@@ -157,7 +157,7 @@ async function fetchFfmpeg() {
 // The repo that publishes the Vulkan build. Overridable so moving the project between GitHub
 // accounts does not need a code change — getting it wrong is invisible at runtime, because the
 // download just fails and the app falls back to a slower CPU build.
-const WHISPER_VULKAN_REPO = process.env.ARTDADDY_WHISPER_VULKAN_REPO ?? "Akshay-Dagar/artdaddy";
+const WHISPER_VULKAN_REPO = process.env.ARTDADDY_WHISPER_VULKAN_REPO ?? "art-daddy/artdaddy";
 const WHISPER_VULKAN_TAG = "whisper-vulkan-v1.9.2-sdk1.4.357.0";
 const WHISPER_VULKAN_ASSET = "whisper-vulkan-win-x64.zip";
 

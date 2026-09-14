@@ -100,3 +100,4 @@ docs/MANUAL_EDITING_PARITY.md
 
 # Vite writes these while resolving a TS config; regenerated on every dev run.
 vite.config.ts.timestamp-*
+docs/DEVELOPMENT.md
