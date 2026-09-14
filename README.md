@@ -1,8 +1,9 @@
 <div align="center">
 
-<img src="brand/artdaddy-mark-brand.png" width="88" alt="" />
-
-# ArtDaddy
+<h1>
+  <img src="brand/artdaddy-icon.png" width="46" align="center" alt="" />
+  ArtDaddy
+</h1>
 
 **The AI video editor your agent can actually drive.**
 
@@ -10,7 +11,7 @@
 
 [Download](https://github.com/art-daddy/artdaddy/releases/latest) · [artdaddy.app](https://artdaddy.app)
 
-![ArtDaddy](assets/hero.png)
+![ArtDaddy](assets/hero.jpg)
 
 </div>
 
