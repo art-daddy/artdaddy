@@ -1,14 +1,16 @@
 <div align="center">
 
+<img src="brand/artdaddy-mark-brand.png" width="88" alt="" />
+
 # ArtDaddy
 
 **The AI video editor your agent can actually drive.**
 
+**Windows 10/11** · **macOS**
+
 [Download](https://github.com/art-daddy/artdaddy/releases/latest) · [artdaddy.app](https://artdaddy.app)
 
 ![ArtDaddy](assets/hero.png)
-
-<sub>A shot from <em>Odyssey</em> — generated, cut and graded in ArtDaddy.</sub>
 
 </div>
 
@@ -109,7 +111,12 @@ repository. Once signed in, editing keeps working without a connection.
 <details>
 <summary><b>Which platforms?</b></summary>
 
-Windows 10/11 today. macOS builds exist and are not yet signed for public distribution.
+Windows 10/11 and macOS.
+
+Code-signing certificates are in progress, so until they land Windows shows a SmartScreen prompt
+("More info" → "Run anyway") and macOS asks you to allow the app on first launch. Updates
+themselves are cryptographically signed and verified already — that part is separate, and has
+been in place from the start.
 
 </details>
 
