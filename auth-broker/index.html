@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="robots" content="noindex" />
+    <title>Sign in — ArtDaddy</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #0a0a0a;
+        color: #e5e5e5;
+        font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      #app {
+        width: 100%;
+        max-width: 420px;
+        padding: 24px;
+      }
+      #message {
+        text-align: center;
+        color: #a3a3a3;
+      }
+      #message.error {
+        color: #f87171;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <p id="message">Loading…</p>
+      <div id="sign-in"></div>
+    </div>
+
+    <script>
+      // The desktop app cannot run Clerk at all inside its own webview (wrong origin for a
+      // pk_live_ key) — this page IS the fix: a real browser at the real verified domain runs
+      // Clerk normally, then hands a short-lived one-time code back to the app via a deep link.
+      // See artdaddy-main/src/api/desktopAuth.ts and src-tauri/src/lib.rs (open_desktop_auth)
+      // for the client half of this flow, and Akaru-main/src/akaru/server/desktop_auth.py for
+      // the backend half.
+      const CLERK_PUBLISHABLE_KEY = "pk_live_Y2xlcmsuYXJ0ZGFkZHkuYXBwJA";
+      const API_BASE = "https://artdaddy-server.ambitioustree-4d826744.centralindia.azurecontainerapps.io";
+      const DEEP_LINK_PREFIX = "artdaddy://auth/callback";
+
+      const messageEl = document.getElementById("message");
+      const signInEl = document.getElementById("sign-in");
+      let authorizationInFlight = false;
+
+      function showMessage(text, isError) {
+        messageEl.textContent = text;
+        messageEl.classList.toggle("error", Boolean(isError));
+        messageEl.hidden = false;
+      }
+
+      function showAuth() {
+        messageEl.hidden = true;
+        signInEl.hidden = false;
+      }
+
+      async function completeAuthorization(clerk, codeChallenge, state) {
+        if (authorizationInFlight) return;
+        authorizationInFlight = true;
+        signInEl.hidden = true;
+        showMessage("Finishing sign-in…");
+        let token;
+        try {
+          token = await clerk.session.getToken();
+        } catch {
+          authorizationInFlight = false;
+          showMessage("Sign-in could not be completed. Please return to the ArtDaddy app and try again.", true);
+          return;
+        }
+        let res;
+        try {
+          res = await fetch(`${API_BASE}/auth/desktop/authorize`, {
+            method: "POST",
+            headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+            body: JSON.stringify({
+              code_challenge: codeChallenge,
+              code_challenge_method: "S256",
+              state: state,
+            }),
+          });
+        } catch {
+          authorizationInFlight = false;
+          showMessage("Couldn't reach the server. Check your connection and try again.", true);
+          return;
+        }
+        if (res.status === 503) {
+          authorizationInFlight = false;
+          showMessage("The server is temporarily unavailable. Please try again in a moment.", true);
+          return;
+        }
+        if (!res.ok) {
+          authorizationInFlight = false;
+          showMessage("Sign-in could not be completed. Please return to the ArtDaddy app and try again.", true);
+          return;
+        }
+        const body = await res.json();
+        showMessage("Signed in — returning you to ArtDaddy…");
+        // The SAME state the app generated, never a new one — the app checks this matches
+        // exactly before it will trust the code.
+        window.location.href = `${DEEP_LINK_PREFIX}?code=${encodeURIComponent(body.code)}&state=${encodeURIComponent(state)}`;
+        setTimeout(() => showMessage("You can close this window and return to ArtDaddy."), 1500);
+      }
+
+      async function main() {
+        const params = new URLSearchParams(window.location.search);
+        const codeChallenge = params.get("code_challenge");
+        const codeChallengeMethod = params.get("code_challenge_method");
+        const state = params.get("state");
+        const mode = params.get("mode") === "sign-up" ? "sign-up" : "sign-in";
+        if (!codeChallenge || !state || codeChallengeMethod !== "S256") {
+          showMessage(
+            "This sign-in link is missing required information. Please return to the ArtDaddy app and try again.",
+            true,
+          );
+          return;
+        }
+
+        // Derive Clerk's Frontend API domain from the publishable key (the documented no-build
+        // pattern) and load its UI bundle from there — no bundler, no build step.
+        const fapi = atob(CLERK_PUBLISHABLE_KEY.split("_")[2]).slice(0, -1);
+        await new Promise((resolve, reject) => {
+          const ui = document.createElement("script");
+          ui.src = `https://${fapi}/npm/@clerk/ui@1/dist/ui.browser.js`;
+          ui.async = true;
+          ui.crossOrigin = "anonymous";
+          ui.onload = resolve;
+          ui.onerror = () => reject(new Error("failed to load Clerk UI"));
+          document.head.appendChild(ui);
+        });
+        await new Promise((resolve, reject) => {
+          const sdk = document.createElement("script");
+          // The browser bundle reads its key from THIS attribute and self-instantiates the
+          // global `Clerk` singleton — `new Clerk(key)` is the separate npm/ESM API and throws
+          // "Missing publishableKey" when used against this bundle instead.
+          sdk.setAttribute("data-clerk-publishable-key", CLERK_PUBLISHABLE_KEY);
+          sdk.src = `https://${fapi}/npm/@clerk/clerk-js@6/dist/clerk.browser.js`;
+          sdk.async = true;
+          sdk.crossOrigin = "anonymous";
+          sdk.onload = resolve;
+          sdk.onerror = () => reject(new Error("failed to load Clerk"));
+          document.head.appendChild(sdk);
+        });
+
+        const clerk = window.Clerk;
+        await clerk.load({ ui: { ClerkUI: window.__internal_ClerkUICtor } });
+
+        if (clerk.session) {
+          await completeAuthorization(clerk, codeChallenge, state);
+          return;
+        }
+
+        showAuth();
+        // Clerk owns the hash while rendering. The broker owns the mode query, but neither is
+        // part of the desktop request that must survive every auth transition.
+        const canonicalUrl = new URL(window.location.href);
+        canonicalUrl.hash = "";
+        canonicalUrl.searchParams.delete("mode");
+        const brokerRequestUrl = canonicalUrl.toString();
+        const signInUrl = new URL(brokerRequestUrl);
+        signInUrl.searchParams.set("mode", "sign-in");
+        const signUpUrl = new URL(brokerRequestUrl);
+        signUpUrl.searchParams.set("mode", "sign-up");
+        const redirectOptions = {
+          routing: "hash",
+          forceRedirectUrl: brokerRequestUrl,
+          fallbackRedirectUrl: brokerRequestUrl,
+        };
+        if (mode === "sign-up") {
+          document.title = "Sign up — ArtDaddy";
+          clerk.mountSignUp(signInEl, {
+            ...redirectOptions,
+            signInUrl: signInUrl.toString(),
+          });
+        } else {
+          clerk.mountSignIn(signInEl, {
+            ...redirectOptions,
+            signUpUrl: signUpUrl.toString(),
+          });
+        }
+        clerk.addListener(({ session }) => {
+          if (session) void completeAuthorization(clerk, codeChallenge, state);
+        });
+      }
+
+      main().catch(() => {
+        showMessage("Something went wrong loading sign-in. Please return to the ArtDaddy app and try again.", true);
+      });
+    </script>
+  </body>
+</html>

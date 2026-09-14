@@ -1,0 +1,70 @@
+#!/bin/sh
+# Guard: build + test the client before every push to a remote.
+#
+# Tests/builds are intentionally NOT run during normal editing. This hook is
+# the gate that guarantees they run when code actually leaves the machine.
+#
+# Deliberate bypass (rare): git push --no-verify
+echo "[pre-push] client: running build + vitest..."
+
+npm run build && npm test
+if [ $? -ne 0 ]; then
+  echo "[pre-push] build/tests FAILED - push aborted (use 'git push --no-verify' to override)."
+  exit 1
+fi
+
+# The Rust side has its own tests and NOTHING was running them: the MCP server-name
+# assertion sat red for the whole rename, invisible to `npm test` and to `cargo check`
+# (which compiles the lib but not the test cfg).
+if command -v cargo >/dev/null 2>&1; then
+  echo "[pre-push] cargo test (src-tauri)..."
+  (cd src-tauri && cargo test)
+  if [ $? -ne 0 ]; then
+    echo "[pre-push] cargo tests FAILED - push aborted (use 'git push --no-verify' to override)."
+    exit 1
+  fi
+else
+  echo "[pre-push] cargo not found - skipping Rust tests."
+fi
+
+# Render/audio golden e2e lane (real ffmpeg). Runs only when ffmpeg + ffprobe are
+# installed; skipped gracefully otherwise so the hook stays portable across
+# machines/CI that lack them. These goldens assert the ACTUAL rendered pixels/audio
+# (the class of bug a valid-looking filter graph hides).
+if command -v ffmpeg >/dev/null 2>&1 && command -v ffprobe >/dev/null 2>&1; then
+  echo "[pre-push] ffmpeg found: running e2e goldens (npm run smoke)..."
+  npm run smoke
+  if [ $? -ne 0 ]; then
+    echo "[pre-push] e2e goldens FAILED - push aborted (use 'git push --no-verify' to override)."
+    exit 1
+  fi
+else
+  echo "[pre-push] ffmpeg/ffprobe not found - skipping e2e goldens."
+fi
+
+# The tool contract is BUNDLED (src/contract/catalog.json) and generated from the server's
+# registry, so nothing inside this repo can tell whether it is current -- every test here would
+# agree with a bundle that went stale two contract versions ago, which is exactly what happened
+# before it was bundled. Only a checkout of the server can answer, so check when one is present
+# and say so plainly when it is not.
+SERVER_DIR="${ARTDADDY_SERVER_DIR:-../Akaru}"
+if [ -f "$SERVER_DIR/src/akaru/turn/tools/catalog.py" ]; then
+  echo "[pre-push] checking the bundled tool contract against $SERVER_DIR..."
+  if [ -x "$SERVER_DIR/.venv/Scripts/python.exe" ]; then
+    SRV_PY="$SERVER_DIR/.venv/Scripts/python.exe"
+  elif [ -x "$SERVER_DIR/.venv/bin/python" ]; then
+    SRV_PY="$SERVER_DIR/.venv/bin/python"
+  else
+    SRV_PY="python"
+  fi
+  (cd "$SERVER_DIR" && "$SRV_PY" -m pytest tests/unit/turn/tools/test_client_bundle.py -q)
+  if [ $? -ne 0 ]; then
+    echo "[pre-push] the bundled contract is STALE - run 'npm run codegen' and commit it."
+    exit 1
+  fi
+else
+  echo "[pre-push] server checkout not found at $SERVER_DIR - cannot verify the bundled contract."
+fi
+
+echo "[pre-push] build + tests passed - allowing push."
+exit 0

@@ -1,0 +1,205 @@
+# End-to-end verification of the macOS build. Separate from macos-release.yml on purpose:
+# that one's job is to produce a shippable dmg, this one's job is to find out what actually
+# works on a Mac. Nobody on this project owns one.
+#
+# Every lane runs even if an earlier one fails (continue-on-error + a gate at the end), so one
+# run gives the whole picture instead of stopping at the first problem.
+#
+# WHAT THIS CANNOT DO: drive the real UI properly. WKWebView exposes no CDP (the Windows sweep's
+# port 9222 is a WebView2 feature), tauri-driver has no macOS branch, and safaridriver cannot
+# attach to a WKWebView app. The walkthrough below sends real keystrokes through System Events
+# and judges the result from screenshots, which is weaker: a missed keystroke looks exactly like
+# a feature doing nothing. Treat its screenshots as evidence to read, not as a passing gate.
+name: macOS end-to-end
+
+on:
+  workflow_dispatch:
+    inputs:
+      eval_models:
+        description: "Models for the agent lane (CSV)"
+        required: true
+        default: "gpt-5.4-mini"
+      eval_cap_usd:
+        description: "Hard spend cap for the agent lane"
+        required: true
+        default: "1.50"
+      whisper_ref:
+        description: "whisper.cpp tag (needed by the transcript lanes)"
+        required: true
+        default: "v1.9.2"
+
+jobs:
+  e2e:
+    runs-on: macos-14
+    # Every lane pipes to `tail`, and a pipeline's status is the LAST command's - so without
+    # pipefail each lane reported success no matter what happened, and the whole run went green
+    # while the agent lane was 401ing on every scenario.
+    defaults:
+      run:
+        shell: bash -eo pipefail {0}
+    env:
+      TRIPLE: aarch64-apple-darwin
+      ARTDADDY_SERVER: https://artdaddy-server.ambitioustree-4d826744.centralindia.azurecontainerapps.io
+      # Frozen into the bundle at build time; without it the app boots pointing at
+      # http://127.0.0.1:8000 and every backend call fails.
+      VITE_API_BASE_URL: https://artdaddy-server.ambitioustree-4d826744.centralindia.azurecontainerapps.io
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+
+      - name: Cache the whisper binary
+        id: whisper-cache
+        uses: actions/cache@v4
+        with:
+          path: whisper-out
+          key: whisper-${{ env.TRIPLE }}-${{ inputs.whisper_ref }}
+
+      # Cloned OUTSIDE the checkout: whisper.cpp carries its own *.spec.js, and vitest's default
+      # include picks them up as if they were ours — the unit lane failed on an addon.node module
+      # that has nothing to do with this project.
+      - name: Build whisper.cpp
+        if: steps.whisper-cache.outputs.cache-hit != 'true'
+        env:
+          WHISPER_REF: ${{ inputs.whisper_ref }}
+        run: |
+          git clone --depth 1 --branch "$WHISPER_REF" https://github.com/ggml-org/whisper.cpp "$HOME/whisper.cpp"
+          cd "$HOME/whisper.cpp"
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_METAL=ON \
+            -DGGML_METAL_EMBED_LIBRARY=ON -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_SERVER=OFF \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+          cmake --build build -j"$(sysctl -n hw.ncpu)" --config Release
+          mkdir -p "$GITHUB_WORKSPACE/whisper-out"
+          cp "$(find build -name whisper-cli -type f -perm +111 | head -n1)" "$GITHUB_WORKSPACE/whisper-out/whisper-cli-${TRIPLE}"
+
+      - name: Stage sidecars
+        run: |
+          mkdir -p src-tauri/binaries
+          cp "whisper-out/whisper-cli-${TRIPLE}" "src-tauri/binaries/whisper-cli-${TRIPLE}"
+          chmod +x "src-tauri/binaries/whisper-cli-${TRIPLE}"
+          node scripts/fetch-sidecars.mjs
+          ls -la src-tauri/binaries/
+          # smoke.e2e.ts spawns "ffmpeg" by BARE NAME and skips itself when the PATH lookup fails,
+          # so without this the lane silently skips ~111 tests and proves nothing about mac. These
+          # aliases point it at the very binaries the installer ships.
+          mkdir -p "$GITHUB_WORKSPACE/.binshim"
+          for n in ffmpeg ffprobe yt-dlp; do
+            ln -sf "$GITHUB_WORKSPACE/src-tauri/binaries/$n-${TRIPLE}" "$GITHUB_WORKSPACE/.binshim/$n"
+          done
+          echo "$GITHUB_WORKSPACE/.binshim" >> "$GITHUB_PATH"
+
+      # --- headless lanes: these need no GUI and no window server -----------------------
+
+      - name: Unit suite
+        id: unit
+        continue-on-error: true
+        run: npx vitest run --reporter=dot 2>&1 | tail -40
+
+      # The one lane that proves render/export/captions against the REAL mac ffmpeg rather
+      # than the Windows one every previous run used.
+      - name: Render + export + captions (real ffmpeg)
+        id: smoke
+        continue-on-error: true
+        run: npx vitest run --config vitest.smoke.config.ts --reporter=dot 2>&1 | tail -60
+
+      - name: Audio engine (real Web Audio)
+        id: audio
+        continue-on-error: true
+        run: node --experimental-websocket scripts/audiolane/run.mjs 2>&1 | tail -40
+
+      - name: Preview compositor + app shell (Playwright)
+        id: playwright
+        continue-on-error: true
+        run: |
+          npm i --no-save @playwright/test@1.49.1
+          npx playwright install chromium
+          npx playwright test 2>&1 | tail -40
+
+      # Real model calls against the DEPLOYED server, with the credentials of a dedicated CI
+      # account. The harness now fails loudly on a 401 rather than recording it as the model
+      # failing every scenario.
+      - name: Agent loop against the live server
+        id: agent
+        continue-on-error: true
+        env:
+          ARTDADDY_EVAL_MODELS: ${{ inputs.eval_models }}
+          ARTDADDY_EVAL_CAP_USD: ${{ inputs.eval_cap_usd }}
+          ARTDADDY_EVAL_EFFORT: high
+          ARTDADDY_EVAL_CHECKPOINT: "off"
+          ARTDADDY_EVAL_USER: ${{ secrets.ARTDADDY_EVAL_USER }}
+          ARTDADDY_EVAL_PASSWORD: ${{ secrets.ARTDADDY_EVAL_PASSWORD }}
+        run: npm run eval 2>&1 | tail -80
+
+      # --- the app itself ---------------------------------------------------------------
+
+      - name: Build the app
+        id: build
+        run: |
+          npm run build:sidecar
+          npm run bundle:browser
+          npx tauri build --bundles dmg
+
+      - name: Install it
+        run: |
+          DMG="$(find src-tauri/target -type f -name '*.dmg' | head -n1)"
+          MNT="$(mktemp -d)"
+          hdiutil attach "$DMG" -mountpoint "$MNT" -nobrowse -readonly -quiet
+          rm -rf /Applications/artdaddy.app
+          cp -R "$MNT/artdaddy.app" /Applications/
+          hdiutil detach "$MNT" -quiet || true
+          xattr -cr /Applications/artdaddy.app || true
+
+      - name: Walk the UI
+        id: walk
+        continue-on-error: true
+        run: |
+          rc=0
+          bash scripts/macwalk.sh || rc=$?
+          echo "code=$rc" >> "$GITHUB_OUTPUT"
+          exit $rc
+
+      - name: Everything worth reading afterwards
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-e2e-evidence
+          path: |
+            reports/eval/**
+            /tmp/macwalk/**
+            /tmp/artdaddy.err
+            /tmp/artdaddy.out
+          if-no-files-found: warn
+
+      # continue-on-error hides failures from the run's status, which would make a broken lane
+      # look like a green run. This is the only gate.
+      - name: Verdict
+        if: always()
+        run: |
+          fail=0
+          unverified=0
+          for lane in unit smoke audio playwright agent walk; do
+            case "$lane" in
+              unit) r="${{ steps.unit.outcome }}" ;;
+              smoke) r="${{ steps.smoke.outcome }}" ;;
+              audio) r="${{ steps.audio.outcome }}" ;;
+              playwright) r="${{ steps.playwright.outcome }}" ;;
+              agent) r="${{ steps.agent.outcome }}" ;;
+              walk)
+                r="${{ steps.walk.outcome }}"
+                # 78 (EX_CONFIG) from macwalk.sh: no Aqua session, so no window and no input.
+                # Neither a pass nor an app failure - say so rather than scoring it as either.
+                if [ "${{ steps.walk.outputs.code }}" = "78" ]; then r="unrunnable"; fi
+                ;;
+            esac
+            printf '%-12s %s\n' "$lane" "$r"
+            if [ "$r" = "unrunnable" ]; then unverified=1
+            elif [ "$r" != "success" ]; then fail=1; fi
+          done
+          if [ "$unverified" = "1" ]; then
+            echo
+            echo "UNVERIFIED: the packaged UI and its keyboard shortcuts were not exercised."
+          fi
+          exit $fail

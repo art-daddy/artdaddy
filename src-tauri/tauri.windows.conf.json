@@ -1,0 +1,13 @@
+{
+  "bundle": {
+    "resources": [
+      "resources/artdaddy-browser.mjs",
+      "resources/artdaddy.mcpb",
+      "resources/ms-playwright/**/*",
+      "resources/node_modules/**/*",
+      "resources/fonts/*",
+      "resources/brand/*",
+      "resources/whisper/*"
+    ]
+  }
+}

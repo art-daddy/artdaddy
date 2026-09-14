@@ -1,0 +1,86 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`buildScene (golden draw-list) > snapshots the composited scene for a multi-feature clip 1`] = `
+{
+  "height": 1000,
+  "layers": [
+    {
+      "blend": "normal",
+      "clipBox": {
+        "h": 500,
+        "w": 500,
+        "x": 350,
+        "y": 150,
+      },
+      "dst": {
+        "h": 312.5,
+        "w": 500,
+        "x": 350,
+        "y": 243.75,
+      },
+      "eq": [
+        0.2,
+        1,
+        1,
+        1,
+      ],
+      "exposure": 0,
+      "fx": {
+        "a": [
+          0,
+          0,
+          0,
+          0,
+        ],
+        "b": [
+          0,
+          0,
+          0,
+          0,
+        ],
+        "c": [
+          0,
+          0,
+          -1,
+          0,
+        ],
+        "key": [
+          0,
+          1,
+          0,
+        ],
+      },
+      "hs": [
+        0,
+        0,
+      ],
+      "kind": "video",
+      "levels": [
+        0,
+        1,
+        0,
+        1,
+      ],
+      "opacity": 0.8,
+      "rotate": 0.2617993877991494,
+      "source": "v.mp4",
+      "sourceTime": 1,
+      "src": {
+        "h": 1,
+        "w": 0.9,
+        "x": 0.1,
+        "y": 0,
+      },
+      "wb": [
+        1,
+        1,
+        1,
+      ],
+      "z": 0,
+    },
+  ],
+  "textLayers": [],
+  "time": 1,
+  "width": 1000,
+}
+`;

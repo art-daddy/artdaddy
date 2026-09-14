@@ -1,0 +1,86 @@
+# CI for the desktop client: fast unit gate on every push/PR + the Tauri/desktop
+# BUILD gate that the local pre-push hook never ran (npm run build only compiles
+# the web half). The `desktop` job compiles the Rust shell (build.rs validates
+# tauri.conf.json + capabilities) and then produces the full bundle — so a broken
+# Cargo.toml / lib.rs / capabilities/*.json / tauri.conf.json fails the PR, not a
+# user. See ideas.md IDEA-CI-001 (F10).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: build + unit tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run format:check
+      - run: npm run build # tsc --noEmit && vite build
+      - run: npm test # vitest run
+
+  browser:
+    name: real-browser UI + compositor pixels
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      # happy-dom has no WebGL and no layout, so the compositor's shaders and the
+      # app's ability to boot at all are untested until this job runs them in a
+      # real Chromium. See playwright.config.ts.
+      # Installed with --no-save so the committed lockfile stays authoritative for
+      # the app itself; move it into devDependencies once it earns a place there.
+      - run: npm i --no-save @playwright/test@1.49.1
+      - run: npx playwright install --with-deps chromium
+      - run: npm run e2e:ui
+
+  desktop:
+    name: tauri desktop build (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+      # Reliable core gate: compiles the Rust shell AND validates tauri.conf.json +
+      # capabilities via build.rs — catches the Cargo / scope / sidecar-wiring
+      # breakage class without needing the (large) sidecar binaries. `--locked`
+      # forbids a silent Cargo.lock repair, so a drift between Cargo.toml and the
+      # committed lockfile fails the PR instead of being papered over.
+      - name: cargo build (rust + config/capability gate)
+        run: cargo build --locked --manifest-path src-tauri/Cargo.toml
+      # The custom IPC command (`trash_path`) is the app's only recoverable delete.
+      # Its unit tests live next to it so a regression fails the PR, not a user.
+      - name: cargo test (trash_path)
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+      # Full desktop bundle: fetch the public per-platform sidecars, then package.
+      # (No secrets; the fetch pulls from public release URLs.)
+      - name: fetch sidecars
+        run: npm run fetch:sidecars
+      - name: build node sidecar
+        run: npm run build:sidecar
+      - name: bundle browser resources
+        run: npm run bundle:browser
+      - name: tauri build
+        run: npx tauri build

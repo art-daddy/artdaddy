@@ -1,0 +1,221 @@
+# Build the Windows `whisper-cli` sidecar WITH THE VULKAN BACKEND.
+#
+# WHY THIS EXISTS: whisper.cpp publishes a Windows prebuilt and we shipped it, but that zip
+# is CPU-ONLY — its 14 DLLs are all ggml-cpu-*/ggml-base, no GPU backend at all. On a 58
+# minute podcast whisper ran 21 minutes. The upstream GPU prebuilts are cuBLAS, which is
+# NVIDIA-only and 257-640 MB against a ~204 MB installer. Vulkan is the one backend that
+# covers NVIDIA, AMD and Intel from a single few-MB DLL, and there is no prebuilt for it —
+# hence this workflow. (The macOS sidecar already gets Metal; see whisper-macos.yml.)
+#
+# ggml loads backends DYNAMICALLY: ggml-vulkan.dll is used when a usable driver exists and
+# ignored when it doesn't, so the same artifact still works on a machine with no GPU. That is
+# also the trap — a build that quietly lost Vulkan looks identical and transcribes fine, just
+# slowly. "Refuse a build without the Vulkan backend" below is what makes that loud.
+#
+# MANUAL ONLY: the output changes about as often as whisper.cpp releases.
+#
+# WHAT CI CAN AND CANNOT PROVE: GitHub's Windows runners have no GPU, so the transcription
+# step here exercises the CPU fallback path. CI proves the binary is real whisper, that it
+# decodes actual speech, and that the Vulkan backend is COMPILED IN AND SHIPPED. Proving the
+# GPU is really used has to happen on a machine with one — run the binary and look for
+# `ggml_vulkan: Found N Vulkan devices` on stderr.
+name: whisper-cli (Windows, Vulkan)
+
+on:
+  workflow_dispatch:
+    inputs:
+      whisper_ref:
+        description: "whisper.cpp tag to build (PIN it — 'latest' means a release can change what users get with no commit here)"
+        required: true
+        default: "v1.9.2"
+      vulkan_sdk:
+        description: "LunarG Vulkan SDK version (supplies glslc + SPIRV-Headers; pinned for the same reason). Must be 1.4.x — see the install step."
+        required: true
+        default: "1.4.357.0"
+      publish:
+        description: "Also publish a GitHub Release that fetch-sidecars.mjs can download"
+        required: true
+        default: true
+        type: boolean
+
+jobs:
+  build:
+    runs-on: windows-latest
+    # Only for the release step. The repo default for GITHUB_TOKEN is read-only, which fails
+    # the publish with a flat "HTTP 403: Resource not accessible by integration" AFTER a
+    # 13-minute build has already succeeded.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # via env, not "${{ }}" inside the script: these are free text and would otherwise be
+      # pasted straight into a shell line.
+      - name: Clone whisper.cpp at the pinned tag
+        env:
+          WHISPER_REF: ${{ inputs.whisper_ref }}
+        run: git clone --depth 1 --branch "$env:WHISPER_REF" https://github.com/ggml-org/whisper.cpp whisper.cpp
+
+      # The SDK is only needed to COMPILE the shaders (glslc) and to supply SPIRV-Headers.
+      # Users need nothing installed: vulkan-1.dll ships with the graphics driver.
+      #
+      # TWO version-specific details, both of which broke the first run on SDK 1.3.296.0:
+      #   1. The installer FILE NAME changed. `VulkanSDK-<v>-Installer.exe` serves 200 for
+      #      1.3.x and 404s for current SDKs; `vulkansdk-windows-X64-<v>.exe` is the name
+      #      LunarG serves now, and the one llama.cpp's Vulkan release job uses.
+      #   2. ggml-vulkan/CMakeLists.txt does `find_package(SPIRV-Headers CONFIG REQUIRED)`.
+      #      1.3.296.0 ships no such config, so configure found Vulkan 1.3.296 happily and
+      #      THEN died on a package nobody had heard of. Anything below 1.4.x will fail the
+      #      same way; the discovery line below prints what the SDK actually provides.
+      #
+      # Installed at the DEFAULT root (C:\VulkanSDK\<version>), not --root: the versioned
+      # path is what llama.cpp uses and what the SDK's own cmake configs are relative to.
+      - name: Install the Vulkan SDK
+        env:
+          SDK: ${{ inputs.vulkan_sdk }}
+        run: |
+          $url = "https://sdk.lunarg.com/sdk/download/$env:SDK/windows/vulkansdk-windows-X64-$env:SDK.exe"
+          Write-Host "downloading $url"
+          curl.exe -fsSL -o vulkan_sdk.exe $url
+          Start-Process -FilePath .\vulkan_sdk.exe -ArgumentList '--accept-licenses','--default-answer','--confirm-command','install' -Wait -NoNewWindow
+          $sdk = "C:\VulkanSDK\$env:SDK"
+          "VULKAN_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "$sdk\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          if (-not (Test-Path "$sdk\Bin\glslc.exe")) {
+            Write-Host "::error::Vulkan SDK install produced no glslc.exe under $sdk — the shaders cannot be compiled"
+            exit 1
+          }
+          & "$sdk\Bin\glslc.exe" --version
+          # Diagnostic only, deliberately NOT a gate: cmake's own "Could not find a package
+          # configuration file provided by SPIRV-Headers" is already unambiguous, and a guard
+          # asserting a filename layout nobody here has observed could fail a good build.
+          Write-Host "SPIRV-Headers files this SDK provides:"
+          Get-ChildItem $sdk -Recurse -Filter '*SPIRV-Headers*' -ErrorAction SilentlyContinue |
+            Select-Object -First 8 -ExpandProperty FullName | ForEach-Object { "  $_" }
+
+      # GGML_BACKEND_DL + GGML_CPU_ALL_VARIANTS build the CPU backend ONCE PER INSTRUCTION SET
+      # (sse42, x64, haswell, skylakex, ...) and pick at load time, which is how upstream's zip
+      # ships nine ggml-cpu-*.dll. Without them cmake compiles a single variant for whatever the
+      # RUNNER happens to support — and this runner reports `HAS_AVX512 - Failed`, so the first
+      # green build produced one /arch:AVX2 DLL. That costs nothing in speed (measured on a
+      # 7840U: within noise of upstream), but a pre-2013 CPU without AVX2 would have had NO
+      # loadable CPU backend at all, so a machine with no Vulkan driver would lose transcription
+      # entirely — a hard failure where it currently just works. ~7 MB against the 51 MB
+      # ggml-vulkan.dll already in the zip.
+      - name: Build
+        working-directory: whisper.cpp
+        run: |
+          cmake -B build `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DGGML_VULKAN=ON `
+            -DGGML_BACKEND_DL=ON `
+            -DGGML_CPU_ALL_VARIANTS=ON `
+            -DWHISPER_BUILD_TESTS=OFF `
+            -DWHISPER_BUILD_SERVER=OFF `
+            -DWHISPER_BUILD_EXAMPLES=ON
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::cmake configure failed"; exit 1 }
+          cmake --build build --config Release -j $env:NUMBER_OF_PROCESSORS
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::build failed"; exit 1 }
+
+      # Stage exactly what fetch-sidecars.mjs stages: the exe plus the whole sibling DLL set.
+      # The Windows build is DYNAMIC, so the exe cannot even start without them.
+      - name: Stage the sidecar and its runtime DLLs
+        run: |
+          $bin = Get-ChildItem whisper.cpp\build -Recurse -Filter whisper-cli.exe |
+                 Where-Object { $_.FullName -notmatch 'deprecat' } | Select-Object -First 1
+          if (-not $bin) { Write-Host "::error::no whisper-cli.exe was produced"; exit 1 }
+          New-Item -ItemType Directory -Force out | Out-Null
+          Copy-Item $bin.FullName out\whisper-cli.exe
+          Get-ChildItem $bin.Directory -Filter *.dll | ForEach-Object { Copy-Item $_.FullName out\ }
+          Get-ChildItem out | Select-Object Name,@{n='KB';e={[math]::Round($_.Length/1KB)}} | Format-Table -AutoSize
+
+      # THE point of this workflow. -DGGML_VULKAN=ON can degrade to a CPU-only build if the
+      # SDK isn't found, and the result looks and behaves identically — just slow. A missing
+      # DLL here means users would get the thing we are trying to replace.
+      - name: Refuse a build without the Vulkan backend
+        run: |
+          if (-not (Test-Path out\ggml-vulkan.dll)) {
+            Write-Host "::error::ggml-vulkan.dll is absent — this is a CPU-only build wearing a Vulkan label"
+            Get-ChildItem out -Filter *.dll | Select-Object -ExpandProperty Name
+            exit 1
+          }
+          # The fallback matters as much as the GPU path, and it is just as silent when wrong:
+          # a single-variant CPU backend loads fine HERE and fails only on someone else's older
+          # machine. GGML_CPU_ALL_VARIANTS must produce several; one means the flag did nothing.
+          $cpu = @(Get-ChildItem out -Filter 'ggml-cpu*.dll')
+          if ($cpu.Count -lt 2) {
+            Write-Host "::error::only $($cpu.Count) CPU backend DLL(s) — GGML_CPU_ALL_VARIANTS did not take effect, so the no-GPU fallback is limited to this runner's instruction set"
+            $cpu | Select-Object -ExpandProperty Name
+            exit 1
+          }
+          Write-Host "vulkan backend present; $($cpu.Count) CPU backend variants for machines without a usable driver:"
+          $cpu | ForEach-Object { "  $($_.Name)" }
+
+      # The SAME check fetch-sidecars.mjs runs after staging, from the same module — so a
+      # decoy cannot pass here and fail there, or the reverse.
+      - name: Smoke — is it actually whisper?
+        run: node scripts/smoke-whisper.mjs "out/whisper-cli.exe"
+
+      # Proof it TRANSCRIBES, which --help cannot tell you. Runners have no GPU, so this
+      # exercises the CPU fallback — which is exactly the path a driverless user gets, and
+      # therefore worth proving too. Assert the WORDS: whisper writes an empty .txt when a
+      # decode yields nothing, so an existence check passes on silence.
+      - name: Transcribe something real
+        run: |
+          curl.exe -fsSL -o tiny.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin
+          Push-Location out
+          .\whisper-cli.exe -m ..\tiny.bin -f ..\whisper.cpp\samples\jfk.wav -otxt -of ..\result 2>&1 | Tee-Object -Variable log
+          Pop-Location
+          if (-not (Test-Path result.txt) -or (Get-Item result.txt).Length -eq 0) {
+            Write-Host "::error::empty transcript — whisper ran but decoded nothing"; exit 1
+          }
+          Write-Host "--- transcript ---"; Get-Content result.txt
+          $norm = ((Get-Content result.txt -Raw).ToLower() -replace '[^a-z]','')
+          if ($norm -notmatch 'asknotwhatyourcountry') {
+            Write-Host "::error::transcript does not contain the expected words"; exit 1
+          }
+          Write-Host "decoded the expected speech."
+          # Informational: on a GPU-less runner this reports 0 devices. On a real machine the
+          # same line is how you confirm the GPU is actually in use.
+          ($log -join "`n") | Select-String -Pattern 'ggml_vulkan|Vulkan' | ForEach-Object { Write-Host "  $_" }
+
+      - name: Package
+        run: Compress-Archive -Path out\* -DestinationPath whisper-vulkan-win-x64.zip -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: whisper-vulkan-win-x64
+          path: whisper-vulkan-win-x64.zip
+          if-no-files-found: error
+
+      # A release (not just an artifact) because artifacts expire in 90 days and
+      # fetch-sidecars.mjs needs a stable place to pull from. The tag encodes BOTH pinned
+      # inputs, so a rebuild with different versions cannot quietly replace the old one.
+      - name: Publish the release fetch-sidecars downloads
+        if: ${{ inputs.publish }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: whisper-vulkan-${{ inputs.whisper_ref }}-sdk${{ inputs.vulkan_sdk }}
+        run: |
+          gh release view "$env:TAG" 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create "$env:TAG" --title "whisper-cli Vulkan (Windows) $env:TAG" --notes "whisper.cpp ${{ inputs.whisper_ref }} built with -DGGML_VULKAN=ON, Vulkan SDK ${{ inputs.vulkan_sdk }}. Consumed by scripts/fetch-sidecars.mjs."
+            if ($LASTEXITCODE -ne 0) { Write-Host "::error::could not create release $env:TAG"; exit 1 }
+          }
+          gh release upload "$env:TAG" whisper-vulkan-win-x64.zip --clobber
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::could not upload the asset to $env:TAG"; exit 1 }
+          # Ask what the release ACTUALLY carries rather than trusting the upload's exit code.
+          # The first version of this step printed "published <tag>" on the line after
+          # "release not found", because the success message was unconditional — the log said
+          # the release existed while the API said it did not, and fetch-sidecars would have
+          # fallen back to the CPU build with nothing to explain why.
+          $assets = @(gh release view "$env:TAG" --json assets --jq '.assets[].name')
+          if ($assets -notcontains 'whisper-vulkan-win-x64.zip') {
+            Write-Host "::error::release $env:TAG carries no whisper-vulkan-win-x64.zip (assets: $assets)"
+            exit 1
+          }
+          Write-Host "published $env:TAG carrying: $($assets -join ', ')"

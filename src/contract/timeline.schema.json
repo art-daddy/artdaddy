@@ -1,0 +1,474 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://artdaddy.app/contract/timeline.schema.json",
+  "title": "ArtDaddyTimeline",
+  "version": "1.0.0",
+  "description": "Canonical timeline.json — the shared source of truth between the Python engine and the TS client. ALL times are INTEGER PROJECT FRAMES at canvas.fps (never seconds). This schema pins STRUCTURE + per-field value ranges; relational/timing invariants (same-track overlap, duration parity (source_out-source_in)/speed==timeline span, transition overlap, duck cross-track targets) are enforced by apply_op validation on whichever side owns the write (server: renderer._check_timeline / v1_tools._preflight_timeline; client: its TS port). Keep this file and those validators in lockstep.",
+  "type": "object",
+  "required": ["canvas", "tracks"],
+  "additionalProperties": true,
+  "properties": {
+    "units": {
+      "const": "frames",
+      "description": "Canonical unit tag. Always integer project frames at canvas.fps."
+    },
+    "_schema_note": {
+      "type": "string",
+      "description": "Optional human/LLM-facing prose crib of the coordinate convention (src/akaru/timeline_schema.py::TIMELINE_SCHEMA_NOTE). Not semantically load-bearing."
+    },
+    "canvas": {
+      "$ref": "#/$defs/canvas"
+    },
+    "tracks": {
+      "type": "array",
+      "description": "Compositing/stacking layers. Visual tracks composite by z (higher on top); audio tracks are summed.",
+      "items": {
+        "$ref": "#/$defs/track"
+      }
+    }
+  },
+  "$defs": {
+    "canvas": {
+      "type": "object",
+      "required": ["width", "height", "fps"],
+      "additionalProperties": false,
+      "properties": {
+        "width": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "fps": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "track": {
+      "type": "object",
+      "required": ["id", "kind"],
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Unique across tracks (uniqueness enforced by the validator, not the schema)."
+        },
+        "kind": {
+          "enum": ["video", "audio", "text"]
+        },
+        "z": {
+          "type": "number",
+          "description": "Stacking order for visual (video/text) tracks: higher = on top. Organizational only for audio (audio is summed)."
+        },
+        "clips": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/clip"
+          }
+        }
+      }
+    },
+    "frame": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "A whole project-frame count/position at canvas.fps."
+    },
+    "clip": {
+      "type": "object",
+      "description": "One of: media clip (video/image — kind absent or 'video'/'image'), audio clip (kind='audio'), or text clip (kind='text'). Kind-specific required fields are applied via allOf/if-then below.",
+      "required": ["timeline_in", "timeline_out"],
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": ["video", "image", "audio", "text"],
+          "description": "Absent ⇒ media clip (video/image inferred from media_ref)."
+        },
+        "media_ref": {
+          "type": "string",
+          "description": "Absolute or library path to the media file (video/image + audio clips)."
+        },
+        "source_in": {
+          "$ref": "#/$defs/frame",
+          "description": "Source in-point (frames). Required for video/audio; optional for stills (image/lottie loop to fill their span)."
+        },
+        "source_out": {
+          "$ref": "#/$defs/frame"
+        },
+        "timeline_in": {
+          "$ref": "#/$defs/frame"
+        },
+        "timeline_out": {
+          "$ref": "#/$defs/frame",
+          "description": "Must be > timeline_in (enforced by validator)."
+        },
+        "speed": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Playback speed (default 1.0). Timing invariant: (source_out-source_in)/speed == (timeline_out-timeline_in)."
+        },
+        "layout": {
+          "$ref": "#/$defs/layout"
+        },
+        "rotate": {
+          "$ref": "#/$defs/animatableNumber",
+          "description": "Degrees clockwise (video/image)."
+        },
+        "opacity": {
+          "$ref": "#/$defs/animatableNumber",
+          "description": "0..1 (values outside the range are clamped at write time)."
+        },
+        "crop": {
+          "$ref": "#/$defs/crop"
+        },
+        "flip": {
+          "$ref": "#/$defs/flip"
+        },
+        "glow": {
+          "$ref": "#/$defs/glow"
+        },
+        "blend": {
+          "enum": ["normal", "multiply", "screen", "overlay", "add"],
+          "description": "How the clip composites onto the layers below (video/image)."
+        },
+        "color": {
+          "type": "object",
+          "description": "Color grade (see apply_color keys: exposure/contrast/saturation/wheels/curves/lut/...). Numeric knobs are clamped to safe ranges."
+        },
+        "effects": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/effect"
+          },
+          "description": "Ordered non-color effects (video: blur/denoise/sharpen/grain/bw/custom; audio: pan/eq/compressor/reverb/denoise/loudnorm)."
+        },
+        "transition_in": {
+          "$ref": "#/$defs/transition"
+        },
+        "volume": {
+          "$ref": "#/$defs/animatableNumber",
+          "description": "Audio gain (>=0; 1.0 unchanged). Clamped at write time."
+        },
+        "fade": {
+          "$ref": "#/$defs/fade"
+        },
+        "duck": {
+          "$ref": "#/$defs/duck"
+        },
+        "loop": {
+          "type": "boolean",
+          "description": "Audio: repeat the source to fill the timeline span."
+        },
+        "stretch": {
+          "type": "boolean",
+          "description": "Audio: pitch-preserving time-stretch to fit the span (ratio 0.25..4.0)."
+        },
+        "audio_filter": {
+          "type": "string",
+          "description": "Audio: raw ffmpeg filter string (escape hatch)."
+        },
+        "content": {
+          "description": "Text clip content: a plain string OR the stored SEGMENTED form (array of {text,...} tokens, e.g. for word-by-word builds). add_text_clips accepts a string; the timeline may store either.",
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["text"],
+                "additionalProperties": true,
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "text": {
+          "type": "string",
+          "description": "Text clip: alias for content (plain string)."
+        },
+        "style": {
+          "type": "object",
+          "description": "Text clip: typography (font/size/color/weight/case/shadow/outline/background)."
+        },
+        "transform": {
+          "type": "object",
+          "description": "Text clip: normalized text-box center/size + anchor."
+        },
+        "animation": {
+          "type": "object",
+          "description": "Text clip: build/entrance/timing + emphasis {kind,color,scale}."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["kind"],
+            "properties": {
+              "kind": {
+                "const": "text"
+              }
+            }
+          },
+          "then": {
+            "anyOf": [
+              {
+                "required": ["content"]
+              },
+              {
+                "required": ["text"]
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "required": ["kind"],
+            "properties": {
+              "kind": {
+                "const": "audio"
+              }
+            }
+          },
+          "then": {
+            "required": ["media_ref"]
+          }
+        },
+        {
+          "if": {
+            "required": ["kind"],
+            "properties": {
+              "kind": {
+                "enum": ["video", "image"]
+              }
+            }
+          },
+          "then": {
+            "required": ["media_ref"]
+          }
+        },
+        {
+          "if": {
+            "not": {
+              "required": ["kind"]
+            }
+          },
+          "then": {
+            "required": ["media_ref"]
+          }
+        }
+      ]
+    },
+    "animatableNumber": {
+      "description": "A constant number OR a keyframe animation list [{t,v,ease?}].",
+      "oneOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/keyframe"
+          }
+        }
+      ]
+    },
+    "keyframe": {
+      "type": "object",
+      "required": ["t", "v"],
+      "additionalProperties": false,
+      "properties": {
+        "t": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Clip-relative frame (0 = the clip's first frame). Strictly increasing across the list."
+        },
+        "v": {
+          "type": "number"
+        },
+        "ease": {
+          "enum": ["linear", "hold", "ease-in", "ease-out", "ease-in-out"]
+        }
+      }
+    },
+    "layout": {
+      "type": "object",
+      "description": "Spatial placement box in CANVAS PIXELS. x/y/w/h are each animatable (constant or keyframes).",
+      "required": ["x", "y", "w", "h"],
+      "additionalProperties": true,
+      "properties": {
+        "x": {
+          "$ref": "#/$defs/animatableNumber"
+        },
+        "y": {
+          "$ref": "#/$defs/animatableNumber"
+        },
+        "w": {
+          "$ref": "#/$defs/animatableNumber",
+          "description": ">=2 px; may exceed canvas up to the overscan budget."
+        },
+        "h": {
+          "$ref": "#/$defs/animatableNumber"
+        },
+        "fit": {
+          "enum": ["contain", "cover"],
+          "description": "'contain' letterboxes inside the box; 'cover' crops to fill it."
+        }
+      }
+    },
+    "crop": {
+      "type": "object",
+      "description": "Edge crop fractions in [0,1); left+right<1 and top+bottom<1. Out-of-range values are clamped at write time.",
+      "additionalProperties": false,
+      "properties": {
+        "left": {
+          "type": "number",
+          "minimum": 0,
+          "exclusiveMaximum": 1
+        },
+        "top": {
+          "type": "number",
+          "minimum": 0,
+          "exclusiveMaximum": 1
+        },
+        "right": {
+          "type": "number",
+          "minimum": 0,
+          "exclusiveMaximum": 1
+        },
+        "bottom": {
+          "type": "number",
+          "minimum": 0,
+          "exclusiveMaximum": 1
+        }
+      }
+    },
+    "flip": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "h": {
+          "type": "boolean"
+        },
+        "v": {
+          "type": "boolean"
+        }
+      }
+    },
+    "glow": {
+      "description": "Soft bloom. A number 0..100 OR {amount:0..100, opacity:0..1}. Clamped at write time.",
+      "oneOf": [
+        {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "amount": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100
+            },
+            "opacity": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          }
+        }
+      ]
+    },
+    "effect": {
+      "type": "object",
+      "description": "One ordered effect. 'type' selects the effect; remaining keys are its params (out-of-range clamped).",
+      "required": ["type"],
+      "additionalProperties": true,
+      "properties": {
+        "type": {
+          "type": "string"
+        }
+      }
+    },
+    "transition": {
+      "type": "object",
+      "description": "Incoming crossfade from the PREVIOUS clip on the SAME track. Requires an explicit overlap: this clip's timeline_in == previous timeline_out - duration.",
+      "required": ["kind", "duration"],
+      "additionalProperties": true,
+      "properties": {
+        "kind": {
+          "enum": [
+            "crossfade",
+            "dip-to-black",
+            "dip-to-white",
+            "whip",
+            "wipe-l",
+            "wipe-r",
+            "custom"
+          ]
+        },
+        "duration": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "description": "Crossfade length in project frames; <= either clip's length."
+        },
+        "expr": {
+          "type": "string",
+          "description": "Raw xfade expression (only when kind='custom')."
+        }
+      }
+    },
+    "fade": {
+      "type": "object",
+      "description": "Audio fade in/out, in SECONDS; each <= the clip's timeline length (clamped at write time).",
+      "additionalProperties": false,
+      "properties": {
+        "in": {
+          "type": "number",
+          "minimum": 0
+        },
+        "out": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "duck": {
+      "type": "object",
+      "description": "Sidechain-duck this audio under another track's audio.",
+      "required": ["against"],
+      "additionalProperties": false,
+      "properties": {
+        "against": {
+          "type": "string",
+          "description": "Track id whose audio drives the duck (must be an audio-bearing track other than this clip's own)."
+        },
+        "ratio": {
+          "type": "number",
+          "minimum": 1,
+          "description": "Compression ratio (default 8; higher ducks harder). Clamped."
+        },
+        "threshold": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "description": "LINEAR level 0..1 (default 0.03; NOT dB). Clamped."
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,362 @@
+# Build the macOS app bundle. This is the ONLY way a mac build can happen here: a .app can
+# only be produced on macOS, and nobody on this project owns a Mac.
+#
+# UNSIGNED, deliberately. Signing + notarization need an Apple Developer account; until then
+# the .dmg opens via right-click -> Open (Gatekeeper refuses a double-click). Wiring signing
+# in later is an env-var and a few lines, not a redesign — see the note at the bottom.
+#
+# whisper.cpp is compiled HERE rather than downloaded, because there is no macOS prebuilt and
+# the release job is already on a Mac. That keeps one source of truth: no artifact to upload,
+# expire, or forget to refresh against the pinned ref. `whisper-macos.yml` still exists to
+# test a whisper.cpp bump on its own without paying for a whole release.
+#
+# Note the opposite call for the dmg: a build INPUT is produced where it is consumed, but an
+# OUTPUT has to go where users can reach it. `publish: true` uploads it to the same public
+# container that serves the Windows installer and latest.json. It does NOT touch latest.json:
+# mac auto-update needs a signature and the `app` bundle target, both blocked on signing.
+name: macOS build
+
+on:
+  workflow_dispatch:
+    inputs:
+      whisper_ref:
+        description: "whisper.cpp tag to build (pinned; 'latest' would let an upstream release change what ships with no commit here)"
+        required: true
+        default: "v1.9.2"
+      publish:
+        description: "Upload the dmg to the public release store. Leave OFF for a test build."
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    # Self-hosted: GitHub-hosted macOS minutes are billing-blocked and Codemagic's subscription
+    # is disabled, so this Apple Silicon Mac is the only way a .app can be produced at all.
+    runs-on: [self-hosted, macOS, ARM64]
+    env:
+      TRIPLE: aarch64-apple-darwin
+      # .env is gitignored, and VITE_API_BASE_URL is FROZEN INTO THE BUNDLE at build time with a
+      # fallback of http://127.0.0.1:8000. Without this the published dmg points every user at
+      # their own machine and each AI feature is dead on arrival. Not a secret — it is the same
+      # public URL the app advertises.
+      VITE_API_BASE_URL: https://artdaddy-server.ambitioustree-4d826744.centralindia.azurecontainerapps.io
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Toolchain versions
+        run: |
+          node --version; npm --version
+          # Which node actually runs matters: fetch:sidecars stages `process.execPath` AS the
+          # browser sidecar, so a Homebrew node would drag ~21 /opt/homebrew dylibs into the
+          # bundle and the sidecar gate below would (correctly) fail. Print the resolution so a
+          # bad PATH on the self-hosted machine is visible here rather than three steps later.
+          which -a node
+          node -p process.execPath
+          rustc --version; cargo --version
+          # A self-hosted Mac may carry only the Command Line Tools, where `xcodebuild` exits
+          # non-zero — and the default shell's pipefail would fail this PRINT-ONLY step. Nothing
+          # in the build needs full Xcode; the dmg builds fine against the CLT.
+          xcodebuild -version 2>/dev/null | head -n1 || xcode-select -p
+
+      # Keyed on the whisper ref, so a rebuild only happens when the pinned version moves.
+      - name: Cache the whisper binary
+        id: whisper-cache
+        uses: actions/cache@v4
+        with:
+          path: whisper-out
+          key: whisper-${{ env.TRIPLE }}-${{ inputs.whisper_ref }}
+
+      # STATIC with the Metal shader embedded: the mac sidecar is ONE self-contained file.
+      # The Windows build is dynamic, which is why that one ships 14 sibling DLLs.
+      - name: Build whisper.cpp
+        if: steps.whisper-cache.outputs.cache-hit != 'true'
+        env:
+          WHISPER_REF: ${{ inputs.whisper_ref }}
+        run: |
+          git clone --depth 1 --branch "$WHISPER_REF" https://github.com/ggml-org/whisper.cpp whisper.cpp
+          cd whisper.cpp
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DGGML_METAL=ON \
+            -DGGML_METAL_EMBED_LIBRARY=ON \
+            -DWHISPER_BUILD_TESTS=OFF \
+            -DWHISPER_BUILD_SERVER=OFF \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+          cmake --build build -j"$(sysctl -n hw.ncpu)" --config Release
+          BIN="$(find build -name whisper-cli -type f -perm +111 | head -n1)"
+          test -n "$BIN" || { echo "::error::no whisper-cli was produced"; exit 1; }
+          mkdir -p ../whisper-out
+          cp "$BIN" "../whisper-out/whisper-cli-${TRIPLE}"
+
+      # Staged BEFORE fetch:sidecars, which skips anything already present — that is how the
+      # "no macOS prebuilt" branch is satisfied without touching fetch-sidecars.
+      - name: Stage whisper as the sidecar
+        run: |
+          mkdir -p src-tauri/binaries
+          cp "whisper-out/whisper-cli-${TRIPLE}" "src-tauri/binaries/whisper-cli-${TRIPLE}"
+          chmod +x "src-tauri/binaries/whisper-cli-${TRIPLE}"
+
+      - name: Prove it transcribes
+        run: |
+          BIN="src-tauri/binaries/whisper-cli-${TRIPLE}"
+          node scripts/smoke-whisper.mjs "$BIN"
+          curl -fsSL -o tiny.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin
+          test -d whisper.cpp || git clone --depth 1 --branch "${{ inputs.whisper_ref }}" https://github.com/ggml-org/whisper.cpp whisper.cpp
+          "$BIN" -m tiny.bin -f whisper.cpp/samples/jfk.wav -otxt -of result
+          test -s result.txt || { echo "::error::empty transcript — whisper decoded nothing"; exit 1; }
+          cat result.txt
+          NORM="$(tr '[:upper:]' '[:lower:]' < result.txt | tr -cd 'a-z')"
+          case "$NORM" in
+            *asknotwhatyourcountry*) echo "decoded the expected speech." ;;
+            *) echo "::error::transcript does not contain the expected words"; exit 1 ;;
+          esac
+
+      - run: npm ci
+
+      # yt-dlp + ffmpeg/ffprobe for mac, and artdaddy-browser = this runner's Node. Ends with the
+      # externalBin guard, so a missing sidecar fails here and not deep inside bundling.
+      - run: npm run fetch:sidecars
+
+      # Two ways a sidecar is present but unusable, and both are silent until a user hits the
+      # feature. WRONG ARCH needs Rosetta, which a clean Mac does not have — that is how an
+      # x86_64-only ffmpeg nearly shipped inside an arm64 app. NON-SYSTEM DYLIBS are files that
+      # exist on this runner and not on a user's machine — the DLL bug, one OS over. These
+      # apply to EVERY sidecar, not just the one we compile ourselves.
+      - name: Every sidecar must run on this arch and load only system libraries
+        run: |
+          FAIL=0
+          for f in src-tauri/binaries/*; do
+            n="$(basename "$f")"
+            ARCHS="$(lipo -archs "$f" 2>/dev/null || echo "?")"
+            case "$ARCHS" in
+              *arm64*) echo "  $n: $ARCHS" ;;
+              *) echo "::error::$n is $ARCHS — not arm64; it would need Rosetta"; FAIL=1 ;;
+            esac
+            # Only the INDENTED dependency lines. A universal binary makes otool print a
+            # "<path> (architecture x86_64):" header per slice, and dropping just the first
+            # one reads the next header as a library — which failed a perfectly good yt-dlp.
+            STRAY="$(otool -L "$f" 2>/dev/null | grep -E '^[[:space:]]' | awk '{print $1}' | grep -Ev '^(/usr/lib/|/System/Library/)' || true)"
+            if [ -n "$STRAY" ]; then
+              echo "::error::$n links libraries a user's Mac will not have:"
+              echo "$STRAY"
+              FAIL=1
+            fi
+          done
+          exit $FAIL
+
+      # resources/artdaddy-browser.mjs is a BUILD ARTIFACT (esbuild), not a copy of the source, and
+      # nothing in `tauri build` regenerates it. Skipping this ships the OLD browser behaviour.
+      - run: npm run build:sidecar
+
+      # Same class of artifact, same trap: the .mcpb is GENERATED and gitignored, yet
+      # tauri.conf.json lists `resources/artdaddy.mcpb` as a required bundle resource. Without
+      # this, `tauri build` dies with "resource path doesn't exist" — which is what failed every
+      # macOS release run to date. `npm run release` has always had it; this workflow did not.
+      - run: npm run build:mcpb
+
+      - run: npm run bundle:browser
+
+      - name: Build the app
+        run: |
+          rm -rf dist
+          npx tauri build --bundles dmg
+
+      # The dmg that shipped 0.3.0 pointed every user at their own machine. Nothing caught it,
+      # because "the workflow sets the variable" is not evidence the bundle received it. dist/ is
+      # what tauri just embedded, so assert against that rather than against the env.
+      - name: The bundle must point at the real server
+        run: |
+          test -n "$VITE_API_BASE_URL" || { echo "::error::VITE_API_BASE_URL is empty - this check would pass on anything"; exit 1; }
+          # --include='*.js' or this reads the SOURCEMAPS, which embed config.ts verbatim: the
+          # fallback is always in there, and a hit for the real URL could come from a .map
+          # rather than from anything that ships. Both directions were wrong without it.
+          grep -rqF --include='*.js' "$VITE_API_BASE_URL" dist/assets || {
+            echo "::error::the built bundle does not contain $VITE_API_BASE_URL"
+            exit 1
+          }
+          # With the variable set the minifier folds the `?? "http://127.0.0.1:8000"` branch away,
+          # so the fallback surviving IS the signature of the build that shipped 0.3.0.
+          if grep -rqF --include='*.js' "127.0.0.1:8000" dist/assets; then
+            echo "::error::the built bundle still carries the localhost fallback"
+            exit 1
+          fi
+          echo "  api base baked in: $VITE_API_BASE_URL"
+
+      # "It built" is not evidence the app works: assert the bundle CONTAINS the sidecars and
+      # the browser resources, because a missing one is silent until a user hits that feature.
+      # Checked INSIDE THE MOUNTED DMG, not in target/: the dmg is what a user receives, and
+      # the intermediate .app under bundle/macos was not where find could see it.
+      - name: The shipped dmg must contain what the app needs
+        id: verify
+        run: |
+          DMG="$(find src-tauri/target -type f -name '*.dmg' | head -n1)"
+          if [ -z "$DMG" ]; then
+            echo "::error::no dmg was produced"
+            find src-tauri/target -maxdepth 4 \( -name '*.app' -o -name '*.dmg' \) -print
+            exit 1
+          fi
+          ls -lh "$DMG"
+          MNT="$(mktemp -d)"
+          hdiutil attach "$DMG" -mountpoint "$MNT" -nobrowse -readonly -quiet
+          APP="$MNT/artdaddy.app"
+          FAIL=0
+          if [ ! -d "$APP" ]; then
+            echo "::error::the dmg has no artdaddy.app in it"; ls -la "$MNT"; FAIL=1
+          else
+            for n in ffmpeg ffprobe yt-dlp whisper-cli artdaddy-browser; do
+              if [ -f "$APP/Contents/MacOS/$n" ]; then echo "  sidecar $n: ok"; else
+                echo "::error::sidecar missing from the dmg: $n"; FAIL=1; fi
+            done
+            for p in "resources/artdaddy-browser.mjs" "resources/node_modules/playwright-core"; do
+              if [ -e "$APP/Contents/Resources/$p" ]; then echo "  $p: ok"; else
+                echo "::error::resource missing from the dmg: $p"; FAIL=1; fi
+            done
+            # Run the WHOLE browser path the app uses, out of the mounted image: the bundled Node
+            # sidecar executing the bundled script, which resolves playwright-core and the chromium
+            # shell from its own location and opens a persistent context. Requiring playwright
+            # directly from the runner's Node would prove the easiest member of that chain and none
+            # of the parts that actually differ on macOS. Asserting the page TITLE, because a
+            # process that starts and returns nothing is the failure being ruled out.
+            RES="$APP/Contents/Resources/resources"
+            if "$APP/Contents/MacOS/artdaddy-browser" "$RES/artdaddy-browser.mjs" page --url https://example.com 2>/tmp/ab.err \
+              | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let j;try{j=JSON.parse(s)}catch(e){console.error("  not JSON:",JSON.stringify(s.slice(0,200)));process.exit(1)}if(!j.ok){console.error("  sidecar error:",j.error);process.exit(1)}if(!/example domain/i.test(j.title||"")){console.error("  unexpected title:",j.title);process.exit(1)}console.log("  bundled browser fetched:",j.title,"("+j.final_url+")")});'; then
+              echo "  browser sidecar: ok"
+            else
+              echo "::error::the bundled artdaddy-browser sidecar could not fetch a page"
+              sed -n '1,25p' /tmp/ab.err || true
+              ls -la "$RES/ms-playwright" || true
+              FAIL=1
+            fi
+          fi
+          hdiutil detach "$MNT" -quiet || true
+          echo "path=$DMG" >> "$GITHUB_OUTPUT"
+          exit $FAIL
+
+      - uses: actions/upload-artifact@v4
+        # The archive is a convenience, not the deliverable — the comment on the publish step
+        # below says so outright. Hard-failing here stopped BOTH the "Launch it" gate and the
+        # actual Azure publish when the account's artifact storage quota filled up, and that
+        # quota only recalculates every 6-12 hours, so a full release was blocked for a day by
+        # a copy nobody downloads. The step still runs and still reports failure; it just no
+        # longer decides whether the release happens.
+        continue-on-error: true
+        with:
+          name: artdaddy-macos-${{ env.TRIPLE }}-unsigned
+          path: ${{ steps.verify.outputs.path }}
+          if-no-files-found: error
+
+      # Everything above inspects the artifact. This is the first step that RUNS the app: it
+      # installs from the dmg the way a user would, launches it, and requires it to still be
+      # alive after a settle period — a Tauri app that cannot create its WKWebView dies within
+      # a second or two, and no amount of bundle inspection would show that.
+      #
+      # The screenshot is EVIDENCE, not a gate: it is the only way to see whether the webview
+      # actually painted the UI rather than a white rectangle. A missing window server is a
+      # runner limitation, so it is reported loudly instead of failing the build.
+      - name: Launch it
+        id: launch
+        run: |
+          MNT="$(mktemp -d)"
+          hdiutil attach "${{ steps.verify.outputs.path }}" -mountpoint "$MNT" -nobrowse -readonly -quiet
+          rm -rf /Applications/artdaddy.app
+          cp -R "$MNT/artdaddy.app" /Applications/
+          hdiutil detach "$MNT" -quiet || true
+          # Installed from a locally built image, so there is no quarantine flag to clear —
+          # this does NOT prove a downloaded copy gets past Gatekeeper.
+          xattr -cr /Applications/artdaddy.app || true
+
+          # Ask the bundle for its executable name instead of assuming it matches productName:
+          # the Cargo binary is `app`, and guessing produced a "no such file" that read exactly
+          # like the app crashing on launch.
+          EXE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' /Applications/artdaddy.app/Contents/Info.plist)"
+          echo "CFBundleExecutable: $EXE"
+          ls -la /Applications/artdaddy.app/Contents/MacOS/
+          BIN="/Applications/artdaddy.app/Contents/MacOS/$EXE"
+          test -x "$BIN" || { echo "::error::bundle executable $BIN is missing or not executable"; exit 1; }
+
+          "$BIN" > /tmp/artdaddy.out 2>/tmp/artdaddy.err &
+          PID=$!
+          echo "launched pid $PID"
+          for i in $(seq 1 20); do
+            sleep 1
+            if ! kill -0 "$PID" 2>/dev/null; then
+              echo "::error::the app exited after ~${i}s instead of staying open"
+              echo "--- stdout ---"; head -50 /tmp/artdaddy.out || true
+              echo "--- stderr ---"; head -50 /tmp/artdaddy.err || true
+              exit 1
+            fi
+          done
+          echo "still running after 20s"
+          ps -o pid,rss,command -p "$PID" | tail -n1
+
+          if screencapture -x /tmp/artdaddy-screen.png 2>/tmp/cap.err; then
+            echo "screenshot: $(file -b /tmp/artdaddy-screen.png)"
+          else
+            echo "::warning::no screenshot — the runner has no window server: $(cat /tmp/cap.err)"
+          fi
+          echo "--- app stderr (first 40 lines) ---"; head -40 /tmp/artdaddy.err || true
+          kill "$PID" 2>/dev/null || true
+
+      - name: Keep the launch evidence
+        if: always() && steps.launch.conclusion != 'skipped'
+        uses: actions/upload-artifact@v4
+        # Evidence, like the dmg archive above: useful to read, never a reason to withhold a
+        # release. It also sits BEFORE the publish step, so a full artifact quota here would
+        # skip the upload just as effectively.
+        continue-on-error: true
+        with:
+          name: artdaddy-macos-launch-evidence
+          path: |
+            /tmp/artdaddy-screen.png
+            /tmp/artdaddy.out
+            /tmp/artdaddy.err
+          if-no-files-found: warn
+
+      # An Actions artifact is not a release: it expires in 90 days and needs a repo login.
+      # The public store is the same container that already serves the Windows installer and
+      # latest.json, so a mac user downloads from where everything else lives.
+      #
+      # Opt-in per run, because most dispatches are test builds and should not touch what is
+      # published. The blob name carries the version, so this never clobbers an older release.
+      - name: Publish the dmg
+        if: inputs.publish
+        env:
+          SAS: ${{ secrets.ARTDADDY_RELEASES_SAS_URL }}
+        run: |
+          if [ -z "$SAS" ]; then
+            echo "::error::publish was requested but ARTDADDY_RELEASES_SAS_URL is not set."
+            echo "::error::Add a container SAS URL (write+create on the 'updates' container) as a repo secret."
+            exit 1
+          fi
+          DMG="${{ steps.verify.outputs.path }}"
+          NAME="$(basename "$DMG")"
+          BASE="${SAS%%\?*}"
+          QS="${SAS#*\?}"
+          curl -fsS --retry 3 -X PUT \
+            -H "x-ms-blob-type: BlockBlob" \
+            -H "Content-Type: application/x-apple-diskimage" \
+            --data-binary "@$DMG" \
+            "$BASE/$NAME?$QS" > /dev/null
+          # Read it back ANONYMOUSLY: a 2xx from the upload only says the request was accepted,
+          # not that a user can now download the bytes we built.
+          PUB="$BASE/$NAME"
+          CODE="$(curl -s -o /dev/null -w '%{http_code}' -I "$PUB")"
+          REMOTE="$(curl -sI "$PUB" | awk 'tolower($1) ~ /^content-length/ {print $2}' | tr -d '\r')"
+          LOCAL="$(stat -f%z "$DMG")"
+          echo "published: $PUB"
+          echo "  http $CODE, remote $REMOTE bytes, local $LOCAL bytes"
+          [ "$CODE" = "200" ] || { echo "::error::published URL returned $CODE"; exit 1; }
+          [ "$REMOTE" = "$LOCAL" ] || { echo "::error::published size $REMOTE != built size $LOCAL"; exit 1; }
+
+      - name: Say plainly what this is not
+        run: |
+          echo "::warning::UNSIGNED and NOT notarized. Gatekeeper will refuse a double-click;"
+          echo "::warning::open it with right-click -> Open. This build cannot update itself:"
+          echo "::warning::latest.json advertises only the Windows .exe, and a mac updater entry"
+          echo "::warning::needs a signature plus the 'app' bundle target."

@@ -1,0 +1,129 @@
+// The white-screen gate.
+//
+// Every unit test mounts a component in isolation; nothing asserts that the SHIPPED
+// bundle boots. A bad dynamic import, a circular module, a CSP rule or a broken
+// chunk split renders a blank page that the whole suite still calls green. This
+// loads the real app in real Chromium and insists it mounted and stayed up.
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+import { expect, test, type ConsoleMessage } from "@playwright/test";
+
+/** What VITE_API_BASE_URL this bundle was built with. Vite loads .env in the dev-server process,
+ *  not in this one, so read the same files it would (its precedence: .env.local wins). */
+function configuredApiBase(): string {
+  if (process.env.VITE_API_BASE_URL?.trim()) return process.env.VITE_API_BASE_URL.trim();
+  for (const file of [".env.local", ".env"]) {
+    try {
+      const m = /^\s*VITE_API_BASE_URL\s*=\s*(.+?)\s*$/m.exec(
+        readFileSync(join(process.cwd(), file), "utf8"),
+      );
+      if (m) return m[1].replace(/^["']|["']$/g, "").trim();
+    } catch {
+      /* absent -> try the next one */
+    }
+  }
+  return "";
+}
+
+/** Console noise that is expected with no backend running. */
+const BENIGN =
+  /Failed to load resource|ERR_CONNECTION_REFUSED|net::ERR|127\.0\.0\.1:8000|Failed to fetch|NetworkError|sentry/i;
+
+test.describe("app boot", () => {
+  test("mounts something into #root and does not white-screen", async ({ page }) => {
+    await page.goto("/");
+    const root = page.locator("#root");
+    await expect(root).toBeAttached();
+    await expect
+      .poll(async () => (await root.innerHTML()).trim().length, { timeout: 15_000 })
+      .toBeGreaterThan(50);
+  });
+
+  test("throws no uncaught error or unhandled rejection while booting", async ({ page }) => {
+    const fatal: string[] = [];
+    page.on("pageerror", (e) => fatal.push(String(e)));
+    page.on("console", (m: ConsoleMessage) => {
+      if (m.type() === "error" && !BENIGN.test(m.text())) fatal.push(m.text());
+    });
+
+    await page.goto("/");
+    await page.waitForTimeout(2500);
+
+    expect(fatal, `the app logged fatal errors on boot:\n${fatal.join("\n")}`).toEqual([]);
+  });
+
+  test("renders the application chrome, not just an empty div", async ({ page }) => {
+    await page.goto("/");
+    // The menu bar is the one piece of shell that renders with no project and no
+    // backend, so it is the honest "the UI is really up" signal.
+    await expect(page.locator("#root button, #root [role='menu'], #root nav").first()).toBeVisible({
+      timeout: 15_000,
+    });
+  });
+
+  // 0.3.0 shipped a dmg that asked every user's own machine for the tool catalog, because
+  // VITE_API_BASE_URL is frozen at build time and .env is gitignored. Grepping the bundle for
+  // the URL only proves the string is present; this proves the running app SENDS the request
+  // and the server ANSWERS it. main.tsx calls loadContract() on boot, so it always fires.
+  test("asks the configured backend for the tool catalog, and gets it", async ({ page }) => {
+    // A cold vite server spends ~40s transforming modules before the app boots at all.
+    test.setTimeout(150_000);
+
+    const CATALOG = /\/contract\/tools\b/;
+    const sent: string[] = [];
+    const failed: string[] = [];
+
+    page.on("request", (r) => {
+      if (CATALOG.test(r.url())) sent.push(r.url());
+    });
+    page.on("requestfailed", (r) => {
+      if (CATALOG.test(r.url())) failed.push(`${r.url()} (${r.failure()?.errorText ?? "unknown"})`);
+    });
+
+    // Registered BEFORE goto: on a warm server the catalog comes back while goto is still
+    // resolving, and a waiter created afterwards would sit there missing it.
+    const answered = page
+      .waitForResponse((r) => CATALOG.test(r.url()), { timeout: 120_000 })
+      .catch(() => null);
+
+    await page.goto("/");
+    await expect.poll(() => sent.length, { timeout: 60_000 }).toBeGreaterThan(0);
+
+    // The 0.3.0 defect was VITE_API_BASE_URL not REACHING the build, so the bundle fell back to
+    // the localhost default. "is not localhost" cannot express that: a developer whose .env
+    // legitimately points at the local server is indistinguishable from the bug, and the guard
+    // fires on every local run. Compare against the value this build was actually given.
+    const configured = configuredApiBase();
+    if (configured) {
+      expect(
+        new URL(sent[0]).origin,
+        `the bundle asked ${sent[0]} but was built with VITE_API_BASE_URL=${configured}: the ` +
+          "env did not reach this build, which is exactly the defect that shipped in 0.3.0",
+      ).toBe(new URL(configured).origin);
+    } else {
+      expect(
+        sent[0],
+        "no VITE_API_BASE_URL was configured, so the bundle fell back to the localhost default",
+      ).not.toMatch(/\/\/(127\.0\.0\.1|localhost|\[::1\]):8000\//);
+    }
+
+    const res = await answered;
+    expect(failed, `the request to ${sent[0]} never completed`).toEqual([]);
+    expect(res, `no response came back from ${sent[0]}`).not.toBeNull();
+    expect(res!.status(), `${res!.url()} did not answer 200`).toBe(200);
+  });
+
+  test("survives a hard reload (no boot-order dependence on a warm module cache)", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await expect(page.locator("#root")).toBeAttached();
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await expect
+      .poll(async () => (await page.locator("#root").innerHTML()).trim().length, {
+        timeout: 15_000,
+      })
+      .toBeGreaterThan(50);
+  });
+});

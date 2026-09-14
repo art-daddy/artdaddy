@@ -1,0 +1,70 @@
+# Ask a macOS 26 Mac what Apple's SpeechTranscriber actually returns.
+#
+# WHY THIS EXISTS: SpeechTranscriber (macOS 26+) is a candidate to run ahead of whisper on
+# new Macs. Two things make it attractive — Apple downloads and manages the speech models
+# via AssetInventory, so there is no 155 MB-per-size encoder for US to ship, and it reads an
+# AVAudioFile directly. One thing decides whether it can REPLACE whisper or only supplement
+# it: whether its timing is per WORD. Our transcript model carries per-word start/end times
+# and the karaoke caption sweep animates from them.
+#
+# The documentation does not say, so this asks the machine. It is a probe, not a build: it
+# produces no sidecar and nothing is wired to the app.
+#
+# MANUAL ONLY, and arm64 only. macOS minutes bill at 10x on a private repo, and macos-26 is
+# the only image carrying an SDK new enough (macosx26.0+) to compile against this API.
+name: probe — Apple SpeechTranscriber (macOS 26)
+
+on:
+  workflow_dispatch:
+    inputs:
+      audio_url:
+        description: "A wav to transcribe (default: whisper.cpp's jfk.wav — real speech, known words)"
+        required: true
+        default: "https://github.com/ggml-org/whisper.cpp/raw/v1.9.2/samples/jfk.wav"
+
+jobs:
+  probe:
+    # `macos-26` IS the Arm64 image; `macos-26-arm64` is an image NAME, not a runnable label,
+    # and would leave the job queued forever. The Intel one is `macos-26-intel`.
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: What Xcode / SDK is this?
+        run: |
+          sw_vers
+          xcodebuild -version
+          xcrun --sdk macosx --show-sdk-version
+
+      # via env, not "${{ }}" inside the script: a URL is free text and would otherwise be
+      # pasted straight into a shell line.
+      - name: Fetch the audio
+        env:
+          AUDIO_URL: ${{ inputs.audio_url }}
+        run: |
+          curl -fsSL -o sample.wav "$AUDIO_URL"
+          ls -lh sample.wav
+          file sample.wav
+
+      - name: Build the probe
+        run: |
+          swiftc -O -target arm64-apple-macos26.0 -o speech-probe scripts/macos/speech-probe.swift
+          ls -lh speech-probe
+
+      # The probe exits non-zero on real failures and 0 when the machine simply cannot run
+      # the API. `shell: bash` is load-bearing: the default for `run` is `bash -e {0}` with NO
+      # pipefail, so `probe | tee` returns tee's status and a failing probe reports SUCCESS —
+      # which is exactly what happened on the first run. Naming the shell adds `-o pipefail`.
+      #
+      # Its stdout IS the deliverable: read the `runs` count per result to see whether the
+      # timing is per word or per phrase.
+      - name: Run it
+        shell: bash
+        run: ./speech-probe sample.wav 2>&1 | tee probe.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: speech-probe-log
+          path: probe.log
+          if-no-files-found: warn

@@ -1,0 +1,891 @@
+# macOS end-to-end on Codemagic. Same job as .github/workflows/macos-e2e.yml, on a provider
+# whose free tier actually has macOS minutes. Kept in sync by hand: if a lane is added there,
+# add it here, or the two will quietly diverge and only one will be telling the truth.
+#
+# ONE-TIME SETUP (in the Codemagic UI, not here):
+#   - connect the artdaddy repo
+#   - add a variable group named `artdaddy` holding ARTDADDY_EVAL_USER and ARTDADDY_EVAL_PASSWORD
+#     (the dedicated CI tester account, not a personal login) and mark them secure
+#
+# The 500 free minutes are the budget: this run is ~20 min, so treat it as roughly 25 runs a
+# month, not a per-push lane. Trigger it manually.
+#
+# TRIGGER THE UI WALK LIKE THIS, or it reports unrunnable and the rest still passes:
+#   POST /builds with remote access enabled AND environment.variables.CM_API_TOKEN set, e.g.
+#     {"appId":..., "workflowId":"macos-e2e", "branch":"main",
+#      "enableSshAccess":true, "remoteAccessEnabled":true, "enableVnc":true,
+#      "environment":{"variables":{"CM_API_TOKEN":"<your token>"}}}
+#   The token is what lets the build ask for its OWN VNC credentials, so nothing is stored in
+#   the repo or in a variable group; it dies with the build.
+#
+# macOS GUI automation DOES work here. The route, after nineteen rounds of wrong turns:
+#
+#   1. Trigger with remote access on (the REST API accepts it despite the docs saying UI-only;
+#      `remote_access_enabled` flips to true, and a build triggered without it reads false).
+#   2. The build asks for its OWN credentials at GET /api/v3/builds/$CM_BUILD_ID/remote-access,
+#      passing the token as a trigger-time variable so nothing is stored. Codemagic names
+#      `builder` there - the account already past Setup Assistant, with Dock running - and that
+#      password works on loopback 5900. Do NOT create a new account: a fresh user's first login
+#      runs Setup Assistant, whose Apple ID pane has no unattended escape. Do NOT run kickstart
+#      either; reconfiguring remote access breaks the credentials you just asked for.
+#   3. Connecting gives the real desktop immediately: dock=yes, screen_mean 125 on frame one.
+#   4. System Events HANGS, because a consent alert - "sshd-keygen-wrapper wants access to
+#      control System Events" - is waiting. Writing TCC rows does NOT suppress it: macOS
+#      validates csreq and a NULL one is ignored. The dialog is the consent path. System Events
+#      cannot dismiss it (it is the thing being blocked), so click it over VNC, locating the
+#      blue default button by colour rather than coordinates.
+#   5. After the click System Events answers, apps launch, and keystrokes move pixels well
+#      above the ambient floor.
+#
+# Proof, all from one run: events-before HUNG, events-after HUNG, events-after-click exit=0;
+# open-textedit action=786432 against floor=119412; keystroke action=650730 against floor=61110.
+#
+# Two traps worth keeping. Artifacts do NOT publish while remote access holds the machine for
+# its ten minutes, so frames ship through the log as base64. And holding one VNC session while
+# opening another for each capture makes them fight - a capture came back -1 mid-stimulus.
+workflows:
+  # The probe that found the route above. shots/ and the B64 blocks are its evidence.
+  mac-gui-probe:
+    name: macOS GUI-session probe
+    instance_type: mac_mini_m2
+    max_build_duration: 35
+    artifacts:
+      - shots/*.png
+    scripts:
+      - name: Grant Apple Events in the VNC session and try to drive it
+        script: |
+          set +e
+          # Every probe gets a hard cap. An unbounded diagnostic hung for 2+ minutes and was
+          # cancelled, and a cancelled Codemagic step publishes NO log at all - so it told me
+          # nothing except that something was stuck. Sets RC so callers can branch on it.
+          cap() { # cap <secs> <label> <cmd...>
+            local secs=$1 label=$2; shift 2
+            "$@" >/tmp/o.txt 2>&1 & local pid=$!
+            ( sleep "$secs"; kill -9 "$pid" 2>/dev/null ) & local wd=$!
+            wait "$pid"; RC=$?
+            kill -9 "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
+            if [ $RC -ge 128 ]; then echo "[$label] HUNG - killed after ${secs}s"
+            else echo "[$label] exit=$RC"; fi
+            # A python traceback puts the actual error LAST. Round four printed the first 12
+            # lines of one and so reported a connection failure as an absent framebuffer.
+            local n=$(wc -l </tmp/o.txt | tr -d ' ')
+            if [ "$n" -gt 24 ]; then
+              sed -n '1,8p' /tmp/o.txt | sed 's/^/    /'
+              echo "    ... $((n - 16)) lines elided ..."
+              tail -8 /tmp/o.txt | sed 's/^/    /'
+            else
+              sed -n '1,24p' /tmp/o.txt | sed 's/^/    /'
+            fi
+          }
+
+          U=$(id -u); ME=$(whoami)
+          gui() { sudo -n launchctl asuser "$U" sudo -u "$ME" "$@"; }
+          bytes() { stat -f%z "$1" 2>/dev/null || echo 0; }
+          dims() { sips -g pixelWidth -g pixelHeight "$1" 2>/dev/null | sed -n '2,3p' | tr -d ' \n'; }
+          rand() { LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c "$1"; }
+          echo "user=$ME uid=$U console=$(stat -f%Su /dev/console 2>&1)"
+
+          # BEFORE. Without this the "after" numbers prove nothing - and measuring it in the
+          # same run beats trusting yesterday's log.
+          echo "== before any VNC client is attached =="
+          cap 20 displays-before system_profiler SPDisplaysDataType
+          rm -f /tmp/before.png; gui screencapture -x /tmp/before.png >/dev/null 2>&1
+          BEFORE=$(bytes /tmp/before.png); echo "    screencapture bytes=$BEFORE"
+          cap 10 port-before nc -z -v -w 2 localhost 5900
+
+          # Codemagic generates VNC credentials for THIS machine when remote access is enabled,
+          # and the account they name is `builder` - the one already past Setup Assistant, with
+          # Dock running since round two. I had written builder off as unauthenticatable, but
+          # that was only true of passwords I tried to set myself; theirs already works.
+          #
+          # The build fetches its own credentials at runtime, so nothing is stored in the repo
+          # and nothing is added to a variable group - the token arrives as a trigger-time
+          # variable and dies with the build.
+          VU=builder
+          PW=""
+          RH=""
+          cat > /tmp/ra.py <<'PY'
+          import json
+          try:
+              d = json.load(open('/tmp/ra.json'))
+              v = (d.get('data') or d)['vnc']
+              print(v['username'])
+              print(v['password'])
+              print('%s::%s' % (v['host'], v['port']))
+          except Exception:
+              print(''); print(''); print('')
+          PY
+          if [ -n "$CM_API_TOKEN" ]; then
+            curl -s -H "x-auth-token: $CM_API_TOKEN" \
+              "https://codemagic.io/api/v3/builds/$CM_BUILD_ID/remote-access" -o /tmp/ra.json
+            python3 /tmp/ra.py > /tmp/ra.txt 2>/dev/null
+            RU=$(sed -n 1p /tmp/ra.txt)
+            PW=$(sed -n 2p /tmp/ra.txt)
+            RH=$(sed -n 3p /tmp/ra.txt)
+            [ -n "$RU" ] && VU="$RU"
+            echo "[remote-access] user=$VU gateway=$RH password_len=${#PW}"
+          else
+            echo "[remote-access] CM_API_TOKEN not provided"
+          fi
+          if [ -z "$PW" ]; then
+            head -c 300 /tmp/ra.json 2>/dev/null | sed 's/^/    /'
+            echo ""
+            echo "VERDICT: UNTESTED - no VNC credentials, so nothing below could run"
+            echo "PROBE COMPLETE"; exit 0
+          fi
+
+          # Deliberately NOT running kickstart: Codemagic already configured remote access for
+          # this account, and reconfiguring it is how I would break the credentials I just asked
+          # for. Their password is an ARD/VNC secret, not the account password, so dscl
+          # -authonly would fail on it - the connection itself is the only honest test.
+
+          cap 240 venv python3 -m venv /tmp/vnv
+          cap 300 pip /tmp/vnv/bin/pip install --quiet vncdotool
+          cap 20 vncdo-version /tmp/vnv/bin/vncdo --version
+
+          # Two small helpers rather than one long-lived script: pixels have to be sampled
+          # repeatedly and AROUND other shell commands, which a single session cannot do.
+          cat > /tmp/shot.py <<'PY'
+          import sys
+          from vncdotool import api
+          server, user, pw, out = sys.argv[1:5]
+          try:
+              c = api.connect(server, username=(user or None), password=pw)
+              c.timeout = 60
+              c.refreshScreen()
+              c.captureScreen(out)
+              print("SHOT %dx%d" % c.screen.size)
+          except Exception as e:
+              print("SHOTFAIL %s: %s" % (type(e).__name__, e))
+          finally:
+              try:
+                  api.shutdown()
+              except Exception:
+                  pass
+          PY
+
+          cat > /tmp/cmp.py <<'PY'
+          import sys
+          from PIL import Image, ImageChops
+          # COUNT changed pixels rather than measuring a bounding box: getbbox() spans ALL
+          # differences, so the menu-bar clock plus one Dock pixel reports most of the screen.
+          try:
+              a = Image.open(sys.argv[1]).convert("RGB")
+              b = Image.open(sys.argv[2]).convert("RGB")
+              print(sum(ImageChops.difference(a, b).convert("L").histogram()[24:]))
+          except Exception:
+              print(-1)
+          PY
+
+          # Mean brightness, 0-255. The session spends its first minute pitch black, which reads
+          # as a perfectly stable screen - so "nothing changed" needs to be distinguishable from
+          # "nothing is drawn yet".
+          cat > /tmp/mean.py <<'PY'
+          import sys
+          from PIL import Image, ImageStat
+          try:
+              im = Image.open(sys.argv[1]).convert("RGB")
+              print(int(sum(ImageStat.Stat(im).mean) / 3))
+          except Exception:
+              print(-1)
+          PY
+
+          # Locates the blue default button of a macOS alert. Two refinements, both paid for by
+          # looking at the real screenshot: search the CENTRE band only (the menu bar and Dock
+          # are full of blue icons and a whole-screen centroid lands between them, on nothing),
+          # and keep only the LOWEST blue cluster - the alert icon carries a blue badge that
+          # drags a naive centroid up onto the button's top edge.
+          cat > /tmp/findblue.py <<'PY'
+          import sys
+          from PIL import Image
+          try:
+              im = Image.open(sys.argv[1]).convert("RGB")
+              w, h = im.size
+              px = im.load()
+              pts = []
+              for y in range(int(h * 0.12), int(h * 0.75)):
+                  for x in range(int(w * 0.15), int(w * 0.85)):
+                      r, g, b = px[x, y]
+                      if b > 170 and b - r > 55 and b - g > 35:
+                          pts.append((x, y))
+              if len(pts) < 150:
+                  print("")
+              else:
+                  ymax = max(p[1] for p in pts)
+                  band = [p for p in pts if p[1] >= ymax - h * 0.05]
+                  if len(band) < 100:
+                      band = pts
+                  cx = sum(p[0] for p in band) // len(band)
+                  cy = sum(p[1] for p in band) // len(band)
+                  print("%d %d %d" % (cx, cy, len(band)))
+          except Exception:
+              print("")
+          PY
+
+          cat > /tmp/click.py <<'PY'
+          import sys, time
+          from vncdotool import api
+          srv, user, pw, x, y, out = sys.argv[1:7]
+          try:
+              c = api.connect(srv, username=(user or None), password=pw)
+              c.timeout = 60
+              c.mouseMove(int(x), int(y))
+              time.sleep(1)
+              c.mousePress(1)
+              time.sleep(4)
+              c.refreshScreen()
+              c.captureScreen(out)
+              print("CLICKED %s,%s" % (x, y))
+          except Exception as e:
+              print("CLICKFAIL %s: %s" % (type(e).__name__, e))
+          finally:
+              try:
+                  api.shutdown()
+              except Exception:
+                  pass
+          PY
+
+          # Artifacts do NOT publish while remote access holds the machine, and the picture is
+          # the only thing that has settled any question in this whole exercise - so ship the
+          # frame through the log, downscaled, and decode it locally.
+          cat > /tmp/b64.py <<'PY'
+          import base64, io, sys
+          from PIL import Image
+          try:
+              im = Image.open(sys.argv[1]).convert("RGB")
+              im.thumbnail((720, 720))
+              buf = io.BytesIO()
+              im.save(buf, "JPEG", quality=55)
+              d = base64.b64encode(buf.getvalue()).decode()
+              print("B64START %s %d" % (sys.argv[1], len(d)))
+              for i in range(0, len(d), 200):
+                  print(d[i:i + 200])
+              print("B64END")
+          except Exception as e:
+              print("B64FAIL %s" % e)
+          PY
+
+          shot() { /tmp/vnv/bin/python /tmp/shot.py "$VNCSRV" "$VU" "$PW" "$1" >/tmp/shot.log 2>&1; }
+          num() { local v=$(/tmp/vnv/bin/python "$1" "$2" "$3" 2>/dev/null | tail -1); case "$v" in ''|*[!0-9-]*) v=-1;; esac; echo "$v"; }
+          areaof() { num /tmp/cmp.py "$1" "$2"; }
+          meanof() { num /tmp/mean.py "$1" ""; }
+          b64() { /tmp/vnv/bin/python /tmp/b64.py "$1"; }
+          VUID=$(id -u "$VU")
+          vgui() { sudo -n launchctl asuser "$VUID" sudo -u "$VU" "$@"; }
+
+          # Their credentials may be scoped to the public gateway rather than the loopback
+          # server, so try both and say which answered instead of assuming either.
+          VNCSRV="localhost::5900"
+          rm -f /tmp/pick.png; shot /tmp/pick.png
+          if [ ! -s /tmp/pick.png ] && [ -n "$RH" ]; then
+            sed -n '1,6p' /tmp/shot.log | sed 's/^/    /'
+            VNCSRV="$RH"
+            rm -f /tmp/pick.png; shot /tmp/pick.png
+          fi
+          echo "[vnc] server=$VNCSRV first_frame_bytes=$(bytes /tmp/pick.png)"
+          if [ ! -s /tmp/pick.png ]; then
+            sed -n '1,10p' /tmp/shot.log | sed 's/^/    /'
+            echo "VERDICT: UNTESTED - could not open a VNC session with their credentials"
+            echo "PROBE COMPLETE"; exit 0
+          fi
+
+          # Walks whatever modal owns the screen. Setup Assistant's Apple ID page exposes its
+          # "Set Up Later" control with NO accessibility name - it prints as `missing value` -
+          # so matching on names alone clicked Continue fifteen times against the same page.
+          # Read the description too, and failing that CYCLE through the buttons one per call,
+          # so an unnamed control still gets tried instead of being invisible.
+          cat > /tmp/dismiss.scpt <<'AS'
+          on run argv
+            set i to (item 1 of argv) as integer
+            tell application "System Events"
+              set out to ""
+              try
+                set p to first application process whose frontmost is true
+                set out to name of p
+                tell p
+                  set ws to every window
+                  if (count of ws) is 0 then return out & " (no windows)"
+                  -- A sheet is not part of window 1's button list. "Other Sign-In Options"
+                  -- opens one, which is where "Set Up Later" actually lives - so look there
+                  -- first, or the walk clicks Continue against the same page forever.
+                  set bs to {}
+                  try
+                    set bs to every button of sheet 1 of item 1 of ws
+                    set out to out & " SHEET"
+                  end try
+                  if (count of bs) is 0 then set bs to every button of item 1 of ws
+                  set n to count of bs
+                  if n is 0 then return out & " (no buttons)"
+                  set out to out & " n=" & n
+                  repeat with b in bs
+                    set nm to ""
+                    set ds to ""
+                    try
+                      set nm to name of b
+                    end try
+                    try
+                      set ds to description of b
+                    end try
+                    set out to out & " {" & nm & "|" & ds & "}"
+                  end repeat
+                  repeat with b in bs
+                    set nm to ""
+                    try
+                      set nm to name of b
+                    end try
+                    if nm is in {"Set Up Later", "Skip", "Not Now", "Later", "Done", "Get Started", "Skip for Now"} then
+                      click b
+                      return out & " -> CLICKED skip " & nm
+                    end if
+                  end repeat
+                  -- Second choice: the door that leads to "Set Up Later".
+                  repeat with b in bs
+                    set nm to ""
+                    try
+                      set nm to name of b
+                    end try
+                    if nm contains "Other Sign-In Options" then
+                      click b
+                      return out & " -> CLICKED other-signin"
+                    end if
+                  end repeat
+                  set k to ((i - 1) mod n) + 1
+                  click item k of bs
+                  return out & " -> CLICKED index " & k
+                end tell
+              on error e
+                return out & " ERROR " & e
+              end try
+            end tell
+          end run
+          AS
+
+          # The framebuffer exists only while a client is attached, so hold one for the whole
+          # probe instead of reconnecting around every measurement.
+          /tmp/vnv/bin/vncdo -s "$VNCSRV" -u "$VU" -p "$PW" pause 1200 >/tmp/hold.log 2>&1 &
+          HOLD=$!
+          for i in $(seq 1 12); do
+            sleep 10
+            shot /tmp/boot.png
+            M=$(meanof /tmp/boot.png)
+            echo "    [boot $i] screen_mean=$M"
+            [ "$M" -gt 5 ] && break
+          done
+          # Bail rather than grind. Round fourteen spent its whole 25-minute budget looping over
+          # a connection that never existed, and a timed-out build publishes a truncated log.
+          if [ "$(meanof /tmp/boot.png)" -lt 0 ]; then
+            sed -n '1,15p' /tmp/shot.log | sed 's/^/    /'
+            echo "VERDICT: UNTESTED - never captured a frame, so nothing below could run"
+            echo "PROBE COMPLETE"; exit 0
+          fi
+          cap 10 session-is-aqua sudo -n launchctl asuser "$VUID" launchctl managername
+
+          # BEFORE the grant, in the same run. If this already answers, the grant proves nothing.
+          cap 30 events-before vgui osascript -e 'tell application "System Events" to return name of first process'
+          BEFORE_OK=no; [ "$RC" = 0 ] && BEFORE_OK=yes
+
+          # The grant. Accessibility lives in the SYSTEM database and AppleEvents in the USER
+          # one, and which binary TCC blames for a shell-spawned osascript is undocumented - so
+          # write every plausible pair. Extra rows are inert; a missing one costs a build.
+          UDB="/Users/$VU/Library/Application Support/com.apple.TCC/TCC.db"
+          SDB="/Library/Application Support/com.apple.TCC/TCC.db"
+          grant() { # grant <db> <service> <client> <indirect-object>
+            sudo -n sqlite3 -cmd '.timeout 5000' "$1" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version,csreq,policy_id,indirect_object_identifier_type,indirect_object_identifier,indirect_object_code_identity,flags,last_modified) VALUES ('$2','$3',1,2,2,1,NULL,NULL,0,'$4',NULL,0,strftime('%s','now'));" 2>&1
+          }
+          cap 15 rows-before-grant sudo -n sqlite3 "$UDB" "select service,client,client_type,auth_value,indirect_object_identifier from access where auth_value<>2;"
+          for CL in /usr/bin/osascript /bin/bash /bin/sh /bin/zsh /usr/bin/sudo /usr/libexec/sshd \
+                    /usr/libexec/sshd-keygen-wrapper /usr/bin/login /bin/launchctl; do
+            grant "$UDB" kTCCServiceAppleEvents   "$CL" com.apple.systemevents
+            grant "$SDB" kTCCServiceAppleEvents   "$CL" com.apple.systemevents
+            grant "$UDB" kTCCServiceAccessibility "$CL" UNUSED
+            grant "$SDB" kTCCServiceAccessibility "$CL" UNUSED
+          done
+          # An INSERT cannot fix a PRE-EXISTING deny with a different client_type or indirect
+          # object - and there was one: sshd-keygen-wrapper at auth_value 0, which is why the
+          # denial arrived with no prompt. Flipping it is what actually unblocked this.
+          for DB in "$UDB" "$SDB"; do
+            sudo -n sqlite3 "$DB" "UPDATE access SET auth_value=2, flags=0 WHERE service IN ('kTCCServiceAppleEvents','kTCCServiceAccessibility','kTCCServiceScreenCapture','kTCCServicePostEvent');" 2>&1
+          done
+          cap 15 rows-still-denied sudo -n sqlite3 "$UDB" "select service,client,auth_value from access where auth_value<>2;"
+          cap 20 reload-tccd sudo -n killall tccd
+          sleep 10
+
+          cap 40 events-after vgui osascript -e 'tell application "System Events" to return name of first process'
+          AFTER_OK=no; [ "$RC" = 0 ] && AFTER_OK=yes
+
+          # Now click through whatever is in the way. Dock is the readiness signal: it does not
+          # run under Setup Assistant, so it cannot be faked by a bright screen.
+          READY=no
+          for i in $(seq 1 20); do
+            if pgrep -u "$VU" -x Dock >/dev/null 2>&1 && [ "$(meanof /tmp/boot.png)" -gt 5 ]; then READY=yes; break; fi
+            # If clicking cannot escape a pane, stop clicking. loginwindow may hand the session
+            # to the desktop once the assistant is gone.
+            if [ "$i" = 6 ] || [ "$i" = 12 ]; then
+              cap 20 kill-setup-assistant sudo -n pkill -u "$VU" -f 'Setup Assistant'
+              sleep 10
+            fi
+            cap 30 "dismiss-$i" vgui osascript /tmp/dismiss.scpt "$i"
+            shot "/tmp/dismiss_$i.png"; cp "/tmp/dismiss_$i.png" /tmp/boot.png
+            sleep 6
+          done
+          shot /tmp/desktop.png
+          echo "[ready] $READY dock=$(pgrep -u "$VU" -x Dock >/dev/null 2>&1 && echo yes || echo no) screen_mean=$(meanof /tmp/desktop.png)"
+
+          # System Events HANGS rather than denying, and the photograph says why: a real consent
+          # alert - "sshd-keygen-wrapper wants access to control System Events" - drawn on a real
+          # desktop. My TCC row did not suppress it (macOS validates csreq, which I left NULL),
+          # so the DIALOG is the actual consent path. A hang is a question waiting for an answer.
+          vgui osascript -e 'tell application "System Events" to return name of first process' >/tmp/ae.txt 2>&1 &
+          AE=$!
+          sleep 12
+          shot /tmp/consent.png
+          echo "[consent] mean=$(meanof /tmp/consent.png) differs_from_desktop=$(areaof /tmp/desktop.png /tmp/consent.png)"
+          b64 /tmp/consent.png
+
+          # The held session and a new one fight over the framebuffer, so let go before clicking.
+          kill -9 $HOLD 2>/dev/null
+          BTN=$(/tmp/vnv/bin/python /tmp/findblue.py /tmp/consent.png)
+          echo "[allow-button] centroid=${BTN:-none}"
+          CLICKED=no
+          if [ -n "$BTN" ]; then
+            cap 90 click-allow /tmp/vnv/bin/python /tmp/click.py "$VNCSRV" "$VU" "$PW" $(echo "$BTN" | cut -d' ' -f1) $(echo "$BTN" | cut -d' ' -f2) /tmp/after_click.png
+            grep -q CLICKED /tmp/o.txt && CLICKED=yes
+            b64 /tmp/after_click.png
+          fi
+          kill -9 $AE 2>/dev/null
+
+          # The outcome: the call that was blocked either answers now or it does not. Nothing
+          # about the click itself counts as evidence.
+          cap 40 events-after-click vgui osascript -e 'tell application "System Events" to return name of first process'
+          CONSENT_OK=no; [ "$RC" = 0 ] && CONSENT_OK=yes
+          echo "[consent] clicked=$CLICKED system_events_now=$CONSENT_OK"
+
+          # Re-attach for the stimuli below; the framebuffer only exists while a client is on.
+          /tmp/vnv/bin/vncdo -s "$VNCSRV" -u "$VU" -p "$PW" pause 600 >/tmp/hold2.log 2>&1 &
+          HOLD=$!
+          sleep 8
+
+          # Ambient measured immediately before each stimulus over the SAME interval. A single
+          # baseline taken at the start is not a control for a screen that changes on its own -
+          # a Setup Assistant page turn scored 22788 and I credited it to an `open -a TextEdit`
+          # that had done nothing at all.
+          STIM_OK=no
+          stim() { # stim <label> <cmd...>
+            local label=$1; shift
+            shot "/tmp/${label}_a1.png"; sleep 10; shot "/tmp/${label}_a2.png"
+            local amb=$(areaof "/tmp/${label}_a1.png" "/tmp/${label}_a2.png")
+            shot "/tmp/${label}_s1.png"
+            cap 40 "$label" "$@"
+            sleep 10
+            shot "/tmp/${label}_s2.png"
+            local act=$(areaof "/tmp/${label}_s1.png" "/tmp/${label}_s2.png")
+            local floor=$(( amb * 3 )); [ "$floor" -lt 5000 ] && floor=5000
+            STIM_OK=no; [ "$act" -gt "$floor" ] && STIM_OK=yes
+            echo "    [$label] ambient=$amb action=$act floor=$floor attributed=$STIM_OK"
+            return 0
+          }
+
+          OPEN_OK=no; KEY_OK=no
+          if [ "$READY" = yes ]; then
+            stim open-textedit vgui open -a TextEdit
+            OPEN_OK=$STIM_OK
+            stim keystroke vgui osascript -e 'tell application "System Events" to keystroke "n" using command down'
+            KEY_OK=$STIM_OK
+          fi
+          kill -9 $HOLD 2>/dev/null
+
+          # Keep the frames. A number in a log is not a picture, and the one time I opened the
+          # picture the "live desktop" turned out to be a software-update prompt.
+          mkdir -p "$CM_BUILD_DIR/shots"
+          cp /tmp/*.png "$CM_BUILD_DIR/shots/" 2>/dev/null
+          ls -l "$CM_BUILD_DIR/shots" | sed 's/^/    /'
+
+          echo "OUTCOME: ready=$READY events_before=$BEFORE_OK events_after=$AFTER_OK consent_clicked=$CLICKED system_events_after_consent=$CONSENT_OK app_painted=$OPEN_OK keystroke_moved=$KEY_OK"
+          if [ "$BEFORE_OK" = yes ]; then
+            echo "VERDICT: System Events already worked BEFORE the grant - this run proves nothing about the grant"
+          elif [ "$READY" = no ]; then
+            echo "VERDICT: UNTESTED - never reached a desktop, so the stimuli below did not run"
+          elif [ "$CONSENT_OK" = yes ] && [ "$KEY_OK" = yes ] && [ "$OPEN_OK" = yes ]; then
+            echo "VERDICT: DRIVABLE - real desktop, consent answered, apps launch and keystrokes move pixels"
+          elif [ "$CONSENT_OK" = yes ]; then
+            echo "VERDICT: consent answered and System Events works; stimuli app=$OPEN_OK keys=$KEY_OK"
+          elif [ "$OPEN_OK" = yes ]; then
+            echo "VERDICT: apps launch and paint, but System Events is still blocked"
+          else
+            echo "VERDICT: reached a desktop and nothing attributable happened"
+          fi
+          echo "PROBE COMPLETE"
+          exit 0
+
+  macos-e2e:
+    name: macOS end-to-end
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    environment:
+      node: 20
+      groups:
+        - artdaddy
+      vars:
+        TRIPLE: aarch64-apple-darwin
+        WHISPER_REF: v1.9.2
+        ARTDADDY_SERVER: https://artdaddy-server.ambitioustree-4d826744.centralindia.azurecontainerapps.io
+        # .env is gitignored and VITE_API_BASE_URL is FROZEN INTO THE BUNDLE at build time,
+        # falling back to http://127.0.0.1:8000 - which is why the WebKit boot test caught the
+        # app trying to reach the user's own machine.
+        VITE_API_BASE_URL: https://artdaddy-server.ambitioustree-4d826744.centralindia.azurecontainerapps.io
+        ARTDADDY_EVAL_MODELS: gpt-5.4-mini
+        ARTDADDY_EVAL_CAP_USD: "0.40"
+        ARTDADDY_EVAL_EFFORT: high
+        ARTDADDY_EVAL_CHECKPOINT: "off"
+    cache:
+      cache_paths:
+        - $CM_BUILD_DIR/whisper-out
+        - $HOME/.cargo
+        # The TOOLCHAIN lives here, not in .cargo. Caching only .cargo restores the rustup
+        # shim with nothing behind it, and `tauri build` dies on `cargo metadata` with
+        # "no default is configured" - which is what happened.
+        - $HOME/.rustup
+        - $CM_BUILD_DIR/src-tauri/target
+    scripts:
+      - name: Install
+        script: |
+          set -eo pipefail
+          command -v cmake >/dev/null || brew install cmake
+          # The image has Xcode and Node but no Rust, and `tauri build` dies on `cargo metadata`.
+          # Ask whether cargo RUNS, not whether the file is there: a warm cache restores the
+          # rustup shim without its toolchain, and an -x test on the shim passes while every
+          # cargo invocation fails. Same shape as trusting an exit code over an outcome.
+          export PATH="$HOME/.cargo/bin:$PATH"
+          if ! cargo --version >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal --default-toolchain stable
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup default stable >/dev/null 2>&1 || true
+          cargo --version || { echo "cargo is installed but cannot run - the build would fail later"; exit 1; }
+          echo "PATH=$HOME/.cargo/bin:$PATH" >> $CM_ENV
+          npm ci
+
+      # Static, Metal shader embedded: one self-contained sidecar. Cached on the pinned ref,
+      # so this only pays out when the version moves. Cloned OUTSIDE the checkout: whisper.cpp
+      # ships its own *.spec.js, which vitest's default include swallows as if it were ours —
+      # the unit lane failed on an addon.node module that has nothing to do with this project.
+      - name: Build whisper.cpp
+        script: |
+          set -eo pipefail
+          if [ -f "whisper-out/whisper-cli-${TRIPLE}" ]; then echo "cached"; exit 0; fi
+          git clone --depth 1 --branch "$WHISPER_REF" https://github.com/ggml-org/whisper.cpp "$HOME/whisper.cpp"
+          cd "$HOME/whisper.cpp"
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_METAL=ON \
+            -DGGML_METAL_EMBED_LIBRARY=ON -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_SERVER=OFF \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+          cmake --build build -j"$(sysctl -n hw.ncpu)" --config Release
+          mkdir -p "$CM_BUILD_DIR/whisper-out"
+          cp "$(find build -name whisper-cli -type f -perm +111 | head -n1)" "$CM_BUILD_DIR/whisper-out/whisper-cli-${TRIPLE}"
+
+      - name: Stage sidecars
+        script: |
+          set -eo pipefail
+          mkdir -p src-tauri/binaries
+          cp "whisper-out/whisper-cli-${TRIPLE}" "src-tauri/binaries/whisper-cli-${TRIPLE}"
+          chmod +x "src-tauri/binaries/whisper-cli-${TRIPLE}"
+          node scripts/fetch-sidecars.mjs
+          ls -la src-tauri/binaries/
+          # smoke.e2e.ts spawns "ffmpeg" by BARE NAME and skips itself when the PATH lookup
+          # fails, so the first run silently skipped ~111 tests and proved nothing about mac.
+          # These aliases point it at the very binaries the installer ships.
+          mkdir -p "$CM_BUILD_DIR/.binshim"
+          for n in ffmpeg ffprobe yt-dlp; do
+            ln -sf "$CM_BUILD_DIR/src-tauri/binaries/$n-${TRIPLE}" "$CM_BUILD_DIR/.binshim/$n"
+          done
+          echo "PATH=$CM_BUILD_DIR/.binshim:$PATH" >> $CM_ENV
+
+      # Each lane records its own result and never aborts the build, so one run reports on all
+      # of them. `set -o pipefail` matters: these pipe to tail, and tail always exits 0 — that
+      # is exactly how six lanes once reported success while the agent lane 401'd on every call.
+      - name: Unit suite
+        script: |
+          set -o pipefail
+          npx vitest run --reporter=dot 2>&1 | tail -40; echo "unit=$?" >> $CM_BUILD_DIR/lanes.txt
+
+      - name: Render + export + captions (real mac ffmpeg)
+        script: |
+          set -o pipefail
+          npx vitest run --config vitest.smoke.config.ts --reporter=dot 2>&1 | tail -60; echo "smoke=$?" >> $CM_BUILD_DIR/lanes.txt
+
+      - name: Audio engine
+        script: |
+          set -o pipefail
+          node --experimental-websocket scripts/audiolane/run.mjs 2>&1 | tail -40; echo "audio=$?" >> $CM_BUILD_DIR/lanes.txt
+
+      - name: Preview compositor + app shell (chromium + webkit)
+        script: |
+          set -o pipefail
+          npm i --no-save @playwright/test@1.61.1
+          npx playwright install chromium webkit
+          npx playwright test 2>&1 | tail -40; echo "playwright=$?" >> $CM_BUILD_DIR/lanes.txt
+
+      - name: Agent loop against the live server
+        script: |
+          set -o pipefail
+          npm run eval 2>&1 | tail -80; echo "agent=$?" >> $CM_BUILD_DIR/lanes.txt
+
+      - name: Build the app
+        script: |
+          set -eo pipefail
+          npm run build:sidecar
+          npm run bundle:browser
+          rm -rf dist
+          npx tauri build --bundles dmg
+          # The dmg that shipped 0.3.0 pointed every user at their own machine. "The workflow
+          # sets the variable" is not evidence the bundle received it, and the dmg is compressed
+          # so it cannot be searched after the fact. dist/ is what tauri just embedded.
+          test -n "$VITE_API_BASE_URL" || { echo "VITE_API_BASE_URL is empty - this check would pass on anything"; exit 1; }
+          # --include='*.js' or this reads the SOURCEMAPS, which embed config.ts verbatim: the
+          # fallback is always in there, and a hit for the real URL could come from a .map
+          # rather than from anything that ships. Both directions were wrong without it.
+          grep -rqF --include='*.js' "$VITE_API_BASE_URL" dist/assets || { echo "the built bundle does not contain $VITE_API_BASE_URL"; exit 1; }
+          # With the variable set the minifier folds the `?? "http://127.0.0.1:8000"` branch away,
+          # so the fallback surviving IS the signature of the build that shipped 0.3.0.
+          ! grep -rqF --include='*.js' "127.0.0.1:8000" dist/assets || { echo "the built bundle still carries the localhost fallback"; exit 1; }
+          echo "api base baked in: $VITE_API_BASE_URL"
+
+      - name: Install and walk the UI
+        script: |
+          set -o pipefail
+          DMG="$(find src-tauri/target -type f -name '*.dmg' | head -n1)"
+          MNT="$(mktemp -d)"
+          hdiutil attach "$DMG" -mountpoint "$MNT" -nobrowse -readonly -quiet
+          rm -rf /Applications/artdaddy.app
+          cp -R "$MNT/artdaddy.app" /Applications/
+          hdiutil detach "$MNT" -quiet || true
+          xattr -cr /Applications/artdaddy.app || true
+          # 78 (EX_CONFIG) means the runner cannot host a GUI, not that the app failed. The walk
+          # needs CM_API_TOKEN and remote access, so trigger this workflow with both - see the
+          # header. Without them it reports unrunnable rather than inventing a result.
+          bash scripts/macwalk.sh; rc=$?
+          if [ $rc -eq 78 ]; then echo "walk=unrunnable"; else echo "walk=$rc"; fi >> $CM_BUILD_DIR/lanes.txt
+
+      # The only gate. Without it the per-lane failures above are just text in a log.
+      - name: Verdict
+        script: |
+          # A missing or short file means a lane never ran — grep alone would pass on that.
+          test -f "$CM_BUILD_DIR/lanes.txt" || { echo "no lane recorded a result"; exit 1; }
+          cat "$CM_BUILD_DIR/lanes.txt"
+          n=$(grep -c '=' "$CM_BUILD_DIR/lanes.txt")
+          [ "$n" -eq 6 ] || { echo "expected 6 lanes, got $n — one did not report"; exit 1; }
+          bad=$(grep -v '=0$' "$CM_BUILD_DIR/lanes.txt" | grep -v '=unrunnable$')
+          if [ -n "$bad" ]; then echo "FAILING LANES:"; echo "$bad"; exit 1; fi
+          # Printed on EVERY green run, because a skipped lane that says nothing is how an
+          # untested surface gets forgotten. This build passing does NOT cover the packaged
+          # UI: no Aqua session here. .github/workflows/macos-e2e.yml is where that runs.
+          if grep -q '=unrunnable$' "$CM_BUILD_DIR/lanes.txt"; then
+            echo
+            echo "UNVERIFIED ON THIS PROVIDER:"
+            grep '=unrunnable$' "$CM_BUILD_DIR/lanes.txt" | sed 's/^/  /'
+            echo "  the packaged app's UI and keyboard shortcuts are NOT covered by this pass"
+          fi
+    artifacts:
+      - reports/eval/**
+      - /tmp/macwalk/**
+      - /tmp/artdaddy.err
+      - lanes.txt
+      - src-tauri/target/**/bundle/dmg/*.dmg
+
+  # The release build, when GitHub Actions is billing-blocked. Same artifact and the same
+  # guards as .github/workflows/macos-release.yml, minus the six test lanes: this exists to
+  # produce a dmg, not to re-prove the suite that already ran on the push.
+  #
+  # UNSIGNED and NOT notarized. Gatekeeper refuses a double-click; testers open it with
+  # right-click -> Open. It cannot update itself either - latest.json advertises only the
+  # Windows exe, and a mac entry needs a signature plus the `app` bundle target.
+  #
+  # Publishing is deliberately NOT here: the container SAS is a GitHub secret with no
+  # counterpart in this provider, so the dmg ships as an artifact and is uploaded from a
+  # machine that already holds Azure credentials.
+  #
+  # Its cache starts EMPTY - Codemagic keys the cache by workflow - so the first run pays for
+  # a whisper.cpp compile and a cold cargo build. Budget ~40 minutes for it, ~15 after.
+  macos-release:
+    name: macOS release build (unsigned)
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    environment:
+      node: 20
+      vars:
+        TRIPLE: aarch64-apple-darwin
+        WHISPER_REF: v1.9.2
+        # Apple Silicon REFUSES to run an arm64 binary with no signature at all - the user sees
+        # "artdaddy is damaged, move it to the Bin", which right-click -> Open cannot clear. The
+        # linker ad-hoc signs, but bundling the sidecars into Contents/MacOS breaks that seal.
+        # "-" is an ad-hoc identity: no Apple account, no notarization, just a valid signature,
+        # which downgrades the block to the ordinary unidentified-developer prompt.
+        APPLE_SIGNING_IDENTITY: "-"
+        # Frozen into the bundle at build time, fallback http://127.0.0.1:8000. Without it the
+        # dmg points every user at their own machine - which is exactly what 0.3.0 shipped.
+        VITE_API_BASE_URL: https://artdaddy-server.ambitioustree-4d826744.centralindia.azurecontainerapps.io
+    cache:
+      cache_paths:
+        - $CM_BUILD_DIR/whisper-out
+        - $HOME/.cargo
+        - $HOME/.rustup
+        - $CM_BUILD_DIR/src-tauri/target
+    scripts:
+      - name: Install
+        script: |
+          set -eo pipefail
+          command -v cmake >/dev/null || brew install cmake
+          export PATH="$HOME/.cargo/bin:$PATH"
+          # Ask whether cargo RUNS: a warm cache restores the rustup shim with no toolchain
+          # behind it, and an -x test on the shim passes while every cargo call fails.
+          if ! cargo --version >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal --default-toolchain stable
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup default stable >/dev/null 2>&1 || true
+          cargo --version || { echo "cargo is installed but cannot run - the build would fail later"; exit 1; }
+          echo "PATH=$HOME/.cargo/bin:$PATH" >> $CM_ENV
+          npm ci
+
+      # No macOS prebuilt exists, and this job is already on a Mac. Cached on the pinned ref.
+      # Cloned OUTSIDE the checkout: whisper.cpp ships *.spec.js that vitest would swallow.
+      - name: Build whisper.cpp
+        script: |
+          set -eo pipefail
+          if [ -f "whisper-out/whisper-cli-${TRIPLE}" ]; then echo "cached"; exit 0; fi
+          git clone --depth 1 --branch "$WHISPER_REF" https://github.com/ggml-org/whisper.cpp "$HOME/whisper.cpp"
+          cd "$HOME/whisper.cpp"
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_METAL=ON \
+            -DGGML_METAL_EMBED_LIBRARY=ON -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_SERVER=OFF \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+          cmake --build build -j"$(sysctl -n hw.ncpu)" --config Release
+          mkdir -p "$CM_BUILD_DIR/whisper-out"
+          cp "$(find build -name whisper-cli -type f -perm +111 | head -n1)" "$CM_BUILD_DIR/whisper-out/whisper-cli-${TRIPLE}"
+
+      - name: Stage sidecars
+        script: |
+          set -eo pipefail
+          mkdir -p src-tauri/binaries
+          cp "whisper-out/whisper-cli-${TRIPLE}" "src-tauri/binaries/whisper-cli-${TRIPLE}"
+          chmod +x "src-tauri/binaries/whisper-cli-${TRIPLE}"
+          node scripts/fetch-sidecars.mjs
+          ls -la src-tauri/binaries/
+
+      # Two ways a sidecar is present but unusable, both silent until a user hits the feature.
+      # WRONG ARCH needs Rosetta, which a clean Mac does not have. NON-SYSTEM DYLIBS exist on
+      # this runner and not on a user's machine.
+      - name: Every sidecar must run on this arch and load only system libraries
+        script: |
+          FAIL=0
+          for f in src-tauri/binaries/*; do
+            n="$(basename "$f")"
+            ARCHS="$(lipo -archs "$f" 2>/dev/null || echo '?')"
+            case "$ARCHS" in
+              *arm64*) echo "  $n: $ARCHS" ;;
+              *) echo "  $n is $ARCHS - not arm64; it would need Rosetta"; FAIL=1 ;;
+            esac
+            # Only the INDENTED lines: a universal binary makes otool print an
+            # "<path> (architecture x86_64):" header per slice, and dropping just the first
+            # reads the next header as a library - which failed a perfectly good yt-dlp.
+            STRAY="$(otool -L "$f" 2>/dev/null | grep -E '^[[:space:]]' | awk '{print $1}' | grep -Ev '^(/usr/lib/|/System/Library/)' || true)"
+            if [ -n "$STRAY" ]; then
+              echo "  $n links libraries a user's Mac will not have:"; echo "$STRAY"; FAIL=1
+            fi
+          done
+          exit $FAIL
+
+      - name: Build the app
+        script: |
+          set -eo pipefail
+          # resources/artdaddy-browser.mjs is a BUILD ARTIFACT (esbuild), not a copy of the source,
+          # and nothing in `tauri build` regenerates it. Skipping this ships OLD behaviour.
+          npm run build:sidecar
+          npm run bundle:browser
+          rm -rf dist
+          npx tauri build --bundles dmg
+          # "The workflow sets the variable" is not evidence the bundle received it, and the dmg
+          # is compressed so it cannot be searched after the fact. dist/ is what tauri embedded.
+          test -n "$VITE_API_BASE_URL" || { echo "VITE_API_BASE_URL is empty - this check would pass on anything"; exit 1; }
+          # --include='*.js' or this reads the SOURCEMAPS, which embed config.ts verbatim.
+          grep -rqF --include='*.js' "$VITE_API_BASE_URL" dist/assets || { echo "the built bundle does not contain $VITE_API_BASE_URL"; exit 1; }
+          # With the variable set the minifier folds the `?? "http://127.0.0.1:8000"` branch
+          # away, so the fallback surviving IS the signature of the build that shipped 0.3.0.
+          ! grep -rqF --include='*.js' "127.0.0.1:8000" dist/assets || { echo "the built bundle still carries the localhost fallback"; exit 1; }
+          echo "api base baked in: $VITE_API_BASE_URL"
+
+      # Checked INSIDE THE MOUNTED DMG, not in target/: the dmg is what a user receives.
+      - name: The shipped dmg must contain what the app needs
+        script: |
+          set -eo pipefail
+          DMG="$(find src-tauri/target -type f -name '*.dmg' | head -n1)"
+          [ -n "$DMG" ] || { echo "no dmg was produced"; find src-tauri/target -maxdepth 4 -name '*.dmg' -print; exit 1; }
+          ls -lh "$DMG"
+          MNT="$(mktemp -d)"
+          hdiutil attach "$DMG" -mountpoint "$MNT" -nobrowse -readonly -quiet
+          APP="$MNT/artdaddy.app"
+          FAIL=0
+          if [ ! -d "$APP" ]; then echo "the dmg has no artdaddy.app in it"; ls -la "$MNT"; FAIL=1; else
+            # "APPLE_SIGNING_IDENTITY is set" is not evidence the bundle got signed, and an
+            # unsigned arm64 app reads to the user as a CORRUPT DOWNLOAD, not as a warning.
+            # --deep --strict so a sidecar with a broken seal fails here and not on their Mac.
+            # Redirected rather than piped: through `| sed` the pipeline's status is sed's,
+            # which is always 0, so the guard would pass on an unsigned bundle. It ships as an
+            # artifact because Codemagic exposes no log URL for a step through the API.
+            if codesign --verify --deep --strict --verbose=2 "$APP" >/tmp/codesign.txt 2>&1; then
+              codesign -dv "$APP" >>/tmp/codesign.txt 2>&1 || true
+              sed 's/^/  /' /tmp/codesign.txt
+              echo "  signature: valid"
+            else
+              sed 's/^/  /' /tmp/codesign.txt
+              echo "  the bundle is NOT validly signed - macOS will call it damaged"; FAIL=1
+            fi
+            for n in ffmpeg ffprobe yt-dlp whisper-cli artdaddy-browser; do
+              if [ -f "$APP/Contents/MacOS/$n" ]; then echo "  sidecar $n: ok"; else echo "  MISSING sidecar: $n"; FAIL=1; fi
+            done
+            for p in "resources/artdaddy-browser.mjs" "resources/node_modules/playwright-core"; do
+              if [ -e "$APP/Contents/Resources/$p" ]; then echo "  $p: ok"; else echo "  MISSING resource: $p"; FAIL=1; fi
+            done
+          fi
+          hdiutil detach "$MNT" -quiet || true
+          exit $FAIL
+
+      # Everything above inspects the artifact; this RUNS it. A Tauri app that cannot create
+      # its WKWebView dies within a second or two, and no bundle inspection would show that.
+      - name: Launch it
+        script: |
+          set -eo pipefail
+          DMG="$(find src-tauri/target -type f -name '*.dmg' | head -n1)"
+          MNT="$(mktemp -d)"
+          hdiutil attach "$DMG" -mountpoint "$MNT" -nobrowse -readonly -quiet
+          rm -rf /Applications/artdaddy.app
+          cp -R "$MNT/artdaddy.app" /Applications/
+          hdiutil detach "$MNT" -quiet || true
+          xattr -cr /Applications/artdaddy.app || true
+          # Ask the bundle for its executable name: the Cargo binary is `app`, and guessing
+          # produced a "no such file" that read exactly like the app crashing on launch.
+          EXE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' /Applications/artdaddy.app/Contents/Info.plist)"
+          BIN="/Applications/artdaddy.app/Contents/MacOS/$EXE"
+          test -x "$BIN" || { echo "bundle executable $BIN is missing or not executable"; exit 1; }
+          "$BIN" > /tmp/artdaddy.out 2>/tmp/artdaddy.err &
+          PID=$!
+          for i in $(seq 1 20); do
+            sleep 1
+            if ! kill -0 "$PID" 2>/dev/null; then
+              echo "the app exited after ~${i}s instead of staying open"
+              head -50 /tmp/artdaddy.out || true; head -50 /tmp/artdaddy.err || true; exit 1
+            fi
+          done
+          echo "still running after 20s"
+          kill "$PID" 2>/dev/null || true
+
+      - name: Say plainly what this is not
+        script: |
+          echo "AD-HOC signed, so macOS will not call it damaged - but NOT notarized and not"
+          echo "signed by a Developer ID. Gatekeeper still refuses a double-click; open it with"
+          echo "right-click -> Open. This build cannot update itself either: latest.json"
+          echo "advertises only the Windows exe, and a mac entry needs a real signature."
+    artifacts:
+      - src-tauri/target/**/bundle/dmg/*.dmg
+      - /tmp/codesign.txt
+      - /tmp/artdaddy.err

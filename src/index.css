@@ -1,0 +1,157 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  @apply bg-bg text-ink antialiased;
+  font-family:
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: theme(colors.edge) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: theme(colors.edge);
+  border-radius: 4px;
+}
+
+/* Registered so a conic gradient's start angle can be animated. Chromium (the Windows
+   WebView2) and Safari 16.4+ support this; anywhere else the ring renders STATIC rather
+   than breaking, which is why the glow is a separate layer that never needs the angle. */
+@property --halo-angle {
+  syntax: "<angle>";
+  initial-value: 0deg;
+  inherits: false;
+}
+
+@keyframes halo-spin {
+  to {
+    --halo-angle: 360deg;
+  }
+}
+
+/* Fallback motion for engines without @property: the glow still breathes, so the composer
+   never looks frozen while the agent is working. */
+@keyframes halo-breathe {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+@keyframes shimmer-sweep {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+@layer components {
+  .halo {
+    position: relative;
+  }
+
+  /* The ring: a conic gradient masked down to the 1.5px band just outside the box, so the
+     input keeps its own background and only its edge is lit. */
+  .halo-on::before {
+    content: "";
+    position: absolute;
+    inset: -1.5px;
+    border-radius: inherit;
+    padding: 1.5px;
+    background: conic-gradient(
+      from var(--halo-angle),
+      transparent 0deg,
+      theme(colors.brand) 55deg,
+      theme(colors.brand-hi) 105deg,
+      theme(colors.brand) 150deg,
+      transparent 210deg,
+      transparent 360deg
+    );
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    mask-composite: exclude;
+    animation: halo-spin 3s linear infinite;
+    pointer-events: none;
+  }
+
+  /* The soft bloom outside the ring — the part that reads as heat rather than a border. */
+  .halo-on::after {
+    content: "";
+    position: absolute;
+    inset: -5px;
+    border-radius: inherit;
+    background: conic-gradient(
+      from var(--halo-angle),
+      transparent 0deg,
+      theme(colors.brand) 105deg,
+      transparent 210deg,
+      transparent 360deg
+    );
+    filter: blur(10px);
+    opacity: 0.4;
+    animation:
+      halo-spin 3s linear infinite,
+      halo-breathe 3s ease-in-out infinite;
+    pointer-events: none;
+  }
+
+  /* A highlight sweeping through the text, for a status that is still running. */
+  .shimmer {
+    background: linear-gradient(
+      90deg,
+      theme(colors.ink-dim) 0%,
+      theme(colors.ink-dim) 40%,
+      theme(colors.brand-hi) 50%,
+      theme(colors.ink-dim) 60%,
+      theme(colors.ink-dim) 100%
+    );
+    background-size: 200% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    animation: shimmer-sweep 2.4s linear infinite;
+  }
+}
+
+/* Motion here is decoration, never information: every state it conveys is also carried by
+   the words beside it. */
+@media (prefers-reduced-motion: reduce) {
+  .halo-on::before,
+  .halo-on::after,
+  .shimmer {
+    animation: none;
+  }
+  .shimmer {
+    background: none;
+    -webkit-text-fill-color: theme(colors.ink-dim);
+  }
+}

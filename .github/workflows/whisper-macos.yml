@@ -1,0 +1,219 @@
+# Build the macOS `whisper-cli` sidecar on a rented Mac.
+#
+# WHY THIS EXISTS: whisper.cpp publishes a Windows prebuilt and we ship it, but there is no
+# prebuilt for macOS — `fetch-sidecars.mjs` prints a note and carries on, so a mac build
+# would install cleanly with transcription silently dead. Cross-compiling from Windows is
+# not an option: Apple's SDK is licence-restricted to Apple hardware and the Metal shader
+# compiler only runs on macOS. A GitHub-hosted Mac is the honest way to get a real binary
+# without owning one.
+#
+# MANUAL ONLY, on purpose. macOS minutes bill at 10x on a private repo, and this output
+# changes about as often as whisper.cpp releases.
+#
+# HOW IT GETS USED: src-tauri/binaries/ is gitignored — sidecars are fetched, never
+# committed — so there is nothing to commit here. Unzip the artifact into that folder on the
+# Mac doing the build, before `tauri build`; Tauri picks sidecars up by the `<name>-<triple>`
+# convention, so no code change is needed. Artifacts expire in 90 days: re-run this rather
+# than hunting for an old one. NOT WIRED UP: fetch-sidecars.mjs still prints "no reliable
+# prebuilt for this OS" on mac and carries on, so that step is manual today.
+name: whisper-cli (macOS)
+
+on:
+  workflow_dispatch:
+    inputs:
+      whisper_ref:
+        description: "whisper.cpp tag to build (PIN it — 'latest' means a release can change what users get with no commit here)"
+        required: true
+        default: "v1.9.2"
+      arch:
+        description: "Which Macs to build for"
+        required: true
+        default: "arm64"
+        type: choice
+        options: [arm64, x86_64, both]
+
+jobs:
+  # Decide the matrix BEFORE any Mac is rented. A per-job `if:` still allocates the runner and
+  # bills for it — at 10x — so an unrequested arch has to be absent from the matrix, not skipped
+  # inside it. It also keeps the run from sitting "in progress" behind a job that does nothing,
+  # which is what blocks `gh run view --log-failed`.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+    steps:
+      - id: pick
+        env:
+          ARCH: ${{ inputs.arch }}
+        run: |
+          # Labels, not image names: `macos-26` IS the Arm64 image (the Intel one is
+          # `macos-26-intel`), so there is no `-arm64` suffix to add. macos-14 is deprecated
+          # and macos-13 has been REMOVED outright — it is absent from both the label table and
+          # actions/runner-images/images/macos — so the x86 job here could no longer allocate a
+          # runner at all. Staying on macos-15 rather than 26 for the SDK: the deployment
+          # target below is 11.0, and an older SDK is the safer thing to ask that of.
+          ARM='{"triple":"aarch64-apple-darwin","runner":"macos-15","coreml":"ON"}'
+          X86='{"triple":"x86_64-apple-darwin","runner":"macos-15-intel","coreml":"OFF"}'
+          case "$ARCH" in
+            arm64)  INC="[$ARM]" ;;
+            x86_64) INC="[$X86]" ;;
+            both)   INC="[$ARM,$X86]" ;;
+            *) echo "::error::unknown arch: $ARCH"; exit 1 ;;
+          esac
+          echo "matrix={\"include\":$INC}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: plan
+    name: ${{ matrix.triple }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # via env, not "${{ }}" inside the script: the ref is free text and would otherwise be
+      # pasted straight into a shell line.
+      - name: Clone whisper.cpp at the pinned tag
+        env:
+          WHISPER_REF: ${{ inputs.whisper_ref }}
+        run: git clone --depth 1 --branch "$WHISPER_REF" https://github.com/ggml-org/whisper.cpp whisper.cpp
+
+      # STATIC + embedded Metal shader. The Windows build is dynamic, which is why we ship a
+      # folder of ggml*.dll and run the binary with that folder as its cwd. Linking static and
+      # embedding the shader means the mac sidecar is ONE self-contained file with nothing to
+      # lose in transit — the whole class of "missing sibling" bugs disappears.
+      #
+      # WHISPER_COREML puts the ENCODER on the Neural Engine, which only exists on Apple
+      # Silicon — hence per-arch, not a blanket ON. It needs a separate ~155 MB .mlmodelc per
+      # model size that nothing ships yet, so ALLOW_FALLBACK is not optional: without it
+      # whisper_init_state returns nullptr when that file is absent (src/whisper.cpp: the
+      # `#ifndef WHISPER_COREML_ALLOW_FALLBACK` free-and-return), and a user who never
+      # downloaded it gets NO transcription rather than a slower one. Both options default OFF
+      # upstream, so enabling one without the other is an easy way to ship silence.
+      - name: Build
+        working-directory: whisper.cpp
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DGGML_METAL=ON \
+            -DGGML_METAL_EMBED_LIBRARY=ON \
+            -DWHISPER_COREML=${{ matrix.coreml }} \
+            -DWHISPER_COREML_ALLOW_FALLBACK=ON \
+            -DWHISPER_BUILD_TESTS=OFF \
+            -DWHISPER_BUILD_SERVER=OFF \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+          cmake --build build -j"$(sysctl -n hw.ncpu)" --config Release
+          find build -name whisper-cli -type f -perm +111 -print
+
+      - name: Stage it under the sidecar name
+        run: |
+          BIN="$(find whisper.cpp/build -name whisper-cli -type f -perm +111 | head -n1)"
+          test -n "$BIN" || { echo "::error::no whisper-cli was produced"; exit 1; }
+          mkdir -p out
+          cp "$BIN" "out/whisper-cli-${{ matrix.triple }}"
+          chmod +x "out/whisper-cli-${{ matrix.triple }}"
+          ls -lh out/
+
+      # The mac equivalent of the DLL check. `otool -L` lists every dylib the binary will try
+      # to load at startup; anything outside /usr/lib and /System is a file that exists on THIS
+      # runner and probably not on a user's machine. Catching that here is the difference
+      # between a failed build and a silent no-transcript in the field.
+      - name: Refuse a binary that depends on libraries users won't have
+        run: |
+          BIN="out/whisper-cli-${{ matrix.triple }}"
+          echo "--- otool -L ---"; otool -L "$BIN"
+          # Only the INDENTED dependency lines: a universal binary prints a
+          # "<path> (architecture x86_64):" header per slice, which would otherwise read as a
+          # library path. This binary is thin today, so that is a latent trap, not a live one.
+          STRAY="$(otool -L "$BIN" | grep -E '^[[:space:]]' | awk '{print $1}' | grep -Ev '^(/usr/lib/|/System/Library/)' || true)"
+          if [ -n "$STRAY" ]; then
+            echo "::error::links non-system libraries that will not exist on a user's Mac:"
+            echo "$STRAY"
+            exit 1
+          fi
+          echo "self-contained: only system libraries."
+          file "$BIN"
+          lipo -archs "$BIN"
+
+      # The SAME check fetch-sidecars.mjs runs after staging, from the same module — so a
+      # decoy cannot pass here and fail there, or the reverse.
+      - name: Smoke — is it actually whisper?
+        run: node scripts/smoke-whisper.mjs "out/whisper-cli-${{ matrix.triple }}"
+
+      # Proof it TRANSCRIBES, which --help cannot tell you. The input is whisper.cpp's own
+      # jfk.wav — real speech, already on disk from the clone, and no ffmpeg (macOS runners
+      # don't have one; the Linux and Windows images do, which is how that assumption survived).
+      # Assert the WORDS, not that a file appeared: whisper writes an empty .txt when a decode
+      # yields nothing, so an existence check passes on silence and proves only that it exited.
+      - name: Transcribe something real
+        run: |
+          curl -fsSL -o tiny.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin
+          "out/whisper-cli-${{ matrix.triple }}" -m tiny.bin -f whisper.cpp/samples/jfk.wav -otxt -of result
+          test -s result.txt || { echo "::error::empty transcript — whisper ran but decoded nothing"; exit 1; }
+          echo "--- transcript ---"; cat result.txt
+          NORM="$(tr '[:upper:]' '[:lower:]' < result.txt | tr -cd 'a-z')"
+          case "$NORM" in
+            *asknotwhatyourcountry*) echo "decoded the expected speech." ;;
+            *) echo "::error::transcript does not contain the expected words"; exit 1 ;;
+          esac
+
+      # Core ML changes ONE thing — the encoder — so whisper's own `encode time` is the
+      # instrument. Wall clock on an 11-second clip is mostly model load and would report
+      # noise as a result.
+      #
+      # There is no runtime switch for Core ML: the only A/B is whether the .mlmodelc exists.
+      # That makes the first half the FALLBACK PROOF at the same time — Core ML is compiled
+      # in, no encoder is on disk, and it must still transcribe. Upstream's headline "more
+      # than x3 faster" is against CPU-ONLY, and this binary already has Metal, so the number
+      # that decides whether a 155 MB per-model download is worth shipping is the one printed
+      # here, not the one in the README.
+      - name: Core ML — measure the encoder, and prove the fallback
+        if: matrix.coreml == 'ON'
+        run: |
+          BIN="$PWD/out/whisper-cli-${{ matrix.triple }}"
+          WAV="$PWD/whisper.cpp/samples/jfk.wav"
+          curl -fsSL -o ggml-tiny.en.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin
+
+          echo "--- WITHOUT the Core ML encoder: the state every user is in before downloading one ---"
+          "$BIN" -m ggml-tiny.en.bin -f "$WAV" -otxt -of nocoreml > no.log 2>&1 || true
+          if [ ! -s nocoreml.txt ]; then
+            echo "::error::a COREML build cannot transcribe without an encoder present — WHISPER_COREML_ALLOW_FALLBACK is not in effect, so every user missing the .mlmodelc would get silence"
+            tail -30 no.log; exit 1
+          fi
+          echo "fallback works: transcribed with no encoder on disk."
+
+          echo "--- WITH the Core ML encoder ---"
+          curl -fsSL -o enc.zip https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en-encoder.mlmodelc.zip
+          unzip -q enc.zip -d .
+          # whisper derives this name by stripping the .bin extension, so it must sit beside
+          # the model under exactly this name or it is silently ignored.
+          test -d ggml-tiny.en-encoder.mlmodelc || { echo "::error::no ggml-tiny.en-encoder.mlmodelc after unzip"; ls -la; exit 1; }
+          # "first run on a device may take a while" — Core ML compiles for the device on
+          # first load, so timing that run would measure the compile, not the encoder.
+          "$BIN" -m ggml-tiny.en.bin -f "$WAV" -otxt -of warm > warm.log 2>&1 || true
+          "$BIN" -m ggml-tiny.en.bin -f "$WAV" -otxt -of coreml > yes.log 2>&1 || true
+          grep -q "Core ML model loaded" yes.log || {
+            echo "::error::the encoder is on disk but Core ML did not load it — the build would silently stay on Metal"
+            tail -30 yes.log; exit 1
+          }
+          NORM="$(tr '[:upper:]' '[:lower:]' < coreml.txt | tr -cd 'a-z')"
+          case "$NORM" in
+            *asknotwhatyourcountry*) echo "Core ML path decoded the expected speech." ;;
+            *) echo "::error::Core ML produced a transcript, but not the right one"; cat coreml.txt; exit 1 ;;
+          esac
+
+          echo "--- encoder cost (Metal alone vs Metal + Core ML) ---"
+          echo "  without: $(grep 'encode time' no.log  | tail -1)"
+          echo "  with   : $(grep 'encode time' yes.log | tail -1)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: whisper-cli-${{ matrix.triple }}
+          path: out/whisper-cli-${{ matrix.triple }}
+          if-no-files-found: error

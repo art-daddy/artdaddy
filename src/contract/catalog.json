@@ -1,0 +1,4082 @@
+{
+  "$schema_note": "Generated from the live tool registry (v4/tools/catalog.py) - do not hand-edit; refresh with `npm run codegen`.",
+  "version": "2.6.0",
+  "generated_from": "src/akaru/turn/tools/definitions.py::ALL_TOOLS",
+  "count": 55,
+  "tools": [
+    {
+      "name": "add_captions",
+      "expensive": true,
+      "description": "Caption the spoken audio: transcribes it, splits it into caption-sized phrases on word boundaries, and places the text clips — one atomic, undoable action. Use this for captions/subtitles rather than building them by hand out of get_transcript + add_text_clips.\n\nTranscription runs LOCALLY and is cached per source, so re-captioning the same footage costs nothing.\n\nAlready have an SRT/WebVTT file? Import it, then pass its `subtitle_media_ref` to place its cues at their authored timecodes instead — a subtitle asset can never be placed with add_clips.\n\nOmit `track_id` and it captions the audio track with the most speech. Chunking is done for you: `max_words` / `max_characters` cap each caption and `max_gap_seconds` holds a caption across a short pause instead of blinking off (default 0.5s; 0 disables).\n\n`style`, `transform` and `animation` are OPTIONAL OVERRIDES — omit them all for the app's default caption look, and do NOT invent fonts, colours, outlines, boxes or animations the user did not ask for.\n\nReturns {ok, created:[{clip_id, track_id}], count, caption_group, source_track} plus a change delta — patch your model, don't re-read. Keep the `caption_group`: it restyles or removes the whole set in one update_text / remove_clips call.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "track_id": {
+            "type": "string",
+            "description": "Optional. Caption this AUDIO track. Omit to auto-pick the audio track with the most speech."
+          },
+          "subtitle_media_ref": {
+            "type": "string",
+            "description": "Place an imported SRT/WebVTT file's cues as captions at their AUTHORED timecodes — no transcription, no re-chunking. Mutually exclusive with every other parameter except text_track_id."
+          },
+          "text_track_id": {
+            "type": "string",
+            "description": "Optional. Text track to place the captions on (default 'captions', created if missing)."
+          },
+          "language": {
+            "type": "string",
+            "description": "Optional. Spoken-language code (e.g. 'en', 'es', 'hi'). Omit to auto-detect; also tightens non-English word alignment."
+          },
+          "max_words": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Optional. Max words per caption."
+          },
+          "max_characters": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Optional. Max characters per caption, spaces and punctuation included. A single longer word still gets its own caption."
+          },
+          "max_gap_seconds": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 2,
+            "description": "Optional. Hold a caption across a gap no longer than this, and hold the last one, in SECONDS. Default 0.5; 0 disables."
+          },
+          "case": {
+            "type": "string",
+            "enum": [
+              "none",
+              "upper",
+              "lower"
+            ],
+            "description": "Optional. Display casing for every caption. Default: as spoken."
+          },
+          "hero": {
+            "type": "string",
+            "enum": [
+              "none",
+              "longest",
+              "first",
+              "last"
+            ],
+            "description": "Optional. Mark ONE word per caption as the hero, which `animation.emphasis` then styles (e.g. one yellow word in a white caption). 'longest' picks the longest word — usually the stressed one. Default 'none' (no word is emphasised)."
+          },
+          "style": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Type styling (all fields optional; a `preset` sets a base look that the other fields override).",
+            "properties": {
+              "preset": {
+                "type": "string",
+                "enum": [
+                  "boxed",
+                  "clean-white",
+                  "editorial",
+                  "headline",
+                  "minimal",
+                  "punchy"
+                ],
+                "description": "Named look; other fields override it."
+              },
+              "font": {
+                "type": "string",
+                "enum": [
+                  "Anton",
+                  "Bebas Neue",
+                  "Oswald",
+                  "Playfair Display",
+                  "Poppins"
+                ]
+              },
+              "size": {
+                "type": [
+                  "number",
+                  "string"
+                ],
+                "description": "Font size: a named tier ('s' | 'm' | 'l' | 'xl', sized to the canvas — prefer these) or an exact px number."
+              },
+              "color": {
+                "type": "string",
+                "description": "Hex colour, e.g. '#FFFFFF'."
+              },
+              "bold": {
+                "type": "boolean"
+              },
+              "italic": {
+                "type": "boolean"
+              },
+              "underline": {
+                "type": "boolean"
+              },
+              "strike": {
+                "type": "boolean"
+              },
+              "weight": {
+                "type": "integer",
+                "minimum": 100,
+                "maximum": 900,
+                "description": "Font weight 100..900."
+              },
+              "case": {
+                "type": "string",
+                "enum": [
+                  "none",
+                  "upper",
+                  "lower"
+                ]
+              },
+              "align": {
+                "type": "string",
+                "enum": [
+                  "left",
+                  "center",
+                  "right"
+                ],
+                "description": "Horizontal alignment of the text within its box (default 'center'). Also justifies wrapped lines."
+              },
+              "anchor_v": {
+                "type": "string",
+                "enum": [
+                  "top",
+                  "middle",
+                  "bottom"
+                ],
+                "description": "Which edge of the text block sits on the y position, i.e. which way EXTRA LINES grow. 'middle' (default) grows both ways, so a card that wraps to two lines shifts its first line UP — fine for one centred title, but it makes consecutive caption cards sit at different heights. Use 'top' for captions: the first line stays put and extra lines grow downward."
+              },
+              "spacing": {
+                "type": "number",
+                "description": "Letter spacing in px."
+              },
+              "outline": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "color": {
+                    "type": "string",
+                    "description": "Hex colour, e.g. '#FFFFFF'."
+                  },
+                  "width": {
+                    "type": "number",
+                    "minimum": 0
+                  }
+                },
+                "description": "Text outline."
+              },
+              "shadow": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "color": {
+                    "type": "string",
+                    "description": "Hex colour, e.g. '#FFFFFF'."
+                  },
+                  "depth": {
+                    "type": "number",
+                    "minimum": 0
+                  }
+                },
+                "description": "Drop shadow."
+              },
+              "box": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "color": {
+                    "type": "string",
+                    "description": "Hex colour, e.g. '#FFFFFF'."
+                  },
+                  "opacity": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "padding": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "description": "Background box behind the text."
+              }
+            }
+          },
+          "transform": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Placement by the text's CENTRE: {position:{x,y}, scale, scale_x?, scale_y?}.",
+            "properties": {
+              "position": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "x": {
+                    "type": "number",
+                    "description": "Centre X in 0..1 canvas coords (0.5 = centre; beyond 0/1 slides off-frame)."
+                  },
+                  "y": {
+                    "type": "number",
+                    "description": "Centre Y in 0..1."
+                  }
+                }
+              },
+              "scale": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Size multiplier (1.0 = normal)."
+              },
+              "scale_x": {
+                "type": "number",
+                "minimum": 0
+              },
+              "scale_y": {
+                "type": "number",
+                "minimum": 0
+              }
+            }
+          },
+          "animation": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Build / entrance / exit animation. A `preset` sets a whole motion that the other fields override. For a CAPTION, set build='phrase-chunks' + timing='transcript' to sync to the spoken audio.",
+            "properties": {
+              "preset": {
+                "type": "string",
+                "enum": [
+                  "pop-in",
+                  "slide-up",
+                  "typewriter",
+                  "word-reveal",
+                  "word-highlight",
+                  "karaoke",
+                  "phrase-chunks"
+                ],
+                "description": "Named motion; sets build/entrance/timing together. Other fields override it."
+              },
+              "build": {
+                "type": "string",
+                "enum": [
+                  "whole-line",
+                  "phrase-chunks",
+                  "word-highlight",
+                  "word-by-word",
+                  "append",
+                  "typewriter",
+                  "none"
+                ],
+                "description": "How the text builds on ('none' = whole-line = no build)."
+              },
+              "entrance": {
+                "type": "string",
+                "enum": [
+                  "none",
+                  "pop",
+                  "fade",
+                  "slide-up",
+                  "slide-left"
+                ]
+              },
+              "exit": {
+                "type": "string",
+                "enum": [
+                  "none",
+                  "fade"
+                ]
+              },
+              "entrance_ms": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "exit_ms": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "timing": {
+                "type": "string",
+                "enum": [
+                  "even",
+                  "explicit",
+                  "transcript"
+                ]
+              },
+              "emphasis": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "none",
+                      "pop",
+                      "color",
+                      "box-invert",
+                      "highlight"
+                    ]
+                  },
+                  "color": {
+                    "type": "string",
+                    "description": "Hex colour, e.g. '#FFFFFF'."
+                  },
+                  "scale": {
+                    "type": "number",
+                    "minimum": 0,
+                    "description": "Pop scale (for kind='pop')."
+                  }
+                },
+                "description": "How hero / emphasised words are marked."
+              }
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "add_clips",
+      "expensive": false,
+      "description": "Place one or more media clips on the timeline in a single atomic action — video, image, lottie, or audio (kind detected from the source). Placement only: it sets where a clip sits and its source trim; set look and sound (transform, volume, ducking, effects, colour, keyframes, transitions) afterwards with the edit tools.\n\nClips on the same track are sequential and tracks are layers: if a new clip overlaps one already on that track, the existing clip is trimmed, split, or removed to make room (like dragging onto occupied space). Other tracks are untouched. To splice footage in WITHOUT overwriting — pushing everything after it right — use `insert_clips` instead.\n\nPer entry: `media_ref` (a `media_...` ref from generate_*/import_media or a chat attachment's asset_id — never a filesystem path) and `timeline_in` (the timeline position in PROJECT FRAMES at the canvas fps — copy from get_timeline, don't do fps math). Optionally set a length: `timeline_out` (project frames) or `source_span` = [startSeconds, endSeconds] to cut an exact span of the source; omit both to place the whole source at 1x. If you set both, `source_span` wins and a disagreeing timeline_out/duration is ignored (with a note). For audio shorter than the target span, give `timeline_out` plus `loop:true` (repeat) or `stretch:true` (time-fit); if you set both, loop wins. Images and lottie are stills.\n\nUsually omit `track_id`: each clip auto-routes to its default zone (video / image / lottie to the video layer, audio to the audio track, created if missing); name one only to target a specific existing lane. A video's own audio is auto-split onto an audio track as a LINKED clip (moves/trims/deletes together), leaving the video visual-only.\n\nReturns `{ok, created:[{clip_id, kind, track_id}], count}` — keep the returned clip_ids to edit clips later. One undo step; one bad entry rejects the whole call. Also returns a change delta — patch your model, don't re-read.\n\nIf the landing region was NOT empty the reply also carries `overwrote` `{removed:[clip_id], shortened:[{id, was, now, was_clip}]}` and a matching `warnings` line: `removed` clips are gone, and a clip cut at a boundary comes back under a NEW id (`was_clip` names the one it came from). Read it — it is the only report of work that was already on the timeline being destroyed, and `undo` is what restores it. If it names material you did not mean to touch, say so instead of describing the timeline as unchanged.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "entries": {
+            "type": "array",
+            "minItems": 1,
+            "description": "One or more clips to place; each entry is an object with the fields below.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "media_ref": {
+                  "type": "string",
+                  "description": "A library ref (media_...) from generate_*/import_media or a chat attachment's asset_id (video/image/lottie/audio)."
+                },
+                "track_id": {
+                  "type": "string",
+                  "description": "Optional - usually OMIT (the clip auto-routes to the default video/audio zone, created if missing). Set only to target a specific existing lane."
+                },
+                "timeline_in": {
+                  "type": "integer",
+                  "description": "Timeline position of the clip's first frame, in PROJECT FRAMES at the canvas fps."
+                },
+                "timeline_out": {
+                  "type": "integer",
+                  "description": "Optional. Timeline position where the clip ends, in PROJECT FRAMES. Give timeline_out OR duration OR source_span; OMIT all to place the whole source at 1x. If both are set, source_span wins and a disagreeing timeline_out is ignored (with a note)."
+                },
+                "duration": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "Optional. Clip length in PROJECT FRAMES — the same thing as timeline_out, measured from timeline_in. Accepted so this entry matches insert_clips'."
+                },
+                "source_span": {
+                  "type": "array",
+                  "items": {
+                    "type": "number"
+                  },
+                  "minItems": 2,
+                  "maxItems": 2,
+                  "description": "Optional. [startSeconds, endSeconds] - cut an exact span of the SOURCE media, in SECONDS. Timeline length = this span at 1x. Give timeline_out OR source_span (omit both = whole source); if both are set, source_span wins and a disagreeing timeline_out is ignored (with a note). source_span also wins over loop/stretch."
+                },
+                "loop": {
+                  "type": "boolean",
+                  "description": "Optional (AUDIO only). Repeat the source to fill the timeline span when it is longer than the source. Pair with timeline_out; ignored if source_span is set. If both loop and stretch are set, loop wins."
+                },
+                "stretch": {
+                  "type": "boolean",
+                  "description": "Optional (AUDIO only). Time-stretch the source (pitch-preserving) to fit the timeline span. Pair with timeline_out; ignored if source_span is set, or if loop is also set."
+                },
+                "with_audio": {
+                  "type": "boolean",
+                  "description": "Optional (VIDEO only). Pass false to place the picture ONLY, creating no linked audio clip — for a shot going under narration or a music bed. Default true. Use this instead of placing the clip and then muting or deleting its audio afterwards."
+                }
+              },
+              "required": [
+                "media_ref",
+                "timeline_in"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "entries"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "add_text_clips",
+      "expensive": false,
+      "description": "Place one or more on-screen TITLES / lower-thirds / callouts in a single atomic action. Text renders as an overlay; it takes no media source.\n\nFor captions of SPOKEN AUDIO use `add_captions` instead — it transcribes, splits on word boundaries and times every caption for you. Reach for this tool when you already know the words and where they go.\n\nPer entry: `timeline_in` + `timeline_out` (or `duration`) in frames, plus `content` (the words; a string, or runs), and optional `style`, `transform` (x/y/anchor position), and `animation`. `style` accepts `preset` (boxed, clean-white, editorial, headline, minimal, punchy), `font` (Anton, Bebas Neue, Oswald, Playfair Display, Poppins), `size` ('s'/'m'/'l'/'xl' or px), `color` (#hex), `outline` {color, width}, `shadow` {color, depth}, and `box` {color, opacity, padding}. `animation.preset` names a motion (pop-in, slide-up, typewriter, …). Omit style and animation for the app's default look rather than inventing one the user didn't ask for. `track_id` is optional (defaults to a captions track, created if missing).\n\nReturns `{ok, created:[{clip_id, track_id}], count}`. One undo step; one bad entry rejects the whole call. Also returns a change delta — patch your model, don't re-read.\n\nTo CHANGE text that is already on the timeline — its words, style, position or animation — use `update_text`. Never remove and re-add clips to restyle them: that discards their ids, costs the user two undo steps, and re-sends every timing you already got right.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "entries": {
+            "type": "array",
+            "minItems": 1,
+            "description": "One or more text clips (titles and/or captions); each entry is an object with the fields below.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "track_id": {
+                  "type": "string",
+                  "description": "Optional. Target track id (default 'captions')."
+                },
+                "timeline_in": {
+                  "type": "integer",
+                  "description": "Timeline position of the text's first frame, in PROJECT FRAMES at the canvas fps."
+                },
+                "timeline_out": {
+                  "type": "integer",
+                  "description": "Optional. Timeline position where the text ends, in PROJECT FRAMES (or give 'duration')."
+                },
+                "duration": {
+                  "type": "integer",
+                  "description": "Optional. Text length on the timeline, in PROJECT FRAMES (alternative to timeline_out)."
+                },
+                "content": {
+                  "type": [
+                    "string",
+                    "array"
+                  ],
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "text"
+                    ],
+                    "properties": {
+                      "text": {
+                        "type": "string"
+                      },
+                      "emphasis": {
+                        "type": "boolean",
+                        "description": "Mark this run as a hero word."
+                      },
+                      "style": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "description": "Type styling (all fields optional; a `preset` sets a base look that the other fields override).",
+                        "properties": {
+                          "preset": {
+                            "type": "string",
+                            "enum": [
+                              "boxed",
+                              "clean-white",
+                              "editorial",
+                              "headline",
+                              "minimal",
+                              "punchy"
+                            ],
+                            "description": "Named look; other fields override it."
+                          },
+                          "font": {
+                            "type": "string",
+                            "enum": [
+                              "Anton",
+                              "Bebas Neue",
+                              "Oswald",
+                              "Playfair Display",
+                              "Poppins"
+                            ]
+                          },
+                          "size": {
+                            "type": [
+                              "number",
+                              "string"
+                            ],
+                            "description": "Font size: a named tier ('s' | 'm' | 'l' | 'xl', sized to the canvas — prefer these) or an exact px number."
+                          },
+                          "color": {
+                            "type": "string",
+                            "description": "Hex colour, e.g. '#FFFFFF'."
+                          },
+                          "bold": {
+                            "type": "boolean"
+                          },
+                          "italic": {
+                            "type": "boolean"
+                          },
+                          "underline": {
+                            "type": "boolean"
+                          },
+                          "strike": {
+                            "type": "boolean"
+                          },
+                          "weight": {
+                            "type": "integer",
+                            "minimum": 100,
+                            "maximum": 900,
+                            "description": "Font weight 100..900."
+                          },
+                          "case": {
+                            "type": "string",
+                            "enum": [
+                              "none",
+                              "upper",
+                              "lower"
+                            ]
+                          },
+                          "align": {
+                            "type": "string",
+                            "enum": [
+                              "left",
+                              "center",
+                              "right"
+                            ],
+                            "description": "Horizontal alignment of the text within its box (default 'center'). Also justifies wrapped lines."
+                          },
+                          "anchor_v": {
+                            "type": "string",
+                            "enum": [
+                              "top",
+                              "middle",
+                              "bottom"
+                            ],
+                            "description": "Which edge of the text block sits on the y position, i.e. which way EXTRA LINES grow. 'middle' (default) grows both ways, so a card that wraps to two lines shifts its first line UP — fine for one centred title, but it makes consecutive caption cards sit at different heights. Use 'top' for captions: the first line stays put and extra lines grow downward."
+                          },
+                          "spacing": {
+                            "type": "number",
+                            "description": "Letter spacing in px."
+                          },
+                          "outline": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                              "color": {
+                                "type": "string",
+                                "description": "Hex colour, e.g. '#FFFFFF'."
+                              },
+                              "width": {
+                                "type": "number",
+                                "minimum": 0
+                              }
+                            },
+                            "description": "Text outline."
+                          },
+                          "shadow": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                              "color": {
+                                "type": "string",
+                                "description": "Hex colour, e.g. '#FFFFFF'."
+                              },
+                              "depth": {
+                                "type": "number",
+                                "minimum": 0
+                              }
+                            },
+                            "description": "Drop shadow."
+                          },
+                          "box": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                              "color": {
+                                "type": "string",
+                                "description": "Hex colour, e.g. '#FFFFFF'."
+                              },
+                              "opacity": {
+                                "type": "number",
+                                "minimum": 0,
+                                "maximum": 1
+                              },
+                              "padding": {
+                                "type": "integer",
+                                "minimum": 0
+                              }
+                            },
+                            "description": "Background box behind the text."
+                          }
+                        }
+                      },
+                      "t_in": {
+                        "type": "number",
+                        "description": "Explicit clip-relative start, in seconds."
+                      },
+                      "t_out": {
+                        "type": "number",
+                        "description": "Explicit clip-relative end, in seconds."
+                      }
+                    }
+                  },
+                  "description": "Title text (a plain string = one run) OR caption runs (an array of {text, emphasis?, style?, t_in?, t_out?})."
+                },
+                "style": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "description": "Type styling (all fields optional; a `preset` sets a base look that the other fields override).",
+                  "properties": {
+                    "preset": {
+                      "type": "string",
+                      "enum": [
+                        "boxed",
+                        "clean-white",
+                        "editorial",
+                        "headline",
+                        "minimal",
+                        "punchy"
+                      ],
+                      "description": "Named look; other fields override it."
+                    },
+                    "font": {
+                      "type": "string",
+                      "enum": [
+                        "Anton",
+                        "Bebas Neue",
+                        "Oswald",
+                        "Playfair Display",
+                        "Poppins"
+                      ]
+                    },
+                    "size": {
+                      "type": [
+                        "number",
+                        "string"
+                      ],
+                      "description": "Font size: a named tier ('s' | 'm' | 'l' | 'xl', sized to the canvas — prefer these) or an exact px number."
+                    },
+                    "color": {
+                      "type": "string",
+                      "description": "Hex colour, e.g. '#FFFFFF'."
+                    },
+                    "bold": {
+                      "type": "boolean"
+                    },
+                    "italic": {
+                      "type": "boolean"
+                    },
+                    "underline": {
+                      "type": "boolean"
+                    },
+                    "strike": {
+                      "type": "boolean"
+                    },
+                    "weight": {
+                      "type": "integer",
+                      "minimum": 100,
+                      "maximum": 900,
+                      "description": "Font weight 100..900."
+                    },
+                    "case": {
+                      "type": "string",
+                      "enum": [
+                        "none",
+                        "upper",
+                        "lower"
+                      ]
+                    },
+                    "align": {
+                      "type": "string",
+                      "enum": [
+                        "left",
+                        "center",
+                        "right"
+                      ],
+                      "description": "Horizontal alignment of the text within its box (default 'center'). Also justifies wrapped lines."
+                    },
+                    "anchor_v": {
+                      "type": "string",
+                      "enum": [
+                        "top",
+                        "middle",
+                        "bottom"
+                      ],
+                      "description": "Which edge of the text block sits on the y position, i.e. which way EXTRA LINES grow. 'middle' (default) grows both ways, so a card that wraps to two lines shifts its first line UP — fine for one centred title, but it makes consecutive caption cards sit at different heights. Use 'top' for captions: the first line stays put and extra lines grow downward."
+                    },
+                    "spacing": {
+                      "type": "number",
+                      "description": "Letter spacing in px."
+                    },
+                    "outline": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "color": {
+                          "type": "string",
+                          "description": "Hex colour, e.g. '#FFFFFF'."
+                        },
+                        "width": {
+                          "type": "number",
+                          "minimum": 0
+                        }
+                      },
+                      "description": "Text outline."
+                    },
+                    "shadow": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "color": {
+                          "type": "string",
+                          "description": "Hex colour, e.g. '#FFFFFF'."
+                        },
+                        "depth": {
+                          "type": "number",
+                          "minimum": 0
+                        }
+                      },
+                      "description": "Drop shadow."
+                    },
+                    "box": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "color": {
+                          "type": "string",
+                          "description": "Hex colour, e.g. '#FFFFFF'."
+                        },
+                        "opacity": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1
+                        },
+                        "padding": {
+                          "type": "integer",
+                          "minimum": 0
+                        }
+                      },
+                      "description": "Background box behind the text."
+                    }
+                  }
+                },
+                "transform": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "description": "Placement by the text's CENTRE: {position:{x,y}, scale, scale_x?, scale_y?}.",
+                  "properties": {
+                    "position": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "x": {
+                          "type": "number",
+                          "description": "Centre X in 0..1 canvas coords (0.5 = centre; beyond 0/1 slides off-frame)."
+                        },
+                        "y": {
+                          "type": "number",
+                          "description": "Centre Y in 0..1."
+                        }
+                      }
+                    },
+                    "scale": {
+                      "type": "number",
+                      "minimum": 0,
+                      "description": "Size multiplier (1.0 = normal)."
+                    },
+                    "scale_x": {
+                      "type": "number",
+                      "minimum": 0
+                    },
+                    "scale_y": {
+                      "type": "number",
+                      "minimum": 0
+                    }
+                  }
+                },
+                "rotate": {
+                  "type": "number",
+                  "description": "Optional. Clockwise rotation in degrees (a top-level sibling, matching media clips)."
+                },
+                "animation": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "description": "Build / entrance / exit animation. A `preset` sets a whole motion that the other fields override. For a CAPTION, set build='phrase-chunks' + timing='transcript' to sync to the spoken audio.",
+                  "properties": {
+                    "preset": {
+                      "type": "string",
+                      "enum": [
+                        "pop-in",
+                        "slide-up",
+                        "typewriter",
+                        "word-reveal",
+                        "word-highlight",
+                        "karaoke",
+                        "phrase-chunks"
+                      ],
+                      "description": "Named motion; sets build/entrance/timing together. Other fields override it."
+                    },
+                    "build": {
+                      "type": "string",
+                      "enum": [
+                        "whole-line",
+                        "phrase-chunks",
+                        "word-highlight",
+                        "word-by-word",
+                        "append",
+                        "typewriter",
+                        "none"
+                      ],
+                      "description": "How the text builds on ('none' = whole-line = no build)."
+                    },
+                    "entrance": {
+                      "type": "string",
+                      "enum": [
+                        "none",
+                        "pop",
+                        "fade",
+                        "slide-up",
+                        "slide-left"
+                      ]
+                    },
+                    "exit": {
+                      "type": "string",
+                      "enum": [
+                        "none",
+                        "fade"
+                      ]
+                    },
+                    "entrance_ms": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "exit_ms": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "timing": {
+                      "type": "string",
+                      "enum": [
+                        "even",
+                        "explicit",
+                        "transcript"
+                      ]
+                    },
+                    "emphasis": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "none",
+                            "pop",
+                            "color",
+                            "box-invert",
+                            "highlight"
+                          ]
+                        },
+                        "color": {
+                          "type": "string",
+                          "description": "Hex colour, e.g. '#FFFFFF'."
+                        },
+                        "scale": {
+                          "type": "number",
+                          "minimum": 0,
+                          "description": "Pop scale (for kind='pop')."
+                        }
+                      },
+                      "description": "How hero / emphasised words are marked."
+                    }
+                  }
+                },
+                "raw_ass": {
+                  "type": "string",
+                  "description": "Optional. Escape hatch: a raw ASS override."
+                }
+              },
+              "required": [
+                "timeline_in",
+                "content"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "entries"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "add_track",
+      "expensive": false,
+      "description": "Add an empty track. `kind` is what the track carries — 'video' (a visual layer; the default), 'text' (caption overlays), or 'audio' (a mixed bed). Optional `id` (auto-generated if omitted) and `z` (stacking / track order; higher = on top, for split-screen / picture-in-picture). Audio is summed, so an audio track's `z` is just its place in the stack, not a mix priority. Returns `{ok, track_id}`. Also returns a change delta — patch your model, don't re-read.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Optional. Track id (auto-generated if omitted)."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "video",
+              "audio",
+              "text"
+            ],
+            "description": "Optional. What the track carries: 'video' (default; visual layer) | 'text' (captions) | 'audio' (mixed bed)."
+          },
+          "z": {
+            "type": "integer",
+            "description": "Optional. Stacking / track order; higher draws on top (auto-assigned if omitted). Audio is summed, so its z is organisational only."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "apply_color",
+      "expensive": false,
+      "description": "Author/merge a colour grade on one or more clips, atomically — the colorist path (looks / FX go to apply_effects). Pass any of the typed knobs below; they MERGE onto the clip's current grade (only the knobs you pass change). To COPY a grade between clips, read a clip's `color` from get_timeline / inspect_color and pass it back as `color` (a whole-grade object). `reset` true (or `color` null) starts from a neutral grade; clearing everything removes the grade. Out-of-range values are clamped; omitted knobs keep their current value. An unknown knob is rejected. Returns `{ok, updated, color}` — the resulting grade per clip, the same object `color` accepts, so copying a look is passing it straight back. Grading is subtle — use small values. Verify with inspect_color (graded look + scopes): loop apply_color → inspect_color → read gap → adjust. Also returns a change delta — patch your model, don't re-read.\n\nKnobs — group: knob (range, neutral):\n  Primaries — exposure (-3..3 EV, 0), brightness (-1..1, 0), contrast (0..3, 1), saturation (0..3, 1), gamma (0.1..3, 1), vibrance (-2..2, 0), temperature (1000..40000 K, 6500), tint (-1..1, 0)\n  Levels — highlights (-1..1, 0), shadows (-1..1, 0), blacks (-1..1, 0), whites (-1..1, 0)\n  Colour wheels — shadowsHue (0..360°, 0), shadowsAmount (0..1, 0), shadowsLum (-0.5..0.5, 0), midsHue (0..360°, 0), midsAmount (0..1, 0), midsGamma (0.5..2, 1), highsHue (0..360°, 0), highsAmount (0..1, 0), highsGain (0.5..1.5, 1)\n  Curves — masterCurve (no default), redCurve (no default), greenCurve (no default), blueCurve (no default)\n  LUT — lut (no default)",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "clip_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "description": "Ids of the clips to grade."
+          },
+          "reset": {
+            "type": "boolean",
+            "description": "Start from a neutral grade instead of merging onto the clip's current one (default false)."
+          },
+          "color": {
+            "type": "object",
+            "description": "A whole-grade object as read from a clip's `color` (get_timeline / inspect_color) — the grade-copy path. Merged like the knobs; use it to paste a grade between clips."
+          },
+          "exposure": {
+            "type": "number",
+            "description": "Exposure in stops (EV). -3..3 EV; 0 = neutral.",
+            "minimum": -3,
+            "maximum": 3
+          },
+          "brightness": {
+            "type": "number",
+            "description": "Additive brightness. -1..1; 0 = neutral.",
+            "minimum": -1,
+            "maximum": 1
+          },
+          "contrast": {
+            "type": "number",
+            "description": "Contrast multiplier. 0..3; 1 = neutral.",
+            "minimum": 0,
+            "maximum": 3
+          },
+          "saturation": {
+            "type": "number",
+            "description": "Saturation multiplier; 0 = greyscale. 0..3; 1 = neutral.",
+            "minimum": 0,
+            "maximum": 3
+          },
+          "gamma": {
+            "type": "number",
+            "description": "Midtone gamma. 0.1..3; 1 = neutral.",
+            "minimum": 0.1,
+            "maximum": 3
+          },
+          "vibrance": {
+            "type": "number",
+            "description": "Vibrance; protects skin tones. -2..2; 0 = neutral.",
+            "minimum": -2,
+            "maximum": 2
+          },
+          "temperature": {
+            "type": "number",
+            "description": "White balance; higher is warmer. 1000..40000 K; 6500 = neutral.",
+            "minimum": 1000,
+            "maximum": 40000
+          },
+          "tint": {
+            "type": "number",
+            "description": "Green-magenta tint; positive is greener. -1..1; 0 = neutral.",
+            "minimum": -1,
+            "maximum": 1
+          },
+          "highlights": {
+            "type": "number",
+            "description": "Recover (<0) or lift (>0) highlights. -1..1; 0 = neutral.",
+            "minimum": -1,
+            "maximum": 1
+          },
+          "shadows": {
+            "type": "number",
+            "description": "Lift (>0) or deepen (<0) shadows. -1..1; 0 = neutral.",
+            "minimum": -1,
+            "maximum": 1
+          },
+          "blacks": {
+            "type": "number",
+            "description": "Black point. -1..1; 0 = neutral.",
+            "minimum": -1,
+            "maximum": 1
+          },
+          "whites": {
+            "type": "number",
+            "description": "White point. -1..1; 0 = neutral.",
+            "minimum": -1,
+            "maximum": 1
+          },
+          "shadowsHue": {
+            "type": "number",
+            "description": "Shadow colour-push hue. 0..360°; 0 = neutral.",
+            "minimum": 0,
+            "maximum": 360
+          },
+          "shadowsAmount": {
+            "type": "number",
+            "description": "Strength of the shadow push. 0..1; 0 = neutral.",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "shadowsLum": {
+            "type": "number",
+            "description": "Shadow lift (brightness). -0.5..0.5; 0 = neutral.",
+            "minimum": -0.5,
+            "maximum": 0.5
+          },
+          "midsHue": {
+            "type": "number",
+            "description": "Midtone colour-push hue. 0..360°; 0 = neutral.",
+            "minimum": 0,
+            "maximum": 360
+          },
+          "midsAmount": {
+            "type": "number",
+            "description": "Strength of the midtone push. 0..1; 0 = neutral.",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "midsGamma": {
+            "type": "number",
+            "description": "Midtone gamma. 0.5..2; 1 = neutral.",
+            "minimum": 0.5,
+            "maximum": 2
+          },
+          "highsHue": {
+            "type": "number",
+            "description": "Highlight colour-push hue. 0..360°; 0 = neutral.",
+            "minimum": 0,
+            "maximum": 360
+          },
+          "highsAmount": {
+            "type": "number",
+            "description": "Strength of the highlight push. 0..1; 0 = neutral.",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "highsGain": {
+            "type": "number",
+            "description": "Highlight gain. 0.5..1.5; 1 = neutral.",
+            "minimum": 0.5,
+            "maximum": 1.5
+          },
+          "masterCurve": {
+            "type": "array",
+            "description": "Luma tone curve as [[x,y]..] control points in 0..1.",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            }
+          },
+          "redCurve": {
+            "type": "array",
+            "description": "Red-channel tone curve as [[x,y]..] control points in 0..1.",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            }
+          },
+          "greenCurve": {
+            "type": "array",
+            "description": "Green-channel tone curve as [[x,y]..] control points in 0..1.",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            }
+          },
+          "blueCurve": {
+            "type": "array",
+            "description": "Blue-channel tone curve as [[x,y]..] control points in 0..1.",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            }
+          },
+          "lut": {
+            "type": "string",
+            "description": "A library asset ref (media_... id or filename) for a .cube 3D LUT, applied on top of the grade."
+          }
+        },
+        "required": [
+          "clip_ids"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "apply_effects",
+      "expensive": false,
+      "description": "Add/update or remove effects on one or more clips (a merge-by-type stack), atomically — the looks / FX path (colour grading goes to apply_color). `add` is a list of {type, params, enabled?} merged by type; `remove` is a list of type names to drop. `params` holds ONLY that effect's own knobs, keyed by name — send just the ones you care about. Params you omit keep their current value, else the default below, so `{type:\"glow\"}` alone renders a real glow; out-of-range values are clamped. A param that does not belong to the effect is rejected. Routed automatically by clip kind — `denoise` means the video or the audio one depending on the clip. Pass `enabled:false` to bypass an effect without losing its settings. Returns `{ok, updated, effects}`, where `effects` is the resulting stack per clip in the same shape `add` accepts — so copying a look between clips is passing it straight back. Also returns a change delta — patch your model, don't re-read.\n\nVIDEO / IMAGE effects — type: param (range, default):\n  Blur & Sharpen — blur: radius (0..50px, 8); sharpen: sharpness (0..3, 1); motion: frames (2..12 frames, 3)\n  Noise & Grain — denoise: strength (0..20, 4); grain: grain (0..100, 15)\n  Stylize — vignette: vignette (0..1, 0.3); glow: intensity (0..100, 25), opacity (0..1, auto)\n  Detail — clarity: clarity (-1..1, 0.3), dehaze (-1..1, 0)\n  Keying — chroma: color (default '#00FF00'), similarity (0..1, 0.3), blend (0..1, 0.1)\n  Utility — custom: expr (no default)\nAUDIO effects (audio clips) — type: param (range, default):\n  Noise Reduction — denoise: reduction_db (0.01..97 dB, 12)\n  Filter and EQ — eq: bass (-20..20 dB, 0), treble (-20..20 dB, 0)\n  Amplitude and Compression — compressor: threshold (-60..0 dB, -18), ratio (1..20:1, 4); loudnorm: target (-70..-5 LUFS, -14)\n  Reverb — reverb: room (0..1, 0.3)\n  Stereo Imagery — pan: balance (-1..1, 0)\n\nRight-size denoise / loudnorm off inspect_media's noise + loudness numbers.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "clip_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "description": "Ids of the clips to apply effects to."
+          },
+          "add": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "blur",
+                    "chroma",
+                    "clarity",
+                    "compressor",
+                    "custom",
+                    "denoise",
+                    "eq",
+                    "glow",
+                    "grain",
+                    "loudnorm",
+                    "motion",
+                    "pan",
+                    "reverb",
+                    "sharpen",
+                    "vignette"
+                  ],
+                  "description": "Effect type. See the tool description for each effect's params, ranges + defaults."
+                },
+                "params": {
+                  "type": "object",
+                  "description": "This effect's own knobs, keyed by name (see the catalog above). Send only the ones you want to set; omitted knobs keep their current or default value, and out-of-range values are clamped."
+                },
+                "enabled": {
+                  "type": "boolean",
+                  "description": "Optional, default true. false bypasses the effect without removing its settings."
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "additionalProperties": false
+            },
+            "description": "Optional. Effects to add/update; merged by type."
+          },
+          "remove": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "blur",
+                "chroma",
+                "clarity",
+                "compressor",
+                "custom",
+                "denoise",
+                "eq",
+                "glow",
+                "grain",
+                "loudnorm",
+                "motion",
+                "pan",
+                "reverb",
+                "sharpen",
+                "vignette"
+              ]
+            },
+            "description": "Optional. Effect type names to remove."
+          }
+        },
+        "required": [
+          "clip_ids"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "clip_video",
+      "expensive": false,
+      "description": "Extract the [start_s, end_s] window of a video file and save it to the library, returning its `media_ref`. Default is a fast stream-copy (cuts on keyframes); set `reencode=true` for sub-second-accurate cuts. Works on a library `media_ref` only — for a remote URL use `download_video`, which windows the same way.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "media_ref": {
+            "type": "string",
+            "description": "A library asset ref (media_… id or filename) for the source video."
+          },
+          "start_s": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Window start, in seconds."
+          },
+          "end_s": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Window end, in seconds."
+          },
+          "output_name": {
+            "type": "string",
+            "description": "Filename for the saved clip (e.g. 'clip.mp4')."
+          },
+          "reencode": {
+            "type": "boolean",
+            "default": false,
+            "description": "Optional. Default false (fast stream-copy, cuts on keyframes); set true for sub-second-accurate cuts (slower, re-encodes)."
+          }
+        },
+        "required": [
+          "media_ref",
+          "start_s",
+          "end_s",
+          "output_name"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "crop_image",
+      "expensive": false,
+      "description": "Crop an existing image into a new image — a pure pick: source pixels are kept byte-for-byte inside the chosen rectangle, no resampling, padding, or aspect adjustment. Give a `media_ref` (a library asset id, filename, or image artifact id), plus `bbox` = {x, y, w, h} in source pixels; the output is exactly those pixels (a bbox past the edges is clamped; an empty clamp fails). Output shape equals the clamped bbox — to change aspect/size, pick a different bbox. The crop is saved to the library and returned as a `media_ref` (the handle every other tool takes), with `filename`, the final `bbox` in source-pixel coords, and `size`.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "media_ref": {
+            "type": "string",
+            "description": "The image to crop — a library asset ref (media_... id or filename) or an image artifact id."
+          },
+          "bbox": {
+            "type": "object",
+            "description": "Crop rectangle in source-image pixels.",
+            "properties": {
+              "x": {
+                "type": "number",
+                "description": "Left edge, in source-image pixels."
+              },
+              "y": {
+                "type": "number",
+                "description": "Top edge, in source-image pixels."
+              },
+              "w": {
+                "type": "number",
+                "description": "Width, in source-image pixels."
+              },
+              "h": {
+                "type": "number",
+                "description": "Height, in source-image pixels."
+              }
+            },
+            "required": [
+              "x",
+              "y",
+              "w",
+              "h"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "media_ref",
+          "bbox"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "download_video",
+      "expensive": false,
+      "description": "Download a video from a URL into the project library (near-empty outputs are rejected), returning a `media_ref`. URLs only — to window a file already on disk, use `clip_video`.\n\nBy default the download is VIDEO-ONLY (smaller/faster); set `with_audio=true` when you need the sound (a narration / a-roll source you'll transcribe or keep). Omit start_s and end_s to fetch the whole video (the usual case); pass BOTH for a specific [start_s, end_s] window.\n\nReturns {ok, media_ref, path, duration_s, width, height, fps, has_audio} plus full `metadata` (format, streams, codec, audio).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "Video URL (YouTube, Vimeo, TikTok, and most streaming/video sites - whatever is supported by yt-dlp)."
+          },
+          "output_name": {
+            "type": "string",
+            "description": "Filename for the downloaded video (e.g. 'shot.mp4')."
+          },
+          "start_s": {
+            "type": "number",
+            "description": "Optional. Download-window start (seconds). Omit (along with end_s) to download the whole video; pass BOTH to fetch only a sub-window."
+          },
+          "end_s": {
+            "type": "number",
+            "description": "Optional. Download-window end (seconds). Omit for the whole video; pass BOTH start_s and end_s (start_s < end_s) for a sub-window."
+          },
+          "with_audio": {
+            "type": "boolean",
+            "description": "Optional. Include the audio track (default false = video-only). Set true if you want audio as well"
+          }
+        },
+        "required": [
+          "url",
+          "output_name"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "duplicate_project",
+      "expensive": false,
+      "description": "Copy a project (timeline + library + history) into a brand-new project and make it active. Defaults to duplicating the CURRENT project when `project` is omitted. Returns {id, name, path}. The current conversation continues on its own project.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Optional. Name for the copy (default '<source> copy')."
+          },
+          "project": {
+            "type": "string",
+            "description": "Optional. Project id or path to copy; defaults to the current project."
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "export",
+      "expensive": true,
+      "description": "Render the finished timeline to an mp4.\n\nAuthor + register `timeline_json` first (the export also runs the render preflight).\n\nReturns IMMEDIATELY with {ok, status:'exporting'|'queued', job_id, saved_to, queue_position} — the file does NOT exist yet, and a long timeline takes minutes. Everything that can REFUSE the export still happens before this returns (validation, media still generating, offline sources, a destination already being written), so an `ok` means the render really did start. Exports run one at a time; `queue_position` > 0 means yours is waiting. The destination is only written when the render SUCCEEDS, so a failed export never damages a file already there.\n\nTo learn how it FINISHED, call manage_exports action='list': it reports every export this session with its state ('done'/'failed'), the error when one failed, and `media_ref` for the delivered file. An export that finished is registered in the library, so you can inspect_media that `media_ref` to check what actually shipped — the only way to look at the delivered file rather than at the timeline it came from.\n\nONE export per request. The default destination never overwrites — it de-dupes to \"name 2.mp4\", \"name 3.mp4\" — so every extra call leaves the user another file to sort through. Do NOT re-export to check your own work: inspect the TIMELINE with inspect_timeline BEFORE exporting, which renders the same frames without writing a deliverable. Export again only if the user asks, or to redo one you just queued with the wrong settings (cancel that one with manage_exports). If the finished file turns out to have a problem, say so and let the user decide — do not silently start another render.\n\n`resolution`, `quality` and `fps` default to the project's own settings, so an export with no options re-encodes at the canvas size, frame rate and the standard quality.\n\nOMIT `output_path` unless the user named a destination — the default drops the file in their Downloads folder, and that is what the in-app Export dialog does when they do not pick one.\n\nNLE interchange (FCPXML/XMEML for Premiere and Resolve, Final Cut, Premiere .jsx, a self-contained project bundle) and H.265/ProRes codecs are deferred — see ideas.md. Do not offer them.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "output_path": {
+            "type": "string",
+            "description": "Optional. ABSOLUTE destination path for the exported file, including the filename (the '.mp4' extension is appended if you omit it). Only set this when the user named a folder or filename; omit it and the export lands in their Downloads folder. The folder must already exist, and an existing file at that path is overwritten."
+          },
+          "resolution": {
+            "type": "string",
+            "enum": [
+              "source",
+              "2160p",
+              "1440p",
+              "1080p",
+              "720p",
+              "480p"
+            ],
+            "description": "Optional, mp4 only. Output size, given as the SHORTER side in pixels so it reads the same for landscape and vertical projects (a 1080x1920 vertical canvas at '1080p' is unchanged; at '720p' it becomes 720x1280). Aspect ratio is always preserved. Default 'source' — the project's canvas size."
+          },
+          "quality": {
+            "type": "string",
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ],
+            "description": "Optional, mp4 only. Encoder quality: 'high' is near-visually-lossless and large, 'medium' (default) is the usual delivery trade-off, 'low' is for a quick preview or a size-constrained upload."
+          },
+          "fps": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 120,
+            "description": "Optional, mp4 only. Output frames per second. Defaults to the project's canvas rate; changing it resamples the render, it does not retime the edit."
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "note": "ffmpeg export runs client-side; must pixel-match the WebGL preview."
+    },
+    {
+      "name": "generate_image",
+      "expensive": true,
+      "description": "Generate one or more AI images from a text prompt — optionally guided by reference images (image editing / character & style consistency). Results are saved to the project asset library; YOU place them with add_clips (a full-frame still, an overlay, a title card, or a `start_frame` for generate_video).\n\nFor on-screen TEXT or strong layout control prefer 'nano-banana-pro' or a 'gpt-image' model. Pass `reference_images` (library asset ids) to edit an existing image or hold a look across generations.\n\n`model` (default 'nano-banana-pro'): nano-banana | nano-banana-pro | nano-banana-2 | gpt-image-1.5 | gpt-image-2 | mai-image-2.5 — see list_models. `aspect_ratio` default '9:16' (vertical). `count` 1-4.\n\nReturns IMMEDIATELY with {ok, model, count, status:'generating', assets:[{media_ref, kind:'image'}]} — the picture does NOT exist yet. Each `media_ref` is a real library handle you can pass straight to add_clips; the clip shows a placeholder until the image lands and then fills in by itself.\n\nAn export refuses while any generated media is still pending. Costs real money.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "description": "What to generate (subject + setting + shot/lighting). Concrete nouns beat adjectives."
+          },
+          "model": {
+            "type": "string",
+            "enum": [
+              "nano-banana",
+              "nano-banana-pro",
+              "nano-banana-2",
+              "nano-banana-2-lite",
+              "gpt-image-1.5",
+              "gpt-image-2",
+              "mai-image-2.5"
+            ],
+            "description": "Optional. Image model id (default nano-banana-pro); see list_models."
+          },
+          "aspect_ratio": {
+            "type": "string",
+            "description": "Optional. Aspect ratio for models that list 'aspect_ratios' (e.g. '9:16' | '16:9' | '1:1'); default '9:16' (vertical). See list_models."
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4,
+            "description": "Optional. How many images (default 1; max is per-model 'max_images')."
+          },
+          "resolution": {
+            "type": "string",
+            "description": "Optional. Output resolution '1K' | '2K' | '4K' for models that list 'resolutions' (nano-banana-pro / nano-banana-2 / gpt-image-2 — gpt-image-2 reaches true 4K); omit for the model default. Ignored by other models (they size from aspect_ratio)."
+          },
+          "reference_images": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional. Library asset ids — edit an existing image, or hold subject(s) on-model (one per distinct character/prop in this image; build a reference still per recurring subject first). None by default."
+          },
+          "quality": {
+            "type": "string",
+            "description": "Optional. Render quality (e.g. 'low' | 'medium' | 'high') for models that list 'qualities' (gpt-image) — see list_models. Model default if omitted."
+          },
+          "negative_prompt": {
+            "type": "string",
+            "description": "Optional. What to avoid."
+          },
+          "seed": {
+            "type": "integer",
+            "description": "Optional. Seed for repeatable output (random if omitted)."
+          },
+          "name": {
+            "type": "string",
+            "description": "Optional. Display name in the asset library (auto-named from the prompt if omitted)."
+          },
+          "folder": {
+            "type": "string",
+            "description": "Optional. Library folder to file the result under (root if omitted)."
+          }
+        },
+        "required": [
+          "prompt"
+        ],
+        "additionalProperties": false
+      },
+      "note": "client owns the model catalog + validation + result persistence; the authed provider call is a thin server sub-call (/ai/generate/image)."
+    },
+    {
+      "name": "generate_music",
+      "expensive": true,
+      "description": "Generate a short music clip from a description — an instrumental bed, or (on models that support lyrics, e.g. lyria-3-pro) a full song with sung vocals. Returns a ready-to-use audio file; YOU decide where it goes on the timeline and how to fit it.\n\nWhen to use: a music bed under narration / a-roll, an intro sting, an outro. Describe the music with any of: 'mood' (uplifting | tense | dreamy | epic | chill …), 'genre' (lofi hip hop | cinematic orchestral | synthwave | ambient | corporate …), 'bpm' (tempo), and/or a free-text 'prompt' for extra detail (instruments, references). Give at least one of prompt / mood / genre. 'instrumental' defaults true (no vocals) — best under a voiceover; set false to allow singing. For sung vocals, pass 'lyrics' (optionally with [Verse]/[Chorus] tags) and/or 'style_instructions' (a delivery note) — these apply ONLY to models whose list_models shows supports_lyrics / supports_style_instructions and are ignored by instrumental-only models.\n\nReturns IMMEDIATELY with {ok, media_ref, instrumental, status:'generating'} — the music does NOT exist yet (~30-60s). The `media_ref` is a real library handle you can pass straight to add_clips; the clip shows a placeholder until the audio lands. An export refuses while any generated media is still pending.\n\nThe exact LENGTH is not known until it lands: use inspect_media once it is ready, or set the clip length you want and rely on loop/stretch below.\n\nHow to use the result: add a clip {kind:'audio', media_ref:<media_ref>, source_in:0, source_out:<len>, timeline_in:<t>, timeline_out:<t>+<len>} wherever you want it. To cover a scene LONGER than the clip, set loop:true (repeats to fill) or stretch:true; for a SHORTER span pick a smaller source_out. Keep it low under a voice (e.g. volume:0.12) and add duck:{against:'<voice track id>'} so it sits beneath the narration. Identical inputs are cached, so re-calling is free.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "description": "Optional. Free-text detail (instruments, vibe, references). Give at least one of prompt / mood / genre."
+          },
+          "mood": {
+            "type": "string",
+            "description": "Optional. e.g. 'uplifting', 'tense', 'dreamy', 'epic', 'chill'. Give at least one of prompt / mood / genre."
+          },
+          "genre": {
+            "type": "string",
+            "description": "Optional. e.g. 'lofi hip hop', 'cinematic orchestral', 'synthwave', 'ambient'. Give at least one of prompt / mood / genre."
+          },
+          "bpm": {
+            "type": "number",
+            "description": "Optional. Tempo in beats per minute."
+          },
+          "instrumental": {
+            "type": "boolean",
+            "description": "Optional. Avoid vocals (default true; best under narration)."
+          },
+          "lyrics": {
+            "type": "string",
+            "description": "Optional. Sung lyrics, optionally with [Verse]/[Chorus] section tags. Honoured ONLY by models whose list_models shows supports_lyrics (ignored otherwise); implies vocals, so it overrides instrumental."
+          },
+          "style_instructions": {
+            "type": "string",
+            "description": "Optional. Free-text delivery/style note (e.g. 'female vocal, warm and slow'). Honoured ONLY by models whose list_models shows supports_style_instructions; ignored otherwise."
+          },
+          "seed": {
+            "type": "integer",
+            "description": "Optional. Seed for repeatable output."
+          },
+          "model": {
+            "type": "string",
+            "enum": [
+              "lyria",
+              "lyria-3-clip",
+              "lyria-3-pro"
+            ],
+            "description": "Optional. Music model id (see list_models type='audio'); omit for the default."
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "note": "client validates + composes the prompt + gates caps and does the ffmpeg re-mux + persistence; the Lyria call is a thin server sub-call (/ai/music)."
+    },
+    {
+      "name": "generate_video",
+      "expensive": true,
+      "description": "Generate a short AI video clip from a text prompt — optionally animating a still you supply as the first frame (image-to-video), interpolating from a `start_frame` to an `end_frame` (first → last keyframe), or guiding the shot with `reference_images` of a subject to keep consistent. The result is saved to the project asset library (with audio when the model produces it); YOU place it with add_clips, which auto-splits its audio onto an audio track.\n\nBest practice: generate the look first with generate_image, then pass that as `start_frame` (add an `end_frame` to control the landing frame — the clip interpolates start → end).\n\n`model` (default 'veo-3.1-fast'): veo-3.1 | veo-3.1-fast (fast = cheaper / quicker) — see list_models. `aspect_ratio` '9:16' (default) or '16:9'. `duration` 4 | 6 | 8 seconds (default 8).\n\nReturns IMMEDIATELY with {ok, model, media_ref, kind:'video', status:'generating'} — the clip does NOT exist yet and takes ~1-15 min. The `media_ref` is a real library handle you can pass straight to add_clips; the clip shows a placeholder until the video lands and then fills in by itself.\n\nAn export refuses while any generated media is still pending. Costs real money.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "description": "Camera movement + subject action. When start_frame is set, don't re-describe the frame."
+          },
+          "model": {
+            "type": "string",
+            "enum": [
+              "veo-3.1",
+              "veo-3.1-fast",
+              "veo-3.1-lite"
+            ],
+            "description": "Optional. Video model id (default veo-3.1-fast); see list_models."
+          },
+          "aspect_ratio": {
+            "type": "string",
+            "description": "Optional. Aspect ratio for models that list 'aspect_ratios' (e.g. '9:16' | '16:9'); default '9:16' (vertical). See list_models."
+          },
+          "duration": {
+            "type": "integer",
+            "enum": [
+              4,
+              6,
+              8
+            ],
+            "description": "Optional. Clip length in seconds — 4 | 6 | 8 (default 8)."
+          },
+          "resolution": {
+            "type": "string",
+            "description": "Optional. Output resolution (see list_models 'resolutions', e.g. '720p' | '1080p'); omit for the model default."
+          },
+          "start_frame": {
+            "type": "string",
+            "description": "Optional. Library asset id of a still to animate (image-to-video)."
+          },
+          "end_frame": {
+            "type": "string",
+            "description": "Optional. Library asset id of the final frame; the clip interpolates from start_frame to this frame. Requires start_frame."
+          },
+          "reference_images": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional. Up to 5 library asset ids — one per DISTINCT subject in this shot (e.g. the hero AND the rival character), each kept on-model. Build a reference still per recurring subject first and pass only the ones that actually feature here; anchoring a shot to the WRONG subject's reference makes it render as that subject. A separate mode — don't combine with start_frame/end_frame; always renders at 8s."
+          },
+          "negative_prompt": {
+            "type": "string",
+            "description": "Optional. What to avoid."
+          },
+          "generate_audio": {
+            "type": "boolean",
+            "description": "Optional. Generate native audio (default true)."
+          },
+          "seed": {
+            "type": "integer",
+            "description": "Optional. Seed for repeatable output (random if omitted)."
+          },
+          "name": {
+            "type": "string",
+            "description": "Optional. Display name in the asset library (auto-named from the prompt if omitted)."
+          },
+          "folder": {
+            "type": "string",
+            "description": "Optional. Library folder to file the result under (root if omitted)."
+          }
+        },
+        "required": [
+          "prompt"
+        ],
+        "additionalProperties": false
+      },
+      "note": "client owns the model catalog + validation + result persistence; the authed provider call is a thin server sub-call (/ai/generate/video)."
+    },
+    {
+      "name": "generate_voiceover",
+      "expensive": true,
+      "description": "Generate a spoken voiceover (text-to-speech) from a line of text.\n\nWhen to use: to narrate a video that has NO talking-head a-roll (explainer / faceless), or to add a spoken layer (an intro hook, a callout). For a talking-head video the a-roll already carries the voice — don't double it.\n\nVoice: 30 prebuilt voices (default Charon) — pick by vibe from list_models (e.g. Kore firm, Puck upbeat, Sulafat warm, Sadaltager documentary). 'style' is a plain delivery note (\"calm and reassuring\", \"fast and energetic\"); you can also drop inline audio tags like [whispers] or [laughs] into the text. 'language' is optional — omit to auto-detect, or set a code (e.g. 'es', 'hi') for non-English scripts (it also tightens caption word-alignment).\n\nReturns IMMEDIATELY with {ok, media_ref, voice, status:'generating'} — the audio does NOT exist yet (~5-20s). The `media_ref` is a real library handle you can pass straight to add_clips; the clip shows a placeholder until the voice lands. An export refuses while any generated media is still pending.\n\nThe exact LENGTH is not known until it lands: use inspect_media once it is ready.\n\nHow to use the result: add a clip {kind:'audio', media_ref:<media_ref>, source_in:0, source_out:<len>, timeline_in:<t>, timeline_out:<t>+<len>}; it is mixed with the rest of the audio (use volume/fade/duck/loop/stretch as needed). For captions that sync to the voice, place the clip and then call get_transcript on it — every audio asset is transcribed automatically once it lands, and get_transcript reports word timings in PROJECT FRAMES already mapped through the clip's position, so a text clip with animation.timing:'transcript' can use them with no arithmetic. Identical text+voice+style is cached, so re-calling is free.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "The script text to speak aloud."
+          },
+          "voice": {
+            "type": "string",
+            "description": "TTS only. Voice preset name. list_models shows voicesSample (first 3) + voiceCount; any voice supported by the model is accepted. Defaults to the model's defaultVoice. Ignored by music models."
+          },
+          "style": {
+            "type": "string",
+            "description": "Optional. Plain-language delivery note, e.g. 'calm documentary narrator' or 'fast and hype'."
+          },
+          "language": {
+            "type": "string",
+            "description": "Optional. Spoken-language code — omit to AUTO-DETECT from the text, or set a BCP-47 / short code (e.g. 'en-US', 'es', 'hi'); see list_models 'languages'. Also tightens caption word-alignment for non-English."
+          },
+          "model": {
+            "type": "string",
+            "enum": [
+              "gemini-tts-flash",
+              "gemini-tts-flash-2.5",
+              "gemini-tts-pro-2.5"
+            ],
+            "description": "Optional. TTS model id (see list_models type='audio'); omit for the default."
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "additionalProperties": false
+      },
+      "note": "client validates + composes the text and does the PCM->WAV + word-alignment + persistence; the TTS synthesis is a thin server sub-call (/ai/voiceover)."
+    },
+    {
+      "name": "get_page_image",
+      "expensive": true,
+      "description": "Return the full-page screenshot of any webpage given its url as an image artifact. Capture only — does not analyze or locate anything in the image.\n\nUse `crop_image` to crop it to a bbox-region. Reach for it any time you need pixels of a web page (text-only HTML extraction uses `get_page` instead). The result is cached per (URL, viewport); `viewport` picks the SITE layout to capture, and the captured PNG is retina-resolution.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "Page URL to screenshot."
+          },
+          "viewport": {
+            "type": "string",
+            "default": "desktop",
+            "description": "Optional. Render breakpoint (default 'desktop'), in SOURCE pixels of the captured image PNG. Presets: mobile (1170x2532), tablet (2304x3072), desktop (3840x2400), wide (4320x2700), large_monitor (5760x3240), ultrawide (7680x4320). Freeform '{w}x{h}' is accepted and also in source pixels (e.g. '1080x1920' renders a PNG exactly 1080 wide)."
+          },
+          "force_refresh": {
+            "type": "boolean",
+            "default": false,
+            "description": "Optional. Bypass the per-run screenshot cache and re-capture the page by re-rendering it in the browser.Default false (returns cached image if available)."
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "additionalProperties": false
+      },
+      "note": "client browser screenshot (real IP); the image can then be uploaded to the server vision proxy."
+    },
+    {
+      "name": "get_project_state",
+      "expensive": false,
+      "description": "Return the CURRENT project's state: project id + name, the default canvas, the active model / style / workflow, and the project's ASSET INVENTORY — `library` (every imported, downloaded, captured or generated asset, each with its `media_ref`, filename, kind and folder) plus `library_count`.\n\n`library` is the source of truth for what this project already HAS: if an asset there matches a shot you were about to download or a voiceover you were about to generate, re-use its `media_ref` instead of re-creating it. An EMPTY `library` with an empty timeline means a genuinely new project — never ask the user to re-supply assets without checking here first. When `library_truncated` is present the list is capped; use `library_op` with action `list` for the rest.\n\nProject media is addressed ONLY by `media_ref`; a filesystem path is for media that lives outside the project.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_timeline",
+      "expensive": false,
+      "description": "Read the current timeline: canvas (width/height/fps) and every track with its clips. Each clip and track carries a stable `id` — those ids are what every other timeline tool accepts to target a clip/track. Coordinates are integer frames at canvas fps. Call this to see what's placed and to get ids before editing.\n\nThe payload is COMPACT: any field left at its default (e.g. volume/opacity/ speed 1, no transform, an unmuted track) is OMITTED — absent means default, not zero. On a large timeline, page the read with `start_frame`/`end_frame` (project frames): only clips overlapping [start_frame, end_frame) come back, and a track whose clips were clipped reports `total_clips` (its full count). Omit both to read the whole timeline.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "start_frame": {
+            "type": "integer",
+            "description": "Optional window start (inclusive), PROJECT FRAMES. Returns only clips overlapping [start_frame, end_frame). Omit for the whole timeline."
+          },
+          "end_frame": {
+            "type": "integer",
+            "description": "Optional window end (exclusive), PROJECT FRAMES. Defaults to the timeline end when only start_frame is given."
+          },
+          "caption_detail": {
+            "type": "boolean",
+            "description": "Optional. Captions from add_captions arrive as ONE collapsed row per caption_group (span, count and their words). Set true to list every caption clip individually — only needed to edit ONE caption; restyling the whole set takes the group id."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_transcript",
+      "expensive": true,
+      "description": "The current timeline's spoken transcript in PROJECT FRAMES — the post-edit caption track in one call. Walks every audio clip on the timeline (a video clip's audio is split to a linked audio clip at placement), maps each word through that clip's trim/speed/position, and concatenates in timeline order. Deleted ranges are gone by construction, so after cuts this always reflects what's actually audible — no stale results, no per-clip frame math.\n\nEach clip's words come as compact `[index, text, start_frame, end_frame]` rows (`index` is a stable global 0-based position); both frames drop straight into ripple_delete / split_clips (they take PROJECT frames too). The SILENCE between two words is `next.start_frame - this.end_frame` — measure it from these rows rather than guessing where a word ended. To transcribe a RAW source file instead of the timeline (e.g. to read a clip before placing it), use `inspect_media`, which returns that asset's transcript in SOURCE seconds.\n\nPass `clip_id` to scope the transcript to a single clip (its audio, or the audio split from that video clip); omit it for the whole timeline.\n\nReturns {ok, fps, timing:\"project_frames\", word_format, clips:[{clip_id, track_id, words}], word_count, truncated, script_preview, script_chars}.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "start_frame": {
+            "type": "integer",
+            "description": "Optional. Only return words at/after this PROJECT frame. Default 0 (the start). Page a long timeline by passing the previous call's last frame."
+          },
+          "end_frame": {
+            "type": "integer",
+            "description": "Optional. Only return words before this PROJECT frame. Default = the timeline end (the whole thing)."
+          },
+          "clip_id": {
+            "type": "string",
+            "description": "Optional. Scope the transcript to a single timeline clip (from get_timeline) — either the audio clip or the video clip whose audio was split off. Omit for the whole timeline."
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "note": "client via whisper.cpp/wasm so audio never leaves the machine (offline-capable), model lazy-downloaded."
+    },
+    {
+      "name": "import_media",
+      "expensive": false,
+      "description": "Import external media into the project library and return a stable `media_ref` (e.g. `media_ab12cd34ef56`) — the portable handle every other tool takes (add_clips `media_ref`, inspect_media, get_transcript), so you never pass a raw filesystem path. Media is copied in and de-duplicated: importing byte-identical media twice returns the same id.\n\n`source` sets ONE of: `url` (an HTTPS link to a media FILE, downloaded — for streaming sites like YouTube/TikTok use `download_video` instead), `bytes` (base64 media data, small files), or `path` (a LOCAL file or directory, LINKED in place — not copied — returning a `media_ref`; a directory links every media file inside it). If you set more than one, the most concrete wins (path > url > bytes) and the result `note` says which was ignored. `mimeType` is only needed to type `bytes` or a `url` with no file extension.\n\nSupported: video (mp4/mov/webm/mkv/m4v), audio (mp3/wav/m4a/aac/flac/ogg), image (png/jpg/jpeg/gif/webp/bmp/avif). Returns {ok, media_ref, path, filename, kind}.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "object",
+            "description": "Where the media comes from — set ONE of url / bytes / path. `path` LINKS a local file (or a directory of media) in place, read-only, returning a media_ref. If you set more than one, path > url > bytes wins, with a note.",
+            "properties": {
+              "url": {
+                "type": "string",
+                "description": "HTTPS link to a media file (downloaded). Not for streaming sites — use download_video."
+              },
+              "bytes": {
+                "type": "string",
+                "description": "Base64-encoded media data (small files only)."
+              },
+              "path": {
+                "type": "string",
+                "description": "A LOCAL filesystem path to a media file, or a directory of media — LINKED in place (read-only reference, NOT copied), returning a media_ref (a directory returns one per media file)."
+              },
+              "mimeType": {
+                "type": "string",
+                "description": "Optional MIME type override (e.g. 'video/mp4'); required for bytes and for an extension-less url."
+              }
+            },
+            "additionalProperties": false
+          },
+          "name": {
+            "type": "string",
+            "description": "Optional display name in the library (defaults to the filename)."
+          },
+          "folder": {
+            "type": "string",
+            "description": "Optional destination folder path in the library (e.g. 'B-roll'). Created if missing."
+          }
+        },
+        "required": [
+          "source"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "insert_clips",
+      "expensive": false,
+      "description": "Insert one or more media clips at a single point and RIPPLE: every clip at or after `at` on the target track shifts right to open a gap, so nothing is overwritten. This is the non-destructive counterpart to `add_clips` (which clears the landing region, trimming/splitting whatever is already there). Use `insert_clips` to splice footage in; use `add_clips` to fill empty space or deliberately overwrite.\n\nEntries are laid end-to-end from `at` (entry[0] at `at`, entry[1] right after it, …). The total push equals the sum of the entries' durations and is applied to the target track; each pushed clip's LINKED audio shifts with it so A/V stays in sync. A clip straddling `at` is split so the gap opens cleanly. Every OTHER track is sync-locked by default, so its clips at/after `at` shift right by the same amount to stay aligned; turn a track's sync lock off (set_track sync_locked:false) to leave it in place.\n\nPer entry: `media_ref` plus OPTIONALLY a length: `duration` (PROJECT FRAMES) or `source_span` = [startSeconds, endSeconds] to splice an exact span of the SOURCE media (in SECONDS); OMIT both to splice the WHOLE source at 1x. If you set both, `source_span` wins and a disagreeing duration is ignored (with a note). For AUDIO shorter than the target, give `duration` plus `loop:true` or `stretch:true` (if you set both, loop wins). `track_id` is optional - omit it to insert on the main visual track (created if missing). A video clip's own audio is auto-split onto an audio track as a LINKED clip.\n\nReturns `{ok, created:[{clip_id, kind, track_id}], count, at, pushed_by, track_id}`. The whole batch is one undo step; one bad entry rejects the call with nothing written. Also returns a change delta — patch your model, don't re-read.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "at": {
+            "type": "integer",
+            "description": "Timeline frame where insertion begins, in PROJECT FRAMES at the canvas fps; clips at/after this point on the target track shift right."
+          },
+          "track_id": {
+            "type": "string",
+            "description": "Optional - usually OMIT (inserts on the default visual track, created if missing). Set to target a specific existing lane to ripple."
+          },
+          "entries": {
+            "type": "array",
+            "minItems": 1,
+            "description": "One or more clips to splice in, laid end-to-end from `at`; each entry is an object with the fields below.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "media_ref": {
+                  "type": "string",
+                  "description": "A library ref (media_...) from generate_*/import_media or a chat attachment's asset_id (video/image/lottie/audio). Always a ref - never a filesystem path."
+                },
+                "duration": {
+                  "type": "integer",
+                  "description": "Optional. Clip length on the timeline, in PROJECT FRAMES. Give duration OR source_span; OMIT both to splice the whole source at 1x. If both are set, source_span wins and a disagreeing duration is ignored (with a note)."
+                },
+                "source_span": {
+                  "type": "array",
+                  "items": {
+                    "type": "number"
+                  },
+                  "minItems": 2,
+                  "maxItems": 2,
+                  "description": "Optional. [startSeconds, endSeconds] - splice an exact span of the SOURCE media, in SECONDS. Length = this span at 1x. Give duration OR source_span (omit both = whole source); if both are set, source_span wins and a disagreeing duration is ignored (with a note). source_span also wins over loop/stretch."
+                },
+                "loop": {
+                  "type": "boolean",
+                  "description": "Optional (AUDIO only). Repeat the source to fill the timeline span. Pair with duration; ignored if source_span is set. If both loop and stretch are set, loop wins."
+                },
+                "stretch": {
+                  "type": "boolean",
+                  "description": "Optional (AUDIO only). Time-stretch the source to fit the timeline span. Pair with duration; ignored if source_span is set, or if loop is also set."
+                },
+                "with_audio": {
+                  "type": "boolean",
+                  "description": "Optional (VIDEO only). Pass false to splice the picture ONLY, creating no linked audio clip — for a shot going under narration or a music bed. Default true. Use this instead of splicing the clip and then muting or deleting its audio afterwards."
+                }
+              },
+              "required": [
+                "media_ref"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "at",
+          "entries"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "inspect_color",
+      "expensive": false,
+      "description": "Measure color scopes of a timeline clip's CURRENT graded look (clip_id) or a raw asset (media_ref) — grade by the numbers, not eyeballing. Returns black/white points, % clipping, mean & per-channel levels, saturation, warm-cool & green-magenta balance, and a 12-bin hue histogram (from 0°/red; orange cluster = skin, cyan/blue = sky) — and attaches the rendered frame to SEE. Pass a `reference` asset to also measure it and get the subject−reference gap + grade hints. Loop: apply_color → inspect_color(clip_id, reference) → read gap → adjust.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "clip_id": {
+            "type": "string",
+            "description": "Optional. Timeline clip — measures its GRADED look. Provide this OR media_ref."
+          },
+          "media_ref": {
+            "type": "string",
+            "description": "Optional. Library asset/path — measures RAW (no grade). Provide this OR clip_id."
+          },
+          "reference": {
+            "type": "string",
+            "description": "Optional. Asset/path to compare against (gap + hints)."
+          },
+          "at_frame": {
+            "type": "integer",
+            "description": "Optional. Project frame to sample a clip (default midpoint)."
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "inspect_media",
+      "expensive": false,
+      "description": "Look at a source asset before you reference or edit it. Branches by type:\n\n- IMAGE: the image itself + dimensions + EXIF.\n- VIDEO: a few frames sampled across the clip (or a window) plus an\n  on-device transcription, sharpness/noise, and audio loudness\n  (LUFS/peak/RMS) so you can right-size sharpen/denoise/grain and volume.\n- AUDIO: transcription + loudness levels (integrated LUFS, true peak,\n  RMS) — measure before raising volume or applying loudnorm.\n- LOTTIE (.json/.lottie): frames sampled evenly across the animation plus\n  framerate and duration, to verify a Lottie you authored moves right.\n\nTranscription is sentence-level `[text, start_s, end_s]` rows (capped at 400; page with the returned `next_start_s`) and reports the detected `language`. Set `word_timestamps=true` to also get word-level tuples (capped at 10000) in a `words` array — for word-boundary edits like filler-word or dead-air removal. For long media, read the transcript first, then re-call with `start_seconds`/`end_seconds` to zoom; a windowed call only samples and transcribes that span.\n\nFor finer temporal detail — an exact moment, fast action, or motion over time — raise `sample_fps` or narrow the [start_seconds, end_seconds] window so the attached segment is denser.\n\nIdentify the media with `media_ref` (a library asset id (media_...) or a library filename) and/or `clip_id` (a placed timeline clip from get_timeline) — give at least one. `clip_id` alone inspects that clip's source; passing both pins a specific asset (they must name the same one). With `clip_id` the transcript times come back in the timeline's PROJECT FRAMES (rows outside the clip's span dropped), so you can act on them directly. Returns technical metadata (dimensions, fps, duration, codec, etc.) plus the attached media: video attaches the [start_seconds, end_seconds] segment sampled at `sample_fps` (default 1); audio attaches the segment itself — both alongside the same metadata and transcript.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "media_ref": {
+            "type": "string",
+            "description": "A library asset id/ref (media_...) or a library filename. Give media_ref and/or clip_id (at least one)."
+          },
+          "clip_id": {
+            "type": "string",
+            "description": "A placed timeline clip id (from get_timeline). Alone, inspects that clip's source and returns transcript times in PROJECT FRAMES; with media_ref, the two must name the same asset. Give media_ref and/or clip_id (at least one)."
+          },
+          "max_frames": {
+            "type": "integer",
+            "description": "Optional. Frames to sample for video/lottie (default 6, max 12)."
+          },
+          "start_seconds": {
+            "type": "number",
+            "description": "Optional. Window start (seconds) for video/audio (whole asset if omitted)."
+          },
+          "end_seconds": {
+            "type": "number",
+            "description": "Optional. Window end (seconds) for video/audio (asset end if omitted)."
+          },
+          "sample_fps": {
+            "type": "number",
+            "description": "Optional. Sampling rate (frames/sec) for the attached video segment (default 1)."
+          },
+          "attach_audio": {
+            "type": "boolean",
+            "description": "Optional. Keep the segment's audio in the attached video (default false = visual-only; the AUDIO path attaches sound separately)."
+          },
+          "word_timestamps": {
+            "type": "boolean",
+            "description": "Optional. Add word-level `[text, start_s, end_s]` tuples to the transcript in a `words` array (capped at 10000) — for word-boundary edits like filler-word / dead-air removal. Default false (sentence-level only). Windowed by start_seconds/end_seconds."
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "inspect_timeline",
+      "expensive": false,
+      "description": "See the COMPOSITED timeline — what the viewer actually sees in the preview at a given frame: every video track stacked with its transforms, opacity, crop, and keyframes applied, plus text and caption overlays baked in. Use it to VERIFY your edits landed (a PiP's position, a title's placement, layer order, a transition mid-way) — `inspect_media` shows a raw source asset, this shows the actual cut.\n\nFrames are PROJECT FRAMES (from `get_timeline` — integer frames at the canvas fps). Pass a single `start_frame` for one composited frame; add `end_frame` to sample `max_frames` evenly across [start_frame, end_frame) for a transition or sequence. The composited stills are attached for you to SEE on your next turn. Frames at/after the timeline end are reported out-of-range (the canvas is black past content).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "start_frame": {
+            "type": "integer",
+            "description": "Optional. Project frame to render (default 0). With no end_frame, one frame is returned."
+          },
+          "end_frame": {
+            "type": "integer",
+            "description": "Optional. Sample max_frames evenly across [start_frame, end_frame) instead of one."
+          },
+          "max_frames": {
+            "type": "integer",
+            "description": "Optional. Frames to sample when end_frame is set (default 5, max 8)."
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "library_op",
+      "expensive": false,
+      "description": "Read/write the per-run asset library. The library is the catalog of every video clip in this run (auto-populated by download_video and clip_video) plus folders/tags/notes you assign. Returns are JSON-shaped {\"ok\": ..., ...}. To ADD media to the library, use import_media (a url, base64 bytes, or a local file/directory path), which returns a media_ref.\n\nPass exactly one `action` per call:\n\n  * list          (folder?, recursive?) -> {clips: [...]}\n  * get           (id) -> {clip: {...}}\n  * update        (id, filename?, folder?, tags?, notes?) -> {clip: {...}}\n  * move          (id, folder) -> {clip: {...}}\n  * delete        (id) -> {removed_clips, ...}   # CASCADE: also removes every clip using it, across the timeline, as ONE undo entry\n  * create_folder (folder) -> {folders: [...]}\n  * rename_folder (old, new) -> {clips_moved, ...}\n  * delete_folder (folder, force?) -> {removed_clip_ids, ...}\n  * rescan        () -> {added, removed_catalog_rows, removed_dup_files}\n  * resolve       (id_or_path) -> {path}\n\nFolders are slash-separated path strings (\"a/b/c\"). They are pure metadata - no real directories are created. delete refuses by default if the clip is referenced by timeline.json (pass force=true to override).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "list",
+              "get",
+              "update",
+              "move",
+              "delete",
+              "create_folder",
+              "rename_folder",
+              "delete_folder",
+              "rescan",
+              "resolve"
+            ],
+            "description": "The library operation to run (see description for each action and its extra params)."
+          },
+          "id": {
+            "type": "string",
+            "description": "Optional. Library asset id (media_xxxxxx) — for get/update/move/delete."
+          },
+          "id_or_path": {
+            "type": "string",
+            "description": "Optional. For resolve: a library id OR a project-relative path."
+          },
+          "filename": {
+            "type": "string",
+            "description": "Optional. Display name (for update); defaults to the file basename."
+          },
+          "folder": {
+            "type": "string",
+            "description": "Optional. Slash-separated path, e.g. \"liftoff/wide-shots\" (for update/move); empty = root."
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional. Tags to attach (for update)."
+          },
+          "notes": {
+            "type": "string",
+            "description": "Optional. Free-text notes (for update)."
+          },
+          "old": {
+            "type": "string",
+            "description": "Optional. For rename_folder: the existing folder path."
+          },
+          "new": {
+            "type": "string",
+            "description": "Optional. For rename_folder: the new folder path."
+          },
+          "recursive": {
+            "type": "boolean",
+            "default": true,
+            "description": "Optional. For list: include nested folders (default true)."
+          },
+          "force": {
+            "type": "boolean",
+            "default": false,
+            "description": "Optional. For delete_folder: also remove a non-empty folder and its clips (default false). Not needed for delete, which cascades by default."
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "link_clips",
+      "expensive": false,
+      "description": "Link clips so they move, trim, split and delete AS ONE — the relationship a camera clip and its own audio already have when `add_clips` splits them. Stamps one new group across every clip you name PLUS anything already linked to them, so existing groups merge rather than fragment. Use it after assembling a picture and its sound separately, so a later edit cannot desync them. Returns `{ok, linked, link_group}`. Also returns a change delta — patch your model, don't re-read.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "clip_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 2,
+            "description": "Clips to link into one group (at least 2)."
+          }
+        },
+        "required": [
+          "clip_ids"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_models",
+      "expensive": false,
+      "description": "List the AI generation models available to generate_image / generate_video / generate_voiceover / generate_music, with their capabilities, so you can pick one. Optionally filter by `type` ('image' | 'video' | 'audio'). Returns {ok, models:[{id, kind, label, aspect_ratios, durations?, resolutions?, qualities?, max_images?, supports_start_frame?, supports_end_frame?, supports_reference_images?, category?, voices?}], defaults}. Call this when unsure which model / aspect_ratio / resolution / quality to use; otherwise the defaults (image: nano-banana-pro, video: veo-3.1-fast) are sensible.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "description": "Optional. Filter to one kind — image | video | audio; omit for all."
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "note": "client-side catalog (image/video/audio models + voices); no external call. Kept in sync with the server spec-only schema enums."
+    },
+    {
+      "name": "list_projects",
+      "expensive": false,
+      "description": "List the user's known projects, most-recently-opened first (id, name, path, lastOpenedAt), plus the currently-active project id. A project is the persistent unit of work — its own timeline, asset library, and chat history. Use before open_project to find one by name.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "manage_exports",
+      "expensive": false,
+      "description": "List exports and their outcomes, or cancel one that has not finished. Exports are queued: `export` returns a `job_id` and the render continues in the background.\n\naction 'list' (default) returns {ok, exports:[{job_id, filename, state, media_ref?, error?, warnings?, duration_s?}]} for EVERY export this session, including finished ones. state is 'running' (encoding now), 'queued' (waiting its turn), 'done', 'failed' or 'cancelled'. A 'failed' row carries the `error` explaining why. This is the ONLY way to learn how a background export ended, so check it before telling the user their file is ready — an export that started successfully can still fail.\n\nA 'done' row carries `media_ref` for the delivered file, which is registered in the library: pass it to inspect_media to look at what actually shipped, rather than at the timeline it was rendered from.\n\naction 'cancel' needs `job_id` and stops that export: the partly written file is discarded and any file already at the destination is left untouched. Returns {ok, cancelled:true|false}; `false` means that job had already finished, which is not an error — a completed export cannot be recalled.\n\nUse it when the user asks what is still rendering, or asks to stop an export, or to check whether a job you started earlier has finished.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "list",
+              "cancel"
+            ],
+            "description": "Optional. 'list' (default) reports unfinished exports; 'cancel' stops one."
+          },
+          "job_id": {
+            "type": "string",
+            "description": "Required for 'cancel'. The `job_id` the `export` call returned."
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "move_clips",
+      "expensive": false,
+      "description": "Move one or more clips to a new timeline position and/or track, atomically. Per move: `clip_id` plus at least one of `to_timeline_in` (in frames — preserves the clip's length) and `to_track` (id, created if missing).\n\nA clip's LINKED partner (a video clip's split audio) follows it automatically: the time shift propagates to the partner as the same delta (so an l-cut / j-cut offset is preserved) and the partner keeps its own track. So move ONLY the video/primary clip — never list its linked audio as a separate move.\n\nReturns `{ok, moved}`. Also returns a change delta — patch your model, don't re-read. A move overwrites whatever it lands on; when it does, the reply carries `overwrote` `{removed, shortened}` and a `warnings` line naming that material. `undo` restores it.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "moves": {
+            "type": "array",
+            "minItems": 1,
+            "description": "One or more clip moves; each entry is an object with the fields below.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "clip_id": {
+                  "type": "string",
+                  "description": "Id of the clip to move."
+                },
+                "to_timeline_in": {
+                  "type": "integer",
+                  "description": "Optional. New timeline position of the clip's first frame, in PROJECT FRAMES at the canvas fps (the clip's length is preserved)."
+                },
+                "to_track": {
+                  "type": "string",
+                  "description": "Optional. Destination track id (created if missing)."
+                }
+              },
+              "required": [
+                "clip_id"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "moves"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "new_project",
+      "expensive": false,
+      "description": "Create a new, empty project for a SIDE IDEA. A project owns its own timeline, asset library, and chat history. Returns {id, name, path, canvas}.\n\nIt does NOT switch you: your next tool calls still act on the project you already have open, and the new project's library is empty (media imported elsewhere is not in it). To work on the new project, call manage_project {action:'open', id} first.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Human-facing project name."
+          },
+          "aspect_ratio": {
+            "type": "string",
+            "enum": [
+              "16:9",
+              "9:16",
+              "1:1",
+              "4:3",
+              "2.4:1",
+              "9:14"
+            ],
+            "description": "Optional. Canvas aspect-ratio preset (default 9:16 vertical; combine with `quality` to pick the size)."
+          },
+          "quality": {
+            "type": "string",
+            "enum": [
+              "720p",
+              "1080p",
+              "2K",
+              "4K"
+            ],
+            "description": "Optional. Resolution preset — scales the short edge to 720/1080/1440/2160 px, preserving the aspect ratio."
+          },
+          "fps": {
+            "type": "integer",
+            "description": "Optional. Frames per second (default 30)."
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "open_project",
+      "expensive": false,
+      "description": "Make an existing project the active one, identified by its `id` (from list_projects) or by a directory path. Returns {id, name, path}. The current conversation continues on its own project; the opened project resumes in a fresh session.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "project": {
+            "type": "string",
+            "description": "Project id (from list_projects) or a project directory path."
+          }
+        },
+        "required": [
+          "project"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "pack_project",
+      "expensive": false,
+      "description": "Export the ENTIRE project as a portable, self-contained `.artdaddy.zip` in the user's Downloads folder: the timeline + settings + asset catalog and EVERY media file (external / referenced-in-place clips are collected in, and refs are rewritten project-relative) so the bundle opens intact on another machine. Missing media is reported, not fatal. Returns {ok, path, clips, collected, missing, bytes}. No parameters.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "read_file",
+      "expensive": false,
+      "description": "Read a JSON or text file from the project by a project-relative path (whole file, up to a 200,000-char cap). Returns {ok, path, content, truncated}. If `truncated=true` comes back, escalate to the user — chunked reading isn't implemented yet.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path_or_key": {
+            "type": "string",
+            "description": "A project-relative path to the file to read."
+          }
+        },
+        "required": [
+          "path_or_key"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "redo",
+      "expensive": false,
+      "description": "Reapply the most recently undone timeline edit. Returns `{ok, redone, remaining_redo}` plus the same change delta every edit returns (`clips` / `shifted` / `removed_ids` / `created_tracks`) describing what was re-applied.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "remove_clips",
+      "expensive": false,
+      "description": "Remove one or more clips by id in one undoable action. A clip in a link group (a video and its split-off audio) takes its whole group with it. Returns `{ok, removed}`. Also returns a change delta — patch your model, don't re-read.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "clip_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "description": "Ids of the clips to remove."
+          }
+        },
+        "required": [
+          "clip_ids"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "remove_tracks",
+      "expensive": false,
+      "description": "Remove whole tracks (and every clip on them) by id, in one atomic action. Returns `{ok, removed}`. Also returns a change delta — patch your model, don't re-read.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "track_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "description": "Track ids to remove (along with all clips on them)."
+          }
+        },
+        "required": [
+          "track_ids"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "rename_project",
+      "expensive": false,
+      "description": "Rename a project. Defaults to the CURRENT project when `project` is omitted; otherwise pass a project id (from list_projects) or a directory path. The project's id and folder are unchanged. Returns {id, name, path}.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "New human-facing project name."
+          },
+          "project": {
+            "type": "string",
+            "description": "Optional. Project id or path; defaults to the current project."
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "ripple_delete",
+      "expensive": false,
+      "description": "Cut one or more time RANGES out of a track and close the gap(s) in ONE atomic, undoable op — the fast path for filler-word / silence removal. Replaces hand-cranked split_clips → remove_clips → move_clips loops: pass every range at once.\n\nPrecise, and spans clips: a range may cover any number of clips on the track. A clip straddling a boundary is TRIMMED at it and a clip spanning a whole range is split, so only the material inside the range(s) is removed (clips are never dropped just for overlapping); everything after shifts left to close up. Linked audio is trimmed / split / shifted with its video — no per-clip splitting or re-reading the timeline between cuts.\n\nTarget a whole `track_id` or a single `clip_id`; if you pass both, `clip_id` wins (the cut is clamped to that clip, track_id ignored, with a note). In clip mode the ranges are clamped to that clip's visible span so a cut can't run past it. Pass `ranges` (a list of {start, end}, applied back-to-front so your frame numbers stay valid) or a single `start` + `end`; if you pass both, the ranges list wins. Times are PROJECT FRAMES at the canvas fps; overlapping / abutting ranges merge.\n\nSync lock: every OTHER track is sync-locked by default, so its clips after the cut slide left by the same amount to stay aligned (linked audio always follows its video regardless). If a sync-locked track's remaining clips can't absorb the slide without overlapping, the WHOLE edit is refused and the blocking track is named — pass that track id in `ignore_sync_locked_tracks` to leave it in place and retry. Returns `{ok, removed_span, ranges}`. Also returns a change delta — patch your model, don't re-read.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "track_id": {
+            "type": "string",
+            "description": "Cut range(s) across a whole track. Provide track_id or clip_id; if both, clip_id wins."
+          },
+          "clip_id": {
+            "type": "string",
+            "description": "Optional. Cut range(s) within this single clip only (from get_timeline), clamped to its visible span. Provide track_id or clip_id; if both, clip_id wins."
+          },
+          "ranges": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "start": {
+                  "type": "integer",
+                  "description": "Range start, PROJECT FRAMES."
+                },
+                "end": {
+                  "type": "integer",
+                  "description": "Range end, PROJECT FRAMES."
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ],
+              "additionalProperties": false
+            },
+            "description": "Batch: time ranges to delete (PROJECT FRAMES). Use instead of start/end to remove many spans (e.g. filler words) in one atomic op."
+          },
+          "start": {
+            "type": "integer",
+            "description": "Single-range start, PROJECT FRAMES (use with `end`; omit `ranges`)."
+          },
+          "end": {
+            "type": "integer",
+            "description": "Single-range end, PROJECT FRAMES."
+          },
+          "ignore_sync_locked_tracks": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional. Track ids to EXEMPT from the ripple shift — their clips stay put while other tracks close the gap. Use this to release a track named in a sync-lock refusal, or to intentionally desync a layer."
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "run_ffmpeg",
+      "expensive": true,
+      "description": "Escape hatch — a raw ffmpeg command for a deterministic media transform no other tool can express. It bakes a NEW output file from its input(s): a flat, opaque asset, not the non-destructive, re-editable timeline representation. Prefer a timeline primitive wherever one exists; recreating an edit with ffmpeg throws away editability and increases your asset count. Use run_ffmpeg only when there is genuinely no timeline primitive, and none of the existing tools can do the job.\n\nAuthoring: you write the ffmpeg ARGUMENT LIST (everything AFTER the word `ffmpeg`) as a JSON array of strings. The tool prepends `ffmpeg -y -nostdin` and runs it directly (no shell), so do NOT add `ffmpeg`, `-y`, or shell operators (`;`, `|`, `&&`, redirects). Placeholders (required — never write real paths): `{in0}`, `{in1}`, ... → inputs[0], inputs[1], ... (add one `-i {inN}` per input); `{out}` → the output path (use it at least once). First call `inspect_media` on each input so width/height/fps/codec are exact, not guessed.\n\nExamples (genuinely ffmpeg-only — note: crop/scale/speed/concat are NOT here; those are native.\nNeither is REMOVING A CLIP'S AUDIO: pass `with_audio: false` on the add_clips/insert_clips\nentry to place the picture alone, rather than baking a silent copy of the asset here)\n  Extract one frame at 2.0s as a PNG:\n    inputs=[\"media_57e1a248\"], output_name=\"frame.png\"\n    args=[\"-ss\",\"2.0\",\"-i\",\"{in0}\",\"-frames:v\",\"1\",\"{out}\"]\n  Transcode an AV1/VP9 source to H.264 a downstream NLE can read:\n    inputs=[\"media_a\"], output_name=\"h264.mp4\"\n    args=[\"-i\",\"{in0}\",\"-c:v\",\"libx264\",\"-pix_fmt\",\"yuv420p\",\"-c:a\",\"aac\",\"{out}\"]\n\nA media output (video/image/audio) is auto-added to the library and returned as a `media_ref` (the portable handle every other tool takes); any other output comes back as a project-relative `output_ref`.\n\nReturns on success, for a media output: `{ok, media_ref, filename, kind, duration_s, video, audio}`; for a non-media output: `{ok, output_ref, duration_s}`. On failure: `{ok:false, error, stderr_tail}` — read `stderr_tail` and fix your args.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "inputs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Input files (library ids/filenames or paths), in placeholder order: inputs[0]->{in0}, inputs[1]->{in1}, ..."
+          },
+          "output_name": {
+            "type": "string",
+            "description": "Output filename, e.g. 'reel_crop.mp4' or 'frame.png'. A media output (video/image/audio) is saved to the library."
+          },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "ffmpeg args AFTER 'ffmpeg', as a JSON array of strings. Use {in0}/{in1}/... and {out}. No shell operators."
+          }
+        },
+        "required": [
+          "inputs",
+          "output_name",
+          "args"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "set_clip_properties",
+      "expensive": false,
+      "description": "Set styling, length, and source-window properties on one or more clips (the same values applied to every id), atomically — the after-placement styling + retime surface for everything except colour, effects, keyframes, and transitions (which have their own tools). Pass any combination of the typed properties below (VISUAL = video/image clips, AUDIO = audio clips). Setting a scalar clears any keyframes on that property; an out-of-range number is clamped to its nearest bound. A `speed` change rescales the clip's timeline length to keep the same source content and propagates to its linked audio. TRIM vs SLIP: `duration` is what changes a clip's LENGTH. A source edge on its own SLIPS (different content, same length, same position) — to shorten a clip from the head, send `source_in` AND `duration` together. This tool never moves a clip; use move_clips for position. REPLACING A SHOT: pass `media_ref` to point the clip at a DIFFERENT source while keeping everything else — its position, length, colour grade, transform, effects and keyframes all survive, and its linked audio follows. Use this instead of remove_clips + add_clips, which loses all of that. If the replacement is shorter than the slot the clip is shortened to fit (reported in the notes). Before changing `volume`, read the clip's loudness via inspect_media (LUFS/peak) to match a level instead of guessing. Returns `{ok, updated}`. Also returns a change delta — patch your model, don't re-read.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "clip_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "description": "Ids of the clips to update (the same values are applied to each)."
+          },
+          "media_ref": {
+            "type": "string",
+            "description": "Optional. Point the clip at a DIFFERENT source (a library media_... ref), keeping its position, length, grade, transform, effects and keyframes. The source window restarts at the top of the new media; a shorter replacement shortens the clip."
+          },
+          "transform": {
+            "type": "object",
+            "description": "VISUAL. The clip's placement — replaces the current transform, so include position + scale together.",
+            "properties": {
+              "position": {
+                "type": "object",
+                "properties": {
+                  "x": {
+                    "type": "number",
+                    "description": "Centre X in 0..1 canvas coords (0.5 = centre; beyond 0/1 slides off-frame)."
+                  },
+                  "y": {
+                    "type": "number",
+                    "description": "Centre Y in 0..1 canvas coords."
+                  }
+                },
+                "additionalProperties": false
+              },
+              "scale": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Uniform size multiplier (1.0 = full canvas)."
+              },
+              "scale_x": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Horizontal-only scale."
+              },
+              "scale_y": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Vertical-only scale."
+              }
+            },
+            "additionalProperties": false
+          },
+          "fit": {
+            "type": "string",
+            "enum": [
+              "contain",
+              "cover",
+              "stretch"
+            ],
+            "description": "VISUAL. How a differently-shaped source fills its box."
+          },
+          "rotate": {
+            "type": "number",
+            "description": "VISUAL. Rotation in degrees (clockwise)."
+          },
+          "opacity": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "VISUAL. 0 = transparent, 1 = opaque. Clears opacity keyframes."
+          },
+          "speed": {
+            "type": "number",
+            "minimum": 0.01,
+            "description": "Playback multiplier > 0 (2 = 2x). Rescales the clip's length and propagates to linked audio."
+          },
+          "duration": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Resize the clip in place to this LENGTH in frames (timeline_in stays; a relative length, so it is safe to apply to many clips at once — each keeps its own start). This is the ONLY way to change a clip's length: pair it with source_in to TRIM (keep the head you chose, at the length you chose). AUDIO: pair with loop or stretch to fill a length LONGER than the source (e.g. extend a music bed to the video length). Usually unnecessary alongside speed — a speed change already rescales each clip's length from its own source."
+          },
+          "source_in": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Which frame of the SOURCE media the clip starts on, in PROJECT FRAMES at the canvas fps — NOT the source's own fps, and NOT a timeline frame. ON ITS OWN THIS SLIPS: the clip keeps its current length and its timeline position, and shows LATER source content. To TRIM (make the clip shorter), pass `duration` as well."
+          },
+          "source_out": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Which frame of the SOURCE media the clip ends on (exclusive), in PROJECT FRAMES at the canvas fps. ON ITS OWN THIS SLIPS (length held, source_in follows). Passing BOTH source_in and source_out sets the length from the window itself — that is a trim, and any `duration` you also send is ignored."
+          },
+          "flip": {
+            "type": "object",
+            "properties": {
+              "h": {
+                "type": "boolean"
+              },
+              "v": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false,
+            "description": "VISUAL. Mirror horizontally (h) and/or vertically (v)."
+          },
+          "crop": {
+            "type": "object",
+            "properties": {
+              "left": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "top": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "right": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "bottom": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            },
+            "additionalProperties": false,
+            "description": "VISUAL. Edge insets as fractions 0..1 (left+right < 1, top+bottom < 1)."
+          },
+          "blend": {
+            "type": "string",
+            "enum": [
+              "normal",
+              "multiply",
+              "screen",
+              "overlay",
+              "add"
+            ],
+            "description": "VISUAL. How the clip composites over the tracks below it."
+          },
+          "volume": {
+            "type": "number",
+            "minimum": 0,
+            "description": "AUDIO. 1.0 = unchanged, >1 boosts, 0 = silent. Clears volume keyframes."
+          },
+          "loop": {
+            "type": "boolean",
+            "description": "AUDIO. Repeat the source to fill the clip's length — pair with duration to extend the clip past the source."
+          },
+          "stretch": {
+            "type": "boolean",
+            "description": "AUDIO. Time-stretch the source to fill the clip's length — pair with duration to extend the clip past the source."
+          },
+          "duck": {
+            "type": "object",
+            "properties": {
+              "against": {
+                "type": "string",
+                "description": "Track id to duck under."
+              },
+              "ratio": {
+                "type": "number",
+                "minimum": 1,
+                "description": "Sidechain ratio >= 1 (default 8; higher ducks harder)."
+              },
+              "threshold": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "description": "Linear level 0..1 (default 0.03; NOT dB)."
+              }
+            },
+            "required": [
+              "against"
+            ],
+            "additionalProperties": false,
+            "description": "AUDIO. Sidechain-duck this clip under another track."
+          },
+          "fade": {
+            "type": "object",
+            "properties": {
+              "in": {
+                "type": "number",
+                "minimum": 0
+              },
+              "out": {
+                "type": "number",
+                "minimum": 0
+              }
+            },
+            "additionalProperties": false,
+            "description": "Fade {in, out} in FRAMES (each <= the clip's length). Works on ANY clip: video/image ramps opacity (a visual fade), audio ramps level."
+          },
+          "audio_filter": {
+            "type": "string",
+            "description": "AUDIO. A raw ffmpeg audio-filter string (advanced)."
+          }
+        },
+        "required": [
+          "clip_ids"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "set_keyframes",
+      "expensive": false,
+      "description": "Replace the keyframe track for ONE clip + ONE property to animate it over time. `clip_id`, `property`, and `keyframes` — a keyframe is {t, v, ease?}: `t` a CLIP-RELATIVE frame (0 = the clip's first frame), `v` the value, `ease` ∈ linear|hold|ease-in|ease-out|ease-in-out ('hold' steps: the value stays put until the next keyframe instead of ramping). An empty list clears the animation. One call animates ONE property — a \"Ken Burns\" is a `position` call + a `scale` call. Returns `{ok, property, n}`. Also returns a change delta — patch your model, don't re-read.\n\nAnimatable `property` (keyframes are {t, v}, except `position` uses {t, x, y}):\n  • `position` — PAN. Each keyframe is {t, x, y}: x, y = the clip's CENTRE\n    in normalised 0..1 canvas coords (0.5 = centre). One call animates both axes.\n  • `scale` — ZOOM. A size multiplier (1.0 = full canvas); `scale_x` /\n    `scale_y` animate one axis.\n  • `rotate` — degrees clockwise. A full SPIN = [{t:0,v:0},{t:60,v:360}];\n    use 720 / 1080 for fast multi-turn \"crazy spins\".\n  • `opacity` — 0..1. Fade a clip in or out.\n  • `volume` — 0 = silent, 1 = unchanged, >1 boosts (audio swell / dip).\n\nPlace a still with add_clips, then animate it here.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "clip_id": {
+            "type": "string",
+            "description": "Id of the clip to animate."
+          },
+          "property": {
+            "type": "string",
+            "enum": [
+              "opacity",
+              "rotate",
+              "volume",
+              "position",
+              "scale",
+              "scale_x",
+              "scale_y"
+            ],
+            "description": "Which property to animate (one of the listed keyframe-able properties)."
+          },
+          "keyframes": {
+            "type": "array",
+            "description": "The full keyframe list for this clip+property (replaces any existing); an empty list clears the animation.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "t": {
+                  "type": "integer",
+                  "description": "Clip-relative time, in PROJECT FRAMES at the canvas fps (0 = the clip's first frame)."
+                },
+                "v": {
+                  "type": "number",
+                  "description": "Scalar value (opacity / rotate / volume / scale / scale_x / scale_y). For `position`, use x + y instead."
+                },
+                "x": {
+                  "type": "number",
+                  "description": "For `position` only: the clip CENTRE X, normalised 0..1 (0.5 = centre)."
+                },
+                "y": {
+                  "type": "number",
+                  "description": "For `position` only: the clip CENTRE Y, normalised 0..1."
+                },
+                "ease": {
+                  "type": "string",
+                  "enum": [
+                    "linear",
+                    "hold",
+                    "ease-in",
+                    "ease-out",
+                    "ease-in-out"
+                  ],
+                  "description": "Optional. Easing OUT of this keyframe towards the next (default 'linear'). 'hold' is a step: the value stays put until the next keyframe, which is how you get an instant change rather than a ramp."
+                }
+              },
+              "required": [
+                "t"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "clip_id",
+          "property",
+          "keyframes"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "set_project_settings",
+      "expensive": false,
+      "description": "Set the project's output canvas — `fps` and/or `size`. This changes the ACTIVE timeline (what renders and exports) and stores the same values as the project default. Change ONLY what the user asked for: pass `null` for a field they did not mention and it KEEPS ITS CURRENT VALUE. To change only the frame rate, pass `fps` and `size: null` — sending a `size` they did not ask for RESHAPES their video. To change only the shape or resolution, pass `size` and `fps: null`. You never need to look up the current canvas. Inside `size`, size the canvas ONE way — for an exact size pass BOTH `width` and `height`. If you pass more than one sizing input, explicit `width`+`height` win and any `aspect_ratio`/`quality` that disagrees is ignored (with a note). `quality` scales the short edge (720p/1080p/2K/4K), preserving the aspect ratio (the selected preset's, or the current canvas's). Sizes are 64..8192 px per edge and fps is 1..120. Changing `fps` rescales every existing clip's frame coordinates (spans, source cursors, keyframe times, fades, transitions) so each clip keeps the same real-time position and length; `undo` restores the exact prior frames. Resizing changes the canvas only and never moves clips in time. Returns `{ok, fps, resolution, aspect_ratio, changed}` — re-read `get_timeline` after an fps change before any frame-based edit.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "fps": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 120,
+            "description": "Output frames per second, 1..120. Pass null to leave the frame rate alone. Changing it rescales every existing clip's frame coordinates to preserve real-time timing."
+          },
+          "size": {
+            "type": [
+              "object",
+              "string"
+            ],
+            "description": "How big / what shape the canvas should be. Pass null to LEAVE THE CANVAS EXACTLY AS IT IS — do that whenever the user didn't ask about size or shape (e.g. a frame-rate-only change). Either the \"WIDTHxHEIGHT\" string this tool reports the canvas back as (e.g. \"1080x1920\"), so a value you read can be written straight back, or an object sizing the canvas ONE way: an `aspect_ratio` preset, a `quality` preset, or BOTH `width` and `height` for an exact size.",
+            "properties": {
+              "aspect_ratio": {
+                "type": "string",
+                "enum": [
+                  "16:9",
+                  "9:16",
+                  "1:1",
+                  "4:3",
+                  "2.4:1",
+                  "9:14"
+                ],
+                "description": "Canvas shape. Sets width+height; combine with `quality` to pick the size. If you also pass width+height, those win and this is ignored (with a note) when it disagrees."
+              },
+              "quality": {
+                "type": "string",
+                "enum": [
+                  "720p",
+                  "1080p",
+                  "2K",
+                  "4K"
+                ],
+                "description": "Output resolution: scales the short edge to 720/1080/1440/2160 px, preserving the aspect ratio. If you also pass width+height, those win and this is ignored (with a note) when it disagrees."
+              },
+              "width": {
+                "type": "integer",
+                "description": "Exact canvas width in pixels; prefer aspect_ratio/quality unless the user gave an exact size. Pass BOTH width and height together."
+              },
+              "height": {
+                "type": "integer",
+                "description": "Exact canvas height in pixels; prefer aspect_ratio/quality unless the user gave an exact size. Pass BOTH width and height together."
+              }
+            },
+            "required": [],
+            "additionalProperties": false
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "set_track",
+      "expensive": false,
+      "description": "Set track-level flags on one track. `mute` silences its audio; `hidden` excludes a video track from the render; `sync_locked` (ON by default for every track) makes ripple edits shift this track along to keep cross-track alignment — set it false to pin the track so ripples leave it in place; `z` is the stacking order (higher draws on top — audio is summed, so its z is organizational only). Pass only the flags you want to change. Returns `{ok, track_id}`. Also returns a change delta — patch your model, don't re-read.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "track_id": {
+            "type": "string",
+            "description": "Id of the track to modify."
+          },
+          "mute": {
+            "type": "boolean",
+            "description": "Optional. Mute the track's audio (unchanged if omitted)."
+          },
+          "hidden": {
+            "type": "boolean",
+            "description": "Optional. Hide the track from the render (unchanged if omitted)."
+          },
+          "sync_locked": {
+            "type": "boolean",
+            "description": "Optional. Whether ripple edits shift this track along to keep cross-track alignment. ON for every track by default; set false to pin this track so ripples leave it in place (unchanged if omitted)."
+          },
+          "z": {
+            "type": "integer",
+            "description": "Optional. Stacking order; higher draws on top (unchanged if omitted)."
+          }
+        },
+        "required": [
+          "track_id"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "set_tracks",
+      "expensive": false,
+      "description": "Set track-level flags on SEVERAL tracks in ONE action — same flags as `set_track`, applied atomically. Use this whenever a single intent touches more than one track (restacking with `z` is the common case): one `set_track` per track costs the user one press of Ctrl+Z per track to put back, while this costs exactly one. Returns `{ok, track_ids}`. Also returns a change delta — patch your model, don't re-read.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "tracks": {
+            "type": "array",
+            "minItems": 1,
+            "description": "One patch per track. Pass only the flags you want to change on each.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "track_id": {
+                  "type": "string",
+                  "description": "Id of the track to modify."
+                },
+                "mute": {
+                  "type": "boolean",
+                  "description": "Optional. Mute the track's audio (unchanged if omitted)."
+                },
+                "hidden": {
+                  "type": "boolean",
+                  "description": "Optional. Hide the track from the render (unchanged if omitted)."
+                },
+                "sync_locked": {
+                  "type": "boolean",
+                  "description": "Optional. Whether ripple edits shift this track along to keep cross-track alignment (unchanged if omitted)."
+                },
+                "z": {
+                  "type": "integer",
+                  "description": "Optional. Stacking order; higher draws on top (unchanged if omitted)."
+                }
+              },
+              "required": [
+                "track_id"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "tracks"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "set_transition",
+      "expensive": false,
+      "description": "Set or clear a clip's incoming crossfade with the PREVIOUS clip on its track, atomically. Clips are NOT moved and never need to overlap: the two ABUT and the transition is a render-side blend CENTRED on the cut, so a 15-frame crossfade runs from 7.5 frames before the cut to 7.5 after, and the outgoing clip holds its last frame underneath. Resizing or removing a transition therefore never shifts a neighbour. `transition_in` is {kind, duration, expr?}: kind ∈ crossfade | dip-to-black | dip-to-white | whip | wipe-l | wipe-r (or 'custom' with a raw `expr`); `duration` in PROJECT FRAMES at the canvas fps (an integer; e.g. 15 = 0.5 s at 30 fps) and must not exceed either clip's length. Pass `transition_in` as null to remove it. Needs a preceding clip on the same track. Returns `{ok, clip_id}`. Also returns a change delta — patch your model, don't re-read.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "clip_id": {
+            "type": "string",
+            "description": "Id of the clip whose incoming transition is set."
+          },
+          "transition_in": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "The incoming transition {kind, duration, expr?}, or null to remove it.",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "crossfade",
+                  "dip-to-black",
+                  "dip-to-white",
+                  "whip",
+                  "wipe-l",
+                  "wipe-r",
+                  "custom"
+                ],
+                "description": "Transition kind (crossfade unless authoring a raw `expr` with 'custom')."
+              },
+              "duration": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Transition length in PROJECT FRAMES at the canvas fps (e.g. 15 = 0.5 s at 30 fps)."
+              },
+              "expr": {
+                "type": "string",
+                "description": "Optional. Raw transition expression (only when kind='custom')."
+              }
+            }
+          }
+        },
+        "required": [
+          "clip_id",
+          "transition_in"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "split_clips",
+      "expensive": false,
+      "description": "Split clips into two at one or more cut points, atomically. Per split: `clip_id` and `at` (a timeline frame, strictly inside the clip). The left half keeps the original id; the right half gets a new id (returned). Source trim is mapped through the cut. Returns `{ok, new_clip_ids}`. Also returns a change delta — patch your model, don't re-read.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "splits": {
+            "type": "array",
+            "minItems": 1,
+            "description": "One or more split points; each entry is an object with the fields below.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "clip_id": {
+                  "type": "string",
+                  "description": "Id of the clip to split."
+                },
+                "at": {
+                  "type": "integer",
+                  "description": "Cut point on the timeline, in PROJECT FRAMES at the canvas fps (strictly inside the clip)."
+                }
+              },
+              "required": [
+                "clip_id",
+                "at"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "splits"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "undo",
+      "expensive": false,
+      "description": "Revert the most recent timeline edit (one step). Returns `{ok, undone, remaining_undo}` plus the same change delta every edit returns (`clips` / `shifted` / `removed_ids` / `created_tracks`) describing what the revert restored — patch your picture from it instead of re-reading the timeline. Use `redo` to reapply.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "unlink_clips",
+      "expensive": false,
+      "description": "Dissolve the link group(s) the named clips belong to, so each clip can be edited independently again — the inverse of `link_clips`. Affects the named clips AND their partners (a group is dissolved as a whole, never half). Use it when you deliberately want to move or trim one side of an A/V pair, e.g. to build a J/L cut. Returns `{ok, unlinked}`. Also returns a change delta — patch your model, don't re-read.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "clip_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "description": "Clips whose link group should be dissolved."
+          }
+        },
+        "required": [
+          "clip_ids"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "update_text",
+      "expensive": false,
+      "description": "Reword or restyle EXISTING text clips — titles or captions — in one atomic, undoable action. Target either `clip_ids` or a whole `caption_group` (from add_captions / get_timeline): the group restyles every caption in the set without naming them one by one.\n\n`style`, `transform` and `animation` are PARTIAL PATCHES — fields you omit keep their current values, nested objects included, so `{\"outline\": {\"width\": 0}}` leaves the outline colour alone. Pass null for a whole object to clear it.\n\nThis does NOT move or retime anything: use set_clip_properties for timeline position, duration and fades.\n\nReturns {ok, updated:[{clip_id, track_id}], count} plus a change delta.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "clip_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Text clip ids to change. Optional when caption_group is given."
+          },
+          "caption_group": {
+            "type": "string",
+            "description": "Change EVERY caption in this group (returned by add_captions)."
+          },
+          "content": {
+            "type": [
+              "string",
+              "array"
+            ],
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "text"
+              ],
+              "properties": {
+                "text": {
+                  "type": "string"
+                },
+                "emphasis": {
+                  "type": "boolean",
+                  "description": "Mark this run as a hero word."
+                },
+                "style": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "description": "Type styling (all fields optional; a `preset` sets a base look that the other fields override).",
+                  "properties": {
+                    "preset": {
+                      "type": "string",
+                      "enum": [
+                        "boxed",
+                        "clean-white",
+                        "editorial",
+                        "headline",
+                        "minimal",
+                        "punchy"
+                      ],
+                      "description": "Named look; other fields override it."
+                    },
+                    "font": {
+                      "type": "string",
+                      "enum": [
+                        "Anton",
+                        "Bebas Neue",
+                        "Oswald",
+                        "Playfair Display",
+                        "Poppins"
+                      ]
+                    },
+                    "size": {
+                      "type": [
+                        "number",
+                        "string"
+                      ],
+                      "description": "Font size: a named tier ('s' | 'm' | 'l' | 'xl', sized to the canvas — prefer these) or an exact px number."
+                    },
+                    "color": {
+                      "type": "string",
+                      "description": "Hex colour, e.g. '#FFFFFF'."
+                    },
+                    "bold": {
+                      "type": "boolean"
+                    },
+                    "italic": {
+                      "type": "boolean"
+                    },
+                    "underline": {
+                      "type": "boolean"
+                    },
+                    "strike": {
+                      "type": "boolean"
+                    },
+                    "weight": {
+                      "type": "integer",
+                      "minimum": 100,
+                      "maximum": 900,
+                      "description": "Font weight 100..900."
+                    },
+                    "case": {
+                      "type": "string",
+                      "enum": [
+                        "none",
+                        "upper",
+                        "lower"
+                      ]
+                    },
+                    "align": {
+                      "type": "string",
+                      "enum": [
+                        "left",
+                        "center",
+                        "right"
+                      ],
+                      "description": "Horizontal alignment of the text within its box (default 'center'). Also justifies wrapped lines."
+                    },
+                    "anchor_v": {
+                      "type": "string",
+                      "enum": [
+                        "top",
+                        "middle",
+                        "bottom"
+                      ],
+                      "description": "Which edge of the text block sits on the y position, i.e. which way EXTRA LINES grow. 'middle' (default) grows both ways, so a card that wraps to two lines shifts its first line UP — fine for one centred title, but it makes consecutive caption cards sit at different heights. Use 'top' for captions: the first line stays put and extra lines grow downward."
+                    },
+                    "spacing": {
+                      "type": "number",
+                      "description": "Letter spacing in px."
+                    },
+                    "outline": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "color": {
+                          "type": "string",
+                          "description": "Hex colour, e.g. '#FFFFFF'."
+                        },
+                        "width": {
+                          "type": "number",
+                          "minimum": 0
+                        }
+                      },
+                      "description": "Text outline."
+                    },
+                    "shadow": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "color": {
+                          "type": "string",
+                          "description": "Hex colour, e.g. '#FFFFFF'."
+                        },
+                        "depth": {
+                          "type": "number",
+                          "minimum": 0
+                        }
+                      },
+                      "description": "Drop shadow."
+                    },
+                    "box": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "color": {
+                          "type": "string",
+                          "description": "Hex colour, e.g. '#FFFFFF'."
+                        },
+                        "opacity": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 1
+                        },
+                        "padding": {
+                          "type": "integer",
+                          "minimum": 0
+                        }
+                      },
+                      "description": "Background box behind the text."
+                    }
+                  }
+                },
+                "t_in": {
+                  "type": "number",
+                  "description": "Explicit clip-relative start, in seconds."
+                },
+                "t_out": {
+                  "type": "number",
+                  "description": "Explicit clip-relative end, in seconds."
+                }
+              }
+            },
+            "description": "Replacement words: a plain string, or runs. Omit to keep the current text."
+          },
+          "style": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Type styling (all fields optional; a `preset` sets a base look that the other fields override).",
+            "properties": {
+              "preset": {
+                "type": "string",
+                "enum": [
+                  "boxed",
+                  "clean-white",
+                  "editorial",
+                  "headline",
+                  "minimal",
+                  "punchy"
+                ],
+                "description": "Named look; other fields override it."
+              },
+              "font": {
+                "type": "string",
+                "enum": [
+                  "Anton",
+                  "Bebas Neue",
+                  "Oswald",
+                  "Playfair Display",
+                  "Poppins"
+                ]
+              },
+              "size": {
+                "type": [
+                  "number",
+                  "string"
+                ],
+                "description": "Font size: a named tier ('s' | 'm' | 'l' | 'xl', sized to the canvas — prefer these) or an exact px number."
+              },
+              "color": {
+                "type": "string",
+                "description": "Hex colour, e.g. '#FFFFFF'."
+              },
+              "bold": {
+                "type": "boolean"
+              },
+              "italic": {
+                "type": "boolean"
+              },
+              "underline": {
+                "type": "boolean"
+              },
+              "strike": {
+                "type": "boolean"
+              },
+              "weight": {
+                "type": "integer",
+                "minimum": 100,
+                "maximum": 900,
+                "description": "Font weight 100..900."
+              },
+              "case": {
+                "type": "string",
+                "enum": [
+                  "none",
+                  "upper",
+                  "lower"
+                ]
+              },
+              "align": {
+                "type": "string",
+                "enum": [
+                  "left",
+                  "center",
+                  "right"
+                ],
+                "description": "Horizontal alignment of the text within its box (default 'center'). Also justifies wrapped lines."
+              },
+              "anchor_v": {
+                "type": "string",
+                "enum": [
+                  "top",
+                  "middle",
+                  "bottom"
+                ],
+                "description": "Which edge of the text block sits on the y position, i.e. which way EXTRA LINES grow. 'middle' (default) grows both ways, so a card that wraps to two lines shifts its first line UP — fine for one centred title, but it makes consecutive caption cards sit at different heights. Use 'top' for captions: the first line stays put and extra lines grow downward."
+              },
+              "spacing": {
+                "type": "number",
+                "description": "Letter spacing in px."
+              },
+              "outline": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "color": {
+                    "type": "string",
+                    "description": "Hex colour, e.g. '#FFFFFF'."
+                  },
+                  "width": {
+                    "type": "number",
+                    "minimum": 0
+                  }
+                },
+                "description": "Text outline."
+              },
+              "shadow": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "color": {
+                    "type": "string",
+                    "description": "Hex colour, e.g. '#FFFFFF'."
+                  },
+                  "depth": {
+                    "type": "number",
+                    "minimum": 0
+                  }
+                },
+                "description": "Drop shadow."
+              },
+              "box": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "color": {
+                    "type": "string",
+                    "description": "Hex colour, e.g. '#FFFFFF'."
+                  },
+                  "opacity": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "padding": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "description": "Background box behind the text."
+              }
+            }
+          },
+          "transform": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Placement by the text's CENTRE: {position:{x,y}, scale, scale_x?, scale_y?}.",
+            "properties": {
+              "position": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "x": {
+                    "type": "number",
+                    "description": "Centre X in 0..1 canvas coords (0.5 = centre; beyond 0/1 slides off-frame)."
+                  },
+                  "y": {
+                    "type": "number",
+                    "description": "Centre Y in 0..1."
+                  }
+                }
+              },
+              "scale": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Size multiplier (1.0 = normal)."
+              },
+              "scale_x": {
+                "type": "number",
+                "minimum": 0
+              },
+              "scale_y": {
+                "type": "number",
+                "minimum": 0
+              }
+            }
+          },
+          "animation": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Build / entrance / exit animation. A `preset` sets a whole motion that the other fields override. For a CAPTION, set build='phrase-chunks' + timing='transcript' to sync to the spoken audio.",
+            "properties": {
+              "preset": {
+                "type": "string",
+                "enum": [
+                  "pop-in",
+                  "slide-up",
+                  "typewriter",
+                  "word-reveal",
+                  "word-highlight",
+                  "karaoke",
+                  "phrase-chunks"
+                ],
+                "description": "Named motion; sets build/entrance/timing together. Other fields override it."
+              },
+              "build": {
+                "type": "string",
+                "enum": [
+                  "whole-line",
+                  "phrase-chunks",
+                  "word-highlight",
+                  "word-by-word",
+                  "append",
+                  "typewriter",
+                  "none"
+                ],
+                "description": "How the text builds on ('none' = whole-line = no build)."
+              },
+              "entrance": {
+                "type": "string",
+                "enum": [
+                  "none",
+                  "pop",
+                  "fade",
+                  "slide-up",
+                  "slide-left"
+                ]
+              },
+              "exit": {
+                "type": "string",
+                "enum": [
+                  "none",
+                  "fade"
+                ]
+              },
+              "entrance_ms": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "exit_ms": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "timing": {
+                "type": "string",
+                "enum": [
+                  "even",
+                  "explicit",
+                  "transcript"
+                ]
+              },
+              "emphasis": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "none",
+                      "pop",
+                      "color",
+                      "box-invert",
+                      "highlight"
+                    ]
+                  },
+                  "color": {
+                    "type": "string",
+                    "description": "Hex colour, e.g. '#FFFFFF'."
+                  },
+                  "scale": {
+                    "type": "number",
+                    "minimum": 0,
+                    "description": "Pop scale (for kind='pop')."
+                  }
+                },
+                "description": "How hero / emphasised words are marked."
+              }
+            }
+          },
+          "rotate": {
+            "type": "number",
+            "description": "Optional. Clockwise rotation in degrees."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "video_ask",
+      "expensive": true,
+      "description": "Ask anything about a video or a sub-window of one — a deep video-understanding pass (by a multimodal model that sees and understands video natively). Describe, verify, compare, count, or ask any ad-hoc question about what's in a video. It analyzes the whole clip at high fps (~250ms resolution), so it's the right call for millisecond-level / temporal questions; for a quick few-frame glance use `inspect_media` instead.\n\nTo FIND/locate something in a video, use `video_find_moment` instead — it's better at that and returns structured candidates; don't use `video_ask` for \"find the best window\" / \"where is the clean launch\" (weaker at picking). You can use `video_ask` to verify candidates `video_find_moment` returned.\n\nPoint it at a video with `media_ref` (a library asset) and/or `clip_id` (a placed timeline clip, analyzed via its source); LOCAL sources only — for a URL, call `download_video` first and pass the returned path (URLs are rejected).\n\nBy default the whole clip is analyzed; pass `start_seconds`/`end_seconds` to analyze just that window (cheaper on long sources), in which case returned timestamps are relative to the window start. Clips or windows over 30 min are rejected. Returns {ok, response, timing, timestamps_found, video_duration_s, window_s}. With `clip_id` (a placed clip) the structured `timestamps_found` come back as PROJECT FRAMES ([{text, frame}], timing:\"project_frames\") — ready to hand straight to the edit tools; with `media_ref` (a raw asset) they are SOURCE seconds ([{text, seconds}], timing:\"source_seconds\").",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "media_ref": {
+            "type": "string",
+            "description": "A library asset ref (media_... id or filename). Use `download_video` first if you only have a URL. Give media_ref and/or clip_id."
+          },
+          "clip_id": {
+            "type": "string",
+            "description": "Optional. A placed timeline clip id (from get_timeline); analyzes that clip's source media. With media_ref, the two must name the same asset. Give media_ref and/or clip_id. Times come back as PROJECT FRAMES for this clip (SOURCE seconds for a raw media_ref)."
+          },
+          "prompt": {
+            "type": "string",
+            "description": "Free-form question about the video."
+          },
+          "start_seconds": {
+            "type": "number",
+            "description": "Optional. Analyze only the [start_seconds, end_seconds] window (source seconds); omit for the whole clip. Returned timestamps are relative to the window start."
+          },
+          "end_seconds": {
+            "type": "number",
+            "description": "Optional. Window end in source seconds (asset end if omitted). Pair with start_seconds."
+          },
+          "visual_only": {
+            "type": "boolean",
+            "default": true,
+            "description": "Optional. When true (default), answer from rendered pixels only and ignore audio/captions. Set false to also consider audio/spoken content."
+          },
+          "reasoning_mode": {
+            "type": "string",
+            "enum": [
+              "off",
+              "thinking",
+              "extended_thinking"
+            ],
+            "default": "off",
+            "description": "Optional. Reasoning depth — off (default) | thinking | extended_thinking; the latter two trade latency and cost for harder questions."
+          }
+        },
+        "required": [
+          "prompt"
+        ],
+        "additionalProperties": false
+      },
+      "note": "client resolves + pre-encodes the clip (ffmpeg); the hosted video-understanding call is a thin server sub-call (/ai/vision_video)."
+    },
+    {
+      "name": "video_find_moment",
+      "expensive": true,
+      "description": "Ask Gemini to search an entire video and return the top-K best contiguous windows matching a natural-language query, ranked by editorial quality.\n\nEach returned candidate has TWO fields:\n  - `why`: the reason the picker chose this candidate. Short, may\n    be biased toward justifying the pick.\n  - `shots`: a STRUCTURED shot-by-shot map of the candidate window,\n    shape `[{in_s, out_s, description}, ...]` covering the entire\n    window contiguously. Each description names subject + motion +\n    framing + any on-screen text + tone — what is actually rendered\n    into the pixels, not editorial intent. Use `shots` to verify the\n    candidate before clipping; the picker's `why` alone can be\n    optimistic.\n\nDO NOT trust candidates from `why` alone. Read `shots` for each candidate before picking. Sub-shot descriptions often reveal tone/content mismatches the picker's short `why` cannot (e.g. a sub-shot labelled \"damaged spacecraft, somber\" inside a window the picker described as \"clean Apollo archival shot\"). If `shots` describes content that is tonally off for your shot, pick a different candidate or run a different `video_find_moment` query.\n\nYou can use sub-shots as anchors when clipping.\n\nReturns {timing, moments: [{start_s, end_s, peak_s, why, shots: [{in_s, out_s, description}, ...]}, ...]}. With a placed `clip_id` the moment and shot times come back as PROJECT FRAMES instead (start_frame/end_frame/ peak_frame, shots in_frame/out_frame, timing:\"project_frames\"; moments outside the clip's visible span dropped) — ready for the edit tools. A raw `media_ref` returns SOURCE seconds (the _s fields, timing:\"source_seconds\").\n\nPick this over `video_ask` when you don't yet know WHERE the target footage lives inside a longer video. For verifying a specific window you already have, use `video_ask` instead.\n\nFor just a quick few-frame GLANCE at a clip, use `inspect_media` instead. This tool (and `video_ask`) analyze the WHOLE clip at high fps (~250ms resolution) and are the right call for millisecond-level / temporal questions; `inspect_media` only samples a few frames.\n\nAccepts a library `media_ref` (media_... id or filename) or a `clip_id` only — never a raw file path. If you have a YouTube or other web URL, first call `download_video(url, ...)` to fetch it, then pass the `media_ref` that tool returns. URLs passed here will be REJECTED with a clean error pointing to `download_video`. Audio is stripped before sending to Gemini (the picker is visual-only) so don't worry about audio token cost.\n\nHard constraint: rejects videos longer than 30 mins with a clean error. The whole video is always searched - there is no way to narrow.\n\nQuery tips:\n- Describe the visible action concretely: 'rocket lifting off from\n  the launch pad with flames and smoke' beats 'Artemis launch'.\n- Mention what should NOT be in frame if the video has known\n  distractions (e.g. 'clean shot without broadcast graphics').",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "media_ref": {
+            "type": "string",
+            "description": "A library asset ref (media_... id or filename). Use `download_video` first if you only have a URL. Give media_ref and/or clip_id."
+          },
+          "clip_id": {
+            "type": "string",
+            "description": "Optional. A placed timeline clip id (from get_timeline); searches that clip's source media. With media_ref, the two must name the same asset. Give media_ref and/or clip_id. Moment/shot times come back as PROJECT FRAMES for this clip (SOURCE seconds for a raw media_ref)."
+          },
+          "query": {
+            "type": "string",
+            "description": "What to look for, e.g. 'Saturn V launching'."
+          },
+          "visual_only": {
+            "type": "boolean",
+            "default": true,
+            "description": "Optional. When true (default), search rendered pixels only and ignore audio/captions. Set false to also consider audio/spoken content."
+          },
+          "reasoning_mode": {
+            "type": "string",
+            "enum": [
+              "off",
+              "thinking",
+              "extended_thinking"
+            ],
+            "default": "off",
+            "description": "Optional. Reasoning depth — off (default) | thinking | extended_thinking; the latter two trade latency and cost for harder searches."
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "additionalProperties": false
+      },
+      "note": "client resolves + pre-encodes the clip (ffmpeg) + parses the prose shot list; the hosted video-understanding call is a thin server sub-call (/ai/vision_video)."
+    },
+    {
+      "name": "video_get_metadata",
+      "expensive": false,
+      "description": "Get rich metadata for a video URL without downloading it — title, duration, channel, upload date, view count, description, best thumbnail, chapters, and the \"most replayed\" heatmap. YouTube is richest (chapters / heatmap / storyboards are essentially YouTube-only); other sites degrade gracefully, with missing fields returned as null. Cached per URL within the run. Returns {ok, cached, metadata:{title, duration, channel, upload_date, view_count, description, thumbnail, chapters, heatmap, heatmap_total_buckets, has_storyboards, captions_available}}.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "Video URL (YouTube, Vimeo, TikTok, and most streaming/video sites supported by yt dlp)."
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "web_search",
+      "expensive": false,
+      "description": "Search the web and return up to N results as {title, url, snippet}. Indexes the whole web — news, articles, social media (X, Reddit, Facebook, LinkedIn), blogs, government/educational pages. For YouTube video intent prefer `youtube_search`, which returns the same fields plus enriched per-video metadata in one call.\n\nTips: be specific ('noun + action + context' beats keywords, e.g. 'NASA Artemis II SLS launch' over 'rocket launching'). To restrict results to one domain pass `site` — do NOT hand-write a `site:` prefix into `query`.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Search query."
+          },
+          "site": {
+            "type": "string",
+            "description": "Optional. Restrict results to ONE domain, e.g. 'x.com' or 'reddit.com'. Bare hostname — no scheme, no path."
+          },
+          "n": {
+            "type": "integer",
+            "default": 5,
+            "minimum": 1,
+            "maximum": 15,
+            "description": "Optional. Max results to return (default 5, 1-15)."
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "additionalProperties": false
+      },
+      "note": "primary path scrapes DDG/Bing SERPs and needs a real IP (anti-bot); the Azure-grounded fallback is a server sub-call."
+    },
+    {
+      "name": "youtube_search",
+      "expensive": false,
+      "description": "Search YouTube and return up to N video results in rank order.\n\nBy default each result is ENRICHED with metadata (duration, channel, view count, thumbnail, chapter/heatmap/storyboard presence, first 300 chars of description). Set `enrich=false` to skip the per-result fetch and return only shallow fields (url, title, channel, duration_s) - much faster.\n\nPrefer over `web_search` when you specifically want YouTube videos; use `web_search` for non-YouTube or non-video results (articles, social posts, fact-checking). Pass `shorts=true` to also include YouTube Shorts (each flagged `is_short:true`); default returns only normal videos.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Search query."
+          },
+          "n": {
+            "type": "integer",
+            "default": 5,
+            "minimum": 1,
+            "maximum": 10,
+            "description": "Optional. Max results to return (default 5, 1-10)."
+          },
+          "enrich": {
+            "type": "boolean",
+            "default": true,
+            "description": "Optional. When true (default), enrich each result with full metadata (duration, views, description, chapters, heatmap) via parallel per-result fetches. Set false to return only shallow search fields (url, title, channel, duration_s) and skip the N extra round-trips — faster; enrich a specific result later with `video_get_metadata`."
+          },
+          "shorts": {
+            "type": "boolean",
+            "default": false,
+            "description": "Optional. When true, ALSO include YouTube Shorts (flagged is_short:true) alongside normal video results. When false (default), only normal videos are returned."
+          },
+          "beat_id": {
+            "type": "integer",
+            "description": "Optional. v1 only: target beat_id. Counts against the per-beat web_search cap (3)."
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "effects": [
+    {
+      "id": "blur",
+      "display": "Blur",
+      "category": "Blur & Sharpen",
+      "kind": "video",
+      "params": [
+        {
+          "key": "radius",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 50,
+          "default": 8
+        }
+      ]
+    },
+    {
+      "id": "sharpen",
+      "display": "Sharpen",
+      "category": "Blur & Sharpen",
+      "kind": "video",
+      "params": [
+        {
+          "key": "sharpness",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 3,
+          "default": 1
+        }
+      ]
+    },
+    {
+      "id": "motion",
+      "display": "Motion Blur",
+      "category": "Blur & Sharpen",
+      "kind": "video",
+      "params": [
+        {
+          "key": "frames",
+          "type": "number",
+          "minimum": 2,
+          "maximum": 12,
+          "default": 3
+        }
+      ]
+    },
+    {
+      "id": "denoise",
+      "display": "Denoise",
+      "category": "Noise & Grain",
+      "kind": "video",
+      "params": [
+        {
+          "key": "strength",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 20,
+          "default": 4
+        }
+      ]
+    },
+    {
+      "id": "grain",
+      "display": "Film Grain",
+      "category": "Noise & Grain",
+      "kind": "video",
+      "params": [
+        {
+          "key": "grain",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100,
+          "default": 15
+        }
+      ]
+    },
+    {
+      "id": "vignette",
+      "display": "Vignette",
+      "category": "Stylize",
+      "kind": "video",
+      "params": [
+        {
+          "key": "vignette",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.3
+        }
+      ]
+    },
+    {
+      "id": "glow",
+      "display": "Glow",
+      "category": "Stylize",
+      "kind": "video",
+      "params": [
+        {
+          "key": "intensity",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100,
+          "default": 25
+        },
+        {
+          "key": "opacity",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": null
+        }
+      ]
+    },
+    {
+      "id": "clarity",
+      "display": "Clarity & Dehaze",
+      "category": "Detail",
+      "kind": "video",
+      "params": [
+        {
+          "key": "clarity",
+          "type": "number",
+          "minimum": -1,
+          "maximum": 1,
+          "default": 0.3
+        },
+        {
+          "key": "dehaze",
+          "type": "number",
+          "minimum": -1,
+          "maximum": 1,
+          "default": 0
+        }
+      ]
+    },
+    {
+      "id": "chroma",
+      "display": "Chroma Key",
+      "category": "Keying",
+      "kind": "video",
+      "params": [
+        {
+          "key": "color",
+          "type": "string",
+          "minimum": null,
+          "maximum": null,
+          "default": "#00FF00"
+        },
+        {
+          "key": "similarity",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.3
+        },
+        {
+          "key": "blend",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.1
+        }
+      ]
+    },
+    {
+      "id": "custom",
+      "display": "Custom Filter",
+      "category": "Utility",
+      "kind": "video",
+      "params": [
+        {
+          "key": "expr",
+          "type": "string",
+          "minimum": null,
+          "maximum": null,
+          "default": null
+        }
+      ]
+    },
+    {
+      "id": "denoise",
+      "display": "Noise Reduction",
+      "category": "Noise Reduction",
+      "kind": "audio",
+      "params": [
+        {
+          "key": "reduction_db",
+          "type": "number",
+          "minimum": 0.01,
+          "maximum": 97,
+          "default": 12
+        }
+      ]
+    },
+    {
+      "id": "eq",
+      "display": "EQ",
+      "category": "Filter and EQ",
+      "kind": "audio",
+      "params": [
+        {
+          "key": "bass",
+          "type": "number",
+          "minimum": -20,
+          "maximum": 20,
+          "default": 0
+        },
+        {
+          "key": "treble",
+          "type": "number",
+          "minimum": -20,
+          "maximum": 20,
+          "default": 0
+        }
+      ]
+    },
+    {
+      "id": "compressor",
+      "display": "Compressor",
+      "category": "Amplitude and Compression",
+      "kind": "audio",
+      "params": [
+        {
+          "key": "threshold",
+          "type": "number",
+          "minimum": -60,
+          "maximum": 0,
+          "default": -18
+        },
+        {
+          "key": "ratio",
+          "type": "number",
+          "minimum": 1,
+          "maximum": 20,
+          "default": 4
+        }
+      ]
+    },
+    {
+      "id": "reverb",
+      "display": "Reverb",
+      "category": "Reverb",
+      "kind": "audio",
+      "params": [
+        {
+          "key": "room",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.3
+        }
+      ]
+    },
+    {
+      "id": "pan",
+      "display": "Pan",
+      "category": "Stereo Imagery",
+      "kind": "audio",
+      "params": [
+        {
+          "key": "balance",
+          "type": "number",
+          "minimum": -1,
+          "maximum": 1,
+          "default": 0
+        }
+      ]
+    },
+    {
+      "id": "loudnorm",
+      "display": "Loudness",
+      "category": "Amplitude and Compression",
+      "kind": "audio",
+      "params": [
+        {
+          "key": "target",
+          "type": "number",
+          "minimum": -70,
+          "maximum": -5,
+          "default": -14
+        }
+      ]
+    },
+    {
+      "id": "primaries",
+      "display": "Primaries",
+      "category": "Primaries",
+      "kind": "color",
+      "params": [
+        {
+          "key": "exposure",
+          "type": "number",
+          "minimum": -3,
+          "maximum": 3,
+          "default": 0
+        },
+        {
+          "key": "brightness",
+          "type": "number",
+          "minimum": -1,
+          "maximum": 1,
+          "default": 0
+        },
+        {
+          "key": "contrast",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 3,
+          "default": 1
+        },
+        {
+          "key": "saturation",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 3,
+          "default": 1
+        },
+        {
+          "key": "gamma",
+          "type": "number",
+          "minimum": 0.1,
+          "maximum": 3,
+          "default": 1
+        },
+        {
+          "key": "vibrance",
+          "type": "number",
+          "minimum": -2,
+          "maximum": 2,
+          "default": 0
+        },
+        {
+          "key": "temperature",
+          "type": "number",
+          "minimum": 1000,
+          "maximum": 40000,
+          "default": 6500
+        },
+        {
+          "key": "tint",
+          "type": "number",
+          "minimum": -1,
+          "maximum": 1,
+          "default": 0
+        }
+      ]
+    },
+    {
+      "id": "levels",
+      "display": "Levels",
+      "category": "Levels",
+      "kind": "color",
+      "params": [
+        {
+          "key": "highlights",
+          "type": "number",
+          "minimum": -1,
+          "maximum": 1,
+          "default": 0
+        },
+        {
+          "key": "shadows",
+          "type": "number",
+          "minimum": -1,
+          "maximum": 1,
+          "default": 0
+        },
+        {
+          "key": "blacks",
+          "type": "number",
+          "minimum": -1,
+          "maximum": 1,
+          "default": 0
+        },
+        {
+          "key": "whites",
+          "type": "number",
+          "minimum": -1,
+          "maximum": 1,
+          "default": 0
+        }
+      ]
+    },
+    {
+      "id": "wheels",
+      "display": "Colour Wheels",
+      "category": "Colour wheels",
+      "kind": "color",
+      "params": [
+        {
+          "key": "shadowsHue",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 360,
+          "default": 0
+        },
+        {
+          "key": "shadowsAmount",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0
+        },
+        {
+          "key": "shadowsLum",
+          "type": "number",
+          "minimum": -0.5,
+          "maximum": 0.5,
+          "default": 0
+        },
+        {
+          "key": "midsHue",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 360,
+          "default": 0
+        },
+        {
+          "key": "midsAmount",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0
+        },
+        {
+          "key": "midsGamma",
+          "type": "number",
+          "minimum": 0.5,
+          "maximum": 2,
+          "default": 1
+        },
+        {
+          "key": "highsHue",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 360,
+          "default": 0
+        },
+        {
+          "key": "highsAmount",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0
+        },
+        {
+          "key": "highsGain",
+          "type": "number",
+          "minimum": 0.5,
+          "maximum": 1.5,
+          "default": 1
+        }
+      ]
+    },
+    {
+      "id": "curves",
+      "display": "Tone Curves",
+      "category": "Curves",
+      "kind": "color",
+      "params": [
+        {
+          "key": "masterCurve",
+          "type": "array",
+          "minimum": null,
+          "maximum": null,
+          "default": null
+        },
+        {
+          "key": "redCurve",
+          "type": "array",
+          "minimum": null,
+          "maximum": null,
+          "default": null
+        },
+        {
+          "key": "greenCurve",
+          "type": "array",
+          "minimum": null,
+          "maximum": null,
+          "default": null
+        },
+        {
+          "key": "blueCurve",
+          "type": "array",
+          "minimum": null,
+          "maximum": null,
+          "default": null
+        }
+      ]
+    },
+    {
+      "id": "lut",
+      "display": "LUT",
+      "category": "LUT",
+      "kind": "color",
+      "params": [
+        {
+          "key": "lut",
+          "type": "string",
+          "minimum": null,
+          "maximum": null,
+          "default": null
+        }
+      ]
+    }
+  ]
+}

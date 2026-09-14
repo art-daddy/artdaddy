@@ -1,0 +1,25 @@
+# Build outputs / deps / generated artifacts — never reformat.
+node_modules
+dist
+build
+coverage
+reports
+public
+
+# Tauri Rust shell + generated/bundled resources.
+src-tauri/target
+src-tauri/gen
+src-tauri/binaries
+src-tauri/resources
+
+# Codegen output (owned by `npm run codegen`; formatting it would drift vs the server).
+src/contract/tools.json
+src/contract/tools.snapshot.json
+src/contract/params.snapshot.json
+src/contract/effectRegistry.json
+src/api/schema.d.ts
+
+# Lockfiles + minified assets.
+package-lock.json
+*.min.js
+*.min.css

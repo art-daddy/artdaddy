@@ -1,0 +1,18 @@
+{
+  "brand": {
+    "displayName": "ArtDaddy",
+    "tagline": "AI video editor",
+    "site": "artdaddy.app",
+    "productName": "artdaddy",
+    "packageInfix": "artdaddy",
+    "mcpServerName": "artdaddy"
+  },
+  "identity": {
+    "bundleIdentifier": "com.artdaddy.app",
+    "dataFolder": "ArtDaddy",
+    "legacyDataFolders": ["Akaru"],
+    "legacyProductNames": ["akaru"],
+    "sidecarPrefix": "artdaddy",
+    "envPrefix": "ARTDADDY"
+  }
+}
