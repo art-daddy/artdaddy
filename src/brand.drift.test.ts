@@ -147,30 +147,12 @@ describe("the app's names have one source of truth", () => {
     }
   });
 
-  it("the landing page offers the version that actually shipped", () => {
-    // It is a standalone page with no build step, so nothing else would notice it still
-    // advertising an old release — including the installer URLs, which carry the version.
-    const version = readJson("src-tauri/tauri.conf.json").version;
-    const html = read("landing/index.html");
-    expect(html).toContain(`<span id="ver">${version}</span>`);
-    const cmp = (v: string) => v.split(".").map(Number);
-    const ahead = (a: number[], b: number[]) =>
-      a[0] > b[0] || (a[0] === b[0] && (a[1] > b[1] || (a[1] === b[1] && a[2] > b[2])));
-    let current = 0;
-    for (const m of html.matchAll(/updates\/(\w+)_(\d+\.\d+\.\d+)_/g)) {
-      // The NAME as well as the version: `\w+` used to swallow the product name here, so the
-      // links still pointed at the pre-rename installer and would have 404'd on release day.
-      expect(m[1]).toBe(BRAND.productName);
-      // A platform may LAG — 0.9.0 shipped Windows-only because macOS cannot be built without
-      // CI or a Mac — but it must never LEAD, which is the case that 404s on release day. The
-      // page has to name the older version next to that button; see `mac-meta`.
-      expect(ahead(cmp(m[2]), cmp(version)), `${m[1]} ${m[2]} is ahead of ${version}`).toBe(false);
-      if (m[2] === version) current += 1;
-    }
-    // ...and at least one link must actually be the release, or the page advertises a version
-    // nobody can download.
-    expect(current).toBeGreaterThan(0);
-  });
+  // The landing page moved to its own repository, taking three guards with it: that it
+  // advertises the version actually shipped (its installer URLs carry the version and 404 on
+  // release day if they lead), that its social card is byte-identical to the shipped end card,
+  // and that its palette matches the tokens here. Nothing in THIS repo can assert those any
+  // more. They are a release-checklist item now, which is weaker than a test, and saying so is
+  // better than leaving a skipped test that reads as covered.
 
   it("everything that names the website names the same one", () => {
     // artdaddy.in went dead while the end card, the Claude Desktop manifest and the landing
@@ -178,13 +160,6 @@ describe("the app's names have one source of truth", () => {
     // resolve. The domain is a brand token now; these are the copies that cannot import it.
     const site = BRAND.site;
     expect(site).toMatch(/^[a-z0-9-]+\.[a-z.]+$/);
-
-    const html = read("landing/index.html");
-    expect(html).toContain(`<link rel="canonical" href="https://${site}/" />`);
-    expect(html).toContain(`<meta property="og:url" content="https://${site}/" />`);
-    // Relative og:image is not fetched by link unfurlers, so it has to be absolute — which
-    // means it carries the domain too.
-    expect(html).toMatch(new RegExp(`og:image" content="https://${site}/`));
 
     const mcpb = readJson("mcpb/manifest.json");
     expect(mcpb.homepage).toBe(`https://${site}`);
@@ -195,33 +170,6 @@ describe("the app's names have one source of truth", () => {
     const gen = read("scripts/brand-video.mjs");
     expect(gen).not.toMatch(/const SUFFIX = "\./);
     expect(gen).toContain("cfg.brand.site");
-  });
-
-  it("the landing page's social card is the end card that ships", () => {
-    // A hand-copied still: it drifted silently once already. Same class as the staged-brand
-    // check below — a copy nothing regenerates.
-    const still = readFileSync(resolve(root, "brand/video/endcard-16x9-still.png"));
-    const shipped = readFileSync(resolve(root, "landing/assets/endcard.png"));
-    expect(shipped.equals(still), "landing/assets/endcard.png is stale").toBe(true);
-  });
-
-  it("the landing page palette matches the tokens", () => {
-    // Read as TEXT rather than imported: tailwind.config.js is plain JS with no declaration
-    // file, so importing it fails `tsc --noEmit` under noImplicitAny even though vitest is
-    // happy to run it — green tests, broken build.
-    const tokens = new Map(
-      [...read("tailwind.config.js").matchAll(/^const (\w+) = "(#[0-9a-fA-F]{6})";/gm)].map(
-        ([, name, hex]) => [name.toLowerCase(), hex.toLowerCase()],
-      ),
-    );
-    expect(tokens.size).toBeGreaterThan(4);
-
-    const html = read("landing/index.html").toLowerCase();
-    for (const name of ["bg", "surface", "raised", "edge", "brand", "ink"]) {
-      const hex = tokens.get(name);
-      expect(hex, `no token named ${name} in tailwind.config.js`).toBeDefined();
-      expect(html).toContain(`--${name}: ${hex};`);
-    }
   });
 
   it("the installer hook, if wired, uninstalls every product name the app shipped under", () => {

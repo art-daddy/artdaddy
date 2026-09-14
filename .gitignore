@@ -101,3 +101,7 @@ docs/MANUAL_EDITING_PARITY.md
 # Vite writes these while resolving a TS config; regenerated on every dev run.
 vite.config.ts.timestamp-*
 docs/DEVELOPMENT.md
+# `_*.txt` above is for root-level scratch, but it is unanchored, so it also swallowed this
+# render fixture -- which the export golden test reads and cannot regenerate for itself. It was
+# tracked here for years and only vanished when a fresh repo re-applied the ignore rules.
+!src/timeline/__golden.export.txt
