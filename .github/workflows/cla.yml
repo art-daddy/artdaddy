@@ -1,0 +1,40 @@
+# Records CLA acceptance on pull requests. Signatures live on the orphan
+# `cla-signatures` branch so recording one does not trigger the desktop build
+# that ci.yml runs on every push to main.
+name: CLA
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [opened, closed, synchronize]
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+  statuses: write
+
+concurrency:
+  group: cla-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  cla:
+    name: check signature
+    runs-on: ubuntu-latest
+    # issue_comment also fires on plain issues, which have no PR to sign against.
+    if: >-
+      github.event_name == 'pull_request_target' ||
+      (github.event.issue.pull_request != null &&
+       (github.event.comment.body == 'recheck' ||
+        github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA'))
+    steps:
+      - uses: contributor-assistant/github-action@v2.6.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          path-to-signatures: signatures/cla.json
+          path-to-document: https://github.com/art-daddy/artdaddy/blob/main/CLA.md
+          branch: cla-signatures
+          allowlist: bot*,*[bot]
