@@ -36,9 +36,10 @@ permissions:
 
 jobs:
   build:
-    # Self-hosted: GitHub-hosted macOS minutes are billing-blocked and Codemagic's subscription
-    # is disabled, so this Apple Silicon Mac is the only way a .app can be produced at all.
-    runs-on: [self-hosted, macOS, ARM64]
+    # GitHub-hosted Apple Silicon. This was a self-hosted Mac while the repo was private and
+    # macOS minutes were billed at 10x; a public repo gets them free and unmetered, and no
+    # self-hosted runner is registered any more — leaving the old label would queue forever.
+    runs-on: macos-14
     env:
       TRIPLE: aarch64-apple-darwin
       # .env is gitignored, and VITE_API_BASE_URL is FROZEN INTO THE BUNDLE at build time with a

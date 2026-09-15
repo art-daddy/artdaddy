@@ -1,7 +1,7 @@
 {
   "name": "artdaddy-client",
   "private": true,
-  "version": "0.12.1",
+  "version": "0.13.0",
   "type": "module",
   "license": "GPL-3.0-or-later",
   "description": "ArtDaddy editor client (web-first React app; Tauri desktop shell wraps the same bundle later). Talks to the ArtDaddy FastAPI server over REST + SSE + WS.",
@@ -41,7 +41,8 @@
     "auth-broker:deploy": "node scripts/auth-broker-deploy.mjs",
     "fetch:sidecars": "node scripts/fetch-sidecars.mjs",
     "bundle:browser": "node scripts/bundle-browser.mjs",
-    "release": "npm run fetch:sidecars && npm run build:sidecar && npm run build:mcpb && npm run bundle:browser && tauri build"
+    "release": "npm run fetch:sidecars && npm run build:sidecar && npm run build:mcpb && npm run bundle:browser && tauri build",
+    "release:verify": "node scripts/verify-release-signature.mjs"
   },
   "dependencies": {
     "@sentry/react": "^10.66.0",
