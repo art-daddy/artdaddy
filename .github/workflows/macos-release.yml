@@ -11,8 +11,8 @@
 # test a whisper.cpp bump on its own without paying for a whole release.
 #
 # Note the opposite call for the dmg: a build INPUT is produced where it is consumed, but an
-# OUTPUT has to go where users can reach it. `publish: true` uploads it to the same public
-# container that serves the Windows installer and latest.json. It does NOT touch latest.json:
+# OUTPUT has to go where users can reach it. `publish: true` attaches it to the GitHub release
+# for this version, where the Windows installer already lives. It does NOT touch latest.json:
 # mac auto-update needs a signature and the `app` bundle target, both blocked on signing.
 name: macOS build
 
@@ -24,9 +24,15 @@ on:
         required: true
         default: "v1.9.2"
       publish:
-        description: "Upload the dmg to the public release store. Leave OFF for a test build."
+        description: "Attach the dmg to this version's GitHub release. Leave OFF for a test build."
         type: boolean
         default: false
+
+# The organisation defaults the token to read-only, and that default is NOT raised by asking
+# nicely at the step level - a workflow that needs write has to declare it here or the upload
+# 403s.
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -319,35 +325,39 @@ jobs:
           if-no-files-found: warn
 
       # An Actions artifact is not a release: it expires in 90 days and needs a repo login.
-      # The public store is the same container that already serves the Windows installer and
-      # latest.json, so a mac user downloads from where everything else lives.
+      # GitHub Releases is where the installers live now — free and unmetered on a public
+      # repo, and the same place the README and the landing page already point.
+      #
+      # The asset name is deliberately VERSION-LESS. The landing page links to
+      # /releases/latest/download/<name>, which only stays correct if the name never changes;
+      # the release's own tag carries the version.
       #
       # Opt-in per run, because most dispatches are test builds and should not touch what is
-      # published. The blob name carries the version, so this never clobbers an older release.
-      - name: Publish the dmg
+      # published.
+      - name: Publish the dmg to the GitHub release
         if: inputs.publish
         env:
-          SAS: ${{ secrets.ARTDADDY_RELEASES_SAS_URL }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ -z "$SAS" ]; then
-            echo "::error::publish was requested but ARTDADDY_RELEASES_SAS_URL is not set."
-            echo "::error::Add a container SAS URL (write+create on the 'updates' container) as a repo secret."
+          DMG="${{ steps.verify.outputs.path }}"
+          VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          TAG="v$VERSION"
+          ASSET="ArtDaddy-macos-arm64.dmg"
+          cp "$DMG" "/tmp/$ASSET"
+
+          # The Windows release creates the tag; this only ever adds to it. Creating one here
+          # would publish a release advertising a mac build and no installer.
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::release $TAG does not exist yet - publish the Windows release first."
             exit 1
           fi
-          DMG="${{ steps.verify.outputs.path }}"
-          NAME="$(basename "$DMG")"
-          BASE="${SAS%%\?*}"
-          QS="${SAS#*\?}"
-          curl -fsS --retry 3 -X PUT \
-            -H "x-ms-blob-type: BlockBlob" \
-            -H "Content-Type: application/x-apple-diskimage" \
-            --data-binary "@$DMG" \
-            "$BASE/$NAME?$QS" > /dev/null
+          gh release upload "$TAG" "/tmp/$ASSET" --repo "$GITHUB_REPOSITORY" --clobber
+
           # Read it back ANONYMOUSLY: a 2xx from the upload only says the request was accepted,
           # not that a user can now download the bytes we built.
-          PUB="$BASE/$NAME"
-          CODE="$(curl -s -o /dev/null -w '%{http_code}' -I "$PUB")"
-          REMOTE="$(curl -sI "$PUB" | awk 'tolower($1) ~ /^content-length/ {print $2}' | tr -d '\r')"
+          PUB="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$ASSET"
+          CODE="$(curl -sL -o /dev/null -w '%{http_code}' -I "$PUB")"
+          REMOTE="$(curl -sIL "$PUB" | awk 'tolower($1) ~ /^content-length/ {print $2}' | tail -1 | tr -d '\r')"
           LOCAL="$(stat -f%z "$DMG")"
           echo "published: $PUB"
           echo "  http $CODE, remote $REMOTE bytes, local $LOCAL bytes"

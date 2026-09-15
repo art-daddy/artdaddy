@@ -66,7 +66,7 @@
   },
   "plugins": {
     "updater": {
-      "endpoints": ["https://artdaddyreleases.blob.core.windows.net/updates/latest.json"],
+      "endpoints": ["https://artdaddy.app/updates/latest.json"],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlCMkZDNTVFNzU5RjVGOTIKUldTU1g1OTFYc1V2bXdMMG1yNDdzNkZWU1dvbnkxbFVNRENWZGlGREowd0pUTVhrdThReU5BWHcK",
       "windows": {
         "installMode": "passive"

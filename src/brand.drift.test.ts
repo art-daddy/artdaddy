@@ -172,6 +172,19 @@ describe("the app's names have one source of truth", () => {
     expect(gen).toContain("cfg.brand.site");
   });
 
+  it("the updater polls a host we own, not a storage vendor's", () => {
+    // The endpoint is baked in at BUILD time, so every installed copy asks the URL it shipped
+    // with, forever. Point it at a vendor hostname and leaving that vendor silently ends
+    // updates for everyone already installed — a failed check is deliberately non-fatal, so
+    // nothing surfaces and there is no way to reach them. A rename already put a
+    // `*.blob.core.windows.net` hostname here that did not even resolve.
+    const endpoints: string[] = readJson("src-tauri/tauri.conf.json").plugins.updater.endpoints;
+    expect(endpoints.length).toBeGreaterThan(0);
+    for (const ep of endpoints) {
+      expect(new URL(ep).host, `${ep} is not on a domain we control`).toBe(BRAND.site);
+    }
+  });
+
   it("the installer hook, if wired, uninstalls every product name the app shipped under", () => {
     // NSIS keys its uninstall entry and install dir by PRODUCT NAME, not by the bundle
     // identifier — a real 0.6.0 install registers under "akaru" at %LOCALAPPDATA%\artdaddy, so

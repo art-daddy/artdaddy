@@ -358,9 +358,9 @@ present. Keep it that way unless the registry situation changes.
 | Version | `src-tauri/tauri.conf.json` `version` | What the updater COMPARES. Mirror it in `Cargo.toml` + `package.json`. |
 | Public key | `tauri.conf.json` `plugins.updater.pubkey` | Committed. Every update is verified against it. |
 | Private key | `~/.tauri/artdaddy-updater.key` | **Never committed.** No password. `tauri build` reads only `TAURI_SIGNING_PRIVATE_KEY` (the key's CONTENT); `TAURI_SIGNING_PRIVATE_KEY_PATH` works for `tauri signer sign` only. |
-| Manifest | `<host>/updates/latest.json` | Static JSON; the endpoint is in `plugins.updater.endpoints`. |
+| Manifest | `https://artdaddy.app/updates/latest.json` | Static JSON served by the landing site. Deliberately on a domain we OWN: the endpoint is compiled in and polled forever by every install, and a vendor hostname cannot be redirected when we leave it. |
 | Artifacts | `src-tauri/target/release/bundle/nsis/` | `artdaddy_<v>_x64-setup.exe` + `.exe.sig`. Tauri v2 signs the INSTALLER itself — no separate `.nsis.zip` (that was v1). |
-| Host | Azure Blob `artdaddyreleases` / `updates` (public read) | NOT GitHub Releases — both repos are private, and private release assets need a token that a desktop app cannot safely ship. |
+| Host | GitHub Releases, `art-daddy/artdaddy` | Version-less asset names so `/releases/latest/download/<name>` is stable. Free and unmetered while the repo is public. The manifest's URLs are data — moving the artifacts never touches an installed client. |
 
 ### Invariants
 
