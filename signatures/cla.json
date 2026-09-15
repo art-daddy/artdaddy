@@ -1,3 +1,12 @@
 {
-   "signedContributors": []
+  "signedContributors": [
+    {
+      "name": "Akshay-Dagar",
+      "id": 52738374,
+      "comment_id": 5676941338,
+      "created_at": "2026-09-15T08:11:13Z",
+      "repoId": 1370409617,
+      "pullRequestNo": 1
+    }
+  ]
 }
