@@ -45,7 +45,7 @@ jobs:
       # fallback of http://127.0.0.1:8000. Without this the published dmg points every user at
       # their own machine and each AI feature is dead on arrival. Not a secret — it is the same
       # public URL the app advertises.
-      VITE_API_BASE_URL: https://artdaddy-server.ambitioustree-4d826744.centralindia.azurecontainerapps.io
+      VITE_API_BASE_URL: https://akaru-server.ambitioustree-4d826744.centralindia.azurecontainerapps.io
     steps:
       - uses: actions/checkout@v4
 

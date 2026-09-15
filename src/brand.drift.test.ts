@@ -4,7 +4,7 @@
 //
 // It is deliberately a CONFORMANCE test over the real files on disk, not a snapshot:
 // a snapshot would happily record the drift and go green.
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { BRAND, IDENTITY } from "./brand";
@@ -183,6 +183,39 @@ describe("the app's names have one source of truth", () => {
     for (const ep of endpoints) {
       expect(new URL(ep).host, `${ep} is not on a domain we control`).toBe(BRAND.site);
     }
+  });
+
+  it("every build path talks to the same backend", () => {
+    // The backend hostname is inlined at BUILD time and lives in nine copies no bundler can
+    // reach: the production default, three CI lanes, codemagic and the auth broker. The brand
+    // rename rewrote all of them to a host that was never created, so a released build would
+    // 404 on every call and sign-in would be impossible — while a developer's .env kept
+    // pointing at the real one, so nothing looked wrong locally.
+    const files = [
+      "src/api/config.ts",
+      "auth-broker/index.html",
+      "scripts/auth-broker.test.ts",
+      ".github/workflows/macos-release.yml",
+      ".github/workflows/macos-e2e.yml",
+      "codemagic.yaml",
+    ];
+    const hosts = new Map<string, string[]>();
+    for (const file of files) {
+      for (const [, host] of read(file).matchAll(/https:\/\/([a-z0-9.-]+\.azurecontainerapps\.io)/g)) {
+        hosts.set(host, [...(hosts.get(host) ?? []), file]);
+      }
+    }
+    expect(hosts.size, `these name different backends: ${JSON.stringify([...hosts])}`).toBe(1);
+  });
+
+  it("the sign-in page the website serves is the one this repo maintains", () => {
+    // The broker is coupled to the deep-link scheme and the server's /auth/desktop routes,
+    // so it is maintained here — but artdaddy.app is published from the landing repo, which
+    // carries the copy users actually load. Two copies of one page: a fix applied here and
+    // not there leaves the app opening a stale sign-in flow, and nothing local looks wrong.
+    const served = resolve(root, "../akaru-landing/landing/auth/index.html");
+    if (!existsSync(served)) return; // sibling checkout absent (CI); the pre-push hook has it
+    expect(readFileSync(served, "utf8")).toBe(read("auth-broker/index.html"));
   });
 
   it("the installer hook, if wired, uninstalls every product name the app shipped under", () => {

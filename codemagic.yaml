@@ -528,11 +528,11 @@ workflows:
       vars:
         TRIPLE: aarch64-apple-darwin
         WHISPER_REF: v1.9.2
-        ARTDADDY_SERVER: https://artdaddy-server.ambitioustree-4d826744.centralindia.azurecontainerapps.io
+        ARTDADDY_SERVER: https://akaru-server.ambitioustree-4d826744.centralindia.azurecontainerapps.io
         # .env is gitignored and VITE_API_BASE_URL is FROZEN INTO THE BUNDLE at build time,
         # falling back to http://127.0.0.1:8000 - which is why the WebKit boot test caught the
         # app trying to reach the user's own machine.
-        VITE_API_BASE_URL: https://artdaddy-server.ambitioustree-4d826744.centralindia.azurecontainerapps.io
+        VITE_API_BASE_URL: https://akaru-server.ambitioustree-4d826744.centralindia.azurecontainerapps.io
         ARTDADDY_EVAL_MODELS: gpt-5.4-mini
         ARTDADDY_EVAL_CAP_USD: "0.40"
         ARTDADDY_EVAL_EFFORT: high
@@ -723,7 +723,7 @@ workflows:
         APPLE_SIGNING_IDENTITY: "-"
         # Frozen into the bundle at build time, fallback http://127.0.0.1:8000. Without it the
         # dmg points every user at their own machine - which is exactly what 0.3.0 shipped.
-        VITE_API_BASE_URL: https://artdaddy-server.ambitioustree-4d826744.centralindia.azurecontainerapps.io
+        VITE_API_BASE_URL: https://akaru-server.ambitioustree-4d826744.centralindia.azurecontainerapps.io
     cache:
       cache_paths:
         - $CM_BUILD_DIR/whisper-out

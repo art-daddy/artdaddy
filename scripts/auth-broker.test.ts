@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const APPROVED_API =
-  "https://artdaddy-server.ambitioustree-4d826744.centralindia.azurecontainerapps.io";
+  "https://akaru-server.ambitioustree-4d826744.centralindia.azurecontainerapps.io";
 const html = readFileSync(resolve(process.cwd(), "auth-broker/index.html"), "utf8");
 const source = html.match(/<script>([\s\S]*?)<\/script>/)?.[1];
 

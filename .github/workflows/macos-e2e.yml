@@ -39,10 +39,10 @@ jobs:
         shell: bash -eo pipefail {0}
     env:
       TRIPLE: aarch64-apple-darwin
-      ARTDADDY_SERVER: https://artdaddy-server.ambitioustree-4d826744.centralindia.azurecontainerapps.io
+      ARTDADDY_SERVER: https://akaru-server.ambitioustree-4d826744.centralindia.azurecontainerapps.io
       # Frozen into the bundle at build time; without it the app boots pointing at
       # http://127.0.0.1:8000 and every backend call fails.
-      VITE_API_BASE_URL: https://artdaddy-server.ambitioustree-4d826744.centralindia.azurecontainerapps.io
+      VITE_API_BASE_URL: https://akaru-server.ambitioustree-4d826744.centralindia.azurecontainerapps.io
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

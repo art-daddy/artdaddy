@@ -14,7 +14,7 @@ function normalize(url: string): string {
 // means a build with no .env still reaches a real server, and every route there requires a
 // session, so an unsigned caller gets 401 rather than anything we pay for.
 const PRODUCTION_API =
-  "https://artdaddy-server.ambitioustree-4d826744.centralindia.azurecontainerapps.io";
+  "https://akaru-server.ambitioustree-4d826744.centralindia.azurecontainerapps.io";
 
 const BUILD_DEFAULT = normalize(import.meta.env.VITE_API_BASE_URL ?? PRODUCTION_API);
 
