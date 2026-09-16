@@ -2,7 +2,7 @@
   "manifest_version": "0.4",
   "name": "artdaddy",
   "display_name": "ArtDaddy",
-  "version": "0.13.0",
+  "version": "0.13.1",
   "description": "Edit your videos with ArtDaddy from Claude Desktop.",
   "long_description": "Connects Claude Desktop to the MCP server inside ArtDaddy, an AI video editor. Claude can read the timeline, cut and arrange clips, generate media, grade colour, and export. ArtDaddy must be running: the bundle talks to it over loopback and does nothing on its own.",
   "icon": "icon.png",
