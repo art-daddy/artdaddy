@@ -202,6 +202,7 @@ export default function MenuBar() {
         ok?: boolean;
         error?: string;
         saved_to?: string;
+        job_id?: string;
         warnings?: string[];
       } | null;
       if (controller.signal.aborted) {
@@ -209,16 +210,28 @@ export default function MenuBar() {
       } else if (!res?.ok) {
         useExportJob.getState().finish({ phase: "failed", error: res?.error ?? "unknown error" });
       } else {
-        useExportJob
-          .getState()
-          // The tool returns a bare filename (it must not leak paths to the model). The menu
-          // already knows the folder the user picked, so report the real destination.
-          .finish({
+        // `export` returns as soon as the render is QUEUED, not when it finishes. Treating that
+        // answer as the outcome jumped the bar to 100% while ffmpeg was still encoding, and the
+        // real progress arriving afterwards was discarded because the store stops applying
+        // updates once the phase leaves `rendering`. So follow the job to its actual end.
+        const settled = res.job_id
+          ? await (await import("../timeline/exportQueue")).whenExportEnds(res.job_id)
+          : null;
+        const job2 = useExportJob.getState();
+        if (settled?.state === "failed") {
+          job2.finish({ phase: "failed", error: settled.error ?? "the render failed" });
+        } else if (settled?.state === "cancelled") {
+          job2.finish({ phase: "cancelled" });
+        } else {
+          job2.finish({
             phase: "done",
             fraction: 1,
             etaSec: 0,
-            savedTo: outputPath ?? res.saved_to ?? null,
+            // The tool returns a bare filename (it must not leak paths to the model). The menu
+            // already knows the folder the user picked, so report the real destination.
+            savedTo: outputPath ?? settled?.destPath ?? res.saved_to ?? null,
           });
+        }
       }
     } catch (e) {
       useExportJob

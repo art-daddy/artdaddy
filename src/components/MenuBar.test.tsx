@@ -60,13 +60,20 @@ import { BRAND } from "../brand";
 import { useExportJob } from "../store/exportJob";
 import { unknownParams } from "../contract/params";
 
-const runTool = vi.fn(async (name: string, args: Record<string, unknown>) => {
+type ToolReply = { ok: boolean; error?: string; saved_to?: string; job_id?: string };
+const runTool = vi.fn(async (name: string, args: Record<string, unknown>): Promise<ToolReply> => {
   const unknown = unknownParams(name, args);
   return unknown.length
     ? { ok: false, error: `${name}: unknown param(s) ${unknown.join(", ")}` }
     : { ok: true, saved_to: "alpha.mp4" };
 });
 vi.mock("../tools/host", () => ({ openToolHost: () => ({ run: runTool }) }));
+
+const whenExportEnds = vi.fn();
+vi.mock("../timeline/exportQueue", async (orig) => ({
+  ...(await orig<Record<string, unknown>>()),
+  whenExportEnds: (id: string) => whenExportEnds(id),
+}));
 
 function Loc() {
   const l = useLocation();
@@ -148,8 +155,60 @@ describe("MenuBar", () => {
     await waitFor(() => expect(screen.getByText(/Saved alpha\.mp4/)).toBeInTheDocument());
   });
 
-  it("sends the chosen delivery settings, not the defaults", async () => {
-    renderBar("/p/test");
+  describe("a queued render is followed to its real end", () => {
+    // `export` returns as soon as the render is QUEUED. Reading that as the outcome put the bar
+    // at 100% and said "Saved" while ffmpeg was still encoding — and told the user their file
+    // was ready even when the render went on to fail.
+    const startExport = async () => {
+      renderBar("/p/test");
+      fireEvent.click(screen.getByRole("button", { name: "File" }));
+      fireEvent.click(screen.getByText("Export Video (.mp4)…"));
+      fireEvent.click(screen.getByRole("button", { name: "Export" }));
+    };
+
+    beforeEach(() => {
+      runTool.mockResolvedValue({ ok: true, job_id: "j1", saved_to: "alpha.mp4" });
+    });
+
+    it("does not claim the file is saved while the render is still going", async () => {
+      let settle: (r: unknown) => void = () => {};
+      whenExportEnds.mockReturnValue(new Promise((r) => (settle = r)));
+      await startExport();
+
+      await waitFor(() => expect(whenExportEnds).toHaveBeenCalledWith("j1"));
+      expect(screen.queryByText(/Saved alpha\.mp4/)).not.toBeInTheDocument();
+      expect(useExportJob.getState().phase).not.toBe("done");
+
+      settle({ state: "done", destPath: "C:/out/alpha.mp4" });
+      await waitFor(() => expect(useExportJob.getState().phase).toBe("done"));
+    });
+
+    it("reports a render that failed AFTER it was queued", async () => {
+      whenExportEnds.mockResolvedValue({ state: "failed", error: "no such encoder" });
+      await startExport();
+
+      await waitFor(() => expect(useExportJob.getState().phase).toBe("failed"));
+      expect(useExportJob.getState().error).toMatch(/no such encoder/);
+      expect(screen.queryByText(/Saved alpha\.mp4/)).not.toBeInTheDocument();
+    });
+
+    it("reports a render cancelled from the queue as cancelled, not delivered", async () => {
+      whenExportEnds.mockResolvedValue({ state: "cancelled" });
+      await startExport();
+
+      await waitFor(() => expect(useExportJob.getState().phase).toBe("cancelled"));
+      expect(screen.queryByText(/Saved alpha\.mp4/)).not.toBeInTheDocument();
+    });
+
+    it("prefers the queue's real destination over the tool's bare filename", async () => {
+      whenExportEnds.mockResolvedValue({ state: "done", destPath: "D:/films/alpha.mp4" });
+      await startExport();
+
+      await waitFor(() => expect(useExportJob.getState().savedTo).toBe("D:/films/alpha.mp4"));
+    });
+  });
+
+  it("sends the chosen delivery settings, not the defaults", async () => {    renderBar("/p/test");
     fireEvent.click(screen.getByRole("button", { name: "File" }));
     fireEvent.click(screen.getByText("Export Video (.mp4)…"));
     fireEvent.change(screen.getByLabelText("resolution"), { target: { value: "720p" } });

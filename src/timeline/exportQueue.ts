@@ -92,6 +92,29 @@ export function subscribeExports(fn: () => void): () => void {
   return () => listeners.delete(fn);
 }
 
+/** Resolve when this job stops running. `submitExport` returns the moment the render is QUEUED,
+ *  so a caller that treats that answer as the finish reports 100% while ffmpeg is still going —
+ *  and the progress the renderer pushes afterwards is dropped, because the job store ignores
+ *  updates once the phase leaves `rendering`. Null means the job is not in the queue, which the
+ *  caller must not read as success. */
+export function whenExportEnds(jobId: string): Promise<ExportRecord | null> {
+  const settled = (r: ExportRecord | undefined) =>
+    r && r.state !== "queued" && r.state !== "running" ? r : null;
+  const now = records.find((x) => x.job_id === jobId);
+  if (!now) return Promise.resolve(null);
+  const already = settled(now);
+  if (already) return Promise.resolve({ ...already });
+
+  return new Promise((resolve) => {
+    const stop = subscribeExports(() => {
+      const done = settled(records.find((x) => x.job_id === jobId));
+      if (!done) return;
+      stop();
+      resolve({ ...done });
+    });
+  });
+}
+
 /** Drop a SETTLED row. A running one is left alone — cancel it first. */
 export function dismissExport(jobId: string): boolean {
   const i = records.findIndex((x) => x.job_id === jobId);

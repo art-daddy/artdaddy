@@ -10,6 +10,7 @@ import {
   listExports,
   manageExportsTool,
   submitExport,
+  whenExportEnds,
   whenExportsSettle,
   ExportRunError,
 } from "./exportQueue";
@@ -100,6 +101,75 @@ afterEach(async () => {
 });
 
 describe("export queue", () => {
+  describe("whenExportEnds", () => {
+    // submitExport answers as soon as the render is QUEUED. A caller that reads that as the
+    // outcome shows 100% while ffmpeg is still encoding, so this is how a caller waits for the
+    // real end without polling.
+    it("stays pending while the render is running, then reports how it ended", async () => {
+      const { fs, store } = make();
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      const sub = await submitExport({
+        store,
+        destPath: DEST,
+        stagePath: STAGE,
+        filename: "final.mp4",
+        run: async () => {
+          await gate;
+          await fs.writeBytes(STAGE, new Uint8Array([1]));
+          return {};
+        },
+      });
+
+      let ended: unknown = "pending";
+      void whenExportEnds(sub.job_id).then((r) => (ended = r));
+      await Promise.resolve();
+      expect(ended, "resolved before the encode finished").toBe("pending");
+
+      release();
+      await whenExportsSettle();
+      await Promise.resolve();
+      expect((ended as { state?: string })?.state).toBe("done");
+    });
+
+    it("reports a render that failed, so a caller cannot call it delivered", async () => {
+      const { store } = make();
+      const sub = await submitExport({
+        store,
+        destPath: DEST,
+        stagePath: STAGE,
+        filename: "final.mp4",
+        run: async () => {
+          throw new Error("no such encoder");
+        },
+      });
+      await whenExportsSettle();
+      const ended = await whenExportEnds(sub.job_id);
+      expect(ended?.state).toBe("failed");
+      expect(ended?.error).toMatch(/no such encoder/);
+    });
+
+    it("answers immediately for a job that already ended", async () => {
+      const { fs, store } = make();
+      const sub = await submitExport({
+        store,
+        destPath: DEST,
+        stagePath: STAGE,
+        filename: "final.mp4",
+        run: async () => {
+          await fs.writeBytes(STAGE, new Uint8Array([1]));
+          return {};
+        },
+      });
+      await whenExportsSettle();
+      expect((await whenExportEnds(sub.job_id))?.state).toBe("done");
+    });
+
+    it("answers null for a job it does not have, rather than hanging forever", async () => {
+      expect(await whenExportEnds("no-such-job")).toBeNull();
+    });
+  });
+
   it("returns before the encode has run", async () => {
     const { fs, store } = make();
     let release!: () => void;
