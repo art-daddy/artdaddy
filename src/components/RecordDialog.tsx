@@ -32,7 +32,7 @@ export default function RecordDialog({
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const recRef = useRef<MediaRecorder | null>(null);
-  const chunks = useRef<Blob[]>([]);
+  const requestRef = useRef(0);
 
   const [cameras, setCameras] = useState<CaptureDevice[]>([]);
   const [mics, setMics] = useState<CaptureDevice[]>([]);
@@ -41,49 +41,91 @@ export default function RecordDialog({
   const [phase, setPhase] = useState<Phase>("idle");
   const [elapsed, setElapsed] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [opening, setOpening] = useState(false);
+  const [ready, setReady] = useState(false);
 
-  const stop = useCallback(() => {
-    recRef.current?.state === "recording" && recRef.current.stop();
-    streamRef.current?.getTracks().forEach((t) => t.stop());
+  const releaseStream = useCallback(() => {
+    streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
+    if (videoRef.current) videoRef.current.srcObject = null;
+    setReady(false);
   }, []);
+
+  const stop = useCallback((save: boolean) => {
+    const recorder = recRef.current;
+    recRef.current = null;
+    if (recorder) {
+      if (!save) {
+        recorder.onstop = null;
+        recorder.ondataavailable = null;
+        recorder.onerror = null;
+      }
+      if (recorder.state !== "inactive") recorder.stop();
+    }
+    releaseStream();
+  }, [releaseStream]);
 
   /** (Re)open the camera. Also refreshes the device lists, which only carry labels once a
    *  stream has been granted. */
   const openStream = useCallback(async (camera: string, mic: string) => {
+    const request = ++requestRef.current;
+    releaseStream();
     setError(null);
+    setOpening(true);
     try {
-      streamRef.current?.getTracks().forEach((t) => t.stop());
-      const stream = await navigator.mediaDevices.getUserMedia({
+      const media = navigator.mediaDevices;
+      if (!media?.getUserMedia || typeof MediaRecorder === "undefined") {
+        throw new Error("Camera recording is unavailable in this window. Use the installed app or a supported browser.");
+      }
+      const stream = await media.getUserMedia({
         video: camera ? { deviceId: { exact: camera } } : true,
         audio: mic ? { deviceId: { exact: mic } } : true,
       });
+      if (request !== requestRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
       streamRef.current = stream;
       if (videoRef.current) videoRef.current.srcObject = stream;
-      const { cameras: cams, mics: ms } = await listCaptureDevices(navigator.mediaDevices);
+      const { cameras: cams, mics: ms } = await listCaptureDevices(media);
+      if (request !== requestRef.current) return;
       setCameras(cams);
       setMics(ms);
-      setCameraId((c) => c || (cams[0]?.deviceId ?? ""));
-      setMicId((m) => m || (ms[0]?.deviceId ?? ""));
+      setCameraId(camera || cams[0]?.deviceId || "");
+      setMicId(mic || ms[0]?.deviceId || "");
+      setReady(true);
     } catch (e) {
+      if (request !== requestRef.current) return;
+      releaseStream();
       // A refused permission is the common case and reads as a bug unless it is named.
       setError(
-        e instanceof DOMException && (e.name === "NotAllowedError" || e.name === "NotFoundError")
-          ? "No camera available, or access was refused. Check your system privacy settings."
+        e instanceof DOMException && e.name === "NotAllowedError"
+          ? "Camera or microphone access was refused. Allow ArtDaddy in your system privacy settings, then retry."
+          : e instanceof DOMException && e.name === "NotFoundError"
+            ? "No camera or microphone was found. Connect a device, then retry."
           : `Could not open the camera: ${e instanceof Error ? e.message : String(e)}`,
       );
+    } finally {
+      if (request === requestRef.current) setOpening(false);
     }
-  }, []);
+  }, [releaseStream]);
 
   useEffect(() => {
     if (!open) return;
+    setCameras([]);
+    setMics([]);
+    setCameraId("");
+    setMicId("");
+    setPhase("idle");
+    setElapsed(0);
     void openStream("", "");
     return () => {
-      stop();
+      ++requestRef.current;
+      stop(false);
       setPhase("idle");
       setElapsed(0);
     };
-  }, [open, openStream, stop]);
+  }, [open, projectDir, openStream, stop]);
 
   useEffect(() => {
     if (phase !== "recording") return;
@@ -94,47 +136,71 @@ export default function RecordDialog({
 
   const begin = (): void => {
     const stream = streamRef.current;
-    if (!stream) return;
-    const mime = pickRecordingMime((t) => MediaRecorder.isTypeSupported(t));
-    if (!mime) {
-      setError("This system cannot record video in a format the editor can read.");
-      return;
-    }
-    chunks.current = [];
-    let held = 0;
-    const rec = new MediaRecorder(stream, { mimeType: mime });
-    rec.ondataavailable = (e) => {
-      if (!e.data.size) return;
-      chunks.current.push(e.data);
-      held += e.data.size;
-      // The take is buffered in this heap, so it has to stop itself before it can crash the
-      // app. Stopping saves what was captured rather than discarding an hour of it.
-      if (held >= MAX_RECORDING_BYTES && rec.state === "recording") {
-        setError("Reached the maximum recording length — saving what was captured.");
-        rec.stop();
+    if (!stream || !ready || recRef.current || !projectDir) return;
+    const request = requestRef.current;
+    try {
+      const mime = pickRecordingMime((type) => MediaRecorder.isTypeSupported(type));
+      if (!mime) {
+        setError("This system cannot record video in a format the editor can read.");
+        return;
       }
-    };
-    rec.onstop = () => void finish(mime);
-    recRef.current = rec;
-    rec.start(1000); // timeslice: a crash mid-recording still leaves the chunks so far
-    setPhase("recording");
+      const chunks: Blob[] = [];
+      let held = 0;
+      const rec = new MediaRecorder(stream, { mimeType: mime });
+      rec.ondataavailable = (event) => {
+        if (request !== requestRef.current || !event.data.size) return;
+        chunks.push(event.data);
+        held += event.data.size;
+        if (held >= MAX_RECORDING_BYTES && rec.state === "recording") {
+          setError("Reached the maximum recording length — saving what was captured.");
+          stop(true);
+        }
+      };
+      rec.onstop = () => {
+        if (request !== requestRef.current) return;
+        recRef.current = null;
+        releaseStream();
+        void finish(chunks, rec.mimeType || mime, request);
+      };
+      rec.onerror = () => {
+        if (request !== requestRef.current) return;
+        stop(false);
+        setPhase("idle");
+        setError("Recording failed. Check your camera and microphone, then retry.");
+      };
+      recRef.current = rec;
+      rec.start(1000);
+      setElapsed(0);
+      setPhase("recording");
+    } catch (e) {
+      stop(false);
+      setError(`Could not start recording: ${e instanceof Error ? e.message : String(e)}`);
+    }
   };
 
-  const finish = async (mime: string): Promise<void> => {
+  const finish = async (chunks: Blob[], mime: string, request: number): Promise<void> => {
     setPhase("saving");
     try {
       if (!projectDir) throw new Error("open a project first");
-      const blob = new Blob(chunks.current, { type: mime });
+      const blob = new Blob(chunks, { type: mime });
       const bytes = new Uint8Array(await blob.arrayBuffer());
+      if (request !== requestRef.current) return;
       const ctx = makeTauriContext(projectDir);
       const saved = await saveRecording(ctx, bytes, mime);
       notifyLibraryChanged();
       useProjectNotice.getState().notify(`Saved ${saved.filename} to the library.`);
-      onClose();
+      if (request === requestRef.current) onClose();
     } catch (e) {
+      if (request !== requestRef.current) return;
       setError(`Could not save the recording: ${e instanceof Error ? e.message : String(e)}`);
       setPhase("idle");
     }
+  };
+
+  const close = () => {
+    ++requestRef.current;
+    stop(false);
+    onClose();
   };
 
   if (!open) return null;
@@ -160,7 +226,8 @@ export default function RecordDialog({
           />
         </div>
 
-        {error && <p className="mt-2 text-[11px] text-amber-400">{error}</p>}
+        {opening && <p role="status" className="mt-2 text-[11px] text-neutral-400">Opening camera...</p>}
+        {error && <p role="alert" className="mt-2 text-[11px] text-amber-400">{error}</p>}
 
         <div className="mt-3 grid grid-cols-2 gap-3">
           <label className="text-[11px] text-neutral-400">
@@ -168,7 +235,7 @@ export default function RecordDialog({
             <select
               aria-label="camera"
               value={cameraId}
-              disabled={recording || phase === "saving"}
+              disabled={opening || recording || phase === "saving" || !ready}
               onChange={(e) => {
                 setCameraId(e.target.value);
                 void openStream(e.target.value, micId);
@@ -187,7 +254,7 @@ export default function RecordDialog({
             <select
               aria-label="microphone"
               value={micId}
-              disabled={recording || phase === "saving"}
+              disabled={opening || recording || phase === "saving" || !ready}
               onChange={(e) => {
                 setMicId(e.target.value);
                 void openStream(cameraId, e.target.value);
@@ -209,18 +276,24 @@ export default function RecordDialog({
             {recording || phase === "saving" ? elapsedLabel(elapsed) : ""}
           </span>
           <div className="flex gap-2">
-            <Button variant="ghost" onClick={onClose} disabled={phase === "saving"}>
+            {error && !ready && !opening && phase === "idle" && (
+              <Button onClick={() => void openStream(cameraId, micId)}>Retry</Button>
+            )}
+            <Button variant="ghost" onClick={close} disabled={phase === "saving"}>
               {recording ? "Discard" : "Close"}
             </Button>
             {recording ? (
-              <Button variant="primary" onClick={() => stop()}>
+              <Button variant="primary" onClick={() => {
+                setPhase("saving");
+                stop(true);
+              }}>
                 Stop &amp; save
               </Button>
             ) : (
               <Button
                 variant="primary"
                 onClick={begin}
-                disabled={phase === "saving" || !streamRef.current}
+                disabled={phase === "saving" || opening || !ready || !projectDir}
               >
                 {phase === "saving" ? "Saving…" : "Record"}
               </Button>

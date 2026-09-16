@@ -58,8 +58,14 @@ import MenuBar from "./MenuBar";
 import { usePanes } from "../store/panes";
 import { BRAND } from "../brand";
 import { useExportJob } from "../store/exportJob";
+import { unknownParams } from "../contract/params";
 
-const runTool = vi.fn(async () => ({ ok: true, saved_to: "alpha.mp4" }));
+const runTool = vi.fn(async (name: string, args: Record<string, unknown>) => {
+  const unknown = unknownParams(name, args);
+  return unknown.length
+    ? { ok: false, error: `${name}: unknown param(s) ${unknown.join(", ")}` }
+    : { ok: true, saved_to: "alpha.mp4" };
+});
 vi.mock("../tools/host", () => ({ openToolHost: () => ({ run: runTool }) }));
 
 function Loc() {
@@ -135,7 +141,7 @@ describe("MenuBar", () => {
     await waitFor(() =>
       expect(runTool).toHaveBeenCalledWith(
         "export",
-        expect.objectContaining({ format: "mp4", resolution: "source", quality: "medium" }),
+        { resolution: "source", quality: "medium" },
         expect.anything(),
       ),
     );

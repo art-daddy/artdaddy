@@ -224,6 +224,17 @@ jobs:
               if [ -e "$APP/Contents/Resources/$p" ]; then echo "  $p: ok"; else
                 echo "::error::resource missing from the dmg: $p"; FAIL=1; fi
             done
+            # WKWebView does not expose navigator.mediaDevices AT ALL unless the bundle declares
+            # why it wants the camera, so Record failed with "undefined is not an object" rather
+            # than with a permission prompt. tauri.conf.json naming an Info.plist is not evidence
+            # the keys survived the merge into the bundle - read them back out of the shipped app.
+            for k in NSCameraUsageDescription NSMicrophoneUsageDescription; do
+              if /usr/libexec/PlistBuddy -c "Print :$k" "$APP/Contents/Info.plist" >/dev/null 2>&1; then
+                echo "  $k: ok"
+              else
+                echo "::error::$k missing from the shipped Info.plist - Record cannot open the camera"; FAIL=1
+              fi
+            done
             # Run the WHOLE browser path the app uses, out of the mounted image: the bundled Node
             # sidecar executing the bundled script, which resolves playwright-core and the chromium
             # shell from its own location and opens a persistent context. Requiring playwright

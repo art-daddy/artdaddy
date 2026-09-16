@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSCameraUsageDescription</key>
+  <string>ArtDaddy uses your camera to record video into your project when you choose Record.</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>ArtDaddy uses your microphone to record audio with your video when you choose Record.</string>
+</dict>
+</plist>

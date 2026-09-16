@@ -4,27 +4,7 @@
 // bundle boots. A bad dynamic import, a circular module, a CSP rule or a broken
 // chunk split renders a blank page that the whole suite still calls green. This
 // loads the real app in real Chromium and insists it mounted and stayed up.
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-
 import { expect, test, type ConsoleMessage } from "@playwright/test";
-
-/** What VITE_API_BASE_URL this bundle was built with. Vite loads .env in the dev-server process,
- *  not in this one, so read the same files it would (its precedence: .env.local wins). */
-function configuredApiBase(): string {
-  if (process.env.VITE_API_BASE_URL?.trim()) return process.env.VITE_API_BASE_URL.trim();
-  for (const file of [".env.local", ".env"]) {
-    try {
-      const m = /^\s*VITE_API_BASE_URL\s*=\s*(.+?)\s*$/m.exec(
-        readFileSync(join(process.cwd(), file), "utf8"),
-      );
-      if (m) return m[1].replace(/^["']|["']$/g, "").trim();
-    } catch {
-      /* absent -> try the next one */
-    }
-  }
-  return "";
-}
 
 /** Console noise that is expected with no backend running. */
 const BENIGN =
@@ -62,56 +42,23 @@ test.describe("app boot", () => {
     });
   });
 
-  // 0.3.0 shipped a dmg that asked every user's own machine for the tool catalog, because
-  // VITE_API_BASE_URL is frozen at build time and .env is gitignored. Grepping the bundle for
-  // the URL only proves the string is present; this proves the running app SENDS the request
-  // and the server ANSWERS it. main.tsx calls loadContract() on boot, so it always fires.
-  test("asks the configured backend for the tool catalog, and gets it", async ({ page }) => {
-    // A cold vite server spends ~40s transforming modules before the app boots at all.
-    test.setTimeout(150_000);
-
-    const CATALOG = /\/contract\/tools\b/;
+  test("can use the tool catalogue without requesting it from a server", async ({ page }) => {
     const sent: string[] = [];
-    const failed: string[] = [];
-
-    page.on("request", (r) => {
-      if (CATALOG.test(r.url())) sent.push(r.url());
+    page.on("request", (request) => {
+      if (/\/contract\/tools\b/.test(request.url())) sent.push(request.url());
     });
-    page.on("requestfailed", (r) => {
-      if (CATALOG.test(r.url())) failed.push(`${r.url()} (${r.failure()?.errorText ?? "unknown"})`);
-    });
-
-    // Registered BEFORE goto: on a warm server the catalog comes back while goto is still
-    // resolving, and a waiter created afterwards would sit there missing it.
-    const answered = page
-      .waitForResponse((r) => CATALOG.test(r.url()), { timeout: 120_000 })
-      .catch(() => null);
-
+    await page.route("**/contract/tools**", (route) => route.abort());
     await page.goto("/");
-    await expect.poll(() => sent.length, { timeout: 60_000 }).toBeGreaterThan(0);
-
-    // The 0.3.0 defect was VITE_API_BASE_URL not REACHING the build, so the bundle fell back to
-    // the localhost default. "is not localhost" cannot express that: a developer whose .env
-    // legitimately points at the local server is indistinguishable from the bug, and the guard
-    // fires on every local run. Compare against the value this build was actually given.
-    const configured = configuredApiBase();
-    if (configured) {
-      expect(
-        new URL(sent[0]).origin,
-        `the bundle asked ${sent[0]} but was built with VITE_API_BASE_URL=${configured}: the ` +
-          "env did not reach this build, which is exactly the defect that shipped in 0.3.0",
-      ).toBe(new URL(configured).origin);
-    } else {
-      expect(
-        sent[0],
-        "no VITE_API_BASE_URL was configured, so the bundle fell back to the localhost default",
-      ).not.toMatch(/\/\/(127\.0\.0\.1|localhost|\[::1\]):8000\//);
-    }
-
-    const res = await answered;
-    expect(failed, `the request to ${sent[0]} never completed`).toEqual([]);
-    expect(res, `no response came back from ${sent[0]}`).not.toBeNull();
-    expect(res!.status(), `${res!.url()} did not answer 200`).toBe(200);
+    const validation = await page.evaluate(async () => {
+      const { validateToolArgs } = await import("/src/contract/params.ts");
+      return {
+        valid: validateToolArgs("export", { output_path: "preview.mp4" }),
+        obsolete: validateToolArgs("export", { format: "mp4" }),
+      };
+    });
+    expect(validation.valid).toEqual({ ok: true });
+    expect(validation.obsolete.ok).toBe(false);
+    expect(sent).toEqual([]);
   });
 
   test("survives a hard reload (no boot-order dependence on a warm module cache)", async ({

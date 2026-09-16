@@ -192,7 +192,6 @@ export default function MenuBar() {
       const res = (await openToolHost(projectId).run(
         "export",
         {
-          format: "mp4",
           resolution: settings.resolution,
           quality: settings.quality,
           ...(settings.fps === null ? {} : { fps: settings.fps }),
