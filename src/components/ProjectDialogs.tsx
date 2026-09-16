@@ -25,6 +25,7 @@ export function NewProjectDialog({
   const [aspect, setAspect] = useState("9:16");
   const [where, setWhere] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState("");
   const pickWhere = async () => {
     const { open } = await import("@tauri-apps/plugin-dialog");
     const dir = await open({ directory: true, title: "Where to keep this project" });
@@ -33,6 +34,7 @@ export function NewProjectDialog({
   const submit = async () => {
     if (!name.trim() || busy) return;
     setBusy(true);
+    setFailed("");
     try {
       // A chosen folder is the PARENT; the project gets its own folder inside it, so
       // picking Documents twice does not put two projects in one directory.
@@ -42,6 +44,10 @@ export function NewProjectDialog({
       const p = await create(name.trim(), aspect, undefined, at);
       onClose();
       onDone(p.id);
+    } catch (e) {
+      // Without this the rejection escaped, the dialog stayed open and nothing was shown, so a
+      // permission error or an unwritable location read as a dead button the user pressed again.
+      setFailed(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
@@ -84,6 +90,11 @@ export function NewProjectDialog({
           </Button>
         </div>
       </div>
+      {failed && (
+        <p role="alert" className="mt-3 text-xs text-red-400">
+          Could not create the project: {failed}
+        </p>
+      )}
     </Overlay>
   );
 }
