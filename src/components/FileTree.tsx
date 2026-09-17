@@ -30,7 +30,14 @@ function readView(): LibView {
 // turn writes new files) so renders/downloads/transcripts appear automatically.
 // Library media shows as a thumbnail grid by default; a right-click menu toggles
 // between Thumbnails and List (and offers Import).
-export default function FileTree({ projectId }: { projectId: string }) {
+export default function FileTree({
+  projectId,
+  onHide,
+}: {
+  projectId: string;
+  /** Renders the pane's hide button in this header, so the library has only one. */
+  onHide?: () => void;
+}) {
   const session = useChat((s) => s.session);
   const store = useEditor((s) => s.store);
   const [tree, setTree] = useState<FileNode[]>([]);
@@ -268,6 +275,16 @@ export default function FileTree({ projectId }: { projectId: string }) {
           >
             ⟳
           </button>
+          {onHide && (
+            <button
+              onClick={onHide}
+              className="rounded px-1.5 py-0.5 text-sm leading-none text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200"
+              title="Hide Library"
+              aria-label="hide Library"
+            >
+              ×
+            </button>
+          )}
         </div>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto pb-2 text-xs">
