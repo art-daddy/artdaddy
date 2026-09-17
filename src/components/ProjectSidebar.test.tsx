@@ -18,7 +18,7 @@ describe("ProjectSidebar", () => {
       </MemoryRouter>,
     );
     expect(screen.getByText("file-tree:abc")).toBeInTheDocument();
-    expect(screen.getByText("Files")).toBeInTheDocument();
+    expect(screen.getByText("Library")).toBeInTheDocument();
   });
 
   it("prompts to open a project when none is active", () => {

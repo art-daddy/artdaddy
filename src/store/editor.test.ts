@@ -175,6 +175,21 @@ describe("editor store", () => {
     expect(useEditor.getState().timeline?.canvas.width).not.toBe(4242);
   });
 
+  // A tab addresses media through THIS project's store, so one carried across a switch would
+  // render project A's clip against project B's library -- a broken tab, or worse, a hit on a
+  // ref that happens to exist in both.
+  it("carries no preview tab across a project switch", async () => {
+    const { store: s1 } = seedStore(P1);
+    const { store: s2 } = seedStore(P2);
+    setProjectStoreFactory((dir) => (dir.endsWith("/p1") ? s1 : s2));
+    await useEditor.getState().load("p1");
+    useEditor.getState().openMediaTab("a.mp4", { pin: true });
+    expect(useEditor.getState().activeMediaTab).toBe("a.mp4");
+    await useEditor.getState().load("p2");
+    expect(useEditor.getState().mediaTabs).toEqual([]);
+    expect(useEditor.getState().activeMediaTab).toBeNull();
+  });
+
   it("a superseded load does NOT clobber the winning project's store (F5)", async () => {
     const { store: s1 } = seedStore(P1);
     const { store: s2 } = seedStore(P2);
@@ -675,10 +690,8 @@ describe("editor store — remaining view state + listeners", () => {
     expect(new Set(useEditor.getState().selectedIds)).toEqual(new Set([id1, id2]));
   });
 
-  it("setSelectedLibraryRef / setSelectedRange (ordered+clamped) / setTrackScale (clamped)", () => {
+  it("setSelectedRange (ordered+clamped) / setTrackScale (clamped)", () => {
     const st = useEditor.getState();
-    st.setSelectedLibraryRef("library/x.mp4");
-    expect(useEditor.getState().selectedLibraryRef).toBe("library/x.mp4");
     st.setSelectedRange({ startFrame: 50, endFrame: 10 }); // reversed -> ordered
     expect(useEditor.getState().selectedRange).toEqual({ startFrame: 10, endFrame: 50 });
     st.setSelectedRange({ startFrame: 5, endFrame: 5 }); // empty -> null

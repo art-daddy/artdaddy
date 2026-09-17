@@ -11,7 +11,7 @@ vi.mock("react-resizable-panels", () => ({
   Panel: ({ children }: any) => <div>{children}</div>,
   PanelResizeHandle: () => <div />,
 }));
-vi.mock("./LeftColumn", () => ({ default: () => <div>leftcol</div> }));
+vi.mock("./ProjectSidebar", () => ({ default: () => <div>library</div> }));
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 vi.mock("./StagePanel", () => ({ default: ({ projectId }: any) => <div>stage:{projectId}</div> }));
 vi.mock("./ChatView", () => ({ default: () => <div>chat</div> }));
@@ -66,12 +66,12 @@ afterEach(() => vi.clearAllMocks());
 describe("hiding panels", () => {
   it("shows all three hideable panes by default", async () => {
     await showProject();
-    for (const t of ["leftcol", "inspector", "chat"])
+    for (const t of ["library", "inspector", "chat"])
       expect(screen.getByText(t)).toBeInTheDocument();
   });
 
   it.each([
-    ["library", "leftcol"],
+    ["library", "library"],
     ["inspector", "inspector"],
     ["chat", "chat"],
   ] as const)("removes %s from the tree when hidden", async (id, text) => {

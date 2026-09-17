@@ -8,7 +8,7 @@ vi.mock("react-resizable-panels", () => ({
   Panel: ({ children }: any) => <div>{children}</div>,
   PanelResizeHandle: () => <div />,
 }));
-vi.mock("./LeftColumn", () => ({ default: () => <div>leftcol</div> }));
+vi.mock("./ProjectSidebar", () => ({ default: () => <div>library</div> }));
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 vi.mock("./StagePanel", () => ({ default: ({ projectId }: any) => <div>stage:{projectId}</div> }));
 vi.mock("./ChatView", () => ({ default: () => <div>chat</div> }));
@@ -55,13 +55,13 @@ afterEach(() => vi.clearAllMocks());
 describe("Shell", () => {
   it("opens the document and reveals the panes once the project loads", async () => {
     render(<Shell projectId="p1" />);
-    expect(screen.getByText("leftcol")).toBeInTheDocument();
     // open() now runs AFTER the close-before-open barrier + the failed-close veto (findings #3/#4), so
     // it's awaited rather than synchronous.
     await waitFor(() => expect(openMock).toHaveBeenCalledWith("p1"));
     // The panes reveal only AFTER open() + the document open resolve (RF7), so they never
     // flash the previous project's store state.
     await waitFor(() => expect(screen.getByText("stage:p1")).toBeInTheDocument());
+    expect(screen.getByText("library")).toBeInTheDocument();
     expect(screen.getByText("chat")).toBeInTheDocument();
     expect(openDocMock).toHaveBeenCalledWith("p1");
   });
@@ -70,14 +70,18 @@ describe("Shell", () => {
     let releaseOpen: () => void = () => {};
     openMock.mockReturnValueOnce(new Promise<void>((r) => (releaseOpen = () => r())));
     render(<Shell projectId="p1" />);
-    // While open() is pending, NO stage/chat pane is mounted (no flash of the previous
-    // project's store state) -- only the placeholder, and the document is not opened yet.
+    // While open() is pending, NO pane that describes this project's data is mounted (no flash
+    // of the previous project's store state) -- only the placeholder, and the document is not
+    // opened yet. The LIBRARY is included: a file tree mounted ahead of the store is what let an
+    // import land in the PREVIOUS project (editor.ts Q1).
     expect(screen.getByText(/Opening project/)).toBeInTheDocument();
     expect(screen.queryByText("stage:p1")).not.toBeInTheDocument();
+    expect(screen.queryByText("library")).not.toBeInTheDocument();
     expect(screen.queryByText("chat")).not.toBeInTheDocument();
     expect(openDocMock).not.toHaveBeenCalled();
     releaseOpen();
     await waitFor(() => expect(screen.getByText("stage:p1")).toBeInTheDocument());
+    expect(screen.getByText("library")).toBeInTheDocument();
     expect(screen.getByText("chat")).toBeInTheDocument();
   });
 
@@ -87,6 +91,7 @@ describe("Shell", () => {
     // A failed open must surface an error, NOT reveal a null / stale workspace.
     expect(await screen.findByText(/Couldn't open this project/)).toBeInTheDocument();
     expect(screen.queryByText("stage:p1")).not.toBeInTheDocument();
+    expect(screen.queryByText("library")).not.toBeInTheDocument();
     expect(screen.queryByText("chat")).not.toBeInTheDocument();
   });
 
@@ -97,6 +102,7 @@ describe("Shell", () => {
     // The refusal message replaces the editor, and the chat pane is gone.
     expect(await screen.findByText(msg)).toBeInTheDocument();
     expect(screen.queryByText("stage:too-new")).not.toBeInTheDocument();
+    expect(screen.queryByText("library")).not.toBeInTheDocument();
     expect(screen.queryByText("chat")).not.toBeInTheDocument();
     // Crucially: no document (timeline/chat/tool host) is opened for a refused project.
     expect(openDocMock).not.toHaveBeenCalled();
@@ -107,7 +113,7 @@ describe("Shell", () => {
     expect(screen.getByText("project-picker")).toBeInTheDocument();
     // The reported bug: a LIBRARY with nothing to list and a FILES tree of no project used to
     // render anyway. No pane that describes a project may mount without one.
-    expect(screen.queryByText("leftcol")).not.toBeInTheDocument();
+    expect(screen.queryByText("library")).not.toBeInTheDocument();
     expect(screen.queryByText("chat")).not.toBeInTheDocument();
     expect(screen.queryByText(/stage:/)).not.toBeInTheDocument();
     expect(openMock).not.toHaveBeenCalled();

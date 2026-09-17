@@ -9,17 +9,18 @@ import { usePanes } from "../store/panes";
 import { useProjects } from "../store/projects";
 import ChatView from "./ChatView";
 import Inspector from "./Inspector";
-import LeftColumn from "./LeftColumn";
 import ProjectPicker from "./ProjectPicker";
+import ProjectSidebar from "./ProjectSidebar";
 import StagePanel from "./StagePanel";
 import TimelineEditor from "./TimelineEditor";
 import { Empty } from "./ui";
 
-// Resizable workspace (Premiere-style): source monitor + library (left) · center
-// stack [preview + clip properties on top, full-width timeline below] · chat
-// (right). Owns the per-project effects (open, load chat, load the editor
-// timeline, start the local tool runtime) so they run once regardless of which
-// panes re-render.
+// Resizable workspace: top row [library · tabbed preview · clip properties], full-width
+// timeline below it, chat on the right. The source monitor is a TAB of the preview rather
+// than a pane of its own, which is what frees the top-left for the library and lets the
+// timeline span the whole window. Owns the per-project effects (open, load chat, load the
+// editor timeline, start the local tool runtime) so they run once regardless of which panes
+// re-render.
 export default function Shell({ projectId }: { projectId: string | null }) {
   const open = useProjects((s) => s.open);
   const nav = useNavigate();
@@ -107,33 +108,33 @@ export default function Shell({ projectId }: { projectId: string | null }) {
   if (!projectId) return <ProjectPicker />;
 
   return (
-    <PanelGroup direction="horizontal" className="h-full" autoSaveId="artdaddy-layout-v3">
-      {visible.library && (
-        <>
-          <Panel defaultSize={20} minSize={12} maxSize={42} className="min-w-0" order={1}>
-            <LeftColumn onHide={() => hide("library", false)} />
-          </Panel>
-          <Handle />
-        </>
-      )}
-      <Panel defaultSize={60} minSize={30} className="min-w-0" order={2}>
+    <PanelGroup direction="horizontal" className="h-full" autoSaveId="artdaddy-layout-v4">
+      <Panel defaultSize={80} minSize={40} className="min-w-0" order={1}>
         {openError ? (
           <Empty>{openError}</Empty>
         ) : !ready ? (
           <Empty>Opening project…</Empty>
         ) : (
-          // Center: preview + clip properties share the top row (both at preview
-          // height); the timeline spans the full width below them.
-          <PanelGroup direction="vertical" className="h-full" autoSaveId="artdaddy-stage-v2">
+          // Library, preview and clip properties share the top row; the timeline spans the
+          // full width below all three.
+          <PanelGroup direction="vertical" className="h-full" autoSaveId="artdaddy-main-v1">
             <Panel defaultSize={58} minSize={22} className="min-h-0">
-              <PanelGroup direction="horizontal" className="h-full" autoSaveId="artdaddy-stage-top">
-                <Panel defaultSize={72} minSize={40} className="min-w-0" order={1}>
+              <PanelGroup direction="horizontal" className="h-full" autoSaveId="artdaddy-top-v1">
+                {visible.library && (
+                  <>
+                    <Panel defaultSize={22} minSize={12} maxSize={42} className="min-w-0" order={1}>
+                      <ProjectSidebar onHide={() => hide("library", false)} />
+                    </Panel>
+                    <Handle />
+                  </>
+                )}
+                <Panel defaultSize={50} minSize={30} className="min-w-0" order={2}>
                   <StagePanel projectId={projectId} />
                 </Panel>
                 {visible.inspector && (
                   <>
                     <Handle />
-                    <Panel defaultSize={28} minSize={16} maxSize={46} className="min-w-0" order={2}>
+                    <Panel defaultSize={28} minSize={16} maxSize={46} className="min-w-0" order={3}>
                       <Inspector onHide={() => hide("inspector", false)} />
                     </Panel>
                   </>
@@ -154,7 +155,7 @@ export default function Shell({ projectId }: { projectId: string | null }) {
       {visible.chat && (
         <>
           <Handle />
-          <Panel defaultSize={20} minSize={14} className="min-w-0" order={3}>
+          <Panel defaultSize={20} minSize={14} className="min-w-0" order={2}>
             {ready ? <ChatView onHide={() => hide("chat", false)} /> : null}
           </Panel>
         </>

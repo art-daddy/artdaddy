@@ -3,12 +3,13 @@ import { useEffect, useRef, useState } from "react";
 import { resolvePreviewUrl } from "../preview/resolve";
 import { kindOf } from "../media/formats";
 import { useEditor } from "../store/editor";
-import { Empty, cn } from "./ui";
+import { cn } from "./ui";
 
-// Source monitor (Premiere-style): previews the library clip selected in the
-// file tree, independent of the timeline/program monitor. Video + audio use a
-// transport (play + scrub + time) styled to match the live preview; images
-// render full-frame; audio shows a music icon. Video uses the H.264 preview
+// Source monitor (Premiere-style): previews one library clip, independent of the
+// timeline/program monitor. It renders inside the preview pane's tab strip, so the
+// tab owns which ref is showing and this component never re-derives it. Video +
+// audio use a transport (play + scrub + time) styled to match the live preview;
+// images render full-frame; audio shows a music icon. Video uses the H.264 preview
 // proxy when present so non-web codecs (HEVC/ProRes) still play.
 
 function fmt(t: number): string {
@@ -102,8 +103,8 @@ function AVPlayer({ url, kind }: { url: string; kind: "video" | "audio" }) {
   );
 }
 
-export default function SourceMonitor() {
-  const ref = useEditor((s) => s.selectedLibraryRef);
+export default function SourceMonitor({ mediaRef }: { mediaRef: string }) {
+  const ref = mediaRef;
   const store = useEditor((s) => s.store);
   const [url, setUrl] = useState<string | null>(null);
   // The ref may be a bare library id (external assets are keyed by id), which has no
@@ -111,7 +112,7 @@ export default function SourceMonitor() {
   const [resolved, setResolved] = useState<string>("");
 
   useEffect(() => {
-    if (!ref || !store) {
+    if (!store) {
       setUrl(null);
       setResolved("");
       return;
@@ -129,36 +130,20 @@ export default function SourceMonitor() {
     };
   }, [ref, store]);
 
-  const name = ref ? ref.split("/").pop() : "";
-  const probe = resolved || ref || "";
-  const kind = !ref ? null : (kindOf(probe) ?? "other");
+  const name = ref.split("/").pop() ?? ref;
+  const kind = kindOf(resolved || ref) ?? "other";
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex items-center gap-2 px-3 py-1.5 text-[10px] uppercase tracking-wider text-neutral-500">
-        <span className="shrink-0">Source</span>
-        {name && (
-          <span className="truncate normal-case text-neutral-400" title={ref ?? undefined}>
-            {name}
-          </span>
-        )}
-      </div>
-      <div className="flex min-h-0 flex-1 flex-col items-center justify-center bg-black/40 p-2">
-        {!ref ? (
-          <Empty>Click a library clip to preview it here.</Empty>
-        ) : url === null ? (
+      <div className="flex min-h-0 flex-1 flex-col items-center justify-center bg-black p-2">
+        {url === null ? (
           <p className="text-xs text-neutral-600">Loading…</p>
         ) : url === "" ? (
           <p className="text-xs text-neutral-600">Couldn't resolve this file.</p>
         ) : kind === "video" || kind === "audio" ? (
           <AVPlayer key={url} url={url} kind={kind} />
         ) : kind === "image" ? (
-          <img
-            key={url}
-            src={url}
-            alt={name ?? ""}
-            className="max-h-full max-w-full object-contain"
-          />
+          <img key={url} src={url} alt={name} className="max-h-full max-w-full object-contain" />
         ) : (
           <p className="text-xs text-neutral-600">No preview for this file type.</p>
         )}

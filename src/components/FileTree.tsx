@@ -429,7 +429,7 @@ function tileKind(name: string): string {
 }
 
 // One library clip as a thumbnail tile: the generated poster (video/image) or a
-// kind icon, clickable to preview it in the source monitor and draggable to the
+// kind icon, clickable to preview it in a stage tab and draggable to the
 // timeline (same source payload as the list rows).
 function LibraryTile({
   node,
@@ -440,14 +440,15 @@ function LibraryTile({
   store: ProjectStoreAccess | null;
   onItemMenu?: (e: React.MouseEvent, node: FileNode) => void;
 }) {
-  const setSel = useEditor((s) => s.setSelectedLibraryRef);
-  const selected = useEditor((s) => s.selectedLibraryRef);
+  const openTab = useEditor((s) => s.openMediaTab);
+  const selected = useEditor((s) => s.activeMediaTab);
   const isSel = selected === node.path;
   const kind = tileKind(node.name);
   return (
     <button
       onPointerDown={(e) => dragToTimeline(e, node)}
-      onClick={() => setSel(node.path)}
+      onClick={() => openTab(node.path)}
+      onDoubleClick={() => openTab(node.path, { pin: true })}
       onContextMenu={(e) => onItemMenu?.(e, node)}
       title={node.name}
       className={cn(
@@ -513,8 +514,8 @@ function Node({
   onItemMenu?: (e: React.MouseEvent, node: FileNode) => void;
 }) {
   const [open, setOpen] = useState(depth < 1);
-  const setSel = useEditor((s) => s.setSelectedLibraryRef);
-  const selected = useEditor((s) => s.selectedLibraryRef);
+  const openTab = useEditor((s) => s.openMediaTab);
+  const selected = useEditor((s) => s.activeMediaTab);
   const pad = { paddingLeft: `${8 + depth * 12}px` };
   if (node.type === "dir") {
     return (
@@ -540,7 +541,8 @@ function Node({
     <div
       style={pad}
       onPointerDown={media ? (e) => dragToTimeline(e, node) : undefined}
-      onClick={media ? () => setSel(node.path) : undefined}
+      onClick={media ? () => openTab(node.path) : undefined}
+      onDoubleClick={media ? () => openTab(node.path, { pin: true }) : undefined}
       onContextMenu={media && onItemMenu ? (e) => onItemMenu(e, node) : undefined}
       className={cn(
         "flex items-center gap-1 py-0.5 text-neutral-400",

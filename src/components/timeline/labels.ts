@@ -6,10 +6,14 @@ export function clipId(c: Clip, fallback: string): string {
   return String(c.id ?? fallback);
 }
 
-/** Human label for a clip: the text content for text clips, else the media's name.
- *  A clip stores a bare library id, so the readable name comes from the catalog
- *  (`names`); anything unresolved falls back to the ref's last path segment, which
- *  is what legacy path-shaped refs carried. */
+/** Human label for a library ref. A clip stores a bare library id, so the readable
+ *  name comes from the catalog (`names`); anything unresolved falls back to the ref's
+ *  last path segment, which is what legacy path-shaped refs carried. */
+export function mediaLabel(ref: string, names?: Record<string, string>): string {
+  return names?.[ref] ?? ref.split(/[\\/]/).pop() ?? ref;
+}
+
+/** Human label for a clip: the text content for text clips, else the media's name. */
 export function clipLabel(c: Clip, names?: Record<string, string>): string {
   if (c.kind === "text") {
     const t: unknown =
@@ -22,8 +26,7 @@ export function clipLabel(c: Clip, names?: Record<string, string>): string {
     }
     return "text";
   }
-  const s = String(c.media_ref ?? c.kind ?? "clip");
-  return names?.[s] ?? s.split(/[\\/]/).pop() ?? s;
+  return mediaLabel(String(c.media_ref ?? c.kind ?? "clip"), names);
 }
 
 /** Premiere-style track labels: v1/v2/a1/t1… numbered per kind, in array order. */

@@ -86,7 +86,12 @@ export interface EditorState {
    *  use, so an edit that shifts the frames cannot leave it pointing at material. Mutually
    *  exclusive with a clip selection: Delete must have exactly one target. */
   selectedGap: { trackId: string; atFrame: number } | null;
-  selectedLibraryRef: string | null; // library clip shown in the source monitor
+  /** Library assets open as tabs beside the live preview, in strip order. `transient` marks
+   *  the one single-click slot the next single click reuses, so browsing the library cannot
+   *  fill the strip with tabs nobody asked to keep. */
+  mediaTabs: { ref: string; transient: boolean }[];
+  /** Which preview tab is showing: a library ref, or null for the pinned live preview. */
+  activeMediaTab: string | null;
   selectedRange: { startFrame: number; endFrame: number } | null; // ruler in/out selection (half-open frames)
   playhead: number; // seconds
   zoom: number; // pixels per second
@@ -128,7 +133,11 @@ export interface EditorState {
   selectGap: (trackId: string, frame: number) => void;
   /** Close the selected gap: ripple the track from the gap's start to its end. */
   rippleDeleteGap: () => Promise<void>;
-  setSelectedLibraryRef: (ref: string | null) => void;
+  /** Show `ref` in the preview. Without `pin` it takes the transient slot. */
+  openMediaTab: (ref: string, opts?: { pin?: boolean }) => void;
+  closeMediaTab: (ref: string) => void;
+  /** null selects the live preview tab. A ref not in the strip is ignored. */
+  setActiveMediaTab: (ref: string | null) => void;
   setSelectedRange: (range: { startFrame: number; endFrame: number } | null) => void;
   setPlayhead: (seconds: number) => void;
   setZoom: (pxPerSec: number) => void;
@@ -291,7 +300,8 @@ const editorCreator: StateCreator<EditorState> = (set, get) => {
     selection: null,
     selectedIds: [],
     selectedGap: null,
-    selectedLibraryRef: null,
+    mediaTabs: [],
+    activeMediaTab: null,
     selectedRange: null,
     playhead: 0,
     zoom: DEFAULT_ZOOM,
@@ -324,8 +334,8 @@ const editorCreator: StateCreator<EditorState> = (set, get) => {
       // Clear store + timeline at the START (not only at the commit below): projectId
       // flips to the new project synchronously here while the store/timeline build
       // async, and desktopStore()/consumers key off (projectId === id && store). Leaving
-      // the OLD store mounted in that window let the still-mounted FileTree (in the
-      // ungated LeftColumn) import into the PREVIOUS project (Q1). Nulling them makes
+      // the OLD store mounted in that window let a still-mounted FileTree import into the
+      // PREVIOUS project (Q1). Nulling them makes
       // desktopStore() return null until the new store commits, so a stray import
       // no-ops / takes the server path instead of hitting the wrong project's store.
       set({
@@ -337,7 +347,9 @@ const editorCreator: StateCreator<EditorState> = (set, get) => {
         selection: null,
         selectedIds: [],
         selectedGap: null,
-        selectedLibraryRef: null,
+        // Tabs address media through THIS project's store, so they cannot outlive it.
+        mediaTabs: [],
+        activeMediaTab: null,
         selectedRange: null,
         playhead: 0,
         dirty: false,
@@ -511,7 +523,40 @@ const editorCreator: StateCreator<EditorState> = (set, get) => {
         return { selectedGap: { trackId, atFrame: frame }, selection: null, selectedIds: [] };
       }),
     setPlayhead: (seconds) => set({ playhead: Math.max(0, seconds) }),
-    setSelectedLibraryRef: (ref) => set({ selectedLibraryRef: ref }),
+    openMediaTab: (ref, opts) =>
+      set((s) => {
+        const pin = opts?.pin ?? false;
+        const at = s.mediaTabs.findIndex((t) => t.ref === ref);
+        if (at >= 0)
+          return {
+            activeMediaTab: ref,
+            mediaTabs: pin
+              ? s.mediaTabs.map((t, i) => (i === at ? { ref, transient: false } : t))
+              : s.mediaTabs,
+          };
+        const slot = pin ? -1 : s.mediaTabs.findIndex((t) => t.transient);
+        const tab = { ref, transient: !pin };
+        return {
+          activeMediaTab: ref,
+          mediaTabs:
+            slot >= 0
+              ? s.mediaTabs.map((t, i) => (i === slot ? tab : t))
+              : [...s.mediaTabs, tab],
+        };
+      }),
+    closeMediaTab: (ref) =>
+      set((s) => {
+        const at = s.mediaTabs.findIndex((t) => t.ref === ref);
+        if (at < 0) return {};
+        const mediaTabs = s.mediaTabs.filter((t) => t.ref !== ref);
+        if (s.activeMediaTab !== ref) return { mediaTabs };
+        // Closing what you are looking at lands on the right neighbour, else the left,
+        // else the live preview -- never on nothing.
+        const next = mediaTabs[at] ?? mediaTabs[at - 1];
+        return { mediaTabs, activeMediaTab: next?.ref ?? null };
+      }),
+    setActiveMediaTab: (ref) =>
+      set((s) => (ref && !s.mediaTabs.some((t) => t.ref === ref) ? {} : { activeMediaTab: ref })),
     setSelectedRange: (range) =>
       set(() => {
         if (!range) return { selectedRange: null };

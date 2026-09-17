@@ -12,6 +12,8 @@ import { totalFrames } from "../timeline/geometry";
 import type { Timeline as SceneTimeline } from "../timeline/model";
 import { AudioMeter } from "./AudioMeter";
 import PreviewCanvas from "./PreviewCanvas";
+import PreviewTabs from "./PreviewTabs";
+import SourceMonitor from "./SourceMonitor";
 import StageEmpty from "./StageEmpty";
 import StageOverlay from "./StageOverlay";
 import { cn } from "./ui";
@@ -19,10 +21,10 @@ import { cn } from "./ui";
 // Premiere's Program Monitor ladder.
 const ZOOM_LEVELS: (number | "fit")[] = ["fit", 0.1, 0.25, 0.5, 0.75, 1, 1.5, 2, 4];
 
-// Middle pane: preview monitor (rendered video, else the live WebGL composite)
-// over a draggable transport, over the interactive TimelineEditor. The editor
-// store's playhead (seconds) is the single clock shared by the preview and the
-// timeline, so scrubbing either moves both.
+// Middle pane: a tab strip (live preview, then any library clips opened from the
+// library) over the preview monitor (rendered video, else the live WebGL composite)
+// over a draggable transport. The editor store's playhead (seconds) is the single
+// clock shared by the preview and the timeline, so scrubbing either moves both.
 export default function StagePanel({ projectId }: { projectId: string }) {
   const session = useChat((s) => s.session);
   const active = useProjects((s) => s.active);
@@ -31,6 +33,9 @@ export default function StagePanel({ projectId }: { projectId: string }) {
   const setPlayhead = useEditor((s) => s.setPlayhead);
   const store = useEditor((s) => s.store);
   const importing = useEditor((s) => s.importing);
+  // Empty = the live preview tab; a ref = that library clip's source monitor.
+  const sourceRef = useEditor((s) => s.activeMediaTab);
+  const onSource = !!sourceRef;
 
   const canvas = timeline?.canvas;
   const fps = Number(canvas?.fps) || 30;
@@ -69,12 +74,18 @@ export default function StagePanel({ projectId }: { projectId: string }) {
     setPlaying(false);
     setVDur(0);
   }, [projectId, finalMp4]);
+  // Leaving the live tab stops the program monitor: two transports running at once would
+  // put the timeline's audio under a clip the user is auditioning.
+  useEffect(() => {
+    if (onSource) setPlaying(false);
+  }, [onSource]);
   // Space bar (from the timeline keyboard handler) toggles play/pause.
   useEffect(() => {
+    if (onSource) return; // a source tab has its own transport
     const onToggle = () => setPlaying((p) => !p);
     window.addEventListener("artdaddy:toggle-play", onToggle);
     return () => window.removeEventListener("artdaddy:toggle-play", onToggle);
-  }, []);
+  }, [onSource]);
   useEffect(() => {
     if (!hasVideo || !platform.capabilities.fileSystem || !store) {
       setAssetSrc(null);
@@ -198,14 +209,15 @@ export default function StagePanel({ projectId }: { projectId: string }) {
 
   return (
     <div className="flex h-full min-h-0 w-full flex-col bg-neutral-950">
+      <PreviewTabs />
       <header className="flex items-center gap-3 border-b border-edge px-4 py-2">
         <h2 className="truncate text-sm font-semibold">{active?.name ?? projectId}</h2>
-        {canvas && (
+        {canvas && !onSource && (
           <span className="text-xs text-neutral-500">
             {canvas.width}×{canvas.height} · {canvas.fps}fps
           </span>
         )}
-        {hasVideo && timeline && (
+        {hasVideo && timeline && !onSource && (
           <div className="ml-auto flex overflow-hidden rounded border border-edge text-[11px]">
             <button
               onClick={() => setMode("live")}
@@ -229,7 +241,7 @@ export default function StagePanel({ projectId }: { projectId: string }) {
             </button>
           </div>
         )}
-        {timeline && !showRendered && (
+        {timeline && !showRendered && !onSource && (
           <select
             aria-label="canvas zoom"
             value={String(zoom)}
@@ -244,7 +256,7 @@ export default function StagePanel({ projectId }: { projectId: string }) {
             ))}
           </select>
         )}
-        {timeline && !showRendered && (
+        {timeline && !showRendered && !onSource && (
           <button
             type="button"
             aria-label="crop mode"
@@ -295,9 +307,17 @@ export default function StagePanel({ projectId }: { projectId: string }) {
         ) : (
           <StageEmpty projectId={projectId} />
         )}
+        {/* A source tab COVERS the program monitor rather than replacing it: the compositor
+            keeps its canvas and its decoded frames, so switching back is instant and no
+            worker is torn down for a glance at a library clip. */}
+        {sourceRef && (
+          <div className="absolute inset-0 z-20 bg-black">
+            <SourceMonitor key={sourceRef} mediaRef={sourceRef} />
+          </div>
+        )}
       </div>
 
-      {duration > 0 && (
+      {!onSource && duration > 0 && (
         <div className="flex items-center gap-3 border-t border-edge px-4 py-2">
           <button
             onClick={toggle}
