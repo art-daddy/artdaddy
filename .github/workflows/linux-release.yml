@@ -12,7 +12,11 @@ on:
         required: true
         default: "v1.9.2"
       publish:
-        description: "Attach signed Linux bundles to the current version's GitHub release"
+        description: "Attach Linux bundles to the current version's GitHub release"
+        type: boolean
+        default: false
+      enable_auto_update:
+        description: "Sign the AppImage for auto-update (requires the existing updater key secret)"
         type: boolean
         default: false
 
@@ -113,12 +117,12 @@ jobs:
         env:
           SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           SIGNING_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          PUBLISH: ${{ inputs.publish }}
+          ENABLE_AUTO_UPDATE: ${{ inputs.enable_auto_update }}
         run: |
           rm -rf dist
-          if [ "$PUBLISH" = "true" ]; then
+          if [ "$ENABLE_AUTO_UPDATE" = "true" ]; then
             test -n "$SIGNING_KEY" || {
-              echo "::error::publish needs the TAURI_SIGNING_PRIVATE_KEY repository secret"
+              echo "::error::auto-update needs the TAURI_SIGNING_PRIVATE_KEY repository secret"
               exit 1
             }
             export TAURI_SIGNING_PRIVATE_KEY="$SIGNING_KEY"
@@ -175,7 +179,7 @@ jobs:
             ${{ steps.artifact.outputs.appimage }}
             ${{ steps.artifact.outputs.deb }}
             ${{ steps.artifact.outputs.appimage }}.sig
-          if-no-files-found: error
+          if-no-files-found: warn
 
       - name: Publish Linux assets to the existing GitHub release
         if: ${{ inputs.publish }}
@@ -183,9 +187,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APPIMAGE: ${{ steps.artifact.outputs.appimage }}
           DEB: ${{ steps.artifact.outputs.deb }}
+          ENABLE_AUTO_UPDATE: ${{ inputs.enable_auto_update }}
         run: |
           SIG="${APPIMAGE}.sig"
-          test -s "$SIG" || { echo "::error::signed AppImage has no .sig"; exit 1; }
+          if [ "$ENABLE_AUTO_UPDATE" = "true" ]; then
+            test -s "$SIG" || { echo "::error::signed AppImage has no .sig"; exit 1; }
+          fi
           VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
           TAG="v$VERSION"
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
@@ -193,17 +200,18 @@ jobs:
             exit 1
           fi
           cp "$APPIMAGE" /tmp/ArtDaddy-linux-x86_64.AppImage
-          cp "$SIG" /tmp/ArtDaddy-linux-x86_64.AppImage.sig
           cp "$DEB" /tmp/ArtDaddy-linux-x86_64.deb
-          gh release upload "$TAG" \
-            /tmp/ArtDaddy-linux-x86_64.AppImage \
-            /tmp/ArtDaddy-linux-x86_64.AppImage.sig \
-            /tmp/ArtDaddy-linux-x86_64.deb \
-            --repo "$GITHUB_REPOSITORY" --clobber
-          for ASSET in \
-            ArtDaddy-linux-x86_64.AppImage \
-            ArtDaddy-linux-x86_64.AppImage.sig \
-            ArtDaddy-linux-x86_64.deb; do
+          ASSETS=(
+            /tmp/ArtDaddy-linux-x86_64.AppImage
+            /tmp/ArtDaddy-linux-x86_64.deb
+          )
+          if [ "$ENABLE_AUTO_UPDATE" = "true" ]; then
+            cp "$SIG" /tmp/ArtDaddy-linux-x86_64.AppImage.sig
+            ASSETS+=(/tmp/ArtDaddy-linux-x86_64.AppImage.sig)
+          fi
+          gh release upload "$TAG" "${ASSETS[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+          for LOCAL in "${ASSETS[@]}"; do
+            ASSET="$(basename "$LOCAL")"
             LOCAL="/tmp/$ASSET"
             URL="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$ASSET"
             CODE="$(curl -sL -o /dev/null -w '%{http_code}' -I "$URL")"
@@ -214,6 +222,10 @@ jobs:
               exit 1
             }
           done
-          echo "::notice::Linux assets are public. In art-daddy/akaru-landing run:"
-          echo "::notice::npm run update:linux -- $VERSION /path/to/ArtDaddy-linux-x86_64.AppImage.sig"
-          echo "::notice::then deploy that repository to enable Linux auto-update."
+          if [ "$ENABLE_AUTO_UPDATE" = "true" ]; then
+            echo "::notice::Linux assets are signed and public. In art-daddy/akaru-landing run:"
+            echo "::notice::npm run update:linux -- $VERSION /path/to/ArtDaddy-linux-x86_64.AppImage.sig"
+            echo "::notice::then deploy that repository to enable Linux auto-update."
+          else
+            echo "::notice::Unsigned Linux first-install assets are public; auto-update remains disabled."
+          fi

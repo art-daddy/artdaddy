@@ -92,9 +92,11 @@ which ships with Windows 11.
 ### Linux release
 
 Run the **Linux build** workflow to produce an x86_64 AppImage and `.deb` on Ubuntu 22.04.
-A normal dispatch builds and verifies Actions artifacts. `publish: true` additionally signs
-the AppImage and attaches stable-name Linux assets to the existing release for the current
-version; publish Windows first so that release already exists.
+A normal dispatch builds and verifies Actions artifacts. `publish: true` attaches stable-name
+Linux assets to the existing release for the current version; publish Windows first so that
+release already exists. Enable `enable_auto_update` only when the existing updater private key
+is configured as `TAURI_SIGNING_PRIVATE_KEY`; otherwise first-install downloads are published
+without an updater signature.
 
 Linux users can make the AppImage executable and launch it directly:
 
