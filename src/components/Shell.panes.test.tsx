@@ -32,8 +32,9 @@ vi.mock("../store/projects", () => ({
 }));
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 vi.mock("../store/chat", () => ({ useChat: (sel: any) => sel({}) }));
+const ed = vi.hoisted(() => ({ selectedIds: [] as string[] }));
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-vi.mock("../store/editor", () => ({ useEditor: (sel: any) => sel({}) }));
+vi.mock("../store/editor", () => ({ useEditor: (sel: any) => sel({ selectedIds: ed.selectedIds }) }));
 vi.mock("../tools/host", () => ({
   openToolHost: () => ({ ready: Promise.resolve() }),
   closeToolHost: () => undefined,
@@ -59,6 +60,7 @@ const showProject = async () => {
 
 beforeEach(() => {
   localStorage.clear();
+  ed.selectedIds = ["c1"]; // the inspector follows the selection; most cases here want it up
   usePanes.setState({ visible: { ...ALL } });
 });
 afterEach(() => vi.clearAllMocks());
@@ -70,9 +72,10 @@ describe("hiding panels", () => {
       expect(screen.getByText(t)).toBeInTheDocument();
   });
 
+  // The inspector is not in here: it is selection-driven now, so "hidden" is not a standing
+  // state it can be put in. Its own describe block below covers it.
   it.each([
     ["library", "library"],
-    ["inspector", "inspector"],
     ["chat", "chat"],
   ] as const)("removes %s from the tree when hidden", async (id, text) => {
     usePanes.setState({ visible: { ...ALL, [id]: false } });
@@ -86,6 +89,61 @@ describe("hiding panels", () => {
     await showProject();
     expect(screen.getByText("stage:p1")).toBeInTheDocument();
     expect(screen.getByText("timeline")).toBeInTheDocument();
+  });
+});
+
+// The inspector inspects a clip. With nothing selected it can only show canvas settings, so it
+// is not worth a column of the window -- it follows the selection instead of being managed.
+describe("the inspector follows the selection", () => {
+  it("stays out of the way with nothing selected, even if it was left open", async () => {
+    ed.selectedIds = [];
+    usePanes.setState({ visible: { ...ALL } });
+    await showProject();
+    expect(screen.queryByText("inspector")).not.toBeInTheDocument();
+  });
+
+  it("appears when a clip is selected, even if it was left closed", async () => {
+    ed.selectedIds = [];
+    usePanes.setState({ visible: { ...ALL, inspector: false } });
+    const { rerender } = render(<Shell projectId="p1" />);
+    await waitFor(() => expect(screen.getByText("timeline")).toBeInTheDocument());
+    expect(screen.queryByText("inspector")).not.toBeInTheDocument();
+    ed.selectedIds = ["c1"];
+    rerender(<Shell projectId="p1" />);
+    expect(screen.getByText("inspector")).toBeInTheDocument();
+  });
+
+  it("goes away again when the selection is cleared", async () => {
+    ed.selectedIds = ["c1"];
+    const { rerender } = render(<Shell projectId="p1" />);
+    await waitFor(() => expect(screen.getByText("inspector")).toBeInTheDocument());
+    ed.selectedIds = [];
+    rerender(<Shell projectId="p1" />);
+    expect(screen.queryByText("inspector")).not.toBeInTheDocument();
+  });
+
+  // Closing it by hand must STICK while the same clip stays selected -- an inspector that
+  // sprang back on the next render would be a pane you cannot dismiss.
+  it("stays closed after the user closes it, while the selection is unchanged", async () => {
+    ed.selectedIds = ["c1"];
+    const { rerender } = render(<Shell projectId="p1" />);
+    await waitFor(() => expect(screen.getByText("inspector")).toBeInTheDocument());
+    usePanes.getState().setVisible("inspector", false);
+    rerender(<Shell projectId="p1" />);
+    expect(screen.queryByText("inspector")).not.toBeInTheDocument();
+  });
+
+  it("comes back when the user selects something else", async () => {
+    ed.selectedIds = ["c1"];
+    const { rerender } = render(<Shell projectId="p1" />);
+    await waitFor(() => expect(screen.getByText("inspector")).toBeInTheDocument());
+    usePanes.getState().setVisible("inspector", false);
+    rerender(<Shell projectId="p1" />);
+    ed.selectedIds = [];
+    rerender(<Shell projectId="p1" />);
+    ed.selectedIds = ["c2"];
+    rerender(<Shell projectId="p1" />);
+    expect(screen.getByText("inspector")).toBeInTheDocument();
   });
 });
 

@@ -16,7 +16,10 @@ export const PANE_LABELS: Record<PaneId, string> = {
 };
 
 const KEY = "artdaddy-panes-v1";
-const DEFAULTS: Record<PaneId, boolean> = { library: true, inspector: true, chat: true };
+// The inspector starts CLOSED and is opened by selecting a clip (Shell drives it): with nothing
+// selected it can only show canvas settings, which is not worth a permanent column of the window.
+const DEFAULTS: Record<PaneId, boolean> = { library: true, inspector: false, chat: true };
+const ALL: Record<PaneId, boolean> = { library: true, inspector: true, chat: true };
 
 function load(): Record<PaneId, boolean> {
   try {
@@ -46,6 +49,8 @@ interface PanesState {
   visible: Record<PaneId, boolean>;
   toggle: (id: PaneId) => void;
   setVisible: (id: PaneId, on: boolean) => void;
+  /** View → Show All Panels: the recovery path, so it means ALL of them — including the
+   *  inspector, which is not on by default. */
   showAll: () => void;
 }
 
@@ -64,7 +69,7 @@ export const usePanes = create<PanesState>((set) => ({
       return { visible };
     }),
   showAll: () => {
-    save(DEFAULTS);
-    return set({ visible: { ...DEFAULTS } });
+    save(ALL);
+    return set({ visible: { ...ALL } });
   },
 }));

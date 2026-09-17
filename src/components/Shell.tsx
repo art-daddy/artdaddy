@@ -5,6 +5,7 @@ import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { projectDocuments } from "../project/documentRegistry";
 import { asProjectId } from "../project/types";
 import { projectPath, useCloseCoordinator } from "../store/closeCoordinator";
+import { useEditor } from "../store/editor";
 import { usePanes } from "../store/panes";
 import { useProjects } from "../store/projects";
 import ChatView from "./ChatView";
@@ -100,6 +101,14 @@ export default function Shell({ projectId }: { projectId: string | null }) {
   // left behind; their state lives in stores, so nothing is lost by remounting.
   const visible = usePanes((s) => s.visible);
   const hide = usePanes((s) => s.setVisible);
+
+  // The inspector inspects a CLIP, so it follows the selection rather than sitting there empty:
+  // it appears when something is selected and goes away when nothing is. Keyed on the boolean, so
+  // it fires only when that flips -- closing it by hand mid-selection sticks until the next change.
+  const hasSelection = useEditor((s) => (s.selectedIds?.length ?? 0) > 0);
+  useEffect(() => {
+    hide("inspector", hasSelection);
+  }, [hasSelection, hide]);
 
   // No project -> no workspace. The library, source monitor, files tree, inspector and
   // timeline all describe a project; with none open they could only render as empty chrome,

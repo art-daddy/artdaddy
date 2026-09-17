@@ -70,6 +70,17 @@ body {
 }
 
 @layer components {
+  /* Library thumbnails: 2 columns in a narrow pane, 3, then 4 once it is dragged wide —
+     driven by the PANE's width, not the window's, so Tailwind's viewport breakpoints are
+     the wrong tool. The track minimum reads outward: 96px normally; `min(…, 50% - 3px)`
+     floors it at 2 columns in a pane too narrow for two 96px tiles; `max(…, 25% - 4.5px)`
+     caps it at 4, because past that the tiles are too small to recognise a shot by. */
+  .library-grid {
+    display: grid;
+    gap: 6px;
+    grid-template-columns: repeat(auto-fill, minmax(max(min(96px, 50% - 3px), 25% - 4.5px), 1fr));
+  }
+
   .halo {
     position: relative;
   }

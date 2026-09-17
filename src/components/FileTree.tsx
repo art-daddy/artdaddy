@@ -287,7 +287,8 @@ export default function FileTree({ projectId }: { projectId: string }) {
           </div>
         ) : tree.length === 0 ? (
           <p className="px-3 py-1 text-neutral-600">No files yet.</p>
-        ) : view === "thumbnails" ? (          <div className="grid grid-cols-2 gap-1.5 p-2">
+        ) : view === "thumbnails" ? (
+          <div className="library-grid p-2">
             {collectMedia(tree).map((n) => (
               <LibraryTile key={n.path} node={n} store={store} onItemMenu={onItemMenu} />
             ))}
