@@ -43,6 +43,12 @@ describe("Claude Desktop connector bundle", () => {
     expect(manifest.version).toBe(tauri.version);
   });
 
+  it("does not advertise the Claude Desktop bundle on Linux", () => {
+    // Claude Code uses the HTTP endpoint directly on Linux. Claiming Linux here would instead
+    // advertise an .mcpb for Claude Desktop, which has no supported Linux desktop application.
+    expect(manifest.compatibility.platforms).toEqual(["win32", "darwin"]);
+  });
+
   it("is shipped as a resource, or it is not in the build at all", () => {
     // A bundle that never gets staged makes the Install button fail for every user.
     const tauri = JSON.parse(readFileSync(resolve(root, "src-tauri/tauri.conf.json"), "utf8"));

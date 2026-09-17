@@ -358,8 +358,8 @@ present. Keep it that way unless the registry situation changes.
 | Version | `src-tauri/tauri.conf.json` `version` | What the updater COMPARES. Mirror it in `Cargo.toml` + `package.json`. |
 | Public key | `tauri.conf.json` `plugins.updater.pubkey` | Committed. Every update is verified against it. |
 | Private key | `~/.tauri/artdaddy-updater.key` | **Never committed.** No password. `tauri build` reads only `TAURI_SIGNING_PRIVATE_KEY` (the key's CONTENT); `TAURI_SIGNING_PRIVATE_KEY_PATH` works for `tauri signer sign` only. |
-| Manifest | `https://artdaddy.app/updates/latest.json` | Static JSON served by the landing site. Deliberately on a domain we OWN: the endpoint is compiled in and polled forever by every install, and a vendor hostname cannot be redirected when we leave it. |
-| Artifacts | `src-tauri/target/release/bundle/nsis/` | `artdaddy_<v>_x64-setup.exe` + `.exe.sig`. Tauri v2 signs the INSTALLER itself — no separate `.nsis.zip` (that was v1). |
+| Manifest | `https://artdaddy.app/updates/latest.json` | Static JSON owned by `art-daddy/akaru-landing`. Deliberately on a domain we OWN: the endpoint is compiled in and polled forever by every install, and a vendor hostname cannot be redirected when we leave it. |
+| Artifacts | `src-tauri/target/release/bundle/` | Windows: `nsis/artdaddy_<v>_x64-setup.exe` + `.sig`. Linux: `appimage/artdaddy_<v>_amd64.AppImage` + `.sig`, plus the first-install `.deb`. Tauri v2 signs the updater artifact itself. |
 | Host | GitHub Releases, `art-daddy/artdaddy` | Version-less asset names so `/releases/latest/download/<name>` is stable. Free and unmetered while the repo is public. The manifest's URLs are data — moving the artifacts never touches an installed client. |
 
 ### Invariants
@@ -373,6 +373,8 @@ present. Keep it that way unless the registry situation changes.
    the bundle first, or clients get handed a URL that 404s. Write it **without a BOM**
    (Windows PowerShell's `-Encoding utf8` adds one and the Rust parser rejects it), and
    verify by PARSING the published URL rather than checking for a 200.
+   Every platform entry must point to the manifest's exact version; preserving an older
+   sibling-platform URL while bumping the top-level version creates an update loop.
 4. **A failed update CHECK must never surface as an error** (`updater.ts` resolves it to
    `null`): an unreachable release host must not stop someone using the app they already
    installed. `installUpdate` deliberately does the opposite and propagates — the user

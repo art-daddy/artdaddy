@@ -7,7 +7,7 @@
 
 **The AI video editor your agent can actually drive.**
 
-**Windows 10/11** · **macOS**
+**Windows 10/11** · **macOS** · **Linux x86_64 preview**
 
 [Download](https://github.com/art-daddy/artdaddy/releases/latest) · [artdaddy.app](https://artdaddy.app)
 
@@ -89,6 +89,30 @@ which ships with Windows 11.
 
 `npm test` runs the suite and needs no server, so a change can be verified end to end offline.
 
+### Linux release
+
+Run the **Linux build** workflow to produce an x86_64 AppImage and `.deb` on Ubuntu 22.04.
+A normal dispatch builds and verifies Actions artifacts. `publish: true` additionally signs
+the AppImage and attaches stable-name Linux assets to the existing release for the current
+version; publish Windows first so that release already exists.
+
+Linux users can make the AppImage executable and launch it directly:
+
+```bash
+chmod +x ArtDaddy-linux-x86_64.AppImage
+./ArtDaddy-linux-x86_64.AppImage
+```
+
+Claude Code uses the same local HTTP MCP endpoint on Linux:
+
+```bash
+claude mcp add --transport http artdaddy http://127.0.0.1:19787/mcp
+claude mcp list
+```
+
+The Claude Desktop `.mcpb` remains Windows/macOS-only. Linux users should use Claude Code,
+Cursor, VS Code/Copilot, or Codex.
+
 ---
 
 ## FAQ
@@ -112,7 +136,7 @@ repository. Once signed in, editing keeps working without a connection.
 <details>
 <summary><b>Which platforms?</b></summary>
 
-Windows 10/11 and macOS.
+Windows 10/11, macOS, and an x86_64 Linux preview built against Ubuntu 22.04.
 
 Code-signing certificates are in progress, so until they land Windows shows a SmartScreen prompt
 ("More info" → "Run anyway") and macOS asks you to allow the app on first launch. Updates

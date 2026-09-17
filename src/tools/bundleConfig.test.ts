@@ -11,8 +11,14 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 // Not import.meta.url: vitest rewrites it to a root-relative URL, which resolved to C:\.
-const read = (name: string): { bundle: { resources: string[] } } =>
-  JSON.parse(readFileSync(resolve(process.cwd(), "src-tauri", name), "utf8"));
+const read = (
+  name: string,
+): {
+  bundle: {
+    resources: string[];
+    linux?: { appimage?: { bundleMediaFramework?: boolean } };
+  };
+} => JSON.parse(readFileSync(resolve(process.cwd(), "src-tauri", name), "utf8"));
 
 const WINDOWS_ONLY = ["resources/whisper/*"];
 
@@ -28,5 +34,9 @@ describe("bundle resources across platform configs", () => {
     // Not a subset check: the override replaces the array, so a base entry missing here is
     // a resource Windows stops shipping.
     expect(win).toEqual([...base, ...WINDOWS_ONLY]);
+  });
+
+  it("ships the media framework the Linux preview needs", () => {
+    expect(read("tauri.conf.json").bundle.linux?.appimage?.bundleMediaFramework).toBe(true);
   });
 });

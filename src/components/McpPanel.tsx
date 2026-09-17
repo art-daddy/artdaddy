@@ -65,7 +65,7 @@ const CLIENTS: Client[] = [
   {
     label: "Claude Desktop",
     installer: installClaudeConnector,
-    note: "installs the bundled connector",
+    note: "Windows/macOS only; installs the bundled connector",
     code: `{
   "mcpServers": {
     "${server}": { "type": "http", "url": "${endpoint}" }
@@ -74,7 +74,11 @@ const CLIENTS: Client[] = [
   },
   // CLI-only: neither ships a URL handler, so a button here could only shell out to their
   // binary, which this app is not allowed to do.
-  { label: "Claude Code", code: `claude mcp add --transport http ${server} ${endpoint}` },
+  {
+    label: "Claude Code",
+    note: "works on Linux, macOS and Windows while ArtDaddy is running",
+    code: `claude mcp add --transport http ${server} ${endpoint}`,
+  },
   { label: "Codex", code: `codex mcp add ${server} --url ${endpoint}` },
 ];
 

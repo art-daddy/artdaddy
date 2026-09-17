@@ -1,0 +1,219 @@
+# Build and optionally publish the x86_64 Linux AppImage and Debian package.
+#
+# Ubuntu 22.04 is the compatibility floor: AppImages inherit the build host's glibc floor, so
+# moving this to ubuntu-latest would silently stop the app running on older supported systems.
+name: Linux build
+
+on:
+  workflow_dispatch:
+    inputs:
+      whisper_ref:
+        description: "whisper.cpp tag to build"
+        required: true
+        default: "v1.9.2"
+      publish:
+        description: "Attach signed Linux bundles to the current version's GitHub release"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    env:
+      TRIPLE: x86_64-unknown-linux-gnu
+      VITE_API_BASE_URL: https://akaru-server.ambitioustree-4d826744.centralindia.azurecontainerapps.io
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install Linux build and launch dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake curl file libayatana-appindicator3-dev libssl-dev \
+            libwebkit2gtk-4.1-dev librsvg2-dev patchelf squashfs-tools xvfb \
+            gstreamer1.0-libav gstreamer1.0-plugins-bad gstreamer1.0-plugins-good
+
+      - run: npm ci
+
+      - name: Build portable whisper.cpp
+        env:
+          WHISPER_REF: ${{ inputs.whisper_ref }}
+        run: |
+          git clone --depth 1 --branch "$WHISPER_REF" https://github.com/ggml-org/whisper.cpp whisper.cpp
+          cmake -S whisper.cpp -B whisper.cpp/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DGGML_NATIVE=OFF \
+            -DGGML_OPENMP=OFF \
+            -DGGML_BLAS=OFF \
+            -DWHISPER_BUILD_TESTS=OFF \
+            -DWHISPER_BUILD_SERVER=OFF
+          cmake --build whisper.cpp/build --config Release -j"$(nproc)"
+          BIN="$(find whisper.cpp/build -name whisper-cli -type f -perm -111 | head -n1)"
+          test -n "$BIN" || { echo "::error::no whisper-cli was produced"; exit 1; }
+          mkdir -p src-tauri/binaries
+          cp "$BIN" "src-tauri/binaries/whisper-cli-${TRIPLE}"
+          chmod +x "src-tauri/binaries/whisper-cli-${TRIPLE}"
+
+      - name: Prove whisper is portable and transcribes
+        run: |
+          BIN="src-tauri/binaries/whisper-cli-${TRIPLE}"
+          file "$BIN"
+          ldd "$BIN"
+          ! ldd "$BIN" | grep -q "not found" || {
+            echo "::error::whisper-cli has an unresolved runtime library"
+            exit 1
+          }
+          node scripts/smoke-whisper.mjs "$BIN"
+          curl -fsSL -o tiny.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin
+          "$BIN" -m tiny.bin -f whisper.cpp/samples/jfk.wav -otxt -of result
+          test -s result.txt || { echo "::error::whisper produced an empty transcript"; exit 1; }
+          NORM="$(tr '[:upper:]' '[:lower:]' < result.txt | tr -cd 'a-z')"
+          case "$NORM" in
+            *asknotwhatyourcountry*) echo "whisper decoded the expected speech." ;;
+            *) echo "::error::transcript did not contain the expected words"; cat result.txt; exit 1 ;;
+          esac
+
+      - name: Stage every Linux sidecar
+        run: npm run fetch:sidecars
+
+      - name: Prove ffmpeg and ffprobe produce a real artifact
+        run: |
+          FFMPEG="src-tauri/binaries/ffmpeg-${TRIPLE}"
+          FFPROBE="src-tauri/binaries/ffprobe-${TRIPLE}"
+          "$FFMPEG" -hide_banner -loglevel error -f lavfi -i testsrc2=size=160x90:rate=5 \
+            -t 1 -pix_fmt yuv420p probe.mp4
+          test -s probe.mp4 || { echo "::error::ffmpeg produced no video"; exit 1; }
+          DIMS="$("$FFPROBE" -v error -select_streams v:0 -show_entries stream=width,height \
+            -of csv=s=x:p=0 probe.mp4)"
+          test "$DIMS" = "160x90" || { echo "::error::ffprobe reported $DIMS"; exit 1; }
+
+      - run: npm run build:sidecar
+      - run: npm run build:mcpb
+      - run: npm run bundle:browser
+
+      - name: Install the bundled browser's Linux runtime dependencies
+        run: npx playwright install-deps chromium
+
+      - name: Build AppImage and Debian package
+        env:
+          SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          SIGNING_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          PUBLISH: ${{ inputs.publish }}
+        run: |
+          rm -rf dist
+          if [ "$PUBLISH" = "true" ]; then
+            test -n "$SIGNING_KEY" || {
+              echo "::error::publish needs the TAURI_SIGNING_PRIVATE_KEY repository secret"
+              exit 1
+            }
+            export TAURI_SIGNING_PRIVATE_KEY="$SIGNING_KEY"
+            export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$SIGNING_PASSWORD"
+            npx tauri build --bundles appimage,deb
+          else
+            npx tauri build --bundles appimage,deb \
+              --config '{"bundle":{"createUpdaterArtifacts":false}}'
+          fi
+
+      - name: Verify and launch what users receive
+        id: artifact
+        run: |
+          APPIMAGE="$(find src-tauri/target/release/bundle/appimage -maxdepth 1 -type f -name '*.AppImage' | head -n1)"
+          DEB="$(find src-tauri/target/release/bundle/deb -maxdepth 1 -type f -name '*.deb' | head -n1)"
+          test -n "$APPIMAGE" && test -s "$APPIMAGE" || { echo "::error::no AppImage"; exit 1; }
+          test -n "$DEB" && test -s "$DEB" || { echo "::error::no Debian package"; exit 1; }
+          chmod +x "$APPIMAGE"
+          rm -rf squashfs-root
+          "$APPIMAGE" --appimage-extract >/dev/null
+          for name in ffmpeg ffprobe yt-dlp whisper-cli artdaddy-browser; do
+            FOUND="$(find squashfs-root -type f -name "$name" | head -n1)"
+            test -n "$FOUND" || { echo "::error::$name is missing from the AppImage"; exit 1; }
+            test -x "$FOUND" || { echo "::error::$name is not executable in the AppImage"; exit 1; }
+          done
+          SCRIPT="$(find squashfs-root -type f -path '*/resources/artdaddy-browser.mjs' | head -n1)"
+          NODE="$(find squashfs-root -type f -name artdaddy-browser | head -n1)"
+          test -n "$SCRIPT" || { echo "::error::browser script is missing"; exit 1; }
+          BROWSER_RESULT="$("$NODE" "$SCRIPT" page --url https://example.com)"
+          RESULT="$BROWSER_RESULT" node -e '
+            const r = JSON.parse(process.env.RESULT);
+            if (!r.ok || !/example domain/i.test(r.title || "")) process.exit(1);
+            console.log(`bundled browser fetched: ${r.title}`);
+          '
+          set +e
+          APPIMAGE_EXTRACT_AND_RUN=1 xvfb-run -a timeout 20s "$APPIMAGE" \
+            >/tmp/artdaddy-linux.out 2>/tmp/artdaddy-linux.err
+          STATUS=$?
+          set -e
+          if [ "$STATUS" -ne 124 ]; then
+            echo "::error::AppImage exited during its 20 second launch gate (status $STATUS)"
+            sed -n '1,80p' /tmp/artdaddy-linux.err
+            exit 1
+          fi
+          echo "AppImage stayed alive for 20 seconds."
+          echo "appimage=$APPIMAGE" >> "$GITHUB_OUTPUT"
+          echo "deb=$DEB" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: artdaddy-linux-x86_64
+          path: |
+            ${{ steps.artifact.outputs.appimage }}
+            ${{ steps.artifact.outputs.deb }}
+            ${{ steps.artifact.outputs.appimage }}.sig
+          if-no-files-found: error
+
+      - name: Publish Linux assets to the existing GitHub release
+        if: ${{ inputs.publish }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPIMAGE: ${{ steps.artifact.outputs.appimage }}
+          DEB: ${{ steps.artifact.outputs.deb }}
+        run: |
+          SIG="${APPIMAGE}.sig"
+          test -s "$SIG" || { echo "::error::signed AppImage has no .sig"; exit 1; }
+          VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          TAG="v$VERSION"
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::release $TAG does not exist yet - publish the Windows release first."
+            exit 1
+          fi
+          cp "$APPIMAGE" /tmp/ArtDaddy-linux-x86_64.AppImage
+          cp "$SIG" /tmp/ArtDaddy-linux-x86_64.AppImage.sig
+          cp "$DEB" /tmp/ArtDaddy-linux-x86_64.deb
+          gh release upload "$TAG" \
+            /tmp/ArtDaddy-linux-x86_64.AppImage \
+            /tmp/ArtDaddy-linux-x86_64.AppImage.sig \
+            /tmp/ArtDaddy-linux-x86_64.deb \
+            --repo "$GITHUB_REPOSITORY" --clobber
+          for ASSET in \
+            ArtDaddy-linux-x86_64.AppImage \
+            ArtDaddy-linux-x86_64.AppImage.sig \
+            ArtDaddy-linux-x86_64.deb; do
+            LOCAL="/tmp/$ASSET"
+            URL="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$ASSET"
+            CODE="$(curl -sL -o /dev/null -w '%{http_code}' -I "$URL")"
+            REMOTE="$(curl -sIL "$URL" | awk 'tolower($1) ~ /^content-length/ {print $2}' | tail -1 | tr -d '\r')"
+            SIZE="$(stat -c%s "$LOCAL")"
+            test "$CODE" = "200" && test "$REMOTE" = "$SIZE" || {
+              echo "::error::$ASSET verification failed: HTTP $CODE, remote=$REMOTE local=$SIZE"
+              exit 1
+            }
+          done
+          echo "::notice::Linux assets are public. In art-daddy/akaru-landing run:"
+          echo "::notice::npm run update:linux -- $VERSION /path/to/ArtDaddy-linux-x86_64.AppImage.sig"
+          echo "::notice::then deploy that repository to enable Linux auto-update."

@@ -5,6 +5,7 @@ import { render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import McpPanel from "./McpPanel";
+import { BRAND } from "../brand";
 import { MCP_PORT } from "../mcp/service";
 import { useMcpPanel } from "../store/mcpPanel";
 
@@ -40,6 +41,14 @@ describe("MCP setup pane", () => {
     for (const client of ["Claude Code", "Codex", "Cursor", "VS Code / Copilot"]) {
       expect(screen.getByText(client)).toBeInTheDocument();
     }
+  });
+
+  it("gives Linux users a complete Claude Code HTTP command", () => {
+    render(<McpPanel />);
+    expect(codeBlocks().find((code) => code.startsWith("claude mcp add"))).toBe(
+      `claude mcp add --transport http ${BRAND.mcpServerName} http://127.0.0.1:${MCP_PORT}/mcp`,
+    );
+    expect(screen.getByText(/works on Linux, macOS and Windows/i)).toBeInTheDocument();
   });
 
   it("tells the agent how to reach a project, which nothing else would", () => {
