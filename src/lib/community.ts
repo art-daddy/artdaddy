@@ -1,13 +1,11 @@
 // The community link, in ONE place. Four surfaces point at it (the Help menu, the menu-bar
-// tab, the sign-in screen and the landing page), so a reissued invite must be a single edit.
+// tab, the sign-in screen and the landing page), so a reissued invite is a single edit.
 //
-// NOTE: a `discord.com/channels/...` URL only resolves for people who are ALREADY in the
-// server — everyone else lands on their own Discord with nothing selected. Swap this for a
-// `https://discord.gg/<code>` invite to make it work for the people it is meant to reach;
-// the Rust guard already accepts both.
+// An INVITE, not a `discord.com/channels/...` URL: the latter only resolves for people who
+// are already members, so it would show nothing to exactly the people it is meant to reach.
 import { platform } from "../platform";
 
-export const DISCORD_URL = "https://discord.com/channels/1550040801680302192";
+export const DISCORD_URL = "https://discord.gg/eJmUhD6vx";
 
 /** Open the community link in the user's real browser / Discord app.
  *
