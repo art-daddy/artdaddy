@@ -71,22 +71,24 @@ describe("where it is offered", () => {
 
 describe("the link itself", () => {
   // One constant, four surfaces. A second literal is how the invite gets reissued in three
-  // places and stays broken in the fourth.
-  it("is written down exactly once in the app source", () => {
-    const hits: string[] = [];
-    const walk = (dir: string): void => {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const fs = require("node:fs") as typeof import("node:fs");
-      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-        const p = `${dir}/${e.name}`;
-        if (e.isDirectory()) walk(p);
-        else if (/\.(ts|tsx)$/.test(e.name) && !/\.test\.tsx?$/.test(e.name)) {
-          if (readFileSync(p, "utf8").includes("discord.com/channels")) hits.push(p);
-        }
-      }
-    };
-    walk("src");
-    expect(hits).toEqual(["src/lib/community.ts"]);
+  // places and stays broken in the fourth. Asserted against the SURFACES rather than by
+  // walking the tree: it states the rule directly, and a whole-of-src read races the other
+  // test that does the same walk.
+  it.each([
+    ["src/components/MenuBar.tsx", "the menu bar tab and the Help entry"],
+    ["src/components/SignInScreen.tsx", "the sign-in screen"],
+  ])("%s imports the constant instead of repeating it", (file) => {
+    const src = readFileSync(file, "utf8");
+    expect(src).not.toMatch(/discord\.(com|gg)\//);
+    expect(src).toContain("openDiscord");
+  });
+
+  it("is written down in community.ts, once", () => {
+    const src = readFileSync("src/lib/community.ts", "utf8");
+    // Quoted literals only — the file's comment names discord.gg/<code> as the invite form
+    // to switch to, and prose is not a second source of truth.
+    expect(src.match(/"https:\/\/discord\.(com|gg)\/[^"]*"/g)).toHaveLength(1);
+    expect(src).toContain(`export const DISCORD_URL = "${DISCORD_URL}"`);
   });
 
   // The Rust guard accepts `discord.gg/` too, so swapping in a real invite needs no rebuild.
