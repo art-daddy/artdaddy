@@ -592,6 +592,9 @@ export interface RenderPlan {
   /** Branded exports pad audio through the end card. Successful ffmpeg exit is not enough for
    *  those plans: the encoded stream is probed before the staged artifact can be committed. */
   audioMustSpanVideo: boolean;
+  /** What the DELIVERED file will be, after the delivery scale and fps override — not the
+   *  canvas. Reported with the export, where the canvas would describe the wrong artifact. */
+  output: { width: number; height: number; fps: number };
 }
 
 interface Input {
@@ -1399,6 +1402,7 @@ export function buildRenderCommand(
     fonts: [...usedFontFiles],
     stillImages: [...new Set(inputs.filter((i) => i.isImage).map((i) => i.path))],
     audioMustSpanVideo: brand !== undefined && aout !== null,
+    output: { width: ow, height: oh, fps: outFps },
   };
 }
 
@@ -2025,6 +2029,16 @@ export async function exportTimelineTool(
     filename: dest.filename,
     // Present only when the AGENT called this tool; the Export menu runs it with no origin.
     origin: ctx.origin,
+    // Describes the artifact the plan will produce, captured here because a failed encode
+    // leaves no file to measure and the metric still has to say what was attempted.
+    meta: {
+      duration_s: prepared.plan.duration,
+      width: prepared.plan.output.width,
+      height: prepared.plan.output.height,
+      fps: prepared.plan.output.fps,
+      quality: String(args.quality ?? ""),
+      project_id: ctx.store.projectDir.split(/[\\/]/).pop() ?? "",
+    },
     run: async (signal) => {
       // NOT the turn's signal: the turn is over by the time ffmpeg runs, and its abort must not
       // kill a render nobody cancelled. The queue's own signal is what Stop/cancel reaches.

@@ -214,6 +214,16 @@ export interface ExportSpec {
    *  external MCP agent run the SAME tool (deliberately — one renderer), so this is the only thing
    *  that tells them apart, and it decides whether finishing resumes the conversation. */
   origin?: MutationOrigin;
+  /** What is being delivered, for the export metric. Describes the PLANNED artifact, so it is
+   *  still reportable when the encode fails and no file exists to measure. */
+  meta?: {
+    duration_s: number;
+    width: number;
+    height: number;
+    fps: number;
+    quality: string;
+    project_id: string;
+  };
   /** Runs the encode. Rejects with a message on failure. */
   run: (signal: AbortSignal) => Promise<{ warnings?: string[] }>;
 }
@@ -268,10 +278,48 @@ async function registerExportInLibrary(
   while (inflight.size) await Promise.allSettled([...inflight]);
 }
 
+/** In-flight export metrics. Separate from `inflight` on purpose — see the call site. */
+const beacons = new Set<Promise<void>>();
+
+/** Tests only. The metric is fire-and-forget in production, so this is the only way to observe
+ *  it without making the assertion race the network. */
+export async function whenExportTelemetrySettles(): Promise<void> {
+  while (beacons.size) await Promise.allSettled([...beacons]);
+}
+
+/** Report one settled export to the server's analytics. Fire-and-forget by contract: the file is
+ *  already delivered, so nothing here may fail, delay or alter the export. */
+async function reportSettledExport(
+  spec: ExportSpec,
+  outcome: { status: "done" | "failed" | "cancelled"; elapsedMs: number; warnings: number; error: string },
+): Promise<void> {
+  try {
+    // Only a delivered file has a size; a failed encode leaves nothing to measure.
+    const size = outcome.status === "done" ? ((await spec.store.byteSize(spec.destPath)) ?? 0) : 0;
+    const { reportExport } = await import("../api/exportEvents");
+    await reportExport({
+      status: outcome.status,
+      duration_s: spec.meta?.duration_s ?? 0,
+      size_bytes: size,
+      elapsed_ms: outcome.elapsedMs,
+      width: spec.meta?.width ?? 0,
+      height: spec.meta?.height ?? 0,
+      fps: spec.meta?.fps ?? 0,
+      quality: spec.meta?.quality ?? "",
+      warnings: outcome.warnings,
+      error: outcome.error,
+      project_id: spec.meta?.project_id ?? "",
+    });
+  } catch {
+    /* telemetry is never worth disturbing a finished export over */
+  }
+}
+
 /** Tests only. */
 export function __resetExportQueue(): void {
   reserved.clear();
   inflight.clear();
+  beacons.clear();
   controllers.clear();
   records.length = 0;
   snapshot = [];
@@ -323,6 +371,7 @@ async function encode(
   key: string,
 ): Promise<void> {
   const { store } = spec;
+  const startedAt = Date.now();
   // Committing by rename keeps the destination either untouched or complete. When the fs cannot
   // rename, the caller already pointed the encode at the destination and there is nothing to move.
   const staged = spec.stagePath !== spec.destPath;
@@ -376,6 +425,20 @@ async function encode(
         }
       : { status: "done" },
   );
+  // Reported from HERE rather than from the export tool: the tool returns as soon as the job is
+  // QUEUED, so anything measured there would describe an encode that had not happened yet. This
+  // is also the one place every door ends up — menu, agent and MCP all queue through submitExport.
+  //
+  // Deliberately NOT in `inflight`: that set is what a drain on quit waits for, and making
+  // someone's app hang on a telemetry socket to save a metric row is the wrong trade.
+  const beacon = reportSettledExport(spec, {
+    status: error ? (cancelled ? "cancelled" : "failed") : "done",
+    elapsedMs: Date.now() - startedAt,
+    warnings: warnings.length,
+    error: error && !cancelled ? error : "",
+  });
+  beacons.add(beacon);
+  void beacon.finally(() => beacons.delete(beacon));
   if (cancelled) return;
   const note = warnings.length
     ? `saved as ${spec.filename} (${warnings.length} warning${warnings.length > 1 ? "s" : ""}: ${warnings.join("; ")})`
