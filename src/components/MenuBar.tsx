@@ -9,6 +9,7 @@ import { BRAND, PACKAGE_EXT } from "../brand";
 import AccountMenu from "./AccountMenu";
 import { useContractVersion } from "../contract/useContractVersion";
 import { requestExit } from "../lib/appExit";
+import { openDiscord } from "../lib/community";
 import { desktopStore } from "../lib/desktop";
 import { lastExportDir, rememberExportDir } from "../lib/exportDir";
 import { copyIntoProject } from "../lib/mediaLink";
@@ -24,6 +25,7 @@ import { useProjectNotice } from "../store/projectNotice";
 import { withImportJob } from "../store/importJobs";
 import { useProjects } from "../store/projects";
 import ExportDialog, { type ExportSettings } from "./ExportDialog";
+import { DiscordIcon } from "./DiscordIcon";
 import RecordDialog from "./RecordDialog";
 import { useRecordPanel } from "../store/recordPanel";
 import ImportProgress from "./ImportProgress";
@@ -493,6 +495,7 @@ export default function MenuBar() {
     Help: [
       { label: "Report a Problem…", onClick: () => setReportOpen(true), disabled: !hasProject },
       { label: "Connect an AI Agent (MCP)…", onClick: openMcp },
+      { label: "Join the Discord", onClick: () => void openDiscord() },
       { label: `About ${BRAND.displayName}`, onClick: () => setDialog("about") },
     ],
   };
@@ -549,6 +552,16 @@ export default function MenuBar() {
             )}
           </div>
         ))}
+        {/* Not a menu: it opens the server rather than a dropdown. Sitting in the bar rather
+            than only under Help is the point — nobody goes looking in Help for a community. */}
+        <button
+          onClick={() => void openDiscord()}
+          title="Join the ArtDaddy Discord"
+          className="flex items-center gap-1.5 rounded px-2 py-0.5 text-neutral-300 hover:bg-neutral-800 hover:text-[#5865F2]"
+        >
+          <DiscordIcon className="h-3 w-3" />
+          Discord
+        </button>
         <div className="ml-auto flex items-center gap-1">
           <ExportBadge onClick={() => setExportOpen(true)} />
           {hasProject && (

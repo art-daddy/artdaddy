@@ -257,6 +257,7 @@ pub fn run() {
       check_for_update,
       install_update,
       open_install_link,
+      open_community_link,
       open_mcp_bundle,
       open_desktop_auth,
       store_refresh_token,
@@ -334,6 +335,35 @@ fn is_install_link(url: &str) -> bool {
 fn open_install_link(app: tauri::AppHandle, url: String) -> Result<(), String> {
   if !is_install_link(&url) {
     return Err("refused: not an MCP install link".to_string());
+  }
+  #[allow(deprecated)]
+  {
+    use tauri_plugin_shell::ShellExt;
+    app.shell().open(url, None).map_err(|e| e.to_string())
+  }
+}
+
+/// The ArtDaddy Discord, and nothing else. Two forms because they do different jobs: the invite
+/// is what someone who is not a member yet needs, while the channels URL jumps an existing member
+/// straight into the server. Prefixes, so the invite code can be reissued without a rebuild, and
+/// the same reasoning as `is_install_link`: a bare `discord.com` host match would allow any page
+/// on it, including someone else's server.
+#[cfg(desktop)]
+const COMMUNITY_LINK_PREFIXES: &[&str] = &[
+  "https://discord.gg/",
+  "https://discord.com/channels/1550040801680302192",
+];
+
+#[cfg(desktop)]
+fn is_community_link(url: &str) -> bool {
+  COMMUNITY_LINK_PREFIXES.iter().any(|p| url.starts_with(p))
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+fn open_community_link(app: tauri::AppHandle, url: String) -> Result<(), String> {
+  if !is_community_link(&url) {
+    return Err("refused: not the community link".to_string());
   }
   #[allow(deprecated)]
   {
@@ -962,6 +992,38 @@ mod tests {
       "",
     ] {
       assert!(!super::is_install_link(url), "should have refused {url}");
+    }
+  }
+
+  // ── community link ──────────────────────────────────────────────────────────
+  #[test]
+  #[cfg(desktop)]
+  fn accepts_our_discord_in_both_forms() {
+    // What a non-member needs...
+    assert!(super::is_community_link("https://discord.gg/abc123"));
+    // ...and what jumps an existing member into the server.
+    assert!(super::is_community_link("https://discord.com/channels/1550040801680302192"));
+    assert!(super::is_community_link("https://discord.com/channels/1550040801680302192/999"));
+  }
+
+  #[test]
+  #[cfg(desktop)]
+  fn refuses_discord_pages_that_are_not_ours() {
+    for url in [
+      // The whole reason this is a prefix and not a host check: another server's id.
+      "https://discord.com/channels/9999999999",
+      "https://discord.com/login",
+      "https://discord.com/",
+      // Lookalike hosts.
+      "https://discord.gg.evil.example/x",
+      "https://notdiscord.gg/abc",
+      "https://evil.example/?u=https://discord.gg/abc",
+      // Not https.
+      "http://discord.gg/abc",
+      "file:///C:/Windows/System32/calc.exe",
+      "",
+    ] {
+      assert!(!super::is_community_link(url), "should have refused {url}");
     }
   }
 

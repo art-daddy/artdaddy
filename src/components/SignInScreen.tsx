@@ -4,8 +4,10 @@ import { useState } from "react";
 
 import { startDesktopSignIn } from "../api/desktopAuth";
 import { BRAND } from "../brand";
+import { openDiscord } from "../lib/community";
 import { platform } from "../platform";
 import { useAuth } from "../store/auth";
+import { DiscordIcon } from "./DiscordIcon";
 import { Button } from "./ui";
 
 /** `offline` = we hold no session AND cannot reach the server, so we cannot tell who this is.
@@ -89,6 +91,16 @@ export default function SignInScreen({ offline = false }: { offline?: boolean })
           )}
           {error && <p className="mt-3 text-xs text-red-400">{error}</p>}
         </section>
+
+        {/* Under the card on purpose: someone stuck at a sign-in gate is exactly the person
+            with nobody to ask, and this is the one screen where that is most likely. */}
+        <button
+          onClick={() => void openDiscord()}
+          className="mt-4 flex w-full items-center justify-center gap-2 text-xs text-ink-dim hover:text-ink"
+        >
+          <DiscordIcon className="h-3.5 w-3.5" />
+          Join our Discord for support
+        </button>
       </div>
     </div>
   );
