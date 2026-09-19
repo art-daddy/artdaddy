@@ -17,6 +17,7 @@ import {
   refreshDesktopSession,
 } from "../api/desktopAuth";
 import { onAuthFailure, setClerkTokenProvider } from "../api/auth";
+import { reportLaunchOnce } from "../api/appEvents";
 import { identifyUser } from "../observability/sentry";
 import { platform } from "../platform";
 import { useAuth, isSignedOutGate, authBypassed } from "../store/auth";
@@ -69,6 +70,10 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
       if (cancelled) return;
       void useAuth.getState().verify();
       identifyUser(getDesktopUserId(), getDesktopUserEmail()); // so an issue names a real person
+      // Fired here rather than at startup: before the session restores there is nobody to
+      // attribute the launch to, and an unattributed launch answers none of the questions
+      // this marker exists for.
+      if (getDesktopUserId()) reportLaunchOnce();
     })();
     let offDeepLink: (() => void) | undefined;
     void (async () => {
@@ -79,6 +84,7 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
           if (result.ok) {
             void useAuth.getState().verify();
             identifyUser(getDesktopUserId(), getDesktopUserEmail());
+            if (getDesktopUserId()) reportLaunchOnce();
           }
         }
       };

@@ -3,6 +3,7 @@ import { create } from "zustand";
 import type { ProjectListEntry, ProjectSummary } from "../api/types";
 import { BRAND } from "../brand";
 import { noteSessionProject } from "../observability/crashWatch";
+import { reportProjectOpened } from "../api/appEvents";
 import { projectsRoot, registryPath } from "../tools/dataRoot";
 import { ProjectRegistry } from "../tools/project";
 import { useEditor } from "./editor";
@@ -126,6 +127,10 @@ export const useProjects = create<ProjectsState>((set, get) => ({
     if (token === openSeq) {
       set({ active: summary, activeId: id, error: null });
       noteSessionProject(id); // so a crash report names the project that was open
+      // Deliberately here and not at the call sites: this is the one point where an open has
+      // actually succeeded AND won the supersede race, which is what "reached the product"
+      // means. A superseded or failed open must not report one.
+      reportProjectOpened(id);
     }
     return summary;
   },
