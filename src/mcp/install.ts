@@ -26,7 +26,7 @@ export function vscodeInstallUrl(insiders = false): string {
 
 /** Why an install attempt ended the way it did. The message is shown verbatim, so it has to say
  *  what the user should DO — "couldn't open" tells them nothing they can act on. */
-export type InstallOutcome = { ok: true } | { ok: false; message: string };
+export type InstallOutcome = { ok: true; message?: string } | { ok: false; message: string };
 
 const NO_DESKTOP = "Installing from here needs the desktop app. Use the config below.";
 
@@ -52,16 +52,21 @@ export async function openInstallLink(url: string): Promise<InstallOutcome> {
   }
 }
 
-/** Install the Claude Desktop connector by handing it the bundled `.mcpb`.
+/** Save the bundled `.mcpb` where the user can reach it and reveal it.
  *
- *  Unlike the url handlers this one CAN be checked: Rust looks for the app before opening
- *  anything and returns a message naming the missing piece. */
+ *  It used to hand the file to Claude Desktop and report success as soon as the process
+ *  spawned — which installed nothing when Claude was already running (the argument was
+ *  dropped) and made the Store build open and immediately exit. Both read as success.
+ *  Revealing the file works regardless, and the message says what is left to do. */
 export async function installClaudeConnector(): Promise<InstallOutcome> {
   if (!onDesktop()) return { ok: false, message: NO_DESKTOP };
   try {
     const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("open_mcp_bundle");
-    return { ok: true };
+    const path = await invoke<string>("reveal_mcp_bundle");
+    return {
+      ok: true,
+      message: `Saved to ${path}. In Claude Desktop: Settings → Extensions → Install Extension, then pick that file.`,
+    };
   } catch (e) {
     return { ok: false, message: reason(e) };
   }

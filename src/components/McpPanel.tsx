@@ -65,12 +65,15 @@ const CLIENTS: Client[] = [
   {
     label: "Claude Desktop",
     installer: installClaudeConnector,
-    note: "Windows/macOS only; installs the bundled connector",
-    code: `{
-  "mcpServers": {
-    "${server}": { "type": "http", "url": "${endpoint}" }
-  }
-}`,
+    note: "Windows/macOS. Install saves the connector and shows you where it is.",
+    // NOT a config snippet: claude_desktop_config.json is stdio-only and silently ignores the
+    // `"type": "http"` form the other clients use, so pasting one here taught people to set up
+    // something that could never connect. These are the steps that actually work.
+    code: `1. Press Install above (saves artdaddy.mcpb and opens the folder)
+2. Claude Desktop -> Settings -> Extensions -> Install Extension
+3. Choose artdaddy.mcpb
+
+ArtDaddy must be running for Claude to reach it.`,
   },
   // CLI-only: neither ships a URL handler, so a button here could only shell out to their
   // binary, which this app is not allowed to do.
@@ -85,6 +88,7 @@ const CLIENTS: Client[] = [
 function Snippet({ label, code, note, install, installer }: Client) {
   const [copied, setCopied] = useState(false);
   const [failure, setFailure] = useState("");
+  const [hint, setHint] = useState("");
   const [done, setDone] = useState(false);
 
   const run = async (): Promise<InstallOutcome> =>
@@ -100,10 +104,14 @@ function Snippet({ label, code, note, install, installer }: Client) {
               variant="primary"
               onClick={() => {
                 setFailure("");
+                setHint("");
                 setDone(false);
                 void run().then((r) => {
                   if (r.ok) {
                     setDone(true);
+                    // An instruction must not vanish on a timer the way a tick can: this is the
+                    // step the user still has to perform, not a confirmation that it is done.
+                    if (r.message) setHint(r.message);
                     setTimeout(() => setDone(false), 2000);
                   } else setFailure(r.message);
                 });
@@ -126,6 +134,7 @@ function Snippet({ label, code, note, install, installer }: Client) {
         </div>
       </div>
       {failure && <p className="text-[11px] text-amber-400">{failure}</p>}
+      {hint && <p className="text-[11px] text-emerald-400">{hint}</p>}
       {note && <p className="text-[11px] text-neutral-500">{note}</p>}
       <pre className="mt-1 overflow-x-auto rounded border border-edge bg-black/40 p-2 text-[11px] leading-relaxed text-neutral-300">
         {code}

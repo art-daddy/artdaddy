@@ -130,9 +130,15 @@ describe("install outcomes", () => {
     }
   });
 
-  it("reports success only when the command resolved", () => {
-    invoke.mockResolvedValueOnce(undefined);
-    return expect(installClaudeConnector()).resolves.toEqual({ ok: true });
+  it("tells the user where the connector went and what is left to do", async () => {
+    // Success here is "the file is saved and shown", NOT "the connector is installed" — the
+    // old version reported installed the moment a process spawned, which is how a tester ended
+    // up with Claude flashing open and no connector, and the UI saying it had worked.
+    invoke.mockResolvedValueOnce("C:\\Users\\x\\Downloads\\artdaddy.mcpb");
+    const outcome = await installClaudeConnector();
+    expect(outcome.ok).toBe(true);
+    expect(outcome.message).toContain("artdaddy.mcpb");
+    expect(outcome.message).toMatch(/Install Extension/i);
   });
 
   it("never leaves the user with an empty explanation", () => {

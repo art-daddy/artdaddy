@@ -259,7 +259,7 @@ pub fn run() {
       install_update,
       open_install_link,
       open_community_link,
-      open_mcp_bundle,
+      reveal_mcp_bundle,
       open_desktop_auth,
       store_refresh_token,
       load_refresh_token,
@@ -608,20 +608,20 @@ mod claude_msix_tests {
   }
 }
 
-/// Open the bundled `.mcpb` with Claude Desktop, which installs the connector.
+/// Put the bundled `.mcpb` somewhere the user can reach and show it to them.
 ///
-/// Returns a message the UI can show verbatim on failure. The presence check happens HERE
-/// rather than only in the UI: this is the last point before the side effect, and a UI that
-/// checked earlier could be acting on a stale answer (the user may have quit the installer
-/// in between).
+/// It used to hand the file straight to Claude Desktop and report success the moment `spawn`
+/// returned. That is not evidence of anything: with Claude already running the argument was
+/// silently dropped (the window just came forward), and against the Store build Claude opened
+/// and immediately exited. Both looked like success in the UI and installed nothing.
+///
+/// Revealing the file works on every install type, running or not, and the one manual step
+/// that follows is honest about what the user still has to do.
 #[cfg(desktop)]
 #[tauri::command]
-fn open_mcp_bundle(app: tauri::AppHandle) -> Result<(), String> {
+fn reveal_mcp_bundle(app: tauri::AppHandle) -> Result<String, String> {
   use tauri::Manager;
 
-  let Some(claude) = claude_desktop_path() else {
-    return Err("Claude Desktop was not found. Install it, then try again.".to_string());
-  };
   let bundle = app
     .path()
     .resolve("resources/artdaddy.mcpb", tauri::path::BaseDirectory::Resource)
@@ -633,32 +633,47 @@ fn open_mcp_bundle(app: tauri::AppHandle) -> Result<(), String> {
     ));
   }
 
-  #[cfg(target_os = "macos")]
-  {
-    // `open -a <app> <file>` is the documented way to force a specific handler.
-    std::process::Command::new("open")
-      .arg("-a")
-      .arg(&claude)
-      .arg(&bundle)
-      .spawn()
-      .map_err(|e| format!("could not hand the bundle to Claude Desktop: {e}"))?;
-    Ok(())
+  // Downloads is where a user expects to find something they were just handed; the resource
+  // lives inside the install directory, which is awkward to browse and may be read-only.
+  let dest = app
+    .path()
+    .download_dir()
+    .ok()
+    .map(|d| d.join("artdaddy.mcpb"))
+    .unwrap_or_else(|| std::env::temp_dir().join("artdaddy.mcpb"));
+  std::fs::copy(&bundle, &dest).map_err(|e| format!("could not save the connector: {e}"))?;
+
+  reveal_in_file_manager(&dest);
+  // Not a refusal: the file is saved and shown either way. Saying so up front is kinder than
+  // letting someone hunt through Claude's settings for an app they have not installed.
+  if claude_desktop_path().is_none() {
+    return Ok(format!("{} (Claude Desktop was not found on this machine)", dest.display()));
   }
+  Ok(dest.to_string_lossy().into_owned())
+}
+
+/// Best-effort: the path is returned to the UI either way, so a file manager that refuses to
+/// open must not turn into a failed install.
+#[cfg(desktop)]
+fn reveal_in_file_manager(path: &std::path::Path) {
   #[cfg(target_os = "windows")]
   {
-    // Hand the file to the exe directly. There is no `.mcpb` association to fall back on — the
-    // Store build registers none — and this works for it anyway: the second instance forwards the
-    // path to the running one and exits, so a quick exit here is delivery, not failure.
-    std::process::Command::new(&claude)
-      .arg(&bundle)
-      .spawn()
-      .map_err(|e| format!("could not hand the bundle to Claude Desktop: {e}"))?;
-    Ok(())
+    use std::os::windows::process::CommandExt;
+    const NO_WINDOW: u32 = 0x0800_0000;
+    let _ = std::process::Command::new("explorer.exe")
+      .arg(format!("/select,{}", path.display()))
+      .creation_flags(NO_WINDOW)
+      .spawn();
+  }
+  #[cfg(target_os = "macos")]
+  {
+    let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
   }
   #[cfg(not(any(target_os = "windows", target_os = "macos")))]
   {
-    let _ = claude;
-    Err("Claude Desktop is not supported on this platform.".to_string())
+    if let Some(dir) = path.parent() {
+      let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+    }
   }
 }
 

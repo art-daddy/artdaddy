@@ -32,8 +32,23 @@ describe("MCP setup pane", () => {
     const blocks = codeBlocks();
     expect(blocks.length).toBeGreaterThan(0);
     // The failure this catches: the pane hard-codes a port that drifts from MCP_PORT, so every
-    // snippet the user pastes points somewhere nothing is listening.
-    for (const code of blocks) expect(code).toContain(`127.0.0.1:${MCP_PORT}/mcp`);
+    // snippet the user pastes points somewhere nothing is listening. Only blocks that actually
+    // CONFIGURE a connection are checked — Claude Desktop's is install steps, because its
+    // config file cannot take a URL at all (see below).
+    const configs = blocks.filter((c) => /127\.0\.0\.1|mcpServers|"servers"|--transport/.test(c));
+    expect(configs.length).toBeGreaterThan(0);
+    for (const code of configs) expect(code).toContain(`127.0.0.1:${MCP_PORT}/mcp`);
+  });
+
+  it("never hands Claude Desktop a URL config it cannot use", () => {
+    // claude_desktop_config.json is stdio-only: it silently ignores the `"type": "http"` form
+    // the other clients take. Shipping one taught people to set up something that could never
+    // connect, and a tester lost an evening to it. The connector bundle is the only way in.
+    render(<McpPanel />);
+    const claude = codeBlocks().find((c) => /Install Extension/i.test(c));
+    expect(claude, "the Claude Desktop block should describe installing the bundle").toBeTruthy();
+    expect(claude).not.toMatch(/"type"\s*:\s*"http"/);
+    expect(claude).not.toContain("mcpServers");
   });
 
   it("covers the clients that can connect with a URL alone", () => {
