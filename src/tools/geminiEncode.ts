@@ -57,9 +57,7 @@ export async function encodeVideoForGemini(
   src: string,
   opts: GeminiEncodeOpts,
 ): Promise<string> {
-  const kbps = opts.budget
-    ? bitrateForBudget(opts.budget.maxBytes, opts.budget.durationS)
-    : null;
+  const kbps = opts.budget ? bitrateForBudget(opts.budget.maxBytes, opts.budget.durationS) : null;
   const key = keyHash(
     `${src}|${opts.start ?? ""}|${opts.end ?? ""}|${opts.fps}|${opts.maxDim}|${opts.keepAudio}|${kbps ?? ""}|r${GEMINI_VIDEO_ENCODE_REV}`,
   );

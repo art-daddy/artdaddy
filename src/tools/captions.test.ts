@@ -164,7 +164,8 @@ describe("add_captions", () => {
     expect(runs.some((r) => r.emphasis === true)).toBe(false);
   });
 
-  it("splits at the caps instead of emitting one long clip", async () => {    const { ctx, store } = await seededCtx();
+  it("splits at the caps instead of emitting one long clip", async () => {
+    const { ctx, store } = await seededCtx();
     await withAudio(ctx);
     await seedTranscript(
       ctx,

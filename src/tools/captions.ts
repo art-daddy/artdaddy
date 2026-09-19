@@ -87,7 +87,7 @@ function markHero(runs: CaptionRun[], mode: string): void {
 
 interface Cue {
   span: CaptionSpan;
-  text: string;  /** The card's words, when the source had per-word timing. Empty for a subtitle file, which
+  text: string; /** The card's words, when the source had per-word timing. Empty for a subtitle file, which
    *  gives a cue's text but no word boundaries. */
   words?: CaptionRun[];
 }

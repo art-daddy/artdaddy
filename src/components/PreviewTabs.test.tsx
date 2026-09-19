@@ -11,9 +11,7 @@ import PreviewTabs from "./PreviewTabs";
 
 const tabNames = () => screen.getAllByRole("tab").map((t) => t.textContent);
 
-beforeEach(() =>
-  useEditor.setState({ mediaTabs: [], activeMediaTab: null, mediaNames: {} }),
-);
+beforeEach(() => useEditor.setState({ mediaTabs: [], activeMediaTab: null, mediaNames: {} }));
 
 describe("PreviewTabs", () => {
   it("offers the live preview first, and alone, with nothing else open", () => {

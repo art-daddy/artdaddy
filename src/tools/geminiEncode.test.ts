@@ -138,7 +138,8 @@ describe("the analysis encode is bounded by what the caller can read", () => {
       ...VIDEO,
       budget: { maxBytes: 64 * 1024 * 1024, durationS: 1800 },
     });
-    const rateOf = (r: Run) => Number(String(r.args[r.args.indexOf("-maxrate") + 1]).replace("k", ""));
+    const rateOf = (r: Run) =>
+      Number(String(r.args[r.args.indexOf("-maxrate") + 1]).replace("k", ""));
     expect(rateOf(long.runs[0])).toBeLessThan(rateOf(short.runs[0]));
   });
 

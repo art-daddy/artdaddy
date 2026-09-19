@@ -971,11 +971,7 @@ export async function inspectColorTool(
     return { ok: false, error: "provide clip_id or media_ref" };
   }
   if (!frame)
-    return unresolvedRefError(
-      ctx.store,
-      mediaRef,
-      `could not sample a frame from '${mediaRef}'`,
-    );
+    return unresolvedRefError(ctx.store, mediaRef, `could not sample a frame from '${mediaRef}'`);
 
   const scopes = await measureColorFrame(ctx, frame);
   if (!scopes) return { ok: false, error: "failed to measure color scopes (frame decode failed)" };

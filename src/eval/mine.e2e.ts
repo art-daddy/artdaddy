@@ -28,7 +28,8 @@ function appDataBase(): string {
 // Hard-coding `~/AppData/Roaming/ArtDaddy` here made this lane mine NOTHING twice over: it is a
 // Windows-only path, and it names the folder the app used BEFORE the rename. Both failures look
 // identical to "no sessions recorded", so the lane reported clean and nobody looked.
-const DIR = process.env.ARTDADDY_MINE_DIR ?? path.join(appDataBase(), IDENTITY.dataFolder, "projects");
+const DIR =
+  process.env.ARTDADDY_MINE_DIR ?? path.join(appDataBase(), IDENTITY.dataFolder, "projects");
 
 describe.skipIf(!MINE)("transcript mining (offline, real recorded sessions)", () => {
   const mined: MinedSession[] = [];

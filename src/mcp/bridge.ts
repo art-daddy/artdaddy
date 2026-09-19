@@ -106,7 +106,10 @@ async function manageProject(args: Record<string, unknown>): Promise<Record<stri
       }
       return activeId
         ? textResult({ active_id: activeId, name: active?.name ?? null })
-        : textResult({ active_id: null, hint: "no project open â€” use action='open' or 'create'" });
+        : textResult({
+            active_id: null,
+            hint: "no project open â€” use action='open' or 'create'",
+          });
     }
     case "open": {
       const id = String(args.id ?? "");
@@ -239,9 +242,9 @@ const IMAGE_MIME: Record<string, string> = {
 async function mcpImageBlocks(out: unknown): Promise<Array<Record<string, unknown>>> {
   const atts = (out as { _attachments?: unknown } | null)?._attachments;
   if (!Array.isArray(atts) || !atts.length) return [];
-  const store = (await import("../tools/host")).openToolHost(
-    (await projects()).getState().activeId as string,
-  ).store();
+  const store = (await import("../tools/host"))
+    .openToolHost((await projects()).getState().activeId as string)
+    .store();
   if (!store) return [];
   const blocks: Array<Record<string, unknown>> = [];
   for (const a of atts) {

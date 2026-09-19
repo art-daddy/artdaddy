@@ -53,7 +53,12 @@ export default function SignInScreen({ offline = false }: { offline?: boolean })
                 Sign in needs a connection. Once you have signed in on this device, your projects
                 stay available offline.
               </p>
-              <Button variant="primary" className="mt-4 w-full" onClick={() => void retry()} disabled={busy}>
+              <Button
+                variant="primary"
+                className="mt-4 w-full"
+                onClick={() => void retry()}
+                disabled={busy}
+              >
                 {busy ? "Retrying…" : "Try again"}
               </Button>
             </>

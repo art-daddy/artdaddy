@@ -188,7 +188,8 @@ async function resolveSwapMedia(
   const abs = (await ctx.store.resolveMediaRef(ref)) ?? ref;
   let kind = placeableKind(abs);
   if (kind === "video" && !(await sourceHasVideo(ctx, abs))) kind = "audio";
-  const hasAudio = kind === "audio" ? true : kind === "video" ? await sourceHasAudio(ctx, abs) : false;
+  const hasAudio =
+    kind === "audio" ? true : kind === "video" ? await sourceHasAudio(ctx, abs) : false;
   let totalFrames: number | null = null;
   if (kind === "video" || kind === "audio") {
     const secs = await sourceDurationSeconds(ctx.runner, abs);

@@ -514,11 +514,27 @@ maybe("what the exported file actually shows (real ffmpeg)", () => {
       tl([
         track(
           "v1",
-          [clip({ id: "long", media_ref: blue, timeline_in: 0, timeline_out: 5, source_in: 0, source_out: 5 })],
+          [
+            clip({
+              id: "long",
+              media_ref: blue,
+              timeline_in: 0,
+              timeline_out: 5,
+              source_in: 0,
+              source_out: 5,
+            }),
+          ],
           { z: 1, hidden: true },
         ),
         track("v0", [
-          clip({ id: "shown", media_ref: red, timeline_in: 0, timeline_out: 2, source_in: 0, source_out: 2 }),
+          clip({
+            id: "shown",
+            media_ref: red,
+            timeline_in: 0,
+            timeline_out: 2,
+            source_in: 0,
+            source_out: 2,
+          }),
         ]),
       ]),
       "hiddenlen",

@@ -477,7 +477,10 @@ describe("a generation is not submitted with no credit left", () => {
     // The re-check confirms it: the balance really is gone.
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => new Response(JSON.stringify({ metered: true, used: 2175, limit: 2000, remaining: 0 }))),
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ metered: true, used: 2175, limit: 2000, remaining: 0 })),
+      ),
     );
 
     await expect(gen(store)).rejects.toThrow(/no credit left/i);

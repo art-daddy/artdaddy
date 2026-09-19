@@ -34,7 +34,9 @@ vi.mock("../store/projects", () => ({
 vi.mock("../store/chat", () => ({ useChat: (sel: any) => sel({}) }));
 const ed = vi.hoisted(() => ({ selectedIds: [] as string[] }));
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-vi.mock("../store/editor", () => ({ useEditor: (sel: any) => sel({ selectedIds: ed.selectedIds }) }));
+vi.mock("../store/editor", () => ({
+  useEditor: (sel: any) => sel({ selectedIds: ed.selectedIds }),
+}));
 vi.mock("../tools/host", () => ({
   openToolHost: () => ({ ready: Promise.resolve() }),
   closeToolHost: () => undefined,

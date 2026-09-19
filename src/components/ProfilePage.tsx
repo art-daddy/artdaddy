@@ -61,7 +61,9 @@ export default function ProfilePage() {
             </div>
           )}
           <div className="min-w-0">
-            <h1 className="truncate text-xl font-semibold text-ink">{name || email || "Your account"}</h1>
+            <h1 className="truncate text-xl font-semibold text-ink">
+              {name || email || "Your account"}
+            </h1>
             {email && <p className="truncate text-sm text-ink-dim">{email}</p>}
           </div>
         </header>

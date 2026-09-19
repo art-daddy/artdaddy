@@ -213,7 +213,10 @@ describe("only work THIS chat started may resume it", () => {
     const s = sink();
     registerJobSink(A, s);
 
-    notifyJobSettled(A, job("j1", { status: "failed", error: "disk full", startedBy: "elsewhere" }));
+    notifyJobSettled(
+      A,
+      job("j1", { status: "failed", error: "disk full", startedBy: "elsewhere" }),
+    );
     vi.advanceTimersByTime(SETTLE_WINDOW_MS);
 
     expect(s.deliveries).toHaveLength(0);

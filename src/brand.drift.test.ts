@@ -50,10 +50,10 @@ describe("the app's names have one source of truth", () => {
 
     const named = JSON.stringify(readJson("src-tauri/capabilities/default.json"));
     expect(named).toContain(`"${bin}"`);
-      // The legacy sidecar name, kept deliberately: this guard exists to prove no capability or
-      // config still names it. Renaming it to the CURRENT prefix empties the filter and the loop
-      // asserts nothing at all.
-      for (const legacy of ["akaru-browser"].filter(
+    // The legacy sidecar name, kept deliberately: this guard exists to prove no capability or
+    // config still names it. Renaming it to the CURRENT prefix empties the filter and the loop
+    // asserts nothing at all.
+    for (const legacy of ["akaru-browser"].filter(
       (n) => n !== `${IDENTITY.sidecarPrefix}-browser`,
     )) {
       expect(named).not.toContain(legacy);
@@ -201,7 +201,9 @@ describe("the app's names have one source of truth", () => {
     ];
     const hosts = new Map<string, string[]>();
     for (const file of files) {
-      for (const [, host] of read(file).matchAll(/https:\/\/([a-z0-9.-]+\.azurecontainerapps\.io)/g)) {
+      for (const [, host] of read(file).matchAll(
+        /https:\/\/([a-z0-9.-]+\.azurecontainerapps\.io)/g,
+      )) {
         hosts.set(host, [...(hosts.get(host) ?? []), file]);
       }
     }

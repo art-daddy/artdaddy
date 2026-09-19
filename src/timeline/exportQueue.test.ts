@@ -270,7 +270,9 @@ describe("export queue", () => {
     const realRename = fs.rename.bind(fs);
     fs.rename = async (from: string, to: string) => {
       if (joinPath(to) === joinPath(DEST))
-        throw new Error("The process cannot access the file because it is being used by another process. (os error 32)");
+        throw new Error(
+          "The process cannot access the file because it is being used by another process. (os error 32)",
+        );
       return realRename(from, to);
     };
     let encoded = false;
@@ -588,7 +590,8 @@ describe("export queue", () => {
   });
 
   it("keeps the queue moving after a failure", async () => {
-    const { store } = make();    let second = false;
+    const { store } = make();
+    let second = false;
     await submitExport({
       store,
       destPath: DEST,
