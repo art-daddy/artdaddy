@@ -254,6 +254,7 @@ pub fn run() {
       commit_file,
       remove_file,
       probe_media_file,
+      host_platform,
       check_for_update,
       install_update,
       open_install_link,
@@ -276,7 +277,8 @@ pub fn run() {
     kill_process_tree,
     commit_file,
     remove_file,
-    probe_media_file
+    probe_media_file,
+    host_platform
   ]);
 
   builder
@@ -370,6 +372,17 @@ fn open_community_link(app: tauri::AppHandle, url: String) -> Result<(), String>
     use tauri_plugin_shell::ShellExt;
     app.shell().open(url, None).map_err(|e| e.to_string())
   }
+}
+
+/// The real OS and CPU, which the webview cannot tell us: its user-agent reports an Intel Mac on
+/// Apple Silicon, and that distinction decides which native sidecar build is running — exactly the
+/// thing we need to know when transcription or export dies on one machine and not another.
+#[tauri::command]
+fn host_platform() -> (String, String) {
+  (
+    std::env::consts::OS.to_string(),
+    std::env::consts::ARCH.to_string(),
+  )
 }
 
 /// The one page the desktop-auth flow is ever allowed to open: Clerk cannot run inside this
@@ -744,13 +757,80 @@ mod tests {
   use std::path::PathBuf;
   use std::time::{SystemTime, UNIX_EPOCH};
 
-  // std only, on purpose: CI runs `cargo build --locked`, so adding a dev-dependency
-  // here would need a Cargo.lock update or the desktop job fails on the lockfile.
   fn scratch(tag: &str) -> PathBuf {
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_nanos();
     let mut p = std::env::temp_dir();
     p.push(format!("artdaddy_trash_test_{tag}_{nanos}"));
     p
+  }
+
+  /// A video editor's footage lives on the big second drive, and the folder picker already lets
+  /// anyone choose one. Reading the capability JSON cannot tell you whether its globs actually
+  /// MATCH such a path -- a project on `D:\` failed every read with "forbidden path" while the
+  /// file looked perfectly correct -- so this evaluates the shipped patterns with the same
+  /// matcher and options tauri uses (`require_literal_separator: true`, which is why a bare `*`
+  /// is not enough on its own).
+  mod fs_scope {
+    use glob::{MatchOptions, Pattern};
+
+    fn allow_patterns() -> Vec<String> {
+      let raw = include_str!("../capabilities/default.json");
+      let v: serde_json::Value = serde_json::from_str(raw).expect("capability json must parse");
+      let perms = v["permissions"].as_array().expect("permissions array");
+      let scope = perms
+        .iter()
+        .find(|p| p["identifier"] == "fs:scope")
+        .expect("an fs:scope entry must exist");
+      scope["allow"]
+        .as_array()
+        .expect("allow array")
+        .iter()
+        .map(|e| e["path"].as_str().expect("path string").to_string())
+        .collect()
+    }
+
+    fn options() -> MatchOptions {
+      // Mirrors tauri::scope::fs (tauri-2.11.5 src/scope/fs.rs).
+      MatchOptions { case_sensitive: false, require_literal_separator: true, require_literal_leading_dot: false }
+    }
+
+    fn allowed(path: &str) -> bool {
+      let opts = options();
+      allow_patterns()
+        .iter()
+        .filter_map(|p| Pattern::new(p).ok())
+        .any(|p| p.matches_with(path, opts))
+    }
+
+    #[test]
+    fn the_capability_still_declares_a_scope() {
+      // Without this the checks below would pass vacuously if the entry were ever renamed.
+      assert!(!allow_patterns().is_empty());
+    }
+
+    #[test]
+    fn a_project_on_a_second_windows_drive_is_allowed() {
+      // The exact path from the crash report that prompted this.
+      assert!(allowed("D:/AIVEDIOEDITING/MAHESH/internals/project.json"));
+      assert!(allowed("E:/footage/clip.mp4"));
+    }
+
+    #[test]
+    fn a_project_on_a_mounted_volume_is_allowed() {
+      // The same rule has to hold where our mac and Linux users keep external media.
+      assert!(allowed("/Volumes/Scratch/project/internals/project.json"));
+      assert!(allowed("/mnt/media/footage/clip.mp4"));
+    }
+
+    #[test]
+    fn the_default_location_is_still_covered() {
+      // What this proves is that the SHIPPED scope admits a default-location project, which is
+      // the user-visible outcome. It does not prove the `$DATA`/`$HOME` entries specifically
+      // still work: tauri expands those at runtime and this test does not, so today they are
+      // admitted by the catch-all above. Kept because the outcome is what must not regress.
+      assert!(allowed("C:/Users/someone/AppData/Roaming/ArtDaddy/projects/p/internals/project.json"));
+      assert!(allowed("/home/someone/.local/share/ArtDaddy/projects/p/timeline.json"));
+    }
   }
 
   #[test]

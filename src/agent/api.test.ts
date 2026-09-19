@@ -47,8 +47,13 @@ describe("inferRound", () => {
     expect(url).toBe(`${apiBase()}/inference`);
     expect(init.method).toBe("POST");
     expect((init.headers as Record<string, string>).Authorization).toBe("Bearer tok");
-    expect(JSON.parse(init.body as string)).toEqual(body);
-    expect(init.signal).toBe(ctrl.signal);
+    // The round carries diagnostics (host OS/arch, app version) on top of the caller's body.
+    expect(JSON.parse(init.body as string)).toMatchObject(body);
+    // The request rides a signal DERIVED from the caller's (it also carries the round
+    // deadline). That the caller's Stop reaches an IN-FLIGHT request is proven in
+    // roundTimeout.test.ts; here the round has already finished, so only the wiring is checked.
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    expect(ctrl.signal.aborted).toBe(false);
   });
 
   it("notifies auth failure and throws on 401", async () => {
@@ -157,7 +162,10 @@ describe("inferRoundStreaming", () => {
     const headers = init.headers as Record<string, string>;
     expect(headers.Accept).toBe("text/event-stream");
     expect(headers.Authorization).toBe("Bearer tok");
-    expect(init.signal).toBe(ctrl.signal);
+    // Derived from the caller's signal (it also carries the round deadline); live propagation
+    // is covered by roundTimeout.test.ts against an in-flight request.
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    expect(ctrl.signal.aborted).toBe(false);
   });
 
   it("falls back to the plain round against a server that has no stream route", async () => {

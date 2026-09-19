@@ -73,8 +73,24 @@ export function clearMcpLastError(): void {
   lastError = null;
 }
 
+/** Turn a boot failure into something the person reading it can act on. Both the boot hook and
+ *  the panel toggle go through here, so neither can show a rawer message than the other.
+ *
+ *  The address-in-use case is the one that matters: it means a SECOND copy of the app is already
+ *  running and holding the port, and "os error 10048" told nobody that. */
+export function explainMcpError(e: unknown): string {
+  const raw = (e as Error)?.message ?? String(e);
+  if (/(10048|address (already )?in use|EADDRINUSE|only one usage of each socket)/i.test(raw)) {
+    return (
+      `Port ${MCP_PORT} is already taken — another copy of this app is probably still running. ` +
+      `Close it (check the system tray) and switch this back on.`
+    );
+  }
+  return raw;
+}
+
 export function recordMcpError(e: unknown): string {
-  lastError = (e as Error)?.message ?? String(e);
+  lastError = explainMcpError(e);
   return lastError;
 }
 

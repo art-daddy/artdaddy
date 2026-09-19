@@ -7,6 +7,9 @@
 // transcript, so no breadcrumbs are needed to reconstruct the story.
 import * as Sentry from "@sentry/react";
 
+import { platform } from "../platform";
+import { hostInfo, hostTag, resolveHostInfo } from "../platform/host";
+
 let enabled = false;
 
 // The active project/transcript/model ids — set once per turn. Kept independent
@@ -108,7 +111,22 @@ export function initSentry(): boolean {
     beforeSend,
   });
   enabled = true;
+  tagHost();
+  // The authoritative OS/arch needs an IPC round-trip; tag again once it lands.
+  void resolveHostInfo().then(tagHost, () => {});
   return true;
+}
+
+/** OS/CPU/shell on every event. Without these an issue cannot be read as "only on Windows" or
+ *  "only on Apple Silicon" — and mac/Linux reported nothing at all until this release, so the
+ *  dashboard silently described Windows and called it everyone. */
+function tagHost(): void {
+  if (!enabled) return;
+  const { os, arch } = hostInfo();
+  Sentry.setTag("os_name", os);
+  Sentry.setTag("shell", platform.name);
+  if (arch) Sentry.setTag("arch", arch);
+  Sentry.setTag("host", hostTag());
 }
 
 /** Set the active correlation ids for the current turn. Records them for the
@@ -138,27 +156,22 @@ export function correlationBody(): { project_id?: string; transcript_id?: string
 }
 
 /** Attribute events to the signed-in tester, so "how many people hit this" is a real
- *  number. Every issue read 0 users affected while five testers were using the app,
- *  because nothing ever identified one — which made a live bug look like local noise.
+ *  number AND support can answer "who hit this?" without a hash lookup. The id and email
+ *  come from the verified session, never from anything the page can set.
  *
- *  The access secret IS the identity here, so it is HASHED: Sentry gets a stable opaque
- *  id, never the credential, and `sendDefaultPii` stays off. */
-export async function identifyUser(secret: string | null): Promise<void> {
+ *  This is deliberate PII: `sendDefaultPii` stays off (no IPs, no request bodies, no
+ *  headers) and user CONTENT is still scrubbed — the identity is the exception, because a
+ *  bug report we cannot trace to a person is a bug we cannot follow up. */
+export function identifyUser(userId: string | null, email?: string | null): void {
   if (!enabled) return;
-  if (!secret) {
+  if (!userId) {
     Sentry.setUser(null);
     return;
   }
-  Sentry.setUser({ id: await opaqueId(secret) });
-}
-
-async function opaqueId(secret: string): Promise<string> {
-  const subtle = globalThis.crypto?.subtle;
-  if (!subtle) return "tester";
-  const digest = await subtle.digest("SHA-256", new TextEncoder().encode(secret));
-  return Array.from(new Uint8Array(digest).slice(0, 8))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+  Sentry.setUser({
+    id: userId.slice(0, 200),
+    ...(email ? { email: email.slice(0, 320) } : {}),
+  });
 }
 
 /** Report a handled error with a small, scrubbed context. No-op when disabled. */

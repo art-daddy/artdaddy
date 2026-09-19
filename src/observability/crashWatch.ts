@@ -21,6 +21,34 @@ interface Session {
   aliveAt: number;
   projectId?: string;
   release?: string;
+  /** JS heap at the last heartbeat, MB. The whole point: it separates a renderer that ran out
+   *  of memory from a native side that aborted, and the marker is the only evidence that
+   *  survives the process. */
+  heapMb?: number;
+  heapLimitMb?: number;
+  /** What the app was doing when it last checked in — an export is a very different suspect
+   *  from an idle window. */
+  activity?: string;
+}
+
+/** Chromium-only and deliberately untyped elsewhere: WebView2 is Chromium, so this is present
+ *  where our crashes happen, and absent (harmlessly) in tests and on Safari. */
+function heap(): { heapMb?: number; heapLimitMb?: number } {
+  const m = (performance as unknown as { memory?: { usedJSHeapSize: number; jsHeapSizeLimit: number } })
+    .memory;
+  if (!m) return {};
+  return {
+    heapMb: Math.round(m.usedJSHeapSize / 1e6),
+    heapLimitMb: Math.round(m.jsHeapSizeLimit / 1e6),
+  };
+}
+
+let activity = "idle";
+
+/** Name the expensive thing currently under way ("export", "transcribe", "render"). Reported
+ *  with the next crash, so "it dies during export" stops being a guess. */
+export function noteSessionActivity(what: string): void {
+  activity = what || "idle";
 }
 
 function read(store: Storage): Session | null {
@@ -74,6 +102,15 @@ export function startCrashWatch(
         ran_for_ms: ranForMs,
         project_id: previous.projectId,
         previous_release: previous.release,
+        // The last heartbeat before the process vanished — this is what says whether it ran
+        // out of memory, and what it was busy with when it did.
+        heap_mb: previous.heapMb,
+        heap_limit_mb: previous.heapLimitMb,
+        heap_pct:
+          previous.heapMb && previous.heapLimitMb
+            ? Math.round((previous.heapMb / previous.heapLimitMb) * 100)
+            : undefined,
+        activity: previous.activity,
         // Named so the cause is searchable next to the Windows/OS crash record.
         likely_cause: "process died (out of memory, native abort, or force-quit)",
       });
@@ -93,7 +130,7 @@ export function installCrashWatch(opts: { release?: string } = {}): () => void {
 
   const beat = setInterval(() => {
     const s = read(store);
-    if (s) write(store, { ...s, aliveAt: Date.now() });
+    if (s) write(store, { ...s, aliveAt: Date.now(), activity, ...heap() });
   }, 5_000);
 
   const clear = (): void => {

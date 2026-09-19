@@ -77,18 +77,27 @@ export function getAccessToken(): string | null {
   return accessToken;
 }
 
-/** The `sub` claim from the current access token, for Sentry correlation only — this reads the
- *  JWT payload without verifying its signature, which is fine here since it is never used for
+/** Claims from the current access token, for Sentry correlation only — this reads the JWT
+ *  payload without verifying its signature, which is fine here since it is never used for
  *  authorization (the backend still verifies the token itself on every request). */
-export function getUserId(): string | null {
-  if (!accessToken) return null;
+function claims(): { sub?: string; email?: string } {
+  if (!accessToken) return {};
   try {
     const payload = accessToken.split(".")[1];
     const json = atob(payload.replace(/-/g, "+").replace(/_/g, "/"));
-    return (JSON.parse(json) as { sub?: string }).sub ?? null;
+    return JSON.parse(json) as { sub?: string; email?: string };
   } catch {
-    return null;
+    return {};
   }
+}
+
+export function getUserId(): string | null {
+  return claims().sub ?? null;
+}
+
+/** Empty for a token minted before the server carried the claim; it appears on the next refresh. */
+export function getUserEmail(): string | null {
+  return claims().email ?? null;
 }
 
 const onDesktop = (): boolean => platform.name === "tauri";

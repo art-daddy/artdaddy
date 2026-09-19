@@ -29,6 +29,8 @@ jobs:
     env:
       TRIPLE: x86_64-unknown-linux-gnu
       VITE_API_BASE_URL: https://akaru-server.ambitioustree-4d826744.centralindia.azurecontainerapps.io
+      # See macos-release.yml: without this the build ships with error reporting off.
+      VITE_SENTRY_DSN: ${{ secrets.VITE_SENTRY_DSN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -132,6 +134,24 @@ jobs:
             npx tauri build --bundles appimage,deb \
               --config '{"bundle":{"createUpdaterArtifacts":false}}'
           fi
+
+      # "The workflow sets the variable" is not evidence the bundle received it — mac shipped
+      # with error reporting silently off for every release up to 0.13.1 and nothing failed.
+      # dist/ is what tauri just embedded, so assert against that.
+      - name: The bundle must carry the server + Sentry config
+        run: |
+          test -n "$VITE_API_BASE_URL" || { echo "::error::VITE_API_BASE_URL is empty"; exit 1; }
+          grep -rqF --include='*.js' "$VITE_API_BASE_URL" dist/assets || {
+            echo "::error::the built bundle does not contain $VITE_API_BASE_URL"
+            exit 1
+          }
+          test -n "$VITE_SENTRY_DSN" || { echo "::error::VITE_SENTRY_DSN is empty - linux would ship blind"; exit 1; }
+          dsn_id="${VITE_SENTRY_DSN##*/}"
+          grep -rqF --include='*.js' "$dsn_id" dist/assets || {
+            echo "::error::the built bundle does not carry the Sentry DSN"
+            exit 1
+          }
+          echo "  api base + sentry baked in (project $dsn_id)"
 
       - name: Verify and launch what users receive
         id: artifact

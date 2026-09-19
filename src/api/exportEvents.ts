@@ -7,6 +7,7 @@
 import { apiBase } from "./config";
 import { authHeaders } from "./auth";
 import { platform } from "../platform";
+import { hostInfo } from "../platform/host";
 
 export interface ExportEvent {
   /** Terminal state only — a running export has nothing to report yet. */
@@ -35,7 +36,14 @@ export async function reportExport(ev: ExportEvent): Promise<void> {
       headers: { "Content-Type": "application/json", ...(await authHeaders()) },
       // Which build and which OS is the client's to state, not the caller's — every export
       // reports them the same way, so no call site can get them wrong or leave them out.
-      body: JSON.stringify({ ...ev, app_version: __ARTDADDY_RELEASE__, platform: platform.name }),
+      // `platform` is the SHELL (tauri/web); the OS is what a per-platform failure is read by.
+      body: JSON.stringify({
+        ...ev,
+        app_version: __ARTDADDY_RELEASE__,
+        platform: hostInfo().os,
+        arch: hostInfo().arch,
+        shell: platform.name,
+      }),
       // A background beacon must not be able to hang a shutdown drain on a stalled socket.
       signal: AbortSignal.timeout(10_000),
     });

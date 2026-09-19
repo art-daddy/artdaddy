@@ -47,6 +47,10 @@ jobs:
       # their own machine and each AI feature is dead on arrival. Not a secret — it is the same
       # public URL the app advertises.
       VITE_API_BASE_URL: https://akaru-server.ambitioustree-4d826744.centralindia.azurecontainerapps.io
+      # Baked in at build time exactly like the API base. Without it a mac build ships with error
+      # reporting OFF, which is why every issue in the dashboard described a Windows machine and
+      # looked like it described everyone.
+      VITE_SENTRY_DSN: ${{ secrets.VITE_SENTRY_DSN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -194,6 +198,16 @@ jobs:
             exit 1
           fi
           echo "  api base baked in: $VITE_API_BASE_URL"
+          # Same reasoning for the DSN: mac shipped with reporting silently OFF for every release
+          # up to 0.13.1, and nothing failed. Match on the project id so the assertion cannot pass
+          # on an empty or truncated value.
+          test -n "$VITE_SENTRY_DSN" || { echo "::error::VITE_SENTRY_DSN is empty - mac would ship blind again"; exit 1; }
+          dsn_id="${VITE_SENTRY_DSN##*/}"
+          grep -rqF --include='*.js' "$dsn_id" dist/assets || {
+            echo "::error::the built bundle does not carry the Sentry DSN"
+            exit 1
+          }
+          echo "  sentry reporting baked in (project $dsn_id)"
 
       # "It built" is not evidence the app works: assert the bundle CONTAINS the sidecars and
       # the browser resources, because a missing one is silent until a user hits that feature.

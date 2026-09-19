@@ -131,35 +131,49 @@ describe("beforeSend", () => {
 });
 
 // Five testers were using the app while every issue read "0 users affected", because
-// nothing identified anyone — a live bug was indistinguishable from local noise.
+// nothing identified anyone — a live bug was indistinguishable from local noise. The id was
+// then a HASH, which counted people correctly but could not name one: the first real crash
+// sat in the dashboard for three days as an anonymous string. It is now the account itself.
 describe("identifyUser", () => {
-  it("attributes events to a stable id that is NOT the credential", async () => {
+  it("attributes events to the account, so a report can be answered", async () => {
     vi.stubEnv("VITE_SENTRY_DSN", "https://k@example.com/1");
     const s = await fresh();
     s.initSentry();
-    await s.identifyUser("super-secret-token");
-    const arg = mockSetUser.mock.calls.at(-1)?.[0] as { id?: string };
-    expect(arg.id).toBeTruthy();
-    expect(arg.id).not.toContain("super-secret-token");
+    s.identifyUser("user_3JQ", "hamza@example.com");
+    expect(mockSetUser).toHaveBeenLastCalledWith({
+      id: "user_3JQ",
+      email: "hamza@example.com",
+    });
+
     // Same tester, same id — otherwise every launch looks like a new person.
     mockSetUser.mockClear();
-    await s.identifyUser("super-secret-token");
-    expect((mockSetUser.mock.calls.at(-1)?.[0] as { id?: string }).id).toBe(arg.id);
+    s.identifyUser("user_3JQ", "hamza@example.com");
+    expect((mockSetUser.mock.calls.at(-1)?.[0] as { id?: string }).id).toBe("user_3JQ");
     // ...and a different tester is a different person.
-    await s.identifyUser("another-token");
-    expect((mockSetUser.mock.calls.at(-1)?.[0] as { id?: string }).id).not.toBe(arg.id);
+    s.identifyUser("user_OTHER", "other@example.com");
+    expect((mockSetUser.mock.calls.at(-1)?.[0] as { id?: string }).id).not.toBe("user_3JQ");
+  });
+
+  it("never carries the access token", async () => {
+    // The failure direction: the identity is taken from the JWT's claims, and handing the
+    // whole credential to a third party instead would be a real leak.
+    vi.stubEnv("VITE_SENTRY_DSN", "https://k@example.com/1");
+    const s = await fresh();
+    s.initSentry();
+    s.identifyUser("user_3JQ", "hamza@example.com");
+    expect(JSON.stringify(mockSetUser.mock.calls.at(-1))).not.toMatch(/eyJ|Bearer|token/i);
   });
 
   it("clears the user on sign-out and stays silent when reporting is off", async () => {
     vi.stubEnv("VITE_SENTRY_DSN", "https://k@example.com/1");
     const on = await fresh();
     on.initSentry();
-    await on.identifyUser(null);
+    on.identifyUser(null);
     expect(mockSetUser).toHaveBeenLastCalledWith(null);
 
     mockSetUser.mockClear();
     const off = await fresh();
-    await off.identifyUser("t");
+    off.identifyUser("user_x", "a@b.co");
     expect(mockSetUser).not.toHaveBeenCalled();
   });
 });

@@ -35,6 +35,13 @@ trash = "5"
 sha2 = "0.10"
 keyring = "4"
 
+# Tests only. The fs capability is a list of GLOBS, and whether one of them actually matches a
+# path on a second drive is not something reading the JSON can answer — a project on D:\ failed
+# every read for a real user while the file looked correct. Pinned to the version tauri itself
+# resolves so the test evaluates the same matcher the app does.
+[dev-dependencies]
+glob = "0.3"
+
 # Desktop-only: there is no updater on mobile, and the plugin doesn't build there.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-updater = "2"

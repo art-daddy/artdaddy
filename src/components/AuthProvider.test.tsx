@@ -13,10 +13,12 @@ const mocks = vi.hoisted(() => {
     authFailureCb: null as (() => void) | null,
     offAuth: vi.fn(),
     userId: null as string | null,
+    userEmail: null as string | null,
     refreshDesktopSession: vi.fn(async () => false),
     handleDeepLinkCallback: vi.fn(async () => ({ ok: true }) as { ok: boolean }),
     getAccessToken: vi.fn(() => null as string | null),
     getUserId: vi.fn(() => mocks.userId),
+    getUserEmail: vi.fn(() => mocks.userEmail),
     hasStoredDesktopSession: vi.fn(async () => false),
     setStoredSession: vi.fn(),
     hasStoredSession: false,
@@ -64,6 +66,7 @@ vi.mock("../api/auth", () => ({
 vi.mock("../api/desktopAuth", () => ({
   getAccessToken: mocks.getAccessToken,
   getUserId: mocks.getUserId,
+  getUserEmail: mocks.getUserEmail,
   refreshDesktopSession: mocks.refreshDesktopSession,
   handleDeepLinkCallback: mocks.handleDeepLinkCallback,
   hasStoredDesktopSession: mocks.hasStoredDesktopSession,
@@ -161,23 +164,29 @@ describe("AuthProvider", () => {
   it("identifies the Sentry user once a stored desktop-auth session restores", async () => {
     mocks.refreshDesktopSession.mockResolvedValue(true);
     mocks.userId = "user_abc123";
+    mocks.userEmail = "tester@example.com";
     render(
       <AuthProvider>
         <span>x</span>
       </AuthProvider>,
     );
-    await waitFor(() => expect(mocks.identifyUser).toHaveBeenLastCalledWith("user_abc123"));
+    // The email is the point: an id alone cannot be traced back to the person who filed a
+    // report, which is what made the first real crash take three days to attribute.
+    await waitFor(() =>
+      expect(mocks.identifyUser).toHaveBeenLastCalledWith("user_abc123", "tester@example.com"),
+    );
   });
 
   it("identifies with null when nothing is stored (no lingering identity from a prior run)", async () => {
     mocks.refreshDesktopSession.mockResolvedValue(false);
     mocks.userId = null;
+    mocks.userEmail = null;
     render(
       <AuthProvider>
         <span>x</span>
       </AuthProvider>,
     );
-    await waitFor(() => expect(mocks.identifyUser).toHaveBeenLastCalledWith(null));
+    await waitFor(() => expect(mocks.identifyUser).toHaveBeenLastCalledWith(null, null));
   });
 
   it("re-verifies when the network returns ('online') while NOT unlocked", () => {

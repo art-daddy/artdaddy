@@ -11,6 +11,7 @@ import { useEffect } from "react";
 import {
   getAccessToken as getDesktopAccessToken,
   getUserId as getDesktopUserId,
+  getUserEmail as getDesktopUserEmail,
   handleDeepLinkCallback,
   hasStoredDesktopSession,
   refreshDesktopSession,
@@ -67,7 +68,7 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
       useAuth.getState().setStoredSession(await hasStoredDesktopSession());
       if (cancelled) return;
       void useAuth.getState().verify();
-      void identifyUser(getDesktopUserId()); // so an issue's "users affected" is a real count
+      identifyUser(getDesktopUserId(), getDesktopUserEmail()); // so an issue names a real person
     })();
     let offDeepLink: (() => void) | undefined;
     void (async () => {
@@ -77,7 +78,7 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
           const result = await handleDeepLinkCallback(url);
           if (result.ok) {
             void useAuth.getState().verify();
-            void identifyUser(getDesktopUserId());
+            identifyUser(getDesktopUserId(), getDesktopUserEmail());
           }
         }
       };

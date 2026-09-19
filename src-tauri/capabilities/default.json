@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "enables the default permissions",
+  "description": "Enables the default permissions. The fs scope is deliberately whole-disk: a video editor's footage lives on the big second drive, the folder picker already lets anyone choose one, and refusing it afterwards meant the UI promised what the sandbox denied - a project on D:\\ failed every file read with 'forbidden path' as an unhandled rejection carrying no message, so the app just never opened it. The agent still reaches media only through media_ref and the library (isUnsafeAgentRef), so the injection surface is unchanged; what this gives up is containment of a bug in any direct fs call.",
   "windows": ["main"],
   "permissions": [
     "core:default",
@@ -48,7 +48,10 @@
         { "path": "$DOWNLOAD" },
         { "path": "$DOWNLOAD/**" },
         { "path": "$HOME" },
-        { "path": "$HOME/**" }
+        { "path": "$HOME/**" },
+        { "path": "*" },
+        { "path": "**" },
+        { "path": "/**" }
       ]
     },
     "dialog:default",
