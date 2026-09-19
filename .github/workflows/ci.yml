@@ -63,24 +63,27 @@ jobs:
         with:
           workspaces: src-tauri
       - run: npm ci
-      # Reliable core gate: compiles the Rust shell AND validates tauri.conf.json +
-      # capabilities via build.rs — catches the Cargo / scope / sidecar-wiring
-      # breakage class without needing the (large) sidecar binaries. `--locked`
-      # forbids a silent Cargo.lock repair, so a drift between Cargo.toml and the
-      # committed lockfile fails the PR instead of being papered over.
-      - name: cargo build (rust + config/capability gate)
-        run: cargo build --locked --manifest-path src-tauri/Cargo.toml
-      # The custom IPC command (`trash_path`) is the app's only recoverable delete.
-      # Its unit tests live next to it so a regression fails the PR, not a user.
-      - name: cargo test (trash_path)
-        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
-      # Full desktop bundle: fetch the public per-platform sidecars, then package.
-      # (No secrets; the fetch pulls from public release URLs.)
+      # Staged BEFORE the cargo gate below, not after. build.rs validates every `externalBin`
+      # and resource path, so with these missing it fails on the first one
+      # (`binaries\ffmpeg-...exe doesn't exist`) and never reaches the config it exists to check.
+      # That stayed hidden while rust-cache kept the build script from re-running at all: the
+      # gate passed by being SKIPPED, and the first capability change in months — which is
+      # exactly what it is meant to catch — turned it red.
       - name: fetch sidecars
         run: npm run fetch:sidecars
       - name: build node sidecar
         run: npm run build:sidecar
       - name: bundle browser resources
         run: npm run bundle:browser
+      # Reliable core gate: compiles the Rust shell AND validates tauri.conf.json +
+      # capabilities via build.rs — catches the Cargo / scope / sidecar-wiring
+      # breakage class. `--locked` forbids a silent Cargo.lock repair, so a drift between
+      # Cargo.toml and the committed lockfile fails the PR instead of being papered over.
+      - name: cargo build (rust + config/capability gate)
+        run: cargo build --locked --manifest-path src-tauri/Cargo.toml
+      # The custom IPC command (`trash_path`) is the app's only recoverable delete.
+      # Its unit tests live next to it so a regression fails the PR, not a user.
+      - name: cargo test (trash_path)
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
       - name: tauri build
         run: npx tauri build
