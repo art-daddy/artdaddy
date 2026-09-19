@@ -58,6 +58,8 @@ const MODE_LABELS: Record<ApprovalMode, string> = {
   default: "Default permissions",
   autopilot: "Autopilot",
 };
+const COMPOSER_MIN_HEIGHT = 40;
+const COMPOSER_MAX_HEIGHT = 220;
 
 /** Flatten the project file tree to library media refs for the @ picker. */
 function collectMediaRefs(nodes: FileNode[]): { ref: string; name: string; kind: string }[] {
@@ -151,27 +153,17 @@ export default function ChatView({ onHide }: { onHide?: () => void } = {}) {
     if (!composer) return;
 
     if (!text) {
-      composer.style.height = "";
+      composer.style.height = `${COMPOSER_MIN_HEIGHT}px`;
       composer.style.overflowY = "hidden";
       return;
     }
 
-    composer.style.height = "auto";
-    const style = getComputedStyle(composer);
-    const lineHeight = Number.parseFloat(style.lineHeight);
-    const chrome =
-      Number.parseFloat(style.paddingTop) +
-      Number.parseFloat(style.paddingBottom) +
-      Number.parseFloat(style.borderTopWidth) +
-      Number.parseFloat(style.borderBottomWidth);
-    const maxHeight = lineHeight * 10 + chrome;
-    const contentHeight =
-      composer.scrollHeight +
-      Number.parseFloat(style.borderTopWidth) +
-      Number.parseFloat(style.borderBottomWidth);
-
-    composer.style.height = `${Math.min(contentHeight, maxHeight)}px`;
-    composer.style.overflowY = contentHeight > maxHeight ? "auto" : "hidden";
+    // Zeroing first makes scrollHeight report the content instead of preserving an
+    // accidentally stretched textarea as its own minimum.
+    composer.style.height = "0px";
+    const contentHeight = Math.max(COMPOSER_MIN_HEIGHT, composer.scrollHeight);
+    composer.style.height = `${Math.min(contentHeight, COMPOSER_MAX_HEIGHT)}px`;
+    composer.style.overflowY = contentHeight > COMPOSER_MAX_HEIGHT ? "auto" : "hidden";
   }, [text]);
 
   // Tool summaries name a track the way the ruler does. Subscribed rather than read once,
@@ -726,7 +718,7 @@ export default function ChatView({ onHide }: { onHide?: () => void } = {}) {
               }}
               placeholder="Message the editor…"
               rows={1}
-              className="relative z-10 min-h-[40px] w-full resize-none overflow-y-hidden rounded-lg border border-edge bg-neutral-900 px-3 py-2 text-sm outline-none focus:border-accent"
+              className="relative z-10 h-10 min-h-10 w-full resize-none overflow-y-hidden rounded-lg border border-edge bg-neutral-900 px-3 py-2 text-sm leading-5 outline-none focus:border-accent"
             />
           </div>
           {streaming ? (
