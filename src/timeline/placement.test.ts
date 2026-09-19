@@ -193,9 +193,7 @@ describe("addClipsTool", () => {
     // Naming a track is still an explicit request to overwrite it.
     await addClipsTool(
       {
-        entries: [
-          { media_ref: "song.mp3", timeline_in: 0, timeline_out: 90, track_id: "music" },
-        ],
+        entries: [{ media_ref: "song.mp3", timeline_in: 0, timeline_out: 90, track_id: "music" }],
       },
       ctx,
     );

@@ -51,64 +51,72 @@ export default function RecordDialog({
     setReady(false);
   }, []);
 
-  const stop = useCallback((save: boolean) => {
-    const recorder = recRef.current;
-    recRef.current = null;
-    if (recorder) {
-      if (!save) {
-        recorder.onstop = null;
-        recorder.ondataavailable = null;
-        recorder.onerror = null;
+  const stop = useCallback(
+    (save: boolean) => {
+      const recorder = recRef.current;
+      recRef.current = null;
+      if (recorder) {
+        if (!save) {
+          recorder.onstop = null;
+          recorder.ondataavailable = null;
+          recorder.onerror = null;
+        }
+        if (recorder.state !== "inactive") recorder.stop();
       }
-      if (recorder.state !== "inactive") recorder.stop();
-    }
-    releaseStream();
-  }, [releaseStream]);
+      releaseStream();
+    },
+    [releaseStream],
+  );
 
   /** (Re)open the camera. Also refreshes the device lists, which only carry labels once a
    *  stream has been granted. */
-  const openStream = useCallback(async (camera: string, mic: string) => {
-    const request = ++requestRef.current;
-    releaseStream();
-    setError(null);
-    setOpening(true);
-    try {
-      const media = navigator.mediaDevices;
-      if (!media?.getUserMedia || typeof MediaRecorder === "undefined") {
-        throw new Error("Camera recording is unavailable in this window. Use the installed app or a supported browser.");
-      }
-      const stream = await media.getUserMedia({
-        video: camera ? { deviceId: { exact: camera } } : true,
-        audio: mic ? { deviceId: { exact: mic } } : true,
-      });
-      if (request !== requestRef.current) {
-        stream.getTracks().forEach((track) => track.stop());
-        return;
-      }
-      streamRef.current = stream;
-      if (videoRef.current) videoRef.current.srcObject = stream;
-      const { cameras: cams, mics: ms } = await listCaptureDevices(media);
-      if (request !== requestRef.current) return;
-      setCameras(cams);
-      setMics(ms);
-      setCameraId(camera || cams[0]?.deviceId || "");
-      setMicId(mic || ms[0]?.deviceId || "");
-      setReady(true);
-    } catch (e) {
-      if (request !== requestRef.current) return;
+  const openStream = useCallback(
+    async (camera: string, mic: string) => {
+      const request = ++requestRef.current;
       releaseStream();
-      // A refused permission is the common case and reads as a bug unless it is named.
-      setError(
-        e instanceof DOMException && e.name === "NotAllowedError"
-          ? "Camera or microphone access was refused. Allow ArtDaddy in your system privacy settings, then retry."
-          : e instanceof DOMException && e.name === "NotFoundError"
-            ? "No camera or microphone was found. Connect a device, then retry."
-          : `Could not open the camera: ${e instanceof Error ? e.message : String(e)}`,
-      );
-    } finally {
-      if (request === requestRef.current) setOpening(false);
-    }
-  }, [releaseStream]);
+      setError(null);
+      setOpening(true);
+      try {
+        const media = navigator.mediaDevices;
+        if (!media?.getUserMedia || typeof MediaRecorder === "undefined") {
+          throw new Error(
+            "Camera recording is unavailable in this window. Use the installed app or a supported browser.",
+          );
+        }
+        const stream = await media.getUserMedia({
+          video: camera ? { deviceId: { exact: camera } } : true,
+          audio: mic ? { deviceId: { exact: mic } } : true,
+        });
+        if (request !== requestRef.current) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+        streamRef.current = stream;
+        if (videoRef.current) videoRef.current.srcObject = stream;
+        const { cameras: cams, mics: ms } = await listCaptureDevices(media);
+        if (request !== requestRef.current) return;
+        setCameras(cams);
+        setMics(ms);
+        setCameraId(camera || cams[0]?.deviceId || "");
+        setMicId(mic || ms[0]?.deviceId || "");
+        setReady(true);
+      } catch (e) {
+        if (request !== requestRef.current) return;
+        releaseStream();
+        // A refused permission is the common case and reads as a bug unless it is named.
+        setError(
+          e instanceof DOMException && e.name === "NotAllowedError"
+            ? "Camera or microphone access was refused. Allow ArtDaddy in your system privacy settings, then retry."
+            : e instanceof DOMException && e.name === "NotFoundError"
+              ? "No camera or microphone was found. Connect a device, then retry."
+              : `Could not open the camera: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      } finally {
+        if (request === requestRef.current) setOpening(false);
+      }
+    },
+    [releaseStream],
+  );
 
   useEffect(() => {
     if (!open) return;
@@ -226,8 +234,16 @@ export default function RecordDialog({
           />
         </div>
 
-        {opening && <p role="status" className="mt-2 text-[11px] text-neutral-400">Opening camera...</p>}
-        {error && <p role="alert" className="mt-2 text-[11px] text-amber-400">{error}</p>}
+        {opening && (
+          <p role="status" className="mt-2 text-[11px] text-neutral-400">
+            Opening camera...
+          </p>
+        )}
+        {error && (
+          <p role="alert" className="mt-2 text-[11px] text-amber-400">
+            {error}
+          </p>
+        )}
 
         <div className="mt-3 grid grid-cols-2 gap-3">
           <label className="text-[11px] text-neutral-400">
@@ -283,10 +299,13 @@ export default function RecordDialog({
               {recording ? "Discard" : "Close"}
             </Button>
             {recording ? (
-              <Button variant="primary" onClick={() => {
-                setPhase("saving");
-                stop(true);
-              }}>
+              <Button
+                variant="primary"
+                onClick={() => {
+                  setPhase("saving");
+                  stop(true);
+                }}
+              >
                 Stop &amp; save
               </Button>
             ) : (

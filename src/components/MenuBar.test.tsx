@@ -41,7 +41,12 @@ vi.mock("../store/projects", () => ({
 const authState = vi.hoisted(() => ({
   status: "locked" as "locked" | "unlocked",
   markLocked: vi.fn(),
-  profile: null as { display_name: string; email: string; image_url: string; user_id: string } | null,
+  profile: null as {
+    display_name: string;
+    email: string;
+    image_url: string;
+    user_id: string;
+  } | null,
 }));
 vi.mock("../store/auth", () => ({
   useAuth: Object.assign(
@@ -208,7 +213,8 @@ describe("MenuBar", () => {
     });
   });
 
-  it("sends the chosen delivery settings, not the defaults", async () => {    renderBar("/p/test");
+  it("sends the chosen delivery settings, not the defaults", async () => {
+    renderBar("/p/test");
     fireEvent.click(screen.getByRole("button", { name: "File" }));
     fireEvent.click(screen.getByText("Export Video (.mp4)…"));
     fireEvent.change(screen.getByLabelText("resolution"), { target: { value: "720p" } });

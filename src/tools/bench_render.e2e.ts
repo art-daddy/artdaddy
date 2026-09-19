@@ -161,84 +161,91 @@ function buildTimeline(level: (typeof LEVELS)[number], src: string, durSec: numb
   return { canvas, tracks: [main, overlay, a] } as Timeline;
 }
 
-describe.skipIf(!process.env.ARTDADDY_BENCH)("BENCH #1 — render wall-time vs preview (1080p)", () => {
-  beforeAll(async () => {
-    ffmpegAvailable = (await have("ffmpeg")) && (await have("ffprobe"));
-    if (!ffmpegAvailable) return;
-    dir = await fsp.mkdtemp(path.join(os.tmpdir(), "artdaddy-bench-render-"));
-    ctx = mkCtx(dir);
-    await ensureTimeline(ctx.store);
-    // One 1080p testsrc2 source per duration (motion => realistic encode load) + a tone.
+describe.skipIf(!process.env.ARTDADDY_BENCH)(
+  "BENCH #1 — render wall-time vs preview (1080p)",
+  () => {
+    beforeAll(async () => {
+      ffmpegAvailable = (await have("ffmpeg")) && (await have("ffprobe"));
+      if (!ffmpegAvailable) return;
+      dir = await fsp.mkdtemp(path.join(os.tmpdir(), "artdaddy-bench-render-"));
+      ctx = mkCtx(dir);
+      await ensureTimeline(ctx.store);
+      // One 1080p testsrc2 source per duration (motion => realistic encode load) + a tone.
+      for (const d of DURATIONS) {
+        const src = path.join(dir, `src${d}.mp4`);
+        await ff([
+          "-y",
+          "-f",
+          "lavfi",
+          "-i",
+          `testsrc2=size=${W}x${H}:rate=${FPS}:duration=${d}`,
+          "-f",
+          "lavfi",
+          "-i",
+          `sine=frequency=440:duration=${d}`,
+          "-c:v",
+          "libx264",
+          "-preset",
+          "veryfast",
+          "-pix_fmt",
+          "yuv420p",
+          "-c:a",
+          "aac",
+          "-shortest",
+          src,
+        ]);
+        srcByDur.set(d, src);
+      }
+    }, 600_000);
+
     for (const d of DURATIONS) {
-      const src = path.join(dir, `src${d}.mp4`);
-      await ff([
-        "-y",
-        "-f",
-        "lavfi",
-        "-i",
-        `testsrc2=size=${W}x${H}:rate=${FPS}:duration=${d}`,
-        "-f",
-        "lavfi",
-        "-i",
-        `sine=frequency=440:duration=${d}`,
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-pix_fmt",
-        "yuv420p",
-        "-c:a",
-        "aac",
-        "-shortest",
-        src,
-      ]);
-      srcByDur.set(d, src);
+      for (const level of LEVELS) {
+        it(`${level} @ ${d}s`, async () => {
+          if (!ffmpegAvailable) return;
+          const src = srcByDur.get(d)!;
+          const tl = buildTimeline(level, src, d);
+          await replaceTimeline(ctx.store, tl);
+          const t0 = Date.now();
+          const mp4 = await renderMp4(ctx, dir);
+          const renderSec = (Date.now() - t0) / 1000;
+          const pr = await probe(mp4);
+          const st = await fsp.stat(mp4);
+          const clips = tl.tracks.reduce((n, t) => n + (t.clips?.length ?? 0), 0);
+          rows.push({
+            level,
+            videoSec: d,
+            renderSec: Number(renderSec.toFixed(2)),
+            realtimeFactor: Number((renderSec / d).toFixed(2)),
+            outMB: Number((st.size / 1e6).toFixed(1)),
+            clips,
+            tracks: tl.tracks.length,
+            warnings: 0,
+          });
+          // sanity: output is a real 1080p mp4 of ~the right length
+          if (pr.width !== W || pr.height !== H)
+            throw new Error(`bad dims ${pr.width}x${pr.height}`);
+        }, 620_000);
+      }
     }
-  }, 600_000);
 
-  for (const d of DURATIONS) {
-    for (const level of LEVELS) {
-      it(`${level} @ ${d}s`, async () => {
-        if (!ffmpegAvailable) return;
-        const src = srcByDur.get(d)!;
-        const tl = buildTimeline(level, src, d);
-        await replaceTimeline(ctx.store, tl);
-        const t0 = Date.now();
-        const mp4 = await renderMp4(ctx, dir);
-        const renderSec = (Date.now() - t0) / 1000;
-        const pr = await probe(mp4);
-        const st = await fsp.stat(mp4);
-        const clips = tl.tracks.reduce((n, t) => n + (t.clips?.length ?? 0), 0);
-        rows.push({
-          level,
-          videoSec: d,
-          renderSec: Number(renderSec.toFixed(2)),
-          realtimeFactor: Number((renderSec / d).toFixed(2)),
-          outMB: Number((st.size / 1e6).toFixed(1)),
-          clips,
-          tracks: tl.tracks.length,
-          warnings: 0,
-        });
-        // sanity: output is a real 1080p mp4 of ~the right length
-        if (pr.width !== W || pr.height !== H) throw new Error(`bad dims ${pr.width}x${pr.height}`);
-      }, 620_000);
-    }
-  }
-
-  afterAll(async () => {
-    if (rows.length) {
-      const md = renderReport(rows);
-      const outDir = path.resolve("reports/bench");
-      await fsp.mkdir(outDir, { recursive: true });
-      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-      await fsp.writeFile(path.join(outDir, `render-${stamp}.json`), JSON.stringify(rows, null, 2));
-      await fsp.writeFile(path.join(outDir, "render-latest.md"), md);
-      // eslint-disable-next-line no-console
-      console.log("\n" + md + "\n");
-    }
-    if (dir) await fsp.rm(dir, { recursive: true, force: true }).catch(() => undefined);
-  });
-});
+    afterAll(async () => {
+      if (rows.length) {
+        const md = renderReport(rows);
+        const outDir = path.resolve("reports/bench");
+        await fsp.mkdir(outDir, { recursive: true });
+        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+        await fsp.writeFile(
+          path.join(outDir, `render-${stamp}.json`),
+          JSON.stringify(rows, null, 2),
+        );
+        await fsp.writeFile(path.join(outDir, "render-latest.md"), md);
+        // eslint-disable-next-line no-console
+        console.log("\n" + md + "\n");
+      }
+      if (dir) await fsp.rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    });
+  },
+);
 
 function renderReport(data: Row[]): string {
   const lines: string[] = [];

@@ -238,7 +238,8 @@ async function withDeadline(
   }
 }
 
-async function settleLater(  spec: SubmitSpec,
+async function settleLater(
+  spec: SubmitSpec,
   ledger: JobLedger,
   jobId: string,
   ids: string[],

@@ -406,7 +406,10 @@ describe("client tools E2E (real binaries)", () => {
     const dir = joinPath(proj, "cc");
     await nodeFs.mkdir(dir);
     await openE2EDoc(dir);
-    const cc: ClientToolContext = { store: new ProjectStoreAccess(dir, nodeFs), runner: nodeRunner };
+    const cc: ClientToolContext = {
+      store: new ProjectStoreAccess(dir, nodeFs),
+      runner: nodeRunner,
+    };
     const src = joinPath(dir, "red.mp4");
     expect(
       (

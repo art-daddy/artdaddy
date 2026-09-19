@@ -132,7 +132,9 @@ describe("RecordDialog", () => {
   it("stops a late stream when the dialog closed while permission was pending", async () => {
     let grant!: (stream: MediaStream) => void;
     vi.mocked(navigator.mediaDevices.getUserMedia).mockReturnValueOnce(
-      new Promise((resolve) => { grant = resolve; }),
+      new Promise((resolve) => {
+        grant = resolve;
+      }),
     );
     const stopTrack = vi.fn();
     const { rerender } = render(<RecordDialog open projectDir="C:/p" onClose={vi.fn()} />);
@@ -159,9 +161,7 @@ describe("RecordDialog", () => {
 
   it("releases the camera when unmounted without saving", async () => {
     const stopTrack = vi.fn();
-    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValueOnce(
-      captureStream(stopTrack),
-    );
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValueOnce(captureStream(stopTrack));
     const { unmount } = render(<RecordDialog open projectDir="C:/p" onClose={vi.fn()} />);
     await waitFor(() => expect(screen.getByRole("button", { name: "Record" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "Record" }));

@@ -274,7 +274,7 @@ async function registerExportInLibrary(
   }
 }
 
-/** Resolve once every export started in this process has settled (tests and a deliberate drain). */export async function whenExportsSettle(): Promise<void> {
+/** Resolve once every export started in this process has settled (tests and a deliberate drain). */ export async function whenExportsSettle(): Promise<void> {
   while (inflight.size) await Promise.allSettled([...inflight]);
 }
 
@@ -291,7 +291,12 @@ export async function whenExportTelemetrySettles(): Promise<void> {
  *  already delivered, so nothing here may fail, delay or alter the export. */
 async function reportSettledExport(
   spec: ExportSpec,
-  outcome: { status: "done" | "failed" | "cancelled"; elapsedMs: number; warnings: number; error: string },
+  outcome: {
+    status: "done" | "failed" | "cancelled";
+    elapsedMs: number;
+    warnings: number;
+    error: string;
+  },
 ): Promise<void> {
   try {
     // Only a delivered file has a size; a failed encode leaves nothing to measure.

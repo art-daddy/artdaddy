@@ -263,11 +263,35 @@ describe.runIf(FF && FP && existsSync(BRAND.endcard))("a BRANDED export with aud
     };
     const loudnessOf = async (file: string): Promise<number> =>
       integrated(
-        (await run(FF!, ["-hide_banner", "-nostats", "-i", file, "-filter_complex", "ebur128", "-f", "null", "-"])).err,
+        (
+          await run(FF!, [
+            "-hide_banner",
+            "-nostats",
+            "-i",
+            file,
+            "-filter_complex",
+            "ebur128",
+            "-f",
+            "null",
+            "-",
+          ])
+        ).err,
       );
     const durOf = async (file: string, stream: string): Promise<number> =>
       Number(
-        (await run(FP!, ["-v", "error", "-select_streams", stream, "-show_entries", "stream=duration", "-of", "default=nk=1:nw=1", file])).out
+        (
+          await run(FP!, [
+            "-v",
+            "error",
+            "-select_streams",
+            stream,
+            "-show_entries",
+            "stream=duration",
+            "-of",
+            "default=nk=1:nw=1",
+            file,
+          ])
+        ).out
           .trim()
           .split(/\r?\n/)[0],
       );

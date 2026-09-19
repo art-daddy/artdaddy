@@ -87,7 +87,6 @@ describe("results handed to an external agent", () => {
   });
 });
 
-
 // A gated app has no editor mounted, so the Shell that opens a ProjectDocument never runs. The
 // bridge used to wait 15s and then blame routing, which sent an agent looking in the wrong place.
 describe("manage_project under the sign-in gate", () => {
@@ -120,7 +119,6 @@ describe("manage_project under the sign-in gate", () => {
     expect(body).toMatch(/sign-in|sign in/i);
   });
 });
-
 
 // Withdrawn tools keep their implementations so they can be brought back, which means the tool
 // host still answers `has(name)` for one. The catalog is what decides, and an agent that

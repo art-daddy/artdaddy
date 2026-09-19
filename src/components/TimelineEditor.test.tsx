@@ -600,7 +600,9 @@ describe("TimelineEditor", () => {
       );
       expect(screen.getByTestId("drop-ghost").getAttribute("data-frame")).toBe("60");
 
-      act(() => void window.dispatchEvent(new CustomEvent("artdaddy:os-drag-over", { detail: null })));
+      act(
+        () => void window.dispatchEvent(new CustomEvent("artdaddy:os-drag-over", { detail: null })),
+      );
       expect(screen.queryByTestId("drop-ghost")).toBeNull();
     });
 
@@ -610,7 +612,9 @@ describe("TimelineEditor", () => {
       act(
         () =>
           void window.dispatchEvent(
-            new CustomEvent("artdaddy:os-drag-over", { detail: { target: "library", x: 86, y: 10 } }),
+            new CustomEvent("artdaddy:os-drag-over", {
+              detail: { target: "library", x: 86, y: 10 },
+            }),
           ),
       );
       expect(screen.queryByTestId("drop-ghost")).toBeNull();

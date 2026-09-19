@@ -2,7 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import { findClipById, seededCtx, audioRunner, makeRunner, videoRunner } from "../test/timelineKit";
 import { ctxApplyOp, loadTimeline } from "./engine";
-import { addClipsTool, addTextClipsTool, clearDurationCache, clearHasAudioCache } from "./placement";
+import {
+  addClipsTool,
+  addTextClipsTool,
+  clearDurationCache,
+  clearHasAudioCache,
+} from "./placement";
 import { clearSourceDimsCache } from "./sourceDims";
 import {
   applyColorTool,
@@ -317,7 +322,11 @@ describe("swapping a clip's media in place", () => {
     const shortRunner = makeRunner((p, a) => {
       if (p !== "ffprobe") return { code: 0, stdout: "", stderr: "" };
       if (a.includes("-select_streams"))
-        return { code: 0, stdout: a[a.indexOf("-select_streams") + 1] === "v" ? "1" : "", stderr: "" };
+        return {
+          code: 0,
+          stdout: a[a.indexOf("-select_streams") + 1] === "v" ? "1" : "",
+          stderr: "",
+        };
       return { code: 0, stdout: "1.0", stderr: "" };
     });
     const { ctx, store } = await seededCtx(shortRunner);

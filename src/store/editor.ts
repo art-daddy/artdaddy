@@ -539,9 +539,7 @@ const editorCreator: StateCreator<EditorState> = (set, get) => {
         return {
           activeMediaTab: ref,
           mediaTabs:
-            slot >= 0
-              ? s.mediaTabs.map((t, i) => (i === slot ? tab : t))
-              : [...s.mediaTabs, tab],
+            slot >= 0 ? s.mediaTabs.map((t, i) => (i === slot ? tab : t)) : [...s.mediaTabs, tab],
         };
       }),
     closeMediaTab: (ref) =>

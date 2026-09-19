@@ -92,7 +92,8 @@ export function resolveCanvas(
     // A "1080x1920" STRING is accepted because it is the form this tool REPORTS the canvas back
     // in (`resolution`), and read-then-write-it-back is the obvious round-trip. Refusing it with
     // "must be object" made the tool disagree with its own output.
-    const wh = typeof nested === "string" ? /^\s*(\d{2,5})\s*[x×]\s*(\d{2,5})\s*$/.exec(nested) : null;
+    const wh =
+      typeof nested === "string" ? /^\s*(\d{2,5})\s*[x×]\s*(\d{2,5})\s*$/.exec(nested) : null;
     args = wh
       ? { ...args, width: Number(wh[1]), height: Number(wh[2]) }
       : nested !== null && typeof nested === "object" && !Array.isArray(nested)

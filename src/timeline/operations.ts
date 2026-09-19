@@ -970,12 +970,7 @@ export interface SwapMedia {
  *
  *  The source window restarts at 0 of the new media and keeps the slot; a shorter replacement
  *  SHORTENS the clip (and says so) rather than claiming frames past the end of its own footage. */
-function swapClipMedia(
-  timeline: Timeline,
-  clip: Clip,
-  m: SwapMedia,
-  notes: string[],
-): void {
+function swapClipMedia(timeline: Timeline, clip: Clip, m: SwapMedia, notes: string[]): void {
   const cid = String(clip.id ?? "");
   const tIn = Number(clip.timeline_in) || 0;
   const tOut = Number(clip.timeline_out) || 0;

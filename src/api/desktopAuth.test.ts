@@ -118,9 +118,7 @@ describe("handleDeepLinkCallback — negative cases", () => {
     const state = new URL(invoke.mock.calls[0][1].url).searchParams.get("state")!;
     fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
 
-    const result = await handleDeepLinkCallback(
-      `artdaddy://auth/callback?code=abc&state=${state}`,
-    );
+    const result = await handleDeepLinkCallback(`artdaddy://auth/callback?code=abc&state=${state}`);
     expect(result.ok).toBe(false);
     expect("message" in result && result.message).toBeTruthy();
   });

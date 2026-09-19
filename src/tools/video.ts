@@ -208,9 +208,7 @@ async function videoAsk(
       start: winStart ?? undefined,
       end: winEnd ?? undefined,
       tag: "gemini",
-      ...(analyzedS
-        ? { budget: { maxBytes: MAX_HEAP_READ_BYTES, durationS: analyzedS } }
-        : {}),
+      ...(analyzedS ? { budget: { maxBytes: MAX_HEAP_READ_BYTES, durationS: analyzedS } } : {}),
     });
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };

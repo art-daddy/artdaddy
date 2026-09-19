@@ -285,7 +285,8 @@ describe("unrenderable flag emoji", () => {
   });
 });
 
-describe("runs + emphasis (C2)", () => {  it("composes per-run overrides: a recoloured run gets \\1c + {\\r} reset; base-matching runs stay plain", () => {
+describe("runs + emphasis (C2)", () => {
+  it("composes per-run overrides: a recoloured run gets \\1c + {\\r} reset; base-matching runs stay plain", () => {
     const line = buildBandAss(
       [cap({ text: "", runs: [run({ text: "plain" }), run({ text: "hero", color: "#ff0000" })] })],
       { w: 1920, h: 1080 },

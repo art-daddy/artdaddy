@@ -365,9 +365,7 @@ export class ProjectStoreAccess {
     } catch {
       return null;
     }
-    const row = clips.find(
-      (c) => c.id === s || c.filename === s || (c.aliases ?? []).includes(s),
-    );
+    const row = clips.find((c) => c.id === s || c.filename === s || (c.aliases ?? []).includes(s));
     const status = row ? String(row.status ?? "") : "";
     if (!row || (status !== "generating" && status !== "failed")) return null;
     return {
