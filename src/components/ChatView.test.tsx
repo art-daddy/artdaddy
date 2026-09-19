@@ -152,6 +152,21 @@ describe("ChatView", () => {
     expect(state.send).toHaveBeenCalled();
   });
 
+  it("starts at one row and grows with the message content", () => {
+    render(<ChatView />);
+    const box = screen.getByPlaceholderText(/Message the editor/) as HTMLTextAreaElement;
+    Object.defineProperty(box, "scrollHeight", {
+      configurable: true,
+      get: () => (box.value.includes("\n") ? 60 : 40),
+    });
+
+    expect(box.style.height).toBe("40px");
+    fireEvent.change(box, { target: { value: "first\nsecond" } });
+    expect(box.style.height).toBe("60px");
+    fireEvent.change(box, { target: { value: "" } });
+    expect(box.style.height).toBe("40px");
+  });
+
   it("renders turns with user text + parts", () => {
     state.turns = [
       {
