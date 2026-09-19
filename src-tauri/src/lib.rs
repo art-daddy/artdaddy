@@ -646,9 +646,27 @@ fn reveal_mcp_bundle(app: tauri::AppHandle) -> Result<String, String> {
   reveal_in_file_manager(&dest);
   // Not a refusal: the file is saved and shown either way. Saying so up front is kinder than
   // letting someone hunt through Claude's settings for an app they have not installed.
-  if claude_desktop_path().is_none() {
+  let Some(_claude) = claude_desktop_path() else {
     return Ok(format!("{} (Claude Desktop was not found on this machine)", dest.display()));
+  };
+
+  #[cfg(target_os = "macos")]
+  {
+    // `open -a <app> <file>` is the documented way to force a handler, and macOS delivers the
+    // file to an app that is ALREADY running. Windows has no equivalent: there is no `.mcpb`
+    // association to shell out to (verified: HKCR, UserChoice and `assoc` all have none), and
+    // exec'ing the packaged exe directly is what opened Claude and immediately closed it.
+    let _ = std::process::Command::new("open")
+      .arg("-a")
+      .arg(&_claude)
+      .arg(&dest)
+      .spawn();
+    return Ok(format!(
+      "{} - Claude should show an install dialog. If it does not: Settings > Extensions > Install Extension.",
+      dest.display()
+    ));
   }
+  #[cfg(not(target_os = "macos"))]
   Ok(dest.to_string_lossy().into_owned())
 }
 
