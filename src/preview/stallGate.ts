@@ -5,11 +5,11 @@
 // the playhead moved, audio played, and the canvas held one stale frame until decode caught
 // up — so the user lost those seconds of their own video and heard them out of sync.
 //
-// Holding is only correct if it is BOUNDED. A source that never decodes must not freeze
-// playback forever, and the worker cannot always know that it never will, so the wait has a
-// ceiling: past it the clock runs regardless and the preview degrades to the old behaviour
-// rather than deadlocking.
-export const MAX_STALL_MS = 2000;
+// Holding is only correct if it is both BOUNDED and imperceptibly short. Posters now cover
+// decoder warm-up, so a multi-second hold only makes the Play button appear broken. Allow a
+// few frames for an in-flight decode, then keep the transport responsive and degrade to the
+// poster/stale-frame behaviour rather than delaying playback.
+export const MAX_STALL_MS = 100;
 
 export class StallGate {
   private starved = false;
