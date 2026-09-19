@@ -34,8 +34,9 @@ interface Session {
 /** Chromium-only and deliberately untyped elsewhere: WebView2 is Chromium, so this is present
  *  where our crashes happen, and absent (harmlessly) in tests and on Safari. */
 function heap(): { heapMb?: number; heapLimitMb?: number } {
-  const m = (performance as unknown as { memory?: { usedJSHeapSize: number; jsHeapSizeLimit: number } })
-    .memory;
+  const m = (
+    performance as unknown as { memory?: { usedJSHeapSize: number; jsHeapSizeLimit: number } }
+  ).memory;
   if (!m) return {};
   return {
     heapMb: Math.round(m.usedJSHeapSize / 1e6),

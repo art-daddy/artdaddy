@@ -74,7 +74,11 @@ export async function inferRound(body: InferBody, signal?: AbortSignal): Promise
   // as a silent stream does, and this is also the fallback an older server lands on.
   const deadline = withDeadline(signal, ROUND_TIMEOUT_MS);
   try {
-    return await postJson<RoundResultDTO>(api.inferenceUrl(), withClientInfo(body), deadline.signal);
+    return await postJson<RoundResultDTO>(
+      api.inferenceUrl(),
+      withClientInfo(body),
+      deadline.signal,
+    );
   } catch (e) {
     return deadline.rethrow(e);
   } finally {
