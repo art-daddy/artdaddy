@@ -93,6 +93,25 @@ function beforeSend(event: Sentry.ErrorEvent): Sentry.ErrorEvent | null {
   return event;
 }
 
+/** Keep the HTTP trail and nothing else.
+ *
+ *  Breadcrumbs were off entirely, so an error arrived with no idea what the app had been
+ *  doing — a round that opened a request and never got an answer looked identical to one that
+ *  was never sent. Sentry's fetch crumbs carry url/method/status/duration, which answers that.
+ *
+ *  Everything else is dropped on purpose: console crumbs would carry whatever we ever log,
+ *  and `ui.input` would carry what the user typed. The query string goes too — nothing of ours
+ *  puts a secret there today, and this way nothing can start to. */
+function beforeBreadcrumb(crumb: Sentry.Breadcrumb): Sentry.Breadcrumb | null {
+  if (crumb.category !== "fetch" && crumb.category !== "xhr") return null;
+  const url = crumb.data?.url;
+  if (typeof url === "string") {
+    const cut = url.indexOf("?");
+    crumb.data = { ...crumb.data, url: cut === -1 ? url : `${url.slice(0, cut)}?…` };
+  }
+  return crumb;
+}
+
 /** Initialize Sentry when VITE_SENTRY_DSN is set; return true if active. A
  *  no-op (returns false) otherwise, so local dev + tests never send anything. */
 export function initSentry(): boolean {
@@ -107,7 +126,10 @@ export function initSentry(): boolean {
     environment: import.meta.env.VITE_ARTDADDY_ENV || "alpha",
     sendDefaultPii: false,
     tracesSampleRate: 0, // errors only
-    maxBreadcrumbs: 0, // no breadcrumbs (transcript_id links out)
+    // HTTP only (see beforeBreadcrumb): enough to see what the app asked for and what came
+    // back, without carrying console output or anything the user typed.
+    maxBreadcrumbs: 30,
+    beforeBreadcrumb,
     beforeSend,
   });
   enabled = true;

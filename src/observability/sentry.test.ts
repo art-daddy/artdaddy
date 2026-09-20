@@ -44,7 +44,12 @@ describe("initSentry", () => {
     expect(s.initSentry()).toBe(true);
     const opts = mockInit.mock.calls[0][0] as Any;
     expect(opts.tracesSampleRate).toBe(0);
-    expect(opts.maxBreadcrumbs).toBe(0);
+    // Breadcrumbs are ON now, but bounded and filtered: an error used to arrive with no idea
+    // what the app had been doing. What keeps content out is `beforeBreadcrumb`, not a zero —
+    // so both must be present, and breadcrumbs.test.ts pins what that filter actually allows.
+    expect(opts.maxBreadcrumbs).toBeGreaterThan(0);
+    expect(opts.maxBreadcrumbs).toBeLessThanOrEqual(50);
+    expect(typeof opts.beforeBreadcrumb).toBe("function");
     expect(opts.sendDefaultPii).toBe(false);
     expect(typeof opts.beforeSend).toBe("function");
   });
