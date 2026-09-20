@@ -3,7 +3,10 @@ import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  claudeCodeCommand,
+  cursorConfigJson,
   cursorInstallUrl,
+  cursorServerConfig,
   installClaudeConnector,
   openInstallLink,
   vscodeInstallUrl,
@@ -29,8 +32,21 @@ describe("MCP install links", () => {
   it("hands Cursor the inner server object, and the name separately", () => {
     // Cursor takes the entry WITHOUT the { mcpServers: … } wrapper. Sending the wrapper is the
     // obvious mistake and would register a server called "mcpServers" pointing nowhere.
-    expect(cursorPayload()).toEqual({ type: "http", url: endpoint });
+    expect(cursorPayload()).toEqual({ url: endpoint });
     expect(new URL(cursorInstallUrl()).searchParams.get("name")).toBe(BRAND.mcpServerName);
+  });
+
+  it("uses the same documented URL-only entry for Cursor's global fallback", () => {
+    expect(JSON.parse(cursorConfigJson())).toEqual({
+      mcpServers: { [BRAND.mcpServerName]: cursorServerConfig() },
+    });
+    expect(cursorServerConfig()).toEqual({ url: endpoint });
+  });
+
+  it("registers Claude Code machine-wide instead of only in the current directory", () => {
+    expect(claudeCodeCommand()).toBe(
+      `claude mcp add --scope user --transport http ${BRAND.mcpServerName} ${endpoint}`,
+    );
   });
 
   it("hands VS Code the whole entry, name included", () => {

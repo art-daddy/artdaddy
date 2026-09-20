@@ -7,6 +7,8 @@ import { useEffect, useState } from "react";
 
 import { BRAND } from "../brand";
 import {
+  claudeCodeCommand,
+  cursorConfigJson,
   cursorInstallUrl,
   installClaudeConnector,
   type InstallOutcome,
@@ -46,11 +48,7 @@ const CLIENTS: Client[] = [
     label: "Cursor",
     install: cursorInstallUrl,
     note: "or add to ~/.cursor/mcp.json",
-    code: `{
-  "mcpServers": {
-    "${server}": { "type": "http", "url": "${endpoint}" }
-  }
-}`,
+    code: cursorConfigJson(),
   },
   {
     label: "VS Code / Copilot",
@@ -79,8 +77,8 @@ ArtDaddy must be running for Claude to reach it.`,
   // binary, which this app is not allowed to do.
   {
     label: "Claude Code",
-    note: "works on Linux, macOS and Windows while ArtDaddy is running",
-    code: `claude mcp add --transport http ${server} ${endpoint}`,
+    note: "installs for every project on Linux, macOS and Windows while ArtDaddy is running",
+    code: claudeCodeCommand(),
   },
   { label: "Codex", code: `codex mcp add ${server} --url ${endpoint}` },
 ];
