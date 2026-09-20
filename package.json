@@ -1,7 +1,7 @@
 {
   "name": "artdaddy-client",
   "private": true,
-  "version": "0.15.0",
+  "version": "0.16.0",
   "type": "module",
   "license": "GPL-3.0-or-later",
   "description": "ArtDaddy editor client (web-first React app; Tauri desktop shell wraps the same bundle later). Talks to the ArtDaddy FastAPI server over REST + SSE + WS.",
