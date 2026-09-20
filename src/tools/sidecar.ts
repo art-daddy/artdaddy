@@ -9,7 +9,7 @@ import { IDENTITY } from "../brand";
  *  at runtime rather than at build. */
 export const BROWSER_BIN = `${IDENTITY.sidecarPrefix}-browser`;
 
-/** Tool names that are bundled as Tauri sidecars (src-tauri/binaries/<name>). */
+/** Logical tool names accepted by CommandRunner. */
 export const SIDECAR_BINS: ReadonlySet<string> = new Set([
   "ffmpeg",
   "ffprobe",
@@ -17,6 +17,11 @@ export const SIDECAR_BINS: ReadonlySet<string> = new Set([
   "whisper-cli",
   BROWSER_BIN,
 ]);
+
+/** OS-package-safe executable name used by Tauri and src-tauri/binaries. */
+export function packagedSidecarName(program: string): string {
+  return program === BROWSER_BIN ? program : `${IDENTITY.sidecarPrefix}-${program}`;
+}
 
 export interface SidecarResolution {
   /** True when the tool is launched as a bundled sidecar, false for PATH. */
@@ -29,6 +34,6 @@ export interface SidecarResolution {
 /** Decide how the Tauri shell should launch a tool. */
 export function resolveSidecar(program: string): SidecarResolution {
   return SIDECAR_BINS.has(program)
-    ? { sidecar: true, path: `binaries/${program}` }
+    ? { sidecar: true, path: `binaries/${packagedSidecarName(program)}` }
     : { sidecar: false, path: program };
 }

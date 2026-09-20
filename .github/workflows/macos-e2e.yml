@@ -78,8 +78,8 @@ jobs:
       - name: Stage sidecars
         run: |
           mkdir -p src-tauri/binaries
-          cp "whisper-out/whisper-cli-${TRIPLE}" "src-tauri/binaries/whisper-cli-${TRIPLE}"
-          chmod +x "src-tauri/binaries/whisper-cli-${TRIPLE}"
+          cp "whisper-out/whisper-cli-${TRIPLE}" "src-tauri/binaries/artdaddy-whisper-cli-${TRIPLE}"
+          chmod +x "src-tauri/binaries/artdaddy-whisper-cli-${TRIPLE}"
           node scripts/fetch-sidecars.mjs
           ls -la src-tauri/binaries/
           # smoke.e2e.ts spawns "ffmpeg" by BARE NAME and skips itself when the PATH lookup fails,

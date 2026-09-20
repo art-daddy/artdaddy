@@ -10,11 +10,14 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
+import { packagedSidecarName, SIDECAR_BINS } from "./sidecar";
+
 // Not import.meta.url: vitest rewrites it to a root-relative URL, which resolved to C:\.
 const read = (
   name: string,
 ): {
   bundle: {
+    externalBin: string[];
     resources: string[];
     linux?: { appimage?: { bundleMediaFramework?: boolean } };
   };
@@ -38,5 +41,12 @@ describe("bundle resources across platform configs", () => {
 
   it("ships the media framework the Linux preview needs", () => {
     expect(read("tauri.conf.json").bundle.linux?.appimage?.bundleMediaFramework).toBe(true);
+  });
+
+  it("packages every sidecar under an application-owned executable name", () => {
+    const expected = [...SIDECAR_BINS]
+      .map((name) => `binaries/${packagedSidecarName(name)}`)
+      .sort();
+    expect(read("tauri.conf.json").bundle.externalBin.sort()).toEqual(expected);
   });
 });

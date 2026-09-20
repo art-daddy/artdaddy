@@ -36,10 +36,10 @@
     "targets": "all",
     "createUpdaterArtifacts": true,
     "externalBin": [
-      "binaries/ffmpeg",
-      "binaries/ffprobe",
-      "binaries/yt-dlp",
-      "binaries/whisper-cli",
+      "binaries/artdaddy-ffmpeg",
+      "binaries/artdaddy-ffprobe",
+      "binaries/artdaddy-yt-dlp",
+      "binaries/artdaddy-whisper-cli",
       "binaries/artdaddy-browser"
     ],
     "resources": [

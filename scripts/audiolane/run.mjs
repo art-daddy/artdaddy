@@ -92,10 +92,10 @@ function bundledFfmpeg() {
   const dir = path.join(ROOT, "src-tauri/binaries");
   const names =
     process.platform === "win32"
-      ? ["ffmpeg-x86_64-pc-windows-msvc.exe"]
+      ? ["artdaddy-ffmpeg-x86_64-pc-windows-msvc.exe"]
       : process.platform === "darwin"
-        ? ["ffmpeg-aarch64-apple-darwin", "ffmpeg-x86_64-apple-darwin"]
-        : ["ffmpeg-x86_64-unknown-linux-gnu"];
+        ? ["artdaddy-ffmpeg-aarch64-apple-darwin", "artdaddy-ffmpeg-x86_64-apple-darwin"]
+        : ["artdaddy-ffmpeg-x86_64-unknown-linux-gnu"];
   for (const n of names) {
     const p = path.join(dir, n);
     if (existsSync(p)) return p;

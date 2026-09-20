@@ -49,7 +49,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential cmake curl file libayatana-appindicator3-dev libssl-dev \
+            build-essential cmake curl ffmpeg file libayatana-appindicator3-dev libssl-dev \
             libwebkit2gtk-4.1-dev librsvg2-dev patchelf squashfs-tools xvfb \
             gstreamer1.0-libav gstreamer1.0-plugins-bad gstreamer1.0-plugins-good
 
@@ -72,12 +72,12 @@ jobs:
           BIN="$(find whisper.cpp/build -name whisper-cli -type f -perm -111 | head -n1)"
           test -n "$BIN" || { echo "::error::no whisper-cli was produced"; exit 1; }
           mkdir -p src-tauri/binaries
-          cp "$BIN" "src-tauri/binaries/whisper-cli-${TRIPLE}"
-          chmod +x "src-tauri/binaries/whisper-cli-${TRIPLE}"
+          cp "$BIN" "src-tauri/binaries/artdaddy-whisper-cli-${TRIPLE}"
+          chmod +x "src-tauri/binaries/artdaddy-whisper-cli-${TRIPLE}"
 
       - name: Prove whisper is portable and transcribes
         run: |
-          BIN="src-tauri/binaries/whisper-cli-${TRIPLE}"
+          BIN="src-tauri/binaries/artdaddy-whisper-cli-${TRIPLE}"
           file "$BIN"
           ldd "$BIN"
           ! ldd "$BIN" | grep -q "not found" || {
@@ -99,8 +99,8 @@ jobs:
 
       - name: Prove ffmpeg and ffprobe produce a real artifact
         run: |
-          FFMPEG="src-tauri/binaries/ffmpeg-${TRIPLE}"
-          FFPROBE="src-tauri/binaries/ffprobe-${TRIPLE}"
+          FFMPEG="src-tauri/binaries/artdaddy-ffmpeg-${TRIPLE}"
+          FFPROBE="src-tauri/binaries/artdaddy-ffprobe-${TRIPLE}"
           "$FFMPEG" -hide_banner -loglevel error -f lavfi -i testsrc2=size=160x90:rate=5 \
             -t 1 -pix_fmt yuv420p probe.mp4
           test -s probe.mp4 || { echo "::error::ffmpeg produced no video"; exit 1; }
@@ -163,7 +163,7 @@ jobs:
           chmod +x "$APPIMAGE"
           rm -rf squashfs-root
           "$APPIMAGE" --appimage-extract >/dev/null
-          for name in ffmpeg ffprobe yt-dlp whisper-cli artdaddy-browser; do
+          for name in artdaddy-ffmpeg artdaddy-ffprobe artdaddy-yt-dlp artdaddy-whisper-cli artdaddy-browser; do
             FOUND="$(find squashfs-root -type f -name "$name" | head -n1)"
             test -n "$FOUND" || { echo "::error::$name is missing from the AppImage"; exit 1; }
             test -x "$FOUND" || { echo "::error::$name is not executable in the AppImage"; exit 1; }
@@ -188,6 +188,33 @@ jobs:
             exit 1
           fi
           echo "AppImage stayed alive for 20 seconds."
+
+          mapfile -t DEB_BINS < <(dpkg-deb --fsys-tarfile "$DEB" | tar -tf - |
+            sed -n -e 's#^\./usr/bin/##p' -e 's#^usr/bin/##p')
+          test "${#DEB_BINS[@]}" -gt 0 || { echo "::error::Debian package has no executables"; exit 1; }
+          for name in "${DEB_BINS[@]}"; do
+            case "$name" in
+              artdaddy|artdaddy-*) ;;
+              *) echo "::error::Debian package claims generic /usr/bin/$name"; exit 1 ;;
+            esac
+          done
+          FFMPEG_OWNER_BEFORE="$(dpkg-query -S /usr/bin/ffprobe)"
+          sudo apt-get install -y "$(realpath "$DEB")"
+          test "$(dpkg-query -S /usr/bin/ffprobe)" = "$FFMPEG_OWNER_BEFORE" || {
+            echo "::error::ArtDaddy replaced the distribution ffprobe"
+            exit 1
+          }
+          set +e
+          xvfb-run -a timeout 20s /usr/bin/artdaddy \
+            >/tmp/artdaddy-deb.out 2>/tmp/artdaddy-deb.err
+          STATUS=$?
+          set -e
+          if [ "$STATUS" -ne 124 ]; then
+            echo "::error::installed Debian app exited during its 20 second launch gate (status $STATUS)"
+            sed -n '1,80p' /tmp/artdaddy-deb.err
+            exit 1
+          fi
+          echo "Installed Debian app stayed alive for 20 seconds."
           echo "appimage=$APPIMAGE" >> "$GITHUB_OUTPUT"
           echo "deb=$DEB" >> "$GITHUB_OUTPUT"
 

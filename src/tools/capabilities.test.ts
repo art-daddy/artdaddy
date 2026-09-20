@@ -15,7 +15,7 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { SIDECAR_BINS } from "./sidecar";
+import { packagedSidecarName, SIDECAR_BINS } from "./sidecar";
 
 interface ScopedPermission {
   identifier: string;
@@ -39,7 +39,9 @@ describe("tauri shell capabilities", () => {
     const perm = scoped(id);
     expect(perm, `${id} missing from capabilities/default.json`).toBeDefined();
     const granted = new Set((perm!.allow ?? []).map((a) => a.name));
-    for (const bin of SIDECAR_BINS) expect(granted).toContain(`binaries/${bin}`);
+    for (const bin of SIDECAR_BINS) {
+      expect(granted).toContain(`binaries/${packagedSidecarName(bin)}`);
+    }
   });
 
   it("grants shell:allow-kill so Stop can actually kill a running sidecar", () => {
@@ -58,9 +60,10 @@ describe("tauri shell capabilities", () => {
   });
 
   it("grants nothing beyond the sidecars we ship", () => {
+    const packaged = new Set([...SIDECAR_BINS].map(packagedSidecarName));
     for (const id of ["shell:allow-execute", "shell:allow-spawn"]) {
       for (const entry of scoped(id)!.allow ?? []) {
-        expect(SIDECAR_BINS).toContain(String(entry.name).replace("binaries/", ""));
+        expect(packaged).toContain(String(entry.name).replace("binaries/", ""));
       }
     }
   });
