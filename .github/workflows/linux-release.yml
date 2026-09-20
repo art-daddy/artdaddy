@@ -163,7 +163,11 @@ jobs:
           chmod +x "$APPIMAGE"
           rm -rf squashfs-root
           "$APPIMAGE" --appimage-extract >/dev/null
-          for name in artdaddy-ffmpeg artdaddy-ffprobe artdaddy-yt-dlp artdaddy-whisper-cli artdaddy-browser; do
+          # From the config, not a second copy of it: the equivalent list in macos-release.yml
+          # still said the pre-namespace names and failed a perfectly good dmg on all four.
+          SIDECARS="$(node -p "require('./src-tauri/tauri.conf.json').bundle.externalBin.map(b=>b.split('/').pop()).join(' ')")"
+          test -n "$SIDECARS" || { echo "::error::could not read externalBin from tauri.conf.json"; exit 1; }
+          for name in $SIDECARS; do
             FOUND="$(find squashfs-root -type f -name "$name" | head -n1)"
             test -n "$FOUND" || { echo "::error::$name is missing from the AppImage"; exit 1; }
             test -x "$FOUND" || { echo "::error::$name is not executable in the AppImage"; exit 1; }

@@ -230,7 +230,13 @@ jobs:
           if [ ! -d "$APP" ]; then
             echo "::error::the dmg has no artdaddy.app in it"; ls -la "$MNT"; FAIL=1
           else
-            for n in ffmpeg ffprobe yt-dlp whisper-cli artdaddy-browser; do
+            # Read the names out of tauri.conf.json rather than repeating them here. The
+            # hand-written list said `ffmpeg ffprobe yt-dlp whisper-cli` and went stale the
+            # moment the sidecars were namespaced to `artdaddy-*`: a perfectly good dmg failed
+            # four assertions, which is the same list-drift the check exists to catch.
+            SIDECARS="$(node -p "require('./src-tauri/tauri.conf.json').bundle.externalBin.map(b=>b.split('/').pop()).join(' ')")"
+            test -n "$SIDECARS" || { echo "::error::could not read externalBin from tauri.conf.json"; FAIL=1; }
+            for n in $SIDECARS; do
               if [ -f "$APP/Contents/MacOS/$n" ]; then echo "  sidecar $n: ok"; else
                 echo "::error::sidecar missing from the dmg: $n"; FAIL=1; fi
             done
