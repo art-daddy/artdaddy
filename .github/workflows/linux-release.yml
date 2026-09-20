@@ -199,7 +199,7 @@ jobs:
             esac
           done
           FFMPEG_OWNER_BEFORE="$(dpkg-query -S /usr/bin/ffprobe)"
-          sudo apt-get install -y "$DEB"
+          sudo apt-get install -y "$(realpath "$DEB")"
           test "$(dpkg-query -S /usr/bin/ffprobe)" = "$FFMPEG_OWNER_BEFORE" || {
             echo "::error::ArtDaddy replaced the distribution ffprobe"
             exit 1
