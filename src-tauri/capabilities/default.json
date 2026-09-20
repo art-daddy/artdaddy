@@ -10,20 +10,20 @@
     {
       "identifier": "shell:allow-execute",
       "allow": [
-        { "name": "binaries/ffmpeg", "sidecar": true, "args": true },
-        { "name": "binaries/ffprobe", "sidecar": true, "args": true },
-        { "name": "binaries/yt-dlp", "sidecar": true, "args": true },
-        { "name": "binaries/whisper-cli", "sidecar": true, "args": true },
+        { "name": "binaries/artdaddy-ffmpeg", "sidecar": true, "args": true },
+        { "name": "binaries/artdaddy-ffprobe", "sidecar": true, "args": true },
+        { "name": "binaries/artdaddy-yt-dlp", "sidecar": true, "args": true },
+        { "name": "binaries/artdaddy-whisper-cli", "sidecar": true, "args": true },
         { "name": "binaries/artdaddy-browser", "sidecar": true, "args": true }
       ]
     },
     {
       "identifier": "shell:allow-spawn",
       "allow": [
-        { "name": "binaries/ffmpeg", "sidecar": true, "args": true },
-        { "name": "binaries/ffprobe", "sidecar": true, "args": true },
-        { "name": "binaries/yt-dlp", "sidecar": true, "args": true },
-        { "name": "binaries/whisper-cli", "sidecar": true, "args": true },
+        { "name": "binaries/artdaddy-ffmpeg", "sidecar": true, "args": true },
+        { "name": "binaries/artdaddy-ffprobe", "sidecar": true, "args": true },
+        { "name": "binaries/artdaddy-yt-dlp", "sidecar": true, "args": true },
+        { "name": "binaries/artdaddy-whisper-cli", "sidecar": true, "args": true },
         { "name": "binaries/artdaddy-browser", "sidecar": true, "args": true }
       ]
     },

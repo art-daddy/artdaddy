@@ -15,6 +15,7 @@ import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { nodeFs, nodeRunner } from "./__e2e";
+import { packagedSidecarName } from "./sidecar";
 import { joinPath } from "./store";
 
 /** Host target-triple the way setup-sidecars.mjs stages them (rustc host, else a
@@ -35,8 +36,8 @@ function hostTriple(): string {
 const EXT = process.platform === "win32" ? ".exe" : "";
 const BIN = path.join(process.cwd(), "src-tauri", "binaries");
 const triple = hostTriple();
-const ffmpegBin = path.join(BIN, `ffmpeg-${triple}${EXT}`);
-const ffprobeBin = path.join(BIN, `ffprobe-${triple}${EXT}`);
+const ffmpegBin = path.join(BIN, `${packagedSidecarName("ffmpeg")}-${triple}${EXT}`);
+const ffprobeBin = path.join(BIN, `${packagedSidecarName("ffprobe")}-${triple}${EXT}`);
 const ROOT = joinPath(os.tmpdir(), `artdaddy-sidecar-${Date.now()}`);
 let STAGED = false;
 

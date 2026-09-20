@@ -110,12 +110,12 @@ jobs:
       - name: Stage whisper as the sidecar
         run: |
           mkdir -p src-tauri/binaries
-          cp "whisper-out/whisper-cli-${TRIPLE}" "src-tauri/binaries/whisper-cli-${TRIPLE}"
-          chmod +x "src-tauri/binaries/whisper-cli-${TRIPLE}"
+          cp "whisper-out/whisper-cli-${TRIPLE}" "src-tauri/binaries/artdaddy-whisper-cli-${TRIPLE}"
+          chmod +x "src-tauri/binaries/artdaddy-whisper-cli-${TRIPLE}"
 
       - name: Prove it transcribes
         run: |
-          BIN="src-tauri/binaries/whisper-cli-${TRIPLE}"
+          BIN="src-tauri/binaries/artdaddy-whisper-cli-${TRIPLE}"
           node scripts/smoke-whisper.mjs "$BIN"
           curl -fsSL -o tiny.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin
           test -d whisper.cpp || git clone --depth 1 --branch "${{ inputs.whisper_ref }}" https://github.com/ggml-org/whisper.cpp whisper.cpp

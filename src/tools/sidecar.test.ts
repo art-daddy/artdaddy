@@ -1,11 +1,20 @@
 import { describe, expect, it } from "vitest";
 
-import { BROWSER_BIN, resolveSidecar, SIDECAR_BINS } from "./sidecar";
+import { BROWSER_BIN, packagedSidecarName, resolveSidecar, SIDECAR_BINS } from "./sidecar";
 
 describe("resolveSidecar", () => {
   it("routes bundled tools to their sidecar id", () => {
     for (const name of ["ffmpeg", "ffprobe", "yt-dlp", "whisper-cli", BROWSER_BIN]) {
-      expect(resolveSidecar(name)).toEqual({ sidecar: true, path: `binaries/${name}` });
+      expect(resolveSidecar(name)).toEqual({
+        sidecar: true,
+        path: `binaries/${packagedSidecarName(name)}`,
+      });
+    }
+  });
+
+  it("gives every packaged executable an application-owned name", () => {
+    for (const name of SIDECAR_BINS) {
+      expect(packagedSidecarName(name)).toMatch(/^artdaddy-/);
     }
   });
 

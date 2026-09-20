@@ -14,6 +14,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const binariesDir = join(here, "..", "src-tauri", "binaries");
 const { identity } = JSON.parse(readFileSync(join(here, "..", "src", "brand.json"), "utf8"));
 const browserBin = `${identity.sidecarPrefix}-browser`;
+const packagedName = (name) => `${identity.sidecarPrefix}-${name}`;
 
 function hostTriple() {
   try {
@@ -52,7 +53,7 @@ for (const name of ["ffmpeg", "ffprobe", "yt-dlp", "whisper-cli"]) {
     console.warn(`[sidecars] SKIP ${name}: not found on PATH (bundle the real binary for release)`);
     continue;
   }
-  const dst = join(binariesDir, `${name}-${triple}${ext}`);
+  const dst = join(binariesDir, `${packagedName(name)}-${triple}${ext}`);
   copyFileSync(src, dst);
   console.log(`[sidecars] staged ${name} -> ${dst}`);
 }

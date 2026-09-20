@@ -80,7 +80,7 @@ const fs = {
 const invoke = vi.fn(async (_cmd: string, _args?: unknown) => undefined);
 const downloadDir = vi.fn(async () => "/Users/me/Downloads");
 const resolveResource = vi.fn(async (p: string) => `/app/${p}`);
-const resolveSidecar = vi.fn((program: string) => ({ path: `binaries/${program}`, sidecar: true }));
+const resolveSidecar = vi.fn((program: string) => ({ path: program, sidecar: true }));
 
 vi.mock("@tauri-apps/plugin-shell", () => ({ Command: FakeCommand }));
 vi.mock("@tauri-apps/plugin-fs", () => fs);
@@ -98,7 +98,7 @@ vi.mock("./sidecar", async () => ({
 }));
 
 const { TauriCommandRunner, TauriFs, makeTauriContext } = await import("./tauri");
-const { BROWSER_BIN } = await import("./sidecar");
+const { BROWSER_BIN, packagedSidecarName } = await import("./sidecar");
 
 const utf8 = (s: string) => Array.from(new TextEncoder().encode(s));
 
@@ -108,12 +108,12 @@ beforeEach(() => {
   FakeCommand.spawnRejects = false;
   FakeCommand.lastInstance = null;
   vi.clearAllMocks();
-  vi.unstubAllGlobals();
-  resolveResource.mockImplementation(async (p: string) => `/app/${p}`);
   resolveSidecar.mockImplementation((program: string) => ({
-    path: `binaries/${program}`,
+    path: `binaries/${packagedSidecarName(program)}`,
     sidecar: true,
   }));
+  vi.unstubAllGlobals();
+  resolveResource.mockImplementation(async (p: string) => `/app/${p}`);
 });
 
 // The whisper cwd is Windows-ONLY, so every case below must say which platform it runs on
@@ -127,7 +127,10 @@ describe("TauriCommandRunner — sidecar wiring", () => {
   it("runs a plain sidecar with raw encoding", async () => {
     const r = await new TauriCommandRunner().run("ffmpeg", ["-version"]);
     expect(r.code).toBe(0);
-    expect(FakeCommand.made[0]).toMatchObject({ kind: "sidecar", program: "binaries/ffmpeg" });
+    expect(FakeCommand.made[0]).toMatchObject({
+      kind: "sidecar",
+      program: "binaries/artdaddy-ffmpeg",
+    });
     // Raw bytes, not strings: a strict utf-8 decode THROWS on cp1252 output.
     expect(FakeCommand.made[0].opts).toMatchObject({ encoding: "raw" });
   });
@@ -164,7 +167,7 @@ describe("TauriCommandRunner — sidecar wiring", () => {
     fs.exists.mockResolvedValueOnce(false);
     await new TauriCommandRunner().run("whisper-cli", ["-m", "model.bin"]);
     expect(FakeCommand.made[0].opts).not.toHaveProperty("cwd");
-    expect(FakeCommand.made[0]).toMatchObject({ program: "binaries/whisper-cli" });
+    expect(FakeCommand.made[0]).toMatchObject({ program: "binaries/artdaddy-whisper-cli" });
     expect(FakeCommand.made[0].args).toEqual(["-m", "model.bin"]);
   });
 

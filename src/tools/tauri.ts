@@ -62,6 +62,7 @@ export class TauriCommandRunner implements CommandRunner {
       const script = await resolveResource(`resources/${BROWSER_BIN}.mjs`);
       return Command.sidecar(`binaries/${BROWSER_BIN}`, [script, ...args], { encoding: "raw" });
     }
+    const r = resolveSidecar(program);
     if (program === "whisper-cli") {
       // The Windows whisper.cpp sidecar is a DYNAMIC build: it needs its runtime
       // DLLs (ggml*.dll, whisper.dll) at load time. They ship as a bundled
@@ -79,9 +80,8 @@ export class TauriCommandRunner implements CommandRunner {
         dllDir && (await dllDirUsable(dllDir))
           ? { encoding: "raw" as const, cwd: dllDir }
           : { encoding: "raw" as const };
-      return Command.sidecar("binaries/whisper-cli", args, opts);
+      return Command.sidecar(r.path, args, opts);
     }
-    const r = resolveSidecar(program);
     const opts = cwd ? { encoding: "raw" as const, cwd } : { encoding: "raw" as const };
     return r.sidecar ? Command.sidecar(r.path, args, opts) : Command.create(r.path, args, opts);
   }

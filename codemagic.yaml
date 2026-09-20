@@ -587,8 +587,8 @@ workflows:
         script: |
           set -eo pipefail
           mkdir -p src-tauri/binaries
-          cp "whisper-out/whisper-cli-${TRIPLE}" "src-tauri/binaries/whisper-cli-${TRIPLE}"
-          chmod +x "src-tauri/binaries/whisper-cli-${TRIPLE}"
+          cp "whisper-out/whisper-cli-${TRIPLE}" "src-tauri/binaries/artdaddy-whisper-cli-${TRIPLE}"
+          chmod +x "src-tauri/binaries/artdaddy-whisper-cli-${TRIPLE}"
           node scripts/fetch-sidecars.mjs
           ls -la src-tauri/binaries/
           # smoke.e2e.ts spawns "ffmpeg" by BARE NAME and skips itself when the PATH lookup
@@ -596,7 +596,7 @@ workflows:
           # These aliases point it at the very binaries the installer ships.
           mkdir -p "$CM_BUILD_DIR/.binshim"
           for n in ffmpeg ffprobe yt-dlp; do
-            ln -sf "$CM_BUILD_DIR/src-tauri/binaries/$n-${TRIPLE}" "$CM_BUILD_DIR/.binshim/$n"
+            ln -sf "$CM_BUILD_DIR/src-tauri/binaries/artdaddy-$n-${TRIPLE}" "$CM_BUILD_DIR/.binshim/$n"
           done
           echo "PATH=$CM_BUILD_DIR/.binshim:$PATH" >> $CM_ENV
 
@@ -767,8 +767,8 @@ workflows:
         script: |
           set -eo pipefail
           mkdir -p src-tauri/binaries
-          cp "whisper-out/whisper-cli-${TRIPLE}" "src-tauri/binaries/whisper-cli-${TRIPLE}"
-          chmod +x "src-tauri/binaries/whisper-cli-${TRIPLE}"
+          cp "whisper-out/whisper-cli-${TRIPLE}" "src-tauri/binaries/artdaddy-whisper-cli-${TRIPLE}"
+          chmod +x "src-tauri/binaries/artdaddy-whisper-cli-${TRIPLE}"
           node scripts/fetch-sidecars.mjs
           ls -la src-tauri/binaries/
 

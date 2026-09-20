@@ -33,6 +33,7 @@ const whisperResDir = join(here, "..", "src-tauri", "resources", "whisper");
 // file under a name the externalBin entry cannot find, and only fail at runtime.
 const { identity } = JSON.parse(readFileSync(join(here, "..", "src", "brand.json"), "utf8"));
 const BROWSER_BIN = `${identity.sidecarPrefix}-browser`;
+const packagedName = (name) => (name === BROWSER_BIN ? name : `${identity.sidecarPrefix}-${name}`);
 
 function hostTriple() {
   try {
@@ -58,7 +59,8 @@ const ext = osName === "win" ? ".exe" : "";
 mkdirSync(binariesDir, { recursive: true });
 const tmp = mkdtempSync(join(tmpdir(), "artdaddy-fetch-"));
 
-const staged = (name) => join(binariesDir, `${name}-${triple}${ext}`);
+const staged = (name) => join(binariesDir, `${packagedName(name)}-${triple}${ext}`);
+const stagedId = (name) => join(binariesDir, `${name}-${triple}${ext}`);
 const want = (name) => !only || only.has(name);
 
 async function download(url, dest) {
@@ -257,7 +259,10 @@ async function fetchWhisper() {
   // it still held SDL2.dll from the pre-Vulkan zip. That is a LOAD PATH: ggml scans it for
   // ggml-*.dll, so a backend from a previous build sits there as a candidate to load next to
   // the current set, and gets bundled into every installer besides.
-  for (const gone of stalePaths(readdirSync(whisperResDir), dlls.map((d) => basename(d)))) {
+  for (const gone of stalePaths(
+    readdirSync(whisperResDir),
+    dlls.map((d) => basename(d)),
+  )) {
     rmSync(join(whisperResDir, gone), { force: true });
     console.log(`  pruned stale ${gone} (not part of this build)`);
   }
@@ -344,12 +349,12 @@ async function main() {
     const required = (JSON.parse(readFileSync(confPath, "utf8")).bundle?.externalBin ?? []).map(
       (b) => b.split("/").pop(),
     );
-    const missing = required.filter((n) => !existsSync(staged(n)));
+    const missing = required.filter((n) => !existsSync(stagedId(n)));
     if (missing.length) {
       console.error(
         `\n[fetch-sidecars] MISSING externalBin for ${triple} (tauri build would fail at bundling):`,
       );
-      for (const n of missing) console.error(`  ${staged(n)}`);
+      for (const n of missing) console.error(`  ${stagedId(n)}`);
       process.exit(1);
     }
     console.log(
