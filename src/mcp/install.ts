@@ -14,9 +14,21 @@ import { MCP_PORT } from "./service";
 const endpoint = (): string => `http://127.0.0.1:${MCP_PORT}/mcp`;
 const serverName = (): string => BRAND.mcpServerName;
 
+export function cursorServerConfig(): { url: string } {
+  return { url: endpoint() };
+}
+
 export function cursorInstallUrl(): string {
-  const config = btoa(JSON.stringify({ type: "http", url: endpoint() }));
+  const config = btoa(JSON.stringify(cursorServerConfig()));
   return `https://cursor.com/en/install-mcp?name=${encodeURIComponent(serverName())}&config=${encodeURIComponent(config)}`;
+}
+
+export function cursorConfigJson(): string {
+  return JSON.stringify({ mcpServers: { [serverName()]: cursorServerConfig() } }, null, 2);
+}
+
+export function claudeCodeCommand(): string {
+  return `claude mcp add --scope user --transport http ${serverName()} ${endpoint()}`;
 }
 
 export function vscodeInstallUrl(insiders = false): string {

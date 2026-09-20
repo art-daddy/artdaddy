@@ -61,9 +61,19 @@ describe("MCP setup pane", () => {
   it("gives Linux users a complete Claude Code HTTP command", () => {
     render(<McpPanel />);
     expect(codeBlocks().find((code) => code.startsWith("claude mcp add"))).toBe(
-      `claude mcp add --transport http ${BRAND.mcpServerName} http://127.0.0.1:${MCP_PORT}/mcp`,
+      `claude mcp add --scope user --transport http ${BRAND.mcpServerName} http://127.0.0.1:${MCP_PORT}/mcp`,
     );
-    expect(screen.getByText(/works on Linux, macOS and Windows/i)).toBeInTheDocument();
+    expect(screen.getByText(/every project on Linux, macOS and Windows/i)).toBeInTheDocument();
+  });
+
+  it("uses Cursor's global cross-platform config shape", () => {
+    render(<McpPanel />);
+    const cursor = codeBlocks().find((code) => code.includes('"mcpServers"'));
+    expect(JSON.parse(cursor!)).toEqual({
+      mcpServers: {
+        [BRAND.mcpServerName]: { url: `http://127.0.0.1:${MCP_PORT}/mcp` },
+      },
+    });
   });
 
   it("tells the agent how to reach a project, which nothing else would", () => {
