@@ -113,7 +113,9 @@ describe("RecordDialog", () => {
   it("names an unavailable capture API without throwing or enabling Record", async () => {
     vi.stubGlobal("navigator", { ...navigator, mediaDevices: undefined });
     render(<RecordDialog open projectDir="C:/p" onClose={vi.fn()} />);
-    expect(await screen.findByRole("alert")).toHaveTextContent("Camera recording is unavailable");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Install the latest ArtDaddy release",
+    );
     expect(screen.getByRole("button", { name: "Record" })).toBeDisabled();
     expect(h.saved).toEqual([]);
   });
