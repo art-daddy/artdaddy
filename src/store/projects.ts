@@ -3,7 +3,8 @@ import { create } from "zustand";
 import type { ProjectListEntry, ProjectSummary } from "../api/types";
 import { BRAND } from "../brand";
 import { noteSessionProject } from "../observability/crashWatch";
-import { reportProjectOpened } from "../api/appEvents";
+import { reportProjectOpened, startHeartbeat } from "../api/appEvents";
+import { setAgentContext } from "../api/agentEvents";
 import { projectsRoot, registryPath } from "../tools/dataRoot";
 import { ProjectRegistry } from "../tools/project";
 import { useEditor } from "./editor";
@@ -131,6 +132,10 @@ export const useProjects = create<ProjectsState>((set, get) => ({
       // actually succeeded AND won the supersede race, which is what "reached the product"
       // means. A superseded or failed open must not report one.
       reportProjectOpened(id);
+      // Same reason, same place: a beat only means something once a project is really open,
+      // and starting one here replaces any beat left running for the project we just left.
+      startHeartbeat(id);
+      setAgentContext({ project_id: id });
     }
     return summary;
   },

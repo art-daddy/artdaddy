@@ -9,6 +9,7 @@ import type { InferenceAttachment, RoundInput, Usage } from "../agent/types";
 import { captureError, setCorrelation } from "../observability/sentry";
 import { isExpected, toUserMessage } from "../lib/errors";
 import { submitFeedback, type FeedbackKind } from "../api/feedback";
+import { setAgentContext } from "../api/agentEvents";
 import type { SSEMessage } from "../api/sse";
 import type { ApprovalMode, Attachment, PendingApproval, SessionState } from "../api/types";
 import { useEditor } from "./editor";
@@ -392,6 +393,14 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
         const ed = useEditor.getState();
         const cfg = ed.store ? await projectConfig(ed.store) : undefined;
         setCorrelation({ project_id: projectId, transcript_id: transcriptId, model_id: model });
+        // Same three facts the crash reporter needs, for the same reason: a tool trace that
+        // cannot say which model and which transcript produced it answers no question worth
+        // asking. Set per round, because the picker can change between them.
+        setAgentContext({
+          model,
+          project_id: projectId ?? "",
+          transcript_id: transcriptId ?? "",
+        });
         const dto = await inferRoundStreaming(
           {
             round_input: roundInput,
@@ -552,7 +561,11 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
     canContinue: false,
     closing: false,
     error: null,
-    model: "gpt-5.4-mini",
+    // The full model, not mini. A round costs $0.042 against $0.0076 measured over 3,438
+    // metered calls -- real, but a rounding error beside one Veo clip at $1.37, and the agent
+    // is what decides whether that clip was worth generating. Must agree with the server's
+    // fallback in sessions.py: a user who never touches the picker sends no model at all.
+    model: "gpt-5.4",
     effort: "high",
     mode: "default",
     pendingMentions: [],

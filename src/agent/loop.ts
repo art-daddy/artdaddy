@@ -17,6 +17,7 @@ import type {
 import { capToolResult } from "./truncate";
 import { scrubAbsolutePaths } from "./scrubPaths";
 import { MAX_CONCURRENT_READS, toolEffect } from "./toolEffect";
+import { flushAgentEvents, recordAgentOutput, recordToolDenied } from "../api/agentEvents";
 import type { ApprovalMode } from "../api/types";
 
 // Re-exported so callers of the loop don't need to reach into the API types.
@@ -185,8 +186,12 @@ export class ClientTurnRunner {
       return;
     }
     if (rr.kind === "text") {
-      if (rr.final_text) this.d.emit("text", { text: rr.final_text });
+      if (rr.final_text) {
+        this.d.emit("text", { text: rr.final_text });
+        recordAgentOutput(rr.final_text);
+      }
       this.d.emit("turn_done", this.d.session());
+      void flushAgentEvents();
       return;
     }
     // tool_calls: surface any reasoning, then run the batch (N=1 for single-call
@@ -271,6 +276,9 @@ export class ClientTurnRunner {
     const result = { ok: false, error: reason || "user denied this tool call" };
     this.d.emit("tool_call", { call_id: call.call_id, name: call.name, args: call.arguments });
     this.d.emit("tool_result", { ...result, call_id: call.call_id, name: call.name });
+    // A refusal never reaches the dispatch boundary, so this is the only place it can be
+    // counted -- and "the user said no" is a different signal from "the tool failed".
+    recordToolDenied(call.name, call.call_id, result.error);
     this.results.push({ call_id: call.call_id, name: call.name, result });
     this.batch.shift();
   }
@@ -278,6 +286,7 @@ export class ClientTurnRunner {
   /** Stop pressed: end the turn cleanly (no more rounds, no approval gate). */
   private endTurn(): void {
     this.d.emit("turn_done", this.d.session());
+    void flushAgentEvents();
   }
 
   private async runCall(call: PendingCall): Promise<void> {
