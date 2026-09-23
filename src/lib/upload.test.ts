@@ -336,6 +336,7 @@ describe("a large file is never materialised in the webview", () => {
       },
       probeMedia: async (_p: string, headBytes: number) => ({
         id12: "abcdef012345",
+        sha256: "abcdef012345".padEnd(64, "0"),
         size: 1_000_000_000,
         head: new Uint8Array(Math.min(headBytes, 16)).fill(7),
       }),

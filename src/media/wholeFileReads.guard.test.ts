@@ -39,7 +39,6 @@ const BOUNDED = new Map<string, string>([
   ["preview/renderer.ts", "reads back a canvas blob the renderer itself just produced"],
   ["lib/upload.ts", "staged by path in chunks; the whole-file read is the small-file branch"],
   ["tools/import.ts", "downloads have their own byte cap before the buffer is taken"],
-  ["tools/transcribe.ts", "reads a model/JSON artefact, never the media"],
   [
     "components/RecordDialog.tsx",
     "the take is capped at MAX_RECORDING_BYTES as chunks arrive; the recorder stops itself",

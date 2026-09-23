@@ -10,6 +10,8 @@ import { currentProjectSession } from "./coordinator";
 export interface MediaProbe {
   /** First 12 hex chars of the sha256 of the whole file. */
   id12: string;
+  /** Full sha256 of the whole file. */
+  sha256: string;
   size: number;
   head: Uint8Array;
 }
@@ -556,6 +558,10 @@ export class ProjectStoreAccess {
   /** True when a file can be imported without its bytes passing through the webview. */
   get canStreamImport(): boolean {
     return typeof this.fs.appendBytes === "function" && typeof this.fs.probeMedia === "function";
+  }
+  /** True when a remote artifact can be streamed, verified natively, and atomically promoted. */
+  get canStreamDownload(): boolean {
+    return this.canStreamImport && typeof this.fs.rename === "function";
   }
 
   // ── narrow typed fs capabilities (features go through these, never `fs` directly) ──

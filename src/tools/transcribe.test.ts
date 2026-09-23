@@ -11,7 +11,8 @@ import {
   fmtTimestampPrecise,
   getTranscriptTool,
   parseWhisperCppJson,
-  warmWhisperModel,
+  WHISPER_MODELS,
+  type WhisperModelSpec,
   whisperModelPath,
 } from "./transcribe";
 
@@ -21,11 +22,20 @@ type Any = any;
 class MockFs implements FsLike {
   files = new Map<string, string>();
   bytes = new Map<string, Uint8Array>();
+  modelMetadata = new Map<string, { size: number; sha256: string }>();
+  appended: number[] = [];
   touch(p: string): void {
     this.files.set(joinPath(p), "");
   }
   putBytes(p: string, b: Uint8Array): void {
-    this.bytes.set(joinPath(p), b);
+    const n = joinPath(p);
+    this.bytes.set(n, b.slice());
+    this.modelMetadata.delete(n);
+  }
+  putModel(p = MODEL): void {
+    const spec = WHISPER_MODELS.small;
+    this.bytes.set(joinPath(p), new Uint8Array([1]));
+    this.modelMetadata.set(joinPath(p), { size: spec.bytes, sha256: spec.sha256 });
   }
   async exists(p: string): Promise<boolean> {
     const n = joinPath(p);
@@ -45,21 +55,103 @@ class MockFs implements FsLike {
     return v;
   }
   async writeBytes(p: string, data: Uint8Array): Promise<void> {
-    this.bytes.set(joinPath(p), data);
+    this.putBytes(p, data);
+  }
+  async appendBytes(p: string, data: Uint8Array): Promise<void> {
+    const n = joinPath(p);
+    const previous = this.bytes.get(n) ?? new Uint8Array();
+    const next = new Uint8Array(previous.length + data.length);
+    next.set(previous);
+    next.set(data, previous.length);
+    this.bytes.set(n, next);
+    this.appended.push(data.length);
+  }
+  async stat(p: string): Promise<{ isDirectory: boolean; size: number }> {
+    const n = joinPath(p);
+    const model = this.modelMetadata.get(n);
+    if (model) return { isDirectory: false, size: model.size };
+    const bytes = this.bytes.get(n);
+    if (bytes) return { isDirectory: false, size: bytes.length };
+    if (this.files.has(n)) return { isDirectory: false, size: this.files.get(n)!.length };
+    throw new Error("ENOENT");
+  }
+  async probeMedia(p: string, headBytes: number) {
+    const n = joinPath(p);
+    const bytes = this.bytes.get(n);
+    if (!bytes) throw new Error("ENOENT");
+    const model = this.modelMetadata.get(n);
+    const sha256 = model?.sha256 ?? (await sha256Of(bytes));
+    return {
+      id12: sha256.slice(0, 12),
+      sha256,
+      size: model?.size ?? bytes.length,
+      head: bytes.slice(0, headBytes),
+    };
+  }
+  async remove(p: string): Promise<void> {
+    const n = joinPath(p);
+    this.files.delete(n);
+    this.bytes.delete(n);
+    this.modelMetadata.delete(n);
+  }
+  async rename(from: string, to: string): Promise<void> {
+    const src = joinPath(from);
+    const dst = joinPath(to);
+    const bytes = this.bytes.get(src);
+    if (!bytes) throw new Error("ENOENT");
+    this.bytes.set(dst, bytes);
+    this.bytes.delete(src);
+    const metadata = this.modelMetadata.get(src);
+    if (metadata) this.modelMetadata.set(dst, metadata);
+    this.modelMetadata.delete(src);
   }
   async mkdir(): Promise<void> {}
 }
 
-/** fs with no binary write, to exercise the warm no-op guard. */
-class TextOnlyFs implements FsLike {
-  async exists(): Promise<boolean> {
-    return false;
-  }
-  async readTextFile(): Promise<string> {
-    throw new Error("ENOENT");
-  }
-  async writeTextFile(): Promise<void> {}
-  async mkdir(): Promise<void> {}
+async function sha256Of(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+async function specFor(bytes: Uint8Array): Promise<WhisperModelSpec> {
+  return { revision: "test-revision", bytes: bytes.length, sha256: await sha256Of(bytes) };
+}
+
+function streamedResponse(
+  chunks: Uint8Array[],
+  opts: {
+    status?: number;
+    declaredBytes?: number;
+    onDone?: () => void;
+    onCancel?: () => void;
+  } = {},
+): Response {
+  let at = 0;
+  return {
+    ok: (opts.status ?? 200) >= 200 && (opts.status ?? 200) < 300,
+    status: opts.status ?? 200,
+    headers: new Headers(
+      opts.declaredBytes === undefined
+        ? undefined
+        : { "content-length": String(opts.declaredBytes) },
+    ),
+    body: {
+      getReader: () => ({
+        read: async () => {
+          if (at < chunks.length) return { done: false, value: chunks[at++] };
+          opts.onDone?.();
+          return { done: true, value: undefined };
+        },
+        cancel: async () => opts.onCancel?.(),
+        releaseLock: () => undefined,
+      }),
+    },
+    arrayBuffer: async () => {
+      throw new Error("whole-buffer model read");
+    },
+  } as unknown as Response;
 }
 
 const DIR = "C:/data/projects/p1";
@@ -178,68 +270,150 @@ describe("parseWhisperCppJson", () => {
 describe("ensureWhisperModel", () => {
   it("returns the existing model without downloading", async () => {
     const fs = new MockFs();
-    fs.putBytes(MODEL, new Uint8Array([1, 2, 3]));
+    const bytes = new Uint8Array([1, 2, 3]);
+    fs.putBytes(MODEL, bytes);
+    const spec = await specFor(bytes);
     const fetchSpy = vi.fn();
-    const r = await ensureWhisperModel(ctxWith(transcribeRunner(fs), fs), "small", fetchSpy as Any);
+    const r = await ensureWhisperModel(
+      ctxWith(transcribeRunner(fs), fs),
+      "small",
+      fetchSpy as Any,
+      spec,
+    );
     expect(r).toEqual({ path: MODEL, downloaded: false });
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it("downloads + writes the model when absent", async () => {
+  it("streams the model to a temp file, validates it, and atomically promotes it", async () => {
     const fs = new MockFs();
-    const fetchImpl = vi.fn(async () => ({
-      ok: true,
-      status: 200,
-      arrayBuffer: async () => new Uint8Array([9, 9]).buffer,
-    }));
+    const chunks = [new Uint8Array([9, 9]), new Uint8Array([8, 7, 6])];
+    const bytes = new Uint8Array(chunks.flatMap((chunk) => [...chunk]));
+    const spec = await specFor(bytes);
+    const fetchImpl = vi.fn(async () => streamedResponse(chunks, { declaredBytes: bytes.length }));
     const r = await ensureWhisperModel(
       ctxWith(transcribeRunner(fs), fs),
       "small",
       fetchImpl as Any,
+      spec,
     );
-    expect(r.downloaded).toBe(true);
-    expect(await fs.exists(MODEL)).toBe(true);
-    expect(String((fetchImpl.mock.calls[0] as unknown[])[0])).toContain("ggml-small.bin");
+    expect(r).toEqual({ path: MODEL, downloaded: true });
+    expect(fs.bytes.get(MODEL)).toEqual(bytes);
+    expect(fs.appended).toEqual([2, 3]);
+    expect([...fs.bytes.keys()].filter((path) => path.endsWith(".part"))).toEqual([]);
+    expect((fetchImpl.mock.calls[0] as unknown[])[0]).toBe(
+      "https://huggingface.co/ggerganov/whisper.cpp/resolve/test-revision/ggml-small.bin",
+    );
   });
 
   it("throws on an HTTP error", async () => {
     const fs = new MockFs();
-    const fetchImpl = vi.fn(async () => ({
-      ok: false,
-      status: 404,
-      arrayBuffer: async () => new ArrayBuffer(0),
-    }));
+    const spec = await specFor(new Uint8Array([1]));
+    const fetchImpl = vi.fn(async () => streamedResponse([], { status: 404 }));
     await expect(
-      ensureWhisperModel(ctxWith(transcribeRunner(fs), fs), "base", fetchImpl as Any),
+      ensureWhisperModel(ctxWith(transcribeRunner(fs), fs), "small", fetchImpl as Any, spec),
     ).rejects.toThrow("404");
   });
 
-  it("throws on an empty download", async () => {
+  it("removes an incomplete download without exposing a final model", async () => {
     const fs = new MockFs();
-    const fetchImpl = vi.fn(async () => ({
-      ok: true,
-      status: 200,
-      arrayBuffer: async () => new ArrayBuffer(0),
-    }));
+    const spec = await specFor(new Uint8Array([1, 2, 3]));
+    const fetchImpl = vi.fn(async () => streamedResponse([new Uint8Array([1])]));
     await expect(
-      ensureWhisperModel(ctxWith(transcribeRunner(fs), fs), "base", fetchImpl as Any),
-    ).rejects.toThrow("empty");
-  });
-});
-
-describe("warmWhisperModel", () => {
-  it("is a no-op when the fs cannot write bytes", async () => {
-    const ctx: ClientToolContext = {
-      store: new ProjectStoreAccess(DIR, new TextOnlyFs()),
-      runner: transcribeRunner(new MockFs()),
-    };
-    await expect(warmWhisperModel(ctx)).resolves.toBeUndefined();
+      ensureWhisperModel(ctxWith(transcribeRunner(fs), fs), "small", fetchImpl as Any, spec),
+    ).rejects.toThrow("incomplete");
+    expect(await fs.exists(MODEL)).toBe(false);
+    expect([...fs.bytes.keys()].filter((path) => path.endsWith(".part"))).toEqual([]);
   });
 
-  it("does not throw when the model is already present", async () => {
+  it("replaces a same-size cached model whose checksum is wrong", async () => {
     const fs = new MockFs();
-    fs.putBytes(MODEL, new Uint8Array([1]));
-    await expect(warmWhisperModel(ctxWith(transcribeRunner(fs), fs))).resolves.toBeUndefined();
+    const wanted = new Uint8Array([4, 5, 6]);
+    const spec = await specFor(wanted);
+    fs.putBytes(MODEL, new Uint8Array([6, 5, 4]));
+    const fetchImpl = vi.fn(async () => streamedResponse([wanted]));
+
+    await ensureWhisperModel(ctxWith(transcribeRunner(fs), fs), "small", fetchImpl as Any, spec);
+
+    expect(fs.bytes.get(MODEL)).toEqual(wanted);
+  });
+
+  it("keeps the previous cached model when its replacement cannot be downloaded", async () => {
+    const fs = new MockFs();
+    const previous = new Uint8Array([6, 5, 4]);
+    const wanted = new Uint8Array([4, 5, 6]);
+    const spec = await specFor(wanted);
+    fs.putBytes(MODEL, previous);
+    const fetchImpl = vi.fn(async () => {
+      throw new TypeError("offline");
+    });
+
+    await expect(
+      ensureWhisperModel(ctxWith(transcribeRunner(fs), fs), "small", fetchImpl as Any, spec),
+    ).rejects.toThrow("offline");
+    expect(fs.bytes.get(MODEL)).toEqual(previous);
+  });
+
+  it("cancels an oversized response body and removes its temp file", async () => {
+    const fs = new MockFs();
+    const spec = await specFor(new Uint8Array([1]));
+    let cancelled = false;
+    const fetchImpl = vi.fn(async () =>
+      streamedResponse([new Uint8Array([1, 2])], {
+        onCancel: () => {
+          cancelled = true;
+        },
+      }),
+    );
+
+    await expect(
+      ensureWhisperModel(ctxWith(transcribeRunner(fs), fs), "small", fetchImpl as Any, spec),
+    ).rejects.toThrow("exceeded");
+    expect(cancelled).toBe(true);
+    expect(await fs.exists(MODEL)).toBe(false);
+    expect([...fs.bytes.keys()].filter((path) => path.endsWith(".part"))).toEqual([]);
+  });
+
+  it("joins concurrent callers into one download and one final model", async () => {
+    const fs = new MockFs();
+    const bytes = new Uint8Array([2, 4, 6, 8]);
+    const spec = await specFor(bytes);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const fetchImpl = vi.fn(async () => {
+      await gate;
+      return streamedResponse([bytes]);
+    });
+    const ctx = ctxWith(transcribeRunner(fs), fs);
+
+    const first = ensureWhisperModel(ctx, "small", fetchImpl as Any, spec);
+    const second = ensureWhisperModel(ctx, "small", fetchImpl as Any, spec);
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledOnce());
+    release();
+
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      { path: MODEL, downloaded: true },
+      { path: MODEL, downloaded: true },
+    ]);
+    expect(fs.bytes.get(MODEL)).toEqual(bytes);
+  });
+
+  it("does not promote when cancellation arrives after the final chunk", async () => {
+    const fs = new MockFs();
+    const bytes = new Uint8Array([3, 1, 4]);
+    const spec = await specFor(bytes);
+    const controller = new AbortController();
+    const fetchImpl = vi.fn(async () =>
+      streamedResponse([bytes], { onDone: () => controller.abort() }),
+    );
+    const ctx = { ...ctxWith(transcribeRunner(fs), fs), signal: controller.signal };
+
+    await expect(ensureWhisperModel(ctx, "small", fetchImpl as Any, spec)).rejects.toThrow(
+      "cancelled",
+    );
+    expect(await fs.exists(MODEL)).toBe(false);
+    expect([...fs.bytes.keys()].filter((path) => path.endsWith(".part"))).toEqual([]);
   });
 });
 
@@ -321,7 +495,7 @@ describe("ensureTranscript", () => {
   it("transcribes to a canonical path, then reuses it (no re-transcription)", async () => {
     const fs = new MockFs();
     fs.touch(joinPath(DIR, "audio.mp4"));
-    fs.putBytes(MODEL, new Uint8Array([1]));
+    fs.putModel();
     const ctx = ctxWith(transcribeRunner(fs), fs);
     const first = await ensureTranscript(ctx, "audio.mp4");
     expect(first.existed).toBe(false);
@@ -333,7 +507,7 @@ describe("ensureTranscript", () => {
   it("honors an explicit output path", async () => {
     const fs = new MockFs();
     fs.touch(joinPath(DIR, "audio.mp4"));
-    fs.putBytes(MODEL, new Uint8Array([1]));
+    fs.putModel();
     const r = await ensureTranscript(
       ctxWith(transcribeRunner(fs), fs),
       "audio.mp4",
@@ -344,7 +518,7 @@ describe("ensureTranscript", () => {
   });
   it("throws on missing media", async () => {
     const fs = new MockFs();
-    fs.putBytes(MODEL, new Uint8Array([1]));
+    fs.putModel();
     await expect(
       ensureTranscript(ctxWith(transcribeRunner(fs), fs), "missing.mp4"),
     ).rejects.toThrow(/not found/);
@@ -352,7 +526,7 @@ describe("ensureTranscript", () => {
   it("surfaces an audio-extraction failure", async () => {
     const fs = new MockFs();
     fs.touch(joinPath(DIR, "audio.mp4"));
-    fs.putBytes(MODEL, new Uint8Array([1]));
+    fs.putModel();
     await expect(
       ensureTranscript(ctxWith(transcribeRunner(fs, { failConv: true }), fs), "audio.mp4"),
     ).rejects.toThrow(/audio extraction failed/);
@@ -360,7 +534,7 @@ describe("ensureTranscript", () => {
   it("surfaces a whisper-cli failure", async () => {
     const fs = new MockFs();
     fs.touch(joinPath(DIR, "audio.mp4"));
-    fs.putBytes(MODEL, new Uint8Array([1]));
+    fs.putModel();
     await expect(
       ensureTranscript(ctxWith(transcribeRunner(fs, { failWhisper: true }), fs), "audio.mp4"),
     ).rejects.toThrow(/whisper-cli failed/);
@@ -382,7 +556,7 @@ describe("getTranscriptTool (timeline transcript)", () => {
   it("walks the audio clips and maps words to project frames", async () => {
     const fs = new MockFs();
     fs.touch(joinPath(DIR, "audio.mp4"));
-    fs.putBytes(MODEL, new Uint8Array([1]));
+    fs.putModel();
     await fs.writeTextFile(
       joinPath(DIR, "internals", "timeline.json"),
       JSON.stringify({
@@ -445,7 +619,7 @@ describe("getTranscriptTool (timeline transcript)", () => {
   it("FAILS instead of reporting silence when transcription is broken", async () => {
     const fs = new MockFs();
     fs.touch(joinPath(DIR, "c1.mp4"));
-    fs.putBytes(MODEL, new Uint8Array([1]));
+    fs.putModel();
     await fs.writeTextFile(joinPath(DIR, "internals", "timeline.json"), timelineWith(["c1"]));
 
     const r = (await getTranscriptTool(
@@ -464,7 +638,7 @@ describe("getTranscriptTool (timeline transcript)", () => {
   it("still returns the clips it COULD transcribe, and names the ones it could not", async () => {
     const fs = new MockFs();
     fs.touch(joinPath(DIR, "c1.mp4")); // transcribes
-    fs.putBytes(MODEL, new Uint8Array([1]));
+    fs.putModel();
     // c2.mp4 is absent -> ensureTranscript throws "not found" for that clip only.
     await fs.writeTextFile(joinPath(DIR, "internals", "timeline.json"), timelineWith(["c1", "c2"]));
 

@@ -20,7 +20,7 @@ import { openProjectJobs } from "../tools/genJobs";
 import type { ProjectStoreAccess } from "../tools/store";
 import type { MutationOrigin } from "../project/MutationGate";
 import { notifyJobSettled } from "../store/jobNotes";
-import { noteSessionActivity } from "../observability/crashWatch";
+import { beginSessionActivity } from "../observability/crashWatch";
 
 /** Destinations with an export queued or running, so a second one is refused rather than raced. */
 const reserved = new Set<string>();
@@ -387,13 +387,14 @@ async function encode(
   let cancelled = false;
   let stderrTail: string | undefined;
   let warnings: string[] = [];
+  let finishActivity: (() => void) | null = null;
   try {
     // Cancelled while still queued: never start an encode nobody is waiting for.
     if (signal.aborted) throw new Error("export cancelled");
     patch(jobId, { state: "running" });
     // An encode is the heaviest thing the app does and the likeliest moment to be killed for
     // memory; if the process dies here the crash marker will say so.
-    noteSessionActivity("export");
+    finishActivity = beginSessionActivity("export");
     warnings = (await spec.run(signal)).warnings ?? [];
     if (signal.aborted) throw new Error("export cancelled");
     if (staged) await store.rename(spec.stagePath, spec.destPath);
@@ -405,7 +406,7 @@ async function encode(
     // Never leave a partial file where a finished export belongs.
     if (staged) await store.remove(spec.stagePath).catch(() => undefined);
   } finally {
-    noteSessionActivity("idle");
+    finishActivity?.();
     reserved.delete(key);
     controllers.delete(jobId);
     patch(jobId, {

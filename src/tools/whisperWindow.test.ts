@@ -2,7 +2,7 @@
 // than what we do with the answer. These drive runWhisper's real argument/caching logic.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { runWhisper, whisperModelPath } from "./transcribe";
+import { runWhisper, WHISPER_MODELS, whisperModelPath } from "./transcribe";
 import type { ClientToolContext } from "./context";
 
 const DIR = "C:/data/projects/p1";
@@ -21,6 +21,14 @@ function harness() {
       prepareArtifact: async (rel: string) => `${DIR}/internals/cache/${rel}`,
       exists: async (p: string) => files.has(p),
       readText: async () => WHISPER_JSON,
+      writeText: async (p: string) => void files.add(p),
+      byteSize: async () => WHISPER_MODELS.small.bytes,
+      probeMedia: async () => ({
+        id12: WHISPER_MODELS.small.sha256.slice(0, 12),
+        sha256: WHISPER_MODELS.small.sha256,
+        size: WHISPER_MODELS.small.bytes,
+        head: new Uint8Array(),
+      }),
       resolveRef: async (r: string) => r,
     },
     runner: {

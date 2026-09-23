@@ -233,12 +233,15 @@ export class TauriFs implements FsLike {
     const { useImportJobs } = await import("../store/importJobs");
     const onProgress = new Channel<{ read: number; total: number }>();
     onProgress.onmessage = (m) => useImportJobs.getState().progress(path, m.read, m.total);
-    const p = await invoke<{ id12: string; size: number; head: number[] }>("probe_media_file", {
-      path,
-      headBytes,
-      onProgress,
-    });
-    return { id12: p.id12, size: p.size, head: new Uint8Array(p.head) };
+    const p = await invoke<{ id12: string; sha256: string; size: number; head: number[] }>(
+      "probe_media_file",
+      {
+        path,
+        headBytes,
+        onProgress,
+      },
+    );
+    return { id12: p.id12, sha256: p.sha256, size: p.size, head: new Uint8Array(p.head) };
   }
   async readDir(path: string): Promise<DirEntry[]> {
     const entries = await readDir(path);
