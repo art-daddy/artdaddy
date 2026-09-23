@@ -1,42 +1,33 @@
 // Per-project background indexer — other NLEs' SearchIndexCoordinator, scoped to
 // our needs. Observes the project's media (timeline clips AND the library
 // catalog) and, on open / import / edit, runs a SERIAL, disk-cached, best-effort
-// sweep of two passes:
+// sweep of one pass:
 //   • proxy      — poster + H.264 preview proxy for timeline VIDEO clips whose
 //                  codec the in-app WebCodecs preview can't decode (HEVC/ProRes),
 //                  so the live preview never goes blank waiting on a transcode;
-//   • transcript — on-device word-level transcript per audio/video asset, warming
-//                  get_transcript (and future search) so the first read is instant.
-// Proxies are drained BEFORE transcripts (preview latency beats background index).
+// Transcription is deliberately ON DEMAND. Its model is 465 MiB; silently downloading it while
+// a project opens killed the macOS webview before the user had asked for captions.
 // Desktop-only: no runner (web build) => no-op. Lifecycle-scoped: dispose() on
 // project switch cancels pending work so it never leaks across projects.
 import type { CommandRunner } from "../tools/command";
-import type { ClientToolContext } from "../tools/context";
 import type { ProjectStoreAccess } from "../tools/store";
 import type { Timeline } from "../timeline/model";
 import { kindOf, needsPreviewProxy } from "../media/formats";
 
-// Media imported BY REFERENCE lives wherever the user keeps it, so neither pass may require
-// a path inside the project. Requiring `library/` here is why an externally-referenced clip
-// got no preview proxy AND no transcript: both silently matched nothing.
+// Media imported BY REFERENCE lives wherever the user keeps it, so the proxy pass may not
+// require a path inside the project.
 const needsProxy = (p: string): boolean =>
   kindOf(p) === "video" || (kindOf(p) === "image" && needsPreviewProxy(p));
-const isIndexable = (p: string): boolean => {
-  const k = kindOf(p);
-  return k === "video" || k === "audio";
-};
 
 /** The desktop-only modules a drain needs, resolved once per drain rather than per job. */
 interface IndexModules {
   processImportedMedia: typeof import("../preview/mediaProxy").processImportedMedia;
-  ensureTranscript: typeof import("../tools/transcribe").ensureTranscript;
   clearSourceUrlCache: typeof import("../preview/resolve").clearSourceUrlCache;
 }
 
 export class IndexCoordinator {
   private readonly proxyQ: string[] = [];
-  private readonly txQ: string[] = [];
-  private readonly seen = new Set<string>(); // `${pass}\0${source}` already enqueued
+  private readonly seen = new Set<string>();
   private running = false;
   private disposed = false;
   // Aborts the in-flight derived job (ffmpeg/whisper) on dispose. dispose()
@@ -63,8 +54,8 @@ export class IndexCoordinator {
     // preview proxy was ever built.
     let byId = new Map<string, string>();
     // Media still being generated has a catalog row and a path, but NO FILE. Indexing it would
-    // fail both passes, and `seen` is permanent -- one premature sweep would cost that asset its
-    // only chance at a proxy and a transcript. Skip until it lands; a later sweep picks it up.
+    // fail, and `seen` is permanent -- one premature sweep would cost that asset its only chance
+    // at a proxy. Skip until it lands; a later sweep picks it up.
     let pending = new Set<string>();
     let clips: Awaited<ReturnType<typeof this.store.listClips>> = [];
     try {
@@ -87,16 +78,13 @@ export class IndexCoordinator {
         const ref = typeof c.media_ref === "string" ? c.media_ref : "";
         if (!ref) continue;
         // Enqueue the catalog PATH, not the ref: the library loop below enqueues the
-        // same string, so the seen-set dedupes them into ONE transcription per asset.
+        // same string, so the seen-set dedupes them into one proxy pass per asset.
         const p = byId.get(ref) || ref;
         if (pending.has(p)) continue;
-        if (c.kind !== "audio" && needsProxy(p)) this.enqueue("proxy", p);
-        if (isIndexable(p)) this.enqueue("transcript", p);
+        if (c.kind !== "audio" && needsProxy(p)) this.enqueue(p);
       }
     }
-    // Library assets not yet placed on the timeline still get transcribed, so the
-    // whole library is searchable — this is the single choke point every import
-    // path (upload, drag-drop, agent import_media, download, generation) funnels through.
+    // Library assets not yet placed on the timeline still get preview assets.
     for (const clip of clips) {
       const p = typeof clip.path === "string" ? clip.path : "";
       if (pending.has(p)) continue;
@@ -105,73 +93,51 @@ export class IndexCoordinator {
       // the poster pass, or whose queue never drained (agent import, generation, a restart),
       // had nothing left to give it one — `seen` is permanent and the loop above only covers
       // PLACED clips. The pass itself skips a poster that already exists.
-      if (needsProxy(p)) this.enqueue("proxy", p);
-      if (isIndexable(p)) this.enqueue("transcript", p);
+      if (needsProxy(p)) this.enqueue(p);
     }
   }
 
   /** Index one specific just-imported source (e.g. a manual drop before it's on
-   *  the timeline): proxy if it's previewable video, plus a transcript. */
+   *  the timeline): build its preview assets when applicable. */
   indexSource(source: string): void {
     const s = (source ?? "").trim();
     if (!s || this.disposed) return;
-    if (needsProxy(s)) this.enqueue("proxy", s);
-    if (isIndexable(s)) this.enqueue("transcript", s);
+    if (needsProxy(s)) this.enqueue(s);
   }
 
   dispose(): void {
     this.disposed = true;
     this.proxyQ.length = 0;
-    this.txQ.length = 0;
     this.ac.abort();
   }
 
-  private enqueue(pass: "proxy" | "transcript", source: string): void {
-    const key = `${pass}\u0000${source}`;
-    if (this.seen.has(key)) return;
-    this.seen.add(key);
-    (pass === "proxy" ? this.proxyQ : this.txQ).push(source);
+  private enqueue(source: string): void {
+    if (this.seen.has(source)) return;
+    this.seen.add(source);
+    this.proxyQ.push(source);
     if (!this.running) void this.drain();
   }
 
-  private next(): { pass: "proxy" | "transcript"; source: string } | undefined {
-    const p = this.proxyQ.shift();
-    if (p !== undefined) return { pass: "proxy", source: p };
-    const t = this.txQ.shift();
-    if (t !== undefined) return { pass: "transcript", source: t };
-    return undefined;
-  }
-
   private async runJob(
-    job: { pass: "proxy" | "transcript"; source: string },
+    source: string,
     runner: CommandRunner,
     mods: IndexModules,
     markImporting: () => void,
   ): Promise<void> {
-    if (job.pass === "proxy") {
-      const changed = await mods.processImportedMedia(
-        this.store,
-        runner,
-        job.source,
-        markImporting,
-        this.ac.signal,
-      );
-      if (changed && !this.disposed) {
-        mods.clearSourceUrlCache();
-        this.onProxyReady();
-      }
-      return;
-    }
-    await mods.ensureTranscript(
-      { store: this.store, runner, signal: this.ac.signal } as ClientToolContext,
-      job.source,
+    const changed = await mods.processImportedMedia(
+      this.store,
+      runner,
+      source,
+      markImporting,
+      this.ac.signal,
     );
+    if (changed && !this.disposed) {
+      mods.clearSourceUrlCache();
+      this.onProxyReady();
+    }
   }
 
-  /** Concurrent workers over the queues. Transcribing a long file is minutes of CPU, and a
-   *  timeline typically has several distinct sources — draining them one after another made
-   *  the last asset wait for every earlier one. Two, not more: whisper already takes several
-   *  threads each, so a wider pool just oversubscribes the machine it is running on. */
+  /** Two workers keep independent posters/proxies moving without unbounded ffmpeg fan-out. */
   private static readonly WORKERS = 2;
 
   private async drain(): Promise<void> {
@@ -180,17 +146,14 @@ export class IndexCoordinator {
     let mods: IndexModules;
     try {
       runner = await this.makeRunner();
-      // Resolved ONCE, before the pool. These stay dynamic so the desktop-only transcode and
-      // whisper code keeps out of the main bundle, but importing them per JOB repeated that
-      // resolution for every asset.
-      const [proxy, transcribe, resolve] = await Promise.all([
+      // Resolved ONCE, before the pool. These stay dynamic so desktop-only transcode code
+      // stays out of the main bundle, without repeating module resolution for every asset.
+      const [proxy, resolve] = await Promise.all([
         import("../preview/mediaProxy"),
-        import("../tools/transcribe"),
         import("../preview/resolve"),
       ]);
       mods = {
         processImportedMedia: proxy.processImportedMedia,
-        ensureTranscript: transcribe.ensureTranscript,
         clearSourceUrlCache: resolve.clearSourceUrlCache,
       };
     } catch {
@@ -206,12 +169,13 @@ export class IndexCoordinator {
     try {
       await Promise.all(
         Array.from({ length: IndexCoordinator.WORKERS }, async () => {
-          for (let job = this.next(); job && !this.disposed; job = this.next()) {
+          for (let source = this.proxyQ.shift(); source !== undefined && !this.disposed;) {
             try {
-              await this.runJob(job, runner, mods, markImporting);
+              await this.runJob(source, runner, mods, markImporting);
             } catch {
               /* best-effort; skip a bad asset */
             }
+            source = this.proxyQ.shift();
           }
         }),
       );
@@ -219,8 +183,8 @@ export class IndexCoordinator {
       if (importingShown) this.setImporting(false);
       this.running = false;
     }
-    // Work enqueued between the last `next()` and `running = false` saw a busy drain and
+    // Work enqueued between the last queue read and `running = false` saw a busy drain and
     // started none of its own, so it would sit until some later enqueue happened along.
-    if (!this.disposed && (this.proxyQ.length > 0 || this.txQ.length > 0)) void this.drain();
+    if (!this.disposed && this.proxyQ.length > 0) void this.drain();
   }
 }

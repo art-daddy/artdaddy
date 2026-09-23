@@ -1,12 +1,17 @@
 // The gap this closes: the app's worst failures kill the process, so nothing inside the
 // webview is alive to report them. A 1.84 GB media read aborted the Rust side with
 // 0xE0000008 and Sentry showed a quiet week while the editor crashed repeatedly.
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const captureMock = vi.hoisted(() => vi.fn());
 vi.mock("./sentry", () => ({ captureError: captureMock }));
 
-import { noteSessionProject, startCrashWatch } from "./crashWatch";
+import {
+  beginSessionActivity,
+  installCrashWatch,
+  noteSessionProject,
+  startCrashWatch,
+} from "./crashWatch";
 
 /** A localStorage that survives "restarts" — the whole point is what outlives the process. */
 function fakeStorage(): Storage {
@@ -24,6 +29,10 @@ function fakeStorage(): Storage {
 }
 
 beforeEach(() => captureMock.mockReset());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 describe("crash watch", () => {
   it("reports the previous session when it died without shutting down", () => {
@@ -90,5 +99,22 @@ describe("crash watch", () => {
     storage.setItem("artdaddy.session", "{not json");
     expect(() => startCrashWatch({ storage })).not.toThrow();
     expect(captureMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps a concurrent export visible when a model download finishes first", () => {
+    vi.useFakeTimers();
+    const storage = fakeStorage();
+    vi.stubGlobal("localStorage", storage);
+    const stopWatch = installCrashWatch();
+    const finishExport = beginSessionActivity("export");
+    const finishModel = beginSessionActivity("whisper-model-download");
+
+    finishModel();
+    vi.advanceTimersByTime(5_000);
+    const marker = JSON.parse(storage.getItem("artdaddy.session")!) as { activity?: string };
+    expect(marker.activity).toBe("export");
+
+    finishExport();
+    stopWatch();
   });
 });

@@ -1,11 +1,14 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+import type { DesktopSessionRefresh } from "../api/desktopAuth";
 
 const mocks = vi.hoisted(() => {
   const removeTokenProvider = vi.fn();
   return {
     verify: vi.fn(),
     markLocked: vi.fn(),
+    markOffline: vi.fn(),
     removeTokenProvider,
     setClerkTokenProvider: vi.fn(() => removeTokenProvider),
     identifyUser: vi.fn(),
@@ -14,12 +17,14 @@ const mocks = vi.hoisted(() => {
     offAuth: vi.fn(),
     userId: null as string | null,
     userEmail: null as string | null,
-    refreshDesktopSession: vi.fn(async () => false),
+    refreshDesktopSession: vi.fn(async (): Promise<DesktopSessionRefresh> => ({
+      status: "refreshed",
+      hasStoredSession: true,
+    })),
     handleDeepLinkCallback: vi.fn(async () => ({ ok: true }) as { ok: boolean }),
     getAccessToken: vi.fn(() => null as string | null),
     getUserId: vi.fn(() => mocks.userId),
     getUserEmail: vi.fn(() => mocks.userEmail),
-    hasStoredDesktopSession: vi.fn(async () => false),
     setStoredSession: vi.fn(),
     hasStoredSession: false,
     startDesktopSignIn: vi.fn(async () => ({ ok: true }) as { ok: boolean }),
@@ -43,6 +48,7 @@ vi.mock("../store/auth", async () => {
   const state = () => ({
     verify: mocks.verify,
     markLocked: mocks.markLocked,
+    markOffline: mocks.markOffline,
     setStoredSession: mocks.setStoredSession,
     status: mocks.authStatus,
     hasStoredSession: mocks.hasStoredSession,
@@ -69,7 +75,6 @@ vi.mock("../api/desktopAuth", () => ({
   getUserEmail: mocks.getUserEmail,
   refreshDesktopSession: mocks.refreshDesktopSession,
   handleDeepLinkCallback: mocks.handleDeepLinkCallback,
-  hasStoredDesktopSession: mocks.hasStoredDesktopSession,
   startDesktopSignIn: mocks.startDesktopSignIn,
 }));
 
@@ -86,6 +91,7 @@ vi.mock("../observability/sentry", () => ({ identifyUser: mocks.identifyUser }))
 import AuthProvider from "./AuthProvider";
 
 afterEach(() => {
+  vi.useRealTimers();
   mocks.authFailureCb = null;
   mocks.authStatus = "checking";
   mocks.hasStoredSession = false;
@@ -93,10 +99,12 @@ afterEach(() => {
   mocks.onOpenUrlCb = null;
   mocks.startUrls = null;
   mocks.platformName = "tauri";
-  mocks.refreshDesktopSession.mockReset().mockResolvedValue(false);
+  mocks.refreshDesktopSession.mockReset().mockResolvedValue({
+    status: "refreshed",
+    hasStoredSession: true,
+  });
   mocks.handleDeepLinkCallback.mockReset().mockResolvedValue({ ok: true });
   mocks.getAccessToken.mockReset().mockReturnValue(null);
-  mocks.hasStoredDesktopSession.mockReset().mockResolvedValue(false);
   vi.clearAllMocks();
 });
 
@@ -124,16 +132,54 @@ describe("AuthProvider", () => {
     expect(screen.getByText(/sign in to continue/i)).toBeInTheDocument();
   });
 
-  it("shows neither the app nor a sign-in prompt while still checking", () => {
+  it("shows a visible startup state rather than a black screen while checking", () => {
     mocks.authStatus = "checking";
     render(
       <AuthProvider>
         <span>editor</span>
       </AuthProvider>,
     );
-    // Flashing "sign in" at someone who IS signed in is the bug this prevents.
     expect(screen.queryByText("editor")).not.toBeInTheDocument();
     expect(screen.queryByText(/sign in to continue/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/starting artdaddy/i)).toBeInTheDocument();
+    expect(screen.getByText(/restoring your saved session/i)).toBeInTheDocument();
+  });
+
+  it("offers a retry when the OS keychain cannot be read", async () => {
+    mocks.refreshDesktopSession.mockResolvedValue({
+      status: "unavailable",
+      hasStoredSession: null,
+    });
+    render(
+      <AuthProvider>
+        <span>editor</span>
+      </AuthProvider>,
+    );
+
+    expect(await screen.findByText(/couldn't read your saved session/i)).toBeInTheDocument();
+    screen.getByRole("button", { name: "Retry" }).click();
+    await waitFor(() => expect(mocks.refreshDesktopSession).toHaveBeenCalledTimes(2));
+    expect(mocks.markLocked).not.toHaveBeenCalled();
+    screen.getByRole("button", { name: /sign in again/i }).click();
+    expect(mocks.markLocked).toHaveBeenCalledOnce();
+  });
+
+  it("offers recovery controls even when the OS keychain call never settles", async () => {
+    vi.useFakeTimers();
+    mocks.refreshDesktopSession.mockReturnValue(new Promise<never>(() => undefined));
+    render(
+      <AuthProvider>
+        <span>editor</span>
+      </AuthProvider>,
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+
+    expect(screen.getByText(/couldn't read your saved session/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /sign in again/i })).toBeInTheDocument();
   });
 
   it("keeps the editor usable offline when this device already holds a session", () => {
@@ -162,7 +208,10 @@ describe("AuthProvider", () => {
   });
 
   it("identifies the Sentry user once a stored desktop-auth session restores", async () => {
-    mocks.refreshDesktopSession.mockResolvedValue(true);
+    mocks.refreshDesktopSession.mockResolvedValue({
+      status: "refreshed",
+      hasStoredSession: true,
+    });
     mocks.userId = "user_abc123";
     mocks.userEmail = "tester@example.com";
     render(
@@ -178,7 +227,10 @@ describe("AuthProvider", () => {
   });
 
   it("identifies with null when nothing is stored (no lingering identity from a prior run)", async () => {
-    mocks.refreshDesktopSession.mockResolvedValue(false);
+    mocks.refreshDesktopSession.mockResolvedValue({
+      status: "missing",
+      hasStoredSession: false,
+    });
     mocks.userId = null;
     mocks.userEmail = null;
     render(
@@ -189,28 +241,38 @@ describe("AuthProvider", () => {
     await waitFor(() => expect(mocks.identifyUser).toHaveBeenLastCalledWith(null, null));
   });
 
-  it("re-verifies when the network returns ('online') while NOT unlocked", () => {
+  it("refreshes before re-verifying when the network returns while NOT unlocked", async () => {
     mocks.authStatus = "offline";
     render(
       <AuthProvider>
         <span>x</span>
       </AuthProvider>,
     );
+    await waitFor(() => expect(mocks.refreshDesktopSession).toHaveBeenCalled());
     mocks.verify.mockClear();
+    mocks.refreshDesktopSession.mockClear();
+    mocks.refreshDesktopSession.mockResolvedValue({
+      status: "refreshed",
+      hasStoredSession: true,
+    });
     window.dispatchEvent(new Event("online"));
-    expect(mocks.verify).toHaveBeenCalledOnce();
+    await waitFor(() => expect(mocks.refreshDesktopSession).toHaveBeenCalledOnce());
+    await waitFor(() => expect(mocks.verify).toHaveBeenCalledOnce());
   });
 
-  it("does NOT re-verify on 'online' when already unlocked", () => {
+  it("does NOT refresh or re-verify on 'online' when already unlocked", async () => {
     mocks.authStatus = "unlocked";
     render(
       <AuthProvider>
         <span>x</span>
       </AuthProvider>,
     );
+    await waitFor(() => expect(mocks.refreshDesktopSession).toHaveBeenCalled());
     mocks.verify.mockClear();
+    mocks.refreshDesktopSession.mockClear();
     window.dispatchEvent(new Event("online"));
     expect(mocks.verify).not.toHaveBeenCalled();
+    expect(mocks.refreshDesktopSession).not.toHaveBeenCalled();
   });
 
   it("re-verifies the moment a deep-link callback completes sign-in (no reload needed)", async () => {
@@ -224,6 +286,7 @@ describe("AuthProvider", () => {
     mocks.handleDeepLinkCallback.mockResolvedValue({ ok: true });
     await mocks.onOpenUrlCb!(["artdaddy://auth/callback?code=x&state=y"]);
     expect(mocks.verify).toHaveBeenCalledOnce();
+    expect(mocks.setStoredSession).toHaveBeenCalledWith(true);
   });
 
   it("does NOT re-verify when the deep-link callback fails (bad state, expired code, etc.)", async () => {
@@ -251,7 +314,6 @@ describe("AuthProvider", () => {
   });
 
   it("locks the AI on a live auth failure ONLY once a silent refresh also fails, and removes every listener on unmount", async () => {
-    mocks.refreshDesktopSession.mockResolvedValue(false); // the 60-day refresh token is also dead
     const { unmount } = render(
       <AuthProvider>
         <span>x</span>
@@ -259,6 +321,10 @@ describe("AuthProvider", () => {
     );
     await waitFor(() => expect(mocks.verify).toHaveBeenCalled()); // let the boot-time restore settle first
     mocks.refreshDesktopSession.mockClear();
+    mocks.refreshDesktopSession.mockResolvedValue({
+      status: "invalid",
+      hasStoredSession: false,
+    });
     mocks.markLocked.mockClear();
     mocks.authFailureCb?.();
     await waitFor(() => expect(mocks.markLocked).toHaveBeenCalledOnce());
@@ -280,10 +346,61 @@ describe("AuthProvider", () => {
     await waitFor(() => expect(mocks.verify).toHaveBeenCalled()); // let the boot-time restore settle first
     mocks.verify.mockClear();
     mocks.markLocked.mockClear();
-    mocks.refreshDesktopSession.mockResolvedValue(true);
+    mocks.refreshDesktopSession.mockResolvedValue({
+      status: "refreshed",
+      hasStoredSession: true,
+    });
     mocks.authFailureCb?.();
     await waitFor(() => expect(mocks.verify).toHaveBeenCalledOnce());
     expect(mocks.markLocked).not.toHaveBeenCalled();
+  });
+
+  it("keeps local editing open when refresh infrastructure fails transiently", async () => {
+    mocks.authStatus = "unlocked";
+    render(
+      <AuthProvider>
+        <span>editor</span>
+      </AuthProvider>,
+    );
+    await waitFor(() => expect(mocks.verify).toHaveBeenCalled());
+    mocks.markLocked.mockClear();
+    mocks.markOffline.mockClear();
+    mocks.refreshDesktopSession.mockClear();
+    mocks.refreshDesktopSession.mockResolvedValue({
+      status: "unavailable",
+      hasStoredSession: true,
+    });
+
+    mocks.authFailureCb?.();
+
+    await waitFor(() => expect(mocks.markOffline).toHaveBeenCalledOnce());
+    expect(mocks.markLocked).not.toHaveBeenCalled();
+    expect(screen.getByText("editor")).toBeInTheDocument();
+  });
+
+  it("ignores a refresh result superseded by a newer sign-in or explicit sign-out", async () => {
+    mocks.authStatus = "unlocked";
+    render(
+      <AuthProvider>
+        <span>editor</span>
+      </AuthProvider>,
+    );
+    await waitFor(() => expect(mocks.verify).toHaveBeenCalled());
+    mocks.markLocked.mockClear();
+    mocks.markOffline.mockClear();
+    mocks.setStoredSession.mockClear();
+    mocks.refreshDesktopSession.mockClear();
+    mocks.refreshDesktopSession.mockResolvedValue({
+      status: "superseded",
+      hasStoredSession: null,
+    });
+
+    mocks.authFailureCb?.();
+
+    await waitFor(() => expect(mocks.refreshDesktopSession).toHaveBeenCalledOnce());
+    expect(mocks.markLocked).not.toHaveBeenCalled();
+    expect(mocks.markOffline).not.toHaveBeenCalled();
+    expect(mocks.setStoredSession).not.toHaveBeenCalled();
   });
 
   it("locks immediately off the desktop shell, without attempting a refresh that has nowhere to read a token from", () => {

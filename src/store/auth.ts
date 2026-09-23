@@ -24,6 +24,8 @@ interface AuthState {
   verify: () => Promise<void>;
   /** A live 401 (rotated / revoked token) calls this. */
   markLocked: () => void;
+  /** The session still exists, but auth infrastructure is temporarily unavailable. */
+  markOffline: () => void;
   setStoredSession: (has: boolean) => void;
 }
 
@@ -63,6 +65,7 @@ export const useAuth = create<AuthState>((set) => ({
     set({ status: "locked", profile: null, hasStoredSession: false });
     clearUsage();
   },
+  markOffline: () => set({ status: "offline" }),
   setStoredSession: (has) => set({ hasStoredSession: has }),
 }));
 

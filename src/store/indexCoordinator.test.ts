@@ -7,15 +7,12 @@ import type { Timeline } from "../timeline/model";
 type Any = any;
 
 // Mocks must be hoisted so the vi.mock factories can reference them.
-const { processImportedMedia, clearSourceUrlCache, ensureTranscript } = vi.hoisted(() => ({
+const { processImportedMedia, clearSourceUrlCache } = vi.hoisted(() => ({
   processImportedMedia: vi.fn(async () => false),
   clearSourceUrlCache: vi.fn(),
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  ensureTranscript: vi.fn(async (_ctx?: any) => ({ path: "t.json", parsed: {}, existed: false })),
 }));
 vi.mock("../preview/mediaProxy", () => ({ processImportedMedia }));
 vi.mock("../preview/resolve", () => ({ clearSourceUrlCache }));
-vi.mock("../tools/transcribe", () => ({ ensureTranscript }));
 
 const runner = { run: vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })) } as Any;
 const makeRunner = async () => runner as Any;
@@ -45,8 +42,6 @@ beforeEach(() => {
   processImportedMedia.mockReset();
   processImportedMedia.mockResolvedValue(false);
   clearSourceUrlCache.mockReset();
-  ensureTranscript.mockReset();
-  ensureTranscript.mockResolvedValue({ path: "t.json", parsed: {}, existed: false } as Any);
 });
 
 describe("IndexCoordinator", () => {
@@ -61,14 +56,12 @@ describe("IndexCoordinator", () => {
     await c.sweep(tl([{ media_ref: "media_gen_a" }]));
     await settle(() => processImportedMedia.mock.calls.length > 0, 60);
     expect(processImportedMedia).not.toHaveBeenCalled();
-    expect(ensureTranscript).not.toHaveBeenCalled();
 
     // It landed: the row loses its status, and the NEXT sweep must pick it up.
     store.listClips = vi.fn(async () => [{ id: "media_gen_a", path: "library/media_gen_a.mp4" }]);
     await c.sweep(tl([{ media_ref: "media_gen_a" }]));
     await settle(() => processImportedMedia.mock.calls.length > 0);
     expect(processImportedMedia).toHaveBeenCalledTimes(1);
-    expect(ensureTranscript).toHaveBeenCalledTimes(1);
   });
 
   // The poster IS the library tile and the timeline thumbnail. Placing a clip must not be
@@ -93,8 +86,7 @@ describe("IndexCoordinator", () => {
     const c = new IndexCoordinator(store, makeRunner, vi.fn(), vi.fn());
 
     await c.sweep(tl([]));
-
-    await settle(() => ensureTranscript.mock.calls.length > 0);
+    await new Promise((r) => setTimeout(r, 20));
     expect(processImportedMedia).not.toHaveBeenCalled();
   });
 
@@ -105,52 +97,18 @@ describe("IndexCoordinator", () => {
     const c = new IndexCoordinator(store, makeRunner, vi.fn(), vi.fn());
 
     await c.sweep(tl([{ media_ref: "media_gen_b", kind: "audio" }]));
-    await settle(() => ensureTranscript.mock.calls.length > 0, 60);
-
-    expect(ensureTranscript).not.toHaveBeenCalled();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(processImportedMedia).not.toHaveBeenCalled();
   });
 
-  // other NLEs fans out across FILES for the same reason: a long transcript is minutes of CPU,
-  // and draining serially made the last asset wait for every earlier one.
-  it("transcribes two different files at the same time, not one after the other", async () => {
-    let inFlight = 0;
-    let peak = 0;
-    const release: (() => void)[] = [];
-    ensureTranscript.mockImplementation(async () => {
-      inFlight += 1;
-      peak = Math.max(peak, inFlight);
-      await new Promise<void>((r) => release.push(r));
-      inFlight -= 1;
-      return { path: "t", parsed: {}, existed: false } as Any;
-    });
-    const store = fakeStore([
-      { id: "a", path: "library/a.wav" },
-      { id: "b", path: "library/b.wav" },
-    ]);
-    const c = new IndexCoordinator(store, makeRunner, vi.fn(), vi.fn());
-
-    void c.sweep(tl([]));
-    await settle(() => release.length >= 2);
-    expect(peak, "a second file must not wait for the first to finish").toBeGreaterThan(1);
-    release.forEach((r) => r());
-  });
-
-  it("indexes a timeline video: proxy AND transcript, proxy drained first", async () => {
-    const order: string[] = [];
+  it("indexes a timeline video for preview without starting transcription", async () => {
     processImportedMedia.mockImplementation(async () => {
-      order.push("proxy");
       return false;
-    });
-    ensureTranscript.mockImplementation(async () => {
-      order.push("tx");
-      return { path: "t", parsed: {}, existed: false } as Any;
     });
     const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
     await c.sweep(tl([{ media_ref: "library/a.mp4" }]));
-    await settle(() => order.length >= 2);
-    expect(order).toEqual(["proxy", "tx"]);
+    await settle(() => processImportedMedia.mock.calls.length > 0);
     expect(processImportedMedia).toHaveBeenCalledTimes(1);
-    expect(ensureTranscript).toHaveBeenCalledTimes(1);
   });
 
   it("clears the URL cache + bumps the preview when a new proxy lands", async () => {
@@ -178,25 +136,24 @@ describe("IndexCoordinator", () => {
     expect(setImporting).toHaveBeenLastCalledWith(false);
   });
 
-  it("indexes library assets off the timeline and dedups repeat sweeps", async () => {
+  it("indexes previewable library assets off the timeline and dedups repeat sweeps", async () => {
     const c = new IndexCoordinator(
-      fakeStore([{ path: "library/lib.mp3" }]),
+      fakeStore([{ path: "library/lib.mp4" }]),
       makeRunner,
       vi.fn(),
       vi.fn(),
     );
     await c.sweep(tl([{ media_ref: "library/a.mp4" }]));
-    await settle(() => ensureTranscript.mock.calls.length >= 2);
+    await settle(() => processImportedMedia.mock.calls.length >= 2);
     await c.sweep(tl([{ media_ref: "library/a.mp4" }])); // same media -> no new work
     await new Promise((r) => setTimeout(r, 20));
-    expect(processImportedMedia).toHaveBeenCalledTimes(1); // a.mp4 only
-    expect(ensureTranscript).toHaveBeenCalledTimes(2); // a.mp4 + lib.mp3
+    expect(processImportedMedia).toHaveBeenCalledTimes(2); // timeline + library video
   });
 
   it("skips the proxy for audio-only clips and no-ops after dispose", async () => {
     const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
     await c.sweep(tl([{ media_ref: "library/song.mp3", kind: "audio" }]));
-    await settle(() => ensureTranscript.mock.calls.length > 0);
+    await new Promise((r) => setTimeout(r, 20));
     expect(processImportedMedia).not.toHaveBeenCalled();
     c.dispose();
     c.indexSource("library/b.mp4");
@@ -223,25 +180,5 @@ describe("IndexCoordinator", () => {
     expect(captured?.aborted).toBe(true); // dispose kills the in-flight process' signal
     release();
     await new Promise((r) => setTimeout(r, 0)); // let the drain unwind
-  });
-
-  it("dispose() aborts the IN-FLIGHT transcript job via ctx.signal", async () => {
-    let captured: AbortSignal | undefined;
-    let release!: () => void;
-    const gate = new Promise<void>((r) => (release = r));
-    ensureTranscript.mockImplementation(async (ctx: Any) => {
-      captured = ctx.signal;
-      await gate;
-      return { path: "t", parsed: {}, existed: false } as Any;
-    });
-    const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
-    // Audio-only clip -> no proxy pass, so the drain lands straight on transcript.
-    await c.sweep(tl([{ media_ref: "library/song.mp3", kind: "audio" }]));
-    await settle(() => captured !== undefined);
-    expect(captured?.aborted).toBe(false);
-    c.dispose();
-    expect(captured?.aborted).toBe(true);
-    release();
-    await new Promise((r) => setTimeout(r, 0));
   });
 });

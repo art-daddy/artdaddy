@@ -45,11 +45,23 @@ function heap(): { heapMb?: number; heapLimitMb?: number } {
 }
 
 let activity = "idle";
+const activities = new Map<symbol, string>();
 
 /** Name the expensive thing currently under way ("export", "transcribe", "render"). Reported
  *  with the next crash, so "it dies during export" stops being a guess. */
 export function noteSessionActivity(what: string): void {
   activity = what || "idle";
+}
+
+/** Register a concurrent expensive activity without one job's cleanup hiding another one. */
+export function beginSessionActivity(what: string): () => void {
+  const token = Symbol(what);
+  activities.set(token, what || "idle");
+  activity = what || "idle";
+  return () => {
+    activities.delete(token);
+    activity = [...activities.values()].at(-1) ?? "idle";
+  };
 }
 
 function read(store: Storage): Session | null {

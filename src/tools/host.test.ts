@@ -25,7 +25,6 @@ vi.mock("./dataRoot", () => ({
   projectDirFor: (id: string) => projectDirFor(id),
 }));
 vi.mock("./tauri", () => ({ makeTauriContext: (d: string) => makeTauriContext(d) }));
-vi.mock("./transcribe", () => ({ warmWhisperModel: vi.fn(async () => undefined) }));
 vi.mock("../timeline/engine", () => ({ ensureTimeline: vi.fn(async () => undefined) }));
 vi.mock(".", () => ({
   createToolRegistry: (getCtx: () => Any) => ({

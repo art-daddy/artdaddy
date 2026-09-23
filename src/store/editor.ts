@@ -63,7 +63,7 @@ export function setRunnerFactory(fn: () => CommandRunner | Promise<CommandRunner
   makeRunner = fn;
 }
 
-// Background proxy + transcript indexing is owned by IndexCoordinator (per project).
+// Background preview proxy indexing is owned by IndexCoordinator (per project).
 
 const MIN_ZOOM = 4; // px per second
 const MAX_ZOOM = 400;
@@ -114,7 +114,7 @@ export interface EditorState {
   refreshMedia: () => void;
   _unsub: (() => void) | null;
   _pending: Timeline | null; // a bus update deferred until a gesture ends
-  _index: IndexCoordinator | null; // per-project background proxy + transcript indexer
+  _index: IndexCoordinator | null; // per-project background preview proxy indexer
 
   /** Result: "loaded" (committed this project's store), "superseded" (a newer
    *  load took over -> leave the winner's state), or "failed" (build error). The
@@ -320,7 +320,7 @@ const editorCreator: StateCreator<EditorState> = (set, get) => {
       if (!store) return;
       void refreshMediaNames(store, () => get().projectId === pid, set);
       // Media that just landed was skipped by every earlier sweep (it had no file), so this is
-      // its first chance at a proxy and a transcript.
+      // its first chance at a proxy.
       void get()._index?.sweep(get().timeline);
     },
     _unsub: null,
@@ -392,7 +392,7 @@ const editorCreator: StateCreator<EditorState> = (set, get) => {
             set({ dirty: change.dirty ?? false });
             return;
           }
-          void index.sweep(tl); // agent/manual added or moved media -> proxy + transcript
+          void index.sweep(tl); // agent/manual added or moved media -> preview proxy
           const dirty = change.dirty ?? false;
           if (get().gestureActive) {
             set({ _pending: tl, dirty }); // don't clobber an in-progress drag
@@ -402,7 +402,7 @@ const editorCreator: StateCreator<EditorState> = (set, get) => {
         });
         // Media imported WITHOUT touching the timeline (file menu / FileTree / chat
         // attach / paste) fires "artdaddy:files-changed"; re-sweep so the new library
-        // asset gets its proxy + transcript right away instead of on the next reload.
+        // asset gets its proxy right away instead of on the next reload.
         const onFilesChanged = () => {
           if (get().projectId !== projectId) return;
           void index.sweep(get().timeline);

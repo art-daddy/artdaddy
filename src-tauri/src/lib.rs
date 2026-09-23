@@ -56,6 +56,7 @@ fn remove_file(path: String) -> Result<(), String> {
 #[derive(serde::Serialize)]
 pub struct MediaProbe {
   id12: String,
+  sha256: String,
   size: u64,
   head: Vec<u8>,
 }
@@ -118,8 +119,10 @@ fn probe_media_blocking(
     }
   }
   let digest = hasher.finalize();
+  let sha256 = digest.iter().map(|b| format!("{b:02x}")).collect::<String>();
   Ok(MediaProbe {
-    id12: digest.iter().map(|b| format!("{b:02x}")).collect::<String>()[..12].to_string(),
+    id12: sha256[..12].to_string(),
+    sha256,
     size,
     head,
   })
@@ -1220,4 +1223,3 @@ mod tests {
     assert!(super::clear_refresh_token_at(service, account).is_ok());
   }
 }
-

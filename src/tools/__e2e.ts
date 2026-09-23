@@ -5,7 +5,8 @@
 // NUMBERS (average RGB / luma via inspect_color, dB via volumedetect) so the
 // goldens stay stable across ffmpeg builds instead of pinning exact pixels.
 import { spawn } from "node:child_process";
-import { existsSync, promises as fsp } from "node:fs";
+import { createHash } from "node:crypto";
+import { createReadStream, existsSync, promises as fsp } from "node:fs";
 import path from "node:path";
 
 import type { CommandResult, CommandRunner } from "./command";
@@ -165,6 +166,32 @@ export const nodeFs: FsLike = {
   async writeBytes(p, bytes) {
     await fsp.mkdir(path.dirname(p), { recursive: true });
     await fsp.writeFile(p, bytes);
+  },
+  async appendBytes(p, bytes) {
+    await fsp.mkdir(path.dirname(p), { recursive: true });
+    await fsp.appendFile(p, bytes);
+  },
+  async stat(p) {
+    const s = await fsp.stat(p);
+    return { isDirectory: s.isDirectory(), size: s.size };
+  },
+  async probeMedia(p, headBytes) {
+    const hash = createHash("sha256");
+    const head = new Uint8Array(headBytes);
+    let headLength = 0;
+    let size = 0;
+    for await (const raw of createReadStream(p)) {
+      const chunk = raw as Buffer;
+      hash.update(chunk);
+      size += chunk.length;
+      if (headLength < headBytes) {
+        const take = Math.min(headBytes - headLength, chunk.length);
+        head.set(chunk.subarray(0, take), headLength);
+        headLength += take;
+      }
+    }
+    const sha256 = hash.digest("hex");
+    return { id12: sha256.slice(0, 12), sha256, size, head: head.slice(0, headLength) };
   },
   async rename(src, dst) {
     await fsp.mkdir(path.dirname(dst), { recursive: true });

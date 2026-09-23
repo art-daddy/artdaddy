@@ -11,7 +11,6 @@ import type { ProjectStoreAccess } from "./store";
 import { ProjectClosingError, type MutationOrigin } from "../project/MutationGate";
 import { openDocumentById } from "../project/openDocuments";
 import { isJobEffect, toolEffect } from "../contract/effects";
-import { warmWhisperModel } from "./transcribe";
 
 /** A tool runtime bound to ONE project. The agent runner captures the host for
  *  its project at turn start and routes every tool run + media read through it,
@@ -44,8 +43,8 @@ async function buildContext(
   const dir = await projectDirFor(projectId);
   const c = await tauri.makeTauriContext(dir);
   holder.ctx = c;
-  // Warm the transcription model + seed an (empty) timeline, best-effort.
-  void warmWhisperModel(c).catch(() => undefined);
+  // Seed an empty timeline, best-effort. The 465 MiB transcription model is deliberately
+  // downloaded only when the user asks for transcription/captions, never on project open.
   try {
     await ensureTimeline(c.store);
   } catch {

@@ -9,7 +9,6 @@ import { DEFAULT_CANVAS, emptyTimeline } from "../timeline/model";
 import { resolveCanvas } from "../timeline/canvas";
 import { setCanvasTool } from "../timeline/ops";
 import { projectAggregate } from "../timeline/aggregate";
-import { platform } from "../platform";
 import { BRAND, IDENTITY } from "../brand";
 import type { ClientToolContext } from "./context";
 import type { ClientToolRegistry } from "./registry";
@@ -27,7 +26,6 @@ import {
 } from "./store";
 import { runProjectMutation, withProjectLock } from "./coordinator";
 import type { MutationOrigin } from "../project/MutationGate";
-import { warmWhisperModel } from "./transcribe";
 import { isSafeProjectId } from "./dataRoot";
 
 type Result = Record<string, unknown>;
@@ -818,9 +816,6 @@ export async function newProjectTool(args: Args, ctx: ClientToolContext | null):
   }
   const { id, dir } = await reg.createProject(name, { width: w, height: h, fps }, model);
   await reg.register({ id, name, path: dir, lastOpenedAt: nowIso() }, true);
-  // Preload the whisper model in the background (desktop only) so the first
-  // transcribe is warm — mirrors the server's warm_whisper on session start.
-  if (platform.capabilities.localTools) void warmWhisperModel(ctx).catch(() => undefined);
   return {
     ok: true,
     id,

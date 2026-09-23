@@ -412,8 +412,7 @@ export function makeEditorCommands(
       });
     },
     processImport: async (relSource) => {
-      // Poster + preview proxy + transcript for a just-imported source, via the
-      // per-project indexer (proxies drain first, so the preview is ready fast).
+      // Poster + preview proxy for a just-imported source, via the per-project indexer.
       get()._index?.indexSource(relSource);
     },
     addTrack: async (kind) => {

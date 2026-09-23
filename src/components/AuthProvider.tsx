@@ -1,19 +1,17 @@
-// Non-blocking auth wrapper. It NEVER hides the editor: it restores a stored desktop-auth
-// session in the background, re-locks on a live 401, re-checks when the network returns.
-// The AI panel reads useAuth to enable/disable itself. (F11: gate the AI, not the app.)
+// Desktop auth wrapper. It restores a stored session in the background, re-locks only when
+// refresh proves the session is absent/invalid, and re-checks when the network returns.
 //
 // Clerk's own SDK cannot run inside this webview at all (its origin is neither the verified
 // web domain nor a browser Clerk trusts — see api/desktopAuth.ts), so sign-in happens in the
 // system browser at the real https://artdaddy.app/auth origin and hands a one-time code back
 // here via an `artdaddy://` deep link.
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 
 import {
   getAccessToken as getDesktopAccessToken,
   getUserId as getDesktopUserId,
   getUserEmail as getDesktopUserEmail,
   handleDeepLinkCallback,
-  hasStoredDesktopSession,
   refreshDesktopSession,
 } from "../api/desktopAuth";
 import { onAuthFailure, setClerkTokenProvider } from "../api/auth";
@@ -26,7 +24,20 @@ import SignInScreen from "./SignInScreen";
 export default function AuthProvider({ children }: { children: React.ReactNode }) {
   const status = useAuth((s) => s.status);
   const hasStoredSession = useAuth((s) => s.hasStoredSession);
+  const [restoreAttempt, setRestoreAttempt] = useState(0);
+  const [restoreUnavailable, setRestoreUnavailable] = useState(false);
   useEffect(() => {
+    const restoreDesktopSession = async (): Promise<void> => {
+      const result = await refreshDesktopSession();
+      if (result.status === "superseded") return;
+      if (result.hasStoredSession !== null) {
+        useAuth.getState().setStoredSession(result.hasStoredSession);
+      }
+      if (result.status === "refreshed") void useAuth.getState().verify();
+      else if (result.status === "missing" || result.status === "invalid")
+        useAuth.getState().markLocked();
+      else useAuth.getState().markOffline();
+    };
     // A rotated/revoked access token 401s a live call every 30 minutes (its own lifetime) —
     // that must not force a fresh sign-in while the 60-day refresh token is still good, so try
     // a silent refresh first and only lock if THAT also fails.
@@ -35,15 +46,14 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
         useAuth.getState().markLocked();
         return;
       }
-      void (async () => {
-        const restored = await refreshDesktopSession();
-        if (restored) void useAuth.getState().verify();
-        else useAuth.getState().markLocked();
-      })();
+      void restoreDesktopSession();
     });
-    // When the network returns, re-verify so AI re-enables without a manual click.
+    // An offline desktop process has no access token in memory. Refresh first when the network
+    // returns; calling verify() directly would send no bearer token and falsely lock the user.
     const onOnline = () => {
-      if (useAuth.getState().status !== "unlocked") void useAuth.getState().verify();
+      if (useAuth.getState().status === "unlocked") return;
+      if (platform.name === "tauri") void restoreDesktopSession();
+      else void useAuth.getState().verify();
     };
     window.addEventListener("online", onOnline);
     return () => {
@@ -59,22 +69,6 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
       return removeProvider;
     }
     let cancelled = false;
-    void (async () => {
-      // Try a stored session before touching the network gate, so a returning user isn't
-      // shown "locked" for the split second before the keychain read resolves.
-      await refreshDesktopSession();
-      if (cancelled) return;
-      // Read AFTER the refresh: a 401 there clears the token, and this is what decides
-      // whether an unreachable server locks the app or merely disables AI.
-      useAuth.getState().setStoredSession(await hasStoredDesktopSession());
-      if (cancelled) return;
-      void useAuth.getState().verify();
-      identifyUser(getDesktopUserId(), getDesktopUserEmail()); // so an issue names a real person
-      // Fired here rather than at startup: before the session restores there is nobody to
-      // attribute the launch to, and an unattributed launch answers none of the questions
-      // this marker exists for.
-      if (getDesktopUserId()) reportLaunchOnce();
-    })();
     let offDeepLink: (() => void) | undefined;
     void (async () => {
       const { getCurrent, onOpenUrl } = await import("@tauri-apps/plugin-deep-link");
@@ -82,6 +76,7 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
         for (const url of urls) {
           const result = await handleDeepLinkCallback(url);
           if (result.ok) {
+            useAuth.getState().setStoredSession(true);
             void useAuth.getState().verify();
             identifyUser(getDesktopUserId(), getDesktopUserEmail());
             if (getDesktopUserId()) reportLaunchOnce();
@@ -106,10 +101,81 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
     };
   }, []);
 
-  // A blank screen while the keychain + /auth/verify resolve, rather than flashing the
-  // sign-in screen at someone who is already signed in.
+  useEffect(() => {
+    if (platform.name !== "tauri") return;
+    let cancelled = false;
+    setRestoreUnavailable(false);
+    void (async () => {
+      let result = await refreshDesktopSession();
+      if (cancelled) return;
+      if (result.status === "superseded") {
+        result = await refreshDesktopSession();
+        if (cancelled) return;
+      }
+      if (result.hasStoredSession !== null) {
+        useAuth.getState().setStoredSession(result.hasStoredSession);
+      }
+      if (result.status === "superseded") {
+        setRestoreUnavailable(true);
+        return;
+      }
+      if (result.status === "unavailable" && result.hasStoredSession === null) {
+        setRestoreUnavailable(true);
+        return;
+      }
+      if (result.status === "unavailable") useAuth.getState().markOffline();
+      else if (result.status === "missing" || result.status === "invalid")
+        useAuth.getState().markLocked();
+      else void useAuth.getState().verify();
+      identifyUser(getDesktopUserId(), getDesktopUserEmail()); // so an issue names a real person
+      // Fired here rather than at startup: before the session restores there is nobody to
+      // attribute the launch to, and an unattributed launch answers none of the questions
+      // this marker exists for.
+      if (getDesktopUserId()) reportLaunchOnce();
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [restoreAttempt]);
+
+  useEffect(() => {
+    if (status !== "checking") return;
+    const timer = setTimeout(() => setRestoreUnavailable(true), 10_000);
+    return () => clearTimeout(timer);
+  }, [status, restoreAttempt]);
+
   if (authBypassed()) return <>{children}</>;
-  if (status === "checking") return <div className="h-full w-full bg-bg" />;
+  if (status === "checking")
+    return (
+      <div className="flex h-full w-full items-center justify-center bg-bg p-6 text-center">
+        <div>
+          <div className="text-lg font-semibold text-neutral-100">Starting ArtDaddy…</div>
+          <div className="mt-2 text-sm text-neutral-400">
+            {restoreUnavailable
+              ? "ArtDaddy couldn't read your saved session."
+              : "Restoring your saved session."}
+          </div>
+          {restoreUnavailable ? (
+            <div className="mt-5 flex justify-center gap-3">
+              <button
+                type="button"
+                className="rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-black"
+                onClick={() => setRestoreAttempt((attempt) => attempt + 1)}
+              >
+                Retry
+              </button>
+              <button
+                type="button"
+                className="rounded-lg border border-neutral-700 px-4 py-2 text-sm text-neutral-200"
+                onClick={() => useAuth.getState().markLocked()}
+              >
+                Sign in again
+              </button>
+            </div>
+          ) : null}
+        </div>
+      </div>
+    );
   if (isSignedOutGate({ status, hasStoredSession }))
     return <SignInScreen offline={status === "offline"} />;
   return <>{children}</>;

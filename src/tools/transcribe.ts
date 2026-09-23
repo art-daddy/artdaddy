@@ -4,14 +4,14 @@
 // whisper-cli emits token-level JSON, and we reshape it into the canonical
 // transcript schema that the rest of the pipeline reads. Each media file has a
 // deterministic transcript path, so get_transcript returns an existing
-// transcript instead of re-transcribing, and library indexing pre-builds it.
-// The ggml model is lazy-downloaded into app-data and warmed on every project
-// load (open or create) via warmWhisperModel.
+// transcript instead of re-transcribing, so explicit callers share one cache.
+// The ggml model is downloaded into app-data only when transcription is requested.
 import { stderrExcerpt } from "./command";
 import type { ClientToolContext } from "./context";
 import { shortHash } from "./media";
 import type { ClientToolRegistry } from "./registry";
 import { joinPath } from "./store";
+import { beginSessionActivity } from "../observability/crashWatch";
 import { loadTimeline } from "../timeline/engine";
 import { findClip } from "../timeline/helpers";
 import type { Clip } from "../timeline/model";
@@ -20,10 +20,24 @@ type Result = Record<string, unknown>;
 type Args = Record<string, unknown>;
 const NOT_READY: Result = { ok: false, error: "client tool runtime not ready" };
 // Fixed transcription model. `get_transcript` does NOT expose model selection —
-// everything (the tool, inspect_media, and the background indexer) uses this one
+// everything (the tool, inspect_media, and captions) uses this one
 // model so the model can never downgrade to base/tiny or pick an inconsistent one.
 const DEFAULT_MODEL = "small";
-const HF_BASE = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
+const HF_BASE = "https://huggingface.co/ggerganov/whisper.cpp/resolve";
+
+export interface WhisperModelSpec {
+  revision: string;
+  bytes: number;
+  sha256: string;
+}
+
+export const WHISPER_MODELS: Readonly<Record<string, WhisperModelSpec>> = {
+  small: {
+    revision: "5359861c739e955e79d9a303bcbc70fb988958b1",
+    bytes: 487_601_967,
+    sha256: "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
+  },
+};
 
 function normSep(p: string): string {
   return p.replace(/\\/g, "/");
@@ -200,37 +214,125 @@ export function parseWhisperCppJson(raw: string): ParsedTranscript {
   return { language, duration_seconds: maxEndMs / 1000, segments, words };
 }
 
-/** Ensure the ggml model is present in app-data, downloading it on first use.
- *  Returns the local model path. Injectable fetch for tests. */
+const modelDownloads = new Map<string, Promise<{ path: string; downloaded: boolean }>>();
+
+async function validModel(
+  ctx: ClientToolContext,
+  path: string,
+  spec: WhisperModelSpec,
+): Promise<boolean> {
+  if (!(await ctx.store.exists(path))) return false;
+  const size = await ctx.store.byteSize(path);
+  if (size !== spec.bytes) return false;
+  const marker = `${path}.verified.json`;
+  if (await ctx.store.exists(marker)) {
+    try {
+      const verified = JSON.parse(await ctx.store.readText(marker)) as {
+        bytes?: number;
+        sha256?: string;
+      };
+      if (verified.bytes === spec.bytes && verified.sha256 === spec.sha256) {
+        return true;
+      }
+    } catch {
+      /* stale/corrupt marker: verify the real file below */
+    }
+  }
+  const probe = await ctx.store.probeMedia(path, 0);
+  if (!probe || probe.size !== spec.bytes || probe.sha256 !== spec.sha256) return false;
+  await ctx.store.writeText(marker, JSON.stringify({ bytes: spec.bytes, sha256: spec.sha256 }));
+  return true;
+}
+
+/** Ensure the pinned ggml model is present in app-data. The response is streamed into a
+ * temporary sibling, verified natively, and atomically promoted, so the webview never holds
+ * the 465 MiB model and an interrupted download is never mistaken for a complete cache hit. */
 export async function ensureWhisperModel(
   ctx: ClientToolContext,
   size: string = DEFAULT_MODEL,
   fetchImpl: typeof fetch = globalThis.fetch,
+  injectedSpec?: WhisperModelSpec,
 ): Promise<{ path: string; downloaded: boolean }> {
+  const spec = injectedSpec ?? WHISPER_MODELS[size];
+  if (!spec) throw new Error(`unsupported whisper model '${size}'`);
   const path = whisperModelPath(ctx.store.projectDir, size);
-  if (await ctx.store.exists(path)) return { path, downloaded: false };
+  if (await validModel(ctx, path, spec)) return { path, downloaded: false };
   if (!fetchImpl) throw new Error("no network available to download the whisper model");
-  const url = `${HF_BASE}/ggml-${size}.bin`;
-  const resp = await fetchImpl(url);
-  if (!resp.ok) throw new Error(`whisper model download failed: HTTP ${resp.status}`);
-  const bytes = new Uint8Array(await resp.arrayBuffer());
-  if (bytes.length === 0) throw new Error("whisper model download was empty");
-  await ctx.store.writeBytes(path, bytes);
-  return { path, downloaded: true };
-}
-
-/** Best-effort model preload for a fresh project (fire-and-forget). No-op when
- *  the fs can't write bytes (web / unit tests) so it never hits the network. */
-export async function warmWhisperModel(
-  ctx: ClientToolContext,
-  size: string = DEFAULT_MODEL,
-): Promise<void> {
-  if (!ctx.store.canWriteBytes) return;
-  try {
-    await ensureWhisperModel(ctx, size);
-  } catch {
-    /* best-effort warm; the first transcribe will retry the download */
+  if (!ctx.store.canStreamDownload) {
+    throw new Error("this platform cannot stream and atomically install the whisper model");
   }
+  const key = `${path}\u0000${spec.sha256}`;
+  const existing = modelDownloads.get(key);
+  if (existing) return existing;
+
+  const started = (async () => {
+    const tmp = `${path}.download.part`;
+    const marker = `${path}.verified.json`;
+    let committed = false;
+    const finishActivity = beginSessionActivity("whisper-model-download");
+    await ctx.store.remove(tmp).catch(() => undefined);
+    try {
+      const url = `${HF_BASE}/${spec.revision}/ggml-${size}.bin`;
+      const resp = await fetchImpl(url, { signal: ctx.signal });
+      if (!resp.ok) throw new Error(`whisper model download failed: HTTP ${resp.status}`);
+      if (!resp.body) throw new Error("whisper model download cannot be streamed");
+      const declaredHeader = resp.headers.get("content-length");
+      const declared = declaredHeader === null ? null : Number(declaredHeader);
+      if (declared !== null && Number.isFinite(declared) && declared !== spec.bytes) {
+        throw new Error(
+          `whisper model size mismatch: expected ${spec.bytes}, server sent ${declared}`,
+        );
+      }
+
+      const reader = resp.body.getReader();
+      let received = 0;
+      let completed = false;
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (ctx.signal?.aborted) throw new Error("transcription cancelled");
+          received += value.length;
+          if (received > spec.bytes) {
+            throw new Error(`whisper model exceeded expected size ${spec.bytes}`);
+          }
+          if (!(await ctx.store.appendBytes(tmp, value))) {
+            if (ctx.signal?.aborted) throw new Error("transcription cancelled");
+            throw new Error("whisper model download stopped before it could be written");
+          }
+        }
+        completed = true;
+      } finally {
+        if (!completed) await reader.cancel().catch(() => undefined);
+        reader.releaseLock();
+      }
+      if (ctx.signal?.aborted) throw new Error("transcription cancelled");
+      if (received !== spec.bytes) {
+        throw new Error(
+          `whisper model was incomplete: expected ${spec.bytes}, received ${received}`,
+        );
+      }
+      const probe = await ctx.store.probeMedia(tmp, 0);
+      if (!probe || probe.size !== spec.bytes || probe.sha256 !== spec.sha256) {
+        throw new Error("whisper model failed checksum validation");
+      }
+      if (ctx.signal?.aborted) throw new Error("transcription cancelled");
+      if (await ctx.store.exists(path)) await ctx.store.remove(path);
+      await ctx.store.remove(marker).catch(() => undefined);
+      await ctx.store.rename(tmp, path);
+      committed = true;
+      await ctx.store
+        .writeText(marker, JSON.stringify({ bytes: spec.bytes, sha256: spec.sha256 }))
+        .catch(() => undefined);
+      return { path, downloaded: true };
+    } finally {
+      if (!committed) await ctx.store.remove(tmp).catch(() => undefined);
+      finishActivity();
+    }
+  })().finally(() => modelDownloads.delete(key));
+
+  modelDownloads.set(key, started);
+  return started;
 }
 
 /** Run the whisper pipeline (ensure model -> ffmpeg 16 kHz mono WAV -> whisper-cli
@@ -352,6 +454,7 @@ export async function runWhisper(
     try {
       model = (await ensureWhisperModel(ctx, size)).path;
     } catch (e) {
+      if (ctx.signal?.aborted) throw new Error("transcription cancelled");
       throw new Error(`whisper model '${size}' unavailable: ${String(e)}`);
     }
     const wav = await ensureWav(ctx, src);
@@ -453,7 +556,7 @@ function parsedFromPayload(raw: string): ParsedTranscript {
  *  EXISTING transcript when present (no re-transcription); otherwise runs whisper
  *  and writes `transcripts/<hash(ref|size)>.json`. This deterministic path is the
  *  link between a media file and its transcript — any tool can recompute it, and
- *  library indexing pre-builds it. `outRel` overrides the canonical location. */
+ *  explicit callers share it. `outRel` overrides the canonical location. */
 export async function ensureTranscript(
   ctx: ClientToolContext,
   ref: string,

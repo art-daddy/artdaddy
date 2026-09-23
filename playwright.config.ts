@@ -39,7 +39,14 @@ export default defineConfig({
     // The closest thing to macOS without a Mac: WKWebView is WebKit, and this build runs on
     // Windows. It does NOT cover Metal-backed WebGL or the Tauri shell, but it does cover the
     // engine-level differences (CSS, layout, JS APIs) that a Chromium-only lane cannot see.
-    { name: "webkit", use: { ...devices["Desktop Safari"] } },
+    {
+      name: "webkit",
+      use: { ...devices["Desktop Safari"] },
+      // Playwright's Windows WebKit build exposes no WebGL2 context, so the GPU probe pages
+      // cannot initialize there. Keep WebKit on boot/layout/input/OS-drop; Chromium covers the
+      // real WebGL2 pixel suite, and macOS CI/runtime covers the actual WKWebView + Metal path.
+      testIgnore: ["preview.spec.ts", "chromaKey.spec.ts"],
+    },
   ],
   webServer: {
     // A dedicated port so the lane never collides with a dev server the user has open.

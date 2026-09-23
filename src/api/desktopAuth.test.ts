@@ -304,8 +304,8 @@ describe("refreshDesktopSession", () => {
   it("reports no session and never calls the backend when nothing is stored in the keychain", async () => {
     invoke.mockResolvedValue(null); // load_refresh_token: nothing stored
     const { refreshDesktopSession } = await importFresh();
-    const ok = await refreshDesktopSession();
-    expect(ok).toBe(false);
+    const result = await refreshDesktopSession();
+    expect(result).toEqual({ status: "missing", hasStoredSession: false });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -315,8 +315,8 @@ describe("refreshDesktopSession", () => {
     );
     fetchMock.mockResolvedValue(jsonResponse(401, { error: "revoked" }));
     const { refreshDesktopSession } = await importFresh();
-    const ok = await refreshDesktopSession();
-    expect(ok).toBe(false);
+    const result = await refreshDesktopSession();
+    expect(result).toEqual({ status: "invalid", hasStoredSession: false });
     expect(invoke).toHaveBeenCalledWith("clear_refresh_token", undefined);
   });
 
@@ -328,10 +328,104 @@ describe("refreshDesktopSession", () => {
       jsonResponse(200, { access_token: "at2", refresh_token: "new-rt", expires_in: 900 }),
     );
     const { refreshDesktopSession, getAccessToken } = await importFresh();
-    const ok = await refreshDesktopSession();
-    expect(ok).toBe(true);
+    const result = await refreshDesktopSession();
+    expect(result).toEqual({ status: "refreshed", hasStoredSession: true });
     expect(getAccessToken()).toBe("at2");
     expect(invoke).toHaveBeenCalledWith("store_refresh_token", { token: "new-rt" });
+  });
+
+  it("joins concurrent refreshes so a rotating token is submitted and stored exactly once", async () => {
+    invoke.mockImplementation(async (cmd: string) =>
+      cmd === "load_refresh_token" ? "one-time-rt" : undefined,
+    );
+    let answer!: (value: ReturnType<typeof jsonResponse>) => void;
+    fetchMock.mockReturnValue(
+      new Promise((resolve) => {
+        answer = resolve;
+      }),
+    );
+    const { refreshDesktopSession } = await importFresh();
+
+    const first = refreshDesktopSession();
+    const second = refreshDesktopSession();
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    answer(jsonResponse(200, { access_token: "at2", refresh_token: "new-rt" }));
+
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      { status: "refreshed", hasStoredSession: true },
+      { status: "refreshed", hasStoredSession: true },
+    ]);
+    expect(invoke.mock.calls.filter(([cmd]) => cmd === "load_refresh_token")).toHaveLength(1);
+    expect(invoke.mock.calls.filter(([cmd]) => cmd === "store_refresh_token")).toHaveLength(1);
+  });
+
+  it("does not clear a new deep-link session when an older refresh later returns 401", async () => {
+    let stored: string | null = "stale-rt";
+    invoke.mockImplementation(async (cmd: string, args?: { token?: string }) => {
+      if (cmd === "load_refresh_token") return stored;
+      if (cmd === "store_refresh_token") stored = args?.token ?? null;
+      if (cmd === "clear_refresh_token") stored = null;
+      if (cmd === "open_desktop_auth") return undefined;
+      return undefined;
+    });
+    let answerRefresh!: (value: ReturnType<typeof jsonResponse>) => void;
+    fetchMock
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          answerRefresh = resolve;
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, { access_token: "signed-in-at", refresh_token: "signed-in-rt" }),
+      );
+    const { refreshDesktopSession, startDesktopSignIn, handleDeepLinkCallback, getAccessToken } =
+      await importFresh();
+
+    const refreshing = refreshDesktopSession();
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    await startDesktopSignIn();
+    const state = new URL(
+      invoke.mock.calls.find(([cmd]) => cmd === "open_desktop_auth")![1].url,
+    ).searchParams.get("state")!;
+    await expect(
+      handleDeepLinkCallback(`artdaddy://auth/callback?code=fresh&state=${state}`),
+    ).resolves.toEqual({ ok: true });
+    answerRefresh(jsonResponse(401, { error: "stale" }));
+
+    await expect(refreshing).resolves.toEqual({
+      status: "superseded",
+      hasStoredSession: null,
+    });
+    expect(stored).toBe("signed-in-rt");
+    expect(getAccessToken()).toBe("signed-in-at");
+  });
+
+  it("does not clear a refresh token changed by another writer before a 401 arrives", async () => {
+    let stored: string | null = "submitted-rt";
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "load_refresh_token") return stored;
+      if (cmd === "clear_refresh_token") stored = null;
+      return undefined;
+    });
+    let answer!: (value: ReturnType<typeof jsonResponse>) => void;
+    fetchMock.mockReturnValue(
+      new Promise((resolve) => {
+        answer = resolve;
+      }),
+    );
+    const { refreshDesktopSession } = await importFresh();
+
+    const refreshing = refreshDesktopSession();
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    stored = "other-writer-rt";
+    answer(jsonResponse(401, { error: "submitted token was stale" }));
+
+    await expect(refreshing).resolves.toEqual({
+      status: "unavailable",
+      hasStoredSession: true,
+    });
+    expect(stored).toBe("other-writer-rt");
+    expect(invoke).not.toHaveBeenCalledWith("clear_refresh_token", undefined);
   });
 
   it("does NOT clear the refresh token on a transient backend outage (503) -- only a definitive 401 justifies that", async () => {
@@ -340,8 +434,8 @@ describe("refreshDesktopSession", () => {
     );
     fetchMock.mockResolvedValue(jsonResponse(503, { error: "unavailable" }));
     const { refreshDesktopSession, getAccessToken } = await importFresh();
-    const ok = await refreshDesktopSession();
-    expect(ok).toBe(false);
+    const result = await refreshDesktopSession();
+    expect(result).toEqual({ status: "unavailable", hasStoredSession: true });
     expect(getAccessToken()).toBeNull();
     expect(invoke).not.toHaveBeenCalledWith("clear_refresh_token", undefined);
   });
@@ -352,8 +446,8 @@ describe("refreshDesktopSession", () => {
     );
     fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
     const { refreshDesktopSession } = await importFresh();
-    const ok = await refreshDesktopSession();
-    expect(ok).toBe(false);
+    const result = await refreshDesktopSession();
+    expect(result).toEqual({ status: "unavailable", hasStoredSession: true });
     expect(invoke).not.toHaveBeenCalledWith("clear_refresh_token", undefined);
   });
 
@@ -367,8 +461,8 @@ describe("refreshDesktopSession", () => {
       jsonResponse(200, { access_token: "at2", refresh_token: "new-rt", expires_in: 900 }),
     );
     const { refreshDesktopSession, getAccessToken } = await importFresh();
-    const ok = await refreshDesktopSession();
-    expect(ok).toBe(false);
+    const result = await refreshDesktopSession();
+    expect(result).toEqual({ status: "unavailable", hasStoredSession: true });
     expect(getAccessToken()).toBeNull();
   });
 });
@@ -389,5 +483,81 @@ describe("signOutDesktop", () => {
     await signOutDesktop();
     expect(getAccessToken()).toBeNull();
     expect(invoke).toHaveBeenCalledWith("clear_refresh_token", undefined);
+  });
+
+  it("wins over a refresh whose keychain write was already in flight", async () => {
+    let releaseStore!: () => void;
+    const storeBlocked = new Promise<void>((resolve) => {
+      releaseStore = resolve;
+    });
+    let stored: string | null = "old-rt";
+    invoke.mockImplementation(async (cmd: string, args?: { token?: string }) => {
+      if (cmd === "load_refresh_token") return stored;
+      if (cmd === "store_refresh_token") {
+        await storeBlocked;
+        stored = args?.token ?? null;
+      }
+      if (cmd === "clear_refresh_token") stored = null;
+      return undefined;
+    });
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, { access_token: "at2", refresh_token: "new-rt" }),
+    );
+    const { refreshDesktopSession, signOutDesktop, getAccessToken } = await importFresh();
+
+    const refreshing = refreshDesktopSession();
+    await vi.waitFor(() =>
+      expect(invoke.mock.calls.some(([cmd]) => cmd === "store_refresh_token")).toBe(true),
+    );
+    const signingOut = signOutDesktop();
+    releaseStore();
+
+    await expect(refreshing).resolves.toEqual({ status: "superseded", hasStoredSession: null });
+    await signingOut;
+    expect(getAccessToken()).toBeNull();
+    expect(stored).toBeNull();
+  });
+
+  it("blocks a new refresh that starts after sign-out begins", async () => {
+    let releaseClear!: () => void;
+    const clearBlocked = new Promise<void>((resolve) => {
+      releaseClear = resolve;
+    });
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "load_refresh_token") return "old-rt";
+      if (cmd === "clear_refresh_token") await clearBlocked;
+      return undefined;
+    });
+    fetchMock.mockResolvedValue(jsonResponse(200, {}));
+    const { refreshDesktopSession, signOutDesktop } = await importFresh();
+
+    const signingOut = signOutDesktop();
+    await vi.waitFor(() =>
+      expect(invoke.mock.calls.some(([cmd]) => cmd === "clear_refresh_token")).toBe(true),
+    );
+    await expect(refreshDesktopSession()).resolves.toEqual({
+      status: "missing",
+      hasStoredSession: false,
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+    releaseClear();
+    await signingOut;
+  });
+
+  it("keeps refresh blocked when the OS refuses to open a new sign-in attempt", async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "load_refresh_token") return "old-rt";
+      if (cmd === "open_desktop_auth") throw new Error("browser unavailable");
+      return undefined;
+    });
+    fetchMock.mockResolvedValue(jsonResponse(200, {}));
+    const { signOutDesktop, startDesktopSignIn, refreshDesktopSession } = await importFresh();
+
+    await signOutDesktop();
+    await expect(startDesktopSignIn()).resolves.toMatchObject({ ok: false });
+    await expect(refreshDesktopSession()).resolves.toEqual({
+      status: "missing",
+      hasStoredSession: false,
+    });
   });
 });
