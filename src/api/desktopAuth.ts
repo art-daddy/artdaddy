@@ -236,7 +236,7 @@ async function commitTokens(
                 );
               }
             } else {
-              await withTimeout(invoke("clear_refresh_token"), KEYCHAIN_TIMEOUT_MS);
+              await withTimeout(invoke("clear_refresh_token", undefined), KEYCHAIN_TIMEOUT_MS);
             }
           }),
         )
@@ -362,7 +362,7 @@ async function refreshDesktopSessionOnce(
           KEYCHAIN_TIMEOUT_MS,
         );
         if (current !== stored) return false;
-        await withTimeout(invoke("clear_refresh_token"), KEYCHAIN_TIMEOUT_MS);
+        await withTimeout(invoke("clear_refresh_token", undefined), KEYCHAIN_TIMEOUT_MS);
         accessToken = null;
         desiredRefreshToken = null;
         return true;
@@ -413,7 +413,7 @@ export async function signOutDesktop(): Promise<void> {
     }
     accessToken = null;
     try {
-      await withTimeout(invoke("clear_refresh_token"), KEYCHAIN_TIMEOUT_MS);
+      await withTimeout(invoke("clear_refresh_token", undefined), KEYCHAIN_TIMEOUT_MS);
     } catch {
       // The in-memory session is still gone and the native delete may complete late.
     }

@@ -1,6 +1,8 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { DesktopSessionRefresh } from "../api/desktopAuth";
+
 const mocks = vi.hoisted(() => {
   const removeTokenProvider = vi.fn();
   return {
@@ -15,9 +17,9 @@ const mocks = vi.hoisted(() => {
     offAuth: vi.fn(),
     userId: null as string | null,
     userEmail: null as string | null,
-    refreshDesktopSession: vi.fn(async () => ({
-      status: "missing" as const,
-      hasStoredSession: false as const,
+    refreshDesktopSession: vi.fn(async (): Promise<DesktopSessionRefresh> => ({
+      status: "refreshed",
+      hasStoredSession: true,
     })),
     handleDeepLinkCallback: vi.fn(async () => ({ ok: true }) as { ok: boolean }),
     getAccessToken: vi.fn(() => null as string | null),
@@ -98,8 +100,8 @@ afterEach(() => {
   mocks.startUrls = null;
   mocks.platformName = "tauri";
   mocks.refreshDesktopSession.mockReset().mockResolvedValue({
-    status: "missing",
-    hasStoredSession: false,
+    status: "refreshed",
+    hasStoredSession: true,
   });
   mocks.handleDeepLinkCallback.mockReset().mockResolvedValue({ ok: true });
   mocks.getAccessToken.mockReset().mockReturnValue(null);
@@ -312,10 +314,6 @@ describe("AuthProvider", () => {
   });
 
   it("locks the AI on a live auth failure ONLY once a silent refresh also fails, and removes every listener on unmount", async () => {
-    mocks.refreshDesktopSession.mockResolvedValue({
-      status: "invalid",
-      hasStoredSession: false,
-    });
     const { unmount } = render(
       <AuthProvider>
         <span>x</span>
@@ -323,6 +321,10 @@ describe("AuthProvider", () => {
     );
     await waitFor(() => expect(mocks.verify).toHaveBeenCalled()); // let the boot-time restore settle first
     mocks.refreshDesktopSession.mockClear();
+    mocks.refreshDesktopSession.mockResolvedValue({
+      status: "invalid",
+      hasStoredSession: false,
+    });
     mocks.markLocked.mockClear();
     mocks.authFailureCb?.();
     await waitFor(() => expect(mocks.markLocked).toHaveBeenCalledOnce());
@@ -363,6 +365,7 @@ describe("AuthProvider", () => {
     await waitFor(() => expect(mocks.verify).toHaveBeenCalled());
     mocks.markLocked.mockClear();
     mocks.markOffline.mockClear();
+    mocks.refreshDesktopSession.mockClear();
     mocks.refreshDesktopSession.mockResolvedValue({
       status: "unavailable",
       hasStoredSession: true,

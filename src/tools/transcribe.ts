@@ -215,7 +215,6 @@ export function parseWhisperCppJson(raw: string): ParsedTranscript {
 }
 
 const modelDownloads = new Map<string, Promise<{ path: string; downloaded: boolean }>>();
-const validatedModels = new Set<string>();
 
 async function validModel(
   ctx: ClientToolContext,
@@ -223,8 +222,6 @@ async function validModel(
   spec: WhisperModelSpec,
 ): Promise<boolean> {
   if (!(await ctx.store.exists(path))) return false;
-  const key = `${path}\u0000${spec.sha256}`;
-  if (validatedModels.has(key)) return true;
   const size = await ctx.store.byteSize(path);
   if (size !== spec.bytes) return false;
   const marker = `${path}.verified.json`;
@@ -235,7 +232,6 @@ async function validModel(
         sha256?: string;
       };
       if (verified.bytes === spec.bytes && verified.sha256 === spec.sha256) {
-        validatedModels.add(key);
         return true;
       }
     } catch {
@@ -245,7 +241,6 @@ async function validModel(
   const probe = await ctx.store.probeMedia(path, 0);
   if (!probe || probe.size !== spec.bytes || probe.sha256 !== spec.sha256) return false;
   await ctx.store.writeText(marker, JSON.stringify({ bytes: spec.bytes, sha256: spec.sha256 }));
-  validatedModels.add(key);
   return true;
 }
 
@@ -329,7 +324,6 @@ export async function ensureWhisperModel(
       await ctx.store
         .writeText(marker, JSON.stringify({ bytes: spec.bytes, sha256: spec.sha256 }))
         .catch(() => undefined);
-      validatedModels.add(key);
       return { path, downloaded: true };
     } finally {
       if (!committed) await ctx.store.remove(tmp).catch(() => undefined);
