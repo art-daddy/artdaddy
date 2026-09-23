@@ -41,6 +41,13 @@ describe("useAuth", () => {
     useAuth.getState().markLocked();
     expect(useAuth.getState().status).toBe("locked");
   });
+
+  it("markOffline preserves the stored identity while disabling online features", () => {
+    useAuth.setState({ status: "unlocked", hasStoredSession: true });
+    useAuth.getState().markOffline();
+    expect(useAuth.getState()).toMatchObject({ status: "offline", hasStoredSession: true });
+    expect(mockClear).not.toHaveBeenCalled();
+  });
 });
 
 // The balance belongs to the identity. Before this, the meter only refreshed on
