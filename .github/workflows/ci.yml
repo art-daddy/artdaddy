@@ -46,7 +46,7 @@ jobs:
       # Installed with --no-save so the committed lockfile stays authoritative for
       # the app itself; move it into devDependencies once it earns a place there.
       - run: npm i --no-save @playwright/test@1.49.1
-      - run: npx playwright install --with-deps chromium
+      - run: npx playwright install --with-deps chromium webkit
       - run: npm run e2e:ui
 
   desktop:

@@ -162,6 +162,7 @@ async function fetchFfmpeg() {
 const WHISPER_VULKAN_REPO = process.env.ARTDADDY_WHISPER_VULKAN_REPO ?? "art-daddy/artdaddy";
 const WHISPER_VULKAN_TAG = "whisper-vulkan-v1.9.2-sdk1.4.357.0";
 const WHISPER_VULKAN_ASSET = "whisper-vulkan-win-x64.zip";
+const WHISPER_UPSTREAM_TAG = "v1.9.2";
 
 /** Download a release asset from this (PRIVATE) repo via the gh CLI, which already holds the
  *  developer's credentials — a plain HTTPS GET 404s on a private release.
@@ -220,7 +221,7 @@ async function fetchWhisper() {
     );
     extract(
       await download(
-        "https://github.com/ggml-org/whisper.cpp/releases/latest/download/whisper-bin-x64.zip",
+        `https://github.com/ggml-org/whisper.cpp/releases/download/${WHISPER_UPSTREAM_TAG}/whisper-bin-x64.zip`,
         join(tmp, "whisper.zip"),
       ),
       out,

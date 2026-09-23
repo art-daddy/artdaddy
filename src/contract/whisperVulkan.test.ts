@@ -59,6 +59,10 @@ describe("whisper Vulkan sidecar: workflow <-> fetch-sidecars", () => {
       "fetch-sidecars.mjs asks for a release tag the workflow does not publish — it will " +
         "silently fall back to the CPU-only build",
     ).toBe(expected);
+    expect(
+      constant("WHISPER_UPSTREAM_TAG"),
+      "the CPU fallback must use the same pinned whisper.cpp release; `latest` may publish no binaries",
+    ).toBe(inputDefault("whisper_ref"));
   });
 
   it("names the asset the workflow will actually attach", () => {
