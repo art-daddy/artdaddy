@@ -73,6 +73,8 @@ jobs:
         run: npm run fetch:sidecars
       - name: build node sidecar
         run: npm run build:sidecar
+      - name: build MCP bundle
+        run: npm run build:mcpb
       - name: bundle browser resources
         run: npm run bundle:browser
       # Reliable core gate: compiles the Rust shell AND validates tauri.conf.json +
