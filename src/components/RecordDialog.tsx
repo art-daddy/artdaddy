@@ -80,7 +80,7 @@ export default function RecordDialog({
         const media = navigator.mediaDevices;
         if (!media?.getUserMedia || typeof MediaRecorder === "undefined") {
           throw new Error(
-            "Camera recording is unavailable in this window. Use the installed app or a supported browser.",
+            "Camera recording is unavailable in this window. Install the latest ArtDaddy release or use a supported browser.",
           );
         }
         const stream = await media.getUserMedia({
