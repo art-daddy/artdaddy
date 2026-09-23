@@ -40,12 +40,23 @@ jobs:
       - name: Build unsigned NSIS installer
         shell: pwsh
         run: |
-          # The updater public key in tauri.conf.json normally requires a private key so Tauri
-          # can create updater signatures. No private-key secret is configured in this repo.
-          # Disable updater artifacts for this manual installer build; do not pretend it can
-          # auto-update. Authenticode signing is likewise not configured yet.
-          $env:TAURI_CONFIG = '{"bundle":{"createUpdaterArtifacts":false}}'
-          npx tauri build --bundles nsis
+          # Tauri writes the complete NSIS installer before it attempts updater signing. This
+          # repository has the updater PUBLIC key but no private-key secret, so that final signing
+          # phase exits 1 after the usable installer already exists. Accept only that exact failure
+          # and only when one substantial installer was produced; every earlier build/bundle error
+          # still fails this step.
+          & npx tauri build --bundles nsis 2>&1 | Tee-Object -Variable buildLog
+          $buildExit = $LASTEXITCODE
+          if ($buildExit -ne 0) {
+            $files = @(Get-ChildItem "src-tauri/target/release/bundle/nsis/*.exe" -ErrorAction SilentlyContinue)
+            $expectedSigningFailure = (($buildLog -join "`n") -match "public key.*no private key")
+            $completeInstaller = $files.Count -eq 1 -and $files[0].Length -ge 100MB
+            if ($expectedSigningFailure -and $completeInstaller) {
+              Write-Host "::warning::updater signing is unavailable; continuing with the complete unsigned NSIS installer"
+              exit 0
+            }
+            exit $buildExit
+          }
 
       - name: Verify installer and production configuration
         id: verify
