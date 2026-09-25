@@ -10,10 +10,17 @@ import { authHeaders } from "./auth";
 import { platform } from "../platform";
 import { hostInfo, resolveHostInfo } from "../platform/host";
 
-export type AppEvent = "launch" | "project_opened" | "heartbeat";
+export type AppEvent =
+  "launch" | "project_opened" | "heartbeat" | "media_import" | "app_error" | "credits_exhausted";
+
+interface AppEventDetail {
+  projectId?: string;
+  ok?: boolean;
+  reason?: string;
+}
 
 /** Report one marker. Never throws and never blocks: this is a beacon, not a feature. */
-export async function reportAppEvent(event: AppEvent, projectId = ""): Promise<void> {
+export async function reportAppEvent(event: AppEvent, detail: AppEventDetail = {}): Promise<void> {
   try {
     // The authoritative OS needs an IPC round-trip; a launch beacon would otherwise race it
     // and report the user-agent's guess, which is the thing it exists to replace.
@@ -33,7 +40,9 @@ export async function reportAppEvent(event: AppEvent, projectId = ""): Promise<v
         arch,
         app_version: __ARTDADDY_RELEASE__,
         shell: platform.name,
-        project_id: projectId,
+        project_id: detail.projectId ?? "",
+        ...(detail.ok === undefined ? {} : { ok: detail.ok }),
+        ...(detail.reason ? { reason: detail.reason.slice(0, 300) } : {}),
       }),
       signal: AbortSignal.timeout(10_000),
     });
@@ -56,13 +65,52 @@ export function reportLaunchOnce(): void {
 export function reportProjectOpened(projectId: string): void {
   if (!projectId || openedProjects.has(projectId)) return;
   openedProjects.add(projectId);
-  void reportAppEvent("project_opened", projectId);
+  void reportAppEvent("project_opened", { projectId });
+}
+
+// Getting footage in is the first thing everyone does, and the dimension guard genuinely
+// refuses some files. A refusal ends the session before a prompt ever exists, so the trace
+// simply stops -- indistinguishable from walking away.
+//
+// Failures are always reported; successes only the FIRST time per project. A hundred-file
+// import would otherwise spend the whole per-user beacon budget on one answer we already have.
+const importedProjects = new Set<string>();
+
+export function reportMediaImport(ok: boolean, projectId = "", reason = ""): void {
+  if (ok) {
+    if (importedProjects.has(projectId)) return;
+    importedProjects.add(projectId);
+  }
+  void reportAppEvent("media_import", { projectId, ok, reason });
+}
+
+/** A crash leaves no event by definition, which is what makes it the likeliest silent exit. */
+export function reportAppError(reason: string, projectId = ""): void {
+  if (!reason) return;
+  void reportAppEvent("app_error", { projectId, ok: false, reason });
+}
+
+// Reported once per over-limit transition, not per refusal: a shot list produces a run of
+// identical 402s, and counting those would say a wall was hit twenty times when it was hit once.
+let reportedExhausted = false;
+
+export function reportCreditsExhausted(reason = ""): void {
+  if (reportedExhausted) return;
+  reportedExhausted = true;
+  void reportAppEvent("credits_exhausted", { ok: false, reason });
+}
+
+/** Called when usage drops back under the limit, so a later wall is reported again. */
+export function resetCreditsExhausted(): void {
+  reportedExhausted = false;
 }
 
 /** Tests only. */
 export function __resetAppEvents(): void {
   launched = false;
   openedProjects.clear();
+  importedProjects.clear();
+  reportedExhausted = false;
   stopHeartbeat();
 }
 
@@ -78,7 +126,7 @@ let beat: ReturnType<typeof setInterval> | null = null;
 export function startHeartbeat(projectId: string): void {
   stopHeartbeat();
   if (!projectId) return;
-  beat = setInterval(() => void reportAppEvent("heartbeat", projectId), HEARTBEAT_MS);
+  beat = setInterval(() => void reportAppEvent("heartbeat", { projectId }), HEARTBEAT_MS);
   // Node/Tauri only: a bare interval would hold the process open at shutdown.
   (beat as { unref?: () => void }).unref?.();
 }

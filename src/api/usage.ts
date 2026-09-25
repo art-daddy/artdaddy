@@ -73,6 +73,7 @@ export function markOverLimit(detail: unknown): void {
   const d = (detail && typeof detail === "object" ? detail : {}) as {
     used?: number;
     limit?: number;
+    scope?: string;
   };
   set({
     metered: true,
@@ -81,12 +82,25 @@ export function markOverLimit(detail: unknown): void {
     limit: Number(d.limit ?? state.limit),
     remaining: 0,
   });
+  // Reported HERE rather than at the three 402 call sites: ai.ts and both agent round senders
+  // all funnel through this, so one of them growing a fourth caller cannot miss it. A hard stop
+  // mid-project is indistinguishable from churn in the funnel otherwise -- the ledger knows, the
+  // event stream did not.
+  void import("./appEvents")
+    .then((m) =>
+      m.reportCreditsExhausted(
+        `${d.scope ?? "user"} limit: ${Number(d.used ?? state.used)}/${Number(d.limit ?? state.limit)}`,
+      ),
+    )
+    .catch(() => undefined);
 }
 
 /** Drop the balance when the identity goes away — a signed-out or revoked session
  *  must never keep showing the previous account's credits. */
 export function clearUsage(): void {
   set({ metered: false, used: 0, limit: 0, remaining: 0, over: false });
+  // A new identity gets a fresh wall; without this, the next account's first 402 is silent.
+  void import("./appEvents").then((m) => m.resetCreditsExhausted()).catch(() => undefined);
 }
 
 /** Thrown by the request wrappers on an HTTP 402 (credit limit reached). */

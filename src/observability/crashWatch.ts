@@ -127,6 +127,18 @@ export function startCrashWatch(
         // Named so the cause is searchable next to the Windows/OS crash record.
         likely_cause: "process died (out of memory, native abort, or force-quit)",
       });
+      // The same fact as a funnel row. A process that died reported nothing while it was
+      // dying, so the session simply stops -- this is the only place that end can be dated,
+      // and it names what the app was busy with when it happened.
+      void import("../api/appEvents")
+        .then((m) =>
+          m.reportAppError(
+            `unclean exit after ${Math.round(ranForMs! / 1000)}s during ${previous.activity ?? "idle"}` +
+              (previous.heapMb ? ` (heap ${previous.heapMb}MB)` : ""),
+            previous.projectId ?? "",
+          ),
+        )
+        .catch(() => undefined);
     }
   }
 

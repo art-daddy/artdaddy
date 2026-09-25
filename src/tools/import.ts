@@ -13,6 +13,7 @@ import { isMutationRejected, runProjectMutation } from "./coordinator";
 import { ProjectClosingError, type MutationOrigin } from "../project/MutationGate";
 import { encodeVideoForGemini } from "./geminiEncode";
 import { undecodableImageReason } from "./imageDims";
+import { reportMediaImport } from "../api/appEvents";
 import {
   AUDIO_EXTS,
   IMAGE_EXTS,
@@ -243,6 +244,40 @@ export function notifyLibraryChanged(): void {
  *  them in `internals/library.json`. Idempotent by content hash: identical bytes
  *  return the SAME id with no duplicate file or catalog entry. */
 export async function registerLibraryClip(
+  store: ProjectStoreAccess,
+  bytes: Uint8Array | StagedFile,
+  filename: string,
+  kind: string,
+  source?: Record<string, unknown>,
+  externalPath?: string,
+  opts?: { origin?: MutationOrigin; signal?: AbortSignal },
+): Promise<LibEntry> {
+  // Reported from the one door every asset enters by, because a refused import ends the
+  // session before a prompt ever exists -- the trace just stops, and that is indistinguishable
+  // from losing interest. Wrapped rather than placed at the call sites so a new producer
+  // cannot forget to say whether its import worked.
+  try {
+    const entry = await registerLibraryClipInner(
+      store,
+      bytes,
+      filename,
+      kind,
+      source,
+      externalPath,
+      opts,
+    );
+    reportMediaImport(true, store.projectDir);
+    return entry;
+  } catch (e) {
+    // A project closing mid-import is a lifecycle event, not a rejection worth counting as one.
+    if (!(e instanceof ProjectClosingError) && !isMutationRejected(e)) {
+      reportMediaImport(false, store.projectDir, (e as Error)?.message ?? String(e));
+    }
+    throw e;
+  }
+}
+
+async function registerLibraryClipInner(
   store: ProjectStoreAccess,
   bytes: Uint8Array | StagedFile,
   filename: string,

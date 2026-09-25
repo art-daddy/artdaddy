@@ -106,6 +106,6 @@ describe("a beacon must never be visible to the user", () => {
       "fetch",
       vi.fn(async () => new Response("nope", { status: 401 })),
     );
-    await expect(reportAppEvent("project_opened", "p1")).resolves.toBeUndefined();
+    await expect(reportAppEvent("project_opened", { projectId: "p1" })).resolves.toBeUndefined();
   });
 });
