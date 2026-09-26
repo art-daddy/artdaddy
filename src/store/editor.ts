@@ -63,7 +63,7 @@ export function setRunnerFactory(fn: () => CommandRunner | Promise<CommandRunner
   makeRunner = fn;
 }
 
-// Background preview proxy indexing is owned by IndexCoordinator (per project).
+// Background preview proxy + transcript indexing is owned by IndexCoordinator (per project).
 
 const MIN_ZOOM = 4; // px per second
 const MAX_ZOOM = 400;
@@ -114,7 +114,7 @@ export interface EditorState {
   refreshMedia: () => void;
   _unsub: (() => void) | null;
   _pending: Timeline | null; // a bus update deferred until a gesture ends
-  _index: IndexCoordinator | null; // per-project background preview proxy indexer
+  _index: IndexCoordinator | null; // per-project background proxy + transcript indexer
 
   /** Result: "loaded" (committed this project's store), "superseded" (a newer
    *  load took over -> leave the winner's state), or "failed" (build error). The

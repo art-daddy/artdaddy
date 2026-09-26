@@ -12,6 +12,12 @@ import { shortHash } from "./media";
 import type { ClientToolRegistry } from "./registry";
 import { joinPath } from "./store";
 import { beginSessionActivity } from "../observability/crashWatch";
+import {
+  clearModelDownload,
+  megabytes,
+  percent,
+  reportModelDownload,
+} from "../store/modelDownload";
 import { loadTimeline } from "../timeline/engine";
 import { findClip } from "../timeline/helpers";
 import type { Clip } from "../timeline/model";
@@ -214,7 +220,88 @@ export function parseWhisperCppJson(raw: string): ParsedTranscript {
   return { language, duration_seconds: maxEndMs / 1000, segments, words };
 }
 
-const modelDownloads = new Map<string, Promise<{ path: string; downloaded: boolean }>>();
+interface InstalledModel {
+  path: string;
+  downloaded: boolean;
+}
+
+/** One in-flight install of one pinned model, shared by everything waiting for it.
+ *
+ *  It owns its OWN cancellation. A caller's signal must never reach the download: the background
+ *  indexer and a user's caption request wait on the SAME promise, so a project switch cancelling
+ *  the indexer used to cancel the user's request with it — and tell them THEY cancelled. The tap
+ *  is turned off only when the last waiter has left. */
+class ModelInstall {
+  readonly ac = new AbortController();
+  readonly promise: Promise<InstalledModel>;
+  waiters = 0;
+  settled = false;
+  received = 0;
+
+  constructor(
+    readonly total: number,
+    run: (self: ModelInstall) => Promise<InstalledModel>,
+    onSettled: () => void,
+  ) {
+    this.promise = run(this).finally(() => {
+      this.settled = true;
+      onSettled();
+    });
+  }
+}
+
+const modelDownloads = new Map<string, ModelInstall>();
+
+/** Wait for a shared install under THIS caller's cancellation, without imposing it on the others. */
+function joinDownload(dl: ModelInstall, signal: AbortSignal | undefined): Promise<InstalledModel> {
+  dl.waiters += 1;
+  let left = false;
+  const depart = (): void => {
+    if (left) return;
+    left = true;
+    dl.waiters -= 1;
+    if (dl.waiters === 0 && !dl.settled) dl.ac.abort();
+  };
+  return new Promise<InstalledModel>((resolve, reject) => {
+    const onAbort = (): void => {
+      const got = dl.received;
+      depart();
+      reject(new Error(modelCancelledMessage(got, dl.total)));
+    };
+    // Observed unconditionally, even by a caller that has already gone: an unwatched shared
+    // rejection surfaces as an unhandled promise rejection and kills the app in dev.
+    dl.promise.then(
+      (v) => {
+        signal?.removeEventListener("abort", onAbort);
+        depart();
+        resolve(v);
+      },
+      (e: unknown) => {
+        signal?.removeEventListener("abort", onAbort);
+        depart();
+        reject(e instanceof Error ? e : new Error(String(e)));
+      },
+    );
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    signal?.addEventListener("abort", onAbort);
+  });
+}
+
+/** What a stopped download says. It names the thing, its size, how far it got, and that the
+ *  bytes survive — "transcription cancelled" said none of that, and no transcription had begun. */
+export function modelCancelledMessage(received: number, total: number): string {
+  return (
+    `speech model download cancelled at ${percent(received, total)}% of ${megabytes(total)} MB — ` +
+    `the part already downloaded is kept and resumes next time`
+  );
+}
+
+/** Bytes between progress reports: ~116 updates across the model, cheap enough to publish from
+ *  the read loop and often enough that the percentage visibly moves. */
+const PROGRESS_STEP = 4 * 1024 * 1024;
 
 async function validModel(
   ctx: ClientToolContext,
@@ -246,7 +333,9 @@ async function validModel(
 
 /** Ensure the pinned ggml model is present in app-data. The response is streamed into a
  * temporary sibling, verified natively, and atomically promoted, so the webview never holds
- * the 465 MiB model and an interrupted download is never mistaken for a complete cache hit. */
+ * the 465 MiB model and an interrupted download is never mistaken for a complete cache hit.
+ * An interrupted download RESUMES: the partial file survives, and only bytes proven wrong
+ * (bad checksum, wrong length, a server that ignored our Range) are thrown away. */
 export async function ensureWhisperModel(
   ctx: ClientToolContext,
   size: string = DEFAULT_MODEL,
@@ -263,76 +352,127 @@ export async function ensureWhisperModel(
   }
   const key = `${path}\u0000${spec.sha256}`;
   const existing = modelDownloads.get(key);
-  if (existing) return existing;
+  if (existing) return joinDownload(existing, ctx.signal);
 
-  const started = (async () => {
-    const tmp = `${path}.download.part`;
-    const marker = `${path}.verified.json`;
-    let committed = false;
-    const finishActivity = beginSessionActivity("whisper-model-download");
-    await ctx.store.remove(tmp).catch(() => undefined);
-    try {
-      const url = `${HF_BASE}/${spec.revision}/ggml-${size}.bin`;
-      const resp = await fetchImpl(url, { signal: ctx.signal });
-      if (!resp.ok) throw new Error(`whisper model download failed: HTTP ${resp.status}`);
-      if (!resp.body) throw new Error("whisper model download cannot be streamed");
-      const declaredHeader = resp.headers.get("content-length");
-      const declared = declaredHeader === null ? null : Number(declaredHeader);
-      if (declared !== null && Number.isFinite(declared) && declared !== spec.bytes) {
-        throw new Error(
-          `whisper model size mismatch: expected ${spec.bytes}, server sent ${declared}`,
-        );
-      }
+  const install = new ModelInstall(
+    spec.bytes,
+    (self) => downloadModel(ctx, path, size, spec, fetchImpl, self),
+    () => modelDownloads.delete(key),
+  );
+  modelDownloads.set(key, install);
+  return joinDownload(install, ctx.signal);
+}
 
-      const reader = resp.body.getReader();
-      let received = 0;
-      let completed = false;
-      try {
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (ctx.signal?.aborted) throw new Error("transcription cancelled");
-          received += value.length;
-          if (received > spec.bytes) {
-            throw new Error(`whisper model exceeded expected size ${spec.bytes}`);
-          }
-          if (!(await ctx.store.appendBytes(tmp, value))) {
-            if (ctx.signal?.aborted) throw new Error("transcription cancelled");
-            throw new Error("whisper model download stopped before it could be written");
-          }
-        }
-        completed = true;
-      } finally {
-        if (!completed) await reader.cancel().catch(() => undefined);
-        reader.releaseLock();
-      }
-      if (ctx.signal?.aborted) throw new Error("transcription cancelled");
-      if (received !== spec.bytes) {
-        throw new Error(
-          `whisper model was incomplete: expected ${spec.bytes}, received ${received}`,
-        );
-      }
-      const probe = await ctx.store.probeMedia(tmp, 0);
-      if (!probe || probe.size !== spec.bytes || probe.sha256 !== spec.sha256) {
-        throw new Error("whisper model failed checksum validation");
-      }
-      if (ctx.signal?.aborted) throw new Error("transcription cancelled");
-      if (await ctx.store.exists(path)) await ctx.store.remove(path);
-      await ctx.store.remove(marker).catch(() => undefined);
-      await ctx.store.rename(tmp, path);
-      committed = true;
-      await ctx.store
-        .writeText(marker, JSON.stringify({ bytes: spec.bytes, sha256: spec.sha256 }))
-        .catch(() => undefined);
-      return { path, downloaded: true };
-    } finally {
-      if (!committed) await ctx.store.remove(tmp).catch(() => undefined);
-      finishActivity();
+async function downloadModel(
+  ctx: ClientToolContext,
+  path: string,
+  size: string,
+  spec: WhisperModelSpec,
+  fetchImpl: typeof fetch,
+  self: ModelInstall,
+): Promise<InstalledModel> {
+  // Keyed by the CONTENT, not just the model name: `ggml-small.bin` keeps its path across
+  // revisions, so a part left by the previous pinned build would otherwise be resumed into the
+  // new one and fail its checksum — a guaranteed wasted download for every user on a bump.
+  const tmp = `${path}.${spec.sha256.slice(0, 12)}.part`;
+  const marker = `${path}.verified.json`;
+  const signal = self.ac.signal;
+  // Only bytes we can PROVE are wrong. A cancellation or a dropped connection leaves a
+  // perfectly good prefix, and discarding it is what made the user restart from zero.
+  let discardPart = false;
+  const finishActivity = beginSessionActivity("whisper-model-download");
+  try {
+    const url = `${HF_BASE}/${spec.revision}/ggml-${size}.bin`;
+    let have = (await ctx.store.byteSize(tmp)) ?? 0;
+    if (have < 0 || have >= spec.bytes) {
+      await ctx.store.remove(tmp).catch(() => undefined);
+      have = 0;
     }
-  })().finally(() => modelDownloads.delete(key));
+    const resp = await fetchImpl(url, {
+      signal,
+      headers: have > 0 ? { Range: `bytes=${have}-` } : undefined,
+    });
+    if (resp.status === 416) {
+      // Our part is at or past the end of the file the server holds, so it is not this model.
+      discardPart = true;
+      throw new Error("whisper model download could not resume from the partial file");
+    }
+    if (!resp.ok) throw new Error(`whisper model download failed: HTTP ${resp.status}`);
+    if (!resp.body) throw new Error("whisper model download cannot be streamed");
+    // A server that ignores Range answers 200 with the WHOLE file. Appending that to what we
+    // already had would concatenate two copies and leave the checksum as the only thing between
+    // the user and a doubled file — start the part over rather than trust the length check.
+    if (have > 0 && resp.status !== 206) {
+      await ctx.store.remove(tmp).catch(() => undefined);
+      have = 0;
+    }
+    const declaredHeader = resp.headers.get("content-length");
+    const declared = declaredHeader === null ? null : Number(declaredHeader);
+    const remaining = spec.bytes - have;
+    if (declared !== null && Number.isFinite(declared) && declared !== remaining) {
+      discardPart = true;
+      throw new Error(
+        `whisper model size mismatch: expected ${remaining}, server sent ${declared}`,
+      );
+    }
 
-  modelDownloads.set(key, started);
-  return started;
+    const reader = resp.body.getReader();
+    let received = have;
+    let published = -1;
+    const publish = (): void => {
+      if (received === published) return;
+      published = received;
+      self.received = received;
+      reportModelDownload(received, spec.bytes);
+    };
+    publish();
+    let completed = false;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (signal.aborted) throw new Error(modelCancelledMessage(received, spec.bytes));
+        if (received + value.length > spec.bytes) {
+          discardPart = true;
+          throw new Error(`whisper model exceeded expected size ${spec.bytes}`);
+        }
+        // `received` tracks what is ON DISK, so a failed append cannot inflate it: the next
+        // attempt re-reads the file's real size anyway, which keeps resume self-correcting.
+        if (!(await ctx.store.appendBytes(tmp, value))) {
+          if (signal.aborted) throw new Error(modelCancelledMessage(received, spec.bytes));
+          throw new Error("whisper model download stopped before it could be written");
+        }
+        received += value.length;
+        if (received - published >= PROGRESS_STEP || received === spec.bytes) publish();
+      }
+      completed = true;
+    } finally {
+      if (!completed) await reader.cancel().catch(() => undefined);
+      reader.releaseLock();
+    }
+    if (signal.aborted) throw new Error(modelCancelledMessage(received, spec.bytes));
+    if (received !== spec.bytes) {
+      // Truncated, not wrong: keep the prefix so the next attempt picks up where this stopped.
+      throw new Error(`whisper model was incomplete: expected ${spec.bytes}, received ${received}`);
+    }
+    const probe = await ctx.store.probeMedia(tmp, 0);
+    if (!probe || probe.size !== spec.bytes || probe.sha256 !== spec.sha256) {
+      discardPart = true; // proven wrong; resuming these bytes would never converge
+      throw new Error("whisper model failed checksum validation");
+    }
+    if (signal.aborted) throw new Error(modelCancelledMessage(received, spec.bytes));
+    if (await ctx.store.exists(path)) await ctx.store.remove(path);
+    await ctx.store.remove(marker).catch(() => undefined);
+    await ctx.store.rename(tmp, path);
+    await ctx.store
+      .writeText(marker, JSON.stringify({ bytes: spec.bytes, sha256: spec.sha256 }))
+      .catch(() => undefined);
+    return { path, downloaded: true };
+  } finally {
+    if (discardPart) await ctx.store.remove(tmp).catch(() => undefined);
+    clearModelDownload();
+    finishActivity();
+  }
 }
 
 /** Run the whisper pipeline (ensure model -> ffmpeg 16 kHz mono WAV -> whisper-cli
@@ -454,8 +594,11 @@ export async function runWhisper(
     try {
       model = (await ensureWhisperModel(ctx, size)).path;
     } catch (e) {
-      if (ctx.signal?.aborted) throw new Error("transcription cancelled");
-      throw new Error(`whisper model '${size}' unavailable: ${String(e)}`);
+      // Do NOT flatten this into "transcription cancelled". Whatever went wrong happened while
+      // INSTALLING the model, before a single second of audio was read, and the download's own
+      // message is the only one that says so — replacing it is how a 465 MiB download in
+      // progress came out the other side looking like a failed transcription.
+      throw e instanceof Error ? e : new Error(`whisper model '${size}' unavailable: ${String(e)}`);
     }
     const wav = await ensureWav(ctx, src);
     const run = await ctx.runner.run(

@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { CommandRunner } from "./command";
 import type { ClientToolContext } from "./context";
 import { ProjectStoreAccess, joinPath, type FsLike } from "./store";
+import { useModelDownload } from "../store/modelDownload";
 import {
   clipWordFrames,
   ensureTranscript,
@@ -158,6 +159,12 @@ function streamedResponse(
 
 const DIR = "C:/data/projects/p1";
 const MODEL = "C:/data/models/ggml-small.bin";
+
+/** The part file is keyed by CONTENT, so a part left by a previous pinned revision can never
+ *  be resumed into a different one. */
+function partFor(spec: WhisperModelSpec): string {
+  return `${MODEL}.${spec.sha256.slice(0, 12)}.part`;
+}
 
 function ctxWith(runner: CommandRunner, fs: MockFs = new MockFs()): ClientToolContext {
   return { store: new ProjectStoreAccess(DIR, fs), runner };
@@ -316,7 +323,7 @@ describe("ensureWhisperModel", () => {
     ).rejects.toThrow("404");
   });
 
-  it("removes an incomplete download without exposing a final model", async () => {
+  it("keeps an incomplete download so the next attempt can resume it", async () => {
     const fs = new MockFs();
     const spec = await specFor(new Uint8Array([1, 2, 3]));
     const fetchImpl = vi.fn(async () => streamedResponse([new Uint8Array([1])]));
@@ -324,6 +331,75 @@ describe("ensureWhisperModel", () => {
       ensureWhisperModel(ctxWith(transcribeRunner(fs), fs), "small", fetchImpl as Any, spec),
     ).rejects.toThrow("incomplete");
     expect(await fs.exists(MODEL)).toBe(false);
+    // Discarding this prefix is what made every interrupted install restart from zero.
+    expect(fs.bytes.get(partFor(spec))).toEqual(new Uint8Array([1]));
+  });
+
+  it("resumes from the bytes already on disk instead of downloading them again", async () => {
+    const fs = new MockFs();
+    const bytes = new Uint8Array([1, 2, 3, 4, 5, 6]);
+    const spec = await specFor(bytes);
+    fs.putBytes(partFor(spec), bytes.slice(0, 4)); // an earlier attempt got 4 of 6
+    const ranges: (string | undefined)[] = [];
+    const fetchImpl = vi.fn(async (_u: string, init?: RequestInit) => {
+      ranges.push((init?.headers as Record<string, string> | undefined)?.Range);
+      return streamedResponse([bytes.slice(4)], { status: 206, declaredBytes: 2 });
+    });
+
+    const r = await ensureWhisperModel(
+      ctxWith(transcribeRunner(fs), fs),
+      "small",
+      fetchImpl as Any,
+      spec,
+    );
+
+    expect(ranges).toEqual(["bytes=4-"]);
+    expect(fs.appended, "only the missing tail may be fetched").toEqual([2]);
+    expect(r).toEqual({ path: MODEL, downloaded: true });
+    expect(fs.bytes.get(MODEL)).toEqual(bytes);
+  });
+
+  // A server free to ignore Range answers 200 with the WHOLE file. Appending that to the part
+  // would concatenate two copies and leave the checksum as the only thing catching it.
+  it("starts over when the server ignores the range instead of concatenating", async () => {
+    const fs = new MockFs();
+    const bytes = new Uint8Array([1, 2, 3, 4, 5, 6]);
+    const spec = await specFor(bytes);
+    fs.putBytes(partFor(spec), bytes.slice(0, 4));
+    const fetchImpl = vi.fn(async () =>
+      streamedResponse([bytes], { status: 200, declaredBytes: bytes.length }),
+    );
+
+    await ensureWhisperModel(ctxWith(transcribeRunner(fs), fs), "small", fetchImpl as Any, spec);
+
+    expect(fs.bytes.get(MODEL)).toEqual(bytes);
+  });
+
+  it("discards the partial file when the server cannot satisfy the range", async () => {
+    const fs = new MockFs();
+    const bytes = new Uint8Array([1, 2, 3]);
+    const spec = await specFor(bytes);
+    fs.putBytes(partFor(spec), new Uint8Array([9, 9]));
+    const fetchImpl = vi.fn(async () => streamedResponse([], { status: 416 }));
+
+    await expect(
+      ensureWhisperModel(ctxWith(transcribeRunner(fs), fs), "small", fetchImpl as Any, spec),
+    ).rejects.toThrow("resume");
+    expect(await fs.exists(partFor(spec))).toBe(false);
+  });
+
+  // The one failure a resume must NOT survive: these bytes are proven wrong, so keeping them
+  // would make every future attempt download the tail and fail the same checksum forever.
+  it("discards a complete download whose checksum is wrong", async () => {
+    const fs = new MockFs();
+    const spec = await specFor(new Uint8Array([4, 5, 6]));
+    const fetchImpl = vi.fn(async () =>
+      streamedResponse([new Uint8Array([9, 9, 9])], { declaredBytes: 3 }),
+    );
+
+    await expect(
+      ensureWhisperModel(ctxWith(transcribeRunner(fs), fs), "small", fetchImpl as Any, spec),
+    ).rejects.toThrow("checksum");
     expect([...fs.bytes.keys()].filter((path) => path.endsWith(".part"))).toEqual([]);
   });
 
@@ -411,11 +487,66 @@ describe("ensureWhisperModel", () => {
     );
     const ctx = { ...ctxWith(transcribeRunner(fs), fs), signal: controller.signal };
 
+    // Named, sized and resumable. "transcription cancelled" described work that never started.
     await expect(ensureWhisperModel(ctx, "small", fetchImpl as Any, spec)).rejects.toThrow(
-      "cancelled",
+      /speech model download cancelled at \d+% of \d+ MB/,
     );
     expect(await fs.exists(MODEL)).toBe(false);
-    expect([...fs.bytes.keys()].filter((path) => path.endsWith(".part"))).toEqual([]);
+    expect(fs.bytes.get(partFor(spec))).toEqual(bytes);
+  });
+
+  // The background indexer and a caption request share ONE download. A project switch
+  // cancelling the indexer used to reject the user's request too, and blame the user for it.
+  it("lets one waiter cancel without cancelling the download the others need", async () => {
+    const fs = new MockFs();
+    const bytes = new Uint8Array([2, 4, 6, 8]);
+    const spec = await specFor(bytes);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const fetchImpl = vi.fn(async () => {
+      await gate;
+      return streamedResponse([bytes]);
+    });
+    const ctx = ctxWith(transcribeRunner(fs), fs);
+    const leaving = new AbortController();
+
+    const abandoned = ensureWhisperModel(
+      { ...ctx, signal: leaving.signal },
+      "small",
+      fetchImpl as Any,
+      spec,
+    );
+    const waiting = ensureWhisperModel(ctx, "small", fetchImpl as Any, spec);
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledOnce());
+
+    leaving.abort();
+    await expect(abandoned).rejects.toThrow(/speech model download cancelled/);
+    release();
+
+    await expect(waiting).resolves.toEqual({ path: MODEL, downloaded: true });
+    expect(fs.bytes.get(MODEL)).toEqual(bytes);
+  });
+
+  it("publishes moving progress while downloading and clears it afterwards", async () => {
+    const fs = new MockFs();
+    const chunks = [new Uint8Array([1, 2]), new Uint8Array([3, 4])];
+    const bytes = new Uint8Array([1, 2, 3, 4]);
+    const spec = await specFor(bytes);
+    const seen: Array<[number, number]> = [];
+    const stop = useModelDownload.subscribe((s) => seen.push([s.received, s.total]));
+    try {
+      const fetchImpl = vi.fn(async () => streamedResponse(chunks, { declaredBytes: 4 }));
+      await ensureWhisperModel(ctxWith(transcribeRunner(fs), fs), "small", fetchImpl as Any, spec);
+    } finally {
+      stop();
+    }
+
+    // Two DIFFERENT points, or a frozen readout would pass just as well as a live one.
+    expect(seen).toContainEqual([0, 4]);
+    expect(seen).toContainEqual([4, 4]);
+    expect(seen.at(-1), "the readout must not outlive the download").toEqual([0, 0]);
   });
 });
 

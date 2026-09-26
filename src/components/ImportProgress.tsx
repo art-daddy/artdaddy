@@ -3,17 +3,39 @@
 // Premiere reports ingest in its status area and other NLEs uses a media-panel toast; neither
 // blocks the editor. A 1.75 GB file takes ~55s to hash, and silence for that long reads as a
 // hang even when the window is perfectly responsive.
+//
+// The speech model shares this area: it is a 465 MiB download that installs once, and the same
+// silence cost us a user who waited 2m21s on a caption request with nothing on screen.
 import { useImportJobs } from "../store/importJobs";
+import { modelDownloadMessage, percent, useModelDownload } from "../store/modelDownload";
 
 export default function ImportProgress(): JSX.Element | null {
   const jobs = useImportJobs((s) => s.jobs);
-  if (!jobs.length) return null;
+  const received = useModelDownload((s) => s.received);
+  const total = useModelDownload((s) => s.total);
+  const modelPct = total > 0 ? percent(received, total) : null;
+  if (!jobs.length && modelPct === null) return null;
   return (
     <div
       role="status"
-      aria-label="importing media"
+      aria-label={jobs.length ? "importing media" : "downloading speech model"}
       className="pointer-events-none fixed bottom-4 left-4 z-[70] w-72 space-y-2"
     >
+      {modelPct !== null && (
+        <div
+          data-testid="model-download"
+          data-pct={String(modelPct)}
+          className="rounded-md border border-edge bg-panel/95 px-3 py-2 text-xs text-neutral-200 shadow-xl"
+        >
+          <div className="leading-snug">{modelDownloadMessage(received, total)}</div>
+          <div className="mt-1.5 h-1 overflow-hidden rounded bg-neutral-800">
+            <div
+              className="h-full rounded bg-accent transition-[width] duration-200"
+              style={{ width: `${modelPct}%` }}
+            />
+          </div>
+        </div>
+      )}
       {jobs.map((j) => (
         <div
           key={j.path}
