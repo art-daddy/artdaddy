@@ -35,6 +35,20 @@ export class RateLimitError extends ArtDaddyError {
   }
 }
 
+/** A 401 from a live call. Expected, not a crash: the session is renewed before each request,
+ *  so reaching this means the session was revoked or the refresh token is spent — the sign-in
+ *  gate is already coming up (notifyAuthFailure), and the user needs a sentence, not an
+ *  apology. Untyped, this read as "Something went wrong. Please try again." and was reported
+ *  to Sentry as an error on every routine token rotation. */
+export class SessionExpiredError extends ArtDaddyError {
+  readonly code = "session_expired";
+  readonly expected = true;
+  constructor(message = "Your session expired. Sign in again and retry.") {
+    super(message);
+    this.name = "SessionExpiredError";
+  }
+}
+
 /** Parse a Retry-After header (delta-seconds or an HTTP-date) to milliseconds. */
 function retryAfterMs(header: string | null): number | null {
   if (!header) return null;

@@ -2,7 +2,7 @@
 // thin proxy. Plain request/response, plus an opt-in SSE variant of the same round.
 import { authHeaders, notifyAuthFailure } from "../api/auth";
 import { api } from "../api/client";
-import { fetchWithRetry, RateLimitError } from "../api/http";
+import { fetchWithRetry, RateLimitError, SessionExpiredError } from "../api/http";
 import { readSSE } from "../api/sse";
 import { CreditLimitError, markOverLimit } from "../api/usage";
 import { hostInfo } from "../platform/host";
@@ -21,6 +21,7 @@ async function postJson<T>(url: string, body: unknown, signal?: AbortSignal): Pr
   if (!res.ok) {
     if (res.status === 401) notifyAuthFailure();
     const text = await res.text().catch(() => "");
+    if (res.status === 401) throw new SessionExpiredError();
     if (res.status === 402) {
       let detail: unknown = text;
       try {
@@ -201,6 +202,7 @@ async function streamRound(
   if (!res.ok) {
     if (res.status === 401) notifyAuthFailure();
     const text = await res.text().catch(() => "");
+    if (res.status === 401) throw new SessionExpiredError();
     if (res.status === 402) {
       let detail: unknown = text;
       try {

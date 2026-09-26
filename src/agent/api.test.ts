@@ -15,6 +15,8 @@ vi.mock("../api/usage", async (io) => {
 });
 
 import { notifyAuthFailure, setClerkTokenProvider } from "../api/auth";
+import { SessionExpiredError } from "../api/http";
+import { isExpected, toUserMessage } from "../lib/errors";
 import { apiBase, setApiBase } from "../api/config";
 import { CreditLimitError, markOverLimit } from "../api/usage";
 import { inferRound, inferRoundStreaming, type InferBody } from "./api";
@@ -56,12 +58,18 @@ describe("inferRound", () => {
     expect(ctrl.signal.aborted).toBe(false);
   });
 
-  it("notifies auth failure and throws on 401", async () => {
+  // Untyped, this surfaced as "Something went wrong. Please try again." and was reported to
+  // Sentry as a crash on every routine token rotation.
+  it("notifies auth failure and throws a typed, expected error on 401", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => res("nope", 401)),
     );
-    await expect(inferRound(body)).rejects.toThrow(/401/);
+    await expect(inferRound(body)).rejects.toBeInstanceOf(SessionExpiredError);
+    const err = await inferRound(body).catch((e: unknown) => e);
+    expect(isExpected(err)).toBe(true);
+    expect(toUserMessage(err)).not.toMatch(/something went wrong/i);
+    expect(toUserMessage(err)).toMatch(/sign in/i);
     expect(notifyAuthFailure).toHaveBeenCalled();
   });
 
@@ -227,12 +235,12 @@ describe("inferRoundStreaming", () => {
     expect(markOverLimit).toHaveBeenCalledWith({ error: "credit_limit_reached" });
   });
 
-  it("notifies auth failure on 401", async () => {
+  it("notifies auth failure and throws a typed, expected error on 401", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => res("nope", 401)),
     );
-    await expect(inferRoundStreaming(body, () => {})).rejects.toThrow(/401/);
+    await expect(inferRoundStreaming(body, () => {})).rejects.toBeInstanceOf(SessionExpiredError);
     expect(notifyAuthFailure).toHaveBeenCalled();
   });
 });

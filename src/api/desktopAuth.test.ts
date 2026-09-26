@@ -561,3 +561,99 @@ describe("signOutDesktop", () => {
     });
   });
 });
+
+// The access token lives ~30 minutes and nothing used to renew it until a live call came back
+// 401. That made the FIRST prompt after any idle spell fail for everyone, every time: the 401
+// triggered the refresh, the refresh worked, and the request that paid for it was thrown away.
+// A real user reported it as "it errored, then the same prompt worked".
+describe("ensureFreshAccessToken", () => {
+  /** A token whose `exp` claim sits `secondsFromNow` away. Unsigned: nothing here verifies it. */
+  function tokenExpiringIn(secondsFromNow: number): string {
+    const payload = Buffer.from(
+      JSON.stringify({ sub: "user_1", exp: Math.floor(Date.now() / 1000) + secondsFromNow }),
+    )
+      .toString("base64")
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "");
+    return `h.${payload}.s`;
+  }
+
+  /** Sign in so the module holds `token`, then forget how we got there. */
+  async function withToken(token: string) {
+    invoke.mockImplementation(async (cmd: string) =>
+      cmd === "load_refresh_token" ? "rt-0" : undefined,
+    );
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, { access_token: token, refresh_token: "rt-1", expires_in: 1800 }),
+    );
+    const mod = await importFresh();
+    await mod.refreshDesktopSession();
+    fetchMock.mockClear();
+    return mod;
+  }
+
+  it("renews a token that is about to expire BEFORE handing it to a request", async () => {
+    const mod = await withToken(tokenExpiringIn(10)); // inside the skew
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, { access_token: tokenExpiringIn(1800), refresh_token: "rt-2" }),
+    );
+
+    const token = await mod.ensureFreshAccessToken();
+
+    expect(fetchMock, "a spent token must be renewed, not sent").toHaveBeenCalledTimes(1);
+    expect(token).not.toBe("");
+    expect(mod.getAccessToken()).toBe(token);
+  });
+
+  it("does not refresh a healthy token, so every request does not stampede the endpoint", async () => {
+    const mod = await withToken(tokenExpiringIn(1800));
+
+    const token = await mod.ensureFreshAccessToken();
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(token).toBe(mod.getAccessToken());
+  });
+
+  // Unreadable is not evidence of valid. Treating an undated token as fine is the failure
+  // direction that puts us straight back to "first request 401s".
+  it("treats a token with no readable expiry as spent", async () => {
+    const mod = await withToken("not-a-jwt");
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, { access_token: tokenExpiringIn(1800), refresh_token: "rt-2" }),
+    );
+
+    await mod.ensureFreshAccessToken();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  // The stored refresh token is one-time and rotates. Two simultaneous requests finding a spent
+  // token must not both spend it: one rotation wins and the other would 401 a valid session.
+  it("joins concurrent callers into a single refresh", async () => {
+    const mod = await withToken(tokenExpiringIn(5));
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, { access_token: tokenExpiringIn(1800), refresh_token: "rt-2" }),
+    );
+
+    const [a, b] = await Promise.all([mod.ensureFreshAccessToken(), mod.ensureFreshAccessToken()]);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(a).toBe(b);
+  });
+
+  // Falling back to the token in hand beats sending none: no Authorization header is a
+  // guaranteed 401, whereas a token seconds from expiry may still be accepted.
+  it("falls back to the held token, without throwing, when the refresh cannot be made", async () => {
+    const held = tokenExpiringIn(5);
+    const mod = await withToken(held);
+    invoke.mockResolvedValue(null); // the keychain has nothing to refresh with
+    await expect(mod.ensureFreshAccessToken()).resolves.toBe(held);
+  });
+
+  it("never throws when the refresh request itself explodes", async () => {
+    const mod = await withToken(tokenExpiringIn(5));
+    fetchMock.mockRejectedValue(new TypeError("offline"));
+    await expect(mod.ensureFreshAccessToken()).resolves.not.toThrow();
+  });
+});

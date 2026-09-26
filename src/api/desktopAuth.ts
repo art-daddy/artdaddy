@@ -121,15 +121,42 @@ export function getAccessToken(): string | null {
   return accessToken;
 }
 
-/** Claims from the current access token, for Sentry correlation only — this reads the JWT
- *  payload without verifying its signature, which is fine here since it is never used for
+/** Refresh this long before the token actually dies, so a slow request cannot start valid and
+ *  arrive expired. */
+const EXPIRY_SKEW_MS = 60_000;
+
+/** The access token the NEXT request should carry, refreshing first when the one we hold is
+ *  spent.
+ *
+ *  The token lives ~30 minutes and nothing used to renew it until a real request came back 401.
+ *  That made the first prompt after any idle period fail for everyone, every time: the 401
+ *  triggered the refresh, the refresh worked, and the request that paid for it was discarded —
+ *  "it failed, then the same prompt worked". Concurrent callers join one refresh, because the
+ *  stored token is one-time and rotates. */
+export async function ensureFreshAccessToken(): Promise<string | null> {
+  if (accessToken && !expiringWithin(EXPIRY_SKEW_MS)) return accessToken;
+  if (!onDesktop()) return accessToken;
+  await refreshDesktopSession().catch(() => undefined);
+  return accessToken;
+}
+
+/** True when the held token is absent, undated, or dies inside `ms`. A token whose payload we
+ *  cannot read counts as expiring: unreadable is not evidence of valid. */
+function expiringWithin(ms: number): boolean {
+  const exp = claims().exp;
+  if (typeof exp !== "number" || !Number.isFinite(exp)) return true;
+  return exp * 1000 - Date.now() <= ms;
+}
+
+/** Claims from the current access token, for Sentry correlation and expiry only — this reads the
+ *  JWT payload without verifying its signature, which is fine here since it is never used for
  *  authorization (the backend still verifies the token itself on every request). */
-function claims(): { sub?: string; email?: string } {
+function claims(): { sub?: string; email?: string; exp?: number } {
   if (!accessToken) return {};
   try {
     const payload = accessToken.split(".")[1];
     const json = atob(payload.replace(/-/g, "+").replace(/_/g, "/"));
-    return JSON.parse(json) as { sub?: string; email?: string };
+    return JSON.parse(json) as { sub?: string; email?: string; exp?: number };
   } catch {
     return {};
   }

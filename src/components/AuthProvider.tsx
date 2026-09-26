@@ -8,7 +8,7 @@
 import { useEffect, useState } from "react";
 
 import {
-  getAccessToken as getDesktopAccessToken,
+  ensureFreshAccessToken,
   getUserId as getDesktopUserId,
   getUserEmail as getDesktopUserEmail,
   handleDeepLinkCallback,
@@ -38,9 +38,9 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
         useAuth.getState().markLocked();
       else useAuth.getState().markOffline();
     };
-    // A rotated/revoked access token 401s a live call every 30 minutes (its own lifetime) —
-    // that must not force a fresh sign-in while the 60-day refresh token is still good, so try
-    // a silent refresh first and only lock if THAT also fails.
+    // A REVOKED token still 401s a live call, and that must not force a fresh sign-in while the
+    // 60-day refresh token is good — so try a silent refresh first and only lock if THAT fails.
+    // Ordinary EXPIRY no longer arrives here: the token provider renews before the request.
     const offAuth = onAuthFailure(() => {
       if (platform.name !== "tauri") {
         useAuth.getState().markLocked();
@@ -63,7 +63,9 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
   }, []);
 
   useEffect(() => {
-    const removeProvider = setClerkTokenProvider(() => Promise.resolve(getDesktopAccessToken()));
+    // Renews a spent token BEFORE the request carries it. Handing over whatever was in memory is
+    // what made the first prompt after an idle spell fail for everyone, once, every time.
+    const removeProvider = setClerkTokenProvider(() => ensureFreshAccessToken());
     if (platform.name !== "tauri") {
       void useAuth.getState().verify();
       return removeProvider;

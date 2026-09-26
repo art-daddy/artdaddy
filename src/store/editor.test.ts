@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
 
-import { _resetTimelineBus } from "../timeline/bus";
+import { _resetTimelineBus, emitTimelineChange } from "../timeline/bus";
 import { applyOp } from "../timeline/engine";
 import { findClip } from "../timeline/helpers";
 import { emptyTimeline, type Timeline } from "../timeline/model";
@@ -58,6 +58,30 @@ function seedStore(dir = P1, timeline: Timeline = emptyTimeline()) {
   fs.files.set(`${dir}/internals/timeline.json`, JSON.stringify(timeline));
   registerTestDocument(dir); // back the store with an open document so applyOp/undo commit through it
   return { store: new ProjectStoreAccess(dir, fs), fs };
+}
+
+/** A timeline with something on it, so "has content" is not the same as "has tracks". */
+function withClip(timelineOut = 120): Timeline {
+  const tl = emptyTimeline();
+  tl.tracks = [
+    {
+      id: "v1",
+      kind: "video",
+      z: 0,
+      clips: [
+        {
+          id: "clip_1",
+          media_ref: "media_1",
+          kind: "video",
+          timeline_in: 0,
+          timeline_out: timelineOut,
+          source_in: 0,
+          source_out: timelineOut,
+        },
+      ],
+    },
+  ];
+  return tl;
 }
 
 beforeEach(() => {
@@ -190,6 +214,45 @@ describe("editor store", () => {
     expect(useEditor.getState().activeMediaTab).toBeNull();
   });
 
+  // An empty project composites to nothing, so people open a library clip just to see something
+  // — and then the first edit lands BEHIND that tab. One user watched his source footage while
+  // the agent built a 9:16 short, reported "the timeline does not show the final video", and
+  // exported a file that had been correct the whole time.
+  it("reveals the timeline the moment it gains its first clips", async () => {
+    const { store } = seedStore(P1);
+    setProjectStoreFactory(() => store);
+    await useEditor.getState().load("p1");
+    useEditor.getState().openMediaTab("a.mp4", { pin: true });
+    expect(useEditor.getState().activeMediaTab).toBe("a.mp4");
+
+    emitTimelineChange(withClip(), "engine", P1);
+
+    expect(useEditor.getState().activeMediaTab).toBeNull();
+  });
+
+  // ...but only the FIRST time. Yanking the view on every subsequent edit would fight anyone
+  // using the source monitor to pick the next in/out point.
+  it("leaves the source monitor alone once the timeline already has clips", async () => {
+    const { store } = seedStore(P1, withClip());
+    setProjectStoreFactory(() => store);
+    await useEditor.getState().load("p1");
+    useEditor.getState().openMediaTab("a.mp4", { pin: true });
+
+    emitTimelineChange(withClip(240), "engine", P1);
+
+    expect(useEditor.getState().activeMediaTab).toBe("a.mp4");
+  });
+
+  it("does not reveal a timeline that is still empty", async () => {
+    const { store } = seedStore(P1);
+    setProjectStoreFactory(() => store);
+    await useEditor.getState().load("p1");
+    useEditor.getState().openMediaTab("a.mp4", { pin: true });
+
+    emitTimelineChange(emptyTimeline(), "engine", P1);
+
+    expect(useEditor.getState().activeMediaTab).toBe("a.mp4");
+  });
   it("a superseded load does NOT clobber the winning project's store (F5)", async () => {
     const { store: s1 } = seedStore(P1);
     const { store: s2 } = seedStore(P2);

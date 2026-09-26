@@ -248,6 +248,11 @@ function clipSel<T extends object>(patch: T): T & { selectedGap: null } {
   return { ...patch, selectedGap: null };
 }
 
+/** A new project already HAS tracks, so "has a timeline" is not "has something to show". */
+function hasClips(timeline: Timeline | null): boolean {
+  return !!timeline?.tracks?.some((t) => (t.clips?.length ?? 0) > 0);
+}
+
 /** All clip ids sharing `clipId`'s link group (incl. itself); a lone clip -> [clipId].
  *  Click-selection expands to the whole group so linked A/V clips select together. */
 function linkGroupIds(timeline: Timeline | null, clipId: string): string[] {
@@ -394,6 +399,12 @@ const editorCreator: StateCreator<EditorState> = (set, get) => {
           }
           void index.sweep(tl); // agent/manual added or moved media -> preview proxy
           const dirty = change.dirty ?? false;
+          // A source-monitor tab covers the stage. An empty project has nothing to composite, so
+          // people park on a library clip to see anything at all — and then the first edit lands
+          // BEHIND that tab. One user watched his source footage while the agent built a 9:16
+          // short, reported "the timeline does not show the final video", and exported a file
+          // that was correct all along. The stage must never hide a timeline's first content.
+          if (!hasClips(get().timeline) && hasClips(tl)) set({ activeMediaTab: null });
           if (get().gestureActive) {
             set({ _pending: tl, dirty }); // don't clobber an in-progress drag
             return;
