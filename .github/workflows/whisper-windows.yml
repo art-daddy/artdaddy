@@ -212,13 +212,19 @@ jobs:
           if-no-files-found: error
 
       # A release (not just an artifact) because artifacts expire in 90 days and
-      # fetch-sidecars.mjs needs a stable place to pull from. The tag encodes BOTH pinned
-      # inputs, so a rebuild with different versions cannot quietly replace the old one.
+      # fetch-sidecars.mjs needs a stable place to pull from.
+      #
+      # The `-b<n>` suffix is a BUILD REVISION and exists because the two pinned inputs do NOT
+      # determine the output. Changing a cmake flag with the same whisper_ref/vulkan_sdk produced a
+      # genuinely different binary under the identical tag, and the upload below is --clobber: it
+      # would have silently replaced bytes people already fetched, with nothing to roll back to.
+      # BUMP IT whenever the build flags change. src/contract/whisperVulkan.test.ts fails until
+      # fetch-sidecars.mjs pins the same string, so the two cannot drift apart.
       - name: Publish the release fetch-sidecars downloads
         if: ${{ inputs.publish }}
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: whisper-vulkan-${{ inputs.whisper_ref }}-sdk${{ inputs.vulkan_sdk }}
+          TAG: whisper-vulkan-${{ inputs.whisper_ref }}-sdk${{ inputs.vulkan_sdk }}-b2
         run: |
           gh release view "$env:TAG" 2>$null
           if ($LASTEXITCODE -ne 0) {

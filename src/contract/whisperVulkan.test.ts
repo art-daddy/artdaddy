@@ -52,7 +52,7 @@ describe("whisper Vulkan sidecar: workflow <-> fetch-sidecars", () => {
     // un-substituted expression and this file would otherwise compare two wrong strings and
     // pass. Assert the composed tag is fully resolved BEFORE comparing it to anything.
     expect(expected, "tag template was not fully substituted").not.toMatch(/\$\{\{/);
-    expect(expected).toMatch(/^whisper-vulkan-v\d+\.\d+\.\d+-sdk\d+\.\d+\.\d+\.\d+$/);
+    expect(expected).toMatch(/^whisper-vulkan-v\d+\.\d+\.\d+-sdk\d+\.\d+\.\d+\.\d+-b\d+$/);
 
     expect(
       constant("WHISPER_VULKAN_TAG"),
