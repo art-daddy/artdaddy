@@ -180,24 +180,67 @@ function sourceSpanFrames(span: unknown, fps: number): [number, number] {
  *  source's real duration so a guessed/oversized end can't create a clip that
  *  runs past EOF (a blank/silent tail — the "30-minute clip" bug). Only clamps
  *  when the probe yields a duration (durF > 0); stills/unprobeable spans pass
- *  through. Throws if the span starts at/after the media's end. */
+ *  through. Throws if the span starts at/after the media's end.
+ *
+ *  Reports the clamp: the caller asked for a length it did not get, and silently handing back
+ *  a shorter clip leaves it timing the rest of the edit against a number that was never true. */
 async function spanToFrames(
   ctx: ClientToolContext,
   span: unknown,
   fps: number,
   abs: string,
-): Promise<[number, number]> {
+): Promise<{ sIn: number; sOut: number; note?: string }> {
   const [sIn, sOut] = sourceSpanFrames(span, fps);
   const durF = Math.round((await sourceDurationSeconds(ctx.runner, abs)) * fps);
   if (durF > 0) {
     if (sIn >= durF) {
+      // source_span is the ONE time argument in this entry measured in seconds — every other
+      // one (timeline_in, timeline_out, duration) is frames. A start past the end of the media
+      // is usually that mix-up rather than a real request, so offer the conversion when the
+      // frames reading would actually land inside the file.
+      const raw = sIn / fps;
+      const hint =
+        raw < durF
+          ? ` source_span is in SECONDS, unlike timeline_in/duration which are frames — if you meant ${raw} FRAMES, pass ${(raw / fps).toFixed(2)}.`
+          : "";
       throw new OpError(
-        `source_span start ${(sIn / fps).toFixed(2)}s is at/after the media's end (${(durF / fps).toFixed(2)}s)`,
+        `source_span start ${raw.toFixed(2)}s is at/after the media's end (${(durF / fps).toFixed(2)}s).${hint}`,
       );
     }
-    if (sOut > durF) return [sIn, durF]; // clamp an oversized/guessed span to EOF
+    if (sOut > durF) {
+      return {
+        sIn,
+        sOut: durF, // clamp an oversized/guessed span to EOF
+        note:
+          `source_span ended past the media (asked for ${(sOut / fps).toFixed(2)}s, media ends at ` +
+          `${(durF / fps).toFixed(2)}s), so this clip is ${durF - sIn} frames, not ${sOut - sIn}.`,
+      };
+    }
   }
-  return [sIn, sOut];
+  return { sIn, sOut };
+}
+
+/** The caller gave BOTH a source_span (SECONDS) and a timeline length (FRAMES), and the span's
+ *  RAW numbers already match that frame length — so they are frames.
+ *
+ *  Not a guess: at any real fps the seconds reading is fps times longer, so the two readings
+ *  cannot agree by accident. Without this the call SUCCEEDS and lands a clip ~fps times too
+ *  long with nothing reported — the quiet twin of the "start past EOF" refusal, and the one
+ *  nobody would think to look for. */
+function framesPassedAsSeconds(rawLen: number, wantLen: number, fps: number): boolean {
+  if (fps <= 1 || wantLen <= 0) return false;
+  return Math.abs(rawLen - wantLen) <= 1 && Math.abs(rawLen * fps - wantLen) > 1;
+}
+
+function refuseFrameUnitMixup(span: unknown, wantLen: number, fps: number): void {
+  const [rs, re] = span as [number, number];
+  if (!framesPassedAsSeconds(Number(re) - Number(rs), wantLen, fps)) return;
+  throw new OpError(
+    `source_span ${JSON.stringify(span)} is in SECONDS, but those numbers are exactly the ` +
+      `${wantLen}-frame length you also asked for, so they look like FRAMES. Read as seconds ` +
+      `they would cut ${Math.round((Number(re) - Number(rs)) * fps)} frames. For that span in ` +
+      `seconds pass [${(Number(rs) / fps).toFixed(2)}, ${(Number(re) / fps).toFixed(2)}].`,
+  );
 }
 
 interface Placement {
@@ -272,6 +315,7 @@ async function resolvePlace(
       const wantLen = toutValid
         ? toFrames(entry.timeline_out, fps) - tin
         : toFrames(entry.duration, fps);
+      refuseFrameUnitMixup(span, wantLen, fps);
       if (Math.abs(spanLen - wantLen) > 1) {
         // Naming the DISAGREEMENT is not naming the CONSEQUENCE. "they disagreed on the length"
         // read as a tidy precedence note, so a span 2 frames short of the requested window landed
@@ -284,7 +328,9 @@ async function resolvePlace(
         );
       }
     }
-    const [sIn, sOut] = await spanToFrames(ctx, span, fps, abs);
+    const spanned = await spanToFrames(ctx, span, fps, abs);
+    if (spanned.note) notes.push(spanned.note);
+    const { sIn, sOut } = spanned;
     return {
       tin,
       tout: tin + (sOut - sIn),
@@ -506,6 +552,7 @@ async function resolveInsertEntry(
       const [rs, re] = span as [number, number];
       const spanLen = Math.round((Number(re) - Number(rs)) * fps);
       const wantLen = toFrames(entry.duration, fps);
+      refuseFrameUnitMixup(span, wantLen, fps);
       if (Math.abs(spanLen - wantLen) > 1) {
         notes.push(
           `used source_span (~${spanLen} frames); ignored the duration you also set (${wantLen} frames) — they disagreed on the length.`,
@@ -520,7 +567,10 @@ async function resolveInsertEntry(
       loop = false;
       stretch = false;
     }
-    [sIn, sOut] = await spanToFrames(ctx, span, fps, abs);
+    const spanned = await spanToFrames(ctx, span, fps, abs);
+    if (spanned.note) notes.push(spanned.note);
+    sIn = spanned.sIn;
+    sOut = spanned.sOut;
     dur = sOut - sIn;
   } else if (durValid) {
     dur = toFrames(entry.duration, fps);
