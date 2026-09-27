@@ -11,7 +11,7 @@ import { canvasFps, toFrames } from "./frames";
 import { findClip } from "./helpers";
 import { normalizeKeyframes } from "./keyframe";
 import type { Clip, Timeline, Track } from "./model";
-import { clampMagnification, setClipProperties, type SwapMedia } from "./operations";
+import { clampMagnification, missingClip, setClipProperties, type SwapMedia } from "./operations";
 import { placeableKind } from "./helpers";
 import { sourceDurationSeconds, sourceHasAudio, sourceHasVideo } from "./placement";
 import { sourceDims } from "./sourceDims";
@@ -28,7 +28,7 @@ const TRANSFORM_SCALAR_PROPS = new Set(["scale", "scale_x", "scale_y"]);
 
 function requireClip(timeline: Timeline, clipId: unknown): [Track, Clip] {
   const found = findClip(timeline, String(clipId ?? ""));
-  if (!found) throw new OpError(`clip '${String(clipId)}' not found`);
+  if (!found) throw missingClip(clipId);
   return found;
 }
 

@@ -140,4 +140,51 @@ describe("unansweredCalls", () => {
     expect(unansweredCalls(turns)).toEqual([]);
     expect(unansweredCalls([])).toEqual([]);
   });
+
+  // The strand that kept refusing every later request: `takeUnsentResults()` CLEARS the
+  // in-memory debt, so a send that then failed to reach the provider dropped it — and once
+  // another turn followed, reading only the last turn could no longer see it.
+  it("recovers a debt stranded behind a later turn that never reached the provider", () => {
+    const turns = [
+      turn({
+        id: "stopped",
+        parts: [{ kind: "tool_call", call_id: "orphan", name: "add_clips" }] as Any,
+      }),
+      turn({ id: "wake", parts: [{ kind: "text", text: "a job finished" }] as Any }),
+    ];
+    expect(unansweredCalls(turns).map((o) => o.call_id)).toEqual(["orphan"]);
+  });
+
+  // ...but an answered call is proof the provider accepted a round, so nothing before it is
+  // still owed. Re-answering earns the OPPOSITE refusal, which this app has also seen.
+  it("stops at the last accepted round rather than reaching back forever", () => {
+    const turns = [
+      turn({ id: "ancient", parts: [{ kind: "tool_call", call_id: "old", name: "x" }] as Any }),
+      turn({
+        id: "accepted",
+        parts: [
+          { kind: "tool_call", call_id: "c1", name: "get_timeline" },
+          { kind: "tool_result", call_id: "c1" },
+        ] as Any,
+      }),
+      turn({
+        id: "stopped",
+        parts: [{ kind: "tool_call", call_id: "orphan", name: "add_clips" }] as Any,
+      }),
+    ];
+    expect(unansweredCalls(turns).map((o) => o.call_id)).toEqual(["orphan"]);
+  });
+
+  it("keeps every owed call from one interrupted round, in order", () => {
+    const turns = [
+      turn({
+        id: "stopped",
+        parts: [
+          { kind: "tool_call", call_id: "a", name: "add_clips" },
+          { kind: "tool_call", call_id: "b", name: "add_track" },
+        ] as Any,
+      }),
+    ];
+    expect(unansweredCalls(turns).map((o) => o.call_id)).toEqual(["a", "b"]);
+  });
 });

@@ -69,30 +69,46 @@ export function buildRequests(turns: Turn[]): TranscriptRequest[] {
   }));
 }
 
-/** Tool calls in the LAST turn that never got a result.
+/** Tool calls the transcript shows were never answered, back to the last proof of settlement.
  *
  *  The provider keeps the conversation on its side and refuses the next request until every
  *  call it issued has exactly one output. A turn stopped mid-batch hands its debt over in
- *  memory, but a session that is KILLED — which is how this app has been failing — loses that
- *  with the process, and the first message after the crash was refused. The transcript
- *  survives the crash, so the debt is recovered from it here.
+ *  memory, but a session that is KILLED loses that with the process, and the first message
+ *  after the crash was refused. The transcript survives the crash, so the debt is recovered
+ *  from it here.
  *
- *  Only the last turn: earlier ones completed, and answering a call the provider has long
- *  since forgotten would be a new error rather than a repair. */
+ *  How far back is not a guess. An ANSWERED call is proof the provider accepted a round at
+ *  that point, which it would not have done with an outstanding debt — so everything before it
+ *  was already settled, and re-answering earns the OPPOSITE refusal ("No tool call found for
+ *  function call output"), which this app has also seen. Walk back from the end and stop at
+ *  that evidence.
+ *
+ *  Reading the LAST turn alone was the bug: `takeUnsentResults()` CLEARS the in-memory debt,
+ *  so a send that then failed to reach the provider dropped it, and once another turn followed,
+ *  nothing looked further back. Every later request was refused with "No tool output found for
+ *  function call ..." until the chat was reset. */
 export function unansweredCalls(turns: Turn[]): ToolResultItem[] {
-  const last = turns.at(-1);
-  if (!last) return [];
-  const answered = new Set(
-    last.parts.filter((p) => p.kind === "tool_result").map((p) => String(p.call_id ?? "")),
-  );
-  return last.parts
-    .filter((p) => p.kind === "tool_call" && !answered.has(String(p.call_id ?? "")))
-    .map((p) => ({
-      call_id: String(p.call_id ?? ""),
-      name: String(p.name ?? ""),
-      result: { ok: false, error: "not run — the app closed before this tool call finished" },
-    }))
-    .filter((r) => r.call_id);
+  const owed: ToolResultItem[] = [];
+  for (let i = turns.length - 1; i >= 0; i--) {
+    const parts = turns[i].parts;
+    const answered = new Set(
+      parts.filter((p) => p.kind === "tool_result").map((p) => String(p.call_id ?? "")),
+    );
+    const batch: ToolResultItem[] = [];
+    for (const p of parts) {
+      if (p.kind !== "tool_call") continue;
+      const id = String(p.call_id ?? "");
+      if (!id || answered.has(id)) continue;
+      batch.push({
+        call_id: id,
+        name: String(p.name ?? ""),
+        result: { ok: false, error: "not run — the app closed before this tool call finished" },
+      });
+    }
+    owed.unshift(...batch); // whole turn at once: within a round the calls keep their order
+    if (answered.size) break; // this round was accepted: nothing before it is still owed
+  }
+  return owed;
 }
 
 /** The transcript to send for a round: pre-turn history on the first (user)

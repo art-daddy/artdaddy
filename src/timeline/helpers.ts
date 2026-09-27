@@ -317,15 +317,32 @@ function nextAudioTrackId(tracks: Track[]): string {
  *  add_captions derives its own timings, so it owns the choice of where they land. Taking the
  *  default track unconditionally meant one pre-existing title was enough to make the entire
  *  call fail validation ("timeline_in=0 overlaps prev") and change nothing — a plain
- *  "add a title, then caption it" sequence. An explicit track_id is still honoured as given:
- *  the caller asked for that track, and quietly moving their captions elsewhere is worse. */
+ *  "add a title, then caption it" sequence.
+ *
+ *  A NAMED track is still honoured rather than silently swapped — but naming an occupied one
+ *  used to skip the fit check entirely and append regardless, so the whole call died deeper
+ *  down on `captions.clips[1]: timeline_in=2 overlaps previous clip`. That is the same refusal
+ *  a group drag makes (`refuseOverwrite`), minus any way for the caller to act on it. Refuse
+ *  HERE instead, naming what is in the way, so no overlapping caption is ever built. */
 export function resolveCaptionTrack(
   timeline: Timeline,
   trackId: string | null | undefined,
   spans: Array<{ in: number; out: number }>,
 ): Track {
-  if (trackId) return resolveTrack(timeline, trackId, "text", true);
   const fits = (t: Track) => !spans.some((s) => spanOverlaps(t.clips ?? [], s.in, s.out));
+  if (trackId) {
+    const named = resolveTrack(timeline, trackId, "text", true);
+    if (!fits(named)) {
+      const free = timeline.tracks.find((t) => t.kind === "text" && t.id !== named.id && fits(t));
+      throw new Error(
+        `track '${named.id}' already has clips where these captions go — ` +
+          (free
+            ? `pass text_track_id:'${free.id}', or omit it to place them automatically`
+            : "omit text_track_id to place them on a free track, or clear that track first"),
+      );
+    }
+    return named;
+  }
   const free = timeline.tracks.find((t) => t.kind === "text" && fits(t));
   if (free) return free;
   const existing = new Set(timeline.tracks.map((t) => t.id));
