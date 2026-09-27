@@ -106,18 +106,29 @@ jobs:
       # loadable CPU backend at all, so a machine with no Vulkan driver would lose transcription
       # entirely — a hard failure where it currently just works. ~7 MB against the 51 MB
       # ggml-vulkan.dll already in the zip.
-      # CMAKE_MSVC_RUNTIME_LIBRARY links the CRT STATICALLY. Without it every binary here imports
-      # MSVCP140/VCRUNTIME140/VCRUNTIME140_1, which arrive with the Visual C++ redistributable —
-      # present on every dev box and every CI runner, and on no clean Windows install. A machine
-      # without it cannot START whisper-cli: exit 0xC0000135, empty stderr, nothing the app can
-      # report. One user produced 56 of those in a single session. fetch-sidecars.mjs also ships
-      # the runtime app-local, so a build made before this flag still works; this removes the
-      # dependency at the source rather than shipping around it.
+      # CMAKE_MSVC_RUNTIME_LIBRARY links the C/C++ runtime STATICALLY, so the binaries stop
+      # importing MSVCP140/VCRUNTIME140/VCRUNTIME140_1 — the Visual C++ redistributable, present
+      # on every dev box and every CI runner and on no clean Windows install. A machine without
+      # it cannot START whisper-cli: exit 0xC0000135, empty stderr, nothing the app can report.
+      # One user produced 56 of those in a single session.
+      #
+      # CMAKE_POLICY_DEFAULT_CMP0091=NEW is what makes that flag DO anything. Under the old
+      # policy CMake ignores MSVC_RUNTIME_LIBRARY entirely and bakes /MD in via CMAKE_C_FLAGS,
+      # with no warning. Setting the flag alone produced a build whose dependency set was
+      # byte-for-byte the same as before — green CI, zero effect, and it would have been taken
+      # as proof the problem was solved at the source.
+      #
+      # vcomp140 (OpenMP) is NOT covered: MSVC ships no static OpenMP runtime, so it stays
+      # app-local via fetch-sidecars.mjs regardless of what is done here. Turning OpenMP off
+      # would remove it, at a CPU-path cost nobody has measured — so that is a deliberate
+      # non-decision, not an oversight. src/contract/whisperRuntimeDeps.test.ts is what proves
+      # the shipped set is complete either way.
       - name: Build
         working-directory: whisper.cpp
         run: |
           cmake -B build `
             -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_POLICY_DEFAULT_CMP0091=NEW `
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
             -DGGML_VULKAN=ON `
             -DGGML_BACKEND_DL=ON `

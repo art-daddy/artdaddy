@@ -26,7 +26,10 @@ import { describe, expect, it } from "vitest";
 // LoadLibrary (which is how ggml probes its CPU/Vulkan backends) is invisible here by design —
 // those are soft-failed and fall back, so they cannot produce this crash.
 
-const whisperDir = join(process.cwd(), "src-tauri/resources/whisper");
+// Overridable so the same check can be aimed at an EXTRACTED INSTALLER, which is the artifact
+// users actually get; the repo's staging directory is only what we hope ends up there.
+const whisperDir =
+  process.env.ARTDADDY_WHISPER_DIR || join(process.cwd(), "src-tauri/resources/whisper");
 
 /** DLLs that ship WITH Windows (or with the GPU driver), so importing them is safe.
  *
