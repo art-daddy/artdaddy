@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
@@ -99,50 +99,68 @@ function importedDlls(file: string): string[] {
   return names;
 }
 
-const staged = existsSync(whisperDir)
+// The binary the app SPAWNS is the externalBin copy, which lives outside the DLL directory and
+// finds its libraries through the cwd TauriCommandRunner sets (src/tools/tauri.ts). An earlier
+// version of this file checked a whisper-cli.exe that happened to sit in resources/whisper —
+// fetch-sidecars prunes that copy as "not part of this build", so the check was aimed at a file
+// that is not shipped and not executed.
+function runtimeExe(): string | null {
+  if (process.env.ARTDADDY_WHISPER_EXE) return process.env.ARTDADDY_WHISPER_EXE;
+  const dir = join(process.cwd(), "src-tauri/binaries");
+  if (!existsSync(dir)) return null;
+  const hit = readdirSync(dir).find((f) => /^artdaddy-whisper-cli.*\.exe$/i.test(f));
+  return hit ? join(dir, hit) : null;
+}
+
+const stagedDlls = existsSync(whisperDir)
   ? readdirSync(whisperDir).filter((f) => /\.(dll|exe)$/i.test(f))
   : [];
+const exe = runtimeExe();
+
+/** Everything the loader touches: the spawned exe plus every library beside it. */
+const loaded: { label: string; path: string }[] = [
+  ...(exe ? [{ label: basename(exe), path: exe }] : []),
+  ...stagedDlls.map((f) => ({ label: f, path: join(whisperDir, f) })),
+];
 
 // Sidecars are fetched by a separate script, so a clean checkout has nothing to inspect.
 // Scoped to "the directory is empty" rather than per-file, so a PARTIAL stage still fails.
-describe.skipIf(staged.length === 0)("staged whisper binaries: runtime dependencies", () => {
+describe.skipIf(stagedDlls.length === 0)("staged whisper binaries: runtime dependencies", () => {
   it("parses real import tables (guards the parser itself)", () => {
-    const cli = staged.find((f) => f.toLowerCase() === "whisper-cli.exe");
-    expect(cli, "whisper-cli.exe is not staged").toBeDefined();
+    expect(exe, "no artdaddy-whisper-cli executable to check").not.toBeNull();
 
-    const imports = importedDlls(join(whisperDir, cli!));
+    const imports = importedDlls(exe!);
     // If the parse silently returned nothing, every other assertion here would pass on an
     // empty set. whisper-cli links the CRT and Win32; it is never importless.
     expect(imports.length, "parsed no imports at all — the PE parser is broken").toBeGreaterThan(2);
     expect(imports).toContain("kernel32.dll");
   });
 
-  it.each(staged)("%s imports nothing a clean Windows install would lack", (file) => {
-    const present = new Set(staged.map((f) => f.toLowerCase()));
+  it.each(loaded)("$label imports nothing a clean Windows install would lack", ({ label, path }) => {
+    const present = new Set(stagedDlls.map((f) => f.toLowerCase()));
 
-    const unresolvable = importedDlls(join(whisperDir, file)).filter(
+    const unresolvable = importedDlls(path).filter(
       (dep) => !present.has(dep) && !SYSTEM_DLL.some((re) => re.test(dep)),
     );
 
     expect(
       unresolvable,
-      `${file} imports ${unresolvable.join(", ")}, which is neither staged beside it nor part ` +
+      `${label} imports ${unresolvable.join(", ")}, which is neither staged beside it nor part ` +
         "of Windows. On a machine without it the process dies in the loader with no stderr and " +
         "no exit status, and transcription fails looking exactly like silent audio. Stage the " +
         "library in scripts/fetch-sidecars.mjs, or link it statically in the whisper workflow.",
     ).toEqual([]);
   });
 
-  // The reason the redist DLLs are staged at all. If a future whisper build links the CRT
-  // statically these imports vanish and the staging can be dropped — but until then their
-  // ABSENCE is the bug, and the test above would happily pass with them simply not imported.
-  it("still needs the VC++ redistributable staged", () => {
-    const crt = ["msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll"];
-    const importedSomewhere = new Set(staged.flatMap((f) => importedDlls(join(whisperDir, f))));
-    const needed = crt.filter((d) => importedSomewhere.has(d));
-    const present = new Set(staged.map((f) => f.toLowerCase()));
+  // Whichever redist libraries this build still imports must be staged. Kept as a separate
+  // assertion because the check above passes just as happily when NOTHING imports them, so it
+  // cannot tell "we linked statically" from "we stopped looking".
+  it("stages every redistributable library the build still imports", () => {
+    const redist = ["msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll", "vcomp140.dll"];
+    const importedSomewhere = new Set(loaded.flatMap((f) => importedDlls(f.path)));
+    const present = new Set(stagedDlls.map((f) => f.toLowerCase()));
 
-    for (const dep of needed) {
+    for (const dep of redist.filter((d) => importedSomewhere.has(d))) {
       expect(present.has(dep), `${dep} is imported but not staged`).toBe(true);
     }
   });
