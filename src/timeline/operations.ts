@@ -33,6 +33,8 @@ import {
   linkPartners,
   overwroteAnything,
   resolveTrack,
+  resolveTextTrack,
+  rangesOverlap,
   rippleDeleteRange,
   rippleOpenGap,
   spanFrames,
@@ -198,30 +200,91 @@ export function insertClips(
 }
 
 /** Add text clips — no media, so nothing to probe and no source window. */
+/** Entries that will land on ONE track, in the order the caller wrote them. */
+interface TextBatch {
+  readonly trackId: string | null; // null = auto-place
+  readonly items: Array<{ index: number; tin: number; tout: number }>;
+}
+
+/** Refuse a batch whose own entries collide, naming both sides.
+ *
+ *  A track shows one text at a time, so two overlapping entries cannot both render. The
+ *  validator downstream does catch it, but only after normalizeTimeline has SORTED the track,
+ *  so it reports an index into an array the caller never saw ("clips[7] overlaps previous
+ *  clip") and there is no way to tell which entry was wrong or whether the collision was with
+ *  pre-existing content. Name the caller's own indices instead. */
+function refuseSelfOverlap(batch: TextBatch): void {
+  const ordered = [...batch.items].sort((a, b) => a.tin - b.tin);
+  for (let i = 1; i < ordered.length; i++) {
+    const prev = ordered[i - 1];
+    const cur = ordered[i];
+    if (!rangesOverlap(prev.tin, prev.tout, cur.tin, cur.tout)) continue;
+    throw new OpError(
+      `entries[${cur.index}] (frames ${cur.tin}-${cur.tout}) overlaps entries[${prev.index}] ` +
+        `(frames ${prev.tin}-${prev.tout}); one track shows one text at a time. Change the ` +
+        "timing so they don't overlap, or give one of them its own track_id.",
+    );
+  }
+}
+
 export function addTextClips(timeline: Timeline, entries: Args[]): OperationResult {
   const fps = canvasFps(timeline);
+
+  // Resolve and validate EVERY entry before touching the timeline: a refusal must leave no
+  // half-written track behind, and the caller gets the first real problem rather than
+  // whichever one happened to be reached first.
+  const spans = entries.map((e) => spanFrames(e, fps));
+  entries.forEach((e, i) => {
+    const content = typeof e.content === "string" ? [{ text: e.content }] : e.content;
+    // A text clip with nothing to draw is never what anyone meant, and it is invisible rather
+    // than noisy: the call returns ok, the clip lands, and the frame is blank. `raw_ass` counts
+    // as content — it carries its own.
+    if (!present(content) && !present(e.raw_ass)) {
+      throw new OpError(
+        `entries[${i}] needs 'content' (the text to show)${e.text !== undefined ? " — got 'text'" : ""}`,
+      );
+    }
+  });
+
+  const batches = new Map<string | null, TextBatch>();
+  entries.forEach((e, index) => {
+    const trackId = (e.track_id as string | undefined) || null;
+    let batch = batches.get(trackId);
+    if (!batch) batches.set(trackId, (batch = { trackId, items: [] }));
+    (batch.items as TextBatch["items"]).push({ index, tin: spans[index][0], tout: spans[index][1] });
+  });
+  for (const batch of batches.values()) refuseSelfOverlap(batch);
+
+  const named = new Set([...batches.keys()].filter((id): id is string => id !== null));
+  const trackFor = new Map<string | null, Track>();
+  for (const batch of batches.values()) {
+    trackFor.set(
+      batch.trackId,
+      resolveTextTrack(
+        timeline,
+        batch.trackId,
+        batch.items.map((it) => ({ in: it.tin, out: it.tout })),
+        // Auto-placed entries stay off tracks another entry named: those clips are not
+        // written yet, so a fit check against the timeline cannot see them coming.
+        { param: "track_id", exclude: batch.trackId === null ? named : undefined },
+      ),
+    );
+  }
+
   const created: Array<Record<string, unknown>> = [];
-  for (const e of entries) {
-    const [tin, tout] = spanFrames(e, fps);
+  entries.forEach((e, i) => {
+    const [tin, tout] = spans[i];
     const clip: Clip = { id: newId("txt"), kind: "text", timeline_in: tin, timeline_out: tout };
     let content = e.content;
     if (typeof content === "string") content = [{ text: content }];
     if (present(content)) clip.content = content as Clip["content"];
-    // A text clip with nothing to draw is never what anyone meant, and it is invisible rather
-    // than noisy: the call returns ok, the clip lands, and the frame is blank. `raw_ass` counts
-    // as content — it carries its own.
-    if (!present(clip.content) && !present(e.raw_ass)) {
-      throw new OpError(
-        `each entry needs 'content' (the text to show)${e.text !== undefined ? " — got 'text'" : ""}`,
-      );
-    }
     for (const key of ["style", "transform", "animation", "raw_ass", "rotate"] as const) {
       if (present(e[key])) (clip as Record<string, unknown>)[key] = e[key];
     }
-    const track = resolveTrack(timeline, e.track_id as string | undefined, "text", true);
+    const track = trackFor.get((e.track_id as string | undefined) || null)!;
     (track.clips ??= []).push(clip);
     created.push({ clip_id: clip.id, track_id: track.id });
-  }
+  });
   return { created, count: created.length };
 }
 

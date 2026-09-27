@@ -295,6 +295,12 @@ export function spanFrames(entry: Record<string, unknown>, fps: number): [number
   return [tin, tout];
 }
 
+/** Two half-open frame ranges share at least one frame. The one definition of "these
+ *  collide", so a caller cannot disagree with the check that will reject it later. */
+export function rangesOverlap(aIn: number, aOut: number, bIn: number, bOut: number): boolean {
+  return aIn < bOut && bIn < aOut;
+}
+
 function spanOverlaps(clips: Clip[], tin: number, tout: number): boolean {
   for (const c of clips) {
     if (c === null || typeof c !== "object") continue;
@@ -312,33 +318,46 @@ function nextAudioTrackId(tracks: Track[]): string {
   return `a${n}`;
 }
 
-/** A text track the whole caption group fits on, creating one if every existing track is busy.
+/** A text track the whole batch fits on, creating one if every existing track is busy.
+ *
+ *  Shared by add_captions and add_text_clips: both answer "where does this text go?", and
+ *  the two used to answer it differently — captions fit-checked, titles took the default
+ *  track and appended regardless, so one pre-existing clip killed the whole call deeper down
+ *  on `captions.clips[1]: timeline_in=2 overlaps previous clip`. Same family, one of them
+ *  fixed, which is how they drifted in the first place.
  *
  *  add_captions derives its own timings, so it owns the choice of where they land. Taking the
  *  default track unconditionally meant one pre-existing title was enough to make the entire
- *  call fail validation ("timeline_in=0 overlaps prev") and change nothing — a plain
- *  "add a title, then caption it" sequence.
+ *  call fail validation and change nothing — a plain "add a title, then caption it" sequence.
  *
  *  A NAMED track is still honoured rather than silently swapped — but naming an occupied one
- *  used to skip the fit check entirely and append regardless, so the whole call died deeper
- *  down on `captions.clips[1]: timeline_in=2 overlaps previous clip`. That is the same refusal
- *  a group drag makes (`refuseOverwrite`), minus any way for the caller to act on it. Refuse
- *  HERE instead, naming what is in the way, so no overlapping caption is ever built. */
-export function resolveCaptionTrack(
+ *  used to skip the fit check entirely and append regardless. That is the same refusal a group
+ *  drag makes (`refuseOverwrite`), minus any way for the caller to act on it. Refuse HERE
+ *  instead, naming what is in the way, so no overlapping text is ever built.
+ *
+ *  `exclude` keeps auto-placed entries off tracks another entry in the SAME call named
+ *  explicitly — those clips do not exist yet, so a fit check cannot see them. */
+export function resolveTextTrack(
   timeline: Timeline,
   trackId: string | null | undefined,
   spans: Array<{ in: number; out: number }>,
+  opts: { param?: string; exclude?: ReadonlySet<string> } = {},
 ): Track {
-  const fits = (t: Track) => !spans.some((s) => spanOverlaps(t.clips ?? [], s.in, s.out));
+  const param = opts.param ?? "text_track_id";
+  const exclude = opts.exclude ?? new Set<string>();
+  const fits = (t: Track) =>
+    !exclude.has(t.id) && !spans.some((s) => spanOverlaps(t.clips ?? [], s.in, s.out));
   if (trackId) {
     const named = resolveTrack(timeline, trackId, "text", true);
-    if (!fits(named)) {
+    // A named track is checked on its own terms: `exclude` only governs AUTO placement, so
+    // naming a track another entry also names is the caller's business, not a refusal here.
+    if (spans.some((s) => spanOverlaps(named.clips ?? [], s.in, s.out))) {
       const free = timeline.tracks.find((t) => t.kind === "text" && t.id !== named.id && fits(t));
       throw new Error(
-        `track '${named.id}' already has clips where these captions go — ` +
+        `track '${named.id}' already has clips where these go — ` +
           (free
-            ? `pass text_track_id:'${free.id}', or omit it to place them automatically`
-            : "omit text_track_id to place them on a free track, or clear that track first"),
+            ? `pass ${param}:'${free.id}', or omit it to place them automatically`
+            : `omit ${param} to place them on a free track, or clear that track first`),
       );
     }
     return named;
@@ -346,10 +365,10 @@ export function resolveCaptionTrack(
   const free = timeline.tracks.find((t) => t.kind === "text" && fits(t));
   if (free) return free;
   const existing = new Set(timeline.tracks.map((t) => t.id));
-  if (!existing.has(DEFAULT_TRACK.text))
+  if (!existing.has(DEFAULT_TRACK.text) && !exclude.has(DEFAULT_TRACK.text))
     return resolveTrack(timeline, DEFAULT_TRACK.text, "text", true);
   let n = 2;
-  while (existing.has(`${DEFAULT_TRACK.text}${n}`)) n++;
+  while (existing.has(`${DEFAULT_TRACK.text}${n}`) || exclude.has(`${DEFAULT_TRACK.text}${n}`)) n++;
   return resolveTrack(timeline, `${DEFAULT_TRACK.text}${n}`, "text", true);
 }
 

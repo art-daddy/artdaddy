@@ -1,4 +1,4 @@
-// add_captions: spoken audio -> caption clips, in one call.
+﻿// add_captions: spoken audio -> caption clips, in one call.
 //
 // The model's job here is to ask for captions, not to compute them. Transcription, phrase
 // chunking, frame mapping, gap closing and placement are all deterministic, so they live in
@@ -17,7 +17,7 @@ import {
 import { parseSubtitles, subtitleFormat, type SubtitleCue } from "../timeline/subtitleParse";
 import { ctxApplyOp, loadTimeline } from "../timeline/engine";
 import { canvasFps, newId } from "../timeline/frames";
-import { clipSpanToFrames, resolveCaptionTrack } from "../timeline/helpers";
+import { clipSpanToFrames, resolveTextTrack } from "../timeline/helpers";
 import type { Clip, Timeline } from "../timeline/model";
 import type { ClientToolContext } from "./context";
 import type { ClientToolRegistry } from "./registry";
@@ -33,7 +33,7 @@ const DEFAULT_MAX_GAP_SECONDS = 0.5;
 
 /** Where a caption sits when nobody says otherwise: centred, low in the frame.
  *
- *  Text renders dead-centre by default, which is right for a TITLE and wrong for a caption —
+ *  Text renders dead-centre by default, which is right for a TITLE and wrong for a caption â€”
  *  "add a title, then caption it" stacked the two on top of each other, unreadable. Matches
  *  established desktop NLEs's `AppTheme.Caption.defaultCenter`. Written onto each caption as a real
  *  transform rather than applied at render time, so it is visible in get_timeline, draggable in
@@ -63,7 +63,7 @@ const HERO_MODES = ["none", "longest", "first", "last"];
 
 /** Flag ONE run per card as the hero, so `animation.emphasis` has a target.
  *  Without this the emphasis spec has nothing to mark and every word renders in the base
- *  colour — which is why "one key word in yellow" was unbuildable even after cards became
+ *  colour â€” which is why "one key word in yellow" was unbuildable even after cards became
  *  per-word runs. `longest` picks the longest alphanumeric word, a decent stand-in for the
  *  stressed one; ties keep the earliest so the choice is stable. */
 function markHero(runs: CaptionRun[], mode: string): void {
@@ -162,7 +162,7 @@ export async function addCaptionsTool(args: Args, ctx: ClientToolContext | null)
   }
 
   // Transcribe each candidate track. Auto-pick reads every track because "the track with the
-  // most speech" cannot be known before transcribing — but each result is cached, so the cost
+  // most speech" cannot be known before transcribing â€” but each result is cached, so the cost
   // is paid once per source, not once per call.
   const candidates = wantTrack ? [wantTrack] : [...byTrack.keys()];
   const cuesByTrack = new Map<string, Cue[]>();
@@ -192,7 +192,7 @@ export async function addCaptionsTool(args: Args, ctx: ClientToolContext | null)
         // Carry the WORDS, not just the joined string. Collapsing a card to one run is why
         // `word-by-word`, `word-highlight` and `karaoke` rendered statically: those builds animate
         // per chunk, and a card with one chunk has nothing to animate. It is also why there was
-        // nothing for `animation.emphasis` to mark — a hero is a RUN, and there was only ever one.
+        // nothing for `animation.emphasis` to mark â€” a hero is a RUN, and there was only ever one.
         // Times are seconds RELATIVE to the card, which is what the render plan reads.
         const cardSec = (span[0] - 0) / fps;
         const words = phrase.words.map((w) => {
@@ -218,7 +218,7 @@ export async function addCaptionsTool(args: Args, ctx: ClientToolContext | null)
     if (failures.length) {
       return {
         ok: false,
-        error: `transcription failed for all ${failures.length} audio clip(s) — a tool failure, NOT an absence of speech: ${failures[0].error}`,
+        error: `transcription failed for all ${failures.length} audio clip(s) â€” a tool failure, NOT an absence of speech: ${failures[0].error}`,
         failed: failures,
       };
     }
@@ -252,7 +252,7 @@ export async function addCaptionsTool(args: Args, ctx: ClientToolContext | null)
   const animation = args.animation;
 
   const result = await ctxApplyOp(ctx, "add_captions", (tl) => {
-    const track = resolveCaptionTrack(
+    const track = resolveTextTrack(
       tl,
       args.text_track_id as string | undefined,
       placed.map((c) => c.span),
@@ -293,7 +293,7 @@ function numOrUndef(v: unknown): number | undefined {
   return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
-/** Place an SRT/WebVTT file's cues at their AUTHORED timecodes — no transcription, no chunking:
+/** Place an SRT/WebVTT file's cues at their AUTHORED timecodes â€” no transcription, no chunking:
  *  someone already decided where the words break, and second-guessing that is how an imported
  *  subtitle stops matching the video it was made for. */
 async function placeSubtitleCues(
@@ -342,7 +342,7 @@ async function placeSubtitleCues(
 
   const group = newId("cap");
   return ctxApplyOp(ctx, "add_captions", (tl) => {
-    const track = resolveCaptionTrack(
+    const track = resolveTextTrack(
       tl,
       args.text_track_id as string | undefined,
       placed.map((c) => c.span),
