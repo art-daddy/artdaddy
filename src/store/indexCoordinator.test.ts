@@ -7,17 +7,30 @@ import type { Timeline } from "../timeline/model";
 type Any = any;
 
 // Mocks must be hoisted so the vi.mock factories can reference them.
-const { processImportedMedia, clearSourceUrlCache, ensureTranscript, reportAppError } = vi.hoisted(
-  () => ({
-    processImportedMedia: vi.fn(async () => false),
-    clearSourceUrlCache: vi.fn(),
-    ensureTranscript: vi.fn(async () => ({ path: "t.json", parsed: {}, existed: false })),
-    reportAppError: vi.fn(),
-  }),
-);
+const {
+  processImportedMedia,
+  clearSourceUrlCache,
+  ensureTranscript,
+  reportAppError,
+  sourceHasAudio,
+} = vi.hoisted(() => ({
+  processImportedMedia: vi.fn(async () => false),
+  clearSourceUrlCache: vi.fn(),
+  ensureTranscript: vi.fn(async () => ({ path: "t.json", parsed: {}, existed: false })),
+  reportAppError: vi.fn(),
+  sourceHasAudio: vi.fn(async () => true),
+}));
+
+/** A speech engine that cannot start. Shape-compatible with the real typed error. */
+class FakeEngineDown extends Error {
+  readonly code = "speech_engine_unavailable";
+}
+const isSpeechEngineUnavailable = (e: unknown): boolean => e instanceof FakeEngineDown;
+
 vi.mock("../preview/mediaProxy", () => ({ processImportedMedia }));
 vi.mock("../preview/resolve", () => ({ clearSourceUrlCache }));
-vi.mock("../tools/transcribe", () => ({ ensureTranscript }));
+vi.mock("../tools/transcribe", () => ({ ensureTranscript, isSpeechEngineUnavailable }));
+vi.mock("../timeline/placement", () => ({ sourceHasAudio }));
 vi.mock("../api/appEvents", () => ({ reportAppError }));
 
 /** The sources handed to the transcript pass, in order. */
@@ -29,6 +42,7 @@ const makeRunner = async () => runner as Any;
 const fakeStore = (clips: { path: string; status?: string; id?: string }[] = []): Any => ({
   projectDir: "C:/p",
   listClips: vi.fn(async () => clips),
+  resolveRef: vi.fn(async (r: string) => `C:/p/${r}`),
 });
 
 function tl(clips: { media_ref: string; kind?: string }[]): Timeline {
@@ -55,6 +69,8 @@ beforeEach(() => {
   ensureTranscript.mockReset();
   ensureTranscript.mockResolvedValue({ path: "t.json", parsed: {}, existed: false });
   reportAppError.mockReset();
+  sourceHasAudio.mockReset();
+  sourceHasAudio.mockResolvedValue(true);
 });
 
 describe("IndexCoordinator", () => {
@@ -228,6 +244,58 @@ describe("IndexCoordinator", () => {
     expect(processImportedMedia).toHaveBeenCalledTimes(1);
     await settle(() => ensureTranscript.mock.calls.length > 0);
     expect(transcribed()).toEqual(["library/a.mp4"]);
+  });
+
+  // Her footage included silent video. ffmpeg is asked for an audio-only output, says "Output
+  // file does not contain any stream" and exits EINVAL -- which read as a broken transcriber.
+  it("never transcribes media that has no audio track", async () => {
+    sourceHasAudio.mockResolvedValue(false);
+    const c = new IndexCoordinator(
+      fakeStore([{ id: "m1", path: "library/silent.mp4" }]),
+      makeRunner,
+      vi.fn(),
+      vi.fn(),
+    );
+
+    await c.sweep(tl([]));
+    await settle(() => sourceHasAudio.mock.calls.length > 0);
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(ensureTranscript).not.toHaveBeenCalled();
+    // Nothing to transcribe is not a failure, so it must not be reported or retried.
+    expect(reportAppError).not.toHaveBeenCalled();
+  });
+
+  it("still transcribes when the audio probe cannot answer", async () => {
+    sourceHasAudio.mockRejectedValue(new Error("ffprobe exploded"));
+    const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+    c.indexSource("library/a.mp3");
+    await settle(() => ensureTranscript.mock.calls.length > 0);
+    expect(transcribed()).toEqual(["library/a.mp3"]);
+  });
+
+  // A machine missing the VC++ runtime cannot START whisper. That is the machine's state, not
+  // the file's, so per-asset retries just repeat it: one user logged 56 identical failures.
+  it("gives up after 3 engine failures and reports once, however many assets are queued", async () => {
+    ensureTranscript.mockRejectedValue(new FakeEngineDown("0xC0000135"));
+    const clips = Array.from({ length: 12 }, (_, i) => ({
+      id: `m${i}`,
+      path: `library/a${i}.mp3`,
+    }));
+    const c = new IndexCoordinator(fakeStore(clips), makeRunner, vi.fn(), vi.fn());
+
+    await c.sweep(tl([]));
+    await settle(() => reportAppError.mock.calls.length > 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    expect(ensureTranscript.mock.calls.length).toBe(3);
+    expect(reportAppError).toHaveBeenCalledTimes(1);
+    expect(String(reportAppError.mock.calls[0][0])).toMatch(/speech engine unavailable/i);
+
+    // ...and it stays given up: a later sweep must not start the same doomed run again.
+    await c.sweep(tl([{ media_ref: "library/late.mp3", kind: "audio" }]));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(ensureTranscript.mock.calls.length).toBe(3);
   });
 
   it("clears the URL cache + bumps the preview when a new proxy lands", async () => {

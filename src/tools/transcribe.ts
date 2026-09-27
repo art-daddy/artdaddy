@@ -12,6 +12,7 @@ import { shortHash } from "./media";
 import type { ClientToolRegistry } from "./registry";
 import { joinPath } from "./store";
 import { beginSessionActivity } from "../observability/crashWatch";
+import { ArtDaddyError } from "../lib/errors";
 import {
   clearModelDownload,
   megabytes,
@@ -562,6 +563,33 @@ async function ensureWav(ctx: ClientToolContext, src: string): Promise<string> {
   });
 }
 
+/** Windows kills a process that cannot resolve its imports BEFORE a line of its code runs, so
+ *  there is no stderr to read and no exit status from whisper itself — only an NTSTATUS. One
+ *  user's machine lacked the Visual C++ runtime whisper-cli imports and produced 56 of these in
+ *  a single session: identical, empty, and indistinguishable from a broken media file. */
+const WINDOWS_LOAD_FAILURES: ReadonlySet<number> = new Set([
+  -1073741515, // 0xC0000135 STATUS_DLL_NOT_FOUND
+  -1073741511, // 0xC0000139 STATUS_ENTRYPOINT_NOT_FOUND
+  -1073741701, // 0xC000007B STATUS_INVALID_IMAGE_FORMAT
+]);
+
+/** The speech engine cannot run on this machine AT ALL. Distinct from "this file failed":
+ *  retrying it per asset just repeats the same load failure, so the caller must stop asking. */
+export class SpeechEngineUnavailableError extends ArtDaddyError {
+  readonly code = "speech_engine_unavailable";
+  readonly expected = true;
+  constructor(readonly exitCode: number) {
+    super("The speech engine could not start on this machine, so audio cannot be transcribed.");
+    this.name = "SpeechEngineUnavailableError";
+  }
+}
+
+/** Duck-typed on purpose: the background indexer resolves this through its dynamic module
+ *  record, so an `instanceof` would drag desktop-only transcription into the main bundle. */
+export function isSpeechEngineUnavailable(e: unknown): boolean {
+  return e instanceof SpeechEngineUnavailableError;
+}
+
 export async function runWhisper(
   ctx: ClientToolContext,
   src: string,
@@ -624,6 +652,8 @@ export async function runWhisper(
       // it surfaced as `whisper-cli failed (code=-1): cancelled`, which reads as a broken
       // install rather than as the thing the user just asked for.
       if (ctx.signal?.aborted) throw new Error("transcription cancelled");
+      if (run.code !== null && WINDOWS_LOAD_FAILURES.has(run.code))
+        throw new SpeechEngineUnavailableError(run.code);
       throw new Error(`whisper-cli failed (code=${run.code}): ${stderrExcerpt(run.stderr, 200)}`);
     }
     return parseWhisperCppJson(await ctx.store.readText(jsonPath));

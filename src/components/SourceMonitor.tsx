@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
+import { ignorePlayRejection } from "../media/playRejection";
 import { resolvePreviewUrl } from "../preview/resolve";
 import { kindOf } from "../media/formats";
 import { useEditor } from "../store/editor";
@@ -30,7 +31,7 @@ function AVPlayer({ url, kind }: { url: string; kind: "video" | "audio" }) {
   const toggle = () => {
     const el = mediaRef.current;
     if (!el) return;
-    if (el.paused) void el.play?.();
+    if (el.paused) el.play?.().catch(ignorePlayRejection);
     else el.pause?.();
   };
   return (

@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { ignorePlayRejection } from "../media/playRejection";
+
 import { platform } from "../platform";
 import { PreviewAudio, publishPreviewAudio } from "../preview/audioEngine";
 import { MASTER } from "../preview/meterPump";
@@ -198,7 +200,7 @@ export default function StagePanel({ projectId }: { projectId: string }) {
     }
     const v = videoRef.current;
     if (!v) return;
-    if (v.paused) void v.play?.();
+    if (v.paused) v.play?.().catch(ignorePlayRejection);
     else v.pause?.();
   }, [showRendered]);
 

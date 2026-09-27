@@ -4,6 +4,7 @@ import type { CommandRunner } from "./command";
 import type { ClientToolContext } from "./context";
 import { ProjectStoreAccess, joinPath, type FsLike } from "./store";
 import { useModelDownload } from "../store/modelDownload";
+import { isExpected } from "../lib/errors";
 import {
   clipWordFrames,
   ensureTranscript,
@@ -11,6 +12,7 @@ import {
   fmtTimestamp,
   fmtTimestampPrecise,
   getTranscriptTool,
+  isSpeechEngineUnavailable,
   parseWhisperCppJson,
   WHISPER_MODELS,
   type WhisperModelSpec,
@@ -194,6 +196,8 @@ interface RunnerOpts {
   failConv?: boolean;
   failWhisper?: boolean;
   json?: string;
+  /** Simulate a process that never started (Windows resolves imports before any code runs). */
+  whisperExit?: number;
 }
 function transcribeRunner(fs: MockFs, opts: RunnerOpts = {}): CommandRunner {
   return {
@@ -204,6 +208,8 @@ function transcribeRunner(fs: MockFs, opts: RunnerOpts = {}): CommandRunner {
         return { code: 0, stdout: "", stderr: "" };
       }
       if (program === "whisper-cli") {
+        if (opts.whisperExit !== undefined)
+          return { code: opts.whisperExit, stdout: "", stderr: "" };
         if (opts.failWhisper) return { code: 1, stdout: "", stderr: "whisper boom" };
         const outBase = args[args.indexOf("-of") + 1];
         await fs.writeTextFile(`${outBase}.json`, opts.json ?? WHISPER_JSON);
@@ -671,6 +677,44 @@ describe("ensureTranscript", () => {
     await expect(
       ensureTranscript(ctxWith(transcribeRunner(fs, { failWhisper: true }), fs), "audio.mp4"),
     ).rejects.toThrow(/whisper-cli failed/);
+  });
+
+  // Windows resolves a process's imports BEFORE any of its code runs, so a machine missing the
+  // Visual C++ runtime whisper-cli needs produces this: no stderr, no whisper exit status, just
+  // an NTSTATUS. One user's machine did it 56 times in a session, identical every time, and it
+  // was indistinguishable from a broken media file.
+  it.each([
+    [-1073741515, "0xC0000135 STATUS_DLL_NOT_FOUND"],
+    [-1073741511, "0xC0000139 STATUS_ENTRYPOINT_NOT_FOUND"],
+    [-1073741701, "0xC000007B STATUS_INVALID_IMAGE_FORMAT"],
+  ])("reports a process that never started (%i) as an unavailable engine, not a bad file", async (
+    code,
+  ) => {
+    const fs = new MockFs();
+    fs.touch(joinPath(DIR, "audio.mp4"));
+    fs.putModel();
+    const err = await ensureTranscript(
+      ctxWith(transcribeRunner(fs, { whisperExit: code }), fs),
+      "audio.mp4",
+    ).catch((e: unknown) => e);
+
+    expect(isSpeechEngineUnavailable(err)).toBe(true);
+    // Expected, not a crash: the machine is misconfigured, which is not a Sentry event.
+    expect(isExpected(err)).toBe(true);
+    expect(String(err)).not.toMatch(/whisper-cli failed/);
+  });
+
+  // The opposite direction: an ordinary non-zero exit is still just a failed transcription, and
+  // must NOT disable transcription for the whole session.
+  it("treats an ordinary whisper failure as a per-file failure", async () => {
+    const fs = new MockFs();
+    fs.touch(joinPath(DIR, "audio.mp4"));
+    fs.putModel();
+    const err = await ensureTranscript(
+      ctxWith(transcribeRunner(fs, { failWhisper: true }), fs),
+      "audio.mp4",
+    ).catch((e: unknown) => e);
+    expect(isSpeechEngineUnavailable(err)).toBe(false);
   });
 });
 

@@ -256,14 +256,17 @@ async function fetchWhisper() {
     copyFileSync(dll, dst);
     console.log(`  staged whisper dll -> ${dst} (${(statSync(dst).size / 1e6).toFixed(1)} MB)`);
   }
+  // Staged BEFORE the prune below, and named in its keep-list: the pruner deletes anything the
+  // zip did not contain, and the VC++ runtime never comes from the zip.
+  const vcRuntime = stageVcRuntime();
   // Copying never deletes, so the directory accumulated whatever earlier fetches put there —
   // it still held SDL2.dll from the pre-Vulkan zip. That is a LOAD PATH: ggml scans it for
   // ggml-*.dll, so a backend from a previous build sits there as a candidate to load next to
   // the current set, and gets bundled into every installer besides.
-  for (const gone of stalePaths(
-    readdirSync(whisperResDir),
-    dlls.map((d) => basename(d)),
-  )) {
+  for (const gone of stalePaths(readdirSync(whisperResDir), [
+    ...dlls.map((d) => basename(d)),
+    ...vcRuntime,
+  ])) {
     rmSync(join(whisperResDir, gone), { force: true });
     console.log(`  pruned stale ${gone} (not part of this build)`);
   }
@@ -277,6 +280,72 @@ async function fetchWhisper() {
       ? "  whisper backend: VULKAN (GPU when the machine has a usable driver, CPU otherwise)"
       : "  whisper backend: CPU ONLY — no ggml-vulkan.dll in this build",
   );
+}
+
+/** The MSVC runtime whisper-cli STATICALLY imports. */
+const VC_RUNTIME_DLLS = ["msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll"];
+
+/** Ship the Visual C++ runtime beside whisper, because a clean Windows does not have it.
+ *
+ *  whisper-cli.exe imports MSVCP140/VCRUNTIME140/VCRUNTIME140_1 at LOAD time. They arrive with
+ *  the Visual C++ redistributable, which is on every dev box and every CI runner and on no
+ *  fresh install — so this was invisible to everyone who built or tested the app. A machine
+ *  without it cannot start the process at all: exit 0xC0000135, EMPTY stderr, no message the
+ *  app can report. One user produced 56 of those in a single session and got no transcript,
+ *  no captions, and no explanation. ffmpeg/ffprobe/yt-dlp are unaffected — they are static
+ *  builds with no MSVC dependency, which is exactly why this looked like "whisper is broken"
+ *  rather than "this machine is missing a runtime". */
+function stageVcRuntime() {
+  if (osName !== "win") return [];
+  const wanted = new Set(VC_RUNTIME_DLLS);
+  const found = new Map();
+  for (const root of vcRedistRoots()) {
+    // Newest redist version first, so a box with several VS toolsets ships one coherent set.
+    for (const p of findFiles(root, (n) => wanted.has(n.toLowerCase())).sort().reverse()) {
+      if (!/[\\/]x64[\\/]/i.test(p)) continue; // never stage the 32-bit copies
+      const key = basename(p).toLowerCase();
+      if (!found.has(key)) found.set(key, p);
+    }
+  }
+  // Last resort: the live system copies. Same files, minus the redistributable licence folder.
+  for (const name of wanted) {
+    if (found.has(name)) continue;
+    const sys = join(process.env.WINDIR || "C:\\Windows", "System32", name);
+    if (existsSync(sys)) found.set(name, sys);
+  }
+  const missing = VC_RUNTIME_DLLS.filter((n) => !found.has(n));
+  if (missing.length) {
+    throw new Error(
+      `cannot stage the Visual C++ runtime whisper-cli needs (${missing.join(", ")}). ` +
+        "Install the VC++ redistributable or Visual Studio on this machine — shipping without " +
+        "it leaves transcription dead on every clean Windows install.",
+    );
+  }
+  mkdirSync(whisperResDir, { recursive: true });
+  const staged = [];
+  for (const [name, src] of found) {
+    copyFileSync(src, join(whisperResDir, name));
+    staged.push(name);
+  }
+  console.log(`  staged the VC++ runtime beside whisper: ${staged.join(", ")}`);
+  return staged;
+}
+
+/** Visual Studio's redistributable folders (any edition/year), newest first. */
+function vcRedistRoots() {
+  const roots = [];
+  for (const pf of [process.env.ProgramFiles, process.env["ProgramFiles(x86)"]]) {
+    if (!pf) continue;
+    const vs = join(pf, "Microsoft Visual Studio");
+    if (!existsSync(vs)) continue;
+    for (const year of readdirSync(vs)) {
+      for (const edition of readdirSync(join(vs, year)).map((e) => join(vs, year, e))) {
+        const redist = join(edition, "VC", "Redist", "MSVC");
+        if (existsSync(redist)) roots.push(redist);
+      }
+    }
+  }
+  return roots;
 }
 
 // Prove the staged whisper-cli is REAL whisper — not merely that a process started. The
@@ -390,6 +459,24 @@ async function main() {
       console.log(
         `[fetch-sidecars] verified ${dlls.length} whisper runtime DLL(s) in resources/whisper/.`,
       );
+      // The ggml set above is not enough: whisper-cli also imports the VC++ runtime, which a
+      // clean Windows does not have. Every build and test machine DOES have it, so its absence
+      // from the installer is invisible right up until a real user's process refuses to start.
+      // ENSURE, not just check: fetchWhisper() is skipped whenever the exe is already staged,
+      // so a checkout that predates this would otherwise never gain the runtime it needs.
+      stageVcRuntime();
+      const have = new Set(readdirSync(whisperResDir).map((n) => n.toLowerCase()));
+      const missing = VC_RUNTIME_DLLS.filter((n) => !have.has(n));
+      if (missing.length) {
+        console.error(
+          `\n[fetch-sidecars] the VC++ runtime whisper-cli imports is MISSING from ${whisperResDir}: ${missing.join(", ")}`,
+        );
+        console.error(
+          "  the installer would start whisper only on machines that already have the redistributable.",
+        );
+        process.exit(1);
+      }
+      console.log("[fetch-sidecars] verified the VC++ runtime ships beside whisper.");
     }
     smokeWhisper();
   }

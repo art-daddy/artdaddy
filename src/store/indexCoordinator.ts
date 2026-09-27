@@ -38,6 +38,8 @@ type Pass = "proxy" | "transcript";
 interface IndexModules {
   processImportedMedia: typeof import("../preview/mediaProxy").processImportedMedia;
   ensureTranscript: typeof import("../tools/transcribe").ensureTranscript;
+  isSpeechEngineUnavailable: typeof import("../tools/transcribe").isSpeechEngineUnavailable;
+  sourceHasAudio: typeof import("../timeline/placement").sourceHasAudio;
   clearSourceUrlCache: typeof import("../preview/resolve").clearSourceUrlCache;
 }
 
@@ -51,11 +53,18 @@ interface Ready {
  *  cannot make every subsequent sweep re-run the same doomed job. */
 const MAX_ATTEMPTS = 3;
 
+/** How many times a machine may fail to START the speech engine before we stop asking it to.
+ *  The failure is a property of the MACHINE, not the file, so per-asset retries just repeat it:
+ *  one user's box was missing a runtime and produced 56 identical errors in 100 minutes. */
+const MAX_ENGINE_ATTEMPTS = 3;
+
 export class IndexCoordinator {
   private readonly proxyQ: string[] = [];
   private readonly txQ: string[] = [];
   private readonly seen = new Set<string>(); // `${pass}\0${source}` already enqueued
   private readonly attempts = new Map<string, number>();
+  private engineAttempts = 0;
+  private engineDown = false;
   private readyOnce: Promise<Ready | null> | null = null;
   private proxyRunning = false;
   private txRunning = false;
@@ -150,6 +159,7 @@ export class IndexCoordinator {
   private enqueue(pass: Pass, source: string): void {
     const key = `${pass}\u0000${source}`;
     if (this.seen.has(key)) return;
+    if (pass === "transcript" && this.engineDown) return; // this machine cannot transcribe
     this.seen.add(key);
     if (pass === "proxy") {
       this.proxyQ.push(source);
@@ -159,7 +169,6 @@ export class IndexCoordinator {
     this.txQ.push(source);
     if (!this.txRunning) void this.drainTranscripts();
   }
-
   /** A failed job is REPORTED, not swallowed, and retried a bounded number of times.
    *  Silence here is indistinguishable from footage with no speech — which is exactly how a
    *  broken transcriber stayed invisible until a user's first caption request timed out. */
@@ -193,9 +202,10 @@ export class IndexCoordinator {
     try {
       const runner = await this.makeRunner();
       // Dynamic so the desktop-only transcode and whisper code stays out of the main bundle.
-      const [proxy, transcribe, resolve] = await Promise.all([
+      const [proxy, transcribe, placement, resolve] = await Promise.all([
         import("../preview/mediaProxy"),
         import("../tools/transcribe"),
+        import("../timeline/placement"),
         import("../preview/resolve"),
       ]);
       return {
@@ -203,6 +213,8 @@ export class IndexCoordinator {
         mods: {
           processImportedMedia: proxy.processImportedMedia,
           ensureTranscript: transcribe.ensureTranscript,
+          isSpeechEngineUnavailable: transcribe.isSpeechEngineUnavailable,
+          sourceHasAudio: placement.sourceHasAudio,
           clearSourceUrlCache: resolve.clearSourceUrlCache,
         },
       };
@@ -287,17 +299,50 @@ export class IndexCoordinator {
       signal: this.ac.signal,
     } as ClientToolContext;
     try {
-      for (let src = this.txQ.shift(); src !== undefined && !this.disposed; ) {
+      for (let src = this.txQ.shift(); src !== undefined && !this.disposed && !this.engineDown; ) {
         try {
-          await ready.mods.ensureTranscript(ctx, src);
+          // A video with no audio track is not a failure to report — there is simply nothing to
+          // transcribe. Asking ffmpeg for an audio-only output of one fails with "Output file
+          // does not contain any stream", which read as a broken transcriber.
+          if (await this.hasSpeech(ctx, ready.mods, src)) {
+            await ready.mods.ensureTranscript(ctx, src);
+          }
         } catch (e) {
-          this.onJobFailed("transcript", src, e);
+          if (ready.mods.isSpeechEngineUnavailable(e)) this.onEngineUnavailable(e);
+          else this.onJobFailed("transcript", src, e);
         }
         src = this.txQ.shift();
       }
     } finally {
       this.txRunning = false;
     }
-    if (!this.disposed && this.txQ.length > 0) void this.drainTranscripts();
+    if (!this.disposed && !this.engineDown && this.txQ.length > 0) void this.drainTranscripts();
+  }
+
+  /** Is there any audio here worth transcribing? A probe that cannot answer says yes: losing a
+   *  transcript to an ffprobe hiccup is worse than one clear failure downstream. */
+  private async hasSpeech(
+    ctx: ClientToolContext,
+    mods: IndexModules,
+    source: string,
+  ): Promise<boolean> {
+    try {
+      const abs = await this.store.resolveRef(source);
+      if (!abs) return true; // let ensureTranscript report the missing file
+      return await mods.sourceHasAudio(ctx, abs);
+    } catch {
+      return true;
+    }
+  }
+
+  /** The engine could not START. That is the machine's state, not this asset's, so retrying the
+   *  next file repeats it exactly — stop the pass and say so ONCE instead of once per asset. */
+  private onEngineUnavailable(err: unknown): void {
+    if (this.disposed || this.engineDown) return;
+    this.engineAttempts += 1;
+    if (this.engineAttempts < MAX_ENGINE_ATTEMPTS) return;
+    this.engineDown = true;
+    this.txQ.length = 0;
+    reportAppError(`speech engine unavailable, transcription disabled: ${String(err).slice(-160)}`);
   }
 }
