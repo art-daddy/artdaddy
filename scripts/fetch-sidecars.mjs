@@ -282,8 +282,18 @@ async function fetchWhisper() {
   );
 }
 
-/** The MSVC runtime whisper-cli STATICALLY imports. */
-const VC_RUNTIME_DLLS = ["msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll"];
+/** The MSVC runtime the staged whisper binaries STATICALLY import.
+ *
+ *  vcomp140 is OpenMP, imported by every ggml-cpu-*.dll rather than by the exe — shipping only
+ *  the three whisper-cli names left the CPU backends unloadable on the machines this staging
+ *  exists for. src/contract/whisperRuntimeDeps.test.ts reads the real import tables so the
+ *  next addition is caught rather than guessed. */
+const VC_RUNTIME_DLLS = [
+  "msvcp140.dll",
+  "vcruntime140.dll",
+  "vcruntime140_1.dll",
+  "vcomp140.dll",
+];
 
 /** Ship the Visual C++ runtime beside whisper, because a clean Windows does not have it.
  *
