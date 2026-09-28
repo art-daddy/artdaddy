@@ -38,4 +38,19 @@ describe("ignorePlayRejection", () => {
     expect(() => ignorePlayRejection(undefined)).not.toThrow();
     expect(() => ignorePlayRejection("a bare string")).not.toThrow();
   });
+
+  // Gaps mutation testing found (2026-09-27).
+  it("an interruption before a real failure does not use up the one report", () => {
+    ignorePlayRejection(new DOMException("interrupted", "AbortError"));
+    ignorePlayRejection(new DOMException("no supported sources", "NotSupportedError"));
+    expect(reportAppError).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the END of a long message, where the reason is", () => {
+    const long = new Error(`${"path/".repeat(80)}The element has no supported sources.`);
+    ignorePlayRejection(long);
+    const msg = String(reportAppError.mock.calls[0][0]);
+    expect(msg).toMatch(/no supported sources\.$/);
+    expect(msg.length).toBeLessThan(200);
+  });
 });

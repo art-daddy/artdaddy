@@ -1,3 +1,4 @@
+import fc from "fast-check";
 import { describe, expect, it, vi } from "vitest";
 
 import type { CommandRunner } from "./command";
@@ -715,6 +716,84 @@ describe("ensureTranscript", () => {
       "audio.mp4",
     ).catch((e: unknown) => e);
     expect(isSpeechEngineUnavailable(err)).toBe(false);
+  });
+
+  // Engine-down switches transcription off for the session, so the classification must be
+  // exact: ANY other exit code — access violations, stack overflows, ordinary whisper errors,
+  // the positive twins of the three load failures — stays a per-file failure. A code that
+  // slipped into the set would let one unrelated crash disable transcription entirely.
+  it("treats every exit code outside the three loader failures as per-file", async () => {
+    const LOAD = new Set([-1073741515, -1073741511, -1073741701]);
+    const code = fc.oneof(
+      fc.integer({ min: -2147483648, max: 2147483647 }),
+      fc.constantFrom(-1073741819, -1073741571, -1073741510, 3221225781, 1, 2, -1, 255),
+    );
+    await fc.assert(
+      fc.asyncProperty(code, async (exit) => {
+        fc.pre(exit !== 0 && !LOAD.has(exit));
+        const fs = new MockFs();
+        fs.touch(joinPath(DIR, "audio.mp4"));
+        fs.putModel();
+        const err = await ensureTranscript(
+          ctxWith(transcribeRunner(fs, { whisperExit: exit }), fs),
+          "audio.mp4",
+        ).catch((e: unknown) => e);
+        expect(err, `exit ${exit} should fail the file`).toBeInstanceOf(Error);
+        expect(isSpeechEngineUnavailable(err), `exit ${exit}`).toBe(false);
+      }),
+      { numRuns: 150 },
+    );
+  });
+
+  // Gaps mutation testing found (2026-09-27): each of these survived a mutant.
+  it("a Stop says 'cancelled', not that the engine or the install is broken", async () => {
+    const fs = new MockFs();
+    fs.touch(joinPath(DIR, "audio.mp4"));
+    fs.putModel();
+    const ac = new AbortController();
+    const runner = transcribeRunner(fs, { whisperExit: -1073741515 });
+    const run = runner.run as ReturnType<typeof vi.fn>;
+    const inner = run.getMockImplementation()!;
+    run.mockImplementation(async (program: string, args: string[]) => {
+      if (program === "whisper-cli") ac.abort(); // Stop kills the sidecar mid-run
+      return inner(program, args);
+    });
+    const err = await ensureTranscript(
+      { store: new ProjectStoreAccess(DIR, fs), runner, signal: ac.signal } as ClientToolContext,
+      "audio.mp4",
+    ).catch((e: unknown) => e);
+    expect(String(err)).toMatch(/transcription cancelled/);
+    // The kill's exit code must not be read as the machine's state.
+    expect(isSpeechEngineUnavailable(err)).toBe(false);
+  });
+
+  it("fails on a non-zero exit even when a transcript file was left behind", async () => {
+    const fs = new MockFs();
+    fs.touch(joinPath(DIR, "audio.mp4"));
+    fs.putModel();
+    const runner = transcribeRunner(fs);
+    const run = runner.run as ReturnType<typeof vi.fn>;
+    const inner = run.getMockImplementation()!;
+    run.mockImplementation(async (program: string, args: string[]) => {
+      const r = await inner(program, args); // writes a complete-looking .json...
+      return program === "whisper-cli" ? { ...r, code: 3, stderr: "crashed at the end" } : r;
+    });
+    await expect(ensureTranscript(ctxWith(runner, fs), "audio.mp4")).rejects.toThrow(
+      /whisper-cli failed \(code=3\)/,
+    );
+  });
+
+  it("an unavailable engine is an expected, named error the UI can recognise", async () => {
+    const fs = new MockFs();
+    fs.touch(joinPath(DIR, "audio.mp4"));
+    fs.putModel();
+    const err = (await ensureTranscript(
+      ctxWith(transcribeRunner(fs, { whisperExit: -1073741515 }), fs),
+      "audio.mp4",
+    ).catch((e: unknown) => e)) as Error & { code?: string };
+    expect(err.name).toBe("SpeechEngineUnavailableError");
+    expect(err.code).toBe("speech_engine_unavailable");
+    expect(err.message).toMatch(/could not start on this machine/);
   });
 });
 

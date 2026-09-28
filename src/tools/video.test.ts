@@ -944,3 +944,49 @@ describe("video_find_moment — encode/proxy errors", () => {
     expect(r.error).toBe("weird");
   });
 });
+
+// The contract said "top-K best windows", called each result a candidate, and told the model to
+// "pick a different candidate" — while the prompt asks for ONE moment and the parser keeps the
+// first. The model read that and passed `top_k` (rejected, and billed). Description and
+// behaviour must agree, so both halves are pinned here against each other.
+describe("video_find_moment: the contract promises what the tool returns", () => {
+  const moment = (n: number, s: number, e: number) =>
+    [
+      `## Moment ${n}  00:0${s}.000 - 00:0${e}.000`,
+      "**Why:** a fine shot.",
+      "",
+      "**Shot 1**",
+      `*   **Timestamp:** 00:0${s}.000 - 00:0${e}.000`,
+      "*   **What is in frame:** a rocket",
+      "*   **On-screen text:** none",
+      "*   **Tone/mood:** calm",
+      "",
+    ].join("\n");
+
+  it("returns at most one moment even when the model offers several", async () => {
+    proxy.mockResolvedValue({
+      result: { ok: true, text: [moment(1, 1, 3), moment(2, 4, 6), moment(3, 7, 9)].join("\n") },
+    } as Any);
+    const r = await runTool(
+      "video_find_moment",
+      { media_ref: "media_a", query: "rocket" },
+      ctxWith(probeRunner()),
+    );
+    expect(r.ok).toBe(true);
+    expect((r.moments as Any[]).length).toBe(1);
+  });
+
+  it("the description never promises more than one moment or a second candidate", async () => {
+    const { default: catalog } = await import("../contract/catalog.json");
+    const desc = String(
+      (catalog as Any).tools.find((t: Any) => t.name === "video_find_moment").description,
+    );
+    expect(desc).not.toMatch(/top-?k\b/i);
+    expect(desc).not.toMatch(/each candidate|different candidate|candidates/i);
+    expect(desc).toMatch(/single|at most one|exactly one/i);
+    const params = Object.keys(
+      (catalog as Any).tools.find((t: Any) => t.name === "video_find_moment").parameters.properties,
+    );
+    expect(params).not.toContain("top_k");
+  });
+});

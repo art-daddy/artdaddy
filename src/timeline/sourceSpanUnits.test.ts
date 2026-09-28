@@ -162,3 +162,87 @@ describe("source_span: a span running past the end is reported, not just shorten
     expect(String((r.notes ?? []).join(" "))).not.toMatch(/past the media/);
   });
 });
+
+// Boundaries mutation testing found unpinned (2026-09-27): each of these survived a mutant.
+describe("source_span: exact boundaries", () => {
+  it("refuses a start exactly AT the end of the media, not just past it", async () => {
+    const { ctx, store } = await ctxWithMedia();
+    const r = (await addClipsTool(
+      { entries: [{ media_ref: "clip.mp4", timeline_in: 0, source_span: [MEDIA_SECONDS, MEDIA_SECONDS + 5] }] },
+      ctx,
+    )) as Any;
+    expect(r.ok).toBe(false);
+    expect(String(r.error)).toMatch(/at\/after the media's end \(600\.00s\)/);
+    expect(await clipLengths(store)).toEqual([]);
+  });
+
+  it("an end exactly AT the end of the media is not shortened and not noted", async () => {
+    const { ctx, store } = await ctxWithMedia();
+    const r = (await addClipsTool(
+      { entries: [{ media_ref: "clip.mp4", timeline_in: 0, source_span: [590, MEDIA_SECONDS] }] },
+      ctx,
+    )) as Any;
+    expect(r.ok).toBe(true);
+    expect(await clipLengths(store)).toEqual([10 * FPS]);
+    expect(String((r.notes ?? []).join(" "))).not.toMatch(/past the media/);
+  });
+
+  it("the clamp note reports the seconds and frames actually involved", async () => {
+    const { ctx } = await ctxWithMedia();
+    const r = (await addClipsTool(
+      { entries: [{ media_ref: "clip.mp4", timeline_in: 0, source_span: [590, 700] }] },
+      ctx,
+    )) as Any;
+    const note = String((r.notes ?? []).join(" "));
+    expect(note).toMatch(/asked for 700\.00s, media ends at 600\.00s/);
+    expect(note).toMatch(/300 frames, not 3300/);
+  });
+
+  // The frames reading may be off by one frame (rounding) and still be the mix-up; exactly two
+  // frames off is an ordinary disagreement and must only be NOTED, as before.
+  it("still recognises frames passed as seconds when the lengths differ by one frame", async () => {
+    const { ctx } = await ctxWithMedia();
+    const r = (await addClipsTool(
+      { entries: [{ media_ref: "clip.mp4", timeline_in: 0, timeline_out: 601, source_span: [300, 900] }] },
+      ctx,
+    )) as Any;
+    expect(r.ok).toBe(false);
+    expect(String(r.error)).toMatch(/look like FRAMES/);
+  });
+
+  it("treats a two-frame difference as an ordinary disagreement", async () => {
+    const { ctx } = await ctxWithMedia();
+    const r = (await addClipsTool(
+      { entries: [{ media_ref: "clip.mp4", timeline_in: 0, timeline_out: 602, source_span: [300, 900] }] },
+      ctx,
+    )) as Any;
+    expect(String(r.error ?? "")).not.toMatch(/look like FRAMES/);
+  });
+
+  it("the unit hint gives the frame-to-seconds conversion, with the real numbers", async () => {
+    const { ctx } = await ctxWithMedia();
+    const past = (await addClipsTool(
+      { entries: [{ media_ref: "clip.mp4", timeline_in: 0, source_span: [4938, 4950] }] },
+      ctx,
+    )) as Any;
+    expect(String(past.error)).toMatch(/if you meant 4938 FRAMES, pass 164\.60/);
+
+    const silent = (await addClipsTool(
+      { entries: [{ media_ref: "clip.mp4", timeline_in: 0, timeline_out: 600, source_span: [300, 900] }] },
+      ctx,
+    )) as Any;
+    expect(String(silent.error)).toMatch(/they would cut 18000 frames/);
+  });
+
+  // A start past the end whose frames reading is ALSO past the end is not a unit mix-up, and the
+  // message must not claim it might be.
+  it("offers no frames conversion when that reading would be past the end too", async () => {
+    const { ctx } = await ctxWithMedia();
+    const r = (await addClipsTool(
+      { entries: [{ media_ref: "clip.mp4", timeline_in: 0, source_span: [30000, 30010] }] },
+      ctx,
+    )) as Any;
+    expect(r.ok).toBe(false);
+    expect(String(r.error)).not.toMatch(/FRAMES/);
+  });
+});

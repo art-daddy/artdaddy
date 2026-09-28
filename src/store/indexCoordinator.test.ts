@@ -298,6 +298,71 @@ describe("IndexCoordinator", () => {
     expect(ensureTranscript.mock.calls.length).toBe(3);
   });
 
+  // The opposite direction. Giving up is only right when the ENGINE cannot start; a file that
+  // fails on its own (corrupt audio, a bad codec) says nothing about the next one. However many
+  // of those pile up, every queued asset must still be attempted.
+  it("never gives up on ordinary per-file failures, however many there are", async () => {
+    const clips = Array.from({ length: 12 }, (_, i) => ({
+      id: `m${i}`,
+      path: `library/bad${i}.mp3`,
+    }));
+    ensureTranscript.mockImplementation((async (_ctx: unknown, src: string) => {
+      if (src.includes("bad")) throw new Error("whisper-cli failed (code=1): invalid data");
+      return { path: "t.json", parsed: { segments: [] }, existed: false };
+    }) as never);
+    const c = new IndexCoordinator(fakeStore(clips), makeRunner, vi.fn(), vi.fn());
+
+    await c.sweep(tl([]));
+    await settle(() => ensureTranscript.mock.calls.length >= 12);
+    c.indexSource("library/good.mp3");
+    await settle(() => transcribed().includes("library/good.mp3"));
+
+    expect(transcribed()).toHaveLength(13);
+    const disabled = reportAppError.mock.calls.some((c) =>
+      /speech engine unavailable/i.test(String(c[0])),
+    );
+    expect(disabled).toBe(false);
+  });
+
+  // Gaps mutation testing found (2026-09-27).
+  it("an engine failure that lands after the project closed disables and reports nothing", async () => {
+    let fail!: (e: unknown) => void;
+    ensureTranscript.mockImplementation(
+      (() => new Promise((_res, rej) => (fail = rej))) as never,
+    );
+    const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+    for (let i = 0; i < 3; i++) c.indexSource(`library/a${i}.mp3`);
+    await settle(() => ensureTranscript.mock.calls.length > 0);
+    c.dispose();
+    for (let i = 0; i < 3; i++) fail(new FakeEngineDown("0xC0000135"));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(reportAppError).not.toHaveBeenCalled();
+  });
+
+  // A ref the store cannot resolve must still be handed to the transcriber, whose own error
+  // names the missing file — probing it for audio first would hide that as "no audio".
+  it("still attempts a source whose path cannot be resolved, so its real error surfaces", async () => {
+    const store = fakeStore();
+    store.resolveRef.mockResolvedValue(null);
+    sourceHasAudio.mockResolvedValue(false);
+    const c = new IndexCoordinator(store, makeRunner, vi.fn(), vi.fn());
+    c.indexSource("library/missing.mp3");
+    await settle(() => ensureTranscript.mock.calls.length > 0);
+    expect(transcribed()).toEqual(["library/missing.mp3"]);
+  });
+
+  it("the engine-down report carries the END of the error, where the NTSTATUS is", async () => {
+    const long = `${"x".repeat(400)} exit code 0xC0000135`;
+    ensureTranscript.mockRejectedValue(new FakeEngineDown(long));
+    const clips = Array.from({ length: 3 }, (_, i) => ({ id: `m${i}`, path: `library/a${i}.mp3` }));
+    const c = new IndexCoordinator(fakeStore(clips), makeRunner, vi.fn(), vi.fn());
+    await c.sweep(tl([]));
+    await settle(() => reportAppError.mock.calls.length > 0);
+    const msg = String(reportAppError.mock.calls[0][0]);
+    expect(msg).toMatch(/0xC0000135$/);
+    expect(msg.length).toBeLessThan(260);
+  });
+
   it("clears the URL cache + bumps the preview when a new proxy lands", async () => {
     processImportedMedia.mockResolvedValue(true);
     const onProxy = vi.fn();

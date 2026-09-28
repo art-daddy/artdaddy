@@ -1,14 +1,17 @@
-// update_text asserts the CLIPS after the call — what a viewer would read and see — rather
+// update_text asserts the CLIPS after the call â€” what a viewer would read and see â€” rather
 // than that the tool returned ok.
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { updateTextTool, addTextClipsTool } from "./placement";
 import { applyOp, loadTimeline } from "./engine";
 import { resetTestDocuments, seededCtx } from "../test/timelineKit";
+import { createToolRegistry } from "../tools";
 import type { ClientToolContext } from "../tools/context";
 import type { Clip } from "./model";
 
 type Any = Record<string, unknown>;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Loose = any;
 
 const textClips = (tl: Any): Clip[] =>
   ((tl.tracks as Any[]) ?? [])
@@ -144,5 +147,37 @@ describe("update_text", () => {
     ]);
     await updateTextTool({ clip_ids: [id], animation: null }, ctx);
     expect(textClips(await loadTimeline(store))[0].animation).toBeUndefined();
+  });
+});
+
+// The description tells the model timeline_in / timeline_out / duration "belong to other tools
+// and are rejected here", and that there is no per-clip payload. Each claim is only true if the
+// dispatcher refuses the param â€” pinned here so the text and the gate cannot drift apart.
+// `targets` is the per-clip shape a real session reached for.
+describe("update_text: every param its description says is rejected, is rejected", () => {
+  it.each(["timeline_in", "timeline_out", "duration", "targets"])("refuses %s", async (param) => {
+    const { ctx, store } = await seededCtx();
+    const reg = createToolRegistry(() => ctx as Loose) as Loose;
+    const made = (await reg.run("add_text_clips", {
+      entries: [{ content: "hi", timeline_in: 0, timeline_out: 30 }],
+    })) as Loose;
+    expect(made.ok).toBe(true);
+    const id = made.created[0].clip_id;
+    const before = JSON.stringify(await loadTimeline(store));
+
+    const r = (await reg.run("update_text", { clip_ids: [id], content: "new", [param]: 10 })) as Loose;
+
+    expect(r.ok).toBe(false);
+    expect(String(r.error)).toMatch(new RegExp(`unknown param\\(s\\) ${param}`));
+    expect(JSON.stringify(await loadTimeline(store))).toBe(before);
+  });
+
+  it("the description names the three timing params it rejects", async () => {
+    const { default: catalog } = await import("../contract/catalog.json");
+    const desc = String(
+      (catalog as Loose).tools.find((t: Loose) => t.name === "update_text").description,
+    );
+    for (const p of ["timeline_in", "timeline_out", "duration"]) expect(desc).toContain(p);
+    expect(desc).toMatch(/rejected here/);
   });
 });
