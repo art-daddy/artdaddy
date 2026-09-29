@@ -212,6 +212,15 @@ jobs:
             echo "::error::auto-update needs the TAURI_SIGNING_PRIVATE_KEY repository secret"
             exit 1
           fi
+          # An unset secret arrives as an EMPTY STRING, not as an absent variable, and tauri
+          # branches on "is APPLE_CERTIFICATE defined?" - so leaving these declared made it try to
+          # import an empty certificate and abort the whole bundle. Unset the blank ones so the
+          # hooks are genuinely inert until the secrets exist.
+          for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
+                   APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            eval "val=\${$v}"
+            [ -z "$val" ] && unset "$v"
+          done
           # Ad-hoc unless a real identity is configured. "-" is codesign's ad-hoc identity: no
           # Apple account, no notarization, but a VALID signature - which is the difference
           # between Gatekeeper saying "unverified" (right-click -> Open works) and "damaged"
