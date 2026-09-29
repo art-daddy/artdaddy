@@ -128,6 +128,17 @@ export default function RecordDialog({
     setElapsed(0);
     void openStream("", "");
     return () => {
+      // Discard clears `recRef` first, so a LIVE recorder here means nobody asked to end this
+      // take -- a project switch, a remount. It cannot be rescued: it belongs to the project
+      // that was open when it started, and by the time this runs that session is already gone,
+      // so saving would either fail or file it under the wrong project. Losing the take is bad;
+      // losing it in SILENCE is what made it unreportable -- no file, no message, nothing to
+      // tell "the recorder is broken" from "I must have clicked the wrong thing".
+      if (recRef.current) {
+        useProjectNotice
+          .getState()
+          .notify("Recording discarded — the project changed while it was running.");
+      }
       ++requestRef.current;
       stop(false);
       setPhase("idle");

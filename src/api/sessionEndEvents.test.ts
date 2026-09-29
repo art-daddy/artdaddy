@@ -77,6 +77,22 @@ describe("media_import", () => {
     reportMediaImport(true, "p2");
     await vi.waitFor(() => expect(posted.length).toBe(2));
   });
+
+  it("reports a recording that follows a file import", async () => {
+    // Keyed on the project alone, the second of these produced NO row at all -- a recording
+    // behind an earlier import left no trace, which is exactly why "did her recording ever
+    // land?" could not be answered from the trace.
+    reportMediaImport(true, "p1", "", "copy");
+    reportMediaImport(true, "p1", "", "recording");
+    await vi.waitFor(() => expect(posted.length).toBe(2));
+    expect(posted.map((e) => e.via)).toEqual(["copy", "recording"]);
+  });
+
+  it("still costs ONE beacon for a folder full of files through the same door", async () => {
+    for (let i = 0; i < 20; i++) reportMediaImport(true, "p1", "", "copy");
+    await sent();
+    expect(posted).toHaveLength(1);
+  });
 });
 
 describe("credits_exhausted", () => {

@@ -4,6 +4,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MAX_RECORDING_BYTES } from "../media/recorder";
+import { useProjectNotice } from "../store/projectNotice";
 
 const h = vi.hoisted(() => ({ saved: [] as number[] }));
 
@@ -108,6 +109,36 @@ describe("RecordDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Stop & save" }));
     await waitFor(() => expect(h.saved).toHaveLength(1));
     expect(rec.stopCalls).toBe(1);
+  });
+
+  it("says so rather than vanishing when a project change ends a take", async () => {
+    useProjectNotice.getState().clear();
+    const view = render(<RecordDialog open projectDir="C:/p" onClose={vi.fn()} />);
+    const record = await screen.findByRole("button", { name: "Record" });
+    await waitFor(() => expect(record).toBeEnabled());
+    fireEvent.click(record);
+    await waitFor(() => expect(FakeRecorder.last).not.toBeNull());
+    (FakeRecorder.last as FakeRecorder).emit(500_000);
+
+    view.rerender(<RecordDialog open projectDir="C:/other" onClose={vi.fn()} />);
+    await act(async () => {});
+
+    // The take still cannot be rescued -- it belongs to a session that is already gone by now.
+    // What changed is that it no longer disappears without a word, which is the difference
+    // between a reportable bug and "I must have clicked the wrong thing".
+    expect(h.saved).toEqual([]);
+    expect(useProjectNotice.getState().message).toMatch(/discarded/i);
+  });
+
+  it("stays quiet when the user discarded the take themselves", async () => {
+    useProjectNotice.getState().clear();
+    const rec = await startRecording();
+    rec.emit(500_000);
+    fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+    await act(async () => {});
+    // Explicit intent needs no explanation, and announcing it would train people to ignore the
+    // line that matters.
+    expect(useProjectNotice.getState().message).toBeNull();
   });
 
   it("names an unavailable capture API without throwing or enabling Record", async () => {

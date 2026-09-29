@@ -19,6 +19,16 @@ import { registerTestDocument, resetTestDocuments } from "../test/timelineKit";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
 
+// `via` is derived at this boundary rather than passed by callers, so it is worth asserting the
+// vocabulary it actually emits -- that is the field the funnel reads.
+const tele = vi.hoisted(() => ({ calls: [] as { ok: boolean; via: string }[] }));
+vi.mock("../api/appEvents", async (orig) => ({
+  ...(await orig<typeof import("../api/appEvents")>()),
+  reportMediaImport: (ok: boolean, _p = "", _r = "", via = "") => {
+    tele.calls.push({ ok, via });
+  },
+}));
+
 const DIR = "C:/data/projects/p1";
 
 class MockFs implements FsLike {
@@ -75,6 +85,52 @@ function ctxWith(fs: MockFs = new MockFs()): ClientToolContext {
 afterEach(() => vi.unstubAllGlobals());
 afterEach(async () => resetTestDocuments());
 beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  tele.calls = [];
+});
+
+describe("how the media got in (media_import.via)", () => {
+  it("says 'reference' for a file that was never copied in", async () => {
+    const fs = new MockFs();
+    const ABS = "D:/footage/hero.mp4";
+    await fs.writeBytes(joinPath(ABS), new Uint8Array([5, 6, 7]));
+    const store = new ProjectStoreAccess(DIR, fs);
+    await registerLibraryClip(store, new Uint8Array([5, 6, 7]), "hero.mp4", "video", undefined, ABS);
+    // The one import whose bytes can vanish underneath the library later, so it outranks any
+    // provenance the caller supplied.
+    expect(tele.calls).toEqual([{ ok: true, via: "reference" }]);
+  });
+
+  it("carries the producer's own kind, so a recording is not just 'an import'", async () => {
+    const fs = new MockFs();
+    const store = new ProjectStoreAccess(DIR, fs);
+    await registerLibraryClip(store, new Uint8Array([1, 2, 3]), "take.mp4", "video", {
+      kind: "recording",
+    });
+    expect(tele.calls).toEqual([{ ok: true, via: "recording" }]);
+  });
+
+  it("says 'copy' for plain bytes with no provenance", async () => {
+    const fs = new MockFs();
+    const store = new ProjectStoreAccess(DIR, fs);
+    await registerLibraryClip(store, new Uint8Array([9, 9, 9]), "clip.mp4", "video");
+    expect(tele.calls).toEqual([{ ok: true, via: "copy" }]);
+  });
+
+  it("still says how a REFUSED import was entering", async () => {
+    // A PNG header the dimension guard refuses: 6864x41754, the real full-page screenshot that
+    // hung a render. Built here rather than borrowed, so this block owns its fixture.
+    const huge = new Uint8Array(33);
+    huge.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+    huge.set([0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52], 8);
+    new DataView(huge.buffer).setUint32(16, 6864);
+    new DataView(huge.buffer).setUint32(20, 41754);
+    const fs = new MockFs();
+    const store = new ProjectStoreAccess(DIR, fs);
+    await expect(registerLibraryClip(store, huge, "shot.png", "image")).rejects.toThrow();
+    expect(tele.calls).toEqual([{ ok: false, via: "copy" }]);
+  });
+});
 
 describe("registerLibraryClip (by reference)", () => {
   it("references an external file in place (no copy) + tags it external", async () => {

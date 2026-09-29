@@ -17,6 +17,7 @@ interface AppEventDetail {
   projectId?: string;
   ok?: boolean;
   reason?: string;
+  via?: string;
 }
 
 /** Report one marker. Never throws and never blocks: this is a beacon, not a feature. */
@@ -43,6 +44,7 @@ export async function reportAppEvent(event: AppEvent, detail: AppEventDetail = {
         project_id: detail.projectId ?? "",
         ...(detail.ok === undefined ? {} : { ok: detail.ok }),
         ...(detail.reason ? { reason: detail.reason.slice(0, 300) } : {}),
+        ...(detail.via ? { via: detail.via.slice(0, 30) } : {}),
       }),
       signal: AbortSignal.timeout(10_000),
     });
@@ -72,16 +74,20 @@ export function reportProjectOpened(projectId: string): void {
 // refuses some files. A refusal ends the session before a prompt ever exists, so the trace
 // simply stops -- indistinguishable from walking away.
 //
-// Failures are always reported; successes only the FIRST time per project. A hundred-file
-// import would otherwise spend the whole per-user beacon budget on one answer we already have.
+// Failures are always reported; successes only the FIRST time per project AND WAY IN. Deduping
+// on the project alone hid every later way in behind whichever came first: a recording that
+// followed a file import produced no row at all, which is why "did her recording ever land?"
+// could not be answered from the trace. Keyed by `via`, the hundred-file import still costs one
+// beacon while each distinct door reports once.
 const importedProjects = new Set<string>();
 
-export function reportMediaImport(ok: boolean, projectId = "", reason = ""): void {
+export function reportMediaImport(ok: boolean, projectId = "", reason = "", via = ""): void {
   if (ok) {
-    if (importedProjects.has(projectId)) return;
-    importedProjects.add(projectId);
+    const key = `${projectId}|${via}`;
+    if (importedProjects.has(key)) return;
+    importedProjects.add(key);
   }
-  void reportAppEvent("media_import", { projectId, ok, reason });
+  void reportAppEvent("media_import", { projectId, ok, reason, via });
 }
 
 /** A crash leaves no event by definition, which is what makes it the likeliest silent exit. */

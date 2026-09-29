@@ -256,6 +256,15 @@ export async function registerLibraryClip(
   // session before a prompt ever exists -- the trace just stops, and that is indistinguishable
   // from losing interest. Wrapped rather than placed at the call sites so a new producer
   // cannot forget to say whether its import worked.
+  //
+  // `via` is derived HERE from arguments this boundary already holds, so a new producer cannot
+  // forget it either. REFERENCE wins over the provenance kind: a referenced import is the one
+  // whose bytes can vanish underneath the library later, so it is the fact worth keeping.
+  const via = externalPath?.trim()
+    ? "reference"
+    : typeof source?.kind === "string" && source.kind
+      ? source.kind.slice(0, 30)
+      : "copy";
   try {
     const entry = await registerLibraryClipInner(
       store,
@@ -266,12 +275,12 @@ export async function registerLibraryClip(
       externalPath,
       opts,
     );
-    reportMediaImport(true, store.projectDir);
+    reportMediaImport(true, store.projectDir, "", via);
     return entry;
   } catch (e) {
     // A project closing mid-import is a lifecycle event, not a rejection worth counting as one.
     if (!(e instanceof ProjectClosingError) && !isMutationRejected(e)) {
-      reportMediaImport(false, store.projectDir, (e as Error)?.message ?? String(e));
+      reportMediaImport(false, store.projectDir, (e as Error)?.message ?? String(e), via);
     }
     throw e;
   }
