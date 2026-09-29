@@ -275,7 +275,7 @@ jobs:
           done
           if [ "$ENABLE_AUTO_UPDATE" = "true" ]; then
             echo "::notice::Linux assets are signed and public. In art-daddy/akaru-landing run:"
-            echo "::notice::npm run update:linux -- $VERSION /path/to/ArtDaddy-linux-x86_64.AppImage.sig"
+            echo "::notice::npm run update:platform -- linux-x86_64 $VERSION /path/to/ArtDaddy-linux-x86_64.AppImage.sig"
             echo "::notice::then deploy that repository to enable Linux auto-update."
           else
             echo "::notice::Unsigned Linux first-install assets are public; auto-update remains disabled."

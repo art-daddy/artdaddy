@@ -7,6 +7,10 @@ on:
         description: "Attach the NSIS installer to this version's GitHub release"
         type: boolean
         default: false
+      enable_auto_update:
+        description: "Produce signed auto-update artifacts (needs the TAURI_SIGNING_PRIVATE_KEY secret)"
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -37,26 +41,38 @@ jobs:
       - run: npm run build:mcpb
       - run: npm run bundle:browser
 
-      - name: Build unsigned NSIS installer
+      - name: Build the NSIS installer
+        shell: pwsh
+        env:
+          # The UPDATER key (minisign), not an Authenticode certificate. Its public half is baked
+          # into every shipped app; without the private half tauri writes the installer and then
+          # exits 1 on the signing phase, which this step used to SWALLOW - shipping installers
+          # that no client could ever be offered as an update.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if ("${{ inputs.enable_auto_update }}" -eq "true" -and -not $env:TAURI_SIGNING_PRIVATE_KEY) {
+            Write-Host "::error::auto-update needs the TAURI_SIGNING_PRIVATE_KEY repository secret"
+            exit 1
+          }
+          & npx tauri build --bundles nsis
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # The signature is the whole point of signing, so assert the FILE rather than the exit code.
+      # A tauri build that cannot sign still leaves a perfectly convincing installer behind.
+      - name: The updater signature must exist
+        id: updater
+        if: inputs.enable_auto_update
         shell: pwsh
         run: |
-          # Tauri writes the complete NSIS installer before it attempts updater signing. This
-          # repository has the updater PUBLIC key but no private-key secret, so that final signing
-          # phase exits 1 after the usable installer already exists. Accept only that exact failure
-          # and only when one substantial installer was produced; every earlier build/bundle error
-          # still fails this step.
-          & npx tauri build --bundles nsis 2>&1 | Tee-Object -Variable buildLog
-          $buildExit = $LASTEXITCODE
-          if ($buildExit -ne 0) {
-            $files = @(Get-ChildItem "src-tauri/target/release/bundle/nsis/*.exe" -ErrorAction SilentlyContinue)
-            $expectedSigningFailure = (($buildLog -join "`n") -match "public key.*no private key")
-            $completeInstaller = $files.Count -eq 1 -and $files[0].Length -ge 100MB
-            if ($expectedSigningFailure -and $completeInstaller) {
-              Write-Host "::warning::updater signing is unavailable; continuing with the complete unsigned NSIS installer"
-              exit 0
-            }
-            exit $buildExit
+          $sig = @(Get-ChildItem "src-tauri/target/release/bundle/nsis/*.exe.sig" -ErrorAction SilentlyContinue)
+          if ($sig.Count -ne 1 -or $sig[0].Length -eq 0) {
+            Write-Host "::error::expected exactly one non-empty .exe.sig, found $($sig.Count)"
+            exit 1
           }
+          Write-Host "  sig: $($sig[0].Name) ($($sig[0].Length) bytes)"
+          Write-Host "  signature: $(Get-Content $sig[0].FullName -Raw)"
+          "path=$($sig[0].FullName)" >> $env:GITHUB_OUTPUT
 
       - name: Verify installer and production configuration
         id: verify
@@ -95,7 +111,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: artdaddy-windows-x64-unsigned
+          name: artdaddy-windows-x64
           path: ${{ steps.verify.outputs.path }}
           if-no-files-found: error
 
@@ -125,4 +141,15 @@ jobs:
           if ([int64]$response.Headers.'Content-Length' -ne [int64]"${{ steps.verify.outputs.size }}") {
             Write-Host "::error::published size does not match the built installer"
             exit 1
+          }
+
+          # The .sig is what an installed client verifies before replacing itself. Uploaded under
+          # the same version-less name the manifest will point at.
+          if ("${{ inputs.enable_auto_update }}" -eq "true") {
+            $sigAsset = Join-Path $env:RUNNER_TEMP "ArtDaddy-windows-x64-setup.exe.sig"
+            Copy-Item "${{ steps.updater.outputs.path }}" $sigAsset
+            gh release upload $tag $sigAsset --repo $env:GITHUB_REPOSITORY --clobber
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+            Write-Host "::notice::signature published. It is inert until latest.json advertises it:"
+            Write-Host "::notice::  npm run update:platform -- windows-x86_64 $version <path-to>.exe.sig"
           }

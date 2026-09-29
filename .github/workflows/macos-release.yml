@@ -1,9 +1,22 @@
 # Build the macOS app bundle. This is the ONLY way a mac build can happen here: a .app can
 # only be produced on macOS, and nobody on this project owns a Mac.
 #
-# UNSIGNED, deliberately. Signing + notarization need an Apple Developer account; until then
-# the .dmg opens via right-click -> Open (Gatekeeper refuses a double-click). Wiring signing
-# in later is an env-var and a few lines, not a redesign — see the note at the bottom.
+# TWO DIFFERENT SIGNATURES, and conflating them cost this workflow its auto-update for months:
+#
+#   - The UPDATER signature is minisign, it is free, and the key's public half is already baked
+#     into every shipped app as `plugins.updater.pubkey`. It is the ONLY thing the updater
+#     verifies. Nothing about it needs Apple.
+#   - APPLE code signing + notarization is what Gatekeeper checks on FIRST launch. That needs the
+#     $99 account. It has no bearing on whether an update can be delivered.
+#
+# So mac auto-update was never blocked on the Apple account - only on this job building the `app`
+# bundle target and being handed the updater key. It now does both.
+#
+# The bundle is ad-hoc signed (`signingIdentity: "-"`) when no Apple identity is configured.
+# That matters: an arm64 binary must carry SOME signature to execute at all, and a missing or
+# broken one is why Gatekeeper reports a perfectly good build as "damaged" - which right-click ->
+# Open cannot bypass - rather than merely "unverified", which it can. Once the Apple secrets
+# exist, tauri picks them up from the env below and notarizes without further changes here.
 #
 # whisper.cpp is compiled HERE rather than downloaded, because there is no macOS prebuilt and
 # the release job is already on a Mac. That keeps one source of truth: no artifact to upload,
@@ -12,8 +25,9 @@
 #
 # Note the opposite call for the dmg: a build INPUT is produced where it is consumed, but an
 # OUTPUT has to go where users can reach it. `publish: true` attaches it to the GitHub release
-# for this version, where the Windows installer already lives. It does NOT touch latest.json:
-# mac auto-update needs a signature and the `app` bundle target, both blocked on signing.
+# for this version, where the Windows installer already lives, along with the .app.tar.gz and
+# .sig the updater needs. Adding the darwin entry to latest.json is still a deliberate step in
+# the landing repo - see the notice this job prints at the end.
 name: macOS build
 
 on:
@@ -27,6 +41,10 @@ on:
         description: "Attach the dmg to this version's GitHub release. Leave OFF for a test build."
         type: boolean
         default: false
+      enable_auto_update:
+        description: "Produce signed auto-update artifacts (needs the TAURI_SIGNING_PRIVATE_KEY secret)"
+        type: boolean
+        default: true
 
 # The organisation defaults the token to read-only, and that default is NOT raised by asking
 # nicely at the step level - a workflow that needs write has to declare it here or the upload
@@ -174,9 +192,57 @@ jobs:
       - run: npm run bundle:browser
 
       - name: Build the app
+        env:
+          # Free, and unrelated to Apple. Without it tauri emits no .app.tar.gz and there is
+          # nothing for the updater to fetch, however well the dmg builds.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Absent until the Apple Developer account exists. tauri signs AND notarizes on its own
+          # when it finds these, and skips both silently when it does not - so they are safe to
+          # leave wired, and the day they are added nothing here has to change.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           rm -rf dist
-          npx tauri build --bundles dmg
+          if [ "${{ inputs.enable_auto_update }}" = "true" ] && [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error::auto-update needs the TAURI_SIGNING_PRIVATE_KEY repository secret"
+            exit 1
+          fi
+          # Ad-hoc unless a real identity is configured. "-" is codesign's ad-hoc identity: no
+          # Apple account, no notarization, but a VALID signature - which is the difference
+          # between Gatekeeper saying "unverified" (right-click -> Open works) and "damaged"
+          # (it does not).
+          IDENTITY="${APPLE_SIGNING_IDENTITY:--}"
+          echo "  signing identity: $IDENTITY"
+          # `app` is the updater's payload - tauri tars it to .app.tar.gz and signs that with the
+          # minisign key. `dmg` is what a human downloads. Building only dmg is precisely why no
+          # mac updater artifact has ever existed.
+          npx tauri build --bundles app,dmg \
+            --config "{\"bundle\":{\"macOS\":{\"signingIdentity\":\"$IDENTITY\"}}}"
+
+      # A green build is not evidence an update can be delivered: `createUpdaterArtifacts` is
+      # already true in tauri.conf.json, and this job still produced nothing for months because
+      # it never built the `app` target. Assert the two files exist, and that the signature is
+      # non-empty rather than merely present.
+      - name: The updater artifacts must exist and be signed
+        id: updater
+        if: inputs.enable_auto_update
+        run: |
+          TARBALL="$(find src-tauri/target -type f -name '*.app.tar.gz' | head -n1)"
+          [ -n "$TARBALL" ] || { echo "::error::no .app.tar.gz - the 'app' bundle target did not build"; exit 1; }
+          SIG="$TARBALL.sig"
+          [ -s "$SIG" ] || { echo "::error::$SIG missing or empty - the updater key did not sign it"; exit 1; }
+          echo "  tarball: $TARBALL ($(stat -f%z "$TARBALL") bytes)"
+          echo "  sig:     $(stat -f%z "$SIG") bytes"
+          echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
+          echo "sig=$SIG" >> "$GITHUB_OUTPUT"
+          # The signature is what every installed app checks before replacing itself. Print the
+          # value so a mismatch against the shipped pubkey is diagnosable from the log alone.
+          echo "  signature: $(cat "$SIG")"
 
       # The dmg that shipped 0.3.0 pointed every user at their own machine. Nothing caught it,
       # because "the workflow sets the variable" is not evidence the bundle received it. dist/ is
@@ -385,6 +451,20 @@ jobs:
           fi
           gh release upload "$TAG" "/tmp/$ASSET" --repo "$GITHUB_REPOSITORY" --clobber
 
+          # The updater fetches the tarball, not the dmg. Version-less names for the same reason
+          # as above: latest.json points at /releases/latest/download/<name>.
+          if [ "${{ inputs.enable_auto_update }}" = "true" ]; then
+            cp "${{ steps.updater.outputs.tarball }}" /tmp/ArtDaddy-macos-arm64.app.tar.gz
+            cp "${{ steps.updater.outputs.sig }}"     /tmp/ArtDaddy-macos-arm64.app.tar.gz.sig
+            gh release upload "$TAG" \
+              /tmp/ArtDaddy-macos-arm64.app.tar.gz \
+              /tmp/ArtDaddy-macos-arm64.app.tar.gz.sig \
+              --repo "$GITHUB_REPOSITORY" --clobber
+            echo "::notice::mac updater artifacts uploaded. They are inert until latest.json"
+            echo "::notice::carries a darwin-aarch64 entry - run this in the landing repo:"
+            echo "::notice::  npm run update:platform -- darwin-aarch64 $VERSION /path/to/ArtDaddy-macos-arm64.app.tar.gz.sig"
+          fi
+
           # Read it back ANONYMOUSLY: a 2xx from the upload only says the request was accepted,
           # not that a user can now download the bytes we built.
           PUB="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$ASSET"
@@ -398,7 +478,13 @@ jobs:
 
       - name: Say plainly what this is not
         run: |
-          echo "::warning::UNSIGNED and NOT notarized. Gatekeeper will refuse a double-click;"
-          echo "::warning::open it with right-click -> Open. This build cannot update itself:"
-          echo "::warning::latest.json advertises only the Windows .exe, and a mac updater entry"
-          echo "::warning::needs a signature plus the 'app' bundle target."
+          if [ -n "${{ secrets.APPLE_SIGNING_IDENTITY }}" ]; then
+            echo "::notice::Apple-signed. Gatekeeper should accept a double-click."
+          else
+            echo "::warning::AD-HOC SIGNED, NOT notarized. Gatekeeper still refuses a double-click,"
+            echo "::warning::but the app now carries a valid signature, so the message is the"
+            echo "::warning::bypassable 'unverified developer' rather than 'damaged' - right-click"
+            echo "::warning::-> Open works. Removing the warning entirely needs the Apple account."
+          fi
+          echo "::warning::A published update is NOT live until latest.json advertises it."
+          echo "::warning::Uploading the .app.tar.gz here does nothing on its own."
