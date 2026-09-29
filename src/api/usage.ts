@@ -111,10 +111,13 @@ export class CreditLimitError extends ArtDaddyError {
   constructor(detail: unknown) {
     // `message` is what a tool result carries to the MODEL, so it has to say STOP. Without that
     // a model reads "limit reached" as this call failing and tries the next paid tool, which
-    // cannot succeed either -- the same mistake the 401 path already paid for.
+    // cannot succeed either -- the same mistake the 401 path already paid for. The Discord line
+    // is here as well as in the UI because in most turns the sentence a person actually reads is
+    // the model's, not the raw error plate.
     super(
       "the credit limit is reached, so no paid call can succeed right now. Do NOT retry this or " +
-        "any other paid tool — tell the user their credits are exhausted and stop.",
+        "any other paid tool — tell the user their credits are exhausted, tell them they can " +
+        "join the ArtDaddy Discord and raise a request for more credits, and stop.",
     );
     this.name = "CreditLimitError";
     this.detail = detail;

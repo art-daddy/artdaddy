@@ -22,6 +22,7 @@ vi.mock("../store/auth", () => ({
 }));
 
 import { DISCORD_URL, openDiscord } from "./community";
+import MessagePart from "../components/MessagePart";
 import SignInScreen from "../components/SignInScreen";
 
 beforeEach(() => {
@@ -66,6 +67,33 @@ describe("where it is offered", () => {
     await waitFor(() =>
       expect(invoke).toHaveBeenCalledWith("open_community_link", { url: DISCORD_URL }),
     );
+  });
+
+  // Out of credits is the one error a person cannot act on alone, so the offer has to reach
+  // the OS, not merely appear. Asserted by clicking through to the guarded command.
+  it("is on the out-of-credits error in the agent panel", async () => {
+    render(
+      <MessagePart
+        part={{ kind: "error", error: "You've reached your credit limit.", code: "credit_limit" }}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /join our discord/i }));
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("open_community_link", { url: DISCORD_URL }),
+    );
+  });
+
+  // The failure direction: the offer is keyed to the credit code, not to "something went
+  // wrong". Without this, any future error would start advertising the Discord.
+  it("is NOT offered on errors that more credits cannot fix", () => {
+    render(<MessagePart part={{ kind: "error", error: "Couldn't reach the server.", code: "api" }} />);
+    expect(screen.queryByRole("button", { name: /discord/i })).not.toBeInTheDocument();
+  });
+
+  // An error thrown before the code existed still renders; it just gets no offer.
+  it("is NOT offered on an error part carrying no code at all", () => {
+    render(<MessagePart part={{ kind: "error", error: "kaboom" }} />);
+    expect(screen.queryByRole("button", { name: /discord/i })).not.toBeInTheDocument();
   });
 });
 

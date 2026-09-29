@@ -20,16 +20,26 @@ vi.mock("../lib/upload", () => ({
   MEDIA_RE: /\.(mp4|mov|webm|mkv|m4v|png|jpe?g|gif|webp|bmp|avif|mp3|wav|m4a|aac|flac|ogg)$/i,
 }));
 vi.mock("../lib/files", () => ({ listProjectFiles: () => Promise.resolve([]) }));
-// Stable snapshot (same reference each call) so useSyncExternalStore doesn't loop.
-vi.mock("../api/usage", () => {
-  const usage = { metered: true, over: false, used: 10, limit: 100, remaining: 1_500_000 };
-  return { getUsage: () => usage, subscribeUsage: () => () => {}, refreshUsage: vi.fn() };
-});
+// Stable snapshot (same reference each call) so useSyncExternalStore doesn't loop — which is
+// also why `over` is flipped in place rather than the object being replaced.
+const usageMock = vi.hoisted(() => ({
+  metered: true,
+  over: false,
+  used: 10,
+  limit: 100,
+  remaining: 1_500_000,
+}));
+vi.mock("../api/usage", () => ({
+  getUsage: () => usageMock,
+  subscribeUsage: () => () => {},
+  refreshUsage: vi.fn(),
+}));
 
 const startDesktopSignIn = vi.hoisted(() => vi.fn());
 vi.mock("../api/desktopAuth", () => ({ startDesktopSignIn }));
 
 import { uploadFiles, importViaDialog, importPaths, filesFromItems } from "../lib/upload";
+import { DISCORD_URL } from "../lib/community";
 import ChatView from "./ChatView";
 import { STARTER_PROMPTS } from "./starterPrompts";
 
@@ -66,8 +76,29 @@ beforeEach(() => {
   Object.assign(state, baseState());
   authState.status = "unlocked";
   platformName = "web";
+  usageMock.over = false;
   vi.mocked(importPaths).mockResolvedValue([]);
   vi.mocked(filesFromItems).mockReturnValue([]);
+});
+
+describe("ChatView", () => {
+  it("shows the remaining balance while there is one", () => {
+    render(<ChatView />);
+    expect(screen.queryByRole("button", { name: /join our discord/i })).not.toBeInTheDocument();
+  });
+
+  // A bare "0" states the dead end and withholds the only way out of it. Asserted by
+  // clicking through to the open, not by reading the label.
+  it("turns the credit chip into a way out once the balance is spent", async () => {
+    const open = vi.spyOn(window, "open").mockReturnValue(null);
+    usageMock.over = true;
+    render(<ChatView />);
+    fireEvent.click(screen.getByRole("button", { name: /join our discord/i }));
+    await waitFor(() =>
+      expect(open).toHaveBeenCalledWith(DISCORD_URL, "_blank", "noopener,noreferrer"),
+    );
+    open.mockRestore();
+  });
 });
 
 describe("ChatView", () => {

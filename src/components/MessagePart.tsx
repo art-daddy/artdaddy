@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { ReactNode } from "react";
 
 import type { TranscriptPart } from "../api/types";
+import DiscordCreditsCta from "./DiscordCreditsCta";
 
 export default function MessagePart({ part }: { part: TranscriptPart }) {
   const kind = part.kind;
@@ -34,6 +35,9 @@ export default function MessagePart({ part }: { part: TranscriptPart }) {
     return (
       <div className="rounded bg-red-500/10 px-3 py-2 text-xs text-red-300">
         ⚠ {String(part.error ?? "error")}
+        {/* Keyed off the thrown error's stable `code`, not its prose — the sentence is free
+            to change without silently dropping the only way out of this dead end. */}
+        {part.code === "credit_limit" && <DiscordCreditsCta className="mt-1 block" />}
       </div>
     );
   }

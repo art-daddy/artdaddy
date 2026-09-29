@@ -13,6 +13,7 @@ import type { ApprovalMode, Attachment, FileNode, SessionState } from "../api/ty
 import { getUsage, refreshUsage, subscribeUsage } from "../api/usage";
 import type { FeedbackKind } from "../api/feedback";
 import { BRAND } from "../brand";
+import { openDiscord } from "../lib/community";
 import { listProjectFiles } from "../lib/files";
 import { onOsDragOver, onOsDrop, webOwnsFileDrops } from "../lib/osDrop";
 import {
@@ -838,17 +839,26 @@ function ContextMeter({ session, model }: { session: SessionState | null; model:
       <span className="tabular-nums">
         {fmtTok(used)}/{fmtTok(max)} · {pct}%
       </span>
-      {usage.metered && (
-        <span
-          className={cn(
-            "tabular-nums",
-            usage.over ? "font-medium text-red-400" : "text-neutral-400",
-          )}
-          title={`${Math.round(usage.used).toLocaleString()} / ${Math.round(usage.limit).toLocaleString()} credits used this window`}
-        >
-          {usage.over ? "0" : fmtTok(Math.max(0, usage.remaining))} cr left
-        </span>
-      )}
+      {usage.metered &&
+        (usage.over ? (
+          // At zero the number is the least useful thing we can show: it states the dead end
+          // without the way out, which is the one thing someone stuck here needs.
+          <button
+            type="button"
+            onClick={() => void openDiscord()}
+            title={`${Math.round(usage.used).toLocaleString()} / ${Math.round(usage.limit).toLocaleString()} credits used this window`}
+            className="whitespace-nowrap font-medium text-red-400 underline underline-offset-2 hover:text-red-300"
+          >
+            0 cr — Join our Discord to get more
+          </button>
+        ) : (
+          <span
+            className="tabular-nums text-neutral-400"
+            title={`${Math.round(usage.used).toLocaleString()} / ${Math.round(usage.limit).toLocaleString()} credits used this window`}
+          >
+            {fmtTok(Math.max(0, usage.remaining))} cr left
+          </span>
+        ))}
     </div>
   );
 }

@@ -71,6 +71,15 @@ describe("ProfilePage", () => {
     expect(screen.queryByText("Remaining")).not.toBeInTheDocument();
   });
 
+  it("offers the Discord only once the allowance is actually spent", () => {
+    renderPage();
+    expect(screen.queryByRole("button", { name: /join our discord/i })).not.toBeInTheDocument();
+
+    mocks.usage = { metered: true, used: 100, limit: 100, remaining: 0, over: true };
+    renderPage();
+    expect(screen.getByRole("button", { name: /join our discord/i })).toBeInTheDocument();
+  });
+
   it("signs out and hands back to the gate", async () => {
     renderPage();
     fireEvent.click(screen.getByRole("button", { name: "Sign out" }));

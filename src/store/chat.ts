@@ -482,7 +482,7 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
             ...t,
             status: "error",
             parts: isExpected(e)
-              ? [...t.parts, { kind: "error", error: toUserMessage(e) }]
+              ? [...t.parts, { kind: "error", error: toUserMessage(e), code: e.code }]
               : t.parts,
           })),
         }));
