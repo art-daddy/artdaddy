@@ -41,6 +41,28 @@ export async function offlineClips(store: ProjectStoreAccess): Promise<LibraryCl
   return out;
 }
 
+/** The offline media under the playhead, so the stage can say WHY it is black.
+ *  Without this a clip whose source walked away is pixel-identical to a gap, and the
+ *  only place that says otherwise is a panel the user has to think to open. */
+export function offlineUnderPlayhead(
+  timeline: { tracks?: { clips?: { media_ref?: string; timeline_in: number; timeline_out: number }[] }[] } | null,
+  frame: number,
+  offline: readonly string[] | undefined,
+): string[] {
+  if (!timeline?.tracks?.length || !offline?.length) return [];
+  const gone = new Set(offline);
+  const hit: string[] = [];
+  for (const track of timeline.tracks) {
+    for (const clip of track.clips ?? []) {
+      const ref = clip.media_ref;
+      // Half-open, matching every other span check here: a clip ending at F does not cover F.
+      if (!ref || !gone.has(ref) || frame < clip.timeline_in || frame >= clip.timeline_out) continue;
+      if (!hit.includes(ref)) hit.push(ref);
+    }
+  }
+  return hit;
+}
+
 export interface RelinkResult {
   /** Ids that now point at a file that exists. */
   relinked: string[];

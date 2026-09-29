@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { ignorePlayRejection } from "../media/playRejection";
+import { offlineUnderPlayhead } from "../lib/mediaLink";
 
 import { platform } from "../platform";
 import { PreviewAudio, publishPreviewAudio } from "../preview/audioEngine";
@@ -38,6 +39,8 @@ export default function StagePanel({ projectId }: { projectId: string }) {
   // Empty = the live preview tab; a ref = that library clip's source monitor.
   const sourceRef = useEditor((s) => s.activeMediaTab);
   const onSource = !!sourceRef;
+  const mediaOffline = useEditor((s) => s.mediaOffline);
+  const mediaNames = useEditor((s) => s.mediaNames);
 
   const canvas = timeline?.canvas;
   const fps = Number(canvas?.fps) || 30;
@@ -46,6 +49,13 @@ export default function StagePanel({ projectId }: { projectId: string }) {
   // A new project already HAS a timeline — empty v1/a1 tracks — so "no timeline" is not what
   // an empty project looks like. Nothing to composite means no CLIPS.
   const empty = !timeline || timeline.tracks.every((t) => !t.clips?.length);
+
+  // A clip whose referenced source walked away composites to nothing, which is pixel-identical
+  // to a gap. Name it here or the user reads an intact project as lost work.
+  const offlineHere = useMemo(
+    () => offlineUnderPlayhead(timeline, Math.floor(playhead * fps), mediaOffline),
+    [timeline, playhead, fps, mediaOffline],
+  );
 
   const finalMp4 = session?.final_mp4 || active?.manifest?.final_mp4 || "";
   const hasVideo = Boolean(finalMp4);
@@ -305,6 +315,18 @@ export default function StagePanel({ projectId }: { projectId: string }) {
             onStalled={(s) => stallRef.current?.setStarved(s)}
           >
             <StageOverlay cropMode={cropMode} />
+            {offlineHere.length > 0 && (
+              <div className="pointer-events-none absolute inset-x-0 top-2 flex justify-center px-2">
+                <span
+                  role="status"
+                  className="max-w-full truncate rounded bg-red-600/90 px-2 py-1 text-[11px] font-medium text-white shadow"
+                >
+                  Media offline:{" "}
+                  {offlineHere.map((ref) => mediaNames[ref] || ref).join(", ")} — relink it in
+                  the library.
+                </span>
+              </div>
+            )}
           </PreviewCanvas>
         ) : (
           <StageEmpty projectId={projectId} />

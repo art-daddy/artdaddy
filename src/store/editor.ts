@@ -24,6 +24,7 @@ import type { CommandRunner } from "../tools/command";
 import { setEditorContextSnapshot } from "../tools/editorContext";
 import { projectDirFor } from "../tools/dataRoot";
 import { ProjectStoreAccess } from "../tools/store";
+import { useProjectNotice } from "./projectNotice";
 import { IndexCoordinator } from "./indexCoordinator";
 import { makeEditorCommands } from "./editorCommands";
 
@@ -110,6 +111,11 @@ export interface EditorState {
   mediaNames: Record<string, string>;
   /** media id -> "generating" | "failed" for library rows that are not ready. Absent = ready. */
   mediaStatus: Record<string, string>;
+  /** Library ids whose REFERENCED source file is gone. Referenced media lives outside the
+   *  project, so the user can move or delete it at any time and nothing here would know.
+   *  One place computes it so the library, the timeline and the stage cannot disagree about
+   *  which clips are offline. */
+  mediaOffline: string[];
   /** Re-read the catalog (names + status). Called when a background job settles. */
   refreshMedia: () => void;
   _unsub: (() => void) | null;
@@ -262,15 +268,25 @@ function linkGroupIds(timeline: Timeline | null, clipId: string): string[] {
 /** Load the library catalog's human names (id -> filename) into state, so clip
  *  labels can show "interview.mov" for a clip whose media_ref is a bare id.
  *  `current` guards the commit: a slower refresh must not land on a project that
- *  superseded it. Failures are non-fatal — labels fall back to the raw ref. */
+ *  superseded it. Failures are non-fatal — labels fall back to the raw ref.
+ *
+ *  Also collects the REFERENCED clips whose file is gone. It rides this pass rather than
+ *  getting its own because it needs the same catalog rows, and two passes are two answers
+ *  that can disagree. Only external rows are checked: copied media lives inside the project
+ *  and cannot be moved out from under it.
+ *
+ *  Returns how many are offline, so a caller that just OPENED a project can say so. Nothing
+ *  else should: the state is refreshed after every import too, and a toast on each one would
+ *  be noise about a fact the library panel already shows. */
 async function refreshMediaNames(
   store: ProjectStoreAccess,
   current: () => boolean,
   set: (partial: Partial<EditorState>) => void,
-): Promise<void> {
+): Promise<number> {
   try {
     const names: Record<string, string> = {};
     const status: Record<string, string> = {};
+    const offline: string[] = [];
     for (const c of await store.listClips()) {
       const id = String(c.id ?? "");
       if (!id) continue;
@@ -282,10 +298,16 @@ async function refreshMediaNames(
       if (name) names[id] = name;
       const st = typeof c.status === "string" ? c.status : "";
       if (st === "generating" || st === "failed") status[id] = st;
+      // Media still being generated has no file YET; that is not the same as a source that
+      // walked away, and calling it offline would flag every generation in flight.
+      if (c.external && st !== "generating" && !(await store.exists(String(c.path ?? ""))))
+        offline.push(id);
     }
-    if (current()) set({ mediaNames: names, mediaStatus: status });
+    if (current()) set({ mediaNames: names, mediaStatus: status, mediaOffline: offline });
+    return offline.length;
   } catch {
     /* catalog unreadable — labels fall back to the ref */
+    return 0;
   }
 }
 
@@ -319,6 +341,7 @@ const editorCreator: StateCreator<EditorState> = (set, get) => {
     clipboard: null,
     mediaNames: {},
     mediaStatus: {},
+    mediaOffline: [],
     refreshMedia: () => {
       const store = get().store;
       const pid = get().projectId;
@@ -360,6 +383,7 @@ const editorCreator: StateCreator<EditorState> = (set, get) => {
         dirty: false,
         mediaNames: {},
         mediaStatus: {},
+        mediaOffline: [],
         _unsub: null,
         _pending: null,
         _index: null,
@@ -448,7 +472,18 @@ const editorCreator: StateCreator<EditorState> = (set, get) => {
         }
         set({ store, timeline, loading: false, _unsub: unsubAll, _index: index });
         if (timeline) void index.sweep(timeline);
-        void refreshMediaNames(store, () => loadSeq === seq, set);
+        // Say it ONCE, on open. Referenced media can walk away between sessions with nothing
+        // to notice: the library panel does show it, but only to someone who thinks to look
+        // there, and a user who does not hits a clip that plays as black and reads it as the
+        // app losing their work.
+        void refreshMediaNames(store, () => loadSeq === seq, set).then((offline) => {
+          if (offline > 0 && loadSeq === seq)
+            useProjectNotice
+              .getState()
+              .notify(
+                `${offline} media ${offline === 1 ? "file is" : "files are"} offline — the source moved or was deleted. Relink from the library panel.`,
+              );
+        });
         return "loaded";
       } catch (e) {
         // A stale load's failure must not write its error onto the project that

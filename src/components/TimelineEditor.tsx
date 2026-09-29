@@ -312,6 +312,11 @@ export default function TimelineEditor() {
   const selectedRange = useEditor((s) => s.selectedRange);
   const mediaNames = useEditor((s) => s.mediaNames);
   const mediaStatus = useEditor((s) => s.mediaStatus);
+  const mediaOffline = useEditor((s) => s.mediaOffline);
+  // A Set because this is read once per drawn clip; `?? []` because a partially-built store
+  // (tests, a project mid-load) has no offline list yet and a missing one is not "everything
+  // is offline".
+  const offlineRefs = useMemo(() => new Set(mediaOffline ?? []), [mediaOffline]);
   const addMention = useChat((s) => s.addMention);
 
   const fps = Number(timeline?.canvas?.fps) || 30;
@@ -1733,6 +1738,14 @@ export default function TimelineEditor() {
                           )}
                           {tr.kind !== "text" && (
                             <span className="pointer-events-none relative block truncate px-2">
+                              {/* The clip still occupies its span and still exports — it just
+                                  draws nothing. Saying so on the clip is what separates
+                                  "offline" from "I made an empty clip". */}
+                              {offlineRefs.has(String(c.media_ref ?? "")) && (
+                                <span className="mr-1 rounded bg-red-600/90 px-1 text-[9px] font-medium uppercase tracking-wide text-white">
+                                  offline
+                                </span>
+                              )}
                               {clipLabel(c, mediaNames)}
                             </span>
                           )}

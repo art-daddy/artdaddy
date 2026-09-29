@@ -3,7 +3,7 @@
 // folder; these assert the CATALOG that results, not that some helper was called.
 import { describe, expect, it } from "vitest";
 
-import { copyIntoProject, offlineClips, relinkMedia } from "./mediaLink";
+import { copyIntoProject, offlineClips, offlineUnderPlayhead, relinkMedia } from "./mediaLink";
 import type { ProjectStoreAccess } from "../tools/store";
 
 /** A store over an in-memory disk: `present` is the set of paths that exist. */
@@ -138,5 +138,54 @@ describe("copyIntoProject", () => {
       path: "library/media_c.mp4",
     });
     expect(copied).toEqual([]);
+  });
+});
+
+describe("offlineUnderPlayhead", () => {
+  const clip = (ref: string, from: number, to: number) => ({
+    media_ref: ref,
+    timeline_in: from,
+    timeline_out: to,
+  });
+  const tl = (...tracks: { clips: ReturnType<typeof clip>[] }[]) => ({ tracks });
+
+  it("names the offline media the playhead is sitting on", () => {
+    const t = tl({ clips: [clip("media_a", 0, 100)] });
+    expect(offlineUnderPlayhead(t, 50, ["media_a"])).toEqual(["media_a"]);
+  });
+
+  it("says NOTHING over healthy media", () => {
+    // The failure direction that matters: a banner over footage that plays fine teaches the
+    // user to ignore the banner, which costs more than never showing one.
+    const t = tl({ clips: [clip("media_ok", 0, 100)] });
+    expect(offlineUnderPlayhead(t, 50, ["media_a"])).toEqual([]);
+  });
+
+  it("treats the span as half-open, like every other span check here", () => {
+    const t = tl({ clips: [clip("media_a", 10, 20)] });
+    expect(offlineUnderPlayhead(t, 9, ["media_a"]), "before the clip").toEqual([]);
+    expect(offlineUnderPlayhead(t, 10, ["media_a"]), "first frame is covered").toEqual([
+      "media_a",
+    ]);
+    expect(offlineUnderPlayhead(t, 20, ["media_a"]), "the out frame is NOT covered").toEqual([]);
+  });
+
+  it("finds it on a LOWER track, not just the first one it looks at", () => {
+    // Picking the easiest member to verify is how a per-track bug ships: the offline clip is
+    // as likely to be on v3 as on v1.
+    const t = tl({ clips: [clip("media_ok", 0, 100)] }, { clips: [] }, {
+      clips: [clip("media_a", 0, 100)],
+    });
+    expect(offlineUnderPlayhead(t, 50, ["media_a"])).toEqual(["media_a"]);
+  });
+
+  it("names each offline source once, however many clips use it", () => {
+    const t = tl({ clips: [clip("media_a", 0, 100)] }, { clips: [clip("media_a", 0, 100)] });
+    expect(offlineUnderPlayhead(t, 50, ["media_a"])).toEqual(["media_a"]);
+  });
+
+  it("is inert with nothing offline or no timeline", () => {
+    expect(offlineUnderPlayhead(tl({ clips: [clip("media_a", 0, 100)] }), 50, [])).toEqual([]);
+    expect(offlineUnderPlayhead(null, 50, ["media_a"])).toEqual([]);
   });
 });

@@ -14,6 +14,7 @@ import {
   seededCtx,
 } from "../test/timelineKit";
 import { type FsLike, ProjectStoreAccess } from "../tools/store";
+import { useProjectNotice } from "./projectNotice";
 import {
   _zoomBounds,
   activateEditorProject,
@@ -839,5 +840,82 @@ describe("per-project registry + activation (frontmost document)", () => {
     expect(result.current).toBeNull(); // no active project -> default store
     await activateEditorProject("p1");
     await waitFor(() => expect(result.current).toBe("p1"));
+  });
+});
+
+describe("offline media", () => {
+  const lib = (clips: unknown[]) => JSON.stringify({ version: 1, clips });
+
+  it("marks a referenced source that walked away, and says so once on open", async () => {
+    const { store, fs } = seedStore(P1, withClip());
+    fs.files.set(
+      `${P1}/internals/library.json`,
+      lib([{ id: "media_1", path: "D:/Downloads/hero.mp4", filename: "hero.mp4", external: true }]),
+    );
+    useProjectNotice.getState().clear();
+    setProjectStoreFactory(() => store);
+    await useEditor.getState().load("p1");
+
+    await waitFor(() => expect(useEditor.getState().mediaOffline).toEqual(["media_1"]));
+    // The panel already showed this to anyone who opened it. The point of the notice is the
+    // user who does not, and reads a clip that composites to nothing as lost work.
+    await waitFor(() =>
+      expect(useProjectNotice.getState().message).toMatch(/1 media file is offline/i),
+    );
+  });
+
+  it("says nothing when the referenced file is still there", async () => {
+    const { store, fs } = seedStore(P1, withClip());
+    fs.files.set("D:/Downloads/hero.mp4", "bytes");
+    fs.files.set(
+      `${P1}/internals/library.json`,
+      lib([{ id: "media_1", path: "D:/Downloads/hero.mp4", filename: "hero.mp4", external: true }]),
+    );
+    useProjectNotice.getState().clear();
+    setProjectStoreFactory(() => store);
+    await useEditor.getState().load("p1");
+
+    await waitFor(() => expect(useEditor.getState().mediaNames.media_1).toBe("hero.mp4"));
+    expect(useEditor.getState().mediaOffline).toEqual([]);
+    expect(useProjectNotice.getState().message).toBeNull();
+  });
+
+  it("does not call media still being GENERATED offline", async () => {
+    // It has no file yet by design. Flagging it would put a red banner over every generation
+    // in flight, which is the fastest way to make the banner meaningless.
+    const { store, fs } = seedStore(P1, withClip());
+    fs.files.set(
+      `${P1}/internals/library.json`,
+      lib([
+        {
+          id: "media_1",
+          path: "D:/gen/pending.mp4",
+          filename: "pending.mp4",
+          external: true,
+          status: "generating",
+        },
+      ]),
+    );
+    useProjectNotice.getState().clear();
+    setProjectStoreFactory(() => store);
+    await useEditor.getState().load("p1");
+
+    await waitFor(() => expect(useEditor.getState().mediaStatus.media_1).toBe("generating"));
+    expect(useEditor.getState().mediaOffline).toEqual([]);
+    expect(useProjectNotice.getState().message).toBeNull();
+  });
+
+  it("leaves COPIED media alone -- it lives in the project and cannot be moved out from under it", async () => {
+    const { store, fs } = seedStore(P1, withClip());
+    fs.files.set(
+      `${P1}/internals/library.json`,
+      lib([{ id: "media_1", path: "library/media_1.mp4", filename: "hero.mp4" }]),
+    );
+    useProjectNotice.getState().clear();
+    setProjectStoreFactory(() => store);
+    await useEditor.getState().load("p1");
+
+    await waitFor(() => expect(useEditor.getState().mediaNames.media_1).toBe("hero.mp4"));
+    expect(useEditor.getState().mediaOffline).toEqual([]);
   });
 });
