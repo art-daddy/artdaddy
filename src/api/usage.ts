@@ -5,6 +5,13 @@
 import { authHeaders } from "./auth";
 import { apiBase } from "./config";
 import { ArtDaddyError } from "../lib/errors";
+import { DISCORD_URL } from "../lib/community";
+import {
+  CREDIT_LIMIT,
+  CREDITS_PAUSED,
+  OUT_OF_CREDITS,
+  markOutOfCredits,
+} from "../lib/outOfCredits";
 
 export interface UsageState {
   metered: boolean;
@@ -105,26 +112,40 @@ export function clearUsage(): void {
 
 /** Thrown by the request wrappers on an HTTP 402 (credit limit reached). */
 export class CreditLimitError extends ArtDaddyError {
-  readonly code = "credit_limit";
+  readonly code = CREDIT_LIMIT;
   readonly expected = true;
   detail: unknown;
-  constructor(detail: unknown) {
+  /** `context` is what the caller knows that a 402 does not, e.g. that nothing was submitted. */
+  constructor(detail: unknown, context?: string) {
     // `message` is what a tool result carries to the MODEL, so it has to say STOP. Without that
     // a model reads "limit reached" as this call failing and tries the next paid tool, which
-    // cannot succeed either -- the same mistake the 401 path already paid for. The Discord line
-    // is here as well as in the UI because in most turns the sentence a person actually reads is
-    // the model's, not the raw error plate.
+    // cannot succeed either -- the same mistake the 401 path already paid for. The invite is
+    // spelled out because over MCP this sentence is the only way out a person is ever shown.
+    const global = isGlobal(detail);
     super(
-      "the credit limit is reached, so no paid call can succeed right now. Do NOT retry this or " +
-        "any other paid tool — tell the user their credits are exhausted, tell them they can " +
-        "join the ArtDaddy Discord and raise a request for more credits, and stop.",
+      markOutOfCredits(
+        (context ? `${context}. ` : "") +
+          (global
+            ? "ArtDaddy's shared AI budget is used up for now"
+            : "the credit limit is reached") +
+          ", so no paid call can succeed right now. Do NOT retry this or any other paid tool — tell the user " +
+          (global ? "AI generation is paused for everyone right now" : "they are out of credits") +
+          `, tell them they can join the ArtDaddy Discord (${DISCORD_URL}) and raise a request, and stop.`,
+      ),
     );
     this.name = "CreditLimitError";
     this.detail = detail;
   }
 
-  /** What a person sees; `message` is aimed at the model. */
+  /** What a person sees; `message` is aimed at the model. Free credits are one-time, so it
+   *  must never promise they come back on their own. */
   get userMessage(): string {
-    return "You've reached your credit limit. It resets at the start of your next window.";
+    return isGlobal(this.detail) ? CREDITS_PAUSED : OUT_OF_CREDITS;
   }
+}
+
+function isGlobal(detail: unknown): boolean {
+  return (
+    !!detail && typeof detail === "object" && (detail as { scope?: unknown }).scope === "global"
+  );
 }

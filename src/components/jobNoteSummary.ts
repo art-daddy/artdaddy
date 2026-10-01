@@ -1,6 +1,8 @@
 // The wake prompt is written for the MODEL: it lists ids and tells the agent how to behave.
 // Showing that verbatim would put instructions in the transcript that the user did not write
 // and does not need. This reduces it to the one line a person wants: what finished.
+import { isOutOfCredits } from "../lib/outOfCredits";
+
 const READY = /^- (.+?) is ready/;
 const FAILED = /^- (.+?) FAILED: (.+)$/;
 
@@ -10,7 +12,7 @@ export function jobNoteSummary(prompt: string): string {
   for (const line of prompt.split("\n")) {
     const f = FAILED.exec(line.trim());
     if (f) {
-      failed.push(`${f[1]} failed — ${f[2]}`);
+      failed.push(`${f[1]} failed — ${isOutOfCredits(f[2]) ? "out of credits" : f[2]}`);
       continue;
     }
     const r = READY.exec(line.trim());

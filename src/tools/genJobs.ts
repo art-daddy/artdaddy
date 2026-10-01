@@ -11,7 +11,7 @@
 // also why generation must not stay a `cancelOnClose` job.
 import { JobLedger } from "../project/jobLedger";
 import { ProjectClosingError, type MutationOrigin } from "../project/MutationGate";
-import { getUsage, refreshUsage } from "../api/usage";
+import { CreditLimitError, getUsage, refreshUsage } from "../api/usage";
 import { notifyJobSettled } from "../store/jobNotes";
 import {
   failPendingClip,
@@ -172,9 +172,10 @@ async function refuseIfOutOfCredit(): Promise<void> {
   await refreshUsage().catch(() => undefined);
   const u = getUsage();
   if (!u.over) return;
-  throw new Error(
+  throw new CreditLimitError(
+    { used: u.used, limit: u.limit },
     `no credit left (${u.used.toFixed(0)} of ${u.limit.toFixed(0)} used), so this was not submitted ` +
-      `and nothing was charged. Stop generating and tell the user — every further attempt will fail the same way.`,
+      `and nothing was charged`,
   );
 }
 

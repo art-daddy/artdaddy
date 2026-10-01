@@ -78,6 +78,8 @@ describe("ProfilePage", () => {
     mocks.usage = { metered: true, used: 100, limit: 100, remaining: 0, over: true };
     renderPage();
     expect(screen.getByRole("button", { name: /join our discord/i })).toBeInTheDocument();
+    // Free credits are one-time: nothing here may promise another period.
+    expect(screen.queryByText(/period|window|reset/i)).not.toBeInTheDocument();
   });
 
   it("signs out and hands back to the gate", async () => {

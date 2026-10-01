@@ -1,5 +1,7 @@
 import { useState } from "react";
 
+import { isOutOfCredits, OUT_OF_CREDITS } from "../lib/outOfCredits";
+import DiscordCreditsCta from "./DiscordCreditsCta";
 import { rowSummary, type SummaryContext, type ToolCallView } from "./toolSummary";
 import { Spinner } from "./ui";
 
@@ -40,7 +42,15 @@ export default function ToolCalls({ calls, ctx }: { calls: ToolCallView[]; ctx: 
       {/* The first failure's real message, without expanding: a summary that only said
           "Couldn't export the video" would leave the user with nowhere to go. */}
       {!open && failed.length > 0 && failed[0].error && (
-        <div className="mt-0.5 pl-5 text-red-300/80">{failed[0].error}</div>
+        <div className="mt-0.5 pl-5 text-red-300/80">
+          {isOutOfCredits(failed[0].error) ? (
+            <>
+              {OUT_OF_CREDITS} <DiscordCreditsCta />
+            </>
+          ) : (
+            failed[0].error
+          )}
+        </div>
       )}
 
       {open && (
@@ -57,6 +67,9 @@ export default function ToolCalls({ calls, ctx }: { calls: ToolCallView[]; ctx: 
                 </pre>
               )}
               {c.error && <div className="mt-1 text-[11px] text-red-300">{c.error}</div>}
+              {isOutOfCredits(c.error) && (
+                <DiscordCreditsCta className="mt-1 block text-[11px] text-red-300" />
+              )}
               {c.result && !c.error && (
                 <pre className="mt-1 overflow-x-auto text-[11px] text-neutral-600">
                   {JSON.stringify(c.result, null, 2)}

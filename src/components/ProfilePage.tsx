@@ -8,6 +8,7 @@ import { getUsage, refreshUsage, subscribeUsage } from "../api/usage";
 import { BRAND } from "../brand";
 import { useAuth } from "../store/auth";
 import DiscordCreditsCta from "./DiscordCreditsCta";
+import { OUT_OF_CREDITS } from "../lib/outOfCredits";
 import { Button } from "./ui";
 
 function Row({ label, value }: { label: string; value: string }) {
@@ -84,8 +85,7 @@ export default function ProfilePage() {
               <Row label="Limit" value={String(usage.limit)} />
               {usage.over && (
                 <p className="mt-2 text-xs text-red-400">
-                  You have used your allowance for this period.{" "}
-                  <DiscordCreditsCta />
+                  {OUT_OF_CREDITS} <DiscordCreditsCta />
                 </p>
               )}
             </div>

@@ -1,9 +1,8 @@
 import { openDiscord } from "../lib/community";
 
-/** The out-of-credits offer, worded once. Three surfaces show it — the agent panel's error
- *  part, the composer's credit chip and the profile page — and `community.ts` already
- *  records why that matters: a second literal is how the offer gets reworded in two places
- *  and left stale in the third. Colour is inherited so it reads correctly on the red error
+/** The out-of-credits offer, worded once. Every surface that says credits ran out shows it
+ *  (`isOutOfCredits` decides which do); a second literal is how the offer gets reworded in one
+ *  place and left stale in another. Colour is inherited so it reads correctly on the red error
  *  plate and on neutral surfaces alike. */
 export default function DiscordCreditsCta({ className }: { className?: string }) {
   return (

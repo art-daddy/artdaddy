@@ -40,6 +40,7 @@ vi.mock("../api/desktopAuth", () => ({ startDesktopSignIn }));
 
 import { uploadFiles, importViaDialog, importPaths, filesFromItems } from "../lib/upload";
 import { DISCORD_URL } from "../lib/community";
+import { toUserMessage } from "../lib/errors";
 import ChatView from "./ChatView";
 import { STARTER_PROMPTS } from "./starterPrompts";
 
@@ -294,6 +295,41 @@ describe("ChatView", () => {
     state.error = "bad thing";
     render(<ChatView />);
     expect(screen.getByText("bad thing")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /join our discord/i })).not.toBeInTheDocument();
+  });
+
+  // The REAL error's person-facing sentence, for both scopes: the banner is set from
+  // toUserMessage(e), so a fixture string would agree with the matcher whatever the error said.
+  it.each(["user", "global"])("offers the Discord on the banner when %s credits ran out", async (scope) => {
+    const { CreditLimitError } = await vi.importActual<typeof import("../api/usage")>("../api/usage");
+    state.error = toUserMessage(new CreditLimitError({ scope }));
+    render(<ChatView />);
+    expect(screen.getByRole("button", { name: /join our discord/i })).toBeInTheDocument();
+  });
+
+  // A generation that ran out in the background lands as a note, not an error part, so the note
+  // itself has to carry the way out.
+  it("offers the Discord on a background job that ran out of credits", async () => {
+    const open = vi.spyOn(window, "open").mockReturnValue(null);
+    const { CreditLimitError } = await vi.importActual<typeof import("../api/usage")>("../api/usage");
+    const error = new CreditLimitError({ used: 500, limit: 500 }).message;
+    state.turns = [
+      {
+        id: "t1",
+        system: true,
+        userText: `Background work you started earlier has finished:\n- an image FAILED: ${error}`,
+        attachments: [],
+        parts: [],
+        status: "done",
+      },
+    ];
+    render(<ChatView />);
+    expect(screen.getByText(/an image failed — out of credits/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /join our discord/i }));
+    await waitFor(() =>
+      expect(open).toHaveBeenCalledWith(DISCORD_URL, "_blank", "noopener,noreferrer"),
+    );
+    open.mockRestore();
   });
 
   it("undo/redo call the store when enabled", () => {

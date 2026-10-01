@@ -1,6 +1,9 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 
+import { CreditLimitError } from "../api/usage";
+import { DISCORD_URL } from "../lib/community";
+import { ClientToolRegistry } from "../tools/registry";
 import ToolCalls from "./ToolCalls";
 import { summarizeCall, type SummaryContext, type ToolCallView } from "./toolSummary";
 
@@ -48,6 +51,49 @@ describe("a call the turn never answered", () => {
   it("is not counted as a failure — nothing reported an error", () => {
     render(<ToolCalls calls={[deadCall("export")]} ctx={ctx} />);
     expect(screen.queryByText("✗")).toBeNull();
+  });
+});
+
+describe("a call that ran out of credits", () => {
+  // Through the REAL registry from the REAL error: a hand-written string would agree with the
+  // matcher whether or not the text that reaches this row still carries the mark.
+  async function outOfCredits(): Promise<ToolCallView> {
+    const reg = new ClientToolRegistry().register("generate_image", () => {
+      throw new CreditLimitError({ used: 500, limit: 500 });
+    });
+    return call("generate_image", {}, (await reg.run("generate_image", {})) as Record<string, unknown>);
+  }
+
+  it("offers the Discord, and the offer actually opens it", async () => {
+    const open = vi.spyOn(window, "open").mockReturnValue(null);
+    render(<ToolCalls calls={[await outOfCredits()]} ctx={ctx} />);
+    fireEvent.click(screen.getByRole("button", { name: /join our discord/i }));
+    await waitFor(() =>
+      expect(open).toHaveBeenCalledWith(DISCORD_URL, "_blank", "noopener,noreferrer"),
+    );
+    open.mockRestore();
+  });
+
+  it("shows a person a sentence, not the instructions written for the model", async () => {
+    render(<ToolCalls calls={[await outOfCredits()]} ctx={ctx} />);
+    expect(screen.getByText(/out of credits/i)).toBeInTheDocument();
+    expect(screen.queryByText(/do not retry/i)).not.toBeInTheDocument();
+  });
+
+  it("keeps the offer once the row is expanded", async () => {
+    render(<ToolCalls calls={[await outOfCredits()]} ctx={ctx} />);
+    fireEvent.click(screen.getByRole("button", { expanded: false }));
+    expect(screen.getByRole("button", { name: /join our discord/i })).toBeInTheDocument();
+  });
+
+  it("is not offered for a failure more credits cannot fix", () => {
+    render(
+      <ToolCalls
+        calls={[call("generate_image", {}, { ok: false, error: "content filter" })]}
+        ctx={ctx}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: /discord/i })).not.toBeInTheDocument();
   });
 });
 

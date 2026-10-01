@@ -14,6 +14,8 @@ import { getUsage, refreshUsage, subscribeUsage } from "../api/usage";
 import type { FeedbackKind } from "../api/feedback";
 import { BRAND } from "../brand";
 import { openDiscord } from "../lib/community";
+import { isOutOfCredits } from "../lib/outOfCredits";
+import DiscordCreditsCta from "./DiscordCreditsCta";
 import { listProjectFiles } from "../lib/files";
 import { onOsDragOver, onOsDrop, webOwnsFileDrops } from "../lib/osDrop";
 import {
@@ -433,6 +435,7 @@ export default function ChatView({ onHide }: { onHide?: () => void } = {}) {
                 <div className="flex justify-center">
                   <div className="max-w-[90%] rounded-md border border-neutral-800 bg-neutral-900/60 px-3 py-1.5 text-center text-[11px] text-neutral-400">
                     {jobNoteSummary(turn.userText)}
+                    {isOutOfCredits(turn.userText) && <DiscordCreditsCta className="block" />}
                   </div>
                 </div>
               ) : (
@@ -559,6 +562,7 @@ export default function ChatView({ onHide }: { onHide?: () => void } = {}) {
       {error && (
         <div className="border-t border-red-500/30 bg-red-500/10 px-5 py-2 text-xs text-red-300">
           {error}
+          {isOutOfCredits(error) && <DiscordCreditsCta className="mt-1 block" />}
         </div>
       )}
 
@@ -860,7 +864,7 @@ function ContextMeter({ session, model }: { session: SessionState | null; model:
           <button
             type="button"
             onClick={() => void openDiscord()}
-            title={`${Math.round(usage.used).toLocaleString()} / ${Math.round(usage.limit).toLocaleString()} credits used this window`}
+            title={`${Math.round(usage.used).toLocaleString()} / ${Math.round(usage.limit).toLocaleString()} credits used`}
             className="whitespace-nowrap font-medium text-red-400 underline underline-offset-2 hover:text-red-300"
           >
             0 cr — Join our Discord to get more
@@ -868,7 +872,7 @@ function ContextMeter({ session, model }: { session: SessionState | null; model:
         ) : (
           <span
             className="tabular-nums text-neutral-400"
-            title={`${Math.round(usage.used).toLocaleString()} / ${Math.round(usage.limit).toLocaleString()} credits used this window`}
+            title={`${Math.round(usage.used).toLocaleString()} / ${Math.round(usage.limit).toLocaleString()} credits used`}
           >
             {fmtTok(Math.max(0, usage.remaining))} cr left
           </span>

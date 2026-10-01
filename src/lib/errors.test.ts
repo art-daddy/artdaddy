@@ -79,7 +79,7 @@ describe("isExpected", () => {
 describe("toUserMessage", () => {
   it("returns a typed error's own user-facing message", () => {
     expect(toUserMessage(new RateLimitError("slow down"))).toBe("slow down");
-    expect(toUserMessage(new CreditLimitError(null))).toMatch(/credit limit/i);
+    expect(toUserMessage(new CreditLimitError(null))).toMatch(/out of credits/i);
   });
 
   it("maps ApiError by STATUS and never leaks the raw server detail", () => {

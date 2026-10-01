@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { jobNoteSummary } from "./jobNoteSummary";
+import { CreditLimitError } from "../api/usage";
 import { jobWakePrompt } from "../store/chat";
 import type { SettledJob } from "../store/jobNotes";
 
@@ -39,6 +40,16 @@ describe("job note summary", () => {
       jobWakePrompt([job({ status: "failed", error: "content filter", media_refs: undefined })]),
     );
     expect(out).toBe("an image failed — content filter");
+  });
+
+  // The failure text was written for the MODEL ("Do NOT retry ... and stop"); a person needs
+  // the reason, and the button ChatView puts beside it.
+  it("reports running out of credits as that, not as the model's instructions", () => {
+    const error = new CreditLimitError({ used: 500, limit: 500 }).message;
+    const out = jobNoteSummary(
+      jobWakePrompt([job({ status: "failed", error, media_refs: undefined })]),
+    );
+    expect(out).toBe("an image failed — out of credits");
   });
 
   it("shows ready and failed together", () => {

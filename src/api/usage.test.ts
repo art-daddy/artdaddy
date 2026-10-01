@@ -150,7 +150,35 @@ describe("CreditLimitError", () => {
     expect(err.message).toMatch(/do not retry/i);
     expect(err.message).toMatch(/credit/i);
     // `userMessage` is a sentence for a person, not an instruction aimed at a model.
-    expect(err.userMessage).toMatch(/credit limit/i);
+    expect(err.userMessage).toMatch(/out of credits/i);
     expect(err.userMessage).not.toMatch(/do not retry/i);
+  });
+
+  // Free credits are one-time. "It resets at the start of your next window" sent people to wait
+  // for a refill that will never come.
+  it("never promises the credits come back on their own", async () => {
+    const { CreditLimitError } = await load();
+    for (const err of [new CreditLimitError(null), new CreditLimitError({ scope: "global" })]) {
+      expect(err.userMessage).not.toMatch(/reset|renew|refill|next window|period/i);
+      expect(err.message).not.toMatch(/reset|renew|refill|next window/i);
+    }
+  });
+
+  // Over MCP this text is the only thing a person ever sees; a button exists only in our chat.
+  it("names the Discord invite in the text an external agent receives", async () => {
+    const { CreditLimitError } = await load();
+    const { DISCORD_URL } = await import("../lib/community");
+    expect(new CreditLimitError(null).message).toContain(DISCORD_URL);
+    expect(new CreditLimitError({ scope: "global" }).message).toContain(DISCORD_URL);
+  });
+
+  // The kill-switch is everyone's budget. Telling this user THEIR credits are gone would be
+  // false, and they would ask for credits they already have.
+  it("does not tell someone their own credits are gone when the shared budget tripped", async () => {
+    const { CreditLimitError } = await load();
+    const shared = new CreditLimitError({ scope: "global", used: 12, limit: 500 });
+    expect(shared.userMessage).toMatch(/everyone/i);
+    expect(shared.message).not.toMatch(/they are out of credits/i);
+    expect(new CreditLimitError({ scope: "user" }).userMessage).not.toMatch(/everyone/i);
   });
 });

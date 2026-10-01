@@ -6,6 +6,10 @@ import {
   whenGenerationsSettle,
 } from "./genJobs";
 import { clearUsage, markOverLimit } from "../api/usage";
+import { DISCORD_URL } from "../lib/community";
+import { isOutOfCredits } from "../lib/outOfCredits";
+import { sanitizeForMcp } from "../mcp/bridge";
+import { ClientToolRegistry } from "./registry";
 import { reconcilePendingMedia } from "./import";
 import { joinPath, ProjectStoreAccess, type DirEntry, type FsLike } from "./store";
 import { resetTestDocuments } from "../test/timelineKit";
@@ -514,5 +518,28 @@ describe("a generation is not submitted with no credit left", () => {
     expect(out.media_refs).toHaveLength(1);
     expect(f).not.toHaveBeenCalled(); // no /usage round-trip on the happy path
     await whenGenerationsSettle();
+  });
+
+  // The whole path an external agent sees: this refusal, the registry flattening it to text, the
+  // MCP sanitiser. 0.19.2 shipped a gap between those hops: a plain Error that named no way out.
+  it("reaches an MCP client as out-of-credits text that names the way out", async () => {
+    const { store } = make();
+    markOverLimit({ used: 2175, limit: 2000 });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ metered: true, used: 2175, limit: 2000, remaining: 0 })),
+      ),
+    );
+    const reg = new ClientToolRegistry().register("generate_image", () => gen(store));
+    const out = sanitizeForMcp(await reg.run("generate_image", {})) as {
+      ok: boolean;
+      error: string;
+    };
+    expect(out.ok).toBe(false);
+    expect(isOutOfCredits(out.error)).toBe(true);
+    expect(out.error).toContain(DISCORD_URL);
+    expect(out.error).toMatch(/nothing was charged/);
   });
 });
