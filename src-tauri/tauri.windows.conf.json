@@ -1,5 +1,6 @@
 {
   "bundle": {
+    "licenseFile": "PRIVACY.txt",
     "resources": [
       "resources/artdaddy-browser.mjs",
       "resources/artdaddy.mcpb",

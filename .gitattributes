@@ -1,0 +1,3 @@
+# Shown in the Windows installer's text box, which reads the file in the system codepage
+# with Windows line endings. Pinned so the runner's git config cannot change what ships.
+src-tauri/PRIVACY.txt text eol=crlf
