@@ -50,6 +50,9 @@ export interface InferBody {
   // Client-owned continuity + the project "rules" (style/workflow) config.
   transcript?: { requests: unknown[] } | null;
   provider_snapshot?: Record<string, unknown> | null;
+  /** "client": the transcript is the model's whole history; the server rebuilds the input from
+   *  it and keeps no chain. The result echoes it back only when it actually did. */
+  history_mode?: "client";
   project?: Record<string, unknown> | null;
 }
 

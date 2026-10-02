@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { disposeChatStore, getChatStore, isChatExecutionCurrent, useChat } from "./chat";
+import { disposeChatStore, getChatStore, isChatExecutionCurrent, resetHistoryModeSupport, useChat } from "./chat";
 import { useEditor } from "./editor";
 import { __resetJobNotes, notifyJobSettled, pendingJobNotes, type SettledJob } from "./jobNotes";
 import { loadClientSession, persistSession, persistSessionSoon } from "./transcriptFile";
@@ -589,6 +589,77 @@ describe("useChat controls + session ops", () => {
     await useChat.getState().stop();
     await useChat.getState().refreshState();
     expect(useChat.getState().turns).toHaveLength(0);
+  });
+});
+
+describe("useChat sends client-owned history (Phase 1, option A)", () => {
+  beforeEach(() => resetHistoryModeSupport());
+
+  const ECHO = { kind: "text", final_text: "ok", usage: {}, provider_snapshot: {}, history_mode: "client" };
+  const legacyFrames = [{ kind: "image", b64: "AA==" }];
+
+  it("asks for history mode with the whole transcript, each message as the MODEL saw it", async () => {
+    setDesktop("p1");
+    useChat.setState({ projectId: "p1", model: "gpt-5.4" });
+    await useChat.getState().send("trim the intro", [
+      { path: "library/media_1.mp4", kind: "video", caption: "intro.mp4" } as Any,
+    ]);
+    (inferRoundStreaming as Any).mockResolvedValue(ECHO);
+    await lastDeps.infer({ user_text: "x" }, legacyFrames);
+    const body = (inferRoundStreaming as Any).mock.calls.at(-1)[0];
+    expect(body.history_mode).toBe("client");
+    const req = body.transcript.requests.at(-1);
+    // The composed text (with the attachment note) is what the model got on the first round.
+    expect(req.message.text).toContain("trim the intro");
+    expect(req.message.text).toContain("Attached file(s)");
+    expect(req.checkpoint).toBeUndefined(); // the model never reads timeline checkpoints
+    // Not known yet whether the server rebuilds history: this round's frames, as before.
+    expect(body.attachments).toEqual(legacyFrames);
+  });
+
+  it("once the server has rebuilt the history, keeps no chain and re-sends history frames instead", async () => {
+    setDesktop("p1");
+    useChat.setState({ projectId: "p1", model: "gpt-5.4", providerSnapshot: { previous_response_id: "OLD" } });
+    await useChat.getState().send("hi");
+    // Even a stray chain id beside the echo must not be kept: the history is the transcript.
+    (inferRoundStreaming as Any).mockResolvedValue({ ...ECHO, provider_snapshot: { previous_response_id: "STRAY" } });
+    await lastDeps.infer({ user_text: "hi" }, legacyFrames);
+    expect(useChat.getState().providerSnapshot).toEqual({});
+    await lastDeps.infer({ tool_results: [] }, legacyFrames);
+    const body = (inferRoundStreaming as Any).mock.calls.at(-1)[0];
+    expect(body.history_mode).toBe("client");
+    // History frames come from the transcript (none here), not this round's legacy list.
+    expect(body.attachments).toEqual([]);
+  });
+
+  it("a server or model without the mode keeps its chain, and the next round is a plain chained one", async () => {
+    setDesktop("p1");
+    useChat.setState({ projectId: "p1", model: "gemini-3.1-pro-preview" });
+    await useChat.getState().send("hi");
+    (inferRoundStreaming as Any).mockResolvedValue({
+      kind: "text",
+      final_text: "ok",
+      usage: {},
+      provider_snapshot: { previous_response_id: "R" },
+    });
+    await lastDeps.infer({ user_text: "hi" }, legacyFrames);
+    expect(useChat.getState().providerSnapshot).toEqual({ previous_response_id: "R" });
+    await lastDeps.infer({ tool_results: [] }, legacyFrames);
+    const body = (inferRoundStreaming as Any).mock.calls.at(-1)[0];
+    expect(body.history_mode).toBeUndefined();
+    expect(body.provider_snapshot).toEqual({ previous_response_id: "R" });
+    expect(body.attachments).toEqual(legacyFrames);
+  });
+
+  it("an error round does not demote the model to the chain", async () => {
+    setDesktop("p1");
+    useChat.setState({ projectId: "p1", model: "gpt-5.4" });
+    await useChat.getState().send("hi");
+    (inferRoundStreaming as Any).mockResolvedValueOnce({ kind: "error", error: "boom", usage: {}, provider_snapshot: {} });
+    await lastDeps.infer({ user_text: "hi" }, []);
+    (inferRoundStreaming as Any).mockResolvedValueOnce(ECHO);
+    await lastDeps.infer({ user_text: "hi" }, []);
+    expect((inferRoundStreaming as Any).mock.calls.at(-1)[0].history_mode).toBe("client");
   });
 });
 

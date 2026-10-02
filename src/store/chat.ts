@@ -5,6 +5,7 @@ import { inferRoundStreaming } from "../agent/api";
 import { ClientTurnRunner, type LoopDeps } from "../agent/loop";
 import { composeModelText } from "../agent/compose";
 import { collectInferenceAttachments } from "../agent/attachments";
+import { historyAttachments } from "../agent/historyFrames";
 import type { InferenceAttachment, RoundInput, Usage } from "../agent/types";
 import { captureError, setCorrelation } from "../observability/sentry";
 import { isExpected, toUserMessage } from "../lib/errors";
@@ -29,12 +30,24 @@ import {
   type Turn,
   mapRequests,
   buildRequests,
+  requestsForHistory,
   transcriptForRound,
   unansweredCalls,
 } from "./chatTranscript";
 import { undoFlags, localSession } from "./chatSession";
 import { projectConfig } from "./projectConfig";
 import { registerJobSink, unregisterJobSink, type SettledJob } from "./jobNotes";
+
+/** Per model, whether the server has said it rebuilds that model's input from the transcript
+ *  (client-owned history). Absent = not known yet: the request then also carries what the
+ *  chained path needs. For the app's lifetime; a model the server cannot do it for stays on
+ *  the chain. */
+const historyModeSupport = new Map<string, boolean>();
+
+/** Tests only: forget what the server said. */
+export function resetHistoryModeSupport(): void {
+  historyModeSupport.clear();
+}
 
 export interface RestoredPrompt {
   text: string;
@@ -402,16 +415,31 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
           project_id: projectId ?? "",
           transcript_id: transcriptId ?? "",
         });
+        // Client-owned history (Phase 1, option A): ask the server to rebuild the model's whole
+        // input from the transcript. Until a server has said it does that for this model, the
+        // request stays valid for the chained path too (round_input, the chain token, this
+        // round's frames); once it has, every kept frame of the history rides along, tagged.
+        const turns = get().turns;
+        const modelKey = String(model ?? "");
+        const support = historyModeSupport.get(modelKey);
+        const history = support !== false;
+        const atts =
+          history && support === true
+            ? await historyAttachments(turns, exec.host.store())
+            : attachments;
         const dto = await inferRoundStreaming(
           {
             round_input: roundInput,
-            attachments,
+            attachments: atts,
             model,
             effort,
             project_id: projectId ?? undefined,
             transcript_id: transcriptId ?? undefined,
-            transcript: transcriptForRound(base, roundInput, get().turns),
+            transcript: history
+              ? { requests: requestsForHistory(turns) }
+              : transcriptForRound(base, roundInput, turns),
             provider_snapshot: providerSnapshot,
+            ...(history ? { history_mode: "client" as const } : {}),
             project: cfg ?? null,
           },
           // Deltas are live presentation only. They go through the SAME supersede
@@ -421,7 +449,13 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
           },
           exec.controller.signal,
         );
-        if (!superseded()) set({ providerSnapshot: dto.provider_snapshot ?? providerSnapshot });
+        // Learn the mode from a real answer only: an error round may come from a path that
+        // never got as far as choosing one, and must not demote this model to the chain.
+        if (dto.history_mode === "client") historyModeSupport.set(modelKey, true);
+        else if (history && dto.kind !== "error") historyModeSupport.set(modelKey, false);
+        const ranHistory = dto.history_mode === "client";
+        if (!superseded())
+          set({ providerSnapshot: ranHistory ? {} : (dto.provider_snapshot ?? providerSnapshot) });
         return dto;
       },
       runTool: async (name, args) => {

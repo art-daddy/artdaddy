@@ -2,6 +2,7 @@
 // turns<->transcript-requests transforms. Mirrors the backend turn/transcript.py
 // (the transcript is the durable conversation; turns are its UI projection).
 import type { Attachment, TranscriptPart, TranscriptRequest } from "../api/types";
+import { composeModelText } from "../agent/compose";
 import type { RoundInput, ToolResultItem } from "../agent/types";
 import type { Mention } from "../timeline/mentions";
 import type { Timeline } from "../timeline/model";
@@ -66,6 +67,23 @@ export function buildRequests(turns: Turn[]): TranscriptRequest[] {
       timeline_after: t.timelineAfter ?? undefined,
     },
     undone: t.undone ?? false,
+  }));
+}
+
+/** The whole transcript as the model's history (client-owned history, Phase 1 option A): every
+ *  turn, this round's results included, which the server rebuilds the input from.
+ *  - Each user message is the text the MODEL got (`composeModelText`: the user's words plus the
+ *    editor context and attachment notes), not the raw text the chat shows. The model saw the
+ *    composed text on the first round; every later round must show it the same bytes.
+ *  - The timeline checkpoints are left out: the model never reads them, and they are most of the
+ *    bytes. */
+export function requestsForHistory(turns: Turn[]): TranscriptRequest[] {
+  return buildRequests(turns).map(({ checkpoint: _checkpoint, ...rest }, i) => ({
+    ...rest,
+    message: {
+      ...rest.message,
+      text: composeModelText(turns[i].userText, turns[i].attachments, turns[i].mentions ?? []),
+    },
   }));
 }
 
