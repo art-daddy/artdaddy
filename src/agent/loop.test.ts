@@ -310,6 +310,52 @@ describe("ClientTurnRunner", () => {
     expect(h.events.filter((e) => e.event === "turn_paused").at(-1)?.data.can_continue).toBe(true);
   });
 
+  it("checks in after 40 steps (80 on autopilot) -- the owner's 2026-10-02 decision", () => {
+    expect(CONTINUE_CAPS).toEqual({ default: 40, autopilot: 80 });
+  });
+
+  it("never pauses inside a batch: one that crosses the cap finishes, then the pause comes before the next round", async () => {
+    // UJ-008: the pause fell inside a 30-call batch, the unrun calls were never answered,
+    // and the next request was refused. Now every call of a batch runs and is answered.
+    const batch = (n: number, tag: string) =>
+      rr({
+        kind: "tool_calls",
+        pending_calls: Array.from({ length: n }, (_, i) => ({ call_id: `${tag}${i}`, name: "set_transition", arguments: {} })),
+      });
+    const h = harness([batch(30, "a"), batch(15, "b"), rr({ kind: "text", final_text: "done" })]);
+    await h.runner.start("crossfade everything");
+    expect(h.runTool).toHaveBeenCalledTimes(45); // the batch that crossed 40 ran to the end
+    expect(h.events.filter((e) => e.event === "turn_paused").at(-1)?.data.can_continue).toBe(true);
+    expect(h.infer).toHaveBeenCalledTimes(2); // ...and the next round waits for Continue
+    expect(h.runner.takeUnsentResults().map((r) => r.call_id)).toHaveLength(15); // all answered, none "not run"
+  });
+
+  it("Continue sends the paused batch's results", async () => {
+    const batch = rr({
+      kind: "tool_calls",
+      pending_calls: Array.from({ length: CONTINUE_CAPS.default }, (_, i) => ({ call_id: `a${i}`, name: "get_timeline", arguments: {} })),
+    });
+    const h = harness([batch, rr({ kind: "text", final_text: "done" })]);
+    await h.runner.start("go");
+    expect(h.infer).toHaveBeenCalledTimes(1);
+    await h.runner.continueRun();
+    expect(h.infer).toHaveBeenCalledTimes(2);
+    expect((h.infer.mock.calls[1][0] as RoundInput).tool_results).toHaveLength(CONTINUE_CAPS.default);
+    expect(h.names().at(-1)).toBe("turn_done");
+  });
+
+  it("a round the server refused still owes its results", async () => {
+    // UJ-008: a 413 or a network error dropped the results it carried; the chained path then
+    // had nothing to answer those calls with on the next message.
+    const h = harness([toolCall("get_timeline", "c1")]);
+    h.infer.mockImplementationOnce(async () => toolCall("get_timeline", "c1"));
+    h.infer.mockImplementationOnce(async () => {
+      throw new Error("413: request too large");
+    });
+    await expect(h.runner.start("go")).rejects.toThrow("413");
+    expect(h.runner.takeUnsentResults().map((r) => r.call_id)).toEqual(["c1"]);
+  });
+
   it("emits an error round", async () => {
     const h = harness([rr({ kind: "error", error: "boom" })]);
     await h.runner.start("x");

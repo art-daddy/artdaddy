@@ -75,8 +75,10 @@ export function needsApproval(name: string, args?: Record<string, unknown>): boo
 }
 
 // After this many auto-approved steps in one drive, PAUSE and offer Continue.
-// Autopilot is trusted to run longer before it checks in.
-export const CONTINUE_CAPS: Record<ApprovalMode, number> = { default: 20, autopilot: 40 };
+// Autopilot is trusted to run longer before it checks in. Checked only BETWEEN batches
+// (owner, 2026-10-02): a pause inside one left the rest of the batch unanswered, and the
+// provider refused the next request for it (UJ-008, one model response issued 30 calls).
+export const CONTINUE_CAPS: Record<ApprovalMode, number> = { default: 40, autopilot: 80 };
 
 export interface LoopDeps {
   /** Run one model round (POST /inference), optionally with media the model
@@ -269,11 +271,6 @@ export class ClientTurnRunner {
       const group = toolEffect(next.name) === "read" ? this.leadingReads() : [next];
 
       this.autoSteps += group.length;
-      if (this.autoSteps > CONTINUE_CAPS[this.d.mode()]) {
-        this.d.emit("turn_paused", { ...this.d.session(), can_continue: true });
-        return; // paused at the cap — continueRun() resumes
-      }
-
       if (group.length === 1) {
         await this.runCall(group[0]);
       } else {
@@ -282,13 +279,29 @@ export class ClientTurnRunner {
       this.batch.splice(0, group.length);
     }
     if (this.d.stopped()) return this.endTurn();
-    // Batch drained: feed all results back for the next round, along with any
-    // media a tool exposed for the model to SEE (inspect_media pixels).
+    // Batch drained, every call answered. Check in BEFORE the next round, never inside a
+    // batch; Continue sends these results.
+    if (this.autoSteps >= CONTINUE_CAPS[this.d.mode()]) {
+      this.d.emit("turn_paused", { ...this.d.session(), can_continue: true });
+      return; // paused at the cap -- continueRun() resumes
+    }
+    // Feed all results back for the next round, along with any media a tool exposed for the
+    // model to SEE (inspect_media pixels). They are taken off the runner BEFORE the round, so
+    // the round that follows (handled inside this call) cannot have its own results wiped on
+    // the way back out; and a round the server refuses hands them back, still owed.
     const atts = this.pendingAtts;
     this.pendingAtts = [];
     this.decisions.clear();
-    await this.handle(await this.d.infer({ tool_results: this.results }, atts));
+    const sent = this.results;
     this.results = [];
+    let next: RoundResultDTO;
+    try {
+      next = await this.d.infer({ tool_results: sent }, atts);
+    } catch (e) {
+      this.results = [...sent, ...this.results];
+      throw e;
+    }
+    await this.handle(next);
   }
 
   /** The run of reads at the head of the batch, capped so a fan-out of ffmpeg-backed reads

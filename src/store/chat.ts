@@ -6,7 +6,7 @@ import { ClientTurnRunner, type LoopDeps } from "../agent/loop";
 import { composeModelText } from "../agent/compose";
 import { collectInferenceAttachments } from "../agent/attachments";
 import { historyAttachments } from "../agent/historyFrames";
-import type { InferenceAttachment, RoundInput, Usage } from "../agent/types";
+import type { InferenceAttachment, RoundInput, ToolResultItem, Usage } from "../agent/types";
 import { captureError, setCorrelation } from "../observability/sentry";
 import { isExpected, toUserMessage } from "../lib/errors";
 import { submitFeedback, type FeedbackKind } from "../api/feedback";
@@ -160,6 +160,10 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
   }
   let currentRunner: ClientTurnRunner | null = null;
   let currentExec: TurnExecution | null = null;
+  // Results a retired runner still owed the provider, held until a turn starts with them.
+  // Taken BEFORE supersede() drops the runner: taking them after (as send() did) always got
+  // nothing, and the chained provider refused the next request (UJ-008).
+  let carriedDebt: ToolResultItem[] = [];
   let execSeq = 0;
   // Monotonic load generation: a slower load() (even for the SAME project id -- an
   // A->B->A re-activation) sees a newer one took over and bails before committing
@@ -725,6 +729,7 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
       // below is rejected by the guard at the top of send() -- otherwise it would
       // slip through (streaming was previously only set inside runTurn) and orphan
       // THIS turn as an eternal "streaming" spinner (RF8).
+      carriedDebt = [...carriedDebt, ...(currentRunner?.takeUnsentResults() ?? [])];
       supersede();
       const host = openToolHost(projectId);
       // Publish THIS turn's execution BEFORE awaiting the host warm-up, so a project
@@ -759,7 +764,8 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
       // A previous turn that was stopped mid-batch still owes the provider an output for
       // every call it issued; hand that debt to this turn or the request is refused. The
       // runner only knows about THIS session, so the transcript covers the crash case.
-      const owed = currentRunner?.takeUnsentResults() ?? [];
+      const owed = carriedDebt;
+      carriedDebt = [];
       const seen = new Set(owed.map((o) => o.call_id));
       const carried = [...owed, ...unansweredCalls(turns).filter((o) => !seen.has(o.call_id))];
       currentRunner = new ClientTurnRunner(buildLoopDeps(base, exec));

@@ -15,6 +15,10 @@ type Any = any;
 // store delegates to it and (b) drive the store's `apply` reducer by calling the
 // `emit` dep it was constructed with — the same event shapes the real runner emits.
 const runnerStart = vi.fn(async (_t: string) => {});
+// What each new runner was started with (the debt it carries), and what the live runner
+// still owes (its unsent results).
+const runnerCarried = vi.fn((_carried: unknown) => {});
+const runnerUnsent: unknown[] = [];
 const runnerApprove = vi.fn(async (_id?: string) => {});
 const runnerDeny = vi.fn(async (_r: string, _id?: string) => {});
 const runnerContinue = vi.fn(async () => {});
@@ -27,7 +31,11 @@ vi.mock("../agent/loop", () => ({
     constructor(deps: any) {
       lastDeps = deps;
     }
-    start = (t: string) => runnerStart(t);
+    start = (t: string, carried?: unknown) => {
+      runnerCarried(carried);
+      return runnerStart(t);
+    };
+    takeUnsentResults = () => runnerUnsent.splice(0);
     approve = (id?: string) => runnerApprove(id);
     deny = (r: string, id?: string) => runnerDeny(r, id);
     continueRun = () => runnerContinue();
@@ -679,6 +687,20 @@ describe("useChat loop deps + remaining actions", () => {
     const body = (inferRoundStreaming as Any).mock.calls.at(-1)[0];
     expect(body).toMatchObject({ model: "gpt-5.4-mini", project_id: "p1", transcript_id: "tx1" });
     expect(useChat.getState().providerSnapshot).toEqual({ previous_response_id: "R" });
+  });
+
+  it("a new message hands the previous turn's unsent results to the next turn (UJ-008)", async () => {
+    // `send()` retired the old runner BEFORE asking it for its debt, so the debt was always
+    // empty and the chained provider refused the next request.
+    setDesktop("p1");
+    useChat.setState({ projectId: "p1" });
+    await useChat.getState().send("first");
+    runnerUnsent.push({ call_id: "c7", name: "set_transition", result: { ok: true } });
+    useChat.setState({ streaming: false });
+    await useChat.getState().send("second");
+    expect(runnerCarried.mock.calls.at(-1)?.[0]).toEqual(
+      expect.arrayContaining([expect.objectContaining({ call_id: "c7" })]),
+    );
   });
 
   it("runTool returns ok:false for an unknown client tool", async () => {
