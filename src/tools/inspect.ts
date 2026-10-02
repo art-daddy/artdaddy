@@ -33,16 +33,25 @@ const NOT_READY: Result = { ok: false, error: "client tool runtime not ready" };
 const DEFAULT_FRAMES = 4;
 const MAX_FRAMES = 12;
 
-/** Longest edge of an extracted frame.
+/** Longest edge of a frame the agent sees, per tool (owner decision, 2026-10-02).
  *
- *  Was 512, which on a 1080x1920 canvas produced 288x512 — 7% of the frame's area. A caption at
- *  2-3% of frame height lands at 10-15px there, so stroke width, weight and legibility are all
- *  unjudgeable and `inspect_timeline` returned ok:true for a frame nobody could actually check.
- *  One constant, shared by every extractor, so the three call sites cannot drift apart. */
-const FRAME_MAX_EDGE = 1024;
+ *  Frames are now re-sent every round while they stay in the conversation (the app owns the
+ *  history), so their size is paid many times: a 1024 px PNG is ~1 MB, and ~30 of them a round
+ *  approach the 64 MB request cap. `inspect_media` asks "what is in this clip", which 512 px
+ *  answers (Palmier sends 512). `inspect_timeline` must also let the agent judge caption text:
+ *  512 px was tried before and a caption at 2-3% of a 9:16 frame's height came out 10-15 px tall,
+ *  unjudgeable; at 768 px it is ~15-23 px. `inspect_color` keeps 1024 px PNG because its
+ *  measurement reads the same file and compression would move the numbers. */
+const MEDIA_FRAME_EDGE = 512;
+const TIMELINE_FRAME_EDGE = 768;
+const COLOR_FRAME_EDGE = 1024;
 
-/** ffmpeg scale filter bounding a frame to {@link FRAME_MAX_EDGE} without changing its aspect. */
-const frameScale = `scale=${FRAME_MAX_EDGE}:${FRAME_MAX_EDGE}:force_original_aspect_ratio=decrease`;
+/** ffmpeg scale filter bounding a frame to `edge` without changing its aspect. */
+const scaleTo = (edge: number): string =>
+  `scale=${edge}:${edge}:force_original_aspect_ratio=decrease`;
+
+/** ffmpeg's mjpeg quantizer (2 = best, 31 = worst) for frames the agent sees. */
+const FRAME_JPEG_Q = "4";
 
 /** How much of `cache/inspect/` the intermediate renders may occupy.
  *
@@ -435,7 +444,7 @@ export async function inspectMediaTool(
     const targets = await Promise.all(
       times.map(async (t) => ({
         t,
-        out: await ctx.store.prepareArtifact(`inspect/${shortHash(`${path}|${t.toFixed(3)}`)}.png`),
+        out: await ctx.store.prepareArtifact(`inspect/${shortHash(`${path}|${t.toFixed(3)}|${MEDIA_FRAME_EDGE}`)}.jpg`),
       })),
     );
     const results = new Array<{ t: number; out: string; ok: boolean }>(targets.length);
@@ -455,9 +464,11 @@ export async function inspectMediaTool(
             "-i",
             path,
             "-vf",
-            frameScale,
+            scaleTo(MEDIA_FRAME_EDGE),
             "-frames:v",
             "1",
+            "-q:v",
+            FRAME_JPEG_Q,
             out,
           ]);
           results[i] = { t, out, ok: r.code === 0 && (await ctx.store.exists(out)) };
@@ -605,14 +616,20 @@ export async function inspectTimelineTool(
     }
   }
 
-  // Extraction is per-frame and independent: same read-only mp4 in, a distinct png out. Running
+  // Extraction is per-frame and independent: same read-only mp4 in, a distinct jpg out. Running
   // them in sequence made an 8-frame call pay eight ffmpeg startups end to end, which is most of
   // why this tool's cost tracked "how many processes" rather than "how much work". Bounded rather
   // than unbounded so a low-core machine isn't thrashed by a wide request.
+  //
+  // Each file is named for the timeline STATE it shows (the render key), never just its frame
+  // number: the conversation keeps re-sending the frames an earlier round saw, and `tl_<frame>`
+  // was overwritten by the next look at that frame, so the history would have shown a later edit
+  // under an earlier result. No key (the platform cannot size a file) gets a one-off name.
+  const state = key ?? nextCallToken();
   const targets = await Promise.all(
     nums.map(async (nFrame) => ({
       nFrame,
-      out: await ctx.store.prepareArtifact(`inspect/tl_${nFrame}.png`),
+      out: await ctx.store.prepareArtifact(`inspect/tl_${state}_${nFrame}_${TIMELINE_FRAME_EDGE}.jpg`),
     })),
   );
   const results = new Array<{ nFrame: number; out: string; ok: boolean }>(targets.length);
@@ -638,9 +655,11 @@ export async function inspectTimelineTool(
           "-i",
           mp4,
           "-vf",
-          frameScale,
+          scaleTo(TIMELINE_FRAME_EDGE),
           "-frames:v",
           "1",
+          "-q:v",
+          FRAME_JPEG_Q,
           out,
         ]);
         results[i] = { nFrame, out, ok: r.code === 0 && (await ctx.store.exists(out)) };
@@ -857,7 +876,7 @@ async function rawFrame(
     "-i",
     p,
     "-vf",
-    frameScale,
+    scaleTo(COLOR_FRAME_EDGE),
     "-frames:v",
     "1",
     out,
