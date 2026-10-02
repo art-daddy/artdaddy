@@ -27,6 +27,11 @@ export interface RoundResultDTO {
   finish_reason: string;
   usage: Usage;
   provider_snapshot: Record<string, unknown>;
+  /** This round's encrypted reasoning (client-owned history only). The app keeps it in the
+   *  transcript and sends it back, so the model keeps its reasoning without a server chain. */
+  reasoning_items?: Array<{ id: string; encrypted_content: string }>;
+  /** Echoed only when the server actually rebuilt the input from the transcript. */
+  history_mode?: "client";
 }
 
 export interface ToolResultItem {
@@ -50,6 +55,10 @@ export interface InferenceAttachment {
   caption?: string;
   fps?: number;
   ext?: string;
+  /** Client-owned history: the tool call whose result showed this frame, and which of its
+   *  frames it is. The server places the image from these, never from list order. */
+  call_id?: string;
+  index?: number;
 }
 
 /** One generated output file a server tool returned, for the client to persist. */

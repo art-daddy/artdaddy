@@ -281,6 +281,22 @@ describe("buildRows", () => {
     expect(rows.map((r) => r.kind)).toEqual(["tools", "part", "tools", "part"]);
   });
 
+  it("never shows the model's encrypted reasoning, and it does not split a run of calls", () => {
+    const rows = buildRows(
+      [
+        { kind: "reasoning_item", id: "rs_1", encrypted_content: "gAAAA...", round: 1 },
+        { kind: "tool_call", call_id: "c1", name: "add_clips", args: {}, round: 1 },
+        { kind: "tool_result", call_id: "c1", result: { ok: true, count: 1 } },
+        { kind: "reasoning_item", id: "rs_2", encrypted_content: "gAAAA...", round: 2 },
+        { kind: "tool_call", call_id: "c2", name: "add_clips", args: {}, round: 2 },
+        { kind: "tool_result", call_id: "c2", result: { ok: true, count: 2 } },
+      ],
+      ctx,
+    );
+    expect(rows.map((r) => r.kind)).toEqual(["tools"]);
+    expect(JSON.stringify(rows)).not.toContain("gAAAA");
+  });
+
   it("shows a call whose result has not arrived as still running", () => {
     const rows = buildRows([{ kind: "tool_call", call_id: "c1", name: "export", args: {} }], ctx);
     const [row] = rows as Any[];

@@ -346,3 +346,79 @@ describe("ClientTurnRunner", () => {
     expect(h.infer.mock.calls[1][1]).toEqual([{ kind: "image", b64: "AA==" }]); // rode the next round
   });
 });
+
+// Client-owned history (Phase 1, option A): the server rebuilds the model's input from the
+// transcript every round, so the transcript must carry exactly what the model saw.
+describe("ClientTurnRunner records what the model saw", () => {
+  it("keeps the exact result under model_result, even fields the envelope would overwrite", async () => {
+    const h = harness([toolCall("get_project_state"), rr({ kind: "text", final_text: "ok" })]);
+    h.runTool.mockResolvedValueOnce({ ok: true, name: "Odyssey II", kind: "image" });
+    await h.runner.start("state?");
+    const tr = h.events.find((e) => e.event === "tool_result")!;
+    expect(tr.data.model_result).toEqual({ ok: true, name: "Odyssey II", kind: "image" });
+    // The model was sent that same object.
+    const sent = (h.infer.mock.calls[1][0] as RoundInput).tool_results![0].result;
+    expect(sent).toEqual(tr.data.model_result);
+  });
+
+  it("keeps a reference to each image a result showed, in order, and nothing else", async () => {
+    const h = harness([toolCall("inspect_media"), rr({ kind: "text", final_text: "seen" })]);
+    h.runTool.mockResolvedValueOnce({
+      ok: true,
+      _attachments: [
+        { path: "internals/cache/inspect/a.jpg", kind: "image", caption: "@1s" },
+        { path: "internals/cache/inspect/clip.mp4", kind: "video" },
+        { path: "internals/cache/inspect/b.jpg", kind: "image", caption: "@2s" },
+      ],
+    });
+    await h.runner.start("look");
+    const tr = h.events.find((e) => e.event === "tool_result")!;
+    expect(tr.data.frame_refs).toEqual([
+      { path: "internals/cache/inspect/a.jpg", caption: "@1s" },
+      { path: "internals/cache/inspect/b.jpg", caption: "@2s" },
+    ]);
+    expect((tr.data.model_result as Record<string, unknown>)._attachments).toBeUndefined();
+  });
+
+  it("stores the round's encrypted reasoning BEFORE its calls, and marks every call with its round", async () => {
+    const h = harness([
+      rr({
+        kind: "tool_calls",
+        pending_calls: [
+          { call_id: "a", name: "get_timeline", arguments: {}, rationale: "Let me look." },
+          { call_id: "b", name: "get_project_state", arguments: {} },
+        ],
+        reasoning_items: [{ id: "rs_1", encrypted_content: "ENC" }],
+      }),
+      rr({ kind: "text", final_text: "done", reasoning_items: [{ id: "rs_2", encrypted_content: "ENC2" }] }),
+    ]);
+    await h.runner.start("hi");
+    const seq = h.events.filter((e) => e.event !== "turn_start" && e.event !== "turn_done");
+    expect(seq.map((e) => e.event)).toEqual([
+      "reasoning_item",
+      "tool_call",
+      "tool_call",
+      "tool_result",
+      "tool_result",
+      "reasoning_item",
+      "text",
+    ]);
+    const [r1, ca, cb] = seq;
+    expect(r1.data).toMatchObject({ id: "rs_1", encrypted_content: "ENC" });
+    expect(ca.data.round).toBe(r1.data.round);
+    expect(cb.data.round).toBe(r1.data.round);
+    expect(ca.data.rationale).toBe("Let me look.");
+    expect(cb.data.rationale).toBeUndefined();
+    // The next round is a different round.
+    expect(seq[5].data.round).not.toBe(r1.data.round);
+  });
+
+  it("a refused call is recorded like any other result", async () => {
+    const h = harness([toolCall("generate_video", "g1"), rr({ kind: "text", final_text: "ok" })]);
+    await h.runner.start("make a video");
+    await h.runner.deny("too expensive", "g1");
+    const tr = h.events.find((e) => e.event === "tool_result")!;
+    expect(tr.data.model_result).toEqual({ ok: false, error: "too expensive" });
+    expect(h.events.find((e) => e.event === "tool_call")!.data.round).toEqual(expect.any(Number));
+  });
+});

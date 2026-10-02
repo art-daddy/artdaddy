@@ -538,6 +538,9 @@ export function buildRows(
 
   parts.forEach((p, i) => {
     if (p.kind === "tool_result") return; // folded into its call
+    // The model's encrypted reasoning: kept for the model, unreadable to a person. It must
+    // not split a run of calls either, or every round would start a new row.
+    if (p.kind === "reasoning_item") return;
     if (p.kind === "tool_call") {
       const name = s(p.name);
       const args = (p.args ?? p.arguments ?? {}) as Args;

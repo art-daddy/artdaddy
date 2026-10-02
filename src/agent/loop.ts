@@ -118,6 +118,26 @@ function asResult(v: unknown): Record<string, unknown> {
     : { result: v };
 }
 
+/** A number unique to one model round, so the server can tell where a round's calls end
+ *  (it shows a round's frames after ALL of that round's outputs). Monotonic for the app's
+ *  lifetime; only equality within one turn is ever compared. */
+let roundSeq = 0;
+
+/** The images a result showed the model, in order: what the app re-sends in later rounds.
+ *  References only (paths), never bytes; video/audio attachments are not history frames. */
+function frameRefs(rawAtts: unknown): Array<{ path: string; caption?: string }> {
+  if (!Array.isArray(rawAtts)) return [];
+  const out: Array<{ path: string; caption?: string }> = [];
+  for (const a of rawAtts) {
+    if (!a || typeof a !== "object") continue;
+    const { path, kind, caption } = a as { path?: unknown; kind?: unknown; caption?: unknown };
+    if (typeof path !== "string" || !path) continue;
+    if ((kind ?? "image") !== "image") continue;
+    out.push(typeof caption === "string" && caption ? { path, caption } : { path });
+  }
+  return out;
+}
+
 /** Drives ONE agent turn client-side. Pauses at an approval gate or the
  *  continue-cap; `approve` / `deny` / `continueRun` resume the same runner. */
 export class ClientTurnRunner {
@@ -128,6 +148,9 @@ export class ClientTurnRunner {
   // later round never inherits a decision the user made about a different call.
   private decisions = new Map<string, { allowed: boolean; reason?: string }>();
   private autoSteps = 0;
+  // Per call of the current round: its round marker, and the round's prose (first call only).
+  private callRound = new Map<string, number>();
+  private rationale = new Map<string, string>();
 
   constructor(private readonly d: LoopDeps) {}
 
@@ -185,6 +208,13 @@ export class ClientTurnRunner {
       this.d.emit("error", { error: rr.error || "error" });
       return;
     }
+    // The round's encrypted reasoning goes into the transcript BEFORE anything the round
+    // produced: the server rebuilds the model's input from the transcript in this order.
+    const round = ++roundSeq;
+    for (const ri of rr.reasoning_items ?? []) {
+      if (ri?.id && ri?.encrypted_content)
+        this.d.emit("reasoning_item", { id: ri.id, encrypted_content: ri.encrypted_content, round });
+    }
     if (rr.kind === "text") {
       if (rr.final_text) {
         this.d.emit("text", { text: rr.final_text });
@@ -199,6 +229,11 @@ export class ClientTurnRunner {
     const reasoning = (rr.pending_calls ?? []).flatMap((c) => c.reasoning_summary ?? []);
     if (reasoning.length) this.d.emit("reasoning", { text: reasoning.join("\n") });
     this.batch = (rr.pending_calls ?? []).slice();
+    this.callRound.clear();
+    this.rationale.clear();
+    for (const c of this.batch) this.callRound.set(c.call_id, round);
+    const first = this.batch[0];
+    if (first?.rationale) this.rationale.set(first.call_id, first.rationale);
     this.results = [];
     await this.driveBatch();
   }
@@ -274,13 +309,23 @@ export class ClientTurnRunner {
   /** Answer a call the user refused, truthfully, without running it. */
   private recordDenial(call: PendingCall, reason?: string): void {
     const result = { ok: false, error: reason || "user denied this tool call" };
-    this.d.emit("tool_call", { call_id: call.call_id, name: call.name, args: call.arguments });
-    this.d.emit("tool_result", { ...result, call_id: call.call_id, name: call.name });
+    this.emitCall(call);
+    this.d.emit("tool_result", { ...result, call_id: call.call_id, name: call.name, model_result: result });
     // A refusal never reaches the dispatch boundary, so this is the only place it can be
     // counted -- and "the user said no" is a different signal from "the tool failed".
     recordToolDenied(call.name, call.call_id, result.error);
     this.results.push({ call_id: call.call_id, name: call.name, result });
     this.batch.shift();
+  }
+
+  /** The tool_call part: the call, its round, and (first call only) the round's prose. */
+  private emitCall(call: PendingCall): void {
+    const part: Record<string, unknown> = { call_id: call.call_id, name: call.name, args: call.arguments };
+    const round = this.callRound.get(call.call_id);
+    if (round !== undefined) part.round = round;
+    const prose = this.rationale.get(call.call_id);
+    if (prose) part.rationale = prose;
+    this.d.emit("tool_call", part);
   }
 
   /** Stop pressed: end the turn cleanly (no more rounds, no approval gate). */
@@ -290,7 +335,7 @@ export class ClientTurnRunner {
   }
 
   private async runCall(call: PendingCall): Promise<void> {
-    this.d.emit("tool_call", { call_id: call.call_id, name: call.name, args: call.arguments });
+    this.emitCall(call);
     let result: Record<string, unknown>;
     try {
       result = asResult(await this.d.runTool(call.name, call.arguments));
@@ -301,6 +346,7 @@ export class ClientTurnRunner {
     // Drain any media the tool exposed for the model to SEE into the next round
     // (other NLEs attach-transport), and strip it before the model sees the result.
     const rawAtts = result._attachments;
+    const frames = frameRefs(rawAtts);
     if (rawAtts !== undefined) {
       delete result._attachments;
       if (this.d.collectAttachments) {
@@ -321,7 +367,18 @@ export class ClientTurnRunner {
     // `name: "Odyssey II"`, and every inspect_media/generate_video result (which report
     // `kind: "image"|"video"`) stopped being a tool_result at all. 49 of one session's 164 calls
     // had no recorded result as a direct consequence.
-    this.d.emit("tool_result", { ...result, call_id: call.call_id, name: call.name });
+    //
+    // The spread is for the chat UI. What the MODEL saw travels whole under `model_result`
+    // (the envelope renames a result's own `name`), with references to the frames it was
+    // shown: the server rebuilds every later round's input from exactly these.
+    const part: Record<string, unknown> = {
+      ...result,
+      call_id: call.call_id,
+      name: call.name,
+      model_result: result,
+    };
+    if (frames.length) part.frame_refs = frames;
+    this.d.emit("tool_result", part);
     this.results.push({ call_id: call.call_id, name: call.name, result });
   }
 

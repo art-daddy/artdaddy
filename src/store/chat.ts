@@ -277,6 +277,7 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
         }));
         break;
       case "reasoning":
+      case "reasoning_item":
       case "tool_call":
       case "tool_result":
       case "text":
