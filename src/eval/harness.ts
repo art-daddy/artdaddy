@@ -189,7 +189,8 @@ export async function driveScenario(
     // no network, no paid inference, no ffmpeg.
     const studio: StudioState = emptyStudioState();
     if (scenario.surface === "journey") registerJourneyStubs(registry, studio);
-    else if (scenario.surface === "studio") registerStudioStubs(registry, studio);
+    else if (scenario.surface === "studio")
+      registerStudioStubs(registry, studio, 30, () => loadTimeline(store));
 
     let snapshot: Record<string, unknown> | null = null;
     const infer = async (roundInput: RoundInput): Promise<RoundResultDTO> => {

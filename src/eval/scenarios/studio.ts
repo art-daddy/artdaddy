@@ -23,6 +23,7 @@ import {
   STUDIO_VOICEOVER_REF,
 } from "../studio";
 import type { Scenario, Trace } from "../types";
+import { timelineLookFrames } from "../../tools/inspect";
 import { aclip, allClips, atrack, clipsOf, timeline, vclip, vtrack } from "./helpers";
 
 const FPS = 30;
@@ -175,10 +176,12 @@ export const STUDIO_SCENARIOS: Scenario[] = [
     ),
     expectTrace: (t) => {
       mustCall(t, "inspect_timeline");
-      // 2s at 30fps = frame 60. The model must not make the user do fps math for it.
+      // 2s at 30fps = frame 60. The model must not make the user do fps math for it: one of the
+      // frames the call LOOKS AT (the tool's own sampling rule) must be within 2 frames of it.
       const call = called(t, "inspect_timeline")[0];
-      const raw = JSON.stringify(call.args);
-      if (!/\b60\b/.test(raw)) throw new Error(`inspected the wrong frame: ${raw}`);
+      const seen = timelineLookFrames((call.args ?? {}) as Record<string, unknown>);
+      if (!seen.some((f) => Math.abs(f - 60) <= 2))
+        throw new Error(`inspected the wrong frame: ${JSON.stringify(call.args)} looks at ${seen}`);
     },
   },
   {

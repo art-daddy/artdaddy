@@ -22,6 +22,15 @@
 //   3. Its facts are FIXED and exported, so a grader asserts the model carried
 //      THIS bbox / THIS moment through, not merely that it called something.
 import type { ClientToolRegistry } from "../tools/registry";
+import {
+  mediaLookTimes,
+  planTimelineLook,
+  timelineLookFrames,
+  visibleClips,
+} from "../tools/inspect";
+import { GRID_NOTE } from "../tools/inspectOverlay";
+import { resolveRenderPlan } from "../timeline/renderPlan";
+import type { Timeline } from "../timeline/model";
 import { kindOf } from "../media/formats";
 import { registerJourneyStubs, type JourneyState } from "./journey";
 
@@ -109,11 +118,13 @@ function isClipSubject(a: Record<string, unknown>): boolean {
 }
 
 /** Register the deterministic stand-ins for everything outside the timeline.
- *  Timeline tools stay REAL — this only fills in the surface around them. */
+ *  Timeline tools stay REAL — this only fills in the surface around them. `timeline` reads the
+ *  scenario's live timeline, so a look at it answers from what is actually there. */
 export function registerStudioStubs(
   registry: ClientToolRegistry,
   state: StudioState,
   fps = 30,
+  timeline?: () => Promise<Timeline>,
 ): void {
   // A studio workflow still needs import / transcript / export.
   registerJourneyStubs(registry, state, fps);
@@ -434,29 +445,82 @@ export function registerStudioStubs(
     const a = (args ?? {}) as Record<string, unknown>;
     const subject = str(a.clip_id ?? a.media_ref, "?");
     state.inspections.push({ tool: "inspect_media", subject });
-    return {
+    // The real result, key for key, for a fixed 12 s 1080p clip with sound. Times are project
+    // frames for a clip_id (the seeds place it at frame 0, untrimmed), source seconds otherwise;
+    // the samples are the real tool's own.
+    const clip = isClipSubject(a);
+    const start = num(a.start_seconds, 0);
+    const end = num(a.end_seconds, 12);
+    const at = (t: number): { frame: number } | { t: number } =>
+      clip ? { frame: Math.round(t * fps) } : { t: Math.round(t * 1000) / 1000 };
+    const base = {
       ok: true,
       kind: "video",
       media_ref: subject,
       duration_s: 12,
-      frames: [{ t: 0 }, { t: 4 }, { t: 8 }],
-      frames_attached: 0,
-      transcript: null,
+      window_s: [start, end],
+      timing: clip ? "project_frames" : "source_seconds",
       metadata: { width: 1920, height: 1080, fps: 30 },
+      loudness: { integrated_lufs: -18.2, true_peak_dbtp: -3.1, rms_dbfs: -21.5 },
+      transcript: null,
+      frames_attached: 0,
+    };
+    if (a.overview === true) {
+      const tiles = [0, 4, 8].map((t) => Math.round(t * (clip ? fps : 1)));
+      return {
+        ...base,
+        overview: clip ? { tile_frames: tiles } : { tile_times: tiles },
+        note: "(eval) the storyboard was not attached in this harness",
+      };
+    }
+    return {
+      ...base,
+      frames: mediaLookTimes(start, end, a.max_frames).map(at),
+      coordinate_grid: GRID_NOTE,
+      sharpness: 182.4,
+      noise_sigma: 1.1,
       note: "(eval) frames were not attached in this harness",
     };
   });
 
   registry.register("inspect_timeline", async (args) => {
     const a = (args ?? {}) as Record<string, unknown>;
-    const raw = a.frames ?? a.frame;
-    const frames = Array.isArray(raw) ? raw.map((f) => num(f, 0)) : [num(raw, 0)];
+    if (timeline) {
+      // The real tool's answer minus the pixels: same frames, same out-of-range and empty-timeline
+      // refusals, same clips on canvas at each frame, read from the scenario's actual timeline.
+      const raw = await timeline();
+      const planned = planTimelineLook(raw, a);
+      state.inspections.push({
+        tool: "inspect_timeline",
+        subject: timelineLookFrames(a).join(","),
+      });
+      if (!planned.ok) return planned.result;
+      const look = resolveRenderPlan(planned.seconds);
+      return {
+        ok: true,
+        canvas: raw.canvas,
+        duration_frames: planned.total,
+        frame_numbers: planned.nums,
+        ...(planned.outOfRange.length ? { out_of_range: planned.outOfRange } : {}),
+        coordinate_grid: GRID_NOTE,
+        frames_attached: 0,
+        frames: planned.nums.map((f) => ({
+          frame: f,
+          time_s: Math.round((f / planned.fps) * 1000) / 1000,
+          ok: true,
+          visible_clips: visibleClips(look, f, planned.fps),
+        })),
+        note: "(eval) frames were not attached in this harness",
+      };
+    }
+    const frames = timelineLookFrames(a);
     state.inspections.push({ tool: "inspect_timeline", subject: frames.join(",") });
     return {
       ok: true,
       canvas: { width: 1080, height: 1920, fps },
       frame_numbers: frames,
       frames_attached: 0,
+      coordinate_grid: GRID_NOTE,
       frames: frames.map((f) => ({ frame: f, time_s: f / fps, ok: true })),
       note: "(eval) frames were not attached in this harness",
     };

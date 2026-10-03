@@ -322,13 +322,15 @@ describe("studio trace graders reject a broken chain", () => {
 
   it("inspect_timeline_check: rejects inspecting a frame the prompt didn't ask for", () => {
     const s = byId("inspect_timeline_check");
-    expect(() =>
-      s.expectTrace!(trace([{ name: "inspect_timeline", args: { frames: [60] } }])),
-    ).not.toThrow();
+    const look = (args: Record<string, unknown>) => () =>
+      s.expectTrace!(trace([{ name: "inspect_timeline", args }]));
+    expect(look({ start_frame: 60 })).not.toThrow();
+    // A range is graded on the frames it samples, not on the numbers in it.
+    expect(look({ start_frame: 55, end_frame: 65 })).not.toThrow(); // samples 55..64, incl. 60
     // 2 seconds at 30fps is frame 60; frame 2 is the model doing no fps math at all.
-    expect(() =>
-      s.expectTrace!(trace([{ name: "inspect_timeline", args: { frames: [2] } }])),
-    ).toThrow();
+    expect(look({ start_frame: 2 })).toThrow();
+    // Sweeping the whole timeline samples 25, 75, ... — never the moment asked about.
+    expect(look({ start_frame: 0, end_frame: 300 })).toThrow();
   });
 
   it("search_then_fetch: rejects downloading a result other than the one asked for", () => {
@@ -417,6 +419,37 @@ describe("studio surface covers the whole advertised contract", () => {
 });
 
 // ── the harness's audio/video routing fact ──────────────────────────────────
+
+// The stand-in used to read `frames`/`frame`, arguments the contract never had, so every real call
+// (`start_frame: 60`) was answered as a look at frame 0, with nothing on screen.
+describe("the inspect_timeline stand-in answers from the scenario's real timeline", () => {
+  const s = byId("inspect_timeline_check");
+  const registry = new ClientToolRegistry();
+  registerStudioStubs(registry, emptyStudioState(), 30, async () => s.seed());
+  const look = async (args: Record<string, unknown>) =>
+    (await registry.run("inspect_timeline", args)) as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+
+  it("looks at the frame asked for, and lists what is on screen there, top layer first", async () => {
+    const r = await look({ start_frame: 60 });
+    expect(r.ok).toBe(true);
+    expect(r.frame_numbers).toEqual([60]);
+    expect(r.frames[0].visible_clips).toEqual(["logo", "a"]);
+    expect(r.duration_frames).toBe(300);
+  });
+
+  it("samples a range by the tool's own rule", async () => {
+    expect((await look({ start_frame: 55, end_frame: 65 })).frame_numbers).toEqual([
+      55, 57, 59, 60, 62, 64,
+    ]);
+  });
+
+  it("refuses a frame past the end the way the tool does", async () => {
+    const r = await look({ start_frame: 400 });
+    expect(r.ok).toBe(false);
+    expect(r.out_of_range).toEqual([400]);
+    expect(r.duration_frames).toBe(300);
+  });
+});
 
 describe("studioRefIsAudio keeps generated audio off video tracks", () => {
   it("classifies the generated audio refs as audio", () => {
