@@ -358,14 +358,19 @@ describe("transcript: never waited on when long", () => {
       const ref = await libRef(ctx, file, "audio");
       const wavSeconds: number[] = [];
       const watching: CommandRunner = {
-        run(program, args, signal, cwd, onStdout) {
+        async run(program, args, signal, cwd, onStdout) {
           if (program === "whisper-cli") {
             const wav = args[args.indexOf("-f") + 1];
-            const p = spawnSync(
-              path.resolve("src-tauri/binaries", `artdaddy-ffprobe-x86_64-pc-windows-msvc${process.platform === "win32" ? ".exe" : ""}`),
-              ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", wav],
-              { encoding: "utf8" },
-            );
+            // The same ffprobe the tool runs (any platform), not a hard-coded Windows binary.
+            const p = await nodeRunner.run("ffprobe", [
+              "-v",
+              "error",
+              "-show_entries",
+              "format=duration",
+              "-of",
+              "csv=p=0",
+              wav,
+            ]);
             wavSeconds.push(Number(p.stdout.trim()));
           }
           return nodeRunner.run(program, args, signal, cwd, onStdout);
