@@ -8,6 +8,7 @@
 // 16 the kept set changes once per 16 new frames, so the cache misses once per batch. The server
 // enforces Azure's own limit (50 images per request) again where it assembles the input.
 import type { Turn } from "../store/chatTranscript";
+import { readImageSize } from "../tools/imageDims";
 import type { ProjectStoreAccess } from "../tools/store";
 import type { InferenceAttachment } from "./types";
 
@@ -75,8 +76,17 @@ function extOf(path: string): string | undefined {
   return m ? `.${m[1].toLowerCase()}` : undefined;
 }
 
+/** Azure refuses the WHOLE request over one image it cannot decode (probed 2026-10-03), and a
+ *  history frame rides every round: only jpeg/png/gif/webp stating a size go (the header parser
+ *  also reads BMP, which Azure does not take). */
+function decodableImage(bytes: Uint8Array): boolean {
+  const size = readImageSize(bytes);
+  return !!size && size.width > 0 && size.height > 0 && !(bytes[0] === 0x42 && bytes[1] === 0x4d);
+}
+
 /** The bytes of the kept frames, each tagged with the call and index it belongs to. A frame
- *  that is missing, unreadable or too large is skipped; the server tells the model so. */
+ *  that is missing, unreadable, too large, not a decodable image, or outside the project is
+ *  skipped; the server tells the model so. */
 export async function historyAttachments(
   turns: Turn[],
   store: ProjectStoreAccess | null,
@@ -84,10 +94,12 @@ export async function historyAttachments(
   if (!store) return [];
   const out: InferenceAttachment[] = [];
   for (const f of keptFrames(historyFrameRefs(turns))) {
+    // The transcript is a file on disk: no path in it may reach a file outside this project.
+    const abs = store.resolveWritable(f.path);
+    if (!abs) continue;
     try {
-      const abs = (await store.resolveRef(f.path)) ?? f.path;
       const bytes = await store.readBytes(abs);
-      if (!bytes.length || bytes.length > HISTORY_FRAME_MAX_BYTES) continue;
+      if (!bytes.length || bytes.length > HISTORY_FRAME_MAX_BYTES || !decodableImage(bytes)) continue;
       out.push({
         kind: "image",
         b64: toB64(bytes),
@@ -97,7 +109,7 @@ export async function historyAttachments(
         index: f.index,
       });
     } catch {
-      /* gone from the cache (trimmed, project reopened): the server writes a note instead */
+      /* gone (trimmed past the cache budget, or deleted): the server writes a note instead */
     }
   }
   return out;

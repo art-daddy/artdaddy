@@ -292,6 +292,49 @@ describe("sweepArtifactCache (close-time derived-artifact GC)", () => {
     expect(await hasCache(fs, "cuts/keepme.mp4")).toBe(true);
   });
 
+  // The chat history is re-sent to the model every round, frames included, read back from these
+  // files. A sweep that did not know about frame_refs emptied cache/inspect at every close, so a
+  // reopened project's history had lost every frame it showed (seen in QA 2026-10-03: 108 of 108).
+  it("keeps the frames the chat history shows, in either path form, undone turns included", async () => {
+    const fs = new MockFs();
+    seed(fs, {
+      catalog: { clips: [] },
+      timeline: { tracks: [] },
+      session: {
+        requests: [
+          {
+            response: [
+              { kind: "tool_call", call_id: "c1" },
+              {
+                kind: "tool_result",
+                call_id: "c1",
+                frame_refs: [
+                  { path: joinPath(DIR, "internals/cache/inspect/abs0001.jpg"), caption: "@1s" },
+                  { path: "internals/cache/gemini/gem_img_rel0002.jpg" },
+                  null,
+                  { path: 7 },
+                ],
+              },
+            ],
+          },
+          {
+            undone: true, // a redo brings it back into the history
+            response: [{ kind: "tool_result", call_id: "c2", frame_refs: [{ path: "internals/cache/inspect/undone03.jpg" }] }],
+          },
+          { response: "not a list" },
+        ],
+      },
+    });
+    cache(fs, "inspect/abs0001.jpg");
+    cache(fs, "gemini/gem_img_rel0002.jpg");
+    cache(fs, "inspect/undone03.jpg");
+    cache(fs, "inspect/stale004.jpg");
+    const { removed } = await sweep(fs);
+    expect(removed).toEqual(["inspect/stale004.jpg"]);
+    for (const kept of ["inspect/abs0001.jpg", "gemini/gem_img_rel0002.jpg", "inspect/undone03.jpg"])
+      expect(await hasCache(fs, kept)).toBe(true);
+  });
+
   it("FAILS CLOSED on a corrupt catalog — removes nothing", async () => {
     const fs = new MockFs();
     seed(fs, { timeline: { tracks: [] } });

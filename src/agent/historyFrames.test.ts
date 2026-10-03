@@ -120,6 +120,7 @@ describe("keptFrames", () => {
 
 class MemFs implements FsLike {
   bytes = new Map<string, Uint8Array>();
+  reads: string[] = [];
   async exists(p: string): Promise<boolean> {
     return this.bytes.has(joinPath(p));
   }
@@ -128,6 +129,7 @@ class MemFs implements FsLike {
   }
   async writeTextFile(): Promise<void> {}
   async readBytes(p: string): Promise<Uint8Array> {
+    this.reads.push(joinPath(p));
     const v = this.bytes.get(joinPath(p));
     if (!v) throw new Error("ENOENT");
     return v;
@@ -135,13 +137,29 @@ class MemFs implements FsLike {
   async mkdir(): Promise<void> {}
 }
 
+/** The smallest bytes each header parser accepts, stating a size. */
+const PNG = (w = 32, h = 16): Uint8Array =>
+  new Uint8Array([
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52,
+    0, 0, w >> 8, w & 255, 0, 0, h >> 8, h & 255, 8, 2, 0, 0, 0,
+  ]);
+const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0x10, 0x00, 0x20, 0x03]);
+const GIF = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x20, 0x00, 0x10, 0x00, 0, 0]);
+const WEBP = new Uint8Array([
+  ...[0x52, 0x49, 0x46, 0x46], 0, 0, 0, 0, ...[0x57, 0x45, 0x42, 0x50], ...[0x56, 0x50, 0x38, 0x58],
+  0, 0, 0, 0, 0, 0, 0, 0, 31, 0, 0, 15, 0, 0,
+]);
+const b64 = (b: Uint8Array): string => btoa(String.fromCharCode(...b));
+
 describe("historyAttachments", () => {
   it("re-sends the kept frames' bytes, tagged with their call and index; skips missing and oversized ones", async () => {
     const fs = new MemFs();
     const DIR = "C:/proj";
-    fs.bytes.set(joinPath(DIR, "f/a_0.jpg"), new Uint8Array([0xff, 0xd8, 1]));
+    fs.bytes.set(joinPath(DIR, "f/a_0.jpg"), JPEG);
     // f/a_1.jpg is missing (cache trimmed)
-    fs.bytes.set(joinPath(DIR, "f/c_0.jpg"), new Uint8Array(HISTORY_FRAME_MAX_BYTES + 1));
+    const big = new Uint8Array(HISTORY_FRAME_MAX_BYTES + 1);
+    big.set(PNG());
+    fs.bytes.set(joinPath(DIR, "f/c_0.jpg"), big);
     const store = new ProjectStoreAccess(DIR, fs);
     const turns = [
       turn("t1", [{ kind: "tool_call", call_id: "a" }, result("a", 2)]),
@@ -149,15 +167,15 @@ describe("historyAttachments", () => {
     ];
     const atts = await historyAttachments(turns, store);
     expect(atts).toEqual([
-      { kind: "image", b64: btoa(String.fromCharCode(0xff, 0xd8, 1)), caption: "@0s", ext: ".jpg", call_id: "a", index: 0 },
+      { kind: "image", b64: b64(JPEG), caption: "@0s", ext: ".jpg", call_id: "a", index: 0 },
     ]);
   });
 
   it("names the file type from the extension, case-insensitively, and only from the file name", async () => {
     const fs = new MemFs();
     const DIR = "C:/proj";
-    fs.bytes.set(joinPath(DIR, "f/UP.JPG"), new Uint8Array([1]));
-    fs.bytes.set(joinPath(DIR, "f.dir/noext"), new Uint8Array([2]));
+    fs.bytes.set(joinPath(DIR, "f/UP.JPG"), JPEG);
+    fs.bytes.set(joinPath(DIR, "f.dir/noext"), PNG());
     const store = new ProjectStoreAccess(DIR, fs);
     const turns = [
       turn("t1", [{ kind: "tool_result", call_id: "a", frame_refs: [{ path: "f/UP.JPG" }, { path: "f.dir/noext" }] }]),
@@ -174,8 +192,107 @@ describe("historyAttachments", () => {
   it("a frame exactly at the size limit is still re-sent", async () => {
     const fs = new MemFs();
     const DIR = "C:/proj";
-    fs.bytes.set(joinPath(DIR, "f/a_0.jpg"), new Uint8Array(HISTORY_FRAME_MAX_BYTES));
+    const atLimit = new Uint8Array(HISTORY_FRAME_MAX_BYTES);
+    atLimit.set(PNG());
+    fs.bytes.set(joinPath(DIR, "f/a_0.jpg"), atLimit);
     const atts = await historyAttachments([turn("t1", [result("a", 1)])], new ProjectStoreAccess(DIR, fs));
     expect(atts).toHaveLength(1);
+  });
+
+  // The transcript is a file on disk, and a project folder can come from someone else. A path in
+  // it must not be able to send any other file on this machine to the model.
+  it("never reads a frame from outside the project, whatever path the transcript holds", async () => {
+    const fs = new MemFs();
+    const DIR = "C:/proj";
+    const outside = [
+      "C:/Users/me/secret.png",
+      "C:/proj2/internals/cache/inspect/x.png", // a sibling folder that merely starts with the name
+      "../outside.png",
+      "internals/../../outside2.png",
+      "internals\\..\\..\\outside3.png",
+    ];
+    for (const p of outside) {
+      fs.bytes.set(joinPath(p), PNG());
+      fs.bytes.set(joinPath(DIR, p), PNG());
+    }
+    fs.bytes.set(joinPath(DIR, "internals/cache/inspect/ok.png"), PNG());
+    const turns = [
+      turn("t1", [
+        {
+          kind: "tool_result",
+          call_id: "a",
+          frame_refs: [...outside, joinPath(DIR, "internals/cache/inspect/ok.png")].map((path) => ({ path })),
+        },
+      ]),
+    ];
+    const atts = await historyAttachments(turns, new ProjectStoreAccess(DIR, fs));
+    expect(atts.map((a) => a.index)).toEqual([outside.length]);
+    expect(fs.reads).toEqual([joinPath(DIR, "internals/cache/inspect/ok.png")]);
+  });
+
+  // Azure refuses the WHOLE request over one image it cannot decode (probed 2026-10-03: JSON bytes
+  // and a bare JPEG header were refused with 400, a truncated JPEG was accepted), and the frame
+  // would then ride every round until it left the window: a chat that fails every message.
+  it("sends only images Azure decodes: jpeg, png, gif, webp with a size", async () => {
+    const fs = new MemFs();
+    const DIR = "C:/proj";
+    const files: Record<string, Uint8Array> = {
+      "f/json.jpg": new TextEncoder().encode('{"clips":[1,2,3]}'),
+      "f/header_only.jpg": JPEG.slice(0, 4),
+      "f/empty.png": new Uint8Array(0),
+      "f/zero_width.png": PNG(0, 16),
+      "f/zero_height.png": PNG(32, 0),
+      "f/bitmap.bmp": new Uint8Array([0x42, 0x4d, ...new Array(12).fill(0), 40, 0, 0, 0, 32, 0, 0, 0, 16, 0, 0, 0]),
+      "f/ok.jpg": JPEG,
+      "f/ok.png": PNG(),
+      "f/ok.gif": GIF,
+      "f/ok.webp": WEBP,
+    };
+    for (const [p, b] of Object.entries(files)) fs.bytes.set(joinPath(DIR, p), b);
+    const names = Object.keys(files);
+    const turns = [turn("t1", [{ kind: "tool_result", call_id: "a", frame_refs: names.map((path) => ({ path })) }])];
+    const atts = await historyAttachments(turns, new ProjectStoreAccess(DIR, fs));
+    expect(atts.map((a) => names[a.index as number])).toEqual(["f/ok.jpg", "f/ok.png", "f/ok.gif", "f/ok.webp"]);
+  });
+
+  it("fuzz: whatever the path, only files inside the project are read; a plain in-project path always is", async () => {
+    const DIR = "C:/proj";
+    const segment = fc.constantFrom("..", ".", "", "a", "inspect", "x.png", "C:", "proj", "proj2", "..\\..", "~");
+    const path = fc.tuple(
+      fc.constantFrom("", "/", "C:/", "C:/proj/", "C:/proj2/", "\\\\server\\share\\", "c:/proj/"),
+      fc.array(segment, { minLength: 1, maxLength: 5 }),
+      fc.constantFrom("/", "\\"),
+    ).map(([root, segs, sep]) => root + segs.join(sep));
+    await fc.assert(
+      fc.asyncProperty(path, async (p) => {
+        const fs = new MemFs();
+        fs.bytes.set(joinPath(p), PNG());
+        fs.bytes.set(joinPath(DIR, p), PNG());
+        await historyAttachments(
+          [turn("t1", [{ kind: "tool_result", call_id: "a", frame_refs: [{ path: p }] }])],
+          new ProjectStoreAccess(DIR, fs),
+        );
+        for (const r of fs.reads) {
+          expect(r === DIR || r.startsWith(`${DIR}/`)).toBe(true);
+          expect(r.split("/")).not.toContain("..");
+        }
+      }),
+      { numRuns: 400 },
+    );
+    // The legitimate direction: a plain relative path of ordinary names is never dropped.
+    const name = fc.stringMatching(/^[a-z0-9_-]{1,8}(\.[a-z]{2,4})?$/);
+    await fc.assert(
+      fc.asyncProperty(fc.array(name, { minLength: 1, maxLength: 4 }), async (segs) => {
+        const fs = new MemFs();
+        const p = segs.join("/");
+        fs.bytes.set(joinPath(DIR, p), PNG());
+        const atts = await historyAttachments(
+          [turn("t1", [{ kind: "tool_result", call_id: "a", frame_refs: [{ path: p }] }])],
+          new ProjectStoreAccess(DIR, fs),
+        );
+        expect(atts).toHaveLength(1);
+      }),
+      { numRuns: 200 },
+    );
   });
 });

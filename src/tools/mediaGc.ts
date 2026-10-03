@@ -54,11 +54,29 @@ async function collectAuthoritativeRefs(
   );
   if (trText !== null) {
     const session = JSON.parse(trText) as {
-      requests?: Array<{ checkpoint?: { timeline?: unknown; timeline_after?: unknown } }>;
+      requests?: Array<{
+        checkpoint?: { timeline?: unknown; timeline_after?: unknown };
+        response?: unknown;
+      }>;
     };
     for (const req of session.requests ?? []) {
       collectRefs(req.checkpoint?.timeline, refs);
       collectRefs(req.checkpoint?.timeline_after, refs);
+      collectFrameRefs(req.response, refs);
+    }
+  }
+}
+
+/** Add the frame files a transcript's tool results showed the model: the client-owned history
+ *  re-sends them every round, so they are live for as long as the transcript names them. */
+function collectFrameRefs(response: unknown, into: Set<string>): void {
+  if (!Array.isArray(response)) return;
+  for (const part of response) {
+    const frames = (part as { frame_refs?: unknown } | null)?.frame_refs;
+    if (!Array.isArray(frames)) continue;
+    for (const f of frames) {
+      const path = (f as { path?: unknown } | null)?.path;
+      if (typeof path === "string" && path) into.add(path);
     }
   }
 }
