@@ -242,13 +242,15 @@ export async function ff(args: string[]): Promise<void> {
 /** A long 1080p H.264 source for cost tests (a keyframe every `gop` frames, as OBS and phones
  *  write), made once and kept between runs in the OS temp dir: 14 minutes takes ~45 s to encode.
  *  Written under a temporary name first, so a run killed half way never leaves a short file that a
- *  later run would reuse. */
+ *  later run would reuse. The temporary name is this BUILD's own: e2e files run in parallel, and on
+ *  a cold cache (CI) several build the same fixture at once. With one shared `.part` name, the first
+ *  to finish renamed the others' file out from under them (ENOENT on macOS CI, 2026-10-04). */
 export async function longFixture(o: { seconds: number; fps: number; gop: number }): Promise<string> {
   const dir = path.join(os.tmpdir(), "artdaddy-e2e-fixtures");
   const file = path.join(dir, `long${o.seconds}_1080p${o.fps}_g${o.gop}.mp4`);
   if (existsSync(file)) return file;
   await fsp.mkdir(dir, { recursive: true });
-  const tmp = `${file}.part.mp4`;
+  const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.part.mp4`;
   await ff([
     "-y",
     "-hide_banner",
@@ -270,7 +272,13 @@ export async function longFixture(o: { seconds: number; fps: number; gop: number
     "yuv420p",
     tmp,
   ]);
-  await fsp.rename(tmp, file);
+  // Another build may have finished first; theirs is the same bytes, so keep it and drop ours.
+  if (existsSync(file)) await fsp.rm(tmp, { force: true });
+  else
+    await fsp.rename(tmp, file).catch(async (e) => {
+      await fsp.rm(tmp, { force: true });
+      if (!existsSync(file)) throw e;
+    });
   return file;
 }
 
