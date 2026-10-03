@@ -5,7 +5,10 @@
 //   J2 (UJ-008/018) Stop in the middle of a batch, then a new message -- the next request was
 //      refused, and after the recovery the agent had no memory of the request;
 //   J3 (UJ-018) the server dies in the middle of a turn (a deploy / scale-to-zero restart), then a
-//      new message -- the agent must still remember the conversation (this script restarts it).
+//      new message -- the agent must still remember the conversation (this script restarts it);
+//   J4 frames the history showed survive a project close and an app restart;
+//   J5 Stop while the model is thinking: the server hangs up on Azure, reports no usage, and the
+//      chat carries on (owner decision 2026-10-03: a stopped round costs what Azure charges).
 // It asserts on ARTIFACTS: the persisted transcript (internals/transcript.json) and the server's
 // per-round log lines (`client_history ...`, `round usage ...`), never on the DOM alone.
 //
@@ -256,6 +259,42 @@ async function j4(d, pid, name) {
   check("J4: answered without a refusal", finalText(next) && errors(next).length === 0, finalText(next).slice(0, 200).replace(/\n/g, " "));
 }
 
+// ── Stop while the model is thinking: the server must hang up on Azure (2026-10-03) ──────
+async function j5(d, pid) {
+  console.log("J5: Stop while the model is thinking hangs up on Azure, and the chat goes on");
+  const off = logSize();
+  await say(
+    d,
+    "Without calling any tool, think very carefully and work out how many positive integers below 10^7 have digits " +
+      "that sum to 37 and are divisible by 11. Check every step twice, then answer with the number only.",
+  );
+  // Wait until the round is under way on the server, then give the model a few seconds to think.
+  const t0 = Date.now();
+  while (!logSince(off).some((l) => l.includes("client_history items="))) {
+    if (Date.now() - t0 > 60000) throw new Error("the round never reached the server");
+    await sleep(200);
+  }
+  await sleep(4000);
+  const stoppedAt = Date.now();
+  await d.eval(`(${STOP})?.click()`);
+  let lines = [];
+  for (;;) {
+    lines = logSince(off);
+    if (lines.some((l) => l.includes("round cancelled")) || Date.now() - stoppedAt > 20000) break;
+    await sleep(200);
+  }
+  const cancelled = lines.find((l) => l.includes("round cancelled"));
+  const usage = lines.filter((l) => l.includes("round usage"));
+  check("J5: the server hung up on Azure after the Stop", Boolean(cancelled), cancelled ?? "no 'round cancelled' line within 20 s");
+  check("J5: no usage was reported for the stopped round", usage.length === 0, usage.join(" | ") || "none");
+  console.log(`  noticed ${((Date.now() - stoppedAt) / 1000).toFixed(1)} s after the Stop; stopped at ${new Date(stoppedAt).toISOString()}`);
+  await waitTurn(d, 30000);
+  await say(d, "What is 2 + 2? Answer with the number only.");
+  await waitTurn(d);
+  const next = lastRequest(pid);
+  check("J5: the next message is answered normally", /4/.test(finalText(next)) && errors(next).length === 0, finalText(next).slice(0, 80));
+}
+
 // ── the server dies mid-turn (UJ-018) ────────────────────────────────────────────────────
 const AKARU = path.resolve(import.meta.dirname, "../../../Akaru");
 const SERVER_ENV = {
@@ -346,6 +385,7 @@ if (!only || only === "J1") await j1(d, pid);
 if (!only || only === "J2") await j2(d, pid);
 if (!only || only === "J3") await j3(d, pid);
 if (!only || only === "J4") await j4(d, pid, name);
+if (!only || only === "J5") await j5(d, pid);
 writeFileSync(path.join(OUT, `chatHistory-${stamp}.json`), JSON.stringify({ pid, model: MODEL, report }, null, 2));
 const failed = report.filter((r) => !r.ok).length;
 console.log(`\n${report.length - failed}/${report.length} checks passed`);
