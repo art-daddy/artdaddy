@@ -494,22 +494,15 @@ function whisperThreads(): string {
   return String(Math.max(1, Math.min(8, cores - 2)));
 }
 
-/** whisper's own `-ot`/`-d` bounds, plus the cache-key suffix that keeps a windowed
- *  transcript from ever being served as a full one.
- *
- *  Verified against whisper-cli: with `-ot 60000` the reported offsets START at 60000, i.e.
- *  they stay on the SOURCE timeline. Nothing downstream has to shift them back. */
-function windowArgs(w?: TranscribeWindow | null): { key: string; args: string[] } {
+/** The cache-key suffix that keeps a windowed transcript from ever being served as a full one
+ *  ("" for the whole file). A window is transcribed from its own extracted audio (see runWhisper),
+ *  so whisper itself is never given `-ot`/`-d`. */
+function windowArgs(w?: TranscribeWindow | null): { key: string } {
   const start = Math.max(0, Number(w?.start) || 0);
   const rawEnd = Number(w?.end);
   const end = Number.isFinite(rawEnd) && rawEnd > start ? rawEnd : null;
-  if (!start && end === null) return { key: "", args: [] };
-  const args = start > 0 ? ["-ot", String(Math.floor(start * 1000))] : [];
-  if (end !== null) args.push("-d", String(Math.ceil((end - start) * 1000)));
-  return {
-    key: `|w${Math.floor(start * 1000)}-${end === null ? "" : Math.ceil(end * 1000)}`,
-    args,
-  };
+  if (!start && end === null) return { key: "" };
+  return { key: `|w${Math.floor(start * 1000)}-${end === null ? "" : Math.ceil(end * 1000)}` };
 }
 
 /** One run per output path. Whisper is minutes long and BOTH the background indexer and
@@ -534,7 +527,12 @@ function wavPathFor(ctx: ClientToolContext, src: string): Promise<string> {
   );
 }
 
-/** Extract [start, end) seconds of `src`'s audio, or the whole of it, as whisper's 16 kHz WAV. */
+/** Extract [start, end) seconds of `src`'s audio, or the whole of it, as whisper's 16 kHz WAV.
+ *
+ *  Written under a temporary name and renamed into place, so `exists(wav)` means COMPLETE. It was
+ *  written straight to `wav`, and a window asked for while the whole file was still being extracted
+ *  read the half-written file; a failed extraction also left one behind for the next call to reuse.
+ *  Without rename (web) it writes in place, as before. */
 async function extractWav(
   ctx: ClientToolContext,
   src: string,
@@ -543,6 +541,7 @@ async function extractWav(
 ): Promise<string> {
   if (await ctx.store.exists(wav)) return wav;
   return once(`wav\u0000${wav}`, async () => {
+    const out = ctx.store.canRename ? wav.replace(/\.wav$/, `.${scratchToken()}.tmp.wav`) : wav;
     const seek: string[] = [];
     if (span && span.start > 0) seek.push("-ss", span.start.toFixed(3));
     if (span && span.end !== null) seek.push("-to", span.end.toFixed(3));
@@ -562,18 +561,27 @@ async function extractWav(
         "1",
         "-c:a",
         "pcm_s16le",
-        wav,
+        out,
       ],
       ctx.signal,
     );
-    if (conv.code !== 0 || !(await ctx.store.exists(wav))) {
+    if (conv.code !== 0 || !(await ctx.store.exists(out))) {
+      await ctx.store.remove(out).catch(() => undefined);
       if (ctx.signal?.aborted) throw new Error("transcription cancelled");
       throw new Error(
         `audio extraction failed (code=${conv.code}): ${stderrExcerpt(conv.stderr, 200)}`,
       );
     }
+    if (out !== wav) await ctx.store.rename(out, wav);
     return wav;
   });
+}
+
+/** A name part unique to one extraction, so two never share a scratch file. */
+let scratchSeq = 0;
+function scratchToken(): string {
+  scratchSeq = (scratchSeq + 1) % 1e6;
+  return `${Date.now().toString(36)}${scratchSeq.toString(36)}`;
 }
 
 /** whisper's JSON for a window extracted on its own starts at 0; move every offset onto the
@@ -693,23 +701,30 @@ export async function runWhisper(
       // progress came out the other side looking like a failed transcription.
       throw e instanceof Error ? e : new Error(`whisper model '${size}' unavailable: ${String(e)}`);
     }
-    // A window reads only its own audio, unless the whole file's extract is already on disk.
-    // Extracting a 2-hour file to transcribe 30 seconds of it was most of the wait (UJ-012).
+    // A window is transcribed from its OWN audio only. Extracting a 2-hour file to transcribe 30
+    // seconds of it was most of the wait (UJ-012); and whisper loads the whole file it is handed, so
+    // `-ot/-d` on an 80-minute extract took 11.9 s for a 60 s window where the window's own WAV took
+    // 7.3 s (QA, 2026-10-03). The window is cut from the whole-file extract when that is on disk
+    // (published by rename, so it is complete), else from the source.
     const fullWav = await wavPathFor(ctx, src);
-    const own = win.key !== "" && !(await ctx.store.exists(fullWav));
     const start = Math.max(0, Number(window?.start) || 0);
     const rawEnd = Number(window?.end);
     const end = Number.isFinite(rawEnd) && rawEnd > start ? rawEnd : null;
-    const wav = own
-      ? await extractWav(
-          ctx,
-          src,
-          await ctx.store.prepareArtifact(
-            `transcribe/${shortHash(`${src}|16k|r${TRANSCODE_WAV_REV}${win.key}`)}.wav`,
-          ),
-          { start, end },
-        )
-      : await extractWav(ctx, src, fullWav);
+    const wav =
+      win.key === ""
+        ? await extractWav(ctx, src, fullWav)
+        : await extractWav(
+            ctx,
+            (await ctx.store.exists(fullWav)) ? fullWav : src,
+            await ctx.store.prepareArtifact(
+              `transcribe/${shortHash(`${src}|16k|r${TRANSCODE_WAV_REV}${win.key}`)}.wav`,
+            ),
+            { start, end },
+          );
+    // whisper writes under a scratch name; the transcript reaches the cache path in ONE atomic
+    // write, already on the file's timeline. Shifting it in place after whisper had written it
+    // would leave a window cached on its own clock if anything stopped between the two writes.
+    const scratch = `${outBase}.${scratchToken()}.tmp`;
     const run = await ctx.runner.run(
       "whisper-cli",
       [
@@ -719,16 +734,16 @@ export async function runWhisper(
         wav,
         "-ojf",
         "-of",
-        outBase,
+        scratch,
         "-np",
         "-t",
         whisperThreads(),
-        ...(own ? [] : win.args),
         ...(lang ? ["-l", lang] : []),
       ],
       ctx.signal,
     );
-    if (run.code !== 0 || !(await ctx.store.exists(jsonPath))) {
+    if (run.code !== 0 || !(await ctx.store.exists(`${scratch}.json`))) {
+      await ctx.store.remove(`${scratch}.json`).catch(() => undefined);
       // Stop kills the sidecar, so the exit code describes the KILL, not the transcription:
       // it surfaced as `whisper-cli failed (code=-1): cancelled`, which reads as a broken
       // install rather than as the thing the user just asked for.
@@ -737,13 +752,12 @@ export async function runWhisper(
         throw new SpeechEngineUnavailableError(run.code);
       throw new Error(`whisper-cli failed (code=${run.code}): ${stderrExcerpt(run.stderr, 200)}`);
     }
-    if (own && start > 0) {
-      await ctx.store.writeText(
-        jsonPath,
-        shiftWhisperJson(await ctx.store.readText(jsonPath), Math.floor(start * 1000)),
-      );
-    }
-    return parseWhisperCppJson(await ctx.store.readText(jsonPath));
+    let text = await ctx.store.readText(`${scratch}.json`);
+    if (win.key !== "" && start > 0) text = shiftWhisperJson(text, Math.floor(start * 1000));
+    const parsed = parseWhisperCppJson(text);
+    await ctx.store.writeTextAtomic(jsonPath, text);
+    await ctx.store.remove(`${scratch}.json`).catch(() => undefined);
+    return parsed;
   });
 }
 

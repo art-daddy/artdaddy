@@ -16,7 +16,7 @@ import type { CommandRunner } from "./command";
 import type { ClientToolContext } from "./context";
 import { inspectMediaTool } from "./inspect";
 import { joinPath } from "./store";
-import { whisperModelPath } from "./transcribe";
+import { runWhisper, whisperModelPath } from "./transcribe";
 import { registerBackgroundTranscriber } from "./transcriptQueue";
 import {
   decodeCountingRunner,
@@ -367,6 +367,60 @@ describe("transcript: never waited on when long", () => {
         expect(words.length).toBeGreaterThan(3);
         // Spoken at 6:00 of the FILE: the times are on the file's timeline, not the window's.
         for (const [, s] of words) expect(s).toBeGreaterThanOrEqual(355);
+        expect(words.map((w) => w[0].toLowerCase()).join(" ")).toMatch(/fox|dog|quick/);
+      }
+    },
+    600_000,
+  );
+
+  // Found in QA (2026-10-03): whisper loads the whole file it is handed, so a window read through
+  // `-ot/-d` from an 80-minute extract cost 11.9 s against 7.3 s for the window's own WAV. With the
+  // whole-file extract on disk, the window is now CUT from it, and must still land on the file's
+  // timeline.
+  it.skipIf(!existsSync(model))(
+    "a window is cut from the whole file's extract when one is on disk, on the file's timeline",
+    async () => {
+      const { file, speech } = await longTalk();
+      const ref = await libRef(ctx, file, "audio");
+      // A whole-file run that extracted the audio and was then stopped leaves the extract behind.
+      let stopFirstWhisper = true;
+      const ffInputs: string[] = [];
+      const whisperInputs: string[] = [];
+      const runner: CommandRunner = {
+        run(program, args, signal, cwd, onStdout) {
+          if (program === "ffmpeg") ffInputs.push(args[args.indexOf("-i") + 1]);
+          if (program === "whisper-cli") {
+            whisperInputs.push(args[args.indexOf("-f") + 1]);
+            if (stopFirstWhisper) {
+              stopFirstWhisper = false;
+              return Promise.resolve({ code: 1, stdout: "", stderr: "stopped" });
+            }
+          }
+          return nodeRunner.run(program, args, signal, cwd, onStdout);
+        },
+      };
+      // As the app names it: the store's path for the ref, which every cache key is built from.
+      const src = (await ctx.store.resolveRef(ref))!;
+      await expect(runWhisper({ ...ctx, runner }, src)).rejects.toThrow(/whisper-cli failed/);
+      const extract = whisperInputs[0];
+      expect(existsSync(extract)).toBe(true);
+      ffInputs.length = 0;
+      const r = (await inspectMediaTool(
+        { media_ref: ref, start_seconds: 350, end_seconds: 375, word_timestamps: true },
+        { ...ctx, runner },
+      )) as Any;
+      expect(r.ok, JSON.stringify(r).slice(0, 400)).toBe(true);
+      // The window's audio came out of the extract, not the source, and whisper read only that.
+      expect(
+        ffInputs.map((p) => p.replace(/\\/g, "/")),
+        JSON.stringify({ ffInputs, extract, whisperInputs }),
+      ).toContain(extract.replace(/\\/g, "/"));
+      expect(whisperInputs.at(-1)).not.toBe(extract);
+      if (speech) {
+        const words = (r.transcript.words as Array<[string, number, number]>) ?? [];
+        expect(words.length).toBeGreaterThan(3);
+        for (const [, s] of words) expect(s).toBeGreaterThanOrEqual(350);
+        expect(words[0][1]).toBeGreaterThan(359.5); // spoken at 6:00 of the FILE
         expect(words.map((w) => w[0].toLowerCase()).join(" ")).toMatch(/fox|dog|quick/);
       }
     },

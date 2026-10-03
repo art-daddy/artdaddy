@@ -103,6 +103,14 @@ class MockFs implements FsLike {
   async rename(from: string, to: string): Promise<void> {
     const src = joinPath(from);
     const dst = joinPath(to);
+    // A rename moves whatever is there, like the real one: the WAV extracts are written by a fake
+    // ffmpeg as (empty) text entries, the model as bytes.
+    const text = this.files.get(src);
+    if (text !== undefined) {
+      this.files.set(dst, text);
+      this.files.delete(src);
+      return;
+    }
     const bytes = this.bytes.get(src);
     if (!bytes) throw new Error("ENOENT");
     this.bytes.set(dst, bytes);
@@ -659,22 +667,24 @@ describe("runWhisper on a window (UJ-012)", () => {
     expect(t.words.map((w) => w.start_seconds)).toEqual([60, 60.6, 61.2]);
   });
 
-  it("windows the whole file's extract instead when it is already on disk", async () => {
+  it("cuts the window from the whole file's extract when it is already on disk", async () => {
     const fs = new MockFs();
     fs.putModel();
     const runner = transcribeRunner(fs);
     const ctx = ctxWith(runner, fs);
     // A French transcript of the whole file leaves its 16 kHz extract behind (and no default one).
     await runWhisper(ctx, SRC, "small", "fr");
-    await runWhisper(ctx, SRC, "small", undefined, { start: 60, end: 90 });
-    expect(calls(runner, "ffmpeg")).toHaveLength(1); // nothing extracted the second time
+    const t = await runWhisper(ctx, SRC, "small", undefined, { start: 60, end: 90 });
+    const [whole, cut] = calls(runner, "ffmpeg");
+    // The window is read from that extract, not decoded from the source again...
+    expect(cut[cut.indexOf("-i") + 1]).not.toBe(SRC);
+    expect(cut[cut.indexOf("-i") + 1]).toBe(
+      `${whole.at(-1)!.replace(/\.[a-z0-9]+\.tmp\.wav$/, "")}.wav`,
+    );
+    // ...and whisper is handed only the window, never the whole extract with an offset.
     const second = calls(runner, "whisper-cli")[1];
-    expect(second.slice(second.indexOf("-ot"), second.indexOf("-ot") + 4)).toEqual([
-      "-ot",
-      "60000",
-      "-d",
-      "30000",
-    ]);
+    expect(second).not.toContain("-ot");
+    expect(t.segments[0].start_seconds).toBe(60);
   });
 
   it("never hands a window's transcript out as the whole file's", async () => {
