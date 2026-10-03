@@ -7,79 +7,32 @@
 //     `tl_<frame>.png`, so a later look at the same frame number OVERWROTE an earlier one, and the
 //     re-sent history would have shown the model a later edit under an earlier result.
 // Run: npx vitest run --config vitest.smoke.config.ts src/tools/inspectFrames.e2e.ts
-import { spawn } from "node:child_process";
 import { promises as fsp } from "node:fs";
 import os from "node:os";
-import path from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import type { CommandResult, CommandRunner } from "./command";
 import type { ClientToolContext } from "./context";
 import { inspectMediaTool, inspectTimelineTool } from "./inspect";
-import { ProjectStoreAccess, joinPath, type FsLike } from "./store";
+import { ProjectStoreAccess, joinPath } from "./store";
 import { ensureTimeline } from "../timeline/engine";
 import { addClipsTool } from "../timeline/placement";
 import { applyColorTool } from "../timeline/props";
-import { installE2EDocuments, resetE2EDocuments, flushE2EDoc, libRef, openE2EDoc } from "./__e2e";
+import {
+  installE2EDocuments,
+  resetE2EDocuments,
+  flushE2EDoc,
+  libRef,
+  nodeFs,
+  nodeRunner,
+  openE2EDoc,
+} from "./__e2e";
 
 type Rec = Record<string, unknown>;
 
-const nodeRunner: CommandRunner = {
-  run(program, args): Promise<CommandResult> {
-    return new Promise((resolve) => {
-      const child = spawn(program, args, { windowsHide: true });
-      let stdout = "";
-      let stderr = "";
-      child.stdout?.on("data", (d) => (stdout += d.toString()));
-      child.stderr?.on("data", (d) => (stderr += d.toString()));
-      child.on("error", (e) => resolve({ code: -1, stdout, stderr: String(e) }));
-      child.on("close", (code) => resolve({ code, stdout, stderr }));
-    });
-  },
-};
-
-const nodeFs: FsLike = {
-  async exists(p) {
-    try {
-      await fsp.access(p);
-      return true;
-    } catch {
-      return false;
-    }
-  },
-  readTextFile: (p) => fsp.readFile(p, "utf8"),
-  async writeTextFile(p, c) {
-    await fsp.mkdir(path.dirname(p), { recursive: true });
-    await fsp.writeFile(p, c);
-  },
-  async readBytes(p) {
-    const b = await fsp.readFile(p);
-    return new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
-  },
-  async writeBytes(p, bytes) {
-    await fsp.mkdir(path.dirname(p), { recursive: true });
-    await fsp.writeFile(p, bytes);
-  },
-  async rename(src, dst) {
-    await fsp.mkdir(path.dirname(dst), { recursive: true });
-    await fsp.rename(src, dst);
-  },
-  async readDir(p) {
-    const entries = await fsp.readdir(p, { withFileTypes: true });
-    return entries.map((e) => ({ name: e.name, isDirectory: e.isDirectory() }));
-  },
-  async remove(p) {
-    await fsp.rm(p, { recursive: true, force: true });
-  },
-  async copyFile(src, dst) {
-    await fsp.mkdir(path.dirname(dst), { recursive: true });
-    await fsp.copyFile(src, dst);
-  },
-  async mkdir(p) {
-    await fsp.mkdir(p, { recursive: true });
-  },
-};
+// The shared harness runner: the ffmpeg the app ships, run in the working dir it is given. The
+// grid on an inspect_timeline frame is a libass file staged in that dir, so a runner that drops
+// `cwd` (this file's own, until 2026-10-04) cannot draw it.
 
 const proj = joinPath(os.tmpdir(), `artdaddy-frames-${Date.now()}`);
 const ctx: ClientToolContext = { store: new ProjectStoreAccess(proj, nodeFs), runner: nodeRunner };

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { IndexCoordinator } from "./indexCoordinator";
 import type { Timeline } from "../timeline/model";
+import { prioritizeTranscript } from "../tools/transcriptQueue";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -74,6 +75,76 @@ beforeEach(() => {
 });
 
 describe("IndexCoordinator", () => {
+  // UJ-012: a look at a long file does not wait for its transcript. It puts the file at the FRONT
+  // of this queue (still one whisper at a time) and tells the model to come back.
+  describe("a look's transcript jumps the queue", () => {
+    /** A coordinator whose transcriptions wait at a gate, with the first one already running. */
+    async function busy(): Promise<{ c: IndexCoordinator; release: () => Promise<void> }> {
+      const gates: Array<() => void> = [];
+      (ensureTranscript as Any).mockImplementation(async () => {
+        await new Promise<void>((r) => gates.push(r));
+        return { path: "t.json", parsed: {}, existed: false };
+      });
+      const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+      for (const s of ["library/a.mp3", "library/b.mp3", "library/c.mp3"]) c.indexSource(s);
+      await settle(() => gates.length > 0);
+      const release = async (): Promise<void> => {
+        const before = ensureTranscript.mock.calls.length;
+        gates.shift()?.();
+        await settle(() => ensureTranscript.mock.calls.length > before || gates.length > 0, 200);
+      };
+      return { c, release };
+    }
+
+    it("runs the asked-for file right after the one already running", async () => {
+      const { c, release } = await busy();
+      expect(prioritizeTranscript("C:/p", "C:/media/talk.mp4", "")).toBe(true);
+      await release();
+      await settle(() => ensureTranscript.mock.calls.length >= 2);
+      expect(transcribed().slice(0, 2)).toEqual(["library/a.mp3", "C:/media/talk.mp4"]);
+      for (let i = 0; i < 3; i++) await release();
+      expect(transcribed()).toEqual([
+        "library/a.mp3",
+        "C:/media/talk.mp4",
+        "library/b.mp3",
+        "library/c.mp3",
+      ]);
+      c.dispose();
+    });
+
+    it("transcribes in the language the look asked for", async () => {
+      const { c, release } = await busy();
+      prioritizeTranscript("C:/p", "C:/media/charla.mp4", "es");
+      await release();
+      await settle(() => ensureTranscript.mock.calls.length >= 2);
+      const call = ensureTranscript.mock.calls[1] as unknown[];
+      expect(call[1]).toBe("C:/media/charla.mp4");
+      expect(call[4]).toBe("es");
+      c.dispose();
+    });
+
+    it("moves a queued file forward instead of queueing it twice, and never re-queues the running one", async () => {
+      const { c, release } = await busy();
+      expect(prioritizeTranscript("C:/p", "library/c.mp3", "")).toBe(true);
+      expect(prioritizeTranscript("C:/p", "library/a.mp3", "")).toBe(true); // running now
+      for (let i = 0; i < 4; i++) await release();
+      expect(transcribed()).toEqual(["library/a.mp3", "library/c.mp3", "library/b.mp3"]);
+      c.dispose();
+    });
+
+    it("refuses once the project is closed, and a reopened project's queue is the one reached", async () => {
+      const old = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+      const reopened = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+      old.dispose(); // the old session finishes closing AFTER the reopen
+      expect(prioritizeTranscript("C:/p", "C:/media/talk.mp4", "")).toBe(true);
+      await settle(() => ensureTranscript.mock.calls.length > 0);
+      expect(transcribed()).toEqual(["C:/media/talk.mp4"]);
+      reopened.dispose();
+      expect(prioritizeTranscript("C:/p", "C:/media/other.mp4", "")).toBe(false);
+      expect(prioritizeTranscript("C:/elsewhere", "C:/media/talk.mp4", "")).toBe(false);
+    });
+  });
+
   // The seen-set is permanent, so indexing a file that does not exist yet burns that asset's
   // ONLY chance at a proxy and a transcript — it would never be retried.
   it("skips media that is still generating, then indexes it once it lands", async () => {

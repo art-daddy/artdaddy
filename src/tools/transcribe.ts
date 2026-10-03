@@ -527,13 +527,25 @@ function once<T>(key: string, run: () => Promise<T>): Promise<T> {
 // whisper.cpp wants 16 kHz mono PCM WAV. Bump the rev when the extract recipe changes.
 const TRANSCODE_WAV_REV = 1;
 
-/** The 16 kHz mono extract whisper reads, shared by every window of the same source. */
-async function ensureWav(ctx: ClientToolContext, src: string): Promise<string> {
-  const wav = await ctx.store.prepareArtifact(
+/** Where the whole-file 16 kHz extract of `src` lives (whether or not it exists yet). */
+function wavPathFor(ctx: ClientToolContext, src: string): Promise<string> {
+  return ctx.store.prepareArtifact(
     `transcribe/${shortHash(`${src}|16k|r${TRANSCODE_WAV_REV}`)}.wav`,
   );
+}
+
+/** Extract [start, end) seconds of `src`'s audio, or the whole of it, as whisper's 16 kHz WAV. */
+async function extractWav(
+  ctx: ClientToolContext,
+  src: string,
+  wav: string,
+  span?: { start: number; end: number | null },
+): Promise<string> {
   if (await ctx.store.exists(wav)) return wav;
   return once(`wav\u0000${wav}`, async () => {
+    const seek: string[] = [];
+    if (span && span.start > 0) seek.push("-ss", span.start.toFixed(3));
+    if (span && span.end !== null) seek.push("-to", span.end.toFixed(3));
     const conv = await ctx.runner.run(
       "ffmpeg",
       [
@@ -541,6 +553,7 @@ async function ensureWav(ctx: ClientToolContext, src: string): Promise<string> {
         "-hide_banner",
         "-loglevel",
         "error",
+        ...seek,
         "-i",
         src,
         "-ar",
@@ -561,6 +574,22 @@ async function ensureWav(ctx: ClientToolContext, src: string): Promise<string> {
     }
     return wav;
   });
+}
+
+/** whisper's JSON for a window extracted on its own starts at 0; move every offset onto the
+ *  SOURCE timeline, where `-ot` on the whole file would have put it. */
+function shiftWhisperJson(raw: string, shiftMs: number): string {
+  const data = JSON.parse(raw) as WhisperCppJson;
+  const move = (o?: { from?: number; to?: number }): void => {
+    if (!o) return;
+    if (typeof o.from === "number") o.from += shiftMs;
+    if (typeof o.to === "number") o.to += shiftMs;
+  };
+  for (const seg of data.transcription ?? []) {
+    move(seg.offsets);
+    for (const tok of seg.tokens ?? []) move(tok.offsets);
+  }
+  return JSON.stringify(data);
 }
 
 /** Windows kills a process that cannot resolve its imports BEFORE a line of its code runs, so
@@ -590,6 +619,44 @@ export function isSpeechEngineUnavailable(e: unknown): boolean {
   return e instanceof SpeechEngineUnavailableError;
 }
 
+/** The cache files a transcription request reads: the full transcript (which answers every
+ *  window) and, for a windowed request, the window's own. One place, so a peek and a run can never
+ *  disagree about what is cached. */
+async function transcriptFiles(
+  ctx: ClientToolContext,
+  src: string,
+  size: string,
+  language: string | undefined,
+  window: TranscribeWindow | null | undefined,
+): Promise<{ lang: string; full: string; out: string; win: ReturnType<typeof windowArgs> }> {
+  const lang = normLanguage(language);
+  // The language is part of the KEY, not just the arguments: keyed on src|size alone, a
+  // Spanish request would be served the English transcript already on disk, forever.
+  const baseKey = `${src}|${size}${lang ? `|${lang}` : ""}`;
+  const full = await ctx.store.prepareArtifact(`transcribe/${shortHash(baseKey)}`);
+  const win = windowArgs(window);
+  const out = win.key
+    ? await ctx.store.prepareArtifact(`transcribe/${shortHash(baseKey + win.key)}`)
+    : full;
+  return { lang, full, out, win };
+}
+
+/** The transcript {@link runWhisper} would return for this request, WITHOUT running anything:
+ *  the whole file's (which answers every window), or this window's own, or null. */
+export async function peekTranscript(
+  ctx: ClientToolContext,
+  src: string,
+  size: string = DEFAULT_MODEL,
+  language?: string,
+  window?: TranscribeWindow | null,
+): Promise<ParsedTranscript | null> {
+  const f = await transcriptFiles(ctx, src, size, language, window);
+  for (const base of new Set([f.full, f.out]))
+    if (await ctx.store.exists(`${base}.json`))
+      return parseWhisperCppJson(await ctx.store.readText(`${base}.json`));
+  return null;
+}
+
 export async function runWhisper(
   ctx: ClientToolContext,
   src: string,
@@ -597,21 +664,19 @@ export async function runWhisper(
   language?: string,
   window?: TranscribeWindow | null,
 ): Promise<ParsedTranscript> {
-  const lang = normLanguage(language);
-  // The language is part of the KEY, not just the arguments: keyed on src|size alone, a
-  // Spanish request would be served the English transcript already on disk, forever.
-  const baseKey = `${src}|${size}${lang ? `|${lang}` : ""}`;
-  const fullBase = await ctx.store.prepareArtifact(`transcribe/${shortHash(baseKey)}`);
+  const { lang, full: fullBase, out: outBase, win } = await transcriptFiles(
+    ctx,
+    src,
+    size,
+    language,
+    window,
+  );
   // A full transcript already answers every window, so a windowed ask must never re-run
   // over one we have — the indexer builds these in the background for exactly this reason.
   if (await ctx.store.exists(`${fullBase}.json`)) {
     return parseWhisperCppJson(await ctx.store.readText(`${fullBase}.json`));
   }
 
-  const win = windowArgs(window);
-  const outBase = win.key
-    ? await ctx.store.prepareArtifact(`transcribe/${shortHash(baseKey + win.key)}`)
-    : fullBase;
   const jsonPath = `${outBase}.json`;
   if (await ctx.store.exists(jsonPath)) {
     return parseWhisperCppJson(await ctx.store.readText(jsonPath));
@@ -628,7 +693,23 @@ export async function runWhisper(
       // progress came out the other side looking like a failed transcription.
       throw e instanceof Error ? e : new Error(`whisper model '${size}' unavailable: ${String(e)}`);
     }
-    const wav = await ensureWav(ctx, src);
+    // A window reads only its own audio, unless the whole file's extract is already on disk.
+    // Extracting a 2-hour file to transcribe 30 seconds of it was most of the wait (UJ-012).
+    const fullWav = await wavPathFor(ctx, src);
+    const own = win.key !== "" && !(await ctx.store.exists(fullWav));
+    const start = Math.max(0, Number(window?.start) || 0);
+    const rawEnd = Number(window?.end);
+    const end = Number.isFinite(rawEnd) && rawEnd > start ? rawEnd : null;
+    const wav = own
+      ? await extractWav(
+          ctx,
+          src,
+          await ctx.store.prepareArtifact(
+            `transcribe/${shortHash(`${src}|16k|r${TRANSCODE_WAV_REV}${win.key}`)}.wav`,
+          ),
+          { start, end },
+        )
+      : await extractWav(ctx, src, fullWav);
     const run = await ctx.runner.run(
       "whisper-cli",
       [
@@ -642,7 +723,7 @@ export async function runWhisper(
         "-np",
         "-t",
         whisperThreads(),
-        ...win.args,
+        ...(own ? [] : win.args),
         ...(lang ? ["-l", lang] : []),
       ],
       ctx.signal,
@@ -655,6 +736,12 @@ export async function runWhisper(
       if (run.code !== null && WINDOWS_LOAD_FAILURES.has(run.code))
         throw new SpeechEngineUnavailableError(run.code);
       throw new Error(`whisper-cli failed (code=${run.code}): ${stderrExcerpt(run.stderr, 200)}`);
+    }
+    if (own && start > 0) {
+      await ctx.store.writeText(
+        jsonPath,
+        shiftWhisperJson(await ctx.store.readText(jsonPath), Math.floor(start * 1000)),
+      );
     }
     return parseWhisperCppJson(await ctx.store.readText(jsonPath));
   });

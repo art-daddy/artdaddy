@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ClientToolContext } from "../tools/context";
-import { joinPath, ProjectStoreAccess, type FsLike } from "../tools/store";
+import type { ClientToolContext } from "./context";
+import { joinPath, ProjectStoreAccess, type FsLike } from "./store";
 import { withAssScratch } from "./assScratch";
 
 // Pretend to be the desktop app, whose bundled fonts live in resources/fonts.

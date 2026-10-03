@@ -1944,6 +1944,47 @@ async function renderCtx(
   return { ctx: { store, runner }, fs };
 }
 
+/** A timeline whose one video clip (`v1c`) reads /media/gone.mp4, with an ffmpeg that fails the way
+ *  it would: ENOENT when the file is missing, an unrelated filter error when it is there. */
+async function goneMediaCtx(o: { present: boolean }): Promise<{ ctx: ClientToolContext }> {
+  const fs = new MemFs();
+  if (o.present) await fs.writeTextFile("/media/gone.mp4", "media");
+  const store = new ProjectStoreAccess("C:/proj", fs);
+  await store.writeText(
+    "C:/proj/internals/timeline.json",
+    JSON.stringify({
+      units: "frames",
+      canvas: { width: 100, height: 100, fps: 30 },
+      tracks: [
+        {
+          id: "v",
+          kind: "video",
+          z: 0,
+          clips: [
+            {
+              id: "v1c",
+              kind: "video",
+              media_ref: "/media/gone.mp4",
+              source_in: 0,
+              source_out: 30,
+              timeline_in: 0,
+              timeline_out: 30,
+            },
+          ],
+        },
+      ],
+    }),
+  );
+  const runner = makeRunner((program) =>
+    program !== "ffmpeg"
+      ? { code: 0, stdout: "", stderr: "" }
+      : o.present
+        ? { code: 1, stdout: "", stderr: "boom filter error" }
+        : { code: -2, stdout: "", stderr: "/media/gone.mp4: No such file or directory" },
+  );
+  return { ctx: { store, runner } };
+}
+
 describe("resolveClipSources ΓÇö lut hardening", () => {
   it("drops an absolute lut and resolves a contained project-relative lut", async () => {
     // An agent-supplied LUT must be a library asset, never a raw system path fed to ffmpeg's
@@ -2173,6 +2214,24 @@ describe("renderTimelineTool", () => {
     // as "ffmpeg render failed (code=-22). Read stderr_tail." with no stderr_tail anywhere.
     expect(String(r.error)).toContain("boom");
     expect(String(r.error)).not.toMatch(/Read stderr_tail/i);
+  });
+
+  // ffmpeg's account of a missing input is "code=-2" and a path. A user whose source sat in iCloud
+  // got exactly that from a look, naming neither the clip nor what to do (UJ-012, 2026-10-02).
+  // runRenderPlan is the boundary every render goes through, so it is where the clip gets named.
+  it("names the clip whose media is not on disk when a render fails", async () => {
+    const { ctx } = await goneMediaCtx({ present: false });
+    const r = (await renderTimelineTool({}, ctx)) as Any;
+    expect(r.ok).toBe(false);
+    expect(String(r.error)).toMatch(/media offline: clip v1c uses 'gone\.mp4', which is not on disk/);
+  });
+
+  it("blames no file that IS on disk: the failure keeps ffmpeg's own reason", async () => {
+    const { ctx } = await goneMediaCtx({ present: true });
+    const r = (await renderTimelineTool({}, ctx)) as Any;
+    expect(r.ok).toBe(false);
+    expect(String(r.error)).toContain("boom filter error");
+    expect(String(r.error)).not.toContain("media offline");
   });
 
   it("says ffmpeg printed nothing rather than pointing at an empty field", async () => {

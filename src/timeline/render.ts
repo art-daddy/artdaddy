@@ -32,7 +32,7 @@ import {
   type ResolvedTransition,
 } from "./renderPlan";
 import { buildBandAss, unrenderableFlags, type CaptionSpec } from "./assCaption";
-import { withAssScratch } from "./assScratch";
+import { withAssScratch } from "../tools/assScratch";
 import { ExportRunError, isDestinationReserved, submitExport } from "./exportQueue";
 import { sourceHasAudio } from "./placement";
 import { clipPlays, outputGate, suppressClip } from "./visibility";
@@ -85,6 +85,24 @@ function hasVal(v: unknown): boolean {
  *  must satisfy this because the composite runs in a 4:2:0 pixel format. */
 function evenPx(n: number): number {
   return Math.max(2, Math.round(n / 2) * 2);
+}
+
+/** The canvas the render composites at, in pixels: the authored size made even. */
+export function canvasPx(timeline: Timeline): { w: number; h: number } {
+  return {
+    w: evenPx(Math.trunc(Number(timeline.canvas.width))),
+    h: evenPx(Math.trunc(Number(timeline.canvas.height))),
+  };
+}
+
+/** When a clip is on canvas in the render, in seconds. A picture clip starts at its centred
+ *  transition's lead-in and stays through the hold under the next clip's transition; a caption
+ *  covers its own span. The render's `enable` gate, the frame window's choice of inputs and an
+ *  inspect frame's `visible_clips` all read it here. */
+export function onCanvasSec(pc: PlanClip): { from: number; to: number } {
+  if (pc.kind === "text") return { from: pc.visibility.inSec, to: pc.visibility.outSec };
+  const lead = pc.transition ? pc.transition.durSec / 2 : 0;
+  return { from: pc.visibility.inSec - lead, to: pc.visibility.outSec + pc.visibility.holdSec };
 }
 
 function boxOf(clip: Clip, cw: number, ch: number, fit: FitKind): Box {
@@ -502,10 +520,7 @@ function escFilterPath(p: string): string {
   return p.replace(/\\/g, "/").replace(/:/g, "\\:");
 }
 
-// The bundled font directory now lives with the one helper that stages fonts for a run.
-export { bundledFontDir } from "./assScratch";
-
-// The bundled brand assets (resources/brand), same lazy resolve as the fonts. null outside a
+// The bundled brand assets (resources/brand), resolved lazily like the fonts (tools/assScratch). null outside a
 // Tauri context, which is why `exportBranding` reports rather than throws: a web/dev build
 // with no bundled resources must still export the user's video.
 let _brandDirCache: string | null | undefined;
@@ -587,6 +602,8 @@ export interface RenderPlan {
   output: { width: number; height: number; fps: number };
   /** A single-frame look (see {@link FrameWindow}), not an export: it reports no progress. */
   frame: boolean;
+  /** Every media file the command opens, with the clip that opens it (branding excluded). */
+  sources: { clipId: string; path: string }[];
 }
 
 /** Render ONE project frame with the export's own graph, cutting away the work around it.
@@ -612,6 +629,7 @@ interface Input {
   si: number;
   so: number;
   isImage: boolean;
+  clipId: string;
   /** Frame window: the seek (video) or loop length (still) that replaces `si` / the clip span. */
   seekArg?: string;
   lengthArg?: string;
@@ -649,6 +667,8 @@ interface VRec {
   blend: BlendKind;
   transition: ResolvedTransition | null;
   holdDur: number;
+  /** On canvas from..to, seconds ({@link onCanvasSec}). */
+  span: { from: number; to: number };
   shift: Shift | null;
 }
 interface ARec {
@@ -783,8 +803,7 @@ export function buildRenderCommand(
   // enforced here rather than at each producer. An odd canvas cannot encode to
   // yuv420p h264 at all, and it fails the same misleading way an odd transform box
   // did: pad rounds its input up to even, then reports the padded size as "smaller".
-  const cw = evenPx(Math.trunc(Number(canvas.width)));
-  const ch = evenPx(Math.trunc(Number(canvas.height)));
+  const { w: cw, h: ch } = canvasPx(timeline);
   const fps = Math.trunc(canvasFps(timeline));
   const duration = canvasDuration(timeline);
   const win = window
@@ -831,7 +850,13 @@ export function buildRenderCommand(
       const aRawSo = Number(clip.source_out);
       const aSo =
         Number.isFinite(aRawSo) && aRawSo > aSi ? aRawSo : aSi + Math.max(0, aTout - aTin) * aSpeed;
-      inputs.push({ path: String(clip.media_ref), si: aSi, so: aSo, isImage: false });
+      inputs.push({
+        path: String(clip.media_ref),
+        si: aSi,
+        so: aSo,
+        isImage: false,
+        clipId: pc.srcClipId,
+      });
       const fade = (clip.fade ?? {}) as { in?: number; out?: number };
       const tlSpan = Math.max(0, aTout - aTin);
       const srcSpan = Math.max(0, aSo - aSi);
@@ -982,12 +1007,19 @@ export function buildRenderCommand(
     const si = isImg ? 0 : Number(clip.source_in) || 0;
     const so = isImg ? Math.max(0, tout - tin) : Number(clip.source_out) || 0;
     let shift: Shift | null = null;
-    const input: Input = { path: String(clip.media_ref), si, so, isImage: isImg };
+    const input: Input = {
+      path: String(clip.media_ref),
+      si,
+      so,
+      isImage: isImg,
+      clipId: pc.srcClipId,
+    };
+    const span = onCanvasSec(pc);
     if (win) {
       const lead = pc.transition ? pc.transition.durSec / 2 : 0;
       // Not on canvas near the frame: never opened. The band bookkeeping above still ran, so
       // the captions keep the z-order they have in the full render.
-      if (tin - lead > win.t + 2 / fps || tout + pc.visibility.holdSec < win.t - 2 / fps) continue;
+      if (span.from > win.t + 2 / fps || span.to < win.t - 2 / fps) continue;
       const speed = Number(clip.speed ?? 1) || 1;
       const clones = lead > 0 ? tpadFrames(lead * speed, fps) : 0;
       const skip = Math.floor(
@@ -1053,6 +1085,7 @@ export function buildRenderCommand(
       blend: pc.media.blend,
       transition: pc.transition,
       holdDur,
+      span,
       shift,
     });
   }
@@ -1342,7 +1375,7 @@ export function buildRenderCommand(
         : isNum(r.posY)
           ? String(Math.round(r.posY))
           : `'round(${compileAnim(r.posY, "t", r.tin)})'`;
-    const enable = `between(t,${(r.tin - leadIn).toFixed(6)},${(r.tout + r.holdDur).toFixed(6)})`;
+    const enable = `between(t,${r.span.from.toFixed(6)},${r.span.to.toFixed(6)})`;
     // Dip-to-colour: a full-canvas colour flash BETWEEN the outgoing clip (already in `last`) and
     // this incoming clip. Its alpha ramps clip(2p,0,1) — opaque by the midpoint — enable-gated to the
     // transition window so it vanishes after (the preview draws the same solid quad at z=track; a
@@ -1562,6 +1595,7 @@ export function buildRenderCommand(
       audioMustSpanVideo: false,
       output: { width: cw, height: ch, fps },
       frame: true,
+      sources: inputs.map((i) => ({ clipId: i.clipId, path: i.path })),
     };
   }
   if (aout) cmd.push("-map", `[${aout}]`);
@@ -1585,6 +1619,7 @@ export function buildRenderCommand(
     audioMustSpanVideo: brand !== undefined && aout !== null,
     output: { width: ow, height: oh, fps: outFps },
     frame: false,
+    sources: inputs.map((i) => ({ clipId: i.clipId, path: i.path })),
   };
 }
 
@@ -1687,7 +1722,7 @@ export async function runRenderPlan(
   if (refused) return refused;
   // A one-frame look is not an export: feeding its progress to the export job would move the bar
   // of an export running at the same time.
-  return withAssScratch(ctx, plan.assFiles, plan.fonts, (cwd) =>
+  const res = await withAssScratch(ctx, plan.assFiles, plan.fonts, (cwd) =>
     ctx.runner.run(
       "ffmpeg",
       plan.args,
@@ -1696,6 +1731,39 @@ export async function runRenderPlan(
       plan.frame ? undefined : progressReporter(plan.duration),
     ),
   );
+  if (res.code === 0) return res;
+  // Last, so it survives every excerpt: ffmpeg's own account of a missing input is "code=-2"
+  // and a path, which names neither the clip nor what to do about it.
+  const offline = await offlineInputs(ctx, plan.sources);
+  return offline ? { ...res, stderr: `${res.stderr.trimEnd()}\n${offline}` } : res;
+}
+
+/** The inputs of a FAILED run that are not on disk, as one line each naming the clip, or null.
+ *  Asked only after a failure, so a render that works is never refused on a guess; a path the
+ *  platform will not stat counts as present. The file is named as the library knows it: a source
+ *  that no longer resolves sits at a placeholder path named after its library id. */
+async function offlineInputs(
+  ctx: ClientToolContext,
+  sources: readonly { clipId: string; path: string }[],
+): Promise<string | null> {
+  const lines: string[] = [];
+  const seen = new Set<string>();
+  let library: LibraryClip[] | null = null;
+  for (const s of sources) {
+    if (seen.has(s.path)) continue;
+    seen.add(s.path);
+    if (await ctx.store.exists(s.path).catch(() => true)) continue;
+    library ??= await ctx.store.listClips().catch(() => []);
+    const base = s.path.split(/[\\/]/).pop() || s.path;
+    const entry = library.find(
+      (c) => c.id === base || c.path.replace(/\\/g, "/") === s.path.replace(/\\/g, "/"),
+    );
+    const name = entry?.filename || (entry?.path.split(/[\\/]/).pop() ?? base);
+    lines.push(
+      `media offline: clip ${s.clipId} uses '${name}', which is not on disk (moved, deleted, or still in the cloud). Relink it in the library.`,
+    );
+  }
+  return lines.length ? lines.join("\n") : null;
 }
 
 /** Backstop for stills that predate the import guard, or arrived by reference and changed on

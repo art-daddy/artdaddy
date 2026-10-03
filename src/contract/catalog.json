@@ -1,6 +1,6 @@
 {
   "$schema_note": "Generated from the live tool registry (v4/tools/catalog.py) - do not hand-edit; refresh with `npm run codegen`.",
-  "version": "2.6.0",
+  "version": "2.7.0",
   "generated_from": "src/akaru/turn/tools/definitions.py::ALL_TOOLS",
   "count": 55,
   "tools": [
@@ -1847,7 +1847,7 @@
     {
       "name": "inspect_color",
       "expensive": false,
-      "description": "Measure color scopes of a timeline clip's CURRENT graded look (clip_id) or a raw asset (media_ref) — grade by the numbers, not eyeballing. Returns black/white points, % clipping, mean & per-channel levels, saturation, warm-cool & green-magenta balance, and a 12-bin hue histogram (from 0°/red; orange cluster = skin, cyan/blue = sky) — and attaches the rendered frame to SEE. Pass a `reference` asset to also measure it and get the subject−reference gap + grade hints. Loop: apply_color → inspect_color(clip_id, reference) → read gap → adjust.",
+      "description": "Measure color scopes of a timeline clip's CURRENT graded look (clip_id) or a raw asset (media_ref) — grade by the numbers, not eyeballing. Returns black/white points, % clipping, mean & per-channel levels, saturation, warm-cool & green-magenta balance, and a 12-bin hue histogram (from 0°/red; orange cluster = skin, cyan/blue = sky) — and attaches the measured frame to SEE (one frame, fitted to 1024 px; a clip's is rendered with its grade, alone, at `at_frame`). Pass a `reference` asset to also measure it and get the subject−reference gap + grade hints. Loop: apply_color → inspect_color(clip_id, reference) → read gap → adjust.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -1857,11 +1857,11 @@
           },
           "media_ref": {
             "type": "string",
-            "description": "Optional. Library asset/path — measures RAW (no grade). Provide this OR clip_id."
+            "description": "Optional. A library asset id/ref (media_...) or a library filename — measures it RAW (no grade). Provide this OR clip_id."
           },
           "reference": {
             "type": "string",
-            "description": "Optional. Asset/path to compare against (gap + hints)."
+            "description": "Optional. A library asset id/ref (media_...) or a library filename to compare against (gap + hints). import_media a local file first."
           },
           "at_frame": {
             "type": "integer",
@@ -1875,7 +1875,7 @@
     {
       "name": "inspect_media",
       "expensive": false,
-      "description": "Look at a source asset before you reference or edit it. Branches by type:\n\n- IMAGE: the image itself + dimensions + EXIF.\n- VIDEO: a few frames sampled across the clip (or a window) plus an\n  on-device transcription, sharpness/noise, and audio loudness\n  (LUFS/peak/RMS) so you can right-size sharpen/denoise/grain and volume.\n- AUDIO: transcription + loudness levels (integrated LUFS, true peak,\n  RMS) — measure before raising volume or applying loudnorm.\n- LOTTIE (.json/.lottie): frames sampled evenly across the animation plus\n  framerate and duration, to verify a Lottie you authored moves right.\n\nTranscription is sentence-level `[text, start_s, end_s]` rows (capped at 400; page with the returned `next_start_s`) and reports the detected `language`. Set `word_timestamps=true` to also get word-level tuples (capped at 10000) in a `words` array — for word-boundary edits like filler-word or dead-air removal. For long media, read the transcript first, then re-call with `start_seconds`/`end_seconds` to zoom; a windowed call only samples and transcribes that span.\n\nFor finer temporal detail — an exact moment, fast action, or motion over time — raise `sample_fps` or narrow the [start_seconds, end_seconds] window so the attached segment is denser.\n\nIdentify the media with `media_ref` (a library asset id (media_...) or a library filename) and/or `clip_id` (a placed timeline clip from get_timeline) — give at least one. `clip_id` alone inspects that clip's source; passing both pins a specific asset (they must name the same one). With `clip_id` the transcript times come back in the timeline's PROJECT FRAMES (rows outside the clip's span dropped), so you can act on them directly. Returns technical metadata (dimensions, fps, duration, codec, etc.) plus the attached media: video attaches the [start_seconds, end_seconds] segment sampled at `sample_fps` (default 1); audio attaches the segment itself — both alongside the same metadata and transcript.",
+      "description": "Look at a source asset before you reference, describe or edit it. Describe an asset from what this returns, never from its filename.\n\nIdentify it with `media_ref` (a library asset id (media_...) or a library filename) and/or `clip_id` (a placed timeline clip from get_timeline) — give at least one. `clip_id` alone looks at that clip's source over the span the clip uses; passing both pins a specific asset (they must name the same one). With `clip_id` every time in the result is a PROJECT FRAME (`timing: \"project_frames\"`); with `media_ref` times are source seconds.\n\n- IMAGE: the image, fitted to 512 px, with the coordinate grid.\n- VIDEO: `max_frames` frames (default 6, max 12) at the middles of equal\n  parts of the span, each a 512 px image with the coordinate grid, plus\n  `sharpness`, `noise_sigma`, `loudness` and `transcript` (below).\n- AUDIO: `loudness` and `transcript`.\n\nLong media, coarse to fine: first `overview: true`, which returns ONE storyboard image instead of frames — a tile at each change of scene across the span (up to 36, each labelled with its time; the times are in `overview.tile_times`, or `tile_frames` for a clip_id). Then look at the sections that matter with `start_seconds`/`end_seconds`, and zoom further the same way. A windowed call is fast: its cost is set by the window, not the file. For an exact moment, fast action or motion over time, use `video_find_moment` or `video_ask` instead.\n\nCoordinate grid: frames and images carry faint lines every 0.05 with labels every 0.1 along the right and bottom edges, 0-1 from the top-left corner (`coordinate_grid`). Read positions off it. The storyboard has no grid.\n\n`sharpness`: variance of the Laplacian of each frame's 512 px grey copy, averaged. Higher is sharper. Measured: phone video 150-280 and the same video blurred 15-90; screen recordings and frames full of text 900-2400, still 200-480 when blurred. Grain and text raise it too, so compare a clip with itself (before and after a change), not with other footage. `noise_sigma`: estimated noise on 0-255 brightness, edges excluded, averaged. Measured: clean footage 0.3-1.5, light grain about 1.8, heavy grain about 4; busy graphics and text can read up to 3 without being noisy. Only sharpen a soft clip, only denoise a noisy one.\n\n`loudness`: integrated loudness (LUFS), true peak (dBTP) and RMS (dBFS) over the whole span looked at. For a `clip_id` it adds `clip_volume` and `after_clip_volume`, the same figures at the clip's volume (audio effects and track mixing not included). Read it before changing `volume` or applying `loudnorm`; don't boost an already-loud clip.\n\n`transcript`: sentence rows `[text, start, end]` (at most 400; continue from `next_start_s`, or `next_start_frame` for a clip_id), the detected `language`, and with `word_timestamps=true` word rows in `words` (at most 10000) — for word-boundary edits like filler-word or dead-air removal. Pass `language` for speech that is not English. Up to 10 minutes of audio is transcribed while you wait. A longer span with no transcript yet returns `transcript.status: \"in_progress\"`: the whole file is being transcribed in the background, one file at a time. Call again later for it, or pass a window of up to 10 minutes to transcribe that part now.\n\nYou view video natively, so for a VIDEO the window is attached as video instead of frames: sampled at `sample_fps` (default 1; raise it, or narrow the window, for fast action or an exact moment), with its sound if `attach_audio` is true. It carries no grid and no sharpness/noise. `overview` still returns the storyboard.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -1885,31 +1885,39 @@
           },
           "clip_id": {
             "type": "string",
-            "description": "A placed timeline clip id (from get_timeline). Alone, inspects that clip's source and returns transcript times in PROJECT FRAMES; with media_ref, the two must name the same asset. Give media_ref and/or clip_id (at least one)."
+            "description": "A placed timeline clip id (from get_timeline). Alone, looks at that clip's source over the span the clip uses and reports every time in PROJECT FRAMES; with media_ref, the two must name the same asset. Give media_ref and/or clip_id (at least one)."
           },
           "max_frames": {
             "type": "integer",
-            "description": "Optional. Frames to sample for video/lottie (default 6, max 12)."
+            "description": "Optional. Frames to sample from a video (default 6, max 12)."
           },
           "start_seconds": {
             "type": "number",
-            "description": "Optional. Window start (seconds) for video/audio (whole asset if omitted)."
+            "description": "Optional. Window start in SOURCE seconds for video/audio (the clip's span, or the whole asset, if omitted)."
           },
           "end_seconds": {
             "type": "number",
-            "description": "Optional. Window end (seconds) for video/audio (asset end if omitted)."
+            "description": "Optional. Window end in SOURCE seconds for video/audio (the clip's span, or the whole asset, if omitted)."
+          },
+          "overview": {
+            "type": "boolean",
+            "description": "Optional. Return ONE storyboard image of the span (a tile per scene, up to 36, their times in overview.tile_times) instead of frames: the first look at long media. Default false."
+          },
+          "language": {
+            "type": "string",
+            "description": "Optional. The spoken language as a short code (e.g. \"es\", \"hi\"). Pass it for speech that is not English."
           },
           "sample_fps": {
             "type": "number",
-            "description": "Optional. Sampling rate (frames/sec) for the attached video segment (default 1)."
+            "description": "Optional. Gemini models only: sampling rate (frames/sec) of the attached video (default 1)."
           },
           "attach_audio": {
             "type": "boolean",
-            "description": "Optional. Keep the segment's audio in the attached video (default false = visual-only; the AUDIO path attaches sound separately)."
+            "description": "Optional. Gemini models only: keep the sound in the attached video (default false)."
           },
           "word_timestamps": {
             "type": "boolean",
-            "description": "Optional. Add word-level `[text, start_s, end_s]` tuples to the transcript in a `words` array (capped at 10000) — for word-boundary edits like filler-word / dead-air removal. Default false (sentence-level only). Windowed by start_seconds/end_seconds."
+            "description": "Optional. Add word-level `[text, start, end]` rows to the transcript in a `words` array (at most 10000) — for word-boundary edits like filler-word / dead-air removal. Default false (sentence rows only). Windowed like the transcript."
           }
         },
         "required": [],
@@ -1919,7 +1927,7 @@
     {
       "name": "inspect_timeline",
       "expensive": false,
-      "description": "See the COMPOSITED timeline — what the viewer actually sees in the preview at a given frame: every video track stacked with its transforms, opacity, crop, and keyframes applied, plus text and caption overlays baked in. Use it to VERIFY your edits landed (a PiP's position, a title's placement, layer order, a transition mid-way) — `inspect_media` shows a raw source asset, this shows the actual cut.\n\nFrames are PROJECT FRAMES (from `get_timeline` — integer frames at the canvas fps). Pass a single `start_frame` for one composited frame; add `end_frame` to sample `max_frames` evenly across [start_frame, end_frame) for a transition or sequence. The composited stills are attached for you to SEE on your next turn. Frames at/after the timeline end are reported out-of-range (the canvas is black past content).",
+      "description": "See the COMPOSITED timeline — exactly what the export shows at a frame: every track stacked with its transforms, opacity, crop, keyframes, effects, transitions, text and captions. Use it to VERIFY your edits landed (a PiP's position, a title's placement, layer order, a transition mid-way) — `inspect_media` shows a raw source asset, this shows the actual cut.\n\nFrames are PROJECT FRAMES (integer frames at the canvas fps, from `get_timeline`). `start_frame` alone renders that one frame (default 0). Add `end_frame` to sample `max_frames` (default 6, max 12) across [start_frame, end_frame), at the middles of equal parts — for a transition or a sequence. Each frame is a 768 px image with the coordinate grid (faint lines every 0.05, labels every 0.1, 0-1 from the top-left corner) and its frame number top-left. Each entry in `frames` lists `visible_clips`: the clip ids on canvas at that frame, top layer first. Frames outside the timeline come back in `out_of_range`, unrendered. A frame costs about the same wherever it is in the timeline, so look as often as you need.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -1929,11 +1937,11 @@
           },
           "end_frame": {
             "type": "integer",
-            "description": "Optional. Sample max_frames evenly across [start_frame, end_frame) instead of one."
+            "description": "Optional. Sample max_frames across [start_frame, end_frame) instead of one."
           },
           "max_frames": {
             "type": "integer",
-            "description": "Optional. Frames to sample when end_frame is set (default 5, max 8)."
+            "description": "Optional. Frames to sample when end_frame is set (default 6, max 12)."
           }
         },
         "required": [],

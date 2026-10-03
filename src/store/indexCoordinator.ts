@@ -18,6 +18,7 @@
 import type { CommandRunner } from "../tools/command";
 import type { ClientToolContext } from "../tools/context";
 import type { ProjectStoreAccess } from "../tools/store";
+import { registerBackgroundTranscriber } from "../tools/transcriptQueue";
 import type { Timeline } from "../timeline/model";
 import { kindOf, needsPreviewProxy } from "../media/formats";
 import { reportAppError } from "../api/appEvents";
@@ -33,6 +34,16 @@ const isIndexable = (p: string): boolean => {
 };
 
 type Pass = "proxy" | "transcript";
+
+/** One transcription: a source, and the language asked for ("" = the default). */
+interface TxJob {
+  source: string;
+  language: string;
+}
+/** A transcript job's identity. A language other than the default is its own job: a Spanish
+ *  transcript is not the default one. */
+const txKey = (j: TxJob): string =>
+  j.language ? `transcript\u0000${j.source}\u0000${j.language}` : `transcript\u0000${j.source}`;
 
 /** The desktop-only modules a drain needs, resolved once rather than per job. */
 interface IndexModules {
@@ -60,7 +71,9 @@ const MAX_ENGINE_ATTEMPTS = 3;
 
 export class IndexCoordinator {
   private readonly proxyQ: string[] = [];
-  private readonly txQ: string[] = [];
+  private readonly txQ: TxJob[] = [];
+  /** The transcript job running now, by {@link txKey}. */
+  private txCurrent: string | null = null;
   private readonly seen = new Set<string>(); // `${pass}\0${source}` already enqueued
   private readonly attempts = new Map<string, number>();
   private engineAttempts = 0;
@@ -73,6 +86,7 @@ export class IndexCoordinator {
   // clears the QUEUES (no new job starts); this cancels the RUNNING process, so
   // no derived work outlives its project — not just the not-yet-started jobs.
   private readonly ac = new AbortController();
+  private readonly unregister: () => void;
 
   constructor(
     private readonly store: ProjectStoreAccess,
@@ -81,7 +95,12 @@ export class IndexCoordinator {
     private readonly onProxyReady: () => void,
     /** Toggles the "processing…" overlay around a (slow) proxy transcode. */
     private readonly setImporting: (v: boolean) => void,
-  ) {}
+  ) {
+    // The tools (inspect_media) reach this project's queue by its directory.
+    this.unregister = registerBackgroundTranscriber(store.projectDir, {
+      prioritize: (source, language) => this.prioritizeTranscript(source, language),
+    });
+  }
 
   /** Scan the timeline + library catalog and enqueue any not-yet-seen work. Cheap
    *  to call on every edit — the seen-set means only NEW media enqueues anything. */
@@ -153,7 +172,24 @@ export class IndexCoordinator {
     this.disposed = true;
     this.proxyQ.length = 0;
     this.txQ.length = 0;
+    this.unregister();
     this.ac.abort();
+  }
+
+  /** Transcribe `source` (in `language`, "" = the default) NEXT: a look asked for it and is not
+   *  waiting, so it goes to the front of the one-at-a-time queue, even if the sweep transcribed it
+   *  once already (its cache may have been swept). False when nothing will transcribe it. */
+  prioritizeTranscript(source: string, language: string): boolean {
+    if (this.disposed || this.engineDown) return false;
+    const job: TxJob = { source, language };
+    const key = txKey(job);
+    if (this.txCurrent === key) return true;
+    const at = this.txQ.findIndex((j) => txKey(j) === key);
+    if (at >= 0) this.txQ.splice(at, 1);
+    this.seen.add(key);
+    this.txQ.unshift(job);
+    if (!this.txRunning) void this.drainTranscripts();
+    return true;
   }
 
   private enqueue(pass: Pass, source: string): void {
@@ -166,15 +202,15 @@ export class IndexCoordinator {
       if (!this.proxyRunning) void this.drainProxies();
       return;
     }
-    this.txQ.push(source);
+    this.txQ.push({ source, language: "" });
     if (!this.txRunning) void this.drainTranscripts();
   }
   /** A failed job is REPORTED, not swallowed, and retried a bounded number of times.
    *  Silence here is indistinguishable from footage with no speech — which is exactly how a
    *  broken transcriber stayed invisible until a user's first caption request timed out. */
-  private onJobFailed(pass: Pass, source: string, err: unknown): void {
+  private onJobFailed(pass: Pass, job: string | TxJob, err: unknown): void {
     if (this.disposed) return; // our own cancellation; nothing failed
-    const key = `${pass}\u0000${source}`;
+    const key = typeof job === "string" ? `${pass}\u0000${job}` : txKey(job);
     const tried = (this.attempts.get(key) ?? 0) + 1;
     this.attempts.set(key, tried);
     if (tried < MAX_ATTEMPTS) this.seen.delete(key); // a later sweep may try again
@@ -299,21 +335,30 @@ export class IndexCoordinator {
       signal: this.ac.signal,
     } as ClientToolContext;
     try {
-      for (let src = this.txQ.shift(); src !== undefined && !this.disposed && !this.engineDown; ) {
+      for (let job = this.txQ.shift(); job !== undefined && !this.disposed && !this.engineDown; ) {
+        this.txCurrent = txKey(job);
         try {
           // A video with no audio track is not a failure to report — there is simply nothing to
           // transcribe. Asking ffmpeg for an audio-only output of one fails with "Output file
           // does not contain any stream", which read as a broken transcriber.
-          if (await this.hasSpeech(ctx, ready.mods, src)) {
-            await ready.mods.ensureTranscript(ctx, src);
+          if (await this.hasSpeech(ctx, ready.mods, job.source)) {
+            await ready.mods.ensureTranscript(
+              ctx,
+              job.source,
+              undefined,
+              undefined,
+              job.language || undefined,
+            );
           }
         } catch (e) {
           if (ready.mods.isSpeechEngineUnavailable(e)) this.onEngineUnavailable(e);
-          else this.onJobFailed("transcript", src, e);
+          else this.onJobFailed("transcript", job, e);
         }
-        src = this.txQ.shift();
+        this.txCurrent = null;
+        job = this.txQ.shift();
       }
     } finally {
+      this.txCurrent = null;
       this.txRunning = false;
     }
     if (!this.disposed && !this.engineDown && this.txQ.length > 0) void this.drainTranscripts();

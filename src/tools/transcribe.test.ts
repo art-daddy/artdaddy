@@ -15,6 +15,8 @@ import {
   getTranscriptTool,
   isSpeechEngineUnavailable,
   parseWhisperCppJson,
+  peekTranscript,
+  runWhisper,
   WHISPER_MODELS,
   type WhisperModelSpec,
   whisperModelPath,
@@ -628,6 +630,66 @@ describe("clipWordFrames", () => {
     expect(
       clipWordFrames(noEnds, { source_in: 0, source_out: 60, timeline_in: 0, speed: 1 }, 30),
     ).toEqual([["a", 30, 30]]);
+  });
+});
+
+describe("runWhisper on a window (UJ-012)", () => {
+  const SRC = "C:/media/talk.mp4";
+  const calls = (runner: CommandRunner, program: string): string[][] =>
+    (runner.run as Any).mock.calls.filter((c: Any[]) => c[0] === program).map((c: Any[]) => c[1]);
+
+  // Extracting all of a 2-hour file to transcribe 30 seconds of it was most of that wait.
+  it("reads only the window's audio when the whole file's extract is not on disk", async () => {
+    const fs = new MockFs();
+    fs.putModel();
+    const runner = transcribeRunner(fs);
+    const t = await runWhisper(ctxWith(runner, fs), SRC, "small", undefined, { start: 60, end: 90 });
+    const [extract] = calls(runner, "ffmpeg");
+    expect(extract.slice(0, extract.indexOf("-i"))).toEqual(
+      expect.arrayContaining(["-ss", "60.000", "-to", "90.000"]),
+    );
+    const [whisper] = calls(runner, "whisper-cli");
+    expect(whisper).not.toContain("-ot"); // the WAV IS the window
+    expect(whisper).not.toContain("-d");
+    // whisper counted from the window's start; the transcript is on the SOURCE timeline.
+    expect(t.segments.map((s) => [s.start_seconds, s.end_seconds])).toEqual([
+      [60, 61.2],
+      [61.2, 62],
+    ]);
+    expect(t.words.map((w) => w.start_seconds)).toEqual([60, 60.6, 61.2]);
+  });
+
+  it("windows the whole file's extract instead when it is already on disk", async () => {
+    const fs = new MockFs();
+    fs.putModel();
+    const runner = transcribeRunner(fs);
+    const ctx = ctxWith(runner, fs);
+    // A French transcript of the whole file leaves its 16 kHz extract behind (and no default one).
+    await runWhisper(ctx, SRC, "small", "fr");
+    await runWhisper(ctx, SRC, "small", undefined, { start: 60, end: 90 });
+    expect(calls(runner, "ffmpeg")).toHaveLength(1); // nothing extracted the second time
+    const second = calls(runner, "whisper-cli")[1];
+    expect(second.slice(second.indexOf("-ot"), second.indexOf("-ot") + 4)).toEqual([
+      "-ot",
+      "60000",
+      "-d",
+      "30000",
+    ]);
+  });
+
+  it("never hands a window's transcript out as the whole file's", async () => {
+    const fs = new MockFs();
+    fs.putModel();
+    const ctx = ctxWith(transcribeRunner(fs), fs);
+    expect(await peekTranscript(ctx, SRC)).toBeNull();
+    await runWhisper(ctx, SRC, "small", undefined, { start: 60, end: 90 });
+    expect(await peekTranscript(ctx, SRC)).toBeNull();
+    expect((await peekTranscript(ctx, SRC, "small", undefined, { start: 60, end: 90 }))?.segments).toHaveLength(2);
+    // ...while the whole file's answers every window, without running anything.
+    await runWhisper(ctx, SRC, "small");
+    const runs = ((ctx.runner.run as Any).mock.calls as Any[]).length;
+    expect(await peekTranscript(ctx, SRC, "small", undefined, { start: 300, end: 330 })).not.toBeNull();
+    expect(((ctx.runner.run as Any).mock.calls as Any[]).length).toBe(runs);
   });
 });
 

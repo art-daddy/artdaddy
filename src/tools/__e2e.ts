@@ -7,6 +7,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync, promises as fsp } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import type { CommandResult, CommandRunner } from "./command";
@@ -236,6 +237,58 @@ export function mkCtx(dir: string): ClientToolContext {
 export async function ff(args: string[]): Promise<void> {
   const r = await nodeRunner.run("ffmpeg", args);
   if (r.code !== 0) throw new Error(`ffmpeg failed (${r.code}): ${r.stderr.slice(-800)}`);
+}
+
+/** A long 1080p H.264 source for cost tests (a keyframe every `gop` frames, as OBS and phones
+ *  write), made once and kept between runs in the OS temp dir: 14 minutes takes ~45 s to encode.
+ *  Written under a temporary name first, so a run killed half way never leaves a short file that a
+ *  later run would reuse. */
+export async function longFixture(o: { seconds: number; fps: number; gop: number }): Promise<string> {
+  const dir = path.join(os.tmpdir(), "artdaddy-e2e-fixtures");
+  const file = path.join(dir, `long${o.seconds}_1080p${o.fps}_g${o.gop}.mp4`);
+  if (existsSync(file)) return file;
+  await fsp.mkdir(dir, { recursive: true });
+  const tmp = `${file}.part.mp4`;
+  await ff([
+    "-y",
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-f",
+    "lavfi",
+    "-i",
+    `testsrc2=size=1920x1080:rate=${o.fps}:duration=${o.seconds}`,
+    "-c:v",
+    "libx264",
+    "-preset",
+    "ultrafast",
+    "-crf",
+    "46",
+    "-g",
+    String(o.gop),
+    "-pix_fmt",
+    "yuv420p",
+    tmp,
+  ]);
+  await fsp.rename(tmp, file);
+  return file;
+}
+
+/** A runner that runs the tool's own commands with ffmpeg's log level raised, so ffmpeg reports how
+ *  many frames it decoded; `decoded` gets one total per render (a command with a filter graph). */
+export function decodeCountingRunner(decoded: number[]): CommandRunner {
+  return {
+    async run(program, args, signal, cwd, onStdout) {
+      if (program !== "ffmpeg" || !args.includes("-filter_complex"))
+        return nodeRunner.run(program, args, signal, cwd, onStdout);
+      const loud = args.map((a, i) => (args[i - 1] === "-loglevel" ? "verbose" : a));
+      const r = await nodeRunner.run(program, loud, signal, cwd, onStdout);
+      decoded.push(
+        [...r.stderr.matchAll(/(\d+) frames decoded/g)].reduce((n, m) => n + Number(m[1]), 0),
+      );
+      return r;
+    },
+  };
 }
 
 /** Synthesize a solid-colour clip (optionally carrying a sine tone) at `out`. */

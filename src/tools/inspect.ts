@@ -12,37 +12,56 @@ import type { ClientToolContext } from "./context";
 import { probePath, shortHash } from "./media";
 import { encodeImageForGemini, encodeVideoForGemini } from "./geminiEncode";
 import type { ClientToolRegistry } from "./registry";
-import { unresolvedRefError } from "./refState";
-import { runWhisper } from "./transcribe";
-import { INTERNAL_DIR, joinPath } from "./store";
+import { unresolvedRefError, unresolvedRefMessage } from "./refState";
+import { normLanguage, peekTranscript, runWhisper } from "./transcribe";
+import { prioritizeTranscript } from "./transcriptQueue";
+import { measureLoudness, type Loudness } from "./loudness";
+import { displaySize, mediaFrameDims, sampleFrames, stillWithGrid } from "./mediaFrames";
+import { makeStoryboard } from "./storyboard";
 import { loadTimeline } from "../timeline/engine";
-import { clipSourceSpanSeconds, findClip } from "../timeline/helpers";
+import { clipSourceSpanSeconds, clipSpanToFrames, findClip } from "../timeline/helpers";
 import { canvasFps, toSecondsView } from "../timeline/frames";
 import { IMAGE_EXTS } from "../media/formats";
 import type { Clip, Timeline } from "../timeline/model";
 import {
   buildRenderCommand,
   canvasDuration,
+  canvasPx,
+  onCanvasSec,
   resolveClipSources,
   runRenderPlan,
 } from "../timeline/render";
+import { resolveRenderPlan, type SecondsRenderPlan } from "../timeline/renderPlan";
 import { validateTimeline } from "../timeline/validate";
+import {
+  fitDims,
+  gridAss,
+  gridFilter,
+  GRID_NOTE,
+  OVERLAY_FONT_FILE,
+  OVERLAY_REV,
+} from "./inspectOverlay";
 
 type Result = Record<string, unknown>;
 const NOT_READY: Result = { ok: false, error: "client tool runtime not ready" };
-const DEFAULT_FRAMES = 4;
+/** Frames inspect_media samples from a video when max_frames is not given (Palmier's). */
+const DEFAULT_FRAMES = 6;
 const MAX_FRAMES = 12;
+/** Frames inspect_timeline samples from a range when max_frames is not given (Palmier's). */
+const TIMELINE_DEFAULT_FRAMES = 6;
+/** Frame renders at once: each is its own ffmpeg, and a low-core machine must not be thrashed. */
+const FRAME_LANES = 4;
 
 /** Longest edge of a frame the agent sees, per tool (owner decision, 2026-10-02).
  *
  *  Frames are now re-sent every round while they stay in the conversation (the app owns the
  *  history), so their size is paid many times: a 1024 px PNG is ~1 MB, and ~30 of them a round
  *  approach the 64 MB request cap. `inspect_media` asks "what is in this clip", which 512 px
- *  answers (Palmier sends 512). `inspect_timeline` must also let the agent judge caption text:
- *  512 px was tried before and a caption at 2-3% of a 9:16 frame's height came out 10-15 px tall,
- *  unjudgeable; at 768 px it is ~15-23 px. `inspect_color` keeps 1024 px PNG because its
- *  measurement reads the same file and compression would move the numbers. */
-const MEDIA_FRAME_EDGE = 512;
+ *  answers (Palmier sends 512; see mediaFrames.MEDIA_FRAME_EDGE). `inspect_timeline` must also let
+ *  the agent judge caption text: 512 px was tried before and a caption at 2-3% of a 9:16 frame's
+ *  height came out 10-15 px tall, unjudgeable; at 768 px it is ~15-23 px. `inspect_color` keeps
+ *  1024 px PNG because its measurement reads the same file and compression would move the
+ *  numbers. */
 const TIMELINE_FRAME_EDGE = 768;
 const COLOR_FRAME_EDGE = 1024;
 
@@ -53,44 +72,6 @@ const scaleTo = (edge: number): string =>
 /** ffmpeg's mjpeg quantizer (2 = best, 31 = worst) for frames the agent sees. */
 const FRAME_JPEG_Q = "4";
 
-/** How much of `cache/inspect/` the intermediate renders may occupy.
- *
- *  Each call encodes up to the DEEPEST frame asked for, so a question about the end of a 50s
- *  timeline writes ~40 MB whatever the frame count. `sweepArtifactCache` collects these, but only
- *  at project CLOSE — so an afternoon of iterative work grew the directory without bound (eight
- *  calls, ~220 MB, in one reported session). This is the in-session ceiling. */
-const INSPECT_CACHE_BUDGET = 512 * 1024 * 1024;
-
-/** Hold `cache/inspect/` under {@link INSPECT_CACHE_BUDGET}, never touching `keep`.
- *
- *  `readDir` reports no timestamps, so there is no least-recently-used to evict by: over budget,
- *  everything but the render this call needs goes. That still serves the dominant pattern (the same
- *  window asked repeatedly — seven times in one reported session, five back to back) and is only
- *  reached when the directory is already large. Best-effort: a cache it cannot trim must never fail
- *  the inspection. */
-async function trimInspectCache(ctx: ClientToolContext, keep: string): Promise<void> {
-  try {
-    const dir = joinPath(ctx.store.projectDir, INTERNAL_DIR, "cache", "inspect");
-    const entries = await ctx.store.readDir(dir);
-    const mp4s = entries.filter((e) => !e.isDirectory && e.name.endsWith(".mp4"));
-    const sized = await Promise.all(
-      mp4s.map(async (e) => {
-        const path = joinPath(dir, e.name);
-        return { path, bytes: (await ctx.store.byteSize(path).catch(() => null)) ?? 0 };
-      }),
-    );
-    let total = sized.reduce((n, f) => n + f.bytes, 0);
-    if (total <= INSPECT_CACHE_BUDGET) return;
-    for (const f of sized) {
-      if (total <= INSPECT_CACHE_BUDGET) break;
-      if (f.path === keep) continue;
-      await ctx.store.remove(f.path).catch(() => undefined);
-      total -= f.bytes;
-    }
-  } catch {
-    /* unreadable cache dir — trimming is housekeeping, not part of the answer */
-  }
-}
 const IMAGE_EXT = new Set(IMAGE_EXTS.map((e) => `.${e}`));
 
 function baseName(p: string): string {
@@ -123,14 +104,38 @@ function clampFrames(v: unknown): number {
   return Math.max(1, Math.min(MAX_FRAMES, n));
 }
 
-/** n evenly-spaced frame numbers in [start,end]; mirrors _even_frame_nums. */
-export function evenFrameNums(start: number, end: number, n: number): number[] {
+/** The source times an inspect_media call samples from [start, end): `max_frames` (default 6, max
+ *  12) sub-span midpoints. The one rule, shared with the eval's stand-in. */
+export function mediaLookTimes(start: number, end: number, maxFrames: unknown): number[] {
+  return evenTimes(start, end, clampFrames(maxFrames));
+}
+
+/** The project frames an inspect_timeline call asks for: `start_frame` alone (default 0), or with
+ *  `end_frame`, `max_frames` (default 6, max 12) midpoints of [start_frame, end_frame). The one
+ *  rule, shared with the eval's stand-in. */
+export function timelineLookFrames(args: Record<string, unknown>): number[] {
+  const startFrame = typeof args.start_frame === "number" ? Math.trunc(args.start_frame) : 0;
+  const endFrame = typeof args.end_frame === "number" ? Math.trunc(args.end_frame) : null;
+  const n =
+    typeof args.max_frames === "number"
+      ? Math.max(1, Math.min(MAX_FRAMES, Math.trunc(args.max_frames)))
+      : TIMELINE_DEFAULT_FRAMES;
+  return endFrame === null ? [startFrame] : midpointFrames(startFrame, endFrame, n);
+}
+
+/** Palmier's sampling of a frame range: the midpoints of n equal parts of [start, end), distinct
+ *  and ascending. A span shorter than n gives each of its frames once; an empty one, the start. */
+export function midpointFrames(start: number, end: number, n: number): number[] {
   const s = Math.trunc(start);
-  const e = Math.trunc(end);
-  if (e <= s) return [s];
-  const k = Math.max(1, Math.min(n, e - s));
-  if (k === 1) return [s];
-  return Array.from({ length: k }, (_, i) => s + Math.round(((e - s - 1) * i) / (k - 1)));
+  const span = Math.trunc(end) - s;
+  if (span <= 0) return [s];
+  const k = Math.max(1, Math.trunc(n));
+  const out: number[] = [];
+  for (let i = 0; i < k; i++) {
+    const f = s + Math.floor((span * (i + 0.5)) / k);
+    if (out[out.length - 1] !== f) out.push(f);
+  }
+  return out;
 }
 
 /** True for a Gemini-family model (reasons over video/audio natively). */
@@ -193,33 +198,67 @@ const TRANSCRIPT_SEG_CAP = 400;
 const TRANSCRIPT_WORD_CAP = 10_000;
 const round3 = (n: number): number => Math.round(n * 1000) / 1000;
 
-/** Transcribe `path` (whole file, cached) into a compact inspect_media transcript:
+/** The longest span a look transcribes while the model waits (owner decision 2026-10-02, UJ-012).
+ *  A longer one is made in the background, one file at a time, and the look returns at once: a
+ *  58-minute podcast once took 21 minutes to answer one question about it. */
+export const INLINE_TRANSCRIPT_MAX_S = 600;
+
+/** mm:ss (h:mm:ss past an hour) for a duration in a note to the model. */
+function clock(s: number): string {
+  const t = Math.max(0, Math.round(s));
+  const pad = (n: number): string => String(n).padStart(2, "0");
+  return t >= 3600
+    ? `${Math.floor(t / 3600)}:${pad(Math.floor((t % 3600) / 60))}:${pad(t % 60)}`
+    : `${Math.floor(t / 60)}:${pad(t % 60)}`;
+}
+
+/** Transcribe `path` over [start, end] into a compact inspect_media transcript:
  *  sentence rows `[text, start_s, end_s]` always, plus a flat `words` list
  *  `[text, start_s, end_s]` when `wordTimestamps` — both windowed to [start, end]
  *  and capped, mirroring the server + other NLEs. When `clip` is set the times are
  *  instead the clip's PROJECT FRAMES `[text, start_frame, end_frame]` and rows
- *  outside its visible span are dropped. On failure returns `{ error }` so
- *  inspect_media still succeeds with frames/metadata. */
+ *  outside its visible span are dropped.
+ *
+ *  A cached transcript (the whole file's, or this window's) is used whatever its length. With
+ *  none, a span up to {@link INLINE_TRANSCRIPT_MAX_S} is transcribed now; a longer one goes to the
+ *  FRONT of the project's background queue and comes back as `status: "in_progress"`. On failure
+ *  returns `{ error }` so inspect_media still succeeds with frames/metadata. */
 async function buildTranscript(
   ctx: ClientToolContext,
   path: string,
   opts: {
     start: number | null;
     end: number | null;
+    /** The file's length, when known: a window covering all of it is the whole-file transcript. */
+    duration: number | null;
     wordTimestamps: boolean;
+    language: string;
     clip?: Clip | null;
     fps?: number;
   },
 ): Promise<Result> {
   try {
-    // Bound the WORK by the window, not just the rows we print. Transcribing all of a
-    // 58-minute podcast to answer a question about 30 seconds of it cost 21 minutes; the
-    // window whisper is given keeps its own cache entry, and a full transcript (the
-    // indexer builds one in the background) still short-circuits every windowed ask.
-    const t = await runWhisper(ctx, path, undefined, undefined, {
-      start: opts.start,
-      end: opts.end,
-    });
+    const from = Math.max(0, opts.start ?? 0);
+    const to = opts.end ?? opts.duration;
+    // A window that covers the whole file IS the whole-file transcript: asking for it as a window
+    // would cache a second copy the background transcriber can never reuse.
+    const whole = from <= 0.05 && (to === null || (opts.duration !== null && to >= opts.duration - 0.05));
+    const window = whole ? null : { start: from, end: to };
+    let t = await peekTranscript(ctx, path, undefined, opts.language, window);
+    if (!t && to !== null && to - from > INLINE_TRANSCRIPT_MAX_S) {
+      const queued = prioritizeTranscript(ctx.store.projectDir, path, normLanguage(opts.language));
+      const zoom = `Pass start_seconds/end_seconds covering up to ${INLINE_TRANSCRIPT_MAX_S / 60} minutes to transcribe that part now.`;
+      return queued
+        ? {
+            status: "in_progress",
+            note: `Not transcribed yet: ${clock(to - from)} of audio is too long to wait for, so the whole file is being transcribed in the background (one file at a time, this one next). Call inspect_media again later for it. ${zoom}`,
+          }
+        : {
+            status: "unavailable",
+            note: `Not transcribed: ${clock(to - from)} of audio is too long to wait for, and nothing is transcribing in the background for this project. ${zoom}`,
+          };
+    }
+    t ??= await runWhisper(ctx, path, undefined, opts.language, window);
     const { start, end } = opts;
     const inWin = (a: number, b: number): boolean =>
       !((end !== null && a > end) || (start !== null && b < start));
@@ -282,6 +321,7 @@ export async function inspectMediaTool(
   const clipId = String(args.clip_id ?? "").trim();
   let mediaRef = argMediaRef;
   let timelineClip: Clip | null = null;
+  let clipTimeline: Timeline | null = null;
   let clipFps = 30;
   // A clip-derived source may legitimately be an EXTERNAL (out-of-project absolute) ref; an
   // agent-supplied `media_ref` may NOT. Track the origin so the final resolve picks the right
@@ -300,6 +340,7 @@ export async function inspectMediaTool(
     const found = findClip(timeline, clipId);
     if (!found) return { ok: false, error: `clip not found on the timeline: ${clipId}` };
     timelineClip = found[1];
+    clipTimeline = timeline;
     clipFps = canvasFps(timeline);
     const clipSource = String(timelineClip.media_ref ?? "").trim();
     if (!clipSource)
@@ -312,7 +353,7 @@ export async function inspectMediaTool(
       // clip_id can't silently override a mismatched media_ref.
       const [pClip, pArg] = await Promise.all([
         ctx.store.resolveRef(clipSource),
-        ctx.store.resolveRef(argMediaRef),
+        ctx.store.resolveMediaRef(argMediaRef),
       ]);
       if (pClip && pArg && pClip !== pArg) {
         return {
@@ -347,218 +388,301 @@ export async function inspectMediaTool(
   if (!probe.ok) return probe;
   const kind = mediaKind(path, probe);
   const wordTs = args.word_timestamps === true;
+  const language = typeof args.language === "string" ? args.language.trim() : "";
   const hasAudio = probe.audio != null;
+  const video = (probe.video ?? null) as Result | null;
+  const display = displaySize(video);
+  // Part of every cache key: a file replaced in place (a generation landing on its placeholder)
+  // must not be answered with frames of what was there before.
+  const sizeKey = String(probe.size_bytes ?? "");
 
   if (kind === "image") {
-    const v = (probe.video ?? null) as Result | null;
+    const gridded = display
+      ? await stillWithGrid(ctx, path, mediaFrameDims(display), sizeKey)
+      : null;
     return {
       ok: true,
       kind: "image",
       media_ref: srcRef,
-      width: v ? v.width : null,
-      height: v ? v.height : null,
+      width: video ? video.width : null,
+      height: video ? video.height : null,
       frames_attached: 1,
+      ...(gridded ? { coordinate_grid: GRID_NOTE } : {}),
       metadata: probe,
       _attachments: [
         imageAttachment(
-          await encodeImageForGemini(ctx, path),
+          gridded ?? (await encodeImageForGemini(ctx, path)),
           `inspect_media image ${baseName(path)}`,
         ),
       ],
     };
   }
 
-  if (kind === "video") {
-    const dur = typeof probe.duration_s === "number" ? probe.duration_s : 0;
-    // A clip_id names a SPAN of its source, not the whole file. Without this the sampled
-    // frames came from wherever the file happened to be — inspecting a 30s clip of a 10min
-    // video returned frames at 149s and 447s, footage the clip does not contain — while the
-    // transcript beside them was correctly clipped. An explicit window still wins.
-    const clipWin = timelineClip ? clipSourceSpanSeconds(timelineClip, clipFps) : null;
-    const winStart = clipWin ? clipWin[0] : 0;
-    const winEnd = clipWin && clipWin[1] > clipWin[0] ? clipWin[1] : dur > 0 ? dur : winStart + 1;
-    const start = typeof args.start_seconds === "number" ? args.start_seconds : winStart;
-    let end = typeof args.end_seconds === "number" ? args.end_seconds : winEnd;
-    if (end <= start) end = dur > start ? dur : start + 1;
+  // The span looked at. A clip_id names a SPAN of its source, not the whole file. Without this the
+  // sampled frames came from wherever the file happened to be — inspecting a 30s clip of a 10min
+  // video returned frames at 149s and 447s, footage the clip does not contain — while the
+  // transcript beside them was correctly clipped. An explicit window still wins.
+  const dur = typeof probe.duration_s === "number" && probe.duration_s > 0 ? probe.duration_s : 0;
+  const clipWin = timelineClip ? clipSourceSpanSeconds(timelineClip, clipFps) : null;
+  const winStart = clipWin ? clipWin[0] : 0;
+  const winEnd = clipWin && clipWin[1] > clipWin[0] ? clipWin[1] : dur > 0 ? dur : null;
+  const start = typeof args.start_seconds === "number" ? Math.max(0, args.start_seconds) : winStart;
+  let end: number | null = typeof args.end_seconds === "number" ? args.end_seconds : winEnd;
+  if (end !== null && end <= start) end = dur > start ? dur : null;
 
+  // Sound and transcript come from other subsystems than the frames, so they start FIRST and run
+  // while the frames are read, instead of one after the other. Loudness is measured over the whole
+  // span looked at, however long (owner decision 2026-10-03).
+  const loudnessTask: Promise<Result | null> = hasAudio
+    ? measureLoudness(ctx, path, start, end).then((l) =>
+        "error" in l ? l : withClipGain(l, clipTimeline, timelineClip),
+      )
+    : Promise.resolve(null);
+  const transcriptTask: Promise<Result | null> = hasAudio
+    ? buildTranscript(ctx, path, {
+        start,
+        end,
+        duration: dur || null,
+        wordTimestamps: wordTs,
+        language,
+        clip: timelineClip,
+        fps: clipFps,
+      })
+    : Promise.resolve(null);
+  const finish = async (body: Result): Promise<Result> => {
+    const [loudness, transcript] = await Promise.all([loudnessTask, transcriptTask]);
+    if (ctx.signal?.aborted) return { ok: false, error: "cancelled" };
+    return { ...body, loudness, transcript };
+  };
+  /** A source time in the caller's units: project frames for a clip_id, seconds otherwise. */
+  const at = (t: number): Result => {
+    if (!timelineClip) return { t: round3(t) };
+    const f = clipSpanToFrames(timelineClip, t, t, clipFps);
+    return { frame: f ? f[0] : null };
+  };
+  const timing = timelineClip ? "project_frames" : "source_seconds";
+
+  if (kind === "video") {
+    const span: [number, number] = [start, end ?? start + 1];
     // Gemini perceives video natively -> attach the windowed clip (richer than
     // stills). gpt/text models keep the sampled-frame path below.
-    if (isGemini(args._model_id)) {
+    if (isGemini(args._model_id) && args.overview !== true) {
       const attachFps =
         typeof args.sample_fps === "number" && args.sample_fps > 0 ? args.sample_fps : 1;
       const keepAudio = args.attach_audio === true;
       try {
-        const clip = await clipVideoForGemini(ctx, path, start, end, attachFps, keepAudio);
-        const cap = `inspect_media video ${baseName(path)} [${start.toFixed(2)}-${end.toFixed(2)}s] @ ${attachFps}fps`;
-        const transcript = hasAudio
-          ? await buildTranscript(ctx, path, {
-              start,
-              end,
-              wordTimestamps: wordTs,
-              clip: timelineClip,
-              fps: clipFps,
-            })
-          : null;
-        return {
+        const clip = await clipVideoForGemini(ctx, path, span[0], span[1], attachFps, keepAudio);
+        const cap = `inspect_media video ${baseName(path)} [${span[0].toFixed(2)}-${span[1].toFixed(2)}s] @ ${attachFps}fps`;
+        return finish({
           ok: true,
           kind: "video",
           media_ref: srcRef,
           duration_s: dur || null,
-          window_s: [start, end],
+          window_s: span,
           attach_fps: attachFps,
           video_attached: true,
           audio_attached_with_video: keepAudio,
-          transcript,
           metadata: probe,
           _attachments: [videoAttachment(clip, cap, attachFps)],
-        };
+        });
       } catch (e) {
-        return {
+        return finish({
           ok: true,
           kind: "video",
           media_ref: srcRef,
           video_attached: false,
           attach_error: String(e),
           metadata: probe,
-        };
+        });
       }
     }
+    if (!display)
+      return finish({
+        ok: true,
+        kind: "video",
+        media_ref: srcRef,
+        duration_s: dur || null,
+        frames_attached: 0,
+        frames_error: "the video's picture size could not be read, so no frame was taken",
+        metadata: probe,
+      });
 
-    const n = clampFrames(args.max_frames);
-    const times = evenTimes(start, end, n);
-    // Frames go through ffmpeg, the transcript through whisper — different subsystems, so
-    // start the transcript FIRST and let it run while the frames extract, instead of paying
-    // for one after the other. (other NLEs' read_video does the same.)
-    const transcriptTask = hasAudio
-      ? buildTranscript(ctx, path, {
-          start,
-          end,
-          wordTimestamps: wordTs,
-          clip: timelineClip,
-          fps: clipFps,
-        })
-      : Promise.resolve(null);
-
-    // Each extract is an independent ffmpeg on the same read-only file; awaiting them one at
-    // a time paid a process startup per frame (the cost inspect_timeline already shed).
-    const targets = await Promise.all(
-      times.map(async (t) => ({
-        t,
-        out: await ctx.store.prepareArtifact(`inspect/${shortHash(`${path}|${t.toFixed(3)}|${MEDIA_FRAME_EDGE}`)}.jpg`),
-      })),
-    );
-    const results = new Array<{ t: number; out: string; ok: boolean }>(targets.length);
-    const LANES = 4;
-    let next = 0;
-    await Promise.all(
-      Array.from({ length: Math.min(LANES, targets.length) }, async () => {
-        for (let i = next++; i < targets.length; i = next++) {
-          const { t, out } = targets[i];
-          const r = await ctx.runner.run("ffmpeg", [
-            "-y",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-ss",
-            Math.max(0, t).toFixed(3),
-            "-i",
-            path,
-            "-vf",
-            scaleTo(MEDIA_FRAME_EDGE),
-            "-frames:v",
-            "1",
-            "-q:v",
-            FRAME_JPEG_Q,
-            out,
-          ]);
-          results[i] = { t, out, ok: r.code === 0 && (await ctx.store.exists(out)) };
-        }
-      }),
-    );
-
-    // Rebuilt in request order: the lanes finish out of order and the model reads a sequence.
-    const attachments: Attachment[] = [];
-    const frames: Array<{ t: number }> = [];
-    for (const r of results) {
-      if (!r?.ok) continue;
-      attachments.push(imageAttachment(r.out, `inspect_media frame @${r.t.toFixed(2)}s`));
-      frames.push({ t: r.t });
-    }
-    const transcript = await transcriptTask;
-    return {
+    const base: Result = {
       ok: true,
       kind: "video",
       media_ref: srcRef,
       duration_s: dur || null,
-      frames,
+      window_s: [round3(span[0]), round3(span[1])],
+      timing,
+    };
+    // Coarse first: ONE storyboard of the span's visual flow, instead of frames.
+    if (args.overview === true) {
+      try {
+        const sb = await makeStoryboard(ctx, path, span[0], span[1], display);
+        const tiles = sb.tile_times.map(at);
+        return finish({
+          ...base,
+          overview: timelineClip
+            ? { tile_frames: tiles.map((x) => x.frame) }
+            : { tile_times: tiles.map((x) => x.t) },
+          frames_attached: 1,
+          metadata: probe,
+          _attachments: [
+            imageAttachment(
+              sb.path,
+              `inspect_media overview ${baseName(path)} [${span[0].toFixed(1)}-${span[1].toFixed(1)}s]`,
+            ),
+          ],
+        });
+      } catch (e) {
+        return finish({ ...base, overview: { error: String(e) }, frames_attached: 0, metadata: probe });
+      }
+    }
+
+    const shots = await sampleFrames(
+      ctx,
+      path,
+      mediaLookTimes(span[0], span[1], args.max_frames),
+      mediaFrameDims(display),
+      sizeKey,
+    );
+    // Rebuilt in request order: the lanes finish out of order and the model reads a sequence.
+    const attachments: Attachment[] = [];
+    const measured = shots.filter((s) => s.sharpness !== undefined);
+    const mean = (k: "sharpness" | "noise"): number | null =>
+      measured.length
+        ? Math.round((measured.reduce((n, s) => n + (s[k] ?? 0), 0) / measured.length) * 10) / 10
+        : null;
+    for (const s of shots)
+      if (s.path) attachments.push(imageAttachment(s.path, `inspect_media frame @${s.t.toFixed(2)}s`));
+    return finish({
+      ...base,
+      frames: shots.map((s) => ({ ...at(s.t), ...(s.error ? { error: s.error } : {}) })),
       frames_attached: attachments.length,
-      transcript,
+      coordinate_grid: GRID_NOTE,
+      sharpness: mean("sharpness"),
+      noise_sigma: mean("noise"),
       metadata: probe,
       _attachments: attachments,
-    };
+    });
   }
 
   // audio
-  const audioDur = typeof probe.duration_s === "number" ? probe.duration_s : null;
+  const audioDur = dur || null;
   if (isGemini(args._model_id)) {
     // Gemini reasons over audio natively -> attach the (windowed) clip.
-    const start = typeof args.start_seconds === "number" ? args.start_seconds : null;
-    const end = typeof args.end_seconds === "number" ? args.end_seconds : null;
+    const gStart = typeof args.start_seconds === "number" ? args.start_seconds : null;
+    const gEnd = typeof args.end_seconds === "number" ? args.end_seconds : null;
     try {
-      const clip = await clipAudioForGemini(ctx, path, start, end);
-      const transcript = await buildTranscript(ctx, path, {
-        start,
-        end,
-        wordTimestamps: wordTs,
-        clip: timelineClip,
-        fps: clipFps,
-      });
-      return {
+      const clip = await clipAudioForGemini(ctx, path, gStart, gEnd);
+      return finish({
         ok: true,
         kind: "audio",
         media_ref: srcRef,
         duration_s: audioDur,
         audio_attached: true,
-        transcript,
         metadata: probe,
         _attachments: [audioAttachment(clip, `inspect_media audio ${baseName(path)}`)],
-      };
+      });
     } catch (e) {
-      return {
+      return finish({
         ok: true,
         kind: "audio",
         media_ref: srcRef,
         audio_attached: false,
         attach_error: String(e),
         metadata: probe,
-      };
+      });
     }
   }
   // gpt/text: on-device whisper transcription (no media attachment).
-  const start = typeof args.start_seconds === "number" ? args.start_seconds : null;
-  const end = typeof args.end_seconds === "number" ? args.end_seconds : null;
-  const transcript = await buildTranscript(ctx, path, {
-    start,
-    end,
-    wordTimestamps: wordTs,
-    clip: timelineClip,
-    fps: clipFps,
-  });
-  return {
+  return finish({
     ok: true,
     kind: "audio",
     media_ref: srcRef,
     duration_s: audioDur,
     frames_attached: 0,
-    transcript,
     metadata: probe,
+  });
+}
+
+/** The loudness a clip is heard at, beside the source's. A clip's sound is the audio clip itself,
+ *  or for a video clip the audio clip placement split from it (same link group and media). A
+ *  constant volume moves every figure by the same dB; a keyframed one is reported, not applied.
+ *  Audio effects and track mixing are not included. */
+function withClipGain(l: Loudness, timeline: Timeline | null, clip: Clip | null): Result {
+  if (!timeline || !clip) return { ...l };
+  let sound: Clip | null = clip.kind === "audio" ? clip : null;
+  if (!sound && clip.link_group)
+    for (const t of timeline.tracks ?? [])
+      for (const c of t.clips ?? [])
+        if (c.kind === "audio" && c.link_group === clip.link_group && c.media_ref === clip.media_ref)
+          sound ??= c;
+  if (!sound) return { ...l };
+  const vol = sound.volume ?? 1;
+  if (typeof vol !== "number") return { ...l, clip_volume: "keyframed" };
+  const db = vol > 0 ? 20 * Math.log10(vol) : null;
+  const move = (v: number | null): number | null =>
+    v === null || db === null ? null : Math.round((v + db) * 10) / 10;
+  return {
+    ...l,
+    clip_volume: vol,
+    after_clip_volume:
+      db === null
+        ? null
+        : {
+            integrated_lufs: move(l.integrated_lufs),
+            true_peak_dbtp: move(l.true_peak_dbtp),
+            rms_dbfs: move(l.rms_dbfs),
+          },
   };
 }
 
-/** inspect_timeline (client): render the composited timeline and attach sampled
- *  frames so the model can SEE the current edit. Reuses buildRenderCommand
- *  (full-timeline render, cached to cache/inspect/) + the attachment-transport.
- *  Ports inspect.py::inspect_timeline. */
+/** What a look at the timeline covers, decided before a pixel is drawn: the frames asked for that
+ *  exist, the ones that do not, or why there is nothing to look at. Pure — the eval's stand-in
+ *  answers from it too, so the two cannot disagree about which frames a call means. */
+export function planTimelineLook(
+  raw: Timeline,
+  args: Record<string, unknown>,
+):
+  | { ok: false; result: Result }
+  | { ok: true; seconds: Timeline; fps: number; total: number; nums: number[]; outOfRange: number[] } {
+  const errors = validateTimeline(raw);
+  if (errors.length)
+    return {
+      ok: false,
+      result: { ok: false, error: "timeline preflight failed", preflight_errors: errors.slice(0, 20) },
+    };
+  const seconds = toSecondsView(raw);
+  const duration = canvasDuration(seconds);
+  if (duration <= 0)
+    return { ok: false, result: { ok: false, error: "timeline is empty — add clips first" } };
+  const fps = canvasFps(raw);
+  const total = Math.round(duration * fps);
+  const asked = timelineLookFrames(args);
+  const nums = asked.filter((f) => f >= 0 && f < total);
+  const outOfRange = asked.filter((f) => f < 0 || f >= total);
+  if (!nums.length)
+    return {
+      ok: false,
+      result: {
+        ok: false,
+        error: `every frame asked for is outside the timeline, which runs from frame 0 to ${total - 1}.`,
+        out_of_range: outOfRange,
+        duration_frames: total,
+      },
+    };
+  return { ok: true, seconds, fps, total, nums, outOfRange };
+}
+
+/** inspect_timeline (client): show the model the composited timeline at the frames it asks for.
+ *
+ *  Each frame is its OWN one-frame render of the export's graph (buildRenderCommand's frame
+ *  window): only the clips on canvas near that frame are opened, each seeked close to it, so a look
+ *  costs a few frames of work wherever it lands. It used to render the timeline from frame 0 up to
+ *  the deepest frame asked for, which made a look at minute 14 cost 14 minutes of encode (UJ-012).
+ *  The frame is the export's frame at that instant, then fitted to 768 px with Palmier's grid and
+ *  an \"f<frame>\" label drawn on. */
 export async function inspectTimelineTool(
   args: Record<string, unknown>,
   ctx: ClientToolContext | null,
@@ -570,130 +694,122 @@ export async function inspectTimelineTool(
   } catch (e) {
     return { ok: false, error: `timeline.json not found — author it first (${String(e)})` };
   }
-  const errors = validateTimeline(raw);
-  if (errors.length)
-    return { ok: false, error: "timeline preflight failed", preflight_errors: errors.slice(0, 20) };
-  const seconds = toSecondsView(raw);
-  const duration = canvasDuration(seconds);
-  if (duration <= 0) return { ok: false, error: "timeline is empty — add clips first" };
-  const fps = canvasFps(raw);
-  const startFrame = typeof args.start_frame === "number" ? Math.trunc(args.start_frame) : 0;
-  const endFrame = typeof args.end_frame === "number" ? Math.trunc(args.end_frame) : null;
-  const maxFrames =
-    typeof args.max_frames === "number"
-      ? Math.max(1, Math.min(MAX_FRAMES, Math.trunc(args.max_frames)))
-      : 5;
-  const nums = endFrame === null ? [startFrame] : evenFrameNums(startFrame, endFrame, maxFrames);
+  const planned = planTimelineLook(raw, args);
+  if (!planned.ok) return planned.result;
+  const { seconds, fps, total, nums, outOfRange } = planned;
 
-  // Resolve portable "library/<id>" sources to absolute paths (like the real
-  // render does) so ffmpeg can open them — inspect_timeline previously handed
-  // ffmpeg the raw relative path, which failed even though the file exists.
-  await resolveClipSources(ctx, seconds);
-  // Two costs this tool used to pay in full on EVERY call, on a timeline of ANY length:
-  //
-  //   * it encoded the WHOLE timeline. Frames are pulled by ABSOLUTE time below, so stopping the
-  //     output after the last one asked for leaves every sampled frame byte-identical and drops
-  //     the rest of the encode. In report d03ab792 a 2.7s question encoded 159s.
-  //   * it encoded at DELIVERABLE quality (no -preset => libx264 `medium`). Nobody watches this
-  //     file; it exists to have PNGs pulled out of it.
-  //
-  // And it re-did that work for calls it had already answered: the same session asked for the
-  // identical window seven times, five of them back to back.
-  const upTo = Math.min(duration, Math.max(...nums) / fps + 1 / fps);
-  const options = { preset: "ultrafast", maxDurationSec: upTo };
-  const key = await previewKey(ctx, seconds, options);
-  const mp4 = await ctx.store.prepareArtifact(`inspect/tl_${key ?? "uncached"}.mp4`);
-  await trimInspectCache(ctx, mp4);
-  if (!key || !(await ctx.store.exists(mp4))) {
-    const plan = buildRenderCommand(seconds, mp4, options);
+  // Resolve portable "library/<id>" sources to absolute paths, as the export does: ffmpeg can only
+  // open a path.
+  const warnings = new Set(await resolveClipSources(ctx, seconds));
+  const look = resolveRenderPlan(seconds);
+  // Each file is named for the timeline STATE it shows (plus the size and overlay it was drawn
+  // with), never just its frame number: the conversation keeps re-sending the frames an earlier
+  // round saw, so a later look at the same frame number must not overwrite one. No key (the
+  // platform cannot size a file) gets a one-off name, and is rendered every time: a stale frame is
+  // a wrong answer.
+  const key = await previewKey(ctx, seconds);
+  const state = key ?? nextCallToken();
+  const canvas = canvasPx(seconds);
+  const dims = fitDims(canvas.w, canvas.h, TIMELINE_FRAME_EDGE);
+
+  const renderFrame = async (frame: number): Promise<FrameShot> => {
+    const final = await ctx.store.prepareArtifact(
+      `inspect/tl_${state}_${frame}_${TIMELINE_FRAME_EDGE}g${OVERLAY_REV}.jpg`,
+    );
+    if (key && (await ctx.store.exists(final))) return { frame, path: final };
+    // Stop starts nothing new; a frame already rendering is killed through the runner's signal.
+    if (ctx.signal?.aborted) return { frame, error: "cancelled" };
+    // Rendered under a temporary name and renamed into place, so a parallel look at the same frame
+    // never reads half a JPEG, and a frame a round has shown is never rewritten under it.
+    const out = ctx.store.canRename
+      ? final.replace(/\.jpg$/, `.${nextCallToken()}.tmp.jpg`)
+      : final;
+    const assName = `grid_f${frame}.ass`;
+    const plan = buildRenderCommand(seconds, out, {}, {
+      frame,
+      post: `${scaleTo(TIMELINE_FRAME_EDGE)},${gridFilter(assName)}`,
+      postAss: [{ name: assName, content: gridAss(dims.w, dims.h, `f${frame}`) }],
+      postFonts: [OVERLAY_FONT_FILE],
+      outputArgs: ["-q:v", FRAME_JPEG_Q],
+    });
+    for (const w of plan.warnings) warnings.add(w);
     const rr = await runRenderPlan(ctx, plan);
-    if (rr.code !== 0 || !(await ctx.store.exists(mp4))) {
+    if (rr.code !== 0 || !(await ctx.store.exists(out))) {
+      // Whatever a failed run left is not a frame: never let the name of one point at it.
+      if (out !== final) await ctx.store.remove(out).catch(() => undefined);
       return {
-        ok: false,
-        error: `timeline render failed (code=${rr.code})`,
-        stderr_tail: stderrExcerpt(rr.stderr),
+        frame,
+        error: `frame ${frame} could not be rendered${ffmpegReason(rr.stderr) || " — ffmpeg wrote no image"}`,
       };
     }
-  }
+    if (out !== final) {
+      if (await ctx.store.exists(final)) await ctx.store.remove(out).catch(() => undefined);
+      else await ctx.store.rename(out, final);
+    }
+    return { frame, path: final };
+  };
 
-  // Extraction is per-frame and independent: same read-only mp4 in, a distinct jpg out. Running
-  // them in sequence made an 8-frame call pay eight ffmpeg startups end to end, which is most of
-  // why this tool's cost tracked "how many processes" rather than "how much work". Bounded rather
-  // than unbounded so a low-core machine isn't thrashed by a wide request.
-  //
-  // Each file is named for the timeline STATE it shows (the render key), never just its frame
-  // number: the conversation keeps re-sending the frames an earlier round saw, and `tl_<frame>`
-  // was overwritten by the next look at that frame, so the history would have shown a later edit
-  // under an earlier result. No key (the platform cannot size a file) gets a one-off name.
-  const state = key ?? nextCallToken();
-  const targets = await Promise.all(
-    nums.map(async (nFrame) => ({
-      nFrame,
-      out: await ctx.store.prepareArtifact(`inspect/tl_${state}_${nFrame}_${TIMELINE_FRAME_EDGE}.jpg`),
-    })),
-  );
-  const results = new Array<{ nFrame: number; out: string; ok: boolean }>(targets.length);
-  const LANES = 4;
+  const shots: FrameShot[] = [];
   let next = 0;
   await Promise.all(
-    Array.from({ length: Math.min(LANES, targets.length) }, async () => {
-      for (let i = next++; i < targets.length; i = next++) {
-        const { nFrame, out } = targets[i];
-        // Seek HALF A FRAME EARLY. `-ss` before `-i` discards by PTS and keeps the first frame at
-        // or after the target, so asking for a frame's own start time is a coin flip on rounding:
-        // frame 59 at 30fps starts at 1.9666…s, prints as "1.967", and ffmpeg returned frame 60
-        // instead. Landing between frame n-1 and frame n makes frame n the first one kept,
-        // whatever the rounding. Measured: seeking mid-frame returns n+1, half a frame early n.
-        const seek = Math.max(0, (nFrame - 0.5) / fps);
-        const r = await ctx.runner.run("ffmpeg", [
-          "-y",
-          "-hide_banner",
-          "-loglevel",
-          "error",
-          "-ss",
-          seek.toFixed(3),
-          "-i",
-          mp4,
-          "-vf",
-          scaleTo(TIMELINE_FRAME_EDGE),
-          "-frames:v",
-          "1",
-          "-q:v",
-          FRAME_JPEG_Q,
-          out,
-        ]);
-        results[i] = { nFrame, out, ok: r.code === 0 && (await ctx.store.exists(out)) };
-      }
+    Array.from({ length: Math.min(FRAME_LANES, nums.length) }, async () => {
+      for (let i = next++; i < nums.length; i = next++) shots[i] = await renderFrame(nums[i]);
     }),
   );
+  if (ctx.signal?.aborted) return { ok: false, error: "cancelled" };
 
   // Rebuilt in frame order: the lanes finish out of order, and the model reads these as a sequence.
   const attachments: Attachment[] = [];
-  const frames: Array<Record<string, unknown>> = [];
-  for (const { nFrame, out, ok } of results) {
-    const t = nFrame / fps;
-    if (ok) attachments.push(imageAttachment(out, `timeline frame ${nFrame} (${t.toFixed(2)}s)`));
-    frames.push({ frame: nFrame, time_s: t, ok });
-  }
+  const frames = shots.map((s) => {
+    const time = s.frame / fps;
+    if (s.path)
+      attachments.push(imageAttachment(s.path, `timeline frame ${s.frame} (${time.toFixed(2)}s)`));
+    return {
+      frame: s.frame,
+      time_s: round3(time),
+      ok: !s.error,
+      visible_clips: visibleClips(look, s.frame, fps),
+      ...(s.error ? { error: s.error } : {}),
+    };
+  });
+  const failed = shots.filter((s) => s.error);
+  if (failed.length === shots.length) return { ok: false, error: failed[0].error, frames };
   return {
     ok: true,
     canvas: raw.canvas,
+    duration_frames: total,
     frame_numbers: nums,
+    ...(outOfRange.length ? { out_of_range: outOfRange } : {}),
+    coordinate_grid: GRID_NOTE,
     frames_attached: attachments.length,
     frames,
+    ...(warnings.size ? { warnings: [...warnings] } : {}),
     _attachments: attachments,
   };
 }
 
-/** Cache key for the rendered preview: the RESOLVED timeline plus the size of every media file it
+/** One sampled frame: the file it was rendered to, or why it was not. */
+type FrameShot =
+  | { frame: number; path: string; error?: undefined }
+  | { frame: number; path?: undefined; error: string };
+
+/** Clip ids on canvas at `frame`, top layer first: the render plan's order reversed (hidden tracks
+ *  and disabled clips are not in it), each clip's span taken from the renderer's own rule. */
+export function visibleClips(look: SecondsRenderPlan, frame: number, fps: number): string[] {
+  const out: string[] = [];
+  for (const pc of look.clips) {
+    if (pc.kind === "audio") continue;
+    const { from, to } = onCanvasSec(pc);
+    if (frame >= from * fps - 1e-6 && frame < to * fps - 1e-6) out.push(pc.srcClipId);
+  }
+  return out.reverse();
+}
+
+/** Cache key for a rendered frame: the RESOLVED timeline plus the size of every media file it
  *  reads. The timeline alone is not enough — a source can be replaced in place (a generation
  *  landing on its placeholder) without a single clip changing. Null when the platform cannot stat,
  *  and then the caller re-renders: a stale frame is a wrong answer, which is worse than a slow one. */
-async function previewKey(
-  ctx: ClientToolContext,
-  seconds: Timeline,
-  options: Record<string, unknown>,
-): Promise<string | null> {
+async function previewKey(ctx: ClientToolContext, seconds: Timeline): Promise<string | null> {
   const refs = new Set<string>();
   for (const t of seconds.tracks ?? [])
     for (const c of t.clips ?? [])
@@ -704,7 +820,7 @@ async function previewKey(
     if (size === null) return null;
     sizes.push(`${ref}:${size}`);
   }
-  return shortHash(JSON.stringify({ tl: seconds, options, sizes }));
+  return shortHash(JSON.stringify({ tl: seconds, sizes }));
 }
 
 // ---------------------------------------------------------------------------
@@ -852,14 +968,15 @@ function findClipInTimeline(tl: Timeline, id: string): Clip | null {
 }
 
 /** Sample a raw (ungraded) frame from a media ref: the still itself for images,
- *  else a frame near 1s. Ports inspect_color._raw_frame. */
+ *  else a frame near 1s. Ports inspect_color._raw_frame. `ref` is always a model-typed argument,
+ *  so it resolves through the narrow resolver: a raw path or `..` escape reads nothing. */
 async function rawFrame(
   ctx: ClientToolContext,
   ref: string,
   tag: string,
   call: string,
 ): Promise<string | null> {
-  const p = await ctx.store.resolveRef(ref);
+  const p = await ctx.store.resolveMediaRef(ref);
   if (!p) return null;
   const dot = p.lastIndexOf(".");
   if (IMAGE_EXT.has(dot >= 0 ? p.slice(dot).toLowerCase() : "")) return p;
@@ -884,8 +1001,11 @@ async function rawFrame(
   return r.code === 0 && (await ctx.store.exists(out)) ? out : null;
 }
 
-/** Render ONE clip with its grade applied (no other layers) at its midpoint and
- *  return the still. Ports inspect_color._render_graded_clip. */
+/** Render ONE frame of ONE clip with its grade applied (no other layers), at its midpoint or
+ *  `atFrame`, as a PNG fitted to 1024 px. It used to render the whole clip at deliverable quality
+ *  and pull one frame out of it: 44 s median in production to look at a single frame (UJ-012). The
+ *  frame window renders just that frame with the export's own graph. Ports
+ *  inspect_color._render_graded_clip. */
 async function gradedClipFrame(
   ctx: ClientToolContext,
   clipId: string,
@@ -900,12 +1020,11 @@ async function gradedClipFrame(
   }
   const clip = findClipInTimeline(raw, clipId);
   if (!clip) return { error: `no clip '${clipId}' on the timeline` };
-  const fps = canvasFps(raw);
   const tIn = typeof clip.timeline_in === "number" ? clip.timeline_in : 0;
   const tOut = typeof clip.timeline_out === "number" ? clip.timeline_out : 1;
   const dur = Math.max(1, tOut - tIn);
   const mid = atFrame === null ? tIn + Math.floor(dur / 2) : atFrame;
-  const rel = Math.max(0, mid - tIn);
+  const rel = Math.min(Math.max(0, mid - tIn), dur - 1);
   const oneClip: Clip = { ...clip, timeline_in: 0, timeline_out: dur };
   delete (oneClip as Record<string, unknown>).id;
   delete (oneClip as Record<string, unknown>).link_group;
@@ -915,32 +1034,18 @@ async function gradedClipFrame(
     tracks: [{ id: "g", kind: "video", z: 0, clips: [oneClip] }],
     failures: [],
   };
-  const mp4 = await ctx.store.prepareArtifact(`inspect/color_clip_${call}.mp4`);
   const seconds = toSecondsView(one);
   // ffmpeg cannot open a library ref, only a path. Every other render path resolves first; this
   // one did not, so measuring a CLIP always failed while a media_ref worked.
   await resolveClipSources(ctx, seconds);
-  const plan = buildRenderCommand(seconds, mp4);
-  const rr = await runRenderPlan(ctx, plan);
-  if (rr.code !== 0 || !(await ctx.store.exists(mp4)))
-    return { error: `rendering the clip failed${ffmpegReason(rr.stderr)}` };
-  const t = Math.min(rel, dur - 1) / fps;
   const png = await ctx.store.prepareArtifact(`inspect/color_clip_${call}.png`);
-  const r2f = await ctx.runner.run("ffmpeg", [
-    "-y",
-    "-hide_banner",
-    "-loglevel",
-    "error",
-    "-ss",
-    Math.max(0, t).toFixed(3),
-    "-i",
-    mp4,
-    "-frames:v",
-    "1",
-    png,
-  ]);
-  if (r2f.code !== 0 || !(await ctx.store.exists(png)))
-    return { error: `sampling frame ${mid} failed${ffmpegReason(r2f.stderr)}` };
+  const plan = buildRenderCommand(seconds, png, {}, {
+    frame: rel,
+    post: scaleTo(COLOR_FRAME_EDGE),
+  });
+  const rr = await runRenderPlan(ctx, plan);
+  if (rr.code !== 0 || !(await ctx.store.exists(png)))
+    return { error: `rendering frame ${mid} of the clip failed${ffmpegReason(rr.stderr)}` };
   return { png };
 }
 
@@ -990,7 +1095,11 @@ export async function inspectColorTool(
     return { ok: false, error: "provide clip_id or media_ref" };
   }
   if (!frame)
-    return unresolvedRefError(ctx.store, mediaRef, `could not sample a frame from '${mediaRef}'`);
+    return unresolvedRefError(
+      ctx.store,
+      mediaRef,
+      `could not sample a frame from '${mediaRef}'. Pass a library id/filename (import_media a local file first) or a clip_id.`,
+    );
 
   const scopes = await measureColorFrame(ctx, frame);
   if (!scopes) return { ok: false, error: "failed to measure color scopes (frame decode failed)" };
@@ -999,13 +1108,20 @@ export async function inspectColorTool(
 
   if (reference) {
     const rf = await rawFrame(ctx, reference, "ref", call);
-    if (rf) {
-      const refScopes = await measureColorFrame(ctx, rf);
-      if (refScopes) {
-        attachments.push(imageAttachment(rf, "inspect_color reference"));
-        res.reference_scopes = refScopes;
-        res.gap = colorGapHints(scopes, refScopes);
-      }
+    const refScopes = rf ? await measureColorFrame(ctx, rf) : null;
+    if (rf && refScopes) {
+      attachments.push(imageAttachment(rf, "inspect_color reference"));
+      res.reference_scopes = refScopes;
+      res.gap = colorGapHints(scopes, refScopes);
+    } else {
+      // Said, not dropped: without it the model reads "no gap" as "no difference".
+      res.reference_error = rf
+        ? `could not measure the reference '${reference}' (frame decode failed)`
+        : await unresolvedRefMessage(
+            ctx.store,
+            reference,
+            `reference '${reference}' is not a library asset — import_media it first and pass its media_ref`,
+          );
     }
   }
   res._attachments = attachments;

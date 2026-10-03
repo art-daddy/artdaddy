@@ -2,22 +2,24 @@
 // and labels on an inspect frame) references its .ass files by BARE name and its fonts through a
 // `fonts/` dir, so the run needs a scratch working dir holding both. This is the one place that
 // stages it and always removes it, whatever the run does.
-import type { ClientToolContext } from "../tools/context";
-import { joinPath } from "../tools/store";
+import type { ClientToolContext } from "./context";
+import { joinPath } from "./store";
 
 // The bundled font directory (resources/fonts), resolved lazily via the Tauri path API and
 // cached. null outside a Tauri context (tests / browser bundle); then nothing is copied and
-// libass falls back to its built-in default.
-let fontDirCache: string | null | undefined;
-export async function bundledFontDir(): Promise<string | null> {
-  if (fontDirCache !== undefined) return fontDirCache;
-  try {
-    const { resolveResource } = await import("@tauri-apps/api/path");
-    fontDirCache = await resolveResource("resources/fonts");
-  } catch {
-    fontDirCache = null;
-  }
-  return fontDirCache;
+// libass falls back to its built-in default. The PROMISE is cached, so the frames of one look,
+// which stage their runs at the same moment, share one resolution instead of racing to make it.
+let fontDir: Promise<string | null> | undefined;
+export function bundledFontDir(): Promise<string | null> {
+  fontDir ??= (async () => {
+    try {
+      const { resolveResource } = await import("@tauri-apps/api/path");
+      return await resolveResource("resources/fonts");
+    } catch {
+      return null;
+    }
+  })();
+  return fontDir;
 }
 
 export interface AssFile {

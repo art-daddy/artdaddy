@@ -34,9 +34,11 @@ import { installE2EDocuments, resetE2EDocuments, flushE2EDoc, libRef, openE2EDoc
 type Rec = Record<string, unknown>;
 
 const nodeRunner: CommandRunner = {
-  run(program, args): Promise<CommandResult> {
+  // `cwd` is honoured as the app's runner does: libass files (captions, the inspect grid) are
+  // staged in a scratch dir and referenced by bare name.
+  run(program, args, _signal, cwd): Promise<CommandResult> {
     return new Promise((resolve) => {
-      const child = spawn(program, args, { windowsHide: true });
+      const child = spawn(program, args, { cwd, windowsHide: true });
       let stdout = "";
       let stderr = "";
       child.stdout?.on("data", (d) => (stdout += d.toString()));
@@ -210,13 +212,13 @@ describe("client tools E2E (real binaries)", () => {
     expect((rprobe.video as Rec).width).toBe(1080); // seeded canvas is 1080x1920
     expect(rprobe.has_audio).toBe(true); // linked audio was mixed in
 
-    // inspect_timeline: render the composite + sample real frames as attachments
+    // inspect_timeline: one-frame renders of the composite at the range's midpoints, as attachments
     const tlInspect = (await inspectTimelineTool(
       { start_frame: 0, end_frame: 60, max_frames: 3 },
       ctx,
     )) as Rec;
     expect(tlInspect.ok).toBe(true);
-    expect(tlInspect.frame_numbers).toEqual([0, 30, 59]);
+    expect(tlInspect.frame_numbers).toEqual([10, 30, 50]);
     const tlAtts = tlInspect._attachments as Array<{ path: string; kind: string }>;
     expect(tlAtts).toHaveLength(3);
     for (const a of tlAtts) {
