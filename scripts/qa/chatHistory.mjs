@@ -76,6 +76,9 @@ function rounds(lines) {
 
 // ── the chat panel, through real input ───────────────────────────────────────────────────
 async function selectModel(d, model) {
+  await unlock(d);
+  const has = `[...document.querySelectorAll('select')].some(x => [...x.options].some(o => o.value === ${JSON.stringify(model)}))`;
+  await d.waitFor(has, 30000).catch(() => null);
   const ok = await d.eval(`(() => {
     const s = [...document.querySelectorAll('select')].find(x => [...x.options].some(o => o.value === ${JSON.stringify(model)}));
     if (!s) return false;
@@ -207,6 +210,44 @@ async function j2(d, pid) {
   console.log(`  rounds: ${JSON.stringify(r.hist)}`);
 }
 
+// ── frames survive closing and reopening the project ────────────────────────────────────
+function frameFiles(pid) {
+  return (transcript(pid).requests ?? [])
+    .flatMap((q) => q.response ?? [])
+    .flatMap((p) => (p.kind === "tool_result" ? (p.frame_refs ?? []) : []))
+    .map((f) => f.path);
+}
+
+async function j4(d, pid, name) {
+  console.log("J4: frames the history showed survive a close and reopen");
+  await say(d, "Inspect the library files clip1_red.mp4 and clip2_green.mp4 with inspect_media (media_ref = the file name), 3 frames each, then name each clip's colour in one line.");
+  await waitTurn(d);
+  const frames = frameFiles(pid);
+  check("J4: the looks produced frames", frames.length >= 6 && frames.every((f) => existsSync(f)), `${frames.length} frames`);
+  // An unreferenced file beside them proves the sweep really ran at close.
+  const stale = path.join(projectDir(pid), "internals", "cache", "inspect", "qa_stale_unreferenced.jpg");
+  writeFileSync(stale, "x");
+  await d.clickText("File", "button");
+  await d.clickText("Close Project", "button");
+  await d.waitFor(`!location.pathname.startsWith('/p/')`, 30000);
+  await sleep(3000);
+  const kept = frames.filter((f) => existsSync(f)).length;
+  check("J4: the close-time sweep ran (an unreferenced cache file is gone)", !existsSync(stale), stale);
+  check("J4: every frame the history references survived the close", kept === frames.length, `${kept}/${frames.length} on disk`);
+  await d.clickText(name);
+  await d.waitFor(`location.pathname === ${JSON.stringify(`/p/${pid}`)}`, 30000);
+  await sleep(1500);
+  await selectModel(d, MODEL);
+  const off = logSize();
+  await say(d, "Without calling any tool, look again at the frames you saw before: which clip was greener? One line.");
+  await waitTurn(d);
+  const next = lastRequest(pid);
+  const r = rounds(logSince(off));
+  const h = r.hist[r.hist.length - 1] ?? {};
+  check("J4: after the reopen the frames were re-sent, none omitted", h.images >= frames.length && h.frames_omitted === 0, JSON.stringify(h));
+  check("J4: answered without a refusal", finalText(next) && errors(next).length === 0, finalText(next).slice(0, 200).replace(/\n/g, " "));
+}
+
 // ── the server dies mid-turn (UJ-018) ────────────────────────────────────────────────────
 const AKARU = path.resolve(import.meta.dirname, "../../../Akaru");
 const SERVER_ENV = {
@@ -282,14 +323,21 @@ async function j3(d, pid) {
 
 // ── main ─────────────────────────────────────────────────────────────────────────────────
 const d = await open();
+if (process.argv.includes("--reload")) {
+  // Code changed since the dev app loaded: start from a full reload, not a hot-patched graph.
+  await d.eval(`location.href = '/'`);
+  await sleep(5000);
+}
 const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-const pid = await newProject(d, `qa-phase1-${stamp}`, "16:9");
+const name = `qa-phase1-${stamp}`;
+const pid = await newProject(d, name, "16:9");
 console.log(`project ${pid}, model ${MODEL}`);
 await importMedia(d, pid, fixtures());
 await selectModel(d, MODEL);
 if (!only || only === "J1") await j1(d, pid);
 if (!only || only === "J2") await j2(d, pid);
 if (!only || only === "J3") await j3(d, pid);
+if (!only || only === "J4") await j4(d, pid, name);
 writeFileSync(path.join(OUT, `chatHistory-${stamp}.json`), JSON.stringify({ pid, model: MODEL, report }, null, 2));
 const failed = report.filter((r) => !r.ok).length;
 console.log(`\n${report.length - failed}/${report.length} checks passed`);
