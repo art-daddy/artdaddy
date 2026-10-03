@@ -422,19 +422,18 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
         // Client-owned history (Phase 1, option A): ask the server to rebuild the model's whole
         // input from the transcript. Until a server has said it does that for this model, the
         // request stays valid for the chained path too (round_input, the chain token, this
-        // round's frames); once it has, every kept frame of the history rides along, tagged.
+        // round's frames). The history's own frames ride `history_frames` from the first round,
+        // which a server without the mode ignores, so the first round after a restart already
+        // shows them; once the mode is confirmed, nothing rides `attachments` twice.
         const turns = get().turns;
         const modelKey = String(model ?? "");
         const support = historyModeSupport.get(modelKey);
         const history = support !== false;
-        const atts =
-          history && support === true
-            ? await historyAttachments(turns, exec.host.store())
-            : attachments;
+        const historyFrames = history ? await historyAttachments(turns, exec.host.store()) : [];
         const dto = await inferRoundStreaming(
           {
             round_input: roundInput,
-            attachments: atts,
+            attachments: support === true ? [] : attachments,
             model,
             effort,
             project_id: projectId ?? undefined,
@@ -443,7 +442,7 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
               ? { requests: requestsForHistory(turns) }
               : transcriptForRound(base, roundInput, turns),
             provider_snapshot: providerSnapshot,
-            ...(history ? { history_mode: "client" as const } : {}),
+            ...(history ? { history_mode: "client" as const, history_frames: historyFrames } : {}),
             project: cfg ?? null,
           },
           // Deltas are live presentation only. They go through the SAME supersede

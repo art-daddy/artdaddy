@@ -53,6 +53,9 @@ export interface InferBody {
   /** "client": the transcript is the model's whole history; the server rebuilds the input from
    *  it and keeps no chain. The result echoes it back only when it actually did. */
   history_mode?: "client";
+  /** The frames that history re-sends, tagged with their call and index. Their own field, so a
+   *  server without the mode ignores them rather than showing them as this round's images. */
+  history_frames?: InferenceAttachment[];
   project?: Record<string, unknown> | null;
 }
 

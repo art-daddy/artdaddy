@@ -234,6 +234,11 @@ async function j4(d, pid, name) {
   const kept = frames.filter((f) => existsSync(f)).length;
   check("J4: the close-time sweep ran (an unreferenced cache file is gone)", !existsSync(stale), stale);
   check("J4: every frame the history references survived the close", kept === frames.length, `${kept}/${frames.length} on disk`);
+  // A full reload stands in for an app restart: everything the app learned in memory is gone,
+  // including which models the server rebuilds history for.
+  await d.eval(`location.href = '/'`);
+  await sleep(5000);
+  await d.waitFor(`[...document.querySelectorAll('button')].some(b => (b.innerText ?? '').trim() === 'File')`, 60000);
   await d.clickText(name);
   await d.waitFor(`location.pathname === ${JSON.stringify(`/p/${pid}`)}`, 30000);
   await sleep(1500);
@@ -243,8 +248,9 @@ async function j4(d, pid, name) {
   await waitTurn(d);
   const next = lastRequest(pid);
   const r = rounds(logSince(off));
-  const h = r.hist[r.hist.length - 1] ?? {};
-  check("J4: after the reopen the frames were re-sent, none omitted", h.images >= frames.length && h.frames_omitted === 0, JSON.stringify(h));
+  // The FIRST round after the restart: the app does not know yet that this server rebuilds history.
+  const h = r.hist[0] ?? {};
+  check("J4: the first round after a restart re-sent the frames, none omitted", h.images >= frames.length && h.frames_omitted === 0, JSON.stringify(h));
   check("J4: answered without a refusal", finalText(next) && errors(next).length === 0, finalText(next).slice(0, 200).replace(/\n/g, " "));
 }
 

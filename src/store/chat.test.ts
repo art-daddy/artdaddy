@@ -52,6 +52,11 @@ vi.mock("../tools/host", () => ({
 }));
 vi.mock("../agent/api", () => ({ inferRound: vi.fn(), inferRoundStreaming: vi.fn() }));
 vi.mock("../agent/attachments", () => ({ collectInferenceAttachments: vi.fn() }));
+// The history's own frames (read from the project by historyFrames.ts, tested there).
+const { HISTORY_FRAMES } = vi.hoisted(() => ({
+  HISTORY_FRAMES: [{ kind: "image", b64: "SElTVA==", ext: ".jpg", call_id: "c1", index: 0 }],
+}));
+vi.mock("../agent/historyFrames", () => ({ historyAttachments: vi.fn(async () => HISTORY_FRAMES) }));
 vi.mock("./transcriptFile", () => ({
   loadClientSession: vi.fn(),
   persistSession: vi.fn(),
@@ -621,8 +626,11 @@ describe("useChat sends client-owned history (Phase 1, option A)", () => {
     expect(req.message.text).toContain("trim the intro");
     expect(req.message.text).toContain("Attached file(s)");
     expect(req.checkpoint).toBeUndefined(); // the model never reads timeline checkpoints
-    // Not known yet whether the server rebuilds history: this round's frames, as before.
+    // Not known yet whether the server rebuilds history: this round's frames, as a chained
+    // server needs them; the history's frames ride their own field, which such a server ignores.
+    // So the first round after a restart already shows the frames the history saw.
     expect(body.attachments).toEqual(legacyFrames);
+    expect(body.history_frames).toEqual(HISTORY_FRAMES);
   });
 
   it("once the server has rebuilt the history, keeps no chain and re-sends history frames instead", async () => {
@@ -636,8 +644,9 @@ describe("useChat sends client-owned history (Phase 1, option A)", () => {
     await lastDeps.infer({ tool_results: [] }, legacyFrames);
     const body = (inferRoundStreaming as Any).mock.calls.at(-1)[0];
     expect(body.history_mode).toBe("client");
-    // History frames come from the transcript (none here), not this round's legacy list.
+    // Every frame once: in the history's field, none repeated as this round's.
     expect(body.attachments).toEqual([]);
+    expect(body.history_frames).toEqual(HISTORY_FRAMES);
   });
 
   it("a server or model without the mode keeps its chain, and the next round is a plain chained one", async () => {
@@ -657,6 +666,7 @@ describe("useChat sends client-owned history (Phase 1, option A)", () => {
     expect(body.history_mode).toBeUndefined();
     expect(body.provider_snapshot).toEqual({ previous_response_id: "R" });
     expect(body.attachments).toEqual(legacyFrames);
+    expect(body.history_frames).toBeUndefined();
   });
 
   it("an error round does not demote the model to the chain", async () => {
