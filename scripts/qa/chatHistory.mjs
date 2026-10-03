@@ -239,6 +239,8 @@ async function j4(d, pid, name) {
   await d.eval(`location.href = '/'`);
   await sleep(5000);
   await d.waitFor(`[...document.querySelectorAll('button')].some(b => (b.innerText ?? '').trim() === 'File')`, 60000);
+  // The start screen lists projects once it has read them from disk.
+  await d.waitFor(`[...document.querySelectorAll('button')].some(b => (b.innerText ?? '').includes(${JSON.stringify(name)}))`, 60000);
   await d.clickText(name);
   await d.waitFor(`location.pathname === ${JSON.stringify(`/p/${pid}`)}`, 30000);
   await sleep(1500);
