@@ -28,9 +28,11 @@ import {
   resolveRenderPlan,
   type BlendKind,
   type FitKind,
+  type PlanClip,
   type ResolvedTransition,
 } from "./renderPlan";
 import { buildBandAss, unrenderableFlags, type CaptionSpec } from "./assCaption";
+import { withAssScratch } from "./assScratch";
 import { ExportRunError, isDestinationReserved, submitExport } from "./exportQueue";
 import { sourceHasAudio } from "./placement";
 import { clipPlays, outputGate, suppressClip } from "./visibility";
@@ -500,20 +502,8 @@ function escFilterPath(p: string): string {
   return p.replace(/\\/g, "/").replace(/:/g, "\\:");
 }
 
-// The bundled font directory (resources/fonts), resolved lazily via the Tauri
-// path API and cached. null outside a Tauri context (tests / browser bundle) —
-// then runRenderPlan skips the font copy and libass falls back to its built-in default.
-let _fontDirCache: string | null | undefined;
-export async function bundledFontDir(): Promise<string | null> {
-  if (_fontDirCache !== undefined) return _fontDirCache;
-  try {
-    const { resolveResource } = await import("@tauri-apps/api/path");
-    _fontDirCache = await resolveResource("resources/fonts");
-  } catch {
-    _fontDirCache = null;
-  }
-  return _fontDirCache;
-}
+// The bundled font directory now lives with the one helper that stages fonts for a run.
+export { bundledFontDir } from "./assScratch";
 
 // The bundled brand assets (resources/brand), same lazy resolve as the fonts. null outside a
 // Tauri context, which is why `exportBranding` reports rather than throws: a web/dev build
@@ -595,6 +585,26 @@ export interface RenderPlan {
   /** What the DELIVERED file will be, after the delivery scale and fps override — not the
    *  canvas. Reported with the export, where the canvas would describe the wrong artifact. */
   output: { width: number; height: number; fps: number };
+  /** A single-frame look (see {@link FrameWindow}), not an export: it reports no progress. */
+  frame: boolean;
+}
+
+/** Render ONE project frame with the export's own graph, cutting away the work around it.
+ *
+ *  Only clips on canvas near the frame are opened, each seeked close to it, and colour sources run
+ *  for two frames instead of the timeline. Every frame placement is computed with the same
+ *  arithmetic as the full render, so the result is the export's frame at that instant (UJ-012). */
+export interface FrameWindow {
+  /** Project frame at canvas fps. */
+  frame: number;
+  /** Filters applied to the composited frame (an inspect frame's scale, grid and label). */
+  post?: string;
+  /** .ass files the `post` chain references by bare name; staged like caption bands. */
+  postAss?: { name: string; content: string }[];
+  /** Bundled font files the `post` chain's .ass needs. */
+  postFonts?: string[];
+  /** Encoder/muxer args for the one output frame, before the output path. */
+  outputArgs?: string[];
 }
 
 interface Input {
@@ -602,6 +612,18 @@ interface Input {
   si: number;
   so: number;
   isImage: boolean;
+  /** Frame window: the seek (video) or loop length (still) that replaces `si` / the clip span. */
+  seekArg?: string;
+  lengthArg?: string;
+  /** Frame window: whole seconds the seek lands before the window's own start (see GAP_MARGIN_S). */
+  marginS?: number;
+}
+/** How far a frame window moves one clip's stream: K of its output frames are never produced. */
+interface Shift {
+  /** Output frames skipped, lead-in clones included — added back inside `setpts`. */
+  k: number;
+  /** Source frames (at canvas fps) skipped by the seek; the pre-`setpts` clock starts this late. */
+  m: number;
 }
 interface VRec {
   inputIdx: number;
@@ -627,6 +649,7 @@ interface VRec {
   blend: BlendKind;
   transition: ResolvedTransition | null;
   holdDur: number;
+  shift: Shift | null;
 }
 interface ARec {
   inputIdx: number;
@@ -644,6 +667,80 @@ interface ARec {
   /** The track this clip sits on — what `duck.against` names. */
   trackId: string;
   duck?: { against: string; ratio?: number; threshold?: number };
+}
+
+/** ffmpeg reads a time argument as whole microseconds; this is that number for a value the graph
+ *  prints with `toFixed(6)`. */
+function usOf(sec: number): number {
+  return Math.round(Number(sec.toFixed(6)) * 1e6);
+}
+
+/** Microseconds back to the 6-decimal seconds ffmpeg parses, without a float round trip. */
+function fmtUs(us: number): string {
+  const whole = Math.floor(us / 1e6);
+  return `${whole}.${String(us - whole * 1e6).padStart(6, "0")}`;
+}
+
+function gcd(a: number, b: number): number {
+  return b === 0 ? a : gcd(b, a % b);
+}
+
+/** Frames a seek moves in. m/fps must be whole microseconds, or a 60 fps source on a 30 fps canvas
+ *  can land on the other side of a half-frame tie than the export did: 3 at 24/30/60 fps, 1 at 25. */
+function seekStep(fps: number): number {
+  return fps / gcd(fps, 1_000_000);
+}
+
+/** tpad's own count of lead-in clones: it converts the printed duration to frames, rounding. */
+function tpadFrames(sec: number, fps: number): number {
+  return Math.round((usOf(sec) * fps) / 1e6);
+}
+
+/** Whole seconds a window's seek lands early. A screen recording sends no frames while the screen
+ *  is still, and the export repeats the last frame before such a gap. ffmpeg's MP4 seek into a gap
+ *  jumps FORWARD to the next keyframe, so a seek inside it can only show the frame after the gap.
+ *  Seeking this far earlier and shifting timestamps back (whole seconds are exact in any time base)
+ *  keeps that frame for gaps up to this long. It also hands the fps filter the frames just before
+ *  the window's first slot, which it needs to pick the same frame for it the export picks. The
+ *  margin's frames are dropped by the fps filter before anything but the scale runs on them. */
+const GAP_MARGIN_S = 2;
+
+/** Frames a temporal effect needs BEFORE the one shown, counted after the fps filter (the margin's
+ *  frames are dropped before effects run): motion blur averages `frames`, denoise accumulates. */
+function temporalPreroll(effects: unknown): number {
+  let n = 0;
+  if (Array.isArray(effects)) {
+    for (const fx of effects) {
+      const e = (fx ?? {}) as { type?: unknown; enabled?: unknown; params?: Record<string, unknown> };
+      if (e.enabled === false) continue;
+      if (e.type === "motion") n = Math.max(n, Number(e.params?.frames ?? 3) + 1);
+      if (e.type === "denoise") n = Math.max(n, 8);
+    }
+  }
+  return n;
+}
+
+/** A zooming clip (animated size) followed by any filter: ffmpeg sizes those filters on the clip's
+ *  FIRST frame (rotate's `ow=iw` is evaluated once), so the export draws every later frame relative
+ *  to the clip's start. A window that seeked in would size them on a later frame and draw a
+ *  different picture, so such a clip is rendered from its first frame. Measured: zoom + rotate
+ *  came out PSNR 16 dB from the export when seeked, identical when not. */
+function sizedOnFirstFrame(clip: Clip, pc: PlanClip, cw: number, ch: number): boolean {
+  const ta = transformAnims(clip, boxOf(clip, cw, ch, pc.media.fit), cw, ch);
+  const zooms =
+    (ta.sizeW !== undefined && !isNum(ta.sizeW)) || (ta.sizeH !== undefined && !isNum(ta.sizeH));
+  if (!zooms) return false;
+  const fade = (clip.fade ?? {}) as { in?: number; out?: number };
+  return (
+    pc.media.rotate !== undefined ||
+    pc.media.opacity !== undefined ||
+    pc.transition !== null ||
+    isNum(fade.in) ||
+    isNum(fade.out) ||
+    colorFilters(pc.media.color).length > 0 ||
+    effectFilters(clip.effects, clip.id, []).length > 0 ||
+    parseGlow(clip.glow ?? glowFromEffects(clip.effects)) !== null
+  );
 }
 
 /** Decompose a tempo ratio into ffmpeg atempo factors, each within [0.5, 2] (a
@@ -677,6 +774,7 @@ export function buildRenderCommand(
   raw: Timeline,
   outPath: string,
   options: ExportOptions = {},
+  window?: FrameWindow,
 ): RenderPlan {
   const timeline = toSecondsView(raw);
   assertSourcesResolved(timeline);
@@ -689,6 +787,9 @@ export function buildRenderCommand(
   const ch = evenPx(Math.trunc(Number(canvas.height)));
   const fps = Math.trunc(canvasFps(timeline));
   const duration = canvasDuration(timeline);
+  const win = window
+    ? { frame: Math.max(0, Math.trunc(window.frame)), t: Math.max(0, Math.trunc(window.frame)) / fps }
+    : null;
   const warnings: string[] = [];
   if (cw !== Math.trunc(Number(canvas.width)) || ch !== Math.trunc(Number(canvas.height))) {
     warnings.push(
@@ -717,6 +818,7 @@ export function buildRenderCommand(
   for (const pc of plan.clips) {
     const clip = pc.clipRef;
     if (clip.kind === "audio") {
+      if (win) continue; // a frame has no sound
       const aSi = Number(clip.source_in) || 0;
       const aTin = Number(clip.timeline_in) || 0;
       const aTout = Number(clip.timeline_out) || 0;
@@ -879,7 +981,38 @@ export function buildRenderCommand(
     const tout = Number(clip.timeline_out) || 0;
     const si = isImg ? 0 : Number(clip.source_in) || 0;
     const so = isImg ? Math.max(0, tout - tin) : Number(clip.source_out) || 0;
-    inputs.push({ path: String(clip.media_ref), si, so, isImage: isImg });
+    let shift: Shift | null = null;
+    const input: Input = { path: String(clip.media_ref), si, so, isImage: isImg };
+    if (win) {
+      const lead = pc.transition ? pc.transition.durSec / 2 : 0;
+      // Not on canvas near the frame: never opened. The band bookkeeping above still ran, so
+      // the captions keep the z-order they have in the full render.
+      if (tin - lead > win.t + 2 / fps || tout + pc.visibility.holdSec < win.t - 2 / fps) continue;
+      const speed = Number(clip.speed ?? 1) || 1;
+      const clones = lead > 0 ? tpadFrames(lead * speed, fps) : 0;
+      const skip = Math.floor(
+        (win.frame - temporalPreroll(clip.effects) - (tin - lead) * fps) * speed,
+      );
+      if (skip > clones && !sizedOnFirstFrame(clip, pc, cw, ch)) {
+        const step = seekStep(fps);
+        const srcFrames = Math.floor((so - si) * fps + 1e-6);
+        const m = Math.min(
+          Math.floor((skip - clones) / step) * step,
+          Math.floor(Math.max(0, srcFrames - 2) / step) * step,
+        );
+        const deltaUs = (m * 1e6) / fps;
+        // A video is only seeked when the seek moves a whole second, so its margin is never empty.
+        if (m > 0 && (isImg || deltaUs >= 1e6)) {
+          shift = { k: clones + m, m };
+          if (isImg) input.lengthArg = fmtUs(usOf(so - si) - deltaUs);
+          else {
+            input.marginS = Math.min(GAP_MARGIN_S, Math.floor(deltaUs / 1e6));
+            input.seekArg = fmtUs(usOf(si) + deltaUs - input.marginS * 1e6);
+          }
+        }
+      }
+    }
+    inputs.push(input);
     const deferred = DEFERRED_FIELDS.find((f) => clip[f] !== undefined);
     if (deferred) warnings.push(`clip ${clip.id}: '${deferred}' not rendered (scoped)`);
     const { left: cl, top: ct, right: cr, bottom: cb } = pc.media.crop;
@@ -920,6 +1053,7 @@ export function buildRenderCommand(
       blend: pc.media.blend,
       transition: pc.transition,
       holdDur,
+      shift,
     });
   }
 
@@ -938,12 +1072,21 @@ export function buildRenderCommand(
   for (const inp of inputs) {
     const dur = Math.max(0, inp.so - inp.si);
     if (inp.isImage)
-      cmd.push("-loop", "1", "-framerate", String(fps), "-t", dur.toFixed(6), "-i", inp.path);
-    else cmd.push("-ss", inp.si.toFixed(6), "-to", inp.so.toFixed(6), "-i", inp.path);
+      cmd.push(
+        "-loop",
+        "1",
+        "-framerate",
+        String(fps),
+        "-t",
+        inp.lengthArg ?? dur.toFixed(6),
+        "-i",
+        inp.path,
+      );
+    else cmd.push("-ss", inp.seekArg ?? inp.si.toFixed(6), "-to", inp.so.toFixed(6), "-i", inp.path);
   }
   // The branding inputs go LAST so every clip keeps the input index it had; an unbranded plan
   // pushes nothing and is byte-identical to what it was before branding existed.
-  const brand = options.branding ?? null;
+  const brand = win ? null : (options.branding ?? null);
   const wmIdx = inputs.length;
   const ecIdx = wmIdx + 1;
   if (brand) {
@@ -960,7 +1103,13 @@ export function buildRenderCommand(
     cmd.push("-i", brand.endcard);
   }
 
-  const chains: string[] = [`color=c=black:s=${cw}x${ch}:r=${fps}:d=${duration.toFixed(6)}[base]`];
+  // A colour source runs the whole timeline in an export. In a frame window it runs two frames,
+  // stamped at the window's frame so every expression keyed on time sees the export's clock.
+  const colorSrc = (spec: string): string =>
+    win
+      ? `color=${spec}:s=${cw}x${ch}:r=${fps}:d=${(2 / fps).toFixed(6)},setpts=PTS+${win.frame}`
+      : `color=${spec}:s=${cw}x${ch}:r=${fps}:d=${duration.toFixed(6)}`;
+  const chains: string[] = [`${colorSrc("c=black")}[base]`];
   let last = "base";
   // Caption z-bands interleave with the video overlays by `ord`: each band burns ONE libass `ass` filter
   // straight onto the running `last` (the .ass Dialogue lines carry their own timing, so NO enable= gate).
@@ -998,7 +1147,10 @@ export function buildRenderCommand(
         `transition at ${r.tin.toFixed(2)}s: custom expr not evaluated (rendered as a crossfade)`,
       );
     const leadIn = cross ? cross.durSec / 2 : 0;
-    const parts = [`[${r.inputIdx}:v]setsar=1`];
+    // A window seek that landed GAP_MARGIN_S early gets its clock moved back first, so the frames
+    // of the margin arrive with negative timestamps and only the gap's last frame survives fps.
+    const margin = inputs[r.inputIdx].marginS ?? 0;
+    const parts = [margin > 0 ? `[${r.inputIdx}:v]setpts=PTS-${margin}/TB,setsar=1` : `[${r.inputIdx}:v]setsar=1`];
     if (r.cropExpr) parts.push(r.cropExpr);
     if (r.flipH) parts.push("hflip");
     if (r.flipV) parts.push("vflip");
@@ -1013,9 +1165,11 @@ export function buildRenderCommand(
       // the source aspect — cover fills the box (crop overflow), contain fits
       // inside it — then the overlay re-centers the result. Mirrors the preview
       // (scene.ts fitRects). `t` is clip-relative here (this stage runs BEFORE
-      // setpts) so the keyframe offset is 0; the overlay uses timeline `t`+tin.
-      const wSc = r.sizeW !== undefined ? compileAnim(r.sizeW, "t", 0) : String(w);
-      const hSc = r.sizeH !== undefined ? compileAnim(r.sizeH, "t", 0) : String(h);
+      // setpts) so the keyframe offset is 0; the overlay uses timeline `t`+tin. A frame window's
+      // seek starts this clock `m` frames late, so it is moved back by exactly that.
+      const preClock = r.shift ? -r.shift.m / fps : 0;
+      const wSc = r.sizeW !== undefined ? compileAnim(r.sizeW, "t", preClock) : String(w);
+      const hSc = r.sizeH !== undefined ? compileAnim(r.sizeH, "t", preClock) : String(h);
       const foar = fitAspect(fit);
       parts.push(
         `scale=w='max(2,round((${wSc})/2)*2)':h='max(2,round((${hSc})/2)*2)':force_original_aspect_ratio=${foar}:force_divisible_by=2:eval=frame`,
@@ -1059,20 +1213,24 @@ export function buildRenderCommand(
     // timeline frames are 1:1, so there is no gap to cover and the graph is left untouched.
     const retimed = Math.abs(r.speed - 1) > 1e-6;
     const backPad = r.holdDur + (retimed ? 1 / fps : 0);
-    if (leadIn > 0 || backPad > 0) {
+    // A window that seeked past this clip's lead-in has no use for it; `shift.k` counts it instead.
+    const frontPad = leadIn > 0 && !r.shift;
+    if (frontPad || backPad > 0) {
       const opts: string[] = [];
-      if (leadIn > 0)
+      if (frontPad)
         opts.push("start_mode=clone", `start_duration=${(leadIn * r.speed).toFixed(6)}`);
       if (backPad > 0)
         opts.push("stop_mode=clone", `stop_duration=${(backPad * r.speed).toFixed(6)}`);
       parts.push(`tpad=${opts.join(":")}`);
     }
-    // The front pad shifts the stream leadIn earlier, so anchor at tin-leadIn.
+    // The front pad shifts the stream leadIn earlier, so anchor at tin-leadIn. A frame window adds
+    // back the frames its seek skipped as a whole number, so placement is the export's to the bit.
     const off = (r.tin - leadIn).toFixed(6);
+    const skipped = r.shift ? `+${r.shift.k}` : "";
     parts.push(
       Math.abs(r.speed - 1) < 1e-6
-        ? `setpts=PTS-STARTPTS+${off}/TB`
-        : `setpts=(PTS-STARTPTS)/${r.speed.toFixed(6)}+${off}/TB`,
+        ? `setpts=PTS-STARTPTS${skipped}+${off}/TB`
+        : `setpts=(PTS-STARTPTS${skipped})/${r.speed.toFixed(6)}+${off}/TB`,
     );
     // Colour grade + ordered effects act on the opaque, scaled clip.
     for (const f of r.preAlpha) parts.push(f);
@@ -1194,7 +1352,7 @@ export function buildRenderCommand(
       const dipStart = (r.tin - leadIn).toFixed(6);
       const dipEnd = (r.tin + leadIn).toFixed(6);
       chains.push(
-        `color=c=black:s=${cw}x${ch}:r=${fps}:d=${duration.toFixed(6)},format=rgba,` +
+        `${colorSrc("c=black")},format=rgba,` +
           `geq=r='${dipRGB}':g='${dipRGB}':b='${dipRGB}':a='255*clip(2*(T-${dipStart})/${cross.durSec.toFixed(6)},0,1)'[dip${i}]`,
       );
       chains.push(
@@ -1208,7 +1366,7 @@ export function buildRenderCommand(
       const p = `bl${i}`;
       chains.push(`[${last}]split=2[${p}ca][${p}cb]`);
       chains.push(
-        `color=c=black@0:s=${cw}x${ch}:r=${fps}:d=${duration.toFixed(6)},format=rgba[${p}ct]`,
+        `${colorSrc("c=black@0")},format=rgba[${p}ct]`,
       );
       chains.push(
         `[${p}ct][v${i}]overlay=x=${ovX}:y=${ovY}:enable='${enable}':shortest=0:eof_action=pass[${p}top]`,
@@ -1340,7 +1498,7 @@ export function buildRenderCommand(
   // NOT as `-vf`. ffmpeg refuses to attach a simple filtergraph to a stream fed from a complex
   // one ("Simple and complex filtering cannot be used together"), so `-vf` here killed the whole
   // render with EINVAL before encoding a frame, while the args string looked perfectly sensible.
-  const size = outputSize(cw, ch, options.resolution);
+  const size = win ? null : outputSize(cw, ch, options.resolution);
   if (size) {
     chains.push(`[${last}]scale=${size.w}:${size.h}:flags=lanczos[scaled]`);
     last = "scaled";
@@ -1381,8 +1539,31 @@ export function buildRenderCommand(
     }
   }
 
+  if (win) {
+    // The look's own finishing (scale, grid, label) applies to the composited frame, from t=0.
+    chains.push(`[${last}]setpts=PTS-STARTPTS${window?.post ? `,${window.post}` : ""}[frame]`);
+    last = "frame";
+    for (const f of window?.postAss ?? []) assFiles.push(f);
+    for (const f of window?.postFonts ?? []) usedFontFiles.add(f);
+  }
+
   const filterComplex = chains.join(";");
   cmd.push("-filter_complex", filterComplex, "-map", `[${last}]`);
+  if (win) {
+    cmd.push("-frames:v", "1", "-an", ...(window?.outputArgs ?? []), outPath);
+    return {
+      args: cmd,
+      filterComplex,
+      duration: 1 / fps,
+      warnings,
+      assFiles,
+      fonts: [...usedFontFiles],
+      stillImages: [...new Set(inputs.filter((i) => i.isImage).map((i) => i.path))],
+      audioMustSpanVideo: false,
+      output: { width: cw, height: ch, fps },
+      frame: true,
+    };
+  }
   if (aout) cmd.push("-map", `[${aout}]`);
   cmd.push("-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", String(outFps));
   if (options.preset) cmd.push("-preset", options.preset);
@@ -1403,6 +1584,7 @@ export function buildRenderCommand(
     stillImages: [...new Set(inputs.filter((i) => i.isImage).map((i) => i.path))],
     audioMustSpanVideo: brand !== undefined && aout !== null,
     output: { width: ow, height: oh, fps: outFps },
+    frame: false,
   };
 }
 
@@ -1501,10 +1683,30 @@ export async function runRenderPlan(
   ctx: ClientToolContext,
   plan: RenderPlan,
 ): Promise<CommandResult> {
-  // Backstop for stills that predate the import guard, or arrived by reference and changed on
-  // disk since. ffmpeg answers an undecodable image under `-loop 1` by retrying forever, so this
-  // has to happen BEFORE the spawn — afterwards there is nothing to observe but a hung process.
-  for (const path of plan.stillImages) {
+  const refused = await undecodableStill(ctx, plan.stillImages);
+  if (refused) return refused;
+  // A one-frame look is not an export: feeding its progress to the export job would move the bar
+  // of an export running at the same time.
+  return withAssScratch(ctx, plan.assFiles, plan.fonts, (cwd) =>
+    ctx.runner.run(
+      "ffmpeg",
+      plan.args,
+      ctx.signal,
+      cwd,
+      plan.frame ? undefined : progressReporter(plan.duration),
+    ),
+  );
+}
+
+/** Backstop for stills that predate the import guard, or arrived by reference and changed on
+ *  disk since. ffmpeg answers an undecodable image under `-loop 1` by retrying forever, so this
+ *  has to happen BEFORE the spawn — afterwards there is nothing to observe but a hung process.
+ *  Returns the refusal to report, or null when every still can be decoded. */
+export async function undecodableStill(
+  ctx: ClientToolContext,
+  stillImages: readonly string[],
+): Promise<CommandResult | null> {
+  for (const path of stillImages) {
     let reason: string | null = null;
     try {
       reason = undecodableImageReason(await ctx.store.readBytes(path));
@@ -1518,40 +1720,7 @@ export async function runRenderPlan(
         stderr: `render aborted: '${path.split(/[\\/]/).pop()}' ${reason}.`,
       };
   }
-  let scratch: string | null = null;
-  try {
-    if (plan.assFiles.length) {
-      const relBase = `renderer/caps-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-      scratch = ctx.store.artifactPath(relBase);
-      for (const f of plan.assFiles)
-        await ctx.store.writeText(
-          await ctx.store.prepareArtifact(`${relBase}/${f.name}`),
-          f.content,
-        );
-      const fontDir = plan.fonts.length ? await bundledFontDir() : null;
-      if (fontDir) {
-        for (const file of plan.fonts) {
-          try {
-            await ctx.store.writeBytes(
-              joinPath(scratch, "fonts", file),
-              await ctx.store.readBytes(joinPath(fontDir, file)),
-            );
-          } catch {
-            /* a missing/unreadable bundled font: libass just falls back for that family */
-          }
-        }
-      }
-    }
-    return await ctx.runner.run(
-      "ffmpeg",
-      plan.args,
-      ctx.signal,
-      scratch ?? undefined,
-      progressReporter(plan.duration),
-    );
-  } finally {
-    if (scratch) await ctx.store.remove(scratch).catch(() => undefined);
-  }
+  return null;
 }
 
 /** Feed ffmpeg's `-progress` stream into the export job the UI is watching. */

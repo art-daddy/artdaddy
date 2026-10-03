@@ -24,6 +24,7 @@ import { joinPath, ProjectStoreAccess, type FsLike } from "../tools/store";
 import { buildScene } from "../preview/scene";
 import { __resetExportQueue, whenExportsSettle } from "./exportQueue";
 import { __resetJobNotes, pendingJobNotes } from "../store/jobNotes";
+import { useExportJob } from "../store/exportJob";
 import type { ClientToolContext } from "../tools/context";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -169,6 +170,98 @@ describe("canvasDuration", () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (t.tracks[1].clips as any)[0].disabled = true;
     expect(canvasDuration(t)).toBe(9);
+  });
+});
+
+describe("buildRenderCommand — one frame (UJ-012)", () => {
+  // A look at one frame used to encode the timeline from frame 0 to it: 14 minutes of encode for
+  // six frames. The pixels are proven equal to the export in frameWindow.smoke.e2e.ts; these pin
+  // the COST, which is what the users paid: what gets opened, and how far into it decoding starts.
+  const inputsOf = (args: string[]): string[] => args.filter((_, i) => args[i - 1] === "-i");
+  const seekOf = (args: string[], file: string): number =>
+    Number(args[args.lastIndexOf("-ss", args.indexOf(file)) + 1]);
+  /** Fifty 10-second clips back to back: a 500 s timeline. */
+  const fifty = (): Timeline =>
+    ({
+      canvas: { width: 1920, height: 1080, fps: 30 },
+      tracks: [
+        {
+          id: "v",
+          kind: "video",
+          z: 0,
+          clips: Array.from({ length: 50 }, (_, i) => ({
+            media_ref: `/c${i}.mp4`,
+            source_in: 0,
+            source_out: 10,
+            timeline_in: i * 10,
+            timeline_out: i * 10 + 10,
+          })),
+        },
+      ],
+    }) as Timeline;
+
+  it("opens only the clip on screen, however long the timeline", () => {
+    const plan = buildRenderCommand(fifty(), "/f.png", {}, { frame: 30 * 255 });
+    expect(inputsOf(plan.args)).toEqual(["/c25.mp4"]);
+    // the export of the same timeline opens all fifty
+    expect(inputsOf(buildRenderCommand(fifty(), "/o.mp4").args)).toHaveLength(50);
+  });
+
+  it("at a cut opens both sides of it and nothing else", () => {
+    expect(inputsOf(buildRenderCommand(fifty(), "/f.png", {}, { frame: 30 * 260 }).args)).toEqual([
+      "/c25.mp4",
+      "/c26.mp4",
+    ]);
+  });
+
+  it("starts decoding a few seconds before the frame, nine minutes in", () => {
+    const tenMinutes = tl([
+      { media_ref: "/long.mp4", source_in: 0, source_out: 600, timeline_in: 0, timeline_out: 600 },
+    ]);
+    const seek = seekOf(buildRenderCommand(tenMinutes, "/f.png", {}, { frame: 30 * 540 }).args, "/long.mp4");
+    // two seconds early on purpose, so a gap in a screen recording is filled like the export fills it
+    expect(seek).toBeGreaterThan(537);
+    expect(seek).toBeLessThanOrEqual(540);
+    // the same clip in an export still starts at its source_in
+    expect(seekOf(buildRenderCommand(tenMinutes, "/o.mp4").args, "/long.mp4")).toBe(0);
+  });
+
+  it("writes one frame and no sound, and a still's loop is cut to the window", () => {
+    const plan = buildRenderCommand(
+      tl([
+        { media_ref: "/bg.png", timeline_in: 0, timeline_out: 600 },
+        { kind: "audio", media_ref: "/m.wav", source_in: 0, source_out: 600, timeline_in: 0, timeline_out: 600 },
+      ]),
+      "/f.png",
+      {},
+      { frame: 30 * 590 },
+    );
+    expect(plan.args.slice(-4)).toEqual(["-frames:v", "1", "-an", "/f.png"]);
+    expect(inputsOf(plan.args)).toEqual(["/bg.png"]); // the music is never opened
+    const loop = Number(plan.args[plan.args.indexOf("/bg.png") - 2]);
+    expect(loop).toBeLessThan(11); // ~10 s of a 600 s still, not all of it
+  });
+
+  it("never moves the progress bar of an export that is running", async () => {
+    const job = useExportJob.getState();
+    job.begin(null);
+    job.update({ phase: "rendering", fraction: 0.5 });
+    const ctx: ClientToolContext = {
+      store: new ProjectStoreAccess("C:/proj", new MemFs()),
+      runner: {
+        run: async (_p, _a, _s, _cwd, onOutput) => {
+          onOutput?.("frame=1\nout_time_us=2900000\nprogress=end\n");
+          return { code: 0, stdout: "", stderr: "" };
+        },
+      },
+    };
+    const clip = [{ media_ref: "/v.mp4", source_in: 0, source_out: 3, timeline_in: 0, timeline_out: 3 }];
+    await runRenderPlan(ctx, buildRenderCommand(tl(clip), "/f.png", {}, { frame: 10 }));
+    expect(useExportJob.getState().fraction).toBe(0.5);
+    // control: the same report from an export render does move it
+    await runRenderPlan(ctx, buildRenderCommand(tl(clip), "/o.mp4"));
+    expect(useExportJob.getState().fraction).not.toBe(0.5);
+    job.reset();
   });
 });
 

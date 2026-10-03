@@ -108,7 +108,11 @@ export async function libRef(
 
 /** Resolve a bare sidecar name to the bundled binary, as the app's Tauri shell does. Without this
  *  the harness only ever finds tools that happen to be on PATH — ffmpeg usually is, whisper-cli
- *  never is, so the transcription path reported ENOENT and looked like a product failure. */
+ *  never is, so the transcription path reported ENOENT and looked like a product failure.
+ *
+ *  The app ships `artdaddy-<program>` (tauri.conf.json `externalBin`). The unprefixed names in
+ *  `src-tauri/binaries` are older builds left from before the rename, so they are only a fallback:
+ *  preferring them meant the lane tested an ffmpeg two months older than the one users run. */
 function sidecar(program: string): string {
   const triple =
     process.platform === "win32"
@@ -117,8 +121,11 @@ function sidecar(program: string): string {
         ? "aarch64-apple-darwin"
         : "x86_64-unknown-linux-gnu";
   const ext = process.platform === "win32" ? ".exe" : "";
-  const p = path.resolve(process.cwd(), "src-tauri/binaries", `${program}-${triple}${ext}`);
-  return existsSync(p) ? p : program;
+  for (const name of [`artdaddy-${program}`, program]) {
+    const p = path.resolve(process.cwd(), "src-tauri/binaries", `${name}-${triple}${ext}`);
+    if (existsSync(p)) return p;
+  }
+  return program;
 }
 
 export const nodeRunner: CommandRunner = {
