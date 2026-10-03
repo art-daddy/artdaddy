@@ -38,6 +38,11 @@ type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
 const FPS = 30;
 const GOP = 120;
+/** Wall-clock CEILINGS. The tight guarantee is the work (frames ffmpeg decodes), which no other
+ *  load can change; time is asserted only as a ceiling far below what the old paths cost (minutes)
+ *  that still holds when the pre-push hook runs every e2e file at once. A 1.5x end-vs-start TIME
+ *  ratio here failed that run on a correct build (one look took 3.2 s, another 0.8 s). */
+const LOOK_CEILING_MS = 30_000;
 // One level under the OS temp dir, so the data root (two levels up) is where the app's own e2e
 // runs keep the whisper model.
 const proj = joinPath(os.tmpdir(), `artdaddy-inspect-media-${Date.now()}`);
@@ -66,8 +71,6 @@ async function grey(file: string, w: number, h: number): Promise<Uint8Array> {
   return new Uint8Array(await fsp.readFile(out)).subarray(0, w * h);
 }
 
-const median = (xs: number[]): number => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)];
-
 describe("frames cost a seek each, wherever they are (UJ-012)", () => {
   let ref = "";
   beforeAll(async () => {
@@ -88,10 +91,10 @@ describe("frames cost a seek each, wherever they are (UJ-012)", () => {
     }
     expect(typeof r.sharpness).toBe("number");
     console.log(`[inspect_media] 6 frames over 14 min: ${Math.round(ms)} ms`); // eslint-disable-line no-console
-    expect(ms).toBeLessThan(10_000);
+    expect(ms).toBeLessThan(LOOK_CEILING_MS);
   });
 
-  it("decodes at most a GOP per frame, and frames at the end cost what frames at the start do", async () => {
+  it("decodes at most a GOP per frame, at the end of the file as at its start", async () => {
     const decoded: number[] = [];
     const r = (await inspectMediaTool(
       { media_ref: ref, start_seconds: 123.4, end_seconds: 14 * 60 - 3 },
@@ -102,21 +105,26 @@ describe("frames cost a seek each, wherever they are (UJ-012)", () => {
     expect(decoded).toHaveLength(6);
     for (const n of decoded) expect(n).toBeLessThanOrEqual(GOP + 30);
 
-    const time = async (start: number): Promise<number> => {
+    // The same look at the first and the last 6 s of the file: the work is the seek's, not the
+    // position's. The old way decoded everything before the frame.
+    const look = async (start: number): Promise<{ frames: number[]; ms: number }> => {
       await fsp.rm(path.join(proj, "internals", "cache", "inspect"), { recursive: true, force: true });
+      const frames: number[] = [];
       const t0 = performance.now();
-      const x = (await inspectMediaTool({ media_ref: ref, start_seconds: start, end_seconds: start + 6 }, ctx)) as Any;
+      const x = (await inspectMediaTool(
+        { media_ref: ref, start_seconds: start, end_seconds: start + 6 },
+        { ...ctx, runner: decodeCountingRunner(frames) },
+      )) as Any;
       expect(x.frames_attached).toBe(6);
-      return performance.now() - t0;
+      return { frames, ms: performance.now() - t0 };
     };
-    const atStart: number[] = [];
-    const atEnd: number[] = [];
-    for (let i = 0; i < 3; i++) {
-      atStart.push(await time(0));
-      atEnd.push(await time(14 * 60 - 6));
-    }
-    console.log(`[inspect_media] start ${atStart.map(Math.round)} ms, end ${atEnd.map(Math.round)} ms`); // eslint-disable-line no-console
-    expect(median(atEnd)).toBeLessThanOrEqual(1.5 * median(atStart));
+    const atStart = await look(0);
+    const atEnd = await look(14 * 60 - 6);
+    console.log(`[inspect_media] start ${atStart.frames} (${Math.round(atStart.ms)} ms), end ${atEnd.frames} (${Math.round(atEnd.ms)} ms)`); // eslint-disable-line no-console
+    for (const n of [...atStart.frames, ...atEnd.frames]) expect(n).toBeLessThanOrEqual(GOP + 30);
+    const total = (a: number[]): number => a.reduce((s, n) => s + n, 0);
+    expect(total(atEnd.frames)).toBeLessThanOrEqual(total(atStart.frames) + 6 * GOP);
+    expect(atEnd.ms).toBeLessThan(LOOK_CEILING_MS);
   });
 });
 
@@ -237,19 +245,27 @@ describe("overview: one storyboard of the span's scenes", () => {
 
   it("shows every scene of a 14-minute 1080p file exactly once, in a few seconds", async () => {
     const ref = await libRef(ctx, await scenes(), "video");
+    const decoded: number[] = [];
     const t0 = performance.now();
-    const r = (await inspectMediaTool({ media_ref: ref, overview: true }, ctx)) as Any;
+    const r = (await inspectMediaTool(
+      { media_ref: ref, overview: true },
+      { ...ctx, runner: decodeCountingRunner(decoded) },
+    )) as Any;
     const ms = performance.now() - t0;
     expect(r.ok, JSON.stringify(r).slice(0, 400)).toBe(true);
     const times = r.overview.tile_times as number[];
-    console.log(`[inspect_media] overview of 14 min: ${Math.round(ms)} ms, ${times.length} tiles`); // eslint-disable-line no-console
+    const total = decoded.reduce((s, n) => s + n, 0);
+    console.log(`[inspect_media] overview of 14 min: ${Math.round(ms)} ms, ${times.length} tiles, ${total} frames decoded in ${decoded.length} processes`); // eslint-disable-line no-console
     expect(times).toHaveLength(28);
     expect(new Set(times.map((t) => Math.floor(t / 30))).size).toBe(28); // one tile per scene
     for (let i = 1; i < times.length; i++) expect(times[i]).toBeGreaterThan(times[i - 1]);
     const sheet = await jpegSize((r._attachments as Array<{ path: string }>)[0].path);
     expect(sheet).toMatchObject({ jpeg: true, w: 6 * 160, h: 5 * 90 }); // 28 tiles: 6 columns, 5 rows
     expect(r.frames).toBeUndefined();
-    expect(ms).toBeLessThan(20_000);
+    // The work: a keyframe per candidate, not the file (25,200 frames) — a pass over the whole file
+    // took 33.8 s on the 80-minute recording, the seeks ~3-4 s.
+    expect(total).toBeLessThan((14 * 60 * FPS) / 20);
+    expect(ms).toBeLessThan(LOOK_CEILING_MS);
   });
 
   it("keeps a portrait source's shape", async () => {
@@ -326,7 +342,9 @@ describe("transcript: never waited on when long", () => {
       expect(queued).toHaveLength(1);
       expect(queued[0][0].replace(/\\/g, "/")).toBe(file.replace(/\\/g, "/"));
       expect(r.loudness.integrated_lufs).not.toBeNull(); // the sound is still measured
-      expect(ms).toBeLessThan(15_000);
+      // Never waited on: whisper did not run (above), so the time is the loudness pass's. 12
+      // minutes inline would take minutes; the ceiling is far under that and survives a busy run.
+      expect(ms).toBeLessThan(LOOK_CEILING_MS);
     } finally {
       unregister();
     }

@@ -41,6 +41,11 @@ const FPS = 30;
 const GOP = 120; // a keyframe every 4 s, as OBS and most phones write
 const LONG_S = 14 * 60;
 const TOTAL = LONG_S * FPS;
+/** Wall-clock CEILING. The tight guarantee is the work (frames ffmpeg decodes), which no other load
+ *  can change; time is asserted only as a ceiling far below what the old path cost (it rendered the
+ *  timeline up to the frame: 241 s in production) that still holds when the pre-push hook runs every
+ *  e2e file at once. A 1.5x end-vs-start TIME ratio here failed that run on a correct build. */
+const LOOK_CEILING_MS = 30_000;
 
 const root = path.join(os.tmpdir(), `artdaddy-inspect-tl-${Date.now()}`);
 const proj = joinPath(root, "long");
@@ -50,8 +55,6 @@ const ctx: ClientToolContext = { store: new ProjectStoreAccess(proj, nodeFs), ru
 async function clearFrameCache(dir: string): Promise<void> {
   await fsp.rm(path.join(dir, "internals", "cache", "inspect"), { recursive: true, force: true });
 }
-
-const median = (xs: number[]): number => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)];
 
 /** Width, height and JPEG-ness of a frame file, from its bytes and ffprobe. */
 async function jpegFacts(file: string): Promise<{ jpeg: boolean; w: number; h: number }> {
@@ -123,26 +126,32 @@ describe("inspect_timeline costs the frames it shows, wherever they are (UJ-012)
       expect(Math.max(f.w, f.h)).toBe(768);
     }
     console.log(`[inspect_timeline] 6 frames over 14 min: ${Math.round(ms)} ms`); // eslint-disable-line no-console
-    expect(ms).toBeLessThan(10_000);
+    expect(ms).toBeLessThan(LOOK_CEILING_MS);
   });
 
-  it("frames at the end take no longer than frames at the start (median of 3)", async () => {
-    const time = async (start: number): Promise<number> => {
+  it("a look at the end does the work a look at the start does", async () => {
+    const look = async (start: number): Promise<{ frames: number[]; ms: number }> => {
       await clearFrameCache(proj);
+      const frames: number[] = [];
       const t0 = performance.now();
-      const r = (await inspectTimelineTool({ start_frame: start, end_frame: start + 180 }, ctx)) as Any;
-      const ms = performance.now() - t0;
+      const r = (await inspectTimelineTool(
+        { start_frame: start, end_frame: start + 180 },
+        { ...ctx, runner: decodeCountingRunner(frames) },
+      )) as Any;
       expect(r.frames_attached).toBe(6);
-      return ms;
+      return { frames, ms: performance.now() - t0 };
     };
-    const atStart: number[] = [];
-    const atEnd: number[] = [];
-    for (let i = 0; i < 3; i++) {
-      atStart.push(await time(0));
-      atEnd.push(await time(TOTAL - 180));
-    }
-    console.log(`[inspect_timeline] start ${atStart.map(Math.round)} ms, end ${atEnd.map(Math.round)} ms`); // eslint-disable-line no-console
-    expect(median(atEnd)).toBeLessThanOrEqual(1.5 * median(atStart));
+    const atStart = await look(0);
+    const atEnd = await look(TOTAL - 180);
+    console.log(`[inspect_timeline] start ${atStart.frames} (${Math.round(atStart.ms)} ms), end ${atEnd.frames} (${Math.round(atEnd.ms)} ms)`); // eslint-disable-line no-console
+    expect(atStart.frames).toHaveLength(6);
+    expect(atEnd.frames).toHaveLength(6);
+    // Each frame decodes a few seconds of source around itself, wherever it is; the old path
+    // decoded everything before it (~25,000 frames for the last one).
+    for (const n of [...atStart.frames, ...atEnd.frames]) expect(n).toBeLessThanOrEqual(GOP + 2 * FPS + 60);
+    const total = (a: number[]): number => a.reduce((s, n) => s + n, 0);
+    expect(total(atEnd.frames)).toBeLessThanOrEqual(total(atStart.frames) + 6 * GOP);
+    expect(atEnd.ms).toBeLessThan(LOOK_CEILING_MS);
   });
 
   it("ffmpeg decodes a few seconds of source per frame, never the timeline up to it", async () => {
