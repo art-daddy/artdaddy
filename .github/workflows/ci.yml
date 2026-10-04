@@ -8,7 +8,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # qa/**: throwaway branches that run this whole workflow before anything reaches main
+    # (deleted after each run). main itself is only ever pushed by its owner.
+    branches: [main, "qa/**"]
   pull_request:
 
 concurrency:
