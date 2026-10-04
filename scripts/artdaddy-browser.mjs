@@ -20,6 +20,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ddgBlocked } from "./ddgBlock.mjs";
+import { isWebUrl } from "./webUrl.mjs";
 
 // Point Playwright at the bundled chromium headless-shell (a resource next to
 // this script) unless the host already set a browsers path. Must be set BEFORE
@@ -276,6 +277,14 @@ async function main() {
   const handler = handlers[cmd];
   if (!handler) {
     print({ ok: false, error: `unknown command: ${cmd}` });
+    process.exit(2);
+  }
+  // `page` and `shot` navigate to a URL the agent typed; Chromium would render file:// too.
+  if ((cmd === "page" || cmd === "shot") && !isWebUrl(opts.url)) {
+    print({
+      ok: false,
+      error: `only http(s) pages can be opened, not ${String(opts.url ?? "").slice(0, 200)}`,
+    });
     process.exit(2);
   }
   try {

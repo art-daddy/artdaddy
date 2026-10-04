@@ -45,6 +45,7 @@ class MockFs implements FsLike {
 }
 
 const DIR = "C:/proj";
+const U = "https://example.com/u";
 const PROBE_JSON = JSON.stringify({
   format: { format_name: "mp4", duration: "12.5", size: "1048576" },
   streams: [
@@ -172,8 +173,8 @@ describe("downloadVideoTool", () => {
     expect(((await downloadVideoTool({}, null)) as Any).ok).toBe(false);
     const ctx = ctxWith(runnerOf(() => ({ code: 0, stdout: "", stderr: "" })));
     expect(((await downloadVideoTool({ output_name: "o.mp4" }, ctx)) as Any).ok).toBe(false);
-    expect(((await downloadVideoTool({ url: "u" }, ctx)) as Any).ok).toBe(false);
-    expect(((await downloadVideoTool({ url: "u", output_name: "../e" }, ctx)) as Any).ok).toBe(
+    expect(((await downloadVideoTool({ url: U }, ctx)) as Any).ok).toBe(false);
+    expect(((await downloadVideoTool({ url: U, output_name: "../e" }, ctx)) as Any).ok).toBe(
       false,
     );
   });
@@ -192,7 +193,7 @@ describe("downloadVideoTool", () => {
       }),
     };
     const r = (await downloadVideoTool(
-      { url: "u", output_name: "o.mp4" },
+      { url: U, output_name: "o.mp4" },
       ctxWith(runner, fs),
     )) as Any;
     expect(r.ok).toBe(true);
@@ -220,7 +221,7 @@ describe("downloadVideoTool", () => {
       }),
     };
     const r = (await downloadVideoTool(
-      { url: "u", output_name: "o.mp4", start_s: 5, end_s: 10 },
+      { url: U, output_name: "o.mp4", start_s: 5, end_s: 10 },
       ctxWith(runner, fs),
     )) as Any;
     expect(r.ok).toBe(true);
@@ -242,7 +243,7 @@ describe("downloadVideoTool", () => {
       }),
     };
     const r = (await downloadVideoTool(
-      { url: "u", output_name: "o.mp4", start_s: 5 },
+      { url: U, output_name: "o.mp4", start_s: 5 },
       ctxWith(runner, fs),
     )) as Any;
     expect(r.ok).toBe(true);
@@ -264,7 +265,7 @@ describe("downloadVideoTool", () => {
       }),
     };
     const r = (await downloadVideoTool(
-      { url: "u", output_name: "o.mp4", start_s: 5, end_s: 10 },
+      { url: U, output_name: "o.mp4", start_s: 5, end_s: 10 },
       ctxWith(runner, fs),
     )) as Any;
     expect(r.ok).toBe(false);
@@ -272,7 +273,7 @@ describe("downloadVideoTool", () => {
   });
   it("surfaces a yt-dlp failure", async () => {
     const r = (await downloadVideoTool(
-      { url: "u", output_name: "o.mp4" },
+      { url: U, output_name: "o.mp4" },
       ctxWith(runnerOf(() => ({ code: 1, stdout: "", stderr: "gone" }))),
     )) as Any;
     expect(r.ok).toBe(false);
@@ -295,7 +296,7 @@ describe("downloadVideoTool", () => {
       }),
     };
     const r = (await downloadVideoTool(
-      { url: "u", output_name: "o.mp4", with_audio: true },
+      { url: U, output_name: "o.mp4", with_audio: true },
       ctxWith(runner, fs),
     )) as Any;
     expect(r.ok).toBe(true);
@@ -309,7 +310,7 @@ describe("downloadVideoTool", () => {
 
 describe("videoGetMetadataTool", () => {
   it("errors without a context or url", async () => {
-    expect(((await videoGetMetadataTool({ url: "u" }, null)) as Any).ok).toBe(false);
+    expect(((await videoGetMetadataTool({ url: U }, null)) as Any).ok).toBe(false);
     expect(
       (
         (await videoGetMetadataTool(
@@ -322,22 +323,22 @@ describe("videoGetMetadataTool", () => {
   it("fetches, curates, then serves from cache", async () => {
     const runner = runnerOf(() => ({ code: 0, stdout: INFO_JSON, stderr: "" }));
     const ctx = ctxWith(runner);
-    const a = (await videoGetMetadataTool({ url: "u1" }, ctx)) as Any;
+    const a = (await videoGetMetadataTool({ url: `${U}1` }, ctx)) as Any;
     expect(a.ok).toBe(true);
     expect(a.cached).toBe(false);
     expect(a.metadata.title).toBe("Test Video");
-    const b = (await videoGetMetadataTool({ url: "u1" }, ctx)) as Any;
+    const b = (await videoGetMetadataTool({ url: `${U}1` }, ctx)) as Any;
     expect(b.cached).toBe(true);
     expect(runner.run).toHaveBeenCalledTimes(1);
   });
   it("surfaces failures and bad json", async () => {
     const fail = (await videoGetMetadataTool(
-      { url: "u2" },
+      { url: `${U}2` },
       ctxWith(runnerOf(() => ({ code: 1, stdout: "", stderr: "private" }))),
     )) as Any;
     expect(fail.ok).toBe(false);
     const bad = (await videoGetMetadataTool(
-      { url: "u3" },
+      { url: `${U}3` },
       ctxWith(runnerOf(() => ({ code: 0, stdout: "{not json", stderr: "" }))),
     )) as Any;
     expect(bad.ok).toBe(false);

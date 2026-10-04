@@ -1,6 +1,6 @@
 {
   "$schema_note": "Generated from the live tool registry (v4/tools/catalog.py) - do not hand-edit; refresh with `npm run codegen`.",
-  "version": "2.7.0",
+  "version": "2.7.1",
   "generated_from": "src/akaru/turn/tools/definitions.py::ALL_TOOLS",
   "count": 55,
   "tools": [
@@ -1648,13 +1648,13 @@
     {
       "name": "get_page_image",
       "expensive": true,
-      "description": "Return the full-page screenshot of any webpage given its url as an image artifact. Capture only — does not analyze or locate anything in the image.\n\nUse `crop_image` to crop it to a bbox-region. Reach for it any time you need pixels of a web page (text-only HTML extraction uses `get_page` instead). The result is cached per (URL, viewport); `viewport` picks the SITE layout to capture, and the captured PNG is retina-resolution.",
+      "description": "Return the full-page screenshot of an http(s) web page as an image artifact. Capture only — does not analyze or locate anything in the image. Local files and other schemes (file:, data:, about:) are refused: bring a local image in with import_media instead.\n\nUse `crop_image` to crop it to a bbox-region. Reach for it any time you need pixels of a web page. The result is cached per (URL, viewport); `viewport` picks the SITE layout to capture, and the captured PNG is retina-resolution.",
       "parameters": {
         "type": "object",
         "properties": {
           "url": {
             "type": "string",
-            "description": "Page URL to screenshot."
+            "description": "The http(s) page URL to screenshot."
           },
           "viewport": {
             "type": "string",
@@ -2378,7 +2378,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Input files (library ids/filenames or paths), in placeholder order: inputs[0]->{in0}, inputs[1]->{in1}, ..."
+            "description": "Input media as library refs (media ids or filenames), never system paths — import_media a local file first. In placeholder order: inputs[0]->{in0}, inputs[1]->{in1}, ..."
           },
           "output_name": {
             "type": "string",

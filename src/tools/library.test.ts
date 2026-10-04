@@ -815,6 +815,6 @@ describe("resolve", () => {
   it("errors when nothing matches the given id_or_path", async () => {
     const r = await runLib(ctxWith(new MockFs()), { action: "resolve", id_or_path: "nope.mp4" });
     expect(r.ok).toBe(false);
-    expect(String(r.error)).toContain("nothing matches");
+    expect(String(r.error)).toContain("nothing in this project matches");
   });
 });

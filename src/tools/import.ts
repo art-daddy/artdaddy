@@ -6,6 +6,7 @@
 // copied, deletion/GC never follow it (NLE-style referenced media). The id is
 // `media_<sha256(bytes)[:12]>`, matching the backend library so the desktop client
 // + server agree on ids (byte-identical media dedups to one entry/file).
+import { isWebUrl } from "../../scripts/webUrl.mjs";
 import type { ClientToolContext } from "./context";
 import type { ClientToolRegistry } from "./registry";
 import { INTERNAL_DIR, joinPath, type DirEntry, type ProjectStoreAccess } from "./store";
@@ -799,6 +800,11 @@ export async function importMediaTool(args: Args, ctx: ClientToolContext | null)
   let filename: string;
   try {
     if (url) {
+      if (!isWebUrl(url))
+        return {
+          ok: false,
+          error: `source.url must be an http(s) link, not ${url.slice(0, 120)}. A local file comes in with source.path.`,
+        };
       const resp = await fetch(url);
       if (!resp.ok) return { ok: false, error: `download failed: HTTP ${resp.status}` };
       const declared = Number(resp.headers.get("content-length") ?? 0);

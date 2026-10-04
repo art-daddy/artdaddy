@@ -4,6 +4,7 @@
 // invoked via the CommandRunner like ffmpeg/yt-dlp. The
 // sidecar prints a small JSON result on stdout; pages/screenshots land in the
 // shared project store (screenshots ride the _attachments transport).
+import { isWebUrl } from "../../scripts/webUrl.mjs";
 import { type Attachment, imageAttachment } from "./attachments";
 import { stderrExcerpt } from "./command";
 import { encodeImageForGemini } from "./geminiEncode";
@@ -197,6 +198,11 @@ export async function getPageImageTool(args: Args, ctx: ClientToolContext | null
   if (!ctx) return NOT_READY;
   const url = typeof args.url === "string" ? args.url.trim() : "";
   if (!url) return { ok: false, error: "url is required" };
+  if (!isWebUrl(url))
+    return {
+      ok: false,
+      error: `url must be an http(s) web page, not ${url.slice(0, 120)}. A local image comes in with import_media.`,
+    };
   const viewport = resolveViewport(args.viewport);
   const force = args.force_refresh === true;
   const out = await ctx.store.prepareArtifact(

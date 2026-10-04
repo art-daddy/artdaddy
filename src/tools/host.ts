@@ -5,6 +5,7 @@
 // even if the user navigates to B mid-turn (fixes the stale-runner class, F2).
 import { ensureTimeline } from "../timeline/engine";
 import { createToolRegistry } from ".";
+import { agentToolContext } from "./agentStore";
 import type { ClientToolContext } from "./context";
 import type { ClientToolRegistry } from "./registry";
 import type { ProjectStoreAccess } from "./store";
@@ -64,22 +65,13 @@ class ProjectToolHost implements ToolHost {
     this.registry = createToolRegistry(() => this.viewCtx());
     this.ready = buildContext(projectId, this.holder);
   }
-  // The context tools see: the base ctx plus the turn's abort signal and a runner
-  // that injects it (so a running sidecar is killed on Stop) — without mutating
-  // the shared base ctx or touching any tool call site.
+  // The context tools see: the agent's view of the store (refs reach only media the project
+  // knows) plus the turn's abort signal and a runner that injects it (so a running sidecar is
+  // killed on Stop) — without mutating the shared base ctx or touching any tool call site.
   private viewCtx(): ClientToolContext | null {
     const base = this.holder.ctx;
-    const sig = this.currentSignal;
-    if (!base || !sig) return base;
-    return {
-      ...base,
-      signal: sig,
-      origin: this.currentOrigin,
-      // Forward EVERY argument but the signal, which this wrapper exists to inject. Dropping the
-      // trailing ones silently disabled the export progress stream: the render worked, the bar
-      // never moved, and nothing failed.
-      runner: { run: (p, a, _s, cwd, onStdout) => base.runner.run(p, a, sig, cwd, onStdout) },
-    };
+    if (!base) return null;
+    return agentToolContext(base, this.currentSignal, this.currentOrigin);
   }
   has(name: string): boolean {
     return this.registry.has(name);

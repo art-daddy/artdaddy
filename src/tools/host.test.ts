@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ProjectJobScope } from "../project/ProjectJobScope";
 import { setOpenDocumentResolver } from "../project/openDocuments";
 import { asProjectId } from "../project/types";
+import { ProjectStoreAccess, type FsLike } from "./store";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -144,5 +145,33 @@ describe("ProjectToolHost.run effect routing (Step 4)", () => {
     const host = openToolHost("p1");
     await host.ready;
     expect(await host.run("download_video", {})).toEqual({ ok: true });
+  });
+});
+
+describe("the store every agent tool call sees", () => {
+  // In-app turns pass a Stop signal; MCP calls arrive without one. Both go through host.run, and
+  // both must get the agent's view, where a path the project does not know resolves to nothing.
+  it("limits refs to what the project knows, with or without a turn signal", async () => {
+    const secret = "C:/Users/u/Documents/secret.mp4";
+    const disk: FsLike = {
+      exists: async (p) => p.toLowerCase() === secret.toLowerCase(),
+      readTextFile: async () => {
+        throw new Error("ENOENT");
+      },
+      writeTextFile: async () => undefined,
+      mkdir: async () => undefined,
+    };
+    const store = new ProjectStoreAccess("C:/root/p9", disk);
+    makeTauriContext.mockResolvedValueOnce({ store: store as never, runner: {} as never });
+    const host = openToolHost("p9");
+    await host.ready;
+    expect(await store.resolveRef(secret)).toBe(secret); // the trusted resolver would hand it over
+
+    await host.run("library_op", {}); // the MCP shape: no signal
+    expect(await toolCtx.store.resolveRef(secret)).toBeNull();
+
+    await host.run("library_op", {}, new AbortController().signal); // an in-app turn
+    expect(await toolCtx.store.resolveRef(secret)).toBeNull();
+    expect(toolCtx.store.projectDir).toBe("C:/root/p9");
   });
 });

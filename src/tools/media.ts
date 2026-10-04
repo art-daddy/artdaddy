@@ -303,7 +303,12 @@ export async function clipVideoTool(
   }
 
   const src = await ctx.store.resolveRef(inputRef);
-  if (!src) return unresolvedRefError(ctx.store, inputRef, `input not found: ${inputRef}`);
+  if (!src)
+    return unresolvedRefError(
+      ctx.store,
+      inputRef,
+      `input not found: ${inputRef}. Pass a library id or filename (import_media a local file first).`,
+    );
 
   const outPath = await ctx.store.prepareArtifact(`cuts/${outputName}`);
   const cmd = ["-y", "-ss", startS.toFixed(3), "-to", endS.toFixed(3), "-i", src];
@@ -342,7 +347,12 @@ export async function cropImageTool(
   if (!ref) return { ok: false, error: "media_ref is required." };
 
   const src = await ctx.store.resolveRef(ref);
-  if (!src) return unresolvedRefError(ctx.store, ref, `image not found: ${ref}`);
+  if (!src)
+    return unresolvedRefError(
+      ctx.store,
+      ref,
+      `image not found: ${ref}. Pass a library id or filename (import_media a local file first).`,
+    );
 
   const bbox = (args.bbox ?? {}) as Record<string, unknown>;
   const bx = numOrNull(bbox.x) ?? 0;

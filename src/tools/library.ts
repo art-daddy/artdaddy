@@ -503,7 +503,11 @@ async function runLibraryOp(
           : { ok: false, error: `resolve: unknown library id ${ref}` };
       }
       const abs = await store.resolveRef(ref);
-      if (!abs) return { ok: false, error: `resolve: nothing matches ${ref}` };
+      if (!abs)
+        return {
+          ok: false,
+          error: `resolve: nothing in this project matches ${ref} (library ids, filenames and project-relative paths only)`,
+        };
       return { ok: true, path: store.toRef(abs) };
     }
 

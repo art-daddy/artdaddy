@@ -1,5 +1,6 @@
 // Client-side network tools (yt-dlp) — run on the desktop via the Tauri shell.
 // Ported from src/akaru/v4/tools/mechanical.py to match the server contracts.
+import { isWebUrl } from "../../scripts/webUrl.mjs";
 import { stderrExcerpt, type CommandResult, type CommandRunner } from "./command";
 import type { ClientToolContext } from "./context";
 import { registerLibraryClip } from "./import";
@@ -7,6 +8,11 @@ import { numOrNull, probePath } from "./media";
 import type { ClientToolRegistry } from "./registry";
 
 type Result = Record<string, unknown>;
+
+const notWebUrl = (url: string): Result => ({
+  ok: false,
+  error: `url must be an http(s) link, not ${url.slice(0, 120)}. A local file comes in with import_media.`,
+});
 
 const DESCRIPTION_MAX_CHARS = 2000;
 const HEATMAP_TOP_N = 10;
@@ -184,6 +190,7 @@ export async function downloadVideoTool(
   const url = String(args.url ?? "").trim();
   const outputName = String(args.output_name ?? "").trim();
   if (!url) return { ok: false, error: "url is required." };
+  if (!isWebUrl(url)) return notWebUrl(url);
   if (!outputName) return { ok: false, error: "output_name is required." };
   if (/[\\/]|\.\./.test(outputName)) {
     return { ok: false, error: `invalid output_name ${outputName} (simple filename only).` };
@@ -305,6 +312,7 @@ export async function videoGetMetadataTool(
   if (!ctx) return { ok: false, error: "client tool runtime not ready" };
   const url = String(args.url ?? "").trim();
   if (!url) return { ok: false, error: "url is required." };
+  if (!isWebUrl(url)) return notWebUrl(url);
 
   const cached = metadataCache.get(url);
   if (cached) return { ok: true, cached: true, metadata: cached };
