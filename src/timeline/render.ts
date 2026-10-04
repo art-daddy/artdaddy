@@ -87,6 +87,12 @@ function evenPx(n: number): number {
   return Math.max(2, Math.round(n / 2) * 2);
 }
 
+/** The largest value an animated pixel size reaches (eases never overshoot their keyframes). */
+function peak(size: Animatable | undefined, fallback: number): number {
+  if (size === undefined) return fallback;
+  return isNum(size) ? size : Math.max(...size.map((k) => k.v));
+}
+
 /** The canvas the render composites at, in pixels: the authored size made even. */
 export function canvasPx(timeline: Timeline): { w: number; h: number } {
   return {
@@ -744,29 +750,6 @@ function temporalPreroll(effects: unknown): number {
   return n;
 }
 
-/** A zooming clip (animated size) followed by any filter: ffmpeg sizes those filters on the clip's
- *  FIRST frame (rotate's `ow=iw` is evaluated once), so the export draws every later frame relative
- *  to the clip's start. A window that seeked in would size them on a later frame and draw a
- *  different picture, so such a clip is rendered from its first frame. Measured: zoom + rotate
- *  came out PSNR 16 dB from the export when seeked, identical when not. */
-function sizedOnFirstFrame(clip: Clip, pc: PlanClip, cw: number, ch: number): boolean {
-  const ta = transformAnims(clip, boxOf(clip, cw, ch, pc.media.fit), cw, ch);
-  const zooms =
-    (ta.sizeW !== undefined && !isNum(ta.sizeW)) || (ta.sizeH !== undefined && !isNum(ta.sizeH));
-  if (!zooms) return false;
-  const fade = (clip.fade ?? {}) as { in?: number; out?: number };
-  return (
-    pc.media.rotate !== undefined ||
-    pc.media.opacity !== undefined ||
-    pc.transition !== null ||
-    isNum(fade.in) ||
-    isNum(fade.out) ||
-    colorFilters(pc.media.color).length > 0 ||
-    effectFilters(clip.effects, clip.id, []).length > 0 ||
-    parseGlow(clip.glow ?? glowFromEffects(clip.effects)) !== null
-  );
-}
-
 /** Decompose a tempo ratio into ffmpeg atempo factors, each within [0.5, 2] (a
  *  single atempo only spans that range); chaining keeps a speed change
  *  PITCH-PRESERVING instead of resampling, which would chipmunk the audio. */
@@ -1032,7 +1015,7 @@ export function buildRenderCommand(
       const skip = Math.floor(
         (win.frame - temporalPreroll(clip.effects) - (tin - lead) * fps) * speed,
       );
-      if (skip > clones && !sizedOnFirstFrame(clip, pc, cw, ch)) {
+      if (skip > clones) {
         const step = seekStep(fps);
         const srcFrames = Math.floor((so - si) * fps + 1e-6);
         const m = Math.min(
@@ -1205,24 +1188,24 @@ export function buildRenderCommand(
     // aspect-preserved clip in its box. Box-size exprs here are in TIMELINE `t`
     // (offset=tin) to match the post-setpts overlay.
     let sizeAnim: { wBox: string; hBox: string } | null = null;
+    // The per-frame zoom, appended as the clip's LAST filter (UJ-007): grade, effects, glow and
+    // rotate size their state on the first frame they see, so they run at one size before it.
+    let zoom: string | null = null;
     if (wAnimated || hAnimated) {
       // Animated size (Ken Burns zoom): scale to the per-frame box PRESERVING
       // the source aspect — cover fills the box (crop overflow), contain fits
       // inside it — then the overlay re-centers the result. Mirrors the preview
-      // (scene.ts fitRects). `t` is clip-relative here (this stage runs BEFORE
-      // setpts) so the keyframe offset is 0; the overlay uses timeline `t`+tin. A frame window's
-      // seek starts this clock `m` frames late, so it is moved back by exactly that.
-      const preClock = r.shift ? -r.shift.m / fps : 0;
-      const wSc = r.sizeW !== undefined ? compileAnim(r.sizeW, "t", preClock) : String(w);
-      const hSc = r.sizeH !== undefined ? compileAnim(r.sizeH, "t", preClock) : String(h);
+      // (scene.ts fitRects). Everything before it runs at the box's LARGEST size,
+      // so the zoom only ever shrinks what was rendered and keeps the detail.
       const foar = fitAspect(fit);
       parts.push(
-        `scale=w='max(2,round((${wSc})/2)*2)':h='max(2,round((${hSc})/2)*2)':force_original_aspect_ratio=${foar}:force_divisible_by=2:eval=frame`,
+        `scale=w=${evenPx(peak(r.sizeW, w))}:h=${evenPx(peak(r.sizeH, h))}:force_original_aspect_ratio=${foar}:force_divisible_by=2`,
       );
       sizeAnim = {
         wBox: r.sizeW !== undefined ? compileAnim(r.sizeW, "t", r.tin) : String(w),
         hBox: r.sizeH !== undefined ? compileAnim(r.sizeH, "t", r.tin) : String(h),
       };
+      zoom = `scale=w='max(2,round((${sizeAnim.wBox})/2)*2)':h='max(2,round((${sizeAnim.hBox})/2)*2)':force_original_aspect_ratio=${foar}:force_divisible_by=2:eval=frame`;
     } else {
       switch (fit) {
         case "cover":
@@ -1351,6 +1334,7 @@ export function buildRenderCommand(
     if (fadeExpr !== null)
       // Visual fade: multiply the alpha plane by the fade envelope over [tin, tout].
       alpha.push(`geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*(${fadeExpr})'`);
+    if (zoom) alpha.push(zoom);
     // Glow (soft bloom) is spliced between the texture stage and the alpha stage:
     // brighten highlights, blur, screen-blend back, then apply rotate/opacity.
     const glow = parseGlow(r.glow);

@@ -755,6 +755,111 @@ describe("buildRenderCommand", () => {
     expect(plan.filterComplex).toContain("-overlay_w/2)");
   });
 
+  // UJ-007: the per-frame zoom resized every frame BEFORE the grade, effects, glow and rotate, which
+  // size their state on the frame they were configured with, and the export died (0xC0000005).
+  it("a size-animated clip changes size only in its LAST filter, after every look", () => {
+    const fx = (type: string) => ({ type });
+    const plan = buildRenderCommand(
+      tl([
+        {
+          media_ref: "/p.jpg",
+          timeline_in: 1,
+          timeline_out: 3,
+          fit: "cover",
+          transform: {
+            position: { x: 0.5, y: 0.5 },
+            scale: [
+              { t: 0, v: 1.6 },
+              { t: 2, v: 1.8 },
+            ],
+          },
+          rotate: 12,
+          opacity: [
+            { t: 0, v: 0.3 },
+            { t: 2, v: 1 },
+          ],
+          fade: { in: 0.2, out: 0.2 },
+          color: { contrast: 1.2 },
+          effects: [
+            "vignette",
+            "sharpen",
+            "denoise",
+            "clarity",
+            "blur",
+            "grain",
+            "motion",
+            "chroma",
+            "glow",
+          ].map(fx),
+        },
+      ]),
+      "/o.mp4",
+    );
+    const g = plan.filterComplex;
+    const perFrame = [...g.matchAll(/eval=frame/g)].map((m) => m.index!);
+    expect(perFrame).toHaveLength(1);
+    // Nothing but the clip's output label follows it: the overlay is the next consumer.
+    expect(g.slice(perFrame[0])).toMatch(/^eval=frame\[v0\];/);
+    const looks = ["eq=", "vignette", "unsharp", "hqdn3d", "gblur", "noise=", "tmix", "chromakey"];
+    for (const f of [...looks, "split=2[g0a]", "rotate=", "geq="]) {
+      expect(g.indexOf(f), f).toBeGreaterThan(-1);
+      expect(g.indexOf(f), `${f} runs before the size changes`).toBeLessThan(perFrame[0]);
+    }
+    // ...and they run at ONE size: a fixed scale comes first.
+    const first = g.split(";").find((c) => c.startsWith("[0:v]"))!;
+    expect(first).toMatch(/scale=w=\d+:h=\d+/);
+    expect(first.indexOf("scale=w=")).toBeLessThan(first.indexOf("eq="));
+  });
+
+  it("the looks run at the LARGEST size the zoom reaches, so the zoom only ever shrinks them", () => {
+    const g = buildRenderCommand(
+      tl([
+        {
+          media_ref: "/p.jpg",
+          timeline_in: 0,
+          timeline_out: 3,
+          transform: {
+            scale: [
+              { t: 0, v: 1.2 },
+              { t: 1, v: 1.9, ease: "ease-in-out" },
+              { t: 3, v: 1.4 },
+            ],
+          },
+          effects: [{ type: "sharpen" }],
+        },
+      ]),
+      "/o.mp4",
+    ).filterComplex;
+    // 1.9 x 1920x1080, neither the first keyframe nor the last.
+    expect(g).toContain("scale=w=3648:h=2052:");
+  });
+
+  it("the per-frame zoom keeps the timeline clock, so speed does not change when it happens", () => {
+    const at = (speed: number) =>
+      buildRenderCommand(
+        tl([
+          {
+            media_ref: "/a.mp4",
+            source_in: 0,
+            source_out: 2 * speed,
+            timeline_in: 1,
+            timeline_out: 3,
+            speed,
+            transform: {
+              scale: [
+                { t: 0, v: 1 },
+                { t: 2, v: 2 },
+              ],
+            },
+          },
+        ]),
+        "/o.mp4",
+      ).filterComplex;
+    const zoom = (g: string) => /scale=w='([^']*)'[^;]*eval=frame/.exec(g)?.[1];
+    expect(zoom(at(1))).toContain("(t-1.000000)");
+    expect(zoom(at(2))).toBe(zoom(at(1)));
+  });
+
   it("emits colour grade + effect filters (no longer deferred)", () => {
     const plan = buildRenderCommand(
       tl([

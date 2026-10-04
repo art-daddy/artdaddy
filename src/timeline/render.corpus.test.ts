@@ -71,6 +71,8 @@ describe("render corpus (Commit-1 byte-identical gate)", () => {
     expect(fc(t)).toMatchSnapshot();
   });
 
+  // Re-frozen once, for UJ-007: the size is fixed at the box's peak (2304x1296 here) for the whole
+  // chain and the per-frame zoom moved to the end, on the timeline clock. Nothing else moved.
   it("Ken-Burns size animation recentres the aspect-preserved clip in its box (cover)", () => {
     const t = timeline([
       vtrack("v", 0, [
@@ -232,6 +234,78 @@ describe("render corpus (Commit-2 transition exports)", () => {
   for (const kind of ["wipe-l", "wipe-r", "whip", "dip-to-black", "dip-to-white"]) {
     it(`${kind} renders a centred spatial/colour transition`, () => {
       expect(fc(pair(kind))).toMatchSnapshot();
+    });
+  }
+});
+
+// UJ-007 gate, frozen against the code BEFORE the fix: moving effects off the animated zoom must
+// not touch a clip whose size never animates.
+describe("render corpus (UJ-007: clips whose size does not animate)", () => {
+  const one = (clip: Any) =>
+    timeline([
+      vtrack("v", 0, [
+        {
+          media_ref: "/a.jpg",
+          source_in: 0,
+          source_out: 2,
+          timeline_in: 0,
+          timeline_out: 2,
+          ...clip,
+        },
+      ]),
+    ]);
+  const EFFECTS = [
+    { type: "blur", params: { radius: 6 } },
+    { type: "denoise", params: { strength: 5 } },
+    { type: "sharpen", params: { sharpness: 1.2 } },
+    { type: "grain", params: { grain: 20 } },
+    { type: "vignette", params: { vignette: 0.4 } },
+    { type: "motion", params: { frames: 4 } },
+    { type: "clarity", params: { clarity: 0.4, dehaze: 0.2 } },
+    { type: "chroma", params: { color: "#00FF00", similarity: 0.3, blend: 0.1 } },
+  ];
+  const CASES: Record<string, Any> = {
+    "every effect, cover, scaled": {
+      fit: "cover",
+      transform: { position: { x: 0.4, y: 0.6 }, scale: 1.6 },
+      effects: EFFECTS,
+    },
+    "every effect, contain": { fit: "contain", effects: EFFECTS },
+    "grade + glow + static rotate + crop + flip": {
+      color: { contrast: 1.3, saturation: 1.4, temperature: 5000 },
+      glow: { amount: 30 },
+      rotate: 12,
+      crop: { left: 0.1, top: 0.05, right: 0, bottom: 0.1 },
+      flip: { h: true, v: false },
+      transform: { scale: 1.2 },
+    },
+    "position-only animation keeps a fixed size": {
+      transform: {
+        position: {
+          x: [
+            { t: 0, v: 0.3 },
+            { t: 2, v: 0.7 },
+          ],
+          y: 0.5,
+        },
+        scale: 1.5,
+      },
+      effects: EFFECTS.slice(0, 5),
+    },
+    "speed + effects + opacity animation + fades": {
+      source_out: 4,
+      speed: 2,
+      effects: [EFFECTS[2], EFFECTS[4]],
+      opacity: [
+        { t: 0, v: 0.3 },
+        { t: 2, v: 1 },
+      ],
+      fade: { in: 0.3, out: 0.3 },
+    },
+  };
+  for (const [name, clip] of Object.entries(CASES)) {
+    it(name, () => {
+      expect(fc(one(clip))).toMatchSnapshot();
     });
   }
 });

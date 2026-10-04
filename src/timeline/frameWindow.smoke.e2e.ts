@@ -393,7 +393,9 @@ describe("a frame window is the export's frame at that instant", () => {
     await expectSameAsExport("blendop", tl, [10, 100, 239], { singleThread: true });
   });
 
-  it("a zooming clip that also rotates, deep in (rendered from its own first frame)", async () => {
+  // Windows used to render such a clip from its first frame: rotate's size came from it. Since
+  // UJ-007 everything before the zoom runs at the box's peak size, so a window seeks in like any other.
+  it("a zooming clip that also rotates, deep in", async () => {
     const spin = vclip(src.b, 0, 330, 30, {
       transform: {
         scale: [
