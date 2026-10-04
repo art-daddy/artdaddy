@@ -126,4 +126,8 @@ jobs:
       - name: cargo test (trash_path)
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml
       - name: tauri build
-        run: npx tauri build
+        # A build GATE, not a release: no updater signature is wanted, and without the private key
+        # (never given to a PR build) tauri wrote both installers and then exited 1 on
+        # "A public key has been found, but no private key" - the job was red on every run.
+        shell: bash
+        run: npx tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}'
