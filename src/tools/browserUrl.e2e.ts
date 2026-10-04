@@ -14,18 +14,12 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { nodeRunner } from "./__e2e";
 import { BROWSER_BIN } from "./sidecar";
+import { shippedSidecar } from "../test/sidecars";
 
-const arch = process.arch === "arm64" ? "aarch64" : "x86_64";
-const triple =
-  process.platform === "win32"
-    ? `${arch}-pc-windows-msvc.exe`
-    : process.platform === "darwin"
-      ? `${arch}-apple-darwin`
-      : `${arch}-unknown-linux-gnu`;
 const ROOT = path.resolve("src-tauri");
-const BIN = path.join(ROOT, "binaries", `${BROWSER_BIN}-${triple}`);
+const BIN = shippedSidecar(BROWSER_BIN);
 const SCRIPT = path.join(ROOT, "resources", `${BROWSER_BIN}.mjs`);
-const STAGED = existsSync(BIN) && existsSync(SCRIPT);
+const STAGED = BIN !== null && existsSync(SCRIPT);
 
 const dir = path.join(os.tmpdir(), `artdaddy-browser-url-${process.pid}`);
 let server: http.Server;
@@ -47,7 +41,7 @@ afterAll(async () => {
 
 const shot = (url: string, out: string) =>
   nodeRunner.run(
-    BIN,
+    BIN!,
     [SCRIPT, "shot", "--url", url, "--viewport", "800x600", "--dsf", "1", "--mobile", "0", "--out", out],
     undefined,
     ROOT,

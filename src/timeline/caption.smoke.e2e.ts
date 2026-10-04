@@ -3,7 +3,6 @@
 // the `ass`-on-transparent-layer regression passed every graph-string assertion while compositing
 // nothing. NOT part of the unit suite: `npx vitest run --config vitest.smoke.config.ts`.
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
 import { promises as fsp } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -12,23 +11,10 @@ import { afterAll, describe, expect, it } from "vitest";
 
 import type { Timeline } from "./model";
 import { buildRenderCommand } from "./render";
+import { shippedSidecar } from "../test/sidecars";
 
-// The bundled ffmpeg has libass (the PATH one may not); resolve the current platform's sidecar.
-function bundledFfmpeg(): string | null {
-  const dir = path.resolve(process.cwd(), "src-tauri/binaries");
-  const names =
-    process.platform === "win32"
-      ? ["ffmpeg-x86_64-pc-windows-msvc.exe"]
-      : process.platform === "darwin"
-        ? ["ffmpeg-aarch64-apple-darwin", "ffmpeg-x86_64-apple-darwin"]
-        : ["ffmpeg-x86_64-unknown-linux-gnu"];
-  for (const n of names) {
-    const p = path.join(dir, n);
-    if (existsSync(p)) return p;
-  }
-  return null;
-}
-const FF = bundledFfmpeg();
+// The shipped ffmpeg has libass (a PATH one may not).
+const FF = shippedSidecar("ffmpeg");
 const FONTS_SRC = path.resolve(process.cwd(), "src-tauri/resources/fonts");
 
 function run(

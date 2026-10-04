@@ -7,37 +7,18 @@
 // binary. Skips cleanly if the sidecars aren't staged yet (fresh clone, before
 // `npm run setup:sidecars`).
 //   npx vitest run --config vitest.smoke.config.ts src/tools/sidecar.e2e.ts
-import { execSync } from "node:child_process";
 import { promises as fsp } from "node:fs";
 import os from "node:os";
-import path from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { nodeFs, nodeRunner } from "./__e2e";
-import { packagedSidecarName } from "./sidecar";
+import { shippedSidecar, shippedSidecarPath } from "../test/sidecars";
 import { joinPath } from "./store";
 
-/** Host target-triple the way setup-sidecars.mjs stages them (rustc host, else a
- *  platform guess) — must match so we resolve the SAME file Tauri bundles. */
-function hostTriple(): string {
-  try {
-    const m = execSync("rustc -vV", { encoding: "utf8" }).match(/host:\s*(\S+)/);
-    if (m) return m[1];
-  } catch {
-    /* rustc missing -> platform guess below */
-  }
-  const arch = process.arch === "arm64" ? "aarch64" : "x86_64";
-  if (process.platform === "win32") return `${arch}-pc-windows-msvc`;
-  if (process.platform === "darwin") return `${arch}-apple-darwin`;
-  return `${arch}-unknown-linux-gnu`;
-}
-
-const EXT = process.platform === "win32" ? ".exe" : "";
-const BIN = path.join(process.cwd(), "src-tauri", "binaries");
-const triple = hostTriple();
-const ffmpegBin = path.join(BIN, `${packagedSidecarName("ffmpeg")}-${triple}${EXT}`);
-const ffprobeBin = path.join(BIN, `${packagedSidecarName("ffprobe")}-${triple}${EXT}`);
+// Under CI an unstaged sidecar throws here, so this file cannot pass by skipping its checks.
+const ffmpegBin = shippedSidecar("ffmpeg") ?? shippedSidecarPath("ffmpeg");
+const ffprobeBin = shippedSidecar("ffprobe") ?? shippedSidecarPath("ffprobe");
 const ROOT = joinPath(os.tmpdir(), `artdaddy-sidecar-${Date.now()}`);
 let STAGED = false;
 

@@ -20,6 +20,8 @@ import { renderTimelineTool } from "../timeline/render";
 import { ProjectDocument } from "../project/ProjectDocument";
 import { setOpenDocumentResolver } from "../project/openDocuments";
 import { asProjectId } from "../project/types";
+import { shippedSidecar } from "../test/sidecars";
+import { SIDECAR_BINS } from "./sidecar";
 
 type Rec = Record<string, unknown>;
 
@@ -111,22 +113,11 @@ export async function libRef(
  *  the harness only ever finds tools that happen to be on PATH — ffmpeg usually is, whisper-cli
  *  never is, so the transcription path reported ENOENT and looked like a product failure.
  *
- *  The app ships `artdaddy-<program>` (tauri.conf.json `externalBin`). The unprefixed names in
- *  `src-tauri/binaries` are older builds left from before the rename, so they are only a fallback:
- *  preferring them meant the lane tested an ffmpeg two months older than the one users run. */
+ *  Only the SHIPPED name counts (shippedSidecar); the unprefixed builds left in src-tauri/binaries
+ *  are older binaries. Outside CI an unstaged sidecar falls back to PATH; under CI it fails. */
 function sidecar(program: string): string {
-  const triple =
-    process.platform === "win32"
-      ? "x86_64-pc-windows-msvc"
-      : process.platform === "darwin"
-        ? "aarch64-apple-darwin"
-        : "x86_64-unknown-linux-gnu";
-  const ext = process.platform === "win32" ? ".exe" : "";
-  for (const name of [`artdaddy-${program}`, program]) {
-    const p = path.resolve(process.cwd(), "src-tauri/binaries", `${name}-${triple}${ext}`);
-    if (existsSync(p)) return p;
-  }
-  return program;
+  if (!SIDECAR_BINS.has(program)) return program;
+  return shippedSidecar(program) ?? program;
 }
 
 export const nodeRunner: CommandRunner = {

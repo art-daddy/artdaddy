@@ -11,22 +11,9 @@ import path from "node:path";
 
 import { afterAll, describe, expect, it } from "vitest";
 
-function bundled(tool: "ffmpeg"): string | null {
-  const dir = path.resolve(process.cwd(), "src-tauri/binaries");
-  const triples =
-    process.platform === "win32"
-      ? ["x86_64-pc-windows-msvc.exe"]
-      : process.platform === "darwin"
-        ? ["aarch64-apple-darwin", "x86_64-apple-darwin"]
-        : ["x86_64-unknown-linux-gnu"];
-  for (const t of triples) {
-    const p = path.join(dir, `${tool}-${t}`);
-    if (existsSync(p)) return p;
-  }
-  return null;
-}
+import { shippedSidecar } from "../test/sidecars";
 
-const FF = bundled("ffmpeg");
+const FF = shippedSidecar("ffmpeg");
 
 function run(args: string[]): Promise<{ code: number; stderr: string; stdout: string }> {
   return new Promise((resolve) => {

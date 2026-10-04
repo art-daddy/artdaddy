@@ -14,7 +14,7 @@
 //
 // NOT part of the unit suite: `npx vitest run --config vitest.smoke.config.ts`.
 import { spawn } from "node:child_process";
-import { existsSync, promises as fsp } from "node:fs";
+import { promises as fsp } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -22,23 +22,10 @@ import { afterAll, describe, expect, it } from "vitest";
 
 import type { Timeline } from "./model";
 import { buildRenderCommand } from "./render";
+import { shippedSidecar } from "../test/sidecars";
 
-function bundled(tool: "ffmpeg" | "ffprobe"): string | null {
-  const dir = path.resolve(process.cwd(), "src-tauri/binaries");
-  const triples =
-    process.platform === "win32"
-      ? ["x86_64-pc-windows-msvc.exe"]
-      : process.platform === "darwin"
-        ? ["aarch64-apple-darwin", "x86_64-apple-darwin"]
-        : ["x86_64-unknown-linux-gnu"];
-  for (const t of triples) {
-    const p = path.join(dir, `${tool}-${t}`);
-    if (existsSync(p)) return p;
-  }
-  return null;
-}
-const FF = bundled("ffmpeg");
-const FP = bundled("ffprobe");
+const FF = shippedSidecar("ffmpeg");
+const FP = shippedSidecar("ffprobe");
 
 function run(
   program: string,

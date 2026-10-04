@@ -16,20 +16,10 @@ import { afterAll, describe, expect, it } from "vitest";
 import type { Timeline } from "./model";
 import type { ExportResolution } from "./exportOptions";
 import { buildRenderCommand } from "./render";
+import { shippedSidecar } from "../test/sidecars";
 
-function bundled(name: string): string | null {
-  const dir = path.resolve(process.cwd(), "src-tauri/binaries");
-  const suffix =
-    process.platform === "win32"
-      ? "-x86_64-pc-windows-msvc.exe"
-      : process.platform === "darwin"
-        ? "-aarch64-apple-darwin"
-        : "-x86_64-unknown-linux-gnu";
-  const p = path.join(dir, `${name}${suffix}`);
-  return existsSync(p) ? p : null;
-}
-const FF = bundled("ffmpeg");
-const FP = bundled("ffprobe");
+const FF = shippedSidecar("ffmpeg");
+const FP = shippedSidecar("ffprobe");
 
 function run(program: string, args: string[]): Promise<{ code: number; out: string; err: string }> {
   return new Promise((resolve) => {

@@ -12,29 +12,16 @@
 //
 // NOT part of the unit suite: `npx vitest run --config vitest.smoke.config.ts`.
 import { spawn } from "node:child_process";
-import { existsSync, promises as fsp } from "node:fs";
+import { promises as fsp } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 import { afterAll, describe, expect, it } from "vitest";
 
 import { keyAlpha, keyDistance } from "./chromaKey";
+import { shippedSidecar } from "../test/sidecars";
 
-function bundled(stem: string): string | null {
-  const dir = path.resolve(process.cwd(), "src-tauri/binaries");
-  const names =
-    process.platform === "win32"
-      ? [`${stem}-x86_64-pc-windows-msvc.exe`]
-      : process.platform === "darwin"
-        ? [`${stem}-aarch64-apple-darwin`, `${stem}-x86_64-apple-darwin`]
-        : [`${stem}-x86_64-unknown-linux-gnu`];
-  for (const n of names) {
-    const p = path.join(dir, n);
-    if (existsSync(p)) return p;
-  }
-  return null;
-}
-const FF = bundled("ffmpeg");
+const FF = shippedSidecar("ffmpeg");
 
 function run(program: string, args: string[]): Promise<{ code: number; stderr: string }> {
   return new Promise((resolve) => {

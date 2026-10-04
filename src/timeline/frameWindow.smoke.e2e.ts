@@ -12,6 +12,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { ff, mkCtx } from "../tools/__e2e";
 import type { ClientToolContext } from "../tools/context";
+import { shippedSidecar, shippedSidecarPath } from "../test/sidecars";
 import type { Timeline } from "./model";
 import { buildRenderCommand, runRenderPlan } from "./render";
 
@@ -49,14 +50,7 @@ function ffBytes(args: string[]): Promise<Buffer> {
 
 /** The ffmpeg the app ships. */
 function ffmpegPath(): string {
-  const triple =
-    process.platform === "win32"
-      ? "x86_64-pc-windows-msvc"
-      : process.platform === "darwin"
-        ? "aarch64-apple-darwin"
-        : "x86_64-unknown-linux-gnu";
-  const ext = process.platform === "win32" ? ".exe" : "";
-  return path.resolve(process.cwd(), "src-tauri/binaries", `artdaddy-ffmpeg-${triple}${ext}`);
+  return shippedSidecar("ffmpeg") ?? shippedSidecarPath("ffmpeg");
 }
 
 /** Frame `n` of a rendered file as raw yuv420p bytes. */

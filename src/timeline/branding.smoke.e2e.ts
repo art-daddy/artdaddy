@@ -18,23 +18,10 @@ import { afterAll, describe, expect, it } from "vitest";
 import { brandRatio, endcardFile, watermarkFile } from "./branding";
 import type { Timeline } from "./model";
 import { buildRenderCommand } from "./render";
+import { shippedSidecar } from "../test/sidecars";
 
-function bundled(tool: "ffmpeg" | "ffprobe"): string | null {
-  const dir = path.resolve(process.cwd(), "src-tauri/binaries");
-  const names =
-    process.platform === "win32"
-      ? [`${tool}-x86_64-pc-windows-msvc.exe`]
-      : process.platform === "darwin"
-        ? [`${tool}-aarch64-apple-darwin`, `${tool}-x86_64-apple-darwin`]
-        : [`${tool}-x86_64-unknown-linux-gnu`];
-  for (const n of names) {
-    const p = path.join(dir, n);
-    if (existsSync(p)) return p;
-  }
-  return null;
-}
-const FF = bundled("ffmpeg");
-const FP = bundled("ffprobe");
+const FF = shippedSidecar("ffmpeg");
+const FP = shippedSidecar("ffprobe");
 const BRAND_DIR = path.resolve(process.cwd(), "src-tauri/resources/brand");
 
 function run(
