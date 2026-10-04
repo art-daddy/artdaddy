@@ -12,6 +12,7 @@ import path from "node:path";
 
 import type { CommandResult, CommandRunner } from "./command";
 import type { ClientToolContext } from "./context";
+import { useFontDirOutsideTauri } from "./assScratch";
 import { ffmpegPolicy } from "./ffmpegPolicy";
 import { kindOf, type MediaKind } from "../media/formats";
 import { inspectColorTool } from "./inspect";
@@ -21,10 +22,15 @@ import { renderTimelineTool } from "../timeline/render";
 import { ProjectDocument } from "../project/ProjectDocument";
 import { setOpenDocumentResolver } from "../project/openDocuments";
 import { asProjectId } from "../project/types";
-import { shippedSidecar } from "../test/sidecars";
+import { shippedFontsDir, shippedSidecar } from "../test/sidecars";
 import { SIDECAR_BINS } from "./sidecar";
 
 type Rec = Record<string, unknown>;
+
+// Every libass render in the harness (captions, titles, the inspect grid) draws with the fonts the
+// app SHIPS, as the app does through Tauri. Without this they fell back to system fonts and the
+// caption tests passed on Windows and macOS while testing nothing about the bundled fonts.
+useFontDirOutsideTauri(shippedFontsDir());
 
 // Since Phase 5.5 every timeline commit requires an OPEN ProjectDocument (openDocumentByDir -> the
 // injected resolver). The e2e lane drives the REAL tools against real dirs, so back EVERY project

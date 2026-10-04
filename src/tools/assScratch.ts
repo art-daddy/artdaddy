@@ -6,20 +6,30 @@ import type { ClientToolContext } from "./context";
 import { joinPath } from "./store";
 
 // The bundled font directory (resources/fonts), resolved lazily via the Tauri path API and
-// cached. null outside a Tauri context (tests / browser bundle); then nothing is copied and
-// libass falls back to its built-in default. The PROMISE is cached, so the frames of one look,
-// which stage their runs at the same moment, share one resolution instead of racing to make it.
+// cached. Outside a Tauri context (tests / browser bundle) it is whatever `useFontDirOutsideTauri`
+// was given, else null; with null nothing is copied and libass falls back to a SYSTEM font. The
+// PROMISE is cached, so the frames of one look, which stage their runs at the same moment, share
+// one resolution instead of racing to make it.
 let fontDir: Promise<string | null> | undefined;
+let fontDirOutsideTauri: string | null = null;
 export function bundledFontDir(): Promise<string | null> {
   fontDir ??= (async () => {
     try {
       const { resolveResource } = await import("@tauri-apps/api/path");
       return await resolveResource("resources/fonts");
     } catch {
-      return null;
+      return fontDirOutsideTauri;
     }
   })();
   return fontDir;
+}
+
+/** For the e2e harness, which has no Tauri: stage the fonts the app SHIPS. Without it every e2e
+ *  caption was drawn in a system fallback font and still passed; Linux exposed it, where the
+ *  fallback for bold Poppins draws nothing at all. */
+export function useFontDirOutsideTauri(dir: string): void {
+  fontDirOutsideTauri = dir;
+  fontDir = undefined;
 }
 
 export interface AssFile {

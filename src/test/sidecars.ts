@@ -46,3 +46,11 @@ export function shippedSidecar(program: string): string | null {
     );
   return null;
 }
+
+/** The caption fonts the app ships (bundled from src-tauri/resources/fonts). Committed, so a
+ *  missing directory is a broken checkout, never a reason to fall back to system fonts. */
+export function shippedFontsDir(): string {
+  const p = path.resolve(process.cwd(), "src-tauri/resources/fonts");
+  if (!existsSync(p)) throw new Error(`the shipped caption fonts are not at ${p}`);
+  return p;
+}

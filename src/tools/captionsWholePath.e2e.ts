@@ -48,20 +48,27 @@ async function project(bed: string = "black"): Promise<{ ctx: ClientToolContext;
   return { ctx, dir };
 }
 
-/** Mean luma (0..1) of the rendered frame at `atSec`. White text on black: more/bigger/brighter
- *  glyphs raise it, and nothing else in these projects can. */
+/** Mean luma (0..1) of the rendered frame at `atSec`, optionally of a region (`vf`, e.g. a crop).
+ *  White text on black: more/bigger/brighter glyphs raise it, and nothing else in these projects
+ *  can. */
 async function inkAt(
   ctx: ClientToolContext,
   dir: string,
   mp4: string,
   atSec: number,
+  vf?: string,
 ): Promise<number> {
   const png = path.join(
     dir,
     `f_${Math.round(atSec * 1000)}_${Math.random().toString(36).slice(2, 8)}.png`,
   );
-  return (await regionScopes(ctx, mp4, png, { atSec })).luma;
+  return (await regionScopes(ctx, mp4, png, { atSec, vf })).luma;
 }
+
+/** The band a centred title sits in. Whole-frame luma is measured on a 240 px thumbnail and
+ *  reported to three decimals, which cannot see a thin italic title on a portrait canvas at all:
+ *  `editorial` read as "changed nothing" once it was drawn in its real (light) font. */
+const TITLE_BAND = "crop=iw:ih*0.2:0:ih*0.4";
 
 /** Ink on a frame with NO text at all. Every "did it render?" assertion is made against this
  *  rather than a guessed constant: the lightest preset (a thin font at a modest size) legitimately
@@ -103,7 +110,13 @@ describe.skipIf(!process.env.VITEST)("caption + text tools, end to end in pixels
     const presets = ["clean-white", "boxed", "punchy", "headline", "editorial", "minimal"];
     // Grey bed: white glyphs raise luma, a dark background box lowers it. Both are real changes.
     const grey = await project("gray");
-    const greyBaseline = await inkAt(grey.ctx, grey.dir, await renderMp4(grey.ctx, grey.dir), 1);
+    const greyBaseline = await inkAt(
+      grey.ctx,
+      grey.dir,
+      await renderMp4(grey.ctx, grey.dir),
+      1,
+      TITLE_BAND,
+    );
 
     const ink: Record<string, number> = {};
     for (const preset of presets) {
@@ -113,7 +126,7 @@ describe.skipIf(!process.env.VITEST)("caption + text tools, end to end in pixels
         preset,
       ).toBe(true);
       const mp4 = await renderMp4(ctx, dir);
-      ink[preset] = await inkAt(ctx, dir, mp4, 1);
+      ink[preset] = await inkAt(ctx, dir, mp4, 1, TITLE_BAND);
       expect(
         Math.abs(ink[preset] - greyBaseline),
         `${preset} changed nothing against an empty frame (${greyBaseline})`,
@@ -121,12 +134,47 @@ describe.skipIf(!process.env.VITEST)("caption + text tools, end to end in pixels
     }
     // `boxed` lays a dark background behind the words; `clean-white` is bare glyphs. If the preset
     // reached the plan in name only these would be indistinguishable.
+    console.log("[captions] preset ink on the title band:", { greyBaseline, ...ink }); // eslint-disable-line no-console
     expect(
       ink.boxed,
       `boxed (${ink.boxed}) should sit darker than clean-white (${ink["clean-white"]})`,
     ).toBeLessThan(ink["clean-white"]);
     // And the six are not one look wearing six names.
     expect(new Set(Object.values(ink).map((v) => v.toFixed(3))).size).toBeGreaterThan(3);
+  }, 900_000);
+
+  // The export draws each family from the fonts the app SHIPS. If they do not reach libass, every
+  // family falls back to the same system font and these three render identically, on every OS:
+  // that is how the caption suite once passed on Windows and macOS while testing no bundled font.
+  it("draws each family with its own bundled font, not one system fallback", async () => {
+    if (!ffmpegAvailable) return;
+    const families = ["Anton", "Poppins", "Playfair Display"];
+    const empty = await project();
+    const bandBase = await inkAt(
+      empty.ctx,
+      empty.dir,
+      await renderMp4(empty.ctx, empty.dir),
+      1,
+      TITLE_BAND,
+    );
+    const ink: Record<string, number> = {};
+    for (const font of families) {
+      const { ctx, dir } = await project();
+      const r = (await addTextClipsTool(
+        { entries: [title({ style: { font, size: "l" } })] },
+        ctx,
+      )) as Rec;
+      expect(r.ok, `${font}: ${JSON.stringify(r)}`).toBe(true);
+      ink[font] = await inkAt(ctx, dir, await renderMp4(ctx, dir), 1, TITLE_BAND);
+      expect(ink[font], `${font} drew nothing`).toBeGreaterThan(bandBase + 0.002);
+    }
+    console.log("[captions] font ink on the title band:", { bandBase, ...ink }); // eslint-disable-line no-console
+    for (let i = 0; i < families.length; i++)
+      for (let j = i + 1; j < families.length; j++)
+        expect(
+          Math.abs(ink[families[i]] - ink[families[j]]),
+          `${families[i]} and ${families[j]} drew the same glyphs: ${JSON.stringify(ink)}`,
+        ).toBeGreaterThan(0.002);
   }, 900_000);
 
   it("size tiers get bigger, in that order", async () => {
