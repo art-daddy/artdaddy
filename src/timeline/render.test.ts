@@ -569,6 +569,22 @@ describe("buildRenderCommand", () => {
     expect(plan.filterComplex).toContain("atempo");
   });
 
+  it("loops every still with an option its own reader accepts", () => {
+    // `-loop 1` is the image-sequence reader's; a GIF or AVIF opens with its own reader, which
+    // rejected it, and every export containing one failed. exportInputs.smoke.e2e.ts is the proof.
+    const opts = (ref: string) => {
+      const a = buildRenderCommand(
+        tl([{ media_ref: ref, timeline_in: 0, timeline_out: 3 }]),
+        "/o.mp4",
+      ).args;
+      return a.slice(a.indexOf("-progress") + 2, a.indexOf(ref));
+    };
+    for (const ref of ["/p.png", "/p.jpg", "/p.webp", "/p.bmp", "/p.tiff"])
+      expect(opts(ref)).toEqual(["-loop", "1", "-framerate", "30", "-t", "3.000000", "-i"]);
+    for (const ref of ["/p.gif", "/P.GIF", "/p.avif"])
+      expect(opts(ref)).toEqual(["-stream_loop", "-1", "-t", "3.000000", "-i"]);
+  });
+
   it("loops images, honours a cover layout, opacity, and speed", () => {
     const img = buildRenderCommand(
       tl([{ media_ref: "/p.png", timeline_in: 0, timeline_out: 3 }]),
@@ -2020,7 +2036,8 @@ describe("buildRenderCommand", () => {
       ]),
       "/o.mp4",
     );
-    expect(plan.args.join(" ")).toContain("-map [base]");
+    expect(plan.filterComplex).toContain("[base]scale=out_range=tv,format=yuv420p[tv]");
+    expect(plan.args.join(" ")).toContain("-map [tv]");
     expect(plan.args.join(" ")).toContain("-map [a0]");
   });
 });

@@ -94,6 +94,9 @@ function peak(size: Animatable | undefined, fallback: number): number {
   return isNum(size) ? size : Math.max(...size.map((k) => k.v));
 }
 
+/** Stills ffmpeg opens with a demuxer of their own (not image2), so they loop by replaying. */
+const REPLAYED_STILL = /\.(gif|avif)$/i;
+
 /** The canvas the render composites at, in pixels: the authored size made even. */
 export function canvasPx(timeline: Timeline): { w: number; h: number } {
   return {
@@ -1095,10 +1098,11 @@ export function buildRenderCommand(
     const dur = Math.max(0, inp.so - inp.si);
     if (inp.isImage)
       cmd.push(
-        "-loop",
-        "1",
-        "-framerate",
-        String(fps),
+        // `-loop 1` belongs to the image-sequence reader; GIF and AVIF open with their own, which
+        // refuse it ("Option loop not found") and failed the whole export.
+        ...(REPLAYED_STILL.test(inp.path)
+          ? ["-stream_loop", "-1"]
+          : ["-loop", "1", "-framerate", String(fps)]),
         "-t",
         inp.lengthArg ?? dur.toFixed(6),
         "-i",
@@ -1554,6 +1558,11 @@ export function buildRenderCommand(
     chains.push(`[${last}]scale=${size.w}:${size.h}:flags=lanczos[scaled]`);
     last = "scaled";
   }
+  // Standard (TV) range for every picture the graph delivers. A JPEG or Motion-JPEG clip is
+  // full range, and ffmpeg carried that onto the WHOLE export (white 255, black 0, tagged pc),
+  // which a player that ignores the tag shows with crushed blacks and clipped whites.
+  chains.push(`[${last}]scale=out_range=tv,format=yuv420p[tv]`);
+  last = "tv";
 
   // Branding rides at the very end, on the DELIVERY-sized picture: the watermark asset is a
   // full frame with the bug already inset, so it scales to the output size and composites at
