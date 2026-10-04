@@ -45,3 +45,7 @@ glob = "0.3"
 # Desktop-only: there is no updater on mobile, and the plugin doesn't build there.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-updater = "2"
+
+# getrlimit/setrlimit (fdlimit.rs). Already in the lock through tauri, so nothing new is fetched.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

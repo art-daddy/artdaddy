@@ -1726,6 +1726,33 @@ async function hasAudioStreamForRender(ctx: ClientToolContext, abs: string): Pro
   }
 }
 
+/** Longest command line handed to ffmpeg with its filter graph inline. Windows refuses to start
+ *  a process whose command line passes 32,767 characters (os error 206); every clip adds an input
+ *  and a filter chain, so a montage of ~80 clips crossed it. Well under it, for the program path
+ *  and the quoting the runner adds. */
+const ARG_BUDGET = 16_000;
+
+/** Staged beside the caption files, and named so no caption band can take the name. */
+const GRAPH_FILE = "graph.ffgraph";
+
+/** Rough length of the command line `args` makes: each argument plus quotes and a space. */
+function commandLength(args: readonly string[]): number {
+  return args.reduce((n, a) => n + a.length + 3, 0);
+}
+
+/** The args to run and the files to stage for them. A command over ARG_BUDGET reads its filter
+ *  graph from a staged file (`-/filter_complex`, ffmpeg 7+) instead of the command line. */
+export function graphFromFile(
+  args: readonly string[],
+  assFiles: readonly { name: string; content: string }[],
+): { args: string[]; files: { name: string; content: string }[] } {
+  const at = args.indexOf("-filter_complex");
+  if (at < 0 || commandLength(args) <= ARG_BUDGET) return { args: [...args], files: [...assFiles] };
+  const out = [...args];
+  out.splice(at, 2, "-/filter_complex", GRAPH_FILE);
+  return { args: out, files: [...assFiles, { name: GRAPH_FILE, content: args[at + 1] }] };
+}
+
 /** Run an ffmpeg render whose filter_complex may reference libass caption files by BARE name
  *  (`ass=f=cap_bandN.ass`): stage a per-run scratch dir with those .ass files + the bundled fonts they
  *  resolve by family, run ffmpeg with it as cwd, and ALWAYS delete it (success, failure, OR throw) in
@@ -1739,18 +1766,26 @@ export async function runRenderPlan(
 ): Promise<CommandResult> {
   const refused = await undecodableStill(ctx, plan.stillImages);
   if (refused) return refused;
+  const { args, files } = graphFromFile(plan.args, plan.assFiles);
   // A one-frame look is not an export: feeding its progress to the export job would move the bar
   // of an export running at the same time.
-  const res = await withAssScratch(ctx, plan.assFiles, plan.fonts, (cwd) =>
+  const res = await withAssScratch(ctx, files, plan.fonts, (cwd) =>
     ctx.runner.run(
       "ffmpeg",
-      plan.args,
+      args,
       ctx.signal,
       cwd,
       plan.frame ? undefined : progressReporter(plan.duration),
     ),
   );
   if (res.code === 0) return res;
+  if (/ENAMETOOLONG|os error 206|too long/i.test(res.stderr) && commandLength(args) > ARG_BUDGET)
+    return {
+      ...res,
+      stderr:
+        `this timeline has too many clips to render in one pass on this computer ` +
+        `(${plan.sources.length} inputs). Render a shorter section, or combine clips first.\n${res.stderr}`,
+    };
   // Last, so it survives every excerpt: ffmpeg's own account of a missing input is "code=-2"
   // and a path, which names neither the clip nor what to do about it.
   const offline = await offlineInputs(ctx, plan.sources);

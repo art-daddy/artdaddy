@@ -89,6 +89,40 @@ jobs:
           ARTDADDY_E2E_SKIP_SIDECARS: ${{ runner.os != 'Windows' && 'whisper-cli' || '' }}
         run: npx vitest run --config vitest.smoke.config.ts
 
+  # The Rust shell's unit tests on the platforms the `desktop` job never runs. Some behaviour is
+  # Unix-only (the open-file limit every sidecar inherits, UJ-020) and had no test anywhere. This
+  # compiles and tests; it bundles nothing, so the sidecars and generated resources build.rs
+  # checks for only have to EXIST.
+  rust-unix:
+    name: cargo test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: system libraries (Linux; the linux-release.yml set, less its bundling tools)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libayatana-appindicator3-dev libssl-dev \
+            libwebkit2gtk-4.1-dev librsvg2-dev
+      - name: stand-in sidecars and resources (build.rs only checks they exist)
+        shell: bash
+        run: |
+          triple="$(rustc -vV | sed -n 's/^host: //p')"
+          mkdir -p src-tauri/binaries src-tauri/resources/ms-playwright src-tauri/resources/node_modules
+          for n in ffmpeg ffprobe yt-dlp whisper-cli browser; do touch "src-tauri/binaries/artdaddy-$n-$triple"; done
+          touch src-tauri/resources/artdaddy-browser.mjs src-tauri/resources/artdaddy.mcpb
+          touch src-tauri/resources/ms-playwright/placeholder src-tauri/resources/node_modules/placeholder
+      - name: cargo test
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+
   desktop:
     name: tauri desktop build (windows)
     runs-on: windows-latest

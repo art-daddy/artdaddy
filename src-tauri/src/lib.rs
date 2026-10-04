@@ -1,3 +1,4 @@
+mod fdlimit;
 mod mcp;
 
 /// Move a file or directory to the OS Recycle Bin / Trash (recoverable) instead of
@@ -223,6 +224,8 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+  // Before anything can spawn: every sidecar inherits this limit (UJ-020).
+  let open_files = fdlimit::raise();
   let builder = tauri::Builder::default();
 
   // MUST be the first plugin registered, and must come before deep-link: it is what makes a
@@ -285,7 +288,7 @@ pub fn run() {
   ]);
 
   builder
-    .setup(|app| {
+    .setup(move |app| {
       // Release builds log too: a beta tester whose MCP server or export dies at boot has no
       // console to read, and "it just didn't work" is the only report we would otherwise get.
       app.handle().plugin(
@@ -295,6 +298,11 @@ pub fn run() {
           .max_file_size(2_000_000)
           .build(),
       )?;
+      match open_files {
+        Ok(Some((was, now))) => log::info!("open-file limit raised from {was} to {now}"),
+        Ok(None) => {}
+        Err(e) => log::warn!("open-file limit could not be raised: {e}"),
+      }
       #[cfg(desktop)]
       migrate_data_folder(app.handle());
       #[cfg(desktop)]

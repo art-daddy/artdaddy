@@ -118,6 +118,7 @@ version = "0.19.3"
 dependencies = [
  "glob",
  "keyring",
+ "libc",
  "log",
  "serde",
  "serde_json",
