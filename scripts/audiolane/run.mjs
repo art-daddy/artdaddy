@@ -63,7 +63,29 @@ async function bundleProbe() {
     target: "chrome110",
     write: false,
     logLevel: "silent",
+    // The app is bundled by Vite, which always defines import.meta.env. An IIFE bundle has no
+    // import.meta at all, so a module that reads it at load (src/api/config.ts does) threw while
+    // the bundle evaluated and the probe never installed its entry points — on every OS. Give
+    // the probe the env a production build has, with no VITE_* overrides.
+    define: {
+      "import.meta.env": JSON.stringify({
+        MODE: "production",
+        DEV: false,
+        PROD: true,
+        SSR: false,
+        BASE_URL: "/",
+      }),
+    },
   });
+  // Any OTHER Vite-only construct (import.meta.url, import.meta.glob) would still be emptied
+  // silently and fail later as a 20-second timeout. Say so here instead.
+  const emptied = result.warnings.filter(
+    (w) => w.id === "empty-import-meta" || /import\.meta/.test(w.text),
+  );
+  if (emptied.length) {
+    const at = emptied.map((w) => `${w.location?.file}:${w.location?.line}`).join(", ");
+    throw new Error(`the probe bundle reads import.meta the IIFE cannot provide (${at})`);
+  }
   return result.outputFiles[0].text;
 }
 
@@ -228,9 +250,15 @@ function connect(url) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(url);
     const pending = new Map();
+    const exceptions = [];
     let id = 0;
     ws.onmessage = (ev) => {
       const msg = JSON.parse(ev.data);
+      if (msg.method === "Runtime.exceptionThrown") {
+        const d = msg.params?.exceptionDetails;
+        exceptions.push(d?.exception?.description ?? d?.text ?? "unknown exception");
+        return;
+      }
       if (!msg.id) return;
       const p = pending.get(msg.id);
       if (!p) return;
@@ -248,6 +276,7 @@ function connect(url) {
             ws.send(JSON.stringify({ id: mid, method, params }));
           });
         },
+        exceptions,
         close: () => ws.close(),
       });
   });
@@ -275,6 +304,8 @@ async function measureInBrowser(pageUrl) {
     const page = targets.find((t) => t.type === "page");
     if (!page) throw new Error("browser opened no page target");
     const cdp = await connect(page.webSocketDebuggerUrl);
+    // Replays exceptions already thrown, so a bundle that died on load says why.
+    await cdp.send("Runtime.enable");
     // The bundle may still be evaluating when the target appears.
     const deadline = Date.now() + 20_000;
     for (;;) {
@@ -284,7 +315,10 @@ async function measureInBrowser(pageUrl) {
         returnByValue: true,
       });
       if (ready.result?.value === true) break;
-      if (Date.now() > deadline) throw new Error("probe never installed its entry points");
+      if (Date.now() > deadline) {
+        const why = cdp.exceptions.length ? `: ${cdp.exceptions[0].slice(0, 600)}` : "";
+        throw new Error(`probe never installed its entry points${why}`);
+      }
       await new Promise((r) => setTimeout(r, 100));
     }
     const evaluate = async (expression) => {

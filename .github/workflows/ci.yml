@@ -49,6 +49,44 @@ jobs:
       - run: npx playwright install --with-deps chromium webkit
       - run: npm run e2e:ui
 
+  # The export suite (vitest.smoke.config.ts: render, export, captions, presets, frames) against
+  # the ffmpeg each platform's INSTALLER ships, on that platform. Every earlier run of this suite
+  # used the Windows ffmpeg, so a mac- or Linux-only export failure could only be found by a
+  # user. Under CI a sidecar the suite needs and cannot find FAILS the run (src/test/sidecars.ts)
+  # instead of skipping, so a broken download cannot turn into a green, empty pass.
+  exports:
+    name: export suite (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-14, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: fetch sidecars
+        if: runner.os == 'Windows'
+        run: npm run fetch:sidecars
+      # mac and Linux have no whisper prebuilt: their RELEASE workflows compile it, which is
+      # ~10 minutes this per-push lane does not need. Everything else is the shipped set.
+      - name: fetch sidecars (no whisper prebuilt on this OS)
+        if: runner.os != 'Windows'
+        run: node scripts/fetch-sidecars.mjs --only yt-dlp,ffmpeg,artdaddy-browser
+      - run: npm run build:sidecar
+      - run: npm run bundle:browser
+      - name: the bundled browser's Linux runtime dependencies
+        if: runner.os == 'Linux'
+        run: npx playwright install-deps chromium
+      - name: export suite (real ffmpeg)
+        env:
+          # The one sidecar this lane deliberately did not stage. Release lanes set nothing here.
+          ARTDADDY_E2E_SKIP_SIDECARS: ${{ runner.os != 'Windows' && 'whisper-cli' || '' }}
+        run: npx vitest run --config vitest.smoke.config.ts
+
   desktop:
     name: tauri desktop build (windows)
     runs-on: windows-latest

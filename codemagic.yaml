@@ -4,8 +4,10 @@
 #
 # ONE-TIME SETUP (in the Codemagic UI, not here):
 #   - connect the artdaddy repo
-#   - add a variable group named `artdaddy` holding ARTDADDY_EVAL_USER and ARTDADDY_EVAL_PASSWORD
-#     (the dedicated CI tester account, not a personal login) and mark them secure
+#   - add a variable group named `artdaddy` holding ARTDADDY_EVAL_TOKEN (a Clerk JWT for the
+#     dedicated CI tester account, minted from a JWT template whose lifetime outlives the run -
+#     the harness sends that one token for the whole run) and mark it secure. Without it the
+#     agent lane reports `off` instead of spending credits.
 #
 # The 500 free minutes are the budget: this run is ~20 min, so treat it as roughly 25 runs a
 # month, not a per-push lane. Trigger it manually.
@@ -628,12 +630,16 @@ workflows:
       - name: Agent loop against the live server
         script: |
           set -o pipefail
+          # The harness reads ARTDADDY_EVAL_TOKEN only. No token: the lane is off, not failed.
+          if [ -z "$ARTDADDY_EVAL_TOKEN" ]; then echo "agent=off" >> $CM_BUILD_DIR/lanes.txt; exit 0; fi
           npm run eval 2>&1 | tail -80; echo "agent=$?" >> $CM_BUILD_DIR/lanes.txt
 
       - name: Build the app
         script: |
           set -eo pipefail
           npm run build:sidecar
+          # Generated and gitignored, yet tauri.conf.json lists it as a required resource.
+          npm run build:mcpb
           npm run bundle:browser
           rm -rf dist
           npx tauri build --bundles dmg
@@ -674,16 +680,16 @@ workflows:
           cat "$CM_BUILD_DIR/lanes.txt"
           n=$(grep -c '=' "$CM_BUILD_DIR/lanes.txt")
           [ "$n" -eq 6 ] || { echo "expected 6 lanes, got $n — one did not report"; exit 1; }
-          bad=$(grep -v '=0$' "$CM_BUILD_DIR/lanes.txt" | grep -v '=unrunnable$')
+          bad=$(grep -v '=0$' "$CM_BUILD_DIR/lanes.txt" | grep -v '=unrunnable$' | grep -v '=off$')
           if [ -n "$bad" ]; then echo "FAILING LANES:"; echo "$bad"; exit 1; fi
           # Printed on EVERY green run, because a skipped lane that says nothing is how an
           # untested surface gets forgotten. This build passing does NOT cover the packaged
           # UI: no Aqua session here. .github/workflows/macos-e2e.yml is where that runs.
-          if grep -q '=unrunnable$' "$CM_BUILD_DIR/lanes.txt"; then
+          if grep -qE '=(unrunnable|off)$' "$CM_BUILD_DIR/lanes.txt"; then
             echo
             echo "UNVERIFIED ON THIS PROVIDER:"
-            grep '=unrunnable$' "$CM_BUILD_DIR/lanes.txt" | sed 's/^/  /'
-            echo "  the packaged app's UI and keyboard shortcuts are NOT covered by this pass"
+            grep -E '=(unrunnable|off)$' "$CM_BUILD_DIR/lanes.txt" | sed 's/^/  /'
+            echo "  those lanes were not exercised by this pass"
           fi
     artifacts:
       - reports/eval/**
@@ -801,7 +807,12 @@ workflows:
           # resources/artdaddy-browser.mjs is a BUILD ARTIFACT (esbuild), not a copy of the source,
           # and nothing in `tauri build` regenerates it. Skipping this ships OLD behaviour.
           npm run build:sidecar
+          # Generated and gitignored, yet tauri.conf.json lists it as a required resource.
+          npm run build:mcpb
           npm run bundle:browser
+          # The export suite against the very sidecars this dmg ships; a release that cannot
+          # export is not a release. CI=true makes a missing sidecar FAIL it, not skip it.
+          CI=true npx vitest run --config vitest.smoke.config.ts
           rm -rf dist
           npx tauri build --bundles dmg
           # "The workflow sets the variable" is not evidence the bundle received it, and the dmg

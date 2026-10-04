@@ -41,6 +41,12 @@ jobs:
       - run: npm run build:mcpb
       - run: npm run bundle:browser
 
+      # The export suite against the very sidecars this installer is about to ship. A release that
+      # cannot export is not a release, so this gates the build and has no opt-out: under CI a
+      # sidecar the suite cannot find fails it rather than skipping (src/test/sidecars.ts).
+      - name: Export suite (real ffmpeg, the shipped sidecars)
+        run: npx vitest run --config vitest.smoke.config.ts
+
       - name: Build the NSIS installer
         shell: pwsh
         env:

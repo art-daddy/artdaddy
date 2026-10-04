@@ -15,6 +15,10 @@ name: macOS end-to-end
 on:
   workflow_dispatch:
     inputs:
+      run_agent_lane:
+        description: "Run the agent lane (spends model credits; needs the ARTDADDY_EVAL_TOKEN secret)"
+        type: boolean
+        default: false
       eval_models:
         description: "Models for the agent lane (CSV)"
         required: true
@@ -82,11 +86,9 @@ jobs:
           chmod +x "src-tauri/binaries/artdaddy-whisper-cli-${TRIPLE}"
           node scripts/fetch-sidecars.mjs
           ls -la src-tauri/binaries/
-          # smoke.e2e.ts spawns "ffmpeg" by BARE NAME and skips itself when the PATH lookup fails,
-          # so without this the lane silently skips ~111 tests and proves nothing about mac. These
-          # aliases point it at the very binaries the installer ships — fetch-sidecars stages them
-          # as `artdaddy-<name>-<triple>`; the unprefixed names these links used to point at no
-          # longer exist, so every bare-name spawn died ENOENT (exit -1).
+          # The e2e suites resolve the shipped `artdaddy-<name>-<triple>` binaries themselves
+          # (src/test/sidecars.ts). These bare-name aliases remain for anything else that spawns
+          # "ffmpeg" by name, pointed at the same shipped binaries rather than at nothing.
           mkdir -p "$GITHUB_WORKSPACE/.binshim"
           for n in ffmpeg ffprobe yt-dlp; do
             ln -sf "$GITHUB_WORKSPACE/src-tauri/binaries/artdaddy-$n-${TRIPLE}" "$GITHUB_WORKSPACE/.binshim/$n"
@@ -112,28 +114,39 @@ jobs:
         continue-on-error: true
         run: node --experimental-websocket scripts/audiolane/run.mjs 2>&1 | tail -40
 
+      # Both browsers the config declares: installing only chromium failed every WebKit spec at
+      # launch. Not piped to tail - the failures are the part worth reading, and the summary
+      # lists names only.
       - name: Preview compositor + app shell (Playwright)
         id: playwright
         continue-on-error: true
         run: |
           npm i --no-save @playwright/test@1.49.1
-          npx playwright install chromium
-          npx playwright test 2>&1 | tail -40
+          npx playwright install chromium webkit
+          npx playwright test
 
-      # Real model calls against the DEPLOYED server, with the credentials of a dedicated CI
-      # account. The harness now fails loudly on a 401 rather than recording it as the model
-      # failing every scenario.
+      # Real model calls against the DEPLOYED server, so OPT-IN: it spends credits. The harness
+      # (src/eval/eval.e2e.ts) reads ARTDADDY_EVAL_TOKEN - a Clerk JWT for the dedicated CI
+      # account - and sends it on every request for the whole run, so it must outlive the run:
+      # an ordinary session token expires in about a minute. Mint it from a Clerk JWT template
+      # with a long lifetime. It fails loudly on a rejected token rather than recording a 401 as
+      # the model failing every scenario.
       - name: Agent loop against the live server
         id: agent
+        if: inputs.run_agent_lane
         continue-on-error: true
         env:
           ARTDADDY_EVAL_MODELS: ${{ inputs.eval_models }}
           ARTDADDY_EVAL_CAP_USD: ${{ inputs.eval_cap_usd }}
           ARTDADDY_EVAL_EFFORT: high
           ARTDADDY_EVAL_CHECKPOINT: "off"
-          ARTDADDY_EVAL_USER: ${{ secrets.ARTDADDY_EVAL_USER }}
-          ARTDADDY_EVAL_PASSWORD: ${{ secrets.ARTDADDY_EVAL_PASSWORD }}
-        run: npm run eval 2>&1 | tail -80
+          ARTDADDY_EVAL_TOKEN: ${{ secrets.ARTDADDY_EVAL_TOKEN }}
+        run: |
+          test -n "$ARTDADDY_EVAL_TOKEN" || {
+            echo "::error::the agent lane needs the ARTDADDY_EVAL_TOKEN repository secret"
+            exit 1
+          }
+          npm run eval 2>&1 | tail -80
 
       # --- the app itself ---------------------------------------------------------------
 
@@ -141,6 +154,9 @@ jobs:
         id: build
         run: |
           npm run build:sidecar
+          # Generated and gitignored, yet tauri.conf.json lists it as a required resource:
+          # without it `tauri build` dies with "resource path doesn't exist".
+          npm run build:mcpb
           npm run bundle:browser
           npx tauri build --bundles dmg
 
@@ -170,6 +186,7 @@ jobs:
           name: macos-e2e-evidence
           path: |
             reports/eval/**
+            test-results/**
             /tmp/macwalk/**
             /tmp/artdaddy.err
             /tmp/artdaddy.out
@@ -188,7 +205,11 @@ jobs:
               smoke) r="${{ steps.smoke.outcome }}" ;;
               audio) r="${{ steps.audio.outcome }}" ;;
               playwright) r="${{ steps.playwright.outcome }}" ;;
-              agent) r="${{ steps.agent.outcome }}" ;;
+              agent)
+                r="${{ steps.agent.outcome }}"
+                # Opt-in: not asked for is not a failure, and not a pass either.
+                if [ "${{ inputs.run_agent_lane }}" != "true" ]; then r="off"; fi
+                ;;
               walk)
                 r="${{ steps.walk.outcome }}"
                 # 78 (EX_CONFIG) from macwalk.sh: no Aqua session, so no window and no input.
@@ -197,11 +218,11 @@ jobs:
                 ;;
             esac
             printf '%-12s %s\n' "$lane" "$r"
-            if [ "$r" = "unrunnable" ]; then unverified=1
+            if [ "$r" = "unrunnable" ] || [ "$r" = "off" ]; then unverified=1
             elif [ "$r" != "success" ]; then fail=1; fi
           done
           if [ "$unverified" = "1" ]; then
             echo
-            echo "UNVERIFIED: the packaged UI and its keyboard shortcuts were not exercised."
+            echo "UNVERIFIED: every lane marked off or unrunnable above was not exercised."
           fi
           exit $fail
