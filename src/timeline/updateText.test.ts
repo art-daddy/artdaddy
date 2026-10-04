@@ -165,7 +165,11 @@ describe("update_text: every param its description says is rejected, is rejected
     const id = made.created[0].clip_id;
     const before = JSON.stringify(await loadTimeline(store));
 
-    const r = (await reg.run("update_text", { clip_ids: [id], content: "new", [param]: 10 })) as Loose;
+    const r = (await reg.run("update_text", {
+      clip_ids: [id],
+      content: "new",
+      [param]: 10,
+    })) as Loose;
 
     expect(r.ok).toBe(false);
     expect(String(r.error)).toMatch(new RegExp(`unknown param\\(s\\) ${param}`));

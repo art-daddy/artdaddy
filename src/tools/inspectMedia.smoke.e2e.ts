@@ -18,15 +18,7 @@ import { inspectMediaTool } from "./inspect";
 import { joinPath } from "./store";
 import { runWhisper, whisperModelPath } from "./transcribe";
 import { registerBackgroundTranscriber } from "./transcriptQueue";
-import {
-  decodeCountingRunner,
-  ff,
-  libRef,
-  longFixture,
-  mkCtx,
-  nodeFs,
-  nodeRunner,
-} from "./__e2e";
+import { decodeCountingRunner, ff, libRef, longFixture, mkCtx, nodeFs, nodeRunner } from "./__e2e";
 
 // The grid's labels are drawn with the bundled font, as in the app.
 vi.mock("@tauri-apps/api/path", async () => {
@@ -59,15 +51,36 @@ afterAll(async () => {
 async function jpegSize(file: string): Promise<{ jpeg: boolean; w: number; h: number }> {
   const buf = await fsp.readFile(file);
   const r = await nodeRunner.run("ffprobe", [
-    "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "json", file,
+    "-v",
+    "error",
+    "-select_streams",
+    "v:0",
+    "-show_entries",
+    "stream=width,height",
+    "-of",
+    "json",
+    file,
   ]);
-  const s = (JSON.parse(r.stdout) as { streams: Array<{ width: number; height: number }> }).streams[0];
+  const s = (JSON.parse(r.stdout) as { streams: Array<{ width: number; height: number }> })
+    .streams[0];
   return { jpeg: buf[0] === 0xff && buf[1] === 0xd8, w: s.width, h: s.height };
 }
 
 async function grey(file: string, w: number, h: number): Promise<Uint8Array> {
   const out = `${file}.gray.raw`;
-  await ff(["-y", "-hide_banner", "-loglevel", "error", "-i", file, "-f", "rawvideo", "-pix_fmt", "gray", out]);
+  await ff([
+    "-y",
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-i",
+    file,
+    "-f",
+    "rawvideo",
+    "-pix_fmt",
+    "gray",
+    out,
+  ]);
   return new Uint8Array(await fsp.readFile(out)).subarray(0, w * h);
 }
 
@@ -108,7 +121,10 @@ describe("frames cost a seek each, wherever they are (UJ-012)", () => {
     // The same look at the first and the last 6 s of the file: the work is the seek's, not the
     // position's. The old way decoded everything before the frame.
     const look = async (start: number): Promise<{ frames: number[]; ms: number }> => {
-      await fsp.rm(path.join(proj, "internals", "cache", "inspect"), { recursive: true, force: true });
+      await fsp.rm(path.join(proj, "internals", "cache", "inspect"), {
+        recursive: true,
+        force: true,
+      });
       const frames: number[] = [];
       const t0 = performance.now();
       const x = (await inspectMediaTool(
@@ -120,7 +136,9 @@ describe("frames cost a seek each, wherever they are (UJ-012)", () => {
     };
     const atStart = await look(0);
     const atEnd = await look(14 * 60 - 6);
-    console.log(`[inspect_media] start ${atStart.frames} (${Math.round(atStart.ms)} ms), end ${atEnd.frames} (${Math.round(atEnd.ms)} ms)`); // eslint-disable-line no-console
+    console.log(
+      `[inspect_media] start ${atStart.frames} (${Math.round(atStart.ms)} ms), end ${atEnd.frames} (${Math.round(atEnd.ms)} ms)`,
+    ); // eslint-disable-line no-console
     for (const n of [...atStart.frames, ...atEnd.frames]) expect(n).toBeLessThanOrEqual(GOP + 30);
     const total = (a: number[]): number => a.reduce((s, n) => s + n, 0);
     expect(total(atEnd.frames)).toBeLessThanOrEqual(total(atStart.frames) + 6 * GOP);
@@ -133,9 +151,20 @@ describe("the numbers come from the pictures", () => {
     const make = async (name: string, vf: string): Promise<string> => {
       const out = media(name);
       await ff([
-        "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
-        "-i", `testsrc2=size=1280x720:rate=${FPS}:duration=4`,
-        ...(vf ? ["-vf", vf] : []), "-pix_fmt", "yuv420p", "-crf", "12", out,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        `testsrc2=size=1280x720:rate=${FPS}:duration=4`,
+        ...(vf ? ["-vf", vf] : []),
+        "-pix_fmt",
+        "yuv420p",
+        "-crf",
+        "12",
+        out,
       ]);
       return libRef(ctx, out, "video");
     };
@@ -144,7 +173,14 @@ describe("the numbers come from the pictures", () => {
     const sharp = await look(await make("sharp.mp4", ""));
     const blurred = await look(await make("blurred.mp4", "gblur=sigma=4"));
     const grainy = await look(await make("grainy.mp4", "noise=alls=25:allf=t"));
-    console.log("[inspect_media] sharpness", sharp.sharpness, blurred.sharpness, "noise", sharp.noise_sigma, grainy.noise_sigma); // eslint-disable-line no-console
+    console.log(
+      "[inspect_media] sharpness",
+      sharp.sharpness,
+      blurred.sharpness,
+      "noise",
+      sharp.noise_sigma,
+      grainy.noise_sigma,
+    ); // eslint-disable-line no-console
     expect(blurred.sharpness).toBeLessThan(sharp.sharpness / 3);
     expect(grainy.noise_sigma).toBeGreaterThan(sharp.noise_sigma + 1);
   });
@@ -168,8 +204,23 @@ describe("frames and stills carry the grid", () => {
 
   it("on a video frame", async () => {
     const out = media("grey.mp4");
-    await ff(["-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=0x808080:s=1280x720:r=30:d=2", "-pix_fmt", "yuv420p", out]);
-    const r = (await inspectMediaTool({ media_ref: await libRef(ctx, out, "video"), max_frames: 1 }, ctx)) as Any;
+    await ff([
+      "-y",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-f",
+      "lavfi",
+      "-i",
+      "color=c=0x808080:s=1280x720:r=30:d=2",
+      "-pix_fmt",
+      "yuv420p",
+      out,
+    ]);
+    const r = (await inspectMediaTool(
+      { media_ref: await libRef(ctx, out, "video"), max_frames: 1 },
+      ctx,
+    )) as Any;
     expect(r.coordinate_grid).toBe("0-1, origin top-left");
     const file = (r._attachments as Array<{ path: string }>)[0].path;
     expectGrid(await grey(file, 512, 288), 512, 288);
@@ -177,7 +228,19 @@ describe("frames and stills carry the grid", () => {
 
   it("on a still", async () => {
     const out = media("grey.png");
-    await ff(["-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=0x808080:s=800x600", "-frames:v", "1", out]);
+    await ff([
+      "-y",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-f",
+      "lavfi",
+      "-i",
+      "color=c=0x808080:s=800x600",
+      "-frames:v",
+      "1",
+      out,
+    ]);
     const r = (await inspectMediaTool({ media_ref: await libRef(ctx, out, "image") }, ctx)) as Any;
     expect(r.coordinate_grid).toBe("0-1, origin top-left");
     const file = (r._attachments as Array<{ path: string }>)[0].path;
@@ -190,10 +253,26 @@ describe("loudness", () => {
   it("reads the EBU calibration tone as -23 LUFS, and a clip at half volume 6 dB lower", async () => {
     const out = media("tone.mov");
     await ff([
-      "-y", "-hide_banner", "-loglevel", "error",
-      "-f", "lavfi", "-i", "color=c=gray:s=320x180:r=30:d=10",
-      "-f", "lavfi", "-i", "aevalsrc=0.0707946*sin(2*PI*1000*t)|0.0707946*sin(2*PI*1000*t):s=48000:d=10",
-      "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "pcm_s16le", "-shortest", out,
+      "-y",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-f",
+      "lavfi",
+      "-i",
+      "color=c=gray:s=320x180:r=30:d=10",
+      "-f",
+      "lavfi",
+      "-i",
+      "aevalsrc=0.0707946*sin(2*PI*1000*t)|0.0707946*sin(2*PI*1000*t):s=48000:d=10",
+      "-c:v",
+      "libx264",
+      "-pix_fmt",
+      "yuv420p",
+      "-c:a",
+      "pcm_s16le",
+      "-shortest",
+      out,
     ]);
     const ref = await libRef(ctx, out, "video");
     const r = (await inspectMediaTool({ media_ref: ref, max_frames: 1 }, ctx)) as Any;
@@ -202,7 +281,14 @@ describe("loudness", () => {
     expect(r.loudness.rms_dbfs).toBeCloseTo(-26, 0);
 
     // The same file placed on a timeline at volume 0.5, its sound on the linked audio clip.
-    const clip = { media_ref: ref, source_in: 0, source_out: 300, timeline_in: 0, timeline_out: 300, link_group: "L" };
+    const clip = {
+      media_ref: ref,
+      source_in: 0,
+      source_out: 300,
+      timeline_in: 0,
+      timeline_out: 300,
+      link_group: "L",
+    };
     await nodeFs.writeTextFile(
       joinPath(proj, "internals", "timeline.json"),
       JSON.stringify({
@@ -210,7 +296,12 @@ describe("loudness", () => {
         canvas: { width: 320, height: 180, fps: 30 },
         tracks: [
           { id: "v1", kind: "video", z: 0, clips: [{ id: "v", kind: "video", ...clip }] },
-          { id: "a1", kind: "audio", z: 0, clips: [{ id: "a", kind: "audio", ...clip, volume: 0.5 }] },
+          {
+            id: "a1",
+            kind: "audio",
+            z: 0,
+            clips: [{ id: "a", kind: "audio", ...clip, volume: 0.5 }],
+          },
         ],
         failures: [],
       }),
@@ -224,7 +315,11 @@ describe("loudness", () => {
 describe("overview: one storyboard of the span's scenes", () => {
   /** 28 scenes of 30 s, each a flat colour of its own brightness: 14 minutes of 1080p. */
   async function scenes(): Promise<string> {
-    const out = path.join(os.tmpdir(), "artdaddy-e2e-fixtures", `scenes28x30_1080p${FPS}_g${GOP}.mp4`);
+    const out = path.join(
+      os.tmpdir(),
+      "artdaddy-e2e-fixtures",
+      `scenes28x30_1080p${FPS}_g${GOP}.mp4`,
+    );
     if (existsSync(out)) return out;
     await fsp.mkdir(path.dirname(out), { recursive: true });
     const inputs: string[] = [];
@@ -235,9 +330,22 @@ describe("overview: one storyboard of the span's scenes", () => {
     }
     const tmp = `${out}.part.mp4`;
     await ff([
-      "-y", "-hide_banner", "-loglevel", "error", ...inputs,
-      "-filter_complex", `${Array.from({ length: 28 }, (_, i) => `[${i}:v]`).join("")}concat=n=28:v=1:a=0`,
-      "-c:v", "libx264", "-preset", "ultrafast", "-g", String(GOP), "-pix_fmt", "yuv420p", tmp,
+      "-y",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      ...inputs,
+      "-filter_complex",
+      `${Array.from({ length: 28 }, (_, i) => `[${i}:v]`).join("")}concat=n=28:v=1:a=0`,
+      "-c:v",
+      "libx264",
+      "-preset",
+      "ultrafast",
+      "-g",
+      String(GOP),
+      "-pix_fmt",
+      "yuv420p",
+      tmp,
     ]);
     await fsp.rename(tmp, out);
     return out;
@@ -255,7 +363,9 @@ describe("overview: one storyboard of the span's scenes", () => {
     expect(r.ok, JSON.stringify(r).slice(0, 400)).toBe(true);
     const times = r.overview.tile_times as number[];
     const total = decoded.reduce((s, n) => s + n, 0);
-    console.log(`[inspect_media] overview of 14 min: ${Math.round(ms)} ms, ${times.length} tiles, ${total} frames decoded in ${decoded.length} processes`); // eslint-disable-line no-console
+    console.log(
+      `[inspect_media] overview of 14 min: ${Math.round(ms)} ms, ${times.length} tiles, ${total} frames decoded in ${decoded.length} processes`,
+    ); // eslint-disable-line no-console
     expect(times).toHaveLength(28);
     expect(new Set(times.map((t) => Math.floor(t / 30))).size).toBe(28); // one tile per scene
     for (let i = 1; i < times.length; i++) expect(times[i]).toBeGreaterThan(times[i - 1]);
@@ -271,12 +381,30 @@ describe("overview: one storyboard of the span's scenes", () => {
   it("keeps a portrait source's shape", async () => {
     const out = media("portrait.mp4");
     await ff([
-      "-y", "-hide_banner", "-loglevel", "error",
-      "-f", "lavfi", "-i", "color=c=0x303030:s=1080x1920:r=30:d=4",
-      "-f", "lavfi", "-i", "color=c=0xd0d0d0:s=1080x1920:r=30:d=4",
-      "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0", "-g", "30", "-pix_fmt", "yuv420p", out,
+      "-y",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-f",
+      "lavfi",
+      "-i",
+      "color=c=0x303030:s=1080x1920:r=30:d=4",
+      "-f",
+      "lavfi",
+      "-i",
+      "color=c=0xd0d0d0:s=1080x1920:r=30:d=4",
+      "-filter_complex",
+      "[0:v][1:v]concat=n=2:v=1:a=0",
+      "-g",
+      "30",
+      "-pix_fmt",
+      "yuv420p",
+      out,
     ]);
-    const r = (await inspectMediaTool({ media_ref: await libRef(ctx, out, "video"), overview: true }, ctx)) as Any;
+    const r = (await inspectMediaTool(
+      { media_ref: await libRef(ctx, out, "video"), overview: true },
+      ctx,
+    )) as Any;
     expect(r.overview.tile_times).toHaveLength(2);
     const sheet = await jpegSize((r._attachments as Array<{ path: string }>)[0].path);
     expect(sheet).toMatchObject({ w: 2 * 90, h: 160 }); // 90x160 tiles, not 160x90 stretched
@@ -307,13 +435,22 @@ describe("transcript: never waited on when long", () => {
     const speech = speechWav();
     const out = media("talk.m4a");
     const silence = ["-f", "lavfi", "-t", "360", "-i", "anullsrc=r=48000:cl=stereo"];
-    const mid = speech ? ["-i", speech] : ["-f", "lavfi", "-t", "5", "-i", "sine=frequency=440:sample_rate=48000"];
+    const mid = speech
+      ? ["-i", speech]
+      : ["-f", "lavfi", "-t", "5", "-i", "sine=frequency=440:sample_rate=48000"];
     await ff([
-      "-y", "-hide_banner", "-loglevel", "error",
-      ...silence, ...mid, ...silence,
+      "-y",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      ...silence,
+      ...mid,
+      ...silence,
       "-filter_complex",
       "[1:a]aresample=48000,aformat=channel_layouts=stereo[b];[0:a][b][2:a]concat=n=3:v=0:a=1",
-      "-c:a", "aac", out,
+      "-c:a",
+      "aac",
+      out,
     ]);
     return { file: out, speech: speech !== null };
   }

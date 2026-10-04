@@ -29,6 +29,10 @@ export function registerBackgroundTranscriber(
 }
 
 /** Ask `projectDir`'s background transcriber to do `source` next. False when there is none. */
-export function prioritizeTranscript(projectDir: string, source: string, language: string): boolean {
+export function prioritizeTranscript(
+  projectDir: string,
+  source: string,
+  language: string,
+): boolean {
   return byDir.get(keyOf(projectDir))?.prioritize(source, language) ?? false;
 }

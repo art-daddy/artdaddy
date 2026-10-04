@@ -297,7 +297,7 @@ export class IndexCoordinator {
     try {
       await Promise.all(
         Array.from({ length: IndexCoordinator.PROXY_WORKERS }, async () => {
-          for (let src = this.proxyQ.shift(); src !== undefined && !this.disposed; ) {
+          for (let src = this.proxyQ.shift(); src !== undefined && !this.disposed;) {
             try {
               await this.runProxy(src, ready.runner, ready.mods, markImporting);
             } catch (e) {
@@ -335,7 +335,7 @@ export class IndexCoordinator {
       signal: this.ac.signal,
     } as ClientToolContext;
     try {
-      for (let job = this.txQ.shift(); job !== undefined && !this.disposed && !this.engineDown; ) {
+      for (let job = this.txQ.shift(); job !== undefined && !this.disposed && !this.engineDown;) {
         this.txCurrent = txKey(job);
         try {
           // A video with no audio track is not a failure to report — there is simply nothing to

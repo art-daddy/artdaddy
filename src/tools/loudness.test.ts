@@ -53,7 +53,11 @@ const SILENCE = `[Parsed_ebur128_0 @ 0000022d9834] Summary:
 
 describe("parseLoudness", () => {
   it("reads the calibration tone as the standard says it must read", () => {
-    expect(parseLoudness(TONE)).toEqual({ integrated_lufs: -23, true_peak_dbtp: -23, rms_dbfs: -26 });
+    expect(parseLoudness(TONE)).toEqual({
+      integrated_lufs: -23,
+      true_peak_dbtp: -23,
+      rms_dbfs: -26,
+    });
   });
 
   it("reads the Summary, never a running per-frame I: printed before it", () => {
@@ -63,7 +67,11 @@ describe("parseLoudness", () => {
   });
 
   it("reports silence as ffmpeg's -70 floor and no peak or RMS, not as zero", () => {
-    expect(parseLoudness(SILENCE)).toEqual({ integrated_lufs: -70, true_peak_dbtp: null, rms_dbfs: null });
+    expect(parseLoudness(SILENCE)).toEqual({
+      integrated_lufs: -70,
+      true_peak_dbtp: null,
+      rms_dbfs: null,
+    });
   });
 
   it("returns nulls, never invented figures, when the text has none", () => {

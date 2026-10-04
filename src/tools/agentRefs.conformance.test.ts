@@ -250,7 +250,10 @@ const PARAMS: Record<string, { kind: Kind; call?: Call; control?: string }> = {
   },
   "run_ffmpeg inputs[]": {
     kind: "library-ref",
-    call: (x) => ["run_ffmpeg", { inputs: [x], args: ["-i", "{in0}", "{out}"], output_name: "o.mp4" }],
+    call: (x) => [
+      "run_ffmpeg",
+      { inputs: [x], args: ["-i", "{in0}", "{out}"], output_name: "o.mp4" },
+    ],
     control: "media_ctl",
   },
   "set_clip_properties media_ref": {

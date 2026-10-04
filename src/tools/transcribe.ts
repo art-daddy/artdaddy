@@ -672,13 +672,12 @@ export async function runWhisper(
   language?: string,
   window?: TranscribeWindow | null,
 ): Promise<ParsedTranscript> {
-  const { lang, full: fullBase, out: outBase, win } = await transcriptFiles(
-    ctx,
-    src,
-    size,
-    language,
-    window,
-  );
+  const {
+    lang,
+    full: fullBase,
+    out: outBase,
+    win,
+  } = await transcriptFiles(ctx, src, size, language, window);
   // A full transcript already answers every window, so a windowed ask must never re-run
   // over one we have — the indexer builds these in the background for exactly this reason.
   if (await ctx.store.exists(`${fullBase}.json`)) {

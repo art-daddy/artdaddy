@@ -86,7 +86,9 @@ describe("where it is offered", () => {
   // The failure direction: the offer is keyed to the credit code, not to "something went
   // wrong". Without this, any future error would start advertising the Discord.
   it("is NOT offered on errors that more credits cannot fix", () => {
-    render(<MessagePart part={{ kind: "error", error: "Couldn't reach the server.", code: "api" }} />);
+    render(
+      <MessagePart part={{ kind: "error", error: "Couldn't reach the server.", code: "api" }} />,
+    );
     expect(screen.queryByRole("button", { name: /discord/i })).not.toBeInTheDocument();
   });
 

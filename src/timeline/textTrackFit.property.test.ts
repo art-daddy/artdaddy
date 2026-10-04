@@ -26,19 +26,17 @@ const TRACK_IDS = ["captions", "titles", "captions2"] as const;
 const NAMES = [undefined, "captions", "titles", "captions2", "lower_thirds"] as const;
 
 const disjointClips = (prefix: string) =>
-  fc
-    .uniqueArray(fc.integer({ min: 0, max: 14 }), { maxLength: 4 })
-    .map((slots) =>
-      slots
-        .sort((a, b) => a - b)
-        .map((s) => ({
-          id: `${prefix}_${s}`,
-          kind: "text",
-          timeline_in: s * 20,
-          timeline_out: s * 20 + 15,
-          content: [{ text: "existing" }],
-        })),
-    );
+  fc.uniqueArray(fc.integer({ min: 0, max: 14 }), { maxLength: 4 }).map((slots) =>
+    slots
+      .sort((a, b) => a - b)
+      .map((s) => ({
+        id: `${prefix}_${s}`,
+        kind: "text",
+        timeline_in: s * 20,
+        timeline_out: s * 20 + 15,
+        content: [{ text: "existing" }],
+      })),
+  );
 
 const timelineArb = fc
   .subarray([...TRACK_IDS], { minLength: 0 })
@@ -103,67 +101,84 @@ function noTrackOverlaps(tl: Timeline): boolean {
 describe("add_text_clips: placement rules over random timelines and batches", () => {
   it("refuses exactly the batches the rules refuse", () => {
     fc.assert(
-      fc.property(timelineArb, fc.array(entryArb, { minLength: 1, maxLength: 6 }), (tl, entries) => {
-        let threw = false;
-        try {
-          addTextClips(structuredClone(tl), entries);
-        } catch {
-          threw = true;
-        }
-        expect(threw, "refused iff the rules say so").toBe(expectedRefusal(tl, entries));
-      }),
+      fc.property(
+        timelineArb,
+        fc.array(entryArb, { minLength: 1, maxLength: 6 }),
+        (tl, entries) => {
+          let threw = false;
+          try {
+            addTextClips(structuredClone(tl), entries);
+          } catch {
+            threw = true;
+          }
+          expect(threw, "refused iff the rules say so").toBe(expectedRefusal(tl, entries));
+        },
+      ),
       { numRuns: 600 },
     );
   });
 
   it("never leaves two clips overlapping on one track", () => {
     fc.assert(
-      fc.property(timelineArb, fc.array(entryArb, { minLength: 1, maxLength: 6 }), (tl, entries) => {
-        fc.pre(!expectedRefusal(tl, entries));
-        const work = structuredClone(tl);
-        addTextClips(work, entries);
-        expect(noTrackOverlaps(work)).toBe(true);
-      }),
+      fc.property(
+        timelineArb,
+        fc.array(entryArb, { minLength: 1, maxLength: 6 }),
+        (tl, entries) => {
+          fc.pre(!expectedRefusal(tl, entries));
+          const work = structuredClone(tl);
+          addTextClips(work, entries);
+          expect(noTrackOverlaps(work)).toBe(true);
+        },
+      ),
       { numRuns: 600 },
     );
   });
 
   it("lands every entry once, named ones on their track, the rest together on one other track", () => {
     fc.assert(
-      fc.property(timelineArb, fc.array(entryArb, { minLength: 1, maxLength: 6 }), (tl, entries) => {
-        fc.pre(!expectedRefusal(tl, entries));
-        const work = structuredClone(tl);
-        const r = addTextClips(work, entries) as Any;
-        expect(r.created).toHaveLength(entries.length);
+      fc.property(
+        timelineArb,
+        fc.array(entryArb, { minLength: 1, maxLength: 6 }),
+        (tl, entries) => {
+          fc.pre(!expectedRefusal(tl, entries));
+          const work = structuredClone(tl);
+          const r = addTextClips(work, entries) as Any;
+          expect(r.created).toHaveLength(entries.length);
 
-        const trackOf = new Map<string, string>();
-        for (const t of work.tracks) for (const c of t.clips ?? []) trackOf.set(String(c.id), t.id);
-        const autoTracks = new Set<string>();
-        entries.forEach((e: Any, i: number) => {
-          const landed = trackOf.get(r.created[i].clip_id);
-          expect(landed).toBe(r.created[i].track_id);
-          if (e.track_id) expect(landed).toBe(e.track_id);
-          else autoTracks.add(landed!);
-        });
-        expect(autoTracks.size).toBeLessThanOrEqual(1);
-        const named = new Set(entries.map((e: Any) => e.track_id).filter(Boolean));
-        for (const id of autoTracks) expect(named.has(id)).toBe(false);
-      }),
+          const trackOf = new Map<string, string>();
+          for (const t of work.tracks)
+            for (const c of t.clips ?? []) trackOf.set(String(c.id), t.id);
+          const autoTracks = new Set<string>();
+          entries.forEach((e: Any, i: number) => {
+            const landed = trackOf.get(r.created[i].clip_id);
+            expect(landed).toBe(r.created[i].track_id);
+            if (e.track_id) expect(landed).toBe(e.track_id);
+            else autoTracks.add(landed!);
+          });
+          expect(autoTracks.size).toBeLessThanOrEqual(1);
+          const named = new Set(entries.map((e: Any) => e.track_id).filter(Boolean));
+          for (const id of autoTracks) expect(named.has(id)).toBe(false);
+        },
+      ),
       { numRuns: 600 },
     );
   });
 
   it("never disturbs text that was already there", () => {
     fc.assert(
-      fc.property(timelineArb, fc.array(entryArb, { minLength: 1, maxLength: 6 }), (tl, entries) => {
-        fc.pre(!expectedRefusal(tl, entries));
-        const work = structuredClone(tl);
-        addTextClips(work, entries);
-        for (const t of tl.tracks) {
-          const after = work.tracks.find((w) => w.id === t.id)!;
-          for (const c of t.clips ?? []) expect(after.clips).toContainEqual(c);
-        }
-      }),
+      fc.property(
+        timelineArb,
+        fc.array(entryArb, { minLength: 1, maxLength: 6 }),
+        (tl, entries) => {
+          fc.pre(!expectedRefusal(tl, entries));
+          const work = structuredClone(tl);
+          addTextClips(work, entries);
+          for (const t of tl.tracks) {
+            const after = work.tracks.find((w) => w.id === t.id)!;
+            for (const c of t.clips ?? []) expect(after.clips).toContainEqual(c);
+          }
+        },
+      ),
       { numRuns: 400 },
     );
   });
@@ -171,29 +186,33 @@ describe("add_text_clips: placement rules over random timelines and batches", ()
   // Creating a track while an existing one had room would multiply tracks over a session.
   it("only creates a track for auto-placed text when no existing text track had room", () => {
     fc.assert(
-      fc.property(timelineArb, fc.array(entryArb, { minLength: 1, maxLength: 6 }), (tl, entries) => {
-        fc.pre(!expectedRefusal(tl, entries));
-        const auto = entries.filter((e: Any) => !e.track_id);
-        fc.pre(auto.length > 0);
-        const work = structuredClone(tl);
-        const r = addTextClips(work, entries) as Any;
-        const autoTrack = r.created[entries.indexOf(auto[0])].track_id;
-        if (tl.tracks.some((t) => t.id === autoTrack)) return;
-        const named = new Set(entries.map((e: Any) => e.track_id).filter(Boolean));
-        const couldFit = tl.tracks.filter(
-          (t) =>
-            !named.has(t.id) &&
-            !auto.some((e: Any) =>
-              (t.clips ?? []).some((c) =>
-                overlap(
-                  [e.timeline_in, e.timeline_out],
-                  [c.timeline_in as number, c.timeline_out as number],
+      fc.property(
+        timelineArb,
+        fc.array(entryArb, { minLength: 1, maxLength: 6 }),
+        (tl, entries) => {
+          fc.pre(!expectedRefusal(tl, entries));
+          const auto = entries.filter((e: Any) => !e.track_id);
+          fc.pre(auto.length > 0);
+          const work = structuredClone(tl);
+          const r = addTextClips(work, entries) as Any;
+          const autoTrack = r.created[entries.indexOf(auto[0])].track_id;
+          if (tl.tracks.some((t) => t.id === autoTrack)) return;
+          const named = new Set(entries.map((e: Any) => e.track_id).filter(Boolean));
+          const couldFit = tl.tracks.filter(
+            (t) =>
+              !named.has(t.id) &&
+              !auto.some((e: Any) =>
+                (t.clips ?? []).some((c) =>
+                  overlap(
+                    [e.timeline_in, e.timeline_out],
+                    [c.timeline_in as number, c.timeline_out as number],
+                  ),
                 ),
               ),
-            ),
-        );
-        expect(couldFit.map((t) => t.id)).toEqual([]);
-      }),
+          );
+          expect(couldFit.map((t) => t.id)).toEqual([]);
+        },
+      ),
       { numRuns: 600 },
     );
   });

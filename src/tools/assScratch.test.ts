@@ -35,7 +35,8 @@ class DirFs implements FsLike {
   async mkdir(): Promise<void> {}
   async remove(p: string): Promise<void> {
     const k = joinPath(p);
-    for (const f of [...this.files.keys()]) if (f === k || f.startsWith(`${k}/`)) this.files.delete(f);
+    for (const f of [...this.files.keys()])
+      if (f === k || f.startsWith(`${k}/`)) this.files.delete(f);
   }
   under(dir: string): string[] {
     return [...this.files.keys()].filter((f) => f.startsWith(`${joinPath(dir)}/`));

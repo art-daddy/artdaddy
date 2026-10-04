@@ -61,7 +61,11 @@ describe("a call that ran out of credits", () => {
     const reg = new ClientToolRegistry().register("generate_image", () => {
       throw new CreditLimitError({ used: 500, limit: 500 });
     });
-    return call("generate_image", {}, (await reg.run("generate_image", {})) as Record<string, unknown>);
+    return call(
+      "generate_image",
+      {},
+      (await reg.run("generate_image", {})) as Record<string, unknown>,
+    );
   }
 
   it("offers the Discord, and the offer actually opens it", async () => {

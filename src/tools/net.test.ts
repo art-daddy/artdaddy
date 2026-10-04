@@ -174,9 +174,7 @@ describe("downloadVideoTool", () => {
     const ctx = ctxWith(runnerOf(() => ({ code: 0, stdout: "", stderr: "" })));
     expect(((await downloadVideoTool({ output_name: "o.mp4" }, ctx)) as Any).ok).toBe(false);
     expect(((await downloadVideoTool({ url: U }, ctx)) as Any).ok).toBe(false);
-    expect(((await downloadVideoTool({ url: U, output_name: "../e" }, ctx)) as Any).ok).toBe(
-      false,
-    );
+    expect(((await downloadVideoTool({ url: U, output_name: "../e" }, ctx)) as Any).ok).toBe(false);
   });
   it("downloads a full video and probes it", async () => {
     const fs = new MockFs();

@@ -731,7 +731,11 @@ function temporalPreroll(effects: unknown): number {
   let n = 0;
   if (Array.isArray(effects)) {
     for (const fx of effects) {
-      const e = (fx ?? {}) as { type?: unknown; enabled?: unknown; params?: Record<string, unknown> };
+      const e = (fx ?? {}) as {
+        type?: unknown;
+        enabled?: unknown;
+        params?: Record<string, unknown>;
+      };
       if (e.enabled === false) continue;
       if (e.type === "motion") n = Math.max(n, Number(e.params?.frames ?? 3) + 1);
       if (e.type === "denoise") n = Math.max(n, 8);
@@ -807,7 +811,10 @@ export function buildRenderCommand(
   const fps = Math.trunc(canvasFps(timeline));
   const duration = canvasDuration(timeline);
   const win = window
-    ? { frame: Math.max(0, Math.trunc(window.frame)), t: Math.max(0, Math.trunc(window.frame)) / fps }
+    ? {
+        frame: Math.max(0, Math.trunc(window.frame)),
+        t: Math.max(0, Math.trunc(window.frame)) / fps,
+      }
     : null;
   const warnings: string[] = [];
   if (cw !== Math.trunc(Number(canvas.width)) || ch !== Math.trunc(Number(canvas.height))) {
@@ -1115,7 +1122,8 @@ export function buildRenderCommand(
         "-i",
         inp.path,
       );
-    else cmd.push("-ss", inp.seekArg ?? inp.si.toFixed(6), "-to", inp.so.toFixed(6), "-i", inp.path);
+    else
+      cmd.push("-ss", inp.seekArg ?? inp.si.toFixed(6), "-to", inp.so.toFixed(6), "-i", inp.path);
   }
   // The branding inputs go LAST so every clip keeps the input index it had; an unbranded plan
   // pushes nothing and is byte-identical to what it was before branding existed.
@@ -1183,7 +1191,11 @@ export function buildRenderCommand(
     // A window seek that landed GAP_MARGIN_S early gets its clock moved back first, so the frames
     // of the margin arrive with negative timestamps and only the gap's last frame survives fps.
     const margin = inputs[r.inputIdx].marginS ?? 0;
-    const parts = [margin > 0 ? `[${r.inputIdx}:v]setpts=PTS-${margin}/TB,setsar=1` : `[${r.inputIdx}:v]setsar=1`];
+    const parts = [
+      margin > 0
+        ? `[${r.inputIdx}:v]setpts=PTS-${margin}/TB,setsar=1`
+        : `[${r.inputIdx}:v]setsar=1`,
+    ];
     if (r.cropExpr) parts.push(r.cropExpr);
     if (r.flipH) parts.push("hflip");
     if (r.flipV) parts.push("vflip");
@@ -1398,9 +1410,7 @@ export function buildRenderCommand(
       // Blend the clip onto the accumulated result using its own alpha as a mask.
       const p = `bl${i}`;
       chains.push(`[${last}]split=2[${p}ca][${p}cb]`);
-      chains.push(
-        `${colorSrc("c=black@0")},format=rgba[${p}ct]`,
-      );
+      chains.push(`${colorSrc("c=black@0")},format=rgba[${p}ct]`);
       chains.push(
         `[${p}ct][v${i}]overlay=x=${ovX}:y=${ovY}:enable='${enable}':shortest=0:eof_action=pass[${p}top]`,
       );

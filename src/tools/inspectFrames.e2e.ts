@@ -44,7 +44,9 @@ afterAll(async () => {
 });
 
 /** What is actually in the file: codec and size, from ffprobe, plus the JPEG magic bytes. */
-async function frameFacts(file: string): Promise<{ jpeg: boolean; w: number; h: number; bytes: number }> {
+async function frameFacts(
+  file: string,
+): Promise<{ jpeg: boolean; w: number; h: number; bytes: number }> {
   const buf = await fsp.readFile(file);
   const r = await nodeRunner.run("ffprobe", [
     "-v",
@@ -57,7 +59,8 @@ async function frameFacts(file: string): Promise<{ jpeg: boolean; w: number; h: 
     "json",
     file,
   ]);
-  const s = (JSON.parse(r.stdout) as { streams: Array<{ width: number; height: number }> }).streams[0];
+  const s = (JSON.parse(r.stdout) as { streams: Array<{ width: number; height: number }> })
+    .streams[0];
   return { jpeg: buf[0] === 0xff && buf[1] === 0xd8, w: s.width, h: s.height, bytes: buf.length };
 }
 
@@ -70,7 +73,15 @@ describe("frames the agent sees are small, and never change after the round that
   it("inspect_media: video frames and stills are JPEG, at most 512 px on the long edge", async () => {
     await nodeFs.mkdir(proj);
     const video = joinPath(proj, "wide.mp4");
-    await ffmpeg(["-f", "lavfi", "-i", "testsrc2=size=1920x1080:rate=30:duration=6", "-pix_fmt", "yuv420p", video]);
+    await ffmpeg([
+      "-f",
+      "lavfi",
+      "-i",
+      "testsrc2=size=1920x1080:rate=30:duration=6",
+      "-pix_fmt",
+      "yuv420p",
+      video,
+    ]);
     const still = joinPath(proj, "photo.png");
     await ffmpeg(["-f", "lavfi", "-i", "testsrc2=size=1600x1200:rate=1", "-frames:v", "1", still]);
 
@@ -96,11 +107,22 @@ describe("frames the agent sees are small, and never change after the round that
 
   it("inspect_timeline: frames are JPEG at most 768 px, and a later look never overwrites an earlier one", async () => {
     const video = joinPath(proj, "tall.mp4");
-    await ffmpeg(["-f", "lavfi", "-i", "testsrc2=size=1080x1920:rate=30:duration=4", "-pix_fmt", "yuv420p", video]);
+    await ffmpeg([
+      "-f",
+      "lavfi",
+      "-i",
+      "testsrc2=size=1080x1920:rate=30:duration=4",
+      "-pix_fmt",
+      "yuv420p",
+      video,
+    ]);
     const ref = await libRef(ctx, video, "video");
     await openE2EDoc(proj);
     await ensureTimeline(ctx.store); // seeded canvas: 1080x1920 @ 30
-    const placed = (await addClipsTool({ entries: [{ media_ref: ref, timeline_in: 0, timeline_out: 90 }] }, ctx)) as Rec;
+    const placed = (await addClipsTool(
+      { entries: [{ media_ref: ref, timeline_in: 0, timeline_out: 90 }] },
+      ctx,
+    )) as Rec;
     expect(placed.ok).toBe(true);
     await flushE2EDoc(proj);
 
@@ -114,7 +136,9 @@ describe("frames the agent sees are small, and never change after the round that
 
     // Edit, then look at the SAME frame number again.
     const clipId = (placed.created as Array<{ clip_id: string }>)[0].clip_id;
-    expect(((await applyColorTool({ clip_ids: [clipId], saturation: 0 }, ctx)) as Rec).ok).toBe(true);
+    expect(((await applyColorTool({ clip_ids: [clipId], saturation: 0 }, ctx)) as Rec).ok).toBe(
+      true,
+    );
     await flushE2EDoc(proj);
     const second = (await inspectTimelineTool({ start_frame: 30 }, ctx)) as Rec;
     expect(second.ok).toBe(true);

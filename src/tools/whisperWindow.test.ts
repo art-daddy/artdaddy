@@ -126,7 +126,10 @@ describe("runWhisper", () => {
     await runWhisper(ctx, "/m/a.mp4", "small", undefined, { start: 12.5, end: 42 });
     const ff = calls.filter((c) => c.program === "ffmpeg");
     expect(ff).toHaveLength(1);
-    expect(argVal(ff[0].args, "-i"), "cut from the extract, not decoded from the source again").toBe(fullWav);
+    expect(
+      argVal(ff[0].args, "-i"),
+      "cut from the extract, not decoded from the source again",
+    ).toBe(fullWav);
     expect([argVal(ff[0].args, "-ss"), argVal(ff[0].args, "-to")]).toEqual(["12.500", "42.000"]);
     const w = whisperCall(calls)!;
     expect(argVal(w.args, "-f")).not.toBe(fullWav);
@@ -147,7 +150,9 @@ describe("runWhisper", () => {
       await runWhisper(ctx, "/m/a.mp4", "small", undefined, { start: 30, end: 40 });
       const winFf = calls.filter((c) => c.program === "ffmpeg")[1];
       expect(winFf, "the window extracted its own audio").toBeDefined();
-      expect(argVal(winFf.args, "-i"), "from the source, not the half-written extract").toBe("/m/a.mp4");
+      expect(argVal(winFf.args, "-i"), "from the source, not the half-written extract").toBe(
+        "/m/a.mp4",
+      );
     } finally {
       // Always let the held extraction finish: runs are shared per output path across callers,
       // so one left hanging would hang every later test that asks for this file.
@@ -160,7 +165,10 @@ describe("runWhisper", () => {
     const { ctx, calls } = harness({ failFfmpeg: 1 });
     await expect(runWhisper(ctx, "/m/a.mp4")).rejects.toThrow(/audio extraction failed/);
     await runWhisper(ctx, "/m/a.mp4");
-    expect(calls.filter((c) => c.program === "ffmpeg"), "the failed extract was not reused").toHaveLength(2);
+    expect(
+      calls.filter((c) => c.program === "ffmpeg"),
+      "the failed extract was not reused",
+    ).toHaveLength(2);
     expect(calls.filter((c) => c.program === "whisper-cli")).toHaveLength(1);
   });
 
@@ -176,7 +184,10 @@ describe("runWhisper", () => {
     const { ctx, calls, published } = harness();
     await runWhisper(ctx, "/m/a.mp4", "small", undefined, { start: 10, end: 20 });
     await runWhisper(ctx, "/m/a.mp4", "small");
-    expect(calls.filter((c) => c.program === "whisper-cli"), "the window did not answer the whole file").toHaveLength(2);
+    expect(
+      calls.filter((c) => c.program === "whisper-cli"),
+      "the window did not answer the whole file",
+    ).toHaveLength(2);
     expect(new Set(published).size, "the window has to be part of the cache key").toBe(2);
   });
 

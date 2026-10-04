@@ -215,7 +215,11 @@ export class ClientTurnRunner {
     const round = ++roundSeq;
     for (const ri of rr.reasoning_items ?? []) {
       if (ri?.id && ri?.encrypted_content)
-        this.d.emit("reasoning_item", { id: ri.id, encrypted_content: ri.encrypted_content, round });
+        this.d.emit("reasoning_item", {
+          id: ri.id,
+          encrypted_content: ri.encrypted_content,
+          round,
+        });
     }
     if (rr.kind === "text") {
       if (rr.final_text) {
@@ -323,7 +327,12 @@ export class ClientTurnRunner {
   private recordDenial(call: PendingCall, reason?: string): void {
     const result = { ok: false, error: reason || "user denied this tool call" };
     this.emitCall(call);
-    this.d.emit("tool_result", { ...result, call_id: call.call_id, name: call.name, model_result: result });
+    this.d.emit("tool_result", {
+      ...result,
+      call_id: call.call_id,
+      name: call.name,
+      model_result: result,
+    });
     // A refusal never reaches the dispatch boundary, so this is the only place it can be
     // counted -- and "the user said no" is a different signal from "the tool failed".
     recordToolDenied(call.name, call.call_id, result.error);
@@ -333,7 +342,11 @@ export class ClientTurnRunner {
 
   /** The tool_call part: the call, its round, and (first call only) the round's prose. */
   private emitCall(call: PendingCall): void {
-    const part: Record<string, unknown> = { call_id: call.call_id, name: call.name, args: call.arguments };
+    const part: Record<string, unknown> = {
+      call_id: call.call_id,
+      name: call.name,
+      args: call.arguments,
+    };
     const round = this.callRound.get(call.call_id);
     if (round !== undefined) part.round = round;
     const prose = this.rationale.get(call.call_id);

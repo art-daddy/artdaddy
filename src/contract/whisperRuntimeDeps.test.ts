@@ -77,7 +77,11 @@ function importedDlls(file: string): string[] {
   const sections: { va: number; size: number; raw: number }[] = [];
   for (let i = 0; i < sectionCount; i++) {
     const s = peAt + 24 + optSize + i * 40;
-    sections.push({ va: readU32(buf, s + 12), size: readU32(buf, s + 16), raw: readU32(buf, s + 20) });
+    sections.push({
+      va: readU32(buf, s + 12),
+      size: readU32(buf, s + 16),
+      raw: readU32(buf, s + 20),
+    });
   }
 
   const toOffset = (rva: number): number => {
@@ -136,21 +140,24 @@ describe.skipIf(stagedDlls.length === 0)("staged whisper binaries: runtime depen
     expect(imports).toContain("kernel32.dll");
   });
 
-  it.each(loaded)("$label imports nothing a clean Windows install would lack", ({ label, path }) => {
-    const present = new Set(stagedDlls.map((f) => f.toLowerCase()));
+  it.each(loaded)(
+    "$label imports nothing a clean Windows install would lack",
+    ({ label, path }) => {
+      const present = new Set(stagedDlls.map((f) => f.toLowerCase()));
 
-    const unresolvable = importedDlls(path).filter(
-      (dep) => !present.has(dep) && !SYSTEM_DLL.some((re) => re.test(dep)),
-    );
+      const unresolvable = importedDlls(path).filter(
+        (dep) => !present.has(dep) && !SYSTEM_DLL.some((re) => re.test(dep)),
+      );
 
-    expect(
-      unresolvable,
-      `${label} imports ${unresolvable.join(", ")}, which is neither staged beside it nor part ` +
-        "of Windows. On a machine without it the process dies in the loader with no stderr and " +
-        "no exit status, and transcription fails looking exactly like silent audio. Stage the " +
-        "library in scripts/fetch-sidecars.mjs, or link it statically in the whisper workflow.",
-    ).toEqual([]);
-  });
+      expect(
+        unresolvable,
+        `${label} imports ${unresolvable.join(", ")}, which is neither staged beside it nor part ` +
+          "of Windows. On a machine without it the process dies in the loader with no stderr and " +
+          "no exit status, and transcription fails looking exactly like silent audio. Stage the " +
+          "library in scripts/fetch-sidecars.mjs, or link it statically in the whisper workflow.",
+      ).toEqual([]);
+    },
+  );
 
   // Whichever redist libraries this build still imports must be staged. Kept as a separate
   // assertion because the check above passes just as happily when NOTHING imports them, so it

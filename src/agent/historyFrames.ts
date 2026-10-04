@@ -99,7 +99,8 @@ export async function historyAttachments(
     if (!abs) continue;
     try {
       const bytes = await store.readBytes(abs);
-      if (!bytes.length || bytes.length > HISTORY_FRAME_MAX_BYTES || !decodableImage(bytes)) continue;
+      if (!bytes.length || bytes.length > HISTORY_FRAME_MAX_BYTES || !decodableImage(bytes))
+        continue;
       out.push({
         kind: "image",
         b64: toB64(bytes),

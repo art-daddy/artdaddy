@@ -164,18 +164,20 @@ describe("offlineUnderPlayhead", () => {
   it("treats the span as half-open, like every other span check here", () => {
     const t = tl({ clips: [clip("media_a", 10, 20)] });
     expect(offlineUnderPlayhead(t, 9, ["media_a"]), "before the clip").toEqual([]);
-    expect(offlineUnderPlayhead(t, 10, ["media_a"]), "first frame is covered").toEqual([
-      "media_a",
-    ]);
+    expect(offlineUnderPlayhead(t, 10, ["media_a"]), "first frame is covered").toEqual(["media_a"]);
     expect(offlineUnderPlayhead(t, 20, ["media_a"]), "the out frame is NOT covered").toEqual([]);
   });
 
   it("finds it on a LOWER track, not just the first one it looks at", () => {
     // Picking the easiest member to verify is how a per-track bug ships: the offline clip is
     // as likely to be on v3 as on v1.
-    const t = tl({ clips: [clip("media_ok", 0, 100)] }, { clips: [] }, {
-      clips: [clip("media_a", 0, 100)],
-    });
+    const t = tl(
+      { clips: [clip("media_ok", 0, 100)] },
+      { clips: [] },
+      {
+        clips: [clip("media_a", 0, 100)],
+      },
+    );
     expect(offlineUnderPlayhead(t, 50, ["media_a"])).toEqual(["media_a"]);
   });
 

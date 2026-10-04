@@ -300,18 +300,23 @@ describe("ChatView", () => {
 
   // The REAL error's person-facing sentence, for both scopes: the banner is set from
   // toUserMessage(e), so a fixture string would agree with the matcher whatever the error said.
-  it.each(["user", "global"])("offers the Discord on the banner when %s credits ran out", async (scope) => {
-    const { CreditLimitError } = await vi.importActual<typeof import("../api/usage")>("../api/usage");
-    state.error = toUserMessage(new CreditLimitError({ scope }));
-    render(<ChatView />);
-    expect(screen.getByRole("button", { name: /join our discord/i })).toBeInTheDocument();
-  });
+  it.each(["user", "global"])(
+    "offers the Discord on the banner when %s credits ran out",
+    async (scope) => {
+      const { CreditLimitError } =
+        await vi.importActual<typeof import("../api/usage")>("../api/usage");
+      state.error = toUserMessage(new CreditLimitError({ scope }));
+      render(<ChatView />);
+      expect(screen.getByRole("button", { name: /join our discord/i })).toBeInTheDocument();
+    },
+  );
 
   // A generation that ran out in the background lands as a note, not an error part, so the note
   // itself has to carry the way out.
   it("offers the Discord on a background job that ran out of credits", async () => {
     const open = vi.spyOn(window, "open").mockReturnValue(null);
-    const { CreditLimitError } = await vi.importActual<typeof import("../api/usage")>("../api/usage");
+    const { CreditLimitError } =
+      await vi.importActual<typeof import("../api/usage")>("../api/usage");
     const error = new CreditLimitError({ used: 500, limit: 500 }).message;
     state.turns = [
       {

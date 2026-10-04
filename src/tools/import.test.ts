@@ -95,7 +95,14 @@ describe("how the media got in (media_import.via)", () => {
     const ABS = "D:/footage/hero.mp4";
     await fs.writeBytes(joinPath(ABS), new Uint8Array([5, 6, 7]));
     const store = new ProjectStoreAccess(DIR, fs);
-    await registerLibraryClip(store, new Uint8Array([5, 6, 7]), "hero.mp4", "video", undefined, ABS);
+    await registerLibraryClip(
+      store,
+      new Uint8Array([5, 6, 7]),
+      "hero.mp4",
+      "video",
+      undefined,
+      ABS,
+    );
     // The one import whose bytes can vanish underneath the library later, so it outranks any
     // provenance the caller supplied.
     expect(tele.calls).toEqual([{ ok: true, via: "reference" }]);

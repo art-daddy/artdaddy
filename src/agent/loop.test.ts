@@ -320,7 +320,11 @@ describe("ClientTurnRunner", () => {
     const batch = (n: number, tag: string) =>
       rr({
         kind: "tool_calls",
-        pending_calls: Array.from({ length: n }, (_, i) => ({ call_id: `${tag}${i}`, name: "set_transition", arguments: {} })),
+        pending_calls: Array.from({ length: n }, (_, i) => ({
+          call_id: `${tag}${i}`,
+          name: "set_transition",
+          arguments: {},
+        })),
       });
     const h = harness([batch(30, "a"), batch(15, "b"), rr({ kind: "text", final_text: "done" })]);
     await h.runner.start("crossfade everything");
@@ -333,14 +337,20 @@ describe("ClientTurnRunner", () => {
   it("Continue sends the paused batch's results", async () => {
     const batch = rr({
       kind: "tool_calls",
-      pending_calls: Array.from({ length: CONTINUE_CAPS.default }, (_, i) => ({ call_id: `a${i}`, name: "get_timeline", arguments: {} })),
+      pending_calls: Array.from({ length: CONTINUE_CAPS.default }, (_, i) => ({
+        call_id: `a${i}`,
+        name: "get_timeline",
+        arguments: {},
+      })),
     });
     const h = harness([batch, rr({ kind: "text", final_text: "done" })]);
     await h.runner.start("go");
     expect(h.infer).toHaveBeenCalledTimes(1);
     await h.runner.continueRun();
     expect(h.infer).toHaveBeenCalledTimes(2);
-    expect((h.infer.mock.calls[1][0] as RoundInput).tool_results).toHaveLength(CONTINUE_CAPS.default);
+    expect((h.infer.mock.calls[1][0] as RoundInput).tool_results).toHaveLength(
+      CONTINUE_CAPS.default,
+    );
     expect(h.names().at(-1)).toBe("turn_done");
   });
 
@@ -436,7 +446,11 @@ describe("ClientTurnRunner records what the model saw", () => {
         ],
         reasoning_items: [{ id: "rs_1", encrypted_content: "ENC" }],
       }),
-      rr({ kind: "text", final_text: "done", reasoning_items: [{ id: "rs_2", encrypted_content: "ENC2" }] }),
+      rr({
+        kind: "text",
+        final_text: "done",
+        reasoning_items: [{ id: "rs_2", encrypted_content: "ENC2" }],
+      }),
     ]);
     await h.runner.start("hi");
     const seq = h.events.filter((e) => e.event !== "turn_start" && e.event !== "turn_done");

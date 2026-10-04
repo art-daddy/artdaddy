@@ -29,9 +29,10 @@ describe.skipIf(!NET)("pinned whisper release exists upstream", () => {
       `https://api.github.com/repos/art-daddy/artdaddy/releases/tags/${encodeURIComponent(tag)}`,
       { headers: { accept: "application/vnd.github+json" } },
     );
-    expect(res.status, `release '${tag}' does not exist — the fetch would fall back to CPU-only`).toBe(
-      200,
-    );
+    expect(
+      res.status,
+      `release '${tag}' does not exist — the fetch would fall back to CPU-only`,
+    ).toBe(200);
     const names = ((await res.json()).assets ?? []).map((a: { name: string }) => a.name);
     expect(names, `release '${tag}' has no '${asset}'`).toContain(asset);
   });

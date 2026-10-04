@@ -218,7 +218,10 @@ describe("buildRenderCommand — one frame (UJ-012)", () => {
     const tenMinutes = tl([
       { media_ref: "/long.mp4", source_in: 0, source_out: 600, timeline_in: 0, timeline_out: 600 },
     ]);
-    const seek = seekOf(buildRenderCommand(tenMinutes, "/f.png", {}, { frame: 30 * 540 }).args, "/long.mp4");
+    const seek = seekOf(
+      buildRenderCommand(tenMinutes, "/f.png", {}, { frame: 30 * 540 }).args,
+      "/long.mp4",
+    );
     // two seconds early on purpose, so a gap in a screen recording is filled like the export fills it
     expect(seek).toBeGreaterThan(537);
     expect(seek).toBeLessThanOrEqual(540);
@@ -230,7 +233,14 @@ describe("buildRenderCommand — one frame (UJ-012)", () => {
     const plan = buildRenderCommand(
       tl([
         { media_ref: "/bg.png", timeline_in: 0, timeline_out: 600 },
-        { kind: "audio", media_ref: "/m.wav", source_in: 0, source_out: 600, timeline_in: 0, timeline_out: 600 },
+        {
+          kind: "audio",
+          media_ref: "/m.wav",
+          source_in: 0,
+          source_out: 600,
+          timeline_in: 0,
+          timeline_out: 600,
+        },
       ]),
       "/f.png",
       {},
@@ -255,7 +265,9 @@ describe("buildRenderCommand — one frame (UJ-012)", () => {
         },
       },
     };
-    const clip = [{ media_ref: "/v.mp4", source_in: 0, source_out: 3, timeline_in: 0, timeline_out: 3 }];
+    const clip = [
+      { media_ref: "/v.mp4", source_in: 0, source_out: 3, timeline_in: 0, timeline_out: 3 },
+    ];
     await runRenderPlan(ctx, buildRenderCommand(tl(clip), "/f.png", {}, { frame: 10 }));
     expect(useExportJob.getState().fraction).toBe(0.5);
     // control: the same report from an export render does move it
@@ -2223,7 +2235,9 @@ describe("renderTimelineTool", () => {
     const { ctx } = await goneMediaCtx({ present: false });
     const r = (await renderTimelineTool({}, ctx)) as Any;
     expect(r.ok).toBe(false);
-    expect(String(r.error)).toMatch(/media offline: clip v1c uses 'gone\.mp4', which is not on disk/);
+    expect(String(r.error)).toMatch(
+      /media offline: clip v1c uses 'gone\.mp4', which is not on disk/,
+    );
   });
 
   it("blames no file that IS on disk: the failure keeps ffmpeg's own reason", async () => {

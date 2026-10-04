@@ -36,9 +36,13 @@ function strokes(w: number, h: number, ticks: number[], width: number, colour: s
   const rects: string[] = [];
   for (const t of ticks) {
     const x = Math.min(Math.max(0.5, t * w), w - 0.5);
-    rects.push(`m ${q(x - half)} 0 l ${q(x + half)} 0 ${q(x + half)} ${q(h)} ${q(x - half)} ${q(h)}`);
+    rects.push(
+      `m ${q(x - half)} 0 l ${q(x + half)} 0 ${q(x + half)} ${q(h)} ${q(x - half)} ${q(h)}`,
+    );
     const y = Math.min(Math.max(0.5, t * h), h - 0.5);
-    rects.push(`m 0 ${q(y - half)} l ${q(w)} ${q(y - half)} ${q(w)} ${q(y + half)} 0 ${q(y + half)}`);
+    rects.push(
+      `m 0 ${q(y - half)} l ${q(w)} ${q(y - half)} ${q(w)} ${q(y + half)} 0 ${q(y + half)}`,
+    );
   }
   return `{\\an7\\pos(0,0)\\bord0\\shad0${colour}\\p3}${rects.join(" ")}{\\p0}`;
 }

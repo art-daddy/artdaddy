@@ -146,7 +146,11 @@ async function runBatch(
 }
 
 /** ASS labels for a storyboard: a dark chip with the time at each tile's top-left corner. */
-function labelsAss(times: number[], tile: { w: number; h: number }, sheet: { w: number; h: number }): AssFile {
+function labelsAss(
+  times: number[],
+  tile: { w: number; h: number },
+  sheet: { w: number; h: number },
+): AssFile {
   const events = times.map((t, i) => {
     const x = (i % OVERVIEW.columns) * tile.w;
     const y = Math.floor(i / OVERVIEW.columns) * tile.h;
@@ -205,8 +209,11 @@ export async function makeStoryboard(
   try {
     const times = candidateTimes(start, end);
     const batches: number[][] = [];
-    for (let i = 0; i < times.length; i += OVERVIEW.batch) batches.push(times.slice(i, i + OVERVIEW.batch));
-    const results: Array<Array<{ t: number; grid: Uint8Array; file: string }>> = new Array(batches.length);
+    for (let i = 0; i < times.length; i += OVERVIEW.batch)
+      batches.push(times.slice(i, i + OVERVIEW.batch));
+    const results: Array<Array<{ t: number; grid: Uint8Array; file: string }>> = new Array(
+      batches.length,
+    );
     let next = 0;
     await Promise.all(
       Array.from({ length: Math.min(4, batches.length) }, async () => {

@@ -98,12 +98,22 @@ function threads(args: string[], single: boolean): string[] {
 }
 
 /** The frame window: one frame, written as raw yuv420p so nothing converts it. */
-async function windowFrame(tl: Timeline, frame: number, tag: string, singleThread = false): Promise<Buffer> {
+async function windowFrame(
+  tl: Timeline,
+  frame: number,
+  tag: string,
+  singleThread = false,
+): Promise<Buffer> {
   const out = path.join(dir, `${tag}_w${frame}.yuv`);
-  const plan = buildRenderCommand(tl, out, {}, {
-    frame,
-    outputArgs: ["-f", "rawvideo", "-pix_fmt", "yuv420p"],
-  });
+  const plan = buildRenderCommand(
+    tl,
+    out,
+    {},
+    {
+      frame,
+      outputArgs: ["-f", "rawvideo", "-pix_fmt", "yuv420p"],
+    },
+  );
   const r = await runRenderPlan(ctx, { ...plan, args: threads([...plan.args], singleThread) });
   expect(r.code, r.stderr.slice(-600)).toBe(0);
   return fsp.readFile(out);
@@ -136,8 +146,14 @@ async function expectSameAsExport(
 }
 
 const sec = (frames: number): number => frames / FPS;
-const track = (id: string, z: number, clips: Any[], kind = "video"): Any => ({ id, kind, z, clips });
-const timeline = (tracks: Any[]): Timeline => ({ canvas: { width: W, height: H, fps: FPS }, tracks }) as Timeline;
+const track = (id: string, z: number, clips: Any[], kind = "video"): Any => ({
+  id,
+  kind,
+  z,
+  clips,
+});
+const timeline = (tracks: Any[]): Timeline =>
+  ({ canvas: { width: W, height: H, fps: FPS }, tracks }) as Timeline;
 /** A video clip by FRAMES, in the seconds view buildRenderCommand reads. */
 function vclip(media: string, tin: number, tout: number, srcIn = 0, extra: Any = {}): Any {
   const speed = extra.speed ?? 1;
@@ -157,13 +173,46 @@ beforeAll(async () => {
   // Long GOPs, so a seek really has to decode forward from a keyframe that is seconds away.
   const enc = ["-c:v", "libx264", "-g", "120", "-pix_fmt", "yuv420p"];
   src.a = path.join(dir, "a.mp4");
-  await ff(["-y", "-f", "lavfi", "-i", `testsrc2=size=${W}x${H}:rate=30:duration=14`, ...enc, src.a]);
+  await ff([
+    "-y",
+    "-f",
+    "lavfi",
+    "-i",
+    `testsrc2=size=${W}x${H}:rate=30:duration=14`,
+    ...enc,
+    src.a,
+  ]);
   src.b = path.join(dir, "b.mp4");
-  await ff(["-y", "-f", "lavfi", "-i", `testsrc2=size=${W}x${H}:rate=30:duration=14,hue=h=140`, ...enc, src.b]);
+  await ff([
+    "-y",
+    "-f",
+    "lavfi",
+    "-i",
+    `testsrc2=size=${W}x${H}:rate=30:duration=14,hue=h=140`,
+    ...enc,
+    src.b,
+  ]);
   src.c60 = path.join(dir, "c60.mp4");
-  await ff(["-y", "-f", "lavfi", "-i", `testsrc2=size=${W}x${H}:rate=60:duration=14`, ...enc, src.c60]);
+  await ff([
+    "-y",
+    "-f",
+    "lavfi",
+    "-i",
+    `testsrc2=size=${W}x${H}:rate=60:duration=14`,
+    ...enc,
+    src.c60,
+  ]);
   src.still = path.join(dir, "still.png");
-  await ff(["-y", "-f", "lavfi", "-i", "testsrc2=size=480x360:rate=1", "-frames:v", "1", src.still]);
+  await ff([
+    "-y",
+    "-f",
+    "lavfi",
+    "-i",
+    "testsrc2=size=480x360:rate=1",
+    "-frames:v",
+    "1",
+    src.still,
+  ]);
   // A screen recording with nothing to send for a second: frames 100-129 are missing, and the
   // export repeats frame 99 through the gap.
   src.vfr = path.join(dir, "vfr.mp4");
@@ -189,13 +238,19 @@ afterAll(async () => {
 describe("a frame window is the export's frame at that instant", () => {
   it("plain cuts, deep into a clip and right at its edges", async () => {
     const tl = timeline([
-      track("v", 0, [vclip(src.a, 0, 150, 0), vclip(src.b, 150, 300, 60), vclip(src.a, 300, 390, 240)]),
+      track("v", 0, [
+        vclip(src.a, 0, 150, 0),
+        vclip(src.b, 150, 300, 60),
+        vclip(src.a, 300, 390, 240),
+      ]),
     ]);
     await expectSameAsExport("cuts", tl, [0, 1, 74, 148, 149, 150, 151, 299, 300, 301, 389]);
   });
 
   it("a centred crossfade: inside the lead-in, at the cut, and after it", async () => {
-    const b = vclip(src.b, 150, 300, 30, { transition_in: { kind: "crossfade", duration: sec(16) } });
+    const b = vclip(src.b, 150, 300, 30, {
+      transition_in: { kind: "crossfade", duration: sec(16) },
+    });
     const tl = timeline([track("v", 0, [vclip(src.a, 0, 150, 0), b])]);
     await expectSameAsExport("xfade", tl, [100, 141, 142, 145, 149, 150, 151, 157, 158, 200, 299]);
   });
@@ -215,11 +270,26 @@ describe("a frame window is the export's frame at that instant", () => {
   it("keyframed position, scale, opacity and rotation over a base layer", async () => {
     const top = vclip(src.b, 30, 270, 15, {
       transform: {
-        position: { x: [{ t: 0, v: 0.25 }, { t: sec(240), v: 0.75 }], y: 0.5 },
-        scale: [{ t: 0, v: 0.4 }, { t: sec(240), v: 0.8 }],
+        position: {
+          x: [
+            { t: 0, v: 0.25 },
+            { t: sec(240), v: 0.75 },
+          ],
+          y: 0.5,
+        },
+        scale: [
+          { t: 0, v: 0.4 },
+          { t: sec(240), v: 0.8 },
+        ],
       },
-      opacity: [{ t: 0, v: 0.3 }, { t: sec(120), v: 1 }],
-      rotate: [{ t: 0, v: 0 }, { t: sec(240), v: 45 }],
+      opacity: [
+        { t: 0, v: 0.3 },
+        { t: sec(120), v: 1 },
+      ],
+      rotate: [
+        { t: 0, v: 0 },
+        { t: sec(240), v: 45 },
+      ],
     });
     const tl = timeline([track("base", 0, [vclip(src.a, 0, 300, 0)]), track("top", 1, [top])]);
     await expectSameAsExport("keys", tl, [30, 31, 77, 150, 151, 268, 269]);
@@ -252,7 +322,12 @@ describe("a frame window is the export's frame at that instant", () => {
           media_ref: src.still,
           timeline_in: 0,
           timeline_out: sec(240),
-          transform: { scale: [{ t: 0, v: 1 }, { t: sec(240), v: 1.6 }] },
+          transform: {
+            scale: [
+              { t: 0, v: 1 },
+              { t: sec(240), v: 1.6 },
+            ],
+          },
         },
       ]),
     ]);
@@ -285,7 +360,11 @@ describe("a frame window is the export's frame at that instant", () => {
           ],
           timeline_in: sec(150),
           timeline_out: sec(210),
-          animation: { build: "word-highlight", timing: "explicit", emphasis: { kind: "color", color: "#ffd400" } },
+          animation: {
+            build: "word-highlight",
+            timing: "explicit",
+            emphasis: { kind: "color", color: "#ffd400" },
+          },
           style,
         },
       ],
@@ -298,7 +377,9 @@ describe("a frame window is the export's frame at that instant", () => {
   it("a blend mode, a glow and motion blur", async () => {
     const top = vclip(src.b, 0, 240, 40, { blend: "screen" });
     const glowy = vclip(src.a, 240, 330, 100, { glow: 0.6 });
-    const blur = vclip(src.b, 330, 420, 200, { effects: [{ type: "motion", params: { frames: 6 } }] });
+    const blur = vclip(src.b, 330, 420, 200, {
+      effects: [{ type: "motion", params: { frames: 6 } }],
+    });
     const tl = timeline([
       track("base", 0, [vclip(src.a, 0, 240, 0), glowy, blur]),
       track("top", 1, [top]),
@@ -314,7 +395,12 @@ describe("a frame window is the export's frame at that instant", () => {
 
   it("a zooming clip that also rotates, deep in (rendered from its own first frame)", async () => {
     const spin = vclip(src.b, 0, 330, 30, {
-      transform: { scale: [{ t: 0, v: 0.4 }, { t: sec(330), v: 0.9 }] },
+      transform: {
+        scale: [
+          { t: 0, v: 0.4 },
+          { t: sec(330), v: 0.9 },
+        ],
+      },
       rotate: 20,
     });
     const tl = timeline([track("base", 0, [vclip(src.a, 0, 330, 0)]), track("top", 1, [spin])]);
@@ -323,7 +409,9 @@ describe("a frame window is the export's frame at that instant", () => {
 
   it("denoise is temporal, so a window may differ by a little, never by a frame", async () => {
     const tl = timeline([
-      track("v", 0, [vclip(src.a, 0, 300, 0, { effects: [{ type: "denoise", params: { strength: 4 } }] })]),
+      track("v", 0, [
+        vclip(src.a, 0, 300, 0, { effects: [{ type: "denoise", params: { strength: 4 } }] }),
+      ]),
     ]);
     await expectSameAsExport("denoise", tl, [12, 150, 290], { tolerance: 3 });
   });

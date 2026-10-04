@@ -46,7 +46,8 @@ function handled(call: ts.CallExpression): boolean {
       return false;
     }
     if (ts.isAwaitExpression(parent)) {
-      for (let a: ts.Node | undefined = parent; a; a = a.parent) if (ts.isTryStatement(a)) return true;
+      for (let a: ts.Node | undefined = parent; a; a = a.parent)
+        if (ts.isTryStatement(a)) return true;
       return false;
     }
     return false;
@@ -80,7 +81,9 @@ describe("every media element play() handles its rejection", () => {
           ts.isPropertyAccessExpression(node.expression) &&
           node.expression.name.text === "play"
         ) {
-          const recv = checker.getNonNullableType(checker.getTypeAtLocation(node.expression.expression));
+          const recv = checker.getNonNullableType(
+            checker.getTypeAtLocation(node.expression.expression),
+          );
           const names = (recv.isUnion() ? recv.types : [recv]).map((t) => checker.typeToString(t));
           if (names.some((n) => /^HTML(Media|Video|Audio)Element$/.test(n))) {
             const where = `${relative(ROOT, file)}:${sf.getLineAndCharacterOfPosition(node.getStart()).line + 1}`;

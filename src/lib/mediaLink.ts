@@ -45,7 +45,9 @@ export async function offlineClips(store: ProjectStoreAccess): Promise<LibraryCl
  *  Without this a clip whose source walked away is pixel-identical to a gap, and the
  *  only place that says otherwise is a panel the user has to think to open. */
 export function offlineUnderPlayhead(
-  timeline: { tracks?: { clips?: { media_ref?: string; timeline_in: number; timeline_out: number }[] }[] } | null,
+  timeline: {
+    tracks?: { clips?: { media_ref?: string; timeline_in: number; timeline_out: number }[] }[];
+  } | null,
   frame: number,
   offline: readonly string[] | undefined,
 ): string[] {
@@ -56,7 +58,8 @@ export function offlineUnderPlayhead(
     for (const clip of track.clips ?? []) {
       const ref = clip.media_ref;
       // Half-open, matching every other span check here: a clip ending at F does not cover F.
-      if (!ref || !gone.has(ref) || frame < clip.timeline_in || frame >= clip.timeline_out) continue;
+      if (!ref || !gone.has(ref) || frame < clip.timeline_in || frame >= clip.timeline_out)
+        continue;
       if (!hit.includes(ref)) hit.push(ref);
     }
   }

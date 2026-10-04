@@ -33,7 +33,9 @@ vi.mock("./storyboard", () => ({
 }));
 vi.mock("./transcribe", () => ({
   normLanguage: (l: unknown) => {
-    const s = String(l ?? "").trim().toLowerCase();
+    const s = String(l ?? "")
+      .trim()
+      .toLowerCase();
     return !s || s === "auto" ? "" : s;
   },
   peekTranscript: vi.fn(async () => null),
@@ -402,7 +404,10 @@ describe("inspectMediaTool", () => {
   it("honours an explicit start_seconds/end_seconds window and skips frames ffmpeg fails to write", async () => {
     const fs = new MockFs();
     fs.touch(joinPath(DIR, "vid.mp4"));
-    const runner = mediaRunner(fs, { probe: VIDEO_PROBE, failFrame: (t) => Math.abs(t - 5) < 0.01 });
+    const runner = mediaRunner(fs, {
+      probe: VIDEO_PROBE,
+      failFrame: (t) => Math.abs(t - 5) < 0.01,
+    });
     const r = (await inspectMediaTool(
       { media_ref: "vid.mp4", max_frames: 3, start_seconds: 2, end_seconds: 8 },
       ctxWith(runner, fs),
@@ -444,7 +449,9 @@ describe("inspectMediaTool looks at what it returns (UJ-012)", () => {
     const runner = mediaRunner(fs, { probe: VIDEO_PROBE });
     const r = (await inspectMediaTool({ media_ref: "vid.mp4" }, ctxWith(runner, fs))) as Any;
     expect(r.ok).toBe(true);
-    expect(r.frames.map((f: Any) => f.t)).toEqual(evenTimes(0, 12.5, 6).map((t) => Math.round(t * 1000) / 1000));
+    expect(r.frames.map((f: Any) => f.t)).toEqual(
+      evenTimes(0, 12.5, 6).map((t) => Math.round(t * 1000) / 1000),
+    );
     expect(r.frames_attached).toBe(6);
     expect(r.timing).toBe("source_seconds");
     expect(r.coordinate_grid).toBe("0-1, origin top-left");
@@ -462,7 +469,10 @@ describe("inspectMediaTool looks at what it returns (UJ-012)", () => {
   it("measures sharpness and noise on the grey copy of exactly the pixels shown", async () => {
     const { fs } = setup();
     const runner = mediaRunner(fs, { probe: VIDEO_PROBE, grey: texture });
-    const r = (await inspectMediaTool({ media_ref: "vid.mp4", max_frames: 2 }, ctxWith(runner, fs))) as Any;
+    const r = (await inspectMediaTool(
+      { media_ref: "vid.mp4", max_frames: 2 },
+      ctxWith(runner, fs),
+    )) as Any;
     const px = texture(288, 512);
     expect(r.sharpness).toBe(Math.round(laplacianVariance(px, 288, 512) * 10) / 10);
     expect(r.noise_sigma).toBe(Math.round(noiseSigma(px, 288, 512) * 10) / 10);
@@ -479,7 +489,10 @@ describe("inspectMediaTool looks at what it returns (UJ-012)", () => {
     const { fs } = setup();
     const runner = mediaRunner(fs, { probe: VIDEO_PROBE, loudness: TONE_STDERR });
     const stop = new AbortController();
-    await inspectMediaTool({ media_ref: "vid.mp4", max_frames: 3 }, { ...ctxWith(runner, fs), signal: stop.signal });
+    await inspectMediaTool(
+      { media_ref: "vid.mp4", max_frames: 3 },
+      { ...ctxWith(runner, fs), signal: stop.signal },
+    );
     const ff = runner.calls.filter((c) => c.program === "ffmpeg");
     expect(ff.length).toBe(4); // three frames and the loudness pass
     for (const c of ff) expect(c.signal).toBe(stop.signal);
@@ -489,7 +502,15 @@ describe("inspectMediaTool looks at what it returns (UJ-012)", () => {
     const { fs } = setup();
     const dv = JSON.stringify({
       format: { format_name: "dv", duration: "10", size: "1000" },
-      streams: [{ codec_type: "video", width: 720, height: 480, sample_aspect_ratio: "8:9", codec_name: "dvvideo" }],
+      streams: [
+        {
+          codec_type: "video",
+          width: 720,
+          height: 480,
+          sample_aspect_ratio: "8:9",
+          codec_name: "dvvideo",
+        },
+      ],
     });
     const runner = mediaRunner(fs, { probe: dv });
     await inspectMediaTool({ media_ref: "vid.mp4", max_frames: 1 }, ctxWith(runner, fs));
@@ -506,7 +527,12 @@ describe("inspectMediaTool looks at what it returns (UJ-012)", () => {
     )) as Any;
     expect(r.loudness).toEqual({ integrated_lufs: -23, true_peak_dbtp: -23, rms_dbfs: -26 });
     const pass = runner.calls.find((c) => c.args.some((a) => a.includes("ebur128")))!.args;
-    expect(pass.slice(pass.indexOf("-ss"), pass.indexOf("-ss") + 4)).toEqual(["-ss", "2.000", "-to", "8.000"]);
+    expect(pass.slice(pass.indexOf("-ss"), pass.indexOf("-ss") + 4)).toEqual([
+      "-ss",
+      "2.000",
+      "-to",
+      "8.000",
+    ]);
   });
 
   it("reports no loudness for a video with no sound, and never runs the pass", async () => {
@@ -516,7 +542,10 @@ describe("inspectMediaTool looks at what it returns (UJ-012)", () => {
       streams: [{ codec_type: "video", width: 640, height: 360, codec_name: "h264" }],
     });
     const runner = mediaRunner(fs, { probe: silent });
-    const r = (await inspectMediaTool({ media_ref: "vid.mp4", max_frames: 1 }, ctxWith(runner, fs))) as Any;
+    const r = (await inspectMediaTool(
+      { media_ref: "vid.mp4", max_frames: 1 },
+      ctxWith(runner, fs),
+    )) as Any;
     expect(r.loudness).toBeNull();
     expect(r.transcript).toBeNull();
     expect(runner.calls.some((c) => c.args.some((a) => a.includes("ebur128")))).toBe(false);
@@ -525,7 +554,14 @@ describe("inspectMediaTool looks at what it returns (UJ-012)", () => {
   /** A timeline holding video clip `v` (200 frames from source frame 30, placed at 100) and its
    *  linked audio clip at `volume`. */
   function linked(fs: MockFs, volume: unknown): void {
-    const clip = { media_ref: "vid.mp4", source_in: 30, source_out: 90, timeline_in: 100, timeline_out: 160, link_group: "L" };
+    const clip = {
+      media_ref: "vid.mp4",
+      source_in: 30,
+      source_out: 90,
+      timeline_in: 100,
+      timeline_out: 160,
+      link_group: "L",
+    };
     fs.files.set(
       joinPath(DIR, "internals/timeline.json"),
       JSON.stringify({
@@ -547,9 +583,16 @@ describe("inspectMediaTool looks at what it returns (UJ-012)", () => {
     const r = (await inspectMediaTool({ clip_id: "v", max_frames: 1 }, ctxWith(runner, fs))) as Any;
     expect(r.loudness.clip_volume).toBe(0.5);
     // Half the amplitude is 6.02 dB down, on every figure.
-    expect(r.loudness.after_clip_volume).toEqual({ integrated_lufs: -29, true_peak_dbtp: -29, rms_dbfs: -32 });
+    expect(r.loudness.after_clip_volume).toEqual({
+      integrated_lufs: -29,
+      true_peak_dbtp: -29,
+      rms_dbfs: -32,
+    });
     // A keyframed volume is reported, not applied.
-    linked(fs, [{ t: 0, v: 1 }, { t: 30, v: 0 }]);
+    linked(fs, [
+      { t: 0, v: 1 },
+      { t: 30, v: 0 },
+    ]);
     const k = (await inspectMediaTool({ clip_id: "v", max_frames: 1 }, ctxWith(runner, fs))) as Any;
     expect(k.loudness.clip_volume).toBe("keyframed");
     expect(k.loudness.after_clip_volume).toBeUndefined();
@@ -568,23 +611,36 @@ describe("inspectMediaTool looks at what it returns (UJ-012)", () => {
   it("with overview, returns ONE storyboard of the span and takes no frames", async () => {
     const { fs } = setup();
     const runner = mediaRunner(fs, { probe: VIDEO_PROBE });
-    const r = (await inspectMediaTool({ media_ref: "vid.mp4", overview: true }, ctxWith(runner, fs))) as Any;
+    const r = (await inspectMediaTool(
+      { media_ref: "vid.mp4", overview: true },
+      ctxWith(runner, fs),
+    )) as Any;
     expect(r.ok).toBe(true);
     expect(r.overview).toEqual({ tile_times: [1.5, 6, 11] });
     expect(r._attachments).toHaveLength(1);
     expect(r._attachments[0].path).toContain("ov_sheet.jpg");
     expect(frameRuns(runner.calls)).toHaveLength(0);
-    expect(vi.mocked(makeStoryboard).mock.calls[0].slice(2)).toEqual([0, 12.5, { w: 1080, h: 1920 }]);
+    expect(vi.mocked(makeStoryboard).mock.calls[0].slice(2)).toEqual([
+      0,
+      12.5,
+      { w: 1080, h: 1920 },
+    ]);
     // For a clip, the tiles' times come back as project frames (none for a time the clip skips).
     linked(fs, 1);
-    const c = (await inspectMediaTool({ clip_id: "v", overview: true }, ctxWith(runner, fs))) as Any;
+    const c = (await inspectMediaTool(
+      { clip_id: "v", overview: true },
+      ctxWith(runner, fs),
+    )) as Any;
     expect(c.overview).toEqual({ tile_frames: [115, null, null] });
   });
 
   describe("transcript", () => {
     it("transcribes a short file inline, as the whole-file transcript", async () => {
       const { fs } = setup();
-      await inspectMediaTool({ media_ref: "vid.mp4", max_frames: 1 }, ctxWith(mediaRunner(fs, { probe: VIDEO_PROBE }), fs));
+      await inspectMediaTool(
+        { media_ref: "vid.mp4", max_frames: 1 },
+        ctxWith(mediaRunner(fs, { probe: VIDEO_PROBE }), fs),
+      );
       expect(vi.mocked(runWhisper)).toHaveBeenCalledTimes(1);
       const [, , , language, window] = vi.mocked(runWhisper).mock.calls[0];
       expect(window).toBeNull(); // the whole file, which every later window can reuse
@@ -594,19 +650,32 @@ describe("inspectMediaTool looks at what it returns (UJ-012)", () => {
     it("never waits on a long file: the whole file goes to the front of the background queue", async () => {
       const { fs } = setup();
       const runner = mediaRunner(fs, { probe: LONG_PROBE });
-      const r = (await inspectMediaTool({ media_ref: "vid.mp4", max_frames: 1, language: "es" }, ctxWith(runner, fs))) as Any;
+      const r = (await inspectMediaTool(
+        { media_ref: "vid.mp4", max_frames: 1, language: "es" },
+        ctxWith(runner, fs),
+      )) as Any;
       expect(r.ok).toBe(true);
       expect(r.frames_attached).toBe(1); // the look itself still returns
       expect(r.transcript.status).toBe("in_progress");
       expect(r.transcript.note).toMatch(/start_seconds\/end_seconds/);
       expect(vi.mocked(runWhisper)).not.toHaveBeenCalled();
-      expect(vi.mocked(prioritizeTranscript)).toHaveBeenCalledWith(DIR, joinPath(DIR, "vid.mp4"), "es");
+      expect(vi.mocked(prioritizeTranscript)).toHaveBeenCalledWith(
+        DIR,
+        joinPath(DIR, "vid.mp4"),
+        "es",
+      );
     });
 
     it("transcribes a window of a long file now, in the language asked for", async () => {
       const { fs } = setup();
       await inspectMediaTool(
-        { media_ref: "vid.mp4", max_frames: 1, start_seconds: 600, end_seconds: 660, language: "es" },
+        {
+          media_ref: "vid.mp4",
+          max_frames: 1,
+          start_seconds: 600,
+          end_seconds: 660,
+          language: "es",
+        },
         ctxWith(mediaRunner(fs, { probe: LONG_PROBE }), fs),
       );
       const [, , , language, window] = vi.mocked(runWhisper).mock.calls[0];
@@ -618,7 +687,12 @@ describe("inspectMediaTool looks at what it returns (UJ-012)", () => {
     it("sends a long window to the background too: the limit is the span, not the call", async () => {
       const { fs } = setup();
       const r = (await inspectMediaTool(
-        { media_ref: "vid.mp4", max_frames: 1, start_seconds: 0, end_seconds: INLINE_TRANSCRIPT_MAX_S + 1 },
+        {
+          media_ref: "vid.mp4",
+          max_frames: 1,
+          start_seconds: 0,
+          end_seconds: INLINE_TRANSCRIPT_MAX_S + 1,
+        },
         ctxWith(mediaRunner(fs, { probe: LONG_PROBE }), fs),
       )) as Any;
       expect(r.transcript.status).toBe("in_progress");
@@ -630,10 +704,23 @@ describe("inspectMediaTool looks at what it returns (UJ-012)", () => {
       vi.mocked(peekTranscript).mockResolvedValueOnce({
         language: "en",
         duration_seconds: 1800,
-        segments: [{ segment_id: 1, start_seconds: 5, end_seconds: 6, start_timestamp: "", end_timestamp: "", text: "cached", words: [] }],
+        segments: [
+          {
+            segment_id: 1,
+            start_seconds: 5,
+            end_seconds: 6,
+            start_timestamp: "",
+            end_timestamp: "",
+            text: "cached",
+            words: [],
+          },
+        ],
         words: [],
       });
-      const r = (await inspectMediaTool({ media_ref: "vid.mp4", max_frames: 1 }, ctxWith(mediaRunner(fs, { probe: LONG_PROBE }), fs))) as Any;
+      const r = (await inspectMediaTool(
+        { media_ref: "vid.mp4", max_frames: 1 },
+        ctxWith(mediaRunner(fs, { probe: LONG_PROBE }), fs),
+      )) as Any;
       expect(r.transcript.segments).toEqual([["cached", 5, 6]]);
       expect(vi.mocked(runWhisper)).not.toHaveBeenCalled();
       expect(vi.mocked(prioritizeTranscript)).not.toHaveBeenCalled();
@@ -642,7 +729,10 @@ describe("inspectMediaTool looks at what it returns (UJ-012)", () => {
     it("says so when nothing will transcribe it in the background", async () => {
       const { fs } = setup();
       vi.mocked(prioritizeTranscript).mockReturnValueOnce(false);
-      const r = (await inspectMediaTool({ media_ref: "vid.mp4", max_frames: 1 }, ctxWith(mediaRunner(fs, { probe: LONG_PROBE }), fs))) as Any;
+      const r = (await inspectMediaTool(
+        { media_ref: "vid.mp4", max_frames: 1 },
+        ctxWith(mediaRunner(fs, { probe: LONG_PROBE }), fs),
+      )) as Any;
       expect(r.transcript.status).toBe("unavailable");
       expect(vi.mocked(runWhisper)).not.toHaveBeenCalled();
     });
@@ -939,7 +1029,9 @@ describe("inspectTimelineTool", () => {
     const bad = (r.frames as Any[]).find((f) => f.frame === 30);
     expect(bad.ok).toBe(false);
     expect(String(bad.error)).toContain("boom at 30");
-    expect((r._attachments as Any[]).some((a) => String(a.caption).includes("frame 30"))).toBe(false);
+    expect((r._attachments as Any[]).some((a) => String(a.caption).includes("frame 30"))).toBe(
+      false,
+    );
   });
 
   it("fails as a whole when no frame renders", async () => {
@@ -1075,7 +1167,10 @@ describe("inspectTimelineTool", () => {
       failures: [],
     });
     const visible = async (frame: number): Promise<string[]> => {
-      const r = (await inspectTimelineTool({ start_frame: frame }, ctxWith(frameRunner(fs), fs))) as Any;
+      const r = (await inspectTimelineTool(
+        { start_frame: frame },
+        ctxWith(frameRunner(fs), fs),
+      )) as Any;
       return r.frames[0].visible_clips;
     };
     // A 10-frame crossfade is centred on the cut at 60: y fades in from 55, x holds under it to 65.
@@ -1192,7 +1287,9 @@ describe("inspectTimelineTool", () => {
     const reported = (r.frames as Array<{ frame: number }>).map((f) => f.frame);
     expect(reported).toEqual(r.frame_numbers);
     expect([...reported].sort((a, b) => a - b)).toEqual(reported);
-    const captions = (r._attachments as Any[]).map((a) => Number(/frame (\d+)/.exec(a.caption)?.[1]));
+    const captions = (r._attachments as Any[]).map((a) =>
+      Number(/frame (\d+)/.exec(a.caption)?.[1]),
+    );
     expect(captions).toEqual(reported);
   });
 });
@@ -1212,7 +1309,8 @@ class StatFs extends MockFs {
 class RemoveFs extends StatFs {
   async remove(p: string): Promise<void> {
     const k = joinPath(p);
-    for (const f of [...this.files.keys()]) if (f === k || f.startsWith(`${k}/`)) this.files.delete(f);
+    for (const f of [...this.files.keys()])
+      if (f === k || f.startsWith(`${k}/`)) this.files.delete(f);
   }
 }
 
@@ -1228,7 +1326,8 @@ class RenameFs extends StatFs {
   }
   async remove(p: string): Promise<void> {
     const k = joinPath(p);
-    for (const f of [...this.files.keys()]) if (f === k || f.startsWith(`${k}/`)) this.files.delete(f);
+    for (const f of [...this.files.keys()])
+      if (f === k || f.startsWith(`${k}/`)) this.files.delete(f);
   }
 }
 
@@ -1630,8 +1729,20 @@ describe("inspectColorTool", () => {
       JSON.stringify({
         version: 1,
         clips: [
-          { id: "media_shot", filename: "shot.png", path: "D:/footage/shot.png", kind: "image", external: true },
-          { id: "media_look", filename: "look.png", path: "D:/footage/look.png", kind: "image", external: true },
+          {
+            id: "media_shot",
+            filename: "shot.png",
+            path: "D:/footage/shot.png",
+            kind: "image",
+            external: true,
+          },
+          {
+            id: "media_look",
+            filename: "look.png",
+            path: "D:/footage/look.png",
+            kind: "image",
+            external: true,
+          },
         ],
       }),
     );

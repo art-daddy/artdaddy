@@ -251,7 +251,11 @@ export function addTextClips(timeline: Timeline, entries: Args[]): OperationResu
     const trackId = (e.track_id as string | undefined) || null;
     let batch = batches.get(trackId);
     if (!batch) batches.set(trackId, (batch = { trackId, items: [] }));
-    (batch.items as TextBatch["items"]).push({ index, tin: spans[index][0], tout: spans[index][1] });
+    (batch.items as TextBatch["items"]).push({
+      index,
+      tin: spans[index][0],
+      tout: spans[index][1],
+    });
   });
   for (const batch of batches.values()) refuseSelfOverlap(batch);
 

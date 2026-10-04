@@ -651,7 +651,10 @@ describe("runWhisper on a window (UJ-012)", () => {
     const fs = new MockFs();
     fs.putModel();
     const runner = transcribeRunner(fs);
-    const t = await runWhisper(ctxWith(runner, fs), SRC, "small", undefined, { start: 60, end: 90 });
+    const t = await runWhisper(ctxWith(runner, fs), SRC, "small", undefined, {
+      start: 60,
+      end: 90,
+    });
     const [extract] = calls(runner, "ffmpeg");
     expect(extract.slice(0, extract.indexOf("-i"))).toEqual(
       expect.arrayContaining(["-ss", "60.000", "-to", "90.000"]),
@@ -694,11 +697,15 @@ describe("runWhisper on a window (UJ-012)", () => {
     expect(await peekTranscript(ctx, SRC)).toBeNull();
     await runWhisper(ctx, SRC, "small", undefined, { start: 60, end: 90 });
     expect(await peekTranscript(ctx, SRC)).toBeNull();
-    expect((await peekTranscript(ctx, SRC, "small", undefined, { start: 60, end: 90 }))?.segments).toHaveLength(2);
+    expect(
+      (await peekTranscript(ctx, SRC, "small", undefined, { start: 60, end: 90 }))?.segments,
+    ).toHaveLength(2);
     // ...while the whole file's answers every window, without running anything.
     await runWhisper(ctx, SRC, "small");
     const runs = ((ctx.runner.run as Any).mock.calls as Any[]).length;
-    expect(await peekTranscript(ctx, SRC, "small", undefined, { start: 300, end: 330 })).not.toBeNull();
+    expect(
+      await peekTranscript(ctx, SRC, "small", undefined, { start: 300, end: 330 }),
+    ).not.toBeNull();
     expect(((ctx.runner.run as Any).mock.calls as Any[]).length).toBe(runs);
   });
 });
@@ -760,22 +767,23 @@ describe("ensureTranscript", () => {
     [-1073741515, "0xC0000135 STATUS_DLL_NOT_FOUND"],
     [-1073741511, "0xC0000139 STATUS_ENTRYPOINT_NOT_FOUND"],
     [-1073741701, "0xC000007B STATUS_INVALID_IMAGE_FORMAT"],
-  ])("reports a process that never started (%i) as an unavailable engine, not a bad file", async (
-    code,
-  ) => {
-    const fs = new MockFs();
-    fs.touch(joinPath(DIR, "audio.mp4"));
-    fs.putModel();
-    const err = await ensureTranscript(
-      ctxWith(transcribeRunner(fs, { whisperExit: code }), fs),
-      "audio.mp4",
-    ).catch((e: unknown) => e);
+  ])(
+    "reports a process that never started (%i) as an unavailable engine, not a bad file",
+    async (code) => {
+      const fs = new MockFs();
+      fs.touch(joinPath(DIR, "audio.mp4"));
+      fs.putModel();
+      const err = await ensureTranscript(
+        ctxWith(transcribeRunner(fs, { whisperExit: code }), fs),
+        "audio.mp4",
+      ).catch((e: unknown) => e);
 
-    expect(isSpeechEngineUnavailable(err)).toBe(true);
-    // Expected, not a crash: the machine is misconfigured, which is not a Sentry event.
-    expect(isExpected(err)).toBe(true);
-    expect(String(err)).not.toMatch(/whisper-cli failed/);
-  });
+      expect(isSpeechEngineUnavailable(err)).toBe(true);
+      // Expected, not a crash: the machine is misconfigured, which is not a Sentry event.
+      expect(isExpected(err)).toBe(true);
+      expect(String(err)).not.toMatch(/whisper-cli failed/);
+    },
+  );
 
   // The opposite direction: an ordinary non-zero exit is still just a failed transcription, and
   // must NOT disable transcription for the whole session.

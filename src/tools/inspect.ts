@@ -242,7 +242,8 @@ async function buildTranscript(
     const to = opts.end ?? opts.duration;
     // A window that covers the whole file IS the whole-file transcript: asking for it as a window
     // would cache a second copy the background transcriber can never reuse.
-    const whole = from <= 0.05 && (to === null || (opts.duration !== null && to >= opts.duration - 0.05));
+    const whole =
+      from <= 0.05 && (to === null || (opts.duration !== null && to >= opts.duration - 0.05));
     const window = whole ? null : { start: from, end: to };
     let t = await peekTranscript(ctx, path, undefined, opts.language, window);
     if (!t && to !== null && to - from > INLINE_TRANSCRIPT_MAX_S) {
@@ -535,7 +536,12 @@ export async function inspectMediaTool(
           ],
         });
       } catch (e) {
-        return finish({ ...base, overview: { error: String(e) }, frames_attached: 0, metadata: probe });
+        return finish({
+          ...base,
+          overview: { error: String(e) },
+          frames_attached: 0,
+          metadata: probe,
+        });
       }
     }
 
@@ -554,7 +560,8 @@ export async function inspectMediaTool(
         ? Math.round((measured.reduce((n, s) => n + (s[k] ?? 0), 0) / measured.length) * 10) / 10
         : null;
     for (const s of shots)
-      if (s.path) attachments.push(imageAttachment(s.path, `inspect_media frame @${s.t.toFixed(2)}s`));
+      if (s.path)
+        attachments.push(imageAttachment(s.path, `inspect_media frame @${s.t.toFixed(2)}s`));
     return finish({
       ...base,
       frames: shots.map((s) => ({ ...at(s.t), ...(s.error ? { error: s.error } : {}) })),
@@ -616,7 +623,11 @@ function withClipGain(l: Loudness, timeline: Timeline | null, clip: Clip | null)
   if (!sound && clip.link_group)
     for (const t of timeline.tracks ?? [])
       for (const c of t.clips ?? [])
-        if (c.kind === "audio" && c.link_group === clip.link_group && c.media_ref === clip.media_ref)
+        if (
+          c.kind === "audio" &&
+          c.link_group === clip.link_group &&
+          c.media_ref === clip.media_ref
+        )
           sound ??= c;
   if (!sound) return { ...l };
   const vol = sound.volume ?? 1;
@@ -646,12 +657,23 @@ export function planTimelineLook(
   args: Record<string, unknown>,
 ):
   | { ok: false; result: Result }
-  | { ok: true; seconds: Timeline; fps: number; total: number; nums: number[]; outOfRange: number[] } {
+  | {
+      ok: true;
+      seconds: Timeline;
+      fps: number;
+      total: number;
+      nums: number[];
+      outOfRange: number[];
+    } {
   const errors = validateTimeline(raw);
   if (errors.length)
     return {
       ok: false,
-      result: { ok: false, error: "timeline preflight failed", preflight_errors: errors.slice(0, 20) },
+      result: {
+        ok: false,
+        error: "timeline preflight failed",
+        preflight_errors: errors.slice(0, 20),
+      },
     };
   const seconds = toSecondsView(raw);
   const duration = canvasDuration(seconds);
@@ -725,13 +747,18 @@ export async function inspectTimelineTool(
       ? final.replace(/\.jpg$/, `.${nextCallToken()}.tmp.jpg`)
       : final;
     const assName = `grid_f${frame}.ass`;
-    const plan = buildRenderCommand(seconds, out, {}, {
-      frame,
-      post: `${scaleTo(TIMELINE_FRAME_EDGE)},${gridFilter(assName)}`,
-      postAss: [{ name: assName, content: gridAss(dims.w, dims.h, `f${frame}`) }],
-      postFonts: [OVERLAY_FONT_FILE],
-      outputArgs: ["-q:v", FRAME_JPEG_Q],
-    });
+    const plan = buildRenderCommand(
+      seconds,
+      out,
+      {},
+      {
+        frame,
+        post: `${scaleTo(TIMELINE_FRAME_EDGE)},${gridFilter(assName)}`,
+        postAss: [{ name: assName, content: gridAss(dims.w, dims.h, `f${frame}`) }],
+        postFonts: [OVERLAY_FONT_FILE],
+        outputArgs: ["-q:v", FRAME_JPEG_Q],
+      },
+    );
     for (const w of plan.warnings) warnings.add(w);
     const rr = await runRenderPlan(ctx, plan);
     if (rr.code !== 0 || !(await ctx.store.exists(out))) {
@@ -1039,10 +1066,15 @@ async function gradedClipFrame(
   // one did not, so measuring a CLIP always failed while a media_ref worked.
   await resolveClipSources(ctx, seconds);
   const png = await ctx.store.prepareArtifact(`inspect/color_clip_${call}.png`);
-  const plan = buildRenderCommand(seconds, png, {}, {
-    frame: rel,
-    post: scaleTo(COLOR_FRAME_EDGE),
-  });
+  const plan = buildRenderCommand(
+    seconds,
+    png,
+    {},
+    {
+      frame: rel,
+      post: scaleTo(COLOR_FRAME_EDGE),
+    },
+  );
   const rr = await runRenderPlan(ctx, plan);
   if (rr.code !== 0 || !(await ctx.store.exists(png)))
     return { error: `rendering frame ${mid} of the clip failed${ffmpegReason(rr.stderr)}` };

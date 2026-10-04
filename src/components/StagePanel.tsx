@@ -321,9 +321,8 @@ export default function StagePanel({ projectId }: { projectId: string }) {
                   role="status"
                   className="max-w-full truncate rounded bg-red-600/90 px-2 py-1 text-[11px] font-medium text-white shadow"
                 >
-                  Media offline:{" "}
-                  {offlineHere.map((ref) => mediaNames[ref] || ref).join(", ")} — relink it in
-                  the library.
+                  Media offline: {offlineHere.map((ref) => mediaNames[ref] || ref).join(", ")} —
+                  relink it in the library.
                 </span>
               </div>
             )}

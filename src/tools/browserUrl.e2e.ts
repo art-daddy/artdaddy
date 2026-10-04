@@ -42,7 +42,20 @@ afterAll(async () => {
 const shot = (url: string, out: string) =>
   nodeRunner.run(
     BIN!,
-    [SCRIPT, "shot", "--url", url, "--viewport", "800x600", "--dsf", "1", "--mobile", "0", "--out", out],
+    [
+      SCRIPT,
+      "shot",
+      "--url",
+      url,
+      "--viewport",
+      "800x600",
+      "--dsf",
+      "1",
+      "--mobile",
+      "0",
+      "--out",
+      out,
+    ],
     undefined,
     ROOT,
   );

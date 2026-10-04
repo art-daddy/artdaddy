@@ -20,7 +20,8 @@ const MEASURED: Array<[number, number, number, number]> = [
 
 describe("fitDims", () => {
   it("gives the size ffmpeg's fit produces", () => {
-    for (const [w, h, ew, eh] of MEASURED) expect(fitDims(w, h, 768), `${w}x${h}`).toEqual({ w: ew, h: eh });
+    for (const [w, h, ew, eh] of MEASURED)
+      expect(fitDims(w, h, 768), `${w}x${h}`).toEqual({ w: ew, h: eh });
   });
 
   it("fills the edge on the long side and keeps the shape within a pixel", () => {
@@ -48,7 +49,13 @@ function rects(line: string): number[][] {
   return body
     .split("m ")
     .filter(Boolean)
-    .map((r) => r.replace("l ", "").trim().split(/\s+/).map((n) => Number(n) / 4));
+    .map((r) =>
+      r
+        .replace("l ", "")
+        .trim()
+        .split(/\s+/)
+        .map((n) => Number(n) / 4),
+    );
 }
 
 describe("gridAss", () => {
@@ -100,7 +107,12 @@ describe("gridAss", () => {
 
   it("sizes the labels to the frame, between 8 and 11 px", () => {
     const size = (w: number, h: number): number =>
-      Number(gridAss(w, h).split("\n").find((l) => l.startsWith("Style: Chip,"))!.split(",")[2]);
+      Number(
+        gridAss(w, h)
+          .split("\n")
+          .find((l) => l.startsWith("Style: Chip,"))!
+          .split(",")[2],
+      );
     expect(size(768, 432)).toBeCloseTo(432 / 42, 1); // 10.3: scales with the short side
     expect(size(512, 288)).toBe(8);
     expect(size(200, 100)).toBe(8);
@@ -156,7 +168,8 @@ describe("gridAss", () => {
       return Math.round((r[2] - r[0]) * 100) / 100;
     };
     const colour = (line: string): string => /\\1c&H([0-9A-F]{6})&/.exec(line)![1];
-    const alpha = (line: string): number => 1 - parseInt(/\\1a&H([0-9A-F]{2})&/.exec(line)![1], 16) / 255;
+    const alpha = (line: string): number =>
+      1 - parseInt(/\\1a&H([0-9A-F]{2})&/.exec(line)![1], 16) / 255;
     // [outline, core] for minor then major, in drawing (layer) order.
     expect(strokes.map(colour)).toEqual(["000000", "FFFFFF", "000000", "FFFFFF"]);
     expect(strokes.map(width)).toEqual([2, 1, 2.5, 1.5]);
@@ -206,7 +219,12 @@ describe("gridAss", () => {
     expect(cap).toHaveLength(1);
     expect(cap[0]).toMatch(/\{\\an7\\pos\(5,3\)\}f120$/);
     const hostile = gridAss(W, H, "f1{\\fs400\\c&H0000FF&}2\\N");
-    const text = hostile.split("\n").find((l) => l.includes(",Caption,"))!.split("}").slice(1).join("}");
+    const text = hostile
+      .split("\n")
+      .find((l) => l.includes(",Caption,"))!
+      .split("}")
+      .slice(1)
+      .join("}");
     expect(text).not.toMatch(/[{}\\]/);
     expect(text).toContain("f1");
     expect(gridAss(W, H).includes(",Caption,")).toBe(false);

@@ -24,7 +24,9 @@ function ratio(v: unknown): number {
 /** The shape a source is SHOWN in: the probe's rotation-aware width and height, with the width
  *  stretched by the pixel aspect when pixels are not square (HDV, DV, some broadcast files). A
  *  rotated source's pixel aspect turns with it. Null when the probe has no usable size. */
-export function displaySize(video: Record<string, unknown> | null): { w: number; h: number } | null {
+export function displaySize(
+  video: Record<string, unknown> | null,
+): { w: number; h: number } | null {
   const w = Number(video?.width);
   const h = Number(video?.height);
   if (!(w > 0) || !(h > 0)) return null;
@@ -117,7 +119,10 @@ export async function sampleFrames(
           await ctx.store.remove(tmpGrey).catch(() => undefined);
         }
         const why = stderrExcerpt(r.stderr, 200).split(/\r?\n/).filter(Boolean).pop();
-        return { t, error: `the frame at ${t.toFixed(2)}s could not be read${why ? ` — ${why}` : ""}` };
+        return {
+          t,
+          error: `the frame at ${t.toFixed(2)}s could not be read${why ? ` — ${why}` : ""}`,
+        };
       }
       await settle(ctx, tmpGrey, grey);
       await settle(ctx, tmpJpg, jpg);

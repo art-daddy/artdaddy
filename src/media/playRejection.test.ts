@@ -21,7 +21,9 @@ describe("ignorePlayRejection", () => {
   // The opposite direction: a file the webview cannot decode must not vanish silently, or a
   // broken codec is indistinguishable from a user who never pressed play.
   it("reports a source the element genuinely cannot play", () => {
-    ignorePlayRejection(new DOMException("The element has no supported sources.", "NotSupportedError"));
+    ignorePlayRejection(
+      new DOMException("The element has no supported sources.", "NotSupportedError"),
+    );
     expect(reportAppError).toHaveBeenCalledTimes(1);
     expect(String(reportAppError.mock.calls[0][0])).toMatch(/no supported sources/);
   });
@@ -29,7 +31,9 @@ describe("ignorePlayRejection", () => {
   // One user produced 24 of these in a session. The tenth answers nothing the first did not.
   it("reports an unplayable source once per session, not once per click", () => {
     for (let i = 0; i < 24; i++) {
-      ignorePlayRejection(new DOMException("The element has no supported sources.", "NotSupportedError"));
+      ignorePlayRejection(
+        new DOMException("The element has no supported sources.", "NotSupportedError"),
+      );
     }
     expect(reportAppError).toHaveBeenCalledTimes(1);
   });

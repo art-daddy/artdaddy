@@ -168,7 +168,15 @@ describe("source_span: exact boundaries", () => {
   it("refuses a start exactly AT the end of the media, not just past it", async () => {
     const { ctx, store } = await ctxWithMedia();
     const r = (await addClipsTool(
-      { entries: [{ media_ref: "clip.mp4", timeline_in: 0, source_span: [MEDIA_SECONDS, MEDIA_SECONDS + 5] }] },
+      {
+        entries: [
+          {
+            media_ref: "clip.mp4",
+            timeline_in: 0,
+            source_span: [MEDIA_SECONDS, MEDIA_SECONDS + 5],
+          },
+        ],
+      },
       ctx,
     )) as Any;
     expect(r.ok).toBe(false);
@@ -203,7 +211,11 @@ describe("source_span: exact boundaries", () => {
   it("still recognises frames passed as seconds when the lengths differ by one frame", async () => {
     const { ctx } = await ctxWithMedia();
     const r = (await addClipsTool(
-      { entries: [{ media_ref: "clip.mp4", timeline_in: 0, timeline_out: 601, source_span: [300, 900] }] },
+      {
+        entries: [
+          { media_ref: "clip.mp4", timeline_in: 0, timeline_out: 601, source_span: [300, 900] },
+        ],
+      },
       ctx,
     )) as Any;
     expect(r.ok).toBe(false);
@@ -213,7 +225,11 @@ describe("source_span: exact boundaries", () => {
   it("treats a two-frame difference as an ordinary disagreement", async () => {
     const { ctx } = await ctxWithMedia();
     const r = (await addClipsTool(
-      { entries: [{ media_ref: "clip.mp4", timeline_in: 0, timeline_out: 602, source_span: [300, 900] }] },
+      {
+        entries: [
+          { media_ref: "clip.mp4", timeline_in: 0, timeline_out: 602, source_span: [300, 900] },
+        ],
+      },
       ctx,
     )) as Any;
     expect(String(r.error ?? "")).not.toMatch(/look like FRAMES/);
@@ -228,7 +244,11 @@ describe("source_span: exact boundaries", () => {
     expect(String(past.error)).toMatch(/if you meant 4938 FRAMES, pass 164\.60/);
 
     const silent = (await addClipsTool(
-      { entries: [{ media_ref: "clip.mp4", timeline_in: 0, timeline_out: 600, source_span: [300, 900] }] },
+      {
+        entries: [
+          { media_ref: "clip.mp4", timeline_in: 0, timeline_out: 600, source_span: [300, 900] },
+        ],
+      },
       ctx,
     )) as Any;
     expect(String(silent.error)).toMatch(/they would cut 18000 frames/);

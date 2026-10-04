@@ -3,7 +3,14 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
-import { OVERVIEW, candidateTimes, keepTiles, tileSize, timeLabel, type Candidate } from "./storyboard";
+import {
+  OVERVIEW,
+  candidateTimes,
+  keepTiles,
+  tileSize,
+  timeLabel,
+  type Candidate,
+} from "./storyboard";
 
 const flat = (v: number): Uint8Array => new Uint8Array(64).fill(v);
 const cand = (t: number, v: number): Candidate => ({ t, grid: flat(v) });
@@ -11,15 +18,19 @@ const cand = (t: number, v: number): Candidate => ({ t, grid: flat(v) });
 describe("candidateTimes", () => {
   it("covers the window with at most ~120 points, none outside it", () => {
     fc.assert(
-      fc.property(fc.double({ min: 0, max: 10_000, noNaN: true }), fc.double({ min: 0.5, max: 20_000, noNaN: true }), (start, span) => {
-        const ts = candidateTimes(start, start + span);
-        expect(ts.length).toBeGreaterThan(0);
-        expect(ts.length).toBeLessThanOrEqual(OVERVIEW.candidates + 1);
-        for (const t of ts) {
-          expect(t).toBeGreaterThanOrEqual(start);
-          expect(t).toBeLessThan(start + span + 1e-9);
-        }
-      }),
+      fc.property(
+        fc.double({ min: 0, max: 10_000, noNaN: true }),
+        fc.double({ min: 0.5, max: 20_000, noNaN: true }),
+        (start, span) => {
+          const ts = candidateTimes(start, start + span);
+          expect(ts.length).toBeGreaterThan(0);
+          expect(ts.length).toBeLessThanOrEqual(OVERVIEW.candidates + 1);
+          for (const t of ts) {
+            expect(t).toBeGreaterThanOrEqual(start);
+            expect(t).toBeLessThan(start + span + 1e-9);
+          }
+        },
+      ),
     );
   });
 
@@ -78,12 +89,16 @@ describe("timeLabel and tileSize", () => {
     expect(tileSize(1080, 1920)).toEqual({ w: 90, h: 160 });
     expect(tileSize(768, 576)).toEqual({ w: 160, h: 120 });
     fc.assert(
-      fc.property(fc.integer({ min: 16, max: 8000 }), fc.integer({ min: 16, max: 8000 }), (w, h) => {
-        const t = tileSize(w, h);
-        expect(Math.max(t.w, t.h)).toBe(160);
-        expect(t.w % 2).toBe(0);
-        expect(t.h % 2).toBe(0);
-      }),
+      fc.property(
+        fc.integer({ min: 16, max: 8000 }),
+        fc.integer({ min: 16, max: 8000 }),
+        (w, h) => {
+          const t = tileSize(w, h);
+          expect(Math.max(t.w, t.h)).toBe(160);
+          expect(t.w % 2).toBe(0);
+          expect(t.h % 2).toBe(0);
+        },
+      ),
     );
   });
 });

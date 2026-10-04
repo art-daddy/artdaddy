@@ -92,8 +92,12 @@ describe("add_text_clips refusals, through the registry, against the saved docum
   // room for the span. (Mutation testing showed nothing checked any of the three.)
   it("suggests only a text track that has room", async () => {
     const { call } = await setup();
-    await call({ entries: [{ content: "busy", timeline_in: 0, timeline_out: 15, track_id: "lower" }] });
-    await call({ entries: [{ content: "free", timeline_in: 900, timeline_out: 915, track_id: "spare" }] });
+    await call({
+      entries: [{ content: "busy", timeline_in: 0, timeline_out: 15, track_id: "lower" }],
+    });
+    await call({
+      entries: [{ content: "free", timeline_in: 900, timeline_out: 915, track_id: "spare" }],
+    });
     const r = await call({
       entries: [{ content: "x", timeline_in: 5, timeline_out: 10, track_id: "titles" }],
     });
@@ -103,7 +107,9 @@ describe("add_text_clips refusals, through the registry, against the saved docum
 
   it("offers no track at all when none has room, rather than a busy one", async () => {
     const { call } = await setup();
-    await call({ entries: [{ content: "busy", timeline_in: 0, timeline_out: 15, track_id: "lower" }] });
+    await call({
+      entries: [{ content: "busy", timeline_in: 0, timeline_out: 15, track_id: "lower" }],
+    });
     const r = await call({
       entries: [{ content: "x", timeline_in: 5, timeline_out: 10, track_id: "titles" }],
     });

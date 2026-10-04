@@ -398,9 +398,7 @@ describe("IndexCoordinator", () => {
   // Gaps mutation testing found (2026-09-27).
   it("an engine failure that lands after the project closed disables and reports nothing", async () => {
     let fail!: (e: unknown) => void;
-    ensureTranscript.mockImplementation(
-      (() => new Promise((_res, rej) => (fail = rej))) as never,
-    );
+    ensureTranscript.mockImplementation((() => new Promise((_res, rej) => (fail = rej))) as never);
     const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
     for (let i = 0; i < 3; i++) c.indexSource(`library/a${i}.mp3`);
     await settle(() => ensureTranscript.mock.calls.length > 0);

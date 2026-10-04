@@ -70,14 +70,27 @@ async function jpegFacts(file: string): Promise<{ jpeg: boolean; w: number; h: n
     "json",
     file,
   ]);
-  const s = (JSON.parse(r.stdout) as { streams: Array<{ width: number; height: number }> }).streams[0];
+  const s = (JSON.parse(r.stdout) as { streams: Array<{ width: number; height: number }> })
+    .streams[0];
   return { jpeg: buf[0] === 0xff && buf[1] === 0xd8, w: s.width, h: s.height };
 }
 
 /** A frame file as 8-bit grey pixels. */
 async function greyPixels(file: string, w: number, h: number): Promise<Uint8Array> {
   const out = `${file}.gray`;
-  await ff(["-y", "-hide_banner", "-loglevel", "error", "-i", file, "-f", "rawvideo", "-pix_fmt", "gray", out]);
+  await ff([
+    "-y",
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-i",
+    file,
+    "-f",
+    "rawvideo",
+    "-pix_fmt",
+    "gray",
+    out,
+  ]);
   const b = await fsp.readFile(out);
   expect(b.length).toBe(w * h);
   return new Uint8Array(b);
@@ -86,7 +99,11 @@ async function greyPixels(file: string, w: number, h: number): Promise<Uint8Arra
 beforeAll(async () => {
   installE2EDocuments();
   await fsp.mkdir(proj, { recursive: true });
-  const ref = await libRef(ctx, await longFixture({ seconds: LONG_S, fps: FPS, gop: GOP }), "video");
+  const ref = await libRef(
+    ctx,
+    await longFixture({ seconds: LONG_S, fps: FPS, gop: GOP }),
+    "video",
+  );
   await openE2EDoc(proj);
   await ensureTimeline(ctx.store); // the default canvas: 1080x1920 @ 30
   const placed = (await addClipsTool(
@@ -143,12 +160,15 @@ describe("inspect_timeline costs the frames it shows, wherever they are (UJ-012)
     };
     const atStart = await look(0);
     const atEnd = await look(TOTAL - 180);
-    console.log(`[inspect_timeline] start ${atStart.frames} (${Math.round(atStart.ms)} ms), end ${atEnd.frames} (${Math.round(atEnd.ms)} ms)`); // eslint-disable-line no-console
+    console.log(
+      `[inspect_timeline] start ${atStart.frames} (${Math.round(atStart.ms)} ms), end ${atEnd.frames} (${Math.round(atEnd.ms)} ms)`,
+    ); // eslint-disable-line no-console
     expect(atStart.frames).toHaveLength(6);
     expect(atEnd.frames).toHaveLength(6);
     // Each frame decodes a few seconds of source around itself, wherever it is; the old path
     // decoded everything before it (~25,000 frames for the last one).
-    for (const n of [...atStart.frames, ...atEnd.frames]) expect(n).toBeLessThanOrEqual(GOP + 2 * FPS + 60);
+    for (const n of [...atStart.frames, ...atEnd.frames])
+      expect(n).toBeLessThanOrEqual(GOP + 2 * FPS + 60);
     const total = (a: number[]): number => a.reduce((s, n) => s + n, 0);
     expect(total(atEnd.frames)).toBeLessThanOrEqual(total(atStart.frames) + 6 * GOP);
     expect(atEnd.ms).toBeLessThan(LOOK_CEILING_MS);
@@ -181,12 +201,27 @@ describe("inspect_timeline frames carry the grid and say what failed", () => {
   const W = 1280;
   const H = 720;
   const dir = joinPath(root, "grid");
-  const gctx: ClientToolContext = { store: new ProjectStoreAccess(dir, nodeFs), runner: nodeRunner };
+  const gctx: ClientToolContext = {
+    store: new ProjectStoreAccess(dir, nodeFs),
+    runner: nodeRunner,
+  };
 
   it("draws Palmier's grid where its labels say, and the frame number top-left", async () => {
     await fsp.mkdir(dir, { recursive: true });
     const grey = path.join(dir, "grey.png");
-    await ff(["-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", `color=c=0x808080:s=${W}x${H}`, "-frames:v", "1", grey]);
+    await ff([
+      "-y",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-f",
+      "lavfi",
+      "-i",
+      `color=c=0x808080:s=${W}x${H}`,
+      "-frames:v",
+      "1",
+      grey,
+    ]);
     const ref = await libRef(gctx, grey, "image");
     // Written straight to disk: nothing here edits it, so no open document is needed.
     await nodeFs.writeTextFile(
@@ -239,7 +274,8 @@ describe("inspect_timeline frames carry the grid and say what failed", () => {
       const minor = line(at, Math.round(size * 0.35));
       expect(minor.core).toBeGreaterThan(128 + 20);
       expect(minor.edge).toBeLessThan(128 - 8);
-      for (let d = -3; d <= 3; d++) expect(Math.abs(at(Math.round(size * 0.525) + d) - 128)).toBeLessThan(6);
+      for (let d = -3; d <= 3; d++)
+        expect(Math.abs(at(Math.round(size * 0.525) + d) - 128)).toBeLessThan(6);
     }
     // The "f12" chip: a dark box with light text, top-left.
     let lo = 255;
@@ -258,7 +294,10 @@ describe("inspect_timeline frames carry the grid and say what failed", () => {
   // back, and the one that does must name the clip and the file.
   it("names the clip whose file is gone, and still returns the frames that do not need it", async () => {
     const odir = joinPath(root, "offline");
-    const octx: ClientToolContext = { store: new ProjectStoreAccess(odir, nodeFs), runner: nodeRunner };
+    const octx: ClientToolContext = {
+      store: new ProjectStoreAccess(odir, nodeFs),
+      runner: nodeRunner,
+    };
     await fsp.mkdir(odir, { recursive: true });
     const here = path.join(root, "here.mp4");
     const gone = path.join(root, "gone.mp4");
@@ -267,7 +306,19 @@ describe("inspect_timeline frames carry the grid and say what failed", () => {
       [here, "testsrc2"],
       [gone, "testsrc"],
     ])
-      await ff(["-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", `${pattern}=size=320x180:rate=${FPS}:duration=3`, "-pix_fmt", "yuv420p", f]);
+      await ff([
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        `${pattern}=size=320x180:rate=${FPS}:duration=3`,
+        "-pix_fmt",
+        "yuv420p",
+        f,
+      ]);
     const a = await libRef(octx, here, "video");
     const b = await libRef(octx, gone, "video");
     await openE2EDoc(odir);
@@ -285,7 +336,10 @@ describe("inspect_timeline frames carry the grid and say what failed", () => {
     await flushE2EDoc(odir);
     await fsp.rm(gone); // moved to the cloud, deleted, or on a drive that is not plugged in
     const goneClip = (placed.created as Array<{ clip_id: string }>)[1].clip_id;
-    const r = (await inspectTimelineTool({ start_frame: 0, end_frame: 180, max_frames: 2 }, octx)) as Any;
+    const r = (await inspectTimelineTool(
+      { start_frame: 0, end_frame: 180, max_frames: 2 },
+      octx,
+    )) as Any;
     expect(r.ok, JSON.stringify(r).slice(0, 800)).toBe(true);
     const [first, second] = r.frames as Any[];
     expect(first.ok).toBe(true);

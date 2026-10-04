@@ -319,7 +319,13 @@ describe("sweepArtifactCache (close-time derived-artifact GC)", () => {
           },
           {
             undone: true, // a redo brings it back into the history
-            response: [{ kind: "tool_result", call_id: "c2", frame_refs: [{ path: "internals/cache/inspect/undone03.jpg" }] }],
+            response: [
+              {
+                kind: "tool_result",
+                call_id: "c2",
+                frame_refs: [{ path: "internals/cache/inspect/undone03.jpg" }],
+              },
+            ],
           },
           { response: "not a list" },
         ],
@@ -331,7 +337,11 @@ describe("sweepArtifactCache (close-time derived-artifact GC)", () => {
     cache(fs, "inspect/stale004.jpg");
     const { removed } = await sweep(fs);
     expect(removed).toEqual(["inspect/stale004.jpg"]);
-    for (const kept of ["inspect/abs0001.jpg", "gemini/gem_img_rel0002.jpg", "inspect/undone03.jpg"])
+    for (const kept of [
+      "inspect/abs0001.jpg",
+      "gemini/gem_img_rel0002.jpg",
+      "inspect/undone03.jpg",
+    ])
       expect(await hasCache(fs, kept)).toBe(true);
   });
 

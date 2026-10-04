@@ -23,7 +23,10 @@ function result(callId: string, n: number, extra: Record<string, unknown> = {}) 
     call_id: callId,
     name: "inspect_media",
     model_result: { ok: true },
-    frame_refs: Array.from({ length: n }, (_, i) => ({ path: `f/${callId}_${i}.jpg`, caption: `@${i}s` })),
+    frame_refs: Array.from({ length: n }, (_, i) => ({
+      path: `f/${callId}_${i}.jpg`,
+      caption: `@${i}s`,
+    })),
     ...extra,
   };
 }
@@ -37,7 +40,11 @@ describe("historyFrameRefs", () => {
     const turns = [
       turn("t1", [{ kind: "tool_call", call_id: "a" }, result("a", 2)]),
       turn("t2", [{ kind: "tool_call", call_id: "b" }, result("b", 1)], true), // undone
-      turn("t3", [{ kind: "tool_call", call_id: "c" }, result("c", 1), { kind: "text", text: "ok" }]),
+      turn("t3", [
+        { kind: "tool_call", call_id: "c" },
+        result("c", 1),
+        { kind: "text", text: "ok" },
+      ]),
     ];
     expect(historyFrameRefs(turns)).toEqual([
       { call_id: "a", index: 0, path: "f/a_0.jpg", caption: "@0s" },
@@ -66,7 +73,13 @@ describe("historyFrameRefs", () => {
         {
           kind: "tool_result",
           call_id: "b",
-          frame_refs: [null, { path: 7 }, { path: "" }, { path: "f/ok.jpg", caption: "" }, { path: "f/ok2.jpg", caption: 3 }],
+          frame_refs: [
+            null,
+            { path: 7 },
+            { path: "" },
+            { path: "f/ok.jpg", caption: "" },
+            { path: "f/ok2.jpg", caption: 3 },
+          ],
         },
       ]),
     ];
@@ -96,7 +109,8 @@ describe("keptFrames", () => {
         const kept = keptFrames(all);
         expect(kept.length).toBeLessThanOrEqual(HISTORY_FRAMES_MAX);
         expect(kept).toEqual(all.slice(all.length - kept.length));
-        if (n > HISTORY_FRAMES_MAX) expect(kept.length).toBeGreaterThan(HISTORY_FRAMES_MAX - HISTORY_FRAMES_BATCH);
+        if (n > HISTORY_FRAMES_MAX)
+          expect(kept.length).toBeGreaterThan(HISTORY_FRAMES_MAX - HISTORY_FRAMES_BATCH);
       }),
     );
   });
@@ -111,7 +125,9 @@ describe("keptFrames", () => {
         };
         const before = firstKept(n);
         const after = firstKept(n + 1);
-        const crossed = n + 1 > HISTORY_FRAMES_MAX && (n + 1 - HISTORY_FRAMES_MAX - 1) % HISTORY_FRAMES_BATCH === 0;
+        const crossed =
+          n + 1 > HISTORY_FRAMES_MAX &&
+          (n + 1 - HISTORY_FRAMES_MAX - 1) % HISTORY_FRAMES_BATCH === 0;
         if (n > 0 && !crossed) expect(after).toBe(before);
       }),
     );
@@ -140,14 +156,62 @@ class MemFs implements FsLike {
 /** The smallest bytes each header parser accepts, stating a size. */
 const PNG = (w = 32, h = 16): Uint8Array =>
   new Uint8Array([
-    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52,
-    0, 0, w >> 8, w & 255, 0, 0, h >> 8, h & 255, 8, 2, 0, 0, 0,
+    0x89,
+    0x50,
+    0x4e,
+    0x47,
+    0x0d,
+    0x0a,
+    0x1a,
+    0x0a,
+    0,
+    0,
+    0,
+    13,
+    0x49,
+    0x48,
+    0x44,
+    0x52,
+    0,
+    0,
+    w >> 8,
+    w & 255,
+    0,
+    0,
+    h >> 8,
+    h & 255,
+    8,
+    2,
+    0,
+    0,
+    0,
   ]);
-const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0x10, 0x00, 0x20, 0x03]);
+const JPEG = new Uint8Array([
+  0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0x10, 0x00, 0x20, 0x03,
+]);
 const GIF = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x20, 0x00, 0x10, 0x00, 0, 0]);
 const WEBP = new Uint8Array([
-  ...[0x52, 0x49, 0x46, 0x46], 0, 0, 0, 0, ...[0x57, 0x45, 0x42, 0x50], ...[0x56, 0x50, 0x38, 0x58],
-  0, 0, 0, 0, 0, 0, 0, 0, 31, 0, 0, 15, 0, 0,
+  ...[0x52, 0x49, 0x46, 0x46],
+  0,
+  0,
+  0,
+  0,
+  ...[0x57, 0x45, 0x42, 0x50],
+  ...[0x56, 0x50, 0x38, 0x58],
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  31,
+  0,
+  0,
+  15,
+  0,
+  0,
 ]);
 const b64 = (b: Uint8Array): string => btoa(String.fromCharCode(...b));
 
@@ -178,7 +242,13 @@ describe("historyAttachments", () => {
     fs.bytes.set(joinPath(DIR, "f.dir/noext"), PNG());
     const store = new ProjectStoreAccess(DIR, fs);
     const turns = [
-      turn("t1", [{ kind: "tool_result", call_id: "a", frame_refs: [{ path: "f/UP.JPG" }, { path: "f.dir/noext" }] }]),
+      turn("t1", [
+        {
+          kind: "tool_result",
+          call_id: "a",
+          frame_refs: [{ path: "f/UP.JPG" }, { path: "f.dir/noext" }],
+        },
+      ]),
     ];
     const atts = await historyAttachments(turns, store);
     expect(atts.map((a) => a.ext)).toEqual([".jpg", undefined]);
@@ -195,7 +265,10 @@ describe("historyAttachments", () => {
     const atLimit = new Uint8Array(HISTORY_FRAME_MAX_BYTES);
     atLimit.set(PNG());
     fs.bytes.set(joinPath(DIR, "f/a_0.jpg"), atLimit);
-    const atts = await historyAttachments([turn("t1", [result("a", 1)])], new ProjectStoreAccess(DIR, fs));
+    const atts = await historyAttachments(
+      [turn("t1", [result("a", 1)])],
+      new ProjectStoreAccess(DIR, fs),
+    );
     expect(atts).toHaveLength(1);
   });
 
@@ -221,7 +294,9 @@ describe("historyAttachments", () => {
         {
           kind: "tool_result",
           call_id: "a",
-          frame_refs: [...outside, joinPath(DIR, "internals/cache/inspect/ok.png")].map((path) => ({ path })),
+          frame_refs: [...outside, joinPath(DIR, "internals/cache/inspect/ok.png")].map((path) => ({
+            path,
+          })),
         },
       ]),
     ];
@@ -242,7 +317,23 @@ describe("historyAttachments", () => {
       "f/empty.png": new Uint8Array(0),
       "f/zero_width.png": PNG(0, 16),
       "f/zero_height.png": PNG(32, 0),
-      "f/bitmap.bmp": new Uint8Array([0x42, 0x4d, ...new Array(12).fill(0), 40, 0, 0, 0, 32, 0, 0, 0, 16, 0, 0, 0]),
+      "f/bitmap.bmp": new Uint8Array([
+        0x42,
+        0x4d,
+        ...new Array(12).fill(0),
+        40,
+        0,
+        0,
+        0,
+        32,
+        0,
+        0,
+        0,
+        16,
+        0,
+        0,
+        0,
+      ]),
       "f/ok.jpg": JPEG,
       "f/ok.png": PNG(),
       "f/ok.gif": GIF,
@@ -250,19 +341,42 @@ describe("historyAttachments", () => {
     };
     for (const [p, b] of Object.entries(files)) fs.bytes.set(joinPath(DIR, p), b);
     const names = Object.keys(files);
-    const turns = [turn("t1", [{ kind: "tool_result", call_id: "a", frame_refs: names.map((path) => ({ path })) }])];
+    const turns = [
+      turn("t1", [
+        { kind: "tool_result", call_id: "a", frame_refs: names.map((path) => ({ path })) },
+      ]),
+    ];
     const atts = await historyAttachments(turns, new ProjectStoreAccess(DIR, fs));
-    expect(atts.map((a) => names[a.index as number])).toEqual(["f/ok.jpg", "f/ok.png", "f/ok.gif", "f/ok.webp"]);
+    expect(atts.map((a) => names[a.index as number])).toEqual([
+      "f/ok.jpg",
+      "f/ok.png",
+      "f/ok.gif",
+      "f/ok.webp",
+    ]);
   });
 
   it("fuzz: whatever the path, only files inside the project are read; a plain in-project path always is", async () => {
     const DIR = "C:/proj";
-    const segment = fc.constantFrom("..", ".", "", "a", "inspect", "x.png", "C:", "proj", "proj2", "..\\..", "~");
-    const path = fc.tuple(
-      fc.constantFrom("", "/", "C:/", "C:/proj/", "C:/proj2/", "\\\\server\\share\\", "c:/proj/"),
-      fc.array(segment, { minLength: 1, maxLength: 5 }),
-      fc.constantFrom("/", "\\"),
-    ).map(([root, segs, sep]) => root + segs.join(sep));
+    const segment = fc.constantFrom(
+      "..",
+      ".",
+      "",
+      "a",
+      "inspect",
+      "x.png",
+      "C:",
+      "proj",
+      "proj2",
+      "..\\..",
+      "~",
+    );
+    const path = fc
+      .tuple(
+        fc.constantFrom("", "/", "C:/", "C:/proj/", "C:/proj2/", "\\\\server\\share\\", "c:/proj/"),
+        fc.array(segment, { minLength: 1, maxLength: 5 }),
+        fc.constantFrom("/", "\\"),
+      )
+      .map(([root, segs, sep]) => root + segs.join(sep));
     await fc.assert(
       fc.asyncProperty(path, async (p) => {
         const fs = new MemFs();
