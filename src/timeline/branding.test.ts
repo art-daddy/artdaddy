@@ -178,4 +178,16 @@ describe("branded render plan", () => {
     expect(a.args).toContain("-t");
     expect(a.args).not.toContain("-shortest");
   });
+
+  it("checks the audio length only where it is padded: branded, with audio", () => {
+    // An unbranded export pads nothing, so sound that ends early is the timeline, not a fault.
+    expect(buildRenderCommand(timeline(undefined, true), "/o.mp4").audioMustSpanVideo).toBe(false);
+    expect(
+      buildRenderCommand(timeline(undefined, true), "/o.mp4", { branding: BRAND })
+        .audioMustSpanVideo,
+    ).toBe(true);
+    expect(buildRenderCommand(timeline(), "/o.mp4", { branding: BRAND }).audioMustSpanVideo).toBe(
+      false,
+    );
+  });
 });

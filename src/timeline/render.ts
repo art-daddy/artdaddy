@@ -1417,8 +1417,10 @@ export function buildRenderCommand(
       const p = `bl${i}`;
       chains.push(`[${last}]split=2[${p}ca][${p}cb]`);
       chains.push(`${colorSrc("c=black@0")},format=rgba[${p}ct]`);
+      // One thread: overlaying onto this transparent canvas races between slice threads when the
+      // clip is semi-transparent, so two exports of one project differed in 89 of 90 frames.
       chains.push(
-        `[${p}ct][v${i}]overlay=x=${ovX}:y=${ovY}:enable='${enable}':shortest=0:eof_action=pass[${p}top]`,
+        `[${p}ct][v${i}]overlay=x=${ovX}:y=${ovY}:enable='${enable}':shortest=0:eof_action=pass:threads=1[${p}top]`,
       );
       chains.push(`[${p}top]split=2[${p}ta][${p}tb]`);
       chains.push(`[${p}ca]format=rgba[${p}caf]`);
@@ -1632,7 +1634,8 @@ export function buildRenderCommand(
     assFiles,
     fonts: [...usedFontFiles],
     stillImages: [...new Set(inputs.filter((i) => i.isImage).map((i) => i.path))],
-    audioMustSpanVideo: brand !== undefined && aout !== null,
+    // Only a branded export pads its audio (through the end card); `brand` is null otherwise.
+    audioMustSpanVideo: brand !== null && aout !== null,
     output: { width: ow, height: oh, fps: outFps },
     frame: false,
     sources: inputs.map((i) => ({ clipId: i.clipId, path: i.path })),

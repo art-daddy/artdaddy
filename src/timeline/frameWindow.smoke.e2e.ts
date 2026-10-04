@@ -75,11 +75,10 @@ async function referenceFrames(
   tl: Timeline,
   frames: number[],
   tag: string,
-  singleThread = false,
 ): Promise<Map<number, Buffer>> {
   const out = path.join(dir, `${tag}_full.mkv`);
   const plan = buildRenderCommand(tl, out, {});
-  const args = threads([...plan.args], singleThread);
+  const args = [...plan.args];
   const i = args.indexOf("-c:v");
   args.splice(i, 2, "-c:v", "libx264", "-qp", "0", "-preset", "ultrafast");
   const r = await runRenderPlan(ctx, { ...plan, args });
@@ -89,21 +88,8 @@ async function referenceFrames(
   return got;
 }
 
-/** A blend-mode clip with opacity is not deterministic in ffmpeg's threaded filtering: three
- *  renders of the same export graph differed by up to 10 levels; with one filter thread they were
- *  identical. That case compares both sides single-threaded, so it still catches a wrong frame. */
-function threads(args: string[], single: boolean): string[] {
-  if (single) args.splice(1, 0, "-filter_threads", "1", "-filter_complex_threads", "1");
-  return args;
-}
-
 /** The frame window: one frame, written as raw yuv420p so nothing converts it. */
-async function windowFrame(
-  tl: Timeline,
-  frame: number,
-  tag: string,
-  singleThread = false,
-): Promise<Buffer> {
+async function windowFrame(tl: Timeline, frame: number, tag: string): Promise<Buffer> {
   const out = path.join(dir, `${tag}_w${frame}.yuv`);
   const plan = buildRenderCommand(
     tl,
@@ -114,7 +100,7 @@ async function windowFrame(
       outputArgs: ["-f", "rawvideo", "-pix_fmt", "yuv420p"],
     },
   );
-  const r = await runRenderPlan(ctx, { ...plan, args: threads([...plan.args], singleThread) });
+  const r = await runRenderPlan(ctx, plan);
   expect(r.code, r.stderr.slice(-600)).toBe(0);
   return fsp.readFile(out);
 }
@@ -132,12 +118,12 @@ async function expectSameAsExport(
   tag: string,
   tl: Timeline,
   frames: number[],
-  o: { tolerance?: number; moving?: boolean; singleThread?: boolean } = {},
+  o: { tolerance?: number; moving?: boolean } = {},
 ): Promise<void> {
-  const ref = await referenceFrames(tl, frames, tag, o.singleThread);
+  const ref = await referenceFrames(tl, frames, tag);
   let distinguishable = 0;
   for (const f of frames) {
-    const w = await windowFrame(tl, f, tag, o.singleThread);
+    const w = await windowFrame(tl, f, tag);
     expect(w.length, `${tag} frame ${f}: size`).toBe((W * H * 3) / 2);
     expect(maxDiff(w, ref.get(f)!), `${tag} frame ${f}`).toBeLessThanOrEqual(o.tolerance ?? 0);
     if (maxDiff(ref.get(f)!, ref.get(f + 1)!) > (o.tolerance ?? 0)) distinguishable++;
@@ -387,10 +373,10 @@ describe("a frame window is the export's frame at that instant", () => {
     await expectSameAsExport("fx", tl, [10, 200, 239, 260, 329, 330, 333, 336, 400]);
   });
 
-  it("a blend mode with opacity (compared single-threaded; see threads())", async () => {
+  it("a blend mode with opacity, threaded as the app renders it", async () => {
     const top = vclip(src.b, 0, 240, 40, { blend: "screen", opacity: 0.8 });
     const tl = timeline([track("base", 0, [vclip(src.a, 0, 240, 0)]), track("top", 1, [top])]);
-    await expectSameAsExport("blendop", tl, [10, 100, 239], { singleThread: true });
+    await expectSameAsExport("blendop", tl, [10, 100, 239]);
   });
 
   // Windows used to render such a clip from its first frame: rotate's size came from it. Since
