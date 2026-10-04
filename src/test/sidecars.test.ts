@@ -48,8 +48,34 @@ describe("no e2e file finds a sidecar on its own", () => {
         if (e.isDirectory()) walk(p);
         else if (/(\.e2e\.ts|__e2e\.ts)$/.test(e.name)) {
           const src = readFileSync(p, "utf8");
-          if (/["'`]src-tauri\/binaries|["'`]binaries["'`]|-(x86_64|aarch64)-(pc-windows|apple|unknown-linux)/.test(src))
+          if (
+            /["'`]src-tauri\/binaries|["'`]binaries["'`]|-(x86_64|aarch64)-(pc-windows|apple|unknown-linux)/.test(
+              src,
+            )
+          )
             offenders.push(path.relative(root, p));
+        }
+      }
+    };
+    walk(root);
+    expect(offenders).toEqual([]);
+  });
+
+  // smoke.e2e.ts carried its own CommandRunner that spawned by BARE name, so it ran whatever ffmpeg
+  // was on PATH (and skipped the app's ffmpeg rules) — the path guard above could not see it.
+  it("no e2e file spawns a sidecar by bare name or runs its own spawning CommandRunner", () => {
+    const root = path.resolve(process.cwd(), "src");
+    const offenders: string[] = [];
+    const bareSpawn =
+      /\b(?:spawn|spawnSync|execFile|execFileSync)\(\s*["'`](?:ffmpeg|ffprobe|yt-dlp|whisper-cli|artdaddy-browser)["'`]/;
+    const walk = (dir: string): void => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const p = path.join(dir, e.name);
+        if (e.isDirectory()) walk(p);
+        else if (/\.e2e\.ts$/.test(e.name)) {
+          const src = readFileSync(p, "utf8");
+          const ownRunner = /:\s*CommandRunner\s*=\s*\{/.test(src) && /\bspawn\(/.test(src);
+          if (bareSpawn.test(src) || ownRunner) offenders.push(path.relative(root, p));
         }
       }
     };

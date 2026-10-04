@@ -210,6 +210,26 @@ describe("TauriCommandRunner — sidecar wiring", () => {
     expect(FakeCommand.made[0].opts).toMatchObject({ cwd: "/work" });
   });
 
+  // The one door every production ffmpeg passes, so the AAC rule lives here and nowhere else.
+  // Checked on what reaches the spawn, for a producer that never asked for it.
+  it("spawns an AAC encode at 48 kHz, and leaves other commands and programs exactly as given", async () => {
+    const aac = ["-i", "/in/talk16k.wav", "-af", "adelay=5000|5000", "-c:a", "aac", "/out/a.m4a"];
+    await new TauriCommandRunner().run("ffmpeg", aac);
+    const spawned = FakeCommand.made[0].args;
+    expect(spawned.slice(spawned.indexOf("-ar"), spawned.indexOf("-ar") + 2)).toEqual([
+      "-ar",
+      "48000",
+    ]);
+    expect(spawned[spawned.length - 1]).toBe("/out/a.m4a");
+
+    const wav = ["-i", "/in/a.mp4", "-ar", "16000", "-c:a", "pcm_s16le", "/out/a.wav"];
+    await new TauriCommandRunner().run("ffmpeg", wav);
+    expect(FakeCommand.made[1].args).toEqual(wav);
+
+    await new TauriCommandRunner().run("ffprobe", aac);
+    expect(FakeCommand.made[2].args).toEqual(aac);
+  });
+
   it("decodes non-utf8 output leniently instead of throwing", async () => {
     FakeCommand.nextExecute = { code: 0, stdout: [0xff, 0xfe, ...utf8("ok")], stderr: [] };
     const r = await new TauriCommandRunner().run("ffprobe", []);

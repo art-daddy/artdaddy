@@ -3,14 +3,16 @@
 // NOT part of the unit suite (see vitest.config exclude). Run explicitly:
 //   npx vitest run --config vitest.smoke.config.ts
 // Network tools are gated behind ARTDADDY_SMOKE_NET=1 (they hit YouTube).
-import { spawn } from "node:child_process";
+//
+// The runner is the SHARED one (__e2e.ts): the shipped sidecars, with the ffmpeg rules the app's
+// runner applies. This file used to spawn bare names, so it ran whatever ffmpeg was on PATH, and
+// on a machine without one it failed instead of testing anything.
 import { promises as fsp } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import type { CommandResult, CommandRunner } from "./command";
 import type { ClientToolContext } from "./context";
 import { clipVideoTool, cropImageTool, probeMediaTool, runFfmpegTool } from "./media";
 import { inspectColorTool, inspectMediaTool, inspectTimelineTool } from "./inspect";
@@ -29,25 +31,16 @@ import { applyColorTool } from "../timeline/props";
 import { buildRenderCommand, renderTimelineTool } from "../timeline/render";
 import { toSecondsView } from "../timeline/frames";
 import { PARITY_CANVAS, PARITY_PROBE_FRAME, parityTimeline } from "../preview/__parity";
-import { installE2EDocuments, resetE2EDocuments, flushE2EDoc, libRef, openE2EDoc } from "./__e2e";
+import {
+  installE2EDocuments,
+  resetE2EDocuments,
+  flushE2EDoc,
+  libRef,
+  nodeRunner,
+  openE2EDoc,
+} from "./__e2e";
 
 type Rec = Record<string, unknown>;
-
-const nodeRunner: CommandRunner = {
-  // `cwd` is honoured as the app's runner does: libass files (captions, the inspect grid) are
-  // staged in a scratch dir and referenced by bare name.
-  run(program, args, _signal, cwd): Promise<CommandResult> {
-    return new Promise((resolve) => {
-      const child = spawn(program, args, { cwd, windowsHide: true });
-      let stdout = "";
-      let stderr = "";
-      child.stdout?.on("data", (d) => (stdout += d.toString()));
-      child.stderr?.on("data", (d) => (stderr += d.toString()));
-      child.on("error", (e) => resolve({ code: -1, stdout, stderr: String(e) }));
-      child.on("close", (code) => resolve({ code, stdout, stderr }));
-    });
-  },
-};
 
 const nodeFs: FsLike = {
   async exists(p) {

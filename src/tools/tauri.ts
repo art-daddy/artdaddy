@@ -22,6 +22,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { CommandResult, CommandRunner } from "./command";
 import type { ClientToolContext } from "./context";
 import { decodeCommandOutput as decode } from "./decode";
+import { ffmpegPolicy } from "./ffmpegPolicy";
 import { BROWSER_BIN, resolveSidecar } from "./sidecar";
 import { type DirEntry, type FsLike, ProjectStoreAccess } from "./store";
 
@@ -40,7 +41,9 @@ export class TauriCommandRunner implements CommandRunner {
     // error). That masked real errors as an opaque "invalid utf-8 sequence".
     if (signal?.aborted) return { code: -1, stdout: "", stderr: "cancelled" };
     try {
-      const cmd = await this.build(program, args, cwd);
+      // Every production ffmpeg passes here, so the app's ffmpeg rules are applied here and
+      // nowhere else (ffmpegPolicy.ts: AAC is always encoded at 48 kHz).
+      const cmd = await this.build(program, ffmpegPolicy(program, args), cwd);
       // execute() buffers, so it can never report progress — spawn whenever the caller wants
       // either cancellation or live output.
       if (!signal && !onStdout) {

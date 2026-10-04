@@ -25,6 +25,12 @@ const NOT_EXTENSIONS = new Map<string, RegExp>([
     // ffprobe's CONTAINER names for the ISOBMFF family, compared against a probe result.
     /WEB_CONTAINER_OK/,
   ],
+  [
+    "timeline/aac48k.smoke.e2e.ts",
+    // OUTPUT extensions ffmpeg is asked to WRITE, to measure which ones default to AAC: a
+    // deliberately wide universe of muxers, not a list of media the app opens.
+    /^\s*\.\.\.\["/,
+  ],
 ]);
 
 function walk(dir: string, out: string[] = []): string[] {

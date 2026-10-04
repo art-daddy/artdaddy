@@ -12,6 +12,7 @@ import path from "node:path";
 
 import type { CommandResult, CommandRunner } from "./command";
 import type { ClientToolContext } from "./context";
+import { ffmpegPolicy } from "./ffmpegPolicy";
 import { kindOf, type MediaKind } from "../media/formats";
 import { inspectColorTool } from "./inspect";
 import { registerLibraryClip } from "./import";
@@ -124,8 +125,15 @@ export const nodeRunner: CommandRunner = {
   // `cwd` is honoured because runRenderPlan relies on it: the caption .ass files are staged into a
   // scratch dir and referenced by BARE name. A runner that drops it renders every text clip as
   // "ass_read_file: fopen failed", which is a harness lie about a feature that works.
-  run(program, args, _signal, cwd): Promise<CommandResult> {
+  //
+  // `signal` kills the child, as the app's runner does on Stop. It was ignored, so a test could
+  // only bound a hung ffmpeg by its own timeout, and the process outlived the test.
+  run(program, args, signal, cwd): Promise<CommandResult> {
     return new Promise((resolve) => {
+      if (signal?.aborted) {
+        resolve({ code: -1, stdout: "", stderr: "cancelled" });
+        return;
+      }
       // Mirrors TauriCommandRunner.build: whisper.cpp's Windows build is DYNAMIC, and ggml
       // resolves its CPU backend by scanning the process's own directory, so putting the DLL
       // dir on PATH is NOT enough — the exe loads and then dies on GGML_ASSERT(device). The app
@@ -133,13 +141,26 @@ export const nodeRunner: CommandRunner = {
       // product failure that does not exist.
       const dllDir = path.resolve(process.cwd(), "src-tauri/resources/whisper");
       const runCwd = program === "whisper-cli" && existsSync(dllDir) ? dllDir : cwd;
-      const child = spawn(sidecar(program), args, { cwd: runCwd, windowsHide: true });
+      // The same rules TauriCommandRunner applies, so the suites run what users run.
+      const child = spawn(sidecar(program), ffmpegPolicy(program, args), {
+        cwd: runCwd,
+        windowsHide: true,
+      });
       let stdout = "";
       let stderr = "";
+      let killed = false;
+      const onAbort = () => {
+        killed = true;
+        child.kill("SIGKILL");
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
       child.stdout?.on("data", (d) => (stdout += d.toString()));
       child.stderr?.on("data", (d) => (stderr += d.toString()));
       child.on("error", (e) => resolve({ code: -1, stdout, stderr: String(e) }));
-      child.on("close", (code) => resolve({ code, stdout, stderr }));
+      child.on("close", (code) => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve(killed ? { code: -1, stdout, stderr: "cancelled" } : { code, stdout, stderr });
+      });
     });
   },
 };
@@ -236,7 +257,11 @@ export async function ff(args: string[]): Promise<void> {
  *  later run would reuse. The temporary name is this BUILD's own: e2e files run in parallel, and on
  *  a cold cache (CI) several build the same fixture at once. With one shared `.part` name, the first
  *  to finish renamed the others' file out from under them (ENOENT on macOS CI, 2026-10-04). */
-export async function longFixture(o: { seconds: number; fps: number; gop: number }): Promise<string> {
+export async function longFixture(o: {
+  seconds: number;
+  fps: number;
+  gop: number;
+}): Promise<string> {
   const dir = path.join(os.tmpdir(), "artdaddy-e2e-fixtures");
   const file = path.join(dir, `long${o.seconds}_1080p${o.fps}_g${o.gop}.mp4`);
   if (existsSync(file)) return file;
