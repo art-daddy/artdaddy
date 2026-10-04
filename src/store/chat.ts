@@ -561,11 +561,8 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
     canContinue: false,
     closing: false,
     error: null,
-    // The full model, not mini. A round costs $0.042 against $0.0076 measured over 3,438
-    // metered calls -- real, but a rounding error beside one Veo clip at $1.37, and the agent
-    // is what decides whether that clip was worth generating. Must agree with the server's
-    // fallback in sessions.py: a user who never touches the picker sends no model at all.
-    model: "gpt-5.4",
+    // Luna at high effort costs a fraction of a cent a round; the picker offers gpt-6.1-sol.
+    model: "gpt-5.6-luna",
     effort: "high",
     mode: "default",
     pendingMentions: [],

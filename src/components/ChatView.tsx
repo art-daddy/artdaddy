@@ -51,8 +51,10 @@ import { attachmentKindFromName, mediaKindFromName } from "./chatMedia";
 // Gemini ids route to the Gemini provider server-side by prefix (attachments.is_gemini_model),
 // so adding them here is all that is needed to offer them. The gemini-3.x family is withdrawn for
 // now and the server refuses it too, so listing one here would only produce a 400.
-const MODELS = ["gpt-5.4-mini", "gpt-5.4"];
+const MODELS = ["gpt-5.6-luna", "gpt-6.1-sol"];
 const EFFORTS = ["none", "low", "medium", "high", "xhigh"];
+// gpt-6.1-sol rejects "none"; the server would send it as "low", so don't offer it.
+const effortsFor = (model: string) => (model === "gpt-6.1-sol" ? EFFORTS.slice(1) : EFFORTS);
 const MODES: ApprovalMode[] = ["default", "autopilot"];
 // "default" alone says nothing about what it decides; the value stays as the stored/wire form.
 const MODE_LABELS: Record<ApprovalMode, string> = {
@@ -738,8 +740,20 @@ export default function ChatView({ onHide }: { onHide?: () => void } = {}) {
         </div>
 
         <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
-          <Select value={model} onChange={(v) => setControls({ model: v })} options={MODELS} />
-          <Select value={effort} onChange={(v) => setControls({ effort: v })} options={EFFORTS} />
+          <Select
+            value={model}
+            onChange={(v) =>
+              setControls(
+                effortsFor(v).includes(effort) ? { model: v } : { model: v, effort: "low" },
+              )
+            }
+            options={MODELS}
+          />
+          <Select
+            value={effort}
+            onChange={(v) => setControls({ effort: v })}
+            options={effortsFor(model)}
+          />
           <Select
             value={mode}
             onChange={(v) => setControls({ mode: v as ApprovalMode })}

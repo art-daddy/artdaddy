@@ -50,7 +50,7 @@ function baseState() {
     streaming: false,
     pending: null,
     session: null,
-    model: "gpt-5.4-mini",
+    model: "gpt-5.6-luna",
     effort: "high",
     mode: "default",
     error: null,
@@ -414,10 +414,39 @@ describe("ChatView", () => {
   it("changes model and effort selectors", () => {
     render(<ChatView />);
     const selects = screen.getAllByRole("combobox");
-    fireEvent.change(selects[0], { target: { value: "gpt-5.4" } });
-    expect(state.setControls).toHaveBeenCalledWith({ model: "gpt-5.4" });
+    fireEvent.change(selects[0], { target: { value: "gpt-6.1-sol" } });
+    expect(state.setControls).toHaveBeenCalledWith({ model: "gpt-6.1-sol" });
     fireEvent.change(selects[1], { target: { value: "low" } });
     expect(state.setControls).toHaveBeenCalledWith({ effort: "low" });
+  });
+
+  it("offers the two served models, Luna first", () => {
+    render(<ChatView />);
+    const models = [...(screen.getAllByRole("combobox")[0] as HTMLSelectElement).options].map(
+      (o) => o.value,
+    );
+    expect(models).toEqual(["gpt-5.6-luna", "gpt-6.1-sol"]);
+  });
+
+  // gpt-6.1-sol 400s on effort "none"; Luna accepts it. Both directions, or a filter that hid
+  // "none" everywhere would pass.
+  it("never offers Sol an effort it rejects, and Luna keeps it", () => {
+    const efforts = () =>
+      [...(screen.getAllByRole("combobox")[1] as HTMLSelectElement).options].map((o) => o.value);
+    state.model = "gpt-6.1-sol";
+    const { unmount } = render(<ChatView />);
+    expect(efforts()).not.toContain("none");
+    unmount();
+    state.model = "gpt-5.6-luna";
+    render(<ChatView />);
+    expect(efforts()).toContain("none");
+  });
+
+  it("switching to Sol at effort none lands on low instead of a value Sol rejects", () => {
+    state.effort = "none";
+    render(<ChatView />);
+    fireEvent.change(screen.getAllByRole("combobox")[0], { target: { value: "gpt-6.1-sol" } });
+    expect(state.setControls).toHaveBeenCalledWith({ model: "gpt-6.1-sol", effort: "low" });
   });
 
   it("removes a pending attachment chip", async () => {
@@ -475,7 +504,7 @@ describe("ChatView", () => {
   it("shows the credit balance whenever the server reports the round is metered", () => {
     // Keyed on usage.metered, not on which model is selected — the gemini id this used to name
     // was incidental, and the app no longer offers one.
-    state.model = "gpt-5.4";
+    state.model = "gpt-6.1-sol";
     render(<ChatView />);
     expect(screen.getByText(/cr left/)).toBeInTheDocument();
   });
