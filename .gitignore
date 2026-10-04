@@ -87,6 +87,10 @@ landing/
 # Ad-hoc preview probes used while chasing rendering bugs
 preview-probe*.html
 preview-parity.html
+# ...except the two the real-browser lane loads (e2e/ui/preview.spec.ts, chromaKey.spec.ts). Being
+# ignored, they never reached a CI checkout, and both specs timed out on every run since.
+!preview-probe.html
+!preview-probe-chroma.html
 
 # Scratch output from local runs
 _*.txt

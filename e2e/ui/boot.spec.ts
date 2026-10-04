@@ -49,15 +49,17 @@ test.describe("app boot", () => {
     });
     await page.route("**/contract/tools**", (route) => route.abort());
     await page.goto("/");
+    // `unknownParams` is the check every tool call goes through (validateToolArgs, which this
+    // used to call, was folded into it); `[]` means every name is one the bundled contract knows.
     const validation = await page.evaluate(async () => {
-      const { validateToolArgs } = await import("/src/contract/params.ts");
+      const { unknownParams } = await import("/src/contract/params.ts");
       return {
-        valid: validateToolArgs("export", { output_path: "preview.mp4" }),
-        obsolete: validateToolArgs("export", { format: "mp4" }),
+        valid: unknownParams("export", { output_path: "preview.mp4" }),
+        obsolete: unknownParams("export", { format: "mp4" }),
       };
     });
-    expect(validation.valid).toEqual({ ok: true });
-    expect(validation.obsolete.ok).toBe(false);
+    expect(validation.valid).toEqual([]);
+    expect(validation.obsolete).toEqual(["format"]);
     expect(sent).toEqual([]);
   });
 

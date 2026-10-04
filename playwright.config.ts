@@ -24,6 +24,7 @@ import { defineConfig, devices } from "@playwright/test";
 // page, neither of which needs /inference or a project on the server.
 export default defineConfig({
   testDir: "./e2e/ui",
+  globalSetup: "./e2e/ui/warmup.ts",
   timeout: 60_000,
   expect: { timeout: 10_000 },
   fullyParallel: false,
@@ -45,7 +46,13 @@ export default defineConfig({
       // Playwright's Windows WebKit build exposes no WebGL2 context, so the GPU probe pages
       // cannot initialize there. Keep WebKit on boot/layout/input/OS-drop; Chromium covers the
       // real WebGL2 pixel suite, and macOS CI/runtime covers the actual WKWebView + Metal path.
-      testIgnore: ["preview.spec.ts", "chromaKey.spec.ts"],
+      // That Windows build's DataTransfer also has no `items.add`, so the OS-drop spec cannot even
+      // build its input there; it runs on macOS WebKit, the engine those drops come from.
+      testIgnore: [
+        "preview.spec.ts",
+        "chromaKey.spec.ts",
+        ...(process.platform === "win32" ? ["osdrop.spec.ts"] : []),
+      ],
     },
   ],
   webServer: {
@@ -58,5 +65,10 @@ export default defineConfig({
     timeout: 120_000,
     stdout: "ignore",
     stderr: "pipe",
+    // "No backend", as the specs assume (boot.spec's BENIGN names this address). Since the API
+    // default became the deployed server, the lane booted against PRODUCTION: CORS refused the
+    // 127.0.0.1:5199 origin, the app locked itself, and every boot and menu spec failed. Set here,
+    // it also overrides a VITE_API_BASE_URL a workflow exports for its build steps.
+    env: { VITE_API_BASE_URL: "http://127.0.0.1:8000" },
   },
 });
