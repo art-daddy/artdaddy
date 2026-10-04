@@ -36,7 +36,14 @@ export default defineConfig({
     screenshot: "only-on-failure",
   },
   projects: [
-    { name: "chromium", use: { ...devices["Desktop Chrome"] } },
+    {
+      name: "chromium",
+      use: {
+        ...devices["Desktop Chrome"],
+        // GPU-less runners (macOS CI) get WebGL2 only from SwiftShader, which Chrome no longer picks unasked.
+        launchOptions: { args: ["--enable-unsafe-swiftshader"] },
+      },
+    },
     // The closest thing to macOS without a Mac: WKWebView is WebKit, and this build runs on
     // Windows. It does NOT cover Metal-backed WebGL or the Tauri shell, but it does cover the
     // engine-level differences (CSS, layout, JS APIs) that a Chromium-only lane cannot see.
@@ -48,11 +55,11 @@ export default defineConfig({
       // real WebGL2 pixel suite, and macOS CI/runtime covers the actual WKWebView + Metal path.
       // That Windows build's DataTransfer also has no `items.add`, so the OS-drop spec cannot even
       // build its input there; it runs on macOS WebKit, the engine those drops come from.
-      testIgnore: [
-        "preview.spec.ts",
-        "chromaKey.spec.ts",
-        ...(process.platform === "win32" ? ["osdrop.spec.ts"] : []),
-      ],
+      // On macOS the GPU specs DO run here: until 2026-10-04 they were ignored on every OS.
+      testIgnore:
+        process.platform === "win32"
+          ? ["preview.spec.ts", "chromaKey.spec.ts", "osdrop.spec.ts"]
+          : [],
     },
   ],
   webServer: {
