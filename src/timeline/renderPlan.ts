@@ -803,6 +803,27 @@ function resolveText(clip: Clip, cw: number, ch: number, durSec: number): Resolv
   };
 }
 
+/** When a clip is on canvas, in seconds. A picture clip starts at its centred transition's lead-in
+ *  and stays through the hold under the next clip's transition; a caption covers its own span. */
+export function onCanvasSec(pc: PlanClip): { from: number; to: number } {
+  if (pc.kind === "text") return { from: pc.visibility.inSec, to: pc.visibility.outSec };
+  const lead = pc.transition ? pc.transition.durSec / 2 : 0;
+  return { from: pc.visibility.inSec - lead, to: pc.visibility.outSec + pc.visibility.holdSec };
+}
+
+/** The whole frames a span covers, `first` through `end - 1`: frame k is in it when
+ *  from <= k/fps < to. A centred transition's span can start or end on a HALF frame. The 1e-6
+ *  absorbs float noise in a span authored in frames (10/24/2 s is 5.000000000000001 frames). */
+export function framesOf(span: { from: number; to: number }, fps: number) {
+  return { first: Math.ceil(span.from * fps - 1e-6) + 0, end: Math.ceil(span.to * fps - 1e-6) + 0 };
+}
+
+/** The frames a clip is on canvas. The ONE rule: the preview draws it, the export gates it and an
+ *  inspect frame lists it in `visible_clips` on exactly these frames (UJ-026). */
+export function onCanvasFrames(pc: PlanClip, fps: number): { first: number; end: number } {
+  return framesOf(onCanvasSec(pc), fps);
+}
+
 /** Resolve the shared look plan from a SECONDS-view timeline. Pure; ordering + duration + transition +
  *  hold mirror render.ts exactly so the exporter can consume this byte-for-byte. */
 export function resolveRenderPlan(timeline: Timeline): SecondsRenderPlan {

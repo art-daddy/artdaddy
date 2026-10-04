@@ -459,7 +459,8 @@ describe("buildRenderCommand", () => {
     expect(plan.duration).toBe(2);
     expect(plan.filterComplex).toContain("color=c=black:s=1920x1080:r=30:d=2.000000[base]");
     expect(plan.filterComplex).toContain("scale=1920:1080:force_original_aspect_ratio=decrease");
-    expect(plan.filterComplex).toContain("overlay=x=0:y=0:enable='between(t,0.000000,2.000000)'");
+    // UJ-026: the gate sits half a frame (1/60 s at 30 fps) inside each boundary.
+    expect(plan.filterComplex).toContain("overlay=x=0:y=0:enable='between(t,-0.016667,1.983333)'");
     expect(plan.filterComplex).toContain("adelay=0|0,volume=0.5000");
     // Audio effects render as afilters after volume, in canonical order.
     expect(plan.filterComplex).toContain("afftdn=nr=8.00");
@@ -613,7 +614,7 @@ describe("buildRenderCommand", () => {
       ]),
       "/o.mp4",
     );
-    expect(fast.filterComplex).toContain("/2.000000+0.000000/TB");
+    expect(fast.filterComplex).toContain("setpts=ceil((PTS-STARTPTS+1)/2.000000-0.000001)-1+0");
   });
 
   it("emits source crop + flip filters (no longer deferred)", () => {

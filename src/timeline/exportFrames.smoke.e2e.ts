@@ -640,3 +640,190 @@ maybe("what the exported file actually shows (real ffmpeg)", () => {
     expect(colourOf(f[0])).toBe("red");
   }, 180_000);
 });
+
+// UJ-026. Every cut above sits on a whole second, which at 30 fps is a multiple of 3 frames and
+// prints exactly. Elsewhere `toFixed(6)` rounding put a clip one frame early (its first frame
+// skipped) or left the cut frame black: at 30 fps n % 3 == 1 skipped, n % 3 == 2 went black.
+// Solid colours cannot show a skipped frame, so each source frame carries its index in luma.
+/** A CFR clip whose frame N has luma 16 + 4N, tinted by `cb`/`cr` so the clip can be told apart. */
+async function indexed(dir: string, name: string, fps: number, cb: number, cr: number) {
+  const out = path.join(dir, `${name}${fps}.mkv`);
+  const r = await run(FF!, [
+    "-y",
+    "-v",
+    "error",
+    "-f",
+    "lavfi",
+    "-i",
+    `color=c=black:size=64x64:rate=${fps}:duration=1,format=yuv444p,geq=lum='16+4*N':cb=${cb}:cr=${cr}`,
+    "-c:v",
+    "ffv1",
+    out,
+  ]);
+  expect(r.code, `source ${name} failed: ${r.stderr.slice(-300)}`).toBe(0);
+  return out;
+}
+
+/** Which clip and source frame an `indexed` export shows at frame `k`, or "black". */
+function shownAt(f: Frame[], k: number, fps: number): string {
+  const x = f.find((g) => Math.abs(g.t - k / fps) < 0.4 / fps);
+  // Frame 0 of either clip is as dark as black, so the tint decides: black has none.
+  if (!x || Math.abs(x.u - x.v) < 40) return "black";
+  return `${x.v > x.u ? "A" : "B"}${Math.round((x.y - 16) / 4)}`;
+}
+
+const CUTS = [30, 37, 59, 61, 62, 143];
+
+maybe("UJ-026: the frame at a cut is the incoming clip's FIRST frame, at any frame number", () => {
+  for (const fps of [24, 30, 60]) {
+    it(`${fps} fps: cuts at every residue`, async () => {
+      const dir = await scratch();
+      const a = await indexed(dir, "a", fps, 100, 190);
+      const b = await indexed(dir, "b", fps, 190, 100);
+      const wrong: string[] = [];
+      for (const cut of CUTS) {
+        const sec = (n: number) => n / fps;
+        const timeline = {
+          canvas: { width: 64, height: 64, fps },
+          tracks: [
+            track("v0", [
+              clip({
+                id: `a${cut}`,
+                media_ref: a,
+                timeline_in: sec(cut - 3),
+                timeline_out: sec(cut),
+                source_in: 0,
+                source_out: sec(3),
+              }),
+              clip({
+                id: `b${cut}`,
+                media_ref: b,
+                timeline_in: sec(cut),
+                timeline_out: sec(cut + 3),
+                source_in: 0,
+                source_out: sec(3),
+              }),
+            ]),
+          ],
+        } as unknown as Timeline;
+        const f = await exported(dir, timeline, `cut${cut}`);
+        for (let k = cut - 3; k < cut + 3; k++) {
+          const expected = k < cut ? `A${k - cut + 3}` : `B${k - cut}`;
+          const seen = shownAt(f, k, fps);
+          if (seen !== expected) wrong.push(`cut ${cut}, frame ${k}: ${seen} (want ${expected})`);
+        }
+      }
+      expect(wrong, wrong.join("\n")).toEqual([]);
+    }, 300_000);
+  }
+
+  // UJ-026 was measured at speed 1.5 as well. The preview shows source frame floor(rel * speed)
+  // at clip frame `rel` (scene.ts), so a retimed clip's cut frame is still its frame 0, and every
+  // frame after it is the one the preview shows. Slow motion is the opposite direction.
+  for (const speed of [1.5, 0.75]) {
+    it(`30 fps, speed ${speed}: every frame is the one the preview shows`, async () => {
+      const fps = 30;
+      const dir = await scratch();
+      const a = await indexed(dir, "a", fps, 100, 190);
+      const b = await indexed(dir, "b", fps, 190, 100);
+      const wrong: string[] = [];
+      const n = 4;
+      for (const cut of CUTS) {
+        const sec = (x: number) => x / fps;
+        const timeline = {
+          canvas: { width: 64, height: 64, fps },
+          tracks: [
+            track("v0", [
+              clip({
+                id: `a${cut}`,
+                media_ref: a,
+                timeline_in: sec(cut - n),
+                timeline_out: sec(cut),
+                source_in: 0,
+                source_out: sec(n * speed),
+                speed,
+              }),
+              clip({
+                id: `b${cut}`,
+                media_ref: b,
+                timeline_in: sec(cut),
+                timeline_out: sec(cut + n),
+                source_in: 0,
+                source_out: sec(n * speed),
+                speed,
+              }),
+            ]),
+          ],
+        } as unknown as Timeline;
+        const f = await exported(dir, timeline, `s${speed}cut${cut}`);
+        for (let k = cut - n; k < cut + n; k++) {
+          const rel = k < cut ? k - cut + n : k - cut;
+          const expected = `${k < cut ? "A" : "B"}${Math.floor(rel * speed)}`;
+          const seen = shownAt(f, k, fps);
+          if (seen !== expected) wrong.push(`cut ${cut}, frame ${k}: ${seen} (want ${expected})`);
+        }
+      }
+      expect(wrong, wrong.join("\n")).toEqual([]);
+    }, 300_000);
+  }
+
+  // An odd-length crossfade starts and ends on a HALF frame. The preview draws a clip on frame k
+  // when from <= k < to, so a 3-frame one shows the incoming clip from cut-1 and keeps the
+  // outgoing one under it through cut+1; a 1-frame one shows both on the cut frame alone. The
+  // composite is a blend, so each edge frame is matched against the picture with BOTH clips and
+  // against the picture with either one missing: it must be nearest the first.
+  it("30 fps: an odd-length crossfade keeps both clips on its first and last frames", async () => {
+    const fps = 30;
+    const dir = await scratch();
+    const a = await indexed(dir, "a", fps, 100, 190);
+    const b = await indexed(dir, "b", fps, 190, 100);
+    const wrong: string[] = [];
+    const sec = (x: number) => x / fps;
+    for (const cut of CUTS) {
+      for (const dur of [1, 3]) {
+        const timeline = {
+          canvas: { width: 64, height: 64, fps },
+          tracks: [
+            track("v0", [
+              // A shows source frames 20..29, so its held last frame is bright (luma 132).
+              clip({
+                id: `a${cut}`,
+                media_ref: a,
+                timeline_in: sec(cut - 10),
+                timeline_out: sec(cut),
+                source_in: sec(20),
+                source_out: sec(30),
+              }),
+              clip({
+                id: `b${cut}`,
+                media_ref: b,
+                timeline_in: sec(cut),
+                timeline_out: sec(cut + 10),
+                source_in: 0,
+                source_out: sec(10),
+                transition_in: { kind: "crossfade", duration: sec(dur) },
+              }),
+            ]),
+          ],
+        } as unknown as Timeline;
+        const f = await exported(dir, timeline, `xf${dur}cut${cut}`);
+        const lead = dur / 2;
+        const ay = (k: number) => 16 + 4 * (k < cut ? 20 + k - (cut - 10) : 29);
+        const by = (k: number) => 16 + 4 * Math.max(0, k - cut);
+        const p = (k: number) => Math.max(0, Math.min(1, (k - cut + lead) / dur));
+        for (const k of [cut - Math.floor(lead), cut + Math.floor(lead)]) {
+          const both = p(k) * by(k) + (1 - p(k)) * ay(k);
+          const noB = ay(k);
+          const noA = p(k) * by(k) + (1 - p(k)) * 16;
+          const x = f.find((g) => Math.abs(g.t - k / fps) < 0.4 / fps);
+          const y = x ? x.y : -1000;
+          if (Math.abs(y - both) >= Math.min(Math.abs(y - noB), Math.abs(y - noA)))
+            wrong.push(
+              `cut ${cut}, ${dur}-frame crossfade, frame ${k}: luma ${y.toFixed(1)} (both ${both.toFixed(1)}, no B ${noB.toFixed(1)}, no A ${noA.toFixed(1)})`,
+            );
+        }
+      }
+    }
+    expect(wrong, wrong.join("\n")).toEqual([]);
+  }, 300_000);
+});

@@ -25,10 +25,11 @@ import { clipKind } from "./helpers";
 import type { Animatable, Clip, Timeline } from "./model";
 import { validateTimeline } from "./validate";
 import {
+  framesOf,
+  onCanvasSec,
   resolveRenderPlan,
   type BlendKind,
   type FitKind,
-  type PlanClip,
   type ResolvedTransition,
 } from "./renderPlan";
 import { buildBandAss, unrenderableFlags, type CaptionSpec } from "./assCaption";
@@ -101,14 +102,12 @@ export function canvasPx(timeline: Timeline): { w: number; h: number } {
   };
 }
 
-/** When a clip is on canvas in the render, in seconds. A picture clip starts at its centred
- *  transition's lead-in and stays through the hold under the next clip's transition; a caption
- *  covers its own span. The render's `enable` gate, the frame window's choice of inputs and an
- *  inspect frame's `visible_clips` all read it here. */
-export function onCanvasSec(pc: PlanClip): { from: number; to: number } {
-  if (pc.kind === "text") return { from: pc.visibility.inSec, to: pc.visibility.outSec };
-  const lead = pc.transition ? pc.transition.durSec / 2 : 0;
-  return { from: pc.visibility.inSec - lead, to: pc.visibility.outSec + pc.visibility.holdSec };
+/** An ffmpeg `enable` window that is open on frames `first` through `end - 1`. UJ-026: a bound
+ *  printed to 6 places sits a hair off its own frame time (59/30 prints as 1.966667, above
+ *  59/30), so a gate AT a frame decides it by rounding. Each threshold here sits half a frame
+ *  from every frame time, where printing cannot carry it across one. */
+export function frameGate(first: number, end: number, fps: number): string {
+  return `between(t,${((first - 0.5) / fps).toFixed(6)},${((end - 0.5) / fps).toFixed(6)})`;
 }
 
 function boxOf(clip: Clip, cw: number, ch: number, fit: FitKind): Box {
@@ -1251,14 +1250,29 @@ export function buildRenderCommand(
         opts.push("stop_mode=clone", `stop_duration=${(backPad * r.speed).toFixed(6)}`);
       parts.push(`tpad=${opts.join(":")}`);
     }
-    // The front pad shifts the stream leadIn earlier, so anchor at tin-leadIn. A frame window adds
-    // back the frames its seek skipped as a whole number, so placement is the export's to the bit.
-    const off = (r.tin - leadIn).toFixed(6);
-    const skipped = r.shift ? `+${r.shift.k}` : "";
+    // Anchor in whole FRAMES: the clip's own first frame lands exactly on frame round(tin*fps).
+    // UJ-026: anchoring at a printed `(tin-leadIn)/TB` let 37/30 print as 36.99999, which
+    // setpts truncated to frame 36, so the cut showed the incoming clip's SECOND frame. `C` is
+    // the lead-in clones the export's tpad puts in front; a frame window has no tpad and its
+    // `shift.k` counts those clones plus the frames its seek skipped, so both reach the same
+    // clip-relative frame index (PTS-STARTPTS + K - C) and the same placement.
+    const anchor = Math.round(r.tin * fps);
+    const clones = leadIn > 0 ? tpadFrames(leadIn * r.speed, fps) : 0;
+    const rel = (r.shift ? r.shift.k : 0) - clones;
+    const j = `PTS-STARTPTS${rel === 0 ? "" : rel > 0 ? `+${rel}` : `${rel}`}`;
+    // A retimed clip shows source frame floor(k*speed) at its frame k, as the preview does. The
+    // overlay draws, at frame k, the FIRST source frame stamped k, or else the last one stamped
+    // before k (measured). Slow motion stamps frame j with the first frame that shows it,
+    // ceil(j/speed). A speed-up stamps it with the frame that shows it, and a frame it skips with
+    // the stamp of the one before, so it is never drawn. Truncating j/speed instead ran the clip
+    // up to a frame ahead of the preview, so a retimed cut never showed the clip's first frame.
+    const sp = r.speed.toFixed(6);
     parts.push(
       Math.abs(r.speed - 1) < 1e-6
-        ? `setpts=PTS-STARTPTS${skipped}+${off}/TB`
-        : `setpts=(PTS-STARTPTS${skipped})/${r.speed.toFixed(6)}+${off}/TB`,
+        ? `setpts=${j}+${anchor}`
+        : r.speed > 1
+          ? `setpts=ceil((${j}+1)/${sp}-0.000001)-1+${anchor}`
+          : `setpts=ceil((${j})/${sp}-0.000001)+${anchor}`,
     );
     // Colour grade + ordered effects act on the opaque, scaled clip.
     for (const f of r.preAlpha) parts.push(f);
@@ -1371,7 +1385,9 @@ export function buildRenderCommand(
         : isNum(r.posY)
           ? String(Math.round(r.posY))
           : `'round(${compileAnim(r.posY, "t", r.tin)})'`;
-    const enable = `between(t,${r.span.from.toFixed(6)},${r.span.to.toFixed(6)})`;
+    // On canvas exactly on the frames the preview draws it (UJ-026).
+    const { first, end } = framesOf(r.span, fps);
+    const enable = frameGate(first, end, fps);
     // Dip-to-colour: a full-canvas colour flash BETWEEN the outgoing clip (already in `last`) and
     // this incoming clip. Its alpha ramps clip(2p,0,1) — opaque by the midpoint — enable-gated to the
     // transition window so it vanishes after (the preview draws the same solid quad at z=track; a
@@ -1379,13 +1395,19 @@ export function buildRenderCommand(
     if (cross && (cross.kind === "dip-to-black" || cross.kind === "dip-to-white")) {
       const dipRGB = cross.kind === "dip-to-white" ? "255" : "0";
       const dipStart = (r.tin - leadIn).toFixed(6);
-      const dipEnd = (r.tin + leadIn).toFixed(6);
       chains.push(
         `${colorSrc("c=black")},format=rgba,` +
           `geq=r='${dipRGB}':g='${dipRGB}':b='${dipRGB}':a='255*clip(2*(T-${dipStart})/${cross.durSec.toFixed(6)},0,1)'[dip${i}]`,
       );
+      // The preview draws the colour on both ends of its window, tin-leadIn and tin+leadIn, and
+      // only while this clip is on canvas (it is one of the clip's layers there).
+      const dipGate = frameGate(
+        Math.max(first, Math.ceil((r.tin - leadIn) * fps - 1e-6)),
+        Math.min(end, Math.floor((r.tin + leadIn) * fps + 1e-6) + 1),
+        fps,
+      );
       chains.push(
-        `[${last}][dip${i}]overlay=x=0:y=0:enable='between(t,${dipStart},${dipEnd})':eof_action=pass[dipov${i}]`,
+        `[${last}][dip${i}]overlay=x=0:y=0:enable='${dipGate}':eof_action=pass[dipov${i}]`,
       );
       last = `dipov${i}`;
     }

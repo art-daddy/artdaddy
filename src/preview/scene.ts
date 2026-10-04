@@ -11,6 +11,7 @@ import { fadeMul, hasVal, sampleAnim } from "../timeline/anim";
 import type { Animatable, Clip, Timeline } from "../timeline/model";
 import { assertNever, transitionProgress } from "../timeline/transition";
 import {
+  onCanvasFrames,
   resolveRenderPlan,
   type BlendKind,
   type FitKind,
@@ -443,9 +444,10 @@ export function buildScene(
       // the FIRST half) and the previous clip holds its last frame to tin+leadF.
       // Transition + outgoing hold come from the SHARED plan (the SAME resolution the exporter reads),
       // converted to frames at the preview's edge. Math.round(durSec*fps) RECOVERS the exact authored
-      // frame count (the fps assert above guarantees the fps), so leadF is byte-identical; holdF is
-      // genuinely fractional (dur/2) so it is NOT rounded. Keyed by clip id (track-positional fallback
-      // for an id-less clip), matching resolveRenderPlan's key exactly; never a bare index.
+      // frame count (the fps assert above guarantees the fps), so leadF is byte-identical. When the
+      // clip is on canvas (lead-in through hold) is the plan's onCanvasFrames, below. Keyed by clip
+      // id (track-positional fallback for an id-less clip), matching resolveRenderPlan's key exactly;
+      // never a bare index.
       const pc = planByClip.get(`${track.id ?? ""}#${clip.id ?? `@${cidx}`}`);
       // B2 sampling contract: the plan's ONE declared offset (clip start, seconds) + clip-relative
       // seconds, so opacity/rotate sample the SAME curve at the SAME base the exporter uses — neither
@@ -464,8 +466,11 @@ export function buildScene(
             }
           : null;
       const leadF = selfTr ? selfTr.duration / 2 : 0;
-      const holdF = clip.kind !== "text" ? (pc?.visibility.holdSec ?? 0) * fps : 0;
-      if (!(tin - leadF <= tFrame && tFrame < tout + holdF)) continue;
+      // On canvas on exactly the frames the export gates it and an inspect frame lists it (UJ-026):
+      // the plan owns that rule. Computing `tout + holdSec*fps` here drew the outgoing clip one
+      // frame long whenever the product came out a hair above a whole frame (10/24/2*24).
+      const on = pc ? onCanvasFrames(pc, fps) : { first: tin, end: tout };
+      if (tFrame < on.first || tFrame >= on.end) continue;
       if (clip.kind === "text") {
         // Caption LOOK comes from the SHARED plan (pc.text) — the same resolved style + unified defaults
         // the exporter's libass burn-in uses (size = fontsize ?? size ?? canvasH*0.06, font ?? "Poppins",
@@ -627,7 +632,7 @@ export function buildScene(
       if (kind === "video") {
         const speed = Number(clip.speed ?? 1) || 1;
         // Freeze the FIRST frame during the centered lead-in ([tin-leadF, tin])
-        // and the LAST frame during the cross-cut hold ([tout, tout+holdF]).
+        // and the LAST frame through the cross-cut hold after tout.
         const rel = tFrame < tin ? 0 : tFrame < tout ? tFrame - tin : Math.max(0, tout - tin - 1);
         layer.sourceTime = (num(clip.source_in) + rel * speed) / fps;
       }

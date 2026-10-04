@@ -27,11 +27,10 @@ import {
   buildRenderCommand,
   canvasDuration,
   canvasPx,
-  onCanvasSec,
   resolveClipSources,
   runRenderPlan,
 } from "../timeline/render";
-import { resolveRenderPlan, type SecondsRenderPlan } from "../timeline/renderPlan";
+import { onCanvasFrames, resolveRenderPlan, type SecondsRenderPlan } from "../timeline/renderPlan";
 import { validateTimeline } from "../timeline/validate";
 import {
   fitDims,
@@ -826,8 +825,8 @@ export function visibleClips(look: SecondsRenderPlan, frame: number, fps: number
   const out: string[] = [];
   for (const pc of look.clips) {
     if (pc.kind === "audio") continue;
-    const { from, to } = onCanvasSec(pc);
-    if (frame >= from * fps - 1e-6 && frame < to * fps - 1e-6) out.push(pc.srcClipId);
+    const { first, end } = onCanvasFrames(pc, fps);
+    if (frame >= first && frame < end) out.push(pc.srcClipId);
   }
   return out.reverse();
 }
