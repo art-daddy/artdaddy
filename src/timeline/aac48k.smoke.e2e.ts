@@ -5,11 +5,13 @@
 // it must exist within a bound, carry 48 kHz AAC, and sound where the source sounds.
 //   npx vitest run --config vitest.smoke.config.ts src/timeline/aac48k.smoke.e2e.ts
 import os from "node:os";
+import { spawnSync } from "node:child_process";
 import { promises as fsp } from "node:fs";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import type { ClientToolContext } from "../tools/context";
+import { shippedSidecar } from "../test/sidecars";
 import {
   ff,
   installE2EDocuments,
@@ -224,6 +226,60 @@ describe("AAC at 48 kHz: every AAC encode finishes on 16 kHz audio that starts s
     await ff(["-y", "-i", wav, "-vn", "-c:a", "libmp3lame", "-q:a", "5", mp3]);
     expect(await audioStream(mp3)).toEqual({ codec: "mp3", rate: 16000 });
   }, 60_000);
+
+  // Found by QA: an agent asked for 16 kHz AAC tried every spelling of the rate it knew. swresample's
+  // own options are a real way past `-ar` — the raw half below proves it, so this cannot pass by
+  // testing a spelling ffmpeg ignores — and beside the pinned rate ffmpeg refused the command
+  // ("Impossible to convert between the formats"). Through the app's runner they are dropped: the
+  // encode of the stalling shape finishes, at 48 kHz.
+  it("swresample's output rate (-osr / -out_sample_rate) cannot make a 16 kHz AAC", async () => {
+    const { dir } = await project("swr");
+    const bin = shippedSidecar("ffmpeg");
+    expect(bin, "the shipped ffmpeg is staged").toBeTruthy();
+    // A plain tone for the raw half: 16 kHz AAC after silence is the shape that never finishes.
+    const tone = joinPath(dir, "tone16k.wav");
+    await ff(["-y", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=16000:duration=1", tone]);
+    const stalls = await silenceThenTone(joinPath(dir, "src16k.mkv"), false);
+    for (const opt of ["-osr", "-out_sample_rate"]) {
+      const raw = joinPath(dir, `raw${opt}.m4a`);
+      const r0 = spawnSync(bin!, [
+        "-y",
+        "-v",
+        "error",
+        "-i",
+        tone,
+        "-c:a",
+        "aac",
+        opt,
+        "16000",
+        raw,
+      ]);
+      expect(r0.status, `${opt}: ${r0.stderr}`).toBe(0);
+      expect(await audioStream(raw), `${opt} without the rule`).toEqual({
+        codec: "aac",
+        rate: 16000,
+      });
+
+      const out = joinPath(dir, `ruled${opt}.m4a`);
+      const r = await bounded(
+        opt,
+        nodeRunner.run("ffmpeg", [
+          "-y",
+          "-v",
+          "error",
+          "-i",
+          stalls,
+          "-c:a",
+          "aac",
+          opt,
+          "16000",
+          out,
+        ]),
+      );
+      expect(r.code, `${opt}: ${r.stderr}`).toBe(0);
+      expect(await audioStream(out), opt).toEqual({ codec: "aac", rate: 48000 });
+    }
+  }, 120_000);
 });
 
 // The rule's tables say which muxers and extensions encode AAC when no codec is named. A table can

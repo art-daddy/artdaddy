@@ -2,6 +2,7 @@
 // Ported from src/akaru/v4/tools/mechanical.py to match the server contracts.
 import { stderrExcerpt, type CommandRunner } from "./command";
 import type { ClientToolContext } from "./context";
+import { AAC_SAMPLE_RATE, replacedRates } from "./ffmpegPolicy";
 import { registerLibraryClip } from "./import";
 import { unresolvedRefError } from "./refState";
 import type { ClientToolRegistry } from "./registry";
@@ -224,7 +225,17 @@ export async function runFfmpegTool(
     return { ok: false, error: "args must reference the output via {out} at least once." };
   }
 
-  const r = await ctx.runner.run("ffmpeg", ["-y", "-nostdin", ...subArgs]);
+  const cmd = ["-y", "-nostdin", ...subArgs];
+  const r = await ctx.runner.run("ffmpeg", cmd);
+  // The runner rewrites a command the agent cannot see. When it overrode a rate the agent asked
+  // for, say so: QA watched an agent asked for 16 kHz AAC get 48 kHz back with no reason given and
+  // try eleven more spellings over 4.5 minutes.
+  const replaced = replacedRates("ffmpeg", cmd);
+  const note = replaced.length
+    ? `${replaced.join(" and ")} did not apply: AAC is always encoded at ${AAC_SAMPLE_RATE / 1000} kHz ` +
+      `here, and no option changes that. To keep another sample rate, write a format that is not ` +
+      `AAC, such as WAV, FLAC, MP3 or Opus.`
+    : undefined;
   const stderrTail = stderrExcerpt(r.stderr);
   const exists = await ctx.store.exists(outPath);
   if (r.code !== 0 || !exists) {
@@ -232,6 +243,7 @@ export async function runFfmpegTool(
       ok: false,
       error: `ffmpeg failed (code=${r.code}). Read stderr_tail and fix your args.`,
       stderr_tail: stderrTail,
+      ...(note ? { note } : {}),
     };
   }
   const probe = await probePath(ctx.runner, outPath);
@@ -258,6 +270,7 @@ export async function runFfmpegTool(
       duration_s: probe.ok ? probe.duration_s : null,
       video: probe.ok ? probe.video : null,
       audio: probe.ok ? probe.audio : null,
+      ...(note ? { note } : {}),
     };
   }
   // Non-media output (e.g. a text artifact): a project-relative ref, no system path.
@@ -265,6 +278,7 @@ export async function runFfmpegTool(
     ok: true,
     output_ref: ctx.store.toRef(outPath),
     duration_s: probe.ok ? probe.duration_s : null,
+    ...(note ? { note } : {}),
   };
 }
 

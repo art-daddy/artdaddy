@@ -392,6 +392,51 @@ describe("runFfmpegTool", () => {
     expect(r.ok).toBe(false);
     expect(String(r.stderr_tail)).toContain("bad args");
   });
+
+  // QA, slice 3d: asked for 16 kHz AAC, the agent got 48 kHz back with no reason given and spent
+  // eleven more calls (4.5 minutes) on other spellings. The reply now SAYS the rate was replaced.
+  async function runOne(args: string[], name: string, code = 0): Promise<Any> {
+    const fs = new MockFs();
+    fs.touch(joinPath(DIR, "in.wav"));
+    const runner = mockRunner((program) => {
+      if (program !== "ffmpeg") return { code: 0, stdout: PROBE_JSON, stderr: "" };
+      if (code === 0) fs.touch(joinPath(DIR, `internals/cache/ffmpeg/${name}`));
+      return { code, stdout: "", stderr: code ? "Invalid argument" : "" };
+    });
+    return runFfmpegTool({ inputs: ["in.wav"], args, output_name: name }, ctxWith(runner, fs));
+  }
+
+  it("says when an AAC sample rate the command asked for will not apply, and what will", async () => {
+    const r = await runOne(["-i", "{in0}", "-c:a", "aac", "-ar", "16000", "{out}"], "o.m4a");
+    expect(r.ok).toBe(true);
+    const note = String(r.note);
+    expect(note).toContain("-ar 16000");
+    expect(note).toMatch(/48 kHz/);
+    // The way out, so the agent offers it instead of retrying: a format that is not AAC.
+    expect(note).toMatch(/WAV/);
+  });
+
+  it("adds no note when nothing the command asked for was replaced", async () => {
+    for (const [args, name] of [
+      [["-i", "{in0}", "-ar", "16000", "{out}"], "o.wav"], // not AAC: the rate applies
+      [["-i", "{in0}", "-c:a", "aac", "-ar", "48000", "{out}"], "o.m4a"], // asked for 48 kHz
+      [["-i", "{in0}", "-c:a", "aac", "{out}"], "o.m4a"], // asked for no rate
+    ] as const) {
+      const r = await runOne([...args], name);
+      expect(r.ok, name).toBe(true);
+      expect(r.note, `${name} ${args.join(" ")}`).toBeUndefined();
+    }
+  });
+
+  it("keeps the note on a failed run: the replaced rate may be the reason it failed", async () => {
+    const r = await runOne(
+      ["-i", "{in0}", "-c:a", "aac", "-ar", "16000", "-audio_track_timescale", "16000", "{out}"],
+      "o.m4a",
+      1,
+    );
+    expect(r.ok).toBe(false);
+    expect(String(r.note)).toContain("-ar 16000");
+  });
 });
 
 describe("clipVideoTool", () => {

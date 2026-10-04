@@ -6,8 +6,8 @@
 // few seconds of digital silence (N-126655: 5 s, 7 s and 120 s of silence hang; 48 kHz never
 // does), so an export of a 16 kHz clip placed 5 s into the timeline ran until cancelled. An
 // output that encodes AAC — named (`-c:a aac`) or by its container's default (.mp4/.m4a/.mov with
-// no audio codec named) — is encoded at 48 kHz, and any `-ar` the command gave that output is
-// replaced. A source already at 48 kHz is not resampled at all.
+// no audio codec named) — is encoded at 48 kHz, and any rate the command gave that output (`-ar`,
+// or swresample's `-osr`) is replaced. A source already at 48 kHz is not resampled at all.
 //
 // Scope, deliberately: the options after the LAST input belong to the first output, which is the
 // only output of every command the app builds. A second output of a multi-output command, and
@@ -17,8 +17,12 @@ export const AAC_SAMPLE_RATE = 48000;
 
 /** `-c`, `-codec` (every stream), `-c:a`, `-codec:a`, `-c:a:N`, `-codec:a:N`, `-acodec`. */
 const AUDIO_CODEC_OPT = /^-(?:c|codec)(?::a(?::\d+)?)?$|^-acodec$/;
-/** `-ar`, `-ar:a`, `-ar:a:N`, `-ar:N`. */
-const SAMPLE_RATE_OPT = /^-ar(?::[a-z0-9:]+)?$/i;
+/** Every spelling of an OUTPUT's sample rate: `-ar`, `-ar:a`, `-ar:a:N`, `-ar:N`, and swresample's
+ *  `-osr` / `-out_sample_rate`, which the CLI hands to the resampler it puts before the encoder.
+ *  Those two encode AAC at the rate they name, and beside the pinned `-ar` ffmpeg refuses the
+ *  command ("Impossible to convert between the formats"), so they go with it. Found by QA: an agent
+ *  asked for 16 kHz AAC tried them. */
+const SAMPLE_RATE_OPT = /^-(?:ar(?::[a-z0-9:]+)?|osr|out_sample_rate)$/i;
 /** Muxers whose default audio codec is AAC (3gp/3g2 default to AMR, so they are not here).
  *  aac48k.smoke.e2e.ts checks every entry against the shipped ffmpeg's own answer. */
 export const AAC_MUXERS: ReadonlySet<string> = new Set([
@@ -55,9 +59,21 @@ function encodesAac(codec: string | null, format: string | null, output: string)
 
 /** `args` with the AAC rule applied, or `args` itself (the same array) when it does not apply. */
 export function aacAt48k(args: string[]): string[] {
+  return planAac(args).args;
+}
+
+/** A rate value ffmpeg reads as 48 kHz (`48000`, `48k`): asking for it is not overridden. */
+function is48k(value: string): boolean {
+  const m = /^(\d+(?:\.\d+)?)([kK])?$/.exec(value);
+  return m !== null && Number(m[1]) * (m[2] ? 1000 : 1) === AAC_SAMPLE_RATE;
+}
+
+/** What the rule does to one command: the args to spawn, and each rate the command asked an AAC
+ *  output for that will not apply, as `<option> <value>`. */
+function planAac(args: string[]): { args: string[]; replaced: string[] } {
   let lastInput = -1;
   for (let i = 0; i < args.length - 1; i++) if (args[i] === "-i") lastInput = i;
-  if (lastInput < 0) return args;
+  if (lastInput < 0) return { args, replaced: [] };
   const first = lastInput + 2; // the first option after the last input's path
 
   let codec: string | null = null;
@@ -69,21 +85,31 @@ export function aacAt48k(args: string[]): string[] {
     else if (t === "-f" && i + 1 < args.length) format = args[++i];
     else if (t === "-an") noAudio = true;
   }
-  if (noAudio || !encodesAac(codec, format, args[args.length - 1])) return args;
+  if (noAudio || !encodesAac(codec, format, args[args.length - 1])) return { args, replaced: [] };
 
   const out = args.slice(0, first);
+  const replaced: string[] = [];
   out.push("-ar", String(AAC_SAMPLE_RATE));
   for (let i = first; i < args.length; i++) {
     if (SAMPLE_RATE_OPT.test(args[i]) && i + 1 < args.length) {
-      i++; // drop the output's own rate; ours is the one that applies
+      // Drop the output's own rate; ours is the one that applies.
+      if (!is48k(args[i + 1])) replaced.push(`${args[i]} ${args[i + 1]}`);
+      i++;
       continue;
     }
     out.push(args[i]);
   }
-  return out;
+  return { args: out, replaced };
 }
 
 /** Every rule this module owns, for the runner to apply to an ffmpeg command before spawning. */
 export function ffmpegPolicy(program: string, args: string[]): string[] {
   return program === "ffmpeg" ? aacAt48k(args) : args;
+}
+
+/** The sample rates `args` asked for that `ffmpegPolicy` will replace, each as `<option> <value>`
+ *  (`-ar 16000`); empty when none. The runner rewrites the command where the caller cannot see it,
+ *  so a caller that hands the result to the agent asks this to say so. */
+export function replacedRates(program: string, args: string[]): string[] {
+  return program === "ffmpeg" ? planAac(args).replaced : [];
 }
