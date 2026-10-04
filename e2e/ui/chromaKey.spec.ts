@@ -32,6 +32,10 @@ test.describe("chroma key on the GPU", () => {
   test.beforeEach(async ({ page }) => {
     await page.goto("/preview-probe-chroma.html");
     await page.waitForFunction(() => "__probe" in window);
+    // Fail with the probe's own error rather than time out waiting for a snapshot that only a
+    // successful render attaches (see preview.spec.ts).
+    const status = await page.evaluate(() => (window as unknown as { __probe: string }).__probe);
+    expect(status, "the chroma-key probe failed to initialise in a real browser").toBe("ok");
     await page.waitForSelector("#probe-snapshot", { state: "attached" });
   });
 

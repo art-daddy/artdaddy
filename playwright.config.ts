@@ -69,6 +69,17 @@ export default defineConfig({
     // default became the deployed server, the lane booted against PRODUCTION: CORS refused the
     // 127.0.0.1:5199 origin, the app locked itself, and every boot and menu spec failed. Set here,
     // it also overrides a VITE_API_BASE_URL a workflow exports for its build steps.
-    env: { VITE_API_BASE_URL: "http://127.0.0.1:8000" },
+    //
+    // The e2e auth bypass, because with no server the app is "offline" with no stored session, and
+    // the sign-in gate then replaces the WHOLE app — menu bar included. The menu specs passed on
+    // every developer machine only because a gitignored .env.development sets this; CI never had
+    // it, so all eight failed there (2026-10-04). Set here, a local run is the run CI does.
+    // vite.config.ts refuses a production build with it set, so it cannot reach a release.
+    // And no Sentry: a local run would otherwise report the lane's deliberate failures upstream.
+    env: {
+      VITE_API_BASE_URL: "http://127.0.0.1:8000",
+      VITE_E2E_AUTH_BYPASS: "1",
+      VITE_SENTRY_DSN: "",
+    },
   },
 });

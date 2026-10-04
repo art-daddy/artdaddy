@@ -28,6 +28,10 @@ test.describe("preview compositor (real WebGL2)", () => {
   test.beforeEach(async ({ page }) => {
     await page.goto("/preview-probe.html");
     await page.waitForFunction(() => "__probe" in window);
+    // The probe records WHY it failed; the snapshot exists only when it did not. Waiting for the
+    // snapshot alone turned every failure into a bare 60 s timeout (macOS CI, 2026-10-04).
+    const status = await page.evaluate(() => (window as unknown as { __probe: string }).__probe);
+    expect(status, "the compositor failed to initialise in a real browser").toBe("ok");
     await page.waitForSelector("#probe-snapshot", { state: "attached" });
   });
 
