@@ -1,6 +1,6 @@
 {
   "$schema_note": "Generated from the live tool registry (v4/tools/catalog.py) - do not hand-edit; refresh with `npm run codegen`.",
-  "version": "2.7.4",
+  "version": "2.7.5",
   "generated_from": "src/akaru/turn/tools/definitions.py::ALL_TOOLS",
   "count": 55,
   "tools": [
@@ -2070,7 +2070,7 @@
     {
       "name": "list_projects",
       "expensive": false,
-      "description": "List the user's known projects, most-recently-opened first (id, name, path, lastOpenedAt), plus the currently-active project id. A project is the persistent unit of work — its own timeline, asset library, and chat history. Use before open_project to find one by name.",
+      "description": "List the user's known projects, most-recently-opened first (id, name, lastOpenedAt), plus `active_project_id`, the project open in the app. A project is the persistent unit of work — its own timeline, asset library, and chat history. Use it to find one by name.",
       "parameters": {
         "type": "object",
         "properties": {},
@@ -2145,7 +2145,7 @@
     {
       "name": "new_project",
       "expensive": false,
-      "description": "Create a new, empty project for a SIDE IDEA. A project owns its own timeline, asset library, and chat history. Returns {id, name, path, canvas}.\n\nIt does NOT switch you: your next tool calls still act on the project you already have open, and the new project's library is empty (media imported elsewhere is not in it). To work on the new project, call manage_project {action:'open', id} first.",
+      "description": "Create a new, empty project for a SIDE IDEA. A project owns its own timeline, asset library, and chat history. Returns {id, name, canvas}.\n\nIt does NOT switch you or the user's screen: your next tool calls still act on the project you already have open, and the new project's library is empty (media imported elsewhere is not in it). Tell the user it is in their project list. Over MCP, manage_project {action:'open', id} switches.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -2189,7 +2189,7 @@
     {
       "name": "open_project",
       "expensive": false,
-      "description": "Make an existing project the active one, identified by its `id` (from list_projects) or by a directory path. Returns {id, name, path}. The current conversation continues on its own project; the opened project resumes in a fresh session.",
+      "description": "Point the user to an existing project, by its `id` (from list_projects) or a directory path: confirms it exists and that this app can open it. It does NOT switch you or the user's screen: your tools keep acting on the current project. Tell the user to open it from their project list (File > Open Project). Over MCP, manage_project {action:'open', id} switches. Returns {id, name}.",
       "parameters": {
         "type": "object",
         "properties": {

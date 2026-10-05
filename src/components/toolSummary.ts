@@ -365,9 +365,9 @@ const PHRASES: Record<string, Phrase> = {
     done: (a, r) => `Created ${quoted(r.name ?? a.name) || "a project"}`,
   },
   open_project: {
-    bare: "open a project",
-    ing: "Opening a project",
-    done: () => "Opened the project",
+    bare: "find a project",
+    ing: "Finding a project",
+    done: (a, r) => `Found ${quoted(r.name ?? a.project) || "the project"} in your projects`,
   },
   rename_project: {
     bare: "rename the project",
@@ -522,7 +522,8 @@ export function buildRows(
   for (const p of parts) {
     if (p.kind === "tool_result") {
       const id = s(p.call_id);
-      const r = (p.result ?? p) as Result;
+      // `model_result` is the whole result; the part's own `name` is the call's, not the result's.
+      const r = (p.model_result ?? p.result ?? p) as Result;
       if (id) results.set(id, r);
     }
   }

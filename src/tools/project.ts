@@ -758,6 +758,16 @@ async function currentPid(ctx: ClientToolContext): Promise<string> {
     .catch(() => ({}) as { id?: unknown });
   return isSafeProjectId(pj.id) ? pj.id : fallback;
 }
+/** The name of the project the caller is editing (its id when project.json has none). */
+async function currentName(ctx: ClientToolContext, reg: ProjectRegistry): Promise<string> {
+  const pid = await currentPid(ctx);
+  try {
+    const pj = await reg.readProject(pid);
+    return typeof pj.name === "string" ? pj.name : pid;
+  } catch {
+    return pid;
+  }
+}
 /** Resolve a model-supplied project id OR directory path to a CONTAINED project id
  *  (a bare simple name), or "" when the ref is unsafe / unresolvable. Ports
  *  _resolve_pid, hardened: a traversal-shaped ref (`../../x`) never survives, so
@@ -824,13 +834,13 @@ export async function newProjectTool(args: Args, ctx: ClientToolContext | null):
     /* no current project.json -> empty model */
   }
   const { id, dir } = await reg.createProject(name, { width: w, height: h, fps }, model);
-  await reg.register({ id, name, path: dir, lastOpenedAt: nowIso() }, true);
+  await reg.register({ id, name, path: dir, lastOpenedAt: nowIso() }, false);
   return {
     ok: true,
     id,
     name,
     canvas: { width: w, height: h, fps },
-    note: "Created, and set as the app's active project. This does NOT switch YOU: your next tool calls still act on the project you already had open. To work on this one, call manage_project {action:'open', id}.",
+    note: `Created "${name}". This does NOT switch you or the user's screen: your tools keep acting on "${await currentName(ctx, reg)}". Tell the user the new project is in their project list. (Over MCP, manage_project {action:'open', id} switches.)`,
   };
 }
 
@@ -850,13 +860,13 @@ export async function openProjectTool(args: Args, ctx: ClientToolContext | null)
       error: `project "${ref}" was created by a newer version of ${BRAND.displayName} (project schema v${opened.tooNew} > supported v${opened.current}); update the app to open it.`,
     };
   }
-  await reg.setActive(pid);
   const pj = opened.data;
+  const name = typeof pj.name === "string" ? pj.name : pid;
   return {
     ok: true,
     id: pid,
-    name: typeof pj.name === "string" ? pj.name : pid,
-    note: "Set active. The current conversation continues on its own project; the opened project resumes in a fresh session.",
+    name,
+    note: `"${name}" is in the user's project list (File > Open Project). This does NOT switch you or the user's screen: your tools keep acting on "${await currentName(ctx, reg)}". (Over MCP, manage_project {action:'open', id} switches.)`,
   };
 }
 
@@ -953,16 +963,7 @@ export async function duplicateProjectTool(
   const srcName = typeof srcPj.name === "string" ? srcPj.name : pid;
   const name = (typeof args.name === "string" && args.name.trim()) || `${srcName} copy`;
   const dup = await reg.duplicateProject(pid, name);
-  const cur = await currentPid(ctx);
-  let curName = cur === pid ? srcName : cur;
-  if (cur !== pid) {
-    try {
-      const pj = await reg.readProject(cur);
-      if (typeof pj.name === "string") curName = pj.name;
-    } catch {
-      /* unreadable project.json: the id names it well enough */
-    }
-  }
+  const curName = (await currentPid(ctx)) === pid ? srcName : await currentName(ctx, reg);
   return {
     ok: true,
     id: dup.id,

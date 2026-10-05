@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 
+import { ClientTurnRunner } from "../agent/loop";
+import type { RoundResultDTO } from "../agent/types";
+import type { TranscriptPart } from "../api/types";
 import { toolNames } from "../contract/views";
 import { trackLabels } from "./timeline/labels";
 import {
@@ -249,6 +252,50 @@ describe("folding a run of calls", () => {
 });
 
 // ── rows ─────────────────────────────────────────────────────────────────────
+
+// Parts built by the REAL loop, not a hand-made shape: its envelope ends with the call's own
+// `name`, which overwrote the project name these tools return. The chat read "Created
+// “new_project”" for every new project, and the hand-made fixtures above never had a `name`.
+describe("a result's own name survives the loop's envelope", () => {
+  async function partsFor(tool: string, result: Record<string, unknown>, args = {}) {
+    const parts: Record<string, unknown>[] = [];
+    let rounds = 0;
+    const runner = new ClientTurnRunner({
+      infer: async () =>
+        rounds++ === 0
+          ? ({
+              kind: "tool_calls",
+              pending_calls: [{ call_id: "c1", name: tool, arguments: args }],
+              final_text: "",
+              error: "",
+              finish_reason: "",
+              usage: {},
+              provider_snapshot: {},
+            } as RoundResultDTO)
+          : ({ kind: "text", final_text: "done", usage: {} } as RoundResultDTO),
+      runTool: async () => result,
+      emit: (event, data) => {
+        if (event === "tool_call" || event === "tool_result") parts.push({ ...data, kind: event });
+      },
+      mode: () => "default",
+      stopped: () => false,
+      onUsage: () => {},
+      session: () => ({}),
+    });
+    await runner.start("go");
+    return parts as TranscriptPart[];
+  }
+
+  it.each([
+    ["new_project", "Created “Side Idea”"],
+    ["duplicate_project", "Duplicated the project as “Side Idea”"],
+    ["rename_project", "Renamed the project to “Side Idea”"],
+    ["open_project", "Found “Side Idea” in your projects"],
+  ])("%s names the project, not the tool", async (tool, expected) => {
+    const rows = buildRows(await partsFor(tool, { ok: true, id: "side_1", name: "Side Idea" }), ctx);
+    expect((rows[0] as Any).calls[0].text).toBe(expected);
+  });
+});
 
 describe("buildRows", () => {
   it("folds a call and its result into ONE entry", () => {

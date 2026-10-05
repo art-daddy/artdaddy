@@ -751,7 +751,7 @@ describe("list_projects", () => {
 });
 
 describe("new_project", () => {
-  it("scaffolds a project, seeds files, and sets it active", async () => {
+  it("scaffolds a project and seeds files, and the user stays on the project they have open", async () => {
     const { ctx, fs } = await mkCtx();
     const r = (await newProjectTool({ name: "My Reel", aspect_ratio: "16:9" }, ctx)) as Any;
     expect(r.ok).toBe(true);
@@ -763,9 +763,11 @@ describe("new_project", () => {
     expect(pj.settings.canvas.width).toBe(1920);
     // carries the current project's model forward (in project.json)
     expect(pj.settings.model_id).toBe("gpt-x");
+    // Listed, but nobody switches to it (owner decision, 2026-10-05): the app's active project,
+    // which MCP and the project list read, still names the one being edited.
     const reg = await readRegistry(fs);
-    expect(reg.activeProjectId).toBe(r.id);
     expect(reg.projects.map((p: Any) => p.id)).toContain(r.id);
+    expect(reg.activeProjectId).toBe("proj_active");
   });
 
   it("requires a name", async () => {
@@ -785,6 +787,9 @@ describe("new_project", () => {
     expect(note).toMatch(/does NOT switch/i);
     expect(note).toContain("manage_project");
     expect(note).not.toMatch(/^Created and set active/);
+    // In the app there is no manage_project: the agent has to tell the user where it is.
+    expect(note).toMatch(/project list/i);
+    expect(note).not.toMatch(/set as the app's active project/i);
   });
 });
 
@@ -813,7 +818,7 @@ describe("project refs survive a scope-enforcing filesystem (desktop parity)", (
 
   it("open_project accepts a bare id", async () => {
     const { ctx } = await scopedCtx();
-    await newProjectTool({ name: "Second" }, ctx); // moves active away
+    await newProjectTool({ name: "Second" }, ctx);
     const r = (await openProjectTool({ project: "proj_active" }, ctx)) as Any;
     expect(r.ok).toBe(true);
     expect(r.id).toBe("proj_active");
@@ -857,14 +862,19 @@ describe("project refs survive a scope-enforcing filesystem (desktop parity)", (
 });
 
 describe("open_project", () => {
-  it("switches the active project by id", async () => {
+  it("points to an existing project by id without switching anything", async () => {
     const { ctx, fs } = await mkCtx();
-    const b = (await newProjectTool({ name: "Second" }, ctx)) as Any; // active = b
-    const r = (await openProjectTool({ project: "proj_active" }, ctx)) as Any;
+    const b = (await newProjectTool({ name: "Second" }, ctx)) as Any;
+    const r = (await openProjectTool({ project: b.id }, ctx)) as Any;
     expect(r.ok).toBe(true);
-    expect(r.id).toBe("proj_active");
+    expect(r.id).toBe(b.id);
+    expect(r.name).toBe("Second");
+    // Owner decision, 2026-10-05: the screen never followed this tool, so it no longer moves the
+    // app's active project either; the agent tells the user where to find it.
     expect((await readRegistry(fs)).activeProjectId).toBe("proj_active");
-    expect(b.id).not.toBe("proj_active");
+    expect(String(r.note)).toMatch(/project list/i);
+    expect(String(r.note)).toContain('"Active"'); // the project still being edited
+    expect(String(r.note)).not.toMatch(/^Set active/);
   });
 
   it("errors when the project is missing", async () => {
@@ -879,9 +889,9 @@ describe("open_project", () => {
     expect(((await openProjectTool({}, ctx)) as Any).ok).toBe(false);
   });
 
-  it("refuses a project written by a NEWER schema (and does not switch to it)", async () => {
+  it("refuses a project written by a NEWER schema", async () => {
     const { ctx, fs } = await mkCtx();
-    const b = (await newProjectTool({ name: "Second" }, ctx)) as Any; // active = b
+    await newProjectTool({ name: "Second" }, ctx);
     await fs.writeTextFile(
       `${ACTIVE}/internals/project.json`,
       JSON.stringify({ id: "proj_active", name: "Active", schemaVersion: 999 }),
@@ -889,7 +899,7 @@ describe("open_project", () => {
     const r = (await openProjectTool({ project: "proj_active" }, ctx)) as Any;
     expect(r.ok).toBe(false);
     expect(String(r.error)).toContain(`newer version of ${BRAND.displayName}`);
-    expect((await readRegistry(fs)).activeProjectId).toBe(b.id); // stayed on b
+    expect((await readRegistry(fs)).activeProjectId).toBe("proj_active");
   });
 
   it("opens a legacy project.json that has no schemaVersion stamp", async () => {
@@ -1228,7 +1238,8 @@ describe("delete_project", () => {
 
   it("deletes another project and reassigns active", async () => {
     const { ctx, fs } = await mkCtx();
-    const b = (await newProjectTool({ name: "Doomed" }, ctx)) as Any; // active = b
+    const b = (await newProjectTool({ name: "Doomed" }, ctx)) as Any;
+    await ProjectRegistry.fromProjectDir(ACTIVE, fs).setActive(b.id); // b was open last
     const r = (await deleteProjectTool({ project: b.id }, ctx)) as Any;
     expect(r.ok).toBe(true);
     expect(r.deleted).toBe(true);

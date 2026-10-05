@@ -679,18 +679,19 @@ export function registerStudioStubs(
       id,
       name,
       canvas: { width: num(a.width, 1080), height: num(a.height, 1920), fps: num(a.fps, 30) },
-      note: "Created and set active. The current conversation continues on its own project; the new project opens in a fresh session.",
+      note: `Created "${name}". This does NOT switch you or the user's screen: your tools keep acting on "Current cut". Tell the user the new project is in their project list. (Over MCP, manage_project {action:'open', id} switches.)`,
     };
   });
 
   registry.register("open_project", async (args) => {
     const a = (args ?? {}) as Record<string, unknown>;
-    const id = str(a.id ?? a.project_id, "proj_teaser");
+    const id = str(a.id ?? a.project_id ?? a.project, "proj_teaser");
+    const name = id === "proj_teaser" ? "Teaser" : "Current cut";
     return {
       ok: true,
       id,
-      name: id === "proj_teaser" ? "Teaser" : "Current cut",
-      note: "Set active. The current conversation continues on its own project; the opened project resumes in a fresh session.",
+      name,
+      note: `"${name}" is in the user's project list (File > Open Project). This does NOT switch you or the user's screen: your tools keep acting on "Current cut". (Over MCP, manage_project {action:'open', id} switches.)`,
     };
   });
 
