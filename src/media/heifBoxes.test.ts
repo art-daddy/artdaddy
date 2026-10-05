@@ -11,6 +11,7 @@ import {
   DEPTH_HEVC,
   auxC,
   box,
+  exifOrientation,
   heifFile,
   imir,
   irot,
@@ -41,6 +42,29 @@ describe("readHeifLayout", () => {
       { type: "thmb", from: 1, to: [2] },
     ]);
     expect(readHeifLayout(f)).toMatchObject({ primary: 2, alpha: [] });
+  });
+
+  // Every iPhone photo also carries an Exif METADATA item tied to the primary by `cdsc`, and a
+  // portrait one says Orientation 6 there while `irot` says the same turn. The Exif item is not an
+  // image and its orientation is not a transform: the layout must read exactly as without it.
+  it("an Exif metadata item changes nothing: not an image, not a transform, not an alpha plane", () => {
+    const items: Item[] = [
+      { coded: coded(), props: [irot(1)] },
+      { coded: coded(), props: [auxC(ALPHA_HEVC)] },
+    ];
+    const refs: Ref[] = [{ type: "auxl", from: 2, to: [1] }];
+    const without = readHeifLayout(heifFile(items, 1, refs));
+    for (const o of [1, 3, 6, 8]) {
+      const withExif = readHeifLayout(
+        heifFile([...items, { exif: exifOrientation(o), hidden: true }], 1, [
+          ...refs,
+          { type: "cdsc", from: 3, to: [1] },
+        ]),
+      );
+      expect(withExif, `Orientation ${o}`).toEqual(without);
+    }
+    expect(without).toMatchObject({ primary: 1, alpha: [2] });
+    expect(without?.transforms.get(1)).toEqual(["r1"]);
   });
 
   it("takes an alpha auxiliary of the primary, and nothing that only looks like one", () => {

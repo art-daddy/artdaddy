@@ -62,6 +62,25 @@ const nodeFs: FsLike = {
 
 const probeRunner: CommandRunner = {
   run: async (program, args): Promise<CommandResult> => {
+    // Sources must have a SIZE, or every rule that depends on one (how far a clip may be
+    // zoomed before it stops being a picture) is invisible to every scenario. A ref that
+    // names its resolution gets it; anything else is 1080p, the common case. Answered in the
+    // shape the size owner (tools/media probePath) asks for: if this stops matching, sizes
+    // silently become unknown and the zoom ceiling is skipped in every scenario.
+    if (program === "ffprobe" && args.includes("-show_streams")) {
+      const ref = String(args[args.length - 1] ?? "");
+      if (studioRefIsAudio(ref))
+        return { code: 0, stdout: JSON.stringify({ format: {}, streams: [] }), stderr: "" };
+      const [width, height] = /480p/i.test(ref) ? [854, 480] : [1920, 1080];
+      return {
+        code: 0,
+        stdout: JSON.stringify({
+          format: { format_name: "mov,mp4,m4a,3gp,3g2,mj2" },
+          streams: [{ codec_type: "video", width, height }],
+        }),
+        stderr: "",
+      };
+    }
     // Timeline-only harness: no real files to probe. Emulate a plain VIDEO source
     // for STREAM probes so a newly added media_ref (e.g. outro.mp4) places as video.
     // A code-0/empty ffprobe reads as "no video stream" and misfires sourceHasVideo,
@@ -69,13 +88,6 @@ const probeRunner: CommandRunner = {
     // add_clip_after / insert_between failure. Report a video stream, no audio;
     // everything else (duration, etc.) stays a benign no-op.
     if (program === "ffprobe" && args.includes("-select_streams")) {
-      // Sources must have a SIZE, or every rule that depends on one (how far a clip may be
-      // zoomed before it stops being a picture) is invisible to every scenario. A ref that
-      // names its resolution gets it; anything else is 1080p, the common case.
-      if (args.includes("stream=width,height")) {
-        const ref = String(args[args.length - 1] ?? "");
-        return { code: 0, stdout: /480p/i.test(ref) ? "854,480" : "1920,1080", stderr: "" };
-      }
       const kind = args[args.indexOf("-select_streams") + 1];
       // ...but an AUDIO asset must not claim a video stream, or a generated
       // voiceover/music bed would place onto a video track and every audio
@@ -87,6 +99,11 @@ const probeRunner: CommandRunner = {
     return { code: 0, stdout: "", stderr: "" };
   },
 };
+
+/** The harness's stand-in for ffprobe, exposed so a guard test can prove sizes still reach the zoom
+ *  rule through it (if its answers stop matching what the size owner asks, every scenario silently
+ *  loses that rule). */
+export const harnessProbeRunner: CommandRunner = probeRunner;
 
 export interface DriveOpts {
   server: string;

@@ -40,12 +40,15 @@ export interface Coded {
 }
 
 /** An image item. `coded` for a coded image; `grid` (tiles = item ids, row-major) for a derived
- *  grid; `props` are extra property boxes (irot, imir, auxC) associated with it. */
+ *  grid; `props` are extra property boxes (irot, imir, auxC) associated with it. `exif` makes it an
+ *  `Exif` METADATA item instead (payload: the 4-byte offset to the TIFF header, then the TIFF
+ *  block), which a `cdsc` reference ties to the image it describes, as every iPhone photo has. */
 export interface Item {
   coded?: Coded;
   grid?: { rows: number; cols: number; w: number; h: number; tiles: number[] };
   props?: Buffer[];
   hidden?: boolean;
+  exif?: Buffer;
 }
 
 export interface Ref {
@@ -61,6 +64,20 @@ export const irot = (quarterTurns: number): Buffer => box("irot", u8(quarterTurn
 export const imir = (axis: 0 | 1): Buffer => box("imir", u8(axis));
 export const auxC = (urn: string): Buffer =>
   fullBox("auxC", 0, 0, Buffer.from(urn, "latin1"), u8(0));
+/** A big-endian TIFF block whose IFD0 holds one entry, Orientation (0x0112) = `o` (EXIF 1-8). */
+export const exifOrientation = (o: number): Buffer =>
+  Buffer.concat([
+    Buffer.from("MM", "latin1"),
+    u16(42),
+    u32(8),
+    u16(1),
+    u16(0x0112),
+    u16(3),
+    u32(1),
+    u16(o),
+    u16(0),
+    u32(0),
+  ]);
 export const ALPHA_HEVC = "urn:mpeg:hevc:2015:auxid:1";
 export const DEPTH_HEVC = "urn:mpeg:hevc:2015:auxid:2";
 export const ALPHA_MPEGB = "urn:mpeg:mpegB:cicp:systems:auxiliary:alpha";
@@ -105,19 +122,22 @@ export function heifFile(
   refs: Ref[] = [],
   opt: HeifOptions = {},
 ): Buffer {
+  const itemType = (it: Item): string => (it.exif ? "Exif" : it.grid ? "grid" : "hvc1");
   const ids = items.map((_, i) => i + 1);
   const id = (n: number): Buffer => (opt.wideIds ? u32(n) : u16(n));
   const payload = (it: Item): Buffer =>
-    it.coded
-      ? it.coded.sample
-      : Buffer.concat([
-          u8(0),
-          u8(0),
-          u8(it.grid!.rows - 1),
-          u8(it.grid!.cols - 1),
-          u16(it.grid!.w),
-          u16(it.grid!.h),
-        ]);
+    it.exif
+      ? Buffer.concat([u32(0), it.exif])
+      : it.coded
+        ? it.coded.sample
+        : Buffer.concat([
+            u8(0),
+            u8(0),
+            u8(it.grid!.rows - 1),
+            u8(it.grid!.cols - 1),
+            u16(it.grid!.w),
+            u16(it.grid!.h),
+          ]);
   const payloads = items.map(payload);
   const props: Buffer[] = [];
   /** 1-based index of `p`, reusing an identical box when sharing. */
@@ -131,6 +151,7 @@ export function heifFile(
   };
   const assoc = items.map((it) => {
     const a: number[] = [];
+    if (it.exif) return a; // a metadata item has no image properties
     if (it.coded) a.push(0x8000 | prop(box("hvcC", it.coded.hvcC)));
     const [w, h] = it.coded ? [it.coded.w, it.coded.h] : [it.grid!.w, it.grid!.h];
     a.push(prop(fullBox("ispe", 0, 0, u32(w), u32(h))));
@@ -214,7 +235,7 @@ export function heifFile(
                 it.hidden ? 1 : 0,
                 u32(i + 1),
                 u16(0),
-                Buffer.from(it.grid ? "grid" : "hvc1"),
+                Buffer.from(itemType(it)),
                 u8(0),
               )
             : fullBox(
@@ -223,7 +244,7 @@ export function heifFile(
                 it.hidden ? 1 : 0,
                 u16(i + 1),
                 u16(0),
-                Buffer.from(it.grid ? "grid" : "hvc1"),
+                Buffer.from(itemType(it)),
                 u8(0),
               ),
         ),

@@ -8,6 +8,7 @@
 // unprobeable file, or a probe that answered with nonsense. Callers must then SKIP the clamp: a
 // failed ffprobe is not evidence that the media is small.
 import type { ClientToolContext } from "../tools/context";
+import { probePath } from "../tools/media";
 import { stillPicture } from "../media/stillPicture";
 import { loadTimeline } from "./engine";
 import { findClip } from "./helpers";
@@ -26,24 +27,16 @@ async function probe(ctx: ClientToolContext, source: string): Promise<Dims | nul
   if (hit !== undefined) return hit;
   let dims: Dims | null = null;
   try {
-    const r = await ctx.runner.run("ffprobe", [
-      "-v",
-      "error",
-      "-select_streams",
-      "v:0",
-      "-show_entries",
-      "stream=width,height",
-      "-of",
-      "csv=p=0",
-      source,
-    ]);
+    // The size every decoder SHOWS, from the one owner. A private stream probe here reported the
+    // STORED size: a portrait phone video (a landscape frame plus a display matrix) and a portrait
+    // phone JPEG (EXIF orientation) were measured on their sides, so the ceiling on zooming into
+    // them was computed for a picture of the wrong shape.
+    const r = await probePath(ctx.runner, source);
+    const v = (r.ok ? r.video : null) as { width?: unknown; height?: unknown } | null;
     // ffprobe EXITS 0 on an undecodable file and prints width=0 height=0, so judge the reported
     // numbers rather than the exit code.
-    const [w, h] = r.stdout
-      .trim()
-      .split(/[,\s]+/)
-      .map(Number);
-    if (r.code === 0 && Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) dims = { w, h };
+    const [w, h] = [Number(v?.width), Number(v?.height)];
+    if (Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) dims = { w, h };
   } catch {
     dims = null; // ffprobe unavailable -> no clamp (chosen over blocking the edit)
   }

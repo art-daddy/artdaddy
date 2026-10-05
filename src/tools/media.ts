@@ -53,6 +53,12 @@ export function numOrNull(v: unknown): number | null {
   return Number.isNaN(n) ? null : n;
 }
 
+/** Does a display rotation swap width and height? Only a quarter turn does; 180 is still the same
+ *  shape. The one rule for every source of a rotation (stream matrix, rotate tag, frame matrix). */
+export function quarterTurn(rotation: number | null): boolean {
+  return rotation !== null && Math.abs(Math.round(rotation)) % 180 === 90;
+}
+
 /** Parse ffprobe JSON into the trimmed contract (mirrors _probe_media_path). */
 export function parseProbe(path: string, raw: string): Result {
   let data: FfProbe;
@@ -87,7 +93,7 @@ export function parseProbe(path: string, raw: string): Result {
     // (nothing here passes -noautorotate) and so does a <video>. Reporting 1920x1080 told the
     // model the clip was landscape, so on a 9:16 canvas it "corrected" a video that was
     // already upright and the export came out on its side.
-    const turned = rotation !== null && Math.abs(Math.round(rotation)) % 180 === 90;
+    const turned = quarterTurn(rotation);
     const cw = numOrNull(v.width);
     const ch = numOrNull(v.height);
     video = {
@@ -141,7 +147,55 @@ export async function probePath(runner: CommandRunner, path: string): Promise<Re
   const res = parseProbe(path, r.stdout);
   // Never expose the absolute system path in probe results (model sees refs only).
   if (res.ok) delete (res as Record<string, unknown>).path;
+  if (res.ok) await turnByFrame(runner, path, res);
   return res;
+}
+
+/** ffmpeg's single-picture demuxers (`jpeg_pipe`, `png_pipe`, `webp_pipe`, ..., and `image2`). */
+const SINGLE_PICTURE = /(^|,)(\w+_pipe|image2)(,|$)/;
+
+/** A still turned by its EXIF orientation is decoded UPRIGHT everywhere (ffmpeg and the WebView
+ *  alike), but ffprobe's STREAM keeps the stored size: the orientation reaches only the decoded
+ *  FRAME, as a display matrix. A portrait phone JPEG was therefore reported landscape, and the
+ *  frame inspect_media showed the model was squashed into that shape. Measured on the shipped
+ *  ffprobe for all 8 orientations (JPEG and PNG eXIf): stream 640x320, frame rotation -90/90 for
+ *  5-8, and ffmpeg decodes 320x640. So a single-picture file whose stream carries no turn of its
+ *  own is asked about its first frame, and parseProbe's rule is applied to what it says. A frame
+ *  probe that fails or says nothing leaves the stored size: no worse than before. */
+async function turnByFrame(runner: CommandRunner, path: string, res: Result): Promise<void> {
+  const video = res.video as Result | null;
+  if (!video || video.rotation !== null || !SINGLE_PICTURE.test(String(res.format ?? ""))) return;
+  const r = await runner.run("ffprobe", [
+    "-v",
+    "error",
+    "-select_streams",
+    "v:0",
+    "-read_intervals",
+    "%+#1",
+    "-show_entries",
+    "frame_side_data=rotation",
+    "-of",
+    "json",
+    path,
+  ]);
+  if (r.code !== 0) return;
+  let rotation: number | null = null;
+  try {
+    const frames = (JSON.parse(r.stdout) as { frames?: unknown }).frames;
+    const side = Array.isArray(frames)
+      ? (frames[0] as { side_data_list?: unknown })?.side_data_list
+      : null;
+    for (const sd of Array.isArray(side) ? side : [])
+      if (sd && typeof sd === "object" && "rotation" in sd) {
+        rotation = numOrNull((sd as { rotation: unknown }).rotation);
+        break;
+      }
+  } catch {
+    return;
+  }
+  if (rotation === null) return;
+  video.rotation = rotation;
+  if (quarterTurn(rotation)) [video.width, video.height] = [video.height, video.width];
 }
 
 export async function probeMediaTool(

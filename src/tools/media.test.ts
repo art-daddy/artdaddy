@@ -6,6 +6,7 @@ import {
   parseFraction,
   parseProbe,
   probeMediaTool,
+  probePath,
   runFfmpegTool,
   clipVideoTool,
   cropImageTool,
@@ -270,6 +271,104 @@ describe("parseProbe", () => {
     expect(r.duration_s).toBeNull(); // no NaN
     expect(r.size_bytes).toBeNull();
     expect(r.video.nb_frames).toBe("1");
+  });
+});
+
+/** ffprobe as the shipped build answers for one file, both questions probePath can ask: its streams
+ *  (the STORED size, and a display matrix only when the stream itself carries one, as a phone video
+ *  does) and its first frame's side data (where a JPEG or PNG keeps its EXIF orientation). Measured
+ *  for all 8 EXIF orientations: stream 640x320 with no rotation, frame displaymatrix -90/90/-180/0,
+ *  and ffmpeg decodes the turned size. `frame` = null: the frame carries no rotation. */
+function ffprobeOf(file: {
+  format: string;
+  w: number;
+  h: number;
+  stream?: number;
+  frame?: number | null;
+  frameAnswer?: CommandResult;
+}): CommandRunner {
+  return mockRunner((program, args) => {
+    if (program !== "ffprobe") return { code: 0, stdout: "", stderr: "" };
+    if (args.some((a) => a.includes("frame_side_data"))) {
+      if (file.frameAnswer) return file.frameAnswer;
+      const sd =
+        file.frame === null || file.frame === undefined ? [{}] : [{ rotation: file.frame }, {}];
+      return { code: 0, stdout: JSON.stringify({ frames: [{ side_data_list: sd }] }), stderr: "" };
+    }
+    const stream: Record<string, unknown> = { codec_type: "video", width: file.w, height: file.h };
+    if (file.stream !== undefined)
+      stream.side_data_list = [{ side_data_type: "Display Matrix", rotation: file.stream }];
+    return {
+      code: 0,
+      stdout: JSON.stringify({ format: { format_name: file.format }, streams: [stream] }),
+      stderr: "",
+    };
+  });
+}
+
+// Every size the app reports or reasons with must be the size of the picture a decoder SHOWS. A
+// portrait phone JPEG stores a landscape frame plus EXIF orientation 6; every renderer shows it
+// upright, but inspect_media reported it landscape and squashed the frame the model saw into that
+// shape, crop_image refused the lower half of the picture, and find_content cut tiles wider than it.
+describe("probePath reports the size a decoder shows", () => {
+  it("a still turned by its EXIF orientation reports its upright size", async () => {
+    const cases: [string, number | null, [number, number]][] = [
+      ["jpeg_pipe", -90, [320, 640]],
+      ["jpeg_pipe", 90, [320, 640]],
+      ["png_pipe", -90, [320, 640]],
+      ["jpeg_pipe", -180, [640, 320]],
+      ["jpeg_pipe", 0, [640, 320]],
+      ["jpeg_pipe", null, [640, 320]],
+    ];
+    for (const [format, frame, want] of cases) {
+      const r = (await probePath(ffprobeOf({ format, w: 640, h: 320, frame }), "/p.jpg")) as Any;
+      expect(r.ok, `${format} ${frame}`).toBe(true);
+      expect([r.video.width, r.video.height], `${format} frame rotation ${frame}`).toEqual(want);
+    }
+  });
+
+  it("a turn the stream already carries (a phone video) is applied once, never again from a frame", async () => {
+    // Both places saying 90 is what a real file looks like; turning for each would undo the turn.
+    for (const format of ["mov,mp4,m4a,3gp,3g2,mj2", "jpeg_pipe"]) {
+      const r = (await probePath(
+        ffprobeOf({ format, w: 1920, h: 1080, stream: -90, frame: -90 }),
+        "/v",
+      )) as Any;
+      expect([r.video.width, r.video.height], format).toEqual([1080, 1920]);
+    }
+  });
+
+  it("a frame probe that fails or says nothing leaves the stored size, never something worse", async () => {
+    const answers: CommandResult[] = [
+      { code: 1, stdout: "", stderr: "boom" },
+      { code: 0, stdout: "", stderr: "" },
+      { code: 0, stdout: "{not json", stderr: "" },
+      { code: 0, stdout: JSON.stringify({ frames: [] }), stderr: "" }, // what a broken JPEG gives
+      { code: 0, stdout: JSON.stringify({ frames: [{ side_data_list: "x" }] }), stderr: "" },
+      {
+        code: 0,
+        stdout: JSON.stringify({ frames: [{ side_data_list: [{ rotation: "?" }] }] }),
+        stderr: "",
+      },
+    ];
+    for (const frameAnswer of answers) {
+      const r = (await probePath(
+        ffprobeOf({ format: "jpeg_pipe", w: 640, h: 320, frameAnswer }),
+        "/p.jpg",
+      )) as Any;
+      expect(r.ok, JSON.stringify(frameAnswer)).toBe(true);
+      expect([r.video.width, r.video.height], JSON.stringify(frameAnswer)).toEqual([640, 320]);
+    }
+  });
+
+  it("only a single-picture container is asked about its first frame", async () => {
+    // A frame probe decodes; doing it for every video and audio file would double every probe.
+    for (const format of ["mov,mp4,m4a,3gp,3g2,mj2", "matroska,webm", "wav", "gif"]) {
+      const runner = ffprobeOf({ format, w: 64, h: 48, frame: -90 });
+      const r = (await probePath(runner, "/m")) as Any;
+      expect([r.video.width, r.video.height], format).toEqual([64, 48]);
+      expect(vi.mocked(runner.run).mock.calls.length, format).toBe(1);
+    }
   });
 });
 

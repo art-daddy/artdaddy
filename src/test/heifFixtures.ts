@@ -8,6 +8,7 @@ import {
   ALPHA_HEVC,
   DEPTH_HEVC,
   auxC,
+  exifOrientation,
   heifFile,
   irot,
   type Coded,
@@ -160,14 +161,16 @@ export async function tiles(
 /** What an iPhone writes, at test scale: a THUMBNAIL item stored first (a flat colour, so taking it
  *  for the photo is visible), then the photo as a cropped tile grid (primary, optionally rotated by
  *  `turns` quarter turns), and a DEPTH auxiliary (flat white, which would make the photo opaque-or-
- *  holey if taken for alpha). The picture is `w`x`h` before rotation. */
+ *  holey if taken for alpha). The picture is `w`x`h` before rotation. `exif` adds the Exif item an
+ *  iPhone also writes, carrying that EXIF orientation (a portrait photo has irot 1 AND Orientation
+ *  6; HEIF readers must ignore the Exif one). */
 export async function iphoneLikeHeic(
   dir: string,
   out: string,
   picture: string,
   w: number,
   h: number,
-  opts: { tile: number; turns?: number },
+  opts: { tile: number; turns?: number; exif?: number },
 ): Promise<string> {
   await fsp.mkdir(dir, { recursive: true });
   const thumb = await hevcStill(
@@ -194,10 +197,12 @@ export async function iphoneLikeHeic(
       props: opts.turns ? [irot(opts.turns)] : [],
     },
     { coded: depth, props: [auxC(DEPTH_HEVC)], hidden: true },
+    ...(opts.exif !== undefined ? [{ exif: exifOrientation(opts.exif), hidden: true }] : []),
   ];
   const refs: Ref[] = [
     { type: "thmb", from: 1, to: [gridId] },
     { type: "auxl", from: n + 3, to: [gridId] },
+    ...(opts.exif !== undefined ? [{ type: "cdsc" as const, from: n + 4, to: [gridId] }] : []),
   ];
   await fsp.writeFile(out, heifFile(items, gridId, refs, { shareProps: true }));
   return out;

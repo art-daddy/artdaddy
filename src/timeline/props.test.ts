@@ -759,10 +759,19 @@ describe("applyEffectsTool -- branch hardening", () => {
   });
 });
 
-// A 480p source, the resolution that produced the "video is static" report.
+// A 480p source, the resolution that produced the "video is static" report. Answered in the shape
+// the size owner (tools/media probePath) asks for.
 const sdRunner = makeRunner((p, a) => {
   if (p !== "ffprobe") return { code: 0, stdout: "", stderr: "" };
-  if (a.includes("stream=width,height")) return { code: 0, stdout: "854,480", stderr: "" };
+  if (a.includes("-show_streams"))
+    return {
+      code: 0,
+      stdout: JSON.stringify({
+        format: { format_name: "mov,mp4,m4a,3gp,3g2,mj2" },
+        streams: [{ codec_type: "video", width: 854, height: 480 }],
+      }),
+      stderr: "",
+    };
   if (a.includes("-select_streams"))
     return { code: 0, stdout: a[a.indexOf("-select_streams") + 1] === "v" ? "1" : "", stderr: "" };
   return { code: 0, stdout: "", stderr: "" };

@@ -7,7 +7,7 @@ import type { ClientToolContext } from "./context";
 import { withAssScratch } from "./assScratch";
 import { laplacianVariance, noiseSigma } from "./frameMeasures";
 import { fitDims, gridAss, gridFilter, OVERLAY_FONT_FILE, OVERLAY_REV } from "./inspectOverlay";
-import { shortHash } from "./media";
+import { quarterTurn, shortHash } from "./media";
 
 /** Longest edge of a frame inspect_media attaches (Palmier sends 512). */
 export const MEDIA_FRAME_EDGE = 512;
@@ -32,7 +32,7 @@ export function displaySize(
   if (!(w > 0) || !(h > 0)) return null;
   const sar = ratio(video?.sample_aspect_ratio);
   const rot = Number(video?.rotation);
-  const turned = Number.isFinite(rot) && Math.abs(Math.round(rot)) % 180 === 90;
+  const turned = Number.isFinite(rot) && quarterTurn(rot);
   const pixel = sar > 0 ? (turned ? 1 / sar : sar) : 1;
   return { w: Math.max(1, Math.round(w * pixel)), h };
 }
