@@ -76,5 +76,6 @@ export function agentToolContext(
     // trailing ones silently disabled the export progress stream: the render worked, the bar
     // never moved, and nothing failed.
     runner: { run: (p, a, _s, cwd, onStdout) => base.runner.run(p, a, signal, cwd, onStdout) },
+    detach: () => ({ ...base, store }),
   };
 }

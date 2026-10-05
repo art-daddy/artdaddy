@@ -178,9 +178,16 @@ export default function MenuBar() {
     }
     const job = useExportJob.getState();
     // The render is cancellable from the dialog even after it is dismissed, so the controller
-    // lives with the job rather than in this component's state.
+    // lives with the job rather than in this component's state. Once queued, the render belongs
+    // to the export queue (UJ-022) and only the queue's cancel stops it.
     const controller = new AbortController();
-    job.begin(() => controller.abort());
+    let jobId: string | null = null;
+    const cancelQueued = (id: string) =>
+      void import("../timeline/exportQueue").then((q) => q.cancelExport(id));
+    job.begin(() => {
+      controller.abort();
+      if (jobId) cancelQueued(jobId);
+    });
     try {
       const { openToolHost } = await import("../tools/host");
       const res = (await openToolHost(projectId).run(
@@ -199,6 +206,10 @@ export default function MenuBar() {
         job_id?: string;
         warnings?: string[];
       } | null;
+      if (res?.job_id) {
+        jobId = res.job_id;
+        if (controller.signal.aborted) cancelQueued(res.job_id); // cancelled while it was queuing
+      }
       if (controller.signal.aborted) {
         useExportJob.getState().finish({ phase: "cancelled" });
       } else if (!res?.ok) {

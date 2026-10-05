@@ -2701,11 +2701,12 @@ describe("exportTimelineTool", () => {
     expect(String(denied.job.error)).toContain("render failed");
   });
 
-  it("keeps the .mp4 extension on the staging file ffmpeg writes", async () => {
-    // ffmpeg picks its CONTAINER from the output extension. Staging to `<name>.part-a1b2c3`
-    // made every real export die with "Unable to find a suitable output format" ΓÇö invisible
-    // to a mocked runner, so this asserts the actual argument. MemFs has no rename, and
-    // without one the export writes straight to the destination and never stages at all.
+  it("tells ffmpeg the container when the staging file carries no video extension", async () => {
+    // ffmpeg picks its CONTAINER from the output extension unless told. The staging file is
+    // deliberately not a `.mp4` (UJ-022: a partial must not pass for a video), so the render must
+    // say `-f mp4`, or every real export dies with "Unable to find a suitable output format",
+    // invisible to a mocked runner, so this asserts the actual arguments. MemFs has no rename,
+    // and without one the export writes straight to the destination and never stages at all.
     const mem = new MemFs();
     const fs: FsLike = {
       exists: (p) => mem.exists(p),
@@ -2722,12 +2723,14 @@ describe("exportTimelineTool", () => {
     registerTestDocument("C:/proj");
     await ensureTimeline(store);
     let out = "";
+    let argv: string[] = [];
     const ctx: ClientToolContext = {
       store,
       runner: {
         run: async (program: string, args: string[]) => {
           if (program === "ffmpeg") {
             out = args[args.length - 1];
+            argv = args;
             await fs.writeTextFile(out, "video");
           }
           return { code: 0, stdout: "", stderr: "" };
@@ -2741,8 +2744,8 @@ describe("exportTimelineTool", () => {
     await exportTimelineTool({ name: "deliverable" }, ctx);
     await whenExportsSettle();
 
-    expect(out).toContain(".part-"); // it really staged, or the extension rule is untested
-    expect(out).toMatch(/\.mp4$/);
+    expect(out).toMatch(/\.partial$/); // it really staged, or the container rule is untested
+    expect(argv.slice(-3, -1)).toEqual(["-f", "mp4"]);
     // And the finished file is at the destination, under its real name.
     expect(await fs.exists("C:/Users/test/Downloads/deliverable.mp4")).toBe(true);
   });

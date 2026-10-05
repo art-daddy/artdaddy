@@ -21,6 +21,7 @@ import type { ProjectStoreAccess } from "../tools/store";
 import type { MutationOrigin } from "../project/MutationGate";
 import { notifyJobSettled } from "../store/jobNotes";
 import { beginSessionActivity } from "../observability/crashWatch";
+import { recordStaging, releaseStaging } from "./exportStaging";
 
 /** Destinations with an export queued or running, so a second one is refused rather than raced. */
 const reserved = new Set<string>();
@@ -250,7 +251,10 @@ function normalizeDest(p: string): string {
 }
 
 /** Publish a delivered export into the library, LINKED in place. Never fatal: the file is already
- *  on disk and the user has it, so a catalog failure must not turn a good export into a failed one. */
+ *  on disk and the user has it, so a catalog failure must not turn a good export into a failed one.
+ *  Committed WITHOUT the asking turn's origin: the export belongs to the queue (UJ-022), so it is
+ *  catalogued even when it finishes after that turn was stopped or retired by the next message,
+ *  which the gate's origin fence would refuse. The close fence still applies. */
 async function registerExportInLibrary(
   store: ProjectStoreAccess,
   spec: ExportSpec,
@@ -267,7 +271,6 @@ async function registerExportInLibrary(
       "video",
       { kind: "export", job_id: spec.filename },
       spec.destPath,
-      { origin: spec.origin },
     );
     return entry.id;
   } catch {
@@ -395,16 +398,28 @@ async function encode(
     // An encode is the heaviest thing the app does and the likeliest moment to be killed for
     // memory; if the process dies here the crash marker will say so.
     finishActivity = beginSessionActivity("export");
+    // Listed until it is renamed into place or removed, so a partial a crash or a quit leaves
+    // behind is removed at the next launch (exportStaging.ts).
+    if (staged) await recordStaging(spec.stagePath);
     warnings = (await spec.run(signal)).warnings ?? [];
     if (signal.aborted) throw new Error("export cancelled");
-    if (staged) await store.rename(spec.stagePath, spec.destPath);
+    if (staged) {
+      await store.rename(spec.stagePath, spec.destPath);
+      await releaseStaging(spec.stagePath);
+    }
   } catch (e) {
     // A killed ffmpeg reports its own confusing error; the reason the user needs is the cancel.
     cancelled = signal.aborted;
     error = cancelled ? "export cancelled" : e instanceof Error ? e.message : String(e);
     if (!cancelled && e instanceof ExportRunError) stderrTail = e.stderrTail;
-    // Never leave a partial file where a finished export belongs.
-    if (staged) await store.remove(spec.stagePath).catch(() => undefined);
+    // Never leave a partial file where a finished export belongs. One that cannot be removed now
+    // stays listed, for the next launch to remove.
+    if (staged) {
+      await store.remove(spec.stagePath).then(
+        () => releaseStaging(spec.stagePath),
+        () => undefined,
+      );
+    }
   } finally {
     finishActivity?.();
     reserved.delete(key);

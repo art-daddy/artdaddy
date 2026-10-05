@@ -75,9 +75,11 @@ const runTool = vi.fn(async (name: string, args: Record<string, unknown>): Promi
 vi.mock("../tools/host", () => ({ openToolHost: () => ({ run: runTool }) }));
 
 const whenExportEnds = vi.fn();
+const cancelExport = vi.fn();
 vi.mock("../timeline/exportQueue", async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
   whenExportEnds: (id: string) => whenExportEnds(id),
+  cancelExport: (id: string) => cancelExport(id),
 }));
 
 function Loc() {
@@ -203,6 +205,18 @@ describe("MenuBar", () => {
 
       await waitFor(() => expect(useExportJob.getState().phase).toBe("cancelled"));
       expect(screen.queryByText(/Saved alpha\.mp4/)).not.toBeInTheDocument();
+    });
+
+    // The render belongs to the export queue (UJ-022), so the dialog's Cancel has to reach it there.
+    it("Cancel in the dialog stops the queued render", async () => {
+      cancelExport.mockClear();
+      whenExportEnds.mockReturnValue(new Promise(() => {}));
+      await startExport();
+      await waitFor(() => expect(whenExportEnds).toHaveBeenCalledWith("j1"));
+
+      useExportJob.getState().abort?.();
+
+      await waitFor(() => expect(cancelExport).toHaveBeenCalledWith("j1"));
     });
 
     it("prefers the queue's real destination over the tool's bare filename", async () => {

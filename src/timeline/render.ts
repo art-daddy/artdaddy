@@ -1638,6 +1638,8 @@ export function buildRenderCommand(
   else cmd.push("-an");
   if (brand) cmd.push("-shortest");
   else cmd.push("-t", Math.min(duration, options.maxDurationSec ?? Infinity).toFixed(6));
+  // An export's staging name carries no extension for ffmpeg to pick the container from.
+  if (!/\.mp4$/i.test(outPath)) cmd.push("-f", "mp4");
   cmd.push(outPath);
   return {
     args: cmd,
@@ -2343,13 +2345,11 @@ export async function exportTimelineTool(
       error: `an export to ${dest.filename} is already queued or running; wait for it or choose another name.`,
     };
   // The plan is built against the STAGING path, so the destination only ever receives a finished
-  // file. Built here, in the turn, because this is what can still refuse the request.
-  // The extension MUST survive: ffmpeg picks its container from it, and a name ending
-  // `.part-a1b2c3` dies with "Unable to find a suitable output format".
-  const stagePath = dest.path.replace(
-    /\.mp4$/i,
-    `.part-${Math.random().toString(36).slice(2, 8)}.mp4`,
-  );
+  // file. Built here, in the turn, because this is what can still refuse the request. Hidden and
+  // without a video extension, so a partial left by a crash cannot pass for a video (UJ-022); the
+  // render names the container itself (`-f mp4`) because the name no longer does.
+  const slash = Math.max(dest.path.lastIndexOf("/"), dest.path.lastIndexOf("\\"));
+  const stagePath = `${dest.path.slice(0, slash + 1)}.${dest.path.slice(slash + 1)}.${Math.random().toString(36).slice(2, 8)}.partial`;
   const target = ctx.store.canRename ? stagePath : dest.path;
   const prepared = await prepareRender(ctx, target, "deliverable", {
     resolution: args.resolution as ExportOptions["resolution"],
@@ -2376,9 +2376,9 @@ export async function exportTimelineTool(
       project_id: ctx.store.projectDir.split(/[\\/]/).pop() ?? "",
     },
     run: async (signal) => {
-      // NOT the turn's signal: the turn is over by the time ffmpeg runs, and its abort must not
-      // kill a render nobody cancelled. The queue's own signal is what Stop/cancel reaches.
-      const detached: ClientToolContext = { ...ctx, signal };
+      // Not bound to the turn: it is over by the time ffmpeg runs, and Stop, the next message or a
+      // project switch must not kill a render nobody cancelled. Only the queue's signal reaches it.
+      const detached: ClientToolContext = { ...(ctx.detach?.() ?? ctx), signal };
       const res = (await executeRender(detached, prepared.plan, target)) as {
         ok?: boolean;
         error?: string;

@@ -14,4 +14,7 @@ export interface ClientToolContext {
   /** The chat execution that initiated this tool run (agent commits only), so the mutation gate can
    *  reject a commit from a SUPERSEDED execution. Absent for manual editor edits (always current). */
   origin?: MutationOrigin;
+  /** The same context with its runner no longer bound to the turn, for work a tool hands off to
+   *  outlive it (a queued export); that work brings its own signal. Absent where nothing binds it. */
+  detach?: () => ClientToolContext;
 }
