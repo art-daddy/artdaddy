@@ -3,6 +3,8 @@
 import { stderrExcerpt, type CommandRunner } from "./command";
 import type { ClientToolContext } from "./context";
 import { AAC_SAMPLE_RATE, replacedRates } from "./ffmpegPolicy";
+import { shortHash } from "./hash";
+import { stillPicture } from "../media/stillPicture";
 import { registerLibraryClip } from "./import";
 import { unresolvedRefError } from "./refState";
 import type { ClientToolRegistry } from "./registry";
@@ -196,7 +198,11 @@ export async function runFfmpegTool(
         `input ${i} not found: ${String(inputs[i])}. Pass a library asset id or filename (not a system path).`,
       );
     }
-    inPaths.push(p);
+    // A HEIF-family still is handed over as its decoded picture: `-vf` on a tiled iPhone photo
+    // fails, and `[0:v]` is its first tile, neither of which the command's author could know.
+    const picture = await stillPicture(ctx.store, ctx.runner, p, ctx.signal);
+    if ("error" in picture) return { ok: false, error: `input ${i}: ${picture.error}` };
+    inPaths.push(picture.path);
   }
 
   const outPath = await ctx.store.prepareArtifact(`ffmpeg/${outputName}`);
@@ -282,17 +288,9 @@ export async function runFfmpegTool(
   };
 }
 
-/** Stable 12-hex digest for deterministic artifact filenames (double FNV-1a). */
-export function shortHash(s: string): string {
-  let h1 = 0x811c9dc5;
-  let h2 = 0x1000193;
-  for (let i = 0; i < s.length; i++) {
-    const c = s.charCodeAt(i);
-    h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0;
-    h2 = Math.imul(h2 ^ c, 0x01000193) >>> 0;
-  }
-  return (h1.toString(16).padStart(8, "0") + h2.toString(16).padStart(8, "0")).slice(0, 12);
-}
+/** Stable 12-hex digest for deterministic artifact filenames. Lives in the leaf module hash.ts so the
+ *  still-picture owner can reach it without an import cycle; re-exported for existing callers. */
+export { shortHash };
 
 /** Trim a clip to cache/cuts/ via ffmpeg (mirrors clip_video). */
 export async function clipVideoTool(
@@ -316,13 +314,17 @@ export async function clipVideoTool(
     return { ok: false, error: `invalid output_name ${outputName} (simple filename only).` };
   }
 
-  const src = await ctx.store.resolveRef(inputRef);
-  if (!src)
+  const resolved = await ctx.store.resolveRef(inputRef);
+  if (!resolved)
     return unresolvedRefError(
       ctx.store,
       inputRef,
       `input not found: ${inputRef}. Pass a library id or filename (import_media a local file first).`,
     );
+  // A HEIF-family still is read as its decoded picture, as every other tool reads it.
+  const picture = await stillPicture(ctx.store, ctx.runner, resolved, ctx.signal);
+  if ("error" in picture) return { ok: false, error: picture.error };
+  const src = picture.path;
 
   const outPath = await ctx.store.prepareArtifact(`cuts/${outputName}`);
   const cmd = ["-y", "-ss", startS.toFixed(3), "-to", endS.toFixed(3), "-i", src];
@@ -375,7 +377,12 @@ export async function cropImageTool(
   const bh = numOrNull(bbox.h) ?? numOrNull(bbox.height) ?? 0;
   if (bw <= 0 || bh <= 0) return { ok: false, error: "bbox width and height must be positive" };
 
-  const probe = await probePath(ctx.runner, src);
+  // A HEIF-family still is cropped from its decoded picture: on a tiled iPhone photo the crop filter
+  // fails outright, and the probe reports the size of one tile.
+  const picture = await stillPicture(ctx.store, ctx.runner, src, ctx.signal);
+  if ("error" in picture) return { ok: false, error: picture.error };
+  const pic = picture.path;
+  const probe = await probePath(ctx.runner, pic);
   const v = probe.ok ? (probe.video as Result | null) : null;
   const wImg = v ? numOrNull(v.width) : null;
   const hImg = v ? numOrNull(v.height) : null;
@@ -391,13 +398,13 @@ export async function cropImageTool(
   const ch = y1 - y0;
   if (cw <= 0 || ch <= 0) return { ok: false, error: "bbox does not overlap the image" };
 
-  const digest = shortHash(`${src}|${x0},${y0},${x1},${y1}`);
+  const digest = shortHash(`${pic}|${x0},${y0},${x1},${y1}`);
   const outPath = await ctx.store.prepareArtifact(`crops/${digest}.png`);
   const r = await ctx.runner.run("ffmpeg", [
     "-y",
     "-nostdin",
     "-i",
-    src,
+    pic,
     "-vf",
     `crop=${cw}:${ch}:${x0}:${y0}`,
     "-frames:v",

@@ -2,7 +2,7 @@
 // of the (project-relative) clip source. Pure so it's shared by the generator
 // (mediaProxy), the preview resolver (resolve), and the timeline thumbnail
 // (ClipThumbnail) without any of them depending on ffmpeg.
-import { shortHash } from "../tools/media";
+import { shortHash } from "../tools/hash";
 import { INTERNAL_DIR } from "../tools/store";
 
 /** Canonical form of a clip source for proxy/poster keying, so the SAME library
@@ -42,9 +42,12 @@ export function proxyRel(source: string): string {
 }
 
 // Same idea for the still-image stand-in recipe.
-const IMAGE_PROXY_REV = 1;
+// r2: the HEIF family is decoded by media/stillPicture.ts (primary item, whole tile grid, alpha,
+// long edge bounded upright); r1 HEIF stand-ins could be a tile, a thumbnail, or alpha-less.
+const IMAGE_PROXY_REV = 2;
 
-/** PNG stand-in for an image `createImageBitmap` has no decoder for (TIFF, HEIC). */
+/** PNG stand-in for an image the preview cannot draw itself (TIFF), and the decoded picture of a
+ *  HEIF-family still, which every consumer reads (media/stillPicture.ts). */
 export function imageProxyName(source: string): string {
   return `${proxyKey(source)}.r${IMAGE_PROXY_REV}.png`;
 }

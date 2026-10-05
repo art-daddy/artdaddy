@@ -21,7 +21,9 @@ import { loadTimeline } from "./engine";
 import { createProgressReader, etaSeconds, progressFraction } from "./ffmpegProgress";
 import { canvasFps, isNum, toSecondsView } from "./frames";
 import { crfFor, outputFps, outputSize, type ExportOptions } from "./exportOptions";
-import { clipKind } from "./helpers";
+import { clipKind, rendersAsStill } from "./helpers";
+import { extOf, kindOf, REPLAYED_STILL_EXTS } from "../media/formats";
+import { isHeifStill, stillPicture } from "../media/stillPicture";
 import type { Animatable, Clip, Timeline } from "./model";
 import { validateTimeline } from "./validate";
 import {
@@ -95,7 +97,9 @@ function peak(size: Animatable | undefined, fallback: number): number {
 }
 
 /** Stills ffmpeg opens with a demuxer of their own (not image2), so they loop by replaying. */
-const REPLAYED_STILL = /\.(gif|avif)$/i;
+function isReplayedStill(path: string): boolean {
+  return (REPLAYED_STILL_EXTS as readonly string[]).includes(extOf(path));
+}
 
 /** The canvas the render composites at, in pixels: the authored size made even. */
 export function canvasPx(timeline: Timeline): { w: number; h: number } {
@@ -1100,7 +1104,7 @@ export function buildRenderCommand(
       cmd.push(
         // `-loop 1` belongs to the image-sequence reader; GIF and AVIF open with their own, which
         // refuse it ("Option loop not found") and failed the whole export.
-        ...(REPLAYED_STILL.test(inp.path)
+        ...(isReplayedStill(inp.path)
           ? ["-stream_loop", "-1"]
           : ["-loop", "1", "-framerate", String(fps)]),
         "-t",
@@ -1695,6 +1699,27 @@ export async function resolveClipSources(
       if (src)
         clip.media_ref =
           (await ctx.store.resolveRef(src)) ?? joinPath(ctx.store.projectDir, "library", src);
+      // A clip stored as "video" whose file is a still renders as the still it is (helpers.ts
+      // rendersAsStill): every HEIC placed before 3g was stored that way. The plan is a copy, so
+      // the document is untouched.
+      if (
+        typeof clip.media_ref === "string" &&
+        clipKind(clip) !== "image" &&
+        rendersAsStill(clip, kindOf(clip.media_ref))
+      )
+        clip.kind = "image";
+      // A HEIF-family still renders as its decoded picture (media/stillPicture.ts): opened directly,
+      // a tiled iPhone photo is its first tile, and a thumbnail stored first is taken for the photo.
+      // One that cannot be decoded keeps its path, and runRenderPlan refuses it by name.
+      if (
+        clipKind(clip) === "image" &&
+        typeof clip.media_ref === "string" &&
+        isHeifStill(clip.media_ref)
+      ) {
+        const picture = await stillPicture(ctx.store, ctx.runner, clip.media_ref, ctx.signal);
+        if ("path" in picture) clip.media_ref = picture.path;
+        else warnings.push(`image clip ${clip.id ?? "?"}: ${picture.error}`);
+      }
       // ffmpeg rejects the ENTIRE graph with EINVAL when a `[N:a]` names a source with no audio
       // stream, so one such clip takes down every export AND every inspect_timeline. Placement
       // cannot always know (media still generating has no bytes to probe), and an external file
@@ -1838,6 +1863,17 @@ export async function undecodableStill(
   stillImages: readonly string[],
 ): Promise<CommandResult | null> {
   for (const path of stillImages) {
+    // resolveClipSources hands the renderer the DECODED picture of every HEIF-family still it can
+    // decode. One still named here could not be, and ffmpeg would show its first tile (or a
+    // thumbnail) as though it were the photo.
+    if (isHeifStill(path))
+      return {
+        code: -1,
+        stdout: "",
+        stderr:
+          `render aborted: '${path.split(/[\\/]/).pop()}' could not be decoded into a picture. It may ` +
+          `be damaged or not fully downloaded; replace it, or convert it to JPEG or PNG and import that.`,
+      };
     let reason: string | null = null;
     try {
       reason = undecodableImageReason(await ctx.store.readBytes(path));

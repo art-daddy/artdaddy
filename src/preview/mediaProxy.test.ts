@@ -104,7 +104,17 @@ describe("preview proxy — stills the browser cannot decode", () => {
     const store = new ProjectStoreAccess("C:/proj", fs);
     const written: string[] = [];
     const runner = {
-      run: async (_p: string, args: string[]) => {
+      run: async (program: string, args: string[]) => {
+        // A HEIF still is decoded by its owner (media/stillPicture.ts), which first asks ffprobe
+        // which item is the picture. Answer as ffprobe does for a plain one: a single default stream.
+        if (program === "ffprobe")
+          return {
+            code: 0,
+            stdout: JSON.stringify({
+              streams: [{ index: 0, id: "0x1", disposition: { default: 1 } }],
+            }),
+            stderr: "",
+          };
         const out = args[args.length - 1];
         written.push(out);
         await fs.writeTextFile(out, "out");
@@ -122,7 +132,9 @@ describe("preview proxy — stills the browser cannot decode", () => {
   });
 
   it("...and for a HEIC", async () => {
-    expect((await image("library/photo.heic")).some((p) => /\.png$/.test(p))).toBe(true);
+    const written = await image("library/photo.heic");
+    expect(written.some((p) => /proxies\/.*\.png$/.test(p))).toBe(true);
+    expect(written.some((p) => /posters\/.*\.jpg$/.test(p))).toBe(true);
   });
 
   // The failure direction: a PNG already draws, so generating a PNG OF a PNG is pure waste.

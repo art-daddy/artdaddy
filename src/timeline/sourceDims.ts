@@ -8,6 +8,7 @@
 // unprobeable file, or a probe that answered with nonsense. Callers must then SKIP the clamp: a
 // failed ffprobe is not evidence that the media is small.
 import type { ClientToolContext } from "../tools/context";
+import { stillPicture } from "../media/stillPicture";
 import { loadTimeline } from "./engine";
 import { findClip } from "./helpers";
 import type { Dims } from "./magnification";
@@ -74,7 +75,10 @@ export async function sourceDims(
     }
     try {
       const abs = (await ctx.store.resolveMediaRef(ref)) ?? ref;
-      out.set(id, await probe(ctx, abs));
+      // A HEIF-family still is measured as its decoded picture: probed directly, a tiled iPhone
+      // photo reports the size of one 512px tile, and the clamp would refuse a gentle zoom on it.
+      const picture = await stillPicture(ctx.store, ctx.runner, abs, ctx.signal);
+      out.set(id, "path" in picture ? await probe(ctx, picture.path) : null);
     } catch {
       out.set(id, null);
     }

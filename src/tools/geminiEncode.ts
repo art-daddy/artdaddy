@@ -2,10 +2,12 @@
 // of the server's _encode_for_gemini_cached. Downscales, fps-samples and (by
 // default) strips audio into a compact MP4 so we ship a small clip over the wire
 // instead of the full source. Reused by inspect_media (windowed glance) and by
-// read_media (whole-video pre-encode before a hosted vision call). Kept
-// dependency-free (only the context type) so it never forms an import cycle.
+// read_media (whole-video pre-encode before a hosted vision call). Its imports are leaves (the
+// context type, the command helpers, and the still-picture owner, which itself never reaches the
+// tool modules) so it never forms an import cycle.
 import { stderrExcerpt } from "./command";
 import type { ClientToolContext } from "./context";
+import { stillPicture } from "../media/stillPicture";
 
 export interface GeminiEncodeOpts {
   /** Output frame rate (frames sampled per second). */
@@ -107,8 +109,13 @@ export async function encodeVideoForGemini(
 /** Encode `src` into a compact, content-keyed (cached) downscaled JPEG for an
  *  image Part the model SEES (fits within `maxDim`×`maxDim`, never upscaled).
  *  Client-side twin of the server's old Pillow downscale — the server now
- *  attaches image bytes as-is. Returns `src` unchanged on any encode failure
- *  (the model still sees it, just larger). */
+ *  attaches image bytes as-is. Returns the picture unchanged on an encode failure
+ *  (the model still sees it, just larger).
+ *
+ *  Every still uploaded to a model passes here (generation references and frames, vision), so a
+ *  HEIF-family still is read as its decoded picture HERE (media/stillPicture.ts): on a tiled iPhone
+ *  photo the `-vf` below fails, and the fallback then sent the raw HEIC bytes, labelled .jpg, to a
+ *  paid model. One that cannot be decoded is refused before anything is sent. */
 export async function encodeImageForGemini(
   ctx: ClientToolContext,
   src: string,
@@ -116,7 +123,10 @@ export async function encodeImageForGemini(
 ): Promise<string> {
   const maxDim = opts.maxDim ?? 512;
   const quality = opts.quality ?? 70;
-  const key = keyHash(`${src}|${maxDim}|${quality}`);
+  const picture = await stillPicture(ctx.store, ctx.runner, src, ctx.signal);
+  if ("error" in picture) throw new Error(picture.error);
+  const from = picture.path;
+  const key = keyHash(`${from}|${maxDim}|${quality}`);
   const out = await ctx.store.prepareArtifact(`${opts.tag ?? "gemini"}/gem_img_${key}.jpg`);
   if (await ctx.store.exists(out)) return out;
   // mjpeg -q:v runs 2 (best) .. 31 (worst); map a 0-100 quality onto that band.
@@ -127,7 +137,7 @@ export async function encodeImageForGemini(
     "-loglevel",
     "error",
     "-i",
-    src,
+    from,
     "-vf",
     `scale=${maxDim}:${maxDim}:force_original_aspect_ratio=decrease`,
     "-frames:v",
@@ -136,6 +146,6 @@ export async function encodeImageForGemini(
     String(qv),
     out,
   ]);
-  if (r.code !== 0 || !(await ctx.store.exists(out))) return src;
+  if (r.code !== 0 || !(await ctx.store.exists(out))) return from;
   return out;
 }

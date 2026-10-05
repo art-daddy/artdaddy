@@ -5,13 +5,15 @@
 // swaps in the proxy (see resolve.resolvePreviewUrl). Idempotent: existing
 // outputs are skipped. Runs ffmpeg via the Tauri sidecar, so it's excluded from
 // unit coverage. Best-effort throughout — a failure just leaves the original.
-import { stderrExcerpt, type CommandRunner } from "../tools/command";
+import type { CommandRunner } from "../tools/command";
 import { probePath } from "../tools/media";
 import type { ProjectStoreAccess } from "../tools/store";
 import { imageProxyName, posterName, proxyKey, proxyName } from "./proxyPaths";
 import { announceMediaDerived } from "./mediaDerived";
 
 import { extAlternation, kindOf, needsPreviewProxy } from "../media/formats";
+import { isHeifStill, stillPicture, stillPicturePath } from "../media/stillPicture";
+import { transcode } from "../media/transcode";
 
 const VID_RE = new RegExp(`\\.(${extAlternation("video")})$`, "i");
 // Video codecs the in-app WebCodecs preview can decode in the WebView.
@@ -140,9 +142,9 @@ async function deriveArtifacts(
   return changed;
 }
 
-/** Stills the WebView has no decoder for (TIFF, HEIC) get a PNG stand-in, plus the same
- *  poster the timeline thumbnail reads — otherwise an imported still is simply invisible
- *  everywhere in the app while exporting perfectly well. */
+/** Stills the WebView has no decoder for (TIFF) get a PNG stand-in, and a HEIF-family still is
+ *  drawn from its decoded picture; each gets the poster the timeline thumbnail reads. Otherwise an
+ *  imported still is simply invisible everywhere in the app while exporting perfectly well. */
 async function processImage(
   store: ProjectStoreAccess,
   runner: CommandRunner,
@@ -154,75 +156,46 @@ async function processImage(
   const abs = await store.resolveRef(source);
   if (!abs) return false;
   let changed = false;
-  const proxy = await store.prepareArtifact(`proxies/${imageProxyName(source)}`);
-  if (!(await store.exists(proxy))) {
-    onTranscode?.();
-    // Bounded on the long edge: a camera TIFF can exceed what a GPU texture (or
-    // av_image_check_size2) will take, and the preview never needs more than the canvas.
-    if (
-      await transcode(
-        store,
-        runner,
-        proxy,
-        ["-i", abs, "-frames:v", "1", "-vf", "scale='min(3840,iw)':-1"],
-        signal,
+  // What the poster is cut from: the original, or (HEIF) its decoded picture, or nothing when that
+  // cannot be decoded (a poster from the raw file would be a tile, or nothing).
+  let from: string | null = abs;
+  if (isHeifStill(abs)) {
+    // The decoded picture IS the stand-in, so the preview draws the very file the export renders.
+    const had = await store.exists(await stillPicturePath(store, abs));
+    if (!had) onTranscode?.();
+    const picture = await stillPicture(store, runner, abs, signal);
+    from = "path" in picture ? picture.path : null;
+    if (from && !had) changed = true;
+  } else {
+    const proxy = await store.prepareArtifact(`proxies/${imageProxyName(source)}`);
+    if (!(await store.exists(proxy))) {
+      onTranscode?.();
+      // Bounded on the long edge: a camera TIFF can exceed what a GPU texture (or
+      // av_image_check_size2) will take, and the preview never needs more than the canvas.
+      if (
+        await transcode(
+          store,
+          runner,
+          proxy,
+          ["-i", abs, "-frames:v", "1", "-vf", "scale='min(3840,iw)':-1"],
+          signal,
+        )
       )
-    )
-      changed = true;
+        changed = true;
+    }
   }
   const poster = await store.prepareArtifact(`posters/${posterName(source)}`);
-  if (!(await store.exists(poster))) {
+  if (from && !(await store.exists(poster))) {
     if (
       await transcode(
         store,
         runner,
         poster,
-        ["-i", abs, "-frames:v", "1", "-vf", "scale=-2:360", "-q:v", "4"],
+        ["-i", from, "-frames:v", "1", "-vf", "scale=-2:360", "-q:v", "4"],
         signal,
       )
     )
       changed = true;
   }
   return changed;
-}
-
-/** Run ffmpeg writing to a temp sibling, then atomically rename onto `dest` only
- *  on a clean exit — so an interrupted/killed transcode (e.g. the app relaunching
- *  mid-encode) never leaves a corrupt file that later runs skip as "already
- *  done". Falls back to a direct write if the fs has no rename. Returns success. */
-async function transcode(
-  store: ProjectStoreAccess,
-  runner: CommandRunner,
-  dest: string,
-  midArgs: string[],
-  signal?: AbortSignal,
-): Promise<boolean> {
-  const canRename = store.canRename;
-  const dot = dest.lastIndexOf(".");
-  const rand = Math.random().toString(36).slice(2, 8);
-  const out = !canRename
-    ? dest
-    : dot < 0
-      ? `${dest}.tmp-${rand}`
-      : `${dest.slice(0, dot)}.tmp-${rand}${dest.slice(dot)}`;
-  const r = await runner
-    .run("ffmpeg", ["-y", "-hide_banner", "-loglevel", "error", ...midArgs, out], signal)
-    .catch(() => ({ code: -1, stdout: "", stderr: "" }));
-  if (r.code !== 0 || !(await store.exists(out))) {
-    console.warn(
-      `[mediaProxy] ffmpeg failed dest=${dest} code=${r.code} stderr=${stderrExcerpt(r.stderr, 300)}`,
-    );
-    if (canRename) await store.remove(out).catch(() => undefined);
-    return false;
-  }
-  if (canRename) {
-    try {
-      await store.rename(out, dest);
-    } catch (e) {
-      console.warn(`[mediaProxy] rename failed ${out} -> ${dest}: ${String(e)}`);
-      await store.remove(out).catch(() => undefined);
-      return false;
-    }
-  }
-  return true;
 }

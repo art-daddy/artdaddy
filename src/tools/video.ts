@@ -7,6 +7,7 @@ import { callAiProxy, toB64 } from "../api/ai";
 import type { ClientToolContext } from "./context";
 import { encodeVideoForGemini } from "./geminiEncode";
 import { probePath } from "./media";
+import { stillPicture } from "../media/stillPicture";
 import { unresolvedRefMessage } from "./refState";
 import type { ClientToolRegistry } from "./registry";
 import { MAX_HEAP_READ_BYTES } from "./store";
@@ -18,7 +19,7 @@ import type { Clip } from "../timeline/model";
 type Result = Record<string, unknown>;
 const NOT_READY: Result = { ok: false, error: "client tool runtime not ready" };
 
-// ── timestamp parsing (ports research.py _TS_RE / _mmss_to_seconds / _extract_timestamps) ──
+// â”€â”€ timestamp parsing (ports research.py _TS_RE / _mmss_to_seconds / _extract_timestamps) â”€â”€
 const TS_RE =
   /(?<![\d.])(?:(\d{1,2}):(\d{2}):(\d{2}(?:\.\d+)?)|(\d{1,3}):(\d{2}(?:\.\d+)?))(?!\d)/g;
 
@@ -103,8 +104,10 @@ async function resolveVideoSource(
   // Agent-supplied media_ref goes through the NARROW resolver (rejects a raw absolute path / `..`
   // escape) so a read tool can't be turned into an arbitrary-file reader + exfil-to-model; a
   // clip-derived source is trusted (an EXTERNAL clip legitimately carries an absolute ref).
-  const path = fromClip ? await ctx.store.resolveRef(ref) : await ctx.store.resolveMediaRef(ref);
-  if (!path) {
+  const resolved = fromClip
+    ? await ctx.store.resolveRef(ref)
+    : await ctx.store.resolveMediaRef(ref);
+  if (!resolved) {
     return {
       error: await unresolvedRefMessage(
         ctx.store,
@@ -113,10 +116,13 @@ async function resolveVideoSource(
       ),
     };
   }
-  return { path, ref, clip, fps };
+  // A HEIF-family still is read as its decoded picture, as every other tool reads it.
+  const picture = await stillPicture(ctx.store, ctx.runner, resolved, ctx.signal);
+  if ("error" in picture) return { error: picture.error };
+  return { path: picture.path, ref, clip, fps };
 }
 
-// ── video_ask (research.py::video_ask) ──
+// â”€â”€ video_ask (research.py::video_ask) â”€â”€
 const VIDEO_ASK_MAX_DURATION_S = 1800;
 const VIDEO_ASK_FIXED_FPS = 4;
 const TIMESTAMP_RULE =
@@ -264,7 +270,7 @@ async function videoAsk(
   };
 }
 
-// ── video_find_moment (research.py::video_find_moment) ──
+// â”€â”€ video_find_moment (research.py::video_find_moment) â”€â”€
 // Prose-Markdown parser ported verbatim: line-anchored `^` -> `(?:^|\n)`,
 // Python `\Z` -> JS `$` (no `m` flag = end-of-string), `re.DOTALL` -> `[\s\S]`.
 const VFM_FIXED_FPS = 1;

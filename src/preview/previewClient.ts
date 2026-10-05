@@ -11,6 +11,8 @@ import { timelineSources } from "./protocol";
 import { resolvePosterUrl, resolvePreviewUrl } from "./resolve";
 import type { TextLayer } from "./scene";
 import { rasterizeText } from "./text";
+import { kindOf } from "../media/formats";
+import { withStillKinds } from "../timeline/helpers";
 import type { Timeline } from "../timeline/model";
 import type { ProjectStoreAccess } from "../tools/store";
 
@@ -104,12 +106,29 @@ export function createPreviewClient(
   let store: ProjectStoreAccess | null = null;
   let lastTimeline: Timeline | null = null;
   let token = 0; // guards against a slow resolve clobbering a newer timeline
+  // What kind of FILE each ref names (a ref's file never changes kind), so a clip stored as "video"
+  // whose file is a still is drawn as the still it is: the export's rule (helpers.withStillKinds).
+  const fileKinds = new Map<string, string | null>();
+  async function fileKindOf(s: ProjectStoreAccess, src: string): Promise<string | null> {
+    const key = `${s.projectDir}\u0000${src}`;
+    if (fileKinds.has(key)) return fileKinds.get(key)!;
+    let abs: string | null = null;
+    try {
+      abs = await s.resolveRef(src);
+    } catch {
+      abs = null; // best-effort: the stored kind stands
+    }
+    const kind = abs ? kindOf(abs) : null;
+    if (abs) fileKinds.set(key, kind); // an unresolved ref is asked again once its file lands
+    return kind;
+  }
 
   async function resolveAndRender(timeline: Timeline, time: number): Promise<void> {
     const mine = ++token;
     mark("render-requested");
     const urls: Record<string, string> = {};
     const posters: Record<string, string> = {};
+    const kinds = new Map<string, string | null>();
     const s = store;
     if (s) {
       await Promise.all(
@@ -117,19 +136,28 @@ export function createPreviewClient(
           // Concurrently: resolution is ~85% of the time to the first picture (measured in-app at
           // 363ms of 433ms), so awaiting the poster after the source would have added its IPC
           // round-trips to the critical path rather than alongside it.
-          const [u, p] = await Promise.all([
+          const [u, p, k] = await Promise.all([
             resolve(s, src),
             resolvePosterUrl(s, src).catch(() => null), // best-effort: no poster, old black start
+            fileKindOf(s, src),
           ]);
           if (u) urls[src] = u;
           else console.warn(`[preview] timeline source did not resolve to a file: ${src}`);
           if (p) posters[src] = p;
+          kinds.set(src, k);
         }),
       );
     }
     mark("urls-resolved");
     if (mine !== token) return; // a newer timeline superseded this resolve
-    worker.postMessage({ type: "render", timeline, time, urls, posters } satisfies PreviewInbound);
+    const drawn = withStillKinds(timeline, (ref) => kinds.get(ref) ?? null);
+    worker.postMessage({
+      type: "render",
+      timeline: drawn,
+      time,
+      urls,
+      posters,
+    } satisfies PreviewInbound);
   }
 
   return {

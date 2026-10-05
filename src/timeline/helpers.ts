@@ -5,31 +5,8 @@
 import { OpError } from "./errors";
 import { newId, toFrames } from "./frames";
 import type { Clip, Timeline, Track } from "./model";
+import { extOf, kindOf } from "../media/formats";
 
-export const AUDIO_EXTS = new Set([
-  ".wav",
-  ".mp3",
-  ".m4a",
-  ".aac",
-  ".flac",
-  ".ogg",
-  ".oga",
-  ".opus",
-  ".aif",
-  ".aiff",
-  ".wma",
-]);
-export const IMAGE_EXTS = new Set([
-  ".png",
-  ".jpg",
-  ".jpeg",
-  ".gif",
-  ".webp",
-  ".bmp",
-  ".tif",
-  ".tiff",
-  ".avif",
-]);
 export const DEFAULT_TRACK: Record<string, string> = { audio: "music", text: "captions" };
 /** Must be one of `starterTracks()`, else the first clip lands on a track created beside
  *  the empty starter one. */
@@ -37,19 +14,16 @@ export const DEFAULT_VISUAL_TRACK = "v1";
 
 export type MediaKind = "video" | "image" | "audio" | "lottie" | "subtitle";
 
-function ext(p: string): string {
-  const m = p.toLowerCase().match(/\.[a-z0-9]+$/);
-  return m ? m[0] : "";
-}
-
-/** Classify a source path into video | image | audio | lottie | subtitle by extension. */
+/** Classify a source path into video | image | audio | lottie | subtitle by extension.
+ *
+ *  The media kinds come from the ONE list (media/formats.ts). This module kept a copy, written one
+ *  extension per line where the guard could not see it, and it had no .heic or .heif: add_clips
+ *  recorded every iPhone photo as a VIDEO clip, so the export read the file's first stream (its
+ *  thumbnail, or one tile). Only what is not a media format is decided here: lottie, and "video"
+ *  for anything unlisted, as before. */
 export function detectKind(source: string): MediaKind {
-  const e = ext(source);
-  if (e === ".lottie") return "lottie";
-  if (e === ".srt" || e === ".vtt") return "subtitle";
-  if (IMAGE_EXTS.has(e)) return "image";
-  if (AUDIO_EXTS.has(e)) return "audio";
-  return "video";
+  if (extOf(source) === "lottie") return "lottie";
+  return kindOf(source) ?? "video";
 }
 
 /** The kind to place a clip of, refusing anything that cannot BE a clip.
@@ -74,6 +48,41 @@ export function clipKind(clip: Clip): string {
   // extension — a bare library id has none, and every image would read as video.
   if (k === "audio" || k === "text" || k === "image" || k === "video") return k;
   return clip.media_ref ? detectKind(String(clip.media_ref)) : "video"; // legacy clips
+}
+
+/** Whether a clip is drawn and exported as a STILL, given the kind of the FILE its ref resolves to.
+ *
+ *  The stored kind decides, with one repair: a clip stored as "video" whose file is a still IS a
+ *  still. Every HEIC placed before 3g was stored that way (detectKind had no .heic, and a dropped
+ *  file's probe sees its image items as video streams), so the export read its first stream (a
+ *  thumbnail, or one tile) and the preview built a video decoder for a PNG and drew black. A
+ *  document is never rewritten on open, so both renderers ask THIS with the path they resolve. */
+export function rendersAsStill(clip: Clip, fileKind: string | null): boolean {
+  const k = clipKind(clip);
+  return k === "image" || (k === "video" && fileKind === "image");
+}
+
+/** `timeline` with each clip that {@link rendersAsStill} but is not stored as one re-kinded to
+ *  "image", for a renderer to draw. Pure: `timeline` is untouched, and it comes back as the same
+ *  object when no clip needs it. `fileKindOf` answers for a clip's `media_ref`. */
+export function withStillKinds(
+  timeline: Timeline,
+  fileKindOf: (ref: string) => string | null,
+): Timeline {
+  let changed = false;
+  const tracks = (timeline.tracks ?? []).map((t) => {
+    let touched = false;
+    const clips = (t.clips ?? []).map((c) => {
+      if (clipKind(c) === "image" || typeof c.media_ref !== "string") return c;
+      if (!rendersAsStill(c, fileKindOf(c.media_ref))) return c;
+      touched = true;
+      return { ...c, kind: "image" as const };
+    });
+    if (!touched) return t;
+    changed = true;
+    return { ...t, clips };
+  });
+  return changed ? { ...timeline, tracks } : timeline;
 }
 
 function trackKindFor(kind: string): Track["kind"] {

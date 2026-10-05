@@ -33,6 +33,9 @@ const ATTACK = `C:/Users/u/Documents/${SENT}.mp4`;
 const DOTDOT = `library/../../../../Documents/${SENT}.mp4`;
 const FILE_URL = `file:///C:/Users/u/Documents/${SENT}.txt`;
 const WEB_URL = `https://example.com/${CTRL}`;
+/** A HEIF-family library still: every read of its pixels must go through media/stillPicture.ts. */
+const HEIC_NAME = "IMG_0001.HEIC";
+const HEIC = `D:/Footage/${HEIC_NAME}`;
 
 class RecFs implements FsLike {
   files = new Map<string, string>();
@@ -90,6 +93,7 @@ function seed(): ProjectStoreAccess {
     `D:/Footage/${CTRL}.png`,
     joinPath(DIR, "library/media_a.mp4"),
     joinPath(DIR, `notes-${CTRL}.md`),
+    HEIC,
   ])
     fs.put(p);
   fs.put(`D:/Footage/${CTRL}.srt`, "1\n00:00:00,000 --> 00:00:01,000\nhello\n");
@@ -103,6 +107,7 @@ function seed(): ProjectStoreAccess {
         { id: "media_ctl", path: `D:/Footage/${CTRL}.mp4`, external: true, kind: "video" },
         { id: "media_img", path: `D:/Footage/${CTRL}.png`, external: true, kind: "image" },
         { id: "media_srt", path: `D:/Footage/${CTRL}.srt`, external: true, kind: "subtitle" },
+        { id: "media_heic", path: HEIC, external: true, kind: "image" },
       ].map((c) => ({ filename: c.path.split("/").pop(), ...c })),
     }),
   );
@@ -145,6 +150,13 @@ const runner: CommandRunner = {
     calls.push([program, ...args]);
     if (program === "ffprobe" && args.includes("-print_format"))
       return { code: 0, stdout: PROBE_JSON, stderr: "" };
+    // The still-picture owner's inventory: one primary item, as a plain HEIC has.
+    if (program === "ffprobe" && args.some((a) => a.includes("stream_disposition")))
+      return {
+        code: 0,
+        stdout: JSON.stringify({ streams: [{ index: 0, id: "0x1", disposition: { default: 1 } }] }),
+        stderr: "",
+      };
     // ffmpeg "writes" its output, so a tool that checks for it goes on to read it.
     if (program === "ffmpeg" && args.length) fs.put(String(args[args.length - 1]));
     return { code: 0, stdout: "", stderr: "" };
@@ -391,5 +403,58 @@ describe("agent-typed paths and URLs reach only what the project knows", () => {
         expect(marks()).toContain(CTRL);
       });
     }
+  }
+});
+
+// A HEIF-family still (an iPhone photo) read directly is the wrong picture: its first tile or a
+// thumbnail stored ahead of it, and every `-vf` on a tile grid fails. media/stillPicture.ts decodes it
+// once; every other reader must read THAT. Walked over every library-ref parameter the served
+// contract has, so a tool added later is held to it without anyone remembering to list it.
+describe("a HEIF still's pixels are read only through its decoded picture", () => {
+  /** The owner's own reads: its inventory probe and its decode (the only graph with `[still]`). */
+  const ownerRead = (c: string[]): boolean =>
+    (c[0] === "ffmpeg" && c.includes("[still]")) ||
+    (c[0] === "ffprobe" && c.some((a) => a.includes("stream_disposition")));
+  /** Reads that never look at the picture, and that a still answers correctly anyway. */
+  const blindProbe = (c: string[]): boolean =>
+    c[0] === "ffprobe" && c.some((a) => a === "format=duration" || a === "stream=index");
+  const touchesHeic = (c: string[]): boolean => c.slice(1).some((a) => a.includes(HEIC_NAME));
+
+  for (const [param, spec] of Object.entries(PARAMS)) {
+    if (spec.kind !== "library-ref" || !spec.call) continue;
+    const call = spec.call;
+    it(`${param}: never decodes or measures the raw HEIC itself`, async () => {
+      const [name, args] = call("media_heic");
+      await run(name, args);
+      const raw = calls.filter((c) => touchesHeic(c) && !ownerRead(c) && !blindProbe(c));
+      expect(raw.map((c) => c.join(" ").slice(0, 200))).toEqual([]);
+    });
+  }
+
+  // The floor that keeps the rule above from passing by never looking: these read the picture, so
+  // each must have DECODED it through the owner. (Any parameter not listed is still held to the rule.)
+  const PIXEL_READERS = [
+    "clip_video media_ref",
+    "crop_image media_ref",
+    "generate_image reference_images[]",
+    "generate_video end_frame",
+    "generate_video reference_images[]",
+    "generate_video start_frame",
+    "inspect_color media_ref",
+    "inspect_color reference",
+    "inspect_media media_ref",
+    "run_ffmpeg inputs[]",
+    "video_ask media_ref",
+    "video_find_moment media_ref",
+  ];
+  for (const param of PIXEL_READERS) {
+    it(`${param}: reads the picture the owner decoded`, async () => {
+      const [name, args] = PARAMS[param].call!("media_heic");
+      await run(name, args);
+      const decoded = calls.some(
+        (c) => c[0] === "ffmpeg" && c.includes("[still]") && touchesHeic(c),
+      );
+      expect(decoded, calls.map((c) => c.join(" ").slice(0, 140)).join("\n")).toBe(true);
+    });
   }
 });

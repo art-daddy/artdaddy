@@ -7,6 +7,7 @@ import { stderrExcerpt } from "./command";
 import type { ClientToolContext } from "./context";
 import { probePath, shortHash } from "./media";
 import { encodeImageForGemini } from "./geminiEncode";
+import { stillPicture } from "../media/stillPicture";
 import { unresolvedRefError } from "./refState";
 import type { ClientToolRegistry } from "./registry";
 
@@ -302,12 +303,16 @@ async function findContent(
   const prompt = String(args.prompt ?? "");
   const mediaRef = args.media_ref != null ? String(args.media_ref) : "";
   if (!mediaRef) return { ok: false, error: "media_ref is required", prompt };
-  const abs = await ctx.store.resolveMediaRef(mediaRef);
-  if (!abs)
+  const resolved = await ctx.store.resolveMediaRef(mediaRef);
+  if (!resolved)
     return {
       ...(await unresolvedRefError(ctx.store, mediaRef, `image not found: ${mediaRef}`)),
       prompt,
     };
+  // A HEIF-family still is measured and sliced as its decoded picture (media/stillPicture.ts).
+  const picture = await stillPicture(ctx.store, ctx.runner, resolved, ctx.signal);
+  if ("error" in picture) return { ok: false, error: picture.error, prompt, media_ref: mediaRef };
+  const abs = picture.path;
 
   const { w: fullW, h: fullH } = await imageDims(ctx, abs);
   if (!fullW || !fullH)

@@ -22,6 +22,7 @@ import { loadTimeline } from "../timeline/engine";
 import { clipSourceSpanSeconds, clipSpanToFrames, findClip } from "../timeline/helpers";
 import { canvasFps, toSecondsView } from "../timeline/frames";
 import { IMAGE_EXTS } from "../media/formats";
+import { stillPicture } from "../media/stillPicture";
 import type { Clip, Timeline } from "../timeline/model";
 import {
   buildRenderCommand,
@@ -373,17 +374,22 @@ export async function inspectMediaTool(
   // Agent-supplied media_ref goes through the NARROW resolver (rejects a raw absolute path / `..`
   // escape) so a read tool can't be turned into an arbitrary-file reader + exfil-to-model; a
   // clip-derived source is trusted (an EXTERNAL clip legitimately carries an absolute ref).
-  const path = fromClip
+  const resolved = fromClip
     ? await ctx.store.resolveRef(mediaRef)
     : await ctx.store.resolveMediaRef(mediaRef);
-  if (!path) {
+  if (!resolved) {
     return unresolvedRefError(
       ctx.store,
       mediaRef,
       `media not found: ${mediaRef}. Pass a library id/filename or a clip_id.`,
     );
   }
-  const srcRef = ctx.store.toRef(path); // echo a portable ref, never a system path
+  const srcRef = ctx.store.toRef(resolved); // echo a portable ref, never a system path
+  // A HEIF-family still is looked at as its decoded picture (media/stillPicture.ts): read directly,
+  // a tiled iPhone photo reports the size of one tile and shows only that tile.
+  const picture = await stillPicture(ctx.store, ctx.runner, resolved, ctx.signal);
+  if ("error" in picture) return { ok: false, error: picture.error };
+  const path = picture.path;
   const probe = await probePath(ctx.runner, path);
   if (!probe.ok) return probe;
   const kind = mediaKind(path, probe);
@@ -412,7 +418,7 @@ export async function inspectMediaTool(
       _attachments: [
         imageAttachment(
           gridded ?? (await encodeImageForGemini(ctx, path)),
-          `inspect_media image ${baseName(path)}`,
+          `inspect_media image ${baseName(resolved)}`,
         ),
       ],
     };
@@ -1005,7 +1011,11 @@ async function rawFrame(
   const p = await ctx.store.resolveMediaRef(ref);
   if (!p) return null;
   const dot = p.lastIndexOf(".");
-  if (IMAGE_EXT.has(dot >= 0 ? p.slice(dot).toLowerCase() : "")) return p;
+  if (IMAGE_EXT.has(dot >= 0 ? p.slice(dot).toLowerCase() : "")) {
+    // The still itself, as its whole decoded picture when it is a HEIF-family file.
+    const picture = await stillPicture(ctx.store, ctx.runner, p, ctx.signal);
+    return "path" in picture ? picture.path : null;
+  }
   const out = await ctx.store.prepareArtifact(
     `inspect/color_raw_${tag}_${shortHash(p)}_${call}.png`,
   );

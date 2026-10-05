@@ -114,13 +114,35 @@ describe("supported media formats", () => {
     // ClipThumbnail carried one of these and the quoted-only pattern walked straight past it.
     const bareAlternation = `(?:\\b(?:${ext})\\b\\|){2,}\\b(?:${ext})\\b`;
     const listOfThree = new RegExp(`(?:${quotedList})|(?:${bareAlternation})`, "i");
+    // ...and the same list written ONE ENTRY PER LINE, which every pattern above reads a line at a
+    // time and so never sees. timeline/helpers.ts kept exactly that (`new Set([\n ".png",\n ...`),
+    // without .heic or .heif, and add_clips recorded every iPhone photo as a VIDEO clip.
+    const extLine = new RegExp(`^\\s*["']\\.?(?:${ext})["'],?\\s*$`, "i");
     const offenders: string[] = [];
     for (const file of walk(SRC)) {
       const rel = file.slice(SRC.length + 1).replace(/\\/g, "/");
       if (rel === OWNER) continue;
-      for (const line of readFileSync(file, "utf8").split("\n")) {
+      const lines = readFileSync(file, "utf8").split("\n");
+      for (const line of lines) {
         if (NOT_EXTENSIONS.get(rel)?.test(line)) continue;
         if (listOfThree.test(line)) offenders.push(`${rel}: ${line.trim().slice(0, 90)}`);
+      }
+      for (let i = 0; i < lines.length;) {
+        let j = i;
+        while (j < lines.length && extLine.test(lines[j])) j++;
+        if (j - i >= 3) {
+          // Judged by the declaration the run belongs to: the nearest line above it.
+          const head =
+            lines
+              .slice(0, i)
+              .reverse()
+              .find((l) => l.trim()) ?? "";
+          if (!NOT_EXTENSIONS.get(rel)?.test(head))
+            offenders.push(
+              `${rel}:${i + 1}: a ${j - i}-line list under '${head.trim().slice(0, 60)}'`,
+            );
+        }
+        i = Math.max(j, i + 1);
       }
     }
     expect(

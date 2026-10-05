@@ -60,8 +60,27 @@ export const SUBTITLE_EXTS = ["srt", "vtt"] as const;
 /** Video the preview can demux itself: mp4box reads ISOBMFF only. Anything else needs the
  *  H.264 proxy — which is also why proxying must not be limited to media inside the project. */
 const PREVIEW_NATIVE_VIDEO = new Set(["mp4", "m4v", "mov"]);
-/** Images `createImageBitmap` decodes. TIFF/HEIC are importable but need a poster to show. */
-const PREVIEW_NATIVE_IMAGE = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "avif"]);
+/** The HEIF family: stills ffmpeg opens with its MP4 reader, one stream per image ITEM. Their
+ *  picture is decoded once, whole and upright, by media/stillPicture.ts, and every consumer reads
+ *  that instead of the file. */
+export const HEIF_EXTS = [
+  "heic",
+  "heif",
+  "avif",
+] as const satisfies readonly (typeof IMAGE_EXTS)[number][];
+/** Stills the export plays with `-stream_loop -1` rather than the image reader's `-loop 1`, which
+ *  their own readers refuse ("Option loop not found"): GIF has a reader of its own, and the HEIF
+ *  family is MP4. A HEIF still normally reaches the export as its decoded PNG; this is for the one
+ *  that could not be decoded, which the render then refuses by name. */
+export const REPLAYED_STILL_EXTS = [
+  "gif",
+  ...HEIF_EXTS,
+] as const satisfies readonly (typeof IMAGE_EXTS)[number][];
+/** Images `createImageBitmap` decodes. TIFF and the HEIF family are importable but drawn from a
+ *  decoded PNG stand-in: TIFF because the WebView has no decoder, and HEIF because a tiled iPhone
+ *  photo, a thumbnail stored first or an alpha plane all need the decode the export uses, or the
+ *  preview and the export would show different pictures. */
+const PREVIEW_NATIVE_IMAGE = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp"]);
 
 const KIND_BY_EXT = new Map<string, MediaKind>([
   ...VIDEO_EXTS.map((e) => [e, "video"] as const),
