@@ -1,6 +1,6 @@
 {
   "$schema_note": "Generated from the live tool registry (v4/tools/catalog.py) - do not hand-edit; refresh with `npm run codegen`.",
-  "version": "2.7.2",
+  "version": "2.7.3",
   "generated_from": "src/akaru/turn/tools/definitions.py::ALL_TOOLS",
   "count": 55,
   "tools": [
@@ -1736,7 +1736,7 @@
     {
       "name": "import_media",
       "expensive": false,
-      "description": "Import external media into the project library and return a stable `media_ref` (e.g. `media_ab12cd34ef56`) — the portable handle every other tool takes (add_clips `media_ref`, inspect_media, get_transcript), so you never pass a raw filesystem path. Media is copied in and de-duplicated: importing byte-identical media twice returns the same id.\n\n`source` sets ONE of: `url` (an HTTPS link to a media FILE, downloaded — for streaming sites like YouTube/TikTok use `download_video` instead), `bytes` (base64 media data, small files), or `path` (a LOCAL file or directory, LINKED in place — not copied — returning a `media_ref`; a directory links every media file inside it). If you set more than one, the most concrete wins (path > url > bytes) and the result `note` says which was ignored. `mimeType` is only needed to type `bytes` or a `url` with no file extension.\n\nSupported: video (mp4/mov/webm/mkv/m4v), audio (mp3/wav/m4a/aac/flac/ogg), image (png/jpg/jpeg/gif/webp/bmp/avif). Returns {ok, media_ref, path, filename, kind}.",
+      "description": "Import external media into the project library and return a stable `media_ref` (e.g. `media_ab12cd34ef56`) — the portable handle every other tool takes (add_clips `media_ref`, inspect_media, get_transcript), so you never pass a raw filesystem path. Media is copied in and de-duplicated: importing byte-identical media twice returns the same id.\n\n`source` sets ONE of: `url` (an HTTPS link to a media FILE, downloaded — for streaming sites like YouTube/TikTok use `download_video` instead), `bytes` (base64 media data, small files), or `path` (a LOCAL file or directory, LINKED in place — not copied — returning a `media_ref`; a directory links every media file inside it). If you set more than one, the most concrete wins (path > url > bytes) and the result `note` says which was ignored. `mimeType` is only needed to type `bytes` or a `url` with no file extension.\n\nSupported: video (mp4/m4v/mov/webm/mkv/avi), audio (mp3/wav/m4a/aac/flac/ogg/oga/opus/aiff/aif/aifc/caf), image (png/jpg/jpeg/gif/webp/bmp/avif/tif/tiff/heic/heif) — iPhone HEIC photos included — and subtitles (srt/vtt), which add_captions reads. Returns {ok, media_ref, path, filename, kind}.",
       "parameters": {
         "type": "object",
         "properties": {

@@ -5,6 +5,8 @@
 import { describe, expect, it } from "vitest";
 
 import { createToolRegistry } from "../tools";
+import { AUDIO_EXTS, IMAGE_EXTS, SUBTITLE_EXTS, VIDEO_EXTS } from "../media/formats";
+import { toolByName } from ".";
 import { requiredParams, snapshotToolNames, toolParams } from "./params";
 import { toolNames } from "./views";
 import { WITHDRAWN_TOOLS } from "./withdrawn";
@@ -56,6 +58,26 @@ describe("contract conformance", () => {
       .filter((n) => !contract.includes(n) && !UNADVERTISED.includes(n))
       .sort();
     expect(unacknowledged, "withdrawn server-side; add to WITHDRAWN_TOOLS or restore").toEqual([]);
+  });
+
+  // The model learns what it may import from this sentence, so it must name every format the app
+  // takes. It said "image (png/jpg/jpeg/gif/webp/bmp/avif)" while the app took HEIC, HEIF and TIFF
+  // too: an agent told that an iPhone photo is unsupported says so to the user, about a photo the
+  // app handles. Checked against the one list (media/formats.ts), in both directions.
+  it("import_media names exactly the formats the app accepts", () => {
+    const text = toolByName("import_media")?.description ?? "";
+    for (const [kind, exts] of [
+      ["video", VIDEO_EXTS],
+      ["audio", AUDIO_EXTS],
+      ["image", IMAGE_EXTS],
+      ["subtitles", SUBTITLE_EXTS],
+    ] as const) {
+      const m = new RegExp(`${kind} \\(([a-z0-9/]+)\\)`).exec(text);
+      expect(m, `import_media's description has no "${kind} (...)" list`).not.toBeNull();
+      expect(m![1].split("/").sort(), `${kind} formats named to the model`).toEqual(
+        [...exts].sort(),
+      );
+    }
   });
 });
 
