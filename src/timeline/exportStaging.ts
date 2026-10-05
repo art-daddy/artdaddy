@@ -96,11 +96,24 @@ function update<T>(
   return run;
 }
 
+/** The run a partial belongs to. In the app that is the app process's run, which outlives a
+ *  reload of the page while its export keeps writing (3h part 7); elsewhere, the page. */
+async function currentSession(): Promise<string> {
+  try {
+    const { jobSupervisor } = await import("../tools/jobSupervisor");
+    const sup = await jobSupervisor();
+    if (sup) return await sup.launchId();
+  } catch {
+    /* no app process to ask */
+  }
+  return APP_SESSION;
+}
+
 /** Note a partial before ffmpeg starts writing it. */
 export function recordStaging(path: string): Promise<void> {
   return update(async (_b, entries) => {
     const next = entries.filter((e) => e.path !== path);
-    next.push({ path, session: APP_SESSION });
+    next.push({ path, session: await currentSession() });
     return [next, undefined];
   }, undefined);
 }
@@ -117,10 +130,11 @@ export function releaseStaging(path: string): Promise<void> {
  *  be removed yet (still open somewhere) stays listed for the next launch. */
 export function sweepStaging(): Promise<string[]> {
   return update(async (b, entries) => {
+    const session = await currentSession();
     const kept: Entry[] = [];
     const removed: string[] = [];
     for (const e of entries) {
-      if (e.session === APP_SESSION) {
+      if (e.session === session) {
         kept.push(e);
         continue;
       }

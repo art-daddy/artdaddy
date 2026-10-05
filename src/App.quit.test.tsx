@@ -61,6 +61,24 @@ vi.mock("./update/updater", () => ({
   installUpdate: () => update.install(),
 }));
 
+// The export queue as the quit guard sees it: what is still running, and stopping it.
+const exportsQ = vi.hoisted(() => ({
+  running: [] as { job_id: string; filename: string; state: "running" | "queued" }[],
+  cancel: vi.fn(),
+  stuck: false, // an export that ignores being stopped and never settles
+}));
+vi.mock("./timeline/exportQueue", () => ({
+  listExports: () => [...exportsQ.running],
+  cancelExport: (id: string) => {
+    exportsQ.cancel(id);
+    if (!exportsQ.stuck) exportsQ.running = exportsQ.running.filter((e) => e.job_id !== id);
+    return true;
+  },
+  whenExportsSettle: () => (exportsQ.stuck ? new Promise<void>(() => {}) : Promise.resolve()),
+}));
+const ask = vi.hoisted(() => vi.fn());
+vi.mock("./lib/confirm", () => ({ confirmDestructive: (m: string) => ask(m) }));
+
 import App from "./App";
 
 /** Raise a close request and report whether the app held the window open. */
@@ -104,6 +122,10 @@ beforeEach(() => {
     exitError: null,
   });
   useEditor.setState({ projectId: "p1", dirty: false });
+  exportsQ.running = [];
+  exportsQ.stuck = false;
+  exportsQ.cancel.mockReset().mockImplementation(() => order.push("export stopped"));
+  ask.mockReset();
 });
 afterEach(() => useCloseCoordinator.setState({ pending: null, exitHandler: null }));
 
@@ -159,6 +181,98 @@ describe("quitting the app", () => {
     closeProject.mockClear();
     expect(await requestClose()).toBe(false); // re-entry: allowed straight through
     expect(closeProject).not.toHaveBeenCalled();
+  });
+});
+
+// Owner decision 2026-10-05: an export dies with the app, so quitting while one runs asks first.
+describe("quitting while an export runs", () => {
+  const running = () => {
+    exportsQ.running = [{ job_id: "e1", filename: "cut.mp4", state: "running" }];
+  };
+
+  it("asks first, and No keeps the app, the project and the export", async () => {
+    running();
+    ask.mockResolvedValue(false);
+    await mount();
+    expect(await requestClose()).toBe(true);
+    for (let i = 0; i < 4; i++) await flush();
+    expect(ask).toHaveBeenCalledWith("An export is still running. Quit and stop it?");
+    expect(exportsQ.cancel).not.toHaveBeenCalled();
+    expect(closeProject).not.toHaveBeenCalled();
+    expect(windowClosed).toBe(false);
+  });
+
+  it("Quit stops the export first, then saves the project and closes", async () => {
+    running();
+    ask.mockResolvedValue(true);
+    await mount();
+    await requestClose();
+    for (let i = 0; i < 6; i++) await flush();
+    expect(order).toEqual(["export stopped", "project closed"]);
+    expect(windowClosed).toBe(true);
+  });
+
+  it("asks even with no project open: the export does not belong to one", async () => {
+    running();
+    ask.mockResolvedValue(false);
+    useEditor.setState({ projectId: null });
+    await mount();
+    expect(await requestClose()).toBe(true);
+    await flush();
+    expect(ask).toHaveBeenCalled();
+    expect(windowClosed).toBe(false);
+  });
+
+  it("asks nothing when no export runs", async () => {
+    await mount();
+    await requestClose();
+    for (let i = 0; i < 4; i++) await flush();
+    expect(ask).not.toHaveBeenCalled();
+    expect(closeProject).toHaveBeenCalled();
+  });
+
+  it("an export that will not stop cannot trap the user: one Quit is enough", async () => {
+    running();
+    exportsQ.stuck = true;
+    ask.mockResolvedValue(true);
+    await mount();
+    vi.useFakeTimers();
+    try {
+      const closing = requestClose();
+      await vi.advanceTimersByTimeAsync(10_000); // the wait for the export gives up
+      await vi.advanceTimersByTimeAsync(10_000); // (room for a second wait, were there one)
+      await closing;
+    } finally {
+      vi.useRealTimers();
+    }
+    for (let i = 0; i < 6; i++) await flush();
+    expect(ask).toHaveBeenCalledTimes(1);
+    expect(closeProject).toHaveBeenCalled(); // the project is still saved on the way out
+    expect(windowClosed).toBe(true);
+  });
+
+  it("a later quit asks again: one Quit answers that quit only", async () => {
+    running();
+    exportsQ.stuck = true;
+    ask.mockResolvedValue(true);
+    closeProject.mockResolvedValue({ ok: false }); // the save fails, so the app stays open
+    await mount();
+    vi.useFakeTimers();
+    try {
+      const closing = requestClose();
+      await vi.advanceTimersByTimeAsync(10_000);
+      await closing;
+    } finally {
+      vi.useRealTimers();
+    }
+    for (let i = 0; i < 6; i++) await flush();
+    expect(windowClosed).toBe(false);
+    expect(ask).toHaveBeenCalledTimes(1);
+    useCloseCoordinator.setState({ pending: null });
+    ask.mockResolvedValue(false);
+    expect(await requestClose()).toBe(true);
+    await flush();
+    expect(ask).toHaveBeenCalledTimes(2); // the export still runs, so this quit asks too
   });
 });
 

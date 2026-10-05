@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MemFs } from "../test/timelineKit";
+import { FakeJobs } from "../test/fakeJobs";
+import { __resetJobSupervisor, __setJobSupervisor } from "./jobSupervisor";
 import { joinPath } from "./store";
 import {
   claimProjectLock,
@@ -31,6 +33,33 @@ describe("project lock", () => {
   let fs: LockFs;
   beforeEach(() => {
     fs = new LockFs();
+  });
+
+  // 3h part 7: the app now reloads a crashed page by itself, and the page it comes back as must
+  // not warn the user that their own project is "open somewhere else".
+  describe("in the app, the lock belongs to the app's run, not to one page", () => {
+    const g = globalThis as { __artdaddyLockInstance?: unknown };
+    afterEach(() => {
+      __resetJobSupervisor();
+      delete g.__artdaddyLockInstance;
+    });
+
+    it("a page that comes back after a crash finds its own lock, not someone else's", async () => {
+      delete g.__artdaddyLockInstance;
+      __setJobSupervisor(new FakeJobs("launch-1"));
+      await claimProjectLock(fs, DIR); // the page that crashed
+      delete g.__artdaddyLockInstance; // a new page: nothing of the old one survives in memory
+      expect(await foreignProjectLock(fs, DIR)).toBeNull();
+    });
+
+    it("another run of the app is still someone else", async () => {
+      delete g.__artdaddyLockInstance;
+      __setJobSupervisor(new FakeJobs("launch-1"));
+      await claimProjectLock(fs, DIR);
+      delete g.__artdaddyLockInstance;
+      __setJobSupervisor(new FakeJobs("launch-2"));
+      expect(await foreignProjectLock(fs, DIR)).toMatchObject({ instance: "launch-1" });
+    });
   });
 
   it("does not report OUR OWN lock as someone else's", async () => {

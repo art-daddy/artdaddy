@@ -18,9 +18,13 @@
 //                  cannot interleave writes to one path.
 import { openProjectJobs } from "../tools/genJobs";
 import type { ProjectStoreAccess } from "../tools/store";
+import type { ClientToolContext } from "../tools/context";
+import { jobResult, jobSupervisor, type JobSupervisor, type JobView } from "../tools/jobSupervisor";
 import type { MutationOrigin } from "../project/MutationGate";
 import { notifyJobSettled } from "../store/jobNotes";
+import { useExportJob } from "../store/exportJob";
 import { beginSessionActivity } from "../observability/crashWatch";
+import { createProgressReader, etaSeconds, progressFraction } from "./ffmpegProgress";
 import { recordStaging, releaseStaging } from "./exportStaging";
 
 /** Destinations with an export queued or running, so a second one is refused rather than raced. */
@@ -226,8 +230,12 @@ export interface ExportSpec {
     quality: string;
     project_id: string;
   };
-  /** Runs the encode. Rejects with a message on failure. */
-  run: (signal: AbortSignal) => Promise<{ warnings?: string[] }>;
+  /** The app process's job supervisor, when the encode runs as one of its jobs (3h part 7). It
+   *  keeps the order then, so this queue does not hold a job back, and a job's state comes from it. */
+  supervisor?: JobSupervisor;
+  /** Runs the encode. Rejects with a message on failure. `jobId` names the job everywhere: the
+   *  ledger, this queue and the supervisor. */
+  run: (signal: AbortSignal, jobId: string) => Promise<{ warnings?: string[] }>;
 }
 
 /** A background encode failed after producing process diagnostics. Keeping this typed prevents
@@ -257,7 +265,7 @@ function normalizeDest(p: string): string {
  *  which the gate's origin fence would refuse. The close fence still applies. */
 async function registerExportInLibrary(
   store: ProjectStoreAccess,
-  spec: ExportSpec,
+  spec: Pick<ExportSpec, "destPath" | "filename">,
 ): Promise<string | null> {
   try {
     const { registerLibraryClip, stageByPath } = await import("../tools/import");
@@ -294,7 +302,7 @@ export async function whenExportTelemetrySettles(): Promise<void> {
 /** Report one settled export to the server's analytics. Fire-and-forget by contract: the file is
  *  already delivered, so nothing here may fail, delay or alter the export. */
 async function reportSettledExport(
-  spec: ExportSpec,
+  spec: Pick<ExportSpec, "store" | "destPath" | "meta">,
   outcome: {
     status: "done" | "failed" | "cancelled";
     elapsedMs: number;
@@ -340,10 +348,14 @@ export function __resetExportQueue(): void {
 export async function submitExport(spec: ExportSpec): Promise<ExportSubmission> {
   const key = normalizeDest(spec.destPath);
   const ledger = await openProjectJobs(spec.store);
+  // A supervised export lives as long as the app does, not the page: its record says so, or the
+  // next page's ledger would call it interrupted while it is still running (jobLedger.ts).
+  const session = spec.supervisor ? await spec.supervisor.launchId().catch(() => undefined) : undefined;
   const jobId = await ledger.begin({
     kind: "export",
     tool: "export",
     label: `the export ${spec.filename}`,
+    ...(session ? { session } : {}),
   });
   reserved.add(key);
   controllers.set(jobId, new AbortController());
@@ -367,82 +379,142 @@ export async function submitExport(spec: ExportSpec): Promise<ExportSubmission> 
   }
   changed();
 
-  const task = (queueTail = queueTail.then(() => encode(spec, ledger, jobId, key)));
-  inflight.add(task);
-  void task.finally(() => inflight.delete(task));
+  // The supervisor runs one export at a time itself, and keeps doing so with no page attached; in
+  // the page alone, this queue does.
+  const task = spec.supervisor
+    ? encode(spec, ledger, jobId, key)
+    : (queueTail = queueTail.then(() => encode(spec, ledger, jobId, key)));
+  track(task);
   return { job_id: jobId, queue_position: queuePosition };
 }
 
-async function encode(
-  spec: ExportSpec,
-  ledger: Awaited<ReturnType<typeof openProjectJobs>>,
-  jobId: string,
-  key: string,
-): Promise<void> {
-  const { store } = spec;
+function track(task: Promise<unknown>): void {
+  inflight.add(task);
+  void task.finally(() => inflight.delete(task));
+}
+
+type Ledger = Awaited<ReturnType<typeof openProjectJobs>>;
+
+/** How a run ended, before its file is committed. */
+interface RunOutcome {
+  error: string | null;
+  cancelled: boolean;
+  stderrTail?: string;
+  warnings: string[];
+}
+
+async function encode(spec: ExportSpec, ledger: Ledger, jobId: string, key: string): Promise<void> {
   const startedAt = Date.now();
-  // Committing by rename keeps the destination either untouched or complete. When the fs cannot
-  // rename, the caller already pointed the encode at the destination and there is nothing to move.
   const staged = spec.stagePath !== spec.destPath;
   const signal = controllers.get(jobId)?.signal ?? new AbortController().signal;
 
-  let error: string | null = null;
-  let cancelled = false;
-  let stderrTail: string | undefined;
-  let warnings: string[] = [];
+  const run: RunOutcome = { error: null, cancelled: false, warnings: [] };
   let finishActivity: (() => void) | null = null;
+  let unfollow: (() => void) | undefined;
   try {
     // Cancelled while still queued: never start an encode nobody is waiting for.
     if (signal.aborted) throw new Error("export cancelled");
-    patch(jobId, { state: "running" });
+    if (spec.supervisor)
+      unfollow = spec.supervisor.subscribe((v) => {
+        if (v.id === jobId && v.state === "running") patch(jobId, { state: "running" });
+      });
+    else patch(jobId, { state: "running" });
     // An encode is the heaviest thing the app does and the likeliest moment to be killed for
     // memory; if the process dies here the crash marker will say so.
     finishActivity = beginSessionActivity("export");
     // Listed until it is renamed into place or removed, so a partial a crash or a quit leaves
     // behind is removed at the next launch (exportStaging.ts).
     if (staged) await recordStaging(spec.stagePath);
-    warnings = (await spec.run(signal)).warnings ?? [];
+    run.warnings = (await spec.run(signal, jobId)).warnings ?? [];
     if (signal.aborted) throw new Error("export cancelled");
-    if (staged) {
-      await store.rename(spec.stagePath, spec.destPath);
-      await releaseStaging(spec.stagePath);
-    }
   } catch (e) {
     // A killed ffmpeg reports its own confusing error; the reason the user needs is the cancel.
-    cancelled = signal.aborted;
-    error = cancelled ? "export cancelled" : e instanceof Error ? e.message : String(e);
-    if (!cancelled && e instanceof ExportRunError) stderrTail = e.stderrTail;
-    // Never leave a partial file where a finished export belongs. One that cannot be removed now
-    // stays listed, for the next launch to remove.
-    if (staged) {
-      await store.remove(spec.stagePath).then(
-        () => releaseStaging(spec.stagePath),
-        () => undefined,
-      );
-    }
+    run.cancelled = signal.aborted;
+    run.error = run.cancelled ? "export cancelled" : e instanceof Error ? e.message : String(e);
+    if (!run.cancelled && e instanceof ExportRunError) run.stderrTail = e.stderrTail;
   } finally {
+    unfollow?.();
     finishActivity?.();
-    reserved.delete(key);
-    controllers.delete(jobId);
-    patch(jobId, {
-      state: error ? (cancelled ? "cancelled" : "failed") : "done",
-      endedAt: Date.now(),
-      ...(error && !cancelled ? { error } : {}),
-      ...(stderrTail ? { stderrTail } : {}),
-      ...(warnings.length ? { warnings } : {}),
-    });
   }
+  await settle({
+    jobId,
+    key,
+    store: spec.store,
+    destPath: spec.destPath,
+    stagePath: spec.stagePath,
+    filename: spec.filename,
+    meta: spec.meta,
+    startedBy: spec.origin ? "chat" : "elsewhere",
+    startedAt,
+    ledger,
+    supervisor: spec.supervisor,
+    run,
+  });
+}
+
+interface Settle {
+  jobId: string;
+  key: string;
+  store: ProjectStoreAccess;
+  destPath: string;
+  stagePath: string;
+  filename: string;
+  meta?: ExportSpec["meta"];
+  startedBy: "chat" | "elsewhere";
+  startedAt: number;
+  ledger: Ledger;
+  supervisor?: JobSupervisor;
+  run: RunOutcome;
+}
+
+/** Commit the file, then the project's records. The one path for an export this page ran and for
+ *  one it adopted after a crash of the page, so both end exactly the same way. */
+async function settle(x: Settle): Promise<void> {
+  // Committing by rename keeps the destination either untouched or complete. When the fs cannot
+  // rename, the caller already pointed the encode at the destination and there is nothing to move.
+  const staged = x.stagePath !== x.destPath;
+  let { error } = x.run;
+  const { cancelled, stderrTail, warnings } = x.run;
+  if (!error && staged) {
+    try {
+      // A page that renamed it and died before telling the supervisor left it already in place.
+      const alreadyMoved = !(await x.store.exists(x.stagePath)) && (await x.store.exists(x.destPath));
+      if (!alreadyMoved) await x.store.rename(x.stagePath, x.destPath);
+      await releaseStaging(x.stagePath);
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    }
+  }
+  // Never leave a partial file where a finished export belongs. One that cannot be removed now
+  // stays listed, for the next launch to remove.
+  if (error && staged) {
+    await x.store.remove(x.stagePath).then(
+      () => releaseStaging(x.stagePath),
+      () => undefined,
+    );
+  }
+  // From here a page that takes over must not touch the file again.
+  await x.supervisor?.commit(x.jobId).catch(() => false);
+  reserved.delete(x.key);
+  controllers.delete(x.jobId);
+  patch(x.jobId, {
+    state: error ? (cancelled ? "cancelled" : "failed") : "done",
+    endedAt: Date.now(),
+    ...(error && !cancelled ? { error } : {}),
+    ...(stderrTail ? { stderrTail } : {}),
+    ...(warnings.length ? { warnings } : {}),
+  });
 
   // The delivered file enters the library like any other asset, so the ONE thing an agent could
   // not do was look at what it had actually shipped: `inspect_timeline` inspects the timeline, and
   // the export was reachable only by a filesystem path, which is not an address this product has.
   // Linked, never copied — the destination is often outside the project and can be hundreds of MB.
   // A cancelled run sets `error`, so nothing half-written is ever catalogued.
-  const mediaRef = error ? null : await registerExportInLibrary(store, spec);
-  if (mediaRef) patch(jobId, { mediaRef });
+  const mediaRef = error ? null : await registerExportInLibrary(x.store, x);
+  if (mediaRef) patch(x.jobId, { mediaRef });
 
-  await ledger.settle(
-    jobId,
+  await x.ledger.settle(
+    x.jobId,
     error
       ? {
           status: cancelled ? "cancelled" : "failed",
@@ -457,24 +529,204 @@ async function encode(
   //
   // Deliberately NOT in `inflight`: that set is what a drain on quit waits for, and making
   // someone's app hang on a telemetry socket to save a metric row is the wrong trade.
-  const beacon = reportSettledExport(spec, {
+  const beacon = reportSettledExport(x, {
     status: error ? (cancelled ? "cancelled" : "failed") : "done",
-    elapsedMs: Date.now() - startedAt,
+    elapsedMs: Date.now() - x.startedAt,
     warnings: warnings.length,
     error: error && !cancelled ? error : "",
   });
   beacons.add(beacon);
   void beacon.finally(() => beacons.delete(beacon));
+  await x.supervisor?.forget(x.jobId).catch(() => false);
   if (cancelled) return;
   const note = warnings.length
-    ? `saved as ${spec.filename} (${warnings.length} warning${warnings.length > 1 ? "s" : ""}: ${warnings.join("; ")})`
-    : `saved as ${spec.filename}`;
-  notifyJobSettled(store.projectDir, {
-    id: jobId,
+    ? `saved as ${x.filename} (${warnings.length} warning${warnings.length > 1 ? "s" : ""}: ${warnings.join("; ")})`
+    : `saved as ${x.filename}`;
+  notifyJobSettled(x.store.projectDir, {
+    id: x.jobId,
     tool: "export",
-    label: `the export ${spec.filename}`,
+    label: `the export ${x.filename}`,
     status: error ? "failed" : "done",
-    startedBy: spec.origin ? "chat" : "elsewhere",
+    startedBy: x.startedBy,
     ...(error ? { error } : { detail: note }),
   });
+}
+
+/** What render.ts gives an export job, for a page that did not start it. */
+interface ExportJobMeta {
+  kind: "export";
+  projectDir: string;
+  destPath: string;
+  stagePath: string;
+  filename: string;
+  startedBy: "chat" | "elsewhere";
+  submittedAt: number;
+  plan: import("./render").ExportJobPlan;
+  telemetry?: ExportSpec["meta"];
+  scratch?: string | null;
+}
+
+function exportMeta(v: JobView): ExportJobMeta | null {
+  const m = v.meta as Partial<ExportJobMeta> | undefined;
+  if (v.lane !== "export" || m?.kind !== "export") return null;
+  if (!m.projectDir || !m.destPath || !m.stagePath || !m.filename || !m.plan) return null;
+  return m as ExportJobMeta;
+}
+
+/** Resolve with the job once it has ended. */
+function whenJobEnds(sup: JobSupervisor, id: string): Promise<JobView | null> {
+  return new Promise((resolve) => {
+    let done = false;
+    const end = (v: JobView | null) => {
+      if (done) return;
+      done = true;
+      stop();
+      resolve(v);
+    };
+    const stop = sup.subscribe((v) => {
+      if (v.id === id && v.state === "exited") end(v);
+    });
+    // It may have ended before this page was listening.
+    void sup.list().then(
+      (all) => {
+        const now = all.find((v) => v.id === id);
+        if (!now) end(null);
+        else if (now.state === "exited") end(now);
+      },
+      () => end(null),
+    );
+  });
+}
+
+/** Follow a running export's progress into the export dialog's job, the way the page that started
+ *  it did. */
+function followProgress(sup: JobSupervisor, v: JobView, durationSec: number): () => void {
+  const totalMs = Math.max(0, durationSec * 1000);
+  const read = createProgressReader((r) =>
+    useExportJob.getState().update({
+      phase: "rendering",
+      fraction: progressFraction(r.outMs, totalMs),
+      etaSec: etaSeconds(r.outMs, totalMs, r.speed),
+      speed: r.speed,
+      frame: r.frame,
+    }),
+  );
+  read(v.stdout_tail);
+  return sup.subscribe(
+    () => {},
+    (id, chunk) => {
+      if (id === v.id) read(chunk);
+    },
+  );
+}
+
+/** After a reload or a crash of the page: take over the exports the app process still holds.
+ *  One that ended while no page was there is checked and committed now; one still queued or
+ *  running is followed, and committed when it ends. Its records, file and project follow-ups end
+ *  exactly as if this page had started it (3h part 7). */
+export async function adoptExports(
+  opts: { contextFor?: (projectDir: string) => ClientToolContext } = {},
+): Promise<number> {
+  const sup = await jobSupervisor();
+  if (!sup) return 0;
+  const contextFor = opts.contextFor ?? (await import("../tools/tauri")).makeTauriContext;
+  let adopted = 0;
+  for (const v of await sup.list()) {
+    const m = exportMeta(v);
+    if (!m || records.some((r) => r.job_id === v.id)) continue;
+    if (v.committed) {
+      // The page that committed it died before it could let go; its records were written then.
+      await sup.forget(v.id).catch(() => false);
+      continue;
+    }
+    adopted++;
+    const key = normalizeDest(m.destPath);
+    reserved.add(key);
+    const controller = new AbortController();
+    controller.signal.addEventListener("abort", () => void sup.kill(v.id).catch(() => false));
+    controllers.set(v.id, controller);
+    records.push({
+      job_id: v.id,
+      filename: m.filename,
+      destPath: m.destPath,
+      state: v.state === "queued" ? "queued" : "running",
+      startedAt: m.submittedAt || v.queued_at,
+    });
+    changed();
+    track(finishAdopted(sup, v, m, key, contextFor));
+  }
+  return adopted;
+}
+
+async function finishAdopted(
+  sup: JobSupervisor,
+  v: JobView,
+  m: ExportJobMeta,
+  key: string,
+  contextFor: (projectDir: string) => ClientToolContext,
+): Promise<void> {
+  let unfollowState: (() => void) | undefined;
+  let unfollowProgress: (() => void) | undefined;
+  let ended: JobView | null = v.state === "exited" ? v : null;
+  if (!ended) {
+    unfollowState = sup.subscribe((c) => {
+      if (c.id === v.id && c.state === "running") patch(v.id, { state: "running" });
+    });
+    if (v.state === "running") {
+      useExportJob.getState().begin(() => cancelExport(v.id));
+      unfollowProgress = followProgress(sup, v, m.plan.duration);
+    }
+    ended = await whenJobEnds(sup, v.id);
+    unfollowState?.();
+    unfollowProgress?.();
+  }
+  const ctx = contextFor(m.projectDir);
+  const ledger = await openProjectJobs(ctx.store);
+  const run: RunOutcome = { error: null, cancelled: false, warnings: m.plan.warnings ?? [] };
+  if (!ended || ended.killed) {
+    run.cancelled = true;
+    run.error = "export cancelled";
+    if (m.scratch) await ctx.store.remove(m.scratch).catch(() => undefined);
+  } else if (
+    ended.code === 0 &&
+    !(await ctx.store.exists(m.stagePath)) &&
+    (await ctx.store.exists(m.destPath))
+  ) {
+    // The page that ran it renamed the file into place and died before saying so: it was checked
+    // then, and checking the empty staging path now would call a delivered export a failure.
+    if (m.scratch) await ctx.store.remove(m.scratch).catch(() => undefined);
+  } else {
+    const { finishRenderJob } = await import("./render");
+    const res = (await finishRenderJob(ctx, m, jobResult(ended))) as {
+      ok?: boolean;
+      error?: string;
+      stderr_tail?: string;
+      warnings?: string[];
+    };
+    if (!res.ok) {
+      run.error = String(res.error ?? "render failed");
+      if (typeof res.stderr_tail === "string") run.stderrTail = res.stderr_tail;
+    }
+  }
+  await settle({
+    jobId: v.id,
+    key,
+    store: ctx.store,
+    destPath: m.destPath,
+    stagePath: m.stagePath,
+    filename: m.filename,
+    meta: m.telemetry,
+    startedBy: m.startedBy,
+    startedAt: m.submittedAt || v.queued_at,
+    ledger,
+    supervisor: sup,
+    run,
+  });
+  const done = records.find((r) => r.job_id === v.id);
+  if (done && useExportJob.getState().abort && done.state !== "running" && done.state !== "queued")
+    useExportJob.getState().finish({
+      phase: done.state === "done" ? "done" : done.state === "cancelled" ? "cancelled" : "failed",
+      savedTo: done.state === "done" ? m.destPath : null,
+      error: done.error ?? null,
+    });
 }

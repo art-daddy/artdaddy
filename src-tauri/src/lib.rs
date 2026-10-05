@@ -1,4 +1,6 @@
 mod fdlimit;
+#[cfg(desktop)]
+mod jobs;
 mod mcp;
 mod reload_guard;
 
@@ -277,7 +279,15 @@ pub fn run() {
     .plugin(tauri_plugin_deep_link::init());
 
   let builder = if reload_guard::enabled() {
-    builder.plugin(reload_guard::plugin())
+    let guard = std::sync::Arc::new(reload_guard::GuardState::default());
+    #[cfg(target_os = "macos")]
+    let builder = {
+      let state = guard.clone();
+      builder.on_web_content_process_terminate(move |webview| {
+        reload_guard::on_web_content_terminated(&state, webview)
+      })
+    };
+    builder.plugin(reload_guard::plugin(guard))
   } else {
     builder
   };
@@ -285,6 +295,8 @@ pub fn run() {
   #[cfg(desktop)]
   let builder = builder
     .plugin(tauri_plugin_updater::Builder::new().build())
+    // After the shell plugin: its jobs run the shell's sidecars.
+    .plugin(jobs::plugin())
     .manage(StagedUpdate::default())
     .invoke_handler(tauri::generate_handler![
       trash_path,
@@ -303,6 +315,12 @@ pub fn run() {
       store_refresh_token,
       load_refresh_token,
       clear_refresh_token,
+      jobs::jobs_submit,
+      jobs::jobs_kill,
+      jobs::jobs_list,
+      jobs::jobs_commit,
+      jobs::jobs_forget,
+      jobs::jobs_launch_id,
       mcp::mcp_start,
       mcp::mcp_stop,
       mcp::mcp_status,

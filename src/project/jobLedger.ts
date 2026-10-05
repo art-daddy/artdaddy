@@ -59,9 +59,11 @@ export function jobsPath(projectDir: string): string {
   return joinPath(projectDir, INTERNAL_DIR, "jobs.json");
 }
 
-/** True for a record that claimed to be running but whose app launch is gone. */
-function isOrphaned(r: JobRecord): boolean {
-  return r.status === "running" && r.session !== APP_SESSION;
+/** True for a record that claimed to be running but whose app launch is gone. `alive` holds the
+ *  sessions that can still own work: this page, and (in the app) the app process's run, which
+ *  outlives a page reload and owns the exports (3h part 7). */
+function isOrphaned(r: JobRecord, alive: ReadonlySet<string>): boolean {
+  return r.status === "running" && !alive.has(r.session);
 }
 
 function isTerminal(r: JobRecord): boolean {
@@ -82,9 +84,17 @@ export class JobLedger {
     const ledger = new JobLedger(store);
     const file = await store.readJson<LedgerFile>(jobsPath(store.projectDir), emptyFile());
     const jobs = Array.isArray(file?.jobs) ? [...file.jobs] : [];
+    const alive = new Set([APP_SESSION]);
+    try {
+      const { jobSupervisor } = await import("../tools/jobSupervisor");
+      const sup = await jobSupervisor();
+      if (sup) alive.add(await sup.launchId());
+    } catch {
+      /* no app process to ask: only this page's own records are alive */
+    }
     let changed = false;
     for (const r of jobs) {
-      if (!isOrphaned(r)) continue;
+      if (!isOrphaned(r, alive)) continue;
       r.status = "interrupted";
       r.ended_at = Date.now();
       r.error ??= "the app closed before this finished; it may still have been charged";
@@ -115,6 +125,8 @@ export class JobLedger {
     tool: string;
     label: string;
     media_refs?: string[];
+    /** The session that owns the work, when it is not this page (an export the app process runs). */
+    session?: string;
   }): Promise<string> {
     const rec: JobRecord = {
       id: newId(),
@@ -124,7 +136,7 @@ export class JobLedger {
       status: "running",
       media_refs: spec.media_refs,
       started_at: Date.now(),
-      session: APP_SESSION,
+      session: spec.session ?? APP_SESSION,
     };
     this.records.push(rec);
     await this.persist();

@@ -21,12 +21,12 @@ export const HEARTBEAT_MS = 20_000;
 const STALE_MS = 6 * HEARTBEAT_MS;
 
 export interface ProjectLock {
-  /** Random per app RUN, so the holder can be told apart from this one on any machine. */
+  /** Who holds it: the app's run (the same across a reload of its page), on any machine. */
   instance: string;
   at: number;
 }
 
-/** Random per app RUN, shared by every copy of this module in the realm.
+/** Who this app is, as a lock holder, shared by every copy of this module in the realm.
  *
  *  It used to be a module-level `let`, which made it per MODULE INSTANCE. A second copy of this
  *  module (a dynamic import reaching a different module graph, HMR) gets its OWN id, so one app
@@ -35,10 +35,23 @@ export interface ProjectLock {
  *  project permanently — reads keep working (they need no document) while every mutation fails,
  *  and the only cure is a restart. Observed with a single process running and the lock stamped
  *  19s earlier. Hanging it off globalThis makes the identity process-wide, which is what it
- *  always meant. */
-function instanceId(): string {
-  const g = globalThis as { __artdaddyLockInstance?: string };
-  if (!g.__artdaddyLockInstance) g.__artdaddyLockInstance = Math.random().toString(36).slice(2, 10);
+ *  always meant.
+ *
+ *  In the app it is the app process's run, not the page's: the app reloads a crashed page by
+ *  itself, and the page it comes back as is the same editor, which must not be told its own
+ *  project is "open somewhere else" (3h part 7). Elsewhere (tests, the web build), this realm. */
+function instanceId(): Promise<string> {
+  const g = globalThis as { __artdaddyLockInstance?: Promise<string> };
+  g.__artdaddyLockInstance ??= (async () => {
+    try {
+      const { jobSupervisor } = await import("./jobSupervisor");
+      const sup = await jobSupervisor();
+      if (sup) return await sup.launchId();
+    } catch {
+      /* no app process to ask */
+    }
+    return Math.random().toString(36).slice(2, 10);
+  })();
   return g.__artdaddyLockInstance;
 }
 
@@ -52,7 +65,7 @@ function lockPath(projectDir: string): string {
 export async function readProjectLock(fs: FsLike, projectDir: string): Promise<ProjectLock | null> {
   try {
     const raw = JSON.parse(await fs.readTextFile(lockPath(projectDir))) as Partial<ProjectLock>;
-    if (typeof raw.instance !== "string" || raw.instance === instanceId()) return null;
+    if (typeof raw.instance !== "string" || raw.instance === (await instanceId())) return null;
     return { instance: raw.instance, at: typeof raw.at === "number" ? raw.at : 0 };
   } catch {
     return null;
@@ -95,7 +108,7 @@ async function stamp(fs: FsLike, projectDir: string): Promise<void> {
     await fs.mkdir(joinPath(projectDir, INTERNAL_DIR));
     await fs.writeTextFile(
       lockPath(projectDir),
-      JSON.stringify({ instance: instanceId(), at: Date.now() }),
+      JSON.stringify({ instance: await instanceId(), at: Date.now() }),
     );
   } catch {
     /* unwritable project folder — the warning is a courtesy, not a gate */
@@ -107,7 +120,7 @@ async function stamp(fs: FsLike, projectDir: string): Promise<void> {
 async function beat(fs: FsLike, projectDir: string): Promise<void> {
   try {
     const raw = JSON.parse(await fs.readTextFile(lockPath(projectDir))) as Partial<ProjectLock>;
-    if (raw.instance !== instanceId()) {
+    if (raw.instance !== (await instanceId())) {
       stopHeartbeat(projectDir);
       return;
     }
@@ -123,7 +136,7 @@ export async function releaseProjectLock(fs: FsLike, projectDir: string): Promis
   stopHeartbeat(projectDir); // before the delete, so no beat can resurrect the file
   try {
     const raw = JSON.parse(await fs.readTextFile(lockPath(projectDir))) as Partial<ProjectLock>;
-    if (raw.instance !== instanceId()) return;
+    if (raw.instance !== (await instanceId())) return;
     await fs.remove?.(lockPath(projectDir));
   } catch {
     /* no lock, unreadable, or no delete support: nothing to release */

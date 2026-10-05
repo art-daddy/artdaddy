@@ -49,3 +49,8 @@ tauri-plugin-updater = "2"
 # getrlimit/setrlimit (fdlimit.rs). Already in the lock through tauri, so nothing new is fetched.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# WebView2's ProcessFailed event (reload_guard.rs): the one signal that the page's renderer died, so
+# the reload that recovers it is let through. Already in the lock through wry; the same version.
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.38"

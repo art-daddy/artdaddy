@@ -36,6 +36,7 @@ import {
 } from "./renderPlan";
 import { buildBandAss, unrenderableFlags, type CaptionSpec } from "./assCaption";
 import { withAssScratch } from "../tools/assScratch";
+import { jobSupervisor, supervisedRunner } from "../tools/jobSupervisor";
 import { ExportRunError, isDestinationReserved, submitExport } from "./exportQueue";
 import { sourceHasAudio } from "./placement";
 import { clipPlays, outputGate, suppressClip } from "./visibility";
@@ -1814,17 +1815,28 @@ export async function runRenderPlan(
       plan.frame ? undefined : progressReporter(plan.duration),
     ),
   );
+  return explainRenderExit(ctx, plan.sources, res, commandLength(args) > ARG_BUDGET);
+}
+
+/** A failed render's result with what the user needs added to ffmpeg's own words. Exported so a
+ *  page that commits an export it did not start (3h part 7) explains a failure the same way. */
+export async function explainRenderExit(
+  ctx: ClientToolContext,
+  sources: readonly { clipId: string; path: string }[],
+  res: CommandResult,
+  overArgBudget: boolean,
+): Promise<CommandResult> {
   if (res.code === 0) return res;
-  if (/ENAMETOOLONG|os error 206|too long/i.test(res.stderr) && commandLength(args) > ARG_BUDGET)
+  if (/ENAMETOOLONG|os error 206|too long/i.test(res.stderr) && overArgBudget)
     return {
       ...res,
       stderr:
         `this timeline has too many clips to render in one pass on this computer ` +
-        `(${plan.sources.length} inputs). Render a shorter section, or combine clips first.\n${res.stderr}`,
+        `(${sources.length} inputs). Render a shorter section, or combine clips first.\n${res.stderr}`,
     };
   // Last, so it survives every excerpt: ffmpeg's own account of a missing input is "code=-2"
   // and a path, which names neither the clip nor what to do about it.
-  const offline = await offlineInputs(ctx, plan.sources);
+  const offline = await offlineInputs(ctx, sources);
   return offline ? { ...res, stderr: `${res.stderr.trimEnd()}\n${offline}` } : res;
 }
 
@@ -2010,6 +2022,40 @@ async function executeRender(
   outPath: string,
 ): Promise<Result> {
   const r = await runRenderPlan(ctx, plan);
+  return validateRendered(ctx, plan, outPath, r);
+}
+
+/** What an export job records about its plan, so a page that did not start it can finish it. */
+export interface ExportJobPlan {
+  duration: number;
+  audioMustSpanVideo: boolean;
+  warnings: string[];
+  sources: { clipId: string; path: string }[];
+}
+
+/** The end of an export whose ffmpeg the app process ran while no page was there (3h part 7): the
+ *  same explanation and checks `executeRender` applies, from what the job recorded. The scratch dir
+ *  its captions were staged in is removed here, since the page that staged it is gone. */
+export async function finishRenderJob(
+  ctx: ClientToolContext,
+  job: { plan: ExportJobPlan; stagePath: string; scratch?: string | null },
+  r: CommandResult,
+): Promise<Result> {
+  try {
+    const explained = await explainRenderExit(ctx, job.plan.sources, r, false);
+    return await validateRendered(ctx, job.plan, job.stagePath, explained);
+  } finally {
+    if (job.scratch) await ctx.store.remove(job.scratch).catch(() => undefined);
+  }
+}
+
+/** Did ffmpeg produce a file the caller may commit? */
+async function validateRendered(
+  ctx: ClientToolContext,
+  plan: Pick<RenderPlan, "audioMustSpanVideo" | "warnings" | "duration">,
+  outPath: string,
+  r: CommandResult,
+): Promise<Result> {
   // Did ffmpeg actually produce the file? `null` means the platform REFUSED TO SAY, which is
   // not the same as "no". Tauri's fs scope ($DATA/ArtDaddy, $DOWNLOAD, $HOME/**) THROWS for a path
   // outside it, and a Save As destination legitimately can be — another drive, a network share.
@@ -2358,6 +2404,24 @@ export async function exportTimelineTool(
   });
   if (!prepared.ok) return prepared.result;
 
+  // In the app, ffmpeg runs under the app process rather than the page, so the export outlives
+  // a crash of the page; the job carries what another page needs to finish it (3h part 7).
+  const jobs = await jobSupervisor();
+  const telemetry = {
+    duration_s: prepared.plan.duration,
+    width: prepared.plan.output.width,
+    height: prepared.plan.output.height,
+    fps: prepared.plan.output.fps,
+    quality: String(args.quality ?? ""),
+    project_id: ctx.store.projectDir.split(/[\\/]/).pop() ?? "",
+  };
+  const plan: ExportJobPlan = {
+    duration: prepared.plan.duration,
+    audioMustSpanVideo: prepared.plan.audioMustSpanVideo,
+    warnings: prepared.plan.warnings,
+    sources: prepared.plan.sources,
+  };
+  const submittedAt = Date.now();
   const sub = await submitExport({
     store: ctx.store,
     destPath: dest.path,
@@ -2367,18 +2431,30 @@ export async function exportTimelineTool(
     origin: ctx.origin,
     // Describes the artifact the plan will produce, captured here because a failed encode
     // leaves no file to measure and the metric still has to say what was attempted.
-    meta: {
-      duration_s: prepared.plan.duration,
-      width: prepared.plan.output.width,
-      height: prepared.plan.output.height,
-      fps: prepared.plan.output.fps,
-      quality: String(args.quality ?? ""),
-      project_id: ctx.store.projectDir.split(/[\\/]/).pop() ?? "",
-    },
-    run: async (signal) => {
+    meta: telemetry,
+    supervisor: jobs ?? undefined,
+    run: async (signal, jobId) => {
       // Not bound to the turn: it is over by the time ffmpeg runs, and Stop, the next message or a
       // project switch must not kill a render nobody cancelled. Only the queue's signal reaches it.
-      const detached: ClientToolContext = { ...(ctx.detach?.() ?? ctx), signal };
+      const base = ctx.detach?.() ?? ctx;
+      const runner = jobs
+        ? supervisedRunner(base.runner, jobs, {
+            id: jobId,
+            lane: "export",
+            meta: {
+              kind: "export",
+              projectDir: ctx.store.projectDir,
+              destPath: dest.path,
+              stagePath: target,
+              filename: dest.filename,
+              startedBy: ctx.origin ? "chat" : "elsewhere",
+              submittedAt,
+              plan,
+              telemetry,
+            },
+          })
+        : base.runner;
+      const detached: ClientToolContext = { ...base, runner, signal };
       const res = (await executeRender(detached, prepared.plan, target)) as {
         ok?: boolean;
         error?: string;

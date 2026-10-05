@@ -26,6 +26,9 @@ installGlobalErrorHandlers();
 // An export the app did not live to finish leaves a hidden partial beside its destination. Remove
 // the ones an earlier launch recorded (UJ-022). A no-op outside the desktop app.
 void import("./timeline/exportStaging").then((m) => m.sweepStaging()).catch(() => undefined);
+// After a crash or reload of the page, the app process may still hold exports this page did not
+// start: follow them, and commit the ones that ended while no page was there (3h part 7).
+void import("./timeline/exportQueue").then((m) => m.adoptExports()).catch(() => undefined);
 
 // DEV-ONLY seam for the UI sweep (scripts/uisweep): it drives real pointer input for the
 // gesture under test, but needs a stable handle to BUILD each scenario's starting timeline.

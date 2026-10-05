@@ -57,6 +57,7 @@ export default function App() {
   useEffect(() => {
     if (platform.name !== "tauri") return;
     let allow = false; // re-entry: once the guard clears, let the OS close go through
+    let exportsAnswered = false; // the user chose Quit over a running export: the close it raises skips asking
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void (async () => {
@@ -100,6 +101,32 @@ export default function App() {
       });
       const un = await win.onCloseRequested(async (event) => {
         if (allow) return; // the guard already resolved — let the OS close the window
+        // An export dies with the app, so a quit while one runs asks first (owner decision
+        // 2026-10-05). Before anything else: an export does not belong to the open project, and
+        // No must leave everything exactly as it was. On Quit the exports are stopped cleanly (their
+        // partial files removed), then the close is raised again and the guard runs as usual.
+        // That close does not ask again: an export that would not stop in time would otherwise
+        // re-ask on every Quit and the app could never be left. It dies with the app, and the
+        // partial file it leaves is cleaned up at the next start. The answer covers that one close.
+        const answered = exportsAnswered;
+        exportsAnswered = false;
+        const exportQueue = await import("./timeline/exportQueue");
+        if (!answered && exportQueue.listExports().length) {
+          event.preventDefault();
+          const { confirmDestructive } = await import("./lib/confirm");
+          if (!(await confirmDestructive("An export is still running. Quit and stop it?"))) {
+            useCloseCoordinator.getState().setExitIntent("quit"); // a later quit is an ordinary one
+            return;
+          }
+          for (const e of exportQueue.listExports()) exportQueue.cancelExport(e.job_id);
+          await Promise.race([
+            exportQueue.whenExportsSettle(),
+            new Promise((r) => setTimeout(r, 10_000)), // a stuck export must not stop the quit
+          ]);
+          exportsAnswered = true;
+          void win.close();
+          return;
+        }
         const currentId = useEditor.getState().projectId;
         if (!currentId) {
           if (useCloseCoordinator.getState().exitIntent !== "update") return; // allow the close
