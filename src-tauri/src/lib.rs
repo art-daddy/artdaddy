@@ -203,12 +203,20 @@ async fn check_for_update(app: tauri::AppHandle) -> Result<Option<UpdateInfo>, S
   }
 }
 
-/// Download + install the update, then relaunch. Re-checks rather than holding the
-/// Update handle between calls, so the install is driven by whatever is CURRENT at
-/// the moment the user consents, not by a stale check from app start.
+/// The update `download_update` fetched and verified, held until the page's exit guard has
+/// closed the project and calls `install_update`.
+#[cfg(desktop)]
+#[derive(Default)]
+struct StagedUpdate(std::sync::Mutex<Option<(tauri_plugin_updater::Update, Vec<u8>)>>);
+
+/// Download and verify the update without installing it. Re-checks rather than holding the
+/// Update handle from app start, so the install is whatever is CURRENT when the user consents.
 #[cfg(desktop)]
 #[tauri::command]
-async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
+async fn download_update(
+  app: tauri::AppHandle,
+  staged: tauri::State<'_, StagedUpdate>,
+) -> Result<String, String> {
   use tauri_plugin_updater::UpdaterExt;
   let updater = app.updater().map_err(|e| e.to_string())?;
   let update = updater
@@ -216,10 +224,26 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
     .await
     .map_err(|e| e.to_string())?
     .ok_or_else(|| "no update available".to_string())?;
-  update
-    .download_and_install(|_chunk, _total| {}, || {})
+  let bytes = update
+    .download(|_chunk, _total| {}, || {})
     .await
     .map_err(|e| e.to_string())?;
+  let version = update.version.clone();
+  *staged.0.lock().map_err(|e| e.to_string())? = Some((update, bytes));
+  Ok(version)
+}
+
+/// Install the staged update and relaunch (on Windows the installer ends this process).
+#[cfg(desktop)]
+#[tauri::command]
+fn install_update(app: tauri::AppHandle, staged: tauri::State<'_, StagedUpdate>) -> Result<(), String> {
+  let (update, bytes) = staged
+    .0
+    .lock()
+    .map_err(|e| e.to_string())?
+    .take()
+    .ok_or_else(|| "the update has not been downloaded".to_string())?;
+  update.install(bytes).map_err(|e| e.to_string())?;
   app.restart();
 }
 
@@ -261,6 +285,7 @@ pub fn run() {
   #[cfg(desktop)]
   let builder = builder
     .plugin(tauri_plugin_updater::Builder::new().build())
+    .manage(StagedUpdate::default())
     .invoke_handler(tauri::generate_handler![
       trash_path,
       kill_process_tree,
@@ -269,6 +294,7 @@ pub fn run() {
       probe_media_file,
       host_platform,
       check_for_update,
+      download_update,
       install_update,
       open_install_link,
       open_community_link,

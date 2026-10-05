@@ -68,6 +68,8 @@ export default function CloseFailedDialog() {
   const cancel = () => {
     // Only a close that actually STARTED needs un-quiescing; the unsaved prompt never began one.
     if (!unsaved) projectDocuments.cancelClose(asProjectId(failedId));
+    // Staying means staying: an update asked for with this exit must not install on a later quit.
+    useCloseCoordinator.getState().setExitIntent("quit");
     clearPending();
   };
 

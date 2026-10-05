@@ -35,6 +35,15 @@ interface CloseCoordState {
    *  (guardrail 5 re-entry). Null on web. */
   exitHandler: (() => void) | null;
   setExitHandler: (fn: (() => void) | null) => void;
+  /** What the app does once the exit guard clears: close the window, or install the update. */
+  exitIntent: "quit" | "update";
+  setExitIntent: (intent: "quit" | "update") => void;
+  /** Leave through the same door as closing the window. Registered by the desktop shell. */
+  requestExit: (intent: "quit" | "update") => void;
+  setExitRequester: (fn: ((intent: "quit" | "update") => void) | null) => void;
+  /** Why the last exit could not finish (an update that failed to install), for the banner. */
+  exitError: string | null;
+  setExitError: (e: string | null) => void;
 }
 
 export const useCloseCoordinator = create<CloseCoordState>((set) => ({
@@ -45,6 +54,12 @@ export const useCloseCoordinator = create<CloseCoordState>((set) => ({
   setBusy: (busy) => set({ busy }),
   exitHandler: null,
   setExitHandler: (exitHandler) => set({ exitHandler }),
+  exitIntent: "quit",
+  setExitIntent: (exitIntent) => set({ exitIntent }),
+  requestExit: () => {},
+  setExitRequester: (fn) => set({ requestExit: fn ?? (() => {}) }),
+  exitError: null,
+  setExitError: (exitError) => set({ exitError }),
 }));
 
 /** Route path for a switch target (a project id, or null = the no-project home). */

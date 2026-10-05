@@ -15,6 +15,7 @@ import { projectDocuments } from "./project/documentRegistry";
 import { asProjectId } from "./project/types";
 import { useCloseCoordinator } from "./store/closeCoordinator";
 import { useEditor } from "./store/editor";
+import { installUpdate } from "./update/updater";
 
 function ShellRoute() {
   const { projectId } = useParams();
@@ -73,11 +74,39 @@ export default function App() {
           await win.destroy().catch(() => {}); // last resort: the save already ran
         }
       };
-      useCloseCoordinator.getState().setExitHandler(() => void forceClose());
+      // The guard's last step. An update installs here, after the project closed, and the
+      // installer ends the process; a failure leaves the app open with the reason on the banner.
+      const finishExit = async (): Promise<void> => {
+        const coord = useCloseCoordinator.getState();
+        const intent = coord.exitIntent;
+        coord.setExitIntent("quit");
+        if (intent !== "update") return forceClose();
+        try {
+          await installUpdate();
+        } catch (e) {
+          captureError(e instanceof Error ? e : new Error(String(e)), { scope: "app.update" });
+          useCloseCoordinator.getState().setExitError(String(e));
+          // The project closed for the install; leave its route rather than show a closed document.
+          window.history.pushState({}, "", "/");
+          window.dispatchEvent(new PopStateEvent("popstate"));
+        }
+      };
+      useCloseCoordinator.getState().setExitHandler(() => void finishExit());
+      useCloseCoordinator.getState().setExitRequester((intent) => {
+        const coord = useCloseCoordinator.getState();
+        coord.setExitError(null);
+        coord.setExitIntent(intent);
+        void win.close();
+      });
       const un = await win.onCloseRequested(async (event) => {
         if (allow) return; // the guard already resolved — let the OS close the window
         const currentId = useEditor.getState().projectId;
-        if (!currentId) return; // nothing open — allow the close
+        if (!currentId) {
+          if (useCloseCoordinator.getState().exitIntent !== "update") return; // allow the close
+          event.preventDefault();
+          await finishExit();
+          return;
+        }
         event.preventDefault(); // hold the window open while we save asynchronously
         // Unsaved edits: ask before quitting rather than deciding for the user. Autosave clears
         // `dirty` within a beat of the last edit, so this is the genuine "you have work in flight"
@@ -95,7 +124,7 @@ export default function App() {
           captureError(e instanceof Error ? e : new Error(String(e)), { scope: "app.exit" });
           outcome = { ok: false }; // an unexpected throw must offer recovery, never strand the window
         }
-        if (outcome.ok) await forceClose();
+        if (outcome.ok) await finishExit();
         else
           useCloseCoordinator
             .getState()
@@ -108,6 +137,7 @@ export default function App() {
       disposed = true;
       unlisten?.();
       useCloseCoordinator.getState().setExitHandler(null);
+      useCloseCoordinator.getState().setExitRequester(null);
     };
   }, []);
 

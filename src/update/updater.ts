@@ -31,8 +31,16 @@ export async function checkForUpdate(): Promise<UpdateInfo | null> {
   }
 }
 
-/** Download, install, and relaunch. Rejects so the caller can surface a real failure —
- *  unlike the check, the user explicitly asked for this one. */
+/** Download and verify the update, staged in Rust. Nothing closes or installs yet: the user
+ *  keeps working, and a failure here leaves everything as it was. */
+export async function downloadUpdate(): Promise<string> {
+  if (!isDesktop()) throw new Error("updates are desktop-only");
+  return invokeCmd<string>("download_update");
+}
+
+/** Install the staged update and relaunch. Call it only once the exit guard has closed the
+ *  project. Rejects so the caller can surface a real failure — unlike the check, the user
+ *  explicitly asked for this one. */
 export async function installUpdate(): Promise<void> {
   if (!isDesktop()) throw new Error("updates are desktop-only");
   await invokeCmd<void>("install_update");
