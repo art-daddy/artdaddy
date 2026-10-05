@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { collectInferenceAttachments } from "./attachments";
+import { HISTORY_FRAME_MAX_BYTES } from "./historyFrames";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -44,5 +45,24 @@ describe("collectInferenceAttachments", () => {
       }),
     };
     expect(await collectInferenceAttachments([{ path: "x.png" }], bad as Any)).toEqual([]);
+  });
+
+  // The chained (pre-history) request carries these bytes too, and a full-size still is tens of MB:
+  // one would push the whole request past the server's 64 MB limit and lose the turn (UJ-019).
+  it("does not send a picture larger than a history frame may be", async () => {
+    const sized = (n: number) => ({
+      resolveRef: vi.fn(async (p: string) => p),
+      readBytes: vi.fn(async () => new Uint8Array(n)),
+    });
+    const at = await collectInferenceAttachments(
+      [{ path: "a.jpg", kind: "image" }],
+      sized(HISTORY_FRAME_MAX_BYTES) as Any,
+    );
+    expect(at).toHaveLength(1);
+    const over = await collectInferenceAttachments(
+      [{ path: "a.jpg", kind: "image" }],
+      sized(HISTORY_FRAME_MAX_BYTES + 1) as Any,
+    );
+    expect(over).toEqual([]);
   });
 });

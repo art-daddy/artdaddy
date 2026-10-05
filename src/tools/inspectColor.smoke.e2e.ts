@@ -13,6 +13,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { inspectColorTool } from "./inspect";
 import { joinPath } from "./store";
+import { meanColour } from "../test/pictureChecks";
 import { ensureTimeline } from "../timeline/engine";
 import { setCanvasTool } from "../timeline/ops";
 import { addClipsTool } from "../timeline/placement";
@@ -91,8 +92,11 @@ describe("inspect_color measures one frame of a clip (UJ-012)", () => {
     expect(red.ok, JSON.stringify(red)).toBe(true);
     expect(red.scopes.warm_cool).toBeGreaterThan(0.5);
     expect(blue.scopes.warm_cool).toBeLessThan(-0.5);
+    // The model is shown the frame it asked about, as a compact JPEG like every other look (UJ-019).
     const attached = (red._attachments as Array<{ path: string }>)[0].path;
-    expect(attached).toMatch(/\.png$/);
+    expect(attached).toMatch(/\.jpg$/);
+    const seen = await meanColour(attached);
+    expect(seen.v).toBeGreaterThan(seen.u + 60);
 
     // The grade is part of what is measured.
     expect(((await applyColorTool({ clip_ids: [clipId], saturation: 0 }, ctx)) as Any).ok).toBe(

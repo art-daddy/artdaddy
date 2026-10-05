@@ -1097,6 +1097,13 @@ function nextCallToken(): string {
   return `${Date.now().toString(36)}${colorCallSeq.toString(36)}`;
 }
 
+/** What the model is SHOWN of a measured frame: a compact JPEG, like every other look. The frame
+ *  itself is a lossless PNG (or the original still) so the numbers are exact; for 10-bit footage that
+ *  PNG is 16-bit and ~2.5 MB, too large to show at all (UJ-019). */
+async function shownColorFrame(ctx: ClientToolContext, measured: string): Promise<string> {
+  return encodeImageForGemini(ctx, measured, { maxDim: TIMELINE_FRAME_EDGE, quality: 88, tag: "inspect" });
+}
+
 /** The last meaningful ffmpeg line, so a failure names its cause instead of "could not render". */
 function ffmpegReason(stderr: string): string {
   const line = (stderr || "")
@@ -1144,14 +1151,16 @@ export async function inspectColorTool(
 
   const scopes = await measureColorFrame(ctx, frame);
   if (!scopes) return { ok: false, error: "failed to measure color scopes (frame decode failed)" };
-  const attachments: Attachment[] = [imageAttachment(frame, `inspect_color ${subject} scopes`)];
+  const attachments: Attachment[] = [
+    imageAttachment(await shownColorFrame(ctx, frame), `inspect_color ${subject} scopes`),
+  ];
   const res: Result = { ok: true, subject, scopes, frame_attached: 1 };
 
   if (reference) {
     const rf = await rawFrame(ctx, reference, "ref", call);
     const refScopes = rf ? await measureColorFrame(ctx, rf) : null;
     if (rf && refScopes) {
-      attachments.push(imageAttachment(rf, "inspect_color reference"));
+      attachments.push(imageAttachment(await shownColorFrame(ctx, rf), "inspect_color reference"));
       res.reference_scopes = refScopes;
       res.gap = colorGapHints(scopes, refScopes);
     } else {

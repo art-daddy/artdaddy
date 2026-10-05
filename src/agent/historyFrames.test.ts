@@ -6,6 +6,7 @@ import { ProjectStoreAccess, joinPath, type FsLike } from "../tools/store";
 import {
   HISTORY_FRAMES_BATCH,
   HISTORY_FRAMES_MAX,
+  HISTORY_FRAMES_MAX_TOTAL_BYTES,
   HISTORY_FRAME_MAX_BYTES,
   historyAttachments,
   historyFrameRefs,
@@ -409,4 +410,75 @@ describe("historyAttachments", () => {
       { numRuns: 200 },
     );
   });
+
+  // Each frame passing the 2 MB check is not enough: 40 of them is 80 MB, and the server refuses a
+  // request over 64 MB (base64 makes it 4/3 larger still). Whatever the sizes, what is re-sent fits
+  // the budget, is the NEWEST run of frames, and stops only when the next older one would not fit.
+  it("property: the re-sent frames fit the byte budget, newest first, and leave nothing out that fits", async () => {
+    const DIR = "C:/proj";
+    const BUDGET = 20_000; // the rule at a small scale; the real budget is checked below
+    const frameBytes = (n: number): Uint8Array => {
+      const b = new Uint8Array(n);
+      b.set(PNG());
+      return b;
+    };
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(fc.integer({ min: 64, max: 8_000 }), {
+          minLength: 1,
+          maxLength: HISTORY_FRAMES_MAX,
+        }),
+        async (sizes) => {
+          const fs = new MemFs();
+          sizes.forEach((n, i) => fs.bytes.set(joinPath(DIR, `f/a_${i}.jpg`), frameBytes(n)));
+          const turns = [
+            turn("t1", [{ kind: "tool_call", call_id: "a" }, result("a", sizes.length)]),
+          ];
+          const atts = await historyAttachments(turns, new ProjectStoreAccess(DIR, fs), BUDGET);
+          const sent = atts.map((a) => a.index as number);
+          const total = sent.reduce((s, i) => s + sizes[i], 0);
+          expect(total).toBeLessThanOrEqual(BUDGET);
+          const first = sizes.length - sent.length;
+          expect(sent).toEqual(sizes.map((_, i) => i).slice(first));
+          if (first > 0) expect(total + sizes[first - 1]).toBeGreaterThan(BUDGET);
+        },
+      ),
+      { numRuns: 300 },
+    );
+  });
+
+  it("the budget leaves the request under the server's 64 MB once base64 and the transcript are added", () => {
+    expect((HISTORY_FRAMES_MAX_TOTAL_BYTES * 4) / 3).toBeLessThanOrEqual(40 * 1024 * 1024);
+  });
+
+  it("frames that fill the budget exactly are all sent", async () => {
+    const fs = new MemFs();
+    const DIR = "C:/proj";
+    for (let i = 0; i < 4; i++) {
+      const b = new Uint8Array(250);
+      b.set(PNG());
+      fs.bytes.set(joinPath(DIR, `f/a_${i}.jpg`), b);
+    }
+    const turns = [turn("t1", [{ kind: "tool_call", call_id: "a" }, result("a", 4)])];
+    const store = new ProjectStoreAccess(DIR, fs);
+    expect(await historyAttachments(turns, store, 1000)).toHaveLength(4);
+    expect(await historyAttachments(turns, store, 999)).toHaveLength(3);
+  });
+
+  it("at the real budget: twenty 1.9 MB frames send only the newest that fit", async () => {
+    const fs = new MemFs();
+    const DIR = "C:/proj";
+    const size = Math.floor(1.9 * 1024 * 1024);
+    for (let i = 0; i < 20; i++) {
+      const b = new Uint8Array(size);
+      b.set(PNG());
+      fs.bytes.set(joinPath(DIR, `f/a_${i}.jpg`), b);
+    }
+    const atts = await historyAttachments(
+      [turn("t1", [{ kind: "tool_call", call_id: "a" }, result("a", 20)])],
+      new ProjectStoreAccess(DIR, fs),
+    );
+    const fit = Math.floor(HISTORY_FRAMES_MAX_TOTAL_BYTES / size);
+    expect(atts.map((a) => a.index)).toEqual(Array.from({ length: fit }, (_, i) => 20 - fit + i));
+  }, 30_000);
 });

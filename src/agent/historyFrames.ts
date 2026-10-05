@@ -20,6 +20,9 @@ export const HISTORY_FRAMES_BATCH = 16;
  *  inspect tools write are JPEG well under it; this stops a full-size still or a page capture
  *  from riding every round. */
 export const HISTORY_FRAME_MAX_BYTES = 2 * 1024 * 1024;
+/** All re-sent frames together stay under this, so with base64 (4/3) and the transcript a request
+ *  stays under the server's 64 MB: 40 frames that each pass the check above are 80 MB. */
+export const HISTORY_FRAMES_MAX_TOTAL_BYTES = 30 * 1024 * 1024;
 
 export interface FrameRef {
   call_id: string;
@@ -86,32 +89,39 @@ function decodableImage(bytes: Uint8Array): boolean {
 
 /** The bytes of the kept frames, each tagged with the call and index it belongs to. A frame
  *  that is missing, unreadable, too large, not a decodable image, or outside the project is
- *  skipped; the server tells the model so. */
+ *  skipped; the server tells the model so. Read newest first: when the total budget is spent,
+ *  the older frames are the ones left out. */
 export async function historyAttachments(
   turns: Turn[],
   store: ProjectStoreAccess | null,
+  budget = HISTORY_FRAMES_MAX_TOTAL_BYTES,
 ): Promise<InferenceAttachment[]> {
   if (!store) return [];
   const out: InferenceAttachment[] = [];
-  for (const f of keptFrames(historyFrameRefs(turns))) {
+  const kept = keptFrames(historyFrameRefs(turns));
+  let total = 0;
+  for (let i = kept.length - 1; i >= 0; i--) {
+    const f = kept[i];
     // The transcript is a file on disk: no path in it may reach a file outside this project.
     const abs = store.resolveWritable(f.path);
     if (!abs) continue;
+    let bytes: Uint8Array;
     try {
-      const bytes = await store.readBytes(abs);
-      if (!bytes.length || bytes.length > HISTORY_FRAME_MAX_BYTES || !decodableImage(bytes))
-        continue;
-      out.push({
-        kind: "image",
-        b64: toB64(bytes),
-        ...(f.caption ? { caption: f.caption } : {}),
-        ext: extOf(f.path),
-        call_id: f.call_id,
-        index: f.index,
-      });
+      bytes = await store.readBytes(abs);
     } catch {
-      /* gone (trimmed past the cache budget, or deleted): the server writes a note instead */
+      continue; // gone (trimmed past the cache budget, or deleted): the server writes a note instead
     }
+    if (!bytes.length || bytes.length > HISTORY_FRAME_MAX_BYTES || !decodableImage(bytes)) continue;
+    if (total + bytes.length > budget) break;
+    total += bytes.length;
+    out.push({
+      kind: "image",
+      b64: toB64(bytes),
+      ...(f.caption ? { caption: f.caption } : {}),
+      ext: extOf(f.path),
+      call_id: f.call_id,
+      index: f.index,
+    });
   }
-  return out;
+  return out.reverse();
 }

@@ -2,6 +2,7 @@
 // attachments (bytes). The client owns the media, so it resolves each ref to its
 // local file, reads the bytes, and hands them to the next model round.
 import type { ProjectStoreAccess } from "../tools/store";
+import { HISTORY_FRAME_MAX_BYTES } from "./historyFrames";
 import type { InferenceAttachment } from "./types";
 
 function toB64(bytes: Uint8Array): string {
@@ -29,9 +30,13 @@ export async function collectInferenceAttachments(
     if (!path) continue;
     try {
       const abs = (await store.resolveRef(path)) ?? path;
+      const kind = String((a as { kind?: string }).kind ?? "image");
+      const bytes = await store.readBytes(abs);
+      // A full-size still would push the whole request past the server's limit (UJ-019).
+      if (kind === "image" && bytes.length > HISTORY_FRAME_MAX_BYTES) continue;
       out.push({
-        kind: String((a as { kind?: string }).kind ?? "image"),
-        b64: toB64(await store.readBytes(abs)),
+        kind,
+        b64: toB64(bytes),
         caption: String((a as { caption?: string }).caption ?? ""),
         fps: (a as { fps?: number }).fps,
         ext: extOf(path),
