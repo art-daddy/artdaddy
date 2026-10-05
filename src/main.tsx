@@ -42,7 +42,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
     <Sentry.ErrorBoundary
       fallback={
         <div className="flex h-full items-center justify-center p-6 text-sm text-neutral-400">
-          Something went wrong. Please reload the app.
+          Something went wrong. Please restart the app.
         </div>
       }
     >

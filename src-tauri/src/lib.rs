@@ -1,5 +1,6 @@
 mod fdlimit;
 mod mcp;
+mod reload_guard;
 
 /// Move a file or directory to the OS Recycle Bin / Trash (recoverable) instead of
 /// deleting it irreversibly. Backs the client's project-delete path (`fs.trash`).
@@ -250,6 +251,12 @@ pub fn run() {
     .plugin(tauri_plugin_fs::init())
     .plugin(tauri_plugin_dialog::init())
     .plugin(tauri_plugin_deep_link::init());
+
+  let builder = if reload_guard::enabled() {
+    builder.plugin(reload_guard::plugin())
+  } else {
+    builder
+  };
 
   #[cfg(desktop)]
   let builder = builder

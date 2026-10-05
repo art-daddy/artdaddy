@@ -101,15 +101,7 @@ export default function MenuBar() {
     const fps = Number(s.timeline?.canvas?.fps) || 30;
     void s.splitClip(s.selection, Math.round(s.playhead * fps));
   };
-  const resetLayout = () => {
-    try {
-      for (const k of Object.keys(localStorage))
-        if (k.startsWith("react-resizable-panels:")) localStorage.removeItem(k);
-    } catch {
-      /* ignore */
-    }
-    location.reload();
-  };
+  const resetLayout = () => usePanes.getState().resetLayout();
 
   // other NLEs' View-menu shortcuts, on the Windows modifiers: the media/inspector/agent panes toggle,
   // the preview and timeline never do.

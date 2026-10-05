@@ -326,6 +326,17 @@ describe("MenuBar", () => {
     expect(ed.setZoom).toHaveBeenCalledWith(40 / 1.3);
   });
 
+  // It reloaded the page, which killed the agent's turn and every job the page owns; release
+  // builds now refuse reloads, so it resets the panels in place (Shell.resetLayout.test.tsx).
+  it("Reset Panel Layout resets the panels in place", () => {
+    renderBar("/p/test");
+    const reset = vi.spyOn(usePanes.getState(), "resetLayout");
+    fireEvent.click(screen.getByRole("button", { name: "Window" }));
+    fireEvent.click(screen.getByText("Reset Panel Layout"));
+    expect(reset).toHaveBeenCalledTimes(1);
+    reset.mockRestore();
+  });
+
   it("Help → About opens and closes", () => {
     renderBar();
     fireEvent.click(screen.getByRole("button", { name: "Help" }));

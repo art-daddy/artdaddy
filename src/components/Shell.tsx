@@ -101,6 +101,8 @@ export default function Shell({ projectId }: { projectId: string | null }) {
   // left behind; their state lives in stores, so nothing is lost by remounting.
   const visible = usePanes((s) => s.visible);
   const hide = usePanes((s) => s.setVisible);
+  // A remount makes the panel library lay the groups out from its own defaults.
+  const layoutEpoch = usePanes((s) => s.layoutEpoch);
 
   // The inspector inspects a CLIP, so it follows the selection rather than sitting there empty:
   // it appears when something is selected and goes away when nothing is. Keyed on the boolean, so
@@ -117,7 +119,12 @@ export default function Shell({ projectId }: { projectId: string | null }) {
   if (!projectId) return <ProjectPicker />;
 
   return (
-    <PanelGroup direction="horizontal" className="h-full" autoSaveId="artdaddy-layout-v4">
+    <PanelGroup
+      key={layoutEpoch}
+      direction="horizontal"
+      className="h-full"
+      autoSaveId="artdaddy-layout-v4"
+    >
       <Panel defaultSize={80} minSize={40} className="min-w-0" order={1}>
         {openError ? (
           <Empty>{openError}</Empty>

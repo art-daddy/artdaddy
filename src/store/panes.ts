@@ -52,10 +52,15 @@ interface PanesState {
   /** View → Show All Panels: the recovery path, so it means ALL of them — including the
    *  inspector, which is not on by default. */
   showAll: () => void;
+  /** Bumped by `resetLayout`; the Shell keys its panel groups on it. */
+  layoutEpoch: number;
+  /** Default panel sizes, in place: a reload would kill the agent's turn and the page's jobs. */
+  resetLayout: () => void;
 }
 
 export const usePanes = create<PanesState>((set) => ({
   visible: load(),
+  layoutEpoch: 0,
   toggle: (id) =>
     set((s) => {
       const visible = { ...s.visible, [id]: !s.visible[id] };
@@ -71,5 +76,14 @@ export const usePanes = create<PanesState>((set) => ({
   showAll: () => {
     save(ALL);
     return set({ visible: { ...ALL } });
+  },
+  resetLayout: () => {
+    try {
+      for (const k of Object.keys(localStorage))
+        if (k.startsWith("react-resizable-panels:")) localStorage.removeItem(k);
+    } catch {
+      /* private mode: nothing was saved */
+    }
+    set((s) => ({ layoutEpoch: s.layoutEpoch + 1 }));
   },
 }));
