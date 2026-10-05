@@ -651,7 +651,7 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
         canContinue: false,
         providerSnapshot: null,
         turns: withLast(s.turns, (t) =>
-          t.status === "streaming" || t.status === "awaiting" ? { ...t, status: "done" } : t,
+          t.status === "streaming" || t.status === "awaiting" ? { ...t, status: "interrupted" } : t,
         ),
       }));
     },

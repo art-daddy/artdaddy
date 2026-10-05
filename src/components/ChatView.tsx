@@ -489,6 +489,12 @@ export default function ChatView({ onHide }: { onHide?: () => void } = {}) {
                 </div>
               </div>
             )}
+            {turn.status === "interrupted" && (
+              <p className="pl-[36px] text-[11px] text-neutral-500">
+                This reply was cut short: the app closed or the project was switched before it
+                finished. Send a message to carry on.
+              </p>
+            )}
             {turn.status === "done" && (
               <div
                 className={cn(

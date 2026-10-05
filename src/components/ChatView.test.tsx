@@ -378,6 +378,21 @@ describe("ChatView", () => {
     expect(state.sendFeedback).toHaveBeenCalledWith("up", { requestId: undefined });
   });
 
+  it("says when a reply was cut short, instead of showing it as finished", () => {
+    state.turns = [
+      {
+        id: "t1",
+        userText: "hi",
+        attachments: [],
+        parts: [{ kind: "tool_call", call_id: "c1", name: "get_timeline", args: {} }],
+        status: "interrupted",
+      },
+    ];
+    render(<ChatView />);
+    expect(screen.getByText(/This reply was cut short/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Good response" })).not.toBeInTheDocument();
+  });
+
   it("reporting an errored turn asks for a note first, then sends it", async () => {
     state.turns = [{ id: "t1", userText: "hi", attachments: [], parts: [], status: "error" }];
     render(<ChatView />);

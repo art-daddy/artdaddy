@@ -455,7 +455,7 @@ describe("useChat.send + event reducer", () => {
     expect(useChat.getState().closing).toBe(true);
   });
 
-  it("quiesce NORMALIZES the aborted turn (status done + provider reset) like Stop (finding #4)", () => {
+  it("quiesce NORMALIZES the aborted turn (marked cut short + provider reset) (finding #4)", () => {
     setDesktop("p1");
     useChat.setState({
       projectId: "p1",
@@ -475,7 +475,8 @@ describe("useChat.send + event reducer", () => {
       ],
     });
     useChat.getState().quiesce();
-    expect(useChat.getState().turns[0].status).toBe("done"); // no stuck spinner in the UI
+    // Leaving the project cut the reply short; it must not read as a finished turn with no answer.
+    expect(useChat.getState().turns[0].status).toBe("interrupted"); // and no spinner
     expect(useChat.getState().providerSnapshot).toBeNull(); // the invalidated mid-turn chain is reset
     expect(useChat.getState().streaming).toBe(false);
     expect(useChat.getState().closing).toBe(true);

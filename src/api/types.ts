@@ -97,6 +97,8 @@ export interface TranscriptRequest {
   response?: TranscriptPart[];
   undone?: boolean;
   checkpoint?: { timeline?: unknown; timeline_after?: unknown };
+  /** The turn had not ended when this was written. */
+  unfinished?: boolean;
 }
 
 export interface PendingApproval {

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildRequests,
   mapRequests,
+  requestsForHistory,
   transcriptForRound,
   unansweredCalls,
   type Turn,
@@ -67,6 +68,32 @@ describe("mapRequests <-> buildRequests", () => {
     });
 
     expect(buildRequests([t])[0].response).toEqual([{ kind: "text", text: "the real answer" }]);
+  });
+});
+
+// A reload or a crash mid-turn used to leave a turn that read as finished with no answer: the
+// transcript kept no status, and every turn loaded as "done".
+describe("a turn cut short reads as cut short after a reload", () => {
+  it.each(["streaming", "awaiting", "interrupted"] as const)(
+    "a %s turn comes back interrupted",
+    (status) => {
+      const [t] = mapRequests(buildRequests([turn({ status })]));
+      expect(t.status).toBe("interrupted");
+    },
+  );
+
+  it.each(["done", "error"] as const)("a %s turn comes back as it was", (status) => {
+    const [t] = mapRequests(buildRequests([turn({ status })]));
+    expect(t.status).toBe(status === "error" ? "done" : status);
+  });
+
+  it("an older transcript with no mark loads as done", () => {
+    expect(mapRequests([{ id: "x", response: [] }] as Any)[0].status).toBe("done");
+  });
+
+  it("the mark never reaches the model's history", () => {
+    const [req] = requestsForHistory([turn({ status: "streaming" })]) as Any[];
+    expect(req).not.toHaveProperty("unfinished");
   });
 });
 

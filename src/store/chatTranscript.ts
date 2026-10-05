@@ -7,7 +7,9 @@ import type { RoundInput, ToolResultItem } from "../agent/types";
 import type { Mention } from "../timeline/mentions";
 import type { Timeline } from "../timeline/model";
 
-export type TurnStatus = "streaming" | "awaiting" | "done" | "error";
+export type TurnStatus = "streaming" | "awaiting" | "done" | "error" | "interrupted";
+
+const unfinished = (s: TurnStatus) => s === "streaming" || s === "awaiting" || s === "interrupted";
 
 export interface Turn {
   id: string;
@@ -36,7 +38,8 @@ export function mapRequests(reqs: TranscriptRequest[]): Turn[] {
       caption: a.caption ?? a.name ?? null,
     })),
     parts: r.response ?? [],
-    status: "done" as TurnStatus,
+    // Written while the turn had not ended, and never rewritten: a reload or a crash cut it short.
+    status: (r.unfinished ? "interrupted" : "done") as TurnStatus,
     checkpoint: (r.checkpoint?.timeline as Timeline | undefined) ?? null,
     timelineAfter: (r.checkpoint?.timeline_after as Timeline | undefined) ?? null,
     undone: r.undone ?? false,
@@ -67,6 +70,7 @@ export function buildRequests(turns: Turn[]): TranscriptRequest[] {
       timeline_after: t.timelineAfter ?? undefined,
     },
     undone: t.undone ?? false,
+    ...(unfinished(t.status) ? { unfinished: true } : {}),
   }));
 }
 
@@ -78,7 +82,7 @@ export function buildRequests(turns: Turn[]): TranscriptRequest[] {
  *  - The timeline checkpoints are left out: the model never reads them, and they are most of the
  *    bytes. */
 export function requestsForHistory(turns: Turn[]): TranscriptRequest[] {
-  return buildRequests(turns).map(({ checkpoint: _checkpoint, ...rest }, i) => ({
+  return buildRequests(turns).map(({ checkpoint: _checkpoint, unfinished: _unfinished, ...rest }, i) => ({
     ...rest,
     message: {
       ...rest.message,
