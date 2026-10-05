@@ -342,9 +342,11 @@ surface (dialogs, external-media preview, fs/asset scopes, thumbnail-capture) �
 ## 16. Shipping: distribution & auto-update
 
 The desktop app **updates itself**. On launch `UpdateBanner` calls
-`src/update/updater.ts`, which invokes two RUST commands (`check_for_update` /
-`install_update` in `src-tauri/src/lib.rs`); the Rust side owns the whole
+`src/update/updater.ts`, which invokes RUST commands in `src-tauri/src/lib.rs`
+(`check_for_update`, `download_update`, `install_update`); the Rust side owns the whole
 check → download → verify → install → relaunch cycle via `tauri-plugin-updater`.
+"Restart & update" downloads first, then leaves through the same exit guard as closing
+the window (unsaved-edits prompt, project close, lock release), and only then installs.
 
 **Why Rust and not the updater JS package:** npm's registry is unreachable from the
 build machine (SNI filtering), so a new JS dependency cannot be installed. Driving
