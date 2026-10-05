@@ -23,6 +23,7 @@ import {
 import { registerTestDocument, resetTestDocuments, flushTestDocuments } from "../test/timelineKit";
 import { BRAND } from "../brand";
 import { ProjectClosingError } from "../project/MutationGate";
+import { foreignProjectLock } from "./projectLock";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -494,6 +495,17 @@ describe("ProjectRegistry.saveProjectAs", () => {
     expect(await fs.exists(`${SRC}/internals/project.json`)).toBe(true);
     // The derived cache is regeneratable and is never copied.
     expect(await fs.exists(`${DEST}/internals/cache/proxy.mp4`)).toBe(false);
+  });
+
+  it("never carries a lock to the new folder", async () => {
+    const fs = await seeded();
+    await fs.writeTextFile(
+      `${SRC}/internals/.lock`,
+      JSON.stringify({ instance: "another-machine", at: Date.now() }),
+    );
+    await ProjectRegistry.fromProjectDir(ACTIVE, fs).saveProjectAs("hero_a1b2c3", DEST);
+    expect(await foreignProjectLock(fs, DEST)).toBeNull();
+    expect(await fs.exists(`${DEST}/internals/.lock`)).toBe(false);
   });
 
   it("refuses a destination that already holds a project instead of merging into it", async () => {
@@ -1130,7 +1142,7 @@ describe("rename_project", () => {
 });
 
 describe("duplicate_project", () => {
-  it("copies the current project into a fresh active one", async () => {
+  it("copies the current project into a fresh one and the user keeps editing the original", async () => {
     const { ctx, fs } = await mkCtx();
     const r = (await duplicateProjectTool({}, ctx)) as Any;
     expect(r.ok).toBe(true);
@@ -1139,7 +1151,46 @@ describe("duplicate_project", () => {
     const pj = JSON.parse(await fs.readTextFile(`${PROJECTS}/${r.id}/internals/project.json`));
     expect(pj.id).toBe(r.id);
     expect(pj.name).toBe("Active copy");
-    expect((await readRegistry(fs)).activeProjectId).toBe(r.id);
+    // The copy is a backup in the project list (owner decision, 2026-10-05). Nobody switches to
+    // it: the app's active project, which MCP and the project list read, still names the one
+    // being edited. It used to name the copy while the screen and the agent stayed put.
+    const reg = await readRegistry(fs);
+    expect(reg.projects.map((p: Any) => p.id)).toContain(r.id);
+    expect(reg.activeProjectId).toBe("proj_active");
+    expect(((await listProjectsTool({}, ctx)) as Any).active_project_id).toBe("proj_active");
+  });
+
+  it("copying ANOTHER project does not switch to it either", async () => {
+    const { ctx, fs } = await mkCtx();
+    const other = (await newProjectTool({ name: "Other" }, ctx)) as Any;
+    await ProjectRegistry.fromProjectDir(ACTIVE, fs).setActive("proj_active"); // the user's view
+    const r = (await duplicateProjectTool({ project: other.id }, ctx)) as Any;
+    expect(r.ok).toBe(true);
+    expect(await fs.exists(`${PROJECTS}/${r.id}/internals/project.json`)).toBe(true);
+    expect((await readRegistry(fs)).activeProjectId).toBe("proj_active");
+  });
+
+  it("the copy never inherits the original's lock", async () => {
+    const { ctx, fs } = await mkCtx();
+    // Someone else has the original open right now: the original must keep warning, the copy
+    // (which nobody has open) must not claim to be open somewhere.
+    await fs.writeTextFile(
+      `${ACTIVE}/internals/.lock`,
+      JSON.stringify({ instance: "another-machine", at: Date.now() }),
+    );
+    const r = (await duplicateProjectTool({}, ctx)) as Any;
+    expect(r.ok).toBe(true);
+    expect(await foreignProjectLock(fs, ACTIVE)).not.toBeNull();
+    expect(await foreignProjectLock(fs, `${PROJECTS}/${r.id}`)).toBeNull();
+    expect(await fs.exists(`${PROJECTS}/${r.id}/internals/.lock`)).toBe(false);
+  });
+
+  it("tells the model it is still editing the original", async () => {
+    const { ctx } = await mkCtx();
+    const r = (await duplicateProjectTool({ name: "backup" }, ctx)) as Any;
+    expect(r.note).toContain('"Active"');
+    expect(r.note).toContain('"backup"');
+    expect(r.note).not.toMatch(/set active|make it active|now active|switched to/i);
   });
 
   it("errors on a missing explicit project", async () => {

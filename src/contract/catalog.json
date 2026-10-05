@@ -1,6 +1,6 @@
 {
   "$schema_note": "Generated from the live tool registry (v4/tools/catalog.py) - do not hand-edit; refresh with `npm run codegen`.",
-  "version": "2.7.3",
+  "version": "2.7.4",
   "generated_from": "src/akaru/turn/tools/definitions.py::ALL_TOOLS",
   "count": 55,
   "tools": [
@@ -1337,7 +1337,7 @@
     {
       "name": "duplicate_project",
       "expensive": false,
-      "description": "Copy a project (timeline + library + history) into a brand-new project and make it active. Defaults to duplicating the CURRENT project when `project` is omitted. Returns {id, name, path}. The current conversation continues on its own project.",
+      "description": "Save a copy of a project (timeline, library and chat history) as a brand-new project, e.g. a backup before a risky change. Nothing switches: you keep editing the current project and the user's screen stays on it; the copy waits in the user's project list. Name the copy for what it keeps (e.g. 'before the selects'). Defaults to copying the CURRENT project when `project` is omitted. Returns {id, name}.",
       "parameters": {
         "type": "object",
         "properties": {

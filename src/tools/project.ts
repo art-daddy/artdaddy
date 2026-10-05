@@ -136,6 +136,16 @@ async function copyDir(
   }
 }
 
+/** What a copy of a project folder leaves behind, for every copy (Duplicate and Save As):
+ *  - `internals/cache`: derived and regeneratable (invariant 29); it rebuilds on demand.
+ *  - `internals/.lock`: a claim by the editor that has THIS folder open, not part of the
+ *    project. A copied one made the copy look open somewhere else. */
+function notCopied(src: string): (path: string) => boolean {
+  const cache = joinPath(src, INTERNAL_DIR, "cache");
+  const lock = joinPath(src, INTERNAL_DIR, ".lock");
+  return (p) => p === cache || p === lock;
+}
+
 /** projects.json registry + project-dir lifecycle on the shared app-data fs.
  *  Ports the module-level functions of project_store.py. */
 export class ProjectRegistry {
@@ -520,7 +530,9 @@ export class ProjectRegistry {
     return { id: pid, dir };
   }
 
-  /** Copy a project into a brand-new one (fresh id), register it active. */
+  /** Copy a project into a brand-new one (fresh id) and list it. The copy is a backup: it is
+   *  NOT made active (owner decision, 2026-10-05), because nothing switches to it — not the
+   *  screen, not the agent. Marking it active only misled MCP and the project list. */
   async duplicateProject(
     srcId: string,
     name: string,
@@ -529,11 +541,9 @@ export class ProjectRegistry {
     const newId = newProjectId(name);
     const dst = this.projectDir(newId);
     reviveProjectDir(dst); // fresh project at this path: clear any stale tombstone (RF4)
-    // Copy AUTHORITATIVE state only; the derived cache (internals/cache — proxies, posters,
-    // gemini encodes, transcodes, downloads, transcripts, render cache) is regeneratable and is
-    // never copied (invariant 29). It rebuilds on demand in the duplicate.
-    const cacheDir = joinPath(src, INTERNAL_DIR, "cache");
-    await copyDir(this.fs, src, dst, (p) => p === cacheDir);
+    // Copy AUTHORITATIVE state only (see notCopied): the derived cache rebuilds on demand in the
+    // duplicate, and the lock belongs to whoever has the ORIGINAL open.
+    await copyDir(this.fs, src, dst, notCopied(src));
     // Flat consistency bridge: copyDir cloned the source's ON-DISK timeline.json, but the source may
     // be OPEN with unsaved in-memory edits ahead of disk. Re-materialize the copy's timeline from the
     // same read model every reader uses, so the duplicate captures those edits — only when an open
@@ -556,7 +566,7 @@ export class ProjectRegistry {
       joinPath(dst, INTERNAL_DIR, "project.json"),
       JSON.stringify({ ...pj, id: newId, name, createdAt: now, modifiedAt: now }, null, 2),
     );
-    await this.register({ id: newId, name, path: dst, lastOpenedAt: now }, true);
+    await this.register({ id: newId, name, path: dst, lastOpenedAt: now }, false);
     return { id: newId, name, path: dst };
   }
 
@@ -582,8 +592,7 @@ export class ProjectRegistry {
     if (await this.fs.exists(joinPath(dst, INTERNAL_DIR, "project.json")))
       throw new Error(`there is already a project in "${baseName(dst)}"`);
     reviveProjectDir(dst);
-    const cacheDir = joinPath(src, INTERNAL_DIR, "cache");
-    await copyDir(this.fs, src, dst, (p) => p === cacheDir);
+    await copyDir(this.fs, src, dst, notCopied(src));
     // The open document's in-memory timeline is ahead of disk; the copy must carry the
     // edits the user can see, not the last autosave.
     try {
@@ -944,11 +953,21 @@ export async function duplicateProjectTool(
   const srcName = typeof srcPj.name === "string" ? srcPj.name : pid;
   const name = (typeof args.name === "string" && args.name.trim()) || `${srcName} copy`;
   const dup = await reg.duplicateProject(pid, name);
+  const cur = await currentPid(ctx);
+  let curName = cur === pid ? srcName : cur;
+  if (cur !== pid) {
+    try {
+      const pj = await reg.readProject(cur);
+      if (typeof pj.name === "string") curName = pj.name;
+    } catch {
+      /* unreadable project.json: the id names it well enough */
+    }
+  }
   return {
     ok: true,
     id: dup.id,
     name: dup.name,
-    note: "Copied to a new project and set active. The current conversation continues on its own project.",
+    note: `Saved a copy of "${srcName}" as "${dup.name}". You are still editing "${curName}": your tools keep acting on it and the user's screen stays on it. The copy is a separate project in the user's project list.`,
   };
 }
 
