@@ -82,7 +82,7 @@ async function waitTurn(d, ms = 1_800_000) {
   await sleep(1500);
   for (;;) {
     const cont = await d.eval(
-      `(() => { const b = [...document.querySelectorAll('button')].find(b => /^continue$/i.test((b.innerText||'').trim())); if (b) { b.click(); return true } return false })()`,
+      `(() => { const b = [...document.querySelectorAll('button')].find(b => /^\\W*continue$/i.test((b.innerText||'').trim())); if (b) { b.click(); return true } return false })()`,
     );
     if (cont) console.log("  (clicked Continue)");
     if (!(await busy(d))) {
