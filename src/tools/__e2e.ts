@@ -219,6 +219,16 @@ export const nodeFs: FsLike = {
     const sha256 = hash.digest("hex");
     return { id12: sha256.slice(0, 12), sha256, size, head: head.slice(0, headLength) };
   },
+  async readHead(p, maxBytes) {
+    const fh = await fsp.open(p, "r");
+    try {
+      const buf = Buffer.alloc(maxBytes);
+      const { bytesRead } = await fh.read(buf, 0, maxBytes, 0);
+      return new Uint8Array(buf.buffer, buf.byteOffset, bytesRead);
+    } finally {
+      await fh.close();
+    }
+  },
   async rename(src, dst) {
     await fsp.mkdir(path.dirname(dst), { recursive: true });
     await fsp.rename(src, dst);

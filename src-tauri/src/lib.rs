@@ -88,6 +88,30 @@ struct ProbeProgress {
   total: u64,
 }
 
+/// The most `read_file_head` returns: a header, never a file.
+const HEAD_READ_LIMIT: usize = 1 << 20;
+
+/// The first `max_bytes` of a file and nothing past them, for a header a render must judge (which
+/// reader ffmpeg opens a still with). Off the main thread like `probe_media_file`: a cloud-synced
+/// placeholder can stall even a small read.
+#[tauri::command]
+async fn read_file_head(path: String, max_bytes: usize) -> Result<Vec<u8>, String> {
+  tauri::async_runtime::spawn_blocking(move || read_head_blocking(&path, max_bytes))
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn read_head_blocking(path: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
+  use std::io::Read;
+  let file = std::fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
+  let mut head = Vec::new();
+  file
+    .take(max_bytes.min(HEAD_READ_LIMIT) as u64)
+    .read_to_end(&mut head)
+    .map_err(|e| e.to_string())?;
+  Ok(head)
+}
+
 fn probe_media_blocking(
   path: String,
   head_bytes: usize,
@@ -304,6 +328,7 @@ pub fn run() {
       commit_file,
       remove_file,
       probe_media_file,
+      read_file_head,
       host_platform,
       check_for_update,
       download_update,
@@ -335,6 +360,7 @@ pub fn run() {
     commit_file,
     remove_file,
     probe_media_file,
+    read_file_head,
     host_platform
   ]);
 
@@ -857,6 +883,43 @@ mod tests {
     let mut p = std::env::temp_dir();
     p.push(format!("artdaddy_trash_test_{tag}_{nanos}"));
     p
+  }
+
+  mod read_head {
+    use super::super::{read_head_blocking, HEAD_READ_LIMIT};
+    use super::scratch;
+
+    #[test]
+    fn returns_exactly_the_first_bytes_asked_for() {
+      let p = scratch("head");
+      let data: Vec<u8> = (0..10_000u32).map(|i| (i % 251) as u8).collect();
+      std::fs::write(&p, &data).unwrap();
+      let head = read_head_blocking(p.to_str().unwrap(), 2048).unwrap();
+      assert_eq!(head, data[..2048]);
+      std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn a_short_file_is_returned_whole() {
+      let p = scratch("short");
+      std::fs::write(&p, b"GIF89a").unwrap();
+      assert_eq!(read_head_blocking(p.to_str().unwrap(), 2048).unwrap(), b"GIF89a");
+      std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn never_returns_more_than_the_limit() {
+      let p = scratch("big");
+      std::fs::write(&p, vec![7u8; HEAD_READ_LIMIT + 4096]).unwrap();
+      assert_eq!(read_head_blocking(p.to_str().unwrap(), usize::MAX).unwrap().len(), HEAD_READ_LIMIT);
+      std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn a_missing_file_is_an_error_naming_it() {
+      let err = read_head_blocking("Z:/no/such/still.png", 2048).unwrap_err();
+      assert!(err.contains("still.png"), "{err}");
+    }
   }
 
   /// A video editor's footage lives on the big second drive, and the folder picker already lets

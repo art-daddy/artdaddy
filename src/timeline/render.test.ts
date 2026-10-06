@@ -585,6 +585,48 @@ describe("buildRenderCommand", () => {
       expect(opts(ref)).toEqual(["-stream_loop", "-1", "-t", "3.000000", "-i"]);
   });
 
+  // ffmpeg picks a reader by CONTENT, and each takes a different loop option (stillReader.ts,
+  // measured): the reader resolveClipSources found in the file decides, whatever it is called.
+  it("loops a still the way the reader found in its content takes it", () => {
+    const opts = (ref: string, still_reader?: string) => {
+      const a = buildRenderCommand(
+        tl([{ media_ref: ref, timeline_in: 0, timeline_out: 3, still_reader }]),
+        "/o.mp4",
+      ).args;
+      return a.slice(a.indexOf("-progress") + 2, a.indexOf(ref));
+    };
+    expect(opts("/sticker.webp", "webp_anim")).toEqual(["-ignore_loop", "0", "-t", "3.000000", "-i"]);
+    expect(opts("/sticker.png", "apng")).toEqual(["-stream_loop", "-1", "-t", "3.000000", "-i"]);
+    expect(opts("/meme.png", "gif")).toEqual(["-stream_loop", "-1", "-t", "3.000000", "-i"]);
+    // A JPEG saved as .gif: -stream_loop would HANG on it, so the content must win.
+    expect(opts("/photo.gif", "picture")).toEqual(["-loop", "1", "-framerate", "30", "-t", "3.000000", "-i"]);
+  });
+
+  // The WebP reader follows the file's own loop count (its only option that does not hang), so a
+  // play-once WebP ends early; the overlay passes an ended clip through, and it would vanish.
+  it("holds an animated WebP's last frame for the rest of its clip", () => {
+    const fc = (still_reader: string) =>
+      buildRenderCommand(
+        tl([{ media_ref: "/s.webp", timeline_in: 0, timeline_out: 3, still_reader }]),
+        "/o.mp4",
+      ).filterComplex;
+    expect(fc("webp_anim")).toContain("tpad=stop_mode=clone:stop_duration=3.000000");
+    expect(fc("picture")).not.toContain("tpad");
+  });
+
+  it("never shortens an animated still in a frame window, so the look shows the export's frame", () => {
+    const tenMinutes = (still_reader?: string) =>
+      buildRenderCommand(
+        tl([{ media_ref: "/s.gif", timeline_in: 0, timeline_out: 600, still_reader }]),
+        "/f.png",
+        {},
+        { frame: 30 * 540 },
+      ).args;
+    const lengthOf = (a: string[]) => a[a.indexOf("/s.gif") - 2];
+    expect(lengthOf(tenMinutes("gif"))).toBe("600.000000"); // plays from the clip's start, as exported
+    expect(Number(lengthOf(tenMinutes("picture")))).toBeLessThan(600); // a single picture may skip ahead
+  });
+
   it("loops images, honours a cover layout, opacity, and speed", () => {
     const img = buildRenderCommand(
       tl([{ media_ref: "/p.png", timeline_in: 0, timeline_out: 3 }]),
@@ -2172,6 +2214,53 @@ function pngHeader(w: number, h: number): Uint8Array {
     ...[24, 16, 8, 0].map((s) => (h >>> s) & 255),
   ]);
 }
+
+describe("resolveClipSources: the reader each still opens with", () => {
+  const GIF = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 10, 0, 10, 0, 0, 0, 0]);
+  const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46, 0]);
+  const ctxWith = (files: Record<string, Uint8Array>) => {
+    const fs = new (class extends BytesFs {
+      async exists(p: string): Promise<boolean> {
+        return this.bin.has(joinPath(p)) || super.exists(p);
+      }
+    })();
+    for (const [p, b] of Object.entries(files)) fs.bin.set(joinPath(`C:/proj/${p}`), b);
+    return { store: new ProjectStoreAccess("C:/proj", fs), runner: makeRunner() } as ClientToolContext;
+  };
+
+  it("records the reader found in each still's own bytes, whatever the file is called", async () => {
+    const ctx = ctxWith({ "library/meme.png": GIF, "library/photo.gif": JPEG });
+    const timeline = tl([
+      { media_ref: "library/meme.png", timeline_in: 0, timeline_out: 3 },
+      { media_ref: "library/photo.gif", timeline_in: 0, timeline_out: 3 },
+    ]);
+    await resolveClipSources(ctx, timeline);
+    expect(timeline.tracks[0].clips![0].still_reader).toBe("gif");
+    expect(timeline.tracks[1].clips![0].still_reader).toBe("picture");
+    // ...and the render follows the content: the JPEG named .gif is never given -stream_loop.
+    const args = buildRenderCommand(timeline, "/o.mp4").args;
+    const opts = (p: string) => {
+      const i = args.indexOf(joinPath(`C:/proj/${p}`));
+      return args.slice(i - 7, i);
+    };
+    expect(opts("library/photo.gif")).toEqual(["-loop", "1", "-framerate", "30", "-t", "3.000000", "-i"]);
+    expect(opts("library/meme.png").slice(-5)).toEqual(["-stream_loop", "-1", "-t", "3.000000", "-i"]);
+  });
+
+  it("records nothing for a still it cannot read, leaving the name's rule", async () => {
+    const ctx = ctxWith({});
+    const timeline = tl([{ media_ref: "library/gone.png", timeline_in: 0, timeline_out: 3 }]);
+    await resolveClipSources(ctx, timeline);
+    expect(timeline.tracks[0].clips![0].still_reader).toBeUndefined();
+  });
+
+  it("asks nothing of a video clip", async () => {
+    const ctx = ctxWith({ "library/a.mp4": GIF });
+    const timeline = tl([{ kind: "video", media_ref: "library/a.mp4", source_in: 0, source_out: 3, timeline_in: 0, timeline_out: 3 }]);
+    await resolveClipSources(ctx, timeline);
+    expect(timeline.tracks[0].clips![0].still_reader).toBeUndefined();
+  });
+});
 
 describe("runRenderPlan ΓÇö undecodable still backstop", () => {
   // The import fence stops NEW media, but a library authored before it ΓÇö or a linked file that

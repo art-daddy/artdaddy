@@ -32,6 +32,8 @@ export interface FsLike {
   /** Content-hash id, size and leading bytes of a file on disk, computed WITHOUT
    *  reading it into the webview. Optional (desktop only). */
   probeMedia?(path: string, headBytes: number): Promise<MediaProbe>;
+  /** The first `maxBytes` of a file, and nothing past them. Optional (desktop + e2e). */
+  readHead?(path: string, maxBytes: number): Promise<Uint8Array>;
   /** Size and file-vs-directory WITHOUT opening the file. Optional (desktop only).
    *  The cheap answer to both "how big is this?" and "is this a folder?" — asking either
    *  question by reading the file is what took a 16 GB machine down. */
@@ -553,6 +555,17 @@ export class ProjectStoreAccess {
   async probeMedia(path: string, headBytes = 64 * 1024): Promise<MediaProbe | null> {
     if (!this.fs.probeMedia) return null;
     return this.fs.probeMedia(path, headBytes);
+  }
+
+  /** The first `maxBytes` of a file, or null when it cannot be read. A filesystem without a head
+   *  read (tests) reads the whole file under the usual ceiling. */
+  async readHead(path: string, maxBytes: number): Promise<Uint8Array | null> {
+    try {
+      if (this.fs.readHead) return await this.fs.readHead(path, maxBytes);
+      return (await this.readBytes(path)).subarray(0, maxBytes);
+    } catch {
+      return null;
+    }
   }
 
   /** True when a file can be imported without its bytes passing through the webview. */

@@ -24,6 +24,7 @@ import { crfFor, outputFps, outputSize, type ExportOptions } from "./exportOptio
 import { clipKind, rendersAsStill } from "./helpers";
 import { extOf, kindOf, REPLAYED_STILL_EXTS } from "../media/formats";
 import { isHeifStill, stillPicture } from "../media/stillPicture";
+import { PROBE_BYTES, stillLoopArgs, stillReader, type StillReader } from "../media/stillReader";
 import type { Animatable, Clip, Timeline } from "./model";
 import { validateTimeline } from "./validate";
 import {
@@ -100,6 +101,17 @@ function peak(size: Animatable | undefined, fallback: number): number {
 /** Stills ffmpeg opens with a demuxer of their own (not image2), so they loop by replaying. */
 function isReplayedStill(path: string): boolean {
   return (REPLAYED_STILL_EXTS as readonly string[]).includes(extOf(path));
+}
+
+const STILL_READERS: readonly StillReader[] = ["picture", "gif", "apng", "webp_anim", "mov"];
+
+/** The reader a still opens with: the one resolveClipSources found in its bytes, or, where nothing
+ *  looked (a plan built straight from a document), the one its name suggests. */
+function readerOfStill(clip: Clip, path: string): StillReader {
+  const found = clip.still_reader;
+  if (STILL_READERS.includes(found as StillReader)) return found as StillReader;
+  if (!isReplayedStill(path)) return "picture";
+  return extOf(path) === "gif" ? "gif" : "mov";
 }
 
 /** The canvas the render composites at, in pixels: the authored size made even. */
@@ -643,6 +655,8 @@ interface Input {
   so: number;
   isImage: boolean;
   clipId: string;
+  /** A still's reader, which decides how it loops. */
+  reader?: StillReader;
   /** Frame window: the seek (video) or loop length (still) that replaces `si` / the clip span. */
   seekArg?: string;
   lengthArg?: string;
@@ -1010,6 +1024,7 @@ export function buildRenderCommand(
       so,
       isImage: isImg,
       clipId: pc.srcClipId,
+      ...(isImg ? { reader: readerOfStill(clip, String(clip.media_ref)) } : {}),
     };
     const span = onCanvasSec(pc);
     if (win) {
@@ -1031,7 +1046,11 @@ export function buildRenderCommand(
         );
         const deltaUs = (m * 1e6) / fps;
         // A video is only seeked when the seek moves a whole second, so its margin is never empty.
-        if (m > 0 && (isImg || deltaUs >= 1e6)) {
+        // A single picture skips ahead by shortening its loop; an ANIMATED still never does, because
+        // its frame at the window depends on where its own loop is (measured: seeking a looped GIF
+        // decodes every earlier loop anyway), so it plays from the clip's start as in the export.
+        const skips = isImg ? input.reader === "picture" : deltaUs >= 1e6;
+        if (m > 0 && skips) {
           shift = { k: clones + m, m };
           if (isImg) input.lengthArg = fmtUs(usOf(so - si) - deltaUs);
           else {
@@ -1103,11 +1122,9 @@ export function buildRenderCommand(
     const dur = Math.max(0, inp.so - inp.si);
     if (inp.isImage)
       cmd.push(
-        // `-loop 1` belongs to the image-sequence reader; GIF and AVIF open with their own, which
-        // refuse it ("Option loop not found") and failed the whole export.
-        ...(isReplayedStill(inp.path)
-          ? ["-stream_loop", "-1"]
-          : ["-loop", "1", "-framerate", String(fps)]),
+        // Each reader loops with its own option, and the wrong one fails the export or hangs it
+        // (media/stillReader.ts).
+        ...stillLoopArgs(inp.reader ?? "picture", fps),
         "-t",
         inp.lengthArg ?? dur.toFixed(6),
         "-i",
@@ -1248,7 +1265,13 @@ export function buildRenderCommand(
     // extra frame can only cover a gap, never overrun the next clip. At speed 1 the source and
     // timeline frames are 1:1, so there is no gap to cover and the graph is left untouched.
     const retimed = Math.abs(r.speed - 1) > 1e-6;
-    const backPad = r.holdDur + (retimed ? 1 / fps : 0);
+    // An animated WebP plays by its own loop count, so one that plays once ends before its clip
+    // does, and the overlay passes an ended clip through: it would vanish. It holds its last frame.
+    const playsByOwnCount = inputs[r.inputIdx].reader === "webp_anim";
+    const backPad = Math.max(
+      r.holdDur + (retimed ? 1 / fps : 0),
+      playsByOwnCount ? Math.max(0, r.tout - r.tin) : 0,
+    );
     // A window that seeked past this clip's lead-in has no use for it; `shift.k` counts it instead.
     const frontPad = leadIn > 0 && !r.shift;
     if (frontPad || backPad > 0) {
@@ -1692,6 +1715,7 @@ export async function resolveClipSources(
   timeline: Timeline,
 ): Promise<string[]> {
   const warnings: string[] = [];
+  const readers = new Map<string, StillReader | null>(); // one head read per file, however often placed
   for (const track of timeline.tracks ?? []) {
     for (const clip of track.clips ?? []) {
       const src = typeof clip.media_ref === "string" ? clip.media_ref : "";
@@ -1722,6 +1746,17 @@ export async function resolveClipSources(
         const picture = await stillPicture(ctx.store, ctx.runner, clip.media_ref, ctx.signal);
         if ("path" in picture) clip.media_ref = picture.path;
         else warnings.push(`image clip ${clip.id ?? "?"}: ${picture.error}`);
+      }
+      // Which of ffmpeg's readers opens the still, from its own bytes: ffmpeg goes by content, and
+      // each reader takes a different loop option (media/stillReader.ts). Unreadable: the name rules.
+      if (clipKind(clip) === "image" && typeof clip.media_ref === "string") {
+        const path = clip.media_ref;
+        if (!readers.has(path)) {
+          const head = await ctx.store.readHead(path, PROBE_BYTES);
+          readers.set(path, head ? stillReader(head) : null);
+        }
+        const reader = readers.get(path);
+        if (reader) clip.still_reader = reader;
       }
       // ffmpeg rejects the ENTIRE graph with EINVAL when a `[N:a]` names a source with no audio
       // stream, so one such clip takes down every export AND every inspect_timeline. Placement
