@@ -23,7 +23,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { describeGhFailure, stalePaths } from "./sidecarStaging.mjs";
+import { describeGhFailure, ffmpegPin, isPinnedBuild, stalePaths, verifySha256 } from "./sidecarStaging.mjs";
 import { checkWhisper } from "./smoke-whisper.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -54,6 +54,7 @@ const onlyIdx = argv.indexOf("--only");
 const only = onlyIdx >= 0 && argv[onlyIdx + 1] ? new Set(argv[onlyIdx + 1].split(",")) : null;
 
 const triple = process.env.TARGET_TRIPLE || hostTriple();
+const nativeBuild = triple === hostTriple();
 const osName = triple.includes("windows") ? "win" : triple.includes("darwin") ? "mac" : "linux";
 const ext = osName === "win" ? ".exe" : "";
 mkdirSync(binariesDir, { recursive: true });
@@ -70,6 +71,22 @@ async function download(url, dest) {
   writeFileSync(dest, Buffer.from(await res.arrayBuffer()));
   return dest;
 }
+async function downloadPinned({ url, sha256 }, dest) {
+  console.log(`  GET ${url}`);
+  const res = await fetch(url, { redirect: "follow" });
+  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+  const bytes = Buffer.from(await res.arrayBuffer());
+  verifySha256(bytes, sha256, url);
+  writeFileSync(dest, bytes);
+  return dest;
+}
+/** What a staged ffmpeg/ffprobe says it is (empty when it cannot run here). */
+function stagedVersion(name) {
+  const r = spawnSync(staged(name), ["-hide_banner", "-version"], { encoding: "utf8", timeout: 30_000 });
+  return `${r.stdout ?? ""}${r.stderr ?? ""}`;
+}
+const stagedFfmpegIsPinned = () =>
+  ["ffmpeg", "ffprobe"].every((n) => isPinnedBuild(stagedVersion(n), ffmpegPin(triple)));
 function extract(archive, outDir) {
   mkdirSync(outDir, { recursive: true });
   execSync(`tar -xf "${archive}" -C "${outDir}"`, { stdio: "inherit" }); // bsdtar handles .zip + .tar.*
@@ -117,30 +134,21 @@ async function fetchYtDlp() {
 }
 
 async function fetchFfmpeg() {
+  const pin = ffmpegPin(triple);
   if (osName === "mac") {
     // NOT evermeet.cx: it publishes x86_64 ONLY, so an Apple Silicon app got an Intel
     // ffmpeg that needs Rosetta — a missing binary with extra steps. These are static
     // arm64/amd64 builds. The `lipo -archs` gate in the macOS workflow is what caught it.
-    const arch = triple.startsWith("aarch64") ? "arm64" : "amd64";
-    for (const n of ["ffmpeg", "ffprobe"]) {
+    for (const archive of pin.archives) {
+      const n = archive.name;
       const out = join(tmp, `${n}-out`);
-      extract(
-        await download(
-          `https://ffmpeg.martin-riedl.de/redirect/latest/macos/${arch}/release/${n}.zip`,
-          join(tmp, `${n}.zip`),
-        ),
-        out,
-      );
+      extract(await downloadPinned(archive, join(tmp, `${n}.zip`)), out);
       stage(n, join(out, n));
     }
     return;
   }
-  const url =
-    osName === "win"
-      ? "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
-      : "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz";
   const out = join(tmp, "ffmpeg-out");
-  extract(await download(url, join(tmp, `ffmpeg-arc`)), out);
+  extract(await downloadPinned(pin.archives[0], join(tmp, `ffmpeg-arc`)), out);
   const top = firstDir(out);
   stage("ffmpeg", join(out, top, "bin", `ffmpeg${ext}`));
   stage("ffprobe", join(out, top, "bin", `ffprobe${ext}`));
@@ -408,8 +416,13 @@ async function main() {
   for (const [key, fn, produces] of TASKS) {
     if (!produces.some(want)) continue;
     if (!force && produces.every((n) => existsSync(staged(n)))) {
-      console.log(`  skip ${key} (already staged; --force to refetch)`);
-      continue;
+      // A staged ffmpeg from before the pin (or an older pin) is replaced, never kept.
+      if (key === "ffmpeg" && nativeBuild && !stagedFfmpegIsPinned()) {
+        console.log(`  ${key} is staged but is not the pinned ${ffmpegPin(triple).version}; refetching`);
+      } else {
+        console.log(`  skip ${key} (already staged; --force to refetch)`);
+        continue;
+      }
     }
     try {
       await fn();
@@ -440,6 +453,23 @@ async function main() {
     console.log(
       `[fetch-sidecars] verified all ${required.length} externalBin present for ${triple}.`,
     );
+  }
+
+  // The artifact, not the download: a failed fetch is only a warning above and would leave an
+  // older ffmpeg staged, which every guard so far accepts. A cross build cannot run its binaries.
+  if (want("ffmpeg") || want("ffprobe")) {
+    const pin = ffmpegPin(triple);
+    if (!nativeBuild) {
+      console.log(`[fetch-sidecars] ${triple} cannot run here; its ffmpeg pin is checked on a native build.`);
+    } else {
+      const off = ["ffmpeg", "ffprobe"].filter((n) => !isPinnedBuild(stagedVersion(n), pin));
+      if (off.length) {
+        console.error(`\n[fetch-sidecars] staged ${off.join(" and ")} is not the pinned ${pin.version}:`);
+        for (const n of off) console.error(`  ${staged(n)}: ${stagedVersion(n).split(/\r?\n/)[0] || "(did not run)"}`);
+        process.exit(1);
+      }
+      console.log(`[fetch-sidecars] verified ffmpeg and ffprobe are the pinned ${pin.version}.`);
+    }
   }
 
   // Guard (RF5): the WINDOWS whisper.cpp sidecar is a DYNAMIC build — it can't load

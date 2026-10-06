@@ -1,7 +1,111 @@
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
-import { describeGhFailure, stalePaths } from "./sidecarStaging.mjs";
+import {
+  describeGhFailure,
+  ffmpegPin,
+  FFMPEG_PINS,
+  isPinnedBuild,
+  stalePaths,
+  verifySha256,
+} from "./sidecarStaging.mjs";
+
+const here = dirname(fileURLToPath(import.meta.url));
+
+describe("the ffmpeg each platform ships is pinned", () => {
+  // Every triple a release workflow builds, read from the workflows themselves (Windows builds on
+  // the runner's own triple, which the workflow does not spell out).
+  const releaseTriples = [
+    "x86_64-pc-windows-msvc",
+    ...["macos-release.yml", "linux-release.yml"].map((f) => {
+      const yml = readFileSync(join(here, "..", ".github", "workflows", f), "utf8");
+      return yml.match(/^\s*TRIPLE:\s*(\S+)/m)[1];
+    }),
+  ];
+
+  it("has a pin for every triple a release builds", () => {
+    for (const t of releaseTriples) expect(ffmpegPin(t), t).toBeTruthy();
+  });
+
+  it("pins only URLs that cannot move, each with the SHA-256 of what it serves", () => {
+    const all = Object.values(FFMPEG_PINS).flatMap((p) => p.archives);
+    expect(all.length).toBeGreaterThan(0);
+    for (const a of all) {
+      expect(a.url, a.url).not.toMatch(/latest|\/redirect\//i);
+      expect(a.url, a.url).toMatch(/^https:\/\//);
+      expect(a.sha256, a.url).toMatch(/^[0-9a-f]{64}$/);
+    }
+  });
+
+  it("gives each mac binary its own archive and every other platform one archive", () => {
+    for (const t of releaseTriples) {
+      const p = ffmpegPin(t);
+      if (t.includes("darwin")) expect(p.archives.map((a) => a.name).sort()).toEqual(["ffmpeg", "ffprobe"]);
+      else expect(p.archives).toHaveLength(1);
+    }
+  });
+
+  it("refuses a platform it has no pin for, rather than guessing one", () => {
+    expect(() => ffmpegPin("riscv64gc-unknown-linux-gnu")).toThrow(/no pinned ffmpeg/i);
+  });
+});
+
+describe("isPinnedBuild", () => {
+  const btbn = { version: "N-127021-ge0c94b2d1c" };
+  const riedl = { version: "9.0.2" };
+
+  it("accepts the version lines the pinned builds actually print", () => {
+    expect(isPinnedBuild("ffmpeg version N-127021-ge0c94b2d1c-20260930 Copyright (c) 2000-2026", btbn)).toBe(true);
+    expect(isPinnedBuild("ffprobe version N-127021-ge0c94b2d1c-20260930 Copyright", btbn)).toBe(true);
+    expect(isPinnedBuild("ffmpeg version 9.0.2-https://www.martin-riedl.de Copyright (c) 2000-2026", riedl)).toBe(true);
+  });
+
+  // The binary this PC had staged before the pin: it must be refetched, not kept.
+  it("rejects the build that was staged before the pin", () => {
+    expect(isPinnedBuild("ffmpeg version N-126655-gbfac54a03b-20260919 Copyright", btbn)).toBe(false);
+  });
+
+  it("does not take a longer version for its prefix", () => {
+    expect(isPinnedBuild("ffmpeg version 9.0.20-https://x Copyright", riedl)).toBe(false);
+    expect(isPinnedBuild("ffmpeg version N-1270210-gabc Copyright", { version: "N-127021" })).toBe(false);
+  });
+
+  it("rejects output that is not a version line at all", () => {
+    for (const out of ["", "is deprecated", "version N-127021-ge0c94b2d1c", "ffmpeg: not found"])
+      expect(isPinnedBuild(out, btbn), JSON.stringify(out)).toBe(false);
+  });
+
+  it("accepts nothing but the pinned build, whatever the version string", () => {
+    fc.assert(
+      fc.property(fc.stringMatching(/^[A-Za-z0-9.+~-]{1,30}$/), (v) => {
+        const ok = isPinnedBuild(`ffmpeg version ${v} Copyright`, btbn);
+        expect(ok).toBe(v === btbn.version || v.startsWith(`${btbn.version}-`));
+      }),
+    );
+  });
+});
+
+describe("verifySha256", () => {
+  const bytes = Buffer.from("the archive the pin names");
+  const digest = createHash("sha256").update(bytes).digest("hex");
+
+  it("passes the bytes the pin names", () => {
+    expect(() => verifySha256(bytes, digest, "https://example/a.zip")).not.toThrow();
+  });
+
+  it("refuses one changed byte, naming the URL and both digests", () => {
+    const changed = Buffer.from(bytes);
+    changed[0] ^= 1;
+    expect(() => verifySha256(changed, digest, "https://example/a.zip")).toThrow(
+      new RegExp(`https://example/a\\.zip.*${digest}`, "s"),
+    );
+  });
+});
 
 describe("stalePaths", () => {
   it("prunes the file that actually survived: SDL2.dll from the pre-Vulkan zip", () => {
