@@ -34,6 +34,9 @@ tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 trash = "5"
 sha2 = "0.10"
 keyring = "4"
+# The sidecar runner's progress timer (sidecar_run.rs). Already in the lock through tauri and the
+# shell plugin, which uses the same timer, so nothing new is fetched.
+tokio = { version = "1", features = ["time"] }
 
 # Tests only. The fs capability is a list of GLOBS, and whether one of them actually matches a
 # path on a second drive is not something reading the JSON can answer — a project on D:\ failed

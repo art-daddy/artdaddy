@@ -1,15 +1,13 @@
-// The Tauri capability file is the ONLY thing standing between the runner and a
-// silent no-op: it is compiled into the binary, so a missing grant fails at
-// RUNTIME, in the shipped app, with no build error and no test failure.
+// The Tauri capability file is compiled into the binary, so a wrong grant fails at RUNTIME, in
+// the shipped app, with no build error and no test failure.
 //
-// Two real bugs shipped through this gap. `shell:allow-spawn` was missing, so
-// every CANCELLABLE sidecar call (i.e. every agent tool call) died with
-// "not allowed" while the non-cancellable paths a human clicks kept working.
-// Then `shell:allow-kill` was missing, so Stop could not kill anything — the
-// rejected kill was swallowed and ffmpeg/yt-dlp ran to completion after cancel.
-//
-// This test pins the grants to what the runner actually calls, so removing one
-// (or adding a sidecar without granting it) fails here instead of in the wild.
+// Three real bugs shipped through it. `shell:allow-spawn` was missing, so every CANCELLABLE
+// sidecar call (every agent tool call) died with "not allowed". Then `shell:allow-kill` was
+// missing, so Stop could not kill anything. Then the spawn grant itself was the bug: the page
+// received every chunk a process wrote as its own message, and a few chatty runs at once
+// overflowed the page thread's queue and froze the app's IPC (2026-10-07). Processes now start
+// through the app's own `sidecar_run`, which keeps output out of the page until the run ends;
+// the page holds no shell grant, so nothing can quietly go back to the old path.
 import fs from "node:fs";
 import path from "node:path";
 
@@ -17,54 +15,27 @@ import { describe, expect, it } from "vitest";
 
 import { packagedSidecarName, SIDECAR_BINS } from "./sidecar";
 
-interface ScopedPermission {
-  identifier: string;
-  allow?: { name?: string; sidecar?: boolean; args?: boolean }[];
-}
-type Permission = string | ScopedPermission;
+type Permission = string | { identifier: string };
 
 const capability = JSON.parse(
   fs.readFileSync(path.resolve(__dirname, "../../src-tauri/capabilities/default.json"), "utf8"),
 ) as { permissions: Permission[] };
+const config = JSON.parse(
+  fs.readFileSync(path.resolve(__dirname, "../../src-tauri/tauri.conf.json"), "utf8"),
+) as { bundle: { externalBin: string[] } };
 
 const identifiers = capability.permissions.map((p) => (typeof p === "string" ? p : p.identifier));
-const scoped = (id: string): ScopedPermission | undefined =>
-  capability.permissions.find(
-    (p): p is ScopedPermission => typeof p !== "string" && p.identifier === id,
-  );
 
-describe("tauri shell capabilities", () => {
-  // execute() runs a plain call; spawn() is used whenever a Stop signal is present.
-  it.each(["shell:allow-execute", "shell:allow-spawn"])("grants %s to every sidecar", (id) => {
-    const perm = scoped(id);
-    expect(perm, `${id} missing from capabilities/default.json`).toBeDefined();
-    const granted = new Set((perm!.allow ?? []).map((a) => a.name));
+describe("sidecar capabilities", () => {
+  it("grants the page no shell permission: processes start only through the app's runner", () => {
+    expect(identifiers.filter((id) => id.startsWith("shell:"))).toEqual([]);
+  });
+
+  // sidecar_run accepts exactly the bundle's externalBin entries, so a program the runner may
+  // ask for that the bundle does not ship fails here instead of in a user's tool call.
+  it("bundles every program the runner may ask for, under its packaged name", () => {
     for (const bin of SIDECAR_BINS) {
-      expect(granted).toContain(`binaries/${packagedSidecarName(bin)}`);
-    }
-  });
-
-  it("grants shell:allow-kill so Stop can actually kill a running sidecar", () => {
-    // Without this the kill is REJECTED and the process runs to completion while
-    // the UI claims the turn was cancelled.
-    expect(identifiers).toContain("shell:allow-kill");
-  });
-
-  it("passes args to every sidecar (they are all argument-driven)", () => {
-    for (const id of ["shell:allow-execute", "shell:allow-spawn"]) {
-      for (const entry of scoped(id)!.allow ?? []) {
-        expect(entry.args, `${id} ${entry.name} must allow args`).toBe(true);
-        expect(entry.sidecar, `${id} ${entry.name} must be a sidecar`).toBe(true);
-      }
-    }
-  });
-
-  it("grants nothing beyond the sidecars we ship", () => {
-    const packaged = new Set([...SIDECAR_BINS].map(packagedSidecarName));
-    for (const id of ["shell:allow-execute", "shell:allow-spawn"]) {
-      for (const entry of scoped(id)!.allow ?? []) {
-        expect(packaged).toContain(String(entry.name).replace("binaries/", ""));
-      }
+      expect(config.bundle.externalBin).toContain(`binaries/${packagedSidecarName(bin)}`);
     }
   });
 });

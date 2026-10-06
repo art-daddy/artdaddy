@@ -7,27 +7,6 @@
     "core:default",
     "core:window:allow-close",
     "core:window:allow-destroy",
-    {
-      "identifier": "shell:allow-execute",
-      "allow": [
-        { "name": "binaries/artdaddy-ffmpeg", "sidecar": true, "args": true },
-        { "name": "binaries/artdaddy-ffprobe", "sidecar": true, "args": true },
-        { "name": "binaries/artdaddy-yt-dlp", "sidecar": true, "args": true },
-        { "name": "binaries/artdaddy-whisper-cli", "sidecar": true, "args": true },
-        { "name": "binaries/artdaddy-browser", "sidecar": true, "args": true }
-      ]
-    },
-    {
-      "identifier": "shell:allow-spawn",
-      "allow": [
-        { "name": "binaries/artdaddy-ffmpeg", "sidecar": true, "args": true },
-        { "name": "binaries/artdaddy-ffprobe", "sidecar": true, "args": true },
-        { "name": "binaries/artdaddy-yt-dlp", "sidecar": true, "args": true },
-        { "name": "binaries/artdaddy-whisper-cli", "sidecar": true, "args": true },
-        { "name": "binaries/artdaddy-browser", "sidecar": true, "args": true }
-      ]
-    },
-    "shell:allow-kill",
     "fs:allow-read-text-file",
     "fs:allow-write-text-file",
     "fs:allow-read-file",

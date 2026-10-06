@@ -1,8 +1,7 @@
-// Tauri-only bindings: run binaries via the shell plugin, touch files via the fs
+// Tauri-only bindings: run binaries through the app's sidecar runner, touch files via the fs
 // plugin. Imported only from the tool host's default context factory (which runs
 // solely inside the Tauri webview), so the browser bundle/tests never load the
 // Tauri plugins.
-import { Command, type Child } from "@tauri-apps/plugin-shell";
 import {
   copyFile,
   exists,
@@ -17,14 +16,42 @@ import {
   writeTextFile,
 } from "@tauri-apps/plugin-fs";
 import { downloadDir, resolveResource } from "@tauri-apps/api/path";
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 
 import type { CommandResult, CommandRunner } from "./command";
 import type { ClientToolContext } from "./context";
-import { decodeCommandOutput as decode } from "./decode";
 import { ffmpegPolicy } from "./ffmpegPolicy";
-import { BROWSER_BIN, resolveSidecar } from "./sidecar";
+import { BROWSER_BIN, packagedSidecarName, resolveSidecar } from "./sidecar";
 import { type DirEntry, type FsLike, ProjectStoreAccess } from "./store";
+
+/** A run as the app's runner (`sidecar_run`, src-tauri/src/sidecar_run.rs) takes it. */
+interface SidecarSpec {
+  /** The packaged sidecar name, e.g. "artdaddy-ffmpeg". */
+  program: string;
+  args: string[];
+  cwd: string | null;
+}
+
+/** What `sidecar_run` hands back when the process ends. */
+interface SidecarOutput {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+  /** Progress messages it sent; the run resolves once all of them have been handed on. */
+  progress_sent: number;
+}
+
+/** After a run's result arrives, how long to wait for progress messages still on their way.
+ *  They normally land within milliseconds; this only bounds a message that was lost. */
+const PROGRESS_GRACE_MS = 1000;
+
+let runSeq = 0;
+const runPrefix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+/** Unique per app process: ids from a page that reloaded must not collide with the old page's. */
+function newRunId(): string {
+  runSeq += 1;
+  return `${runPrefix}-${runSeq}`;
+}
 
 export class TauriCommandRunner implements CommandRunner {
   async run(
@@ -34,23 +61,12 @@ export class TauriCommandRunner implements CommandRunner {
     cwd?: string,
     onStdout?: (chunk: string) => void,
   ): Promise<CommandResult> {
-    // Capture stdout/stderr as RAW BYTES and decode leniently (see decode.ts).
-    // The default string encoding does a STRICT utf-8 decode that THROWS on the
-    // first non-utf-8 byte — which yt-dlp/ffprobe/ffmpeg readily emit on Windows
-    // (e.g. a cp1252 smart-quote in a "Sign in to confirm you're not a bot"
-    // error). That masked real errors as an opaque "invalid utf-8 sequence".
     if (signal?.aborted) return { code: -1, stdout: "", stderr: "cancelled" };
     try {
       // Every production ffmpeg passes here, so the app's ffmpeg rules are applied here and
       // nowhere else (ffmpegPolicy.ts: AAC is always encoded at 48 kHz).
-      const cmd = await this.build(program, ffmpegPolicy(program, args), cwd);
-      // execute() buffers, so it can never report progress — spawn whenever the caller wants
-      // either cancellation or live output.
-      if (!signal && !onStdout) {
-        const out = await cmd.execute();
-        return { code: out.code ?? -1, stdout: decode(out.stdout), stderr: decode(out.stderr) };
-      }
-      return await runCancellable(cmd, signal, program, onStdout);
+      const spec = await this.build(program, ffmpegPolicy(program, args), cwd);
+      return await runInApp(spec, program, signal, onStdout);
     } catch (e) {
       // Never throw: surface a spawn failure as a structured result so the tool
       // returns a readable error instead of rejecting with a raw exception.
@@ -60,12 +76,13 @@ export class TauriCommandRunner implements CommandRunner {
 
   // The browser sidecar is a Node-sidecar: the bundled Node runtime runs the bundled
   // Playwright script (shipped as a resource). The others are direct sidecars.
-  private async build(program: string, args: string[], cwd?: string): Promise<Command<Uint8Array>> {
+  private async build(program: string, args: string[], cwd?: string): Promise<SidecarSpec> {
     if (program === BROWSER_BIN) {
       const script = await resolveResource(`resources/${BROWSER_BIN}.mjs`);
-      return Command.sidecar(`binaries/${BROWSER_BIN}`, [script, ...args], { encoding: "raw" });
+      return { program: BROWSER_BIN, args: [script, ...args], cwd: null };
     }
-    const r = resolveSidecar(program);
+    if (!resolveSidecar(program).sidecar) throw new Error(`'${program}' is not a bundled program`);
+    const name = packagedSidecarName(program);
     if (program === "whisper-cli") {
       // The Windows whisper.cpp sidecar is a DYNAMIC build: it needs its runtime
       // DLLs (ggml*.dll, whisper.dll) at load time. They ship as a bundled
@@ -79,14 +96,9 @@ export class TauriCommandRunner implements CommandRunner {
       const dllDir = isWindows()
         ? stripVerbatim(await resolveResource("resources/whisper").catch(() => ""))
         : "";
-      const opts =
-        dllDir && (await dllDirUsable(dllDir))
-          ? { encoding: "raw" as const, cwd: dllDir }
-          : { encoding: "raw" as const };
-      return Command.sidecar(r.path, args, opts);
+      return { program: name, args, cwd: dllDir && (await dllDirUsable(dllDir)) ? dllDir : null };
     }
-    const opts = cwd ? { encoding: "raw" as const, cwd } : { encoding: "raw" as const };
-    return r.sidecar ? Command.sidecar(r.path, args, opts) : Command.create(r.path, args, opts);
+    return { program: name, args, cwd: cwd ?? null };
   }
 }
 
@@ -125,40 +137,23 @@ async function dllDirUsable(dir: string): Promise<boolean> {
   }
 }
 
-/** Terminate a sidecar and everything it spawned. A failure here is NEVER silent:
- *  it means the process keeps running (burning CPU, still writing its output)
- *  while the UI reports the turn cancelled. */
-async function killTree(pid: number | undefined, program: string): Promise<void> {
-  if (pid === undefined) return;
-  try {
-    await invoke("kill_process_tree", { pid });
-  } catch (e) {
-    console.error(`[shell] could not kill ${program} (pid ${pid}) on Stop — it keeps running:`, e);
-  }
-}
-
-/** Spawn a command and resolve on close, KILLING the child if `signal` aborts
- *  (Stop). Accumulates raw stdout/stderr bytes and decodes them like execute(), and hands each
- *  stdout chunk to `onStdout` as it lands so a long job can report progress. */
-async function runCancellable(
-  cmd: Command<Uint8Array>,
-  signal: AbortSignal | undefined,
+/** Run `spec` in the app and resolve with what it wrote, KILLING it if `signal` aborts (Stop).
+ *
+ *  The process's output stays in the app until it ends and comes back as this run's one
+ *  result. With `onStdout`, stdout also arrives as it is written, coalesced by the app to a few
+ *  messages a second however fast the process writes: the plugin's per-chunk events overflowed
+ *  the page thread's queue, which lost runs' exits and froze the app's IPC (2026-10-07). */
+function runInApp(
+  spec: SidecarSpec,
   program: string,
+  signal: AbortSignal | undefined,
   onStdout?: (chunk: string) => void,
 ): Promise<CommandResult> {
+  const runId = newRunId();
   return new Promise<CommandResult>((resolve) => {
-    const out: number[] = [];
-    const err: number[] = [];
-    let child: Child | null = null;
     let settled = false;
-    const push = (buf: number[], chunk: unknown): void => {
-      if (chunk instanceof Uint8Array) for (let i = 0; i < chunk.length; i += 1) buf.push(chunk[i]);
-      else if (Array.isArray(chunk)) for (const b of chunk) buf.push(Number(b));
-      else if (typeof chunk === "string") {
-        const e = new TextEncoder().encode(chunk);
-        for (let i = 0; i < e.length; i += 1) buf.push(e[i]);
-      }
-    };
+    let received = 0;
+    let arrived: { sent: number; result: CommandResult } | null = null;
     const finish = (r: CommandResult): void => {
       if (settled) return;
       settled = true;
@@ -166,42 +161,46 @@ async function runCancellable(
       resolve(r);
     };
     const onAbort = (): void => {
-      // Kill the whole TREE, not just the direct child: yt-dlp re-execs itself and
-      // that worker spawns ffmpeg, so signalling the child alone leaves the job
-      // running and it finishes the download the user just cancelled. Tree first,
-      // while the parent still exists to enumerate descendants from.
-      void killTree(child?.pid, program);
-      // Plugin-side bookkeeping; the tree kill above is the authoritative one and
-      // reports its own failure, so a "process already gone" here is expected.
-      void child?.kill().catch(() => undefined);
-      finish({ code: -1, stdout: decode(out), stderr: "cancelled" });
+      // The app kills the whole TREE, not just the direct child: yt-dlp re-execs itself and
+      // that worker spawns ffmpeg, so signalling the child alone would leave the job running.
+      // A run that has not started yet is marked so it never does.
+      invoke("sidecar_kill", { runId }).catch((e: unknown) => {
+        console.error(`[shell] could not kill ${program} on Stop — it keeps running:`, e);
+      });
+      finish({ code: -1, stdout: "", stderr: "cancelled" });
     };
-    cmd.stdout.on("data", (c) => {
-      push(out, c);
-      if (!onStdout) return;
-      // Decode only the new bytes: re-decoding the whole buffer every chunk is quadratic over a
-      // render that emits thousands of progress blocks.
-      try {
-        onStdout(decode(c as Uint8Array));
-      } catch {
-        /* a progress consumer must never be able to fail the render */
+    const channel = new Channel<string>();
+    channel.onmessage = (chunk) => {
+      received += 1;
+      if (onStdout && !settled) {
+        try {
+          onStdout(chunk);
+        } catch {
+          /* a progress consumer must never be able to fail the run */
+        }
       }
-    });
-    cmd.stderr.on("data", (c) => push(err, c));
-    cmd.on("close", (d: { code: number | null }) =>
-      finish({ code: d?.code ?? -1, stdout: decode(out), stderr: decode(err) }),
-    );
-    cmd.on("error", (e) =>
-      finish({ code: -1, stdout: decode(out), stderr: `command error: ${String(e)}` }),
-    );
-    cmd
-      .spawn()
-      .then((c) => {
-        child = c;
-        if (signal?.aborted) onAbort();
-        else signal?.addEventListener("abort", onAbort, { once: true });
+      if (arrived && received >= arrived.sent) finish(arrived.result);
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    invoke<SidecarOutput>("sidecar_run", {
+      runId,
+      program: spec.program,
+      args: spec.args,
+      cwd: spec.cwd,
+      progress: onStdout !== undefined,
+      onStdout: channel,
+    })
+      .then((o) => {
+        // The process has ended: from here a Stop has nothing left to stop.
+        signal?.removeEventListener("abort", onAbort);
+        const result = { code: o.code ?? -1, stdout: o.stdout, stderr: o.stderr };
+        if (received >= o.progress_sent) return finish(result);
+        // Progress travels apart from the result; hand on the rest before resolving, so a
+        // late message cannot move a finished job's bar. A lost one must not hang the run.
+        arrived = { sent: o.progress_sent, result };
+        setTimeout(() => finish(result), PROGRESS_GRACE_MS);
       })
-      .catch((e) => finish({ code: -1, stdout: "", stderr: `spawn failed: ${String(e)}` }));
+      .catch((e: unknown) => finish({ code: -1, stdout: "", stderr: `spawn failed: ${String(e)}` }));
   });
 }
 

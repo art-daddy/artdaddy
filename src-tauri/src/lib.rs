@@ -4,6 +4,8 @@ mod jobs;
 mod mcp;
 mod reload_guard;
 #[cfg(desktop)]
+mod sidecar_run;
+#[cfg(desktop)]
 mod token_store;
 
 /// Move a file or directory to the OS Recycle Bin / Trash (recoverable) instead of
@@ -337,6 +339,8 @@ pub fn run() {
     .plugin(tauri_plugin_updater::Builder::new().build())
     // After the shell plugin: its jobs run the shell's sidecars.
     .plugin(jobs::plugin())
+    // The page's own sidecar runs (every tool's ffmpeg/ffprobe/whisper/yt-dlp/browser).
+    .plugin(sidecar_run::plugin())
     .manage(StagedUpdate::default())
     .invoke_handler(tauri::generate_handler![
       trash_path,
@@ -363,6 +367,8 @@ pub fn run() {
       jobs::jobs_commit,
       jobs::jobs_forget,
       jobs::jobs_launch_id,
+      sidecar_run::sidecar_run,
+      sidecar_run::sidecar_kill,
       mcp::mcp_start,
       mcp::mcp_stop,
       mcp::mcp_status,
