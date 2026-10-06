@@ -131,6 +131,14 @@ jobs:
           else
             cargo test --locked --manifest-path src-tauri/Cargo.toml
           fi
+      # ...and once with NO Secret Service at all, as on a Linux desktop without a keyring: sign-in
+      # must fall back to a file only the user can read. The store looks once per process, so this
+      # is its own run, pointed at a bus that does not exist.
+      - name: cargo test (Linux with no keyring service)
+        if: runner.os == 'Linux'
+        run: |
+          DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent/bus cargo test --locked --manifest-path src-tauri/Cargo.toml --lib \
+            -- --ignored --exact tests::without_a_secret_service_the_session_lives_in_a_private_file
 
   desktop:
     name: tauri desktop build (windows)

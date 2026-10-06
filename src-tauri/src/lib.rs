@@ -3,6 +3,8 @@ mod fdlimit;
 mod jobs;
 mod mcp;
 mod reload_guard;
+#[cfg(desktop)]
+mod token_store;
 
 /// Move a file or directory to the OS Recycle Bin / Trash (recoverable) instead of
 /// deleting it irreversibly. Backs the client's project-delete path (`fs.trash`).
@@ -515,57 +517,90 @@ fn open_desktop_auth(app: tauri::AppHandle, url: String) -> Result<(), String> {
 }
 
 /// Where the desktop-auth refresh token lives: the OS's own secure credential store (macOS
-/// Keychain / Windows Credential Manager / Linux Secret Service), never a plain file — a JSON
-/// file next to the rest of app data would be no more protected than writing it in plaintext.
+/// Keychain / Windows Credential Manager / Linux Secret Service). On Linux with no Secret Service
+/// at all, a file only the user can read instead (token_store.rs).
 #[cfg(desktop)]
 const KEYCHAIN_SERVICE: &str = "com.artdaddy.app";
 #[cfg(desktop)]
 const KEYCHAIN_ACCOUNT: &str = "desktop-auth-refresh-token";
 
-#[cfg(desktop)]
+#[cfg(all(desktop, test))]
 fn store_refresh_token_at(service: &str, account: &str, token: &str) -> Result<(), String> {
-  keyring::Entry::new(service, account)
-    .and_then(|e| e.set_password(token))
-    .map_err(|e| e.to_string())
+  use token_store::Vault;
+  token_store::KeyringVault { service, account }.store(token)
 }
 
-#[cfg(desktop)]
+#[cfg(all(desktop, test))]
 fn load_refresh_token_at(service: &str, account: &str) -> Option<String> {
-  keyring::Entry::new(service, account)
-    .ok()
-    .and_then(|e| e.get_password().ok())
+  use token_store::Vault;
+  token_store::KeyringVault { service, account }.load().ok().flatten()
+}
+
+#[cfg(all(desktop, test))]
+fn clear_refresh_token_at(service: &str, account: &str) -> Result<(), String> {
+  use token_store::Vault;
+  token_store::KeyringVault { service, account }.clear()
+}
+
+/// The OS credential store when the OS has one (the Linux store finds out once per process), and
+/// on Linux the private file the session falls back to without one.
+#[cfg(desktop)]
+fn token_vaults(
+  app: &tauri::AppHandle,
+) -> (Option<token_store::KeyringVault<'static>>, Option<token_store::FileVault>) {
+  #[cfg(target_os = "linux")]
+  let config = {
+    use tauri::Manager;
+    app.path().app_config_dir().ok()
+  };
+  #[cfg(not(target_os = "linux"))]
+  let config = {
+    let _ = app;
+    None
+  };
+  token_vaults_at(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, config)
 }
 
 #[cfg(desktop)]
-fn clear_refresh_token_at(service: &str, account: &str) -> Result<(), String> {
-  match keyring::Entry::new(service, account) {
-    Ok(e) => match e.delete_credential() {
-      Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-      Err(e) => Err(e.to_string()),
-    },
-    Err(e) => Err(e.to_string()),
-  }
+fn token_vaults_at<'a>(
+  service: &'a str,
+  account: &'a str,
+  config_dir: Option<std::path::PathBuf>,
+) -> (Option<token_store::KeyringVault<'a>>, Option<token_store::FileVault>) {
+  let keyring = keyring::Entry::store_status()
+    .is_ok()
+    .then_some(token_store::KeyringVault { service, account });
+  let file = config_dir.map(|dir| token_store::FileVault { path: dir.join("auth").join("refresh-token") });
+  (keyring, file)
+}
+
+#[cfg(desktop)]
+fn as_vault<V: token_store::Vault>(v: &Option<V>) -> Option<&dyn token_store::Vault> {
+  v.as_ref().map(|v| v as &dyn token_store::Vault)
 }
 
 #[cfg(desktop)]
 #[tauri::command]
-fn store_refresh_token(token: String) -> Result<(), String> {
-  store_refresh_token_at(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, &token)
+fn store_refresh_token(app: tauri::AppHandle, token: String) -> Result<(), String> {
+  let (keyring, file) = token_vaults(&app);
+  token_store::store(as_vault(&keyring), as_vault(&file), &token)
 }
 
 /// `None` covers BOTH "never signed in" and "the OS has no entry" identically — callers must
 /// treat either as "no session", not as an error worth surfacing.
 #[cfg(desktop)]
 #[tauri::command]
-fn load_refresh_token() -> Option<String> {
-  load_refresh_token_at(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
+fn load_refresh_token(app: tauri::AppHandle) -> Option<String> {
+  let (keyring, file) = token_vaults(&app);
+  token_store::load(as_vault(&keyring), as_vault(&file))
 }
 
 /// Idempotent: signing out (or a rejected/rotated token) clears the entry even if none exists.
 #[cfg(desktop)]
 #[tauri::command]
-fn clear_refresh_token() -> Result<(), String> {
-  clear_refresh_token_at(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
+fn clear_refresh_token(app: tauri::AppHandle) -> Result<(), String> {
+  let (keyring, file) = token_vaults(&app);
+  token_store::clear(as_vault(&keyring), as_vault(&file))
 }
 
 /// Where Claude Desktop lives, or None when it is not installed.
@@ -1386,5 +1421,64 @@ mod tests {
     assert_eq!(super::load_refresh_token_at(service, account), None);
     // Idempotent: signing out twice, or a callback that races a manual sign-out, must not error.
     assert!(super::clear_refresh_token_at(service, account).is_ok());
+  }
+
+  // A session saved while there was no keyring, and the keyring back holding an OLDER token: the
+  // file's (newest) token is the one used, and the next rotation moves the session into the
+  // keyring and removes the file. The real credential store, through the commands' own wiring.
+  #[test]
+  #[cfg(desktop)]
+  fn a_session_saved_without_a_keyring_moves_into_it_at_the_next_rotation() {
+    use super::token_store::{self, Vault};
+    let dir = std::env::temp_dir().join(format!("artdaddy-handover-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (keyring, file) =
+      super::token_vaults_at("com.artdaddy.app.test", "desktop-auth-refresh-token-handover", Some(dir.clone()));
+    let (k, f) = (super::as_vault(&keyring), super::as_vault(&file));
+    let keyring_entry = keyring.as_ref().expect("needs a credential store (ci.yml gives Linux one)");
+    let _ = token_store::clear(k, f);
+    keyring_entry.store("rt-old").unwrap();
+    file.as_ref().unwrap().store("rt-newest").unwrap();
+
+    assert_eq!(token_store::load(k, f), Some("rt-newest".to_string()));
+    token_store::store(k, f, "rt-rotated").unwrap();
+    assert_eq!(file.as_ref().unwrap().load(), Ok(None));
+    assert_eq!(keyring_entry.load(), Ok(Some("rt-rotated".to_string())));
+    assert_eq!(token_store::load(k, f), Some("rt-rotated".to_string()));
+
+    token_store::clear(k, f).unwrap();
+    assert_eq!(token_store::load(k, f), None);
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  // The owner's case (2026-10-06): Linux with no Secret Service at all. Sign-in is kept in a file
+  // only the user can read. Needs a process that never found a Secret Service (the store checks
+  // once per process), so ci.yml runs it alone with no session bus.
+  #[test]
+  #[cfg(all(desktop, target_os = "linux"))]
+  #[ignore = "needs a process with no Secret Service; ci.yml runs it with no session bus"]
+  fn without_a_secret_service_the_session_lives_in_a_private_file() {
+    use super::token_store;
+    use std::os::unix::fs::PermissionsExt;
+    assert!(keyring::Entry::store_status().is_err(), "this process must have no Secret Service");
+    let dir = std::env::temp_dir().join(format!("artdaddy-nokeyring-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (keyring, file) =
+      super::token_vaults_at("com.artdaddy.app.test", "desktop-auth-refresh-token-nokeyring", Some(dir.clone()));
+    assert!(keyring.is_none());
+    let (k, f) = (super::as_vault(&keyring), super::as_vault(&file));
+
+    token_store::store(k, f, "rt-1").unwrap();
+    assert_eq!(token_store::load(k, f), Some("rt-1".to_string()));
+    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&dir.join("auth")), 0o700);
+    assert_eq!(mode(&dir.join("auth").join("refresh-token")), 0o600);
+    token_store::store(k, f, "rt-2").unwrap();
+    assert_eq!(token_store::load(k, f), Some("rt-2".to_string()));
+
+    token_store::clear(k, f).unwrap();
+    assert_eq!(token_store::load(k, f), None);
+    assert!(!dir.join("auth").join("refresh-token").exists());
+    let _ = std::fs::remove_dir_all(&dir);
   }
 }

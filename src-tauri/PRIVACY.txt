@@ -1,6 +1,6 @@
 ARTDADDY PRIVACY POLICY
 
-Last reviewed 1 October 2026. The current version is always at https://artdaddy.app/privacy
+Last reviewed 6 October 2026. The current version is always at https://artdaddy.app/privacy
 
 ArtDaddy is a desktop application. Your footage, your projects and your edits stay on your computer. The only things that leave are the AI requests you explicitly make, plus the usage data described in full below.
 
@@ -30,6 +30,8 @@ If you never use an AI feature, none of this happens. ArtDaddy is a complete edi
 Your account
 
 Signing in stores your email address and display name, handled by Clerk. We use the email to identify your credit balance and to contact you about the product.
+
+To keep you signed in, the app saves a sign-in token on your computer, in your system's credential store (Keychain on macOS, Credential Manager on Windows, the Secret Service keyring on Linux). On Linux with no keyring service, it is saved instead in a file only your user account can read, in the app's settings folder. Signing out deletes it.
 
 Usage records
 
