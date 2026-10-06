@@ -27,6 +27,21 @@ export interface ExportEvent {
   project_id?: string;
 }
 
+/** The server's bound on `error` (ExportEventBody, pinned by the server's tests). Over it, a
+ *  server that refuses long text dropped the whole row: every failed export went unreported. */
+export const MAX_EXPORT_ERROR = 300;
+
+/** A failure's text within the bound, keeping both ends: the exit code and cause come first, and
+ *  ffmpeg's verdict ("Conversion failed!") last. */
+function boundedError(error: string | undefined): string {
+  const e = error ?? "";
+  if (e.length <= MAX_EXPORT_ERROR) return e;
+  const marker = " ... ";
+  const head = Math.floor(((MAX_EXPORT_ERROR - marker.length) * 3) / 5);
+  const tail = MAX_EXPORT_ERROR - marker.length - head;
+  return e.slice(0, head) + marker + e.slice(e.length - tail);
+}
+
 /** Report one finished export. Never throws and never blocks anything: by the time this runs
  *  the user's file is already on disk, so a telemetry failure must be invisible to them. */
 export async function reportExport(ev: ExportEvent): Promise<void> {
@@ -39,6 +54,7 @@ export async function reportExport(ev: ExportEvent): Promise<void> {
       // `platform` is the SHELL (tauri/web); the OS is what a per-platform failure is read by.
       body: JSON.stringify({
         ...ev,
+        error: boundedError(ev.error),
         app_version: __ARTDADDY_RELEASE__,
         platform: hostInfo().os,
         arch: hostInfo().arch,
