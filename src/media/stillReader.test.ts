@@ -1,7 +1,7 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
-import { stillReader } from "./stillReader";
+import { exportPasses, stillLoopArgs, stillPlays, stillReader } from "./stillReader";
 
 const bytes = (...parts: (number[] | string)[]): Uint8Array =>
   new Uint8Array(parts.flatMap((p) => (typeof p === "string" ? [...p].map((c) => c.charCodeAt(0)) : p)));
@@ -72,13 +72,84 @@ describe("stillReader: which of ffmpeg's readers opens a still", () => {
     fc.assert(
       fc.property(fc.uint8Array({ maxLength: 300 }), (b) => {
         expect(["picture", "gif", "apng", "webp_anim", "mov", null]).toContain(stillReader(b));
+        const plays = stillPlays(b);
+        expect(plays === null || (Number.isInteger(plays) && plays >= 0)).toBe(true);
       }),
     );
     fc.assert(
       fc.property(fc.uint8Array({ maxLength: 300 }), (tail) => {
         expect(() => stillReader(bytes(PNG_SIG, [...tail]))).not.toThrow();
         expect(() => stillReader(bytes("RIFF", le32(30), "WEBP", [...tail]))).not.toThrow();
+        expect(() => stillPlays(bytes(PNG_SIG, IHDR, acTL, [...tail]))).not.toThrow();
+        expect(() => stillPlays(bytes("RIFF", le32(30), "WEBP", "VP8X", le32(10), [2], [...tail]))).not.toThrow();
       }),
     );
+  });
+});
+
+/** RIFF/WEBP: animated VP8X, then `chunks` ([fourcc, payload bytes]) in order. */
+const webpAnim = (...chunks: [string, number[]][]) =>
+  bytes(
+    "RIFF",
+    le32(0),
+    "WEBP",
+    "VP8X",
+    le32(10),
+    [0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    ...chunks.flatMap(([cc, data]): (number[] | string)[] => [cc, le32(data.length), data, data.length & 1 ? [0] : []]),
+  );
+const ANIM = (loops: number) => ["ANIM", [0, 0, 0, 0, loops & 255, loops >> 8]] as [string, number[]];
+const actlPlays = (n: number) => chunk("acTL", 8, [...u32(20), ...u32(n)]);
+
+describe("stillPlays: the file's own play count, where ffmpeg reads it", () => {
+  it("reads an APNG's num_plays from acTL", () => {
+    for (const n of [0, 1, 2, 7, 65536])
+      expect(stillPlays(bytes(PNG_SIG, IHDR, actlPlays(n), chunk("IDAT", 4)))).toBe(n);
+  });
+
+  it("reads an animated WebP's loop count from ANIM, past a colour profile", () => {
+    expect(stillPlays(webpAnim(ANIM(0), ["ANMF", new Array(16).fill(0)]))).toBe(0);
+    expect(stillPlays(webpAnim(ANIM(1)))).toBe(1);
+    expect(stillPlays(webpAnim(ANIM(513)))).toBe(513);
+    expect(stillPlays(webpAnim(["ICCP", new Array(3001).fill(7)], ANIM(3)))).toBe(3);
+  });
+
+  // webp_anim_dec.c: a frame with no ANIM before it sets loop_count = 1.
+  it("reads a WebP whose first frame comes before any ANIM as playing once", () => {
+    expect(stillPlays(webpAnim(["ANMF", new Array(16).fill(0)], ANIM(0)))).toBe(1);
+  });
+
+  it("says it does not know when the count is not in the bytes, or the file has none", () => {
+    expect(stillPlays(webpAnim(["ICCP", new Array(5000).fill(7)], ANIM(3)).subarray(0, 4096))).toBeNull();
+    expect(stillPlays(webpAnim(["ANIM", [0, 0, 0, 0, 1]]))).toBeNull(); // not the 6 bytes ffmpeg requires
+    expect(stillPlays(bytes("GIF89a", new Array(10).fill(0)))).toBeNull();
+    expect(stillPlays(bytes(PNG_SIG, IHDR, chunk("IDAT", 4)))).toBeNull(); // a plain PNG
+    expect(stillPlays(webpX(0x10))).toBeNull(); // a still WebP
+  });
+});
+
+describe("how the export loops each still, and how many passes it plays", () => {
+  // `-stream_loop -1` HANGS on every APNG of 1 to 8 frames (measured; stillReader.smoke.e2e.ts and
+  // animatedStills.smoke.e2e.ts hold it to the shipped ffmpeg), so no APNG is ever given it.
+  it("never gives an APNG -stream_loop", () => {
+    for (const plays of [null, 0, 1, 2, 9])
+      expect(stillLoopArgs("apng", 30, plays)).not.toContain("-stream_loop");
+  });
+
+  it("loops a loop-forever APNG with its own reader, and reads a play-N one once", () => {
+    expect(stillLoopArgs("apng", 30, 0)).toEqual(["-ignore_loop", "0"]);
+    expect(stillLoopArgs("apng", 30, null)).toEqual(["-ignore_loop", "0"]);
+    expect(stillLoopArgs("apng", 30, 1)).toEqual([]);
+    expect(stillLoopArgs("apng", 30, 3)).toEqual([]);
+  });
+
+  it("plays what the export plays: forever, or a set number of passes and then holds", () => {
+    expect(exportPasses("gif", 1)).toBe(Infinity); // -stream_loop ignores a GIF's own count
+    expect(exportPasses("apng", 0)).toBe(Infinity);
+    expect(exportPasses("apng", 3)).toBe(1); // read once, plainly
+    expect(exportPasses("webp_anim", 0)).toBe(Infinity);
+    expect(exportPasses("webp_anim", 2)).toBe(2); // its reader honours the count exactly
+    expect(exportPasses("webp_anim", null)).toBeNull();
+    expect(exportPasses("picture", null)).toBe(Infinity);
   });
 });

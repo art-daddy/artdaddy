@@ -605,29 +605,41 @@ describe("buildRenderCommand", () => {
   // ffmpeg picks a reader by CONTENT, and each takes a different loop option (stillReader.ts,
   // measured): the reader resolveClipSources found in the file decides, whatever it is called.
   it("loops a still the way the reader found in its content takes it", () => {
-    const opts = (ref: string, still_reader?: string) => {
+    const opts = (ref: string, still_reader?: string, still_plays?: number) => {
       const a = buildRenderCommand(
-        tl([{ media_ref: ref, timeline_in: 0, timeline_out: 3, still_reader }]),
+        tl([{ media_ref: ref, timeline_in: 0, timeline_out: 3, still_reader, still_plays }]),
         "/o.mp4",
       ).args;
       return a.slice(a.indexOf("-progress") + 2, a.indexOf(ref));
     };
     expect(opts("/sticker.webp", "webp_anim")).toEqual(["-ignore_loop", "0", "-t", "3.000000", "-i"]);
-    expect(opts("/sticker.png", "apng")).toEqual(["-stream_loop", "-1", "-t", "3.000000", "-i"]);
+    // `-stream_loop -1` HANGS on every APNG of 1 to 8 frames: a loop-forever APNG loops with its own
+    // reader, and one that plays a set number of times is read once (then held).
+    expect(opts("/sticker.png", "apng")).toEqual(["-ignore_loop", "0", "-t", "3.000000", "-i"]);
+    expect(opts("/sticker.png", "apng", 0)).toEqual(["-ignore_loop", "0", "-t", "3.000000", "-i"]);
+    expect(opts("/once.png", "apng", 1)).toEqual(["-t", "3.000000", "-i"]);
     expect(opts("/meme.png", "gif")).toEqual(["-stream_loop", "-1", "-t", "3.000000", "-i"]);
     // A JPEG saved as .gif: -stream_loop would HANG on it, so the content must win.
     expect(opts("/photo.gif", "picture")).toEqual(["-loop", "1", "-framerate", "30", "-t", "3.000000", "-i"]);
   });
 
-  // The WebP reader follows the file's own loop count (its only option that does not hang), so a
-  // play-once WebP ends early; the overlay passes an ended clip through, and it would vanish.
-  it("holds an animated WebP's last frame for the rest of its clip", () => {
-    const fc = (still_reader: string) =>
+  // The WebP reader follows the file's own loop count (its only option that does not hang), and a
+  // play-N APNG is read once, so either can end before its clip; the overlay passes an ended clip
+  // through, and it would vanish.
+  it("holds the last frame of a still whose animation ends before its clip", () => {
+    const fc = (still_reader: string, still_plays?: number) =>
       buildRenderCommand(
-        tl([{ media_ref: "/s.webp", timeline_in: 0, timeline_out: 3, still_reader }]),
+        tl([{ media_ref: "/s.webp", timeline_in: 0, timeline_out: 3, still_reader, still_plays }]),
         "/o.mp4",
       ).filterComplex;
-    expect(fc("webp_anim")).toContain("tpad=stop_mode=clone:stop_duration=3.000000");
+    const HOLD = "tpad=stop_mode=clone:stop_duration=3.000000";
+    expect(fc("webp_anim")).toContain(HOLD); // count unknown: held, harmless if it loops
+    expect(fc("webp_anim", 1)).toContain(HOLD);
+    expect(fc("webp_anim", 2)).toContain(HOLD);
+    expect(fc("apng", 1)).toContain(HOLD);
+    expect(fc("webp_anim", 0)).not.toContain("tpad"); // loops for the whole clip
+    expect(fc("apng", 0)).not.toContain("tpad");
+    expect(fc("gif")).not.toContain("tpad");
     expect(fc("picture")).not.toContain("tpad");
   });
 
@@ -2262,6 +2274,37 @@ describe("resolveClipSources: the reader each still opens with", () => {
     };
     expect(opts("library/photo.gif")).toEqual(["-loop", "1", "-framerate", "30", "-t", "3.000000", "-i"]);
     expect(opts("library/meme.png").slice(-5)).toEqual(["-stream_loop", "-1", "-t", "3.000000", "-i"]);
+  });
+
+  // An APNG's own play count decides its loop option and whether the export holds it: read from
+  // the same bytes as its reader, on the copy the render uses.
+  it("records an APNG's own play count, and the render follows it", async () => {
+    const be = (n: number) => [(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255];
+    const chunk = (type: string, data: number[]) => [...be(data.length), ...[...type].map((c) => c.charCodeAt(0)), ...data, 0, 0, 0, 0];
+    const apng = (plays: number) =>
+      new Uint8Array([
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+        ...chunk("IHDR", [...be(40), ...be(40), 8, 6, 0, 0, 0]),
+        ...chunk("acTL", [...be(6), ...be(plays)]),
+        ...chunk("IDAT", [0, 0, 0, 0]),
+      ]);
+    const ctx = ctxWith({ "library/once.png": apng(1), "library/loops.png": apng(0) });
+    const timeline = tl([
+      { media_ref: "library/once.png", timeline_in: 0, timeline_out: 3 },
+      { media_ref: "library/loops.png", timeline_in: 0, timeline_out: 3 },
+    ]);
+    await resolveClipSources(ctx, timeline);
+    expect(timeline.tracks[0].clips![0]).toMatchObject({ still_reader: "apng", still_plays: 1 });
+    expect(timeline.tracks[1].clips![0]).toMatchObject({ still_reader: "apng", still_plays: 0 });
+    const plan = buildRenderCommand(timeline, "/o.mp4");
+    const before = (p: string) => {
+      const i = plan.args.indexOf(joinPath(`C:/proj/${p}`));
+      return plan.args.slice(i - 5, i);
+    };
+    expect(before("library/once.png").slice(-3)).toEqual(["-t", "3.000000", "-i"]);
+    expect(before("library/once.png")).not.toContain("-ignore_loop");
+    expect(before("library/loops.png")).toEqual(["-ignore_loop", "0", "-t", "3.000000", "-i"]);
+    expect(plan.filterComplex.match(/tpad=stop_mode=clone/g)?.length).toBe(1); // only the play-once one
   });
 
   it("records nothing for a still it cannot read, leaving the name's rule", async () => {

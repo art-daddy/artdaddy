@@ -72,6 +72,13 @@ const ROWS: Row[] = [
     make: (o) => [[...MOVING, "-c:v", "libwebp_anim", "-loop", "1", o]],
     playsOnce: true,
   },
+  // Read once, plainly (its own reader either ends or loops on a play-N file, by its length).
+  {
+    name: "animated PNG that plays once",
+    file: "once.png",
+    make: (o) => [[...MOVING, "-f", "apng", "-plays", "1", o]],
+    playsOnce: true,
+  },
 ];
 
 /** The square's left edge on the middle row of the delivered file at `t`, or -1 when no red. */
@@ -118,6 +125,51 @@ describe("an animated still exports, animates and loops", () => {
       else expect(Math.abs(nextLoop - early), "a second later it is where it started: it loops").toBeLessThanOrEqual(4);
     },
     180_000,
+  );
+});
+
+// A 2..8-frame APNG HANGS `-stream_loop -1` (measured on the shipped ffmpeg; 9+ frames do not), so
+// the 10-frame rows above could not see it: the export of a blinking icon never ended. The smallest
+// animations of every reader, judged frame by frame on the delivered file, with a hard limit.
+describe("a short animation loops frame for frame", () => {
+  const FEW = (n: number) => [...MOVING, "-frames:v", String(n)];
+  it.each([
+    { name: "APNG", file: "blink.png", frames: 6, enc: ["-f", "apng", "-plays", "0"] },
+    { name: "APNG", file: "blink2.png", frames: 2, enc: ["-f", "apng", "-plays", "0"] },
+    { name: "GIF", file: "blink.gif", frames: 6, enc: [] },
+    { name: "WebP", file: "blink.webp", frames: 6, enc: ["-c:v", "libwebp_anim", "-loop", "0"] },
+  ])(
+    "$name of $frames frames",
+    async ({ file, frames, enc }) => {
+      const dir = joinPath(ROOT, `few_${file.replace(/\W+/g, "_")}`);
+      await nodeFs.mkdir(dir);
+      await openE2EDoc(dir);
+      const ctx = mkCtx(dir);
+      await ensureTimeline(ctx.store);
+      expect(((await setCanvasTool({ width: W, height: H, fps: FPS }, ctx)) as Rec).ok).toBe(true);
+      const src = joinPath(dir, file);
+      await ff(["-y", "-v", "error", ...FEW(frames), ...enc, src]);
+      const ref = await libRef(ctx, src, "image");
+      const placed = (await addClipsTool(
+        { entries: [{ media_ref: ref, timeline_in: 0, timeline_out: 20 }] },
+        ctx,
+      )) as Rec;
+      expect(placed.ok, JSON.stringify(placed)).toBe(true);
+      const res = (await exportTimelineTool({ name: "out" }, ctx)) as Rec;
+      expect(res.ok, JSON.stringify(res)).toBe(true);
+      const ended = await Promise.race([
+        whenExportEnds(String(res.job_id)),
+        new Promise<null>((r) => setTimeout(() => r(null), 45_000)),
+      ]);
+      expect(ended?.state, "the export finished (a hang never ends)").toBe("done");
+      const out = await ctx.store.exportPath("out.mp4");
+      // The source runs at the project's own 10 fps, so project frame k shows source frame k mod n,
+      // whose square sits at x = 8 * (k mod n).
+      const seen: number[] = [];
+      for (let k = 0; k < 14; k++) seen.push(await squareX(out, k / FPS));
+      expect(seen).toEqual(Array.from({ length: 14 }, (_, k) => 8 * (k % frames)));
+    },
+    120_000,
   );
 });
 
