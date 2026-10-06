@@ -50,7 +50,11 @@ async function musicDb(file: string, ss: number, dur: number): Promise<number> {
 }
 
 /** Render a two-track audio timeline (voice on `vo`, music on `music`) to `out`. */
-async function render(out: string, duck: Record<string, unknown> | null): Promise<void> {
+async function render(
+  out: string,
+  duck: Record<string, unknown> | null,
+  voiceEnd = DUR,
+): Promise<void> {
   const plan = buildRenderCommand(
     {
       canvas: { width: 64, height: 64, fps: 30 },
@@ -65,9 +69,9 @@ async function render(out: string, duck: Record<string, unknown> | null): Promis
               kind: "audio",
               media_ref: voice,
               source_in: 0,
-              source_out: DUR,
+              source_out: voiceEnd,
               timeline_in: 0,
-              timeline_out: DUR,
+              timeline_out: voiceEnd,
             },
           ],
         },
@@ -169,5 +173,19 @@ describe("duck actually ducks (real ffmpeg)", () => {
     ]);
     const db = Number(r.stderr.match(/mean_volume:\s*(-?\d+(?:\.\d+)?) dB/)![1]);
     expect(db).toBeGreaterThan(-40);
+  }, 120_000);
+
+  // The voice-over usually ends before the music. The compressor stops when its key does, and the
+  // music went with it: 14 s of music under a 5 s voice exported 5 s of sound (2026-10-06). After
+  // the voice clip ends, the music is what it is after a voice that merely went silent.
+  it("the music keeps playing after the voice clip ends", async () => {
+    if (!ok) return;
+    const duck = { against: "vo", ratio: 12, threshold: 0.02 };
+    const ended = path.join(dir, "voice-ended.mp4");
+    await render(ended, duck, HALF);
+    const silent = path.join(dir, "voice-silent.mp4");
+    await render(silent, duck);
+    const after = await musicDb(ended, HALF + 0.4, HALF - 0.6);
+    expect(Math.abs(after - (await musicDb(silent, HALF + 0.4, HALF - 0.6)))).toBeLessThan(1);
   }, 120_000);
 });

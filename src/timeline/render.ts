@@ -1663,8 +1663,9 @@ export function buildRenderCommand(
         const ratio = Math.max(1, Number(r.duck!.ratio ?? 8));
         const threshold = Math.min(1, Math.max(0.001, Number(r.duck!.threshold ?? 0.03)));
         // sidechaincompress refuses mismatched inputs, and each chain above ends in whatever the
-        // source happened to be — so normalise BOTH sides rather than hoping they agree.
-        chains.push(`[${mixLabels[i]}]${SC_FMT}[dm${i}]`, `[${key}]${SC_FMT}[dk${i}f]`);
+        // source happened to be — so normalise BOTH sides rather than hoping they agree. It also
+        // ends when its KEY ends, which cut the music at the last voice clip; a padded key is silence.
+        chains.push(`[${mixLabels[i]}]${SC_FMT}[dm${i}]`, `[${key}]${SC_FMT},apad[dk${i}f]`);
         chains.push(
           `[dm${i}][dk${i}f]sidechaincompress=threshold=${threshold}:ratio=${ratio}:attack=20:release=250:level_sc=1[d${i}]`,
         );
