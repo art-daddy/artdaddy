@@ -310,6 +310,45 @@ describe("loudness", () => {
     expect(c.loudness.clip_volume).toBe(0.5);
     expect(c.loudness.after_clip_volume.integrated_lufs).toBeCloseTo(-29, 0);
   });
+
+  // Every chunk a sidecar writes became one message to the page, and the page's thread can only
+  // queue so many: four 10-minute looks in parallel (~6,000 per-frame log lines each) overflowed
+  // it, the runs' exits were lost and the app's IPC stopped answering (2026-10-07). What the pass
+  // hands back must stay a few KB however long the span is, with the figures unchanged.
+  it("a 10-minute span hands back a few KB of output, not a log line per 100 ms", async () => {
+    // 601 s: just over the inline transcript limit, so the look queues the transcript instead
+    // of running whisper on a tone, and the only sidecar doing real work is the loudness pass.
+    const out = media("tone10min.flac");
+    await ff([
+      "-y",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-f",
+      "lavfi",
+      "-i",
+      "aevalsrc=0.0707946*sin(2*PI*1000*t)|0.0707946*sin(2*PI*1000*t):s=48000:d=601",
+      "-c:a",
+      "flac",
+      out,
+    ]);
+    const ref = await libRef(ctx, out, "audio");
+    const stderrBytes: number[] = [];
+    const watching: CommandRunner = {
+      async run(program, args, signal, cwd, onStdout) {
+        const r = await nodeRunner.run(program, args, signal, cwd, onStdout);
+        if (args.some((a) => a.includes("ebur128"))) stderrBytes.push(r.stderr.length);
+        return r;
+      },
+    };
+    const r = (await inspectMediaTool({ media_ref: ref }, { ...ctx, runner: watching })) as Any;
+    expect(r.ok, JSON.stringify(r).slice(0, 400)).toBe(true);
+    expect(stderrBytes).toHaveLength(1);
+    expect(stderrBytes[0]).toBeLessThan(16 * 1024);
+    expect(r.loudness.integrated_lufs).toBeCloseTo(-23, 0);
+    expect(r.loudness.true_peak_dbtp).toBeCloseTo(-23, 0);
+    expect(r.loudness.rms_dbfs).toBeCloseTo(-26, 0);
+  });
 });
 
 describe("overview: one storyboard of the span's scenes", () => {

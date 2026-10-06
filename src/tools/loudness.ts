@@ -20,8 +20,9 @@ function db(raw: string | undefined): number | null {
   return Number.isFinite(v) ? Math.round(v * 10) / 10 : null;
 }
 
-/** Read the three figures out of ffmpeg's stderr. ebur128 prints a running `I:` per frame before
- *  its Summary, so only text after "Summary:" counts; astats' figures come from its Overall block. */
+/** Read the three figures out of ffmpeg's stderr. Only text after "Summary:" counts (ebur128's
+ *  per-frame log, when on, prints a running `I:` before it); astats' figures come from its Overall
+ *  block. */
 export function parseLoudness(stderr: string): Loudness {
   const summary = stderr.slice(Math.max(0, stderr.lastIndexOf("Summary:")));
   const overall = stderr.slice(Math.max(0, stderr.lastIndexOf("Overall")));
@@ -49,7 +50,10 @@ export async function measureLoudness(
     "0:a:0",
     "-vn",
     "-af",
-    "ebur128=peak=true,astats=measure_perchannel=none",
+    // framelog=quiet: by default ebur128 logs a line per 100 ms of audio, ~1 MB for a 10-minute
+    // span. Every line reached the page as its own message, and a few long looks at once
+    // overflowed the page's queue and stopped the app's IPC (2026-10-07). The Summary is the same.
+    "ebur128=peak=true:framelog=quiet,astats=measure_perchannel=none",
     "-f",
     "null",
     "-",
