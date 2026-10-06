@@ -14,6 +14,7 @@ import { isMutationRejected, runProjectMutation } from "./coordinator";
 import { ProjectClosingError, type MutationOrigin } from "../project/MutationGate";
 import { encodeVideoForGemini } from "./geminiEncode";
 import { undecodableImageReason } from "./imageDims";
+import { missingIndexReason } from "../media/mp4Index";
 import { reportMediaImport } from "../api/appEvents";
 import {
   AUDIO_EXTS,
@@ -311,6 +312,16 @@ async function registerLibraryClipInner(
       throw new Error(`'${filename || "image"}' can't be used as media: ${reason}.`);
     }
   }
+  if (kind === "video" || kind === "audio") {
+    const reason = missingIndexReason(head, size);
+    if (reason) {
+      await staged?.discard();
+      throw new Error(
+        `'${filename || kind}' can't be used as media: ${reason}, like a recording that stopped before it was saved ` +
+          `or a copy that did not finish. Use a complete copy, or repair it in the app that made it first.`,
+      );
+    }
+  }
   const id = `media_${staged ? staged.id12 : await sha256Hex12(raw!)}`;
   const ext = extOf(filename) || defaultExt(kind);
   // EXTERNAL (referenced-in-place): record the absolute source path, copy nothing.
@@ -492,6 +503,10 @@ export async function finalizePendingClip(
     if (reason) throw new Error(`generated image can't be used as media: ${reason}.`);
   }
   const rel = String(row.path ?? `library/${id}${defaultExt(kind)}`);
+  if (kind === "video" || kind === "audio") {
+    const reason = missingIndexReason(bytes, bytes.length);
+    if (reason) throw new Error(`the generated ${kind} arrived incomplete: ${reason}.`);
+  }
   // Bytes first, catalog second: a crash between them leaves an unreferenced file (harmless,
   // swept by the media GC) rather than a row promising media that is not there.
   await store.writeBytesAtomic(joinPath(store.projectDir, rel), bytes);

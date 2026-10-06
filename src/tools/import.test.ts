@@ -282,6 +282,64 @@ describe("registerLibraryClip (renderable-media fence)", () => {
     expect(String(r.error)).toMatch(/6864x41754/);
     expect(r.media_ref).toBeUndefined();
   });
+
+  // What a recorder leaves when it is killed mid-write (measured: ffprobe says "moov atom not
+  // found"): no preview, inspect, transcript or export can ever open it.
+  const UNFINISHED = new Uint8Array([
+    ...[0, 0, 0, 16, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d, 0, 0, 2, 0], // ftyp isom
+    ...[0, 0, 0, 8, 0x66, 0x72, 0x65, 0x65], // free
+    ...[0, 0, 0, 0, 0x6d, 0x64, 0x61, 0x74], // mdat, size 0: runs to the end of the file
+    ...new Array(64).fill(7),
+  ]);
+
+  it("refuses an MP4 with no index and leaves NOTHING behind", async () => {
+    const fs = new MockFs();
+    registerTestDocument(DIR);
+    const store = new ProjectStoreAccess(DIR, fs);
+    await expect(registerLibraryClip(store, UNFINISHED, "take.mp4", "video")).rejects.toThrow(
+      /'take\.mp4' can't be used as media: .*no index/i,
+    );
+    expect(fs.files.has(joinPath(DIR, "internals/library.json"))).toBe(false);
+    expect(await fs.readDir(joinPath(DIR, "library")).catch(() => [])).toEqual([]);
+  });
+
+  it("refuses a LINKED unfinished recording too", async () => {
+    const fs = new MockFs();
+    registerTestDocument(DIR);
+    const ABS = "D:/obs/2026-10-03 21-14-07.mp4";
+    await fs.writeBytes(joinPath(ABS), UNFINISHED);
+    const store = new ProjectStoreAccess(DIR, fs);
+    await expect(
+      registerLibraryClip(store, UNFINISHED, "2026-10-03 21-14-07.mp4", "video", undefined, ABS),
+    ).rejects.toThrow(/no index/i);
+    expect(fs.files.has(joinPath(DIR, "internals/library.json"))).toBe(false);
+  });
+
+  it("tells the model why through import_media", async () => {
+    const fs = new MockFs();
+    registerTestDocument(DIR);
+    const ctx = { store: new ProjectStoreAccess(DIR, fs), runner: { run: vi.fn() } } as Any;
+    const registry = new ClientToolRegistry().register("import_media", (a) =>
+      importMediaTool(a, ctx),
+    );
+    const r = (await registry.run("import_media", {
+      source: { bytes: btoa(String.fromCharCode(...UNFINISHED)), mimeType: "video/mp4" },
+      name: "take.mp4",
+    })) as Any;
+    expect(r.ok).toBe(false);
+    expect(String(r.error)).toMatch(/'take\.mp4' can't be used as media: .*no index/i);
+    expect(r.media_ref).toBeUndefined();
+  });
+
+  it("still admits an MP4 whose index comes first", async () => {
+    const fs = new MockFs();
+    registerTestDocument(DIR);
+    const store = new ProjectStoreAccess(DIR, fs);
+    const ok = new Uint8Array(UNFINISHED);
+    ok.set([0, 0, 0, 8, 0x6d, 0x6f, 0x6f, 0x76], 16); // the "free" box is the index instead
+    const entry = await registerLibraryClip(store, ok, "take.mp4", "video");
+    expect(entry.id).toMatch(/^media_/);
+  });
 });
 
 describe("import_media", () => {
@@ -547,6 +605,23 @@ describe("pending (still-generating) media", () => {
     await expect(finalizePendingClip(store, id, huge)).rejects.toThrow(/can't be used as media/i);
 
     expect((await rows(fs))[0].status).toBe("generating");
+  });
+
+  it("refuses to finalize a generated video that has no index", async () => {
+    const fs = new MockFs();
+    const store = new ProjectStoreAccess(DIR, fs);
+    const id = newPendingMediaId();
+    await registerPendingClip(store, { id, filename: "shot.mp4", kind: "video" });
+    const cutOff = new Uint8Array([
+      ...[0, 0, 0, 16, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d, 0, 0, 2, 0],
+      ...[0, 0x0f, 0x42, 0x40, 0x6d, 0x64, 0x61, 0x74], // mdat declares 1,000,000 bytes
+      ...new Array(100).fill(1), // and the response ended here
+    ]);
+
+    await expect(finalizePendingClip(store, id, cutOff)).rejects.toThrow(/no index/i);
+
+    expect((await rows(fs))[0].status).toBe("generating");
+    expect(await fs.exists(joinPath(DIR, `library/${id}.mp4`))).toBe(false);
   });
 
   it("keeps a failed row so a clip already placed does not vanish", async () => {
