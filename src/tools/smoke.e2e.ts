@@ -468,6 +468,7 @@ describe("client tools E2E (real binaries)", () => {
       runner: nodeRunner,
     };
     try {
+      const activeBefore = ((await listProjectsTool({}, pctx)) as Rec).active_project_id;
       const np = (await newProjectTool({ name: "Smoke Reel", aspect_ratio: "9:16" }, pctx)) as Rec;
       expect(np.ok).toBe(true);
       // new/duplicate return the project id; the dir is <projects>/<id> (no `path` field).
@@ -477,10 +478,12 @@ describe("client tools E2E (real binaries)", () => {
 
       const ls = (await listProjectsTool({}, pctx)) as Rec;
       expect((ls.projects as Rec[]).some((p) => p.id === np.id)).toBe(true);
-      expect(ls.active_project_id).toBe(np.id);
+      // Only the user opening a project moves the active one; an agent tool never does (3h part 3).
+      expect(ls.active_project_id).toBe(activeBefore);
 
       const dup = (await duplicateProjectTool({ project: np.id as string }, pctx)) as Rec;
       expect(dup.ok).toBe(true);
+      expect(((await listProjectsTool({}, pctx)) as Rec).active_project_id).toBe(activeBefore);
       const dupDir = joinPath(projectsDir, dup.id as string);
       expect(await nodeFs.exists(joinPath(dupDir, "internals", "timeline.json"))).toBe(true); // media really copied
 
