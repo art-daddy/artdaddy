@@ -18,7 +18,15 @@ import type { Turn } from "../store/chatTranscript";
 import { ensureTimeline } from "../timeline/engine";
 import { setCanvasTool } from "../timeline/ops";
 import { addClipsTool } from "../timeline/placement";
-import { ff, flushE2EDoc, installE2EDocuments, libRef, mkCtx, openE2EDoc, resetE2EDocuments } from "./__e2e";
+import {
+  ff,
+  flushE2EDoc,
+  installE2EDocuments,
+  libRef,
+  mkCtx,
+  openE2EDoc,
+  resetE2EDocuments,
+} from "./__e2e";
 import { readImageSize } from "./imageDims";
 import { inspectColorTool } from "./inspect";
 import { joinPath } from "./store";
@@ -38,11 +46,32 @@ afterAll(async () => {
 /** A Sony-like clip: 4K, 50 fps, 10-bit 4:2:2 H.264 with PCM sound, busy enough to be large. */
 async function sonyLike(file: string): Promise<string> {
   await ff([
-    "-y", "-v", "error",
-    "-f", "lavfi", "-i", "testsrc2=size=3840x2160:rate=50,noise=alls=12:allf=t",
-    "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
-    "-t", "2", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv422p10le",
-    "-profile:v", "high422", "-c:a", "pcm_s16be", "-f", "mov", file,
+    "-y",
+    "-v",
+    "error",
+    "-f",
+    "lavfi",
+    "-i",
+    "testsrc2=size=3840x2160:rate=50,noise=alls=12:allf=t",
+    "-f",
+    "lavfi",
+    "-i",
+    "sine=frequency=440:sample_rate=48000",
+    "-t",
+    "2",
+    "-c:v",
+    "libx264",
+    "-preset",
+    "ultrafast",
+    "-pix_fmt",
+    "yuv422p10le",
+    "-profile:v",
+    "high422",
+    "-c:a",
+    "pcm_s16be",
+    "-f",
+    "mov",
+    file,
   ]);
   return file;
 }
@@ -73,8 +102,11 @@ function judge(label: string, bytes: Uint8Array[], expected: number): string[] {
     const jpeg = b[0] === 0xff && b[1] === 0xd8;
     if (!jpeg) problems.push(`${label}: a picture is not a JPEG`);
     if (!size || Math.max(size.width, size.height) > MAX_EDGE)
-      problems.push(`${label}: a picture is ${size ? `${size.width}x${size.height}` : "unreadable"}`);
-    if (b.length > 512 * 1024) problems.push(`${label}: a picture is ${(b.length / 1e6).toFixed(2)} MB`);
+      problems.push(
+        `${label}: a picture is ${size ? `${size.width}x${size.height}` : "unreadable"}`,
+      );
+    if (b.length > 512 * 1024)
+      problems.push(`${label}: a picture is ${(b.length / 1e6).toFixed(2)} MB`);
   }
   return problems;
 }
@@ -89,8 +121,18 @@ describe("every picture the model is shown is small (UJ-019)", () => {
     const clip = await libRef(ctx, await sonyLike(path.join(root, "C0001.MP4")), "video");
     const still = path.join(root, "DSC0001.jpg");
     await ff([
-      "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=6000x4000,noise=alls=20:allf=t",
-      "-frames:v", "1", "-q:v", "2", still,
+      "-y",
+      "-v",
+      "error",
+      "-f",
+      "lavfi",
+      "-i",
+      "testsrc2=size=6000x4000,noise=alls=20:allf=t",
+      "-frames:v",
+      "1",
+      "-q:v",
+      "2",
+      still,
     ]);
     const photo = await libRef(ctx, still, "image");
     const problems: string[] = [];
@@ -99,8 +141,13 @@ describe("every picture the model is shown is small (UJ-019)", () => {
     expect(onMedia.ok, JSON.stringify(onMedia).slice(0, 300)).toBe(true);
     problems.push(...judge("media_ref + reference", await shown(ctx, onMedia._attachments), 2));
 
-    expect(((await setCanvasTool({ width: 1920, height: 1080, fps: 25 }, ctx)) as Any).ok).toBe(true);
-    const placed = (await addClipsTool({ entries: [{ media_ref: clip, timeline_in: 0, timeline_out: 25 }] }, ctx)) as Any;
+    expect(((await setCanvasTool({ width: 1920, height: 1080, fps: 25 }, ctx)) as Any).ok).toBe(
+      true,
+    );
+    const placed = (await addClipsTool(
+      { entries: [{ media_ref: clip, timeline_in: 0, timeline_out: 25 }] },
+      ctx,
+    )) as Any;
     expect(placed.ok, JSON.stringify(placed).slice(0, 300)).toBe(true);
     await flushE2EDoc(dir);
     const onClip = (await inspectColorTool({ clip_id: placed.created[0].clip_id }, ctx)) as Any;

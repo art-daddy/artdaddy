@@ -113,9 +113,15 @@ function prepare(): void {
     if (stills.has(src)) continue;
     stills.set(
       src,
-      new AnimatedStill(src, anim.url, anim.timing, () => renderer, () => {
-        dirty = true;
-      }),
+      new AnimatedStill(
+        src,
+        anim.url,
+        anim.timing,
+        () => renderer,
+        () => {
+          dirty = true;
+        },
+      ),
     );
   }
   for (const tr of timeline?.tracks ?? []) {

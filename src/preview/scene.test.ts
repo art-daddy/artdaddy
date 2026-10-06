@@ -481,16 +481,32 @@ describe("buildScene visibility", () => {
   // under the next clip's transition) the frame depends on the still's timing, so the scene says
   // where it is, never which frame.
   it("says where a still is in its clip: frames from its start, its length and its speed", () => {
-    const at = (frame: number, clip: Record<string, unknown>, more: Record<string, unknown>[] = []) =>
-      (buildScene(tl([{ media_ref: "s.gif", timeline_in: 30, timeline_out: 90, ...clip }, ...more]), frame / 30, dims({}))
-        .layers.find((l) => l.source === "s.gif") as Any)?.still;
+    const at = (
+      frame: number,
+      clip: Record<string, unknown>,
+      more: Record<string, unknown>[] = [],
+    ) =>
+      (
+        buildScene(
+          tl([{ media_ref: "s.gif", timeline_in: 30, timeline_out: 90, ...clip }, ...more]),
+          frame / 30,
+          dims({}),
+        ).layers.find((l) => l.source === "s.gif") as Any
+      )?.still;
     expect(at(30, {})).toEqual({ k: 0, len: 60, speed: 1 });
     expect(at(55, {})).toEqual({ k: 25, len: 60, speed: 1 });
     expect(at(55, { source_in: 300, source_out: 360 })).toEqual({ k: 25, len: 60, speed: 1 }); // a trim does not move it
     expect(at(55, { speed: 2 })).toEqual({ k: 25, len: 60, speed: 2 });
     expect(at(89, {})).toEqual({ k: 59, len: 60, speed: 1 }); // the clip's last frame
     // Held under the next clip's 12-frame crossfade: 6 frames past its end.
-    const next = [{ media_ref: "b.png", timeline_in: 90, timeline_out: 120, transition_in: { kind: "crossfade", duration: 12 } }];
+    const next = [
+      {
+        media_ref: "b.png",
+        timeline_in: 90,
+        timeline_out: 120,
+        transition_in: { kind: "crossfade", duration: 12 },
+      },
+    ];
     expect(at(92, {}, next)).toEqual({ k: 62, len: 60, speed: 1 });
   });
   it("skips clips on a hidden track", () => {

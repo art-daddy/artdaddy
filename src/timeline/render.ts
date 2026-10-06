@@ -46,7 +46,12 @@ import {
 import { buildBandAss, unrenderableFlags, type CaptionSpec } from "./assCaption";
 import { withAssScratch } from "../tools/assScratch";
 import { jobSupervisor, supervisedRunner } from "../tools/jobSupervisor";
-import { ExportRunError, isDestinationReserved, submitExport, type ExportSubmission } from "./exportQueue";
+import {
+  ExportRunError,
+  isDestinationReserved,
+  submitExport,
+  type ExportSubmission,
+} from "./exportQueue";
 import { sourceHasAudio } from "./placement";
 import { clipPlays, outputGate, suppressClip } from "./visibility";
 import { assertNever } from "./transition";
@@ -201,7 +206,8 @@ function fittedPixels(
   if (!(sw > 0 && sh > 0)) return Infinity;
   const pw = evenPx(peak(sizeW, box.w));
   const ph = evenPx(peak(sizeH, box.h));
-  const k = fitAspect(box.fit) === "increase" ? Math.max(pw / sw, ph / sh) : Math.min(pw / sw, ph / sh);
+  const k =
+    fitAspect(box.fit) === "increase" ? Math.max(pw / sw, ph / sh) : Math.min(pw / sw, ph / sh);
   return Math.ceil(sw * k) * Math.ceil(sh * k);
 }
 
@@ -1902,11 +1908,17 @@ export async function resolveClipSources(
       if (clipKind(clip) === "image" && typeof clip.media_ref === "string") {
         const path = clip.media_ref;
         if (!stills.has(path)) {
-          const read = (offset: number, length: number) => ctx.store.readRange(path, offset, length);
+          const read = (offset: number, length: number) =>
+            ctx.store.readRange(path, offset, length);
           const { reader, facts } = await probeStillFacts(read, ctx.runner, path, ctx.signal);
           // Only a count that was read: the frame a window shows must be the export's.
           const timed =
-            options.stillTiming && facts.known && reader && reader !== "picture" && reader !== "mov" && ctx.runner
+            options.stillTiming &&
+            facts.known &&
+            reader &&
+            reader !== "picture" &&
+            reader !== "mov" &&
+            ctx.runner
               ? await probeStillTiming(ctx.runner, path, reader, facts, ctx.signal)
               : null;
           stills.set(path, { reader, facts, timing: timed?.timing ?? null });
@@ -2724,7 +2736,9 @@ export async function exportTimelineTool(
     saved_to: dest.filename,
     duration_s: round3(total),
     ...(prepared.branding
-      ? { branding: { watermark: true, end_card_s: round3(card), timeline_s: round3(total - card) } }
+      ? {
+          branding: { watermark: true, end_card_s: round3(card), timeline_s: round3(total - card) },
+        }
       : {}),
     warnings: prepared.plan.warnings,
     ...(note ? { note } : {}),

@@ -5,8 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock(
   "react-resizable-panels",
-  // @ts-expect-error -- the browser build ships no .d.ts of its own; the package's types describe it.
-  () => import("../../node_modules/react-resizable-panels/dist/react-resizable-panels.browser.esm.js"),
+  () =>
+    // @ts-expect-error -- the browser build ships no .d.ts of its own; the package's types describe it.
+    import("../../node_modules/react-resizable-panels/dist/react-resizable-panels.browser.esm.js"),
 );
 vi.mock("./ProjectSidebar", () => ({ default: () => <div>library</div> }));
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

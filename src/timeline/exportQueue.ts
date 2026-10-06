@@ -388,7 +388,9 @@ export async function submitExport(spec: ExportSpec): Promise<ExportSubmission> 
   const ledger = await openProjectJobs(spec.store);
   // A supervised export lives as long as the app does, not the page: its record says so, or the
   // next page's ledger would call it interrupted while it is still running (jobLedger.ts).
-  const session = spec.supervisor ? await spec.supervisor.launchId().catch(() => undefined) : undefined;
+  const session = spec.supervisor
+    ? await spec.supervisor.launchId().catch(() => undefined)
+    : undefined;
   const jobId = await ledger.begin({
     kind: "export",
     tool: "export",
@@ -523,7 +525,8 @@ async function settle(x: Settle): Promise<void> {
   if (!error && staged) {
     try {
       // A page that renamed it and died before telling the supervisor left it already in place.
-      const alreadyMoved = !(await x.store.exists(x.stagePath)) && (await x.store.exists(x.destPath));
+      const alreadyMoved =
+        !(await x.store.exists(x.stagePath)) && (await x.store.exists(x.destPath));
       if (!alreadyMoved) await x.store.rename(x.stagePath, x.destPath);
       await releaseStaging(x.stagePath);
     } catch (e) {

@@ -274,8 +274,21 @@ export async function ff(args: string[]): Promise<void> {
  *  just before the trailer: Chromium honours it there, and ffmpeg holds the last picture through it. */
 export async function gifLoopAtEnd(gif: string, out: string, count: number): Promise<void> {
   const b = new Uint8Array(await fsp.readFile(gif));
-  const block = [0x21, 0xff, 0x0b, ...Buffer.from("NETSCAPE2.0"), 0x03, 0x01, count & 0xff, count >> 8, 0x00];
-  await fsp.writeFile(out, Buffer.concat([b.subarray(0, b.length - 1), new Uint8Array(block), b.subarray(b.length - 1)]));
+  const block = [
+    0x21,
+    0xff,
+    0x0b,
+    ...Buffer.from("NETSCAPE2.0"),
+    0x03,
+    0x01,
+    count & 0xff,
+    count >> 8,
+    0x00,
+  ];
+  await fsp.writeFile(
+    out,
+    Buffer.concat([b.subarray(0, b.length - 1), new Uint8Array(block), b.subarray(b.length - 1)]),
+  );
 }
 
 /** `webp` with a colour profile of `size` bytes between VP8X and ANIM, so its loop count lies far past

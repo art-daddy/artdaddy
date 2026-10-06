@@ -82,13 +82,15 @@ export function buildRequests(turns: Turn[]): TranscriptRequest[] {
  *  - The timeline checkpoints are left out: the model never reads them, and they are most of the
  *    bytes. */
 export function requestsForHistory(turns: Turn[]): TranscriptRequest[] {
-  return buildRequests(turns).map(({ checkpoint: _checkpoint, unfinished: _unfinished, ...rest }, i) => ({
-    ...rest,
-    message: {
-      ...rest.message,
-      text: composeModelText(turns[i].userText, turns[i].attachments, turns[i].mentions ?? []),
-    },
-  }));
+  return buildRequests(turns).map(
+    ({ checkpoint: _checkpoint, unfinished: _unfinished, ...rest }, i) => ({
+      ...rest,
+      message: {
+        ...rest.message,
+        text: composeModelText(turns[i].userText, turns[i].attachments, turns[i].mentions ?? []),
+      },
+    }),
+  );
 }
 
 /** Tool calls the transcript shows were never answered, back to the last proof of settlement.

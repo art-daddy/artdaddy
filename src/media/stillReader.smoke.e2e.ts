@@ -16,7 +16,12 @@ import { stillLoop } from "./stillReader";
 const DIR = joinPath(os.tmpdir(), `artdaddy-stillreader-${Date.now()}`);
 const SINGLE_PICTURE = /(^|,)(\w+_pipe|image2)(,|$)/;
 /** ffprobe's format name for each reader the classifier names. */
-const FORMAT_OF = { gif: "gif", apng: "apng", webp_anim: "webp_anim", mov: "mov,mp4,m4a,3gp,3g2,mj2" };
+const FORMAT_OF = {
+  gif: "gif",
+  apng: "apng",
+  webp_anim: "webp_anim",
+  mov: "mov,mp4,m4a,3gp,3g2,mj2",
+};
 
 const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
   let c = n;
@@ -56,7 +61,9 @@ const STILL = "testsrc2=s=200x120:d=1";
 const BLINK = (r: number) => [...v(MOVING), "-frames:v", "2", "-r", String(r)];
 /** Six frames with irregular delays (7,13,5,20,7 cs), as real stickers are timed. */
 const IRREGULAR = [
-  ...v("color=black:s=240x20:r=100:d=0.6,format=rgba[bg];color=white:s=4x20:r=100:d=0.6,format=rgba[fg];[bg][fg]overlay=x='n*4'"),
+  ...v(
+    "color=black:s=240x20:r=100:d=0.6,format=rgba[bg];color=white:s=4x20:r=100:d=0.6,format=rgba[fg];[bg][fg]overlay=x='n*4'",
+  ),
   "-vf",
   "select='eq(n\\,0)+eq(n\\,7)+eq(n\\,20)+eq(n\\,25)+eq(n\\,45)+eq(n\\,52)'",
   "-fps_mode",
@@ -64,7 +71,9 @@ const IRREGULAR = [
 ];
 /** 16 frames of 2048 x 2048: one pass is over the export's budget for looping in memory. */
 const BIG = [
-  ...v("color=c=black@0:s=2048x2048:r=10:d=1.6,format=rgba[bg];color=c=red:s=256x256:r=10:d=1.6,format=rgba[sq];[bg][sq]overlay=x='t*1000':y=896"),
+  ...v(
+    "color=c=black@0:s=2048x2048:r=10:d=1.6,format=rgba[bg];color=c=red:s=256x256:r=10:d=1.6,format=rgba[sq];[bg][sq]overlay=x='t*1000':y=896",
+  ),
 ];
 
 beforeAll(async () => {
@@ -75,22 +84,106 @@ beforeAll(async () => {
   await ff(["-y", "-v", "error", ...v(STILL), "-frames:v", "1", at("paint.bmp")]);
   await ff(["-y", "-v", "error", ...v(STILL), "-frames:v", "1", at("scan.tiff")]);
   await ff(["-y", "-v", "error", ...v(STILL), "-frames:v", "1", "-c:v", "libwebp", at("web.webp")]);
-  await ff(["-y", "-v", "error", ...v(`${STILL},format=rgba`), "-frames:v", "1", "-c:v", "libwebp", at("alpha.webp")]);
-  await ff(["-y", "-v", "error", ...v(MOVING), "-c:v", "libwebp_anim", "-loop", "0", at("anim.webp")]);
+  await ff([
+    "-y",
+    "-v",
+    "error",
+    ...v(`${STILL},format=rgba`),
+    "-frames:v",
+    "1",
+    "-c:v",
+    "libwebp",
+    at("alpha.webp"),
+  ]);
+  await ff([
+    "-y",
+    "-v",
+    "error",
+    ...v(MOVING),
+    "-c:v",
+    "libwebp_anim",
+    "-loop",
+    "0",
+    at("anim.webp"),
+  ]);
   await ff(["-y", "-v", "error", ...v(STILL), "-frames:v", "1", at("still.gif")]);
   await ff(["-y", "-v", "error", ...v(MOVING), at("anim.gif")]);
   await ff(["-y", "-v", "error", ...v(MOVING), "-f", "apng", "-plays", "0", at("anim_apng.png")]);
   await ff(["-y", "-v", "error", ...BLINK(2), "-f", "apng", "-plays", "0", at("blink_apng.png")]);
-  await ff(["-y", "-v", "error", ...IRREGULAR, "-f", "apng", "-plays", "0", at("irregular_apng.png")]);
+  await ff([
+    "-y",
+    "-v",
+    "error",
+    ...IRREGULAR,
+    "-f",
+    "apng",
+    "-plays",
+    "0",
+    at("irregular_apng.png"),
+  ]);
   await ff(["-y", "-v", "error", ...BLINK(2), at("blink.gif")]);
   await ff(["-y", "-v", "error", ...IRREGULAR, at("irregular.gif")]);
-  await ff(["-y", "-v", "error", ...BLINK(2), "-c:v", "libwebp_anim", "-loop", "0", at("blink.webp")]);
-  await ff(["-y", "-v", "error", ...IRREGULAR, "-c:v", "libwebp_anim", "-loop", "0", at("irregular.webp")]);
+  await ff([
+    "-y",
+    "-v",
+    "error",
+    ...BLINK(2),
+    "-c:v",
+    "libwebp_anim",
+    "-loop",
+    "0",
+    at("blink.webp"),
+  ]);
+  await ff([
+    "-y",
+    "-v",
+    "error",
+    ...IRREGULAR,
+    "-c:v",
+    "libwebp_anim",
+    "-loop",
+    "0",
+    at("irregular.webp"),
+  ]);
   // A set play count: a play-N APNG is read once and held by the export; a WebP plays its count.
-  await ff(["-y", "-v", "error", ...BLINK(2), "-f", "apng", "-plays", "1", at("blink_once_apng.png")]);
+  await ff([
+    "-y",
+    "-v",
+    "error",
+    ...BLINK(2),
+    "-f",
+    "apng",
+    "-plays",
+    "1",
+    at("blink_once_apng.png"),
+  ]);
   await ff(["-y", "-v", "error", ...v(MOVING), "-f", "apng", "-plays", "2", at("twice_apng.png")]);
-  await ff(["-y", "-v", "error", ...v(MOVING), "-c:v", "libwebp_anim", "-loop", "2", at("twice.webp")]);
-  await ff(["-y", "-v", "error", ...v(STILL), "-frames:v", "1", "-c:v", "libaom-av1", "-still-picture", "1", "-cpu-used", "8", at("modern.avif")]);
+  await ff([
+    "-y",
+    "-v",
+    "error",
+    ...v(MOVING),
+    "-c:v",
+    "libwebp_anim",
+    "-loop",
+    "2",
+    at("twice.webp"),
+  ]);
+  await ff([
+    "-y",
+    "-v",
+    "error",
+    ...v(STILL),
+    "-frames:v",
+    "1",
+    "-c:v",
+    "libaom-av1",
+    "-still-picture",
+    "1",
+    "-cpu-used",
+    "8",
+    at("modern.avif"),
+  ]);
   await apngWithTextFirst(at("anim_apng.png"), at("apng_text_500.png"), 500);
   await apngWithTextFirst(at("anim_apng.png"), at("apng_text_3000.png"), 3000);
   // A GIF's own count: none (once), 2 (three times), and 1 kept at the end of the file (twice).
@@ -160,70 +253,153 @@ const BROWSER_PASSES: Record<string, number> = {
 };
 
 const hashes = (md5: string) =>
-  md5.split("\n").filter((l) => /^0,/.test(l)).map((l) => l.split(",").pop()!.trim());
+  md5
+    .split("\n")
+    .filter((l) => /^0,/.test(l))
+    .map((l) => l.split(",").pop()!.trim());
 const readRange = (file: string) => (offset: number, length: number) =>
   nodeFs.readRange!(file, offset, length).catch(() => null);
 
 describe("stillReader agrees with the shipped ffmpeg", () => {
-  it.each(FILES)("%s", async (name) => {
-    const file = joinPath(DIR, name);
-    const { reader: verdict, facts } = await probeStillFacts(readRange(file), nodeRunner, file);
-    const probe = await nodeRunner.run("ffprobe", ["-v", "error", "-show_entries", "format=format_name", "-of", "csv=p=0", file]);
-    const format = probe.stdout.trim().replace(/"/g, "");
-    if (verdict === "picture") expect(format, `${name}: classifier says picture`).toMatch(SINGLE_PICTURE);
-    else expect(format, `${name}: classifier says ${verdict}`).toBe(FORMAT_OF[verdict!]);
-    // The outcome, not the label: the export's own way of looping this still (stillLoop: input
-    // options, and for an APNG a loop over its decoded frames) opens the real file and loops it well
-    // past the animation's own length, promptly (a wrong option hangs or fails). A file the export
-    // plays a set number of times instead ends after them, and the export holds its last frame.
-    const loop = stillLoop(verdict!, 30, facts);
-    expect(loop.passes, `${name}: the passes a browser plays`).toBe(BROWSER_PASSES[name] ?? Infinity);
-    // The export's own rate conversion (render.ts): a bare fps filter pads frames past the end of a
-    // stream that ends, which would count a held still as one that plays on.
-    const FPS10 = "fps=fps=10:start_time=0:round=near:eof_action=round";
-    const vf = loop.graph ? `${loop.graph},trim=duration=3.5,${FPS10}` : FPS10;
-    const how = `${loop.input.join(" ")} ${loop.graph ?? ""}`.trim();
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), 20_000);
-    const r = await nodeRunner
-      .run("ffmpeg", ["-v", "error", ...loop.input, ...(loop.graph ? [] : ["-t", "3.5"]), "-i", file, "-vf", vf, "-f", "framemd5", "-"], ac.signal)
-      .finally(() => clearTimeout(timer));
-    expect(ac.signal.aborted, `${name} hung under ${how}`).toBe(false);
-    expect(r.code, `${name} under ${how}: ${r.stderr}`).toBe(0);
-    // A one-picture loop's last frame keeps its own duration past -t; the export cuts every clip at
-    // its out point, so what matters is that it filled the span.
-    const frames = r.stdout.split("\n").filter((l) => /^0,/.test(l)).length;
-    const passes = loop.passes;
-    if (passes === Infinity) expect(frames, `${name}: frames over 3.5 s`).toBeGreaterThanOrEqual(35);
-    else {
-      // It plays the passes it says, in order, and after them shows only its last frame (the export
-      // holds it): never a further pass. Judged on the pictures in order, each run of repeats as one:
-      // the rate filter repeats a frame for as long as it lasts, and a GIF with data after its last
-      // picture holds that picture longer in the loop (its timing says so; the parity smoke holds
-      // the preview to it frame by frame).
-      const once = hashes((await nodeRunner.run("ffmpeg", ["-v", "error", "-i", file, "-vf", FPS10, "-f", "framemd5", "-"])).stdout);
-      const runs = (h: string[]) => h.filter((x, i) => i === 0 || x !== h[i - 1]);
-      const played = Array.from({ length: passes }, () => once).flat();
-      expect(runs(hashes(r.stdout)), `${name}: ${passes} pass(es) of ${once.length} frames, then its last`).toEqual(runs(played));
-    }
-    // Every frame the loop decodes is the frame one pass decodes there, pass after pass (no rate
-    // conversion to blur it): a loop that leaves an earlier frame on the canvas, or stops early,
-    // differs here.
-    const raw = await nodeRunner.run("ffmpeg", [
-      "-v", "error", ...loop.input, ...(loop.graph ? [] : ["-t", "3.5"]), "-i", file,
-      ...(loop.graph ? ["-vf", `${loop.graph},trim=duration=3.5`] : []),
-      "-fps_mode", "passthrough", "-f", "framemd5", "-",
-    ]);
-    expect(raw.code, `${name} decoded under ${how}: ${raw.stderr}`).toBe(0);
-    const pass = hashes((await nodeRunner.run("ffmpeg", ["-v", "error", "-i", file, "-fps_mode", "passthrough", "-f", "framemd5", "-"])).stdout);
-    const looped = hashes(raw.stdout);
-    if (passes !== Infinity) expect(looped.length, `${name}: ${passes} whole passes`).toBe(passes * pass.length);
-    looped.forEach((h, i) => expect(h, `${name}: frame ${i} under ${how}`).toBe(pass[i % pass.length]));
-  }, 60_000);
+  it.each(FILES)(
+    "%s",
+    async (name) => {
+      const file = joinPath(DIR, name);
+      const { reader: verdict, facts } = await probeStillFacts(readRange(file), nodeRunner, file);
+      const probe = await nodeRunner.run("ffprobe", [
+        "-v",
+        "error",
+        "-show_entries",
+        "format=format_name",
+        "-of",
+        "csv=p=0",
+        file,
+      ]);
+      const format = probe.stdout.trim().replace(/"/g, "");
+      if (verdict === "picture")
+        expect(format, `${name}: classifier says picture`).toMatch(SINGLE_PICTURE);
+      else expect(format, `${name}: classifier says ${verdict}`).toBe(FORMAT_OF[verdict!]);
+      // The outcome, not the label: the export's own way of looping this still (stillLoop: input
+      // options, and for an APNG a loop over its decoded frames) opens the real file and loops it well
+      // past the animation's own length, promptly (a wrong option hangs or fails). A file the export
+      // plays a set number of times instead ends after them, and the export holds its last frame.
+      const loop = stillLoop(verdict!, 30, facts);
+      expect(loop.passes, `${name}: the passes a browser plays`).toBe(
+        BROWSER_PASSES[name] ?? Infinity,
+      );
+      // The export's own rate conversion (render.ts): a bare fps filter pads frames past the end of a
+      // stream that ends, which would count a held still as one that plays on.
+      const FPS10 = "fps=fps=10:start_time=0:round=near:eof_action=round";
+      const vf = loop.graph ? `${loop.graph},trim=duration=3.5,${FPS10}` : FPS10;
+      const how = `${loop.input.join(" ")} ${loop.graph ?? ""}`.trim();
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), 20_000);
+      const r = await nodeRunner
+        .run(
+          "ffmpeg",
+          [
+            "-v",
+            "error",
+            ...loop.input,
+            ...(loop.graph ? [] : ["-t", "3.5"]),
+            "-i",
+            file,
+            "-vf",
+            vf,
+            "-f",
+            "framemd5",
+            "-",
+          ],
+          ac.signal,
+        )
+        .finally(() => clearTimeout(timer));
+      expect(ac.signal.aborted, `${name} hung under ${how}`).toBe(false);
+      expect(r.code, `${name} under ${how}: ${r.stderr}`).toBe(0);
+      // A one-picture loop's last frame keeps its own duration past -t; the export cuts every clip at
+      // its out point, so what matters is that it filled the span.
+      const frames = r.stdout.split("\n").filter((l) => /^0,/.test(l)).length;
+      const passes = loop.passes;
+      if (passes === Infinity)
+        expect(frames, `${name}: frames over 3.5 s`).toBeGreaterThanOrEqual(35);
+      else {
+        // It plays the passes it says, in order, and after them shows only its last frame (the export
+        // holds it): never a further pass. Judged on the pictures in order, each run of repeats as one:
+        // the rate filter repeats a frame for as long as it lasts, and a GIF with data after its last
+        // picture holds that picture longer in the loop (its timing says so; the parity smoke holds
+        // the preview to it frame by frame).
+        const once = hashes(
+          (
+            await nodeRunner.run("ffmpeg", [
+              "-v",
+              "error",
+              "-i",
+              file,
+              "-vf",
+              FPS10,
+              "-f",
+              "framemd5",
+              "-",
+            ])
+          ).stdout,
+        );
+        const runs = (h: string[]) => h.filter((x, i) => i === 0 || x !== h[i - 1]);
+        const played = Array.from({ length: passes }, () => once).flat();
+        expect(
+          runs(hashes(r.stdout)),
+          `${name}: ${passes} pass(es) of ${once.length} frames, then its last`,
+        ).toEqual(runs(played));
+      }
+      // Every frame the loop decodes is the frame one pass decodes there, pass after pass (no rate
+      // conversion to blur it): a loop that leaves an earlier frame on the canvas, or stops early,
+      // differs here.
+      const raw = await nodeRunner.run("ffmpeg", [
+        "-v",
+        "error",
+        ...loop.input,
+        ...(loop.graph ? [] : ["-t", "3.5"]),
+        "-i",
+        file,
+        ...(loop.graph ? ["-vf", `${loop.graph},trim=duration=3.5`] : []),
+        "-fps_mode",
+        "passthrough",
+        "-f",
+        "framemd5",
+        "-",
+      ]);
+      expect(raw.code, `${name} decoded under ${how}: ${raw.stderr}`).toBe(0);
+      const pass = hashes(
+        (
+          await nodeRunner.run("ffmpeg", [
+            "-v",
+            "error",
+            "-i",
+            file,
+            "-fps_mode",
+            "passthrough",
+            "-f",
+            "framemd5",
+            "-",
+          ])
+        ).stdout,
+      );
+      const looped = hashes(raw.stdout);
+      if (passes !== Infinity)
+        expect(looped.length, `${name}: ${passes} whole passes`).toBe(passes * pass.length);
+      looped.forEach((h, i) =>
+        expect(h, `${name}: frame ${i} under ${how}`).toBe(pass[i % pass.length]),
+      );
+    },
+    60_000,
+  );
 });
 
 /** An APNG's first frame with these dispose/blend ops (the frame covers the whole canvas). */
-async function apngFirstFrameOps(apng: string, out: string, dispose: number, blend: number): Promise<void> {
+async function apngFirstFrameOps(
+  apng: string,
+  out: string,
+  dispose: number,
+  blend: number,
+): Promise<void> {
   const b = new Uint8Array(await fsp.readFile(apng));
   const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
   for (let at = 8; at + 8 <= b.length; at += 12 + dv.getUint32(at)) {
@@ -240,16 +416,35 @@ describe("keyFirst says when the shipped ffmpeg can loop an APNG by seeking back
   // The rule picks how a big APNG loops: `-threads 1 -stream_loop` works only from a key first frame.
   // Every dispose/blend pair of the first frame, judged by ffmpeg itself.
   const PAIRS = [0, 1, 2].flatMap((dispose) => [0, 1].map((blend) => [dispose, blend] as const));
-  it.each(PAIRS)("dispose %i, blend %i", async (dispose, blend) => {
-    const file = joinPath(DIR, `ops_d${dispose}_b${blend}.png`);
-    await apngFirstFrameOps(joinPath(DIR, "anim_apng.png"), file, dispose, blend);
-    const { facts } = await probeStillFacts(readRange(file), nodeRunner, file);
-    const r = await nodeRunner.run("ffmpeg", [
-      "-v", "error", "-threads", "1", "-stream_loop", "-1", "-t", "3.5", "-i", file,
-      "-fps_mode", "passthrough", "-f", "framemd5", "-",
-    ]);
-    // 10 frames a pass: three and a half passes when it loops, one when it cannot seek back.
-    const loops = hashes(r.stdout).length >= 35;
-    expect(facts.keyFirst === true, `${hashes(r.stdout).length} frames, exit ${r.code}`).toBe(loops);
-  }, 60_000);
+  it.each(PAIRS)(
+    "dispose %i, blend %i",
+    async (dispose, blend) => {
+      const file = joinPath(DIR, `ops_d${dispose}_b${blend}.png`);
+      await apngFirstFrameOps(joinPath(DIR, "anim_apng.png"), file, dispose, blend);
+      const { facts } = await probeStillFacts(readRange(file), nodeRunner, file);
+      const r = await nodeRunner.run("ffmpeg", [
+        "-v",
+        "error",
+        "-threads",
+        "1",
+        "-stream_loop",
+        "-1",
+        "-t",
+        "3.5",
+        "-i",
+        file,
+        "-fps_mode",
+        "passthrough",
+        "-f",
+        "framemd5",
+        "-",
+      ]);
+      // 10 frames a pass: three and a half passes when it loops, one when it cannot seek back.
+      const loops = hashes(r.stdout).length >= 35;
+      expect(facts.keyFirst === true, `${hashes(r.stdout).length} frames, exit ${r.code}`).toBe(
+        loops,
+      );
+    },
+    60_000,
+  );
 });

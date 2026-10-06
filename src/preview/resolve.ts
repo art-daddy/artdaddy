@@ -148,7 +148,9 @@ export async function resolveStillAnimation(
   let found: StillAnimation | null = null;
   if (await store.exists(indexAbs)) {
     const index = parsePackIndex(await store.readText(indexAbs).catch(() => ""));
-    const url = index ? await resolveSourceUrl(store, joinPath(store.projectDir, animPackRel(abs))) : null;
+    const url = index
+      ? await resolveSourceUrl(store, joinPath(store.projectDir, animPackRel(abs)))
+      : null;
     if (index && url) found = { url, timing: index.timing };
   }
   animCache.set(key, found);

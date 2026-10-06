@@ -75,10 +75,18 @@ const ROWS: Array<{
 }> = [
   { name: "GIF", file: "a.gif", enc: [] },
   { name: "APNG", file: "a.png", enc: ["-f", "apng", "-plays", "0"] },
-  { name: "animated WebP", file: "a.webp", enc: ["-c:v", "libwebp_anim", "-lossless", "1", "-loop", "0"] },
+  {
+    name: "animated WebP",
+    file: "a.webp",
+    enc: ["-c:v", "libwebp_anim", "-lossless", "1", "-loop", "0"],
+  },
   { name: "APNG that plays once", file: "once.png", enc: ["-f", "apng", "-plays", "1"] },
   { name: "APNG that plays twice", file: "twice.png", enc: ["-f", "apng", "-plays", "2"] },
-  { name: "WebP that plays twice", file: "twice.webp", enc: ["-c:v", "libwebp_anim", "-lossless", "1", "-loop", "2"] },
+  {
+    name: "WebP that plays twice",
+    file: "twice.webp",
+    enc: ["-c:v", "libwebp_anim", "-lossless", "1", "-loop", "2"],
+  },
   { name: "GIF saved as .png", file: "meme.png", enc: ["-f", "gif"] },
   { name: "GIF at 2x", file: "fast.gif", enc: [], speed: 2 },
   // A browser plays a GIF with no loop extension once, and count N N+1 times (owner: honour the file).
@@ -100,10 +108,22 @@ const ROWS: Array<{
   },
   // 48 frames is where the old preview hold showed frame 5 and the export frame 0.
   { name: "GIF held under a crossfade", file: "held.gif", enc: [], slot: 48, crossfadeAfter: 12 },
-  { name: "GIF at 1.15x held under a crossfade", file: "held115.gif", enc: [], speed: 1.15, slot: 28, crossfadeAfter: 12 },
+  {
+    name: "GIF at 1.15x held under a crossfade",
+    file: "held115.gif",
+    enc: [],
+    speed: 1.15,
+    slot: 28,
+    crossfadeAfter: 12,
+  },
   // Its reader's own loop drifted from the file's timing after ~5 s: only a long clip can see it.
   { name: "APNG over 12 s", file: "long.png", enc: ["-f", "apng", "-plays", "0"], slot: 360 },
-  { name: "WebP over 12 s", file: "long.webp", enc: ["-c:v", "libwebp_anim", "-lossless", "1", "-loop", "0"], slot: 360 },
+  {
+    name: "WebP over 12 s",
+    file: "long.webp",
+    enc: ["-c:v", "libwebp_anim", "-lossless", "1", "-loop", "0"],
+    slot: 360,
+  },
   { name: "GIF over 12 s", file: "long.gif", enc: [], slot: 360 },
 ];
 
@@ -137,24 +157,54 @@ describe("the preview draws the frame the export draws", () => {
         await craft(encoded, src);
       } else await ff(["-y", "-v", "error", ...IRREGULAR, ...enc, src]);
       const ref = await libRef(ctx, src, "image");
-      const placed = (await addClipsTool({ entries: [{ media_ref: ref, timeline_in: 0, timeline_out: SLOT }] }, ctx)) as Rec;
+      const placed = (await addClipsTool(
+        { entries: [{ media_ref: ref, timeline_in: 0, timeline_out: SLOT }] },
+        ctx,
+      )) as Rec;
       expect(placed.ok, JSON.stringify(placed)).toBe(true);
       if (speed) {
         const id = String((placed.clips as Rec[])[0].id);
-        expect(((await setClipPropertiesTool({ clip_ids: [id], speed }, ctx)) as Rec).ok).toBe(true);
+        expect(((await setClipPropertiesTool({ clip_ids: [id], speed }, ctx)) as Rec).ok).toBe(
+          true,
+        );
       }
       if (crossfadeAfter) {
         // A fully transparent picture: whatever shows through it is the still held beneath.
         const clear = joinPath(dir, "clear.png");
-        await ff(["-y", "-v", "error", "-f", "lavfi", "-i", `color=c=black@0:s=${W}x${H},format=rgba`, "-frames:v", "1", clear]);
-        const trackId = String((await loadTimeline(ctx.store)).tracks.find((t) => (t.clips ?? []).length > 0)!.id);
+        await ff([
+          "-y",
+          "-v",
+          "error",
+          "-f",
+          "lavfi",
+          "-i",
+          `color=c=black@0:s=${W}x${H},format=rgba`,
+          "-frames:v",
+          "1",
+          clear,
+        ]);
+        const trackId = String(
+          (await loadTimeline(ctx.store)).tracks.find((t) => (t.clips ?? []).length > 0)!.id,
+        );
         const after = (await addClipsTool(
-          { entries: [{ media_ref: await libRef(ctx, clear, "image"), timeline_in: SLOT, timeline_out: SLOT + AFTER, track_id: trackId }] },
+          {
+            entries: [
+              {
+                media_ref: await libRef(ctx, clear, "image"),
+                timeline_in: SLOT,
+                timeline_out: SLOT + AFTER,
+                track_id: trackId,
+              },
+            ],
+          },
           ctx,
         )) as Rec;
         expect(after.ok, JSON.stringify(after)).toBe(true);
         const nextId = String((after.clips as Rec[])[0].id);
-        const tr = (await setTransitionTool({ clip_id: nextId, transition_in: { kind: "crossfade", duration: crossfadeAfter } }, ctx)) as Rec;
+        const tr = (await setTransitionTool(
+          { clip_id: nextId, transition_in: { kind: "crossfade", duration: crossfadeAfter } },
+          ctx,
+        )) as Rec;
         expect(tr.ok, JSON.stringify(tr)).toBe(true);
       }
 
@@ -185,7 +235,9 @@ describe("the preview draws the frame the export draws", () => {
       const out = await ctx.store.exportPath("out.mp4");
       const video = await raw(["-i", out, "-vf", `crop=iw:2:0:${H / 2 - 1}`], `${out}.raw`);
       const rowBytes = W * 3 * 2;
-      const delivered = Array.from({ length: video.length / rowBytes }, (_, k) => barX(video.subarray(k * rowBytes), 0));
+      const delivered = Array.from({ length: video.length / rowBytes }, (_, k) =>
+        barX(video.subarray(k * rowBytes), 0),
+      );
       expect(delivered.length).toBe(SLOT + AFTER);
 
       // At every project frame, the frame the preview picks shows the bar where the export shows it.
@@ -193,14 +245,32 @@ describe("the preview draws the frame the export draws", () => {
       const picked: number[] = [];
       for (let k = 0; k < SLOT + AFTER; k++) {
         const layer = buildScene(timeline, k / FPS, new Map()).layers.find((l) => l.source === ref);
-        picked.push(layer?.still ? frameX[stillFrameShown(index!.timing, FPS, layer.still.k, layer.still.len, layer.still.speed)] : -1);
+        picked.push(
+          layer?.still
+            ? frameX[
+                stillFrameShown(
+                  index!.timing,
+                  FPS,
+                  layer.still.k,
+                  layer.still.len,
+                  layer.still.speed,
+                )
+              ]
+            : -1,
+        );
       }
       // H.264 moves a 4 px edge by a pixel at most.
       const off = picked.map((x, k) => (Math.abs(x - delivered[k]) <= 1 ? "." : "X")).join("");
-      expect(off, `preview ${JSON.stringify(picked)}\nexport  ${JSON.stringify(delivered)}`).toBe(".".repeat(SLOT + AFTER));
+      expect(off, `preview ${JSON.stringify(picked)}\nexport  ${JSON.stringify(delivered)}`).toBe(
+        ".".repeat(SLOT + AFTER),
+      );
       // ...and the test can tell: the picture really moves, and a held still is really seen held.
       expect(new Set(delivered).size).toBeGreaterThan(3);
-      if (crossfadeAfter) expect(delivered[SLOT + crossfadeAfter / 2 - 1], "held past its end").toBeGreaterThanOrEqual(0);
+      if (crossfadeAfter)
+        expect(
+          delivered[SLOT + crossfadeAfter / 2 - 1],
+          "held past its end",
+        ).toBeGreaterThanOrEqual(0);
     },
     180_000,
   );

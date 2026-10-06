@@ -70,7 +70,11 @@ async function gifLoopCount(
   // The reader logs the count at debug level while it scans the file for its length; nothing is
   // decoded (`-show_entries format=` reads the header pass only).
   const r = await runner
-    .run("ffprobe", ["-v", "debug", "-show_entries", "format=nb_streams", "-of", "csv=p=0", path], signal)
+    .run(
+      "ffprobe",
+      ["-v", "debug", "-show_entries", "format=nb_streams", "-of", "csv=p=0", path],
+      signal,
+    )
     .catch(() => null);
   if (!r || r.code !== 0) return undefined;
   const m = /Loop count is (\d+)/.exec(r.stderr);
@@ -89,7 +93,17 @@ export async function probeStillTiming(
   const r = await runner
     .run(
       "ffprobe",
-      ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=time_base,width,height,nb_frames:packet=pts,duration", "-of", "json", path],
+      [
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=time_base,width,height,nb_frames:packet=pts,duration",
+        "-of",
+        "json",
+        path,
+      ],
       signal,
     )
     .catch(() => null);
@@ -100,5 +114,8 @@ export async function probeStillTiming(
   } catch {
     return null;
   }
-  return timingFromProbe({ streams: json.streams, frames: json.packets }, browserPasses(reader, facts));
+  return timingFromProbe(
+    { streams: json.streams, frames: json.packets },
+    browserPasses(reader, facts),
+  );
 }

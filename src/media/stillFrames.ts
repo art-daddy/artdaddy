@@ -64,7 +64,13 @@ export function stillFrameBefore(t: StillTiming, end: number): number {
 /** The frame a still's clip shows at clip-relative project frame `k`: its first frame before the
  *  clip (a lead-in), its stream frame at the clip's speed inside it, and after its `len` frames the
  *  frame its export holds. One answer for the preview and for an inspect look. */
-export function stillFrameShown(t: StillTiming, fps: number, k: number, len: number, speed: number): number {
+export function stillFrameShown(
+  t: StillTiming,
+  fps: number,
+  k: number,
+  len: number,
+  speed: number,
+): number {
   if (k >= len) return stillFrameBefore(t, (len * speed * t.den) / fps);
   return stillFrameAt(t, fps, k < 0 ? 0 : Math.floor(k * speed + 1e-6));
 }
@@ -80,7 +86,9 @@ export function timingFromProbe(
 ): { timing: StillTiming; w: number; h: number } | null {
   if (!probe || typeof probe !== "object") return null;
   const p = probe as { frames?: unknown; streams?: unknown };
-  const stream = Array.isArray(p.streams) ? (p.streams[0] as Record<string, unknown> | undefined) : undefined;
+  const stream = Array.isArray(p.streams)
+    ? (p.streams[0] as Record<string, unknown> | undefined)
+    : undefined;
   const frames = Array.isArray(p.frames) ? (p.frames as Record<string, unknown>[]) : [];
   if (!stream || frames.length === 0) return null;
   const tb = /^(\d+)\/(\d+)$/.exec(String(stream.time_base ?? ""));
@@ -103,7 +111,11 @@ export function timingFromProbe(
   // last packet does. A count that is absent or not below the packets removes nothing.
   const count = Number(stream.nb_frames);
   const pictures = Number.isInteger(count) && count > 0 && count < pts.length ? count : pts.length;
-  return { timing: { den, pts: pts.slice(0, pictures), period: pts[pts.length - 1] + last, passes }, w, h };
+  return {
+    timing: { den, pts: pts.slice(0, pictures), period: pts[pts.length - 1] + last, passes },
+    w,
+    h,
+  };
 }
 
 /** Longest side of a preview frame, and the most pixels all of a still's frames may take together. */
@@ -148,8 +160,13 @@ export function splitPngStream(bytes: Uint8Array): Array<[number, number]> | nul
     at += 8;
     for (;;) {
       if (at + 12 > bytes.length) return null;
-      const len = ((bytes[at] << 24) >>> 0) + (bytes[at + 1] << 16) + (bytes[at + 2] << 8) + bytes[at + 3];
-      const iend = bytes[at + 4] === 0x49 && bytes[at + 5] === 0x45 && bytes[at + 6] === 0x4e && bytes[at + 7] === 0x44;
+      const len =
+        ((bytes[at] << 24) >>> 0) + (bytes[at + 1] << 16) + (bytes[at + 2] << 8) + bytes[at + 3];
+      const iend =
+        bytes[at + 4] === 0x49 &&
+        bytes[at + 5] === 0x45 &&
+        bytes[at + 6] === 0x4e &&
+        bytes[at + 7] === 0x44;
       at += 12 + len;
       if (at > bytes.length) return null;
       if (iend) break;
@@ -193,9 +210,18 @@ export function parsePackIndex(text: string): PackIndex | null {
   if (!j || j.v !== PACK_INDEX_VERSION) return null;
   const { den, period, passes, w, h } = j;
   const pts = j.pts;
-  if (!isCount(den) || den === 0 || !isCount(period) || !isCount(passes) || !isCount(w) || !isCount(h)) return null;
+  if (
+    !isCount(den) ||
+    den === 0 ||
+    !isCount(period) ||
+    !isCount(passes) ||
+    !isCount(w) ||
+    !isCount(h)
+  )
+    return null;
   if (w === 0 || h === 0 || !Array.isArray(pts) || pts.length === 0 || pts[0] !== 0) return null;
-  for (let i = 0; i < pts.length; i++) if (!isCount(pts[i]) || (i > 0 && !(pts[i] > pts[i - 1]))) return null;
+  for (let i = 0; i < pts.length; i++)
+    if (!isCount(pts[i]) || (i > 0 && !(pts[i] > pts[i - 1]))) return null;
   if (!(period > pts[pts.length - 1])) return null;
   return {
     timing: { den, pts: pts as number[], period, passes: passes === 0 ? Infinity : passes },

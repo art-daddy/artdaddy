@@ -56,14 +56,25 @@ interface Row {
 }
 const ROWS: Row[] = [
   { name: "GIF", file: "sticker.gif", make: (o) => [[...MOVING, o]] },
-  { name: "animated WebP", file: "sticker.webp", make: (o) => [[...MOVING, "-c:v", "libwebp_anim", "-loop", "0", o]] },
-  { name: "animated PNG", file: "sticker.png", make: (o) => [[...MOVING, "-f", "apng", "-plays", "0", o]] },
+  {
+    name: "animated WebP",
+    file: "sticker.webp",
+    make: (o) => [[...MOVING, "-c:v", "libwebp_anim", "-loop", "0", o]],
+  },
+  {
+    name: "animated PNG",
+    file: "sticker.png",
+    make: (o) => [[...MOVING, "-f", "apng", "-plays", "0", o]],
+  },
   {
     name: "GIF saved as .png",
     file: "meme.png",
     make: (o) => {
       const gif = o.replace(/\.png$/, ".tmp.gif");
-      return [[...MOVING, gif], ["-i", gif, "-c", "copy", "-f", "gif", o]];
+      return [
+        [...MOVING, gif],
+        ["-i", gif, "-c", "copy", "-f", "gif", o],
+      ];
     },
   },
   {
@@ -84,9 +95,27 @@ const ROWS: Row[] = [
 /** The square's left edge on the middle row of the delivered file at `t`, or -1 when no red. */
 async function squareX(file: string, t: number): Promise<number> {
   const raw = `${file}.${t}.raw`;
-  await ff(["-y", "-v", "error", "-ss", String(t), "-i", file, "-frames:v", "1", "-vf", `crop=iw:2:0:${H / 2}`, "-f", "rawvideo", "-pix_fmt", "rgb24", raw]);
+  await ff([
+    "-y",
+    "-v",
+    "error",
+    "-ss",
+    String(t),
+    "-i",
+    file,
+    "-frames:v",
+    "1",
+    "-vf",
+    `crop=iw:2:0:${H / 2}`,
+    "-f",
+    "rawvideo",
+    "-pix_fmt",
+    "rgb24",
+    raw,
+  ]);
   const px = new Uint8Array(await fsp.readFile(raw));
-  for (let x = 0; x < W; x++) if (px[3 * x] > 150 && px[3 * x + 1] < 90 && px[3 * x + 2] < 90) return x;
+  for (let x = 0; x < W; x++)
+    if (px[3 * x] > 150 && px[3 * x + 1] < 90 && px[3 * x + 2] < 90) return x;
   return -1;
 }
 
@@ -122,7 +151,11 @@ describe("an animated still exports, animates and loops", () => {
       expect(later - early, "the square moves: the still animates").toBeGreaterThan(20);
       const nextLoop = await squareX(out, 1.25);
       if (row.playsOnce) expect(nextLoop, "holds its last frame").toBeGreaterThan(later);
-      else expect(Math.abs(nextLoop - early), "a second later it is where it started: it loops").toBeLessThanOrEqual(4);
+      else
+        expect(
+          Math.abs(nextLoop - early),
+          "a second later it is where it started: it loops",
+        ).toBeLessThanOrEqual(4);
     },
     180_000,
   );
@@ -221,7 +254,9 @@ describe("a retimed still stays in the picture for its whole slot", () => {
       // The slot is frames 0..29 at 10 fps. Probed at each frame's START: an input seek drops every
       // frame stamped before it, so a time inside the last frame would find nothing at all.
       for (const k of [0, 14, 15, 18, 25, 29])
-        expect(await squareX(out, k / FPS), `in the picture at frame ${k}`).toBeGreaterThanOrEqual(0);
+        expect(await squareX(out, k / FPS), `in the picture at frame ${k}`).toBeGreaterThanOrEqual(
+          0,
+        );
     },
     180_000,
   );
@@ -230,7 +265,20 @@ describe("a retimed still stays in the picture for its whole slot", () => {
 /** Strongly red pixels in a picture, scaled to the canvas size first. */
 async function redPixels(file: string): Promise<number> {
   const raw = `${file}.red.raw`;
-  await ff(["-y", "-v", "error", "-i", file, "-vf", `scale=${W}:${H}`, "-f", "rawvideo", "-pix_fmt", "rgb24", raw]);
+  await ff([
+    "-y",
+    "-v",
+    "error",
+    "-i",
+    file,
+    "-vf",
+    `scale=${W}:${H}`,
+    "-f",
+    "rawvideo",
+    "-pix_fmt",
+    "rgb24",
+    raw,
+  ]);
   const px = new Uint8Array(await fsp.readFile(raw));
   let n = 0;
   for (let i = 0; i < px.length; i += 3) if (px[i] > 150 && px[i + 1] < 90 && px[i + 2] < 90) n++;

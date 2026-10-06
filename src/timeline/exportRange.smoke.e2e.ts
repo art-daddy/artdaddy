@@ -59,7 +59,17 @@ function ffBytes(args: string[]): Promise<Buffer> {
 
 /** Every frame of a file as raw yuv420p, and its sound as 16-bit PCM at the mix's own rate. */
 async function decoded(file: string): Promise<{ frames: Buffer[]; pcm: Buffer }> {
-  const yuv = await ffBytes(["-i", file, "-map", "0:v", "-f", "rawvideo", "-pix_fmt", "yuv420p", "-"]);
+  const yuv = await ffBytes([
+    "-i",
+    file,
+    "-map",
+    "0:v",
+    "-f",
+    "rawvideo",
+    "-pix_fmt",
+    "yuv420p",
+    "-",
+  ]);
   const frames: Buffer[] = [];
   for (let o = 0; o + FRAME_BYTES <= yuv.length; o += FRAME_BYTES)
     frames.push(yuv.subarray(o, o + FRAME_BYTES));
@@ -68,7 +78,11 @@ async function decoded(file: string): Promise<{ frames: Buffer[]; pcm: Buffer }>
 }
 
 /** The export's own plan, encoded losslessly so nothing but the graph can differ. */
-async function renderLossless(tl: Timeline, tag: string, options: ExportOptions = {}): Promise<string> {
+async function renderLossless(
+  tl: Timeline,
+  tag: string,
+  options: ExportOptions = {},
+): Promise<string> {
   const out = path.join(dir, `${tag}.mkv`);
   const plan = buildRenderCommand(tl, out, options);
   const args = [...plan.args];
@@ -82,7 +96,12 @@ async function renderLossless(tl: Timeline, tag: string, options: ExportOptions 
 }
 
 const sec = (frames: number): number => frames / FPS;
-const track = (id: string, z: number, clips: Any[], kind = "video"): Any => ({ id, kind, z, clips });
+const track = (id: string, z: number, clips: Any[], kind = "video"): Any => ({
+  id,
+  kind,
+  z,
+  clips,
+});
 const timeline = (tracks: Any[]): Timeline =>
   ({ canvas: { width: W, height: H, fps: FPS }, tracks }) as Timeline;
 function vclip(media: string, tin: number, tout: number, srcIn = 0, extra: Any = {}): Any {
@@ -121,13 +140,19 @@ async function expectSpanOfWhole(
   for (let k = 0; k < to - from; k++)
     expect(span.frames[k].equals(whole.frames[from + k]), `${tag}: frame ${from + k}`).toBe(true);
   // Moving content, so a span that landed a frame off could not pass the loop above.
-  expect(span.frames[0].equals(span.frames[to - from - 1]), `${tag}: frames must differ`).toBe(false);
+  expect(span.frames[0].equals(span.frames[to - from - 1]), `${tag}: frames must differ`).toBe(
+    false,
+  );
   const bytesPerFrame = (RATE / FPS) * 2 * 2; // stereo s16
   const want = whole.pcm.subarray(from * bytesPerFrame, to * bytesPerFrame);
   expect(span.pcm.length, `${tag}: samples`).toBe(want.length);
   let first = -1;
-  for (let i = 0; i < want.length && first < 0; i += 2) if (span.pcm.readInt16LE(i) !== want.readInt16LE(i)) first = i;
-  expect(first, `${tag}: sound differs from ${(from + first / bytesPerFrame).toFixed(2)} frames on`).toBe(-1);
+  for (let i = 0; i < want.length && first < 0; i += 2)
+    if (span.pcm.readInt16LE(i) !== want.readInt16LE(i)) first = i;
+  expect(
+    first,
+    `${tag}: sound differs from ${(from + first / bytesPerFrame).toFixed(2)} frames on`,
+  ).toBe(-1);
 }
 
 beforeAll(async () => {
@@ -135,7 +160,15 @@ beforeAll(async () => {
   ctx = mkCtx(dir);
   const enc = ["-c:v", "libx264", "-g", "120", "-pix_fmt", "yuv420p"];
   src.a = path.join(dir, "a.mp4");
-  await ff(["-y", "-f", "lavfi", "-i", `testsrc2=size=${W}x${H}:rate=30:duration=14`, ...enc, src.a]);
+  await ff([
+    "-y",
+    "-f",
+    "lavfi",
+    "-i",
+    `testsrc2=size=${W}x${H}:rate=30:duration=14`,
+    ...enc,
+    src.a,
+  ]);
   src.b = path.join(dir, "b.mp4");
   await ff([
     "-y",
@@ -209,7 +242,12 @@ describe("a clip exported on its own is the whole export over its span", () => {
         ],
         "text",
       ),
-      track("music", 0, [aclip(src.music, 0, 390, { fade: { in: 15, out: 15 }, duck: { against: "vo" } })], "audio"),
+      track(
+        "music",
+        0,
+        [aclip(src.music, 0, 390, { fade: { in: 15, out: 15 }, duck: { against: "vo" } })],
+        "audio",
+      ),
       track("vo", 0, [aclip(src.voice, 100, 250)], "audio"),
     ]);
 
@@ -305,7 +343,19 @@ describe.runIf(FP && existsSync(path.join(BRAND_DIR, watermarkFile("16x9"))))(
 
       // The bug sits bottom-right and nowhere else.
       const yOf = async (file: string): Promise<Buffer> =>
-        ffBytes(["-ss", "1", "-i", file, "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "-"]);
+        ffBytes([
+          "-ss",
+          "1",
+          "-i",
+          file,
+          "-frames:v",
+          "1",
+          "-f",
+          "rawvideo",
+          "-pix_fmt",
+          "gray",
+          "-",
+        ]);
       const [p, m] = [await yOf(plain), await yOf(marked)];
       const mean = (b: Buffer, x0: number, y0: number, x1: number, y1: number): number => {
         let s = 0;

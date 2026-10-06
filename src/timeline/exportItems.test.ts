@@ -9,7 +9,12 @@ vi.mock("@tauri-apps/api/path", () => ({ resolveResource: async (r: string) => `
 
 import { MemFs, registerTestDocument, resetTestDocuments } from "../test/timelineKit";
 import { ensureTimeline } from "./engine";
-import { cancelExport, listExportOutcomes, __resetExportQueue, whenExportsSettle } from "./exportQueue";
+import {
+  cancelExport,
+  listExportOutcomes,
+  __resetExportQueue,
+  whenExportsSettle,
+} from "./exportQueue";
 import { exportTool } from "./exportItems";
 import { addClipsTool, addTextClipsTool } from "./placement";
 import { ProjectStoreAccess, joinPath } from "../tools/store";
@@ -93,8 +98,20 @@ async function project(
     { id: "media_aaa", path: "library/media_aaa.mp4", filename: "Tape 14.mp4", kind: "video" },
     { id: "media_bbb", path: "library/media_bbb.mov", filename: "Tape 16.MOV", kind: "video" },
     { id: "media_ccc", path: "library/media_ccc.wav", filename: "narration.wav", kind: "audio" },
-    { id: "media_gen", path: "library/media_gen.mp4", filename: "dragon.mp4", kind: "video", status: "generating" },
-    { id: "media_bad", path: "library/media_bad.mp4", filename: "bad.mp4", kind: "video", status: "failed" },
+    {
+      id: "media_gen",
+      path: "library/media_gen.mp4",
+      filename: "dragon.mp4",
+      kind: "video",
+      status: "generating",
+    },
+    {
+      id: "media_bad",
+      path: "library/media_bad.mp4",
+      filename: "bad.mp4",
+      kind: "video",
+      status: "failed",
+    },
     ...(o.extra ?? []),
   ];
   await disk.writeTextFile(`${DIR}/internals/library.json`, JSON.stringify({ clips: library }));
@@ -144,7 +161,10 @@ async function project(
 describe("export delivers separate files into a folder", () => {
   it("copies library files byte for byte into a folder made in Downloads, numbered as asked", async () => {
     const p = await project();
-    const r = (await exportTool({ media_refs: ["media_bbb", "media_aaa"], output_dir: "VHS clips" }, p.ctx)) as Any;
+    const r = (await exportTool(
+      { media_refs: ["media_bbb", "media_aaa"], output_dir: "VHS clips" },
+      p.ctx,
+    )) as Any;
     expect(r.ok, r.error).toBe(true);
     await whenExportsSettle();
 
@@ -176,7 +196,9 @@ describe("export delivers separate files into a folder", () => {
     const p = await project();
     const r = (await exportTool({ media_refs: ["media_ccc"] }, p.ctx)) as Any;
     expect(r.ok, r.error).toBe(true);
-    expect(r.note).toBe("Saving 1 file to your Downloads folder. Library files are copied as they are.");
+    expect(r.note).toBe(
+      "Saving 1 file to your Downloads folder. Library files are copied as they are.",
+    );
     await whenExportsSettle();
     expect(p.disk.under(DL)).toEqual({ "narration.wav": "bytes of narration.wav" });
   });
@@ -196,7 +218,11 @@ describe("export delivers separate files into a folder", () => {
       p.ctx,
     )) as Any;
     const cap = (await addTextClipsTool(
-      { entries: [{ content: "Grandma at the lake in nineteen eighty", timeline_in: 0, timeline_out: 60 }] },
+      {
+        entries: [
+          { content: "Grandma at the lake in nineteen eighty", timeline_in: 0, timeline_out: 60 },
+        ],
+      },
       p.ctx,
     )) as Any;
     expect(lib.ok && cap.ok, JSON.stringify([lib.error, cap.error])).toBe(true);
@@ -279,7 +305,10 @@ describe("export delivers separate files into a folder", () => {
     p.disk.mkdir = async () => {
       throw new Error("Access is denied");
     };
-    const r = (await exportTool({ media_refs: ["media_aaa"], output_dir: "Z:/locked" }, p.ctx)) as Any;
+    const r = (await exportTool(
+      { media_refs: ["media_aaa"], output_dir: "Z:/locked" },
+      p.ctx,
+    )) as Any;
     expect(r.ok).toBe(false);
     expect(String(r.error)).toMatch(/could not make the folder Z:\/locked: .*Access is denied/);
     expect(listExportOutcomes()).toEqual([]);
@@ -287,7 +316,15 @@ describe("export delivers separate files into a folder", () => {
 
   it("refuses timeline clips while media on the timeline is offline or still generating", async () => {
     const p = await project({
-      extra: [{ id: "media_ext", path: "D:/footage/ext.mp4", filename: "ext.mp4", kind: "video", external: true }],
+      extra: [
+        {
+          id: "media_ext",
+          path: "D:/footage/ext.mp4",
+          filename: "ext.mp4",
+          kind: "video",
+          external: true,
+        },
+      ],
     });
     await p.disk.writeTextFile("D:/footage/ext.mp4", "linked footage");
     const placed = (await addClipsTool(
@@ -319,7 +356,10 @@ describe("export delivers separate files into a folder", () => {
 
   it("renders each timeline clip over its own span, with the watermark and no end card", async () => {
     const p = await project();
-    const r = (await exportTool({ clip_ids: [p.clips.b, p.clips.a], output_dir: "scenes" }, p.ctx)) as Any;
+    const r = (await exportTool(
+      { clip_ids: [p.clips.b, p.clips.a], output_dir: "scenes" },
+      p.ctx,
+    )) as Any;
     expect(r.ok, r.error).toBe(true);
     await whenExportsSettle();
 
@@ -345,7 +385,10 @@ describe("export delivers separate files into a folder", () => {
   it("never overwrites a file already in the folder", async () => {
     const p = await project();
     await p.disk.writeTextFile(`${DL}/VHS clips/01 Tape 16.mov`, "the user's own file");
-    const r = (await exportTool({ media_refs: ["media_bbb", "media_aaa"], output_dir: "VHS clips" }, p.ctx)) as Any;
+    const r = (await exportTool(
+      { media_refs: ["media_bbb", "media_aaa"], output_dir: "VHS clips" },
+      p.ctx,
+    )) as Any;
     expect(r.ok, r.error).toBe(true);
     await whenExportsSettle();
     expect(p.disk.under(`${DL}/VHS clips`)).toEqual({
@@ -357,11 +400,16 @@ describe("export delivers separate files into a folder", () => {
 
   it("uses a full path as given, and makes it when missing", async () => {
     const p = await project();
-    const r = (await exportTool({ media_refs: ["media_aaa"], output_dir: "D:/Deliveries/Client A" }, p.ctx)) as Any;
+    const r = (await exportTool(
+      { media_refs: ["media_aaa"], output_dir: "D:/Deliveries/Client A" },
+      p.ctx,
+    )) as Any;
     expect(r.ok, r.error).toBe(true);
     await whenExportsSettle();
     expect(p.disk.dirs.has("D:/Deliveries/Client A")).toBe(true);
-    expect(p.disk.under("D:/Deliveries/Client A")).toEqual({ "Tape 14.mp4": "bytes of Tape 14.mp4" });
+    expect(p.disk.under("D:/Deliveries/Client A")).toEqual({
+      "Tape 14.mp4": "bytes of Tape 14.mp4",
+    });
   });
 
   it("puts the whole timeline into a named folder too", async () => {
@@ -381,7 +429,10 @@ describe("export delivers separate files into a folder", () => {
     [{ media_refs: ["media_gen"] }, /still being generated/],
     [{ clip_ids: ["clip_nope"] }, /clip_nope/],
     [{ media_refs: [] }, /empty/],
-    [{ media_refs: Array.from({ length: 51 }, () => "media_aaa"), clip_ids: [] }, /empty|at most 50/],
+    [
+      { media_refs: Array.from({ length: 51 }, () => "media_aaa"), clip_ids: [] },
+      /empty|at most 50/,
+    ],
     [{ media_refs: ["media_aaa"], output_path: "D:/x.mp4" }, /output_dir/],
     [{ output_dir: "renders", output_path: "D:/x.mp4" }, /output_dir/],
     [{ media_refs: ["media_aaa"], output_dir: "Downloads/VHS" }, /folder name/],
@@ -445,9 +496,15 @@ describe("export delivers separate files into a folder", () => {
     const p = await project();
     let release!: () => void;
     p.disk.gates.set(`${DIR}/library/media_aaa.mp4`, new Promise<void>((r) => (release = r)));
-    const first = (await exportTool({ media_refs: ["media_aaa"], output_dir: "VHS clips" }, p.ctx)) as Any;
+    const first = (await exportTool(
+      { media_refs: ["media_aaa"], output_dir: "VHS clips" },
+      p.ctx,
+    )) as Any;
     expect(first.ok).toBe(true);
-    const again = (await exportTool({ media_refs: ["media_aaa"], output_dir: "VHS clips" }, p.ctx)) as Any;
+    const again = (await exportTool(
+      { media_refs: ["media_aaa"], output_dir: "VHS clips" },
+      p.ctx,
+    )) as Any;
     expect(again.ok).toBe(false);
     expect(String(again.error)).toMatch(/already queued or running/);
     release();
@@ -461,10 +518,15 @@ describe("one export call wakes the agent once", () => {
     const p = await project({ origin: true });
     let release!: () => void;
     p.disk.gates.set(`${DIR}/library/media_bbb.mov`, new Promise<void>((r) => (release = r)));
-    const r = (await exportTool({ media_refs: ["media_bbb"], clip_ids: [p.clips.a] }, p.ctx)) as Any;
+    const r = (await exportTool(
+      { media_refs: ["media_bbb"], clip_ids: [p.clips.a] },
+      p.ctx,
+    )) as Any;
     expect(r.ok, r.error).toBe(true);
     // A copy never waits behind a render: the clip renders while the first file is still copying.
-    await vi.waitFor(() => expect(listExportOutcomes().filter((x) => x.state === "done")).toHaveLength(1));
+    await vi.waitFor(() =>
+      expect(listExportOutcomes().filter((x) => x.state === "done")).toHaveLength(1),
+    );
     expect(pendingJobNotes(DIR), "no wake while a file is still on its way").toEqual([]);
     release();
     await whenExportsSettle();
@@ -477,7 +539,10 @@ describe("one export call wakes the agent once", () => {
   it("reports a failed copy in that one wake and leaves no partial file", async () => {
     const p = await project({ origin: true });
     p.disk.failCopy.add(`${DIR}/library/media_aaa.mp4`);
-    const r = (await exportTool({ media_refs: ["media_bbb", "media_aaa"], output_dir: "out" }, p.ctx)) as Any;
+    const r = (await exportTool(
+      { media_refs: ["media_bbb", "media_aaa"], output_dir: "out" },
+      p.ctx,
+    )) as Any;
     expect(r.ok, r.error).toBe(true);
     await whenExportsSettle();
     expect(p.disk.under(`${DL}/out`)).toEqual({ "01 Tape 16.mov": "bytes of Tape 16.MOV" });
@@ -490,12 +555,18 @@ describe("one export call wakes the agent once", () => {
     const p = await project({ origin: true });
     let release!: () => void;
     p.disk.gates.set(`${DIR}/library/media_aaa.mp4`, new Promise<void>((r) => (release = r)));
-    const r = (await exportTool({ media_refs: ["media_bbb", "media_aaa", "media_ccc"], output_dir: "out" }, p.ctx)) as Any;
+    const r = (await exportTool(
+      { media_refs: ["media_bbb", "media_aaa", "media_ccc"], output_dir: "out" },
+      p.ctx,
+    )) as Any;
     expect(r.ok, r.error).toBe(true);
     expect(cancelExport(r.exports[1].job_id)).toBe(true);
     release();
     await whenExportsSettle();
-    expect(Object.keys(p.disk.under(`${DL}/out`)).sort()).toEqual(["01 Tape 16.mov", "03 narration.wav"]);
+    expect(Object.keys(p.disk.under(`${DL}/out`)).sort()).toEqual([
+      "01 Tape 16.mov",
+      "03 narration.wav",
+    ]);
     expect(pendingJobNotes(DIR).map((n) => n.status)).toEqual(["done", "done"]);
   });
 });

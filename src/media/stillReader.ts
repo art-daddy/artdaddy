@@ -49,7 +49,13 @@ export interface StillFacts {
   keyFirst?: boolean;
 }
 
-export const NO_FACTS: StillFacts = { known: false, plays: null, frames: null, width: null, height: null };
+export const NO_FACTS: StillFacts = {
+  known: false,
+  plays: null,
+  frames: null,
+  width: null,
+  height: null,
+};
 
 /** Counts this high are forever in practice (65535, the GIF field's largest, is written to mean it),
  *  and past ffmpeg's int range. */
@@ -103,18 +109,33 @@ export function stillLoop(
     case "picture":
       return { input: ["-loop", "1", "-framerate", String(fps)], graph: null, passes, hold: false };
     case "gif":
-      return { input: passes === 1 ? [] : ["-stream_loop", repeat], graph: null, passes, hold: finite };
+      return {
+        input: passes === 1 ? [] : ["-stream_loop", repeat],
+        graph: null,
+        passes,
+        hold: finite,
+      };
     case "mov":
       return { input: ["-stream_loop", "-1"], graph: null, passes, hold: false };
     case "webp_anim":
       // Its reader plays the count it reads itself: when ours is unknown, hold in case it ends.
-      return { input: ["-ignore_loop", "0"], graph: null, passes, hold: finite || facts.plays === null };
+      return {
+        input: ["-ignore_loop", "0"],
+        graph: null,
+        passes,
+        hold: finite || facts.plays === null,
+      };
     case "apng": {
       if (passes === 1) return { input: [], graph: null, passes, hold: true };
       const frames = facts.frames ?? Infinity;
       const source = (facts.width ?? Infinity) * (facts.height ?? Infinity);
       if (frames * Math.min(drawnPixels, source) > APNG_LOOP_PIXELS && facts.keyFirst)
-        return { input: ["-threads", "1", "-stream_loop", repeat], graph: null, passes, hold: finite };
+        return {
+          input: ["-threads", "1", "-stream_loop", repeat],
+          graph: null,
+          passes,
+          hold: finite,
+        };
       // 32767 is the filter's largest window: it loops what one pass decoded, however many frames.
       const graph = `loop=loop=${repeat}:size=32767:start=0`;
       return drawnPixels < source
@@ -168,7 +189,10 @@ export function stillReader(head: Uint8Array): StillReader | null {
   if (ascii(head, 4, "ftyp")) return "mov";
   if (ascii(head, 0, "RIFF") && ascii(head, 8, "WEBP")) {
     const animated =
-      ascii(head, 12, "VP8X") && head.length > 20 && u32le(head, 16) === 10 && (head[20] & 0x02) !== 0;
+      ascii(head, 12, "VP8X") &&
+      head.length > 20 &&
+      u32le(head, 16) === 10 &&
+      (head[20] & 0x02) !== 0;
     return animated ? "webp_anim" : "picture";
   }
   if (PNG_SIG.every((v, i) => head[i] === v)) return isApng(head) ? "apng" : "picture";
@@ -191,19 +215,27 @@ export function stillFacts(head: Uint8Array): StillFacts {
     const width = u32be(head, 16);
     const height = u32be(head, 20);
     let facts: StillFacts | null = null;
-    for (let at = 8; at + 8 <= head.length; ) {
+    for (let at = 8; at + 8 <= head.length;) {
       const len = u32be(head, at);
       const body = at + 8;
       if (ascii(head, at + 4, "acTL")) {
         if (body + 8 > head.length) return NO_FACTS;
-        facts = { known: true, plays: u32be(head, body + 4), frames: u32be(head, body), width, height };
+        facts = {
+          known: true,
+          plays: u32be(head, body + 4),
+          frames: u32be(head, body),
+          width,
+          height,
+        };
       } else if (ascii(head, at + 4, "fcTL") && facts) {
         if (len !== 26 || body + 26 > head.length) return facts;
         // A frame covering the whole canvas is a key frame when it disposes to the background (or,
         // as the first frame, to "previous", which ffmpeg reads as background) or replaces pixels.
         const whole =
-          u32be(head, body + 4) === width && u32be(head, body + 8) === height &&
-          u32be(head, body + 12) === 0 && u32be(head, body + 16) === 0;
+          u32be(head, body + 4) === width &&
+          u32be(head, body + 8) === height &&
+          u32be(head, body + 12) === 0 &&
+          u32be(head, body + 16) === 0;
         const dispose = head[body + 24];
         const blend = head[body + 25];
         return { ...facts, keyFirst: whole && (dispose === 1 || dispose === 2 || blend === 0) };
@@ -214,7 +246,7 @@ export function stillFacts(head: Uint8Array): StillFacts {
     return facts ?? NO_FACTS;
   }
   if (reader === "webp_anim") {
-    for (let at = 12; at + 8 <= head.length; ) {
+    for (let at = 12; at + 8 <= head.length;) {
       const size = u32le(head, at + 4);
       if (ascii(head, at, "ANIM")) {
         if (size !== 6 || at + 14 > head.length) return NO_FACTS;

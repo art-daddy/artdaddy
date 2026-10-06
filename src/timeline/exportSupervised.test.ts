@@ -302,9 +302,15 @@ describe("the runner that hands ffmpeg to the app process", () => {
   });
 
   it("forwards progress, carries its scratch dir with the job, and reports how it ended", async () => {
-    const r = supervisedRunner(base(), jobs, { id: "j1", lane: "export", meta: { kind: "export" } });
+    const r = supervisedRunner(base(), jobs, {
+      id: "j1",
+      lane: "export",
+      meta: { kind: "export" },
+    });
     const seen: string[] = [];
-    const done = r.run("ffmpeg", ["-i", "x", "o"], undefined, "C:/scratch/caps-1", (c) => seen.push(c));
+    const done = r.run("ffmpeg", ["-i", "x", "o"], undefined, "C:/scratch/caps-1", (c) =>
+      seen.push(c),
+    );
     await flush();
     expect(jobs.submitted[0].cwd).toBe("C:/scratch/caps-1");
     expect(jobs.submitted[0].meta).toEqual({ kind: "export", scratch: "C:/scratch/caps-1" });

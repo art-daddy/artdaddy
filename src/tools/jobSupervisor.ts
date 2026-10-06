@@ -57,7 +57,9 @@ export interface JobSupervisor {
 }
 
 /** A job's stderr as one string: both ends, with what was dropped between them marked. */
-export function jobStderr(job: Pick<JobView, "stderr_head" | "stderr_elided" | "stderr_tail">): string {
+export function jobStderr(
+  job: Pick<JobView, "stderr_head" | "stderr_elided" | "stderr_tail">,
+): string {
   if (!job.stderr_elided) return job.stderr_head + job.stderr_tail;
   return `${job.stderr_head}\n…[${job.stderr_elided} bytes elided]…\n${job.stderr_tail}`;
 }

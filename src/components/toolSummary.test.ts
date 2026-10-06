@@ -306,7 +306,10 @@ describe("a result's own name survives the loop's envelope", () => {
     ["rename_project", "Renamed the project to “Side Idea”"],
     ["open_project", "Found “Side Idea” in your projects"],
   ])("%s names the project, not the tool", async (tool, expected) => {
-    const rows = buildRows(await partsFor(tool, { ok: true, id: "side_1", name: "Side Idea" }), ctx);
+    const rows = buildRows(
+      await partsFor(tool, { ok: true, id: "side_1", name: "Side Idea" }),
+      ctx,
+    );
     expect((rows[0] as Any).calls[0].text).toBe(expected);
   });
 });

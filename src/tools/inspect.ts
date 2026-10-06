@@ -1101,7 +1101,11 @@ function nextCallToken(): string {
  *  itself is a lossless PNG (or the original still) so the numbers are exact; for 10-bit footage that
  *  PNG is 16-bit and ~2.5 MB, too large to show at all (UJ-019). */
 async function shownColorFrame(ctx: ClientToolContext, measured: string): Promise<string> {
-  return encodeImageForGemini(ctx, measured, { maxDim: TIMELINE_FRAME_EDGE, quality: 88, tag: "inspect" });
+  return encodeImageForGemini(ctx, measured, {
+    maxDim: TIMELINE_FRAME_EDGE,
+    quality: 88,
+    tag: "inspect",
+  });
 }
 
 /** The last meaningful ffmpeg line, so a failure names its cause instead of "could not render". */

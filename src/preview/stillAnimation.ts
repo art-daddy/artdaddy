@@ -45,7 +45,9 @@ export class AnimatedStill {
       // The index and the frames are written by one job, so a count that disagrees means a torn or
       // stale pack: drawn unmoving rather than with frames that show at the wrong times.
       if (!ranges || ranges.length !== this.timing.pts.length)
-        throw new Error(`frames do not match their index (${ranges?.length ?? 0} of ${this.timing.pts.length})`);
+        throw new Error(
+          `frames do not match their index (${ranges?.length ?? 0} of ${this.timing.pts.length})`,
+        );
       if (this.dead) return;
       this.frames = ranges.map(([a, b]) => new Blob([bytes.subarray(a, b)], { type: "image/png" }));
       this.onChange();
@@ -81,7 +83,10 @@ export class AnimatedStill {
         this.decoding.delete(idx);
         const r = this.renderer();
         if (this.dead || !r) return bitmap.close();
-        this.cap = Math.max(MIN_TEXTURES, Math.floor(TEXTURE_PIXELS / (bitmap.width * bitmap.height)));
+        this.cap = Math.max(
+          MIN_TEXTURES,
+          Math.floor(TEXTURE_PIXELS / (bitmap.width * bitmap.height)),
+        );
         const key = `${this.source}\u0000frame\u0000${idx}`;
         r.setTexture(key, bitmap);
         bitmap.close(); // the texture holds the pixels now

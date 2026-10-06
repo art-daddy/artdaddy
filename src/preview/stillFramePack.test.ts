@@ -23,10 +23,23 @@ class BytesFs extends MemFs {
 }
 
 const be = (n: number) => [(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255];
-const chunk = (type: string, data: number[]) => [...be(data.length), ...[...type].map((c) => c.charCodeAt(0)), ...data, 0, 0, 0, 0];
+const chunk = (type: string, data: number[]) => [
+  ...be(data.length),
+  ...[...type].map((c) => c.charCodeAt(0)),
+  ...data,
+  0,
+  0,
+  0,
+  0,
+];
 const SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 const IHDR = chunk("IHDR", [...be(40), ...be(40), 8, 6, 0, 0, 0]);
-const APNG_ONCE = new Uint8Array([...SIG, ...IHDR, ...chunk("acTL", [...be(6), ...be(1)]), ...chunk("IDAT", [0])]);
+const APNG_ONCE = new Uint8Array([
+  ...SIG,
+  ...IHDR,
+  ...chunk("acTL", [...be(6), ...be(1)]),
+  ...chunk("IDAT", [0]),
+]);
 const PLAIN_PNG = new Uint8Array([...SIG, ...IHDR, ...chunk("IDAT", [0])]);
 const GIF = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 40, 0, 40, 0, 0, 0, 0]);
 
@@ -52,16 +65,23 @@ function setup(
       calls.push(program);
       // ffprobe as the shipped one answers: a GIF's loop count on stderr at debug level...
       if (program === "ffprobe" && args.includes("debug"))
-        return { code: 0, stdout: "1\n", stderr: loop === null ? "" : `[gif @ 0x1] Loop count is ${loop}\n` };
+        return {
+          code: 0,
+          stdout: "1\n",
+          stderr: loop === null ? "" : `[gif @ 0x1] Loop count is ${loop}\n`,
+        };
       // ...and the packet timing as JSON.
-      if (program === "ffprobe") return { code: 0, stdout: JSON.stringify(o.probe ?? PROBE), stderr: "" };
+      if (program === "ffprobe")
+        return { code: 0, stdout: JSON.stringify(o.probe ?? PROBE), stderr: "" };
       if (o.ffmpegFails) return { code: 1, stdout: "", stderr: "boom" };
       await fs.writeTextFile(args[args.length - 1], "frames");
       return { code: 0, stdout: "", stderr: "" };
     },
   };
-  const index = (name: string) => joinPath(`C:/proj/internals/cache/proxies/${animIndexName(joinPath(`C:/proj/${name}`))}`);
-  const pack = (name: string) => joinPath(`C:/proj/internals/cache/proxies/${animPackName(joinPath(`C:/proj/${name}`))}`);
+  const index = (name: string) =>
+    joinPath(`C:/proj/internals/cache/proxies/${animIndexName(joinPath(`C:/proj/${name}`))}`);
+  const pack = (name: string) =>
+    joinPath(`C:/proj/internals/cache/proxies/${animPackName(joinPath(`C:/proj/${name}`))}`);
   return { fs, store, runner, calls, index, pack };
 }
 
@@ -110,7 +130,10 @@ describe("makeStillFramePack", () => {
   it("makes nothing from a timing it cannot trust, or a single frame", async () => {
     const t = setup({ "library/a.gif": GIF }, { probe: { packets: [], streams: [] } });
     expect(await makeStillFramePack(t.store, t.runner, "library/a.gif")).toBe(false);
-    const one = setup({ "library/b.gif": GIF }, { probe: { ...PROBE, packets: [PROBE.packets[0]] } });
+    const one = setup(
+      { "library/b.gif": GIF },
+      { probe: { ...PROBE, packets: [PROBE.packets[0]] } },
+    );
     expect(await makeStillFramePack(one.store, one.runner, "library/b.gif")).toBe(false);
     expect(one.calls).not.toContain("ffmpeg"); // never decoded
   });

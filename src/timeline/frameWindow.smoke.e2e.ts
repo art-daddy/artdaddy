@@ -361,10 +361,15 @@ describe("a frame window is the export's frame at that instant", () => {
         still(src.gifOnce, 300, 360, { speed: 1.15 }),
         still(src.webp, 360, 420, { transition_in: { kind: "crossfade", duration: sec(12) } }),
       ]),
-      track("tail", 2, [still(src.gifTail, 0, 400, { transform: { scale: 0.5, position: { x: 0.75, y: 0.5 } } })]),
+      track("tail", 2, [
+        still(src.gifTail, 0, 400, { transform: { scale: 0.5, position: { x: 0.75, y: 0.5 } } }),
+      ]),
       track("apng", 3, [
         vclip(src.b, 0, 200, 0, { transform: { scale: 0.3, position: { x: 0.2, y: 0.2 } } }),
-        still(src.apng, 200, 330, { transition_in: { kind: "crossfade", duration: sec(10) }, transform: { scale: 0.3, position: { x: 0.2, y: 0.2 } } }),
+        still(src.apng, 200, 330, {
+          transition_in: { kind: "crossfade", duration: sec(10) },
+          transform: { scale: 0.3, position: { x: 0.2, y: 0.2 } },
+        }),
       ]),
     ]);
     const resolved = await resolveClipSources(ctx, tl, { stillTiming: true });
@@ -374,10 +379,22 @@ describe("a frame window is the export's frame at that instant", () => {
         if (String(c.media_ref).match(/\.(gif|webp)$|_apng\.png$/))
           expect((c as Any).still_timing, `${c.media_ref}: timing read`).toBeTruthy();
     // Each window must show the still as ONE frame (no replay), or this proves nothing new.
-    const plan = buildRenderCommand(tl, path.join(dir, "x.yuv"), {}, { frame: 283, outputArgs: ["-f", "rawvideo"] });
+    const plan = buildRenderCommand(
+      tl,
+      path.join(dir, "x.yuv"),
+      {},
+      { frame: 283, outputArgs: ["-f", "rawvideo"] },
+    );
     expect(plan.args.join(" ")).not.toContain("-stream_loop");
-    expect(plan.filterComplex.match(/select='eq\(n,/g)?.length, "stills shown as one frame").toBeGreaterThanOrEqual(2);
-    await expectSameAsExport("animated", tl, [3, 17, 52, 53, 160, 283, 299, 300, 301, 330, 358, 359, 363, 366, 396, 399, 197, 203, 205]);
+    expect(
+      plan.filterComplex.match(/select='eq\(n,/g)?.length,
+      "stills shown as one frame",
+    ).toBeGreaterThanOrEqual(2);
+    await expectSameAsExport(
+      "animated",
+      tl,
+      [3, 17, 52, 53, 160, 283, 299, 300, 301, 330, 358, 359, 363, 366, 396, 399, 197, 203, 205],
+    );
   });
 
   it("captions: plain, phrase-chunks and word-highlight, over video", async () => {

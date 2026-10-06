@@ -117,8 +117,11 @@ async function exportItemsTool(args: Args, ctx: ClientToolContext | null): Promi
 
   // Timeline clips: one snapshot, checked the way an export of the whole timeline is checked.
   const clips: { clipId: string; from: number; to: number; stem: string }[] = [];
-  let loaded: { seconds: Timeline; branding?: import("./branding").Branding; warnings: string[] } | null =
-    null;
+  let loaded: {
+    seconds: Timeline;
+    branding?: import("./branding").Branding;
+    warnings: string[];
+  } | null = null;
   let fps = 30;
   if (clipIds.length) {
     const raw = await loadTimeline(ctx.store).catch(() => null);
@@ -160,12 +163,24 @@ async function exportItemsTool(args: Args, ctx: ClientToolContext | null): Promi
   const stageOf = (path: string): string => (ctx.store.canRename ? stagingPathFor(path) : path);
   let i = 0;
   for (const m of media) {
-    const { filename, path } = await freeName(ctx.store, folder.dir, numbered(i++, m.stem), m.ext, taken);
+    const { filename, path } = await freeName(
+      ctx.store,
+      folder.dir,
+      numbered(i++, m.stem),
+      m.ext,
+      taken,
+    );
     if (isDestinationReserved(path)) return busy(filename);
     planned.push({ kind: "media", ref: m.ref, src: m.src, filename, path, stage: stageOf(path) });
   }
   for (const c of clips) {
-    const { filename, path } = await freeName(ctx.store, folder.dir, numbered(i++, c.stem), ".mp4", taken);
+    const { filename, path } = await freeName(
+      ctx.store,
+      folder.dir,
+      numbered(i++, c.stem),
+      ".mp4",
+      taken,
+    );
     if (isDestinationReserved(path)) return busy(filename);
     const stage = stageOf(path);
     // The owner's rule for a clip on its own: the watermark, and no end card.
