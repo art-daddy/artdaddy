@@ -569,6 +569,23 @@ describe("buildRenderCommand", () => {
     expect(plan.filterComplex).toContain("atempo");
   });
 
+  // Speed changes how fast a still's animation plays, never how long the still is on screen
+  // (animatedStills.smoke.e2e.ts proves it on the delivered file): its input must last as long as
+  // its slot consumes at that speed, or a 2x still runs out halfway through its own slot.
+  it("reads as much of a retimed still as its slot consumes", () => {
+    const length = (speed: number, reader = "gif") => {
+      const a = buildRenderCommand(
+        tl([{ media_ref: "/s.gif", timeline_in: 0, timeline_out: 3, speed, still_reader: reader }]),
+        "/o.mp4",
+      ).args;
+      return Number(a[a.indexOf("/s.gif") - 2]);
+    };
+    for (const speed of [0.5, 1, 1.15, 2, 4]) {
+      expect(length(speed)).toBeCloseTo(3 * speed, 5);
+      expect(length(speed, "picture")).toBeCloseTo(3 * speed, 5);
+    }
+  });
+
   it("loops every still with an option its own reader accepts", () => {
     // `-loop 1` is the image-sequence reader's; a GIF or AVIF opens with its own reader, which
     // rejected it, and every export containing one failed. exportInputs.smoke.e2e.ts is the proof.

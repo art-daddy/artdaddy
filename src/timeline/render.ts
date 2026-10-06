@@ -1015,8 +1015,13 @@ export function buildRenderCommand(
     const isImg = clipKind(clip) === "image";
     const tin = Number(clip.timeline_in) || 0;
     const tout = Number(clip.timeline_out) || 0;
+    // A still has no source window, so its span is what its slot consumes: the slot's length at
+    // its speed, as for a video (setpts below divides by the speed). Taking just the slot's length
+    // ran a 2x still out of picture halfway through its own slot.
     const si = isImg ? 0 : Number(clip.source_in) || 0;
-    const so = isImg ? Math.max(0, tout - tin) : Number(clip.source_out) || 0;
+    const so = isImg
+      ? Math.max(0, tout - tin) * (Number(clip.speed ?? 1) || 1)
+      : Number(clip.source_out) || 0;
     let shift: Shift | null = null;
     const input: Input = {
       path: String(clip.media_ref),

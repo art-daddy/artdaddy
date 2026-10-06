@@ -18,10 +18,12 @@ import {
   resetE2EDocuments,
 } from "../tools/__e2e";
 import { joinPath } from "../tools/store";
+import { inspectTimelineTool } from "../tools/inspect";
 import { ensureTimeline } from "./engine";
 import { whenExportEnds } from "./exportQueue";
 import { setCanvasTool } from "./ops";
 import { addClipsTool } from "./placement";
+import { setClipPropertiesTool } from "./props";
 import { exportTimelineTool } from "./render";
 
 type Rec = Record<string, unknown>;
@@ -118,3 +120,67 @@ describe("an animated still exports, animates and loops", () => {
     180_000,
   );
 });
+
+// Speed is offered on a still (the Inspector shows it), and it changes how fast an animation plays,
+// not how long the clip lasts. The export cut a still's input to its slot's length and only THEN
+// compressed it by the speed, so at 2x every still -- a plain picture as much as a GIF -- vanished
+// halfway through its own slot, while the preview went on showing it.
+describe("a retimed still stays in the picture for its whole slot", () => {
+  const PICTURE = (o: string): string[][] => [
+    ["-f", "lavfi", "-i", "color=c=red:s=40x40,format=rgba", "-frames:v", "1", o],
+  ];
+  it.each([
+    { name: "picture", file: "still.png", make: PICTURE, speed: 2 },
+    { name: "GIF", file: "sticker.gif", make: (o: string) => [[...MOVING, o]], speed: 2 },
+    { name: "GIF", file: "slow.gif", make: (o: string) => [[...MOVING, o]], speed: 0.5 },
+  ])(
+    "$name at $speed x",
+    async ({ file, make, speed }) => {
+      const dir = joinPath(ROOT, `speed_${file.replace(/\W+/g, "_")}`);
+      await nodeFs.mkdir(dir);
+      await openE2EDoc(dir);
+      const ctx = mkCtx(dir);
+      await ensureTimeline(ctx.store);
+      expect(((await setCanvasTool({ width: W, height: H, fps: FPS }, ctx)) as Rec).ok).toBe(true);
+      const src = joinPath(dir, file);
+      for (const args of make(src)) await ff(["-y", "-v", "error", ...args]);
+      const ref = await libRef(ctx, src, "image");
+      const placed = (await addClipsTool(
+        { entries: [{ media_ref: ref, timeline_in: 0, timeline_out: 30 }] },
+        ctx,
+      )) as Rec;
+      expect(placed.ok, JSON.stringify(placed)).toBe(true);
+      const id = String((placed.clips as Rec[])[0].id);
+      const set = (await setClipPropertiesTool({ clip_ids: [id], speed }, ctx)) as Rec;
+      expect(set.ok, JSON.stringify(set)).toBe(true);
+      expect((set.clips as Rec[])[0].timeline_out, "speed leaves a still's length alone").toBe(30);
+
+      // A look seeks by the same span, so the frame it returns must show the still too.
+      const look = (await inspectTimelineTool({ start_frame: 25 }, ctx)) as Rec;
+      expect(look.ok, JSON.stringify(look).slice(0, 600)).toBe(true);
+      const jpeg = (look._attachments as Array<{ path: string }>)[0].path;
+      expect(await redPixels(jpeg), "the look at frame 25 shows the still").toBeGreaterThan(100);
+
+      const res = (await exportTimelineTool({ name: "out" }, ctx)) as Rec;
+      expect(res.ok, JSON.stringify(res)).toBe(true);
+      const ended = await whenExportEnds(String(res.job_id));
+      expect(ended?.state, JSON.stringify(ended)).toBe("done");
+      const out = await ctx.store.exportPath("out.mp4");
+      // The slot is frames 0..29 at 10 fps. Probed at each frame's START: an input seek drops every
+      // frame stamped before it, so a time inside the last frame would find nothing at all.
+      for (const k of [0, 14, 15, 18, 25, 29])
+        expect(await squareX(out, k / FPS), `in the picture at frame ${k}`).toBeGreaterThanOrEqual(0);
+    },
+    180_000,
+  );
+});
+
+/** Strongly red pixels in a picture, scaled to the canvas size first. */
+async function redPixels(file: string): Promise<number> {
+  const raw = `${file}.red.raw`;
+  await ff(["-y", "-v", "error", "-i", file, "-vf", `scale=${W}:${H}`, "-f", "rawvideo", "-pix_fmt", "rgb24", raw]);
+  const px = new Uint8Array(await fsp.readFile(raw));
+  let n = 0;
+  for (let i = 0; i < px.length; i += 3) if (px[i] > 150 && px[i + 1] < 90 && px[i + 2] < 90) n++;
+  return n;
+}
