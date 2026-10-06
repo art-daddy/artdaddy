@@ -56,6 +56,29 @@ export function imageProxyRel(source: string): string {
   return `${INTERNAL_DIR}/cache/proxies/${imageProxyName(source)}`;
 }
 
+// The preview's frames of an animated still (GIF, APNG, animated WebP): every frame, decoded once
+// by ffmpeg into transparent PNGs written back to back, and an index saying when each shows
+// (media/stillFrames.ts). Two FLAT files carrying the source's key, so the cache GC keeps them while
+// the asset lives and collects them after (it never descends into a directory).
+const ANIM_REV = 1;
+
+export function animPackName(source: string): string {
+  return `${proxyKey(source)}.anim.r${ANIM_REV}.png`;
+}
+
+/** Written LAST: its presence says the pack beside it is complete. */
+export function animIndexName(source: string): string {
+  return `${proxyKey(source)}.anim.r${ANIM_REV}.json`;
+}
+
+export function animPackRel(source: string): string {
+  return `${INTERNAL_DIR}/cache/proxies/${animPackName(source)}`;
+}
+
+export function animIndexRel(source: string): string {
+  return `${INTERNAL_DIR}/cache/proxies/${animIndexName(source)}`;
+}
+
 /** Versioned poster filename — shared by the generator (mediaProxy) and the
  *  reader (posterRel) so a recipe bump re-generates instead of both sides
  *  silently disagreeing on the path (generator writes X, reader looks for Y). */

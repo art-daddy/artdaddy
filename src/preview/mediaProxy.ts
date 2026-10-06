@@ -10,6 +10,7 @@ import { probePath } from "../tools/media";
 import type { ProjectStoreAccess } from "../tools/store";
 import { imageProxyName, posterName, proxyKey, proxyName } from "./proxyPaths";
 import { announceMediaDerived } from "./mediaDerived";
+import { makeStillFramePack } from "./stillFramePack";
 
 import { extAlternation, kindOf, needsPreviewProxy } from "../media/formats";
 import { isHeifStill, stillPicture, stillPicturePath } from "../media/stillPicture";
@@ -144,7 +145,8 @@ async function deriveArtifacts(
 
 /** Stills the WebView has no decoder for (TIFF) get a PNG stand-in, and a HEIF-family still is
  *  drawn from its decoded picture; each gets the poster the timeline thumbnail reads. Otherwise an
- *  imported still is simply invisible everywhere in the app while exporting perfectly well. */
+ *  imported still is simply invisible everywhere in the app while exporting perfectly well.
+ *  An animated still gets the frames the preview animates it with (stillFramePack.ts). */
 async function processImage(
   store: ProjectStoreAccess,
   runner: CommandRunner,
@@ -152,10 +154,13 @@ async function processImage(
   onTranscode?: () => void,
   signal?: AbortSignal,
 ): Promise<boolean> {
-  if (!needsPreviewProxy(source)) return false;
+  // Any image may be one: ffmpeg goes by content, so a GIF saved as .png animates in the export.
+  // Not behind the importing overlay: the still already draws, unmoving, until its frames land.
+  const animated = await makeStillFramePack(store, runner, source, signal).catch(() => false);
+  if (!needsPreviewProxy(source)) return animated;
   const abs = await store.resolveRef(source);
-  if (!abs) return false;
-  let changed = false;
+  if (!abs) return animated;
+  let changed = animated;
   // What the poster is cut from: the original, or (HEIF) its decoded picture, or nothing when that
   // cannot be decoded (a poster from the raw file would be a tile, or nothing).
   let from: string | null = abs;

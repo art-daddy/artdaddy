@@ -6,9 +6,9 @@
 // so we never re-clone a 300-clip timeline across the worker boundary per frame.
 import { loadBundledFonts } from "./fonts";
 import { setAssetDims } from "./assetDims";
-import type { PreviewInbound, PreviewOutbound } from "./protocol";
+import type { PreviewInbound, PreviewOutbound, StillAnimation } from "./protocol";
 import { timelineSources } from "./protocol";
-import { resolvePosterUrl, resolvePreviewUrl } from "./resolve";
+import { resolvePosterUrl, resolvePreviewUrl, resolveStillAnimation } from "./resolve";
 import type { TextLayer } from "./scene";
 import { rasterizeText } from "./text";
 import { kindOf } from "../media/formats";
@@ -33,6 +33,8 @@ export interface PreviewClientDeps {
   createWorker?: () => Worker;
   /** Override source resolution (tests inject a fake). */
   resolve?: (store: ProjectStoreAccess, source: string) => Promise<string | null>;
+  /** Override the animated-still lookup (tests inject a fake). */
+  resolveAnimation?: (store: ProjectStoreAccess, source: string) => Promise<StillAnimation | null>;
   /** Called when the worker reports it could not start / render. */
   onError?: (message: string) => void;
   /** Called when a visible video layer runs out of decoded frames, and again when it
@@ -62,6 +64,7 @@ export function createPreviewClient(
   deps: PreviewClientDeps = {},
 ): PreviewClient {
   const resolve = deps.resolve ?? resolvePreviewUrl;
+  const resolveAnimation = deps.resolveAnimation ?? resolveStillAnimation;
   const worker = deps.createWorker
     ? deps.createWorker()
     : new Worker(new URL("./previewWorker.ts", import.meta.url), { type: "module" });
@@ -128,6 +131,7 @@ export function createPreviewClient(
     mark("render-requested");
     const urls: Record<string, string> = {};
     const posters: Record<string, string> = {};
+    const animations: Record<string, StillAnimation> = {};
     const kinds = new Map<string, string | null>();
     const s = store;
     if (s) {
@@ -136,14 +140,16 @@ export function createPreviewClient(
           // Concurrently: resolution is ~85% of the time to the first picture (measured in-app at
           // 363ms of 433ms), so awaiting the poster after the source would have added its IPC
           // round-trips to the critical path rather than alongside it.
-          const [u, p, k] = await Promise.all([
+          const [u, p, k, a] = await Promise.all([
             resolve(s, src),
             resolvePosterUrl(s, src).catch(() => null), // best-effort: no poster, old black start
             fileKindOf(s, src),
+            resolveAnimation(s, src).catch(() => null), // best-effort: the still draws unmoving
           ]);
           if (u) urls[src] = u;
           else console.warn(`[preview] timeline source did not resolve to a file: ${src}`);
           if (p) posters[src] = p;
+          if (a) animations[src] = a;
           kinds.set(src, k);
         }),
       );
@@ -157,6 +163,7 @@ export function createPreviewClient(
       time,
       urls,
       posters,
+      animations,
     } satisfies PreviewInbound);
   }
 

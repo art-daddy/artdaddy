@@ -25,11 +25,13 @@ import { clipKind, rendersAsStill } from "./helpers";
 import { extOf, kindOf, REPLAYED_STILL_EXTS } from "../media/formats";
 import { isHeifStill, stillPicture } from "../media/stillPicture";
 import {
-  exportPasses,
+  NO_FACTS,
   STILL_HEAD_BYTES,
-  stillLoopArgs,
-  stillPlays,
+  stillFacts,
+  stillLoop,
   stillReader,
+  type StillFacts,
+  type StillLoop,
   type StillReader,
 } from "../media/stillReader";
 import type { Animatable, Clip, Timeline } from "./model";
@@ -121,10 +123,13 @@ function readerOfStill(clip: Clip, path: string): StillReader {
   return extOf(path) === "gif" ? "gif" : "mov";
 }
 
-/** The still's own play count, as resolveClipSources read it from its bytes; null when unknown. */
-function playsOfStill(clip: Clip): number | null {
-  const n = clip.still_plays;
-  return typeof n === "number" && Number.isInteger(n) && n >= 0 ? n : null;
+/** What resolveClipSources read in the still's bytes about its animation; nothing when it did not. */
+function factsOfStill(clip: Clip): StillFacts {
+  const f = clip.still_facts as Partial<StillFacts> | undefined;
+  if (!f || typeof f !== "object") return NO_FACTS;
+  const count = (v: unknown): number | null =>
+    typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : null;
+  return { plays: count(f.plays), frames: count(f.frames), width: count(f.width), height: count(f.height) };
 }
 
 /** The canvas the render composites at, in pixels: the authored size made even. */
@@ -670,8 +675,8 @@ interface Input {
   clipId: string;
   /** A still's reader, which decides how it loops. */
   reader?: StillReader;
-  /** The still's own play count (0 = forever), when its bytes said; an APNG's decides its loop. */
-  plays?: number | null;
+  /** How the export reads and loops the still (media/stillReader.ts stillLoop). */
+  loop?: StillLoop;
   /** Frame window: the seek (video) or loop length (still) that replaces `si` / the clip span. */
   seekArg?: string;
   lengthArg?: string;
@@ -1045,7 +1050,10 @@ export function buildRenderCommand(
       isImage: isImg,
       clipId: pc.srcClipId,
       ...(isImg
-        ? { reader: readerOfStill(clip, String(clip.media_ref)), plays: playsOfStill(clip) }
+        ? (() => {
+            const reader = readerOfStill(clip, String(clip.media_ref));
+            return { reader, loop: stillLoop(reader, fps, factsOfStill(clip)) };
+          })()
         : {}),
     };
     const span = onCanvasSec(pc);
@@ -1146,7 +1154,7 @@ export function buildRenderCommand(
       cmd.push(
         // Each reader loops with its own option, and the wrong one fails the export or hangs it
         // (media/stillReader.ts).
-        ...stillLoopArgs(inp.reader ?? "picture", fps, inp.plays ?? null),
+        ...(inp.loop ?? stillLoop(inp.reader ?? "picture", fps)).input,
         "-t",
         inp.lengthArg ?? dur.toFixed(6),
         "-i",
@@ -1221,11 +1229,16 @@ export function buildRenderCommand(
     // A window seek that landed GAP_MARGIN_S early gets its clock moved back first, so the frames
     // of the margin arrive with negative timestamps and only the gap's last frame survives fps.
     const margin = inputs[r.inputIdx].marginS ?? 0;
+    // A still the export loops itself (an APNG: stillLoop) repeats its one decoded pass here, before
+    // anything else touches its frames, and is cut to its span (its input was read once, unbounded).
+    const graphLoop = inputs[r.inputIdx].loop?.graph ?? null;
     const parts = [
       margin > 0
         ? `[${r.inputIdx}:v]setpts=PTS-${margin}/TB,setsar=1`
         : `[${r.inputIdx}:v]setsar=1`,
     ];
+    if (graphLoop)
+      parts.push(graphLoop, `trim=duration=${(inputs[r.inputIdx].so - inputs[r.inputIdx].si).toFixed(6)}`);
     if (r.cropExpr) parts.push(r.cropExpr);
     if (r.flipH) parts.push("hflip");
     if (r.flipV) parts.push("vflip");
@@ -1292,8 +1305,8 @@ export function buildRenderCommand(
     // clip through: it would vanish. It holds its last frame. Unknown counts hold too: harmless on
     // a still that turns out to loop.
     const inp = inputs[r.inputIdx];
-    const playsByOwnCount =
-      inp.isImage && exportPasses(inp.reader ?? "picture", inp.plays ?? null) !== Infinity;
+    // Unknown (null) holds too, so `??` must not turn it into "loops for the clip".
+    const playsByOwnCount = inp.isImage && !!inp.loop && inp.loop.passes !== Infinity;
     const backPad = Math.max(
       r.holdDur + (retimed ? 1 / fps : 0),
       playsByOwnCount ? Math.max(0, r.tout - r.tin) : 0,
@@ -1742,7 +1755,7 @@ export async function resolveClipSources(
 ): Promise<string[]> {
   const warnings: string[] = [];
   // One head read per file, however often placed.
-  const stills = new Map<string, { reader: StillReader | null; plays: number | null }>();
+  const stills = new Map<string, { reader: StillReader | null; facts: StillFacts }>();
   for (const track of timeline.tracks ?? []) {
     for (const clip of track.clips ?? []) {
       const src = typeof clip.media_ref === "string" ? clip.media_ref : "";
@@ -1783,12 +1796,12 @@ export async function resolveClipSources(
           const head = await ctx.store.readHead(path, STILL_HEAD_BYTES);
           stills.set(path, {
             reader: head ? stillReader(head) : null,
-            plays: head ? stillPlays(head) : null,
+            facts: head ? stillFacts(head) : NO_FACTS,
           });
         }
         const found = stills.get(path)!;
         if (found.reader) clip.still_reader = found.reader;
-        if (found.plays !== null) clip.still_plays = found.plays;
+        if (found.facts !== NO_FACTS) clip.still_facts = found.facts;
       }
       // ffmpeg rejects the ENTIRE graph with EINVAL when a `[N:a]` names a source with no audio
       // stream, so one such clip takes down every export AND every inspect_timeline. Placement

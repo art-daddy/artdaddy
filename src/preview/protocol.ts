@@ -5,7 +5,14 @@
 // unit coverage; this contract is pure and tested.
 import { clipKind } from "../timeline/helpers";
 import type { Timeline } from "../timeline/model";
+import type { StillTiming } from "../media/stillFrames";
 import type { TextLayer } from "./scene";
+
+/** An animated still's frames: one fetch of PNGs written back to back, and when each shows. */
+export interface StillAnimation {
+  url: string;
+  timing: StillTiming;
+}
 
 export interface PreviewInit {
   type: "init";
@@ -20,6 +27,9 @@ export interface PreviewRenderMsg {
   /** source -> its generated first-frame poster, for sources that have one. Stood in until the
    *  decoder produces a real frame, so a cold start shows a picture instead of black. */
   posters?: Record<string, string>;
+  /** source -> its frames, for an animated still whose frames have been made. Until then (and for
+   *  every other still) the picture at `urls` is drawn unmoving. */
+  animations?: Record<string, StillAnimation>;
 }
 /** Lightweight time-only update (playback/scrub). Avoids re-cloning the whole
  *  timeline across the worker boundary every frame; the worker reuses the last

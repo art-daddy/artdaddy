@@ -7,7 +7,9 @@
 import type { ProjectStoreAccess } from "../tools/store";
 import { joinPath } from "../tools/store";
 import { extAlternation, needsPreviewProxy } from "../media/formats";
-import { imageProxyRel, posterRel, proxyRel } from "./proxyPaths";
+import { parsePackIndex } from "../media/stillFrames";
+import { animIndexRel, animPackRel, imageProxyRel, posterRel, proxyRel } from "./proxyPaths";
+import type { StillAnimation } from "./protocol";
 
 export type AssetUrlConverter = (absPath: string) => string | Promise<string>;
 
@@ -32,6 +34,9 @@ const cache = new Map<string, string>();
 // four-source timeline meant tens of filesystem round-trips a second, with the worker unable to
 // draw the new timeline until all of them came back.
 const previewCache = new Map<string, string | null>();
+// Same reason: asked for every source on every timeline change. Cleared with the others when a
+// stand-in lands, which is when a still's frames appear.
+const animCache = new Map<string, StillAnimation | null>();
 
 /** Resolve a clip source to a fetchable URL, or null if nothing resolves. */
 export async function resolveSourceUrl(
@@ -55,6 +60,7 @@ export async function resolveSourceUrl(
 export function clearSourceUrlCache(): void {
   cache.clear();
   previewCache.clear();
+  animCache.clear();
 }
 
 const PREVIEW_VID_RE = new RegExp(`\\.(${extAlternation("video")})$`, "i");
@@ -125,4 +131,26 @@ export async function resolvePosterUrl(
   const url = (await store.exists(posterAbs)) ? await resolveSourceUrl(store, posterAbs) : null;
   previewCache.set(key, url);
   return url;
+}
+
+/** The frames an animated still is drawn with, once its pack exists (stillFramePack.ts): where to
+ *  fetch them and when each one shows. Null for anything else, and until the pack lands. */
+export async function resolveStillAnimation(
+  store: ProjectStoreAccess,
+  source: string,
+): Promise<StillAnimation | null> {
+  const s = (source ?? "").trim();
+  if (!s || PASSTHROUGH.test(s)) return null;
+  const key = `${store.projectDir}\u0000anim\u0000${s}`;
+  if (animCache.has(key)) return animCache.get(key)!;
+  const abs = (await store.resolveRef(s)) ?? s;
+  const indexAbs = joinPath(store.projectDir, animIndexRel(abs));
+  let found: StillAnimation | null = null;
+  if (await store.exists(indexAbs)) {
+    const index = parsePackIndex(await store.readText(indexAbs).catch(() => ""));
+    const url = index ? await resolveSourceUrl(store, joinPath(store.projectDir, animPackRel(abs))) : null;
+    if (index && url) found = { url, timing: index.timing };
+  }
+  animCache.set(key, found);
+  return found;
 }

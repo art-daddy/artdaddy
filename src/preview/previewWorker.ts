@@ -6,11 +6,13 @@
 // clip source to a fetchable asset URL and sends it in the `render` message; the
 // worker only ever fetch()es those URLs.
 import { loadImage } from "./loader";
-import type { PreviewInbound, PreviewOutbound } from "./protocol";
+import type { PreviewInbound, PreviewOutbound, StillAnimation } from "./protocol";
 import { PreviewRenderer } from "./renderer";
 import { type AssetDims, buildScene, type Layer, textLayerToImageLayer } from "./scene";
+import { AnimatedStill } from "./stillAnimation";
 import { textKey } from "./text";
 import { VideoSource } from "./videoSource";
+import { canvasFps } from "../timeline/frames";
 import { clipKind } from "../timeline/helpers";
 import type { Timeline } from "../timeline/model";
 
@@ -20,10 +22,12 @@ const videos = new Map<string, VideoSource>();
 const prepared = new Map<string, string>(); // source -> the asset URL its load was kicked off from
 const uploaded = new Map<string, number>(); // source -> ts of the frame last drawn
 const failed = new Set<string>(); // sources that will never decode here; never stall on these
+const stills = new Map<string, AnimatedStill>(); // animated stills whose frames have been made
 
 let timeline: Timeline | null = null;
 let urls: Record<string, string> = {};
 let posters: Record<string, string> = {};
+let animations: Record<string, StillAnimation> = {};
 let time = 0;
 let dirty = true;
 let lastTime = NaN;
@@ -61,6 +65,7 @@ ctx.onmessage = (e: MessageEvent<PreviewInbound>) => {
     timeline = msg.timeline;
     urls = msg.urls;
     posters = msg.posters ?? {};
+    animations = msg.animations ?? {};
     time = msg.time;
     prepare();
   } else if (msg.type === "seek") {
@@ -97,6 +102,22 @@ async function captureThumbnail(requestId: number, maxEdge?: number): Promise<vo
 // H.264 proxy replaces the original once its transcode finishes — an HEVC/ProRes
 // original the WebCodecs decoder can't decode would otherwise stay a black frame.
 function prepare(): void {
+  // An animated still's frames, from the moment they exist; a still whose frames changed (or went)
+  // lets go of the old ones. Its original picture still loads below: it is drawn until a frame is.
+  for (const [src, still] of stills) {
+    if (animations[src]?.url === still.url) continue;
+    still.close();
+    stills.delete(src);
+  }
+  for (const [src, anim] of Object.entries(animations)) {
+    if (stills.has(src)) continue;
+    stills.set(
+      src,
+      new AnimatedStill(src, anim.url, anim.timing, () => renderer, () => {
+        dirty = true;
+      }),
+    );
+  }
   for (const tr of timeline?.tracks ?? []) {
     for (const c of tr.clips ?? []) {
       if (c.kind === "audio" || c.kind === "text" || typeof c.media_ref !== "string") continue;
@@ -183,7 +204,15 @@ function render(): void {
   // Starved = a layer that IS on screen has no frame to draw yet. Reported so the main
   // thread can hold the playhead instead of running on over pictures nobody sees.
   let starving = false;
+  const fps = canvasFps(tl);
   for (const l of scene.layers) {
+    if (l.kind === "image") {
+      // An animated still draws the frame the export shows here (media/stillFrames.ts); never a
+      // reason to stall, its last frame drawn stands in for one still decoding.
+      const key = stills.get(l.source)?.keyFor(fps, l.stillFrame ?? 0);
+      if (key) l.source = key;
+      continue;
+    }
     if (l.kind !== "video") continue;
     visible.add(l.source);
     const vs = videos.get(l.source);

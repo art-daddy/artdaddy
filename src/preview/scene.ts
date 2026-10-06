@@ -37,6 +37,9 @@ export interface Layer {
   source: string;
   kind: "image" | "video";
   sourceTime?: number;
+  /** Image layers: the frame of the still's own stream to show, counted at the project rate from
+   *  the clip's start (an animated still picks its picture by it: media/stillFrames.ts). */
+  stillFrame?: number;
   z: number;
   opacity: number;
   dst: Rect;
@@ -635,6 +638,13 @@ export function buildScene(
         // and the LAST frame through the cross-cut hold after tout.
         const rel = tFrame < tin ? 0 : tFrame < tout ? tFrame - tin : Math.max(0, tout - tin - 1);
         layer.sourceTime = (num(clip.source_in) + rel * speed) / fps;
+      } else {
+        // A still's stream starts at the clip's start whatever was trimmed (the export reads every
+        // still from its beginning), and runs at the clip's speed: frame k shows stream frame
+        // floor(k * speed), the export's rule for every retimed clip (render.ts setpts).
+        const speed = Number(clip.speed ?? 1) || 1;
+        const rel = tFrame < tin ? 0 : tFrame < tout ? tFrame - tin : Math.max(0, tout - tin - 1);
+        layer.stillFrame = Math.floor(rel * speed + 1e-6);
       }
       // Inbound transition blend against the clip beneath (they overlap here).
       // Centered on the cut: the progress window is [tin-leadF, tin+leadF].

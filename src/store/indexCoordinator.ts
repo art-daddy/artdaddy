@@ -4,6 +4,8 @@
 //   • proxy      — poster + H.264 preview proxy for timeline VIDEO clips whose
 //                  codec the in-app WebCodecs preview can't decode (HEVC/ProRes),
 //                  so the live preview never goes blank waiting on a transcode;
+//                  for stills, a stand-in the WebView can draw and, for an animated
+//                  one, the frames the preview animates it with;
 //   • transcript — on-device word-level transcript per audio/video asset, warming
 //                  get_transcript (and future search) so the first read is instant.
 // Each pass drains INDEPENDENTLY, so a poster the user is waiting on never queues behind a
@@ -20,14 +22,15 @@ import type { ClientToolContext } from "../tools/context";
 import type { ProjectStoreAccess } from "../tools/store";
 import { registerBackgroundTranscriber } from "../tools/transcriptQueue";
 import type { Timeline } from "../timeline/model";
-import { kindOf, needsPreviewProxy } from "../media/formats";
+import { kindOf } from "../media/formats";
 import { reportAppError } from "../api/appEvents";
 
 // Media imported BY REFERENCE lives wherever the user keeps it, so neither pass may require
 // a path inside the project. Requiring `library/` here is why an externally-referenced clip
 // got no preview proxy AND no transcript: both silently matched nothing.
-const needsProxy = (p: string): boolean =>
-  kindOf(p) === "video" || (kindOf(p) === "image" && needsPreviewProxy(p));
+// EVERY image: one the WebView cannot decode needs a stand-in, and any of them may be an animated
+// still whatever it is called (a GIF saved as .png), which the preview animates from its frames.
+const needsProxy = (p: string): boolean => kindOf(p) === "video" || kindOf(p) === "image";
 const isIndexable = (p: string): boolean => {
   const k = kindOf(p);
   return k === "video" || k === "audio";

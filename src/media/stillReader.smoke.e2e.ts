@@ -10,7 +10,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { ff, nodeRunner } from "../tools/__e2e";
 import { joinPath } from "../tools/store";
-import { exportPasses, STILL_HEAD_BYTES, stillLoopArgs, stillPlays, stillReader } from "./stillReader";
+import { STILL_HEAD_BYTES, stillFacts, stillLoop, stillReader } from "./stillReader";
 
 const DIR = joinPath(os.tmpdir(), `artdaddy-stillreader-${Date.now()}`);
 const SINGLE_PICTURE = /(^|,)(\w+_pipe|image2)(,|$)/;
@@ -130,34 +130,43 @@ describe("stillReader agrees with the shipped ffmpeg", () => {
     const file = joinPath(DIR, name);
     const head = new Uint8Array((await fsp.readFile(file)).subarray(0, STILL_HEAD_BYTES));
     const verdict = stillReader(head);
-    const plays = stillPlays(head);
     const probe = await nodeRunner.run("ffprobe", ["-v", "error", "-show_entries", "format=format_name", "-of", "csv=p=0", file]);
     const format = probe.stdout.trim().replace(/"/g, "");
     if (verdict === "picture") expect(format, `${name}: classifier says picture`).toMatch(SINGLE_PICTURE);
     else expect(format, `${name}: classifier says ${verdict}`).toBe(FORMAT_OF[verdict!]);
-    // The outcome, not the label: the option this reader is given opens the real file and loops it
-    // well past the animation's own length, promptly (a wrong option hangs or fails). A file the
-    // export plays a set number of times instead ends, and the export holds its last frame
-    // (render.ts tpad), the way exportPasses says.
-    const loop = stillLoopArgs(verdict!, 30, plays);
-    const passes = exportPasses(verdict!, plays);
+    // The outcome, not the label: the export's own way of looping this still (stillLoop: input
+    // options, and for an APNG a loop over its decoded frames) opens the real file and loops it well
+    // past the animation's own length, promptly (a wrong option hangs or fails). A file the export
+    // plays a set number of times instead ends after them, and the export holds its last frame.
+    const loop = stillLoop(verdict!, 30, stillFacts(head));
+    // The export's own rate conversion (render.ts): a bare fps filter pads frames past the end of a
+    // stream that ends, which would count a held still as one that plays on.
+    const FPS10 = "fps=fps=10:start_time=0:round=near:eof_action=round";
+    const vf = loop.graph ? `${loop.graph},trim=duration=3.5,${FPS10}` : FPS10;
+    const how = `${loop.input.join(" ")} ${loop.graph ?? ""}`.trim();
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), 20_000);
     const r = await nodeRunner
-      .run("ffmpeg", ["-v", "error", ...loop, "-t", "3.5", "-i", file, "-vf", "fps=10", "-f", "framemd5", "-"], ac.signal)
+      .run("ffmpeg", ["-v", "error", ...loop.input, ...(loop.graph ? [] : ["-t", "3.5"]), "-i", file, "-vf", vf, "-f", "framemd5", "-"], ac.signal)
       .finally(() => clearTimeout(timer));
-    expect(ac.signal.aborted, `${name} hung under ${loop.join(" ")}`).toBe(false);
-    expect(r.code, `${name} under ${loop.join(" ")}: ${r.stderr}`).toBe(0);
+    expect(ac.signal.aborted, `${name} hung under ${how}`).toBe(false);
+    expect(r.code, `${name} under ${how}: ${r.stderr}`).toBe(0);
     // A one-picture loop's last frame keeps its own duration past -t; the export cuts every clip at
     // its out point, so what matters is that it filled the span.
     const frames = r.stdout.split("\n").filter((l) => /^0,/.test(l)).length;
+    const passes = loop.passes;
     if (passes === Infinity) expect(frames, `${name}: frames over 3.5 s`).toBeGreaterThanOrEqual(35);
     else {
-      // It ends after the passes it says (the export holds it), and never loops on past them.
-      const once = (await nodeRunner.run("ffmpeg", ["-v", "error", "-i", file, "-vf", "fps=10", "-f", "framemd5", "-"])).stdout;
-      const perPass = once.split("\n").filter((l) => /^0,/.test(l)).length;
+      // It plays the passes it says, in order, and after them shows only its last frame (the export
+      // holds it): never a further pass. Judged on the pictures, not a count -- the rate filter
+      // repeats a looped stream's last frame up to the loop's own end time, which is the same hold.
+      const hashes = (md5: string) => md5.split("\n").filter((l) => /^0,/.test(l)).map((l) => l.split(",").pop()!.trim());
+      const once = hashes((await nodeRunner.run("ffmpeg", ["-v", "error", "-i", file, "-vf", FPS10, "-f", "framemd5", "-"])).stdout);
+      const shown = hashes(r.stdout);
       expect(passes, `${name}: a count the export can hold to`).not.toBeNull();
-      expect(frames, `${name}: ${passes} pass(es) of ${perPass} frames`).toBe(perPass * passes!);
+      const played = Array.from({ length: passes! }, () => once).flat();
+      expect(shown.slice(0, played.length), `${name}: ${passes} pass(es) of ${once.length} frames`).toEqual(played);
+      for (const h of shown.slice(played.length)) expect(h, `${name}: only its last frame after`).toBe(once[once.length - 1]);
     }
   }, 60_000);
 });

@@ -1,17 +1,20 @@
 // Which of ffmpeg's readers opens a still, decided from its first bytes the way ffmpeg's own probe
 // decides it (libavformat: apngdec.c apng_probe, webp_anim_dec.c webp_anim_probe, format.c
-// av_probe_input_buffer2), and the loop option that reader takes. Measured on the shipped ffmpeg,
-// looping a 1 s animation for 3.5 s:
+// av_probe_input_buffer2), and how the export loops it. Measured on the shipped ffmpeg:
 //   - picture (image2 and the *_pipe readers: JPEG, PNG, WebP, BMP, TIFF): `-loop 1` only.
 //     `-stream_loop -1` HANGS on a JPEG.
 //   - gif, mov (AVIF/HEIC): `-stream_loop -1`. They refuse `-loop` ("Option loop not found"), which
-//     failed the whole export.
-//   - apng: `-ignore_loop 0`, its reader's own loop. `-stream_loop -1` HANGS on every APNG of 2 to 8
-//     frames (9+ do not), so a blinking icon's export never ended. With `-t` it never hung (2-12
-//     frames, play-once, 512x512 for 300 s). Its reader loops at IEND until the pass count EQUALS the
-//     file's plays (apngdec.c), so a loop-forever file loops cleanly; a play-N file plays N passes,
-//     then keeps looping with a longer pause at each seam.
-//   - webp_anim: `-ignore_loop 0`, its reader's own loop. `-stream_loop -1` HANGS on it.
+//     failed the whole export. A GIF keeps its own timing over 20 s of loops (0 frames off).
+//   - webp_anim: `-ignore_loop 0`, its reader's own loop, which honours the file's count exactly
+//     (0 frames off over 20 s, forever and play-3). `-stream_loop -1` HANGS on it.
+//   - apng: NO input loop is right. `-stream_loop -1` HANGS on every APNG of 1 to 8 frames (whatever
+//     its size; 9+ do not), so a blinking icon's export never ended. `-ignore_loop 0` never hangs
+//     but loses the file's timing after ~5 s (the last frame of each later pass is held a frame too
+//     long: 347 of 600 frames off over 20 s), and on a play-N file it stops after N passes or loops
+//     on, depending on the file's length. So the export decodes ONE pass and loops the decoded
+//     frames itself (the `loop` filter): 0 frames off, for loop-forever and play-N alike. That
+//     holds every frame in memory (528 MB for 60 frames of 1080p), so past a budget it falls back:
+//     loop-forever to `-ignore_loop 0`, play-N to one pass, held.
 // The file's NAME is not consulted: ffmpeg probes content, so a GIF saved as .png is a GIF to it.
 // stillReader.smoke.e2e.ts holds this to the shipped ffprobe's own verdict, file by file.
 
@@ -28,39 +31,66 @@ export const PROBE_BYTES = 2048;
  *  may keep behind a colour profile. */
 export const STILL_HEAD_BYTES = 64 * 1024;
 
-/** The input options that loop a still of this reader for as long as the clip asks. `plays` is the
- *  file's own count ({@link stillPlays}); only an APNG's changes the options. */
-export function stillLoopArgs(reader: StillReader, fps: number, plays: number | null = null): string[] {
-  switch (reader) {
-    case "picture":
-      return ["-loop", "1", "-framerate", String(fps)];
-    case "webp_anim":
-      return ["-ignore_loop", "0"];
-    case "apng":
-      // A file that plays a set number of times is read once, plainly: under `-ignore_loop 0` its
-      // reader stops after the count on a long file and loops forever on a short one (measured),
-      // which nothing could predict. The export holds its last frame after that one pass.
-      return plays ? [] : ["-ignore_loop", "0"];
-    case "gif":
-    case "mov":
-      return ["-stream_loop", "-1"];
-  }
+/** Most decoded pixels (frames x width x height) the export holds to loop an APNG exactly: 256 MB
+ *  of RGBA. A sticker of 512x512 x 60 frames is 16 M; 1080p x 30 frames just fits. */
+export const APNG_LOOP_PIXELS = 64e6;
+
+/** What a still's first bytes say about its animation. Each is null when they do not say. */
+export interface StillFacts {
+  /** Its own play count; 0 = forever. */
+  plays: number | null;
+  /** Frames in one pass (APNG: acTL). */
+  frames: number | null;
+  /** Picture size (APNG: IHDR). */
+  width: number | null;
+  height: number | null;
 }
 
-/** How many passes of its animation the export plays before holding the last frame: Infinity when
- *  it loops for the whole clip, null when unknown (an animated WebP whose count was not in the bytes
- *  read; ffmpeg reads it itself). One answer for the export (whether to hold) and the preview (which
- *  frame to show). A GIF loops whatever count it carries: `-stream_loop` ignores it. */
-export function exportPasses(reader: StillReader, plays: number | null): number | null {
+export const NO_FACTS: StillFacts = { plays: null, frames: null, width: null, height: null };
+
+/** How the export reads and loops a still. One answer for the export (its command and graph) and
+ *  the preview (which frame shows when). */
+export interface StillLoop {
+  /** Input options, before `-t` and `-i`. */
+  input: string[];
+  /** A filter that loops the decoded frames, first on the clip's chain; null when the input loops. */
+  graph: string | null;
+  /** Passes played before the last frame is held: Infinity = loops for the whole clip; null =
+   *  unknown (an animated WebP whose count was not in the bytes read: ffmpeg reads it itself). */
+  passes: number | null;
+}
+
+/** How the export loops a still of this reader, given what its bytes say ({@link stillFacts}). */
+export function stillLoop(reader: StillReader, fps: number, facts: StillFacts = NO_FACTS): StillLoop {
   switch (reader) {
     case "picture":
+      return { input: ["-loop", "1", "-framerate", String(fps)], graph: null, passes: Infinity };
     case "gif":
     case "mov":
-      return Infinity;
-    case "apng":
-      return plays ? 1 : Infinity;
+      // `-stream_loop` ignores a GIF's own count: it loops for the clip.
+      return { input: ["-stream_loop", "-1"], graph: null, passes: Infinity };
     case "webp_anim":
-      return plays === null ? null : plays === 0 ? Infinity : plays;
+      return {
+        input: ["-ignore_loop", "0"],
+        graph: null,
+        passes: facts.plays === null ? null : facts.plays === 0 ? Infinity : facts.plays,
+      };
+    case "apng": {
+      const { plays, frames, width, height } = facts;
+      if (plays === 1) return { input: [], graph: null, passes: 1 }; // one pass is all it plays
+      const forever = !plays; // 0, or a count the bytes did not give: ffmpeg's own default is forever
+      const fits =
+        frames !== null && width !== null && height !== null && frames * width * height <= APNG_LOOP_PIXELS;
+      if (fits)
+        return {
+          input: [],
+          graph: `loop=loop=${forever ? -1 : plays! - 1}:size=${frames}:start=0`,
+          passes: forever ? Infinity : plays!,
+        };
+      return forever
+        ? { input: ["-ignore_loop", "0"], graph: null, passes: Infinity }
+        : { input: [], graph: null, passes: 1 };
+    }
   }
 }
 
@@ -118,33 +148,39 @@ export function stillReader(head: Uint8Array): StillReader | null {
   return null;
 }
 
-/** The file's own play count (0 = forever) for an animated PNG or WebP, read where ffmpeg reads it;
- *  null for anything else, or when the count is not in `head`.
- *  - APNG: acTL's num_plays (apngdec.c); acTL lies inside the probe window or ffmpeg would not
- *    have called the file an APNG.
+/** What a still's first bytes say about its animation, read where ffmpeg reads it; {@link NO_FACTS}
+ *  for anything that is not an animated PNG or WebP.
+ *  - APNG: acTL (frames, num_plays) and IHDR (size), both inside the probe window or ffmpeg would
+ *    not have called the file an APNG (apngdec.c).
  *  - WebP: the ANIM chunk's loop count, after VP8X and any ICCP (webp_anim_dec.c reads chunks in
  *    order until the first frame). */
-export function stillPlays(head: Uint8Array): number | null {
+export function stillFacts(head: Uint8Array): StillFacts {
   const reader = stillReader(head);
   if (reader === "apng") {
+    const width = u32be(head, 16);
+    const height = u32be(head, 20);
     for (let at = 8; at + 8 <= head.length; ) {
       const len = u32be(head, at);
-      if (ascii(head, at + 4, "acTL")) return at + 16 <= head.length ? u32be(head, at + 12) : null;
-      if (len > 0x7fffffff) return null;
+      if (ascii(head, at + 4, "acTL")) {
+        if (at + 16 > head.length) return NO_FACTS;
+        return { plays: u32be(head, at + 12), frames: u32be(head, at + 8), width, height };
+      }
+      if (len > 0x7fffffff) return NO_FACTS;
       at += 12 + len;
     }
-    return null;
+    return NO_FACTS;
   }
   if (reader === "webp_anim") {
     for (let at = 12; at + 8 <= head.length; ) {
       const size = u32le(head, at + 4);
       if (ascii(head, at, "ANIM")) {
-        if (size !== 6 || at + 14 > head.length) return null;
-        return head[at + 12] | (head[at + 13] << 8);
+        if (size !== 6 || at + 14 > head.length) return NO_FACTS;
+        return { ...NO_FACTS, plays: head[at + 12] | (head[at + 13] << 8) };
       }
-      if (ascii(head, at, "ANMF")) return 1; // a frame before any ANIM: ffmpeg plays it once
+      // A frame before any ANIM: ffmpeg plays it once.
+      if (ascii(head, at, "ANMF")) return { ...NO_FACTS, plays: 1 };
       at += 8 + size + (size & 1);
     }
   }
-  return null;
+  return NO_FACTS;
 }
