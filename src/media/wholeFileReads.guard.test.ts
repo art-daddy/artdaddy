@@ -44,6 +44,11 @@ const BOUNDED = new Map<string, string>([
     "the take is capped at MAX_RECORDING_BYTES as chunks arrive; the recorder stops itself",
   ],
   ["preview/__probe_video.ts", "dev-only probe page, not in the production bundle"],
+  [
+    "preview/stillAnimation.ts",
+    "fetches the frame pack our own generator wrote, never the source: packSize caps its frames " +
+      "at 64 M pixels together (media/stillFrames.ts), and each frame is decoded on its own",
+  ],
 ]);
 
 const READS_BYTES = /\.arrayBuffer\(\)|createImageBitmap\(/;

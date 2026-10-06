@@ -7,6 +7,8 @@ import {
   serializePackIndex,
   splitPngStream,
   stillFrameAt,
+  stillFrameBefore,
+  stillFrameShown,
   timingFromProbe,
   type StillTiming,
 } from "./stillFrames";
@@ -94,6 +96,68 @@ describe("stillFrameAt: the frame of an animated still the export shows at a pro
   });
 });
 
+// After a still's slot ends the export holds its stream's last frame: the frame in view at the
+// end of its span. Measured on the shipped ffmpeg for 64 lengths x speeds (the GIF below, delays
+// 7,13,5,20,7,9,9,7,13,1 cs): the last frame STARTING before the span's end, 64 of 64. The rule the
+// preview used before (the frame at the last whole stream frame) was wrong in 16 of them.
+const HELD: StillTiming = { den: 100, pts: [0, 7, 20, 25, 45, 52, 61, 70, 77, 90], period: 91, passes: Infinity };
+
+describe("stillFrameBefore: the frame the export holds after a still's span", () => {
+  it("matches every case the old rule got wrong (measured)", () => {
+    const cases: Array<[number, number, number]> = [
+      // [speed, slot length in frames at 30 fps, frame held]
+      [2, 7, 4], [2, 31, 2], [2, 45, 3], [2, 90, 5],
+      [1.15, 7, 3], [1.15, 13, 4], [1.15, 31, 3], [1.15, 90, 7],
+      [1.5, 10, 4], [1.5, 31, 6], [1.25, 7, 3], [1.25, 13, 5],
+      [3, 10, 1], [3, 30, 3], [3, 90, 8], [0.75, 31, 8],
+    ];
+    for (const [speed, len, held] of cases)
+      expect(stillFrameBefore(HELD, len * speed * 100 / 30), `${speed}x ${len} frames`).toBe(held);
+  });
+
+  it("is the last frame of the last pass once a still that plays N times has played them", () => {
+    const twice: StillTiming = { ...HELD, passes: 2 };
+    expect(stillFrameBefore(twice, 91 * 5)).toBe(9);
+    expect(stillFrameBefore(twice, 91 + 30)).toBe(3); // still inside pass 2
+  });
+
+  it("agrees with a brute-force walk, for any timing and span", () => {
+    const timing = fc
+      .tuple(fc.array(fc.integer({ min: 1, max: 40 }), { minLength: 1, maxLength: 8 }), fc.integer({ min: 1, max: 3 }))
+      .map(([delays, passes]) => ({
+        den: 100,
+        pts: delays.slice(0, -1).reduce((acc, d) => [...acc, acc[acc.length - 1] + d], [0]),
+        period: delays.reduce((a, b) => a + b, 0),
+        passes: passes === 3 ? Infinity : passes,
+      }));
+    fc.assert(
+      fc.property(timing, fc.double({ min: 0.01, max: 2000, noNaN: true }), (t, end) => {
+        let held = 0;
+        const passes = Number.isFinite(t.passes) ? t.passes : 1000;
+        for (let L = 0; L < passes; L++)
+          for (let i = 0; i < t.pts.length; i++) if (L * t.period + t.pts[i] < end) held = i;
+        expect(stillFrameBefore(t, end)).toBe(held);
+      }),
+    );
+  });
+});
+
+describe("stillFrameShown: the frame a clip shows at a clip-relative project frame", () => {
+  // One answer for the preview and for an inspect look: the frame the export shows there.
+  const at = (k: number, len: number, speed = 1) => stillFrameShown(HELD, 30, k, len, speed);
+
+  it("shows the export's frame inside the clip, at the clip's speed", () => {
+    for (let k = 0; k < 90; k++) expect(at(k, 90)).toBe(stillFrameAt(HELD, 30, k));
+    for (let k = 0; k < 45; k++) expect(at(k, 45, 2)).toBe(stillFrameAt(HELD, 30, Math.floor(k * 2 + 1e-6)));
+  });
+
+  it("shows its first frame before the clip (a lead-in) and holds the end-of-span frame after it", () => {
+    expect(at(-4, 90)).toBe(stillFrameAt(HELD, 30, 0));
+    expect(at(90, 90, 2)).toBe(stillFrameBefore(HELD, (90 * 2 * 100) / 30));
+    expect(at(140, 7, 2)).toBe(4); // measured: 2x for 7 frames holds frame 4
+  });
+});
+
 // The JSON ffprobe prints for `-show_entries stream=time_base,width,height:frame=pts,duration`,
 // captured from the shipped build for the measured GIF.
 const PROBED_GIF = {
@@ -148,6 +212,19 @@ describe("timingFromProbe: a still's timing, as ffprobe reports it", () => {
     expect(timingFromProbe({ frames: [{ pts: "x", duration: 1 }], streams }, Infinity)).toBeNull();
     expect(timingFromProbe(null, Infinity)).toBeNull();
     expect(timingFromProbe({ frames, streams: [{ ...streams[0], width: 0 }] }, Infinity)).toBeNull();
+  });
+
+  // A GIF's packets past its picture count are what follows its last picture: they decode to
+  // nothing, but the export's loop waits them out. Pictures come from the count, the pass from the
+  // packets; a count that cannot be trusted never removes a frame.
+  it("keeps a GIF's trailing packet in the pass and out of the pictures", () => {
+    const frames = [...PROBED_GIF.frames, { pts: 53, duration: 10 }];
+    const streams = [{ ...PROBED_GIF.streams[0], nb_frames: "6" }];
+    expect(timingFromProbe({ frames, streams }, Infinity)?.timing).toEqual({ ...IRREGULAR, period: 63 });
+    for (const nb_frames of [undefined, "N/A", "0", "7", "8", "-1", "5.5"]) {
+      const s = [{ ...PROBED_GIF.streams[0], nb_frames }];
+      expect(timingFromProbe({ frames, streams: s }, Infinity)?.timing.pts, `nb_frames ${nb_frames}`).toHaveLength(7);
+    }
   });
 });
 

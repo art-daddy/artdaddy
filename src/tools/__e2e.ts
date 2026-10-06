@@ -220,10 +220,13 @@ export const nodeFs: FsLike = {
     return { id12: sha256.slice(0, 12), sha256, size, head: head.slice(0, headLength) };
   },
   async readHead(p, maxBytes) {
+    return nodeFs.readRange!(p, 0, maxBytes);
+  },
+  async readRange(p, offset, maxBytes) {
     const fh = await fsp.open(p, "r");
     try {
       const buf = Buffer.alloc(maxBytes);
-      const { bytesRead } = await fh.read(buf, 0, maxBytes, 0);
+      const { bytesRead } = await fh.read(buf, 0, maxBytes, offset);
       return new Uint8Array(buf.buffer, buf.byteOffset, bytesRead);
     } finally {
       await fh.close();
@@ -265,6 +268,28 @@ export function mkCtx(dir: string): ClientToolContext {
 export async function ff(args: string[]): Promise<void> {
   const r = await nodeRunner.run("ffmpeg", args);
   if (r.code !== 0) throw new Error(`ffmpeg failed (${r.code}): ${r.stderr.slice(-800)}`);
+}
+
+/** `gif` (written without a loop extension) with a NETSCAPE loop count of `count` added at its END,
+ *  just before the trailer: Chromium honours it there, and ffmpeg holds the last picture through it. */
+export async function gifLoopAtEnd(gif: string, out: string, count: number): Promise<void> {
+  const b = new Uint8Array(await fsp.readFile(gif));
+  const block = [0x21, 0xff, 0x0b, ...Buffer.from("NETSCAPE2.0"), 0x03, 0x01, count & 0xff, count >> 8, 0x00];
+  await fsp.writeFile(out, Buffer.concat([b.subarray(0, b.length - 1), new Uint8Array(block), b.subarray(b.length - 1)]));
+}
+
+/** `webp` with a colour profile of `size` bytes between VP8X and ANIM, so its loop count lies far past
+ *  any head read. */
+export async function webpWithBigProfile(webp: string, out: string, size: number): Promise<void> {
+  const b = new Uint8Array(await fsp.readFile(webp));
+  const iccp = new Uint8Array(8 + size);
+  iccp.set(Buffer.from("ICCP"));
+  new DataView(iccp.buffer).setUint32(4, size, true);
+  const vp8xEnd = 12 + 8 + 10;
+  const file = Buffer.concat([b.subarray(0, vp8xEnd), iccp, b.subarray(vp8xEnd)]);
+  file[20] |= 0x20; // VP8X: a colour profile is present
+  file.writeUInt32LE(file.length - 8, 4);
+  await fsp.writeFile(out, file);
 }
 
 /** A long 1080p H.264 source for cost tests (a keyframe every `gop` frames, as OBS and phones

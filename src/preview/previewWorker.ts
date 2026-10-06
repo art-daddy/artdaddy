@@ -209,7 +209,7 @@ function render(): void {
     if (l.kind === "image") {
       // An animated still draws the frame the export shows here (media/stillFrames.ts); never a
       // reason to stall, its last frame drawn stands in for one still decoding.
-      const key = stills.get(l.source)?.keyFor(fps, l.stillFrame ?? 0);
+      const key = l.still ? stills.get(l.source)?.keyFor(fps, l.still) : undefined;
       if (key) l.source = key;
       continue;
     }

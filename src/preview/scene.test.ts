@@ -475,19 +475,23 @@ describe("buildScene visibility", () => {
     // sourceTime = (0 + 30*2) / 30 = 2s
     expect((s.layers[0] as Any).sourceTime).toBe(2);
   });
-  // An animated still picks its picture by the frame of its own stream (media/stillFrames.ts), and
-  // the export reads every still from its beginning at the clip's speed: whatever was trimmed off a
-  // GIF, its clip starts at the GIF's first frame.
-  it("counts a still's own frames from its clip's start, at the clip's speed", () => {
-    const at = (frame: number, clip: Record<string, unknown>) =>
-      (buildScene(tl([{ media_ref: "s.gif", timeline_in: 30, timeline_out: 90, ...clip }]), frame / 30, dims({})).layers[0] as Any)?.stillFrame;
-    expect(at(30, {})).toBe(0);
-    expect(at(55, {})).toBe(25);
-    expect(at(55, { source_in: 300, source_out: 360 })).toBe(25); // a trim does not move it
-    expect(at(55, { speed: 2 })).toBe(50);
-    expect(at(55, { speed: 0.5 })).toBe(12);
-    expect(at(41, { speed: 1.15 })).toBe(12); // floor(11 * 1.15) = floor(12.65)
-    expect(at(89, {})).toBe(59); // the clip's last frame
+  // An animated still picks its picture from where it is in its clip (media/stillFrames.ts
+  // stillFrameShown), and the export reads every still from its beginning at the clip's speed:
+  // whatever was trimmed off a GIF, its clip starts at the GIF's first frame. Past its end (held
+  // under the next clip's transition) the frame depends on the still's timing, so the scene says
+  // where it is, never which frame.
+  it("says where a still is in its clip: frames from its start, its length and its speed", () => {
+    const at = (frame: number, clip: Record<string, unknown>, more: Record<string, unknown>[] = []) =>
+      (buildScene(tl([{ media_ref: "s.gif", timeline_in: 30, timeline_out: 90, ...clip }, ...more]), frame / 30, dims({}))
+        .layers.find((l) => l.source === "s.gif") as Any)?.still;
+    expect(at(30, {})).toEqual({ k: 0, len: 60, speed: 1 });
+    expect(at(55, {})).toEqual({ k: 25, len: 60, speed: 1 });
+    expect(at(55, { source_in: 300, source_out: 360 })).toEqual({ k: 25, len: 60, speed: 1 }); // a trim does not move it
+    expect(at(55, { speed: 2 })).toEqual({ k: 25, len: 60, speed: 2 });
+    expect(at(89, {})).toEqual({ k: 59, len: 60, speed: 1 }); // the clip's last frame
+    // Held under the next clip's 12-frame crossfade: 6 frames past its end.
+    const next = [{ media_ref: "b.png", timeline_in: 90, timeline_out: 120, transition_in: { kind: "crossfade", duration: 12 } }];
+    expect(at(92, {}, next)).toEqual({ k: 62, len: 60, speed: 1 });
   });
   it("skips clips on a hidden track", () => {
     const t = {

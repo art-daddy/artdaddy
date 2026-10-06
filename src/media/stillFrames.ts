@@ -44,6 +44,31 @@ export function stillFrameAt(t: StillTiming, fps: number, k: number): number {
   return shown;
 }
 
+/** The frame in view just before `end` (in 1/den s, from the clip's start): the last frame STARTING
+ *  before it, over the passes the still plays. What the export holds once a still's span ends:
+ *  its input is cut there and the hold repeats the last frame it decoded (measured, 64 of 64). */
+export function stillFrameBefore(t: StillTiming, end: number): number {
+  const n = t.pts.length;
+  if (n <= 1 || t.period <= 0 || !(end > 0)) return 0;
+  const lastPass = Number.isFinite(t.passes) ? Math.max(0, t.passes - 1) : Infinity;
+  const pass = Math.min(lastPass, Math.floor(end / t.period));
+  const into = end - pass * t.period;
+  // A span ending exactly on a pass boundary leaves the previous pass's last frame in view.
+  if (into <= 0) return n - 1;
+  if (pass === lastPass && into >= t.period) return n - 1;
+  let shown = 0;
+  for (let i = 0; i < n; i++) if (t.pts[i] < into) shown = i;
+  return shown;
+}
+
+/** The frame a still's clip shows at clip-relative project frame `k`: its first frame before the
+ *  clip (a lead-in), its stream frame at the clip's speed inside it, and after its `len` frames the
+ *  frame its export holds. One answer for the preview and for an inspect look. */
+export function stillFrameShown(t: StillTiming, fps: number, k: number, len: number, speed: number): number {
+  if (k >= len) return stillFrameBefore(t, (len * speed * t.den) / fps);
+  return stillFrameAt(t, fps, k < 0 ? 0 : Math.floor(k * speed + 1e-6));
+}
+
 const isCount = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 0;
 
 /** A still's timing from ffprobe's JSON (`-show_entries stream=time_base,width,height:frame=pts,duration`),
@@ -72,7 +97,13 @@ export function timingFromProbe(
   for (let i = 1; i < pts.length; i++) if (!(pts[i] > pts[i - 1])) return null;
   const last = Number(frames[frames.length - 1]?.duration);
   if (!(Number.isInteger(last) && last > 0)) return null;
-  return { timing: { den, pts, period: pts[pts.length - 1] + last, passes }, w, h };
+  // A GIF with anything after its last picture (a comment, a loop count kept at the end) has a packet
+  // more than pictures: it decodes to nothing, yet the export's `-stream_loop` waits it out before the
+  // next pass (measured). So the pictures are the first `nb_frames`, and the pass ends where the
+  // last packet does. A count that is absent or not below the packets removes nothing.
+  const count = Number(stream.nb_frames);
+  const pictures = Number.isInteger(count) && count > 0 && count < pts.length ? count : pts.length;
+  return { timing: { den, pts: pts.slice(0, pictures), period: pts[pts.length - 1] + last, passes }, w, h };
 }
 
 /** Longest side of a preview frame, and the most pixels all of a still's frames may take together. */

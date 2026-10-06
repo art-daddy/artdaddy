@@ -34,6 +34,8 @@ export interface FsLike {
   probeMedia?(path: string, headBytes: number): Promise<MediaProbe>;
   /** The first `maxBytes` of a file, and nothing past them. Optional (desktop + e2e). */
   readHead?(path: string, maxBytes: number): Promise<Uint8Array>;
+  /** `maxBytes` from `offset` on: short or empty past the end. Optional (desktop + e2e). */
+  readRange?(path: string, offset: number, maxBytes: number): Promise<Uint8Array>;
   /** Size and file-vs-directory WITHOUT opening the file. Optional (desktop only).
    *  The cheap answer to both "how big is this?" and "is this a folder?" — asking either
    *  question by reading the file is what took a 16 GB machine down. */
@@ -563,6 +565,17 @@ export class ProjectStoreAccess {
     try {
       if (this.fs.readHead) return await this.fs.readHead(path, maxBytes);
       return (await this.readBytes(path)).subarray(0, maxBytes);
+    } catch {
+      return null;
+    }
+  }
+
+  /** `maxBytes` from `offset` on (short or empty past the end), or null when it cannot be read. A
+   *  filesystem without a ranged read (tests) reads the whole file under the usual ceiling. */
+  async readRange(path: string, offset: number, maxBytes: number): Promise<Uint8Array | null> {
+    try {
+      if (this.fs.readRange) return await this.fs.readRange(path, offset, maxBytes);
+      return (await this.readBytes(path)).subarray(offset, offset + maxBytes);
     } catch {
       return null;
     }

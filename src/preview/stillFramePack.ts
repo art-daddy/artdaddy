@@ -9,14 +9,8 @@
 // Desktop-only (ffmpeg), best-effort: any failure leaves the still unmoving, never broken.
 import type { CommandRunner } from "../tools/command";
 import type { ProjectStoreAccess } from "../tools/store";
-import {
-  PROBE_BYTES,
-  STILL_HEAD_BYTES,
-  stillFacts,
-  stillLoop,
-  stillReader,
-} from "../media/stillReader";
-import { packSize, serializePackIndex, timingFromProbe } from "../media/stillFrames";
+import { probeStillFacts, probeStillTiming } from "../media/stillProbe";
+import { packSize, serializePackIndex } from "../media/stillFrames";
 import { transcode } from "../media/transcode";
 import { animIndexName, animPackName } from "./proxyPaths";
 
@@ -31,43 +25,13 @@ export async function makeStillFramePack(
   if (!abs) return false;
   const indexPath = store.artifactPath(`proxies/${animIndexName(abs)}`);
   if (await store.exists(indexPath)) return false;
-  // By content, as ffmpeg opens it: a GIF saved as .png animates in the export, so it must here.
-  // ffmpeg decides from 2 KB (an APNG's facts lie inside it); only a WebP may keep its count further,
-  // and then it is read as far as the export reads it.
-  let head = await store.readHead(abs, PROBE_BYTES);
-  const reader = head ? stillReader(head) : null;
+  // By content, as ffmpeg opens it: a GIF saved as .png animates in the export, so it must here. The
+  // facts and timing are the ones the export reads (media/stillProbe.ts), so the preview plays the
+  // passes the export plays.
+  const read = (offset: number, length: number) => store.readRange(abs, offset, length);
+  const { reader, facts } = await probeStillFacts(read, runner, abs, signal);
   if (reader !== "gif" && reader !== "apng" && reader !== "webp_anim") return false;
-  if (reader === "webp_anim" && stillFacts(head!).plays === null)
-    head = (await store.readHead(abs, STILL_HEAD_BYTES)) ?? head;
-  // The passes the EXPORT plays (its own answer, which also picks how it loops). A WebP whose count
-  // lies past even that is shown looping: the residual is a play-N WebP with a colour profile over
-  // 64 KB, which the export plays N times.
-  const passes = stillLoop(reader, 30, stillFacts(head!)).passes ?? Infinity;
-  const probe = await runner
-    .run(
-      "ffprobe",
-      [
-        "-v",
-        "error",
-        "-select_streams",
-        "v:0",
-        "-show_entries",
-        "stream=time_base,width,height:frame=pts,duration",
-        "-of",
-        "json",
-        abs,
-      ],
-      signal,
-    )
-    .catch(() => null);
-  if (!probe || probe.code !== 0) return false;
-  let json: unknown;
-  try {
-    json = JSON.parse(probe.stdout);
-  } catch {
-    return false;
-  }
-  const found = timingFromProbe(json, passes);
+  const found = await probeStillTiming(runner, abs, reader, facts, signal);
   // One frame is a picture: nothing to animate, and the original already draws it.
   if (!found || found.timing.pts.length < 2) return false;
   const size = packSize(found.timing.pts.length, found.w, found.h);

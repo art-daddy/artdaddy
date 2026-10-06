@@ -102,14 +102,28 @@ async fn read_file_head(path: String, max_bytes: usize) -> Result<Vec<u8>, Strin
 }
 
 fn read_head_blocking(path: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
-  use std::io::Read;
-  let file = std::fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
-  let mut head = Vec::new();
+  read_range_blocking(path, 0, max_bytes)
+}
+
+/// `max_bytes` from `offset` on, for a header field a still keeps past its first bytes (an animated
+/// WebP's loop count behind a colour profile). Short or empty past the end; never more than the limit.
+#[tauri::command]
+async fn read_file_range(path: String, offset: u64, max_bytes: usize) -> Result<Vec<u8>, String> {
+  tauri::async_runtime::spawn_blocking(move || read_range_blocking(&path, offset, max_bytes))
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn read_range_blocking(path: &str, offset: u64, max_bytes: usize) -> Result<Vec<u8>, String> {
+  use std::io::{Read, Seek, SeekFrom};
+  let mut file = std::fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
+  file.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
+  let mut bytes = Vec::new();
   file
     .take(max_bytes.min(HEAD_READ_LIMIT) as u64)
-    .read_to_end(&mut head)
+    .read_to_end(&mut bytes)
     .map_err(|e| e.to_string())?;
-  Ok(head)
+  Ok(bytes)
 }
 
 fn probe_media_blocking(
@@ -329,6 +343,7 @@ pub fn run() {
       remove_file,
       probe_media_file,
       read_file_head,
+      read_file_range,
       host_platform,
       check_for_update,
       download_update,
@@ -361,6 +376,7 @@ pub fn run() {
     remove_file,
     probe_media_file,
     read_file_head,
+    read_file_range,
     host_platform
   ]);
 
@@ -886,8 +902,35 @@ mod tests {
   }
 
   mod read_head {
-    use super::super::{read_head_blocking, HEAD_READ_LIMIT};
+    use super::super::{read_head_blocking, read_range_blocking, HEAD_READ_LIMIT};
     use super::scratch;
+
+    #[test]
+    fn a_range_is_exactly_the_bytes_at_its_offset() {
+      let p = scratch("range");
+      let data: Vec<u8> = (0..10_000u32).map(|i| (i % 251) as u8).collect();
+      std::fs::write(&p, &data).unwrap();
+      assert_eq!(read_range_blocking(p.to_str().unwrap(), 4097, 14).unwrap(), data[4097..4111]);
+      assert_eq!(read_range_blocking(p.to_str().unwrap(), 0, 8).unwrap(), data[..8]);
+      std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn a_range_past_the_end_is_short_or_empty_never_an_error() {
+      let p = scratch("range_end");
+      std::fs::write(&p, b"GIF89a").unwrap();
+      assert_eq!(read_range_blocking(p.to_str().unwrap(), 4, 100).unwrap(), b"9a");
+      assert!(read_range_blocking(p.to_str().unwrap(), 50, 10).unwrap().is_empty());
+      std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn a_range_never_returns_more_than_the_limit() {
+      let p = scratch("range_big");
+      std::fs::write(&p, vec![7u8; HEAD_READ_LIMIT + 4096]).unwrap();
+      assert_eq!(read_range_blocking(p.to_str().unwrap(), 10, usize::MAX).unwrap().len(), HEAD_READ_LIMIT);
+      std::fs::remove_file(&p).ok();
+    }
 
     #[test]
     fn returns_exactly_the_first_bytes_asked_for() {

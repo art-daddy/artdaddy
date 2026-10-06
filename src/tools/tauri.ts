@@ -249,6 +249,9 @@ export class TauriFs implements FsLike {
   async readHead(path: string, maxBytes: number): Promise<Uint8Array> {
     return new Uint8Array(await invoke<number[]>("read_file_head", { path, maxBytes }));
   }
+  async readRange(path: string, offset: number, maxBytes: number): Promise<Uint8Array> {
+    return new Uint8Array(await invoke<number[]>("read_file_range", { path, offset, maxBytes }));
+  }
   async readDir(path: string): Promise<DirEntry[]> {
     const entries = await readDir(path);
     return entries.map((e) => ({ name: e.name, isDirectory: e.isDirectory }));

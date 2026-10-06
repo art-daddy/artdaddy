@@ -31,21 +31,29 @@ const PLAIN_PNG = new Uint8Array([...SIG, ...IHDR, ...chunk("IDAT", [0])]);
 const GIF = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 40, 0, 40, 0, 0, 0, 0]);
 
 const PROBE = {
-  frames: [
+  packets: [
     { pts: 0, duration: 7000 },
     { pts: 7000, duration: 13000 },
   ],
   streams: [{ width: 40, height: 40, time_base: "1/100000" }],
 };
 
-function setup(files: Record<string, Uint8Array>, o: { ffmpegFails?: boolean; probe?: unknown } = {}) {
+function setup(
+  files: Record<string, Uint8Array>,
+  o: { ffmpegFails?: boolean; probe?: unknown; gifLoopCount?: number | null } = {},
+) {
   const fs = new BytesFs();
   for (const [p, b] of Object.entries(files)) fs.bin.set(joinPath(`C:/proj/${p}`), b);
   const store = new ProjectStoreAccess("C:/proj", fs);
   const calls: string[] = [];
+  const loop = o.gifLoopCount === undefined ? 0 : o.gifLoopCount;
   const runner = {
     run: async (program: string, args: string[]) => {
       calls.push(program);
+      // ffprobe as the shipped one answers: a GIF's loop count on stderr at debug level...
+      if (program === "ffprobe" && args.includes("debug"))
+        return { code: 0, stdout: "1\n", stderr: loop === null ? "" : `[gif @ 0x1] Loop count is ${loop}\n` };
+      // ...and the packet timing as JSON.
       if (program === "ffprobe") return { code: 0, stdout: JSON.stringify(o.probe ?? PROBE), stderr: "" };
       if (o.ffmpegFails) return { code: 1, stdout: "", stderr: "boom" };
       await fs.writeTextFile(args[args.length - 1], "frames");
@@ -74,6 +82,18 @@ describe("makeStillFramePack", () => {
     expect(parsePackIndex(t.fs.files.get(t.index("library/once.png"))!)?.timing.passes).toBe(1);
   });
 
+  // A GIF's own count, as the export plays it (a browser's rule): none once, N N+1 times.
+  it("records a GIF's own count", async () => {
+    const passes = async (gifLoopCount: number | null) => {
+      const t = setup({ "library/a.gif": GIF }, { gifLoopCount });
+      expect(await makeStillFramePack(t.store, t.runner, "library/a.gif")).toBe(true);
+      return parsePackIndex(t.fs.files.get(t.index("library/a.gif"))!)?.timing.passes;
+    };
+    expect(await passes(null)).toBe(1);
+    expect(await passes(2)).toBe(3);
+    expect(await passes(0)).toBe(Infinity);
+  });
+
   // The failure direction: an ordinary picture must cost nothing but a 2 KB read.
   it("runs nothing at all for a still that does not animate, whatever it is called", async () => {
     const t = setup({ "library/photo.gif": PLAIN_PNG });
@@ -88,11 +108,11 @@ describe("makeStillFramePack", () => {
   });
 
   it("makes nothing from a timing it cannot trust, or a single frame", async () => {
-    const t = setup({ "library/a.gif": GIF }, { probe: { frames: [], streams: [] } });
+    const t = setup({ "library/a.gif": GIF }, { probe: { packets: [], streams: [] } });
     expect(await makeStillFramePack(t.store, t.runner, "library/a.gif")).toBe(false);
-    const one = setup({ "library/b.gif": GIF }, { probe: { ...PROBE, frames: [PROBE.frames[0]] } });
+    const one = setup({ "library/b.gif": GIF }, { probe: { ...PROBE, packets: [PROBE.packets[0]] } });
     expect(await makeStillFramePack(one.store, one.runner, "library/b.gif")).toBe(false);
-    expect(one.calls).toEqual(["ffprobe"]); // never decoded
+    expect(one.calls).not.toContain("ffmpeg"); // never decoded
   });
 
   it("does the work once", async () => {

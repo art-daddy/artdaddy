@@ -727,7 +727,7 @@ export async function inspectTimelineTool(
 
   // Resolve portable "library/<id>" sources to absolute paths, as the export does: ffmpeg can only
   // open a path.
-  const warnings = new Set(await resolveClipSources(ctx, seconds));
+  const warnings = new Set(await resolveClipSources(ctx, seconds, { stillTiming: true }));
   const look = resolveRenderPlan(seconds);
   // Each file is named for the timeline STATE it shows (plus the size and overlay it was drawn
   // with), never just its frame number: the conversation keeps re-sending the frames an earlier
@@ -1073,7 +1073,7 @@ async function gradedClipFrame(
   const seconds = toSecondsView(one);
   // ffmpeg cannot open a library ref, only a path. Every other render path resolves first; this
   // one did not, so measuring a CLIP always failed while a media_ref worked.
-  await resolveClipSources(ctx, seconds);
+  await resolveClipSources(ctx, seconds, { stillTiming: true });
   const png = await ctx.store.prepareArtifact(`inspect/color_clip_${call}.png`);
   const plan = buildRenderCommand(
     seconds,

@@ -37,9 +37,10 @@ export interface Layer {
   source: string;
   kind: "image" | "video";
   sourceTime?: number;
-  /** Image layers: the frame of the still's own stream to show, counted at the project rate from
-   *  the clip's start (an animated still picks its picture by it: media/stillFrames.ts). */
-  stillFrame?: number;
+  /** Image layers: where the still is in its clip, `k` project frames from its start (negative in a
+   *  transition's lead-in, `len` or more while held past its end), over `len` frames at `speed`. An
+   *  animated still picks its picture from it (media/stillFrames.ts stillFrameShown). */
+  still?: { k: number; len: number; speed: number };
   z: number;
   opacity: number;
   dst: Rect;
@@ -640,11 +641,9 @@ export function buildScene(
         layer.sourceTime = (num(clip.source_in) + rel * speed) / fps;
       } else {
         // A still's stream starts at the clip's start whatever was trimmed (the export reads every
-        // still from its beginning), and runs at the clip's speed: frame k shows stream frame
-        // floor(k * speed), the export's rule for every retimed clip (render.ts setpts).
-        const speed = Number(clip.speed ?? 1) || 1;
-        const rel = tFrame < tin ? 0 : tFrame < tout ? tFrame - tin : Math.max(0, tout - tin - 1);
-        layer.stillFrame = Math.floor(rel * speed + 1e-6);
+        // still from its beginning) and runs at the clip's speed. Which picture that is, inside the
+        // clip and held past its end, is the timing's to say: the scene only says where it is.
+        layer.still = { k: tFrame - tin, len: tout - tin, speed: Number(clip.speed ?? 1) || 1 };
       }
       // Inbound transition blend against the clip beneath (they overlap here).
       // Centered on the cut: the progress window is [tin-leadF, tin+leadF].

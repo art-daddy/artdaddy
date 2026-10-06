@@ -5,7 +5,7 @@
 // decoded when first needed, a few ahead of the playhead, and uploaded as its own texture, so two
 // clips of one GIF at different points of its loop each draw their own frame. A frame not decoded
 // yet never holds anything up: the frame last drawn stands in for it.
-import { splitPngStream, stillFrameAt, type StillTiming } from "../media/stillFrames";
+import { splitPngStream, stillFrameShown, type StillTiming } from "../media/stillFrames";
 import type { PreviewRenderer } from "./renderer";
 
 /** Frames decoded ahead of the one on screen, so playback finds them ready. */
@@ -54,12 +54,12 @@ export class AnimatedStill {
     }
   }
 
-  /** The texture key to draw for stream frame `streamFrame` (stillFrame from the scene), or null
-   *  while no frame of this still is on the GPU yet (the original picture is drawn then). */
-  keyFor(fps: number, streamFrame: number): string | null {
+  /** The texture key to draw where the still is in its clip (`still` from the scene), or null while
+   *  no frame of this still is on the GPU yet (the original picture is drawn then). */
+  keyFor(fps: number, at: { k: number; len: number; speed: number }): string | null {
     if (!this.frames || this.dead) return this.lastKey;
     const n = this.frames.length;
-    const idx = stillFrameAt(this.timing, fps, streamFrame);
+    const idx = stillFrameShown(this.timing, fps, at.k, at.len, at.speed);
     for (let i = 1; i <= AHEAD; i++) this.decode((idx + i) % n);
     const key = this.resident.get(idx);
     if (key) {

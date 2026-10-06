@@ -59,8 +59,9 @@ export function imageProxyRel(source: string): string {
 // The preview's frames of an animated still (GIF, APNG, animated WebP): every frame, decoded once
 // by ffmpeg into transparent PNGs written back to back, and an index saying when each shows
 // (media/stillFrames.ts). Two FLAT files carrying the source's key, so the cache GC keeps them while
-// the asset lives and collects them after (it never descends into a directory).
-const ANIM_REV = 1;
+// the asset lives and collects them after (it never descends into a directory). r2: a still plays the
+// passes its file says (r1 looped every GIF, and a WebP whose count sat behind a big colour profile).
+const ANIM_REV = 2;
 
 export function animPackName(source: string): string {
   return `${proxyKey(source)}.anim.r${ANIM_REV}.png`;

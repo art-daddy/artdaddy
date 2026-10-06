@@ -10,11 +10,11 @@ import path from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
-import { ff, mkCtx } from "../tools/__e2e";
+import { ff, gifLoopAtEnd, mkCtx } from "../tools/__e2e";
 import type { ClientToolContext } from "../tools/context";
 import { shippedSidecar, shippedSidecarPath } from "../test/sidecars";
 import type { Timeline } from "./model";
-import { buildRenderCommand, runRenderPlan } from "./render";
+import { buildRenderCommand, resolveClipSources, runRenderPlan } from "./render";
 
 // Captions only prove anything if libass has the bundled fonts to draw with.
 vi.mock("@tauri-apps/api/path", async () => {
@@ -215,6 +215,29 @@ beforeAll(async () => {
     ...enc,
     src.vfr,
   ]);
+  // Animated stills: a moving square on transparency, keeping six frames of irregular delays
+  // (7, 13, 5, 20, 7 cs + the last), as stickers are timed.
+  const sticker = [
+    "-f",
+    "lavfi",
+    "-i",
+    `color=c=black@0:s=${W}x${H}:r=100:d=0.6,format=rgba[bg];color=c=red:s=40x40:r=100:d=0.6,format=rgba[sq];[bg][sq]overlay=x='n*5':y=70`,
+    "-vf",
+    "select='eq(n\\,0)+eq(n\\,7)+eq(n\\,20)+eq(n\\,25)+eq(n\\,45)+eq(n\\,52)'",
+    "-fps_mode",
+    "passthrough",
+  ];
+  src.gif = path.join(dir, "loops.gif");
+  await ff(["-y", ...sticker, src.gif]);
+  src.gifOnce = path.join(dir, "once.gif");
+  await ff(["-y", ...sticker, "-loop", "-1", src.gifOnce]);
+  // Its count kept at its end: ffmpeg holds the last picture through what follows it.
+  src.gifTail = path.join(dir, "tail.gif");
+  await gifLoopAtEnd(src.gifOnce, src.gifTail, 3);
+  src.apng = path.join(dir, "loops_apng.png");
+  await ff(["-y", ...sticker, "-f", "apng", "-plays", "0", src.apng]);
+  src.webp = path.join(dir, "twice.webp");
+  await ff(["-y", ...sticker, "-c:v", "libwebp_anim", "-lossless", "1", "-loop", "2", src.webp]);
 });
 
 afterAll(async () => {
@@ -318,6 +341,43 @@ describe("a frame window is the export's frame at that instant", () => {
       ]),
     ]);
     await expectSameAsExport("kenburns", tl, [0, 100, 101, 238, 239]);
+  });
+
+  // A look far into an animated still shows the one frame the export shows there (its timing read,
+  // as inspect reads it), instead of replaying every pass before it: inside a pass, at a pass
+  // boundary, through a GIF's trailing packet, after a play-once GIF has ended, held under the next
+  // clip's crossfade at 1.15x, and in an APNG's lead-in.
+  it("animated stills deep in, shown as the frame the export shows", async () => {
+    const still = (media: string, tin: number, tout: number, extra: Any = {}): Any => ({
+      media_ref: media,
+      timeline_in: sec(tin),
+      timeline_out: sec(tout),
+      ...extra,
+    });
+    const tl = timeline([
+      track("base", 0, [vclip(src.a, 0, 420, 0)]),
+      track("gifs", 1, [
+        still(src.gif, 0, 300),
+        still(src.gifOnce, 300, 360, { speed: 1.15 }),
+        still(src.webp, 360, 420, { transition_in: { kind: "crossfade", duration: sec(12) } }),
+      ]),
+      track("tail", 2, [still(src.gifTail, 0, 400, { transform: { scale: 0.5, position: { x: 0.75, y: 0.5 } } })]),
+      track("apng", 3, [
+        vclip(src.b, 0, 200, 0, { transform: { scale: 0.3, position: { x: 0.2, y: 0.2 } } }),
+        still(src.apng, 200, 330, { transition_in: { kind: "crossfade", duration: sec(10) }, transform: { scale: 0.3, position: { x: 0.2, y: 0.2 } } }),
+      ]),
+    ]);
+    const resolved = await resolveClipSources(ctx, tl, { stillTiming: true });
+    expect(resolved, "nothing unresolved").toEqual([]);
+    for (const t of tl.tracks)
+      for (const c of t.clips ?? [])
+        if (String(c.media_ref).match(/\.(gif|webp)$|_apng\.png$/))
+          expect((c as Any).still_timing, `${c.media_ref}: timing read`).toBeTruthy();
+    // Each window must show the still as ONE frame (no replay), or this proves nothing new.
+    const plan = buildRenderCommand(tl, path.join(dir, "x.yuv"), {}, { frame: 283, outputArgs: ["-f", "rawvideo"] });
+    expect(plan.args.join(" ")).not.toContain("-stream_loop");
+    expect(plan.filterComplex.match(/select='eq\(n,/g)?.length, "stills shown as one frame").toBeGreaterThanOrEqual(2);
+    await expectSameAsExport("animated", tl, [3, 17, 52, 53, 160, 283, 299, 300, 301, 330, 358, 359, 363, 366, 396, 399, 197, 203, 205]);
   });
 
   it("captions: plain, phrase-chunks and word-highlight, over video", async () => {
