@@ -2112,7 +2112,7 @@ async function prepareRender(
   outPath: string,
   kind: "deliverable" | "working",
   options: ExportOptions = {},
-): Promise<{ ok: false; result: Result } | { ok: true; plan: RenderPlan }> {
+): Promise<{ ok: false; result: Result } | { ok: true; plan: RenderPlan; branding?: Branding }> {
   let raw: Timeline;
   try {
     raw = await loadTimeline(ctx.store);
@@ -2170,7 +2170,7 @@ async function prepareRender(
 
   const plan = buildRenderCommand(seconds, outPath, { ...options, branding });
   if (extraWarnings.length) plan.warnings.push(...extraWarnings);
-  return { ok: true, plan };
+  return { ok: true, plan, ...(branding ? { branding } : {}) };
 }
 
 /** Run a prepared plan and validate the encoded artifact before any caller may commit it. */
@@ -2630,6 +2630,15 @@ export async function exportTimelineTool(
 
   // Don't leak the OS Downloads path to the model — return only the filename. When the caller
   // NAMED the destination it already knows the path, so there is nothing to disclose either way.
+  const round3 = (s: number) => Math.round(s * 1000) / 1000;
+  const total = prepared.plan.duration;
+  const card = prepared.branding?.endcardDuration ?? 0;
+  // Without this an agent reads the end card's extra seconds as a broken export.
+  const brandNote = prepared.branding
+    ? `The ArtDaddy watermark and end card are always added to an export: this file runs ` +
+      `${total.toFixed(1)} s, ${(total - card).toFixed(1)} s of timeline plus a ${card.toFixed(1)} s end card.`
+    : "";
+  const note = [dest.defaulted ? "Saving to your Downloads folder." : "", brandNote].filter(Boolean).join(" ");
   return {
     ok: true,
     status: sub.queue_position > 0 ? "queued" : "exporting",
@@ -2637,8 +2646,11 @@ export async function exportTimelineTool(
     queue_position: sub.queue_position,
     format: "mp4",
     saved_to: dest.filename,
-    duration_s: Math.round(prepared.plan.duration * 1000) / 1000,
+    duration_s: round3(total),
+    ...(prepared.branding
+      ? { branding: { watermark: true, end_card_s: round3(card), timeline_s: round3(total - card) } }
+      : {}),
     warnings: prepared.plan.warnings,
-    ...(dest.defaulted ? { note: "Saving to your Downloads folder." } : {}),
+    ...(note ? { note } : {}),
   };
 }
