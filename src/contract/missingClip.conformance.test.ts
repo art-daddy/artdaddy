@@ -24,6 +24,7 @@ const GONE = "clip_gone_7f3a";
 const CALLS: Record<string, Record<string, unknown>> = {
   apply_color: { clip_ids: [GONE], brightness: 0.1 },
   apply_effects: { clip_ids: [GONE], add: [{ type: "blur" }] },
+  export: { clip_ids: [GONE] },
   get_transcript: { clip_id: GONE },
   inspect_color: { clip_id: GONE },
   inspect_media: { clip_id: GONE },

@@ -624,6 +624,10 @@ export class ProjectStoreAccess {
     if (parent) await this.fs.mkdir(parent);
     await this.fs.copyFile(src, dst);
   }
+  /** Make a folder and its parents: where the user asked for deliverables, outside the project. */
+  async ensureDir(path: string): Promise<void> {
+    await this.fs.mkdir(path);
+  }
   /** List a directory's immediate entries (empty when the fs can't list). */
   readDir(dir: string): Promise<DirEntry[]> {
     return this.fs.readDir ? this.fs.readDir(dir) : Promise.resolve([]);

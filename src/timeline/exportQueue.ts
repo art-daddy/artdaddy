@@ -21,7 +21,7 @@ import type { ProjectStoreAccess } from "../tools/store";
 import type { ClientToolContext } from "../tools/context";
 import { jobResult, jobSupervisor, type JobSupervisor, type JobView } from "../tools/jobSupervisor";
 import type { MutationOrigin } from "../project/MutationGate";
-import { notifyJobSettled } from "../store/jobNotes";
+import { notifyJobSettled, type SettledJob } from "../store/jobNotes";
 import { useExportJob } from "../store/exportJob";
 import { beginSessionActivity } from "../observability/crashWatch";
 import { createProgressReader, etaSeconds, progressFraction } from "./ffmpegProgress";
@@ -32,6 +32,37 @@ const reserved = new Set<string>();
 
 /** Serializes encodes across every project in the process. */
 let queueTail: Promise<unknown> = Promise.resolve();
+
+/** Serializes copies. Their own lane: a copy is disk work, and must not wait behind an encode. */
+let copyTail: Promise<unknown> = Promise.resolve();
+
+/** Export calls that deliver several files: the agent is woken once, after the last one settles. */
+const batches = new Map<
+  string,
+  { open: number; sealed: boolean; notes: Array<[string, SettledJob]> }
+>();
+
+function batchOf(id: string) {
+  let b = batches.get(id);
+  if (!b) {
+    b = { open: 0, sealed: false, notes: [] };
+    batches.set(id, b);
+  }
+  return b;
+}
+
+/** Every file of the call is queued: its one wake may go once the last of them settles. */
+export function sealExportBatch(id: string): void {
+  batchOf(id).sealed = true;
+  flushBatch(id);
+}
+
+function flushBatch(id: string): void {
+  const b = batches.get(id);
+  if (!b || !b.sealed || b.open > 0) return;
+  batches.delete(id);
+  for (const [dir, job] of b.notes) notifyJobSettled(dir, job);
+}
 
 /** In-flight exports, awaited by {@link whenExportsSettle}. */
 const inflight = new Set<Promise<unknown>>();
@@ -233,6 +264,11 @@ export interface ExportSpec {
   /** The app process's job supervisor, when the encode runs as one of its jobs (3h part 7). It
    *  keeps the order then, so this queue does not hold a job back, and a job's state comes from it. */
   supervisor?: JobSupervisor;
+  /** A library file delivered as it is: no encode, no export metric, and the delivered row names
+   *  this library ref rather than cataloguing the same bytes a second time. */
+  copyOf?: string;
+  /** The export call this job is one file of (see {@link sealExportBatch}). */
+  batch?: string;
   /** Runs the encode. Rejects with a message on failure. `jobId` names the job everywhere: the
    *  ledger, this queue and the supervisor. */
   run: (signal: AbortSignal, jobId: string) => Promise<{ warnings?: string[] }>;
@@ -342,6 +378,8 @@ export function __resetExportQueue(): void {
   snapshot = [];
   listeners.clear();
   queueTail = Promise.resolve();
+  copyTail = Promise.resolve();
+  batches.clear();
 }
 
 /** Record the job, queue the encode, and return immediately. */
@@ -359,6 +397,7 @@ export async function submitExport(spec: ExportSpec): Promise<ExportSubmission> 
   });
   reserved.add(key);
   controllers.set(jobId, new AbortController());
+  if (spec.batch) batchOf(spec.batch).open++;
   const queuePosition = Math.max(0, reserved.size - 1);
   records.push({
     job_id: jobId,
@@ -383,7 +422,9 @@ export async function submitExport(spec: ExportSpec): Promise<ExportSubmission> 
   // the page alone, this queue does.
   const task = spec.supervisor
     ? encode(spec, ledger, jobId, key)
-    : (queueTail = queueTail.then(() => encode(spec, ledger, jobId, key)));
+    : spec.copyOf
+      ? (copyTail = copyTail.then(() => encode(spec, ledger, jobId, key)))
+      : (queueTail = queueTail.then(() => encode(spec, ledger, jobId, key)));
   track(task);
   return { job_id: jobId, queue_position: queuePosition };
 }
@@ -448,6 +489,8 @@ async function encode(spec: ExportSpec, ledger: Ledger, jobId: string, key: stri
     startedAt,
     ledger,
     supervisor: spec.supervisor,
+    copyOf: spec.copyOf,
+    batch: spec.batch,
     run,
   });
 }
@@ -464,6 +507,8 @@ interface Settle {
   startedAt: number;
   ledger: Ledger;
   supervisor?: JobSupervisor;
+  copyOf?: string;
+  batch?: string;
   run: RunOutcome;
 }
 
@@ -509,8 +554,9 @@ async function settle(x: Settle): Promise<void> {
   // not do was look at what it had actually shipped: `inspect_timeline` inspects the timeline, and
   // the export was reachable only by a filesystem path, which is not an address this product has.
   // Linked, never copied — the destination is often outside the project and can be hundreds of MB.
-  // A cancelled run sets `error`, so nothing half-written is ever catalogued.
-  const mediaRef = error ? null : await registerExportInLibrary(x.store, x);
+  // A cancelled run sets `error`, so nothing half-written is ever catalogued. A copy of a library
+  // file is that file's bytes, so it is that file's ref.
+  const mediaRef = error ? null : (x.copyOf ?? (await registerExportInLibrary(x.store, x)));
   if (mediaRef) patch(x.jobId, { mediaRef });
 
   await x.ledger.settle(
@@ -529,27 +575,37 @@ async function settle(x: Settle): Promise<void> {
   //
   // Deliberately NOT in `inflight`: that set is what a drain on quit waits for, and making
   // someone's app hang on a telemetry socket to save a metric row is the wrong trade.
-  const beacon = reportSettledExport(x, {
-    status: error ? (cancelled ? "cancelled" : "failed") : "done",
-    elapsedMs: Date.now() - x.startedAt,
-    warnings: warnings.length,
-    error: error && !cancelled ? error : "",
-  });
-  beacons.add(beacon);
-  void beacon.finally(() => beacons.delete(beacon));
+  // A copy is not an encode: counting it would dilute the export failure rate it exists to show.
+  if (!x.copyOf) {
+    const beacon = reportSettledExport(x, {
+      status: error ? (cancelled ? "cancelled" : "failed") : "done",
+      elapsedMs: Date.now() - x.startedAt,
+      warnings: warnings.length,
+      error: error && !cancelled ? error : "",
+    });
+    beacons.add(beacon);
+    void beacon.finally(() => beacons.delete(beacon));
+  }
   await x.supervisor?.forget(x.jobId).catch(() => false);
-  if (cancelled) return;
   const note = warnings.length
     ? `saved as ${x.filename} (${warnings.length} warning${warnings.length > 1 ? "s" : ""}: ${warnings.join("; ")})`
     : `saved as ${x.filename}`;
-  notifyJobSettled(x.store.projectDir, {
-    id: x.jobId,
-    tool: "export",
-    label: `the export ${x.filename}`,
-    status: error ? "failed" : "done",
-    startedBy: x.startedBy,
-    ...(error ? { error } : { detail: note }),
-  });
+  const settled: SettledJob | null = cancelled
+    ? null
+    : {
+        id: x.jobId,
+        tool: "export",
+        label: `the export ${x.filename}`,
+        status: error ? "failed" : "done",
+        startedBy: x.startedBy,
+        ...(error ? { error } : { detail: note }),
+      };
+  if (x.batch) {
+    const b = batchOf(x.batch);
+    b.open--;
+    if (settled) b.notes.push([x.store.projectDir, settled]);
+    flushBatch(x.batch);
+  } else if (settled) notifyJobSettled(x.store.projectDir, settled);
 }
 
 /** What render.ts gives an export job, for a page that did not start it. */

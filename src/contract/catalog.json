@@ -1,6 +1,6 @@
 {
   "$schema_note": "Generated from the live tool registry (v4/tools/catalog.py) - do not hand-edit; refresh with `npm run codegen`.",
-  "version": "2.7.5",
+  "version": "2.8.0",
   "generated_from": "src/akaru/turn/tools/definitions.py::ALL_TOOLS",
   "count": 55,
   "tools": [
@@ -1357,13 +1357,35 @@
     {
       "name": "export",
       "expensive": true,
-      "description": "Render the finished timeline to an mp4.\n\nAuthor + register `timeline_json` first (the export also runs the render preflight).\n\nReturns IMMEDIATELY with {ok, status:'exporting'|'queued', job_id, saved_to, queue_position} — the file does NOT exist yet, and a long timeline takes minutes. Everything that can REFUSE the export still happens before this returns (validation, media still generating, offline sources, a destination already being written), so an `ok` means the render really did start. Exports run one at a time; `queue_position` > 0 means yours is waiting. The destination is only written when the render SUCCEEDS, so a failed export never damages a file already there.\n\nTo learn how it FINISHED, call manage_exports action='list': it reports every export this session with its state ('done'/'failed'), the error when one failed, and `media_ref` for the delivered file. An export that finished is registered in the library, so you can inspect_media that `media_ref` to check what actually shipped — the only way to look at the delivered file rather than at the timeline it came from.\n\nONE export per request. The default destination never overwrites — it de-dupes to \"name 2.mp4\", \"name 3.mp4\" — so every extra call leaves the user another file to sort through. Do NOT re-export to check your own work: inspect the TIMELINE with inspect_timeline BEFORE exporting, which renders the same frames without writing a deliverable. Export again only if the user asks, or to redo one you just queued with the wrong settings (cancel that one with manage_exports). If the finished file turns out to have a problem, say so and let the user decide — do not silently start another render.\n\n`resolution`, `quality` and `fps` default to the project's own settings, so an export with no options re-encodes at the canvas size, frame rate and the standard quality.\n\nOMIT `output_path` unless the user named a destination — the default drops the file in their Downloads folder, and that is what the in-app Export dialog does when they do not pick one.\n\nNLE interchange (FCPXML/XMEML for Premiere and Resolve, Final Cut, Premiere .jsx, a self-contained project bundle) and H.265/ProRes codecs are deferred — see ideas.md. Do not offer them.",
+      "description": "Render the finished timeline to an mp4 — or deliver SEPARATE files into a folder: library media as it is, or timeline clips one per file (see SEPARATE FILES).\n\nAuthor + register `timeline_json` first (the export also runs the render preflight).\n\nReturns IMMEDIATELY with {ok, status:'exporting'|'queued', job_id, saved_to, queue_position} — the file does NOT exist yet, and a long timeline takes minutes. Everything that can REFUSE the export still happens before this returns (validation, media still generating, offline sources, a destination already being written), so an `ok` means the render really did start. Exports run one at a time; `queue_position` > 0 means yours is waiting. The destination is only written when the render SUCCEEDS, so a failed export never damages a file already there.\n\nTo learn how it FINISHED, call manage_exports action='list': it reports every export this session with its state ('done'/'failed'), the error when one failed, and `media_ref` for the delivered file. An export that finished is registered in the library, so you can inspect_media that `media_ref` to check what actually shipped — the only way to look at the delivered file rather than at the timeline it came from.\n\nONE export per request. The default destination never overwrites — it de-dupes to \"name 2.mp4\", \"name 3.mp4\" — so every extra call leaves the user another file to sort through. Do NOT re-export to check your own work: inspect the TIMELINE with inspect_timeline BEFORE exporting, which renders the same frames without writing a deliverable. Export again only if the user asks, or to redo one you just queued with the wrong settings (cancel that one with manage_exports). If the finished file turns out to have a problem, say so and let the user decide — do not silently start another render.\n\n`resolution`, `quality` and `fps` default to the project's own settings, so an export with no options re-encodes at the canvas size, frame rate and the standard quality.\n\nSEPARATE FILES: pass `media_refs` and/or `clip_ids` instead of exporting the\nwhole timeline. Each becomes its own file and its own job in the export queue:\n  - `media_refs`: library assets, copied byte for byte (no re-encode, no\n    watermark). Clips cut with clip_video, generated media, any library file.\n  - `clip_ids`: clips on the timeline. Each file is what the preview shows over\n    that clip's span (every track there, captions, transitions, sound), with the\n    ArtDaddy watermark and no end card.\nTwo or more files are numbered in the order given ('01 <name>', '02 <name>').\nThe reply is {ok, status, exports:[{job_id, saved_to, media_ref|clip_id,\nduration_s?, queue_position}], folder, note}; manage_exports reports each job.\nWhen the user wants clips or files \"in a folder\", deliver them this way: never\noffer a zip of the project or tell them to copy files themselves.\n\nOMIT `output_path` and `output_dir` unless the user named a destination — the default drops the file(s) in their Downloads folder, and that is what the in-app Export dialog does when they do not pick one. `output_dir` takes a folder NAME (made inside Downloads) or an absolute path; `output_path` names ONE file.\n\nNLE interchange (FCPXML/XMEML for Premiere and Resolve, Final Cut, Premiere .jsx, a self-contained project bundle) and H.265/ProRes codecs are deferred — see ideas.md. Do not offer them.",
       "parameters": {
         "type": "object",
         "properties": {
           "output_path": {
             "type": "string",
-            "description": "Optional. ABSOLUTE destination path for the exported file, including the filename (the '.mp4' extension is appended if you omit it). Only set this when the user named a folder or filename; omit it and the export lands in their Downloads folder. The folder must already exist, and an existing file at that path is overwritten."
+            "description": "Optional. ABSOLUTE destination path for the exported file, including the filename (the '.mp4' extension is appended if you omit it). Only set this when the user named a folder or filename; omit it and the export lands in their Downloads folder. The folder must already exist, and an existing file at that path is overwritten. Not with media_refs, clip_ids or output_dir."
+          },
+          "output_dir": {
+            "type": "string",
+            "description": "Optional. The folder the file(s) go in: a folder NAME (no slashes) is made inside the user's Downloads folder; an ABSOLUTE path is used as given. Made if missing. A name already in it is never overwritten: the new file gets ' 2'. Set it only when the user asked for a folder."
+          },
+          "media_refs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "maxItems": 50,
+            "description": "Optional. Library assets to deliver as SEPARATE files, copied byte for byte (no re-encode, no watermark): media_ref ids from the library. A file on disk must be imported with import_media first. At most 50 files per call, counting clip_ids."
+          },
+          "clip_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "maxItems": 50,
+            "description": "Optional. Timeline clips to export as SEPARATE files, by clip id from get_timeline. Each file is what the preview shows over that clip's span (every track, captions, transitions, sound), with the watermark and no end card. resolution, quality and fps apply to them."
           },
           "resolution": {
             "type": "string",

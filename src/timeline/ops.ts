@@ -30,7 +30,7 @@ import {
   setKeyframesTool,
   setTransitionTool,
 } from "./props";
-import { exportTimelineTool } from "./render";
+import { exportTool } from "./exportItems";
 import { manageExportsTool } from "./exportQueue";
 import { collapseCaptionGroups, compactClip } from "./shape";
 
@@ -349,6 +349,6 @@ export function registerTimelineTools(
   registry.register("link_clips", (args) => linkClipsTool(args, getCtx()));
   registry.register("unlink_clips", (args) => unlinkClipsTool(args, getCtx()));
   // export (8f)
-  registry.register("export", (args) => exportTimelineTool(args, getCtx()));
+  registry.register("export", (args) => exportTool(args, getCtx()));
   registry.register("manage_exports", (args) => manageExportsTool(args));
 }

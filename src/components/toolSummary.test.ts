@@ -135,6 +135,20 @@ describe("what the line counts", () => {
     expect(q.text).toBe("Queued reel.mp4 for export");
   });
 
+  it("counts separate files and names their folder, not a single video", () => {
+    const r = {
+      ok: true,
+      status: "exporting",
+      exports: [{ saved_to: "01 Tape 14.mp4" }, { saved_to: "02 Tape 16.mov" }],
+      folder: "'VHS clips' in your Downloads folder",
+    };
+    expect(call("export", { media_refs: ["a", "b"] }, r).text).toBe(
+      "Exporting 2 files to 'VHS clips' in your Downloads folder",
+    );
+    const one = { ...r, exports: [{ saved_to: "Tape 14.mp4" }] };
+    expect(call("export", { media_refs: ["a"] }, one).text).toBe("Exporting Tape 14.mp4");
+  });
+
   it("says what manage_exports actually did", () => {
     expect(call("manage_exports", { action: "list" }, { ok: true, exports: [] }).text).toBe(
       "No exports running",

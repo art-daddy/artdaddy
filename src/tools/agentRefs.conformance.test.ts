@@ -220,6 +220,11 @@ const PARAMS: Record<string, { kind: Kind; call?: Call; control?: string }> = {
     call: (x) => ["crop_image", { media_ref: x, bbox: { x: 0, y: 0, w: 10, h: 10 } }],
     control: "media_img",
   },
+  "export media_refs[]": {
+    kind: "library-ref",
+    call: (x) => ["export", { media_refs: [x] }],
+    control: "media_ctl",
+  },
   "generate_image reference_images[]": {
     kind: "library-ref",
     call: (x) => ["generate_image", { prompt: "p", reference_images: [x] }],
@@ -300,6 +305,7 @@ const PARAMS: Record<string, { kind: Kind; call?: Call; control?: string }> = {
   },
   "import_media source.path": { kind: "import-door" },
   "export output_path": { kind: "destination" },
+  "export output_dir": { kind: "destination" },
   "clip_video output_name": { kind: "output-name" },
   "download_video output_name": { kind: "output-name" },
   "run_ffmpeg output_name": { kind: "output-name" },

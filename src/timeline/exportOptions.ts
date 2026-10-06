@@ -23,6 +23,8 @@ export interface ExportOptions {
   /** Stop the output here when it is shorter than the timeline. inspect_timeline samples frames by
    *  absolute time, so everything after the last one it asked for is encoded and thrown away. */
   maxDurationSec?: number;
+  /** Deliver only project frames [from, to): exactly the whole export's frames and sound there. */
+  range?: { from: number; to: number };
 }
 
 /** The SHORTER side each preset targets. Reading presets off the short side means "1080p" is the

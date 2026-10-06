@@ -46,10 +46,11 @@ export function brandRatio(width: number, height: number): BrandRatio {
 export const watermarkFile = (r: BrandRatio): string => `watermark-${r}.png`;
 export const endcardFile = (r: BrandRatio): string => `endcard-${r}.mp4`;
 
-/** Absolute paths to the two assets a branded render feeds ffmpeg. */
+/** Absolute paths to the assets a branded render feeds ffmpeg. */
 export interface Branding {
   watermark: string;
-  endcard: string;
-  /** Probed from the bundled artifact before planning; never a stale authored constant. */
+  /** Null for a file that carries the watermark alone (a clip exported on its own). */
+  endcard: string | null;
+  /** Probed from the bundled artifact before planning; never a stale authored constant. 0 with no card. */
   endcardDuration: number;
 }

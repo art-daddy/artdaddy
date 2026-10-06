@@ -342,10 +342,15 @@ const PHRASES: Record<string, Phrase> = {
     bare: "export the video",
     ing: "Exporting",
     // The file does not exist yet — "Exported" would be a lie the user could act on.
-    done: (_a, r) =>
-      r.status === "queued"
-        ? `Queued ${fileName(r.saved_to) || "the video"} for export`
-        : `Exporting ${fileName(r.saved_to) || "the video"}`,
+    done: (_a, r) => {
+      const files = Array.isArray(r.exports) ? (r.exports as Array<{ saved_to?: unknown }>) : null;
+      if (files && files.length > 1)
+        return `Exporting ${plural(files.length, "file")} to ${s(r.folder) || "your Downloads folder"}`;
+      const name = fileName(files ? files[0]?.saved_to : r.saved_to);
+      return r.status === "queued"
+        ? `Queued ${name || "the video"} for export`
+        : `Exporting ${name || "the video"}`;
+    },
   },
   manage_exports: {
     bare: "check on exports",

@@ -46,7 +46,7 @@ import {
 import { buildBandAss, unrenderableFlags, type CaptionSpec } from "./assCaption";
 import { withAssScratch } from "../tools/assScratch";
 import { jobSupervisor, supervisedRunner } from "../tools/jobSupervisor";
-import { ExportRunError, isDestinationReserved, submitExport } from "./exportQueue";
+import { ExportRunError, isDestinationReserved, submitExport, type ExportSubmission } from "./exportQueue";
 import { sourceHasAudio } from "./placement";
 import { clipPlays, outputGate, suppressClip } from "./visibility";
 import { assertNever } from "./transition";
@@ -800,6 +800,17 @@ function tpadFrames(sec: number, fps: number): number {
   return Math.round((usOf(sec) * fps) / 1e6);
 }
 
+/** A half-open span of project frames, with its edges in seconds. */
+function spanOf(
+  range: { from: number; to: number },
+  fps: number,
+): { from: number; to: number; a: number; b: number } {
+  const from = Math.max(0, Math.trunc(range.from));
+  const to = Math.trunc(range.to);
+  if (!(to > from)) throw new Error(`render span [${range.from}, ${range.to}) is empty`);
+  return { from, to, a: from / fps, b: to / fps };
+}
+
 /** Whole seconds a window's seek lands early. A screen recording sends no frames while the screen
  *  is still, and the export repeats the last frame before such a gap. ffmpeg's MP4 seek into a gap
  *  jumps FORWARD to the next keyframe, so a seek inside it can only show the frame after the gap.
@@ -877,6 +888,10 @@ export function buildRenderCommand(
         t: Math.max(0, Math.trunc(window.frame)) / fps,
       }
     : null;
+  // A span (a clip exported on its own): the whole graph with the canvas running only over the
+  // span, so every frame and sample in it is the whole export's.
+  const rng = !win && options.range ? spanOf(options.range, fps) : null;
+  const outDuration = rng ? (rng.to - rng.from) / fps : duration;
   const warnings: string[] = [];
   if (cw !== Math.trunc(Number(canvas.width)) || ch !== Math.trunc(Number(canvas.height))) {
     warnings.push(
@@ -1143,6 +1158,8 @@ export function buildRenderCommand(
         }
       }
     }
+    // Not on canvas anywhere near the span: it adds nothing there, so it is never opened.
+    if (rng && (span.from > rng.b + 2 / fps || span.to < rng.a - 2 / fps)) continue;
     inputs.push(input);
     const deferred = DEFERRED_FIELDS.find((f) => clip[f] !== undefined);
     if (deferred) warnings.push(`clip ${clip.id}: '${deferred}' not rendered (scoped)`);
@@ -1229,19 +1246,22 @@ export function buildRenderCommand(
       "-framerate",
       String(fps),
       "-t",
-      duration.toFixed(6),
+      outDuration.toFixed(6),
       "-i",
       brand.watermark,
     );
-    cmd.push("-i", brand.endcard);
+    if (brand.endcard) cmd.push("-i", brand.endcard);
   }
 
   // A colour source runs the whole timeline in an export. In a frame window it runs two frames,
-  // stamped at the window's frame so every expression keyed on time sees the export's clock.
+  // stamped at the window's frame so every expression keyed on time sees the export's clock; over
+  // a span it runs the span's frames (half a frame short, so printing cannot add one), stamped alike.
   const colorSrc = (spec: string): string =>
     win
       ? `color=${spec}:s=${cw}x${ch}:r=${fps}:d=${(2 / fps).toFixed(6)},setpts=PTS+${win.frame}`
-      : `color=${spec}:s=${cw}x${ch}:r=${fps}:d=${duration.toFixed(6)}`;
+      : rng
+        ? `color=${spec}:s=${cw}x${ch}:r=${fps}:d=${((rng.to - rng.from - 0.5) / fps).toFixed(6)},setpts=PTS+${rng.from}`
+        : `color=${spec}:s=${cw}x${ch}:r=${fps}:d=${duration.toFixed(6)}`;
   const chains: string[] = [`${colorSrc("c=black")}[base]`];
   let last = "base";
   // Caption z-bands interleave with the video overlays by `ord`: each band burns ONE libass `ass` filter
@@ -1573,6 +1593,10 @@ export function buildRenderCommand(
   });
   // Any remaining caption bands sit ABOVE all video (highest z) — composite them on top.
   emitBandsBelow(Infinity);
+  if (rng) {
+    chains.push(`[${last}]setpts=PTS-STARTPTS[span]`);
+    last = "span";
+  }
 
   let aout: string | null = null;
   if (arecs.length) {
@@ -1680,6 +1704,13 @@ export function buildRenderCommand(
       );
       aout = "amix";
     }
+    // Every sound is mixed from its own start, so the span's samples are the whole mix's there.
+    if (rng) {
+      chains.push(
+        `[${aout}]atrim=start=${rng.a.toFixed(6)}:end=${rng.b.toFixed(6)},asetpts=PTS-STARTPTS[aspan]`,
+      );
+      aout = "aspan";
+    }
   }
 
   // Delivery size is applied once, at the END of the composite — as a chain inside the graph,
@@ -1703,10 +1734,13 @@ export function buildRenderCommand(
   const outFps = outputFps(fps, options.fps);
   const ow = size ? size.w : cw;
   const oh = size ? size.h : ch;
-  let totalDuration = duration;
+  let totalDuration = outDuration;
   if (brand) {
     chains.push(`[${wmIdx}:v]scale=${ow}:${oh}[wm]`);
     chains.push(`[${last}][wm]overlay=0:0:format=auto[branded]`);
+    last = "branded";
+  }
+  if (brand?.endcard) {
     // concat refuses inputs that disagree on size, pixel format or SAR, and drifts on
     // timestamps when they disagree on rate — so BOTH branches are normalised, not just the
     // card. Doing it only to the card is the version of this that works on one project and
@@ -1717,7 +1751,7 @@ export function buildRenderCommand(
     );
     chains.push(`[mainv][ecv]concat=n=2:v=1:a=0[outv]`);
     last = "outv";
-    totalDuration = duration + brand.endcardDuration;
+    totalDuration = outDuration + brand.endcardDuration;
     // The card carries no audio. Without this the track simply stops at the cut and some
     // players report the file as ending there; apad gives it real silence, and `-shortest`
     // below then ends the file with the VIDEO -- which is how the output length comes from the
@@ -1765,8 +1799,8 @@ export function buildRenderCommand(
   if (crf !== null) cmd.push("-crf", String(crf));
   if (aout) cmd.push("-c:a", "aac");
   else cmd.push("-an");
-  if (brand) cmd.push("-shortest");
-  else cmd.push("-t", Math.min(duration, options.maxDurationSec ?? Infinity).toFixed(6));
+  if (brand?.endcard) cmd.push("-shortest");
+  else cmd.push("-t", Math.min(outDuration, options.maxDurationSec ?? Infinity).toFixed(6));
   // An export's staging name carries no extension for ffmpeg to pick the container from.
   if (!/\.mp4$/i.test(outPath)) cmd.push("-f", "mp4");
   cmd.push(outPath);
@@ -1778,8 +1812,8 @@ export function buildRenderCommand(
     assFiles,
     fonts: [...usedFontFiles],
     stillImages: [...new Set(inputs.filter((i) => i.isImage).map((i) => i.path))],
-    // Only a branded export pads its audio (through the end card); `brand` is null otherwise.
-    audioMustSpanVideo: brand !== null && aout !== null,
+    // Only an export with an end card pads its audio (through the card).
+    audioMustSpanVideo: !!brand?.endcard && aout !== null,
     output: { width: ow, height: oh, fps: outFps },
     frame: false,
     sources: inputs.map((i) => ({ clipId: i.clipId, path: i.path })),
@@ -2114,6 +2148,22 @@ async function prepareRender(
   kind: "deliverable" | "working",
   options: ExportOptions = {},
 ): Promise<{ ok: false; result: Result } | { ok: true; plan: RenderPlan; branding?: Branding }> {
+  const r = await loadForRender(ctx, kind);
+  if (!r.ok) return r;
+  const plan = buildRenderCommand(r.seconds, outPath, { ...options, branding: r.branding });
+  if (r.warnings.length) plan.warnings.push(...r.warnings);
+  return { ok: true, plan, ...(r.branding ? { branding: r.branding } : {}) };
+}
+
+/** The timeline as a render reads it, once: validated, its media resolved, branding measured.
+ *  Several plans may be built from one load (a clip each), all from the same snapshot. */
+export async function loadForRender(
+  ctx: ClientToolContext,
+  kind: "deliverable" | "working",
+): Promise<
+  | { ok: false; result: Result }
+  | { ok: true; seconds: Timeline; branding?: Branding; warnings: string[] }
+> {
   let raw: Timeline;
   try {
     raw = await loadTimeline(ctx.store);
@@ -2168,10 +2218,7 @@ async function prepareRender(
     branding = b.branding ?? undefined;
     if (b.warning) extraWarnings.push(b.warning);
   }
-
-  const plan = buildRenderCommand(seconds, outPath, { ...options, branding });
-  if (extraWarnings.length) plan.warnings.push(...extraWarnings);
-  return { ok: true, plan, ...(branding ? { branding } : {}) };
+  return { ok: true, seconds, warnings: extraWarnings, ...(branding ? { branding } : {}) };
 }
 
 /** Run a prepared plan and validate the encoded artifact before any caller may commit it. */
@@ -2368,8 +2415,12 @@ const RESERVED_DEVICE_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
  *  `exportStem.property.test.ts` fuzzes both directions. */
 export function exportStem(raw: string, fallback: string): string {
   const base = raw.replace(/\\/g, "/").split("/").pop() ?? ""; // drop any directory part
-  const cleaned = base
-    .replace(/\.[^.]+$/, "") // strip a trailing extension
+  return safeName(base.replace(/\.[^.]+$/, ""), fallback); // strip a trailing extension
+}
+
+/** {@link exportStem} for a name with no extension to strip: a folder, or a stem already cut. */
+export function safeName(raw: string, fallback: string): string {
+  const cleaned = raw
     // Separators, the Windows-reserved set, C0/C1 controls, and the invisible
     // zero-width/bidi characters used to disguise one filename as another.
     .replace(
@@ -2388,6 +2439,59 @@ export function exportStem(raw: string, fallback: string): string {
     .trim();
   if (!bounded || RESERVED_DEVICE_NAME.test(bounded)) return fallback;
   return bounded;
+}
+
+/** Where an `output_dir` is: a folder NAME inside Downloads, or an absolute path as given. Nothing
+ *  is created here; the caller makes the folder only once everything else about the call is valid. */
+export async function exportFolder(
+  store: Pick<ProjectStoreAccess, "downloadDir" | "artifactPath" | "exists" | "isDirectory">,
+  raw: unknown,
+): Promise<{ ok: true; dir: string; label: string } | { ok: false; error: string }> {
+  const s = typeof raw === "string" ? raw.trim() : "";
+  const root = (await store.downloadDir()) ?? store.artifactPath("exports");
+  if (!s) return { ok: true, dir: root, label: "your Downloads folder" };
+  if (isAbsolutePath(s)) {
+    const dir = s.replace(/\\/g, "/").replace(/(.)\/+$/, "$1");
+    if ((await store.exists(dir).catch(() => false)) && !(await store.isDirectory(dir)))
+      return { ok: false, error: `output_dir '${s}' is a file, not a folder.` };
+    return { ok: true, dir, label: dir };
+  }
+  if (/[\\/]/.test(s))
+    return {
+      ok: false,
+      error: `output_dir must be a folder name, which is made inside Downloads, or an absolute path (got '${s}').`,
+    };
+  const name = safeName(s, "");
+  if (!name) return { ok: false, error: `output_dir '${s}' is not a usable folder name.` };
+  return { ok: true, dir: joinPath(root, name), label: `'${name}' in your Downloads folder` };
+}
+
+/** A name in `dir` that no file has and this call has not handed out: "stem.ext", then
+ *  "stem 2.ext"... Compared without case, as Windows and macOS compare names. */
+export async function freeName(
+  store: Pick<ProjectStoreAccess, "exists">,
+  dir: string,
+  stem: string,
+  ext: string,
+  taken: Set<string>,
+): Promise<{ filename: string; path: string }> {
+  for (let n = 1; n <= 999; n++) {
+    const filename = n === 1 ? `${stem}${ext}` : `${stem} ${n}${ext}`;
+    const path = joinPath(dir, filename);
+    if (taken.has(path.toLowerCase())) continue;
+    if (await store.exists(path).catch(() => false)) continue;
+    taken.add(path.toLowerCase());
+    return { filename, path };
+  }
+  const filename = `${stem} ${Date.now()}${ext}`;
+  return { filename, path: joinPath(dir, filename) };
+}
+
+/** Where a deliverable is written before it is renamed into place: hidden, and without a video
+ *  extension, so a partial a crash leaves cannot pass for a finished file (UJ-022). */
+export function stagingPathFor(destPath: string): string {
+  const slash = Math.max(destPath.lastIndexOf("/"), destPath.lastIndexOf("\\"));
+  return `${destPath.slice(0, slash + 1)}.${destPath.slice(slash + 1)}.${Math.random().toString(36).slice(2, 8)}.partial`;
 }
 
 export type ExportDest =
@@ -2476,7 +2580,7 @@ export async function exportDestination(
  *  Deleting a source you have stopped using is ordinary housekeeping, so this refused a render
  *  it could have completed perfectly. `timeline` null (unreadable) falls back to checking
  *  everything — a preflight that cannot read the timeline should not go quiet. */
-async function offlineSources(
+export async function offlineSources(
   ctx: ClientToolContext,
   timeline: Timeline | null,
 ): Promise<string[]> {
@@ -2532,6 +2636,25 @@ export async function exportTimelineTool(
     outputPath: args.output_path,
   });
   if (!dest.ok) return dest;
+  // A named folder holds the one file under the default name, numbered past any already there.
+  const dirArg = typeof args.output_dir === "string" ? args.output_dir.trim() : "";
+  let folder: { dir: string; label: string } | null = null;
+  if (dirArg) {
+    if (typeof args.output_path === "string" && args.output_path.trim())
+      return {
+        ok: false,
+        error: "pass output_dir for a folder or output_path for one file, not both.",
+      };
+    const f = await exportFolder(ctx.store, dirArg);
+    if (!f.ok) return f;
+    folder = f;
+    const stem = exportStem(
+      String(args.name ?? args.filename ?? "").trim(),
+      defaultExportStem(ctx.store.projectDir),
+    );
+    const free = await freeName(ctx.store, f.dir, stem, ".mp4", new Set());
+    Object.assign(dest, { path: free.path, filename: free.filename, defaulted: false });
+  }
   // Media linked in place can be moved or deleted between import and export. Premiere renders
   // red "Media Offline" frames; shipping a deliverable with holes in it is worse than being told,
   // so name what is gone. Checked here rather than in runRenderPlan: preview shares that path and
@@ -2553,80 +2676,27 @@ export async function exportTimelineTool(
   // file. Built here, in the turn, because this is what can still refuse the request. Hidden and
   // without a video extension, so a partial left by a crash cannot pass for a video (UJ-022); the
   // render names the container itself (`-f mp4`) because the name no longer does.
-  const slash = Math.max(dest.path.lastIndexOf("/"), dest.path.lastIndexOf("\\"));
-  const stagePath = `${dest.path.slice(0, slash + 1)}.${dest.path.slice(slash + 1)}.${Math.random().toString(36).slice(2, 8)}.partial`;
-  const target = ctx.store.canRename ? stagePath : dest.path;
+  const target = ctx.store.canRename ? stagingPathFor(dest.path) : dest.path;
   const prepared = await prepareRender(ctx, target, "deliverable", {
     resolution: args.resolution as ExportOptions["resolution"],
     quality: args.quality as ExportOptions["quality"],
     fps: typeof args.fps === "number" ? args.fps : undefined,
   });
   if (!prepared.ok) return prepared.result;
+  if (folder) {
+    try {
+      await ctx.store.ensureDir(folder.dir);
+    } catch (e) {
+      return { ok: false, error: `could not make the folder ${folder.label}: ${String(e)}` };
+    }
+  }
 
-  // In the app, ffmpeg runs under the app process rather than the page, so the export outlives
-  // a crash of the page; the job carries what another page needs to finish it (3h part 7).
-  const jobs = await jobSupervisor();
-  const telemetry = {
-    duration_s: prepared.plan.duration,
-    width: prepared.plan.output.width,
-    height: prepared.plan.output.height,
-    fps: prepared.plan.output.fps,
-    quality: String(args.quality ?? ""),
-    project_id: ctx.store.projectDir.split(/[\\/]/).pop() ?? "",
-  };
-  const plan: ExportJobPlan = {
-    duration: prepared.plan.duration,
-    audioMustSpanVideo: prepared.plan.audioMustSpanVideo,
-    warnings: prepared.plan.warnings,
-    sources: prepared.plan.sources,
-  };
-  const submittedAt = Date.now();
-  const sub = await submitExport({
-    store: ctx.store,
+  const sub = await queueRenderJob(ctx, {
+    plan: prepared.plan,
     destPath: dest.path,
     stagePath: target,
     filename: dest.filename,
-    // Present only when the AGENT called this tool; the Export menu runs it with no origin.
-    origin: ctx.origin,
-    // Describes the artifact the plan will produce, captured here because a failed encode
-    // leaves no file to measure and the metric still has to say what was attempted.
-    meta: telemetry,
-    supervisor: jobs ?? undefined,
-    run: async (signal, jobId) => {
-      // Not bound to the turn: it is over by the time ffmpeg runs, and Stop, the next message or a
-      // project switch must not kill a render nobody cancelled. Only the queue's signal reaches it.
-      const base = ctx.detach?.() ?? ctx;
-      const runner = jobs
-        ? supervisedRunner(base.runner, jobs, {
-            id: jobId,
-            lane: "export",
-            meta: {
-              kind: "export",
-              projectDir: ctx.store.projectDir,
-              destPath: dest.path,
-              stagePath: target,
-              filename: dest.filename,
-              startedBy: ctx.origin ? "chat" : "elsewhere",
-              submittedAt,
-              plan,
-              telemetry,
-            },
-          })
-        : base.runner;
-      const detached: ClientToolContext = { ...base, runner, signal };
-      const res = (await executeRender(detached, prepared.plan, target)) as {
-        ok?: boolean;
-        error?: string;
-        stderr_tail?: string;
-        warnings?: string[];
-      };
-      if (!res.ok)
-        throw new ExportRunError(
-          String(res.error ?? "render failed"),
-          typeof res.stderr_tail === "string" ? res.stderr_tail : undefined,
-        );
-      return { warnings: res.warnings ?? [] };
-    },
+    quality: String(args.quality ?? ""),
   });
 
   // Don't leak the OS Downloads path to the model — return only the filename. When the caller
@@ -2639,7 +2709,12 @@ export async function exportTimelineTool(
     ? `The ArtDaddy watermark and end card are always added to an export: this file runs ` +
       `${total.toFixed(1)} s, ${(total - card).toFixed(1)} s of timeline plus a ${card.toFixed(1)} s end card.`
     : "";
-  const note = [dest.defaulted ? "Saving to your Downloads folder." : "", brandNote].filter(Boolean).join(" ");
+  const where = dest.defaulted
+    ? "Saving to your Downloads folder."
+    : folder
+      ? `Saving to ${folder.label}.`
+      : "";
+  const note = [where, brandNote].filter(Boolean).join(" ");
   return {
     ok: true,
     status: sub.queue_position > 0 ? "queued" : "exporting",
@@ -2654,4 +2729,84 @@ export async function exportTimelineTool(
     warnings: prepared.plan.warnings,
     ...(note ? { note } : {}),
   };
+}
+
+/** Queue one rendered deliverable: the whole timeline, or a clip on its own. In the app, ffmpeg
+ *  runs under the app process rather than the page, so the export outlives a crash of the page;
+ *  the job carries what another page needs to finish it (3h part 7). */
+export async function queueRenderJob(
+  ctx: ClientToolContext,
+  job: {
+    plan: RenderPlan;
+    destPath: string;
+    stagePath: string;
+    filename: string;
+    quality: string;
+    batch?: string;
+  },
+): Promise<ExportSubmission> {
+  const jobs = await jobSupervisor();
+  const telemetry = {
+    duration_s: job.plan.duration,
+    width: job.plan.output.width,
+    height: job.plan.output.height,
+    fps: job.plan.output.fps,
+    quality: job.quality,
+    project_id: ctx.store.projectDir.split(/[\\/]/).pop() ?? "",
+  };
+  const plan: ExportJobPlan = {
+    duration: job.plan.duration,
+    audioMustSpanVideo: job.plan.audioMustSpanVideo,
+    warnings: job.plan.warnings,
+    sources: job.plan.sources,
+  };
+  const submittedAt = Date.now();
+  return submitExport({
+    store: ctx.store,
+    destPath: job.destPath,
+    stagePath: job.stagePath,
+    filename: job.filename,
+    // Present only when the AGENT called this tool; the Export menu runs it with no origin.
+    origin: ctx.origin,
+    // Describes the artifact the plan will produce, captured here because a failed encode
+    // leaves no file to measure and the metric still has to say what was attempted.
+    meta: telemetry,
+    supervisor: jobs ?? undefined,
+    ...(job.batch ? { batch: job.batch } : {}),
+    run: async (signal, jobId) => {
+      // Not bound to the turn: it is over by the time ffmpeg runs, and Stop, the next message or a
+      // project switch must not kill a render nobody cancelled. Only the queue's signal reaches it.
+      const base = ctx.detach?.() ?? ctx;
+      const runner = jobs
+        ? supervisedRunner(base.runner, jobs, {
+            id: jobId,
+            lane: "export",
+            meta: {
+              kind: "export",
+              projectDir: ctx.store.projectDir,
+              destPath: job.destPath,
+              stagePath: job.stagePath,
+              filename: job.filename,
+              startedBy: ctx.origin ? "chat" : "elsewhere",
+              submittedAt,
+              plan,
+              telemetry,
+            },
+          })
+        : base.runner;
+      const detached: ClientToolContext = { ...base, runner, signal };
+      const res = (await executeRender(detached, job.plan, job.stagePath)) as {
+        ok?: boolean;
+        error?: string;
+        stderr_tail?: string;
+        warnings?: string[];
+      };
+      if (!res.ok)
+        throw new ExportRunError(
+          String(res.error ?? "render failed"),
+          typeof res.stderr_tail === "string" ? res.stderr_tail : undefined,
+        );
+      return { warnings: res.warnings ?? [] };
+    },
+  });
 }
