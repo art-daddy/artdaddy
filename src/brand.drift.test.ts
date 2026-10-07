@@ -48,8 +48,9 @@ describe("the app's names have one source of truth", () => {
     expect(conf.bundle.externalBin).toContain(bin);
     expect(conf.bundle.resources).toContain(`resources/${IDENTITY.sidecarPrefix}-browser.mjs`);
 
+    // The capability file no longer names sidecars: the app's runner (sidecar_run) accepts exactly
+    // the externalBin list above, and the page holds no shell grant (capabilities.test.ts).
     const named = JSON.stringify(readJson("src-tauri/capabilities/default.json"));
-    expect(named).toContain(`"${bin}"`);
     // The legacy sidecar name, kept deliberately: this guard exists to prove no capability or
     // config still names it. Renaming it to the CURRENT prefix empties the filter and the loop
     // asserts nothing at all.
