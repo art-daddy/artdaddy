@@ -697,18 +697,25 @@ describe("manage_exports", () => {
 
   // A finished export is not a failure to report ΓÇö the file is on disk.
   it("says plainly that a finished export cannot be cancelled", async () => {
-    const { store } = make();
+    const { fs, store } = make();
+    // The run must really deliver: an encode that writes nothing FAILS at commit, and this test
+    // passed on such a run for as long as every late cancel was answered "already finished".
     const sub = await submitExport({
       store,
       destPath: DEST,
       stagePath: STAGE,
       filename: "final.mp4",
-      run: async () => ({}),
+      run: async () => {
+        await fs.writeBytes(STAGE, new Uint8Array([1]));
+        return {};
+      },
     });
     await whenExportsSettle();
+    expect(await fs.exists(DEST)).toBe(true);
     const r = (await manageExportsTool({ action: "cancel", job_id: sub.job_id })) as Any;
     expect(r.ok).toBe(true);
     expect(r.cancelled).toBe(false);
+    expect(r.state).toBe("done");
     expect(String(r.note)).toContain("already finished");
   });
 
@@ -719,7 +726,52 @@ describe("manage_exports", () => {
 
   it("cancelling an id that never existed is refused, not silently claimed", async () => {
     const r = (await manageExportsTool({ action: "cancel", job_id: "nope" })) as Any;
-    expect(r.cancelled).toBe(false);
+    expect(r.ok).toBe(false);
+    expect(r.cancelled).not.toBe(true);
+    expect(String(r.error)).toMatch(/no export/i);
+    expect(JSON.stringify(r)).not.toMatch(/finished/);
+  });
+
+  // QA 2026-10-07: a second cancel of an export the first had stopped answered "that export had
+  // already finished" — telling the agent a file was delivered when none was. Every settled state
+  // must be named as what it is.
+  it("says a cancelled export was cancelled, and a failed one failed — never that it finished", async () => {
+    const { store } = make();
+    let started!: () => void;
+    const running = new Promise<void>((r) => (started = r));
+    const stopped = await submitExport({
+      store,
+      destPath: DEST,
+      stagePath: STAGE,
+      filename: "final.mp4",
+      run: async (signal) => {
+        started();
+        await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve()));
+        throw new Error("ffmpeg killed");
+      },
+    });
+    await running;
+    expect(((await manageExportsTool({ action: "cancel", job_id: stopped.job_id })) as Any).cancelled).toBe(true);
+    await whenExportsSettle();
+    const again = (await manageExportsTool({ action: "cancel", job_id: stopped.job_id })) as Any;
+    expect(again).toMatchObject({ ok: true, cancelled: false, state: "cancelled" });
+    expect(String(again.note)).toMatch(/already cancelled/);
+    expect(String(again.note)).not.toMatch(/finished/);
+
+    const failed = await submitExport({
+      store,
+      destPath: "C:/out/boom.mp4",
+      stagePath: "C:/out/boom.mp4.part",
+      filename: "boom.mp4",
+      run: async () => {
+        throw new Error("ffmpeg render failed (code=-28): No space left on device");
+      },
+    });
+    await whenExportsSettle();
+    const late = (await manageExportsTool({ action: "cancel", job_id: failed.job_id })) as Any;
+    expect(late).toMatchObject({ ok: true, cancelled: false, state: "failed" });
+    expect(String(late.note)).toMatch(/already failed/);
+    expect(String(late.note)).not.toMatch(/finished/);
   });
 
   it("persists ffmpeg diagnostics when validation refuses the staged artifact", async () => {

@@ -1,6 +1,6 @@
 {
   "$schema_note": "Generated from the live tool registry (v4/tools/catalog.py) - do not hand-edit; refresh with `npm run codegen`.",
-  "version": "2.8.0",
+  "version": "2.8.1",
   "generated_from": "src/akaru/turn/tools/definitions.py::ALL_TOOLS",
   "count": 55,
   "tools": [
@@ -2103,7 +2103,7 @@
     {
       "name": "manage_exports",
       "expensive": false,
-      "description": "List exports and their outcomes, or cancel one that has not finished. Exports are queued: `export` returns a `job_id` and the render continues in the background.\n\naction 'list' (default) returns {ok, exports:[{job_id, filename, state, media_ref?, error?, warnings?, duration_s?}]} for EVERY export this session, including finished ones. state is 'running' (encoding now), 'queued' (waiting its turn), 'done', 'failed' or 'cancelled'. A 'failed' row carries the `error` explaining why. This is the ONLY way to learn how a background export ended, so check it before telling the user their file is ready — an export that started successfully can still fail.\n\nA 'done' row carries `media_ref` for the delivered file, which is registered in the library: pass it to inspect_media to look at what actually shipped, rather than at the timeline it was rendered from.\n\naction 'cancel' needs `job_id` and stops that export: the partly written file is discarded and any file already at the destination is left untouched. Returns {ok, cancelled:true|false}; `false` means that job had already finished, which is not an error — a completed export cannot be recalled.\n\nUse it when the user asks what is still rendering, or asks to stop an export, or to check whether a job you started earlier has finished.",
+      "description": "List exports and their outcomes, or cancel one that has not finished. Exports are queued: `export` returns a `job_id` and the render continues in the background.\n\naction 'list' (default) returns {ok, exports:[{job_id, filename, state, media_ref?, error?, warnings?, duration_s?}]} for EVERY export this session, including finished ones. state is 'running' (encoding now), 'queued' (waiting its turn), 'done', 'failed' or 'cancelled'. A 'failed' row carries the `error` explaining why. This is the ONLY way to learn how a background export ended, so check it before telling the user their file is ready — an export that started successfully can still fail.\n\nA 'done' row carries `media_ref` for the delivered file, which is registered in the library: pass it to inspect_media to look at what actually shipped, rather than at the timeline it was rendered from.\n\naction 'cancel' needs `job_id` and stops that export: the partly written file is discarded and any file already at the destination is left untouched. Returns {ok, cancelled:true|false}. `false` means that job had already ended, and `state` says how: 'done' (the file was delivered), 'failed' or 'cancelled'. That is not an error; an ended export cannot be recalled. A job_id this session never started is refused (ok:false).\n\nUse it when the user asks what is still rendering, or asks to stop an export, or to check whether a job you started earlier has finished.",
       "parameters": {
         "type": "object",
         "properties": {

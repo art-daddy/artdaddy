@@ -356,9 +356,15 @@ const PHRASES: Record<string, Phrase> = {
     bare: "check on exports",
     ing: "Checking exports",
     done: (a, r) => {
-      if (a.action === "cancel")
-        return r.cancelled ? "Cancelled the export" : "That export had already finished";
-      const n = Array.isArray(r.exports) ? r.exports.length : 0;
+      if (a.action === "cancel") {
+        if (r.cancelled) return "Cancelled the export";
+        if (r.state === "cancelled") return "That export was already cancelled";
+        if (r.state === "failed") return "That export had already failed";
+        return "That export had already finished";
+      }
+      // `list` carries settled rows too; only the unfinished ones are running.
+      const rows = Array.isArray(r.exports) ? (r.exports as Array<{ state?: unknown }>) : [];
+      const n = rows.filter((x) => x.state === "running" || x.state === "queued").length;
       return n ? `${plural(n, "export")} still running` : "No exports running";
     },
   },

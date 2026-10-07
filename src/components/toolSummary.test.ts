@@ -160,6 +160,21 @@ describe("what the line counts", () => {
     expect(call("manage_exports", { action: "cancel" }, { ok: true, cancelled: false }).text).toBe(
       "That export had already finished",
     );
+    // ...but it must say which way it ended: a second cancel is not a delivered file.
+    const late = (state: string) =>
+      call("manage_exports", { action: "cancel" }, { ok: true, cancelled: false, state }).text;
+    expect(late("done")).toBe("That export had already finished");
+    expect(late("cancelled")).toBe("That export was already cancelled");
+    expect(late("failed")).toBe("That export had already failed");
+    // `list` returns settled rows too; only the unfinished ones are "still running".
+    const rows = (...states: string[]) => ({
+      ok: true,
+      exports: states.map((state, i) => ({ job_id: `j${i}`, state })),
+    });
+    expect(call("manage_exports", { action: "list" }, rows("done")).text).toBe("No exports running");
+    expect(call("manage_exports", { action: "list" }, rows("running", "done", "queued")).text).toBe(
+      "2 exports still running",
+    );
   });
 
   it("names the site rather than the whole URL", () => {

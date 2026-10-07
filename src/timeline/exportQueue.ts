@@ -210,6 +210,13 @@ export function cancelExport(jobId: string): boolean {
   return true;
 }
 
+/** Why a cancel found nothing to stop, by how the export had already ended. */
+const NOTHING_TO_CANCEL: Partial<Record<ExportState, string>> = {
+  done: "that export had already finished; nothing to cancel",
+  failed: "that export had already failed; nothing to cancel",
+  cancelled: "that export was already cancelled",
+};
+
 /** manage_exports: the only route to cancellation. Without it an async export could be started
  *  and never stopped, which is a capability the synchronous version had. */
 export async function manageExportsTool(
@@ -222,14 +229,18 @@ export async function manageExportsTool(
 
   const jobId = String(args.job_id ?? "").trim();
   if (!jobId) return { ok: false, error: "job_id is required to cancel an export" };
-  const cancelled = cancelExport(jobId);
-  return {
-    ok: true,
-    cancelled,
-    // Not an error: the export finished before the request arrived, and saying so plainly
-    // stops the model reporting a failure for a file that is sitting on disk.
-    ...(cancelled ? {} : { note: "that export had already finished; nothing to cancel" }),
-  };
+  if (cancelExport(jobId)) return { ok: true, cancelled: true };
+  const record = records.find((r) => r.job_id === jobId);
+  if (!record)
+    return {
+      ok: false,
+      error: `no export with job_id '${jobId}' in this session; manage_exports action='list' shows them`,
+    };
+  // Not an error: the export ended before the request arrived. Say HOW it ended — "finished" for
+  // a run that was cancelled or failed told the agent a file was delivered when none was (QA
+  // 2026-10-07), and "failed" for one sitting on disk would send it hunting for a fault.
+  const note = NOTHING_TO_CANCEL[record.state];
+  return { ok: true, cancelled: false, state: record.state, ...(note ? { note } : {}) };
 }
 
 export interface ExportSubmission {
