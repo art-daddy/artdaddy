@@ -272,6 +272,21 @@ describe("a clip exported on its own is the whole export over its span", () => {
   it("a span that starts and ends on odd frames, inside clips", async () => {
     await expectSpanOfWhole(whole, tl, 143, 211, "odd");
   });
+
+  // The ducker dropped whatever it still held of the music when the music ended before its padded
+  // key caught up, and how much it held depended on thread timing: run beside the rest of this
+  // suite, 3 of 20 whole exports came out 2832 samples short (2026-10-07). Many at once here, so
+  // the timing varies; every one must hold exactly the timeline's sound.
+  it("the whole export's sound is exactly the timeline's length, however many render at once", async () => {
+    const want = (390 / FPS) * RATE * 2 * 2; // stereo s16
+    const lengths = await Promise.all(
+      Array.from(
+        { length: 16 },
+        async (_, i) => (await decoded(await renderLossless(tl, `again${i}`))).pcm.length,
+      ),
+    );
+    expect(lengths).toEqual(lengths.map(() => want));
+  }, 300_000);
 });
 
 const BRAND_DIR = path.resolve(process.cwd(), "src-tauri/resources/brand");

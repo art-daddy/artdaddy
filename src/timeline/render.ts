@@ -1695,9 +1695,16 @@ export function buildRenderCommand(
         // sidechaincompress refuses mismatched inputs, and each chain above ends in whatever the
         // source happened to be — so normalise BOTH sides rather than hoping they agree. It also
         // ends when its KEY ends, which cut the music at the last voice clip; a padded key is silence.
-        chains.push(`[${mixLabels[i]}]${SC_FMT}[dm${i}]`, `[${key}]${SC_FMT},apad[dk${i}f]`);
+        // And it drops what it still holds of its MAIN when the main ends before the key catches up,
+        // by an amount thread timing decides (3 of 20 exports of one timeline lost 2832 samples,
+        // 2026-10-07): the padded main moves that loss into silence, and the trim restores its end.
+        const end = (r.tin + r.tlSpan).toFixed(6);
         chains.push(
-          `[dm${i}][dk${i}f]sidechaincompress=threshold=${threshold}:ratio=${ratio}:attack=20:release=250:level_sc=1[d${i}]`,
+          `[${mixLabels[i]}]${SC_FMT},apad=pad_dur=1[dm${i}]`,
+          `[${key}]${SC_FMT},apad[dk${i}f]`,
+        );
+        chains.push(
+          `[dm${i}][dk${i}f]sidechaincompress=threshold=${threshold}:ratio=${ratio}:attack=20:release=250:level_sc=1,atrim=end=${end}[d${i}]`,
         );
         mixLabels[i] = `d${i}`;
       }
