@@ -58,6 +58,39 @@ fn remove_file(path: String) -> Result<(), String> {
   }
 }
 
+/// Let the preview read a project's folder or a file its library links (UJ-027). The asset
+/// protocol's static scope is the app's data folder and the home folder, so footage on a second
+/// drive or a camera card, or a project kept there, played black after every restart. The page
+/// asks from its one URL door (preview/resolve.ts), once per path per run. The fs scope is already
+/// the whole disk, so this gives the page nothing it could not read anyway.
+#[tauri::command]
+fn allow_preview_path(app: tauri::AppHandle, path: String, directory: bool) -> Result<(), String> {
+  use tauri::Manager;
+  let p = std::path::Path::new(&path);
+  preview_grant_check(p, directory)?;
+  let scope = app.asset_protocol_scope();
+  if directory {
+    scope.allow_directory(p, true)
+  } else {
+    scope.allow_file(p)
+  }
+  .map_err(|e| e.to_string())
+}
+
+/// What may be opened to the preview: an existing file, or an existing folder that is not a root.
+fn preview_grant_check(p: &std::path::Path, directory: bool) -> Result<(), String> {
+  if !p.is_absolute() {
+    return Err(format!("not an absolute path: {}", p.display()));
+  }
+  let meta = std::fs::metadata(p).map_err(|e| format!("{}: {e}", p.display()))?;
+  match (directory, meta.is_dir()) {
+    (true, true) if p.parent().is_some() => Ok(()),
+    (true, true) => Err(format!("refusing a whole drive: {}", p.display())),
+    (false, false) if meta.is_file() => Ok(()),
+    _ => Err(format!("not a {}: {}", if directory { "folder" } else { "file" }, p.display())),
+  }
+}
+
 /// Everything the importer needs to know about a media file WITHOUT the webview ever
 /// holding it: the content-hash id, the size, and enough leading bytes to check the
 /// header. Reading a 1 GB file through `arrayBuffer()` killed the renderer outright.
@@ -347,6 +380,7 @@ pub fn run() {
       kill_process_tree,
       commit_file,
       remove_file,
+      allow_preview_path,
       probe_media_file,
       read_file_head,
       read_file_range,
@@ -382,6 +416,7 @@ pub fn run() {
     kill_process_tree,
     commit_file,
     remove_file,
+    allow_preview_path,
     probe_media_file,
     read_file_head,
     read_file_range,
@@ -940,6 +975,48 @@ mod tests {
     let mut p = std::env::temp_dir();
     p.push(format!("artdaddy_trash_test_{tag}_{nanos}"));
     p
+  }
+
+  /// What the preview may be opened to (UJ-027): only what exists, in the kind asked for, and
+  /// never a whole drive.
+  mod preview_grant {
+    use super::super::preview_grant_check;
+    use super::scratch;
+    use std::path::Path;
+
+    #[test]
+    fn an_existing_file_and_an_existing_folder_may_be_opened() {
+      let dir = scratch("grant_dir");
+      std::fs::create_dir_all(dir.join("internals")).unwrap();
+      let file = dir.join("C0001.MP4");
+      std::fs::write(&file, b"x").unwrap();
+      assert_eq!(preview_grant_check(&file, false), Ok(()));
+      assert_eq!(preview_grant_check(&dir, true), Ok(()));
+      // Forward slashes, as the page sends them on Windows too.
+      let fwd = file.to_string_lossy().replace('\\', "/");
+      assert_eq!(preview_grant_check(Path::new(&fwd), false), Ok(()));
+      std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_wrong_kind_a_missing_path_or_a_relative_one_is_refused() {
+      let dir = scratch("grant_kind");
+      std::fs::create_dir_all(&dir).unwrap();
+      let file = dir.join("a.mp4");
+      std::fs::write(&file, b"x").unwrap();
+      assert!(preview_grant_check(&file, true).is_err(), "a file opened as a folder");
+      assert!(preview_grant_check(&dir, false).is_err(), "a folder opened as a file");
+      assert!(preview_grant_check(&dir.join("gone.mp4"), false).is_err());
+      assert!(preview_grant_check(Path::new("library/a.mp4"), false).is_err());
+      std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_whole_drive_is_never_opened() {
+      let root = if cfg!(windows) { Path::new("C:\\") } else { Path::new("/") };
+      let err = preview_grant_check(root, true).expect_err("a root must be refused");
+      assert!(err.contains("whole drive"), "{err}");
+    }
   }
 
   mod read_head {

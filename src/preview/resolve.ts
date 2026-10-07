@@ -5,7 +5,7 @@
 // identical files. Results are cached per (projectDir, source). Main-thread only
 // (needs the store + Tauri api); the worker receives already-resolved URLs.
 import type { ProjectStoreAccess } from "../tools/store";
-import { joinPath } from "../tools/store";
+import { INTERNAL_DIR, joinPath } from "../tools/store";
 import { extAlternation, needsPreviewProxy } from "../media/formats";
 import { parsePackIndex } from "../media/stillFrames";
 import { animIndexRel, animPackRel, imageProxyRel, posterRel, proxyRel } from "./proxyPaths";
@@ -23,6 +23,49 @@ let convertAsset: AssetUrlConverter = async (p) => {
 /** DI hook (tests / future web adapter): override how an absolute path becomes a URL. */
 export function setAssetUrlConverter(fn: AssetUrlConverter): void {
   convertAsset = fn;
+}
+
+/** Widens the asset protocol's scope to one file, or to a folder and everything in it. */
+export type AssetAccessGrant = (path: string, directory: boolean) => Promise<void>;
+
+let grantAccess: AssetAccessGrant = async (path, directory) => {
+  const { invoke } = await import("@tauri-apps/api/core");
+  await invoke("allow_preview_path", { path, directory });
+};
+
+/** DI hook (tests): override how the preview is given access to a file. */
+export function setAssetAccessGrant(fn: AssetAccessGrant): void {
+  grantAccess = fn;
+}
+
+// What this run has opened. The scope lives in the Rust process, so a cleared URL cache does not
+// close anything and nothing here needs asking twice.
+const opened = new Set<string>();
+
+/** Test hook. */
+export function _resetAssetAccess(): void {
+  opened.clear();
+}
+
+async function openToPreview(path: string, directory: boolean): Promise<void> {
+  const key = `${directory}\u0000${path}`;
+  if (opened.has(key)) return;
+  try {
+    await grantAccess(path, directory);
+    opened.add(key);
+  } catch (e) {
+    // Best-effort: the URL still goes out, and inside the static scope it plays anyway.
+    console.warn(`[resolve] could not open ${path} to the preview`, e);
+  }
+}
+
+/** The library is the gate (UJ-027). The asset protocol serves only the app's data folder and the
+ *  home folder by itself, so footage on a second drive or a camera card, or a project kept there,
+ *  played black after every restart. What the open project holds is opened before its URL goes
+ *  out: its own folder (library copies, the cache, renders) or a file its library links. */
+async function openIfHeld(store: ProjectStoreAccess, abs: string): Promise<void> {
+  if (store.resolveWritable(abs) !== null) await openToPreview(store.projectDir, true);
+  else if (await store.linksFile(abs)) await openToPreview(abs, false);
 }
 
 const PASSTHROUGH = /^(https?|blob|data|asset|tauri):/i;
@@ -51,9 +94,16 @@ export async function resolveSourceUrl(
   if (cached !== undefined) return cached;
   const abs = await store.resolveRef(s);
   if (!abs) return null;
+  await openIfHeld(store, abs);
   const url = await convertAsset(abs);
   cache.set(key, url);
   return url;
+}
+
+/** The thumbnail the project picker shows for the project at `projectDir`. */
+export async function projectThumbnailUrl(projectDir: string): Promise<string> {
+  await openToPreview(projectDir, true);
+  return convertAsset(joinPath(projectDir, INTERNAL_DIR, "thumbnail.jpg"));
 }
 
 /** Drop cached resolutions (e.g. after media is re-imported). */

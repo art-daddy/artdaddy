@@ -418,6 +418,15 @@ export class ProjectStoreAccess {
     return this.toRef(s);
   }
 
+  /** True when the library links `abs` from outside the project (an EXTERNAL entry): the files
+   *  besides the project's own folder that the preview may read, wherever they live (UJ-027). */
+  async linksFile(abs: string): Promise<boolean> {
+    const s = normSep(abs);
+    return (await this.listClips()).some(
+      (c) => c.external === true && clipAbs(this.projectDir, c) === s,
+    );
+  }
+
   /** Where a tool writes a regeneratable output (mirrors ProjectStore.artifact_path -> <internal>/cache/). */
   artifactPath(rel: string): string {
     return joinPath(this.projectDir, INTERNAL_DIR, "cache", rel);

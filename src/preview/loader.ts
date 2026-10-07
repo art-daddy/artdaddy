@@ -1,6 +1,5 @@
-// Load a clip source into an ImageBitmap + its dimensions. A source is fetched
-// as a URL; on Tauri desktop a local filesystem path is first converted to an
-// asset URL the webview can fetch. Video-frame decode is a later slice.
+// Load an image URL into an ImageBitmap + its dimensions. The main thread turns every file into a
+// URL (preview/resolve.ts, which first opens it to the preview); the worker only ever gets URLs.
 // Browser-only (fetch + createImageBitmap); excluded from unit coverage.
 import type { AssetDims } from "./scene";
 
@@ -9,21 +8,9 @@ export interface LoadedImage {
   dims: AssetDims;
 }
 
-/** Resolve a clip source to a URL the webview can fetch. */
-export async function sourceToUrl(source: string): Promise<string> {
-  if (/^(https?|blob|data|asset|tauri):/i.test(source)) return source;
-  try {
-    const { convertFileSrc } = await import("@tauri-apps/api/core");
-    return convertFileSrc(source);
-  } catch {
-    return source; // web without a server asset route -> best-effort
-  }
-}
-
-export async function loadImage(source: string): Promise<LoadedImage> {
-  const url = await sourceToUrl(source);
+export async function loadImage(url: string): Promise<LoadedImage> {
   const resp = await fetch(url);
-  if (!resp.ok) throw new Error(`asset fetch failed (${resp.status}) for ${source}`);
+  if (!resp.ok) throw new Error(`asset fetch failed (${resp.status}) for ${url}`);
   const bitmap = await createImageBitmap(await resp.blob());
   return { bitmap, dims: { w: bitmap.width, h: bitmap.height } };
 }

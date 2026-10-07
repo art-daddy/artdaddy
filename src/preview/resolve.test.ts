@@ -1,24 +1,41 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { ProjectStoreAccess } from "../tools/store";
+import { joinPath, ProjectStoreAccess, type FsLike } from "../tools/store";
 import {
+  _resetAssetAccess,
   clearSourceUrlCache,
+  projectThumbnailUrl,
   resolvePosterUrl,
   resolvePreviewUrl,
   resolveSourceUrl,
+  setAssetAccessGrant,
   setAssetUrlConverter,
 } from "./resolve";
 import { posterRel, proxyRel } from "./proxyPaths";
 import { shortHash } from "../tools/media";
 
+/** The store's own containment and library rules, over an empty disk (these fakes mock resolveRef). */
+const NO_DISK = { exists: async () => false } as unknown as FsLike;
+const REAL = new ProjectStoreAccess("/proj", NO_DISK);
+const rules = {
+  resolveWritable: (p: string) => REAL.resolveWritable(p),
+  linksFile: (p: string) => REAL.linksFile(p),
+};
+
 function storeWith(fn: (ref: string) => Promise<string | null>) {
   const resolveRef = vi.fn(fn);
-  const store = { projectDir: "/proj", resolveRef } as unknown as ProjectStoreAccess;
+  const store = { projectDir: "/proj", resolveRef, ...rules } as unknown as ProjectStoreAccess;
   return { store, resolveRef };
 }
 
+let grants: Array<[string, boolean]> = [];
 beforeEach(() => {
   clearSourceUrlCache();
+  _resetAssetAccess();
+  grants = [];
+  setAssetAccessGrant(async (path, directory) => {
+    grants.push([path, directory]);
+  });
   setAssetUrlConverter((p) => `asset://${p}`);
 });
 
@@ -66,7 +83,12 @@ describe("resolveSourceUrl", () => {
 function previewStore(existsFn: (p: string) => boolean, refFn: (ref: string) => string | null) {
   const exists = vi.fn(async (p: string) => existsFn(p));
   const resolveRef = vi.fn(async (ref: string) => refFn(ref));
-  const store = { projectDir: "/proj", exists, resolveRef } as unknown as ProjectStoreAccess;
+  const store = {
+    projectDir: "/proj",
+    exists,
+    resolveRef,
+    ...rules,
+  } as unknown as ProjectStoreAccess;
   return { store, exists, resolveRef };
 }
 
@@ -150,7 +172,7 @@ describe("resolvePreviewUrl", () => {
     const exists = vi.fn(async (p: string) => p.startsWith("/a/"));
     const resolveRef = vi.fn(async (r: string) => r);
     const mk = (dir: string) =>
-      ({ projectDir: dir, exists, resolveRef }) as unknown as ProjectStoreAccess;
+      Object.assign(new ProjectStoreAccess(dir, NO_DISK), { exists, resolveRef });
     const src = "inputs/uploads/a.mp4";
 
     expect(await resolvePreviewUrl(mk("/a"), src)).toBe(`asset:///a/${proxyRel(src)}`);
@@ -206,5 +228,122 @@ describe("resolvePosterUrl", () => {
     );
     expect(await resolvePreviewUrl(store, src)).toBe(`asset:///proj/${proxyRel(src)}`);
     expect(await resolvePosterUrl(store, src)).toBe(`asset:///proj/${posterRel(src)}`);
+  });
+});
+
+// The asset protocol serves only the app's data folder and the home folder by itself. Footage on a
+// second drive or a camera card - or a project kept there - was readable only on the run it was
+// picked in a dialog, black after every restart, and never for the agent's imports (UJ-027).
+describe("preview file access: the library is the gate (UJ-027)", () => {
+  const DIR = "D:/Projects/birthday_1a2b3c"; // kept on a second drive, as New Project allows
+  const CARD = "E:/DCIM/100CANON/MVI_0001.MP4";
+  const STRANGER = "E:/DCIM/100CANON/MVI_0002.MP4"; // same card, never imported
+
+  class Disk implements FsLike {
+    files = new Map<string, string>();
+    put(p: string, s = ""): void {
+      this.files.set(joinPath(p), s);
+    }
+    async exists(p: string): Promise<boolean> {
+      return this.files.has(joinPath(p));
+    }
+    async readTextFile(p: string): Promise<string> {
+      const v = this.files.get(joinPath(p));
+      if (v === undefined) throw new Error(`ENOENT ${p}`);
+      return v;
+    }
+    async writeTextFile(p: string, s: string): Promise<void> {
+      this.put(p, s);
+    }
+    async mkdir(): Promise<void> {}
+  }
+
+  function project(dir = DIR): { store: ProjectStoreAccess; disk: Disk } {
+    const disk = new Disk();
+    disk.put(
+      joinPath(dir, "internals", "library.json"),
+      JSON.stringify({
+        clips: [
+          { id: "media_card", path: CARD, external: true, filename: "MVI_0001.MP4", kind: "video" },
+          { id: "media_copy", path: "library/media_copy.mp4", kind: "video" },
+        ],
+      }),
+    );
+    for (const p of [CARD, STRANGER, joinPath(dir, "library/media_copy.mp4")]) disk.put(p);
+    disk.put(joinPath(dir, posterRel("library/media_copy.mp4")));
+    disk.put(`${dir}/../elsewhere/x.mp4`);
+    return { store: new ProjectStoreAccess(dir, disk), disk };
+  }
+
+  it("opens a linked library file BEFORE its URL is handed out", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    setAssetAccessGrant(async (path, directory) => {
+      grants.push([path, directory]);
+      await gate;
+    });
+    let url: string | null | undefined;
+    const pending = resolveSourceUrl(project().store, "media_card").then((u) => (url = u));
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    expect(grants).toEqual([[CARD, false]]);
+    expect(url, "a URL went out before the file was opened to the preview").toBeUndefined();
+    release();
+    await pending;
+    expect(url).toBe(`asset://${CARD}`);
+  });
+
+  it("opens the project's own folder once for every file in it", async () => {
+    const { store } = project();
+    await resolveSourceUrl(store, "media_copy");
+    await resolveSourceUrl(store, posterRel("library/media_copy.mp4"));
+    await resolveSourceUrl(store, joinPath(DIR, "library/media_copy.mp4"));
+    expect(grants).toEqual([[DIR, true]]);
+  });
+
+  it("opens nothing for a file the library does not link, even next to one it does", async () => {
+    const { store } = project();
+    // Today's answer stands for such a file: a URL, which the static scope then judges.
+    expect(await resolveSourceUrl(store, STRANGER)).toBe(`asset://${STRANGER}`);
+    // A `..` out of the project is not the project's folder.
+    expect(await resolveSourceUrl(store, `${DIR}/../elsewhere/x.mp4`)).not.toBeNull();
+    expect(grants).toEqual([]);
+  });
+
+  it("asks again after a grant fails, still hands out the URL, and asks once per run after", async () => {
+    let calls = 0;
+    setAssetAccessGrant(async () => {
+      calls += 1;
+      if (calls === 1) throw new Error("IPC down");
+    });
+    const { store } = project();
+    expect(await resolveSourceUrl(store, "media_card")).toBe(`asset://${CARD}`);
+    clearSourceUrlCache();
+    await resolveSourceUrl(store, "media_card");
+    expect(calls).toBe(2);
+    clearSourceUrlCache();
+    await resolveSourceUrl(store, "media_card");
+    expect(calls, "a file already opened is not asked for again in the same run").toBe(2);
+  });
+
+  it("gives another project its own folder", async () => {
+    await resolveSourceUrl(project().store, "media_copy");
+    await resolveSourceUrl(project("F:/Work/promo_9f8e7d").store, "media_copy");
+    expect(grants).toEqual([
+      [DIR, true],
+      ["F:/Work/promo_9f8e7d", true],
+    ]);
+  });
+
+  it("serves a linked file's preview proxy from the project's folder", async () => {
+    const { store, disk } = project();
+    const proxy = joinPath(DIR, proxyRel(CARD));
+    disk.put(proxy);
+    expect(await resolvePreviewUrl(store, "media_card")).toBe(`asset://${proxy}`);
+    expect(grants).toEqual([[DIR, true]]);
+  });
+
+  it("opens a listed project's folder for its thumbnail in the project picker", async () => {
+    expect(await projectThumbnailUrl(DIR)).toBe(`asset://${DIR}/internals/thumbnail.jpg`);
+    expect(grants).toEqual([[DIR, true]]);
   });
 });

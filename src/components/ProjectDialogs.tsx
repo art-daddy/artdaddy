@@ -10,6 +10,7 @@ import type { ProjectListEntry } from "../api/types";
 import { BRAND } from "../brand";
 import { confirmDestructive } from "../lib/confirm";
 import { platform } from "../platform";
+import { projectThumbnailUrl } from "../preview/resolve";
 import { useProjects } from "../store/projects";
 import { Button, cn, Overlay } from "./ui";
 
@@ -108,8 +109,7 @@ export function ProjectThumb({ path, className }: { path: string; className?: st
     let alive = true;
     void (async () => {
       try {
-        const { convertFileSrc } = await import("@tauri-apps/api/core");
-        const url = convertFileSrc(`${path}/internals/thumbnail.jpg`);
+        const url = await projectThumbnailUrl(path);
         if (alive) setSrc(url);
       } catch {
         /* web / no tauri -> placeholder */

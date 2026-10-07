@@ -235,6 +235,42 @@ describe("ProjectStoreAccess.resolveRef", () => {
   });
 });
 
+describe("ProjectStoreAccess.linksFile (the library's files outside the project, UJ-027)", () => {
+  const CARD = "E:/PRIVATE/M4ROOT/CLIP/C0001.MP4";
+
+  function linked(): { fs: MockFs; store: ProjectStoreAccess } {
+    const fs = new MockFs();
+    withLibrary(fs, [
+      { id: "media_card", path: CARD, external: true, filename: "C0001.MP4" },
+      { id: "media_copy", path: "library/media_copy.mp4" },
+    ]);
+    return { fs, store: new ProjectStoreAccess(DIR, fs) };
+  }
+
+  it("is true for a file the library links from elsewhere, whichever separators name it", async () => {
+    const { store } = linked();
+    expect(await store.linksFile(CARD)).toBe(true);
+    expect(await store.linksFile(CARD.replace(/\//g, "\\"))).toBe(true);
+  });
+
+  it("is false for anything the library does not link: a sibling, a copied entry, a stranger", async () => {
+    const { store } = linked();
+    expect(await store.linksFile("E:/PRIVATE/M4ROOT/CLIP/C0002.MP4")).toBe(false);
+    // A copied entry lives in the project's own folder; it is not a link out of it.
+    expect(await store.linksFile(joinPath(DIR, "library/media_copy.mp4"))).toBe(false);
+    expect(await store.linksFile("C:/secret/passwords.txt")).toBe(false);
+    expect(await store.linksFile("")).toBe(false);
+  });
+
+  it("is false once the entry is gone from the catalog, and when the catalog is unreadable", async () => {
+    const { fs, store } = linked();
+    withLibrary(fs, [{ id: "media_copy", path: "library/media_copy.mp4" }]);
+    expect(await store.linksFile(CARD)).toBe(false);
+    fs.set(joinPath(DIR, "internals", "library.json"), "{bad json");
+    expect(await store.linksFile(CARD)).toBe(false);
+  });
+});
+
 describe("ProjectStoreAccess.resolveMediaRef (narrow agent-facing resolver)", () => {
   it("REJECTS a bare absolute path even when the file exists (resolveRef would accept it)", async () => {
     const fs = new MockFs();
