@@ -22,6 +22,7 @@ import {
 import { loadTimeline } from "../timeline/engine";
 import { findClip } from "../timeline/helpers";
 import type { Clip } from "../timeline/model";
+import { UNSPACED_CHAR } from "../timeline/wordJoin";
 
 type Result = Record<string, unknown>;
 type Args = Record<string, unknown>;
@@ -131,8 +132,86 @@ function isSpecialToken(t: string): boolean {
   return /^\s*\[_/.test(t) || t.trim() === "";
 }
 
+/** whisper writes the sounds it hears, but does not transcribe, as subtitle-style annotations:
+ *  "(eerie music)", "[Music]", "[BLANK_AUDIO]", "[NON-ENGLISH SPEECH]". 176 whisper outputs cached
+ *  on the dev machine held over 30 kinds, parentheses the most common. They are not speech: as
+ *  WORDS they reach every caption and read as talk to anything that times speech (UJ-004). Only a
+ *  span that closes inside its segment counts, so a stray "(" in real speech keeps its words. */
+const ANNOTATION = /\[[^[\]]*\]|\([^()]*\)/g;
+/** Something was said: a letter or a digit in any script. */
+const SAID = /[\p{L}\p{N}]/u;
+
+/** Which characters of `text` lie inside an annotation. */
+function annotationMask(text: string): boolean[] {
+  const mask = new Array<boolean>(text.length).fill(false);
+  for (const m of text.matchAll(ANNOTATION)) mask.fill(true, m.index, m.index + m[0].length);
+  return mask;
+}
+
+/** Chinese and Japanese are written without spaces between words. whisper's tokens carry none there
+ *  either, so the space rule makes a whole sentence one "word": a caption per sentence, and nothing a
+ *  word edit could cut inside (UJ-004: a real 60 s Japanese clip came back as 5 words). Which scripts
+ *  those are is decided in ONE place, with how such words are joined again for display. */
+let wordSegmenter: Intl.Segmenter | null | undefined;
+/** A dictionary word-breaker. It goes by the characters' script, so no locale is needed. */
+function segmenter(): Intl.Segmenter | null {
+  if (wordSegmenter === undefined)
+    wordSegmenter =
+      typeof Intl === "object" && typeof Intl.Segmenter === "function"
+        ? new Intl.Segmenter(undefined, { granularity: "word" })
+        : null;
+  return wordSegmenter;
+}
+
+/** One token's visible text inside a word being built: where it sits in the word's text, its time. */
+interface Piece {
+  at: number;
+  end: number;
+  from: number;
+  to: number;
+  p: number | undefined;
+}
+interface Cut {
+  text: string;
+  from: number;
+  to: number;
+  ps: number[];
+}
+
+/** Cut a run of unspaced text into words where the word-breaker says they end. Punctuation joins the
+ *  word before it, as "Hello," does in a spaced language (or the word after, at the start); each
+ *  word's time runs from its first character's token to its last one's. Null when the runtime has
+ *  no word-breaker, and the run stays one word. */
+function cutWords(text: string, pieces: Piece[]): Cut[] | null {
+  const seg = segmenter();
+  if (!seg) return null;
+  const spans: Array<{ start: number; end: number }> = [];
+  let lead: number | null = null;
+  for (const s of seg.segment(text)) {
+    const start = s.index;
+    const end = start + s.segment.length;
+    if (!s.segment.trim()) continue;
+    if (s.isWordLike) {
+      spans.push({ start: lead ?? start, end });
+      lead = null;
+    } else if (spans.length) spans[spans.length - 1].end = end;
+    else lead ??= start;
+  }
+  if (lead !== null) spans.push({ start: lead, end: text.length }); // punctuation and nothing else
+  const pieceAt = (i: number): Piece => pieces.find((p) => i < p.end) ?? pieces[pieces.length - 1];
+  return spans.map(({ start, end }) => ({
+    text: text.slice(start, end).trim(),
+    from: pieceAt(start).from,
+    to: pieceAt(end - 1).to,
+    ps: pieces
+      .filter((p) => p.at < end && p.end > start && p.p !== undefined)
+      .map((p) => p.p as number),
+  }));
+}
+
 /** Reshape whisper.cpp `-ojf` JSON into the canonical transcript schema. Words
- *  are reconstructed by merging BPE tokens (a leading space starts a new word). */
+ *  are reconstructed by merging BPE tokens (a leading space starts a new word).
+ *  A segment's text is kept whole; its annotations never become words. */
 export function parseWhisperCppJson(raw: string): ParsedTranscript {
   const data = JSON.parse(raw) as WhisperCppJson;
   const trans = data.transcription ?? [];
@@ -152,60 +231,75 @@ export function parseWhisperCppJson(raw: string): ParsedTranscript {
     const segStart = segFrom / 1000;
     const segEnd = segTo / 1000;
     const segWords: WordPayload[] = [];
+    const pushWord = (text: string, fromMs: number, toMs: number, ps: number[]): void => {
+      const w: WordPayload = {
+        word_id: words.length + 1,
+        segment_id: segId,
+        index_in_segment: segWords.length,
+        word: text,
+        start_seconds: fromMs / 1000,
+        end_seconds: toMs / 1000,
+        start_timestamp: fmtTimestampPrecise(fromMs / 1000),
+        end_timestamp: fmtTimestampPrecise(toMs / 1000),
+        probability: ps.length ? ps.reduce((a, b) => a + b, 0) / ps.length : 0,
+      };
+      segWords.push(w);
+      words.push(w);
+    };
 
-    let cur: { text: string; from: number; to: number; ps: number[] } | null = null;
+    // An annotation is split over several BPE tokens ("(", "e", "erie", " music", ")"), so it is
+    // found in the segment's joined token text and each token keeps only its characters outside.
+    const toks = (seg.tokens ?? []).filter((t) => !isSpecialToken(t.text ?? ""));
+    const mask = annotationMask(toks.map((t) => t.text ?? "").join(""));
+    let at = 0;
+    // `residue`: the word began where an annotation ended, inside one token, so it counts only if
+    // it says something ("[Music]." leaves a bare ".").
+    let cur: { text: string; pieces: Piece[]; residue: boolean } | null = null;
     const flush = (): void => {
       if (!cur) return;
       const wt = cur.text.trim();
-      if (wt) {
-        const w: WordPayload = {
-          word_id: words.length + 1,
-          segment_id: segId,
-          index_in_segment: segWords.length,
-          word: wt,
-          start_seconds: cur.from / 1000,
-          end_seconds: cur.to / 1000,
-          start_timestamp: fmtTimestampPrecise(cur.from / 1000),
-          end_timestamp: fmtTimestampPrecise(cur.to / 1000),
-          probability: cur.ps.length ? cur.ps.reduce((a, b) => a + b, 0) / cur.ps.length : 0,
-        };
-        segWords.push(w);
-        words.push(w);
+      if (wt && (!cur.residue || SAID.test(wt))) {
+        const cut = UNSPACED_CHAR.test(wt) ? cutWords(cur.text, cur.pieces) : null;
+        if (cut) for (const w of cut) pushWord(w.text, w.from, w.to, w.ps);
+        else {
+          const { pieces } = cur;
+          const ps = pieces.filter((p) => p.p !== undefined).map((p) => p.p as number);
+          pushWord(wt, pieces[0].from, pieces[pieces.length - 1].to, ps);
+        }
       }
       cur = null;
     };
 
-    for (const tok of seg.tokens ?? []) {
-      const tt = tok.text ?? "";
-      if (isSpecialToken(tt)) continue;
+    for (const tok of toks) {
+      const raw = tok.text ?? "";
+      let tt = "";
+      for (let i = 0; i < raw.length; i++) if (!mask[at + i]) tt += raw[i];
+      const opensMasked = mask[at] === true; // blank tokens were filtered: `raw` is never empty
+      at += raw.length;
+      // Nothing said in this piece: an annotation, or the space before one. Either ends a word,
+      // and lends its time to none.
+      if (tt.trim() === "") {
+        flush();
+        continue;
+      }
       const from = tok.offsets?.from ?? segFrom;
       const to = tok.offsets?.to ?? from;
-      if (/^\s/.test(tt) || cur === null) {
+      const p = tok.p ?? undefined;
+      if (opensMasked || /^\s/.test(tt) || cur === null) {
         flush();
-        cur = { text: tt, from, to, ps: tok.p != null ? [tok.p] : [] };
+        cur = { text: tt, pieces: [{ at: 0, end: tt.length, from, to, p }], residue: opensMasked };
       } else {
+        cur.pieces.push({ at: cur.text.length, end: cur.text.length + tt.length, from, to, p });
         cur.text += tt;
-        cur.to = to;
-        if (tok.p != null) cur.ps.push(tok.p);
       }
     }
     flush();
 
-    // No usable tokens -> treat the whole segment as a single word.
-    if (segWords.length === 0) {
-      const w: WordPayload = {
-        word_id: words.length + 1,
-        segment_id: segId,
-        index_in_segment: 0,
-        word: segText,
-        start_seconds: segStart,
-        end_seconds: segEnd,
-        start_timestamp: fmtTimestampPrecise(segStart),
-        end_timestamp: fmtTimestampPrecise(segEnd),
-        probability: 0,
-      };
-      segWords.push(w);
-      words.push(w);
+    // No token data at all -> the segment's speech is a single word. A segment whose tokens were
+    // all annotation has none.
+    if (toks.length === 0) {
+      const said = segText.replace(ANNOTATION, " ").replace(/\s+/g, " ").trim();
+      if (SAID.test(said)) pushWord(said, segFrom, segTo, []);
     }
 
     segments.push({
@@ -637,10 +731,11 @@ async function transcriptFiles(
   language: string | undefined,
   window: TranscribeWindow | null | undefined,
 ): Promise<{ lang: string; full: string; out: string; win: ReturnType<typeof windowArgs> }> {
-  const lang = normLanguage(language);
+  const lang = whisperLanguage(language);
   // The language is part of the KEY, not just the arguments: keyed on src|size alone, a
-  // Spanish request would be served the English transcript already on disk, forever.
-  const baseKey = `${src}|${size}${lang ? `|${lang}` : ""}`;
+  // Spanish request would be served the English transcript already on disk, forever. "auto" is
+  // in the key too, so nothing made under whisper's English default is served as detected.
+  const baseKey = `${src}|${size}|${lang}`;
   const full = await ctx.store.prepareArtifact(`transcribe/${shortHash(baseKey)}`);
   const win = windowArgs(window);
   const out = win.key
@@ -726,19 +821,7 @@ export async function runWhisper(
     const scratch = `${outBase}.${scratchToken()}.tmp`;
     const run = await ctx.runner.run(
       "whisper-cli",
-      [
-        "-m",
-        model,
-        "-f",
-        wav,
-        "-ojf",
-        "-of",
-        scratch,
-        "-np",
-        "-t",
-        whisperThreads(),
-        ...(lang ? ["-l", lang] : []),
-      ],
+      ["-m", model, "-f", wav, "-ojf", "-of", scratch, "-np", "-t", whisperThreads(), "-l", lang],
       ctx.signal,
     );
     if (run.code !== 0 || !(await ctx.store.exists(`${scratch}.json`))) {
@@ -775,22 +858,30 @@ function canonicalRef(ref: string): string {
   return m ? m[1] : s;
 }
 
-/** Canonical, deterministic transcript path for a media ref (project-portable:
- *  keyed by the canonical ref, not the absolute path). A language, when asked for, joins
- *  the key — omitting it would hand a Spanish request the cached English words. Absent
- *  language keeps the ORIGINAL key, so transcripts cached before this existed still hit. */
-function canonicalTranscriptRel(ref: string, size: string, language?: string): string {
-  const lang = normLanguage(language);
-  return `transcripts/${shortHash(`${canonicalRef(ref)}|${size}${lang ? `|${lang}` : ""}`)}.json`;
+/** Canonical, deterministic transcript path for a media ref (project-portable: keyed by the
+ *  canonical ref, not the absolute path), in the language whisper is told. A request with no
+ *  language is keyed "auto": the files made before that under whisper's English default (keyed
+ *  without it) are redone when next asked for, as decided for UJ-004. */
+export function canonicalTranscriptRel(ref: string, size: string, language?: string): string {
+  return `transcripts/${shortHash(`${canonicalRef(ref)}|${size}|${whisperLanguage(language)}`)}.json`;
 }
 
-/** Whisper takes a short code ('en', 'es'); 'auto' means "let it detect", which is the
- *  no-language path. */
+/** The language as the caller means it: a short code ("es"), or "" to detect it. A regional tag
+ *  names the same language to whisper ("en-US", "pt_BR" -> "en", "pt"); whisper refuses the tag
+ *  itself. 'auto' is the no-language path. */
 export function normLanguage(language: unknown): string {
   const s = String(language ?? "")
     .trim()
-    .toLowerCase();
+    .toLowerCase()
+    .split(/[-_]/)[0];
   return !s || s === "auto" ? "" : s;
+}
+
+/** What whisper is told AND what keys its cache: a language code, or "auto". whisper-cli's own
+ *  default is ENGLISH, not detection, so leaving `-l` out transcribed every language as English
+ *  (UJ-004). One value for the argument and the key, so the two can never disagree. */
+function whisperLanguage(language: unknown): string {
+  return normLanguage(language) || "auto";
 }
 
 function transcriptPayload(
@@ -827,7 +918,7 @@ function parsedFromPayload(raw: string): ParsedTranscript {
 
 /** Ensure a canonical transcript exists for `ref` and return it. Returns the
  *  EXISTING transcript when present (no re-transcription); otherwise runs whisper
- *  and writes `transcripts/<hash(ref|size)>.json`. This deterministic path is the
+ *  and writes `transcripts/<hash(ref|size|language)>.json`. This deterministic path is the
  *  link between a media file and its transcript — any tool can recompute it, and
  *  explicit callers share it. `outRel` overrides the canonical location. */
 export async function ensureTranscript(

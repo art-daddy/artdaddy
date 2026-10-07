@@ -22,11 +22,12 @@ import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 
 import { addCaptionsTool } from "./captions";
-import { getTranscriptTool } from "./transcribe";
+import { ensureTranscript, getTranscriptTool } from "./transcribe";
 import { have, installE2EDocuments, libRef, mkCtx, openE2EDoc, resetE2EDocuments } from "./__e2e";
 import { addClipsTool } from "../timeline/placement";
 import { ensureTimeline, loadTimeline } from "../timeline/engine";
 import type { Clip } from "../timeline/model";
+import { clipText } from "../timeline/shape";
 
 type Rec = Record<string, unknown>;
 
@@ -96,4 +97,65 @@ describe.skipIf(!enabled)("add_captions transcribes real speech", () => {
     expect(all).toMatch(/[a-z]{3,}/);
     console.log(`[speech] ${clips.length} captions:`, clips.map(textOf).join(" | ").slice(0, 300));
   }, 900_000);
+});
+
+// Speech in other languages (UJ-004). The app left whisper's `-l` out, and whisper-cli's default is
+// ENGLISH, not detection: German greetings came back as English, a Hindi clip as
+// "[NON-ENGLISH SPEECH]". This asks with NO language, through the transcript door every tool uses,
+// and judges what came back: the detected language, real words, and no annotation as a word.
+//
+// Run with ARTDADDY_SPEECH_NON_EN set to `<file>=<language>` pairs separated by `;`, e.g.
+//   $env:ARTDADDY_SPEECH_NON_EN = "C:\clips\hindi.mp4=hi;C:\clips\rede.ogg=de"
+const NON_EN = (process.env.ARTDADDY_SPEECH_NON_EN ?? "")
+  .split(";")
+  .map((pair) => {
+    const at = pair.lastIndexOf("=");
+    return { file: pair.slice(0, at).trim(), lang: pair.slice(at + 1).trim() };
+  })
+  .filter((c) => c.file && c.lang && existsSync(c.file));
+
+describe.skipIf(NON_EN.length === 0)("transcribes speech in the language spoken (UJ-004)", () => {
+  it.each(NON_EN)(
+    "$lang: $file",
+    async ({ file, lang }) => {
+      installE2EDocuments();
+      if (!(await have("ffmpeg"))) return;
+      const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "artdaddy-speech-"));
+      dirs.push(dir);
+      const ctx = mkCtx(dir);
+      await ensureTimeline(ctx.store);
+      await openE2EDoc(dir);
+
+      const ref = await libRef(ctx, file);
+      const { parsed } = await ensureTranscript(ctx, ref);
+      const words = parsed.words.map((w) => w.word);
+      console.log(`[speech ${lang}] detected ${parsed.language}:`, words.join(" ").slice(0, 300));
+
+      expect(parsed.language).toBe(lang);
+      expect(words.length, "whisper produced no words").toBeGreaterThan(5);
+      expect(
+        words.filter((w) => /[[\]()]/.test(w)),
+        "an annotation became a word",
+      ).toEqual([]);
+
+      // The whole path, to what a viewer reads: captions made from it, with no language given.
+      const placed = (await addClipsTool(
+        { entries: [{ media_ref: ref, timeline_in: 0 }] },
+        ctx,
+      )) as Rec;
+      expect(placed.ok, JSON.stringify(placed).slice(0, 300)).toBe(true);
+      const caps = (await addCaptionsTool({}, ctx)) as Rec;
+      expect(caps.ok, JSON.stringify(caps).slice(0, 300)).toBe(true);
+      const shown = (await loadTimeline(ctx.store)).tracks
+        .flatMap((t) => t.clips ?? [])
+        .filter((c) => c.kind === "text")
+        .map(clipText);
+      console.log(`[captions ${lang}] ${shown.length}:`, shown.slice(0, 6).join(" | "));
+      expect(shown.length, "no captions").toBeGreaterThan(0);
+      // Chinese and Japanese are read with no space between words.
+      const cj = "[\\p{Script=Han}\\p{Script=Hiragana}\\p{Script=Katakana}]";
+      for (const line of shown) expect(line).not.toMatch(new RegExp(`${cj} ${cj}`, "u"));
+    },
+    900_000,
+  );
 });

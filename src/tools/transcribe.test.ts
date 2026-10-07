@@ -3,10 +3,12 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { CommandRunner } from "./command";
 import type { ClientToolContext } from "./context";
+import { shortHash as shortHashOf } from "./media";
 import { ProjectStoreAccess, joinPath, type FsLike } from "./store";
 import { useModelDownload } from "../store/modelDownload";
 import { isExpected } from "../lib/errors";
 import {
+  canonicalTranscriptRel,
   clipWordFrames,
   ensureTranscript,
   ensureWhisperModel,
@@ -14,6 +16,7 @@ import {
   fmtTimestampPrecise,
   getTranscriptTool,
   isSpeechEngineUnavailable,
+  normLanguage,
   parseWhisperCppJson,
   peekTranscript,
   runWhisper,
@@ -290,6 +293,471 @@ describe("parseWhisperCppJson", () => {
     );
     expect(t.segments).toHaveLength(0);
     expect(t.language).toBeNull();
+  });
+});
+
+// whisper writes sounds it hears as subtitle annotations. The forms below are real: 176 whisper
+// outputs cached on the dev machine held "(eerie music)" x82, "(camera shutter clicks)" x72,
+// "[Music]" x56, "[BLANK_AUDIO]", "[MUSIC PLAYING]"... and the Hindi clip of UJ-004 came back
+// "[NON-ENGLISH SPEECH]" under the English default. As words they reach every caption.
+describe("whisper's sound annotations are not words (UJ-004)", () => {
+  type Tok = [text: string, fromMs: number, toMs: number];
+  const seg = (text: string, toks: Tok[]) => ({
+    offsets: { from: toks[0]?.[1] ?? 0, to: toks.at(-1)?.[2] ?? 0 },
+    text,
+    tokens: toks.map(([t, from, to]) => ({ text: t, offsets: { from, to }, p: 0.9 })),
+  });
+  const parse = (...segs: unknown[]) =>
+    parseWhisperCppJson(JSON.stringify({ result: { language: "en" }, transcription: segs }));
+
+  it("keeps the speech around an annotation, with its own timing, and the sentence whole", () => {
+    // whisper's BPE splits an annotation over several tokens, spaces included.
+    const t = parse(
+      seg(" (eerie music) Hello there", [
+        [" (", 0, 100],
+        ["e", 100, 200],
+        ["erie", 200, 500],
+        [" music", 500, 900],
+        [")", 900, 1000],
+        [" Hello", 1000, 2000],
+        [" there", 2000, 3000],
+      ]),
+    );
+    expect(t.words.map((w) => w.word)).toEqual(["Hello", "there"]);
+    expect([t.words[0].start_seconds, t.words[0].end_seconds]).toEqual([1, 2]);
+    expect(t.words.map((w) => w.index_in_segment)).toEqual([0, 1]);
+    // The sentence keeps it: a reader still sees where the music is.
+    expect(t.segments[0].text).toBe("(eerie music) Hello there");
+  });
+
+  it("gives a segment that is only an annotation no words at all", () => {
+    const t = parse(
+      seg(" [Music]", [
+        [" [", 0, 100],
+        ["Music", 100, 1900],
+        ["]", 1900, 2000],
+      ]),
+      seg(" [NON-ENGLISH SPEECH]", [
+        [" [", 2000, 2100],
+        ["NON", 2100, 2400],
+        ["-", 2400, 2500],
+        ["ENGLISH", 2500, 3000],
+        [" SPEECH", 3000, 3800],
+        ["]", 3800, 4000],
+      ]),
+    );
+    expect(t.words).toEqual([]);
+    expect(t.segments.map((s) => [s.text, s.words.length])).toEqual([
+      ["[Music]", 0],
+      ["[NON-ENGLISH SPEECH]", 0],
+    ]);
+  });
+
+  it("drops what an annotation leaves behind, and keeps the word before it", () => {
+    const t = parse(
+      seg(" Bye [BLANK_AUDIO].", [
+        [" Bye", 0, 500],
+        [" [", 500, 600],
+        ["BL", 600, 700],
+        ["ANK", 700, 800],
+        ["_", 800, 850],
+        ["AUDIO", 850, 950],
+        ["].", 950, 1000],
+      ]),
+      seg(" Ha(laughs)ha", [
+        [" Ha", 1000, 1200],
+        ["(", 1200, 1250],
+        ["laugh", 1250, 1400],
+        ["s", 1400, 1450],
+        [")", 1450, 1500],
+        ["ha", 1500, 1700],
+      ]),
+    );
+    expect(t.words.map((w) => w.word)).toEqual(["Bye", "Ha", "ha"]);
+  });
+
+  it("keeps speech that merely contains a bracket that never closes", () => {
+    const t = parse(
+      seg(" well (and then", [
+        [" well", 0, 300],
+        [" (", 300, 350],
+        ["and", 350, 600],
+        [" then", 600, 900],
+      ]),
+    );
+    expect(t.words.map((w) => w.word)).toEqual(["well", "(and", "then"]);
+  });
+
+  it("keeps ordinary punctuation words", () => {
+    const t = parse(
+      seg(" well -- right", [
+        [" well", 0, 300],
+        [" --", 300, 350],
+        [" right", 350, 900],
+      ]),
+    );
+    expect(t.words.map((w) => w.word)).toEqual(["well", "--", "right"]);
+  });
+
+  it("gives an untokenised annotation-only segment no word, and an untokenised one its speech", () => {
+    const t = parseWhisperCppJson(
+      JSON.stringify({
+        transcription: [
+          { offsets: { from: 0, to: 1000 }, text: " (upbeat music)" },
+          { offsets: { from: 1000, to: 2000 }, text: " [Music] Danke (laughs)" },
+        ],
+      }),
+    );
+    expect(t.words.map((w) => w.word)).toEqual(["Danke"]);
+    expect(t.segments).toHaveLength(2);
+  });
+
+  it("joins an untokenised segment's speech with single spaces where annotations were", () => {
+    const t = parseWhisperCppJson(
+      JSON.stringify({
+        transcription: [
+          { offsets: { from: 0, to: 1000 }, text: " Hallo[Music]Albi" },
+          { offsets: { from: 1000, to: 2000 }, text: " [Music]  Danke (laughs)  schön" },
+          // No offsets at all, and only special or blank tokens: the text is still the speech.
+          { text: " Grüezi", tokens: [{ text: "[_BEG_]" }, { text: "  " }, { text: "[_TT_50]" }] },
+        ],
+      }),
+    );
+    expect(t.words.map((w) => [w.word, w.probability])).toEqual([
+      ["Hallo Albi", 0],
+      ["Danke schön", 0],
+      ["Grüezi", 0],
+    ]);
+  });
+
+  it("numbers the words it keeps without gaps, and times each from its own tokens", () => {
+    const t = parseWhisperCppJson(
+      JSON.stringify({
+        transcription: [
+          {
+            offsets: { from: 0, to: 4000 },
+            text: " Hello (sigh)World (x)ok",
+            tokens: [
+              { text: " Hel", offsets: { from: 0, to: 400 }, p: 0.8 },
+              { text: "l", offsets: { from: 400, to: 600 } }, // no probability: not counted
+              { text: "o", offsets: { from: 600, to: 900 }, p: 0.6 },
+              { text: " (", offsets: { from: 900, to: 1000 }, p: 0.1 },
+              { text: "sigh", offsets: { from: 1000, to: 2000 }, p: 0.1 },
+              { text: ")", offsets: { from: 2000, to: 2500 }, p: 0.1 },
+              // Glued to the annotation: the word starts at ITS time, not the annotation's.
+              { text: "World", offsets: { from: 2500, to: 3000 }, p: 0.6 },
+              { text: " (x)ok", offsets: { from: 3000, to: 4000 } },
+            ],
+          },
+        ],
+      }),
+    );
+    expect(t.words.map((w) => w.word)).toEqual(["Hello", "World", "ok"]);
+    expect(t.words.map((w) => w.word_id)).toEqual([1, 2, 3]);
+    expect(t.words.map((w) => [w.start_timestamp, w.end_timestamp])).toEqual([
+      ["00:00:00.000", "00:00:00.900"],
+      ["00:00:02.500", "00:00:03.000"],
+      ["00:00:03.000", "00:00:04.000"],
+    ]);
+    const [hello, world, ok] = t.words.map((w) => w.probability);
+    expect(hello).toBeCloseTo(0.7, 9); // the mean of its scored tokens
+    expect([world, ok]).toEqual([0.6, 0]);
+  });
+
+  it("ends the word before an annotation that shares a token with the next one", () => {
+    const t = parse(
+      seg(" Ha(x)ha", [
+        [" Ha", 0, 500],
+        ["(x)ha", 500, 900],
+      ]),
+      // A whole annotation in one token, the next word glued on: that word starts at its own time.
+      seg(" (x)World", [
+        [" (x)", 1000, 1500],
+        ["World", 1500, 1900],
+      ]),
+    );
+    expect(t.words.map((w) => [w.word, w.start_seconds])).toEqual([
+      ["Ha", 0],
+      ["ha", 0.5],
+      ["World", 1.5],
+    ]);
+  });
+
+  it("property: the words are exactly what was said, around any annotations", () => {
+    // Speech in Latin and Devanagari (the UJ-004 clip) and annotations of either bracket kind,
+    // each word cut into BPE-like pieces with the space at the front, as whisper's tokens are.
+    const spoken = fc
+      .array(fc.constantFrom(..."abcxyzÄöüßéñएकआदमी"), { minLength: 1, maxLength: 6 })
+      .map((cs) => cs.join(""));
+    const item = fc.oneof(
+      spoken.map((w) => ({ said: true, words: [w] })),
+      fc
+        .tuple(
+          fc.constantFrom(["(", ")"], ["[", "]"]),
+          fc.array(spoken, { minLength: 1, maxLength: 3 }),
+        )
+        .map(([[o, c], ws]) => ({ said: false, words: [`${o}${ws.join(" ")}${c}`] })),
+    );
+    fc.assert(
+      fc.property(
+        fc.array(item, { minLength: 1, maxLength: 8 }),
+        fc.array(fc.integer({ min: 1, max: 3 }), { minLength: 1, maxLength: 5 }),
+        (items, cuts) => {
+          const toks: Tok[] = [];
+          let k = 0;
+          for (const entry of items) {
+            for (const w of entry.words.join(" ").split(" ")) {
+              const piece = ` ${w}`;
+              for (let i = 0; i < piece.length;) {
+                const n = i === 0 ? 1 + cuts[k++ % cuts.length] : cuts[k++ % cuts.length];
+                toks.push([piece.slice(i, i + n), toks.length * 10, toks.length * 10 + 10]);
+                i += n;
+              }
+            }
+          }
+          const text = items.map((e) => ` ${e.words.join(" ")}`).join("");
+          const got = parse(seg(text, toks)).words.map((w) => w.word);
+          expect(got).toEqual(items.filter((e) => e.said).map((e) => e.words[0]));
+        },
+      ),
+      { numRuns: 400 },
+    );
+  });
+});
+
+// Japanese, Chinese and Thai are written without spaces between words, and whisper's tokens carry
+// none there either, so the space rule made each SENTENCE one word: a real 60 s Japanese clip came
+// back as 5 "words" — a caption per sentence, and nothing a word edit could cut inside (UJ-004).
+describe("speech written without spaces is cut into words (UJ-004)", () => {
+  /** One token per piece, 100 ms each, the way whisper's tokens for these scripts look. */
+  const parseTokens = (pieces: string[], start = 0) =>
+    parseWhisperCppJson(
+      JSON.stringify({
+        result: { language: "ja" },
+        transcription: [
+          {
+            offsets: { from: start, to: start + pieces.length * 100 },
+            text: pieces.join(""),
+            tokens: pieces.map((text, i) => ({
+              text,
+              offsets: { from: start + i * 100, to: start + (i + 1) * 100 },
+              p: 0.5,
+            })),
+          },
+        ],
+      }),
+    );
+
+  it("cuts Japanese at its words, each timed from its own tokens, punctuation kept on the word", () => {
+    // Real tokens from the clip: |ベ|ル|リ|ン|オ|リ|ンピ|ック|...
+    const t = parseTokens([
+      "ベ",
+      "ル",
+      "リ",
+      "ン",
+      "オ",
+      "リ",
+      "ンピ",
+      "ック",
+      "に",
+      "出",
+      "場",
+      "した",
+      "。",
+    ]);
+    expect(t.words.map((w) => [w.word, w.start_seconds, w.end_seconds])).toEqual([
+      ["ベルリン", 0, 0.4],
+      ["オリンピック", 0.4, 0.8],
+      ["に", 0.8, 0.9],
+      ["出場", 0.9, 1.1],
+      ["した。", 1.1, 1.3],
+    ]);
+    expect(t.words.map((w) => w.word_id)).toEqual([1, 2, 3, 4, 5]);
+    expect(t.segments[0].text).toBe("ベルリンオリンピックに出場した。"); // the sentence is unchanged
+  });
+
+  it("cuts Chinese too, and leaves languages that write spaces as whisper spaced them", () => {
+    expect(parseTokens([..."我们今天去北京，好吗？"]).words.map((w) => w.word)).toEqual([
+      "我们",
+      "今天",
+      "去",
+      "北京，",
+      "好",
+      "吗？",
+    ]);
+    // Thai has no spaces between words, but whisper spaces its phrases, which is how it is written.
+    expect(parseTokens([" สวัส", "ดี", "ครับ"]).words.map((w) => w.word)).toEqual(["สวัสดีครับ"]);
+    // Hindi is written with spaces: its words stay exactly as before.
+    expect(parseTokens([" एक", " आ", "द", "म", "ी", ","]).words.map((w) => w.word)).toEqual([
+      "एक",
+      "आदमी,",
+    ]);
+  });
+
+  it("property: nothing said is dropped or invented, and the words run forward in time", () => {
+    const pool = [..."日本語の文章を書きますオリンピック北京我们好吗。、！？ 1914年abc"];
+    fc.assert(
+      fc.property(
+        fc.array(fc.constantFrom(...pool), { minLength: 1, maxLength: 40 }),
+        fc.array(fc.integer({ min: 1, max: 3 }), { minLength: 1, maxLength: 4 }),
+        (chars, sizes) => {
+          const text = chars.join("");
+          const pieces: string[] = [];
+          for (let i = 0, k = 0; i < text.length; k++) {
+            const n = sizes[k % sizes.length];
+            pieces.push(text.slice(i, i + n));
+            i += n;
+          }
+          const t = parseTokens(pieces);
+          const squash = (s: string) => s.replace(/\s+/g, "");
+          expect(squash(t.words.map((w) => w.word).join(""))).toBe(squash(text));
+          for (const [a, b] of t.words.slice(1).map((w, i) => [t.words[i], w]))
+            expect(b.start_seconds).toBeGreaterThanOrEqual(a.start_seconds);
+          for (const w of t.words) expect(w.end_seconds).toBeGreaterThanOrEqual(w.start_seconds);
+        },
+      ),
+      { numRuns: 400 },
+    );
+  });
+});
+
+describe("language: none means detect, never whisper's English default (UJ-004)", () => {
+  const SRC = "C:/media/rede.mp4";
+  const whisperArgs = (runner: CommandRunner): string[][] =>
+    (runner.run as Any).mock.calls
+      .filter((c: Any[]) => c[0] === "whisper-cli")
+      .map((c: Any[]) => c[1]);
+  const langOf = (args: string[]): string | undefined => {
+    const i = args.indexOf("-l");
+    return i >= 0 ? args[i + 1] : undefined;
+  };
+  // What the code BEFORE this fix wrote for a request with no language: keyed on src|size alone,
+  // made with whisper's English default. Frozen here as history, not derived from the code.
+  const LEGACY_DEFAULT_KEY = (src: string) => `transcribe/${shortHashOf(`${src}|small`)}.json`;
+
+  it("keeps the queue's identity of 'no language' one value, however it is written", () => {
+    // The background queue keys a job by this: two spellings of "detect" must not make two jobs.
+    for (const none of [undefined, null, "", "  ", "auto", " AUTO "])
+      expect(normLanguage(none)).toBe("");
+    expect(normLanguage(" ES ")).toBe("es");
+    expect(normLanguage("de-CH")).toBe("de");
+    expect(normLanguage("zh_Hans")).toBe("zh");
+  });
+
+  it("files each distinct request's transcript separately, under transcripts/", () => {
+    const rel = (ref: string, size = "small", lang?: string) =>
+      canonicalTranscriptRel(ref, size, lang);
+    // transcripts/ is the folder the media GC keeps whole; a transcript filed elsewhere is swept.
+    expect(rel("library/a.mp4")).toMatch(/^transcripts\/[0-9a-f]{12}\.json$/);
+    const distinct = [
+      rel("library/a.mp4"),
+      rel("library/b.mp4"),
+      rel("library/a.mp4", "base"),
+      rel("library/a.mp4", "small", "es"),
+    ];
+    expect(new Set(distinct).size).toBe(distinct.length);
+    // One request, however it is spelled.
+    expect(rel("library/a.mp4", "small", "auto")).toBe(rel("library/a.mp4"));
+    expect(rel("library/a.mp4", "small", "en-US")).toBe(rel("library/a.mp4", "small", "en"));
+    expect(rel("C:\\proj\\library\\a.mp4")).toBe(rel("library/a.mp4"));
+  });
+
+  it("asks whisper to detect the language when none is given", async () => {
+    const fs = new MockFs();
+    fs.putModel();
+    const runner = transcribeRunner(fs);
+    await runWhisper(ctxWith(runner, fs), SRC);
+    expect(whisperArgs(runner).map(langOf)).toEqual(["auto"]);
+  });
+
+  it("treats 'auto' and no language as one request", async () => {
+    const fs = new MockFs();
+    fs.putModel();
+    const runner = transcribeRunner(fs);
+    const ctx = ctxWith(runner, fs);
+    await runWhisper(ctx, SRC);
+    await runWhisper(ctx, SRC, "small", "AUTO");
+    expect(whisperArgs(runner)).toHaveLength(1);
+  });
+
+  it("gives whisper the language of a regional code, and shares that language's transcript", async () => {
+    const fs = new MockFs();
+    fs.putModel();
+    const runner = transcribeRunner(fs);
+    const ctx = ctxWith(runner, fs);
+    await runWhisper(ctx, SRC, "small", "de-CH");
+    await runWhisper(ctx, SRC, "small", "de");
+    await runWhisper(ctx, SRC, "small", "pt_BR");
+    expect(whisperArgs(runner).map(langOf)).toEqual(["de", "pt"]);
+  });
+
+  it("never serves a transcript made under the English default as a detected one", async () => {
+    const fs = new MockFs();
+    fs.putModel();
+    const english = JSON.stringify({
+      result: { language: "en" },
+      transcription: [
+        { offsets: { from: 0, to: 900 }, text: " Hallo Albi", tokens: [{ text: " Hallo Albi" }] },
+      ],
+    });
+    const detected = JSON.stringify({
+      result: { language: "de" },
+      transcription: [
+        {
+          offsets: { from: 0, to: 900 },
+          text: " Hallo Albi",
+          tokens: [{ text: " Hallo" }, { text: " Albi" }],
+        },
+      ],
+    });
+    const runner = transcribeRunner(fs, { json: detected });
+    const ctx = ctxWith(runner, fs);
+    const legacy = await ctx.store.prepareArtifact(LEGACY_DEFAULT_KEY(SRC));
+    await fs.writeTextFile(legacy, english);
+    const t = await runWhisper(ctx, SRC);
+    expect(t.language).toBe("de");
+    expect(whisperArgs(runner).map(langOf)).toEqual(["auto"]);
+    // ...and peeking (inspect_media's cache check) agrees: it was not answered from the old file.
+    expect((await peekTranscript(ctx, SRC))?.language).toBe("de");
+  });
+
+  it("still serves a transcript made in a language that was named", async () => {
+    const fs = new MockFs();
+    fs.putModel();
+    const runner = transcribeRunner(fs);
+    const ctx = ctxWith(runner, fs);
+    const named = await ctx.store.prepareArtifact(
+      `transcribe/${shortHashOf(`${SRC}|small|es`)}.json`,
+    );
+    await fs.writeTextFile(
+      named,
+      JSON.stringify({ result: { language: "es" }, transcription: [] }),
+    );
+    expect((await runWhisper(ctx, SRC, "small", "es")).language).toBe("es");
+    expect(whisperArgs(runner)).toHaveLength(0);
+  });
+
+  it("does the same for the canonical transcript every tool shares", async () => {
+    const fs = new MockFs();
+    fs.touch(joinPath(DIR, "library/rede.mp4"));
+    fs.putModel();
+    const runner = transcribeRunner(fs);
+    const ctx = ctxWith(runner, fs);
+    // The old canonical file for "no language": hash(ref|size), English words in it.
+    const old = await ctx.store.prepareArtifact(
+      `transcripts/${shortHashOf("library/rede.mp4|small")}.json`,
+    );
+    await fs.writeTextFile(
+      old,
+      JSON.stringify({ transcription: { language: "en", words: [{ word: "stale" }] } }),
+    );
+    const r = await ensureTranscript(ctx, "library/rede.mp4");
+    expect(r.existed).toBe(false);
+    expect(r.path).toBe(
+      await ctx.store.prepareArtifact(canonicalTranscriptRel("library/rede.mp4", "small")),
+    );
+    expect(r.parsed.words.map((w) => w.word)).not.toContain("stale");
+    expect(whisperArgs(runner).map(langOf)).toEqual(["auto"]);
   });
 });
 

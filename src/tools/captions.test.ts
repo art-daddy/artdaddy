@@ -22,9 +22,10 @@ async function seedTranscript(
   words: Array<[string, number, number]>,
   language = "",
 ): Promise<void> {
-  // Mirrors canonicalTranscriptRel: hash(canonicalRef|size[|lang]).
-  const { shortHash } = await import("./media");
-  const rel = `transcripts/${shortHash(`${ref}|small${language ? `|${language}` : ""}`)}.json`;
+  // The canonical key itself, not a copy of its formula: a copy goes on seeding the old key when
+  // the key changes, as it did for UJ-004.
+  const { canonicalTranscriptRel } = await import("./transcribe");
+  const rel = canonicalTranscriptRel(ref, "small", language || undefined);
   const path = await ctx.store.prepareArtifact(rel);
   await ctx.store.writeText(
     path,
