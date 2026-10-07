@@ -57,6 +57,8 @@ export default defineConfig({
         "src/preview/__probe_video.ts",
         "src/preview/__parity.ts",
         "src/preview/__probe_parity.ts",
+        "src/preview/__probeRotation.ts",
+        "src/preview/__rotationFixtures.ts",
         "src/components/PreviewCanvas.tsx",
         "src/components/SourceMonitor.tsx",
         "src/components/ClipWaveform.tsx",

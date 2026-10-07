@@ -15,6 +15,8 @@
 // simple + correct; a persistent forward-decoding decoder is a later optimisation.
 import MP4Box, { type MP4ArrayBuffer, type MP4Info } from "mp4box";
 
+import { type Orientation, UPRIGHT, displaySize, mp4Orientation } from "./orientation";
+
 interface Sample {
   cts: number; // timescale units
   duration: number;
@@ -48,7 +50,12 @@ export class VideoSource {
   private timescale = 1;
   private startCts = 0; // min composition time (B-frame reorder offset)
   private readonly ready: Promise<void>;
+  /** The size the picture is SHOWN at: the stored frame turned by the file's display matrix, as
+   *  ffmpeg turns it for the export. A phone's portrait clip is stored 1920x1080 and shown 1080x1920. */
   dims: VideoDims = { w: 0, h: 0 };
+  /** How this file's decoded frames are stored relative to the shown picture. Its frames must be
+   *  uploaded with it (PreviewRenderer.setTexture) or they draw on their side (UJ-015). */
+  orientation: Orientation = UPRIGHT;
   duration = 0;
   decoderStarts = 0; // diagnostic: number of decoder (re)configurations
 
@@ -84,7 +91,8 @@ export class VideoSource {
           return;
         }
         this.timescale = track.timescale;
-        this.dims = { w: track.video.width, h: track.video.height };
+        this.orientation = mp4Orientation(file, track);
+        this.dims = displaySize({ w: track.video.width, h: track.video.height }, this.orientation);
         this.duration = track.duration / track.timescale;
         this.config = {
           codec: track.codec,

@@ -1,0 +1,181 @@
+{
+  "ffmpeg": "ffmpeg version N-127021-ge0c94b2d1c-20260930 Copyright (c) 2000-2026 the FFmpeg developers",
+  "fixtures": {
+    "h264_rot0.mp4": {
+      "coded": [
+        160,
+        96
+      ],
+      "display": [
+        160,
+        96
+      ],
+      "corners": [
+        "red",
+        "green",
+        "blue",
+        "white"
+      ]
+    },
+    "h264_rot0_hflip.mp4": {
+      "coded": [
+        160,
+        96
+      ],
+      "display": [
+        160,
+        96
+      ],
+      "corners": [
+        "green",
+        "red",
+        "white",
+        "blue"
+      ]
+    },
+    "h264_rot90.mp4": {
+      "coded": [
+        160,
+        96
+      ],
+      "display": [
+        96,
+        160
+      ],
+      "corners": [
+        "green",
+        "white",
+        "red",
+        "blue"
+      ]
+    },
+    "h264_rot90_hflip.mp4": {
+      "coded": [
+        160,
+        96
+      ],
+      "display": [
+        96,
+        160
+      ],
+      "corners": [
+        "white",
+        "green",
+        "blue",
+        "red"
+      ]
+    },
+    "h264_rot180.mp4": {
+      "coded": [
+        160,
+        96
+      ],
+      "display": [
+        160,
+        96
+      ],
+      "corners": [
+        "white",
+        "blue",
+        "green",
+        "red"
+      ]
+    },
+    "h264_rot180_hflip.mp4": {
+      "coded": [
+        160,
+        96
+      ],
+      "display": [
+        160,
+        96
+      ],
+      "corners": [
+        "blue",
+        "white",
+        "red",
+        "green"
+      ]
+    },
+    "h264_rot270.mp4": {
+      "coded": [
+        160,
+        96
+      ],
+      "display": [
+        96,
+        160
+      ],
+      "corners": [
+        "blue",
+        "red",
+        "white",
+        "green"
+      ]
+    },
+    "h264_rot270_hflip.mp4": {
+      "coded": [
+        160,
+        96
+      ],
+      "display": [
+        96,
+        160
+      ],
+      "corners": [
+        "red",
+        "blue",
+        "green",
+        "white"
+      ]
+    },
+    "h264_rot0_movie90.mp4": {
+      "coded": [
+        160,
+        96
+      ],
+      "display": [
+        96,
+        160
+      ],
+      "corners": [
+        "green",
+        "white",
+        "red",
+        "blue"
+      ]
+    },
+    "h264_rot90_movie90.mp4": {
+      "coded": [
+        160,
+        96
+      ],
+      "display": [
+        160,
+        96
+      ],
+      "corners": [
+        "white",
+        "blue",
+        "green",
+        "red"
+      ]
+    },
+    "h264_rot0_hflip_movie90.mp4": {
+      "coded": [
+        160,
+        96
+      ],
+      "display": [
+        96,
+        160
+      ],
+      "corners": [
+        "red",
+        "blue",
+        "green",
+        "white"
+      ]
+    }
+  }
+}

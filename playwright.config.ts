@@ -58,7 +58,7 @@ export default defineConfig({
       // On macOS the GPU specs DO run here: until 2026-10-04 they were ignored on every OS.
       testIgnore:
         process.platform === "win32"
-          ? ["preview.spec.ts", "chromaKey.spec.ts", "osdrop.spec.ts"]
+          ? ["preview.spec.ts", "chromaKey.spec.ts", "rotation.spec.ts", "osdrop.spec.ts"]
           : [],
     },
   ],

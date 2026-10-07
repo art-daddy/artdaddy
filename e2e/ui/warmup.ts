@@ -9,7 +9,12 @@ export default async function warmup(config: FullConfig): Promise<void> {
   const browser = await chromium.launch();
   try {
     const page = await browser.newPage();
-    for (const path of ["/", "/preview-probe.html", "/preview-probe-chroma.html"])
+    for (const path of [
+      "/",
+      "/preview-probe.html",
+      "/preview-probe-chroma.html",
+      "/preview-probe-rotation.html",
+    ])
       await page.goto(`${baseURL}${path}`, { waitUntil: "load", timeout: 300_000 });
   } finally {
     await browser.close();

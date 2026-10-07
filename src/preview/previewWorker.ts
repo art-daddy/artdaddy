@@ -229,7 +229,9 @@ function render(): void {
     vs.pump(l.sourceTime ?? 0);
     const frame = vs.nearestFrame(l.sourceTime ?? 0);
     if (frame && uploaded.get(l.source) !== frame.timestamp) {
-      renderer.setTexture(l.source, frame); // owned by vs — upload, don't close
+      // Owned by vs: upload, don't close. With its file's turn: a phone's portrait clip is stored
+      // on its side, and the poster this replaces was already upright (UJ-015).
+      renderer.setTexture(l.source, frame, vs.orientation);
       if (!uploaded.has(l.source)) post({ type: "firstFrame", source: l.source });
       uploaded.set(l.source, frame.timestamp);
       d = true;

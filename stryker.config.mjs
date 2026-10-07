@@ -32,6 +32,9 @@ export default {
     "src/lib/upload.ts",
     "src/lib/osDrop.ts",
     "src/preview/transport.ts",
+    // How a video's stored frame maps to the picture it shows (UJ-015): pure, and its tests hold
+    // it to ffmpeg's picture through committed fixtures.
+    "src/preview/orientation.ts",
     "src/contract/clamp.ts",
     // NOT src/eval/studio.ts: the stub surface is exercised by the LIVE eval lane,
     // not by vitest, so its mutants are ~all "no coverage" and only dilute the score.

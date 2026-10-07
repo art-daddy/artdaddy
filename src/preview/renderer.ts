@@ -5,6 +5,7 @@
 import type { Scene } from "./scene";
 import { NEUTRAL_FX } from "./scene";
 import { KEY_GLSL } from "./chromaKey";
+import { ORIENT_GLSL, type Orientation, UPRIGHT } from "./orientation";
 import { assertNever } from "../timeline/transition";
 import type { BlendKind } from "../timeline/renderPlan";
 
@@ -12,7 +13,7 @@ const VERT = `#version 300 es
 in vec2 a_pos;            // unit quad 0..1
 uniform vec2 u_canvas;    // canvas size in px
 uniform vec4 u_dst;       // x,y,w,h in canvas px (top-left origin)
-uniform vec4 u_src;       // x,y,w,h in 0..1 texture space (top-left origin)
+uniform vec4 u_src;       // x,y,w,h in 0..1 of the SHOWN picture (top-left origin)
 uniform float u_rotate;   // radians, clockwise (screen space); 0 = none
 out vec2 v_uv;
 out vec2 v_quad;
@@ -50,25 +51,35 @@ uniform vec3 u_key;      // chroma key colour
 uniform float u_time;    // seconds; animates grain
 uniform sampler2D u_curve; // 256x1 tone ramp: rgb = per-channel, a = master
 uniform int u_hasCurve;
+uniform vec4 u_orient;   // how u_tex is stored relative to the shown picture (orientation.ts)
 out vec4 frag;
 const vec3 LUMA = vec3(0.299, 0.587, 0.114);
 
 ${KEY_GLSL}
 
+${ORIENT_GLSL}
+
+// The source at a point of the SHOWN picture. EVERY read of u_tex goes through here: a decoded
+// frame can be stored turned (a phone's portrait clip), and a read that skipped the turn would
+// sample the frame on its side (UJ-015).
+vec4 src(vec2 uv) { return texture(u_tex, artdaddy_tex_uv(uv, u_orient)); }
+// The shown picture's size in texels: a quarter turn shows the stored height across.
+vec2 srcSize() { vec2 s = vec2(textureSize(u_tex, 0)); return u_orient.x == 0.0 ? s.yx : s; }
+
 // Two 8-tap rings + centre: a cheap circular blur. The preview targets VISUAL
 // equivalence with ffmpeg's gblur, not identical kernels, so a single-pass
 // multi-tap avoids introducing offscreen framebuffers for the whole compositor.
 vec3 ringBlur(vec2 uv, float radiusPx, vec2 aspect) {
-  if (radiusPx <= 0.05) return texture(u_tex, uv).rgb;
-  vec2 t = radiusPx / vec2(textureSize(u_tex, 0)) * aspect;
-  vec3 s = texture(u_tex, uv).rgb * 2.0;
+  if (radiusPx <= 0.05) return src(uv).rgb;
+  vec2 t = radiusPx / srcSize() * aspect;
+  vec3 s = src(uv).rgb * 2.0;
   float wsum = 2.0;
   for (int r = 1; r <= 2; r++) {
     float fr = float(r) * 0.5;
     float w = 1.0 / (1.0 + fr * 2.0);
     for (int i = 0; i < 8; i++) {
       float ang = 6.2831853 * float(i) / 8.0;
-      s += texture(u_tex, uv + vec2(cos(ang), sin(ang)) * t * fr).rgb * w;
+      s += src(uv + vec2(cos(ang), sin(ang)) * t * fr).rgb * w;
       wsum += w;
     }
   }
@@ -87,8 +98,8 @@ void main() {
   float motionPx = u_fx3.x;
   float denoisePx = u_fx3.y;
   vec4 c = (blurPx + denoisePx) > 0.05
-    ? vec4(ringBlur(v_uv, blurPx + denoisePx, vec2(1.0)), texture(u_tex, v_uv).a)
-    : texture(u_tex, v_uv);
+    ? vec4(ringBlur(v_uv, blurPx + denoisePx, vec2(1.0)), src(v_uv).a)
+    : src(v_uv);
   // motion: ffmpeg tmix averages N PREVIOUS frames; a stateless draw can't, so this
   // approximates the look as a horizontal smear (preview != export, by design).
   if (motionPx > 0.05) c.rgb = ringBlur(v_uv, motionPx, vec2(1.0, 0.15));
@@ -139,7 +150,7 @@ void main() {
   }
   float grain = u_fx1.z;
   if (grain > 0.001) {
-    float g = hash21(v_uv * vec2(textureSize(u_tex, 0)) + fract(u_time) * 137.0) - 0.5;
+    float g = hash21(v_uv * srcSize() + fract(u_time) * 137.0) - 0.5;
     rgb = clamp(rgb + g * grain * 0.5, 0.0, 1.0);
   }
   float vig = u_fx1.w;
@@ -168,6 +179,10 @@ export class PreviewRenderer {
   private readonly program: WebGLProgram;
   private readonly quad: WebGLBuffer;
   private readonly textures = new Map<string, WebGLTexture>();
+  /** How each texture's pixels are stored, set by the SAME upload that put them there: a poster
+   *  (already upright) and a decoded frame (maybe turned) share one source key, so the turn must
+   *  travel with the pixels, never be looked up from the source. */
+  private readonly orientations = new Map<string, Orientation>();
   private readonly loc: Record<string, WebGLUniformLocation | null>;
   private readonly aPos: number;
 
@@ -210,6 +225,7 @@ export class PreviewRenderer {
       time: gl.getUniformLocation(this.program, "u_time"),
       curve: gl.getUniformLocation(this.program, "u_curve"),
       hasCurve: gl.getUniformLocation(this.program, "u_hasCurve"),
+      orient: gl.getUniformLocation(this.program, "u_orient"),
     };
   }
 
@@ -247,6 +263,7 @@ export class PreviewRenderer {
       if (!match(key)) continue;
       gl.deleteTexture(tex);
       this.textures.delete(key);
+      this.orientations.delete(key);
     }
   }
 
@@ -265,14 +282,17 @@ export class PreviewRenderer {
     return this.curve;
   }
 
-  /** Upload (or replace) a source's texture. Straight alpha, top-left origin. */
-  setTexture(source: string, image: TexImageSource): void {
+  /** Upload (or replace) a source's texture. Straight alpha, top-left origin. `orientation` is how
+   *  THESE pixels are stored relative to the picture they show: a decoded video frame passes its
+   *  file's (VideoSource.orientation); anything already upright (images, posters, text) leaves it. */
+  setTexture(source: string, image: TexImageSource, orientation: Orientation = UPRIGHT): void {
     const gl = this.gl;
     let tex = this.textures.get(source);
     if (!tex) {
       tex = gl.createTexture() as WebGLTexture;
       this.textures.set(source, tex);
     }
+    this.orientations.set(source, orientation);
     gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
@@ -322,6 +342,8 @@ export class PreviewRenderer {
       if (tex) gl.bindTexture(gl.TEXTURE_2D, tex);
       gl.uniform4f(this.loc.dst, layer.dst.x, layer.dst.y, layer.dst.w, layer.dst.h);
       gl.uniform4f(this.loc.src, layer.src.x, layer.src.y, layer.src.w, layer.src.h);
+      const o = (!solid && this.orientations.get(layer.source)) || UPRIGHT;
+      gl.uniform4f(this.loc.orient, o.m[0], o.m[1], o.m[2], o.m[3]);
       gl.uniform1f(this.loc.rotate, layer.rotate);
       const tr = layer.transition;
       let transMode = 0;
@@ -395,6 +417,7 @@ export class PreviewRenderer {
     const gl = this.gl;
     for (const t of this.textures.values()) gl.deleteTexture(t);
     this.textures.clear();
+    this.orientations.clear();
     gl.deleteBuffer(this.quad);
     gl.deleteProgram(this.program);
   }

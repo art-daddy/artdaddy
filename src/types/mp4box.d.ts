@@ -11,6 +11,8 @@ declare module "mp4box" {
     duration: number;
     nb_samples: number;
     video: { width: number; height: number };
+    /** The track header's display matrix (tkhd), read SIGNED: a b u / c d v / x y w. */
+    matrix?: Int32Array;
   }
   export interface MP4Info {
     videoTracks: MP4VideoTrackInfo[];
@@ -68,6 +70,8 @@ declare module "mp4box" {
     flush(): void;
     setExtractionOptions(id: number, user?: unknown, opts?: { nbSamples?: number }): void;
     getTrackById(id: number): MP4Track;
+    /** The movie header's display matrix (mvhd) is read UNSIGNED by mp4box: -1.0 arrives as 2^32 - 65536. */
+    moov?: { mvhd?: { matrix?: Uint32Array } };
   }
   export interface MP4BoxStatic {
     createFile(): MP4File;

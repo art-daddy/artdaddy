@@ -89,10 +89,11 @@ export function parseProbe(path: string, raw: string): Result {
     }
     if (rotation === null) rotation = numOrNull((v.tags ?? {}).rotate);
     // DISPLAY dimensions, not coded ones. A phone shoots portrait by recording a 1920x1080
-    // frame plus a 90° display matrix, and every decoder honours it: ffmpeg auto-rotates
-    // (nothing here passes -noautorotate) and so does a <video>. Reporting 1920x1080 told the
-    // model the clip was landscape, so on a 9:16 canvas it "corrected" a video that was
-    // already upright and the export came out on its side.
+    // frame plus a 90° display matrix, and everything that shows the clip honours it: ffmpeg
+    // auto-rotates (nothing here passes -noautorotate), a <video> does, and the preview, which
+    // decodes the file itself, turns it by the same matrix (preview/orientation.ts; it did not
+    // until UJ-015). Reporting 1920x1080 told the model the clip was landscape, so on a 9:16
+    // canvas it "corrected" a video that was already upright and the export came out on its side.
     const turned = quarterTurn(rotation);
     const cw = numOrNull(v.width);
     const ch = numOrNull(v.height);

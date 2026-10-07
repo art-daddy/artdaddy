@@ -16,6 +16,7 @@
     "preview": "vite preview",
     "codegen": "node scripts/codegen.mjs",
     "fontmetrics": "vite-node scripts/genFontMetrics.ts",
+    "fixtures:rotation": "vite-node scripts/genRotationFixtures.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",

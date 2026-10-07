@@ -91,6 +91,7 @@ preview-parity.html
 # ignored, they never reached a CI checkout, and both specs timed out on every run since.
 !preview-probe.html
 !preview-probe-chroma.html
+!preview-probe-rotation.html
 
 # Scratch output from local runs
 _*.txt
