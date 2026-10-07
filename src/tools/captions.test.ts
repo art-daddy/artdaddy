@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { addCaptionsTool } from "./captions";
 import { loadTimeline, applyOp } from "../timeline/engine";
+import { lineWidthIn, textBox } from "../timeline/renderPlan";
 import { DIR, resetTestDocuments, seededCtx } from "../test/timelineKit";
 import { joinPath } from "./store";
 import type { ClientToolContext } from "./context";
@@ -19,7 +20,7 @@ const FPS = 30;
 async function seedTranscript(
   ctx: ClientToolContext,
   ref: string,
-  words: Array<[string, number, number]>,
+  words: Array<[string, number, number] | [string, number, number, number]>,
   language = "",
 ): Promise<void> {
   // The canonical key itself, not a copy of its formula: a copy goes on seeding the old key when
@@ -34,9 +35,9 @@ async function seedTranscript(
         language: language || "en",
         duration_seconds: 10,
         segments: [],
-        words: words.map(([word, start, end], i) => ({
+        words: words.map(([word, start, end, segment], i) => ({
           word_id: i,
-          segment_id: 0,
+          segment_id: segment ?? 0,
           index_in_segment: i,
           word,
           start_seconds: start,
@@ -93,6 +94,78 @@ const textOf = (c: Clip): string =>
 describe("add_captions", () => {
   beforeEach(async () => {
     await resetTestDocuments();
+  });
+
+  // UJ-030 / Palmier's rule: a caption is as long as fits ONE line of its box, so how long that is
+  // depends on the canvas and the type size, and no caption it places wraps.
+  describe("how long a caption is", () => {
+    const SPEECH =
+      "so today we are going to talk about the way captions fit on a screen and why the size of " +
+      "the screen and the size of the text decide how many words each caption can hold without " +
+      "wrapping onto a second line";
+    const speech = (): Array<[string, number, number]> =>
+      SPEECH.split(" ").map((t, i) => [t, i * 0.3, i * 0.3 + 0.25]);
+
+    async function captionOn(
+      canvas: { width: number; height: number },
+      args: Any = {},
+    ): Promise<Clip[]> {
+      const { ctx, store } = await seededCtx();
+      await applyOp(store, "canvas", (tl) => {
+        tl.canvas = { ...tl.canvas, ...canvas, fps: FPS };
+      });
+      await withAudio(ctx, "library/speech.m4a", 600);
+      await seedTranscript(ctx, "library/speech.m4a", speech());
+      const r = (await addCaptionsTool({ max_gap_seconds: 0, ...args }, ctx)) as Any;
+      expect(r.ok, JSON.stringify(r)).toBe(true);
+      return captions((await loadTimeline(store)) as unknown as Any);
+    }
+    const fitsItsBox = (c: Clip, canvas: { width: number; height: number }): boolean => {
+      const box = textBox(c, canvas.width, canvas.height);
+      return lineWidthIn(textOf(c), box) <= box.wPx;
+    };
+
+    it("never places a caption that would wrap, on a wide or a tall canvas", async () => {
+      for (const canvas of [
+        { width: 1920, height: 1080 },
+        { width: 1080, height: 1920 },
+      ]) {
+        const caps = await captionOn(canvas);
+        expect(caps.length).toBeGreaterThan(1);
+        for (const c of caps)
+          expect(fitsItsBox(c, canvas), `${textOf(c)} @${canvas.width}`).toBe(true);
+        expect(caps.map(textOf).join(" ")).toBe(SPEECH); // and nothing was dropped
+      }
+    });
+
+    it("makes shorter captions on a vertical canvas than on a wide one", async () => {
+      const wide = await captionOn({ width: 1920, height: 1080 });
+      const tall = await captionOn({ width: 1080, height: 1920 });
+      expect(tall.length).toBeGreaterThan(wide.length);
+    });
+
+    it("makes shorter captions at a bigger type size", async () => {
+      const small = await captionOn({ width: 1920, height: 1080 }, { style: { size: "s" } });
+      const big = await captionOn({ width: 1920, height: 1080 }, { style: { size: "xl" } });
+      expect(big.length).toBeGreaterThan(small.length);
+      for (const c of big) expect(fitsItsBox(c, { width: 1920, height: 1080 })).toBe(true);
+    });
+
+    it("never runs a caption from one transcript segment into the next", async () => {
+      const { ctx, store } = await seededCtx();
+      await withAudio(ctx);
+      await seedTranscript(ctx, "library/speech.m4a", [
+        ["first", 0, 0.3, 1],
+        ["part", 0.3, 0.6, 1],
+        ["second", 0.6, 0.9, 2],
+        ["part", 0.9, 1.2, 2],
+      ]);
+      await addCaptionsTool({ max_gap_seconds: 0 }, ctx);
+      expect(captions((await loadTimeline(store)) as unknown as Any).map(textOf)).toEqual([
+        "first part",
+        "second part",
+      ]);
+    });
   });
 
   it("turns spoken words into caption clips at the frames they are spoken", async () => {

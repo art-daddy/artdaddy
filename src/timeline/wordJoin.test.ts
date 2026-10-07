@@ -4,12 +4,12 @@ import { describe, expect, it } from "vitest";
 import {
   breakUnspaced,
   breakWords,
-  estimateWidth,
   joinWords,
   UNSPACED_CHAR,
   wordGap,
   wordSpans,
 } from "./wordJoin";
+import { lineWidthPx } from "./fontMetrics";
 
 describe("joinWords: words back into the line they are read as", () => {
   it("writes Chinese and Japanese with no space between words", () => {
@@ -77,13 +77,15 @@ describe("joinWords: words back into the line they are read as", () => {
 // both renderers draw them.
 describe("breakUnspaced: Chinese and Japanese lines broken to fit, everything else untouched", () => {
   const SIZE = 40;
+  // As the plan measures: in the clip's font, here Poppins (Japanese falls back, one em a character).
+  const measure = (line: string): number => lineWidthPx(line, "Poppins", SIZE);
   it("breaks a Japanese line that would run past the width, only between words", () => {
     const text = "藤村のりを1914年大正3年11月14日から没年不明は日本のセーリング競技選手";
-    const broken = breakUnspaced(text, SIZE, 0, 10 * SIZE);
+    const broken = breakUnspaced(text, measure, 10 * SIZE);
     expect(broken.replace(/\n/g, "")).toBe(text); // nothing lost or added but breaks
     const lines = broken.split("\n");
     expect(lines.length).toBeGreaterThan(2);
-    for (const line of lines) expect(estimateWidth(line, SIZE)).toBeLessThanOrEqual(10 * SIZE);
+    for (const line of lines) expect(measure(line)).toBeLessThanOrEqual(10 * SIZE);
     // Every break falls where the word-breaker says a word starts.
     const starts = new Set((wordSpans(text) ?? []).map((s) => s.start));
     let at = 0;
@@ -97,28 +99,28 @@ describe("breakUnspaced: Chinese and Japanese lines broken to fit, everything el
     fc.assert(
       fc.property(fc.string({ unit: "grapheme", maxLength: 120 }), (s) => {
         fc.pre(!UNSPACED_CHAR.test(s));
-        expect(breakUnspaced(s, SIZE, 0, 5 * SIZE)).toBe(s);
+        expect(breakUnspaced(s, measure, 5 * SIZE)).toBe(s);
       }),
       { numRuns: 300 },
     );
   });
 
   it("keeps a line that already fits, and restarts the width at an authored break", () => {
-    expect(breakUnspaced("藤村のりを", SIZE, 0, 10 * SIZE)).toBe("藤村のりを");
-    expect(breakUnspaced("藤村の\nりを", SIZE, 0, 4 * SIZE)).toBe("藤村の\nりを");
+    expect(breakUnspaced("藤村のりを", measure, 10 * SIZE)).toBe("藤村のりを");
+    expect(breakUnspaced("藤村の\nりを", measure, 4 * SIZE)).toBe("藤村の\nりを");
   });
 
   it("puts a line break in front of each word that starts a new line, and joins with no space there", () => {
     const words = ["藤村", "の", "り", "を", "1914", "年", "大正", "3", "年"];
-    const broken = breakWords(words, SIZE, 0, 6 * SIZE);
+    const broken = breakWords(words, measure, 6 * SIZE);
     expect(broken.map((w) => w.replace(/^\n/, ""))).toEqual(words);
     expect(broken[0].startsWith("\n")).toBe(false);
     const lines = joinWords(broken).split("\n");
     expect(lines.length).toBeGreaterThan(1);
     expect(lines.join("")).toBe(joinWords(words));
-    for (const line of lines) expect(estimateWidth(line, SIZE)).toBeLessThanOrEqual(6 * SIZE);
+    for (const line of lines) expect(measure(line)).toBeLessThanOrEqual(6 * SIZE);
     const latin = ["Hello", "there", "and", "welcome", "back"];
-    expect(breakWords(latin, SIZE, 0, 2 * SIZE)).toEqual(latin);
+    expect(breakWords(latin, measure, 2 * SIZE)).toEqual(latin);
   });
 
   it("property: any Japanese text is broken only between words, never lost, every line fitting", () => {
@@ -129,12 +131,12 @@ describe("breakUnspaced: Chinese and Japanese lines broken to fit, everything el
         fc.integer({ min: 3, max: 20 }),
         (cs, em) => {
           const text = cs.join("");
-          const broken = breakUnspaced(text, SIZE, 0, em * SIZE);
+          const broken = breakUnspaced(text, measure, em * SIZE);
           expect(broken.replace(/\n/g, "")).toBe(text);
           for (const line of broken.split("\n")) {
             // A single word wider than the line keeps its own line rather than being cut.
             const one = (wordSpans(line) ?? []).length <= 1;
-            if (!one) expect(estimateWidth(line, SIZE)).toBeLessThanOrEqual(em * SIZE);
+            if (!one) expect(measure(line)).toBeLessThanOrEqual(em * SIZE);
           }
         },
       ),

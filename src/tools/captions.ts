@@ -19,6 +19,7 @@ import { ctxApplyOp, loadTimeline } from "../timeline/engine";
 import { canvasFps, newId } from "../timeline/frames";
 import { clipSpanToFrames, resolveTextTrack } from "../timeline/helpers";
 import type { Clip, Timeline } from "../timeline/model";
+import { lineWidthIn, planCanvas, textBox } from "../timeline/renderPlan";
 import type { ClientToolContext } from "./context";
 import type { ClientToolRegistry } from "./registry";
 import { ensureTranscript } from "./transcribe";
@@ -160,6 +161,20 @@ export async function addCaptionsTool(args: Args, ctx: ClientToolContext | null)
   if (!HERO_MODES.includes(hero)) {
     return { ok: false, error: `hero must be one of ${HERO_MODES.join(" | ")}` };
   }
+  // A caption is as long as fits on one line of its box: measured in the font, size and case it will
+  // be drawn in, on this canvas, by the same resolution both renderers lay it out with.
+  const style = args.style;
+  const transform = captionTransform(args.transform);
+  const canvas = planCanvas(timeline);
+  const box = textBox(
+    {
+      style: style && typeof style === "object" ? (style as Clip["style"]) : undefined,
+      transform: transform as Clip["transform"],
+    },
+    canvas.w,
+    canvas.h,
+  );
+  const fits = (text: string): boolean => lineWidthIn(applyCase(text, textCase), box) <= box.wPx;
 
   // Transcribe each candidate track. Auto-pick reads every track because "the track with the
   // most speech" cannot be known before transcribing â€” but each result is cached, so the cost
@@ -170,7 +185,12 @@ export async function addCaptionsTool(args: Args, ctx: ClientToolContext | null)
   for (const trackId of candidates) {
     const cues: Cue[] = [];
     for (const clip of byTrack.get(trackId) ?? []) {
-      let words: Array<{ word: string; start_seconds: number; end_seconds: number }>;
+      let words: Array<{
+        word: string;
+        start_seconds: number;
+        end_seconds: number;
+        segment_id: number;
+      }>;
       try {
         words = (
           await ensureTranscript(ctx, String(clip.media_ref), undefined, undefined, language)
@@ -182,9 +202,14 @@ export async function addCaptionsTool(args: Args, ctx: ClientToolContext | null)
       }
       const timed: CaptionWord[] = words
         .filter((w) => Number.isFinite(w.start_seconds) && Number.isFinite(w.end_seconds))
-        .map((w) => ({ text: w.word.trim(), start: w.start_seconds, end: w.end_seconds }))
+        .map((w) => ({
+          text: w.word.trim(),
+          start: w.start_seconds,
+          end: w.end_seconds,
+          segment: w.segment_id,
+        }))
         .filter((w) => w.text.length > 0);
-      for (const phrase of chunkWords(timed, { maxWords, maxCharacters })) {
+      for (const phrase of chunkWords(timed, { fits, maxWords, maxCharacters })) {
         // clipSpanToFrames owns source-seconds -> project-frames (trim + speed + position)
         // and drops anything outside the clip's visible span.
         const span = clipSpanToFrames(clip, phrase.start, phrase.end, fps);
@@ -247,8 +272,6 @@ export async function addCaptionsTool(args: Args, ctx: ClientToolContext | null)
   if (!placed.length) return { ok: false, error: "no speech detected to caption" };
 
   const group = newId("cap");
-  const style = args.style;
-  const transform = captionTransform(args.transform);
   const animation = args.animation;
 
   const result = await ctxApplyOp(ctx, "add_captions", (tl) => {

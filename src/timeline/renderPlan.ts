@@ -19,6 +19,7 @@ import type { Animatable, Clip, Timeline } from "./model";
 import { canvasFps, isNum } from "./frames";
 import { clipPlays, outputGate } from "./visibility";
 import { parseTransitionIn, TRANSITION_KINDS, type TransitionKind } from "./transition";
+import { lineWidthPx } from "./fontMetrics";
 import { breakUnspaced, breakWords, joinWords } from "./wordJoin";
 
 /** A clip's OWN incoming transition (from `transition_in`), resolved ONCE so render.ts's private
@@ -501,7 +502,13 @@ export function mergeAnimation(raw: unknown): Record<string, unknown> {
  *  name (e.g. "Impact") leaves plan.fonts empty and libass falls back to a SYSTEM font, so exports would
  *  differ per machine. resolveText clamps a requested font to one of these (case/space-insensitive),
  *  defaulting to Poppins. */
-const BUNDLED_FONTS = ["Anton", "Bebas Neue", "Oswald", "Playfair Display", "Poppins"] as const;
+export const BUNDLED_FONTS = [
+  "Anton",
+  "Bebas Neue",
+  "Oswald",
+  "Playfair Display",
+  "Poppins",
+] as const;
 const FONT_ALIASES: Record<string, string> = Object.fromEntries(
   BUNDLED_FONTS.flatMap((f) => [
     [f.toLowerCase(), f],
@@ -676,24 +683,70 @@ function resolveRuns(
   });
 }
 
+/** A text clip's face, em size and wrap box, as both renderers lay it out. The ONE resolution of these:
+ *  resolveText reads it, and so does add_captions to know how a caption will draw before placing it. */
+export interface TextBox {
+  readonly style: Record<string, unknown>;
+  readonly font: string;
+  readonly sizePx: number;
+  readonly spacingPx: number;
+  readonly caseMode: "upper" | "lower" | "none";
+  readonly safeMarginXPx: number;
+  /** The width a line wraps at: the canvas less a 5% title-safe margin each side (90%). */
+  readonly wPx: number;
+}
+
+export function textBox(clip: Pick<Clip, "style" | "transform">, cw: number, ch: number): TextBox {
+  const style = mergeStyle(clip.style);
+  // transform.scale multiplies the TYPE SIZE (a text clip has no pixel box to scale — it scales glyphs).
+  const tScale = isNum(clip.transform?.scale) ? Math.max(0, clip.transform!.scale as number) : 1;
+  // Per-EDGE title-safe inset (5% of EACH dimension — a landscape frame's side margin must be 5% of the
+  // WIDTH, not of the smaller height, or a wide caption still touches the vertical edges).
+  const safeMarginXPx = Math.round(cw * 0.05);
+  return {
+    style,
+    sizePx: Math.round(resolveSizePx(style, ch, ch * 0.06) * tScale),
+    // Clamp to a BUNDLED family (default Poppins): an unbundled name would leave plan.fonts empty and
+    // libass would fall back to a per-machine system font.
+    font: clampFont(style.font),
+    spacingPx: isNum(style.spacing) ? (style.spacing as number) : 0,
+    caseMode: style.case === "upper" || style.case === "lower" ? style.case : "none",
+    safeMarginXPx,
+    wPx: Math.max(1, cw - 2 * safeMarginXPx),
+  };
+}
+
+/** How wide `text` draws on one line of `box`, cased as the box draws it. */
+export function lineWidthIn(text: string, box: TextBox): number {
+  const cased =
+    box.caseMode === "upper"
+      ? text.toUpperCase()
+      : box.caseMode === "lower"
+        ? text.toLowerCase()
+        : text;
+  return lineWidthPx(cased, box.font, box.sizePx, box.spacingPx);
+}
+
+/** The canvas a timeline's text is laid out on, read the way the render plan reads it. */
+export function planCanvas(timeline: Pick<Timeline, "canvas">): { w: number; h: number } {
+  return {
+    w: Math.trunc(Number(timeline.canvas?.width)),
+    h: Math.trunc(Number(timeline.canvas?.height)),
+  };
+}
+
 /** Resolve a text clip's CONSTRAINTS + unified style defaults (Commit 2): `size ?? round(ch*0.06)`
  *  (resolution-relative, not a fixed 48), `font ?? "Poppins"` (a concrete bundled family — never
  *  `sans-serif`, which libass can't resolve without fontconfig), `color ?? white`. Box + align +
  *  per-edge safe margins + hardBreaks are the target constraints each backend lays out within. */
 function resolveText(clip: Clip, cw: number, ch: number, durSec: number): ResolvedText {
-  const style = mergeStyle(clip.style);
-  // transform.scale multiplies the TYPE SIZE (a text clip has no pixel box to scale — it scales glyphs).
-  const tScale = isNum(clip.transform?.scale) ? Math.max(0, clip.transform!.scale as number) : 1;
-  const sizePx = Math.round(resolveSizePx(style, ch, ch * 0.06) * tScale);
+  const { style, sizePx, font, spacingPx, caseMode, safeMarginXPx, wPx } = textBox(clip, cw, ch);
   const color =
     typeof style.color === "string"
       ? style.color
       : typeof style.fontcolor === "string"
         ? style.fontcolor
         : "white";
-  // Clamp to a BUNDLED family (default Poppins): an unbundled name would leave plan.fonts empty and
-  // libass would fall back to a per-machine system font.
-  const font = clampFont(style.font);
   const align =
     style.align === "left" || style.align === "right"
       ? (style.align as "left" | "right")
@@ -714,8 +767,6 @@ function resolveText(clip: Clip, cw: number, ch: number, durSec: number): Resolv
   const italic = style.italic === true;
   const underline = style.underline === true;
   const strike = style.strike === true;
-  const spacingPx = isNum(style.spacing) ? (style.spacing as number) : 0;
-  const caseMode = style.case === "upper" || style.case === "lower" ? style.case : "none";
   // Painted decorations: box wins over outline (both drive OutlineColour under different BorderStyles).
   const box = parseBox(style.box, sizePx);
   const outline = box ? null : parseOutline(style.outline);
@@ -740,9 +791,6 @@ function resolveText(clip: Clip, cw: number, ch: number, durSec: number): Resolv
           ms: isNum(anim.entrance_ms) ? Math.max(0, anim.entrance_ms as number) : 300,
         }
       : null;
-  // Per-EDGE title-safe inset (5% of EACH dimension — a landscape frame's side margin must be 5% of the
-  // WIDTH, not of the smaller height, or a wide caption still touches the vertical edges).
-  const safeMarginXPx = Math.round(cw * 0.05);
   const safeMarginYPx = Math.round(ch * 0.05);
   const pos = clip.transform?.position;
   const hasPos = pos != null && isNum(pos.x) && isNum(pos.y);
@@ -753,13 +801,14 @@ function resolveText(clip: Clip, cw: number, ch: number, durSec: number): Resolv
   const raw = textContent(clip);
   const cased =
     caseMode === "upper" ? raw.toUpperCase() : caseMode === "lower" ? raw.toLowerCase() : raw;
-  const wPx = Math.max(1, cw - 2 * safeMarginXPx); // wrap box inset by the horizontal safe margin on BOTH sides
   // Neither renderer can break a line inside Chinese or Japanese, so their breaks are decided here,
-  // once, for both (UJ-029); text in other scripts comes through untouched.
-  const fit = (s: string): string => breakUnspaced(s, sizePx, spacingPx, wPx);
+  // once, for both (UJ-029); text in other scripts comes through untouched. Measured in the clip's own
+  // font (the text is already cased).
+  const measure = (s: string): number => lineWidthPx(s, font, sizePx, spacingPx);
+  const fit = (s: string): string => breakUnspaced(s, measure, wPx);
   const fitWords = <T>(items: T[] | null, get: (t: T) => string, set: (t: T, s: string) => T) => {
     if (!items) return null;
-    const broken = breakWords(items.map(get), sizePx, spacingPx, wPx);
+    const broken = breakWords(items.map(get), measure, wPx);
     return items.map((it, i) => set(it, broken[i]));
   };
   const chunks =
@@ -852,8 +901,7 @@ export function onCanvasFrames(pc: PlanClip, fps: number): { first: number; end:
 /** Resolve the shared look plan from a SECONDS-view timeline. Pure; ordering + duration + transition +
  *  hold mirror render.ts exactly so the exporter can consume this byte-for-byte. */
 export function resolveRenderPlan(timeline: Timeline): SecondsRenderPlan {
-  const w = Math.trunc(Number(timeline.canvas?.width));
-  const h = Math.trunc(Number(timeline.canvas?.height));
+  const { w, h } = planCanvas(timeline);
   // NOT truncated: the preview inverts durSec -> frames with `Math.round(durSec * fps)`, which only
   // recovers the authored frame count when this is the exact fps the durations were resolved at
   // (buildScene asserts plan.canvas.fps === its own canvas fps). Truncating would drift at 29.97 etc.

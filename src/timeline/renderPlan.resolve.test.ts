@@ -14,7 +14,7 @@ import { describe, expect, it } from "vitest";
 
 import type { Timeline } from "./model";
 import { resolveRenderPlan } from "./renderPlan";
-import { estimateWidth } from "./wordJoin";
+import { lineWidthPx } from "./fontMetrics";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -346,7 +346,8 @@ describe("resolveRenderPlan — text look defaults + static marks", () => {
       "から",
     ];
     const vertical = { width: 1080, height: 1920 };
-    const fits = (tx: Any, line: string) => estimateWidth(line, tx.sizePx) <= tx.wPx;
+    const fits = (tx: Any, line: string) =>
+      lineWidthPx(line, tx.font, tx.sizePx, tx.spacingPx) <= tx.wPx;
     const plain = oneText(tclip({ text: long }), vertical);
     expect(plain.text.replace(/\n/g, "")).toBe(long);
     expect(plain.text.split("\n").length).toBeGreaterThan(1);

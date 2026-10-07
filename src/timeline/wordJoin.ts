@@ -80,32 +80,20 @@ export function wordSpans(text: string): Array<{ start: number; end: number }> |
   return spans;
 }
 
-/** How wide `text` draws at `sizePx`, estimated: a Chinese or Japanese character is one em in every
- *  CJK font; anything else is counted at 0.6 em, about an average Latin letter or digit. */
-export function estimateWidth(text: string, sizePx: number, spacingPx = 0): number {
-  let w = 0;
-  for (const ch of text) w += (UNSPACED_CHAR.test(ch) ? 1 : 0.6) * sizePx + spacingPx;
-  return w;
-}
-
 /** Neither renderer can break a line inside Chinese or Japanese (both break at spaces only), so a long
  *  one ran off both edges of the frame (UJ-029). This decides those breaks once, for both: "\n" goes
- *  between words wherever the line would be wider than `maxWidthPx`. Text with no Chinese or Japanese
- *  is returned as it is, for the renderers to wrap at spaces as before. */
+ *  between words wherever the line, as `measure` draws it, would be wider than `maxWidthPx`. Text with
+ *  no Chinese or Japanese is returned as it is, for the renderers to wrap at spaces as before. */
 export function breakUnspaced(
   text: string,
-  sizePx: number,
-  spacingPx: number,
+  measure: (line: string) => number,
   maxWidthPx: number,
 ): string {
   if (!UNSPACED_CHAR.test(text)) return text;
   return text
     .split("\n")
     .map((para) => {
-      const spans =
-        UNSPACED_CHAR.test(para) && estimateWidth(para, sizePx, spacingPx) > maxWidthPx
-          ? wordSpans(para)
-          : null;
+      const spans = UNSPACED_CHAR.test(para) && measure(para) > maxWidthPx ? wordSpans(para) : null;
       if (!spans || spans.length < 2) return para;
       const words = spans.map(({ start, end }, i) => ({
         gap: i ? para.slice(spans[i - 1].end, start) : para.slice(0, start),
@@ -114,7 +102,7 @@ export function breakUnspaced(
       let line = words[0].gap + words[0].word;
       const lines: string[] = [];
       for (const { gap, word } of words.slice(1)) {
-        if (estimateWidth(line + gap + word, sizePx, spacingPx) > maxWidthPx) {
+        if (measure(line + gap + word) > maxWidthPx) {
           lines.push(line);
           line = word;
         } else line += gap + word;
@@ -130,18 +118,16 @@ export function breakUnspaced(
  *  Only a line holding Chinese or Japanese is broken here; others are left as they are. */
 export function breakWords(
   words: readonly string[],
-  sizePx: number,
-  spacingPx: number,
+  measure: (line: string) => number,
   maxWidthPx: number,
 ): string[] {
   const joined = joinWords(words);
-  if (!UNSPACED_CHAR.test(joined) || estimateWidth(joined, sizePx, spacingPx) <= maxWidthPx)
-    return [...words];
+  if (!UNSPACED_CHAR.test(joined) || measure(joined) <= maxWidthPx) return [...words];
   const out = [words[0]];
   let line = words[0];
   for (let i = 1; i < words.length; i++) {
     const next = line + wordGap(words[i - 1], words[i]) + words[i];
-    if (estimateWidth(next, sizePx, spacingPx) > maxWidthPx) {
+    if (measure(next) > maxWidthPx) {
       out.push(`\n${words[i]}`);
       line = words[i];
     } else {

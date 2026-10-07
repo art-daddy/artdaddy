@@ -11,22 +11,57 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { addCaptionsTool } from "./captions";
 import {
+  ff,
   have,
   installE2EDocuments,
   libRef,
   mkCtx,
+  nodeRunner,
   openE2EDoc,
   regionScopes,
   renderMp4,
   resetE2EDocuments,
   srcSolid,
+  srcTone,
 } from "./__e2e";
+import { canonicalTranscriptRel } from "./transcribe";
 import { addClipsTool, addTextClipsTool, updateTextTool } from "../timeline/placement";
 import { getTimelineTool } from "../timeline/ops";
 import { ensureTimeline, loadTimeline, applyOp } from "../timeline/engine";
 import type { ClientToolContext } from "./context";
 
 type Rec = Record<string, unknown>;
+
+/** Seed `ref`'s transcript where a finished transcription leaves it, so add_captions reads these words
+ *  through its real door without running whisper. */
+async function seedTranscript(
+  ctx: ClientToolContext,
+  ref: string,
+  words: Array<[string, number, number]>,
+): Promise<void> {
+  const file = await ctx.store.prepareArtifact(canonicalTranscriptRel(ref, "small", undefined));
+  await ctx.store.writeText(
+    file,
+    JSON.stringify({
+      transcription: {
+        language: "en",
+        duration_seconds: words.length ? words[words.length - 1][2] : 0,
+        segments: [],
+        words: words.map(([word, start, end], i) => ({
+          word_id: i,
+          segment_id: 1,
+          index_in_segment: i,
+          word,
+          start_seconds: start,
+          end_seconds: end,
+          start_timestamp: "00:00:00",
+          end_timestamp: "00:00:00",
+          probability: 1,
+        })),
+      },
+    }),
+  );
+}
 
 const dirs: string[] = [];
 async function project(bed: string = "black"): Promise<{ ctx: ClientToolContext; dir: string }> {
@@ -70,6 +105,27 @@ async function inkAt(
  *  `editorial` read as "changed nothing" once it was drawn in its real (light) font. */
 const TITLE_BAND = "crop=iw:ih*0.2:0:ih*0.4";
 
+/** Darkest-to-brightest luma (0..255) in a region of the frame at `atSec`. */
+async function lumaRange(mp4: string, atSec: number, vf: string): Promise<number> {
+  const r = await nodeRunner.run("ffmpeg", [
+    "-hide_banner",
+    "-ss",
+    String(atSec),
+    "-i",
+    mp4,
+    "-frames:v",
+    "1",
+    "-vf",
+    `${vf},signalstats,metadata=print`,
+    "-f",
+    "null",
+    "-",
+  ]);
+  const get = (k: string): number =>
+    Number(new RegExp(`lavfi\\.signalstats\\.${k}=(\\d+)`).exec(r.stderr)?.[1]);
+  return get("YMAX") - get("YMIN");
+}
+
 /** Ink on a frame with NO text at all. Every "did it render?" assertion is made against this
  *  rather than a guessed constant: the lightest preset (a thin font at a modest size) legitimately
  *  paints far less than the heaviest, and a fixed threshold just encodes one preset's weight. */
@@ -110,13 +166,9 @@ describe.skipIf(!process.env.VITEST)("caption + text tools, end to end in pixels
     const presets = ["clean-white", "boxed", "punchy", "headline", "editorial", "minimal"];
     // Grey bed: white glyphs raise luma, a dark background box lowers it. Both are real changes.
     const grey = await project("gray");
-    const greyBaseline = await inkAt(
-      grey.ctx,
-      grey.dir,
-      await renderMp4(grey.ctx, grey.dir),
-      1,
-      TITLE_BAND,
-    );
+    const greyMp4 = await renderMp4(grey.ctx, grey.dir);
+    const greyBaseline = await inkAt(grey.ctx, grey.dir, greyMp4, 1, TITLE_BAND);
+    const greyRange = await lumaRange(greyMp4, 1, TITLE_BAND);
 
     const ink: Record<string, number> = {};
     for (const preset of presets) {
@@ -127,10 +179,12 @@ describe.skipIf(!process.env.VITEST)("caption + text tools, end to end in pixels
       ).toBe(true);
       const mp4 = await renderMp4(ctx, dir);
       ink[preset] = await inkAt(ctx, dir, mp4, 1, TITLE_BAND);
-      expect(
-        Math.abs(ink[preset] - greyBaseline),
-        `${preset} changed nothing against an empty frame (${greyBaseline})`,
-      ).toBeGreaterThan(0.001);
+      // Painted at all: judged by the band's luma RANGE, which an empty grey band does not have.
+      // The mean cannot tell: a white fill inside a black outline (headline) can average to the bed.
+      const range = await lumaRange(mp4, 1, TITLE_BAND);
+      expect(range, `${preset} painted nothing on the band (range ${range})`).toBeGreaterThan(
+        greyRange + 40,
+      );
     }
     // `boxed` lays a dark background behind the words; `clean-white` is bare glyphs. If the preset
     // reached the plan in name only these would be indistinguishable.
@@ -268,6 +322,90 @@ describe.skipIf(!process.env.VITEST)("caption + text tools, end to end in pixels
     const after = await inkAt(ctx, dir, await renderMp4(ctx, dir), 1);
     expect(after).toBeGreaterThan(boxed * 0.5);
   }, 300_000);
+});
+
+// UJ-030 / UJ-032, the whole path: add_captions cuts the speech to fit one line of the caption box,
+// the export draws each caption at the size the preview shows, and on screen every one of them is ONE
+// line inside the title-safe margins, on a wide canvas and on a tall one. Either half alone (the cut,
+// or the size) can be right while the frame is wrong; this reads the frame.
+describe.skipIf(!process.env.VITEST)("captions fit one line, end to end in pixels", () => {
+  const SPEECH =
+    "today we are going to look at how captions fit on a screen and why the size of the screen " +
+    "and the size of the text decide how many words each caption can hold";
+
+  /** Luma of one frame of `mp4` at `atSec`, row by row. */
+  async function frameLuma(mp4: string, atSec: number): Promise<Buffer> {
+    const raw = `${mp4}.${Math.round(atSec * 1000)}.gray`;
+    await ff(
+      ["-y", "-ss", String(atSec), "-i", mp4, "-frames:v", "1", "-f", "rawvideo"].concat([
+        "-pix_fmt",
+        "gray",
+        raw,
+      ]),
+    );
+    return fsp.readFile(raw);
+  }
+
+  for (const canvas of [
+    { width: 640, height: 360 },
+    { width: 360, height: 640 },
+  ]) {
+    it(`${canvas.width}x${canvas.height}: every caption is one line inside the frame`, async () => {
+      if (!ffmpegAvailable) return;
+      const { ctx, dir } = await project();
+      await applyOp(ctx.store, "canvas", (tl) => {
+        tl.canvas = { ...tl.canvas, ...canvas };
+      });
+      const tone = await srcTone(path.join(dir, "speech.wav"), { freq: 300, dur: 6 });
+      const ref = await libRef(ctx, tone, "audio");
+      const placed = (await addClipsTool(
+        { entries: [{ media_ref: ref, timeline_in: 0 }] },
+        ctx,
+      )) as Rec;
+      expect(placed.ok, JSON.stringify(placed)).toBe(true);
+      const words = SPEECH.split(" ");
+      await seedTranscript(
+        ctx,
+        ref,
+        words.map((t, i) => [t, (i * 5.5) / words.length, ((i + 0.9) * 5.5) / words.length]),
+      );
+      const r = (await addCaptionsTool({ max_gap_seconds: 0 }, ctx)) as Rec;
+      expect(r.ok, JSON.stringify(r)).toBe(true);
+
+      const tl = await loadTimeline(ctx.store);
+      const fps = Number(tl.canvas?.fps) || 30;
+      const caps = tl.tracks
+        .flatMap((t) => t.clips ?? [])
+        .filter((c) => c.kind === "text")
+        .sort((a, b) => Number(a.timeline_in) - Number(b.timeline_in));
+      expect(caps.length, "the speech made more than one caption").toBeGreaterThan(1);
+      const em = Math.round(canvas.height * 0.06); // the default caption size: 6% of the height
+      const mp4 = await renderMp4(ctx, dir);
+      for (const c of caps) {
+        const mid = (Number(c.timeline_in) + Number(c.timeline_out)) / 2 / fps;
+        const px = await frameLuma(mp4, mid);
+        let [x0, x1, y0, y1] = [canvas.width, -1, canvas.height, -1];
+        for (let y = 0; y < canvas.height; y++)
+          for (let x = 0; x < canvas.width; x++)
+            if (px[y * canvas.width + x] > 128) {
+              [x0, x1, y0, y1] = [
+                Math.min(x0, x),
+                Math.max(x1, x),
+                Math.min(y0, y),
+                Math.max(y1, y),
+              ];
+            }
+        const what = `caption ${JSON.stringify(c.content)} at ${mid.toFixed(2)}s: ink x ${x0}..${x1}, y ${y0}..${y1}`;
+        expect(x1, `${what}: nothing drawn`).toBeGreaterThan(x0);
+        // One line: glyph ink spans about an em (ascenders to descenders); a second line adds a
+        // whole line height on top.
+        expect(y1 - y0, `${what}: taller than one line`).toBeLessThan(1.6 * em);
+        // Inside the 5% title-safe margin on each side, give or take a pixel of antialiasing.
+        expect(x0, what).toBeGreaterThanOrEqual(Math.floor(canvas.width * 0.05) - 2);
+        expect(x1, what).toBeLessThanOrEqual(Math.ceil(canvas.width * 0.95) + 2);
+      }
+    }, 300_000);
+  }
 });
 
 describe.skipIf(!process.env.VITEST)("subtitles, end to end in pixels", () => {

@@ -26,9 +26,23 @@ import { __resetExportQueue, whenExportsSettle } from "./exportQueue";
 import { __resetJobNotes, pendingJobNotes } from "../store/jobNotes";
 import { useExportJob } from "../store/exportJob";
 import type { ClientToolContext } from "../tools/context";
+import { BUNDLED_FACES } from "./fontMetrics.data";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
+
+/** Each [V4+ Styles] row as {family, em}: libass's Fontsize is the face's Windows ascent + descent,
+ *  so the em it draws is Fontsize over that ratio, read from the font's own numbers (UJ-032). */
+function styleEms(ass: string): Array<{ family: string; em: number }> {
+  return ass
+    .split("\n")
+    .filter((l) => l.startsWith("Style:"))
+    .map((l) => {
+      const [, family, size] = l.split(",");
+      const f = BUNDLED_FACES[family];
+      return { family, em: Number(size) / ((f.winAscent + f.winDescent) / f.upm) };
+    });
+}
 
 // seededCtx installs a per-project open-document resolver; reset it between tests so the bare-store
 // suites below (which seed timeline.json on disk and expect the no-document read path) don't pick up
@@ -1482,7 +1496,7 @@ describe("buildRenderCommand", () => {
     expect(ass).toContain("PlayResX: 200");
     expect(ass).toContain("PlayResY: 100");
     // The static look (Poppins default family, authored 64px) lives in the named [V4+ Styles] row.
-    expect(ass).toContain("Poppins,64,");
+    expect(styleEms(ass)).toEqual([{ family: "Poppins", em: expect.closeTo(64, 1) }]);
     // Safe margin insets the wrap box per EDGE: MarginL=MarginR=round(200*0.05)=10 (was 0,0 ΓÇö edge-touching).
     expect(ass).toContain(",10,10,0,,");
     // Centred (an5) at the canvas midpoint; the static marks moved to the style, so the inline override
@@ -1613,7 +1627,7 @@ describe("buildRenderCommand", () => {
       "/o.mp4",
     );
     const style = plan.assFiles[0].content.split("\n").find((l) => l.startsWith("Style:"))!;
-    expect(style).toContain("Poppins,92,"); // preset font + size seeded
+    expect(styleEms(style)).toEqual([{ family: "Poppins", em: expect.closeTo(92, 1) }]); // preset font + size seeded
     expect(style).toContain(",-1,"); // preset bold
     // Explicit fields override the preset.
     const over = buildRenderCommand(
@@ -1632,7 +1646,7 @@ describe("buildRenderCommand", () => {
       "/o.mp4",
     );
     const os = over.assFiles[0].content.split("\n").find((l) => l.startsWith("Style:"))!;
-    expect(os).toContain("Poppins,50,"); // size overridden
+    expect(styleEms(os)).toEqual([{ family: "Poppins", em: expect.closeTo(50, 1) }]); // size overridden
     expect(os).toContain("&H000000FF"); // colour overridden to red (Primary, ARGB BGR order)
     // A preset that forces upper-case cases the text in the plan.
     const punchy = buildRenderCommand(
@@ -1966,9 +1980,9 @@ describe("buildRenderCommand", () => {
     // Two text clips, no video between -> one shared band; each distinct font family gets its own named style.
     expect(plan.assFiles).toHaveLength(1);
     const ass = plan.assFiles[0].content;
-    const styles = ass.split("\n").filter((l) => l.startsWith("Style:"));
-    expect(styles.some((s) => s.includes("Anton,40,"))).toBe(true); // known family kept
-    expect(styles.some((s) => s.includes("Poppins,40,"))).toBe(true); // "Nonesuch" clamped to the bundled default
+    const ems = styleEms(ass);
+    expect(ems).toContainEqual({ family: "Anton", em: expect.closeTo(40, 1) }); // known family kept
+    expect(ems).toContainEqual({ family: "Poppins", em: expect.closeTo(40, 1) }); // "Nonesuch" clamped to the bundled default
     expect(ass).not.toContain("Nonesuch"); // never emitted -> no per-machine system-font fallback
     expect(plan.fonts.length).toBeGreaterThan(0); // both families bundled -> their ttfs are staged
     // No drawtext fontfile path anymore ΓÇö glyphs resolve by family from the staged fontsdir at render.
@@ -1993,7 +2007,9 @@ describe("buildRenderCommand", () => {
       ),
       "/o.mp4",
     );
-    expect(plan.assFiles[0].content).toContain("Poppins,80,"); // 40 * 2
+    expect(styleEms(plan.assFiles[0].content)).toEqual([
+      { family: "Poppins", em: expect.closeTo(80, 1) }, // 40 * 2
+    ]);
   });
 
   it("reads text from a content array and skips empty text clips", () => {
@@ -2016,7 +2032,7 @@ describe("buildRenderCommand", () => {
     // The content array joins into one caption; the empty clip emits no Dialogue (single band, one line).
     expect(plan.assFiles).toHaveLength(1);
     const ass = plan.assFiles[0].content;
-    expect(ass).toContain("Poppins,30,"); // authored size 30 in the named style
+    expect(styleEms(ass)).toEqual([{ family: "Poppins", em: expect.closeTo(30, 1) }]); // authored size 30 in the named style
     expect(ass).toContain("}Line A Line B");
     expect((ass.match(/^Dialogue:/gm) ?? []).length).toBe(1); // empty clip skipped
   });

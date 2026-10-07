@@ -16,6 +16,7 @@
 // block can open) and guards every `\` with a zero-width space, so text can only ever be DRAWN, never
 // interpreted — WITHOUT dropping characters. The `rawAss` escape hatch (a clip's explicit `raw_ass`) is
 // the ONLY path that passes override tags through, and only because the author opted in.
+import { exportCell } from "./fontMetrics";
 import type { ResolvedRun } from "./renderPlan";
 import { joinMapped, wordGap } from "./wordJoin";
 
@@ -148,6 +149,12 @@ function assNum(n: number): string {
   return Number.isInteger(n) ? String(n) : String(Number(n.toFixed(3)));
 }
 
+/** The ASS Fontsize that draws `text` with an em of `sizePx`. libass sizes a face so its Windows
+ *  ascent + descent equal Fontsize; the plan's size is the em, as the preview draws it (UJ-032). */
+function assFontsize(sizePx: number, text: string, font: string): number {
+  return Math.round(sizePx * exportCell(text, font) * 100) / 100;
+}
+
 /** Port of v1 `_style_line`: a caption's STATIC look -> one `[V4+ Styles]` row BODY (the text after
  *  `Style: <name>,`), so `buildBandAss` can dedupe by body and assign a name. A box paints via
  *  BorderStyle=3 (opaque box, `Outline` = padding, `BackColour` = box fill) which libass can ONLY set in
@@ -180,7 +187,7 @@ function styleRow(c: CaptionSpec): string {
   const boldField = c.weight != null ? String(c.weight) : c.bold ? "-1" : "0";
   return [
     c.font,
-    assNum(c.sizePx),
+    assNum(assFontsize(c.sizePx, c.text, c.font)),
     primary,
     secondary,
     outlineC,
@@ -286,8 +293,12 @@ function runOverride(
   const tags: string[] = [];
   if (run.font !== base.font) tags.push(`\\fn${run.font}`);
   if (run.color !== base.color) tags.push(`\\1c${assColour(run.color)}`);
-  if (run.sizePx !== base.sizePx) {
-    const sc = base.sizePx ? (run.sizePx / base.sizePx) * 100 : 100;
+  // The style's Fontsize is the BASE face's; a run drawn by another face, or at another size, scales
+  // by the ratio of the two Fontsizes so its em is still its own size.
+  const runSize = assFontsize(run.sizePx, run.text, run.font);
+  const baseSize = assFontsize(base.sizePx, base.text, base.font);
+  if (runSize !== baseSize) {
+    const sc = baseSize ? Math.round((runSize / baseSize) * 10000) / 100 : 100;
     tags.push(`\\fscx${assNum(sc)}\\fscy${assNum(sc)}`);
   }
   if (run.weight != null && run.weight !== base.weight) tags.push(`\\b${run.weight}`);

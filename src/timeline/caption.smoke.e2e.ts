@@ -10,6 +10,8 @@ import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 
 import type { Timeline } from "./model";
+import { BUNDLED_FACES } from "./fontMetrics.data";
+import { lineWidthPx } from "./fontMetrics";
 import { buildRenderCommand } from "./render";
 import { shippedSidecar } from "../test/sidecars";
 
@@ -92,6 +94,36 @@ async function regionMaxLuma(ff: string, mp4: string, t: number, crop: string): 
   ]);
   const mx = r.stderr.match(/lavfi\.signalstats\.YMAX=(\d+)/);
   return mx ? Number(mx[1]) : -1;
+}
+
+/** Bounding box of the lit pixels (luma > 128) in the frame at `t`, in canvas pixels. */
+async function inkBox(
+  ff: string,
+  mp4: string,
+  t: number,
+  w: number,
+  h: number,
+): Promise<{ width: number; height: number; x0: number; x1: number }> {
+  const raw = `${mp4}.k${Math.round(t * 1000)}.gray`;
+  await run(
+    ff,
+    ["-y", "-ss", String(t), "-i", mp4, "-frames:v", "1", "-f", "rawvideo"].concat([
+      "-pix_fmt",
+      "gray",
+      raw,
+    ]),
+  );
+  const px = await fsp.readFile(raw);
+  let [x0, x1, y0, y1] = [w, -1, h, -1];
+  for (let y = 0; y < h; y++)
+    for (let x = 0; x < w; x++)
+      if (px[y * w + x] > 128) {
+        x0 = Math.min(x0, x);
+        x1 = Math.max(x1, x);
+        y0 = Math.min(y0, y);
+        y1 = Math.max(y1, y);
+      }
+  return { width: x1 - x0 + 1, height: y1 - y0 + 1, x0, x1 };
 }
 
 /** Stage the plan's .ass + referenced fonts into `cwd` (mirrors runRenderPlan) and render. The graph
@@ -610,6 +642,77 @@ describe.skipIf(!FF)("caption pixel smoke (bundled libass)", () => {
     const lit = await Promise.all(lines.map((b) => regionMaxLuma(FF!, out, 0.5, b)));
     expect(lit.filter((l) => l > 150).length, `ink per band ${lit}`).toBeGreaterThan(1);
   });
+
+  // UJ-032: a size is the EM, as the preview (a canvas, as in CSS) draws it. libass took it as the
+  // face's Windows ascent + descent instead, so exported text came out 57-77% as big as the preview
+  // showed, by font. Every bundled family is walked: each has its own ratio.
+  it.each(Object.keys(BUNDLED_FACES))("%s exports at the em the preview draws", async (font) => {
+    const cwd = await scratch();
+    const [W, H, sizePx, word] = [1600, 300, 100, "Hamburgefonstiv"];
+    const out = await render(FF!, cwd, {
+      canvas: { width: W, height: H, fps: 30 },
+      tracks: [
+        {
+          id: "t",
+          kind: "text",
+          z: 0,
+          clips: [
+            {
+              kind: "text",
+              text: word,
+              timeline_in: 0,
+              timeline_out: 1,
+              style: { color: "#ffffff", font, size: sizePx },
+            },
+          ],
+        },
+      ],
+    } as unknown as Timeline);
+    const ink = await inkBox(FF!, out, 0.5, W, H);
+    const advance = lineWidthPx(word, font, sizePx);
+    // The ink is the advances less the outer glyphs' side bearings: a little under, never over.
+    expect(
+      ink.width / advance,
+      `${font}: ink ${ink.width}px, advances ${advance}px`,
+    ).toBeGreaterThan(0.9);
+    expect(ink.width / advance, `${font}: ink ${ink.width}px, advances ${advance}px`).toBeLessThan(
+      1.02,
+    );
+  });
+
+  // A script no bundled font has is drawn by a system face with its own height metrics; the export
+  // sizes it by that face's. Which face that is depends on the OS, so this is checked on Windows only.
+  it.skipIf(process.platform !== "win32")(
+    "Chinese drawn by the system's fallback face exports at the same em",
+    async () => {
+      const cwd = await scratch();
+      const [W, H, sizePx, text] = [1600, 300, 100, "这是一个测试句子你好世界"];
+      const out = await render(FF!, cwd, {
+        canvas: { width: W, height: H, fps: 30 },
+        tracks: [
+          {
+            id: "t",
+            kind: "text",
+            z: 0,
+            clips: [
+              {
+                kind: "text",
+                text,
+                timeline_in: 0,
+                timeline_out: 1,
+                style: { color: "#ffffff", font: "Poppins", size: sizePx },
+              },
+            ],
+          },
+        ],
+      } as unknown as Timeline);
+      const ink = await inkBox(FF!, out, 0.5, W, H);
+      // An ideograph fills its em square: twelve of them span about twelve ems.
+      const ems = ink.width / sizePx / [...text].length;
+      expect(ems, `ink ${ink.width}px for ${[...text].length} ideographs`).toBeGreaterThan(0.9);
+      expect(ems).toBeLessThan(1.1);
+    },
+  );
 
   it("a style PRESET resolves into a real look (C5: clean-white renders visible text)", async () => {
     const cwd = await scratch();

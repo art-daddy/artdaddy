@@ -11,13 +11,15 @@
 // silently drop a word are worse than no captions, because nobody re-reads their own video
 // to check.
 
-import { joinWords, UNSPACED_CHAR, wordGap } from "./wordJoin";
+import { joinWords, wordGap } from "./wordJoin";
 
 export interface CaptionWord {
   readonly text: string;
   /** Source seconds. */
   readonly start: number;
   readonly end: number;
+  /** The transcript segment the word came from; a caption never spans two. */
+  readonly segment?: number;
 }
 
 export interface CaptionPhrase {
@@ -28,71 +30,83 @@ export interface CaptionPhrase {
 }
 
 export interface ChunkOptions {
-  /** Cap words per caption. Undefined = no cap. */
+  /** Whether a caption's text draws on ONE line of its box. Required, because no length is right on
+   *  every canvas, in every font, at every size: a caption is as long as fits (UJ-030). */
+  readonly fits: (text: string) => boolean;
+  /** Cap words per caption. A cap only makes captions shorter: they still fit one line. */
   readonly maxWords?: number;
-  /** Cap characters per caption, spaces included. A single longer word still gets its own
-   *  caption rather than being split or dropped. Undefined = the subtitle standard below. */
+  /** Cap characters per caption, spaces included. */
   readonly maxCharacters?: number;
 }
-
-/** A caption's length when the caller sets none: the subtitle line standard (Netflix's timed-text
- *  style guides), 42 characters, or 16 for Chinese and Japanese. With no cap at all a caption only
- *  closed at a sentence end, so a transcript with none became one caption for the whole clip (UJ-030). */
-export const DEFAULT_MAX_CHARACTERS = 42;
-export const DEFAULT_MAX_CHARACTERS_UNSPACED = 16;
 
 /** A word that ends a sentence closes the caption even when there is room left: reading a
  *  new sentence that begins mid-caption is what makes auto-captions feel machine-made. Other
  *  scripts end theirs with their own marks: 。！？ (Chinese, Japanese), । ॥ (Hindi and other
  *  Indian scripts), ؟ (Arabic), ۔ (Urdu). */
 const SENTENCE_END = /[.!?…。！？।॥؟۔]["')\]」』]?$/;
+/** Where a clause ends: the next best place to cut a line that does not fit. */
+const CLAUSE_END = /[,;:，、；：،؛]["')\]」』]?$/;
 
-export function chunkWords(
-  words: readonly CaptionWord[],
-  opts: ChunkOptions = {},
-): CaptionPhrase[] {
+/** Group spoken words into captions the way an NLE does (Palmier Pro's rule): a caption is everything
+ *  up to a sentence end, within one transcript segment, if it fits on one line; one that does not is
+ *  cut at the clause mark nearest its middle, else at the word nearest its middle, and each half is
+ *  judged again. A single word too wide for the line keeps a caption of its own. */
+export function chunkWords(words: readonly CaptionWord[], opts: ChunkOptions): CaptionPhrase[] {
   const maxWords = opts.maxWords && opts.maxWords > 0 ? Math.floor(opts.maxWords) : Infinity;
-  const asked =
-    opts.maxCharacters && opts.maxCharacters > 0 ? Math.floor(opts.maxCharacters) : null;
+  const maxChars =
+    opts.maxCharacters && opts.maxCharacters > 0 ? Math.floor(opts.maxCharacters) : Infinity;
+  const textOf = (run: readonly CaptionWord[]): string => joinWords(run.map((w) => w.text));
 
   const out: CaptionPhrase[] = [];
-  let run: CaptionWord[] = [];
-  let chars = 0;
-  let unspaced = false; // the caption so far holds Chinese or Japanese
-
-  const flush = (): void => {
-    if (!run.length) return;
-    out.push({
-      text: joinWords(run.map((w) => w.text)),
-      start: run[0].start,
-      end: run[run.length - 1].end,
-      words: run,
-    });
-    run = [];
-    chars = 0;
-    unspaced = false;
+  const place = (run: readonly CaptionWord[]): void => {
+    const text = textOf(run);
+    const ok = run.length <= maxWords && text.length <= maxChars && opts.fits(text);
+    if (ok || run.length === 1) {
+      out.push({ text, start: run[0].start, end: run[run.length - 1].end, words: run });
+      return;
+    }
+    const at = cutAt(run);
+    place(run.slice(0, at));
+    place(run.slice(at));
   };
-  /** The caption's width with `w` added: the space before it counts, where there is one. */
-  const widthWith = (w: CaptionWord): number =>
-    run.length
-      ? chars + wordGap(run[run.length - 1].text, w.text).length + w.text.length
-      : w.text.length;
-  const capWith = (w: CaptionWord): number =>
-    asked ??
-    (unspaced || UNSPACED_CHAR.test(w.text)
-      ? DEFAULT_MAX_CHARACTERS_UNSPACED
-      : DEFAULT_MAX_CHARACTERS);
 
+  let unit: CaptionWord[] = [];
   for (const w of words) {
-    // `run.length` guard: a word longer than the cap must still be emitted, not loop forever.
-    if (run.length && (run.length + 1 > maxWords || widthWith(w) > capWith(w))) flush();
-    chars = widthWith(w);
-    unspaced ||= UNSPACED_CHAR.test(w.text);
-    run.push(w);
-    if (SENTENCE_END.test(w.text)) flush();
+    if (unit.length && w.segment !== unit[unit.length - 1].segment) {
+      place(unit);
+      unit = [];
+    }
+    unit.push(w);
+    if (SENTENCE_END.test(w.text)) {
+      place(unit);
+      unit = [];
+    }
   }
-  flush();
+  if (unit.length) place(unit);
   return out;
+}
+
+/** Where to cut a run of two or more words that does not fit: after the clause mark nearest the
+ *  middle of its text, or failing one, between the words nearest the middle. */
+function cutAt(run: readonly CaptionWord[]): number {
+  const ends: number[] = []; // text length up to and including word i
+  let len = 0;
+  run.forEach((w, i) => {
+    len += (i ? wordGap(run[i - 1].text, w.text).length : 0) + w.text.length;
+    ends.push(len);
+  });
+  const nearestMiddle = (allowed: (i: number) => boolean): number => {
+    let best = -1;
+    for (let i = 1; i < run.length; i++)
+      if (
+        allowed(i) &&
+        (best < 0 || Math.abs(ends[i - 1] - len / 2) < Math.abs(ends[best - 1] - len / 2))
+      )
+        best = i;
+    return best;
+  };
+  const clause = nearestMiddle((i) => CLAUSE_END.test(run[i - 1].text));
+  return clause > 0 ? clause : nearestMiddle(() => true);
 }
 
 export interface CaptionSpan {

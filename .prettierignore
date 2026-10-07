@@ -18,6 +18,7 @@ src/contract/tools.snapshot.json
 src/contract/params.snapshot.json
 src/contract/effectRegistry.json
 src/api/schema.d.ts
+src/timeline/fontMetrics.data.ts
 
 # Lockfiles + minified assets.
 package-lock.json

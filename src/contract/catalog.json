@@ -7,7 +7,7 @@
     {
       "name": "add_captions",
       "expensive": true,
-      "description": "Caption the spoken audio: transcribes it, splits it into caption-sized phrases on word boundaries, and places the text clips — one atomic, undoable action. Use this for captions/subtitles rather than building them by hand out of get_transcript + add_text_clips.\n\nTranscription runs LOCALLY and is cached per source, so re-captioning the same footage costs nothing.\n\nAlready have an SRT/WebVTT file? Import it, then pass its `subtitle_media_ref` to place its cues at their authored timecodes instead — a subtitle asset can never be placed with add_clips.\n\nOmit `track_id` and it captions the audio track with the most speech. Chunking is done for you: `max_words` / `max_characters` cap each caption and `max_gap_seconds` holds a caption across a short pause instead of blinking off (default 0.5s; 0 disables).\n\n`style`, `transform` and `animation` are OPTIONAL OVERRIDES — omit them all for the app's default caption look, and do NOT invent fonts, colours, outlines, boxes or animations the user did not ask for.\n\nReturns {ok, created:[{clip_id, track_id}], count, caption_group, source_track} plus a change delta — patch your model, don't re-read. Keep the `caption_group`: it restyles or removes the whole set in one update_text / remove_clips call.",
+      "description": "Caption the spoken audio: transcribes it, splits it into caption-sized phrases on word boundaries, and places the text clips — one atomic, undoable action. Use this for captions/subtitles rather than building them by hand out of get_transcript + add_text_clips.\n\nTranscription runs LOCALLY and is cached per source, so re-captioning the same footage costs nothing.\n\nAlready have an SRT/WebVTT file? Import it, then pass its `subtitle_media_ref` to place its cues at their authored timecodes instead — a subtitle asset can never be placed with add_clips.\n\nOmit `track_id` and it captions the audio track with the most speech. Chunking is done for you: each caption holds as many words as fit on ONE line of the caption box at its font and size on this canvas (so a vertical canvas or a bigger size makes shorter captions), never past a sentence end; `max_words` / `max_characters` can only make them shorter. `max_gap_seconds` holds a caption across a short pause instead of blinking off (default 0.5s; 0 disables).\n\n`style`, `transform` and `animation` are OPTIONAL OVERRIDES — omit them all for the app's default caption look, and do NOT invent fonts, colours, outlines, boxes or animations the user did not ask for.\n\nReturns {ok, created:[{clip_id, track_id}], count, caption_group, source_track} plus a change delta — patch your model, don't re-read. Keep the `caption_group`: it restyles or removes the whole set in one update_text / remove_clips call.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -30,12 +30,12 @@
           "max_words": {
             "type": "integer",
             "minimum": 1,
-            "description": "Optional. Max words per caption."
+            "description": "Optional. Max words per caption. Omit both caps for captions that fill one line of the box."
           },
           "max_characters": {
             "type": "integer",
             "minimum": 1,
-            "description": "Optional. Max characters per caption, spaces and punctuation included. Default 42 (16 for Chinese and Japanese). A single longer word still gets its own caption."
+            "description": "Optional. Max characters per caption, spaces and punctuation included. A caption never runs past one line of its box either way. A single longer word still gets its own caption."
           },
           "max_gap_seconds": {
             "type": "number",

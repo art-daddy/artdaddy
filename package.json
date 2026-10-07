@@ -15,6 +15,7 @@
     "lint:fix": "eslint . --fix",
     "preview": "vite preview",
     "codegen": "node scripts/codegen.mjs",
+    "fontmetrics": "vite-node scripts/genFontMetrics.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",

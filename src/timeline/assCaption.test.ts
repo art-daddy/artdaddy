@@ -8,7 +8,18 @@ import {
   unrenderableFlags,
   type CaptionSpec,
 } from "./assCaption";
+import { BUNDLED_FACES } from "./fontMetrics.data";
 import type { ResolvedRun } from "./renderPlan";
+
+/** What libass multiplies an em by to get its Fontsize for a bundled face: (winAscent + winDescent)
+ *  / upm, read from the font's own numbers (UJ-032). */
+const cell = (family: string): number => {
+  const f = BUNDLED_FACES[family];
+  return (f.winAscent + f.winDescent) / f.upm;
+};
+/** The visible text of a Dialogue line: everything after its nine fields, override blocks removed. */
+const visible = (line: string): string =>
+  line.replace(/^(?:[^,]*,){9}/, "").replace(/\{[^}]*\}/g, "");
 
 const cap = (over: Partial<CaptionSpec> = {}): CaptionSpec => ({
   text: "Hello",
@@ -126,7 +137,9 @@ describe("buildBandAss — one .ass per z-band", () => {
     const style = ass.split("\n").find((l) => l.startsWith("Style:"))!;
     const line = ass.split("\n").find((l) => l.startsWith("Dialogue:"))!;
     // font / size / primary colour now live in the named [V4+ Styles] row, not inline on the Dialogue.
-    expect(style).toContain("Poppins,60,&H00FFFFFF");
+    expect(style).toMatch(/^Style: S0,Poppins,[\d.]+,&H00FFFFFF/);
+    // The size is the em (as the preview draws it); libass wants the face's ascent + descent.
+    expect(Number(style.split(",")[2]) / 60).toBeCloseTo(cell("Poppins"), 3);
     // wrap width 800 over a 1920 canvas -> equal margins of (1920-800)/2 = 560.
     expect(line).toContain(",560,560,0,,");
     expect(line).toContain("\\an5");
@@ -299,7 +312,7 @@ describe("runs + emphasis (C2)", () => {
   });
 
   it("emits only the fields that DIFFER from the base (font / size / marks)", () => {
-    const line = buildBandAss(
+    const ass = buildBandAss(
       [
         cap({
           text: "",
@@ -308,11 +321,13 @@ describe("runs + emphasis (C2)", () => {
         }),
       ],
       { w: 1920, h: 1080 },
-    )
-      .split("\n")
-      .find((l) => l.startsWith("Dialogue:"))!;
+    ).split("\n");
+    const line = ass.find((l) => l.startsWith("Dialogue:"))!;
     expect(line).toContain("\\fnAnton"); // font differs
-    expect(line).toContain("\\fscx150\\fscy150"); // 90/60 -> 150% scale
+    // The run is drawn by Anton at the style's Fontsize scaled by \fscx: its em must come out 90.
+    const fontsize = Number(ass.find((l) => l.startsWith("Style:"))!.split(",")[2]);
+    const scale = Number(/\\fscx([\d.]+)\\fscy\1/.exec(line)![1]) / 100;
+    expect((fontsize * scale) / cell("Anton")).toBeCloseTo(90, 1);
     expect(line).toContain("\\b1"); // bold differs from the base's false
   });
 
@@ -457,7 +472,8 @@ describe("captions in Chinese and Japanese have no space between words (UJ-004)"
       text: "",
       runs: [run({ text: "AI" }), run({ text: "が", color: "#ff0000" }), run({ text: "日本" })],
     });
-    expect(line).toMatch(/}AI\{\\1c&H0000FF&}が\{\\r}日本$/);
+    expect(line).toContain("{\\1c&H0000FF&"); // the recoloured run is still styled on its own
+    expect(visible(line)).toBe("AIが日本");
   });
 
   it("while a spaced language keeps its spaces in all three", () => {
