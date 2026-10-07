@@ -194,3 +194,50 @@ describe("MutationGate", () => {
     expect(idle).toBe(true);
   });
 });
+
+describe("MutationGate lease observer", () => {
+  it("brackets every lease with begin/end, end reporting whether it committed", async () => {
+    const seen: string[] = [];
+    const g = new MutationGate(PID, SID, undefined, {
+      begin: (r) => seen.push(`begin ${r.operation}`),
+      end: (r, committed) => seen.push(`end ${r.operation} ${committed}`),
+    });
+    await g.run(req({ operation: "read" }), async () => {
+      seen.push("run read");
+    });
+    await g.run(req({ operation: "write" }), async (ctx) => {
+      seen.push("run write");
+      ctx.markCommitted();
+    });
+    await expect(
+      g.run(req({ operation: "boom" }), async () => {
+        throw new Error("boom");
+      }),
+    ).rejects.toThrow("boom");
+    expect(seen).toEqual([
+      "begin read",
+      "run read",
+      "end read false",
+      "begin write",
+      "run write",
+      "end write true",
+      "begin boom",
+      "end boom false",
+    ]);
+  });
+
+  it("never holds a lease because the observer threw, at either end", async () => {
+    const g = new MutationGate(PID, SID, undefined, {
+      begin: () => {
+        throw new Error("begin");
+      },
+      end: () => {
+        throw new Error("end");
+      },
+    });
+    await g.run(req(), async (ctx) => ctx.markCommitted());
+    await g.run(req(), async (ctx) => ctx.markCommitted()); // would hang if the first lease leaked
+    expect(g.currentRevision()).toBe(2);
+    await expect(g.waitForIdle()).resolves.toBeUndefined();
+  });
+});

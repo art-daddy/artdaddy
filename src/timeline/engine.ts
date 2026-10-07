@@ -682,9 +682,19 @@ async function applyOpLocked(
   return r.receipt;
 }
 
-export async function doUndo(store: ProjectStoreAccess): Promise<Result> {
+export async function doUndo(
+  store: ProjectStoreAccess,
+  origin?: MutationOrigin,
+  signal?: AbortSignal,
+): Promise<Result> {
   try {
-    return await runTimelineCommit(store, "undo", (doc, ctx) => doUndoLocked(store, doc, ctx));
+    return await runTimelineCommit(
+      store,
+      "undo",
+      (doc, ctx) => doUndoLocked(store, doc, ctx),
+      origin,
+      signal,
+    );
   } catch (e) {
     if (isTimelineCommitClosed(e))
       return { ok: false, error: "undo: not written — the project was closed" };
@@ -728,9 +738,19 @@ async function doUndoLocked(
   return receipt;
 }
 
-export async function doRedo(store: ProjectStoreAccess): Promise<Result> {
+export async function doRedo(
+  store: ProjectStoreAccess,
+  origin?: MutationOrigin,
+  signal?: AbortSignal,
+): Promise<Result> {
   try {
-    return await runTimelineCommit(store, "redo", (doc, ctx) => doRedoLocked(store, doc, ctx));
+    return await runTimelineCommit(
+      store,
+      "redo",
+      (doc, ctx) => doRedoLocked(store, doc, ctx),
+      origin,
+      signal,
+    );
   } catch (e) {
     if (isTimelineCommitClosed(e))
       return { ok: false, error: "redo: not written — the project was closed" };

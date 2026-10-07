@@ -146,6 +146,31 @@ describe("ProjectToolHost.run effect routing (Step 4)", () => {
     await host.ready;
     expect(await host.run("download_video", {})).toEqual({ ok: true });
   });
+
+  // The origin is how a timeline change is told apart from an outside one (UJ-028), and it lives
+  // in a field of the shared host. It stays per call only because nothing awaits between setting
+  // it and the tool reading it; an MCP call landing during an agent call must not take its origin.
+  it("keeps each concurrent call's origin its own (an MCP call during an agent call)", async () => {
+    const host = openToolHost("p1");
+    await host.ready;
+    const ticks = async () => {
+      for (let i = 0; i < 5; i++) await Promise.resolve();
+    };
+    let release!: (v: Any) => void;
+    toolGate = new Promise((r) => (release = r));
+    const origin = { chatSessionId: "t", branchId: 0, executionId: 7 };
+    const agent = host.run("add_clips", {}, new AbortController().signal, origin);
+    await ticks();
+    const agentCtx = toolCtx;
+    const mcp = host.run("add_clips", {}); // the MCP shape: no signal, no origin
+    await ticks();
+    const mcpCtx = toolCtx;
+    expect(agentCtx).not.toBe(mcpCtx);
+    expect(agentCtx.origin).toEqual(origin);
+    expect(mcpCtx.origin).toBeUndefined();
+    release({ ok: true });
+    await Promise.all([agent, mcp]);
+  });
 });
 
 describe("the store every agent tool call sees", () => {

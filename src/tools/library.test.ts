@@ -433,6 +433,33 @@ describe("delete", () => {
     expect(await hasRow()).toBe(false);
     expect(await usesX()).toBe(false);
   });
+  it("a cascade delete counts as an outside timeline change from the library panel, not from the agent (UJ-028)", async () => {
+    const usedTimeline = {
+      ...emptyTimeline(),
+      tracks: [
+        {
+          id: "v",
+          kind: "video",
+          z: 0,
+          clips: [{ id: "c1", media_ref: "library/media_x.mp4", timeline_in: 0, timeline_out: 30 }],
+        },
+      ],
+    };
+    const agentOrigin = { chatSessionId: "t1", branchId: 0, executionId: 1 };
+    for (const [who, extra, expected] of [
+      ["agent", { origin: agentOrigin, signal: new AbortController().signal }, 0],
+      ["library panel", {}, 1],
+    ] as const) {
+      resetTestDocuments();
+      const fs = new MockFs();
+      seedClipFile(fs);
+      seedTimeline(fs, usedTimeline);
+      const doc = registerTestDocument(DIR);
+      const del = await runLib({ ...ctxWith(fs), ...extra }, { action: "delete", id: "media_x" });
+      expect(del.removed_clips, who).toBe(1);
+      expect(doc.externalTimelineEdits(), who).toBe(expected);
+    }
+  });
   it("REVERTS the timeline when the composite cascade's catalog write FAILS — truthful {ok:false}, no phantom history (blocker 3)", async () => {
     // A fs whose CATALOG write throws (library.json + its atomic temp), leaving the timeline half of
     // the composite applied. The tool must roll the timeline back cleanly and report failure — never

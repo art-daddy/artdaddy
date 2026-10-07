@@ -1,4 +1,4 @@
-import { MutationGate, type MutationOrigin } from "./MutationGate";
+import { MutationGate, type LeaseObserver, type MutationOrigin } from "./MutationGate";
 import { ProjectJobScope } from "./ProjectJobScope";
 import { AutosaveController } from "./AutosaveController";
 import { TimelineSession } from "../timeline/TimelineSession";
@@ -98,6 +98,19 @@ export class ProjectDocument {
   private readonly onReopen?: (id: ProjectId) => void;
   /** Close producer admission synchronously the instant close begins (finding #2). */
   private readonly onBeginClose?: (id: ProjectId) => void;
+  /** Committed timeline changes this session that the in-app agent did not make: the editor, MCP,
+   *  an undo from the UI, a chat restore. Only in-app chat executions carry an `origin`. */
+  private _externalTimelineEdits = 0;
+  private _leaseStartTimelineRevision = 0;
+  private readonly leaseObserver: LeaseObserver = {
+    begin: () => {
+      this._leaseStartTimelineRevision = this._timeline?.revision() ?? 0;
+    },
+    end: (request, committed) => {
+      const changed = (this._timeline?.revision() ?? 0) !== this._leaseStartTimelineRevision;
+      if (committed && changed && !request.origin) this._externalTimelineEdits++;
+    },
+  };
 
   constructor(
     id: ProjectId,
@@ -107,7 +120,7 @@ export class ProjectDocument {
     this.id = id;
     this.sessionId = newSessionId(); // fresh per open/reopen — a same-id reopen is distinguishable
     this.isOriginCurrent = opts.isOriginCurrent;
-    this.gate = new MutationGate(id, this.sessionId, opts.isOriginCurrent);
+    this.gate = new MutationGate(id, this.sessionId, opts.isOriginCurrent, this.leaseObserver);
     this.jobs = new ProjectJobScope();
     this.autosave = new AutosaveController();
     this.onCloseSaveFailed = opts.onCloseSaveFailed;
@@ -119,6 +132,12 @@ export class ProjectDocument {
 
   phase(): ProjectPhase {
     return this._phase;
+  }
+
+  /** How many times something other than the in-app agent has changed the timeline since this
+   *  document opened. Monotonic for the document's life, so a reader compares two readings. */
+  externalTimelineEdits(): number {
+    return this._externalTimelineEdits;
   }
 
   /** The in-memory timeline, or null before the first gated commit created it. Readers use this
@@ -217,7 +236,7 @@ export class ProjectDocument {
    *  during the drain). No-op unless a close actually failed. */
   cancelClose(): void {
     if (this._phase !== "close-failed") return;
-    this.gate = new MutationGate(this.id, this.sessionId, this.isOriginCurrent);
+    this.gate = new MutationGate(this.id, this.sessionId, this.isOriginCurrent, this.leaseObserver);
     this.jobs = new ProjectJobScope();
     this._phase = "open";
     this.safeReport(() => this.onReopen?.(this.id)); // re-admit producers — a throw must NOT undo the transition

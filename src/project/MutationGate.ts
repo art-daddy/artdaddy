@@ -43,6 +43,12 @@ export interface MutationOrigin {
   readonly executionId: number;
 }
 
+/** Told when each lease starts and ends, so the document can attribute what changed inside it. */
+export interface LeaseObserver {
+  begin(request: MutationRequest): void;
+  end(request: MutationRequest, committed: boolean): void;
+}
+
 export interface MutationRequest {
   /** A stable operation name (telemetry + errors), e.g. "timeline.commit". */
   readonly operation: string;
@@ -86,6 +92,7 @@ export class MutationGate {
     private readonly sessionId: SessionId,
     /** Is this agent origin (chat branch/execution) still current? Absent => always current. */
     private readonly isOriginCurrent: (origin: MutationOrigin) => boolean = () => true,
+    private readonly observer?: LeaseObserver,
   ) {}
 
   /** Current committed revision (monotonic). Advances ONLY when a mutation actually changed the
@@ -117,13 +124,24 @@ export class MutationGate {
         committed = true;
       },
     };
+    this.notify(() => this.observer?.begin(request));
     try {
       return await operation(ctx);
     } finally {
       // Advance ONLY for a real committed mutation (markCommitted). A read / no-op / {ok:false} commit
       // never marks, so it never bumps — a spurious bump would falsely signal "the document changed".
       if (committed) this.revision++;
+      this.notify(() => this.observer?.end(request, committed));
       this.release();
+    }
+  }
+
+  /** An observer that throws must never leave a lease unreleased. */
+  private notify(fn: () => void): void {
+    try {
+      fn();
+    } catch {
+      /* ignored: attribution is advisory, the gate is not */
     }
   }
 

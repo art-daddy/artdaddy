@@ -308,11 +308,11 @@ export function setTracksTool(args: Args, ctx: ClientToolContext | null): Promis
 
 export function undoTool(_args: Args, ctx: ClientToolContext | null): Promise<Result> {
   if (!ctx) return Promise.resolve(NOT_READY);
-  return doUndo(ctx.store);
+  return doUndo(ctx.store, ctx.origin, ctx.signal);
 }
 export function redoTool(_args: Args, ctx: ClientToolContext | null): Promise<Result> {
   if (!ctx) return Promise.resolve(NOT_READY);
-  return doRedo(ctx.store);
+  return doRedo(ctx.store, ctx.origin, ctx.signal);
 }
 
 export function registerTimelineTools(
