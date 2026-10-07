@@ -53,7 +53,8 @@ describe("media-kind classification", () => {
         `media_ref (a bare library id) it will silently do nothing. Use clipKind(clip), or ` +
         `resolve the ref to a path first — only then add it to ALLOWED with the reason.`,
     ).toEqual([]);
-  });
+    // Reads every source file: ~0.1 s alone, over vitest's 5 s default under a full parallel run.
+  }, 30_000);
 
   it("the allow-list has no stale entries", () => {
     const stale = [...ALLOWED.keys()].filter((rel) => {

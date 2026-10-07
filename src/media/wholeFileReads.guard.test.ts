@@ -80,7 +80,8 @@ describe("whole-file reads into the webview", () => {
         `source is an app crash, not a slow load. Bound it with a Range request, an ffmpeg ` +
         `conform of the clip's window, or a size ceiling from a stat — then record which, here.`,
     ).toEqual([]);
-  });
+    // Reads every source file: ~0.1 s alone, over vitest's 5 s default under a full parallel run.
+  }, 30_000);
 
   it("...and the list has no stale entries hiding a module that stopped reading bytes", () => {
     const stale = [...BOUNDED.keys()].filter(

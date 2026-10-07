@@ -56,7 +56,8 @@ describe("no HTML5 drag source survives", () => {
         .filter((f) => DRAGGABLE.test(code(f)))
         .map(rel),
     ).toEqual([]);
-  });
+    // Reads every source file: ~0.1 s alone, over vitest's 5 s default under a full parallel run.
+  }, 30_000);
 
   it("has no in-app dataTransfer payload left behind", () => {
     // The old library -> timeline channel. A reader with no writer is worse than neither:
@@ -66,7 +67,7 @@ describe("no HTML5 drag source survives", () => {
         .filter((f) => /application\/x-artdaddy-source/.test(code(f)))
         .map(rel),
     ).toEqual([]);
-  });
+  }, 30_000);
 
   it("still recognises a `draggable` when one exists (the guard is not vacuous)", () => {
     // A regex that matched nothing would pass the two checks above forever.

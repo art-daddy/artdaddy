@@ -150,5 +150,6 @@ describe("supported media formats", () => {
       `These enumerate media extensions themselves and will drift from ${OWNER}. ` +
         `Import VIDEO_EXTS/IMAGE_EXTS/AUDIO_EXTS or call kindOf() instead.`,
     ).toEqual([]);
-  });
+    // Reads every source file: ~0.1 s alone, over vitest's 5 s default under a full parallel run.
+  }, 30_000);
 });
