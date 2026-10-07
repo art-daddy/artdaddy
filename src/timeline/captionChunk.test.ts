@@ -185,3 +185,35 @@ describe("applyCase", () => {
     expect(applyCase("Hi There", "auto")).toBe("Hi There");
   });
 });
+
+describe("Chinese and Japanese captions (UJ-004)", () => {
+  it("joins the words with no space, and counts no space against max_characters", () => {
+    const ja = ["藤村", "の", "り", "を"].map((t, i) => w(t, i * 0.3, i * 0.3 + 0.25));
+    expect(chunkWords(ja).map((p) => p.text)).toEqual(["藤村のりを"]);
+    // Four characters fit a 4-character cap: there is no space between them to count.
+    expect(chunkWords(ja, { maxCharacters: 4 }).map((p) => p.text)).toEqual(["藤村のり", "を"]);
+  });
+
+  it("closes a caption at a Japanese or Chinese full stop, as it does at '.'", () => {
+    const words = ["した。", "翌年", "の", "大会"].map((t, i) => w(t, i * 0.3, i * 0.3 + 0.25));
+    expect(chunkWords(words).map((p) => p.text)).toEqual(["した。", "翌年の大会"]);
+    const zh = ["好", "吗？", "我们"].map((t, i) => w(t, i * 0.3, i * 0.3 + 0.25));
+    expect(chunkWords(zh).map((p) => p.text)).toEqual(["好吗？", "我们"]);
+  });
+
+  it("closes a caption at the sentence ends of Hindi, Arabic and Urdu too", () => {
+    const at = (ts: string[]) => ts.map((t, i) => w(t, i * 0.3, i * 0.3 + 0.25));
+    expect(chunkWords(at(["नमस्ते", "दोस्तों।", "आज"])).map((p) => p.text)).toEqual([
+      "नमस्ते दोस्तों।",
+      "आज",
+    ]);
+    expect(chunkWords(at(["كيف", "حالك؟", "شكرا"])).map((p) => p.text)).toEqual([
+      "كيف حالك؟",
+      "شكرا",
+    ]);
+    expect(chunkWords(at(["آپ", "کیسے", "ہیں۔", "شکریہ"])).map((p) => p.text)).toEqual([
+      "آپ کیسے ہیں۔",
+      "شکریہ",
+    ]);
+  });
+});

@@ -10,6 +10,7 @@ import { clipPlays, visibleTracks } from "../timeline/visibility";
 import { fadeMul, hasVal, sampleAnim } from "../timeline/anim";
 import type { Animatable, Clip, Timeline } from "../timeline/model";
 import { assertNever, transitionProgress } from "../timeline/transition";
+import { joinWords } from "../timeline/wordJoin";
 import {
   onCanvasFrames,
   resolveRenderPlan,
@@ -533,10 +534,10 @@ export function buildScene(
             else break;
             startCs += w.durCs;
           }
-          drawText = rt.karaoke.map((w) => w.word).join(" ");
+          drawText = joinWords(rt.karaoke.map((w) => w.word));
           drawColor = rt.emphasis?.color || rt.color; // sung (primary) colour
           karaokeSweep = {
-            sungChars: sungWords.join(" ").length,
+            sungChars: joinWords(sungWords).length,
             secondaryColor: rt.karaokeReveal ? "transparent" : rt.color,
           };
         }

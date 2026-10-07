@@ -17,6 +17,12 @@
 // interpreted — WITHOUT dropping characters. The `rawAss` escape hatch (a clip's explicit `raw_ass`) is
 // the ONLY path that passes override tags through, and only because the author opted in.
 import type { ResolvedRun } from "./renderPlan";
+import { joinMapped, wordGap } from "./wordJoin";
+
+type KaraokeWord = { readonly word: string; readonly durCs: number };
+/** A karaoke word as the gap between words is judged (plain), and as it is written to ASS. */
+const plain = (w: KaraokeWord): string => w.word;
+const escaped = (w: KaraokeWord): string => assEscape(w.word);
 
 /** One caption resolved from the plan, plus its on-screen window. `rawAss` (a clip's `raw_ass`), when
  *  non-empty, is the Dialogue text VERBATIM — the author's full-control escape hatch — and every other
@@ -348,13 +354,13 @@ function dialogue(c: CaptionSpec, playResX: number, styleName: string): string[]
     // resets to the style. Position/motion/fade lead once. (Per-run styling is export-authoritative; the
     // preview draws the joined base-styled line — a NAMED residual.)
     const parts: string[] = [`{\\an${an}${posTag}${emphScale}${popTag}${fad}}`];
-    for (const run of c.runs) {
+    c.runs.forEach((run, i) => {
+      if (i) parts.push(wordGap(c.runs![i - 1].text, run.text));
       const ov = runOverride(run, c, c.emphasisSpec);
       if (ov) parts.push(`{${ov}}`);
       parts.push(assEscape(run.text));
       if (ov) parts.push("{\\r}");
-      parts.push(" ");
-    }
+    });
     return [
       `Dialogue: 0,${start},${end},${styleName},,${margin},${margin},0,,${parts.join("").trimEnd()}`,
     ];
@@ -391,15 +397,10 @@ function dialogue(c: CaptionSpec, playResX: number, styleName: string): string[]
         const fin = first ? Math.round(c.fadeInMs) : 0;
         const fout = i === last ? Math.round(c.fadeOutMs) : 0;
         const stepFad = fin || fout ? `\\fad(${fin},${fout})` : "";
-        const shown = words
-          .slice(0, i + 1)
-          .map((w) => assEscape(w.word))
-          .join(" ");
-        const hidden = words
-          .slice(i + 1)
-          .map((w) => assEscape(w.word))
-          .join(" ");
-        const tail = hidden ? ` {\\alpha&HFF&}${hidden}` : "";
+        const shown = joinMapped(words.slice(0, i + 1), plain, escaped);
+        const hidden = joinMapped(words.slice(i + 1), plain, escaped);
+        const gap = hidden ? wordGap(words[i].word, words[i + 1].word) : "";
+        const tail = hidden ? `${gap}{\\alpha&HFF&}${hidden}` : "";
         const ovr = `{\\an${an}${stepPos}\\1c${assColour(c.highlightColor)}\\1a&H00&${emphScale}${stepPop}${stepFad}}`;
         out.push(
           `Dialogue: 0,${assTime(from)},${assTime(to)},${styleName},,${margin},${margin},0,,${ovr}${shown}${tail}`,
@@ -407,7 +408,7 @@ function dialogue(c: CaptionSpec, playResX: number, styleName: string): string[]
       }
       if (out.length) return out;
       // Every step was zero-length (all durations 0): show the whole line rather than nothing.
-      const all = words.map((w) => assEscape(w.word)).join(" ");
+      const all = joinMapped(words, plain, escaped);
       const ovr = `{\\an${an}${posTag}\\1c${assColour(c.highlightColor)}\\1a&H00&${emphScale}${popTag}${fad}}`;
       return [`Dialogue: 0,${start},${end},${styleName},,${margin},${margin},0,,${ovr}${all}`];
     }
@@ -415,7 +416,11 @@ function dialogue(c: CaptionSpec, playResX: number, styleName: string): string[]
     // highlight (Primary = highlightColor) as the \k sweep reaches it (durations in centiseconds). The
     // reveal colours are inline (they differ from the style's static Primary); the style supplies
     // font/size/border/shadow.
-    const sweep = words.map((k) => `{\\k${Math.round(k.durCs)}}${assEscape(k.word)}`).join(" ");
+    const sweep = joinMapped(
+      words,
+      plain,
+      (k) => `{\\k${Math.round(k.durCs)}}${assEscape(k.word)}`,
+    );
     const ovr = `{\\an${an}${posTag}\\1c${assColour(c.highlightColor)}\\1a&H00&\\2c${assColour(c.color)}\\2a&H80&${emphScale}${popTag}${fad}}`;
     return [`Dialogue: 0,${start},${end},${styleName},,${margin},${margin},0,,${ovr}${sweep}`];
   }

@@ -101,6 +101,12 @@ describe("clipText", () => {
     expect(clipText({ text: "legacy" } as Clip)).toBe("legacy");
     expect(clipText({} as Clip)).toBe("");
   });
+
+  it("reads Chinese and Japanese runs with no space between them (UJ-004)", () => {
+    expect(clipText({ content: [{ text: "藤村" }, { text: "の" }, { text: "り" }] } as Clip)).toBe(
+      "藤村のり",
+    );
+  });
 });
 
 // A pure collapse function proves nothing about what the model actually receives; this drives

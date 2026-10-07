@@ -333,6 +333,27 @@ describe("text layers", () => {
     expect(buildScene(t, 1.5, dims({})).textLayers[0].text).toBe("one two"); // the full joined karaoke line
   });
 
+  it("preview karaoke draws Japanese with no space between words, and sweeps to the same line (UJ-004)", () => {
+    const t = tl([
+      {
+        id: "t",
+        kind: "text",
+        content: [
+          { text: "藤村", t_in: 0, t_out: 1 },
+          { text: "の", t_in: 1, t_out: 2 },
+        ],
+        timeline_in: 0,
+        timeline_out: 60,
+        animation: { build: "word-highlight", timing: "explicit" },
+        style: { color: "#ffffff" },
+      },
+    ]);
+    const late = buildScene(t, 1.5, dims({})).textLayers[0];
+    expect(late.text).toBe("藤村の");
+    // Every word sung: the sweep covers the whole drawn line, no more and no less.
+    expect(late.karaoke!.sungChars).toBe("藤村の".length);
+  });
+
   it("animates a pop/slide entrance in the preview (Fix #3B)", () => {
     const pop = tl([
       {

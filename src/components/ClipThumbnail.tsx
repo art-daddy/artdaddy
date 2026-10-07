@@ -9,6 +9,7 @@ import { onMediaDerived } from "../preview/mediaDerived";
 import { imageProxyRel, posterRel } from "../preview/proxyPaths";
 import { kindOf, needsPreviewProxy } from "../media/formats";
 import type { Clip } from "../timeline/model";
+import { joinWords } from "../timeline/wordJoin";
 import { INTERNAL_DIR, type ProjectStoreAccess } from "../tools/store";
 
 /** library/<id>.<ext> -> internals/cache/thumbnails/<id>.jpg (or null if the source
@@ -23,14 +24,13 @@ function clipText(clip: Clip): string {
   if (typeof clip.text === "string" && clip.text.trim()) return clip.text;
   const c = clip.content;
   if (Array.isArray(c)) {
-    return c
-      .map((s) =>
+    return joinWords(
+      c.map((s) =>
         s && typeof s === "object"
           ? String((s as Record<string, unknown>).text ?? "")
           : String(s ?? ""),
-      )
-      .join(" ")
-      .trim();
+      ),
+    ).trim();
   }
   if (typeof c === "string") return c;
   return "";

@@ -19,6 +19,7 @@ import type { Animatable, Clip, Timeline } from "./model";
 import { canvasFps, isNum } from "./frames";
 import { clipPlays, outputGate } from "./visibility";
 import { parseTransitionIn, TRANSITION_KINDS, type TransitionKind } from "./transition";
+import { joinWords } from "./wordJoin";
 
 /** A clip's OWN incoming transition (from `transition_in`), resolved ONCE so render.ts's private
  *  `parseTransition` and scene.ts's `parseTransitionIn` stop being two parsers of one contract field.
@@ -286,11 +287,11 @@ function textContent(clip: Clip): string {
   if (typeof clip.text === "string") return clip.text;
   if (typeof clip.content === "string") return clip.content;
   if (Array.isArray(clip.content)) {
-    return clip.content
-      .map((c) =>
+    return joinWords(
+      clip.content.map((c) =>
         c && typeof c === "object" ? String((c as Record<string, unknown>).text ?? "") : "",
-      )
-      .join(" ");
+      ),
+    );
   }
   return "";
 }

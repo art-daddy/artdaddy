@@ -4,6 +4,7 @@
 // its picture without re-reading). Lives in its own module so `engine.ts`
 // (applyOp) and `ops.ts` (getTimelineTool) can both import it without a cycle.
 import type { Clip, Timeline } from "./model";
+import { joinWords } from "./wordJoin";
 
 // ── clip default-omit ────────────────────────────────────────────────────────
 // A field left at its default is dropped from the model-facing shape (absent
@@ -50,7 +51,7 @@ const CAPTION_PREVIEW_CHARS = 240;
 export function clipText(clip: Clip): string {
   const c = clip.content;
   if (typeof c === "string") return c;
-  if (Array.isArray(c)) return c.map((r) => String(r?.text ?? "")).join(" ");
+  if (Array.isArray(c)) return joinWords(c.map((r) => String(r?.text ?? "")));
   return typeof clip.text === "string" ? clip.text : "";
 }
 

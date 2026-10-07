@@ -11,6 +11,8 @@
 // silently drop a word are worse than no captions, because nobody re-reads their own video
 // to check.
 
+import { joinWords, wordGap } from "./wordJoin";
+
 export interface CaptionWord {
   readonly text: string;
   /** Source seconds. */
@@ -34,8 +36,10 @@ export interface ChunkOptions {
 }
 
 /** A word that ends a sentence closes the caption even when there is room left: reading a
- *  new sentence that begins mid-caption is what makes auto-captions feel machine-made. */
-const SENTENCE_END = /[.!?…]["')\]]?$/;
+ *  new sentence that begins mid-caption is what makes auto-captions feel machine-made. Other
+ *  scripts end theirs with their own marks: 。！？ (Chinese, Japanese), । ॥ (Hindi and other
+ *  Indian scripts), ؟ (Arabic), ۔ (Urdu). */
+const SENTENCE_END = /[.!?…。！？।॥؟۔]["')\]」』]?$/;
 
 export function chunkWords(
   words: readonly CaptionWord[],
@@ -52,7 +56,7 @@ export function chunkWords(
   const flush = (): void => {
     if (!run.length) return;
     out.push({
-      text: run.map((w) => w.text).join(" "),
+      text: joinWords(run.map((w) => w.text)),
       start: run[0].start,
       end: run[run.length - 1].end,
       words: run,
@@ -60,12 +64,16 @@ export function chunkWords(
     run = [];
     chars = 0;
   };
+  /** The caption's width with `w` added: the space before it counts, where there is one. */
+  const widthWith = (w: CaptionWord): number =>
+    run.length
+      ? chars + wordGap(run[run.length - 1].text, w.text).length + w.text.length
+      : w.text.length;
 
   for (const w of words) {
-    const width = run.length ? chars + 1 + w.text.length : w.text.length;
     // `run.length` guard: a word longer than the cap must still be emitted, not loop forever.
-    if (run.length && (run.length + 1 > maxWords || width > maxChars)) flush();
-    chars = run.length ? chars + 1 + w.text.length : w.text.length;
+    if (run.length && (run.length + 1 > maxWords || widthWith(w) > maxChars)) flush();
+    chars = widthWith(w);
     run.push(w);
     if (SENTENCE_END.test(w.text)) flush();
   }

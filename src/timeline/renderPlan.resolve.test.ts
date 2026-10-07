@@ -405,6 +405,9 @@ describe("resolveRenderPlan — caption builds", () => {
   });
 
   it("multi-run content resolves per-run styles (null unless an override is present; unset inherits base)", () => {
+    // The joined line both backends draw: spaced, except where Chinese or Japanese meet (UJ-004).
+    expect(oneText(tclip({ content: [{ text: "a" }, { text: "b" }] })).text).toBe("a b");
+    expect(oneText(tclip({ content: [{ text: "藤村" }, { text: "の" }] })).text).toBe("藤村の");
     expect(oneText(tclip({ content: [{ text: "a" }, { text: "b" }] })).runs).toBeNull(); // no per-run style/emphasis -> simpler joined path
     const runs = oneText(
       tclip({

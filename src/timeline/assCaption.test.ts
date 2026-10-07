@@ -427,3 +427,50 @@ describe("karaoke reveal (C3)", () => {
     expect(lines[lines.length - 1]).toContain("b");
   });
 });
+
+// Chinese and Japanese are read with no space between words (UJ-004): a Japanese caption that put a
+// space between every word read "藤村 の り を". Every way the export draws words obeys one rule.
+describe("captions in Chinese and Japanese have no space between words (UJ-004)", () => {
+  const dialogue = (spec: Partial<CaptionSpec>): string[] =>
+    buildBandAss([cap({ startSec: 0, endSec: 1, ...spec })], { w: 1920, h: 1080 })
+      .split("\n")
+      .filter((l) => l.startsWith("Dialogue:"));
+  const ja = [
+    { word: "藤村", durCs: 30 },
+    { word: "の", durCs: 30 },
+    { word: "り", durCs: 40 },
+  ];
+
+  it("a karaoke sweep", () => {
+    const [line] = dialogue({ karaoke: ja });
+    expect(line).toMatch(/\{\\k30}藤村\{\\k30}の\{\\k40}り$/);
+  });
+
+  it("a word-by-word reveal, step by step, hidden words included", () => {
+    const lines = dialogue({ karaoke: ja, karaokeReveal: true });
+    expect(lines[0]).toMatch(/}藤村\{\\alpha&HFF&}のり$/);
+    expect(lines[2]).toMatch(/}藤村のり$/);
+  });
+
+  it("styled runs, and a Latin word inside Japanese", () => {
+    const [line] = dialogue({
+      text: "",
+      runs: [run({ text: "AI" }), run({ text: "が", color: "#ff0000" }), run({ text: "日本" })],
+    });
+    expect(line).toMatch(/}AI\{\\1c&H0000FF&}が\{\\r}日本$/);
+  });
+
+  it("while a spaced language keeps its spaces in all three", () => {
+    const de = [
+      { word: "Hallo", durCs: 50 },
+      { word: "Albi", durCs: 50 },
+    ];
+    expect(dialogue({ karaoke: de })[0]).toMatch(/\{\\k50}Hallo \{\\k50}Albi$/);
+    expect(dialogue({ karaoke: de, karaokeReveal: true })[0]).toMatch(
+      /}Hallo \{\\alpha&HFF&}Albi$/,
+    );
+    expect(
+      dialogue({ text: "", runs: [run({ text: "Hallo" }), run({ text: "Albi" })] })[0],
+    ).toMatch(/}Hallo Albi$/);
+  });
+});
