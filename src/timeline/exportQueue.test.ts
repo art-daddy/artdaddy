@@ -751,7 +751,9 @@ describe("manage_exports", () => {
       },
     });
     await running;
-    expect(((await manageExportsTool({ action: "cancel", job_id: stopped.job_id })) as Any).cancelled).toBe(true);
+    expect(
+      ((await manageExportsTool({ action: "cancel", job_id: stopped.job_id })) as Any).cancelled,
+    ).toBe(true);
     await whenExportsSettle();
     const again = (await manageExportsTool({ action: "cancel", job_id: stopped.job_id })) as Any;
     expect(again).toMatchObject({ ok: true, cancelled: false, state: "cancelled" });

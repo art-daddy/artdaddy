@@ -417,7 +417,9 @@ describe("useChat.send + event reducer", () => {
     useChat.setState({ projectId: "p1" });
     await useChat.getState().send("look");
     emit("awaiting_approval", {
-      calls: [{ call_id: "c1", name: "video_ask", arguments: {}, rationale: "", reasoning_summary: [] }],
+      calls: [
+        { call_id: "c1", name: "video_ask", arguments: {}, rationale: "", reasoning_summary: [] },
+      ],
     });
     let driveDone!: () => void;
     runnerApprove.mockImplementationOnce(() => new Promise<void>((r) => (driveDone = r)));

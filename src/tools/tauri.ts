@@ -200,7 +200,9 @@ function runInApp(
         arrived = { sent: o.progress_sent, result };
         setTimeout(() => finish(result), PROGRESS_GRACE_MS);
       })
-      .catch((e: unknown) => finish({ code: -1, stdout: "", stderr: `spawn failed: ${String(e)}` }));
+      .catch((e: unknown) =>
+        finish({ code: -1, stdout: "", stderr: `spawn failed: ${String(e)}` }),
+      );
   });
 }
 

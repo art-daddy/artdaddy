@@ -319,9 +319,7 @@ describe("TauriCommandRunner — cancellation", () => {
     autoFinish = null;
     const ac = new AbortController();
     const seen: string[] = [];
-    const p = new TauriCommandRunner().run("ffmpeg", [], ac.signal, undefined, (c) =>
-      seen.push(c),
-    );
+    const p = new TauriCommandRunner().run("ffmpeg", [], ac.signal, undefined, (c) => seen.push(c));
     await settle();
     runs[0].resolve(done({ code: 0, stdout: "a", progress_sent: 1 }));
     await settle();
@@ -336,9 +334,7 @@ describe("TauriCommandRunner — live output", () => {
   it("asks for progress only when someone listens, and hands each message on", async () => {
     autoFinish = null;
     const seen: string[] = [];
-    const p = new TauriCommandRunner().run("ffmpeg", [], undefined, undefined, (c) =>
-      seen.push(c),
-    );
+    const p = new TauriCommandRunner().run("ffmpeg", [], undefined, undefined, (c) => seen.push(c));
     await settle();
     expect(runs[0].args.progress).toBe(true);
     runs[0].args.onStdout.onmessage("frame=1\n");

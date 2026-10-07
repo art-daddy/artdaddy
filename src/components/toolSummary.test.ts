@@ -171,7 +171,9 @@ describe("what the line counts", () => {
       ok: true,
       exports: states.map((state, i) => ({ job_id: `j${i}`, state })),
     });
-    expect(call("manage_exports", { action: "list" }, rows("done")).text).toBe("No exports running");
+    expect(call("manage_exports", { action: "list" }, rows("done")).text).toBe(
+      "No exports running",
+    );
     expect(call("manage_exports", { action: "list" }, rows("running", "done", "queued")).text).toBe(
       "2 exports still running",
     );
