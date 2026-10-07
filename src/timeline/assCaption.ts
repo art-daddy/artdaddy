@@ -200,7 +200,10 @@ function styleRow(c: CaptionSpec): string {
     "0",
     "0",
     "0",
-    "1",
+    // Encoding -1: libass finds each line's direction from its text. With 1 it lays out left to right
+    // whenever override tags split the line, and every per-word build does: an Arabic caption
+    // revealed its first word on the left. Left-to-right lines render byte-identically either way.
+    "-1",
   ].join(",");
 }
 

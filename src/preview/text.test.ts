@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { TextLayer } from "./scene";
-import { blockTop, textKey } from "./text";
+import { blockTop, lineDirection, textKey } from "./text";
 
 const layer = (over: Partial<TextLayer> = {}): TextLayer => ({
   kind: "text",
@@ -79,5 +79,30 @@ describe("textKey", () => {
     expect(textKey(layer({ weight: 700 }))).not.toBe(base);
     expect(textKey(layer({ karaoke: { sungChars: 3, secondaryColor: "#808080" } }))).not.toBe(base);
     expect(textKey(layer({ letterSpacingPx: 4 }))).not.toBe(base);
+  });
+});
+
+// The export lets libass find each line's direction from its first strong letter (Encoding -1). The
+// preview must decide the same way, or an Arabic caption reads one way in the editor and the other way
+// in the file.
+describe("lineDirection: the first strong letter decides, as in the export", () => {
+  it("reads Arabic, Hebrew and Urdu right to left", () => {
+    expect(lineDirection("وعد بلفور هو الاسم")).toBe("rtl");
+    expect(lineDirection("שלום עולם")).toBe("rtl");
+    expect(lineDirection("آپ کیسے ہیں۔")).toBe("rtl");
+  });
+
+  it("reads Latin, Devanagari and Japanese left to right", () => {
+    expect(lineDirection("Hallo Albi")).toBe("ltr");
+    expect(lineDirection("एक आदमी")).toBe("ltr");
+    expect(lineDirection("藤村のりを")).toBe("ltr");
+  });
+
+  it("skips what has no direction of its own: digits, punctuation, marks", () => {
+    expect(lineDirection("2023: «وعد بلفور»")).toBe("rtl");
+    expect(lineDirection("١٢٣ abc")).toBe("ltr"); // Arabic-Indic digits are numbers, not letters
+    expect(lineDirection("... Hello وعد")).toBe("ltr");
+    expect(lineDirection("123 !?")).toBe("ltr");
+    expect(lineDirection("")).toBe("ltr");
   });
 });

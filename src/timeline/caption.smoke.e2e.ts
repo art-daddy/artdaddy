@@ -546,6 +546,30 @@ describe.skipIf(!FF)("caption pixel smoke (bundled libass)", () => {
     );
   });
 
+  // Arabic reads right to left, so its FIRST word belongs on the right. libass lays a line out left to
+  // right when its style says Encoding 1 and override tags split it, and every word build splits it
+  // per word: the first Arabic word came out on the LEFT, the caption read backwards.
+  it("a right-to-left caption reveals its first word on the RIGHT", async () => {
+    const cwd = await scratch();
+    const arabic = ["وعد", "بلفور", "هو", "الاسم"].map((text, i) => ({
+      text,
+      t_in: i * 0.5,
+      t_out: i * 0.5 + 0.5,
+    }));
+    const clip = buildClip("word-by-word");
+    clip.clips[0].content = arabic;
+    const out = await render(FF!, cwd, {
+      canvas: wideCanvas,
+      tracks: [clip],
+    } as unknown as Timeline);
+    const rightEarly = await regionMaxLuma(FF!, out, 0.2, RIGHT_HALF);
+    const leftEarly = await regionMaxLuma(FF!, out, 0.2, LEFT_HALF);
+    const leftLate = await regionMaxLuma(FF!, out, 1.9, LEFT_HALF);
+    expect(rightEarly, "the first Arabic word should be on the right at 0.2s").toBeGreaterThan(150);
+    expect(leftEarly, "words not yet revealed must leave the left half empty").toBeLessThan(60);
+    expect(leftLate, "the last words should arrive on the left").toBeGreaterThan(150);
+  });
+
   it("a style PRESET resolves into a real look (C5: clean-white renders visible text)", async () => {
     const cwd = await scratch();
     const clip = {
