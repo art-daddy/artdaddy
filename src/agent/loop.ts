@@ -102,6 +102,9 @@ export interface LoopDeps {
   session: () => Record<string, unknown>;
   /** Report an unexpected tool exception (best-effort telemetry). Optional. */
   onToolError?: (name: string, args: Record<string, unknown>, err: unknown) => void;
+  /** Fields the app adds to a round that returns tool outputs, e.g. that the timeline changed
+   *  outside the chat (UJ-028). Asked once per such round, right before it is sent. Optional. */
+  noteForRound?: () => Record<string, string> | null;
 }
 
 function pendingDict(c: PendingCall): Record<string, unknown> {
@@ -298,6 +301,7 @@ export class ClientTurnRunner {
     this.decisions.clear();
     const sent = this.results;
     this.results = [];
+    this.addRoundNote(sent);
     let next: RoundResultDTO;
     try {
       next = await this.d.infer({ tool_results: sent }, atts);
@@ -306,6 +310,18 @@ export class ClientTurnRunner {
       throw e;
     }
     await this.handle(next);
+  }
+
+  /** Merge the app's note for this round into its LAST output. A note rides inside a tool output,
+   *  never as a user message: a user message after a tool output costs the model its reasoning
+   *  (see the server's responses_history). The transcript gets the same bytes the round sends. */
+  private addRoundNote(sent: ToolResultItem[]): void {
+    const note = this.d.noteForRound?.();
+    if (!note || !sent.length) return;
+    const last = sent[sent.length - 1];
+    const result = { ...last.result, ...note };
+    sent[sent.length - 1] = { ...last, result };
+    this.d.emit("tool_result_note", { call_id: last.call_id, model_result: result });
   }
 
   /** The run of reads at the head of the batch, capped so a fan-out of ffmpeg-backed reads

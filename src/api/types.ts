@@ -1,6 +1,7 @@
 // Domain types for the ArtDaddy API. Request-body shapes are also mirrored in the
 // generated src/api/schema.d.ts (from the server OpenAPI); responses are plain
 // dicts server-side, so they're typed here.
+import type { Mention } from "../timeline/mentions";
 
 export interface Canvas {
   width: number;
@@ -89,6 +90,10 @@ export interface TranscriptPart {
 export interface TranscriptMessage {
   text?: string;
   attachments?: AttachmentInfo[];
+  /** Editor refs the user attached; part of what the model's message is rebuilt from. */
+  mentions?: Mention[];
+  /** The message told the model the timeline changed outside the chat (UJ-028). */
+  timeline_changed?: boolean;
 }
 
 export interface TranscriptRequest {

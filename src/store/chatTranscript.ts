@@ -25,6 +25,8 @@ export interface Turn {
   /** Timeline AFTER this turn (client-owned redo restores it). */
   timelineAfter?: Timeline | null;
   undone?: boolean;
+  /** The turn's message told the model the timeline changed outside the chat (UJ-028). */
+  timelineChanged?: boolean;
 }
 
 /** Persisted transcript requests -> UI turns. */
@@ -37,6 +39,8 @@ export function mapRequests(reqs: TranscriptRequest[]): Turn[] {
       kind: a.kind ?? null,
       caption: a.caption ?? a.name ?? null,
     })),
+    ...(r.message?.mentions?.length ? { mentions: r.message.mentions } : {}),
+    ...(r.message?.timeline_changed ? { timelineChanged: true } : {}),
     parts: r.response ?? [],
     // Written while the turn had not ended, and never rewritten: a reload or a crash cut it short.
     status: (r.unfinished ? "interrupted" : "done") as TurnStatus,
@@ -63,6 +67,10 @@ export function buildRequests(turns: Turn[]): TranscriptRequest[] {
         kind: a.kind ?? undefined,
         caption: a.caption ?? undefined,
       })),
+      // Saved because the model's message is rebuilt from them on every later round, also after
+      // a reload; a turn that lost them would show the model different words than it got.
+      ...(t.mentions?.length ? { mentions: t.mentions } : {}),
+      ...(t.timelineChanged ? { timeline_changed: true } : {}),
     },
     response: t.parts.filter((p) => !p.partial),
     checkpoint: {
@@ -86,8 +94,10 @@ export function requestsForHistory(turns: Turn[]): TranscriptRequest[] {
     ({ checkpoint: _checkpoint, unfinished: _unfinished, ...rest }, i) => ({
       ...rest,
       message: {
-        ...rest.message,
-        text: composeModelText(turns[i].userText, turns[i].attachments, turns[i].mentions ?? []),
+        text: composeModelText(turns[i].userText, turns[i].attachments, turns[i].mentions ?? [], {
+          timelineChanged: turns[i].timelineChanged,
+        }),
+        attachments: rest.message?.attachments,
       },
     }),
   );

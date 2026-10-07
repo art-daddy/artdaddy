@@ -39,11 +39,19 @@ function formatEditorContext(mentions: Mention[]): string {
   return lines.length > 1 ? lines.join("\n") : "";
 }
 
+/** What the model is told when the timeline changed since its last look by something other than
+ *  itself (UJ-028). Rides the next message, or the next tool output inside a turn. */
+export const TIMELINE_CHANGED_NOTE =
+  "The timeline was changed outside this chat since your last look at it (an edit in the editor, " +
+  "an undo, or another app). What you remember of it may be out of date: call get_timeline before " +
+  "relying on clip ids, positions or durations.";
+
 /** Build the model-facing text: user text + editor context + attachment manifest. */
 export function composeModelText(
   text: string,
   attachments: Attachment[],
   mentions: Mention[],
+  opts: { timelineChanged?: boolean } = {},
 ): string {
   const blocks: string[] = [];
   const ctx = formatEditorContext(mentions);
@@ -62,6 +70,7 @@ export function composeModelText(
     }
     blocks.push(lines.join("\n"));
   }
+  if (opts.timelineChanged) blocks.push(TIMELINE_CHANGED_NOTE);
   if (!blocks.length) return text;
   const tail = blocks.join("\n\n");
   return text ? `${text}\n\n${tail}` : tail;

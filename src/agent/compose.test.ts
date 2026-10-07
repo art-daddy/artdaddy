@@ -2,11 +2,19 @@ import { describe, expect, it } from "vitest";
 
 import type { Attachment } from "../api/types";
 import type { Mention } from "../timeline/mentions";
-import { composeModelText } from "./compose";
+import { composeModelText, TIMELINE_CHANGED_NOTE } from "./compose";
 
 describe("composeModelText", () => {
   it("returns the raw text when nothing is attached", () => {
     expect(composeModelText("hello", [], [])).toBe("hello");
+  });
+
+  it("says the timeline changed outside the chat only when told so (UJ-028)", () => {
+    expect(composeModelText("how long is it?", [], [])).not.toContain(TIMELINE_CHANGED_NOTE);
+    const out = composeModelText("how long is it?", [], [], { timelineChanged: true });
+    expect(out.startsWith("how long is it?")).toBe(true);
+    expect(out).toContain(TIMELINE_CHANGED_NOTE);
+    expect(TIMELINE_CHANGED_NOTE).toContain("get_timeline");
   });
 
   it("renders editor-context mentions (playhead + range + clip)", () => {

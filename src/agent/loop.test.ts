@@ -30,7 +30,10 @@ function toolCall(
   return rr({ kind: "tool_calls", pending_calls: [{ call_id, name, arguments: args }] });
 }
 
-function harness(rounds: RoundResultDTO[], opts: { mode?: ApprovalMode } = {}) {
+function harness(
+  rounds: RoundResultDTO[],
+  opts: { mode?: ApprovalMode; noteForRound?: LoopDeps["noteForRound"] } = {},
+) {
   const events: { event: string; data: Record<string, unknown> }[] = [];
   let mode: ApprovalMode = opts.mode ?? "default";
   let stopped = false;
@@ -54,6 +57,7 @@ function harness(rounds: RoundResultDTO[], opts: { mode?: ApprovalMode } = {}) {
     stopped: () => stopped,
     onUsage: vi.fn(),
     session: () => ({ cost_usd: 0.01 }),
+    noteForRound: opts.noteForRound,
   };
   return {
     runner: new ClientTurnRunner(deps),
@@ -480,5 +484,54 @@ describe("ClientTurnRunner records what the model saw", () => {
     const tr = h.events.find((e) => e.event === "tool_result")!;
     expect(tr.data.model_result).toEqual({ ok: false, error: "too expensive" });
     expect(h.events.find((e) => e.event === "tool_call")!.data.round).toEqual(expect.any(Number));
+  });
+});
+
+// UJ-028: the app's note about an outside timeline change rides INSIDE a tool output (a user
+// message there would cost the model its reasoning), in the round about to be sent.
+describe("ClientTurnRunner round notes", () => {
+  const NOTE = { timeline_note: "changed outside" };
+  const twoCalls = rr({
+    kind: "tool_calls",
+    pending_calls: [
+      { call_id: "a", name: "get_timeline", arguments: {} },
+      { call_id: "b", name: "add_track", arguments: {} },
+    ],
+  });
+
+  it("merges the note into the LAST output of the round it sends, and records the same bytes", async () => {
+    const noteForRound = vi.fn((): Record<string, string> | null => NOTE);
+    const h = harness([twoCalls, rr({ kind: "text", final_text: "done" })], { noteForRound });
+    await h.runner.start("go");
+    expect(noteForRound).toHaveBeenCalledTimes(1); // asked for the tool round, not the first one
+    const sent = h.infer.mock.calls[1][0].tool_results ?? [];
+    expect(sent.map((t) => t.call_id)).toEqual(["a", "b"]);
+    expect(sent[0].result).not.toHaveProperty("timeline_note");
+    expect(sent[1].result).toMatchObject({ ok: true, ran: "add_track", ...NOTE });
+    const recorded = h.events.find((e) => e.event === "tool_result_note")!;
+    expect(recorded.data).toEqual({ call_id: "b", model_result: sent[1].result });
+  });
+
+  it("leaves a round alone when there is nothing to say", async () => {
+    const h = harness([twoCalls, rr({ kind: "text", final_text: "done" })], {
+      noteForRound: () => null,
+    });
+    await h.runner.start("go");
+    const sent = h.infer.mock.calls[1][0].tool_results ?? [];
+    expect(sent.every((t) => !("timeline_note" in t.result))).toBe(true);
+    expect(h.names()).not.toContain("tool_result_note");
+  });
+
+  it("asks when a paused round is finally sent, so an edit made during the pause reaches it", async () => {
+    let edited = false;
+    const cap = CONTINUE_CAPS.default;
+    const rounds = Array.from({ length: cap + 1 }, () => toolCall("get_timeline", "c"));
+    const h = harness(rounds, { noteForRound: () => (edited ? NOTE : null) });
+    await h.runner.start("go");
+    const before = h.infer.mock.calls.length;
+    edited = true; // the user edits the timeline while "Continue?" is up
+    await h.runner.continueRun();
+    const resumed = h.infer.mock.calls[before][0].tool_results ?? [];
+    expect(resumed.at(-1)?.result).toMatchObject(NOTE);
   });
 });

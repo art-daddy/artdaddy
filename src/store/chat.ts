@@ -3,7 +3,8 @@ import { createStore, type StoreApi } from "zustand/vanilla";
 
 import { inferRoundStreaming } from "../agent/api";
 import { ClientTurnRunner, type LoopDeps } from "../agent/loop";
-import { composeModelText } from "../agent/compose";
+import { composeModelText, TIMELINE_CHANGED_NOTE } from "../agent/compose";
+import { sameTimeline, TimelineAwareness, type DocReading } from "../agent/timelineAwareness";
 import { collectInferenceAttachments } from "../agent/attachments";
 import { historyAttachments } from "../agent/historyFrames";
 import type { InferenceAttachment, RoundInput, ToolResultItem, Usage } from "../agent/types";
@@ -14,8 +15,10 @@ import { setAgentContext } from "../api/agentEvents";
 import type { SSEMessage } from "../api/sse";
 import type { ApprovalMode, Attachment, PendingApproval, SessionState } from "../api/types";
 import { useEditor } from "./editor";
-import { replaceTimeline } from "../timeline/engine";
+import { loadTimeline, replaceTimeline } from "../timeline/engine";
 import { withProjectLock } from "../tools/coordinator";
+import type { ProjectStoreAccess } from "../tools/store";
+import { openDocumentById } from "../project/openDocuments";
 import { mentionKey, type Mention } from "../timeline/mentions";
 import {
   loadClientSession,
@@ -127,6 +130,28 @@ function withLast(turns: Turn[], fn: (t: Turn) => Turn): Turn[] {
   return next;
 }
 
+/** The open document's count of outside timeline edits (UJ-028), or null with none open. */
+function docReading(projectId: string): DocReading | null {
+  const doc = openDocumentById(projectId);
+  return doc ? { docSession: doc.sessionId, epoch: doc.externalTimelineEdits() } : null;
+}
+
+/** Is the timeline now different from the one the model last saw: the one the last kept turn
+ *  ended on (or began on, if it never recorded an end)? False when there is no such turn. */
+async function changedSinceLastTurn(
+  prior: Turn[],
+  store: ProjectStoreAccess | null,
+): Promise<boolean> {
+  const last = [...prior].reverse().find((t) => !t.undone);
+  const seen = last?.timelineAfter ?? last?.checkpoint ?? null;
+  if (!seen || !store) return false;
+  try {
+    return !sameTimeline(seen, await loadTimeline(store));
+  } catch {
+    return false;
+  }
+}
+
 /** What the model is told when background work lands. It names the ids so the next round can
  *  use them without a lookup, and reports failures plainly so the agent corrects its own earlier
  *  "generating it now" rather than leaving that as the last word. */
@@ -167,6 +192,8 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
   // nothing, and the chained provider refused the next request (UJ-008).
   let carriedDebt: ToolResultItem[] = [];
   let execSeq = 0;
+  // What the model has seen of the timeline, so it can be told when that went stale (UJ-028).
+  const awareness = new TimelineAwareness();
   // Monotonic load generation: a slower load() (even for the SAME project id -- an
   // A->B->A re-activation) sees a newer one took over and bails before committing
   // its stale session. A bare projectId check can't tell two same-id loads apart (R6-3).
@@ -329,6 +356,23 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
         // assistant message already delivered as a `text` part. Ignoring it keeps
         // the response from rendering twice.
         break;
+      case "tool_result_note": {
+        // The runner merged an app note into an output it is about to send; the transcript must
+        // hold the same bytes, because every later round is rebuilt from it.
+        const id = String(data?.call_id ?? "");
+        set((s) => ({
+          turns: withLast(s.turns, (t) => ({
+            ...t,
+            parts: t.parts.map((p) =>
+              p.kind === "tool_result" && String(p.call_id ?? "") === id
+                ? { ...p, model_result: data.model_result }
+                : p,
+            ),
+          })),
+        }));
+        persistCurrentSession();
+        break;
+      }
       case "awaiting_approval":
         set((s) => ({
           pending: ((data as { calls?: PendingApproval[] })?.calls ?? [
@@ -474,14 +518,26 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
         // its old project after a switch. Bound to THIS turn's host + abort signal.
         if (halted()) return { ok: false, error: "turn cancelled" };
         if (!exec.host.has(name)) return { ok: false, error: `unknown tool: ${name}` };
+        // A whole-timeline read shows the model every outside edit made before it began.
+        const wholeRead =
+          name === "get_timeline" && args.start_frame == null && args.end_frame == null
+            ? docReading(exec.host.projectId)
+            : null;
         // Carry THIS execution's origin so a commit that lands after a supersede/restore is rejected
         // at the mutation gate (the mandatory backstop under the halted() guard above).
-        return exec.host.run(name, args, exec.controller.signal, {
+        const out = await exec.host.run(name, args, exec.controller.signal, {
           chatSessionId: get().transcriptId ?? "",
           branchId: 0,
           executionId: exec.token,
         });
+        if (wholeRead && !superseded() && (out as { ok?: unknown } | null)?.ok !== false)
+          awareness.sawWholeTimeline(wholeRead);
+        return out;
       },
+      noteForRound: () =>
+        !superseded() && awareness.atToolRound(docReading(exec.host.projectId))
+          ? { timeline_note: TIMELINE_CHANGED_NOTE }
+          : null,
       collectAttachments: (raw) => collectInferenceAttachments(raw, exec.host.store()),
       emit: (event, data) => {
         if (!superseded()) apply({ event, data });
@@ -637,6 +693,7 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
       // project (or to one whose open stalls/fails) would otherwise leave the old
       // hidden turn running paid calls + tools against its old host (R7-3).
       quiesceTurn(); // retire the turn (+ pending load) so it can't repopulate after we reset (R8-7).
+      awareness.reset();
       set({
         projectId: null,
         transcriptId: null,
@@ -679,6 +736,7 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
       // leaving (Copilot/Cursor-style): its exec is retired, so the stale runner
       // can't keep working and its late events/edits can't land here.
       supersede();
+      awareness.reset();
       set({
         projectId,
         transcriptId: null,
@@ -773,6 +831,19 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
         return;
       }
       if (exec !== currentExec) return; // superseded during warm-up -> run nothing
+      // Has something other than the agent changed the timeline since the model last saw it?
+      // Decided here, right before the first round, and kept on the turn: every later round
+      // rebuilds this message from the transcript and must show the model the same words.
+      const timelineChanged = await awareness.atTurnStart(docReading(projectId), () =>
+        changedSinceLastTurn(turns, clientOwned ? ed.store : null),
+      );
+      if (exec !== currentExec) return;
+      if (timelineChanged) {
+        set((s) => ({
+          turns: s.turns.map((t) => (t.id === turn.id ? { ...t, timelineChanged: true } : t)),
+        }));
+        persistCurrentSession();
+      }
       const base = { requests: buildRequests(turns) as unknown[] };
       // A previous turn that was stopped mid-batch still owes the provider an output for
       // every call it issued; hand that debt to this turn or the request is refused. The
@@ -783,7 +854,10 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
       const carried = [...owed, ...unansweredCalls(turns).filter((o) => !seen.has(o.call_id))];
       currentRunner = new ClientTurnRunner(buildLoopDeps(base, exec));
       await runTurn(exec, () =>
-        currentRunner!.start(composeModelText(text, attachments, mentions), carried),
+        currentRunner!.start(
+          composeModelText(text, attachments, mentions, { timelineChanged }),
+          carried,
+        ),
       );
     },
 
@@ -847,6 +921,7 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
           providerSnapshot: null,
           session: s.session ? { ...s.session, ...undoFlags(next) } : s.session,
         }));
+        awareness.reset(); // the model's history changed with the timeline: compare, don't count
         const store = ed.store;
         await withProjectLock(store.projectDir, () =>
           persistSession(store, { requests: buildRequests(next), providerSnapshot: null }),
@@ -877,6 +952,7 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
           turns: next,
           session: s.session ? { ...s.session, ...undoFlags(next) } : s.session,
         }));
+        awareness.reset();
         const store = ed.store;
         await withProjectLock(store.projectDir, () =>
           persistSession(store, {
@@ -912,6 +988,7 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
           providerSnapshot: null,
           session: s.session ? { ...s.session, ...undoFlags(next) } : s.session,
         }));
+        awareness.reset();
         const store = ed.store;
         await withProjectLock(store.projectDir, () =>
           persistSession(store, { requests: buildRequests(next), providerSnapshot: null }),

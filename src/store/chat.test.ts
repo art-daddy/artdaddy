@@ -11,6 +11,9 @@ import { useEditor } from "./editor";
 import { __resetJobNotes, notifyJobSettled, pendingJobNotes, type SettledJob } from "./jobNotes";
 import { loadClientSession, persistSession, persistSessionSoon } from "./transcriptFile";
 import { inferRoundStreaming } from "../agent/api";
+import { TIMELINE_CHANGED_NOTE } from "../agent/compose";
+import { setOpenDocumentResolver } from "../project/openDocuments";
+import { emptyTimeline, type Timeline } from "../timeline/model";
 import { openToolHost } from "../tools/host";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1336,5 +1339,131 @@ describe("streamed output", () => {
     stale.emit("delta_text", { text: "ghost" });
 
     expect(parts().some((p) => String(p.text ?? "").includes("ghost"))).toBe(false);
+  });
+});
+
+// UJ-028: the agent read the timeline once, the user placed four clips by hand, and the agent
+// answered "90 seconds" from memory. The open document counts edits the agent did not make; the
+// chat turns that count (or, on a new session, the timeline itself) into a line the model gets.
+describe("useChat tells the model when the timeline changed outside the chat (UJ-028)", () => {
+  let outside = 0;
+  let live: Timeline;
+  const trackWithClips = (n: number): Timeline => {
+    const t = emptyTimeline();
+    t.tracks.push({
+      id: "v1",
+      kind: "video",
+      z: 0,
+      clips: Array.from({ length: n }, (_, i) => ({
+        id: `c${i}`,
+        media_ref: "media_a",
+        timeline_in: i * 2700,
+        timeline_out: (i + 1) * 2700,
+      })),
+    });
+    return t;
+  };
+  const lastStart = () => String(runnerStart.mock.calls.at(-1)?.[0] ?? "");
+  const finish = () => emit("turn_done", snap());
+  const NOTE = { timeline_note: TIMELINE_CHANGED_NOTE };
+
+  beforeEach(() => {
+    outside = 0;
+    live = trackWithClips(1);
+    setOpenDocumentResolver((id) =>
+      id === "p1"
+        ? ({
+            sessionId: "s1",
+            externalTimelineEdits: () => outside,
+            timeline: { current: () => live },
+          } as Any)
+        : undefined,
+    );
+    useEditor.setState({
+      projectId: "p1",
+      store: { projectDir: "C:/p1", writeProjectText: vi.fn() } as Any,
+      timeline: live,
+    });
+    useChat.setState({ projectId: "p1", turns: [] });
+  });
+  afterEach(() => setOpenDocumentResolver(() => undefined));
+
+  it("tells the next message once after an edit in the editor, and keeps it on the saved turn", async () => {
+    await useChat.getState().send("how long is my timeline?");
+    expect(lastStart()).not.toContain(TIMELINE_CHANGED_NOTE);
+    finish();
+    outside++; // four more copies placed by hand
+    await useChat.getState().send("how long is my timeline now?");
+    expect(lastStart()).toContain(TIMELINE_CHANGED_NOTE);
+    expect(useChat.getState().turns.at(-1)?.timelineChanged).toBe(true);
+    const saved = (persistSessionSoon as Any).mock.calls.at(-1)[1].requests.at(-1);
+    expect(saved.message.timeline_changed).toBe(true);
+    finish();
+    await useChat.getState().send("and how many clips?");
+    expect(lastStart()).not.toContain(TIMELINE_CHANGED_NOTE);
+  });
+
+  it("tells the next tool round about an edit made while the turn ran, once", async () => {
+    await useChat.getState().send("build it");
+    expect(lastDeps.noteForRound()).toBeNull();
+    outside++;
+    expect(lastDeps.noteForRound()).toEqual(NOTE);
+    expect(lastDeps.noteForRound()).toBeNull();
+  });
+
+  it("a whole-timeline read after the edit covers it; a windowed read does not", async () => {
+    (openToolHost as Any).mockImplementationOnce((id: string) => ({
+      projectId: id,
+      ready: Promise.resolve(),
+      has: () => true,
+      run: vi.fn(async () => ({ ok: true })),
+      store: () => null,
+    }));
+    await useChat.getState().send("build it");
+    outside++;
+    await lastDeps.runTool("get_timeline", { start_frame: 0, end_frame: 30 });
+    expect(lastDeps.noteForRound()).toEqual(NOTE);
+    outside++;
+    await lastDeps.runTool("get_timeline", { start_frame: null, end_frame: null });
+    expect(lastDeps.noteForRound()).toBeNull();
+  });
+
+  it("on a new session compares the timeline with the one the last turn ended on", async () => {
+    const saved = (after: Timeline) => ({
+      requests: [
+        {
+          id: "old",
+          message: { text: "hi" },
+          response: [{ kind: "text", text: "Your timeline is 90 seconds long." }],
+          checkpoint: { timeline_after: JSON.parse(JSON.stringify(after)) },
+        },
+      ],
+      providerSnapshot: null,
+    });
+    loadSess.mockResolvedValueOnce(saved(live));
+    await useChat.getState().load("p1");
+    await useChat.getState().send("same as before?");
+    expect(lastStart()).not.toContain(TIMELINE_CHANGED_NOTE);
+    finish();
+
+    loadSess.mockResolvedValueOnce(saved(live));
+    await useChat.getState().load("p1");
+    live = trackWithClips(5); // edited while the app was closed, or before the first message
+    await useChat.getState().send("how long is it?");
+    expect(lastStart()).toContain(TIMELINE_CHANGED_NOTE);
+  });
+
+  it("a chat undo is not news: the next message compares with the turn it went back to", async () => {
+    await useChat.getState().send("first"); // ends on `live`
+    finish();
+    useEditor.setState({ timeline: null }); // no checkpoint, so the undo below restores nothing
+    await useChat.getState().send("second");
+    finish();
+    useEditor.setState({ timeline: live });
+    outside++; // the restore a chat undo commits is counted like any edit the agent did not make
+    await useChat.getState().undo();
+    expect(useChat.getState().turns.at(-1)?.undone).toBe(true);
+    await useChat.getState().send("third");
+    expect(lastStart()).not.toContain(TIMELINE_CHANGED_NOTE);
   });
 });

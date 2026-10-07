@@ -71,6 +71,38 @@ describe("mapRequests <-> buildRequests", () => {
   });
 });
 
+// The model saw the composed message on the turn's first round; every later round, and every
+// round after a reload, must rebuild those same bytes from what was saved.
+describe("the model's message survives a save and a reload", () => {
+  const composed = turn({
+    userText: "cut here",
+    mentions: [{ kind: "playhead", frame: 120, fps: 30, timecode: "00:00:04:00" }],
+    timelineChanged: true,
+  });
+
+  it("rebuilds the same history text after mapRequests(buildRequests(...))", () => {
+    const before = requestsForHistory([composed]) as Any[];
+    const after = requestsForHistory(
+      mapRequests(JSON.parse(JSON.stringify(buildRequests([composed])))),
+    ) as Any[];
+    expect(after[0].message.text).toBe(before[0].message.text);
+    expect(before[0].message.text).toContain("playhead: frame 120");
+    expect(before[0].message.text).toContain("changed outside this chat");
+  });
+
+  it("sends the folded text only, not the fields it was folded from", () => {
+    const [req] = requestsForHistory([composed]) as Any[];
+    expect(req.message).not.toHaveProperty("mentions");
+    expect(req.message).not.toHaveProperty("timeline_changed");
+  });
+
+  it("an older transcript without the fields loads as before", () => {
+    const [t] = mapRequests([{ id: "x", message: { text: "hi" } }] as Any);
+    expect(t.timelineChanged).toBeFalsy();
+    expect(requestsForHistory([t])[0].message?.text).toBe("hi");
+  });
+});
+
 // A reload or a crash mid-turn used to leave a turn that read as finished with no answer: the
 // transcript kept no status, and every turn loaded as "done".
 describe("a turn cut short reads as cut short after a reload", () => {
