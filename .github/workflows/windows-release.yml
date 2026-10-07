@@ -144,7 +144,9 @@ jobs:
             Write-Host "::error::published URL returned $($response.StatusCode)"
             exit 1
           }
-          if ([int64]$response.Headers.'Content-Length' -ne [int64]"${{ steps.verify.outputs.size }}") {
+          # pwsh 7 returns header values as String[]; a bare [int64] cast of the array throws.
+          $length = $response.Headers.'Content-Length' | Select-Object -First 1
+          if ([int64]$length -ne [int64]"${{ steps.verify.outputs.size }}") {
             Write-Host "::error::published size does not match the built installer"
             exit 1
           }
