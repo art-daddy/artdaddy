@@ -570,6 +570,47 @@ describe.skipIf(!FF)("caption pixel smoke (bundled libass)", () => {
     expect(leftLate, "the last words should arrive on the left").toBeGreaterThan(150);
   });
 
+  // UJ-029: a long Japanese caption ran off both edges of the frame, because libass breaks lines only
+  // at spaces and Japanese has none. The plan now breaks it between words; this asks the export where
+  // the ink is: inside the frame's side margins, on more than one line.
+  it("a long Japanese caption wraps inside the frame on a vertical canvas", async () => {
+    const cwd = await scratch();
+    const tall = { width: 360, height: 640, fps: 30 };
+    const out = await render(FF!, cwd, {
+      canvas: tall,
+      tracks: [
+        {
+          id: "t",
+          kind: "text",
+          z: 0,
+          clips: [
+            {
+              kind: "text",
+              text: "藤村のりを1914年大正3年11月14日から没年不明は日本のセーリング競技選手",
+              timeline_in: 0,
+              timeline_out: 1,
+              style: { color: "#ffffff", font: "Poppins" },
+            },
+          ],
+        },
+      ],
+    } as unknown as Timeline);
+    // The outer 3% of each side: the plan keeps text 5% in, so a fitted line leaves these empty.
+    expect(
+      await regionMaxLuma(FF!, out, 0.5, "crop=iw*0.03:ih:0:0"),
+      "ink at the left edge",
+    ).toBeLessThan(60);
+    expect(
+      await regionMaxLuma(FF!, out, 0.5, "crop=iw*0.03:ih:iw*0.97:0"),
+      "ink at the right edge",
+    ).toBeLessThan(60);
+    // More than one line: ink both above and below the middle line's band.
+    const band = (y0: number, y1: number) => `crop=iw:ih*${y1 - y0}:0:ih*${y0}`;
+    const lines = [band(0.3, 0.45), band(0.45, 0.55), band(0.55, 0.7)];
+    const lit = await Promise.all(lines.map((b) => regionMaxLuma(FF!, out, 0.5, b)));
+    expect(lit.filter((l) => l > 150).length, `ink per band ${lit}`).toBeGreaterThan(1);
+  });
+
   it("a style PRESET resolves into a real look (C5: clean-white renders visible text)", async () => {
     const cwd = await scratch();
     const clip = {

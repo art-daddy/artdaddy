@@ -19,7 +19,7 @@ import type { Animatable, Clip, Timeline } from "./model";
 import { canvasFps, isNum } from "./frames";
 import { clipPlays, outputGate } from "./visibility";
 import { parseTransitionIn, TRANSITION_KINDS, type TransitionKind } from "./transition";
-import { joinWords } from "./wordJoin";
+import { breakUnspaced, breakWords, joinWords } from "./wordJoin";
 
 /** A clip's OWN incoming transition (from `transition_in`), resolved ONCE so render.ts's private
  *  `parseTransition` and scene.ts's `parseTransitionIn` stop being two parsers of one contract field.
@@ -751,18 +751,42 @@ function resolveText(clip: Clip, cw: number, ch: number, durSec: number): Resolv
   const cyRaw = hasPos ? Math.round((pos!.y as number) * ch) : Math.round(ch / 2);
   const cyPx = Math.max(safeMarginYPx, Math.min(ch - safeMarginYPx, cyRaw));
   const raw = textContent(clip);
-  const text =
+  const cased =
     caseMode === "upper" ? raw.toUpperCase() : caseMode === "lower" ? raw.toLowerCase() : raw;
-  const chunks = resolveChunks(clip, caseMode, durSec);
-  const karaoke = resolveKaraoke(clip, caseMode, durSec);
+  const wPx = Math.max(1, cw - 2 * safeMarginXPx); // wrap box inset by the horizontal safe margin on BOTH sides
+  // Neither renderer can break a line inside Chinese or Japanese, so their breaks are decided here,
+  // once, for both (UJ-029); text in other scripts comes through untouched.
+  const fit = (s: string): string => breakUnspaced(s, sizePx, spacingPx, wPx);
+  const fitWords = <T>(items: T[] | null, get: (t: T) => string, set: (t: T, s: string) => T) => {
+    if (!items) return null;
+    const broken = breakWords(items.map(get), sizePx, spacingPx, wPx);
+    return items.map((it, i) => set(it, broken[i]));
+  };
+  const chunks =
+    resolveChunks(clip, caseMode, durSec)?.map((c) => ({ ...c, text: fit(c.text) })) ?? null;
+  const karaoke = fitWords(
+    resolveKaraoke(clip, caseMode, durSec) as Array<{ word: string; durCs: number }> | null,
+    (k) => k.word,
+    (k, word) => ({ ...k, word }),
+  );
   // Reveal builds (word-by-word/append/typewriter) hide unsung words; word-highlight only dims them.
   const karaokeReveal = karaoke != null && anim.build !== "word-highlight";
-  const runs = resolveRuns(
-    clip,
-    { font, sizePx, color, bold, italic, underline, strike, weight, outline },
-    caseMode,
-    ch,
+  const runs = fitWords(
+    resolveRuns(
+      clip,
+      { font, sizePx, color, bold, italic, underline, strike, weight, outline },
+      caseMode,
+      ch,
+    ) as ResolvedRun[] | null,
+    (r) => r.text,
+    (r, text) => ({ ...r, text }),
   );
+  // The line every backend draws: the words as broken above when there are any, else the text.
+  const text = karaoke
+    ? joinWords(karaoke.map((k) => k.word))
+    : runs
+      ? joinWords(runs.map((r) => r.text))
+      : fit(cased);
   const rawAss =
     typeof (clip as Record<string, unknown>).raw_ass === "string"
       ? ((clip as Record<string, unknown>).raw_ass as string)
@@ -789,7 +813,7 @@ function resolveText(clip: Clip, cw: number, ch: number, durSec: number): Resolv
     hasPos,
     cxPx,
     cyPx,
-    wPx: Math.max(1, cw - 2 * safeMarginXPx), // wrap box inset by the horizontal safe margin on BOTH sides
+    wPx,
     hPx: ch,
     safeMarginXPx,
     safeMarginYPx,

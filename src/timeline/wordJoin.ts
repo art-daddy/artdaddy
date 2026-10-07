@@ -24,8 +24,10 @@ function firstChar(s: string): string {
   return cp === undefined ? "" : String.fromCodePoint(cp);
 }
 
-/** What separates two adjacent words: nothing where either side is Chinese or Japanese, else a space. */
+/** What separates two adjacent words: nothing where either side is Chinese or Japanese, or where a
+ *  line break already does (a word that starts a new line carries it, see `lineStarts`); else a space. */
 export function wordGap(left: string, right: string): string {
+  if (left.endsWith("\n") || right.startsWith("\n")) return "";
   return UNSPACED_CHAR.test(lastChar(left)) || UNSPACED_CHAR.test(firstChar(right)) ? "" : " ";
 }
 
@@ -49,4 +51,103 @@ export function joinWords(words: readonly string[]): string {
     (w) => w,
     (w) => w,
   );
+}
+
+let segmenter: Intl.Segmenter | null | undefined;
+
+/** Where the words of `text` are, by a dictionary word-breaker (it goes by the characters' script, so
+ *  no locale is needed). Punctuation belongs to the word before it, or the word after at the start, so
+ *  "した。" stays one word and no line can begin with "。". Null when the runtime has no word-breaker. */
+export function wordSpans(text: string): Array<{ start: number; end: number }> | null {
+  segmenter ??=
+    typeof Intl === "object" && typeof Intl.Segmenter === "function"
+      ? new Intl.Segmenter(undefined, { granularity: "word" })
+      : null;
+  if (!segmenter) return null;
+  const spans: Array<{ start: number; end: number }> = [];
+  let lead: number | null = null;
+  for (const s of segmenter.segment(text)) {
+    const start = s.index;
+    const end = start + s.segment.length;
+    if (!s.segment.trim()) continue;
+    if (s.isWordLike) {
+      spans.push({ start: lead ?? start, end });
+      lead = null;
+    } else if (spans.length) spans[spans.length - 1].end = end;
+    else lead ??= start;
+  }
+  if (lead !== null) spans.push({ start: lead, end: text.length }); // punctuation and nothing else
+  return spans;
+}
+
+/** How wide `text` draws at `sizePx`, estimated: a Chinese or Japanese character is one em in every
+ *  CJK font; anything else is counted at 0.6 em, about an average Latin letter or digit. */
+export function estimateWidth(text: string, sizePx: number, spacingPx = 0): number {
+  let w = 0;
+  for (const ch of text) w += (UNSPACED_CHAR.test(ch) ? 1 : 0.6) * sizePx + spacingPx;
+  return w;
+}
+
+/** Neither renderer can break a line inside Chinese or Japanese (both break at spaces only), so a long
+ *  one ran off both edges of the frame (UJ-029). This decides those breaks once, for both: "\n" goes
+ *  between words wherever the line would be wider than `maxWidthPx`. Text with no Chinese or Japanese
+ *  is returned as it is, for the renderers to wrap at spaces as before. */
+export function breakUnspaced(
+  text: string,
+  sizePx: number,
+  spacingPx: number,
+  maxWidthPx: number,
+): string {
+  if (!UNSPACED_CHAR.test(text)) return text;
+  return text
+    .split("\n")
+    .map((para) => {
+      const spans =
+        UNSPACED_CHAR.test(para) && estimateWidth(para, sizePx, spacingPx) > maxWidthPx
+          ? wordSpans(para)
+          : null;
+      if (!spans || spans.length < 2) return para;
+      const words = spans.map(({ start, end }, i) => ({
+        gap: i ? para.slice(spans[i - 1].end, start) : para.slice(0, start),
+        word: para.slice(start, end),
+      }));
+      let line = words[0].gap + words[0].word;
+      const lines: string[] = [];
+      for (const { gap, word } of words.slice(1)) {
+        if (estimateWidth(line + gap + word, sizePx, spacingPx) > maxWidthPx) {
+          lines.push(line);
+          line = word;
+        } else line += gap + word;
+      }
+      lines.push(line + para.slice(spans[spans.length - 1].end));
+      return lines.join("\n");
+    })
+    .join("\n");
+}
+
+/** `words` with "\n" put in front of each one that starts a new line when they are drawn joined
+ *  (joinWords) in a line `maxWidthPx` wide, so every renderer that joins them draws the same lines.
+ *  Only a line holding Chinese or Japanese is broken here; others are left as they are. */
+export function breakWords(
+  words: readonly string[],
+  sizePx: number,
+  spacingPx: number,
+  maxWidthPx: number,
+): string[] {
+  const joined = joinWords(words);
+  if (!UNSPACED_CHAR.test(joined) || estimateWidth(joined, sizePx, spacingPx) <= maxWidthPx)
+    return [...words];
+  const out = [words[0]];
+  let line = words[0];
+  for (let i = 1; i < words.length; i++) {
+    const next = line + wordGap(words[i - 1], words[i]) + words[i];
+    if (estimateWidth(next, sizePx, spacingPx) > maxWidthPx) {
+      out.push(`\n${words[i]}`);
+      line = words[i];
+    } else {
+      out.push(words[i]);
+      line = next;
+    }
+  }
+  return out;
 }

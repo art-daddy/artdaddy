@@ -1,7 +1,15 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
-import { joinWords, UNSPACED_CHAR, wordGap } from "./wordJoin";
+import {
+  breakUnspaced,
+  breakWords,
+  estimateWidth,
+  joinWords,
+  UNSPACED_CHAR,
+  wordGap,
+  wordSpans,
+} from "./wordJoin";
 
 describe("joinWords: words back into the line they are read as", () => {
   it("writes Chinese and Japanese with no space between words", () => {
@@ -23,9 +31,10 @@ describe("joinWords: words back into the line they are read as", () => {
 
   it("is join(' ') exactly for any words without Chinese or Japanese in them", () => {
     // The byte-identical gate: every caption already made in a spaced language renders as before.
+    // (A word that starts or ends a line has no space beside it: the line break separates it.)
     const spaced = fc
       .string({ unit: "grapheme", maxLength: 8 })
-      .filter((s) => !UNSPACED_CHAR.test(s));
+      .filter((s) => !UNSPACED_CHAR.test(s) && !/^\n|\n$/.test(s));
     fc.assert(
       fc.property(fc.array(spaced, { maxLength: 12 }), (ws) => {
         expect(joinWords(ws)).toBe(ws.join(" "));
@@ -60,5 +69,76 @@ describe("joinWords: words back into the line they are read as", () => {
     expect(wordGap("\u{20B9F}", "x")).toBe("");
     expect(wordGap("x", "\u{20B9F}")).toBe("");
     expect(wordGap("", "")).toBe(" ");
+  });
+});
+
+// UJ-029: neither renderer can break inside Chinese or Japanese (libass and the preview's wrap both
+// break at spaces only), so a long line ran off both edges. The breaks are decided here, once, and
+// both renderers draw them.
+describe("breakUnspaced: Chinese and Japanese lines broken to fit, everything else untouched", () => {
+  const SIZE = 40;
+  it("breaks a Japanese line that would run past the width, only between words", () => {
+    const text = "藤村のりを1914年大正3年11月14日から没年不明は日本のセーリング競技選手";
+    const broken = breakUnspaced(text, SIZE, 0, 10 * SIZE);
+    expect(broken.replace(/\n/g, "")).toBe(text); // nothing lost or added but breaks
+    const lines = broken.split("\n");
+    expect(lines.length).toBeGreaterThan(2);
+    for (const line of lines) expect(estimateWidth(line, SIZE)).toBeLessThanOrEqual(10 * SIZE);
+    // Every break falls where the word-breaker says a word starts.
+    const starts = new Set((wordSpans(text) ?? []).map((s) => s.start));
+    let at = 0;
+    for (const line of lines.slice(0, -1)) {
+      at += line.length;
+      expect(starts.has(at)).toBe(true);
+    }
+  });
+
+  it("leaves text without Chinese or Japanese exactly as it was, however long", () => {
+    fc.assert(
+      fc.property(fc.string({ unit: "grapheme", maxLength: 120 }), (s) => {
+        fc.pre(!UNSPACED_CHAR.test(s));
+        expect(breakUnspaced(s, SIZE, 0, 5 * SIZE)).toBe(s);
+      }),
+      { numRuns: 300 },
+    );
+  });
+
+  it("keeps a line that already fits, and restarts the width at an authored break", () => {
+    expect(breakUnspaced("藤村のりを", SIZE, 0, 10 * SIZE)).toBe("藤村のりを");
+    expect(breakUnspaced("藤村の\nりを", SIZE, 0, 4 * SIZE)).toBe("藤村の\nりを");
+  });
+
+  it("puts a line break in front of each word that starts a new line, and joins with no space there", () => {
+    const words = ["藤村", "の", "り", "を", "1914", "年", "大正", "3", "年"];
+    const broken = breakWords(words, SIZE, 0, 6 * SIZE);
+    expect(broken.map((w) => w.replace(/^\n/, ""))).toEqual(words);
+    expect(broken[0].startsWith("\n")).toBe(false);
+    const lines = joinWords(broken).split("\n");
+    expect(lines.length).toBeGreaterThan(1);
+    expect(lines.join("")).toBe(joinWords(words));
+    for (const line of lines) expect(estimateWidth(line, SIZE)).toBeLessThanOrEqual(6 * SIZE);
+    const latin = ["Hello", "there", "and", "welcome", "back"];
+    expect(breakWords(latin, SIZE, 0, 2 * SIZE)).toEqual(latin);
+  });
+
+  it("property: any Japanese text is broken only between words, never lost, every line fitting", () => {
+    const pool = [..."日本語の文章を書きますオリンピック北京我们好吗。、！？1914年"];
+    fc.assert(
+      fc.property(
+        fc.array(fc.constantFrom(...pool), { maxLength: 60 }),
+        fc.integer({ min: 3, max: 20 }),
+        (cs, em) => {
+          const text = cs.join("");
+          const broken = breakUnspaced(text, SIZE, 0, em * SIZE);
+          expect(broken.replace(/\n/g, "")).toBe(text);
+          for (const line of broken.split("\n")) {
+            // A single word wider than the line keeps its own line rather than being cut.
+            const one = (wordSpans(line) ?? []).length <= 1;
+            if (!one) expect(estimateWidth(line, SIZE)).toBeLessThanOrEqual(em * SIZE);
+          }
+        },
+      ),
+      { numRuns: 300 },
+    );
   });
 });

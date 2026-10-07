@@ -72,6 +72,54 @@ describe("chunkWords", () => {
   it("returns nothing for no words", () => {
     expect(chunkWords([])).toEqual([]);
   });
+
+  // UJ-030: with no cap given, a caption only closed at a sentence end, so a transcript with no
+  // full stops (a real Hindi clip: commas only) became ONE caption for the whole 57 s.
+  it("with no cap given, holds a caption to 42 characters (one over-long word excepted)", () => {
+    fc.assert(
+      fc.property(wordArb, (words) => {
+        const phrases = chunkWords(words);
+        expect(phrases.flatMap((p) => p.words.map((x) => x.text))).toEqual(
+          words.map((x) => x.text),
+        );
+        for (const p of phrases)
+          if (p.words.length > 1) expect(p.text.length).toBeLessThanOrEqual(42);
+      }),
+    );
+    const commasOnly = timed(
+      "एक आदमी को अगर आपको सन्तुष रखना है, तोसको बताये कि खुध से कुम्टीषन करो, खुध से, गरीबो कि लिए अच्छी बाद्दि,",
+    );
+    expect(chunkWords(commasOnly).length).toBeGreaterThan(1);
+  });
+
+  it("holds a Chinese or Japanese caption to 16 characters by default", () => {
+    const ja = [
+      "藤村",
+      "の",
+      "り",
+      "を",
+      "1914",
+      "年",
+      "対象",
+      "3",
+      "年",
+      "11",
+      "月",
+      "14",
+      "日",
+      "から",
+    ];
+    const phrases = chunkWords(ja.map((t, i) => w(t, i * 0.3, i * 0.3 + 0.25)));
+    expect(phrases.length).toBeGreaterThan(1);
+    for (const p of phrases) expect(p.text.length).toBeLessThanOrEqual(16);
+  });
+
+  it("lets a cap the caller gives win over the default", () => {
+    const long = timed("one two three four five six seven eight nine ten eleven twelve");
+    expect(chunkWords(long, { maxCharacters: 80 }).map((p) => p.text)).toEqual([
+      "one two three four five six seven eight nine ten eleven twelve",
+    ]);
+  });
 });
 
 describe("fitSpans", () => {

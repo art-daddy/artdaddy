@@ -11,7 +11,7 @@
 // silently drop a word are worse than no captions, because nobody re-reads their own video
 // to check.
 
-import { joinWords, wordGap } from "./wordJoin";
+import { joinWords, UNSPACED_CHAR, wordGap } from "./wordJoin";
 
 export interface CaptionWord {
   readonly text: string;
@@ -31,9 +31,15 @@ export interface ChunkOptions {
   /** Cap words per caption. Undefined = no cap. */
   readonly maxWords?: number;
   /** Cap characters per caption, spaces included. A single longer word still gets its own
-   *  caption rather than being split or dropped. */
+   *  caption rather than being split or dropped. Undefined = the subtitle standard below. */
   readonly maxCharacters?: number;
 }
+
+/** A caption's length when the caller sets none: the subtitle line standard (Netflix's timed-text
+ *  style guides), 42 characters, or 16 for Chinese and Japanese. With no cap at all a caption only
+ *  closed at a sentence end, so a transcript with none became one caption for the whole clip (UJ-030). */
+export const DEFAULT_MAX_CHARACTERS = 42;
+export const DEFAULT_MAX_CHARACTERS_UNSPACED = 16;
 
 /** A word that ends a sentence closes the caption even when there is room left: reading a
  *  new sentence that begins mid-caption is what makes auto-captions feel machine-made. Other
@@ -46,12 +52,13 @@ export function chunkWords(
   opts: ChunkOptions = {},
 ): CaptionPhrase[] {
   const maxWords = opts.maxWords && opts.maxWords > 0 ? Math.floor(opts.maxWords) : Infinity;
-  const maxChars =
-    opts.maxCharacters && opts.maxCharacters > 0 ? Math.floor(opts.maxCharacters) : Infinity;
+  const asked =
+    opts.maxCharacters && opts.maxCharacters > 0 ? Math.floor(opts.maxCharacters) : null;
 
   const out: CaptionPhrase[] = [];
   let run: CaptionWord[] = [];
   let chars = 0;
+  let unspaced = false; // the caption so far holds Chinese or Japanese
 
   const flush = (): void => {
     if (!run.length) return;
@@ -63,17 +70,24 @@ export function chunkWords(
     });
     run = [];
     chars = 0;
+    unspaced = false;
   };
   /** The caption's width with `w` added: the space before it counts, where there is one. */
   const widthWith = (w: CaptionWord): number =>
     run.length
       ? chars + wordGap(run[run.length - 1].text, w.text).length + w.text.length
       : w.text.length;
+  const capWith = (w: CaptionWord): number =>
+    asked ??
+    (unspaced || UNSPACED_CHAR.test(w.text)
+      ? DEFAULT_MAX_CHARACTERS_UNSPACED
+      : DEFAULT_MAX_CHARACTERS);
 
   for (const w of words) {
     // `run.length` guard: a word longer than the cap must still be emitted, not loop forever.
-    if (run.length && (run.length + 1 > maxWords || widthWith(w) > maxChars)) flush();
+    if (run.length && (run.length + 1 > maxWords || widthWith(w) > capWith(w))) flush();
     chars = widthWith(w);
+    unspaced ||= UNSPACED_CHAR.test(w.text);
     run.push(w);
     if (SENTENCE_END.test(w.text)) flush();
   }

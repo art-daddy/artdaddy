@@ -14,6 +14,7 @@ import { describe, expect, it } from "vitest";
 
 import type { Timeline } from "./model";
 import { resolveRenderPlan } from "./renderPlan";
+import { estimateWidth } from "./wordJoin";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -322,6 +323,57 @@ describe("resolveRenderPlan — text look defaults + static marks", () => {
     expect(tx).toMatchObject({ hasPos: true, cxPx: 500, cyPx: 950 }); // y 990 clamped to ch - safeMarginY (950)
     expect(oneText(tclip({ text: "a\nb" })).hardBreaks).toBe(true);
     expect(oneText(tclip({ text: "ab" })).hardBreaks).toBe(false);
+  });
+
+  // UJ-029: neither renderer can break inside Chinese or Japanese, so the plan both draw from decides
+  // those line breaks, for the caption's text, its karaoke words, its styled runs and its chunks alike.
+  it("breaks a long Japanese caption into lines that fit, in every form a caption takes", () => {
+    const long = "藤村のりを1914年大正3年11月14日から没年不明は日本のセーリング競技選手";
+    const words = [
+      "藤村",
+      "の",
+      "り",
+      "を",
+      "1914",
+      "年",
+      "大正",
+      "3",
+      "年",
+      "11",
+      "月",
+      "14",
+      "日",
+      "から",
+    ];
+    const vertical = { width: 1080, height: 1920 };
+    const fits = (tx: Any, line: string) => estimateWidth(line, tx.sizePx) <= tx.wPx;
+    const plain = oneText(tclip({ text: long }), vertical);
+    expect(plain.text.replace(/\n/g, "")).toBe(long);
+    expect(plain.text.split("\n").length).toBeGreaterThan(1);
+    for (const line of plain.text.split("\n")) expect(fits(plain, line)).toBe(true);
+
+    const content = words.map((text, i) => ({ text, t_in: i * 0.1, t_out: i * 0.1 + 0.1 }));
+    const kara = oneText(
+      tclip({ content, animation: { build: "word-highlight", timing: "explicit" } }),
+      vertical,
+    );
+    expect(kara.karaoke.map((k: Any) => k.word.replace(/^\n/, ""))).toEqual(words);
+    expect(kara.karaoke.some((k: Any) => k.word.startsWith("\n"))).toBe(true);
+    expect(kara.text).toBe(kara.karaoke.map((k: Any) => k.word).join(""));
+
+    const runs = oneText(
+      tclip({ content: content.map((c, i) => ({ ...c, emphasis: i === 2 })) }),
+      vertical,
+    );
+    expect(runs.runs.some((r: Any) => r.text.startsWith("\n"))).toBe(true);
+  });
+
+  it("leaves Latin captions and a Japanese line that fits exactly as they were", () => {
+    const vertical = { width: 1080, height: 1920 };
+    const latin =
+      "Hello there, this is a fairly long English caption that wraps at spaces as before";
+    expect(oneText(tclip({ text: latin }), vertical).text).toBe(latin);
+    expect(oneText(tclip({ text: "藤村のりを" })).text).toBe("藤村のりを");
   });
 });
 
