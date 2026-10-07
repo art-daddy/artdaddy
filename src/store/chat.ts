@@ -157,6 +157,8 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
     controller: AbortController;
     readonly host: ToolHost;
     stopped: boolean;
+    /** Actions of this turn still running (the start, each approval answer, Continue). */
+    inflight: number;
   }
   let currentRunner: ClientTurnRunner | null = null;
   let currentExec: TurnExecution | null = null;
@@ -172,7 +174,13 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
 
   /** Begin a fresh execution for a NEW turn (a new user message). */
   function newExec(host: ToolHost): TurnExecution {
-    currentExec = { token: ++execSeq, controller: new AbortController(), host, stopped: false };
+    currentExec = {
+      token: ++execSeq,
+      controller: new AbortController(),
+      host,
+      stopped: false,
+      inflight: 0,
+    };
     set({ execToken: currentExec.token }); // surface the live execution for the origin fence
     return currentExec;
   }
@@ -491,6 +499,7 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
 
   async function runTurn(exec: TurnExecution, action: () => Promise<void>): Promise<void> {
     set({ streaming: true, error: null, canContinue: false });
+    exec.inflight += 1;
     try {
       await action();
     } catch (e) {
@@ -526,9 +535,14 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
         }));
       }
       return;
+    } finally {
+      exec.inflight -= 1;
     }
-    // Only the still-current turn owns the streaming flag (a superseded one must not).
-    if (get().streaming && exec === currentExec) set({ streaming: false });
+    // Only the still-current turn owns the streaming flag (a superseded one must not), and only
+    // its LAST running action may clear it: each approval answer is its own action, and only the
+    // last answer resumes the batch. The first to finish used to clear the flag while the resumed
+    // turn was still running, which hid Stop and let a new message or a job wake in mid-turn.
+    if (get().streaming && exec === currentExec && exec.inflight === 0) set({ streaming: false });
   }
 
   /** Persist the client-owned session (transcript + provider snapshot) to

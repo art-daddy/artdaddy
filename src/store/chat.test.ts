@@ -352,6 +352,86 @@ describe("useChat.send + event reducer", () => {
     expect(useChat.getState().pending).toEqual([]);
   });
 
+  // Each answer runs as its own action, and only the LAST one resumes the batch. When answers
+  // overlap, the earliest to finish cleared `streaming` while the resumed turn was still running:
+  // the Stop button vanished mid-turn, and the composer and the job wake both saw an idle chat
+  // (QA 2026-10-07, four denials at once). The flag belongs to the turn, not to one answer.
+  it("stays streaming until the answer that resumed the batch has finished, however answers overlap", async () => {
+    setDesktop("p1");
+    useChat.setState({ projectId: "p1" });
+    await useChat.getState().send("look at these");
+    const call = (id: string) => ({
+      call_id: id,
+      name: "video_ask",
+      arguments: {},
+      rationale: "",
+      reasoning_summary: [],
+    });
+    emit("awaiting_approval", { calls: [call("c1"), call("c2")] });
+    let resumeDone!: () => void;
+    runnerDeny.mockImplementationOnce(async () => {}); // c1: not the last answer, returns at once
+    runnerDeny.mockImplementationOnce(() => new Promise<void>((r) => (resumeDone = r))); // c2 drives
+
+    const first = useChat.getState().deny("no", "c1");
+    const second = useChat.getState().deny("no", "c2");
+    await first;
+    for (let i = 0; i < 10; i += 1) await Promise.resolve();
+    expect(useChat.getState().streaming).toBe(true);
+
+    resumeDone();
+    await second;
+    expect(useChat.getState().streaming).toBe(false);
+  });
+
+  // The opposite ordering: the resuming answer ends first while an earlier one is still running.
+  it("stays streaming while any answer of the turn is still running, in either order", async () => {
+    setDesktop("p1");
+    useChat.setState({ projectId: "p1" });
+    await useChat.getState().send("look at these");
+    emit("awaiting_approval", {
+      calls: ["c1", "c2"].map((id) => ({
+        call_id: id,
+        name: "video_ask",
+        arguments: {},
+        rationale: "",
+        reasoning_summary: [],
+      })),
+    });
+    let slowDone!: () => void;
+    runnerApprove.mockImplementationOnce(() => new Promise<void>((r) => (slowDone = r)));
+    runnerApprove.mockImplementationOnce(async () => {});
+
+    const slow = useChat.getState().approve("c1");
+    const quick = useChat.getState().approve("c2");
+    await quick;
+    for (let i = 0; i < 10; i += 1) await Promise.resolve();
+    expect(useChat.getState().streaming).toBe(true);
+
+    slowDone();
+    await slow;
+    expect(useChat.getState().streaming).toBe(false);
+  });
+
+  it("Stop still ends the turn at once while answers are in flight", async () => {
+    setDesktop("p1");
+    useChat.setState({ projectId: "p1" });
+    await useChat.getState().send("look");
+    emit("awaiting_approval", {
+      calls: [{ call_id: "c1", name: "video_ask", arguments: {}, rationale: "", reasoning_summary: [] }],
+    });
+    let driveDone!: () => void;
+    runnerApprove.mockImplementationOnce(() => new Promise<void>((r) => (driveDone = r)));
+    const answered = useChat.getState().approve("c1");
+    await Promise.resolve();
+    expect(useChat.getState().streaming).toBe(true);
+
+    await useChat.getState().stop();
+    expect(useChat.getState().streaming).toBe(false);
+    driveDone();
+    await answered;
+    expect(useChat.getState().streaming).toBe(false);
+  });
+
   it("still understands a single bare approval payload", async () => {
     // Older shape: one call, not wrapped in `calls`.
     setDesktop("p1");
