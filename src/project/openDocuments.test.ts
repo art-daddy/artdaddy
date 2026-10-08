@@ -29,4 +29,14 @@ describe("openDocumentByDir", () => {
     expect(openDocumentByDir("")).toBeUndefined();
     expect(openDocumentByDir("///")).toBeUndefined();
   });
+
+  // The eval and e2e harnesses open projects in temp folders (`artdaddy-golden-l3x9`). Reading only
+  // folder names that can be ids left each of them with no document and every edit refused: 49
+  // smoke tests failed, and the unit suite, whose folders all happen to be ids, stayed green.
+  it("finds the document of a folder whose name is no id", () => {
+    const doc = {} as ProjectDocument;
+    setOpenDocumentResolver((id) => (id === asProjectId("artdaddy-golden-l3x9") ? doc : undefined));
+    expect(openDocumentByDir("C:/Users/x/AppData/Local/Temp/artdaddy-golden-l3x9")).toBe(doc);
+    expect(openDocumentByDir("/tmp/artdaddy-golden-l3x9/")).toBe(doc);
+  });
 });

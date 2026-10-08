@@ -112,7 +112,7 @@ export async function registryPath(): Promise<string> {
 /** Dir -> id for projects whose folder is NOT named after their id, i.e. every project
  *  moved by Save As. Recorded as a side effect of {@link projectDirFor}, the one hop that
  *  resolves an id, so it cannot describe a project nobody has opened. Read through
- *  {@link projectIdOfDir}, whose folder-name answer is exact for the default layout. */
+ *  {@link projectKeyOfDir}, whose folder-name answer is exact for the default layout. */
 const idByDir = new Map<string, string>();
 
 function normDir(d: string): string {
@@ -124,16 +124,22 @@ export function boundProjectId(dir: string): string {
   return idByDir.get(normDir(dir)) ?? "";
 }
 
-/** The id of the project whose folder is `dir`: the id Save As bound to it, else the folder's
- *  own name when that can be an id (the default layout keeps a project under its id), else "".
- *  Never a path. The one rule for finding the dir's open document and for the `project_id` the
- *  app reports: a report once sent the whole folder path, the user's name in it, and an export
- *  sent the name the user gave a folder Save As made. */
+/** What the project in folder `dir` is known by: the id Save As bound to the folder, else the
+ *  folder's own name, as it is (the default layout keeps a project under its id). The key its
+ *  open document is found by. Not filtered: the eval and e2e harnesses open projects in temp
+ *  folders whose names are no id, and filtering them here left those projects with no document,
+ *  every edit refused. */
+export function projectKeyOfDir(dir: string): string {
+  return boundProjectId(dir) || (normDir(dir).split("/").pop() ?? "");
+}
+
+/** The project's id to REPORT for folder `dir`: its key when that can be an id, else nothing.
+ *  Never a path, and never a folder name that cannot be an id: a report once sent the whole
+ *  folder path, the user's name in it, and an export sent the name the user gave a folder Save As
+ *  made. */
 export function projectIdOfDir(dir: string): string {
-  const bound = boundProjectId(dir);
-  if (bound) return bound;
-  const name = normDir(dir).split("/").pop() ?? "";
-  return isSafeProjectId(name) ? name : "";
+  const key = projectKeyOfDir(dir);
+  return isSafeProjectId(key) ? key : "";
 }
 
 /** Where project `id` ACTUALLY lives — the UI-side twin of `ProjectRegistry.dirFor`.
