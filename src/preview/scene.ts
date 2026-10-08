@@ -23,6 +23,9 @@ import {
 export interface AssetDims {
   w: number;
   h: number;
+  /** Video: where its picture ends, in source seconds (VideoSource.end). Absent until the decoder
+   *  has read the file's index, and then nothing is hidden. */
+  end?: number;
 }
 export interface Rect {
   x: number;
@@ -640,6 +643,9 @@ export function buildScene(
         // and the LAST frame through the cross-cut hold after tout.
         const rel = tFrame < tin ? 0 : tFrame < tout ? tFrame - tin : Math.max(0, tout - tin - 1);
         layer.sourceTime = (num(clip.source_in) + rel * speed) / fps;
+        // Past the end of its media there is no picture: the export's overlay passes what is
+        // beneath once the stream ends, so the preview draws nothing here either (UJ-033).
+        if (layer.sourceTime >= (img.end ?? Infinity)) continue;
       } else {
         // A still's stream starts at the clip's start whatever was trimmed (the export reads every
         // still from its beginning) and runs at the clip's speed. Which picture that is, inside the

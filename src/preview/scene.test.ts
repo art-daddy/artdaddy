@@ -496,6 +496,45 @@ describe("buildScene visibility", () => {
     // sourceTime = (0 + 30*2) / 30 = 2s
     expect((s.layers[0] as Any).sourceTime).toBe(2);
   });
+  // A clip that asks for more than its file holds: the export's overlay passes the picture beneath
+  // once the stream ends, so nothing of this clip is drawn there. The preview held the last frame
+  // instead, so the two disagreed about what the video shows (UJ-033).
+  it("draws nothing of a video past the end of its media, as the export does", () => {
+    // 2 s of media (60 frames at 30 fps) on a clip that asks for 120 frames of it.
+    const at = (frame: number, clip: Record<string, unknown> = {}) =>
+      buildScene(
+        tl([
+          {
+            media_ref: "a.mp4",
+            source_in: 0,
+            source_out: 120,
+            timeline_in: 0,
+            timeline_out: 120,
+            ...clip,
+          },
+        ]),
+        frame / 30,
+        dims({ "a.mp4": { w: 100, h: 100, end: 2 } }),
+      ).layers.map((l) => (l as Any).sourceTime);
+    expect(at(0)).toEqual([0]);
+    expect(at(59)).toEqual([59 / 30]); // its last frame still shows
+    expect(at(60)).toEqual([]); // the media has ended
+    expect(at(119)).toEqual([]);
+    // Measured in SOURCE time, so a trim and a speed move the frame it ends at.
+    expect(at(29, { source_in: 30 })).toEqual([59 / 30]);
+    expect(at(30, { source_in: 30 })).toEqual([]);
+    expect(at(29, { speed: 2 })).toEqual([58 / 30]);
+    expect(at(30, { speed: 2 })).toEqual([]);
+    // A length nothing reported yet (the media is still loading) hides nothing.
+    const unknown = buildScene(
+      tl([
+        { media_ref: "a.mp4", source_in: 0, source_out: 120, timeline_in: 0, timeline_out: 120 },
+      ]),
+      100 / 30,
+      dims({ "a.mp4": { w: 100, h: 100 } }),
+    );
+    expect(unknown.layers.length).toBe(1);
+  });
   // An animated still picks its picture from where it is in its clip (media/stillFrames.ts
   // stillFrameShown), and the export reads every still from its beginning at the clip's speed:
   // whatever was trimmed off a GIF, its clip starts at the GIF's first frame. Past its end (held

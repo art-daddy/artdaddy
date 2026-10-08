@@ -625,6 +625,137 @@ describe("insertClipsTool", () => {
   });
 });
 
+// A clip placed for longer than its media ran past the file's end: the export drew nothing there
+// (its overlay passes at the end of a stream) while the preview held the last frame, so the two
+// disagreed (UJ-033). source_span was already held to the media; a length given as timeline_out
+// or duration was not.
+describe("a placed clip is never longer than its media", () => {
+  const ok = (stdout: string) => ({ code: 0, stdout, stderr: "" });
+  /** ffprobe: a 2 s source (60 frames at 30 fps) with only the given stream kind. */
+  const twoSeconds = (stream: "v" | "a") =>
+    makeRunner((p, a) => {
+      if (p !== "ffprobe") return ok("");
+      if (a.includes("format=duration")) return ok("2.0");
+      if (a.includes("-select_streams"))
+        return ok(a[a.indexOf("-select_streams") + 1] === stream ? "1" : "");
+      return ok("");
+    });
+  const span = async (store: ProjectStoreAccess, track: string) => {
+    const c = (await loadTimeline(store)).tracks.find((t) => t.id === track)!.clips![0] as Any;
+    return [c.timeline_in, c.timeline_out, c.source_in, c.source_out];
+  };
+
+  it("add_clips: a timeline_out past the end stops at the end, and the reply says where", async () => {
+    const { ctx, store } = await seededCtx(twoSeconds("v"));
+    const r = (await addClipsTool(
+      { entries: [{ media_ref: "short.mp4", timeline_in: 30, timeline_out: 150 }] },
+      ctx,
+    )) as Any;
+    expect(r.ok).toBe(true);
+    expect(await span(store, "v1")).toEqual([30, 90, 0, 60]);
+    const note = String((r.notes ?? []).join(" "));
+    expect(note).toContain("60"); // how long the media is
+    expect(note).toContain("90"); // where the clip now ends
+    // ...and nothing about loop or stretch, which a video cannot take (it would be refused).
+    expect(note).toMatch(/not 150\.$/);
+  });
+
+  it("add_clips: a duration past the end too", async () => {
+    const { ctx, store } = await seededCtx(twoSeconds("v"));
+    await addClipsTool(
+      { entries: [{ media_ref: "short.mp4", timeline_in: 0, duration: 120 }] },
+      ctx,
+    );
+    expect(await span(store, "v1")).toEqual([0, 60, 0, 60]);
+  });
+
+  it("insert_clips: the same rule at the other door", async () => {
+    const { ctx, store } = await seededCtx(twoSeconds("v"));
+    const r = (await insertClipsTool(
+      { at: 0, track_id: "v1", entries: [{ media_ref: "short.mp4", duration: 120 }] },
+      ctx,
+    )) as Any;
+    expect(r.ok).toBe(true);
+    expect(await span(store, "v1")).toEqual([0, 60, 0, 60]);
+    const note = String((r.notes ?? []).join(" "));
+    expect(note).toContain("not 120"); // what was asked
+    expect(note).toContain("moves by 60"); // what the ripple really did
+  });
+
+  it("audio is held to its end too, unless loop or stretch fills the span", async () => {
+    const { ctx, store } = await seededCtx(twoSeconds("a"));
+    const r = (await addClipsTool(
+      { entries: [{ media_ref: "song.mp3", timeline_in: 0, timeline_out: 150 }] },
+      ctx,
+    )) as Any;
+    expect(await span(store, r.created[0].track_id)).toEqual([0, 60, 0, 60]);
+    expect(String((r.notes ?? []).join(" "))).toContain("loop");
+    // Held, not filled: the note offers loop/stretch, the placement does not apply them unasked.
+    const held = (await loadTimeline(store)).tracks.find((t) => t.id === r.created[0].track_id)!
+      .clips![0] as Any;
+    expect(Boolean(held.loop) || Boolean(held.stretch)).toBe(false);
+    const looped = await seededCtx(twoSeconds("a"));
+    const l = (await addClipsTool(
+      { entries: [{ media_ref: "song.mp3", timeline_in: 0, timeline_out: 150, loop: true }] },
+      looped.ctx,
+    )) as Any;
+    expect((await span(looped.store, l.created[0].track_id)).slice(0, 2)).toEqual([0, 150]);
+  });
+
+  it("a length inside the media is placed as asked, without a note", async () => {
+    const { ctx, store } = await seededCtx(twoSeconds("v"));
+    const r = (await addClipsTool(
+      { entries: [{ media_ref: "short.mp4", timeline_in: 0, timeline_out: 60 }] },
+      ctx,
+    )) as Any;
+    expect(await span(store, "v1")).toEqual([0, 60, 0, 60]);
+    expect(r.notes ?? []).toEqual([]);
+    // Measured from where the clip starts, not from the start of the timeline.
+    const later = await seededCtx(twoSeconds("v"));
+    await addClipsTool(
+      { entries: [{ media_ref: "short.mp4", timeline_in: 100, timeline_out: 150 }] },
+      later.ctx,
+    );
+    expect(await span(later.store, "v1")).toEqual([100, 150, 0, 50]);
+  });
+
+  it("a still has no end to hold to, even one ffprobe gives a duration for", async () => {
+    // An animated GIF reports its own running time; as a clip it is a still, held or looped.
+    const { ctx, store } = await seededCtx(twoSeconds("v"));
+    await addClipsTool(
+      { entries: [{ media_ref: "sticker.gif", timeline_in: 0, timeline_out: 150 }] },
+      ctx,
+    );
+    expect((await span(store, "v1")).slice(0, 2)).toEqual([0, 150]);
+  });
+
+  it("a length ffprobe cannot read is placed as asked rather than refused", async () => {
+    const unreadable = makeRunner((p, a) => {
+      if (p !== "ffprobe") return ok("");
+      if (a.includes("format=duration")) return { code: 1, stdout: "", stderr: "Invalid data" };
+      if (a.includes("-select_streams"))
+        return ok(a[a.indexOf("-select_streams") + 1] === "v" ? "1" : "");
+      return ok("");
+    });
+    const { ctx, store } = await seededCtx(unreadable);
+    const r = (await addClipsTool(
+      { entries: [{ media_ref: "odd.mp4", timeline_in: 0, timeline_out: 150 }] },
+      ctx,
+    )) as Any;
+    expect(r.ok, r.error).toBe(true);
+    expect((await span(store, "v1")).slice(0, 2)).toEqual([0, 150]);
+  });
+
+  it("a length nothing can check (no duration from ffprobe) is placed as asked", async () => {
+    const { ctx, store } = await seededCtx(); // videoRunner: ffprobe reports no duration
+    await addClipsTool(
+      { entries: [{ media_ref: "unknown.mp4", timeline_in: 0, timeline_out: 150 }] },
+      ctx,
+    );
+    expect((await span(store, "v1")).slice(0, 2)).toEqual([0, 150]);
+  });
+});
+
 describe("placing media that is still being generated", () => {
   // The contract promises the model it can place a generated ref IMMEDIATELY. It could not:
   // resolveMediaRef returns null for a row whose file does not exist, so the raw ref went to
@@ -687,6 +818,27 @@ describe("placing media that is still being generated", () => {
     expect(r.ok).toBe(true);
     const placed = (await loadTimeline(store)).tracks.flatMap((t) => (t.clips ?? []) as Any[]);
     expect(placed.some((c) => c.media_ref === "media_gen_pending")).toBe(true);
+  });
+
+  // A length given for it is never held to anything: nothing can read how long it will be until
+  // it lands, even where a probe would answer (UJ-033 holds only media whose bytes exist).
+  it("keeps the length it was given, whatever a probe would say", async () => {
+    const answers = makeRunner((p, a) =>
+      p === "ffprobe" && a.includes("format=duration")
+        ? { code: 0, stdout: "1.0", stderr: "" }
+        : { code: 0, stdout: "", stderr: "" },
+    );
+    const { ctx, store } = await seededCtx(answers);
+    await pendingCatalog(store, "video");
+    const r = (await addClipsTool(
+      { entries: [{ media_ref: "media_gen_pending", timeline_in: 0, timeline_out: 150 }] },
+      ctx,
+    )) as Any;
+    expect(r.ok, r.error).toBe(true);
+    const placed = (await loadTimeline(store)).tracks
+      .flatMap((t) => (t.clips ?? []) as Any[])
+      .find((c) => c.media_ref === "media_gen_pending");
+    expect([placed.timeline_in, placed.timeline_out]).toEqual([0, 150]);
   });
 
   // Its length is genuinely unknowable, so say so instead of probing a missing file and

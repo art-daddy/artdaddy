@@ -35,7 +35,13 @@ async function exportNineSeconds(o: { brandAssets: boolean; outputPath?: string 
   const runner = {
     run: async (program: string, args: string[]) => {
       if (program === "ffprobe" && args.includes("format=duration"))
-        return { code: 0, stdout: "2.033\n", stderr: "" };
+        // The end card measures 2.033 s; a.mp4 is long enough for its 9 s clip (a clip is never
+        // placed longer than its media).
+        return {
+          code: 0,
+          stdout: /endcard-/.test(args[args.length - 1]) ? "2.033\n" : "60\n",
+          stderr: "",
+        };
       if (program === "ffmpeg") await fs.writeTextFile(args[args.length - 1], "video");
       return { code: 0, stdout: "", stderr: "" };
     },

@@ -57,6 +57,10 @@ export class VideoSource {
    *  uploaded with it (PreviewRenderer.setTexture) or they draw on their side (UJ-015). */
   orientation: Orientation = UPRIGHT;
   duration = 0;
+  /** Where the picture ENDS, in the same source seconds as frameAt/pump: the end of the last frame
+   *  shown. Past it the export draws nothing of this clip (its overlay passes the picture beneath
+   *  once the stream ends), so the preview must not either (UJ-033). */
+  end = 0;
   decoderStarts = 0; // diagnostic: number of decoder (re)configurations
 
   // Persistent decode state: one running decoder + a bounded frame buffer.
@@ -67,6 +71,7 @@ export class VideoSource {
   // that scheduled from fedIndex would re-request the same span every frame
   private feeding: Promise<void> = Promise.resolve();
   private feedEpoch = 0; // bumped on restart/seek so in-flight reads drop their output
+  private drainedRun = -1; // the feedEpoch whose run pump already drained at the stream's end
   private runStart = -1; // keyframe index the current run began at
   private pending: Pending | null = null;
   private maxOutputTs = -1; // highest presentation timestamp output in this run
@@ -138,6 +143,13 @@ export class VideoSource {
             return;
           }
           this.startCts = this.samples.reduce((m, s) => Math.min(m, s.cts), Infinity);
+          // A muxer may leave the last sample's duration at 0; it still shows for a frame.
+          const frameTicks = this.samples.find((s) => s.duration > 0)?.duration ?? 0;
+          const endCts = this.samples.reduce(
+            (m, s) => Math.max(m, s.cts + (s.duration > 0 ? s.duration : frameTicks)),
+            -Infinity,
+          );
+          this.end = (endCts - this.startCts) / this.timescale;
           resolve();
         } catch (e) {
           reject(e as Error);
@@ -265,6 +277,27 @@ export class VideoSource {
       this.restartAt(ki);
     }
     this.feedRange(this.fedIndex + 1, end);
+    if (end === this.samples.length - 1) this.drainAtEnd();
+  }
+
+  /** Once the stream's LAST sample is fed, drain the decoder. It holds the last frames back to put
+   *  them in display order, and at the end of a stream nothing follows to push them out - so the
+   *  final frames of every clip never drew in playback, and a clip of a frame or two drew nothing
+   *  at all (UJ-034). frameAt drains for the same reason. Once per run: after a flush the decoder
+   *  wants a keyframe, so the run is over and the next pump that needs a frame starts a new one. */
+  private drainAtEnd(): void {
+    const run = this.feedEpoch;
+    if (this.drainedRun === run) return;
+    this.drainedRun = run;
+    void this.feeding.then(() => {
+      if (run !== this.feedEpoch || !this.decoder) return; // superseded: a seek restarted the run
+      return this.decoder.flush().then(
+        () => {
+          if (run === this.feedEpoch) this.runStart = -1;
+        },
+        () => undefined, // closed mid-drain by a seek or idle(); that run is gone anyway
+      );
+    });
   }
 
   /** Sync: the buffered frame with the greatest ts <= `tSec` (the one to display

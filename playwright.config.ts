@@ -55,10 +55,18 @@ export default defineConfig({
       // real WebGL2 pixel suite, and macOS CI/runtime covers the actual WKWebView + Metal path.
       // That Windows build's DataTransfer also has no `items.add`, so the OS-drop spec cannot even
       // build its input there; it runs on macOS WebKit, the engine those drops come from.
+      // Nor does it have WebCodecs (no VideoDecoder, checked 2026-10-08), which the playback
+      // spec decodes with; macOS WebKit has it.
       // On macOS the GPU specs DO run here: until 2026-10-04 they were ignored on every OS.
       testIgnore:
         process.platform === "win32"
-          ? ["preview.spec.ts", "chromaKey.spec.ts", "rotation.spec.ts", "osdrop.spec.ts"]
+          ? [
+              "preview.spec.ts",
+              "chromaKey.spec.ts",
+              "rotation.spec.ts",
+              "stream.spec.ts",
+              "osdrop.spec.ts",
+            ]
           : [],
     },
   ],

@@ -125,7 +125,13 @@ async function project(
   const runner = {
     run: async (program: string, args: string[]) => {
       if (program === "ffprobe" && args.includes("format=duration"))
-        return { code: 0, stdout: "2.033\n", stderr: "" };
+        // The brand end card measures 2.033 s; library media is long enough for the clips placed
+        // on it (a clip is never placed longer than its media).
+        return {
+          code: 0,
+          stdout: /endcard-/.test(args[args.length - 1]) ? "2.033\n" : "60\n",
+          stderr: "",
+        };
       if (program === "ffmpeg") {
         ffmpeg.push(args);
         await hold.gate;

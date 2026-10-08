@@ -176,7 +176,7 @@ function prepare(): void {
         void vs
           .whenReady()
           .then(() => {
-            dims.set(src, vs.dims);
+            dims.set(src, { ...vs.dims, end: vs.end });
             post({ type: "dims", source: src, w: vs.dims.w, h: vs.dims.h });
             dirty = true;
           })

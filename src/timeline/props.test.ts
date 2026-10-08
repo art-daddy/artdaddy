@@ -318,7 +318,8 @@ describe("swapping a clip's media in place", () => {
 
   it("shortens the clip when the replacement is shorter, and says so", async () => {
     clearDurationCache();
-    // ffprobe reports 1s of media against a 60-frame (2s) slot.
+    // ffprobe reports 1s of media for the replacement against a 60-frame (2s) slot; the original
+    // fills its slot (a clip is never placed longer than its media).
     const shortRunner = makeRunner((p, a) => {
       if (p !== "ffprobe") return { code: 0, stdout: "", stderr: "" };
       if (a.includes("-select_streams"))
@@ -327,7 +328,7 @@ describe("swapping a clip's media in place", () => {
           stdout: a[a.indexOf("-select_streams") + 1] === "v" ? "1" : "",
           stderr: "",
         };
-      return { code: 0, stdout: "1.0", stderr: "" };
+      return { code: 0, stdout: a[a.length - 1].endsWith("b.mp4") ? "1.0" : "2.0", stderr: "" };
     });
     const { ctx, store } = await seededCtx(shortRunner);
     const r = (await addClipsTool(

@@ -253,16 +253,54 @@ interface Placement {
   note?: string;
 }
 
+/** The media's length in frames when a clip `len` frames long would run past its end; null when
+ *  it fits, or when there is no end to hold it to (a still or an animation, or a length ffprobe
+ *  cannot report).
+ *
+ *  A length given in FRAMES (timeline_out / duration) is held to the media like a source_span is
+ *  (spanToFrames) and a later resize is (sourceWindow.ts). Past its end a clip has nothing to
+ *  show: the export drew nothing there while the preview held the last frame, so the two disagreed
+ *  about the same timeline (UJ-033). Only for media whose bytes exist: a generating ref has no
+ *  length to read yet. */
+async function overrunsMedia(
+  ctx: ClientToolContext,
+  abs: string,
+  kind: MediaKind,
+  len: number,
+  fps: number,
+): Promise<number | null> {
+  if (kind !== "video" && kind !== "audio") return null;
+  let seconds: number;
+  try {
+    seconds = await sourceDurationSeconds(ctx.runner, abs);
+  } catch (e) {
+    // Unreadable here: placed as asked, as it was before this check existed. Whatever cannot
+    // read it will say so where it matters, rather than this refusing a placement over a length.
+    if (e instanceof OpError) return null;
+    throw e;
+  }
+  const mediaF = Math.round(seconds * fps);
+  return mediaF > 0 && len > mediaF ? mediaF : null;
+}
+
+/** What the caller can do about a length the media cannot fill. */
+const fillHint = (kind: MediaKind): string =>
+  kind === "audio" ? " To fill the longer span, pass loop or stretch." : "";
+
 /** Resolve an add_clips entry's length: ONE of source_span (seconds) or
  *  timeline_out/duration (frames); loop/stretch (audio) fill a longer span.
  *  Fence + report: the model often sets more than one — keep the canonical one
- *  (source_span > length; loop > stretch) and return a `note` rather than reject. */
+ *  (source_span > length; loop > stretch) and return a `note` rather than reject.
+ *
+ *  `mediaKnown`: the media's bytes exist, so a length in frames can be held to it. False for a
+ *  ref still being generated, whose length nothing can read yet. */
 async function resolvePlace(
   ctx: ClientToolContext,
   entry: Args,
   fps: number,
   abs: string,
   kind: MediaKind,
+  mediaKnown: boolean,
 ): Promise<Placement> {
   if (!present(entry.timeline_in)) throw new OpError("each entry needs 'timeline_in'");
   const tin = toFrames(entry.timeline_in, fps);
@@ -342,9 +380,18 @@ async function resolvePlace(
     };
   }
   if (toutValid || durValid) {
+    let tout = toutOf();
+    const mediaF = mediaKnown ? await overrunsMedia(ctx, abs, kind, tout - tin, fps) : null;
+    if (mediaF !== null) {
+      notes.push(
+        `'${String(entry.media_ref)}' is only ${mediaF} frames long, so this clip ` +
+          `ends at frame ${tin + mediaF}, not ${tout}.${fillHint(kind)}`,
+      );
+      tout = tin + mediaF;
+    }
     return {
       tin,
-      tout: toutOf(),
+      tout,
       sIn: null,
       sOut: null,
       loop: false,
@@ -404,7 +451,7 @@ async function resolveAddEntry(
       throw new OpError(
         `'${raw}' is still being generated, so its length is not known yet — give this entry a timeline_out or duration.`,
       );
-    const place = await resolvePlace(ctx, entry, fps, pending.path, pending.kind);
+    const place = await resolvePlace(ctx, entry, fps, pending.path, pending.kind, false);
     return {
       source: pending.id,
       kind: pending.kind,
@@ -429,7 +476,7 @@ async function resolveAddEntry(
   // no video stream as audio, so it places ONE audio clip (not a video shell + a
   // spuriously split linked-audio clip on a second track).
   if (kind === "video" && !(await sourceHasVideo(ctx, abs))) kind = "audio";
-  const place = await resolvePlace(ctx, entry, fps, abs, kind);
+  const place = await resolvePlace(ctx, entry, fps, abs, kind, true);
   const hasAudio = kind === "video" ? await sourceHasAudio(ctx, abs) : false;
   // Store the LIBRARY ID, never a path — so get_timeline shows the model the same
   // handle every other tool takes. Uncatalogued media falls back to the portable
@@ -583,6 +630,16 @@ async function resolveInsertEntry(
     } else {
       sIn = null;
       sOut = null;
+      // Held to the media, as add_clips holds it. Everything after the insert moves by the
+      // length it really has, so say so.
+      const mediaF = await overrunsMedia(ctx, abs, kind, dur, fps);
+      if (mediaF !== null) {
+        notes.push(
+          `'${raw}' is only ${mediaF} frames long, so this clip is ${mediaF} frames, not ${dur}, ` +
+            `and what follows it moves by ${mediaF}.${fillHint(kind)}`,
+        );
+        dur = mediaF;
+      }
     }
   } else {
     // Omit both -> splice the WHOLE source at 1x (stills default to 5s).
