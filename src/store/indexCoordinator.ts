@@ -7,7 +7,9 @@
 //                  for stills, a stand-in the WebView can draw and, for an animated
 //                  one, the frames the preview animates it with;
 //   • transcript — on-device word-level transcript per audio/video asset, warming
-//                  get_transcript (and future search) so the first read is instant.
+//                  get_transcript (and future search) so the first read is instant;
+//   • loudness   — each audio/video asset measured whole (owner decision 2026-10-04), so a look
+//                  at a long file finds its loudness kept, plus the long spans looks ask for.
 // Each pass drains INDEPENDENTLY, so a poster the user is waiting on never queues behind a
 // multi-minute transcription.
 // Desktop-only: no runner (web build) => no-op. Lifecycle-scoped: dispose() on
@@ -19,8 +21,9 @@
 // visible while it installs, and a transcript that fails says so instead of reading as silence.
 import type { CommandRunner } from "../tools/command";
 import type { ClientToolContext } from "../tools/context";
+import type { Loudness } from "../tools/loudness";
 import type { ProjectStoreAccess } from "../tools/store";
-import { registerBackgroundTranscriber } from "../tools/transcriptQueue";
+import { registerBackgroundTranscriber, type BackgroundLoudness } from "../tools/transcriptQueue";
 import type { Timeline } from "../timeline/model";
 import { kindOf } from "../media/formats";
 import { reportAppError } from "../api/appEvents";
@@ -36,7 +39,7 @@ const isIndexable = (p: string): boolean => {
   return k === "video" || k === "audio";
 };
 
-type Pass = "proxy" | "transcript";
+type Pass = "proxy" | "transcript" | "loudness";
 
 /** One transcription: a source, and the language asked for ("" = the default). */
 interface TxJob {
@@ -48,11 +51,26 @@ interface TxJob {
 const txKey = (j: TxJob): string =>
   j.language ? `transcript\u0000${j.source}\u0000${j.language}` : `transcript\u0000${j.source}`;
 
+/** One loudness measurement: a source over [start, end) seconds, the whole file when both are null. */
+interface LoudJob {
+  source: string;
+  start: number | null;
+  end: number | null;
+}
+/** A loudness job's identity. The whole file's is the pass's plain key, the one the sweep uses. */
+const loudKey = (j: LoudJob): string =>
+  j.start === null && j.end === null
+    ? `loudness\u0000${j.source}`
+    : `loudness\u0000${j.source}\u0000${j.start ?? 0}-${j.end ?? "end"}`;
+
+type Measured = Loudness | { error: string };
+
 /** The desktop-only modules a drain needs, resolved once rather than per job. */
 interface IndexModules {
   processImportedMedia: typeof import("../preview/mediaProxy").processImportedMedia;
   ensureTranscript: typeof import("../tools/transcribe").ensureTranscript;
   isSpeechEngineUnavailable: typeof import("../tools/transcribe").isSpeechEngineUnavailable;
+  measureLoudness: typeof import("../tools/loudness").measureLoudness;
   sourceHasAudio: typeof import("../timeline/placement").sourceHasAudio;
   clearSourceUrlCache: typeof import("../preview/resolve").clearSourceUrlCache;
 }
@@ -77,6 +95,14 @@ export class IndexCoordinator {
   private readonly txQ: TxJob[] = [];
   /** The transcript job running now, by {@link txKey}. */
   private txCurrent: string | null = null;
+  private readonly loudQ: LoudJob[] = [];
+  /** The loudness job running now, by {@link loudKey}. */
+  private loudCurrent: string | null = null;
+  /** The measurement a look is waiting on, by {@link loudKey}, until it has run. */
+  private readonly looks = new Map<
+    string,
+    { result: Promise<Measured>; settle: (m: Measured) => void }
+  >();
   private readonly seen = new Set<string>(); // `${pass}\0${source}` already enqueued
   private readonly attempts = new Map<string, number>();
   private engineAttempts = 0;
@@ -84,6 +110,7 @@ export class IndexCoordinator {
   private readyOnce: Promise<Ready | null> | null = null;
   private proxyRunning = false;
   private txRunning = false;
+  private loudRunning = false;
   private disposed = false;
   // Aborts the in-flight derived job (ffmpeg/whisper) on dispose. dispose()
   // clears the QUEUES (no new job starts); this cancels the RUNNING process, so
@@ -102,6 +129,7 @@ export class IndexCoordinator {
     // The tools (inspect_media) reach this project's queue by its directory.
     this.unregister = registerBackgroundTranscriber(store.projectDir, {
       prioritize: (source, language) => this.prioritizeTranscript(source, language),
+      loudness: (source, start, end) => this.measureSoon(source, start, end),
     });
   }
 
@@ -143,7 +171,10 @@ export class IndexCoordinator {
         const p = byId.get(ref) || ref;
         if (pending.has(p)) continue;
         if (c.kind !== "audio" && needsProxy(p)) this.enqueue("proxy", p);
-        if (isIndexable(p)) this.enqueue("transcript", p);
+        if (isIndexable(p)) {
+          this.enqueue("transcript", p);
+          this.enqueue("loudness", p);
+        }
       }
     }
     // Library assets not yet placed on the timeline still get transcribed, so the
@@ -158,23 +189,31 @@ export class IndexCoordinator {
       // had nothing left to give it one — `seen` is permanent and the loop above only covers
       // PLACED clips. The pass itself skips a poster that already exists.
       if (needsProxy(p)) this.enqueue("proxy", p);
-      if (isIndexable(p)) this.enqueue("transcript", p);
+      if (isIndexable(p)) {
+        this.enqueue("transcript", p);
+        this.enqueue("loudness", p);
+      }
     }
   }
 
   /** Index one specific just-imported source (e.g. a manual drop before it's on
-   *  the timeline): proxy if it's previewable video, plus a transcript. */
+   *  the timeline): proxy if it's previewable video, plus a transcript and its loudness. */
   indexSource(source: string): void {
     const s = (source ?? "").trim();
     if (!s || this.disposed) return;
     if (needsProxy(s)) this.enqueue("proxy", s);
-    if (isIndexable(s)) this.enqueue("transcript", s);
+    if (isIndexable(s)) {
+      this.enqueue("transcript", s);
+      this.enqueue("loudness", s);
+    }
   }
 
   dispose(): void {
     this.disposed = true;
     this.proxyQ.length = 0;
     this.txQ.length = 0;
+    this.loudQ.length = 0;
+    this.settleLooks({ error: "the project was closed before its loudness was measured" });
     this.unregister();
     this.ac.abort();
   }
@@ -195,6 +234,32 @@ export class IndexCoordinator {
     return true;
   }
 
+  /** Measure `source` over [start, end) NEXT, for a look that does not wait for it. A look that
+   *  asks again before it has run is handed the same measurement, to wait on. */
+  measureSoon(source: string, start: number | null, end: number | null): BackgroundLoudness | null {
+    if (this.disposed) return null;
+    const job: LoudJob = { source, start, end };
+    const key = loudKey(job);
+    const waiting = this.looks.get(key);
+    if (waiting) return { first: false, result: waiting.result };
+    let settle!: (m: Measured) => void;
+    const result = new Promise<Measured>((r) => (settle = r));
+    this.looks.set(key, { result, settle });
+    if (this.loudCurrent !== key) {
+      const at = this.loudQ.findIndex((j) => loudKey(j) === key);
+      if (at >= 0) this.loudQ.splice(at, 1);
+      this.seen.add(key);
+      this.loudQ.unshift(job);
+      if (!this.loudRunning) void this.drainLoudness();
+    }
+    return { first: true, result };
+  }
+
+  private settleLooks(m: Measured): void {
+    for (const look of this.looks.values()) look.settle(m);
+    this.looks.clear();
+  }
+
   private enqueue(pass: Pass, source: string): void {
     const key = `${pass}\u0000${source}`;
     if (this.seen.has(key)) return;
@@ -205,15 +270,19 @@ export class IndexCoordinator {
       if (!this.proxyRunning) void this.drainProxies();
       return;
     }
+    if (pass === "loudness") {
+      this.loudQ.push({ source, start: null, end: null });
+      if (!this.loudRunning) void this.drainLoudness();
+      return;
+    }
     this.txQ.push({ source, language: "" });
     if (!this.txRunning) void this.drainTranscripts();
   }
   /** A failed job is REPORTED, not swallowed, and retried a bounded number of times.
    *  Silence here is indistinguishable from footage with no speech — which is exactly how a
    *  broken transcriber stayed invisible until a user's first caption request timed out. */
-  private onJobFailed(pass: Pass, job: string | TxJob, err: unknown): void {
+  private onJobFailed(pass: Pass, key: string, err: unknown): void {
     if (this.disposed) return; // our own cancellation; nothing failed
-    const key = typeof job === "string" ? `${pass}\u0000${job}` : txKey(job);
     const tried = (this.attempts.get(key) ?? 0) + 1;
     this.attempts.set(key, tried);
     if (tried < MAX_ATTEMPTS) this.seen.delete(key); // a later sweep may try again
@@ -232,7 +301,7 @@ export class IndexCoordinator {
   /** The runner + desktop-only modules a drain needs. Null on the web build (no runner),
    *  where indexing is a no-op.
    *
-   *  Memoized for the life of the coordinator, not per drain: the two drains start together,
+   *  Memoized for the life of the coordinator, not per drain: the drains start together,
    *  and two concurrent dynamic imports of the same module never both resolve — the second
    *  pass simply never ran. */
   private ready(): Promise<Ready | null> {
@@ -250,9 +319,10 @@ export class IndexCoordinator {
     try {
       const runner = await this.makeRunner();
       // Dynamic so the desktop-only transcode and whisper code stays out of the main bundle.
-      const [proxy, transcribe, placement, resolve] = await Promise.all([
+      const [proxy, transcribe, loudness, placement, resolve] = await Promise.all([
         import("../preview/mediaProxy"),
         import("../tools/transcribe"),
+        import("../tools/loudness"),
         import("../timeline/placement"),
         import("../preview/resolve"),
       ]);
@@ -262,6 +332,7 @@ export class IndexCoordinator {
           processImportedMedia: proxy.processImportedMedia,
           ensureTranscript: transcribe.ensureTranscript,
           isSpeechEngineUnavailable: transcribe.isSpeechEngineUnavailable,
+          measureLoudness: loudness.measureLoudness,
           sourceHasAudio: placement.sourceHasAudio,
           clearSourceUrlCache: resolve.clearSourceUrlCache,
         },
@@ -314,7 +385,7 @@ export class IndexCoordinator {
               if (!(await this.parkedOffline(`proxy\u0000${src}`, src)))
                 await this.runProxy(src, ready.runner, ready.mods, markImporting);
             } catch (e) {
-              this.onJobFailed("proxy", src, e);
+              this.onJobFailed("proxy", `proxy\u0000${src}`, e);
             }
             src = this.proxyQ.shift();
           }
@@ -356,7 +427,7 @@ export class IndexCoordinator {
           // does not contain any stream", which read as a broken transcriber.
           if (
             !(await this.parkedOffline(txKey(job), job.source)) &&
-            (await this.hasSpeech(ctx, ready.mods, job.source))
+            (await this.hasAudio(ctx, ready.mods, job.source))
           ) {
             await ready.mods.ensureTranscript(
               ctx,
@@ -369,7 +440,7 @@ export class IndexCoordinator {
           if (ready.mods.isSpeechEngineUnavailable(e)) this.onEngineUnavailable(e);
           // Gone between the check and the run: the same fact, found later.
           else if (!(await this.parkedOffline(txKey(job), job.source)))
-            this.onJobFailed("transcript", job, e);
+            this.onJobFailed("transcript", txKey(job), e);
         }
         this.txCurrent = null;
         job = this.txQ.shift();
@@ -381,9 +452,65 @@ export class IndexCoordinator {
     if (!this.disposed && !this.engineDown && this.txQ.length > 0) void this.drainTranscripts();
   }
 
-  /** Is there any audio here worth transcribing? A probe that cannot answer says yes: losing a
-   *  transcript to an ffprobe hiccup is worse than one clear failure downstream. */
-  private async hasSpeech(
+  /** ONE at a time, on its own drain: a whole file's decode, which a poster must not queue behind,
+   *  nor a look's span behind a multi-minute transcription. */
+  private async drainLoudness(): Promise<void> {
+    this.loudRunning = true;
+    const ready = await this.ready();
+    if (!ready) {
+      this.loudRunning = false; // web build — no runner; indexing is desktop-only
+      this.settleLooks({ error: "loudness cannot be measured here" });
+      return;
+    }
+    const ctx = {
+      store: this.store,
+      runner: ready.runner,
+      signal: this.ac.signal,
+    } as ClientToolContext;
+    try {
+      for (let job = this.loudQ.shift(); job !== undefined && !this.disposed;) {
+        const key = loudKey(job);
+        this.loudCurrent = key;
+        const got = await this.measure(ctx, ready.mods, job, key);
+        this.loudCurrent = null;
+        const look = this.looks.get(key);
+        if (look) {
+          this.looks.delete(key);
+          look.settle(got);
+        }
+        job = this.loudQ.shift();
+      }
+    } finally {
+      this.loudCurrent = null;
+      this.loudRunning = false;
+    }
+    if (!this.disposed && this.loudQ.length > 0) void this.drainLoudness();
+  }
+
+  /** One job's figures, or why there are none. Only a measurement that FAILED is a failure: an
+   *  offline file is parked, and a file with no sound has nothing to measure. */
+  private async measure(
+    ctx: ClientToolContext,
+    mods: IndexModules,
+    job: LoudJob,
+    key: string,
+  ): Promise<Measured> {
+    try {
+      if (await this.parkedOffline(key, job.source)) return { error: "the file is offline" };
+      if (!(await this.hasAudio(ctx, mods, job.source))) return { error: "the file has no sound" };
+      const abs = (await this.store.resolveRef(job.source)) ?? job.source;
+      const got = await mods.measureLoudness(ctx, abs, job.start, job.end);
+      if ("error" in got) this.onJobFailed("loudness", key, got.error);
+      return got;
+    } catch (e) {
+      this.onJobFailed("loudness", key, e);
+      return { error: `loudness could not be measured: ${String(e)}` };
+    }
+  }
+
+  /** Is there any sound here? A probe that cannot answer says yes: losing a transcript or a
+   *  measurement to an ffprobe hiccup is worse than one clear failure downstream. */
+  private async hasAudio(
     ctx: ClientToolContext,
     mods: IndexModules,
     source: string,

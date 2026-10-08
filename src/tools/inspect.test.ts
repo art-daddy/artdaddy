@@ -19,12 +19,15 @@ import {
 import { ProjectStoreAccess, joinPath, type FsLike } from "./store";
 import { makeStoryboard } from "./storyboard";
 import { peekTranscript, runWhisper } from "./transcribe";
-import { prioritizeTranscript } from "./transcriptQueue";
+import { backgroundLoudness, prioritizeTranscript } from "./transcriptQueue";
 
 // inspect_media now transcribes audio/video-with-audio via runWhisper; mock it so
 // tests don't shell out to whisper-cli / download a model.
 vi.mock("@tauri-apps/api/path", () => ({ resolveResource: async () => "C:/res/fonts" }));
-vi.mock("./transcriptQueue", () => ({ prioritizeTranscript: vi.fn(() => true) }));
+vi.mock("./transcriptQueue", () => ({
+  prioritizeTranscript: vi.fn(() => true),
+  backgroundLoudness: vi.fn(() => null),
+}));
 vi.mock("./storyboard", () => ({
   makeStoryboard: vi.fn(async () => ({
     path: "C:/proj/internals/cache/inspect/ov_sheet.jpg",
@@ -134,10 +137,8 @@ function ctxWith(runner: CommandRunner, fs: MockFs = new MockFs()): ClientToolCo
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
 
-/** The verbatim summary ffmpeg's ebur128 + astats print for the EBU -23 LUFS calibration tone. */
-const TONE_STDERR = `[Parsed_astats_1 @ 0] Overall
-[Parsed_astats_1 @ 0] RMS level dB: -26.010573
-[Parsed_ebur128_0 @ 0] Summary:
+/** The summary ffmpeg's ebur128 + volumedetect print for the EBU -23 LUFS calibration tone. */
+const TONE_STDERR = `[Parsed_ebur128_0 @ 0] Summary:
 
   Integrated loudness:
     I:         -23.0 LUFS
@@ -145,6 +146,9 @@ const TONE_STDERR = `[Parsed_astats_1 @ 0] Overall
 
   True peak:
     Peak:      -23.0 dBFS
+[Parsed_volumedetect_1 @ 0] n_samples: 1920000
+[Parsed_volumedetect_1 @ 0] mean_volume: -26.0 dB
+[Parsed_volumedetect_1 @ 0] max_volume: -23.0 dB
 `;
 
 interface MediaCall {
@@ -549,6 +553,155 @@ describe("inspectMediaTool looks at what it returns (UJ-012)", () => {
     expect(r.loudness).toBeNull();
     expect(r.transcript).toBeNull();
     expect(runner.calls.some((c) => c.args.some((a) => a.includes("ebur128")))).toBe(false);
+  });
+
+  // Owner decision 2026-10-04 (4g): a look never waits for more than 10 minutes of audio to be
+  // measured. Every file is measured whole in the background, so a whole-file look finds it kept.
+  describe("loudness of a long span", () => {
+    const never = new Promise<never>(() => undefined);
+    const passes = (runner: { calls: MediaCall[] }): MediaCall[] =>
+      runner.calls.filter((c) => c.args.some((a) => a.includes("ebur128")));
+
+    it("is measured in the background, not while the model waits", async () => {
+      const { fs } = setup();
+      vi.mocked(backgroundLoudness).mockReturnValue({ first: true, result: never });
+      const runner = mediaRunner(fs, { probe: LONG_PROBE, loudness: TONE_STDERR });
+      const r = (await inspectMediaTool(
+        { media_ref: "vid.mp4", max_frames: 1 },
+        ctxWith(runner, fs),
+      )) as Any;
+      expect(r.ok).toBe(true);
+      expect(r.loudness.status).toBe("in_progress");
+      expect(passes(runner)).toHaveLength(0);
+      // The whole file, named as the indexer names it, so the indexer's measurement is the one found.
+      expect(vi.mocked(backgroundLoudness)).toHaveBeenCalledWith(
+        DIR,
+        joinPath(DIR, "vid.mp4"),
+        null,
+        null,
+      );
+    });
+
+    it("measures a window of up to 10 minutes of it now", async () => {
+      const { fs } = setup();
+      const runner = mediaRunner(fs, { probe: LONG_PROBE, loudness: TONE_STDERR });
+      const r = (await inspectMediaTool(
+        { media_ref: "vid.mp4", max_frames: 1, start_seconds: 600, end_seconds: 1200 },
+        ctxWith(runner, fs),
+      )) as Any;
+      expect(r.loudness).toEqual({ integrated_lufs: -23, true_peak_dbtp: -23, rms_dbfs: -26 });
+      expect(passes(runner)).toHaveLength(1);
+      expect(vi.mocked(backgroundLoudness)).not.toHaveBeenCalled();
+    });
+
+    it("a window covering the whole file measures the whole file", async () => {
+      const { fs } = setup();
+      const runner = mediaRunner(fs, { probe: VIDEO_PROBE, loudness: TONE_STDERR });
+      // Within 50 ms of both ends is the whole file.
+      await inspectMediaTool(
+        { media_ref: "vid.mp4", max_frames: 1, start_seconds: 0.05, end_seconds: 12.45 },
+        ctxWith(runner, fs),
+      );
+      const [pass] = passes(runner);
+      expect(pass.args).not.toContain("-ss");
+      expect(pass.args).not.toContain("-to");
+    });
+
+    it("a long window that ends where the file ends is still a window", async () => {
+      const { fs } = setup();
+      vi.mocked(backgroundLoudness).mockReturnValue({ first: true, result: never });
+      await inspectMediaTool(
+        { media_ref: "vid.mp4", max_frames: 1, start_seconds: 600, end_seconds: 1800 },
+        ctxWith(mediaRunner(fs, { probe: LONG_PROBE }), fs),
+      );
+      expect(vi.mocked(backgroundLoudness)).toHaveBeenCalledWith(
+        DIR,
+        joinPath(DIR, "vid.mp4"),
+        600,
+        1800,
+      );
+    });
+
+    // A file ffprobe gives no duration for: its length is unknown, so the whole of it is not
+    // measured while the model waits; a window of it, whose length IS known, is.
+    it("a file of unknown length is measured whole in the background, and a window of it now", async () => {
+      const fs = new MockFs();
+      fs.touch(joinPath(DIR, "song.mp3"));
+      const noDuration = JSON.stringify({
+        format: { format_name: "mp3", size: "2000000" },
+        streams: [{ codec_type: "audio", codec_name: "mp3", sample_rate: "44100", channels: 2 }],
+      });
+      vi.mocked(backgroundLoudness).mockReturnValue({ first: true, result: never });
+      const runner = mediaRunner(fs, { probe: noDuration, loudness: TONE_STDERR });
+      const r = (await inspectMediaTool({ media_ref: "song.mp3" }, ctxWith(runner, fs))) as Any;
+      expect(r.loudness.status).toBe("in_progress");
+      expect(vi.mocked(backgroundLoudness)).toHaveBeenCalledWith(
+        DIR,
+        joinPath(DIR, "song.mp3"),
+        null,
+        null,
+      );
+      expect(passes(runner)).toHaveLength(0);
+      const w = (await inspectMediaTool(
+        { media_ref: "song.mp3", start_seconds: 0, end_seconds: 300 },
+        ctxWith(runner, fs),
+      )) as Any;
+      expect(w.loudness).toEqual({ integrated_lufs: -23, true_peak_dbtp: -23, rms_dbfs: -26 });
+      const [pass] = passes(runner);
+      expect(pass.args.slice(pass.args.indexOf("-to"), pass.args.indexOf("-to") + 2)).toEqual([
+        "-to",
+        "300.000",
+      ]);
+    });
+
+    it("for a clip, a measurement that lands while the look waits carries the clip's volume", async () => {
+      const { fs } = setup();
+      // 20 minutes of the 30-minute file, its sound on the linked audio clip at volume 0.5.
+      const clip = {
+        media_ref: "vid.mp4",
+        source_in: 0,
+        source_out: 36000,
+        timeline_in: 0,
+        timeline_out: 36000,
+        link_group: "L",
+      };
+      fs.files.set(
+        joinPath(DIR, "internals/timeline.json"),
+        JSON.stringify({
+          units: "frames",
+          canvas: { width: 1920, height: 1080, fps: 30 },
+          tracks: [
+            { id: "v1", kind: "video", z: 0, clips: [{ id: "v", kind: "video", ...clip }] },
+            {
+              id: "a1",
+              kind: "audio",
+              z: 0,
+              clips: [{ id: "a", kind: "audio", ...clip, volume: 0.5 }],
+            },
+          ],
+          failures: [],
+        }),
+      );
+      const figures = { integrated_lufs: -23, true_peak_dbtp: -23, rms_dbfs: -26 };
+      vi.mocked(backgroundLoudness).mockReturnValue({
+        first: false,
+        result: Promise.resolve(figures),
+      });
+      const runner = mediaRunner(fs, { probe: LONG_PROBE, loudness: TONE_STDERR });
+      const r = (await inspectMediaTool(
+        { clip_id: "v", max_frames: 1 },
+        ctxWith(runner, fs),
+      )) as Any;
+      expect(r.loudness.integrated_lufs).toBe(-23);
+      expect(r.loudness.after_clip_volume.integrated_lufs).toBe(-29);
+      expect(passes(runner)).toHaveLength(0);
+      expect(vi.mocked(backgroundLoudness)).toHaveBeenCalledWith(
+        DIR,
+        joinPath(DIR, "vid.mp4"),
+        0,
+        1200,
+      );
+    });
   });
 
   /** A timeline holding video clip `v` (200 frames from source frame 30, placed at 100) and its

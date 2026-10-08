@@ -15,7 +15,7 @@ import type { ClientToolRegistry } from "./registry";
 import { unresolvedRefError, unresolvedRefMessage } from "./refState";
 import { normLanguage, peekTranscript, runWhisper } from "./transcribe";
 import { prioritizeTranscript } from "./transcriptQueue";
-import { measureLoudness, type Loudness } from "./loudness";
+import { lookLoudness, type Loudness } from "./loudness";
 import { displaySize, mediaFrameDims, sampleFrames, stillWithGrid } from "./mediaFrames";
 import { makeStoryboard } from "./storyboard";
 import { loadTimeline } from "../timeline/engine";
@@ -212,6 +212,12 @@ function clock(s: number): string {
     : `${Math.floor(t / 60)}:${pad(t % 60)}`;
 }
 
+/** Does [from, to) cover all of a file `duration` long? Then it IS the whole file, and is asked for
+ *  as the whole file: the transcript and loudness the indexer keeps for a file are kept as that. */
+function coversWholeFile(from: number, to: number | null, duration: number | null): boolean {
+  return from <= 0.05 && (to === null || (duration !== null && to >= duration - 0.05));
+}
+
 /** Transcribe `path` over [start, end] into a compact inspect_media transcript:
  *  sentence rows `[text, start_s, end_s]` always, plus a flat `words` list
  *  `[text, start_s, end_s]` when `wordTimestamps` — both windowed to [start, end]
@@ -242,8 +248,7 @@ async function buildTranscript(
     const to = opts.end ?? opts.duration;
     // A window that covers the whole file IS the whole-file transcript: asking for it as a window
     // would cache a second copy the background transcriber can never reuse.
-    const whole =
-      from <= 0.05 && (to === null || (opts.duration !== null && to >= opts.duration - 0.05));
+    const whole = coversWholeFile(from, to, opts.duration);
     const window = whole ? null : { start: from, end: to };
     let t = await peekTranscript(ctx, path, undefined, opts.language, window);
     if (!t && to !== null && to - from > INLINE_TRANSCRIPT_MAX_S) {
@@ -437,12 +442,17 @@ export async function inspectMediaTool(
   if (end !== null && end <= start) end = dur > start ? dur : null;
 
   // Sound and transcript come from other subsystems than the frames, so they start FIRST and run
-  // while the frames are read, instead of one after the other. Loudness is measured over the whole
-  // span looked at, however long (owner decision 2026-10-03).
+  // while the frames are read, instead of one after the other. A look waits for at most 10 minutes
+  // of audio to be measured (owner decision 2026-10-04); the indexer measures every file whole.
+  const whole = coversWholeFile(start, end, dur > 0 ? dur : null);
   const loudnessTask: Promise<Result | null> = hasAudio
-    ? measureLoudness(ctx, path, start, end).then((l) =>
-        "error" in l ? l : withClipGain(l, clipTimeline, timelineClip),
-      )
+    ? lookLoudness(
+        ctx,
+        path,
+        whole ? null : start,
+        whole ? null : end,
+        end !== null ? end - start : null,
+      ).then((l) => ("integrated_lufs" in l ? withClipGain(l, clipTimeline, timelineClip) : l))
     : Promise.resolve(null);
   const transcriptTask: Promise<Result | null> = hasAudio
     ? buildTranscript(ctx, path, {

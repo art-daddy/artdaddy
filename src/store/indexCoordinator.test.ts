@@ -2,22 +2,29 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { IndexCoordinator } from "./indexCoordinator";
 import type { Timeline } from "../timeline/model";
-import { prioritizeTranscript } from "../tools/transcriptQueue";
+import { backgroundLoudness, prioritizeTranscript } from "../tools/transcriptQueue";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
 
 // Mocks must be hoisted so the vi.mock factories can reference them.
+const FIGURES = { integrated_lufs: -23, true_peak_dbtp: -23, rms_dbfs: -26 };
 const {
   processImportedMedia,
   clearSourceUrlCache,
   ensureTranscript,
+  measureLoudness,
   reportAppError,
   sourceHasAudio,
 } = vi.hoisted(() => ({
   processImportedMedia: vi.fn(async () => false),
   clearSourceUrlCache: vi.fn(),
   ensureTranscript: vi.fn(async () => ({ path: "t.json", parsed: {}, existed: false })),
+  measureLoudness: vi.fn(async (..._a: unknown[]): Promise<object> => ({
+    integrated_lufs: -23,
+    true_peak_dbtp: -23,
+    rms_dbfs: -26,
+  })),
   reportAppError: vi.fn(),
   sourceHasAudio: vi.fn(async () => true),
 }));
@@ -31,12 +38,15 @@ const isSpeechEngineUnavailable = (e: unknown): boolean => e instanceof FakeEngi
 vi.mock("../preview/mediaProxy", () => ({ processImportedMedia }));
 vi.mock("../preview/resolve", () => ({ clearSourceUrlCache }));
 vi.mock("../tools/transcribe", () => ({ ensureTranscript, isSpeechEngineUnavailable }));
+vi.mock("../tools/loudness", () => ({ measureLoudness }));
 vi.mock("../timeline/placement", () => ({ sourceHasAudio }));
 vi.mock("../api/appEvents", () => ({ reportAppError }));
 
 /** The sources handed to the transcript pass, in order. */
 const transcribed = (): string[] =>
   ensureTranscript.mock.calls.map((c) => (c as unknown[])[1] as string);
+/** The [path, start, end] handed to the loudness pass, in order. */
+const measured = (): unknown[][] => measureLoudness.mock.calls.map((c) => c.slice(1, 4));
 
 const runner = { run: vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })) } as Any;
 const makeRunner = async () => runner as Any;
@@ -46,7 +56,9 @@ const fakeStore = (
 ): Any => ({
   projectDir: "C:/p",
   listClips: vi.fn(async () => clips),
-  resolveRef: vi.fn(async (r: string) => (offline.has(r) ? null : `C:/p/${r}`)),
+  resolveRef: vi.fn(async (r: string) =>
+    offline.has(r) ? null : /^[A-Za-z]:\//.test(r) ? r : `C:/p/${r}`,
+  ),
   offlineMedia: vi.fn(async (r: string) => (offline.has(r) ? { id: r, path: r } : null)),
 });
 
@@ -73,6 +85,8 @@ beforeEach(() => {
   clearSourceUrlCache.mockReset();
   ensureTranscript.mockReset();
   ensureTranscript.mockResolvedValue({ path: "t.json", parsed: {}, existed: false });
+  measureLoudness.mockReset();
+  measureLoudness.mockResolvedValue(FIGURES);
   reportAppError.mockReset();
   sourceHasAudio.mockReset();
   sourceHasAudio.mockResolvedValue(true);
@@ -371,6 +385,9 @@ describe("IndexCoordinator", () => {
     await c.sweep(tl([{ media_ref: "library/late.mp3", kind: "audio" }]));
     await new Promise((r) => setTimeout(r, 20));
     expect(ensureTranscript.mock.calls.length).toBe(3);
+    // The speech engine says nothing about loudness: every file is still measured.
+    await settle(() => measureLoudness.mock.calls.length >= 13);
+    expect(measureLoudness).toHaveBeenCalledTimes(13);
   });
 
   // The opposite direction. Giving up is only right when the ENGINE cannot start; a file that
@@ -440,6 +457,7 @@ describe("IndexCoordinator", () => {
       }
       expect(ensureTranscript).not.toHaveBeenCalled();
       expect(processImportedMedia).not.toHaveBeenCalled();
+      expect(measureLoudness).not.toHaveBeenCalled();
       expect(reportAppError).not.toHaveBeenCalled();
     });
 
@@ -596,6 +614,266 @@ describe("IndexCoordinator", () => {
     await new Promise((r) => setTimeout(r, 20));
     expect(processImportedMedia).not.toHaveBeenCalled();
     expect(transcribed()).toEqual(["library/song.mp3"]);
+  });
+
+  // 4g (owner decision 2026-10-04): every file with sound is measured whole in the background, so a
+  // look at a long file finds its loudness kept; a look at a long uncached span is measured next.
+  describe("loudness, measured in the background (4g)", () => {
+    /** A coordinator whose measurements wait at a gate, with the first one already running. */
+    async function busy(): Promise<{ c: IndexCoordinator; gates: Array<() => void> }> {
+      const gates: Array<() => void> = [];
+      measureLoudness.mockImplementation(async () => {
+        await new Promise<void>((r) => gates.push(r));
+        return FIGURES;
+      });
+      const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+      for (const s of ["library/a.mp3", "library/b.mp3"]) c.indexSource(s);
+      await settle(() => gates.length > 0);
+      return { c, gates };
+    }
+
+    it("measures every audio and video file whole, once, and nothing else", async () => {
+      const c = new IndexCoordinator(
+        fakeStore([
+          { id: "m1", path: "library/clip.mp4" },
+          { id: "m2", path: "library/song.mp3" },
+          { id: "m3", path: "library/still.png" },
+        ]),
+        makeRunner,
+        vi.fn(),
+        vi.fn(),
+      );
+      await c.sweep(tl([]));
+      await settle(() => measureLoudness.mock.calls.length >= 2);
+      await c.sweep(tl([{ media_ref: "m1" }]));
+      await new Promise((r) => setTimeout(r, 20));
+      expect(measured().sort()).toEqual([
+        ["C:/p/library/clip.mp4", null, null],
+        ["C:/p/library/song.mp3", null, null],
+      ]);
+      c.dispose();
+    });
+
+    it("measures a file the moment it is imported", async () => {
+      const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+      c.indexSource("library/dropped.wav");
+      await settle(() => measureLoudness.mock.calls.length > 0);
+      expect(measured()).toEqual([["C:/p/library/dropped.wav", null, null]]);
+      c.dispose();
+    });
+
+    it("never measures a file with no sound, and does not call that a failure", async () => {
+      sourceHasAudio.mockResolvedValue(false);
+      const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+      c.indexSource("library/silent.mp4");
+      await settle(() => sourceHasAudio.mock.calls.length >= 2);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(measureLoudness).not.toHaveBeenCalled();
+      expect(reportAppError).not.toHaveBeenCalled();
+      c.dispose();
+    });
+
+    it("measures one file at a time", async () => {
+      const { c, gates } = await busy();
+      c.indexSource("library/c.mp3");
+      for (let i = 0; i < 3; i++) {
+        expect(gates).toHaveLength(1);
+        gates.shift()!();
+        await settle(() => gates.length > 0, 200);
+      }
+      expect(measured().map((m) => m[0])).toEqual([
+        "C:/p/library/a.mp3",
+        "C:/p/library/b.mp3",
+        "C:/p/library/c.mp3",
+      ]);
+      c.dispose();
+    });
+
+    it("runs a look's span next, and hands the look the figures once it has run", async () => {
+      const { c, gates } = await busy();
+      const look = backgroundLoudness("C:/p", "C:/media/talk.mp4", 0, 900)!;
+      expect(look.first).toBe(true);
+      // Asked again before it ran: the same measurement, which the second look waits on.
+      const queued = backgroundLoudness("C:/p", "C:/media/talk.mp4", 0, 900)!;
+      expect([queued.first, queued.result === look.result]).toEqual([false, true]);
+      gates.shift()!();
+      await settle(() => measureLoudness.mock.calls.length >= 2);
+      expect(measured()[1]).toEqual(["C:/media/talk.mp4", 0, 900]);
+      // ...and again while it runs.
+      const running = backgroundLoudness("C:/p", "C:/media/talk.mp4", 0, 900)!;
+      expect([running.first, running.result === look.result]).toEqual([false, true]);
+      expect(gates).toHaveLength(1); // still one measurement at a time
+      gates.shift()!();
+      expect(await look.result).toEqual(FIGURES);
+      await settle(() => gates.length > 0);
+      gates.shift()!();
+      expect(measured().map((m) => m[0])).toEqual([
+        "C:/p/library/a.mp3",
+        "C:/media/talk.mp4",
+        "C:/p/library/b.mp3",
+      ]);
+      c.dispose();
+    });
+
+    it("hands a failure to the look waiting on it, reports it, and retries it boundedly", async () => {
+      const boom = { error: "loudness could not be measured: boom" };
+      measureLoudness.mockResolvedValue(boom);
+      const c = new IndexCoordinator(
+        fakeStore([{ id: "m1", path: "library/a.mp3" }]),
+        makeRunner,
+        vi.fn(),
+        vi.fn(),
+      );
+      expect(await backgroundLoudness("C:/p", "C:/media/talk.mp4", null, null)!.result).toEqual(
+        boom,
+      );
+      for (let i = 0; i < 4; i++) {
+        await c.sweep(tl([]));
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      expect(measured().filter((m) => m[0] === "C:/p/library/a.mp3")).toHaveLength(3);
+      const reports = reportAppError.mock.calls.map((k) => String(k[0]));
+      expect(reports.some((m) => /index loudness failed/.test(m) && m.includes("boom"))).toBe(true);
+      c.dispose();
+    });
+
+    it("settles every waiting look when the project closes, and measures nothing more", async () => {
+      const { c, gates } = await busy();
+      const look = backgroundLoudness("C:/p", "C:/media/talk.mp4", null, null)!;
+      c.dispose();
+      expect(await look.result).toEqual({ error: expect.stringMatching(/closed/) });
+      expect(backgroundLoudness("C:/p", "C:/media/talk.mp4", null, null)).toBeNull();
+      expect(c.measureSoon("C:/media/talk.mp4", null, null)).toBeNull();
+      gates.shift()!();
+      await new Promise((r) => setTimeout(r, 20));
+      expect(measureLoudness).toHaveBeenCalledTimes(1);
+      expect(reportAppError).not.toHaveBeenCalled();
+    });
+
+    it("measures each span of a file on its own, never one for another", async () => {
+      const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+      const spans: Array<[number | null, number | null]> = [
+        [0, 900],
+        [0, 1800],
+        [900, 1800],
+        [300, null],
+        [null, null],
+      ];
+      const looks = spans.map(([a, b]) => backgroundLoudness("C:/p", "C:/media/talk.mp4", a, b)!);
+      expect(looks.map((l) => l.first)).toEqual([true, true, true, true, true]);
+      await Promise.all(looks.map((l) => l.result));
+      expect(
+        measured()
+          .map((m) => [m[1], m[2]])
+          .sort(),
+      ).toEqual(spans.slice().sort());
+      c.dispose();
+    });
+
+    // A LINKED file's catalog path is its absolute path, so the sweep's whole-file job and a look
+    // at the whole file are the same job.
+    it("a look at a whole file the sweep is measuring waits on that run, not a second one", async () => {
+      const LINKED = "D:/media/long.mp3";
+      const gates: Array<() => void> = [];
+      measureLoudness.mockImplementation(async () => {
+        await new Promise<void>((r) => gates.push(r));
+        return FIGURES;
+      });
+      const c = new IndexCoordinator(
+        fakeStore([{ id: "m1", path: LINKED }]),
+        makeRunner,
+        vi.fn(),
+        vi.fn(),
+      );
+      await c.sweep(tl([]));
+      await settle(() => gates.length > 0);
+      const look = backgroundLoudness("C:/p", LINKED, null, null)!;
+      expect(look.first).toBe(true);
+      gates.shift()!();
+      expect(await look.result).toEqual(FIGURES);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(measured()).toEqual([[LINKED, null, null]]);
+      c.dispose();
+    });
+
+    it("a look at a whole file the sweep has queued moves it forward, not a copy of it", async () => {
+      const gates: Array<() => void> = [];
+      measureLoudness.mockImplementation(async () => {
+        await new Promise<void>((r) => gates.push(r));
+        return FIGURES;
+      });
+      const lib = ["D:/a.mp3", "D:/b.mp3", "D:/c.mp3"].map((path, i) => ({ id: `m${i}`, path }));
+      const c = new IndexCoordinator(fakeStore(lib), makeRunner, vi.fn(), vi.fn());
+      await c.sweep(tl([]));
+      await settle(() => gates.length > 0); // a runs; b is next, then c
+      for (const next of ["D:/b.mp3", "D:/c.mp3"])
+        expect(backgroundLoudness("C:/p", next, null, null)!.first).toBe(true);
+      for (let i = 0; i < 4; i++) {
+        gates.shift()?.();
+        await settle(() => gates.length > 0, 100);
+      }
+      expect(measured().map((m) => m[0])).toEqual(["D:/a.mp3", "D:/c.mp3", "D:/b.mp3"]);
+      c.dispose();
+    });
+
+    it("tells the look why a file was not measured: offline, or no sound", async () => {
+      const offline = new Set(["D:/gone.mp3"]);
+      const c = new IndexCoordinator(fakeStore([], offline), makeRunner, vi.fn(), vi.fn());
+      expect(await backgroundLoudness("C:/p", "D:/gone.mp3", null, null)!.result).toEqual({
+        error: expect.stringMatching(/offline/),
+      });
+      sourceHasAudio.mockResolvedValue(false);
+      expect(await backgroundLoudness("C:/p", "D:/mute.mp4", null, null)!.result).toEqual({
+        error: expect.stringMatching(/no sound/),
+      });
+      expect(measureLoudness).not.toHaveBeenCalled();
+      expect(reportAppError).not.toHaveBeenCalled();
+      c.dispose();
+    });
+
+    it("a measurement that throws reaches the look and is reported", async () => {
+      measureLoudness.mockRejectedValue(new Error("kaboom"));
+      const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+      expect(await backgroundLoudness("C:/p", "D:/a.mp3", null, null)!.result).toEqual({
+        error: expect.stringContaining("kaboom"),
+      });
+      expect(String(reportAppError.mock.calls[0]?.[0])).toMatch(/index loudness failed.*kaboom/);
+      c.dispose();
+    });
+
+    // The web build has no runner. A look must hear so, not wait on a queue nothing drains; and a
+    // runner that comes back later measures what is asked then.
+    it("answers a look when there is no runner, and measures once there is one", async () => {
+      let runnerUp = false;
+      const c = new IndexCoordinator(
+        fakeStore(),
+        async () => {
+          if (!runnerUp) throw new Error("no runner here");
+          return runner;
+        },
+        vi.fn(),
+        vi.fn(),
+      );
+      expect(await backgroundLoudness("C:/p", "D:/a.mp3", null, null)!.result).toEqual({
+        error: expect.stringMatching(/cannot be measured/),
+      });
+      runnerUp = true;
+      expect(await backgroundLoudness("C:/p", "D:/a.mp3", null, null)!.result).toEqual(FIGURES);
+      c.dispose();
+    });
+
+    // The editor and the agent's tool host name the same project's folder in either slash, with or
+    // without a trailing one.
+    it("is reached by its project's folder however the folder is written", async () => {
+      const c = new IndexCoordinator(
+        { ...fakeStore(), projectDir: "C:\\p\\\\" },
+        makeRunner,
+        vi.fn(),
+        vi.fn(),
+      );
+      expect(await backgroundLoudness("C:/p", "D:/a.mp3", null, null)!.result).toEqual(FIGURES);
+      c.dispose();
+    });
   });
 
   it("dispose() aborts the IN-FLIGHT proxy job, not just the queue", async () => {

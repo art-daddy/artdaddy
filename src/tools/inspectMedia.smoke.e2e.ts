@@ -15,6 +15,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { CommandRunner } from "./command";
 import type { ClientToolContext } from "./context";
 import { inspectMediaTool } from "./inspect";
+import { measureLoudness } from "./loudness";
 import { joinPath } from "./store";
 import { runWhisper, whisperModelPath } from "./transcribe";
 import { registerBackgroundTranscriber } from "./transcriptQueue";
@@ -316,8 +317,6 @@ describe("loudness", () => {
   // it, the runs' exits were lost and the app's IPC stopped answering (2026-10-07). What the pass
   // hands back must stay a few KB however long the span is, with the figures unchanged.
   it("a 10-minute span hands back a few KB of output, not a log line per 100 ms", async () => {
-    // 601 s: just over the inline transcript limit, so the look queues the transcript instead
-    // of running whisper on a tone, and the only sidecar doing real work is the loudness pass.
     const out = media("tone10min.flac");
     await ff([
       "-y",
@@ -327,12 +326,11 @@ describe("loudness", () => {
       "-f",
       "lavfi",
       "-i",
-      "aevalsrc=0.0707946*sin(2*PI*1000*t)|0.0707946*sin(2*PI*1000*t):s=48000:d=601",
+      "aevalsrc=0.0707946*sin(2*PI*1000*t)|0.0707946*sin(2*PI*1000*t):s=48000:d=600",
       "-c:a",
       "flac",
       out,
     ]);
-    const ref = await libRef(ctx, out, "audio");
     const stderrBytes: number[] = [];
     const watching: CommandRunner = {
       async run(program, args, signal, cwd, onStdout) {
@@ -341,13 +339,37 @@ describe("loudness", () => {
         return r;
       },
     };
-    const r = (await inspectMediaTool({ media_ref: ref }, { ...ctx, runner: watching })) as Any;
-    expect(r.ok, JSON.stringify(r).slice(0, 400)).toBe(true);
+    const r = (await measureLoudness({ ...ctx, runner: watching }, out, null, null)) as Any;
     expect(stderrBytes).toHaveLength(1);
     expect(stderrBytes[0]).toBeLessThan(16 * 1024);
-    expect(r.loudness.integrated_lufs).toBeCloseTo(-23, 0);
-    expect(r.loudness.true_peak_dbtp).toBeCloseTo(-23, 0);
-    expect(r.loudness.rms_dbfs).toBeCloseTo(-26, 0);
+    expect(r.integrated_lufs).toBeCloseTo(-23, 0);
+    expect(r.true_peak_dbtp).toBeCloseTo(-23, 0);
+    expect(r.rms_dbfs).toBeCloseTo(-26, 0);
+  });
+
+  // The RMS is volumedetect's (4g). It measures in 16 bits and prints -91 dB for silence, which
+  // must read as no RMS, not as a level; and a MONO file's RMS is its one channel's.
+  it("reads digital silence as silent and a mono tone at its level, through the real filter", async () => {
+    const make = async (name: string, src: string): Promise<string> => {
+      const out = media(name);
+      await ff(["-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", src, out]);
+      return out;
+    };
+    const silent = await measureLoudness(
+      ctx,
+      await make("silence.wav", "aevalsrc=0|0:s=48000:d=5"),
+      null,
+      null,
+    );
+    expect(silent).toEqual({ integrated_lufs: -70, true_peak_dbtp: null, rms_dbfs: null });
+    const mono = (await measureLoudness(
+      ctx,
+      await make("mono.wav", "aevalsrc=0.0707946*sin(2*PI*1000*t):s=48000:d=5"),
+      null,
+      null,
+    )) as Any;
+    expect(mono.rms_dbfs).toBeCloseTo(-26, 0);
+    expect(mono.true_peak_dbtp).toBeCloseTo(-23, 0);
   });
 });
 
@@ -498,8 +520,13 @@ describe("transcript: never waited on when long", () => {
     const { file } = await longTalk();
     const ref = await libRef(ctx, file, "audio");
     const queued: Array<[string, string]> = [];
+    const measuring: Array<[string, number | null, number | null]> = [];
     const unregister = registerBackgroundTranscriber(proj, {
       prioritize: (s, l) => (queued.push([s, l]), true),
+      loudness: (s, a, b) => (
+        measuring.push([s, a, b]),
+        { first: true, result: new Promise(() => undefined) }
+      ),
     });
     let whisperRuns = 0;
     const counting: CommandRunner = {
@@ -517,9 +544,11 @@ describe("transcript: never waited on when long", () => {
       expect(whisperRuns).toBe(0);
       expect(queued).toHaveLength(1);
       expect(queued[0][0].replace(/\\/g, "/")).toBe(file.replace(/\\/g, "/"));
-      expect(r.loudness.integrated_lufs).not.toBeNull(); // the sound is still measured
-      // Never waited on: whisper did not run (above), so the time is the loudness pass's. 12
-      // minutes inline would take minutes; the ceiling is far under that and survives a busy run.
+      // 12 minutes is over the loudness limit too (4g): measured in the background, whole.
+      expect(r.loudness.status).toBe("in_progress");
+      expect(measuring).toEqual([[queued[0][0], null, null]]);
+      // Never waited on: neither whisper nor the loudness pass ran in the look. 12 minutes inline
+      // would take minutes; the ceiling is far under that and survives a busy run.
       expect(ms).toBeLessThan(LOOK_CEILING_MS);
     } finally {
       unregister();
