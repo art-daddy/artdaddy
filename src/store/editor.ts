@@ -732,6 +732,9 @@ function pushEditorSnapshot(s: EditorState): void {
 
 /** Point the UI + tool runtime at project `id`'s editor instance (or clear it). */
 function setActiveEditor(id: string | null): void {
+  // A project notice is about the project it was raised in (a file offline, the project open
+  // elsewhere, an import that failed). Once that project is left it is not true of what is shown.
+  if (activeEditorId.getState().id !== id) useProjectNotice.getState().clear();
   activeEditorId.setState({ id });
   editorBridgeUnsub?.();
   const store = id ? getEditorStore(id) : null;

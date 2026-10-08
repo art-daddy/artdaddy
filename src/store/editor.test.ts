@@ -825,6 +825,62 @@ describe("per-project registry + activation (frontmost document)", () => {
     expect(getEditorStore("p1")).not.toBe(active); // the instance was disposed + rebuilt fresh
   });
 
+  // A project notice is about the project it was raised in. Leaving the project ends it: the next
+  // project must not open under the last one's warning, nor the home screen sit under it.
+  describe("the project notice", () => {
+    const offline = (...ids: string[]) =>
+      JSON.stringify({
+        version: 1,
+        clips: ids.map((id) => ({
+          id,
+          path: `D:/gone/${id}.mp4`,
+          filename: `${id}.mp4`,
+          external: true,
+        })),
+      });
+    const projects = (aOffline: string[], bOffline: string[]) => {
+      const a = seedStore(P1, withClip());
+      const b = seedStore(P2, withClip());
+      a.fs.files.set(`${P1}/internals/library.json`, offline(...aOffline));
+      b.fs.files.set(`${P2}/internals/library.json`, offline(...bOffline));
+      setProjectStoreFactory((dir) => (dir.endsWith("/p1") ? a.store : b.store));
+      useProjectNotice.getState().clear();
+    };
+    const notice = () => useProjectNotice.getState().message;
+
+    it("goes when its project is closed", async () => {
+      projects(["media_1"], []);
+      await activateEditorProject("p1");
+      await waitFor(() => expect(notice()).toMatch(/^1 media file is offline/));
+
+      deactivateEditorProject("p1");
+
+      expect(notice()).toBeNull();
+    });
+
+    it("is not carried into the next project, which still raises its own", async () => {
+      projects(["media_1"], ["media_2", "media_3"]);
+      await activateEditorProject("p1");
+      await waitFor(() => expect(notice()).toMatch(/^1 media file is offline/));
+
+      const opening = activateEditorProject("p2");
+      expect(notice()).toBeNull();
+      await opening;
+
+      await waitFor(() => expect(notice()).toMatch(/^2 media files are offline/));
+    });
+
+    it("stays when the same project is activated again", async () => {
+      projects(["media_1"], []);
+      await activateEditorProject("p1");
+      await waitFor(() => expect(notice()).toMatch(/^1 media file is offline/));
+
+      const again = activateEditorProject("p1");
+      expect(notice()).toMatch(/^1 media file is offline/);
+      await again;
+    });
+  });
+
   it("createProjectStore builds a store through the injected factory", async () => {
     const { store } = seedStore();
     setProjectStoreFactory((dir) => (dir === "/root/projects/p1" ? store : (undefined as never)));
