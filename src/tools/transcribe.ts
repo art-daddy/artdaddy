@@ -6,14 +6,16 @@
 // deterministic transcript path, so get_transcript returns an existing
 // transcript instead of re-transcribing, so explicit callers share one cache.
 // The ggml model is downloaded into app-data only when transcription is requested.
-import { stderrExcerpt } from "./command";
+import { stderrExcerpt, type CommandResult } from "./command";
+import type { AppCache } from "./appCache";
 import type { ClientToolContext } from "./context";
+import { jobResult, jobSupervisor, runAsJob, whenJobEnds, type JobView } from "./jobSupervisor";
 import { shortHash } from "./media";
 import type { ClientToolRegistry } from "./registry";
 import { MediaOfflineError } from "./refState";
 import { joinPath } from "./store";
 import { prioritizeTranscript } from "./transcriptQueue";
-import { lookWhisper } from "./workGate";
+import { adoptTurn, lookWhisper } from "./workGate";
 import { beginSessionActivity } from "../observability/crashWatch";
 import { ArtDaddyError } from "../lib/errors";
 import { settledWithin } from "../lib/settledWithin";
@@ -620,6 +622,14 @@ function once<T>(key: string, run: () => Promise<T>): Promise<T> {
   return started;
 }
 
+/** Let a request for `key` join `running`, a run this page did not start (adopted after a crash of
+ *  the page, 4i), exactly as {@link once} lets it join one it did. */
+function joinable<T>(key: string, running: Promise<T>): void {
+  const tracked = running.finally(() => inflight.delete(key));
+  tracked.catch(() => undefined);
+  inflight.set(key, tracked);
+}
+
 // whisper.cpp wants 16 kHz mono PCM WAV. Bump the rev when the extract recipe changes.
 const TRANSCODE_WAV_REV = 1;
 
@@ -641,7 +651,7 @@ const wavRemovals = new Map<string, Promise<void>>();
  *  it ends. Only a run that holds an extract reads it, so none is deleted from under a reader, and
  *  none outlives the runs that needed it (an 80-minute file's is 148 MB). */
 async function holdingWavs<T>(
-  ctx: ClientToolContext,
+  io: { remove(path: string): Promise<void> },
   wavs: string[],
   fn: () => Promise<T>,
 ): Promise<T> {
@@ -657,7 +667,7 @@ async function holdingWavs<T>(
         continue;
       }
       wavHolders.delete(w);
-      const gone: Promise<void> = ctx.store
+      const gone: Promise<void> = io
         .remove(w)
         .catch(() => undefined)
         .finally(() => {
@@ -871,6 +881,9 @@ export async function runWhisper(
   // on the 12-minute QA file it had words and times the whole file's lacked (4h2).
   const done = (await cachedWhisper(ctx, out)) ?? (await cachedWhisper(ctx, full));
   if (done) return parseWhisperCpp(done);
+  // Not before this page has taken over what a crashed page left running: a transcription of this
+  // file still at work there is joined below, never run a second time (4i).
+  await adoptTranscriptions(ctx.store);
 
   // whisper's own output is scratch, written in the app's work folder like the audio it reads, so
   // a run still going when its project closes finishes without writing into the project (4i).
@@ -899,7 +912,8 @@ export async function runWhisper(
     const start = Math.max(0, Number(window?.start) || 0);
     const rawEnd = Number(window?.end);
     const end = Number.isFinite(rawEnd) && rawEnd > start ? rawEnd : null;
-    return holdingWavs(ctx, winWav ? [fullWav, winWav] : [fullWav], async () => {
+    const wavs = winWav ? [fullWav, winWav] : [fullWav];
+    return holdingWavs(ctx.store, wavs, async () => {
       const wav =
         winWav === null
           ? await extractWav(ctx, src, fullWav)
@@ -910,57 +924,180 @@ export async function runWhisper(
       // whisper writes under a scratch name; the transcript reaches the cache in ONE atomic write,
       // already on the file's timeline. Shifting it in place after whisper had written it would
       // leave a window cached on its own clock if anything stopped between the two writes.
-      const scratch = `${scratchBase}.${scratchToken()}.tmp`;
+      const meta: TranscriptJobMeta = {
+        kind: "transcript",
+        key: out,
+        once: out ?? scratchBase,
+        scratch: `${scratchBase}.${scratchToken()}.tmp`,
+        // A window's own audio starts where the window does (only the whole file starts at 0).
+        shiftMs: Math.floor(start * 1000),
+        wavs,
+      };
+      // -mc 0: no text carried from one 30 s window into the next. With it, six minutes of
+      // silence left whisper repeating "[BLANK_AUDIO]" straight through the speech after it
+      // (4h2): the file's whole transcript came back empty, and it answers every stretch of it.
+      const args = [
+        "-m",
+        model,
+        "-f",
+        wav,
+        "-ojf",
+        "-of",
+        meta.scratch,
+        "-np",
+        "-t",
+        whisperThreads(),
+        "-l",
+        lang,
+        "-mc",
+        "0",
+      ];
+      // In the app, whisper is a job of the app process: a crash of the page neither stops it nor
+      // loses its words, and the next page finishes it ({@link adoptTranscriptions}).
+      const sup = await jobSupervisor();
+      const id = `whisper-${scratchToken()}`;
+      const whisper = (): Promise<CommandResult> =>
+        sup
+          ? runAsJob(
+              sup,
+              { id, lane: id, program: "whisper-cli", args, meta: { ...meta } },
+              ctx.signal,
+            )
+          : ctx.runner.run("whisper-cli", args, ctx.signal);
       try {
-        // -mc 0: no text carried from one 30 s window into the next. With it, six minutes of
-        // silence left whisper repeating "[BLANK_AUDIO]" straight through the speech after it
-        // (4h2): the file's whole transcript came back empty, and it answers every stretch of it.
-        const whisper = () =>
-          ctx.runner.run(
-            "whisper-cli",
-            [
-              "-m",
-              model,
-              "-f",
-              wav,
-              "-ojf",
-              "-of",
-              scratch,
-              "-np",
-              "-t",
-              whisperThreads(),
-              "-l",
-              lang,
-              "-mc",
-              "0",
-            ],
-            ctx.signal,
-          );
         // A look's whisper runs at once, one look at a time; the indexer's took its turn already.
         const run = ctx.background ? await whisper() : await lookWhisper(whisper, ctx.signal);
         if (!run) throw new Error("transcription cancelled"); // stopped before its turn came
-        if (run.code !== 0 || !(await ctx.store.exists(`${scratch}.json`))) {
-          // Stop kills the sidecar, so the exit code describes the KILL, not the transcription:
-          // it surfaced as `whisper-cli failed (code=-1): cancelled`, which reads as a broken
-          // install rather than as the thing the user just asked for.
-          if (ctx.signal?.aborted) throw new Error("transcription cancelled");
-          if (run.code !== null && WINDOWS_LOAD_FAILURES.has(run.code))
-            throw new SpeechEngineUnavailableError(run.code);
-          throw new Error(
-            `whisper-cli failed (code=${run.code}): ${stderrExcerpt(run.stderr, 200)}`,
-          );
-        }
-        const data = JSON.parse(await ctx.store.readText(`${scratch}.json`)) as WhisperCppJson;
-        if (win.key !== "" && start > 0) shiftWhisperJson(data, Math.floor(start * 1000));
-        const parsed = parseWhisperCpp(data);
-        // Kept outside the project, so it is kept even when the project closed while whisper ran.
-        if (out) await (await ctx.store.appCache())?.put(TRANSCRIPTS, out, data);
-        return parsed;
+        return await finishWhisper(ctx.store, meta, run, ctx.signal);
       } finally {
-        await ctx.store.remove(`${scratch}.json`).catch(() => undefined);
+        // Its words are kept, or it failed: nothing is left for another page to finish.
+        await sup?.forget(id).catch(() => undefined);
       }
     });
   });
+}
+
+/** Where a run of whisper is read and its transcript kept: a project's store, or for a run adopted
+ *  after a crash of the page, the app's own filesystem (no project is needed). */
+interface ScratchIO {
+  exists(path: string): Promise<boolean>;
+  readText(path: string): Promise<string>;
+  remove(path: string): Promise<void>;
+  appCache(): Promise<AppCache | null>;
+}
+
+/** A run of whisper, as whoever finishes it needs it: the page that started it, or the next one. */
+interface TranscriptJobMeta {
+  kind: "transcript";
+  /** The app-cache key its transcript is kept under; null when the file has no identity. */
+  key: string | null;
+  /** What another request for the same transcript joins while it runs. */
+  once: string;
+  /** whisper's output base (`-of`): it writes `<scratch>.json`. */
+  scratch: string;
+  /** Where its clock starts on the file's, for a window cut out on its own. */
+  shiftMs: number;
+  /** The 16 kHz extracts it reads. */
+  wavs: string[];
+}
+
+/** A run of whisper made into its transcript and kept: the one finish, for the page that ran it
+ *  and for a page that adopted it after a crash. Its JSON is read, moved onto the file's timeline
+ *  and put in the app cache; the scratch output is removed, whatever happens. */
+async function finishWhisper(
+  io: ScratchIO,
+  meta: TranscriptJobMeta,
+  run: CommandResult,
+  signal?: AbortSignal,
+): Promise<ParsedTranscript> {
+  const json = `${meta.scratch}.json`;
+  try {
+    if (run.code !== 0 || !(await io.exists(json))) {
+      // Stop kills the sidecar, so the exit code describes the KILL, not the transcription:
+      // it surfaced as `whisper-cli failed (code=-1): cancelled`, which reads as a broken
+      // install rather than as the thing the user just asked for.
+      if (signal?.aborted || run.stderr === "cancelled") throw new Error("transcription cancelled");
+      if (run.code !== null && WINDOWS_LOAD_FAILURES.has(run.code))
+        throw new SpeechEngineUnavailableError(run.code);
+      throw new Error(`whisper-cli failed (code=${run.code}): ${stderrExcerpt(run.stderr, 200)}`);
+    }
+    const data = JSON.parse(await io.readText(json)) as WhisperCppJson;
+    shiftWhisperJson(data, meta.shiftMs);
+    const parsed = parseWhisperCpp(data);
+    // Kept outside the project, so it is kept even when the project closed while whisper ran.
+    if (meta.key) await (await io.appCache())?.put(TRANSCRIPTS, meta.key, data);
+    return parsed;
+  } finally {
+    await io.remove(json).catch(() => undefined);
+  }
+}
+
+/** The transcription a job of the app process is running, or null for any other job. Its meta is
+ *  what this app's page wrote when it started the job: the app process outlives a page, never a
+ *  version of the app. */
+function transcriptMeta(v: JobView): TranscriptJobMeta | null {
+  return v.meta.kind === "transcript" ? (v.meta as unknown as TranscriptJobMeta) : null;
+}
+
+async function desktopScratchIO(): Promise<ScratchIO | null> {
+  try {
+    const [{ TauriFs }, { appCacheFor }] = await Promise.all([
+      import("./tauri"),
+      import("./appCache"),
+    ]);
+    const fs = new TauriFs();
+    return {
+      exists: (p) => fs.exists(p),
+      readText: (p) => fs.readTextFile(p),
+      remove: (p) => fs.remove(p),
+      appCache: () => appCacheFor(fs),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** This page's taking over of what a crashed page left running, once begun. */
+let adoption: Promise<number> | null = null;
+
+/** After a crash of the page (4i): the transcriptions the app process still runs, or ran while no
+ *  page was there, are finished exactly as the page that started them would have: their words kept
+ *  in the app cache, their scratch and audio removed, the job let go. One still running is whisper
+ *  at work, so it holds the indexer's whisper turn, and a request for the same transcript waits for
+ *  it instead of starting another.
+ *
+ *  Once per page, and before this page runs any whisper itself: every later call answers how many
+ *  the first took over. Never fails; a page that cannot list the app's jobs transcribes as before. */
+export function adoptTranscriptions(io?: ScratchIO): Promise<number> {
+  adoption ??= adoptOrphans(io).catch(() => 0);
+  return adoption;
+}
+
+async function adoptOrphans(io?: ScratchIO): Promise<number> {
+  const sup = await jobSupervisor();
+  if (!sup) return 0;
+  const scratchIo = io ?? (await desktopScratchIO());
+  if (!scratchIo) return 0;
+  let adopted = 0;
+  for (const v of await sup.list()) {
+    const m = transcriptMeta(v);
+    if (!m) continue;
+    adopted++;
+    // Held until its words are kept: while it runs, it is the whisper at work.
+    const turn = adoptTurn("whisper");
+    const finished = holdingWavs(scratchIo, m.wavs, async () => {
+      const ended = await whenJobEnds(sup, v.id);
+      if (!ended) throw new Error("the app process no longer has this transcription");
+      return finishWhisper(scratchIo, m, jobResult(ended));
+    }).finally(async () => {
+      turn();
+      await sup.forget(v.id).catch(() => undefined);
+    });
+    // A failure reaches whoever joins it; nobody else is waiting on it.
+    finished.catch(() => undefined);
+    joinable(m.once, finished);
+  }
+  return adopted;
 }
 
 export interface EnsuredTranscript {

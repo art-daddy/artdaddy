@@ -13,8 +13,11 @@ let exportsBusy = false;
 /** Looks whose whisper is running or waiting for the one before it. */
 let looks = 0;
 let lookTail: Promise<unknown> = Promise.resolve();
-const running: Record<BackgroundKind, boolean> = { whisper: false, loudness: false };
+/** Background jobs of each kind holding a turn (more than one only after {@link adoptTurn}). */
+const running: Record<BackgroundKind, number> = { whisper: 0, loudness: 0 };
 let waiters: Array<() => void> = [];
+/** Bumped by the tests' reset: a turn or look taken before it gives nothing back after it. */
+let generation = 0;
 
 function wake(): void {
   const now = waiters;
@@ -36,6 +39,7 @@ export async function lookWhisper<T>(
   signal?: AbortSignal,
 ): Promise<T | null> {
   looks++;
+  const gen = generation;
   const before = lookTail;
   let done!: () => void;
   lookTail = new Promise<void>((r) => (done = r));
@@ -47,8 +51,10 @@ export async function lookWhisper<T>(
   } finally {
     // The next look starts once this one is over; a stopped one never ran, so it waits for nothing.
     before.finally(done).catch(() => undefined);
-    looks--;
-    if (looks === 0) wake();
+    if (gen === generation) {
+      looks--;
+      if (looks === 0) wake();
+    }
   }
 }
 
@@ -68,16 +74,7 @@ export async function backgroundTurn(
 ): Promise<(() => void) | null> {
   for (;;) {
     if (signal?.aborted) return null;
-    if (!exportsBusy && looks === 0 && !running[kind]) {
-      running[kind] = true;
-      let released = false;
-      return () => {
-        if (released) return;
-        released = true;
-        running[kind] = false;
-        wake();
-      };
-    }
+    if (!exportsBusy && looks === 0 && running[kind] === 0) return hold(kind);
     await new Promise<void>((resolve) => {
       const onAbort = (): void => resolve();
       signal?.addEventListener("abort", onAbort, { once: true });
@@ -89,12 +86,31 @@ export async function backgroundTurn(
   }
 }
 
+/** Take a turn now, whatever holds one: for a job already running that this page did not start
+ *  (adopted after a crash of the page). The next job of its kind waits for it like any other. */
+export function adoptTurn(kind: BackgroundKind): () => void {
+  return hold(kind);
+}
+
+function hold(kind: BackgroundKind): () => void {
+  running[kind]++;
+  const gen = generation;
+  let released = false;
+  return () => {
+    if (released || gen !== generation) return;
+    released = true;
+    running[kind]--;
+    wake();
+  };
+}
+
 /** Tests only. */
 export function __resetWorkGate(): void {
+  generation++;
   exportsBusy = false;
   looks = 0;
   lookTail = Promise.resolve();
-  running.whisper = false;
-  running.loudness = false;
+  running.whisper = 0;
+  running.loudness = 0;
   wake();
 }

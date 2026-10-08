@@ -19,7 +19,13 @@
 import { openProjectJobs } from "../tools/genJobs";
 import type { ProjectStoreAccess } from "../tools/store";
 import type { ClientToolContext } from "../tools/context";
-import { jobResult, jobSupervisor, type JobSupervisor, type JobView } from "../tools/jobSupervisor";
+import {
+  jobResult,
+  jobSupervisor,
+  whenJobEnds,
+  type JobSupervisor,
+  type JobView,
+} from "../tools/jobSupervisor";
 import type { MutationOrigin } from "../project/MutationGate";
 import { notifyJobSettled, type SettledJob } from "../store/jobNotes";
 import { useExportJob } from "../store/exportJob";
@@ -645,31 +651,6 @@ function exportMeta(v: JobView): ExportJobMeta | null {
   if (v.lane !== "export" || m?.kind !== "export") return null;
   if (!m.projectDir || !m.destPath || !m.stagePath || !m.filename || !m.plan) return null;
   return m as ExportJobMeta;
-}
-
-/** Resolve with the job once it has ended. */
-function whenJobEnds(sup: JobSupervisor, id: string): Promise<JobView | null> {
-  return new Promise((resolve) => {
-    let done = false;
-    const end = (v: JobView | null) => {
-      if (done) return;
-      done = true;
-      stop();
-      resolve(v);
-    };
-    const stop = sup.subscribe((v) => {
-      if (v.id === id && v.state === "exited") end(v);
-    });
-    // It may have ended before this page was listening.
-    void sup.list().then(
-      (all) => {
-        const now = all.find((v) => v.id === id);
-        if (!now) end(null);
-        else if (now.state === "exited") end(now);
-      },
-      () => end(null),
-    );
-  });
 }
 
 /** Follow a running export's progress into the export dialog's job, the way the page that started

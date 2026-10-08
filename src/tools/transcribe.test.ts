@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CommandRunner } from "./command";
 import { _resetAppCaches } from "./appCache";
 import type { ClientToolContext } from "./context";
+import { __resetJobSupervisor, __setJobSupervisor } from "./jobSupervisor";
+import { FakeJobs } from "../test/fakeJobs";
 import { shortHash as shortHashOf } from "./media";
 import {
   ProjectStoreAccess,
@@ -1433,6 +1435,251 @@ describe("whisper's scratch, outside every project (4i)", () => {
     await french;
     expect(argsOf(g.runner, "whisper-cli")).toHaveLength(1);
     expect(under(fs, WORK)).toEqual([]);
+  });
+});
+
+// 4i part 3: in the app, whisper is a job of the app process, so a crash of the page neither stops
+// it nor loses its words. The next page finishes it, and nothing asks for it twice.
+describe("whisper as a job of the app process (4i)", () => {
+  /** Each test's own file: a page that "dies" here leaves its run joinable in this module for good,
+   *  so a file shared between tests would join it and never run. */
+  let SRC = "";
+  let files = 0;
+  const under = (fs: MockFs, dir: string): string[] =>
+    [...fs.files.keys(), ...fs.bytes.keys()].filter((p) => p.startsWith(`${dir}/`));
+  const words = (t: { words: Array<{ word: string }> }): string[] => t.words.map((w) => w.word);
+  async function until(pred: () => boolean): Promise<void> {
+    for (let i = 0; i < 500 && !pred(); i++) await new Promise((r) => setTimeout(r, 1));
+    expect(pred()).toBe(true);
+  }
+  /** The process writes its transcript and exits (or fails without one). */
+  async function finish(fs: MockFs, jobs: FakeJobs, id: string, code = 0): Promise<void> {
+    const spec = jobs.submitted.find((s) => s.id === id)!;
+    if (code === 0)
+      await fs.writeTextFile(`${spec.args[spec.args.indexOf("-of") + 1]}.json`, WHISPER_JSON);
+    jobs.exit(id, code, code === 0 ? "" : "whisper boom");
+  }
+  function disk(): MockFs {
+    _resetAppCaches();
+    SRC = `C:/media/adopt-${++files}.mp4`;
+    const fs = new MockFs();
+    fs.putModel();
+    fs.touch(SRC);
+    return fs;
+  }
+  /** The page after a crash: every module fresh, the app process (and its jobs) the same. */
+  async function nextPage(fs: MockFs, jobs: FakeJobs) {
+    jobs.pageDied();
+    vi.resetModules();
+    const [transcribe, supervisor, gate, store, cache] = await Promise.all([
+      import("./transcribe"),
+      import("./jobSupervisor"),
+      import("./workGate"),
+      import("./store"),
+      import("./appCache"),
+    ]);
+    supervisor.__setJobSupervisor(jobs);
+    const ctx = { store: new store.ProjectStoreAccess(DIR, fs), runner: transcribeRunner(fs) };
+    const io = {
+      exists: (p: string) => fs.exists(p),
+      readText: (p: string) => fs.readTextFile(p),
+      remove: (p: string) => fs.remove(p),
+      appCache: () => cache.appCacheFor(fs),
+    };
+    return { transcribe, gate, ctx, io };
+  }
+
+  afterEach(() => __resetJobSupervisor());
+
+  it("runs whisper as a job of the app process, keeps its words, and lets the job go", async () => {
+    const fs = disk();
+    const jobs = new FakeJobs();
+    jobs.onStart = (spec) => void finish(fs, jobs, spec.id);
+    __setJobSupervisor(jobs);
+    const runner = transcribeRunner(fs);
+    const t = await runWhisper(ctxWith(runner, fs), SRC);
+    expect(words(t)).toEqual(["Hello", "world", "Bye"]);
+    const whisperInPage = (runner.run as Any).mock.calls.filter(
+      (c: Any[]) => c[0] === "whisper-cli",
+    );
+    expect(whisperInPage).toHaveLength(0);
+    expect(jobs.submitted.map((s) => s.program)).toEqual(["whisper-cli"]);
+    expect(jobs.submitted[0].meta).toMatchObject({
+      kind: "transcript",
+      key: expect.stringMatching(/^whisper:v2:/),
+    });
+    expect(jobs.forgotten).toEqual([jobs.submitted[0].id]);
+    expect(under(fs, WORK)).toEqual([]);
+    expect(await peekTranscript(ctxWith(runner, fs), SRC)).not.toBeNull();
+  });
+
+  it("kills the job on Stop and answers cancelled", async () => {
+    const fs = disk();
+    const jobs = new FakeJobs();
+    __setJobSupervisor(jobs);
+    const stop = new AbortController();
+    const run = runWhisper({ ...ctxWith(transcribeRunner(fs), fs), signal: stop.signal }, SRC);
+    await until(() => jobs.started.length === 1);
+    stop.abort();
+    await expect(run).rejects.toThrow(/transcription cancelled/);
+    expect(jobs.killed).toEqual(jobs.started);
+    expect(jobs.forgotten).toEqual(jobs.started);
+    expect(under(fs, WORK)).toEqual([]);
+  });
+
+  it("keeps the words of a transcription the page crashed during, and asks for nothing twice", async () => {
+    const fs = disk();
+    const jobs = new FakeJobs();
+    __setJobSupervisor(jobs);
+    void runWhisper(ctxWith(transcribeRunner(fs), fs), SRC).catch(() => undefined);
+    await until(() => jobs.started.length === 1);
+    const [id] = jobs.started;
+    const next = await nextPage(fs, jobs);
+    expect(await next.transcribe.adoptTranscriptions(next.io)).toBe(1);
+    // whisper is still at work: the indexer's next whisper waits for it...
+    let turn: unknown = "waiting";
+    void next.gate.backgroundTurn("whisper").then((r) => (turn = r));
+    // ...and a request for the same transcript waits for it too, starting nothing.
+    const joined = next.transcribe.runWhisper(next.ctx, SRC);
+    for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 1));
+    expect([turn, jobs.submitted.length]).toEqual(["waiting", 1]);
+    await finish(fs, jobs, id);
+    expect(words(await joined)).toEqual(["Hello", "world", "Bye"]);
+    await until(() => jobs.forgotten.includes(id) && typeof turn === "function");
+    expect(under(fs, WORK)).toEqual([]);
+    expect(await next.transcribe.peekTranscript(next.ctx, SRC)).not.toBeNull();
+  });
+
+  it("keeps the words of one that ended while no page was there", async () => {
+    const fs = disk();
+    const jobs = new FakeJobs();
+    __setJobSupervisor(jobs);
+    void runWhisper(ctxWith(transcribeRunner(fs), fs), SRC).catch(() => undefined);
+    await until(() => jobs.started.length === 1);
+    const [id] = jobs.started;
+    jobs.pageDied();
+    await finish(fs, jobs, id);
+    const next = await nextPage(fs, jobs);
+    expect(await next.transcribe.adoptTranscriptions(next.io)).toBe(1);
+    await until(() => jobs.forgotten.includes(id));
+    expect(words((await next.transcribe.peekTranscript(next.ctx, SRC))!)).toEqual([
+      "Hello",
+      "world",
+      "Bye",
+    ]);
+    expect(under(fs, WORK)).toEqual([]);
+    // Asked again, it is answered from what was kept: whisper does not run again.
+    await next.transcribe.runWhisper(next.ctx, SRC);
+    expect(jobs.submitted).toHaveLength(1);
+  });
+
+  it("lets go of one that failed, keeps nothing of it, and a later request runs whisper again", async () => {
+    const fs = disk();
+    const jobs = new FakeJobs();
+    __setJobSupervisor(jobs);
+    void runWhisper(ctxWith(transcribeRunner(fs), fs), SRC).catch(() => undefined);
+    await until(() => jobs.started.length === 1);
+    const [id] = jobs.started;
+    const next = await nextPage(fs, jobs);
+    await next.transcribe.adoptTranscriptions(next.io);
+    await finish(fs, jobs, id, 1);
+    await until(() => jobs.forgotten.includes(id));
+    expect(await next.transcribe.peekTranscript(next.ctx, SRC)).toBeNull();
+    expect(under(fs, WORK)).toEqual([]);
+    jobs.onStart = (spec) => void finish(fs, jobs, spec.id);
+    expect(words(await next.transcribe.runWhisper(next.ctx, SRC))).toEqual([
+      "Hello",
+      "world",
+      "Bye",
+    ]);
+    expect(jobs.submitted).toHaveLength(2);
+  });
+
+  it("takes over the transcriptions, and leaves every other job alone", async () => {
+    const fs = disk();
+    const jobs = new FakeJobs();
+    __setJobSupervisor(jobs);
+    await jobs.submit({
+      id: "e1",
+      lane: "export",
+      program: "ffmpeg",
+      args: [],
+      meta: { kind: "export" },
+    });
+    void runWhisper(ctxWith(transcribeRunner(fs), fs), SRC).catch(() => undefined);
+    await until(() => jobs.started.length === 2);
+    const id = jobs.started[1];
+    const next = await nextPage(fs, jobs);
+    expect(await next.transcribe.adoptTranscriptions(next.io)).toBe(1);
+    await finish(fs, jobs, id);
+    await until(() => jobs.forgotten.includes(id));
+    expect([jobs.forgotten, jobs.killed, jobs.view("e1")?.state]).toEqual([[id], [], "running"]);
+    expect(await next.transcribe.peekTranscript(next.ctx, SRC)).not.toBeNull();
+  });
+
+  // A window is cut out and transcribed on its own, so its words come back on the window's clock and
+  // are moved onto the file's before they are kept: by whichever page finishes it.
+  it("keeps a window's words on the file's clock, and removes its audio", async () => {
+    const fs = disk();
+    const jobs = new FakeJobs();
+    __setJobSupervisor(jobs);
+    const window = { start: 60, end: 90 };
+    void runWhisper(ctxWith(transcribeRunner(fs), fs), SRC, "small", undefined, window).catch(
+      () => undefined,
+    );
+    await until(() => jobs.started.length === 1);
+    const [id] = jobs.started;
+    expect(under(fs, WORK).filter((p) => p.endsWith(".wav"))).toHaveLength(1);
+    const next = await nextPage(fs, jobs);
+    expect(await next.transcribe.adoptTranscriptions(next.io)).toBe(1);
+    await finish(fs, jobs, id);
+    await until(() => jobs.forgotten.includes(id));
+    const t = await next.transcribe.peekTranscript(next.ctx, SRC, "small", undefined, window);
+    expect(t?.words.map((w) => [w.word, w.start_seconds])).toEqual([
+      ["Hello", 60],
+      ["world", 60.6],
+      ["Bye", 61.2],
+    ]);
+    expect(under(fs, WORK)).toEqual([]);
+  });
+
+  // The opposite ordering: the next page's first request comes before anything asked it to take
+  // over (main.tsx's call is a dynamic import, still loading).
+  it("joins the transcription still at work when asked before the page has taken over", async () => {
+    const fs = disk();
+    const jobs = new FakeJobs();
+    __setJobSupervisor(jobs);
+    void runWhisper(ctxWith(transcribeRunner(fs), fs), SRC).catch(() => undefined);
+    await until(() => jobs.started.length === 1);
+    const [id] = jobs.started;
+    const next = await nextPage(fs, jobs);
+    const joined = next.transcribe.runWhisper(next.ctx, SRC);
+    for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 1));
+    expect(jobs.submitted).toHaveLength(1);
+    // The page's own call comes now, and takes over nothing a second time.
+    await next.transcribe.adoptTranscriptions(next.io);
+    await finish(fs, jobs, id);
+    expect(words(await joined)).toEqual(["Hello", "world", "Bye"]);
+    await until(() => jobs.forgotten.includes(id));
+    expect([jobs.submitted.length, jobs.forgotten]).toEqual([1, [id]]);
+    expect(under(fs, WORK)).toEqual([]);
+  });
+
+  it("still transcribes on a page that could not list the app's jobs", async () => {
+    const fs = disk();
+    const jobs = new FakeJobs();
+    jobs.onStart = (spec) => void finish(fs, jobs, spec.id);
+    const next = await nextPage(fs, jobs);
+    const list = jobs.list.bind(jobs);
+    let listed = 0;
+    jobs.list = () => (++listed === 1 ? Promise.reject(new Error("ipc down")) : list());
+    expect(await next.transcribe.adoptTranscriptions(next.io)).toBe(0);
+    expect(words(await next.transcribe.runWhisper(next.ctx, SRC))).toEqual([
+      "Hello",
+      "world",
+      "Bye",
+    ]);
+    expect(jobs.submitted).toHaveLength(1);
   });
 });
 

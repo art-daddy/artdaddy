@@ -11,7 +11,6 @@ import { agentToolContext } from "../tools/agentStore";
 import type { CommandResult, CommandRunner } from "../tools/command";
 import type { ClientToolContext } from "../tools/context";
 import { __resetProjectJobs } from "../tools/genJobs";
-import { ffmpegPolicy } from "../tools/ffmpegPolicy";
 import { __resetJobSupervisor, __setJobSupervisor, supervisedRunner } from "../tools/jobSupervisor";
 import { joinPath, ProjectStoreAccess } from "../tools/store";
 import { ensureTimeline } from "./engine";
@@ -290,15 +289,20 @@ describe("the runner that hands ffmpeg to the app process", () => {
     jobs = new FakeJobs();
   });
 
-  it("applies the app's ffmpeg rules, as the page's runner does", async () => {
-    const r = supervisedRunner(base(), jobs, { id: "j1", lane: "export", meta: {} });
+  // The app's ffmpeg rules are applied where the job is started (tauri.ts launchSpec; its test walks
+  // every program a job may run), so the export hands over its command as it built it.
+  it("hands its first ffmpeg to the app as a job, and runs everything else itself", async () => {
+    const b = base();
+    const r = supervisedRunner(b, jobs, { id: "j1", lane: "export", meta: {} });
     const args = ["-i", "a.wav", "-c:a", "aac", "-ar", "16000", "out.partial"];
     const done = r.run("ffmpeg", args);
     await flush();
-    expect(jobs.submitted[0].args).toEqual(ffmpegPolicy("ffmpeg", args));
-    expect(jobs.submitted[0].args).not.toContain("16000"); // AAC is always encoded at 48 kHz
+    expect(jobs.submitted.map((s) => [s.program, s.args])).toEqual([["ffmpeg", args]]);
     jobs.exit("j1", 0);
     expect((await done).code).toBe(0);
+    await r.run("ffprobe", []);
+    await r.run("ffmpeg", []);
+    expect([jobs.submitted.length, b.ran]).toEqual([1, ["ffprobe", "ffmpeg"]]);
   });
 
   it("forwards progress, carries its scratch dir with the job, and reports how it ended", async () => {

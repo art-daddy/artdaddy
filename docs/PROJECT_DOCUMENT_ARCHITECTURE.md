@@ -609,7 +609,9 @@ Default policy is `cancelOnClose`.
   measurement IN PROGRESS at close run to their end, as Palmier's indexer does; their queue is
   dropped. They may outlive the document only because they write nothing into it: the result goes
   to the app-wide cache and whisper's scratch to the app's work folder. Proxies and posters write
-  into the project, so they are still cancelled.
+  into the project, so they are still cancelled. whisper itself runs as a job of the app process
+  (the export's supervisor, `jobs.rs`), so a crash of the page neither stops it nor loses its
+  words: the next page finishes it, and a request for the same transcript joins it (4i part 3).
 - `finishBeforeClose`: short final package commits already admitted. This must not be used for
   unbounded network/model/render work.
 - `resumable`: cloud generation with a durable placeholder/job ID. Closing detaches local

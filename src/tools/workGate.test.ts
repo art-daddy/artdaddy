@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   __resetWorkGate,
+  adoptTurn,
   backgroundTurn,
   lookWhisper,
   setExportsBusy,
@@ -37,6 +38,38 @@ function look(signal?: AbortSignal) {
 }
 
 describe("the work gate (4i)", () => {
+  // After a crash of the page, a job the dead page started is still at work in the app process: the
+  // page that takes it over counts it, whatever else holds a turn, and the next of its kind waits.
+  it("counts a job already at work at once, and the next of its kind waits for it", async () => {
+    setExportsBusy(true); // nothing new may start...
+    const adopted = adoptTurn("whisper"); // ...but a job already running is counted all the same
+    setExportsBusy(false);
+    const next = ask("whisper");
+    const other = ask("loudness");
+    await tick();
+    expect([next.settled(), !!other.got()]).toEqual([false, true]);
+    adopted();
+    await tick();
+    expect(!!next.got()).toBe(true);
+  });
+
+  it("forgets at a reset every turn and look taken before it (tests start clean)", async () => {
+    const old = ask("whisper");
+    await tick();
+    const oldLook = look();
+    await tick();
+    __resetWorkGate();
+    const held = ask("whisper");
+    await tick();
+    expect(!!held.got()).toBe(true);
+    old.got()!(); // a release from before the reset frees nothing now
+    oldLook.finish();
+    await oldLook.result; // ...nor does the end of a look from before it
+    const next = ask("whisper");
+    const loud = ask("loudness");
+    await tick();
+    expect([next.settled(), !!loud.got()]).toEqual([false, true]);
+  });
   it("starts no background job while an export is queued or running, and starts it once none is", async () => {
     setExportsBusy(true);
     const w = ask("whisper");

@@ -1,6 +1,7 @@
-// The app's rules for an ffmpeg command, applied where the command is SPAWNED: inside
-// TauriCommandRunner.run, the one door every production ffmpeg passes (the e2e runner applies the
-// same function). No producer has to remember them, and the agent's run_ffmpeg gets them too.
+// The app's rules for an ffmpeg command, applied where the command is SPAWNED: by tauri.ts
+// `launchSpec`, which both doors a production process is started by apply (the page's runner and a
+// job of the app process); the e2e runner applies the same function. No producer has to remember
+// them, and the agent's run_ffmpeg gets them too.
 //
 // AAC at 48 kHz. The shipped ffmpeg's AAC encoder stalls forever on 16 kHz audio that follows a
 // few seconds of digital silence (N-126655: 5 s, 7 s and 120 s of silence hang; 48 kHz never

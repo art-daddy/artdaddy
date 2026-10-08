@@ -1,20 +1,23 @@
-// The app's long jobs, owned by the app process instead of the page (3h part 7, UJ-022).
+// The app's long jobs, owned by the app process instead of the page (3h part 7, UJ-022; 4i).
 //
 // The page builds an export's ffmpeg command and, once it has ended, commits the file it wrote:
 // it checks it, renames it into place and updates the project. In between, the PROCESS and the
 // ORDER exports run in belong here, so a crash of the page neither kills a render nor loses its
 // result: the next page lists the jobs, commits the ones that ended while no page was there and
-// follows the ones still running. Rust never writes project files. It runs the bundled ffmpeg,
-// one job per lane at a time, keeps each job's exit code and the tail of its output until a page
-// has committed it, and kills jobs on Cancel and when the app exits.
+// follows the ones still running. Whisper runs here the same way (4i): a crash of the page leaves
+// the transcription running, and the next page keeps its words. Rust never writes project files.
+// It runs the bundled ffmpeg and whisper-cli, one job per lane at a time, keeps each job's exit
+// code and the tail of its output until a page has committed it, and kills jobs on Cancel and when
+// the app exits.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The programs a job may run, as (logical name, bundled sidecar file). A command the page can
-/// call must not become a way to start any process: only the sidecar the export path needs.
-pub const SIDECARS: &[(&str, &str)] = &[("ffmpeg", "artdaddy-ffmpeg")];
+/// call must not become a way to start any process: only the sidecars the long jobs need.
+pub const SIDECARS: &[(&str, &str)] =
+  &[("ffmpeg", "artdaddy-ffmpeg"), ("whisper-cli", "artdaddy-whisper-cli")];
 
 /// Bytes of each output stream kept per job: ffmpeg's last error lines and the last progress
 /// block, bounded so a chatty process cannot grow memory.
@@ -744,13 +747,29 @@ mod tests {
   }
 
   #[test]
-  fn only_the_bundled_ffmpeg_can_be_run() {
+  fn only_the_bundled_sidecars_can_be_run() {
     let (s, fake) = sup();
-    for program in ["cmd", "powershell", "/bin/sh", "artdaddy-ffmpeg", "ffprobe", ""] {
+    for program in [
+      "cmd",
+      "powershell",
+      "/bin/sh",
+      "artdaddy-ffmpeg",
+      "artdaddy-whisper-cli",
+      "ffprobe",
+      "yt-dlp",
+      "whisper",
+      "",
+    ] {
       assert!(s.submit(JobSpec { program: program.into(), ..spec(program) }).is_err(), "{program}");
     }
     assert!(fake.spawned_ids().is_empty());
     assert!(s.list().is_empty());
+    // ...and each of those it names, by its logical name.
+    for (program, _) in SIDECARS {
+      s.submit(JobSpec { program: (*program).into(), lane: (*program).into(), ..spec(program) })
+        .unwrap();
+    }
+    assert_eq!(fake.spawned_ids(), ["ffmpeg", "whisper-cli"]);
   }
 
   #[test]

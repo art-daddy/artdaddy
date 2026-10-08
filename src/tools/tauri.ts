@@ -63,9 +63,7 @@ export class TauriCommandRunner implements CommandRunner {
   ): Promise<CommandResult> {
     if (signal?.aborted) return { code: -1, stdout: "", stderr: "cancelled" };
     try {
-      // Every production ffmpeg passes here, so the app's ffmpeg rules are applied here and
-      // nowhere else (ffmpegPolicy.ts: AAC is always encoded at 48 kHz).
-      const spec = await this.build(program, ffmpegPolicy(program, args), cwd);
+      const spec = await this.build(program, args, cwd);
       return await runInApp(spec, program, signal, onStdout);
     } catch (e) {
       // Never throw: surface a spawn failure as a structured result so the tool
@@ -82,24 +80,38 @@ export class TauriCommandRunner implements CommandRunner {
       return { program: BROWSER_BIN, args: [script, ...args], cwd: null };
     }
     if (!resolveSidecar(program).sidecar) throw new Error(`'${program}' is not a bundled program`);
-    const name = packagedSidecarName(program);
-    if (program === "whisper-cli") {
-      // The Windows whisper.cpp sidecar is a DYNAMIC build: it needs its runtime
-      // DLLs (ggml*.dll, whisper.dll) at load time. They ship as a bundled
-      // resource (resources/whisper); run whisper-cli WITH THAT DIR AS ITS cwd so
-      // Windows' DLL search resolves them. The model / wav / -of args are all
-      // absolute, so the cwd doesn't affect whisper's file I/O.
-      //
-      // Getting this wrong does not surface as a tool error: the process never
-      // starts (STATUS_DLL_NOT_FOUND, 0xC0000135) and Windows shows a modal
-      // "ggml.dll was not found" dialog instead.
-      const dllDir = isWindows()
-        ? stripVerbatim(await resolveResource("resources/whisper").catch(() => ""))
-        : "";
-      return { program: name, args, cwd: dllDir && (await dllDirUsable(dllDir)) ? dllDir : null };
-    }
-    return { program: name, args, cwd: cwd ?? null };
+    return { program: packagedSidecarName(program), ...(await launchSpec(program, args, cwd)) };
   }
+}
+
+/** The app's rules for starting `program`, applied by both doors a process is started by: this
+ *  runner, and a job of the app process (jobSupervisor.ts). Here and nowhere else, so no producer
+ *  has to remember them: ffmpeg's (ffmpegPolicy.ts: AAC is always encoded at 48 kHz), and
+ *  whisper-cli's working directory. */
+export async function launchSpec(
+  program: string,
+  args: string[],
+  cwd?: string | null,
+): Promise<{ args: string[]; cwd: string | null }> {
+  return { args: ffmpegPolicy(program, args), cwd: await sidecarCwd(program, cwd) };
+}
+
+/** The working directory `program` runs in: the caller's, except whisper-cli's.
+ *
+ *  The Windows whisper.cpp sidecar is a DYNAMIC build: it needs its runtime DLLs (ggml*.dll,
+ *  whisper.dll) at load time. They ship as a bundled resource (resources/whisper); run whisper-cli
+ *  WITH THAT DIR AS ITS cwd so Windows' DLL search resolves them. The model / wav / -of args are all
+ *  absolute, so the cwd doesn't affect whisper's file I/O.
+ *
+ *  Getting this wrong does not surface as a tool error: the process never starts
+ *  (STATUS_DLL_NOT_FOUND, 0xC0000135) and Windows shows a modal "ggml.dll was not found" dialog
+ *  instead. */
+async function sidecarCwd(program: string, cwd?: string | null): Promise<string | null> {
+  if (program !== "whisper-cli") return cwd ?? null;
+  const dllDir = isWindows()
+    ? stripVerbatim(await resolveResource("resources/whisper").catch(() => ""))
+    : "";
+  return dllDir && (await dllDirUsable(dllDir)) ? dllDir : null;
 }
 
 /** Windows verbatim paths (`\\?\C:\…`) are rejected as a working directory, and the fs

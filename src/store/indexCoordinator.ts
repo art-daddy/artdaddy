@@ -85,6 +85,7 @@ interface IndexModules {
   ensureTranscript: typeof import("../tools/transcribe").ensureTranscript;
   runWhisper: typeof import("../tools/transcribe").runWhisper;
   isSpeechEngineUnavailable: typeof import("../tools/transcribe").isSpeechEngineUnavailable;
+  adoptTranscriptions: typeof import("../tools/transcribe").adoptTranscriptions;
   measureLoudness: typeof import("../tools/loudness").measureLoudness;
   sourceHasAudio: typeof import("../timeline/placement").sourceHasAudio;
   clearSourceUrlCache: typeof import("../preview/resolve").clearSourceUrlCache;
@@ -354,6 +355,7 @@ export class IndexCoordinator {
           ensureTranscript: transcribe.ensureTranscript,
           runWhisper: transcribe.runWhisper,
           isSpeechEngineUnavailable: transcribe.isSpeechEngineUnavailable,
+          adoptTranscriptions: transcribe.adoptTranscriptions,
           measureLoudness: loudness.measureLoudness,
           sourceHasAudio: placement.sourceHasAudio,
           clearSourceUrlCache: resolve.clearSourceUrlCache,
@@ -443,6 +445,9 @@ export class IndexCoordinator {
       background: true,
     } as ClientToolContext;
     try {
+      // A crashed page's transcription still at work holds the whisper turn, but only once this page
+      // has taken it over: before that, no turn here would wait for it (4i).
+      await ready.mods.adoptTranscriptions();
       for (let job = this.txQ.shift(); job !== undefined && !this.disposed && !this.engineDown;) {
         this.txCurrent = txKey(job);
         // One background whisper in the app at a time, and none starts while an export is queued

@@ -79,6 +79,7 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: (c: string, a: unknown) => invoke(c, a),
   Channel: FakeChannel,
 }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: async () => () => undefined }));
 // Only `resolveSidecar` is stubbed. BROWSER_BIN keeps its REAL value, because tauri.ts
 // builds the binary and resource paths from it — a stand-in here would let those drift
 // from what actually ships and no test would notice.
@@ -89,6 +90,7 @@ vi.mock("./sidecar", async () => ({
 
 const { TauriCommandRunner, TauriFs, makeTauriContext } = await import("./tauri");
 const { BROWSER_BIN, packagedSidecarName } = await import("./sidecar");
+const { JOB_PROGRAMS, jobSupervisor, __resetJobSupervisor } = await import("./jobSupervisor");
 
 /** Let the runner's awaits (resource lookups, the invoke) run. */
 const settle = async (): Promise<void> => {
@@ -264,6 +266,50 @@ describe("TauriCommandRunner — sidecar wiring", () => {
     const r = await p;
     expect(r.code).toBe(-1);
     expect(r.stderr).toMatch(/spawn failed: 'artdaddy-ffmpeg' is not a bundled program/);
+  });
+});
+
+// A job of the app process (jobSupervisor.ts) is the same program started by another door: whisper-cli
+// as a job without its DLL folder never loads on Windows, and nothing says why (4i). Every program a
+// job may run, in every working directory a caller may ask for, on both platforms.
+describe("the app's jobs start each program as the runner does", () => {
+  const page = window as unknown as Record<string, unknown>;
+  beforeEach(() => {
+    page.__TAURI_INTERNALS__ = {};
+    __resetJobSupervisor();
+  });
+  afterEach(() => {
+    delete page.__TAURI_INTERNALS__;
+    __resetJobSupervisor();
+  });
+
+  it.each([
+    ["Windows", asWindows],
+    ["mac", asMac],
+  ])("with the same arguments, in the same working directory, on %s", async (os, platform) => {
+    platform();
+    const sup = (await jobSupervisor())!;
+    expect(sup).not.toBeNull();
+    // A 16 kHz AAC encode, which ffmpeg's rule changes, handed to every program alike.
+    const args = ["-i", "/in/a.wav", "-c:a", "aac", "-ar", "16000", "/out/a.m4a"];
+    const cwds: Array<string | null> = [];
+    for (const program of JOB_PROGRAMS) {
+      for (const cwd of [undefined, "/scratch"]) {
+        runs.length = 0;
+        await new TauriCommandRunner().run(program, args, undefined, cwd);
+        await sup.submit({ id: `${program}${cwd}`, lane: "l", program, args, cwd, meta: {} });
+        const job = (
+          calls("jobs_submit").at(-1) as { spec: { args: string[]; cwd: string | null } }
+        ).spec;
+        expect({ args: job.args, cwd: job.cwd }, `${program} asked for ${cwd}`).toEqual({
+          args: runs[0].args.args,
+          cwd: runs[0].args.cwd,
+        });
+        if (program === "ffmpeg") expect(job.args).not.toContain("16000");
+        cwds.push(job.cwd);
+      }
+    }
+    expect(cwds.includes("/app/resources/whisper")).toBe(os === "Windows");
   });
 });
 

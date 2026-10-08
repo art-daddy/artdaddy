@@ -2,7 +2,12 @@
 // same rules its Rust tests pin: one job per lane at a time, in order; Cancel ends a queued job
 // before it starts and kills a running one; commit and forget only after the job ended. A test
 // plays the process: it decides what a started job writes, prints and exits with.
-import type { JobSpec, JobSupervisor, JobView } from "../tools/jobSupervisor";
+import {
+  JOB_PROGRAMS,
+  type JobSpec,
+  type JobSupervisor,
+  type JobView,
+} from "../tools/jobSupervisor";
 
 export class FakeJobs implements JobSupervisor {
   readonly submitted: JobSpec[] = [];
@@ -45,7 +50,8 @@ export class FakeJobs implements JobSupervisor {
 
   async submit(spec: JobSpec): Promise<number> {
     if (this.slowSubmit) await new Promise((r) => setTimeout(r, 0));
-    if (spec.program !== "ffmpeg") throw new Error(`'${spec.program}' cannot be run as a job`);
+    if (!(JOB_PROGRAMS as readonly string[]).includes(spec.program))
+      throw new Error(`'${spec.program}' cannot be run as a job`);
     if (this.jobs.has(spec.id)) throw new Error(`job ${spec.id} already exists`);
     this.submitted.push(spec);
     const l = this.lanes.get(spec.lane) ?? { running: null, queue: [] };

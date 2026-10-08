@@ -5,9 +5,13 @@
 // was there. The page still does all the thinking (the plan, the checks, the rename, the project's
 // records); the supervisor only runs the process, in order, and remembers how it ended.
 import type { CommandResult, CommandRunner } from "./command";
-import { ffmpegPolicy } from "./ffmpegPolicy";
 
 export type JobState = "queued" | "running" | "exited";
+
+/** The programs the app process will run as a job: the logical names of `SIDECARS` in
+ *  src-tauri/src/jobs.rs, its twin (a test holds the two together). */
+export const JOB_PROGRAMS = ["ffmpeg", "whisper-cli"] as const;
+export type JobProgram = (typeof JOB_PROGRAMS)[number];
 
 export interface JobView {
   id: string;
@@ -31,7 +35,7 @@ export interface JobView {
 export interface JobSpec {
   id: string;
   lane: string;
-  program: "ffmpeg";
+  program: JobProgram;
   args: string[];
   cwd?: string | null;
   meta: Record<string, unknown>;
@@ -93,7 +97,11 @@ class TauriJobSupervisor implements JobSupervisor {
   }
   async submit(spec: JobSpec): Promise<number> {
     await this.listen(); // before the job exists, so its first change cannot be missed
-    return this.invoke<number>("jobs_submit", { spec });
+    // Started by the app's rules for the program, as the page's own runner starts it: ffmpeg's, and
+    // whisper-cli's DLL folder as its working directory, without which it never loads on Windows.
+    const { launchSpec } = await import("./tauri");
+    const launch = await launchSpec(spec.program, spec.args, spec.cwd);
+    return this.invoke<number>("jobs_submit", { spec: { ...spec, ...launch } });
   }
   kill(id: string): Promise<boolean> {
     return this.invoke<boolean>("jobs_kill", { id });
@@ -168,53 +176,96 @@ export function supervisedRunner(
     run(program, args, signal, cwd, onStdout) {
       if (program !== "ffmpeg" || used) return base.run(program, args, signal, cwd, onStdout);
       used = true;
-      if (signal?.aborted) return Promise.resolve({ code: -1, stdout: "", stderr: "cancelled" });
-      return new Promise<CommandResult>((resolve) => {
-        let done = false;
-        const finish = (r: CommandResult) => {
-          if (done) return;
-          done = true;
-          stop();
-          signal?.removeEventListener("abort", onAbort);
-          resolve(r);
-        };
-        const stop = sup.subscribe(
-          (v) => {
-            if (v.id === job.id && v.state === "exited") finish(jobResult(v));
-          },
-          (id, chunk) => {
-            if (id !== job.id || !onStdout) return;
-            try {
-              onStdout(chunk);
-            } catch {
-              /* a progress consumer must never fail the render */
-            }
-          },
-        );
-        const onAbort = () => void sup.kill(job.id).catch(() => undefined);
-        signal?.addEventListener("abort", onAbort, { once: true });
-        sup
-          .submit({
-            id: job.id,
-            lane: job.lane,
-            program: "ffmpeg",
-            args: ffmpegPolicy("ffmpeg", args),
-            cwd: cwd ?? null,
-            // The scratch dir goes with the job: a page that commits it later has to remove it.
-            meta: { ...job.meta, scratch: cwd ?? null },
-          })
-          .then(async () => {
-            // Cancelled while the job was being handed over: the kill may have reached the
-            // supervisor before the job did, so send it again now that the job exists.
-            if (signal?.aborted) await sup.kill(job.id).catch(() => false);
-            // It may have ended before this page was listening for it.
-            const now = (await sup.list()).find((v) => v.id === job.id);
-            if (now?.state === "exited") finish(jobResult(now));
-          })
-          .catch((e) =>
-            finish({ code: -1, stdout: "", stderr: `could not start ffmpeg: ${String(e)}` }),
-          );
-      });
+      return runAsJob(
+        sup,
+        {
+          id: job.id,
+          lane: job.lane,
+          program: "ffmpeg",
+          args,
+          cwd: cwd ?? null,
+          // The scratch dir goes with the job: a page that commits it later has to remove it.
+          meta: { ...job.meta, scratch: cwd ?? null },
+        },
+        signal,
+        onStdout,
+      );
     },
   };
+}
+
+/** Run `spec` as a job of the app process and resolve the way a CommandRunner reports a process:
+ *  when it ends, with its code and output, or "cancelled" once `signal` aborts (the job is killed).
+ *  If the page dies first, the job runs on, and the next page finds it by its id. */
+export function runAsJob(
+  sup: JobSupervisor,
+  spec: JobSpec,
+  signal?: AbortSignal,
+  onStdout?: (chunk: string) => void,
+): Promise<CommandResult> {
+  if (signal?.aborted) return Promise.resolve({ code: -1, stdout: "", stderr: "cancelled" });
+  return new Promise<CommandResult>((resolve) => {
+    let done = false;
+    const finish = (r: CommandResult) => {
+      if (done) return;
+      done = true;
+      stop();
+      signal?.removeEventListener("abort", onAbort);
+      resolve(r);
+    };
+    const stop = sup.subscribe(
+      (v) => {
+        if (v.id === spec.id && v.state === "exited") finish(jobResult(v));
+      },
+      (id, chunk) => {
+        if (id !== spec.id || !onStdout) return;
+        try {
+          onStdout(chunk);
+        } catch {
+          /* a progress consumer must never fail the job */
+        }
+      },
+    );
+    const onAbort = () => void sup.kill(spec.id).catch(() => undefined);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    sup
+      .submit(spec)
+      .then(async () => {
+        // Cancelled while the job was being handed over: the kill may have reached the
+        // supervisor before the job did, so send it again now that the job exists.
+        if (signal?.aborted) await sup.kill(spec.id).catch(() => false);
+        // It may have ended before this page was listening for it.
+        const now = (await sup.list()).find((v) => v.id === spec.id);
+        if (now?.state === "exited") finish(jobResult(now));
+      })
+      .catch((e) =>
+        finish({ code: -1, stdout: "", stderr: `could not start ${spec.program}: ${String(e)}` }),
+      );
+  });
+}
+
+/** Resolve with job `id` once it has ended (at once if it already has), or null when the app
+ *  process does not have it. Shared by every page that follows a job it did not start. */
+export function whenJobEnds(sup: JobSupervisor, id: string): Promise<JobView | null> {
+  return new Promise((resolve) => {
+    let done = false;
+    const end = (v: JobView | null) => {
+      if (done) return;
+      done = true;
+      stop();
+      resolve(v);
+    };
+    const stop = sup.subscribe((v) => {
+      if (v.id === id && v.state === "exited") end(v);
+    });
+    // It may have ended before this page was listening.
+    void sup.list().then(
+      (all) => {
+        const now = all.find((v) => v.id === id);
+        if (!now) end(null);
+        else if (now.state === "exited") end(now);
+      },
+      () => end(null),
+    );
+  });
 }

@@ -15,6 +15,7 @@ const {
   clearSourceUrlCache,
   ensureTranscript,
   runWhisper,
+  adoptTranscriptions,
   measureLoudness,
   reportAppError,
   sourceHasAudio,
@@ -23,6 +24,7 @@ const {
   clearSourceUrlCache: vi.fn(),
   ensureTranscript: vi.fn(async () => ({ path: "t.json", parsed: {}, existed: false })),
   runWhisper: vi.fn(async (..._a: unknown[]) => ({})),
+  adoptTranscriptions: vi.fn(async () => 0),
   measureLoudness: vi.fn(async (..._a: unknown[]): Promise<object> => ({
     integrated_lufs: -23,
     true_peak_dbtp: -23,
@@ -44,6 +46,7 @@ vi.mock("../tools/transcribe", () => ({
   ensureTranscript,
   runWhisper,
   isSpeechEngineUnavailable,
+  adoptTranscriptions,
 }));
 vi.mock("../tools/loudness", () => ({ measureLoudness }));
 vi.mock("../timeline/placement", () => ({ sourceHasAudio }));
@@ -94,6 +97,8 @@ beforeEach(() => {
   ensureTranscript.mockResolvedValue({ path: "t.json", parsed: {}, existed: false });
   runWhisper.mockReset();
   runWhisper.mockResolvedValue({});
+  adoptTranscriptions.mockReset();
+  adoptTranscriptions.mockResolvedValue(0);
   measureLoudness.mockReset();
   measureLoudness.mockResolvedValue(FIGURES);
   reportAppError.mockReset();
@@ -1063,6 +1068,25 @@ describe("IndexCoordinator", () => {
       await new Promise((r) => setTimeout(r, 20));
       expect(counts()).toEqual([0, 0]);
       expect(runWhisper).not.toHaveBeenCalled();
+    });
+
+    // After a crash of the page, a transcription the dead page started may still be at work in the
+    // app process. It holds the whisper turn only once this page has taken it over, so until then no
+    // transcription here may take the turn: it would run beside it.
+    it("starts no transcription before the page has taken over what a crashed page left running", async () => {
+      let takenOver!: () => void;
+      adoptTranscriptions.mockReturnValue(new Promise<number>((r) => (takenOver = () => r(1))));
+      const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+      c.indexSource("library/a.mp3");
+      prioritizeTranscript("C:/p", "C:/media/talk.mp4", "", { start: 59, end: 91 });
+      await new Promise((r) => setTimeout(r, 20));
+      expect([transcribed(), runWhisper.mock.calls.length]).toEqual([[], 0]);
+      // Loudness is ffmpeg's, not whisper's: it does not wait.
+      expect(measureLoudness).toHaveBeenCalled();
+      takenOver();
+      await settle(() => transcribed().length > 0 && runWhisper.mock.calls.length > 0);
+      expect([transcribed(), runWhisper.mock.calls.length]).toEqual([["library/a.mp3"], 1]);
+      c.dispose();
     });
 
     it("runs one transcription at a time across two projects, a closed one's included", async () => {
