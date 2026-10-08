@@ -26,6 +26,7 @@ import {
   peekTranscript,
   runWhisper,
   TRANSCRIPT_WAIT_MS,
+  transcriptCacheSlot,
   WHISPER_MODELS,
   type WhisperModelSpec,
   whisperModelPath,
@@ -1395,6 +1396,30 @@ describe("one transcript per file, in the app-wide cache (4f)", () => {
     expect(whisperRuns(runner)).toBe(1);
   });
 
+  // 4h2: whisper carried text across its 30 s windows and went blank after long silence. The
+  // outcome is pinned against real whisper in inspectMedia.smoke.e2e.ts; here, the two things
+  // that make it hold without the model: whisper is told to carry nothing, and a transcript made
+  // the old way is never answered with.
+  it("runs whisper carrying no text between windows, and never reads a transcript made otherwise", async () => {
+    const fs = new MockFs();
+    fs.putModel();
+    copiedInto(fs, A);
+    const runner = transcribeRunner(fs);
+    const ctx = ctxIn(A, runner, fs);
+    const src = joinPath(A, "library/media_abc.mp4");
+    const blank = { result: { language: "en" }, transcription: [] };
+    const v1 = `whisper:v1:${await ctx.store.fileIdentity(src)}:small:auto`;
+    await (await ctx.store.appCache())!.put("transcripts", v1, blank);
+    expect((await runWhisper(ctx, src)).words.map((w) => w.word)).toEqual([
+      "Hello",
+      "world",
+      "Bye",
+    ]);
+    const call = (runner.run as Any).mock.calls.find((c: Any[]) => c[0] === "whisper-cli");
+    const args = call[1] as string[];
+    expect(args[args.indexOf("-mc") + 1]).toBe("0");
+  });
+
   it("keeps a linked file's transcript when it is moved and relinked, not when it is edited", async () => {
     const fs = new MockFs();
     fs.putModel();
@@ -1878,6 +1903,29 @@ describe("get_transcript transcribes what the clips play (4h)", () => {
     const again = (await getTranscriptTool({}, ctxWith(runner, fs))) as Any;
     expect(words(again)).toEqual(words(r));
     expect(runs).toHaveLength(2);
+  });
+
+  // 4h2: on the 12-minute QA file a clip's own stretch had words and times the whole file's lacked.
+  it("answers a clip from its own kept stretch before the file's whole transcript", async () => {
+    const { fs, src } = await project([{ id: "c1", from: 60, to: 75, at: 0 }]);
+    const { runner, runs } = spoken(fs);
+    const ctx = ctxWith(runner, fs);
+    await getTranscriptTool({}, ctx); // keeps the stretch 59-76
+    const whole = await transcriptCacheSlot(ctx, src);
+    const at = { from: 60_000, to: 60_500 };
+    await (await ctx.store.appCache())!.put(whole.namespace, whole.key!, {
+      result: { language: "en" },
+      transcription: [{ offsets: at, text: " WHOLE", tokens: [{ text: " WHOLE", offsets: at }] }],
+    });
+    expect(words(await getTranscriptTool({}, ctx))).toEqual(["w12", "w13", "w14"]);
+    expect(runs).toHaveLength(1);
+    // A clip with no stretch of its own kept is answered from the whole file, without running.
+    const tl = JSON.parse(await fs.readTextFile(joinPath(DIR, "internals", "timeline.json")));
+    tl.tracks[0].clips[0].source_out = 72 * FPS; // a new stretch: 60-72 s
+    tl.tracks[0].clips[0].timeline_out = 12 * FPS;
+    await fs.writeTextFile(joinPath(DIR, "internals", "timeline.json"), JSON.stringify(tl));
+    expect(words(await getTranscriptTool({}, ctx))).toEqual(["WHOLE"]);
+    expect(runs).toHaveLength(1);
   });
 
   it("keeps a clip's words when a clip overlapping it joins, and transcribes only the newcomer", async () => {

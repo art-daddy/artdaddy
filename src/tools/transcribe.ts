@@ -764,8 +764,9 @@ async function transcriptKeys(
   return { lang, identity, full, out, win };
 }
 
-/** Bump when what is stored under a transcript key changes meaning. */
-const TRANSCRIPT_FORMAT = "v1";
+/** Bump when what is stored under a transcript key changes meaning. v2: whisper runs with no
+ *  carried context (-mc 0); a v1 transcript of a file with long silence can be blank after it. */
+const TRANSCRIPT_FORMAT = "v2";
 const TRANSCRIPTS = "transcripts";
 
 /** Where the app cache keeps the whole-file transcript of `src` (namespace and key, the key null
@@ -795,7 +796,7 @@ async function cachedWhisper(
 }
 
 /** The transcript {@link runWhisper} would return for this request, WITHOUT running anything:
- *  the whole file's (which answers every window), or this window's own, or null. */
+ *  this window's own, or the whole file's (which answers every window), or null. */
 export async function peekTranscript(
   ctx: ClientToolContext,
   src: string,
@@ -804,7 +805,7 @@ export async function peekTranscript(
   window?: TranscribeWindow | null,
 ): Promise<ParsedTranscript | null> {
   const k = await transcriptKeys(ctx, src, size, language, window);
-  for (const key of new Set([k.full, k.out])) {
+  for (const key of new Set([k.out, k.full])) {
     const data = await cachedWhisper(ctx, key);
     if (data) return parseWhisperCpp(data);
   }
@@ -821,7 +822,9 @@ export async function runWhisper(
   const { lang, identity, full, out, win } = await transcriptKeys(ctx, src, size, language, window);
   // A full transcript already answers every window, so a windowed ask must never re-run
   // over one we have — the indexer builds these in the background for exactly this reason.
-  const done = (await cachedWhisper(ctx, full)) ?? (await cachedWhisper(ctx, out));
+  // A window's OWN transcript answers first: whisper hears that stretch with less around it, and
+  // on the 12-minute QA file it had words and times the whole file's lacked (4h2).
+  const done = (await cachedWhisper(ctx, out)) ?? (await cachedWhisper(ctx, full));
   if (done) return parseWhisperCpp(done);
 
   // whisper's own output is scratch, written in the project like the audio it reads.
@@ -862,9 +865,27 @@ export async function runWhisper(
     // already on the file's timeline. Shifting it in place after whisper had written it would
     // leave a window cached on its own clock if anything stopped between the two writes.
     const scratch = `${scratchBase}.${scratchToken()}.tmp`;
+    // -mc 0: no text carried from one 30 s window into the next. With it, six minutes of silence
+    // left whisper repeating "[BLANK_AUDIO]" straight through the speech after it (4h2): the file's
+    // whole transcript came back empty, and it answers every stretch of the file.
     const run = await ctx.runner.run(
       "whisper-cli",
-      ["-m", model, "-f", wav, "-ojf", "-of", scratch, "-np", "-t", whisperThreads(), "-l", lang],
+      [
+        "-m",
+        model,
+        "-f",
+        wav,
+        "-ojf",
+        "-of",
+        scratch,
+        "-np",
+        "-t",
+        whisperThreads(),
+        "-l",
+        lang,
+        "-mc",
+        "0",
+      ],
       ctx.signal,
     );
     if (run.code !== 0 || !(await ctx.store.exists(`${scratch}.json`))) {

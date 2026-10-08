@@ -601,6 +601,27 @@ describe("transcript: never waited on when long", () => {
     600_000,
   );
 
+  // 4h2: whisper carried text from one 30 s window into the next, and after six minutes of silence
+  // repeated "[BLANK_AUDIO]" straight through the speech: the indexer's whole-file transcript of
+  // exactly this file had no words (QA 2026-10-08), and it answers every stretch of the file.
+  it.skipIf(!existsSync(model))(
+    "a whole 12-minute file's transcript has the words spoken after six minutes of silence",
+    async () => {
+      const { file, speech } = await longTalk();
+      const ref = await libRef(ctx, file, "audio");
+      const src = (await ctx.store.resolveRef(ref))!;
+      const t = await runWhisper(ctx, src);
+      const said = t.words.map((w) => w.word.toLowerCase()).join(" ");
+      console.log("[whisper] whole file heard:", said.slice(0, 120)); // eslint-disable-line no-console
+      if (speech) {
+        expect(said).toMatch(/fox|dog|quick/);
+        for (const w of t.words.filter((x) => /fox|dog|quick/i.test(x.word)))
+          expect(w.start_seconds).toBeGreaterThanOrEqual(355);
+      }
+    },
+    600_000,
+  );
+
   // 4h: get_transcript transcribes what the CLIPS PLAY (plus a second either side), not the files
   // they come from, and hands the words back on the timeline.
   it.skipIf(!existsSync(model))(
