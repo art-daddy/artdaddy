@@ -9,6 +9,7 @@
 import { INTERNAL_DIR, joinPath, type LibraryClip, type ProjectStoreAccess } from "./store";
 import { proxyKey } from "../preview/proxyPaths";
 import { captureError } from "../observability/sentry";
+import { isTempName } from "./tempNames";
 
 /** Add every clip `media_ref` string in a timeline-shaped value to `into`. Tolerant of `unknown`
  *  (chat checkpoints are typed loosely) + malformed shapes — a bad snapshot just contributes nothing. */
@@ -127,6 +128,9 @@ export async function sweepOwnedMedia(store: ProjectStoreAccess): Promise<{ remo
   const removed: string[] = [];
   for (const e of entries) {
     if (e.isDirectory) continue;
+    // A file still being written, or left by a writer that died: the temp sweep's (projectTemps.ts),
+    // which waits until nothing can still finish it.
+    if (isTempName(e.name)) continue;
     const id = e.name.replace(/\.[a-z0-9]+$/i, ""); // a library file is `<id><ext>`; the id is `media_<hash>`
     if (!id.startsWith("media_") || blob.includes(id)) continue; // non-owned, or still referenced -> keep
     await store.remove(joinPath(libDir, e.name)).catch(() => undefined);
@@ -206,7 +210,10 @@ export async function sweepArtifactCache(
       continue;
     }
     for (const e of entries) {
-      if (e.isDirectory) continue; // one level deep; nested trees are left alone
+      if (e.isDirectory) continue; // one level deep; scratch folders are the temp sweep's
+      // A temp is not its asset's artifact: a half-built proxy carries the asset's key, and was kept
+      // for as long as the asset lived. The temp sweep (projectTemps.ts) removes it once stale.
+      if (isTempName(e.name)) continue;
       const rel = `${sub.name}/${e.name}`;
       if (refBlob.includes(e.name)) continue; // a checkpoint/timeline/catalog can still reach it
       if (assetDerived && liveKeys.some((k) => e.name.includes(k))) continue; // still-live asset

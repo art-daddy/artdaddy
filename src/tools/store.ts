@@ -608,6 +608,14 @@ export class ProjectStoreAccess {
     return st && !st.isDirectory ? st.size : null;
   }
 
+  /** When a file or folder was last written (ms), or null when the platform can't say. A folder's
+   *  time moves when something is added to it or taken out. */
+  async writtenAt(path: string): Promise<number | null> {
+    if (!this.fs.stat) return null;
+    const t = (await this.fs.stat(path).catch(() => null))?.mtimeMs;
+    return typeof t === "number" && Number.isFinite(t) ? t : null;
+  }
+
   /** Is this path a directory? A stat where the platform has one; otherwise the weaker
    *  "listing it yields children", which cannot tell an empty folder from a file. */
   async isDirectory(path: string): Promise<boolean> {

@@ -20,13 +20,12 @@
 //    Nothing here throws: a cache that cannot answer is a miss, and the caller does the work.
 import { shortHash } from "./hash";
 import { atomicWriteText, type FsLike, joinPath } from "./store";
+import { isStale, isTempName } from "./tempNames";
 
 /** The owner's ceiling for the whole cache (2026-10-07). */
 export const APP_CACHE_BUDGET_BYTES = 1024 ** 3;
 /** Eviction stops here, so one new entry does not trigger a sweep per write. */
 const AFTER_EVICTION = 0.9;
-/** A write that crashed between its temporary file and the rename leaves the temporary behind. */
-const STALE_TEMP_MS = 10 * 60 * 1000;
 const INDEX = "index.json";
 const FLUSH_DELAY_MS = 1000;
 
@@ -36,7 +35,6 @@ interface Usage {
 }
 
 const utf8Bytes = (s: string): number => new TextEncoder().encode(s).length;
-const isTemp = (name: string): boolean => name.includes(".tmp-");
 
 export class AppCache {
   private usage: Map<string, Usage> | null = null;
@@ -234,16 +232,16 @@ export class AppCache {
         const rel = `${dir.name}/${f.name}`;
         const path = joinPath(base, f.name);
         const known = recorded.get(rel);
-        if (known && !isTemp(f.name)) {
+        if (known && !isTempName(f.name)) {
           usage.set(rel, known);
           continue;
         }
         const st = await this.fs.stat(path).catch(() => null);
         if (!st) continue;
         const written = st.mtimeMs ?? 0;
-        if (isTemp(f.name)) {
-          if (this.now() - written > STALE_TEMP_MS)
-            await this.fs.remove?.(path).catch(() => undefined);
+        // A write that crashed between its temporary file and the rename leaves the temporary.
+        if (isTempName(f.name)) {
+          if (isStale(written, this.now())) await this.fs.remove?.(path).catch(() => undefined);
           continue;
         }
         usage.set(rel, { bytes: st.size, used: written });

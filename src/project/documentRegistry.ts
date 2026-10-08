@@ -15,6 +15,7 @@ import { flushPendingSession } from "../store/transcriptFile";
 import { rearmTimelinePersist } from "../timeline/engine";
 import { closeToolHost, openToolHost } from "../tools/host";
 import { sweepArtifactCache, sweepOwnedMedia } from "../tools/mediaGc";
+import { sweepProjectTemps } from "../tools/projectTemps";
 import { storeForProject } from "../lib/desktop";
 import { projectDirFor } from "../tools/dataRoot";
 import { captureError } from "../observability/sentry";
@@ -26,15 +27,20 @@ import { ProjectDocumentRegistry } from "./ProjectDocumentRegistry";
 import { setOpenDocumentResolver } from "./openDocuments";
 import type { ProjectId } from "./types";
 
-/** Warn when another machine already has this project open, then claim it. Best-effort and
- *  never blocks the open: a project on a shared drive is the only way this fires, and the
+/** Warn when another machine already has this project open, then claim it, then clear what a
+ *  writer that died left in it (projectTemps.ts: a crash skips the close that would have). The
+ *  sweep goes after the claim and only when nobody else held the project: the claim replaces
+ *  another machine's lock, after which nothing here could tell its writers were there. Best-effort
+ *  and never blocks the open: a project on a shared drive is the only way the lock fires, and the
  *  answer to a stale lock has to be "you can still work". */
 async function noteAndClaimProjectLock(id: ProjectId): Promise<void> {
+  let store: Awaited<ReturnType<typeof storeForProject>> | null = null;
+  let held: Awaited<ReturnType<typeof foreignProjectLock>> = null;
   try {
-    const store = await storeForProject(id);
+    store = await storeForProject(id);
     if (!store) return;
     const fs = store.fsForProjectRegistry();
-    const held = await foreignProjectLock(fs, store.projectDir);
+    held = await foreignProjectLock(fs, store.projectDir);
     if (held)
       useProjectNotice
         .getState()
@@ -44,6 +50,12 @@ async function noteAndClaimProjectLock(id: ProjectId): Promise<void> {
     await claimProjectLock(fs, store.projectDir);
   } catch (e) {
     captureError(e, { scope: "project.open.lock" });
+  }
+  if (!store || held) return;
+  try {
+    await sweepProjectTemps(store);
+  } catch (e) {
+    captureError(e, { scope: "project.open.temps" });
   }
 }
 
@@ -96,6 +108,7 @@ export function makeProjectChildren(id: ProjectId): ProjectChildren {
         if (gcStore) {
           await sweepOwnedMedia(gcStore);
           await sweepArtifactCache(gcStore);
+          await sweepProjectTemps(gcStore);
         }
       } catch (e) {
         captureError(e, { scope: "project.dispose.gc" });
