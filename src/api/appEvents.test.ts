@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("./auth", async (io) => {
   const actual = await io<typeof import("./auth")>();
-  return { ...actual, authHeaders: vi.fn(async () => ({ Authorization: "Bearer t" })) };
+  return { ...actual, hasSession: vi.fn(async () => true) };
 });
 vi.mock("../platform/host", async (io) => {
   const actual = await io<typeof import("../platform/host")>();

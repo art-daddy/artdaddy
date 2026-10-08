@@ -7,11 +7,14 @@
 // app's OWN access/refresh tokens. This module never talks to Clerk directly.
 import { platform } from "../platform";
 import { apiBase } from "./config";
+import { SessionRenewalUnavailableError } from "./http";
 
 const DESKTOP_AUTH_URL = "https://artdaddy.app/auth";
 const DEEP_LINK_PREFIX = "artdaddy://auth/callback";
 const KEYCHAIN_TIMEOUT_MS = 8_000;
-const REFRESH_TIMEOUT_MS = 15_000;
+// Outlasts the server waking from zero (18-43 s measured). Never retried: the refresh token is
+// one-time, and re-sending one the server already rotated revokes the whole session.
+const REFRESH_TIMEOUT_MS = 90_000;
 
 type Outcome = { ok: true } | { ok: false; message: string };
 export type DesktopSessionRefresh =
@@ -103,7 +106,11 @@ function writePending(p: Pending | null): void {
 }
 
 let accessToken: string | null = null;
+/** When the held token arrived, on both of this PC's clocks, and how long it lives. */
+let tokenLife: { wallAt: number; monoAt: number; lifetimeMs: number } | null = null;
 let desiredRefreshToken: string | null = null;
+/** Whether the keychain holds a session, once anything has read or written it; null before. */
+let storedSession: boolean | null = null;
 let sessionGeneration = 0;
 let refreshBlocked = false;
 let keychainMutation: Promise<void> = Promise.resolve();
@@ -121,6 +128,12 @@ export function getAccessToken(): string | null {
   return accessToken;
 }
 
+/** True/false once the keychain has answered: the app can open offline for a stored session while
+ *  its renewal waits for the server. */
+export function storedSessionKnown(): boolean | null {
+  return storedSession;
+}
+
 /** Refresh this long before the token actually dies, so a slow request cannot start valid and
  *  arrive expired. */
 const EXPIRY_SKEW_MS = 60_000;
@@ -136,27 +149,55 @@ const EXPIRY_SKEW_MS = 60_000;
 export async function ensureFreshAccessToken(): Promise<string | null> {
   if (accessToken && !expiringWithin(EXPIRY_SKEW_MS)) return accessToken;
   if (!onDesktop()) return accessToken;
-  await refreshDesktopSession().catch(() => undefined);
-  return accessToken;
+  const result = await refreshDesktopSession();
+  // The renewal's own token is the newest the server issued, so it goes even when its life cannot
+  // be read; an older one goes only while it still lives.
+  if (accessToken && (result.status === "refreshed" || !expiringWithin(0))) return accessToken;
+  // A spent token is never sent, and no token reads to the server as "signed out".
+  if (result.status === "unavailable") throw new SessionRenewalUnavailableError();
+  return null;
 }
 
-/** True when the held token is absent, undated, or dies inside `ms`. A token whose payload we
- *  cannot read counts as expiring: unreadable is not evidence of valid. */
+/** The server refused `used`: true when the token held now is a different one, renewing first
+ *  unless a newer token already replaced it. The local clock's verdict does not count here. */
+export async function renewAfterRejection(used: string | null): Promise<boolean> {
+  if (!onDesktop()) return false;
+  if (!accessToken || accessToken === used) await refreshDesktopSession();
+  return accessToken !== null && accessToken !== used;
+}
+
+/** True when the held token is absent, of unknown life, or dies inside `ms`, timed from its
+ *  arrival on whichever of this PC's clocks ran further: the wall clock counts through sleep, the
+ *  monotonic one through a clock set back. Never the server's `exp` against this PC's wall clock:
+ *  a PC two hours slow kept a 30-minute token for two and a half hours that way (UJ-010). */
 function expiringWithin(ms: number): boolean {
-  const exp = claims().exp;
-  if (typeof exp !== "number" || !Number.isFinite(exp)) return true;
-  return exp * 1000 - Date.now() <= ms;
+  if (!accessToken || !tokenLife) return true;
+  const elapsed = Math.max(Date.now() - tokenLife.wallAt, performance.now() - tokenLife.monoAt);
+  return tokenLife.lifetimeMs - elapsed <= ms;
+}
+
+/** What the server said the token lives, else its own `exp - iat` (one clock, so no skew). */
+function lifetimeMs(tokens: { access_token: string; expires_in?: unknown }): number | null {
+  const stated = Number(tokens.expires_in);
+  if (Number.isFinite(stated) && stated > 0) return stated * 1000;
+  const { iat, exp } = claimsOf(tokens.access_token);
+  return typeof iat === "number" && typeof exp === "number" && exp > iat
+    ? (exp - iat) * 1000
+    : null;
 }
 
 /** Claims from the current access token, for Sentry correlation and expiry only — this reads the
  *  JWT payload without verifying its signature, which is fine here since it is never used for
  *  authorization (the backend still verifies the token itself on every request). */
-function claims(): { sub?: string; email?: string; exp?: number } {
-  if (!accessToken) return {};
+function claims(): { sub?: string; email?: string; exp?: number; iat?: number } {
+  return accessToken ? claimsOf(accessToken) : {};
+}
+
+function claimsOf(token: string): { sub?: string; email?: string; exp?: number; iat?: number } {
   try {
-    const payload = accessToken.split(".")[1];
+    const payload = token.split(".")[1];
     const json = atob(payload.replace(/-/g, "+").replace(/_/g, "/"));
-    return JSON.parse(json) as { sub?: string; email?: string; exp?: number };
+    return JSON.parse(json) as { sub?: string; email?: string; exp?: number; iat?: number };
   } catch {
     return {};
   }
@@ -197,9 +238,9 @@ export async function startDesktopSignIn(): Promise<Outcome> {
   }
 }
 
-type ExchangeResult =
-  | { ok: true; tokens: { access_token: string; refresh_token: string } }
-  | { ok: false; message: string };
+type ExchangeResult = { ok: true; tokens: TokenReply } | { ok: false; message: string };
+
+type TokenReply = { access_token: string; refresh_token: string; expires_in?: number };
 
 async function exchangeCode(code: string, verifier: string): Promise<ExchangeResult> {
   let res: Response;
@@ -221,7 +262,7 @@ async function exchangeCode(code: string, verifier: string): Promise<ExchangeRes
   try {
     return {
       ok: true,
-      tokens: (await res.json()) as { access_token: string; refresh_token: string },
+      tokens: (await res.json()) as TokenReply,
     };
   } catch {
     return { ok: false, message: "the server's reply could not be read" };
@@ -233,7 +274,7 @@ async function exchangeCode(code: string, verifier: string): Promise<ExchangeRes
  *  refresh token was already invalidated server-side the moment this exchange happened, so a
  *  failed write here leaves NO usable refresh token for the next launch either way. */
 async function commitTokens(
-  tokens: { access_token: string; refresh_token: string },
+  tokens: TokenReply,
   expectedGeneration = sessionGeneration,
 ): Promise<boolean> {
   return mutateKeychain(async () => {
@@ -274,6 +315,10 @@ async function commitTokens(
     // the keychain write was in flight, it owns the final state and will clear this token next.
     if (sessionGeneration !== expectedGeneration) return false;
     accessToken = tokens.access_token;
+    storedSession = true;
+    const life = lifetimeMs(tokens);
+    tokenLife =
+      life === null ? null : { wallAt: Date.now(), monoAt: performance.now(), lifetimeMs: life };
     return true;
   });
 }
@@ -358,6 +403,7 @@ async function refreshDesktopSessionOnce(
       KEYCHAIN_TIMEOUT_MS,
     );
     if (sessionGeneration !== expectedGeneration) return superseded();
+    storedSession = Boolean(stored);
     if (!stored) {
       desiredRefreshToken = null;
       return { status: "missing", hasStoredSession: false };
@@ -391,7 +437,9 @@ async function refreshDesktopSessionOnce(
         if (current !== stored) return false;
         await withTimeout(invoke("clear_refresh_token", undefined), KEYCHAIN_TIMEOUT_MS);
         accessToken = null;
+        tokenLife = null;
         desiredRefreshToken = null;
+        storedSession = false;
         return true;
       });
       return cleared
@@ -401,7 +449,7 @@ async function refreshDesktopSessionOnce(
           : superseded();
     }
     if (!res.ok) return { status: "unavailable", hasStoredSession };
-    const tokens = (await res.json()) as { access_token: string; refresh_token: string };
+    const tokens = (await res.json()) as TokenReply;
     if (sessionGeneration !== expectedGeneration) return superseded();
     if (await commitTokens(tokens, expectedGeneration)) {
       return { status: "refreshed", hasStoredSession: true };
@@ -426,6 +474,7 @@ export async function signOutDesktop(): Promise<void> {
   refreshBlocked = true;
   sessionGeneration += 1;
   desiredRefreshToken = null;
+  storedSession = false;
   writePending(null);
   const stored = await mutateKeychain(async () => {
     const { invoke } = await import("@tauri-apps/api/core");
@@ -439,6 +488,7 @@ export async function signOutDesktop(): Promise<void> {
       stored = null;
     }
     accessToken = null;
+    tokenLife = null;
     try {
       await withTimeout(invoke("clear_refresh_token", undefined), KEYCHAIN_TIMEOUT_MS);
     } catch {

@@ -1,7 +1,7 @@
 // Opt-in diagnostic feedback (POST /telemetry/feedback). Best-effort — never
 // throws into the UI. The client uploads a small JSON snapshot only on an
 // explicit user action (thumbs up/down or "report a problem").
-import { authHeaders, notifyAuthFailure } from "./auth";
+import { authedFetch, notifyAuthFailure } from "./auth";
 import { apiBase } from "./config";
 
 export type FeedbackKind = "up" | "down" | "report";
@@ -25,9 +25,9 @@ export interface FeedbackPayload {
  *  never throws — a failed report must not disrupt editing). */
 export async function submitFeedback(payload: FeedbackPayload): Promise<boolean> {
   try {
-    const res = await fetch(`${apiBase()}/telemetry/feedback`, {
+    const res = await authedFetch(`${apiBase()}/telemetry/feedback`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...(await authHeaders()) },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
     if (res.status === 401) notifyAuthFailure();

@@ -5,7 +5,7 @@
 // this body would be a value the client chose, and a per-user metric the client can choose is
 // not a metric.
 import { apiBase } from "./config";
-import { authHeaders } from "./auth";
+import { authedFetch } from "./auth";
 import { platform } from "../platform";
 import { hostInfo } from "../platform/host";
 
@@ -46,9 +46,9 @@ function boundedError(error: string | undefined): string {
  *  the user's file is already on disk, so a telemetry failure must be invisible to them. */
 export async function reportExport(ev: ExportEvent): Promise<void> {
   try {
-    await fetch(`${apiBase()}/telemetry/export`, {
+    await authedFetch(`${apiBase()}/telemetry/export`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...(await authHeaders()) },
+      headers: { "Content-Type": "application/json" },
       // Which build and which OS is the client's to state, not the caller's — every export
       // reports them the same way, so no call site can get them wrong or leave them out.
       // `platform` is the SHELL (tauri/web); the OS is what a per-platform failure is read by.

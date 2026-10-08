@@ -13,13 +13,18 @@ import {
   getUserEmail as getDesktopUserEmail,
   handleDeepLinkCallback,
   refreshDesktopSession,
+  renewAfterRejection,
+  storedSessionKnown,
 } from "../api/desktopAuth";
-import { onAuthFailure, setClerkTokenProvider } from "../api/auth";
+import { onAuthFailure, setClerkTokenProvider, setSessionRenewer } from "../api/auth";
 import { reportLaunchOnce } from "../api/appEvents";
 import { identifyUser } from "../observability/sentry";
 import { platform } from "../platform";
 import { useAuth, isSignedOutGate, authBypassed } from "../store/auth";
 import SignInScreen from "./SignInScreen";
+
+/** How long launch waits on the session before opening (offline) for one that is stored. */
+const BOOT_PATIENCE_MS = 15_000;
 
 export default function AuthProvider({ children }: { children: React.ReactNode }) {
   const status = useAuth((s) => s.status);
@@ -65,10 +70,19 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
   useEffect(() => {
     // Renews a spent token BEFORE the request carries it. Handing over whatever was in memory is
     // what made the first prompt after an idle spell fail for everyone, once, every time.
-    const removeProvider = setClerkTokenProvider(() => ensureFreshAccessToken());
+    // Under the local/e2e bypass no door may block, so a renewal that fails sends no token.
+    const removeProvider = setClerkTokenProvider(
+      authBypassed()
+        ? () => ensureFreshAccessToken().catch(() => null)
+        : () => ensureFreshAccessToken(),
+    );
+    const removeRenewer = setSessionRenewer((refused) => renewAfterRejection(refused));
     if (platform.name !== "tauri") {
       void useAuth.getState().verify();
-      return removeProvider;
+      return () => {
+        removeProvider();
+        removeRenewer();
+      };
     }
     let cancelled = false;
     let offDeepLink: (() => void) | undefined;
@@ -99,6 +113,7 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
     return () => {
       cancelled = true;
       removeProvider();
+      removeRenewer();
       offDeepLink?.();
     };
   }, []);
@@ -108,8 +123,26 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
     let cancelled = false;
     setRestoreUnavailable(false);
     void (async () => {
-      let result = await refreshDesktopSession();
+      const restoring = refreshDesktopSession();
+      let patience: ReturnType<typeof setTimeout> | undefined;
+      let result = await Promise.race([
+        restoring,
+        new Promise<null>((resolve) => {
+          patience = setTimeout(() => resolve(null), BOOT_PATIENCE_MS);
+        }),
+      ]);
+      clearTimeout(patience);
       if (cancelled) return;
+      if (result === null) {
+        // The server is still waking (up to ~45 s, UJ-010): a stored session opens offline now,
+        // and the renewal that carries on brings AI back by itself.
+        if (storedSessionKnown() === true) {
+          useAuth.getState().setStoredSession(true);
+          useAuth.getState().markOffline();
+        }
+        result = await restoring;
+        if (cancelled) return;
+      }
       if (result.status === "superseded") {
         result = await refreshDesktopSession();
         if (cancelled) return;

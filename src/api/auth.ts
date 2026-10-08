@@ -21,11 +21,45 @@ export async function getAccessToken(): Promise<string | null> {
   return token?.trim() || null;
 }
 
-/** Auth headers for a backend request — empty when Clerk has no session. */
-export async function authHeaders(): Promise<Record<string, string>> {
-  const token = await getAccessToken();
-  if (!token) return {};
-  return { Authorization: ["Bearer", token].join(" ") };
+/** True when a token can be had: a beacon sends nothing rather than a guaranteed 401. */
+export async function hasSession(): Promise<boolean> {
+  return (await getAccessToken()) !== null;
+}
+
+type SessionRenewer = (refused: string | null) => Promise<boolean>;
+let sessionRenewer: SessionRenewer | null = null;
+
+/** Install how a refused session is renewed (true = a different token is now held). Cleanup
+ *  cannot remove a newer renewer. */
+export function setSessionRenewer(renewer: SessionRenewer | null): () => void {
+  sessionRenewer = renewer;
+  return () => {
+    if (sessionRenewer === renewer) sessionRenewer = null;
+  };
+}
+
+type Send = (url: string, init: RequestInit) => Promise<Response>;
+
+/** The one way a request carries the session's token. The server checks it before doing any work,
+ *  so a 401 means nothing ran: renew and send the same request once more (UJ-010). */
+export async function authedFetch(
+  url: string,
+  init: RequestInit = {},
+  send: Send = (u, i) => fetch(u, i),
+): Promise<Response> {
+  const attempt = async () => {
+    const token = await getAccessToken();
+    const headers = {
+      ...(init.headers as Record<string, string> | undefined),
+      ...(token ? { Authorization: ["Bearer", token].join(" ") } : {}),
+    };
+    return { token, res: await send(url, { ...init, headers }) };
+  };
+  const first = await attempt();
+  if (first.res.status !== 401 || !sessionRenewer) return first.res;
+  if (!(await sessionRenewer(first.token).catch(() => false))) return first.res;
+  await first.res.body?.cancel().catch(() => undefined);
+  return (await attempt()).res;
 }
 
 /** Check the current Clerk session against the server.
@@ -34,10 +68,7 @@ export async function authHeaders(): Promise<Record<string, string>> {
  *  - network error / other (e.g. Clerk verification temporarily unavailable
  *    server-side) -> throws (can't currently tell -> offline, not locked). */
 export async function verifyAccess(): Promise<boolean> {
-  const token = await getAccessToken();
-  const res = await fetch(`${apiBase()}/auth/verify`, {
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
-  });
+  const res = await authedFetch(`${apiBase()}/auth/verify`);
   if (res.status === 401) return false;
   if (res.status === 404) return true; // server has no gate endpoint -> open
   if (!res.ok) throw new Error(`verify ${res.status}`);
@@ -56,7 +87,7 @@ export interface Profile {
  *  outage must not be rendered as a signed-out user; only /auth/verify decides that. */
 export async function fetchProfile(): Promise<Profile | null> {
   try {
-    const res = await fetch(`${apiBase()}/me`, { headers: await authHeaders() });
+    const res = await authedFetch(`${apiBase()}/me`);
     if (!res.ok) return null;
     const j = (await res.json()) as Partial<Profile>;
     return {

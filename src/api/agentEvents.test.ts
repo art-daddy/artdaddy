@@ -5,7 +5,10 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("./config", () => ({ apiBase: () => "https://example.invalid" }));
-vi.mock("./auth", () => ({ authHeaders: async () => ({ Authorization: "Bearer t" }) }));
+vi.mock("./auth", () => ({
+  hasSession: async () => true,
+  authedFetch: (url: string, init: RequestInit = {}) => fetch(url, init),
+}));
 vi.mock("../platform/host", () => ({
   hostInfo: () => ({ os: "windows", arch: "x86_64" }),
   resolveHostInfo: async () => undefined,

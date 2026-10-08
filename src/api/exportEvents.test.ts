@@ -4,7 +4,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { MAX_EXPORT_ERROR, reportExport } from "./exportEvents";
 
-vi.mock("./auth", () => ({ authHeaders: async () => ({ Authorization: "Bearer t" }) }));
+vi.mock("./auth", () => ({
+  authedFetch: (url: string, init: RequestInit = {}) => fetch(url, init),
+}));
 
 afterEach(() => vi.unstubAllGlobals());
 

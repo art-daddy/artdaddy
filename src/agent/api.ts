@@ -1,6 +1,6 @@
 // Typed HTTP calls for the client-owned loop: one stateless model round on the
 // thin proxy. Plain request/response, plus an opt-in SSE variant of the same round.
-import { authHeaders, notifyAuthFailure } from "../api/auth";
+import { authedFetch, notifyAuthFailure } from "../api/auth";
 import { api } from "../api/client";
 import { fetchWithRetry, RateLimitError, SessionExpiredError } from "../api/http";
 import { readSSE } from "../api/sse";
@@ -9,14 +9,14 @@ import { hostInfo } from "../platform/host";
 import type { InferenceAttachment, RoundInput, RoundResultDTO } from "./types";
 
 async function postJson<T>(url: string, body: unknown, signal?: AbortSignal): Promise<T> {
-  const res = await fetchWithRetry(
+  const res = await authedFetch(
     url,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...(await authHeaders()) },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     },
-    signal,
+    (u, init) => fetchWithRetry(u, init, signal),
   );
   if (!res.ok) {
     if (res.status === 401) notifyAuthFailure();
@@ -188,12 +188,11 @@ async function streamRound(
   signal: AbortSignal,
   userSignal: AbortSignal | undefined,
 ): Promise<RoundResultDTO> {
-  const res = await fetch(api.inferenceStreamUrl(), {
+  const res = await authedFetch(api.inferenceStreamUrl(), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Accept: "text/event-stream",
-      ...(await authHeaders()),
     },
     body: JSON.stringify(withClientInfo(body)),
     signal,

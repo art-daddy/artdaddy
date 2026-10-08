@@ -3,10 +3,13 @@
 // as long as it stays open.
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 
-const authHeaders = vi.hoisted(() => vi.fn(async () => ({}) as Record<string, string>));
+const session = vi.hoisted(() => ({ signedIn: false }));
 
 vi.mock("./config", () => ({ apiBase: () => "https://example.invalid" }));
-vi.mock("./auth", () => ({ authHeaders }));
+vi.mock("./auth", () => ({
+  hasSession: async () => session.signedIn,
+  authedFetch: (url: string, init: RequestInit = {}) => fetch(url, init),
+}));
 vi.mock("../platform/host", () => ({
   hostInfo: () => ({ os: "windows", arch: "x86_64" }),
   resolveHostInfo: async () => undefined,
@@ -18,7 +21,7 @@ import { startHeartbeat, stopHeartbeat } from "./appEvents";
 
 beforeEach(() => {
   __resetAgentEvents();
-  authHeaders.mockResolvedValue({});
+  session.signedIn = false;
   vi.stubGlobal(
     "fetch",
     vi.fn(async () => ({ ok: true }) as Response),
@@ -48,7 +51,7 @@ describe("signed out", () => {
   it("still drops the buffer, so a long signed-out session cannot grow without bound", async () => {
     recordToolCall({ name: "undo", ok: true, ms: 1 });
     await flushAgentEvents();
-    authHeaders.mockResolvedValue({ Authorization: "Bearer t" });
+    session.signedIn = true;
     await flushAgentEvents();
 
     // Nothing was retained from the signed-out flush: the second call has nothing to send.
@@ -58,7 +61,7 @@ describe("signed out", () => {
 
 describe("signed in", () => {
   it("POSTs once there is an identity to attribute to", async () => {
-    authHeaders.mockResolvedValue({ Authorization: "Bearer t" });
+    session.signedIn = true;
     recordToolCall({ name: "undo", ok: true, ms: 1 });
     await flushAgentEvents();
     expect(fetch).toHaveBeenCalledTimes(1);

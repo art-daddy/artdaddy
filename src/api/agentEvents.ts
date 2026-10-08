@@ -12,7 +12,7 @@
 //
 // Carries NO identity: the server takes that from the authenticated request.
 import { apiBase } from "./config";
-import { authHeaders } from "./auth";
+import { authedFetch, hasSession } from "./auth";
 import { hostInfo } from "../platform/host";
 
 export type AgentEventKind = "tool_call" | "tool_denied" | "agent_output";
@@ -109,14 +109,13 @@ export async function flushAgentEvents(): Promise<void> {
   const events = buffer;
   buffer = [];
   try {
-    const auth = await authHeaders();
     // Nobody to attribute it to: the server takes identity from the request, so an
     // unauthenticated flush is a guaranteed 401 carrying data we could not file anyway.
-    if (!auth.Authorization) return;
+    if (!(await hasSession())) return;
     const { os, arch } = hostInfo();
-    await fetch(`${apiBase()}/telemetry/agent`, {
+    await authedFetch(`${apiBase()}/telemetry/agent`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...auth },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         events,
         surface: context.surface,

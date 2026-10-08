@@ -3,12 +3,13 @@
 // never exercised by hand — so these assert the failure direction, not the happy one.
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 
-const authHeaders = vi.hoisted(() =>
-  vi.fn(async () => ({ Authorization: "Bearer t" }) as Record<string, string>),
-);
+const session = vi.hoisted(() => ({ signedIn: true }));
 
 vi.mock("./config", () => ({ apiBase: () => "https://example.invalid" }));
-vi.mock("./auth", () => ({ authHeaders }));
+vi.mock("./auth", () => ({
+  hasSession: async () => session.signedIn,
+  authedFetch: (url: string, init: RequestInit = {}) => fetch(url, init),
+}));
 vi.mock("../platform/host", () => ({
   hostInfo: () => ({ os: "windows", arch: "x86_64" }),
   resolveHostInfo: async () => undefined,
@@ -28,7 +29,7 @@ const posted: Record<string, unknown>[] = [];
 beforeEach(() => {
   __resetAppEvents();
   posted.length = 0;
-  authHeaders.mockResolvedValue({ Authorization: "Bearer t" });
+  session.signedIn = true;
   vi.stubGlobal(
     "fetch",
     vi.fn(async (_u: string, init: { body: string }) => {
@@ -138,7 +139,7 @@ describe("app_error", () => {
 
 describe("attribution", () => {
   it("sends nothing when signed out — the server could not file it anyway", async () => {
-    authHeaders.mockResolvedValue({});
+    session.signedIn = false;
     reportMediaImport(false, "p1", "refused");
     reportAppError("boom");
     reportCreditsExhausted("wall");

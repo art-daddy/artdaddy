@@ -2,7 +2,7 @@
 // "limit reached" UX. Metering is a server concern; this just reflects what the
 // backend reports (via GET /usage) and any 402 it returns. A tiny external
 // store (useSyncExternalStore-friendly) so the meter re-renders on change.
-import { authHeaders } from "./auth";
+import { authedFetch } from "./auth";
 import { apiBase } from "./config";
 import { ArtDaddyError } from "../lib/errors";
 import { DISCORD_URL } from "../lib/community";
@@ -54,7 +54,7 @@ function set(next: Partial<UsageState>): void {
 /** Fetch the caller's credit balance. No-op visual when unmetered/unreachable. */
 export async function refreshUsage(): Promise<void> {
   try {
-    const res = await fetch(`${apiBase()}/usage`, { headers: await authHeaders() });
+    const res = await authedFetch(`${apiBase()}/usage`);
     if (!res.ok) return;
     const j = (await res.json()) as Partial<UsageState>;
     if (!j.metered) {

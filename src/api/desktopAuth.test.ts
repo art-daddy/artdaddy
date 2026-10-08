@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import fc from "fast-check";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // The PKCE/loopback exchange this app needs since Clerk's own SDK cannot run inside the Tauri
 // webview at all (its origin is neither the verified web domain nor a browser Clerk trusts):
@@ -566,11 +567,36 @@ describe("signOutDesktop", () => {
 // 401. That made the FIRST prompt after any idle spell fail for everyone, every time: the 401
 // triggered the refresh, the refresh worked, and the request that paid for it was thrown away.
 // A real user reported it as "it errored, then the same prompt worked".
+//
+// Built from what the server really sends (desktop_auth.py): `iat`/`exp` on the SERVER's clock and
+// `expires_in`. This PC's two clocks are driven separately, because UJ-010 was exactly a PC whose
+// wall clock disagreed with the server's: two hours slow, it kept a 30-minute token for 2.5 hours.
 describe("ensureFreshAccessToken", () => {
-  /** A token whose `exp` claim sits `secondsFromNow` away. Unsigned: nothing here verifies it. */
-  function tokenExpiringIn(secondsFromNow: number): string {
+  const SERVER_NOW = 1_800_000_000; // seconds, the server's clock
+  const TTL = 1800; // ACCESS_TOKEN_TTL_SECONDS
+  const MIN = 60_000;
+  let wall = 0; // this PC's Date.now(), ms
+  let mono = 0; // this PC's performance.now(), ms
+  let spies: Array<{ mockRestore(): void }> = [];
+  let rotation = 0;
+
+  beforeEach(() => {
+    wall = SERVER_NOW * 1000;
+    mono = 5_000;
+    spies = [
+      vi.spyOn(Date, "now").mockImplementation(() => wall),
+      vi.spyOn(performance, "now").mockImplementation(() => mono),
+    ];
+  });
+  afterEach(() => {
+    for (const s of spies) s.mockRestore();
+    vi.useRealTimers();
+  });
+
+  /** A token as the server mints it at `serverSec` on ITS clock. Unsigned: nothing here verifies it. */
+  function minted(serverSec = SERVER_NOW): string {
     const payload = Buffer.from(
-      JSON.stringify({ sub: "user_1", exp: Math.floor(Date.now() / 1000) + secondsFromNow }),
+      JSON.stringify({ sub: "user_1", iat: serverSec, exp: serverSec + TTL }),
     )
       .toString("base64")
       .replace(/\+/g, "-")
@@ -578,63 +604,227 @@ describe("ensureFreshAccessToken", () => {
       .replace(/=+$/, "");
     return `h.${payload}.s`;
   }
+  const reply = (token: string, extra: Record<string, unknown> = { expires_in: TTL }) =>
+    jsonResponse(200, { access_token: token, refresh_token: `rt-${++rotation}`, ...extra });
+  /** Time passing on this PC: the wall clock and the monotonic clock, separately. */
+  const pass = (wallMs: number, monoMs = wallMs) => {
+    wall += wallMs;
+    mono += monoMs;
+  };
 
   /** Sign in so the module holds `token`, then forget how we got there. */
-  async function withToken(token: string) {
+  async function withToken(token: string, extra?: Record<string, unknown>) {
     invoke.mockImplementation(async (cmd: string) =>
       cmd === "load_refresh_token" ? "rt-0" : undefined,
     );
-    fetchMock.mockResolvedValue(
-      jsonResponse(200, { access_token: token, refresh_token: "rt-1", expires_in: 1800 }),
-    );
+    fetchMock.mockResolvedValue(reply(token, extra));
     const mod = await importFresh();
     await mod.refreshDesktopSession();
     fetchMock.mockClear();
+    fetchMock.mockResolvedValue(reply(minted(SERVER_NOW + 1500)));
     return mod;
   }
 
-  it("renews a token that is about to expire BEFORE handing it to a request", async () => {
-    const mod = await withToken(tokenExpiringIn(10)); // inside the skew
-    fetchMock.mockResolvedValue(
-      jsonResponse(200, { access_token: tokenExpiringIn(1800), refresh_token: "rt-2" }),
-    );
+  it("renews a token in its last minute BEFORE handing it to a request", async () => {
+    const mod = await withToken(minted());
+    pass(29.5 * MIN);
 
     const token = await mod.ensureFreshAccessToken();
 
     expect(fetchMock, "a spent token must be renewed, not sent").toHaveBeenCalledTimes(1);
-    expect(token).not.toBe("");
-    expect(mod.getAccessToken()).toBe(token);
+    expect(token).toBe(mod.getAccessToken());
+    expect(token).not.toBe(minted());
   });
 
   it("does not refresh a healthy token, so every request does not stampede the endpoint", async () => {
-    const mod = await withToken(tokenExpiringIn(1800));
+    const mod = await withToken(minted());
+    pass(10 * MIN);
 
     const token = await mod.ensureFreshAccessToken();
 
     expect(fetchMock).not.toHaveBeenCalled();
-    expect(token).toBe(mod.getAccessToken());
+    expect(token).toBe(minted());
   });
 
-  // Unreadable is not evidence of valid. Treating an undated token as fine is the failure
-  // direction that puts us straight back to "first request 401s".
-  it("treats a token with no readable expiry as spent", async () => {
-    const mod = await withToken("not-a-jwt");
-    fetchMock.mockResolvedValue(
-      jsonResponse(200, { access_token: tokenExpiringIn(1800), refresh_token: "rt-2" }),
-    );
+  // UJ-010, the Tunisian PC: two hours slow. Read against its wall clock, `exp` was 2.5 h away when
+  // the token had seconds left, so nothing renewed it and the turn ended "session expired".
+  it("a PC two hours SLOW still renews before the token dies", async () => {
+    wall = (SERVER_NOW - 2 * 3600) * 1000;
+    const mod = await withToken(minted());
+    pass(29.5 * MIN);
 
     await mod.ensureFreshAccessToken();
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  // The opposite clock error: `exp` reads as long past, so every request renewed and rotated.
+  it("a PC two hours FAST does not renew on every request", async () => {
+    wall = (SERVER_NOW + 2 * 3600) * 1000;
+    const mod = await withToken(minted());
+    pass(1 * MIN);
+
+    await mod.ensureFreshAccessToken();
+    await mod.ensureFreshAccessToken();
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  // A sleeping machine's monotonic clock can stand still (macOS), so the wall clock must count too.
+  it("a machine that slept through the token's life renews on waking", async () => {
+    const mod = await withToken(minted());
+    pass(31 * MIN, 0);
+
+    await mod.ensureFreshAccessToken();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  // ...and the wall clock can be set back while a token is held, so the monotonic clock counts too.
+  it("a clock set back while the token is held still renews when its life is up", async () => {
+    const mod = await withToken(minted());
+    pass(-2 * 3600 * 1000 + 31 * MIN, 31 * MIN);
+
+    await mod.ensureFreshAccessToken();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("a token that arrives without expires_in is timed by its own iat and exp", async () => {
+    wall = (SERVER_NOW - 2 * 3600) * 1000;
+    const mod = await withToken(minted(), {});
+    pass(29.5 * MIN);
+
+    await mod.ensureFreshAccessToken();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  // ...and not renewed early on that account either: its life is exp - iat, not zero.
+  for (const [label, extra] of [
+    ["no expires_in", {}],
+    ["expires_in 0", { expires_in: 0 }],
+    ["a negative expires_in", { expires_in: -5 }],
+    ["an unreadable expires_in", { expires_in: "soon" }],
+  ] as const) {
+    it(`with ${label}, a token's own iat and exp keep it until near its end`, async () => {
+      const mod = await withToken(minted(), extra);
+      pass(28 * MIN);
+
+      await mod.ensureFreshAccessToken();
+
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+  }
+
+  it("renews from exactly one minute before the end", async () => {
+    const mod = await withToken(minted());
+    pass(29 * MIN - 1);
+    await mod.ensureFreshAccessToken();
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    pass(1);
+    await mod.ensureFreshAccessToken();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  // The payload is base64url: '-' and '_' stand where base64 has '+' and '/'.
+  it("reads a payload whose base64url uses '-' and '_'", async () => {
+    const claims = { sub: "user_>>>???", iat: SERVER_NOW, exp: SERVER_NOW + TTL, pad: "ûï¿" };
+    const payload = Buffer.from(JSON.stringify(claims)).toString("base64url");
+    expect(payload, "the fixture must exercise both substitutions").toMatch(/-/);
+    expect(payload).toMatch(/_/);
+    const mod = await withToken(`ad_h.${payload}.s`, {});
+    pass(28 * MIN);
+
+    await mod.ensureFreshAccessToken();
+
+    expect(mod.getUserId()).toBe("user_>>>???");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("off the desktop shell, never reaches for the keychain or the refresh endpoint", async () => {
+    platformMock.name = "web";
+    const mod = await importFresh();
+
+    await expect(mod.ensureFreshAccessToken()).resolves.toBeNull();
+    await expect(mod.renewAfterRejection(null)).resolves.toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  // Unreadable is not evidence of valid: a token whose life nothing states counts as spent.
+  it("treats a token whose lifetime cannot be established as spent", async () => {
+    const mod = await withToken("not-a-jwt", {});
+
+    await mod.ensureFreshAccessToken();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  // ...but the token a renewal has just returned is the newest the server issued. Holding it back
+  // sent the request with no token at all, which the server reads as signed out.
+  it("sends the token a renewal just returned, even one whose life it cannot read", async () => {
+    const mod = await withToken(minted());
+    pass(31 * MIN);
+    fetchMock.mockResolvedValue(reply("ad_at_opaque", {}));
+
+    await expect(mod.ensureFreshAccessToken()).resolves.toBe("ad_at_opaque");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  // What the server says a token lives is enough on its own: the payload need not be readable.
+  it("keeps a token it cannot read for as long as the server said it lives", async () => {
+    const mod = await withToken("ad_at_opaque", { expires_in: TTL });
+    pass(28 * MIN);
+
+    await expect(mod.ensureFreshAccessToken()).resolves.toBe("ad_at_opaque");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  // Only NUMERIC claims date a token. Anything else - a claim missing, written as text, null - must
+  // read as "unknown, renew before use", never as a lifetime. `iat` without `exp` would compute NaN,
+  // and NaN compares false with everything: that token would never have expired.
+  it("dates a token by its own claims only when both are numbers", async () => {
+    const near = fc.integer({ min: SERVER_NOW - 4000, max: SERVER_NOW + 4000 });
+    const claim = fc.oneof(
+      near,
+      near.map(String),
+      fc.constant(null),
+      fc.boolean(),
+      fc.constant(undefined),
+    );
+    const end = SERVER_NOW + TTL;
+    await fc.assert(
+      fc.asyncProperty(claim, claim, async (iat, exp) => {
+        const payload = Buffer.from(JSON.stringify({ sub: "u", iat, exp })).toString("base64url");
+        const mod = await withToken(`h.${payload}.s`, {});
+
+        await mod.ensureFreshAccessToken();
+
+        const dated = typeof iat === "number" && typeof exp === "number";
+        const keeps = dated && (exp - iat) * 1000 > MIN;
+        expect(fetchMock.mock.calls.length, `iat ${iat}, exp ${exp}`).toBe(keeps ? 0 : 1);
+      }),
+      {
+        numRuns: 150,
+        examples: [
+          [SERVER_NOW, end],
+          [SERVER_NOW, undefined],
+          [String(SERVER_NOW), end],
+          [SERVER_NOW, String(end)],
+          [String(SERVER_NOW), String(end)],
+          [null, end],
+        ],
+      },
+    );
+  });
+
   // The stored refresh token is one-time and rotates. Two simultaneous requests finding a spent
   // token must not both spend it: one rotation wins and the other would 401 a valid session.
   it("joins concurrent callers into a single refresh", async () => {
-    const mod = await withToken(tokenExpiringIn(5));
-    fetchMock.mockResolvedValue(
-      jsonResponse(200, { access_token: tokenExpiringIn(1800), refresh_token: "rt-2" }),
-    );
+    const mod = await withToken(minted());
+    pass(29.9 * MIN);
 
     const [a, b] = await Promise.all([mod.ensureFreshAccessToken(), mod.ensureFreshAccessToken()]);
 
@@ -642,18 +832,169 @@ describe("ensureFreshAccessToken", () => {
     expect(a).toBe(b);
   });
 
-  // Falling back to the token in hand beats sending none: no Authorization header is a
-  // guaranteed 401, whereas a token seconds from expiry may still be accepted.
-  it("falls back to the held token, without throwing, when the refresh cannot be made", async () => {
-    const held = tokenExpiringIn(5);
-    const mod = await withToken(held);
-    invoke.mockResolvedValue(null); // the keychain has nothing to refresh with
-    await expect(mod.ensureFreshAccessToken()).resolves.toBe(held);
+  // UJ-010, the Mac: its token ran out while it slept and so did the server (min replicas 0). The
+  // renewal gave up after 15 s, every cold start that week took 18-43 s, so the app sent the token
+  // it knew had expired. The renewal must outlast the wake-up.
+  it("renews through a server that takes 45 s to wake", async () => {
+    const mod = await withToken(minted());
+    pass(31 * MIN);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const renewed = minted(SERVER_NOW + 1900);
+    fetchMock.mockImplementation(
+      (_url: string, init: RequestInit) =>
+        new Promise((resolve, reject) => {
+          const timer = setTimeout(() => resolve(reply(renewed)), 45_000);
+          init.signal?.addEventListener("abort", () => {
+            clearTimeout(timer);
+            reject(new DOMException("Aborted", "AbortError"));
+          });
+        }),
+    );
+
+    const token = mod.ensureFreshAccessToken();
+    for (let i = 0; i < 100 && fetchMock.mock.calls.length === 0; i++)
+      await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(45_000);
+
+    await expect(token).resolves.toBe(renewed);
   });
 
-  it("never throws when the refresh request itself explodes", async () => {
-    const mod = await withToken(tokenExpiringIn(5));
+  it("never hands over a token it knows is spent when the server cannot be reached", async () => {
+    const mod = await withToken(minted());
+    pass(31 * MIN);
+    fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
+
+    await expect(mod.ensureFreshAccessToken()).rejects.toMatchObject({
+      name: "SessionRenewalUnavailableError",
+    });
+  });
+
+  // A request with NO token reads to the server as signed out (401 -> the sign-in screen), which is
+  // the wrong verdict for a stored session the server merely could not be asked about.
+  it("does not send an unauthenticated request for a stored session it could not renew", async () => {
+    invoke.mockImplementation(async (cmd: string) =>
+      cmd === "load_refresh_token" ? "rt-0" : undefined,
+    );
+    fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
+    const mod = await importFresh();
+
+    await expect(mod.ensureFreshAccessToken()).rejects.toMatchObject({
+      name: "SessionRenewalUnavailableError",
+    });
+  });
+
+  // Still inside its life, a token beats none: the server accepts it for the seconds it has left.
+  it("hands over a token in its last minute when the renewal fails, without throwing", async () => {
+    const mod = await withToken(minted());
+    pass(29.5 * MIN);
     fetchMock.mockRejectedValue(new TypeError("offline"));
-    await expect(mod.ensureFreshAccessToken()).resolves.not.toThrow();
+
+    await expect(mod.ensureFreshAccessToken()).resolves.toBe(minted());
+  });
+
+  it("answers null, not an error, when there is no session at all", async () => {
+    invoke.mockResolvedValue(null);
+    const mod = await importFresh();
+
+    await expect(mod.ensureFreshAccessToken()).resolves.toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+// Launch opens offline for a stored session while its renewal waits on a waking server, so whether
+// the keychain holds one must be known as soon as anything has read or changed it.
+describe("storedSessionKnown", () => {
+  it("is unknown before the keychain was asked, then says what it holds", async () => {
+    invoke.mockImplementation(async (cmd: string) =>
+      cmd === "load_refresh_token" ? "rt-0" : undefined,
+    );
+    fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
+    const mod = await importFresh();
+    expect(mod.storedSessionKnown()).toBeNull();
+
+    await mod.refreshDesktopSession();
+
+    expect(mod.storedSessionKnown(), "known even though the server never answered").toBe(true);
+  });
+
+  it("is false when the keychain is empty", async () => {
+    invoke.mockResolvedValue(null);
+    const mod = await importFresh();
+    await mod.refreshDesktopSession();
+    expect(mod.storedSessionKnown()).toBe(false);
+  });
+
+  it("is false once the server rejects the stored token, and after sign-out", async () => {
+    invoke.mockImplementation(async (cmd: string) =>
+      cmd === "load_refresh_token" ? "rt-0" : undefined,
+    );
+    fetchMock.mockResolvedValue(jsonResponse(401, { detail: "invalid refresh token" }));
+    const rejected = await importFresh();
+    await rejected.refreshDesktopSession();
+    expect(rejected.storedSessionKnown()).toBe(false);
+
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, { access_token: "at", refresh_token: "rt-1", expires_in: 1800 }),
+    );
+    const signedOut = await importFresh();
+    await signedOut.refreshDesktopSession();
+    expect(signedOut.storedSessionKnown()).toBe(true);
+    await signedOut.signOutDesktop();
+    expect(signedOut.storedSessionKnown()).toBe(false);
+  });
+});
+
+// The server checks a token before it does anything, so a 401 means nothing ran: renew and send
+// the request again. A token can be refused while this PC still believes in it (revoked, or a
+// clock set back further than the monotonic clock can see), so the local verdict does not decide.
+describe("renewAfterRejection", () => {
+  async function signedIn() {
+    invoke.mockImplementation(async (cmd: string) =>
+      cmd === "load_refresh_token" ? "rt-0" : undefined,
+    );
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, { access_token: "at-1", refresh_token: "rt-1", expires_in: 1800 }),
+    );
+    const mod = await importFresh();
+    await mod.refreshDesktopSession();
+    fetchMock.mockClear();
+    return mod;
+  }
+
+  it("renews a refused token even though this PC still believes in it", async () => {
+    const mod = await signedIn();
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, { access_token: "at-2", refresh_token: "rt-2", expires_in: 1800 }),
+    );
+
+    await expect(mod.renewAfterRejection("at-1")).resolves.toBe(true);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(mod.getAccessToken()).toBe("at-2");
+  });
+
+  it("does not rotate again when a newer token already replaced the refused one", async () => {
+    const mod = await signedIn();
+
+    await expect(mod.renewAfterRejection("at-0")).resolves.toBe(true);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("says no when the session itself is gone", async () => {
+    const mod = await signedIn();
+    invoke.mockImplementation(async (cmd: string) =>
+      cmd === "load_refresh_token" ? "rt-1" : undefined,
+    );
+    fetchMock.mockResolvedValue(jsonResponse(401, { detail: "invalid refresh token" }));
+
+    await expect(mod.renewAfterRejection("at-1")).resolves.toBe(false);
+  });
+
+  it("says no when the server cannot be reached", async () => {
+    const mod = await signedIn();
+    fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
+
+    await expect(mod.renewAfterRejection("at-1")).resolves.toBe(false);
   });
 });

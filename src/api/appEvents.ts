@@ -6,7 +6,7 @@
 //
 // Carries NO identity: the server takes that from the authenticated request.
 import { apiBase } from "./config";
-import { authHeaders } from "./auth";
+import { authedFetch, hasSession } from "./auth";
 import { platform } from "../platform";
 import { hostInfo, resolveHostInfo } from "../platform/host";
 
@@ -26,15 +26,14 @@ export async function reportAppEvent(event: AppEvent, detail: AppEventDetail = {
     // The authoritative OS needs an IPC round-trip; a launch beacon would otherwise race it
     // and report the user-agent's guess, which is the thing it exists to replace.
     await resolveHostInfo();
-    const auth = await authHeaders();
     // The server takes identity from the request, so a signed-out beacon is a guaranteed 401
     // carrying a marker we could not attribute anyway. Matters most for the heartbeat, which
     // would otherwise retry that 401 every few minutes for as long as the app is open.
-    if (!auth.Authorization) return;
+    if (!(await hasSession())) return;
     const { os, arch } = hostInfo();
-    await fetch(`${apiBase()}/telemetry/app`, {
+    await authedFetch(`${apiBase()}/telemetry/app`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...auth },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         event,
         os,

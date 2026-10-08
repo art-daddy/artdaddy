@@ -12,7 +12,7 @@ import path from "node:path";
 
 import { ClientTurnRunner, type LoopDeps } from "../agent/loop";
 import type { RoundInput, RoundResultDTO, Usage } from "../agent/types";
-import { authHeaders } from "../api/auth";
+import { authedFetch } from "../api/auth";
 import { ensureTimeline, loadTimeline } from "../timeline/engine";
 import { registerTimelineTools } from "../timeline/ops";
 import { setProjectSettingsTool } from "../tools/project";
@@ -211,11 +211,11 @@ export async function driveScenario(
 
     let snapshot: Record<string, unknown> | null = null;
     const infer = async (roundInput: RoundInput): Promise<RoundResultDTO> => {
-      const res = await fetch(`${opts.server}/inference`, {
+      const res = await authedFetch(`${opts.server}/inference`, {
         method: "POST",
         // This posts to /inference itself rather than going through src/agent/api.ts, so it
         // has to carry the auth header too — against a gated server it 401s without one.
-        headers: { "Content-Type": "application/json", ...(await authHeaders()) },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           round_input: roundInput,
           provider_snapshot: snapshot,

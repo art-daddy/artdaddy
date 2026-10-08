@@ -111,7 +111,7 @@ describe("requests follow the configured server", () => {
     const { setApiBase } = await import("./config");
     const auth = await import("./auth");
     auth.setClerkTokenProvider(async () => "clerk-jwt");
-    expect(await auth.authHeaders()).toHaveProperty("Authorization");
+    expect(await auth.hasSession()).toBe(true);
 
     const hit = vi.fn();
     const off = auth.onAuthFailure(hit);

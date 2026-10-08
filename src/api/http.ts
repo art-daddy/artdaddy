@@ -49,6 +49,19 @@ export class SessionExpiredError extends ArtDaddyError {
   }
 }
 
+/** The token ran out and the server could not be reached to renew it. Not a sign-out: the stored
+ *  session is fine, the request just cannot go yet (UJ-010). */
+export class SessionRenewalUnavailableError extends ArtDaddyError {
+  readonly code = "session_renewal_unavailable";
+  readonly expected = true;
+  constructor(
+    message = "Couldn't reach ArtDaddy to renew your session. Check your connection and try again.",
+  ) {
+    super(message);
+    this.name = "SessionRenewalUnavailableError";
+  }
+}
+
 /** Parse a Retry-After header (delta-seconds or an HTTP-date) to milliseconds. */
 function retryAfterMs(header: string | null): number | null {
   if (!header) return null;

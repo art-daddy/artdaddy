@@ -10,7 +10,11 @@ const mocks = vi.hoisted(() => {
     markLocked: vi.fn(),
     markOffline: vi.fn(),
     removeTokenProvider,
-    setClerkTokenProvider: vi.fn(() => removeTokenProvider),
+    setClerkTokenProvider: vi.fn((_provide: () => Promise<string | null>) => removeTokenProvider),
+    ensureFreshAccessToken: vi.fn(async () => null as string | null),
+    bypassed: null as boolean | null,
+    setSessionRenewer: vi.fn(() => () => undefined),
+    storedSessionKnown: vi.fn(() => null as boolean | null),
     identifyUser: vi.fn(),
     authStatus: "checking",
     authFailureCb: null as (() => void) | null,
@@ -58,11 +62,16 @@ vi.mock("../store/auth", async () => {
   const useAuth = (selector?: (s: ReturnType<typeof state>) => unknown) =>
     selector ? selector(state()) : state();
   useAuth.getState = state;
-  return { useAuth, isSignedOutGate: actual.isSignedOutGate, authBypassed: actual.authBypassed };
+  return {
+    useAuth,
+    isSignedOutGate: actual.isSignedOutGate,
+    authBypassed: () => mocks.bypassed ?? actual.authBypassed(),
+  };
 });
 
 vi.mock("../api/auth", () => ({
   setClerkTokenProvider: mocks.setClerkTokenProvider,
+  setSessionRenewer: mocks.setSessionRenewer,
   onAuthFailure: (cb: () => void) => {
     mocks.authFailureCb = cb;
     return mocks.offAuth;
@@ -76,6 +85,8 @@ vi.mock("../api/desktopAuth", () => ({
   refreshDesktopSession: mocks.refreshDesktopSession,
   handleDeepLinkCallback: mocks.handleDeepLinkCallback,
   startDesktopSignIn: mocks.startDesktopSignIn,
+  storedSessionKnown: mocks.storedSessionKnown,
+  ensureFreshAccessToken: mocks.ensureFreshAccessToken,
 }));
 
 vi.mock("@tauri-apps/plugin-deep-link", () => ({
@@ -105,7 +116,121 @@ afterEach(() => {
   });
   mocks.handleDeepLinkCallback.mockReset().mockResolvedValue({ ok: true });
   mocks.getAccessToken.mockReset().mockReturnValue(null);
+  mocks.storedSessionKnown.mockReset().mockReturnValue(null);
+  mocks.ensureFreshAccessToken.mockReset().mockResolvedValue(null);
+  mocks.bypassed = null;
   vi.clearAllMocks();
+});
+
+// A real build refuses a request whose session could not be renewed; it never sends one with no
+// token. The local/e2e bypass is the one place no door may block, so there it sends none.
+describe("AuthProvider, the token every request carries", () => {
+  const unreachable = Object.assign(new Error("unreachable"), {
+    name: "SessionRenewalUnavailableError",
+  });
+  function provider() {
+    mocks.ensureFreshAccessToken.mockRejectedValue(unreachable);
+    render(
+      <AuthProvider>
+        <span>editor</span>
+      </AuthProvider>,
+    );
+    const call = mocks.setClerkTokenProvider.mock.calls.at(-1);
+    if (!call) throw new Error("no token provider was installed");
+    return call[0];
+  }
+
+  it("refuses the request when the renewal cannot reach the server", async () => {
+    mocks.bypassed = false;
+    await expect(provider()()).rejects.toBe(unreachable);
+  });
+
+  it("under the local/e2e bypass, sends it with no token instead", async () => {
+    mocks.bypassed = true;
+    await expect(provider()()).resolves.toBeNull();
+  });
+});
+
+// UJ-010: at launch the server is often asleep (min replicas 0) and takes up to ~45 s to wake. The
+// renewal now waits that out, so the app must not wait on its splash for it: it opens offline at
+// the moment it always did, and comes online by itself when the renewal lands.
+describe("AuthProvider, while the server wakes", () => {
+  function slowRenewal() {
+    let land!: (r: DesktopSessionRefresh) => void;
+    mocks.refreshDesktopSession.mockImplementation(
+      () =>
+        new Promise<DesktopSessionRefresh>((resolve) => {
+          land = resolve;
+        }),
+    );
+    return (r: DesktopSessionRefresh) => land(r);
+  }
+  const flush = () =>
+    act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+  it("opens offline for a stored session, then unlocks when the renewal lands", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const land = slowRenewal();
+    mocks.storedSessionKnown.mockReturnValue(true);
+    render(
+      <AuthProvider>
+        <span>editor</span>
+      </AuthProvider>,
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(14_000);
+    });
+    expect(mocks.markOffline, "not before the moment it always opened").not.toHaveBeenCalled();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(mocks.setStoredSession).toHaveBeenCalledWith(true);
+    expect(mocks.markOffline).toHaveBeenCalled();
+    expect(mocks.verify).not.toHaveBeenCalled();
+
+    land({ status: "refreshed", hasStoredSession: true });
+    await flush();
+    expect(mocks.verify).toHaveBeenCalledOnce();
+  });
+
+  it("still locks if the late answer is that the session is gone", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const land = slowRenewal();
+    mocks.storedSessionKnown.mockReturnValue(true);
+    render(
+      <AuthProvider>
+        <span>editor</span>
+      </AuthProvider>,
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000);
+    });
+
+    land({ status: "invalid", hasStoredSession: false });
+    await flush();
+    expect(mocks.markLocked).toHaveBeenCalled();
+    expect(mocks.verify).not.toHaveBeenCalled();
+  });
+
+  // Unknown is not "has a session": opening offline then would show the sign-in screen instead.
+  it("keeps waiting while even the keychain has not answered", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    slowRenewal();
+    render(
+      <AuthProvider>
+        <span>editor</span>
+      </AuthProvider>,
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20_000);
+    });
+
+    expect(mocks.markOffline).not.toHaveBeenCalled();
+    expect(mocks.markLocked).not.toHaveBeenCalled();
+  });
 });
 
 describe("AuthProvider", () => {

@@ -14,8 +14,8 @@ vi.mock("../api/usage", async (io) => {
   return { ...actual, markOverLimit: vi.fn() };
 });
 
-import { notifyAuthFailure, setClerkTokenProvider } from "../api/auth";
-import { SessionExpiredError } from "../api/http";
+import { notifyAuthFailure, setClerkTokenProvider, setSessionRenewer } from "../api/auth";
+import { SessionExpiredError, SessionRenewalUnavailableError } from "../api/http";
 import { isExpected, toUserMessage } from "../lib/errors";
 import { apiBase, setApiBase } from "../api/config";
 import { CreditLimitError, markOverLimit } from "../api/usage";
@@ -31,7 +31,77 @@ const body: InferBody = { round_input: { user_text: "hi" } };
 
 afterEach(() => {
   setClerkTokenProvider(null);
+  setSessionRenewer(null);
   setApiBase(null);
+  vi.mocked(notifyAuthFailure).mockClear();
+});
+
+// UJ-010: the round a stale token lost was the one the user was waiting on. The server refuses a
+// token before it runs anything, so the round is renewed and sent again instead of dropped.
+describe("a refused round", () => {
+  function staleThenRenewed() {
+    let token = "stale";
+    setClerkTokenProvider(async () => token);
+    setSessionRenewer(async () => {
+      token = "fresh";
+      return true;
+    });
+  }
+  const auths = (f: ReturnType<typeof vi.fn>) =>
+    f.mock.calls
+      .map((c) => ((c as unknown[])[1] as RequestInit).headers as Record<string, string>)
+      .map((h) => h.Authorization);
+
+  it("is renewed and sent once more when streamed, and answers without a sign-in prompt", async () => {
+    staleThenRenewed();
+    const dto = { kind: "text", final_text: "done" };
+    const f = vi
+      .fn()
+      .mockResolvedValueOnce(res("invalid or expired session", 401))
+      .mockResolvedValueOnce(sse([frame("result", dto)]));
+    vi.stubGlobal("fetch", f);
+
+    await expect(inferRoundStreaming(body, () => {})).resolves.toEqual(dto);
+
+    expect(auths(f)).toEqual(["Bearer stale", "Bearer fresh"]);
+    expect(notifyAuthFailure).not.toHaveBeenCalled();
+  });
+
+  it("is renewed and sent once more on the plain route too", async () => {
+    staleThenRenewed();
+    const dto = { kind: "text", final_text: "done" };
+    const f = vi.fn().mockResolvedValueOnce(res("nope", 401)).mockResolvedValueOnce(res(dto));
+    vi.stubGlobal("fetch", f);
+
+    await expect(inferRound(body)).resolves.toEqual(dto);
+    expect(auths(f)).toEqual(["Bearer stale", "Bearer fresh"]);
+  });
+
+  it("refused twice, it is the sign-in it always was", async () => {
+    staleThenRenewed();
+    const f = vi.fn(async () => res("nope", 401));
+    vi.stubGlobal("fetch", f);
+
+    await expect(inferRoundStreaming(body, () => {})).rejects.toBeInstanceOf(SessionExpiredError);
+    expect(f).toHaveBeenCalledTimes(2);
+    expect(notifyAuthFailure).toHaveBeenCalled();
+  });
+
+  // Not "sign in again": the stored session is fine, the server just could not be asked.
+  it("that cannot even be renewed says the connection, not the sign-in, is the problem", async () => {
+    setClerkTokenProvider(async () => {
+      throw new SessionRenewalUnavailableError();
+    });
+    const f = vi.fn();
+    vi.stubGlobal("fetch", f);
+
+    const err = await inferRoundStreaming(body, () => {}).catch((e: unknown) => e);
+
+    expect(f).not.toHaveBeenCalled();
+    expect(isExpected(err)).toBe(true);
+    expect(toUserMessage(err)).toMatch(/connection/i);
+    expect(toUserMessage(err)).not.toMatch(/sign in/i);
+  });
 });
 
 describe("inferRound", () => {

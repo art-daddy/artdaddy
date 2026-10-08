@@ -2,7 +2,7 @@
 // logic + media pre-processing and uploads ready-to-send bytes; the server makes
 // the ONE authed model/API call (the credential stays server-side) and returns
 // bytes / text. Mirrors agent/api.ts's auth (401) + credit (402) handling.
-import { authHeaders, notifyAuthFailure } from "./auth";
+import { authedFetch, notifyAuthFailure } from "./auth";
 import { apiBase } from "./config";
 import { fetchWithRetry, RateLimitError, type RetryOpts } from "./http";
 import { CreditLimitError, markOverLimit } from "./usage";
@@ -45,15 +45,14 @@ export async function callAiProxy<R = Record<string, unknown>>(
   signal?: AbortSignal,
   opts: RetryOpts = {},
 ): Promise<AiProxyResult<R>> {
-  const res = await fetchWithRetry(
+  const res = await authedFetch(
     `${apiBase()}/ai/${name}`,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...(await authHeaders()) },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ...body, ...correlationBody() }),
     },
-    signal,
-    opts,
+    (u, init) => fetchWithRetry(u, init, signal, opts),
   );
   if (!res.ok) {
     if (res.status === 401) notifyAuthFailure();

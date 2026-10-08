@@ -1,4 +1,4 @@
-import { authHeaders, notifyAuthFailure } from "./auth";
+import { authedFetch, notifyAuthFailure } from "./auth";
 import { apiBase } from "./config";
 import { ArtDaddyError } from "../lib/errors";
 
@@ -30,11 +30,10 @@ export interface ContractResponse {
 }
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${apiBase()}${path}`, {
+  const res = await authedFetch(`${apiBase()}${path}`, {
     ...init,
     headers: {
       "Content-Type": "application/json",
-      ...(await authHeaders()),
       ...(init?.headers ?? {}),
     },
   });
