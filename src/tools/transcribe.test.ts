@@ -1,5 +1,5 @@
 import fc from "fast-check";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { CommandRunner } from "./command";
 import type { ClientToolContext } from "./context";
@@ -25,10 +25,12 @@ import {
   parseWhisperCppJson,
   peekTranscript,
   runWhisper,
+  TRANSCRIPT_WAIT_MS,
   WHISPER_MODELS,
   type WhisperModelSpec,
   whisperModelPath,
 } from "./transcribe";
+import { registerBackgroundTranscriber } from "./transcriptQueue";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -1658,5 +1660,376 @@ describe("getTranscriptTool (timeline transcript)", () => {
     expect(String(r.error)).toMatch(/'New Jeans\.mp3' is offline/);
     expect(String(r.error)).toMatch(/relink/i);
     expect(String(r.error)).not.toMatch(/file not found|iCloud Fotos/);
+  });
+});
+
+// 4h (owner decision 2026-10-04): get_transcript transcribes only what the clips play, plus a second
+// either side, and waits at most about a minute; what is not ready is listed and goes on in the
+// background. The file here speaks a word "w<k>" every 5 s for 80 minutes, and the fake whisper
+// hears only the stretch of the WAV it is handed, so what was transcribed shows in the words.
+describe("get_transcript transcribes what the clips play (4h)", () => {
+  const FPS = 30;
+  const unregister: Array<() => void> = [];
+  const releases: Array<() => void> = [];
+  afterEach(async () => {
+    for (const u of unregister.splice(0)) u();
+    vi.useRealTimers();
+    for (const release of releases.splice(0)) release();
+    await new Promise((r) => setTimeout(r, 10)); // a released run finishes and leaves the join map
+  });
+
+  /** A runner whose ffmpeg records the stretch each WAV holds and whose whisper hears only that
+   *  stretch. `hold(n)` makes the n-th whisper run (1-based) wait until it is released. */
+  function spoken(fs: MockFs, hold: (n: number) => Promise<void> | void = () => undefined) {
+    const held = (p: string): string => joinPath(p).replace(/\.[0-9a-z]+\.tmp\.wav$/, ".wav");
+    const stretch = new Map<string, [number, number]>();
+    const runs: Array<[number, number]> = [];
+    const runner: CommandRunner = {
+      run: vi.fn(async (program: string, args: string[]) => {
+        if (program === "ffmpeg") {
+          const at = (flag: string, none: number): number =>
+            args.includes(flag) ? Number(args[args.indexOf(flag) + 1]) : none;
+          const from = stretch.get(held(args[args.indexOf("-i") + 1]))?.[0] ?? 0;
+          stretch.set(held(args[args.length - 1]), [from + at("-ss", 0), from + at("-to", 4800)]);
+          fs.touch(args[args.length - 1]);
+        }
+        if (program === "whisper-cli") {
+          const [s, e] = stretch.get(held(args[args.indexOf("-f") + 1])) ?? [0, 4800];
+          runs.push([s, e]);
+          await hold(runs.length);
+          const ms = (t: number): number => Math.round((t - s) * 1000);
+          const said = Array.from({ length: 960 }, (_, k) => k * 5).filter(
+            (t) => t >= s && t + 0.5 <= e,
+          );
+          const transcription = said.map((t) => ({
+            offsets: { from: ms(t), to: ms(t + 0.5) },
+            text: ` w${t / 5}`,
+            tokens: [{ text: ` w${t / 5}`, offsets: { from: ms(t), to: ms(t + 0.5) }, p: 0.9 }],
+          }));
+          await fs.writeTextFile(
+            `${args[args.indexOf("-of") + 1]}.json`,
+            JSON.stringify({ result: { language: "en" }, transcription }),
+          );
+        }
+        return { code: 0, stdout: "", stderr: "" };
+      }),
+    };
+    return { runner, runs };
+  }
+
+  /** A project whose timeline holds `clips` on one audio track, every clip of one file, its own:
+   *  whisper runs are joined per file across the whole process, so tests must not share one.
+   *  Each clip: the source seconds it plays and where it starts on the timeline, in seconds. */
+  let files = 0;
+  async function project(
+    clips: Array<{ id: string; from: number; to: number; at: number; speed?: number }>,
+  ) {
+    const name = `talk${++files}.mp4`;
+    const fs = new MockFs();
+    fs.putModel();
+    fs.touch(joinPath(DIR, name));
+    await fs.writeTextFile(
+      joinPath(DIR, "internals", "timeline.json"),
+      JSON.stringify({
+        canvas: { width: 1920, height: 1080, fps: FPS },
+        tracks: [
+          {
+            id: "a1",
+            kind: "audio",
+            clips: clips.map((c) => ({
+              id: c.id,
+              media_ref: name,
+              source_in: c.from * FPS,
+              source_out: c.to * FPS,
+              timeline_in: c.at * FPS,
+              timeline_out: (c.at + (c.to - c.from) / (c.speed ?? 1)) * FPS,
+              ...(c.speed ? { speed: c.speed } : {}),
+            })),
+          },
+        ],
+      }),
+    );
+    return { fs, src: joinPath(DIR, name) };
+  }
+  const words = (r: Any): string[] =>
+    (r.clips as Array<{ words: Array<[number, string]> }>).flatMap((c) => c.words.map((w) => w[1]));
+
+  it("transcribes only the stretch a clip plays, plus a second either side", async () => {
+    const { fs } = await project([{ id: "c1", from: 60, to: 75, at: 0 }]);
+    const { runner, runs } = spoken(fs);
+    const r = (await getTranscriptTool({}, ctxWith(runner, fs))) as Any;
+    expect(runs).toEqual([[59, 76]]);
+    expect(r.clips[0].words).toEqual([
+      [0, "w12", 0, 15],
+      [1, "w13", 150, 165],
+      [2, "w14", 300, 315],
+    ]);
+    expect(r.in_progress).toBeUndefined();
+    expect(r.word_format).toEqual(["index", "text", "start_frame", "end_frame"]);
+    expect([r.script_preview, r.word_count]).toEqual(["w12 w13 w14", 3]);
+  });
+
+  it("maps a sped-up clip to the stretch of the file it plays, from a start inside it", async () => {
+    // At 2x, 15 s of timeline play 60-90 s of the file; from 5 s in, that is 70-90 s.
+    const { fs } = await project([{ id: "c1", from: 60, to: 90, at: 0, speed: 2 }]);
+    const { runner, runs } = spoken(fs);
+    const r = (await getTranscriptTool({ start_frame: 5 * FPS }, ctxWith(runner, fs))) as Any;
+    expect(runs).toEqual([[69, 91]]);
+    expect(r.clips[0].words.map((w: Any) => [w[1], w[2]])).toEqual([
+      ["w14", 150],
+      ["w15", 225],
+      ["w16", 300],
+      ["w17", 375],
+    ]);
+  });
+
+  it("returns no word before start_frame, even one the stretch's padding heard", async () => {
+    const { fs } = await project([{ id: "c1", from: 60, to: 75, at: 0 }]);
+    const { runner, runs } = spoken(fs);
+    const r = (await getTranscriptTool({ start_frame: 6 * FPS }, ctxWith(runner, fs))) as Any;
+    expect(runs).toEqual([[65, 76]]); // heard the word at 65 s, which plays at frame 150
+    expect(words(r)).toEqual(["w14"]);
+  });
+
+  it("transcribes nothing of a clip that ends where the asked-for frames begin", async () => {
+    const { fs } = await project([
+      { id: "c1", from: 60, to: 75, at: 0 },
+      { id: "c2", from: 600, to: 610, at: 15 },
+    ]);
+    const { runner, runs } = spoken(fs);
+    await getTranscriptTool({ start_frame: 15 * FPS }, ctxWith(runner, fs));
+    expect(runs).toEqual([[599, 611]]);
+  });
+
+  it("answers in timeline order whatever order the track lists its clips in", async () => {
+    const { fs } = await project([
+      { id: "late", from: 600, to: 610, at: 15 },
+      { id: "early", from: 60, to: 75, at: 0 },
+    ]);
+    const { runner } = spoken(fs);
+    const r = (await getTranscriptTool({}, ctxWith(runner, fs))) as Any;
+    expect(r.clips.map((c: Any) => c.clip_id)).toEqual(["early", "late"]);
+    expect(words(r)).toEqual(["w12", "w13", "w14", "w120", "w121"]);
+  });
+
+  it("lists no clip whose stretch holds no words", async () => {
+    const { fs } = await project([{ id: "c1", from: 61, to: 64, at: 0 }]);
+    const { runner, runs } = spoken(fs);
+    const r = (await getTranscriptTool({}, ctxWith(runner, fs))) as Any;
+    expect(runs).toEqual([[60, 65]]); // heard the word at 60 s, which the clip does not play
+    expect([r.clips, r.word_count]).toEqual([[], 0]);
+  });
+
+  it("merges in the file's order, whatever order the timeline plays the stretches in", async () => {
+    const { fs } = await project([
+      { id: "c1", from: 600, to: 610, at: 0 },
+      { id: "c2", from: 60, to: 75, at: 10 },
+      { id: "c3", from: 77, to: 90, at: 25 }, // its padded stretch starts where c2's ends
+    ]);
+    const { runner, runs } = spoken(fs);
+    const r = (await getTranscriptTool({}, ctxWith(runner, fs))) as Any;
+    expect(runs).toEqual([
+      [599, 611],
+      [59, 91],
+    ]);
+    expect(words(r)).toEqual(["w120", "w121", "w12", "w13", "w14", "w16", "w17"]);
+  });
+
+  it("scopes to a clip by its own id or by the video clip its sound was split from", async () => {
+    const { fs } = await project([
+      { id: "a1c", from: 60, to: 75, at: 0 },
+      { id: "a2c", from: 600, to: 610, at: 15 },
+    ]);
+    const at = joinPath(DIR, "internals", "timeline.json");
+    const tl = JSON.parse(await fs.readTextFile(at));
+    tl.tracks[0].clips[0].link_group = "L1";
+    tl.tracks.unshift({
+      id: "v1",
+      kind: "video",
+      clips: [{ ...tl.tracks[0].clips[0], id: "vc" }],
+    });
+    await fs.writeTextFile(at, JSON.stringify(tl));
+    const { runner } = spoken(fs);
+    const ctx = ctxWith(runner, fs);
+    expect(words(await getTranscriptTool({ clip_id: "vc" }, ctx))).toEqual(["w12", "w13", "w14"]);
+    expect(words(await getTranscriptTool({ clip_id: "a2c" }, ctx))).toEqual(["w120", "w121"]);
+    // The video clip is never read itself: its sound is the audio clip's.
+    expect(words(await getTranscriptTool({}, ctx))).toEqual(["w12", "w13", "w14", "w120", "w121"]);
+    expect(await getTranscriptTool({ clip_id: "nope" }, ctx)).toEqual({
+      ok: false,
+      error: "clip not found on the timeline: nope",
+    });
+  });
+
+  it("transcribes neighbouring stretches of one file once, and stretches far apart apart", async () => {
+    const { fs } = await project([
+      { id: "c1", from: 60, to: 75, at: 0 },
+      { id: "c2", from: 75.5, to: 90, at: 15 },
+      { id: "c3", from: 600, to: 610, at: 30 },
+    ]);
+    const { runner, runs } = spoken(fs);
+    const r = (await getTranscriptTool({}, ctxWith(runner, fs))) as Any;
+    expect(runs).toEqual([
+      [59, 91],
+      [599, 611],
+    ]);
+    expect(words(r)).toEqual(["w12", "w13", "w14", "w16", "w17", "w120", "w121"]);
+    // Asked again: the merged stretch was kept as one, and answers as one.
+    const again = (await getTranscriptTool({}, ctxWith(runner, fs))) as Any;
+    expect(words(again)).toEqual(words(r));
+    expect(runs).toHaveLength(2);
+  });
+
+  it("keeps a clip's words when a clip overlapping it joins, and transcribes only the newcomer", async () => {
+    const { fs } = await project([{ id: "c1", from: 60, to: 75, at: 0 }]);
+    const { runner, runs } = spoken(fs);
+    const ctx = ctxWith(runner, fs);
+    await getTranscriptTool({}, ctx);
+    const at = joinPath(DIR, "internals", "timeline.json");
+    const tl = JSON.parse(await fs.readTextFile(at));
+    const [first] = tl.tracks[0].clips;
+    tl.tracks[0].clips.push({
+      ...first,
+      id: "c2",
+      source_in: 70 * FPS,
+      source_out: 200 * FPS,
+      timeline_in: 15 * FPS,
+      timeline_out: 145 * FPS,
+    });
+    await fs.writeTextFile(at, JSON.stringify(tl));
+    const r = (await getTranscriptTool({}, ctx)) as Any;
+    expect(runs).toEqual([
+      [59, 76],
+      [69, 201],
+    ]);
+    expect(r.clips.map((c: Any) => c.clip_id)).toEqual(["c1", "c2"]);
+  });
+
+  it("answers from the file's whole transcript, when the indexer made one, without running", async () => {
+    const { fs, src } = await project([{ id: "c1", from: 60, to: 75, at: 0 }]);
+    const { runner, runs } = spoken(fs);
+    const ctx = ctxWith(runner, fs);
+    await runWhisper(ctx, src); // the indexer's whole-file run
+    runs.length = 0;
+    const r = (await getTranscriptTool({}, ctx)) as Any;
+    expect(runs).toEqual([]);
+    expect(words(r)).toEqual(["w12", "w13", "w14"]);
+  });
+
+  it("answers a stretch an earlier call transcribed without running again", async () => {
+    const { fs } = await project([{ id: "c1", from: 60, to: 75, at: 0 }]);
+    const { runner, runs } = spoken(fs);
+    const ctx = ctxWith(runner, fs);
+    await getTranscriptTool({}, ctx);
+    expect(words((await getTranscriptTool({}, ctx)) as Any)).toEqual(["w12", "w13", "w14"]);
+    expect(runs).toHaveLength(1);
+  });
+
+  // The whole file's 16 kHz audio is kept to cut windows from. Named by the file's PATH, a file
+  // edited in place had its windows cut from the audio of what it was before (found in 4h).
+  it("never cuts a window from the audio a file had before it changed", async () => {
+    const { fs, src } = await project([{ id: "c1", from: 60, to: 75, at: 0 }]);
+    const { runner } = spoken(fs);
+    const ctx = ctxWith(runner, fs);
+    await runWhisper(ctx, src); // extracts the whole file's audio, and keeps it
+    const cutFrom = async (): Promise<string[]> => {
+      vi.mocked(runner.run).mockClear();
+      await getTranscriptTool({}, ctx);
+      return vi
+        .mocked(runner.run)
+        .mock.calls.filter((c) => c[0] === "ffmpeg")
+        .map((c) => joinPath(c[1][c[1].indexOf("-i") + 1]));
+    };
+    fs.touch(src); // edited in place: written again, a second later
+    expect(await cutFrom()).toEqual([src]);
+  });
+
+  it("transcribes only the clips inside start_frame/end_frame, and only the part inside", async () => {
+    const { fs } = await project([
+      { id: "c1", from: 60, to: 75, at: 0 },
+      { id: "c2", from: 600, to: 610, at: 15 },
+    ]);
+    const { runner, runs } = spoken(fs);
+    const r = (await getTranscriptTool(
+      { start_frame: 0, end_frame: 5 * FPS },
+      ctxWith(runner, fs),
+    )) as Any;
+    expect(runs).toEqual([[59, 66]]);
+    expect(words(r)).toEqual(["w12"]);
+  });
+
+  /** Let pending promises run until `done`, never forever (fake timers: no timer can help). */
+  async function until(done: () => boolean): Promise<void> {
+    for (let i = 0; i < 10_000 && !done(); i++) await Promise.resolve();
+    expect(done()).toBe(true);
+  }
+
+  /** Three clips of three stretches; the second whisper run does not finish until the test ends. */
+  async function slow(): Promise<{
+    fs: MockFs;
+    src: string;
+    runner: CommandRunner;
+    runs: Array<[number, number]>;
+  }> {
+    const { fs, src } = await project([
+      { id: "c1", from: 60, to: 75, at: 0 },
+      { id: "c2", from: 600, to: 610, at: 15 },
+      { id: "c3", from: 1200, to: 1210, at: 25 },
+    ]);
+    const { runner, runs } = spoken(fs, (n) =>
+      n === 2 ? new Promise<void>((r) => releases.push(r)) : undefined,
+    );
+    return { fs, src, runner, runs };
+  }
+
+  it("waits at most TRANSCRIPT_WAIT_MS, lists what is not ready, and hands the rest on", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const { fs, src, runner, runs } = await slow();
+    const asked: Array<[string, string, unknown]> = [];
+    unregister.push(
+      registerBackgroundTranscriber(DIR, {
+        prioritize: (source, language, window) => (asked.push([source, language, window]), true),
+        loudness: () => null,
+      }),
+    );
+    let got: Any;
+    void getTranscriptTool({}, ctxWith(runner, fs)).then((r) => (got = r));
+    await until(() => runs.length === 2);
+    await vi.advanceTimersByTimeAsync(TRANSCRIPT_WAIT_MS - 1);
+    expect(got).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    await until(() => got !== undefined);
+    expect(got.ok).toBe(true);
+    expect(words(got)).toEqual(["w12", "w13", "w14"]);
+    expect(got.in_progress).toEqual([
+      { clip_id: "c2", track_id: "a1" },
+      { clip_id: "c3", track_id: "a1" },
+    ]);
+    expect(got.note).toMatch(/background/);
+    expect(got.note).toMatch(/not silence/);
+    // The run still going keeps going; the one never started is the background's now.
+    expect(runs).toHaveLength(2);
+    expect(asked).toEqual([[src, "", { start: 1199, end: 1211 }]]);
+  });
+
+  it("says the rest takes longer than a call waits when nothing transcribes in the background", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const { fs, runner, runs } = await slow();
+    let got: Any;
+    void getTranscriptTool({}, ctxWith(runner, fs)).then((r) => (got = r));
+    await until(() => runs.length === 2);
+    await vi.advanceTimersByTimeAsync(TRANSCRIPT_WAIT_MS);
+    await until(() => got !== undefined);
+    expect(got.in_progress).toHaveLength(2);
+    expect(got.note).toMatch(/longer than one call waits/);
+  });
+
+  it("answers cancelled at once when the call is stopped while it waits", async () => {
+    const { fs, runner, runs } = await slow();
+    const stop = new AbortController();
+    const call = getTranscriptTool({}, { ...ctxWith(runner, fs), signal: stop.signal });
+    for (let i = 0; i < 2000 && runs.length < 2; i++) await new Promise((r) => setTimeout(r, 1));
+    stop.abort();
+    expect(await call).toEqual({ ok: false, error: "cancelled" });
   });
 });

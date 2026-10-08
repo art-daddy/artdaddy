@@ -13,6 +13,7 @@ const {
   processImportedMedia,
   clearSourceUrlCache,
   ensureTranscript,
+  runWhisper,
   measureLoudness,
   reportAppError,
   sourceHasAudio,
@@ -20,6 +21,7 @@ const {
   processImportedMedia: vi.fn(async () => false),
   clearSourceUrlCache: vi.fn(),
   ensureTranscript: vi.fn(async () => ({ path: "t.json", parsed: {}, existed: false })),
+  runWhisper: vi.fn(async (..._a: unknown[]) => ({})),
   measureLoudness: vi.fn(async (..._a: unknown[]): Promise<object> => ({
     integrated_lufs: -23,
     true_peak_dbtp: -23,
@@ -37,7 +39,11 @@ const isSpeechEngineUnavailable = (e: unknown): boolean => e instanceof FakeEngi
 
 vi.mock("../preview/mediaProxy", () => ({ processImportedMedia }));
 vi.mock("../preview/resolve", () => ({ clearSourceUrlCache }));
-vi.mock("../tools/transcribe", () => ({ ensureTranscript, isSpeechEngineUnavailable }));
+vi.mock("../tools/transcribe", () => ({
+  ensureTranscript,
+  runWhisper,
+  isSpeechEngineUnavailable,
+}));
 vi.mock("../tools/loudness", () => ({ measureLoudness }));
 vi.mock("../timeline/placement", () => ({ sourceHasAudio }));
 vi.mock("../api/appEvents", () => ({ reportAppError }));
@@ -161,6 +167,50 @@ describe("IndexCoordinator", () => {
       expect(prioritizeTranscript("C:/p", "C:/media/other.mp4", "")).toBe(false);
       expect(prioritizeTranscript("C:/elsewhere", "C:/media/talk.mp4", "")).toBe(false);
     });
+  });
+
+  // 4h: get_transcript hands the background only the stretches of a file the clips play.
+  it("transcribes a window it is handed as that window, apart from the whole file, once", async () => {
+    runWhisper.mockReset();
+    runWhisper.mockResolvedValue({});
+    const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+    const talk = "C:/media/talk.mp4";
+    const window = { start: 59, end: 91 };
+    const asks: Array<[string, string, { start: number; end: number } | undefined]> = [
+      [talk, "", window],
+      [talk, "", { ...window }], // the same window: the same job
+      [talk, "", { start: 10, end: 91 }], // the same end, another start
+      [talk, "", { start: 59, end: 120 }], // the same start, another end
+      ["library/a.mp3", "", window], // a library path, read where it lies
+      [talk, "", undefined], // the whole file: a job of its own
+      [talk, "es", undefined], // ...and in each language asked for
+      [talk, "de", undefined],
+    ];
+    for (const [source, language, w] of asks)
+      expect(prioritizeTranscript("C:/p", source, language, w)).toBe(true);
+    await settle(
+      () => runWhisper.mock.calls.length >= 4 && ensureTranscript.mock.calls.length >= 3,
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    const ran = (calls: unknown[][]): string[] => calls.map((k) => JSON.stringify(k)).sort();
+    expect(ran(runWhisper.mock.calls.map((k) => [k[1], k[3], k[4]]))).toEqual(
+      ran([
+        [talk, undefined, window],
+        [talk, undefined, { start: 10, end: 91 }],
+        [talk, undefined, { start: 59, end: 120 }],
+        ["C:/p/library/a.mp3", undefined, window],
+      ]),
+    );
+    expect(
+      ran(ensureTranscript.mock.calls.map((k) => [(k as unknown[])[1], (k as unknown[])[3]])),
+    ).toEqual(
+      ran([
+        [talk, undefined],
+        [talk, "es"],
+        [talk, "de"],
+      ]),
+    );
+    c.dispose();
   });
 
   // The seen-set is permanent, so indexing a file that does not exist yet burns that asset's

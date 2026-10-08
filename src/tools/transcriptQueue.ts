@@ -6,6 +6,7 @@
 // project's directory (the stable identity both the editor and the agent's tool host share), so a
 // tool can reach it without holding the editor's store.
 import type { Loudness } from "./loudness";
+import type { TranscribeWindow } from "./transcribe";
 
 /** A look's loudness measurement, handed to the background. */
 export interface BackgroundLoudness {
@@ -18,9 +19,10 @@ export interface BackgroundLoudness {
 
 export interface BackgroundTranscriber {
   /** Put `source` (an absolute path) in `language` ("" = the default) at the front of the queue,
-   *  or report that it is already running. False when nothing will transcribe it: the project is
-   *  closing, or this machine cannot run the speech engine at all. */
-  prioritize(source: string, language: string): boolean;
+   *  or report that it is already running: the whole file, or only `window` (source seconds).
+   *  False when nothing will transcribe it: the project is closing, or this machine cannot run the
+   *  speech engine at all. */
+  prioritize(source: string, language: string, window?: TranscribeWindow | null): boolean;
   /** Measure `source` (an absolute path) over [start, end) seconds, the whole file when both are
    *  null, next. Null when nothing will: the project is closing. */
   loudness(source: string, start: number | null, end: number | null): BackgroundLoudness | null;
@@ -42,13 +44,15 @@ export function registerBackgroundTranscriber(
   };
 }
 
-/** Ask `projectDir`'s background transcriber to do `source` next. False when there is none. */
+/** Ask `projectDir`'s background transcriber to do `source` (or only `window` of it) next. False
+ *  when there is none. */
 export function prioritizeTranscript(
   projectDir: string,
   source: string,
   language: string,
+  window?: TranscribeWindow | null,
 ): boolean {
-  return byDir.get(keyOf(projectDir))?.prioritize(source, language) ?? false;
+  return byDir.get(keyOf(projectDir))?.prioritize(source, language, window) ?? false;
 }
 
 /** Ask `projectDir`'s background index to measure `source` over [start, end) next. Null when

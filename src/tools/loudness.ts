@@ -7,6 +7,7 @@ import type { AppCache } from "./appCache";
 import { stderrExcerpt } from "./command";
 import type { ClientToolContext } from "./context";
 import { backgroundLoudness } from "./transcriptQueue";
+import { settledWithin } from "../lib/settledWithin";
 
 export interface Loudness {
   /** EBU R128 integrated loudness, LUFS. -70 is ffmpeg's floor for silence. */
@@ -137,22 +138,6 @@ export const LOUDNESS_WAIT_MS = 60_000;
 
 export type LookedLoudness =
   Loudness | { error: string } | { status: "in_progress" | "unavailable"; note: string };
-
-/** `p`'s value, or null once `ms` pass or `signal` aborts, whichever is first. */
-function settledWithin<T>(p: Promise<T>, ms: number, signal?: AbortSignal): Promise<T | null> {
-  return new Promise((resolve) => {
-    const finish = (v: T | null): void => {
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", stop);
-      resolve(v);
-    };
-    const stop = (): void => finish(null);
-    const timer = setTimeout(stop, ms);
-    if (signal?.aborted) return stop();
-    signal?.addEventListener("abort", stop, { once: true });
-    p.then(finish, stop);
-  });
-}
 
 /** The loudness a look answers with, over [start, end) of a span `seconds` long (null: unknown).
  *  Kept figures come back at once, however long the span. Otherwise a span of up to

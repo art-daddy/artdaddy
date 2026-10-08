@@ -17,7 +17,7 @@ import type { ClientToolContext } from "./context";
 import { inspectMediaTool } from "./inspect";
 import { measureLoudness } from "./loudness";
 import { joinPath } from "./store";
-import { runWhisper, whisperModelPath } from "./transcribe";
+import { getTranscriptTool, runWhisper, whisperModelPath } from "./transcribe";
 import { registerBackgroundTranscriber } from "./transcriptQueue";
 import { decodeCountingRunner, ff, libRef, longFixture, mkCtx, nodeFs, nodeRunner } from "./__e2e";
 
@@ -596,6 +596,82 @@ describe("transcript: never waited on when long", () => {
         // Spoken at 6:00 of the FILE: the times are on the file's timeline, not the window's.
         for (const [, s] of words) expect(s).toBeGreaterThanOrEqual(355);
         expect(words.map((w) => w[0].toLowerCase()).join(" ")).toMatch(/fox|dog|quick/);
+      }
+    },
+    600_000,
+  );
+
+  // 4h: get_transcript transcribes what the CLIPS PLAY (plus a second either side), not the files
+  // they come from, and hands the words back on the timeline.
+  it.skipIf(!existsSync(model))(
+    "get_transcript transcribes only what a clip plays of a 12-minute file, in project frames",
+    async () => {
+      const { file, speech } = await longTalk();
+      const ref = await libRef(ctx, file, "audio");
+      const wavSeconds: number[] = [];
+      const watching: CommandRunner = {
+        async run(program, args, signal, cwd, onStdout) {
+          if (program === "whisper-cli") {
+            const p = await nodeRunner.run("ffprobe", [
+              "-v",
+              "error",
+              "-show_entries",
+              "format=duration",
+              "-of",
+              "csv=p=0",
+              args[args.indexOf("-f") + 1],
+            ]);
+            wavSeconds.push(Number(p.stdout.trim()));
+          }
+          return nodeRunner.run(program, args, signal, cwd, onStdout);
+        },
+      };
+      // One clip playing 5:55-6:20 of the file, placed 2 s into the timeline.
+      const FPS = 30;
+      await nodeFs.writeTextFile(
+        joinPath(proj, "internals", "timeline.json"),
+        JSON.stringify({
+          units: "frames",
+          canvas: { width: 320, height: 180, fps: FPS },
+          tracks: [
+            {
+              id: "a1",
+              kind: "audio",
+              z: 0,
+              clips: [
+                {
+                  id: "a",
+                  kind: "audio",
+                  media_ref: ref,
+                  source_in: 355 * FPS,
+                  source_out: 380 * FPS,
+                  timeline_in: 2 * FPS,
+                  timeline_out: 27 * FPS,
+                },
+              ],
+            },
+          ],
+          failures: [],
+        }),
+      );
+      const at = { ...ctx, runner: watching };
+      let r = (await getTranscriptTool({}, at)) as Any;
+      // Under the whole e2e lane at once the minute a call waits can pass before whisper is done:
+      // then the clip is in progress and calling again is the contract. The run is not repeated.
+      for (let i = 0; r.in_progress && i < 9; i++) r = (await getTranscriptTool({}, at)) as Any;
+      expect(r.ok, JSON.stringify(r).slice(0, 400)).toBe(true);
+      expect(r.in_progress).toBeUndefined();
+      expect(wavSeconds).toHaveLength(1);
+      expect(wavSeconds[0]).toBeGreaterThan(26); // 25 s played + 1 s either side
+      expect(wavSeconds[0]).toBeLessThan(28); // not 12 minutes
+      if (speech) {
+        const rows = r.clips[0].words as Array<[number, string, number, number]>;
+        console.log("[get_transcript] clip words:", rows.slice(0, 6)); // eslint-disable-line no-console
+        expect(rows.length).toBeGreaterThan(3);
+        expect(rows.map((w) => w[1].toLowerCase()).join(" ")).toMatch(/fox|dog|quick/);
+        // Spoken at 6:00 of the file, which this clip plays 5 s in: frame 60 + 150, on the timeline.
+        expect(rows[0][2]).toBeGreaterThanOrEqual(2 * FPS + 4 * FPS);
+        for (const [, , f] of rows) expect(f).toBeLessThan(27 * FPS);
       }
     },
     600_000,

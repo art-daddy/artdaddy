@@ -12,8 +12,10 @@ import { shortHash } from "./media";
 import type { ClientToolRegistry } from "./registry";
 import { MediaOfflineError } from "./refState";
 import { joinPath } from "./store";
+import { prioritizeTranscript } from "./transcriptQueue";
 import { beginSessionActivity } from "../observability/crashWatch";
 import { ArtDaddyError } from "../lib/errors";
+import { settledWithin } from "../lib/settledWithin";
 import {
   clearModelDownload,
   megabytes,
@@ -21,7 +23,7 @@ import {
   reportModelDownload,
 } from "../store/modelDownload";
 import { loadTimeline } from "../timeline/engine";
-import { findClip } from "../timeline/helpers";
+import { clipSourceSpanSeconds, findClip } from "../timeline/helpers";
 import type { Clip } from "../timeline/model";
 import { UNSPACED_CHAR } from "../timeline/wordJoin";
 
@@ -620,10 +622,12 @@ function once<T>(key: string, run: () => Promise<T>): Promise<T> {
 // whisper.cpp wants 16 kHz mono PCM WAV. Bump the rev when the extract recipe changes.
 const TRANSCODE_WAV_REV = 1;
 
-/** Where the whole-file 16 kHz extract of `src` lives (whether or not it exists yet). */
-function wavPathFor(ctx: ClientToolContext, src: string): Promise<string> {
+/** Where the whole-file 16 kHz extract of the file `audioOf` names lives (whether or not it exists
+ *  yet). `audioOf` is the file's identity where it has one, as for its transcript: a file changed
+ *  in place gets new audio, never the extract of what it was. */
+function wavPathFor(ctx: ClientToolContext, audioOf: string, windowKey = ""): Promise<string> {
   return ctx.store.prepareArtifact(
-    `transcribe/${shortHash(`${src}|16k|r${TRANSCODE_WAV_REV}`)}.wav`,
+    `transcribe/${shortHash(`${audioOf}|16k|r${TRANSCODE_WAV_REV}${windowKey}`)}.wav`,
   );
 }
 
@@ -742,6 +746,7 @@ async function transcriptKeys(
   window: TranscribeWindow | null | undefined,
 ): Promise<{
   lang: string;
+  identity: string | null;
   full: string | null;
   out: string | null;
   win: ReturnType<typeof windowArgs>;
@@ -756,7 +761,7 @@ async function transcriptKeys(
   const identity = await ctx.store.fileIdentity(src);
   const full = identity ? `whisper:${TRANSCRIPT_FORMAT}:${identity}:${size}:${lang}` : null;
   const out = full && win.key ? `${full}${win.key}` : full;
-  return { lang, full, out, win };
+  return { lang, identity, full, out, win };
 }
 
 /** Bump when what is stored under a transcript key changes meaning. */
@@ -813,7 +818,7 @@ export async function runWhisper(
   language?: string,
   window?: TranscribeWindow | null,
 ): Promise<ParsedTranscript> {
-  const { lang, full, out, win } = await transcriptKeys(ctx, src, size, language, window);
+  const { lang, identity, full, out, win } = await transcriptKeys(ctx, src, size, language, window);
   // A full transcript already answers every window, so a windowed ask must never re-run
   // over one we have — the indexer builds these in the background for exactly this reason.
   const done = (await cachedWhisper(ctx, full)) ?? (await cachedWhisper(ctx, out));
@@ -839,7 +844,8 @@ export async function runWhisper(
     // `-ot/-d` on an 80-minute extract took 11.9 s for a 60 s window where the window's own WAV took
     // 7.3 s (QA, 2026-10-03). The window is cut from the whole-file extract when that is on disk
     // (published by rename, so it is complete), else from the source.
-    const fullWav = await wavPathFor(ctx, src);
+    const audioOf = identity ?? src;
+    const fullWav = await wavPathFor(ctx, audioOf);
     const start = Math.max(0, Number(window?.start) || 0);
     const rawEnd = Number(window?.end);
     const end = Number.isFinite(rawEnd) && rawEnd > start ? rawEnd : null;
@@ -849,9 +855,7 @@ export async function runWhisper(
         : await extractWav(
             ctx,
             (await ctx.store.exists(fullWav)) ? fullWav : src,
-            await ctx.store.prepareArtifact(
-              `transcribe/${shortHash(`${src}|16k|r${TRANSCODE_WAV_REV}${win.key}`)}.wav`,
-            ),
+            await wavPathFor(ctx, audioOf, win.key),
             { start, end },
           );
     // whisper writes under a scratch name; the transcript reaches the cache in ONE atomic write,
@@ -907,6 +911,16 @@ function whisperLanguage(language: unknown): string {
   return normLanguage(language) || "auto";
 }
 
+/** The file `ref` names, or why there is none: offline (a linked file that moved, UJ-014), or
+ *  missing. */
+async function sourcePath(ctx: ClientToolContext, ref: string): Promise<string> {
+  const src = await ctx.store.resolveRef(ref);
+  if (src) return src;
+  const offline = await ctx.store.offlineMedia(ref).catch(() => null);
+  if (offline) throw new MediaOfflineError(offline);
+  throw new Error(`file not found: ${ref}`);
+}
+
 /** The whole-file transcript of `ref`: the one already made for this file, model and language
  *  (in any project), else a new one. Every caller that needs a file's words comes through here
  *  or {@link runWhisper}, so all of them share one transcript per file. */
@@ -916,12 +930,7 @@ export async function ensureTranscript(
   size: string = DEFAULT_MODEL,
   language?: string,
 ): Promise<EnsuredTranscript> {
-  const src = await ctx.store.resolveRef(ref);
-  if (!src) {
-    const offline = await ctx.store.offlineMedia(ref).catch(() => null);
-    if (offline) throw new MediaOfflineError(offline);
-    throw new Error(`file not found: ${ref}`);
-  }
+  const src = await sourcePath(ctx, ref);
   const made = await peekTranscript(ctx, src, size, language);
   if (made) return { parsed: made, existed: true };
   return { parsed: await runWhisper(ctx, src, size, language), existed: false };
@@ -958,13 +967,86 @@ export function clipWordFrames(
   return out;
 }
 
+/** How long get_transcript waits for transcription before answering with what is ready (owner
+ *  decision 2026-10-04): about a minute. What is not ready goes on in the background. */
+export const TRANSCRIPT_WAIT_MS = 60_000;
+
+/** Audio transcribed either side of what a clip plays, so a word its cut clips is heard whole. */
+const SPAN_PAD_S = 1;
+
+/** The SOURCE seconds `clip` plays inside [fromFrame, toFrame) of the timeline, or null. */
+function playedSpan(
+  clip: Clip,
+  fps: number,
+  fromFrame: number,
+  toFrame: number,
+): [number, number] | null {
+  const tin = Number(clip.timeline_in) || 0;
+  const tout = Number(clip.timeline_out) || 0;
+  const a = Math.max(tin, fromFrame);
+  const b = Math.min(tout, toFrame);
+  if (!(b > a)) return null;
+  const speed = Number(clip.speed) > 0 ? Number(clip.speed) : 1;
+  const sourceIn = (Number(clip.source_in) || 0) + (a - tin) * speed;
+  return clipSourceSpanSeconds(
+    { source_in: sourceIn, timeline_in: a, timeline_out: b, speed },
+    fps,
+  );
+}
+
+/** One clip as get_transcript reads it: its file, and the source seconds it plays. */
+interface ClipUse {
+  track: string;
+  clip: Clip;
+  src: string;
+  span: [number, number];
+}
+
+/** A stretch of one file to transcribe, covering the clips that play it. */
+interface SpanJob {
+  src: string;
+  window: { start: number; end: number };
+  words?: WordPayload[];
+  error?: string;
+}
+
+/** The stretch transcribed for a clip: what it plays, and {@link SPAN_PAD_S} either side. */
+const padded = (span: [number, number]): { start: number; end: number } => ({
+  start: Math.max(0, span[0] - SPAN_PAD_S),
+  end: span[1] + SPAN_PAD_S,
+});
+
+/** The windows to transcribe: each clip's padded span, merged where two of one file overlap, so
+ *  a split clip is one window and not two. */
+function spanJobs(uses: ClipUse[]): Map<ClipUse, SpanJob> {
+  const bySrc = new Map<string, ClipUse[]>();
+  for (const u of uses) bySrc.set(u.src, [...(bySrc.get(u.src) ?? []), u]);
+  const jobOf = new Map<ClipUse, SpanJob>();
+  for (const [src, list] of bySrc) {
+    let job: SpanJob | null = null;
+    for (const u of [...list].sort((p, q) => p.span[0] - q.span[0])) {
+      const { start, end } = padded(u.span);
+      if (job && start <= job.window.end) job.window.end = Math.max(job.window.end, end);
+      else job = { src, window: { start, end } };
+      jobOf.set(u, job);
+    }
+  }
+  return jobOf;
+}
+
 /** get_transcript: the CURRENT TIMELINE's spoken transcript in PROJECT FRAMES
  *  (other NLEs model). Walks the audio-track clips (a video clip's audio is split to a
  *  linked audio clip at placement), maps each clip's source words through its
  *  trim/speed/position, and concatenates in timeline order — so it always reflects
  *  what's audible after cuts. For a RAW source file's transcript, use inspect_media.
  *  Optional start_frame/end_frame window it to a time range; optional clip_id scopes
- *  it to one clip (its audio, or the audio split from that video clip). */
+ *  it to one clip (its audio, or the audio split from that video clip).
+ *
+ *  Only what the clips play is transcribed, plus a second either side (owner decision
+ *  2026-10-04): an 80-minute file a clip uses 2 minutes of is not transcribed whole. A file's
+ *  whole transcript, when the indexer has made it, answers every clip of it. The call waits at
+ *  most {@link TRANSCRIPT_WAIT_MS}; clips not ready by then are listed in `in_progress` and the
+ *  rest of the work goes to the project's background transcriber. */
 export async function getTranscriptTool(
   args: Args,
   ctx: ClientToolContext | null,
@@ -998,24 +1080,79 @@ export async function getTranscriptTool(
   }
   audio.sort((a, b) => (Number(a[1].timeline_in) || 0) - (Number(b[1].timeline_in) || 0));
 
-  const clipsOut: Array<Record<string, unknown>> = [];
   const failures: Array<{ clip_id: string; error: string }> = [];
-  let idx = 0;
-  let truncated = false;
+  const uses: ClipUse[] = [];
   for (const [track, clip] of audio) {
-    let words: WordPayload[];
+    const span = playedSpan(clip, fps, startFrame, endFrame);
+    if (!span) continue; // plays nothing inside the asked-for frames
     try {
-      words = (await ensureTranscript(ctx, String(clip.media_ref), DEFAULT_MODEL)).parsed.words;
+      uses.push({ track, clip, src: await sourcePath(ctx, String(clip.media_ref)), span });
     } catch (e) {
       // Swallowing this made a BROKEN transcriber indistinguishable from silence:
       // the tool reported success with no words and the model concluded the footage
       // had no speech. Keep going (one bad source shouldn't sink the rest) but
       // report what failed, and fail outright when nothing could be transcribed.
       failures.push({ clip_id: String(clip.id), error: transcriptionFailureText(e) });
+    }
+  }
+  // Kept already, the file's whole transcript (the indexer's) or a clip's own stretch from an
+  // earlier call: answered at once. Only the clips still without words are merged and transcribed,
+  // so a clip keeps its words when a new clip overlapping it joins the timeline.
+  const jobOf = new Map<ClipUse, SpanJob>();
+  const rest: ClipUse[] = [];
+  for (const use of uses) {
+    const window = padded(use.span);
+    const kept = await peekTranscript(ctx, use.src, DEFAULT_MODEL, undefined, window).catch(
+      () => null,
+    );
+    if (kept) jobOf.set(use, { src: use.src, window, words: kept.words });
+    else rest.push(use);
+  }
+  for (const [use, job] of spanJobs(rest)) jobOf.set(use, job);
+  const jobs = [...new Set(uses.map((u) => jobOf.get(u)!))]; // in the order the timeline plays them
+  // The rest, one at a time, for at most TRANSCRIPT_WAIT_MS in all (a merge an earlier call kept
+  // comes straight back from runWhisper). A run still going when the time is up keeps going and
+  // keeps its result; one not started yet goes to the background queue.
+  const until = Date.now() + TRANSCRIPT_WAIT_MS;
+  let overdue: SpanJob | null = null;
+  const queued: SpanJob[] = [];
+  for (const job of jobs) {
+    if (job.words) continue;
+    if (overdue) {
+      queued.push(job);
       continue;
     }
+    const run = runWhisper(ctx, job.src, DEFAULT_MODEL, undefined, job.window).then(
+      (t) => ({ words: t.words }),
+      (e: unknown) => ({ error: transcriptionFailureText(e) }),
+    );
+    const got = await settledWithin(run, Math.max(0, until - Date.now()), ctx.signal);
+    if (got) Object.assign(job, got);
+    else overdue = job;
+  }
+  if (ctx.signal?.aborted) return { ok: false, error: "cancelled" };
+  const handed = queued
+    .map((job) => prioritizeTranscript(ctx.store.projectDir, job.src, "", job.window))
+    .every(Boolean);
+
+  const clipsOut: Array<Record<string, unknown>> = [];
+  const pending: Array<{ clip_id: string; track_id: string }> = [];
+  let idx = 0;
+  let truncated = false;
+  for (const use of uses) {
+    const { clip, track } = use;
+    const job = jobOf.get(use)!;
+    if (job.error !== undefined) {
+      failures.push({ clip_id: String(clip.id), error: job.error });
+      continue;
+    }
+    if (!job.words) {
+      pending.push({ clip_id: String(clip.id), track_id: track });
+      continue;
+    }
+    if (truncated) continue;
     const rows: Array<[number, string, number, number]> = [];
-    for (const [text, tf, te] of clipWordFrames(words, clip, fps)) {
+    for (const [text, tf, te] of clipWordFrames(job.words, clip, fps)) {
       if (tf < startFrame || tf >= endFrame) continue;
       if (idx >= TRANSCRIPT_WORD_CAP) {
         truncated = true;
@@ -1024,13 +1161,12 @@ export async function getTranscriptTool(
       rows.push([idx++, text, tf, te]);
     }
     if (rows.length) clipsOut.push({ clip_id: clip.id, track_id: track, words: rows });
-    if (truncated) break;
   }
   const preview = clipsOut
     .flatMap((c) => (c.words as Array<[number, string, number, number]>).map((r) => r[1]))
     .join(" ");
   // Every audio source failed -> an empty transcript would be a lie, not a result.
-  if (failures.length && !clipsOut.length) {
+  if (failures.length && !clipsOut.length && !pending.length) {
     return {
       ok: false,
       error:
@@ -1039,6 +1175,9 @@ export async function getTranscriptTool(
       failed: failures,
     };
   }
+  const waiting = handed
+    ? "they are being transcribed in the background, only the parts the clips play"
+    : "transcribing them takes longer than one call waits";
   return {
     ok: true,
     fps,
@@ -1050,6 +1189,12 @@ export async function getTranscriptTool(
     script_preview: preview.slice(0, 600),
     script_chars: preview.length,
     ...(failures.length ? { failed: failures } : {}),
+    ...(pending.length
+      ? {
+          in_progress: pending,
+          note: `No words yet for ${pending.length} clip(s) in in_progress: ${waiting}. Call get_transcript again for them; their absence here is not silence.`,
+        }
+      : {}),
   };
 }
 

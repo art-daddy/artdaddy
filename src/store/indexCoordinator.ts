@@ -23,6 +23,7 @@ import type { CommandRunner } from "../tools/command";
 import type { ClientToolContext } from "../tools/context";
 import type { Loudness } from "../tools/loudness";
 import type { ProjectStoreAccess } from "../tools/store";
+import type { TranscribeWindow } from "../tools/transcribe";
 import { registerBackgroundTranscriber, type BackgroundLoudness } from "../tools/transcriptQueue";
 import type { Timeline } from "../timeline/model";
 import { kindOf } from "../media/formats";
@@ -41,15 +42,21 @@ const isIndexable = (p: string): boolean => {
 
 type Pass = "proxy" | "transcript" | "loudness";
 
-/** One transcription: a source, and the language asked for ("" = the default). */
+/** One transcription: a source, the language asked for ("" = the default), and the window of it
+ *  (source seconds), or the whole file. */
 interface TxJob {
   source: string;
   language: string;
+  window?: TranscribeWindow | null;
 }
 /** A transcript job's identity. A language other than the default is its own job: a Spanish
- *  transcript is not the default one. */
-const txKey = (j: TxJob): string =>
-  j.language ? `transcript\u0000${j.source}\u0000${j.language}` : `transcript\u0000${j.source}`;
+ *  transcript is not the default one. So is a window: it is not the whole file. */
+const txKey = (j: TxJob): string => {
+  const base = j.language
+    ? `transcript\u0000${j.source}\u0000${j.language}`
+    : `transcript\u0000${j.source}`;
+  return j.window ? `${base}\u0000w${j.window.start ?? 0}-${j.window.end ?? "end"}` : base;
+};
 
 /** One loudness measurement: a source over [start, end) seconds, the whole file when both are null. */
 interface LoudJob {
@@ -69,6 +76,7 @@ type Measured = Loudness | { error: string };
 interface IndexModules {
   processImportedMedia: typeof import("../preview/mediaProxy").processImportedMedia;
   ensureTranscript: typeof import("../tools/transcribe").ensureTranscript;
+  runWhisper: typeof import("../tools/transcribe").runWhisper;
   isSpeechEngineUnavailable: typeof import("../tools/transcribe").isSpeechEngineUnavailable;
   measureLoudness: typeof import("../tools/loudness").measureLoudness;
   sourceHasAudio: typeof import("../timeline/placement").sourceHasAudio;
@@ -128,7 +136,7 @@ export class IndexCoordinator {
   ) {
     // The tools (inspect_media) reach this project's queue by its directory.
     this.unregister = registerBackgroundTranscriber(store.projectDir, {
-      prioritize: (source, language) => this.prioritizeTranscript(source, language),
+      prioritize: (source, language, window) => this.prioritizeTranscript(source, language, window),
       loudness: (source, start, end) => this.measureSoon(source, start, end),
     });
   }
@@ -218,12 +226,17 @@ export class IndexCoordinator {
     this.ac.abort();
   }
 
-  /** Transcribe `source` (in `language`, "" = the default) NEXT: a look asked for it and is not
-   *  waiting, so it goes to the front of the one-at-a-time queue, even if the sweep transcribed it
-   *  once already (its cache may have been swept). False when nothing will transcribe it. */
-  prioritizeTranscript(source: string, language: string): boolean {
+  /** Transcribe `source` (in `language`, "" = the default), the whole file or only `window`, NEXT:
+   *  a caller asked for it and is not waiting, so it goes to the front of the one-at-a-time queue,
+   *  even if the sweep transcribed it once already (its cache may have been swept). False when
+   *  nothing will transcribe it. */
+  prioritizeTranscript(
+    source: string,
+    language: string,
+    window?: TranscribeWindow | null,
+  ): boolean {
     if (this.disposed || this.engineDown) return false;
-    const job: TxJob = { source, language };
+    const job: TxJob = { source, language, window: window ?? null };
     const key = txKey(job);
     if (this.txCurrent === key) return true;
     const at = this.txQ.findIndex((j) => txKey(j) === key);
@@ -331,6 +344,7 @@ export class IndexCoordinator {
         mods: {
           processImportedMedia: proxy.processImportedMedia,
           ensureTranscript: transcribe.ensureTranscript,
+          runWhisper: transcribe.runWhisper,
           isSpeechEngineUnavailable: transcribe.isSpeechEngineUnavailable,
           measureLoudness: loudness.measureLoudness,
           sourceHasAudio: placement.sourceHasAudio,
@@ -429,12 +443,13 @@ export class IndexCoordinator {
             !(await this.parkedOffline(txKey(job), job.source)) &&
             (await this.hasAudio(ctx, ready.mods, job.source))
           ) {
-            await ready.mods.ensureTranscript(
-              ctx,
-              job.source,
-              undefined,
-              job.language || undefined,
-            );
+            const language = job.language || undefined;
+            if (job.window) {
+              const abs = (await this.store.resolveRef(job.source)) ?? job.source;
+              await ready.mods.runWhisper(ctx, abs, undefined, language, job.window);
+            } else {
+              await ready.mods.ensureTranscript(ctx, job.source, undefined, language);
+            }
           }
         } catch (e) {
           if (ready.mods.isSpeechEngineUnavailable(e)) this.onEngineUnavailable(e);
