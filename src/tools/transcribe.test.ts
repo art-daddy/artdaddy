@@ -4,11 +4,16 @@ import { describe, expect, it, vi } from "vitest";
 import type { CommandRunner } from "./command";
 import type { ClientToolContext } from "./context";
 import { shortHash as shortHashOf } from "./media";
-import { ProjectStoreAccess, joinPath, type FsLike } from "./store";
+import {
+  ProjectStoreAccess,
+  joinPath,
+  markProjectDirDead,
+  reviveProjectDir,
+  type FsLike,
+} from "./store";
 import { useModelDownload } from "../store/modelDownload";
 import { isExpected } from "../lib/errors";
 import {
-  canonicalTranscriptRel,
   clipWordFrames,
   ensureTranscript,
   ensureWhisperModel,
@@ -33,13 +38,22 @@ class MockFs implements FsLike {
   bytes = new Map<string, Uint8Array>();
   modelMetadata = new Map<string, { size: number; sha256: string }>();
   appended: number[] = [];
+  /** When each path was last written: a second apart, as a clock the file identity can read. */
+  written = new Map<string, number>();
+  private clock = 1_700_000_000_000;
+  private stamp(n: string): void {
+    this.clock += 1000;
+    this.written.set(n, this.clock);
+  }
   touch(p: string): void {
     this.files.set(joinPath(p), "");
+    this.stamp(joinPath(p));
   }
   putBytes(p: string, b: Uint8Array): void {
     const n = joinPath(p);
     this.bytes.set(n, b.slice());
     this.modelMetadata.delete(n);
+    this.stamp(n);
   }
   putModel(p = MODEL): void {
     const spec = WHISPER_MODELS.small;
@@ -57,6 +71,7 @@ class MockFs implements FsLike {
   }
   async writeTextFile(p: string, c: string): Promise<void> {
     this.files.set(joinPath(p), c);
+    this.stamp(joinPath(p));
   }
   async readBytes(p: string): Promise<Uint8Array> {
     const v = this.bytes.get(joinPath(p));
@@ -75,14 +90,18 @@ class MockFs implements FsLike {
     this.bytes.set(n, next);
     this.appended.push(data.length);
   }
-  async stat(p: string): Promise<{ isDirectory: boolean; size: number }> {
+  async stat(p: string): Promise<{ isDirectory: boolean; size: number; mtimeMs?: number }> {
     const n = joinPath(p);
+    const mtimeMs = this.written.get(n) ?? 0;
     const model = this.modelMetadata.get(n);
-    if (model) return { isDirectory: false, size: model.size };
+    if (model) return { isDirectory: false, size: model.size, mtimeMs };
     const bytes = this.bytes.get(n);
-    if (bytes) return { isDirectory: false, size: bytes.length };
-    if (this.files.has(n)) return { isDirectory: false, size: this.files.get(n)!.length };
+    if (bytes) return { isDirectory: false, size: bytes.length, mtimeMs };
+    if (this.files.has(n)) return { isDirectory: false, size: this.files.get(n)!.length, mtimeMs };
     throw new Error("ENOENT");
+  }
+  async cacheDir(): Promise<string> {
+    return "C:/cache/app";
   }
   async probeMedia(p: string, headBytes: number) {
     const n = joinPath(p);
@@ -109,6 +128,9 @@ class MockFs implements FsLike {
     // A rename moves whatever is there, like the real one: the WAV extracts are written by a fake
     // ffmpeg as (empty) text entries, the model as bytes.
     const text = this.files.get(src);
+    const written = this.written.get(src);
+    if (written !== undefined) this.written.set(dst, written); // a move keeps the file's time
+    this.written.delete(src);
     if (text !== undefined) {
       this.files.set(dst, text);
       this.files.delete(src);
@@ -644,27 +666,29 @@ describe("language: none means detect, never whisper's English default (UJ-004)"
     expect(normLanguage("zh_Hans")).toBe("zh");
   });
 
-  it("files each distinct request's transcript separately, under transcripts/", () => {
-    const rel = (ref: string, size = "small", lang?: string) =>
-      canonicalTranscriptRel(ref, size, lang);
-    // transcripts/ is the folder the media GC keeps whole; a transcript filed elsewhere is swept.
-    expect(rel("library/a.mp4")).toMatch(/^transcripts\/[0-9a-f]{12}\.json$/);
-    const distinct = [
-      rel("library/a.mp4"),
-      rel("library/b.mp4"),
-      rel("library/a.mp4", "base"),
-      rel("library/a.mp4", "small", "es"),
-    ];
-    expect(new Set(distinct).size).toBe(distinct.length);
-    // One request, however it is spelled.
-    expect(rel("library/a.mp4", "small", "auto")).toBe(rel("library/a.mp4"));
-    expect(rel("library/a.mp4", "small", "en-US")).toBe(rel("library/a.mp4", "small", "en"));
-    expect(rel("C:\\proj\\library\\a.mp4")).toBe(rel("library/a.mp4"));
+  it("keeps each distinct request's transcript apart, and one request however it is spelled", async () => {
+    const fs = new MockFs();
+    fs.putModel();
+    const OTHER = "C:/media/other.mp4";
+    fs.touch(SRC);
+    fs.touch(OTHER);
+    const runner = transcribeRunner(fs);
+    const ctx = ctxWith(runner, fs);
+    await runWhisper(ctx, SRC);
+    await runWhisper(ctx, OTHER);
+    await runWhisper(ctx, SRC, "small", "es");
+    expect(whisperArgs(runner)).toHaveLength(3);
+    // One request, however it is spelled: none and "auto", a region and its language, either slash.
+    await runWhisper(ctx, SRC, "small", "auto");
+    await runWhisper(ctx, SRC, "small", "es-MX");
+    await runWhisper(ctx, SRC.replace(/\//g, "\\"));
+    expect(whisperArgs(runner)).toHaveLength(3);
   });
 
   it("asks whisper to detect the language when none is given", async () => {
     const fs = new MockFs();
     fs.putModel();
+    fs.touch(SRC);
     const runner = transcribeRunner(fs);
     await runWhisper(ctxWith(runner, fs), SRC);
     expect(whisperArgs(runner).map(langOf)).toEqual(["auto"]);
@@ -673,6 +697,7 @@ describe("language: none means detect, never whisper's English default (UJ-004)"
   it("treats 'auto' and no language as one request", async () => {
     const fs = new MockFs();
     fs.putModel();
+    fs.touch(SRC);
     const runner = transcribeRunner(fs);
     const ctx = ctxWith(runner, fs);
     await runWhisper(ctx, SRC);
@@ -683,6 +708,7 @@ describe("language: none means detect, never whisper's English default (UJ-004)"
   it("gives whisper the language of a regional code, and shares that language's transcript", async () => {
     const fs = new MockFs();
     fs.putModel();
+    fs.touch(SRC);
     const runner = transcribeRunner(fs);
     const ctx = ctxWith(runner, fs);
     await runWhisper(ctx, SRC, "small", "de-CH");
@@ -694,6 +720,7 @@ describe("language: none means detect, never whisper's English default (UJ-004)"
   it("never serves a transcript made under the English default as a detected one", async () => {
     const fs = new MockFs();
     fs.putModel();
+    fs.touch(SRC);
     const english = JSON.stringify({
       result: { language: "en" },
       transcription: [
@@ -721,23 +748,23 @@ describe("language: none means detect, never whisper's English default (UJ-004)"
     expect((await peekTranscript(ctx, SRC))?.language).toBe("de");
   });
 
-  it("still serves a transcript made in a language that was named", async () => {
+  it("serves a transcript made in a named language to the next ask in that language", async () => {
     const fs = new MockFs();
     fs.putModel();
-    const runner = transcribeRunner(fs);
+    fs.touch(SRC);
+    const runner = transcribeRunner(fs, {
+      json: JSON.stringify({ result: { language: "es" }, transcription: [] }),
+    });
     const ctx = ctxWith(runner, fs);
-    const named = await ctx.store.prepareArtifact(
-      `transcribe/${shortHashOf(`${SRC}|small|es`)}.json`,
-    );
-    await fs.writeTextFile(
-      named,
-      JSON.stringify({ result: { language: "es" }, transcription: [] }),
-    );
+    await runWhisper(ctx, SRC, "small", "es");
     expect((await runWhisper(ctx, SRC, "small", "es")).language).toBe("es");
-    expect(whisperArgs(runner)).toHaveLength(0);
+    expect(whisperArgs(runner)).toHaveLength(1);
   });
 
-  it("does the same for the canonical transcript every tool shares", async () => {
+  // Transcripts used to live in the project (4f moved them to the app cache). What an older
+  // version left there was made under whisper's English default for "no language", so it is never
+  // read: the next ask makes the transcript again, as decided for UJ-004 and the cache move.
+  it("never reads a transcript an older version left in the project", async () => {
     const fs = new MockFs();
     fs.touch(joinPath(DIR, "library/rede.mp4"));
     fs.putModel();
@@ -753,9 +780,6 @@ describe("language: none means detect, never whisper's English default (UJ-004)"
     );
     const r = await ensureTranscript(ctx, "library/rede.mp4");
     expect(r.existed).toBe(false);
-    expect(r.path).toBe(
-      await ctx.store.prepareArtifact(canonicalTranscriptRel("library/rede.mp4", "small")),
-    );
     expect(r.parsed.words.map((w) => w.word)).not.toContain("stale");
     expect(whisperArgs(runner).map(langOf)).toEqual(["auto"]);
   });
@@ -1118,6 +1142,7 @@ describe("runWhisper on a window (UJ-012)", () => {
   it("reads only the window's audio when the whole file's extract is not on disk", async () => {
     const fs = new MockFs();
     fs.putModel();
+    fs.touch(SRC);
     const runner = transcribeRunner(fs);
     const t = await runWhisper(ctxWith(runner, fs), SRC, "small", undefined, {
       start: 60,
@@ -1141,6 +1166,7 @@ describe("runWhisper on a window (UJ-012)", () => {
   it("cuts the window from the whole file's extract when it is already on disk", async () => {
     const fs = new MockFs();
     fs.putModel();
+    fs.touch(SRC);
     const runner = transcribeRunner(fs);
     const ctx = ctxWith(runner, fs);
     // A French transcript of the whole file leaves its 16 kHz extract behind (and no default one).
@@ -1161,6 +1187,7 @@ describe("runWhisper on a window (UJ-012)", () => {
   it("never hands a window's transcript out as the whole file's", async () => {
     const fs = new MockFs();
     fs.putModel();
+    fs.touch(SRC);
     const ctx = ctxWith(transcribeRunner(fs), fs);
     expect(await peekTranscript(ctx, SRC)).toBeNull();
     await runWhisper(ctx, SRC, "small", undefined, { start: 60, end: 90 });
@@ -1179,7 +1206,7 @@ describe("runWhisper on a window (UJ-012)", () => {
 });
 
 describe("ensureTranscript", () => {
-  it("transcribes to a canonical path, then reuses it (no re-transcription)", async () => {
+  it("transcribes once, then answers from what it made (no re-transcription)", async () => {
     const fs = new MockFs();
     fs.touch(joinPath(DIR, "audio.mp4"));
     fs.putModel();
@@ -1189,19 +1216,7 @@ describe("ensureTranscript", () => {
     expect(first.parsed.words.map((w) => w.word)).toEqual(["Hello", "world", "Bye"]);
     const again = await ensureTranscript(ctx, "audio.mp4");
     expect(again.existed).toBe(true);
-    expect(again.path).toBe(first.path);
-  });
-  it("honors an explicit output path", async () => {
-    const fs = new MockFs();
-    fs.touch(joinPath(DIR, "audio.mp4"));
-    fs.putModel();
-    const r = await ensureTranscript(
-      ctxWith(transcribeRunner(fs), fs),
-      "audio.mp4",
-      "small",
-      "custom/t.json",
-    );
-    expect(String(r.path)).toContain("custom/t.json");
+    expect(again.parsed).toEqual(first.parsed);
   });
   it("throws on missing media", async () => {
     const fs = new MockFs();
@@ -1342,6 +1357,166 @@ describe("ensureTranscript", () => {
     expect(err.name).toBe("SpeechEngineUnavailableError");
     expect(err.code).toBe("speech_engine_unavailable");
     expect(err.message).toMatch(/could not start on this machine/);
+  });
+});
+
+// 4f: a transcript is kept by FILE, outside every project. These assert the rule by what whisper
+// is asked to do: once per file, whichever project asks, and again only for different bytes.
+describe("one transcript per file, in the app-wide cache (4f)", () => {
+  const A = "C:/data/projects/a";
+  const B = "C:/data/projects/b";
+  const catalog = (fs: MockFs, dir: string, clips: object[]): void =>
+    void fs.files.set(joinPath(dir, "internals/library.json"), JSON.stringify({ clips }));
+  const whisperRuns = (runner: CommandRunner): number =>
+    (runner.run as Any).mock.calls.filter((c: Any[]) => c[0] === "whisper-cli").length;
+  const ctxIn = (dir: string, runner: CommandRunner, fs: MockFs): ClientToolContext => ({
+    store: new ProjectStoreAccess(dir, fs),
+    runner,
+  });
+  /** The same media copied into two projects: other paths, other write times, the same bytes. */
+  const copiedInto = (fs: MockFs, ...dirs: string[]): void => {
+    for (const dir of dirs) {
+      catalog(fs, dir, [{ id: "media_abc", path: "library/media_abc.mp4", filename: "talk.mp4" }]);
+      fs.putBytes(joinPath(dir, "library/media_abc.mp4"), new Uint8Array([1, 2, 3]));
+    }
+  };
+
+  it("transcribes a file two projects use once", async () => {
+    const fs = new MockFs();
+    fs.putModel();
+    copiedInto(fs, A, B);
+    const runner = transcribeRunner(fs);
+    expect((await ensureTranscript(ctxIn(A, runner, fs), "media_abc")).existed).toBe(false);
+    const inB = await ensureTranscript(ctxIn(B, runner, fs), "media_abc");
+    expect(inB.existed).toBe(true);
+    expect(inB.parsed.words.map((w) => w.word)).toEqual(["Hello", "world", "Bye"]);
+    expect(whisperRuns(runner)).toBe(1);
+  });
+
+  it("keeps a linked file's transcript when it is moved and relinked, not when it is edited", async () => {
+    const fs = new MockFs();
+    fs.putModel();
+    const linkAt = (path: string): void =>
+      catalog(fs, A, [{ id: "media_lnk", path, filename: "talk.mp4", external: true }]);
+    fs.putBytes("D:/shoot/talk.mp4", new Uint8Array([1, 2, 3]));
+    linkAt("D:/shoot/talk.mp4");
+    const runner = transcribeRunner(fs);
+    const ctx = ctxIn(A, runner, fs);
+    await ensureTranscript(ctx, "media_lnk");
+
+    await fs.rename("D:/shoot/talk.mp4", "E:/moved/talk.mp4");
+    linkAt("E:/moved/talk.mp4");
+    expect((await ensureTranscript(ctx, "media_lnk")).existed).toBe(true);
+
+    // Edited where it lies: the same size, written later. Not the bytes it was transcribed from.
+    fs.putBytes("E:/moved/talk.mp4", new Uint8Array([9, 9, 9]));
+    expect((await ensureTranscript(ctx, "media_lnk")).existed).toBe(false);
+    expect(whisperRuns(runner)).toBe(2);
+  });
+
+  // Moving the cache out of the project is what lets a transcription finish after its project
+  // closed: nothing may be written into a closed project, and the next project still gets it.
+  it("keeps a transcript whose project was closed and deleted while whisper ran", async () => {
+    const fs = new MockFs();
+    fs.putModel();
+    copiedInto(fs, A, B);
+    const runner = transcribeRunner(fs);
+    const run = runner.run as ReturnType<typeof vi.fn>;
+    const inner = run.getMockImplementation()!;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let started!: () => void;
+    const whisperStarted = new Promise<void>((r) => (started = r));
+    run.mockImplementation(async (program: string, args: string[]) => {
+      if (program === "whisper-cli") {
+        started();
+        await gate;
+      }
+      return inner(program, args);
+    });
+    try {
+      const inA = ensureTranscript(ctxIn(A, runner, fs), "media_abc");
+      await whisperStarted;
+      markProjectDirDead(A);
+      release();
+      await inA;
+      expect((await ensureTranscript(ctxIn(B, runner, fs), "media_abc")).existed).toBe(true);
+      expect(whisperRuns(runner)).toBe(1);
+    } finally {
+      reviveProjectDir(A);
+    }
+  });
+
+  it("keeps the transcript outside the project", async () => {
+    const fs = new MockFs();
+    fs.putModel();
+    copiedInto(fs, A);
+    await ensureTranscript(ctxIn(A, transcribeRunner(fs), fs), "media_abc");
+    const json = [...fs.files.keys()].filter((p) => p.endsWith(".json"));
+    expect(json.filter((p) => p.startsWith("C:/cache/app/transcripts/"))).toHaveLength(1);
+    expect(json.filter((p) => p.startsWith(`${A}/`))).toEqual([`${A}/internals/library.json`]);
+  });
+
+  // The background indexer and inspect_media can ask from different projects at once.
+  it("runs one whisper for a file two projects ask for at the same moment", async () => {
+    const fs = new MockFs();
+    fs.putModel();
+    copiedInto(fs, A, B);
+    const runner = transcribeRunner(fs);
+    const [inA, inB] = await Promise.all([
+      ensureTranscript(ctxIn(A, runner, fs), "media_abc"),
+      ensureTranscript(ctxIn(B, runner, fs), "media_abc"),
+    ]);
+    expect(inB.parsed).toEqual(inA.parsed);
+    expect(whisperRuns(runner)).toBe(1);
+  });
+
+  it("makes a transcript again when what it finds kept is not whisper's output", async () => {
+    const fs = new MockFs();
+    fs.putModel();
+    copiedInto(fs, A);
+    const runner = transcribeRunner(fs);
+    await ensureTranscript(ctxIn(A, runner, fs), "media_abc");
+    const [entry] = [...fs.files.keys()].filter((p) => p.startsWith("C:/cache/app/transcripts/"));
+    const { key } = JSON.parse(fs.files.get(entry)!) as { key: string };
+    fs.files.set(entry, JSON.stringify({ key, value: "Hello world Bye" }));
+    const again = await ensureTranscript(ctxIn(A, runner, fs), "media_abc");
+    expect(again.existed).toBe(false);
+    expect(again.parsed.words.map((w) => w.word)).toEqual(["Hello", "world", "Bye"]);
+    expect(whisperRuns(runner)).toBe(2);
+  });
+
+  // Without an identity (a platform that does not say when a file was written) or without a cache
+  // folder, nothing is kept: slower, never wrong. Above all, no file is answered with another's
+  // transcript.
+  it("keeps nothing it cannot key, and answers no file with another's transcript", async () => {
+    const untimed = (fs: MockFs): MockFs => {
+      const stat = fs.stat.bind(fs);
+      fs.stat = async (p: string) => {
+        const s = await stat(p);
+        return p.startsWith("C:/media/") ? { isDirectory: s.isDirectory, size: s.size } : s;
+      };
+      return fs;
+    };
+    const disks = {
+      "no identity": untimed(new MockFs()),
+      "no cache folder": Object.assign(new MockFs(), { cacheDir: undefined }),
+    };
+    for (const [lacking, fs] of Object.entries(disks)) {
+      fs.putModel();
+      fs.touch("C:/media/one.mp4");
+      fs.touch("C:/media/two.mp4");
+      const runner = transcribeRunner(fs);
+      const ctx = ctxWith(runner, fs);
+      for (const src of ["C:/media/one.mp4", "C:/media/two.mp4", "C:/media/one.mp4"])
+        expect((await runWhisper(ctx, src)).words.length, lacking).toBeGreaterThan(0);
+      expect(whisperRuns(runner), lacking).toBe(3);
+      // ...and the same for a window of each.
+      const w = { start: 30, end: 40 };
+      for (const src of ["C:/media/one.mp4", "C:/media/two.mp4"])
+        await runWhisper(ctx, src, "small", undefined, w);
+      expect(whisperRuns(runner), lacking).toBe(5);
+    }
   });
 });
 

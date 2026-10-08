@@ -22,8 +22,17 @@ import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 
 import { addCaptionsTool } from "./captions";
+import type { ClientToolContext } from "./context";
 import { ensureTranscript, getTranscriptTool } from "./transcribe";
-import { have, installE2EDocuments, libRef, mkCtx, openE2EDoc, resetE2EDocuments } from "./__e2e";
+import {
+  have,
+  installE2EDocuments,
+  libRef,
+  mkCtx,
+  nodeFs,
+  openE2EDoc,
+  resetE2EDocuments,
+} from "./__e2e";
 import { addClipsTool } from "../timeline/placement";
 import { ensureTimeline, loadTimeline } from "../timeline/engine";
 import type { Clip } from "../timeline/model";
@@ -96,6 +105,49 @@ describe.skipIf(!enabled)("add_captions transcribes real speech", () => {
     const all = clips.map(textOf).join(" ").toLowerCase();
     expect(all).toMatch(/[a-z]{3,}/);
     console.log(`[speech] ${clips.length} captions:`, clips.map(textOf).join(" | ").slice(0, 300));
+  }, 900_000);
+
+  // 4f, end to end with real whisper: the transcript is kept by FILE in the app cache, outside
+  // every project, so a second project with the same file reads it and whisper does not run.
+  it("transcribes a file once for every project that uses it, and keeps it outside both", async () => {
+    installE2EDocuments();
+    if (!(await have("ffmpeg"))) return;
+    let whisperRuns = 0;
+    const counted = (dir: string): ClientToolContext => {
+      const base = mkCtx(dir);
+      return {
+        ...base,
+        runner: {
+          run: (program, ...rest) => {
+            if (program === "whisper-cli") whisperRuns += 1;
+            return base.runner.run(program, ...rest);
+          },
+        },
+      };
+    };
+    const [a, b] = await Promise.all(
+      ["a", "b"].map((n) => fsp.mkdtemp(path.join(os.tmpdir(), `artdaddy-speech-${n}-`))),
+    );
+    dirs.push(a, b);
+    const inA = counted(a);
+    const inB = counted(b);
+    const refA = await libRef(inA, SPEECH, "audio");
+    const refB = await libRef(inB, SPEECH, "audio");
+    expect(refB, "the same bytes are the same media in both projects").toBe(refA);
+
+    const first = await ensureTranscript(inA, refA);
+    expect(first.parsed.words.length, "whisper produced no words").toBeGreaterThan(3);
+    const runs = whisperRuns;
+    const second = await ensureTranscript(inB, refB);
+    expect(second.existed).toBe(true);
+    expect(whisperRuns, "the second project ran whisper again").toBe(runs);
+    expect(second.parsed.words.map((w) => w.word)).toEqual(first.parsed.words.map((w) => w.word));
+
+    // The artifact, not the call: whisper's output is in the app cache folder, in neither project.
+    const kept = await fsp.readdir(path.join(await nodeFs.cacheDir!(), "transcripts"));
+    expect(kept.length).toBeGreaterThan(0);
+    for (const dir of [a, b])
+      expect(existsSync(path.join(dir, "internals", "cache", "transcripts"))).toBe(false);
   }, 900_000);
 });
 

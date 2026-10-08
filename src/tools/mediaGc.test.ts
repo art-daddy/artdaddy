@@ -217,34 +217,35 @@ describe("sweepArtifactCache (close-time derived-artifact GC)", () => {
     expect(await hasCache(fs, "gemini/gem_vid_abc.mp4")).toBe(false);
   });
 
-  it("NEVER touches exports (a user deliverable) or transcripts (a whisper run each)", async () => {
+  it("NEVER touches exports (a user deliverable)", async () => {
     const fs = new MockFs();
     seed(fs, { catalog: { clips: [] }, timeline: { tracks: [] } });
     cache(fs, "exports/my final cut.mp4");
-    cache(fs, "transcripts/abc123.json");
     const { removed } = await sweep(fs);
     expect(removed).toEqual([]);
     expect(await hasCache(fs, "exports/my final cut.mp4")).toBe(true);
-    expect(await hasCache(fs, "transcripts/abc123.json")).toBe(true);
   });
 
-  // `transcribe/` is runWhisper's cache and holds both classes at once. Sweeping the whole
-  // directory kept nothing that was expensive: the WAV is an ffmpeg rebuild away, the JSON is
-  // a whisper run. Asserted in BOTH directions in one test, because keeping the JSON is only
-  // correct if the 100 MB WAV beside it still goes.
-  it("keeps whisper's JSON but still collects the big WAV next to it", async () => {
+  // Transcripts live in the app-wide cache since 4f. What older versions kept in the project is
+  // read by nothing now, so it goes like any other scratch: the WAVs and whisper's JSON in
+  // `transcribe/`, and the transcripts in `transcripts/`.
+  it("collects the transcripts older versions kept in the project", async () => {
     const fs = new MockFs();
     seed(fs, { catalog: { clips: [] }, timeline: { tracks: [] } });
     cache(fs, "transcribe/7e596bc14733.wav");
     cache(fs, "transcribe/a2b0e5d209e0.json");
+    cache(fs, "transcripts/abc123.json");
     const { removed } = await sweep(fs);
-    expect(removed).toEqual(["transcribe/7e596bc14733.wav"]);
-    expect(await hasCache(fs, "transcribe/a2b0e5d209e0.json")).toBe(true);
-    expect(await hasCache(fs, "transcribe/7e596bc14733.wav")).toBe(false);
+    expect([...removed].sort()).toEqual([
+      "transcribe/7e596bc14733.wav",
+      "transcribe/a2b0e5d209e0.json",
+      "transcripts/abc123.json",
+    ]);
+    for (const rel of removed) expect(await hasCache(fs, rel)).toBe(false);
   });
 
-  // The keep is scoped to that directory, not to .json everywhere: a gemini/inspect payload
-  // that happens to be JSON is still a one-shot artifact.
+  // Nothing is kept for being JSON: a gemini/inspect payload that happens to be JSON is still a
+  // one-shot artifact.
   it("does not spare a .json in a directory that has no expensive results", async () => {
     const fs = new MockFs();
     seed(fs, { catalog: { clips: [] }, timeline: { tracks: [] } });

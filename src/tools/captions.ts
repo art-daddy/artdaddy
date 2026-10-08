@@ -192,9 +192,8 @@ export async function addCaptionsTool(args: Args, ctx: ClientToolContext | null)
         segment_id: number;
       }>;
       try {
-        words = (
-          await ensureTranscript(ctx, String(clip.media_ref), undefined, undefined, language)
-        ).parsed.words;
+        words = (await ensureTranscript(ctx, String(clip.media_ref), undefined, language)).parsed
+          .words;
       } catch (e) {
         // One unreadable source must not sink the rest, but it must not read as silence either.
         failures.push({ clip_id: String(clip.id), error: transcriptionFailureText(e) });

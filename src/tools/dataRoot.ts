@@ -50,6 +50,18 @@ export async function projectsRoot(): Promise<string> {
   return joinPath(await dataRoot(), "projects");
 }
 
+/** The app-wide cache: `<app cache dir>/cache`, i.e. `%LOCALAPPDATA%\com.artdaddy.app\cache` on
+ *  Windows, `~/Library/Caches/com.artdaddy.app/cache` on macOS and `~/.cache/com.artdaddy.app/cache`
+ *  on Linux. Local, never the roaming profile the projects live in: it is a gigabyte of work that
+ *  can always be redone. Not `%LOCALAPPDATA%\ArtDaddy\cache` as first decided (2026-10-07): that
+ *  folder is where the installer puts the app, and its uninstaller removes only the files it
+ *  installed, so a cache there would outlive the app. The uninstaller's "delete app data" removes
+ *  this one, with the webview's own data beside it. */
+export async function appCacheRoot(): Promise<string> {
+  const { appCacheDir } = await import("@tauri-apps/api/path");
+  return joinPath(await appCacheDir(), "cache");
+}
+
 // Windows reserves these device names case-insensitively (con, prn, aux, nul,
 // com0-9, lpt0-9) -- a file/dir named one of them doesn't name a real path.
 const RESERVED_DEVICE = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])$/i;

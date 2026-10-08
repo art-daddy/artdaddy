@@ -123,7 +123,7 @@ describe("IndexCoordinator", () => {
       await settle(() => ensureTranscript.mock.calls.length >= 2);
       const call = ensureTranscript.mock.calls[1] as unknown[];
       expect(call[1]).toBe("C:/media/charla.mp4");
-      expect(call[4]).toBe("es");
+      expect(call[3]).toBe("es"); // ensureTranscript(ctx, ref, size, language)
       c.dispose();
     });
 

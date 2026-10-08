@@ -140,24 +140,16 @@ export async function sweepOwnedMedia(store: ProjectStoreAccess): Promise<{ remo
 // gemini encodes, downloads, inspect frames, research screenshots, whisper scratch wavs —
 // lived until the project was deleted. Only `library/` was ever collected.
 
-/** Cache subdirectories that are NOT throwaway, keyed by the class of thing they hold. */
+/** Cache subdirectories that are NOT throwaway, keyed by the class of thing they hold. Transcripts
+ *  were kept here too; they live in the app-wide cache now (4f), and what older versions left in
+ *  `transcripts/` and `transcribe/` is never read again, so it goes like any other scratch. */
 const CACHE_KEEP_ALWAYS = new Set([
   "exports", // a user DELIVERABLE (the Downloads fallback), not a cache — never ours to delete
-  "transcripts", // small JSON, but each one costs a whisper run to rebuild
 ]);
 
 /** Derived from ONE library asset and expensive to rebuild: kept while that asset is
  *  live, collected once it isn't. Their filenames embed the asset's id or source hash. */
 const CACHE_ASSET_DERIVED = new Set(["proxies", "posters", "thumbnails"]);
-
-/** Directories holding a bulk intermediate AND an expensive result, where the split is by
- *  extension. `transcribe/` is runWhisper's own cache: a 16 kHz WAV that ffmpeg rebuilds in
- *  seconds — and at 18-106 MB is most of what this GC exists to reclaim — sitting beside the
- *  whisper JSON, which costs a whisper RUN. That is the same reason `transcripts/` is kept
- *  outright; sweeping the whole directory kept the bytes that are cheap to make and threw
- *  away the ones that are not, and left runWhisper's "a full transcript answers every window"
- *  short-circuit with nothing to find after a close. */
-const CACHE_KEEP_JSON = new Set(["transcribe"]);
 
 /** Every key that identifies a LIVE asset in a derived artifact's filename: the media id
  *  (thumbnails) and the proxy/poster hash of its source (proxies, posters). */
@@ -171,8 +163,8 @@ function liveArtifactKeys(clips: LibraryClip[]): string[] {
 }
 
 /** Close-time GC of the derived-artifact cache. Removes regeneratable files under
- *  `internals/cache/` that nothing persisted points at, keeping user deliverables,
- *  transcripts, and the per-asset proxies/posters/thumbnails of media that is still live.
+ *  `internals/cache/` that nothing persisted points at, keeping user deliverables
+ *  and the per-asset proxies/posters/thumbnails of media that is still live.
  *  Same fail-closed contract as {@link sweepOwnedMedia}: if an authoritative reference
  *  source exists but can't be read, remove NOTHING. Returns the relative paths removed. */
 export async function sweepArtifactCache(
@@ -207,7 +199,6 @@ export async function sweepArtifactCache(
     if (!sub.isDirectory) continue; // stray top-level file: leave it, we didn't put it there
     if (CACHE_KEEP_ALWAYS.has(sub.name)) continue;
     const assetDerived = CACHE_ASSET_DERIVED.has(sub.name);
-    const keepJson = CACHE_KEEP_JSON.has(sub.name);
     let entries: { name: string; isDirectory: boolean }[];
     try {
       entries = await store.readDir(joinPath(cacheDir, sub.name));
@@ -218,7 +209,6 @@ export async function sweepArtifactCache(
       if (e.isDirectory) continue; // one level deep; nested trees are left alone
       const rel = `${sub.name}/${e.name}`;
       if (refBlob.includes(e.name)) continue; // a checkpoint/timeline/catalog can still reach it
-      if (keepJson && e.name.toLowerCase().endsWith(".json")) continue; // costs a whisper run
       if (assetDerived && liveKeys.some((k) => e.name.includes(k))) continue; // still-live asset
       await store.remove(joinPath(cacheDir, rel)).catch(() => undefined);
       removed.push(rel);

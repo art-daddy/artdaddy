@@ -1,54 +1,57 @@
 // add_captions places clips a viewer will read, so these assert the CLIPS on the timeline —
 // their words, their frames, their group — not that the tool was called.
 //
-// Transcription is stubbed by seeding its on-disk cache, which is the same door a real second
-// run comes through. That keeps whisper out of the test without faking the module boundary.
+// Transcription is stubbed by putting whisper's output where the app cache keeps it for the file,
+// which is the same door a real second run comes through. That keeps whisper out of the test
+// without faking the module boundary.
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { addCaptionsTool } from "./captions";
 import { loadTimeline, applyOp } from "../timeline/engine";
 import { lineWidthIn, textBox } from "../timeline/renderPlan";
-import { DIR, resetTestDocuments, seededCtx } from "../test/timelineKit";
+import { CachingMemFs, DIR, resetTestDocuments, seededCtx as kitCtx } from "../test/timelineKit";
 import { joinPath } from "./store";
 import type { ClientToolContext } from "./context";
+import type { CommandRunner } from "./command";
 import type { Clip } from "../timeline/model";
 
 type Any = Record<string, unknown>;
 const FPS = 30;
 
-/** Seed the transcript cache for `ref` so ensureTranscript never shells out to whisper. */
+/** A project on a disk the app cache can use: it needs to know when each file was written. */
+const seededCtx = (runner?: CommandRunner) => kitCtx(runner, DIR, new CachingMemFs());
+
+/** Seed the transcript cache for `ref` so ensureTranscript never shells out to whisper: whisper's
+ *  own JSON, one token per word, a segment per segment number. The media must exist first. */
 async function seedTranscript(
   ctx: ClientToolContext,
   ref: string,
   words: Array<[string, number, number] | [string, number, number, number]>,
   language = "",
 ): Promise<void> {
-  // The canonical key itself, not a copy of its formula: a copy goes on seeding the old key when
-  // the key changes, as it did for UJ-004.
-  const { canonicalTranscriptRel } = await import("./transcribe");
-  const rel = canonicalTranscriptRel(ref, "small", language || undefined);
-  const path = await ctx.store.prepareArtifact(rel);
-  await ctx.store.writeText(
-    path,
-    JSON.stringify({
-      transcription: {
-        language: language || "en",
-        duration_seconds: 10,
-        segments: [],
-        words: words.map(([word, start, end, segment], i) => ({
-          word_id: i,
-          segment_id: segment ?? 0,
-          index_in_segment: i,
-          word,
-          start_seconds: start,
-          end_seconds: end,
-          start_timestamp: "00:00:00",
-          end_timestamp: "00:00:00",
-          probability: 1,
-        })),
-      },
-    }),
-  );
+  // The slot itself, not a copy of its formula: a copy goes on seeding the old key when the key
+  // changes, as it did for UJ-004 and again when transcripts moved to the app cache.
+  const { transcriptCacheSlot } = await import("./transcribe");
+  const src = await ctx.store.resolveRef(ref);
+  const slot = await transcriptCacheSlot(ctx, String(src), "small", language || undefined);
+  const cache = await ctx.store.appCache();
+  if (!src || !slot.key || !cache) throw new Error(`cannot seed a transcript for ${ref}`);
+  const segments = new Map<number, Array<[string, number, number]>>();
+  for (const [word, start, end, segment] of words)
+    segments.set(segment ?? 0, [...(segments.get(segment ?? 0) ?? []), [word, start, end]]);
+  const ms = (s: number): number => Math.round(s * 1000);
+  await cache.put(slot.namespace, slot.key, {
+    result: { language: language || "en" },
+    transcription: [...segments.values()].map((ws) => ({
+      offsets: { from: ms(ws[0][1]), to: ms(ws[ws.length - 1][2]) },
+      text: ws.map(([w]) => ` ${w}`).join(""),
+      tokens: ws.map(([w, start, end]) => ({
+        text: ` ${w}`,
+        offsets: { from: ms(start), to: ms(end) },
+        p: 1,
+      })),
+    })),
+  });
 }
 
 /** A timeline with one audio clip covering [0, durFrames) that references `ref`. The media file

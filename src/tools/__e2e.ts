@@ -6,7 +6,7 @@
 // goldens stay stable across ffmpeg builds instead of pinning exact pixels.
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream, existsSync, promises as fsp } from "node:fs";
+import { createReadStream, existsSync, promises as fsp, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -199,7 +199,7 @@ export const nodeFs: FsLike = {
   },
   async stat(p) {
     const s = await fsp.stat(p);
-    return { isDirectory: s.isDirectory(), size: s.size };
+    return { isDirectory: s.isDirectory(), size: s.size, mtimeMs: s.mtimeMs };
   },
   async probeMedia(p, headBytes) {
     const hash = createHash("sha256");
@@ -250,7 +250,17 @@ export const nodeFs: FsLike = {
   async mkdir(p) {
     await fsp.mkdir(p, { recursive: true });
   },
+  // The app cache, in its own folder per test file (each file loads this module afresh): a run
+  // sees only what this file's tests made, as a fresh install would.
+  cacheDir: () => (e2eCacheDir ??= freshCacheDir()),
 };
+
+let e2eCacheDir: Promise<string> | null = null;
+async function freshCacheDir(): Promise<string> {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "artdaddy-e2e-cache-"));
+  process.once("exit", () => rmSync(dir, { recursive: true, force: true }));
+  return dir;
+}
 
 /** True if a binary answers its version flag (ffmpeg/ffprobe -version). */
 export async function have(program: string): Promise<boolean> {

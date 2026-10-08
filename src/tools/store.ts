@@ -4,6 +4,7 @@
 // fs plugin in production, a mock/Node fs in tests. Ports the Python
 // `_resolve_media_ref` + `Library.resolve` logic (src/akaru).
 
+import { type AppCache, appCacheFor } from "./appCache";
 import { currentProjectSession } from "./coordinator";
 
 /** What the importer can learn about a file it must never load. */
@@ -38,8 +39,9 @@ export interface FsLike {
   readRange?(path: string, offset: number, maxBytes: number): Promise<Uint8Array>;
   /** Size and file-vs-directory WITHOUT opening the file. Optional (desktop only).
    *  The cheap answer to both "how big is this?" and "is this a folder?" — asking either
-   *  question by reading the file is what took a 16 GB machine down. */
-  stat?(path: string): Promise<{ isDirectory: boolean; size: number }>;
+   *  question by reading the file is what took a 16 GB machine down. `mtimeMs` is when the file
+   *  was last written, where the platform says. */
+  stat?(path: string): Promise<{ isDirectory: boolean; size: number; mtimeMs?: number }>;
   /** List a directory's immediate children. Optional (project-lifecycle ops). */
   readDir?(path: string): Promise<DirEntry[]>;
   /** Recursively delete a file or directory. Optional (delete_project). */
@@ -55,6 +57,10 @@ export interface FsLike {
    *  production (Tauri) fs implements it. User-facing exports land here
    *  (other NLEs: deliverables go to ~/Downloads, never inside the project). */
   downloadDir?(): Promise<string>;
+  /** The app-wide cache folder, outside every project (`<app cache dir>/cache`, see
+   *  `appCacheRoot`), where transcripts and loudness figures are kept by file (`appCache.ts`).
+   *  Optional: the desktop and the e2e lanes have one; without it nothing is kept between calls. */
+  cacheDir?(): Promise<string>;
 }
 
 export interface DirEntry {
@@ -390,6 +396,32 @@ export class ProjectStoreAccess {
     const out: string[] = [];
     for (const c of await this.listClips()) if (await this.isOffline(c)) out.push(c.id);
     return out;
+  }
+
+  /** WHICH bytes `abs` holds, the same in every project that uses them: what a transcript or a
+   *  loudness figure in the app cache is kept under (4f). Null when that cannot be said (nothing
+   *  there, or no stat on this filesystem), and then nothing is cached.
+   *  - Media the project owns is its library id, the hash of its bytes at import, and its size.
+   *    The app never rewrites it, so the copy in another project is the same file.
+   *  - A linked file can be edited or replaced where it lies, so when it was last written (to the
+   *    second; filesystems keep different precision) is part of it too. Moved and relinked, it
+   *    is still the same file.
+   *  - Anything else is its path, size and time. */
+  async fileIdentity(abs: string): Promise<string | null> {
+    const s = normSep((abs ?? "").trim());
+    if (!s || !this.fs.stat) return null;
+    const st = await this.fs.stat(s).catch(() => null);
+    if (!st || st.isDirectory) return null;
+    const row = (await this.listClips()).find((c) => normSep(clipAbs(this.projectDir, c)) === s);
+    if (row && !row.external) return `media:${row.id}:${st.size}`;
+    if (typeof st.mtimeMs !== "number" || !Number.isFinite(st.mtimeMs)) return null;
+    const written = Math.floor(st.mtimeMs / 1000);
+    return row ? `media:${row.id}:${st.size}:${written}` : `file:${s}:${st.size}:${written}`;
+  }
+
+  /** The app-wide cache this store's filesystem names, or null where there is none. */
+  appCache(): Promise<AppCache | null> {
+    return appCacheFor(this.fs);
   }
 
   /** A catalog row whose FILE is not on disk: generation is asynchronous, so a `media_ref` is real

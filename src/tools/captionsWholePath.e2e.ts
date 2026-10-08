@@ -24,7 +24,7 @@ import {
   srcSolid,
   srcTone,
 } from "./__e2e";
-import { canonicalTranscriptRel } from "./transcribe";
+import { transcriptCacheSlot } from "./transcribe";
 import { addClipsTool, addTextClipsTool, updateTextTool } from "../timeline/placement";
 import { getTimelineTool } from "../timeline/ops";
 import { ensureTimeline, loadTimeline, applyOp } from "../timeline/engine";
@@ -32,35 +32,35 @@ import type { ClientToolContext } from "./context";
 
 type Rec = Record<string, unknown>;
 
-/** Seed `ref`'s transcript where a finished transcription leaves it, so add_captions reads these words
- *  through its real door without running whisper. */
+/** Seed `ref`'s transcript where a finished transcription leaves it (whisper's JSON, in the app
+ *  cache, under the file), so add_captions reads these words through its real door without
+ *  running whisper. */
 async function seedTranscript(
   ctx: ClientToolContext,
   ref: string,
   words: Array<[string, number, number]>,
 ): Promise<void> {
-  const file = await ctx.store.prepareArtifact(canonicalTranscriptRel(ref, "small", undefined));
-  await ctx.store.writeText(
-    file,
-    JSON.stringify({
-      transcription: {
-        language: "en",
-        duration_seconds: words.length ? words[words.length - 1][2] : 0,
-        segments: [],
-        words: words.map(([word, start, end], i) => ({
-          word_id: i,
-          segment_id: 1,
-          index_in_segment: i,
-          word,
-          start_seconds: start,
-          end_seconds: end,
-          start_timestamp: "00:00:00",
-          end_timestamp: "00:00:00",
-          probability: 1,
-        })),
-      },
-    }),
-  );
+  const src = await ctx.store.resolveRef(ref);
+  const slot = await transcriptCacheSlot(ctx, String(src), "small", undefined);
+  const cache = await ctx.store.appCache();
+  if (!src || !slot.key || !cache) throw new Error(`cannot seed a transcript for ${ref}`);
+  const ms = (s: number): number => Math.round(s * 1000);
+  await cache.put(slot.namespace, slot.key, {
+    result: { language: "en" },
+    transcription: words.length
+      ? [
+          {
+            offsets: { from: ms(words[0][1]), to: ms(words[words.length - 1][2]) },
+            text: words.map(([w]) => ` ${w}`).join(""),
+            tokens: words.map(([w, start, end]) => ({
+              text: ` ${w}`,
+              offsets: { from: ms(start), to: ms(end) },
+              p: 1,
+            })),
+          },
+        ]
+      : [],
+  });
 }
 
 const dirs: string[] = [];

@@ -27,6 +27,28 @@ export class MemFs implements FsLike {
   }
 }
 
+/** {@link MemFs} with what the app cache needs: a stat that knows when each file was written (a
+ *  second apart), and the cache folder. Opt-in, so the suites built on MemFs keep testing the
+ *  paths a filesystem without stat takes. */
+export class CachingMemFs extends MemFs {
+  written = new Map<string, number>();
+  private clock = 1_700_000_000_000;
+  override async writeTextFile(p: string, c: string): Promise<void> {
+    await super.writeTextFile(p, c);
+    this.clock += 1000;
+    this.written.set(joinPath(p), this.clock);
+  }
+  async stat(p: string): Promise<{ isDirectory: boolean; size: number; mtimeMs?: number }> {
+    const n = joinPath(p);
+    const v = this.files.get(n);
+    if (v === undefined) throw new Error(`ENOENT ${p}`);
+    return { isDirectory: false, size: v.length, mtimeMs: this.written.get(n) ?? 0 };
+  }
+  async cacheDir(): Promise<string> {
+    return "C:/cache/app";
+  }
+}
+
 export const DIR = "C:/proj";
 
 export function makeRunner(
@@ -102,8 +124,9 @@ export async function flushTestDocuments(): Promise<void> {
 export async function seededCtx(
   runner?: CommandRunner,
   dir: string = DIR,
+  fs: FsLike = new MemFs(),
 ): Promise<{ ctx: ClientToolContext; store: ProjectStoreAccess; doc: ProjectDocument }> {
-  const store = new ProjectStoreAccess(dir, new MemFs());
+  const store = new ProjectStoreAccess(dir, fs);
   const doc = registerTestDocument(dir);
   await ensureTimeline(store);
   // Default to a runner that reports a real video stream, so a bare ".mp4" is a

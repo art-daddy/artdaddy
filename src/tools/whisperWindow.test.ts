@@ -21,9 +21,21 @@ function harness(opts: { failWhisper?: number; failFfmpeg?: number; gate?: Promi
   let whisperFailures = opts.failWhisper ?? 0;
   let ffmpegFailures = opts.failFfmpeg ?? 0;
   let gate = opts.gate;
+  // The app cache transcripts are kept in (4f), one per harness like the rest of its disk.
+  const kept = new Map<string, unknown>();
+  const appCache = {
+    get: async (ns: string, key: string) => kept.get(`${ns}|${key}`) ?? null,
+    put: async (ns: string, key: string, value: unknown) => {
+      kept.set(`${ns}|${key}`, value);
+      published.push(`${ns}|${key}`);
+      return true;
+    },
+  };
   const ctx = {
     store: {
       projectDir: DIR,
+      fileIdentity: async (src: string) => `file:${src}`,
+      appCache: async () => appCache,
       prepareArtifact: async (rel: string) => `${DIR}/internals/cache/${rel}`,
       exists: async (p: string) => files.has(p),
       readText: async (p: string) => texts.get(p) ?? WHISPER_JSON,

@@ -362,7 +362,6 @@ export class IndexCoordinator {
               ctx,
               job.source,
               undefined,
-              undefined,
               job.language || undefined,
             );
           }

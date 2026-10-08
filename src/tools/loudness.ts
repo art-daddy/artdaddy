@@ -33,13 +33,33 @@ export function parseLoudness(stderr: string): Loudness {
   };
 }
 
-/** Measure `path`'s first audio stream over [start, end) seconds (the whole file when null). */
+/** Bump when what is measured, or how, changes: entries under the old one are then never read. */
+const LOUDNESS_FORMAT = "v1";
+
+/** The span as a key: from the start and to the end name themselves, whatever form they came in. */
+function spanKey(start: number | null, end: number | null): string {
+  const from = start !== null && start > 0 ? start.toFixed(3) : "0";
+  return `${from}-${end !== null ? end.toFixed(3) : "end"}`;
+}
+
+const isLoudness = (v: unknown): v is Loudness =>
+  !!v && typeof v === "object" && "integrated_lufs" in v && "rms_dbfs" in v;
+
+/** Measure `path`'s first audio stream over [start, end) seconds (the whole file when null). Kept
+ *  in the app cache under the file's identity and the span (4f), so the same span of the same
+ *  file is measured once, in any project. A failure is not kept. */
 export async function measureLoudness(
   ctx: ClientToolContext,
   path: string,
   start: number | null,
   end: number | null,
 ): Promise<Loudness | { error: string }> {
+  const identity = await ctx.store.fileIdentity(path).catch(() => null);
+  const key = identity ? `loudness:${LOUDNESS_FORMAT}:${identity}:${spanKey(start, end)}` : null;
+  const cache = key ? await ctx.store.appCache() : null;
+  const kept = cache && key ? await cache.get<unknown>("loudness", key) : null;
+  if (isLoudness(kept)) return kept;
+
   const args = ["-hide_banner", "-nostats"];
   if (start !== null && start > 0) args.push("-ss", start.toFixed(3));
   if (end !== null) args.push("-to", end.toFixed(3));
@@ -66,5 +86,6 @@ export async function measureLoudness(
   const got = parseLoudness(r.stderr);
   if (got.integrated_lufs === null && got.rms_dbfs === null)
     return { error: "loudness could not be read from ffmpeg's output" };
+  if (cache && key) await cache.put("loudness", key, got);
   return got;
 }

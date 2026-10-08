@@ -219,9 +219,14 @@ export class TauriFs implements FsLike {
   readBytes(path: string): Promise<Uint8Array> {
     return readFile(path);
   }
-  async stat(path: string): Promise<{ isDirectory: boolean; size: number }> {
+  async stat(path: string): Promise<{ isDirectory: boolean; size: number; mtimeMs?: number }> {
     const s = await fsStat(path);
-    return { isDirectory: !!s.isDirectory, size: Number(s.size) || 0 };
+    const written = s.mtime ? new Date(s.mtime).getTime() : NaN;
+    return {
+      isDirectory: !!s.isDirectory,
+      size: Number(s.size) || 0,
+      ...(Number.isFinite(written) ? { mtimeMs: written } : {}),
+    };
   }
   async writeBytes(path: string, data: Uint8Array): Promise<void> {
     await writeFile(path, data);
@@ -289,6 +294,10 @@ export class TauriFs implements FsLike {
   }
   downloadDir(): Promise<string> {
     return downloadDir();
+  }
+  async cacheDir(): Promise<string> {
+    const { appCacheRoot } = await import("./dataRoot");
+    return appCacheRoot();
   }
 }
 

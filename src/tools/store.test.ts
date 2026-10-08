@@ -337,6 +337,102 @@ describe("ProjectStoreAccess offline media (UJ-014)", () => {
   });
 });
 
+// 4f: what a transcript or loudness figure in the app cache is kept under. The rule is WHICH
+// bytes: the same for a copy in another project and for a linked file moved and relinked, and
+// different the moment a linked file is written again.
+describe("ProjectStoreAccess.fileIdentity (the app cache's key for a file)", () => {
+  class StatFs extends MockFs {
+    written = new Map<string, number>();
+    put(path: string, contents: string, at: number): void {
+      this.set(path, contents);
+      this.written.set(joinPath(path), at);
+    }
+    async stat(path: string): Promise<{ isDirectory: boolean; size: number; mtimeMs?: number }> {
+      const v = this.files.get(joinPath(path));
+      if (v === undefined) throw new Error(`ENOENT ${path}`);
+      return { isDirectory: false, size: v.length, mtimeMs: this.written.get(joinPath(path)) };
+    }
+  }
+  const OTHER = "C:/Users/x/projects/proj2";
+  const id = (fs: FsLike, dir: string, abs: string) =>
+    new ProjectStoreAccess(dir, fs).fileIdentity(abs);
+  const lib = (fs: StatFs, dir: string, clips: unknown[]) =>
+    fs.set(joinPath(dir, "internals", "library.json"), JSON.stringify({ clips }));
+
+  it("names a copy in another project as the same file, whenever each was written", async () => {
+    const fs = new StatFs();
+    for (const [dir, at] of [
+      [DIR, 1_000],
+      [OTHER, 90_000_000],
+    ] as const) {
+      lib(fs, dir, [{ id: "media_abc", path: "library/media_abc.mp4" }]);
+      fs.put(joinPath(dir, "library/media_abc.mp4"), "bytes", at);
+    }
+    const here = await id(fs, DIR, joinPath(DIR, "library/media_abc.mp4"));
+    expect(here).toBeTruthy();
+    expect(await id(fs, OTHER, joinPath(OTHER, "library/media_abc.mp4"))).toBe(here);
+  });
+
+  it("follows a linked file that moved, and not one written again where it lies", async () => {
+    const fs = new StatFs();
+    const link = (path: string) =>
+      lib(fs, DIR, [{ id: "media_lnk", path, filename: "talk.mp4", external: true }]);
+    fs.put("D:/shoot/talk.mp4", "bytes", 5_000);
+    link("D:/shoot/talk.mp4");
+    const before = await id(fs, DIR, "D:/shoot/talk.mp4");
+
+    fs.put("E:/moved/talk.mp4", "bytes", 5_000); // moved: same bytes, same time
+    link("E:/moved/talk.mp4");
+    expect(await id(fs, DIR, "E:\\moved\\talk.mp4")).toBe(before);
+
+    fs.put("E:/moved/talk.mp4", "bytez", 9_000); // edited in place: same size, later
+    expect(await id(fs, DIR, "E:/moved/talk.mp4")).not.toBe(before);
+    fs.put("E:/moved/talk.mp4", "bytes!", 5_000); // another size, even at the old time
+    expect(await id(fs, DIR, "E:/moved/talk.mp4")).not.toBe(before);
+  });
+
+  it("tells two files apart that the library does not know", async () => {
+    const fs = new StatFs();
+    fs.put("D:/a/take.mp4", "bytes", 5_000);
+    fs.put("D:/b/take.mp4", "bytes", 5_000);
+    const a = await id(fs, DIR, "D:/a/take.mp4");
+    expect(a).toBeTruthy();
+    expect(await id(fs, DIR, "D:/b/take.mp4")).not.toBe(a);
+    expect(await id(fs, DIR, " D:\\a\\take.mp4 ")).toBe(a); // however the path is written
+    // ...and a file the library does not know never borrows the name of one it does.
+    lib(fs, DIR, [{ id: "media_abc", path: "library/media_abc.mp4" }]);
+    fs.put(joinPath(DIR, "library/media_abc.mp4"), "bytes", 5_000);
+    const known = await id(fs, DIR, joinPath(DIR, "library/media_abc.mp4"));
+    expect(await id(fs, DIR, "D:/a/take.mp4")).not.toBe(known);
+  });
+
+  // Filesystems keep write times at different precision (exFAT 10 ms, FAT 2 s): a copy that lost
+  // the milliseconds is the same file.
+  it("reads a write time to the second", async () => {
+    const fs = new StatFs();
+    fs.put("D:/a/take.mp4", "bytes", 5_000);
+    const a = await id(fs, DIR, "D:/a/take.mp4");
+    fs.put("D:/a/take.mp4", "bytes", 5_990);
+    expect(await id(fs, DIR, "D:/a/take.mp4")).toBe(a);
+    fs.put("D:/a/take.mp4", "bytes", 6_000);
+    expect(await id(fs, DIR, "D:/a/take.mp4")).not.toBe(a);
+  });
+
+  it("names nothing it cannot vouch for: no file, no stat, no time for a linked file", async () => {
+    const fs = new StatFs();
+    expect(await id(fs, DIR, "D:/gone.mp4")).toBeNull();
+    expect(await id(new MockFs(), DIR, "D:/gone.mp4")).toBeNull();
+    fs.set("D:/untimed.mp4", "bytes"); // a platform that does not say when it was written
+    expect(await id(fs, DIR, "D:/untimed.mp4")).toBeNull();
+    fs.put("D:/nan.mp4", "bytes", Number.NaN); // or says it in a way that is not a time
+    expect(await id(fs, DIR, "D:/nan.mp4")).toBeNull();
+    const folder = Object.assign(new StatFs(), {
+      stat: async () => ({ isDirectory: true, size: 0, mtimeMs: 5_000 }),
+    });
+    expect(await id(folder, DIR, "D:/shoot")).toBeNull();
+  });
+});
+
 describe("ProjectStoreAccess.resolveMediaRef (narrow agent-facing resolver)", () => {
   it("REJECTS a bare absolute path even when the file exists (resolveRef would accept it)", async () => {
     const fs = new MockFs();

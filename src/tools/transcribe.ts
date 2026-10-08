@@ -214,7 +214,12 @@ function cutWords(text: string, pieces: Piece[]): Cut[] | null {
  *  are reconstructed by merging BPE tokens (a leading space starts a new word).
  *  A segment's text is kept whole; its annotations never become words. */
 export function parseWhisperCppJson(raw: string): ParsedTranscript {
-  const data = JSON.parse(raw) as WhisperCppJson;
+  return parseWhisperCpp(JSON.parse(raw) as WhisperCppJson);
+}
+
+/** {@link parseWhisperCppJson} for whisper's JSON already read: what the app cache holds, so a
+ *  change to how words are cut applies to every transcript already made. */
+function parseWhisperCpp(data: WhisperCppJson): ParsedTranscript {
   const trans = data.transcription ?? [];
   const language = data.result?.language ?? null;
   const segments: SegPayload[] = [];
@@ -681,8 +686,7 @@ function scratchToken(): string {
 
 /** whisper's JSON for a window extracted on its own starts at 0; move every offset onto the
  *  SOURCE timeline, where `-ot` on the whole file would have put it. */
-function shiftWhisperJson(raw: string, shiftMs: number): string {
-  const data = JSON.parse(raw) as WhisperCppJson;
+function shiftWhisperJson(data: WhisperCppJson, shiftMs: number): void {
   const move = (o?: { from?: number; to?: number }): void => {
     if (!o) return;
     if (typeof o.from === "number") o.from += shiftMs;
@@ -692,7 +696,6 @@ function shiftWhisperJson(raw: string, shiftMs: number): string {
     move(seg.offsets);
     for (const tok of seg.tokens ?? []) move(tok.offsets);
   }
-  return JSON.stringify(data);
 }
 
 /** Windows kills a process that cannot resolve its imports BEFORE a line of its code runs, so
@@ -728,27 +731,62 @@ export function transcriptionFailureText(e: unknown): string {
   return e instanceof ArtDaddyError ? e.message : String(e).slice(-200);
 }
 
-/** The cache files a transcription request reads: the full transcript (which answers every
- *  window) and, for a windowed request, the window's own. One place, so a peek and a run can never
- *  disagree about what is cached. */
-async function transcriptFiles(
+/** The cache keys a transcription request reads: the full transcript's (which answers every
+ *  window) and, for a windowed request, the window's own; both null when the file has no
+ *  identity. One place, so a peek and a run can never disagree about what is cached. */
+async function transcriptKeys(
   ctx: ClientToolContext,
   src: string,
   size: string,
   language: string | undefined,
   window: TranscribeWindow | null | undefined,
-): Promise<{ lang: string; full: string; out: string; win: ReturnType<typeof windowArgs> }> {
+): Promise<{
+  lang: string;
+  full: string | null;
+  out: string | null;
+  win: ReturnType<typeof windowArgs>;
+}> {
   const lang = whisperLanguage(language);
-  // The language is part of the KEY, not just the arguments: keyed on src|size alone, a
-  // Spanish request would be served the English transcript already on disk, forever. "auto" is
-  // in the key too, so nothing made under whisper's English default is served as detected.
-  const baseKey = `${src}|${size}|${lang}`;
-  const full = await ctx.store.prepareArtifact(`transcribe/${shortHash(baseKey)}`);
   const win = windowArgs(window);
-  const out = win.key
-    ? await ctx.store.prepareArtifact(`transcribe/${shortHash(baseKey + win.key)}`)
-    : full;
+  // Kept under the FILE, by identity, not under the path a project knows it by (4f): the same
+  // bytes in another project, or moved and relinked, are not transcribed again, and a file
+  // changed in place is. The language is part of the key, not just the arguments: keyed without
+  // it, a Spanish request would be served the English transcript already made, forever. "auto"
+  // is in the key too, so nothing made under whisper's English default is served as detected.
+  const identity = await ctx.store.fileIdentity(src);
+  const full = identity ? `whisper:${TRANSCRIPT_FORMAT}:${identity}:${size}:${lang}` : null;
+  const out = full && win.key ? `${full}${win.key}` : full;
   return { lang, full, out, win };
+}
+
+/** Bump when what is stored under a transcript key changes meaning. */
+const TRANSCRIPT_FORMAT = "v1";
+const TRANSCRIPTS = "transcripts";
+
+/** Where the app cache keeps the whole-file transcript of `src` (namespace and key, the key null
+ *  when the file has no identity), exactly as {@link runWhisper} and every peek compute it.
+ *  Exported so a test can stand in for whisper by putting its output there. */
+export async function transcriptCacheSlot(
+  ctx: ClientToolContext,
+  src: string,
+  size: string = DEFAULT_MODEL,
+  language?: string,
+): Promise<{ namespace: string; key: string | null }> {
+  return {
+    namespace: TRANSCRIPTS,
+    key: (await transcriptKeys(ctx, src, size, language, null)).full,
+  };
+}
+
+/** whisper's JSON for `key` from the app cache, or null. */
+async function cachedWhisper(
+  ctx: ClientToolContext,
+  key: string | null,
+): Promise<WhisperCppJson | null> {
+  if (!key) return null;
+  const cache = await ctx.store.appCache();
+  const data = cache ? await cache.get<WhisperCppJson>(TRANSCRIPTS, key) : null;
+  return data && typeof data === "object" ? data : null;
 }
 
 /** The transcript {@link runWhisper} would return for this request, WITHOUT running anything:
@@ -760,10 +798,11 @@ export async function peekTranscript(
   language?: string,
   window?: TranscribeWindow | null,
 ): Promise<ParsedTranscript | null> {
-  const f = await transcriptFiles(ctx, src, size, language, window);
-  for (const base of new Set([f.full, f.out]))
-    if (await ctx.store.exists(`${base}.json`))
-      return parseWhisperCppJson(await ctx.store.readText(`${base}.json`));
+  const k = await transcriptKeys(ctx, src, size, language, window);
+  for (const key of new Set([k.full, k.out])) {
+    const data = await cachedWhisper(ctx, key);
+    if (data) return parseWhisperCpp(data);
+  }
   return null;
 }
 
@@ -774,24 +813,17 @@ export async function runWhisper(
   language?: string,
   window?: TranscribeWindow | null,
 ): Promise<ParsedTranscript> {
-  const {
-    lang,
-    full: fullBase,
-    out: outBase,
-    win,
-  } = await transcriptFiles(ctx, src, size, language, window);
+  const { lang, full, out, win } = await transcriptKeys(ctx, src, size, language, window);
   // A full transcript already answers every window, so a windowed ask must never re-run
   // over one we have — the indexer builds these in the background for exactly this reason.
-  if (await ctx.store.exists(`${fullBase}.json`)) {
-    return parseWhisperCppJson(await ctx.store.readText(`${fullBase}.json`));
-  }
+  const done = (await cachedWhisper(ctx, full)) ?? (await cachedWhisper(ctx, out));
+  if (done) return parseWhisperCpp(done);
 
-  const jsonPath = `${outBase}.json`;
-  if (await ctx.store.exists(jsonPath)) {
-    return parseWhisperCppJson(await ctx.store.readText(jsonPath));
-  }
-
-  return once(jsonPath, async () => {
+  // whisper's own output is scratch, written in the project like the audio it reads.
+  const scratchBase = await ctx.store.prepareArtifact(
+    `transcribe/${shortHash(`${src}|${size}|${lang}${win.key}`)}`,
+  );
+  return once(out ?? scratchBase, async () => {
     let model: string;
     try {
       model = (await ensureWhisperModel(ctx, size)).path;
@@ -822,10 +854,10 @@ export async function runWhisper(
             ),
             { start, end },
           );
-    // whisper writes under a scratch name; the transcript reaches the cache path in ONE atomic
-    // write, already on the file's timeline. Shifting it in place after whisper had written it
-    // would leave a window cached on its own clock if anything stopped between the two writes.
-    const scratch = `${outBase}.${scratchToken()}.tmp`;
+    // whisper writes under a scratch name; the transcript reaches the cache in ONE atomic write,
+    // already on the file's timeline. Shifting it in place after whisper had written it would
+    // leave a window cached on its own clock if anything stopped between the two writes.
+    const scratch = `${scratchBase}.${scratchToken()}.tmp`;
     const run = await ctx.runner.run(
       "whisper-cli",
       ["-m", model, "-f", wav, "-ojf", "-of", scratch, "-np", "-t", whisperThreads(), "-l", lang],
@@ -841,36 +873,20 @@ export async function runWhisper(
         throw new SpeechEngineUnavailableError(run.code);
       throw new Error(`whisper-cli failed (code=${run.code}): ${stderrExcerpt(run.stderr, 200)}`);
     }
-    let text = await ctx.store.readText(`${scratch}.json`);
-    if (win.key !== "" && start > 0) text = shiftWhisperJson(text, Math.floor(start * 1000));
-    const parsed = parseWhisperCppJson(text);
-    await ctx.store.writeTextAtomic(jsonPath, text);
+    const data = JSON.parse(await ctx.store.readText(`${scratch}.json`)) as WhisperCppJson;
+    if (win.key !== "" && start > 0) shiftWhisperJson(data, Math.floor(start * 1000));
+    const parsed = parseWhisperCpp(data);
+    // Kept outside the project, so it is kept even when the project closed while whisper ran.
+    if (out) await (await ctx.store.appCache())?.put(TRANSCRIPTS, out, data);
     await ctx.store.remove(`${scratch}.json`).catch(() => undefined);
     return parsed;
   });
 }
 
 export interface EnsuredTranscript {
-  path: string;
   parsed: ParsedTranscript;
+  /** True when it was already made, and nothing ran. */
   existed: boolean;
-}
-
-/** Normalize a media ref (absolute path / project-relative / the same file
- *  referenced differently) to ONE key, so the background indexer's pre-built
- *  transcript and a later get_transcript(media_path=…) share the same file. */
-function canonicalRef(ref: string): string {
-  const s = (ref ?? "").replace(/\\/g, "/").trim();
-  const m = /(?:^|\/)(library\/.+)$/i.exec(s);
-  return m ? m[1] : s;
-}
-
-/** Canonical, deterministic transcript path for a media ref (project-portable: keyed by the
- *  canonical ref, not the absolute path), in the language whisper is told. A request with no
- *  language is keyed "auto": the files made before that under whisper's English default (keyed
- *  without it) are redone when next asked for, as decided for UJ-004. */
-export function canonicalTranscriptRel(ref: string, size: string, language?: string): string {
-  return `transcripts/${shortHash(`${canonicalRef(ref)}|${size}|${whisperLanguage(language)}`)}.json`;
 }
 
 /** The language as the caller means it: a short code ("es"), or "" to detect it. A regional tag
@@ -891,48 +907,13 @@ function whisperLanguage(language: unknown): string {
   return normLanguage(language) || "auto";
 }
 
-function transcriptPayload(
-  src: string,
-  size: string,
-  parsed: ParsedTranscript,
-): Record<string, unknown> {
-  return {
-    tool: "v4.get_transcript",
-    created_at: new Date().toISOString().slice(0, 19),
-    input: { original_path: src },
-    transcription: {
-      model_size: size,
-      compute_type: "int8",
-      language: parsed.language,
-      language_probability: null,
-      duration_seconds: parsed.duration_seconds,
-      segments: parsed.segments,
-      words: parsed.words,
-    },
-  };
-}
-
-function parsedFromPayload(raw: string): ParsedTranscript {
-  const o = JSON.parse(raw) as { transcription?: Partial<ParsedTranscript> };
-  const t = o.transcription ?? {};
-  return {
-    language: t.language ?? null,
-    duration_seconds: t.duration_seconds ?? 0,
-    segments: (t.segments as SegPayload[]) ?? [],
-    words: (t.words as WordPayload[]) ?? [],
-  };
-}
-
-/** Ensure a canonical transcript exists for `ref` and return it. Returns the
- *  EXISTING transcript when present (no re-transcription); otherwise runs whisper
- *  and writes `transcripts/<hash(ref|size|language)>.json`. This deterministic path is the
- *  link between a media file and its transcript — any tool can recompute it, and
- *  explicit callers share it. `outRel` overrides the canonical location. */
+/** The whole-file transcript of `ref`: the one already made for this file, model and language
+ *  (in any project), else a new one. Every caller that needs a file's words comes through here
+ *  or {@link runWhisper}, so all of them share one transcript per file. */
 export async function ensureTranscript(
   ctx: ClientToolContext,
   ref: string,
   size: string = DEFAULT_MODEL,
-  outRel?: string,
   language?: string,
 ): Promise<EnsuredTranscript> {
   const src = await ctx.store.resolveRef(ref);
@@ -941,14 +922,9 @@ export async function ensureTranscript(
     if (offline) throw new MediaOfflineError(offline);
     throw new Error(`file not found: ${ref}`);
   }
-  const rel = outRel && outRel.trim() ? outRel.trim() : canonicalTranscriptRel(ref, size, language);
-  const path = await ctx.store.prepareArtifact(rel);
-  if (await ctx.store.exists(path)) {
-    return { path, parsed: parsedFromPayload(await ctx.store.readText(path)), existed: true };
-  }
-  const parsed = await runWhisper(ctx, src, size, language);
-  await ctx.store.writeText(path, JSON.stringify(transcriptPayload(src, size, parsed), null, 2));
-  return { path, parsed, existed: false };
+  const made = await peekTranscript(ctx, src, size, language);
+  if (made) return { parsed: made, existed: true };
+  return { parsed: await runWhisper(ctx, src, size, language), existed: false };
 }
 
 const TRANSCRIPT_WORD_CAP = 10_000;
