@@ -26,6 +26,9 @@ installGlobalErrorHandlers();
 // An export the app did not live to finish leaves a hidden partial beside its destination. Remove
 // the ones an earlier launch recorded (UJ-022). A no-op outside the desktop app.
 void import("./timeline/exportStaging").then((m) => m.sweepStaging()).catch(() => undefined);
+// The same for the work folder, where whisper keeps its scratch: what earlier launches left in it
+// (a crash, a quit mid-transcription) goes; this launch's stays, for a job still running (4i).
+void import("./tools/workFolder").then((m) => m.sweepWork()).catch(() => undefined);
 // After a crash or reload of the page, the app process may still hold exports this page did not
 // start: follow them, and commit the ones that ended while no page was there (3h part 7).
 void import("./timeline/exportQueue").then((m) => m.adoptExports()).catch(() => undefined);

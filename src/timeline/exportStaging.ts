@@ -2,7 +2,7 @@
 // a quit left behind (UJ-022). The export queue removes its own partial when an export settles;
 // this covers only the exports that never got to. Best-effort throughout: the bookkeeping must
 // never fail or delay an export, so every error here is swallowed.
-import { APP_SESSION } from "../project/jobLedger";
+import { currentLaunch } from "../tools/launch";
 import { joinPath, type FsLike } from "../tools/store";
 
 interface Entry {
@@ -96,24 +96,12 @@ function update<T>(
   return run;
 }
 
-/** The run a partial belongs to. In the app that is the app process's run, which outlives a
- *  reload of the page while its export keeps writing (3h part 7); elsewhere, the page. */
-async function currentSession(): Promise<string> {
-  try {
-    const { jobSupervisor } = await import("../tools/jobSupervisor");
-    const sup = await jobSupervisor();
-    if (sup) return await sup.launchId();
-  } catch {
-    /* no app process to ask */
-  }
-  return APP_SESSION;
-}
-
 /** Note a partial before ffmpeg starts writing it. */
 export function recordStaging(path: string): Promise<void> {
   return update(async (_b, entries) => {
     const next = entries.filter((e) => e.path !== path);
-    next.push({ path, session: await currentSession() });
+    // The app process's run, which outlives a reload of the page while its export keeps writing.
+    next.push({ path, session: await currentLaunch() });
     return [next, undefined];
   }, undefined);
 }
@@ -130,7 +118,7 @@ export function releaseStaging(path: string): Promise<void> {
  *  be removed yet (still open somewhere) stays listed for the next launch. */
 export function sweepStaging(): Promise<string[]> {
   return update(async (b, entries) => {
-    const session = await currentSession();
+    const session = await currentLaunch();
     const kept: Entry[] = [];
     const removed: string[] = [];
     for (const e of entries) {

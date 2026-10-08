@@ -253,11 +253,17 @@ export const nodeFs: FsLike = {
   // The app cache, in its own folder per test file (each file loads this module afresh): a run
   // sees only what this file's tests made, as a fresh install would.
   cacheDir: () => (e2eCacheDir ??= freshCacheDir()),
+  // ...and the work folder whisper's scratch goes to, outside every project (4i), likewise.
+  workDir: () => (e2eWorkDir ??= freshDir("artdaddy-e2e-work-")),
 };
 
 let e2eCacheDir: Promise<string> | null = null;
-async function freshCacheDir(): Promise<string> {
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "artdaddy-e2e-cache-"));
+let e2eWorkDir: Promise<string> | null = null;
+function freshCacheDir(): Promise<string> {
+  return freshDir("artdaddy-e2e-cache-");
+}
+async function freshDir(prefix: string): Promise<string> {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), prefix));
   process.once("exit", () => rmSync(dir, { recursive: true, force: true }));
   return dir;
 }

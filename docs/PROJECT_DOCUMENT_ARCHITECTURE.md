@@ -605,6 +605,11 @@ export interface ProjectJobScope {
 Default policy is `cancelOnClose`.
 
 - `cancelOnClose`: downloads, local model calls, probing, proxying, transcription, indexing.
+  Exception (owner decision 2026-10-04, built in 4i): the transcription and the loudness
+  measurement IN PROGRESS at close run to their end, as Palmier's indexer does; their queue is
+  dropped. They may outlive the document only because they write nothing into it: the result goes
+  to the app-wide cache and whisper's scratch to the app's work folder. Proxies and posters write
+  into the project, so they are still cancelled.
 - `finishBeforeClose`: short final package commits already admitted. This must not be used for
   unbounded network/model/render work.
 - `resumable`: cloud generation with a durable placeholder/job ID. Closing detaches local

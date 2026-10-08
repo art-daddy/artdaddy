@@ -6,12 +6,22 @@ import { runWhisper, WHISPER_MODELS, whisperModelPath } from "./transcribe";
 import type { ClientToolContext } from "./context";
 
 const DIR = "C:/data/projects/p1";
+/** The app's work folder, outside every project, where whisper's scratch goes (4i). */
+const WORK = "C:/Users/u/AppData/Local/com.artdaddy.app/work/launch-1-1";
 
 const WHISPER_JSON = JSON.stringify({
   transcription: [{ offsets: { from: 60000, to: 62000 }, text: "hello", tokens: [] }],
 });
 
-function harness(opts: { failWhisper?: number; failFfmpeg?: number; gate?: Promise<void> } = {}) {
+function harness(
+  opts: {
+    failWhisper?: number;
+    failFfmpeg?: number;
+    gate?: Promise<void>;
+    /** Holds the first whisper run until it settles. */
+    whisperGate?: Promise<void>;
+  } = {},
+) {
   // The model is already downloaded; this exercises the RUN, not the fetch.
   const files = new Set<string>([whisperModelPath(DIR, "small"), whisperModelPath(DIR, "base")]);
   const texts = new Map<string, string>();
@@ -21,6 +31,7 @@ function harness(opts: { failWhisper?: number; failFfmpeg?: number; gate?: Promi
   let whisperFailures = opts.failWhisper ?? 0;
   let ffmpegFailures = opts.failFfmpeg ?? 0;
   let gate = opts.gate;
+  let whisperGate = opts.whisperGate;
   // The app cache transcripts are kept in (4f), one per harness like the rest of its disk.
   const kept = new Map<string, unknown>();
   const appCache = {
@@ -37,6 +48,7 @@ function harness(opts: { failWhisper?: number; failFfmpeg?: number; gate?: Promi
       fileIdentity: async (src: string) => `file:${src}`,
       appCache: async () => appCache,
       prepareArtifact: async (rel: string) => `${DIR}/internals/cache/${rel}`,
+      prepareWork: async (rel: string) => `${WORK}/${rel}`,
       exists: async (p: string) => files.has(p),
       readText: async (p: string) => texts.get(p) ?? WHISPER_JSON,
       writeText: async (p: string, s: string) => {
@@ -69,6 +81,9 @@ function harness(opts: { failWhisper?: number; failFfmpeg?: number; gate?: Promi
       run: async (program: string, args: string[]) => {
         calls.push({ program, args });
         if (program === "whisper-cli") {
+          const heldWhisper = whisperGate;
+          whisperGate = undefined;
+          if (heldWhisper) await heldWhisper;
           if (whisperFailures > 0) {
             whisperFailures--;
             return { code: 1, stdout: "", stderr: "interrupted" };
@@ -129,24 +144,34 @@ describe("runWhisper", () => {
   // Measured in QA (2026-10-03, an 80-minute recording): whisper loads the WHOLE file it is
   // handed, so `-ot/-d` over the 148 MB whole-file extract took 11.9 s for a 60 s window, and the
   // window's own WAV 7.3 s. A window is always transcribed from its own audio.
-  it("cuts a window from the whole file's extract when one is on disk, and whisper reads only the window", async () => {
-    // A whole-file run that extracted the audio and then failed leaves the extract behind.
-    const { ctx, calls, renames } = harness({ failWhisper: 1 });
-    await expect(runWhisper(ctx, "/m/a.mp4")).rejects.toThrow(/whisper-cli failed/);
-    const fullWav = renames[0][1];
-    calls.length = 0;
-    await runWhisper(ctx, "/m/a.mp4", "small", undefined, { start: 12.5, end: 42 });
-    const ff = calls.filter((c) => c.program === "ffmpeg");
-    expect(ff).toHaveLength(1);
-    expect(
-      argVal(ff[0].args, "-i"),
-      "cut from the extract, not decoded from the source again",
-    ).toBe(fullWav);
-    expect([argVal(ff[0].args, "-ss"), argVal(ff[0].args, "-to")]).toEqual(["12.500", "42.000"]);
-    const w = whisperCall(calls)!;
-    expect(argVal(w.args, "-f")).not.toBe(fullWav);
-    expect(argVal(w.args, "-f")).toBe(renames.at(-1)![1]);
-    expect(w.args).not.toContain("-ot");
+  it("cuts a window from the whole file's extract while a run of the whole file holds it, and whisper reads only the window", async () => {
+    // The whole file's whisper is still reading its extract.
+    let release!: () => void;
+    const { ctx, calls, renames } = harness({
+      whisperGate: new Promise<void>((r) => (release = r)),
+    });
+    const whole = runWhisper(ctx, "/m/a.mp4");
+    try {
+      for (let i = 0; i < 100 && !calls.some((c) => c.program === "whisper-cli"); i++)
+        await new Promise((r) => setTimeout(r, 0));
+      const fullWav = renames[0][1];
+      calls.length = 0;
+      await runWhisper(ctx, "/m/a.mp4", "small", undefined, { start: 12.5, end: 42 });
+      const ff = calls.filter((c) => c.program === "ffmpeg");
+      expect(ff).toHaveLength(1);
+      expect(
+        argVal(ff[0].args, "-i"),
+        "cut from the extract, not decoded from the source again",
+      ).toBe(fullWav);
+      expect([argVal(ff[0].args, "-ss"), argVal(ff[0].args, "-to")]).toEqual(["12.500", "42.000"]);
+      const w = whisperCall(calls)!;
+      expect(argVal(w.args, "-f")).not.toBe(fullWav);
+      expect(argVal(w.args, "-f")).toBe(renames.at(-1)![1]);
+      expect(w.args).not.toContain("-ot");
+    } finally {
+      release();
+      await whole;
+    }
   });
 
   // An extract is written where it will be READ from, and `exists` was taken to mean "complete".

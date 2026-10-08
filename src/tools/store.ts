@@ -6,6 +6,7 @@
 
 import { type AppCache, appCacheFor } from "./appCache";
 import { currentProjectSession } from "./coordinator";
+import { workRoot } from "./workFolder";
 
 /** What the importer can learn about a file it must never load. */
 export interface MediaProbe {
@@ -61,6 +62,10 @@ export interface FsLike {
    *  `appCacheRoot`), where transcripts and loudness figures are kept by file (`appCache.ts`).
    *  Optional: the desktop and the e2e lanes have one; without it nothing is kept between calls. */
   cacheDir?(): Promise<string>;
+  /** The app's work folder, outside every project (`<app cache dir>/work`), where a long job keeps
+   *  its scratch while it runs (`workFolder.ts`). Optional: without it scratch stays in the
+   *  project. */
+  workDir?(): Promise<string>;
 }
 
 export interface DirEntry {
@@ -511,6 +516,20 @@ export class ProjectStoreAccess {
     // Deleted project: hand back the path but DON'T recreate its dir tree (RF4) —
     // a following ffmpeg/whisper write into the missing dir simply fails.
     if (this.dead) return full;
+    await this.fs.mkdir(full.slice(0, full.lastIndexOf("/")));
+    return full;
+  }
+
+  /**
+   * Where a long job writes its SCRATCH (whisper's 16 kHz audio and raw output): this launch's app
+   * work folder, outside every project, so a job that outlives its project's close never writes
+   * into the project (4i). The parent folder is made. Without a work folder (web, some test fakes),
+   * the project's artifact cache, as before.
+   */
+  async prepareWork(rel: string): Promise<string> {
+    const root = await workRoot(this.fs);
+    if (!root) return this.prepareArtifact(rel);
+    const full = joinPath(root, rel);
     await this.fs.mkdir(full.slice(0, full.lastIndexOf("/")));
     return full;
   }

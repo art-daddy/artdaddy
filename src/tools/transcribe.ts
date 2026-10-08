@@ -624,11 +624,55 @@ const TRANSCODE_WAV_REV = 1;
 
 /** Where the whole-file 16 kHz extract of the file `audioOf` names lives (whether or not it exists
  *  yet). `audioOf` is the file's identity where it has one, as for its transcript: a file changed
- *  in place gets new audio, never the extract of what it was. */
+ *  in place gets new audio, never the extract of what it was. In the app's work folder, outside
+ *  every project, so a run that outlives its project's close never writes into it (4i). */
 function wavPathFor(ctx: ClientToolContext, audioOf: string, windowKey = ""): Promise<string> {
-  return ctx.store.prepareArtifact(
+  return ctx.store.prepareWork(
     `transcribe/${shortHash(`${audioOf}|16k|r${TRANSCODE_WAV_REV}${windowKey}`)}.wav`,
   );
+}
+
+/** How many runs in this page hold each 16 kHz extract, and the removals still under way. */
+const wavHolders = new Map<string, number>();
+const wavRemovals = new Map<string, Promise<void>>();
+
+/** Run `fn` holding the extracts `wavs`: each is deleted when the last run holding it ends, however
+ *  it ends. Only a run that holds an extract reads it, so none is deleted from under a reader, and
+ *  none outlives the runs that needed it (an 80-minute file's is 148 MB). */
+async function holdingWavs<T>(
+  ctx: ClientToolContext,
+  wavs: string[],
+  fn: () => Promise<T>,
+): Promise<T> {
+  for (const w of wavs) wavHolders.set(w, (wavHolders.get(w) ?? 0) + 1);
+  try {
+    return await fn();
+  } finally {
+    const removals: Promise<void>[] = [];
+    for (const w of wavs) {
+      const left = (wavHolders.get(w) ?? 1) - 1;
+      if (left > 0) {
+        wavHolders.set(w, left);
+        continue;
+      }
+      wavHolders.delete(w);
+      const gone: Promise<void> = ctx.store
+        .remove(w)
+        .catch(() => undefined)
+        .finally(() => {
+          if (wavRemovals.get(w) === gone) wavRemovals.delete(w);
+        });
+      wavRemovals.set(w, gone);
+      removals.push(gone);
+    }
+    await Promise.all(removals);
+  }
+}
+
+/** Is the extract at `wav` on disk, once any removal of it already under way has finished? */
+async function wavOnDisk(ctx: ClientToolContext, wav: string): Promise<boolean> {
+  await wavRemovals.get(wav);
+  return ctx.store.exists(wav);
 }
 
 /** Extract [start, end) seconds of `src`'s audio, or the whole of it, as whisper's 16 kHz WAV.
@@ -643,7 +687,7 @@ async function extractWav(
   wav: string,
   span?: { start: number; end: number | null },
 ): Promise<string> {
-  if (await ctx.store.exists(wav)) return wav;
+  if (await wavOnDisk(ctx, wav)) return wav;
   return once(`wav\u0000${wav}`, async () => {
     const out = ctx.store.canRename ? wav.replace(/\.wav$/, `.${scratchToken()}.tmp.wav`) : wav;
     const seek: string[] = [];
@@ -827,8 +871,9 @@ export async function runWhisper(
   const done = (await cachedWhisper(ctx, out)) ?? (await cachedWhisper(ctx, full));
   if (done) return parseWhisperCpp(done);
 
-  // whisper's own output is scratch, written in the project like the audio it reads.
-  const scratchBase = await ctx.store.prepareArtifact(
+  // whisper's own output is scratch, written in the app's work folder like the audio it reads, so
+  // a run still going when its project closes finishes without writing into the project (4i).
+  const scratchBase = await ctx.store.prepareWork(
     `transcribe/${shortHash(`${src}|${size}|${lang}${win.key}`)}`,
   );
   return once(out ?? scratchBase, async () => {
@@ -849,62 +894,67 @@ export async function runWhisper(
     // (published by rename, so it is complete), else from the source.
     const audioOf = identity ?? src;
     const fullWav = await wavPathFor(ctx, audioOf);
+    const winWav = win.key === "" ? null : await wavPathFor(ctx, audioOf, win.key);
     const start = Math.max(0, Number(window?.start) || 0);
     const rawEnd = Number(window?.end);
     const end = Number.isFinite(rawEnd) && rawEnd > start ? rawEnd : null;
-    const wav =
-      win.key === ""
-        ? await extractWav(ctx, src, fullWav)
-        : await extractWav(
-            ctx,
-            (await ctx.store.exists(fullWav)) ? fullWav : src,
-            await wavPathFor(ctx, audioOf, win.key),
-            { start, end },
+    return holdingWavs(ctx, winWav ? [fullWav, winWav] : [fullWav], async () => {
+      const wav =
+        winWav === null
+          ? await extractWav(ctx, src, fullWav)
+          : await extractWav(ctx, (await wavOnDisk(ctx, fullWav)) ? fullWav : src, winWav, {
+              start,
+              end,
+            });
+      // whisper writes under a scratch name; the transcript reaches the cache in ONE atomic write,
+      // already on the file's timeline. Shifting it in place after whisper had written it would
+      // leave a window cached on its own clock if anything stopped between the two writes.
+      const scratch = `${scratchBase}.${scratchToken()}.tmp`;
+      try {
+        // -mc 0: no text carried from one 30 s window into the next. With it, six minutes of
+        // silence left whisper repeating "[BLANK_AUDIO]" straight through the speech after it
+        // (4h2): the file's whole transcript came back empty, and it answers every stretch of it.
+        const run = await ctx.runner.run(
+          "whisper-cli",
+          [
+            "-m",
+            model,
+            "-f",
+            wav,
+            "-ojf",
+            "-of",
+            scratch,
+            "-np",
+            "-t",
+            whisperThreads(),
+            "-l",
+            lang,
+            "-mc",
+            "0",
+          ],
+          ctx.signal,
+        );
+        if (run.code !== 0 || !(await ctx.store.exists(`${scratch}.json`))) {
+          // Stop kills the sidecar, so the exit code describes the KILL, not the transcription:
+          // it surfaced as `whisper-cli failed (code=-1): cancelled`, which reads as a broken
+          // install rather than as the thing the user just asked for.
+          if (ctx.signal?.aborted) throw new Error("transcription cancelled");
+          if (run.code !== null && WINDOWS_LOAD_FAILURES.has(run.code))
+            throw new SpeechEngineUnavailableError(run.code);
+          throw new Error(
+            `whisper-cli failed (code=${run.code}): ${stderrExcerpt(run.stderr, 200)}`,
           );
-    // whisper writes under a scratch name; the transcript reaches the cache in ONE atomic write,
-    // already on the file's timeline. Shifting it in place after whisper had written it would
-    // leave a window cached on its own clock if anything stopped between the two writes.
-    const scratch = `${scratchBase}.${scratchToken()}.tmp`;
-    // -mc 0: no text carried from one 30 s window into the next. With it, six minutes of silence
-    // left whisper repeating "[BLANK_AUDIO]" straight through the speech after it (4h2): the file's
-    // whole transcript came back empty, and it answers every stretch of the file.
-    const run = await ctx.runner.run(
-      "whisper-cli",
-      [
-        "-m",
-        model,
-        "-f",
-        wav,
-        "-ojf",
-        "-of",
-        scratch,
-        "-np",
-        "-t",
-        whisperThreads(),
-        "-l",
-        lang,
-        "-mc",
-        "0",
-      ],
-      ctx.signal,
-    );
-    if (run.code !== 0 || !(await ctx.store.exists(`${scratch}.json`))) {
-      await ctx.store.remove(`${scratch}.json`).catch(() => undefined);
-      // Stop kills the sidecar, so the exit code describes the KILL, not the transcription:
-      // it surfaced as `whisper-cli failed (code=-1): cancelled`, which reads as a broken
-      // install rather than as the thing the user just asked for.
-      if (ctx.signal?.aborted) throw new Error("transcription cancelled");
-      if (run.code !== null && WINDOWS_LOAD_FAILURES.has(run.code))
-        throw new SpeechEngineUnavailableError(run.code);
-      throw new Error(`whisper-cli failed (code=${run.code}): ${stderrExcerpt(run.stderr, 200)}`);
-    }
-    const data = JSON.parse(await ctx.store.readText(`${scratch}.json`)) as WhisperCppJson;
-    if (win.key !== "" && start > 0) shiftWhisperJson(data, Math.floor(start * 1000));
-    const parsed = parseWhisperCpp(data);
-    // Kept outside the project, so it is kept even when the project closed while whisper ran.
-    if (out) await (await ctx.store.appCache())?.put(TRANSCRIPTS, out, data);
-    await ctx.store.remove(`${scratch}.json`).catch(() => undefined);
-    return parsed;
+        }
+        const data = JSON.parse(await ctx.store.readText(`${scratch}.json`)) as WhisperCppJson;
+        if (win.key !== "" && start > 0) shiftWhisperJson(data, Math.floor(start * 1000));
+        const parsed = parseWhisperCpp(data);
+        // Kept outside the project, so it is kept even when the project closed while whisper ran.
+        if (out) await (await ctx.store.appCache())?.put(TRANSCRIPTS, out, data);
+        return parsed;
+      } finally {
+        await ctx.store.remove(`${scratch}.json`).catch(() => undefined);
+      }
+    });
   });
 }
 

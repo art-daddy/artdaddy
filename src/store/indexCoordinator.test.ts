@@ -91,6 +91,8 @@ beforeEach(() => {
   clearSourceUrlCache.mockReset();
   ensureTranscript.mockReset();
   ensureTranscript.mockResolvedValue({ path: "t.json", parsed: {}, existed: false });
+  runWhisper.mockReset();
+  runWhisper.mockResolvedValue({});
   measureLoudness.mockReset();
   measureLoudness.mockResolvedValue(FIGURES);
   reportAppError.mockReset();
@@ -945,5 +947,84 @@ describe("IndexCoordinator", () => {
     expect(captured?.aborted).toBe(true); // dispose kills the in-flight process' signal
     release();
     await new Promise((r) => setTimeout(r, 0)); // let the drain unwind
+  });
+
+  // 4i, Palmier's close (owner decision 2026-10-04): the file in progress finishes, into the app
+  // cache; the queue behind it is dropped. Only the proxy, which writes into the project, is stopped.
+  describe("closing the project (4i)", () => {
+    const stopped = (signals: Array<AbortSignal | undefined>): boolean[] =>
+      signals.map((s) => s?.aborted ?? false);
+
+    it("lets the transcription in progress run to its end, and starts nothing queued behind it", async () => {
+      const gates: Array<() => void> = [];
+      const signals: Array<AbortSignal | undefined> = [];
+      (ensureTranscript as Any).mockImplementation(async (ctx: Any) => {
+        signals.push(ctx.signal);
+        await new Promise<void>((r) => gates.push(r));
+        return { path: "t.json", parsed: {}, existed: false };
+      });
+      const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+      for (const s of ["library/a.mp3", "library/b.mp3"]) c.indexSource(s);
+      await settle(() => gates.length > 0);
+      c.dispose();
+      expect(stopped(signals)).toEqual([false]);
+      gates.shift()!();
+      await new Promise((r) => setTimeout(r, 20));
+      expect(transcribed()).toEqual(["library/a.mp3"]);
+      expect(stopped(signals)).toEqual([false]);
+      expect(reportAppError).not.toHaveBeenCalled();
+    });
+
+    it("lets a window a look handed it run to its end too", async () => {
+      runWhisper.mockReset();
+      const gates: Array<() => void> = [];
+      const signals: Array<AbortSignal | undefined> = [];
+      runWhisper.mockImplementation(async (ctx: Any) => {
+        signals.push(ctx.signal);
+        await new Promise<void>((r) => gates.push(r));
+        return {};
+      });
+      const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+      prioritizeTranscript("C:/p", "C:/media/talk.mp4", "", { start: 59, end: 91 });
+      prioritizeTranscript("C:/p", "C:/media/talk.mp4", "", { start: 300, end: 330 });
+      await settle(() => gates.length > 0);
+      c.dispose();
+      gates.shift()!();
+      await new Promise((r) => setTimeout(r, 20));
+      expect(stopped(signals)).toEqual([false]);
+      expect(runWhisper).toHaveBeenCalledTimes(1);
+    });
+
+    it("lets the loudness measurement in progress run to its end, and starts nothing queued behind it", async () => {
+      const gates: Array<() => void> = [];
+      const signals: Array<AbortSignal | undefined> = [];
+      (measureLoudness as Any).mockImplementation(async (ctx: Any) => {
+        signals.push(ctx.signal);
+        await new Promise<void>((r) => gates.push(r));
+        return FIGURES;
+      });
+      const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+      for (const s of ["library/a.mp3", "library/b.mp3"]) c.indexSource(s);
+      await settle(() => gates.length > 0);
+      c.dispose();
+      gates.shift()!();
+      await new Promise((r) => setTimeout(r, 20));
+      expect(stopped(signals)).toEqual([false]);
+      expect(measured().map((m) => m[0])).toEqual(["C:/p/library/a.mp3"]);
+    });
+
+    it("says nothing when the transcription in progress fails after the close", async () => {
+      let fail!: (e: Error) => void;
+      (ensureTranscript as Any).mockImplementation(
+        () => new Promise((_r, reject) => (fail = reject)),
+      );
+      const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+      c.indexSource("library/a.mp3");
+      await settle(() => fail !== undefined);
+      c.dispose();
+      fail(new Error("whisper-cli failed (code=1)"));
+      await new Promise((r) => setTimeout(r, 20));
+      expect(reportAppError).not.toHaveBeenCalled();
+    });
   });
 });

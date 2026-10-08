@@ -62,6 +62,14 @@ export async function appCacheRoot(): Promise<string> {
   return joinPath(await appCacheDir(), "cache");
 }
 
+/** The app's work folder, beside the cache (`%LOCALAPPDATA%\com.artdaddy.app\work` on Windows):
+ *  scratch a long job writes while it runs, outside every project (`workFolder.ts`). Not inside the
+ *  cache, whose budget would count a 2-hour file's 16 kHz audio and evict transcripts for it. */
+export async function appWorkRoot(): Promise<string> {
+  const { appCacheDir } = await import("@tauri-apps/api/path");
+  return joinPath(await appCacheDir(), "work");
+}
+
 // Windows reserves these device names case-insensitively (con, prn, aux, nul,
 // com0-9, lpt0-9) -- a file/dir named one of them doesn't name a real path.
 const RESERVED_DEVICE = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])$/i;

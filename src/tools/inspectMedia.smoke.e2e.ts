@@ -701,24 +701,30 @@ describe("transcript: never waited on when long", () => {
   // Found in QA (2026-10-03): whisper loads the whole file it is handed, so a window read through
   // `-ot/-d` from an 80-minute extract cost 11.9 s against 7.3 s for the window's own WAV. With the
   // whole-file extract on disk, the window is now CUT from it, and must still land on the file's
-  // timeline.
+  // timeline. Since 4i an extract lives only while a run holds it: here, the whole file's.
   it.skipIf(!existsSync(model))(
-    "a window is cut from the whole file's extract when one is on disk, on the file's timeline",
+    "a window is cut from the whole file's extract while a run of the whole file holds it, on the file's timeline",
     async () => {
       const { file, speech } = await longTalk();
       const ref = await libRef(ctx, file, "audio");
-      // A whole-file run that extracted the audio and was then stopped leaves the extract behind.
-      let stopFirstWhisper = true;
+      // A whole-file run has extracted the audio and its whisper is still reading it.
+      let release!: () => void;
+      const holding = new Promise<void>((r) => (release = r));
+      let wholeStarted!: () => void;
+      const started = new Promise<void>((r) => (wholeStarted = r));
+      let firstWhisper = true;
       const ffInputs: string[] = [];
       const whisperInputs: string[] = [];
       const runner: CommandRunner = {
-        run(program, args, signal, cwd, onStdout) {
+        async run(program, args, signal, cwd, onStdout) {
           if (program === "ffmpeg") ffInputs.push(args[args.indexOf("-i") + 1]);
           if (program === "whisper-cli") {
             whisperInputs.push(args[args.indexOf("-f") + 1]);
-            if (stopFirstWhisper) {
-              stopFirstWhisper = false;
-              return Promise.resolve({ code: 1, stdout: "", stderr: "stopped" });
+            if (firstWhisper) {
+              firstWhisper = false;
+              wholeStarted();
+              await holding;
+              return { code: 1, stdout: "", stderr: "stopped" };
             }
           }
           return nodeRunner.run(program, args, signal, cwd, onStdout);
@@ -726,7 +732,8 @@ describe("transcript: never waited on when long", () => {
       };
       // As the app names it: the store's path for the ref, which every cache key is built from.
       const src = (await ctx.store.resolveRef(ref))!;
-      await expect(runWhisper({ ...ctx, runner }, src)).rejects.toThrow(/whisper-cli failed/);
+      const whole = runWhisper({ ...ctx, runner }, src);
+      await started;
       const extract = whisperInputs[0];
       expect(existsSync(extract)).toBe(true);
       ffInputs.length = 0;
@@ -748,6 +755,10 @@ describe("transcript: never waited on when long", () => {
         expect(words[0][1]).toBeGreaterThan(359.5); // spoken at 6:00 of the FILE
         expect(words.map((w) => w[0].toLowerCase()).join(" ")).toMatch(/fox|dog|quick/);
       }
+      // The whole file's run ends; the extract goes with the last run that held it.
+      release();
+      await expect(whole).rejects.toThrow(/whisper-cli failed/);
+      expect(existsSync(extract)).toBe(false);
     },
     600_000,
   );

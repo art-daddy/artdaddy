@@ -299,6 +299,10 @@ export class TauriFs implements FsLike {
     const { appCacheRoot } = await import("./dataRoot");
     return appCacheRoot();
   }
+  async workDir(): Promise<string> {
+    const { appWorkRoot } = await import("./dataRoot");
+    return appWorkRoot();
+  }
 }
 
 export function makeTauriContext(projectDir: string): ClientToolContext {

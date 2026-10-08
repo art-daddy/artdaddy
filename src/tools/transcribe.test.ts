@@ -2,6 +2,7 @@ import fc from "fast-check";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { CommandRunner } from "./command";
+import { _resetAppCaches } from "./appCache";
 import type { ClientToolContext } from "./context";
 import { shortHash as shortHashOf } from "./media";
 import {
@@ -106,6 +107,9 @@ class MockFs implements FsLike {
   async cacheDir(): Promise<string> {
     return "C:/cache/app";
   }
+  async workDir(): Promise<string> {
+    return WORK;
+  }
   async probeMedia(p: string, headBytes: number) {
     const n = joinPath(p);
     const bytes = this.bytes.get(n);
@@ -200,6 +204,8 @@ function streamedResponse(
 
 const DIR = "C:/data/projects/p1";
 const MODEL = "C:/data/models/ggml-small.bin";
+/** The app's work folder, outside every project: whisper's scratch goes there (4i). */
+const WORK = "C:/work/app";
 
 /** The part file is keyed by CONTENT, so a part left by a previous pinned revision can never
  *  be resumed into a different one. */
@@ -1166,25 +1172,41 @@ describe("runWhisper on a window (UJ-012)", () => {
     expect(t.words.map((w) => w.start_seconds)).toEqual([60, 60.6, 61.2]);
   });
 
-  it("cuts the window from the whole file's extract when it is already on disk", async () => {
+  it("cuts the window from the whole file's extract while a run of the whole file holds it", async () => {
     const fs = new MockFs();
     fs.putModel();
     fs.touch(SRC);
     const runner = transcribeRunner(fs);
+    const run = runner.run as ReturnType<typeof vi.fn>;
+    const inner = run.getMockImplementation()!;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let started!: () => void;
+    const wholeRunning = new Promise<void>((r) => (started = r));
+    run.mockImplementation(async (program: string, args: string[]) => {
+      // The French run of the whole file: whisper reads its extract until released.
+      if (program === "whisper-cli" && args[args.indexOf("-l") + 1] === "fr") {
+        started();
+        await gate;
+      }
+      return inner(program, args);
+    });
     const ctx = ctxWith(runner, fs);
-    // A French transcript of the whole file leaves its 16 kHz extract behind (and no default one).
-    await runWhisper(ctx, SRC, "small", "fr");
+    const whole = runWhisper(ctx, SRC, "small", "fr");
+    await wholeRunning;
     const t = await runWhisper(ctx, SRC, "small", undefined, { start: 60, end: 90 });
-    const [whole, cut] = calls(runner, "ffmpeg");
+    const [wholeExtract, cut] = calls(runner, "ffmpeg");
     // The window is read from that extract, not decoded from the source again...
     expect(cut[cut.indexOf("-i") + 1]).not.toBe(SRC);
     expect(cut[cut.indexOf("-i") + 1]).toBe(
-      `${whole.at(-1)!.replace(/\.[a-z0-9]+\.tmp\.wav$/, "")}.wav`,
+      `${wholeExtract.at(-1)!.replace(/\.[a-z0-9]+\.tmp\.wav$/, "")}.wav`,
     );
     // ...and whisper is handed only the window, never the whole extract with an offset.
     const second = calls(runner, "whisper-cli")[1];
     expect(second).not.toContain("-ot");
     expect(t.segments[0].start_seconds).toBe(60);
+    release();
+    await whole;
   });
 
   it("never hands a window's transcript out as the whole file's", async () => {
@@ -1205,6 +1227,163 @@ describe("runWhisper on a window (UJ-012)", () => {
       await peekTranscript(ctx, SRC, "small", undefined, { start: 300, end: 330 }),
     ).not.toBeNull();
     expect(((ctx.runner.run as Any).mock.calls as Any[]).length).toBe(runs);
+  });
+});
+
+// 4i: whisper's 16 kHz audio and its raw output are scratch in the app's work folder, so a run that
+// outlives its project's close never writes into the project; and none of it outlives the runs.
+describe("whisper's scratch, outside every project (4i)", () => {
+  const SRC = "C:/media/talk.mp4";
+  const onDisk = (fs: MockFs): string[] => [...fs.files.keys(), ...fs.bytes.keys()];
+  const under = (fs: MockFs, dir: string): string[] =>
+    onDisk(fs).filter((p) => p.startsWith(`${dir}/`));
+  const argsOf = (runner: CommandRunner, program: string): string[][] =>
+    (runner.run as Any).mock.calls.filter((c: Any[]) => c[0] === program).map((c: Any[]) => c[1]);
+  /** The published name of the extract the first ffmpeg run wrote. */
+  const firstExtract = (runner: CommandRunner): string =>
+    `${argsOf(runner, "ffmpeg")[0]
+      .at(-1)!
+      .replace(/\.[a-z0-9]+\.tmp\.wav$/, "")}.wav`;
+  /** A runner whose whisper runs in `held` languages wait until released, one release each. */
+  function gated(fs: MockFs, held: string[]) {
+    const runner = transcribeRunner(fs);
+    const run = runner.run as ReturnType<typeof vi.fn>;
+    const inner = run.getMockImplementation()!;
+    const waiting = new Map<string, () => void>();
+    run.mockImplementation(async (program: string, args: string[]) => {
+      const lang = args[args.indexOf("-l") + 1];
+      if (program === "whisper-cli" && held.includes(lang))
+        await new Promise<void>((r) => waiting.set(lang, r));
+      return inner(program, args);
+    });
+    const until = async (lang: string): Promise<void> => {
+      for (let i = 0; i < 200 && !waiting.has(lang); i++)
+        await new Promise((r) => setTimeout(r, 1));
+      expect(waiting.has(lang)).toBe(true);
+    };
+    const release = (lang: string): void => {
+      waiting.get(lang)!();
+      waiting.delete(lang);
+    };
+    return { runner, until, release };
+  }
+
+  it("reads and writes only in the work folder, never in the project, and leaves nothing there", async () => {
+    for (const window of [null, { start: 60, end: 90 }]) {
+      _resetAppCaches(); // each pass is its own install: nothing kept from the last
+      const fs = new MockFs();
+      fs.putModel();
+      fs.touch(SRC);
+      const runner = transcribeRunner(fs);
+      const t = await runWhisper(ctxWith(runner, fs), SRC, "small", undefined, window);
+      expect(t.words.map((w) => w.word)).toEqual(["Hello", "world", "Bye"]);
+      const [extract] = argsOf(runner, "ffmpeg");
+      const [whisper] = argsOf(runner, "whisper-cli");
+      const touched = [
+        extract.at(-1)!,
+        whisper[whisper.indexOf("-f") + 1],
+        whisper[whisper.indexOf("-of") + 1],
+      ];
+      for (const p of touched) expect(p.startsWith(`${WORK}/`), p).toBe(true);
+      expect(under(fs, DIR)).toEqual([]);
+      expect(under(fs, WORK)).toEqual([]);
+      expect(under(fs, "C:/cache/app/transcripts")).toHaveLength(1);
+    }
+  });
+
+  it("leaves nothing in the work folder when the extraction or whisper fails, or Stop ends it", async () => {
+    const stopped = (fs: MockFs): { runner: CommandRunner; signal: AbortSignal } => {
+      const ac = new AbortController();
+      const inner = transcribeRunner(fs);
+      return {
+        signal: ac.signal,
+        runner: {
+          run: vi.fn(async (program: string, args: string[]) => {
+            if (program !== "whisper-cli") return inner.run(program, args);
+            await fs.writeTextFile(`${args[args.indexOf("-of") + 1]}.json`, "{");
+            ac.abort();
+            return { code: -1, stdout: "", stderr: "" };
+          }),
+        },
+      };
+    };
+    const cases: Array<[string, (fs: MockFs) => { runner: CommandRunner; signal?: AbortSignal }]> =
+      [
+        ["extraction fails", (fs) => ({ runner: transcribeRunner(fs, { failConv: true }) })],
+        ["whisper fails", (fs) => ({ runner: transcribeRunner(fs, { failWhisper: true }) })],
+        ["whisper writes nonsense", (fs) => ({ runner: transcribeRunner(fs, { json: "{" }) })],
+        ["Stop", stopped],
+      ];
+    for (const [name, make] of cases) {
+      for (const window of [null, { start: 60, end: 90 }]) {
+        _resetAppCaches();
+        const fs = new MockFs();
+        fs.putModel();
+        fs.touch(SRC);
+        const { runner, signal } = make(fs);
+        const ctx = { ...ctxWith(runner, fs), signal };
+        await expect(runWhisper(ctx, SRC, "small", undefined, window), name).rejects.toThrow();
+        expect(under(fs, WORK), `${name}, window ${!!window}`).toEqual([]);
+        expect(under(fs, DIR), name).toEqual([]);
+      }
+    }
+  });
+
+  it("never deletes an extract a run is reading, and deletes it when the last run holding it ends", async () => {
+    // A whole-file run (French) holds its extract while whisper reads it; a window run cuts from it.
+    for (const wholeEndsFirst of [false, true]) {
+      _resetAppCaches();
+      const fs = new MockFs();
+      fs.putModel();
+      fs.touch(SRC);
+      const g = gated(fs, wholeEndsFirst ? ["fr", "auto"] : ["fr"]);
+      const ctx = ctxWith(g.runner, fs);
+      const whole = runWhisper(ctx, SRC, "small", "fr");
+      await g.until("fr");
+      const extract = firstExtract(g.runner);
+      const window = runWhisper(ctx, SRC, "small", undefined, { start: 60, end: 90 });
+      if (wholeEndsFirst) {
+        await g.until("auto");
+        g.release("fr");
+        await whole;
+        // The window's whisper is still running on audio cut from it: the extract stays...
+        expect(await fs.exists(extract)).toBe(true);
+        g.release("auto");
+        await window;
+      } else {
+        await window;
+        // The whole file's whisper is still reading it.
+        expect(await fs.exists(extract)).toBe(true);
+        g.release("fr");
+        await whole;
+      }
+      // ...and goes with the last run that held it, with every other extract.
+      expect(await fs.exists(extract)).toBe(false);
+      expect(under(fs, WORK)).toEqual([]);
+      const [, cut] = argsOf(g.runner, "ffmpeg");
+      expect(cut[cut.indexOf("-i") + 1]).toBe(extract);
+    }
+  });
+
+  it("extracts a file's audio once for two runs of it that need it at the same time", async () => {
+    _resetAppCaches();
+    const fs = new MockFs();
+    fs.putModel();
+    fs.touch(SRC);
+    const g = gated(fs, ["fr"]);
+    const ctx = ctxWith(g.runner, fs);
+    const french = runWhisper(ctx, SRC, "small", "fr");
+    await g.until("fr");
+    // The German transcript of the same file reads the extract the French run holds.
+    await runWhisper(ctx, SRC, "small", "de");
+    expect(argsOf(g.runner, "ffmpeg")).toHaveLength(1);
+    expect(argsOf(g.runner, "whisper-cli").map((a) => a[a.indexOf("-f") + 1])).toEqual([
+      firstExtract(g.runner),
+      firstExtract(g.runner),
+    ]);
+    g.release("fr");
+    await french;
+    expect(under(fs, WORK)).toEqual([]);
   });
 });
 

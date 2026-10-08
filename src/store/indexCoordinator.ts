@@ -12,8 +12,12 @@
 //                  at a long file finds its loudness kept, plus the long spans looks ask for.
 // Each pass drains INDEPENDENTLY, so a poster the user is waiting on never queues behind a
 // multi-minute transcription.
-// Desktop-only: no runner (web build) => no-op. Lifecycle-scoped: dispose() on
-// project switch cancels pending work so it never leaks across projects.
+// Desktop-only: no runner (web build) => no-op. Lifecycle-scoped, as Palmier's indexer is (owner
+// decision 2026-10-04): dispose() on project close drops every queue and stops the proxy and poster
+// in progress, which write into the project. The transcription and the loudness measurement in
+// progress run to their end: they write only to the app-wide cache (and whisper's scratch to the
+// app's work folder), so a file half transcribed when the user switched projects is not
+// transcribed again from the start next time, and nothing they do touches the closed project.
 //
 // The transcript pass was removed once, because its 465 MiB model was buffered whole in the
 // webview and killed macOS at project open. The download streams to disk and reports progress
@@ -120,9 +124,10 @@ export class IndexCoordinator {
   private txRunning = false;
   private loudRunning = false;
   private disposed = false;
-  // Aborts the in-flight derived job (ffmpeg/whisper) on dispose. dispose()
-  // clears the QUEUES (no new job starts); this cancels the RUNNING process, so
-  // no derived work outlives its project — not just the not-yet-started jobs.
+  // Aborts the in-flight proxy/poster job (ffmpeg) on dispose: it writes into the project, which is
+  // closing. dispose() clears the QUEUES (no new job starts); this stops the RUNNING transcode. The
+  // transcription and loudness passes run without it: the job in progress finishes into the app
+  // cache, and nothing after it starts.
   private readonly ac = new AbortController();
   private readonly unregister: () => void;
 
@@ -427,10 +432,10 @@ export class IndexCoordinator {
       this.txRunning = false; // web build — no runner; indexing is desktop-only
       return;
     }
+    // No signal: closing the project does not stop the transcription in progress (see the top).
     const ctx = {
       store: this.store,
       runner: ready.runner,
-      signal: this.ac.signal,
     } as ClientToolContext;
     try {
       for (let job = this.txQ.shift(); job !== undefined && !this.disposed && !this.engineDown;) {
@@ -477,10 +482,10 @@ export class IndexCoordinator {
       this.settleLooks({ error: "loudness cannot be measured here" });
       return;
     }
+    // No signal: closing the project does not stop the measurement in progress (see the top).
     const ctx = {
       store: this.store,
       runner: ready.runner,
-      signal: this.ac.signal,
     } as ClientToolContext;
     try {
       for (let job = this.loudQ.shift(); job !== undefined && !this.disposed;) {
