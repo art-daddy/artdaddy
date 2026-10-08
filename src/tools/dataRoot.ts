@@ -111,8 +111,8 @@ export async function registryPath(): Promise<string> {
 
 /** Dir -> id for projects whose folder is NOT named after their id, i.e. every project
  *  moved by Save As. Recorded as a side effect of {@link projectDirFor}, the one hop that
- *  resolves an id, so it cannot describe a project nobody has opened. Read only by
- *  `openDocumentByDir`, whose basename derivation is exact for the default layout. */
+ *  resolves an id, so it cannot describe a project nobody has opened. Read through
+ *  {@link projectIdOfDir}, whose folder-name answer is exact for the default layout. */
 const idByDir = new Map<string, string>();
 
 function normDir(d: string): string {
@@ -122,6 +122,18 @@ function normDir(d: string): string {
 /** The id bound to `dir`, or "" when the default layout already answers it. */
 export function boundProjectId(dir: string): string {
   return idByDir.get(normDir(dir)) ?? "";
+}
+
+/** The id of the project whose folder is `dir`: the id Save As bound to it, else the folder's
+ *  own name when that can be an id (the default layout keeps a project under its id), else "".
+ *  Never a path. The one rule for finding the dir's open document and for the `project_id` the
+ *  app reports: a report once sent the whole folder path, the user's name in it, and an export
+ *  sent the name the user gave a folder Save As made. */
+export function projectIdOfDir(dir: string): string {
+  const bound = boundProjectId(dir);
+  if (bound) return bound;
+  const name = normDir(dir).split("/").pop() ?? "";
+  return isSafeProjectId(name) ? name : "";
 }
 
 /** Where project `id` ACTUALLY lives — the UI-side twin of `ProjectRegistry.dirFor`.

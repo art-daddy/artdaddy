@@ -21,8 +21,8 @@ const makeTauriContext = vi.fn(async (_dir: string) => ({
 let toolGate: Promise<Any> = Promise.resolve({ ok: true });
 let toolCtx: Any = null;
 
-vi.mock("./dataRoot", () => ({
-  boundProjectId: () => "",
+vi.mock("./dataRoot", async (orig) => ({
+  ...(await orig<typeof import("./dataRoot")>()),
   projectDirFor: (id: string) => projectDirFor(id),
 }));
 vi.mock("./tauri", () => ({ makeTauriContext: (d: string) => makeTauriContext(d) }));

@@ -6,7 +6,7 @@
 // nothing it touches can close that cycle. Phase 5 removes it once the per-id owners hold their
 // document reference directly and the engine folds into the document command layer.
 import type { ProjectDocument } from "./ProjectDocument";
-import { boundProjectId } from "../tools/dataRoot";
+import { projectIdOfDir } from "../tools/dataRoot";
 import { asProjectId } from "./types";
 
 let resolver: (id: ReturnType<typeof asProjectId>) => ProjectDocument | undefined = () => undefined;
@@ -30,13 +30,11 @@ export function openDocumentByDir(projectDir: string): ProjectDocument | undefin
   // The basename IS the id while a project sits in the app folder under its own id. Once
   // Save As lets the user name the folder that stops being true, and a wrong answer here is
   // not a missing lookup: the executor reads "no document" and falls back to a bare lock,
-  // slipping every commit past the document's admission gate. `boundProjectId` is recorded
-  // by the one hop that resolves an id to a directory, so it covers exactly those projects.
-  const bound = boundProjectId(projectDir);
-  if (bound) return resolver(asProjectId(bound));
-  const segment = projectDir.replace(/\\/g, "/").replace(/\/+$/, "").split("/").pop() ?? "";
-  if (!segment) return undefined;
-  return resolver(asProjectId(segment));
+  // slipping every commit past the document's admission gate. `projectIdOfDir` reads the
+  // binding the one hop that resolves an id to a directory records, so it covers exactly those.
+  const id = projectIdOfDir(projectDir);
+  if (!id) return undefined;
+  return resolver(asProjectId(id));
 }
 
 /** The runtime-AUTHORITY document for project `id` — open, close-failed, OR mid-close — or undefined

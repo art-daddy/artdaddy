@@ -14,8 +14,8 @@ vi.mock("../store/editor", () => ({
   createProjectStore: (dir: string) => createProjectStore(dir),
   useEditor: { getState: () => editorState },
 }));
-vi.mock("../tools/dataRoot", () => ({
-  boundProjectId: () => "",
+vi.mock("../tools/dataRoot", async (orig) => ({
+  ...(await orig<typeof import("../tools/dataRoot")>()),
   projectDirFor: (id: string) => projectDirFor(id),
 }));
 

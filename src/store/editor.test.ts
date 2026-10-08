@@ -34,8 +34,8 @@ import {
   useEditor,
 } from "./editor";
 
-vi.mock("../tools/dataRoot", () => ({
-  boundProjectId: () => "",
+vi.mock("../tools/dataRoot", async (orig) => ({
+  ...(await orig<typeof import("../tools/dataRoot")>()),
   projectsRoot: vi.fn(async () => "/root/projects"),
   projectDirFor: vi.fn(async (id: string) => `/root/projects/${id}`),
 }));

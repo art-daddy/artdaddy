@@ -16,6 +16,7 @@ import { encodeVideoForGemini } from "./geminiEncode";
 import { undecodableImageReason } from "./imageDims";
 import { missingIndexReason } from "../media/mp4Index";
 import { reportMediaImport } from "../api/appEvents";
+import { projectIdOfDir } from "./dataRoot";
 import { writeLibraryCatalog } from "./libraryCatalog";
 import {
   AUDIO_EXTS,
@@ -258,12 +259,17 @@ export async function registerLibraryClip(
       externalPath,
       opts,
     );
-    reportMediaImport(true, store.projectDir, "", via);
+    reportMediaImport(true, projectIdOfDir(store.projectDir), "", via);
     return entry;
   } catch (e) {
     // A project closing mid-import is a lifecycle event, not a rejection worth counting as one.
     if (!(e instanceof ProjectClosingError) && !isMutationRejected(e)) {
-      reportMediaImport(false, store.projectDir, (e as Error)?.message ?? String(e), via);
+      reportMediaImport(
+        false,
+        projectIdOfDir(store.projectDir),
+        (e as Error)?.message ?? String(e),
+        via,
+      );
     }
     throw e;
   }

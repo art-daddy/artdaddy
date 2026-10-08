@@ -21,11 +21,15 @@ type Any = any;
 
 // `via` is derived at this boundary rather than passed by callers, so it is worth asserting the
 // vocabulary it actually emits -- that is the field the funnel reads.
-const tele = vi.hoisted(() => ({ calls: [] as { ok: boolean; via: string }[] }));
+const tele = vi.hoisted(() => ({
+  calls: [] as { ok: boolean; via: string }[],
+  full: [] as { ok: boolean; projectId: string; reason: string; via: string }[],
+}));
 vi.mock("../api/appEvents", async (orig) => ({
   ...(await orig<typeof import("../api/appEvents")>()),
-  reportMediaImport: (ok: boolean, _p = "", _r = "", via = "") => {
+  reportMediaImport: (ok: boolean, projectId = "", reason = "", via = "") => {
     tele.calls.push({ ok, via });
+    tele.full.push({ ok, projectId, reason, via });
   },
 }));
 
@@ -87,6 +91,7 @@ afterEach(async () => resetTestDocuments());
 beforeEach(() => vi.clearAllMocks());
 beforeEach(() => {
   tele.calls = [];
+  tele.full = [];
 });
 
 describe("how the media got in (media_import.via)", () => {
@@ -122,6 +127,8 @@ describe("how the media got in (media_import.via)", () => {
     const store = new ProjectStoreAccess(DIR, fs);
     await registerLibraryClip(store, new Uint8Array([9, 9, 9]), "clip.mp4", "video");
     expect(tele.calls).toEqual([{ ok: true, via: "copy" }]);
+    // The project by its id (the folder's name here), and no reason: nothing went wrong.
+    expect(tele.full).toEqual([{ ok: true, projectId: "p1", reason: "", via: "copy" }]);
   });
 
   it("still says how a REFUSED import was entering", async () => {
@@ -134,8 +141,11 @@ describe("how the media got in (media_import.via)", () => {
     new DataView(huge.buffer).setUint32(20, 41754);
     const fs = new MockFs();
     const store = new ProjectStoreAccess(DIR, fs);
-    await expect(registerLibraryClip(store, huge, "shot.png", "image")).rejects.toThrow();
+    const err = await registerLibraryClip(store, huge, "shot.png", "image").catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
     expect(tele.calls).toEqual([{ ok: false, via: "copy" }]);
+    // The refusal's own words, as the user saw them: not "Error: ..." and not something else.
+    expect(tele.full[0].reason).toBe((err as Error).message);
   });
 });
 
@@ -180,6 +190,8 @@ describe("registerLibraryClip (close / session fence — reviewer blocker 1)", (
     ).rejects.toBeInstanceOf(ProjectClosingError);
     expect(fs.files.has(joinPath(DIR, "internals/library.json"))).toBe(false); // NOTHING published (count stays 0)
     expect(await fs.readDir(joinPath(DIR, "library")).catch(() => [])).toEqual([]); // staged bytes cleaned, not orphaned
+    // A project closing mid-import is not the import being refused: counted, it would read as a wall.
+    expect(tele.calls).toEqual([]);
   });
 
   it("REJECTS a catalog publish whose Stop signal aborted (open document) + cleans its staged bytes", async () => {
@@ -203,6 +215,7 @@ describe("registerLibraryClip (close / session fence — reviewer blocker 1)", (
     ).rejects.toBeInstanceOf(MutationAbortedError);
     expect(fs.files.has(joinPath(DIR, "internals/library.json"))).toBe(false); // nothing published
     expect(await fs.readDir(joinPath(DIR, "library")).catch(() => [])).toEqual([]); // staged bytes cleaned
+    expect(tele.calls).toEqual([]); // a Stop is the user's choice, not a refusal
   });
 });
 

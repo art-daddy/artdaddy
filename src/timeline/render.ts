@@ -46,6 +46,7 @@ import {
 import { buildBandAss, unrenderableFlags, type CaptionSpec } from "./assCaption";
 import { withAssScratch } from "../tools/assScratch";
 import { jobSupervisor, supervisedRunner } from "../tools/jobSupervisor";
+import { projectIdOfDir } from "../tools/dataRoot";
 import {
   ExportRunError,
   isDestinationReserved,
@@ -2770,7 +2771,7 @@ export async function queueRenderJob(
     height: job.plan.output.height,
     fps: job.plan.output.fps,
     quality: job.quality,
-    project_id: ctx.store.projectDir.split(/[\\/]/).pop() ?? "",
+    project_id: projectIdOfDir(ctx.store.projectDir),
   };
   const plan: ExportJobPlan = {
     duration: job.plan.duration,

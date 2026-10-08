@@ -90,9 +90,10 @@ let activeTestDoc: { seg: string; doc: ProjectDocument } | null = null;
 
 /** Register a fresh OPEN ProjectDocument for `dir` and install the leaf resolver, returning the
  *  doc so a test can flush/inspect it. Each call supersedes the previous active doc (one project
- *  under test at a time), so per-test setup needs no explicit teardown for correctness. */
-export function registerTestDocument(dir: string): ProjectDocument {
-  const seg = dirSegment(dir);
+ *  under test at a time), so per-test setup needs no explicit teardown for correctness. `id` is
+ *  the project's id when its folder is not named after it (a project Save As moved). */
+export function registerTestDocument(dir: string, id = dirSegment(dir)): ProjectDocument {
+  const seg = id;
   const doc = new ProjectDocument(asProjectId(seg), {
     open: async () => "loaded",
     dispose: async () => {},

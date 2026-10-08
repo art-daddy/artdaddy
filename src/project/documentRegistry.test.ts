@@ -37,8 +37,8 @@ vi.mock("../tools/host", () => ({
 vi.mock("../store/transcriptFile", () => ({
   flushPendingSession: (dir: string) => flushSession(dir),
 }));
-vi.mock("../tools/dataRoot", () => ({
-  boundProjectId: () => "",
+vi.mock("../tools/dataRoot", async (orig) => ({
+  ...(await orig<typeof import("../tools/dataRoot")>()),
   projectDirFor: async (id: string) => `/root/projects/${id}`,
 }));
 vi.mock("../observability/sentry", () => ({
