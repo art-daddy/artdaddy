@@ -692,6 +692,27 @@ describe("delete_folder", () => {
   });
 });
 
+describe("list", () => {
+  // UJ-014: `list` is how the agent sees the library, so it carries the store's offline answer.
+  it("flags a linked file that is gone, and only that one", async () => {
+    const fs = new MockFs();
+    seed(fs, {
+      clips: [
+        { id: "media_gone", path: "D:/footage/gone.mp4", external: true, kind: "video" },
+        { id: "media_here", path: "D:/footage/here.mp4", external: true, kind: "video" },
+        { id: "media_copy", path: "library/media_copy.mp4", kind: "video" },
+      ],
+    });
+    fs.setBytes("D:/footage/here.mp4", new Uint8Array([7]));
+    const r = await runLib(ctxWith(fs), { action: "list" });
+    expect(r.ok).toBe(true);
+    const byId = Object.fromEntries((r.clips as Any[]).map((c) => [c.id, c]));
+    expect(byId.media_gone.offline).toBe(true);
+    expect(byId.media_here.offline).toBe(false);
+    expect(byId.media_copy).not.toHaveProperty("offline");
+  });
+});
+
 describe("rescan", () => {
   it("keeps an external clip whose source is missing and flags it offline (never prunes a link)", async () => {
     const fs = new MockFs();

@@ -377,6 +377,33 @@ describe("add_captions", () => {
     expect(String(r.error)).toMatch(/NOT an absence of speech/i);
   });
 
+  // UJ-014: an offline linked source is the user's to relink, so say that, by its library name.
+  it("names an OFFLINE linked source as offline and to relink it", async () => {
+    const { ctx } = await seededCtx();
+    await ctx.store.writeText(
+      joinPath(DIR, "internals", "library.json"),
+      JSON.stringify({
+        clips: [
+          {
+            id: "media_gone",
+            path: "D:/Downloads/iCloud Fotos/New Jeans.mp3",
+            filename: "New Jeans.mp3",
+            kind: "audio",
+            external: true,
+          },
+        ],
+      }),
+    );
+    await withAudio(ctx, "media_gone", 300, "a1", false);
+
+    const r = (await addCaptionsTool({}, ctx)) as Any;
+
+    expect(r.ok).toBe(false);
+    expect(String(r.error)).toMatch(/NOT an absence of speech/i);
+    expect(String(r.error)).toMatch(/'New Jeans\.mp3' is offline/);
+    expect(String(r.error)).toMatch(/relink/i);
+  });
+
   it("refuses a timeline with no audio at all", async () => {
     const { ctx } = await seededCtx();
     const r = (await addCaptionsTool({}, ctx)) as Any;

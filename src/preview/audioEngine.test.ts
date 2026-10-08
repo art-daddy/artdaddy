@@ -536,6 +536,63 @@ describe("preview audio — conformed to the clip window", () => {
   });
 });
 
+// UJ-014: a window tried while its linked file was offline decodes to nothing, and an ordinary
+// reload never retries it (above). A relink is what changes that, and the editor says so.
+describe("preview audio — a relinked file", () => {
+  const clip = { kind: "audio", timeline_in: 0, timeline_out: 60, source_in: 0, source_out: 60 };
+  const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 20));
+
+  it("plays a window that found no file once the file is back, and decodes nothing twice", async () => {
+    let linked = false;
+    const written = new Set<string>();
+    const ran: string[][] = [];
+    const store = {
+      projectDir: "/p",
+      resolveRef: async (r: string) => (r.startsWith("/p/") ? r : linked ? `E:/moved/${r}` : null),
+      prepareArtifact: async (rel: string) => `/p/internals/cache/${rel}`,
+      exists: async (p: string) => written.has(p),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+    setPreviewAudioRunner(
+      async () =>
+        ({
+          run: async (_p: string, args: string[]) => {
+            ran.push(args);
+            written.add(args[args.length - 1]);
+            return { code: 0, stdout: "", stderr: "" };
+          },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        }) as any,
+    );
+    const audio = new PreviewAudio();
+    audio.setStore(store);
+    const tl = timeline(clip);
+    audio.load(tl);
+    await tick();
+    audio.load(tl);
+    await tick();
+    audio.play(0);
+    expect(ran).toHaveLength(0);
+    expect(ctx.sources.length).toBe(0);
+
+    linked = true;
+    audio.forgetUnresolved();
+    audio.load(tl);
+    await vi.waitFor(() => expect(decoded).toBe(true));
+    audio.play(0);
+    expect(ctx.sources.length).toBeGreaterThan(0);
+    expect(ran).toHaveLength(1);
+    expect(ran[0][ran[0].indexOf("-i") + 1]).toBe("E:/moved/m.mp3");
+
+    const fetched = vi.mocked(resolveSourceUrl).mock.calls.length;
+    audio.forgetUnresolved();
+    audio.load(tl);
+    await tick();
+    expect(ran).toHaveLength(1);
+    expect(vi.mocked(resolveSourceUrl).mock.calls.length).toBe(fetched);
+  });
+});
+
 // The web build has no ffmpeg to conform with, so it still decodes the source whole and the
 // size ceiling is what stops an oversized one taking the tab down.
 describe("preview audio — no ffmpeg to conform with", () => {

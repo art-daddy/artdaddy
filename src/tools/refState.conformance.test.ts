@@ -34,6 +34,7 @@ vi.mock("../api/ai", () => ({
 const DIR = "C:/proj";
 const PENDING = "media_gen_pending01";
 const FAILED = "media_gen_failed01";
+const OFFLINE = "media_offline01";
 
 class Fs implements FsLike {
   files = new Map<string, string>();
@@ -73,6 +74,14 @@ function ctx(): ClientToolContext {
           kind: "video",
           status: "failed",
           error: "content filter",
+        },
+        // UJ-014: linked from the user's disk, and no longer there.
+        {
+          id: OFFLINE,
+          path: "D:/Downloads/iCloud Fotos/New Jeans.mp4",
+          filename: "New Jeans.mp4",
+          kind: "video",
+          external: true,
         },
       ],
     }),
@@ -149,6 +158,19 @@ describe("every tool that takes a media_ref knows 'pending' from 'unknown'", () 
       const msg = String(r?.error ?? "");
       expect(msg).toMatch(/failed to generate/i);
       expect(msg).toContain("content filter"); // the provider's reason survives to the model
+    });
+
+    // UJ-014: "media not found" told the model its ref was wrong. The ref is right; the user's file
+    // moved, and only the user can point the library at it again.
+    it(`${name}: an OFFLINE linked file is offline, not unknown`, async () => {
+      const r = (await CALLS[name](OFFLINE)) as Any;
+      const msg = String(r?.error ?? "");
+      expect(msg).toMatch(/offline/i);
+      expect(msg).toContain("New Jeans.mp4");
+      expect(msg).toMatch(/relink/i);
+      expect(msg).not.toMatch(/not found|could not sample/i);
+      // Never the user's folder layout: the model gets the library's name for it.
+      expect(msg).not.toContain("iCloud Fotos");
     });
 
     // The direction that keeps the rule honest: a genuine typo must still read as a typo, or the

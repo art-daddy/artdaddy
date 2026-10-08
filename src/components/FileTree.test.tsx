@@ -1,8 +1,13 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { mockAddMention } = vi.hoisted(() => ({ mockAddMention: vi.fn() }));
 vi.mock("../lib/files", () => ({ listProjectFiles: vi.fn() }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
+vi.mock("../lib/mediaLink", async (io) => ({
+  ...(await io<typeof import("../lib/mediaLink")>()),
+  relinkMedia: vi.fn(),
+}));
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 vi.mock("../store/chat", () => ({
   useChat: (sel: any) => sel({ session: null, addMention: mockAddMention }),
@@ -20,7 +25,10 @@ vi.mock("../lib/upload", async (io) => {
 
 import { activeDrag } from "../lib/dragSource";
 import { listProjectFiles } from "../lib/files";
+import { relinkMedia } from "../lib/mediaLink";
 import { importPaths, uploadFiles } from "../lib/upload";
+import { useEditor } from "../store/editor";
+import { open } from "@tauri-apps/plugin-dialog";
 import FileTree from "./FileTree";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -228,5 +236,48 @@ describe("FileTree", () => {
     fireEvent.contextMenu(tile);
     fireEvent.click(await screen.findByText("Add to chat"));
     expect(mockAddMention).toHaveBeenCalled();
+  });
+
+  // UJ-014: a linked file that is gone says so on its tile, and its menu is where the user fixes it,
+  // under the name the stage banner, the open notice and the agent all tell them to look for.
+  describe("offline media", () => {
+    const offlineTree = [
+      { name: "New Jeans.mp3", path: "media_gone", type: "file", offline: true },
+      { name: "kept.mp3", path: "media_kept", type: "file", offline: false },
+    ];
+
+    it("marks the tile and offers Relink… on it, and only on it", async () => {
+      getFiles.mockResolvedValue(offlineTree);
+      render(<FileTree projectId="p1" />);
+      const gone = (await screen.findByText("New Jeans.mp3")).closest("button")!;
+      const kept = screen.getByText("kept.mp3").closest("button")!;
+      expect(within(gone).getByText("Media Offline")).toBeInTheDocument();
+      expect(within(kept).queryByText("Media Offline")).not.toBeInTheDocument();
+      fireEvent.contextMenu(gone);
+      expect(await screen.findByText("Relink\u2026")).toBeInTheDocument();
+      fireEvent.contextMenu(kept);
+      await screen.findByText("Add to chat");
+      expect(screen.queryByText("Relink\u2026")).not.toBeInTheDocument();
+    });
+
+    it("says why a relink was refused, instead of claiming it relinked", async () => {
+      getFiles.mockResolvedValue(offlineTree);
+      vi.mocked(open).mockResolvedValue("E:/moved/New Jeans.jpg");
+      vi.mocked(relinkMedia).mockResolvedValue({
+        ok: false,
+        error: "'New Jeans.jpg' is not an audio file, so it cannot stand in for 'New Jeans.mp3'.",
+      });
+      useEditor.setState({ store: {} as never });
+      try {
+        render(<FileTree projectId="p1" />);
+        fireEvent.contextMenu((await screen.findByText("New Jeans.mp3")).closest("button")!);
+        fireEvent.click(await screen.findByText("Relink\u2026"));
+        expect(await screen.findByText(/is not an audio file/)).toBeInTheDocument();
+        expect(screen.queryByText(/^Relinked/)).not.toBeInTheDocument();
+        expect(relinkMedia).toHaveBeenCalledWith({}, "media_gone", "E:/moved/New Jeans.jpg");
+      } finally {
+        useEditor.setState({ store: null });
+      }
+    });
   });
 });

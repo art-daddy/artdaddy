@@ -873,6 +873,62 @@ describe("placing media that is still being generated", () => {
   });
 });
 
+// UJ-014: a linked file the user moved or deleted. Probing the path ffprobe cannot open answered
+// "couldn't probe 'media_…' (No such file or directory)": a ref that reads as wrong, about a file
+// only the user can bring back.
+describe("placing media whose linked file is offline (UJ-014)", () => {
+  const noFile = makeRunner((p) =>
+    p === "ffprobe"
+      ? { code: 1, stdout: "", stderr: "No such file or directory" }
+      : { code: 0, stdout: "", stderr: "" },
+  );
+
+  async function offlineCatalog(store: ProjectStoreAccess): Promise<void> {
+    await store.writeText(
+      joinPath(store.projectDir, INTERNAL_DIR, "library.json"),
+      JSON.stringify({
+        clips: [
+          {
+            id: "media_gone",
+            path: "D:/Downloads/iCloud Fotos/New Jeans.mp3",
+            filename: "New Jeans.mp3",
+            kind: "audio",
+            external: true,
+          },
+        ],
+      }),
+    );
+  }
+
+  for (const [door, place] of [
+    [
+      "add_clips",
+      (ctx: Any) =>
+        addClipsTool({ entries: [{ media_ref: "media_gone", timeline_in: 0, duration: 30 }] }, ctx),
+    ],
+    [
+      "insert_clips",
+      (ctx: Any) =>
+        insertClipsTool({ entries: [{ media_ref: "media_gone", duration: 30 }], at: 0 }, ctx),
+    ],
+  ] as const) {
+    it(`${door} says the file is offline and to relink it, and places nothing`, async () => {
+      const { ctx, store } = await seededCtx(noFile);
+      await offlineCatalog(store);
+
+      const r = (await place(ctx)) as Any;
+
+      expect(r.ok).toBe(false);
+      expect(String(r.error)).toMatch(/offline/i);
+      expect(String(r.error)).toContain("New Jeans.mp3");
+      expect(String(r.error)).toMatch(/relink/i);
+      expect(String(r.error)).not.toMatch(/couldn't probe|No such file/);
+      const placed = (await loadTimeline(store)).tracks.flatMap((t) => t.clips ?? []);
+      expect(placed).toHaveLength(0);
+    });
+  }
+});
+
 describe("addTextClipsTool", () => {
   it("places a text clip on the captions track (string content wrapped in a run)", async () => {
     const { ctx, store } = await seededCtx();

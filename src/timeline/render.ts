@@ -2589,10 +2589,8 @@ export async function exportDestination(
   };
 }
 
-/** Filenames of REFERENCED-in-place media whose source file is gone, limited to what THIS
- *  timeline actually uses. Only external entries are checked: media that lives inside the
- *  project cannot go offline, and reporting it would send the user hunting for a file that was
- *  never theirs to move.
+/** Filenames of linked media whose file is gone (the store's offline rule), limited to what THIS
+ *  timeline actually uses.
  *
  *  Scoped to the timeline because it iterates the LIBRARY: an offline row that no clip
  *  references blocked every export of every timeline until the user found and deleted it.
@@ -2606,9 +2604,8 @@ export async function offlineSources(
   const used = timeline ? usedMediaRefs(timeline) : null;
   const out: string[] = [];
   for (const clip of await ctx.store.listClips()) {
-    if (!clip.external) continue;
     if (used && !referencedBy(clip, used)) continue;
-    if (!(await ctx.store.exists(clip.path)))
+    if (await ctx.store.isOffline(clip))
       out.push(String(clip.filename || clip.path.split(/[\\/]/).pop() || clip.id));
   }
   return out;

@@ -220,6 +220,15 @@ export class IndexCoordinator {
     reportAppError(`index ${pass} failed (attempt ${tried}): ${String(err).slice(-160)}`);
   }
 
+  /** A linked file the user moved or deleted is OFFLINE, not failing (UJ-014): the library panel
+   *  shows it with Relink, so nothing is attempted, reported or counted against it. Released to the
+   *  next sweep, so Relink (which announces itself and re-sweeps) or a drive coming back picks it up. */
+  private async parkedOffline(key: string, source: string): Promise<boolean> {
+    if (!(await this.store.offlineMedia(source).catch(() => null))) return false;
+    this.seen.delete(key);
+    return true;
+  }
+
   /** The runner + desktop-only modules a drain needs. Null on the web build (no runner),
    *  where indexing is a no-op.
    *
@@ -302,7 +311,8 @@ export class IndexCoordinator {
         Array.from({ length: IndexCoordinator.PROXY_WORKERS }, async () => {
           for (let src = this.proxyQ.shift(); src !== undefined && !this.disposed;) {
             try {
-              await this.runProxy(src, ready.runner, ready.mods, markImporting);
+              if (!(await this.parkedOffline(`proxy\u0000${src}`, src)))
+                await this.runProxy(src, ready.runner, ready.mods, markImporting);
             } catch (e) {
               this.onJobFailed("proxy", src, e);
             }
@@ -344,7 +354,10 @@ export class IndexCoordinator {
           // A video with no audio track is not a failure to report — there is simply nothing to
           // transcribe. Asking ffmpeg for an audio-only output of one fails with "Output file
           // does not contain any stream", which read as a broken transcriber.
-          if (await this.hasSpeech(ctx, ready.mods, job.source)) {
+          if (
+            !(await this.parkedOffline(txKey(job), job.source)) &&
+            (await this.hasSpeech(ctx, ready.mods, job.source))
+          ) {
             await ready.mods.ensureTranscript(
               ctx,
               job.source,
@@ -355,7 +368,9 @@ export class IndexCoordinator {
           }
         } catch (e) {
           if (ready.mods.isSpeechEngineUnavailable(e)) this.onEngineUnavailable(e);
-          else this.onJobFailed("transcript", job, e);
+          // Gone between the check and the run: the same fact, found later.
+          else if (!(await this.parkedOffline(txKey(job), job.source)))
+            this.onJobFailed("transcript", job, e);
         }
         this.txCurrent = null;
         job = this.txQ.shift();

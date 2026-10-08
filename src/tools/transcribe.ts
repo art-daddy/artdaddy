@@ -10,6 +10,7 @@ import { stderrExcerpt } from "./command";
 import type { ClientToolContext } from "./context";
 import { shortHash } from "./media";
 import type { ClientToolRegistry } from "./registry";
+import { MediaOfflineError } from "./refState";
 import { joinPath } from "./store";
 import { beginSessionActivity } from "../observability/crashWatch";
 import { ArtDaddyError } from "../lib/errors";
@@ -721,6 +722,12 @@ export function isSpeechEngineUnavailable(e: unknown): boolean {
   return e instanceof SpeechEngineUnavailableError;
 }
 
+/** A failed transcription as the model reads it: our own errors whole, since they lead with what
+ *  happened, and the TAIL of anything else, where a subprocess puts its reason. */
+export function transcriptionFailureText(e: unknown): string {
+  return e instanceof ArtDaddyError ? e.message : String(e).slice(-200);
+}
+
 /** The cache files a transcription request reads: the full transcript (which answers every
  *  window) and, for a windowed request, the window's own. One place, so a peek and a run can never
  *  disagree about what is cached. */
@@ -929,7 +936,11 @@ export async function ensureTranscript(
   language?: string,
 ): Promise<EnsuredTranscript> {
   const src = await ctx.store.resolveRef(ref);
-  if (!src) throw new Error(`file not found: ${ref}`);
+  if (!src) {
+    const offline = await ctx.store.offlineMedia(ref).catch(() => null);
+    if (offline) throw new MediaOfflineError(offline);
+    throw new Error(`file not found: ${ref}`);
+  }
   const rel = outRel && outRel.trim() ? outRel.trim() : canonicalTranscriptRel(ref, size, language);
   const path = await ctx.store.prepareArtifact(rel);
   if (await ctx.store.exists(path)) {
@@ -1024,7 +1035,7 @@ export async function getTranscriptTool(
       // the tool reported success with no words and the model concluded the footage
       // had no speech. Keep going (one bad source shouldn't sink the rest) but
       // report what failed, and fail outright when nothing could be transcribed.
-      failures.push({ clip_id: String(clip.id), error: String(e).slice(-200) });
+      failures.push({ clip_id: String(clip.id), error: transcriptionFailureText(e) });
       continue;
     }
     const rows: Array<[number, string, number, number]> = [];

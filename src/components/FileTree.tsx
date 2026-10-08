@@ -79,11 +79,13 @@ export default function FileTree({
     if (typeof picked !== "string") return;
     const res = await relinkMedia(store, mediaId, picked);
     setNonce((n) => n + 1);
-    setToast(
-      res.remaining > 0
-        ? `Relinked ${res.relinked.length}; ${res.remaining} still offline.`
-        : `Relinked ${res.relinked.length} file${res.relinked.length === 1 ? "" : "s"}.`,
-    );
+    if (!res.ok) setToast(res.error);
+    else
+      setToast(
+        res.remaining > 0
+          ? `Relinked ${res.relinked.length}; ${res.remaining} still offline.`
+          : `Relinked ${res.relinked.length} file${res.relinked.length === 1 ? "" : "s"}.`,
+      );
   };
 
   const copyIn = async (mediaId: string) => {
@@ -390,7 +392,7 @@ export default function FileTree({
                   void linkMedia(ref, name);
                 }}
               >
-                Link Media…
+                Relink…
               </MenuItem>
             )}
             <MenuItem

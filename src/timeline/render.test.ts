@@ -3208,8 +3208,13 @@ describe("exportTimelineTool", () => {
       return { code: 0, stderr: "" };
     });
     await fs.writeTextFile("C:/proj/internals/library.json", JSON.stringify({ version: 1, clips }));
+    // Placed while every linked file is there, then every one of them goes: placement refuses an
+    // offline file (UJ-014), so an export only meets one that went after it was placed. A test
+    // puts back the files that stay.
+    const linked = clips.filter((c) => c.external).map((c) => String(c.path));
+    for (const p of linked) await fs.writeTextFile(p, "video");
     const refs = placeIds ?? clips.map((c) => String(c.id));
-    await addClipsTool(
+    const placed = (await addClipsTool(
       {
         entries: refs.map((media_ref, i) => ({
           media_ref,
@@ -3218,7 +3223,9 @@ describe("exportTimelineTool", () => {
         })),
       },
       ctx,
-    );
+    )) as Any;
+    expect(placed.ok, JSON.stringify(placed)).toBe(true);
+    for (const p of linked) fs.files.delete(joinPath(p));
     return { ctx, fs, spawned: () => spawned };
   }
 

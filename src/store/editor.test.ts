@@ -2,6 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
 
 import { _resetTimelineBus, emitTimelineChange } from "../timeline/bus";
+import { relinkMedia } from "../lib/mediaLink";
+import {
+  clearSourceUrlCache,
+  resolvePreviewUrl,
+  setAssetAccessGrant,
+  setAssetUrlConverter,
+} from "../preview/resolve";
 import { applyOp } from "../timeline/engine";
 import { findClip } from "../timeline/helpers";
 import { emptyTimeline, type Timeline } from "../timeline/model";
@@ -917,5 +924,183 @@ describe("offline media", () => {
 
     await waitFor(() => expect(useEditor.getState().mediaNames.media_1).toBe("hero.mp4"));
     expect(useEditor.getState().mediaOffline).toEqual([]);
+  });
+
+  // UJ-014: everything that looked the file up by its ref hears the relink: the offline list, and
+  // the preview, which memoised the ref's URL and only resolves again for a new timeline object.
+  it("after a relink, lists nothing offline and the preview resolves the ref to the new file", async () => {
+    const { store, fs } = seedStore(P1, withClip());
+    fs.files.set(
+      `${P1}/internals/library.json`,
+      lib([
+        {
+          id: "media_1",
+          path: "D:/Downloads/hero.mp4",
+          filename: "hero.mp4",
+          kind: "video",
+          external: true,
+        },
+      ]),
+    );
+    fs.files.set("E:/moved/hero.mp4", "bytes");
+    clearSourceUrlCache();
+    setAssetUrlConverter((p) => `asset://${p}`);
+    setAssetAccessGrant(async () => undefined);
+    setProjectStoreFactory(() => store);
+    await useEditor.getState().load("p1");
+    await waitFor(() => expect(useEditor.getState().mediaOffline).toEqual(["media_1"]));
+    expect(await resolvePreviewUrl(store, "media_1")).toBeNull();
+    const before = useEditor.getState().timeline;
+
+    expect(await relinkMedia(store, "media_1", "E:/moved/hero.mp4")).toMatchObject({ ok: true });
+
+    await waitFor(() => expect(useEditor.getState().mediaOffline).toEqual([]));
+    await waitFor(() => expect(useEditor.getState().timeline).not.toBe(before));
+    expect(useEditor.getState().timeline).toEqual(before);
+    expect(await resolvePreviewUrl(store, "media_1")).toBe("asset://E:/moved/hero.mp4");
+  });
+
+  // The notice on open said the file was gone; once it is back the notice must not keep saying so.
+  // A notice that replaced it is someone else's, and stays.
+  it("withdraws its own offline notice once a relink brings the file back, and only its own", async () => {
+    const opened = async () => {
+      const { store, fs } = seedStore(P1, withClip());
+      fs.files.set(
+        `${P1}/internals/library.json`,
+        lib([
+          {
+            id: "media_1",
+            path: "D:/Downloads/hero.mp4",
+            filename: "hero.mp4",
+            kind: "video",
+            external: true,
+          },
+        ]),
+      );
+      fs.files.set("E:/moved/hero.mp4", "bytes");
+      useProjectNotice.getState().clear();
+      setProjectStoreFactory(() => store);
+      await useEditor.getState().load("p1");
+      await waitFor(() =>
+        expect(useProjectNotice.getState().message).toMatch(/1 media file is offline/),
+      );
+      return store;
+    };
+
+    let store = await opened();
+    await relinkMedia(store, "media_1", "E:/moved/hero.mp4");
+    await waitFor(() => expect(useProjectNotice.getState().message).toBeNull());
+
+    useEditor.getState().dispose();
+    store = await opened();
+    useProjectNotice.getState().notify("This project is open in another window.");
+    await relinkMedia(store, "media_1", "E:/moved/hero.mp4");
+    await waitFor(() => expect(useEditor.getState().mediaOffline).toEqual([]));
+    expect(useProjectNotice.getState().message).toBe("This project is open in another window.");
+  });
+
+  it("recounts its notice when a relink brings back only some of the files", async () => {
+    const { store, fs } = seedStore(P1, withClip());
+    const row = (id: string, path: string) => ({
+      id,
+      path,
+      filename: path.split("/").pop(),
+      kind: "video",
+      external: true,
+    });
+    fs.files.set(
+      `${P1}/internals/library.json`,
+      lib([row("media_1", "D:/Downloads/hero.mp4"), row("media_2", "D:/Other/broll.mp4")]),
+    );
+    fs.files.set("E:/moved/hero.mp4", "bytes");
+    useProjectNotice.getState().clear();
+    setProjectStoreFactory(() => store);
+    await useEditor.getState().load("p1");
+    await waitFor(() =>
+      expect(useProjectNotice.getState().message).toMatch(/^2 media files are offline/),
+    );
+
+    await relinkMedia(store, "media_1", "E:/moved/hero.mp4");
+
+    await waitFor(() => expect(useEditor.getState().mediaOffline).toEqual(["media_2"]));
+    await waitFor(() =>
+      expect(useProjectNotice.getState().message).toMatch(/^1 media file is offline/),
+    );
+  });
+
+  // The notice is said once, on open. A file that walks away mid-session shows in the panel; the
+  // next library change must not turn that into a banner nobody asked for.
+  it("raises no notice after open when a file walks away mid-session", async () => {
+    const { store, fs } = seedStore(P1, withClip());
+    fs.files.set("D:/Downloads/hero.mp4", "bytes");
+    fs.files.set(
+      `${P1}/internals/library.json`,
+      lib([{ id: "media_1", path: "D:/Downloads/hero.mp4", filename: "hero.mp4", external: true }]),
+    );
+    useProjectNotice.getState().clear();
+    setProjectStoreFactory(() => store);
+    await useEditor.getState().load("p1");
+    await waitFor(() => expect(useEditor.getState().mediaNames.media_1).toBe("hero.mp4"));
+
+    fs.files.delete("D:/Downloads/hero.mp4");
+    window.dispatchEvent(new CustomEvent("artdaddy:files-changed"));
+
+    await waitFor(() => expect(useEditor.getState().mediaOffline).toEqual(["media_1"]));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(useProjectNotice.getState().message).toBeNull();
+  });
+
+  // The refresh after a library change reads the catalog, and the user can switch projects while
+  // it does. Its answer is about the project it started in: it must not land on the next one's
+  // view, nor withdraw a notice the next one raised in the same words.
+  it("keeps a refresh that outlives a project switch off the next project's view and notice", async () => {
+    const offlineLib = (id: string) =>
+      lib([{ id, path: `D:/Downloads/${id}.mp4`, filename: `${id}.mp4`, external: true }]);
+    const a = seedStore(P1, withClip());
+    const b = seedStore(P2, withClip());
+    a.fs.files.set(`${P1}/internals/library.json`, offlineLib("media_1"));
+    b.fs.files.set(`${P2}/internals/library.json`, offlineLib("media_2"));
+    useProjectNotice.getState().clear();
+    setProjectStoreFactory((dir) => (dir.endsWith("/p1") ? a.store : b.store));
+    await useEditor.getState().load("p1");
+    await waitFor(() =>
+      expect(useProjectNotice.getState().message).toMatch(/^1 media file is offline/),
+    );
+
+    // p1's file comes back, and the catalog read that follows the announcement is slow.
+    a.fs.files.set("D:/Downloads/media_1.mp4", "bytes");
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const read = a.fs.readTextFile.bind(a.fs);
+    a.fs.readTextFile = async (p: string) => {
+      if (p.endsWith("library.json")) await gate;
+      return read(p);
+    };
+    window.dispatchEvent(new CustomEvent("artdaddy:files-changed"));
+    await useEditor.getState().load("p2");
+    await waitFor(() => expect(useEditor.getState().mediaOffline).toEqual(["media_2"]));
+    const shown = useProjectNotice.getState().message;
+    expect(shown).toMatch(/^1 media file is offline/);
+
+    release();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(useEditor.getState().mediaOffline).toEqual(["media_2"]);
+    expect(useProjectNotice.getState().message).toBe(shown);
+  });
+
+  // The new timeline object is only a nudge to the preview, so it must never land under a drag:
+  // the bus defers its own updates for the same reason.
+  it("does not swap the timeline under a gesture when the library changes", async () => {
+    const { store } = seedStore(P1, withClip());
+    setProjectStoreFactory(() => store);
+    await useEditor.getState().load("p1");
+    useEditor.getState().beginGesture();
+    const during = useEditor.getState().timeline;
+
+    window.dispatchEvent(new CustomEvent("artdaddy:files-changed"));
+    await new Promise((r) => setTimeout(r, 30));
+
+    expect(useEditor.getState().timeline).toBe(during);
+    useEditor.getState().endGesture();
   });
 });

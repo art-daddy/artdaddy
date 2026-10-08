@@ -5,6 +5,7 @@
 import { stderrExcerpt, type CommandResult, type CommandRunner } from "../tools/command";
 import type { ClientToolContext } from "../tools/context";
 import { isUnsafeAgentRef } from "../tools/store";
+import { offlineRefMessage } from "../tools/refState";
 import { ctxApplyOp, loadTimeline } from "./engine";
 import { OpError } from "./errors";
 import { canvasFps, toFrames } from "./frames";
@@ -427,6 +428,15 @@ async function pendingMediaRow(
   return { id: row.id, path: row.path, kind };
 }
 
+/** A linked file the user moved or deleted (UJ-014): the ref is right and only the user can bring
+ *  the file back, where a probe of it could only say "No such file". Asked of a ref that did not
+ *  resolve (`abs === raw`). */
+async function refuseOffline(ctx: ClientToolContext, raw: string, abs: string): Promise<void> {
+  if (abs !== raw) return;
+  const row = await ctx.store.offlineMedia(raw).catch(() => null);
+  if (row) throw new OpError(offlineRefMessage(row));
+}
+
 async function resolveAddEntry(
   ctx: ClientToolContext,
   entry: Args,
@@ -471,6 +481,7 @@ async function resolveAddEntry(
       note: place.note,
     };
   }
+  await refuseOffline(ctx, raw, abs);
   let kind = placeableKind(abs);
   // A container ext (.mp4/.mov/...) can be AUDIO-ONLY. Treat a "video" source with
   // no video stream as audio, so it places ONE audio clip (not a video shell + a
@@ -566,6 +577,7 @@ async function resolveInsertEntry(
       note: undefined,
     };
   }
+  await refuseOffline(ctx, raw, abs);
   let kind = placeableKind(abs);
   if (kind === "video" && !(await sourceHasVideo(ctx, abs))) kind = "audio";
   const span = entry.source_span;

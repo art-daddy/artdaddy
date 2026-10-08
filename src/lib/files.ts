@@ -92,7 +92,7 @@ export async function listProjectFiles(
         type: "file",
         // The user can move or delete their own file at any time; say so instead of
         // failing at render with a path nobody recognises.
-        offline: !(await store.exists(c.path)),
+        offline: await store.isOffline(c),
       })),
   );
   if (!external.length) return onDisk;

@@ -271,6 +271,72 @@ describe("ProjectStoreAccess.linksFile (the library's files outside the project,
   });
 });
 
+// UJ-014: a linked file the user moved or deleted. Every reader asks the store, so the rule has one
+// owner: a LINKED row whose path is not on disk. Copied media lives in the project and cannot go
+// offline; media still being generated has no file yet by design.
+describe("ProjectStoreAccess offline media (UJ-014)", () => {
+  const GONE = "D:/Downloads/iCloud Fotos/New Jeans.mp3";
+  const HERE = "D:/Downloads/kept.mp4";
+
+  function library(): { fs: MockFs; store: ProjectStoreAccess } {
+    const fs = new MockFs();
+    fs.touch(HERE);
+    withLibrary(fs, [
+      { id: "media_gone", path: GONE, external: true, filename: "New Jeans.mp3", aliases: ["nj"] },
+      { id: "media_here", path: HERE, external: true, filename: "kept.mp4" },
+      { id: "media_copy", path: "library/media_copy.mp4", filename: "copy.mp4" },
+      { id: "media_gen", path: "D:/gen/pending.mp4", external: true, status: "generating" },
+      { id: "media_bad", path: "D:/gen/refused.mp4", external: true, status: "failed" },
+    ]);
+    return { fs, store: new ProjectStoreAccess(DIR, fs) };
+  }
+
+  it("names a linked file that is gone, by every handle a caller has for it", async () => {
+    const { store } = library();
+    for (const ref of [
+      "media_gone",
+      " media_gone\n",
+      "New Jeans.mp3",
+      "nj",
+      GONE,
+      GONE.replace(/\//g, "\\"),
+    ]) {
+      expect(await store.offlineMedia(ref), ref).toMatchObject({
+        id: "media_gone",
+        filename: "New Jeans.mp3",
+      });
+    }
+  });
+
+  it("is null for a linked file that is there, for copied media, for generating media, for a stranger", async () => {
+    const { fs, store } = library();
+    expect(await store.offlineMedia("media_here")).toBeNull();
+    expect(await store.offlineMedia(HERE)).toBeNull(); // by its path: that row, not another link
+    expect(await store.offlineMedia("D:/Downloads/stranger.mp4")).toBeNull();
+    expect(await store.offlineMedia("media_copy")).toBeNull(); // missing, but not a link
+    expect(fs.files.has(joinPath(DIR, "library/media_copy.mp4"))).toBe(false);
+    expect(await store.offlineMedia("media_gen")).toBeNull(); // no file YET, by design
+    expect(await store.offlineMedia("media_bad")).toBeNull(); // a failed generation says so itself
+    expect(await store.offlineMedia("media_typo")).toBeNull();
+    expect(await store.offlineMedia("")).toBeNull();
+  });
+
+  it("lists exactly the offline links, and follows the file back", async () => {
+    const { fs, store } = library();
+    expect(await store.libraryOffline()).toEqual(["media_gone"]);
+    fs.touch(GONE);
+    expect(await store.libraryOffline()).toEqual([]);
+    expect(await store.offlineMedia("media_gone")).toBeNull();
+  });
+
+  it("answers nothing offline when the catalog is unreadable", async () => {
+    const { fs, store } = library();
+    fs.set(joinPath(DIR, "internals", "library.json"), "{bad json");
+    expect(await store.libraryOffline()).toEqual([]);
+    expect(await store.offlineMedia("media_gone")).toBeNull();
+  });
+});
+
 describe("ProjectStoreAccess.resolveMediaRef (narrow agent-facing resolver)", () => {
   it("REJECTS a bare absolute path even when the file exists (resolveRef would accept it)", async () => {
     const fs = new MockFs();

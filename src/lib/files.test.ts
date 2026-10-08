@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { listProjectFiles, walkProjectDir } from "./files";
-import type { DirEntry, ProjectStoreAccess } from "../tools/store";
+import { joinPath, ProjectStoreAccess, type DirEntry, type FsLike } from "../tools/store";
 
 type Tree = Record<string, DirEntry[]>;
 const d = (name: string): DirEntry => ({ name, isDirectory: true });
@@ -48,15 +48,30 @@ describe("walkProjectDir", () => {
 });
 
 describe("listProjectFiles", () => {
-  /** The panel's real source is the fs walk PLUS the catalog; tests must supply both.
-   *  `present` is the set of absolute paths that exist, so a linked file can be missing. */
-  const mkStore = (readDir: unknown, clips: unknown[] = [], present: string[] = []) =>
-    ({
+  /** The panel's real source is the fs walk PLUS the catalog; tests must supply both, to the REAL
+   *  store, so the offline rule under test is the one the app runs. `present` is the set of
+   *  absolute paths that exist, so a linked file can be missing. */
+  const mkStore = (
+    readDir: FsLike["readDir"],
+    clips: unknown[] = [],
+    present: string[] = [],
+  ): ProjectStoreAccess => {
+    const files = new Map([
+      [joinPath("C:/proj", "internals", "library.json"), JSON.stringify({ clips })],
+    ]);
+    for (const p of present) files.set(joinPath(p), "");
+    return new ProjectStoreAccess("C:/proj", {
       readDir,
-      projectDir: "C:/proj",
-      listClips: async () => clips,
-      exists: async (p: string) => present.includes(p),
-    }) as unknown as ProjectStoreAccess;
+      exists: async (p) => files.has(joinPath(p)),
+      readTextFile: async (p) => {
+        const v = files.get(joinPath(p));
+        if (v === undefined) throw new Error(`ENOENT ${p}`);
+        return v;
+      },
+      writeTextFile: async () => undefined,
+      mkdir: async () => undefined,
+    });
+  };
 
   it("returns the library's contents at the tree root (desktop)", async () => {
     const fs = fakeFs({
@@ -118,6 +133,29 @@ describe("listProjectFiles", () => {
       [], // nothing on disk
     );
     expect((await listProjectFiles("proj", store))[0]).toMatchObject({ offline: true });
+  });
+
+  // The tile carries the name the file was imported under; an older row without one is named by
+  // its file, never by the folders it sat in.
+  it("names a linked file as imported, else by its file", async () => {
+    const fs = fakeFs({ "C:/proj": [f("timeline.json")] });
+    const store = mkStore(
+      fs.readDir,
+      [
+        {
+          id: "media_a",
+          filename: "Holiday.mp4",
+          path: "C:/Users/me/IMG_0042.mp4",
+          external: true,
+        },
+        { id: "media_b", path: "C:/Users/me/Trip/IMG_0043.mp4", external: true },
+      ],
+      ["C:/Users/me/IMG_0042.mp4", "C:/Users/me/Trip/IMG_0043.mp4"],
+    );
+    expect((await listProjectFiles("proj", store)).map((n) => n.name)).toEqual([
+      "Holiday.mp4",
+      "IMG_0043.mp4",
+    ]);
   });
 
   it("does not duplicate COPIED media, which the walk already found", async () => {

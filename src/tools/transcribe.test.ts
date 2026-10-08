@@ -1453,4 +1453,35 @@ describe("getTranscriptTool (timeline transcript)", () => {
     expect(r.failed).toHaveLength(1);
     expect(r.failed[0].clip_id).toBe("c2");
   });
+
+  // UJ-014: a linked source the user moved. "file not found: media_…" read as a wrong ref; the ref
+  // is right, the file is offline, and the user can relink it.
+  it("names an OFFLINE linked source as offline, with what to do, and still not as silence", async () => {
+    const fs = new MockFs();
+    fs.putModel();
+    await fs.writeTextFile(
+      joinPath(DIR, "internals", "library.json"),
+      JSON.stringify({
+        clips: [
+          {
+            id: "media_gone",
+            path: "D:/Downloads/iCloud Fotos/New Jeans.mp3",
+            filename: "New Jeans.mp3",
+            external: true,
+          },
+        ],
+      }),
+    );
+    const tl = JSON.parse(timelineWith(["c1"]));
+    tl.tracks[0].clips[0].media_ref = "media_gone";
+    await fs.writeTextFile(joinPath(DIR, "internals", "timeline.json"), JSON.stringify(tl));
+
+    const r = (await getTranscriptTool({}, ctxWith(transcribeRunner(fs), fs))) as Any;
+
+    expect(r.ok).toBe(false);
+    expect(String(r.error)).toMatch(/NOT an absence of speech/i);
+    expect(String(r.error)).toMatch(/'New Jeans\.mp3' is offline/);
+    expect(String(r.error)).toMatch(/relink/i);
+    expect(String(r.error)).not.toMatch(/file not found|iCloud Fotos/);
+  });
 });

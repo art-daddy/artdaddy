@@ -40,10 +40,14 @@ const transcribed = (): string[] =>
 
 const runner = { run: vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })) } as Any;
 const makeRunner = async () => runner as Any;
-const fakeStore = (clips: { path: string; status?: string; id?: string }[] = []): Any => ({
+const fakeStore = (
+  clips: { path: string; status?: string; id?: string }[] = [],
+  offline: Set<string> = new Set(),
+): Any => ({
   projectDir: "C:/p",
   listClips: vi.fn(async () => clips),
-  resolveRef: vi.fn(async (r: string) => `C:/p/${r}`),
+  resolveRef: vi.fn(async (r: string) => (offline.has(r) ? null : `C:/p/${r}`)),
+  offlineMedia: vi.fn(async (r: string) => (offline.has(r) ? { id: r, path: r } : null)),
 });
 
 function tl(clips: { media_ref: string; kind?: string }[]): Timeline {
@@ -418,6 +422,117 @@ describe("IndexCoordinator", () => {
     c.indexSource("library/missing.mp3");
     await settle(() => ensureTranscript.mock.calls.length > 0);
     expect(transcribed()).toEqual(["library/missing.mp3"]);
+  });
+
+  // UJ-014: a linked file the user moved or deleted is OFFLINE, not a failure. The user's indexer
+  // failed on one twice in 43 minutes and reported each time. The library panel already shows it
+  // offline with Relink, so the indexer's part is to stay out of the way: no attempt, no report,
+  // and no attempt counted against it.
+  describe("an offline linked file (UJ-014)", () => {
+    const GONE = "D:/Downloads/gone.mp3";
+    const lib = [{ id: "m1", path: GONE }];
+
+    it("is never attempted or reported, however many sweeps pass", async () => {
+      const c = new IndexCoordinator(fakeStore(lib, new Set([GONE])), makeRunner, vi.fn(), vi.fn());
+      for (let i = 0; i < 4; i++) {
+        await c.sweep(tl([{ media_ref: "m1", kind: "audio" }]));
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      expect(ensureTranscript).not.toHaveBeenCalled();
+      expect(processImportedMedia).not.toHaveBeenCalled();
+      expect(reportAppError).not.toHaveBeenCalled();
+    });
+
+    // The other half: parked is not forgotten. Relink, or the drive coming back, re-sweeps.
+    it("is indexed once its file is back, with its full count of tries", async () => {
+      const offline = new Set([GONE]);
+      ensureTranscript.mockRejectedValue(new Error("whisper boom"));
+      const c = new IndexCoordinator(fakeStore(lib, offline), makeRunner, vi.fn(), vi.fn());
+      for (let i = 0; i < 3; i++) {
+        await c.sweep(tl([]));
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      expect(ensureTranscript).not.toHaveBeenCalled();
+
+      offline.delete(GONE);
+      for (let i = 0; i < 4; i++) {
+        await c.sweep(tl([]));
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      // Its parked sweeps cost it nothing: it still gets every try a present file gets.
+      expect(transcribed()).toEqual([GONE, GONE, GONE]);
+    });
+
+    // A file that vanishes BETWEEN the sweep and the run is the same fact, found later.
+    it("is parked, not failed, when it goes missing while queued", async () => {
+      const offline = new Set<string>();
+      let release!: () => void;
+      ensureTranscript.mockImplementationOnce((async () => {
+        await new Promise<void>((r) => (release = r));
+        return { path: "t.json", parsed: {}, existed: false };
+      }) as never);
+      const clips = [{ id: "m0", path: "D:/first.mp3" }, ...lib];
+      const c = new IndexCoordinator(fakeStore(clips, offline), makeRunner, vi.fn(), vi.fn());
+      await c.sweep(tl([]));
+      await settle(() => ensureTranscript.mock.calls.length > 0);
+      offline.add(GONE); // gone while it waited its turn
+      release();
+      await new Promise((r) => setTimeout(r, 30));
+
+      expect(transcribed()).toEqual(["D:/first.mp3"]);
+      expect(reportAppError).not.toHaveBeenCalled();
+      offline.delete(GONE);
+      await c.sweep(tl([]));
+      await settle(() => transcribed().includes(GONE));
+      expect(transcribed()).toEqual(["D:/first.mp3", GONE]);
+    });
+
+    // A video goes through the proxy pass too, which parks it the same way.
+    it("parks a video's proxy pass too, and makes its proxy once the file is back", async () => {
+      const VIDEO = "D:/Downloads/gone.mp4";
+      const offline = new Set([VIDEO]);
+      const c = new IndexCoordinator(
+        fakeStore([{ id: "v1", path: VIDEO }], offline),
+        makeRunner,
+        vi.fn(),
+        vi.fn(),
+      );
+      for (let i = 0; i < 3; i++) {
+        await c.sweep(tl([{ media_ref: "v1", kind: "video" }]));
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      expect(processImportedMedia).not.toHaveBeenCalled();
+      expect(reportAppError).not.toHaveBeenCalled();
+
+      offline.delete(VIDEO);
+      await c.sweep(tl([{ media_ref: "v1", kind: "video" }]));
+      await settle(() => processImportedMedia.mock.calls.length > 0);
+      expect(processImportedMedia.mock.calls.map((k) => (k as unknown[])[2])).toEqual([VIDEO]);
+    });
+
+    // Gone DURING the run: the transcriber fails on it, and that failure is the same fact.
+    it("does not report a run that failed because its file went offline mid-run", async () => {
+      const offline = new Set<string>();
+      let vanished = false;
+      ensureTranscript.mockImplementation((async (_ctx: unknown, src: string) => {
+        if (src === GONE && !vanished) {
+          vanished = true;
+          offline.add(GONE);
+          throw new Error(`ENOENT: no such file or directory, open '${GONE}'`);
+        }
+        return { path: "t.json", parsed: {}, existed: false };
+      }) as never);
+      const c = new IndexCoordinator(fakeStore(lib, offline), makeRunner, vi.fn(), vi.fn());
+      await c.sweep(tl([]));
+      await settle(() => transcribed().length > 0);
+      await new Promise((r) => setTimeout(r, 30));
+      expect(reportAppError).not.toHaveBeenCalled();
+
+      offline.delete(GONE);
+      await c.sweep(tl([]));
+      await settle(() => transcribed().length > 1);
+      expect(transcribed()).toEqual([GONE, GONE]);
+    });
   });
 
   it("the engine-down report carries the END of the error, where the NTSTATUS is", async () => {

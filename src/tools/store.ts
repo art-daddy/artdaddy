@@ -265,6 +265,26 @@ export function clipAbs(projectDir: string, m: LibraryClip): string {
   return m.external ? normSep(m.path) : joinPath(projectDir, m.path);
 }
 
+/** The catalog row a (non-absolute) ref names: its id, its filename or an alias, its stored path's
+ *  basename, or for a bare ref that basename's stem. */
+function rowFor(clips: readonly LibraryClip[], s: string): LibraryClip | null {
+  const bare = !/[\\/]/.test(s);
+  const base = baseName(s);
+  const stem = base.replace(/\.[^./\\]+$/, "");
+  return (
+    clips.find((c) => c.id === s) ??
+    clips.find((c) => c.filename === s || (c.aliases ?? []).includes(s)) ??
+    // The stored path's basename, and (for a bare ref) that basename minus its
+    // extension: the two shapes a caller derives from what the UI and catalog display.
+    clips.find((c) => baseName(c.path) === base || (bare && c.id === stem)) ??
+    null
+  );
+}
+
+/** A LINKED row the user can move or delete; media still being generated has no file yet by design. */
+const linkedOnDisk = (c: LibraryClip): boolean =>
+  c.external === true && c.status !== "generating" && c.status !== "failed";
+
 export class ProjectStoreAccess {
   /** The project's session generation captured when THIS store was built. The editor
    *  (makeProjectStore) and the agent tool-host (makeTauriContext) each build their own store
@@ -337,15 +357,7 @@ export class ProjectStoreAccess {
     }
 
     const clips = await this.listClips();
-    const base = baseName(s);
-    const stem = base.replace(/\.[^./\\]+$/, "");
-    const match =
-      clips.find((c) => c.id === s) ??
-      clips.find((c) => c.filename === s || (c.aliases ?? []).includes(s)) ??
-      // The stored path's basename, and (for a bare ref) that basename minus its
-      // extension: the two shapes a caller derives from what the UI and catalog display.
-      clips.find((c) => baseName(c.path) === base || (bare && c.id === stem)) ??
-      null;
+    const match = rowFor(clips, s);
     if (match) {
       const p = clipAbs(this.projectDir, match);
       if (await this.fs.exists(p)) return p;
@@ -353,6 +365,31 @@ export class ProjectStoreAccess {
 
     const rel = joinPath(this.projectDir, s);
     return (await this.fs.exists(rel)) ? rel : null;
+  }
+
+  /** The LINKED row `ref` names whose file is not on disk: the user moved or deleted it (UJ-014).
+   *  The row {@link resolveRef} would pick, or the one an absolute path names exactly. Copied media
+   *  lives in the project, so it is never offline. */
+  async offlineMedia(ref: string): Promise<LibraryClip | null> {
+    const s = (ref ?? "").trim();
+    if (!s) return null;
+    const clips = await this.listClips();
+    const row = isAbsolute(s)
+      ? (clips.find((c) => c.external === true && normSep(c.path) === normSep(s)) ?? null)
+      : rowFor(clips, s);
+    return row && (await this.isOffline(row)) ? row : null;
+  }
+
+  /** The offline rule, for a row a caller already holds: LINKED, and its file is not on disk. */
+  async isOffline(row: LibraryClip): Promise<boolean> {
+    return linkedOnDisk(row) && !(await this.fs.exists(normSep(String(row.path ?? ""))));
+  }
+
+  /** The ids of every linked row whose file is gone. */
+  async libraryOffline(): Promise<string[]> {
+    const out: string[] = [];
+    for (const c of await this.listClips()) if (await this.isOffline(c)) out.push(c.id);
+    return out;
   }
 
   /** A catalog row whose FILE is not on disk: generation is asynchronous, so a `media_ref` is real

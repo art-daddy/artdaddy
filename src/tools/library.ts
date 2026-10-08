@@ -25,6 +25,7 @@ import {
 import type { Timeline } from "../timeline/model";
 import type { ProjectDocument } from "../project/ProjectDocument";
 import { VIDEO_EXTS } from "../media/formats";
+import { writeLibraryCatalog } from "./libraryCatalog";
 
 type Result = Record<string, unknown>;
 type Args = Record<string, unknown>;
@@ -83,9 +84,7 @@ async function writeCatalog(store: ProjectStoreAccess, cat: Catalog): Promise<vo
   // ABANDONED, never torn, so a stale store (a zombie op past the close drain window) can't publish into
   // a project the user left. Inside a gate lease sessionLive is always true, so this only bites the
   // no-document fallback + bare-store cascade paths — the SAME guard saveTimeline uses for timeline.json.
-  await store.writeTextAtomic(catalogPath(store), JSON.stringify(cat, null, 2), () =>
-    store.sessionLive(),
-  );
+  await writeLibraryCatalog(store, cat);
 }
 
 /** Cascade delete (Phase 7): removing a library item ALSO removes every clip that uses it, across the
@@ -301,9 +300,8 @@ async function runLibraryOp(
       // Flag EXTERNAL (referenced-in-place) clips whose source file has gone
       // missing, so the UI / model can surface "media offline" instead of a
       // silent failure. Copied clips live in the project and are never offline.
-      const annotated = await Promise.all(
-        clips.map(async (c) => (c.external ? { ...c, offline: !(await store.exists(c.path)) } : c)),
-      );
+      const offline = new Set(await store.libraryOffline());
+      const annotated = clips.map((c) => (c.external ? { ...c, offline: offline.has(c.id) } : c));
       return { ok: true, clips: annotated };
     }
 
@@ -468,15 +466,12 @@ async function runLibraryOp(
       const removedRows: string[] = [];
       const offlineExternal: string[] = [];
       for (const row of cat.clips) {
-        // Resolve through the external-aware helper: a COPY joins onto the project
-        // dir, an EXTERNAL clip keeps its absolute source path.
-        const present = !!row.path && (await store.exists(clipAbs(store.projectDir, row)));
         if (row.external) {
           // A referenced-in-place clip is a link, not bytes we own: a missing source
           // means "offline" (drive unplugged), NOT gone. Keep the row + flag it.
           keep.push(row);
-          if (!present) offlineExternal.push(row.id);
-        } else if (present) {
+          if (await store.isOffline(row)) offlineExternal.push(row.id);
+        } else if (row.path && (await store.exists(clipAbs(store.projectDir, row)))) {
           keep.push(row);
         } else {
           removedRows.push(row.id); // a genuinely-orphaned copy

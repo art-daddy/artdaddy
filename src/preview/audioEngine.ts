@@ -409,6 +409,12 @@ export class PreviewAudio {
     this.project = null; // a disposed engine holds no project, so a rebind reloads
   }
 
+  /** Forget the windows that decoded to nothing, so the next load() tries them again: a file
+   *  relinked since was offline when they were tried. Decoded audio is kept. */
+  forgetUnresolved(): void {
+    for (const [key, buffer] of this.buffers) if (buffer === null) this.buffers.delete(key);
+  }
+
   /** Drop the schedule + decoded audio; keep the context. Prefer setProject() for a
    *  project switch — it only tears down when the project actually changed. */
   reset(): void {

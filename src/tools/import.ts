@@ -16,6 +16,7 @@ import { encodeVideoForGemini } from "./geminiEncode";
 import { undecodableImageReason } from "./imageDims";
 import { missingIndexReason } from "../media/mp4Index";
 import { reportMediaImport } from "../api/appEvents";
+import { writeLibraryCatalog } from "./libraryCatalog";
 import {
   AUDIO_EXTS,
   IMAGE_EXTS,
@@ -218,29 +219,9 @@ export async function stageByPath(
   };
 }
 
-/** Tell the UI the library changed. Lives HERE, beside the one door every asset enters by, so it
- *  is announced by the WRITE rather than by whoever remembered to call it: the two hand-written
- *  call sites in upload.ts were the UI import paths, so a library added by ANY agent tool --
- *  import_media, download_video, get_page_image, run_ffmpeg, clip_video, every generation -- stayed
- *  invisible in the panel until the project was reopened.
- *
- *  TRAILING debounce, because the listener re-lists the project directory and a folder import
- *  registers one asset per file. A microtask is not enough: callers await between assets, which
- *  flushes it, so a 200-file import would be 200 directory listings. No-op outside a DOM. */
-const LIBRARY_CHANGE_QUIET_MS = 50;
-let libraryChangeTimer: ReturnType<typeof setTimeout> | null = null;
-export function notifyLibraryChanged(): void {
-  if (typeof window === "undefined") return;
-  if (libraryChangeTimer) clearTimeout(libraryChangeTimer);
-  libraryChangeTimer = setTimeout(() => {
-    libraryChangeTimer = null;
-    try {
-      window.dispatchEvent(new CustomEvent("artdaddy:files-changed"));
-    } catch {
-      /* non-DOM env (tests) */
-    }
-  }, LIBRARY_CHANGE_QUIET_MS);
-}
+/** Tell the UI the library changed. Lives beside the catalog's one write, which announces every
+ *  committed change; exported for the UI doors that change the library without writing it. */
+export { notifyLibraryChanged } from "./libraryCatalog";
 
 /** Content-address media bytes into `<project>/library/<id><ext>` and register
  *  them in `internals/library.json`. Idempotent by content hash: identical bytes
@@ -385,9 +366,7 @@ async function registerLibraryClipInner(
         });
         // sessionLive guard: a write for a closed/superseded session is ABANDONED (returns false), not
         // torn — reject cleanly so the caller maps it + the staged bytes are cleaned below.
-        const committed = await store.writeTextAtomic(catPath, JSON.stringify(cat, null, 2), () =>
-          store.sessionLive(),
-        );
+        const committed = await writeLibraryCatalog(store, cat);
         if (!committed)
           throw new ProjectClosingError("library.import abandoned — the project session ended");
         gctx?.markCommitted(); // a real catalog change advances the document revision
@@ -395,7 +374,6 @@ async function registerLibraryClipInner(
       },
       { origin: opts?.origin, signal: opts?.signal },
     );
-    notifyLibraryChanged(); // only after the catalog row is actually committed
     return entry;
   } catch (e) {
     // Rejected/abandoned late publish (closing / superseded / aborted / stale session): the catalog was
@@ -600,12 +578,7 @@ function readCatalog(store: ProjectStoreAccess): Promise<Catalog> {
 }
 
 async function commitCatalog(store: ProjectStoreAccess, cat: Catalog): Promise<void> {
-  const committed = await store.writeTextAtomic(
-    catalogPath(store),
-    JSON.stringify(cat, null, 2),
-    () => store.sessionLive(),
-  );
-  if (!committed)
+  if (!(await writeLibraryCatalog(store, cat)))
     throw new ProjectClosingError("library write abandoned — the project session ended");
 }
 

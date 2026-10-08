@@ -22,7 +22,7 @@ import type { Clip, Timeline } from "../timeline/model";
 import { lineWidthIn, planCanvas, textBox } from "../timeline/renderPlan";
 import type { ClientToolContext } from "./context";
 import type { ClientToolRegistry } from "./registry";
-import { ensureTranscript } from "./transcribe";
+import { ensureTranscript, transcriptionFailureText } from "./transcribe";
 
 type Args = Record<string, unknown>;
 type Result = Record<string, unknown>;
@@ -197,7 +197,7 @@ export async function addCaptionsTool(args: Args, ctx: ClientToolContext | null)
         ).parsed.words;
       } catch (e) {
         // One unreadable source must not sink the rest, but it must not read as silence either.
-        failures.push({ clip_id: String(clip.id), error: String(e).slice(-200) });
+        failures.push({ clip_id: String(clip.id), error: transcriptionFailureText(e) });
         continue;
       }
       const timed: CaptionWord[] = words

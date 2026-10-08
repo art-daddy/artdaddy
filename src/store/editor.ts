@@ -8,6 +8,8 @@ import { useStore, type StateCreator } from "zustand";
 import { createStore, type StoreApi } from "zustand/vanilla";
 
 import { onTimelineChange } from "../timeline/bus";
+import { previewAudio } from "../preview/audioEngine";
+import { clearSourceUrlCache } from "../preview/resolve";
 import {
   closeProjectSession,
   doRedo,
@@ -270,10 +272,9 @@ function linkGroupIds(timeline: Timeline | null, clipId: string): string[] {
  *  `current` guards the commit: a slower refresh must not land on a project that
  *  superseded it. Failures are non-fatal — labels fall back to the raw ref.
  *
- *  Also collects the REFERENCED clips whose file is gone. It rides this pass rather than
- *  getting its own because it needs the same catalog rows, and two passes are two answers
- *  that can disagree. Only external rows are checked: copied media lives inside the project
- *  and cannot be moved out from under it.
+ *  Also collects the linked clips whose file is gone, by the store's offline rule. It rides this
+ *  pass rather than getting its own because it needs the same catalog rows, and two passes are
+ *  two answers that can disagree.
  *
  *  Returns how many are offline, so a caller that just OPENED a project can say so. Nothing
  *  else should: the state is refreshed after every import too, and a toast on each one would
@@ -298,10 +299,7 @@ async function refreshMediaNames(
       if (name) names[id] = name;
       const st = typeof c.status === "string" ? c.status : "";
       if (st === "generating" || st === "failed") status[id] = st;
-      // Media still being generated has no file YET; that is not the same as a source that
-      // walked away, and calling it offline would flag every generation in flight.
-      if (c.external && st !== "generating" && !(await store.exists(String(c.path ?? ""))))
-        offline.push(id);
+      if (await store.isOffline(c)) offline.push(id);
     }
     if (current()) set({ mediaNames: names, mediaStatus: status, mediaOffline: offline });
     return offline.length;
@@ -310,6 +308,9 @@ async function refreshMediaNames(
     return 0;
   }
 }
+
+const offlineNotice = (n: number): string =>
+  `${n} media ${n === 1 ? "file is" : "files are"} offline — the source moved or was deleted. Relink from the library panel.`;
 
 // The store body, extracted so it can be instantiated per project (getEditorStore
 // registry below) as well as via the current singleton. zustand binds set/get to
@@ -438,10 +439,25 @@ const editorCreator: StateCreator<EditorState> = (set, get) => {
         // Media imported WITHOUT touching the timeline (file menu / FileTree / chat
         // attach / paste) fires "artdaddy:files-changed"; re-sweep so the new library
         // asset gets its proxy right away instead of on the next reload.
+        let offlineNoticeShown: string | null = null;
         const onFilesChanged = () => {
           if (get().projectId !== projectId) return;
+          // A relink changes the file a ref names, and the preview memoised its URLs and audio
+          // by ref (UJ-014): forget them, then hand it a new timeline object to resolve again.
+          clearSourceUrlCache();
+          previewAudio()?.forgetUnresolved();
           void index.sweep(get().timeline);
-          void refreshMediaNames(store, () => get().projectId === projectId, set);
+          void refreshMediaNames(store, () => get().projectId === projectId, set).then((n) => {
+            // The open-time notice must stay true after a relink; one that replaced it is not ours.
+            const notice = useProjectNotice.getState();
+            if (get().projectId !== projectId || offlineNoticeShown === null) return;
+            if (notice.message !== offlineNoticeShown) return;
+            offlineNoticeShown = n > 0 ? offlineNotice(n) : null;
+            if (offlineNoticeShown) notice.notify(offlineNoticeShown);
+            else notice.clear();
+          });
+          const cur = get().timeline;
+          if (cur && !get().gestureActive) set({ timeline: { ...cur } });
         };
         try {
           window.addEventListener("artdaddy:files-changed", onFilesChanged);
@@ -477,12 +493,10 @@ const editorCreator: StateCreator<EditorState> = (set, get) => {
         // there, and a user who does not hits a clip that plays as black and reads it as the
         // app losing their work.
         void refreshMediaNames(store, () => loadSeq === seq, set).then((offline) => {
-          if (offline > 0 && loadSeq === seq)
-            useProjectNotice
-              .getState()
-              .notify(
-                `${offline} media ${offline === 1 ? "file is" : "files are"} offline — the source moved or was deleted. Relink from the library panel.`,
-              );
+          if (offline > 0 && loadSeq === seq) {
+            offlineNoticeShown = offlineNotice(offline);
+            useProjectNotice.getState().notify(offlineNoticeShown);
+          }
         });
         return "loaded";
       } catch (e) {
