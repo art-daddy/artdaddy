@@ -17,6 +17,7 @@ import {
 import { __resetJobNotes, pendingJobNotes } from "../store/jobNotes";
 import { __resetProjectJobs } from "../tools/genJobs";
 import { joinPath, ProjectStoreAccess, type DirEntry, type FsLike } from "../tools/store";
+import { backgroundTurn } from "../tools/workGate";
 import { resetTestDocuments } from "../test/timelineKit";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -364,6 +365,36 @@ describe("export queue", () => {
     }
     await whenExportsSettle();
     expect(peak).toBe(1);
+  });
+
+  // 4i: the indexer yields to exports, as Palmier's does, including between two queued ones.
+  it("keeps the indexer's next job waiting while any export is queued or running", async () => {
+    const { store } = make();
+    const releases: (() => void)[] = [];
+    const spec = (i: number) => ({
+      store,
+      destPath: `C:/out/g${i}.mp4`,
+      stagePath: `C:/out/g${i}.mp4.part`,
+      filename: `g${i}.mp4`,
+      run: async () => {
+        await new Promise<void>((r) => releases.push(r));
+        return {};
+      },
+    });
+    await submitExport(spec(1));
+    await submitExport(spec(2));
+    let turn: unknown = "waiting";
+    void backgroundTurn("whisper").then((r) => (turn = r));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(releases).toHaveLength(1);
+    releases.shift()!(); // the first ends; the queued one starts
+    await new Promise((r) => setTimeout(r, 0));
+    expect(releases).toHaveLength(1);
+    expect(turn).toBe("waiting");
+    releases.shift()!();
+    await whenExportsSettle();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(typeof turn).toBe("function");
   });
 
   it("tells the chat where the file went, and why it failed", async () => {

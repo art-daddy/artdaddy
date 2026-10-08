@@ -26,6 +26,7 @@ import { useExportJob } from "../store/exportJob";
 import { beginSessionActivity } from "../observability/crashWatch";
 import { createProgressReader, etaSeconds, progressFraction } from "./ffmpegProgress";
 import { recordStaging, releaseStaging } from "./exportStaging";
+import { setExportsBusy } from "../tools/workGate";
 
 /** Destinations with an export queued or running, so a second one is refused rather than raced. */
 const reserved = new Set<string>();
@@ -108,6 +109,8 @@ let snapshot: readonly ExportRecord[] = [];
 
 function changed(): void {
   snapshot = records.map((r) => ({ ...r }));
+  // The indexer starts nothing while an export is queued or running (workGate.ts).
+  setExportsBusy(records.some((r) => r.state === "running" || r.state === "queued"));
   for (const fn of listeners) fn();
 }
 
@@ -387,6 +390,7 @@ export function __resetExportQueue(): void {
   controllers.clear();
   records.length = 0;
   snapshot = [];
+  setExportsBusy(false);
   listeners.clear();
   queueTail = Promise.resolve();
   copyTail = Promise.resolve();

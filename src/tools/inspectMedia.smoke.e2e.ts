@@ -732,7 +732,8 @@ describe("transcript: never waited on when long", () => {
       };
       // As the app names it: the store's path for the ref, which every cache key is built from.
       const src = (await ctx.store.resolveRef(ref))!;
-      const whole = runWhisper({ ...ctx, runner }, src);
+      // The indexer's run of the whole file (a look's whisper would wait for another look's).
+      const whole = runWhisper({ ...ctx, runner, background: true }, src);
       await started;
       const extract = whisperInputs[0];
       expect(existsSync(extract)).toBe(true);

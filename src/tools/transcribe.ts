@@ -13,6 +13,7 @@ import type { ClientToolRegistry } from "./registry";
 import { MediaOfflineError } from "./refState";
 import { joinPath } from "./store";
 import { prioritizeTranscript } from "./transcriptQueue";
+import { lookWhisper } from "./workGate";
 import { beginSessionActivity } from "../observability/crashWatch";
 import { ArtDaddyError } from "../lib/errors";
 import { settledWithin } from "../lib/settledWithin";
@@ -914,26 +915,30 @@ export async function runWhisper(
         // -mc 0: no text carried from one 30 s window into the next. With it, six minutes of
         // silence left whisper repeating "[BLANK_AUDIO]" straight through the speech after it
         // (4h2): the file's whole transcript came back empty, and it answers every stretch of it.
-        const run = await ctx.runner.run(
-          "whisper-cli",
-          [
-            "-m",
-            model,
-            "-f",
-            wav,
-            "-ojf",
-            "-of",
-            scratch,
-            "-np",
-            "-t",
-            whisperThreads(),
-            "-l",
-            lang,
-            "-mc",
-            "0",
-          ],
-          ctx.signal,
-        );
+        const whisper = () =>
+          ctx.runner.run(
+            "whisper-cli",
+            [
+              "-m",
+              model,
+              "-f",
+              wav,
+              "-ojf",
+              "-of",
+              scratch,
+              "-np",
+              "-t",
+              whisperThreads(),
+              "-l",
+              lang,
+              "-mc",
+              "0",
+            ],
+            ctx.signal,
+          );
+        // A look's whisper runs at once, one look at a time; the indexer's took its turn already.
+        const run = ctx.background ? await whisper() : await lookWhisper(whisper, ctx.signal);
+        if (!run) throw new Error("transcription cancelled"); // stopped before its turn came
         if (run.code !== 0 || !(await ctx.store.exists(`${scratch}.json`))) {
           // Stop kills the sidecar, so the exit code describes the KILL, not the transcription:
           // it surfaced as `whisper-cli failed (code=-1): cancelled`, which reads as a broken

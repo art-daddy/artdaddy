@@ -145,12 +145,12 @@ describe("runWhisper", () => {
   // handed, so `-ot/-d` over the 148 MB whole-file extract took 11.9 s for a 60 s window, and the
   // window's own WAV 7.3 s. A window is always transcribed from its own audio.
   it("cuts a window from the whole file's extract while a run of the whole file holds it, and whisper reads only the window", async () => {
-    // The whole file's whisper is still reading its extract.
+    // The indexer's whisper of the whole file is still reading its extract.
     let release!: () => void;
     const { ctx, calls, renames } = harness({
       whisperGate: new Promise<void>((r) => (release = r)),
     });
-    const whole = runWhisper(ctx, "/m/a.mp4");
+    const whole = runWhisper({ ...ctx, background: true }, "/m/a.mp4");
     try {
       for (let i = 0; i < 100 && !calls.some((c) => c.program === "whisper-cli"); i++)
         await new Promise((r) => setTimeout(r, 0));

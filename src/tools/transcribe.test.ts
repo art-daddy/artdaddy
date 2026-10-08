@@ -1192,7 +1192,8 @@ describe("runWhisper on a window (UJ-012)", () => {
       return inner(program, args);
     });
     const ctx = ctxWith(runner, fs);
-    const whole = runWhisper(ctx, SRC, "small", "fr");
+    // The indexer's run of the whole file (a look's whisper would wait for another look's).
+    const whole = runWhisper({ ...ctx, background: true }, SRC, "small", "fr");
     await wholeRunning;
     const t = await runWhisper(ctx, SRC, "small", undefined, { start: 60, end: 90 });
     const [wholeExtract, cut] = calls(runner, "ffmpeg");
@@ -1330,7 +1331,8 @@ describe("whisper's scratch, outside every project (4i)", () => {
   });
 
   it("never deletes an extract a run is reading, and deletes it when the last run holding it ends", async () => {
-    // A whole-file run (French) holds its extract while whisper reads it; a window run cuts from it.
+    // The indexer's whole-file run (French) holds its extract while whisper reads it; a look's
+    // window cuts from it.
     for (const wholeEndsFirst of [false, true]) {
       _resetAppCaches();
       const fs = new MockFs();
@@ -1338,7 +1340,7 @@ describe("whisper's scratch, outside every project (4i)", () => {
       fs.touch(SRC);
       const g = gated(fs, wholeEndsFirst ? ["fr", "auto"] : ["fr"]);
       const ctx = ctxWith(g.runner, fs);
-      const whole = runWhisper(ctx, SRC, "small", "fr");
+      const whole = runWhisper({ ...ctx, background: true }, SRC, "small", "fr");
       await g.until("fr");
       const extract = firstExtract(g.runner);
       const window = runWhisper(ctx, SRC, "small", undefined, { start: 60, end: 90 });
@@ -1372,7 +1374,7 @@ describe("whisper's scratch, outside every project (4i)", () => {
     fs.touch(SRC);
     const g = gated(fs, ["fr"]);
     const ctx = ctxWith(g.runner, fs);
-    const french = runWhisper(ctx, SRC, "small", "fr");
+    const french = runWhisper({ ...ctx, background: true }, SRC, "small", "fr");
     await g.until("fr");
     // The German transcript of the same file reads the extract the French run holds.
     await runWhisper(ctx, SRC, "small", "de");
@@ -1383,6 +1385,53 @@ describe("whisper's scratch, outside every project (4i)", () => {
     ]);
     g.release("fr");
     await french;
+    expect(under(fs, WORK)).toEqual([]);
+  });
+
+  // 4i: a look's whisper runs at once, one look at a time; the indexer's took its turn already.
+  it("runs looks' whispers one at a time, and the indexer's beside them", async () => {
+    _resetAppCaches();
+    const fs = new MockFs();
+    fs.putModel();
+    fs.touch(SRC);
+    const g = gated(fs, ["fr", "de"]);
+    const ctx = ctxWith(g.runner, fs);
+    const whispers = () => argsOf(g.runner, "whisper-cli").map((a) => a[a.indexOf("-l") + 1]);
+    const french = runWhisper(ctx, SRC, "small", "fr");
+    await g.until("fr");
+    const german = runWhisper(ctx, SRC, "small", "de");
+    for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 1));
+    expect(whispers()).toEqual(["fr"]); // the second look waits for the first
+    const indexer = await runWhisper({ ...ctx, background: true }, SRC, "small", "es");
+    expect(indexer.words.map((w) => w.word)).toEqual(["Hello", "world", "Bye"]);
+    expect(whispers()).toEqual(["fr", "es"]);
+    g.release("fr");
+    await french;
+    await g.until("de");
+    g.release("de");
+    await german;
+    expect(whispers()).toEqual(["fr", "es", "de"]);
+    expect(under(fs, WORK)).toEqual([]);
+  });
+
+  it("answers a look stopped while it waits for its whisper at once, and runs nothing for it", async () => {
+    _resetAppCaches();
+    const fs = new MockFs();
+    fs.putModel();
+    fs.touch(SRC);
+    const g = gated(fs, ["fr"]);
+    const ctx = ctxWith(g.runner, fs);
+    const french = runWhisper(ctx, SRC, "small", "fr");
+    await g.until("fr");
+    const stop = new AbortController();
+    const german = runWhisper({ ...ctx, signal: stop.signal }, SRC, "small", "de");
+    for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 1));
+    stop.abort();
+    await expect(german).rejects.toThrow(/transcription cancelled/);
+    expect(argsOf(g.runner, "whisper-cli")).toHaveLength(1);
+    g.release("fr");
+    await french;
+    expect(argsOf(g.runner, "whisper-cli")).toHaveLength(1);
     expect(under(fs, WORK)).toEqual([]);
   });
 });

@@ -11,7 +11,9 @@
 //   • loudness   — each audio/video asset measured whole (owner decision 2026-10-04), so a look
 //                  at a long file finds its loudness kept, plus the long spans looks ask for.
 // Each pass drains INDEPENDENTLY, so a poster the user is waiting on never queues behind a
-// multi-minute transcription.
+// multi-minute transcription. The transcription and loudness passes also take turns app-wide
+// (workGate.ts): one of each at a time across every project, none starting while an export is
+// queued or running or a look's whisper runs.
 // Desktop-only: no runner (web build) => no-op. Lifecycle-scoped, as Palmier's indexer is (owner
 // decision 2026-10-04): dispose() on project close drops every queue and stops the proxy and poster
 // in progress, which write into the project. The transcription and the loudness measurement in
@@ -29,6 +31,7 @@ import type { Loudness } from "../tools/loudness";
 import type { ProjectStoreAccess } from "../tools/store";
 import type { TranscribeWindow } from "../tools/transcribe";
 import { registerBackgroundTranscriber, type BackgroundLoudness } from "../tools/transcriptQueue";
+import { backgroundTurn } from "../tools/workGate";
 import type { Timeline } from "../timeline/model";
 import { kindOf } from "../media/formats";
 import { reportAppError } from "../api/appEvents";
@@ -433,13 +436,19 @@ export class IndexCoordinator {
       return;
     }
     // No signal: closing the project does not stop the transcription in progress (see the top).
+    // Background: each job takes its turn before it starts (workGate.ts).
     const ctx = {
       store: this.store,
       runner: ready.runner,
+      background: true,
     } as ClientToolContext;
     try {
       for (let job = this.txQ.shift(); job !== undefined && !this.disposed && !this.engineDown;) {
         this.txCurrent = txKey(job);
+        // One background whisper in the app at a time, and none starts while an export is queued
+        // or running or a look's whisper runs. Closed while it waits: dropped with the queue.
+        const release = await backgroundTurn("whisper", this.ac.signal);
+        if (!release) break;
         try {
           // A video with no audio track is not a failure to report — there is simply nothing to
           // transcribe. Asking ffmpeg for an audio-only output of one fails with "Output file
@@ -461,6 +470,8 @@ export class IndexCoordinator {
           // Gone between the check and the run: the same fact, found later.
           else if (!(await this.parkedOffline(txKey(job), job.source)))
             this.onJobFailed("transcript", txKey(job), e);
+        } finally {
+          release();
         }
         this.txCurrent = null;
         job = this.txQ.shift();
@@ -486,12 +497,22 @@ export class IndexCoordinator {
     const ctx = {
       store: this.store,
       runner: ready.runner,
+      background: true,
     } as ClientToolContext;
     try {
       for (let job = this.loudQ.shift(); job !== undefined && !this.disposed;) {
         const key = loudKey(job);
         this.loudCurrent = key;
-        const got = await this.measure(ctx, ready.mods, job, key);
+        // One background measurement in the app at a time, none while an export is queued or
+        // running or a look's whisper runs (workGate.ts). Closed while it waits: dropped.
+        const release = await backgroundTurn("loudness", this.ac.signal);
+        if (!release) break;
+        let got: Measured;
+        try {
+          got = await this.measure(ctx, ready.mods, job, key);
+        } finally {
+          release();
+        }
         this.loudCurrent = null;
         const look = this.looks.get(key);
         if (look) {

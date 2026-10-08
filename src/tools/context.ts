@@ -17,4 +17,7 @@ export interface ClientToolContext {
   /** The same context with its runner no longer bound to the turn, for work a tool hands off to
    *  outlive it (a queued export); that work brings its own signal. Absent where nothing binds it. */
   detach?: () => ClientToolContext;
+  /** Work nobody is waiting on: the project's indexer, which took its turn before it started
+   *  (`workGate.ts`). Its whisper does not queue among the looks'. Absent: someone is waiting. */
+  background?: boolean;
 }

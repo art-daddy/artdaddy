@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { IndexCoordinator } from "./indexCoordinator";
 import type { Timeline } from "../timeline/model";
 import { backgroundLoudness, prioritizeTranscript } from "../tools/transcriptQueue";
+import { setExportsBusy } from "../tools/workGate";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -1025,6 +1026,107 @@ describe("IndexCoordinator", () => {
       fail(new Error("whisper-cli failed (code=1)"));
       await new Promise((r) => setTimeout(r, 20));
       expect(reportAppError).not.toHaveBeenCalled();
+    });
+  });
+
+  // 4i: the indexer's work takes turns app-wide (workGate.ts): nothing starts while an export is
+  // queued or running, and one transcription at a time across every project.
+  describe("taking turns (4i)", () => {
+    const counts = (): number[] => [
+      ensureTranscript.mock.calls.length,
+      measureLoudness.mock.calls.length,
+    ];
+
+    it("starts no transcription or measurement while an export runs, and both once it ends", async () => {
+      setExportsBusy(true);
+      const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+      c.indexSource("library/a.mp3");
+      await new Promise((r) => setTimeout(r, 20));
+      expect(counts()).toEqual([0, 0]);
+      setExportsBusy(false);
+      await settle(() => counts().every((n) => n > 0));
+      expect(counts()).toEqual([1, 1]);
+      // Handed over as background work: its whisper does not queue among the looks'.
+      expect((ensureTranscript.mock.calls[0] as Any[])[0].background).toBe(true);
+      expect((measureLoudness.mock.calls[0] as Any[])[0].background).toBe(true);
+      c.dispose();
+    });
+
+    it("drops a job still waiting for its turn when the project closes", async () => {
+      setExportsBusy(true);
+      const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+      c.indexSource("library/a.mp3");
+      prioritizeTranscript("C:/p", "C:/media/talk.mp4", "", { start: 59, end: 91 });
+      await new Promise((r) => setTimeout(r, 10));
+      c.dispose();
+      setExportsBusy(false);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(counts()).toEqual([0, 0]);
+      expect(runWhisper).not.toHaveBeenCalled();
+    });
+
+    it("runs one transcription at a time across two projects, a closed one's included", async () => {
+      const gates: Array<() => void> = [];
+      (ensureTranscript as Any).mockImplementation(async () => {
+        await new Promise<void>((r) => gates.push(r));
+        return { path: "t.json", parsed: {}, existed: false };
+      });
+      const a = new IndexCoordinator(
+        { ...fakeStore(), projectDir: "C:/a" },
+        makeRunner,
+        vi.fn(),
+        vi.fn(),
+      );
+      const b = new IndexCoordinator(
+        { ...fakeStore(), projectDir: "C:/b" },
+        makeRunner,
+        vi.fn(),
+        vi.fn(),
+      );
+      a.indexSource("library/a.mp3");
+      await settle(() => gates.length > 0);
+      a.dispose(); // its transcription in progress runs on, and keeps the turn
+      b.indexSource("library/b.mp3");
+      await new Promise((r) => setTimeout(r, 20));
+      expect(transcribed()).toEqual(["library/a.mp3"]);
+      gates.shift()!();
+      await settle(() => gates.length > 0);
+      expect(transcribed()).toEqual(["library/a.mp3", "library/b.mp3"]);
+      gates.shift()!();
+      b.dispose();
+    });
+
+    it("measures one file at a time across two projects", async () => {
+      const gates: Array<() => void> = [];
+      (measureLoudness as Any).mockImplementation(async () => {
+        await new Promise<void>((r) => gates.push(r));
+        return FIGURES;
+      });
+      const a = new IndexCoordinator(
+        { ...fakeStore(), projectDir: "C:/a" },
+        makeRunner,
+        vi.fn(),
+        vi.fn(),
+      );
+      const b = new IndexCoordinator(
+        { ...fakeStore(), projectDir: "C:/b" },
+        makeRunner,
+        vi.fn(),
+        vi.fn(),
+      );
+      a.indexSource("library/a.mp3");
+      await settle(() => gates.length > 0);
+      // Started once the first is measuring (two projects never load the indexer's modules at the
+      // same moment: see `ready`).
+      b.indexSource("library/b.mp3");
+      await new Promise((r) => setTimeout(r, 20));
+      expect(gates).toHaveLength(1);
+      gates.shift()!();
+      await settle(() => gates.length > 0);
+      expect(measured().map((m) => m[0])).toEqual(["C:/p/library/a.mp3", "C:/p/library/b.mp3"]);
+      gates.shift()!();
+      a.dispose();
+      b.dispose();
     });
   });
 });

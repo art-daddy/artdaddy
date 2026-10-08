@@ -4,10 +4,13 @@ import fc from "fast-check";
 import { afterEach } from "vitest";
 
 import { _resetAppCaches } from "../tools/appCache";
+import { __resetWorkGate } from "../tools/workGate";
 
 // The app cache is one instance per folder, as in the app. Every fake disk here names the same
 // folder, so without this one case's transcripts would answer the next case's questions.
 afterEach(() => _resetAppCaches());
+// So is the work gate, one per page: a case that ends holding a turn would stall the next case's.
+afterEach(() => __resetWorkGate());
 
 // Property failures must carry their own evidence. Without this, a seed-dependent failure
 // reports only "Property failed after N tests" in the JSON reporter — the counterexample and the
