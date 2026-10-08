@@ -23,6 +23,7 @@ import {
   reportAppEvent,
   reportLaunchOnce,
   reportProjectOpened,
+  reportTranscription,
 } from "./appEvents";
 
 function captureFetch() {
@@ -107,5 +108,70 @@ describe("a beacon must never be visible to the user", () => {
       vi.fn(async () => new Response("nope", { status: 401 })),
     );
     await expect(reportAppEvent("project_opened", { projectId: "p1" })).resolves.toBeUndefined();
+  });
+});
+
+// 4i part 4: which backend whisper ran on, and how fast. A sample, never a flood: every app event of
+// a user shares one budget on the server, and the indexer can finish dozens of short clips a minute.
+describe("the transcription sample", () => {
+  const run = {
+    backend: "vulkan",
+    audioSeconds: 612.34,
+    wallSeconds: 66.1,
+    model: "small",
+    threads: 8,
+  };
+  const T0 = 1_700_000_000_000;
+
+  it("says which backend ran and how fast, and nothing about what was said", async () => {
+    const calls = captureFetch();
+    reportTranscription(run, T0);
+    await vi.waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0]).toMatchObject({
+      event: "transcription",
+      via: "vulkan",
+      reason: "audio_s=612.3 wall_s=66.1 x=9.26 model=small threads=8",
+      project_id: "",
+    });
+  });
+
+  it("sends one a minute at most", async () => {
+    const calls = captureFetch();
+    const at = [T0, T0 + 1_000, T0 + 59_999, T0 + 60_000, T0 + 61_000];
+    // Each run its own length, so what went out says which runs it was.
+    at.forEach((t, i) => reportTranscription({ ...run, audioSeconds: 100 + i }, t));
+    await vi.waitFor(() => expect(calls).toHaveLength(2));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(calls.map((c) => String(c.reason).split(" ")[0])).toEqual([
+      "audio_s=100.0",
+      "audio_s=103.0",
+    ]);
+  });
+
+  it("sends none for a run too short to say how fast, and lets the next long one through", async () => {
+    const calls = captureFetch();
+    reportTranscription({ ...run, audioSeconds: 29.9 }, T0);
+    reportTranscription({ ...run, audioSeconds: null }, T0);
+    reportTranscription({ ...run, audioSeconds: 30 }, T0 + 1);
+    await vi.waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0].reason).toMatch(/^audio_s=30\.0 /);
+  });
+
+  it("names a backend it was not told as unknown, and leaves out figures it does not have", async () => {
+    const calls = captureFetch();
+    reportTranscription(
+      { backend: null, audioSeconds: 45, wallSeconds: null, model: null, threads: null },
+      T0,
+    );
+    await vi.waitFor(() => expect(calls).toHaveLength(1));
+    expect([calls[0].via, calls[0].reason]).toEqual(["unknown", "audio_s=45.0"]);
+  });
+
+  it("sends the first sample of a launch", async () => {
+    const calls = captureFetch();
+    vi.resetModules();
+    const fresh = await import("./appEvents"); // as loaded at launch, never reset
+    fresh.reportTranscription(run, T0);
+    await vi.waitFor(() => expect(calls).toHaveLength(1));
   });
 });

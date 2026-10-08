@@ -9,9 +9,16 @@ import { apiBase } from "./config";
 import { authedFetch, hasSession } from "./auth";
 import { platform } from "../platform";
 import { hostInfo, resolveHostInfo } from "../platform/host";
+import type { WhisperRunFacts } from "../tools/whisperFacts";
 
 export type AppEvent =
-  "launch" | "project_opened" | "heartbeat" | "media_import" | "app_error" | "credits_exhausted";
+  | "launch"
+  | "project_opened"
+  | "heartbeat"
+  | "media_import"
+  | "app_error"
+  | "credits_exhausted"
+  | "transcription";
 
 interface AppEventDetail {
   projectId?: string;
@@ -110,12 +117,36 @@ export function resetCreditsExhausted(): void {
   reportedExhausted = false;
 }
 
+// Sampled: short runs are mostly model load, and all of a user's app events share one server budget.
+const TRANSCRIPTION_MIN_AUDIO_S = 30;
+const TRANSCRIPTION_EVERY_MS = 60_000;
+let lastTranscriptionReport = -Infinity;
+
+export function reportTranscription(facts: WhisperRunFacts, now = Date.now()): void {
+  const audio = facts.audioSeconds;
+  if (audio === null || audio < TRANSCRIPTION_MIN_AUDIO_S) return;
+  if (now - lastTranscriptionReport < TRANSCRIPTION_EVERY_MS) return;
+  lastTranscriptionReport = now;
+  const wall = facts.wallSeconds;
+  const figures = [
+    `audio_s=${audio.toFixed(1)}`,
+    wall ? `wall_s=${wall.toFixed(1)} x=${(audio / wall).toFixed(2)}` : "",
+    facts.model ? `model=${facts.model}` : "",
+    facts.threads ? `threads=${facts.threads}` : "",
+  ];
+  void reportAppEvent("transcription", {
+    via: facts.backend ?? "unknown",
+    reason: figures.filter(Boolean).join(" "),
+  });
+}
+
 /** Tests only. */
 export function __resetAppEvents(): void {
   launched = false;
   openedProjects.clear();
   importedProjects.clear();
   reportedExhausted = false;
+  lastTranscriptionReport = -Infinity;
   stopHeartbeat();
 }
 

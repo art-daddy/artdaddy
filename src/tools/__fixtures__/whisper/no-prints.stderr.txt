@@ -1,0 +1,7 @@
+ggml_vulkan: Found 1 Vulkan devices:
+ggml_vulkan: 0 = AMD Radeon(TM) 780M (AMD proprietary driver) | uma: 1 | fp16: 1 | bf16: 1 | fp4: 0 | warp size: 64 | shared memory: 32768 | int dot: 1 | matrix cores: KHR_coopmat
+load_backend: loaded Vulkan backend from C:\Program Files\ArtDaddy\resources\whisper\ggml-vulkan.dll
+load_backend: loaded CPU backend from C:\Program Files\ArtDaddy\resources\whisper\ggml-cpu-cascadelake.dll
+read_audio_data: reading audio data from 'C:\Users\me\AppData\Local\com.artdaddy.app\work\launch-1\transcribe\0f1e2d3c4b5a.wav' ...
+read_audio_data: trying to decode with miniaudio
+output_json: saving output to 'C:\Users\me\AppData\Local\com.artdaddy.app\work\launch-1\transcribe\0f1e2d3c4b5a.mz1x2.tmp.json'

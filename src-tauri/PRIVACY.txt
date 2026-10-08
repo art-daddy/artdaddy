@@ -1,6 +1,6 @@
 ARTDADDY PRIVACY POLICY
 
-Last reviewed 6 October 2026. The current version is always at https://artdaddy.app/privacy
+Last reviewed 9 October 2026. The current version is always at https://artdaddy.app/privacy
 
 ArtDaddy is a desktop application. Your footage, your projects and your edits stay on your computer. The only things that leave are the AI requests you explicitly make, plus the usage data described in full below.
 
@@ -40,7 +40,7 @@ We record the following so we can tell a product that is working from one that i
 - credits consumed, and the AI model each request used;
 - the text of prompts you send to the agent, stored against your account;
 - which editing tools the agent called, the arguments it passed them, whether each succeeded, and the text of the agent's replies;
-- application events (launch, project opened, media imported, export finished or failed) and error messages, which can include file paths on your machine;
+- application events (launch, project opened, media imported, export finished or failed, and a sample of how fast speech transcription ran and on which kind of processor, never what was said) and error messages, which can include file paths on your machine;
 - crash and error reports, via Sentry.
 
 We keep prompt text indefinitely rather than expiring it, because it is the record of what people actually ask the product to do. Agent activity is kept for 400 days. None of it is sold, shared with advertisers, or used to train any model.

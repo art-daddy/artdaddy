@@ -1,5 +1,12 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
+
 import fc from "fast-check";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// What a finished run says about its backend and speed goes out as a usage sample (4i part 4).
+const { reportTranscription } = vi.hoisted(() => ({ reportTranscription: vi.fn() }));
+vi.mock("../api/appEvents", async (orig) => ({ ...(await orig<object>()), reportTranscription }));
 
 import type { CommandRunner } from "./command";
 import { _resetAppCaches } from "./appCache";
@@ -1457,7 +1464,7 @@ describe("whisper as a job of the app process (4i)", () => {
     const spec = jobs.submitted.find((s) => s.id === id)!;
     if (code === 0)
       await fs.writeTextFile(`${spec.args[spec.args.indexOf("-of") + 1]}.json`, WHISPER_JSON);
-    jobs.exit(id, code, code === 0 ? "" : "whisper boom");
+    jobs.exit(id, code, code === 0 ? VULKAN_STDERR : "whisper boom");
   }
   function disk(): MockFs {
     _resetAppCaches();
@@ -1491,6 +1498,14 @@ describe("whisper as a job of the app process (4i)", () => {
 
   afterEach(() => __resetJobSupervisor());
 
+  /** What the shipped whisper printed on a Vulkan run (__fixtures__/whisper). */
+  const VULKAN_STDERR = readFileSync(
+    path.join(__dirname, "__fixtures__", "whisper", "vulkan.stderr.txt"),
+    "utf8",
+  );
+  const VULKAN_RUN = { backend: "vulkan", audioSeconds: 171562 / 16000, wallSeconds: 2.72378 };
+  beforeEach(() => reportTranscription.mockClear());
+
   it("runs whisper as a job of the app process, keeps its words, and lets the job go", async () => {
     const fs = disk();
     const jobs = new FakeJobs();
@@ -1511,6 +1526,8 @@ describe("whisper as a job of the app process (4i)", () => {
     expect(jobs.forgotten).toEqual([jobs.submitted[0].id]);
     expect(under(fs, WORK)).toEqual([]);
     expect(await peekTranscript(ctxWith(runner, fs), SRC)).not.toBeNull();
+    // ...and what the run said about itself goes out once: which backend, and how fast.
+    expect(reportTranscription.mock.calls).toEqual([[expect.objectContaining(VULKAN_RUN)]]);
   });
 
   it("kills the job on Stop and answers cancelled", async () => {
@@ -1548,6 +1565,8 @@ describe("whisper as a job of the app process (4i)", () => {
     await until(() => jobs.forgotten.includes(id) && typeof turn === "function");
     expect(under(fs, WORK)).toEqual([]);
     expect(await next.transcribe.peekTranscript(next.ctx, SRC)).not.toBeNull();
+    // The page that finished it reports it, once; the one that died never did.
+    expect(reportTranscription.mock.calls).toEqual([[expect.objectContaining(VULKAN_RUN)]]);
   });
 
   it("keeps the words of one that ended while no page was there", async () => {
@@ -1585,6 +1604,7 @@ describe("whisper as a job of the app process (4i)", () => {
     await finish(fs, jobs, id, 1);
     await until(() => jobs.forgotten.includes(id));
     expect(await next.transcribe.peekTranscript(next.ctx, SRC)).toBeNull();
+    expect(reportTranscription).not.toHaveBeenCalled(); // a failed run is not a speed
     expect(under(fs, WORK)).toEqual([]);
     jobs.onStart = (spec) => void finish(fs, jobs, spec.id);
     expect(words(await next.transcribe.runWhisper(next.ctx, SRC))).toEqual([

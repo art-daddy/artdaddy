@@ -15,7 +15,9 @@ import type { ClientToolRegistry } from "./registry";
 import { MediaOfflineError } from "./refState";
 import { joinPath } from "./store";
 import { prioritizeTranscript } from "./transcriptQueue";
+import { whisperRunFacts } from "./whisperFacts";
 import { adoptTurn, lookWhisper } from "./workGate";
+import { reportTranscription } from "../api/appEvents";
 import { beginSessionActivity } from "../observability/crashWatch";
 import { ArtDaddyError } from "../lib/errors";
 import { settledWithin } from "../lib/settledWithin";
@@ -936,6 +938,7 @@ export async function runWhisper(
       // -mc 0: no text carried from one 30 s window into the next. With it, six minutes of
       // silence left whisper repeating "[BLANK_AUDIO]" straight through the speech after it
       // (4h2): the file's whole transcript came back empty, and it answers every stretch of it.
+      // No -np: it would hide the backend and timings whisperFacts.ts reads.
       const args = [
         "-m",
         model,
@@ -944,7 +947,6 @@ export async function runWhisper(
         "-ojf",
         "-of",
         meta.scratch,
-        "-np",
         "-t",
         whisperThreads(),
         "-l",
@@ -1026,6 +1028,7 @@ async function finishWhisper(
     const parsed = parseWhisperCpp(data);
     // Kept outside the project, so it is kept even when the project closed while whisper ran.
     if (meta.key) await (await io.appCache())?.put(TRANSCRIPTS, meta.key, data);
+    reportTranscription(whisperRunFacts(run.stderr));
     return parsed;
   } finally {
     await io.remove(json).catch(() => undefined);
