@@ -42,6 +42,7 @@ test.beforeAll(async ({ browser }) => {
     "rotation-configured-color-control",
     JSON.stringify(shots["configured-color:h264_rot0.mp4"]),
   );
+  console.log("rotation-html-video-control", JSON.stringify(shots["html-video:h264_rot0.mp4"]));
   expect((shots as { error?: string }).error, "the probe failed to run").toBeUndefined();
 });
 test.afterAll(async () => {

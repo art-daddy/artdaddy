@@ -196,6 +196,46 @@ void (async () => {
     } finally {
       VideoDecoder.prototype.configure = configure;
     }
+    const video = document.createElement("video");
+    video.muted = true;
+    video.playsInline = true;
+    video.src = "/e2e/ui/fixtures/rotation/h264_rot0.mp4";
+    await new Promise<void>((resolve, reject) => {
+      video.onloadeddata = () => resolve();
+      video.onerror = () => reject(new Error("HTML video control did not decode"));
+      video.load();
+    });
+    await new Promise<void>((resolve, reject) => {
+      video.requestVideoFrameCallback(() => resolve());
+      void video.play().catch(reject);
+    });
+    video.pause();
+    const htmlCanvas = document.createElement("canvas");
+    htmlCanvas.width = video.videoWidth;
+    htmlCanvas.height = video.videoHeight;
+    const htmlContext = htmlCanvas.getContext("2d", { willReadFrequently: true })!;
+    htmlContext.drawImage(video, 0, 0);
+    const htmlCorners = CORNERS.map(([x, y]): [number, number, number] => {
+      const data = htmlContext.getImageData(
+        Math.floor(x * htmlCanvas.width),
+        Math.floor(y * htmlCanvas.height),
+        1,
+        1,
+      ).data;
+      return [data[0], data[1], data[2]];
+    });
+    if (!htmlCorners.some((pixel) => pixel.some((channel) => channel > 60))) {
+      throw new Error("HTML video control produced no visible pixels");
+    }
+    out["html-video:h264_rot0.mp4"] = {
+      decoded: true,
+      box: { x: 0, y: 0, w: video.videoWidth, h: video.videoHeight },
+      corners: htmlCorners.map(classify),
+      rawCorners: htmlCorners,
+      at: {},
+    };
+    video.removeAttribute("src");
+    video.load();
     (window as unknown as { __rotation: unknown }).__rotation = out;
   } catch (e) {
     (window as unknown as { __rotation: unknown }).__rotation = { error: String(e) };
