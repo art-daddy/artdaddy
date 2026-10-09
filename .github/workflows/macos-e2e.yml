@@ -15,6 +15,13 @@ name: macOS end-to-end
 on:
   workflow_dispatch:
     inputs:
+      runner:
+        description: "Native macOS runtime for QA; this does not change the release target"
+        type: choice
+        options:
+          - macos-14
+          - macos-15
+        default: macos-14
       run_agent_lane:
         description: "Run the agent lane (spends model credits; needs the ARTDADDY_EVAL_TOKEN secret)"
         type: boolean
@@ -34,7 +41,7 @@ on:
 
 jobs:
   e2e:
-    runs-on: macos-14
+    runs-on: ${{ inputs.runner || 'macos-14' }}
     # Every lane pipes to `tail`, and a pipeline's status is the LAST command's - so without
     # pipefail each lane reported success no matter what happened, and the whole run went green
     # while the agent lane was 401ing on every scenario.
