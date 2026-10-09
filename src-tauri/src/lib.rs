@@ -1473,7 +1473,8 @@ mod tests {
   #[cfg(desktop)]
   fn refresh_token_round_trips_through_the_real_keychain() {
     let service = "com.artdaddy.app.test";
-    let account = "desktop-auth-refresh-token-roundtrip";
+    let account = format!("desktop-auth-refresh-token-roundtrip-{}", std::process::id());
+    let account = account.as_str();
     let _ = super::clear_refresh_token_at(service, account); // in case a prior run crashed mid-test
 
     assert_eq!(super::load_refresh_token_at(service, account), None);
@@ -1499,7 +1500,8 @@ mod tests {
   #[cfg(desktop)]
   fn clearing_an_absent_refresh_token_is_a_no_op_not_an_error() {
     let service = "com.artdaddy.app.test";
-    let account = "desktop-auth-refresh-token-absent";
+    let account = format!("desktop-auth-refresh-token-absent-{}", std::process::id());
+    let account = account.as_str();
     let _ = super::clear_refresh_token_at(service, account);
     assert_eq!(super::load_refresh_token_at(service, account), None);
     // Idempotent: signing out twice, or a callback that races a manual sign-out, must not error.
@@ -1515,8 +1517,9 @@ mod tests {
     use super::token_store::{self, Vault};
     let dir = std::env::temp_dir().join(format!("artdaddy-handover-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
+    let account = format!("desktop-auth-refresh-token-handover-{}", std::process::id());
     let (keyring, file) =
-      super::token_vaults_at("com.artdaddy.app.test", "desktop-auth-refresh-token-handover", Some(dir.clone()));
+      super::token_vaults_at("com.artdaddy.app.test", &account, Some(dir.clone()));
     let (k, f) = (super::as_vault(&keyring), super::as_vault(&file));
     let keyring_entry = keyring.as_ref().expect("needs a credential store (ci.yml gives Linux one)");
     let _ = token_store::clear(k, f);
@@ -1546,8 +1549,9 @@ mod tests {
     assert!(keyring::Entry::store_status().is_err(), "this process must have no Secret Service");
     let dir = std::env::temp_dir().join(format!("artdaddy-nokeyring-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
+    let account = format!("desktop-auth-refresh-token-nokeyring-{}", std::process::id());
     let (keyring, file) =
-      super::token_vaults_at("com.artdaddy.app.test", "desktop-auth-refresh-token-nokeyring", Some(dir.clone()));
+      super::token_vaults_at("com.artdaddy.app.test", &account, Some(dir.clone()));
     assert!(keyring.is_none());
     let (k, f) = (super::as_vault(&keyring), super::as_vault(&file));
 
