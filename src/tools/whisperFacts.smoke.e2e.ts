@@ -10,6 +10,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 const { reportTranscription } = vi.hoisted(() => ({ reportTranscription: vi.fn() }));
 vi.mock("../api/appEvents", async (orig) => ({ ...(await orig<object>()), reportTranscription }));
 
+import { shippedSidecar } from "../test/sidecars";
 import type { CommandRunner } from "./command";
 import { joinPath } from "./store";
 import { runWhisper, whisperModelPath } from "./transcribe";
@@ -19,6 +20,7 @@ import { mkCtx, nodeRunner, srcTone } from "./__e2e";
 // One level under the OS temp dir, where the app's e2e runs keep the whisper model (two levels up).
 const proj = joinPath(os.tmpdir(), `artdaddy-whisper-facts-${Date.now()}`);
 const model = whisperModelPath(proj, "small");
+const whisper = shippedSidecar("whisper-cli");
 
 beforeAll(async () => {
   await fsp.mkdir(path.join(proj, "src"), { recursive: true });
@@ -28,7 +30,7 @@ afterAll(async () => {
 });
 
 describe("whisper as the app runs it", () => {
-  it.skipIf(!existsSync(model))(
+  it.skipIf(!whisper || !existsSync(model))(
     "says which backend it ran on, how much it heard and how long it took",
     async () => {
       const file = await srcTone(path.join(proj, "src", "tone.wav"), { freq: 440, dur: 35 });
