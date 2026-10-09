@@ -180,6 +180,22 @@ void (async () => {
     } finally {
       VideoDecoder.prototype.configure = configure;
     }
+    VideoDecoder.prototype.configure = function (config: VideoDecoderConfig) {
+      configure.call(this, {
+        ...config,
+        colorSpace: { matrix: "bt709", primaries: "bt709", transfer: "bt709", fullRange: false },
+      });
+    };
+    try {
+      out["configured-color:h264_rot0.mp4"] = await shoot(
+        renderer,
+        "h264_rot0.mp4",
+        "configured-color",
+        {},
+      );
+    } finally {
+      VideoDecoder.prototype.configure = configure;
+    }
     (window as unknown as { __rotation: unknown }).__rotation = out;
   } catch (e) {
     (window as unknown as { __rotation: unknown }).__rotation = { error: String(e) };

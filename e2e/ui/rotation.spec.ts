@@ -38,6 +38,10 @@ test.beforeAll(async ({ browser }) => {
   });
   console.log("rotation-controls", JSON.stringify(shots["h264_rot0.mp4"]));
   console.log("rotation-software-control", JSON.stringify(shots["software:h264_rot0.mp4"]));
+  console.log(
+    "rotation-configured-color-control",
+    JSON.stringify(shots["configured-color:h264_rot0.mp4"]),
+  );
   expect((shots as { error?: string }).error, "the probe failed to run").toBeUndefined();
 });
 test.afterAll(async () => {
