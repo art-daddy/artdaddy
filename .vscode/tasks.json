@@ -1,0 +1,31 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "QA Phase 4 Closure",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"C:/Users/akshaydagar/akaru-client/scripts/qa/phase4Closure.mjs",
+				"setup",
+				"swiss",
+				"C:/Users/akshaydagar/qa_phase4k"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "QA Phase 4 Swiss Speech",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"--experimental-websocket",
+				"C:/Users/akshaydagar/akaru-client/scripts/qa/phase4Closure.mjs",
+				"verify",
+				"swiss"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		}
+	]
+}

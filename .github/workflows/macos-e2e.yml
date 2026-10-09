@@ -158,7 +158,8 @@ jobs:
           # without it `tauri build` dies with "resource path doesn't exist".
           npm run build:mcpb
           npm run bundle:browser
-          npx tauri build --bundles dmg
+          npx tauri build --bundles dmg \
+            --config '{"bundle":{"createUpdaterArtifacts":false,"macOS":{"signingIdentity":"-"}}}'
 
       - name: Install it
         run: |
