@@ -36,6 +36,7 @@ test.beforeAll(async ({ browser }) => {
     body: JSON.stringify(shots, null, 2),
     contentType: "application/json",
   });
+  console.log("rotation-controls", JSON.stringify(shots["h264_rot0.mp4"]));
   expect((shots as { error?: string }).error, "the probe failed to run").toBeUndefined();
 });
 test.afterAll(async () => {
