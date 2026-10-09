@@ -24,6 +24,7 @@ export interface RoundResultDTO {
   pending_calls: PendingCall[];
   final_text: string;
   error: string;
+  credit_limit?: unknown;
   finish_reason: string;
   usage: Usage;
   provider_snapshot: Record<string, unknown>;

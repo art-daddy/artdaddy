@@ -305,6 +305,17 @@ describe("inferRoundStreaming", () => {
     expect(markOverLimit).toHaveBeenCalledWith({ error: "credit_limit_reached" });
   });
 
+  it("maps a terminal credit stop after paid output to the same typed refusal without resending", async () => {
+    const detail = { error: "credit_limit_reached", scope: "user", used: 101, limit: 100 };
+    const send = vi.fn(async () =>
+      sse([frame("result", { ...dto, kind: "error", credit_limit: detail })]),
+    );
+    vi.stubGlobal("fetch", send);
+    await expect(inferRoundStreaming(body, () => {})).rejects.toBeInstanceOf(CreditLimitError);
+    expect(markOverLimit).toHaveBeenCalledWith(detail);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
   it("notifies auth failure and throws a typed, expected error on 401", async () => {
     vi.stubGlobal(
       "fetch",

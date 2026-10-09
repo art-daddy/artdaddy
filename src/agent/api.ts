@@ -233,5 +233,10 @@ async function streamRound(
     { idleMs: STREAM_IDLE_MS },
   );
   if (!result) throw new Error("the inference stream ended without a result");
-  return result;
+  const terminal = result as RoundResultDTO;
+  if (terminal.credit_limit) {
+    markOverLimit(terminal.credit_limit);
+    throw new CreditLimitError(terminal.credit_limit);
+  }
+  return terminal;
 }
