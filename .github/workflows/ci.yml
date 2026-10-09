@@ -33,8 +33,12 @@ jobs:
       - run: npm test # vitest run
 
   browser:
-    name: real-browser UI + compositor pixels
-    runs-on: windows-latest
+    name: real-browser UI + compositor pixels (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-14]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -47,7 +51,7 @@ jobs:
       # real Chromium. See playwright.config.ts.
       # Installed with --no-save so the committed lockfile stays authoritative for
       # the app itself; move it into devDependencies once it earns a place there.
-      - run: npm i --no-save @playwright/test@1.49.1
+      - run: npm i --no-save @playwright/test@1.61.1
       - run: npx playwright install --with-deps chromium webkit
       - run: npm run e2e:ui
 

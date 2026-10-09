@@ -12,7 +12,7 @@ import { defineConfig, devices } from "@playwright/test";
 //
 // PREREQUISITES (not in package.json — this lane installs its own runner so the
 // app's committed lockfile stays about the app):
-//   npm i --no-save @playwright/test@1.49.1
+//   npm i --no-save @playwright/test@1.61.1
 //   npx playwright install chromium
 //
 // To reuse the browser `npm run bundle:browser` already staged instead of downloading a
@@ -42,7 +42,7 @@ export default defineConfig({
         ...devices["Desktop Chrome"],
         // GPU-less runners (macOS CI) get WebGL2 only from SwiftShader, which Chrome no longer picks unasked.
         launchOptions: {
-          channel: process.platform === "darwin" ? "chrome" : undefined,
+          channel: process.env.CI ? "chrome" : undefined,
           args: ["--enable-unsafe-swiftshader"],
         },
       },
