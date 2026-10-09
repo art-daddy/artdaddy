@@ -20,6 +20,7 @@ export interface RotationShot {
   corners: string[];
   /** RGB at named points, fractions of `box`. */
   at: Record<string, [number, number, number]>;
+  rawCorners?: [number, number, number][];
   error?: string;
 }
 
@@ -62,6 +63,20 @@ async function shoot(
     await vs.whenReady();
     const frame = await vs.frameAt(0);
     if (!frame) return { decoded: false, box: null, corners: [], at: {} };
+    const raw = document.createElement("canvas");
+    raw.width = frame.displayWidth;
+    raw.height = frame.displayHeight;
+    const rawContext = raw.getContext("2d", { willReadFrequently: true })!;
+    rawContext.drawImage(frame, 0, 0);
+    const rawCorners = CORNERS.map(([x, y]): [number, number, number] => {
+      const data = rawContext.getImageData(
+        Math.floor(x * raw.width),
+        Math.floor(y * raw.height),
+        1,
+        1,
+      ).data;
+      return [data[0], data[1], data[2]];
+    });
     const key = `${file}#${tag}`;
     renderer.setTexture(key, frame, vs.orientation);
     renderer.render(
@@ -97,7 +112,7 @@ async function shoot(
       rgb(box.x + fx * box.w, box.y + fy * box.h);
     const at: RotationShot["at"] = {};
     for (const [name, p] of Object.entries(points)) at[name] = inBox(p);
-    return { decoded: true, box, corners: CORNERS.map((p) => classify(inBox(p))), at };
+    return { decoded: true, box, corners: CORNERS.map((p) => classify(inBox(p))), at, rawCorners };
   } catch (e) {
     return { decoded: false, box: null, corners: [], at: {}, error: String(e) };
   } finally {

@@ -32,6 +32,10 @@ test.beforeAll(async ({ browser }) => {
   shots = await page.evaluate(
     () => (window as unknown as { __rotation: Record<string, RotationShot> }).__rotation,
   );
+  await test.info().attach("rotation-pixels", {
+    body: JSON.stringify(shots, null, 2),
+    contentType: "application/json",
+  });
   expect((shots as { error?: string }).error, "the probe failed to run").toBeUndefined();
 });
 test.afterAll(async () => {

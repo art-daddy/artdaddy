@@ -41,7 +41,10 @@ export default defineConfig({
       use: {
         ...devices["Desktop Chrome"],
         // GPU-less runners (macOS CI) get WebGL2 only from SwiftShader, which Chrome no longer picks unasked.
-        launchOptions: { args: ["--enable-unsafe-swiftshader"] },
+        launchOptions: {
+          channel: process.platform === "darwin" ? "chrome" : undefined,
+          args: ["--enable-unsafe-swiftshader"],
+        },
       },
     },
     // The closest thing to macOS without a Mac: WKWebView is WebKit, and this build runs on
