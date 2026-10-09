@@ -55,6 +55,21 @@ describe("a call the turn never answered", () => {
 });
 
 describe("a call that ran out of credits", () => {
+  it("preserves an unaffordable request explanation after registry serialization", async () => {
+    const registry = new ClientToolRegistry().register("generate_image", () => {
+      throw new CreditLimitError({
+        used: 99,
+        limit: 100,
+        remaining: 1,
+        requested: 3,
+        scope: "user",
+      });
+    });
+    const result = (await registry.run("generate_image", {})) as Record<string, unknown>;
+    render(<ToolCalls calls={[call("generate_image", {}, result)]} ctx={ctx} />);
+    expect(screen.getByText(/3 credits.*1 credit remains/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /discord/i })).not.toBeInTheDocument();
+  });
   // Through the REAL registry from the REAL error: a hand-written string would agree with the
   // matcher whether or not the text that reaches this row still carries the mark.
   async function outOfCredits(): Promise<ToolCallView> {

@@ -21,7 +21,8 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../api/desktopAuth", () => ({ signOutDesktop: mocks.signOutDesktop }));
-vi.mock("../api/usage", () => ({
+vi.mock("../api/usage", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../api/usage")>()),
   getUsage: () => mocks.usage,
   subscribeUsage: () => () => {},
   refreshUsage: mocks.refreshUsage,
@@ -61,6 +62,14 @@ describe("ProfilePage", () => {
     expect(screen.getByText("60")).toBeInTheDocument();
     expect(screen.getByText("40")).toBeInTheDocument();
     expect(mocks.refreshUsage).toHaveBeenCalled();
+  });
+
+  it("shows the same precise fractional headroom without transport noise", () => {
+    mocks.usage = { metered: true, used: 99.999, limit: 100, remaining: 100 - 99.999, over: false };
+    renderPage();
+    expect(screen.getByText("0.001")).toBeInTheDocument();
+    expect(screen.getByText("99.999")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /join our discord/i })).not.toBeInTheDocument();
   });
 
   it("says so rather than showing zeroes when the account is not metered", () => {

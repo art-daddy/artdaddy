@@ -4,7 +4,7 @@ import { useEffect, useSyncExternalStore } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { signOutDesktop } from "../api/desktopAuth";
-import { getUsage, refreshUsage, subscribeUsage } from "../api/usage";
+import { formatCredits, getUsage, refreshUsage, subscribeUsage } from "../api/usage";
 import { BRAND } from "../brand";
 import { useAuth } from "../store/auth";
 import DiscordCreditsCta from "./DiscordCreditsCta";
@@ -80,9 +80,9 @@ export default function ProfilePage() {
           <h2 className="text-sm font-semibold text-ink">Credits</h2>
           {usage.metered ? (
             <div className="mt-2">
-              <Row label="Remaining" value={String(usage.remaining)} />
-              <Row label="Used" value={String(usage.used)} />
-              <Row label="Limit" value={String(usage.limit)} />
+              <Row label="Remaining" value={formatCredits(usage.remaining)} />
+              <Row label="Used" value={formatCredits(usage.used)} />
+              <Row label="Limit" value={formatCredits(usage.limit)} />
               {usage.over && (
                 <p className="mt-2 text-xs text-red-400">
                   {OUT_OF_CREDITS} <DiscordCreditsCta />

@@ -28,6 +28,10 @@ export function getUsage(): UsageState {
   return state;
 }
 
+export function formatCredits(value: number): string {
+  return String(Number(value.toPrecision(6)));
+}
+
 export function subscribeUsage(fn: () => void): () => void {
   listeners.add(fn);
   return () => {
@@ -77,6 +81,17 @@ export async function refreshUsage(): Promise<void> {
 
 /** Reflect a 402 immediately, before the next refresh lands. */
 export function markOverLimit(detail: unknown): void {
+  const reservation = unaffordableReservation(detail);
+  if (reservation) {
+    set({
+      metered: true,
+      used: reservation.used,
+      limit: reservation.limit,
+      remaining: reservation.remaining,
+      over: false,
+    });
+    return;
+  }
   const d = (detail && typeof detail === "object" ? detail : {}) as {
     used?: number;
     limit?: number;
@@ -112,7 +127,7 @@ export function clearUsage(): void {
 
 /** Thrown by the request wrappers on an HTTP 402 (credit limit reached). */
 export class CreditLimitError extends ArtDaddyError {
-  readonly code = CREDIT_LIMIT;
+  readonly code: string;
   readonly expected = true;
   detail: unknown;
   /** `context` is what the caller knows that a 402 does not, e.g. that nothing was submitted. */
@@ -122,17 +137,26 @@ export class CreditLimitError extends ArtDaddyError {
     // cannot succeed either -- the same mistake the 401 path already paid for. The invite is
     // spelled out because over MCP this sentence is the only way out a person is ever shown.
     const global = isGlobal(detail);
+    const reservation = unaffordableReservation(detail);
     super(
-      markOutOfCredits(
-        (context ? `${context}. ` : "") +
-          (global
-            ? "ArtDaddy's shared AI budget is used up for now"
-            : "the credit limit is reached") +
-          ", so no paid call can succeed right now. Do NOT retry this or any other paid tool — tell the user " +
-          (global ? "AI generation is paused for everyone right now" : "they are out of credits") +
-          `, tell them they can join the ArtDaddy Discord (${DISCORD_URL}) and raise a request, and stop.`,
-      ),
+      reservation
+        ? `${context ? `${context}. ` : ""}${reservationMessage(reservation)} ` +
+            "The request was not submitted and you were not charged. Do NOT retry the same request. " +
+            "Ask the user to approve a smaller or cheaper request before substituting anything; " +
+            "other work that fits the remaining credit is not blocked."
+        : markOutOfCredits(
+            (context ? `${context}. ` : "") +
+              (global
+                ? "ArtDaddy's shared AI budget is used up for now"
+                : "the credit limit is reached") +
+              ", so no paid call can succeed right now. Do NOT retry this or any other paid tool — tell the user " +
+              (global
+                ? "AI generation is paused for everyone right now"
+                : "they are out of credits") +
+              `, tell them they can join the ArtDaddy Discord (${DISCORD_URL}) and raise a request, and stop.`,
+          ),
     );
+    this.code = reservation ? "credit_request_unaffordable" : CREDIT_LIMIT;
     this.name = "CreditLimitError";
     this.detail = detail;
   }
@@ -140,8 +164,45 @@ export class CreditLimitError extends ArtDaddyError {
   /** What a person sees; `message` is aimed at the model. Free credits are one-time, so it
    *  must never promise they come back on their own. */
   get userMessage(): string {
+    const reservation = unaffordableReservation(this.detail);
+    if (reservation) return reservationMessage(reservation);
     return isGlobal(this.detail) ? CREDITS_PAUSED : OUT_OF_CREDITS;
   }
+}
+
+interface ReservationRefusal {
+  used: number;
+  limit: number;
+  remaining: number;
+  requested: number;
+}
+
+function unaffordableReservation(detail: unknown): ReservationRefusal | null {
+  if (!detail || typeof detail !== "object") return null;
+  const candidate = detail as Record<string, unknown>;
+  if (candidate.scope !== "user") return null;
+  const values = [candidate.used, candidate.limit, candidate.remaining, candidate.requested];
+  if (!values.every(Number.isFinite)) return null;
+  const refusal = candidate as unknown as ReservationRefusal;
+  return refusal.used >= 0 &&
+    refusal.remaining > 0 &&
+    refusal.remaining <= refusal.limit - refusal.used &&
+    refusal.requested > refusal.remaining
+    ? refusal
+    : null;
+}
+
+function reservationMessage(refusal: ReservationRefusal): string {
+  let requested = formatCredits(refusal.requested);
+  let remaining = formatCredits(refusal.remaining);
+  if (Number(requested) <= Number(remaining)) {
+    requested = String(refusal.requested);
+    remaining = String(refusal.remaining);
+  }
+  return (
+    `This request needs up to ${requested} credit${requested === "1" ? "" : "s"}; ` +
+    `${remaining} credit${remaining === "1" ? " remains" : "s remain"}.`
+  );
 }
 
 function isGlobal(detail: unknown): boolean {

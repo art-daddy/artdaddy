@@ -29,7 +29,8 @@ const usageMock = vi.hoisted(() => ({
   limit: 100,
   remaining: 1_500_000,
 }));
-vi.mock("../api/usage", () => ({
+vi.mock("../api/usage", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../api/usage")>()),
   getUsage: () => usageMock,
   subscribeUsage: () => () => {},
   refreshUsage: vi.fn(),
@@ -78,6 +79,7 @@ beforeEach(() => {
   authState.status = "unlocked";
   platformName = "web";
   usageMock.over = false;
+  usageMock.remaining = 1_500_000;
   vi.mocked(importPaths).mockResolvedValue([]);
   vi.mocked(filesFromItems).mockReturnValue([]);
 });
@@ -85,6 +87,13 @@ beforeEach(() => {
 describe("ChatView", () => {
   it("shows the remaining balance while there is one", () => {
     render(<ChatView />);
+    expect(screen.queryByRole("button", { name: /join our discord/i })).not.toBeInTheDocument();
+  });
+
+  it("shows real fractional headroom without floating-point noise", () => {
+    usageMock.remaining = 100 - 99.999;
+    render(<ChatView />);
+    expect(screen.getByText("0.001 cr left")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /join our discord/i })).not.toBeInTheDocument();
   });
 
@@ -295,6 +304,17 @@ describe("ChatView", () => {
     state.error = "bad thing";
     render(<ChatView />);
     expect(screen.getByText("bad thing")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /join our discord/i })).not.toBeInTheDocument();
+  });
+
+  it("shows request headroom without offering the exhausted-account action", async () => {
+    const { CreditLimitError } =
+      await vi.importActual<typeof import("../api/usage")>("../api/usage");
+    state.error = toUserMessage(
+      new CreditLimitError({ used: 99, limit: 100, remaining: 1, requested: 3, scope: "user" }),
+    );
+    render(<ChatView />);
+    expect(screen.getByText(/3 credits.*1 credit remains/i)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /join our discord/i })).not.toBeInTheDocument();
   });
 

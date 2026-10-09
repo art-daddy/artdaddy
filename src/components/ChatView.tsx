@@ -10,7 +10,7 @@ import {
 
 import { startDesktopSignIn } from "../api/desktopAuth";
 import type { ApprovalMode, Attachment, FileNode, SessionState } from "../api/types";
-import { getUsage, refreshUsage, subscribeUsage } from "../api/usage";
+import { formatCredits, getUsage, refreshUsage, subscribeUsage } from "../api/usage";
 import type { FeedbackKind } from "../api/feedback";
 import { BRAND } from "../brand";
 import { openDiscord } from "../lib/community";
@@ -870,7 +870,7 @@ function ContextMeter({ session, model }: { session: SessionState | null; model:
           <button
             type="button"
             onClick={() => void openDiscord()}
-            title={`${Math.round(usage.used).toLocaleString()} / ${Math.round(usage.limit).toLocaleString()} credits used`}
+            title={`${formatCredits(usage.used)} / ${formatCredits(usage.limit)} credits used`}
             className="whitespace-nowrap font-medium text-red-400 underline underline-offset-2 hover:text-red-300"
           >
             0 cr — Join our Discord to get more
@@ -878,9 +878,9 @@ function ContextMeter({ session, model }: { session: SessionState | null; model:
         ) : (
           <span
             className="tabular-nums text-neutral-400"
-            title={`${Math.round(usage.used).toLocaleString()} / ${Math.round(usage.limit).toLocaleString()} credits used`}
+            title={`${formatCredits(usage.used)} / ${formatCredits(usage.limit)} credits used`}
           >
-            {fmtTok(Math.max(0, usage.remaining))} cr left
+            {formatCredits(Math.max(0, usage.remaining))} cr left
           </span>
         ))}
     </div>
