@@ -26,6 +26,21 @@
 			],
 			"isBackground": false,
 			"problemMatcher": []
+		},
+		{
+			"label": "Release Mac Diagnostic Log",
+			"type": "shell",
+			"command": "gh",
+			"args": [
+				"run",
+				"view",
+				"37992610010",
+				"--repo",
+				"art-daddy/artdaddy",
+				"--log-failed"
+			],
+			"isBackground": false,
+			"problemMatcher": []
 		}
 	]
 }

@@ -171,6 +171,15 @@ void (async () => {
       { effects: [{ type: "motion", params: { frames: 12 } }] },
       { acrossLeftRight: [0.47, 0.25], acrossTopBottom: [0.25, 0.47] },
     );
+    const configure = VideoDecoder.prototype.configure;
+    VideoDecoder.prototype.configure = function (config: VideoDecoderConfig) {
+      configure.call(this, { ...config, hardwareAcceleration: "prefer-software" });
+    };
+    try {
+      out["software:h264_rot0.mp4"] = await shoot(renderer, "h264_rot0.mp4", "software", {});
+    } finally {
+      VideoDecoder.prototype.configure = configure;
+    }
     (window as unknown as { __rotation: unknown }).__rotation = out;
   } catch (e) {
     (window as unknown as { __rotation: unknown }).__rotation = { error: String(e) };
