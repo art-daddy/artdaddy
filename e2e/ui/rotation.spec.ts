@@ -37,6 +37,7 @@ test.beforeAll(async ({ browser }) => {
     contentType: "application/json",
   });
   console.log("rotation-controls", JSON.stringify(shots["h264_rot0.mp4"]));
+  console.log("rotation-tagged-stream-control", JSON.stringify(shots["tagged:h264_rot0.mp4"]));
   console.log("rotation-software-control", JSON.stringify(shots["software:h264_rot0.mp4"]));
   console.log(
     "rotation-configured-color-control",

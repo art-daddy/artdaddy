@@ -171,6 +171,7 @@ void (async () => {
       { effects: [{ type: "motion", params: { frames: 12 } }] },
       { acrossLeftRight: [0.47, 0.25], acrossTopBottom: [0.25, 0.47] },
     );
+    out["tagged:h264_rot0.mp4"] = await shoot(renderer, "h264_tagged_control.mp4", "tagged", {});
     const configure = VideoDecoder.prototype.configure;
     VideoDecoder.prototype.configure = function (config: VideoDecoderConfig) {
       configure.call(this, { ...config, hardwareAcceleration: "prefer-software" });
