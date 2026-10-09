@@ -21,6 +21,8 @@ export interface RotationShot {
   /** RGB at named points, fractions of `box`. */
   at: Record<string, [number, number, number]>;
   rawCorners?: [number, number, number][];
+  correctedCorners?: [number, number, number][];
+  colorSpace?: VideoColorSpaceInit;
   error?: string;
 }
 
@@ -77,6 +79,27 @@ async function shoot(
       ).data;
       return [data[0], data[1], data[2]];
     });
+    const frameBytes = new Uint8Array(frame.allocationSize());
+    const layout = await frame.copyTo(frameBytes);
+    const corrected = new VideoFrame(frameBytes, {
+      format: frame.format!,
+      codedWidth: frame.visibleRect?.width ?? frame.displayWidth,
+      codedHeight: frame.visibleRect?.height ?? frame.displayHeight,
+      timestamp: frame.timestamp,
+      layout,
+      colorSpace: { matrix: "bt709", primaries: "bt709", transfer: "bt709", fullRange: false },
+    });
+    rawContext.drawImage(corrected, 0, 0);
+    const correctedCorners = CORNERS.map(([x, y]): [number, number, number] => {
+      const data = rawContext.getImageData(
+        Math.floor(x * raw.width),
+        Math.floor(y * raw.height),
+        1,
+        1,
+      ).data;
+      return [data[0], data[1], data[2]];
+    });
+    corrected.close();
     const key = `${file}#${tag}`;
     renderer.setTexture(key, frame, vs.orientation);
     renderer.render(
@@ -112,7 +135,15 @@ async function shoot(
       rgb(box.x + fx * box.w, box.y + fy * box.h);
     const at: RotationShot["at"] = {};
     for (const [name, p] of Object.entries(points)) at[name] = inBox(p);
-    return { decoded: true, box, corners: CORNERS.map((p) => classify(inBox(p))), at, rawCorners };
+    return {
+      decoded: true,
+      box,
+      corners: CORNERS.map((p) => classify(inBox(p))),
+      at,
+      rawCorners,
+      correctedCorners,
+      colorSpace: frame.colorSpace.toJSON(),
+    };
   } catch (e) {
     return { decoded: false, box: null, corners: [], at: {}, error: String(e) };
   } finally {
