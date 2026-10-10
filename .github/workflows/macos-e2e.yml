@@ -22,6 +22,10 @@ on:
           - macos-14
           - macos-15
         default: macos-14
+      native_pixels_only:
+        description: "Run only the system WKWebView pixel discriminator; no paid calls"
+        type: boolean
+        default: false
       run_agent_lane:
         description: "Run the agent lane (spends model credits; needs the ARTDADDY_EVAL_TOKEN secret)"
         type: boolean
@@ -40,7 +44,32 @@ on:
         default: "v1.9.2"
 
 jobs:
+  native-pixels:
+    runs-on: ${{ inputs.runner || 'macos-14' }}
+    timeout-minutes: 10
+    env:
+      ARTDADDY_SYSTEM_WKWEBVIEW: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm i --no-save @playwright/test@1.61.1
+      - run: npx playwright install chromium
+      - name: System WKWebView decoded pixels
+        run: npx playwright test e2e/ui/rotation.spec.ts --project=system-wkwebview
+      - name: Native pixel evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: system-wkwebview-pixels-${{ inputs.runner || 'macos-14' }}
+          path: test-results/**
+          if-no-files-found: warn
+
   e2e:
+    if: ${{ !inputs.native_pixels_only }}
     runs-on: ${{ inputs.runner || 'macos-14' }}
     # Every lane pipes to `tail`, and a pipeline's status is the LAST command's - so without
     # pipefail each lane reported success no matter what happened, and the whole run went green

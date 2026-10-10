@@ -72,6 +72,18 @@ export default defineConfig({
             ]
           : [],
     },
+    ...(process.platform === "darwin" && process.env.ARTDADDY_SYSTEM_WKWEBVIEW === "1"
+      ? [
+          {
+            name: "system-wkwebview",
+            testMatch: "rotation.spec.ts",
+            use: {
+              ...devices["Desktop Chrome"],
+              launchOptions: { channel: "chrome" },
+            },
+          },
+        ]
+      : []),
   ],
   webServer: {
     // A dedicated port so the lane never collides with a dev server the user has open.

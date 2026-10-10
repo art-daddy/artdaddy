@@ -6,8 +6,10 @@
 // shows for that file (src/preview/orientation.smoke.e2e.ts keeps that file honest). A user's
 // phone clip played on its side here while exporting upright: 4 of 14 WhatsApp clips in one
 // birthday montage.
+import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import { promisify } from "node:util";
 
 import { type Page, expect, test } from "@playwright/test";
 
@@ -25,13 +27,38 @@ const EXPECTED = JSON.parse(
 let page: Page;
 let shots: Record<string, RotationShot>;
 
-test.beforeAll(async ({ browser }) => {
-  page = await browser.newPage();
-  await page.goto("/preview-probe-rotation.html");
-  await page.waitForFunction(() => "__rotation" in window, undefined, { timeout: 60_000 });
-  shots = await page.evaluate(
-    () => (window as unknown as { __rotation: Record<string, RotationShot> }).__rotation,
-  );
+test.beforeAll(async ({ browser }, info) => {
+  if (info.project.name === "system-wkwebview") {
+    info.setTimeout(90_000);
+    const reportPath = info.outputPath("system-wkwebview-rotation.json");
+    await promisify(execFile)(
+      "swift",
+      [
+        path.resolve("scripts/qa/systemWebkitPixels.swift"),
+        new URL("/preview-probe-rotation.html", info.project.use.baseURL!).href,
+        reportPath,
+      ],
+      { timeout: 80_000 },
+    );
+    const report = readFileSync(reportPath, "utf8");
+    const native = JSON.parse(report) as {
+      engine: string;
+      shots: Record<string, RotationShot>;
+    };
+    expect(native.engine).toBe("system WKWebView");
+    shots = native.shots;
+    await info.attach("system-wkwebview-runtime", {
+      body: report,
+      contentType: "application/json",
+    });
+  } else {
+    page = await browser.newPage();
+    await page.goto("/preview-probe-rotation.html");
+    await page.waitForFunction(() => "__rotation" in window, undefined, { timeout: 60_000 });
+    shots = await page.evaluate(
+      () => (window as unknown as { __rotation: Record<string, RotationShot> }).__rotation,
+    );
+  }
   await test.info().attach("rotation-pixels", {
     body: JSON.stringify(shots, null, 2),
     contentType: "application/json",
