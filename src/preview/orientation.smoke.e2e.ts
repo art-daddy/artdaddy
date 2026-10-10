@@ -27,6 +27,7 @@ import {
 import { processImportedMedia } from "./mediaProxy";
 import { type Orientation, UPRIGHT, displaySize, mp4Orientation, textureUv } from "./orientation";
 import { proxyRel } from "./proxyPaths";
+import { resolvePreviewUrl, setAssetAccessGrant, setAssetUrlConverter } from "./resolve";
 import { ensureTimeline } from "../timeline/engine";
 import { whenExportEnds } from "../timeline/exportQueue";
 import { setCanvasTool } from "../timeline/ops";
@@ -35,6 +36,7 @@ import { exportTimelineTool } from "../timeline/render";
 import { decodedSize } from "../test/pictureChecks";
 import {
   ff,
+  flushE2EDoc,
   installE2EDocuments,
   libRef,
   mkCtx,
@@ -199,11 +201,66 @@ describe("the preview proxy is upright and declares no turn", () => {
 
       const p = parseMp4(readFileSync(proxy));
       const track = p.info.videoTracks[0];
+      expect(track.codec.startsWith("avc1.42"), "the proxy is not Baseline H.264").toBe(true);
       expect(mp4Orientation(p.mp4, track)).toEqual(UPRIGHT);
       // Upright in its STORED pixels: decoded without autorotate it is already ffmpeg's picture.
       const [pw, ph] = [track.video.width, track.video.height];
+      expect([pw, ph], "a small proxy must not enlarge its source").toEqual(want.display);
       expect(Math.sign(pw - ph)).toBe(Math.sign(want.display[0] - want.display[1]));
       expect(cornersOf(await frame(proxy, false), pw, ph)).toEqual(want.corners);
     });
   }
 });
+
+it.skipIf(!process.env.ARTDADDY_PIXEL_REPORT)(
+  "prepares normalized fixtures for the native pixel gate",
+  async () => {
+    const projectDir = process.env.ARTDADDY_PIXEL_PROJECT!.replace(/\\/g, "/");
+    await nodeFs.mkdir(projectDir);
+    await openE2EDoc(projectDir);
+    const ctx = mkCtx(projectDir);
+    await ensureTimeline(ctx.store);
+    await flushE2EDoc(projectDir);
+    const timelinePath = path.join(projectDir, "internals", "timeline.json");
+    const timelineBefore = readFileSync(timelinePath);
+    setAssetAccessGrant(async () => {});
+    setAssetUrlConverter(
+      (file) =>
+        new URL(
+          `/${path.relative(process.cwd(), file).replace(/\\/g, "/")}`,
+          process.env.ARTDADDY_PIXEL_BASE_URL!,
+        ).href,
+    );
+    const urls: Record<string, string> = {};
+    for (const file of [
+      ...ROTATION_FIXTURES.map((fixture) => fixture.file),
+      "h264_size_control.mp4",
+      "h264_baseline_control.mp4",
+      "h264_tagged_control.mp4",
+    ]) {
+      const original = path.join(DIR, file);
+      const bytesBefore = readFileSync(original);
+      const ref = await libRef(ctx, original, "video");
+      const libraryBefore = JSON.stringify(await ctx.store.listClips());
+      const abs = (await ctx.store.resolveRef(ref))!;
+      await processImportedMedia(ctx.store, ctx.runner, abs);
+      const url = await resolvePreviewUrl(ctx.store, ref);
+      expect(url, `no normalized preview for ${file}`).toBeTruthy();
+      expect(url, `the original escaped normalization for ${file}`).toContain(".r4.mp4");
+      urls[file] = url!;
+      expect(readFileSync(original).equals(bytesBefore), `original media changed: ${file}`).toBe(
+        true,
+      );
+      expect(
+        JSON.stringify(await ctx.store.listClips()),
+        `library changed during normalization: ${file}`,
+      ).toBe(libraryBefore);
+    }
+    await flushE2EDoc(projectDir);
+    expect(
+      readFileSync(timelinePath).equals(timelineBefore),
+      "normalization changed the timeline",
+    ).toBe(true);
+    await fsp.writeFile(process.env.ARTDADDY_PIXEL_REPORT!, JSON.stringify(urls));
+  },
+);

@@ -49,6 +49,7 @@ jobs:
     timeout-minutes: 10
     env:
       ARTDADDY_SYSTEM_WKWEBVIEW: "1"
+      ARTDADDY_E2E_SKIP_SIDECARS: "whisper-cli,yt-dlp,artdaddy-browser"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -58,6 +59,7 @@ jobs:
       - run: npm ci
       - run: npm i --no-save @playwright/test@1.61.1
       - run: npx playwright install chromium
+      - run: node scripts/fetch-sidecars.mjs --only ffmpeg,ffprobe
       - name: System WKWebView decoded pixels
         run: npx playwright test e2e/ui/rotation.spec.ts --project=system-wkwebview
       - name: Native pixel evidence

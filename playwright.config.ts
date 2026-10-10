@@ -84,6 +84,18 @@ export default defineConfig({
           },
         ]
       : []),
+    ...(process.env.ARTDADDY_PREVIEW_PROXY_QA === "1"
+      ? [
+          {
+            name: "chromium-proxy",
+            testMatch: "rotation.spec.ts",
+            use: {
+              ...devices["Desktop Chrome"],
+              launchOptions: { args: ["--enable-unsafe-swiftshader"] },
+            },
+          },
+        ]
+      : []),
   ],
   webServer: {
     // A dedicated port so the lane never collides with a dev server the user has open.

@@ -25,11 +25,11 @@ export async function transcode(
   const r = await runner
     .run("ffmpeg", ["-y", "-hide_banner", "-loglevel", "error", ...midArgs, out], signal)
     .catch(() => ({ code: -1, stdout: "", stderr: "" }));
-  if (r.code !== 0 || !(await store.exists(out))) {
+  if (r.code !== 0 || !(await store.exists(out)) || signal?.aborted) {
     console.warn(
       `[transcode] ffmpeg failed dest=${dest} code=${r.code} stderr=${stderrExcerpt(r.stderr, 300)}`,
     );
-    if (canRename) await store.remove(out).catch(() => undefined);
+    await store.remove(out).catch(() => undefined);
     return false;
   }
   if (canRename) {

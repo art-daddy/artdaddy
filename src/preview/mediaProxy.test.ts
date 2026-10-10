@@ -4,21 +4,28 @@
 // exposed this was a screen recording named ".mp4" that ffprobe reported as
 // matroska,webm: a codec-only check cleared it, no proxy was built, and the preview
 // silently showed nothing.
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { processImportedMedia } from "./mediaProxy";
+import { highH264DecodesCorrectly } from "./h264Support";
 import { onMediaDerived } from "./mediaDerived";
-import { posterName, proxyKey } from "./proxyPaths";
+import { posterName, proxyKey, proxyRel, webOkName } from "./proxyPaths";
 import { MemFs } from "../test/timelineKit";
 import { ProjectStoreAccess } from "../tools/store";
+
+vi.mock("./h264Support", () => ({ highH264DecodesCorrectly: vi.fn() }));
+beforeEach(() => vi.mocked(highH264DecodesCorrectly).mockResolvedValue(true));
 
 type Probe = { codec: string; format: string };
 
 /** Records the ffmpeg invocations a probe of `p` provokes. */
-async function run(p: Probe, source = "library/a.mp4") {
+async function run(p: Probe, source = "library/a.mp4", legacyWebOk = false) {
   const fs = new MemFs();
   await fs.writeTextFile(`C:/proj/${source}`, "media");
   const store = new ProjectStoreAccess("C:/proj", fs);
+  if (legacyWebOk) {
+    await fs.writeTextFile(store.artifactPath(`proxies/${proxyKey(source)}.webok`), "");
+  }
   const ffmpeg: string[][] = [];
   const runner = {
     run: async (program: string, args: string[]) => {
@@ -55,6 +62,75 @@ describe("preview proxy — what the WebView can actually decode", () => {
     const { ffmpeg } = await run({ codec: "h264", format: "mov,mp4,m4a,3gp,3g2,mj2" });
     expect(proxyRuns(ffmpeg)).toHaveLength(0);
   });
+
+  it("normalizes H.264 on a failing runtime even when an old marker approved it", async () => {
+    vi.mocked(highH264DecodesCorrectly).mockResolvedValue(false);
+    const source = "library/a.mp4";
+    const { store, fs } = await run({ codec: "h264", format: "mov,mp4" }, source, true);
+    expect(await store.exists(`C:/proj/${proxyRel(source)}`)).toBe(true);
+    expect(await store.exists(store.artifactPath(`proxies/${webOkName(source, false)}`))).toBe(
+      false,
+    );
+    expect(await fs.readTextFile(`C:/proj/${source}`)).toBe("media");
+  });
+
+  it("still permits another supported codec on the same runtime", async () => {
+    vi.mocked(highH264DecodesCorrectly).mockResolvedValue(false);
+    const source = "library/a.mp4";
+    const { store } = await run({ codec: "vp9", format: "mov,mp4" }, source);
+    expect(await store.exists(`C:/proj/${proxyRel(source)}`)).toBe(false);
+    expect(await store.exists(store.artifactPath(`proxies/${webOkName(source, false)}`))).toBe(
+      true,
+    );
+  });
+
+  for (const failure of ["rename", "ignored-abort"] as const) {
+    it(`does not publish a proxy or approval after ${failure}`, async () => {
+      vi.mocked(highH264DecodesCorrectly).mockResolvedValue(false);
+      const fs = Object.assign(new MemFs(), {
+        rename: async (from: string, to: string) => {
+          if (failure === "rename") throw new Error("promotion refused");
+          await fs.writeTextFile(to, await fs.readTextFile(from));
+          fs.files.delete(from);
+        },
+        remove: async (file: string) => {
+          fs.files.delete(file);
+        },
+      });
+      const store = new ProjectStoreAccess("C:/proj", fs);
+      const source = "library/refused.mp4";
+      const abs = `C:/proj/${source}`;
+      await fs.writeTextFile(abs, "original media");
+      await fs.writeTextFile(store.artifactPath(`posters/${posterName(source)}`), "poster");
+      const abort = new AbortController();
+      const runner = {
+        run: async (program: string, args: string[]) => {
+          if (program === "ffprobe") {
+            return {
+              code: 0,
+              stdout: JSON.stringify({
+                format: { format_name: "mov,mp4", duration: "5" },
+                streams: [{ codec_type: "video", codec_name: "h264", width: 160, height: 96 }],
+              }),
+              stderr: "",
+            };
+          }
+          await fs.writeTextFile(args[args.length - 1], "rendered proxy");
+          if (failure === "ignored-abort") abort.abort();
+          return { code: 0, stdout: "", stderr: "" };
+        },
+      };
+      expect(await processImportedMedia(store, runner, source, undefined, abort.signal)).toBe(
+        false,
+      );
+      expect(await store.exists(`C:/proj/${proxyRel(source)}`)).toBe(false);
+      expect(await store.exists(store.artifactPath(`proxies/${webOkName(source, false)}`))).toBe(
+        false,
+      );
+      expect([...fs.files.keys()].filter((file) => file.includes(".tmp-"))).toEqual([]);
+      expect(await fs.readTextFile(abs)).toBe("original media");
+    });
+  }
 
   it("still builds one for an undecodable CODEC in a fine container", async () => {
     const { ffmpeg } = await run({ codec: "hevc", format: "mov,mp4,m4a,3gp,3g2,mj2" });
@@ -187,7 +263,7 @@ describe("telling the UI that derived media arrived", () => {
     await fs.writeTextFile(`C:/proj/${source}`, "media");
     const store = new ProjectStoreAccess("C:/proj", fs);
     await fs.writeTextFile(await store.prepareArtifact(`posters/${posterName(source)}`), "p");
-    await fs.writeTextFile(await store.prepareArtifact(`proxies/${proxyKey(source)}.webok`), "");
+    await fs.writeTextFile(await store.prepareArtifact(`proxies/${webOkName(source, true)}`), "");
 
     let fired = 0;
     const off = onMediaDerived(() => (fired += 1));

@@ -21,9 +21,17 @@ export function proxyKey(source: string): string {
   return shortHash(canonicalSource(source));
 }
 
+export function webOkName(source: string, nativeH264: boolean): string {
+  return `${proxyKey(source)}.r${PROXY_REV}.h264-${Number(nativeH264)}.webok`;
+}
+
+export function webOkRel(source: string, nativeH264: boolean): string {
+  return `${INTERNAL_DIR}/cache/proxies/${webOkName(source, nativeH264)}`;
+}
+
 // Bump when the proxy transcode RECIPE changes (codec/scale/GOP/…) so existing
 // proxies are treated as stale and regenerated instead of being reused as-is.
-const PROXY_REV = 3;
+const PROXY_REV = 4;
 
 // Same idea for the first-frame POSTER extraction recipe.
 // r2: pick a representative frame ~10% in instead of frame 0, so a film that opens on black

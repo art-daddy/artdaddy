@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { joinPath, ProjectStoreAccess, type FsLike } from "../tools/store";
+import { highH264DecodesCorrectly } from "./h264Support";
+import { announceMediaDerived } from "./mediaDerived";
 import {
   _resetAssetAccess,
   clearSourceUrlCache,
@@ -11,8 +13,10 @@ import {
   setAssetAccessGrant,
   setAssetUrlConverter,
 } from "./resolve";
-import { posterRel, proxyRel } from "./proxyPaths";
+import { posterRel, proxyKey, proxyRel, webOkRel } from "./proxyPaths";
 import { shortHash } from "../tools/media";
+
+vi.mock("./h264Support", () => ({ highH264DecodesCorrectly: vi.fn() }));
 
 /** The store's own containment and library rules, over an empty disk (these fakes mock resolveRef). */
 const NO_DISK = { exists: async () => false } as unknown as FsLike;
@@ -30,6 +34,7 @@ function storeWith(fn: (ref: string) => Promise<string | null>) {
 
 let grants: Array<[string, boolean]> = [];
 beforeEach(() => {
+  vi.mocked(highH264DecodesCorrectly).mockResolvedValue(true);
   clearSourceUrlCache();
   _resetAssetAccess();
   grants = [];
@@ -123,6 +128,34 @@ describe("resolvePreviewUrl", () => {
     expect(await resolvePreviewUrl(store, "inputs/uploads/a.mp4")).toBe(
       "asset:///proj/inputs/uploads/a.mp4",
     );
+  });
+
+  it("does not present an unverified original or an obsolete proxy on a failing runtime", async () => {
+    vi.mocked(highH264DecodesCorrectly).mockResolvedValue(false);
+    const source = "/proj/library/a.mp4";
+    const files = new Set([
+      `/proj/internals/cache/proxies/${proxyKey(source)}.webok`,
+      `/proj/internals/cache/proxies/${proxyKey(source)}.r3.mp4`,
+      `/proj/${webOkRel(source, true)}`,
+    ]);
+    const { store } = previewStore(
+      (p) => files.has(p),
+      (ref) => ref,
+    );
+    expect(await resolvePreviewUrl(store, source)).toBeNull();
+    files.add(`/proj/${proxyRel(source)}`);
+    announceMediaDerived(source);
+    expect(await resolvePreviewUrl(store, source)).toBe(`asset:///proj/${proxyRel(source)}`);
+  });
+
+  it("permits an original approved for this runtime, not just any cached approval", async () => {
+    vi.mocked(highH264DecodesCorrectly).mockResolvedValue(false);
+    const source = "/proj/library/a.mp4";
+    const { store } = previewStore(
+      (p) => p === `/proj/${webOkRel(source, false)}`,
+      (ref) => ref,
+    );
+    expect(await resolvePreviewUrl(store, source)).toBe(`asset://${source}`);
   });
 
   it("skips the proxy check for non-video and passthrough sources", async () => {

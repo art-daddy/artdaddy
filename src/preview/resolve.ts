@@ -8,7 +8,16 @@ import type { ProjectStoreAccess } from "../tools/store";
 import { INTERNAL_DIR, joinPath } from "../tools/store";
 import { extAlternation, needsPreviewProxy } from "../media/formats";
 import { parsePackIndex } from "../media/stillFrames";
-import { animIndexRel, animPackRel, imageProxyRel, posterRel, proxyRel } from "./proxyPaths";
+import {
+  animIndexRel,
+  animPackRel,
+  imageProxyRel,
+  posterRel,
+  proxyRel,
+  webOkRel,
+} from "./proxyPaths";
+import { highH264DecodesCorrectly } from "./h264Support";
+import { onMediaDerived } from "./mediaDerived";
 import type { StillAnimation } from "./protocol";
 
 export type AssetUrlConverter = (absPath: string) => string | Promise<string>;
@@ -113,6 +122,8 @@ export function clearSourceUrlCache(): void {
   animCache.clear();
 }
 
+onMediaDerived(clearSourceUrlCache);
+
 const PREVIEW_VID_RE = new RegExp(`\\.(${extAlternation("video")})$`, "i");
 
 /** Like {@link resolveSourceUrl}, but prefers a generated H.264 PREVIEW PROXY
@@ -148,6 +159,13 @@ async function resolvePreviewUrlUncached(
       if (await store.exists(proxyAbs)) {
         console.debug(`[resolve] preview via proxy ${proxyAbs}`);
         return resolveSourceUrl(store, proxyAbs);
+      }
+      const nativeH264 = await highH264DecodesCorrectly();
+      if (
+        !nativeH264 &&
+        !(await store.exists(joinPath(store.projectDir, webOkRel(abs, nativeH264))))
+      ) {
+        return null;
       }
       console.debug(`[resolve] no proxy (looked ${proxyAbs}); using original ${s}`);
     } else if (needsPreviewProxy(abs)) {

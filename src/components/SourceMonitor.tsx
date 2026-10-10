@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { ignorePlayRejection } from "../media/playRejection";
 import { resolvePreviewUrl } from "../preview/resolve";
+import { onMediaDerived } from "../preview/mediaDerived";
 import { kindOf } from "../media/formats";
 import { useEditor } from "../store/editor";
 import { cn } from "./ui";
@@ -108,9 +109,15 @@ export default function SourceMonitor({ mediaRef }: { mediaRef: string }) {
   const ref = mediaRef;
   const store = useEditor((s) => s.store);
   const [url, setUrl] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
   // The ref may be a bare library id (external assets are keyed by id), which has no
   // extension to classify. Resolve it to a real path and classify THAT.
   const [resolved, setResolved] = useState<string>("");
+
+  useEffect(() => {
+    if (url) return;
+    return onMediaDerived(() => setAttempt((value) => value + 1));
+  }, [url]);
 
   useEffect(() => {
     if (!store) {
@@ -129,7 +136,7 @@ export default function SourceMonitor({ mediaRef }: { mediaRef: string }) {
     return () => {
       cancelled = true;
     };
-  }, [ref, store]);
+  }, [ref, store, attempt]);
 
   const name = ref.split("/").pop() ?? ref;
   const kind = kindOf(resolved || ref) ?? "other";

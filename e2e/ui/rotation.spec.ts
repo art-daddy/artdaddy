@@ -11,7 +11,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { type Page, expect, test } from "@playwright/test";
+import { type Page, type TestInfo, expect, test } from "@playwright/test";
 
 import {
   PALETTE,
@@ -27,37 +27,73 @@ const EXPECTED = JSON.parse(
 let page: Page;
 let shots: Record<string, RotationShot>;
 
+async function normalizedSources(info: TestInfo): Promise<Record<string, string>> {
+  const reportPath = info.outputPath("normalized-sources.json");
+  await promisify(execFile)(
+    process.execPath,
+    [
+      path.resolve("node_modules/vitest/vitest.mjs"),
+      "run",
+      "--config",
+      "vitest.smoke.config.ts",
+      "src/preview/orientation.smoke.e2e.ts",
+      "-t",
+      "prepares normalized fixtures for the native pixel gate",
+      "--reporter=dot",
+    ],
+    {
+      timeout: 120_000,
+      maxBuffer: 2 * 1024 * 1024,
+      env: {
+        ...process.env,
+        ARTDADDY_PIXEL_PROJECT: info.outputPath("preview-project"),
+        ARTDADDY_PIXEL_REPORT: reportPath,
+        ARTDADDY_PIXEL_BASE_URL: info.project.use.baseURL!,
+      },
+    },
+  );
+  return JSON.parse(readFileSync(reportPath, "utf8")) as Record<string, string>;
+}
+
 test.beforeAll(async ({ browser }, info) => {
-  if (info.project.name === "system-wkwebview") {
-    info.setTimeout(90_000);
-    const reportPath = info.outputPath("system-wkwebview-rotation.json");
-    await promisify(execFile)(
-      "swift",
-      [
-        path.resolve("scripts/qa/systemWebkitPixels.swift"),
-        new URL("/preview-probe-rotation.html", info.project.use.baseURL!).href,
-        reportPath,
-      ],
-      { timeout: 80_000 },
-    );
-    const report = readFileSync(reportPath, "utf8");
-    const native = JSON.parse(report) as {
-      engine: string;
-      shots: Record<string, RotationShot>;
-    };
-    expect(native.engine).toBe("system WKWebView");
-    shots = native.shots;
-    await info.attach("system-wkwebview-runtime", {
-      body: report,
-      contentType: "application/json",
-    });
-  } else {
-    page = await browser.newPage();
-    await page.goto("/preview-probe-rotation.html");
+  info.setTimeout(180_000);
+  const nativeEngine = info.project.name === "system-wkwebview";
+  if (!nativeEngine) page = await browser.newPage();
+  const load = async (url: string, phase: string): Promise<Record<string, RotationShot>> => {
+    if (nativeEngine) {
+      const reportPath = info.outputPath(`system-wkwebview-${phase}.json`);
+      await promisify(execFile)(
+        "swift",
+        [path.resolve("scripts/qa/systemWebkitPixels.swift"), url, reportPath],
+        { timeout: 80_000 },
+      );
+      const report = readFileSync(reportPath, "utf8");
+      const native = JSON.parse(report) as { engine: string; shots: Record<string, RotationShot> };
+      expect(native.engine).toBe("system WKWebView");
+      await info.attach(`system-wkwebview-${phase}`, {
+        body: report,
+        contentType: "application/json",
+      });
+      return native.shots;
+    }
+    await page.goto(url);
     await page.waitForFunction(() => "__rotation" in window, undefined, { timeout: 60_000 });
-    shots = await page.evaluate(
+    return page.evaluate(
       () => (window as unknown as { __rotation: Record<string, RotationShot> }).__rotation,
     );
+  };
+  const url = new URL("/preview-probe-rotation.html", info.project.use.baseURL!);
+  shots = await load(url.href, "original");
+  expect((shots as { error?: string }).error, "the original probe failed to run").toBeUndefined();
+  expect(typeof shots["native-h264"]?.decoded, "no runtime calibration evidence").toBe("boolean");
+  if (!shots["native-h264"].decoded || info.project.name === "chromium-proxy") {
+    await info.attach("original-native-pixels", {
+      body: JSON.stringify(shots, null, 2),
+      contentType: "application/json",
+    });
+    url.searchParams.set("sources", JSON.stringify(await normalizedSources(info)));
+    shots = await load(url.href, "normalized");
+    console.log("rotation-normalized-runtime", JSON.stringify(shots["h264_rot0.mp4"]));
   }
   await test.info().attach("rotation-pixels", {
     body: JSON.stringify(shots, null, 2),

@@ -7,6 +7,7 @@
 import { PreviewRenderer } from "./renderer";
 import { type AssetDims, buildScene } from "./scene";
 import { VideoSource } from "./videoSource";
+import { highH264DecodesCorrectly } from "./h264Support";
 import { CORNERS, ROTATION_FIXTURES, classify } from "./__rotationFixtures";
 import type { Timeline } from "../timeline/model";
 
@@ -27,6 +28,11 @@ export interface RotationShot {
 }
 
 const canvas = document.getElementById("probe") as HTMLCanvasElement;
+const sources = JSON.parse(new URLSearchParams(location.search).get("sources") ?? "{}") as Record<
+  string,
+  string
+>;
+const sourceUrl = (file: string): string => sources[file] ?? `/e2e/ui/fixtures/rotation/${file}`;
 
 function timeline(source: string, clip: Record<string, unknown>): Timeline {
   return {
@@ -60,7 +66,7 @@ async function shoot(
   clip: Record<string, unknown>,
   points: Record<string, [number, number]> = {},
 ): Promise<RotationShot> {
-  const vs = new VideoSource(`/e2e/ui/fixtures/rotation/${file}`);
+  const vs = new VideoSource(sourceUrl(file));
   try {
     await vs.whenReady();
     const frame = await vs.frameAt(0);
@@ -154,6 +160,12 @@ async function shoot(
 void (async () => {
   const out: Record<string, RotationShot> = {};
   try {
+    out["native-h264"] = {
+      decoded: await highH264DecodesCorrectly(),
+      box: null,
+      corners: [],
+      at: {},
+    };
     const renderer = new PreviewRenderer(canvas);
     for (const fx of ROTATION_FIXTURES) out[fx.file] = await shoot(renderer, fx.file, "plain", {});
     for (const file of ["h264_size_control.mp4", "h264_baseline_control.mp4"]) {
@@ -203,7 +215,7 @@ void (async () => {
     const video = document.createElement("video");
     video.muted = true;
     video.playsInline = true;
-    video.src = "/e2e/ui/fixtures/rotation/h264_rot0.mp4";
+    video.src = sourceUrl("h264_rot0.mp4");
     await new Promise<void>((resolve, reject) => {
       video.onloadeddata = () => resolve();
       video.onerror = () => reject(new Error("HTML video control did not decode"));

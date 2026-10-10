@@ -1,14 +1,15 @@
 // Import-time media processing (desktop): generate a poster frame (timeline
-// thumbnail) and, when a clip's codec can't be decoded by the in-app WebCodecs
-// preview (HEVC, ProRes, …), an H.264 PREVIEW PROXY. The timeline keeps the
-// ORIGINAL as the clip source — the server renders from it; only the preview
+// thumbnail) and, when a clip can't be decoded faithfully by the in-app WebCodecs
+// preview, a Baseline H.264 PREVIEW PROXY. The timeline keeps the
+// ORIGINAL as the clip source — the client renders from it; only the preview
 // swaps in the proxy (see resolve.resolvePreviewUrl). Idempotent: existing
 // outputs are skipped. Runs ffmpeg via the Tauri sidecar, so it's excluded from
-// unit coverage. Best-effort throughout — a failure just leaves the original.
+// unit coverage. Unverified originals are withheld on failing decoder runtimes.
 import type { CommandRunner } from "../tools/command";
 import { probePath } from "../tools/media";
 import type { ProjectStoreAccess } from "../tools/store";
-import { imageProxyName, posterName, proxyKey, proxyName } from "./proxyPaths";
+import { imageProxyName, posterName, proxyKey, proxyName, webOkName } from "./proxyPaths";
+import { highH264DecodesCorrectly } from "./h264Support";
 import { announceMediaDerived } from "./mediaDerived";
 import { makeStillFramePack } from "./stillFramePack";
 
@@ -91,13 +92,19 @@ async function deriveArtifacts(
   // A `.webok` marker records "examined, web-decodable, no proxy needed" so a
   // web-codec clip isn't re-probed on every load (matters for big timelines).
   const proxy = await store.prepareArtifact(`proxies/${proxyName(source)}`);
-  const webOk = await store.prepareArtifact(`proxies/${key}.webok`);
+  const nativeH264 = await highH264DecodesCorrectly();
+  if (signal?.aborted) return changed;
+  const webOk = await store.prepareArtifact(`proxies/${webOkName(source, nativeH264)}`);
   if (!(await store.exists(proxy)) && !(await store.exists(webOk))) {
     const probe = await probePath(runner, abs);
     const video = (probe.video ?? null) as Record<string, unknown> | null;
     const codec = String(video?.codec ?? "").toLowerCase();
     const container = String(probe.format ?? "");
-    const playable = WEB_VIDEO_OK.has(codec) && WEB_CONTAINER_OK.test(container);
+    if (signal?.aborted) return changed;
+    const playable =
+      WEB_VIDEO_OK.has(codec) &&
+      WEB_CONTAINER_OK.test(container) &&
+      (codec !== "h264" || nativeH264);
     console.debug(
       `[mediaProxy] proxy check key=${key} codec=${codec || "?"} container=${container || "?"} needsProxy=${!!codec && !playable}`,
     );
@@ -111,9 +118,11 @@ async function deriveArtifacts(
           "-i",
           abs,
           "-vf",
-          "scale=-2:720",
+          "scale=-2:'max(2,trunc(min(720,ih)/2)*2)'",
           "-c:v",
           "libx264",
+          "-profile:v",
+          "baseline",
           "-preset",
           "veryfast",
           "-crf",
