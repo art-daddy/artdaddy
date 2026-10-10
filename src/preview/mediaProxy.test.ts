@@ -16,7 +16,7 @@ import { ProjectStoreAccess } from "../tools/store";
 vi.mock("./h264Support", () => ({ highH264DecodesCorrectly: vi.fn() }));
 beforeEach(() => vi.mocked(highH264DecodesCorrectly).mockResolvedValue(true));
 
-type Probe = { codec: string; format: string };
+type Probe = { codec: string; format: string; audioOnly?: boolean };
 
 /** Records the ffmpeg invocations a probe of `p` provokes. */
 async function run(p: Probe, source = "library/a.mp4", legacyWebOk = false) {
@@ -34,7 +34,11 @@ async function run(p: Probe, source = "library/a.mp4", legacyWebOk = false) {
           code: 0,
           stdout: JSON.stringify({
             format: { format_name: p.format, duration: "5" },
-            streams: [{ codec_type: "video", codec_name: p.codec, width: 1920, height: 1080 }],
+            streams: [
+              p.audioOnly
+                ? { codec_type: "audio", codec_name: p.codec, sample_rate: "48000", channels: 1 }
+                : { codec_type: "video", codec_name: p.codec, width: 1920, height: 1080 },
+            ],
           }),
           stderr: "",
         };
@@ -82,6 +86,17 @@ describe("preview proxy — what the WebView can actually decode", () => {
     expect(await store.exists(store.artifactPath(`proxies/${webOkName(source, false)}`))).toBe(
       true,
     );
+  });
+
+  it("does not disable an audio-only MP4 when High-profile video is unavailable", async () => {
+    vi.mocked(highH264DecodesCorrectly).mockResolvedValue(false);
+    const source = "library/audio.mp4";
+    const { store, fs } = await run({ codec: "aac", format: "mov,mp4", audioOnly: true }, source);
+    expect(await store.exists(`C:/proj/${proxyRel(source)}`)).toBe(false);
+    expect(await store.exists(store.artifactPath(`proxies/${webOkName(source, false)}`))).toBe(
+      true,
+    );
+    expect(await fs.readTextFile(`C:/proj/${source}`)).toBe("media");
   });
 
   for (const failure of ["rename", "ignored-abort"] as const) {

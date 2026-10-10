@@ -141,7 +141,7 @@ async function deriveArtifacts(
         signal,
       );
       if (made) changed = true;
-    } else if (codec) {
+    } else if (codec || (!video && probe.audio && WEB_CONTAINER_OK.test(container))) {
       try {
         await store.writeText(webOk, "");
       } catch {

@@ -30,6 +30,7 @@ import { joinPath } from "../tools/store";
 import { saveRecording } from "../media/recordSave";
 import { processImportedMedia } from "../preview/mediaProxy";
 import { proxyName } from "../preview/proxyPaths";
+import { resolvePreviewUrl, setAssetAccessGrant, setAssetUrlConverter } from "../preview/resolve";
 import { ensureTimeline } from "./engine";
 import { addTrackTool, setCanvasTool } from "./ops";
 import { addClipsTool } from "./placement";
@@ -201,6 +202,33 @@ describe("AAC at 48 kHz: every AAC encode finishes on 16 kHz audio that starts s
     expect(await nodeFs.exists(proxy)).toBe(true);
     expect(await audioStream(proxy)).toEqual({ codec: "aac", rate: 48000 });
   }, 120_000);
+
+  it("an audio-only MP4 remains audible and resolves without a video decoder", async () => {
+    const { dir, ctx } = await project("audio_only_preview");
+    const src = joinPath(dir, "audio.mp4");
+    await ff([
+      "-y",
+      "-f",
+      "lavfi",
+      "-i",
+      "sine=frequency=440:sample_rate=48000:duration=1",
+      "-c:a",
+      "aac",
+      "-vn",
+      src,
+    ]);
+    const before = await fsp.readFile(src);
+    const ref = await libRef(ctx, src, "audio");
+    const libraryBefore = JSON.stringify(await ctx.store.listClips());
+    setAssetAccessGrant(async () => {});
+    setAssetUrlConverter((file) => `asset://${file}`);
+    await processImportedMedia(ctx.store, ctx.runner, src);
+    expect(await resolvePreviewUrl(ctx.store, ref)).toBe(`asset://${src}`);
+    expect(await audioStream(src)).toEqual({ codec: "aac", rate: 48000 });
+    expect(await meanVolumeDb(src)).toBeGreaterThan(-40);
+    expect((await fsp.readFile(src)).equals(before)).toBe(true);
+    expect(JSON.stringify(await ctx.store.listClips())).toBe(libraryBefore);
+  });
 
   it("RECORDING saved from a non-mp4 container finishes at 48 kHz", async () => {
     const { dir, ctx } = await project("record");
