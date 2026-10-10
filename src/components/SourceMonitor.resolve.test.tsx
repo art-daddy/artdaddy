@@ -67,4 +67,28 @@ describe("Source Monitor runtime normalization", () => {
     expect(await fs.readTextFile(LIBRARY)).toBe(libraryBefore);
     expect(await fs.readTextFile(joinPath(DIR, SOURCE))).toBe("original media");
   });
+
+  it("re-resolves an already-open source when its logical ref is relinked", async () => {
+    const fs = await project();
+    await fs.writeTextFile(PROXY, "normalized media");
+    const { container } = render(<SourceMonitor mediaRef="media_source" />);
+    await waitFor(() =>
+      expect(container.querySelector("video")?.getAttribute("src")).toBe(`asset://${PROXY}`),
+    );
+    const nextSource = "library/relinked.mp4";
+    const nextProxy = joinPath(DIR, proxyRel(nextSource));
+    await fs.writeTextFile(joinPath(DIR, nextSource), "relinked media");
+    await fs.writeTextFile(nextProxy, "relinked proxy");
+    await fs.writeTextFile(
+      LIBRARY,
+      JSON.stringify({ clips: [{ id: "media_source", kind: "video", path: nextSource }] }),
+    );
+    act(() => clearSourceUrlCache());
+    await waitFor(() =>
+      expect(container.querySelector("video")?.getAttribute("src")).toBe(`asset://${nextProxy}`),
+    );
+    const player = container.querySelector("video");
+    act(() => clearSourceUrlCache());
+    await waitFor(() => expect(container.querySelector("video")).toBe(player));
+  });
 });

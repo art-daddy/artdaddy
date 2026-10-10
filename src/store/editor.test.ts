@@ -6,9 +6,12 @@ import { relinkMedia } from "../lib/mediaLink";
 import {
   clearSourceUrlCache,
   resolvePreviewUrl,
+  resolveSourceUrl,
   setAssetAccessGrant,
   setAssetUrlConverter,
 } from "../preview/resolve";
+import { announceMediaDerived } from "../preview/mediaDerived";
+import { proxyRel } from "../preview/proxyPaths";
 import { applyOp } from "../timeline/engine";
 import { findClip } from "../timeline/helpers";
 import { emptyTimeline, type Timeline } from "../timeline/model";
@@ -984,7 +987,7 @@ describe("offline media", () => {
 
   // UJ-014: everything that looked the file up by its ref hears the relink: the offline list, and
   // the preview, which memoised the ref's URL and only resolves again for a new timeline object.
-  it("after a relink, lists nothing offline and the preview resolves the ref to the new file", async () => {
+  it("after a relink, lists nothing offline and the preview uses the new file's proxy", async () => {
     const { store, fs } = seedStore(P1, withClip());
     fs.files.set(
       `${P1}/internals/library.json`,
@@ -1013,7 +1016,12 @@ describe("offline media", () => {
     await waitFor(() => expect(useEditor.getState().mediaOffline).toEqual([]));
     await waitFor(() => expect(useEditor.getState().timeline).not.toBe(before));
     expect(useEditor.getState().timeline).toEqual(before);
-    expect(await resolvePreviewUrl(store, "media_1")).toBe("asset://E:/moved/hero.mp4");
+    expect(await resolveSourceUrl(store, "media_1")).toBe("asset://E:/moved/hero.mp4");
+    expect(await resolvePreviewUrl(store, "media_1")).toBeNull();
+    const proxy = `${P1}/${proxyRel("E:/moved/hero.mp4")}`;
+    fs.files.set(proxy, "normalized bytes");
+    announceMediaDerived("E:/moved/hero.mp4");
+    expect(await resolvePreviewUrl(store, "media_1")).toBe(`asset://${proxy}`);
   });
 
   // The notice on open said the file was gone; once it is back the notice must not keep saying so.

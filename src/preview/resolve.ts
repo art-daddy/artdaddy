@@ -89,6 +89,14 @@ const previewCache = new Map<string, string | null>();
 // Same reason: asked for every source on every timeline change. Cleared with the others when a
 // stand-in lands, which is when a still's frames appear.
 const animCache = new Map<string, StillAnimation | null>();
+const sourceUrlListeners = new Set<() => void>();
+
+export function onSourceUrlsChanged(listener: () => void): () => void {
+  sourceUrlListeners.add(listener);
+  return () => {
+    sourceUrlListeners.delete(listener);
+  };
+}
 
 /** Resolve a clip source to a fetchable URL, or null if nothing resolves. */
 export async function resolveSourceUrl(
@@ -120,6 +128,7 @@ export function clearSourceUrlCache(): void {
   cache.clear();
   previewCache.clear();
   animCache.clear();
+  for (const listener of [...sourceUrlListeners]) listener();
 }
 
 onMediaDerived(clearSourceUrlCache);

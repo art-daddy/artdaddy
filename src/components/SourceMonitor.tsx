@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { ignorePlayRejection } from "../media/playRejection";
-import { resolvePreviewUrl } from "../preview/resolve";
-import { onMediaDerived } from "../preview/mediaDerived";
+import { onSourceUrlsChanged, resolvePreviewUrl } from "../preview/resolve";
 import { kindOf } from "../media/formats";
 import { useEditor } from "../store/editor";
 import { cn } from "./ui";
@@ -115,9 +114,13 @@ export default function SourceMonitor({ mediaRef }: { mediaRef: string }) {
   const [resolved, setResolved] = useState<string>("");
 
   useEffect(() => {
-    if (url) return;
-    return onMediaDerived(() => setAttempt((value) => value + 1));
-  }, [url]);
+    return onSourceUrlsChanged(() => setAttempt((value) => value + 1));
+  }, []);
+
+  useEffect(() => {
+    setUrl(null);
+    setResolved("");
+  }, [ref, store]);
 
   useEffect(() => {
     if (!store) {
@@ -126,7 +129,6 @@ export default function SourceMonitor({ mediaRef }: { mediaRef: string }) {
       return;
     }
     let cancelled = false;
-    setUrl(null);
     void resolvePreviewUrl(store, ref).then((u) => {
       if (!cancelled) setUrl(u ?? "");
     });
