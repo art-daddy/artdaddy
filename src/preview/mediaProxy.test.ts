@@ -270,6 +270,38 @@ describe("telling the UI that derived media arrived", () => {
     expect(fired).toBe(1);
   });
 
+  it("announces when eligibility arrives without a video proxy", async () => {
+    vi.mocked(highH264DecodesCorrectly).mockResolvedValue(false);
+    let fired = 0;
+    const off = onMediaDerived(() => (fired += 1));
+    try {
+      const source = "library/audio.mp4";
+      const fs = new MemFs();
+      await fs.writeTextFile(`C:/proj/${source}`, "audio");
+      const store = new ProjectStoreAccess("C:/proj", fs);
+      await fs.writeTextFile(store.artifactPath(`posters/${posterName(source)}`), "poster");
+      const runner = {
+        run: async () => ({
+          code: 0,
+          stdout: JSON.stringify({
+            format: { format_name: "mov,mp4" },
+            streams: [
+              { codec_type: "audio", codec_name: "aac", sample_rate: "48000", channels: 1 },
+            ],
+          }),
+          stderr: "",
+        }),
+      };
+      await processImportedMedia(store, runner, source);
+      expect(await store.exists(store.artifactPath(`proxies/${webOkName(source, false)}`))).toBe(
+        true,
+      );
+    } finally {
+      off();
+    }
+    expect(fired).toBe(1);
+  });
+
   // The other direction, and the one that keeps this honest: announcing unconditionally would
   // make every already-resolved thumbnail re-look on every pass over an untouched library.
   it("stays quiet when everything was already derived", async () => {

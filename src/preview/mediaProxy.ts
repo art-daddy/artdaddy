@@ -144,6 +144,7 @@ async function deriveArtifacts(
     } else if (codec || (!video && probe.audio && WEB_CONTAINER_OK.test(container))) {
       try {
         await store.writeText(webOk, "");
+        changed = true;
       } catch {
         /* marker is best-effort */
       }
