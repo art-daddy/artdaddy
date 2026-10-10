@@ -18,6 +18,7 @@ import { emptyTimeline, type Timeline } from "../timeline/model";
 import { addClipsTool, clearHasAudioCache } from "../timeline/placement";
 import {
   audioRunner,
+  flushTestDocuments,
   makeRunner,
   registerTestDocument,
   resetTestDocuments,
@@ -145,6 +146,42 @@ describe("editor store", () => {
     await useEditor.getState().load("p1");
     expect(useEditor.getState().timeline?.tracks.map((t) => t.id)).toEqual(["vX"]);
   });
+
+  it.each(["width", "height"] as const)(
+    "saves both canvas dimensions when %s is submitted first and undoes each edit once",
+    async (first) => {
+      const timeline = emptyTimeline(1920, 1080, 30);
+      const { store, fs } = seedStore(P1, timeline);
+      setProjectStoreFactory(() => store);
+      await useEditor.getState().load("p1");
+      await flushTestDocuments();
+      const path = `${P1}/internals/timeline.json`;
+      const before = await fs.readTextFile(path);
+      const width = { width: 3840 };
+      const height = { height: 2160 };
+      await Promise.all([
+        useEditor.getState().setCanvas(first === "width" ? width : height),
+        useEditor.getState().setCanvas(first === "width" ? height : width),
+      ]);
+      await flushTestDocuments();
+      expect(JSON.parse(await fs.readTextFile(path)).canvas).toEqual({
+        width: 3840,
+        height: 2160,
+        fps: 30,
+      });
+      expect(useEditor.getState().timeline?.canvas).toEqual({ width: 3840, height: 2160, fps: 30 });
+      await useEditor.getState().undo();
+      await flushTestDocuments();
+      expect(JSON.parse(await fs.readTextFile(path)).canvas).toEqual({
+        width: first === "width" ? 3840 : 1920,
+        height: first === "height" ? 2160 : 1080,
+        fps: 30,
+      });
+      await useEditor.getState().undo();
+      await flushTestDocuments();
+      expect(await fs.readTextFile(path)).toBe(before);
+    },
+  );
 
   it("live-updates the timeline when any write emits on the bus (AI or manual)", async () => {
     const { store } = seedStore();

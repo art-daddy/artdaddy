@@ -162,7 +162,10 @@ export async function getTimelineTool(args: Args, ctx: ClientToolContext | null)
  *  `set_project_settings` (tools/project.ts) is the single canvas tool the model
  *  sees and wraps this, then syncs project.json. Also called directly by the
  *  manual editor (store/editorCommands.ts). */
-export function setCanvasTool(args: Args, ctx: ClientToolContext | null): Promise<Result> {
+export function setCanvasTool(
+  args: Args | ((canvas: Readonly<Timeline["canvas"]>) => Args),
+  ctx: ClientToolContext | null,
+): Promise<Result> {
   if (!ctx) return Promise.resolve(NOT_READY);
   return ctxApplyOp(ctx, "set_project_settings", (timeline) => {
     const canvas = timeline.canvas;
@@ -171,7 +174,7 @@ export function setCanvasTool(args: Args, ctx: ClientToolContext | null): Promis
       height: Math.trunc(Number(canvas.height) || 0),
       fps: Math.trunc(Number(canvas.fps) || 30),
     };
-    const next = resolveCanvas(args, before);
+    const next = resolveCanvas(typeof args === "function" ? args(before) : args, before);
     if ("error" in next) throw new OpError(next.error);
     if (next.fps !== before.fps) {
       // fps is project-wide: every frame coordinate is measured at canvas.fps, so
