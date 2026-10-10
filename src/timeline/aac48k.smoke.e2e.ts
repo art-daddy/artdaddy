@@ -242,6 +242,82 @@ describe("AAC at 48 kHz: every AAC encode finishes on 16 kHz audio that starts s
     expect(await audioStream(out!)).toEqual({ codec: "aac", rate: 48000 });
   }, 120_000);
 
+  it("a fragmented MP4 recording survives save and produces a moving, audible preview", async () => {
+    const { dir, ctx } = await project("record_mp4_preview");
+    const src = joinPath(dir, "captured.mp4");
+    await ff([
+      "-y",
+      "-f",
+      "lavfi",
+      "-i",
+      "testsrc2=size=640x480:rate=30:duration=2",
+      "-f",
+      "lavfi",
+      "-i",
+      "sine=frequency=880:sample_rate=48000:duration=2",
+      "-c:v",
+      "libx264",
+      "-profile:v",
+      "high",
+      "-pix_fmt",
+      "yuv420p",
+      "-g",
+      "15",
+      "-c:a",
+      "aac",
+      "-ac",
+      "1",
+      "-movflags",
+      "frag_keyframe+empty_moov+default_base_moof",
+      "-shortest",
+      src,
+    ]);
+    const bytes = await fsp.readFile(src);
+    const saved = await bounded("saving fragmented MP4", saveRecording(ctx, bytes, "video/mp4"));
+    expect(saved.transcoded).toBe(false);
+    const original = (await ctx.store.resolveRef(saved.media_ref))!;
+    expect((await fsp.readFile(original)).equals(bytes)).toBe(true);
+    const libraryBefore = JSON.stringify(await ctx.store.listClips());
+    setAssetAccessGrant(async () => {});
+    setAssetUrlConverter((file) => `asset://${file}`);
+    await bounded("normalizing saved MP4", processImportedMedia(ctx.store, ctx.runner, original));
+    const previewUrl = await resolvePreviewUrl(ctx.store, saved.media_ref);
+    expect(previewUrl).toBeTruthy();
+    const preview = previewUrl!.slice("asset://".length);
+    const frame = (seconds: number): Buffer => {
+      const result = spawnSync(
+        shippedSidecar("ffmpeg") ?? "ffmpeg",
+        [
+          "-v",
+          "error",
+          "-ss",
+          String(seconds),
+          "-i",
+          preview,
+          "-vf",
+          "scale=160:120",
+          "-frames:v",
+          "1",
+          "-pix_fmt",
+          "rgb24",
+          "-f",
+          "rawvideo",
+          "pipe:1",
+        ],
+        { timeout: 20_000, maxBuffer: 1024 * 1024 },
+      );
+      expect(result.status, String(result.stderr)).toBe(0);
+      expect(result.stdout.length).toBe(160 * 120 * 3);
+      expect(Math.max(...result.stdout) - Math.min(...result.stdout)).toBeGreaterThan(100);
+      return result.stdout;
+    };
+    expect(frame(0.25).equals(frame(1.25)), "the preview was frozen").toBe(false);
+    expect(await audioStream(preview)).toEqual({ codec: "aac", rate: 48000 });
+    expect(await meanVolumeDb(preview)).toBeGreaterThan(-40);
+    expect((await fsp.readFile(original)).equals(bytes)).toBe(true);
+    expect(JSON.stringify(await ctx.store.listClips())).toBe(libraryBefore);
+  }, 120_000);
+
   it("a 48 kHz source is not resampled and a non-AAC encode keeps its rate (control)", async () => {
     const { dir } = await project("control");
     const wav = joinPath(dir, "speech16k.wav");

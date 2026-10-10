@@ -90,6 +90,7 @@ const previewCache = new Map<string, string | null>();
 // stand-in lands, which is when a still's frames appear.
 const animCache = new Map<string, StillAnimation | null>();
 const sourceUrlListeners = new Set<() => void>();
+let resolutionRevision = 0;
 
 export function onSourceUrlsChanged(listener: () => void): () => void {
   sourceUrlListeners.add(listener);
@@ -109,10 +110,13 @@ export async function resolveSourceUrl(
   const key = `${store.projectDir}\u0000${s}`;
   const cached = cache.get(key);
   if (cached !== undefined) return cached;
+  const revision = resolutionRevision;
   const abs = await store.resolveRef(s);
+  if (revision !== resolutionRevision) return resolveSourceUrl(store, s);
   if (!abs) return null;
   await openIfHeld(store, abs);
   const url = await convertAsset(abs);
+  if (revision !== resolutionRevision) return resolveSourceUrl(store, s);
   cache.set(key, url);
   return url;
 }
@@ -125,6 +129,7 @@ export async function projectThumbnailUrl(projectDir: string): Promise<string> {
 
 /** Drop cached resolutions (e.g. after media is re-imported). */
 export function clearSourceUrlCache(): void {
+  resolutionRevision++;
   cache.clear();
   previewCache.clear();
   animCache.clear();
@@ -147,7 +152,9 @@ export async function resolvePreviewUrl(
   const key = `${store.projectDir}\u0000${s}`;
   const memo = previewCache.get(key);
   if (memo !== undefined) return memo;
+  const revision = resolutionRevision;
   const url = await resolvePreviewUrlUncached(store, s);
+  if (revision !== resolutionRevision) return resolvePreviewUrl(store, s);
   previewCache.set(key, url);
   return url;
 }
@@ -203,9 +210,11 @@ export async function resolvePosterUrl(
   const key = `${store.projectDir}\u0000poster\u0000${s}`;
   const memo = previewCache.get(key);
   if (memo !== undefined) return memo;
+  const revision = resolutionRevision;
   const abs = (await store.resolveRef(s)) ?? s;
   const posterAbs = joinPath(store.projectDir, posterRel(abs));
   const url = (await store.exists(posterAbs)) ? await resolveSourceUrl(store, posterAbs) : null;
+  if (revision !== resolutionRevision) return resolvePosterUrl(store, s);
   previewCache.set(key, url);
   return url;
 }
@@ -220,6 +229,7 @@ export async function resolveStillAnimation(
   if (!s || PASSTHROUGH.test(s)) return null;
   const key = `${store.projectDir}\u0000anim\u0000${s}`;
   if (animCache.has(key)) return animCache.get(key)!;
+  const revision = resolutionRevision;
   const abs = (await store.resolveRef(s)) ?? s;
   const indexAbs = joinPath(store.projectDir, animIndexRel(abs));
   let found: StillAnimation | null = null;
@@ -230,6 +240,7 @@ export async function resolveStillAnimation(
       : null;
     if (index && url) found = { url, timing: index.timing };
   }
+  if (revision !== resolutionRevision) return resolveStillAnimation(store, s);
   animCache.set(key, found);
   return found;
 }

@@ -1108,17 +1108,37 @@ mod tests {
         .collect()
     }
 
-    fn options() -> MatchOptions {
-      // Mirrors tauri::scope::fs (tauri-2.11.5 src/scope/fs.rs).
-      MatchOptions { case_sensitive: false, require_literal_separator: true, require_literal_leading_dot: false }
+    fn options(unix: bool) -> MatchOptions {
+      let config: serde_json::Value =
+        serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri config must parse");
+      let leading_dot = config["plugins"]["fs"]["requireLiteralLeadingDot"].as_bool().unwrap_or(unix);
+      MatchOptions { case_sensitive: false, require_literal_separator: true, require_literal_leading_dot: leading_dot }
     }
 
     fn allowed(path: &str) -> bool {
-      let opts = options();
+      allowed_on(path, cfg!(unix))
+    }
+
+    fn allowed_on(path: &str, unix: bool) -> bool {
+      let opts = options(unix);
       allow_patterns()
         .iter()
         .filter_map(|p| Pattern::new(p).ok())
         .any(|p| p.matches_with(path, opts))
+    }
+
+    #[test]
+    fn hidden_export_staging_is_allowed_on_unix_and_windows() {
+      for unix in [true, false] {
+        for path in [
+          "/Users/editor/Downloads/.test_28764f.mp4.w9t626.partial",
+          "/Volumes/Export/Final/.film.mp4.abc123.partial",
+          "/home/editor/Downloads/.film.mp4.abc123.partial",
+          "D:/Exports/.film.mp4.abc123.partial",
+        ] {
+          assert!(allowed_on(path, unix), "staged export refused on unix={unix}: {path}");
+        }
+      }
     }
 
     #[test]

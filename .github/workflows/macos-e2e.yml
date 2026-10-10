@@ -26,6 +26,10 @@ on:
         description: "Run only the system WKWebView pixel discriminator; no paid calls"
         type: boolean
         default: false
+      native_hotfix_only:
+        description: "Run only native recording and hidden-stage export QA; no paid calls"
+        type: boolean
+        default: false
       run_agent_lane:
         description: "Run the agent lane (spends model credits; needs the ARTDADDY_EVAL_TOKEN secret)"
         type: boolean
@@ -44,7 +48,37 @@ on:
         default: "v1.9.2"
 
 jobs:
+  native-hotfix:
+    if: ${{ inputs.native_hotfix_only }}
+    runs-on: ${{ inputs.runner || 'macos-14' }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+      - run: node scripts/fetch-sidecars.mjs --only ffmpeg,ffprobe
+      - run: node scripts/qa/macHotfix.mjs check
+      - name: Reproduce Unix refusal through the actual Tauri plugin
+        run: node scripts/qa/macHotfix.mjs old-fs
+      - name: Record, preview, and export through the fixed native app
+        if: ${{ !cancelled() }}
+        run: node scripts/qa/macHotfix.mjs
+      - name: Native recording and export evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-hotfix-${{ inputs.runner || 'macos-14' }}
+          path: test-results/mac-hotfix/**
+          if-no-files-found: error
+
   native-pixels:
+    if: ${{ !inputs.native_hotfix_only }}
     runs-on: ${{ inputs.runner || 'macos-14' }}
     timeout-minutes: 10
     env:
@@ -71,7 +105,7 @@ jobs:
           if-no-files-found: warn
 
   e2e:
-    if: ${{ !inputs.native_pixels_only }}
+    if: ${{ !inputs.native_pixels_only && !inputs.native_hotfix_only }}
     runs-on: ${{ inputs.runner || 'macos-14' }}
     # Every lane pipes to `tail`, and a pipeline's status is the LAST command's - so without
     # pipefail each lane reported success no matter what happened, and the whole run went green
