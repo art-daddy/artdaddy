@@ -90,6 +90,64 @@ describe("tense", () => {
   });
 });
 
+describe("generation submission is not completion", () => {
+  const generationTools = TOOLS.filter((name) => name.startsWith("generate_"));
+
+  it("keeps a bare terminal failure visible without an error string or ok flag", () => {
+    expect(call("generate_video", {}, { status: "failed" })).toMatchObject({
+      ok: false,
+      running: false,
+      error: "failed",
+    });
+  });
+
+  it("keeps a legacy boolean-only failure from claiming a completed edit", () => {
+    expect(call("add_clips", { entries: [{}, {}] }, { ok: false })).toMatchObject({
+      text: "Couldn't add clips",
+      ok: false,
+      running: false,
+      error: "failed",
+    });
+  });
+
+  it("covers every generation tool in the contract", () => {
+    expect(generationTools.length).toBeGreaterThan(0);
+    for (const name of generationTools) {
+      for (const status of ["queued", "generating"]) {
+        const view = call(
+          name,
+          { prompt: "a room", text: "a sentence" },
+          {
+            ok: true,
+            status,
+            count: 2,
+            assets: [{ media_ref: "media_pending", kind: "image" }],
+          },
+        );
+        expect(view.text, `${name} ${status} must not claim produced media`).not.toMatch(
+          /\bGenerated\b/i,
+        );
+        expect(view.text, `${name} ${status} must describe the submitted request`).toMatch(
+          /^Requested\b/,
+        );
+        expect(view.ok).toBe(true);
+        expect(view.running).toBe(false);
+      }
+      expect(call(name, {}, { ok: true, status: "done", count: 2 }).text).toMatch(/\bGenerated\b/i);
+      const failed = call(name, {}, { ok: true, status: "failed" });
+      expect(failed.ok, `${name} terminal failure is not a successful submission`).toBe(false);
+      expect(failed.error).toBe("failed");
+      expect(failed.text).not.toMatch(/\bGenerated\b/i);
+    }
+  });
+
+  it("does not turn several pending requests into one completed-generation sentence", () => {
+    const pending = { ok: true, status: "generating", count: 1 };
+    const calls = [call("generate_image", {}, pending), call("generate_image", {}, pending)];
+    expect(rowSummary(calls, ctx)).not.toMatch(/\bGenerated\b/i);
+  });
+});
+
 // ── the result is the truth, not the request ─────────────────────────────────
 
 describe("what the line counts", () => {

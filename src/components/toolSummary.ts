@@ -288,24 +288,24 @@ const PHRASES: Record<string, Phrase> = {
     done: (a, r) => {
       const n = count(r, ["count"]);
       return n > 1
-        ? `Generated ${plural(n, "image")}`
-        : `Generated an image${s(a.prompt) ? `: ${quoted(a.prompt)}` : ""}`;
+        ? `${generationVerb(r)} ${plural(n, "image")}`
+        : `${generationVerb(r)} an image${s(a.prompt) ? `: ${quoted(a.prompt)}` : ""}`;
     },
   },
   generate_video: {
     bare: "generate a video",
     ing: "Generating a video",
-    done: (a) => `Generated a video${s(a.prompt) ? `: ${quoted(a.prompt)}` : ""}`,
+    done: (a, r) => `${generationVerb(r)} a video${s(a.prompt) ? `: ${quoted(a.prompt)}` : ""}`,
   },
   generate_music: {
     bare: "generate music",
     ing: "Generating music",
-    done: (a) => `Generated music${s(a.prompt) ? `: ${quoted(a.prompt)}` : ""}`,
+    done: (a, r) => `${generationVerb(r)} music${s(a.prompt) ? `: ${quoted(a.prompt)}` : ""}`,
   },
   generate_voiceover: {
     bare: "generate a voiceover",
     ing: "Generating a voiceover",
-    done: (a) => `Generated a voiceover${s(a.text) ? `: ${quoted(a.text)}` : ""}`,
+    done: (a, r) => `${generationVerb(r)} a voiceover${s(a.text) ? `: ${quoted(a.text)}` : ""}`,
   },
 
   // ── media in + out ──
@@ -448,6 +448,10 @@ function fallback(name: string): Phrase {
   return { bare: words, ing: `${sentence}…`, done: () => sentence };
 }
 
+function generationVerb(result: Result): string {
+  return result.status === "queued" || result.status === "generating" ? "Requested" : "Generated";
+}
+
 export interface ToolCallView {
   name: string;
   args: Args;
@@ -501,7 +505,7 @@ export function summarizeCall(
 }
 
 function errorOf(result: Result): string | undefined {
-  if (result.ok === false) {
+  if (result.ok === false || result.status === "failed") {
     const e = result.error;
     return s(e) || (e ? JSON.stringify(e) : "failed");
   }

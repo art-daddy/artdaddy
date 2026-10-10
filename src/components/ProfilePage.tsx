@@ -8,7 +8,7 @@ import { formatCredits, getUsage, refreshUsage, subscribeUsage } from "../api/us
 import { BRAND } from "../brand";
 import { useAuth } from "../store/auth";
 import DiscordCreditsCta from "./DiscordCreditsCta";
-import { OUT_OF_CREDITS } from "../lib/outOfCredits";
+import { CREDITS_PAUSED, OUT_OF_CREDITS } from "../lib/outOfCredits";
 import { Button } from "./ui";
 
 function Row({ label, value }: { label: string; value: string }) {
@@ -85,7 +85,13 @@ export default function ProfilePage() {
               <Row label="Limit" value={formatCredits(usage.limit)} />
               {usage.over && (
                 <p className="mt-2 text-xs text-red-400">
-                  {OUT_OF_CREDITS} <DiscordCreditsCta />
+                  {usage.globalPaused ? (
+                    CREDITS_PAUSED
+                  ) : (
+                    <>
+                      {OUT_OF_CREDITS} <DiscordCreditsCta />
+                    </>
+                  )}
                 </p>
               )}
             </div>

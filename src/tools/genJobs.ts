@@ -173,9 +173,11 @@ async function refuseIfOutOfCredit(): Promise<void> {
   const u = getUsage();
   if (!u.over) return;
   throw new CreditLimitError(
-    { used: u.used, limit: u.limit },
-    `no credit left (${u.used.toFixed(0)} of ${u.limit.toFixed(0)} used), so this was not submitted ` +
-      `and nothing was charged`,
+    { used: u.used, limit: u.limit, ...(u.globalPaused ? { scope: "global" } : {}) },
+    u.globalPaused
+      ? "the shared AI budget is paused, so this was not submitted and nothing was charged"
+      : `no credit left (${u.used.toFixed(0)} of ${u.limit.toFixed(0)} used), so this was not submitted ` +
+          `and nothing was charged`,
   );
 }
 
@@ -208,7 +210,7 @@ export async function submitGeneration(spec: SubmitSpec): Promise<SubmitResult> 
     media_refs: ids,
   });
 
-  const task = settleLater(spec, ledger, jobId, ids);
+  const task = settleLater(spec, ledger, jobId, ids).finally(refreshUsage);
   inflight.add(task);
   void task.finally(() => inflight.delete(task));
   return { media_refs: ids, job_id: jobId };
