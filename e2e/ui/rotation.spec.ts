@@ -64,6 +64,13 @@ test.beforeAll(async ({ browser }, info) => {
     contentType: "application/json",
   });
   console.log("rotation-controls", JSON.stringify(shots["h264_rot0.mp4"]));
+  console.log(
+    "rotation-encoding-controls",
+    JSON.stringify({
+      high640: shots["h264_size_control.mp4"],
+      baseline160: shots["h264_baseline_control.mp4"],
+    }),
+  );
   console.log("rotation-tagged-stream-control", JSON.stringify(shots["tagged:h264_rot0.mp4"]));
   console.log("rotation-software-control", JSON.stringify(shots["software:h264_rot0.mp4"]));
   console.log(
@@ -81,6 +88,14 @@ const dist = (a: readonly number[], b: readonly number[]) =>
   Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
 
 test.describe("a rotated video previews as it exports (real WebCodecs + WebGL2)", () => {
+  for (const file of ["h264_size_control.mp4", "h264_baseline_control.mp4"]) {
+    test(`${file} preserves the original picture`, () => {
+      const shot = shots[file];
+      expect(shot.decoded, shot.error ?? "the encoding control did not decode").toBe(true);
+      expect(shot.box, "nothing was drawn").not.toBeNull();
+      expect(shot.corners).toEqual(EXPECTED.fixtures["h264_rot0.mp4"].corners);
+    });
+  }
   for (const fx of ROTATION_FIXTURES) {
     test(fx.file, () => {
       const want = EXPECTED.fixtures[fx.file];

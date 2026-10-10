@@ -156,6 +156,9 @@ void (async () => {
   try {
     const renderer = new PreviewRenderer(canvas);
     for (const fx of ROTATION_FIXTURES) out[fx.file] = await shoot(renderer, fx.file, "plain", {});
+    for (const file of ["h264_size_control.mp4", "h264_baseline_control.mp4"]) {
+      out[file] = await shoot(renderer, file, "encoding-control", {});
+    }
     // A crop is a fraction of the SHOWN picture: the left half of a portrait phone clip, not of
     // the landscape frame it is stored as.
     out["crop:h264_rot270.mp4"] = await shoot(renderer, "h264_rot270.mp4", "crop", {
