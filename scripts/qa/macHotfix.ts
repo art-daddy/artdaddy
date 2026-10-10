@@ -327,14 +327,31 @@ async function run(): Promise<void> {
     "Source Monitor metadata",
   );
   const monitorColors: number[][] = [];
+  const presentedTimes: number[] = [];
+  player.muted = true;
   for (const seconds of [0.4, 2]) {
-    await bounded(
-      new Promise<void>((resolve) => {
-        player.addEventListener("seeked", () => resolve(), { once: true });
-        player.currentTime = seconds;
-      }),
-      "Source Monitor seek",
-    );
+    let frameCallback = 0;
+    try {
+      await bounded(
+        new Promise<void>((resolve, reject) => {
+          const presented = (_now: number, metadata: VideoFrameCallbackMetadata) => {
+            if (Math.abs(metadata.mediaTime - seconds) <= 0.1) {
+              presentedTimes.push(metadata.mediaTime);
+              resolve();
+            } else {
+              frameCallback = player.requestVideoFrameCallback(presented);
+            }
+          };
+          frameCallback = player.requestVideoFrameCallback(presented);
+          player.currentTime = seconds;
+          void player.play().catch(reject);
+        }),
+        "Source Monitor presented frame",
+      );
+    } finally {
+      player.pause();
+      player.cancelVideoFrameCallback(frameCallback);
+    }
     const picture = window.document.createElement("canvas");
     picture.width = 16;
     picture.height = 16;
@@ -342,10 +359,16 @@ async function run(): Promise<void> {
     context.drawImage(player, 0, 0, 16, 16);
     monitorColors.push([...context.getImageData(8, 8, 1, 1).data].slice(0, 3));
   }
-  report.previewAttempt = { sourceMonitorColors: monitorColors, url: readyUrl };
+  report.previewAttempt = { sourceMonitorColors: monitorColors, presentedTimes, url: readyUrl };
   const early = await pixels(readyUrl, 0.4);
   const late = await pixels(readyUrl, 2.0);
-  report.previewAttempt = { sourceMonitorColors: monitorColors, early, late, url: readyUrl };
+  report.previewAttempt = {
+    sourceMonitorColors: monitorColors,
+    presentedTimes,
+    early,
+    late,
+    url: readyUrl,
+  };
   check(
     monitorColors[0][0] > monitorColors[0][1] + 80,
     "Source Monitor did not show the red recorded frame",

@@ -72,6 +72,22 @@ describe("resolveSourceUrl", () => {
     expect(await resolveSourceUrl(store, "missing.mp4")).toBeNull();
   });
 
+  it("retries a missing catalog lookup that finishes after a relink", async () => {
+    let releaseMissing!: (value: null) => void;
+    const missing = new Promise<null>((resolve) => {
+      releaseMissing = resolve;
+    });
+    const { store, resolveRef } = storeWith(async () => "/proj/library/relinked.mp4");
+    resolveRef.mockImplementationOnce(() => missing);
+    const pending = resolveSourceUrl(store, "media_recording");
+    clearSourceUrlCache();
+    expect(await resolveSourceUrl(store, "media_recording")).toBe(
+      "asset:///proj/library/relinked.mp4",
+    );
+    releaseMissing(null);
+    expect(await pending).toBe("asset:///proj/library/relinked.mp4");
+  });
+
   it("caches the resolution (resolveRef called once per source)", async () => {
     const { store, resolveRef } = storeWith(async () => "/proj/x.mp4");
     await resolveSourceUrl(store, "x.mp4");
