@@ -102,6 +102,17 @@ try {
     void inspect();
   });
   await copyFile(reportPath, path.join(outputDir, "report.json"));
+  if (report.recording?.path) {
+    await copyFile(report.recording.path, path.join(outputDir, "original-recording.mp4"));
+    for (const seconds of [0.4, 2]) {
+      await copyFile(
+        path.join(root, `preview-${seconds}.png`),
+        path.join(outputDir, `preview-${seconds}.png`),
+      ).catch((error) => {
+        if (error.code !== "ENOENT") throw error;
+      });
+    }
+  }
   if (oldFs) {
     assert.equal(report.ok, false);
     assert.equal(report.failedAt, "hidden-stage-exists");
@@ -109,12 +120,6 @@ try {
     console.log("OLD POLICY: actual Tauri fs IPC refuses the reported hidden staging filename");
   } else {
     assert.equal(report.ok, true, JSON.stringify(report));
-    for (const seconds of [0.4, 2]) {
-      await copyFile(
-        path.join(root, `preview-${seconds}.png`),
-        path.join(outputDir, `preview-${seconds}.png`),
-      );
-    }
     await copyFile(report.export.output, path.join(outputDir, "recording-export.mp4"));
     console.log(
       "FIXED: native Record / Stop & save / Source Monitor / changing WebCodecs pixels / hidden-stage export",

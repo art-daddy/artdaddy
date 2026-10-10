@@ -254,6 +254,7 @@ async function run(): Promise<void> {
     mediaRef: recorded.id,
     filename: recorded.filename,
     size: originalBytes.length,
+    path: original,
   };
 
   mark("native-preview-arrival-race");
@@ -341,6 +342,10 @@ async function run(): Promise<void> {
     context.drawImage(player, 0, 0, 16, 16);
     monitorColors.push([...context.getImageData(8, 8, 1, 1).data].slice(0, 3));
   }
+  report.previewAttempt = { sourceMonitorColors: monitorColors, url: readyUrl };
+  const early = await pixels(readyUrl, 0.4);
+  const late = await pixels(readyUrl, 2.0);
+  report.previewAttempt = { sourceMonitorColors: monitorColors, early, late, url: readyUrl };
   check(
     monitorColors[0][0] > monitorColors[0][1] + 80,
     "Source Monitor did not show the red recorded frame",
@@ -349,8 +354,6 @@ async function run(): Promise<void> {
     monitorColors[1][1] > monitorColors[1][0] + 80,
     "Source Monitor did not show the green recorded frame",
   );
-  const early = await pixels(readyUrl, 0.4);
-  const late = await pixels(readyUrl, 2.0);
   check(early[0] > early[1] + 80, `Early recording is not red: ${early}`);
   check(late[1] > late[0] + 80, `Late recording is not green: ${late}`);
   check(
@@ -472,7 +475,8 @@ void run()
   .catch((error) => {
     report.ok = false;
     report.failedAt = step;
-    report.error = error instanceof Error ? error.stack : String(error);
+    report.error =
+      error instanceof Error ? `${error.message}\n${error.stack ?? ""}` : String(error);
   })
   .finally(async () => {
     await writeTextFile(joinPath(rootPath, "report.tmp"), JSON.stringify(report, null, 2));
