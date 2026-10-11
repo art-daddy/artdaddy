@@ -78,7 +78,7 @@ async function checkVideoBudget(
   if (size !== null && size > budget.maxBytes) {
     throw new Error(
       `this video is too large to analyse in one pass (${Math.round(size / 1e6)} MB of samples). ` +
-        `Pass a shorter start_seconds/end_seconds window and analyse it in parts.`,
+        `Use a shorter input video and analyse it in parts.`,
     );
   }
 }

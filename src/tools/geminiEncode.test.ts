@@ -8,6 +8,7 @@ import fc from "fast-check";
 import type { ClientToolContext } from "./context";
 import { ProjectStoreAccess, type FsLike } from "./store";
 import { agentToolContext } from "./agentStore";
+import { toolParams } from "../contract/params";
 import { endProjectSession } from "./coordinator";
 import { _pendingVideoEncodes, encodeImageForGemini, encodeVideoForGemini } from "./geminiEncode";
 
@@ -414,6 +415,24 @@ describe("encodeVideoForGemini", () => {
 // encoded to 77.6 MB against a 64 MB ceiling — ten failures in one session, reported to the model as
 // a refusal to read a cache filename it had never heard of.
 describe("the analysis encode is bounded by what the caller can read", () => {
+  it("gives both video callers size-recovery advice using only their available controls", async () => {
+    const { ctx } = makeCtx({ outputBytes: 80 * 1024 * 1024 });
+    const error = await encodeVideoForGemini(ctx, "/src/a.mp4", {
+      ...VIDEO,
+      budget: { maxBytes: 64 * 1024 * 1024, durationS: 720 },
+    }).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(Error);
+    const message = (error as Error).message;
+    const names = message.match(/\b[a-z]+(?:_[a-z]+)+\b/g) ?? [];
+    for (const tool of ["video_ask", "video_find_moment"]) {
+      expect(
+        names.every((name) => toolParams(tool).includes(name)),
+        tool,
+      ).toBe(true);
+    }
+    expect(message).toMatch(/shorter/i);
+  });
+
   it("accepts an output exactly at the byte ceiling", async () => {
     const { ctx, written } = makeCtx({ outputBytes: 1024 });
     const output = await encodeVideoForGemini(ctx, "/src/a.mp4", {
@@ -481,7 +500,7 @@ describe("the analysis encode is bounded by what the caller can read", () => {
         ...VIDEO,
         budget: { maxBytes: 64 * 1024 * 1024, durationS: 720 },
       }),
-    ).rejects.toThrow(/too large.*84 MB.*shorter start_seconds\/end_seconds window/);
+    ).rejects.toThrow(/too large.*84 MB.*shorter input video/);
   });
 });
 
