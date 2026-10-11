@@ -66,6 +66,11 @@ async function resolveVideoSource(
   clipId: string,
   tool: string,
 ): Promise<{ path?: string; ref?: string; clip?: Clip; fps?: number; error?: string }> {
+  if (mediaRef && isUrl(mediaRef)) {
+    return {
+      error: `${tool} requires a library media_ref or a placed clip_id, not a URL. Call download_video first, then pass its returned media_ref.`,
+    };
+  }
   let ref = mediaRef;
   let clip: Clip | undefined;
   let fps: number | undefined;
@@ -161,13 +166,6 @@ async function videoAsk(
   const endSeconds = args.end_seconds != null ? Number(args.end_seconds) : null;
   const visualOnly = args.visual_only !== false;
   const reasoningMode = String(args.reasoning_mode ?? "off");
-
-  if (mediaRefArg && isUrl(mediaRefArg)) {
-    return {
-      ok: false,
-      error: `video_ask now accepts LOCAL FILE PATHS ONLY. Got URL: ${mediaRefArg.slice(0, 120)}. Call \`download_video(url, output_name, ...)\` first, then pass the local path returned by that tool.`,
-    };
-  }
 
   const resolved = await resolveVideoSource(ctx, mediaRefArg, clipId, "video_ask");
   if (resolved.error || !resolved.path) return { ok: false, error: resolved.error ?? "unresolved" };
@@ -433,15 +431,6 @@ async function videoFindMoment(
   const clipId = args.clip_id != null ? String(args.clip_id) : "";
   const visualOnly = args.visual_only !== false;
   const reasoningMode = String(args.reasoning_mode ?? "off");
-
-  // Local-only (the safe production default; the server's URL mode is an env flag
-  // that also flips the tool description, so a URL never reaches a local-mode client).
-  if (mediaRefArg && isUrl(mediaRefArg)) {
-    return {
-      ok: false,
-      error: `video_find_moment accepts LOCAL FILE PATHS ONLY. Got URL: ${mediaRefArg.slice(0, 120)}. Call \`download_video(url, output_name, ...)\` first, then pass the local path returned by that tool.`,
-    };
-  }
 
   const resolved = await resolveVideoSource(ctx, mediaRefArg, clipId, "video_find_moment");
   if (resolved.error || !resolved.path) return { ok: false, error: resolved.error ?? "unresolved" };
