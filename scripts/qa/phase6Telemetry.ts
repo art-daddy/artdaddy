@@ -183,6 +183,7 @@ async function exerciseMac(qa: {
       sourceStartTime,
       playedSeconds,
       recoveryUrl: location.href,
+      rendererPid: await invoke<number>("qa_renderer_process"),
     }),
   );
 }

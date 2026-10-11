@@ -115,6 +115,54 @@ pub fn plugin<R: Runtime>(state: Arc<GuardState>) -> tauri::plugin::TauriPlugin<
     .build()
 }
 
+#[cfg(desktop)]
+#[tauri::command]
+pub async fn qa_renderer_process(webview: tauri::Webview) -> Result<u32, String> {
+  use tauri::Manager;
+  if !cfg!(debug_assertions)
+    || std::env::var_os("CI").is_none()
+    || std::env::var("ARTDADDY_PHASE6_QA_RENDERER").as_deref() != Ok("1")
+    || !webview.app_handle().config().identifier.starts_with("com.artdaddy.qa.phase6-")
+  {
+    return Err("Native renderer inspection is restricted to isolated QA".into());
+  }
+  #[cfg(all(target_os = "macos", debug_assertions))]
+  {
+    let (send, receive) = std::sync::mpsc::channel();
+    webview.with_webview(move |native| unsafe {
+      use std::ffi::{c_char, c_void};
+      #[link(name = "objc")]
+      extern "C" {
+        fn sel_registerName(name: *const c_char) -> *mut c_void;
+        fn objc_msgSend();
+      }
+      let selector = sel_registerName(b"_webProcessIdentifier\0".as_ptr().cast());
+      let responds: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> i8 =
+        std::mem::transmute(objc_msgSend as *const ());
+      let get_pid: unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32 =
+        std::mem::transmute(objc_msgSend as *const ());
+      let object = native.inner();
+      let result = if object.is_null()
+        || responds(object, sel_registerName(b"respondsToSelector:\0".as_ptr().cast()), selector) == 0
+      {
+        Err("WKWebView cannot report its renderer process".into())
+      } else {
+        let pid = get_pid(object, selector);
+        if pid > 0 { Ok(pid as u32) } else { Err("WKWebView has no live renderer".into()) }
+      };
+      let _ = send.send(result);
+    }).map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || receive.recv_timeout(Duration::from_secs(10)))
+      .await
+      .map_err(|error| error.to_string())?
+      .map_err(|error| error.to_string())?
+  }
+  #[cfg(not(all(target_os = "macos", debug_assertions)))]
+  {
+    Err("Native renderer inspection requires a debug macOS app".into())
+  }
+}
+
 /// macOS: Tauri reloads a page whose web content process died; this does the same after marking
 /// it, because the guard would otherwise refuse that reload. Registered on the builder.
 #[cfg(target_os = "macos")]
