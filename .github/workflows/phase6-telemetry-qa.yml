@@ -29,7 +29,10 @@ jobs:
         with:
           workspaces: src-tauri
       - run: npm ci
-      - run: npx playwright install chromium
+      - name: Install Native QA Browser
+        run: |
+          npm install --no-save --package-lock=false playwright@1.61.1
+          npx playwright install chromium
       - run: node scripts/fetch-sidecars.mjs --only ffmpeg,ffprobe
       - name: Native Health File Outcomes
         env:
