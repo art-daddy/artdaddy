@@ -3,7 +3,12 @@
 // tool returns). Populated per platform (empty on web; Tauri/Node fills it in).
 import { clampArgs, dropStrictNulls } from "../contract/clamp";
 import { toolParams, unknownParams } from "../contract/params";
-import { recordToolCall } from "../api/agentEvents";
+import {
+  agentEventContext,
+  createToolTrace,
+  type AgentEventContext,
+  type ToolTrace,
+} from "../api/agentEvents";
 
 export type ToolResult = unknown;
 export type ToolHandler = (args: Record<string, unknown>) => ToolResult | Promise<ToolResult>;
@@ -28,26 +33,25 @@ export class ClientToolRegistry {
     return this.handlers.size;
   }
 
-  async run(name: string, rawArgs: Record<string, unknown>): Promise<ToolResult> {
-    const started = Date.now();
+  async run(
+    name: string,
+    rawArgs: Record<string, unknown>,
+    labels: AgentEventContext = agentEventContext(),
+    callTrace: ToolTrace = createToolTrace(name, rawArgs, labels),
+  ): Promise<ToolResult> {
     // Recorded HERE rather than in the agent loop because this is the only point every tool
     // call passes through -- the loop never sees the three rejections below, and they are the
     // ones that mean the model is calling the tool wrong.
     const trace = (result: ToolResult): ToolResult => {
-      const failed =
-        result !== null && typeof result === "object" && (result as { ok?: unknown }).ok === false;
-      recordToolCall({
-        name,
-        ok: !failed,
-        ms: Date.now() - started,
-        args: rawArgs,
-        result,
-        error: failed ? String((result as { error?: unknown }).error ?? "") : "",
-      });
+      callTrace.result(result);
       return result;
     };
     const handler = this.handlers.get(name);
-    if (!handler) throw new Error(`no client tool registered: ${name}`);
+    if (!handler) {
+      const error = new Error(`no client tool registered: ${name}`);
+      callTrace.error(error);
+      throw error;
+    }
     // Tool-call arguments are always a JSON object; anything else (null, array,
     // primitive) is malformed input -> reject gracefully instead of letting a
     // handler dereference it and crash.

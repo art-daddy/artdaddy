@@ -2,7 +2,7 @@
 // applyOp -> store, with only the provider (`infer`) mocked (canned rounds). This
 // catches wiring bugs across loop <-> registry <-> applyOp <-> store that the
 // per-module unit tests (loop.test.ts mocks runTool) can't see.
-import { describe, expect, it, afterEach } from "vitest";
+import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 
 import { seededCtx, videoRunner } from "../test/timelineKit";
 import { loadTimeline } from "../timeline/engine";
@@ -10,6 +10,7 @@ import { __resetExportQueue, whenExportsSettle } from "../timeline/exportQueue";
 import type { CommandRunner } from "../tools/command";
 import { createToolRegistry } from "../tools";
 import { ClientTurnRunner, type ApprovalMode, type LoopDeps } from "./loop";
+import { agentEventContext, __resetAgentEvents } from "../api/agentEvents";
 import type { PendingCall, RoundInput, RoundResultDTO } from "./types";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -57,11 +58,12 @@ async function harness(
   let cost = 0;
   let infer: Infer = () => textRound("");
   const deps: LoopDeps = {
+    eventContext: agentEventContext,
     infer: (i) => {
       rounds += 1;
       return Promise.resolve(infer(i));
     },
-    runTool: (name, args) => registry.run(name, args),
+    runTool: (name, args, trace) => registry.run(name, args, trace.context, trace),
     emit: (event, data) => events.push({ event, data }),
     mode: () => mode,
     stopped: () => false,
@@ -90,6 +92,13 @@ async function harness(
 }
 
 describe("agent loop integration (real registry + applyOp + store)", () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("offline", { status: 503 })),
+    );
+  });
+  afterEach(__resetAgentEvents);
   // The export queue is module-level: a reserved destination would refuse the next test's export.
   afterEach(__resetExportQueue);
   it("drives a real multi-round build (add_track -> add_clips -> split) end to end", async () => {

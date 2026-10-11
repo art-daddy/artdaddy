@@ -9,8 +9,12 @@ import * as Sentry from "@sentry/react";
 
 import { platform } from "../platform";
 import { hostInfo, hostTag, resolveHostInfo } from "../platform/host";
+import { useAuth } from "../store/auth";
 
 let enabled = false;
+let identity: { id: string; email?: string } | null = null;
+let offAuth: (() => void) | null = null;
+const pendingErrors = new Set<(user: typeof identity) => void>();
 
 // The active project/transcript/model ids — set once per turn. Kept independent
 // of `enabled` so the ids are still forwarded to the SERVER (which may run its
@@ -75,7 +79,9 @@ function isActionable(event: Sentry.ErrorEvent): boolean {
   );
 }
 
-function beforeSend(event: Sentry.ErrorEvent): Sentry.ErrorEvent | null {
+function beforeSend(
+  event: Sentry.ErrorEvent,
+): Sentry.ErrorEvent | null | Promise<Sentry.ErrorEvent | null> {
   if (!isActionable(event)) return null;
   const req = event.request;
   if (req) {
@@ -90,7 +96,26 @@ function beforeSend(event: Sentry.ErrorEvent): Sentry.ErrorEvent | null {
     }
   }
   if (event.extra) event.extra = scrub(event.extra) as Record<string, unknown>;
-  return event;
+  const auth = useAuth.getState();
+  if (auth.status === "locked" || (auth.status === "offline" && !auth.hasStoredSession))
+    return null;
+  const attach = (user: typeof identity): Sentry.ErrorEvent | null => {
+    if (!user || (event.user?.id && event.user.id !== user.id)) return null;
+    event.user = { ...user };
+    return event;
+  };
+  if (identity) return attach(identity);
+  if (pendingErrors.size >= 50) return null;
+  return new Promise((resolve) => {
+    const deliver = (user: typeof identity): void => {
+      clearTimeout(timeout);
+      pendingErrors.delete(deliver);
+      resolve(attach(user));
+    };
+    const timeout = setTimeout(() => deliver(null), 60_000);
+    (timeout as { unref?: () => void }).unref?.();
+    pendingErrors.add(deliver);
+  });
 }
 
 /** Keep the HTTP trail and nothing else.
@@ -133,6 +158,12 @@ export function initSentry(): boolean {
     beforeSend,
   });
   enabled = true;
+  offAuth?.();
+  offAuth = useAuth.subscribe((auth) => {
+    if (auth.status === "locked" || (auth.status === "offline" && !auth.hasStoredSession)) {
+      identifyUser(null);
+    }
+  });
   tagHost();
   // The authoritative OS/arch needs an IPC round-trip; tag again once it lands.
   void resolveHostInfo().then(tagHost, () => {});
@@ -186,22 +217,45 @@ export function correlationBody(): { project_id?: string; transcript_id?: string
  *  bug report we cannot trace to a person is a bug we cannot follow up. */
 export function identifyUser(userId: string | null, email?: string | null): void {
   if (!enabled) return;
+  if (!userId || (identity && identity.id !== userId)) {
+    for (const deliver of [...pendingErrors]) deliver(null);
+  }
   if (!userId) {
+    identity = null;
     Sentry.setUser(null);
     return;
   }
-  Sentry.setUser({
+  identity = {
     id: userId.slice(0, 200),
     ...(email ? { email: email.slice(0, 320) } : {}),
-  });
+  };
+  Sentry.setUser(identity);
+  for (const deliver of [...pendingErrors]) deliver(identity);
+}
+
+export function __resetSentry(): void {
+  for (const deliver of [...pendingErrors]) deliver(null);
+  offAuth?.();
+  offAuth = null;
+  identity = null;
+  enabled = false;
 }
 
 /** Report a handled error with a small, scrubbed context. No-op when disabled. */
-export function captureError(err: unknown, context?: Record<string, unknown>): void {
+export function captureError(
+  err: unknown,
+  context?: Record<string, unknown>,
+  ownerId?: string,
+): void {
   if (!enabled) return;
   Sentry.captureException(
     err,
-    context ? { extra: scrub(context) as Record<string, unknown> } : undefined,
+    context || ownerId
+      ? {
+          ...(context ? { extra: scrub(context) as Record<string, unknown> } : {}),
+          ...(ownerId ? { user: { id: ownerId.slice(0, 200) } } : {}),
+        }
+      : undefined,
   );
 }
 

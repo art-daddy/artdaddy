@@ -100,7 +100,10 @@ describe("manage_project under the sign-in gate", () => {
   it("refuses immediately and names sign-in, instead of timing out on a Shell that cannot mount", async () => {
     vi.doMock("../store/auth", () => ({
       isSignedOutGate: () => true,
-      useAuth: { getState: () => ({ status: "locked", hasStoredSession: false }) },
+      useAuth: {
+        getState: () => ({ status: "locked", hasStoredSession: false }),
+        subscribe: () => () => undefined,
+      },
     }));
     const { dispatch } = await import("./bridge");
     // The document wait polls on setTimeout, so under fake timers it can only finish if the clock
@@ -141,7 +144,10 @@ describe("a tool withdrawn from the catalog", () => {
     }));
     vi.doMock("../store/auth", () => ({
       isSignedOutGate: () => false,
-      useAuth: { getState: () => ({ status: "unlocked", hasStoredSession: true }) },
+      useAuth: {
+        getState: () => ({ status: "unlocked", hasStoredSession: true }),
+        subscribe: () => () => undefined,
+      },
     }));
     vi.doMock("../project/openDocuments", () => ({ openDocumentById: () => ({}) }));
     vi.doMock("../tools/host", () => ({
@@ -177,7 +183,10 @@ describe("any tool under the sign-in gate", () => {
     }));
     vi.doMock("../store/auth", () => ({
       isSignedOutGate: () => true,
-      useAuth: { getState: () => ({ status: "locked", hasStoredSession: false }) },
+      useAuth: {
+        getState: () => ({ status: "locked", hasStoredSession: false }),
+        subscribe: () => () => undefined,
+      },
     }));
     vi.doMock("../tools/host", () => ({
       openToolHost: () => ({ ready: Promise.resolve(), has: () => true, run: ran }),
@@ -215,7 +224,10 @@ describe("the MCP door when signed out", () => {
     vi.resetModules();
     vi.doMock("../store/auth", () => ({
       isSignedOutGate: () => true,
-      useAuth: { getState: () => ({ status: "locked", hasStoredSession: false }) },
+      useAuth: {
+        getState: () => ({ status: "locked", hasStoredSession: false }),
+        subscribe: () => () => undefined,
+      },
     }));
   });
 
@@ -235,4 +247,87 @@ describe("the MCP door when signed out", () => {
     expect(res.content[0].text).toMatch(/signed out/i);
     expect(res.content[0].text).toMatch(/sign in/i);
   });
+});
+
+describe("MCP trace delivery", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.doUnmock("../contract");
+    vi.doUnmock("../store/auth");
+    vi.doUnmock("../tools/host");
+    vi.doUnmock("../project/openDocuments");
+  });
+
+  afterEach(async () => {
+    (await import("../api/agentEvents")).__resetAgentEvents();
+    (await import("../api/auth")).setClerkTokenProvider(null);
+    (await import("../tools/host")).closeToolHost();
+    await (await import("../test/timelineKit")).resetTestDocuments();
+    vi.useRealTimers();
+  });
+
+  it.each([
+    ["get_timeline", {}, true],
+    ["manage_project", { action: "current" }, true],
+    ["not_an_offered_tool", {}, false],
+  ])(
+    "batches three %s calls without duplicate traces or an app turn",
+    async (name, args, ok) => {
+      const { seededCtx, videoRunner } = await import("../test/timelineKit");
+      const { ctx } = await seededCtx(videoRunner, "/p");
+      vi.doMock("../tools/tauri", () => ({ makeTauriContext: async () => ctx }));
+      vi.doMock("../tools/dataRoot", async (original) => ({
+        ...(await original<typeof import("../tools/dataRoot")>()),
+        projectDirFor: async () => ctx.store.projectDir,
+      }));
+      vi.doMock("../store/projects", () => ({
+        useProjects: { getState: () => ({ activeId: "p", active: { id: "p", name: "QA" } }) },
+      }));
+      const { useAuth } = await import("../store/auth");
+      useAuth.setState({ status: "unlocked", hasStoredSession: true });
+      (await import("../api/auth")).setClerkTokenProvider(async () => "mcp-trace-test-token");
+      const traces: Array<Record<string, unknown>> = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url, init) => {
+          if (String(url).endsWith("/telemetry/agent")) {
+            traces.push(JSON.parse(init!.body as string));
+            return new Response("", { status: 200 });
+          }
+          return new Response("offline", { status: 503 });
+        }),
+      );
+      (await import("../api/agentEvents")).setAgentContext({
+        surface: "app",
+        model: "other-model",
+        project_id: "other-project",
+        transcript_id: "other-chat",
+      });
+      vi.useFakeTimers();
+      const { dispatch } = await import("./bridge");
+      for (const id of [23, 24, 25]) {
+        const result = await dispatch({
+          id,
+          method: "tools/call",
+          params: { name, arguments: args },
+        });
+        expect(result.isError).toBe(!ok);
+      }
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(traces).toHaveLength(1);
+      expect(traces[0]).toMatchObject({
+        surface: "mcp",
+        project_id: "p",
+        model: "",
+        transcript_id: "",
+        events: [
+          { name, call_id: "23", ok },
+          { name, call_id: "24", ok },
+          { name, call_id: "25", ok },
+        ],
+      });
+      expect(traces[0].events).toHaveLength(3);
+    },
+    15_000,
+  );
 });

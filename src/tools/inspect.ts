@@ -9,6 +9,7 @@
 import { type Attachment, audioAttachment, imageAttachment, videoAttachment } from "./attachments";
 import { stderrExcerpt } from "./command";
 import type { ClientToolContext } from "./context";
+import { clipAbs, isUnsafeAgentRef } from "./store";
 import { probePath, shortHash } from "./media";
 import { encodeImageForGemini, encodeVideoForGemini } from "./geminiEncode";
 import type { ClientToolRegistry } from "./registry";
@@ -389,7 +390,17 @@ export async function inspectMediaTool(
       `media not found: ${mediaRef}. Pass a library id/filename or a clip_id.`,
     );
   }
-  const srcRef = ctx.store.toRef(resolved); // echo a portable ref, never a system path
+  const library = await ctx.store.listClips();
+  const asset =
+    library.find((entry) => entry.id === mediaRef) ??
+    library.find((entry) => clipAbs(ctx.store.projectDir, entry) === resolved);
+  const srcRef = asset?.id ?? mediaRef;
+  if (isUnsafeAgentRef(srcRef)) {
+    return {
+      ok: false,
+      error: `Source for clip ${clipId} is not registered in the library. Import the media and relink the clip before inspecting it.`,
+    };
+  }
   // A HEIF-family still is looked at as its decoded picture (media/stillPicture.ts): read directly,
   // a tiled iPhone photo reports the size of one tile and shows only that tile.
   const picture = await stillPicture(ctx.store, ctx.runner, resolved, ctx.signal);

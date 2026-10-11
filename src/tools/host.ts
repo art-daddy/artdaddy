@@ -12,6 +12,21 @@ import type { ProjectStoreAccess } from "./store";
 import { ProjectClosingError, type MutationOrigin } from "../project/MutationGate";
 import { openDocumentById } from "../project/openDocuments";
 import { isJobEffect, toolEffect } from "../contract/effects";
+import {
+  agentEventContext,
+  createToolTrace,
+  type AgentEventContext,
+  type ToolTrace,
+} from "../api/agentEvents";
+
+export interface ToolRunOptions {
+  surface: "app" | "mcp";
+  signal?: AbortSignal;
+  origin?: MutationOrigin;
+  model?: string;
+  transcriptId?: string;
+  trace?: ToolTrace;
+}
 
 /** A tool runtime bound to ONE project. The agent runner captures the host for
  *  its project at turn start and routes every tool run + media read through it,
@@ -25,12 +40,7 @@ export interface ToolHost {
   /** Run a tool locally (awaits the context). `signal` propagates Stop into the
    *  tool's command runner + /ai proxy calls. `origin` (agent commits) lets the mutation gate reject
    *  a commit from a superseded chat execution. */
-  run(
-    name: string,
-    args: Record<string, unknown>,
-    signal?: AbortSignal,
-    origin?: MutationOrigin,
-  ): Promise<unknown>;
+  run(name: string, args: Record<string, unknown>, options: ToolRunOptions): Promise<unknown>;
   /** The project's store (server-tool media byte I/O), or null until ready. */
   store(): ProjectStoreAccess | null;
 }
@@ -79,9 +89,37 @@ class ProjectToolHost implements ToolHost {
   async run(
     name: string,
     args: Record<string, unknown>,
-    signal?: AbortSignal,
-    origin?: MutationOrigin,
+    options: ToolRunOptions,
   ): Promise<unknown> {
+    const submitted = agentEventContext();
+    const labels: AgentEventContext = {
+      ...submitted,
+      surface: options.surface,
+      project_id: this.projectId,
+      model: options.surface === "mcp" ? "" : (options.model ?? submitted.model),
+      transcript_id:
+        options.surface === "mcp"
+          ? ""
+          : (options.transcriptId ?? options.origin?.chatSessionId ?? submitted.transcript_id),
+    };
+    const trace = options.trace ?? createToolTrace(name, args, labels);
+    try {
+      const result = await this.execute(name, args, options, trace);
+      trace.result(result);
+      return result;
+    } catch (error) {
+      trace.error(error);
+      throw error;
+    }
+  }
+
+  private async execute(
+    name: string,
+    args: Record<string, unknown>,
+    options: ToolRunOptions,
+    trace: ToolTrace,
+  ): Promise<unknown> {
+    const { signal, origin } = options;
     await this.ready;
     this.currentOrigin = origin;
     try {
@@ -95,10 +133,10 @@ class ProjectToolHost implements ToolHost {
         effect && isJobEffect(effect) ? openDocumentById(this.projectId)?.jobs : undefined;
       if (jobs) {
         return await jobs.run({ kind: `tool.${name}` }, (jobSignal) =>
-          this.runTool(name, args, combineSignals(signal, jobSignal)),
+          this.runTool(name, args, trace, combineSignals(signal, jobSignal)),
         );
       }
-      return await this.runTool(name, args, signal);
+      return await this.runTool(name, args, trace, signal);
     } catch (e) {
       // The job scope refused admission because the project began closing — report a clean tool
       // failure rather than reject the turn (the registry path already returns { ok:false } too).
@@ -114,11 +152,12 @@ class ProjectToolHost implements ToolHost {
   private async runTool(
     name: string,
     args: Record<string, unknown>,
+    trace: ToolTrace,
     signal?: AbortSignal,
   ): Promise<unknown> {
     this.currentSignal = signal;
     try {
-      return await this.registry.run(name, args);
+      return await this.registry.run(name, args, trace.context, trace);
     } finally {
       this.currentSignal = undefined;
     }
