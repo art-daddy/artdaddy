@@ -19,6 +19,8 @@ import { exportTool } from "./exportItems";
 import { addClipsTool, addTextClipsTool } from "./placement";
 import { ProjectStoreAccess, joinPath } from "../tools/store";
 import { __resetJobNotes, pendingJobNotes } from "../store/jobNotes";
+import { setClerkTokenProvider } from "../api/auth";
+import { useAuth } from "../store/auth";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -32,6 +34,9 @@ afterEach(async () => {
   __resetExportQueue();
   __resetJobNotes();
   await resetTestDocuments();
+  setClerkTokenProvider(null);
+  useAuth.setState({ status: "checking", profile: null });
+  vi.unstubAllGlobals();
 });
 
 /** An in-memory disk with the operations an export uses, and a gate to hold a copy mid-way. */
@@ -165,6 +170,25 @@ async function project(
 }
 
 describe("export delivers separate files into a folder", () => {
+  it.each([false, true])("uses the account policy for timeline clips, including agent exports: %s", async (origin) => {
+    setClerkTokenProvider(async () => "account-token");
+    useAuth.setState({ status: "unlocked", profile: {
+      user_id: "user_exempt", email: "", display_name: "", image_url: "", metered: true,
+    } });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      user_id: "user_exempt", watermark: false, end_card: true,
+    }), { status: 200, headers: { "Content-Type": "application/json" } })));
+    const setup = await project({ origin });
+    const reply = await exportTool({ clip_ids: [setup.clips.a, setup.clips.b], output_dir: "clean clips" }, setup.ctx) as Any;
+    expect(reply.ok).toBe(true);
+    await whenExportsSettle();
+    expect(Object.keys(setup.disk.under(`${DL}/clean clips`))).toHaveLength(2);
+    expect(setup.ffmpeg).toHaveLength(2);
+    for (const args of setup.ffmpeg)
+      expect(args.some((arg) => /watermark-|endcard-/.test(arg))).toBe(false);
+    expect(String(reply.note)).not.toMatch(/carries the ArtDaddy watermark/i);
+  });
+
   it("copies library files byte for byte into a folder made in Downloads, numbered as asked", async () => {
     const p = await project();
     const r = (await exportTool(

@@ -258,7 +258,7 @@ async function exportItemsTool(args: Args, ctx: ClientToolContext | null): Promi
   const note = [
     `Saving ${planned.length} file${planned.length > 1 ? "s" : ""} to ${folder.label}.`,
     rendered.length < planned.length ? "Library files are copied as they are." : "",
-    rendered.length && loaded?.branding
+    rendered.length && loaded?.branding?.watermark
       ? "Each clip from the timeline carries the ArtDaddy watermark (no end card)."
       : "",
   ]

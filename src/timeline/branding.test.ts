@@ -98,6 +98,17 @@ describe("brandRatio", () => {
 });
 
 describe("branded render plan", () => {
+  it("omits only the corner watermark while retaining the end card and audio span", () => {
+    const plan = buildRenderCommand(timeline(undefined, true), "/o.mp4", {
+      branding: { ...BRAND, watermark: null },
+    });
+    const inputs = plan.args.filter((_, index) => plan.args[index - 1] === "-i");
+    expect(inputs).toEqual(["/m/a.mp4", "/m/b.mp3", BRAND.endcard]);
+    expect(plan.duration).toBe(4);
+    expect(plan.audioMustSpanVideo).toBe(true);
+    expect(plan.args[plan.args.indexOf("-map") + 1]).toBe("[outv]");
+  });
+
   it("adds both assets as inputs without disturbing the clips' input indices", () => {
     const plain = buildRenderCommand(timeline(), "/o.mp4");
     const branded = buildRenderCommand(timeline(), "/o.mp4", { branding: BRAND });

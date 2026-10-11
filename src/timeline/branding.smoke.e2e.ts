@@ -13,12 +13,24 @@ import { existsSync, promises as fsp } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 
-import { brandRatio, endcardFile, watermarkFile } from "./branding";
+import { brandRatio, endcardFile, watermarkFile, type Branding } from "./branding";
 import type { Timeline } from "./model";
-import { buildRenderCommand } from "./render";
+import { buildRenderCommand, exportBranding } from "./render";
 import { shippedSidecar } from "../test/sidecars";
+import { setClerkTokenProvider } from "../api/auth";
+import { useAuth } from "../store/auth";
+
+vi.mock("@tauri-apps/api/path", () => ({
+  resolveResource: async (resource: string) => path.resolve(process.cwd(), "src-tauri", resource),
+}));
+
+afterEach(() => {
+  setClerkTokenProvider(null);
+  useAuth.setState({ status: "checking", profile: null });
+  vi.unstubAllGlobals();
+});
 
 const FF = shippedSidecar("ffmpeg");
 const FP = shippedSidecar("ffprobe");
@@ -140,9 +152,9 @@ async function source(cwd: string): Promise<string> {
   return src;
 }
 
-function timeline(src: string, withAudio = false): Timeline {
+function timeline(src: string, withAudio = false, canvas = { width: W, height: H }): Timeline {
   return {
-    canvas: { width: W, height: H, fps: 30 },
+    canvas: { ...canvas, fps: 30 },
     tracks: [
       {
         id: "v0",
@@ -188,19 +200,19 @@ async function render(
   src: string,
   branded: boolean,
   tag: string,
-  opts: { withAudio?: boolean; endcard?: string } = {},
+  opts: { withAudio?: boolean; endcard?: string; branding?: Branding; canvas?: { width: number; height: number } } = {},
 ): Promise<string> {
   const out = path.join(cwd, `${tag}.mp4`);
   const ratio = brandRatio(W, H);
   const endcard = opts.endcard ?? path.join(BRAND_DIR, endcardFile(ratio));
-  const plan = buildRenderCommand(timeline(src, opts.withAudio), out, {
-    branding: branded
+  const plan = buildRenderCommand(timeline(src, opts.withAudio, opts.canvas), out, {
+    branding: opts.branding ?? (branded
       ? {
           watermark: path.join(BRAND_DIR, watermarkFile(ratio)),
           endcard,
           endcardDuration: await durationOf(endcard),
         }
-      : undefined,
+      : undefined),
   });
   const r = await run(FF!, plan.args, cwd);
   expect(r.code, `ffmpeg failed: ${r.stderr.slice(-800)}`).toBe(0);
@@ -247,6 +259,61 @@ function artBox(px: Buffer, w: number, h: number) {
 }
 
 describe.skipIf(!FF || !FP)("branded export (real ffmpeg)", () => {
+  it.each([
+    { width: 640, height: 360 },
+    { width: 480, height: 480 },
+    { width: 360, height: 640 },
+  ])("a fresh account exemption removes only corner pixels at $width x $height", async (canvas) => {
+    const cwd = await scratch();
+    const src = await source(cwd);
+    setClerkTokenProvider(async () => "account-token");
+    useAuth.setState({ status: "unlocked", profile: {
+      user_id: "user_exempt", email: "", display_name: "", image_url: "", metered: true,
+    } });
+    let watermark = true;
+    const send = vi.fn(async (url: string) => {
+      expect(new URL(url).pathname).toBe("/exports/policy");
+      return new Response(JSON.stringify({ user_id: "user_exempt", watermark, end_card: true }), {
+        status: 200, headers: { "Content-Type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", send);
+    const assets = { exists: async (file: string) => existsSync(file) };
+    const runner = { run: async (program: string, args: string[]) => run(program === "ffprobe" ? FP! : FF!, args) };
+    const ordinary = await exportBranding(assets, runner, canvas);
+    expect(ordinary.branding).not.toBeNull();
+    const baseline = await render(cwd, src, true, "ordinary", { branding: ordinary.branding!, canvas, withAudio: true });
+    watermark = false;
+    const exempt = await exportBranding(assets, runner, canvas);
+    expect(exempt.branding).not.toBeNull();
+    const clean = await render(cwd, src, true, "exempt", { branding: exempt.branding!, canvas, withAudio: true });
+    watermark = true;
+    const restored = await exportBranding(assets, runner, canvas);
+    const revoked = await render(cwd, src, true, "revoked", { branding: restored.branding!, canvas, withAudio: true });
+    const plain = await render(cwd, src, false, "plain-exempt", { canvas });
+    const width = Math.round(canvas.width * 0.35);
+    const height = Math.round(canvas.height * 0.2);
+    const corner = `crop=${width}:${height}:${canvas.width - width}:${canvas.height - height}`;
+    const normalCorner = await lumaAt(baseline, DUR / 2, corner);
+    const cleanCorner = await lumaAt(clean, DUR / 2, corner);
+    expect(normalCorner - cleanCorner).toBeGreaterThan(2);
+    expect(cleanCorner).toBeCloseTo(await lumaAt(plain, DUR / 2, corner), 0);
+    expect(await lumaAt(revoked, DUR / 2, corner)).toBeCloseTo(normalCorner, 0);
+    const total = await durationOf(clean);
+    expect(total).toBeCloseTo(await durationOf(baseline), 1);
+    expect(total).toBeGreaterThan(DUR + 1);
+    const center = `crop=${canvas.width}:${Math.round(canvas.height * 0.15)}:0:${Math.round(canvas.height * 0.425)}`;
+    expect(Math.abs((await lumaAt(clean, DUR / 2, center)) - (await lumaAt(clean, DUR + (total - DUR) / 2)))).toBeGreaterThan(20);
+    const streams = await streamDurations(clean);
+    expect(Math.abs(streams.audio - streams.video)).toBeLessThan(0.2);
+    const clip = await render(cwd, src, true, "clip-exempt", {
+      branding: { ...exempt.branding!, endcard: null, endcardDuration: 0 }, canvas,
+    });
+    expect(await durationOf(clip)).toBeCloseTo(DUR, 1);
+    expect(await lumaAt(clip, DUR / 2, corner)).toBeCloseTo(await lumaAt(plain, DUR / 2, corner), 0);
+    expect(send).toHaveBeenCalledTimes(3);
+  }, 180_000);
+
   it("ships an app icon that fills its box and still has a lion in it", async () => {
     // Two ways this icon has already been wrong: line art so thin it read as a smudge at
     // taskbar size, and dead margin from the master's empty gutters. Filling the box fixes

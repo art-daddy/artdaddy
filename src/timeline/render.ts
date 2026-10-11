@@ -15,6 +15,8 @@ import {
 } from "../tools/store";
 import { undecodableImageReason } from "../tools/imageDims";
 import { useExportJob } from "../store/exportJob";
+import { fetchExportPolicy } from "../api/auth";
+import { isSignedOutGate, useAuth } from "../store/auth";
 import { compileAnim, sampleAnim } from "./anim";
 import { brandRatio, endcardFile, watermarkFile, type Branding } from "./branding";
 import { loadTimeline } from "./engine";
@@ -629,22 +631,24 @@ export async function exportBranding(
   runner: ClientToolContext["runner"],
   canvas: { width: number; height: number },
 ): Promise<{ branding: Branding | null; warning?: string }> {
+  const account = useAuth.getState().profile;
   const dir = await bundledBrandDir();
   if (!dir) return { branding: null, warning: "brand assets unavailable — exported unbranded" };
   const ratio = brandRatio(canvas.width, canvas.height);
-  const watermark = joinPath(dir, watermarkFile(ratio));
+  const watermarkPath = joinPath(dir, watermarkFile(ratio));
   const endcard = joinPath(dir, endcardFile(ratio));
-  for (const p of [watermark, endcard]) {
+  const availability: boolean[] = [];
+  for (const p of [watermarkPath, endcard]) {
     // `exists` throws for a path the fs scope refuses to answer for; that is "can't tell",
     // not "missing", and the resource dir is inside the scope, so a throw here means the
     // check itself is unavailable and the assets are used as-is.
     const there = await store.exists(p).catch(() => true);
-    if (!there)
-      return {
-        branding: null,
-        warning: `brand asset missing (${p.split(/[\\/]/).pop()}) — exported unbranded`,
-      };
+    availability.push(there);
   }
+  if (!availability[1]) return {
+    branding: null,
+    warning: `brand asset missing (${endcard.split(/[\\/]/).pop()}) — exported unbranded`,
+  };
   const probe = await runner.run("ffprobe", [
     "-v",
     "error",
@@ -661,6 +665,15 @@ export async function exportBranding(
       warning: `brand end card could not be measured (${stderrExcerpt(probe.stderr) || "no duration"}) — exported unbranded`,
     };
   }
+  const policy = account?.user_id && !isSignedOutGate()
+    ? await fetchExportPolicy(account.user_id)
+    : null;
+  const exempt = policy?.watermark === false && useAuth.getState().profile === account && !isSignedOutGate();
+  const watermark = exempt ? null : watermarkPath;
+  if (watermark && !availability[0]) return {
+    branding: null,
+    warning: `brand asset missing (${watermark.split(/[\\/]/).pop()}) — exported unbranded`,
+  };
   return { branding: { watermark, endcard, endcardDuration } };
 }
 
@@ -1245,8 +1258,8 @@ export function buildRenderCommand(
   // pushes nothing and is byte-identical to what it was before branding existed.
   const brand = win ? null : (options.branding ?? null);
   const wmIdx = inputs.length;
-  const ecIdx = wmIdx + 1;
-  if (brand) {
+  const ecIdx = wmIdx + (brand?.watermark ? 1 : 0);
+  if (brand?.watermark) {
     cmd.push(
       "-loop",
       "1",
@@ -1257,8 +1270,8 @@ export function buildRenderCommand(
       "-i",
       brand.watermark,
     );
-    if (brand.endcard) cmd.push("-i", brand.endcard);
   }
+  if (brand?.endcard) cmd.push("-i", brand.endcard);
 
   // A colour source runs the whole timeline in an export. In a frame window it runs two frames,
   // stamped at the window's frame so every expression keyed on time sees the export's clock; over
@@ -1749,7 +1762,7 @@ export function buildRenderCommand(
   const ow = size ? size.w : cw;
   const oh = size ? size.h : ch;
   let totalDuration = outDuration;
-  if (brand) {
+  if (brand?.watermark) {
     chains.push(`[${wmIdx}:v]scale=${ow}:${oh}[wm]`);
     chains.push(`[${last}][wm]overlay=0:0:format=auto[branded]`);
     last = "branded";
@@ -1759,7 +1772,7 @@ export function buildRenderCommand(
     // timestamps when they disagree on rate — so BOTH branches are normalised, not just the
     // card. Doing it only to the card is the version of this that works on one project and
     // fails on the next.
-    chains.push(`[branded]fps=${outFps},format=yuv420p,setsar=1,setpts=PTS-STARTPTS[mainv]`);
+    chains.push(`[${last}]fps=${outFps},format=yuv420p,setsar=1,setpts=PTS-STARTPTS[mainv]`);
     chains.push(
       `[${ecIdx}:v]scale=${ow}:${oh}:flags=lanczos,fps=${outFps},format=yuv420p,setsar=1,setpts=PTS-STARTPTS[ecv]`,
     );
@@ -2723,7 +2736,7 @@ export async function exportTimelineTool(
   const card = prepared.branding?.endcardDuration ?? 0;
   // Without this an agent reads the end card's extra seconds as a broken export.
   const brandNote = prepared.branding
-    ? `The ArtDaddy watermark and end card are always added to an export: this file runs ` +
+    ? `${prepared.branding.watermark ? "The ArtDaddy watermark and end card are added" : "The ArtDaddy end card is added; the corner watermark is disabled for this account"}: this file runs ` +
       `${total.toFixed(1)} s, ${(total - card).toFixed(1)} s of timeline plus a ${card.toFixed(1)} s end card.`
     : "";
   const where = dest.defaulted
@@ -2742,7 +2755,7 @@ export async function exportTimelineTool(
     duration_s: round3(total),
     ...(prepared.branding
       ? {
-          branding: { watermark: true, end_card_s: round3(card), timeline_s: round3(total - card) },
+          branding: { watermark: prepared.branding.watermark !== null, end_card_s: round3(card), timeline_s: round3(total - card) },
         }
       : {}),
     warnings: prepared.plan.warnings,

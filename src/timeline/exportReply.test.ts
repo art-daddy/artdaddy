@@ -11,6 +11,8 @@ import { __resetExportQueue, whenExportsSettle } from "./exportQueue";
 import { addClipsTool } from "./placement";
 import { exportTimelineTool } from "./render";
 import { ProjectStoreAccess } from "../tools/store";
+import { setClerkTokenProvider } from "../api/auth";
+import { useAuth } from "../store/auth";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -19,6 +21,9 @@ afterEach(async () => {
   await whenExportsSettle();
   __resetExportQueue();
   await resetTestDocuments();
+  setClerkTokenProvider(null);
+  useAuth.setState({ status: "checking", profile: null });
+  vi.unstubAllGlobals();
 });
 
 /** Exports a 9 s timeline (270 frames at 30 fps); the end card measures 2.033 s. */
@@ -52,13 +57,29 @@ async function exportNineSeconds(o: { brandAssets: boolean; outputPath?: string 
 }
 
 describe("the export reply", () => {
+  it("reports an account exemption without removing the end-card duration", async () => {
+    setClerkTokenProvider(async () => "account-token");
+    useAuth.setState({ status: "unlocked", profile: {
+      user_id: "user_exempt", email: "", display_name: "", image_url: "", metered: true,
+    } });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      user_id: "user_exempt", watermark: false, end_card: true,
+    }), { status: 200, headers: { "Content-Type": "application/json" } })));
+    const reply = await exportNineSeconds({ brandAssets: true });
+    expect(reply.ok).toBe(true);
+    expect(reply.duration_s).toBeCloseTo(11.033, 3);
+    expect(reply.branding).toEqual({ watermark: false, end_card_s: 2.033, timeline_s: 9 });
+    expect(String(reply.note)).toContain("corner watermark is disabled for this account");
+    expect(String(reply.note)).toContain("2.0 s end card");
+  });
+
   it("says the watermark and end card are always added, and what that does to the length", async () => {
     const r = await exportNineSeconds({ brandAssets: true });
     expect(r.ok).toBe(true);
     expect(r.duration_s).toBeCloseTo(11.033, 3);
     expect(r.branding).toEqual({ watermark: true, end_card_s: 2.033, timeline_s: 9 });
     const note = String(r.note);
-    expect(note).toMatch(/watermark and end card are always added to an export/i);
+    expect(note).toMatch(/watermark and end card are added/i);
     expect(note).toContain("11.0 s");
     expect(note).toContain("9.0 s of timeline");
     expect(note).toContain("2.0 s end card");
@@ -68,7 +89,7 @@ describe("the export reply", () => {
   it("says it for an export to a path the caller chose as well", async () => {
     const r = await exportNineSeconds({ brandAssets: true, outputPath: "D:/Videos/cut.mp4" });
     expect(r.ok).toBe(true);
-    expect(String(r.note)).toMatch(/always added to an export/i);
+    expect(String(r.note)).toMatch(/watermark and end card are added/i);
     expect(String(r.note)).not.toContain("Downloads");
   });
 
