@@ -41,6 +41,7 @@ import { registerLibraryClip } from "../tools/import";
 import { __resetJobSupervisor, __setJobSupervisor } from "../tools/jobSupervisor";
 import { joinPath, ProjectStoreAccess } from "../tools/store";
 import { __resetAppEvents } from "./appEvents";
+import { useAuth } from "../store/auth";
 
 const ID = "hero_a1b2c3";
 /** Where a new project goes: the app folder, under its id. */
@@ -94,17 +95,19 @@ const posted: { path: string; body: Record<string, unknown> }[] = [];
 
 beforeEach(() => {
   __resetAppEvents();
+  useAuth.setState({ status: "unlocked", profile: null, hasStoredSession: true });
   posted.length = 0;
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string, init: { body: string }) => {
       posted.push({ path: new URL(url).pathname, body: JSON.parse(init.body) });
-      return { ok: true } as Response;
+      return new Response(JSON.stringify({ ok: true, status: "ok" }), { status: 200 });
     }),
   );
 });
 
 afterEach(async () => {
+  __resetAppEvents();
   await whenExportsSettle();
   __resetExportQueue();
   __resetProjectJobs();
