@@ -5,6 +5,7 @@ import { createWriteStream, watch } from "node:fs";
 import { mkdir, mkdtemp, readFile, writeFile, copyFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { stripVTControlCharacters } from "node:util";
+import { createRequire } from "node:module";
 import path from "node:path";
 import os from "node:os";
 
@@ -279,7 +280,9 @@ try {
     },
   );
   await readyOutput(vite, "Local:");
-  const { chromium } = await import("playwright");
+  const { chromium } = createRequire(path.resolve("reports/qa/phase6/browser/package.json"))(
+    "playwright",
+  );
   const browser = await chromium.launch();
   try {
     const page = await browser.newPage();
@@ -305,8 +308,9 @@ try {
   let app = startApp();
   let ready = await fileReady(path.join(root, "ready.json"));
   const ui = await fileReady(path.join(root, "mac-ui-proof.json"));
+  await copyFile(path.join(root, "mac-ui-proof.json"), path.join(output, "mac-ui-proof.json"));
   assert.equal(ui.ok, true);
-  assert.ok(ui.playedSeconds > 0.1);
+  assert.ok(ui.playedSeconds > ui.sourceStartTime + 0.1);
   assert.equal(ui.playing.current.context.activity, "source-playback");
   assert.notEqual(ui.paused.current.context.activity, "source-playback");
   assert.equal(
@@ -319,7 +323,6 @@ try {
     await readFile(path.join(root, "timeline-before.json")),
     await readFile(path.join(root, "timeline-after-read.json")),
   );
-  await copyFile(path.join(root, "mac-ui-proof.json"), path.join(output, "mac-ui-proof.json"));
   proof.steps.push(
     "native composer trace survived failed synthetic round; actual mono source played and paused; source and timeline bytes unchanged",
   );

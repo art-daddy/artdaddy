@@ -151,10 +151,11 @@ async function exerciseMac(qa: {
     "native play control",
   );
   check(play, "No native play control");
+  const sourceStartTime = player.currentTime;
   play.click();
-  await waitFor(
+  const playedSeconds = await waitFor(
     () => player.currentTime,
-    (time) => time > 0.1,
+    (time) => time > sourceStartTime + 0.1,
     "native audio advancement",
   );
   const playing = await waitFor(
@@ -178,7 +179,8 @@ async function exerciseMac(qa: {
       projectId: qa.projectId,
       playing,
       paused,
-      playedSeconds: player.currentTime,
+      sourceStartTime,
+      playedSeconds,
     }),
   );
 }
