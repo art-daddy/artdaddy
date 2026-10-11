@@ -249,6 +249,24 @@ const quit = async (child, healthPath) => {
   );
   await exited;
 };
+const rendererOwners = (pids) =>
+  JSON.parse(
+    execFileSync(
+      "swift",
+      [
+        "-e",
+        `import Foundation
+import Darwin
+typealias ResponsibleProcess = @convention(c) (Int32) -> Int32
+guard let handle = dlopen(nil, RTLD_LAZY), let symbol = dlsym(handle, "responsibility_get_pid_responsible_for_pid") else { fatalError("Cannot establish WebContent ownership") }
+let responsible = unsafeBitCast(symbol, to: ResponsibleProcess.self)
+let owners = CommandLine.arguments.dropFirst().compactMap { Int32($0) }.map { ["pid": Int($0), "owner": Int(responsible($0))] }
+print(String(data: try JSONSerialization.data(withJSONObject: owners), encoding: .utf8)!)`,
+        ...pids.map(String),
+      ],
+      { encoding: "utf8" },
+    ),
+  );
 const proof = {
   root,
   identifier,
@@ -363,20 +381,37 @@ try {
   proof.steps.push(
     "early event survived late sign-in; real MCP socket delivered correctly labelled batched calls and refusal",
   );
-  const observed = contentProcesses().filter((pid) => !oldContent.has(pid));
+  const beforeCrash = JSON.parse(await readFile(ready.healthPath, "utf8"));
+  const launch = /^launch-[a-f0-9]+-([a-f0-9]+)$/.exec(beforeCrash.current.launch_id);
+  assert.ok(launch, "Native launch identity did not contain its process");
+  const nativePid = Number.parseInt(launch[1], 16);
+  const owners = rendererOwners(contentProcesses().filter((pid) => !oldContent.has(pid)));
+  await writeFile(
+    path.join(output, "renderer-processes.json"),
+    JSON.stringify({ nativePid, owners }, null, 2),
+  );
+  const observed = owners.filter((process) => process.owner === nativePid);
   assert.equal(
     observed.length,
     1,
-    "Refusing to guess which WebContent process belongs to this isolated app",
+    "Refusing to guess among processes not uniquely owned by this isolated app",
   );
   await writeFile(path.join(output, "ready-before-crash.json"), JSON.stringify(ready, null, 2));
-  process.kill(observed[0], "SIGKILL");
-  ready = await fileReady(path.join(root, "ready.json"), (value) => value.at > ready.at);
-  await writeFile(path.join(output, "ready-after-crash.json"), JSON.stringify(ready, null, 2));
+  process.kill(observed[0].pid, "SIGKILL");
   await fileReady(path.join(output, "rows.json"), (saved) =>
-    saved.some((row) => row.via === "web_content_terminated"),
+    saved.some(
+      (row) =>
+        row.via === "web_content_terminated" &&
+        row.event_id?.startsWith(beforeCrash.current.launch_id),
+    ),
   );
-  const health = await fileReady(ready.healthPath, (record) => record.failures.length === 0);
+  const health = await fileReady(
+    ready.healthPath,
+    (record) =>
+      record.failures.length === 0 &&
+      record.current.launch_id === beforeCrash.current.launch_id &&
+      record.current.renderer_epoch > beforeCrash.current.renderer_epoch,
+  );
   assert.equal(health.current.context.user_id, "phase6_qa");
   await copyFile(ready.healthPath, path.join(output, "health-after-renderer-recovery.json"));
   proof.steps.push(
