@@ -21,6 +21,13 @@ export function toolParams(name: string): string[] {
   return liveParamNames(name) ?? [];
 }
 
+export function missingClipMessage(tool: string, clipId: string): string {
+  const message = `clip not found on the timeline: ${clipId}. Call get_timeline for valid clip IDs.`;
+  return toolParams(tool).includes("media_ref")
+    ? `${message} For a library asset, use media_ref with its library ID or filename; get_project_state lists the library.`
+    : `${message} A library asset must be placed on the timeline before this tool can read its clip.`;
+}
+
 /** True when the contract knows this tool's params. */
 export function hasParamSchema(name: string): boolean {
   return liveParamNames(name) !== null;

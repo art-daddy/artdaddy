@@ -19,9 +19,11 @@ export interface UsageState {
   limit: number;
   remaining: number;
   over: boolean;
+  globalPaused?: true;
 }
 
 let state: UsageState = { metered: false, used: 0, limit: 0, remaining: 0, over: false };
+let balanceRevision = 0;
 const listeners = new Set<() => void>();
 
 export function getUsage(): UsageState {
@@ -41,13 +43,15 @@ export function subscribeUsage(fn: () => void): () => void {
 
 function set(next: Partial<UsageState>): void {
   const merged = { ...state, ...next };
+  if (!merged.metered || !merged.over || merged.globalPaused !== true) delete merged.globalPaused;
   // Keep object identity stable when nothing changed (avoids useSyncExternalStore churn).
   if (
     merged.metered === state.metered &&
     merged.used === state.used &&
     merged.limit === state.limit &&
     merged.remaining === state.remaining &&
-    merged.over === state.over
+    merged.over === state.over &&
+    merged.globalPaused === state.globalPaused
   ) {
     return;
   }
@@ -57,22 +61,28 @@ function set(next: Partial<UsageState>): void {
 
 /** Fetch the caller's credit balance. No-op visual when unmetered/unreachable. */
 export async function refreshUsage(): Promise<void> {
+  const revision = ++balanceRevision;
   try {
     const res = await authedFetch(`${apiBase()}/usage`);
     if (!res.ok) return;
-    const j = (await res.json()) as Partial<UsageState>;
+    const j = (await res.json()) as Partial<UsageState> & { pause_scope?: unknown };
+    if (revision !== balanceRevision) return;
     if (!j.metered) {
       set({ metered: false, over: false });
       return;
     }
     const limit = Number(j.limit ?? 0);
     const remaining = Number(j.remaining ?? 0);
+    let globalPaused = state.globalPaused;
+    if (j.over === false || (j.over === true && j.pause_scope === "user")) globalPaused = undefined;
+    else if (j.over === true && j.pause_scope === "global") globalPaused = true;
     set({
       metered: true,
       used: Number(j.used ?? 0),
       limit,
       remaining,
-      over: limit > 0 && remaining <= 0,
+      over: globalPaused === true || j.over === true || (limit > 0 && remaining <= 0),
+      globalPaused,
     });
   } catch {
     /* offline / unreachable — leave the last known balance */
@@ -81,6 +91,7 @@ export async function refreshUsage(): Promise<void> {
 
 /** Reflect a 402 immediately, before the next refresh lands. */
 export function markOverLimit(detail: unknown): void {
+  balanceRevision += 1;
   const reservation = unaffordableReservation(detail);
   if (reservation) {
     set({
@@ -97,12 +108,15 @@ export function markOverLimit(detail: unknown): void {
     limit?: number;
     scope?: string;
   };
+  const used = Number(d.used ?? state.used);
+  const limit = Number(d.limit ?? state.limit);
   set({
     metered: true,
     over: true,
-    used: Number(d.used ?? state.used),
-    limit: Number(d.limit ?? state.limit),
-    remaining: 0,
+    used,
+    limit,
+    remaining: d.scope === "global" ? Math.max(0, limit - used) : 0,
+    globalPaused: d.scope === "global" ? true : undefined,
   });
   // Reported HERE rather than at the three 402 call sites: ai.ts and both agent round senders
   // all funnel through this, so one of them growing a fourth caller cannot miss it. A hard stop
@@ -120,6 +134,7 @@ export function markOverLimit(detail: unknown): void {
 /** Drop the balance when the identity goes away — a signed-out or revoked session
  *  must never keep showing the previous account's credits. */
 export function clearUsage(): void {
+  balanceRevision += 1;
   set({ metered: false, used: 0, limit: 0, remaining: 0, over: false });
   // A new identity gets a fresh wall; without this, the next account's first 402 is silent.
   void import("./appEvents").then((m) => m.resetCreditsExhausted()).catch(() => undefined);

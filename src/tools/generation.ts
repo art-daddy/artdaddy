@@ -101,11 +101,20 @@ async function generateImage(
       error: `unknown image model ${JSON.stringify(args.model)}; call list_models (options: ${IMAGE_IDS.join(", ")})`,
     };
   const count = Math.max(1, Math.min(m.max_images ?? 1, Math.trunc(Number(args.count ?? 1)) || 1));
-  const refRefs = (Array.isArray(args.reference_images) ? args.reference_images : [])
-    .map(String)
-    .filter((s) => s.trim());
+  const suppliedRefs = args.reference_images ?? [];
+  if (
+    !Array.isArray(suppliedRefs) ||
+    suppliedRefs.some((ref) => typeof ref !== "string" || !ref.trim())
+  )
+    return { ok: false, error: "reference_images must be an array of non-empty media_ref strings" };
+  const refRefs = suppliedRefs.map((ref: string) => ref.trim());
   if (refRefs.length && !m.supports_reference_images)
     return { ok: false, error: `${m.id} does not support reference images` };
+  if (refRefs.length > (m.max_reference_images ?? 0))
+    return {
+      ok: false,
+      error: `${m.id} supports at most ${m.max_reference_images ?? 0} reference image(s) per ArtDaddy request; got ${refRefs.length}. Choose another model from list_models or use fewer reference_images.`,
+    };
   let quality = args.quality != null ? String(args.quality) : undefined;
   let resolution = args.resolution != null ? String(args.resolution) : undefined;
   const aspect = String(args.aspect_ratio ?? "9:16");

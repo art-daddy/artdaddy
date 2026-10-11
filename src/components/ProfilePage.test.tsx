@@ -36,6 +36,7 @@ vi.mock("../store/auth", () => ({
 }));
 
 import ProfilePage from "./ProfilePage";
+import { CREDITS_PAUSED } from "../lib/outOfCredits";
 
 const renderPage = () =>
   render(
@@ -51,6 +52,21 @@ afterEach(() => {
 });
 
 describe("ProfilePage", () => {
+  it("shows a shared pause without calling the remaining account credit exhausted", () => {
+    Object.assign(mocks.usage, {
+      used: 3,
+      limit: 100,
+      remaining: 97,
+      over: true,
+      globalPaused: true,
+    });
+    renderPage();
+    expect(screen.getByText("97")).toBeInTheDocument();
+    expect(screen.getByText(CREDITS_PAUSED)).toBeInTheDocument();
+    expect(screen.queryByText("Out of credits.")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /join our discord/i })).not.toBeInTheDocument();
+  });
+
   it("shows who is signed in", () => {
     renderPage();
     expect(screen.getByText("Alice Example")).toBeInTheDocument();

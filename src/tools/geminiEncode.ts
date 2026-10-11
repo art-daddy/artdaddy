@@ -6,6 +6,7 @@
 // context type, the command helpers, and the still-picture owner, which itself never reaches the
 // tool modules) so it never forms an import cycle.
 import { stderrExcerpt } from "./command";
+import { currentProjectSession, withProjectLock } from "./coordinator";
 import type { ClientToolContext } from "./context";
 import { stillPicture } from "../media/stillPicture";
 
@@ -49,7 +50,38 @@ function keyHash(s: string): string {
 
 // Bump when the Gemini video ENCODE recipe changes (fps/scale/mute/codec) so an existing cached
 // encode is treated as stale and regenerated, not reused (Phase 7 cache keying).
-const GEMINI_VIDEO_ENCODE_REV = 1;
+const GEMINI_VIDEO_ENCODE_REV = 2;
+
+interface VideoEncodeJob {
+  controller: AbortController;
+  result: Promise<string>;
+  waiters: number;
+}
+
+const videoEncodes = new Map<string, VideoEncodeJob>();
+
+export function _pendingVideoEncodes(): number {
+  return videoEncodes.size;
+}
+
+function requireEncodeSession(ctx: ClientToolContext, signal?: AbortSignal): void {
+  if (signal?.aborted || !ctx.store.sessionLive()) throw new Error("video analysis cancelled");
+}
+
+async function checkVideoBudget(
+  ctx: ClientToolContext,
+  output: string,
+  budget: GeminiEncodeOpts["budget"],
+): Promise<void> {
+  if (!budget) return;
+  const size = await ctx.store.byteSize(output);
+  if (size !== null && size > budget.maxBytes) {
+    throw new Error(
+      `this video is too large to analyse in one pass (${Math.round(size / 1e6)} MB of samples). ` +
+        `Use a shorter input video and analyse it in parts.`,
+    );
+  }
+}
 
 /** Encode `src` into a compact, content-keyed (cached) MP4 for a Gemini video
  *  Part and return the output path. Skips the ffmpeg run when the cached output
@@ -59,12 +91,76 @@ export async function encodeVideoForGemini(
   src: string,
   opts: GeminiEncodeOpts,
 ): Promise<string> {
-  const kbps = opts.budget ? bitrateForBudget(opts.budget.maxBytes, opts.budget.durationS) : null;
+  requireEncodeSession(ctx, ctx.signal);
+  const recipe: GeminiEncodeOpts = {
+    ...opts,
+    ...(opts.budget ? { budget: { ...opts.budget } } : {}),
+  };
+  const session = currentProjectSession(ctx.store.projectDir);
+  const kbps = recipe.budget
+    ? bitrateForBudget(recipe.budget.maxBytes, recipe.budget.durationS)
+    : null;
+  const identity = await ctx.store.fileIdentity(src);
+  requireEncodeSession(ctx, ctx.signal);
   const key = keyHash(
-    `${src}|${opts.start ?? ""}|${opts.end ?? ""}|${opts.fps}|${opts.maxDim}|${opts.keepAudio}|${kbps ?? ""}|r${GEMINI_VIDEO_ENCODE_REV}`,
+    `${src}|${identity ?? ""}|${recipe.start ?? ""}|${recipe.end ?? ""}|${recipe.fps}|${recipe.maxDim}|${recipe.keepAudio}|${kbps ?? ""}|${recipe.budget?.maxBytes ?? ""}|${recipe.budget?.durationS ?? ""}|r${GEMINI_VIDEO_ENCODE_REV}`,
   );
-  const out = await ctx.store.prepareArtifact(`${opts.tag ?? "gemini"}/gem_vid_${key}.mp4`);
-  if (await ctx.store.exists(out)) return out;
+  const rel = `${recipe.tag ?? "gemini"}/gem_vid_${key}.mp4`;
+  const out = ctx.store.artifactPath(rel);
+  const jobKey = `${session}\0${out}`;
+  let job = videoEncodes.get(jobKey);
+  if (!job || job.controller.signal.aborted) {
+    const controller = new AbortController();
+    const work = ctx.detach?.() ?? ctx;
+    const created: VideoEncodeJob = {
+      controller,
+      waiters: 0,
+      result: Promise.resolve().then(() =>
+        encodeVideo(work, src, recipe, rel, out, kbps, controller.signal),
+      ),
+    };
+    created.result = created.result.finally(() => {
+      if (videoEncodes.get(jobKey) === created) videoEncodes.delete(jobKey);
+    });
+    videoEncodes.set(jobKey, created);
+    job = created;
+  }
+  job.waiters += 1;
+  let onAbort: (() => void) | undefined;
+  try {
+    const cancelled = new Promise<never>((_resolve, reject) => {
+      onAbort = () => reject(new Error("video analysis cancelled"));
+      ctx.signal?.addEventListener("abort", onAbort, { once: true });
+      if (ctx.signal?.aborted) onAbort();
+    });
+    const output = await Promise.race([job.result, cancelled]);
+    await checkVideoBudget(ctx, output, recipe.budget);
+    requireEncodeSession(ctx, ctx.signal);
+    return output;
+  } finally {
+    if (onAbort) ctx.signal?.removeEventListener("abort", onAbort);
+    job.waiters -= 1;
+    if (job.waiters === 0) job.controller.abort();
+  }
+}
+
+async function encodeVideo(
+  ctx: ClientToolContext,
+  src: string,
+  opts: GeminiEncodeOpts,
+  rel: string,
+  out: string,
+  kbps: number | null,
+  signal: AbortSignal,
+): Promise<string> {
+  requireEncodeSession(ctx, signal);
+  if (await ctx.store.exists(out)) {
+    await checkVideoBudget(ctx, out, opts.budget);
+    requireEncodeSession(ctx, signal);
+    return out;
+  }
+  const temporary = await ctx.store.prepareWork(`gemini/encode-${crypto.randomUUID()}.mp4`);
+  const staged = `${out}.partial-${crypto.randomUUID()}`;
   const start = opts.start ?? 0;
   const cmd = ["-y", "-hide_banner", "-loglevel", "error"];
   if (opts.start !== undefined) cmd.push("-ss", Math.max(0, start).toFixed(3));
@@ -87,23 +183,27 @@ export async function encodeVideoForGemini(
   // A cap, not a target: crf still decides the quality, and this only bites on the long sources
   // that would otherwise encode past what the caller can read.
   if (kbps) cmd.push("-maxrate", `${kbps}k`, "-bufsize", `${kbps * 2}k`);
-  cmd.push(...(opts.keepAudio ? ["-c:a", "aac", "-b:a", "96k"] : ["-an"]), out);
-  const r = await ctx.runner.run("ffmpeg", cmd);
-  if (r.code !== 0 || !(await ctx.store.exists(out))) {
-    throw new Error(`encode for gemini failed: ${stderrExcerpt(r.stderr, 200)}`);
-  }
-  // The budget is a cap ffmpeg can still overshoot. Say so in the caller's vocabulary rather than
-  // letting the reader refuse a cache filename the model has never heard of.
-  if (opts.budget) {
-    const size = await ctx.store.byteSize(out).catch(() => null);
-    if (size !== null && size > opts.budget.maxBytes) {
-      throw new Error(
-        `this video is too large to analyse in one pass (${Math.round(size / 1e6)} MB of samples). ` +
-          `Pass a shorter start_seconds/end_seconds window and analyse it in parts.`,
-      );
+  cmd.push(...(opts.keepAudio ? ["-c:a", "aac", "-b:a", "96k"] : ["-an"]), temporary);
+  try {
+    requireEncodeSession(ctx, signal);
+    const result = await ctx.runner.run("ffmpeg", cmd, signal);
+    if (result.code !== 0 || !(await ctx.store.exists(temporary))) {
+      throw new Error(`encode for gemini failed: ${stderrExcerpt(result.stderr, 200)}`);
     }
+    await checkVideoBudget(ctx, temporary, opts.budget);
+    await withProjectLock(ctx.store.projectDir, async () => {
+      requireEncodeSession(ctx, signal);
+      await ctx.store.prepareArtifact(rel);
+      requireEncodeSession(ctx, signal);
+      await ctx.store.copyFile(temporary, staged);
+      requireEncodeSession(ctx, signal);
+      await ctx.store.rename(staged, out);
+    });
+    return out;
+  } finally {
+    await ctx.store.remove(temporary).catch(() => undefined);
+    await ctx.store.remove(staged).catch(() => undefined);
   }
-  return out;
 }
 
 /** Encode `src` into a compact, content-keyed (cached) downscaled JPEG for an

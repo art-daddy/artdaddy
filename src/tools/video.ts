@@ -5,6 +5,7 @@
 // Ported from the server's research.py video tools (now client-side).
 import { callAiProxy, toB64 } from "../api/ai";
 import type { ClientToolContext } from "./context";
+import { missingClipMessage } from "../contract/params";
 import { encodeVideoForGemini } from "./geminiEncode";
 import { probePath } from "./media";
 import { stillPicture } from "../media/stillPicture";
@@ -63,7 +64,13 @@ async function resolveVideoSource(
   ctx: ClientToolContext,
   mediaRef: string,
   clipId: string,
+  tool: string,
 ): Promise<{ path?: string; ref?: string; clip?: Clip; fps?: number; error?: string }> {
+  if (mediaRef && isUrl(mediaRef)) {
+    return {
+      error: `${tool} requires a library media_ref or a placed clip_id, not a URL. Call download_video first, then pass its returned media_ref.`,
+    };
+  }
   let ref = mediaRef;
   let clip: Clip | undefined;
   let fps: number | undefined;
@@ -79,8 +86,7 @@ async function resolveVideoSource(
       return { error: `clip_id given but the timeline could not be read: ${String(e)}` };
     }
     const found = findClip(timeline, clipId);
-    if (!found)
-      return { error: `clip not found on the timeline (or it has no source media): ${clipId}` };
+    if (!found) return { error: missingClipMessage(tool, clipId) };
     clip = found[1];
     fps = canvasFps(timeline);
     const clipSource = String(clip.media_ref ?? "").trim();
@@ -161,14 +167,7 @@ async function videoAsk(
   const visualOnly = args.visual_only !== false;
   const reasoningMode = String(args.reasoning_mode ?? "off");
 
-  if (mediaRefArg && isUrl(mediaRefArg)) {
-    return {
-      ok: false,
-      error: `video_ask now accepts LOCAL FILE PATHS ONLY. Got URL: ${mediaRefArg.slice(0, 120)}. Call \`download_video(url, output_name, ...)\` first, then pass the local path returned by that tool.`,
-    };
-  }
-
-  const resolved = await resolveVideoSource(ctx, mediaRefArg, clipId);
+  const resolved = await resolveVideoSource(ctx, mediaRefArg, clipId, "video_ask");
   if (resolved.error || !resolved.path) return { ok: false, error: resolved.error ?? "unresolved" };
   const localPath = resolved.path;
 
@@ -433,16 +432,7 @@ async function videoFindMoment(
   const visualOnly = args.visual_only !== false;
   const reasoningMode = String(args.reasoning_mode ?? "off");
 
-  // Local-only (the safe production default; the server's URL mode is an env flag
-  // that also flips the tool description, so a URL never reaches a local-mode client).
-  if (mediaRefArg && isUrl(mediaRefArg)) {
-    return {
-      ok: false,
-      error: `video_find_moment accepts LOCAL FILE PATHS ONLY. Got URL: ${mediaRefArg.slice(0, 120)}. Call \`download_video(url, output_name, ...)\` first, then pass the local path returned by that tool.`,
-    };
-  }
-
-  const resolved = await resolveVideoSource(ctx, mediaRefArg, clipId);
+  const resolved = await resolveVideoSource(ctx, mediaRefArg, clipId, "video_find_moment");
   if (resolved.error || !resolved.path) return { ok: false, error: resolved.error ?? "unresolved" };
   const localPath = resolved.path;
 

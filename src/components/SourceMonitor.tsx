@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { ignorePlayRejection } from "../media/playRejection";
+import { beginSessionActivity } from "../observability/crashWatch";
 import { onSourceUrlsChanged, resolvePreviewUrl } from "../preview/resolve";
 import { kindOf } from "../media/formats";
 import { useEditor } from "../store/editor";
@@ -25,6 +26,9 @@ function AVPlayer({ url, kind }: { url: string; kind: "video" | "audio" }) {
   const [playing, setPlaying] = useState(false);
   const [t, setT] = useState(0);
   const [dur, setDur] = useState(0);
+  useEffect(() => {
+    if (playing) return beginSessionActivity("source-playback");
+  }, [playing, url]);
   // An audio-only container (e.g. AAC in an .mp4/.m4a) reports no video frame —
   // show the audio icon instead of a black video box, but keep playing its audio.
   const [noVideo, setNoVideo] = useState(false);
@@ -53,6 +57,7 @@ function AVPlayer({ url, kind }: { url: string; kind: "video" | "audio" }) {
               onDurationChange={(e) => setDur(e.currentTarget.duration || 0)}
               onPlay={() => setPlaying(true)}
               onPause={() => setPlaying(false)}
+              onEnded={() => setPlaying(false)}
               className={cn("max-h-full max-w-full rounded", noVideo && "hidden")}
             />
             {noVideo && (
@@ -70,6 +75,7 @@ function AVPlayer({ url, kind }: { url: string; kind: "video" | "audio" }) {
               onDurationChange={(e) => setDur(e.currentTarget.duration || 0)}
               onPlay={() => setPlaying(true)}
               onPause={() => setPlaying(false)}
+              onEnded={() => setPlaying(false)}
               className="hidden"
             />
           </>

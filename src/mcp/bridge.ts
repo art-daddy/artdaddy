@@ -10,6 +10,7 @@ import { scrubAbsolutePaths } from "../agent/scrubPaths";
 import { capToolResult } from "../agent/truncate";
 import { mcpInstructions } from "./instructions";
 import { mcpTools } from "./tools";
+import type { ToolTrace } from "../api/agentEvents";
 
 // Wire identifiers shared with Rust, not brand text: renaming one without the other
 // silently drops every request.
@@ -163,6 +164,7 @@ async function manageProject(args: Record<string, unknown>): Promise<Record<stri
 
 async function callTool(
   params: Record<string, unknown>,
+  trace: ToolTrace,
   signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
   const name = String(params.name ?? "");
@@ -170,8 +172,7 @@ async function callTool(
 
   if (name === "manage_project") return manageProject(args);
 
-  const useProjects = await projects();
-  const { activeId } = useProjects.getState();
+  const activeId = trace.context.project_id;
   if (!activeId) {
     return textResult(
       "No project is open. Call manage_project with action='list' then action='open' first.",
@@ -212,7 +213,7 @@ async function callTool(
 
   // No `origin` is passed: an MCP call is not part of a chat execution, so the mutation gate's
   // supersede check does not apply to it. It still runs under the project lock like any edit.
-  const out = await host.run(name, args, signal);
+  const out = await host.run(name, args, { surface: "mcp", signal, trace });
   const failed = !!out && typeof out === "object" && (out as { ok?: boolean }).ok === false;
   const images = await mcpImageBlocks(out);
   return textResult(sanitizeForMcp(out), failed, images);
@@ -313,8 +314,31 @@ export async function dispatch(
   switch (req.method) {
     case "tools/list":
       return listTools();
-    case "tools/call":
-      return callTool(req.params ?? {}, signal);
+    case "tools/call": {
+      const { agentEventContext, createToolTrace } = await import("../api/agentEvents");
+      const { activeId } = (await projects()).getState();
+      const params = req.params ?? {};
+      const trace = createToolTrace(
+        String(params.name ?? ""),
+        params.arguments ?? {},
+        {
+          ...agentEventContext(),
+          surface: "mcp",
+          project_id: activeId ?? "",
+          model: "",
+          transcript_id: "",
+        },
+        String(req.id),
+      );
+      try {
+        const result = await callTool(params, trace, signal);
+        trace.result(result);
+        return result;
+      } catch (error) {
+        trace.error(error);
+        throw error;
+      }
+    }
     default:
       return textResult(`unsupported bridge method: ${req.method}`, true);
   }
@@ -364,9 +388,16 @@ async function wire(): Promise<void> {
   });
 
   // Hand Rust the instruction text: `initialize` is answered there, before any bridge call.
-  void mcpInstructions()
-    .then((text) => invoke("mcp_set_instructions", { text }))
-    .catch(() => undefined);
+  const refreshInstructions = () => {
+    void mcpInstructions()
+      .then((text) => invoke("mcp_set_instructions", { text }))
+      .catch(() => undefined);
+  };
+  refreshInstructions();
+  const { useAuth } = await import("../store/auth");
+  useAuth.subscribe((state, previous) => {
+    if (state.status === "unlocked" && previous.status !== "unlocked") refreshInstructions();
+  });
 }
 
 export const __testing = { dispatch, textResult };

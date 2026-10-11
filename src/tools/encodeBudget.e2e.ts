@@ -57,6 +57,54 @@ afterAll(async () => {
 const sizeOf = async (p: string): Promise<number> => (await fsp.stat(p)).size;
 
 describe("gemini encode budget (real ffmpeg)", () => {
+  it("shares one real encode across separate callers and returns complete playable bytes", async () => {
+    if (!ok) return;
+    let encodes = 0;
+    const contexts = Array.from({ length: 4 }, () => {
+      const ctx = mkCtx(dir);
+      ctx.runner = {
+        run: (program, args, signal, cwd) => {
+          if (program === "ffmpeg") encodes += 1;
+          return nodeRunner.run(program, args, signal, cwd);
+        },
+      };
+      return ctx;
+    });
+    const outputs = await Promise.all(
+      contexts.map((ctx) =>
+        encodeVideoForGemini(ctx, src, {
+          fps: 1,
+          maxDim: 128,
+          keepAudio: false,
+          tag: "parallel",
+        }),
+      ),
+    );
+    const bytes = await Promise.all(outputs.map((output) => fsp.readFile(output)));
+    expect(new Set(outputs).size).toBe(1);
+    expect(bytes[0].length).toBeGreaterThan(1000);
+    expect(bytes.every((file) => file.equals(bytes[0]))).toBe(true);
+    expect(encodes).toBe(1);
+    const decoded = await nodeRunner.run("ffmpeg", [
+      "-v",
+      "error",
+      "-i",
+      outputs[0],
+      "-f",
+      "framemd5",
+      "-",
+    ]);
+    expect(decoded.code).toBe(0);
+    const hashes = decoded.stdout
+      .split("\n")
+      .filter((line) => line.trim() && !line.startsWith("#"))
+      .map((line) => line.split(",").at(-1)!.trim());
+    expect(hashes.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(hashes).size).toBeGreaterThan(1);
+    const leftovers = await fsp.readdir(path.join(dir, "internals", "cache", "parallel"));
+    expect(leftovers).toEqual([path.basename(outputs[0])]);
+  });
+
   it("lands the encoded file inside the byte budget it was given", async () => {
     if (!ok) return;
     const ctx = mkCtx(dir);

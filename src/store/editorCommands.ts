@@ -348,7 +348,17 @@ export function makeEditorCommands(
     setCanvas: async (patch) => {
       const { store } = get();
       if (!store) return;
-      await setCanvasTool(patch, editCtx(store));
+      await setCanvasTool(
+        (canvas) =>
+          patch.width !== undefined || patch.height !== undefined
+            ? {
+                ...patch,
+                width: patch.width ?? canvas.width,
+                height: patch.height ?? canvas.height,
+              }
+            : patch,
+        editCtx(store),
+      );
     },
     addClip: async (source, trackId, atFrame) => {
       const { store, timeline } = get();

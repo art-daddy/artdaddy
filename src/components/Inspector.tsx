@@ -6,6 +6,7 @@ import type { ReactNode } from "react";
 
 import { useEditor } from "../store/editor";
 import { sampleAnim } from "../timeline/anim";
+import { MAX_EDGE, MIN_EDGE } from "../timeline/canvas";
 import { findClip } from "../timeline/helpers";
 import {
   isAnimated,
@@ -197,7 +198,8 @@ export default function Inspector({ onHide }: { onHide?: () => void } = {}) {
               <ScrubInput
                 aria-label="canvas width"
                 value={canvas.width}
-                min={16}
+                min={MIN_EDGE}
+                max={MAX_EDGE}
                 step={2}
                 onChange={(v) => void setCanvas({ width: Math.round(v) })}
               />
@@ -206,7 +208,8 @@ export default function Inspector({ onHide }: { onHide?: () => void } = {}) {
               <ScrubInput
                 aria-label="canvas height"
                 value={canvas.height}
-                min={16}
+                min={MIN_EDGE}
+                max={MAX_EDGE}
                 step={2}
                 onChange={(v) => void setCanvas({ height: Math.round(v) })}
               />

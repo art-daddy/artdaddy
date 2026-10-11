@@ -146,6 +146,26 @@ beforeEach(() => {
 });
 
 describe("registerVideoTools", () => {
+  it.each(["video_ask", "video_find_moment"])(
+    "%s directs URL callers to a downloaded media_ref",
+    async (name) => {
+      const result = await runTool(
+        name,
+        {
+          media_ref: "https://example.invalid/clip.mp4",
+          [name === "video_ask" ? "prompt" : "query"]: "Find the opening",
+        },
+        ctxWith(probeRunner()),
+      );
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain("download_video");
+      expect(result.error).toContain("media_ref");
+      expect(result.error).not.toMatch(/file paths|local path|returned path/i);
+      expect(proxy).not.toHaveBeenCalled();
+      expect(encode).not.toHaveBeenCalled();
+    },
+  );
+
   it("registers exactly video_ask + video_find_moment", () => {
     const reg = new ClientToolRegistry();
     registerVideoTools(reg, () => null);
@@ -170,7 +190,7 @@ describe("video_ask — guards & source resolution", () => {
       ctxWith(probeRunner()),
     );
     expect(r.ok).toBe(false);
-    expect(String(r.error)).toContain("LOCAL FILE PATHS ONLY");
+    expect(String(r.error)).toContain("library media_ref");
     expect(String(r.error)).toContain("download_video");
   });
 
@@ -181,7 +201,7 @@ describe("video_ask — guards & source resolution", () => {
       ctxWith(probeRunner()),
     );
     expect(r.ok).toBe(false);
-    expect(String(r.error)).toContain("LOCAL FILE PATHS ONLY");
+    expect(String(r.error)).toContain("library media_ref");
   });
 
   it("errors when neither media_ref nor clip_id is provided", async () => {
@@ -613,7 +633,7 @@ describe("video_find_moment — guards & duration cap", () => {
       ctxWith(probeRunner()),
     );
     expect(r.ok).toBe(false);
-    expect(String(r.error)).toContain("LOCAL FILE PATHS ONLY");
+    expect(String(r.error)).toContain("library media_ref");
   });
 
   it("propagates a source-resolution error", async () => {

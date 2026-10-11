@@ -11,10 +11,11 @@ import type { InferenceAttachment, RoundInput, ToolResultItem, Usage } from "../
 import { captureError, setCorrelation } from "../observability/sentry";
 import { isExpected, toUserMessage } from "../lib/errors";
 import { submitFeedback, type FeedbackKind } from "../api/feedback";
-import { setAgentContext } from "../api/agentEvents";
+import { agentEventContext, setAgentContext } from "../api/agentEvents";
 import type { SSEMessage } from "../api/sse";
 import type { ApprovalMode, Attachment, PendingApproval, SessionState } from "../api/types";
 import { useEditor } from "./editor";
+import { discardFirstPrompt } from "./firstPrompt";
 import { loadTimeline, replaceTimeline } from "../timeline/engine";
 import { withProjectLock } from "../tools/coordinator";
 import type { ProjectStoreAccess } from "../tools/store";
@@ -457,9 +458,18 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
     // flag set. Either way it reads ITS OWN exec, never the next turn's.
     const superseded = () => exec !== currentExec;
     const halted = () => exec.stopped || exec !== currentExec;
+    let traceLabels = {
+      ...agentEventContext(),
+      surface: "app",
+      project_id: exec.host.projectId,
+      model: get().model,
+      transcript_id: get().transcriptId ?? "",
+    };
     return {
+      eventContext: () => ({ ...traceLabels }),
       infer: async (roundInput: RoundInput, attachments?: InferenceAttachment[]) => {
         const { model, effort, providerSnapshot, projectId, transcriptId } = get();
+        traceLabels = { ...traceLabels, model };
         const ed = useEditor.getState();
         const cfg = ed.store ? await projectConfig(ed.store) : undefined;
         setCorrelation({ project_id: projectId, transcript_id: transcriptId, model_id: model });
@@ -467,9 +477,10 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
         // cannot say which model and which transcript produced it answers no question worth
         // asking. Set per round, because the picker can change between them.
         setAgentContext({
+          surface: "app",
           model,
-          project_id: projectId ?? "",
-          transcript_id: transcriptId ?? "",
+          project_id: traceLabels.project_id,
+          transcript_id: traceLabels.transcript_id,
         });
         // Client-owned history (Phase 1, option A): ask the server to rebuild the model's whole
         // input from the transcript. Until a server has said it does that for this model, the
@@ -513,7 +524,7 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
           set({ providerSnapshot: ranHistory ? {} : (dto.provider_snapshot ?? providerSnapshot) });
         return dto;
       },
-      runTool: async (name, args) => {
+      runTool: async (name, args, trace) => {
         // Core fix: a superseded/stopped turn NEVER runs a tool -> no hidden edits on
         // its old project after a switch. Bound to THIS turn's host + abort signal.
         if (halted()) return { ok: false, error: "turn cancelled" };
@@ -525,10 +536,17 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
             : null;
         // Carry THIS execution's origin so a commit that lands after a supersede/restore is rejected
         // at the mutation gate (the mandatory backstop under the halted() guard above).
-        const out = await exec.host.run(name, args, exec.controller.signal, {
-          chatSessionId: get().transcriptId ?? "",
-          branchId: 0,
-          executionId: exec.token,
+        const out = await exec.host.run(name, args, {
+          surface: "app",
+          signal: exec.controller.signal,
+          model: traceLabels.model,
+          transcriptId: traceLabels.transcript_id,
+          trace,
+          origin: {
+            chatSessionId: get().transcriptId ?? "",
+            branchId: 0,
+            executionId: exec.token,
+          },
         });
         if (wholeRead && !superseded() && (out as { ok?: unknown } | null)?.ok !== false)
           awareness.sawWholeTimeline(wholeRead);
@@ -1078,6 +1096,7 @@ export function getChatStore(projectId: string): StoreApi<ChatState> {
 /** Drop a project's chat store instance: retire its turn (stops any in-flight
  *  paid calls + tools) and remove it from the registry. */
 export function disposeChatStore(projectId: string): void {
+  discardFirstPrompt(projectId);
   const s = chatStores.get(projectId);
   if (!s) return;
   s.getState().deactivate();

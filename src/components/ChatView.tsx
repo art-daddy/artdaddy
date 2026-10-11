@@ -14,7 +14,7 @@ import { formatCredits, getUsage, refreshUsage, subscribeUsage } from "../api/us
 import type { FeedbackKind } from "../api/feedback";
 import { BRAND } from "../brand";
 import { openDiscord } from "../lib/community";
-import { isOutOfCredits } from "../lib/outOfCredits";
+import { CREDITS_PAUSED, isOutOfCredits } from "../lib/outOfCredits";
 import DiscordCreditsCta from "./DiscordCreditsCta";
 import { listProjectFiles } from "../lib/files";
 import { onOsDragOver, onOsDrop, webOwnsFileDrops } from "../lib/osDrop";
@@ -28,7 +28,7 @@ import {
 import { useChat } from "../store/chat";
 import { useAuth } from "../store/auth";
 import { useEditor } from "../store/editor";
-import { takeFirstPrompt } from "../store/firstPrompt";
+import { discardFirstPrompt, peekFirstPrompt, takeFirstPrompt } from "../store/firstPrompt";
 import { mentionKey, mentionLabel } from "../timeline/mentions";
 import {
   buildMentionOptions,
@@ -111,6 +111,8 @@ export default function ChatView({ onHide }: { onHide?: () => void } = {}) {
   const {
     turns,
     projectId,
+    transcriptId,
+    closing,
     streaming,
     pending,
     session,
@@ -212,9 +214,21 @@ export default function ChatView({ onHide }: { onHide?: () => void } = {}) {
 
   // What the user typed in the assistant pane before this project existed.
   useEffect(() => {
-    const first = takeFirstPrompt();
+    const first = projectId ? peekFirstPrompt(projectId) : null;
     if (first) setText(first);
-  }, []);
+  }, [projectId]);
+
+  useEffect(() => {
+    if (!projectId || !transcriptId || !aiReady || closing || streaming) return;
+    if (turns.some((turn) => !turn.system)) {
+      discardFirstPrompt(projectId);
+      return;
+    }
+    const first = takeFirstPrompt(projectId);
+    if (!first) return;
+    setText("");
+    void send(first, []);
+  }, [projectId, transcriptId, aiReady, closing, streaming, turns, send]);
 
   // Media list for the @ / Add-context picker; refetched on import (like FileTree).
   useEffect(() => {
@@ -864,7 +878,11 @@ function ContextMeter({ session, model }: { session: SessionState | null; model:
         {fmtTok(used)}/{fmtTok(max)} · {pct}%
       </span>
       {usage.metered &&
-        (usage.over ? (
+        (usage.globalPaused ? (
+          <span className="tabular-nums text-amber-400" title={CREDITS_PAUSED}>
+            {formatCredits(Math.max(0, usage.remaining))} cr left · AI paused
+          </span>
+        ) : usage.over ? (
           // At zero the number is the least useful thing we can show: it states the dead end
           // without the way out, which is the one thing someone stuck here needs.
           <button

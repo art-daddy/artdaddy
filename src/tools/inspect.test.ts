@@ -17,6 +17,9 @@ import {
   midpointFrames,
 } from "./inspect";
 import { ProjectStoreAccess, joinPath, type FsLike } from "./store";
+import { registerLibraryClip } from "./import";
+import { registerTestDocument, resetTestDocuments } from "../test/timelineKit";
+import { emptyTimeline } from "../timeline/model";
 import { makeStoryboard } from "./storyboard";
 import { peekTranscript, runWhisper } from "./transcribe";
 import { backgroundLoudness, prioritizeTranscript } from "./transcriptQueue";
@@ -111,6 +114,20 @@ class MockFs implements FsLike {
   async writeBytes(p: string, b: Uint8Array): Promise<void> {
     this.bytes.set(joinPath(p), b);
   }
+  async copyFile(from: string, to: string): Promise<void> {
+    if (!this.files.has(joinPath(from))) throw new Error("ENOENT");
+    this.files.set(joinPath(to), this.files.get(joinPath(from))!);
+    const bytes = this.bytes.get(joinPath(from));
+    if (bytes) this.bytes.set(joinPath(to), bytes.slice());
+  }
+  async rename(from: string, to: string): Promise<void> {
+    await this.copyFile(from, to);
+    await this.remove(from);
+  }
+  async remove(p: string): Promise<void> {
+    this.files.delete(joinPath(p));
+    this.bytes.delete(joinPath(p));
+  }
   async mkdir(): Promise<void> {}
 }
 
@@ -136,6 +153,22 @@ function ctxWith(runner: CommandRunner, fs: MockFs = new MockFs()): ClientToolCo
 }
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
+
+describe("clip lookup recovery", () => {
+  it("points an unplaced library filename to the available media_ref input", async () => {
+    const fs = new MockFs();
+    await fs.writeTextFile(
+      joinPath(DIR, "internals", "timeline.json"),
+      JSON.stringify(emptyTimeline()),
+    );
+    const runner: CommandRunner = { run: vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })) };
+    const result = await inspectMediaTool({ clip_id: "clip1" }, ctxWith(runner, fs));
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("media_ref");
+    expect(result.error).toContain("get_project_state");
+    expect(runner.run).not.toHaveBeenCalled();
+  });
+});
 
 /** The summary ffmpeg's ebur128 + volumedetect print for the EBU -23 LUFS calibration tone. */
 const TONE_STDERR = `[Parsed_ebur128_0 @ 0] Summary:
@@ -262,6 +295,68 @@ describe("inspectMediaTool", () => {
     expect(r.ok).toBe(false);
     expect(String(r.error)).toContain("media not found");
   });
+
+  it.each([
+    ["image", "linked.png", IMAGE_PROBE],
+    ["video", "linked.mp4", VIDEO_PROBE],
+    ["audio", "linked.mp3", AUDIO_PROBE],
+  ] as const)(
+    "keeps the library identity of linked %s instead of reporting a disk path",
+    async (kind, filename, probe) => {
+      const fs = new MockFs();
+      const path = `C:/Users/customer/Private Media/${filename}`;
+      fs.touch(path);
+      const ctx = ctxWith(mediaRunner(fs, { probe }), fs);
+      const doc = registerTestDocument(DIR);
+      await doc.open();
+      try {
+        const entry = await registerLibraryClip(
+          ctx.store,
+          new Uint8Array([1, 2, 3]),
+          filename,
+          kind,
+          undefined,
+          path,
+        );
+        for (const reference of [entry.id, filename]) {
+          const result = await inspectMediaTool({ media_ref: reference, max_frames: 1 }, ctx);
+          expect(result.ok).toBe(true);
+          expect(result.media_ref).toBe(entry.id);
+          expect(result.media_ref).not.toBe(path);
+        }
+        const timeline = emptyTimeline(1920, 1080, 30);
+        timeline.tracks = [
+          {
+            id: "linked_track",
+            kind: kind === "audio" ? "audio" : "video",
+            z: 0,
+            clips: [
+              {
+                id: "linked_clip",
+                kind,
+                media_ref: path,
+                timeline_in: 0,
+                timeline_out: 30,
+                ...(kind === "image" ? {} : { source_in: 0, source_out: 30 }),
+              },
+            ],
+          },
+        ];
+        fs.files.set(joinPath(DIR, "internals/timeline.json"), JSON.stringify(timeline));
+        const placed = await inspectMediaTool({ clip_id: "linked_clip", max_frames: 1 }, ctx);
+        expect(placed.ok).toBe(true);
+        expect(placed.media_ref).toBe(entry.id);
+        fs.files.set(joinPath(DIR, "internals/library.json"), JSON.stringify({ clips: [] }));
+        const unregistered = await inspectMediaTool({ clip_id: "linked_clip", max_frames: 1 }, ctx);
+        expect(unregistered.ok).toBe(false);
+        expect(unregistered.media_ref).toBeUndefined();
+        expect(String(unregistered.error)).toContain("not registered in the library");
+        expect(JSON.stringify(unregistered)).not.toContain(path);
+      } finally {
+        await resetTestDocuments();
+      }
+    },
+  );
 
   it("attaches an image directly (no frame extraction)", async () => {
     const fs = new MockFs();

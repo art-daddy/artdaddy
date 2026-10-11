@@ -9,6 +9,7 @@
 import { stderrExcerpt, type CommandResult } from "./command";
 import type { AppCache } from "./appCache";
 import type { ClientToolContext } from "./context";
+import { missingClipMessage } from "../contract/params";
 import { jobResult, jobSupervisor, runAsJob, whenJobEnds, type JobView } from "./jobSupervisor";
 import { shortHash } from "./media";
 import type { ClientToolRegistry } from "./registry";
@@ -1280,7 +1281,7 @@ export async function getTranscriptTool(
   let wantLinkGroup: string | null = null;
   if (wantId) {
     const found = findClip(timeline, wantId);
-    if (!found) return { ok: false, error: `clip not found on the timeline: ${wantId}` };
+    if (!found) return { ok: false, error: missingClipMessage("get_transcript", wantId) };
     const lg = found[1].link_group;
     wantLinkGroup = typeof lg === "string" && lg ? lg : null;
   }

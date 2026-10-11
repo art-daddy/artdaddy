@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { ignorePlayRejection } from "../media/playRejection";
 import { offlineUnderPlayhead } from "../lib/mediaLink";
+import { beginSessionActivity } from "../observability/crashWatch";
 
 import { platform } from "../platform";
 import { PreviewAudio, publishPreviewAudio } from "../preview/audioEngine";
@@ -139,6 +140,9 @@ export default function StagePanel({ projectId }: { projectId: string }) {
   }, []);
 
   const duration = showRendered ? vDur || timelineDuration : timelineDuration;
+  useEffect(() => {
+    if (playing && !onSource && duration > 0) return beginSessionActivity("playback");
+  }, [playing, onSource, duration]);
   // Desktop: the resolved asset URL (once ready); web: the server endpoint.
   const videoSrc = assetSrc ?? undefined;
 

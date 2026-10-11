@@ -4,6 +4,8 @@ mod jobs;
 mod mcp;
 mod reload_guard;
 #[cfg(desktop)]
+mod runtime_health;
+#[cfg(desktop)]
 mod sidecar_run;
 #[cfg(desktop)]
 mod token_store;
@@ -321,6 +323,7 @@ fn install_update(app: tauri::AppHandle, staged: tauri::State<'_, StagedUpdate>)
     .take()
     .ok_or_else(|| "the update has not been downloaded".to_string())?;
   update.install(bytes).map_err(|e| e.to_string())?;
+  runtime_health::mark_exit(&app, runtime_health::CleanExit::UpdateRestart);
   app.restart();
 }
 
@@ -353,25 +356,22 @@ pub fn run() {
     .plugin(tauri_plugin_dialog::init())
     .plugin(tauri_plugin_deep_link::init());
 
-  let builder = if reload_guard::enabled() {
-    let guard = std::sync::Arc::new(reload_guard::GuardState::default());
-    #[cfg(target_os = "macos")]
-    let builder = {
-      let state = guard.clone();
-      builder.on_web_content_process_terminate(move |webview| {
-        reload_guard::on_web_content_terminated(&state, webview)
-      })
-    };
-    builder.plugin(reload_guard::plugin(guard))
-  } else {
-    builder
+  let guard = std::sync::Arc::new(reload_guard::GuardState::default());
+  #[cfg(target_os = "macos")]
+  let builder = {
+    let state = guard.clone();
+    builder.on_web_content_process_terminate(move |webview| {
+      reload_guard::on_web_content_terminated(&state, webview)
+    })
   };
+  let builder = builder.plugin(reload_guard::plugin(guard));
 
   #[cfg(desktop)]
   let builder = builder
     .plugin(tauri_plugin_updater::Builder::new().build())
     // After the shell plugin: its jobs run the shell's sidecars.
     .plugin(jobs::plugin())
+    .plugin(runtime_health::plugin())
     // The page's own sidecar runs (every tool's ffmpeg/ffprobe/whisper/yt-dlp/browser).
     .plugin(sidecar_run::plugin())
     .manage(StagedUpdate::default())
@@ -401,6 +401,11 @@ pub fn run() {
       jobs::jobs_commit,
       jobs::jobs_forget,
       jobs::jobs_launch_id,
+      runtime_health::runtime_health_begin,
+      runtime_health::runtime_health_status,
+      runtime_health::runtime_health_update,
+      runtime_health::runtime_health_ack,
+      reload_guard::qa_renderer_process,
       sidecar_run::sidecar_run,
       sidecar_run::sidecar_kill,
       mcp::mcp_start,
@@ -441,6 +446,8 @@ pub fn run() {
       }
       #[cfg(desktop)]
       migrate_data_folder(app.handle());
+      #[cfg(desktop)]
+      runtime_health::initialize(app.handle());
       #[cfg(desktop)]
       if cfg!(target_os = "macos") {
         install_macos_menu(app.handle())?;

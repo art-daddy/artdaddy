@@ -85,6 +85,7 @@ impl GuardState {
 }
 
 pub fn plugin<R: Runtime>(state: Arc<GuardState>) -> tauri::plugin::TauriPlugin<R> {
+  let block_reload = enabled();
   let record = state.clone();
   let decide = state.clone();
   #[cfg_attr(not(windows), allow(unused_variables))]
@@ -96,6 +97,9 @@ pub fn plugin<R: Runtime>(state: Arc<GuardState>) -> tauri::plugin::TauriPlugin<
       }
     })
     .on_navigation(move |webview, to| {
+      if !block_reload {
+        return true;
+      }
       let allowed = decide.allow(webview.label(), to);
       if !allowed {
         log::info!("reload-guard: refused a reload of the app ({to})");
@@ -111,14 +115,69 @@ pub fn plugin<R: Runtime>(state: Arc<GuardState>) -> tauri::plugin::TauriPlugin<
     .build()
 }
 
+#[cfg(desktop)]
+#[tauri::command]
+pub async fn qa_renderer_process(webview: tauri::Webview) -> Result<u32, String> {
+  use tauri::Manager;
+  if !cfg!(debug_assertions)
+    || std::env::var_os("CI").is_none()
+    || std::env::var("ARTDADDY_PHASE6_QA_RENDERER").as_deref() != Ok("1")
+    || !webview.app_handle().config().identifier.starts_with("com.artdaddy.qa.phase6-")
+  {
+    return Err("Native renderer inspection is restricted to isolated QA".into());
+  }
+  #[cfg(all(target_os = "macos", debug_assertions))]
+  {
+    let (send, receive) = std::sync::mpsc::channel();
+    webview.with_webview(move |native| unsafe {
+      use std::ffi::{c_char, c_void};
+      #[link(name = "objc")]
+      extern "C" {
+        fn sel_registerName(name: *const c_char) -> *mut c_void;
+        fn objc_msgSend();
+      }
+      let selector = sel_registerName(b"_webProcessIdentifier\0".as_ptr().cast());
+      let responds: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> i8 =
+        std::mem::transmute(objc_msgSend as *const ());
+      let get_pid: unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32 =
+        std::mem::transmute(objc_msgSend as *const ());
+      let object = native.inner();
+      let result = if object.is_null()
+        || responds(object, sel_registerName(b"respondsToSelector:\0".as_ptr().cast()), selector) == 0
+      {
+        Err("WKWebView cannot report its renderer process".into())
+      } else {
+        let pid = get_pid(object, selector);
+        if pid > 0 { Ok(pid as u32) } else { Err("WKWebView has no live renderer".into()) }
+      };
+      let _ = send.send(result);
+    }).map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || receive.recv_timeout(Duration::from_secs(10)))
+      .await
+      .map_err(|error| error.to_string())?
+      .map_err(|error| error.to_string())?
+  }
+  #[cfg(not(all(target_os = "macos", debug_assertions)))]
+  {
+    Err("Native renderer inspection requires a debug macOS app".into())
+  }
+}
+
 /// macOS: Tauri reloads a page whose web content process died; this does the same after marking
 /// it, because the guard would otherwise refuse that reload. Registered on the builder.
 #[cfg(target_os = "macos")]
 pub fn on_web_content_terminated<R: Runtime>(state: &GuardState, webview: &tauri::Webview<R>) {
+  use tauri::Manager;
+  crate::runtime_health::observe_failure(
+    webview.app_handle(),
+    crate::runtime_health::FailureKind::WebContentTerminated,
+  );
   state.renderer_died(webview.label());
   log::warn!("reload-guard: the page's web content process died; reloading it");
-  if let Err(e) = webview.reload() {
-    log::error!("reload-guard: could not reload the page: {e}");
+  if state.may_auto_reload(webview.label(), Instant::now()) {
+    if let Err(e) = webview.reload() {
+      log::error!("reload-guard: could not reload the page: {e}");
+    }
   }
 }
 
@@ -127,7 +186,7 @@ mod windows {
   use std::sync::Arc;
   use std::time::Instant;
 
-  use tauri::Runtime;
+  use tauri::{Manager, Runtime};
   use webview2_com::Microsoft::Web::WebView2::Win32::{
     COREWEBVIEW2_PROCESS_FAILED_KIND, COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED,
     COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE,
@@ -150,12 +209,20 @@ mod windows {
         }
         let exited = kind == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED;
         if exited || kind == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE {
+          crate::runtime_health::observe_failure(
+            reloader.app_handle(),
+            if exited {
+              crate::runtime_health::FailureKind::RendererExited
+            } else {
+              crate::runtime_health::FailureKind::RendererUnresponsive
+            },
+          );
           state.renderer_died(&label);
           log::warn!(
             "reload-guard: the page's renderer failed (kind {}); its reload may pass",
             kind.0
           );
-          if exited && state.may_auto_reload(&label, Instant::now()) {
+          if state.may_auto_reload(&label, Instant::now()) {
             if let Err(e) = reloader.reload() {
               log::error!("reload-guard: could not reload the page: {e}");
             }
@@ -201,25 +268,44 @@ mod tests {
     // Windows serves the app from http://tauri.localhost; macOS and Linux from tauri://localhost.
     for page in ["http://tauri.localhost/p/abc", "tauri://localhost/p/abc"] {
       let loaded = u(page);
-      assert!(!navigation_allowed(Some(&loaded), &loaded), "reload of {page}");
-      let root = u(&format!("{}://{}/", loaded.scheme(), loaded.host_str().unwrap()));
-      assert!(!navigation_allowed(Some(&loaded), &root), "navigation to the app root from {page}");
+      assert!(
+        !navigation_allowed(Some(&loaded), &loaded),
+        "reload of {page}"
+      );
+      let root = u(&format!(
+        "{}://{}/",
+        loaded.scheme(),
+        loaded.host_str().unwrap()
+      ));
+      assert!(
+        !navigation_allowed(Some(&loaded), &root),
+        "navigation to the app root from {page}"
+      );
     }
   }
 
   #[test]
   fn the_dev_server_page_counts_as_the_app_when_the_guard_is_on_in_dev() {
     let loaded = u("http://localhost:5173/p/abc");
-    assert!(!navigation_allowed(Some(&loaded), &u("http://localhost:5173/")));
+    assert!(!navigation_allowed(
+      Some(&loaded),
+      &u("http://localhost:5173/")
+    ));
     // A different port is a different origin.
-    assert!(navigation_allowed(Some(&loaded), &u("http://localhost:5174/")));
+    assert!(navigation_allowed(
+      Some(&loaded),
+      &u("http://localhost:5174/")
+    ));
   }
 
   #[test]
   fn other_origins_pass_through() {
     let loaded = u("tauri://localhost/p/abc");
     assert!(navigation_allowed(Some(&loaded), &u("about:blank")));
-    assert!(navigation_allowed(Some(&loaded), &u("https://example.com/")));
+    assert!(navigation_allowed(
+      Some(&loaded),
+      &u("https://example.com/")
+    ));
     assert!(navigation_allowed(Some(&loaded), &u("http://localhost/")));
   }
 
@@ -230,8 +316,14 @@ mod tests {
     g.page_loaded("main", &page);
     assert!(!g.allow("main", &page), "a live page is never reloaded");
     g.renderer_died("main");
-    assert!(g.allow("main", &u("http://tauri.localhost/")), "the recovery reload passes");
-    assert!(!g.allow("main", &page), "the recovered page is guarded again");
+    assert!(
+      g.allow("main", &u("http://tauri.localhost/")),
+      "the recovery reload passes"
+    );
+    assert!(
+      !g.allow("main", &page),
+      "the recovered page is guarded again"
+    );
   }
 
   #[test]
@@ -262,6 +354,9 @@ mod tests {
     assert!(g.may_auto_reload("main", t0));
     assert!(!g.may_auto_reload("main", t0 + Duration::from_secs(5)));
     assert!(g.may_auto_reload("main", t0 + AUTO_RELOAD_EVERY + Duration::from_secs(1)));
-    assert!(g.may_auto_reload("other", t0 + Duration::from_secs(5)), "per window");
+    assert!(
+      g.may_auto_reload("other", t0 + Duration::from_secs(5)),
+      "per window"
+    );
   }
 }

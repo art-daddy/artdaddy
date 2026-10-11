@@ -1,11 +1,11 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   __resetProjectJobs,
   openProjectJobs,
   submitGeneration,
   whenGenerationsSettle,
 } from "./genJobs";
-import { clearUsage, markOverLimit } from "../api/usage";
+import { clearUsage, getUsage, markOverLimit } from "../api/usage";
 import { DISCORD_URL } from "../lib/community";
 import { isOutOfCredits } from "../lib/outOfCredits";
 import { sanitizeForMcp } from "../mcp/bridge";
@@ -72,13 +72,144 @@ function make(): { fs: Fs; store: ProjectStoreAccess } {
 /** A chat execution identity: THIS CHAT asked for the generation. Only that resumes the chat. */
 const AGENT = { chatSessionId: "t1", branchId: 0, executionId: 1 };
 
+beforeEach(() => {
+  clearUsage();
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => new Response('{"metered":false}')),
+  );
+});
+
 afterEach(async () => {
   __resetProjectJobs();
   __resetJobNotes();
+  clearUsage();
+  vi.unstubAllGlobals();
   await resetTestDocuments();
 });
 
 describe("async generation", () => {
+  for (const tool of ["generate_image", "generate_video", "generate_music", "generate_voiceover"]) {
+    it(`refuses external ${tool} on a shared pause without claiming the user's credit is gone`, async () => {
+      const { fs, store } = make();
+      markOverLimit({ used: 3, limit: 100, scope: "global" });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(
+          async () =>
+            new Response(
+              JSON.stringify({
+                metered: true,
+                used: 3,
+                limit: 100,
+                remaining: 97,
+                over: true,
+                pause_scope: "global",
+              }),
+            ),
+        ),
+      );
+      const run = vi.fn(async () => [{ bytes: PNG }]);
+      await expect(
+        submitGeneration({
+          store,
+          tool,
+          label: "media",
+          mediaKind: "image",
+          count: 1,
+          filename: () => "media.png",
+          run,
+        }),
+      ).rejects.toMatchObject({
+        detail: { scope: "global" },
+        message: expect.stringContaining("not submitted and nothing was charged"),
+      });
+      expect(run).not.toHaveBeenCalled();
+      expect(await store.listClips()).toEqual([]);
+      expect(await fs.exists(joinPath(DIR, "internals/jobs.json"))).toBe(false);
+      expect(getUsage().remaining).toBe(97);
+    });
+  }
+
+  for (const [tool, mediaKind] of [
+    ["generate_image", "image"],
+    ["generate_video", "video"],
+    ["generate_music", "audio"],
+    ["generate_voiceover", "audio"],
+  ]) {
+    for (const outcome of ["done", "failed"] as const) {
+      it(`refreshes the displayed balance after an external ${tool} is ${outcome}`, async () => {
+        const { fs, store } = make();
+        markOverLimit({ scope: "user", used: 95, limit: 100, remaining: 5, requested: 6 });
+        const used = outcome === "done" ? 96 : 94;
+        const fetch = vi.fn(
+          async () =>
+            new Response(
+              JSON.stringify({
+                metered: true,
+                used,
+                limit: 100,
+                remaining: 100 - used,
+              }),
+            ),
+        );
+        vi.stubGlobal("fetch", fetch);
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => (release = resolve));
+        const submitted = await submitGeneration({
+          store,
+          tool,
+          label: "media",
+          mediaKind,
+          count: 1,
+          filename: () => "media.png",
+          run: async () => {
+            await gate;
+            if (outcome === "failed") throw new Error("provider rejected the request");
+            return [{ bytes: PNG }];
+          },
+        });
+        expect(getUsage().used).toBe(95);
+        expect(fetch).not.toHaveBeenCalled();
+        release();
+        await whenGenerationsSettle();
+        expect(getUsage()).toEqual({
+          metered: true,
+          used,
+          limit: 100,
+          remaining: 100 - used,
+          over: false,
+        });
+        expect((await jobs(fs)).find((job) => job.id === submitted.job_id)?.status).toBe(outcome);
+        expect(pendingJobNotes(DIR)).toHaveLength(0);
+      });
+    }
+  }
+
+  it("keeps a completed generation when refreshing its balance fails", async () => {
+    const { fs, store } = make();
+    markOverLimit({ scope: "user", used: 95, limit: 100, remaining: 5, requested: 6 });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("usage unavailable");
+      }),
+    );
+    const submitted = await submitGeneration({
+      store,
+      tool: "generate_image",
+      label: "an image",
+      mediaKind: "image",
+      count: 1,
+      filename: () => "image.png",
+      run: async () => [{ bytes: PNG }],
+    });
+    await whenGenerationsSettle();
+    expect((await jobs(fs)).find((job) => job.id === submitted.job_id)?.status).toBe("done");
+    expect(await fs.readBytes((await store.resolveRef(submitted.media_refs[0]))!)).toEqual(PNG);
+    expect(getUsage().used).toBe(95);
+  });
+
   it("returns a placeholder BEFORE the paid call resolves", async () => {
     const { fs, store } = make();
     let release!: () => void;

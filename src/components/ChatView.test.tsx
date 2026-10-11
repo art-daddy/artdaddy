@@ -1,4 +1,6 @@
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { StrictMode } from "react";
+import fc from "fast-check";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -42,6 +44,8 @@ vi.mock("../api/desktopAuth", () => ({ startDesktopSignIn }));
 import { uploadFiles, importViaDialog, importPaths, filesFromItems } from "../lib/upload";
 import { DISCORD_URL } from "../lib/community";
 import { toUserMessage } from "../lib/errors";
+import { peekFirstPrompt, setFirstPrompt, takeFirstPrompt } from "../store/firstPrompt";
+import { CREDITS_PAUSED } from "../lib/outOfCredits";
 import ChatView from "./ChatView";
 import { STARTER_PROMPTS } from "./starterPrompts";
 
@@ -49,6 +53,8 @@ function baseState() {
   return {
     turns: [],
     projectId: "p1",
+    transcriptId: "chat-p1",
+    closing: false,
     streaming: false,
     pending: null,
     session: null,
@@ -75,16 +81,144 @@ function baseState() {
 }
 
 beforeEach(() => {
+  setFirstPrompt("", "");
   Object.assign(state, baseState());
   authState.status = "unlocked";
   platformName = "web";
   usageMock.over = false;
+  usageMock.used = 10;
+  usageMock.limit = 100;
   usageMock.remaining = 1_500_000;
+  Reflect.deleteProperty(usageMock, "globalPaused");
   vi.mocked(importPaths).mockResolvedValue([]);
   vi.mocked(filesFromItems).mockReturnValue([]);
 });
 
 describe("ChatView", () => {
+  it("only retains nonempty first requests and consumes them for the owning project once", () => {
+    fc.assert(
+      fc.property(fc.string(), (text) => {
+        setFirstPrompt("first-property", text);
+        const expected = text.trim() || null;
+        expect(peekFirstPrompt("first-property")).toBe(expected);
+        expect(takeFirstPrompt("unrelated-project")).toBeNull();
+        expect(takeFirstPrompt("first-property")).toBe(expected);
+        expect(takeFirstPrompt("first-property")).toBeNull();
+      }),
+    );
+    setFirstPrompt("", "Must not be queued without a project");
+    expect(peekFirstPrompt("")).toBeNull();
+    setFirstPrompt("", "");
+  });
+
+  it("shows the waiting request when its project arrives before sign-in", () => {
+    setFirstPrompt("p1", "Make my reel");
+    state.projectId = null;
+    state.transcriptId = null;
+    authState.status = "checking";
+    const view = render(<ChatView />);
+    expect(screen.getByPlaceholderText(/Message the editor/)).toHaveValue("");
+    state.projectId = "p1";
+    view.rerender(<ChatView />);
+    expect(screen.getByPlaceholderText(/Message the editor/)).toHaveValue("Make my reel");
+    expect(state.send).not.toHaveBeenCalled();
+  });
+
+  it("submits the start-screen prompt as the first turn without a second click", async () => {
+    setFirstPrompt("p1", "Create a creative Instagram reel");
+    const view = render(<ChatView />);
+    await waitFor(() =>
+      expect(state.send).toHaveBeenCalledWith("Create a creative Instagram reel", []),
+    );
+    expect(state.send).toHaveBeenCalledTimes(1);
+    expect(screen.getByPlaceholderText(/Message the editor/)).toHaveValue("");
+    view.unmount();
+    render(<ChatView />);
+    expect(state.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("waits for transcript loading before starting the first turn", () => {
+    setFirstPrompt("p1", "Make my reel");
+    state.transcriptId = null;
+    const view = render(<ChatView />);
+    expect(state.send).not.toHaveBeenCalled();
+    expect(screen.getByPlaceholderText(/Message the editor/)).toHaveValue("Make my reel");
+    state.transcriptId = "loaded-chat";
+    view.rerender(<ChatView />);
+    expect(state.send).toHaveBeenCalledWith("Make my reel", []);
+    expect(state.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("waits for sign-in without losing the start-screen prompt", () => {
+    setFirstPrompt("p1", "Make my reel");
+    authState.status = "checking";
+    const view = render(<ChatView />);
+    expect(state.send).not.toHaveBeenCalled();
+    authState.status = "unlocked";
+    view.rerender(<ChatView />);
+    expect(state.send).toHaveBeenCalledWith("Make my reel", []);
+    expect(state.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("never gives the queued first prompt to another project", () => {
+    setFirstPrompt("created-project", "Make my reel");
+    const view = render(<ChatView />);
+    expect(state.send).not.toHaveBeenCalled();
+    state.projectId = "created-project";
+    state.transcriptId = "created-chat";
+    view.rerender(<ChatView />);
+    expect(state.send).toHaveBeenCalledWith("Make my reel", []);
+    expect(state.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not duplicate the first turn during StrictMode effect replay", () => {
+    setFirstPrompt("p1", "Make my reel");
+    render(
+      <StrictMode>
+        <ChatView />
+      </StrictMode>,
+    );
+    expect(state.send).toHaveBeenCalledWith("Make my reel", []);
+    expect(state.send).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["closing", "streaming"])("does not consume a prompt while chat is %s", (field) => {
+    setFirstPrompt("p1", "Make my reel");
+    state[field] = true;
+    const view = render(<ChatView />);
+    expect(state.send).not.toHaveBeenCalled();
+    state[field] = false;
+    view.rerender(<ChatView />);
+    expect(state.send).toHaveBeenCalledWith("Make my reel", []);
+    expect(state.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not insert a stale first prompt into an existing conversation", () => {
+    setFirstPrompt("p1", "Old start-screen text");
+    state.turns = [
+      { id: "existing", userText: "Already started", attachments: [], parts: [], status: "done" },
+    ];
+    const view = render(<ChatView />);
+    expect(state.send).not.toHaveBeenCalled();
+    state.turns = [];
+    view.rerender(<ChatView />);
+    expect(state.send).not.toHaveBeenCalled();
+  });
+
+  it("keeps the real remaining credit visible while the shared budget is paused", () => {
+    Object.assign(usageMock, {
+      over: true,
+      used: 3,
+      limit: 100,
+      remaining: 97,
+      globalPaused: true,
+    });
+    render(<ChatView />);
+    expect(screen.getByText(/97 cr left/)).toBeInTheDocument();
+    expect(screen.getByTitle(CREDITS_PAUSED)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /join our discord/i })).not.toBeInTheDocument();
+  });
+
   it("shows the remaining balance while there is one", () => {
     render(<ChatView />);
     expect(screen.queryByRole("button", { name: /join our discord/i })).not.toBeInTheDocument();

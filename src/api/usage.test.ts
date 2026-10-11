@@ -68,6 +68,18 @@ describe("subscribeUsage", () => {
 });
 
 describe("markOverLimit", () => {
+  it.each([
+    { used: 3, limit: 100, remaining: 97 },
+    { used: 110, limit: 100, remaining: 0 },
+  ])(
+    "preserves the actual account headroom on an immediate global refusal: %j",
+    async (balance) => {
+      const { markOverLimit, getUsage } = await load();
+      markOverLimit({ used: balance.used, limit: balance.limit, scope: "global" });
+      expect(getUsage()).toEqual({ metered: true, ...balance, over: true, globalPaused: true });
+    },
+  );
+
   it("keeps remaining credit when only this request's reservation is unaffordable", async () => {
     const { markOverLimit, getUsage } = await load();
     markOverLimit({ used: 99, limit: 100, remaining: 1, requested: 3, scope: "user" });
@@ -158,6 +170,279 @@ it("does not exhaust a fresh account when its first request is too expensive", a
 });
 
 describe("refreshUsage", () => {
+  it("replaces a known global pause with a reported user-only exhaustion", async () => {
+    const { refreshUsage, markOverLimit, getUsage } = await load();
+    markOverLimit({ used: 3, limit: 100, scope: "global" });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({
+          metered: true,
+          used: 100,
+          limit: 100,
+          remaining: 0,
+          over: true,
+          pause_scope: "user",
+        }),
+      ),
+    );
+    await refreshUsage();
+    expect(getUsage()).toEqual({ metered: true, used: 100, limit: 100, remaining: 0, over: true });
+  });
+
+  it("does not invent a global scope for an unclassified pause", async () => {
+    const { refreshUsage, getUsage } = await load();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({
+          metered: true,
+          used: 3,
+          limit: 100,
+          remaining: 97,
+          over: true,
+        }),
+      ),
+    );
+    await refreshUsage();
+    expect(getUsage()).toEqual({ metered: true, used: 3, limit: 100, remaining: 97, over: true });
+  });
+
+  it("does not invent a shared pause from a scope label without an over status", async () => {
+    const { refreshUsage, getUsage } = await load();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({
+          metered: true,
+          used: 3,
+          limit: 100,
+          remaining: 97,
+          pause_scope: "global",
+        }),
+      ),
+    );
+    await refreshUsage();
+    expect(getUsage()).toEqual({ metered: true, used: 3, limit: 100, remaining: 97, over: false });
+  });
+
+  it("ignores a balance-shaped body on an unavailable HTTP response", async () => {
+    const { refreshUsage, markOverLimit, getUsage } = await load();
+    markOverLimit({ used: 3, limit: 100, scope: "global" });
+    const before = getUsage();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse(
+          {
+            metered: true,
+            used: 0,
+            limit: 100,
+            remaining: 100,
+            over: false,
+            pause_scope: null,
+          },
+          503,
+        ),
+      ),
+    );
+    await refreshUsage();
+    expect(getUsage()).toEqual(before);
+  });
+
+  it("keeps a reported shared-budget pause without erasing remaining account credit", async () => {
+    const { refreshUsage, getUsage } = await load();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({
+          metered: true,
+          used: 3,
+          limit: 100,
+          remaining: 97,
+          over: true,
+          pause_scope: "global",
+        }),
+      ),
+    );
+    await refreshUsage();
+    expect(getUsage()).toMatchObject({ used: 3, remaining: 97, over: true, globalPaused: true });
+  });
+
+  it("does not clear a known shared pause using a legacy balance-only reply", async () => {
+    const { refreshUsage, markOverLimit, getUsage } = await load();
+    markOverLimit({ used: 3, limit: 100, scope: "global" });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ metered: true, used: 3, limit: 100, remaining: 97 })),
+    );
+    await refreshUsage();
+    expect(getUsage()).toMatchObject({ remaining: 97, over: true, globalPaused: true });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({
+          metered: true,
+          used: 3,
+          limit: 100,
+          remaining: 97,
+          over: false,
+          pause_scope: null,
+        }),
+      ),
+    );
+    await refreshUsage();
+    expect(getUsage()).toEqual({ metered: true, used: 3, limit: 100, remaining: 97, over: false });
+  });
+
+  it("does not clear a known global pause from incomplete user-scope metadata", async () => {
+    const { refreshUsage, markOverLimit, getUsage } = await load();
+    markOverLimit({ used: 3, limit: 100, scope: "global" });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({
+          metered: true,
+          used: 3,
+          limit: 100,
+          remaining: 97,
+          pause_scope: "user",
+        }),
+      ),
+    );
+    await refreshUsage();
+    expect(getUsage()).toEqual({
+      metered: true,
+      used: 3,
+      limit: 100,
+      remaining: 97,
+      over: true,
+      globalPaused: true,
+    });
+  });
+
+  async function pendingRefresh(usage: UsageModule, balance: Record<string, unknown>) {
+    let release!: () => void;
+    let parsing!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const started = new Promise<void>((resolve) => (parsing = resolve));
+    const response = jsonResponse(balance);
+    vi.spyOn(response, "json").mockImplementation(async () => {
+      parsing();
+      await gate;
+      return balance;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => response),
+    );
+    const request = usage.refreshUsage();
+    await started;
+    return { request, release };
+  }
+
+  it.each(["sign-out", "credit-refusal"])(
+    "a refresh after %s cannot make an older pending reply current again",
+    async (transition) => {
+      const usage = await load();
+      const pending = await pendingRefresh(usage, {
+        metered: true,
+        used: 95,
+        limit: 100,
+        remaining: 5,
+      });
+      if (transition === "sign-out") usage.clearUsage();
+      else usage.markOverLimit({ used: 100, limit: 100, scope: "user" });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () =>
+          jsonResponse({
+            metered: true,
+            used: 7,
+            limit: 20,
+            remaining: 13,
+            over: false,
+            pause_scope: null,
+          }),
+        ),
+      );
+      await usage.refreshUsage();
+      pending.release();
+      await pending.request;
+      expect(usage.getUsage()).toEqual({
+        metered: true,
+        used: 7,
+        limit: 20,
+        remaining: 13,
+        over: false,
+      });
+    },
+  );
+
+  it("does not restore the old account's balance after sign-out", async () => {
+    const usage = await load();
+    const pending = await pendingRefresh(usage, {
+      metered: true,
+      used: 95,
+      limit: 100,
+      remaining: 5,
+    });
+    usage.clearUsage();
+    pending.release();
+    await pending.request;
+    expect(usage.getUsage()).toEqual({
+      metered: false,
+      used: 0,
+      limit: 0,
+      remaining: 0,
+      over: false,
+    });
+  });
+
+  it("keeps the newer balance when an older response finishes last", async () => {
+    const usage = await load();
+    const pending = await pendingRefresh(usage, {
+      metered: true,
+      used: 95,
+      limit: 100,
+      remaining: 5,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ metered: true, used: 98, limit: 100, remaining: 2 })),
+    );
+    await usage.refreshUsage();
+    pending.release();
+    await pending.request;
+    expect(usage.getUsage()).toEqual({
+      metered: true,
+      used: 98,
+      limit: 100,
+      remaining: 2,
+      over: false,
+    });
+  });
+
+  it("does not undo a newer credit refusal with an older response", async () => {
+    const usage = await load();
+    const pending = await pendingRefresh(usage, {
+      metered: true,
+      used: 95,
+      limit: 100,
+      remaining: 5,
+    });
+    usage.markOverLimit({ used: 100, limit: 100, remaining: 0, scope: "user" });
+    pending.release();
+    await pending.request;
+    expect(usage.getUsage()).toEqual({
+      metered: true,
+      used: 100,
+      limit: 100,
+      remaining: 0,
+      over: true,
+    });
+  });
+
   it("reflects a metered balance and hits GET /usage", async () => {
     const { refreshUsage, getUsage } = await load();
     const f = vi.fn(async () => jsonResponse({ metered: true, used: 3, limit: 10, remaining: 7 }));

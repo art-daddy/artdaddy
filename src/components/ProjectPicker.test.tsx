@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -19,8 +19,10 @@ vi.mock("../store/projects", () => ({
 vi.mock("@tauri-apps/api/core", () => ({ convertFileSrc: (p: string) => p }));
 
 import ProjectPicker from "./ProjectPicker";
+import { peekFirstPrompt, setFirstPrompt } from "../store/firstPrompt";
 
 afterEach(() => {
+  setFirstPrompt("", "");
   vi.clearAllMocks();
   listed = projects;
 });
@@ -36,6 +38,37 @@ function many(n: number) {
 }
 
 describe("ProjectPicker", () => {
+  it("does not create a project when Enter is pressed on an empty prompt", () => {
+    render(<ProjectPicker />);
+    fireEvent.keyDown(screen.getByLabelText(/Describe what you want/), { key: "Enter" });
+    expect(create).not.toHaveBeenCalled();
+    expect(switchTo).not.toHaveBeenCalled();
+  });
+
+  it("creates only once while a repeated Start click is waiting for disk", async () => {
+    let finish!: (project: { id: string }) => void;
+    create.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    render(<ProjectPicker />);
+    await userEvent.type(screen.getByLabelText(/Describe what you want/), "Make my reel");
+    await userEvent.dblClick(screen.getByRole("button", { name: "Start" }));
+    expect(create).toHaveBeenCalledTimes(1);
+    await act(async () => finish({ id: "one-request" }));
+    expect(switchTo).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a usable failure message when creation rejects without an Error", async () => {
+    create.mockRejectedValueOnce("untyped disk failure");
+    render(<ProjectPicker />);
+    await userEvent.type(screen.getByLabelText(/Describe what you want/), "Make my reel");
+    await userEvent.click(screen.getByRole("button", { name: "Start" }));
+    expect(await screen.findByText("Could not create the project.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Start" })).toBeEnabled();
+  });
+
   it("lists every known project, most recent first", () => {
     render(<ProjectPicker />);
     const names = screen.getAllByRole("button").map((b) => b.textContent ?? "");
@@ -64,6 +97,34 @@ describe("ProjectPicker", () => {
     await waitFor(() => expect(create).toHaveBeenCalledWith("a punchy travel reel", "9:16"));
     // The failure that matters is creating a project and then leaving the user on the picker.
     await waitFor(() => expect(switchTo).toHaveBeenCalledWith("id-a punchy travel reel"));
+    expect(peekFirstPrompt("id-a punchy travel reel")).toBe("a punchy travel reel");
+    expect(peekFirstPrompt("another-project")).toBeNull();
+  });
+
+  it("does not open or queue a request whose start screen was left during creation", async () => {
+    let finish!: (project: { id: string }) => void;
+    create.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const view = render(<ProjectPicker />);
+    await userEvent.type(screen.getByLabelText(/Describe what you want/), "Make my reel");
+    await userEvent.click(screen.getByRole("button", { name: "Start" }));
+    view.unmount();
+    await act(async () => finish({ id: "abandoned-project" }));
+    expect(switchTo).not.toHaveBeenCalled();
+    expect(peekFirstPrompt("abandoned-project")).toBeNull();
+  });
+
+  it("clears the queued first prompt if project navigation fails", async () => {
+    switchTo.mockRejectedValueOnce(new Error("Navigation refused"));
+    render(<ProjectPicker />);
+    await userEvent.type(screen.getByLabelText(/Describe what you want/), "Make my reel");
+    await userEvent.click(screen.getByRole("button", { name: "Start" }));
+    expect(await screen.findByText("Navigation refused")).toBeInTheDocument();
+    expect(peekFirstPrompt("id-Make my reel")).toBeNull();
+    expect(screen.getByRole("button", { name: "Start" })).toBeEnabled();
   });
 
   it("will not create from an empty or whitespace prompt", async () => {

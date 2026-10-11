@@ -1,9 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { ProjectListEntry } from "../api/types";
 import { BRAND } from "../brand";
 import { useProjectSwitch } from "../store/closeCoordinator";
-import { setFirstPrompt } from "../store/firstPrompt";
+import { discardFirstPrompt, setFirstPrompt } from "../store/firstPrompt";
 import { useMcpPanel } from "../store/mcpPanel";
 import { useProjects } from "../store/projects";
 import { NewProjectDialog, ProjectThumb } from "./ProjectDialogs";
@@ -55,21 +55,31 @@ export default function ProjectPicker() {
   const [aspect, setAspect] = useState("9:16");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const requestSeq = useRef(0);
 
   useEffect(() => {
     void refresh();
+    return () => {
+      requestSeq.current += 1;
+    };
   }, [refresh]);
 
   const start = async () => {
     const prompt = text.trim();
     if (!prompt || busy) return;
+    const request = ++requestSeq.current;
     setBusy(true);
     setError(null);
+    let createdId: string | null = null;
     try {
       const p = await create(nameFrom(prompt), aspect);
-      setFirstPrompt(prompt); // waiting in the composer once the project opens
+      if (request !== requestSeq.current) return;
+      createdId = p.id;
+      setFirstPrompt(p.id, prompt);
       await switchTo(p.id);
     } catch (e) {
+      if (createdId) discardFirstPrompt(createdId);
+      if (request !== requestSeq.current) return;
       setError(e instanceof Error ? e.message : "Could not create the project.");
       setBusy(false);
     }

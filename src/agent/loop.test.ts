@@ -8,6 +8,7 @@ import {
   type LoopDeps,
 } from "./loop";
 import type { InferenceAttachment, RoundInput, RoundResultDTO } from "./types";
+import { agentEventContext } from "../api/agentEvents";
 
 function rr(over: Partial<RoundResultDTO>): RoundResultDTO {
   return {
@@ -49,6 +50,7 @@ function harness(
     async () => [{ kind: "image", b64: "AA==" }] as InferenceAttachment[],
   );
   const deps: LoopDeps = {
+    eventContext: agentEventContext,
     infer,
     runTool,
     collectAttachments,
@@ -75,7 +77,7 @@ describe("ClientTurnRunner", () => {
     const h = harness([toolCall("get_timeline"), rr({ kind: "text", final_text: "done" })]);
     await h.runner.start("hi");
     expect(h.names()).toEqual(["turn_start", "tool_call", "tool_result", "text", "turn_done"]);
-    expect(h.runTool).toHaveBeenCalledWith("get_timeline", {});
+    expect(h.runTool).toHaveBeenCalledWith("get_timeline", {}, expect.any(Object));
     expect(h.infer).toHaveBeenCalledTimes(2);
   });
 
@@ -154,7 +156,7 @@ describe("ClientTurnRunner", () => {
     );
     await autoRun.runner.start("find the sunset");
     expect(autoRun.names()).not.toContain("awaiting_approval");
-    expect(autoRun.runTool).toHaveBeenCalledWith("video_find_moment", {});
+    expect(autoRun.runTool).toHaveBeenCalledWith("video_find_moment", {}, expect.any(Object));
   });
 
   it("default gates a DESTRUCTIVE library delete", async () => {
