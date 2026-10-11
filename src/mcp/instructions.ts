@@ -10,6 +10,7 @@
 // say "Costs real money and is not undoable" and its instructions say "Wait for confirmation
 // before submitting") — for them, as for us here, consent is prompt-level, not a runtime gate.
 import { api } from "../api/client";
+import { hasSession } from "../api/auth";
 
 /** Project navigation — an MCP session may open with nothing loaded. */
 export const PROJECT_NAVIGATION = `
@@ -60,7 +61,7 @@ export async function mcpInstructions(): Promise<string> {
   let base = "";
   try {
     // MCP cannot resume a finished turn, so ask for the prompt that says so.
-    base = (await api.instructions(false)).instructions ?? "";
+    if (await hasSession()) base = (await api.instructions(false)).instructions ?? "";
   } catch {
     /* offline: the MCP-only sections below still apply */
   }

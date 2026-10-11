@@ -4,6 +4,9 @@ import { ProjectJobScope } from "../project/ProjectJobScope";
 import { setOpenDocumentResolver } from "../project/openDocuments";
 import { asProjectId } from "../project/types";
 import { ProjectStoreAccess, type FsLike } from "./store";
+import { ClientToolRegistry } from "./registry";
+import { __resetAgentEvents, flushAgentEvents, setAgentContext } from "../api/agentEvents";
+import { useAuth } from "../store/auth";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -27,29 +30,69 @@ vi.mock("./dataRoot", async (orig) => ({
 }));
 vi.mock("./tauri", () => ({ makeTauriContext: (d: string) => makeTauriContext(d) }));
 vi.mock("../timeline/engine", () => ({ ensureTimeline: vi.fn(async () => undefined) }));
+vi.mock("../api/auth", () => ({
+  hasSession: async () => true,
+  authedFetch: (
+    url: string,
+    init: RequestInit = {},
+    send: (url: string, init: RequestInit) => Promise<Response> = (target, request) =>
+      fetch(target, request),
+  ) => send(url, init),
+}));
 vi.mock(".", () => ({
-  createToolRegistry: (getCtx: () => Any) => ({
-    has: () => true,
-    run: async () => {
-      toolCtx = getCtx();
-      return toolGate;
-    },
-  }),
+  createToolRegistry: (getCtx: () => Any) => {
+    const registry = new ClientToolRegistry();
+    for (const name of ["download_video", "get_timeline", "add_clips", "library_op"]) {
+      registry.register(name, async () => {
+        toolCtx = getCtx();
+        return toolGate;
+      });
+    }
+    return registry;
+  },
 }));
 
 import { closeToolHost, openToolHost } from "./host";
 
 beforeEach(() => {
+  __resetAgentEvents();
+  useAuth.setState({ status: "unlocked", profile: null, hasStoredSession: true });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => new Response("", { status: 200 })),
+  );
   toolGate = Promise.resolve({ ok: true });
   toolCtx = null;
 });
 afterEach(() => {
+  __resetAgentEvents();
+  vi.unstubAllGlobals();
   closeToolHost();
   setOpenDocumentResolver(() => undefined);
   vi.clearAllMocks();
 });
 
 describe("openToolHost", () => {
+  it("keeps an MCP tool under its bound project without inheriting the chat's labels", async () => {
+    setAgentContext({
+      surface: "app",
+      project_id: "another_project",
+      model: "chat-model",
+      transcript_id: "chat_1",
+    });
+    const host = openToolHost("p1");
+    await host.run("get_timeline", {}, { surface: "mcp" });
+    await flushAgentEvents();
+    const body = JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string);
+    expect(body).toMatchObject({
+      surface: "mcp",
+      project_id: "p1",
+      model: "",
+      transcript_id: "",
+      events: [{ name: "get_timeline", ok: true }],
+    });
+  });
+
   it("reuses the cached host for the same project", async () => {
     const a = openToolHost("p1");
     expect(openToolHost("p1")).toBe(a); // same instance -> one built context per project
@@ -91,7 +134,7 @@ describe("ProjectToolHost.run effect routing (Step 4)", () => {
     await host.ready;
     let release!: (v: Any) => void;
     toolGate = new Promise((r) => (release = r)); // hold the tool in flight
-    const runP = host.run("download_video", {});
+    const runP = host.run("download_video", {}, { surface: "mcp" });
     await Promise.resolve();
     expect(toolCtx.signal).toBeInstanceOf(AbortSignal); // ran with a (job) cancellation signal
     expect(toolCtx.signal.aborted).toBe(false);
@@ -108,7 +151,7 @@ describe("ProjectToolHost.run effect routing (Step 4)", () => {
     withScope(scope);
     const host = openToolHost("p1");
     await host.ready;
-    await host.run("get_timeline", {});
+    await host.run("get_timeline", {}, { surface: "app" });
     expect(runSpy).not.toHaveBeenCalled(); // a read is not wrapped in the job scope
   });
 
@@ -120,7 +163,7 @@ describe("ProjectToolHost.run effect routing (Step 4)", () => {
     const ac = new AbortController();
     let release!: (v: Any) => void;
     toolGate = new Promise((r) => (release = r));
-    const runP = host.run("download_video", {}, ac.signal);
+    const runP = host.run("download_video", {}, { surface: "app", signal: ac.signal });
     await Promise.resolve();
     expect(toolCtx.signal.aborted).toBe(false);
     ac.abort(); // Stop the turn (not a close)
@@ -135,7 +178,7 @@ describe("ProjectToolHost.run effect routing (Step 4)", () => {
     withScope(scope);
     const host = openToolHost("p1");
     await host.ready;
-    const r = (await host.run("download_video", {})) as Any;
+    const r = (await host.run("download_video", {}, { surface: "mcp" })) as Any;
     expect(r.ok).toBe(false);
     expect(String(r.error)).toContain("closing");
   });
@@ -144,7 +187,7 @@ describe("ProjectToolHost.run effect routing (Step 4)", () => {
     // No resolver -> openDocumentById returns undefined -> no job scope -> the tool still runs.
     const host = openToolHost("p1");
     await host.ready;
-    expect(await host.run("download_video", {})).toEqual({ ok: true });
+    expect(await host.run("download_video", {}, { surface: "mcp" })).toEqual({ ok: true });
   });
 
   // The origin is how a timeline change is told apart from an outside one (UJ-028), and it lives
@@ -159,10 +202,14 @@ describe("ProjectToolHost.run effect routing (Step 4)", () => {
     let release!: (v: Any) => void;
     toolGate = new Promise((r) => (release = r));
     const origin = { chatSessionId: "t", branchId: 0, executionId: 7 };
-    const agent = host.run("add_clips", {}, new AbortController().signal, origin);
+    const agent = host.run(
+      "add_clips",
+      {},
+      { surface: "app", signal: new AbortController().signal, origin },
+    );
     await ticks();
     const agentCtx = toolCtx;
-    const mcp = host.run("add_clips", {}); // the MCP shape: no signal, no origin
+    const mcp = host.run("add_clips", {}, { surface: "mcp" }); // no signal or chat origin
     await ticks();
     const mcpCtx = toolCtx;
     expect(agentCtx).not.toBe(mcpCtx);
@@ -192,10 +239,10 @@ describe("the store every agent tool call sees", () => {
     await host.ready;
     expect(await store.resolveRef(secret)).toBe(secret); // the trusted resolver would hand it over
 
-    await host.run("library_op", {}); // the MCP shape: no signal
+    await host.run("library_op", {}, { surface: "mcp" });
     expect(await toolCtx.store.resolveRef(secret)).toBeNull();
 
-    await host.run("library_op", {}, new AbortController().signal); // an in-app turn
+    await host.run("library_op", {}, { surface: "app", signal: new AbortController().signal });
     expect(await toolCtx.store.resolveRef(secret)).toBeNull();
     expect(toolCtx.store.projectDir).toBe("C:/root/p9");
   });

@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => {
     setSessionRenewer: vi.fn(() => () => undefined),
     storedSessionKnown: vi.fn(() => null as boolean | null),
     identifyUser: vi.fn(),
+    reportLaunchOnce: vi.fn(),
     authStatus: "checking",
     authFailureCb: null as (() => void) | null,
     offAuth: vi.fn(),
@@ -98,6 +99,7 @@ vi.mock("@tauri-apps/plugin-deep-link", () => ({
 }));
 
 vi.mock("../observability/sentry", () => ({ identifyUser: mocks.identifyUser }));
+vi.mock("../api/appEvents", () => ({ reportLaunchOnce: mocks.reportLaunchOnce }));
 
 import AuthProvider from "./AuthProvider";
 

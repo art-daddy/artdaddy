@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { ClientTurnRunner, type LoopDeps } from "./loop";
+import { agentEventContext } from "../api/agentEvents";
 import { MAX_CONCURRENT_READS } from "./toolEffect";
 import type { RoundResultDTO } from "./types";
 
@@ -24,6 +25,7 @@ function harness(opts: { mode?: "default" | "autopilot"; delayMs?: number } = {}
   const rounds: RoundResultDTO[] = [];
 
   const deps: LoopDeps = {
+    eventContext: agentEventContext,
     infer: vi.fn(async () => rounds.shift() ?? textRound),
     runTool: vi.fn(async (name: string) => {
       started.push(name);

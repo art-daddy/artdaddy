@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import SourceMonitor from "./SourceMonitor";
@@ -8,6 +8,7 @@ import { proxyRel } from "../preview/proxyPaths";
 import { clearSourceUrlCache, setAssetAccessGrant, setAssetUrlConverter } from "../preview/resolve";
 import { MemFs } from "../test/timelineKit";
 import { joinPath, ProjectStoreAccess } from "../tools/store";
+import { beginSessionActivity, installCrashWatch } from "../observability/crashWatch";
 
 const editor = vi.hoisted(() => ({ store: null as ProjectStoreAccess | null }));
 vi.mock("../store/editor", () => ({
@@ -43,6 +44,53 @@ async function project(): Promise<MemFs> {
 }
 
 describe("Source Monitor runtime normalization", () => {
+  it.each(["video", "audio"])(
+    "records source %s playback and clears it on end and unmount",
+    async (kind) => {
+      const fs = await project();
+      if (kind === "video") await fs.writeTextFile(PROXY, "normalized media");
+      else {
+        await fs.writeTextFile(joinPath(DIR, "library/source.wav"), "audio media");
+        await fs.writeTextFile(
+          LIBRARY,
+          JSON.stringify({
+            clips: [{ id: "media_source", kind: "audio", path: "library/source.wav" }],
+          }),
+        );
+      }
+      const before = await fs.readTextFile(LIBRARY);
+      const { container, unmount } = render(<SourceMonitor mediaRef="media_source" />);
+      await waitFor(() =>
+        expect(container.querySelector(kind === "video" ? "video" : "audio")).not.toBeNull(),
+      );
+      vi.useFakeTimers();
+      localStorage.clear();
+      const stop = installCrashWatch();
+      const finishExport = beginSessionActivity("export");
+      try {
+        const player = container.querySelector(kind === "video" ? "video" : "audio")!;
+        fireEvent.play(player);
+        vi.advanceTimersByTime(5_000);
+        expect(JSON.parse(localStorage.getItem("artdaddy.session")!).activity).toBe(
+          "source-playback",
+        );
+        fireEvent.ended(player);
+        vi.advanceTimersByTime(5_000);
+        expect(JSON.parse(localStorage.getItem("artdaddy.session")!).activity).toBe("export");
+        fireEvent.play(player);
+        unmount();
+        vi.advanceTimersByTime(5_000);
+        expect(JSON.parse(localStorage.getItem("artdaddy.session")!).activity).toBe("export");
+        expect(await fs.readTextFile(LIBRARY)).toBe(before);
+      } finally {
+        unmount();
+        finishExport();
+        stop();
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it("uses a completed proxy on first open without presenting the invalid original", async () => {
     const fs = await project();
     await fs.writeTextFile(PROXY, "normalized media");

@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Isolated Telemetry QA</title>
+  </head>
+  <body style="margin: 0">
+    <div id="root" style="height: 100vh"></div>
+    <script>
+      globalThis.phase6BootErrors = [];
+      globalThis.phase6BootCheckpoint = "html-loaded";
+      addEventListener("error", (event) =>
+        phase6BootErrors.push(String(event.error || event.message)),
+      );
+      addEventListener("unhandledrejection", (event) =>
+        phase6BootErrors.push(String(event.reason)),
+      );
+    </script>
+    <script type="module" src="./phase6Telemetry.ts"></script>
+  </body>
+</html>

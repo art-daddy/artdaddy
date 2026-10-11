@@ -17,7 +17,14 @@ import type {
 import { capToolResult } from "./truncate";
 import { scrubAbsolutePaths } from "./scrubPaths";
 import { MAX_CONCURRENT_READS, toolEffect } from "./toolEffect";
-import { flushAgentEvents, recordAgentOutput, recordToolDenied } from "../api/agentEvents";
+import {
+  createToolTrace,
+  flushAgentEvents,
+  recordAgentOutput,
+  recordToolDenied,
+  type AgentEventContext,
+  type ToolTrace,
+} from "../api/agentEvents";
 import type { ApprovalMode } from "../api/types";
 
 // Re-exported so callers of the loop don't need to reach into the API types.
@@ -81,12 +88,13 @@ export function needsApproval(name: string, args?: Record<string, unknown>): boo
 export const CONTINUE_CAPS: Record<ApprovalMode, number> = { default: 40, autopilot: 80 };
 
 export interface LoopDeps {
+  eventContext: () => AgentEventContext;
   /** Run one model round (POST /inference), optionally with media the model
    *  should SEE this round. MUST persist the refreshed provider snapshot so the
    *  next round chains the conversation. */
   infer: (roundInput: RoundInput, attachments?: InferenceAttachment[]) => Promise<RoundResultDTO>;
   /** Execute one (client) tool and return its result object. */
-  runTool: (name: string, args: Record<string, unknown>) => Promise<unknown>;
+  runTool: (name: string, args: Record<string, unknown>, trace: ToolTrace) => Promise<unknown>;
   /** Read a tool result's `_attachments` (media the model should SEE) into
    *  inference attachments for the NEXT round. Optional. */
   collectAttachments?: (rawAttachments: unknown) => Promise<InferenceAttachment[]>;
@@ -182,7 +190,11 @@ export class ClientTurnRunner {
     const input: RoundInput = carried.length
       ? { tool_results: carried, extra_texts: userText ? [userText] : [] }
       : { user_text: userText };
-    await this.handle(await this.d.infer(input, []));
+    try {
+      await this.handle(await this.d.infer(input, []));
+    } finally {
+      void flushAgentEvents();
+    }
   }
 
   /** Outputs owed for tool calls the model emitted that we never answered — Stop, or the
@@ -227,10 +239,9 @@ export class ClientTurnRunner {
     if (rr.kind === "text") {
       if (rr.final_text) {
         this.d.emit("text", { text: rr.final_text });
-        recordAgentOutput(rr.final_text);
+        recordAgentOutput(rr.final_text, this.d.eventContext());
       }
       this.d.emit("turn_done", this.d.session());
-      void flushAgentEvents();
       return;
     }
     // tool_calls: surface any reasoning, then run the batch (N=1 for single-call
@@ -248,6 +259,14 @@ export class ClientTurnRunner {
   }
 
   private async driveBatch(): Promise<void> {
+    try {
+      await this.runBatch();
+    } finally {
+      void flushAgentEvents();
+    }
+  }
+
+  private async runBatch(): Promise<void> {
     for (;;) {
       // Stop pressed: end the turn now (don't pause at an approval gate, don't
       // start another round). The in-flight round is aborted separately.
@@ -351,7 +370,7 @@ export class ClientTurnRunner {
     });
     // A refusal never reaches the dispatch boundary, so this is the only place it can be
     // counted -- and "the user said no" is a different signal from "the tool failed".
-    recordToolDenied(call.name, call.call_id, result.error);
+    recordToolDenied(call.name, call.call_id, result.error, this.d.eventContext());
     this.results.push({ call_id: call.call_id, name: call.name, result });
     this.batch.shift();
   }
@@ -373,15 +392,17 @@ export class ClientTurnRunner {
   /** Stop pressed: end the turn cleanly (no more rounds, no approval gate). */
   private endTurn(): void {
     this.d.emit("turn_done", this.d.session());
-    void flushAgentEvents();
   }
 
   private async runCall(call: PendingCall): Promise<void> {
     this.emitCall(call);
+    const trace = createToolTrace(call.name, call.arguments, this.d.eventContext(), call.call_id);
     let result: Record<string, unknown>;
     try {
-      result = asResult(await this.d.runTool(call.name, call.arguments));
+      result = asResult(await this.d.runTool(call.name, call.arguments, trace));
+      trace.result(result);
     } catch (e) {
+      trace.error(e);
       this.d.onToolError?.(call.name, call.arguments, e);
       result = { ok: false, error: String(e) };
     }

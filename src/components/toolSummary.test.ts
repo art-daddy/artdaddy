@@ -350,6 +350,13 @@ describe("a result's own name survives the loop's envelope", () => {
     const parts: Record<string, unknown>[] = [];
     let rounds = 0;
     const runner = new ClientTurnRunner({
+      eventContext: () => ({
+        surface: "app",
+        project_id: "",
+        model: "",
+        transcript_id: "",
+        generation: 0,
+      }),
       infer: async () =>
         rounds++ === 0
           ? ({

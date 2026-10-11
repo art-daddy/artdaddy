@@ -11,6 +11,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { ClientTurnRunner, type LoopDeps } from "../agent/loop";
+import { agentEventContext } from "../api/agentEvents";
 import type { RoundInput, RoundResultDTO, Usage } from "../agent/types";
 import { authedFetch } from "../api/auth";
 import { ensureTimeline, loadTimeline } from "../timeline/engine";
@@ -239,14 +240,18 @@ export async function driveScenario(
     };
 
     const deps: LoopDeps = {
+      eventContext: agentEventContext,
       infer,
-      runTool: async (name, args) => {
+      runTool: async (name, args, trace) => {
         const a = (args ?? {}) as Record<string, unknown>;
         if (!registry.has(name)) {
           toolCalls.push({ round: rounds, name, args: a, ok: false, error: HARNESS_MARK });
           return { ok: false, error: `tool '${name}' is not available in this eval harness` };
         }
-        const r = (await registry.run(name, a)) as { ok?: boolean; error?: string };
+        const r = (await registry.run(name, a, trace.context, trace)) as {
+          ok?: boolean;
+          error?: string;
+        };
         const ok = r?.ok !== false;
         const serialized = JSON.stringify(r ?? null);
         toolCalls.push({

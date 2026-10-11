@@ -42,6 +42,8 @@ vi.mock("../store/editor", () => ({
 }));
 
 import StagePanel from "./StagePanel";
+import { beginSessionActivity, installCrashWatch } from "../observability/crashWatch";
+import { emptyTimeline } from "../timeline/model";
 
 const timeline = {
   canvas: { width: 1080, height: 1920, fps: 30 },
@@ -65,6 +67,53 @@ beforeEach(() => {
 });
 
 describe("StagePanel", () => {
+  it.each(["live", "rendered"])(
+    "records actual %s playback and restores concurrent activity on pause",
+    (mode) => {
+      vi.useFakeTimers();
+      localStorage.clear();
+      const stop = installCrashWatch();
+      const finishExport = beginSessionActivity("export");
+      h.timeline = {
+        ...emptyTimeline(),
+        tracks: [
+          {
+            id: "v1",
+            kind: "video",
+            z: 0,
+            clips: [
+              {
+                id: "c1",
+                kind: "video",
+                media_ref: "media_video",
+                timeline_in: 0,
+                timeline_out: 60,
+              },
+            ],
+          },
+        ],
+      };
+      h.session = mode === "rendered" ? { final_mp4: "qa.mp4" } : null;
+      try {
+        render(<StagePanel projectId="p1" />);
+        if (mode === "rendered") {
+          fireEvent.click(screen.getByRole("button", { name: "Rendered" }));
+          fireEvent.play(screen.getByTestId("preview-video"));
+        } else fireEvent.click(screen.getByRole("button", { name: "play" }));
+        vi.advanceTimersByTime(5_000);
+        expect(JSON.parse(localStorage.getItem("artdaddy.session")!).activity).toBe("playback");
+        if (mode === "rendered") fireEvent.pause(screen.getByTestId("preview-video"));
+        else fireEvent.click(screen.getByRole("button", { name: "pause" }));
+        vi.advanceTimersByTime(5_000);
+        expect(JSON.parse(localStorage.getItem("artdaddy.session")!).activity).toBe("export");
+      } finally {
+        finishExport();
+        stop();
+        vi.useRealTimers();
+      }
+    },
+  );
+
   // A new project is NOT `timeline === null` — it already has empty v1/a1 tracks. Testing the
   // null case only is what let the empty stage ship invisible to every new project.
   it.each([

@@ -3,6 +3,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const h = vi.hoisted(() => ({ calls: [] as boolean[], text: "", fail: false }));
+const session = vi.hoisted(() => ({ present: true }));
+vi.mock("../api/auth", () => ({ hasSession: async () => session.present }));
 
 vi.mock("../api/client", () => ({
   api: {
@@ -21,9 +23,21 @@ beforeEach(() => {
   h.calls = [];
   h.text = "SHARED PROMPT";
   h.fail = false;
+  session.present = true;
 });
 
 describe("MCP instructions", () => {
+  it("uses local guidance before sign-in without making an unauthenticated request", async () => {
+    session.present = false;
+    const early = await mcpInstructions();
+    expect(h.calls).toEqual([]);
+    expect(early).toContain(ASYNC_JOBS);
+    session.present = true;
+    const ready = await mcpInstructions();
+    expect(ready).toContain("SHARED PROMPT");
+    expect(h.calls).toEqual([false]);
+  });
+
   it("asks the server for the prompt that does NOT promise a completion message", async () => {
     await mcpInstructions();
     expect(h.calls).toEqual([false]);

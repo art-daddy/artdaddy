@@ -11,6 +11,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useCloseCoordinator } from "./store/closeCoordinator";
 import { useEditor } from "./store/editor";
+import { useAuth } from "./store/auth";
+import { setClerkTokenProvider } from "./api/auth";
+import {
+  __bufferedAgentEvents,
+  __resetAgentEvents,
+  flushAgentEvents,
+  recordToolCall,
+} from "./api/agentEvents";
 
 vi.mock("./components/Shell", () => ({ default: () => <div>shell</div> }));
 vi.mock("./components/AuthProvider", () => ({
@@ -18,6 +26,11 @@ vi.mock("./components/AuthProvider", () => ({
 }));
 vi.mock("./components/MenuBar", () => ({ default: () => <div>menu</div> }));
 vi.mock("./platform", () => ({ platform: { name: "tauri" } }));
+vi.mock("./mcp/service", () => ({ initMcp: async () => undefined }));
+vi.mock("./lib/osDrop", () => ({
+  webOwnsFileDrops: () => false,
+  startOsDropRouter: async () => () => undefined,
+}));
 
 const closeProject = vi.fn();
 vi.mock("./project/documentRegistry", () => ({
@@ -50,6 +63,7 @@ vi.mock("@tauri-apps/api/window", () => ({
 }));
 
 const order: string[] = [];
+const deliveredTraces: Array<Record<string, unknown>> = [];
 const update = vi.hoisted(() => ({
   check: vi.fn(),
   download: vi.fn(),
@@ -100,6 +114,20 @@ const mount = async () => {
 };
 
 beforeEach(() => {
+  __resetAgentEvents();
+  useAuth.setState({ status: "unlocked", profile: null, hasStoredSession: true });
+  setClerkTokenProvider(async () => "quit-trace-test-token");
+  deliveredTraces.length = 0;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url, init) => {
+      if (String(url).endsWith("/telemetry/agent")) {
+        deliveredTraces.push(JSON.parse(init!.body as string));
+        return new Response("", { status: 200 });
+      }
+      return new Response("offline", { status: 503 });
+    }),
+  );
   handler = null;
   windowClosed = false;
   order.length = 0;
@@ -127,9 +155,94 @@ beforeEach(() => {
   exportsQ.cancel.mockReset().mockImplementation(() => order.push("export stopped"));
   ask.mockReset();
 });
-afterEach(() => useCloseCoordinator.setState({ pending: null, exitHandler: null }));
+afterEach(() => {
+  __resetAgentEvents();
+  setClerkTokenProvider(null);
+  useCloseCoordinator.setState({ pending: null, exitHandler: null });
+});
 
 describe("quitting the app", () => {
+  it("delivers the pending trace before closing the window", async () => {
+    await mount();
+    recordToolCall({ name: "undo", ok: true, ms: 1 });
+    await requestClose();
+    expect(windowClosed).toBe(true);
+    expect(deliveredTraces).toHaveLength(1);
+    expect(deliveredTraces[0]).toMatchObject({ events: [{ name: "undo", ok: true }] });
+  });
+
+  it("delivers pending work even when no project is open", async () => {
+    useEditor.setState({ projectId: null });
+    await mount();
+    recordToolCall({ name: "redo", ok: false, ms: 1 });
+    await requestClose();
+    expect(deliveredTraces).toHaveLength(1);
+    expect(deliveredTraces[0]).toMatchObject({ events: [{ name: "redo", ok: false }] });
+    expect(windowClosed).toBe(true);
+    expect(closeProject).not.toHaveBeenCalled();
+  });
+
+  it("waits for a trace that was already sending before Quit", async () => {
+    await mount();
+    let received!: () => void;
+    let deliver!: () => void;
+    const started = new Promise<void>((resolve) => {
+      received = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url, init) => {
+        received();
+        return new Promise<Response>((resolve) => {
+          deliver = () => {
+            deliveredTraces.push(JSON.parse(init!.body as string));
+            resolve(new Response("", { status: 200 }));
+          };
+        });
+      }),
+    );
+    recordToolCall({ name: "undo", ok: true, ms: 1 });
+    const sending = flushAgentEvents();
+    await started;
+    const closing = requestClose();
+    await flush();
+    expect(windowClosed).toBe(false);
+    deliver();
+    await sending;
+    await closing;
+    expect(windowClosed).toBe(true);
+    expect(deliveredTraces).toHaveLength(1);
+  });
+
+  it("still quits when trace delivery ignores cancellation", async () => {
+    await mount();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise<Response>(() => {})),
+    );
+    recordToolCall({ name: "undo", ok: true, ms: 1 });
+    vi.useFakeTimers();
+    try {
+      const closing = requestClose();
+      await vi.advanceTimersByTimeAsync(2_100);
+      expect(windowClosed).toBe(true);
+      await closing;
+      expect(closeProject).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps unsent traces and the window when the final save fails", async () => {
+    closeProject.mockResolvedValue({ ok: false });
+    await mount();
+    recordToolCall({ name: "undo", ok: true, ms: 1 });
+    await requestClose();
+    expect(windowClosed).toBe(false);
+    expect(deliveredTraces).toHaveLength(0);
+    expect(__bufferedAgentEvents()).toMatchObject([{ name: "undo" }]);
+  });
+
   it("closes the window once the project has saved", async () => {
     await mount();
     expect(await requestClose()).toBe(true); // held open while the save runs
@@ -170,7 +283,8 @@ describe("quitting the app", () => {
   it("lets the OS close the window when no project is open", async () => {
     useEditor.setState({ projectId: null });
     await mount();
-    expect(await requestClose()).toBe(false); // never held open
+    expect(await requestClose()).toBe(true);
+    expect(windowClosed).toBe(true);
     expect(closeProject).not.toHaveBeenCalled();
   });
 

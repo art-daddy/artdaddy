@@ -7,7 +7,12 @@ import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 vi.mock("./config", () => ({ apiBase: () => "https://example.invalid" }));
 vi.mock("./auth", () => ({
   hasSession: async () => true,
-  authedFetch: (url: string, init: RequestInit = {}) => fetch(url, init),
+  authedFetch: (
+    url: string,
+    init: RequestInit = {},
+    send: (url: string, init: RequestInit) => Promise<Response> = (target, request) =>
+      fetch(target, request),
+  ) => send(url, init),
 }));
 vi.mock("../platform/host", () => ({
   hostInfo: () => ({ os: "windows", arch: "x86_64" }),
@@ -18,19 +23,25 @@ vi.mock("../platform", () => ({ platform: { name: "tauri" } }));
 import {
   __bufferedAgentEvents,
   __resetAgentEvents,
+  agentEventContext,
   flushAgentEvents,
   preview,
   recordAgentOutput,
   recordToolCall,
   recordToolDenied,
+  setAgentContext,
 } from "./agentEvents";
 import { startHeartbeat, stopHeartbeat } from "./appEvents";
 import { ClientToolRegistry } from "../tools/registry";
+import { useAuth } from "../store/auth";
+import { ClientTurnRunner } from "../agent/loop";
+import type { RoundResultDTO } from "../agent/types";
 
 const posted: unknown[] = [];
 
 beforeEach(() => {
   __resetAgentEvents();
+  useAuth.setState({ status: "unlocked", profile: null, hasStoredSession: true });
   posted.length = 0;
   vi.stubGlobal(
     "fetch",
@@ -42,6 +53,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  __resetAgentEvents();
   stopHeartbeat();
   vi.unstubAllGlobals();
   vi.useRealTimers();
@@ -106,6 +118,187 @@ describe("the dispatch boundary records every outcome", () => {
 });
 
 describe("batching", () => {
+  it("records a tool's elapsed time, not a wall-clock timestamp", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_800_000_000_000);
+    const registry = new ClientToolRegistry();
+    registry.register("undo", async () => {
+      vi.setSystemTime(1_800_000_000_125);
+      return { ok: true };
+    });
+    await registry.run("undo", {});
+    await flushAgentEvents();
+    expect(posted).toMatchObject([{ events: [{ name: "undo", ms: 125, call_id: "" }] }]);
+  });
+
+  it.each(["refused", "threw"])(
+    "records an app call that %s before reaching the host",
+    async (outcome) => {
+      const submitted = agentEventContext();
+      let rounds = 0;
+      const runner = new ClientTurnRunner({
+        eventContext: () => submitted,
+        infer: async () => {
+          const first = ++rounds === 1;
+          return {
+            kind: first ? "tool_calls" : "text",
+            pending_calls: first
+              ? [{ name: "not_registered", call_id: "model_call_1", arguments: {} }]
+              : [],
+            final_text: "",
+            error: "",
+            finish_reason: "",
+            usage: {},
+            provider_snapshot: {},
+          };
+        },
+        runTool: async () => {
+          if (outcome === "threw") throw new Error("host unavailable");
+          return { ok: false, error: "tool not registered" };
+        },
+        emit: () => undefined,
+        mode: () => "autopilot",
+        stopped: () => false,
+        onUsage: () => undefined,
+        session: () => ({}),
+      });
+      await runner.start("go");
+      await vi.waitFor(() => expect(posted).toHaveLength(1));
+      expect(posted[0]).toMatchObject({
+        surface: "app",
+        events: [{ name: "not_registered", call_id: "model_call_1", ok: false }],
+      });
+      expect((posted[0] as { events: unknown[] }).events).toHaveLength(1);
+    },
+  );
+
+  it("delivers a completed tool trace when the following model round throws", async () => {
+    const registry = new ClientToolRegistry();
+    registry.register("undo", async () => ({ ok: true }));
+    const submitted = agentEventContext();
+    let rounds = 0;
+    const runner = new ClientTurnRunner({
+      eventContext: () => submitted,
+      infer: async () => {
+        if (++rounds === 1)
+          return {
+            kind: "tool_calls",
+            pending_calls: [{ name: "undo", call_id: "call_1", arguments: {} }],
+            usage: {},
+          } as RoundResultDTO;
+        throw new Error("model connection lost");
+      },
+      runTool: (name, args, trace) => registry.run(name, args, trace.context, trace),
+      emit: () => undefined,
+      mode: () => "autopilot",
+      stopped: () => false,
+      onUsage: () => undefined,
+      session: () => ({}),
+    });
+    await expect(runner.start("undo")).rejects.toThrow("model connection lost");
+    await vi.waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0]).toMatchObject({ events: [{ name: "undo", ok: true }] });
+  });
+
+  it("keeps an app answer under its original turn after another project becomes active", async () => {
+    setAgentContext({
+      surface: "app",
+      project_id: "original_project",
+      model: "original-model",
+      transcript_id: "original_chat",
+    });
+    const submitted = agentEventContext();
+    const runner = new ClientTurnRunner({
+      eventContext: () => submitted,
+      infer: async () => {
+        setAgentContext({
+          project_id: "later_project",
+          model: "later-model",
+          transcript_id: "later_chat",
+        });
+        return { kind: "text", final_text: "the original answer", usage: {} } as RoundResultDTO;
+      },
+      runTool: async () => ({ ok: true }),
+      emit: () => undefined,
+      mode: () => "autopilot",
+      stopped: () => false,
+      onUsage: () => undefined,
+      session: () => ({}),
+    });
+    await runner.start("go");
+    await flushAgentEvents();
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).toMatchObject({
+      project_id: "original_project",
+      model: "original-model",
+      transcript_id: "original_chat",
+      events: [{ text: "the original answer" }],
+    });
+  });
+
+  it("keeps each event's project and source rather than using the next turn's labels", async () => {
+    setAgentContext({
+      surface: "mcp",
+      project_id: "external_project",
+      model: "",
+      transcript_id: "",
+    });
+    recordToolCall({ name: "undo", ok: true, ms: 1 });
+    setAgentContext({
+      surface: "app",
+      project_id: "chat_project",
+      model: "chat-model",
+      transcript_id: "chat_1",
+    });
+    recordAgentOutput("the app answer");
+    await flushAgentEvents();
+    expect(posted).toHaveLength(2);
+    expect(posted[0]).toMatchObject({
+      surface: "mcp",
+      project_id: "external_project",
+      events: [{ name: "undo" }],
+    });
+    expect(posted[1]).toMatchObject({
+      surface: "app",
+      project_id: "chat_project",
+      transcript_id: "chat_1",
+      events: [{ text: "the app answer" }],
+    });
+  });
+
+  it("sends a short MCP session on a timer without waiting for an in-app turn", async () => {
+    vi.useFakeTimers();
+    setAgentContext({ surface: "mcp", project_id: "external_project" });
+    recordToolCall({ name: "undo", ok: true, ms: 1 });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).toMatchObject({
+      surface: "mcp",
+      project_id: "external_project",
+      events: [{ name: "undo" }],
+    });
+  });
+
+  it("keeps a slow tool under the project it started in", async () => {
+    setAgentContext({ surface: "mcp", project_id: "original_project" });
+    let finish!: (result: unknown) => void;
+    const reg = new ClientToolRegistry();
+    reg.register(
+      "undo",
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const running = reg.run("undo", {});
+    setAgentContext({ surface: "app", project_id: "later_project" });
+    finish({ ok: true });
+    await running;
+    await flushAgentEvents();
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).toMatchObject({ surface: "mcp", project_id: "original_project" });
+  });
+
   it("flushes on its own at the server's batch ceiling", async () => {
     for (let i = 0; i < 50; i++) {
       recordToolCall({ name: "undo", ok: true, ms: 1 });

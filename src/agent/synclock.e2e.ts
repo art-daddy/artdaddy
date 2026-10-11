@@ -16,6 +16,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { ClientTurnRunner, type LoopDeps } from "./loop";
+import { agentEventContext } from "../api/agentEvents";
 import type { RoundInput, RoundResultDTO } from "./types";
 import { ProjectStoreAccess, type FsLike } from "../tools/store";
 import type { ClientToolContext } from "../tools/context";
@@ -188,12 +189,13 @@ async function drive(
   const tools: string[] = [];
   let finalText = "";
   const deps: LoopDeps = {
+    eventContext: agentEventContext,
     infer,
-    runTool: async (name, args) => {
+    runTool: async (name, args, trace) => {
       tools.push(name);
       // eslint-disable-next-line no-console
       console.log(`  → tool: ${name} ${JSON.stringify(args)}`);
-      const r = await registry.run(name, args as Record<string, unknown>);
+      const r = await registry.run(name, args as Record<string, unknown>, trace.context, trace);
       // eslint-disable-next-line no-console
       console.log(`    ← ${JSON.stringify(r)}`);
       return r;

@@ -198,7 +198,7 @@ export default function MenuBar() {
           ...(settings.fps === null ? {} : { fps: settings.fps }),
           ...(outputPath ? { output_path: outputPath } : {}),
         },
-        controller.signal,
+        { surface: "app", signal: controller.signal, model: "", transcriptId: "" },
       )) as {
         ok?: boolean;
         error?: string;

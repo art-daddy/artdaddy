@@ -17,6 +17,9 @@ import {
   midpointFrames,
 } from "./inspect";
 import { ProjectStoreAccess, joinPath, type FsLike } from "./store";
+import { registerLibraryClip } from "./import";
+import { registerTestDocument, resetTestDocuments } from "../test/timelineKit";
+import { emptyTimeline } from "../timeline/model";
 import { makeStoryboard } from "./storyboard";
 import { peekTranscript, runWhisper } from "./transcribe";
 import { backgroundLoudness, prioritizeTranscript } from "./transcriptQueue";
@@ -262,6 +265,68 @@ describe("inspectMediaTool", () => {
     expect(r.ok).toBe(false);
     expect(String(r.error)).toContain("media not found");
   });
+
+  it.each([
+    ["image", "linked.png", IMAGE_PROBE],
+    ["video", "linked.mp4", VIDEO_PROBE],
+    ["audio", "linked.mp3", AUDIO_PROBE],
+  ] as const)(
+    "keeps the library identity of linked %s instead of reporting a disk path",
+    async (kind, filename, probe) => {
+      const fs = new MockFs();
+      const path = `C:/Users/customer/Private Media/${filename}`;
+      fs.touch(path);
+      const ctx = ctxWith(mediaRunner(fs, { probe }), fs);
+      const doc = registerTestDocument(DIR);
+      await doc.open();
+      try {
+        const entry = await registerLibraryClip(
+          ctx.store,
+          new Uint8Array([1, 2, 3]),
+          filename,
+          kind,
+          undefined,
+          path,
+        );
+        for (const reference of [entry.id, filename]) {
+          const result = await inspectMediaTool({ media_ref: reference, max_frames: 1 }, ctx);
+          expect(result.ok).toBe(true);
+          expect(result.media_ref).toBe(entry.id);
+          expect(result.media_ref).not.toBe(path);
+        }
+        const timeline = emptyTimeline(1920, 1080, 30);
+        timeline.tracks = [
+          {
+            id: "linked_track",
+            kind: kind === "audio" ? "audio" : "video",
+            z: 0,
+            clips: [
+              {
+                id: "linked_clip",
+                kind,
+                media_ref: path,
+                timeline_in: 0,
+                timeline_out: 30,
+                ...(kind === "image" ? {} : { source_in: 0, source_out: 30 }),
+              },
+            ],
+          },
+        ];
+        fs.files.set(joinPath(DIR, "internals/timeline.json"), JSON.stringify(timeline));
+        const placed = await inspectMediaTool({ clip_id: "linked_clip", max_frames: 1 }, ctx);
+        expect(placed.ok).toBe(true);
+        expect(placed.media_ref).toBe(entry.id);
+        fs.files.set(joinPath(DIR, "internals/library.json"), JSON.stringify({ clips: [] }));
+        const unregistered = await inspectMediaTool({ clip_id: "linked_clip", max_frames: 1 }, ctx);
+        expect(unregistered.ok).toBe(false);
+        expect(unregistered.media_ref).toBeUndefined();
+        expect(String(unregistered.error)).toContain("not registered in the library");
+        expect(JSON.stringify(unregistered)).not.toContain(path);
+      } finally {
+        await resetTestDocuments();
+      }
+    },
+  );
 
   it("attaches an image directly (no frame extraction)", async () => {
     const fs = new MockFs();

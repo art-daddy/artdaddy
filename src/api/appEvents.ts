@@ -9,6 +9,7 @@ import { apiBase } from "./config";
 import { authedFetch, hasSession } from "./auth";
 import { platform } from "../platform";
 import { hostInfo, resolveHostInfo } from "../platform/host";
+import { useAuth } from "../store/auth";
 import type { WhisperRunFacts } from "../tools/whisperFacts";
 
 export type AppEvent =
@@ -25,37 +26,143 @@ interface AppEventDetail {
   ok?: boolean;
   reason?: string;
   via?: string;
+  eventId?: string;
+  occurredAt?: number;
+  ownerId?: string;
+  onVerifiedSend?: () => void;
 }
 
+export type AppEventDelivery = "stored" | "discarded" | "unavailable";
+
+const MAX_PENDING_EVENTS = 50;
+const STARTUP_WAIT_MS = 60_000;
+const pendingEvents = new Set<(ready: boolean) => void>();
+
 /** Report one marker. Never throws and never blocks: this is a beacon, not a feature. */
-export async function reportAppEvent(event: AppEvent, detail: AppEventDetail = {}): Promise<void> {
+export async function reportAppEvent(
+  event: AppEvent,
+  detail: AppEventDetail = {},
+): Promise<AppEventDelivery> {
+  if (detail.eventId && (!detail.ownerId || !Number.isFinite(detail.occurredAt)))
+    return "discarded";
+  if (detail.onVerifiedSend && !detail.ownerId) return "discarded";
+  const submitted = useAuth.getState();
+  if (
+    submitted.status === "locked" ||
+    (submitted.status === "offline" && !submitted.hasStoredSession)
+  )
+    return "discarded";
+  if (detail.ownerId && submitted.profile?.user_id && detail.ownerId !== submitted.profile.user_id)
+    return "discarded";
+  const snapshot = { ...detail };
+  const controller = new AbortController();
+  let discarded = false;
+  let owner = detail.ownerId ?? submitted.profile?.user_id ?? "";
+  let resume: ((ready: boolean) => void) | undefined;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const off = useAuth.subscribe((state) => {
+    const signedOut =
+      state.status === "locked" || (state.status === "offline" && !state.hasStoredSession);
+    const user = state.profile?.user_id ?? "";
+    if (signedOut || (user && owner && user !== owner)) {
+      discarded = true;
+      controller.abort();
+      resume?.(false);
+    } else {
+      if (user) owner = user;
+      if (state.status !== "checking" && (!snapshot.ownerId || user)) resume?.(true);
+    }
+  });
   try {
+    if (submitted.status === "checking" || (snapshot.ownerId && !submitted.profile?.user_id)) {
+      if (pendingEvents.size >= MAX_PENDING_EVENTS) return "unavailable";
+      const ready = await new Promise<boolean>((resolve) => {
+        resume = resolve;
+        pendingEvents.add(resolve);
+        timeout = setTimeout(() => resolve(false), STARTUP_WAIT_MS);
+        (timeout as { unref?: () => void }).unref?.();
+      });
+      pendingEvents.delete(resume!);
+      clearTimeout(timeout);
+      if (!ready || controller.signal.aborted) return discarded ? "discarded" : "unavailable";
+    }
     // The authoritative OS needs an IPC round-trip; a launch beacon would otherwise race it
     // and report the user-agent's guess, which is the thing it exists to replace.
     await resolveHostInfo();
     // The server takes identity from the request, so a signed-out beacon is a guaranteed 401
     // carrying a marker we could not attribute anyway. Matters most for the heartbeat, which
     // would otherwise retry that 401 every few minutes for as long as the app is open.
-    if (!(await hasSession())) return;
+    if (!(await hasSession())) return discarded ? "discarded" : "unavailable";
+    if (controller.signal.aborted) return discarded ? "discarded" : "unavailable";
     const { os, arch } = hostInfo();
-    await authedFetch(`${apiBase()}/telemetry/app`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        event,
-        os,
-        arch,
-        app_version: __ARTDADDY_RELEASE__,
-        shell: platform.name,
-        project_id: detail.projectId ?? "",
-        ...(detail.ok === undefined ? {} : { ok: detail.ok }),
-        ...(detail.reason ? { reason: detail.reason.slice(0, 300) } : {}),
-        ...(detail.via ? { via: detail.via.slice(0, 30) } : {}),
-      }),
-      signal: AbortSignal.timeout(10_000),
-    });
+    timeout = setTimeout(() => controller.abort(), 10_000);
+    (timeout as { unref?: () => void }).unref?.();
+    let verifiedAuthorization: string | null = null;
+    if (snapshot.ownerId) {
+      const verification = await authedFetch(
+        `${apiBase()}/me`,
+        { signal: controller.signal },
+        (url, init) => {
+          if (controller.signal.aborted) throw new Error("event session ended before verification");
+          verifiedAuthorization = new Headers(init.headers).get("Authorization");
+          return fetch(url, init);
+        },
+      );
+      if (!verification.ok || !verifiedAuthorization) return "unavailable";
+      const verified = (await verification.json().catch(() => null)) as {
+        user_id?: unknown;
+      } | null;
+      if (typeof verified?.user_id !== "string" || !verified.user_id) return "unavailable";
+      if (verified.user_id !== snapshot.ownerId) return "discarded";
+    }
+    const response = await authedFetch(
+      `${apiBase()}/telemetry/app`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          event,
+          os,
+          arch,
+          app_version: __ARTDADDY_RELEASE__,
+          shell: platform.name,
+          project_id: snapshot.projectId ?? "",
+          ...(snapshot.ok === undefined ? {} : { ok: snapshot.ok }),
+          ...(snapshot.reason ? { reason: snapshot.reason.slice(0, 300) } : {}),
+          ...(snapshot.via ? { via: snapshot.via.slice(0, 30) } : {}),
+          ...(snapshot.eventId ? { event_id: snapshot.eventId } : {}),
+          ...(snapshot.occurredAt === undefined ? {} : { occurred_at: snapshot.occurredAt }),
+        }),
+        signal: controller.signal,
+      },
+      (url, init) => {
+        if (controller.signal.aborted) throw new Error("event session ended before delivery");
+        const currentUser = useAuth.getState().profile?.user_id;
+        if (owner && currentUser && owner !== currentUser)
+          throw new Error("event account changed before delivery");
+        if (
+          snapshot.ownerId &&
+          new Headers(init.headers).get("Authorization") !== verifiedAuthorization
+        ) {
+          throw new Error("event token changed after account verification");
+        }
+        snapshot.onVerifiedSend?.();
+        return fetch(url, init);
+      },
+    );
+    if (!response.ok) return "unavailable";
+    const result = (await response.json().catch(() => null)) as {
+      ok?: unknown;
+      status?: unknown;
+    } | null;
+    return result?.ok === true && result.status === "ok" ? "stored" : "unavailable";
   } catch {
     // Offline, signed out, server down — all fine. A marker is never worth a visible failure.
+    return discarded ? "discarded" : "unavailable";
+  } finally {
+    if (resume) pendingEvents.delete(resume);
+    clearTimeout(timeout);
+    off();
   }
 }
 
@@ -142,6 +249,8 @@ export function reportTranscription(facts: WhisperRunFacts, now = Date.now()): v
 
 /** Tests only. */
 export function __resetAppEvents(): void {
+  for (const resume of pendingEvents) resume(false);
+  pendingEvents.clear();
   launched = false;
   openedProjects.clear();
   importedProjects.clear();

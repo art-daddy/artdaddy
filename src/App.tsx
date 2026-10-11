@@ -16,6 +16,7 @@ import { asProjectId } from "./project/types";
 import { useCloseCoordinator } from "./store/closeCoordinator";
 import { useEditor } from "./store/editor";
 import { installUpdate } from "./update/updater";
+import { flushAgentEventsForExit } from "./api/agentEvents";
 
 function ShellRoute() {
   const { projectId } = useParams();
@@ -81,6 +82,7 @@ export default function App() {
         const coord = useCloseCoordinator.getState();
         const intent = coord.exitIntent;
         coord.setExitIntent("quit");
+        await flushAgentEventsForExit();
         if (intent !== "update") return forceClose();
         try {
           await installUpdate();
@@ -129,7 +131,6 @@ export default function App() {
         }
         const currentId = useEditor.getState().projectId;
         if (!currentId) {
-          if (useCloseCoordinator.getState().exitIntent !== "update") return; // allow the close
           event.preventDefault();
           await finishExit();
           return;

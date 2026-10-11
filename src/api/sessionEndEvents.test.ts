@@ -23,11 +23,13 @@ import {
   reportMediaImport,
   resetCreditsExhausted,
 } from "./appEvents";
+import { useAuth } from "../store/auth";
 
 const posted: Record<string, unknown>[] = [];
 
 beforeEach(() => {
   __resetAppEvents();
+  useAuth.setState({ status: "unlocked", profile: null, hasStoredSession: true });
   posted.length = 0;
   session.signedIn = true;
   vi.stubGlobal(
