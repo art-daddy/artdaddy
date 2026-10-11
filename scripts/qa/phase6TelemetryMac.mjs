@@ -311,6 +311,7 @@ try {
   await copyFile(path.join(root, "mac-ui-proof.json"), path.join(output, "mac-ui-proof.json"));
   assert.equal(ui.ok, true);
   assert.ok(ui.playedSeconds > ui.sourceStartTime + 0.1);
+  assert.equal(ui.recoveryUrl, url);
   assert.equal(ui.playing.current.context.activity, "source-playback");
   assert.notEqual(ui.paused.current.context.activity, "source-playback");
   assert.equal(
@@ -368,8 +369,10 @@ try {
     1,
     "Refusing to guess which WebContent process belongs to this isolated app",
   );
+  await writeFile(path.join(output, "ready-before-crash.json"), JSON.stringify(ready, null, 2));
   process.kill(observed[0], "SIGKILL");
   ready = await fileReady(path.join(root, "ready.json"), (value) => value.at > ready.at);
+  await writeFile(path.join(output, "ready-after-crash.json"), JSON.stringify(ready, null, 2));
   await fileReady(path.join(output, "rows.json"), (saved) =>
     saved.some((row) => row.via === "web_content_terminated"),
   );

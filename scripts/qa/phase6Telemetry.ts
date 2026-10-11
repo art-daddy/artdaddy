@@ -172,6 +172,7 @@ async function exerciseMac(qa: {
     "paused health artifact",
   );
   qa.openSource(null);
+  qa.prepareCrash();
   await writeTextFile(
     proofPath,
     JSON.stringify({
@@ -181,6 +182,7 @@ async function exerciseMac(qa: {
       paused,
       sourceStartTime,
       playedSeconds,
+      recoveryUrl: location.href,
     }),
   );
 }
