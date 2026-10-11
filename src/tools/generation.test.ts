@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CommandRunner } from "./command";
 import type { ClientToolContext } from "./context";
 import { registerGenerationTools } from "./generation";
-import { AUDIO_MODELS, IMAGE_IDS, VIDEO_IDS } from "./genModels";
+import { AUDIO_MODELS, IMAGE_IDS, IMAGE_MODELS, VIDEO_IDS } from "./genModels";
 import { ClientToolRegistry } from "./registry";
 import { ProjectStoreAccess, joinPath, type FsLike } from "./store";
 
@@ -195,6 +195,79 @@ describe("list_models", () => {
 
 // ── generate_image: guards & validation ─────────────────────────────────────
 describe("generate_image — guards & validation", () => {
+  it.each(IMAGE_MODELS)(
+    "enforces the advertised reference limit for $id without dropping inputs",
+    async (model) => {
+      const listed = await runTool("list_models", { type: "image" }, null);
+      expect(listed.models.find((entry: Any) => entry.id === model.id).max_reference_images).toBe(
+        model.max_reference_images,
+      );
+      for (const count of new Set([
+        0,
+        1,
+        2,
+        model.max_reference_images,
+        model.max_reference_images + 1,
+      ])) {
+        proxy.mockClear();
+        submit.mockClear();
+        encode.mockClear();
+        const refs = Array.from({ length: count }, (_, index) => `reference-${index}.png`);
+        const result = await runTool(
+          "generate_image",
+          { prompt: "Create a headshot", model: model.id, reference_images: refs },
+          ctxWithFiles(...refs),
+        );
+        if (count > model.max_reference_images) {
+          expect(result.ok).toBe(false);
+          expect(String(result.error)).toContain(String(model.max_reference_images));
+          expect(submit).not.toHaveBeenCalled();
+          expect(proxy).not.toHaveBeenCalled();
+          expect(encode).not.toHaveBeenCalled();
+        } else {
+          expect(result.ok).toBe(true);
+          expect(submit).toHaveBeenCalledTimes(1);
+          expect(lastCall().body.args.reference_images ?? []).toEqual(
+            refs.map((_, index) => `ref${index}`),
+          );
+          expect(encode).toHaveBeenCalledTimes(count);
+        }
+      }
+    },
+  );
+
+  it.each(["reference.png", [null], [42], [""], ["   "]])(
+    "rejects malformed references before side effects (%j)",
+    async (refs) => {
+      const result = await runTool(
+        "generate_image",
+        { prompt: "Create a headshot", reference_images: refs },
+        ctxWithFiles("reference.png"),
+      );
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain("reference_images");
+      expect(submit).not.toHaveBeenCalled();
+      expect(proxy).not.toHaveBeenCalled();
+    },
+  );
+
+  it("refuses multiple MAI reference images before creating a job or calling the provider", async () => {
+    const result = await runTool(
+      "generate_image",
+      {
+        prompt: "Create a headshot",
+        model: "mai-image-2.5",
+        reference_images: ["first.png", "second.png"],
+      },
+      ctxWithFiles("first.png", "second.png"),
+    );
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/mai-image-2\.5.*(?:one|1) reference image/i);
+    expect(submit).not.toHaveBeenCalled();
+    expect(proxy).not.toHaveBeenCalled();
+    expect(encode).not.toHaveBeenCalled();
+  });
+
   it("returns NOT_READY when the runtime context is null", async () => {
     const r = await runTool("generate_image", { prompt: "a cat" }, null);
     expect(r.ok).toBe(false);

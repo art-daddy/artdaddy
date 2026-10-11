@@ -18,9 +18,10 @@ export interface GenModel {
   supports_start_frame?: boolean;
   supports_end_frame?: boolean;
   supports_reference_images?: boolean;
+  max_reference_images?: number;
 }
 
-export const IMAGE_MODELS: GenModel[] = [
+export const IMAGE_MODELS: (GenModel & { max_reference_images: number })[] = [
   {
     id: "nano-banana",
     kind: "image",
@@ -30,6 +31,7 @@ export const IMAGE_MODELS: GenModel[] = [
     aspect_ratios: ["9:16", "16:9", "1:1"],
     max_images: 4,
     supports_reference_images: true,
+    max_reference_images: 3,
   },
   {
     id: "nano-banana-pro",
@@ -41,6 +43,7 @@ export const IMAGE_MODELS: GenModel[] = [
     resolutions: ["1K", "2K", "4K"],
     max_images: 4,
     supports_reference_images: true,
+    max_reference_images: 14,
   },
   {
     id: "nano-banana-2",
@@ -52,6 +55,7 @@ export const IMAGE_MODELS: GenModel[] = [
     resolutions: ["1K", "2K", "4K"],
     max_images: 4,
     supports_reference_images: true,
+    max_reference_images: 14,
   },
   {
     id: "nano-banana-2-lite",
@@ -65,6 +69,7 @@ export const IMAGE_MODELS: GenModel[] = [
     resolutions: ["1K"],
     max_images: 4,
     supports_reference_images: true,
+    max_reference_images: 1,
   },
   {
     id: "gpt-image-1.5",
@@ -76,6 +81,7 @@ export const IMAGE_MODELS: GenModel[] = [
     qualities: ["low", "medium", "high"],
     max_images: 4,
     supports_reference_images: true,
+    max_reference_images: 16,
   },
   {
     id: "gpt-image-2",
@@ -88,6 +94,7 @@ export const IMAGE_MODELS: GenModel[] = [
     qualities: ["low", "medium", "high"],
     max_images: 4,
     supports_reference_images: true,
+    max_reference_images: 16,
   },
   {
     id: "mai-image-2.5",
@@ -98,6 +105,7 @@ export const IMAGE_MODELS: GenModel[] = [
     aspect_ratios: ["9:16", "16:9", "1:1"],
     max_images: 4,
     supports_reference_images: true,
+    max_reference_images: 1,
   },
 ];
 
@@ -354,6 +362,7 @@ export function modelInfo(m: GenModel): Record<string, unknown> {
   if (m.kind === "image") {
     info.max_images = m.max_images;
     info.supports_reference_images = m.supports_reference_images;
+    info.max_reference_images = m.max_reference_images;
   } else {
     info.supports_start_frame = m.supports_start_frame;
     info.supports_end_frame = m.supports_end_frame;
