@@ -33,6 +33,10 @@ export default defineConfig(async (environment) => {
           import { invoke as nativeInvoke } from ${JSON.stringify(nativeCore)};
           const root = ${JSON.stringify(root)};
           export async function invoke(command, args, options) {
+            if (command === "sidecar_run") {
+              const calls = globalThis.phase7Sidecars ??= [];
+              if (calls.length < 500) calls.push({ program: args.program, args: [...args.args] });
+            }
             if (command === "get_env") {
               return args.name === "ARTDADDY_DATA_DIR" ? root : args.name === "ARTDADDY_PROJECTS_DIR" ? root.replace(/\\\\/g, "/") + "/projects" : null;
             }

@@ -17,6 +17,7 @@ import { useAuth } from "../../src/store/auth";
 import { useChat } from "../../src/store/chat";
 import { useEditor } from "../../src/store/editor";
 import { useProjects } from "../../src/store/projects";
+import { SESSION_REL } from "../../src/store/transcriptFile";
 import { dataRoot, projectsRoot } from "../../src/tools/dataRoot";
 import { joinPath } from "../../src/tools/store";
 import "../../src/index.css";
@@ -240,6 +241,29 @@ async function setup(): Promise<void> {
     const off = useAuth.subscribe(ready);
     ready();
   });
+  if (params.has("phase7")) {
+    await startMcpBridge();
+    await invoke("mcp_start", { port: mcpPort });
+    const qa = {
+      ready: true,
+      paths: () => {
+        const editor = useEditor.getState();
+        const projectDir = editor.store?.projectDir ?? "";
+        return {
+          projectId: editor.projectId,
+          projectDir,
+          timelinePath: joinPath(projectDir, "internals", "timeline.json"),
+          transcriptPath: joinPath(projectDir, SESSION_REL),
+        };
+      },
+      chat: () => ({ turns: useChat.getState().turns, streaming: useChat.getState().streaming }),
+      close: () => getCurrentWindow().close(),
+    };
+    (window as unknown as { phase7: typeof qa }).phase7 = qa;
+    checkpoint("ready");
+    await writeTextFile(joinPath(root, "ready.json"), JSON.stringify({ at: Date.now(), phase: 7 }));
+    return;
+  }
   checkpoint("create-project");
   const projectFile = joinPath(root, "qa-project.json");
   const projectId = (await exists(projectFile))
