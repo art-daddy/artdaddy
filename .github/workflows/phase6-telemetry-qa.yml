@@ -31,8 +31,8 @@ jobs:
       - run: npm ci
       - name: Install Native QA Browser
         run: |
-          npm install --no-save --package-lock=false playwright@1.61.1
-          npx playwright install chromium
+          npm install --prefix reports/qa/phase6/browser --no-save --package-lock=false playwright@1.61.1
+          node reports/qa/phase6/browser/node_modules/playwright/cli.js install chromium
       - run: node scripts/fetch-sidecars.mjs --only ffmpeg,ffprobe
       - name: Native Health File Outcomes
         env:
