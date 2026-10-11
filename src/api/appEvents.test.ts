@@ -495,6 +495,27 @@ describe("startup event delivery", () => {
     expect(calls).toEqual([]);
   });
 
+  it("discards a report when sign-out ends a pending session check without a token", async () => {
+    const calls = captureFetch();
+    let finishSession!: (available: boolean) => void;
+    vi.mocked(hasSession).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishSession = resolve;
+        }),
+    );
+    const pending = reportAppEvent("app_error", { reason: "previous session witness" });
+    await vi.waitFor(() => expect(finishSession).toBeTypeOf("function"));
+    useAuth.getState().markLocked();
+    finishSession(false);
+    expect(await pending).toBe("discarded");
+    expect(calls).toEqual([]);
+    useAuth.setState({ status: "unlocked", hasStoredSession: true });
+    expect(await reportAppEvent("project_opened", { projectId: "new_session" })).toBe("stored");
+    expect(calls).toMatchObject([{ event: "project_opened", project_id: "new_session" }]);
+    expect(calls).toHaveLength(1);
+  });
+
   it("refuses native-ID events without the required account and timestamp", async () => {
     const calls = captureFetch();
     expect(await reportAppEvent("app_error", { eventId: "native-1", occurredAt: 100 })).toBe(
