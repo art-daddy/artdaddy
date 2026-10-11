@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import fc from "fast-check";
 
 // Stable mock fns (the `mock` prefix lets the hoisted factory reference them and
 // keeps the same instances across vi.resetModules()).
@@ -28,6 +29,7 @@ async function fresh() {
 
 afterEach(() => {
   lastModule?.__resetSentry();
+  vi.unstubAllGlobals();
   vi.useRealTimers();
 });
 
@@ -82,6 +84,70 @@ describe("initSentry", () => {
 });
 
 describe("beforeSend", () => {
+  it("fuzzes secret scrubbing without dropping legitimate metadata", async () => {
+    vi.stubEnv("VITE_SENTRY_DSN", "https://k@example.com/1");
+    const sentry = await fresh();
+    sentry.initSentry();
+    sentry.identifyUser("account_a");
+    const beforeSend = (mockInit.mock.calls[0][0] as Any).beforeSend;
+    fc.assert(
+      fc.property(fc.string(), fc.string(), fc.string(), (cookie, authorization, metadata) => {
+        const output = beforeSend({
+          message: "scrubbing witness",
+          request: {
+            data: { prompt: authorization },
+            cookies: { cookie },
+            headers: { Cookie: cookie, Authorization: authorization, "User-Agent": metadata },
+          },
+          extra: { prompt: authorization, model_id: metadata },
+        });
+        expect(output.request.headers.Cookie).toBe("[scrubbed]");
+        expect(output.request.headers.Authorization).toBe("[scrubbed]");
+        expect(output.request.headers["User-Agent"]).toBe(metadata);
+        expect(output.request).not.toHaveProperty("data");
+        expect(output.request).not.toHaveProperty("cookies");
+        expect(output.extra.prompt).toBe("[scrubbed]");
+        expect(output.extra.model_id).toBe(metadata);
+      }),
+    );
+  });
+
+  it("keeps a known user's error when the SDK already attached the same identity", async () => {
+    vi.stubEnv("VITE_SENTRY_DSN", "https://k@example.com/1");
+    const sentry = await fresh();
+    sentry.initSentry();
+    sentry.identifyUser("account_a");
+    const beforeSend = (mockInit.mock.calls[0][0] as Any).beforeSend;
+    expect(
+      await beforeSend({ message: "same-user error", user: { id: "account_a" } }),
+    ).toMatchObject({ message: "same-user error", user: { id: "account_a" } });
+    expect(
+      await beforeSend({
+        message: "no request headers",
+        request: { url: "https://example.invalid/route" },
+      }),
+    ).toMatchObject({ message: "no request headers" });
+  });
+
+  it("waits using browser numeric timers and removes the deadline after identity arrives", async () => {
+    vi.useFakeTimers();
+    const schedule = globalThis.setTimeout;
+    vi.stubGlobal("setTimeout", (handler: () => void, delay?: number) =>
+      Number(schedule(handler, delay)),
+    );
+    vi.stubEnv("VITE_SENTRY_DSN", "https://k@example.com/1");
+    const sentry = await fresh();
+    const { useAuth } = await import("../store/auth");
+    useAuth.setState({ status: "checking", profile: null });
+    sentry.initSentry();
+    const pending = (mockInit.mock.calls[0][0] as Any).beforeSend({
+      message: "browser timer witness",
+    });
+    sentry.identifyUser("account_a");
+    expect(await pending).toMatchObject({ user: { id: "account_a" } });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it.each([
     ["locked", true, false],
     ["offline", false, false],
@@ -154,7 +220,12 @@ describe("beforeSend", () => {
       request: {
         data: { prompt: "x" },
         cookies: { s: "1" },
-        headers: { Authorization: "Bearer x", "X-Api-Key": "k", "User-Agent": "ua" },
+        headers: {
+          Authorization: "Bearer x",
+          "X-Api-Key": "k",
+          Cookie: "private-cookie",
+          "User-Agent": "ua",
+        },
       },
       extra: { prompt: "secret", model_id: "m" },
     });
@@ -162,6 +233,7 @@ describe("beforeSend", () => {
     expect(out.request.cookies).toBeUndefined();
     expect(out.request.headers.Authorization).toBe("[scrubbed]");
     expect(out.request.headers["X-Api-Key"]).toBe("[scrubbed]");
+    expect(out.request.headers.Cookie).toBe("[scrubbed]");
     expect(out.request.headers["User-Agent"]).toBe("ua");
     expect(out.extra.prompt).toBe("[scrubbed]");
     expect(out.extra.model_id).toBe("m");

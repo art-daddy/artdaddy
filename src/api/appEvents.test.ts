@@ -26,6 +26,7 @@ import {
   reportTranscription,
 } from "./appEvents";
 import { hasSession, setClerkTokenProvider } from "./auth";
+import { apiBase } from "./config";
 import { useAuth } from "../store/auth";
 import { resolveHostInfo } from "../platform/host";
 
@@ -35,7 +36,7 @@ function captureFetch() {
     "fetch",
     vi.fn(async (_u: string, init?: RequestInit) => {
       calls.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
-      return new Response("{}", { status: 200 });
+      return new Response(JSON.stringify({ ok: true, status: "ok" }), { status: 200 });
     }),
   );
   return calls;
@@ -51,11 +52,304 @@ beforeEach(() => {
 afterEach(() => {
   __resetAppEvents();
   setClerkTokenProvider(null);
-  vi.useRealTimers();
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 describe("startup event delivery", () => {
+  it("delivers a startup report using browser numeric timer handles", async () => {
+    vi.useFakeTimers();
+    const schedule = globalThis.setTimeout;
+    vi.stubGlobal("setTimeout", (handler: () => void, delay?: number) =>
+      Number(schedule(handler, delay)),
+    );
+    useAuth.setState({ status: "checking", profile: null, hasStoredSession: true });
+    const calls = captureFetch();
+    const pending = reportAppEvent("app_error", { reason: "numeric startup witness" });
+    await vi.advanceTimersByTimeAsync(1);
+    expect(calls).toEqual([]);
+    useAuth.setState({ status: "unlocked" });
+    expect(await pending).toBe("stored");
+    expect(calls).toMatchObject([{ reason: "numeric startup witness" }]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("ends a stalled native account verification at the delivery deadline", async () => {
+    vi.useFakeTimers();
+    useAuth.setState({ profile: { user_id: "account_a" } as never });
+    let signal: AbortSignal | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url, init) => {
+        signal = init!.signal as AbortSignal;
+        return new Promise<Response>((_resolve, reject) => {
+          signal!.addEventListener("abort", () => reject(new Error("verification timeout")), {
+            once: true,
+          });
+        });
+      }),
+    );
+    const pending = reportAppEvent("app_error", {
+      ownerId: "account_a",
+      reason: "verification deadline witness",
+    });
+    await vi.advanceTimersByTimeAsync(10_001);
+    expect(await pending).toBe("unavailable");
+    expect(signal?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("allows a first non-notifying profile read without treating it as an account change", async () => {
+    vi.useFakeTimers();
+    useAuth.setState({ profile: null });
+    let release!: (token: string) => void;
+    setClerkTokenProvider(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    const calls = captureFetch();
+    const pending = reportAppEvent("app_error", { reason: "first identity read" });
+    await vi.advanceTimersByTimeAsync(1);
+    useAuth.getState().profile = { user_id: "account_a" } as never;
+    release("first-account-token");
+    expect(await pending).toBe("stored");
+    expect(calls).toMatchObject([{ reason: "first identity read" }]);
+  });
+
+  it("keeps a startup event while the first profile becomes known without changing accounts", async () => {
+    vi.useFakeTimers();
+    useAuth.setState({ status: "checking", profile: null, hasStoredSession: false });
+    const calls = captureFetch();
+    const pending = reportAppEvent("app_error", { reason: "first profile witness" });
+    useAuth.setState({ hasStoredSession: true });
+    await vi.advanceTimersByTimeAsync(1);
+    expect(calls).toEqual([]);
+    useAuth.setState({ status: "unlocked", profile: { user_id: "account_a" } as never });
+    expect(await pending).toBe("stored");
+    expect(calls).toMatchObject([{ reason: "first profile witness" }]);
+  });
+
+  it("keeps a native report waiting when auth unlocks before its matching profile arrives", async () => {
+    vi.useFakeTimers();
+    useAuth.setState({ status: "checking", profile: null, hasStoredSession: true });
+    const stored: Record<string, unknown>[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url, init) => {
+        if (String(url).endsWith("/me"))
+          return new Response(JSON.stringify({ user_id: "account_a" }), { status: 200 });
+        stored.push(JSON.parse(init!.body as string));
+        return new Response(JSON.stringify({ ok: true, status: "ok" }), { status: 200 });
+      }),
+    );
+    const pending = reportAppEvent("app_error", {
+      ownerId: "account_a",
+      eventId: "native-waiting",
+      occurredAt: 100,
+    });
+    useAuth.setState({ status: "unlocked" });
+    await vi.advanceTimersByTimeAsync(1);
+    expect(stored).toEqual([]);
+    useAuth.setState({ profile: { user_id: "account_a" } as never });
+    expect(await pending).toBe("stored");
+    expect(stored).toMatchObject([{ event_id: "native-waiting" }]);
+  });
+
+  it("discards a native report when sign-out wins the account-verification token wait", async () => {
+    vi.useFakeTimers();
+    useAuth.setState({ profile: { user_id: "account_a" } as never });
+    let release!: (token: string) => void;
+    let requested = false;
+    setClerkTokenProvider(() => {
+      requested = true;
+      return new Promise((resolve) => {
+        release = resolve;
+      });
+    });
+    const calls = captureFetch();
+    const pending = reportAppEvent("app_error", {
+      ownerId: "account_a",
+      reason: "verification race",
+    });
+    await vi.advanceTimersByTimeAsync(1);
+    expect(requested).toBe(true);
+    useAuth.getState().markLocked();
+    release("old-account-token");
+    expect(await pending).toBe("discarded");
+    expect(calls).toEqual([]);
+  });
+
+  it("keeps the final account guard even if a profile change did not notify subscribers", async () => {
+    vi.useFakeTimers();
+    useAuth.setState({ profile: { user_id: "account_a" } as never });
+    let release!: (token: string) => void;
+    setClerkTokenProvider(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    const calls = captureFetch();
+    const pending = reportAppEvent("app_error", { reason: "unnotified account change" });
+    await vi.advanceTimersByTimeAsync(1);
+    useAuth.getState().profile!.user_id = "account_b";
+    release("new-account-token");
+    expect(await pending).toBe("unavailable");
+    expect(calls).toEqual([]);
+  });
+
+  it("does not send after the secondary reporter ends the session", async () => {
+    useAuth.setState({ profile: { user_id: "account_a" } as never });
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url) => {
+        calls.push(String(url));
+        return new Response(
+          JSON.stringify(
+            String(url).endsWith("/me") ? { user_id: "account_a" } : { ok: true, status: "ok" },
+          ),
+          { status: 200 },
+        );
+      }),
+    );
+    expect(
+      await reportAppEvent("app_error", {
+        ownerId: "account_a",
+        onVerifiedSend: () => useAuth.getState().markLocked(),
+      }),
+    ).toBe("discarded");
+    expect(calls.filter((url) => url.endsWith("/telemetry/app"))).toEqual([]);
+  });
+
+  it("does not invoke a verified-send callback without a required owner", async () => {
+    const calls = captureFetch();
+    const notified = vi.fn();
+    expect(await reportAppEvent("app_error", { onVerifiedSend: notified })).toBe("discarded");
+    expect(calls).toEqual([]);
+    expect(notified).not.toHaveBeenCalled();
+  });
+
+  it("stores a report using browser numeric timers and releases its deadline", async () => {
+    vi.useFakeTimers();
+    const schedule = globalThis.setTimeout;
+    vi.stubGlobal("setTimeout", (handler: () => void, delay?: number) =>
+      Number(schedule(handler, delay)),
+    );
+    const stored: Record<string, unknown>[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url, init) => {
+        if (
+          url !== `${apiBase()}/telemetry/app` ||
+          init?.method !== "POST" ||
+          new Headers(init.headers).get("Content-Type") !== "application/json"
+        ) {
+          return new Response("invalid request", { status: 400 });
+        }
+        stored.push(JSON.parse(init.body as string));
+        return new Response(JSON.stringify({ ok: true, status: "ok" }), { status: 200 });
+      }),
+    );
+    expect(
+      await reportAppEvent("app_error", { reason: "browser timer witness", via: "x".repeat(40) }),
+    ).toBe("stored");
+    expect(stored).toMatchObject([{ reason: "browser timer witness", via: "x".repeat(30) }]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("waits through identity updates while checking and permits the same account when unlocked", async () => {
+    vi.useFakeTimers();
+    useAuth.setState({
+      status: "checking",
+      hasStoredSession: false,
+      profile: { user_id: "account_a" } as never,
+    });
+    const stored: Record<string, unknown>[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url, init) => {
+        if (String(url).endsWith("/me"))
+          return new Response(JSON.stringify({ user_id: "account_a" }), { status: 200 });
+        stored.push(JSON.parse(init!.body as string));
+        return new Response(JSON.stringify({ ok: true, status: "ok" }), { status: 200 });
+      }),
+    );
+    const pending = reportAppEvent("app_error", {
+      ownerId: "account_a",
+      reason: "same-account witness",
+    });
+    useAuth.setState({ profile: { user_id: "account_a", email: "qa@example.invalid" } as never });
+    await vi.advanceTimersByTimeAsync(1);
+    expect(stored).toEqual([]);
+    useAuth.setState({ status: "unlocked", hasStoredSession: false });
+    expect(await pending).toBe("stored");
+    expect(stored).toMatchObject([{ reason: "same-account witness" }]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("keeps the known owner when the profile temporarily disappears, and rejects a different owner", async () => {
+    vi.useFakeTimers();
+    useAuth.setState({ profile: null });
+    let finishHost!: (host: Awaited<ReturnType<typeof resolveHostInfo>>) => void;
+    vi.mocked(resolveHostInfo).mockReturnValue(
+      new Promise((resolve) => {
+        finishHost = resolve;
+      }),
+    );
+    const calls = captureFetch();
+    const pending = reportAppEvent("app_error", { reason: "late profile witness" });
+    useAuth.setState({ profile: { user_id: "account_a" } as never });
+    useAuth.setState({ profile: null });
+    useAuth.setState({ profile: { user_id: "account_b" } as never });
+    finishHost({ os: "windows", arch: "x86_64" });
+    expect(await pending).toBe("discarded");
+    expect(calls).toEqual([]);
+  });
+
+  it("releases auth subscriptions after a report completes", async () => {
+    const subscribe = useAuth.subscribe;
+    let live = 0;
+    vi.spyOn(useAuth, "subscribe").mockImplementation((listener) => {
+      live += 1;
+      const off = subscribe(listener);
+      return () => {
+        live -= 1;
+        off();
+      };
+    });
+    captureFetch();
+    await reportAppEvent("app_error", { reason: "resource witness" });
+    expect(live).toBe(0);
+  });
+
+  it("does not let a failed secondary reporter prevent native analytics storage", async () => {
+    useAuth.setState({ profile: { user_id: "account_a" } as never });
+    const stored: Record<string, unknown>[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url, init) => {
+        if (String(url).endsWith("/me"))
+          return new Response(JSON.stringify({ user_id: "account_a" }), { status: 200 });
+        stored.push(JSON.parse(init!.body as string));
+        return new Response(JSON.stringify({ ok: true, status: "ok" }), { status: 200 });
+      }),
+    );
+    expect(
+      await reportAppEvent("app_error", {
+        ownerId: "account_a",
+        eventId: "native-secondary",
+        occurredAt: 100,
+        onVerifiedSend: () => {
+          throw new Error("secondary reporter unavailable");
+        },
+      }),
+    ).toBe("stored");
+    expect(stored).toMatchObject([{ event_id: "native-secondary" }]);
+  });
+
   it("keeps a report pending when its delivery deadline expires", async () => {
     vi.useFakeTimers();
     vi.stubGlobal(
@@ -342,7 +636,9 @@ describe("startup event delivery", () => {
       reportAppEvent("app_error", { reason: `startup ${index}` }),
     );
     useAuth.setState({ status: "unlocked", hasStoredSession: true });
-    await Promise.all(reports);
+    const outcomes = await Promise.all(reports);
+    expect(outcomes.slice(0, 50)).toEqual(Array(50).fill("stored"));
+    expect(outcomes.slice(50)).toEqual(Array(10).fill("unavailable"));
     expect(calls).toHaveLength(50);
     expect(calls.map((call) => call.reason)).toEqual(
       Array.from({ length: 50 }, (_, index) => `startup ${index}`),
@@ -355,7 +651,7 @@ describe("startup event delivery", () => {
     useAuth.setState({ status: "checking", hasStoredSession: false });
     const pending = reportAppEvent("app_error", { reason: "expired startup" });
     await vi.advanceTimersByTimeAsync(60_000);
-    await pending;
+    expect(await pending).toBe("unavailable");
     useAuth.setState({ status: "unlocked", hasStoredSession: true });
     await reportAppEvent("project_opened", { projectId: "current" });
     expect(calls).toHaveLength(1);
@@ -379,7 +675,7 @@ describe("startup event delivery", () => {
     setClerkTokenProvider(async () => "next-account-session");
     useAuth.setState({ status: "unlocked", hasStoredSession: true });
     finishToken("previous-account-session");
-    await pending;
+    expect(await pending).toBe("discarded");
     await reportAppEvent("project_opened", { projectId: "next_account" });
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({ event: "project_opened", project_id: "next_account" });

@@ -1,10 +1,12 @@
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_FAILURES: usize = 8;
 const MAX_RECORD_BYTES: u64 = 64 * 1024;
+const MAX_RECOVERY_RECORDS: usize = 3;
+const RECOVERY_PREFIX: &str = "health-recovery-";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -74,6 +76,8 @@ struct Record {
   current: Session,
   failures: Vec<RuntimeFailure>,
   sequence: u64,
+  #[serde(default)]
+  revision: u64,
 }
 
 struct HealthState {
@@ -130,11 +134,43 @@ fn reportable(context: &RuntimeContext) -> bool {
     && (context.auth_state != RuntimeAuth::Offline || context.has_stored_session)
 }
 
+fn read_record(path: &Path) -> Option<Record> {
+  std::fs::File::open(path)
+    .ok()
+    .and_then(|file| serde_json::from_reader(file.take(MAX_RECORD_BYTES)).ok())
+}
+
+fn recovery_paths(path: &Path) -> Vec<PathBuf> {
+  let Some(parent) = path.parent() else {
+    return Vec::new();
+  };
+  let Ok(entries) = std::fs::read_dir(parent) else {
+    return Vec::new();
+  };
+  entries
+    .flatten()
+    .filter_map(|entry| {
+      let name = entry.file_name();
+      let name = name.to_str()?;
+      (name.starts_with(RECOVERY_PREFIX) && name.ends_with(".json")).then(|| entry.path())
+    })
+    .collect()
+}
+
+fn latest_record(path: &Path) -> Option<Record> {
+  read_record(path)
+    .into_iter()
+    .chain(
+      recovery_paths(path)
+        .iter()
+        .filter_map(|checkpoint| read_record(checkpoint)),
+    )
+    .max_by_key(|record| record.revision)
+}
+
 impl RuntimeHealth {
   pub fn open(path: PathBuf, launch_id: String, release: String) -> Self {
-    let previous = std::fs::File::open(&path)
-      .ok()
-      .and_then(|file| serde_json::from_reader::<_, Record>(file.take(MAX_RECORD_BYTES)).ok());
+    let previous = latest_record(&path);
     let previous_exit = previous.as_ref().and_then(|record| record.current.exit);
     let now = now_ms();
     let current = Session {
@@ -161,6 +197,7 @@ impl RuntimeHealth {
         current,
         failures: Vec::new(),
         sequence: 0,
+        revision: 0,
       },
     };
     if record.failures.len() > MAX_FAILURES {
@@ -188,7 +225,7 @@ impl RuntimeHealth {
   }
 
   fn persist(&self, state: &mut HealthState) {
-    match self.save(&state.record) {
+    match self.save(&mut state.record) {
       Ok(()) => state.storage_ok = true,
       Err(error) => {
         state.storage_ok = false;
@@ -201,17 +238,57 @@ impl RuntimeHealth {
     }
   }
 
-  fn save(&self, record: &Record) -> std::io::Result<()> {
+  fn save(&self, record: &mut Record) -> std::io::Result<()> {
     let parent = self
       .path
       .parent()
       .ok_or_else(|| std::io::Error::other("missing marker directory"))?;
     std::fs::create_dir_all(parent)?;
+    record.revision = record
+      .revision
+      .checked_add(1)
+      .ok_or_else(|| std::io::Error::other("health record revision exhausted"))?;
     let mut staged = tempfile::NamedTempFile::new_in(parent)?;
-    serde_json::to_writer(&mut staged, record).map_err(std::io::Error::other)?;
+    serde_json::to_writer(&mut staged, &*record).map_err(std::io::Error::other)?;
     staged.as_file().sync_all()?;
-    staged.persist(&self.path).map_err(|error| error.error)?;
+    let checkpoint = parent.join(format!(
+      "{RECOVERY_PREFIX}{:020}-{}.json",
+      record.revision,
+      staged
+        .path()
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+    ));
+    let primary_written = match staged.persist(&self.path) {
+      Ok(_) => true,
+      Err(error) => {
+        error
+          .file
+          .persist_noclobber(checkpoint)
+          .map_err(|failure| failure.error)?;
+        false
+      }
+    };
+    self.prune_recovery(record.revision, primary_written);
     Ok(())
+  }
+
+  fn prune_recovery(&self, revision: u64, primary_written: bool) {
+    let mut checkpoints: Vec<_> = recovery_paths(&self.path)
+      .into_iter()
+      .filter_map(|path| read_record(&path).map(|record| (record.revision, path)))
+      .filter(|(saved, _)| *saved <= revision)
+      .collect();
+    checkpoints.sort_by(|left, right| right.0.cmp(&left.0));
+    let keep = if primary_written {
+      0
+    } else {
+      MAX_RECOVERY_RECORDS
+    };
+    for (_, path) in checkpoints.into_iter().skip(keep) {
+      let _ = std::fs::remove_file(path);
+    }
   }
 
   fn matches(state: &HealthState, token: &RendererToken) -> bool {
@@ -320,7 +397,7 @@ impl RuntimeHealth {
     if next.failures.len() == state.record.failures.len() {
       return false;
     }
-    if self.save(&next).is_err() {
+    if self.save(&mut next).is_err() {
       state.storage_ok = false;
       return false;
     }
@@ -419,9 +496,93 @@ pub fn runtime_health_ack(
 mod tests {
   use super::*;
 
+  #[test]
+  fn recovery_uses_the_newest_committed_record_not_a_stale_primary_or_partial_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("health.json");
+    let health = RuntimeHealth::open(path.clone(), "first".into(), "test".into());
+    let original = std::fs::read(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    health.record_failure(FailureKind::RustPanic);
+    health.mark_exit(CleanExit::UpdateRestart);
+    std::fs::write(
+      directory.path().join("health-recovery-partial.json"),
+      "{\"revision\":999999,",
+    )
+    .unwrap();
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::write(&path, original).unwrap();
+    drop(health);
+    let next = RuntimeHealth::open(path.clone(), "next".into(), "test".into());
+    assert_eq!(next.status().previous_exit, Some(CleanExit::UpdateRestart));
+    assert_eq!(next.status().failures.len(), 1);
+    assert_eq!(next.status().failures[0].kind, FailureKind::RustPanic);
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved["failures"][0]["kind"], "rust_panic");
+    assert_eq!(saved["current"]["launch_id"], "next");
+  }
+
+  #[test]
+  fn repeated_blocked_writes_keep_a_bounded_recovery_set_and_compact_after_recovery() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("health.json");
+    let health = RuntimeHealth::open(path.clone(), "first".into(), "test".into());
+    let token = health.bind_renderer().token;
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    for revision in 1..=20 {
+      assert!(health.heartbeat(
+        &token,
+        revision,
+        RuntimeContext {
+          activity: format!("activity-{revision}"),
+          user_id: "account_a".into(),
+          auth_state: RuntimeAuth::Unlocked,
+          has_stored_session: true,
+          ..Default::default()
+        }
+      ));
+      assert!(recovery_paths(&path).len() <= MAX_RECOVERY_RECORDS);
+    }
+    health.record_failure(FailureKind::RendererExited);
+    health.mark_exit(CleanExit::Quit);
+    drop(health);
+    std::fs::remove_dir(&path).unwrap();
+    let next = RuntimeHealth::open(path.clone(), "next".into(), "test".into());
+    assert_eq!(next.status().previous_exit, Some(CleanExit::Quit));
+    assert_eq!(next.status().failures.len(), 1);
+    assert_eq!(
+      next.status().failures[0].session.context.activity,
+      "activity-20"
+    );
+    assert!(recovery_paths(&path).is_empty());
+  }
+
+  #[test]
+  fn an_existing_health_record_without_a_revision_keeps_its_exit_and_pending_failures() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("health.json");
+    let health = RuntimeHealth::open(path.clone(), "first".into(), "test".into());
+    health.record_failure(FailureKind::WebContentTerminated);
+    health.mark_exit(CleanExit::Quit);
+    drop(health);
+    let mut old: serde_json::Value =
+      serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    old.as_object_mut().unwrap().remove("revision");
+    std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+    let next = RuntimeHealth::open(path, "next".into(), "test".into());
+    assert_eq!(next.status().previous_exit, Some(CleanExit::Quit));
+    assert_eq!(next.status().failures.len(), 1);
+    assert_eq!(
+      next.status().failures[0].kind,
+      FailureKind::WebContentTerminated
+    );
+  }
+
   #[cfg(windows)]
   #[test]
-  fn a_reader_without_delete_sharing_cannot_consume_an_unwritten_acknowledgement() {
+  fn a_locked_primary_does_not_block_a_stored_acknowledgement_or_clean_exit() {
     use std::os::windows::fs::OpenOptionsExt;
 
     let directory = tempfile::tempdir().unwrap();
@@ -436,13 +597,19 @@ mod tests {
       .share_mode(1)
       .open(&path)
       .unwrap();
-    assert!(!health.acknowledge(&token, &[failure.clone()]));
-    assert_eq!(health.status().failures.len(), 1);
-    assert_eq!(std::fs::read(&path).unwrap(), before);
-    drop(reader);
     assert!(health.acknowledge(&token, &[failure]));
+    assert!(health.status().failures.is_empty());
+    health.mark_exit(CleanExit::Quit);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    drop(health);
+    let next = RuntimeHealth::open(path.clone(), "next".into(), "test".into());
+    assert_eq!(next.status().previous_exit, Some(CleanExit::Quit));
+    assert!(next.status().failures.is_empty());
+    drop(reader);
+    next.bind_renderer();
     let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
     assert!(saved["failures"].as_array().unwrap().is_empty());
+    assert_eq!(saved["current"]["launch_id"], "next");
   }
 
   #[test]

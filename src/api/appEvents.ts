@@ -146,7 +146,10 @@ export async function reportAppEvent(
         ) {
           throw new Error("event token changed after account verification");
         }
-        snapshot.onVerifiedSend?.();
+        try {
+          snapshot.onVerifiedSend?.();
+        } catch {}
+        if (controller.signal.aborted) throw new Error("event session ended before delivery");
         return fetch(url, init);
       },
     );

@@ -1,0 +1,48 @@
+name: Phase 6 Native Telemetry QA
+
+on:
+  push:
+    branches: ["qa/phase6-telemetry-*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-14, macos-15]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    env:
+      VITE_SENTRY_DSN: ""
+      SENTRY_DSN: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+      - run: npx playwright install chromium
+      - run: node scripts/fetch-sidecars.mjs --only ffmpeg,ffprobe
+      - name: Native Health File Outcomes
+        env:
+          TAURI_CONFIG: '{"bundle":{"externalBin":["binaries/artdaddy-ffmpeg","binaries/artdaddy-ffprobe"],"resources":[]}}'
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib runtime_health::tests -- --test-threads=1
+      - name: Typecheck the Isolated Native Driver
+        run: node scripts/qa/phase6Telemetry.mjs check
+      - name: Actual macOS App and MCP Outcomes
+        run: node scripts/qa/phase6TelemetryMac.mjs
+      - name: Save Native Evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase6-telemetry-${{ matrix.runner }}
+          path: reports/qa/phase6/native-macos/**
+          if-no-files-found: error

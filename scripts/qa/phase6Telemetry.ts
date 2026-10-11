@@ -36,6 +36,153 @@ function check(value: unknown, message: string): asserts value {
   if (!value) throw new Error(message);
 }
 
+function waitFor<T>(
+  read: () => T | Promise<T>,
+  accept: (value: T) => boolean,
+  label: string,
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    let reading = false;
+    const finish = () => {
+      clearInterval(interval);
+      clearTimeout(timeout);
+    };
+    const inspect = async () => {
+      if (reading) return;
+      reading = true;
+      try {
+        const value = await read();
+        if (accept(value)) {
+          finish();
+          resolve(value);
+        }
+      } catch (error) {
+        finish();
+        reject(error);
+      } finally {
+        reading = false;
+      }
+    };
+    const interval = setInterval(() => void inspect(), 100);
+    const timeout = setTimeout(() => {
+      finish();
+      reject(new Error(`${label} timed out`));
+    }, 60_000);
+    void inspect();
+  });
+}
+
+interface HealthRecord {
+  current: { context: { activity: string } };
+  failures: unknown[];
+}
+
+async function exerciseMac(qa: {
+  projectId: string;
+  checking: () => void;
+  signIn: () => Promise<void>;
+  timeline: () => Promise<string>;
+  openSource: (ref: string | null) => void;
+  health: () => Promise<Record<string, unknown>>;
+  prepareCrash: () => void;
+}): Promise<void> {
+  const proofPath = joinPath(root, "mac-ui-proof.json");
+  qa.prepareCrash();
+  if (await exists(proofPath)) return;
+  const before = await qa.timeline();
+  await writeTextFile(joinPath(root, "timeline-before.json"), before);
+  qa.checking();
+  const early = (await (await fetch(`${backend}/qa/rows`)).json()) as { reason?: string }[];
+  check(
+    !early.some((row) => row.reason === "phase6 early startup witness"),
+    "Early event sent before sign-in",
+  );
+  await qa.signIn();
+  const composer = await waitFor(
+    () => document.querySelector<HTMLTextAreaElement>("textarea[placeholder]"),
+    Boolean,
+    "native composer",
+  );
+  check(composer, "No native composer");
+  const setValue = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+  check(setValue, "No textarea value setter");
+  setValue.call(composer, "Phase six read the timeline then fail");
+  composer.dispatchEvent(new Event("input", { bubbles: true }));
+  composer.dispatchEvent(
+    new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true }),
+  );
+  await waitFor(
+    async () =>
+      (await (await fetch(`${backend}/qa/rows`)).json()) as {
+        surface?: string;
+        events?: { call_id?: string; ok?: boolean }[];
+      }[],
+    (rows) =>
+      rows.some(
+        (row) =>
+          row.surface === "app" &&
+          row.events?.some((event) => event.call_id === "phase6_app_read" && event.ok),
+      ),
+    "app trace storage",
+  );
+  const after = await qa.timeline();
+  check(before === after, "A read changed the persisted timeline");
+  await writeTextFile(joinPath(root, "timeline-after-read.json"), after);
+  const audioPath = joinPath(root, "qa-mono.wav");
+  const imported = await dispatch({
+    id: 2,
+    method: "tools/call",
+    params: { name: "import_media", arguments: { source: { path: audioPath } } },
+  });
+  const content = imported.content as { text: string }[];
+  const asset = JSON.parse(content[0].text) as { ok?: boolean; media_ref?: string };
+  check(asset.ok && asset.media_ref, "Native source import failed");
+  qa.openSource(asset.media_ref);
+  const player = await waitFor(
+    () => document.querySelector<HTMLAudioElement>("audio"),
+    Boolean,
+    "native audio source",
+  );
+  check(player, "No native audio player");
+  player.muted = true;
+  const play = await waitFor(
+    () => document.querySelector<HTMLButtonElement>('button[aria-label="play"]'),
+    Boolean,
+    "native play control",
+  );
+  check(play, "No native play control");
+  play.click();
+  await waitFor(
+    () => player.currentTime,
+    (time) => time > 0.1,
+    "native audio advancement",
+  );
+  const playing = await waitFor(
+    async () => (await qa.health()) as unknown as HealthRecord,
+    (health) => health.current.context.activity === "source-playback",
+    "playing health artifact",
+  );
+  const pause = document.querySelector<HTMLButtonElement>('button[aria-label="pause"]');
+  check(pause, "No native pause control");
+  pause.click();
+  const paused = await waitFor(
+    async () => (await qa.health()) as unknown as HealthRecord,
+    (health) => health.current.context.activity !== "source-playback",
+    "paused health artifact",
+  );
+  qa.openSource(null);
+  await writeTextFile(
+    proofPath,
+    JSON.stringify({
+      ok: true,
+      projectId: qa.projectId,
+      playing,
+      paused,
+      playedSeconds: player.currentTime,
+    }),
+  );
+}
+
 async function setup(): Promise<void> {
   checkpoint("native-identifier");
   check(identifier.startsWith("com.artdaddy.qa.phase6"), "Refusing a non-QA identifier");
@@ -156,6 +303,7 @@ async function setup(): Promise<void> {
     joinPath(root, "ready.json"),
     JSON.stringify({ projectId, healthPath, timelinePath, at: realNow() }),
   );
+  if (params.has("mac")) await exerciseMac(qa);
 }
 
 if (!params.has("warmup"))
