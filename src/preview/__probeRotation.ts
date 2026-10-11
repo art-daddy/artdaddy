@@ -111,16 +111,11 @@ async function shoot(
     renderer.render(
       buildScene(timeline(key, clip), 0, new Map<string, AssetDims>([[key, vs.dims]])),
     );
-    // SAME TASK as render(): the context is not preserveDrawingBuffer.
-    const snap = document.createElement("canvas");
-    snap.width = SIZE;
-    snap.height = SIZE;
-    const ctx = snap.getContext("2d", { willReadFrequently: true }) as CanvasRenderingContext2D;
-    ctx.drawImage(canvas, 0, 0);
-    const px = ctx.getImageData(0, 0, SIZE, SIZE).data;
+    const { data: px, width, height } = renderer.readPixels();
+    if (width !== SIZE || height !== SIZE) throw new Error("unexpected framebuffer size");
     const rgb = (x: number, y: number): [number, number, number] => {
       const i =
-        (Math.min(SIZE - 1, Math.max(0, Math.floor(y))) * SIZE +
+        ((SIZE - 1 - Math.min(SIZE - 1, Math.max(0, Math.floor(y)))) * SIZE +
           Math.min(SIZE - 1, Math.max(0, Math.floor(x)))) *
         4;
       return [px[i], px[i + 1], px[i + 2]];
@@ -135,7 +130,16 @@ async function shoot(
         x1 = Math.max(x1, x);
         y1 = Math.max(y1, y);
       }
-    if (x1 < 0) return { decoded: true, box: null, corners: [], at: {} };
+    if (x1 < 0)
+      return {
+        decoded: true,
+        box: null,
+        corners: [],
+        at: {},
+        rawCorners,
+        correctedCorners,
+        colorSpace: frame.colorSpace.toJSON(),
+      };
     const box = { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
     const inBox = ([fx, fy]: readonly [number, number]) =>
       rgb(box.x + fx * box.w, box.y + fy * box.h);
