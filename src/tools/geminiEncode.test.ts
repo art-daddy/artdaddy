@@ -2,11 +2,14 @@
 // pixels to a paid vision call), the ffmpeg ARGUMENT ORDER (`-ss` before `-i` is a
 // fast seek; after `-i` it decodes the whole file), and the two OPPOSITE failure
 // policies — video encode THROWS, image encode falls back to the original.
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import fc from "fast-check";
 
 import type { ClientToolContext } from "./context";
-import { encodeImageForGemini, encodeVideoForGemini } from "./geminiEncode";
+import { ProjectStoreAccess, type FsLike } from "./store";
+import { agentToolContext } from "./agentStore";
+import { endProjectSession } from "./coordinator";
+import { _pendingVideoEncodes, encodeImageForGemini, encodeVideoForGemini } from "./geminiEncode";
 
 type Run = { program: string; args: string[] };
 
@@ -15,27 +18,324 @@ function makeCtx(opts: { code?: number; producesOutput?: boolean; outputBytes?: 
   const written = new Set<string>();
   const code = opts.code ?? 0;
   const produces = opts.producesOutput ?? true;
-  const ctx = {
-    store: {
-      prepareArtifact: (rel: string) => Promise.resolve(`/proj/artifacts/${rel}`),
-      exists: (p: string) => Promise.resolve(written.has(p)),
-      // The real store has this; a fixture without it would let a size check pass by never running.
-      byteSize: () => Promise.resolve(opts.outputBytes ?? 1024),
+  const fs: FsLike = {
+    exists: (p) => Promise.resolve(written.has(p)),
+    readTextFile: async () => "{}",
+    writeTextFile: async (p) => {
+      written.add(p);
     },
+    mkdir: async () => {},
+    stat: async () => ({ size: opts.outputBytes ?? 1024, mtimeMs: 1, isDirectory: false }),
+    copyFile: async (from, to) => {
+      if (!written.has(from)) throw new Error("source missing");
+      written.add(to);
+    },
+    rename: async (from, to) => {
+      if (!written.has(from)) throw new Error("staged file missing");
+      written.delete(from);
+      written.add(to);
+    },
+    remove: async (p) => {
+      written.delete(p);
+    },
+  };
+  const ctx: ClientToolContext = {
+    store: new ProjectStoreAccess("/proj", fs),
     runner: {
       run: (program: string, args: string[]) => {
         runs.push({ program, args });
+        if (program !== "ffmpeg")
+          return Promise.resolve({ code: 1, stdout: "", stderr: "unknown executable" });
         if (code === 0 && produces) written.add(args[args.length - 1]);
         return Promise.resolve({ code, stdout: "", stderr: code === 0 ? "" : "boom" });
       },
     },
-  } as unknown as ClientToolContext;
+  };
   return { ctx, runs, written };
 }
 
 const VIDEO = { fps: 1, maxDim: 512, keepAudio: false };
 
+afterEach(async () => {
+  await vi.waitFor(() => expect(_pendingVideoEncodes()).toBe(0));
+});
+
 describe("encodeVideoForGemini", () => {
+  it("releases the caller's abort listener after successful delivery", async () => {
+    const { ctx } = makeCtx();
+    const controller = new AbortController();
+    const listeners = new Set<EventListenerOrEventListenerObject>();
+    const add = controller.signal.addEventListener.bind(controller.signal);
+    const remove = controller.signal.removeEventListener.bind(controller.signal);
+    vi.spyOn(controller.signal, "addEventListener").mockImplementation(
+      (name, listener, options) => {
+        if (name === "abort") listeners.add(listener);
+        add(name, listener, options);
+      },
+    );
+    vi.spyOn(controller.signal, "removeEventListener").mockImplementation(
+      (name, listener, options) => {
+        if (name === "abort") listeners.delete(listener);
+        remove(name, listener, options);
+      },
+    );
+    const output = await encodeVideoForGemini(
+      agentToolContext(ctx, controller.signal),
+      "/src/a.mp4",
+      VIDEO,
+    );
+    expect(output).toContain("/gemini/gem_vid_");
+    expect(listeners.size).toBe(0);
+  });
+
+  it("keeps the submitted byte ceiling when its caller mutates the recipe during lookup", async () => {
+    const { ctx, written } = makeCtx({ outputBytes: 1024 });
+    let finish!: (identity: string) => void;
+    vi.spyOn(ctx.store, "fileIdentity").mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const recipe = { ...VIDEO, budget: { maxBytes: 1024, durationS: 1 } };
+    const pending = encodeVideoForGemini(ctx, "/src/a.mp4", recipe);
+    recipe.budget.maxBytes = 10;
+    finish("source-version");
+    const output = await pending;
+    expect(written.has(output)).toBe(true);
+  });
+
+  it("never gives unrelated simultaneous sources the first caller's video", async () => {
+    const { ctx, runs, written } = makeCtx();
+    const outputs = await Promise.all(
+      ["first", "second", "third"].map((name) =>
+        encodeVideoForGemini(ctx, `/src/${name}.mp4`, VIDEO),
+      ),
+    );
+    expect(new Set(outputs).size).toBe(3);
+    expect(outputs.every((file) => written.has(file))).toBe(true);
+    expect(runs).toHaveLength(3);
+  });
+
+  it("does not allow a cancelled worker's late cleanup to evict its live replacement", async () => {
+    const { ctx, written } = makeCtx();
+    const finishes: (() => void)[] = [];
+    const runner = vi.spyOn(ctx.runner, "run").mockImplementation(async (_program, args) => {
+      await new Promise<void>((resolve) => finishes.push(resolve));
+      written.add(args.at(-1)!);
+      return { code: 0, stdout: "", stderr: "" };
+    });
+    const remove = vi.spyOn(ctx.store, "remove");
+    const controller = new AbortController();
+    const old = encodeVideoForGemini(agentToolContext(ctx, controller.signal), "/src/a.mp4", VIDEO);
+    await vi.waitFor(() => expect(finishes).toHaveLength(1));
+    const cancelled = expect(old).rejects.toThrow(/cancelled/);
+    controller.abort();
+    await cancelled;
+    const fresh = encodeVideoForGemini(ctx, "/src/a.mp4", VIDEO);
+    await vi.waitFor(() => expect(finishes).toHaveLength(2));
+    finishes[0]();
+    await vi.waitFor(() => expect(remove).toHaveBeenCalledWith(runner.mock.calls[0][1].at(-1)));
+    await Promise.resolve();
+    const sibling = encodeVideoForGemini(ctx, "/src/a.mp4", VIDEO);
+    await Promise.resolve();
+    await Promise.resolve();
+    finishes[1]();
+    const outputs = await Promise.all([fresh, sibling]);
+    expect(outputs[0]).toBe(outputs[1]);
+    expect(runner).toHaveBeenCalledTimes(2);
+    expect([...written]).toEqual([outputs[0]]);
+  });
+
+  it("never caches bytes left by a failed encoder", async () => {
+    const { ctx, written } = makeCtx();
+    vi.spyOn(ctx.runner, "run").mockImplementationOnce(async (_program, args) => {
+      written.add(args.at(-1)!);
+      return { code: 1, stdout: "", stderr: "failed after writing partial video" };
+    });
+    await expect(encodeVideoForGemini(ctx, "/src/a.mp4", VIDEO)).rejects.toThrow(
+      /encode for gemini failed/,
+    );
+    expect(written.size).toBe(0);
+  });
+
+  it("separates source identity changes at the same path", async () => {
+    const { ctx } = makeCtx();
+    vi.spyOn(ctx.store, "fileIdentity")
+      .mockResolvedValueOnce("first-version")
+      .mockResolvedValueOnce("replacement-version");
+    const first = await encodeVideoForGemini(ctx, "/src/a.mp4", VIDEO);
+    const second = await encodeVideoForGemini(ctx, "/src/a.mp4", VIDEO);
+    expect(first).not.toBe(second);
+  });
+
+  it.each(["start", "end"] as const)(
+    "separates a change to only the %s boundary",
+    async (field) => {
+      const { ctx } = makeCtx();
+      const first = await encodeVideoForGemini(ctx, "/src/a.mp4", { ...VIDEO, [field]: 10 });
+      const second = await encodeVideoForGemini(ctx, "/src/a.mp4", { ...VIDEO, [field]: 20 });
+      expect(first).not.toBe(second);
+    },
+  );
+
+  it("shares a completed video artifact across simultaneous searches", async () => {
+    const { ctx, runs, written } = makeCtx();
+    const outputs = await Promise.all(
+      Array.from({ length: 4 }, () => encodeVideoForGemini(ctx, "/src/a.mp4", VIDEO)),
+    );
+    expect(new Set(outputs).size).toBe(1);
+    expect(outputs.every((output) => written.has(output))).toBe(true);
+    expect(runs).toHaveLength(1);
+  });
+
+  it("keeps a shared encode alive after one agent caller cancels", async () => {
+    const { ctx, written } = makeCtx();
+    let finish!: () => void;
+    let workerSignal: AbortSignal | undefined;
+    const running = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const runner = vi
+      .spyOn(ctx.runner, "run")
+      .mockImplementation(async (_program, args, signal) => {
+        workerSignal = signal;
+        await running;
+        written.add(args.at(-1)!);
+        return { code: 0, stdout: "", stderr: "" };
+      });
+    const first = new AbortController();
+    const second = new AbortController();
+    const cancelled = encodeVideoForGemini(
+      agentToolContext(ctx, first.signal),
+      "/src/a.mp4",
+      VIDEO,
+    );
+    const surviving = encodeVideoForGemini(
+      agentToolContext(ctx, second.signal),
+      "/src/a.mp4",
+      VIDEO,
+    );
+    await vi.waitFor(() => expect(runner).toHaveBeenCalledTimes(1));
+    const refused = expect(cancelled).rejects.toThrow(/cancelled/);
+    first.abort();
+    await refused;
+    expect(workerSignal?.aborted).toBe(false);
+    finish();
+    const output = await surviving;
+    expect(written.has(output)).toBe(true);
+    expect(runner).toHaveBeenCalledTimes(1);
+    expect([...written]).toEqual([output]);
+  });
+
+  it("never publishes an encode after every caller cancels even if ffmpeg ignores Stop", async () => {
+    const { ctx, written } = makeCtx();
+    let finish!: () => void;
+    let workerSignal: AbortSignal | undefined;
+    const running = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const runner = vi
+      .spyOn(ctx.runner, "run")
+      .mockImplementation(async (_program, args, signal) => {
+        workerSignal = signal;
+        await running;
+        written.add(args.at(-1)!);
+        return { code: 0, stdout: "", stderr: "" };
+      });
+    const remove = vi.spyOn(ctx.store, "remove");
+    const rename = vi.spyOn(ctx.store, "rename");
+    const controller = new AbortController();
+    const pending = encodeVideoForGemini(
+      agentToolContext(ctx, controller.signal),
+      "/src/a.mp4",
+      VIDEO,
+    );
+    await vi.waitFor(() => expect(runner).toHaveBeenCalledTimes(1));
+    const refused = expect(pending).rejects.toThrow(/cancelled/);
+    controller.abort();
+    await refused;
+    expect(workerSignal?.aborted).toBe(true);
+    finish();
+    await vi.waitFor(() => expect(remove).toHaveBeenCalledWith(runner.mock.calls[0][1].at(-1)));
+    expect(rename).not.toHaveBeenCalled();
+    expect(written.size).toBe(0);
+  });
+
+  it("leaves no cached or staged file after a failed commit and permits a fresh retry", async () => {
+    const { ctx, runs, written } = makeCtx();
+    vi.spyOn(ctx.store, "rename").mockRejectedValueOnce(new Error("commit refused"));
+    await expect(encodeVideoForGemini(ctx, "/src/a.mp4", VIDEO)).rejects.toThrow("commit refused");
+    expect(written.size).toBe(0);
+    const output = await encodeVideoForGemini(ctx, "/src/a.mp4", VIDEO);
+    expect([...written]).toEqual([output]);
+    expect(runs).toHaveLength(2);
+  });
+
+  it("does not publish after its project closes during the staged copy", async () => {
+    const { ctx, written } = makeCtx();
+    const copy = ctx.store.copyFile.bind(ctx.store);
+    vi.spyOn(ctx.store, "copyFile").mockImplementationOnce(async (from, to) => {
+      await copy(from, to);
+      endProjectSession(ctx.store.projectDir);
+    });
+    const rename = vi.spyOn(ctx.store, "rename");
+    await expect(encodeVideoForGemini(ctx, "/src/a.mp4", VIDEO)).rejects.toThrow(/cancelled/);
+    expect(rename).not.toHaveBeenCalled();
+    expect(written.size).toBe(0);
+    const reopened = makeCtx();
+    const output = await encodeVideoForGemini(reopened.ctx, "/src/a.mp4", VIDEO);
+    expect([...reopened.written]).toEqual([output]);
+  });
+
+  it("keeps distinct byte ceilings separate even when their rounded rate caps agree", async () => {
+    const { ctx } = makeCtx();
+    const first = await encodeVideoForGemini(ctx, "/src/a.mp4", {
+      ...VIDEO,
+      budget: { maxBytes: 100_000, durationS: 10 },
+    });
+    const second = await encodeVideoForGemini(ctx, "/src/a.mp4", {
+      ...VIDEO,
+      budget: { maxBytes: 100_001, durationS: 10 },
+    });
+    expect(first).not.toBe(second);
+  });
+
+  it("does not expose a partial encode as a cache hit to a later caller", async () => {
+    const { ctx, written } = makeCtx();
+    let finish!: () => void;
+    const running = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const runner = vi.spyOn(ctx.runner, "run").mockImplementation(async (_program, args) => {
+      written.add(args.at(-1)!);
+      await running;
+      return { code: 0, stdout: "", stderr: "" };
+    });
+    let firstDelivered = false;
+    let secondDelivered = false;
+    const first = encodeVideoForGemini(ctx, "/src/a.mp4", VIDEO).then((output) => {
+      firstDelivered = true;
+      return output;
+    });
+    await vi.waitFor(() => expect(runner).toHaveBeenCalledTimes(1));
+    const second = encodeVideoForGemini({ ...ctx, store: ctx.store }, "/src/a.mp4", VIDEO).then(
+      (output) => {
+        secondDelivered = true;
+        return output;
+      },
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(firstDelivered).toBe(false);
+    expect(secondDelivered).toBe(false);
+    expect([...written].every((file) => !/gem_vid_[a-f0-9]+\.mp4$/.test(file))).toBe(true);
+    finish();
+    const outputs = await Promise.all([first, second]);
+    expect(outputs[0]).toBe(outputs[1]);
+    expect([...written]).toEqual([outputs[0]]);
+    expect(runner).toHaveBeenCalledTimes(1);
+  });
+
   it("runs ffmpeg once and reuses the cached output on the second call", async () => {
     const { ctx, runs } = makeCtx();
     const a = await encodeVideoForGemini(ctx, "/src/a.mp4", VIDEO);
@@ -114,6 +414,15 @@ describe("encodeVideoForGemini", () => {
 // encoded to 77.6 MB against a 64 MB ceiling — ten failures in one session, reported to the model as
 // a refusal to read a cache filename it had never heard of.
 describe("the analysis encode is bounded by what the caller can read", () => {
+  it("accepts an output exactly at the byte ceiling", async () => {
+    const { ctx, written } = makeCtx({ outputBytes: 1024 });
+    const output = await encodeVideoForGemini(ctx, "/src/a.mp4", {
+      ...VIDEO,
+      budget: { maxBytes: 1024, durationS: 1 },
+    });
+    expect(written.has(output)).toBe(true);
+  });
+
   it("caps the rate so the stated budget divided by the span is not exceeded", async () => {
     const { ctx, runs } = makeCtx();
     await encodeVideoForGemini(ctx, "/src/long.mp4", {
@@ -172,7 +481,7 @@ describe("the analysis encode is bounded by what the caller can read", () => {
         ...VIDEO,
         budget: { maxBytes: 64 * 1024 * 1024, durationS: 720 },
       }),
-    ).rejects.toThrow(/shorter start_seconds\/end_seconds window/);
+    ).rejects.toThrow(/too large.*84 MB.*shorter start_seconds\/end_seconds window/);
   });
 });
 
@@ -193,9 +502,9 @@ describe("encodeVideoForGemini cache key (property)", () => {
         fc.pre(JSON.stringify(x) !== JSON.stringify(y));
         const a = makeCtx();
         const b = makeCtx();
-        await encodeVideoForGemini(a.ctx, src, x).catch(() => undefined);
-        await encodeVideoForGemini(b.ctx, src, y).catch(() => undefined);
-        expect(a.runs[0].args.at(-1)).not.toBe(b.runs[0].args.at(-1));
+        const first = await encodeVideoForGemini(a.ctx, src, x);
+        const second = await encodeVideoForGemini(b.ctx, src, y);
+        expect(first).not.toBe(second);
       }),
       { numRuns: 200 },
     );
@@ -207,9 +516,9 @@ describe("encodeVideoForGemini cache key (property)", () => {
         fc.pre(s1 !== s2);
         const a = makeCtx();
         const b = makeCtx();
-        await encodeVideoForGemini(a.ctx, s1, o).catch(() => undefined);
-        await encodeVideoForGemini(b.ctx, s2, o).catch(() => undefined);
-        expect(a.runs[0].args.at(-1)).not.toBe(b.runs[0].args.at(-1));
+        const first = await encodeVideoForGemini(a.ctx, s1, o);
+        const second = await encodeVideoForGemini(b.ctx, s2, o);
+        expect(first).not.toBe(second);
       }),
       { numRuns: 200 },
     );

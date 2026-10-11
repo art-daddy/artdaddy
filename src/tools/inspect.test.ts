@@ -114,6 +114,20 @@ class MockFs implements FsLike {
   async writeBytes(p: string, b: Uint8Array): Promise<void> {
     this.bytes.set(joinPath(p), b);
   }
+  async copyFile(from: string, to: string): Promise<void> {
+    if (!this.files.has(joinPath(from))) throw new Error("ENOENT");
+    this.files.set(joinPath(to), this.files.get(joinPath(from))!);
+    const bytes = this.bytes.get(joinPath(from));
+    if (bytes) this.bytes.set(joinPath(to), bytes.slice());
+  }
+  async rename(from: string, to: string): Promise<void> {
+    await this.copyFile(from, to);
+    await this.remove(from);
+  }
+  async remove(p: string): Promise<void> {
+    this.files.delete(joinPath(p));
+    this.bytes.delete(joinPath(p));
+  }
   async mkdir(): Promise<void> {}
 }
 
