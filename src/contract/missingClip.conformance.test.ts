@@ -47,11 +47,7 @@ const CALLS: Record<string, Record<string, unknown>> = {
 const KNOWN_GAPS: Record<string, string> = {
   remove_clips: '"no matching clip ids" — does not say WHICH id',
   unlink_clips: '"no linked clips to unlink" — misleading: reads as "exists but not linked"',
-  get_transcript: "names the id, but no re-read hint",
-  inspect_media: "names the id, but no re-read hint",
   inspect_color: "names the id, but no re-read hint",
-  video_ask: "names the id, but no re-read hint",
-  video_find_moment: "names the id, but no re-read hint",
 };
 
 /** Tools whose schema names a clip id at any depth — read from the contract, not remembered. */
