@@ -15,6 +15,7 @@ import { agentEventContext, setAgentContext } from "../api/agentEvents";
 import type { SSEMessage } from "../api/sse";
 import type { ApprovalMode, Attachment, PendingApproval, SessionState } from "../api/types";
 import { useEditor } from "./editor";
+import { discardFirstPrompt } from "./firstPrompt";
 import { loadTimeline, replaceTimeline } from "../timeline/engine";
 import { withProjectLock } from "../tools/coordinator";
 import type { ProjectStoreAccess } from "../tools/store";
@@ -1095,6 +1096,7 @@ export function getChatStore(projectId: string): StoreApi<ChatState> {
 /** Drop a project's chat store instance: retire its turn (stops any in-flight
  *  paid calls + tools) and remove it from the registry. */
 export function disposeChatStore(projectId: string): void {
+  discardFirstPrompt(projectId);
   const s = chatStores.get(projectId);
   if (!s) return;
   s.getState().deactivate();

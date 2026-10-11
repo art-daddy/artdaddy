@@ -4,10 +4,13 @@ import {
   disposeChatStore,
   getChatStore,
   isChatExecutionCurrent,
+  quiesceChatProject,
+  resumeChatProject,
   resetHistoryModeSupport,
   useChat,
 } from "./chat";
 import { useEditor } from "./editor";
+import { peekFirstPrompt, setFirstPrompt } from "./firstPrompt";
 import { __resetJobNotes, notifyJobSettled, pendingJobNotes, type SettledJob } from "./jobNotes";
 import { loadClientSession, persistSession, persistSessionSoon } from "./transcriptFile";
 import { inferRoundStreaming } from "../agent/api";
@@ -126,6 +129,20 @@ function setDesktop(pid: string) {
 }
 
 describe("isChatExecutionCurrent (origin fence source)", () => {
+  it("preserves a waiting start request through a refused close and discards it on disposal", () => {
+    const projectId = "first-prompt-close";
+    getChatStore(projectId).setState({ projectId });
+    setFirstPrompt(projectId, "Create a creative Instagram reel");
+    quiesceChatProject(projectId);
+    expect(peekFirstPrompt(projectId)).toBe("Create a creative Instagram reel");
+    resumeChatProject(projectId);
+    expect(peekFirstPrompt(projectId)).toBe("Create a creative Instagram reel");
+    disposeChatStore(projectId);
+    expect(peekFirstPrompt(projectId)).toBeNull();
+    expect(getChatStore(projectId).getState().turns).toEqual([]);
+    disposeChatStore(projectId);
+  });
+
   it("is current only for the live transcript id + execution token", () => {
     getChatStore("pf").setState({ transcriptId: "t1", execToken: 7 });
     const at = (executionId: number, chatSessionId = "t1") =>
