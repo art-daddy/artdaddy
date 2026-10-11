@@ -645,10 +645,11 @@ export async function exportBranding(
     const there = await store.exists(p).catch(() => true);
     availability.push(there);
   }
-  if (!availability[1]) return {
-    branding: null,
-    warning: `brand asset missing (${endcard.split(/[\\/]/).pop()}) — exported unbranded`,
-  };
+  if (!availability[1])
+    return {
+      branding: null,
+      warning: `brand asset missing (${endcard.split(/[\\/]/).pop()}) — exported unbranded`,
+    };
   const probe = await runner.run("ffprobe", [
     "-v",
     "error",
@@ -665,15 +666,16 @@ export async function exportBranding(
       warning: `brand end card could not be measured (${stderrExcerpt(probe.stderr) || "no duration"}) — exported unbranded`,
     };
   }
-  const policy = account?.user_id && !isSignedOutGate()
-    ? await fetchExportPolicy(account.user_id)
-    : null;
-  const exempt = policy?.watermark === false && useAuth.getState().profile === account && !isSignedOutGate();
+  const policy =
+    account?.user_id && !isSignedOutGate() ? await fetchExportPolicy(account.user_id) : null;
+  const exempt =
+    policy?.watermark === false && useAuth.getState().profile === account && !isSignedOutGate();
   const watermark = exempt ? null : watermarkPath;
-  if (watermark && !availability[0]) return {
-    branding: null,
-    warning: `brand asset missing (${watermark.split(/[\\/]/).pop()}) — exported unbranded`,
-  };
+  if (watermark && !availability[0])
+    return {
+      branding: null,
+      warning: `brand asset missing (${watermark.split(/[\\/]/).pop()}) — exported unbranded`,
+    };
   return { branding: { watermark, endcard, endcardDuration } };
 }
 
@@ -2755,7 +2757,11 @@ export async function exportTimelineTool(
     duration_s: round3(total),
     ...(prepared.branding
       ? {
-          branding: { watermark: prepared.branding.watermark !== null, end_card_s: round3(card), timeline_s: round3(total - card) },
+          branding: {
+            watermark: prepared.branding.watermark !== null,
+            end_card_s: round3(card),
+            timeline_s: round3(total - card),
+          },
         }
       : {}),
     warnings: prepared.plan.warnings,

@@ -59,12 +59,30 @@ async function exportNineSeconds(o: { brandAssets: boolean; outputPath?: string 
 describe("the export reply", () => {
   it("reports an account exemption without removing the end-card duration", async () => {
     setClerkTokenProvider(async () => "account-token");
-    useAuth.setState({ status: "unlocked", profile: {
-      user_id: "user_exempt", email: "", display_name: "", image_url: "", metered: true,
-    } });
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
-      user_id: "user_exempt", watermark: false, end_card: true,
-    }), { status: 200, headers: { "Content-Type": "application/json" } })));
+    useAuth.setState({
+      status: "unlocked",
+      profile: {
+        user_id: "user_exempt",
+        email: "",
+        display_name: "",
+        image_url: "",
+        metered: true,
+      },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              user_id: "user_exempt",
+              watermark: false,
+              end_card: true,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+      ),
+    );
     const reply = await exportNineSeconds({ brandAssets: true });
     expect(reply.ok).toBe(true);
     expect(reply.duration_s).toBeCloseTo(11.033, 3);

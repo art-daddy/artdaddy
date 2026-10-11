@@ -133,7 +133,11 @@ export async function fetchExportPolicy(userId: string): Promise<ExportPolicy | 
     const value: unknown = await res.json();
     if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
     const policy = value as Record<string, unknown>;
-    if (policy.user_id !== userId || typeof policy.watermark !== "boolean" || policy.end_card !== true)
+    if (
+      policy.user_id !== userId ||
+      typeof policy.watermark !== "boolean" ||
+      policy.end_card !== true
+    )
       return null;
     const currentToken = await getAccessToken();
     if (!sentToken || sentToken !== currentToken || revision !== authRevision || base !== apiBase())
