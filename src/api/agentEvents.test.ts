@@ -25,6 +25,7 @@ import {
   __resetAgentEvents,
   agentEventContext,
   flushAgentEvents,
+  flushAgentEventsForExit,
   preview,
   recordAgentOutput,
   recordToolCall,
@@ -60,6 +61,52 @@ afterEach(() => {
 });
 
 describe("the dispatch boundary records every outcome", () => {
+  it("records the actual error text instead of repeating the whole failed result", async () => {
+    const registry = new ClientToolRegistry();
+    registry.register("undo", async () => ({
+      ok: false,
+      error: "nothing to undo",
+      unrelated: "other result metadata",
+    }));
+    await registry.run("undo", {});
+    await flushAgentEvents();
+    expect(posted).toMatchObject([{ events: [{ ok: false, error: "nothing to undo" }] }]);
+  });
+
+  it("does not require an offline-session flag for an unlocked live session", async () => {
+    useAuth.setState({ status: "unlocked", hasStoredSession: false });
+    recordToolCall({ name: "undo", ok: true, ms: 1 });
+    await flushAgentEvents();
+    expect(posted).toMatchObject([{ events: [{ name: "undo" }] }]);
+  });
+
+  it.each([null, undefined, false, 42, "plain reply", []])(
+    "preserves a primitive or empty tool reply (%j) without a false failure",
+    async (value) => {
+      const registry = new ClientToolRegistry();
+      registry.register("undo", async () => value);
+      expect(await registry.run("undo", {})).toEqual(value);
+      await flushAgentEvents();
+      expect(posted).toMatchObject([
+        {
+          events: [
+            {
+              name: "undo",
+              ok: true,
+              error: "",
+              result:
+                value === undefined
+                  ? ""
+                  : typeof value === "string"
+                    ? value
+                    : JSON.stringify(value),
+            },
+          ],
+        },
+      ]);
+    },
+  );
+
   it("records a successful call with its arguments and result", async () => {
     const reg = new ClientToolRegistry();
     reg.register("undo", async () => ({ ok: true, undone: "split_clips" }));
@@ -70,6 +117,7 @@ describe("the dispatch boundary records every outcome", () => {
     expect(ev.kind).toBe("tool_call");
     expect(ev.name).toBe("undo");
     expect(ev.ok).toBe(true);
+    expect(ev.error).toBe("");
     expect(ev.result).toContain("split_clips");
   });
 
@@ -118,6 +166,71 @@ describe("the dispatch boundary records every outcome", () => {
 });
 
 describe("batching", () => {
+  it("uses one deadline for several pending events and removes it after delivery", async () => {
+    vi.useFakeTimers();
+    recordToolCall({ name: "undo", ok: true, ms: 1 });
+    recordToolCall({ name: "redo", ok: true, ms: 1 });
+    expect(vi.getTimerCount()).toBe(1);
+    await flushAgentEvents();
+    expect(posted).toMatchObject([{ events: [{ name: "undo" }, { name: "redo" }] }]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("ends a stalled delivery at its deadline and still delivers later events", async () => {
+    vi.useFakeTimers();
+    let signal: AbortSignal | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url, init) => {
+        signal = init!.signal as AbortSignal;
+        return new Promise<Response>((_resolve, reject) => {
+          signal!.addEventListener("abort", () => reject(new Error("offline deadline")), {
+            once: true,
+          });
+        });
+      }),
+    );
+    recordToolCall({ name: "undo", ok: true, ms: 1 });
+    const pending = flushAgentEvents();
+    await vi.advanceTimersByTimeAsync(10_001);
+    await expect(pending).resolves.toBeUndefined();
+    expect(signal?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url, init) => {
+        posted.push(JSON.parse(init!.body as string));
+        return new Response("", { status: 200 });
+      }),
+    );
+    recordToolCall({ name: "redo", ok: true, ms: 1 });
+    await flushAgentEvents();
+    expect(posted).toMatchObject([{ events: [{ name: "redo" }] }]);
+  });
+
+  it("delivers and finishes exit using browser numeric timers without leaving deadlines", async () => {
+    vi.useFakeTimers();
+    const schedule = globalThis.setTimeout;
+    vi.stubGlobal("setTimeout", (handler: () => void, delay?: number) =>
+      Number(schedule(handler, delay)),
+    );
+    recordToolCall({ name: "undo", ok: true, ms: 1 });
+    await flushAgentEventsForExit();
+    expect(posted).toMatchObject([{ events: [{ name: "undo", ok: true }] }]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("does not let a stale completion swallow the new session's valid events", async () => {
+    const previous = agentEventContext();
+    useAuth.getState().markLocked();
+    useAuth.setState({ status: "unlocked", hasStoredSession: true });
+    recordToolCall({ name: "undo", ok: true, ms: 1 }, previous);
+    recordToolCall({ name: "redo", ok: true, ms: 1 });
+    await flushAgentEvents();
+    expect(posted).toMatchObject([{ events: [{ name: "redo" }] }]);
+    expect((posted[0] as { events: unknown[] }).events).toHaveLength(1);
+  });
+
   it("records a tool's elapsed time, not a wall-clock timestamp", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(1_800_000_000_000);

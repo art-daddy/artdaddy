@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const h = vi.hoisted(() => ({
@@ -67,6 +67,25 @@ beforeEach(() => {
 });
 
 describe("StagePanel", () => {
+  it("does not record playback when an empty timeline receives a play request", () => {
+    vi.useFakeTimers();
+    localStorage.clear();
+    h.timeline = emptyTimeline();
+    const stop = installCrashWatch();
+    const finishExport = beginSessionActivity("export");
+    const mounted = render(<StagePanel projectId="p1" />);
+    try {
+      act(() => window.dispatchEvent(new Event("artdaddy:toggle-play")));
+      vi.advanceTimersByTime(5_000);
+      expect(JSON.parse(localStorage.getItem("artdaddy.session")!).activity).toBe("export");
+    } finally {
+      mounted.unmount();
+      finishExport();
+      stop();
+      vi.useRealTimers();
+    }
+  });
+
   it.each(["live", "rendered"])(
     "records actual %s playback and restores concurrent activity on pause",
     (mode) => {
