@@ -5,6 +5,7 @@
 // Ported from the server's research.py video tools (now client-side).
 import { callAiProxy, toB64 } from "../api/ai";
 import type { ClientToolContext } from "./context";
+import { missingClipMessage } from "../contract/params";
 import { encodeVideoForGemini } from "./geminiEncode";
 import { probePath } from "./media";
 import { stillPicture } from "../media/stillPicture";
@@ -63,6 +64,7 @@ async function resolveVideoSource(
   ctx: ClientToolContext,
   mediaRef: string,
   clipId: string,
+  tool: string,
 ): Promise<{ path?: string; ref?: string; clip?: Clip; fps?: number; error?: string }> {
   let ref = mediaRef;
   let clip: Clip | undefined;
@@ -79,8 +81,7 @@ async function resolveVideoSource(
       return { error: `clip_id given but the timeline could not be read: ${String(e)}` };
     }
     const found = findClip(timeline, clipId);
-    if (!found)
-      return { error: `clip not found on the timeline (or it has no source media): ${clipId}` };
+    if (!found) return { error: missingClipMessage(tool, clipId) };
     clip = found[1];
     fps = canvasFps(timeline);
     const clipSource = String(clip.media_ref ?? "").trim();
@@ -168,7 +169,7 @@ async function videoAsk(
     };
   }
 
-  const resolved = await resolveVideoSource(ctx, mediaRefArg, clipId);
+  const resolved = await resolveVideoSource(ctx, mediaRefArg, clipId, "video_ask");
   if (resolved.error || !resolved.path) return { ok: false, error: resolved.error ?? "unresolved" };
   const localPath = resolved.path;
 
@@ -442,7 +443,7 @@ async function videoFindMoment(
     };
   }
 
-  const resolved = await resolveVideoSource(ctx, mediaRefArg, clipId);
+  const resolved = await resolveVideoSource(ctx, mediaRefArg, clipId, "video_find_moment");
   if (resolved.error || !resolved.path) return { ok: false, error: resolved.error ?? "unresolved" };
   const localPath = resolved.path;
 

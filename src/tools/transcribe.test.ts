@@ -2375,9 +2375,9 @@ describe("get_transcript transcribes what the clips play (4h)", () => {
     expect(words(await getTranscriptTool({ clip_id: "a2c" }, ctx))).toEqual(["w120", "w121"]);
     // The video clip is never read itself: its sound is the audio clip's.
     expect(words(await getTranscriptTool({}, ctx))).toEqual(["w12", "w13", "w14", "w120", "w121"]);
-    expect(await getTranscriptTool({ clip_id: "nope" }, ctx)).toEqual({
+    expect(await getTranscriptTool({ clip_id: "nope" }, ctx)).toMatchObject({
       ok: false,
-      error: "clip not found on the timeline: nope",
+      error: expect.stringContaining("get_timeline"),
     });
   });
 

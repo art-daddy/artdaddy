@@ -154,6 +154,22 @@ function ctxWith(runner: CommandRunner, fs: MockFs = new MockFs()): ClientToolCo
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
 
+describe("clip lookup recovery", () => {
+  it("points an unplaced library filename to the available media_ref input", async () => {
+    const fs = new MockFs();
+    await fs.writeTextFile(
+      joinPath(DIR, "internals", "timeline.json"),
+      JSON.stringify(emptyTimeline()),
+    );
+    const runner: CommandRunner = { run: vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })) };
+    const result = await inspectMediaTool({ clip_id: "clip1" }, ctxWith(runner, fs));
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("media_ref");
+    expect(result.error).toContain("get_project_state");
+    expect(runner.run).not.toHaveBeenCalled();
+  });
+});
+
 /** The summary ffmpeg's ebur128 + volumedetect print for the EBU -23 LUFS calibration tone. */
 const TONE_STDERR = `[Parsed_ebur128_0 @ 0] Summary:
 

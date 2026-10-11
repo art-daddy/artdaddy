@@ -9,6 +9,7 @@
 import { type Attachment, audioAttachment, imageAttachment, videoAttachment } from "./attachments";
 import { stderrExcerpt } from "./command";
 import type { ClientToolContext } from "./context";
+import { missingClipMessage } from "../contract/params";
 import { clipAbs, isUnsafeAgentRef } from "./store";
 import { probePath, shortHash } from "./media";
 import { encodeImageForGemini, encodeVideoForGemini } from "./geminiEncode";
@@ -345,7 +346,7 @@ export async function inspectMediaTool(
       return { ok: false, error: `clip_id given but the timeline could not be read: ${String(e)}` };
     }
     const found = findClip(timeline, clipId);
-    if (!found) return { ok: false, error: `clip not found on the timeline: ${clipId}` };
+    if (!found) return { ok: false, error: missingClipMessage("inspect_media", clipId) };
     timelineClip = found[1];
     clipTimeline = timeline;
     clipFps = canvasFps(timeline);
