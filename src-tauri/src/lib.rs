@@ -405,6 +405,7 @@ pub fn run() {
       runtime_health::runtime_health_status,
       runtime_health::runtime_health_update,
       runtime_health::runtime_health_ack,
+      reload_guard::qa_renderer_process,
       sidecar_run::sidecar_run,
       sidecar_run::sidecar_kill,
       mcp::mcp_start,

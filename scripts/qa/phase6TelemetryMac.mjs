@@ -249,24 +249,6 @@ const quit = async (child, healthPath) => {
   );
   await exited;
 };
-const rendererOwners = (pids) =>
-  JSON.parse(
-    execFileSync(
-      "swift",
-      [
-        "-e",
-        `import Foundation
-import Darwin
-typealias ResponsibleProcess = @convention(c) (Int32) -> Int32
-guard let handle = dlopen(nil, RTLD_LAZY), let symbol = dlsym(handle, "responsibility_get_pid_responsible_for_pid") else { fatalError("Cannot establish WebContent ownership") }
-let responsible = unsafeBitCast(symbol, to: ResponsibleProcess.self)
-let owners = CommandLine.arguments.dropFirst().compactMap { Int32($0) }.map { ["pid": Int($0), "owner": Int(responsible($0))] }
-print(String(data: try JSONSerialization.data(withJSONObject: owners), encoding: .utf8)!)`,
-        ...pids.map(String),
-      ],
-      { encoding: "utf8" },
-    ),
-  );
 const proof = {
   root,
   identifier,
@@ -321,7 +303,7 @@ try {
         "--config",
         config,
       ],
-      { VITE_API_BASE_URL: backend, VITE_SENTRY_DSN: "" },
+      { VITE_API_BASE_URL: backend, VITE_SENTRY_DSN: "", ARTDADDY_PHASE6_QA_RENDERER: "1" },
     );
   let app = startApp();
   let ready = await fileReady(path.join(root, "ready.json"));
@@ -385,19 +367,21 @@ try {
   const launch = /^launch-[a-f0-9]+-([a-f0-9]+)$/.exec(beforeCrash.current.launch_id);
   assert.ok(launch, "Native launch identity did not contain its process");
   const nativePid = Number.parseInt(launch[1], 16);
-  const owners = rendererOwners(contentProcesses().filter((pid) => !oldContent.has(pid)));
+  const rendererPid = ui.rendererPid;
+  assert.ok(Number.isInteger(rendererPid) && rendererPid > 0 && rendererPid !== nativePid);
+  assert.equal(beforeCrash.current.launch_id, ui.playing.current.launch_id);
+  assert.equal(beforeCrash.current.renderer_epoch, ui.playing.current.renderer_epoch);
+  const observed = contentProcesses().filter((pid) => !oldContent.has(pid));
   await writeFile(
     path.join(output, "renderer-processes.json"),
-    JSON.stringify({ nativePid, owners }, null, 2),
-  );
-  const observed = owners.filter((process) => process.owner === nativePid);
-  assert.equal(
-    observed.length,
-    1,
-    "Refusing to guess among processes not uniquely owned by this isolated app",
+    JSON.stringify({ nativePid, rendererPid, observed }, null, 2),
   );
   await writeFile(path.join(output, "ready-before-crash.json"), JSON.stringify(ready, null, 2));
-  process.kill(observed[0].pid, "SIGKILL");
+  assert.ok(
+    !oldContent.has(rendererPid) && contentProcesses().includes(rendererPid),
+    "Refusing to terminate a process not reported by this app's live WKWebView",
+  );
+  process.kill(rendererPid, "SIGKILL");
   await fileReady(path.join(output, "rows.json"), (saved) =>
     saved.some(
       (row) =>
