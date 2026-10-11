@@ -168,7 +168,19 @@ describe("startup event delivery", () => {
         release = resolve;
       });
     });
-    const calls = captureFetch();
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url) => {
+        calls.push(String(url));
+        return new Response(
+          JSON.stringify(
+            String(url).endsWith("/me") ? { user_id: "account_a" } : { ok: true, status: "ok" },
+          ),
+          { status: 200 },
+        );
+      }),
+    );
     const pending = reportAppEvent("app_error", {
       ownerId: "account_a",
       reason: "verification race",
@@ -179,6 +191,46 @@ describe("startup event delivery", () => {
     release("old-account-token");
     expect(await pending).toBe("discarded");
     expect(calls).toEqual([]);
+  });
+
+  it("does not notify or upload after sign-out wins the final native token wait", async () => {
+    vi.useFakeTimers();
+    useAuth.setState({ profile: { user_id: "account_a" } as never });
+    let reads = 0;
+    let release!: (token: string) => void;
+    setClerkTokenProvider(async () => {
+      if (++reads === 1) return "account-a-token";
+      return new Promise((resolve) => {
+        release = resolve;
+      });
+    });
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url) => {
+        calls.push(String(url));
+        return new Response(
+          JSON.stringify(
+            String(url).endsWith("/me") ? { user_id: "account_a" } : { ok: true, status: "ok" },
+          ),
+          { status: 200 },
+        );
+      }),
+    );
+    const notified = vi.fn();
+    const pending = reportAppEvent("app_error", {
+      ownerId: "account_a",
+      onVerifiedSend: notified,
+      reason: "final token race",
+    });
+    await vi.advanceTimersByTimeAsync(1);
+    expect(reads).toBe(2);
+    expect(calls.filter((url) => url.endsWith("/me"))).toHaveLength(1);
+    useAuth.getState().markLocked();
+    release("account-a-token");
+    expect(await pending).toBe("discarded");
+    expect(notified).not.toHaveBeenCalled();
+    expect(calls.filter((url) => url.endsWith("/telemetry/app"))).toEqual([]);
   });
 
   it("keeps the final account guard even if a profile change did not notify subscribers", async () => {

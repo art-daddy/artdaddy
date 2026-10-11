@@ -189,6 +189,40 @@ describe("signed in", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it("does not upload after a token provider ignores the delivery deadline", async () => {
+    session.signedIn = true;
+    useAuth.setState({ status: "unlocked", hasStoredSession: true });
+    vi.useFakeTimers();
+    let calls = 0;
+    let releaseToken!: (token: string) => void;
+    let tokenRequested!: () => void;
+    const requested = new Promise<void>((resolve) => {
+      tokenRequested = resolve;
+    });
+    setClerkTokenProvider(async () => {
+      if (++calls === 1) return "trace-test-token";
+      tokenRequested();
+      return new Promise<string>((resolve) => {
+        releaseToken = resolve;
+      });
+    });
+    recordToolCall({ name: "undo", ok: true, ms: 1 });
+    const sending = flushAgentEvents();
+    await requested;
+    await vi.advanceTimersByTimeAsync(10_001);
+    releaseToken("trace-test-token");
+    await sending;
+    expect(fetch).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+    setClerkTokenProvider(async () => "trace-test-token");
+    recordToolCall({ name: "redo", ok: true, ms: 1 });
+    await flushAgentEvents();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string);
+    expect(body.events).toHaveLength(1);
+    expect(body.events[0]).toMatchObject({ name: "redo", ok: true });
+  });
+
   it("POSTs once there is an identity to attribute to", async () => {
     session.signedIn = true;
     useAuth.setState({ status: "unlocked", hasStoredSession: true });
