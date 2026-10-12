@@ -24,6 +24,34 @@ export interface ToolCall {
    *  answer it (a cached round bills differently), so without this the cost of a fat
    *  payload is invisible and payload shaping can only be guessed at. */
   resultChars?: number;
+  expectedFailure?: boolean;
+}
+
+export type RecoveryCase =
+  | "native_success"
+  | "bad_destination"
+  | "platform_limit"
+  | "repeated_failure"
+  | "mixed_parts"
+  | "many_parts"
+  | "both_fail"
+  | "queued_failure";
+
+export interface RecoveryEvidence {
+  timelineUnchanged: boolean;
+  inputFilesUnchanged: boolean;
+  artifacts: {
+    mediaRef: string;
+    filename: string;
+    path: string;
+    sha256: string;
+    durationS: number;
+    problems: string[];
+  }[];
+  expectedFailures: number;
+  unexpectedFailures: number;
+  sources: { filename: string; sha256: string }[];
+  violations: string[];
 }
 
 /** The full trace of one driven scenario (what the model did + what it cost). */
@@ -32,11 +60,14 @@ export interface Trace {
   /** Reasoning snippets the model emitted across rounds (workaround detection). */
   reasoning: string[];
   rounds: number;
+  stopReason?: "round_limit";
   finalText: string;
+  turnTexts?: string[];
   usage: { inputTokens: number; outputTokens: number; reasoningTokens: number; costUsd: number };
   /** What the tools put back into the context across the whole scenario: total serialized
    *  characters, and the single fattest reply. Sizes payload shaping directly. */
   payload?: { resultChars: number; maxResultChars: number; maxResultTool: string };
+  recovery?: RecoveryEvidence;
 }
 
 /** Friction signals mined from the trace — fire EVEN when the task passes. */
@@ -97,7 +128,7 @@ export interface ScenarioResult {
 }
 
 /** A single eval scenario. */
-export interface Scenario {
+interface ScenarioBase {
   /** Stable id (also the report key). */
   id: string;
   title: string;
@@ -124,7 +155,6 @@ export interface Scenario {
    *  WORKFLOW can be driven with no network, ffmpeg, or paid calls. "studio"
    *  widens that to the WHOLE non-timeline catalog (research, vision, generation,
    *  project lifecycle, library, inspection) under the same no-spend rule. */
-  surface?: "timeline" | "journey" | "studio";
   /** Tier 1 for a workflow: assert on what the model DID — sequencing, the
    *  deliverable, no duplicated work — not just the final geometry. Throw on
    *  mismatch. Runs in addition to `expect`. */
@@ -138,3 +168,9 @@ export interface Scenario {
    *  from a deliberate refusal), which otherwise could never pass. */
   maxToolErrors?: number;
 }
+
+export type Scenario = ScenarioBase &
+  (
+    | { surface?: "timeline" | "journey" | "studio"; recovery?: never }
+    | { surface: "recovery"; recovery: RecoveryCase }
+  );

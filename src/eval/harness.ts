@@ -34,6 +34,7 @@ import { setOpenDocumentResolver } from "../project/openDocuments";
 import { asProjectId } from "../project/types";
 import { type Budget, costFromUsage } from "./pricing";
 import { analyzeTrace } from "./signals";
+import { RecoveryRuntime, recoveryContext, recoveryProjectDir } from "./recovery";
 import {
   HARNESS_UNAVAILABLE as HARNESS_MARK,
   type Scenario,
@@ -111,6 +112,7 @@ export interface DriveOpts {
   budget: Budget;
   effort?: string; // reasoning effort, default "high"
   mode?: string; // loop mode, default "autopilot"
+  artifactDir?: string;
 }
 
 /** What the tools handed back across a scenario. Reported per run so payload shaping can be
@@ -142,7 +144,10 @@ export async function driveScenario(
   const reasoning: string[] = [];
   let rounds = 0;
   let finalText = "";
+  const turnTexts: string[] = [];
+  let recovery: RecoveryRuntime | null = null;
   let providerError = "";
+  let roundLimitReached = false;
   const usage = { inputTokens: 0, outputTokens: 0, reasoningTokens: 0, costUsd: 0 };
   // `prompt` is persisted so a later reader (report, LLM judge) can grade what the
   // model did against what was actually asked, not just the scenario's title.
@@ -157,14 +162,16 @@ export async function driveScenario(
 
   try {
     const dir = await fsp.mkdtemp(path.join(os.tmpdir(), `artdaddy-eval-${scenario.id}-`));
-    const store = new ProjectStoreAccess(dir, nodeFs);
+    const realContext =
+      scenario.surface === "recovery" ? recoveryContext(recoveryProjectDir(dir)) : null;
+    const store = realContext?.store ?? new ProjectStoreAccess(dir, nodeFs);
     await ensureTimeline(store);
     // Seed by WRITING timeline.json, not via replaceTimeline: that path restores
     // into an open ProjectDocument's live session and is a documented no-op for a
     // bare store (`return false`), which silently left every scenario running on an
     // EMPTY timeline. Write-then-verify so a future change can't reintroduce that.
     await store.writeTextAtomic(
-      joinPath(dir, INTERNAL_DIR, "timeline.json"),
+      joinPath(store.projectDir, INTERNAL_DIR, "timeline.json"),
       JSON.stringify(scenario.seed(), null, 2),
     );
     const seeded = await loadTimeline(store);
@@ -181,7 +188,7 @@ export async function driveScenario(
     // harness rather than on the model.
     // Keyed by the temp dir's BASENAME: that is how the coordinator maps a store's
     // projectDir onto a document id.
-    const projectId = asProjectId(path.basename(dir));
+    const projectId = asProjectId(path.basename(store.projectDir));
     const doc = new ProjectDocument(projectId, {
       open: async () => "loaded",
       dispose: async () => {},
@@ -192,7 +199,7 @@ export async function driveScenario(
       setOpenDocumentResolver(() => undefined);
       await doc.close().catch(() => undefined);
     };
-    const ctx = { store, runner: probeRunner } as ClientToolContext;
+    const ctx = realContext ?? ({ store, runner: probeRunner } as ClientToolContext);
 
     const registry = new ClientToolRegistry();
     registerTimelineTools(registry, () => ctx);
@@ -209,9 +216,29 @@ export async function driveScenario(
     if (scenario.surface === "journey") registerJourneyStubs(registry, studio);
     else if (scenario.surface === "studio")
       registerStudioStubs(registry, studio, 30, () => loadTimeline(store));
+    else if (scenario.surface === "recovery") {
+      recovery = new RecoveryRuntime(scenario.recovery, ctx);
+      await recovery.initialize();
+      const surfaceResponse = await authedFetch(`${opts.server}/contract/tools`);
+      if (!surfaceResponse.ok)
+        throw new Error("recovery tool-surface preflight failed before inference");
+      const surface = (await surfaceResponse.json()) as { tools: { name: string }[] };
+      if (
+        JSON.stringify(surface.tools.map((tool) => tool.name).sort()) !==
+        JSON.stringify(recovery.toolNames())
+      )
+        throw new Error(
+          "model catalog and executable recovery handlers differ; no paid inference permitted",
+        );
+    }
 
     let snapshot: Record<string, unknown> | null = null;
     const infer = async (roundInput: RoundInput): Promise<RoundResultDTO> => {
+      if (recovery && rounds >= (scenario.maxRounds ?? 16)) {
+        roundLimitReached = true;
+        throw new Error("recovery scenario model-round limit reached");
+      }
+      opts.budget.startRound();
       const res = await authedFetch(`${opts.server}/inference`, {
         method: "POST",
         // This posts to /inference itself rather than going through src/agent/api.ts, so it
@@ -234,6 +261,8 @@ export async function driveScenario(
       usage.outputTokens += u.output_tokens ?? 0;
       usage.reasoningTokens += u.reasoning_tokens ?? 0;
       const cost = costFromUsage(model, u);
+      if (recovery && (u.input_tokens ?? 0) > 0 && cost <= 0)
+        throw new Error("recovery campaign stopped: model usage has no trustworthy cost receipt");
       usage.costUsd += cost;
       opts.budget.add(cost);
       return dto;
@@ -244,11 +273,15 @@ export async function driveScenario(
       infer,
       runTool: async (name, args, trace) => {
         const a = (args ?? {}) as Record<string, unknown>;
-        if (!registry.has(name)) {
+        if (!recovery && !registry.has(name)) {
           toolCalls.push({ round: rounds, name, args: a, ok: false, error: HARNESS_MARK });
           return { ok: false, error: `tool '${name}' is not available in this eval harness` };
         }
-        const r = (await registry.run(name, a, trace.context, trace)) as {
+        const r = (
+          recovery
+            ? await recovery.execute(name, a, rounds)
+            : await registry.run(name, a, trace.context, trace)
+        ) as {
           ok?: boolean;
           error?: string;
         };
@@ -262,6 +295,7 @@ export async function driveScenario(
           result: serialized.slice(0, 1200),
           resultChars: serialized.length,
           error: ok ? undefined : String(r?.error ?? ""),
+          expectedFailure: recovery?.expectedErrors.has(r),
         });
         return r;
       },
@@ -282,23 +316,45 @@ export async function driveScenario(
 
     const runner = new ClientTurnRunner(deps);
     await runner.start(scenario.prompt);
-    if (providerError) throw new Error(`provider error: ${providerError}`);
+    turnTexts.push(finalText);
+    await recovery?.recordClaim(finalText);
+    if (providerError && !roundLimitReached) throw new Error(`provider error: ${providerError}`);
     // Multi-turn: replay each follow-up as a new user turn on the SAME runner
     // (timeline + provider continuity carry over) before scoring the final state.
-    for (const followUp of scenario.followUps ?? []) {
-      if (opts.budget.exceeded()) break;
+    const followUps =
+      scenario.followUps ??
+      (recovery?.jobs.some((job) => job.status === "exporting")
+        ? [
+            "The background export job has now settled. Check its result and finish the requested video if a valid recovery is available. Leave the editable project unchanged. Reply in the same JSON format.",
+          ]
+        : []);
+    for (const followUp of followUps) {
+      if (opts.budget.exceeded() || roundLimitReached) break;
+      recovery?.releaseQueuedFailure();
       await runner.start(followUp);
-      if (providerError) throw new Error(`provider error: ${providerError}`);
+      turnTexts.push(finalText);
+      await recovery?.recordClaim(finalText);
+      if (providerError && !roundLimitReached) throw new Error(`provider error: ${providerError}`);
     }
 
+    await doc.autosave.flush();
     const final = await loadTimeline(store);
     const trace: Trace = {
       toolCalls,
       reasoning,
       rounds,
+      ...(roundLimitReached ? { stopReason: "round_limit" as const } : {}),
       finalText,
+      turnTexts,
       usage,
       payload: payloadOf(toolCalls),
+      ...(recovery
+        ? {
+            recovery: await recovery.evidence(
+              opts.artifactDir ?? path.resolve("reports/eval/artifacts", path.basename(dir)),
+            ),
+          }
+        : {}),
     };
     // A wasted tool call can BE the regression, so tool errors fail the run (tier0
     // only looks at the end state, which the model usually still reaches). The
@@ -327,6 +383,7 @@ export async function driveScenario(
       reasoning,
       rounds,
       finalText,
+      turnTexts,
       usage,
       payload: payloadOf(toolCalls),
     };

@@ -75,7 +75,9 @@ export function evalTier0(final: Timeline, trace: Trace, maxToolErrors = 0): Tie
   // to allow the refusal it provokes. That is what maxToolErrors buys, and it is the
   // ONLY knob — an implicit floor here plus a second budget elsewhere is two rules
   // for one thing, and it made the refusal scenario unpassable by construction.
-  const failed = trace.toolCalls.filter((c) => !c.ok && c.error !== HARNESS_UNAVAILABLE).length;
+  const failed = trace.toolCalls.filter(
+    (c) => !c.ok && c.error !== HARNESS_UNAVAILABLE && !(trace.recovery && c.expectedFailure),
+  ).length;
   if (failed > maxToolErrors)
     violations.push(`invariant: ${failed} tool call(s) errored (budget ${maxToolErrors})`);
 
@@ -86,6 +88,8 @@ export function evalTier0(final: Timeline, trace: Trace, maxToolErrors = 0): Tie
  *  A workflow scenario may ALSO assert on the trace (sequencing / deliverable). */
 export function evalTier1(scenario: Scenario, final: Timeline, trace?: Trace): TierResult {
   const violations: string[] = [];
+  if (trace?.stopReason === "round_limit")
+    violations.push("tier1: model exhausted the scenario round limit before completing the task");
   if (scenario.expect) {
     try {
       scenario.expect(final);

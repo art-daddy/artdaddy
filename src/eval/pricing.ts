@@ -35,6 +35,10 @@ export class Budget {
   private spent = 0;
   constructor(readonly capUsd: number) {}
 
+  startRound(): void {
+    if (this.exceeded()) throw new Error("eval budget exhausted before model round");
+  }
+
   add(usd: number): void {
     if (Number.isFinite(usd) && usd > 0) this.spent += usd;
   }

@@ -1,7 +1,7 @@
 import type { Scenario } from "../types";
 import { CANONICAL } from "./canonical";
 import { EFFECT_SCENARIOS } from "./effects";
-import { EXPORT_SCENARIOS } from "./exports";
+import { EXPORT_SCENARIOS, RECOVERY_SCENARIOS } from "./exports";
 import { JOURNEYS } from "./journeys";
 import { REGRESSIONS } from "./regressions";
 import { STUDIO_SCENARIOS } from "./studio";
@@ -18,5 +18,6 @@ export const ALL_SCENARIOS: Scenario[] = [
   ...REGRESSIONS,
   ...JOURNEYS,
   ...EXPORT_SCENARIOS,
+  ...RECOVERY_SCENARIOS,
   ...STUDIO_SCENARIOS,
 ];

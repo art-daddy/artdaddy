@@ -11,6 +11,8 @@
 // real one's QUEUED reply (`status:'exporting'`, a job_id, no file yet) and a real
 // `manage_exports`, so "check what happened" is an option the model actually has. Zero spend.
 import type { Scenario, Trace } from "../types";
+import { assertRecoveryOutcome, recoverySeed } from "../recovery";
+import type { RecoveryCase } from "../types";
 import { timeline, vclip, vtrack } from "./helpers";
 
 const FPS = 30;
@@ -194,3 +196,73 @@ export const EXPORT_SCENARIOS: Scenario[] = [
     },
   },
 ];
+
+const recoveryPrompts: { kind: RecoveryCase; title: string; prompt: string }[] = [
+  {
+    kind: "native_success",
+    title: "Healthy native export stays native",
+    prompt: "Export the finished video and make sure the completed file is ready.",
+  },
+  {
+    kind: "bad_destination",
+    title: "Invalid previous destination is corrected without an escape hatch",
+    prompt:
+      "The previous export failed. Save the finished video to Downloads and check that it worked.",
+  },
+  {
+    kind: "platform_limit",
+    title: "Platform export failure is recovered using rendered parts",
+    prompt:
+      "Finish exporting my video. The library contains four already-rendered parts in numbered order. Preserve their pictures, sound, treatments and final card, and leave my editable project unchanged.",
+  },
+  {
+    kind: "repeated_failure",
+    title: "Repeated valid-input failure changes strategy",
+    prompt:
+      "I still need the finished video even if the normal export keeps failing. The four numbered completed parts are in the library. Keep everything in order and leave the editable project unchanged.",
+  },
+  {
+    kind: "mixed_parts",
+    title: "Mixed formats and mono-first audio survive recovery",
+    prompt:
+      "Deliver one finished video from the four numbered rendered parts, preserving their order, sound and treatments. They came from different export settings. Keep the final card once and don't change my editable project.",
+  },
+  {
+    kind: "many_parts",
+    title: "Thirteen rendered parts use a bounded assembly plan",
+    prompt:
+      "Deliver one finished video from all thirteen numbered rendered parts in the library. Keep their order, all the sound and treatments, and the final card exactly once. Leave the editable project alone.",
+  },
+  {
+    kind: "both_fail",
+    title: "No output means no invented completion",
+    prompt:
+      "Finish exporting the video; four rendered parts are available if needed. Preserve all content and leave the project unchanged. Tell me the actual blocker if you cannot produce a completed file.",
+  },
+  {
+    kind: "queued_failure",
+    title: "Queued is not delivered; later failure gets recovered",
+    prompt:
+      "An export is already running. Check its status, but don't start a duplicate or say it's finished before the file is ready.",
+  },
+];
+
+export const RECOVERY_SCENARIOS: Scenario[] = recoveryPrompts.map(({ kind, title, prompt }) => ({
+  id: `export_recovery_${kind}`,
+  title,
+  tags: ["export", "recovery", "real-artifact"],
+  surface: "recovery",
+  recovery: kind,
+  seed: () => recoverySeed(kind),
+  prompt: `${prompt} Reply with one JSON object containing status (completed, blocked, or pending), file (the completed filename, or an empty string), and reason. No markdown.`,
+  ...(kind === "queued_failure"
+    ? {
+        followUps: [
+          "That export has now failed. Finish the video using the four numbered rendered parts in the library, preserving all content and leaving my project unchanged. Reply in the same JSON format.",
+        ],
+      }
+    : {}),
+  maxRounds: kind === "many_parts" ? 24 : 16,
+  maxToolErrors: 0,
+  expectTrace: (trace) => assertRecoveryOutcome(kind, trace),
+}));

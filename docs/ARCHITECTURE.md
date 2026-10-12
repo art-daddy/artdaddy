@@ -308,6 +308,58 @@ Non-gating. An **offline transcript miner** (`npm run mine`, "Mode A") replays r
 `reports/eval/transcript-mining.md` — it mined the real t001–t009 into the recurring-bug report.
 Full contract in the backend repo's `docs/ARCHITECTURE.md` §14.
 
+The recovery surface additionally executes real local media/inspection handlers and
+grades retained ffmpeg artifacts rather than an unconditional-success tool stub.
+`recoveryCampaign.e2e.ts` is an explicit old/new-guidance, five-repetition Luna campaign
+with one shared spend journal; it remains skipped without `ARTDADDY_RECOVERY_EVAL=1`.
+Native failure/job timing is controlled, final files are real, and a provider-free
+regrade verifies frozen hashes, unchanged timelines and stereo separation. See
+`DEVELOPMENT.md` -> FFmpeg Recovery Model Evals for commands, provenance, safety limits
+and the distinction from MCP-host verification.
+
+Recovery comparison, 2026-10-12: Luna/high, five repetitions per case/version, 80
+recorded samples. The final provider-free regrade checks frozen output hashes,
+byte-identical source fixtures, decoded pixels/audio and unchanged persisted timelines.
+Verified outcome means a correctly delivered file or, in the no-output case, a truthful
+blocker; clean pass additionally requires no unexpected invalid calls. These differ:
+
+| Scenario | Old Outcome / Clean | New Outcome / Clean |
+| --- | --- | --- |
+| Native success | 5/5 / 5/5 | 5/5 / 5/5 |
+| Correct invalid destination | 5/5 / 5/5 | 5/5 / 5/5 |
+| Confirmed platform limit | 2/5 / 1/5 | 5/5 / 5/5 |
+| Repeated valid-input failure | 5/5 / 5/5 | 5/5 / 5/5 |
+| Mixed rendered parts | 4/5 / 3/5 | 5/5 / 4/5 |
+| Thirteen rendered parts | 4/5 / 0/5 | 3/5 / 2/5 |
+| Neither path produces output | 5/5 / 4/5 | 4/5 / 2/5 |
+| Queued export later fails | 4/5 / 4/5 | 5/5 / 5/5 |
+| Total | 34/40 / 27/40 | 37/40 / 33/40 |
+
+This supports the narrower claim that the new guidance improved this controlled
+four-part platform-recovery sample. It does NOT establish a universal improvement:
+thirteen-part verified outcomes and honest handling of total failure regressed in this
+small sample. One new-guidance total-failure run exhausted 16 rounds; it remains a model
+failure, not an infrastructure retry. Its earlier exception path did not retain artifact
+snapshots, so that failure is not presented as an artifact-verified sample.
+
+Proof artifacts: `reports/eval/ffmpeg-recovery-2026-10-12/validated-summary.json` and
+`validated-campaign.jsonl` plus the frozen media and before/after timeline files. The
+comparison's recorded harness hash is
+`1251458d7b334a999dda16f74f91926c287d1a0d5690b677204330afca3cc34a`.
+All-attempt server-reported round costs in the journal total USD 0.756701; its conservative
+budget total is USD 2.756701, including USD 2 for two unknown interrupted receipts.
+The USD 5 authorization was not reset on resume. No customer credit ledger was changed.
+
+Guaranteed by this test slice: bounded local execution, no paid media tools, portable
+library refs, unchanged checked project/source bytes, and output-based grading.
+Residual: the native job queue/failure is controlled rather than the desktop queue;
+synthetic branding proves preservation, not production logo/caption rendering; one
+already-present final card does not certify stripping duplicate cards from each part.
+Deferred: native mono-first renderer repair (owner accepted), live MCP/host-consumption
+verification, production segmented rendering, other models/platforms and deployment.
+The full local typecheck still reports four pre-existing chat/generation errors outside
+this slice; focused eval tests and diagnostics do not upgrade that gate to a full pass.
+
 **Run**: `npm test` (unit) · `npm run test:coverage` (unit + gate) · `npm run smoke`
 (e2e, needs ffmpeg) · `npm run test:all` (both) · `npm run mutation` (Stryker, slow —
 or `npx stryker run --mutate <path>`) · `npm run eval` / `npm run eval:mini` (model eval,

@@ -5,7 +5,7 @@ import type { Scenario, Trace } from "./types";
 
 const HARNESS_MARK = "(eval) not available in the timeline-only harness";
 
-function scn(extra: Partial<Scenario> = {}): Scenario {
+function scn(extra: Partial<Exclude<Scenario, { surface: "recovery" }>> = {}): Scenario {
   return { id: "s", title: "t", seed: () => ({}) as never, prompt: "p", ...extra };
 }
 function trace(extra: Partial<Trace> = {}): Trace {
