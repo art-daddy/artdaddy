@@ -360,13 +360,23 @@ async function run(): Promise<void> {
     monitorColors.push([...context.getImageData(8, 8, 1, 1).data].slice(0, 3));
   }
   report.previewAttempt = { sourceMonitorColors: monitorColors, presentedTimes, url: readyUrl };
-  const early = await pixels(readyUrl, 0.4);
-  const late = await pixels(readyUrl, 2.0);
+  let early: number[] | undefined;
+  let late: number[] | undefined;
+  let indexedPreviewError: string | undefined;
+  try {
+    early = await pixels(readyUrl, 0.4);
+    late = await pixels(readyUrl, 2.0);
+    check(early[0] > early[1] + 80, `Early recording is not red: ${early}`);
+    check(late[1] > late[0] + 80, `Late recording is not green: ${late}`);
+  } catch (error) {
+    indexedPreviewError = String(error instanceof Error ? error.message : error);
+  }
   report.previewAttempt = {
     sourceMonitorColors: monitorColors,
     presentedTimes,
     early,
     late,
+    indexedPreviewError,
     url: readyUrl,
   };
   check(
@@ -377,8 +387,6 @@ async function run(): Promise<void> {
     monitorColors[1][1] > monitorColors[1][0] + 80,
     "Source Monitor did not show the green recorded frame",
   );
-  check(early[0] > early[1] + 80, `Early recording is not red: ${early}`);
-  check(late[1] > late[0] + 80, `Late recording is not green: ${late}`);
   check(
     JSON.stringify(await ctx.store.listClips()) === JSON.stringify(catalogBefore),
     "Normalization changed the library document",
@@ -392,6 +400,8 @@ async function run(): Promise<void> {
   report.preview = {
     early,
     late,
+    indexedPreviewOk: !indexedPreviewError,
+    indexedPreviewError,
     sourceMonitorColors: monitorColors,
     sourceMonitorReady: true,
     oldLookupRecovered: true,
@@ -491,6 +501,10 @@ async function run(): Promise<void> {
   };
   ui.unmount();
   check((await projectDocuments.close(asProjectId(project.id))).ok, "QA document failed to close");
+  if (indexedPreviewError) {
+    step = "native-preview-arrival-race";
+    throw new Error(indexedPreviewError);
+  }
   report.ok = true;
 }
 
