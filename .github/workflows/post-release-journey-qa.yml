@@ -1,0 +1,35 @@
+name: Post-release journey artifact QA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release-artifacts:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install native Linux probe dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb python3-gi gir1.2-webkit2-4.1 gstreamer1.0-libav libgl1-mesa-dri
+      - name: Inspect signed 0.21.4 platform artifacts
+        run: node scripts/qa/postReleaseArtifacts.mjs
+      - name: Upload all outcome evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: post-release-0214-${{ runner.os }}
+          path: reports/qa/post-release-0214/**
+          if-no-files-found: error
