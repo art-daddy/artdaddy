@@ -15,6 +15,10 @@ name: macOS end-to-end
 on:
   workflow_dispatch:
     inputs:
+      post_release_artifacts_only:
+        description: "Inspect signed 0.21.4 Mac/Linux artifacts only; no paid calls or app changes"
+        type: boolean
+        default: false
       runner:
         description: "Native macOS runtime for QA; this does not change the release target"
         type: choice
@@ -48,8 +52,12 @@ on:
         default: "v1.9.2"
 
 jobs:
+  post-release-artifacts:
+    if: ${{ inputs.post_release_artifacts_only }}
+    uses: ./.github/workflows/post-release-journey-qa.yml
+
   native-hotfix:
-    if: ${{ inputs.native_hotfix_only }}
+    if: ${{ inputs.native_hotfix_only && !inputs.post_release_artifacts_only }}
     runs-on: ${{ inputs.runner || 'macos-14' }}
     timeout-minutes: 35
     steps:
@@ -78,7 +86,7 @@ jobs:
           if-no-files-found: error
 
   native-pixels:
-    if: ${{ !inputs.native_hotfix_only }}
+    if: ${{ !inputs.native_hotfix_only && !inputs.post_release_artifacts_only }}
     runs-on: ${{ inputs.runner || 'macos-14' }}
     timeout-minutes: 10
     env:
@@ -105,7 +113,7 @@ jobs:
           if-no-files-found: warn
 
   e2e:
-    if: ${{ !inputs.native_pixels_only && !inputs.native_hotfix_only }}
+    if: ${{ !inputs.native_pixels_only && !inputs.native_hotfix_only && !inputs.post_release_artifacts_only }}
     runs-on: ${{ inputs.runner || 'macos-14' }}
     # Every lane pipes to `tail`, and a pipeline's status is the LAST command's - so without
     # pipefail each lane reported success no matter what happened, and the whole run went green
