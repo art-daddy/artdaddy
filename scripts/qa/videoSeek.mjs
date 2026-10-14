@@ -37,7 +37,25 @@ for (const version of ["before", "after"]) {
   bundles[version] = bundle.outputFiles[0].text;
 }
 const probe = `
-  const shots = { fresh: {}, sequence: [] };
+  const shots = { fresh: {}, sequence: [], decoders: [] };
+  const NativeDecoder = window.VideoDecoder;
+  window.VideoDecoder = new Proxy(NativeDecoder, {
+    construct(target, [callbacks]) {
+      const events = { inputs: [], outputs: [], errors: [] };
+      shots.decoders.push(events);
+      const decoder = new target({
+        output(frame) { events.outputs.push(frame.timestamp); callbacks.output(frame); },
+        error(error) { events.errors.push(String(error)); callbacks.error(error); },
+      });
+      const decode = decoder.decode.bind(decoder);
+      decoder.decode = (chunk) => {
+        events.inputs.push({ timestamp: chunk.timestamp, type: chunk.type, bytes: chunk.byteLength });
+        try { decode(chunk); }
+        catch (error) { events.errors.push(String(error)); throw error; }
+      };
+      return decoder;
+    },
+  });
   const pixel = (frame) => {
     if (!frame) return null;
     const canvas = document.createElement("canvas");
