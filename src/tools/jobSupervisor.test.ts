@@ -2,10 +2,12 @@
 // CommandRunner reports a process, and `whenJobEnds` follows a job some other page started. Both
 // are shared now (an export's ffmpeg, every whisper), so their edges are pinned here, against
 // FakeJobs, which keeps the Rust supervisor's rules.
-import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { describe, expect, it, vi } from "vitest";
 
 import { FakeJobs } from "../test/fakeJobs";
 import {
+  EXPORT_PROTOCOL_VERSION,
   type JobProgram,
   type JobSpec,
   type JobSupervisor,
@@ -13,6 +15,46 @@ import {
   runAsJob,
   whenJobEnds,
 } from "./jobSupervisor";
+
+const native = vi.hoisted(() => ({ invoke: vi.fn() }));
+vi.mock("@tauri-apps/api/core", () => native);
+
+describe("desktop exporter protocol", () => {
+  const source = readFileSync("src-tauri/src/jobs.rs", "utf8");
+  const nativeVersion = Number(
+    source.match(/pub fn jobs_export_protocol\(\) -> u32 \{ (\d+) \}/)?.[1],
+  );
+
+  it.each([
+    nativeVersion,
+    EXPORT_PROTOCOL_VERSION - 1,
+    EXPORT_PROTOCOL_VERSION + 1,
+    null,
+    String(EXPORT_PROTOCOL_VERSION),
+  ])("accepts only the matching native protocol: %s", async (version) => {
+    vi.resetModules();
+    const previous = Object.getOwnPropertyDescriptor(window, "__TAURI_INTERNALS__");
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: {} });
+    native.invoke.mockImplementation(async (command: string) => {
+      if (command === "jobs_launch_id") return "protocol-test-launch";
+      if (command === "jobs_export_protocol") return version;
+      throw new Error(`unexpected native command ${command}`);
+    });
+    try {
+      const { jobSupervisor } = await import("./jobSupervisor");
+      if (version === nativeVersion) {
+        expect(nativeVersion).toBe(EXPORT_PROTOCOL_VERSION);
+        expect(await jobSupervisor()).not.toBeNull();
+      } else {
+        await expect(jobSupervisor()).rejects.toThrow(/unavailable or outdated/);
+      }
+    } finally {
+      if (previous) Object.defineProperty(window, "__TAURI_INTERNALS__", previous);
+      else delete window.__TAURI_INTERNALS__;
+      vi.resetModules();
+    }
+  });
+});
 
 const spec = (id: string, program: JobProgram = "whisper-cli"): JobSpec => ({
   id,

@@ -9,7 +9,6 @@ import {
   readDir,
   readFile,
   readTextFile,
-  remove,
   rename,
   stat as fsStat,
   writeFile,
@@ -275,15 +274,7 @@ export class TauriFs implements FsLike {
     return entries.map((e) => ({ name: e.name, isDirectory: e.isDirectory }));
   }
   async remove(path: string): Promise<void> {
-    try {
-      await remove(path, { recursive: true });
-    } catch (e) {
-      // Outside the plugin's scope (an export destination on another drive) it refuses rather
-      // than failing to find the file. Falling back keeps a failed export from leaving its
-      // staging file in the user's folder.
-      if (!isForbiddenPath(e)) throw e;
-      await invoke("remove_file", { path });
-    }
+    await invoke("remove_file", { path });
   }
   async trash(path: string): Promise<void> {
     // Native command (lib.rs) -> the cross-platform `trash` crate -> OS Recycle Bin / Trash.

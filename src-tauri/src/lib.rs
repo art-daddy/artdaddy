@@ -13,8 +13,14 @@ mod token_store;
 /// Move a file or directory to the OS Recycle Bin / Trash (recoverable) instead of
 /// deleting it irreversibly. Backs the client's project-delete path (`fs.trash`).
 #[tauri::command]
-fn trash_path(path: String) -> Result<(), String> {
-  trash::delete(&path).map_err(|e| e.to_string())
+fn trash_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
+  use tauri::Manager;
+  let jobs = app.try_state::<jobs::Supervisor>().ok_or("export dependency owner unavailable")?;
+  trash_path_owned(&jobs, path)
+}
+
+fn trash_path_owned(jobs: &jobs::Supervisor, path: String) -> Result<(), String> {
+  jobs.with_unleased_path(std::path::Path::new(&path), || trash::delete(&path).map_err(|e| e.to_string()))
 }
 
 /// Terminate a process AND everything it spawned. The shell plugin's `Child::kill`
@@ -52,12 +58,15 @@ fn commit_file(from: String, to: String) -> Result<(), String> {
 /// Delete a file outright, for the same out-of-scope destinations as `commit_file` — a failed
 /// export must not leave its staging file sitting in the user's folder.
 #[tauri::command]
-fn remove_file(path: String) -> Result<(), String> {
-  match std::fs::remove_file(&path) {
-    Ok(()) => Ok(()),
-    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-    Err(e) => Err(e.to_string()),
-  }
+fn remove_file(app: tauri::AppHandle, path: String) -> Result<(), String> {
+  use tauri::Manager;
+  let jobs = app.try_state::<jobs::Supervisor>().ok_or("export dependency owner unavailable")?;
+  jobs.with_unleased_path(std::path::Path::new(&path), || match std::fs::symlink_metadata(&path) {
+    Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => std::fs::remove_dir_all(&path).map_err(|error| error.to_string()),
+    Ok(_) => std::fs::remove_file(&path).map_err(|error| error.to_string()),
+    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+    Err(error) => Err(error.to_string()),
+  })
 }
 
 /// Let the preview read a project's folder or a file its library links (UJ-027). The asset
@@ -396,11 +405,21 @@ pub fn run() {
       load_refresh_token,
       clear_refresh_token,
       jobs::jobs_submit,
+      jobs::jobs_submit_sequence,
       jobs::jobs_kill,
       jobs::jobs_list,
       jobs::jobs_commit,
       jobs::jobs_forget,
       jobs::jobs_launch_id,
+      jobs::jobs_export_protocol,
+      jobs::jobs_prepare_export,
+      jobs::jobs_verify_export,
+      jobs::jobs_publish_export,
+      jobs::jobs_cancel_export,
+      jobs::jobs_export_intents,
+      jobs::jobs_fail_export,
+      jobs::jobs_complete_export,
+      jobs::jobs_copy_export,
       runtime_health::runtime_health_begin,
       runtime_health::runtime_health_status,
       runtime_health::runtime_health_update,
@@ -972,7 +991,8 @@ fn install_macos_menu(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::
 mod tests {
   #[cfg(windows)]
   use super::kill_tree;
-  use super::trash_path;
+  use super::trash_path_owned;
+  use crate::jobs;
   use std::fs;
   use std::path::PathBuf;
   use std::time::{SystemTime, UNIX_EPOCH};
@@ -1185,7 +1205,7 @@ mod tests {
     fs::write(&p, b"delete me").unwrap();
     assert!(p.exists());
 
-    trash_path(p.to_string_lossy().into_owned()).expect("trash should succeed");
+    unleased_trash(p.to_string_lossy().into_owned()).expect("trash should succeed");
 
     // The OUTCOME, not the call: the path must no longer resolve. (The bytes still
     // exist in the Recycle Bin — that is the whole point of using trash over remove.)
@@ -1198,7 +1218,7 @@ mod tests {
     fs::create_dir_all(dir.join("internals")).unwrap();
     fs::write(dir.join("internals/timeline.json"), b"{}").unwrap();
 
-    trash_path(dir.to_string_lossy().into_owned()).expect("trash should succeed");
+    unleased_trash(dir.to_string_lossy().into_owned()).expect("trash should succeed");
 
     assert!(!dir.exists(), "the project directory survived");
   }
@@ -1208,14 +1228,25 @@ mod tests {
     // The frontend awaits this across IPC; a panic would poison the webview call
     // instead of surfacing a message the delete flow can show the user.
     let p = scratch("missing");
-    let err = trash_path(p.to_string_lossy().into_owned())
+    let err = unleased_trash(p.to_string_lossy().into_owned())
       .expect_err("trashing a non-existent path must fail");
     assert!(!err.is_empty(), "the error must carry a message");
   }
 
   #[test]
   fn an_empty_path_is_rejected_rather_than_deleting_the_cwd() {
-    assert!(trash_path(String::new()).is_err());
+    assert!(unleased_trash(String::new()).is_err());
+  }
+
+  fn unleased_trash(path: String) -> Result<(), String> {
+    struct NoSpawn;
+    impl jobs::Spawner for NoSpawn {
+      fn identity(&self, _: &str) -> Result<jobs::ArtifactIdentity, String> { Err("trash fixture has no worker".into()) }
+      fn spawn(&self, _: &jobs::JobSpec, _: std::sync::Arc<dyn Fn(jobs::ProcEvent) + Send + Sync>) -> Result<u32, String> { Err("unused".into()) }
+      fn kill(&self, _: u32) {}
+    }
+    let supervisor = jobs::Supervisor::new(std::sync::Arc::new(NoSpawn), std::sync::Arc::new(|_| {}));
+    trash_path_owned(&supervisor, path)
   }
 
   // ── kill_process_tree ──────────────────────────────────────────────────────

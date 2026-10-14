@@ -64,6 +64,7 @@ const invoke = vi.fn(async (cmd: string, args?: unknown): Promise<unknown> => {
       if (autoFinish) resolve(autoFinish);
     });
   if (cmd === "sidecar_kill") return true;
+  if (cmd === "jobs_export_protocol") return EXPORT_PROTOCOL_VERSION;
   return undefined;
 });
 const downloadDir = vi.fn(async () => "/Users/me/Downloads");
@@ -90,7 +91,8 @@ vi.mock("./sidecar", async () => ({
 
 const { TauriCommandRunner, TauriFs, makeTauriContext } = await import("./tauri");
 const { BROWSER_BIN, packagedSidecarName } = await import("./sidecar");
-const { JOB_PROGRAMS, jobSupervisor, __resetJobSupervisor } = await import("./jobSupervisor");
+const { JOB_PROGRAMS, EXPORT_PROTOCOL_VERSION, jobSupervisor, __resetJobSupervisor } =
+  await import("./jobSupervisor");
 
 /** Let the runner's awaits (resource lookups, the invoke) run. */
 const settle = async (): Promise<void> => {
@@ -445,9 +447,21 @@ describe("TauriFs", () => {
     expect(fs.remove).not.toHaveBeenCalled();
   });
 
-  it("remove is recursive (a project dir is never empty)", async () => {
+  it("removes nested project bytes only through the native deletion owner", async () => {
+    const files = new Set(["/p/library.json", "/p/media/source.mp4"]);
+    invoke.mockImplementationOnce(async (command, args) => {
+      if (command === "remove_file" && (args as { path?: string }).path === "/p") files.clear();
+      return undefined;
+    });
     await new TauriFs().remove("/p");
-    expect(fs.remove).toHaveBeenCalledWith("/p", { recursive: true });
+    expect([...files]).toEqual([]);
+    expect(fs.remove).not.toHaveBeenCalled();
+  });
+
+  it("does not bypass a refused native dependency lease", async () => {
+    invoke.mockRejectedValueOnce(new Error("path is leased by an active export"));
+    await expect(new TauriFs().remove("/p/media/source.mp4")).rejects.toThrow(/leased/);
+    expect(fs.remove).not.toHaveBeenCalled();
   });
 
   it("mkdir is recursive", async () => {
