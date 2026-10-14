@@ -1,7 +1,29 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { VideoSource } from "./videoSource";
+import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import path from "node:path";
+import MP4Box, { type MP4ArrayBuffer } from "mp4box";
+import { VideoSource, indexedVideoSamples } from "./videoSource";
 
 afterEach(() => vi.unstubAllGlobals());
+
+it("every indexed video packet matches the independent reader in the retained Mac recording", () => {
+  const fixture = path.resolve("e2e/ui/fixtures/mac-recording-preview.mp4");
+  const data = readFileSync(fixture);
+  const file = MP4Box.createFile();
+  let samples: ReturnType<typeof indexedVideoSamples> = [];
+  file.onReady = (info) => { samples = indexedVideoSamples(file, info.videoTracks[0].id); };
+  const bytes = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as MP4ArrayBuffer;
+  bytes.fileStart = 0;
+  file.appendBuffer(bytes);
+  expect(createHash("sha256").update(data).digest("hex")).toBe("bc112240be3dc61e81f8c6b2cdb58160d19a4cdc96a84d193f9c0860142db6fb");
+  expect(samples).toHaveLength(84);
+  const packets = samples.map((sample) => ({
+    offset: sample.offset, size: sample.size, cts: sample.cts, duration: sample.duration, isSync: sample.isSync,
+    hash: `SHA256:${createHash("sha256").update(data.subarray(sample.offset, sample.offset + sample.size)).digest("hex")}`,
+  }));
+  expect(createHash("sha256").update(JSON.stringify(packets)).digest("hex")).toBe("96c37d02c928effb579804874004e654b4c64568833af79d0f56e2ac45226a22");
+});
 
 it("a paused seek reaches later frames without exhausting a small native frame pool", async () => {
   const sources = new Set<{ timestamp: number; close: () => void }>();
