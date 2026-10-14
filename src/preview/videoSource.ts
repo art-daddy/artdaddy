@@ -224,6 +224,8 @@ export class VideoSource {
 
     const ti = this.targetIndex(tSec);
     const targetTs = this.toMicros(this.samples[ti].cts);
+    this.keepTs = targetTs;
+    this.trimPast();
     const cached = this.buffer.get(targetTs);
     if (cached) return cached;
 
@@ -429,6 +431,11 @@ export class VideoSource {
 
   private onOutput(frame: VideoFrame): void {
     if (frame.timestamp > this.maxOutputTs) this.maxOutputTs = frame.timestamp;
+    if (frame.timestamp < this.keepTs && frame.timestamp !== this.pending?.ts) {
+      frame.close();
+      return;
+    }
+    this.buffer.get(frame.timestamp)?.close();
     this.buffer.set(frame.timestamp, frame);
     this.evict();
     if (this.pending && frame.timestamp === this.pending.ts)
@@ -437,8 +444,7 @@ export class VideoSource {
 
   // Bound the buffer. Prefer dropping PAST frames (ts < keepTs, already scrolled
   // past) so a forward look-ahead never evicts the frame that's on screen; never
-  // drop the awaited pending frame. Falls back to oldest-first (keepTs = -1 for
-  // pure frameAt callers reproduces the original FIFO behaviour).
+  // drop the awaited pending frame. Falls back to oldest-first.
   private evict(): void {
     while (this.buffer.size > BUFFER_CAP) {
       let victim = -1;
