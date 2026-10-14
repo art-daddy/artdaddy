@@ -1868,6 +1868,9 @@ mod export_delivery_tests {
     let source = dir.path().join("case-source.wav");
     let independent = dir.path().join("CASE-SOURCE.wav");
     std::fs::write(&source, b"leased lowercase file").unwrap();
+    if cfg!(target_os = "linux") && std::env::var_os("CI").is_some() {
+      assert!(!independent.exists(), "Linux identity QA must exercise a case-sensitive filesystem");
+    }
     if independent.exists() {
       eprintln!("case-sensitive file identity scenario unavailable on this volume");
       return;
