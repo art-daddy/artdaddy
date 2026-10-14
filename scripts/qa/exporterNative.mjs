@@ -52,7 +52,7 @@ const vite = await createServer({ root: repository, configFile: path.join(reposi
 const children = [];
 const logs = [];
 
-function changedFile(filename, accept) {
+function changedFile(filename, accept, child) {
   return new Promise((resolve, reject) => {
     let reading = false;
     let completed = false;
@@ -62,6 +62,8 @@ function changedFile(filename, accept) {
       completed = true;
       watcher.close();
       clearTimeout(timeout);
+      child.off("error", failed);
+      child.off("exit", exited);
       if (error) reject(error); else resolve(result);
     };
     const inspect = async () => {
@@ -83,7 +85,12 @@ function changedFile(filename, accept) {
         if (error.code !== "ENOENT" && !(error instanceof SyntaxError)) finish(error);
       } finally { reading = false; }
     };
+    const failed = (error) => finish(error);
+    const exited = (code, signal) => finish(new Error(`Owned native QA exited before its outcome: code=${code} signal=${signal}; inspect native log`));
     const timeout = setTimeout(() => finish(new Error(`No native outcome: ${filename}`)), 12 * 60_000);
+    child.once("error", failed);
+    child.once("exit", exited);
+    if (child.exitCode !== null || child.signalCode !== null) { exited(child.exitCode, child.signalCode); return; }
     void inspect();
   });
 }
@@ -151,15 +158,13 @@ try {
     app: { windows: [{ label: "main", title: "Isolated Exporter Native QA", url: page, width: 960, height: 640 }] },
     bundle: { active: false, externalBin: ["binaries/artdaddy-ffmpeg", "binaries/artdaddy-ffprobe"], resources: [] },
     plugins: { "deep-link": { desktop: { schemes: ["artdaddy-exporter-qa"] } } } }));
-  const armed = changedFile(path.join(root, "native-armed.json"), (report) => Boolean(report.id));
   const first = start(config, 1);
-  const admitted = await armed;
+  const admitted = await changedFile(path.join(root, "native-armed.json"), (report) => Boolean(report.id), first);
   proof.steps.push({ phase: "native-job-armed", ...admitted });
   stopOwned(first);
   proof.steps.push({ phase: "owned-native-process-crashed" });
-  const finished = changedFile(path.join(root, "native-report.json"), (report) => report.ok === true);
-  start(config, 2);
-  const report = await finished;
+  const second = start(config, 2);
+  const report = await changedFile(path.join(root, "native-report.json"), (report) => report.ok === true, second);
   assert.equal(report.producerComplete, true, "Native success must have persisted producer completion");
   assert.equal(report.recoveryAttempts, 1, "Crash must consume the bounded native recovery attempt");
   assert.ok(admitted.progress.includes("frame="), "Crash was not armed after real encoder progress");
