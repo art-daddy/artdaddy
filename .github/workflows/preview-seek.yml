@@ -1,6 +1,13 @@
 name: Isolated native preview seek
 
 on:
+  push:
+    branches: [qa/preview-seek-20261014]
+    paths:
+      - .github/workflows/preview-seek.yml
+      - scripts/qa/videoSeek.mjs
+      - src/preview/videoSource.ts
+      - e2e/ui/fixtures/mac-recording-preview.mp4
   workflow_dispatch:
     inputs:
       baseline:
@@ -27,7 +34,7 @@ jobs:
       - run: npm ci
       - run: node scripts/qa/videoSeek.mjs "$PREVIEW_BASELINE"
         env:
-          PREVIEW_BASELINE: ${{ inputs.baseline }}
+          PREVIEW_BASELINE: ${{ inputs.baseline || '8e8de30af77effee1e0e640020a1b7a80196d08f' }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
