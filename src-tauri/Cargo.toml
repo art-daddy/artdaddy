@@ -34,6 +34,7 @@ tauri-plugin-deep-link = "2"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 trash = "5"
 sha2 = "0.10"
+same-file = "1.0.6"
 keyring = "4"
 # The sidecar runner's progress timer (sidecar_run.rs). Already in the lock through tauri and the
 # shell plugin, which uses the same timer, so nothing new is fetched.

@@ -9,7 +9,6 @@ import {
   readDir,
   readFile,
   readTextFile,
-  rename,
   stat as fsStat,
   writeFile,
   writeTextFile,
@@ -117,13 +116,6 @@ async function sidecarCwd(program: string, cwd?: string | null): Promise<string 
  *  plugin's scope globs never match them either. */
 function stripVerbatim(p: string): string {
   return p.startsWith("\\\\?\\") ? p.slice(4) : p;
-}
-
-/** Did the fs plugin refuse this path for being outside its scope, rather than fail on the
- *  file itself? Only that case may fall back to a native command — a real ENOENT or a
- *  permission error must still surface. */
-function isForbiddenPath(e: unknown): boolean {
-  return /forbidden path/i.test(e instanceof Error ? e.message : String(e));
 }
 
 /** Only the Windows build ships (and needs) the whisper DLL resource dir. `dllDirUsable` cannot
@@ -284,13 +276,7 @@ export class TauriFs implements FsLike {
     await copyFile(src, dst);
   }
   async rename(from: string, to: string): Promise<void> {
-    try {
-      await rename(from, to);
-    } catch (e) {
-      // Same scope wall, and this is the one that matters: it is the COMMIT of an export.
-      if (!isForbiddenPath(e)) throw e;
-      await invoke("commit_file", { from, to });
-    }
+    await invoke("commit_file", { from, to });
   }
   async mkdir(path: string): Promise<void> {
     await mkdir(path, { recursive: true });

@@ -455,6 +455,7 @@ impl Supervisor {
     };
     let delivery = ExportDelivery { version: 1, id: id.clone(), project_dir, stage_path, dest_path,
       state: "prepared".into(), identity: None, created_at: now_ms(), render_job: None, sources, recovery_attempts: 0, source, followups_done: false, command_sha256: None, worker_identity: None, producer_complete: false };
+    self.require_unleased_path(Path::new(&delivery.dest_path), deliveries.values().chain(std::iter::once(&delivery)))?;
     let stage = std::fs::OpenOptions::new().write(true).create_new(true).open(&delivery.stage_path).map_err(|error| error.to_string())?;
     drop(stage);
     if let Err(error) = persist_delivery(root, &delivery) { let _ = std::fs::remove_file(&delivery.stage_path); return Err(error); }
@@ -509,6 +510,10 @@ impl Supervisor {
     let expected = captured.identity.as_ref().ok_or("export has no verified identity")?;
     if actual.sha256 != expected.sha256 || actual.size != expected.size { return Err("export artifact identity differs at publication".into()); }
     let mut deliveries = self.deliveries.lock().map_err(|error| error.to_string())?;
+    if checked_stage {
+      let destination = &deliveries.get(id).ok_or("unknown export intent")?.dest_path;
+      self.require_unleased_path(Path::new(destination), deliveries.values())?;
+    }
     let delivery = deliveries.get_mut(id).ok_or("unknown export intent")?;
     self.require_completed_producer(delivery)?;
     if delivery.state != "published" && Path::new(&delivery.stage_path).exists() != checked_stage {
@@ -559,9 +564,19 @@ impl Supervisor {
   }
 
   pub fn with_unleased_path<T>(&self, path: &Path, operation: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    self.with_unleased_paths(&[path], operation)
+  }
+
+  pub fn with_unleased_paths<T>(&self, paths: &[&Path], operation: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    let deliveries = self.deliveries.lock().map_err(|error| error.to_string())?;
+    for path in paths { self.require_unleased_path(path, deliveries.values())?; }
+    operation()
+  }
+
+  fn require_unleased_path<'a>(&self, path: &Path, deliveries: impl Iterator<Item = &'a ExportDelivery>) -> Result<(), String> {
     let canonical = match path.canonicalize() {
       Ok(path) => path,
-      Err(error) if error.kind() == std::io::ErrorKind::NotFound => return operation(),
+      Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
       Err(error) => return Err(error.to_string()),
     };
     let key = |path: &Path| {
@@ -570,18 +585,50 @@ impl Supervisor {
     };
     let target = key(&canonical);
     let prefix = format!("{}/", target.trim_end_matches('/'));
-    let deliveries = self.deliveries.lock().map_err(|error| error.to_string())?;
+    let target_file = if canonical.is_file() {
+      Some(same_file::Handle::from_path(&canonical).map_err(|error| error.to_string())?)
+    } else { None };
+    let dependency_path = |path: &Path| -> Result<PathBuf, String> {
+      for ancestor in path.ancestors() {
+        if ancestor.as_os_str().is_empty() { break; }
+        match ancestor.canonicalize() {
+          Ok(mut resolved) => {
+            let remainder = path.strip_prefix(ancestor).map_err(|error| error.to_string())?;
+            for component in remainder.components() {
+              match component {
+                std::path::Component::ParentDir => { resolved.pop(); }
+                std::path::Component::CurDir => {}
+                std::path::Component::Normal(name) => resolved.push(name),
+                _ => return Err("export dependency has an invalid absolute suffix".into()),
+              }
+            }
+            return Ok(resolved);
+          }
+          Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+          Err(error) => return Err(error.to_string()),
+        }
+      }
+      Ok(path.to_path_buf())
+    };
     let state = self.lock();
-    for delivery in deliveries.values() {
+    for delivery in deliveries {
       let running = state.jobs.get(&delivery.id).is_some_and(|job| job.state != JobState::Exited);
-      let cancelled_unsettled = delivery.state == "cancelled" && !delivery.followups_done;
-      if delivery.state != "prepared" && !running && !cancelled_unsettled { continue; }
+      let pending = delivery.state != "published" && !delivery.followups_done;
+      if !pending && !running { continue; }
       let declared: Vec<&str> = match &delivery.source {
         DeliverySource::Render { paths } => paths.iter().map(String::as_str).collect(),
         DeliverySource::Copy { path, .. } => vec![path.as_str()],
       };
       for dependency in declared.into_iter().chain(delivery.sources.iter().map(|(path, _)| path.as_str())) {
-        let dependency = Path::new(dependency).canonicalize().map_err(|error| error.to_string())?;
+        let dependency = dependency_path(Path::new(dependency))?;
+        if let Some(target_file) = &target_file {
+          match same_file::Handle::from_path(&dependency) {
+            Ok(source_file) if *target_file == source_file => return Err("file is leased by an active export through another path".into()),
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
+          }
+        }
         let dependency = key(&dependency);
         if dependency == target || dependency.starts_with(&prefix) { return Err("path is leased by an active export".into()); }
       }
@@ -592,7 +639,7 @@ impl Supervisor {
         }
       }
     }
-    operation()
+    Ok(())
   }
 
   pub fn fail_delivery(&self, id: &str) -> Result<bool, String> {
@@ -613,7 +660,7 @@ impl Supervisor {
     let worker = self.spawner.identity(&spec.program)?;
     let root = self.export_root.as_ref().ok_or("native export journal is unavailable")?;
     let mut deliveries = self.deliveries.lock().map_err(|error| error.to_string())?;
-    let delivery = deliveries.get_mut(&spec.id).ok_or("export job has no admitted delivery intent")?;
+    let delivery = deliveries.get(&spec.id).ok_or("export job has no admitted delivery intent")?;
     if !matches!(&delivery.source, DeliverySource::Render { .. }) { return Err("copy intent cannot admit a render worker".into()); }
     if spec.program != "ffmpeg" { return Err("export intent requires the admitted render backend".into()); }
     if delivery.state != "prepared" { return Err("export job is not in prepared state".into()); }
@@ -635,14 +682,13 @@ impl Supervisor {
     }
     paths.sort(); paths.dedup();
     let mut next = delivery.clone();
+    let first_binding = next.render_job.is_none();
     let command_sha256 = format!("{:x}", Sha256::digest(serde_json::to_vec(spec).map_err(|error| error.to_string())?));
-    if next.render_job.is_none() {
+    if first_binding {
       next.sources = paths.into_iter().map(|path| artifact_identity(Path::new(&path)).map(|identity| (path, identity))).collect::<Result<Vec<_>, _>>()?;
       next.render_job = Some(spec.clone());
       next.command_sha256 = Some(command_sha256);
       next.worker_identity = Some(worker);
-      persist_delivery(root, &next)?;
-      *delivery = next;
     } else {
       if next.command_sha256.as_deref() != Some(command_sha256.as_str()) { return Err("retained export command identity changed; recovery refused".into()); }
       let expected_worker = next.worker_identity.as_ref().ok_or("retained export has no supported worker identity; recovery refused")?;
@@ -653,6 +699,11 @@ impl Supervisor {
         let actual = artifact_identity(Path::new(path))?;
         if actual.sha256 != expected.sha256 || actual.size != expected.size { return Err("export source changed; recovery refused".into()); }
       }
+    }
+    self.require_unleased_path(Path::new(&next.dest_path), deliveries.values().chain(std::iter::once(&next)))?;
+    if first_binding {
+      persist_delivery(root, &next)?;
+      deliveries.insert(spec.id.clone(), next);
     }
     Ok(())
   }
@@ -1354,7 +1405,7 @@ pub fn jobs_launch_id(jobs: tauri::State<'_, Supervisor>) -> String {
 }
 
 #[tauri::command]
-pub fn jobs_export_protocol() -> u32 { 7 }
+pub fn jobs_export_protocol() -> u32 { 9 }
 
 #[tauri::command]
 pub async fn jobs_prepare_export(jobs: tauri::State<'_, Supervisor>, id: String, project_dir: String, stage_path: String, dest_path: String, source: DeliverySource) -> Result<ExportDelivery, String> {
@@ -1745,6 +1796,225 @@ mod export_delivery_tests {
     assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"unrelated old bytes");
     jobs.cancel_delivery(&delivery.id).unwrap();
     assert!(owner(&root).publish_delivery(&delivery.id).is_err());
+  }
+  #[test]
+  fn a_hard_link_cannot_bypass_an_admitted_source_lease() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("journal");
+    let source = dir.path().join("source.wav");
+    let alias = dir.path().join("source-alias.wav");
+    std::fs::write(&source, b"all original source bytes must survive").unwrap();
+    std::fs::hard_link(&source, &alias).unwrap();
+    let jobs = owner(&root);
+    jobs.prepare_delivery("hard-link-lease".into(), "original-project".into(),
+      dir.path().join("render.partial").to_string_lossy().into(), dir.path().join("render.wav").to_string_lossy().into(),
+      DeliverySource::Render { paths: vec![source.to_string_lossy().into()] }).unwrap();
+    let reopened = owner(&root);
+    let result = reopened.with_unleased_path(&alias, || std::fs::write(&alias, b"destructive alias write").map_err(|error| error.to_string()));
+    assert_eq!(std::fs::read(&source).unwrap(), b"all original source bytes must survive");
+    assert_eq!(std::fs::read(&alias).unwrap(), b"all original source bytes must survive");
+    assert!(result.is_err(), "an alias of a leased file must refuse mutation");
+  }
+  #[test]
+  fn late_hard_link_copy_lease_refuses_alias_publication_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("journal");
+    let source = dir.path().join("leased-source.wav");
+    let alias = dir.path().join("destination-alias.wav");
+    let replacement = dir.path().join("replacement.wav");
+    std::fs::write(&source, b"leased bytes must stay under both names").unwrap();
+    std::fs::hard_link(&source, &alias).unwrap();
+    std::fs::write(&replacement, b"unrelated ready copied output").unwrap();
+    let jobs = owner(&root);
+    let delivery = jobs.prepare_delivery("alias-publisher".into(), "original-project".into(),
+      dir.path().join("alias.partial").to_string_lossy().into(), alias.to_string_lossy().into(),
+      DeliverySource::Copy { path: replacement.to_string_lossy().into(), media_ref: "media_replacement".into() }).unwrap();
+    jobs.copy_delivery(&delivery.id).unwrap();
+    jobs.verify_delivery(&delivery.id).unwrap();
+    jobs.prepare_delivery("alias-source-holder".into(), "original-project".into(),
+      dir.path().join("holder.partial").to_string_lossy().into(), dir.path().join("holder.wav").to_string_lossy().into(),
+      DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_alias_source".into() }).unwrap();
+    assert!(owner(&root).publish_delivery(&delivery.id).is_err());
+    assert_eq!(std::fs::read(&source).unwrap(), b"leased bytes must stay under both names");
+    assert_eq!(std::fs::read(&alias).unwrap(), b"leased bytes must stay under both names");
+    assert_eq!(std::fs::read(&delivery.stage_path).unwrap(), b"unrelated ready copied output");
+  }
+  #[test]
+  fn equal_bytes_do_not_lease_an_independent_file_and_aliases_release_after_settlement() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.wav");
+    let alias = dir.path().join("alias.wav");
+    let independent = dir.path().join("independent.wav");
+    std::fs::write(&source, b"same content does not mean same file").unwrap();
+    std::fs::hard_link(&source, &alias).unwrap();
+    std::fs::copy(&source, &independent).unwrap();
+    let jobs = owner(&dir.path().join("journal"));
+    let delivery = jobs.prepare_delivery("identity-direction".into(), "original-project".into(),
+      dir.path().join("identity.partial").to_string_lossy().into(), dir.path().join("identity.wav").to_string_lossy().into(),
+      DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_identity".into() }).unwrap();
+    jobs.with_unleased_path(&independent, || std::fs::write(&independent, b"independent edit allowed").map_err(|error| error.to_string())).unwrap();
+    assert_eq!(std::fs::read(&source).unwrap(), b"same content does not mean same file");
+    assert_eq!(std::fs::read(&independent).unwrap(), b"independent edit allowed");
+    jobs.cancel_delivery(&delivery.id).unwrap();
+    assert!(jobs.with_unleased_path(&alias, || std::fs::remove_file(&alias).map_err(|error| error.to_string())).is_err());
+    jobs.complete_delivery(&delivery.id).unwrap();
+    jobs.with_unleased_path(&alias, || std::fs::remove_file(&alias).map_err(|error| error.to_string())).unwrap();
+    assert!(!alias.exists());
+    assert_eq!(std::fs::read(&source).unwrap(), b"same content does not mean same file");
+  }
+  #[test]
+  fn case_distinct_existing_files_use_physical_identity_when_supported() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("case-source.wav");
+    let independent = dir.path().join("CASE-SOURCE.wav");
+    std::fs::write(&source, b"leased lowercase file").unwrap();
+    if independent.exists() {
+      eprintln!("case-sensitive file identity scenario unavailable on this volume");
+      return;
+    }
+    std::fs::write(&independent, b"independent uppercase file").unwrap();
+    let jobs = owner(&dir.path().join("journal"));
+    jobs.prepare_delivery("case-identity".into(), "original-project".into(),
+      dir.path().join("case.partial").to_string_lossy().into(), dir.path().join("case-result.wav").to_string_lossy().into(),
+      DeliverySource::Render { paths: vec![source.to_string_lossy().into()] }).unwrap();
+    jobs.with_unleased_path(&independent, || std::fs::write(&independent, b"case-distinct mutation permitted").map_err(|error| error.to_string())).unwrap();
+    assert_eq!(std::fs::read(&source).unwrap(), b"leased lowercase file");
+    assert_eq!(std::fs::read(&independent).unwrap(), b"case-distinct mutation permitted");
+  }
+  #[test]
+  fn publication_cannot_replace_another_admitted_export_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("journal");
+    let jobs = owner(&root);
+    let source = dir.path().join("original-source.wav");
+    let replacement = dir.path().join("replacement-source.wav");
+    std::fs::write(&source, b"original source must survive publication").unwrap();
+    std::fs::write(&replacement, b"different verified copied artifact").unwrap();
+    jobs.prepare_delivery("source-holder".into(), "original-project".into(),
+      dir.path().join("holder.partial").to_string_lossy().into(), dir.path().join("holder.wav").to_string_lossy().into(),
+      DeliverySource::Render { paths: vec![source.to_string_lossy().into()] }).unwrap();
+    let stage = dir.path().join("replacement.partial");
+    assert!(jobs.prepare_delivery("source-overwrite".into(), "original-project".into(),
+      stage.to_string_lossy().into(), source.to_string_lossy().into(),
+      DeliverySource::Copy { path: replacement.to_string_lossy().into(), media_ref: "media_replacement".into() }).is_err());
+    assert_eq!(std::fs::read(&source).unwrap(), b"original source must survive publication");
+    assert!(!stage.exists(), "known source collision must refuse before stage creation");
+    assert_eq!(owner(&root).delivery_list().len(), 1);
+  }
+  #[test]
+  fn publication_rechecks_a_source_lease_admitted_after_verification() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("journal");
+    let jobs = owner(&root);
+    let source = dir.path().join("late-source.wav");
+    let replacement = dir.path().join("late-replacement.wav");
+    std::fs::write(&source, b"late admitted source bytes").unwrap();
+    std::fs::write(&replacement, b"ready replacement bytes").unwrap();
+    let delivery = jobs.prepare_delivery("late-publisher".into(), "original-project".into(),
+      dir.path().join("late.partial").to_string_lossy().into(), source.to_string_lossy().into(),
+      DeliverySource::Copy { path: replacement.to_string_lossy().into(), media_ref: "media_late_replacement".into() }).unwrap();
+    jobs.copy_delivery(&delivery.id).unwrap();
+    jobs.verify_delivery(&delivery.id).unwrap();
+    jobs.prepare_delivery("late-holder".into(), "original-project".into(),
+      dir.path().join("late-holder.partial").to_string_lossy().into(), dir.path().join("late-holder.wav").to_string_lossy().into(),
+      DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_late_source".into() }).unwrap();
+    let reopened = owner(&root);
+    assert!(reopened.publish_delivery(&delivery.id).is_err());
+    assert_eq!(std::fs::read(&source).unwrap(), b"late admitted source bytes");
+    assert_eq!(std::fs::read(&delivery.stage_path).unwrap(), b"ready replacement bytes");
+  }
+  #[test]
+  fn a_completed_copy_cannot_publish_over_its_own_admitted_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("own-source.wav");
+    std::fs::write(&source, b"original library source").unwrap();
+    let root = dir.path().join("journal");
+    let jobs = owner(&root);
+    assert!(jobs.prepare_delivery("early-own-source".into(), "original-project".into(),
+      dir.path().join("early-own.partial").to_string_lossy().into(), source.to_string_lossy().into(),
+      DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_own_source".into() }).is_err());
+    assert!(!dir.path().join("early-own.partial").exists());
+    let delivery = jobs.prepare_delivery("own-source".into(), "original-project".into(),
+      dir.path().join("own.partial").to_string_lossy().into(), dir.path().join("own-result.wav").to_string_lossy().into(),
+      DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_own_source".into() }).unwrap();
+    jobs.copy_delivery(&delivery.id).unwrap();
+    let mut retained = jobs.verify_delivery(&delivery.id).unwrap();
+    retained.dest_path = source.to_string_lossy().into();
+    persist_delivery(&root, &retained).unwrap();
+    assert!(owner(&root).publish_delivery(&delivery.id).is_err());
+    assert_eq!(std::fs::read(&source).unwrap(), b"original library source");
+    assert_eq!(std::fs::read(&delivery.stage_path).unwrap(), b"original library source");
+  }
+  #[test]
+  fn verified_and_unacknowledged_failed_work_keeps_its_source_lease() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("verified-source.wav");
+    std::fs::write(&source, b"retained until publication or acknowledged failure").unwrap();
+    let jobs = owner(&dir.path().join("journal"));
+    let delivery = jobs.prepare_delivery("verified-lease".into(), "original-project".into(),
+      dir.path().join("verified.partial").to_string_lossy().into(), dir.path().join("verified.wav").to_string_lossy().into(),
+      DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_verified_source".into() }).unwrap();
+    jobs.copy_delivery(&delivery.id).unwrap();
+    jobs.verify_delivery(&delivery.id).unwrap();
+    let remove = || std::fs::remove_file(&source).map_err(|error| error.to_string());
+    assert!(jobs.with_unleased_path(&source, remove).is_err());
+    jobs.fail_delivery(&delivery.id).unwrap();
+    assert!(jobs.with_unleased_path(&source, remove).is_err());
+    assert_eq!(std::fs::read(&source).unwrap(), b"retained until publication or acknowledged failure");
+    jobs.complete_delivery(&delivery.id).unwrap();
+    jobs.with_unleased_path(&source, remove).unwrap();
+    assert!(!source.exists());
+  }
+  #[test]
+  fn retained_render_rechecks_peer_leases_before_replay() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("journal");
+    let jobs = owner(&root);
+    let source = dir.path().join("replay-input.mp4");
+    let destination = dir.path().join("replay-output.mp4");
+    std::fs::write(&source, b"unchanged admitted render source").unwrap();
+    std::fs::write(&destination, b"later admitted peer source").unwrap();
+    let delivery = jobs.prepare_delivery("replay-publisher".into(), "original-project".into(),
+      dir.path().join("replay.partial").to_string_lossy().into(), destination.to_string_lossy().into(),
+      DeliverySource::Render { paths: vec![source.to_string_lossy().into()] }).unwrap();
+    let spec = JobSpec { id: delivery.id.clone(), lane: "export".into(), program: "ffmpeg".into(),
+      args: vec!["-i".into(), source.to_string_lossy().into(), delivery.stage_path.clone()], steps: Vec::new(), cwd: None,
+      meta: serde_json::json!({ "kind": "export", "plan": { "sources": [{ "path": source }] } }) };
+    jobs.retain_render_job(&spec).unwrap();
+    jobs.prepare_delivery("replay-peer".into(), "original-project".into(),
+      dir.path().join("peer.partial").to_string_lossy().into(), dir.path().join("peer.mp4").to_string_lossy().into(),
+      DeliverySource::Render { paths: vec![destination.to_string_lossy().into()] }).unwrap();
+    let reopened = owner(&root);
+    assert!(reopened.retain_render_job(&spec).is_err());
+    assert!(reopened.list().is_empty());
+    assert_eq!(std::fs::metadata(&delivery.stage_path).unwrap().len(), 0);
+    assert_eq!(std::fs::read(&source).unwrap(), b"unchanged admitted render source");
+    assert_eq!(std::fs::read(&destination).unwrap(), b"later admitted peer source");
+  }
+  #[test]
+  fn unavailable_peer_source_does_not_block_an_unrelated_ready_publication() {
+    let dir = tempfile::tempdir().unwrap();
+    let jobs = owner(&dir.path().join("journal"));
+    let unavailable = dir.path().join("unavailable.mp4");
+    let source = dir.path().join("ready.wav");
+    std::fs::write(&unavailable, b"peer input later disappears").unwrap();
+    std::fs::write(&source, b"ready verified artifact bytes").unwrap();
+    jobs.prepare_delivery("unavailable-peer".into(), "original-project".into(),
+      dir.path().join("unavailable.partial").to_string_lossy().into(), dir.path().join("unavailable-result.mp4").to_string_lossy().into(),
+      DeliverySource::Render { paths: vec![unavailable.to_string_lossy().into()] }).unwrap();
+    let delivery = jobs.prepare_delivery("ready-independent".into(), "original-project".into(),
+      dir.path().join("ready.partial").to_string_lossy().into(), dir.path().join("ready-result.wav").to_string_lossy().into(),
+      DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_ready".into() }).unwrap();
+    jobs.copy_delivery(&delivery.id).unwrap();
+    jobs.verify_delivery(&delivery.id).unwrap();
+    std::fs::write(&delivery.dest_path, b"previous unrelated delivery").unwrap();
+    std::fs::remove_file(&unavailable).unwrap();
+    jobs.publish_delivery(&delivery.id).unwrap();
+    assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"ready verified artifact bytes");
+    assert_eq!(std::fs::read(&source).unwrap(), b"ready verified artifact bytes");
+    assert!(jobs.with_unleased_path(dir.path(), || std::fs::remove_dir_all(dir.path()).map_err(|error| error.to_string())).is_err());
+    assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"ready verified artifact bytes");
+    assert_eq!(std::fs::read(&source).unwrap(), b"ready verified artifact bytes");
   }
   #[test]
   fn changed_stage_and_journal_failure_do_not_replace_destination() {
@@ -2190,6 +2460,17 @@ mod export_delivery_tests {
     recovered.publish_delivery(&delivery.id).unwrap();
     assert_eq!(artifact_identity(Path::new(&delivery.dest_path)).unwrap().sha256, verified.identity.unwrap().sha256);
     assert!(!Path::new(&delivery.stage_path).exists());
+    let original_identity = artifact_identity(&source).unwrap();
+    let protected = recovered.prepare_delivery("real-source-protection".into(), "original-project".into(),
+      dir.path().join("protected.partial").to_string_lossy().into(), source.to_string_lossy().into(),
+      DeliverySource::Render { paths: Vec::new() }).unwrap();
+    let spec = JobSpec { id: protected.id.clone(), lane: "export".into(), program: "ffmpeg".into(),
+      args: vec!["-y".into(), "-nostdin".into(), "-loglevel".into(), "error".into(), "-i".into(), source.to_string_lossy().into(),
+        "-c".into(), "copy".into(), "-f".into(), "mp4".into(), protected.stage_path.clone()], steps: Vec::new(), cwd: None,
+      meta: serde_json::json!({ "kind": "export", "plan": { "sources": [{ "path": source }] } }) };
+    assert!(recovered.submit(spec).is_err(), "metadata-bound inputs must refuse before the worker starts");
+    assert_eq!(artifact_identity(&source).unwrap().sha256, original_identity.sha256);
+    assert_eq!(std::fs::metadata(&protected.stage_path).unwrap().len(), 0);
   }
 }
 

@@ -494,20 +494,18 @@ describe("TauriFs", () => {
       expect(invoke).toHaveBeenCalledWith("remove_file", { path: "D:/out/x.part.mp4" });
     });
 
-    it("does NOT reach for the native command on an ordinary failure", async () => {
+    it("propagates an ordinary native move failure without plugin fallback", async () => {
       // The failure direction: a real ENOENT / permission error must still surface. Falling
       // back on ANY error would turn a genuine problem into a second, more confusing one.
-      fs.rename.mockImplementationOnce(() => {
-        throw new Error("ENOENT: no such file or directory");
-      });
+      invoke.mockRejectedValueOnce(new Error("ENOENT: no such file or directory"));
       await expect(new TauriFs().rename("/a", "/b")).rejects.toThrow(/ENOENT/);
-      expect(invoke).not.toHaveBeenCalledWith("commit_file", expect.anything());
+      expect(fs.rename).not.toHaveBeenCalled();
     });
 
-    it("uses the plugin, not the native command, when the path IS in scope", async () => {
+    it("uses the native lease owner even when the path IS in plugin scope", async () => {
       await new TauriFs().rename("/home/me/a.part.mp4", "/home/me/a.mp4");
-      expect(fs.rename).toHaveBeenCalledWith("/home/me/a.part.mp4", "/home/me/a.mp4");
-      expect(invoke).not.toHaveBeenCalledWith("commit_file", expect.anything());
+      expect(invoke).toHaveBeenCalledWith("commit_file", { from: "/home/me/a.part.mp4", to: "/home/me/a.mp4" });
+      expect(fs.rename).not.toHaveBeenCalled();
     });
   });
 
@@ -530,7 +528,8 @@ describe("TauriFs", () => {
     await expect(t.downloadDir()).resolves.toBe("/Users/me/Downloads");
     expect(fs.writeTextFile).toHaveBeenCalledWith("/p", "x");
     expect(fs.copyFile).toHaveBeenCalledWith("/a", "/b");
-    expect(fs.rename).toHaveBeenCalledWith("/a", "/b");
+    expect(invoke).toHaveBeenCalledWith("commit_file", { from: "/a", to: "/b" });
+    expect(fs.rename).not.toHaveBeenCalled();
   });
 });
 

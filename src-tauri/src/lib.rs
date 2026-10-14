@@ -42,17 +42,25 @@ fn kill_process_tree(pid: u32) -> Result<(), String> {
 ///
 /// `rename` first (atomic, same volume); copy+remove only when that fails across volumes.
 #[tauri::command]
-fn commit_file(from: String, to: String) -> Result<(), String> {
+fn commit_file(app: tauri::AppHandle, from: String, to: String) -> Result<(), String> {
+  use tauri::Manager;
+  let jobs = app.try_state::<jobs::Supervisor>().ok_or("export dependency owner unavailable")?;
+  commit_file_owned(&jobs, &from, &to)
+}
+
+fn commit_file_owned(jobs: &jobs::Supervisor, from: &str, to: &str) -> Result<(), String> {
+  jobs.with_unleased_paths(&[std::path::Path::new(from), std::path::Path::new(to)], || {
   if let Some(parent) = std::path::Path::new(&to).parent() {
     std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
   }
-  if std::fs::rename(&from, &to).is_ok() {
+  if std::fs::rename(from, to).is_ok() {
     return Ok(());
   }
-  std::fs::copy(&from, &to).map_err(|e| e.to_string())?;
+  std::fs::copy(from, to).map_err(|e| e.to_string())?;
   // The copy IS the commit; failing to tidy the staging file must not fail the export.
-  let _ = std::fs::remove_file(&from);
+  let _ = std::fs::remove_file(from);
   Ok(())
+  })
 }
 
 /// Delete a file outright, for the same out-of-scope destinations as `commit_file` — a failed
