@@ -504,7 +504,10 @@ describe("TauriFs", () => {
 
     it("uses the native lease owner even when the path IS in plugin scope", async () => {
       await new TauriFs().rename("/home/me/a.part.mp4", "/home/me/a.mp4");
-      expect(invoke).toHaveBeenCalledWith("commit_file", { from: "/home/me/a.part.mp4", to: "/home/me/a.mp4" });
+      expect(invoke).toHaveBeenCalledWith("commit_file", {
+        from: "/home/me/a.part.mp4",
+        to: "/home/me/a.mp4",
+      });
       expect(fs.rename).not.toHaveBeenCalled();
     });
   });
