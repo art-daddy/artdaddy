@@ -21,6 +21,8 @@ import { notifyAuthFailure, setClerkTokenProvider } from "./auth";
 import { apiBase } from "./config";
 import { CreditLimitError, markOverLimit } from "./usage";
 import { callAiProxy, fromB64, toB64 } from "./ai";
+import { catalogIdentity } from "../contract";
+import { ClientUpdateRequiredError } from "../update/updater";
 
 function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -34,6 +36,14 @@ afterEach(() => {
 });
 
 describe("callAiProxy", () => {
+  it("does not retry a catalog refusal or reinterpret it as exhausted credit", async () => {
+    const fetcher = vi.fn(async () => jsonResponse({ detail: { error: "client_update_required" } }, 426));
+    vi.stubGlobal("fetch", fetcher);
+    await expect(callAiProxy("generate_image", { args: {} })).rejects.toBeInstanceOf(ClientUpdateRequiredError);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(markOverLimit).not.toHaveBeenCalled();
+  });
+
   it("POSTs to /ai/{name}, forwards the signal, and returns the parsed body", async () => {
     setClerkTokenProvider(async () => "tok");
     const payload = {
@@ -60,6 +70,7 @@ describe("callAiProxy", () => {
       ...body,
       project_id: "p1",
       transcript_id: "t1",
+      catalog_id: catalogIdentity(),
     });
     expect(init.signal).toBe(ctrl.signal);
     expect(notifyAuthFailure).not.toHaveBeenCalled();

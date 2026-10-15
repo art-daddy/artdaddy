@@ -11,7 +11,10 @@ const invoke = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 const platformMock = vi.hoisted(() => ({ name: "tauri" as "tauri" | "web" }));
 vi.mock("../platform", () => ({ platform: platformMock }));
-vi.mock("./config", () => ({ apiBase: () => "https://api.example.com" }));
+vi.mock("./config", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./config")>()),
+  apiBase: () => "https://api.example.com",
+}));
 
 const fetchMock = vi.hoisted(() => vi.fn());
 

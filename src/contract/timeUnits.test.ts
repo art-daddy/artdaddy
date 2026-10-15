@@ -17,8 +17,6 @@ const KNOWN_TOP_LEVEL_TIME_PARAMS: string[] = [
   // SECONDS: a caption hold is a duration of real silence, not a timeline position — the
   // tool converts it with the canvas fps so the model never does frame maths.
   "add_captions.max_gap_seconds",
-  "clip_video.end_s",
-  "clip_video.start_s",
   "download_video.end_s",
   "download_video.start_s",
   "generate_video.duration",

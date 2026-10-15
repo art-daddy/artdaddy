@@ -1,12 +1,8 @@
-// The tool catalog (contract) is BUNDLED: `catalog.json` is generated from the server's tool
-// registry by `npm run codegen` and committed, so the app has its full contract before it talks
-// to anything. It used to be fetched from GET /contract/tools at startup — which fired before
-// sign-in, on every launch, and left a clone of this repo with no usable contract at all.
-//
-// The catalog is therefore always ready and never fails: no loading state, no retry, no degraded
-// mode. Drift against the server is caught in the server repo before it can ship, not by a
-// warning in a user's console.
+// catalog.json is the client-authored tool source. Codegen derives its compiled identity and
+// trusted server snapshots; neither app execution nor MCP replaces it with a fetched catalog.
+// Compatibility is a separate admission decision, not a second catalog or schema fallback.
 import catalog from "./catalog.json";
+import identity from "./identity.json";
 
 export interface ToolMeta {
   name: string;
@@ -23,11 +19,16 @@ export interface ParamSchema {
   items?: ParamSchema;
 }
 
-interface RawTool {
+export interface RawTool {
   name: string;
   expensive?: boolean;
   description?: string;
   parameters?: ParamSchema;
+  status?: "active" | "withdrawn";
+  surfaces?: Array<"app" | "mcp">;
+  effect?: string;
+  omit_for_native_video?: boolean;
+  text_variant?: { description: string; parameters: ParamSchema };
 }
 
 export interface EffectDef {
@@ -46,11 +47,15 @@ let _tools: ToolMeta[] = [];
 let _byName: Record<string, ToolMeta> = {};
 let _params: Record<string, ParamSchema> = {};
 let _effects: EffectDef[] = [];
+let _definitions: RawTool[] = [];
 
 /** Replace the in-memory contract. Tests use this to drive a specific catalog; production calls
  *  it once, with the bundle, below. */
 export function setContract(cat: Catalog): void {
-  const raw = (cat.tools ?? []) as RawTool[];
+  _definitions = (cat.tools ?? []) as RawTool[];
+  const raw = _definitions.filter(
+    (tool) => (!tool.status || tool.status === "active") && (!tool.surfaces || tool.surfaces.includes("app")),
+  );
   _version = cat.version ?? "";
   _tools = raw.map((t) => ({
     name: t.name,
@@ -68,9 +73,27 @@ export function setContract(cat: Catalog): void {
 
 setContract(catalog as Catalog);
 
+export function toolDefinition(name: string): RawTool | undefined {
+  return _definitions.find((tool) => tool.name === name);
+}
+
+export function toolDefinitions(): readonly RawTool[] {
+  return _definitions;
+}
+
+export function toolsForSurface(surface: "app" | "mcp"): readonly RawTool[] {
+  return _definitions.filter(
+    (tool) => (!tool.status || tool.status === "active") && (!tool.surfaces || tool.surfaces.includes(surface)),
+  );
+}
+
 /** Contract version string. */
 export function contractVersion(): string {
   return _version;
+}
+
+export function catalogIdentity(): string {
+  return identity.id;
 }
 
 /** Top-level param names a tool declares, or null when the catalog doesn't know the tool. */

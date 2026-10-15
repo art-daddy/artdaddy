@@ -3,6 +3,8 @@
 // tool returns). Populated per platform (empty on web; Tauri/Node fills it in).
 import { clampArgs, dropStrictNulls } from "../contract/clamp";
 import { toolParams, unknownParams } from "../contract/params";
+import { toolDefinition, type RawTool } from "../contract";
+import { assertCompatibleClient } from "../update/compatibility";
 import {
   agentEventContext,
   createToolTrace,
@@ -14,10 +16,12 @@ export type ToolResult = unknown;
 export type ToolHandler = (args: Record<string, unknown>) => ToolResult | Promise<ToolResult>;
 
 export class ClientToolRegistry {
-  private handlers = new Map<string, ToolHandler>();
+  private handlers = new Map<string, { definition: RawTool; handler: ToolHandler }>();
 
   register(name: string, handler: ToolHandler): this {
-    this.handlers.set(name, handler);
+    const definition = toolDefinition(name);
+    if (!definition) throw new Error(`no client catalog definition: ${name}`);
+    this.handlers.set(name, { definition, handler });
     return this;
   }
 
@@ -39,6 +43,7 @@ export class ClientToolRegistry {
     labels: AgentEventContext = agentEventContext(),
     callTrace: ToolTrace = createToolTrace(name, rawArgs, labels),
   ): Promise<ToolResult> {
+    assertCompatibleClient();
     // Recorded HERE rather than in the agent loop because this is the only point every tool
     // call passes through -- the loop never sees the three rejections below, and they are the
     // ones that mean the model is calling the tool wrong.
@@ -46,7 +51,7 @@ export class ClientToolRegistry {
       callTrace.result(result);
       return result;
     };
-    const handler = this.handlers.get(name);
+    const handler = this.handlers.get(name)?.handler;
     if (!handler) {
       const error = new Error(`no client tool registered: ${name}`);
       callTrace.error(error);

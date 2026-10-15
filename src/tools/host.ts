@@ -12,6 +12,7 @@ import type { ProjectStoreAccess } from "./store";
 import { ProjectClosingError, type MutationOrigin } from "../project/MutationGate";
 import { openDocumentById } from "../project/openDocuments";
 import { isJobEffect, toolEffect } from "../contract/effects";
+import { toolByName } from "../contract";
 import {
   agentEventContext,
   createToolTrace,
@@ -84,7 +85,7 @@ class ProjectToolHost implements ToolHost {
     return agentToolContext(base, this.currentSignal, this.currentOrigin);
   }
   has(name: string): boolean {
-    return this.registry.has(name);
+    return !!toolByName(name) && this.registry.has(name);
   }
   async run(
     name: string,
@@ -121,6 +122,7 @@ class ProjectToolHost implements ToolHost {
   ): Promise<unknown> {
     const { signal, origin } = options;
     await this.ready;
+    if (!this.has(name)) return { ok: false, error: `unknown agent tool: ${name}` };
     this.currentOrigin = origin;
     try {
       // Effect classification (single source of truth) decides the mandatory runtime boundary. A

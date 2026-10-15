@@ -87,6 +87,34 @@ export function createProgressReader(
   };
 }
 
+export function createSequenceProgressReader(
+  durations: readonly number[],
+  onRecord: (p: RenderProgress) => void,
+): (chunk: string) => void {
+  let step = 0;
+  let buffer = "";
+  const readerFor = (index: number) => createProgressReader((report) => onRecord({
+    ...report,
+    outMs: durations.slice(0, index).reduce((total, duration) => total + duration * 1000, 0) +
+      Math.min(report.outMs, (durations[index] ?? 0) * 1000),
+    done: report.done && index === durations.length - 1,
+  }));
+  let reader = readerFor(step);
+  return (chunk) => {
+    buffer += chunk;
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    if (buffer.length > 64_000) buffer = buffer.slice(-8_000);
+    for (const line of lines) {
+      const marker = /^artdaddy_step=(\d+)$/.exec(line.trim());
+      if (marker && Number(marker[1]) >= step && Number(marker[1]) < durations.length) {
+        step = Number(marker[1]);
+        reader = readerFor(step);
+      } else reader(`${line}\n`);
+    }
+  };
+}
+
 /** How far through, 0..1. Unknown total (a live/streamed input) reports 0 rather than guessing. */
 export function progressFraction(outMs: number, totalMs: number): number {
   if (!(totalMs > 0) || !(outMs > 0)) return 0;

@@ -27,6 +27,7 @@ vi.mock("../lib/files", () => ({ listProjectFiles: () => Promise.resolve([]) }))
 const usageMock = vi.hoisted(() => ({
   metered: true,
   over: false,
+  globalPaused: undefined as true | undefined,
   used: 10,
   limit: 100,
   remaining: 1_500_000,
@@ -45,9 +46,9 @@ import { uploadFiles, importViaDialog, importPaths, filesFromItems } from "../li
 import { DISCORD_URL } from "../lib/community";
 import { toUserMessage } from "../lib/errors";
 import { peekFirstPrompt, setFirstPrompt, takeFirstPrompt } from "../store/firstPrompt";
-import { CREDITS_PAUSED } from "../lib/outOfCredits";
 import ChatView from "./ChatView";
 import { STARTER_PROMPTS } from "./starterPrompts";
+import { useCompatibility } from "../update/compatibility";
 
 function baseState() {
   return {
@@ -85,11 +86,10 @@ beforeEach(() => {
   Object.assign(state, baseState());
   authState.status = "unlocked";
   platformName = "web";
+  useCompatibility.setState({ status: "allowed" });
   usageMock.over = false;
-  usageMock.used = 10;
-  usageMock.limit = 100;
+  usageMock.globalPaused = undefined;
   usageMock.remaining = 1_500_000;
-  Reflect.deleteProperty(usageMock, "globalPaused");
   vi.mocked(importPaths).mockResolvedValue([]);
   vi.mocked(filesFromItems).mockReturnValue([]);
 });
@@ -205,20 +205,6 @@ describe("ChatView", () => {
     expect(state.send).not.toHaveBeenCalled();
   });
 
-  it("keeps the real remaining credit visible while the shared budget is paused", () => {
-    Object.assign(usageMock, {
-      over: true,
-      used: 3,
-      limit: 100,
-      remaining: 97,
-      globalPaused: true,
-    });
-    render(<ChatView />);
-    expect(screen.getByText(/97 cr left/)).toBeInTheDocument();
-    expect(screen.getByTitle(CREDITS_PAUSED)).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /join our discord/i })).not.toBeInTheDocument();
-  });
-
   it("shows the remaining balance while there is one", () => {
     render(<ChatView />);
     expect(screen.queryByRole("button", { name: /join our discord/i })).not.toBeInTheDocument();
@@ -228,6 +214,16 @@ describe("ChatView", () => {
     usageMock.remaining = 100 - 99.999;
     render(<ChatView />);
     expect(screen.getByText("0.001 cr left")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /join our discord/i })).not.toBeInTheDocument();
+  });
+
+  it("shows the shared pause without pretending the user's remaining credit is zero", () => {
+    usageMock.over = true;
+    usageMock.globalPaused = true;
+    usageMock.remaining = 97;
+    render(<ChatView />);
+    expect(screen.getByText("AI paused - 97 cr left")).toBeInTheDocument();
+    expect(screen.queryByText(/0 cr/)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /join our discord/i })).not.toBeInTheDocument();
   });
 

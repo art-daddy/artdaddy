@@ -25,6 +25,35 @@ interface Sample {
   size: number; // its length in bytes
 }
 
+export function indexedVideoSamples(file: ReturnType<typeof MP4Box.createFile>, trackId: number): Sample[] {
+  const corrected = new Map<number, number>();
+  for (const [moofNumber, moof] of file.moofs.entries()) {
+    let previousTrackEnd = moof.start;
+    for (const [trackNumber, traf] of moof.trafs.entries()) {
+      const header = traf.tfhd;
+      const samples = file.getTrackById(header.track_id).samples.filter((sample) => sample.moof_number === moofNumber + 1);
+      const base = header.flags & 1 ? header.base_data_offset
+        : header.flags & 0x20000 || trackNumber === 0 ? moof.start : previousTrackEnd;
+      let position = base;
+      let sampleNumber = 0;
+      for (const run of traf.truns) {
+        if (run.flags & 1) position = base + run.data_offset;
+        for (let index = 0; index < run.sample_count; index += 1) {
+          const sample = samples[sampleNumber++];
+          if (!sample) throw new Error("fragment sample count does not match its index");
+          if (header.track_id === trackId) corrected.set(sample.number, position);
+          position += sample.size;
+        }
+      }
+      previousTrackEnd = position;
+    }
+  }
+  return file.getTrackById(trackId).samples.map((sample) => ({
+    cts: sample.cts, duration: sample.duration, isSync: sample.is_sync,
+    offset: corrected.get(sample.number) ?? sample.offset, size: sample.size,
+  }));
+}
+
 export interface VideoDims {
   w: number;
   h: number;
@@ -107,15 +136,7 @@ export class VideoSource {
         };
         // The moov alone carries the sample table (mp4box fills offsets/sizes from stco+stsz
         // before onReady), so the index costs a few numbers per frame and NO media bytes.
-        for (const s of file.getTrackById(track.id).samples) {
-          this.samples.push({
-            cts: s.cts,
-            duration: s.duration,
-            isSync: s.is_sync,
-            offset: s.offset,
-            size: s.size,
-          });
-        }
+        this.samples = indexedVideoSamples(file, track.id);
       };
       void (async () => {
         try {
@@ -224,6 +245,8 @@ export class VideoSource {
 
     const ti = this.targetIndex(tSec);
     const targetTs = this.toMicros(this.samples[ti].cts);
+    this.keepTs = targetTs;
+    this.trimPast();
     const cached = this.buffer.get(targetTs);
     if (cached) return cached;
 
@@ -429,6 +452,11 @@ export class VideoSource {
 
   private onOutput(frame: VideoFrame): void {
     if (frame.timestamp > this.maxOutputTs) this.maxOutputTs = frame.timestamp;
+    if (frame.timestamp < this.keepTs && frame.timestamp !== this.pending?.ts) {
+      frame.close();
+      return;
+    }
+    this.buffer.get(frame.timestamp)?.close();
     this.buffer.set(frame.timestamp, frame);
     this.evict();
     if (this.pending && frame.timestamp === this.pending.ts)
@@ -437,8 +465,7 @@ export class VideoSource {
 
   // Bound the buffer. Prefer dropping PAST frames (ts < keepTs, already scrolled
   // past) so a forward look-ahead never evicts the frame that's on screen; never
-  // drop the awaited pending frame. Falls back to oldest-first (keepTs = -1 for
-  // pure frameAt callers reproduces the original FIFO behaviour).
+  // drop the awaited pending frame. Falls back to oldest-first.
   private evict(): void {
     while (this.buffer.size > BUFFER_CAP) {
       let victim = -1;

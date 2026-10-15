@@ -12,17 +12,19 @@ import {
 } from "../store/chat";
 import { activateEditorProject, deactivateEditorProject, useEditor } from "../store/editor";
 import { flushPendingSession } from "../store/transcriptFile";
+import { subscribeJobSettled } from "../store/jobNotes";
 import { rearmTimelinePersist } from "../timeline/engine";
 import { closeToolHost, openToolHost } from "../tools/host";
 import { sweepArtifactCache, sweepOwnedMedia } from "../tools/mediaGc";
 import { sweepProjectTemps } from "../tools/projectTemps";
+import { reconcilePendingMedia } from "../tools/import";
 import { storeForProject } from "../lib/desktop";
 import { projectDirFor } from "../tools/dataRoot";
 import { captureError } from "../observability/sentry";
 import { claimProjectLock, foreignProjectLock, releaseProjectLock } from "../tools/projectLock";
 import { cancelWriteRecovery } from "../timeline/engine";
 import { useProjectNotice } from "../store/projectNotice";
-import type { ProjectChildren } from "./ProjectDocument";
+import type { ProjectChildren, ProjectDocument } from "./ProjectDocument";
 import { ProjectDocumentRegistry } from "./ProjectDocumentRegistry";
 import { setOpenDocumentResolver } from "./openDocuments";
 import type { ProjectId } from "./types";
@@ -169,7 +171,11 @@ export const projectDocuments = new ProjectDocumentRegistry(makeProjectChildren,
     }),
   // Cancelling a failed close (Keep editing) must re-admit the chat producers quiesced during the SAVE
   // (finding #2), else send()/undo stay fenced and the user can't edit.
-  onReopen: (pid) => resumeChatProject(pid),
+  onReopen: (pid) => {
+    resumeChatProject(pid);
+    const doc = projectDocuments.get(pid);
+    if (doc) void recoverGeneratedMedia(doc);
+  },
   // Close chat admission the INSTANT close begins (finding #2): raise the fence + retire the turn +
   // normalize its state synchronously, so no chat op is admitted from the start of close, not just once
   // the SAVE phase is reached.
@@ -184,3 +190,25 @@ export const projectDocuments = new ProjectDocumentRegistry(makeProjectChildren,
 // finding "no document" and slipping past admission on a bare lock (reviewer blocker 1). UI open-
 // visibility still uses `get()`; this is the ownership view.
 setOpenDocumentResolver((id) => projectDocuments.getAuthority(id));
+
+async function recoverGeneratedMedia(doc: ProjectDocument): Promise<void> {
+  const editor = useEditor.getState();
+  const store = editor.projectId === doc.id ? editor.store : null;
+  if (!store || doc.phase() !== "open" || projectDocuments.get(doc.id) !== doc) return;
+  try {
+    await reconcilePendingMedia(store);
+  } catch (error) {
+    captureError(error, { scope: "project.open.generated-media" });
+    if (projectDocuments.get(doc.id) === doc && useEditor.getState().projectId === doc.id)
+      useProjectNotice.getState().notify("Could not update generated media. Reopen the project to retry.");
+  }
+}
+
+projectDocuments.subscribeOpened(recoverGeneratedMedia);
+subscribeJobSettled((projectDir, job) => {
+  if (job.status !== "done" || !job.media_refs?.length) return;
+  const editor = useEditor.getState();
+  if (editor.store?.projectDir !== projectDir) return;
+  const doc = projectDocuments.listOpen().find((candidate) => candidate.id === editor.projectId);
+  if (doc) return recoverGeneratedMedia(doc);
+});

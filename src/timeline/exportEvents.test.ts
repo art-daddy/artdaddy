@@ -10,7 +10,7 @@ vi.mock("../api/exportEvents", () => ({ reportExport }));
 import {
   __resetExportQueue,
   cancelExport,
-  submitExport,
+  submitExport as submitWithDependencies,
   whenExportsSettle,
   whenExportTelemetrySettles,
   ExportRunError,
@@ -23,6 +23,8 @@ import { resetTestDocuments } from "../test/timelineKit";
 const DIR = "C:/proj";
 const DEST = "C:/out/final.mp4";
 const STAGE = `${DEST}.part-x`;
+const submitExport = (request: Omit<Parameters<typeof submitWithDependencies>[0], "dependencies">) =>
+  submitWithDependencies({ ...request, dependencies: [] });
 
 /** Carries `stat`, so a delivered file has a real size to report. */
 class Fs implements FsLike {

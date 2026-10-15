@@ -1,11 +1,12 @@
-import { useEffect } from "react";
-import { Route, Routes, useParams } from "react-router-dom";
+import { useEffect, useRef } from "react";
+import { Route, Routes, useLocation, useParams } from "react-router-dom";
 
 import AuthProvider from "./components/AuthProvider";
 import ProfilePage from "./components/ProfilePage";
 import CloseFailedDialog from "./components/CloseFailedDialog";
 import MenuBar from "./components/MenuBar";
 import Shell from "./components/Shell";
+import CompatibilityGate from "./components/CompatibilityGate";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { startOsDropRouter, webOwnsFileDrops } from "./lib/osDrop";
 import { initMcp } from "./mcp/service";
@@ -17,6 +18,7 @@ import { useCloseCoordinator } from "./store/closeCoordinator";
 import { useEditor } from "./store/editor";
 import { installUpdate } from "./update/updater";
 import { flushAgentEventsForExit } from "./api/agentEvents";
+import { useCompatibility } from "./update/compatibility";
 
 function ShellRoute() {
   const { projectId } = useParams();
@@ -24,11 +26,18 @@ function ShellRoute() {
 }
 
 export default function App() {
+  const compatibility = useCompatibility((state) => state.status);
+  const workAllowed = platform.name !== "tauri" || compatibility === "allowed";
+  const location = useLocation();
+  const editingLocation = useRef(location);
+  if (workAllowed) editingLocation.current = location;
   // On desktop Tauri owns file drops, so they arrive as PATHS and are routed to whatever zone is
   // under the cursor — and the page must NOT claim the drag, or macOS delivers a preview image
   // to the webview instead of the file to Tauri. On web there is no such handler: keep blocking
   // the webview's default "navigate to the dropped file" so a stray drop can't throw the app away.
   useEffect(() => {
+    void initMcp();
+    if (!workAllowed) return;
     const prevent = (e: DragEvent) => {
       if (e.dataTransfer?.types.includes("Files")) e.preventDefault();
     };
@@ -43,14 +52,13 @@ export default function App() {
       .catch(() => undefined);
     // The local MCP server, so Claude Code / Cursor / Codex can drive this project. Loopback
     // only, and a failure to start never blocks the editor.
-    void initMcp();
     return () => {
       cancelled = true;
       stop?.();
       window.removeEventListener("dragover", prevent);
       window.removeEventListener("drop", prevent);
     };
-  }, []);
+  }, [workAllowed]);
 
   // Desktop window close (guardrail 5): preventDefault FIRST, then close the open project through the
   // retryable coordinator. On a clean close the window is closed for real (re-entry flag); on a failed
@@ -171,17 +179,19 @@ export default function App() {
 
   return (
     <AuthProvider>
+      <CompatibilityGate>
       <div className="flex h-full flex-col">
         <MenuBar />
         <UpdateBanner />
         <div className="min-h-0 flex-1">
-          <Routes>
+          <Routes location={editingLocation.current}>
             <Route path="/" element={<Shell projectId={null} />} />
             <Route path="/profile" element={<ProfilePage />} />
             <Route path="/p/:projectId" element={<ShellRoute />} />
           </Routes>
         </div>
       </div>
+      </CompatibilityGate>
       <CloseFailedDialog />
     </AuthProvider>
   );

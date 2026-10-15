@@ -85,13 +85,7 @@ export default function ProfilePage() {
               <Row label="Limit" value={formatCredits(usage.limit)} />
               {usage.over && (
                 <p className="mt-2 text-xs text-red-400">
-                  {usage.globalPaused ? (
-                    CREDITS_PAUSED
-                  ) : (
-                    <>
-                      {OUT_OF_CREDITS} <DiscordCreditsCta />
-                    </>
-                  )}
+                  {usage.globalPaused ? CREDITS_PAUSED : <>{OUT_OF_CREDITS} <DiscordCreditsCta /></>}
                 </p>
               )}
             </div>

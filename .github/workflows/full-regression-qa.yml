@@ -1,0 +1,68 @@
+name: Provider-free regression QA
+
+on:
+  push:
+    branches: ["qa/full-regression-20261015-*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  units:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-14, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      VITE_SENTRY_DSN: ""
+      SENTRY_DSN: ""
+      ARTDADDY_EVAL: ""
+      ARTDADDY_RECOVERY_EVAL: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: node scripts/codegen.mjs --check
+      - run: npm run typecheck
+      - run: npx vitest run --coverage --maxWorkers=2 --reporter=json --outputFile=reports/full-qa/unit.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: full-qa-unit-${{ matrix.os }}
+          path: |
+            reports/full-qa/**
+            coverage/**
+
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    env:
+      ARTDADDY_EVAL: ""
+      ARTDADDY_RECOVERY_EVAL: ""
+      ARTDADDY_SMOKE_NET: ""
+      ARTDADDY_E2E_SKIP_SIDECARS: whisper-cli,yt-dlp,artdaddy-browser
+      ARTDADDY_RECOVERY_REPORT_DIR: reports/full-qa/recovery
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: node scripts/fetch-sidecars.mjs --only ffmpeg,ffprobe
+      - run: npx vitest run --config vitest.smoke.config.ts --maxWorkers=1 --reporter=json --outputFile=reports/full-qa/smoke.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: full-qa-smoke-${{ matrix.os }}
+          path: reports/full-qa/**

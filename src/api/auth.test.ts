@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   authedFetch,
+  fetchExportPolicy,
   getAccessToken,
   hasSession,
   notifyAuthFailure,
@@ -22,6 +23,64 @@ afterEach(() => {
   setClerkTokenProvider(null);
   setSessionRenewer(null);
   vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
+
+describe("fresh export policy", () => {
+  it("reads additions and removals on the next request, without caching", async () => {
+    setClerkTokenProvider(async () => "token-a");
+    let watermark = false;
+    vi.stubGlobal("fetch", vi.fn(async () => resp(200, {
+      user_id: "user_a", watermark, end_card: true,
+    })));
+    expect(await fetchExportPolicy("user_a")).toEqual({ user_id: "user_a", watermark: false, end_card: true });
+    watermark = true;
+    expect(await fetchExportPolicy("user_a")).toEqual({ user_id: "user_a", watermark: true, end_card: true });
+  });
+
+  it.each(["false", 0, null, undefined])("does not infer an exemption from invalid policy %s", async (flag) => {
+    setClerkTokenProvider(async () => "token-a");
+    vi.stubGlobal("fetch", vi.fn(async () => resp(200, { user_id: "user_a", watermark: flag, end_card: true })));
+    expect(await fetchExportPolicy("user_a")).toBeNull();
+  });
+
+  it("does not accept a policy that would also remove the end card", async () => {
+    setClerkTokenProvider(async () => "token-a");
+    vi.stubGlobal("fetch", vi.fn(async () => resp(200, { user_id: "user_a", watermark: false, end_card: false })));
+    expect(await fetchExportPolicy("user_a")).toBeNull();
+  });
+
+  it("rejects another account's policy even when it is exempt", async () => {
+    setClerkTokenProvider(async () => "token-b");
+    vi.stubGlobal("fetch", vi.fn(async () => resp(200, { user_id: "user_a", watermark: false, end_card: true })));
+    expect(await fetchExportPolicy("user_b")).toBeNull();
+  });
+
+  it("rejects an ignored-cancellation reply after the session token changes", async () => {
+    let token = "token-a";
+    setClerkTokenProvider(async () => token);
+    let answer!: (response: Response) => void;
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((resolve) => { answer = resolve; })));
+    const pending = fetchExportPolicy("user_a");
+    await vi.waitFor(() => expect(answer).toBeTypeOf("function"));
+    token = "token-b";
+    answer(resp(200, { user_id: "user_a", watermark: false, end_card: true }));
+    expect(await pending).toBeNull();
+  });
+
+  it("bounds an unavailable policy and does not retain a later exemption", async () => {
+    vi.useFakeTimers();
+    setClerkTokenProvider(async () => "token-a");
+    let answer!: (response: Response) => void;
+    const send = vi.fn(() => new Promise<Response>((resolve) => { answer = resolve; }));
+    vi.stubGlobal("fetch", send);
+    const pending = fetchExportPolicy("user_a");
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(await pending).toBeNull();
+    answer(resp(200, { user_id: "user_a", watermark: false, end_card: true }));
+    send.mockResolvedValue(resp(503));
+    expect(await fetchExportPolicy("user_a")).toBeNull();
+  });
 });
 
 /** The Authorization header of each request `f` was asked to send. */

@@ -543,7 +543,7 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
           transcriptId: traceLabels.transcript_id,
           trace,
           origin: {
-            chatSessionId: get().transcriptId ?? "",
+            chatSessionId: traceLabels.transcript_id,
             branchId: 0,
             executionId: exec.token,
           },
@@ -596,15 +596,17 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
         }));
       } else {
         if (!isExpected(e)) captureError(e, { phase: "turn" });
+        const message = toUserMessage(e);
         finishTurn((s) => ({
           streaming: false,
-          error: toUserMessage(e),
+          error: message,
           turns: withLast(s.turns, (t) => ({
             ...t,
             status: "error",
-            parts: isExpected(e)
-              ? [...t.parts, { kind: "error", error: toUserMessage(e), code: e.code }]
-              : t.parts,
+            parts: [
+              ...t.parts,
+              { kind: "error", error: message, ...(isExpected(e) ? { code: e.code } : {}) },
+            ],
           })),
         }));
       }

@@ -41,6 +41,66 @@
 			],
 			"isBackground": false,
 			"problemMatcher": []
+		},
+		{
+			"label": "Exporter Native CI macOS Evidence",
+			"type": "shell",
+			"command": "gh",
+			"args": [
+				"run",
+				"download",
+				"38558062250",
+				"--repo",
+				"art-daddy/artdaddy",
+				"--name",
+				"exporter-native-macos-14-a25e5f2de33c3a41a768b6530d9ae68512057b2e",
+				"--dir",
+				"C:/Users/akshaydagar/akaru-client/reports/qa/exporter/ci-38558062250-macos"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Exporter Native Corrected CI Wait",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"-e",
+				"const cp=require('node:child_process');const env={...process.env,GH_PROMPT_DISABLED:'1'};delete env.GH_FORCE_TTY;const result=cp.spawnSync('gh',['run','watch','38562742630','--repo','art-daddy/artdaddy','--exit-status'],{encoding:'utf8',maxBuffer:32*1024*1024,env});console.log((result.stdout+result.stderr).split(/\\r?\\n/).slice(-70).join('\\n'));process.exit(result.status??1);"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Exporter Native Corrected CI Watch",
+			"type": "shell",
+			"command": "gh",
+			"args": [
+				"run",
+				"watch",
+				"38562742630",
+				"--repo",
+				"art-daddy/artdaddy",
+				"--exit-status"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Exporter Native Corrected CI Evidence",
+			"type": "shell",
+			"command": "gh",
+			"args": [
+				"run",
+				"download",
+				"38562742630",
+				"--repo",
+				"art-daddy/artdaddy",
+				"--dir",
+				"C:/Users/akshaydagar/akaru-client/reports/qa/exporter/ci-38562742630"
+			],
+			"isBackground": false,
+			"problemMatcher": []
 		}
 	]
 }

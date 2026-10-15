@@ -544,21 +544,13 @@ export async function failPendingClip(
  *  landed while the project was closed, so the mutation gate refused the row. Bytes are written
  *  before the flip precisely so this is recoverable. Returns the ids it completed. */
 export async function reconcilePendingMedia(store: ProjectStoreAccess): Promise<string[]> {
-  const cat = await readCatalog(store);
-  const pending = (cat.clips ?? []).filter((c) => c && c.status === "generating");
-  if (!pending.length) return [];
-  const landed: Record<string, unknown>[] = [];
-  for (const row of pending) {
-    const rel = String(row.path ?? "");
-    if (rel && (await store.exists(joinPath(store.projectDir, rel)))) landed.push(row);
-  }
-  if (!landed.length) return [];
   return runProjectMutation(store.projectDir, "library.reconcile", async (_doc, gctx) => {
     const fresh = await readCatalog(store);
     const done: string[] = [];
     for (const row of fresh.clips ?? []) {
       if (!row || row.status !== "generating") continue;
-      if (!landed.some((l) => l.id === row.id)) continue;
+      const rel = String(row.path ?? "");
+      if (!rel || !(await store.exists(joinPath(store.projectDir, rel)))) continue;
       delete row.status;
       delete row.error;
       done.push(String(row.id));

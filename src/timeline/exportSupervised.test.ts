@@ -2,7 +2,8 @@
 // of the page, and the next page commits it exactly as the first would have. These drive the real
 // export tool and the real queue against FakeJobs, which keeps the supervisor's rules (its Rust
 // twin is tested in src-tauri/src/jobs.rs) and lets a test play the ffmpeg process.
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 
 import { JobLedger } from "../project/jobLedger";
 import { FakeJobs } from "../test/fakeJobs";
@@ -19,6 +20,7 @@ import {
   adoptExports,
   cancelExport,
   listExportRecords,
+  localDeliveryPort,
   whenExportEnds,
   whenExportsSettle,
 } from "./exportQueue";
@@ -27,6 +29,8 @@ import { exportTimelineTool } from "./render";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
+
+vi.mock("../api/exportEvents", () => ({ reportExport: async () => undefined }));
 
 class Fs extends MemFs {
   async rename(from: string, to: string): Promise<void> {
@@ -42,6 +46,11 @@ class Fs extends MemFs {
     const v = this.files.get(joinPath(p));
     if (v === undefined) throw new Error(`ENOENT ${p}`);
     return new TextEncoder().encode(String(v));
+  }
+  async probeMedia(p: string, headBytes: number) {
+    const bytes = await this.readBytes(p);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    return { id12: sha256.slice(0, 12), sha256, size: bytes.length, head: bytes.slice(0, headBytes) };
   }
 }
 
@@ -61,9 +70,20 @@ async function setup() {
   // Everything but ffmpeg runs under the page as before (the probes, the checks); an ffmpeg that
   // lands here ran under the page, which is what these tests forbid.
   const ran: string[] = [];
+  let jobs: FakeJobs | undefined;
   const runner: CommandRunner = {
-    run: async (program): Promise<CommandResult> => {
+    run: async (program, args): Promise<CommandResult> => {
       ran.push(program);
+      if (program === "ffprobe") {
+        const spec = jobs?.submitted.find((submitted) => submitted.meta.stagePath === args.at(-1));
+        const plan = spec?.meta.plan as { duration: number; audioExpected: boolean; output: { width: number; height: number; fps: number } } | undefined;
+        const output = plan?.output ?? { width: 1920, height: 1080, fps: 30 };
+        const duration = plan?.duration ?? 2;
+        return { code: 0, stdout: JSON.stringify({ streams: [{ codec_type: "video", width: output.width, height: output.height,
+          avg_frame_rate: `${output.fps}/1`, nb_read_frames: String(Math.ceil(duration * output.fps)), duration: String(duration) },
+          ...(plan?.audioExpected ? [{ codec_type: "audio", duration: String(duration) }] : [])],
+          format: { duration: String(duration) } }), stderr: "" };
+      }
       return { code: 0, stdout: "", stderr: "" };
     },
   };
@@ -71,7 +91,8 @@ async function setup() {
     { entries: [{ media_ref: "a.mp4", timeline_in: 0, timeline_out: 60 }] },
     { store, runner },
   );
-  const jobs = new FakeJobs();
+  jobs = new FakeJobs();
+  jobs.delivery = localDeliveryPort(store);
   // The process writes its output where it was told: the last argument.
   jobs.onStart = (spec) => fs.writeTextFile(spec.args[spec.args.length - 1], "a whole video");
   __setJobSupervisor(jobs);
@@ -109,6 +130,48 @@ async function ledgerStatus(fs: Fs, id: string): Promise<string | undefined> {
   return file.jobs.find((j) => j.id === id)?.status;
 }
 
+describe("local delivery state after asynchronous identity checks", () => {
+  it.each([
+    { operation: "verify", action: "cancel", terminal: "cancelled" },
+    { operation: "verify", action: "fail", terminal: "failed" },
+    { operation: "publish", action: "cancel", terminal: "cancelled" },
+    { operation: "publish", action: "fail", terminal: "failed" },
+  ] as const)("$action during $operation preserves the destination and terminal state", async ({ operation, action, terminal }) => {
+    const fs = new Fs();
+    const store = new ProjectStoreAccess(DIR, fs);
+    const port = localDeliveryPort(store);
+    const stage = `${DEST}.partial`;
+    const intent = `identity-race-${operation}-${action}`;
+    await fs.writeTextFile(stage, "complete staged bytes");
+    await fs.writeTextFile(DEST, "previous destination bytes");
+    await port.prepare(intent, DIR, stage, DEST, { kind: "render", paths: [] });
+    if (operation === "publish") await port.verify(intent);
+
+    let entered!: () => void;
+    let release!: () => void;
+    const checking = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const probe = store.probeMedia.bind(store);
+    vi.spyOn(store, "probeMedia").mockImplementationOnce(async (...args) => {
+      const result = await probe(...args);
+      entered();
+      await gate;
+      return result;
+    });
+    const pending = port[operation](intent);
+    try {
+      await checking;
+      expect(await port[action](intent)).toBe(true);
+    } finally {
+      release();
+    }
+    await expect(pending).rejects.toThrow("export intent was cancelled or failed");
+    expect((await port.list())[0].state).toBe(terminal);
+    expect(await fs.readTextFile(DEST)).toBe("previous destination bytes");
+    expect(await fs.readTextFile(stage)).toBe("complete staged bytes");
+  });
+});
+
 describe("in the app, an export runs as a job of the app process", () => {
   it("runs ffmpeg there, one export at a time, and delivers each in turn", async () => {
     const t = await setup();
@@ -128,7 +191,8 @@ describe("in the app, an export runs as a job of the app process", () => {
     });
 
     t.jobs.exit(a.job_id, 0);
-    expect((await whenExportEnds(a.job_id))?.state).toBe("done");
+    const completed = await whenExportEnds(a.job_id);
+    expect(completed?.state, completed?.error).toBe("done");
     expect(await t.fs.readTextFile(DEST)).toBe("a whole video");
     await flush();
     expect(t.jobs.view(b.job_id)?.state).toBe("running");
@@ -156,6 +220,120 @@ describe("in the app, an export runs as a job of the app process", () => {
 });
 
 describe("an export outlives a crash of the page", () => {
+  it("retains a retry requested while earlier registration is still active", async () => {
+    const t = await setup();
+    const submitted = await t.exportNow();
+    await flush();
+    let rejectRead!: (reason: Error) => void;
+    const pendingRead = new Promise<Uint8Array>((_, reject) => { rejectRead = reject; });
+    const read = vi.spyOn(t.store, "readBytes").mockReturnValue(pendingRead);
+    t.jobs.exit(submitted.job_id, 0);
+    try {
+      await flush();
+      expect(read).toHaveBeenCalled();
+      expect(await adoptExports({ contextFor: t.nextPage })).toBe(0);
+    } finally {
+      read.mockRestore();
+      rejectRead(new Error("old registration attempt failed after reopen"));
+    }
+    await whenExportsSettle();
+    expect(await t.fs.readTextFile(DEST)).toBe("a whole video");
+    expect(listExportRecords().find((record) => record.job_id === submitted.job_id)?.mediaRef).toMatch(/^media_/);
+    expect((await t.store.listClips()).filter((clip) => clip.path === DEST)).toHaveLength(1);
+  });
+
+  it("adopts pending follow-ups once for the matching project under concurrent requests", async () => {
+    const t = await setup();
+    const submitted = await t.exportNow();
+    await flush();
+    pageCrashes(t.jobs);
+    t.jobs.exit(submitted.job_id, 0);
+    await t.jobs.delivery!.verify(submitted.job_id);
+    await t.jobs.delivery!.publish(submitted.job_id);
+    await t.jobs.commit(submitted.job_id);
+    expect(await adoptExports({ projectId: "different-project", contextFor: t.nextPage })).toBe(0);
+    const results = await Promise.all([
+      adoptExports({ projectId: "proj", contextFor: t.nextPage }),
+      adoptExports({ projectId: "proj", contextFor: t.nextPage }),
+    ]);
+    expect(results.reduce((total, count) => total + count, 0)).toBe(1);
+    await whenExportsSettle();
+    expect(await t.fs.readTextFile(DEST)).toBe("a whole video");
+    expect((await t.store.listClips()).filter((clip) => clip.path === DEST)).toHaveLength(1);
+    expect(listExportRecords().filter((record) => record.job_id === submitted.job_id)).toHaveLength(1);
+  });
+
+  it("retries unacknowledged registration while retaining the current page row", async () => {
+    const t = await setup();
+    const submitted = await t.exportNow();
+    await flush();
+    const read = vi.spyOn(t.store, "readBytes").mockRejectedValue(new Error("registration is unavailable"));
+    t.jobs.exit(submitted.job_id, 0);
+    await whenExportsSettle();
+    read.mockRestore();
+    const delivered = await t.fs.readTextFile(DEST);
+    expect(listExportRecords().find((record) => record.job_id === submitted.job_id)?.mediaRef).toBeUndefined();
+    expect(t.jobs.view(submitted.job_id)?.committed).toBe(true);
+    expect(await adoptExports({ contextFor: t.nextPage })).toBe(1);
+    await whenExportsSettle();
+    expect(await t.fs.readTextFile(DEST)).toBe(delivered);
+    expect(listExportRecords().filter((record) => record.job_id === submitted.job_id)).toHaveLength(1);
+    expect(listExportRecords().find((record) => record.job_id === submitted.job_id)?.mediaRef).toMatch(/^media_/);
+    expect(t.jobs.view(submitted.job_id)).toBeUndefined();
+  });
+
+  it("finishes library and ledger follow-ups after native file commit", async () => {
+    const t = await setup();
+    const submitted = await t.exportNow();
+    await flush();
+    pageCrashes(t.jobs);
+    t.jobs.exit(submitted.job_id, 0);
+    await t.jobs.delivery!.verify(submitted.job_id);
+    await t.jobs.delivery!.publish(submitted.job_id);
+    await t.jobs.commit(submitted.job_id);
+    const delivered = await t.fs.readTextFile(DEST);
+    expect(await adoptExports({ contextFor: t.nextPage })).toBe(1);
+    await whenExportsSettle();
+    expect(await t.fs.readTextFile(DEST)).toBe(delivered);
+    expect(await ledgerStatus(t.fs, submitted.job_id)).toBe("done");
+    expect(listExportRecords().find((record) => record.job_id === submitted.job_id)?.mediaRef).toMatch(/^media_/);
+  });
+
+  it("refuses an unsupported contract even when verified bytes were already moved", async () => {
+    const t = await setup();
+    const submitted = await t.exportNow();
+    await flush();
+    pageCrashes(t.jobs);
+    t.jobs.exit(submitted.job_id, 0);
+    await t.jobs.delivery!.verify(submitted.job_id);
+    await t.fs.rename(t.jobs.submitted[0].args.at(-1)!, DEST);
+    const plan = t.jobs.submitted[0].meta.plan as Record<string, unknown>;
+    plan.contractVersion = -1;
+    await adoptExports({ contextFor: t.nextPage });
+    const outcome = await whenExportEnds(submitted.job_id);
+    expect(outcome?.state).toBe("failed");
+    expect(outcome?.error).toContain("unsupported render contract");
+    expect(await t.fs.readTextFile(DEST)).toBe("a whole video");
+  });
+  it("refuses malformed output metadata even after native publication", async () => {
+    const t = await setup();
+    const submitted = await t.exportNow();
+    await flush();
+    pageCrashes(t.jobs);
+    t.jobs.exit(submitted.job_id, 0);
+    await t.jobs.delivery!.verify(submitted.job_id);
+    await t.jobs.delivery!.publish(submitted.job_id);
+    const plan = t.jobs.submitted[0].meta.plan as { output: { width: number } };
+    plan.output.width = 0;
+    await adoptExports({ contextFor: t.nextPage });
+    await whenExportsSettle();
+    const outcome = await whenExportEnds(submitted.job_id);
+    expect(outcome?.state).toBe("failed");
+    expect(outcome?.error).toContain("supported output contract");
+    expect(await t.fs.readTextFile(DEST)).toBe("a whole video");
+    expect((await t.store.listClips()).filter((clip) => clip.path === DEST)).toHaveLength(0);
+  });
+
   it("one that finished while no page was there is committed by the next page", async () => {
     const t = await setup();
     const a = await t.exportNow();
@@ -227,29 +405,30 @@ describe("an export outlives a crash of the page", () => {
     expect(t.jobs.killed).toEqual([a.job_id]);
   });
 
-  it("one the dead page had already committed is not committed twice", async () => {
+  it("does not repeat acknowledged follow-ups when forgetting the job was interrupted", async () => {
     const t = await setup();
     const a = await t.exportNow();
     await flush();
-    pageCrashes(t.jobs);
-    // The page renamed the file and told the app process, then died before letting go.
+    vi.spyOn(t.jobs, "forget").mockResolvedValueOnce(false);
     t.jobs.exit(a.job_id, 0);
-    const stage = t.jobs.submitted[0].args.at(-1)!;
-    await t.fs.rename(stage, DEST);
-    await t.jobs.commit(a.job_id);
+    await whenExportsSettle();
+    expect(listExportRecords().find((record) => record.job_id === a.job_id)?.mediaRef).toMatch(/^media_/);
+    expect(t.jobs.view(a.job_id)?.committed).toBe(true);
+    pageCrashes(t.jobs);
     expect(await adoptExports({ contextFor: t.nextPage })).toBe(0);
     expect(listExportRecords()).toEqual([]);
     expect(t.jobs.forgotten).toEqual([a.job_id]);
     expect(await t.fs.readTextFile(DEST)).toBe("a whole video");
   });
 
-  it("one the dead page renamed but never reported is still a delivered export", async () => {
+  it("a verified file the dead page renamed is reconciled by its identity", async () => {
     const t = await setup();
     const a = await t.exportNow();
     await flush();
     pageCrashes(t.jobs);
     // Renamed into place, and the page died before telling the app process.
     t.jobs.exit(a.job_id, 0);
+    await t.jobs.delivery!.verify(a.job_id);
     await t.fs.rename(t.jobs.submitted[0].args.at(-1)!, DEST);
     await adoptExports({ contextFor: t.nextPage });
     expect((await whenExportEnds(a.job_id))?.state).toBe("done");
@@ -303,6 +482,25 @@ describe("the runner that hands ffmpeg to the app process", () => {
     await r.run("ffprobe", []);
     await r.run("ffmpeg", []);
     expect([jobs.submitted.length, b.ran]).toEqual([1, ["ffprobe", "ffmpeg"]]);
+  });
+
+  it("hands every render step to one native job without executing intermediate ffmpegs on the page", async () => {
+    const b = base();
+    const r = supervisedRunner(b, jobs, { id: "j1", lane: "export", meta: { kind: "export" } });
+    const done = r.runSequence!([
+      { args: ["first.nut"], duration: 2 },
+      { args: ["second.nut"], duration: 3 },
+      { args: ["final.partial"], duration: 5 },
+    ], undefined, "C:/scratch/parts");
+    await flush();
+    expect(jobs.submitted).toHaveLength(1);
+    expect(jobs.submitted[0]).toMatchObject({
+      id: "j1", args: ["first.nut"], steps: [["second.nut"], ["final.partial"]],
+      cwd: "C:/scratch/parts", meta: { scratch: "C:/scratch/parts" },
+    });
+    expect(b.ran).toEqual([]);
+    jobs.exit("j1", 0);
+    expect(await done).toMatchObject({ code: 0 });
   });
 
   it("forwards progress, carries its scratch dir with the job, and reports how it ended", async () => {
