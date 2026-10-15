@@ -1,24 +1,28 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { UsageState } from "../api/usage";
 
-const mocks = vi.hoisted(() => ({
-  signOutDesktop: vi.fn(async () => {}),
-  markLocked: vi.fn(),
-  verify: vi.fn(),
-  refreshUsage: vi.fn(),
-  usage: { metered: true, used: 40, limit: 100, remaining: 60, over: false },
-  auth: {
-    status: "unlocked" as "unlocked" | "offline",
-    profile: {
-      user_id: "user_abc",
-      email: "alice@example.com",
-      display_name: "Alice Example",
-      image_url: "",
-      metered: true,
-    } as null | Record<string, unknown>,
-  },
-}));
+const mocks = vi.hoisted(() => {
+  const usage: UsageState = { metered: true, used: 40, limit: 100, remaining: 60, over: false };
+  return {
+    signOutDesktop: vi.fn(async () => {}),
+    markLocked: vi.fn(),
+    verify: vi.fn(),
+    refreshUsage: vi.fn(),
+    usage,
+    auth: {
+      status: "unlocked" as "unlocked" | "offline",
+      profile: {
+        user_id: "user_abc",
+        email: "alice@example.com",
+        display_name: "Alice Example",
+        image_url: "",
+        metered: true,
+      } as null | Record<string, unknown>,
+    },
+  };
+});
 
 vi.mock("../api/desktopAuth", () => ({ signOutDesktop: mocks.signOutDesktop }));
 vi.mock("../api/usage", async (importOriginal) => ({
@@ -36,7 +40,6 @@ vi.mock("../store/auth", () => ({
 }));
 
 import ProfilePage from "./ProfilePage";
-import { CREDITS_PAUSED } from "../lib/outOfCredits";
 
 const renderPage = () =>
   render(
@@ -52,21 +55,6 @@ afterEach(() => {
 });
 
 describe("ProfilePage", () => {
-  it("shows a shared pause without calling the remaining account credit exhausted", () => {
-    Object.assign(mocks.usage, {
-      used: 3,
-      limit: 100,
-      remaining: 97,
-      over: true,
-      globalPaused: true,
-    });
-    renderPage();
-    expect(screen.getByText("97")).toBeInTheDocument();
-    expect(screen.getByText(CREDITS_PAUSED)).toBeInTheDocument();
-    expect(screen.queryByText("Out of credits.")).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /join our discord/i })).not.toBeInTheDocument();
-  });
-
   it("shows who is signed in", () => {
     renderPage();
     expect(screen.getByText("Alice Example")).toBeInTheDocument();
@@ -94,6 +82,22 @@ describe("ProfilePage", () => {
     expect(screen.getByText(/not metered/i)).toBeInTheDocument();
     // A zero balance and "no balance" are different things; never render one as the other.
     expect(screen.queryByText("Remaining")).not.toBeInTheDocument();
+  });
+
+  it("keeps the personal balance and names the shared pause instead of asking for more credit", () => {
+    mocks.usage = {
+      metered: true,
+      used: 3,
+      limit: 100,
+      remaining: 97,
+      over: true,
+      globalPaused: true,
+    };
+    renderPage();
+    expect(screen.getByText("97")).toBeInTheDocument();
+    expect(screen.getByText("AI generation is paused for everyone right now.")).toBeInTheDocument();
+    expect(screen.queryByText("Out of credits.")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /join our discord/i })).not.toBeInTheDocument();
   });
 
   it("offers the Discord only once the allowance is actually spent", () => {

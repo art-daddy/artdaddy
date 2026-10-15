@@ -12,11 +12,13 @@ export type JobState = "queued" | "running" | "exited";
  *  src-tauri/src/jobs.rs, its twin (a test holds the two together). */
 export const JOB_PROGRAMS = ["ffmpeg", "whisper-cli"] as const;
 export type JobProgram = (typeof JOB_PROGRAMS)[number];
+export const EXPORT_PROTOCOL_VERSION = 12;
 
 export interface JobView {
   id: string;
   lane: string;
   state: JobState;
+  step?: number;
   code: number | null;
   /** Ended by Cancel (or by the app exiting), whatever its exit code says. */
   killed: boolean;
@@ -37,11 +39,13 @@ export interface JobSpec {
   lane: string;
   program: JobProgram;
   args: string[];
+  steps?: string[][];
   cwd?: string | null;
   meta: Record<string, unknown>;
 }
 
 export interface JobSupervisor {
+  readonly delivery?: ExportDeliveryPort;
   /** Queue the job on its lane; resolves with how many jobs are ahead of it. */
   submit(spec: JobSpec): Promise<number>;
   /** Cancel: a queued job never starts, a running one is killed. False once it has ended. */
@@ -60,6 +64,40 @@ export interface JobSupervisor {
   ): () => void;
 }
 
+export interface ExportDelivery {
+  version: number;
+  id: string;
+  project_dir: string;
+  stage_path: string;
+  dest_path: string;
+  state: "prepared" | "verified" | "publishing" | "published" | "cancelled" | "failed";
+  identity: { sha256: string; size: number } | null;
+  created_at: number;
+  followups_done: boolean;
+  source?: ExportDeliverySource;
+}
+
+export type ExportDeliverySource =
+  { kind: "render"; paths: string[] } | { kind: "copy"; path: string; media_ref: string };
+
+export interface ExportDeliveryPort {
+  protocol(): Promise<number>;
+  prepare(
+    id: string,
+    projectDir: string,
+    stagePath: string,
+    destPath: string,
+    source: ExportDeliverySource,
+  ): Promise<ExportDelivery>;
+  verify(id: string): Promise<ExportDelivery>;
+  publish(id: string): Promise<ExportDelivery>;
+  cancel(id: string): Promise<boolean>;
+  fail(id: string): Promise<boolean>;
+  complete(id: string): Promise<boolean>;
+  copy(id: string): Promise<void>;
+  list(): Promise<ExportDelivery[]>;
+}
+
 /** A job's stderr as one string: both ends, with what was dropped between them marked. */
 export function jobStderr(
   job: Pick<JobView, "stderr_head" | "stderr_elided" | "stderr_tail">,
@@ -75,6 +113,24 @@ export function jobResult(job: JobView): CommandResult {
 }
 
 class TauriJobSupervisor implements JobSupervisor {
+  readonly delivery: ExportDeliveryPort = {
+    protocol: () => this.invoke<number>("jobs_export_protocol"),
+    prepare: (id, projectDir, stagePath, destPath, source) =>
+      this.invoke<ExportDelivery>("jobs_prepare_export", {
+        id,
+        projectDir,
+        stagePath,
+        destPath,
+        source,
+      }),
+    verify: (id) => this.invoke<ExportDelivery>("jobs_verify_export", { id }),
+    publish: (id) => this.invoke<ExportDelivery>("jobs_publish_export", { id }),
+    cancel: (id) => this.invoke<boolean>("jobs_cancel_export", { id }),
+    fail: (id) => this.invoke<boolean>("jobs_fail_export", { id }),
+    complete: (id) => this.invoke<boolean>("jobs_complete_export", { id }),
+    copy: (id) => this.invoke<void>("jobs_copy_export", { id }),
+    list: () => this.invoke<ExportDelivery[]>("jobs_export_intents"),
+  };
   private readonly changeFns = new Set<(job: JobView) => void>();
   private readonly stdoutFns = new Set<(id: string, chunk: string) => void>();
   private listening: Promise<void> | null = null;
@@ -101,7 +157,14 @@ class TauriJobSupervisor implements JobSupervisor {
     // whisper-cli's DLL folder as its working directory, without which it never loads on Windows.
     const { launchSpec } = await import("./tauri");
     const launch = await launchSpec(spec.program, spec.args, spec.cwd);
-    return this.invoke<number>("jobs_submit", { spec: { ...spec, ...launch } });
+    const steps = spec.steps
+      ? await Promise.all(
+          spec.steps.map(async (args) => (await launchSpec(spec.program, args, spec.cwd)).args),
+        )
+      : undefined;
+    return this.invoke<number>(steps?.length ? "jobs_submit_sequence" : "jobs_submit", {
+      spec: { ...spec, ...launch, ...(steps ? { steps } : {}) },
+    });
   }
   kill(id: string): Promise<boolean> {
     return this.invoke<boolean>("jobs_kill", { id });
@@ -143,10 +206,14 @@ export function jobSupervisor(): Promise<JobSupervisor | null> {
       return null;
     try {
       const sup = new TauriJobSupervisor();
-      await sup.launchId(); // an app without the supervisor (an older shell) runs jobs in the page
+      await sup.launchId();
+      if ((await sup.delivery.protocol()) !== EXPORT_PROTOCOL_VERSION)
+        throw new Error("unsupported native exporter protocol");
       return sup;
-    } catch {
-      return null;
+    } catch (error) {
+      throw new Error(
+        `desktop exporter is unavailable or outdated; restart with the matching client (${String(error)})`,
+      );
     }
   })();
   return current;
@@ -172,7 +239,30 @@ export function supervisedRunner(
   job: { id: string; lane: string; meta: Record<string, unknown> },
 ): CommandRunner {
   let used = false;
-  return {
+  const runner: CommandRunner = {
+    runSequence(steps, signal, cwd, onStdout) {
+      if (used || !steps.length)
+        return Promise.resolve({
+          code: -1,
+          stdout: "",
+          stderr: "render sequence already submitted or empty",
+        });
+      used = true;
+      return runAsJob(
+        sup,
+        {
+          id: job.id,
+          lane: job.lane,
+          program: "ffmpeg",
+          args: steps[0].args,
+          steps: steps.slice(1).map((step) => step.args),
+          cwd: cwd ?? null,
+          meta: { ...job.meta, scratch: cwd ?? null },
+        },
+        signal,
+        onStdout,
+      );
+    },
     run(program, args, signal, cwd, onStdout) {
       if (program !== "ffmpeg" || used) return base.run(program, args, signal, cwd, onStdout);
       used = true;
@@ -192,6 +282,13 @@ export function supervisedRunner(
       );
     },
   };
+  if (sup.delivery && job.lane === "export") durableScratchRunners.add(runner);
+  return runner;
+}
+
+const durableScratchRunners = new WeakSet<CommandRunner>();
+export function jobOwnsScratch(runner: CommandRunner): boolean {
+  return durableScratchRunners.has(runner);
 }
 
 /** Run `spec` as a job of the app process and resolve the way a CommandRunner reports a process:

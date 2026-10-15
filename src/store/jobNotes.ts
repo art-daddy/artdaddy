@@ -45,6 +45,16 @@ export const SETTLE_WINDOW_MS = 1500;
 const queued = new Map<string, SettledJob[]>();
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
 const sinks = new Map<string, JobSink>();
+const settledListeners = new Set<(projectDir: string, job: SettledJob) => void | Promise<void>>();
+
+export function subscribeJobSettled(
+  listener: (projectDir: string, job: SettledJob) => void | Promise<void>,
+): () => void {
+  settledListeners.add(listener);
+  return () => {
+    settledListeners.delete(listener);
+  };
+}
 
 /** Attach a project's chat. Delivers anything that landed while it was away. */
 export function registerJobSink(projectDir: string, sink: JobSink): void {
@@ -59,6 +69,11 @@ export function unregisterJobSink(projectDir: string): void {
 /** Record a settled job and schedule the wake. Work another driver started is dropped here rather
  *  than filtered at delivery: it must never occupy the coalescing window either. */
 export function notifyJobSettled(projectDir: string, job: SettledJob): void {
+  for (const listener of settledListeners) {
+    try {
+      void Promise.resolve(listener(projectDir, job)).catch(() => undefined);
+    } catch {}
+  }
   if (job.startedBy !== "chat") return;
   const q = queued.get(projectDir);
   if (q) q.push(job);

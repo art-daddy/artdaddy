@@ -68,7 +68,7 @@ export async function refreshUsage(): Promise<void> {
     const j = (await res.json()) as Partial<UsageState> & { pause_scope?: unknown };
     if (revision !== balanceRevision) return;
     if (!j.metered) {
-      set({ metered: false, over: false });
+      set({ metered: false, over: false, globalPaused: undefined });
       return;
     }
     const limit = Number(j.limit ?? 0);
@@ -100,23 +100,31 @@ export function markOverLimit(detail: unknown): void {
       limit: reservation.limit,
       remaining: reservation.remaining,
       over: false,
+      globalPaused: undefined,
     });
     return;
   }
   const d = (detail && typeof detail === "object" ? detail : {}) as {
     used?: number;
     limit?: number;
+    remaining?: number;
     scope?: string;
   };
+  const globalPaused = isGlobal(detail);
   const used = Number(d.used ?? state.used);
   const limit = Number(d.limit ?? state.limit);
+  const headroom = Number.isFinite(d.remaining)
+    ? Number(d.remaining)
+    : state.metered && state.used === used && state.limit === limit
+      ? state.remaining
+      : limit - used;
   set({
     metered: true,
     over: true,
     used,
     limit,
-    remaining: d.scope === "global" ? Math.max(0, limit - used) : 0,
-    globalPaused: d.scope === "global" ? true : undefined,
+    remaining: globalPaused ? Math.max(0, headroom) : 0,
+    globalPaused: globalPaused ? true : undefined,
   });
   // Reported HERE rather than at the three 402 call sites: ai.ts and both agent round senders
   // all funnel through this, so one of them growing a fourth caller cannot miss it. A hard stop
@@ -135,7 +143,7 @@ export function markOverLimit(detail: unknown): void {
  *  must never keep showing the previous account's credits. */
 export function clearUsage(): void {
   balanceRevision += 1;
-  set({ metered: false, used: 0, limit: 0, remaining: 0, over: false });
+  set({ metered: false, used: 0, limit: 0, remaining: 0, over: false, globalPaused: undefined });
   // A new identity gets a fresh wall; without this, the next account's first 402 is silent.
   void import("./appEvents").then((m) => m.resetCreditsExhausted()).catch(() => undefined);
 }

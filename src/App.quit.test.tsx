@@ -13,6 +13,7 @@ import { useCloseCoordinator } from "./store/closeCoordinator";
 import { useEditor } from "./store/editor";
 import { useAuth } from "./store/auth";
 import { setClerkTokenProvider } from "./api/auth";
+import { catalogIdentity } from "./contract";
 import {
   __bufferedAgentEvents,
   __resetAgentEvents,
@@ -121,6 +122,15 @@ beforeEach(() => {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url, init) => {
+      if (String(url).endsWith("/client/compatibility")) {
+        return new Response(
+          JSON.stringify({
+            catalog_id: catalogIdentity(),
+            supported: true,
+            required_update: false,
+          }),
+        );
+      }
       if (String(url).endsWith("/telemetry/agent")) {
         deliveredTraces.push(JSON.parse(init!.body as string));
         return new Response("", { status: 200 });

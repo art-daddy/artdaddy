@@ -7,6 +7,7 @@ import { ProjectStoreAccess, type FsLike } from "./store";
 import { ClientToolRegistry } from "./registry";
 import { __resetAgentEvents, flushAgentEvents, setAgentContext } from "../api/agentEvents";
 import { useAuth } from "../store/auth";
+import { WITHDRAWN_TOOLS } from "../contract/withdrawn";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -42,7 +43,13 @@ vi.mock("../api/auth", () => ({
 vi.mock(".", () => ({
   createToolRegistry: (getCtx: () => Any) => {
     const registry = new ClientToolRegistry();
-    for (const name of ["download_video", "get_timeline", "add_clips", "library_op"]) {
+    for (const name of [
+      "download_video",
+      "get_timeline",
+      "add_clips",
+      "library_op",
+      ...WITHDRAWN_TOOLS,
+    ]) {
       registry.register(name, async () => {
         toolCtx = getCtx();
         return toolGate;
@@ -73,6 +80,25 @@ afterEach(() => {
 });
 
 describe("openToolHost", () => {
+  it.each(
+    WITHDRAWN_TOOLS.flatMap((name) => [
+      { name, surface: "app" as const },
+      { name, surface: "mcp" as const },
+    ]),
+  )("refuses a cached $name call from $surface before any tool work", async ({ name, surface }) => {
+    const scope = new ProjectJobScope();
+    const admitted = vi.spyOn(scope, "run");
+    setOpenDocumentResolver(() => ({ jobs: scope }) as Any);
+    const host = openToolHost("p1");
+    expect(host.has(name)).toBe(false);
+    expect(await host.run(name, {}, { surface })).toEqual({
+      ok: false,
+      error: `unknown agent tool: ${name}`,
+    });
+    expect(toolCtx).toBeNull();
+    expect(admitted).not.toHaveBeenCalled();
+  });
+
   it("keeps an MCP tool under its bound project without inheriting the chat's labels", async () => {
     setAgentContext({
       surface: "app",

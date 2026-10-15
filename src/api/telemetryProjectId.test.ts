@@ -23,7 +23,7 @@ vi.mock("../platform/host", () => ({
 
 import { IDENTITY } from "../brand";
 import { FakeJobs } from "../test/fakeJobs";
-import { MemFs, registerTestDocument, resetTestDocuments } from "../test/timelineKit";
+import { ExportMemFs, registerTestDocument, resetTestDocuments } from "../test/timelineKit";
 import { ensureTimeline } from "../timeline/engine";
 import {
   __resetExportQueue,
@@ -55,7 +55,7 @@ const LEAK = /someone|client work|hero cut|edits|wedding/i;
 
 /** {@link MemFs} that also keeps bytes (an import writes the file into the library) and moves files
  *  (an export lands by rename). */
-class Fs extends MemFs {
+class Fs extends ExportMemFs {
   bytes = new Map<string, Uint8Array>();
   override async exists(p: string): Promise<boolean> {
     return this.bytes.has(joinPath(p)) || super.exists(p);
@@ -88,7 +88,24 @@ class Fs extends MemFs {
 }
 
 const runner: CommandRunner = {
-  run: async (): Promise<CommandResult> => ({ code: 0, stdout: "", stderr: "" }),
+  run: async (): Promise<CommandResult> => ({
+    code: 0,
+    stdout: JSON.stringify({
+      streams: [
+        {
+          codec_type: "video",
+          width: 1080,
+          height: 1920,
+          avg_frame_rate: "30/1",
+          nb_read_frames: 60,
+          duration: "2",
+        },
+        { codec_type: "audio", duration: "2" },
+      ],
+      format: { duration: "2" },
+    }),
+    stderr: "",
+  }),
 };
 
 const posted: { path: string; body: Record<string, unknown> }[] = [];
@@ -135,6 +152,7 @@ async function importInto(dir: string) {
  *  the app told the server. */
 async function exportFrom(dir: string, id: string) {
   const fs = new Fs();
+  await fs.writeTextFile(joinPath(dir, "a.mp4"), "source video");
   const store = new ProjectStoreAccess(dir, fs);
   registerTestDocument(dir, id);
   await ensureTimeline(store);

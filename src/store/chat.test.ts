@@ -15,9 +15,11 @@ import { __resetJobNotes, notifyJobSettled, pendingJobNotes, type SettledJob } f
 import { loadClientSession, persistSession, persistSessionSoon } from "./transcriptFile";
 import { inferRoundStreaming } from "../agent/api";
 import { TIMELINE_CHANGED_NOTE } from "../agent/compose";
+import { agentEventContext, createToolTrace, setAgentContext } from "../api/agentEvents";
 import { setOpenDocumentResolver } from "../project/openDocuments";
 import { emptyTimeline, type Timeline } from "../timeline/model";
-import { openToolHost } from "../tools/host";
+import { openToolHost, type ToolRunOptions } from "../tools/host";
+import { joinPath, type ProjectStoreAccess } from "../tools/store";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -851,6 +853,69 @@ describe("useChat loop deps + remaining actions", () => {
     expect(await lastDeps.runTool("nope", {})).toEqual({ ok: false, error: "unknown tool: nope" });
   });
 
+  it("keeps tool events attached to their original chat when another driver changes the global context", async () => {
+    const previous = agentEventContext();
+    const transcriptId = useChat.getState().transcriptId;
+    try {
+      setDesktop("p1");
+      useChat.setState({ projectId: "p1", transcriptId: "chat-a", model: "gpt-5.6-luna" });
+      await useChat.getState().send("work in this project");
+      const original = lastDeps.eventContext();
+      expect(original).toMatchObject({
+        surface: "app",
+        project_id: "p1",
+        transcript_id: "chat-a",
+        model: "gpt-5.6-luna",
+      });
+      setAgentContext({
+        surface: "mcp",
+        project_id: "p2",
+        transcript_id: "chat-b",
+        model: "other",
+      });
+      expect(lastDeps.eventContext()).toEqual(original);
+    } finally {
+      setAgentContext({
+        surface: previous.surface,
+        project_id: previous.project_id,
+        transcript_id: previous.transcript_id,
+        model: previous.model,
+      });
+      useChat.setState({ transcriptId });
+    }
+  });
+
+  it("Stop reaches a running tool through the current host API and preserves its trace", async () => {
+    const run = vi.fn(
+      async (_name: string, _args: Record<string, unknown>, options: ToolRunOptions) =>
+        new Promise<unknown>((resolve) => {
+          if (!options.signal) return resolve({ ok: false, error: "missing Stop signal" });
+          options.signal.addEventListener("abort", () => resolve({ ok: false, error: "stopped" }), {
+            once: true,
+          });
+        }),
+    );
+    vi.mocked(openToolHost).mockImplementationOnce(
+      (id: string) =>
+        ({
+          projectId: id,
+          ready: Promise.resolve(),
+          has: () => true,
+          run,
+          store: () => null,
+        }) as Any,
+    );
+    setDesktop("p1");
+    useChat.setState({ projectId: "p1" });
+    await useChat.getState().send("inspect the timeline");
+    const trace = createToolTrace("get_timeline", {}, lastDeps.eventContext(), "tool-1");
+    const pending = lastDeps.runTool("get_timeline", {}, trace);
+    expect(run.mock.calls[0][2].trace).toBe(trace);
+    expect(run.mock.calls[0][2].origin?.executionId).toBe(useChat.getState().execToken);
+    await useChat.getState().stop();
+    expect(await pending).toEqual({ ok: false, error: "stopped" });
+  });
+
   it("wires onToolError / onUsage / mode / stopped / session", async () => {
     setDesktop("p1");
     useChat.setState({ projectId: "p1", mode: "autopilot" });
@@ -1031,6 +1096,7 @@ describe("useChat loop deps + remaining actions", () => {
       return calls[calls.length - 1][1] as {
         requests: Array<{
           message: { text: string };
+          response?: Array<{ kind: string; error?: string; code?: string }>;
           checkpoint?: { timeline?: unknown };
         }>;
       };
@@ -1068,14 +1134,110 @@ describe("useChat loop deps + remaining actions", () => {
       expect(useChat.getState().turns.map((t) => t.userText)).toContain("add 25 clips");
     });
 
-    it("persists a turn that ends in an ERROR, not just a clean one", async () => {
-      setDesktop("p1");
-      useChat.setState({ projectId: "p1" });
-      runnerStart.mockRejectedValueOnce(new Error("boom"));
-      await useChat.getState().send("do a thing");
-      expect(useChat.getState().turns[0].status).toBe("error");
-      expect(lastPersisted().requests.map((r) => r.message.text)).toContain("do a thing");
-    });
+    it.each([
+      { label: "unexpected failure", failure: new Error("private transport diagnostic") },
+      { label: "network failure", failure: new TypeError("Failed to fetch") },
+    ])(
+      "keeps the safe $label reply and failed status after reload without retrying",
+      async ({ failure }) => {
+        setDesktop("p1");
+        useChat.setState({ projectId: "p1" });
+        runnerStart.mockRejectedValueOnce(failure);
+        await useChat.getState().send("do a thing");
+        expect(useChat.getState().turns[0].status).toBe("error");
+        const message = useChat.getState().error;
+        expect(message).toBeTruthy();
+        expect(message).not.toContain(failure.message);
+        const saved = lastPersisted();
+        expect(saved.requests[0].response?.filter((part) => part.kind === "error")).toEqual([
+          { kind: "error", error: message },
+        ]);
+        loadSess.mockResolvedValueOnce({
+          requests: saved.requests,
+          providerSnapshot: null,
+          session: null,
+        });
+        await useChat.getState().load("p1");
+        const restored = useChat.getState().turns[0];
+        expect(restored.userText).toBe("do a thing");
+        expect(restored.status).toBe("error");
+        expect(restored.parts.filter((part) => part.kind === "error")).toEqual([
+          { kind: "error", error: message },
+        ]);
+        expect(runnerStart).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it.each(["transport", "terminal event", "host startup"] as const)(
+      "keeps a %s failure through the real session writer and loader",
+      async (failurePath) => {
+        const actual = await vi.importActual<typeof import("./transcriptFile")>("./transcriptFile");
+        const files: Record<string, string> = {};
+        const store = {
+          projectDir: "C:/proj/failed-chat-roundtrip",
+          sessionLive: () => true,
+          writeProjectText: async (path: string, content: string, guard?: () => boolean) => {
+            if (guard && !guard()) return false;
+            files[path] = content;
+            return true;
+          },
+          readJson: async <Value>(path: string, fallback: Value): Promise<Value> =>
+            path in files ? (JSON.parse(files[path]) as Value) : fallback,
+        } as unknown as ProjectStoreAccess;
+        const soon = vi.mocked(persistSessionSoon);
+        soon.mockImplementation(actual.persistSessionSoon);
+        try {
+          setDesktop("p1");
+          useEditor.setState({ store });
+          useChat.setState({ projectId: "p1" });
+          if (failurePath === "transport") {
+            runnerStart.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+          } else if (failurePath === "terminal event") {
+            runnerStart.mockImplementationOnce(async () => {
+              emit("reasoning", { text: "Checking the source footage." });
+              emit("error", { error: "The server could not complete this request." });
+            });
+          } else {
+            vi.mocked(openToolHost).mockImplementationOnce(
+              () =>
+                ({
+                  projectId: "p1",
+                  ready: Promise.reject(new Error("private host startup diagnostic")),
+                  has: () => false,
+                  run: vi.fn(),
+                  store: () => null,
+                }) as Any,
+            );
+          }
+          await useChat.getState().send("keep my original edit brief");
+          const message = useChat.getState().error;
+          expect(message).toBeTruthy();
+          await actual._persistIdle(store.projectDir);
+          const saved = JSON.parse(files[joinPath(store.projectDir, actual.SESSION_REL)]);
+          expect(
+            saved.requests[0].response.filter((part: { kind: string }) => part.kind === "error"),
+          ).toEqual([{ kind: "error", error: message }]);
+          loadSess.mockResolvedValueOnce(await actual.loadSession(store));
+          await useChat.getState().load("p1");
+          const restored = useChat.getState().turns[0];
+          expect(restored).toMatchObject({
+            userText: "keep my original edit brief",
+            status: "error",
+          });
+          expect(restored.parts).toEqual(saved.requests[0].response);
+          if (failurePath === "terminal event") {
+            expect(restored.parts[0]).toEqual({
+              kind: "reasoning",
+              text: "Checking the source footage.",
+            });
+          }
+          expect(runnerStart).toHaveBeenCalledTimes(failurePath === "host startup" ? 0 : 1);
+        } finally {
+          await actual._persistIdle(store.projectDir);
+          soon.mockReset();
+        }
+      },
+    );
 
     // Reported in alpha: after a crash the chat showed the user's message and NOTHING else --
     // the transcript was written at send and again at turn end, so a turn that never ended lost

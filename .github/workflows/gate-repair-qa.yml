@@ -1,0 +1,82 @@
+name: Client gate repairs
+
+on:
+  push:
+    branches: [qa/full-regression-20261015-akaru-client-refresh-1792088531389]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  VITE_SENTRY_DSN: ""
+  SENTRY_DSN: ""
+  AKARU_EVAL: ""
+  ARTDADDY_EVAL: ""
+  ARTDADDY_RECOVERY_EVAL: ""
+  ARTDADDY_SMOKE_NET: ""
+
+jobs:
+  client:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-14, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+        id: dependencies
+      - name: TypeScript
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: npm run typecheck
+      - name: Formatting
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: npm run format:check
+      - name: Catalog drift
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: node scripts/codegen.mjs --check
+      - name: All client tests and unchanged coverage gate
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: npx vitest run --coverage --coverage.reportOnFailure --maxWorkers=2 --reporter=default --reporter=json --outputFile=reports/gate-repair/unit.json --coverage.reporter=text-summary --coverage.reporter=json-summary --coverage.reportsDirectory=reports/gate-repair/coverage
+      - name: Production bundle
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: npx vite build
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: repaired-client-${{ matrix.os }}
+          path: reports/gate-repair/**
+
+  linux-browser:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ARTDADDY_E2E_SKIP_SIDECARS: whisper-cli,yt-dlp,artdaddy-browser
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm i --no-save @playwright/test@1.61.1
+      - run: npx playwright install --with-deps chromium webkit
+      - run: node scripts/fetch-sidecars.mjs --only ffmpeg,ffprobe
+      - name: Strict Linux Chromium and WebKit pixels
+        run: npx playwright test e2e/ui/rotation.spec.ts --project=chromium --project=webkit --workers=1 --reporter=list,json
+        env:
+          PLAYWRIGHT_JSON_OUTPUT_FILE: reports/gate-repair/rotation.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: repaired-linux-rotation
+          path: |
+            reports/gate-repair/**
+            test-results/**

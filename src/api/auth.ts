@@ -3,15 +3,21 @@
 // call. The app re-verifies against the server whenever Clerk's sign-in state
 // changes, so a signed-out user (or a revoked session) re-prompts.
 import { apiBase, onApiBaseChange } from "./config";
+import { settledWithin } from "../lib/settledWithin";
 
 type TokenProvider = () => Promise<string | null>;
 let clerkTokenProvider: TokenProvider | null = null;
+let authRevision = 0;
 
 /** Install Clerk's live token source. Cleanup cannot remove a newer provider. */
 export function setClerkTokenProvider(provider: TokenProvider | null): () => void {
+  authRevision++;
   clerkTokenProvider = provider;
   return () => {
-    if (clerkTokenProvider === provider) clerkTokenProvider = null;
+    if (clerkTokenProvider === provider) {
+      authRevision++;
+      clerkTokenProvider = null;
+    }
   };
 }
 
@@ -102,6 +108,49 @@ export async function fetchProfile(): Promise<Profile | null> {
   }
 }
 
+export interface ExportPolicy {
+  user_id: string;
+  watermark: boolean;
+  end_card: true;
+}
+
+export async function fetchExportPolicy(userId: string): Promise<ExportPolicy | null> {
+  if (!userId || !clerkTokenProvider) return null;
+  const base = apiBase();
+  const revision = authRevision;
+  const controller = new AbortController();
+  let sentToken: string | null = null;
+  const request = (async (): Promise<ExportPolicy | null> => {
+    const res = await authedFetch(
+      `${base}/exports/policy`,
+      { cache: "no-store", signal: controller.signal },
+      (url, init) => {
+        sentToken = new Headers(init.headers).get("Authorization")?.slice(7) ?? null;
+        return fetch(url, init);
+      },
+    );
+    if (!res.ok) return null;
+    const value: unknown = await res.json();
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+    const policy = value as Record<string, unknown>;
+    if (
+      policy.user_id !== userId ||
+      typeof policy.watermark !== "boolean" ||
+      policy.end_card !== true
+    )
+      return null;
+    const currentToken = await getAccessToken();
+    if (!sentToken || sentToken !== currentToken || revision !== authRevision || base !== apiBase())
+      return null;
+    return { user_id: userId, watermark: policy.watermark, end_card: true };
+  })();
+  try {
+    return await settledWithin(request, 3000, controller.signal);
+  } finally {
+    controller.abort();
+  }
+}
+
 // Mid-session revocation: any 401 from a live backend call re-locks the app. The
 // gate subscribes; request wrappers just call notifyAuthFailure() on a 401.
 type Listener = () => void;
@@ -115,6 +164,7 @@ export function onAuthFailure(fn: Listener): () => void {
 }
 
 export function notifyAuthFailure(): void {
+  authRevision++;
   for (const fn of [...listeners]) fn();
 }
 

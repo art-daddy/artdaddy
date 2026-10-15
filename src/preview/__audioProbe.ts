@@ -169,24 +169,30 @@ function probeTimeline(urls: MediaUrls): Timeline {
  *  beats sleeping on a guess, and beats adding an await hook to production for one test. */
 function trackAsync(): { settled: () => Promise<void> } {
   let pending = 0;
-  const wrap = <T extends (...a: never[]) => Promise<unknown>>(fn: T): T =>
+  let fetches = 0;
+  let decodes = 0;
+  const wrap = <T extends (...a: never[]) => Promise<unknown>>(
+    fn: T,
+    kind: "fetch" | "decode",
+  ): T =>
     function (this: unknown, ...args: never[]) {
+      if (kind === "fetch") fetches++;
+      else decodes++;
       pending++;
       return fn.apply(this, args).finally(() => pending--);
     } as T;
 
-  window.fetch = wrap(window.fetch.bind(window) as never) as typeof window.fetch;
+  window.fetch = wrap(window.fetch.bind(window) as never, "fetch") as typeof window.fetch;
   const proto = OfflineAudioContext.prototype as unknown as {
     decodeAudioData: (...a: never[]) => Promise<AudioBuffer>;
   };
-  proto.decodeAudioData = wrap(proto.decodeAudioData);
+  proto.decodeAudioData = wrap(proto.decodeAudioData, "decode");
 
   return {
     async settled() {
-      // Two consecutive idle turns: the fetch resolving is what STARTS the decode.
       for (let idle = 0; idle < 2;) {
         await new Promise((r) => setTimeout(r, 25));
-        idle = pending === 0 ? idle + 1 : 0;
+        idle = fetches >= 2 && decodes >= 2 && pending === 0 ? idle + 1 : 0;
       }
     },
   };

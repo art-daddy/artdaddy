@@ -27,6 +27,36 @@ export class MemFs implements FsLike {
   }
 }
 
+export class ExportMemFs extends MemFs {
+  async readBytes(p: string): Promise<Uint8Array> {
+    return new TextEncoder().encode(await this.readTextFile(p));
+  }
+  async probeMedia(p: string, headBytes: number) {
+    const bytes = await this.readBytes(p);
+    const digest = await crypto.subtle.digest("SHA-256", new Uint8Array(bytes));
+    const sha256 = Array.from(new Uint8Array(digest), (value) =>
+      value.toString(16).padStart(2, "0"),
+    ).join("");
+    return {
+      id12: sha256.slice(0, 12),
+      sha256,
+      size: bytes.length,
+      head: bytes.slice(0, headBytes),
+    };
+  }
+  async stat(p: string): Promise<{ isDirectory: boolean; size: number }> {
+    return { isDirectory: false, size: (await this.readBytes(p)).length };
+  }
+  async rename(from: string, to: string): Promise<void> {
+    const value = await this.readTextFile(from);
+    this.files.set(joinPath(to), value);
+    this.files.delete(joinPath(from));
+  }
+  async remove(p: string): Promise<void> {
+    this.files.delete(joinPath(p));
+  }
+}
+
 /** {@link MemFs} with what the app cache needs: a stat that knows when each file was written (a
  *  second apart), and the cache folder. Opt-in, so the suites built on MemFs keep testing the
  *  paths a filesystem without stat takes. */

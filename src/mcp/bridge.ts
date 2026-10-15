@@ -11,6 +11,7 @@ import { capToolResult } from "../agent/truncate";
 import { mcpInstructions } from "./instructions";
 import { mcpTools } from "./tools";
 import type { ToolTrace } from "../api/agentEvents";
+import { compatibilityAllowsWork } from "../update/compatibility";
 
 // Wire identifiers shared with Rust, not brand text: renaming one without the other
 // silently drops every request.
@@ -36,6 +37,7 @@ async function waitForDocument(id: string, ms = 15_000): Promise<boolean> {
   const { openDocumentById } = await import("../project/openDocuments");
   const deadline = Date.now() + ms;
   for (;;) {
+    if (!compatibilityAllowsWork()) return false;
     if (openDocumentById(id)) return true;
     if (Date.now() > deadline) return false;
     await new Promise((r) => setTimeout(r, 100));
@@ -46,11 +48,12 @@ async function waitForDocument(id: string, ms = 15_000): Promise<boolean> {
  *  lifecycle (it opens the editor, chat and tool host as one unit and closes them on the way
  *  out), so calling `projectDocuments.open` from here instead would create a SECOND lifecycle
  *  owner whose document the next route change would quietly close underneath the agent. */
-async function activateProject(id: string): Promise<boolean | "signed-out"> {
+async function activateProject(id: string): Promise<boolean | "signed-out" | "update-required"> {
   // That Shell only mounts once the auth gate is open. Waiting 15s for a document that cannot
   // appear would then report a routing problem, which is not what is wrong.
   const { isSignedOutGate } = await import("../store/auth");
   if (isSignedOutGate()) return "signed-out";
+  if (!compatibilityAllowsWork()) return "update-required";
   const route = `/p/${id}`;
   if (window.location.pathname !== route) {
     window.history.pushState({}, "", route);
@@ -76,6 +79,21 @@ function textResult(
   return { content: [{ type: "text", text }, ...extra], isError };
 }
 
+function compatibilityRefusal(): Record<string, unknown> | null {
+  return compatibilityAllowsWork()
+    ? null
+    : textResult(
+        {
+          ran: false,
+          reason:
+            "ArtDaddy must verify this build or install a required update before any tool can run.",
+          remedy:
+            "ask the user to finish the update/check in the app, then reconnect; do not retry tools now",
+        },
+        true,
+      );
+}
+
 async function listTools(): Promise<Record<string, unknown>> {
   return { tools: mcpTools() };
 }
@@ -86,6 +104,8 @@ async function manageProject(args: Record<string, unknown>): Promise<Record<stri
   const useProjects = await projects();
   const store = useProjects.getState();
   const action = String(args.action ?? "");
+  const refused = compatibilityRefusal();
+  if (refused) return refused;
   switch (action) {
     case "list": {
       await store.refresh();
@@ -116,6 +136,8 @@ async function manageProject(args: Record<string, unknown>): Promise<Record<stri
       const id = String(args.id ?? "");
       if (!id) return textResult("open requires 'id' (from action='list')", true);
       const ready = await activateProject(id);
+      const refused = compatibilityRefusal();
+      if (refused) return refused;
       if (ready === "signed-out")
         return textResult(
           {
@@ -155,6 +177,17 @@ async function manageProject(args: Record<string, unknown>): Promise<Record<stri
       // `create` only registers it on disk; opening is a separate act, and every timeline tool
       // needs the open document (`applyOp` refuses a bare store).
       const ready = await activateProject(summary.id);
+      if (ready === "update-required")
+        return textResult(
+          {
+            created: summary.id,
+            name: summary.name,
+            ready: false,
+            reason:
+              "The project was created, but ArtDaddy requires an update before it can be opened.",
+          },
+          true,
+        );
       return textResult({ created: summary.id, name: summary.name, ready });
     }
     default:
@@ -183,9 +216,13 @@ async function callTool(
   const { openToolHost } = await import("../tools/host");
   const host = openToolHost(activeId);
   await host.ready;
+  const refused = compatibilityRefusal();
+  if (refused) return refused;
   // A session that opened its project through the UI (or a previous call) already has a document;
   // one that never did would fail deep inside the mutation with a confusing store error.
   const ready = await activateProject(activeId);
+  const blocked = compatibilityRefusal();
+  if (blocked) return blocked;
   // manage_project already refused a gated app; every OTHER tool used to discard this and run
   // anyway, so a signed-out session got whatever error the tool happened to raise -- deep in the
   // store for a local edit, an HTTP 401 for a hosted one -- and an agent has no way to read
@@ -295,6 +332,8 @@ export async function dispatch(
   req: BridgeRequest,
   signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
+  const refused = compatibilityRefusal();
+  if (refused) return refused;
   // The gate belongs to the DOOR, not to each method: the socket binds at boot, outside the
   // AuthProvider gate, so a signed-out app still answers here. Refusing per method would leave
   // tools/list -- which needs no session to answer from the bundled catalog -- advertising a

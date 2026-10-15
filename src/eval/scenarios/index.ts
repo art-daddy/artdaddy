@@ -1,4 +1,5 @@
 import type { Scenario } from "../types";
+import { WITHDRAWN_TOOLS } from "../../contract/withdrawn";
 import { CANONICAL } from "./canonical";
 import { EFFECT_SCENARIOS } from "./effects";
 import { EXPORT_SCENARIOS, RECOVERY_SCENARIOS } from "./exports";
@@ -12,7 +13,7 @@ import { STUDIO_SCENARIOS } from "./studio";
  *  the model DID, since a wasted render is invisible in the final timeline), and the
  *  studio surface (the catalog outside the timeline verbs — research, vision,
  *  generation, project, library). Add entries to the matching file to grow it. */
-export const ALL_SCENARIOS: Scenario[] = [
+const scenarios: Scenario[] = [
   ...CANONICAL,
   ...EFFECT_SCENARIOS,
   ...REGRESSIONS,
@@ -21,3 +22,10 @@ export const ALL_SCENARIOS: Scenario[] = [
   ...RECOVERY_SCENARIOS,
   ...STUDIO_SCENARIOS,
 ];
+
+const withdrawn = new Set(WITHDRAWN_TOOLS);
+export const DISABLED_SCENARIOS = scenarios.filter((scenario) =>
+  scenario.expectTools?.some((name) => withdrawn.has(name)),
+);
+const disabled = new Set(DISABLED_SCENARIOS);
+export const ALL_SCENARIOS = scenarios.filter((scenario) => !disabled.has(scenario));

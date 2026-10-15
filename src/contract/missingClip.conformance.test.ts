@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import catalog from "./catalog.json";
-import { seededCtx } from "../test/timelineKit";
+import { MemFs, seededCtx } from "../test/timelineKit";
 import { createToolRegistry } from "../tools";
 import { loadTimeline } from "../timeline/engine";
+import { joinPath } from "../tools/store";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -19,6 +20,14 @@ type Any = any;
 // checks nothing was written: a refusal that half-applies is worse than one that is vague.
 
 const GONE = "clip_gone_7f3a";
+
+class StagingFs extends MemFs {
+  async rename(from: string, to: string): Promise<void> {
+    const contents = await this.readTextFile(from);
+    this.files.delete(joinPath(from));
+    this.files.set(joinPath(to), contents);
+  }
+}
 
 /** Minimal valid args per tool, each naming GONE wherever a clip id goes. */
 const CALLS: Record<string, Record<string, unknown>> = {
@@ -47,11 +56,7 @@ const CALLS: Record<string, Record<string, unknown>> = {
 const KNOWN_GAPS: Record<string, string> = {
   remove_clips: '"no matching clip ids" — does not say WHICH id',
   unlink_clips: '"no linked clips to unlink" — misleading: reads as "exists but not linked"',
-  get_transcript: "names the id, but no re-read hint",
-  inspect_media: "names the id, but no re-read hint",
   inspect_color: "names the id, but no re-read hint",
-  video_ask: "names the id, but no re-read hint",
-  video_find_moment: "names the id, but no re-read hint",
 };
 
 /** Tools whose schema names a clip id at any depth — read from the contract, not remembered. */
@@ -79,14 +84,17 @@ describe("every clip-id tool explains a missing clip actionably", () => {
   });
 
   const check = async (name: string, args: Record<string, unknown>) => {
-    const { ctx, store } = await seededCtx();
+    const fs = new StagingFs();
+    const { ctx, store } = await seededCtx(undefined, undefined, fs);
     const reg = createToolRegistry(() => ctx as Any) as Any;
     const before = JSON.stringify(await loadTimeline(store));
+    const filesBefore = [...fs.files.entries()];
 
     const r = (await reg.run(name, args)) as Any;
 
     // Nothing may be written whatever the message says.
     expect(JSON.stringify(await loadTimeline(store))).toBe(before);
+    expect([...fs.files.entries()]).toEqual(filesBefore);
     expect(r.ok, `${name} accepted a clip that does not exist`).toBe(false);
     const msg = String(r.error ?? "");
     expect(msg, `${name}: ${msg}`).toContain(GONE);
@@ -102,11 +110,14 @@ describe("every clip-id tool explains a missing clip actionably", () => {
   // The expected failures above must fail for the MESSAGE, never because a stale id slipped
   // through and wrote something.
   it.each(gaps)("KNOWN GAP %s still refuses and writes nothing", async (name, args) => {
-    const { ctx, store } = await seededCtx();
+    const fs = new StagingFs();
+    const { ctx, store } = await seededCtx(undefined, undefined, fs);
     const reg = createToolRegistry(() => ctx as Any) as Any;
     const before = JSON.stringify(await loadTimeline(store));
+    const filesBefore = [...fs.files.entries()];
     const r = (await reg.run(name, args)) as Any;
     expect(r.ok).toBe(false);
     expect(JSON.stringify(await loadTimeline(store))).toBe(before);
+    expect([...fs.files.entries()]).toEqual(filesBefore);
   });
 });

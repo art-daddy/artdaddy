@@ -7,6 +7,9 @@ import { readSSE } from "../api/sse";
 import { CreditLimitError, markOverLimit } from "../api/usage";
 import { hostInfo } from "../platform/host";
 import type { InferenceAttachment, RoundInput, RoundResultDTO } from "./types";
+import { catalogIdentity } from "../contract";
+import { ClientUpdateRequiredError } from "../update/updater";
+import { fetchCompatibleClient } from "../update/compatibility";
 
 async function postJson<T>(url: string, body: unknown, signal?: AbortSignal): Promise<T> {
   const res = await authedFetch(
@@ -19,6 +22,7 @@ async function postJson<T>(url: string, body: unknown, signal?: AbortSignal): Pr
     (u, init) => fetchWithRetry(u, init, signal),
   );
   if (!res.ok) {
+    if (res.status === 426) throw new ClientUpdateRequiredError();
     if (res.status === 401) notifyAuthFailure();
     const text = await res.text().catch(() => "");
     if (res.status === 401) throw new SessionExpiredError();
@@ -67,6 +71,7 @@ function withClientInfo(body: InferBody): InferBody & Record<string, unknown> {
   const { os, arch } = hostInfo();
   return {
     ...body,
+    catalog_id: catalogIdentity(),
     client_os: os,
     client_arch: arch,
     app_version: __ARTDADDY_RELEASE__,
@@ -188,15 +193,19 @@ async function streamRound(
   signal: AbortSignal,
   userSignal: AbortSignal | undefined,
 ): Promise<RoundResultDTO> {
-  const res = await authedFetch(api.inferenceStreamUrl(), {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "text/event-stream",
+  const res = await authedFetch(
+    api.inferenceStreamUrl(),
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+      },
+      body: JSON.stringify(withClientInfo(body)),
+      signal,
     },
-    body: JSON.stringify(withClientInfo(body)),
-    signal,
-  });
+    fetchCompatibleClient,
+  );
 
   if (res.status === 404 || res.status === 405) {
     // An older server. Nothing ran, so re-issuing the round is free and correct -- and it
@@ -205,6 +214,7 @@ async function streamRound(
     return inferRound(body, userSignal);
   }
   if (!res.ok) {
+    if (res.status === 426) throw new ClientUpdateRequiredError();
     if (res.status === 401) notifyAuthFailure();
     const text = await res.text().catch(() => "");
     if (res.status === 401) throw new SessionExpiredError();

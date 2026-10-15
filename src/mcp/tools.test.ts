@@ -6,6 +6,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { setContract } from "../contract";
+import canonical from "../contract/catalog.json";
 import { MANAGE_PROJECT, mcpTools } from "./tools";
 
 const CATALOG = {
@@ -24,6 +25,7 @@ const CATALOG = {
     // A tool the contract gives no `parameters` for at all.
     { name: "get_timeline", description: "Read the timeline.", expensive: false },
     { name: "generate_image", description: "Generate an image.", expensive: true },
+    canonical.tools.find((tool) => tool.name === "manage_project")!,
   ],
 };
 
@@ -60,7 +62,7 @@ describe("mcp tool list", () => {
     expect(t?.inputSchema.properties).toEqual({});
   });
 
-  it("adds manage_project, which has no contract entry", () => {
+  it("offers the canonical MCP-only project definition", () => {
     // The one tool that exists only for MCP: an external session has no window to click in.
     expect(mcpTools().map((t) => t.name)).toContain("manage_project");
     expect(MANAGE_PROJECT.inputSchema.required).toContain("action");
@@ -79,10 +81,16 @@ describe("mcp tool list", () => {
     expect(after.map((t) => t.name)).toContain("brand_new_tool");
   });
 
-  it("is empty of contract tools before the contract loads", () => {
-    // Not a bug, a documented state: the bundled snapshot has no descriptions or schemas, so the
-    // list is only worth announcing once the live contract has arrived.
+  it("does not retain a phantom project tool when the catalog is empty", () => {
     setContract({ version: "", tools: [] });
-    expect(mcpTools()).toEqual([MANAGE_PROJECT]);
+    expect(mcpTools()).toEqual([]);
+  });
+
+  it("never advertises withdrawn definitions even when their metadata is retained", () => {
+    setContract(canonical);
+    const offered = new Set(mcpTools().map((tool) => tool.name));
+    const withdrawn = canonical.tools.filter((tool) => tool.status === "withdrawn");
+    expect(withdrawn.length).toBeGreaterThan(0);
+    for (const tool of withdrawn) expect(offered.has(tool.name)).toBe(false);
   });
 });

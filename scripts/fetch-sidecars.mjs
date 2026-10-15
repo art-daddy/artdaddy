@@ -24,7 +24,7 @@ import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { describeGhFailure, ffmpegPin, isPinnedBuild, stalePaths, verifySha256 } from "./sidecarStaging.mjs";
-import { checkWhisper } from "./smoke-whisper.mjs";
+import { checkWhisper, verifyWhisperUnicodeProof } from "./smoke-whisper.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const binariesDir = join(here, "..", "src-tauri", "binaries");
@@ -168,7 +168,7 @@ async function fetchFfmpeg() {
 // accounts does not need a code change — getting it wrong is invisible at runtime, because the
 // download just fails and the app falls back to a slower CPU build.
 const WHISPER_VULKAN_REPO = process.env.ARTDADDY_WHISPER_VULKAN_REPO ?? "art-daddy/artdaddy";
-const WHISPER_VULKAN_TAG = "whisper-vulkan-v1.9.2-sdk1.4.357.0-b2";
+const WHISPER_VULKAN_TAG = "whisper-vulkan-v1.9.2-sdk1.4.357.0-b3";
 const WHISPER_VULKAN_ASSET = "whisper-vulkan-win-x64.zip";
 const WHISPER_UPSTREAM_TAG = "v1.9.2";
 
@@ -216,25 +216,9 @@ async function fetchWhisper() {
     WHISPER_VULKAN_ASSET,
     join(tmp, "whisper-gh"),
   );
-  if (vulkan.file) {
-    extract(vulkan.file, out);
-  } else {
-    // Loud, never silent: a CPU-only whisper still transcribes, so the ONLY symptom is that
-    // it takes minutes instead of seconds — indistinguishable from "whisper is just slow".
-    console.warn(
-      `  whisper-cli: could not fetch the Vulkan build (${WHISPER_VULKAN_TAG}):\n` +
-        `    ${vulkan.reason}\n` +
-        "    Falling back to upstream's CPU-ONLY zip: transcription will work, WITHOUT GPU\n" +
-        "    acceleration, with no symptom other than being several times slower.",
-    );
-    extract(
-      await download(
-        `https://github.com/ggml-org/whisper.cpp/releases/download/${WHISPER_UPSTREAM_TAG}/whisper-bin-x64.zip`,
-        join(tmp, "whisper.zip"),
-      ),
-      out,
-    );
-  }
+  if (!vulkan.file)
+    throw new Error(`Unicode-safe whisper build ${WHISPER_VULKAN_TAG} is unavailable: ${vulkan.reason}. Refusing an upstream fallback without the Windows path fixes.`);
+  extract(vulkan.file, out);
   // The release zip ALSO ships whisper.cpp's DEPRECATION SHIMS (the retired
   // `main.exe`, plus copies under examples/deprecation-warning/): tiny stubs that
   // print "this binary is deprecated" and exit 1. Accepting `main.exe` staged one
@@ -247,7 +231,11 @@ async function fetchWhisper() {
   if (!candidates.length)
     throw new Error("whisper-cli.exe not found in the release zip (only deprecation shims?)");
   const exe = candidates[0];
+  const unicodeProof = findFile(out, (name) => name === "whisper-unicode-proof.json");
+  if (!unicodeProof) throw new Error("whisper build has no native Unicode-path proof");
+  verifyWhisperUnicodeProof(exe, join(dirname(exe), "whisper.dll"), unicodeProof);
   stage("whisper-cli", exe);
+  copyFileSync(unicodeProof, `${staged("whisper-cli")}.unicode.json`);
   // The Windows whisper.cpp release is a DYNAMIC build: whisper-cli.exe cannot
   // load without its sibling runtime DLLs (ggml*.dll, whisper.dll, …). Ship them
   // as a bundled RESOURCE (resources/whisper/); the runner points whisper-cli's
@@ -419,6 +407,8 @@ async function main() {
       // A staged ffmpeg from before the pin (or an older pin) is replaced, never kept.
       if (key === "ffmpeg" && nativeBuild && !stagedFfmpegIsPinned()) {
         console.log(`  ${key} is staged but is not the pinned ${ffmpegPin(triple).version}; refetching`);
+      } else if (key === "whisper-cli" && osName === "win" && !existsSync(`${staged("whisper-cli")}.unicode.json`)) {
+        console.log("  whisper-cli lacks Unicode-path proof; refetching the corrected artifact");
       } else {
         console.log(`  skip ${key} (already staged; --force to refetch)`);
         continue;
@@ -505,6 +495,7 @@ async function main() {
       // ENSURE, not just check: fetchWhisper() is skipped whenever the exe is already staged,
       // so a checkout that predates this would otherwise never gain the runtime it needs.
       stageVcRuntime();
+      verifyWhisperUnicodeProof(staged("whisper-cli"), join(whisperResDir, "whisper.dll"), `${staged("whisper-cli")}.unicode.json`);
       const have = new Set(readdirSync(whisperResDir).map((n) => n.toLowerCase()));
       const missing = VC_RUNTIME_DLLS.filter((n) => !have.has(n));
       if (missing.length) {

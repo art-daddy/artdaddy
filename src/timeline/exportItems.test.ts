@@ -4,8 +4,10 @@
 // zip of the project. These drive the real tool door (the registry's `export`) on an in-memory
 // disk and judge what lands there, what the queue reports and what wakes the agent.
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 
 vi.mock("@tauri-apps/api/path", () => ({ resolveResource: async (r: string) => `C:/res/${r}` }));
+vi.mock("../api/exportEvents", () => ({ reportExport: async () => undefined }));
 
 import { MemFs, registerTestDocument, resetTestDocuments } from "../test/timelineKit";
 import { ensureTimeline } from "./engine";
@@ -19,6 +21,8 @@ import { exportTool } from "./exportItems";
 import { addClipsTool, addTextClipsTool } from "./placement";
 import { ProjectStoreAccess, joinPath } from "../tools/store";
 import { __resetJobNotes, pendingJobNotes } from "../store/jobNotes";
+import { setClerkTokenProvider } from "../api/auth";
+import { useAuth } from "../store/auth";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -32,6 +36,9 @@ afterEach(async () => {
   __resetExportQueue();
   __resetJobNotes();
   await resetTestDocuments();
+  setClerkTokenProvider(null);
+  useAuth.setState({ status: "checking", profile: null });
+  vi.unstubAllGlobals();
 });
 
 /** An in-memory disk with the operations an export uses, and a gate to hold a copy mid-way. */
@@ -39,6 +46,19 @@ class Disk extends MemFs {
   dirs = new Set<string>();
   gates = new Map<string, Promise<void>>();
   failCopy = new Set<string>();
+  async readBytes(p: string): Promise<Uint8Array> {
+    return new TextEncoder().encode(await this.readTextFile(p));
+  }
+  async probeMedia(p: string, headBytes: number) {
+    const bytes = await this.readBytes(p);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    return {
+      id12: sha256.slice(0, 12),
+      sha256,
+      size: bytes.length,
+      head: bytes.slice(0, headBytes),
+    };
+  }
   async mkdir(p?: string): Promise<void> {
     if (p) this.dirs.add(joinPath(p));
   }
@@ -124,6 +144,55 @@ async function project(
   const hold: Setup["hold"] = { gate: null };
   const runner = {
     run: async (program: string, args: string[]) => {
+      if (program === "ffprobe" && args.includes("stream=codec_type,duration:format=duration")) {
+        const command = ffmpeg.find((command) => command.at(-1) === args.at(-1));
+        const graph = command?.[command.indexOf("-filter_complex") + 1] ?? "";
+        const main = Number(
+          /color=(?:c=)?[^:;]+:s=\d+x\d+:r=[\d.]+:d=([\d.]+)/.exec(graph)?.[1] ?? 8,
+        );
+        const duration = main + 2.033;
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            streams: [
+              { codec_type: "video", duration: String(duration) },
+              ...(command?.includes("-an")
+                ? []
+                : [{ codec_type: "audio", duration: String(duration) }]),
+            ],
+            format: { duration: String(duration) },
+          }),
+          stderr: "",
+        };
+      }
+      if (program === "ffprobe" && args.includes("-count_frames")) {
+        const command = ffmpeg.find((command) => command.at(-1) === args.at(-1));
+        const graph = command?.[command.indexOf("-filter_complex") + 1] ?? "";
+        const canvas = /color=(?:c=)?[^:;]+:s=(\d+)x(\d+):r=([\d.]+):d=([\d.]+)/.exec(graph);
+        const fps = Number(command?.[command.indexOf("-r") + 1] ?? canvas?.[3] ?? 30);
+        const duration = command?.includes("-shortest")
+          ? Number(canvas?.[4] ?? 0) + 2.033
+          : command?.includes("-t")
+            ? Number(command[command.lastIndexOf("-t") + 1])
+            : Number(canvas?.[4] ?? 0);
+        const frames = Math.ceil(duration * fps - 1e-6);
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            streams: [
+              {
+                codec_type: "video",
+                width: Number(canvas?.[1] ?? 1920),
+                height: Number(canvas?.[2] ?? 1080),
+                avg_frame_rate: `${fps}/1`,
+                nb_read_frames: String(frames),
+                duration: String(frames / fps),
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
       if (program === "ffprobe" && args.includes("format=duration"))
         // The brand end card measures 2.033 s; library media is long enough for the clips placed
         // on it (a clip is never placed longer than its media).
@@ -165,6 +234,49 @@ async function project(
 }
 
 describe("export delivers separate files into a folder", () => {
+  it.each([false, true])(
+    "uses the account policy for timeline clips, including agent exports: %s",
+    async (origin) => {
+      setClerkTokenProvider(async () => "account-token");
+      useAuth.setState({
+        status: "unlocked",
+        profile: {
+          user_id: "user_exempt",
+          email: "",
+          display_name: "",
+          image_url: "",
+          metered: true,
+        },
+      });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(
+          async () =>
+            new Response(
+              JSON.stringify({
+                user_id: "user_exempt",
+                watermark: false,
+                end_card: true,
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            ),
+        ),
+      );
+      const setup = await project({ origin });
+      const reply = (await exportTool(
+        { clip_ids: [setup.clips.a, setup.clips.b], output_dir: "clean clips" },
+        setup.ctx,
+      )) as Any;
+      expect(reply.ok).toBe(true);
+      await whenExportsSettle();
+      expect(Object.keys(setup.disk.under(`${DL}/clean clips`))).toHaveLength(2);
+      expect(setup.ffmpeg).toHaveLength(2);
+      for (const args of setup.ffmpeg)
+        expect(args.some((arg) => /watermark-|endcard-/.test(arg))).toBe(false);
+      expect(String(reply.note)).not.toMatch(/carries the ArtDaddy watermark/i);
+    },
+  );
+
   it("copies library files byte for byte into a folder made in Downloads, numbered as asked", async () => {
     const p = await project();
     const r = (await exportTool(
@@ -424,6 +536,10 @@ describe("export delivers separate files into a folder", () => {
     expect(r.ok, r.error).toBe(true);
     expect(r.saved_to).toBe("proj.mp4");
     await whenExportsSettle();
+    const outcome = listExportOutcomes().find((outcome) => outcome.job_id === r.job_id);
+    expect(outcome?.state, String(outcome?.error ?? "whole timeline delivery outcome")).toBe(
+      "done",
+    );
     expect(Object.keys(p.disk.under(`${DL}/renders`))).toEqual(["proj.mp4"]);
   });
 

@@ -43,7 +43,11 @@ export function mapRequests(reqs: TranscriptRequest[]): Turn[] {
     ...(r.message?.timeline_changed ? { timelineChanged: true } : {}),
     parts: r.response ?? [],
     // Written while the turn had not ended, and never rewritten: a reload or a crash cut it short.
-    status: (r.unfinished ? "interrupted" : "done") as TurnStatus,
+    status: (r.unfinished
+      ? "interrupted"
+      : r.response?.at(-1)?.kind === "error"
+        ? "error"
+        : "done") as TurnStatus,
     checkpoint: (r.checkpoint?.timeline as Timeline | undefined) ?? null,
     timelineAfter: (r.checkpoint?.timeline_after as Timeline | undefined) ?? null,
     undone: r.undone ?? false,

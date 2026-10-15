@@ -13,12 +13,37 @@ import { existsSync, promises as fsp } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 
-import { brandRatio, endcardFile, watermarkFile } from "./branding";
+import { brandRatio, endcardFile, watermarkFile, type Branding } from "./branding";
 import type { Timeline } from "./model";
-import { buildRenderCommand } from "./render";
+import { buildRenderCommand, exportBranding, finishRenderJob } from "./render";
 import { shippedSidecar } from "../test/sidecars";
+import { meanVolumeDb, mkCtx, nodeFs } from "../tools/__e2e";
+import { setClerkTokenProvider } from "../api/auth";
+import { useAuth } from "../store/auth";
+
+vi.mock("@tauri-apps/api/path", () => ({
+  resolveResource: async (resource: string) => path.resolve(process.cwd(), "src-tauri", resource),
+}));
+vi.mock("../tools/dataRoot", async (original) => ({
+  ...(await original<typeof import("../tools/dataRoot")>()),
+  appCacheRoot: async () => nodeFs.cacheDir!(),
+}));
+vi.mock("../tools/tauri", async (original) => ({
+  ...(await original<typeof import("../tools/tauri")>()),
+  TauriFs: class {
+    constructor() {
+      return nodeFs;
+    }
+  },
+}));
+
+afterEach(() => {
+  setClerkTokenProvider(null);
+  useAuth.setState({ status: "checking", profile: null });
+  vi.unstubAllGlobals();
+});
 
 const FF = shippedSidecar("ffmpeg");
 const FP = shippedSidecar("ffprobe");
@@ -117,18 +142,18 @@ const DUR = 2;
 
 /** Mid-grey footage: the watermark is pure white and the end card is near-black, so both
  *  changes move luma in an unambiguous direction from here. */
-async function source(cwd: string): Promise<string> {
+async function source(cwd: string, duration = DUR): Promise<string> {
   const src = path.join(cwd, "src.mp4");
   const r = await run(FF!, [
     "-y",
     "-f",
     "lavfi",
     "-i",
-    `color=c=gray:s=${W}x${H}:r=30:d=${DUR}`,
+    `color=c=gray:s=${W}x${H}:r=30:d=${duration}`,
     "-f",
     "lavfi",
     "-i",
-    `sine=frequency=440:sample_rate=48000:duration=${DUR}`,
+    `sine=frequency=440:sample_rate=48000:duration=${duration}`,
     "-pix_fmt",
     "yuv420p",
     "-c:a",
@@ -140,9 +165,14 @@ async function source(cwd: string): Promise<string> {
   return src;
 }
 
-function timeline(src: string, withAudio = false): Timeline {
+function timeline(
+  src: string,
+  withAudio = false,
+  canvas = { width: W, height: H },
+  duration = DUR,
+): Timeline {
   return {
-    canvas: { width: W, height: H, fps: 30 },
+    canvas: { ...canvas, fps: 30 },
     tracks: [
       {
         id: "v0",
@@ -153,9 +183,9 @@ function timeline(src: string, withAudio = false): Timeline {
             id: "a",
             media_ref: src,
             source_in: 0,
-            source_out: DUR,
+            source_out: duration,
             timeline_in: 0,
-            timeline_out: DUR,
+            timeline_out: duration,
           },
         ],
       },
@@ -171,9 +201,9 @@ function timeline(src: string, withAudio = false): Timeline {
                   kind: "audio",
                   media_ref: src,
                   source_in: 0,
-                  source_out: DUR,
+                  source_out: duration,
                   timeline_in: 0,
-                  timeline_out: DUR,
+                  timeline_out: duration,
                 },
               ],
             },
@@ -188,19 +218,26 @@ async function render(
   src: string,
   branded: boolean,
   tag: string,
-  opts: { withAudio?: boolean; endcard?: string } = {},
+  opts: {
+    withAudio?: boolean;
+    endcard?: string;
+    branding?: Branding;
+    canvas?: { width: number; height: number };
+  } = {},
 ): Promise<string> {
   const out = path.join(cwd, `${tag}.mp4`);
   const ratio = brandRatio(W, H);
   const endcard = opts.endcard ?? path.join(BRAND_DIR, endcardFile(ratio));
-  const plan = buildRenderCommand(timeline(src, opts.withAudio), out, {
-    branding: branded
-      ? {
-          watermark: path.join(BRAND_DIR, watermarkFile(ratio)),
-          endcard,
-          endcardDuration: await durationOf(endcard),
-        }
-      : undefined,
+  const plan = buildRenderCommand(timeline(src, opts.withAudio, opts.canvas), out, {
+    branding:
+      opts.branding ??
+      (branded
+        ? {
+            watermark: path.join(BRAND_DIR, watermarkFile(ratio)),
+            endcard,
+            endcardDuration: await durationOf(endcard),
+          }
+        : undefined),
   });
   const r = await run(FF!, plan.args, cwd);
   expect(r.code, `ffmpeg failed: ${r.stderr.slice(-800)}`).toBe(0);
@@ -247,6 +284,301 @@ function artBox(px: Buffer, w: number, h: number) {
 }
 
 describe.skipIf(!FF || !FP)("branded export (real ffmpeg)", () => {
+  it.each([12, 24, 25, 30, 60])(
+    "delivers every planned end-card frame with and without audio at %i fps",
+    async (fps) => {
+      const cwd = await scratch();
+      const src = await source(cwd, 4.5);
+      const endcard = path.join(BRAND_DIR, endcardFile("16x9"));
+      const frameCounts: number[] = [];
+      for (const withAudio of [false, true]) {
+        const file = path.join(cwd, `complete-${fps}-${withAudio}.mp4`);
+        const plan = buildRenderCommand(
+          timeline(src, withAudio, { width: 320, height: 180 }, 4.5),
+          file,
+          {
+            fps,
+            branding: {
+              watermark: path.join(BRAND_DIR, watermarkFile("16x9")),
+              endcard,
+              endcardDuration: await durationOf(endcard),
+            },
+          },
+        );
+        const encoded = await run(FF!, plan.args, cwd);
+        expect(encoded.code, encoded.stderr.slice(-800)).toBe(0);
+        const accepted = await finishRenderJob(mkCtx(cwd), { plan, stagePath: file }, encoded);
+        expect(accepted.ok, JSON.stringify(accepted)).toBe(true);
+        const counted = await run(FP!, [
+          "-v",
+          "error",
+          "-count_frames",
+          "-select_streams",
+          "v:0",
+          "-show_entries",
+          "stream=nb_read_frames",
+          "-of",
+          "csv=p=0",
+          file,
+        ]);
+        expect(counted.code, counted.stderr).toBe(0);
+        frameCounts.push(Number(counted.stdout.trim()));
+        if (fps === 30) expect(frameCounts.at(-1)).toBe(196);
+        if (withAudio) {
+          const durations = await streamDurations(file);
+          expect(Number.isFinite(durations.audio)).toBe(true);
+          expect(Math.abs(durations.video - durations.audio)).toBeLessThanOrEqual(1 / fps);
+          expect(await meanVolumeDb(file, { ss: 0.5, dur: 0.5 })).toBeGreaterThan(-30);
+          expect(await meanVolumeDb(file, { ss: 5.25, dur: 0.5 })).toBeLessThan(-65);
+        }
+      }
+      expect(frameCounts[1]).toBe(frameCounts[0]);
+    },
+    60_000,
+  );
+
+  it("bounds a capped branded export and pads only the card's sound", async () => {
+    const cwd = await scratch();
+    const src = await source(cwd, 4.5);
+    const endcard = path.join(BRAND_DIR, endcardFile("16x9"));
+    const file = path.join(cwd, "capped-complete.mp4");
+    const plan = buildRenderCommand(timeline(src, true, { width: 320, height: 180 }, 4.5), file, {
+      maxDurationSec: 1.5,
+      branding: { watermark: null, endcard, endcardDuration: await durationOf(endcard) },
+    });
+    const encoded = await run(FF!, plan.args, cwd);
+    const accepted = await finishRenderJob(mkCtx(cwd), { plan, stagePath: file }, encoded);
+    expect(accepted.ok, JSON.stringify(accepted)).toBe(true);
+    expect(await durationOf(file)).toBeCloseTo(106 / 30, 2);
+    expect(await meanVolumeDb(file, { ss: 0.5, dur: 0.25 })).toBeGreaterThan(-30);
+    expect(await meanVolumeDb(file, { ss: 2, dur: 0.25 })).toBeLessThan(-65);
+  }, 60_000);
+
+  it("does not conceal an end card that is genuinely shorter than its plan", async () => {
+    const cwd = await scratch();
+    const src = await source(cwd);
+    const endcard = path.join(BRAND_DIR, endcardFile("16x9"));
+    const file = path.join(cwd, "short-card.mp4");
+    const plan = buildRenderCommand(timeline(src, true, { width: 320, height: 180 }), file, {
+      branding: { watermark: null, endcard, endcardDuration: (await durationOf(endcard)) + 1 },
+    });
+    const encoded = await run(FF!, plan.args, cwd);
+    expect(encoded.code, encoded.stderr.slice(-800)).toBe(0);
+    const accepted = await finishRenderJob(mkCtx(cwd), { plan, stagePath: file }, encoded);
+    expect(accepted.ok).toBe(false);
+    expect(String(accepted.error)).toContain("rendered video failed validation");
+  }, 60_000);
+
+  it.each([
+    { width: 640, height: 360 },
+    { width: 480, height: 480 },
+    { width: 360, height: 640 },
+  ])(
+    "a fresh account exemption removes only corner pixels at $width x $height",
+    async (canvas) => {
+      const cwd = await scratch();
+      const src = await source(cwd);
+      setClerkTokenProvider(async () => "account-token");
+      useAuth.setState({
+        status: "unlocked",
+        profile: {
+          user_id: "user_exempt",
+          email: "",
+          display_name: "",
+          image_url: "",
+          metered: true,
+        },
+      });
+      let watermark = true;
+      const send = vi.fn(async (url: string) => {
+        expect(new URL(url).pathname).toBe("/exports/policy");
+        return new Response(JSON.stringify({ user_id: "user_exempt", watermark, end_card: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      });
+      vi.stubGlobal("fetch", send);
+      const assets = { exists: async (file: string) => existsSync(file) };
+      const runner = {
+        run: async (program: string, args: string[]) =>
+          run(program === "ffprobe" ? FP! : FF!, args),
+      };
+      const ordinary = await exportBranding(assets, runner, canvas);
+      expect(ordinary.branding).not.toBeNull();
+      const baseline = await render(cwd, src, true, "ordinary", {
+        branding: ordinary.branding!,
+        canvas,
+        withAudio: true,
+      });
+      watermark = false;
+      const exempt = await exportBranding(assets, runner, canvas);
+      expect(exempt.branding).not.toBeNull();
+      const clean = await render(cwd, src, true, "exempt", {
+        branding: exempt.branding!,
+        canvas,
+        withAudio: true,
+      });
+      watermark = true;
+      const restored = await exportBranding(assets, runner, canvas);
+      const revoked = await render(cwd, src, true, "revoked", {
+        branding: restored.branding!,
+        canvas,
+        withAudio: true,
+      });
+      const plain = await render(cwd, src, false, "plain-exempt", { canvas });
+      const width = Math.round(canvas.width * 0.35);
+      const height = Math.round(canvas.height * 0.2);
+      const corner = `crop=${width}:${height}:${canvas.width - width}:${canvas.height - height}`;
+      const normalCorner = await lumaAt(baseline, DUR / 2, corner);
+      const cleanCorner = await lumaAt(clean, DUR / 2, corner);
+      expect(normalCorner - cleanCorner).toBeGreaterThan(2);
+      expect(cleanCorner).toBeCloseTo(await lumaAt(plain, DUR / 2, corner), 0);
+      expect(await lumaAt(revoked, DUR / 2, corner)).toBeCloseTo(normalCorner, 0);
+      const total = await durationOf(clean);
+      expect(total).toBeCloseTo(await durationOf(baseline), 1);
+      expect(total).toBeGreaterThan(DUR + 1);
+      const center = `crop=${canvas.width}:${Math.round(canvas.height * 0.15)}:0:${Math.round(canvas.height * 0.425)}`;
+      expect(
+        Math.abs(
+          (await lumaAt(clean, DUR / 2, center)) - (await lumaAt(clean, DUR + (total - DUR) / 2)),
+        ),
+      ).toBeGreaterThan(20);
+      const streams = await streamDurations(clean);
+      expect(Math.abs(streams.audio - streams.video)).toBeLessThan(0.2);
+      const clip = await render(cwd, src, true, "clip-exempt", {
+        branding: { ...exempt.branding!, endcard: null, endcardDuration: 0 },
+        canvas,
+      });
+      expect(await durationOf(clip)).toBeCloseTo(DUR, 1);
+      expect(await lumaAt(clip, DUR / 2, corner)).toBeCloseTo(
+        await lumaAt(plain, DUR / 2, corner),
+        0,
+      );
+      expect(send).toHaveBeenCalledTimes(3);
+    },
+    180_000,
+  );
+
+  it.each([
+    { width: 640, height: 360 },
+    { width: 480, height: 480 },
+    { width: 360, height: 640 },
+  ])(
+    "recovers real branded pixels and retains an exempt end card at $width x $height",
+    async (canvas) => {
+      const cwd = await scratch();
+      const src = await source(cwd);
+      const cache = await nodeFs.cacheDir!();
+      await nodeFs.remove!(path.join(cache, "branding"));
+      setClerkTokenProvider(async () => "recovery-token");
+      useAuth.setState({
+        status: "unlocked",
+        profile: {
+          user_id: "recovery",
+          email: "",
+          display_name: "",
+          image_url: "",
+          metered: true,
+        },
+      });
+      let watermark = true;
+      const requested: string[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: string) => {
+          const pathname = new URL(url).pathname;
+          if (pathname === "/exports/policy")
+            return new Response(
+              JSON.stringify({ user_id: "recovery", watermark, end_card: true }),
+              {
+                headers: { "Content-Type": "application/json" },
+              },
+            );
+          expect(pathname).toMatch(
+            /^\/exports\/branding\/v1\/(?:endcard|watermark)-(?:16x9|1x1|9x16)\.(?:mp4|png)$/,
+          );
+          const name = pathname.split("/").at(-1)!;
+          requested.push(name);
+          return new Response(await fsp.readFile(path.join(BRAND_DIR, name)));
+        }),
+      );
+      const runner = {
+        run: async (program: string, args: string[]) =>
+          run(program === "ffprobe" ? FP! : FF!, args),
+      };
+      const recovered = await exportBranding({ exists: async () => false }, runner, canvas);
+      expect(recovered.warning).toBeUndefined();
+      expect(path.relative(cache, recovered.branding!.watermark!)).toBe(
+        path.join("branding", "v1", watermarkFile(brandRatio(canvas.width, canvas.height))),
+      );
+      expect(path.relative(cache, recovered.branding!.endcard!)).toBe(
+        path.join("branding", "v1", endcardFile(brandRatio(canvas.width, canvas.height))),
+      );
+      const ordinary = await render(cwd, src, true, "recovered", {
+        branding: recovered.branding!,
+        canvas,
+        withAudio: true,
+      });
+      watermark = false;
+      const exempt = await exportBranding({ exists: async () => false }, runner, canvas);
+      expect(exempt.warning).toBeUndefined();
+      expect(exempt.branding?.watermark).toBeNull();
+      expect(requested).toEqual([
+        endcardFile(brandRatio(canvas.width, canvas.height)),
+        watermarkFile(brandRatio(canvas.width, canvas.height)),
+      ]);
+      const clean = await render(cwd, src, true, "recovered-exempt", {
+        branding: exempt.branding!,
+        canvas,
+        withAudio: true,
+      });
+      const plain = await render(cwd, src, false, "recovery-plain", { canvas, withAudio: true });
+      const width = Math.round(canvas.width * 0.35),
+        height = Math.round(canvas.height * 0.2);
+      const corner = `crop=${width}:${height}:${canvas.width - width}:${canvas.height - height}`;
+      expect(
+        (await lumaAt(ordinary, DUR / 2, corner)) - (await lumaAt(clean, DUR / 2, corner)),
+      ).toBeGreaterThan(2);
+      expect(await lumaAt(clean, DUR / 2, corner)).toBeCloseTo(
+        await lumaAt(plain, DUR / 2, corner),
+        0,
+      );
+      expect(await durationOf(clean)).toBeCloseTo(await durationOf(ordinary), 2);
+      expect(await durationOf(clean)).toBeGreaterThan(DUR + 1);
+      const center = `crop=${canvas.width}:${Math.round(canvas.height * 0.15)}:0:${Math.round(canvas.height * 0.425)}`;
+      expect(
+        Math.abs((await lumaAt(clean, DUR / 2, center)) - (await lumaAt(clean, DUR + 1, center))),
+      ).toBeGreaterThan(20);
+      expect(await meanVolumeDb(clean, { ss: 0.25, dur: 0.5 })).toBeGreaterThan(-30);
+      const streams = await streamDurations(clean);
+      expect(Math.abs(streams.audio - streams.video)).toBeLessThan(0.2);
+    },
+    120000,
+  );
+
+  it("continues rendering after exhausted branding recovery with an explicit warning", async () => {
+    const cwd = await scratch();
+    const src = await source(cwd);
+    await nodeFs.remove!(path.join(await nodeFs.cacheDir!(), "branding"));
+    const request = vi.fn(async () => new Response("unavailable", { status: 503 }));
+    vi.stubGlobal("fetch", request);
+    const result = await exportBranding(
+      { exists: async () => false },
+      {
+        run: async (program, args) => run(program === "ffprobe" ? FP! : FF!, args),
+      },
+      { width: W, height: H },
+    );
+    expect(result.branding).toBeNull();
+    expect(result.warning).toContain("exported unbranded");
+    expect(request).toHaveBeenCalledTimes(4);
+    const output = await render(cwd, src, false, "fallback", { withAudio: true });
+    expect(await durationOf(output)).toBeCloseTo(DUR, 2);
+    expect(await lumaAt(output, 0.5)).toBeCloseTo(await lumaAt(src, 0.5), 0);
+    expect(await lumaAt(output, 1.5)).toBeCloseTo(await lumaAt(src, 1.5), 0);
+    expect(await meanVolumeDb(output, { ss: 0.25, dur: 0.5 })).toBeGreaterThan(-30);
+  }, 60000);
+
   it("ships an app icon that fills its box and still has a lion in it", async () => {
     // Two ways this icon has already been wrong: line art so thin it read as a smudge at
     // taskbar size, and dead margin from the master's empty gutters. Filling the box fixes

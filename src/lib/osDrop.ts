@@ -11,6 +11,7 @@
 // Targets declare themselves with `data-artdaddy-drop="<id>"` rather than registering handlers, so
 // hit-testing is one lookup and the target is whatever is under the cursor at drop time.
 import { platform } from "../platform";
+import { compatibilityAllowsWork } from "../update/compatibility";
 
 export interface OsDrop {
   paths: string[];
@@ -70,6 +71,7 @@ export async function startOsDropRouter(): Promise<() => void> {
     return () => {};
   }
   const un = await webview.onDragDropEvent((e) => {
+    if (!compatibilityAllowsWork()) return;
     const payload = e.payload as {
       type: string;
       paths?: string[];
@@ -96,6 +98,7 @@ export async function startOsDropRouter(): Promise<() => void> {
 /** Subscribe to routed OS drops. `target` filters on the zone's `data-artdaddy-drop`. */
 export function onOsDrop(target: string, fn: (d: OsDrop) => void): () => void {
   const h = (e: Event) => {
+    if (!compatibilityAllowsWork()) return;
     const d = (e as CustomEvent<OsDrop>).detail;
     if (d.target === target) fn(d);
   };

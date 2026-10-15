@@ -678,14 +678,19 @@ describe("client tools E2E (real binaries)", () => {
         { url, output_name: "dl.mp4", start_s: 1, end_s: 3 },
         ctx,
       )) as Rec;
-      expect(dl.ok).toBe(true);
-      expect(await nodeFs.exists(dl.path as string)).toBe(true);
+      expect(dl.ok, JSON.stringify(dl)).toBe(true);
+      const downloadedPath = await ctx.store.resolveRef(String(dl.media_ref));
+      expect(downloadedPath).toBeTruthy();
+      expect((await fsp.stat(downloadedPath ?? "")).size).toBeGreaterThan(0);
+      const downloaded = (await probeMediaTool({ media_ref: dl.media_ref }, ctx)) as Rec;
+      expect(downloaded.ok, JSON.stringify(downloaded)).toBe(true);
+      expect(Number((downloaded.video as Rec).width)).toBeGreaterThan(0);
 
       // eslint-disable-next-line no-console
       console.log("[smoke] yt-dlp family OK:", {
         url,
         title: (meta.metadata as Rec).title,
-        dl: dl.path,
+        dl: dl.media_ref,
       });
     },
     180_000,

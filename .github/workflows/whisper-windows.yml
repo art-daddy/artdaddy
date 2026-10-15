@@ -60,6 +60,9 @@ jobs:
           WHISPER_REF: ${{ inputs.whisper_ref }}
         run: git clone --depth 1 --branch "$env:WHISPER_REF" https://github.com/ggml-org/whisper.cpp whisper.cpp
 
+      - name: Correct Windows model-path conversion
+        run: node scripts/smoke-whisper.mjs --patch-model-paths whisper.cpp
+
       # The SDK is only needed to COMPILE the shaders (glslc) and to supply SPIRV-Headers.
       # Users need nothing installed: vulkan-1.dll ships with the graphics driver.
       #
@@ -177,7 +180,7 @@ jobs:
       # The SAME check fetch-sidecars.mjs runs after staging, from the same module — so a
       # decoy cannot pass here and fail there, or the reverse.
       - name: Smoke — is it actually whisper?
-        run: node scripts/smoke-whisper.mjs "out/whisper-cli.exe"
+        run: node scripts/smoke-whisper.mjs --utf8 "out/whisper-cli.exe"
 
       # Proof it TRANSCRIBES, which --help cannot tell you. Runners have no GPU, so this
       # exercises the CPU fallback — which is exactly the path a driverless user gets, and
@@ -202,6 +205,12 @@ jobs:
           # same line is how you confirm the GPU is actually in use.
           ($log -join "`n") | Select-String -Pattern 'ggml_vulkan|Vulkan' | ForEach-Object { Write-Host "  $_" }
 
+      - name: Transcribe through Unicode model, audio and output paths
+        run: |
+          node scripts/qa/whisperUnicode.mjs "out/whisper-cli.exe" "tiny.bin" "whisper.cpp/samples/jfk.wav" "unicode-proof"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Copy-Item unicode-proof\proof.json out\whisper-unicode-proof.json
+
       - name: Package
         run: Compress-Archive -Path out\* -DestinationPath whisper-vulkan-win-x64.zip -Force
 
@@ -224,11 +233,11 @@ jobs:
         if: ${{ inputs.publish }}
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: whisper-vulkan-${{ inputs.whisper_ref }}-sdk${{ inputs.vulkan_sdk }}-b2
+          TAG: whisper-vulkan-${{ inputs.whisper_ref }}-sdk${{ inputs.vulkan_sdk }}-b3
         run: |
           gh release view "$env:TAG" 2>$null
           if ($LASTEXITCODE -ne 0) {
-            gh release create "$env:TAG" --title "whisper-cli Vulkan (Windows) $env:TAG" --notes "whisper.cpp ${{ inputs.whisper_ref }} built with -DGGML_VULKAN=ON, Vulkan SDK ${{ inputs.vulkan_sdk }}. Consumed by scripts/fetch-sidecars.mjs."
+            gh release create "$env:TAG" --latest=false --title "whisper-cli Vulkan (Windows) $env:TAG" --notes "whisper.cpp ${{ inputs.whisper_ref }} built with -DGGML_VULKAN=ON, Vulkan SDK ${{ inputs.vulkan_sdk }}. Consumed by scripts/fetch-sidecars.mjs."
             if ($LASTEXITCODE -ne 0) { Write-Host "::error::could not create release $env:TAG"; exit 1 }
           }
           gh release upload "$env:TAG" whisper-vulkan-win-x64.zip --clobber

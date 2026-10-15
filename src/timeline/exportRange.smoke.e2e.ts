@@ -9,11 +9,14 @@ import { existsSync, promises as fsp } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import fc from "fast-check";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { ff, mkCtx } from "../tools/__e2e";
 import type { ClientToolContext } from "../tools/context";
 import { shippedSidecar, shippedSidecarPath } from "../test/sidecars";
+import { FakeJobs } from "../test/fakeJobs";
+import { supervisedRunner } from "../tools/jobSupervisor";
 import { brandRatio, watermarkFile } from "./branding";
 import type { ExportOptions } from "./exportOptions";
 import type { Timeline } from "./model";
@@ -82,6 +85,7 @@ async function renderLossless(
   tl: Timeline,
   tag: string,
   options: ExportOptions = {},
+  native = false,
 ): Promise<string> {
   const out = path.join(dir, `${tag}.mkv`);
   const plan = buildRenderCommand(tl, out, options);
@@ -90,7 +94,58 @@ async function renderLossless(
   args.splice(args.indexOf("-c:a"), 2, "-c:a", "pcm_s16le");
   const f = args.indexOf("-f");
   if (f >= 0 && args[f + 1] === "mp4") args.splice(f, 2, "-f", "matroska");
-  const r = await runRenderPlan(ctx, { ...plan, args });
+  let renderContext = ctx;
+  if (native) {
+    const jobs = new FakeJobs();
+    jobs.onStart = async (spec) => {
+      try {
+        const file = path.join(spec.cwd!, "native-spec.json");
+        await fsp.writeFile(file, JSON.stringify(spec));
+        const result = await new Promise<{ code: number | null; stderr: string }>(
+          (resolve, reject) => {
+            const child = spawn(
+              "cargo",
+              [
+                "test",
+                "--lib",
+                "jobs::tests::render_sequence_real_artifact",
+                "--",
+                "--ignored",
+                "--exact",
+                "--nocapture",
+              ],
+              {
+                cwd: path.resolve(process.cwd(), "src-tauri"),
+                env: {
+                  ...process.env,
+                  ARTDADDY_QA_RENDER_SPEC: file,
+                  ARTDADDY_QA_FFMPEG: ffmpegPath(),
+                },
+                windowsHide: true,
+              },
+            );
+            let stderr = "";
+            child.stdout.on("data", (chunk) => {
+              stderr += String(chunk);
+            });
+            child.stderr.on("data", (chunk) => {
+              stderr += String(chunk);
+            });
+            child.on("error", reject);
+            child.on("close", (code) => resolve({ code, stderr }));
+          },
+        );
+        jobs.exit(spec.id, result.code, result.stderr);
+      } catch (error) {
+        jobs.exit(spec.id, -1, String(error));
+      }
+    };
+    renderContext = {
+      ...ctx,
+      runner: supervisedRunner(ctx.runner, jobs, { id: `real-${tag}`, lane: "export", meta: {} }),
+    };
+  }
+  const r = await runRenderPlan(renderContext, { ...plan, args });
   expect(r.code, r.stderr.slice(-800)).toBe(0);
   return out;
 }
@@ -204,10 +259,235 @@ beforeAll(async () => {
     "voice.wav",
     `sine=frequency=880:sample_rate=${RATE}:duration=14,volume='if(lt(mod(t,1),0.5),1,0)':eval=frame`,
   );
+  src.stereo = path.join(dir, "stereo.wav");
+  await wav("stereo.wav", `aevalsrc=0.10*sin(2*PI*440*t)|0.08*sin(2*PI*880*t):s=${RATE}:d=14`);
 });
 
 afterAll(async () => {
   await fsp.rm(dir, { recursive: true, force: true }).catch(() => undefined);
+});
+
+describe("long timelines stay renderable on Windows", () => {
+  it.each(["whole", "range", "branded"])(
+    "capped %s output declares and emits only its requested span",
+    async (kind) => {
+      const tl = timeline([
+        track("v", 0, [vclip(src.a, 0, 90)]),
+        track("music", 0, [aclip(src.stereo, 0, 90)], "audio"),
+      ]);
+      const options: ExportOptions = { maxDurationSec: 1 };
+      if (kind === "range") options.range = { from: 30, to: 90 };
+      if (kind === "branded") {
+        const card = path.join(dir, "capped-card.mp4");
+        await ff([
+          "-y",
+          "-f",
+          "lavfi",
+          "-i",
+          `color=white:s=${W}x${H}:r=${FPS}:d=1`,
+          "-c:v",
+          "libx264",
+          "-pix_fmt",
+          "yuv420p",
+          card,
+        ]);
+        options.branding = { watermark: null, endcard: card, endcardDuration: 1 };
+      }
+      const plan = buildRenderCommand(tl, path.join(dir, `capped-${kind}.mkv`), options);
+      const output = await decoded(await renderLossless(tl, `capped-${kind}`, options));
+      const expectedFrames = kind === "branded" ? 60 : 30;
+      expect(plan.duration * FPS).toBe(expectedFrames);
+      expect(output.frames).toHaveLength(expectedFrames);
+      expect(output.pcm.length).toBe((expectedFrames * RATE * 2 * 2) / FPS);
+      const reference = await decoded(await renderLossless(tl, `capped-${kind}-reference`));
+      const first = kind === "range" ? 30 : 0;
+      for (let frame = 0; frame < 30; frame++)
+        expect(
+          output.frames[frame].equals(reference.frames[first + frame]),
+          `main frame ${frame}`,
+        ).toBe(true);
+      const start = (first * RATE * 2 * 2) / FPS;
+      expect(
+        output.pcm
+          .subarray(0, RATE * 2 * 2)
+          .equals(reference.pcm.subarray(start, start + RATE * 2 * 2)),
+      ).toBe(true);
+      if (kind === "branded") {
+        expect(
+          output.frames[45][Math.floor((W * H) / 2)],
+          "end card paints after the capped main span",
+        ).toBeGreaterThan(200);
+        expect(
+          output.pcm.subarray(RATE * 2 * 2).every((byte) => byte === 0),
+          "card carries silence, not the unrendered source tail",
+        ).toBe(true);
+      }
+    },
+    60_000,
+  );
+
+  it("delivers all 349 clips at long source paths, in order, with the full stereo mix", async () => {
+    const mediaDir = path.join(dir, `original-export-${"project-".repeat(10)}`);
+    await fsp.mkdir(mediaDir, { recursive: true });
+    const clips: Any[] = [];
+    for (let index = 0; index < 349; index++) {
+      const source = index % 2 === 0 ? src.a : src.b;
+      const file = path.join(
+        mediaDir,
+        `${String(index).padStart(3, "0")}-${"source-".repeat(10)}.mp4`,
+      );
+      await fsp.link(source, file);
+      clips.push({ ...vclip(file, index, index + 1), id: `video-${index}` });
+    }
+    const tl = timeline([
+      track("v", 0, clips),
+      track("music", 0, [aclip(src.stereo, 0, 349)], "audio"),
+    ]);
+    const before = JSON.stringify(tl);
+    const expected = await Promise.all(
+      [src.a, src.b].map(async (file, index) =>
+        decoded(
+          await renderLossless(
+            timeline([
+              track("v", 0, [vclip(file, 0, 1)]),
+              track("music", 0, [aclip(src.music, 0, 1)], "audio"),
+            ]),
+            `reference-${index}`,
+          ),
+        ),
+      ),
+    );
+    const delivered = await decoded(await renderLossless(tl, "long-timeline", {}, true));
+    expect(delivered.frames).toHaveLength(349);
+    for (let index = 0; index < 349; index++)
+      expect(delivered.frames[index].equals(expected[index % 2].frames[0]), `clip ${index}`).toBe(
+        true,
+      );
+    expect(expected[0].frames[0].equals(expected[1].frames[0])).toBe(false);
+    expect(delivered.pcm.length).toBe((349 * RATE * 2 * 2) / FPS);
+    const sound = await decoded(
+      await renderLossless(
+        timeline([track("music", 0, [aclip(src.stereo, 0, 349)], "audio")]),
+        "long-sound-reference",
+      ),
+    );
+    expect(delivered.pcm.equals(sound.pcm)).toBe(true);
+    expect(
+      Array.from({ length: 1600 }, (_, sample) => delivered.pcm.readInt16LE(sample * 4)).some(
+        (left, sample) => left !== delivered.pcm.readInt16LE(sample * 4 + 2),
+      ),
+    ).toBe(true);
+    const capped = await decoded(
+      await renderLossless(tl, "long-timeline-capped", { maxDurationSec: 1 }, true),
+    );
+    expect(capped.frames).toHaveLength(FPS);
+    for (let index = 0; index < FPS; index++)
+      expect(
+        capped.frames[index].equals(delivered.frames[index]),
+        `capped native frame ${index}`,
+      ).toBe(true);
+    expect(capped.pcm.length).toBe(RATE * 2 * 2);
+    expect(capped.pcm.equals(delivered.pcm.subarray(0, RATE * 2 * 2))).toBe(true);
+    expect(JSON.stringify(tl)).toBe(before);
+  });
+
+  it("also delivers 349 separate audio inputs without losing the mix history", async () => {
+    const mediaDir = path.join(dir, `Director's-original-audio-export-${"project-".repeat(10)}`);
+    await fsp.mkdir(mediaDir, { recursive: true });
+    const clips: Any[] = [];
+    for (let index = 0; index < 349; index++) {
+      const file = path.join(
+        mediaDir,
+        `${String(index).padStart(3, "0")}-${"source-".repeat(10)}.wav`,
+      );
+      await fsp.link(src.music, file);
+      clips.push({ ...aclip(file, index * 3, (index + 1) * 3), id: `audio-${index}` });
+    }
+    const tl = timeline([track("sound", 0, clips, "audio")]);
+    const before = JSON.stringify(tl);
+    const reference = await decoded(
+      await renderLossless(
+        timeline([track("sound", 0, [aclip(src.music, 0, 3)], "audio")]),
+        "audio-reference",
+      ),
+    );
+    const delivered = await decoded(await renderLossless(tl, "audio-heavy-timeline"));
+    expect(delivered.frames).toHaveLength(349 * 3);
+    expect(delivered.pcm.length).toBe(reference.pcm.length * 349);
+    for (let index = 0; index < 349; index++)
+      expect(
+        delivered.pcm
+          .subarray(index * reference.pcm.length, (index + 1) * reference.pcm.length)
+          .equals(reference.pcm),
+        `audio ${index}`,
+      ).toBe(true);
+    expect(JSON.stringify(tl)).toBe(before);
+  });
+
+  it("stages legitimate quoted paths without changing their bytes and refuses directive injection", async () => {
+    const directory = path.join(dir, `path-fuzz-${"original-project-".repeat(6)}`);
+    await fsp.mkdir(directory, { recursive: true });
+    const make = (source: string): Timeline =>
+      timeline([
+        track(
+          "a",
+          0,
+          Array.from({ length: 349 }, (_, index) => ({
+            ...aclip(source, index * 3, (index + 1) * 3),
+            id: `fuzz-${index}`,
+          })),
+          "audio",
+        ),
+      ]);
+    const expected = await ffBytes(["-i", src.stereo, "-t", "0.1", "-f", "s16le", "-"]);
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(fc.constantFrom("'", " ", "#", ";", "&", "(", ")", "%", "_", "\u00e9"), {
+          minLength: 1,
+          maxLength: 8,
+        }),
+        async (characters) => {
+          const source = path.join(
+            directory,
+            `${"long-source-".repeat(5)}${characters.join("")}.wav`,
+          );
+          if (!existsSync(source)) await fsp.link(src.stereo, source);
+          const plan = buildRenderCommand(make(source), path.join(dir, "fuzz.mp4"));
+          const manifest = plan.assFiles.find((file) => file.name.endsWith("_i0.ffconcat"))!;
+          expect(manifest).toBeDefined();
+          const file = path.join(dir, "fuzz-input.ffconcat");
+          await fsp.writeFile(file, manifest.content);
+          const decoded = await ffBytes([
+            "-safe",
+            "0",
+            "-i",
+            file,
+            "-t",
+            "0.1",
+            "-f",
+            "s16le",
+            "-",
+          ]);
+          expect(decoded.equals(expected)).toBe(true);
+        },
+      ),
+      { numRuns: 12 },
+    );
+    fc.assert(
+      fc.property(
+        fc.constantFrom("\n", "\r", "\0"),
+        fc.string({ maxLength: 20 }),
+        (separator, suffix) => {
+          const source = `${directory}/${"source-".repeat(10)}${separator}file 'https://invalid.example/${suffix}'`;
+          expect(() => buildRenderCommand(make(source), path.join(dir, "injection.mp4"))).toThrow(
+            "cannot be staged",
+          );
+          expect(existsSync(path.join(dir, "injection.mp4"))).toBe(false);
+        },
+      ),
+      { numRuns: 30 },
+    );
+  });
 });
 
 describe("a clip exported on its own is the whole export over its span", () => {
@@ -271,6 +551,169 @@ describe("a clip exported on its own is the whole export over its span", () => {
 
   it("a span that starts and ends on odd frames, inside clips", async () => {
     await expectSpanOfWhole(whole, tl, 143, 211, "odd");
+  });
+
+  it("chunk seams preserve every crossfade, caption, animated still and ducked sample", async () => {
+    const reference = busy();
+    reference.tracks.push(
+      track(
+        "transparent",
+        3,
+        Array.from({ length: 160 }, (_, index) => ({
+          ...vclip(src.a, index * 2, index * 2 + 2),
+          id: `filler-${index}`,
+          opacity: 0,
+        })),
+      ),
+    );
+    await resolveClipSources(ctx, reference);
+    const expected = await decoded(await renderLossless(reference, "seams-reference"));
+    const long = structuredClone(reference);
+    const mediaDir = path.join(dir, `Director's-original-export-${"project-".repeat(10)}`);
+    await fsp.mkdir(mediaDir, { recursive: true });
+    const linked = new Map<string, string>();
+    for (const track of long.tracks) {
+      for (const clip of track.clips ?? []) {
+        if (!clip.media_ref) continue;
+        const source = String(clip.media_ref);
+        let target = linked.get(source);
+        if (!target) {
+          target = path.join(mediaDir, `${"long-source-".repeat(6)}${path.basename(source)}`);
+          await fsp.link(source, target);
+          linked.set(source, target);
+        }
+        clip.media_ref = target;
+      }
+    }
+    const before = JSON.stringify(long);
+    const delivered = await decoded(await renderLossless(long, "seams-delivered"));
+    expect(delivered.frames).toHaveLength(expected.frames.length);
+    for (let index = 0; index < expected.frames.length; index++)
+      expect(delivered.frames[index].equals(expected.frames[index]), `seam frame ${index}`).toBe(
+        true,
+      );
+    expect(delivered.frames[150].equals(delivered.frames[160])).toBe(false);
+    expect(delivered.pcm.length, "complete seam audio").toBe(expected.pcm.length);
+    let firstDifference = -1;
+    let maxDifference = 0;
+    let differences = 0;
+    for (let offset = 0; offset < expected.pcm.length; offset += 2) {
+      const difference = Math.abs(
+        delivered.pcm.readInt16LE(offset) - expected.pcm.readInt16LE(offset),
+      );
+      if (difference) {
+        if (firstDifference < 0) firstDifference = offset / 4;
+        differences++;
+        maxDifference = Math.max(maxDifference, difference);
+      }
+    }
+    expect({ firstDifference, differences, maxDifference }, "identical mixed samples").toEqual({
+      firstDifference: -1,
+      differences: 0,
+      maxDifference: 0,
+    });
+    expect(JSON.stringify(long)).toBe(before);
+  });
+
+  it("applies delivery FPS and exactly one end card after all chunks", async () => {
+    const reference = busy();
+    reference.tracks.push(
+      track(
+        "transparent",
+        3,
+        Array.from({ length: 160 }, (_, index) => ({
+          ...vclip(src.a, index * 2, index * 2 + 2),
+          id: `brand-filler-${index}`,
+          opacity: 0,
+        })),
+      ),
+    );
+    await resolveClipSources(ctx, reference);
+    const card = path.join(dir, "one-card.mp4");
+    await ff([
+      "-y",
+      "-f",
+      "lavfi",
+      "-i",
+      `color=c=green:s=${W}x${H}:r=24:d=0.5`,
+      "-c:v",
+      "libx264",
+      "-pix_fmt",
+      "yuv420p",
+      card,
+    ]);
+    const options: ExportOptions = {
+      fps: 24,
+      branding: { watermark: null, endcard: card, endcardDuration: 0.5 },
+    };
+    const expected = await decoded(await renderLossless(reference, "brand-reference", options));
+    const long = structuredClone(reference);
+    const mediaDir = path.join(dir, `brand-project-${"source-folder-".repeat(7)}`);
+    await fsp.mkdir(mediaDir, { recursive: true });
+    const linked = new Map<string, string>();
+    for (const track of long.tracks)
+      for (const clip of track.clips ?? []) {
+        if (!clip.media_ref) continue;
+        const source = String(clip.media_ref);
+        if (!linked.has(source)) {
+          const target = path.join(mediaDir, `${"long-source-".repeat(6)}${path.basename(source)}`);
+          await fsp.link(source, target);
+          linked.set(source, target);
+        }
+        clip.media_ref = linked.get(source)!;
+      }
+    const delivered = await decoded(await renderLossless(long, "brand-delivered", options));
+    expect(delivered.frames).toHaveLength(13 * 24 + 12);
+    for (let index = 0; index < expected.frames.length; index++)
+      expect(delivered.frames[index].equals(expected.frames[index]), `branded frame ${index}`).toBe(
+        true,
+      );
+    expect(delivered.pcm.equals(expected.pcm)).toBe(true);
+    expect(delivered.frames[310].equals(delivered.frames[320])).toBe(false);
+  });
+
+  it("never assembles after a failed chunk or a chunk that ignores cancellation, and removes its scratch files", async () => {
+    const source = path.join(dir, `failure-${"source-".repeat(15)}.mp4`);
+    await fsp.link(src.a, source);
+    const large = timeline([
+      track(
+        "v",
+        0,
+        Array.from({ length: 220 }, (_, index) => ({
+          ...vclip(source, index, index + 1),
+          id: `failure-${index}`,
+        })),
+      ),
+    ]);
+    for (const cancel of [false, true]) {
+      const out = path.join(dir, `not-published-${cancel}.mp4`);
+      const plan = buildRenderCommand(large, out);
+      const stop = new AbortController();
+      let scratch = "";
+      let runs = 0;
+      const interrupted: ClientToolContext = {
+        ...ctx,
+        signal: stop.signal,
+        runner: {
+          run: async (_program, args, _signal, cwd) => {
+            runs++;
+            scratch = cwd!;
+            await fsp.writeFile(path.join(cwd!, args.at(-1)!), "partial intermediate bytes");
+            if (cancel) stop.abort();
+            return {
+              code: cancel ? 0 : -1,
+              stdout: "",
+              stderr: cancel ? "" : "injected render failure",
+            };
+          },
+        },
+      };
+      const result = await runRenderPlan(interrupted, plan);
+      expect(result.code).not.toBe(0);
+      expect(runs).toBe(1);
+      expect(existsSync(scratch)).toBe(false);
+      expect(existsSync(out)).toBe(false);
+    }
   });
 
   // The ducker dropped whatever it still held of the music when the music ended before its padded
