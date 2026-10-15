@@ -533,7 +533,13 @@ impl Supervisor {
       publishing.state = "publishing".into();
       persist_delivery(root, &publishing)?;
       delivery.state = "publishing".into();
-      std::fs::rename(staged, &delivery.dest_path).map_err(|error| error.to_string())?;
+      if let Err(error) = std::fs::rename(staged, &delivery.dest_path) {
+        let mut retryable = delivery.clone();
+        retryable.state = "verified".into();
+        persist_delivery(root, &retryable)?;
+        *delivery = retryable;
+        return Err(error.to_string());
+      }
     } else {
       if actual.sha256 != expected.sha256 || actual.size != expected.size { return Err("destination is not the verified export artifact".into()); }
     }
@@ -574,20 +580,10 @@ impl Supervisor {
   }
 
   fn require_unleased_path<'a>(&self, path: &Path, deliveries: impl Iterator<Item = &'a ExportDelivery>) -> Result<(), String> {
-    let canonical = match path.canonicalize() {
-      Ok(path) => path,
-      Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-      Err(error) => return Err(error.to_string()),
-    };
     let key = |path: &Path| {
       let value = path.to_string_lossy().replace('\\', "/");
       if cfg!(target_os = "windows") { value.to_lowercase() } else { value }
     };
-    let target = key(&canonical);
-    let prefix = format!("{}/", target.trim_end_matches('/'));
-    let target_file = if canonical.is_file() {
-      Some(same_file::Handle::from_path(&canonical).map_err(|error| error.to_string())?)
-    } else { None };
     let dependency_path = |path: &Path| -> Result<PathBuf, String> {
       for ancestor in path.ancestors() {
         if ancestor.as_os_str().is_empty() { break; }
@@ -610,16 +606,25 @@ impl Supervisor {
       }
       Ok(path.to_path_buf())
     };
+    let canonical = dependency_path(path)?;
+    let target = key(&canonical);
+    let prefix = format!("{}/", target.trim_end_matches('/'));
+    let target_file = if canonical.is_file() {
+      Some(same_file::Handle::from_path(&canonical).map_err(|error| error.to_string())?)
+    } else { None };
     let state = self.lock();
     for delivery in deliveries {
       let running = state.jobs.get(&delivery.id).is_some_and(|job| job.state != JobState::Exited);
       let pending = delivery.state != "published" && !delivery.followups_done;
       if !pending && !running { continue; }
+      let stage_owned = matches!(delivery.state.as_str(), "prepared" | "verified" | "publishing") || running ||
+        self.copying.lock().map_err(|error| error.to_string())?.contains(&delivery.id);
       let declared: Vec<&str> = match &delivery.source {
         DeliverySource::Render { paths } => paths.iter().map(String::as_str).collect(),
         DeliverySource::Copy { path, .. } => vec![path.as_str()],
       };
-      for dependency in declared.into_iter().chain(delivery.sources.iter().map(|(path, _)| path.as_str())) {
+      for dependency in declared.into_iter().chain(delivery.sources.iter().map(|(path, _)| path.as_str()))
+        .chain(stage_owned.then_some(delivery.stage_path.as_str())) {
         let dependency = dependency_path(Path::new(dependency))?;
         if let Some(target_file) = &target_file {
           match same_file::Handle::from_path(&dependency) {
@@ -1405,7 +1410,7 @@ pub fn jobs_launch_id(jobs: tauri::State<'_, Supervisor>) -> String {
 }
 
 #[tauri::command]
-pub fn jobs_export_protocol() -> u32 { 10 }
+pub fn jobs_export_protocol() -> u32 { 11 }
 
 #[tauri::command]
 pub async fn jobs_prepare_export(jobs: tauri::State<'_, Supervisor>, id: String, project_dir: String, stage_path: String, dest_path: String, source: DeliverySource) -> Result<ExportDelivery, String> {
@@ -1798,6 +1803,75 @@ mod export_delivery_tests {
     assert!(owner(&root).publish_delivery(&delivery.id).is_err());
   }
   #[test]
+  fn a_refused_rename_does_not_trap_an_intent_in_publishing() {
+    let dir = tempfile::tempdir().unwrap();
+    let jobs = owner(&dir.path().join("journal"));
+    let delivery = intent(&jobs, dir.path(), "rename-refused");
+    render_bytes(&jobs, &delivery, b"complete staged artifact");
+    jobs.verify_delivery(&delivery.id).unwrap();
+    std::fs::create_dir(&delivery.dest_path).unwrap();
+    let marker = Path::new(&delivery.dest_path).join("keep.txt");
+    std::fs::write(&marker, b"existing destination content").unwrap();
+    assert!(jobs.publish_delivery(&delivery.id).is_err());
+    assert!(jobs.fail_delivery(&delivery.id).unwrap(), "a refused rename must still be settleable as failure");
+    jobs.complete_delivery(&delivery.id).unwrap();
+    assert_eq!(std::fs::read(&delivery.stage_path).unwrap(), b"complete staged artifact");
+    assert_eq!(std::fs::read(&marker).unwrap(), b"existing destination content");
+    assert_eq!(jobs.delivery_list().iter().find(|entry| entry.id == delivery.id).unwrap().state, "failed");
+  }
+  #[test]
+  fn a_refused_rename_remains_retryable_after_owner_recreation() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("journal");
+    let jobs = owner(&root);
+    let delivery = intent(&jobs, dir.path(), "rename-retry");
+    render_bytes(&jobs, &delivery, b"complete retryable staged artifact");
+    jobs.verify_delivery(&delivery.id).unwrap();
+    std::fs::create_dir(&delivery.dest_path).unwrap();
+    let marker = Path::new(&delivery.dest_path).join("keep.txt");
+    std::fs::write(&marker, b"blocked destination marker").unwrap();
+    assert!(jobs.publish_delivery(&delivery.id).is_err());
+    let reopened = owner(&root);
+    assert_eq!(reopened.delivery_list()[0].state, "verified");
+    assert_eq!(std::fs::read(&delivery.stage_path).unwrap(), b"complete retryable staged artifact");
+    assert_eq!(std::fs::read(&marker).unwrap(), b"blocked destination marker");
+    std::fs::remove_file(&marker).unwrap();
+    std::fs::remove_dir(&delivery.dest_path).unwrap();
+    reopened.publish_delivery(&delivery.id).unwrap();
+    assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"complete retryable staged artifact");
+    assert!(!Path::new(&delivery.stage_path).exists());
+    assert_eq!(reopened.delivery_list()[0].state, "published");
+  }
+  #[test]
+  fn an_owned_stage_refuses_unrelated_writes_until_native_settlement() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("stage-source.wav");
+    std::fs::write(&source, b"complete admitted copied bytes").unwrap();
+    let jobs = owner(&dir.path().join("journal"));
+    let delivery = jobs.prepare_delivery("stage-owner".into(), "original-project".into(),
+      dir.path().join("owned.partial").to_string_lossy().into(), dir.path().join("delivered.wav").to_string_lossy().into(),
+      DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_stage_source".into() }).unwrap();
+    let stage = Path::new(&delivery.stage_path);
+    let write = || std::fs::write(stage, b"unrelated stage replacement").map_err(|error| error.to_string());
+    assert!(jobs.with_unleased_path(stage, write).is_err());
+    assert_eq!(std::fs::metadata(stage).unwrap().len(), 0);
+    jobs.copy_delivery(&delivery.id).unwrap();
+    std::fs::remove_file(stage).unwrap();
+    assert!(jobs.with_unleased_path(stage, write).is_err(), "a missing owned stage name must remain reserved");
+    assert!(!stage.exists());
+    std::fs::write(stage, b"complete admitted copied bytes").unwrap();
+    jobs.verify_delivery(&delivery.id).unwrap();
+    assert!(jobs.with_unleased_path(stage, write).is_err());
+    let alias = dir.path().join("owned-stage-alias.partial");
+    std::fs::hard_link(stage, &alias).unwrap();
+    assert!(jobs.with_unleased_path(&alias, || std::fs::write(&alias, b"alias corruption").map_err(|error| error.to_string())).is_err());
+    assert_eq!(std::fs::read(stage).unwrap(), b"complete admitted copied bytes");
+    jobs.cancel_delivery(&delivery.id).unwrap();
+    jobs.with_unleased_path(stage, || std::fs::remove_file(stage).map_err(|error| error.to_string())).unwrap();
+    assert!(!stage.exists());
+    assert_eq!(std::fs::read(&source).unwrap(), b"complete admitted copied bytes");
+  }
+  #[test]
   fn a_hard_link_cannot_bypass_an_admitted_source_lease() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("journal");
@@ -2114,6 +2188,7 @@ mod export_delivery_tests {
     assert!(jobs.verify_delivery(&delivery.id).is_err());
     assert!(jobs.kill(&delivery.id));
     assert!(jobs.complete_delivery(&delivery.id).is_err());
+    assert!(jobs.with_unleased_path(Path::new(&delivery.stage_path), || std::fs::remove_file(&delivery.stage_path).map_err(|error| error.to_string())).is_err());
     assert!(jobs.with_unleased_path(&source, || std::fs::remove_file(&source).map_err(|error| error.to_string())).is_err());
     assert_eq!(std::fs::read(&source).unwrap(), b"must survive ignored cancellation");
     jobs.finish(&delivery.id, 0, Some(0), None);
