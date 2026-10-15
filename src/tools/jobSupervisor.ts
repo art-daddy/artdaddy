@@ -12,7 +12,7 @@ export type JobState = "queued" | "running" | "exited";
  *  src-tauri/src/jobs.rs, its twin (a test holds the two together). */
 export const JOB_PROGRAMS = ["ffmpeg", "whisper-cli"] as const;
 export type JobProgram = (typeof JOB_PROGRAMS)[number];
-export const EXPORT_PROTOCOL_VERSION = 9;
+export const EXPORT_PROTOCOL_VERSION = 10;
 
 export interface JobView {
   id: string;

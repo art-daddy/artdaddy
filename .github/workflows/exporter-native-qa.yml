@@ -47,6 +47,8 @@ jobs:
       - run: node scripts/fetch-sidecars.mjs --only ffmpeg,ffprobe
       - name: Native job invariants
         run: "cargo test --manifest-path src-tauri/Cargo.toml --lib jobs::"
+      - name: Native commit failure and volume outcomes
+        run: "cargo test --manifest-path src-tauri/Cargo.toml --lib commit -- --nocapture"
       - name: Native macOS capture and crash recovery
         if: runner.os == 'macOS'
         run: node scripts/qa/exporterNative.mjs

@@ -1405,7 +1405,7 @@ pub fn jobs_launch_id(jobs: tauri::State<'_, Supervisor>) -> String {
 }
 
 #[tauri::command]
-pub fn jobs_export_protocol() -> u32 { 9 }
+pub fn jobs_export_protocol() -> u32 { 10 }
 
 #[tauri::command]
 pub async fn jobs_prepare_export(jobs: tauri::State<'_, Supervisor>, id: String, project_dir: String, stage_path: String, dest_path: String, source: DeliverySource) -> Result<ExportDelivery, String> {

@@ -53,14 +53,37 @@ fn commit_file_owned(jobs: &jobs::Supervisor, from: &str, to: &str) -> Result<()
   if let Some(parent) = std::path::Path::new(&to).parent() {
     std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
   }
-  if std::fs::rename(from, to).is_ok() {
-    return Ok(());
+  match std::fs::rename(from, to) {
+    Ok(()) => return Ok(()),
+    Err(error) if cross_device_error(&error) => {}
+    Err(error) => return Err(error.to_string()),
   }
-  std::fs::copy(from, to).map_err(|e| e.to_string())?;
+  let mut source = std::fs::File::open(from).map_err(|error| error.to_string())?;
+  let permissions = source.metadata().map_err(|error| error.to_string())?.permissions();
+  copy_commit_bytes(&mut source, std::path::Path::new(to), permissions)?;
   // The copy IS the commit; failing to tidy the staging file must not fail the export.
   let _ = std::fs::remove_file(from);
   Ok(())
   })
+}
+
+fn cross_device_error(error: &std::io::Error) -> bool {
+  #[cfg(unix)]
+  { error.raw_os_error() == Some(libc::EXDEV) }
+  #[cfg(windows)]
+  { error.raw_os_error() == Some(17) }
+  #[cfg(not(any(unix, windows)))]
+  { let _ = error; false }
+}
+
+fn copy_commit_bytes(source: &mut impl std::io::Read, to: &std::path::Path, permissions: std::fs::Permissions) -> Result<(), String> {
+  let parent = to.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| std::path::Path::new("."));
+  let mut destination = tempfile::Builder::new().prefix(".artdaddy-commit-").tempfile_in(parent).map_err(|error| error.to_string())?;
+  std::io::copy(source, destination.as_file_mut()).map_err(|error| error.to_string())?;
+  destination.as_file().set_permissions(permissions).map_err(|error| error.to_string())?;
+  destination.as_file().sync_all().map_err(|error| error.to_string())?;
+  destination.persist(to).map_err(|error| error.error.to_string())?;
+  Ok(())
 }
 
 /// Delete a file outright, for the same out-of-scope destinations as `commit_file` — a failed
@@ -1205,6 +1228,82 @@ mod tests {
       assert!(allowed("C:/Users/someone/AppData/Roaming/ArtDaddy/projects/p/internals/project.json"));
       assert!(allowed("/home/someone/.local/share/ArtDaddy/projects/p/timeline.json"));
     }
+  }
+
+  #[test]
+  fn interrupted_commit_copy_preserves_previous_destination_bytes() {
+    use std::io::Read;
+    struct Interrupted { emitted: bool }
+    impl Read for Interrupted {
+      fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if self.emitted { return Err(std::io::Error::new(std::io::ErrorKind::Other, "injected copy failure")); }
+        let bytes = b"incomplete new artifact";
+        buffer[..bytes.len()].copy_from_slice(bytes);
+        self.emitted = true;
+        Ok(bytes.len())
+      }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let destination = directory.path().join("existing.mp4");
+    fs::write(&destination, b"complete previously delivered artifact").unwrap();
+    let permissions = fs::metadata(&destination).unwrap().permissions();
+    let result = super::copy_commit_bytes(&mut Interrupted { emitted: false }, &destination, permissions.clone());
+    assert_eq!(fs::read(&destination).unwrap(), b"complete previously delivered artifact");
+    assert!(result.is_err());
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    let absent = directory.path().join("not-yet-delivered.mp4");
+    assert!(super::copy_commit_bytes(&mut Interrupted { emitted: false }, &absent, permissions).is_err());
+    assert!(!absent.exists());
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+  }
+
+  #[test]
+  fn complete_commit_copy_replaces_only_after_success_and_cleans_failed_publish() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.mp4");
+    let destination = directory.path().join("delivered.mp4");
+    fs::write(&source, b"complete new copied artifact").unwrap();
+    fs::write(&destination, b"previous delivery").unwrap();
+    let permissions = fs::metadata(&source).unwrap().permissions();
+    super::copy_commit_bytes(&mut fs::File::open(&source).unwrap(), &destination, permissions.clone()).unwrap();
+    assert_eq!(fs::read(&destination).unwrap(), b"complete new copied artifact");
+    assert_eq!(fs::read(&source).unwrap(), b"complete new copied artifact");
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 2);
+    let blocked = directory.path().join("blocked");
+    fs::create_dir(&blocked).unwrap();
+    fs::write(blocked.join("keep.txt"), b"unrelated existing content").unwrap();
+    assert!(super::copy_commit_bytes(&mut fs::File::open(&source).unwrap(), &blocked, permissions).is_err());
+    assert_eq!(fs::read(blocked.join("keep.txt")).unwrap(), b"unrelated existing content");
+    assert_eq!(fs::read(&source).unwrap(), b"complete new copied artifact");
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 3);
+  }
+
+  #[test]
+  #[cfg(target_os = "linux")]
+  fn cross_volume_commit_publishes_complete_bytes_before_source_cleanup() {
+    use std::os::unix::fs::MetadataExt;
+    struct NoSpawn;
+    impl jobs::Spawner for NoSpawn {
+      fn identity(&self, _: &str) -> Result<jobs::ArtifactIdentity, String> { Err("volume fixture has no worker".into()) }
+      fn spawn(&self, _: &jobs::JobSpec, _: std::sync::Arc<dyn Fn(jobs::ProcEvent) + Send + Sync>) -> Result<u32, String> { Err("unused".into()) }
+      fn kill(&self, _: u32) {}
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let target = match tempfile::tempdir_in("/dev/shm") {
+      Ok(target) => target,
+      Err(error) if std::env::var_os("CI").is_none() => { eprintln!("cross-volume scenario unavailable: {error}"); return; }
+      Err(error) => panic!("Linux volume QA needs a writable second device: {error}"),
+    };
+    assert_ne!(fs::metadata(directory.path()).unwrap().dev(), fs::metadata(target.path()).unwrap().dev());
+    let source = directory.path().join("source.mp4");
+    let destination = target.path().join("delivered.mp4");
+    fs::write(&source, b"complete cross-volume artifact").unwrap();
+    fs::write(&destination, b"previous complete delivery").unwrap();
+    let owner = jobs::Supervisor::new(std::sync::Arc::new(NoSpawn), std::sync::Arc::new(|_| {}));
+    super::commit_file_owned(&owner, &source.to_string_lossy(), &destination.to_string_lossy()).unwrap();
+    assert_eq!(fs::read(&destination).unwrap(), b"complete cross-volume artifact");
+    assert!(!source.exists());
+    assert_eq!(fs::read_dir(target.path()).unwrap().count(), 1);
   }
 
   #[test]
