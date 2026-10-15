@@ -39,6 +39,30 @@ describe("mapRequests <-> buildRequests", () => {
     expect(t.attachments).toEqual([]);
   });
 
+  it("preserves a terminal failure through JSON serialization and reload", () => {
+    const error = { kind: "error", error: "The connection was interrupted.", code: "network" };
+    const saved = JSON.parse(JSON.stringify(buildRequests([turn({ status: "error", parts: [error] })])));
+    const [restored] = mapRequests(saved);
+    expect(restored.status).toBe("error");
+    expect(restored.parts).toEqual([error]);
+  });
+
+  it("does not make a successful continuation failed because an earlier error remains in history", () => {
+    const parts = [{ kind: "error", error: "Connection interrupted." }, { kind: "text", text: "Finished." }];
+    const [restored] = mapRequests(buildRequests([turn({ status: "done", parts })]));
+    expect(restored.status).toBe("done");
+    expect(restored.parts).toEqual(parts);
+  });
+
+  it("keeps a cut-short retry interrupted even when its last authoritative part is the earlier failure", () => {
+    const [restored] = mapRequests(buildRequests([turn({
+      status: "streaming",
+      parts: [{ kind: "error", error: "Connection interrupted." }, { kind: "text", text: "Trying", partial: true }],
+    })]));
+    expect(restored.status).toBe("interrupted");
+    expect(restored.parts).toEqual([{ kind: "error", error: "Connection interrupted." }]);
+  });
+
   it("never writes a streamed fragment into the transcript", () => {
     // Deltas are live presentation. A partial that outlives its round (a tool-call round
     // streams prose that never becomes a `text` part) would otherwise be persisted AND
@@ -114,9 +138,9 @@ describe("a turn cut short reads as cut short after a reload", () => {
     },
   );
 
-  it.each(["done", "error"] as const)("a %s turn comes back as it was", (status) => {
+  it.each(["done", "error"] as const)("an old %s turn without an error part loads as done", (status) => {
     const [t] = mapRequests(buildRequests([turn({ status })]));
-    expect(t.status).toBe(status === "error" ? "done" : status);
+    expect(t.status).toBe("done");
   });
 
   it("an older transcript with no mark loads as done", () => {

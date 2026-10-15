@@ -6,6 +6,9 @@
 # user. See ideas.md IDEA-CI-001 (F10).
 name: CI
 
+env:
+  GH_TOKEN: ${{ github.token }}
+
 on:
   push:
     # qa/**: throwaway branches that run this whole workflow before anything reaches main

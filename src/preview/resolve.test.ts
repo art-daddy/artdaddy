@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { joinPath, ProjectStoreAccess, type FsLike } from "../tools/store";
+import { MemFs } from "../test/timelineKit";
+import { serializePackIndex } from "../media/stillFrames";
 import { highH264DecodesCorrectly } from "./h264Support";
 import { announceMediaDerived } from "./mediaDerived";
 import {
@@ -10,10 +12,11 @@ import {
   resolvePosterUrl,
   resolvePreviewUrl,
   resolveSourceUrl,
+  resolveStillAnimation,
   setAssetAccessGrant,
   setAssetUrlConverter,
 } from "./resolve";
-import { posterRel, proxyKey, proxyRel, webOkRel } from "./proxyPaths";
+import { animIndexRel, animPackRel, posterRel, proxyKey, proxyRel, webOkRel } from "./proxyPaths";
 import { shortHash } from "../tools/media";
 
 vi.mock("./h264Support", () => ({ highH264DecodesCorrectly: vi.fn() }));
@@ -69,6 +72,22 @@ describe("resolveSourceUrl", () => {
     expect(await resolveSourceUrl(store, "missing.mp4")).toBeNull();
   });
 
+  it("retries a missing catalog lookup that finishes after a relink", async () => {
+    let releaseMissing!: (value: null) => void;
+    const missing = new Promise<null>((resolve) => {
+      releaseMissing = resolve;
+    });
+    const { store, resolveRef } = storeWith(async () => "/proj/library/relinked.mp4");
+    resolveRef.mockImplementationOnce(() => missing);
+    const pending = resolveSourceUrl(store, "media_recording");
+    clearSourceUrlCache();
+    expect(await resolveSourceUrl(store, "media_recording")).toBe(
+      "asset:///proj/library/relinked.mp4",
+    );
+    releaseMissing(null);
+    expect(await pending).toBe("asset:///proj/library/relinked.mp4");
+  });
+
   it("caches the resolution (resolveRef called once per source)", async () => {
     const { store, resolveRef } = storeWith(async () => "/proj/x.mp4");
     await resolveSourceUrl(store, "x.mp4");
@@ -109,7 +128,112 @@ describe("proxyPaths", () => {
   });
 });
 
+describe("every media resolution cache respects invalidation", () => {
+  const resolvers = {
+    source: resolveSourceUrl,
+    preview: resolvePreviewUrl,
+    poster: resolvePosterUrl,
+    animation: resolveStillAnimation,
+  };
+
+  for (const [name, resolve] of Object.entries(resolvers)) {
+    for (const ordering of ["old-first", "ready-first"] as const) {
+      it(`${name}: ${ordering} cannot return or retain a pre-arrival answer`, async () => {
+        vi.mocked(highH264DecodesCorrectly).mockResolvedValue(false);
+        const fs = new MemFs();
+        const source = name === "animation" ? "library/take.gif" : "library/take.mp4";
+        const nextSource = "library/relinked.mp4";
+        const catalog = "/proj/internals/library.json";
+        await fs.writeTextFile(`/proj/${source}`, "original bytes");
+        await fs.writeTextFile(
+          catalog,
+          JSON.stringify({ clips: [{ id: "media_take", kind: "video", path: source }] }),
+        );
+        const store = new ProjectStoreAccess("/proj", fs);
+        let release!: () => void;
+        let reached!: () => void;
+        const blocked = new Promise<void>((finish) => {
+          release = finish;
+        });
+        const entered = new Promise<void>((finish) => {
+          reached = finish;
+        });
+        if (name === "source") {
+          setAssetUrlConverter(async (path) => {
+            if (path === `/proj/${source}`) {
+              reached();
+              await blocked;
+            }
+            return `asset://${path}`;
+          });
+        } else {
+          vi.spyOn(store, "exists").mockImplementationOnce(async () => {
+            reached();
+            await blocked;
+            return false;
+          });
+        }
+        const pending = resolve(store, "media_take");
+        await entered;
+        const timing = { den: 30, pts: [0, 30], period: 60, passes: Infinity };
+        let ready: string | { url: string; timing: typeof timing };
+        if (name === "source") {
+          await fs.writeTextFile(`/proj/${nextSource}`, "replacement bytes");
+          await fs.writeTextFile(
+            catalog,
+            JSON.stringify({ clips: [{ id: "media_take", kind: "video", path: nextSource }] }),
+          );
+          ready = `asset:///proj/${nextSource}`;
+        } else if (name === "animation") {
+          await fs.writeTextFile(
+            `/proj/${animIndexRel(source)}`,
+            serializePackIndex({ timing, w: 16, h: 16 }),
+          );
+          await fs.writeTextFile(`/proj/${animPackRel(source)}`, "frame pack");
+          ready = { url: `asset:///proj/${animPackRel(source)}`, timing };
+        } else {
+          const artifact = name === "preview" ? proxyRel(source) : posterRel(source);
+          await fs.writeTextFile(`/proj/${artifact}`, "derived bytes");
+          ready = `asset:///proj/${artifact}`;
+        }
+        announceMediaDerived(source);
+        if (ordering === "ready-first") expect(await resolve(store, "media_take")).toEqual(ready);
+        release();
+        expect(await pending).toEqual(ready);
+        expect(await resolve(store, "media_take")).toEqual(ready);
+        expect(await fs.readTextFile(`/proj/${source}`)).toBe("original bytes");
+      });
+    }
+  }
+});
+
 describe("resolvePreviewUrl", () => {
+  it("does not let a lookup started before proxy arrival replace the ready URL", async () => {
+    vi.mocked(highH264DecodesCorrectly).mockResolvedValue(false);
+    const source = "/proj/library/recording.mp4";
+    const proxy = `/proj/${proxyRel(source)}`;
+    const files = new Set<string>();
+    let finishOldCheck!: (found: boolean) => void;
+    const oldCheck = new Promise<boolean>((resolve) => {
+      finishOldCheck = resolve;
+    });
+    const { store, exists } = previewStore(
+      (path) => files.has(path),
+      (ref) => ref,
+    );
+    exists.mockImplementationOnce(() => oldCheck);
+    const pending = resolvePreviewUrl(store, source);
+    await vi.waitFor(() => expect(exists).toHaveBeenCalledOnce());
+
+    files.add(proxy);
+    announceMediaDerived(source);
+    expect(await resolvePreviewUrl(store, source)).toBe(`asset://${proxy}`);
+    finishOldCheck(false);
+    expect(await pending).toBe(`asset://${proxy}`);
+
+    expect(await resolvePreviewUrl(store, source)).toBe(`asset://${proxy}`);
+  });
+
   it("prefers the H.264 proxy when one exists for a video source", async () => {
     const { store, exists } = previewStore(
       (p) => p.includes("cache/proxies/"),

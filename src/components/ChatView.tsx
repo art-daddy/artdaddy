@@ -880,7 +880,7 @@ function ContextMeter({ session, model }: { session: SessionState | null; model:
       {usage.metered &&
         (usage.globalPaused ? (
           <span className="tabular-nums text-amber-400" title={CREDITS_PAUSED}>
-            {formatCredits(Math.max(0, usage.remaining))} cr left · AI paused
+            AI paused - {formatCredits(Math.max(0, usage.remaining))} cr left
           </span>
         ) : usage.over ? (
           // At zero the number is the least useful thing we can show: it states the dead end

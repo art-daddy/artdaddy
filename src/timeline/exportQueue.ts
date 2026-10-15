@@ -20,19 +20,22 @@ import { openProjectJobs } from "../tools/genJobs";
 import type { ProjectStoreAccess } from "../tools/store";
 import type { ClientToolContext } from "../tools/context";
 import {
+  EXPORT_PROTOCOL_VERSION,
   jobResult,
   jobSupervisor,
   whenJobEnds,
   type JobSupervisor,
   type JobView,
+  type ExportDeliveryPort,
+  type ExportDelivery,
 } from "../tools/jobSupervisor";
 import type { MutationOrigin } from "../project/MutationGate";
 import { notifyJobSettled, type SettledJob } from "../store/jobNotes";
 import { useExportJob } from "../store/exportJob";
 import { beginSessionActivity } from "../observability/crashWatch";
-import { createProgressReader, etaSeconds, progressFraction } from "./ffmpegProgress";
 import { recordStaging, releaseStaging } from "./exportStaging";
 import { setExportsBusy } from "../tools/workGate";
+import { projectKeyOfDir } from "../tools/dataRoot";
 
 /** Destinations with an export queued or running, so a second one is refused rather than raced. */
 const reserved = new Set<string>();
@@ -72,11 +75,74 @@ function flushBatch(id: string): void {
 }
 
 /** In-flight exports, awaited by {@link whenExportsSettle}. */
-const inflight = new Set<Promise<unknown>>();
+const inflight = new Map<string, { task: Promise<unknown>; retry?: () => Promise<unknown> }>();
 
 /** Per-job cancellation. Making the export outlive its turn removed the only way to stop one —
  *  the turn's own abort — so the queue owns that now. */
 const controllers = new Map<string, AbortController>();
+const deliveryPorts = new Map<string, ExportDeliveryPort>();
+
+export function localDeliveryPort(store: ProjectStoreAccess): ExportDeliveryPort {
+  const entries = new Map<string, ExportDelivery>();
+  const entry = (id: string) => {
+    const value = entries.get(id);
+    if (!value) throw new Error("unknown export intent");
+    return value;
+  };
+  const identity = async (file: string) => {
+    const probe = await store.probeMedia(file, 0);
+    if (!probe || probe.size <= 0) throw new Error("streaming artifact identity is unavailable");
+    return { sha256: probe.sha256, size: probe.size };
+  };
+  return {
+    protocol: async () => EXPORT_PROTOCOL_VERSION,
+    prepare: async (id, projectDir, stagePath, destPath, source) => {
+      if (!store.canRename || stagePath === destPath) throw new Error("export needs a distinct atomic staging path");
+      const value: ExportDelivery = { version: 1, id, project_dir: projectDir, stage_path: stagePath, dest_path: destPath,
+        state: "prepared", identity: null, created_at: Date.now(), followups_done: false, source };
+      entries.set(id, value);
+      return { ...value };
+    },
+    verify: async (id) => {
+      const value = entry(id);
+      if (value.state !== "prepared" && value.state !== "verified") throw new Error("export intent cannot be verified");
+      const proof = await identity(value.stage_path);
+      const currentState = entry(id).state;
+      if (currentState === "cancelled" || currentState === "failed") throw new Error("export intent was cancelled or failed");
+      value.identity = proof; value.state = "verified";
+      return { ...value };
+    },
+    publish: async (id) => {
+      const value = entry(id);
+      if (value.state !== "verified" && value.state !== "publishing" && value.state !== "published") throw new Error("export intent is not verified");
+      const staged = await store.exists(value.stage_path).catch(() => true);
+      const actual = await identity(staged ? value.stage_path : value.dest_path);
+      if (!value.identity || actual.sha256 !== value.identity.sha256 || actual.size !== value.identity.size) throw new Error("export artifact identity changed");
+      const currentState = entry(id).state;
+      if (currentState === "cancelled" || currentState === "failed") throw new Error("export intent was cancelled or failed");
+      if (staged) await store.rename(value.stage_path, value.dest_path);
+      value.state = "published";
+      return { ...value };
+    },
+    cancel: async (id) => {
+      const value = entry(id);
+      if (value.state === "published" || value.state === "cancelled") return false;
+      value.state = "cancelled"; return true;
+    },
+    fail: async (id) => {
+      const value = entry(id);
+      if (value.state === "published" || value.state === "cancelled") return false;
+      value.state = "failed"; return true;
+    },
+    list: async () => [...entries.values()].map((value) => ({ ...value })),
+    complete: async (id) => { entry(id).followups_done = true; return true; },
+    copy: async (id) => {
+      const value = entry(id);
+      if (value.state !== "prepared" || value.source?.kind !== "copy") throw new Error("copy intent is unavailable");
+      await store.copyFile(value.source.path, value.stage_path);
+    },
+  };
+}
 
 export interface QueuedExport {
   job_id: string;
@@ -215,7 +281,9 @@ export function listExportOutcomes(): Array<Record<string, unknown>> {
 export function cancelExport(jobId: string): boolean {
   const c = controllers.get(jobId);
   if (!c) return false;
-  c.abort();
+  const port = deliveryPorts.get(jobId);
+  if (port) void port.cancel(jobId).then((cancelled) => { if (cancelled) c.abort(); }).catch(() => undefined);
+  else c.abort();
   return true;
 }
 
@@ -238,6 +306,14 @@ export async function manageExportsTool(
 
   const jobId = String(args.job_id ?? "").trim();
   if (!jobId) return { ok: false, error: "job_id is required to cancel an export" };
+  const port = deliveryPorts.get(jobId);
+  if (port && controllers.has(jobId)) {
+    try {
+      const cancelled = await port.cancel(jobId);
+      if (cancelled) controllers.get(jobId)?.abort();
+      return { ok: true, cancelled, ...(cancelled ? {} : { state: "done", note: "the verified export was already published" }) };
+    } catch (error) { return { ok: false, error: `export cancellation could not be committed: ${String(error)}` }; }
+  }
   if (cancelExport(jobId)) return { ok: true, cancelled: true };
   const record = records.find((r) => r.job_id === jobId);
   if (!record)
@@ -260,6 +336,7 @@ export interface ExportSubmission {
 
 export interface ExportSpec {
   store: ProjectStoreAccess;
+  dependencies: readonly string[];
   /** Final destination. Reserved until the job settles. */
   destPath: string;
   /** Where the encode actually writes. Chosen by the caller, because the ffmpeg plan is built
@@ -321,7 +398,8 @@ function normalizeDest(p: string): string {
  *  which the gate's origin fence would refuse. The close fence still applies. */
 async function registerExportInLibrary(
   store: ProjectStoreAccess,
-  spec: Pick<ExportSpec, "destPath" | "filename">,
+  spec: Pick<ExportSpec, "destPath" | "filename"> & { jobId: string },
+  identity: ExportDelivery["identity"],
 ): Promise<string | null> {
   try {
     const { registerLibraryClip, stageByPath } = await import("../tools/import");
@@ -333,7 +411,7 @@ async function registerExportInLibrary(
       src,
       spec.filename,
       "video",
-      { kind: "export", job_id: spec.filename },
+      { kind: "export", job_id: spec.jobId, identity },
       spec.destPath,
     );
     return entry.id;
@@ -343,7 +421,7 @@ async function registerExportInLibrary(
 }
 
 /** Resolve once every export started in this process has settled (tests and a deliberate drain). */ export async function whenExportsSettle(): Promise<void> {
-  while (inflight.size) await Promise.allSettled([...inflight]);
+  while (inflight.size) await Promise.allSettled([...inflight.values()].map((activity) => activity.task));
 }
 
 /** In-flight export metrics. Separate from `inflight` on purpose — see the call site. */
@@ -394,6 +472,7 @@ export function __resetExportQueue(): void {
   inflight.clear();
   beacons.clear();
   controllers.clear();
+  deliveryPorts.clear();
   records.length = 0;
   snapshot = [];
   setExportsBusy(false);
@@ -405,20 +484,42 @@ export function __resetExportQueue(): void {
 
 /** Record the job, queue the encode, and return immediately. */
 export async function submitExport(spec: ExportSpec): Promise<ExportSubmission> {
+  spec = { ...spec, dependencies: [...spec.dependencies], ...(spec.meta ? { meta: { ...spec.meta } } : {}) };
+  if (spec.stagePath === spec.destPath || !spec.store.canRename) throw new Error("export requires atomic destination-volume staging; direct-output fallback is not supported");
   const key = normalizeDest(spec.destPath);
-  const ledger = await openProjectJobs(spec.store);
+  if (reserved.has(key)) throw new Error("export destination is already reserved");
+  reserved.add(key);
+  let supervisor: JobSupervisor | null;
+  try { supervisor = spec.supervisor ?? await jobSupervisor(); }
+  catch (error) { reserved.delete(key); throw error; }
+  if (typeof window !== "undefined" && (window.__TAURI_INTERNALS__ ?? window.__TAURI__) && !supervisor?.delivery) {
+    reserved.delete(key);
+    throw new Error("desktop export requires the verified native delivery protocol");
+  }
+  const port = supervisor?.delivery ?? localDeliveryPort(spec.store);
+  let ledger: Ledger;
+  try { ledger = await openProjectJobs(spec.store); }
+  catch (error) { reserved.delete(key); throw error; }
   // A supervised export lives as long as the app does, not the page: its record says so, or the
   // next page's ledger would call it interrupted while it is still running (jobLedger.ts).
   const session = spec.supervisor
     ? await spec.supervisor.launchId().catch(() => undefined)
     : undefined;
-  const jobId = await ledger.begin({
+  let jobId: string;
+  try { jobId = await ledger.begin({
     kind: "export",
     tool: "export",
     label: `the export ${spec.filename}`,
     ...(session ? { session } : {}),
-  });
-  reserved.add(key);
+  }); } catch (error) { reserved.delete(key); throw error; }
+  try {
+    const copyPath = spec.copyOf ? await spec.store.resolveMediaRef(spec.copyOf) : null;
+    if (spec.copyOf && !copyPath) throw new Error("copy export source is unavailable");
+    await port.prepare(jobId, spec.store.projectDir, spec.stagePath, spec.destPath,
+      spec.copyOf ? { kind: "copy", path: copyPath!, media_ref: spec.copyOf } : { kind: "render", paths: [...spec.dependencies] });
+  }
+  catch (error) { reserved.delete(key); await ledger.settle(jobId, { status: "failed", error: String(error) }); throw error; }
+  deliveryPorts.set(jobId, port);
   controllers.set(jobId, new AbortController());
   if (spec.batch) batchOf(spec.batch).open++;
   const queuePosition = Math.max(0, reserved.size - 1);
@@ -448,13 +549,19 @@ export async function submitExport(spec: ExportSpec): Promise<ExportSubmission> 
     : spec.copyOf
       ? (copyTail = copyTail.then(() => encode(spec, ledger, jobId, key)))
       : (queueTail = queueTail.then(() => encode(spec, ledger, jobId, key)));
-  track(task);
+  track(jobId, task);
   return { job_id: jobId, queue_position: queuePosition };
 }
 
-function track(task: Promise<unknown>): void {
-  inflight.add(task);
-  void task.finally(() => inflight.delete(task));
+function track(jobId: string, task: Promise<unknown>): void {
+  const activity: { task: Promise<unknown>; retry?: () => Promise<unknown> } = { task };
+  const release = async () => {
+    if (inflight.get(jobId) !== activity) return;
+    inflight.delete(jobId);
+    await activity.retry?.().catch(() => undefined);
+  };
+  activity.task = task.then(release, release);
+  inflight.set(jobId, activity);
 }
 
 type Ledger = Awaited<ReturnType<typeof openProjectJobs>>;
@@ -489,7 +596,16 @@ async function encode(spec: ExportSpec, ledger: Ledger, jobId: string, key: stri
     // Listed until it is renamed into place or removed, so a partial a crash or a quit leaves
     // behind is removed at the next launch (exportStaging.ts).
     if (staged) await recordStaging(spec.stagePath);
-    run.warnings = (await spec.run(signal, jobId)).warnings ?? [];
+    if (signal.aborted) throw new Error("export cancelled");
+    if (spec.copyOf) {
+      const port = deliveryPorts.get(jobId);
+      if (!port) throw new Error("copy delivery owner is missing");
+      await port.copy(jobId);
+    } else { run.warnings = (await spec.run(signal, jobId)).warnings ?? []; }
+    if (signal.aborted) throw new Error("export cancelled");
+    const port = deliveryPorts.get(jobId);
+    if (!port) throw new Error("export delivery owner is missing");
+    await port.verify(jobId);
     if (signal.aborted) throw new Error("export cancelled");
   } catch (e) {
     // A killed ffmpeg reports its own confusing error; the reason the user needs is the cancel.
@@ -538,17 +654,18 @@ interface Settle {
 /** Commit the file, then the project's records. The one path for an export this page ran and for
  *  one it adopted after a crash of the page, so both end exactly the same way. */
 async function settle(x: Settle): Promise<void> {
+  const delivery = deliveryPorts.get(x.jobId);
   // Committing by rename keeps the destination either untouched or complete. When the fs cannot
   // rename, the caller already pointed the encode at the destination and there is nothing to move.
   const staged = x.stagePath !== x.destPath;
   let { error } = x.run;
+  let publishedIdentity: ExportDelivery["identity"] = null;
   const { cancelled, stderrTail, warnings } = x.run;
   if (!error && staged) {
     try {
-      // A page that renamed it and died before telling the supervisor left it already in place.
-      const alreadyMoved =
-        !(await x.store.exists(x.stagePath)) && (await x.store.exists(x.destPath));
-      if (!alreadyMoved) await x.store.rename(x.stagePath, x.destPath);
+      const port = deliveryPorts.get(x.jobId);
+      if (!port) throw new Error("export delivery owner is missing");
+      publishedIdentity = (await port.publish(x.jobId)).identity;
       await releaseStaging(x.stagePath);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -557,6 +674,7 @@ async function settle(x: Settle): Promise<void> {
   // Never leave a partial file where a finished export belongs. One that cannot be removed now
   // stays listed, for the next launch to remove.
   if (error && staged) {
+    await deliveryPorts.get(x.jobId)?.fail(x.jobId).catch(() => false);
     await x.store.remove(x.stagePath).then(
       () => releaseStaging(x.stagePath),
       () => undefined,
@@ -564,8 +682,8 @@ async function settle(x: Settle): Promise<void> {
   }
   // From here a page that takes over must not touch the file again.
   await x.supervisor?.commit(x.jobId).catch(() => false);
-  reserved.delete(x.key);
   controllers.delete(x.jobId);
+  deliveryPorts.delete(x.jobId);
   patch(x.jobId, {
     state: error ? (cancelled ? "cancelled" : "failed") : "done",
     endedAt: Date.now(),
@@ -580,8 +698,9 @@ async function settle(x: Settle): Promise<void> {
   // Linked, never copied — the destination is often outside the project and can be hundreds of MB.
   // A cancelled run sets `error`, so nothing half-written is ever catalogued. A copy of a library
   // file is that file's bytes, so it is that file's ref.
-  const mediaRef = error ? null : (x.copyOf ?? (await registerExportInLibrary(x.store, x)));
+  const mediaRef = error ? null : (x.copyOf ?? (await registerExportInLibrary(x.store, x, publishedIdentity)));
   if (mediaRef) patch(x.jobId, { mediaRef });
+  reserved.delete(x.key);
 
   await x.ledger.settle(
     x.jobId,
@@ -610,7 +729,10 @@ async function settle(x: Settle): Promise<void> {
     beacons.add(beacon);
     void beacon.finally(() => beacons.delete(beacon));
   }
-  await x.supervisor?.forget(x.jobId).catch(() => false);
+  if (error || mediaRef || x.copyOf) {
+    await delivery?.complete(x.jobId).catch(() => false);
+    await x.supervisor?.forget(x.jobId).catch(() => false);
+  }
   const note = warnings.length
     ? `saved as ${x.filename} (${warnings.length} warning${warnings.length > 1 ? "s" : ""}: ${warnings.join("; ")})`
     : `saved as ${x.filename}`;
@@ -634,38 +756,32 @@ async function settle(x: Settle): Promise<void> {
 
 /** What render.ts gives an export job, for a page that did not start it. */
 interface ExportJobMeta {
-  kind: "export";
+  kind: "export" | "export_copy";
   projectDir: string;
   destPath: string;
   stagePath: string;
   filename: string;
   startedBy: "chat" | "elsewhere";
   submittedAt: number;
-  plan: import("./render").ExportJobPlan;
+  plan?: import("./render").ExportJobPlan;
+  copyOf?: string;
   telemetry?: ExportSpec["meta"];
   scratch?: string | null;
 }
 
 function exportMeta(v: JobView): ExportJobMeta | null {
   const m = v.meta as Partial<ExportJobMeta> | undefined;
-  if (v.lane !== "export" || m?.kind !== "export") return null;
-  if (!m.projectDir || !m.destPath || !m.stagePath || !m.filename || !m.plan) return null;
+  if (v.lane !== "export" || (m?.kind !== "export" && m?.kind !== "export_copy")) return null;
+  if (!m.projectDir || !m.destPath || !m.stagePath || !m.filename || (m.kind === "export" ? !m.plan : !m.copyOf)) return null;
   return m as ExportJobMeta;
 }
 
 /** Follow a running export's progress into the export dialog's job, the way the page that started
  *  it did. */
-function followProgress(sup: JobSupervisor, v: JobView, durationSec: number): () => void {
-  const totalMs = Math.max(0, durationSec * 1000);
-  const read = createProgressReader((r) =>
-    useExportJob.getState().update({
-      phase: "rendering",
-      fraction: progressFraction(r.outMs, totalMs),
-      etaSec: etaSeconds(r.outMs, totalMs, r.speed),
-      speed: r.speed,
-      frame: r.frame,
-    }),
-  );
+async function followProgress(sup: JobSupervisor, v: JobView, plan: import("./render").ExportJobPlan): Promise<() => void> {
+  const { exportProgressReporter } = await import("./render");
+  const read = exportProgressReporter(plan);
+  if (plan.stepDurations) read(`artdaddy_step=${v.step ?? 0}\n`);
   read(v.stdout_tail);
   return sup.subscribe(
     () => {},
@@ -680,17 +796,27 @@ function followProgress(sup: JobSupervisor, v: JobView, durationSec: number): ()
  *  running is followed, and committed when it ends. Its records, file and project follow-ups end
  *  exactly as if this page had started it (3h part 7). */
 export async function adoptExports(
-  opts: { contextFor?: (projectDir: string) => ClientToolContext } = {},
+  opts: { contextFor?: (projectDir: string) => ClientToolContext; projectId?: string } = {},
 ): Promise<number> {
   const sup = await jobSupervisor();
   if (!sup) return 0;
+  const port = sup.delivery;
+  if (!port) throw new Error("page adoption requires verified native delivery state");
+  const intents = await port.list();
   const contextFor = opts.contextFor ?? (await import("../tools/tauri")).makeTauriContext;
   let adopted = 0;
   for (const v of await sup.list()) {
     const m = exportMeta(v);
-    if (!m || records.some((r) => r.job_id === v.id)) continue;
-    if (v.committed) {
-      // The page that committed it died before it could let go; its records were written then.
+    if (!m) continue;
+    if (opts.projectId && projectKeyOfDir(m.projectDir) !== opts.projectId) continue;
+    const active = inflight.get(v.id);
+    if (active) {
+      active.retry = () => adoptExports({ ...opts });
+      continue;
+    }
+    const intent = intents.find((intent) => intent.id === v.id);
+    if (!intent) continue;
+    if (intent.followups_done) {
       await sup.forget(v.id).catch(() => false);
       continue;
     }
@@ -700,15 +826,18 @@ export async function adoptExports(
     const controller = new AbortController();
     controller.signal.addEventListener("abort", () => void sup.kill(v.id).catch(() => false));
     controllers.set(v.id, controller);
-    records.push({
-      job_id: v.id,
-      filename: m.filename,
-      destPath: m.destPath,
-      state: v.state === "queued" ? "queued" : "running",
-      startedAt: m.submittedAt || v.queued_at,
-    });
+    deliveryPorts.set(v.id, port);
+    if (!records.some((record) => record.job_id === v.id)) {
+      records.push({
+        job_id: v.id,
+        filename: m.filename,
+        destPath: m.destPath,
+        state: v.state === "queued" ? "queued" : "running",
+        startedAt: m.submittedAt || v.queued_at,
+      });
+    }
     changed();
-    track(finishAdopted(sup, v, m, key, contextFor));
+    track(v.id, finishAdopted(sup, v, m, key, contextFor));
   }
   return adopted;
 }
@@ -727,9 +856,9 @@ async function finishAdopted(
     unfollowState = sup.subscribe((c) => {
       if (c.id === v.id && c.state === "running") patch(v.id, { state: "running" });
     });
-    if (v.state === "running") {
+    if (v.state === "running" && m.plan) {
       useExportJob.getState().begin(() => cancelExport(v.id));
-      unfollowProgress = followProgress(sup, v, m.plan.duration);
+      unfollowProgress = await followProgress(sup, v, m.plan);
     }
     ended = await whenJobEnds(sup, v.id);
     unfollowState?.();
@@ -737,30 +866,38 @@ async function finishAdopted(
   }
   const ctx = contextFor(m.projectDir);
   const ledger = await openProjectJobs(ctx.store);
-  const run: RunOutcome = { error: null, cancelled: false, warnings: m.plan.warnings ?? [] };
+  const run: RunOutcome = { error: null, cancelled: false, warnings: m.plan?.warnings ?? [] };
   if (!ended || ended.killed) {
     run.cancelled = true;
     run.error = "export cancelled";
     if (m.scratch) await ctx.store.remove(m.scratch).catch(() => undefined);
-  } else if (
-    ended.code === 0 &&
-    !(await ctx.store.exists(m.stagePath)) &&
-    (await ctx.store.exists(m.destPath))
-  ) {
-    // The page that ran it renamed the file into place and died before saying so: it was checked
-    // then, and checking the empty staging path now would call a delivered export a failure.
-    if (m.scratch) await ctx.store.remove(m.scratch).catch(() => undefined);
+  } else if (!m.copyOf && (!m.plan || (await import("./render")).renderContractError(m.plan))) {
+    run.error = m.plan ? (await import("./render")).renderContractError(m.plan) : "unsupported render contract; export again with the current client";
   } else {
-    const { finishRenderJob } = await import("./render");
-    const res = (await finishRenderJob(ctx, m, jobResult(ended))) as {
-      ok?: boolean;
-      error?: string;
-      stderr_tail?: string;
-      warnings?: string[];
-    };
-    if (!res.ok) {
-      run.error = String(res.error ?? "render failed");
-      if (typeof res.stderr_tail === "string") run.stderrTail = res.stderr_tail;
+    const port = deliveryPorts.get(v.id);
+    const delivery = port ? (await port.list()).find((intent) => intent.id === v.id) : undefined;
+    if (ended.code === 0 && delivery?.identity && ["verified", "publishing", "published"].includes(delivery.state) &&
+        !(await ctx.store.exists(m.stagePath))) {
+      if (m.scratch) await ctx.store.remove(m.scratch).catch(() => undefined);
+    } else {
+      const { finishRenderJob } = await import("./render");
+      const res = (m.copyOf
+        ? { ok: true }
+        : await finishRenderJob(ctx, { ...m, plan: m.plan! }, jobResult(ended))) as {
+        ok?: boolean;
+        error?: string;
+        stderr_tail?: string;
+        warnings?: string[];
+      };
+      if (!res.ok) {
+        run.error = String(res.error ?? "render failed");
+        if (typeof res.stderr_tail === "string") run.stderrTail = res.stderr_tail;
+      } else {
+        try {
+          if (!port) throw new Error("export delivery owner is missing");
+          await port.verify(v.id);
+        } catch (error) { run.error = String(error); }
+      }
     }
   }
   await settle({
@@ -775,6 +912,7 @@ async function finishAdopted(
     startedAt: m.submittedAt || v.queued_at,
     ledger,
     supervisor: sup,
+    copyOf: m.copyOf,
     run,
   });
   const done = records.find((r) => r.job_id === v.id);

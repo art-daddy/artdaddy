@@ -28,6 +28,7 @@ import { listProjectFiles } from "../lib/files";
 import { relinkMedia } from "../lib/mediaLink";
 import { importPaths, uploadFiles } from "../lib/upload";
 import { useEditor } from "../store/editor";
+import { useCompatibility } from "../update/compatibility";
 import { open } from "@tauri-apps/plugin-dialog";
 import FileTree from "./FileTree";
 
@@ -54,6 +55,7 @@ async function openListView(container: HTMLElement) {
 describe("FileTree", () => {
   beforeEach(() => {
     platformName = "web";
+    useCompatibility.setState({ status: "allowed" });
     vi.mocked(uploadFiles).mockClear();
     vi.mocked(importPaths).mockClear();
     try {

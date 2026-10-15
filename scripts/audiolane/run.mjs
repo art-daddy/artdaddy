@@ -58,15 +58,12 @@ async function bundleProbe() {
   const result = await build({
     entryPoints: [path.join(ROOT, "src/preview/__audioProbe.ts")],
     bundle: true,
-    format: "iife",
+    format: "esm",
     platform: "browser",
     target: "chrome110",
     write: false,
     logLevel: "silent",
-    // The app is bundled by Vite, which always defines import.meta.env. An IIFE bundle has no
-    // import.meta at all, so a module that reads it at load (src/api/config.ts does) threw while
-    // the bundle evaluated and the probe never installed its entry points — on every OS. Give
-    // the probe the env a production build has, with no VITE_* overrides.
+    // Vite supplies import.meta.env; keep native import.meta.url for browser asset resolution.
     define: {
       "import.meta.env": JSON.stringify({
         MODE: "production",
@@ -84,13 +81,13 @@ async function bundleProbe() {
   );
   if (emptied.length) {
     const at = emptied.map((w) => `${w.location?.file}:${w.location?.line}`).join(", ");
-    throw new Error(`the probe bundle reads import.meta the IIFE cannot provide (${at})`);
+    throw new Error(`the probe bundle contains unsupported import.meta syntax (${at})`);
   }
   return result.outputFiles[0].text;
 }
 
 function serve(js) {
-  const html = `<!doctype html><meta charset="utf-8"><title>audio probe</title><script>${js}</script>`;
+  const html = `<!doctype html><meta charset="utf-8"><title>audio probe</title><script type="module">${js}</script>`;
   const media = makeFixtures();
   return new Promise((resolve) => {
     const server = createServer((req, res) => {

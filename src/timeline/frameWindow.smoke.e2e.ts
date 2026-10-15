@@ -153,6 +153,80 @@ function vclip(media: string, tin: number, tout: number, srcIn = 0, extra: Any =
   };
 }
 
+it.each([{ offset: 0, processed: false }, { offset: 60, processed: true }])(
+  "animated cover clips to its changing box in full exports and frame windows: %j", async ({ offset, processed }) => {
+  const white = path.join(dir, "cover-white.mp4");
+  await ff(["-y", "-f", "lavfi", "-i", `color=white:s=${W}x${H}:r=${FPS}:d=2`,
+    "-c:v", "libx264", "-pix_fmt", "yuv420p", white]);
+  const scene = timeline([track("cover", 0, [vclip(white, offset, offset + 60, 0, {
+    fit: "cover",
+    ...(processed ? { color: { brightness: 0.1 }, effects: [{ type: "blur", params: { radius: 2 } }] } : {}),
+    transform: { position: { x: 0.5, y: 0.5 },
+      scale_x: [{ t: 0, v: 0.5, ease: "hold" }, { t: sec(30), v: 0.5, ease: "hold" }],
+      scale_y: [{ t: 0, v: 0.5, ease: "hold" }, { t: sec(30), v: 0.25, ease: "hold" }] },
+  })])]);
+  const first = offset + 15;
+  const second = offset + 45;
+  const tag = `animated-cover-box-${offset}`;
+  const full = await referenceFrames(scene, [first, second], tag);
+  const luma = (frame: Buffer, column: number, row: number) => frame[row * W + column];
+  expect(luma(full.get(first)!, 160, 50), "earlier taller box paints its interior").toBeGreaterThan(200);
+  expect(luma(full.get(second)!, 160, 50), "later cover overflow must expose the black canvas").toBeLessThan(24);
+  for (const frame of [first, second]) {
+    expect(luma(full.get(frame)!, 160, 90), "inside the current box stays visible").toBeGreaterThan(200);
+    expect(luma(full.get(frame)!, 160, 20), "outside the current box stays black").toBeLessThan(24);
+    expect(maxDiff(await windowFrame(scene, frame, tag), full.get(frame)!)).toBe(0);
+  }
+}, 60_000);
+
+it.each([{ offset: 0, animatedSize: false }, { offset: 60, animatedSize: true }])(
+  "rotation preserves the fitted picture beyond its original box: %j", async ({ offset, animatedSize }) => {
+  const white = path.join(dir, "rotation-white.mp4");
+  await ff(["-y", "-f", "lavfi", "-i", `color=white:s=${W}x${H}:r=${FPS}:d=3`,
+    "-c:v", "libx264", "-pix_fmt", "yuv420p", white]);
+  const scene = timeline([track("rotation", 0, [vclip(white, offset, offset + 90, 0, {
+    fit: "cover",
+    rotate: [{ t: 0, v: 0, ease: "hold" }, { t: sec(30), v: 45, ease: "hold" },
+      { t: sec(60), v: -30, ease: "hold" }],
+    transform: { position: { x: 0.5, y: 0.5 }, scale_x: 0.5,
+      scale_y: animatedSize ? [{ t: 0, v: 0.5, ease: "hold" }, { t: sec(30), v: 0.25, ease: "hold" },
+        { t: sec(60), v: 0.5, ease: "hold" }] : 0.25 },
+  })])]);
+  const frames = [offset + 15, offset + 45, offset + 75];
+  const tag = `rotation-overflow-${offset}`;
+  const full = await referenceFrames(scene, frames, tag);
+  const luma = (frame: number, column: number, row: number) => full.get(frame)![row * W + column];
+  expect(luma(frames[0], 200, 142), "upright picture does not paint outside its box").toBeLessThan(24);
+  expect(luma(frames[1], 200, 142), "clockwise corner extends beyond the original box").toBeGreaterThan(200);
+  const opposite = animatedSize ? { column: 206, row: 34 } : { column: 229, row: 55 };
+  expect(luma(frames[0], opposite.column, opposite.row), "opposite corner starts outside the picture").toBeLessThan(24);
+  expect(luma(frames[2], opposite.column, opposite.row), "negative rotation preserves the opposite corner").toBeGreaterThan(200);
+  for (const frame of frames) {
+    expect(luma(frame, 160, 90), "rotation retains the fitted centre").toBeGreaterThan(200);
+    expect(maxDiff(await windowFrame(scene, frame, tag), full.get(frame)!)).toBe(0);
+  }
+}, 60_000);
+
+it("rotation keeps contain-fit padding transparent above another track", async () => {
+  const white = path.join(dir, "contain-rotation-white.mp4");
+  const green = path.join(dir, "contain-rotation-green.mp4");
+  for (const [color, file] of [["white", white], ["green", green]])
+    await ff(["-y", "-f", "lavfi", "-i", `color=${color}:s=${W}x${H}:r=${FPS}:d=1`,
+      "-c:v", "libx264", "-pix_fmt", "yuv420p", file]);
+  const scene = timeline([
+    track("background", 0, [vclip(green, 0, 30)]),
+    track("contained", 1, [vclip(white, 0, 30, 0, { fit: "contain", rotate: 45,
+      transform: { position: { x: 0.5, y: 0.5 }, scale_x: 0.5, scale_y: 0.25 } })]),
+  ]);
+  const frame = 15;
+  const full = await referenceFrames(scene, [frame], "rotation-contain-alpha");
+  const luma = full.get(frame)!;
+  expect(luma[90 * W + 160], "fitted picture remains visible").toBeGreaterThan(200);
+  expect(luma[140 * W + 210], "transparent rotated padding reveals the lower track")
+    .toBeCloseTo(luma[10 * W + 10], 0);
+  expect(maxDiff(await windowFrame(scene, frame, "rotation-contain-alpha"), luma)).toBe(0);
+}, 60_000);
+
 beforeAll(async () => {
   await fsp.mkdir(dir, { recursive: true });
   ctx = mkCtx(dir);

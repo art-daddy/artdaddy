@@ -1,12 +1,13 @@
 {
-  "$schema_note": "Generated from the live tool registry (v4/tools/catalog.py) - do not hand-edit; refresh with `npm run codegen`.",
-  "version": "2.8.5",
-  "generated_from": "src/akaru/turn/tools/definitions.py::ALL_TOOLS",
-  "count": 55,
+  "version": "3.0.0",
+  "compatibility": {
+    "generation": 1,
+    "minimum_generation": 1
+  },
+  "authored_in": "src/contract/catalog.json",
   "tools": [
     {
       "name": "add_captions",
-      "expensive": true,
       "description": "Caption the spoken audio: transcribes it, splits it into caption-sized phrases on word boundaries, and places the text clips — one atomic, undoable action. Use this for captions/subtitles rather than building them by hand out of get_transcript + add_text_clips.\n\nTranscription runs LOCALLY and is cached per source, so re-captioning the same footage costs nothing.\n\nAlready have an SRT/WebVTT file? Import it, then pass its `subtitle_media_ref` to place its cues at their authored timecodes instead — a subtitle asset can never be placed with add_clips.\n\nOmit `track_id` and it captions the audio track with the most speech. Chunking is done for you: each caption holds as many words as fit on ONE line of the caption box at its font and size on this canvas (so a vertical canvas or a bigger size makes shorter captions), never past a sentence end; `max_words` / `max_characters` can only make them shorter. `max_gap_seconds` holds a caption across a short pause instead of blinking off (default 0.5s; 0 disables).\n\n`style`, `transform` and `animation` are OPTIONAL OVERRIDES — omit them all for the app's default caption look, and do NOT invent fonts, colours, outlines, boxes or animations the user did not ask for.\n\nReturns {ok, created:[{clip_id, track_id}], count, caption_group, source_track} plus a change delta — patch your model, don't re-read. Keep the `caption_group`: it restyles or removes the whole set in one update_text / remove_clips call.",
       "parameters": {
         "type": "object",
@@ -328,11 +329,17 @@
           }
         },
         "additionalProperties": false
-      }
+      },
+      "expensive": true,
+      "effect": "project-mutation",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "add_clips",
-      "expensive": false,
       "description": "Place one or more media clips on the timeline in a single atomic action — video, image, lottie, or audio (kind detected from the source). Placement only: it sets where a clip sits and its source trim; set look and sound (transform, volume, ducking, effects, colour, keyframes, transitions) afterwards with the edit tools.\n\nClips on the same track are sequential and tracks are layers: if a new clip overlaps one already on that track, the existing clip is trimmed, split, or removed to make room (like dragging onto occupied space). Other tracks are untouched. To splice footage in WITHOUT overwriting — pushing everything after it right — use `insert_clips` instead.\n\nPer entry: `media_ref` (a `media_...` ref from generate_*/import_media or a chat attachment's asset_id — never a filesystem path) and `timeline_in` (the timeline position in PROJECT FRAMES at the canvas fps — copy from get_timeline, don't do fps math). Optionally set a length: `timeline_out` (project frames) or `source_span` = [startSeconds, endSeconds] to cut an exact span of the source; omit both to place the whole source at 1x. If you set both, `source_span` wins and a disagreeing timeline_out/duration is ignored (with a note). A clip never runs past the end of its media: a video or audio clip given more frames than its media holds stops where the media ends, and a note says where. For audio shorter than the target span, give `timeline_out` plus `loop:true` (repeat) or `stretch:true` (time-fit); if you set both, loop wins. Images and lottie are stills.\n\nUsually omit `track_id`: each clip auto-routes to its default zone (video / image / lottie to the video layer, audio to the audio track, created if missing); name one only to target a specific existing lane. A video's own audio is auto-split onto an audio track as a LINKED clip (moves/trims/deletes together), leaving the video visual-only.\n\nReturns `{ok, created:[{clip_id, kind, track_id}], count}` — keep the returned clip_ids to edit clips later. One undo step; one bad entry rejects the whole call. Also returns a change delta — patch your model, don't re-read.\n\nIf the landing region was NOT empty the reply also carries `overwrote` `{removed:[clip_id], shortened:[{id, was, now, was_clip}]}` and a matching `warnings` line: `removed` clips are gone, and a clip cut at a boundary comes back under a NEW id (`was_clip` names the one it came from). Read it — it is the only report of work that was already on the timeline being destroyed, and `undo` is what restores it. If it names material you did not mean to touch, say so instead of describing the timeline as unchanged.",
       "parameters": {
         "type": "object",
@@ -399,11 +406,17 @@
           "entries"
         ],
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "project-mutation",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "add_text_clips",
-      "expensive": false,
       "description": "Place one or more on-screen TITLES / lower-thirds / callouts in a single atomic action. Text renders as an overlay; it takes no media source.\n\nFor captions of SPOKEN AUDIO use `add_captions` instead — it transcribes, splits on word boundaries and times every caption for you. Reach for this tool when you already know the words and where they go.\n\nPer entry: `timeline_in` + `timeline_out` (or `duration`) in frames, plus `content` (the words; a string, or runs), and optional `style`, `transform` (x/y/anchor position), and `animation`. `style` accepts `preset` (boxed, clean-white, editorial, headline, minimal, punchy), `font` (Anton, Bebas Neue, Oswald, Playfair Display, Poppins), `size` ('s'/'m'/'l'/'xl' or px), `color` (#hex), `outline` {color, width}, `shadow` {color, depth}, and `box` {color, opacity, padding}. `animation.preset` names a motion (pop-in, slide-up, typewriter, …). Omit style and animation for the app's default look rather than inventing one the user didn't ask for.\n\nA track shows ONE text at a time, so entries that overlap in time must go on DIFFERENT tracks — that is how two titles share the screen. `track_id` is optional and usually best left out: omitted, the whole batch is placed on a text track with room, creating one if every existing track is busy, so it never collides with captions or titles already there. Name a `track_id` only when you specifically want these on a known track; if it is already occupied in that range the call is refused and names a free one.\n\nReturns `{ok, created:[{clip_id, track_id}], count}`. One undo step; one bad entry rejects the whole call. Also returns a change delta — patch your model, don't re-read.\n\nTo CHANGE text that is already on the timeline — its words, style, position or animation — use `update_text`. Never remove and re-add clips to restyle them: that discards their ids, costs the user two undo steps, and re-sends every timing you already got right.",
       "parameters": {
         "type": "object",
@@ -885,11 +898,17 @@
           "entries"
         ],
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "project-mutation",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "add_track",
-      "expensive": false,
       "description": "Add an empty track. `kind` is what the track carries — 'video' (a visual layer; the default), 'text' (caption overlays), or 'audio' (a mixed bed). Optional `id` (auto-generated if omitted) and `z` (stacking / track order; higher = on top, for split-screen / picture-in-picture). Audio is summed, so an audio track's `z` is just its place in the stack, not a mix priority. Returns `{ok, track_id}`. Also returns a change delta — patch your model, don't re-read.",
       "parameters": {
         "type": "object",
@@ -913,11 +932,17 @@
           }
         },
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "project-mutation",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "apply_color",
-      "expensive": false,
       "description": "Author/merge a colour grade on one or more clips, atomically — the colorist path (looks / FX go to apply_effects). Pass any of the typed knobs below; they MERGE onto the clip's current grade (only the knobs you pass change). To COPY a grade between clips, read a clip's `color` from get_timeline / inspect_color and pass it back as `color` (a whole-grade object). `reset` true (or `color` null) starts from a neutral grade; clearing everything removes the grade. Out-of-range values are clamped; omitted knobs keep their current value. An unknown knob is rejected. Returns `{ok, updated, color}` — the resulting grade per clip, the same object `color` accepts, so copying a look is passing it straight back. Grading is subtle — use small values. Verify with inspect_color (graded look + scopes): loop apply_color → inspect_color → read gap → adjust. Also returns a change delta — patch your model, don't re-read.\n\nKnobs — group: knob (range, neutral):\n  Primaries — exposure (-3..3 EV, 0), brightness (-1..1, 0), contrast (0..3, 1), saturation (0..3, 1), gamma (0.1..3, 1), vibrance (-2..2, 0), temperature (1000..40000 K, 6500), tint (-1..1, 0)\n  Levels — highlights (-1..1, 0), shadows (-1..1, 0), blacks (-1..1, 0), whites (-1..1, 0)\n  Colour wheels — shadowsHue (0..360°, 0), shadowsAmount (0..1, 0), shadowsLum (-0.5..0.5, 0), midsHue (0..360°, 0), midsAmount (0..1, 0), midsGamma (0.5..2, 1), highsHue (0..360°, 0), highsAmount (0..1, 0), highsGain (0.5..1.5, 1)\n  Curves — masterCurve (no default), redCurve (no default), greenCurve (no default), blueCurve (no default)\n  LUT — lut (no default)",
       "parameters": {
         "type": "object",
@@ -1121,11 +1146,17 @@
           "clip_ids"
         ],
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "project-mutation",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "apply_effects",
-      "expensive": false,
       "description": "Add/update or remove effects on one or more clips (a merge-by-type stack), atomically — the looks / FX path (colour grading goes to apply_color). `add` is a list of {type, params, enabled?} merged by type; `remove` is a list of type names to drop. `params` holds ONLY that effect's own knobs, keyed by name — send just the ones you care about. Params you omit keep their current value, else the default below, so `{type:\"glow\"}` alone renders a real glow; out-of-range values are clamped. A param that does not belong to the effect is rejected. Routed automatically by clip kind — `denoise` means the video or the audio one depending on the clip. Pass `enabled:false` to bypass an effect without losing its settings. Returns `{ok, updated, effects}`, where `effects` is the resulting stack per clip in the same shape `add` accepts — so copying a look between clips is passing it straight back. Also returns a change delta — patch your model, don't re-read.\n\nVIDEO / IMAGE effects — type: param (range, default):\n  Blur & Sharpen — blur: radius (0..50px, 8); sharpen: sharpness (0..3, 1); motion: frames (2..12 frames, 3)\n  Noise & Grain — denoise: strength (0..20, 4); grain: grain (0..100, 15)\n  Stylize — vignette: vignette (0..1, 0.3); glow: intensity (0..100, 25), opacity (0..1, auto)\n  Detail — clarity: clarity (-1..1, 0.3), dehaze (-1..1, 0)\n  Keying — chroma: color (default '#00FF00'), similarity (0..1, 0.3), blend (0..1, 0.1)\n  Utility — custom: expr (no default)\nAUDIO effects (audio clips) — type: param (range, default):\n  Noise Reduction — denoise: reduction_db (0.01..97 dB, 12)\n  Filter and EQ — eq: bass (-20..20 dB, 0), treble (-20..20 dB, 0)\n  Amplitude and Compression — compressor: threshold (-60..0 dB, -18), ratio (1..20:1, 4); loudnorm: target (-70..-5 LUFS, -14)\n  Reverb — reverb: room (0..1, 0.3)\n  Stereo Imagery — pan: balance (-1..1, 0)\n\nRight-size denoise / loudnorm off inspect_media's noise + loudness numbers.",
       "parameters": {
         "type": "object",
@@ -1209,11 +1240,17 @@
           "clip_ids"
         ],
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "project-mutation",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "clip_video",
-      "expensive": false,
       "description": "Extract the [start_s, end_s] window of a video file and save it to the library, returning its `media_ref`. Default is a fast stream-copy (cuts on keyframes); set `reencode=true` for sub-second-accurate cuts. Works on a library `media_ref` only — for a remote URL use `download_video`, which windows the same way.",
       "parameters": {
         "type": "object",
@@ -1249,11 +1286,17 @@
           "output_name"
         ],
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "project-job",
+      "status": "withdrawn",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "crop_image",
-      "expensive": false,
       "description": "Crop an existing image into a new image — a pure pick: source pixels are kept byte-for-byte inside the chosen rectangle, no resampling, padding, or aspect adjustment. Give a `media_ref` (a library asset id, filename, or image artifact id), plus `bbox` = {x, y, w, h} in source pixels; the output is exactly those pixels (a bbox past the edges is clamped; an empty clamp fails). Output shape equals the clamped bbox — to change aspect/size, pick a different bbox. The crop is saved to the library and returned as a `media_ref` (the handle every other tool takes), with `filename`, the final `bbox` in source-pixel coords, and `size`.",
       "parameters": {
         "type": "object",
@@ -1297,12 +1340,18 @@
           "bbox"
         ],
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "project-job",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "download_video",
-      "expensive": false,
-      "description": "Download a video from a URL into the project library (near-empty outputs are rejected), returning a `media_ref`. URLs only — to window a file already on disk, use `clip_video`.\n\nBy default the download is VIDEO-ONLY (smaller/faster); set `with_audio=true` when you need the sound (a narration / a-roll source you'll transcribe or keep). Omit start_s and end_s to fetch the whole video (the usual case); pass BOTH for a specific [start_s, end_s] window.\n\nReturns {ok, media_ref, path, duration_s, width, height, fps, has_audio} plus full `metadata` (format, streams, codec, audio).",
+      "description": "Download a video from a URL into the project library (near-empty outputs are rejected), returning a `media_ref`. URLs only — for a source already in the library, select its source_span with add_clips or insert_clips instead.\n\nBy default the download is VIDEO-ONLY (smaller/faster); set `with_audio=true` when you need the sound (a narration / a-roll source you'll transcribe or keep). Omit start_s and end_s to fetch the whole video (the usual case); pass BOTH for a specific [start_s, end_s] window.\n\nReturns {ok, media_ref, path, duration_s, width, height, fps, has_audio} plus full `metadata` (format, streams, codec, audio).",
       "parameters": {
         "type": "object",
         "properties": {
@@ -1332,11 +1381,17 @@
           "output_name"
         ],
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "project-job",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "duplicate_project",
-      "expensive": false,
       "description": "Save a copy of a project (timeline, library and chat history) as a brand-new project, e.g. a backup before a risky change. Nothing switches: you keep editing the current project and the user's screen stays on it; the copy waits in the user's project list. Name the copy for what it keeps (e.g. 'before the selects'). Defaults to copying the CURRENT project when `project` is omitted. Returns {id, name}.",
       "parameters": {
         "type": "object",
@@ -1352,12 +1407,18 @@
         },
         "required": [],
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "app-operation",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "export",
-      "expensive": true,
-      "description": "Render the finished timeline to an mp4 — or deliver SEPARATE files into a folder: library media as it is, or timeline clips one per file (see SEPARATE FILES).\n\nAuthor + register `timeline_json` first (the export also runs the render preflight).\n\nReturns IMMEDIATELY with {ok, status:'exporting'|'queued', job_id, saved_to, queue_position} — the file does NOT exist yet, and a long timeline takes minutes. Everything that can REFUSE the export still happens before this returns (validation, media still generating, offline sources, a destination already being written), so an `ok` means the render really did start. Exports run one at a time; `queue_position` > 0 means yours is waiting. The destination is only written when the render SUCCEEDS, so a failed export never damages a file already there.\n\nTo learn how it FINISHED, call manage_exports action='list': it reports every export this session with its state ('done'/'failed'), the error when one failed, and `media_ref` for the delivered file. An export that finished is registered in the library, so you can inspect_media that `media_ref` to check what actually shipped — the only way to look at the delivered file rather than at the timeline it came from.\n\nONE export per request. The default destination never overwrites — it de-dupes to \"name 2.mp4\", \"name 3.mp4\" — so every extra call leaves the user another file to sort through. Do NOT re-export to check your own work: inspect the TIMELINE with inspect_timeline BEFORE exporting, which renders the same frames without writing a deliverable. Export again only if the user asks, or to redo one you just queued with the wrong settings (cancel that one with manage_exports). If the finished file turns out to have a problem, say so and let the user decide — do not silently start another render.\n\n`resolution`, `quality` and `fps` default to the project's own settings, so an export with no options re-encodes at the canvas size, frame rate and the standard quality.\n\nSEPARATE FILES: pass `media_refs` and/or `clip_ids` instead of exporting the\nwhole timeline. Each becomes its own file and its own job in the export queue:\n  - `media_refs`: library assets, copied byte for byte (no re-encode, no\n    watermark). Clips cut with clip_video, generated media, any library file.\n  - `clip_ids`: clips on the timeline. Each file is what the preview shows over\n    that clip's span (every track there, captions, transitions, sound), with the\n    ArtDaddy watermark and no end card.\nTwo or more files are numbered in the order given ('01 <name>', '02 <name>').\nThe reply is {ok, status, exports:[{job_id, saved_to, media_ref|clip_id,\nduration_s?, queue_position}], folder, note}; manage_exports reports each job.\nWhen the user wants clips or files \"in a folder\", deliver them this way: never\noffer a zip of the project or tell them to copy files themselves.\n\nOMIT `output_path` and `output_dir` unless the user named a destination — the default drops the file(s) in their Downloads folder, and that is what the in-app Export dialog does when they do not pick one. `output_dir` takes a folder NAME (made inside Downloads) or an absolute path; `output_path` names ONE file.\n\nNLE interchange (FCPXML/XMEML for Premiere and Resolve, Final Cut, Premiere .jsx, a self-contained project bundle) and H.265/ProRes codecs are deferred — see ideas.md. Do not offer them.",
+      "description": "Render the finished timeline to an mp4 — or deliver SEPARATE files into a folder: library media as it is, or timeline clips one per file (see SEPARATE FILES).\n\nAuthor + register `timeline_json` first (the export also runs the render preflight).\n\nReturns IMMEDIATELY with {ok, status:'exporting'|'queued', job_id, saved_to, queue_position} — the file does NOT exist yet, and a long timeline takes minutes. Everything that can REFUSE the export still happens before this returns (validation, media still generating, offline sources, a destination already being written), so an `ok` means the render really did start. Exports run one at a time; `queue_position` > 0 means yours is waiting. The destination is only written when the render SUCCEEDS, so a failed export never damages a file already there.\n\nTo learn how it FINISHED, call manage_exports action='list': it reports every export this session with its state ('done'/'failed'), the error when one failed, and `media_ref` for the delivered file. An export that finished is registered in the library, so you can inspect_media that `media_ref` to check what actually shipped — the only way to look at the delivered file rather than at the timeline it came from.\n\nONE export per request. The default destination never overwrites — it de-dupes to \"name 2.mp4\", \"name 3.mp4\" — so every extra call leaves the user another file to sort through. Do NOT re-export to check your own work: inspect the TIMELINE with inspect_timeline BEFORE exporting, which renders the same frames without writing a deliverable. Export again only if the user asks, or to redo one you just queued with the wrong settings (cancel that one with manage_exports). If the finished file turns out to have a problem, say so and let the user decide — do not silently start another render.\n\n`resolution`, `quality` and `fps` default to the project's own settings, so an export with no options re-encodes at the canvas size, frame rate and the standard quality.\n\nSEPARATE FILES: pass `media_refs` and/or `clip_ids` instead of exporting the\nwhole timeline. Each becomes its own file and its own job in the export queue:\n  - `media_refs`: library assets, copied byte for byte (no re-encode, no\n                    watermark). Generated media or any other library file.\n  - `clip_ids`: clips on the timeline. Each file is what the preview shows over\n    that clip's span (every track there, captions, transitions, sound), with the\n    ArtDaddy watermark and no end card.\nTwo or more files are numbered in the order given ('01 <name>', '02 <name>').\nThe reply is {ok, status, exports:[{job_id, saved_to, media_ref|clip_id,\nduration_s?, queue_position}], folder, note}; manage_exports reports each job.\nWhen the user wants clips or files \"in a folder\", deliver them this way: never\noffer a zip of the project or tell them to copy files themselves.\n\nOMIT `output_path` and `output_dir` unless the user named a destination — the default drops the file(s) in their Downloads folder, and that is what the in-app Export dialog does when they do not pick one. `output_dir` takes a folder NAME (made inside Downloads) or an absolute path; `output_path` names ONE file.\n\nNLE interchange (FCPXML/XMEML for Premiere and Resolve, Final Cut, Premiere .jsx, a self-contained project bundle) and H.265/ProRes codecs are deferred — see ideas.md. Do not offer them.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -1418,11 +1479,82 @@
         "required": [],
         "additionalProperties": false
       },
+      "expensive": true,
+      "effect": "deliverable",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ],
       "note": "ffmpeg export runs client-side; must pixel-match the WebGL preview."
     },
     {
-      "name": "generate_image",
+      "name": "extract_style",
+      "description": "Create a new reusable editorial STYLE from 1-5 example videos. Analyzes the examples and writes a style guide (pacing, when-to-cut, sourcing, captions, composition, look, restraint) that future runs can select to edit in that style. Use this when the user wants to capture \"edit like THIS\" from reference videos, not to edit the current run.\n\nInputs:\n  - references: 1-5 example videos. Each is a library `media_ref` (media_...\n    id or filename) OR a video URL (any that the downloader supports). If a\n    URL can't be downloaded, the tool returns an error asking you to import\n    it first and pass its media_ref.\n  - style_name: a new lowercase id (a-z, 0-9, - or _). Must not already exist.\n\nLimits: at most 5 references and 1 hour of total footage.\n\nPersists the style as version 1 (editable later) and returns {ok, style_name, version, style_path, metrics_summary, draft_preview, cost, warnings}. The draft is saved immediately; the user can review the preview and edit the file to refine it.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "references": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "maxItems": 5,
+            "description": "1-5 example videos: library media_refs (media_... ids or filenames) and/or video URLs."
+          },
+          "style_name": {
+            "type": "string",
+            "description": "New style id (lowercase a-z0-9, - or _, 2-64 chars)."
+          }
+        },
+        "required": [
+          "references",
+          "style_name"
+        ],
+        "additionalProperties": false
+      },
       "expensive": true,
+      "effect": "project-job",
+      "status": "withdrawn",
+      "surfaces": [
+        "app",
+        "mcp"
+      ],
+      "note": "client acquires (yt-dlp/local) + re-encodes the reels + parses + versions + writes the style into the project; the ONE whole-video Gemini pass is a thin server sub-call (/ai/style_analyze). The deterministic cv2 measure path is dead code."
+    },
+    {
+      "name": "find_content",
+      "description": "Locate specific content on an image and report what's in it. Give an image plus a description of the target (e.g. \"the main tweet\", \"the article headline\", \"the face in the foreground\"). Works on any image — web screenshots (from `get_page_image`), AI-generated images, downloaded stock, video frames, uploads, prior crops.\n\nReturns `bbox` (a TIGHT {x, y, w, h} rectangle on the input image, no padding — pass it to `crop_image` to cut the region), `contents` (verbatim text in the region, non-text elements noted in [brackets] like [logo: UNICEF] — usually enough to decide without looking at the pixels), `label` (a short phrase), and `media_ref`/`image_size` (echoed; bbox is in this image's pixel space). If the target isn't present, returns ok:true with an empty bbox and label:\"not found\".",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "media_ref": {
+            "type": "string",
+            "description": "The image to search — a library asset ref (media_... id or filename) or an image artifact id."
+          },
+          "prompt": {
+            "type": "string",
+            "description": "Free-text description of the target - be detailed and specific about what to look for in the image."
+          }
+        },
+        "required": [
+          "media_ref",
+          "prompt"
+        ],
+        "additionalProperties": false
+      },
+      "expensive": true,
+      "effect": "read",
+      "status": "withdrawn",
+      "surfaces": [
+        "app",
+        "mcp"
+      ],
+      "note": "client resolves + downsamples + tiles the screenshot; the hosted bbox-model call is a thin server sub-call (/ai/vision_image)."
+    },
+    {
+      "name": "generate_image",
       "description": "Generate one or more AI images from a text prompt — optionally guided by reference images (image editing / character & style consistency). Results are saved to the project asset library; YOU place them with add_clips (a full-frame still, an overlay, a title card, or a `start_frame` for generate_video).\n\nFor on-screen TEXT or strong layout control prefer 'nano-banana-pro' or a 'gpt-image' model. Pass `reference_images` (library asset ids) to edit an existing image or hold a look across generations.\n\n`model` (default 'nano-banana-pro'): nano-banana | nano-banana-pro | nano-banana-2 | gpt-image-1.5 | gpt-image-2 | mai-image-2.5 — see list_models. `aspect_ratio` default '9:16' (vertical). `count` 1-4.\n\nReturns IMMEDIATELY with {ok, model, count, status:'generating', assets:[{media_ref, kind:'image'}]} — the picture does NOT exist yet. Each `media_ref` is a real library handle you can pass straight to add_clips; the clip shows a placeholder until the image lands and then fills in by itself.\n\nAn export refuses while any generated media is still pending. Costs real money.",
       "parameters": {
         "type": "object",
@@ -1491,11 +1623,17 @@
         ],
         "additionalProperties": false
       },
+      "expensive": true,
+      "effect": "project-job",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ],
       "note": "client owns the model catalog + validation + result persistence; the authed provider call is a thin server sub-call (/ai/generate/image)."
     },
     {
       "name": "generate_music",
-      "expensive": true,
       "description": "Generate a short music clip from a description — an instrumental bed, or (on models that support lyrics, e.g. lyria-3-pro) a full song with sung vocals. Returns a ready-to-use audio file; YOU decide where it goes on the timeline and how to fit it.\n\nWhen to use: a music bed under narration / a-roll, an intro sting, an outro. Describe the music with any of: 'mood' (uplifting | tense | dreamy | epic | chill …), 'genre' (lofi hip hop | cinematic orchestral | synthwave | ambient | corporate …), 'bpm' (tempo), and/or a free-text 'prompt' for extra detail (instruments, references). Give at least one of prompt / mood / genre. 'instrumental' defaults true (no vocals) — best under a voiceover; set false to allow singing. For sung vocals, pass 'lyrics' (optionally with [Verse]/[Chorus] tags) and/or 'style_instructions' (a delivery note) — these apply ONLY to models whose list_models shows supports_lyrics / supports_style_instructions and are ignored by instrumental-only models.\n\nReturns IMMEDIATELY with {ok, media_ref, instrumental, status:'generating'} — the music does NOT exist yet (~30-60s). The `media_ref` is a real library handle you can pass straight to add_clips; the clip shows a placeholder until the audio lands. An export refuses while any generated media is still pending.\n\nThe exact LENGTH is not known until it lands: use inspect_media once it is ready, or set the clip length you want and rely on loop/stretch below.\n\nHow to use the result: add a clip {kind:'audio', media_ref:<media_ref>, source_in:0, source_out:<len>, timeline_in:<t>, timeline_out:<t>+<len>} wherever you want it. To cover a scene LONGER than the clip, set loop:true (repeats to fill) or stretch:true; for a SHORTER span pick a smaller source_out. Keep it low under a voice (e.g. volume:0.12) and add duck:{against:'<voice track id>'} so it sits beneath the narration. Identical inputs are cached, so re-calling is free.",
       "parameters": {
         "type": "object",
@@ -1545,11 +1683,17 @@
         "required": [],
         "additionalProperties": false
       },
+      "expensive": true,
+      "effect": "project-job",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ],
       "note": "client validates + composes the prompt + gates caps and does the ffmpeg re-mux + persistence; the Lyria call is a thin server sub-call (/ai/music)."
     },
     {
       "name": "generate_video",
-      "expensive": true,
       "description": "Generate a short AI video clip from a text prompt — optionally animating a still you supply as the first frame (image-to-video), interpolating from a `start_frame` to an `end_frame` (first → last keyframe), or guiding the shot with `reference_images` of a subject to keep consistent. The result is saved to the project asset library (with audio when the model produces it); YOU place it with add_clips, which auto-splits its audio onto an audio track.\n\nBest practice: generate the look first with generate_image, then pass that as `start_frame` (add an `end_frame` to control the landing frame — the clip interpolates start → end).\n\n`model` (default 'veo-3.1-fast'): veo-3.1 | veo-3.1-fast (fast = cheaper / quicker) — see list_models. `aspect_ratio` '9:16' (default) or '16:9'. `duration` 4 | 6 | 8 seconds (default 8).\n\nReturns IMMEDIATELY with {ok, model, media_ref, kind:'video', status:'generating'} — the clip does NOT exist yet and takes ~1-15 min. The `media_ref` is a real library handle you can pass straight to add_clips; the clip shows a placeholder until the video lands and then fills in by itself.\n\nAn export refuses while any generated media is still pending. Costs real money.",
       "parameters": {
         "type": "object",
@@ -1625,11 +1769,17 @@
         ],
         "additionalProperties": false
       },
+      "expensive": true,
+      "effect": "project-job",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ],
       "note": "client owns the model catalog + validation + result persistence; the authed provider call is a thin server sub-call (/ai/generate/video)."
     },
     {
       "name": "generate_voiceover",
-      "expensive": true,
       "description": "Generate a spoken voiceover (text-to-speech) from a line of text.\n\nWhen to use: to narrate a video that has NO talking-head a-roll (explainer / faceless), or to add a spoken layer (an intro hook, a callout). For a talking-head video the a-roll already carries the voice — don't double it.\n\nVoice: 30 prebuilt voices (default Charon) — pick by vibe from list_models (e.g. Kore firm, Puck upbeat, Sulafat warm, Sadaltager documentary). 'style' is a plain delivery note (\"calm and reassuring\", \"fast and energetic\"); you can also drop inline audio tags like [whispers] or [laughs] into the text. 'language' is optional — omit to auto-detect, or set a code (e.g. 'es', 'hi') for non-English scripts (it also tightens caption word-alignment).\n\nReturns IMMEDIATELY with {ok, media_ref, voice, status:'generating'} — the audio does NOT exist yet (~5-20s). The `media_ref` is a real library handle you can pass straight to add_clips; the clip shows a placeholder until the voice lands. An export refuses while any generated media is still pending.\n\nThe exact LENGTH is not known until it lands: use inspect_media once it is ready.\n\nHow to use the result: add a clip {kind:'audio', media_ref:<media_ref>, source_in:0, source_out:<len>, timeline_in:<t>, timeline_out:<t>+<len>}; it is mixed with the rest of the audio (use volume/fade/duck/loop/stretch as needed). For captions that sync to the voice, place the clip and then call get_transcript on it — every audio asset is transcribed automatically once it lands, and get_transcript reports word timings in PROJECT FRAMES already mapped through the clip's position, so a text clip with animation.timing:'transcript' can use them with no arithmetic. Identical text+voice+style is cached, so re-calling is free.",
       "parameters": {
         "type": "object",
@@ -1665,11 +1815,52 @@
         ],
         "additionalProperties": false
       },
+      "expensive": true,
+      "effect": "project-job",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ],
       "note": "client validates + composes the text and does the PCM->WAV + word-alignment + persistence; the TTS synthesis is a thin server sub-call (/ai/voiceover)."
     },
     {
+      "name": "get_page",
+      "description": "Fetch a URL and save a cleaned HTML snapshot as an artifact.\n\nReturns a small summary plus `html_artifact_id`. The full HTML stays on disk — read it via `read_file` if you need to scan it.\n\nWHEN TO USE: you need the page's text/markup (article body, structured data, link list) and pixels are not needed. For pixel work pair `get_page_image` + `find_content` + `crop_image` instead.\n\nCACHING: the result is cached per URL within the run. Calling get_page again on the same URL returns the previously captured HTML without re-fetching. Pass `force_refresh: true` to bypass the cache when the page is known to change between calls.\n\nTIPS:\n- Use this when you intend to extract one or more visible sections of\n  the page; for plain text-relevance you can usually decide from the\n  `web_search` snippet alone.\n- The tool waits for the page to settle internally (networkidle with\n  a sensible timeout). You do not need to control timing.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "Page URL to fetch."
+          },
+          "viewport": {
+            "type": "string",
+            "default": "desktop",
+            "description": "Optional. Render breakpoint (default 'desktop'), in SOURCE pixels. Presets: mobile (1170x2532), tablet (2304x3072), desktop (3840x2400), wide (4320x2700), large_monitor (5760x3240), ultrawide (7680x4320). Freeform '{w}x{h}' in source pixels also accepted. Picks the SITE layout to capture (mobile vs desktop rendering)."
+          },
+          "force_refresh": {
+            "type": "boolean",
+            "default": false,
+            "description": "Optional. Bypass the per-run HTML cache and re-fetch from network. Default false (returns cached HTML if available)."
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "additionalProperties": false
+      },
+      "expensive": false,
+      "effect": "read",
+      "status": "withdrawn",
+      "surfaces": [
+        "app",
+        "mcp"
+      ],
+      "note": "runs on the client for a real IP/browser; any LLM extraction is a server sub-call."
+    },
+    {
       "name": "get_page_image",
-      "expensive": true,
       "description": "Return the full-page screenshot of an http(s) web page as an image artifact. Capture only — does not analyze or locate anything in the image. Local files and other schemes (file:, data:, about:) are refused: bring a local image in with import_media instead.\n\nUse `crop_image` to crop it to a bbox-region. Reach for it any time you need pixels of a web page. The result is cached per (URL, viewport); `viewport` picks the SITE layout to capture, and the captured PNG is retina-resolution.",
       "parameters": {
         "type": "object",
@@ -1694,22 +1885,34 @@
         ],
         "additionalProperties": false
       },
+      "expensive": true,
+      "effect": "read",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ],
       "note": "client browser screenshot (real IP); the image can then be uploaded to the server vision proxy."
     },
     {
       "name": "get_project_state",
-      "expensive": false,
       "description": "Return the CURRENT project's state: project id + name, the default canvas, the active model / style / workflow, and the project's ASSET INVENTORY — `library` (every imported, downloaded, captured or generated asset, each with its `media_ref`, filename, kind and folder) plus `library_count`.\n\n`library` is the source of truth for what this project already HAS: if an asset there matches a shot you were about to download or a voiceover you were about to generate, re-use its `media_ref` instead of re-creating it. An EMPTY `library` with an empty timeline means a genuinely new project — never ask the user to re-supply assets without checking here first. When `library_truncated` is present the list is capped; use `library_op` with action `list` for the rest.\n\nProject media is addressed ONLY by `media_ref`; a filesystem path is for media that lives outside the project.",
       "parameters": {
         "type": "object",
         "properties": {},
         "required": [],
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "read",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "get_timeline",
-      "expensive": false,
       "description": "Read the current timeline: canvas (width/height/fps) and every track with its clips. Each clip and track carries a stable `id` — those ids are what every other timeline tool accepts to target a clip/track. Coordinates are integer frames at canvas fps. Call this to see what's placed and to get ids before editing.\n\nThe payload is COMPACT: any field left at its default (e.g. volume/opacity/ speed 1, no transform, an unmuted track) is OMITTED — absent means default, not zero. On a large timeline, page the read with `start_frame`/`end_frame` (project frames): only clips overlapping [start_frame, end_frame) come back, and a track whose clips were clipped reports `total_clips` (its full count). Omit both to read the whole timeline.",
       "parameters": {
         "type": "object",
@@ -1728,11 +1931,17 @@
           }
         },
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "read",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "get_transcript",
-      "expensive": true,
       "description": "The current timeline's spoken transcript in PROJECT FRAMES — the post-edit caption track in one call. Walks every audio clip on the timeline (a video clip's audio is split to a linked audio clip at placement), maps each word through that clip's trim/speed/position, and concatenates in timeline order. Deleted ranges are gone by construction, so after cuts this always reflects what's actually audible — no stale results, no per-clip frame math.\n\nEach clip's words come as compact `[index, text, start_frame, end_frame]` rows (`index` is a stable global 0-based position); both frames drop straight into ripple_delete / split_clips (they take PROJECT frames too). The SILENCE between two words is `next.start_frame - this.end_frame` — measure it from these rows rather than guessing where a word ended. To transcribe a RAW source file instead of the timeline (e.g. to read a clip before placing it), use `inspect_media`, which returns that asset's transcript in SOURCE seconds.\n\nPass `clip_id` to scope the transcript to a single clip (its audio, or the audio split from that video clip); omit it for the whole timeline.\n\nOnly what the clips PLAY is transcribed (plus a second either side), so a clip that uses 2 minutes of a long recording costs 2 minutes; a file already transcribed whole in the background answers at once. The call waits at most about a minute: clips whose words are not ready by then are listed in `in_progress` and go on being transcribed in the background. Call again for them; their absence is not silence.\n\nReturns {ok, fps, timing:\"project_frames\", word_format, clips:[{clip_id, track_id, words}], word_count, truncated, script_preview, script_chars}, plus `in_progress:[{clip_id, track_id}]` and a `note` when some clips are not ready, and `failed:[{clip_id, error}]` for clips that could not be transcribed.",
       "parameters": {
         "type": "object",
@@ -1753,11 +1962,62 @@
         "required": [],
         "additionalProperties": false
       },
+      "expensive": true,
+      "effect": "derived-job",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ],
       "note": "client via whisper.cpp/wasm so audio never leaves the machine (offline-capable), model lazy-downloaded."
     },
     {
+      "name": "image_ask",
+      "description": "Ask a free-form question about one or more images.\n\nWHEN TO USE:\n- Describe an image: \"what is in this photo?\", \"summarize this chart\".\n- Verify a crop: \"does this contain the full TLDR list?\",\n  \"is the headline cropped at the edge?\".\n- Compare images: \"do these three frames have matching color\n  grading?\", \"which would work best as a thumbnail?\".\n- Style / aesthetic: \"what art style is this?\",\n  \"does this look AI-generated?\".\n\nWHEN NOT TO USE - Locate specific content inside an image → use `find_content` (returns a structured output with bbox, not prose).\n\nFor images that exceed the per-image cap (e.g. full-page screenshots), locate and crop first with `find_content` + `crop_image`, then ask about the crop.\n\nReturns `answer` (free text). Caller decides what to do with it.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "description": "Free-form prompt - be detailed and specific about your query."
+          },
+          "images": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 8,
+            "description": "One or more images to analyze together in a single call. Maximum 8 images per call. Each image must be ≤ 24 megapixels (width × height).",
+            "items": {
+              "type": "object",
+              "properties": {
+                "media_ref": {
+                  "type": "string",
+                  "description": "A library asset ref (media_... id or filename) for the image."
+                }
+              },
+              "required": [
+                "media_ref"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "prompt",
+          "images"
+        ],
+        "additionalProperties": false
+      },
+      "expensive": true,
+      "effect": "read",
+      "status": "withdrawn",
+      "surfaces": [
+        "app",
+        "mcp"
+      ],
+      "note": "client resolves + reads the images; the hosted vision-model call is a thin server sub-call (/ai/vision_image)."
+    },
+    {
       "name": "import_media",
-      "expensive": false,
       "description": "Import external media into the project library and return a stable `media_ref` (e.g. `media_ab12cd34ef56`) — the portable handle every other tool takes (add_clips `media_ref`, inspect_media, get_transcript), so you never pass a raw filesystem path. Media is copied in and de-duplicated: importing byte-identical media twice returns the same id.\n\n`source` sets ONE of: `url` (an HTTPS link to a media FILE, downloaded — for streaming sites like YouTube/TikTok use `download_video` instead), `bytes` (base64 media data, small files), or `path` (a LOCAL file or directory, LINKED in place — not copied — returning a `media_ref`; a directory links every media file inside it). If you set more than one, the most concrete wins (path > url > bytes) and the result `note` says which was ignored. `mimeType` is only needed to type `bytes` or a `url` with no file extension.\n\nSupported: video (mp4/m4v/mov/webm/mkv/avi), audio (mp3/wav/m4a/aac/flac/ogg/oga/opus/aiff/aif/aifc/caf), image (png/jpg/jpeg/gif/webp/bmp/avif/tif/tiff/heic/heif) — iPhone HEIC photos included — and subtitles (srt/vtt), which add_captions reads. Returns {ok, media_ref, path, filename, kind}.",
       "parameters": {
         "type": "object",
@@ -1798,11 +2058,17 @@
           "source"
         ],
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "project-job",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "insert_clips",
-      "expensive": false,
       "description": "Insert one or more media clips at a single point and RIPPLE: every clip at or after `at` on the target track shifts right to open a gap, so nothing is overwritten. This is the non-destructive counterpart to `add_clips` (which clears the landing region, trimming/splitting whatever is already there). Use `insert_clips` to splice footage in; use `add_clips` to fill empty space or deliberately overwrite.\n\nEntries are laid end-to-end from `at` (entry[0] at `at`, entry[1] right after it, …). The total push equals the sum of the entries' durations and is applied to the target track; each pushed clip's LINKED audio shifts with it so A/V stays in sync. A clip straddling `at` is split so the gap opens cleanly. Every OTHER track is sync-locked by default, so its clips at/after `at` shift right by the same amount to stay aligned; turn a track's sync lock off (set_track sync_locked:false) to leave it in place.\n\nPer entry: `media_ref` plus OPTIONALLY a length: `duration` (PROJECT FRAMES) or `source_span` = [startSeconds, endSeconds] to splice an exact span of the SOURCE media (in SECONDS); OMIT both to splice the WHOLE source at 1x. If you set both, `source_span` wins and a disagreeing duration is ignored (with a note). A duration longer than the media is shortened to it (with a note), and what follows moves by the length the clip really has. For AUDIO shorter than the target, give `duration` plus `loop:true` or `stretch:true` (if you set both, loop wins). `track_id` is optional - omit it to insert on the main visual track (created if missing). A video clip's own audio is auto-split onto an audio track as a LINKED clip.\n\nReturns `{ok, created:[{clip_id, kind, track_id}], count, at, pushed_by, track_id}`. The whole batch is one undo step; one bad entry rejects the call with nothing written. Also returns a change delta — patch your model, don't re-read.",
       "parameters": {
         "type": "object",
@@ -1864,11 +2130,17 @@
           "entries"
         ],
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "project-mutation",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "inspect_color",
-      "expensive": false,
       "description": "Measure color scopes of a timeline clip's CURRENT graded look (clip_id) or a raw asset (media_ref) — grade by the numbers, not eyeballing. Returns black/white points, % clipping, mean & per-channel levels, saturation, warm-cool & green-magenta balance, and a 12-bin hue histogram (from 0°/red; orange cluster = skin, cyan/blue = sky) — and attaches the measured frame to SEE (one frame, fitted to 1024 px; a clip's is rendered with its grade, alone, at `at_frame`). Pass a `reference` asset to also measure it and get the subject−reference gap + grade hints. Loop: apply_color → inspect_color(clip_id, reference) → read gap → adjust.",
       "parameters": {
         "type": "object",
@@ -1892,11 +2164,17 @@
         },
         "required": [],
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "read",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "inspect_media",
-      "expensive": false,
       "description": "Look at a source asset before you reference, describe or edit it. Describe an asset from what this returns, never from its filename.\n\nIdentify it with `media_ref` (a library asset id (media_...) or a library filename) and/or `clip_id` (a placed timeline clip from get_timeline) — give at least one. `clip_id` alone looks at that clip's source over the span the clip uses; passing both pins a specific asset (they must name the same one). With `clip_id` every time in the result is a PROJECT FRAME (`timing: \"project_frames\"`); with `media_ref` times are source seconds.\n\n- IMAGE: the image, fitted to 512 px, with the coordinate grid.\n- VIDEO: `max_frames` frames (default 6, max 12) at the middles of equal\n  parts of the span, each a 512 px image with the coordinate grid, plus\n  `sharpness`, `noise_sigma`, `loudness` and `transcript` (below).\n- AUDIO: `loudness` and `transcript`.\n\n    Display orientation is already applied to these images, the preview and the\n    export. A nonzero `metadata.video.rotation` describes the file's embedded\n    display matrix, NOT a correction you must make. Never copy that angle into a\n    clip's `rotate`: it adds a second turn. Leave `rotate` unset unless the displayed\n    picture itself needs an additional turn or the user requests one.\n\nLong media, coarse to fine: first `overview: true`, which returns ONE storyboard image instead of frames — a tile at each change of scene across the span (up to 36, each labelled with its time; the times are in `overview.tile_times`, or `tile_frames` for a clip_id). Then look at the sections that matter with `start_seconds`/`end_seconds`, and zoom further the same way. A windowed call is fast: its cost is set by the window, not the file. For an exact moment, fast action or motion over time, use `video_find_moment` or `video_ask` instead.\n\nCoordinate grid: frames and images carry faint lines every 0.05 with labels every 0.1 along the right and bottom edges, 0-1 from the top-left corner (`coordinate_grid`). Read positions off it. The storyboard has no grid.\n\n`sharpness`: variance of the Laplacian of each frame's 512 px grey copy, averaged. Higher is sharper. Measured: phone video 150-280 and the same video blurred 15-90; screen recordings and frames full of text 900-2400, still 200-480 when blurred. Grain and text raise it too, so compare a clip with itself (before and after a change), not with other footage. `noise_sigma`: estimated noise on 0-255 brightness, edges excluded, averaged. Measured: clean footage 0.3-1.5, light grain about 1.8, heavy grain about 4; busy graphics and text can read up to 3 without being noisy. Only sharpen a soft clip, only denoise a noisy one.\n\n`loudness`: integrated loudness (LUFS), true peak (dBTP) and RMS (dBFS; null when silent) over the whole span looked at. For a `clip_id` it adds `clip_volume` and `after_clip_volume`, the same figures at the clip's volume (audio effects and track mixing not included). Read it before changing `volume` or applying `loudnorm`; don't boost an already-loud clip. Up to 10 minutes of audio is measured while you wait, and every file is measured whole in the background once imported. A longer span not measured yet returns `loudness.status: \"in_progress\"`: call again for it (that call waits up to a minute), or pass a window of up to 10 minutes to measure that part now.\n\n`transcript`: sentence rows `[text, start, end]` (at most 400; continue from `next_start_s`, or `next_start_frame` for a clip_id), the detected `language`, and with `word_timestamps=true` word rows in `words` (at most 10000) — for word-boundary edits like filler-word or dead-air removal. Without `language` the language is detected from the audio; pass it when you know what is spoken. Up to 10 minutes of audio is transcribed while you wait. A longer span with no transcript yet returns `transcript.status: \"in_progress\"`: the whole file is being transcribed in the background, one file at a time. Call again later for it, or pass a window of up to 10 minutes to transcribe that part now.\n\nYou view video natively, so for a VIDEO the window is attached as video instead of frames: sampled at `sample_fps` (default 1; raise it, or narrow the window, for fast action or an exact moment), with its sound if `attach_audio` is true. It carries no grid and no sharpness/noise. `overview` still returns the storyboard.",
       "parameters": {
         "type": "object",
@@ -1944,11 +2222,59 @@
         },
         "required": [],
         "additionalProperties": false
+      },
+      "expensive": false,
+      "effect": "read",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ],
+      "text_variant": {
+        "description": "Look at a source asset before you reference, describe or edit it. Describe an asset from what this returns, never from its filename.\n\nIdentify it with `media_ref` (a library asset id (media_...) or a library filename) and/or `clip_id` (a placed timeline clip from get_timeline) — give at least one. `clip_id` alone looks at that clip's source over the span the clip uses; passing both pins a specific asset (they must name the same one). With `clip_id` every time in the result is a PROJECT FRAME (`timing: \"project_frames\"`); with `media_ref` times are source seconds.\n\n- IMAGE: the image, fitted to 512 px, with the coordinate grid.\n- VIDEO: `max_frames` frames (default 6, max 12) at the middles of equal\n  parts of the span, each a 512 px image with the coordinate grid, plus\n  `sharpness`, `noise_sigma`, `loudness` and `transcript` (below).\n- AUDIO: `loudness` and `transcript`.\n\n    Display orientation is already applied to these images, the preview and the\n    export. A nonzero `metadata.video.rotation` describes the file's embedded\n    display matrix, NOT a correction you must make. Never copy that angle into a\n    clip's `rotate`: it adds a second turn. Leave `rotate` unset unless the displayed\n    picture itself needs an additional turn or the user requests one.\n\nLong media, coarse to fine: first `overview: true`, which returns ONE storyboard image instead of frames — a tile at each change of scene across the span (up to 36, each labelled with its time; the times are in `overview.tile_times`, or `tile_frames` for a clip_id). Then look at the sections that matter with `start_seconds`/`end_seconds`, and zoom further the same way. A windowed call is fast: its cost is set by the window, not the file. For an exact moment, fast action or motion over time, use `video_find_moment` or `video_ask` instead.\n\nCoordinate grid: frames and images carry faint lines every 0.05 with labels every 0.1 along the right and bottom edges, 0-1 from the top-left corner (`coordinate_grid`). Read positions off it. The storyboard has no grid.\n\n`sharpness`: variance of the Laplacian of each frame's 512 px grey copy, averaged. Higher is sharper. Measured: phone video 150-280 and the same video blurred 15-90; screen recordings and frames full of text 900-2400, still 200-480 when blurred. Grain and text raise it too, so compare a clip with itself (before and after a change), not with other footage. `noise_sigma`: estimated noise on 0-255 brightness, edges excluded, averaged. Measured: clean footage 0.3-1.5, light grain about 1.8, heavy grain about 4; busy graphics and text can read up to 3 without being noisy. Only sharpen a soft clip, only denoise a noisy one.\n\n`loudness`: integrated loudness (LUFS), true peak (dBTP) and RMS (dBFS; null when silent) over the whole span looked at. For a `clip_id` it adds `clip_volume` and `after_clip_volume`, the same figures at the clip's volume (audio effects and track mixing not included). Read it before changing `volume` or applying `loudnorm`; don't boost an already-loud clip. Up to 10 minutes of audio is measured while you wait, and every file is measured whole in the background once imported. A longer span not measured yet returns `loudness.status: \"in_progress\"`: call again for it (that call waits up to a minute), or pass a window of up to 10 minutes to measure that part now.\n\n`transcript`: sentence rows `[text, start, end]` (at most 400; continue from `next_start_s`, or `next_start_frame` for a clip_id), the detected `language`, and with `word_timestamps=true` word rows in `words` (at most 10000) — for word-boundary edits like filler-word or dead-air removal. Without `language` the language is detected from the audio; pass it when you know what is spoken. Up to 10 minutes of audio is transcribed while you wait. A longer span with no transcript yet returns `transcript.status: \"in_progress\"`: the whole file is being transcribed in the background, one file at a time. Call again later for it, or pass a window of up to 10 minutes to transcribe that part now.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "media_ref": {
+              "type": "string",
+              "description": "A library asset id/ref (media_...) or a library filename. Give media_ref and/or clip_id (at least one)."
+            },
+            "clip_id": {
+              "type": "string",
+              "description": "A placed timeline clip id (from get_timeline). Alone, looks at that clip's source over the span the clip uses and reports every time in PROJECT FRAMES; with media_ref, the two must name the same asset. Give media_ref and/or clip_id (at least one)."
+            },
+            "max_frames": {
+              "type": "integer",
+              "description": "Optional. Frames to sample from a video (default 6, max 12)."
+            },
+            "start_seconds": {
+              "type": "number",
+              "description": "Optional. Window start in SOURCE seconds for video/audio (the clip's span, or the whole asset, if omitted)."
+            },
+            "end_seconds": {
+              "type": "number",
+              "description": "Optional. Window end in SOURCE seconds for video/audio (the clip's span, or the whole asset, if omitted)."
+            },
+            "overview": {
+              "type": "boolean",
+              "description": "Optional. Return ONE storyboard image of the span (a tile per scene, up to 36, their times in overview.tile_times) instead of frames: the first look at long media. Default false."
+            },
+            "language": {
+              "type": "string",
+              "description": "Optional. The spoken language as a short code (e.g. \"es\", \"hi\"). Omit it to detect the language from the audio."
+            },
+            "word_timestamps": {
+              "type": "boolean",
+              "description": "Optional. Add word-level `[text, start, end]` rows to the transcript in a `words` array (at most 10000) — for word-boundary edits like filler-word / dead-air removal. Default false (sentence rows only). Windowed like the transcript."
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
       }
     },
     {
       "name": "inspect_timeline",
-      "expensive": false,
       "description": "See the COMPOSITED timeline — exactly what the export shows at a frame: every track stacked with its transforms, opacity, crop, keyframes, effects, transitions, text and captions. Use it to VERIFY your edits landed (a PiP's position, a title's placement, layer order, a transition mid-way) — `inspect_media` shows a raw source asset, this shows the actual cut.\n\nFrames are PROJECT FRAMES (integer frames at the canvas fps, from `get_timeline`). `start_frame` alone renders that one frame (default 0). Add `end_frame` to sample `max_frames` (default 6, max 12) across [start_frame, end_frame), at the middles of equal parts — for a transition or a sequence. Each frame is a 768 px image with the coordinate grid (faint lines every 0.05, labels every 0.1, 0-1 from the top-left corner) and its frame number top-left. Each entry in `frames` lists `visible_clips`: the clip ids on canvas at that frame, top layer first. Frames outside the timeline come back in `out_of_range`, unrendered. A frame costs about the same wherever it is in the timeline, so look as often as you need.",
       "parameters": {
         "type": "object",
@@ -1968,12 +2294,18 @@
         },
         "required": [],
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "read",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "library_op",
-      "expensive": false,
-      "description": "Read/write the per-run asset library. The library is the catalog of every video clip in this run (auto-populated by download_video and clip_video) plus folders/tags/notes you assign. Returns are JSON-shaped {\"ok\": ..., ...}. To ADD media to the library, use import_media (a url, base64 bytes, or a local file/directory path), which returns a media_ref.\n\nPass exactly one `action` per call:\n\n  * list          (folder?, recursive?) -> {clips: [...]}\n  * get           (id) -> {clip: {...}}\n  * update        (id, filename?, folder?, tags?, notes?) -> {clip: {...}}\n  * move          (id, folder) -> {clip: {...}}\n  * delete        (id) -> {removed_clips, ...}   # CASCADE: also removes every clip using it, across the timeline, as ONE undo entry\n  * create_folder (folder) -> {folders: [...]}\n  * rename_folder (old, new) -> {clips_moved, ...}\n  * delete_folder (folder, force?) -> {removed_clip_ids, ...}\n  * rescan        () -> {added, removed_catalog_rows, removed_dup_files}\n  * resolve       (id_or_path) -> {path}\n\nFolders are slash-separated path strings (\"a/b/c\"). They are pure metadata - no real directories are created. delete refuses by default if the clip is referenced by timeline.json (pass force=true to override).",
+      "description": "Read/write the per-run asset library. The library is the catalog of every asset in this run (populated by import, download, and generation) plus folders/tags/notes you assign. Returns are JSON-shaped {\"ok\": ..., ...}. To ADD media to the library, use import_media (a url, base64 bytes, or a local file/directory path), which returns a media_ref.\n\nPass exactly one `action` per call:\n\n  * list          (folder?, recursive?) -> {clips: [...]}\n  * get           (id) -> {clip: {...}}\n  * update        (id, filename?, folder?, tags?, notes?) -> {clip: {...}}\n  * move          (id, folder) -> {clip: {...}}\n  * delete        (id) -> {removed_clips, ...}   # CASCADE: also removes every clip using it, across the timeline, as ONE undo entry\n  * create_folder (folder) -> {folders: [...]}\n  * rename_folder (old, new) -> {clips_moved, ...}\n  * delete_folder (folder, force?) -> {removed_clip_ids, ...}\n  * rescan        () -> {added, removed_catalog_rows, removed_dup_files}\n  * resolve       (id_or_path) -> {path}\n\nFolders are slash-separated path strings (\"a/b/c\"). They are pure metadata - no real directories are created. delete refuses by default if the clip is referenced by timeline.json (pass force=true to override).",
       "parameters": {
         "type": "object",
         "properties": {
@@ -2043,11 +2375,17 @@
           "action"
         ],
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "project-mutation",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "link_clips",
-      "expensive": false,
       "description": "Link clips so they move, trim, split and delete AS ONE — the relationship a camera clip and its own audio already have when `add_clips` splits them. Stamps one new group across every clip you name PLUS anything already linked to them, so existing groups merge rather than fragment. Use it after assembling a picture and its sound separately, so a later edit cannot desync them. Returns `{ok, linked, link_group}`. Also returns a change delta — patch your model, don't re-read.",
       "parameters": {
         "type": "object",
@@ -2065,11 +2403,17 @@
           "clip_ids"
         ],
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "project-mutation",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "list_models",
-      "expensive": false,
       "description": "List the AI generation models available to generate_image / generate_video / generate_voiceover / generate_music, with their capabilities, so you can pick one. Optionally filter by `type` ('image' | 'video' | 'audio'). Returns {ok, models:[{id, kind, label, aspect_ratios, durations?, resolutions?, qualities?, max_images?, supports_start_frame?, supports_end_frame?, supports_reference_images?, max_reference_images?, category?, voices?}], defaults}. Call this when unsure which model / aspect_ratio / resolution / quality to use; otherwise the defaults (image: nano-banana-pro, video: veo-3.1-fast) are sensible.",
       "parameters": {
         "type": "object",
@@ -2087,22 +2431,34 @@
         "required": [],
         "additionalProperties": false
       },
+      "expensive": false,
+      "effect": "read",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ],
       "note": "client-side catalog (image/video/audio models + voices); no external call. Kept in sync with the server spec-only schema enums."
     },
     {
       "name": "list_projects",
-      "expensive": false,
       "description": "List the user's known projects, most-recently-opened first (id, name, lastOpenedAt), plus `active_project_id`, the project open in the app. A project is the persistent unit of work — its own timeline, asset library, and chat history. Use it to find one by name.",
       "parameters": {
         "type": "object",
         "properties": {},
         "required": [],
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "app-operation",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "manage_exports",
-      "expensive": false,
       "description": "List exports and their outcomes, or cancel one that has not finished. Exports are queued: `export` returns a `job_id` and the render continues in the background.\n\naction 'list' (default) returns {ok, exports:[{job_id, filename, state, media_ref?, error?, warnings?, duration_s?}]} for EVERY export this session, including finished ones. state is 'running' (encoding now), 'queued' (waiting its turn), 'done', 'failed' or 'cancelled'. A 'failed' row carries the `error` explaining why. This is the ONLY way to learn how a background export ended, so check it before telling the user their file is ready — an export that started successfully can still fail.\n\nA 'done' row carries `media_ref` for the delivered file, which is registered in the library: pass it to inspect_media to look at what actually shipped, rather than at the timeline it was rendered from.\n\naction 'cancel' needs `job_id` and stops that export: the partly written file is discarded and any file already at the destination is left untouched. Returns {ok, cancelled:true|false}. `false` means that job had already ended, and `state` says how: 'done' (the file was delivered), 'failed' or 'cancelled'. That is not an error; an ended export cannot be recalled. A job_id this session never started is refused (ok:false).\n\nUse it when the user asks what is still rendering, or asks to stop an export, or to check whether a job you started earlier has finished.",
       "parameters": {
         "type": "object",
@@ -2122,11 +2478,17 @@
         },
         "required": [],
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "read",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "move_clips",
-      "expensive": false,
       "description": "Move one or more clips to a new timeline position and/or track, atomically. Per move: `clip_id` plus at least one of `to_timeline_in` (in frames — preserves the clip's length) and `to_track` (id, created if missing).\n\nA clip's LINKED partner (a video clip's split audio) follows it automatically: the time shift propagates to the partner as the same delta (so an l-cut / j-cut offset is preserved) and the partner keeps its own track. So move ONLY the video/primary clip — never list its linked audio as a separate move.\n\nReturns `{ok, moved}`. Also returns a change delta — patch your model, don't re-read. A move overwrites whatever it lands on; when it does, the reply carries `overwrote` `{removed, shortened}` and a `warnings` line naming that material. `undo` restores it.",
       "parameters": {
         "type": "object",
@@ -2162,11 +2524,17 @@
           "moves"
         ],
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "project-mutation",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "new_project",
-      "expensive": false,
       "description": "Create a new, empty project for a SIDE IDEA. A project owns its own timeline, asset library, and chat history. Returns {id, name, canvas}.\n\nIt does NOT switch you or the user's screen: your next tool calls still act on the project you already have open, and the new project's library is empty (media imported elsewhere is not in it). Tell the user it is in their project list. Over MCP, manage_project {action:'open', id} switches.",
       "parameters": {
         "type": "object",
@@ -2206,11 +2574,17 @@
           "name"
         ],
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "app-operation",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "open_project",
-      "expensive": false,
       "description": "Point the user to an existing project, by its `id` (from list_projects) or a directory path: confirms it exists and that this app can open it. It does NOT switch you or the user's screen: your tools keep acting on the current project. Tell the user to open it from their project list (File > Open Project). Over MCP, manage_project {action:'open', id} switches. Returns {id, name}.",
       "parameters": {
         "type": "object",
@@ -2224,22 +2598,59 @@
           "project"
         ],
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "app-operation",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "pack_project",
-      "expensive": false,
       "description": "Export the ENTIRE project as a portable, self-contained `.artdaddy.zip` in the user's Downloads folder: the timeline + settings + asset catalog and EVERY media file (external / referenced-in-place clips are collected in, and refs are rewritten project-relative) so the bundle opens intact on another machine. Missing media is reported, not fatal. Returns {ok, path, clips, collected, missing, bytes}. No parameters.",
       "parameters": {
         "type": "object",
         "properties": {},
         "required": [],
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "deliverable",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
+    },
+    {
+      "name": "probe_media",
+      "description": "Inspect a library video or image asset with ffprobe and return its real technical metadata: width, height, fps, duration, codec, pixel format, sample/display aspect ratio, rotation, frame count, and audio stream info.\n\nCall this before `run_ffmpeg` for any spatial or timing-sensitive operation (crop, scale/resize, pad, overlay position, xfade offset, concat normalization). The model cannot see the pixels — this is how you learn the real dimensions/fps so your ffmpeg args are exact instead of guesses.\n\n`media_ref` must be a library asset id (media_...) or a library filename.\n\nReturns `{ok, path, duration_s, format, size_bytes, has_audio, video:{width,height,fps,avg_fps,codec,pix_fmt,sample_aspect_ratio, display_aspect_ratio,rotation,nb_frames}, audio:{codec,sample_rate, channels,channel_layout}}`.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "media_ref": {
+            "type": "string",
+            "description": "A library asset ref (media_... id or filename)."
+          }
+        },
+        "required": [
+          "media_ref"
+        ],
+        "additionalProperties": false
+      },
+      "expensive": false,
+      "effect": "read",
+      "status": "withdrawn",
+      "surfaces": [
+        "app",
+        "mcp"
+      ],
+      "note": "local ffprobe; may be deprecated on the live surface but still registered."
     },
     {
       "name": "read_file",
-      "expensive": false,
       "description": "Read a JSON or text file from the project by a project-relative path (whole file, up to a 200,000-char cap). Returns {ok, path, content, truncated}. If `truncated=true` comes back, escalate to the user — chunked reading isn't implemented yet.",
       "parameters": {
         "type": "object",
@@ -2253,21 +2664,33 @@
           "path_or_key"
         ],
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "read",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "redo",
-      "expensive": false,
       "description": "Reapply the most recently undone timeline edit. Returns `{ok, redone, remaining_redo}` plus the same change delta every edit returns (`clips` / `shifted` / `removed_ids` / `created_tracks`) describing what was re-applied.",
       "parameters": {
         "type": "object",
         "properties": {},
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "project-mutation",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "remove_clips",
-      "expensive": false,
       "description": "Remove one or more clips by id in one undoable action. A clip in a link group (a video and its split-off audio) takes its whole group with it. Returns `{ok, removed}`. Also returns a change delta — patch your model, don't re-read.",
       "parameters": {
         "type": "object",
@@ -2285,11 +2708,17 @@
           "clip_ids"
         ],
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "project-mutation",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "remove_tracks",
-      "expensive": false,
       "description": "Remove whole tracks (and every clip on them) by id, in one atomic action. Returns `{ok, removed}`. Also returns a change delta — patch your model, don't re-read.",
       "parameters": {
         "type": "object",
@@ -2307,11 +2736,17 @@
           "track_ids"
         ],
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "project-mutation",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "rename_project",
-      "expensive": false,
       "description": "Rename a project. Defaults to the CURRENT project when `project` is omitted; otherwise pass a project id (from list_projects) or a directory path. The project's id and folder are unchanged. Returns {id, name, path}.",
       "parameters": {
         "type": "object",
@@ -2329,11 +2764,17 @@
           "name"
         ],
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "app-operation",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "ripple_delete",
-      "expensive": false,
       "description": "Cut one or more time RANGES out of a track and close the gap(s) in ONE atomic, undoable op — the fast path for filler-word / silence removal. Replaces hand-cranked split_clips → remove_clips → move_clips loops: pass every range at once.\n\nPrecise, and spans clips: a range may cover any number of clips on the track. A clip straddling a boundary is TRIMMED at it and a clip spanning a whole range is split, so only the material inside the range(s) is removed (clips are never dropped just for overlapping); everything after shifts left to close up. Linked audio is trimmed / split / shifted with its video — no per-clip splitting or re-reading the timeline between cuts.\n\nTarget a whole `track_id` or a single `clip_id`; if you pass both, `clip_id` wins (the cut is clamped to that clip, track_id ignored, with a note). In clip mode the ranges are clamped to that clip's visible span so a cut can't run past it. Pass `ranges` (a list of {start, end}, applied back-to-front so your frame numbers stay valid) or a single `start` + `end`; if you pass both, the ranges list wins. Times are PROJECT FRAMES at the canvas fps; overlapping / abutting ranges merge.\n\nSync lock: every OTHER track is sync-locked by default, so its clips after the cut slide left by the same amount to stay aligned (linked audio always follows its video regardless). If a sync-locked track's remaining clips can't absorb the slide without overlapping, the WHOLE edit is refused and the blocking track is named — pass that track id in `ignore_sync_locked_tracks` to leave it in place and retry. Returns `{ok, removed_span, ranges}`. Also returns a change delta — patch your model, don't re-read.",
       "parameters": {
         "type": "object",
@@ -2386,11 +2827,17 @@
         },
         "required": [],
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "project-mutation",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "run_ffmpeg",
-      "expensive": true,
       "description": "Raw ffmpeg fallback for deterministic media transforms and recovery. Prefer native timeline and media tools when they can do the job reliably: they preserve editability and avoid unnecessary intermediate assets. Use run_ffmpeg when native tools cannot express the requested operation, hit a confirmed tool/product or platform limitation, or fail repeatedly with valid inputs. The job given by the user must ideally never fail - when the existing tools fail to do the job, fallback to run_ffmpeg to address the user's query. Do not abandon a recoverable task while a valid ffmpeg fallback can complete it.\n\nBefore switching tools, read the error/stderr and verify media refs, required parameters, supported values, time units and actual media metadata. Correct model-supplied mistakes first. Invalid arguments, stale refs or incorrect assumptions about the inputs are not evidence of a product limitation. Do not repeat the same invalid call or use ffmpeg to conceal it.\n\nFor export recovery, you may join already-rendered part assets into one output without sending the user to another editor. Probe and normalize formats/streams as needed; preserve part order, timing, audio, rendered treatments and required branding, without duplicating end cards. Keep the original editable timeline unchanged. Joining untreated source files is not a substitute for rendering the timeline's trims, effects or captions. This tool bakes a NEW output asset; it does not automatically compile a timeline or bypass command-length limits. At most 12 input refs per call.\n\nAuthoring: you write the ffmpeg ARGUMENT LIST (everything AFTER the word `ffmpeg`) as a JSON array of strings. The tool prepends `ffmpeg -y -nostdin` and runs it directly (no shell), so do NOT add `ffmpeg`, `-y`, or shell operators (`;`, `|`, `&&`, redirects). Placeholders (required — never write real paths): `{in0}`, `{in1}`, ... → inputs[0], inputs[1], ... (add one `-i {inN}` per input); `{out}` → the output path (use it at least once). First call `inspect_media` on each input so width/height/fps/codec are exact, not guessed.\n\nExamples. Native crop/scale/speed/concat remain the first choice when they\nwork; the fallback rules above also apply to those operations. To place\npicture without audio, prefer `with_audio: false` on add_clips/insert_clips\nrather than baking an unnecessary silent copy.\n  Extract one frame at 2.0s as a PNG:\n    inputs=[\"media_57e1a248\"], output_name=\"frame.png\"\n    args=[\"-ss\",\"2.0\",\"-i\",\"{in0}\",\"-frames:v\",\"1\",\"{out}\"]\n  Transcode an AV1/VP9 source to H.264 a downstream NLE can read:\n    inputs=[\"media_a\"], output_name=\"h264.mp4\"\n    args=[\"-i\",\"{in0}\",\"-c:v\",\"libx264\",\"-pix_fmt\",\"yuv420p\",\"-c:a\",\"aac\",\"{out}\"]\n\nA media output (video/image/audio) is auto-added to the library and returned as a `media_ref` (the portable handle every other tool takes); any other output comes back as a project-relative `output_ref`.\n\nAAC audio is always encoded at 48 kHz: for an AAC output (`-c:a aac`, or a container whose default audio is AAC, such as .mp4/.m4a/.mov, with no audio codec named) the app replaces any sample rate you give it (`-ar`, `-osr`), because this ffmpeg's AAC encoder can stall forever on 16 kHz audio. No option, profile or container gets around it, so do not retry: the reply's `note` says when a rate you asked for was replaced. If the user needs another rate, tell them and offer a format that is not AAC, such as WAV, FLAC, MP3 or Opus: every other codec keeps the rate you ask for.\n\nReturns on success, for a media output: `{ok, media_ref, filename, kind, duration_s, video, audio}`; for a non-media output: `{ok, output_ref, duration_s}`; either may add a `note` saying what the app changed. On failure: `{ok:false, error, stderr_tail}` — read `stderr_tail` and fix your args.",
       "parameters": {
         "type": "object",
@@ -2420,11 +2867,17 @@
           "args"
         ],
         "additionalProperties": false
-      }
+      },
+      "expensive": true,
+      "effect": "project-job",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "set_clip_properties",
-      "expensive": false,
       "description": "Set styling, length, and source-window properties on one or more clips (the same values applied to every id), atomically — the after-placement styling + retime surface for everything except colour, effects, keyframes, and transitions (which have their own tools). Pass any combination of the typed properties below (VISUAL = video/image clips, AUDIO = audio clips). Setting a scalar clears any keyframes on that property; an out-of-range number is clamped to its nearest bound. A `speed` change rescales the clip's timeline length to keep the same source content and propagates to its linked audio. TRIM vs SLIP: `duration` is what changes a clip's LENGTH. A source edge on its own SLIPS (different content, same length, same position) — to shorten a clip from the head, send `source_in` AND `duration` together. This tool never moves a clip; use move_clips for position. REPLACING A SHOT: pass `media_ref` to point the clip at a DIFFERENT source while keeping everything else — its position, length, colour grade, transform, effects and keyframes all survive, and its linked audio follows. Use this instead of remove_clips + add_clips, which loses all of that. If the replacement is shorter than the slot the clip is shortened to fit (reported in the notes). Before changing `volume`, read the clip's loudness via inspect_media (LUFS/peak) to match a level instead of guessing. Returns `{ok, updated}`. Also returns a change delta — patch your model, don't re-read.",
       "parameters": {
         "type": "object",
@@ -2629,11 +3082,17 @@
           "clip_ids"
         ],
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "project-mutation",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "set_keyframes",
-      "expensive": false,
       "description": "Replace the keyframe track for ONE clip + ONE property to animate it over time. `clip_id`, `property`, and `keyframes` — a keyframe is {t, v, ease?}: `t` a CLIP-RELATIVE frame (0 = the clip's first frame), `v` the value, `ease` ∈ linear|hold|ease-in|ease-out|ease-in-out ('hold' steps: the value stays put until the next keyframe instead of ramping). An empty list clears the animation. One call animates ONE property — a \"Ken Burns\" is a `position` call + a `scale` call. Returns `{ok, property, n}`. Also returns a change delta — patch your model, don't re-read.\n\nAnimatable `property` (keyframes are {t, v}, except `position` uses {t, x, y}):\n  • `position` — PAN. Each keyframe is {t, x, y}: x, y = the clip's CENTRE\n    in normalised 0..1 canvas coords (0.5 = centre). One call animates both axes.\n  • `scale` — ZOOM. A size multiplier (1.0 = full canvas); `scale_x` /\n    `scale_y` animate one axis.\n                • `rotate` — additional degrees clockwise AFTER the embedded display\n                    orientation, which is already applied. Never animate a metadata rotation\n                    to correct it. A full SPIN = [{t:0,v:0},{t:60,v:360}];\n    use 720 / 1080 for fast multi-turn \"crazy spins\".\n  • `opacity` — 0..1. Fade a clip in or out.\n  • `volume` — 0 = silent, 1 = unchanged, >1 boosts (audio swell / dip).\n\nPlace a still with add_clips, then animate it here.",
       "parameters": {
         "type": "object",
@@ -2702,11 +3161,17 @@
           "keyframes"
         ],
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "project-mutation",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "set_project_settings",
-      "expensive": false,
       "description": "Set the project's output canvas — `fps` and/or `size`. This changes the ACTIVE timeline (what renders and exports) and stores the same values as the project default. Change ONLY what the user asked for: pass `null` for a field they did not mention and it KEEPS ITS CURRENT VALUE. To change only the frame rate, pass `fps` and `size: null` — sending a `size` they did not ask for RESHAPES their video. To change only the shape or resolution, pass `size` and `fps: null`. You never need to look up the current canvas. Inside `size`, size the canvas ONE way — for an exact size pass BOTH `width` and `height`. If you pass more than one sizing input, explicit `width`+`height` win and any `aspect_ratio`/`quality` that disagrees is ignored (with a note). `quality` scales the short edge (720p/1080p/2K/4K), preserving the aspect ratio (the selected preset's, or the current canvas's). Sizes are 64..8192 px per edge and fps is 1..120. Changing `fps` rescales every existing clip's frame coordinates (spans, source cursors, keyframe times, fades, transitions) so each clip keeps the same real-time position and length; `undo` restores the exact prior frames. Resizing changes the canvas only and never moves clips in time. Returns `{ok, fps, resolution, aspect_ratio, changed}` — re-read `get_timeline` after an fps change before any frame-based edit.",
       "parameters": {
         "type": "object",
@@ -2761,11 +3226,17 @@
         },
         "required": [],
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "project-mutation",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "set_track",
-      "expensive": false,
       "description": "Set track-level flags on one track. `mute` silences its audio; `hidden` excludes a video track from the render; `sync_locked` (ON by default for every track) makes ripple edits shift this track along to keep cross-track alignment — set it false to pin the track so ripples leave it in place; `z` is the stacking order (higher draws on top — audio is summed, so its z is organizational only). Pass only the flags you want to change. Returns `{ok, track_id}`. Also returns a change delta — patch your model, don't re-read.",
       "parameters": {
         "type": "object",
@@ -2795,11 +3266,17 @@
           "track_id"
         ],
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "project-mutation",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "set_tracks",
-      "expensive": false,
       "description": "Set track-level flags on SEVERAL tracks in ONE action — same flags as `set_track`, applied atomically. Use this whenever a single intent touches more than one track (restacking with `z` is the common case): one `set_track` per track costs the user one press of Ctrl+Z per track to put back, while this costs exactly one. Returns `{ok, track_ids}`. Also returns a change delta — patch your model, don't re-read.",
       "parameters": {
         "type": "object",
@@ -2843,11 +3320,17 @@
           "tracks"
         ],
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "project-mutation",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "set_transition",
-      "expensive": false,
       "description": "Set or clear a clip's incoming crossfade with the PREVIOUS clip on its track, atomically. Clips are NOT moved and never need to overlap: the two ABUT and the transition is a render-side blend CENTRED on the cut, so a 15-frame crossfade runs from 7.5 frames before the cut to 7.5 after, and the outgoing clip holds its last frame underneath. Resizing or removing a transition therefore never shifts a neighbour. `transition_in` is {kind, duration, expr?}: kind ∈ crossfade | dip-to-black | dip-to-white | whip | wipe-l | wipe-r (or 'custom' with a raw `expr`); `duration` in PROJECT FRAMES at the canvas fps (an integer; e.g. 15 = 0.5 s at 30 fps) and must not exceed either clip's length. Pass `transition_in` as null to remove it. Needs a preceding clip on the same track. Returns `{ok, clip_id}`. Also returns a change delta — patch your model, don't re-read.",
       "parameters": {
         "type": "object",
@@ -2893,11 +3376,17 @@
           "transition_in"
         ],
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "project-mutation",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "split_clips",
-      "expensive": false,
       "description": "Split clips into two at one or more cut points, atomically. Per split: `clip_id` and `at` (a timeline frame, strictly inside the clip). The left half keeps the original id; the right half gets a new id (returned). Source trim is mapped through the cut. Returns `{ok, new_clip_ids}`. Also returns a change delta — patch your model, don't re-read.",
       "parameters": {
         "type": "object",
@@ -2930,21 +3419,33 @@
           "splits"
         ],
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "project-mutation",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "undo",
-      "expensive": false,
       "description": "Revert the most recent timeline edit (one step). Returns `{ok, undone, remaining_undo}` plus the same change delta every edit returns (`clips` / `shifted` / `removed_ids` / `created_tracks`) describing what the revert restored — patch your picture from it instead of re-reading the timeline. Use `redo` to reapply.",
       "parameters": {
         "type": "object",
         "properties": {},
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "project-mutation",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "unlink_clips",
-      "expensive": false,
       "description": "Dissolve the link group(s) the named clips belong to, so each clip can be edited independently again — the inverse of `link_clips`. Affects the named clips AND their partners (a group is dissolved as a whole, never half). Use it when you deliberately want to move or trim one side of an A/V pair, e.g. to build a J/L cut. Returns `{ok, unlinked}`. Also returns a change delta — patch your model, don't re-read.",
       "parameters": {
         "type": "object",
@@ -2962,11 +3463,17 @@
           "clip_ids"
         ],
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "project-mutation",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "update_text",
-      "expensive": false,
       "description": "Reword or restyle EXISTING text clips — titles or captions — in one atomic, undoable action. Target either `clip_ids` or a whole `caption_group` (from add_captions / get_timeline): the group restyles every caption in the set without naming them one by one.\n\n`style`, `transform` and `animation` are PARTIAL PATCHES — fields you omit keep their current values, nested objects included, so `{\"outline\": {\"width\": 0}}` leaves the outline colour alone. Pass null for a whole object to clear it.\n\nOne call = ONE set of values applied to every clip you name. There is no per-clip payload: to give three captions three DIFFERENT wordings, make three calls. `content` is shared by every id in `clip_ids`.\n\nThis does NOT move or retime anything: use set_clip_properties for timeline position, duration and fades. `timeline_in`/`timeline_out`/ `duration` belong to add_text_clips and set_clip_properties, and are rejected here.\n\nReturns {ok, updated:[{clip_id, track_id}], count} plus a change delta.",
       "parameters": {
         "type": "object",
@@ -3421,11 +3928,17 @@
           }
         },
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "project-mutation",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
     },
     {
       "name": "video_ask",
-      "expensive": true,
       "description": "Ask anything about a video or a sub-window of one — a deep video-understanding pass (by a multimodal model that sees and understands video natively). Describe, verify, compare, count, or ask any ad-hoc question about what's in a video. It analyzes the whole clip at high fps (~250ms resolution), so it's the right call for millisecond-level / temporal questions; for a quick few-frame glance use `inspect_media` instead.\n\nTo FIND/locate something in a video, use `video_find_moment` instead — it's better at that and returns structured candidates; don't use `video_ask` for \"find the best window\" / \"where is the clean launch\" (weaker at picking). You can use `video_ask` to verify candidates `video_find_moment` returned.\n\nPoint it at a video with `media_ref` (a library asset) and/or `clip_id` (a placed timeline clip, analyzed via its source); LOCAL sources only — for a URL, call `download_video` first and pass the returned `media_ref` (URLs are rejected).\n\nBy default the whole clip is analyzed; pass `start_seconds`/`end_seconds` to analyze just that window (cheaper on long sources), in which case returned timestamps are relative to the window start. Clips or windows over 30 min are rejected. Returns {ok, response, timing, timestamps_found, video_duration_s, window_s}. With `clip_id` (a placed clip) the structured `timestamps_found` come back as PROJECT FRAMES ([{text, frame}], timing:\"project_frames\") — ready to hand straight to the edit tools; with `media_ref` (a raw asset) they are SOURCE seconds ([{text, seconds}], timing:\"source_seconds\").",
       "parameters": {
         "type": "object",
@@ -3471,11 +3984,18 @@
         ],
         "additionalProperties": false
       },
-      "note": "client resolves + pre-encodes the clip (ffmpeg); the hosted video-understanding call is a thin server sub-call (/ai/vision_video)."
+      "expensive": true,
+      "effect": "read",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ],
+      "note": "client resolves + pre-encodes the clip (ffmpeg); the hosted video-understanding call is a thin server sub-call (/ai/vision_video).",
+      "omit_for_native_video": true
     },
     {
       "name": "video_find_moment",
-      "expensive": true,
       "description": "Ask Gemini to search an entire video and return the SINGLE best contiguous window matching a natural-language query, chosen by editorial quality rather than by which match comes first.\n\nExactly one moment is returned (`moments` holds 0 or 1 entries) and\nthere is no way to ask for more. It has TWO fields:\n  - `why`: the reason the picker chose it. Short, may be biased\n    toward justifying the pick.\n  - `shots`: a STRUCTURED shot-by-shot map of the window, shape\n    `[{in_s, out_s, description}, ...]` covering the entire window\n    contiguously. Each description names subject + motion +\n    framing + any on-screen text + tone — what is actually rendered\n    into the pixels, not editorial intent. Use `shots` to verify the\n    moment before clipping; the picker's `why` alone can be\n    optimistic.\n\nDO NOT trust the moment from `why` alone. Read `shots` before committing to it. Sub-shot descriptions often reveal tone/content mismatches the short `why` cannot (e.g. a sub-shot labelled \"damaged spacecraft, somber\" inside a window the picker described as \"clean Apollo archival shot\"). If `shots` describes content that is tonally off for your shot, re-run `video_find_moment` with a more specific query — there is no second candidate to fall back on, so spend the effort on the query wording rather than expecting alternatives.\n\nYou can use sub-shots as anchors when clipping.\n\nReturns {timing, moments: [{start_s, end_s, peak_s, why, shots: [{in_s, out_s, description}, ...]}]} with at most one moment. With a placed `clip_id` the moment and shot times come back as PROJECT FRAMES instead (start_frame/end_frame/ peak_frame, shots in_frame/out_frame, timing:\"project_frames\"; a moment outside the clip's visible span dropped) — ready for the edit tools. A raw `media_ref` returns SOURCE seconds (the _s fields, timing:\"source_seconds\").\n\nPick this over `video_ask` when you don't yet know WHERE the target footage lives inside a longer video. For verifying a specific window you already have, use `video_ask` instead.\n\nFor just a quick few-frame GLANCE at a clip, use `inspect_media` instead. This tool (and `video_ask`) analyze the WHOLE clip at high fps (~250ms resolution) and are the right call for millisecond-level / temporal questions; `inspect_media` only samples a few frames.\n\nAccepts a library `media_ref` (media_... id or filename) or a `clip_id` only — never a raw file path. If you have a YouTube or other web URL, first call `download_video(url, ...)` to fetch it, then pass the `media_ref` that tool returns. URLs passed here will be REJECTED with a clean error pointing to `download_video`. Audio is stripped before sending to Gemini (the picker is visual-only) so don't worry about audio token cost.\n\nHard constraint: rejects videos longer than 30 mins with a clean error. The whole video is always searched - there is no way to narrow.\n\nQuery tips:\n- Describe the visible action concretely: 'rocket lifting off from\n  the launch pad with flames and smoke' beats 'Artemis launch'.\n- Mention what should NOT be in frame if the video has known\n  distractions (e.g. 'clean shot without broadcast graphics').",
       "parameters": {
         "type": "object",
@@ -3513,11 +4033,18 @@
         ],
         "additionalProperties": false
       },
-      "note": "client resolves + pre-encodes the clip (ffmpeg) + parses the prose shot list; the hosted video-understanding call is a thin server sub-call (/ai/vision_video)."
+      "expensive": true,
+      "effect": "read",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ],
+      "note": "client resolves + pre-encodes the clip (ffmpeg) + parses the prose shot list; the hosted video-understanding call is a thin server sub-call (/ai/vision_video).",
+      "omit_for_native_video": true
     },
     {
       "name": "video_get_metadata",
-      "expensive": false,
       "description": "Get rich metadata for a video URL without downloading it — title, duration, channel, upload date, view count, description, best thumbnail, chapters, and the \"most replayed\" heatmap. YouTube is richest (chapters / heatmap / storyboards are essentially YouTube-only); other sites degrade gracefully, with missing fields returned as null. Cached per URL within the run. Returns {ok, cached, metadata:{title, duration, channel, upload_date, view_count, description, thumbnail, chapters, heatmap, heatmap_total_buckets, has_storyboards, captions_available}}.",
       "parameters": {
         "type": "object",
@@ -3531,11 +4058,47 @@
           "url"
         ],
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "read",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
+    },
+    {
+      "name": "vision_describe",
+      "description": "Describe a single image by its library ref.\n\nPick this over `video_ask` when the asset is a still image — a downloaded thumbnail, an extracted frame, or a mosaic of multiple frames.\n\nInput: a library asset ref (media_... id or filename) only. If you only have a web URL, import the image first and pass its ref.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "media_ref": {
+            "type": "string",
+            "description": "A library asset ref (media_... id or filename) for the image."
+          },
+          "prompt": {
+            "type": "string",
+            "default": "Describe what you see in this image.",
+            "description": "Optional. What to ask about the image (default: a general description)."
+          }
+        },
+        "required": [
+          "media_ref"
+        ],
+        "additionalProperties": false
+      },
+      "expensive": true,
+      "effect": "read",
+      "status": "withdrawn",
+      "surfaces": [
+        "app",
+        "mcp"
+      ],
+      "note": "client resolves + reads the image; the hosted vision-model call is a thin server sub-call (/ai/vision_image)."
     },
     {
       "name": "web_search",
-      "expensive": false,
       "description": "Search the web and return up to N results as {title, url, snippet}. Indexes the whole web — news, articles, social media (X, Reddit, Facebook, LinkedIn), blogs, government/educational pages. For YouTube video intent prefer `youtube_search`, which returns the same fields plus enriched per-video metadata in one call.\n\nTips: be specific ('noun + action + context' beats keywords, e.g. 'NASA Artemis II SLS launch' over 'rocket launching'). To restrict results to one domain pass `site` — do NOT hand-write a `site:` prefix into `query`.",
       "parameters": {
         "type": "object",
@@ -3561,11 +4124,17 @@
         ],
         "additionalProperties": false
       },
+      "expensive": false,
+      "effect": "read",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ],
       "note": "primary path scrapes DDG/Bing SERPs and needs a real IP (anti-bot); the Azure-grounded fallback is a server sub-call."
     },
     {
       "name": "youtube_search",
-      "expensive": false,
       "description": "Search YouTube and return up to N video results in rank order.\n\nBy default each result is ENRICHED with metadata (duration, channel, view count, thumbnail, chapter/heatmap/storyboard presence, first 300 chars of description). Set `enrich=false` to skip the per-result fetch and return only shallow fields (url, title, channel, duration_s) - much faster.\n\nPrefer over `web_search` when you specifically want YouTube videos; use `web_search` for non-YouTube or non-video results (articles, social posts, fact-checking). Pass `shorts=true` to also include YouTube Shorts (each flagged `is_short:true`); default returns only normal videos.",
       "parameters": {
         "type": "object",
@@ -3600,8 +4169,53 @@
           "query"
         ],
         "additionalProperties": false
-      }
+      },
+      "expensive": false,
+      "effect": "read",
+      "status": "active",
+      "surfaces": [
+        "app",
+        "mcp"
+      ]
+    },
+    {
+      "name": "manage_project",
+      "description": "List, open, or create ArtDaddy projects. An MCP session may begin with NO project open, and every other tool acts on the open one — so call this with action='list' and then action='open' before reading or editing a timeline. action='current' reports what is open.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "aspect": {
+            "type": "string"
+          },
+          "fps": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "expensive": false,
+      "effect": "app-operation",
+      "status": "active",
+      "surfaces": [
+        "mcp"
+      ]
     }
+  ],
+  "removed_tools": [
+    "read_timeline_schema",
+    "video_describe",
+    "video_get_storyboard"
   ],
   "effects": [
     {

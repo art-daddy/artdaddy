@@ -21,13 +21,15 @@ vi.mock("../platform", () => ({
   },
 }));
 
-import { onOsDragOver, onOsDrop, startOsDropRouter, webOwnsFileDrops } from "./osDrop";
+import { OS_DROP_EVENT, onOsDragOver, onOsDrop, startOsDropRouter, webOwnsFileDrops } from "./osDrop";
+import { useCompatibility } from "../update/compatibility";
 
 const emit = (payload: unknown) => listeners.forEach((fn) => fn({ payload }));
 
 beforeEach(() => {
   listeners.length = 0;
   platformName = "tauri";
+  useCompatibility.setState({ status: "allowed" });
   document.body.innerHTML = "";
   vi.restoreAllMocks();
 });
@@ -58,6 +60,23 @@ function zone(name: string): HTMLElement {
 }
 
 describe("startOsDropRouter", () => {
+  it.each(["checking", "unverified", "required"] as const)("refuses native and already-routed drops while %s", async (status) => {
+    await startOsDropRouter();
+    const element = zone("library");
+    const received = vi.fn();
+    const unsubscribe = onOsDrop("library", received);
+    useCompatibility.setState({ status });
+    emit({ type: "drop", paths: ["D:/a.mp4"], position: { x: 10, y: 10 } });
+    window.dispatchEvent(new CustomEvent(OS_DROP_EVENT, { detail: {
+      target: "library", element, paths: ["D:/a.mp4"], x: 10, y: 10,
+    } }));
+    expect(received).not.toHaveBeenCalled();
+    useCompatibility.setState({ status: "allowed" });
+    emit({ type: "drop", paths: ["D:/a.mp4"], position: { x: 10, y: 10 } });
+    expect(received).toHaveBeenCalledTimes(1);
+    unsubscribe();
+  });
+
   it("delivers dropped PATHS to the zone under the cursor", async () => {
     await startOsDropRouter();
     const el = zone("library");

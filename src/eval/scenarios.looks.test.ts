@@ -7,9 +7,15 @@
 import { describe, expect, it } from "vitest";
 
 import type { Timeline } from "../timeline/model";
-import { ALL_SCENARIOS } from "./scenarios";
+import catalog from "../contract/catalog.json";
+import { ALL_SCENARIOS, DISABLED_SCENARIOS } from "./scenarios";
 import { CANONICAL } from "./scenarios/canonical";
+import { EFFECT_SCENARIOS } from "./scenarios/effects";
+import { EXPORT_SCENARIOS, RECOVERY_SCENARIOS } from "./scenarios/exports";
 import { timeline, ttrack, vclip, vtrack } from "./scenarios/helpers";
+import { JOURNEYS } from "./scenarios/journeys";
+import { REGRESSIONS } from "./scenarios/regressions";
+import { STUDIO_SCENARIOS } from "./scenarios/studio";
 import type { Scenario } from "./types";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -73,6 +79,27 @@ describe("caption-look eval graders (validated without the model)", () => {
   it("every scenario id in the corpus is unique (report keys can't collide)", () => {
     const ids = ALL_SCENARIOS.map((s) => s.id);
     expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it("excludes retired-tool workflows without losing supported scenarios", () => {
+    const candidates = [
+      ...CANONICAL,
+      ...EFFECT_SCENARIOS,
+      ...REGRESSIONS,
+      ...JOURNEYS,
+      ...EXPORT_SCENARIOS,
+      ...RECOVERY_SCENARIOS,
+      ...STUDIO_SCENARIOS,
+    ];
+    const withdrawn = new Set(
+      catalog.tools.filter((tool) => tool.status === "withdrawn").map((tool) => tool.name),
+    );
+    for (const scenario of candidates) {
+      const retired = scenario.expectTools?.some((name) => withdrawn.has(name)) ?? false;
+      expect(ALL_SCENARIOS.includes(scenario), scenario.id).toBe(!retired);
+      expect(DISABLED_SCENARIOS.includes(scenario), scenario.id).toBe(retired);
+    }
+    expect(ALL_SCENARIOS.length + DISABLED_SCENARIOS.length).toBe(candidates.length);
   });
 });
 

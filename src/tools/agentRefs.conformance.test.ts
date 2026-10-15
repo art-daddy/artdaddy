@@ -62,6 +62,11 @@ class RecFs implements FsLike {
   async writeTextFile(p: string, c: string): Promise<void> {
     this.files.set(this.k(p), c);
   }
+  async rename(from: string, to: string): Promise<void> {
+    const contents = await this.readTextFile(from);
+    this.files.delete(this.k(from));
+    this.files.set(this.k(to), contents);
+  }
   async readBytes(p: string): Promise<Uint8Array> {
     this.see(p);
     if (!this.files.has(this.k(p))) throw new Error(`ENOENT ${p}`);
@@ -210,11 +215,6 @@ const PARAMS: Record<string, { kind: Kind; call?: Call; control?: string }> = {
     call: (x) => ["insert_clips", { at: 0, track_id: "v1", entries: [{ media_ref: x }] }],
     control: "media_ctl",
   },
-  "clip_video media_ref": {
-    kind: "library-ref",
-    call: (x) => ["clip_video", { media_ref: x, start_s: 0, end_s: 1, output_name: "out.mp4" }],
-    control: "media_ctl",
-  },
   "crop_image media_ref": {
     kind: "library-ref",
     call: (x) => ["crop_image", { media_ref: x, bbox: { x: 0, y: 0, w: 10, h: 10 } }],
@@ -306,7 +306,6 @@ const PARAMS: Record<string, { kind: Kind; call?: Call; control?: string }> = {
   "import_media source.path": { kind: "import-door" },
   "export output_path": { kind: "destination" },
   "export output_dir": { kind: "destination" },
-  "clip_video output_name": { kind: "output-name" },
   "download_video output_name": { kind: "output-name" },
   "run_ffmpeg output_name": { kind: "output-name" },
   "generate_image folder": { kind: "library-folder" },
@@ -440,7 +439,6 @@ describe("a HEIF still's pixels are read only through its decoded picture", () =
   // The floor that keeps the rule above from passing by never looking: these read the picture, so
   // each must have DECODED it through the owner. (Any parameter not listed is still held to the rule.)
   const PIXEL_READERS = [
-    "clip_video media_ref",
     "crop_image media_ref",
     "generate_image reference_images[]",
     "generate_video end_frame",

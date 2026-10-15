@@ -55,6 +55,7 @@ type Planned =
 
 async function exportItemsTool(args: Args, ctx: ClientToolContext | null): Promise<Result> {
   if (!ctx) return { ok: false, error: "client tool runtime not ready" };
+  if (!ctx.store.canRename) return { ok: false, error: "export requires atomic destination-volume staging on this platform" };
   if (typeof args.output_path === "string" && args.output_path.trim())
     return {
       ok: false,
@@ -121,6 +122,7 @@ async function exportItemsTool(args: Args, ctx: ClientToolContext | null): Promi
     seconds: Timeline;
     branding?: import("./branding").Branding;
     warnings: string[];
+    admission: import("./render").RenderAdmission;
   } | null = null;
   let fps = 30;
   if (clipIds.length) {
@@ -160,7 +162,7 @@ async function exportItemsTool(args: Args, ctx: ClientToolContext | null): Promi
     total > 1 ? `${String(i + 1).padStart(width, "0")} ${stem}` : stem;
   const taken = new Set<string>();
   const planned: Planned[] = [];
-  const stageOf = (path: string): string => (ctx.store.canRename ? stagingPathFor(path) : path);
+  const stageOf = (path: string): string => stagingPathFor(path);
   let i = 0;
   for (const m of media) {
     const { filename, path } = await freeName(
@@ -222,6 +224,7 @@ async function exportItemsTool(args: Args, ctx: ClientToolContext | null): Promi
         p.kind === "media"
           ? await submitExport({
               store: ctx.store,
+              dependencies: [p.src],
               destPath: p.path,
               stagePath: p.stage,
               filename: p.filename,
@@ -235,6 +238,7 @@ async function exportItemsTool(args: Args, ctx: ClientToolContext | null): Promi
             })
           : await queueRenderJob(ctx, {
               plan: p.plan,
+              admission: loaded!.admission,
               destPath: p.path,
               stagePath: p.stage,
               filename: p.filename,
@@ -258,7 +262,7 @@ async function exportItemsTool(args: Args, ctx: ClientToolContext | null): Promi
   const note = [
     `Saving ${planned.length} file${planned.length > 1 ? "s" : ""} to ${folder.label}.`,
     rendered.length < planned.length ? "Library files are copied as they are." : "",
-    rendered.length && loaded?.branding
+    rendered.length && loaded?.branding?.watermark
       ? "Each clip from the timeline carries the ArtDaddy watermark (no end card)."
       : "",
   ]

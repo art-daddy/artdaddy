@@ -2,7 +2,8 @@
 // of the page, and the next page commits it exactly as the first would have. These drive the real
 // export tool and the real queue against FakeJobs, which keeps the supervisor's rules (its Rust
 // twin is tested in src-tauri/src/jobs.rs) and lets a test play the ffmpeg process.
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 
 import { JobLedger } from "../project/jobLedger";
 import { FakeJobs } from "../test/fakeJobs";
@@ -11,6 +12,7 @@ import { agentToolContext } from "../tools/agentStore";
 import type { CommandResult, CommandRunner } from "../tools/command";
 import type { ClientToolContext } from "../tools/context";
 import { __resetProjectJobs } from "../tools/genJobs";
+import { registerLibraryClip } from "../tools/import";
 import { __resetJobSupervisor, __setJobSupervisor, supervisedRunner } from "../tools/jobSupervisor";
 import { joinPath, ProjectStoreAccess } from "../tools/store";
 import { ensureTimeline } from "./engine";
@@ -19,6 +21,8 @@ import {
   adoptExports,
   cancelExport,
   listExportRecords,
+  localDeliveryPort,
+  submitExport,
   whenExportEnds,
   whenExportsSettle,
 } from "./exportQueue";
@@ -27,6 +31,8 @@ import { exportTimelineTool } from "./render";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
+
+vi.mock("../api/exportEvents", () => ({ reportExport: async () => undefined }));
 
 class Fs extends MemFs {
   async rename(from: string, to: string): Promise<void> {
@@ -43,6 +49,11 @@ class Fs extends MemFs {
     if (v === undefined) throw new Error(`ENOENT ${p}`);
     return new TextEncoder().encode(String(v));
   }
+  async probeMedia(p: string, headBytes: number) {
+    const bytes = await this.readBytes(p);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    return { id12: sha256.slice(0, 12), sha256, size: bytes.length, head: bytes.slice(0, headBytes) };
+  }
 }
 
 const DIR = "C:/proj";
@@ -53,17 +64,35 @@ async function flush(n = 20) {
   for (let i = 0; i < n; i++) await settle();
 }
 
-async function setup() {
-  const fs = new Fs();
+class StreamingFs extends Fs {
+  async appendBytes(file: string, bytes: Uint8Array): Promise<void> {
+    const key = joinPath(file);
+    this.files.set(key, String(this.files.get(key) ?? "") + new TextDecoder().decode(bytes));
+  }
+}
+
+async function setup(streaming = false) {
+  const fs = streaming ? new StreamingFs() : new Fs();
   const store = new ProjectStoreAccess(DIR, fs);
   registerTestDocument(DIR);
   await ensureTimeline(store);
   // Everything but ffmpeg runs under the page as before (the probes, the checks); an ffmpeg that
   // lands here ran under the page, which is what these tests forbid.
   const ran: string[] = [];
+  let jobs: FakeJobs | undefined;
   const runner: CommandRunner = {
-    run: async (program): Promise<CommandResult> => {
+    run: async (program, args): Promise<CommandResult> => {
       ran.push(program);
+      if (program === "ffprobe") {
+        const spec = jobs?.submitted.find((submitted) => submitted.meta.stagePath === args.at(-1));
+        const plan = spec?.meta.plan as { duration: number; audioExpected: boolean; output: { width: number; height: number; fps: number } } | undefined;
+        const output = plan?.output ?? { width: 1920, height: 1080, fps: 30 };
+        const duration = plan?.duration ?? 2;
+        return { code: 0, stdout: JSON.stringify({ streams: [{ codec_type: "video", width: output.width, height: output.height,
+          avg_frame_rate: `${output.fps}/1`, nb_read_frames: String(Math.ceil(duration * output.fps)), duration: String(duration) },
+          ...(plan?.audioExpected ? [{ codec_type: "audio", duration: String(duration) }] : [])],
+          format: { duration: String(duration) } }), stderr: "" };
+      }
       return { code: 0, stdout: "", stderr: "" };
     },
   };
@@ -71,7 +100,8 @@ async function setup() {
     { entries: [{ media_ref: "a.mp4", timeline_in: 0, timeline_out: 60 }] },
     { store, runner },
   );
-  const jobs = new FakeJobs();
+  jobs = new FakeJobs();
+  jobs.delivery = localDeliveryPort(store);
   // The process writes its output where it was told: the last argument.
   jobs.onStart = (spec) => fs.writeTextFile(spec.args[spec.args.length - 1], "a whole video");
   __setJobSupervisor(jobs);
@@ -109,6 +139,48 @@ async function ledgerStatus(fs: Fs, id: string): Promise<string | undefined> {
   return file.jobs.find((j) => j.id === id)?.status;
 }
 
+describe("local delivery state after asynchronous identity checks", () => {
+  it.each([
+    { operation: "verify", action: "cancel", terminal: "cancelled" },
+    { operation: "verify", action: "fail", terminal: "failed" },
+    { operation: "publish", action: "cancel", terminal: "cancelled" },
+    { operation: "publish", action: "fail", terminal: "failed" },
+  ] as const)("$action during $operation preserves the destination and terminal state", async ({ operation, action, terminal }) => {
+    const fs = new Fs();
+    const store = new ProjectStoreAccess(DIR, fs);
+    const port = localDeliveryPort(store);
+    const stage = `${DEST}.partial`;
+    const intent = `identity-race-${operation}-${action}`;
+    await fs.writeTextFile(stage, "complete staged bytes");
+    await fs.writeTextFile(DEST, "previous destination bytes");
+    await port.prepare(intent, DIR, stage, DEST, { kind: "render", paths: [] });
+    if (operation === "publish") await port.verify(intent);
+
+    let entered!: () => void;
+    let release!: () => void;
+    const checking = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const probe = store.probeMedia.bind(store);
+    vi.spyOn(store, "probeMedia").mockImplementationOnce(async (...args) => {
+      const result = await probe(...args);
+      entered();
+      await gate;
+      return result;
+    });
+    const pending = port[operation](intent);
+    try {
+      await checking;
+      expect(await port[action](intent)).toBe(true);
+    } finally {
+      release();
+    }
+    await expect(pending).rejects.toThrow("export intent was cancelled or failed");
+    expect((await port.list())[0].state).toBe(terminal);
+    expect(await fs.readTextFile(DEST)).toBe("previous destination bytes");
+    expect(await fs.readTextFile(stage)).toBe("complete staged bytes");
+  });
+});
+
 describe("in the app, an export runs as a job of the app process", () => {
   it("runs ffmpeg there, one export at a time, and delivers each in turn", async () => {
     const t = await setup();
@@ -128,7 +200,8 @@ describe("in the app, an export runs as a job of the app process", () => {
     });
 
     t.jobs.exit(a.job_id, 0);
-    expect((await whenExportEnds(a.job_id))?.state).toBe("done");
+    const completed = await whenExportEnds(a.job_id);
+    expect(completed?.state, completed?.error).toBe("done");
     expect(await t.fs.readTextFile(DEST)).toBe("a whole video");
     await flush();
     expect(t.jobs.view(b.job_id)?.state).toBe("running");
@@ -156,6 +229,248 @@ describe("in the app, an export runs as a job of the app process", () => {
 });
 
 describe("an export outlives a crash of the page", () => {
+  it("refuses export registration without its published receipt identity", async () => {
+    const t = await setup();
+    await t.fs.writeTextFile(DEST, "a whole video");
+    const catalogPath = joinPath(`${DIR}/internals/library.json`);
+    const before = t.fs.files.get(catalogPath);
+    await expect(registerLibraryClip(t.store, await t.store.readBytes(DEST), "proj.mp4", "video",
+      { kind: "export", job_id: "missing-receipt" }, DEST)).rejects.toThrow("published artifact identity");
+    expect(t.fs.files.get(catalogPath)).toBe(before);
+    expect(await t.fs.readTextFile(DEST)).toBe("a whole video");
+  });
+
+  it("does not reuse an existing library identity whose linked bytes changed", async () => {
+    const t = await setup();
+    const older = "C:/Users/test/Downloads/older.mp4";
+    await t.fs.writeTextFile(older, "a whole video");
+    const existing = await registerLibraryClip(t.store, await t.store.readBytes(older), "older.mp4", "video", { kind: "import" }, older);
+    const before = await t.fs.readTextFile(`${DIR}/internals/library.json`);
+    await t.fs.writeTextFile(older, "different linked media");
+    const submitted = await t.exportNow();
+    await flush();
+    t.jobs.exit(submitted.job_id, 0);
+    await whenExportsSettle();
+    expect(await t.fs.readTextFile(DEST)).toBe("a whole video");
+    expect(await t.fs.readTextFile(`${DIR}/internals/library.json`)).toBe(before);
+    expect(listExportRecords().find((record) => record.job_id === submitted.job_id)?.mediaRef).toBeUndefined();
+    expect((await t.jobs.delivery!.list()).find((intent) => intent.id === submitted.job_id)?.followups_done).toBe(false);
+    await t.fs.writeTextFile(older, "a whole video");
+    await adoptExports({ contextFor: t.nextPage });
+    await whenExportsSettle();
+    expect(listExportRecords().find((record) => record.job_id === submitted.job_id)?.mediaRef).toBe(existing.id);
+    expect(await t.fs.readTextFile(`${DIR}/internals/library.json`)).toBe(before);
+  });
+
+  it.each([
+    { adopted: false, phase: "media-read", streaming: false }, { adopted: true, phase: "media-read", streaming: false },
+    { adopted: false, phase: "catalog-read", streaming: false }, { adopted: true, phase: "catalog-read", streaming: false },
+    { adopted: false, phase: "media-read", streaming: true }, { adopted: true, phase: "media-read", streaming: true },
+    { adopted: false, phase: "catalog-read", streaming: true }, { adopted: true, phase: "catalog-read", streaming: true },
+  ])("never catalogs replacement bytes during $adopted/$phase/$streaming follow-ups", async ({ adopted, phase, streaming }) => {
+    const t = await setup(streaming);
+    const submitted = await t.exportNow();
+    await flush();
+    if (adopted) pageCrashes(t.jobs);
+    const registerStore = adopted ? t.nextPage().store : t.store;
+    expect(registerStore.canStreamImport).toBe(streaming);
+    const read = registerStore.readBytes.bind(registerStore);
+    let replaced = false;
+    let registrationRead = false;
+    const mediaRead = vi.spyOn(registerStore, "readBytes").mockImplementation(async (file) => {
+      if (joinPath(file) === joinPath(DEST)) registrationRead = true;
+      if (phase === "media-read" && joinPath(file) === joinPath(DEST) && !replaced) {
+        replaced = true;
+        await t.fs.writeTextFile(DEST, "unrelated replacement bytes");
+      }
+      return read(file);
+    });
+    const probe = registerStore.probeMedia.bind(registerStore);
+    let mediaProbe: ReturnType<typeof vi.spyOn> | undefined;
+    const publish = t.jobs.delivery!.publish.bind(t.jobs.delivery!);
+    if (streaming) vi.spyOn(t.jobs.delivery!, "publish").mockImplementation(async (...args) => {
+      const receipt = await publish(...args);
+      mediaProbe = vi.spyOn(registerStore, "probeMedia").mockImplementationOnce(async (...probeArgs) => {
+        const result = await probe(...probeArgs);
+        registrationRead = true;
+        if (phase === "media-read") {
+          replaced = true;
+          await t.fs.writeTextFile(DEST, "unrelated replacement bytes");
+        }
+        return result;
+      });
+      return receipt;
+    });
+    const readJson = registerStore.readJson.bind(registerStore);
+    const catalogRead = vi.spyOn(registerStore, "readJson").mockImplementation(async <Value>(file: string, fallback: Value) => {
+      const result = await readJson<Value>(file, fallback);
+      if (phase === "catalog-read" && registrationRead && joinPath(file) === joinPath(`${DIR}/internals/library.json`) && !replaced) {
+        replaced = true;
+        await t.fs.writeTextFile(DEST, "unrelated replacement bytes");
+      }
+      return result;
+    });
+    t.jobs.exit(submitted.job_id, 0);
+    if (adopted) await adoptExports({ contextFor: () => ({ store: registerStore, runner: t.nextPage().runner }) });
+    await whenExportsSettle();
+    expect(replaced).toBe(true);
+    expect(await t.fs.readTextFile(DEST)).toBe("unrelated replacement bytes");
+    expect((await t.store.listClips()).filter((clip) => clip.path === DEST)).toHaveLength(0);
+    expect(listExportRecords().find((record) => record.job_id === submitted.job_id)?.mediaRef).toBeUndefined();
+    expect((await t.jobs.delivery!.list()).find((intent) => intent.id === submitted.job_id)?.followups_done).toBe(false);
+    mediaRead.mockRestore();
+    mediaProbe?.mockRestore();
+    catalogRead.mockRestore();
+    await t.fs.writeTextFile(DEST, "a whole video");
+    await adoptExports({ contextFor: t.nextPage });
+    await whenExportsSettle();
+    const clips = (await t.store.listClips()).filter((clip) => clip.path === DEST);
+    expect(clips).toHaveLength(1);
+    const catalog = await t.store.readJson<{ clips: Array<{ id: string; source?: { job_id?: string; identity?: unknown } }> }>(
+      `${DIR}/internals/library.json`, { clips: [] });
+    const intent = (await t.jobs.delivery!.list()).find((entry) => entry.id === submitted.job_id)!;
+    expect(catalog.clips.find((clip) => clip.id === clips[0].id)?.source).toMatchObject({ job_id: submitted.job_id, identity: intent.identity });
+    expect(intent.followups_done).toBe(true);
+    expect(await t.fs.readTextFile(DEST)).toBe("a whole video");
+  });
+
+  it("retains the destination reservation until library registration settles", async () => {
+    const t = await setup();
+    const submitted = await t.exportNow();
+    await flush();
+    let release!: () => void;
+    let entered!: () => void;
+    const waiting = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const read = t.store.readBytes.bind(t.store);
+    vi.spyOn(t.store, "readBytes").mockImplementationOnce(async (file) => { entered(); await gate; return read(file); });
+    t.jobs.exit(submitted.job_id, 0);
+    try {
+      await waiting;
+      await expect(submitExport({ store: t.store, destPath: DEST, stagePath: `${DEST}.replacement.partial`,
+        filename: "proj.mp4", dependencies: [], run: async () => { throw new Error("replacement must not start"); } }))
+        .rejects.toThrow(/already|reserved|exporting/);
+      expect(t.jobs.submitted).toHaveLength(1);
+      expect(await t.fs.readTextFile(DEST)).toBe("a whole video");
+    } finally { release(); }
+    await whenExportsSettle();
+    expect((await t.store.listClips()).filter((clip) => clip.path === DEST)).toHaveLength(1);
+  });
+
+  it("retains a retry requested while earlier registration is still active", async () => {
+    const t = await setup();
+    const submitted = await t.exportNow();
+    await flush();
+    let rejectRead!: (reason: Error) => void;
+    const pendingRead = new Promise<Uint8Array>((_, reject) => { rejectRead = reject; });
+    const read = vi.spyOn(t.store, "readBytes").mockReturnValue(pendingRead);
+    t.jobs.exit(submitted.job_id, 0);
+    try {
+      await flush();
+      expect(read).toHaveBeenCalled();
+      expect(await adoptExports({ contextFor: t.nextPage })).toBe(0);
+    } finally {
+      read.mockRestore();
+      rejectRead(new Error("old registration attempt failed after reopen"));
+    }
+    await whenExportsSettle();
+    expect(await t.fs.readTextFile(DEST)).toBe("a whole video");
+    expect(listExportRecords().find((record) => record.job_id === submitted.job_id)?.mediaRef).toMatch(/^media_/);
+    expect((await t.store.listClips()).filter((clip) => clip.path === DEST)).toHaveLength(1);
+  });
+
+  it("adopts pending follow-ups once for the matching project under concurrent requests", async () => {
+    const t = await setup();
+    const submitted = await t.exportNow();
+    await flush();
+    pageCrashes(t.jobs);
+    t.jobs.exit(submitted.job_id, 0);
+    await t.jobs.delivery!.verify(submitted.job_id);
+    await t.jobs.delivery!.publish(submitted.job_id);
+    await t.jobs.commit(submitted.job_id);
+    expect(await adoptExports({ projectId: "different-project", contextFor: t.nextPage })).toBe(0);
+    const results = await Promise.all([
+      adoptExports({ projectId: "proj", contextFor: t.nextPage }),
+      adoptExports({ projectId: "proj", contextFor: t.nextPage }),
+    ]);
+    expect(results.reduce((total, count) => total + count, 0)).toBe(1);
+    await whenExportsSettle();
+    expect(await t.fs.readTextFile(DEST)).toBe("a whole video");
+    expect((await t.store.listClips()).filter((clip) => clip.path === DEST)).toHaveLength(1);
+    expect(listExportRecords().filter((record) => record.job_id === submitted.job_id)).toHaveLength(1);
+  });
+
+  it("retries unacknowledged registration while retaining the current page row", async () => {
+    const t = await setup();
+    const submitted = await t.exportNow();
+    await flush();
+    const read = vi.spyOn(t.store, "readBytes").mockRejectedValue(new Error("registration is unavailable"));
+    t.jobs.exit(submitted.job_id, 0);
+    await whenExportsSettle();
+    read.mockRestore();
+    const delivered = await t.fs.readTextFile(DEST);
+    expect(listExportRecords().find((record) => record.job_id === submitted.job_id)?.mediaRef).toBeUndefined();
+    expect(t.jobs.view(submitted.job_id)?.committed).toBe(true);
+    expect(await adoptExports({ contextFor: t.nextPage })).toBe(1);
+    await whenExportsSettle();
+    expect(await t.fs.readTextFile(DEST)).toBe(delivered);
+    expect(listExportRecords().filter((record) => record.job_id === submitted.job_id)).toHaveLength(1);
+    expect(listExportRecords().find((record) => record.job_id === submitted.job_id)?.mediaRef).toMatch(/^media_/);
+    expect(t.jobs.view(submitted.job_id)).toBeUndefined();
+  });
+
+  it("finishes library and ledger follow-ups after native file commit", async () => {
+    const t = await setup();
+    const submitted = await t.exportNow();
+    await flush();
+    pageCrashes(t.jobs);
+    t.jobs.exit(submitted.job_id, 0);
+    await t.jobs.delivery!.verify(submitted.job_id);
+    await t.jobs.delivery!.publish(submitted.job_id);
+    await t.jobs.commit(submitted.job_id);
+    const delivered = await t.fs.readTextFile(DEST);
+    expect(await adoptExports({ contextFor: t.nextPage })).toBe(1);
+    await whenExportsSettle();
+    expect(await t.fs.readTextFile(DEST)).toBe(delivered);
+    expect(await ledgerStatus(t.fs, submitted.job_id)).toBe("done");
+    expect(listExportRecords().find((record) => record.job_id === submitted.job_id)?.mediaRef).toMatch(/^media_/);
+  });
+
+  it("refuses an unsupported contract even when verified bytes were already moved", async () => {
+    const t = await setup();
+    const submitted = await t.exportNow();
+    await flush();
+    pageCrashes(t.jobs);
+    t.jobs.exit(submitted.job_id, 0);
+    await t.jobs.delivery!.verify(submitted.job_id);
+    await t.fs.rename(t.jobs.submitted[0].args.at(-1)!, DEST);
+    const plan = t.jobs.submitted[0].meta.plan as Record<string, unknown>;
+    plan.contractVersion = -1;
+    await adoptExports({ contextFor: t.nextPage });
+    const outcome = await whenExportEnds(submitted.job_id);
+    expect(outcome?.state).toBe("failed");
+    expect(outcome?.error).toContain("unsupported render contract");
+    expect(await t.fs.readTextFile(DEST)).toBe("a whole video");
+  });
+  it("refuses malformed output metadata even after native publication", async () => {
+    const t = await setup();
+    const submitted = await t.exportNow();
+    await flush();
+    pageCrashes(t.jobs);
+    t.jobs.exit(submitted.job_id, 0);
+    await t.jobs.delivery!.verify(submitted.job_id);
+    await t.jobs.delivery!.publish(submitted.job_id);
+    const plan = t.jobs.submitted[0].meta.plan as { output: { width: number } };
+    plan.output.width = 0;
+    await adoptExports({ contextFor: t.nextPage });
+    await whenExportsSettle();
+    const outcome = await whenExportEnds(submitted.job_id);
+    expect(outcome?.state).toBe("failed");
+    expect(outcome?.error).toContain("supported output contract");
+    expect(await t.fs.readTextFile(DEST)).toBe("a whole video");
+    expect((await t.store.listClips()).filter((clip) => clip.path === DEST)).toHaveLength(0);
+  });
+
   it("one that finished while no page was there is committed by the next page", async () => {
     const t = await setup();
     const a = await t.exportNow();
@@ -227,29 +542,30 @@ describe("an export outlives a crash of the page", () => {
     expect(t.jobs.killed).toEqual([a.job_id]);
   });
 
-  it("one the dead page had already committed is not committed twice", async () => {
+  it("does not repeat acknowledged follow-ups when forgetting the job was interrupted", async () => {
     const t = await setup();
     const a = await t.exportNow();
     await flush();
-    pageCrashes(t.jobs);
-    // The page renamed the file and told the app process, then died before letting go.
+    vi.spyOn(t.jobs, "forget").mockResolvedValueOnce(false);
     t.jobs.exit(a.job_id, 0);
-    const stage = t.jobs.submitted[0].args.at(-1)!;
-    await t.fs.rename(stage, DEST);
-    await t.jobs.commit(a.job_id);
+    await whenExportsSettle();
+    expect(listExportRecords().find((record) => record.job_id === a.job_id)?.mediaRef).toMatch(/^media_/);
+    expect(t.jobs.view(a.job_id)?.committed).toBe(true);
+    pageCrashes(t.jobs);
     expect(await adoptExports({ contextFor: t.nextPage })).toBe(0);
     expect(listExportRecords()).toEqual([]);
     expect(t.jobs.forgotten).toEqual([a.job_id]);
     expect(await t.fs.readTextFile(DEST)).toBe("a whole video");
   });
 
-  it("one the dead page renamed but never reported is still a delivered export", async () => {
+  it("a verified file the dead page renamed is reconciled by its identity", async () => {
     const t = await setup();
     const a = await t.exportNow();
     await flush();
     pageCrashes(t.jobs);
     // Renamed into place, and the page died before telling the app process.
     t.jobs.exit(a.job_id, 0);
+    await t.jobs.delivery!.verify(a.job_id);
     await t.fs.rename(t.jobs.submitted[0].args.at(-1)!, DEST);
     await adoptExports({ contextFor: t.nextPage });
     expect((await whenExportEnds(a.job_id))?.state).toBe("done");
@@ -303,6 +619,25 @@ describe("the runner that hands ffmpeg to the app process", () => {
     await r.run("ffprobe", []);
     await r.run("ffmpeg", []);
     expect([jobs.submitted.length, b.ran]).toEqual([1, ["ffprobe", "ffmpeg"]]);
+  });
+
+  it("hands every render step to one native job without executing intermediate ffmpegs on the page", async () => {
+    const b = base();
+    const r = supervisedRunner(b, jobs, { id: "j1", lane: "export", meta: { kind: "export" } });
+    const done = r.runSequence!([
+      { args: ["first.nut"], duration: 2 },
+      { args: ["second.nut"], duration: 3 },
+      { args: ["final.partial"], duration: 5 },
+    ], undefined, "C:/scratch/parts");
+    await flush();
+    expect(jobs.submitted).toHaveLength(1);
+    expect(jobs.submitted[0]).toMatchObject({
+      id: "j1", args: ["first.nut"], steps: [["second.nut"], ["final.partial"]],
+      cwd: "C:/scratch/parts", meta: { scratch: "C:/scratch/parts" },
+    });
+    expect(b.ran).toEqual([]);
+    jobs.exit("j1", 0);
+    expect(await done).toMatchObject({ code: 0 });
   });
 
   it("forwards progress, carries its scratch dir with the job, and reports how it ended", async () => {

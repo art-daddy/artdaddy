@@ -7,9 +7,11 @@ import {
   type JobSpec,
   type JobSupervisor,
   type JobView,
+  type ExportDeliveryPort,
 } from "../tools/jobSupervisor";
 
 export class FakeJobs implements JobSupervisor {
+  delivery?: ExportDeliveryPort;
   readonly submitted: JobSpec[] = [];
   /** Jobs whose process was started, in order. */
   readonly started: string[] = [];

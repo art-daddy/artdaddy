@@ -8,7 +8,6 @@
 // stays silent when their connection died.
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../contract", () => ({ ensureContract: vi.fn(async () => {}) }));
 vi.mock("../api/auth", async (io) => {
   const actual = await io<typeof import("../api/auth")>();
   return { ...actual, notifyAuthFailure: vi.fn() };

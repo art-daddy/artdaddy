@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   createProgressReader,
+  createSequenceProgressReader,
   etaSeconds,
   formatEta,
   hhmmssToMs,
@@ -146,6 +147,42 @@ describe("createProgressReader", () => {
     const feed2 = createProgressReader((r) => seen2.push(r.frame));
     feed2(block({ frame: 11 }));
     expect(seen2).toEqual([11]);
+  });
+});
+
+describe("createSequenceProgressReader", () => {
+  it("reports cumulative work and finishes only after final assembly, regardless of chunk boundaries", () => {
+    fc.assert(fc.property(
+      fc.array(fc.integer({ min: 1, max: 30 }), { minLength: 2, maxLength: 6 }),
+      fc.array(fc.integer({ min: 1, max: 40 }), { minLength: 1, maxLength: 30 }),
+      (durations, sizes) => {
+        const records: Array<{ outMs: number; done: boolean }> = [];
+        const feed = createSequenceProgressReader(durations, (record) => records.push(record));
+        const stream = durations.map((duration, index) =>
+          `artdaddy_step=${index}\r\n${block({ out_time_us: duration * 1_000_000 }, true)}`,
+        ).join("");
+        let offset = 0;
+        let part = 0;
+        while (offset < stream.length) {
+          const size = sizes[part++ % sizes.length];
+          feed(stream.slice(offset, offset + size));
+          offset += size;
+        }
+        expect(records).toHaveLength(durations.length);
+        expect(records.map((record) => record.done)).toEqual(durations.map((_, index) => index === durations.length - 1));
+        expect(records.map((record) => record.outMs)).toEqual(durations.map((_, index) =>
+          durations.slice(0, index + 1).reduce((total, duration) => total + duration * 1000, 0),
+        ));
+      },
+    ), { numRuns: 100 });
+  });
+
+  it("resumes at the native job's current step rather than restarting at zero", () => {
+    const seen: number[] = [];
+    const feed = createSequenceProgressReader([2, 3, 5], (record) => seen.push(record.outMs));
+    feed("artdaddy_step=2\n");
+    feed(block({ out_time_us: 1_000_000 }));
+    expect(seen).toEqual([6000]);
   });
 });
 

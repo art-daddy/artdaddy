@@ -1,11 +1,23 @@
 // The PLAN a branded export produces. The pixels are proved separately, by
 // `branding.smoke.e2e.ts` against real ffmpeg output — a filtergraph that merely mentions
 // `overlay` is the exact assertion that passed while captions composited nothing.
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { brandRatio, endcardFile, watermarkFile } from "./branding";
 import type { Timeline } from "./model";
-import { buildRenderCommand } from "./render";
+import { buildRenderCommand, exportBranding } from "./render";
+import { recoverBrandAsset } from "./brandRecovery";
+import { fetchExportPolicy } from "../api/auth";
+import { useAuth } from "../store/auth";
+
+vi.mock("@tauri-apps/api/path", () => ({ resolveResource: async () => "/res/brand" }));
+vi.mock("./brandRecovery", () => ({ recoverBrandAsset: vi.fn(async () => null) }));
+vi.mock("../api/auth", async (original) => ({ ...await original<typeof import("../api/auth")>(), fetchExportPolicy: vi.fn(async () => null) }));
+afterEach(() => {
+  vi.mocked(recoverBrandAsset).mockReset().mockResolvedValue(null);
+  vi.mocked(fetchExportPolicy).mockReset().mockResolvedValue(null);
+  useAuth.setState({ status: "checking", profile: null });
+});
 
 const BRAND = {
   watermark: "/res/brand/watermark-16x9.png",
@@ -97,7 +109,87 @@ describe("brandRatio", () => {
   });
 });
 
+describe("missing branding recovery", () => {
+  it("uses verified backend replacements before planning a branded export", async () => {
+    vi.mocked(recoverBrandAsset).mockImplementation(async (name) => `/verified/${name}`);
+    const result = await exportBranding({ exists: async () => false }, {
+      run: async () => ({ code: 0, stdout: "2", stderr: "" }),
+    }, { width: 1920, height: 1080 });
+    expect(result.branding).toEqual({ watermark: "/verified/watermark-16x9.png", endcard: "/verified/endcard-16x9.mp4", endcardDuration: 2 });
+    expect(result.warning).toBeUndefined();
+    expect(vi.mocked(recoverBrandAsset).mock.calls.map(([name]) => name)).toEqual(["endcard-16x9.mp4", "watermark-16x9.png"]);
+  });
+
+  it("continues unbranded with a warning when recovery is unavailable", async () => {
+    const result = await exportBranding({ exists: async () => false }, {
+      run: async () => ({ code: 0, stdout: "2", stderr: "" }),
+    }, { width: 1080, height: 1920 });
+    expect(result.branding).toBeNull();
+    expect(result.warning).toContain("exported unbranded");
+    expect(recoverBrandAsset).toHaveBeenCalledWith("endcard-9x16.mp4");
+  });
+
+  it("retains the end card without recovering a verified exempt account's missing watermark", async () => {
+    useAuth.setState({ status: "unlocked", profile: { user_id: "exempt", email: "", display_name: "", image_url: "", metered: true } });
+    vi.mocked(fetchExportPolicy).mockResolvedValue({ user_id: "exempt", watermark: false, end_card: true });
+    const result = await exportBranding({ exists: async (file) => file.endsWith(".mp4") }, {
+      run: async () => ({ code: 0, stdout: "2", stderr: "" }),
+    }, { width: 1920, height: 1080 });
+    expect(result.branding).toEqual({ watermark: null, endcard: "/res/brand/endcard-16x9.mp4", endcardDuration: 2 });
+    expect(result.warning).toBeUndefined();
+    expect(recoverBrandAsset).not.toHaveBeenCalled();
+  });
+
+  it("recovers a bundled end card that cannot be measured before falling back", async () => {
+    vi.mocked(recoverBrandAsset).mockImplementation(async (name) => `/verified/${name}`);
+    const result = await exportBranding({ exists: async () => true }, {
+      run: async (_program, args) => args.at(-1)?.startsWith("/verified/")
+        ? { code: 0, stdout: "2", stderr: "" } : { code: 1, stdout: "", stderr: "corrupt asset" },
+    }, { width: 1920, height: 1080 });
+    expect(result.branding?.endcard).toBe("/verified/endcard-16x9.mp4");
+    expect(result.warning).toBeUndefined();
+  });
+
+  it("recovers only the required end card for a verified exempt account", async () => {
+    useAuth.setState({ status: "unlocked", profile: { user_id: "exempt", email: "", display_name: "", image_url: "", metered: true } });
+    vi.mocked(fetchExportPolicy).mockResolvedValue({ user_id: "exempt", watermark: false, end_card: true });
+    vi.mocked(recoverBrandAsset).mockImplementation(async (name) => name === "endcard-16x9.mp4" ? `/verified/${name}` : null);
+    const result = await exportBranding({ exists: async () => false }, {
+      run: async () => ({ code: 0, stdout: "2", stderr: "" }),
+    }, { width: 1920, height: 1080 });
+    expect(result.branding).toEqual({ watermark: null, endcard: "/verified/endcard-16x9.mp4", endcardDuration: 2 });
+    expect(result.warning).toBeUndefined();
+    expect(vi.mocked(recoverBrandAsset).mock.calls.map(([name]) => name)).toEqual(["endcard-16x9.mp4"]);
+  });
+
+  it("does not reuse an old account exemption after recovery changes accounts", async () => {
+    useAuth.setState({ status: "unlocked", profile: { user_id: "exempt", email: "", display_name: "", image_url: "", metered: true } });
+    vi.mocked(fetchExportPolicy).mockImplementation(async () => {
+      useAuth.setState({ profile: { user_id: "different", email: "", display_name: "", image_url: "", metered: true } });
+      return { user_id: "exempt", watermark: false, end_card: true };
+    });
+    vi.mocked(recoverBrandAsset).mockImplementation(async (name) => name === "endcard-16x9.mp4" ? `/verified/${name}` : null);
+    const result = await exportBranding({ exists: async () => false }, {
+      run: async () => ({ code: 0, stdout: "2", stderr: "" }),
+    }, { width: 1920, height: 1080 });
+    expect(result.branding).toBeNull();
+    expect(result.warning).toContain("exported unbranded");
+    expect(vi.mocked(recoverBrandAsset).mock.calls.map(([name]) => name)).toEqual(["endcard-16x9.mp4", "watermark-16x9.png"]);
+  });
+});
+
 describe("branded render plan", () => {
+  it("omits only the corner watermark while retaining the end card and audio span", () => {
+    const plan = buildRenderCommand(timeline(undefined, true), "/o.mp4", {
+      branding: { ...BRAND, watermark: null },
+    });
+    const inputs = plan.args.filter((_, index) => plan.args[index - 1] === "-i");
+    expect(inputs).toEqual(["/m/a.mp4", "/m/b.mp3", BRAND.endcard]);
+    expect(plan.duration).toBe(4);
+    expect(plan.audioMustSpanVideo).toBe(true);
+    expect(plan.args[plan.args.indexOf("-map") + 1]).toBe("[outv]");
+  });
+
   it("adds both assets as inputs without disturbing the clips' input indices", () => {
     const plain = buildRenderCommand(timeline(), "/o.mp4");
     const branded = buildRenderCommand(timeline(), "/o.mp4", { branding: BRAND });
@@ -124,7 +216,7 @@ describe("branded render plan", () => {
 
   it("concatenates the end card after the watermarked picture, not before", () => {
     const fc = buildRenderCommand(timeline(), "/o.mp4", { branding: BRAND }).filterComplex;
-    expect(fc).toContain("[mainv][ecv]concat=n=2:v=1:a=0[outv]");
+    expect(fc).toContain("[mainv][ecv]concat=n=2:v=1:a=0[brandjoined]");
     expect(fc).not.toContain("[ecv][mainv]concat");
   });
 
@@ -138,14 +230,14 @@ describe("branded render plan", () => {
     );
   });
 
-  it("lets the concat decide the length instead of capping it with -t", () => {
+  it("ends a branded render on its planned video-frame budget", () => {
     const branded = buildRenderCommand(timeline(), "/o.mp4", { branding: BRAND });
     const plain = buildRenderCommand(timeline(), "/o.mp4");
-    // The OUTPUT `-t` specifically: per-input `-t` still bounds the looped watermark. A `-t`
-    // computed from a constant would cut a re-authored card off mid-animation while the export
-    // still reported success.
     expect(plain.args.slice(-3)).toEqual(["-t", "2.000000", "/o.mp4"]);
-    expect(branded.args.slice(-2)).toEqual(["-shortest", "/o.mp4"]);
+    const frames = Number(branded.args[branded.args.indexOf("-frames:v") + 1]);
+    expect(frames).toBeGreaterThan(0);
+    expect(frames).toBeCloseTo(branded.duration * branded.output.fps, 9);
+    expect(branded.args).not.toContain("-shortest");
   });
 
   it("pads the audio so the card is not silent-by-truncation", () => {
@@ -153,7 +245,7 @@ describe("branded render plan", () => {
       branding: BRAND,
     }).filterComplex;
     expect(fc, "the fixture produced no audio branch at all").toMatch(/\[\d+:a]/);
-    expect(fc).toMatch(/asetpts=N\/SR\/TB,apad=whole_dur=4\.000000\[abrand]/);
+    expect(fc).toMatch(/asetpts=N\/SR\/TB,apad=whole_dur=4\.000000000,atrim=duration=4\.000000000\[abrand]/);
   });
 
   it("maps the branded video, never the pre-branding label", () => {

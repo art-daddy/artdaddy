@@ -5,6 +5,7 @@
 // can surface a clean "try again shortly" to the USER and a paid tool can tell
 // the model to switch model or ask the user.
 import { ArtDaddyError } from "../lib/errors";
+import { assertCompatibleClient, fetchCompatibleClient } from "../update/compatibility";
 
 function envInt(v: unknown, dflt: number, lo: number, hi: number): number {
   const n = Math.trunc(Number(v));
@@ -119,9 +120,10 @@ export async function fetchWithRetry(
   let transient = 0;
   let rateLimited = 0;
   for (;;) {
+    assertCompatibleClient();
     let res: Response;
     try {
-      res = await fetch(url, { ...init, signal });
+      res = await fetchCompatibleClient(url, { ...init, signal });
     } catch (e) {
       // Dropped / timed-out connection. A user Stop is an abort, not a transient.
       if (signal?.aborted || transient >= transientCap) throw e;

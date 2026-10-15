@@ -4,6 +4,7 @@
 // stages it and always removes it, whatever the run does.
 import type { ClientToolContext } from "./context";
 import { joinPath } from "./store";
+import { jobOwnsScratch } from "./jobSupervisor";
 
 // The bundled font directory (resources/fonts), resolved lazily via the Tauri path API and
 // cached. Outside a Tauri context (tests / browser bundle) it is whatever `useFontDirOutsideTauri`
@@ -75,6 +76,6 @@ export async function withAssScratch<T>(
     }
     return await fn(scratch);
   } finally {
-    await ctx.store.remove(scratch).catch(() => undefined);
+    if (!jobOwnsScratch(ctx.runner)) await ctx.store.remove(scratch).catch(() => undefined);
   }
 }

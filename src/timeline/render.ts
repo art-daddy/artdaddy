@@ -6,7 +6,7 @@
 // grade, effects, transitions, text clips, audio fade/duck/loop/stretch. These
 // grow toward full parity alongside the WebGL preview.
 import type { ClientToolContext } from "../tools/context";
-import { stderrExcerpt, type CommandResult } from "../tools/command";
+import { stderrExcerpt, type CommandResult, type CommandStep } from "../tools/command";
 import {
   isAbsolutePath,
   joinPath,
@@ -14,11 +14,20 @@ import {
   type ProjectStoreAccess,
 } from "../tools/store";
 import { undecodableImageReason } from "../tools/imageDims";
+import { runProjectMutation } from "../tools/coordinator";
 import { useExportJob } from "../store/exportJob";
+import { fetchExportPolicy } from "../api/auth";
+import { isSignedOutGate, useAuth } from "../store/auth";
 import { compileAnim, sampleAnim } from "./anim";
 import { brandRatio, endcardFile, watermarkFile, type Branding } from "./branding";
+import { recoverBrandAsset } from "./brandRecovery";
 import { loadTimeline } from "./engine";
-import { createProgressReader, etaSeconds, progressFraction } from "./ffmpegProgress";
+import {
+  createProgressReader,
+  createSequenceProgressReader,
+  etaSeconds,
+  progressFraction,
+} from "./ffmpegProgress";
 import { canvasFps, isNum, toSecondsView } from "./frames";
 import { crfFor, outputFps, outputSize, type ExportOptions } from "./exportOptions";
 import { clipKind, rendersAsStill } from "./helpers";
@@ -605,8 +614,7 @@ function escFilterPath(p: string): string {
 }
 
 // The bundled brand assets (resources/brand), resolved lazily like the fonts (tools/assScratch). null outside a
-// Tauri context, which is why `exportBranding` reports rather than throws: a web/dev build
-// with no bundled resources must still export the user's video.
+// Tauri context. Missing deliverable assets are recovered before falling back with a warning.
 let _brandDirCache: string | null | undefined;
 export async function bundledBrandDir(): Promise<string | null> {
   if (_brandDirCache !== undefined) return _brandDirCache;
@@ -619,53 +627,64 @@ export async function bundledBrandDir(): Promise<string | null> {
   return _brandDirCache;
 }
 
-/** The watermark + end card for a canvas, or null with the reason when they aren't available.
- *
- *  Both files are checked to EXIST here rather than left for ffmpeg: a missing input aborts the
- *  whole render, so an export that would have been fine unbranded must not die because the
- *  bundle is incomplete. */
+/** The watermark + end card for a canvas, recovering missing assets before an explicit
+ *  unbranded fallback. Working renders never call this deliverable preflight. */
 export async function exportBranding(
   store: Pick<ProjectStoreAccess, "exists">,
   runner: ClientToolContext["runner"],
   canvas: { width: number; height: number },
 ): Promise<{ branding: Branding | null; warning?: string }> {
+  const account = useAuth.getState().profile;
   const dir = await bundledBrandDir();
-  if (!dir) return { branding: null, warning: "brand assets unavailable — exported unbranded" };
   const ratio = brandRatio(canvas.width, canvas.height);
-  const watermark = joinPath(dir, watermarkFile(ratio));
-  const endcard = joinPath(dir, endcardFile(ratio));
-  for (const p of [watermark, endcard]) {
-    // `exists` throws for a path the fs scope refuses to answer for; that is "can't tell",
-    // not "missing", and the resource dir is inside the scope, so a throw here means the
-    // check itself is unavailable and the assets are used as-is.
-    const there = await store.exists(p).catch(() => true);
-    if (!there)
-      return {
-        branding: null,
-        warning: `brand asset missing (${p.split(/[\\/]/).pop()}) — exported unbranded`,
-      };
+  const locate = async (name: string): Promise<string | null> => {
+    if (dir) {
+      const bundled = joinPath(dir, name);
+      if (await store.exists(bundled).catch(() => true)) return bundled;
+    }
+    return recoverBrandAsset(name);
+  };
+  let endcard = await locate(endcardFile(ratio));
+  if (!endcard) return {
+    branding: null,
+    warning: `brand asset unavailable after backend recovery (${endcardFile(ratio)}) — exported unbranded`,
+  };
+  const measure = async (file: string): Promise<number | null> => {
+    try {
+      const probe = await runner.run("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", file]);
+      const duration = Number(probe.stdout.trim());
+      return probe.code === 0 && Number.isFinite(duration) && duration > 0 ? duration : null;
+    } catch { return null; }
+  };
+  let endcardDuration = await measure(endcard);
+  if (endcardDuration === null) {
+    const recovered = await recoverBrandAsset(endcardFile(ratio));
+    if (recovered) { endcard = recovered; endcardDuration = await measure(recovered); }
   }
-  const probe = await runner.run("ffprobe", [
-    "-v",
-    "error",
-    "-show_entries",
-    "format=duration",
-    "-of",
-    "csv=p=0",
-    endcard,
-  ]);
-  const endcardDuration = Number(probe.stdout.trim());
-  if (probe.code !== 0 || !Number.isFinite(endcardDuration) || endcardDuration <= 0) {
+  if (endcardDuration === null) {
     return {
       branding: null,
-      warning: `brand end card could not be measured (${stderrExcerpt(probe.stderr) || "no duration"}) — exported unbranded`,
+      warning: "brand end card could not be measured after backend recovery — exported unbranded",
     };
   }
+  const policy = account?.user_id && !isSignedOutGate()
+    ? await fetchExportPolicy(account.user_id)
+    : null;
+  const exempt = policy?.watermark === false && useAuth.getState().profile === account && !isSignedOutGate();
+  const watermark = exempt ? null : await locate(watermarkFile(ratio));
+  if (!exempt && !watermark) return {
+    branding: null,
+    warning: `brand asset unavailable after backend recovery (${watermarkFile(ratio)}) — exported unbranded`,
+  };
   return { branding: { watermark, endcard, endcardDuration } };
 }
 
+export const RENDER_CONTRACT_VERSION = 1;
+
 export interface RenderPlan {
+  contractVersion: number;
   args: string[];
+  dependencies: string[];
   filterComplex: string;
   duration: number;
   warnings: string[];
@@ -681,6 +700,7 @@ export interface RenderPlan {
   /** Branded exports pad audio through the end card. Successful ffmpeg exit is not enough for
    *  those plans: the encoded stream is probed before the staged artifact can be committed. */
   audioMustSpanVideo: boolean;
+  audioExpected: boolean;
   /** What the DELIVERED file will be, after the delivery scale and fps override — not the
    *  canvas. Reported with the export, where the canvas would describe the wrong artifact. */
   output: { width: number; height: number; fps: number };
@@ -688,6 +708,7 @@ export interface RenderPlan {
   frame: boolean;
   /** Every media file the command opens, with the clip that opens it (branding excluded). */
   sources: { clipId: string; path: string }[];
+  steps?: CommandStep[];
 }
 
 /** Render ONE project frame with the export's own graph, cutting away the work around it.
@@ -879,6 +900,20 @@ export function buildRenderCommand(
   options: ExportOptions = {},
   window?: FrameWindow,
 ): RenderPlan {
+  const plan = buildSingleRenderCommand(raw, outPath, options, window);
+  if (window || commandLength(graphFromFile(plan.args, plan.assFiles).args) <= COMMAND_BUDGET)
+    return plan;
+  return segmentedRenderPlan(raw, outPath, options, plan);
+}
+
+function buildSingleRenderCommand(
+  raw: Timeline,
+  outPath: string,
+  options: ExportOptions = {},
+  window?: FrameWindow,
+  composed?: { duration: number; audio: boolean },
+  filePrefix = "",
+): RenderPlan {
   const timeline = toSecondsView(raw);
   assertSourcesResolved(timeline);
   const canvas = timeline.canvas;
@@ -888,7 +923,7 @@ export function buildRenderCommand(
   // did: pad rounds its input up to even, then reports the padded size as "smaller".
   const { w: cw, h: ch } = canvasPx(timeline);
   const fps = Math.trunc(canvasFps(timeline));
-  const duration = canvasDuration(timeline);
+  const duration = composed?.duration ?? canvasDuration(timeline);
   const win = window
     ? {
         frame: Math.max(0, Math.trunc(window.frame)),
@@ -898,7 +933,9 @@ export function buildRenderCommand(
   // A span (a clip exported on its own): the whole graph with the canvas running only over the
   // span, so every frame and sample in it is the whole export's.
   const rng = !win && options.range ? spanOf(options.range, fps) : null;
-  const outDuration = rng ? (rng.to - rng.from) / fps : duration;
+  const availableDuration = rng ? (rng.to - rng.from) / fps : duration;
+  const outDuration = Math.min(availableDuration, options.maxDurationSec ?? Infinity);
+  const durationCapped = outDuration < availableDuration;
   const warnings: string[] = [];
   if (cw !== Math.trunc(Number(canvas.width)) || ch !== Math.trunc(Number(canvas.height))) {
     warnings.push(
@@ -924,7 +961,7 @@ export function buildRenderCommand(
   let curBand: { ord: number; specs: CaptionSpec[] } | null = null;
   let ord = 0;
 
-  for (const pc of plan.clips) {
+  for (const pc of composed ? [] : plan.clips) {
     const clip = pc.clipRef;
     if (clip.kind === "audio") {
       if (win) continue; // a frame has no sound
@@ -1223,6 +1260,7 @@ export function buildRenderCommand(
     "-progress",
     "pipe:1",
   ];
+  if (composed) cmd.push("-f", "concat", "-safe", "1", "-i", "segments.ffconcat");
   for (const inp of inputs) {
     const dur = Math.max(0, inp.so - inp.si);
     if (inp.isImage && inp.frozenFrame !== undefined)
@@ -1244,9 +1282,9 @@ export function buildRenderCommand(
   // The branding inputs go LAST so every clip keeps the input index it had; an unbranded plan
   // pushes nothing and is byte-identical to what it was before branding existed.
   const brand = win ? null : (options.branding ?? null);
-  const wmIdx = inputs.length;
-  const ecIdx = wmIdx + 1;
-  if (brand) {
+  const wmIdx = composed ? 1 : inputs.length;
+  const ecIdx = wmIdx + (brand?.watermark ? 1 : 0);
+  if (brand?.watermark) {
     cmd.push(
       "-loop",
       "1",
@@ -1257,8 +1295,8 @@ export function buildRenderCommand(
       "-i",
       brand.watermark,
     );
-    if (brand.endcard) cmd.push("-i", brand.endcard);
   }
+  if (brand?.endcard) cmd.push("-i", brand.endcard);
 
   // A colour source runs the whole timeline in an export. In a frame window it runs two frames,
   // stamped at the window's frame so every expression keyed on time sees the export's clock; over
@@ -1269,7 +1307,7 @@ export function buildRenderCommand(
       : rng
         ? `color=${spec}:s=${cw}x${ch}:r=${fps}:d=${((rng.to - rng.from - 0.5) / fps).toFixed(6)},setpts=PTS+${rng.from}`
         : `color=${spec}:s=${cw}x${ch}:r=${fps}:d=${duration.toFixed(6)}`;
-  const chains: string[] = [`${colorSrc("c=black")}[base]`];
+  const chains: string[] = [composed ? "[0:v]null[base]" : `${colorSrc("c=black")}[base]`];
   let last = "base";
   // Caption z-bands interleave with the video overlays by `ord`: each band burns ONE libass `ass` filter
   // straight onto the running `last` (the .ass Dialogue lines carry their own timing, so NO enable= gate).
@@ -1280,7 +1318,7 @@ export function buildRenderCommand(
   const emitBandsBelow = (ordLimit: number): void => {
     while (bandPtr < captionBands.length && captionBands[bandPtr].ord < ordLimit) {
       const b = captionBands[bandPtr];
-      const name = `cap_band${bandPtr}.ass`;
+      const name = `${filePrefix}cap_band${bandPtr}.ass`;
       assFiles.push({ name, content: buildBandAss(b.specs, { w: cw, h: ch }) });
       // Burn the band DIRECTLY onto the accumulated stream. libass's `ass` filter draws over its input's
       // pixels but does NOT write an alpha plane, so the old "draw on a transparent canvas then overlay"
@@ -1439,8 +1477,8 @@ export function buildRenderCommand(
     );
     // Colour grade + ordered effects act on the opaque, scaled clip.
     for (const f of r.preAlpha) parts.push(f);
-    // Alpha-aware transform stage: rotate (transparent corners, clipped to the
-    // box via ow=iw:oh=ih) then per-clip opacity. format=yuva420p adds the alpha
+    // Alpha-aware transform stage: fit/crop and per-clip opacity precede rotation.
+    // The rotated surface retains its corners; only the canvas clips them. format=yuva420p adds the alpha
     // plane only when one of them is present so the no-transform path is unchanged.
     const opaAnim = r.opacity !== undefined && !isNum(r.opacity) ? r.opacity : null;
     const dimConst = isNum(r.opacity) && r.opacity < 1;
@@ -1450,7 +1488,9 @@ export function buildRenderCommand(
     // the same `fade` field for both media; mirrors the preview's fadeMul.
     const fadeExpr = fadeAlphaExpr(r.tin, r.tout, r.fadeIn, r.fadeOut);
     const alpha: string[] = [];
-    if (hasRotate || dimConst || opaAnim !== null || cross !== null || fadeExpr !== null)
+    let rotationFilter: string | null = null;
+    const coverAperture = sizeAnim !== null && fit === "cover";
+    if (hasRotate || dimConst || opaAnim !== null || cross !== null || fadeExpr !== null || coverAperture)
       alpha.push("format=yuva420p");
     if (hasRotate) {
       const aExpr =
@@ -1464,7 +1504,7 @@ export function buildRenderCommand(
       // (the uncovered area never moves); an ANIMATED angle smears, and a curve starting at 0
       // exports completely unrotated. Verified on the artifact — corner reads source-white with
       // `none` and background with `black@0`.
-      alpha.push(`rotate=a='(${aExpr})*PI/180':c=black@0:ow=iw:oh=ih`);
+      rotationFilter = `rotate=a='(${aExpr})*PI/180':c=black@0:ow='ceil(hypot(iw,ih)/2)*2':oh=ow`;
     }
     if (isNum(r.opacity) && r.opacity < 1)
       alpha.push(`colorchannelmixer=aa=${r.opacity.toFixed(4)}`);
@@ -1511,7 +1551,26 @@ export function buildRenderCommand(
     if (fadeExpr !== null)
       // Visual fade: multiply the alpha plane by the fade envelope over [tin, tout].
       alpha.push(`geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*(${fadeExpr})'`);
-    if (zoom) alpha.push(zoom);
+    if (coverAperture) {
+      const boxWidth = r.sizeW !== undefined ? compileAnim(r.sizeW, "T", r.tin) : String(w);
+      const boxHeight = r.sizeH !== undefined ? compileAnim(r.sizeH, "T", r.tin) : String(h);
+      const targetWidth = `max(2,round((${boxWidth})/2)*2)`;
+      const targetHeight = `max(2,round((${boxHeight})/2)*2)`;
+      const coverScale = `max((${targetWidth})/W,(${targetHeight})/H)`;
+      const apertureWidth = `((${targetWidth})/(${coverScale}))`;
+      const apertureHeight = `((${targetHeight})/(${coverScale}))`;
+      alpha.push(`geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*` +
+        `gte(X,(W-(${apertureWidth}))/2)*lt(X,(W+(${apertureWidth}))/2)*` +
+        `gte(Y,(H-(${apertureHeight}))/2)*lt(Y,(H+(${apertureHeight}))/2)'`);
+    }
+    if (rotationFilter && !zoom) alpha.push(rotationFilter);
+    if (zoom && !rotationFilter) alpha.push(zoom);
+    const rotatedZoom = rotationFilter && zoom
+      ? `${alpha.join(",")}${alpha.length ? "," : ""}split=2[rotationSource${i}][fitSource${i}];` +
+        `[rotationSource${i}]${rotationFilter}[rotated${i}];[fitSource${i}]${zoom}[fitted${i}];` +
+        `[rotated${i}][fitted${i}]scale2ref=w='ceil(hypot(iw,ih)/2)*2':h=ow:eval=frame[v${i}][fitSink${i}];` +
+        `[fitSink${i}]nullsink`
+      : null;
     // Glow (soft bloom) is spliced between the texture stage and the alpha stage:
     // brighten highlights, blur, screen-blend back, then apply rotate/opacity.
     const glow = parseGlow(r.glow);
@@ -1522,10 +1581,10 @@ export function buildRenderCommand(
         `[g${i}b]lutyuv=y='if(gt(val,200),val,16)':u=128:v=128,gblur=sigma=${glow.sig.toFixed(4)}[g${i}bl]`,
       );
       chains.push(`[g${i}a][g${i}bl]blend=c0_mode=screen:c0_opacity=${glow.op.toFixed(4)}[g${i}o]`);
-      chains.push(alpha.length ? `[g${i}o]${alpha.join(",")}[v${i}]` : `[g${i}o]null[v${i}]`);
+      chains.push(rotatedZoom ? `[g${i}o]${rotatedZoom}` : alpha.length ? `[g${i}o]${alpha.join(",")}[v${i}]` : `[g${i}o]null[v${i}]`);
     } else {
       chains.push(
-        alpha.length ? `${parts.join(",")},${alpha.join(",")}[v${i}]` : `${parts.join(",")}[v${i}]`,
+        rotatedZoom ? `${parts.join(",")},${rotatedZoom}` : alpha.length ? `${parts.join(",")},${alpha.join(",")}[v${i}]` : `${parts.join(",")}[v${i}]`,
       );
     }
     // Overlay position is integer-only in ffmpeg; round the animated expression
@@ -1536,15 +1595,15 @@ export function buildRenderCommand(
     const posYexpr = isNum(r.posY) ? r.posY.toFixed(6) : compileAnim(r.posY, "t", r.tin);
     const ovX = r.posCenter
       ? `'round((${posXexpr})-overlay_w/2)'`
-      : sizeAnim
-        ? `'round((${posXexpr})+((${sizeAnim.wBox})-overlay_w)/2)'`
+      : sizeAnim || rotationFilter
+        ? `'round((${posXexpr})+((${sizeAnim?.wBox ?? w})-overlay_w)/2)'`
         : isNum(r.posX)
           ? String(Math.round(r.posX))
           : `'round(${compileAnim(r.posX, "t", r.tin)})'`;
     const ovY = r.posCenter
       ? `'round((${posYexpr})-overlay_h/2)'`
-      : sizeAnim
-        ? `'round((${posYexpr})+((${sizeAnim.hBox})-overlay_h)/2)'`
+      : sizeAnim || rotationFilter
+        ? `'round((${posYexpr})+((${sizeAnim?.hBox ?? h})-overlay_h)/2)'`
         : isNum(r.posY)
           ? String(Math.round(r.posY))
           : `'round(${compileAnim(r.posY, "t", r.tin)})'`;
@@ -1605,11 +1664,13 @@ export function buildRenderCommand(
     last = "span";
   }
 
-  let aout: string | null = null;
+  let aout: string | null = composed?.audio ? "acomposed" : null;
+  if (composed?.audio) chains.push("[0:a]asetpts=N/SR/TB[acomposed]");
   if (arecs.length) {
     const DECLICK_SEC = 0.005; // 5ms edge micro-fade: declick hard cuts (pops)
+    const MIX_FORMAT = "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo";
     arecs.forEach((r, i) => {
-      const filt = ["asetpts=PTS-STARTPTS"];
+      const filt = ["asetpts=PTS-STARTPTS", MIX_FORMAT];
       // Loop fill: resample to a known rate so aloop's sample-count `size` is
       // exact, repeat the trimmed source forever, then cut to the clip's slot.
       // tempo is 1 for loop clips, so nothing else retimes it.
@@ -1651,7 +1712,7 @@ export function buildRenderCommand(
     const mixLabels = arecs.map((_, i) => `a${i}`);
     const duckers = arecs.map((r, i) => ({ r, i })).filter(({ r }) => r.duck && r.duck.against);
     if (duckers.length) {
-      const SC_FMT = "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo";
+      const SC_FMT = MIX_FORMAT;
       /** Indices whose stream is the key for `against` — never the ducked clip itself. */
       const keysFor = (against: string, self: number): number[] =>
         arecs.map((_, j) => j).filter((j) => j !== self && arecs[j].trackId === against);
@@ -1749,7 +1810,8 @@ export function buildRenderCommand(
   const ow = size ? size.w : cw;
   const oh = size ? size.h : ch;
   let totalDuration = outDuration;
-  if (brand) {
+  let brandedFrames: number | undefined;
+  if (brand?.watermark) {
     chains.push(`[${wmIdx}:v]scale=${ow}:${oh}[wm]`);
     chains.push(`[${last}][wm]overlay=0:0:format=auto[branded]`);
     last = "branded";
@@ -1759,23 +1821,21 @@ export function buildRenderCommand(
     // timestamps when they disagree on rate — so BOTH branches are normalised, not just the
     // card. Doing it only to the card is the version of this that works on one project and
     // fails on the next.
-    chains.push(`[branded]fps=${outFps},format=yuv420p,setsar=1,setpts=PTS-STARTPTS[mainv]`);
+    chains.push(`[${last}]${durationCapped ? `trim=duration=${outDuration.toFixed(6)},` : ""}fps=${outFps},format=yuv420p,setsar=1,setpts=PTS-STARTPTS[mainv]`);
     chains.push(
       `[${ecIdx}:v]scale=${ow}:${oh}:flags=lanczos,fps=${outFps},format=yuv420p,setsar=1,setpts=PTS-STARTPTS[ecv]`,
     );
-    chains.push(`[mainv][ecv]concat=n=2:v=1:a=0[outv]`);
+    brandedFrames = Math.ceil((outDuration + brand.endcardDuration) * outFps - 1e-6);
+    totalDuration = brandedFrames / outFps;
+    chains.push(`[mainv][ecv]concat=n=2:v=1:a=0[brandjoined]`);
+    chains.push(`[brandjoined]tpad=stop_mode=clone:stop=1,trim=end_frame=${brandedFrames},setpts=N/(${outFps}*TB)[outv]`);
     last = "outv";
-    totalDuration = outDuration + brand.endcardDuration;
-    // The card carries no audio. Without this the track simply stops at the cut and some
-    // players report the file as ending there; apad gives it real silence, and `-shortest`
-    // below then ends the file with the VIDEO -- which is how the output length comes from the
-    // card's actual length rather than from a constant that could cut it off.
+    // The card carries no audio; pad silence to the same frame-aligned video endpoint.
     if (aout) {
       // Reset timestamps BEFORE padding. ffmpeg 9 can otherwise send INT64_MAX out of apad,
       // after which every AAC packet is clamped to prev+1 and the delivered track is effectively
-      // one silent frame. Bounding the pad also prevents the filter queue from filling forever
-      // while `-shortest` waits for the video concat.
-      chains.push(`[${aout}]asetpts=N/SR/TB,apad=whole_dur=${totalDuration.toFixed(6)}[abrand]`);
+      // one silent frame. Bound both the pad and the output to the video frame budget.
+      chains.push(`[${aout}]asetpts=N/SR/TB${durationCapped ? `,atrim=duration=${outDuration.toFixed(6)}` : ""},apad=whole_dur=${totalDuration.toFixed(9)},atrim=duration=${totalDuration.toFixed(9)}[abrand]`);
       aout = "abrand";
     }
   }
@@ -1789,11 +1849,21 @@ export function buildRenderCommand(
   }
 
   const filterComplex = chains.join(";");
+  const dependencies = [...new Set([
+    ...inputs.map((input) => input.path),
+    ...plan.clips.flatMap((planned) => {
+      const lut = planned.clipRef.color?.lut;
+      return typeof lut === "string" && lut.trim() ? [lut.trim()] : [];
+    }),
+    ...(!win && brand?.watermark ? [brand.watermark] : []),
+    ...(!win && brand?.endcard ? [brand.endcard] : []),
+  ])];
   cmd.push("-filter_complex", filterComplex, "-map", `[${last}]`);
   if (win) {
     cmd.push("-frames:v", "1", "-an", ...(window?.outputArgs ?? []), outPath);
     return {
       args: cmd,
+      dependencies,
       filterComplex,
       duration: 1 / fps,
       warnings,
@@ -1801,8 +1871,10 @@ export function buildRenderCommand(
       fonts: [...usedFontFiles],
       stillImages: [...new Set(inputs.filter((i) => i.isImage).map((i) => i.path))],
       audioMustSpanVideo: false,
+      audioExpected: false,
       output: { width: cw, height: ch, fps },
       frame: true,
+      contractVersion: RENDER_CONTRACT_VERSION,
       sources: inputs.map((i) => ({ clipId: i.clipId, path: i.path })),
     };
   }
@@ -1813,13 +1885,14 @@ export function buildRenderCommand(
   if (crf !== null) cmd.push("-crf", String(crf));
   if (aout) cmd.push("-c:a", "aac");
   else cmd.push("-an");
-  if (brand?.endcard) cmd.push("-shortest");
+  if (brandedFrames !== undefined) cmd.push("-frames:v", String(brandedFrames), "-t", totalDuration.toFixed(9));
   else cmd.push("-t", Math.min(outDuration, options.maxDurationSec ?? Infinity).toFixed(6));
   // An export's staging name carries no extension for ffmpeg to pick the container from.
   if (!/\.mp4$/i.test(outPath)) cmd.push("-f", "mp4");
   cmd.push(outPath);
   return {
     args: cmd,
+    dependencies,
     filterComplex,
     duration: totalDuration,
     warnings,
@@ -1828,9 +1901,81 @@ export function buildRenderCommand(
     stillImages: [...new Set(inputs.filter((i) => i.isImage).map((i) => i.path))],
     // Only an export with an end card pads its audio (through the card).
     audioMustSpanVideo: !!brand?.endcard && aout !== null,
+    audioExpected: aout !== null,
     output: { width: ow, height: oh, fps: outFps },
     frame: false,
+    contractVersion: RENDER_CONTRACT_VERSION,
     sources: inputs.map((i) => ({ clipId: i.clipId, path: i.path })),
+  };
+}
+
+function segmentedRenderPlan(
+  raw: Timeline,
+  outPath: string,
+  options: ExportOptions,
+  original: RenderPlan,
+): RenderPlan {
+  const timeline = toSecondsView(raw);
+  const fps = Math.trunc(canvasFps(timeline));
+  const videoIds = new Set(resolveRenderPlan(timeline).clips
+    .filter((clip) => clip.clipRef.kind !== "audio" && clip.clipRef.kind !== "text")
+    .map((clip) => clip.srcClipId));
+  const from = options.range ? Math.max(0, Math.trunc(options.range.from)) : 0;
+  const available = options.range
+    ? Math.trunc(options.range.to) - from
+    : Math.round(canvasDuration(timeline) * fps);
+  const frames = Math.min(available, Math.ceil((options.maxDurationSec ?? Infinity) * fps));
+  const files: { name: string; content: string }[] = [];
+  const fonts = new Set<string>();
+  const parts: { name: string; duration: number }[] = [];
+  const steps: CommandStep[] = [];
+  const append = (start: number, end: number): void => {
+    const prefix = `part${steps.length}_`;
+    const name = `${prefix}video.nut`;
+    const part = buildSingleRenderCommand(
+      timeline, name, { range: { from: start, to: end } }, undefined, undefined, prefix,
+    );
+    const args = [...part.args];
+    args.splice(args.indexOf("-c:v"), 2, "-c:v", "ffv1");
+    const audio = args.indexOf("-c:a");
+    if (audio >= 0) args.splice(audio, 2, "-c:a", "pcm_f64le");
+    const format = args.lastIndexOf("-f");
+    args.splice(format, 2, "-f", "nut");
+    let staged = graphFromFile(args, part.assFiles, `${prefix}${GRAPH_FILE}`);
+    if (commandLength(staged.args) > COMMAND_BUDGET)
+      staged = shortInputPaths(staged, part.stillImages, prefix);
+    const videos = part.sources.filter((source) => videoIds.has(source.clipId)).length;
+    if (commandLength(staged.args) > COMMAND_BUDGET || (videos > 96 && end - start > 1)) {
+      if (end - start <= 1)
+        throw new Error(`too many simultaneous source inputs at project frame ${start} to fit a safe render command`);
+      const middle = start + Math.floor((end - start) / 2);
+      append(start, middle);
+      append(middle, end);
+      return;
+    }
+    steps.push({ args: staged.args, duration: (end - start) / fps });
+    parts.push({ name, duration: (end - start) / fps });
+    files.push(...staged.files);
+    for (const font of part.fonts) fonts.add(font);
+  };
+  append(from, from + frames);
+  files.push({
+    name: "segments.ffconcat",
+    content: `ffconcat version 1.0\n${parts.map((part) => `file '${part.name}'\nduration ${part.duration.toFixed(9)}`).join("\n")}\n`,
+  });
+  const final = buildSingleRenderCommand(timeline, outPath, { ...options, range: undefined }, undefined, {
+    duration: frames / fps,
+    audio: original.args.includes("-c:a"),
+  });
+  return {
+    ...final,
+    steps,
+    warnings: original.warnings,
+    sources: original.sources,
+    stillImages: original.stillImages,
+    dependencies: original.dependencies,
+    assFiles: [...files, ...final.assFiles],
+    fonts: [...fonts, ...final.fonts],
   };
 }
 
@@ -1981,13 +2126,38 @@ async function hasAudioStreamForRender(ctx: ClientToolContext, abs: string): Pro
  *  and a filter chain, so a montage of ~80 clips crossed it. Well under it, for the program path
  *  and the quoting the runner adds. */
 const ARG_BUDGET = 16_000;
+const COMMAND_BUDGET = 28_000;
 
 /** Staged beside the caption files, and named so no caption band can take the name. */
 const GRAPH_FILE = "graph.ffgraph";
 
-/** Rough length of the command line `args` makes: each argument plus quotes and a space. */
+/** Conservative Windows command length, including quotes, escapes and spaces. */
 function commandLength(args: readonly string[]): number {
-  return args.reduce((n, a) => n + a.length + 3, 0);
+  return args.reduce((total, argument) => {
+    const escaped = argument.match(/\\+(?="|$)|"/g) ?? [];
+    return total + argument.length + 3 + escaped.reduce((extra, token) => extra + token.length, 0);
+  }, 0);
+}
+
+function shortInputPaths(
+  staged: { args: string[]; files: { name: string; content: string }[] },
+  stillImages: readonly string[],
+  prefix: string,
+): { args: string[]; files: { name: string; content: string }[] } {
+  const args = [...staged.args];
+  const files = [...staged.files];
+  const stills = new Set(stillImages);
+  let number = 0;
+  for (let index = 0; index < args.length - 1; index++) {
+    if (args[index] !== "-i" || stills.has(args[index + 1])) continue;
+    const path = args[index + 1].replace(/\\/g, "/");
+    if (/[\r\n\0]/.test(path)) throw new Error("a source path containing line breaks cannot be staged for export");
+    const name = `${prefix}i${number++}.ffconcat`;
+    files.push({ name, content: `ffconcat version 1.0\nfile '${path.replace(/'/g, "'\\''")}'\n` });
+    args.splice(index, 2, "-safe", "0", "-i", name);
+    index += 3;
+  }
+  return { args, files };
 }
 
 /** The args to run and the files to stage for them. A command over ARG_BUDGET reads its filter
@@ -1995,12 +2165,13 @@ function commandLength(args: readonly string[]): number {
 export function graphFromFile(
   args: readonly string[],
   assFiles: readonly { name: string; content: string }[],
+  graphFile = GRAPH_FILE,
 ): { args: string[]; files: { name: string; content: string }[] } {
   const at = args.indexOf("-filter_complex");
   if (at < 0 || commandLength(args) <= ARG_BUDGET) return { args: [...args], files: [...assFiles] };
   const out = [...args];
-  out.splice(at, 2, "-/filter_complex", GRAPH_FILE);
-  return { args: out, files: [...assFiles, { name: GRAPH_FILE, content: args[at + 1] }] };
+  out.splice(at, 2, "-/filter_complex", graphFile);
+  return { args: out, files: [...assFiles, { name: graphFile, content: args[at + 1] }] };
 }
 
 /** Run an ffmpeg render whose filter_complex may reference libass caption files by BARE name
@@ -2014,20 +2185,44 @@ export async function runRenderPlan(
   ctx: ClientToolContext,
   plan: RenderPlan,
 ): Promise<CommandResult> {
+  const contractError = renderContractError(plan);
+  if (contractError) return { code: -1, stdout: "", stderr: contractError };
   const refused = await undecodableStill(ctx, plan.stillImages);
   if (refused) return refused;
-  const { args, files } = graphFromFile(plan.args, plan.assFiles);
+  let staged = graphFromFile(plan.args, plan.assFiles);
+  if (commandLength(staged.args) > COMMAND_BUDGET)
+    staged = shortInputPaths(staged, plan.stillImages, "frame_");
+  const { args, files } = staged;
+  if (
+    commandLength(args) > COMMAND_BUDGET ||
+    plan.steps?.some((step) => commandLength(step.args) > COMMAND_BUDGET)
+  )
+    return { code: -1, stdout: "", stderr: "render command exceeds the safe process command-line limit" };
   // A one-frame look is not an export: feeding its progress to the export job would move the bar
   // of an export running at the same time.
-  const res = await withAssScratch(ctx, files, plan.fonts, (cwd) =>
-    ctx.runner.run(
+  const res = await withAssScratch(ctx, files, plan.fonts, async (cwd) => {
+    if (plan.steps) {
+      const steps = [...plan.steps, { args, duration: plan.duration }];
+      if (ctx.runner.runSequence)
+        return ctx.runner.runSequence(steps, ctx.signal, cwd, sequenceProgressReporter(steps.map((step) => step.duration)));
+      let result: CommandResult = { code: -1, stdout: "", stderr: "cancelled" };
+      const progress = sequenceProgressReporter(steps.map((step) => step.duration));
+      for (let index = 0; index < steps.length; index++) {
+        if (ctx.signal?.aborted) return { code: -1, stdout: "", stderr: "cancelled" };
+        progress(`artdaddy_step=${index}\n`);
+        result = await ctx.runner.run("ffmpeg", steps[index].args, ctx.signal, cwd, progress);
+        if (result.code !== 0) return result;
+      }
+      return ctx.signal?.aborted ? { code: -1, stdout: "", stderr: "cancelled" } : result;
+    }
+    return ctx.runner.run(
       "ffmpeg",
       args,
       ctx.signal,
       cwd,
       plan.frame ? undefined : progressReporter(plan.duration),
-    ),
-  );
+    );
+  });
   return explainRenderExit(ctx, plan.sources, res, commandLength(args) > ARG_BUDGET);
 }
 
@@ -2131,6 +2326,23 @@ function progressReporter(durationSec: number): (chunk: string) => void {
   });
 }
 
+function sequenceProgressReporter(durations: readonly number[]): (chunk: string) => void {
+  const totalMs = durations.reduce((total, duration) => total + duration * 1000, 0);
+  return createSequenceProgressReader(durations, (report) => {
+    useExportJob.getState().update({
+      phase: "rendering",
+      fraction: progressFraction(report.outMs, totalMs),
+      etaSec: etaSeconds(report.outMs, totalMs, report.speed),
+      speed: report.speed,
+      frame: report.frame,
+    });
+  });
+}
+
+export function exportProgressReporter(plan: Pick<ExportJobPlan, "duration" | "stepDurations">): (chunk: string) => void {
+  return plan.stepDurations ? sequenceProgressReporter(plan.stepDurations) : progressReporter(plan.duration);
+}
+
 /** Clips whose media is still being generated, or whose generation failed. A render cannot
  *  encode what is not on disk, so it must refuse and NAME them: skipping them ships a video with
  *  holes the user may not notice until after they publish it. */
@@ -2167,12 +2379,12 @@ async function prepareRender(
   outPath: string,
   kind: "deliverable" | "working",
   options: ExportOptions = {},
-): Promise<{ ok: false; result: Result } | { ok: true; plan: RenderPlan; branding?: Branding }> {
+): Promise<{ ok: false; result: Result } | { ok: true; plan: RenderPlan; branding?: Branding; admission: RenderAdmission }> {
   const r = await loadForRender(ctx, kind);
   if (!r.ok) return r;
   const plan = buildRenderCommand(r.seconds, outPath, { ...options, branding: r.branding });
   if (r.warnings.length) plan.warnings.push(...r.warnings);
-  return { ok: true, plan, ...(r.branding ? { branding: r.branding } : {}) };
+  return { ok: true, plan, admission: r.admission, ...(r.branding ? { branding: r.branding } : {}) };
 }
 
 /** The timeline as a render reads it, once: validated, its media resolved, branding measured.
@@ -2182,11 +2394,22 @@ export async function loadForRender(
   kind: "deliverable" | "working",
 ): Promise<
   | { ok: false; result: Result }
-  | { ok: true; seconds: Timeline; branding?: Branding; warnings: string[] }
+  | { ok: true; seconds: Timeline; branding?: Branding; warnings: string[]; admission: RenderAdmission }
 > {
   let raw: Timeline;
+  let admission: RenderAdmission;
   try {
-    raw = await loadTimeline(ctx.store);
+    const captured = await runProjectMutation(ctx.store.projectDir, "capture export snapshot", async (document, lease) => {
+      if (!ctx.store.sessionLive()) throw new Error("project session ended before export snapshot admission");
+      const timeline = await loadTimeline(ctx.store);
+      lease?.assertCanCommit();
+      return { timeline, admission: { version: 1 as const, projectDir: ctx.store.projectDir,
+        projectId: document ? String(document.id) : projectIdOfDir(ctx.store.projectDir),
+        documentSessionId: document ? String(document.sessionId) : null,
+        projectRevision: lease?.baseRevision ?? null } };
+    }, { origin: ctx.origin, signal: ctx.signal });
+    raw = captured.timeline;
+    admission = { ...captured.admission, snapshotSha256: await renderFingerprint(raw) };
   } catch (e) {
     return {
       ok: false,
@@ -2238,7 +2461,7 @@ export async function loadForRender(
     branding = b.branding ?? undefined;
     if (b.warning) extraWarnings.push(b.warning);
   }
-  return { ok: true, seconds, warnings: extraWarnings, ...(branding ? { branding } : {}) };
+  return { ok: true, seconds, warnings: extraWarnings, admission, ...(branding ? { branding } : {}) };
 }
 
 /** Run a prepared plan and validate the encoded artifact before any caller may commit it. */
@@ -2251,12 +2474,54 @@ async function executeRender(
   return validateRendered(ctx, plan, outPath, r);
 }
 
+export function renderContractError(
+  plan: Pick<RenderPlan, "contractVersion" | "duration" | "output" | "frame" | "audioExpected" | "audioMustSpanVideo">,
+): string | null {
+  if (plan.contractVersion !== RENDER_CONTRACT_VERSION || typeof plan.audioExpected !== "boolean") {
+    return "unsupported render contract; export again with the current client";
+  }
+  const frames = plan.duration * plan.output?.fps;
+  if (typeof plan.frame !== "boolean" || typeof plan.audioMustSpanVideo !== "boolean" || !plan.output ||
+      !Number.isFinite(plan.duration) || plan.duration <= 0 ||
+      !Number.isSafeInteger(plan.output.width) || plan.output.width <= 0 ||
+      !Number.isSafeInteger(plan.output.height) || plan.output.height <= 0 ||
+      !Number.isFinite(plan.output.fps) || plan.output.fps <= 0 ||
+      !Number.isFinite(frames) || frames <= 0 || frames > Number.MAX_SAFE_INTEGER ||
+      (plan.frame && (plan.audioExpected || plan.audioMustSpanVideo)) ||
+      (plan.audioMustSpanVideo && !plan.audioExpected)) {
+    return "rendered artifact has no supported output contract; export again with the current client";
+  }
+  return null;
+}
+
 /** What an export job records about its plan, so a page that did not start it can finish it. */
 export interface ExportJobPlan {
+  contractVersion: number;
   duration: number;
+  output: RenderPlan["output"];
+  frame: boolean;
+  stepDurations?: number[];
   audioMustSpanVideo: boolean;
+  audioExpected: boolean;
   warnings: string[];
   sources: { clipId: string; path: string }[];
+  admission?: RenderAdmission;
+  manifest?: { version: 1; snapshotSha256: string; requestSha256: string };
+}
+
+export interface RenderAdmission {
+  version: 1;
+  projectDir: string;
+  projectId: string;
+  documentSessionId: string | null;
+  projectRevision: number | null;
+  snapshotSha256: string;
+}
+
+async function renderFingerprint(value: unknown): Promise<string> {
+  const bytes = new TextEncoder().encode(JSON.stringify(value));
+  const hash = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 /** The end of an export whose ffmpeg the app process ran while no page was there (3h part 7): the
@@ -2271,17 +2536,20 @@ export async function finishRenderJob(
     const explained = await explainRenderExit(ctx, job.plan.sources, r, false);
     return await validateRendered(ctx, job.plan, job.stagePath, explained);
   } finally {
-    if (job.scratch) await ctx.store.remove(job.scratch).catch(() => undefined);
+    const { jobSupervisor } = await import("../tools/jobSupervisor");
+    if (job.scratch && !(await jobSupervisor())?.delivery) await ctx.store.remove(job.scratch).catch(() => undefined);
   }
 }
 
 /** Did ffmpeg produce a file the caller may commit? */
 async function validateRendered(
   ctx: ClientToolContext,
-  plan: Pick<RenderPlan, "audioMustSpanVideo" | "warnings" | "duration">,
+  plan: Pick<RenderPlan, "audioMustSpanVideo" | "audioExpected" | "warnings" | "duration" | "output" | "frame" | "contractVersion">,
   outPath: string,
   r: CommandResult,
 ): Promise<Result> {
+  const contractError = renderContractError(plan);
+  if (contractError) return { ok: false, error: contractError, warnings: plan.warnings };
   // Did ffmpeg actually produce the file? `null` means the platform REFUSED TO SAY, which is
   // not the same as "no". Tauri's fs scope ($DATA/ArtDaddy, $DOWNLOAD, $HOME/**) THROWS for a path
   // outside it, and a Save As destination legitimately can be — another drive, a network share.
@@ -2307,7 +2575,38 @@ async function validateRendered(
       warnings: plan.warnings,
     };
   }
-  if (plan.audioMustSpanVideo) {
+  if (plan.frame !== true) {
+    let probe: CommandResult;
+    try {
+      probe = await ctx.runner.run("ffprobe", ["-v", "error", "-count_frames", "-select_streams", "v:0", "-show_entries",
+        "stream=codec_type,width,height,avg_frame_rate,nb_read_frames,duration:format=duration", "-of", "json", outPath], ctx.signal);
+    } catch (error) {
+      return { ok: false, error: `rendered video could not be validated: ${error instanceof Error ? error.message : String(error)}`, warnings: plan.warnings };
+    }
+    let valid = false;
+    let detail = "ffprobe returned no usable video stream";
+    if (probe.code === 0) {
+      try {
+        const payload = JSON.parse(probe.stdout) as { streams?: Array<Record<string, unknown>>; format?: { duration?: string } };
+        const video = payload.streams?.find((stream) => stream.codec_type === "video");
+        if (video) {
+          const rate = String(video.avg_frame_rate ?? "").split("/").map(Number);
+          const fps = rate.length === 2 && rate[1] > 0 ? rate[0] / rate[1] : NaN;
+          const frames = Number(video.nb_read_frames);
+          const duration = Number(video.duration ?? payload.format?.duration);
+          const expectedFrames = Math.ceil(plan.duration * plan.output.fps - 1e-6);
+          valid = Number(video.width) === plan.output.width && Number(video.height) === plan.output.height &&
+            Math.abs(fps - plan.output.fps) < 1e-6 && frames === expectedFrames &&
+            Number.isFinite(duration) && Math.abs(duration - expectedFrames / plan.output.fps) <= 1 / plan.output.fps + 1e-6;
+          detail = `ffprobe reported ${video.width}x${video.height}, ${frames} frames, ${fps} fps, ${duration}s; ` +
+            `expected ${plan.output.width}x${plan.output.height}, ${expectedFrames} frames at ${plan.output.fps} fps`;
+        }
+      } catch { detail = "ffprobe returned malformed artifact metadata"; }
+    } else { detail = `ffprobe failed (code=${probe.code}): ${stderrExcerpt(probe.stderr)}`; }
+    if (!valid) return { ok: false, error: `rendered video failed validation (${detail})`,
+      stderr_tail: stderrExcerpt([r.stderr, probe.stderr].filter(Boolean).join("\n")), warnings: plan.warnings };
+  }
+  if (!plan.frame) {
     let probe: CommandResult;
     try {
       probe = await ctx.runner.run(
@@ -2333,6 +2632,8 @@ async function validateRendered(
     }
     let videoDuration = NaN;
     let audioDuration = NaN;
+    let audioPresent = false;
+    let validPayload = false;
     if (probe.code === 0) {
       try {
         const payload = JSON.parse(probe.stdout) as {
@@ -2340,6 +2641,8 @@ async function validateRendered(
           format?: { duration?: string };
         };
         const streams = Array.isArray(payload.streams) ? payload.streams : [];
+        validPayload = Array.isArray(payload.streams) && streams.some((stream) => stream?.codec_type === "video");
+        audioPresent = streams.some((stream) => stream?.codec_type === "audio");
         videoDuration = Number(
           streams.find((s) => s?.codec_type === "video")?.duration ?? payload.format?.duration,
         );
@@ -2349,9 +2652,9 @@ async function validateRendered(
       }
     }
     if (
-      !Number.isFinite(videoDuration) ||
-      !Number.isFinite(audioDuration) ||
-      Math.abs(audioDuration - videoDuration) >= 0.2
+      probe.code !== 0 || !validPayload ||
+      (plan.audioExpected ? (!audioPresent || !Number.isFinite(videoDuration) || !Number.isFinite(audioDuration) ||
+        audioDuration <= 0 || (plan.audioMustSpanVideo && Math.abs(audioDuration - videoDuration) >= 0.2)) : audioPresent)
     ) {
       const probeDetail =
         probe.code === 0
@@ -2693,7 +2996,8 @@ export async function exportTimelineTool(
   // file. Built here, in the turn, because this is what can still refuse the request. Hidden and
   // without a video extension, so a partial left by a crash cannot pass for a video (UJ-022); the
   // render names the container itself (`-f mp4`) because the name no longer does.
-  const target = ctx.store.canRename ? stagingPathFor(dest.path) : dest.path;
+  if (!ctx.store.canRename) return { ok: false, error: "export requires atomic destination-volume staging on this platform" };
+  const target = stagingPathFor(dest.path);
   const prepared = await prepareRender(ctx, target, "deliverable", {
     resolution: args.resolution as ExportOptions["resolution"],
     quality: args.quality as ExportOptions["quality"],
@@ -2710,6 +3014,7 @@ export async function exportTimelineTool(
 
   const sub = await queueRenderJob(ctx, {
     plan: prepared.plan,
+    admission: prepared.admission,
     destPath: dest.path,
     stagePath: target,
     filename: dest.filename,
@@ -2723,7 +3028,7 @@ export async function exportTimelineTool(
   const card = prepared.branding?.endcardDuration ?? 0;
   // Without this an agent reads the end card's extra seconds as a broken export.
   const brandNote = prepared.branding
-    ? `The ArtDaddy watermark and end card are always added to an export: this file runs ` +
+    ? `${prepared.branding.watermark ? "The ArtDaddy watermark and end card are added" : "The ArtDaddy end card is added; the corner watermark is disabled for this account"}: this file runs ` +
       `${total.toFixed(1)} s, ${(total - card).toFixed(1)} s of timeline plus a ${card.toFixed(1)} s end card.`
     : "";
   const where = dest.defaulted
@@ -2742,7 +3047,7 @@ export async function exportTimelineTool(
     duration_s: round3(total),
     ...(prepared.branding
       ? {
-          branding: { watermark: true, end_card_s: round3(card), timeline_s: round3(total - card) },
+          branding: { watermark: prepared.branding.watermark !== null, end_card_s: round3(card), timeline_s: round3(total - card) },
         }
       : {}),
     warnings: prepared.plan.warnings,
@@ -2757,6 +3062,7 @@ export async function queueRenderJob(
   ctx: ClientToolContext,
   job: {
     plan: RenderPlan;
+    admission: RenderAdmission;
     destPath: string;
     stagePath: string;
     filename: string;
@@ -2764,34 +3070,57 @@ export async function queueRenderJob(
     batch?: string;
   },
 ): Promise<ExportSubmission> {
+  const request = structuredClone(job);
+  const renderPlan = request.plan;
+  const contractError = renderContractError(renderPlan);
+  if (contractError) throw new Error(`${contractError} at export submission`);
+  if (request.admission.version !== 1 || !/^[a-f0-9]{64}$/.test(request.admission.snapshotSha256)) {
+    throw new Error("captured export has no supported snapshot fingerprint");
+  }
+  const requestSha256 = await renderFingerprint(request);
+  await runProjectMutation(ctx.store.projectDir, "admit captured export request", async (document, lease) => {
+    if (!ctx.store.sessionLive() || request.admission.projectDir !== ctx.store.projectDir ||
+        (document && request.admission.documentSessionId !== String(document.sessionId))) {
+      throw new Error("captured export belongs to a closed or different project session");
+    }
+    lease?.assertCanCommit();
+  }, { origin: ctx.origin, signal: ctx.signal });
   const jobs = await jobSupervisor();
   const telemetry = {
-    duration_s: job.plan.duration,
-    width: job.plan.output.width,
-    height: job.plan.output.height,
-    fps: job.plan.output.fps,
-    quality: job.quality,
+    duration_s: renderPlan.duration,
+    width: renderPlan.output.width,
+    height: renderPlan.output.height,
+    fps: renderPlan.output.fps,
+    quality: request.quality,
     project_id: projectIdOfDir(ctx.store.projectDir),
   };
   const plan: ExportJobPlan = {
-    duration: job.plan.duration,
-    audioMustSpanVideo: job.plan.audioMustSpanVideo,
-    warnings: job.plan.warnings,
-    sources: job.plan.sources,
+    contractVersion: renderPlan.contractVersion,
+    duration: renderPlan.duration,
+    admission: { ...request.admission },
+    manifest: { version: 1, snapshotSha256: request.admission.snapshotSha256, requestSha256 },
+    output: { ...renderPlan.output },
+    frame: renderPlan.frame,
+    ...(renderPlan.steps ? { stepDurations: [...renderPlan.steps.map((step) => step.duration), renderPlan.duration] } : {}),
+    audioMustSpanVideo: renderPlan.audioMustSpanVideo,
+    audioExpected: renderPlan.audioExpected,
+    warnings: [...renderPlan.warnings],
+    sources: renderPlan.sources.map((source) => ({ ...source })),
   };
   const submittedAt = Date.now();
   return submitExport({
     store: ctx.store,
-    destPath: job.destPath,
-    stagePath: job.stagePath,
-    filename: job.filename,
+    dependencies: [...renderPlan.dependencies],
+    destPath: request.destPath,
+    stagePath: request.stagePath,
+    filename: request.filename,
     // Present only when the AGENT called this tool; the Export menu runs it with no origin.
     origin: ctx.origin,
     // Describes the artifact the plan will produce, captured here because a failed encode
     // leaves no file to measure and the metric still has to say what was attempted.
     meta: telemetry,
     supervisor: jobs ?? undefined,
-    ...(job.batch ? { batch: job.batch } : {}),
+    ...(request.batch ? { batch: request.batch } : {}),
     run: async (signal, jobId) => {
       // Not bound to the turn: it is over by the time ffmpeg runs, and Stop, the next message or a
       // project switch must not kill a render nobody cancelled. Only the queue's signal reaches it.
@@ -2803,9 +3132,9 @@ export async function queueRenderJob(
             meta: {
               kind: "export",
               projectDir: ctx.store.projectDir,
-              destPath: job.destPath,
-              stagePath: job.stagePath,
-              filename: job.filename,
+              destPath: request.destPath,
+              stagePath: request.stagePath,
+              filename: request.filename,
               startedBy: ctx.origin ? "chat" : "elsewhere",
               submittedAt,
               plan,
@@ -2814,7 +3143,7 @@ export async function queueRenderJob(
           })
         : base.runner;
       const detached: ClientToolContext = { ...base, runner, signal };
-      const res = (await executeRender(detached, job.plan, job.stagePath)) as {
+      const res = (await executeRender(detached, renderPlan, request.stagePath)) as {
         ok?: boolean;
         error?: string;
         stderr_tail?: string;

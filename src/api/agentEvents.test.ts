@@ -4,7 +4,10 @@
 // boundary, which is exactly why the instrumentation lives there and not in the loop.
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("./config", () => ({ apiBase: () => "https://example.invalid" }));
+vi.mock("./config", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./config")>()),
+  apiBase: () => "https://example.invalid",
+}));
 vi.mock("./auth", () => ({
   hasSession: async () => true,
   authedFetch: (
@@ -37,12 +40,14 @@ import { ClientToolRegistry } from "../tools/registry";
 import { useAuth } from "../store/auth";
 import { ClientTurnRunner } from "../agent/loop";
 import type { RoundResultDTO } from "../agent/types";
+import { useCompatibility } from "../update/compatibility";
 
 const posted: unknown[] = [];
 
 beforeEach(() => {
   __resetAgentEvents();
   useAuth.setState({ status: "unlocked", profile: null, hasStoredSession: true });
+  useCompatibility.setState({ status: "allowed" });
   posted.length = 0;
   vi.stubGlobal(
     "fetch",

@@ -1,0 +1,64 @@
+name: Exporter native recovery QA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["qa/exporter-*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: exporter-native-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-14, ubuntu-22.04]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      VITE_API_BASE_URL: http://127.0.0.1:9
+      VITE_SENTRY_DSN: ""
+      SENTRY_DSN: ""
+      CARGO_BUILD_JOBS: "2"
+      TAURI_CONFIG: '{"bundle":{"externalBin":["binaries/artdaddy-ffmpeg","binaries/artdaddy-ffprobe"],"resources":[]}}'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Linux native GUI dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libayatana-appindicator3-dev libssl-dev libwebkit2gtk-4.1-dev librsvg2-dev patchelf xvfb dbus-x11 xdg-utils desktop-file-utils
+          command -v xdg-mime
+          command -v update-desktop-database
+      - run: npm ci
+      - run: node scripts/fetch-sidecars.mjs --only ffmpeg,ffprobe
+      - name: Native job invariants
+        run: "cargo test --manifest-path src-tauri/Cargo.toml --lib jobs::"
+      - name: Native commit failure and volume outcomes
+        run: "cargo test --manifest-path src-tauri/Cargo.toml --lib commit -- --nocapture"
+      - name: Native macOS capture and crash recovery
+        if: runner.os == 'macOS'
+        run: node scripts/qa/exporterNative.mjs
+      - name: Native Linux capture and crash recovery
+        if: runner.os == 'Linux'
+        run: xvfb-run -a dbus-run-session -- node scripts/qa/exporterNative.mjs
+      - name: Preserve actual outcomes and build identities
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: exporter-native-${{ matrix.runner }}-${{ github.sha }}
+          path: reports/qa/exporter/**
+          if-no-files-found: error

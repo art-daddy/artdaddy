@@ -65,6 +65,20 @@ describe("subscribeUsage", () => {
     markOverLimit({ used: 5, limit: 10 }); // identical -> no-op, no notify
     expect(fn).not.toHaveBeenCalled();
   });
+
+  it("publishes a changed pause reason even when the credit numbers do not change", async () => {
+    const { subscribeUsage, markOverLimit, getUsage } = await load();
+    markOverLimit({ used: 100, limit: 100, scope: "user" });
+    const changed = vi.fn();
+    const unsubscribe = subscribeUsage(changed);
+    markOverLimit({ used: 100, limit: 100, scope: "global" });
+    expect(getUsage()).toMatchObject({ remaining: 0, over: true, globalPaused: true });
+    expect(changed).toHaveBeenCalledTimes(1);
+    markOverLimit({ used: 100, limit: 100, scope: "user" });
+    expect(getUsage().globalPaused).toBeUndefined();
+    expect(changed).toHaveBeenCalledTimes(2);
+    unsubscribe();
+  });
 });
 
 describe("markOverLimit", () => {
@@ -319,6 +333,16 @@ describe("refreshUsage", () => {
       over: true,
       globalPaused: true,
     });
+  });
+
+  it("retains a known shared pause when a legacy reply confirms only that work is blocked", async () => {
+    const { refreshUsage, markOverLimit, getUsage } = await load();
+    markOverLimit({ used: 3, limit: 100, scope: "global" });
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({
+      metered: true, used: 3, limit: 100, remaining: 97, over: true,
+    })));
+    await refreshUsage();
+    expect(getUsage()).toMatchObject({ remaining: 97, over: true, globalPaused: true });
   });
 
   async function pendingRefresh(usage: UsageModule, balance: Record<string, unknown>) {

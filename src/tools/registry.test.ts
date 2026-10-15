@@ -9,6 +9,8 @@ beforeAll(() => {
   setContract({
     version: "test",
     tools: [
+      { name: "echo", parameters: { type: "object", properties: { a: {} } } },
+      { name: "boom", parameters: { type: "object", properties: {} } },
       {
         name: "strict_probe",
         parameters: {
@@ -27,6 +29,12 @@ beforeAll(() => {
 });
 
 describe("ClientToolRegistry", () => {
+  it("cannot register an implementation outside the canonical definitions", () => {
+    expect(() => new ClientToolRegistry().register("not_in_the_catalog", () => ({ ok: true }))).toThrow(
+      "no client catalog definition",
+    );
+  });
+
   it("registers, reports, and runs handlers", async () => {
     const r = new ClientToolRegistry();
     r.register("echo", (args) => ({ echoed: args }));

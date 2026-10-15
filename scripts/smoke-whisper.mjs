@@ -12,11 +12,67 @@
 // after staging, and the macOS build workflow after compiling. Two copies of this check
 // would drift, and the copy that drifts is the one that stops catching a shim.
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 /** Windows exit codes for "the loader could not find a DLL", signed and unsigned. */
 const DLL_NOT_FOUND = [3221225781, -1073741515];
+
+export function verifyWhisperUnicodeProof(exe, library, proofFile) {
+  const proof = JSON.parse(readFileSync(proofFile, "utf8"));
+  const hash = (path) => createHash("sha256").update(readFileSync(path)).digest("hex");
+  const names = ["ascii", "model", "audio", "output", "all"];
+  if (proof.version !== 1 || proof.inputsUnchanged !== true ||
+      !names.every((name) => proof.results?.some((test) => test.name === name && test.ok === true && test.jsonVerified === true && test.code === 0 && test.transcript)) ||
+      proof.executableSha256 !== hash(exe) || proof.librarySha256 !== hash(library))
+    throw new Error("whisper Unicode-path proof does not match the staged native artifact");
+}
+
+export function patchWhisperModelPaths(sourceDir) {
+  const source = join(resolve(sourceDir), "src", "whisper.cpp");
+  const text = readFileSync(source, "utf8");
+  const old = "std::codecvt_utf8<wchar_t>";
+  const fixed = "std::codecvt_utf8_utf16<wchar_t>";
+  const count = text.split(old).length - 1;
+  if (count === 0 && text.split(fixed).length - 1 === 2) return;
+  if (count !== 2) throw new Error("pinned whisper model/VAD path conversions changed; refusing an unverified source patch");
+  writeFileSync(source, text.replaceAll(old, fixed));
+}
+
+export function ensureWhisperUtf8(exe) {
+  if (process.platform !== "win32") throw new Error("Windows whisper staging requires the Windows SDK manifest tool");
+  const sdk = join(process.env["ProgramFiles(x86)"] ?? "C:/Program Files (x86)", "Windows Kits", "10", "bin");
+  const versions = existsSync(sdk)
+    ? readdirSync(sdk, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name)
+        .sort((left, right) => right.localeCompare(left, undefined, { numeric: true }))
+    : [];
+  const mt = versions.map((version) => join(sdk, version, "x64", "mt.exe")).find(existsSync);
+  if (!mt) throw new Error("Windows SDK mt.exe is required to stage whisper with Unicode path support");
+  const manifest = fileURLToPath(new URL("./whisper-utf8.manifest", import.meta.url));
+  const bin = resolve(exe);
+  const temp = mkdtempSync(join(tmpdir(), "whisper-manifest-"));
+  const extracted = join(temp, "embedded.manifest");
+  const run = (args) => {
+    const result = spawnSync(mt, ["-nologo", ...args], { encoding: "utf8", timeout: 30000 });
+    if (result.error || result.status !== 0)
+      throw new Error(`whisper manifest staging failed: ${result.error?.message ?? ""} ${result.stdout ?? ""} ${result.stderr ?? ""}`);
+  };
+  try {
+    run([`-inputresource:${bin};#1`, "-manifest", manifest, `-outputresource:${bin};#1`]);
+    run([`-inputresource:${bin};#1`, `-out:${extracted}`]);
+    const verify = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+      "$xml = [xml](Get-Content -LiteralPath $env:WHISPER_MANIFEST_CHECK -Raw); " +
+      "$nodes = $xml.SelectNodes(\"//*[local-name()='activeCodePage' and namespace-uri()='http://schemas.microsoft.com/SMI/2019/WindowsSettings']\"); " +
+      "if ($nodes.Count -ne 1 -or $nodes[0].InnerText -ne 'UTF-8') { exit 1 }"],
+      { env: { ...process.env, WHISPER_MANIFEST_CHECK: extracted }, encoding: "utf8", timeout: 30000 });
+    if (verify.error || verify.status !== 0) throw new Error(`staged whisper did not retain its UTF-8 manifest: ${verify.stderr ?? ""}`);
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+}
 
 /**
  * @param {string} exe  path to the staged whisper-cli
@@ -53,11 +109,19 @@ export function checkWhisper(exe, opts = {}) {
 
 /** CLI: `node scripts/smoke-whisper.mjs <exe> [cwd]` — exits non-zero on a bad binary. */
 if (process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/\\/g, "/"))) {
-  const [exe, cwd] = process.argv.slice(2);
+  const args = process.argv.slice(2);
+  if (args[0] === "--patch-model-paths") {
+    if (!args[1]) throw new Error("--patch-model-paths requires the pinned source directory");
+    patchWhisperModelPaths(args[1]);
+    process.exit(0);
+  }
+  const utf8 = args[0] === "--utf8";
+  const [exe, cwd] = utf8 ? args.slice(1) : args;
   if (!exe) {
     console.error("usage: node scripts/smoke-whisper.mjs <whisper-cli> [cwd]");
     process.exit(2);
   }
+  if (utf8) ensureWhisperUtf8(exe);
   const r = checkWhisper(exe, { cwd });
   if (!r.ok) {
     console.error(`[smoke-whisper] REJECTED ${exe}: ${r.reason}`);

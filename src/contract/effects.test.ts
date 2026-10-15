@@ -3,6 +3,7 @@
 // contract: a tool added/removed/renamed via `npm run codegen` fails here until it is classified, and
 // a stale classification for a dropped tool is caught too.
 import { describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
 
 import { toolNames } from "./views";
 import { WITHDRAWN_TOOLS } from "./withdrawn";
@@ -29,6 +30,13 @@ describe("tool effect classification (Step 4 single source of truth)", () => {
   // A withdrawn tool keeps its implementation, so it keeps its effect class too — otherwise
   // bringing one back would silently leave it unclassified.
   const expected = [...new Set([...contract, ...WITHDRAWN_TOOLS])].sort();
+
+  it("preserves the complete pre-migration routing corpus", () => {
+    const pairs = Object.entries(TOOL_EFFECTS).sort(([left], [right]) => left.localeCompare(right));
+    expect(createHash("sha256").update(JSON.stringify(pairs)).digest("hex")).toBe(
+      "a5e75fc90f9ea7f984831d8bbd60a2147856a4b52aa6912e75baccdc73e0a982",
+    );
+  });
 
   it("every served contract tool has an effect class (no unclassified tool can slip through)", () => {
     expect(contract.filter((n) => !toolEffect(n))).toEqual([]);

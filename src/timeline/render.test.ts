@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
+import { readFileSync } from "node:fs";
 
 import {
   MemFs,
@@ -7,7 +10,7 @@ import {
   resetTestDocuments,
   seededCtx,
 } from "../test/timelineKit";
-import { ensureTimeline } from "./engine";
+import { ensureTimeline, loadTimeline } from "./engine";
 import type { Timeline } from "./model";
 import { addClipsTool, addTextClipsTool } from "./placement";
 import {
@@ -323,6 +326,29 @@ describe("buildRenderCommand", () => {
     expect(frames.duration).toBe(2);
   });
 
+  it("declares the capped output duration instead of the unrendered timeline tail", () => {
+    const plan = buildRenderCommand(tl([
+      { media_ref: "/v.mp4", source_in: 0, source_out: 10, timeline_in: 0, timeline_out: 10 },
+    ]), "/capped.mp4", { maxDurationSec: 2 });
+    expect(plan.duration, "the artifact contract must describe the delivered span").toBe(2);
+    const range = buildRenderCommand(tl([
+      { media_ref: "/v.mp4", source_in: 0, source_out: 10, timeline_in: 0, timeline_out: 10 },
+    ]), "/capped-range.mp4", { range: { from: 30, to: 150 }, maxDurationSec: 2 });
+    expect(range.duration).toBe(2);
+    const branded = buildRenderCommand(tl([
+      { media_ref: "/v.mp4", source_in: 0, source_out: 10, timeline_in: 0, timeline_out: 10 },
+    ]), "/capped-card.mp4", { maxDurationSec: 2,
+      branding: { watermark: null, endcard: "/prepared-card.mp4", endcardDuration: 1 } });
+    expect(branded.duration).toBe(3);
+    const segmented = buildRenderCommand(tl(Array.from({ length: 349 }, (_, index) => ({
+      media_ref: `/long-original-directory-${"source-".repeat(25)}/${index}.mp4`,
+      source_in: 0, source_out: 1 / 30, timeline_in: index / 30, timeline_out: (index + 1) / 30,
+    }))), "/capped-sequence.mp4", { maxDurationSec: 2 });
+    expect(segmented.steps?.length).toBeGreaterThan(0);
+    expect(segmented.steps!.reduce((sum, step) => sum + step.duration, 0)).toBe(2);
+    expect(segmented.duration).toBe(2);
+  });
+
   it("does not mistake a seconds timeline for frames", () => {
     // The failure direction: normalising unconditionally would divide every already-correct
     // caller's times by the fps.
@@ -363,7 +389,20 @@ describe("buildRenderCommand", () => {
       ]),
       "/out.mp4",
     );
-    expect(plan.filterComplex).toMatchSnapshot();
+    const filename = "src/timeline/__snapshots__/render.test.ts.snap";
+    expect(createHash("sha256").update(readFileSync(filename)).digest("hex"))
+      .toBe("f060dadeaff174004343fcbbeb5c8f25ae365db4498ff6bed70deb5954295bf2");
+    const baselines = createRequire(`${process.cwd()}/package.json`)(`./${filename}`) as Record<string, string>;
+    const legacy = JSON.parse(baselines["buildRenderCommand > golden: snapshots the filter_complex for a multi-feature timeline 1"]) as string;
+    expect(legacy).toMatchSnapshot();
+    const seam = "[1:a]asetpts=PTS-STARTPTS,adelay=0|0";
+    expect(legacy.split(seam)).toHaveLength(2);
+    const normalized = "[1:a]asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,adelay=0|0";
+    const expected = legacy.replace(seam, normalized)
+      .replace("rotate=a='(15.000000)*PI/180':c=black@0:ow=iw:oh=ih,colorchannelmixer=aa=0.8000",
+        "colorchannelmixer=aa=0.8000,rotate=a='(15.000000)*PI/180':c=black@0:ow='ceil(hypot(iw,ih)/2)*2':oh=ow")
+      .replace("overlay=x=672:y=162:", "overlay=x='round((672.000000)+((960)-overlay_w)/2)':y='round((162.000000)+((540)-overlay_h)/2)':");
+    expect(plan.filterComplex, "reviewed audio normalization and centre-preserving unclipped rotation").toBe(expected);
   });
 
   it("golden: is deterministic ΓÇö the same timeline builds an identical graph", () => {
@@ -874,7 +913,7 @@ describe("buildRenderCommand", () => {
       "/o.mp4",
     );
     expect(plan.filterComplex).toContain("format=yuva420p");
-    expect(plan.filterComplex).toContain("rotate=a='(90.000000)*PI/180':c=black@0:ow=iw:oh=ih");
+    expect(plan.filterComplex).toContain("rotate=a='(90.000000)*PI/180':c=black@0:ow='ceil(hypot(iw,ih)/2)*2':oh=ow");
     expect(plan.warnings.some((w) => w.includes("rotate"))).toBe(false);
   });
 
@@ -1019,9 +1058,9 @@ describe("buildRenderCommand", () => {
     );
     const g = plan.filterComplex;
     const perFrame = [...g.matchAll(/eval=frame/g)].map((m) => m.index!);
-    expect(perFrame).toHaveLength(1);
-    // Nothing but the clip's output label follows it: the overlay is the next consumer.
-    expect(g.slice(perFrame[0])).toMatch(/^eval=frame\[v0\];/);
+    expect(perFrame).toHaveLength(2);
+    expect(g.slice(perFrame[0])).toMatch(/^eval=frame\[fitted0\];/);
+    expect(g.slice(perFrame[1])).toMatch(/^eval=frame\[v0\]\[fitSink0\];\[fitSink0\]nullsink;/);
     const looks = ["eq=", "vignette", "unsharp", "hqdn3d", "gblur", "noise=", "tmix", "chromakey"];
     for (const f of [...looks, "split=2[g0a]", "rotate=", "geq="]) {
       expect(g.indexOf(f), f).toBeGreaterThan(-1);
@@ -2270,9 +2309,24 @@ async function renderCtx(
   ffmpeg: (path: string) => { code: number; stderr: string },
 ): Promise<{ ctx: ClientToolContext; fs: MemFs }> {
   const fs = new MemFs();
+  Object.assign(fs, {
+    rename: async (from: string, to: string) => {
+      const content = fs.files.get(joinPath(from));
+      if (content === undefined) throw new Error(`ENOENT ${from}`);
+      fs.files.set(joinPath(to), content);
+      fs.files.delete(joinPath(from));
+    },
+    readBytes: async (file: string) => new TextEncoder().encode(await fs.readTextFile(file)),
+    probeMedia: async (file: string, headBytes: number) => {
+      const bytes = new TextEncoder().encode(await fs.readTextFile(file));
+      const sha256 = createHash("sha256").update(bytes).digest("hex");
+      return { id12: sha256.slice(0, 12), sha256, size: bytes.length, head: bytes.slice(0, headBytes) };
+    },
+  });
   const store = new ProjectStoreAccess("C:/proj", fs);
   registerTestDocument("C:/proj"); // back the store with an open document so addClipsTool commits
   await ensureTimeline(store);
+  await fs.writeTextFile("C:/proj/a.mp4", "present source media");
   const runner = {
     run: async (program: string, args: string[]) => {
       if (program === "ffmpeg") {
@@ -2280,7 +2334,17 @@ async function renderCtx(
         if (r.code === 0) await fs.writeTextFile(args[args.length - 1], "video");
         return { code: r.code, stdout: "", stderr: r.stderr };
       }
-      return { code: 0, stdout: "", stderr: "" }; // ffprobe (add_clips has-audio) -> no audio
+      if (program === "ffprobe" && args.includes("-select_streams") && !args.includes("-count_frames"))
+        return { code: 0, stdout: "1", stderr: "" };
+      if (program === "ffprobe" && args.includes("-show_entries")) {
+        const plan = buildRenderCommand(await loadTimeline(store), args[args.length - 1]);
+        return { code: 0, stdout: JSON.stringify({ streams: [{ codec_type: "video", width: plan.output.width,
+          height: plan.output.height, avg_frame_rate: `${plan.output.fps}/1`, duration: String(plan.duration),
+          nb_read_frames: String(Math.ceil(plan.duration * plan.output.fps - 1e-6)) },
+          ...(plan.audioExpected ? [{ codec_type: "audio", duration: String(plan.duration) }] : [])],
+          format: { duration: String(plan.duration) } }), stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
     },
   };
   return { ctx: { store, runner }, fs };
@@ -2716,6 +2780,14 @@ async function captionRenderCtx(
         if (r.code === 0) await fs.writeTextFile(args[args.length - 1], "video");
         return { code: r.code, stdout: "", stderr: r.stderr };
       }
+      if (program === "ffprobe" && args.includes("-show_entries")) {
+        const plan = buildRenderCommand(await loadTimeline(store), args[args.length - 1]);
+        return { code: 0, stdout: JSON.stringify({ streams: [{ codec_type: "video", width: plan.output.width,
+          height: plan.output.height, avg_frame_rate: `${plan.output.fps}/1`, duration: String(plan.duration),
+          nb_read_frames: String(Math.ceil(plan.duration * plan.output.fps - 1e-6)) },
+          ...(plan.audioExpected ? [{ codec_type: "audio", duration: String(plan.duration) }] : [])],
+          format: { duration: String(plan.duration) } }), stderr: "" };
+      }
       return { code: 0, stdout: "", stderr: "" };
     },
   };
@@ -2743,7 +2815,7 @@ describe("renderTimelineTool", () => {
       ctx,
     );
     const r = (await renderTimelineTool({}, ctx)) as Any;
-    expect(r.ok).toBe(true);
+    expect(r.ok, JSON.stringify(r)).toBe(true);
     expect(String(r.final_mp4)).toContain("renderer/final.mp4");
     expect(r.duration_s).toBe(2);
   });
@@ -2881,7 +2953,7 @@ describe("exportTimelineTool", () => {
       ctx,
     );
     const r = (await exportTimelineTool({}, ctx)) as Any;
-    expect(r.ok).toBe(true);
+    expect(r.ok, JSON.stringify(r)).toBe(true);
     expect(r.format).toBe("mp4");
     expect(r.saved_to).toBe("proj.mp4"); // filename only ΓÇö no system path leaked to the model
     expect(String(r.note)).toContain("Downloads");
@@ -2908,8 +2980,10 @@ describe("exportTimelineTool", () => {
     );
     const r = (await exportTimelineTool({ output_path: "D:/Videos/final cut.mp4" }, ctx)) as Any;
     expect(r.ok).toBe(true);
+    await whenExportsSettle();
     // The OUTCOME: ffmpeg wrote where the user pointed, and the file is there.
-    expect(outPath).toBe("D:/Videos/final cut.mp4");
+    expect(outPath).not.toBe("D:/Videos/final cut.mp4");
+    expect(outPath).toMatch(/^D:\/Videos\/.*\.partial$/);
     expect(await fs.exists("D:/Videos/final cut.mp4")).toBe(true);
     expect(r.saved_to).toBe("final cut.mp4");
     // The "Saved to your Downloads folder" note is a LIE once a path was chosen, so it is
@@ -2930,7 +3004,8 @@ describe("exportTimelineTool", () => {
     // Empty string / whitespace is "not chosen", not "write to the root".
     const r = (await exportTimelineTool({ output_path: "   " }, ctx)) as Any;
     expect(r.ok).toBe(true);
-    expect(outPath).toBe("C:/Users/test/Downloads/proj.mp4");
+    await whenExportsSettle();
+    expect(outPath).toMatch(/^C:\/Users\/test\/Downloads\/.*\.partial$/);
     expect(String(r.note)).toContain("Downloads");
   });
 
@@ -2950,10 +3025,13 @@ describe("exportTimelineTool", () => {
     );
 
     const first = (await exportTimelineTool({}, ctx)) as Any;
+    await whenExportsSettle();
     // Distinguishable bytes, so "still there" cannot be satisfied by a fresh render.
     await fs.writeTextFile("C:/Users/test/Downloads/proj.mp4", "FIRST DELIVERABLE");
     const second = (await exportTimelineTool({}, ctx)) as Any;
+    await whenExportsSettle();
     const third = (await exportTimelineTool({}, ctx)) as Any;
+    await whenExportsSettle();
 
     expect([first.saved_to, second.saved_to, third.saved_to]).toEqual([
       "proj.mp4",
@@ -2963,11 +3041,10 @@ describe("exportTimelineTool", () => {
     // The OUTCOME, not the name: ffmpeg was pointed elsewhere and the first file's own
     // bytes survived both later exports.
     expect(await fs.readTextFile("C:/Users/test/Downloads/proj.mp4")).toBe("FIRST DELIVERABLE");
-    expect(paths).toEqual([
-      "C:/Users/test/Downloads/proj.mp4",
-      "C:/Users/test/Downloads/proj 2.mp4",
-      "C:/Users/test/Downloads/proj 3.mp4",
-    ]);
+    expect(paths).toHaveLength(3);
+    for (const output of paths) expect(output).toMatch(/\.partial$/);
+    expect(await fs.readTextFile("C:/Users/test/Downloads/proj 2.mp4")).toBe("video");
+    expect(await fs.readTextFile("C:/Users/test/Downloads/proj 3.mp4")).toBe("video");
   });
 
   // The failure direction: de-duping everything would break the Save As flow, where the OS
@@ -2983,6 +3060,7 @@ describe("exportTimelineTool", () => {
     await fs.writeTextFile("D:/Videos/cut.mp4", "OLD");
     const r = (await exportTimelineTool({ output_path: "D:/Videos/cut.mp4" }, ctx)) as Any;
     expect(r.ok).toBe(true);
+    await whenExportsSettle();
     expect(r.saved_to).toBe("cut.mp4"); // not "cut 2.mp4"
     expect(await fs.readTextFile("D:/Videos/cut.mp4")).toBe("video");
     expect(await fs.exists("D:/Videos/cut 2.mp4")).toBe(false);
@@ -3120,36 +3198,14 @@ describe("exportTimelineTool", () => {
     // say `-f mp4`, or every real export dies with "Unable to find a suitable output format",
     // invisible to a mocked runner, so this asserts the actual arguments. MemFs has no rename,
     // and without one the export writes straight to the destination and never stages at all.
-    const mem = new MemFs();
-    const fs: FsLike = {
-      exists: (p) => mem.exists(p),
-      readTextFile: (p) => mem.readTextFile(p),
-      writeTextFile: (p, c) => mem.writeTextFile(p, c),
-      mkdir: () => mem.mkdir(),
-      downloadDir: () => mem.downloadDir(),
-      rename: async (from: string, to: string) => {
-        mem.files.set(joinPath(to), await mem.readTextFile(from));
-        mem.files.delete(joinPath(from));
-      },
-    };
-    const store = new ProjectStoreAccess("C:/proj", fs);
-    registerTestDocument("C:/proj");
-    await ensureTimeline(store);
     let out = "";
     let argv: string[] = [];
-    const ctx: ClientToolContext = {
-      store,
-      runner: {
-        run: async (program: string, args: string[]) => {
-          if (program === "ffmpeg") {
-            out = args[args.length - 1];
-            argv = args;
-            await fs.writeTextFile(out, "video");
-          }
-          return { code: 0, stdout: "", stderr: "" };
-        },
-      },
-    };
+    const { ctx, fs } = await renderCtx((output) => { out = output; return { code: 0, stderr: "" }; });
+    const run = ctx.runner.run.bind(ctx.runner);
+    ctx.runner = { run: async (program, args, ...options) => {
+      if (program === "ffmpeg") argv = args;
+      return run(program, args, ...options);
+    } };
     await addClipsTool(
       { entries: [{ media_ref: "a.mp4", timeline_in: 0, timeline_out: 60 }] },
       ctx,
@@ -3175,6 +3231,7 @@ describe("exportTimelineTool", () => {
     );
     const r = (await exportTimelineTool({ name: "../../../../Users/evil/pwned" }, ctx)) as Any;
     expect(r.ok).toBe(true);
+    await whenExportsSettle();
     // The render output stays INSIDE the Downloads dir ΓÇö no `..`, no separators
     // carried over from the name ΓÇö so the would-be arbitrary write is neutralized.
     expect(outPath.startsWith("C:/Users/test/Downloads/")).toBe(true);

@@ -1,0 +1,162 @@
+name: Fresh provider-free cross-platform QA
+
+on:
+  push:
+    branches: ["qa/full-regression-20261015-*-refresh-*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  VITE_SENTRY_DSN: ""
+  SENTRY_DSN: ""
+  AKARU_EVAL: ""
+  ARTDADDY_EVAL: ""
+  ARTDADDY_RECOVERY_EVAL: ""
+  ARTDADDY_SMOKE_NET: ""
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  frontend:
+    name: frontend gates (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-14, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+        id: dependencies
+      - name: Catalog drift
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: node scripts/codegen.mjs --check
+      - name: TypeScript
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: npm run typecheck
+      - name: Unit integration property fuzz and coverage gates
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: npx vitest run --coverage --coverage.reportOnFailure --maxWorkers=2 --reporter=default --reporter=json --outputFile=reports/fresh-qa/unit.json --coverage.reporter=text-summary --coverage.reporter=json-summary --coverage.reporter=html --coverage.reportsDirectory=reports/fresh-qa/coverage
+      - name: Production frontend bundle
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: npx vite build
+      - name: Formatting gate
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: npm run format:check
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fresh-qa-frontend-${{ matrix.os }}
+          path: reports/fresh-qa/**
+
+  media-native:
+    name: media and Rust (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-14, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 65
+    env:
+      ARTDADDY_E2E_SKIP_SIDECARS: ${{ matrix.os != 'windows-latest' && 'whisper-cli' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Native Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libayatana-appindicator3-dev libssl-dev libwebkit2gtk-4.1-dev librsvg2-dev gnome-keyring dbus-x11
+      - run: npm ci
+      - name: Fetch the real shipped sidecars (Windows)
+        if: runner.os == 'Windows'
+        run: node scripts/fetch-sidecars.mjs
+      - name: Fetch shipped sidecars except platform-built speech (Unix)
+        if: runner.os != 'Windows'
+        run: node scripts/fetch-sidecars.mjs --only yt-dlp,ffmpeg,artdaddy-browser
+      - run: npm run build:sidecar
+      - run: npm run build:mcpb
+      - run: npm run bundle:browser
+      - name: Chromium runtime dependencies
+        if: runner.os == 'Linux'
+        run: npx playwright install-deps chromium
+      - name: Native build-only speech placeholder (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          triple="$(rustc -vV | sed -n 's/^host: //p')"
+          touch "src-tauri/binaries/artdaddy-whisper-cli-$triple"
+      - name: Native prerequisites staged
+        id: staged
+        run: node -e "console.log('All runtime sidecars/resources staged; Unix speech placeholder is build-only and explicitly excluded from execution.')"
+      - name: Real-media goldens export and caption gates
+        if: ${{ !cancelled() && steps.staged.outcome == 'success' }}
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            dbus-run-session -- bash -c 'echo -n qa | gnome-keyring-daemon --unlock >/dev/null; npx vitest run --config vitest.smoke.config.ts --maxWorkers=1 --reporter=default --reporter=json --outputFile=reports/fresh-qa/smoke.json'
+          else
+            npx vitest run --config vitest.smoke.config.ts --maxWorkers=1 --reporter=default --reporter=json --outputFile=reports/fresh-qa/smoke.json
+          fi
+      - name: Rust tests and native compile gate
+        if: ${{ !cancelled() && steps.staged.outcome == 'success' }}
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            dbus-run-session -- bash -c 'echo -n qa | gnome-keyring-daemon --unlock >/dev/null; cargo test --locked --manifest-path src-tauri/Cargo.toml'
+          else
+            cargo test --locked --manifest-path src-tauri/Cargo.toml
+          fi
+      - name: Missing Linux credential service fallback
+        if: ${{ !cancelled() && steps.staged.outcome == 'success' && runner.os == 'Linux' }}
+        shell: bash
+        run: DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent/bus cargo test --locked --manifest-path src-tauri/Cargo.toml --lib -- --ignored --exact tests::without_a_secret_service_the_session_lives_in_a_private_file
+      - name: Real browser audio graph
+        if: ${{ !cancelled() && steps.staged.outcome == 'success' }}
+        run: npm run test:audio
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fresh-qa-media-${{ matrix.os }}
+          path: |
+            reports/fresh-qa/**
+            reports/audiolane/**
+            reports/qa/**
+
+  browser-linux:
+    name: Linux browser UI and compositor
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    env:
+      ARTDADDY_E2E_SKIP_SIDECARS: whisper-cli,yt-dlp,artdaddy-browser
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm i --no-save @playwright/test@1.61.1
+      - run: npx playwright install --with-deps chromium webkit
+      - run: node scripts/fetch-sidecars.mjs --only ffmpeg,ffprobe
+      - run: npm run e2e:ui
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fresh-qa-browser-linux
+          path: |
+            playwright-report/**
+            test-results/**

@@ -1,6 +1,7 @@
 // The queue's job is to protect the DESTINATION FILE. Every test here is about what is sitting
 // on disk at the path the user chose, not about what the tool returned.
 import { afterEach, describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
 
 import {
   __resetExportQueue,
@@ -9,7 +10,7 @@ import {
   listExportRecords,
   listExports,
   manageExportsTool,
-  submitExport,
+  submitExport as submitWithDependencies,
   whenExportEnds,
   whenExportsSettle,
   ExportRunError,
@@ -55,6 +56,11 @@ class Fs implements FsLike {
   async writeBytes(p: string, b: Uint8Array): Promise<void> {
     this.bytes.set(joinPath(p), b);
   }
+  async probeMedia(p: string, headBytes: number) {
+    const bytes = await this.readBytes(p);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    return { id12: sha256.slice(0, 12), sha256, size: bytes.length, head: bytes.slice(0, headBytes) };
+  }
   async readDir(): Promise<DirEntry[]> {
     return [];
   }
@@ -91,6 +97,8 @@ const commits = (fs: Fs): [string, string][] =>
   fs.renames.filter(([, to]) => !to.includes("internals/"));
 
 const STAGE = `${DEST}.part-x`;
+const submitExport = (request: Omit<Parameters<typeof submitWithDependencies>[0], "dependencies">) =>
+  submitWithDependencies({ ...request, dependencies: [] });
 
 afterEach(async () => {
   // Reset BEFORE draining: a test that leaves an encode gated would otherwise hang cleanup and
@@ -517,9 +525,10 @@ describe("export queue", () => {
     expect(commits(fs)).toEqual([[joinPath(STAGE), joinPath(DEST)]]);
   });
 
-  it("skips the rename when the caller encoded straight to the destination", async () => {
+  it("refuses direct-to-destination output without touching the old file", async () => {
     const { fs, store } = make();
-    await submitExport({
+    await fs.writeBytes(DEST, new Uint8Array([9]));
+    await expect(submitExport({
       store,
       destPath: DEST,
       stagePath: DEST, // no rename support upstream
@@ -528,10 +537,11 @@ describe("export queue", () => {
         await fs.writeBytes(DEST, new Uint8Array([7]));
         return {};
       },
-    });
+    })).rejects.toThrow("direct-output fallback is not supported");
     await whenExportsSettle();
     expect(commits(fs)).toEqual([]);
     expect(await fs.exists(DEST)).toBe(true);
+    expect(await fs.readBytes(DEST)).toEqual(new Uint8Array([9]));
   });
 
   // Making the export outlive its turn removed the only way to stop one. These prove the
