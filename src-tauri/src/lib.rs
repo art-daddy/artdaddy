@@ -13,8 +13,14 @@ mod token_store;
 /// Move a file or directory to the OS Recycle Bin / Trash (recoverable) instead of
 /// deleting it irreversibly. Backs the client's project-delete path (`fs.trash`).
 #[tauri::command]
-fn trash_path(path: String) -> Result<(), String> {
-  trash::delete(&path).map_err(|e| e.to_string())
+fn trash_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
+  use tauri::Manager;
+  let jobs = app.try_state::<jobs::Supervisor>().ok_or("export dependency owner unavailable")?;
+  trash_path_owned(&jobs, path)
+}
+
+fn trash_path_owned(jobs: &jobs::Supervisor, path: String) -> Result<(), String> {
+  jobs.with_unleased_path(std::path::Path::new(&path), || trash::delete(&path).map_err(|e| e.to_string()))
 }
 
 /// Terminate a process AND everything it spawned. The shell plugin's `Child::kill`
@@ -36,28 +42,62 @@ fn kill_process_tree(pid: u32) -> Result<(), String> {
 ///
 /// `rename` first (atomic, same volume); copy+remove only when that fails across volumes.
 #[tauri::command]
-fn commit_file(from: String, to: String) -> Result<(), String> {
+fn commit_file(app: tauri::AppHandle, from: String, to: String) -> Result<(), String> {
+  use tauri::Manager;
+  let jobs = app.try_state::<jobs::Supervisor>().ok_or("export dependency owner unavailable")?;
+  commit_file_owned(&jobs, &from, &to)
+}
+
+fn commit_file_owned(jobs: &jobs::Supervisor, from: &str, to: &str) -> Result<(), String> {
+  jobs.with_unleased_paths(&[std::path::Path::new(from), std::path::Path::new(to)], || {
   if let Some(parent) = std::path::Path::new(&to).parent() {
     std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
   }
-  if std::fs::rename(&from, &to).is_ok() {
-    return Ok(());
+  match std::fs::rename(from, to) {
+    Ok(()) => return Ok(()),
+    Err(error) if cross_device_error(&error) => {}
+    Err(error) => return Err(error.to_string()),
   }
-  std::fs::copy(&from, &to).map_err(|e| e.to_string())?;
+  let mut source = std::fs::File::open(from).map_err(|error| error.to_string())?;
+  let permissions = source.metadata().map_err(|error| error.to_string())?.permissions();
+  copy_commit_bytes(&mut source, std::path::Path::new(to), permissions)?;
   // The copy IS the commit; failing to tidy the staging file must not fail the export.
-  let _ = std::fs::remove_file(&from);
+  let _ = std::fs::remove_file(from);
+  Ok(())
+  })
+}
+
+fn cross_device_error(error: &std::io::Error) -> bool {
+  #[cfg(unix)]
+  { error.raw_os_error() == Some(libc::EXDEV) }
+  #[cfg(windows)]
+  { error.raw_os_error() == Some(17) }
+  #[cfg(not(any(unix, windows)))]
+  { let _ = error; false }
+}
+
+fn copy_commit_bytes(source: &mut impl std::io::Read, to: &std::path::Path, permissions: std::fs::Permissions) -> Result<(), String> {
+  let parent = to.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| std::path::Path::new("."));
+  let mut destination = tempfile::Builder::new().prefix(".artdaddy-commit-").tempfile_in(parent).map_err(|error| error.to_string())?;
+  std::io::copy(source, destination.as_file_mut()).map_err(|error| error.to_string())?;
+  destination.as_file().set_permissions(permissions).map_err(|error| error.to_string())?;
+  destination.as_file().sync_all().map_err(|error| error.to_string())?;
+  destination.persist(to).map_err(|error| error.error.to_string())?;
   Ok(())
 }
 
 /// Delete a file outright, for the same out-of-scope destinations as `commit_file` — a failed
 /// export must not leave its staging file sitting in the user's folder.
 #[tauri::command]
-fn remove_file(path: String) -> Result<(), String> {
-  match std::fs::remove_file(&path) {
-    Ok(()) => Ok(()),
-    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-    Err(e) => Err(e.to_string()),
-  }
+fn remove_file(app: tauri::AppHandle, path: String) -> Result<(), String> {
+  use tauri::Manager;
+  let jobs = app.try_state::<jobs::Supervisor>().ok_or("export dependency owner unavailable")?;
+  jobs.with_unleased_path(std::path::Path::new(&path), || match std::fs::symlink_metadata(&path) {
+    Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => std::fs::remove_dir_all(&path).map_err(|error| error.to_string()),
+    Ok(_) => std::fs::remove_file(&path).map_err(|error| error.to_string()),
+    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+    Err(error) => Err(error.to_string()),
+  })
 }
 
 /// Let the preview read a project's folder or a file its library links (UJ-027). The asset
@@ -396,11 +436,22 @@ pub fn run() {
       load_refresh_token,
       clear_refresh_token,
       jobs::jobs_submit,
+      jobs::jobs_submit_sequence,
       jobs::jobs_kill,
       jobs::jobs_list,
       jobs::jobs_commit,
       jobs::jobs_forget,
       jobs::jobs_launch_id,
+      jobs::jobs_export_protocol,
+      jobs::jobs_prepare_export,
+      jobs::jobs_stage_render_scratch,
+      jobs::jobs_verify_export,
+      jobs::jobs_publish_export,
+      jobs::jobs_cancel_export,
+      jobs::jobs_export_intents,
+      jobs::jobs_fail_export,
+      jobs::jobs_complete_export,
+      jobs::jobs_copy_export,
       runtime_health::runtime_health_begin,
       runtime_health::runtime_health_status,
       runtime_health::runtime_health_update,
@@ -972,7 +1023,8 @@ fn install_macos_menu(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::
 mod tests {
   #[cfg(windows)]
   use super::kill_tree;
-  use super::trash_path;
+  use super::trash_path_owned;
+  use crate::jobs;
   use std::fs;
   use std::path::PathBuf;
   use std::time::{SystemTime, UNIX_EPOCH};
@@ -1159,13 +1211,157 @@ mod tests {
     }
   }
 
+  fn unleased_trash(path: String) -> Result<(), String> {
+    struct NoSpawn;
+    impl jobs::Spawner for NoSpawn {
+      fn identity(&self, _: &str) -> Result<jobs::ArtifactIdentity, String> { Err("trash fixture has no worker".into()) }
+      fn spawn(&self, _: &jobs::JobSpec, _: std::sync::Arc<dyn Fn(jobs::ProcEvent) + Send + Sync>, _: std::sync::Arc<jobs::Workspace>) -> Result<u32, String> { Err("unused".into()) }
+      fn kill(&self, _: &str, _: u32) {}
+    }
+    let supervisor = jobs::Supervisor::new(std::sync::Arc::new(NoSpawn), std::sync::Arc::new(|_| {}));
+    trash_path_owned(&supervisor, path)
+  }
+
+  #[test]
+  fn trash_refuses_an_admitted_export_source() {
+    struct NoSpawn;
+    impl jobs::Spawner for NoSpawn {
+      fn identity(&self, _: &str) -> Result<jobs::ArtifactIdentity, String> { Err("trash fixture has no worker".into()) }
+      fn spawn(&self, _: &jobs::JobSpec, _: std::sync::Arc<dyn Fn(jobs::ProcEvent) + Send + Sync>, _: std::sync::Arc<jobs::Workspace>) -> Result<u32, String> { Err("unused".into()) }
+      fn kill(&self, _: &str, _: u32) {}
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("media_source.mp4");
+    fs::write(&source, b"not trashable while export is admitted").unwrap();
+    let supervisor = jobs::Supervisor::new(std::sync::Arc::new(NoSpawn), std::sync::Arc::new(|_| {}))
+      .with_export_root(directory.path().join("journal")).unwrap();
+    supervisor.prepare_delivery("trash-lease".into(), "original-project".into(), directory.path().join("render.partial").to_string_lossy().into(),
+      directory.path().join("render.mp4").to_string_lossy().into(), jobs::DeliverySource::Render { paths: vec![source.to_string_lossy().into()] }).unwrap();
+    assert!(trash_path_owned(&supervisor, source.to_string_lossy().into()).unwrap_err().contains("leased"));
+    assert_eq!(fs::read(&source).unwrap(), b"not trashable while export is admitted");
+  }
+
+  #[test]
+  fn interrupted_commit_copy_preserves_previous_destination_bytes() {
+    use std::io::Read;
+    struct Interrupted { emitted: bool }
+    impl Read for Interrupted {
+      fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if self.emitted { return Err(std::io::Error::new(std::io::ErrorKind::Other, "injected copy failure")); }
+        let bytes = b"incomplete new artifact";
+        buffer[..bytes.len()].copy_from_slice(bytes);
+        self.emitted = true;
+        Ok(bytes.len())
+      }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let destination = directory.path().join("existing.mp4");
+    fs::write(&destination, b"complete previously delivered artifact").unwrap();
+    let permissions = fs::metadata(&destination).unwrap().permissions();
+    let result = super::copy_commit_bytes(&mut Interrupted { emitted: false }, &destination, permissions.clone());
+    assert_eq!(fs::read(&destination).unwrap(), b"complete previously delivered artifact");
+    assert!(result.is_err());
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    let absent = directory.path().join("not-yet-delivered.mp4");
+    assert!(super::copy_commit_bytes(&mut Interrupted { emitted: false }, &absent, permissions).is_err());
+    assert!(!absent.exists());
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+  }
+
+  #[test]
+  fn complete_commit_copy_replaces_only_after_success_and_cleans_failed_publish() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.mp4");
+    let destination = directory.path().join("delivered.mp4");
+    fs::write(&source, b"complete new copied artifact").unwrap();
+    fs::write(&destination, b"previous delivery").unwrap();
+    let permissions = fs::metadata(&source).unwrap().permissions();
+    super::copy_commit_bytes(&mut fs::File::open(&source).unwrap(), &destination, permissions.clone()).unwrap();
+    assert_eq!(fs::read(&destination).unwrap(), b"complete new copied artifact");
+    assert_eq!(fs::read(&source).unwrap(), b"complete new copied artifact");
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 2);
+    let blocked = directory.path().join("blocked");
+    fs::create_dir(&blocked).unwrap();
+    fs::write(blocked.join("keep.txt"), b"unrelated existing content").unwrap();
+    assert!(super::copy_commit_bytes(&mut fs::File::open(&source).unwrap(), &blocked, permissions).is_err());
+    assert_eq!(fs::read(blocked.join("keep.txt")).unwrap(), b"unrelated existing content");
+    assert_eq!(fs::read(&source).unwrap(), b"complete new copied artifact");
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 3);
+    let mut readonly = fs::metadata(&source).unwrap().permissions();
+    readonly.set_readonly(true);
+    assert!(super::copy_commit_bytes(&mut fs::File::open(&source).unwrap(), &blocked, readonly).is_err());
+    assert_eq!(fs::read(blocked.join("keep.txt")).unwrap(), b"unrelated existing content");
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 3);
+  }
+
+  #[test]
+  #[cfg(target_os = "linux")]
+  fn cross_volume_commit_publishes_complete_bytes_before_source_cleanup() {
+    use std::os::unix::fs::MetadataExt;
+    struct NoSpawn;
+    impl jobs::Spawner for NoSpawn {
+      fn identity(&self, _: &str) -> Result<jobs::ArtifactIdentity, String> { Err("volume fixture has no worker".into()) }
+      fn spawn(&self, _: &jobs::JobSpec, _: std::sync::Arc<dyn Fn(jobs::ProcEvent) + Send + Sync>, _: std::sync::Arc<jobs::Workspace>) -> Result<u32, String> { Err("unused".into()) }
+      fn kill(&self, _: &str, _: u32) {}
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let target = match tempfile::tempdir_in("/dev/shm") {
+      Ok(target) => target,
+      Err(error) if std::env::var_os("CI").is_none() => { eprintln!("cross-volume scenario unavailable: {error}"); return; }
+      Err(error) => panic!("Linux volume QA needs a writable second device: {error}"),
+    };
+    assert_ne!(fs::metadata(directory.path()).unwrap().dev(), fs::metadata(target.path()).unwrap().dev());
+    let source = directory.path().join("source.mp4");
+    let destination = target.path().join("delivered.mp4");
+    fs::write(&source, b"complete cross-volume artifact").unwrap();
+    fs::write(&destination, b"previous complete delivery").unwrap();
+    let owner = jobs::Supervisor::new(std::sync::Arc::new(NoSpawn), std::sync::Arc::new(|_| {}));
+    super::commit_file_owned(&owner, &source.to_string_lossy(), &destination.to_string_lossy()).unwrap();
+    assert_eq!(fs::read(&destination).unwrap(), b"complete cross-volume artifact");
+    assert!(!source.exists());
+    assert_eq!(fs::read_dir(target.path()).unwrap().count(), 1);
+  }
+
+  #[test]
+  fn legacy_commit_preserves_leased_source_and_destination_bytes() {
+    struct NoSpawn;
+    impl jobs::Spawner for NoSpawn {
+      fn identity(&self, _: &str) -> Result<jobs::ArtifactIdentity, String> { Err("filesystem fixture has no worker".into()) }
+      fn spawn(&self, _: &jobs::JobSpec, _: std::sync::Arc<dyn Fn(jobs::ProcEvent) + Send + Sync>, _: std::sync::Arc<jobs::Workspace>) -> Result<u32, String> { Err("unused".into()) }
+      fn kill(&self, _: &str, _: u32) {}
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("leased.mp4");
+    let alias = directory.path().join("leased-alias.mp4");
+    let staged = directory.path().join("incoming.partial");
+    let moved = directory.path().join("moved.mp4");
+    fs::write(&source, b"original leased input bytes").unwrap();
+    fs::hard_link(&source, &alias).unwrap();
+    fs::write(&staged, b"replacement bytes must not reach the input").unwrap();
+    let supervisor = jobs::Supervisor::new(std::sync::Arc::new(NoSpawn), std::sync::Arc::new(|_| {}))
+      .with_export_root(directory.path().join("journal")).unwrap();
+    supervisor.prepare_delivery("commit-lease".into(), "original-project".into(), directory.path().join("render.partial").to_string_lossy().into(),
+      directory.path().join("render.mp4").to_string_lossy().into(), jobs::DeliverySource::Render { paths: vec![source.to_string_lossy().into()] }).unwrap();
+    assert!(super::commit_file_owned(&supervisor, &staged.to_string_lossy(), &source.to_string_lossy()).is_err());
+    assert!(super::commit_file_owned(&supervisor, &source.to_string_lossy(), &moved.to_string_lossy()).is_err());
+    assert!(super::commit_file_owned(&supervisor, &staged.to_string_lossy(), &alias.to_string_lossy()).is_err());
+    assert!(super::commit_file_owned(&supervisor, &alias.to_string_lossy(), &moved.to_string_lossy()).is_err());
+    assert_eq!(fs::read(&source).unwrap(), b"original leased input bytes");
+    assert_eq!(fs::read(&alias).unwrap(), b"original leased input bytes");
+    assert_eq!(fs::read(&staged).unwrap(), b"replacement bytes must not reach the input");
+    assert!(!moved.exists());
+    super::commit_file_owned(&supervisor, &staged.to_string_lossy(), &moved.to_string_lossy()).unwrap();
+    assert_eq!(fs::read(&moved).unwrap(), b"replacement bytes must not reach the input");
+    assert!(!staged.exists());
+  }
+
   #[test]
   fn trashes_a_file_so_the_path_is_gone() {
     let p = scratch("file");
     fs::write(&p, b"delete me").unwrap();
     assert!(p.exists());
 
-    trash_path(p.to_string_lossy().into_owned()).expect("trash should succeed");
+    unleased_trash(p.to_string_lossy().into_owned()).expect("trash should succeed");
 
     // The OUTCOME, not the call: the path must no longer resolve. (The bytes still
     // exist in the Recycle Bin — that is the whole point of using trash over remove.)
@@ -1178,7 +1374,7 @@ mod tests {
     fs::create_dir_all(dir.join("internals")).unwrap();
     fs::write(dir.join("internals/timeline.json"), b"{}").unwrap();
 
-    trash_path(dir.to_string_lossy().into_owned()).expect("trash should succeed");
+    unleased_trash(dir.to_string_lossy().into_owned()).expect("trash should succeed");
 
     assert!(!dir.exists(), "the project directory survived");
   }
@@ -1188,14 +1384,14 @@ mod tests {
     // The frontend awaits this across IPC; a panic would poison the webview call
     // instead of surfacing a message the delete flow can show the user.
     let p = scratch("missing");
-    let err = trash_path(p.to_string_lossy().into_owned())
+    let err = unleased_trash(p.to_string_lossy().into_owned())
       .expect_err("trashing a non-existent path must fail");
     assert!(!err.is_empty(), "the error must carry a message");
   }
 
   #[test]
   fn an_empty_path_is_rejected_rather_than_deleting_the_cwd() {
-    assert!(trash_path(String::new()).is_err());
+    assert!(unleased_trash(String::new()).is_err());
   }
 
   // ── kill_process_tree ──────────────────────────────────────────────────────
