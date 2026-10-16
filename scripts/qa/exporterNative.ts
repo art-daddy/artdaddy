@@ -10,6 +10,7 @@ import { emptyTimeline } from "../../src/timeline/model";
 import { buildRenderCommand, queueRenderJob } from "../../src/timeline/render";
 import { listExportRecords, whenExportEnds, whenExportsSettle } from "../../src/timeline/exportQueue";
 import { ensureTimeline } from "../../src/timeline/engine";
+import { resolveExportResources } from "../../src/platform/host";
 
 const params = new URLSearchParams(location.search);
 const root = params.get("root") ?? "";
@@ -191,6 +192,7 @@ async function exercise(): Promise<void> {
     const stage = joinPath(root, `.promise-${definition.id}.partial`);
     const started = performance.now();
     const plan = buildRenderCommand(timeline, stage, { engine: "partition-pipes-v1", quality: "medium" });
+    const resources = await resolveExportResources(destination);
     let promiseId = "";
     let scratchPath: string | undefined;
     let scratchRead: Promise<void> | undefined;
@@ -222,6 +224,7 @@ async function exercise(): Promise<void> {
     promiseResult = { caseId: definition.id, profile: input.profile, kind: definition.kind, destination, jobId: queued.job_id,
       state: outcome?.state ?? "missing", error: outcome?.error ?? null, elapsedMs: performance.now() - started,
       projectFrames: frames, partitions: plan.steps?.length ?? 0, columns, rows, imageHeight,
+      resources, workload: plan.workload,
       publicationVerified, finalIdentity: delivery?.identity,
       stagingCleaned: !(await exists(stage)), scratchCleaned: !!scratchPath && !(await exists(scratchPath)),
       scratchEvidenceError: scratchError ? String(scratchError) : null, estimateProvided: false };

@@ -443,6 +443,7 @@ pub fn run() {
       jobs::jobs_forget,
       jobs::jobs_launch_id,
       jobs::jobs_export_protocol,
+      jobs::jobs_export_resources,
       jobs::jobs_prepare_export,
       jobs::jobs_stage_render_scratch,
       jobs::jobs_verify_export,

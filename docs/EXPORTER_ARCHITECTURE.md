@@ -231,6 +231,21 @@ by the corresponding open items below and cannot be omitted from phase completio
   queue/recovery and collection checks pass, including100random overlap cases.
   This is the preflight foundation only: confirmation, native free-space/memory
   sampling and calibrated time estimation are not yet enabled or accepted.
+- V2-D017: query current native memory and scratch/destination free bytes through
+  the existing Supervisor blocking-IPC adapter, without creating output directories
+  or acquiring another job/lifecycle owner. Canonical existing parent/mount paths
+  select the volume; unavailable measurements remain null, and real zero free
+  space stays zero. The local reader validates safe byte values, bounds the wait
+  to2seconds and ignores aborted/late results. It never sends resource figures
+  through anonymous reporting. These are advisory snapshots, not reservations or
+  proof that capacity will remain available when encoding starts.
+- V2-D018: real native resource and refusal tests pass; four local-reader tests
+  cover valid/zero, invalid/unknown, web/abort and late completion. Capped pilot
+  report1792173510016passes the existing artifact/audio/publication/cleanup checks
+  and actual IPC measurements in16544.9mswith peakVisualLayers8. The whole-tree
+  cap remains6GiBand reported peak is3572879360bytes, not an exact physical peak
+  ceiling. Host RAM is64GB, not a physical8GBmachine. Pilot/estimate/temp-space
+  qualification flags remain unchanged; no 99%or full-size pass is inferred.
 
 ## Historical V1 Design And Evidence
 

@@ -299,6 +299,12 @@ try {
     assert.equal(native.state, "done");
     assert.equal(native.publicationVerified, true, "Promise output identity/catalog/ledger publication differs");
     assert.equal(native.stagingCleaned, true, "Promise staging file was not cleaned");
+    assert.ok(Number.isSafeInteger(native.resources?.total_memory_bytes) && native.resources.total_memory_bytes > 0,
+      "Native resource snapshot did not measure system memory");
+    assert.ok(Number.isSafeInteger(native.resources?.scratch_free_bytes) && native.resources.scratch_free_bytes >= 0,
+      "Native resource snapshot did not measure scratch free space");
+    assert.ok(Number.isSafeInteger(native.resources?.destination_free_bytes) && native.resources.destination_free_bytes >= 0,
+      "Native resource snapshot did not measure destination free space");
     const probed = spawnSync(executable("artdaddy-ffprobe"), ["-v", "error", "-count_frames", "-show_streams", "-show_format", "-of", "json", native.destination], { encoding: "utf8" });
     assert.equal(probed.status, 0, probed.stderr);
     const metadata = JSON.parse(probed.stdout);

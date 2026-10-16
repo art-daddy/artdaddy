@@ -220,6 +220,44 @@ pub struct ArtifactIdentity {
   pub size: u64,
 }
 
+#[derive(Debug, serde::Serialize)]
+pub struct ExportResources {
+  pub total_memory_bytes: Option<u64>,
+  pub available_memory_bytes: Option<u64>,
+  pub scratch_free_bytes: Option<u64>,
+  pub destination_free_bytes: Option<u64>,
+}
+
+fn existing_resource_directory(path: &Path) -> Option<PathBuf> {
+  if !path.is_absolute() { return None; }
+  let mut current = path.to_path_buf();
+  loop {
+    if let Ok(resolved) = current.canonicalize() {
+      return if resolved.is_dir() { Some(resolved) } else { resolved.parent().map(Path::to_path_buf) };
+    }
+    if !current.pop() { return None; }
+  }
+}
+
+fn resource_free_bytes(path: &Path, disks: &sysinfo::Disks) -> Option<u64> {
+  let directory = existing_resource_directory(path)?;
+  disks.iter().filter_map(|disk| disk.mount_point().canonicalize().ok().map(|mount| (disk, mount)))
+    .filter(|(_, mount)| directory.starts_with(mount))
+    .max_by_key(|(_, mount)| mount.components().count())
+    .map(|(disk, _)| disk.available_space())
+}
+
+fn export_resources(destination: &Path, scratch: Option<&Path>) -> ExportResources {
+  let mut system = sysinfo::System::new();
+  system.refresh_memory();
+  let total_memory_bytes = (system.total_memory() > 0).then(|| system.total_memory());
+  let available_memory_bytes = total_memory_bytes.map(|_| system.available_memory());
+  let disks = sysinfo::Disks::new_with_refreshed_list();
+  ExportResources { total_memory_bytes, available_memory_bytes,
+    scratch_free_bytes: scratch.and_then(|path| resource_free_bytes(path, &disks)),
+    destination_free_bytes: resource_free_bytes(destination, &disks) }
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RenderScratchFile {
   pub name: String,
@@ -1988,6 +2026,12 @@ pub fn jobs_launch_id(jobs: tauri::State<'_, Supervisor>) -> String {
 
 #[tauri::command]
 pub fn jobs_export_protocol() -> u32 { 19 }
+
+#[tauri::command]
+pub async fn jobs_export_resources(jobs: tauri::State<'_, Supervisor>, destination: String) -> Result<ExportResources, String> {
+  supervisor_work(jobs.inner().clone(), move |supervisor|
+    Ok(export_resources(Path::new(&destination), supervisor.export_work_root.as_deref()))).await
+}
 
 #[tauri::command]
 pub async fn jobs_stage_render_scratch(jobs: tauri::State<'_, Supervisor>, id: String, files: Vec<RenderScratchFile>, fonts: Vec<String>) -> Result<String, String> {
@@ -3992,6 +4036,24 @@ mod tests {
     fake.emit("parts", ProcEvent::Exit(Some(0)));
     assert!(state(&s, "parts").killed);
     assert_eq!(fake.spawned_ids(), ["parts"], "cancelled continuation must not spawn");
+  }
+
+  #[test]
+  fn export_resource_snapshot_measures_existing_volumes_without_creating_output() {
+    let root = tempfile::tempdir().unwrap();
+    let destination = root.path().join("not-created").join("movie.mp4");
+    let measured = export_resources(&destination, Some(root.path()));
+    assert!(measured.total_memory_bytes.is_some_and(|bytes| bytes > 1024 * 1024 * 1024));
+    assert!(measured.available_memory_bytes.unwrap() <= measured.total_memory_bytes.unwrap());
+    assert!(measured.destination_free_bytes.is_some_and(|bytes| bytes > 0), "{measured:?}");
+    assert_eq!(measured.scratch_free_bytes, measured.destination_free_bytes);
+    assert!(!destination.exists());
+    assert!(!destination.parent().unwrap().exists());
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    let unknown = export_resources(Path::new("relative-output.mp4"), None);
+    assert!(unknown.destination_free_bytes.is_none());
+    assert!(unknown.scratch_free_bytes.is_none());
+    println!("native resource snapshot: {}", serde_json::to_string(&measured).unwrap());
   }
 
   #[test]
