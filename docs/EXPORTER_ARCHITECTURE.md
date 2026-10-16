@@ -193,6 +193,34 @@ by the corresponding open items below and cannot be omitted from phase completio
   is false and passed is false. The first run failed caption inspection at low
   inspection resolution;384x216inspection retains the same brightness/motion
   checks and the end-to-end rerun passes. No full promise percentage is inferred.
+- V2-D011: anonymous export collection uses an explicit payload allow-list, finite
+  reason/size/readiness categories, elapsed time and bounded build/platform metadata.
+  Never spread an export/job object into the network body. Do not send credentials,
+  referrers, filenames, paths, project/account IDs, content or raw diagnostics.
+  Reporting failure remains non-fatal and cannot renew a session or interrupt export.
+- V2-D012: enforce anonymity again at the server document builder, including legacy
+  callers. Export ingest does not require a session; inference, export policy, other
+  telemetry and administrative routes retain authentication. Bound actual export
+  request bytes to8KiB, including missing/false Content-Length, and retain existing
+  ingest-rate/storage safeguards. IP is used only transiently for admission, not
+  stored in the export document. Historical rows are not rewritten or deleted.
+- V2-D013: export summaries expose separate overall and ready-finished rates with
+  explicit denominators and unknown readiness. Overall includes blocked, declined
+  and cancelled requests; ready-finished counts ready done/failed outcomes, while
+  cancellation/decline counts remain visible separately. Unknown legacy readiness
+  is not guessed. Do not expose legacy names/error text in the export summary;
+  unique-user counts are unavailable, not a fabricated zero.
+- V2-D014: both privacy-policy copies now disclose anonymous export reporting for
+  signed-in/out users and exclude private export data. The client and server are
+  tested locally only; deployment remains last and needs approval. A new anonymous
+  client against the old authenticated backend can lose best-effort reports, so
+  co-ship the endpoint and client deliberately. Preflight blocked/declined emission
+  and workload metadata integration are the next piece, not yet claimed complete.
+- V2-D015: client request/property tests and server persisted-document/property,
+  category-drift, auth, ingest-byte and denominator tests are focused proof. They
+  do not certify population reliability or guarantee delivery while offline/rate
+  limited. The existing reporting path remains best-effort; qualify rates from
+  received reports separately from the controlled promise-library results.
 
 ## Historical V1 Design And Evidence
 
