@@ -4,7 +4,7 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
-import { assessExport, crfFor, outputFps, outputSize, type ExportEstimates } from "./exportOptions";
+import { assessExport, crfFor, estimateExportFromHistory, outputFps, outputSize, type ExportCalibration, type ExportEstimates } from "./exportOptions";
 import type { RenderWorkload } from "./renderPlan";
 
 describe("export preflight assessment", () => {
@@ -51,6 +51,39 @@ describe("export preflight assessment", () => {
         const result = assessExport(workload, { ...resources, available_memory_bytes: memory, destination_free_bytes: disk }, estimates, budgets);
         if (memory < estimates.memoryBytes! || disk < estimates.temporaryBytes! + estimates.finalBytes!) expect(result.severity).toBe("warning");
       }), { numRuns: 200 });
+  });
+});
+
+describe("local measured export estimates", () => {
+  const workload: RenderWorkload = { width: 1920, height: 1080, fps: 30, durationSeconds: 10,
+    visualClips: 14, captionClips: 2, audioClips: 1, peakVisualLayers: 8, peakMediaLayers: 7 };
+  const output = { width: 1920, height: 1080, fps: 30 };
+  const sample: ExportCalibration = { workload, output, quality: "medium", engine: "partition-pipes-v1",
+    elapsedSeconds: 16, finalBytes: 2_400_000, memoryBytes: 1_000_000_000, temporaryBytes: null };
+  const estimate = (target = workload, history: readonly ExportCalibration[] = [sample]) =>
+    estimateExportFromHistory(target, output, "medium", "partition-pipes-v1", history);
+
+  it("does not invent observations for absent or incompatible history", () => {
+    const unknown = { seconds: null, memoryBytes: null, temporaryBytes: null, finalBytes: null };
+    expect(estimate(workload, [])).toEqual(unknown);
+    expect(estimate({ ...workload, peakMediaLayers: 1 })).toEqual(unknown);
+    expect(estimateExportFromHistory(workload, output, "high", "partition-pipes-v1", [sample])).toEqual(unknown);
+    expect(estimateExportFromHistory(workload, { ...output, fps: 60 }, "medium", "partition-pipes-v1", [sample])).toEqual(unknown);
+  });
+
+  it("uses successful measurements without replacing missing observations by zero", () => {
+    expect(estimate()).toEqual({ seconds: 16, finalBytes: 2_400_000, memoryBytes: 1_000_000_000, temporaryBytes: null });
+    expect(estimate(workload, [{ ...sample, elapsedSeconds: NaN }]).seconds).toBeNull();
+    expect(estimate(workload, [sample, { ...sample, elapsedSeconds: 20 }]).seconds).toBe(20);
+  });
+
+  it("does not shorten an estimate when duration or clip count increases", () => {
+    fc.assert(fc.property(fc.integer({ min: 1, max: 1000 }), fc.integer({ min: 1, max: 1000 }), (seconds, clips) => {
+      const first = estimate({ ...workload, durationSeconds: seconds, visualClips: clips });
+      const more = estimate({ ...workload, durationSeconds: seconds + 1, visualClips: clips + 1 });
+      expect(more.seconds!).toBeGreaterThanOrEqual(first.seconds!);
+      expect(more.finalBytes!).toBeGreaterThanOrEqual(first.finalBytes!);
+    }), { numRuns: 100 });
   });
 });
 

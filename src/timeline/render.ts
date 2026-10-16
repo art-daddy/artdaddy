@@ -3386,6 +3386,13 @@ export async function queueRenderJob(
     batch?: string;
   },
 ): Promise<ExportSubmission> {
+  return submitExport(await prepareRenderSubmission(ctx, job));
+}
+
+export async function prepareRenderSubmission(
+  ctx: ClientToolContext,
+  job: Parameters<typeof queueRenderJob>[1],
+): Promise<Parameters<typeof submitExport>[0]> {
   const request = structuredClone(job);
   const renderPlan = request.plan;
   if (!renderPlan.selection || renderPlan.selection.version !== 1 ||
@@ -3425,6 +3432,8 @@ export async function queueRenderJob(
     visual_layers: renderPlan.workload.peakVisualLayers,
     project_width: renderPlan.workload.width,
     project_height: renderPlan.workload.height,
+    calibration: { workload: renderPlan.workload, output: renderPlan.output,
+      quality: request.quality || "medium", engine: renderPlan.selection.backend },
   };
   const plan: ExportJobPlan = {
     contractVersion: renderPlan.contractVersion,
@@ -3444,7 +3453,7 @@ export async function queueRenderJob(
     sources: renderPlan.sources.map((source) => ({ ...source })),
   };
   const submittedAt = Date.now();
-  return submitExport({
+  return {
     store: ctx.store,
     dependencies: [...renderPlan.dependencies],
     destPath: request.destPath,
@@ -3452,6 +3461,8 @@ export async function queueRenderJob(
     filename: request.filename,
     // Present only when the AGENT called this tool; the Export menu runs it with no origin.
     origin: ctx.origin,
+    submissionSignal: ctx.signal,
+    workload: renderPlan.workload,
     // Describes the artifact the plan will produce, captured here because a failed encode
     // leaves no file to measure and the metric still has to say what was attempted.
     meta: telemetry,
@@ -3493,5 +3504,5 @@ export async function queueRenderJob(
         );
       return { warnings: res.warnings ?? [] };
     },
-  });
+  };
 }

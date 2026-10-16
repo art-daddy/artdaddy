@@ -8,9 +8,11 @@ import { ProjectStoreAccess } from "../../src/tools/store";
 import { TauriCommandRunner, TauriFs } from "../../src/tools/tauri";
 import { emptyTimeline } from "../../src/timeline/model";
 import { buildRenderCommand, queueRenderJob } from "../../src/timeline/render";
-import { listExportRecords, whenExportEnds, whenExportsSettle } from "../../src/timeline/exportQueue";
+import { listExportRecords, whenExportEnds, whenExportsSettle, whenExportTelemetrySettles } from "../../src/timeline/exportQueue";
 import { ensureTimeline } from "../../src/timeline/engine";
 import { resolveExportResources } from "../../src/platform/host";
+import { __setExportConfirmationForTests } from "../../src/lib/confirm";
+import { useExportJob } from "../../src/store/exportJob";
 
 const params = new URLSearchParams(location.search);
 const root = params.get("root") ?? "";
@@ -27,6 +29,11 @@ async function exercise(): Promise<void> {
   check(root.includes("artdaddy-export-native-"), "Not an isolated exporter directory");
   check(await getIdentifier() === identifier && identifier.startsWith("com.artdaddy.qa.exporter-"), "Wrong native app identity");
   check((await dataRoot()).replace(/\\/g, "/") === root.replace(/\\/g, "/"), "Native project root is not isolated");
+  const preflightRequests: Array<{ message: string; warning: boolean }> = [];
+  __setExportConfirmationForTests(async (message, warning) => {
+    preflightRequests.push({ message, warning });
+    return "continue";
+  });
   const supervisor = await jobSupervisor();
   check(supervisor?.delivery, "Missing required native delivery owner");
   check(await supervisor.delivery.protocol() === EXPORT_PROTOCOL_VERSION, "Native protocol mismatch");
@@ -193,6 +200,7 @@ async function exercise(): Promise<void> {
     const started = performance.now();
     const plan = buildRenderCommand(timeline, stage, { engine: "partition-pipes-v1", quality: "medium" });
     const resources = await resolveExportResources(destination);
+    const confirmationOffset = preflightRequests.length;
     let promiseId = "";
     let scratchPath: string | undefined;
     let scratchRead: Promise<void> | undefined;
@@ -208,8 +216,10 @@ async function exercise(): Promise<void> {
     promiseId = queued.job_id;
     const outcome = await whenExportEnds(queued.job_id);
     await whenExportsSettle();
+    const exportElapsedMs = performance.now() - started;
     detach();
     await scratchRead;
+    await whenExportTelemetrySettles();
     const delivery = (await supervisor.delivery.list()).find((entry) => entry.id === queued.job_id);
     const records = await store.readJson<{ jobs: Array<{ id: string; status: string }> }>(joinPath(projectDir, "internals/jobs.json"), { jobs: [] });
     const saved = listExportRecords().find((entry) => entry.job_id === queued.job_id);
@@ -222,12 +232,17 @@ async function exercise(): Promise<void> {
       linked?.sha256 === measured?.sha256 && linked?.size === measured?.size &&
       records.jobs.find((entry) => entry.id === queued.job_id)?.status === "done";
     promiseResult = { caseId: definition.id, profile: input.profile, kind: definition.kind, destination, jobId: queued.job_id,
-      state: outcome?.state ?? "missing", error: outcome?.error ?? null, elapsedMs: performance.now() - started,
+      state: outcome?.state ?? "missing", error: outcome?.error ?? null, elapsedMs: exportElapsedMs,
       projectFrames: frames, partitions: plan.steps?.length ?? 0, columns, rows, imageHeight,
       resources, workload: plan.workload,
       publicationVerified, finalIdentity: delivery?.identity,
       stagingCleaned: !(await exists(stage)), scratchCleaned: !!scratchPath && !(await exists(scratchPath)),
-      scratchEvidenceError: scratchError ? String(scratchError) : null, estimateProvided: false };
+      scratchEvidenceError: scratchError ? String(scratchError) : null,
+      preflight: preflightRequests.slice(confirmationOffset),
+      calibrationRecords: useExportJob.getState().calibrations.filter((sample) => sample.workload.width === definition.width &&
+        sample.workload.height === definition.height && sample.workload.durationSeconds === definition.durationSeconds &&
+        sample.workload.peakMediaLayers === definition.videoLayers).length,
+      estimateProvided: preflightRequests.slice(confirmationOffset).some((entry) => entry.message.includes("Estimated encoding and saving time: about")) };
     await writeTextFile(joinPath(root, "promise-native-result.json"), JSON.stringify(promiseResult));
     check(outcome?.state === "done", `Promise export failed: ${JSON.stringify(promiseResult)}`);
   }

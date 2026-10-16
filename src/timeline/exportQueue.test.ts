@@ -1,24 +1,38 @@
 // The queue's job is to protect the DESTINATION FILE. Every test here is about what is sitting
 // on disk at the path the user chose, not about what the tool returned.
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 
 import {
   __resetExportQueue,
   cancelExport,
   isDestinationReserved,
+  localDeliveryPort,
   listExportRecords,
   listExports,
   manageExportsTool,
-  submitExport,
+  submitExport as submitWithDependencies,
+  submitExports,
   whenExportEnds,
   whenExportsSettle,
+  whenExportTelemetrySettles,
   ExportRunError,
+  ExportRequestError,
 } from "./exportQueue";
 import { __resetJobNotes, pendingJobNotes } from "../store/jobNotes";
 import { __resetProjectJobs } from "../tools/genJobs";
 import { joinPath, ProjectStoreAccess, type DirEntry, type FsLike } from "../tools/store";
 import { backgroundTurn } from "../tools/workGate";
 import { resetTestDocuments } from "../test/timelineKit";
+import { __setExportConfirmationForTests, type ExportConfirmation } from "../lib/confirm";
+import { endProjectSession } from "../tools/coordinator";
+import { useExportJob } from "../store/exportJob";
+import type { ExportCalibration } from "./exportOptions";
+import { FakeJobs } from "../test/fakeJobs";
+import * as host from "../platform/host";
+
+const exportBeacon = vi.hoisted(() => vi.fn(async () => undefined));
+vi.mock("../api/exportEvents", () => ({ reportExport: exportBeacon }));
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -54,6 +68,16 @@ class Fs implements FsLike {
   }
   async writeBytes(p: string, b: Uint8Array): Promise<void> {
     this.bytes.set(joinPath(p), b);
+  }
+  async probeMedia(p: string, headBytes: number) {
+    const bytes = await this.readBytes(p);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    return {
+      id12: sha256.slice(0, 12),
+      sha256,
+      size: bytes.length,
+      head: bytes.slice(0, headBytes),
+    };
   }
   async readDir(): Promise<DirEntry[]> {
     return [];
@@ -91,6 +115,9 @@ const commits = (fs: Fs): [string, string][] =>
   fs.renames.filter(([, to]) => !to.includes("internals/"));
 
 const STAGE = `${DEST}.part-x`;
+const submitExport = (
+  request: Omit<Parameters<typeof submitWithDependencies>[0], "dependencies">,
+) => submitWithDependencies({ ...request, dependencies: [] });
 
 afterEach(async () => {
   // Reset BEFORE draining: a test that leaves an encode gated would otherwise hang cleanup and
@@ -99,6 +126,181 @@ afterEach(async () => {
   __resetJobNotes();
   __resetProjectJobs();
   await resetTestDocuments();
+  vi.restoreAllMocks();
+  useExportJob.setState({ calibrations: [] });
+});
+
+describe("required export preflight", () => {
+  const calibration: Pick<ExportCalibration, "workload" | "output" | "quality" | "engine"> = {
+    workload: { width: 1920, height: 1080, fps: 30, durationSeconds: 10,
+      visualClips: 14, captionClips: 2, audioClips: 1, peakVisualLayers: 8, peakMediaLayers: 7 },
+    output: { width: 1920, height: 1080, fps: 30 }, quality: "medium", engine: "partition-pipes-v1",
+  };
+
+  it.each(["slow", "batch-space"] as const)("shows the correct measured %s decision rather than a generic pass", async (scenario) => {
+    const { store } = make();
+    vi.spyOn(host, "resolveExportResources").mockResolvedValue({ total_memory_bytes: 1000, available_memory_bytes: 500,
+      scratch_free_bytes: scenario === "slow" ? 1000 : 150, destination_free_bytes: scenario === "slow" ? 1000 : 150,
+      budgets: { memoryBytes: 500, temporaryBytes: 500, executionSeconds: 28800 } });
+    useExportJob.setState({ calibrations: [{ ...calibration, elapsedSeconds: scenario === "slow" ? 30 : 10,
+      finalBytes: 100, memoryBytes: 100, temporaryBytes: 10 }] });
+    let shown: { message: string; warning: boolean } | undefined;
+    __setExportConfirmationForTests(async (message, warning) => { shown = { message, warning }; return "cancel"; });
+    const requests = (scenario === "slow" ? [DEST] : [DEST, "C:/out/second.mp4"]).map((destPath) => ({
+      store, dependencies: [], destPath, stagePath: `${destPath}.part`, filename: "movie.mp4", workload: calibration.workload,
+      meta: { duration_s: 10, width: 1920, height: 1080, fps: 30, quality: "medium", project_id: "", calibration },
+      run: async () => ({}),
+    }));
+    await expect(submitExports(requests)).rejects.toThrow("cancelled before submission");
+    expect(shown?.warning).toBe(scenario === "batch-space");
+    expect(shown?.message).toContain(scenario === "slow" ? "more than twice" : "all finished outputs together");
+    expect(shown?.message).not.toContain("Estimated time: unknown");
+    expect(listExportRecords()).toHaveLength(0);
+  });
+
+  it.each([true, false])("records comparable calibration only after published success=%s", async (succeeds) => {
+    const { fs, store } = make();
+    useExportJob.setState({ calibrations: [] });
+    vi.useFakeTimers({ now: 5000 });
+    try {
+      const submitted = await submitExport({ store, destPath: DEST, stagePath: STAGE, filename: "final.mp4",
+        workload: calibration.workload,
+        meta: { duration_s: 10, width: 1920, height: 1080, fps: 30, quality: "medium", project_id: "", calibration },
+        run: async () => {
+          vi.setSystemTime(21000);
+          if (!succeeds) throw new Error("render failed");
+          await fs.writeBytes(STAGE, new Uint8Array([1, 2, 3]));
+          return {};
+        } });
+      await whenExportsSettle();
+      await whenExportTelemetrySettles();
+      expect((await whenExportEnds(submitted.job_id))?.state).toBe(succeeds ? "done" : "failed");
+      const history = useExportJob.getState().calibrations;
+      expect(history).toHaveLength(Number(succeeds));
+      if (succeeds) {
+        expect(await fs.readBytes(DEST)).toEqual(new Uint8Array([1, 2, 3]));
+        expect(history[0]).toMatchObject({ elapsedSeconds: 16, finalBytes: 3, memoryBytes: null, temporaryBytes: null });
+      }
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("waits for one batch decision before reserving or writing anything", async () => {
+    const { fs, store } = make();
+    let decide!: (choice: ExportConfirmation) => void;
+    let requests = 0;
+    __setExportConfirmationForTests(async () => {
+      requests++;
+      return new Promise<ExportConfirmation>((resolve) => { decide = resolve; });
+    });
+    const paths = [DEST, "C:/out/second.mp4"];
+    const pending = submitExports(paths.map((destPath) => ({ store, dependencies: [], destPath,
+      stagePath: `${destPath}.part`, filename: "movie.mp4", run: async () => {
+        await fs.writeBytes(`${destPath}.part`, new Uint8Array([1, 2, 3]));
+        return {};
+      } })));
+    await vi.waitFor(() => expect(requests).toBe(1));
+    expect(listExportRecords()).toHaveLength(0);
+    expect(paths.some(isDestinationReserved)).toBe(false);
+    expect(fs.files.size + fs.bytes.size).toBe(0);
+    decide("continue");
+    expect(await pending).toHaveLength(2);
+    await whenExportsSettle();
+    expect(requests).toBe(1);
+    for (const path of paths) expect(await fs.readBytes(path)).toEqual(new Uint8Array([1, 2, 3]));
+  });
+
+  it.each(["cancel", "unavailable"] as const)("admits no job or output after %s, including a copy request", async (choice) => {
+    const { fs, store } = make();
+    const run = vi.fn(async () => ({}));
+    __setExportConfirmationForTests(async () => choice);
+    await expect(submitExport({ store, destPath: DEST, stagePath: STAGE, filename: "final.mp4", copyOf: "media_copy", run }))
+      .rejects.toThrow(choice === "cancel" ? "cancelled before submission" : "could not be confirmed");
+    expect(run).not.toHaveBeenCalled();
+    expect(listExportRecords()).toHaveLength(0);
+    expect(isDestinationReserved(DEST)).toBe(false);
+    expect(fs.files.size + fs.bytes.size).toBe(0);
+  });
+
+  it("does not admit a request aborted while its confirmation was open", async () => {
+    const { fs, store } = make();
+    const controller = new AbortController();
+    let decide!: (choice: ExportConfirmation) => void;
+    __setExportConfirmationForTests(() => new Promise<ExportConfirmation>((resolve) => { decide = resolve; }));
+    const run = vi.fn(async () => ({}));
+    const pending = submitExport({ store, destPath: DEST, stagePath: STAGE, filename: "final.mp4",
+      submissionSignal: controller.signal, run });
+    await vi.waitFor(() => expect(decide).toBeTypeOf("function"));
+    controller.abort();
+    decide("continue");
+    await expect(pending).rejects.toThrow();
+    expect(run).not.toHaveBeenCalled();
+    expect(listExportRecords()).toHaveLength(0);
+    expect(fs.files.size + fs.bytes.size).toBe(0);
+  });
+
+  it("does not admit an old-session request after the project closes during confirmation", async () => {
+    const { fs, store } = make();
+    let decide!: (choice: ExportConfirmation) => void;
+    __setExportConfirmationForTests(() => new Promise<ExportConfirmation>((resolve) => { decide = resolve; }));
+    const run = vi.fn(async () => ({}));
+    const pending = submitExport({ store, destPath: DEST, stagePath: STAGE, filename: "final.mp4", run });
+    await vi.waitFor(() => expect(decide).toBeTypeOf("function"));
+    endProjectSession(DIR);
+    decide("continue");
+    await expect(pending).rejects.toThrow("cancelled before submission");
+    expect(run).not.toHaveBeenCalled();
+    expect(listExportRecords()).toHaveLength(0);
+    expect(fs.files.size + fs.bytes.size).toBe(0);
+  });
+
+  it("cancels native intent when preparation returns after cancellation was ignored", async () => {
+    const { fs, store } = make();
+    const controller = new AbortController();
+    const delivery = localDeliveryPort(store);
+    const prepare = delivery.prepare;
+    delivery.prepare = async (...args) => {
+      const result = await prepare(...args);
+      controller.abort();
+      return result;
+    };
+    const jobs = new FakeJobs();
+    jobs.delivery = delivery;
+    const run = vi.fn(async () => ({}));
+    await expect(submitExport({ store, destPath: DEST, stagePath: STAGE, filename: "final.mp4",
+      supervisor: jobs, submissionSignal: controller.signal, run })).rejects.toThrow();
+    expect(run).not.toHaveBeenCalled();
+    const intents = await delivery.list();
+    expect(intents).toHaveLength(1);
+    expect(intents[0]).toMatchObject({ state: "cancelled", followups_done: true });
+    expect(isDestinationReserved(DEST)).toBe(false);
+    expect(await fs.exists(DEST)).toBe(false);
+  });
+
+  it("retains earlier accepted job identities when a later native admission fails", async () => {
+    const { fs, store } = make();
+    const delivery = localDeliveryPort(store);
+    const prepare = delivery.prepare;
+    let preparations = 0;
+    delivery.prepare = async (...args) => {
+      if (++preparations === 2) throw new Error("second native admission refused");
+      return prepare(...args);
+    };
+    const jobs = new FakeJobs();
+    jobs.delivery = delivery;
+    const paths = [DEST, "C:/out/second.mp4"];
+    const failure = await submitExports(paths.map((destPath) => ({ store, supervisor: jobs, dependencies: [], destPath,
+      stagePath: `${destPath}.part`, filename: "movie.mp4", run: async () => {
+        await fs.writeBytes(`${destPath}.part`, new Uint8Array([1, 2, 3]));
+        return {};
+      } }))).then(() => null, (error: unknown) => error);
+    expect(failure).toBeInstanceOf(ExportRequestError);
+    expect((failure as ExportRequestError).submitted).toHaveLength(1);
+    const first = (failure as ExportRequestError).submitted[0];
+    await whenExportsSettle();
+    expect((await whenExportEnds(first.job_id))?.state).toBe("done");
+    expect(await fs.readBytes(DEST)).toEqual(new Uint8Array([1, 2, 3]));
+    expect(await fs.exists(paths[1])).toBe(false);
+  });
 });
 
 describe("export queue", () => {
@@ -517,21 +719,25 @@ describe("export queue", () => {
     expect(commits(fs)).toEqual([[joinPath(STAGE), joinPath(DEST)]]);
   });
 
-  it("skips the rename when the caller encoded straight to the destination", async () => {
+  it("refuses direct-to-destination output without touching the old file", async () => {
     const { fs, store } = make();
-    await submitExport({
-      store,
-      destPath: DEST,
-      stagePath: DEST, // no rename support upstream
-      filename: "final.mp4",
-      run: async () => {
-        await fs.writeBytes(DEST, new Uint8Array([7]));
-        return {};
-      },
-    });
+    await fs.writeBytes(DEST, new Uint8Array([9]));
+    await expect(
+      submitExport({
+        store,
+        destPath: DEST,
+        stagePath: DEST, // no rename support upstream
+        filename: "final.mp4",
+        run: async () => {
+          await fs.writeBytes(DEST, new Uint8Array([7]));
+          return {};
+        },
+      }),
+    ).rejects.toThrow("direct-output fallback is not supported");
     await whenExportsSettle();
     expect(commits(fs)).toEqual([]);
     expect(await fs.exists(DEST)).toBe(true);
+    expect(await fs.readBytes(DEST)).toEqual(new Uint8Array([9]));
   });
 
   // Making the export outlive its turn removed the only way to stop one. These prove the

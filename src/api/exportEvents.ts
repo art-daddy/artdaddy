@@ -46,7 +46,7 @@ function reasonFor(ev: ExportEvent): ExportReasonCode {
   const error = String(ev.error ?? "").slice(0, 32_768).toLowerCase();
   if (/no space left|enospc|disk.*full/.test(error)) return "storage_full";
   if (/no such file|source.*(?:missing|unavailable)|enoent/.test(error)) return "source_unavailable";
-  if (/permission denied|eacces|read.only|destination.*unavailable/.test(error)) return "storage_unavailable";
+  if (/permission denied|access is denied|eacces|read.only|destination.*unavailable/.test(error)) return "storage_unavailable";
   if (/memory.*(?:budget|limit|exceeded)|cannot allocate memory|out of memory/.test(error)) return "memory_limit";
   if (/deadline|execution.*expired|timed out/.test(error)) return "time_limit";
   if (/artifact|verification|frame.*count|duration.*mismatch/.test(error)) return "verification_failed";

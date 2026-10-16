@@ -26,6 +26,47 @@ export interface ExportBudgets {
   readonly executionSeconds: number | null;
 }
 
+export interface ExportCalibration {
+  readonly workload: RenderWorkload;
+  readonly output: { width: number; height: number; fps: number };
+  readonly quality: string;
+  readonly engine: ExportEngine;
+  readonly elapsedSeconds: number;
+  readonly finalBytes: number;
+  readonly memoryBytes: number | null;
+  readonly temporaryBytes: number | null;
+}
+
+export function estimateExportFromHistory(
+  workload: RenderWorkload,
+  output: ExportCalibration["output"],
+  quality: string,
+  engine: ExportEngine,
+  history: readonly ExportCalibration[],
+): ExportEstimates {
+  const samples = history.filter((sample) => sample.quality === quality && sample.engine === engine &&
+    sample.workload.width === workload.width && sample.workload.height === workload.height && sample.workload.fps === workload.fps &&
+    sample.output.width === output.width && sample.output.height === output.height && sample.output.fps === output.fps &&
+    sample.workload.peakMediaLayers === workload.peakMediaLayers && sample.workload.peakVisualLayers === workload.peakVisualLayers &&
+    sample.workload.durationSeconds > 0 && sample.elapsedSeconds > 0 && Number.isFinite(sample.elapsedSeconds) &&
+    sample.finalBytes > 0 && Number.isFinite(sample.finalBytes));
+  const maximum = (values: (number | null)[]) => {
+    const valid = values.filter((value): value is number => value !== null && Number.isFinite(value) && value >= 0);
+    return valid.length ? Math.ceil(Math.max(...valid)) : null;
+  };
+  const scale = (sample: ExportCalibration) => Math.max(workload.durationSeconds / sample.workload.durationSeconds,
+    workload.visualClips / Math.max(1, sample.workload.visualClips),
+    workload.captionClips / Math.max(1, sample.workload.captionClips),
+    workload.audioClips / Math.max(1, sample.workload.audioClips));
+  return {
+    seconds: maximum(samples.map((sample) => sample.elapsedSeconds * scale(sample))),
+    finalBytes: maximum(samples.map((sample) => sample.finalBytes * workload.durationSeconds / sample.workload.durationSeconds)),
+    memoryBytes: maximum(samples.map((sample) => sample.memoryBytes)),
+    temporaryBytes: maximum(samples.map((sample) => sample.temporaryBytes === null ? null : sample.temporaryBytes * Math.max(1,
+      workload.visualClips / Math.max(1, sample.workload.visualClips), workload.captionClips / Math.max(1, sample.workload.captionClips)))),
+  };
+}
+
 export type ExportPreflightReason = "outside_promise" | "memory_unknown" | "memory_shortage" |
   "disk_unknown" | "disk_shortage" | "temporary_limit" | "time_unknown" | "execution_limit" | "slow";
 

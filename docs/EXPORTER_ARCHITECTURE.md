@@ -263,6 +263,51 @@ by the corresponding open items below and cannot be omitted from phase completio
   Twenty-three local-reader/options checks and the real native reservation
   snapshot check pass. These pure rules are not yet a user confirmation gate:
   calibration, mandatory single/batch admission and visible controls remain open.
+- V2-D021: single renders, per-clip renders and library-copy batches now converge
+  on one required request-level submission operation. Prepare immutable render
+  specs first, validate every destination, ask once for the complete request,
+  then reserve/admit jobs. Optional destination-folder creation is after consent.
+  Confirmation is through the existing native/browser dialog, with explicit
+  Continue/Continue anyway/Cancel and strict boolean results. Unavailable dialogs
+  fail closed. Only unit/private-QA harnesses install explicit consent adapters.
+- V2-D022: after the confirmation await, recheck the existing project session,
+  origin and cancellation fence under the existing mutation lease before ledger/
+  native preparation. Recheck again after native preparation: a late response
+  that ignored cancellation is cancelled/retired without starting a worker.
+  Accepted background work keeps its existing detached cancellation/recovery
+  lifecycle; recovering previously accepted work does not ask again. Partial
+  batch failures retain earlier admitted job identities rather than hiding them.
+- V2-D023: keep at most24build-scoped local successful-export observations in the
+  existing export store, restricted to validated numeric/enum workload/output
+  facts, elapsed time, published bytes and available measured peaks. Never save
+  paths, names, content, project IDs or raw diagnostic text in this history.
+  Compare matching geometry/rate/quality/backend/layer counts; use observed maxima
+  and scope scaling, not promise speed targets. Estimates are rough and may vary
+  with codecs/effects; displayed encoding/saving time excludes preparation/queue.
+  Missing measurements remain unknown, especially temporary-space peaks.
+- V2-D024: full warnings explain specific size/resource/time uncertainty or
+  shortages; measured in-scope work over2xgets a light notice. Batch disk checks
+  conservatively include all estimated finished outputs and staging together.
+  Continuing never disables current native caps, source validation or checked
+  publication. Declined/unavailable/aborted preflight outcomes use anonymous
+  coarse reasons. Early source/destination validation reporting still needs its
+  final class-wide audit; received-report rates are not an all-request guarantee.
+- V2-D025:335focused confirmation/history/compiler/corpus/queue/batch/recovery/
+  privacy checks pass without a golden update. Capped pilot1792178663594passes
+  one actual request-level preflight, complete300frame/stereo/caption output,
+  published identity and cleanup, and records its own calibration. Its first
+  unmatched ETA is correctly unknown. The recorded23545.4msincludes a QA-only
+  telemetry/history wait; the adapter now captures product completion before
+  that wait, to be verified in the next actual pilot. The previous report is not
+  rewritten. No pilot becomes promise-qualified; Fast quality measurement,
+  automatic-routing UI, full temporary-space estimation and deferred full-size/
+  physical cases remain open.
+- V2-D026: post-consent folder/ledger/native admission failures also emit a coarse
+  anonymous blocked/cancelled outcome with observed admission time, rather than
+  disappearing before render settlement. Local reason classification may identify
+  source/storage-not-ready; no raw error reaches the wire. Preserve the existing
+  specific folder refusal and any previously admitted batch jobs. Eighty-eight
+  focused queue/batch/collector checks and the11case consent-ordering subset pass.
 
 ## Historical V1 Design And Evidence
 

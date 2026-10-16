@@ -16,14 +16,15 @@ vi.mock("./auth", () => ({
   hasSession: async () => true,
   authedFetch: (url: string, init: RequestInit = {}) => fetch(url, init),
 }));
-vi.mock("../platform/host", () => ({
+vi.mock("../platform/host", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../platform/host")>()),
   hostInfo: () => ({ os: "windows", arch: "x86_64" }),
   resolveHostInfo: async () => undefined,
 }));
 
 import { IDENTITY } from "../brand";
 import { FakeJobs } from "../test/fakeJobs";
-import { MemFs, registerTestDocument, resetTestDocuments } from "../test/timelineKit";
+import { ExportMemFs, registerTestDocument, resetTestDocuments } from "../test/timelineKit";
 import { ensureTimeline } from "../timeline/engine";
 import {
   __resetExportQueue,

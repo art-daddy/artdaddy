@@ -1,10 +1,14 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@testing-library/react";
 import fc from "fast-check";
-import { afterEach } from "vitest";
+import { afterEach, beforeEach } from "vitest";
 
 import { _resetAppCaches } from "../tools/appCache";
 import { __resetWorkGate } from "../tools/workGate";
+import { __setExportConfirmationForTests } from "../lib/confirm";
+
+beforeEach(() => __setExportConfirmationForTests(async () => "continue"));
+afterEach(() => __setExportConfirmationForTests(null));
 
 // The app cache is one instance per folder, as in the app. Every fake disk here names the same
 // folder, so without this one case's transcripts would answer the next case's questions.

@@ -299,6 +299,10 @@ try {
     assert.equal(native.state, "done");
     assert.equal(native.publicationVerified, true, "Promise output identity/catalog/ledger publication differs");
     assert.equal(native.stagingCleaned, true, "Promise staging file was not cleaned");
+    assert.equal(native.preflight?.length, 1, "Promise pilot must use one real request-level preflight confirmation");
+    assert.ok(native.preflight[0].message.includes("Estimated time:") || native.preflight[0].message.includes("Estimated encoding and saving time:"),
+      "Preflight must show a measured estimate or explicitly unknown time");
+    assert.ok(native.calibrationRecords > 0, "Validated published exports must populate local measured history");
     assert.ok(Number.isSafeInteger(native.resources?.total_memory_bytes) && native.resources.total_memory_bytes > 0,
       "Native resource snapshot did not measure system memory");
     assert.ok(Number.isSafeInteger(native.resources?.scratch_free_bytes) && native.resources.scratch_free_bytes >= 0,

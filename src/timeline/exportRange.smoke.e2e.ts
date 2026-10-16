@@ -30,6 +30,7 @@ import { brandRatio, watermarkFile } from "./branding";
 import type { ExportOptions } from "./exportOptions";
 import { emptyTimeline, type Timeline } from "./model";
 import { buildAudioRenderCommand, buildRenderCommand, resolveClipSources, runRenderPlan } from "./render";
+import { __setExportConfirmationForTests } from "../lib/confirm";
 
 // Captions only prove anything if libass has the bundled fonts to draw with.
 vi.mock("@tauri-apps/api/path", async () => {
@@ -240,6 +241,7 @@ async function expectSpanOfWhole(
 }
 
 beforeAll(async () => {
+  __setExportConfirmationForTests(async () => "continue");
   await fsp.mkdir(dir, { recursive: true });
   ctx = mkCtx(dir);
   const enc = ["-c:v", "libx264", "-g", "120", "-pix_fmt", "yuv420p"];
@@ -293,6 +295,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  __setExportConfirmationForTests(null);
   if (retainArtifacts) { console.log(`Retained exporter conformance artifacts: ${dir}`); return; }
   await fsp.rm(dir, { recursive: true, force: true }).catch(() => undefined);
 });
