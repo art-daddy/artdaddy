@@ -244,6 +244,9 @@ async function exercise(): Promise<void> {
       stagingCleaned: !(await exists(stage)), scratchCleaned: !!scratchPath && !(await exists(scratchPath)),
       scratchEvidenceError: scratchError ? String(scratchError) : null,
       preflight: preflightRequests.slice(confirmationOffset),
+      localCalibration: useExportJob.getState().calibrations.filter((sample) => sample.workload.width === definition.width &&
+        sample.workload.height === definition.height && sample.workload.durationSeconds === definition.durationSeconds &&
+        sample.workload.peakMediaLayers === definition.videoLayers && sample.encoder === (fastEncoderProbe ? "amf-cqp18" : "x264-crf")).at(-1) ?? null,
       calibrationRecords: useExportJob.getState().calibrations.filter((sample) => sample.workload.width === definition.width &&
         sample.workload.height === definition.height && sample.workload.durationSeconds === definition.durationSeconds &&
         sample.workload.peakMediaLayers === definition.videoLayers && sample.encoder === (fastEncoderProbe ? "amf-cqp18" : "x264-crf")).length,

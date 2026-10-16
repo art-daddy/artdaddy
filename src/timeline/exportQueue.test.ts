@@ -185,6 +185,30 @@ describe("required export preflight", () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it.each([0, 4096, null, -1, "4096"])("keeps only valid native temporary-payload observations: %s", async (peak) => {
+    const { fs, store } = make();
+    const jobs = new FakeJobs();
+    vi.useFakeTimers({ now: 5000 });
+    try {
+      const submitted = await submitExport({ store, supervisor: jobs, destPath: DEST, stagePath: STAGE, filename: "final.mp4",
+        workload: calibration.workload,
+        meta: { duration_s: 10, width: 1920, height: 1080, fps: 30, quality: "medium", project_id: "", calibration },
+        run: async (_, id) => {
+          await jobs.submit({ id, lane: "measurement", program: "ffmpeg", args: [], meta: {} });
+          vi.setSystemTime(21000);
+          jobs.exit(id, 0, `native render resident: {"sampled_peak":1024}\nnative render temporary: ${JSON.stringify({ accounted_peak_payload_bytes: peak })}\n`);
+          await fs.writeBytes(STAGE, new Uint8Array([1, 2, 3]));
+          return {};
+        } });
+      await whenExportsSettle();
+      await whenExportTelemetrySettles();
+      expect((await whenExportEnds(submitted.job_id))?.state).toBe("done");
+      expect(await fs.readBytes(DEST)).toEqual(new Uint8Array([1, 2, 3]));
+      expect(useExportJob.getState().calibrations[0]).toMatchObject({ elapsedSeconds: 16, memoryBytes: 1024,
+        temporaryBytes: typeof peak === "number" && peak >= 0 ? peak : null });
+    } finally { vi.useRealTimers(); }
+  });
+
   it("waits for one batch decision before reserving or writing anything", async () => {
     const { fs, store } = make();
     let decide!: (choice: ExportConfirmation) => void;

@@ -393,6 +393,24 @@ by the corresponding open items below and cannot be omitted from phase completio
   select overflow; both mode layouts then fit. The warning-state browser check
   was layout-only: browser/device Fast eligibility remained unavailable. No
   other user tabs, customer projects, provider calls or release state were used.
+- V2-D035: the existing workspace owner now retains per-root high-water
+  accounted payload alongside its live byte/entry charges. Both native FFmpeg
+  execution paths emit that local numeric observation through the existing
+  bounded diagnostic stream; no scanner, resource authority or new limit is
+  introduced. Only roots observed from creation expose a complete value;
+  recovered/unknown roots remain null. Removed temporary files release capacity
+  without erasing the retained root's high-water value, and final root cleanup
+  removes the observation. Successful verified publication may retain it in
+  encoder-specific local calibration; no resource figures enter anonymous reports.
+  A test exposed that short native logs can live entirely in the stderr head;
+  calibration now uses the existing combined bounded-log reader rather than
+  silently dropping head-only memory and scratch summaries. Seventy-four scoped
+  TypeScript checks and 123 native job/resource checks passed, including real
+  files, frames/stereo, allocation refusal, cancellation, recovery and cleanup.
+  This is a conservative logical-payload observation, not final-file allocation
+  or exact filesystem peak. Metadata/allocation overhead remains extra within
+  the existing headroom. The library's full 20 GB temporary-space qualification
+  stays open until artifact-level/full-case measurement; no promise counter moves.
 
 ## Historical V1 Design And Evidence
 

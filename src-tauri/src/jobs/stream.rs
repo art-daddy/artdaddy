@@ -168,6 +168,10 @@ fn execution_deadline(spec: &JobSpec) -> Result<u64, String> {
     .ok_or_else(|| "native render has no admitted execution deadline".into())
 }
 
+fn temporary_diagnostics(workspace: &super::Workspace, key: &str) -> String {
+  format!("native render temporary: {}\n", serde_json::json!({ "accounted_peak_payload_bytes": workspace.peak_bytes(key) }))
+}
+
 #[derive(Clone, serde::Deserialize)]
 pub(super) struct AudioProducer {
   pub args: Vec<String>,
@@ -290,6 +294,7 @@ pub(super) fn cancel(registry: &Registry, id: &str, pid: u32) -> bool {
 
 pub(super) fn spawn_single(executable: &Path, spec: &JobSpec, observer: Observer, registry: Registry, workspace: Arc<super::Workspace>) -> Result<u32, String> {
   let mut args = spec.args.clone();
+  let workspace_key = spec.cwd.as_deref().map(|cwd| super::Supervisor::workspace_key(Path::new(cwd)));
   let mut capture = if let Some(contract) = spec.meta.get("_native_scratch_capture") {
     let path = contract.get("path").and_then(|value| value.as_str()).ok_or("native scratch capture path missing")?;
     let used = contract.get("used").and_then(|value| value.as_u64()).ok_or("native scratch capture byte count missing")?;
@@ -339,6 +344,7 @@ pub(super) fn spawn_single(executable: &Path, spec: &JobSpec, observer: Observer
       result = result.and(capture.finish(Some(code)));
     }
     observer(ProcEvent::Stderr(control.memory_diagnostics()));
+    if let Some(key) = workspace_key { observer(ProcEvent::Stderr(temporary_diagnostics(&workspace, &key))); }
     if let Ok((limit, peak)) = control.budget.commit_accounting() {
       observer(ProcEvent::Stderr(format!("native render budget: configured_commit={limit}, reported_peak={peak}; peak is accounting, not an exact physical ceiling\n")));
     }
@@ -454,6 +460,7 @@ pub(super) fn spawn(executable: &Path, spec: &JobSpec, observer: Observer,
     let errors_read = join(final_errors);
     let result = control.settle().and(audio_result).and(produced).and(consumed).and(output_read).and(errors_read);
     observer(ProcEvent::Stderr(control.memory_diagnostics()));
+    observer(ProcEvent::Stderr(temporary_diagnostics(&workspace, &key)));
     if let Ok((limit, peak)) = control.budget.commit_accounting() {
       observer(ProcEvent::Stderr(format!("native render budget: configured_commit={limit}, reported_peak={peak}; peak is accounting, not an exact physical ceiling\n")));
     }

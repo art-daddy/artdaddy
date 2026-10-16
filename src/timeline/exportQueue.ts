@@ -23,6 +23,7 @@ import {
   EXPORT_PROTOCOL_VERSION,
   jobResult,
   jobSupervisor,
+  jobStderr,
   whenJobEnds,
   type JobSupervisor,
   type JobView,
@@ -532,7 +533,9 @@ async function reportSettledExport(
     const size = outcome.status === "done" ? (outcome.finalSizeBytes ?? (await spec.store.byteSize(spec.destPath)) ?? 0) : 0;
     if (outcome.status === "done" && spec.meta?.calibration && size > 0) {
       let memoryBytes: number | null = null;
-      const summary = native?.stderr_tail.split(/\r?\n/).reverse().find((line) => line.startsWith("native render resident: "));
+      let temporaryBytes: number | null = null;
+      const diagnostics = native ? jobStderr(native).split(/\r?\n/).reverse() : [];
+      const summary = diagnostics.find((line) => line.startsWith("native render resident: "));
       if (summary) {
         try {
           const parsed: unknown = JSON.parse(summary.slice("native render resident: ".length));
@@ -540,10 +543,18 @@ async function reportSettledExport(
           if (typeof peak === "number" && Number.isSafeInteger(peak) && peak > 0) memoryBytes = peak;
         } catch {}
       }
+      const temporary = diagnostics.find((line) => line.startsWith("native render temporary: "));
+      if (temporary) {
+        try {
+          const parsed: unknown = JSON.parse(temporary.slice("native render temporary: ".length));
+          const peak = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>).accounted_peak_payload_bytes : null;
+          if (typeof peak === "number" && Number.isSafeInteger(peak) && peak >= 0) temporaryBytes = peak;
+        } catch {}
+      }
       const queuedMs = native?.started_at ? Math.max(0, native.started_at - native.queued_at) : 0;
       useExportJob.getState().rememberCalibration({ ...spec.meta.calibration,
         elapsedSeconds: Math.max(0, outcome.elapsedMs - queuedMs) / 1000, finalBytes: size,
-        memoryBytes, temporaryBytes: null });
+        memoryBytes, temporaryBytes });
     }
     const { reportExport } = await import("../api/exportEvents");
     await reportExport({
@@ -655,7 +666,7 @@ async function confirmExportRequest(specs: readonly ExportSpec[]): Promise<void>
       ? `Estimated worker memory: about ${(Math.max(...checks.map((check) => check.estimates.memoryBytes!)) / 1024 ** 3).toFixed(1)} GiB, from observed worker samples; this is not a guaranteed peak.`
       : "Estimated memory: unknown. Native resource limits still apply.",
     checks.every((check) => check.estimates.temporaryBytes !== null)
-      ? `Estimated temporary disk: about ${(checks.reduce((total, check) => total + check.estimates.temporaryBytes!, 0) / 1e9).toFixed(1)} GB.`
+      ? `Estimated temporary payload: about ${(checks.reduce((total, check) => total + check.estimates.temporaryBytes!, 0) / 1e9).toFixed(1)} GB, from conservative accounted scratch observations. Filesystem metadata and allocation overhead are extra within the existing headroom; this is not an exact disk peak.`
       : "Estimated temporary disk: unknown. Safe-file and temporary-space limits still apply.",
     "You can lower the export resolution or export a smaller section. Cancel to change settings.",
     warning ? "Continue anyway?" : "Continue?",

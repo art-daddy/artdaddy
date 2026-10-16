@@ -1,11 +1,19 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+#[derive(Clone, Copy, Default)]
+struct RootUsage {
+  bytes: u64,
+  entries: u64,
+  peak_bytes: u64,
+  observed_from_creation: bool,
+}
+
 #[derive(Default)]
 struct State {
   used: u64,
   entries: u64,
-  roots: HashMap<String, (u64, u64)>,
+  roots: HashMap<String, RootUsage>,
 }
 
 pub struct Workspace {
@@ -21,16 +29,22 @@ impl Workspace {
     self.limit.saturating_sub(self.state.lock().unwrap_or_else(|error| error.into_inner()).used)
   }
 
+  pub(super) fn peak_bytes(&self, root: &str) -> Option<u64> {
+    self.state.lock().unwrap_or_else(|error| error.into_inner()).roots.get(root)
+      .filter(|usage| usage.observed_from_creation).map(|usage| usage.peak_bytes)
+  }
+
   pub fn account_existing(&self, root: &str, bytes: u64, entries: u64) -> Result<(), String> {
     let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-    let previous = state.roots.get(root).copied().unwrap_or((0, 0));
-    let bytes = bytes.max(previous.0);
-    let entries = entries.max(previous.1);
-    let used = state.used.checked_add(bytes - previous.0).ok_or("export workspace size overflow")?;
-    let count = state.entries.checked_add(entries - previous.1).ok_or("export workspace entry overflow")?;
+    let previous = state.roots.get(root).copied().unwrap_or_default();
+    let bytes = bytes.max(previous.bytes);
+    let entries = entries.max(previous.entries);
+    let used = state.used.checked_add(bytes - previous.bytes).ok_or("export workspace size overflow")?;
+    let count = state.entries.checked_add(entries - previous.entries).ok_or("export workspace entry overflow")?;
     if used > self.limit { return Err("export workspace budget exceeded by retained scratch".into()); }
     if count > self.entry_limit { return Err("export workspace entry budget exceeded by retained scratch".into()); }
-    state.roots.insert(root.to_string(), (bytes, entries));
+    state.roots.insert(root.to_string(), RootUsage { bytes, entries, peak_bytes: previous.peak_bytes.max(bytes),
+      observed_from_creation: previous.observed_from_creation });
     state.used = used;
     state.entries = count;
     Ok(())
@@ -42,9 +56,11 @@ impl Workspace {
     if used > self.limit { return Err("export workspace budget exceeded before write".into()); }
     let count = state.entries.checked_add(entries).ok_or("export workspace entry overflow")?;
     if count > self.entry_limit { return Err("export workspace entry budget exceeded before write".into()); }
-    let previous = state.roots.get(root).copied().unwrap_or((0, 0));
-    let owned = (previous.0.checked_add(bytes).ok_or("owned export workspace size overflow")?,
-      previous.1.checked_add(entries).ok_or("owned export entry size overflow")?);
+    let previous = state.roots.get(root).copied().unwrap_or(RootUsage { observed_from_creation: true, ..RootUsage::default() });
+    let owned_bytes = previous.bytes.checked_add(bytes).ok_or("owned export workspace size overflow")?;
+    let owned = RootUsage { bytes: owned_bytes,
+      entries: previous.entries.checked_add(entries).ok_or("owned export entry size overflow")?, peak_bytes: previous.peak_bytes.max(owned_bytes),
+      observed_from_creation: previous.observed_from_creation };
     state.roots.insert(root.to_string(), owned);
     state.used = used;
     state.entries = count;
@@ -53,20 +69,21 @@ impl Workspace {
 
   pub fn release(&self, root: &str, bytes: u64, entries: u64) {
     let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-    let owned = state.roots.get(root).copied().unwrap_or((0, 0));
-    let released = bytes.min(owned.0);
-    let released_entries = entries.min(owned.1);
+    let owned = state.roots.get(root).copied().unwrap_or_default();
+    let released = bytes.min(owned.bytes);
+    let released_entries = entries.min(owned.entries);
     state.used = state.used.saturating_sub(released);
     state.entries = state.entries.saturating_sub(released_entries);
-    if released == owned.0 && released_entries == owned.1 { state.roots.remove(root); }
-    else { state.roots.insert(root.to_string(), (owned.0 - released, owned.1 - released_entries)); }
+    if released == owned.bytes && released_entries == owned.entries { state.roots.remove(root); }
+    else { state.roots.insert(root.to_string(), RootUsage { bytes: owned.bytes - released,
+      entries: owned.entries - released_entries, peak_bytes: owned.peak_bytes, observed_from_creation: owned.observed_from_creation }); }
   }
 
   pub fn release_root(&self, root: &str) {
     let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-    if let Some((bytes, entries)) = state.roots.remove(root) {
-      state.used = state.used.saturating_sub(bytes);
-      state.entries = state.entries.saturating_sub(entries);
+    if let Some(usage) = state.roots.remove(root) {
+      state.used = state.used.saturating_sub(usage.bytes);
+      state.entries = state.entries.saturating_sub(usage.entries);
     }
   }
 
@@ -100,6 +117,56 @@ impl Drop for Charge {
 mod tests {
   use super::*;
   use std::sync::Barrier;
+
+  #[test]
+  fn peak_payload_survives_temporary_file_cleanup_without_holding_released_capacity() {
+    let directory = tempfile::tempdir().unwrap();
+    let owner = Workspace::new(64);
+    let root = directory.path().to_string_lossy().into_owned();
+    let first = directory.path().join("retained");
+    let second = directory.path().join("temporary");
+    owner.reserve(&root, 32, 1).unwrap().retain();
+    std::fs::write(&first, [37u8; 32]).unwrap();
+    let temporary = owner.reserve(&root, 16, 1).unwrap();
+    std::fs::write(&second, [41u8; 16]).unwrap();
+    let observed = std::fs::metadata(&first).unwrap().len() + std::fs::metadata(&second).unwrap().len();
+    assert_eq!(owner.peak_bytes(&root), Some(observed));
+    std::fs::remove_file(&second).unwrap();
+    drop(temporary);
+    assert_eq!(owner.peak_bytes(&root), Some(observed));
+    let peer = owner.reserve("peer", 32, 1).unwrap();
+    let peer_path = directory.path().join("peer");
+    std::fs::write(&peer_path, [43u8; 32]).unwrap();
+    assert_eq!(std::fs::read(&peer_path).unwrap(), vec![43u8; 32]);
+    assert!(owner.reserve("blocked", 1, 1).is_err());
+    assert_eq!(owner.peak_bytes(&root), Some(observed));
+    std::fs::remove_file(&peer_path).unwrap();
+    drop(peer);
+    std::fs::remove_file(&first).unwrap();
+    owner.release_root(&root);
+    assert_eq!(owner.peak_bytes(&root), None);
+  }
+
+  #[test]
+  fn recovered_files_enforce_capacity_without_inventing_an_unobserved_peak() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().to_string_lossy().into_owned();
+    let retained = directory.path().join("retained");
+    std::fs::write(&retained, [37u8; 32]).unwrap();
+    let owner = Workspace::new(64);
+    owner.account_existing(&root, std::fs::metadata(&retained).unwrap().len(), 1).unwrap();
+    assert_eq!(owner.peak_bytes(&root), None);
+    let temporary = owner.reserve(&root, 32, 1).unwrap();
+    assert!(owner.reserve("blocked", 1, 1).is_err());
+    assert_eq!(owner.peak_bytes(&root), None);
+    drop(temporary);
+    assert_eq!(std::fs::read(&retained).unwrap(), vec![37u8; 32]);
+    owner.release_root(&root);
+    let fresh = owner.reserve(&root, 16, 1).unwrap();
+    assert_eq!(owner.peak_bytes(&root), Some(16));
+    drop(fresh);
+    assert_eq!(owner.peak_bytes(&root), None);
+  }
 
   #[test]
   fn concurrent_owned_writers_cannot_each_spend_the_same_remaining_bytes() {
