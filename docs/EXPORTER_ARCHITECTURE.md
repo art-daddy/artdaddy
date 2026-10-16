@@ -1,5 +1,173 @@
 # Exporter Architecture and Reliability
 
+## V2 Promise - Active Scope
+
+Owner re-scope,2026-10-16. This section supersedes every conflicting requirement
+in the historical V1 material below. Build a simple background exporter with the
+existing FFmpeg renderer: do not expose a bad or partial final file, preserve the
+previous destination on failure, recover accepted work after an app crash, and
+handle the promised project sizes. No new rendering engine or output format.
+
+**99% means the promise-library pass rate when source files and storage are ready.**
+Also report the all-request overall rate and explicit failure/cancellation reasons.
+A pass requires a complete, correct MP4 with correct picture, sound and captions,
+the applicable speed target, bounded temporary space and cleanup. A completed but
+too-slow16GBexport is an artifact success, not a speed-qualified library pass.
+Eight-GBcases have no speed pass/fail target, but require an honest time estimate.
+Do not turn a small library pass rate into a measured population reliability claim.
+
+| Independent Promise Line | Standard16GB Profile | Minimum8GB Profile |
+| --- | --- | --- |
+| Short social, ordinary HD and YouTube-style projects | Complete/correct output; normal HD speed up to2xvideo length | Same correctness/success promise; slower is allowed; publish the estimate |
+|1080p long edit | Up to2hours, around1000clips; up to2xvideo length | Same largest-project correctness promise; no speed promise |
+|4K edit | Up to30minutes and4simultaneous things; up to4xvideo length | Same correctness promise; no speed promise |
+| Heavy1080p edit | Up to8simultaneous things; up to4xvideo length | Same correctness promise; no speed promise |
+| Frame rate | Assume30fps;60fpsHDshould work; measure4K60and publish its limit | Same declared correctness coverage; no guessed4K60limit |
+| Extra temporary disk | At most20GBduring export, cleaned after settlement | Same20GBrule |
+| Platforms | Windows, macOS and Linux, independently tested | Physical minimum-machine testing remains required |
+
+Each limit stands alone. Do not silently promise combinations beyond the listed
+bounds. Out-of-promise combinations receive a full warning and an honest estimate,
+not a success/speed guarantee. Original sources are never temporary space to delete;
+the retained final deliverable is not cleanup material. Temporary staging, recovery,
+normalization and verification space must be accounted for explicitly.
+
+### Before Every Export
+
+- Estimate memory, disk and time through the existing shared export boundary.
+- Beyond the promise, or estimated not to fit memory/disk: full plain-language
+  warning explaining why, quick fixes such as lower resolution or split parts,
+  an honest time estimate, and an explicit choice to continue anyway.
+- Inside the promise but estimated over2xvideo length: light estimate notice,
+  quick fixes and one-click continuation. The4xpromise still applies to4K/heavy.
+- Optional Fast mode uses the graphics chip only after measured quality comparison.
+  Default remains full quality. Do not reuse or integrate the parked native engine.
+- Existing4GiBcommit, sampled3.5GiBRSS,18GBscratch payload plus metadata headroom,
+  and8houractive execution limits are not raised by this re-scope. If an actual
+  promised case needs a raised limit, obtain owner approval first and record the gap.
+- An unavailable or uncalibrated estimate must say unknown rather than invent zero
+  resource use or a confident duration. Queue wait is reported separately.
+
+### Evidence And Completion
+
+Build a versioned project library covering every promise line on8GBand16GBsoftware
+profiles, including actual phone VFR/rotation clips, screen recordings and web
+downloads. Judge the delivered files, never command text. Preserve preview/export
+parity tests: exported output is authoritative; repair a proven mismatch in preview
+and retain the regression. Profile simulations are not physical-device evidence.
+
+For each promise line, report library cases passed/attempted and ready-success and
+overall denominators explicitly. Runtime failures, slow16GBresults, resource
+failures and post-render validation failures cannot disappear from the record.
+Report missing-source/storage blocks, user cancellation and declined warnings
+separately as well as their effect on the all-request rate. Physical8GBWindows,
+16GBandMac/Linuxdevices come last and will be supplied by the owner. The later
+real-user pilot is owner-run, not work to invent in this phase.
+
+This phase is done only when every promised line reaches99%on the library, warnings
+and anonymous reporting work, the original large-timeline fix still holds, and safe
+publication/recovery remains correct. If a measured promise requires a large or
+complicated change, stop with the measured gap and the simplest proposed fix.
+
+### Implementation Choice And Boundaries
+
+Retain the current FFmpeg path: small lossless video pieces streamed into one final
+MP4 encode, with one continuous audio mix. This avoids keeping a full lossless movie
+on disk. Existing file-piece support remains available where needed. This is the
+existing exporter, not a persistent-decoder/native-compositor replacement. Routing
+defaults and every user-visible warning/control require owner approval before edits.
+
+Preview and export remain separate painters. Park native GPU worker, MLT and GPU
+probe code; keep chunking, verified saving, crash recovery and memory/disk guards.
+The former2hour4K/5000clip/16layer/8GB/8hourcase is stretch only: run it once with
+the current approach, retain the actual result and publish the measured limit. A
+six-second sample of that shape is not the full stretch run.
+
+Record anonymous results for all users: outcome/reason, size band and elapsed time.
+Never send names, content, source/destination paths, project IDs or raw error text.
+Scrub paths at the collection boundary. Update both src-tauri/PRIVACY.txt and the
+landing privacy.html before any enabled reporting change. Local work only; deployment
+and releases remain last. No new formats, Premiere/DaVinci hand-off or engine work.
+
+### Approval And Work Rules
+
+Ask before anything users see changes, golden/reference output changes, pushes or
+releases, paid AI calls, raised memory/disk/time limits, or new engine work. Other
+ordinary in-scope decisions are delegated and recorded here. Commit each finished
+piece locally; no pushes. Different test/fixture repair approaches may continue
+without weakening checks, subject to the coding environment's higher-priority retry
+rules. Do not wait for another continue unless an actual approval boundary is reached.
+
+## V2 Tracker
+
+**In-scope baseline:11/24accepted checks (46%). Original tracker:13/30(43%).**
+These are acceptance checks, not coding hours or a measured99%rate. The denominator
+changes because two items are stretch and four are parked; it is not new feature
+credit. New V2 library, estimation, warnings and reporting obligations are covered
+by the corresponding open items below and cannot be omitted from phase completion.
+
+### In Scope - 24
+
+- [x] E0.1 Preserve real source/output baselines and independent artifact checks.
+- [ ] E0.5 Record the simplest FFmpeg choice and measured promise/profile limits.
+- [x] E1.1 Capture the admitted immutable edit and destination before queue awaits.
+- [x] E1.2 Declare dependencies and protect queued/active source files.
+- [x] E1.3 Bind snapshots, requests, workers and rendered-artifact compatibility.
+- [x] E1.4 Keep UI, agent and MCP exports on the existing shared owners.
+- [ ] E1.5 Close mandatory preflight, eligibility and lifecycle coverage for every export.
+- [x] E2.1 Preserve the original long-command/349-input failure fix.
+- [x] E2.2 Preserve real mono/stereo and audio-policy conformance.
+- [x] E2.3 Preserve core MP4/range/branding/ownership artifact regressions.
+- [ ] E2.4 Estimate/enforce the V2 memory, disk and time envelope without raised limits.
+- [ ] E2.5 Complete supported visual, caption, quality and output conformance.
+- [x] E3.1 Preserve durable native intents, bounded receipts and execution identity.
+- [x] E3.2 Preserve staged verified publication and checked restart reconciliation.
+- [x] E3.3 Preserve bounded render/copy recovery, sticky cancellation and cleanup.
+- [ ] E3.4 Close filesystem identity, volume and concurrent side-effect failure orderings.
+- [ ] E3.5 Qualify real-app restart and registered output under the V2 library.
+- [ ] E4.2 Keep exported visuals/timing correct and preview/export parity regressions.
+- [ ] E4.3 Preserve continuous FFmpeg mixing, fades, ducking and actual audio outcomes.
+- [ ] E4.4 Shared memory/disk/time estimates, approved warnings and measured Fast mode.
+- [ ] E5.1 Qualify current Windows/macOS/Linux FFmpeg/sidecar/protocol paths.
+- [ ] E5.2 Run every promise line on8GB/16GBprofiles; owner-provided devices last.
+- [ ] E5.3 Qualify UI/MCP workflows, warnings and the lifecycle failure matrix.
+- [ ] E5.5 Publish per-line library pass rates and anonymous ready/overall results.
+
+### Stretch - 2
+
+- [ ] E0.4 Run the old combined stress case once and record the actual limit.
+- [ ] E4.5 Qualify any beyond-promise combination only from measured evidence.
+
+### Parked - 4
+
+- [x] E0.2 Historical alternative-engine research; preserved, not active phase credit.
+- [x] E0.3 Historical new-engine feature/licensing/build plan; do not implement it.
+- [ ] E4.1 New native/MLT/persistent-decoder rendering-engine integration.
+- [ ] E5.4 Real-user rollout/cohort confirmation; owner-run later, not this phase.
+
+## V2 Recovery And Decisions
+
+- V2-D001: verified live backups precede the five-file recovery. Recovery commit
+  0bba45f restores the authorized snapshots; seven relevant source digests match
+  dense report1792153141603. The newer smoke snapshot is not falsely described
+  as byte-identical to the older dense run. Focused recovery checks pass220cases.
+- V2-D002: preserve prototype originals and full mixed files in verified external
+  backups and archive/exporter-prototypes-v2-2026-10-16T15-55-26-193Z at69bc93f.
+  Main-line separation commit1ae8fe1 retains FFmpeg baseline, five real artifact/
+  stereo checks and the app memory harness. Its real allocation/refusal self-test
+  passes. Do not remove production chunking, Supervisor, workspace or delivery code.
+- V2-D003: use existing FFmpeg pieces plus continuous audio, never the parked engine.
+  Full-quality defaults and resource limits remain unchanged pending approvals.
+- V2-D004: no prior report certifies the V2 promise. The verified dense sample is
+  correct but slow; thirteen caption and eleven delivery cases prove those classes,
+  not a representative pass rate on the new project library or physical machines.
+
+## Historical V1 Design And Evidence
+
+Everything below is retained history, not authority for conflicting V2 requirements.
+In particular, the old engine-replacement target and giant stress gate are not active
+work. The original30boxes have been moved above, not duplicated or discarded.
+
 Status: owner authorized uninterrupted implementation across phases on 2026-10-14.
 Owner delegated remaining exporter product/design/architecture decisions on
 2026-10-16; record decisions for final review and continue implementation.
@@ -301,53 +469,11 @@ budgets, or claiming unmeasured reliability/hardware qualification.
 | EX-D045 | Test delivery settings through normal encoded MP4 output, not a lossless helper that erases their effect. | An explicit test-helper mode retains normal quality settings and matches final encoder threads only for QA. Walk all six resolution and three quality entries from the authored schema plus24/60fps overrides; inspect encoded shape, codec, pixel format, container and frame count. Measure quality ordering against decoded lossless pixels rather than CRF strings or file size alone. Existing callers retain their lossless default. |
 | EX-D046 | REJECTED: source-clock-restoring range seek without a proven equivalent source-sampling model. | Retaining pre-seek keyframes and restoring source-relative PTS still changes transition, sparse wake-up and native-seam pixels in four of five cases. Remove the candidate entirely; the restored path passes all seven exact range/seam/frozen-audio regressions. No faster but pixel-different branch is enabled. |
 
-### E0: Feasibility
+### Original V1 Checklist
 
-- [x] E0.1 Freeze real output/source baselines and independent artifact checks.
-- [x] E0.2 Measure alternative engines and the private streaming prototype.
-- [x] E0.3 Finish the candidate's complete feature, licensing and build plan.
-- [ ] E0.4 Demonstrate the combined workload within the agreed resource envelope.
-- [ ] E0.5 Record the accepted engine decision and measured minimum specification.
-
-### E1: Shared Boundary
-
-- [x] E1.1 Capture the admitted immutable edit and destination before queue awaits.
-- [x] E1.2 Declare dependencies and protect them through queued and active work.
-- [x] E1.3 Bind versioned snapshots, requests, executable bytes and output contracts.
-- [x] E1.4 Route existing UI/agent/MCP/render/copy doors through shared owners.
-- [ ] E1.5 Close the complete mandatory-contract/capability/lifecycle audit.
-
-### E2: Reliable Renderer
-
-- [x] E2.1 Repair and artifact-test the original long-command/349-input failure.
-- [x] E2.2 Prove ordinary mono/stereo layout and existing audio-policy conformance.
-- [x] E2.3 Pass core format/range/branding/ownership real-artifact regression lanes.
-- [ ] E2.4 Enforce and verify the complete RAM/VRAM/time/scratch resource envelope.
-- [ ] E2.5 Close complete supported-feature, colour and quality conformance.
-
-### E3: Durable Delivery
-
-- [x] E3.1 Persist native intent ownership and versioned execution/recovery data.
-- [x] E3.2 Publish staged verified bytes and reconcile checked restart orderings.
-- [x] E3.3 Prove bounded render/copy restart, cancellation and retained cleanup.
-- [ ] E3.4 Close filesystem identity, volume rules and concurrent side-effect orderings.
-- [ ] E3.5 Qualify complete restart/registration behavior through the real application.
-
-### E4: Streaming Replacement
-
-- [ ] E4.1 Integrate the selected, versioned and distributable streaming backend.
-- [ ] E4.2 Preserve all admitted visuals, text, effects, transitions and timing.
-- [ ] E4.3 Preserve real sample-accurate audio mixing, fades and ducking.
-- [ ] E4.4 Select backends through mandatory shared planning and eligibility rules.
-- [ ] E4.5 Qualify the integrated combined workload without quality/budget concessions.
-
-### E5: Qualification And Rollout
-
-- [ ] E5.1 Qualify Windows/macOS/Linux bundles, sidecars and protocol compatibility.
-- [ ] E5.2 Pass the actual minimum-machine two-hour/8-hour/20-GB combined case.
-- [ ] E5.3 Pass real UI/MCP workflows and the complete lifecycle fault matrix.
-- [ ] E5.4 Complete an opt-in rollout with tested recovery and safe switch-back.
-- [ ] E5.5 Establish representative ready/overall outcome and reliability evidence.
+The original30IDs and their13historical completed states are preserved in the
+V2In Scope / Stretch / Parked groups at the top. Historical engine qualification
+below must not be used to reintroduce parked scope or change V2acceptance criteria.
 
 **Next:** follow Reconciled Next Work above: close the pending workspace change,
 resolve integrated execution/planner gaps and prove the real combined workload.
