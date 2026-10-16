@@ -347,6 +347,52 @@ by the corresponding open items below and cannot be omitted from phase completio
   Keep Fast-only observations out of software calibration. Production Fast stays
   disabled pending owner review of the measured visible quality/file-size tradeoff;
   other encoders, devices, real-world inputs and full-size cases remain unqualified.
+- V2-D031: after reviewing the measured speed, direct picture difference and
+  roughly 4.2x larger integrated file, the owner approved enabling an optional
+  local-only Windows AMD Fast choice. Full quality remains default and the UI
+  must warn about larger files. Unsupported or unqualified devices remain
+  unavailable; no release, other-device qualification, reference-output change
+  or raised limit is approved. Eligibility must be checked through the existing
+  native/sidecar boundary, not inferred from a saved mode preference alone.
+- V2-D032: the optional Fast implementation uses the existing final FFmpeg
+  `h264_amf` encoder with the measured quality/CQP18 profile, not hardware
+  decoding or another rendering engine. Native eligibility is limited to debug
+  Windows builds with an attached AMD 780M adapter; release builds and all other
+  adapters remain unavailable. A successful supervised one-frame 1080p encode
+  is also required. The first 64x64 probe was rejected by AMF initialization
+  (error 5), confirmed by the exact capped command; using the measured 1080p
+  geometry succeeded. Unknown capability, failed queries, timeout or cancellation
+  leave Fast unavailable. There is no silent software fallback. Full quality
+  remains the nonpersisted default, and the dialog warns about larger files and
+  picture differences. The mode is captured before host/save-dialog awaits and
+  retained in the request; working renders, lossless parts and audio are unchanged.
+  Encoder-specific build-scoped calibration prevents either mode from borrowing
+  the other mode's time or file-size observations.
+- V2-D033: actual local Fast pilot 1792183383858 used the selected-mode builder
+  and mandatory supervised capability check, rather than private argument
+  substitution. Its generated 10-second HD heavy project delivered all 300 frames,
+  distinct moving tiles, animated captions and 480000 complete stereo sample
+  frames with the expected channel tones. Publication identity, catalog/ledger
+  acknowledgement and stage/scratch cleanup passed. It took 13.45 seconds including
+  the capability probe and produced 10341706 bytes with SHA256
+  `87355fe20339152564ae663a7463452c6d771d6ca5e6122e801ff897a08d085c`,
+  identical to the earlier private AMF artifact. One encoder-specific calibration
+  was recorded. The unchanged 6 GiB whole-tree cap reported peak commit 2519470080
+  bytes; this is neither a physical 8 GB result nor an exact physical peak bound.
+  First-run time and temporary-space estimates remained explicitly unknown.
+  The result is pilot-only, not full-size, cross-device, temporary-space or 99%
+  promise qualification. The in-scope 11/24 and historical 13/30 stay unchanged.
+- V2-D034: local Fast closure checks passed 385 scoped tests with the unchanged
+  frozen Full-quality corpus and no snapshot updates. The shared-boundary tests
+  cover refused capability, whole/clip mode capture, encoder failure preserving
+  the previous complete destination, ignored cancellation, and no failed-run
+  calibration. A reproduced accepted-probe/failed-IPC-reply cleanup gap was repaired
+  at the helper's single finally boundary; success, cancellation, timeout and reply
+  failure use that same bounded retirement path. Actual browser screenshots and
+  child-control bounds at 320, 390 and 1440 pixels found and repaired a narrow
+  select overflow; both mode layouts then fit. The warning-state browser check
+  was layout-only: browser/device Fast eligibility remained unavailable. No
+  other user tabs, customer projects, provider calls or release state were used.
 
 ## Historical V1 Design And Evidence
 

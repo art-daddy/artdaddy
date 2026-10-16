@@ -5,10 +5,10 @@
 // callback down through the tool context, a render announces itself here and the UI subscribes.
 // One job at a time, matching the one ffmpeg process.
 import { create } from "zustand";
-import type { ExportCalibration, ExportEngine } from "../timeline/exportOptions";
+import type { ExportCalibration, ExportEngine, ExportMode } from "../timeline/exportOptions";
 
 const ENGINE_KEY = "artdaddy-export-routing-v2";
-const CALIBRATION_KEY = `artdaddy-export-calibration-v2:${__ARTDADDY_RELEASE__}`;
+const CALIBRATION_KEY = `artdaddy-export-calibration-v3:${__ARTDADDY_RELEASE__}`;
 
 function calibration(value: unknown): ExportCalibration | null {
   if (!value || typeof value !== "object") return null;
@@ -21,10 +21,12 @@ function calibration(value: unknown): ExportCalibration | null {
   if (keys.some((key) => number(workload[key]) === null) || ["width", "height", "fps"].some((key) => !number(output[key]))) return null;
   if (!number(workload.width) || !number(workload.height) || !number(workload.fps) || !number(workload.durationSeconds) ||
     !number(raw.elapsedSeconds) || !number(raw.finalBytes) || !["high", "medium", "low"].includes(String(raw.quality)) ||
-    !["file-sequence-v1", "partition-pipes-v1"].includes(String(raw.engine))) return null;
+    !["file-sequence-v1", "partition-pipes-v1"].includes(String(raw.engine)) ||
+    raw.encoder !== undefined && !["x264-crf", "amf-cqp18"].includes(String(raw.encoder))) return null;
   return { workload: Object.fromEntries(keys.map((key) => [key, workload[key]])) as unknown as ExportCalibration["workload"],
     output: { width: Number(output.width), height: Number(output.height), fps: Number(output.fps) },
-    quality: String(raw.quality), engine: raw.engine as ExportEngine, elapsedSeconds: Number(raw.elapsedSeconds), finalBytes: Number(raw.finalBytes),
+    quality: String(raw.quality), engine: raw.engine as ExportEngine, encoder: raw.encoder === "amf-cqp18" ? "amf-cqp18" : "x264-crf",
+    elapsedSeconds: Number(raw.elapsedSeconds), finalBytes: Number(raw.finalBytes),
     memoryBytes: number(raw.memoryBytes), temporaryBytes: number(raw.temporaryBytes) };
 }
 
@@ -77,6 +79,8 @@ interface ExportState extends ExportJob {
   rememberCalibration: (sample: ExportCalibration) => void;
   engine: ExportEngine;
   setEngine: (engine: ExportEngine) => void;
+  mode: ExportMode;
+  setMode: (mode: ExportMode) => void;
   /** Set while a render is in flight, so the dialog can offer Cancel. */
   abort: (() => void) | null;
   begin: (abort: (() => void) | null) => void;
@@ -96,6 +100,8 @@ export const useExportJob = create<ExportState>((set, get) => ({
     set({ calibrations });
   },
   engine: savedEngine(),
+  mode: "quality",
+  setMode: (mode) => set({ mode: mode === "fast" ? "fast" : "quality" }),
   setEngine: (engine) => {
     const selected = engine === "partition-pipes-v1" || engine === "auto" ? engine : "file-sequence-v1";
     try { localStorage.setItem(ENGINE_KEY, selected); } catch {}

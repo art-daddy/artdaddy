@@ -435,7 +435,7 @@ export interface ExportSpec {
     visual_layers?: number;
     project_width?: number;
     project_height?: number;
-    calibration?: Pick<ExportCalibration, "workload" | "output" | "quality" | "engine">;
+    calibration?: Pick<ExportCalibration, "workload" | "output" | "quality" | "engine" | "encoder">;
   };
   /** The app process's job supervisor, when the encode runs as one of its jobs (3h part 7). It
    *  keeps the order then, so this queue does not hold a job back, and a job's state comes from it. */
@@ -613,7 +613,7 @@ async function confirmExportRequest(specs: readonly ExportSpec[]): Promise<void>
       peakVisualLayers: spec.meta?.visual_layers ?? 0, peakMediaLayers: 0 };
     const descriptor = spec.meta?.calibration;
     const estimates = descriptor ? estimateExportFromHistory(workload, descriptor.output, descriptor.quality, descriptor.engine,
-      useExportJob.getState().calibrations) : { memoryBytes: null, temporaryBytes: null, finalBytes: null, seconds: null };
+      useExportJob.getState().calibrations, descriptor.encoder) : { memoryBytes: null, temporaryBytes: null, finalBytes: null, seconds: null };
     checks.push(assessExport(workload, resources, estimates, resources.budgets));
   }
   if (specs.some((spec) => spec.submissionSignal?.aborted || !spec.store.sessionLive())) return refuse("cancelled");
@@ -648,6 +648,8 @@ async function confirmExportRequest(specs: readonly ExportSpec[]): Promise<void>
       : warning ? "This project is within the declared size limits; resource fit has not yet been established."
       : "This project is within the declared size limits.",
     [...reasons].map((reason) => explanations[reason]).join("\n"),
+    ...(specs.some((spec) => spec.meta?.calibration?.encoder === "amf-cqp18")
+      ? ["Fast uses the locally measured AMD profile. Files can be much larger, and the picture can differ from Full quality."] : []),
     time,
     checks.every((check) => check.estimates.memoryBytes !== null)
       ? `Estimated worker memory: about ${(Math.max(...checks.map((check) => check.estimates.memoryBytes!)) / 1024 ** 3).toFixed(1)} GiB, from observed worker samples; this is not a guaranteed peak.`

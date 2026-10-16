@@ -11,6 +11,7 @@ describe("export preflight assessment", () => {
   const workload: RenderWorkload = { width: 1920, height: 1080, fps: 30, durationSeconds: 60,
     visualClips: 10, captionClips: 1, audioClips: 1, peakVisualLayers: 2, peakMediaLayers: 1 };
   const resources = { total_memory_bytes: 16e9, available_memory_bytes: 8e9, scratch_free_bytes: 100e9, destination_free_bytes: 100e9,
+    local_fast_candidate: false,
     budgets: { memoryBytes: 4e9, temporaryBytes: 18e9, executionSeconds: 28800 } };
   const estimates: ExportEstimates = { memoryBytes: 2e9, temporaryBytes: 1e9, finalBytes: 100e6, seconds: 60 };
   const budgets = { memoryBytes: 4e9, temporaryBytes: 18e9, executionSeconds: 28800 };
@@ -75,6 +76,15 @@ describe("local measured export estimates", () => {
     expect(estimate()).toEqual({ seconds: 16, finalBytes: 2_400_000, memoryBytes: 1_000_000_000, temporaryBytes: null });
     expect(estimate(workload, [{ ...sample, elapsedSeconds: NaN }]).seconds).toBeNull();
     expect(estimate(workload, [sample, { ...sample, elapsedSeconds: 20 }]).seconds).toBe(20);
+  });
+
+  it("never estimates Fast from software history or software from Fast history", () => {
+    const fast = { ...sample, encoder: "amf-cqp18" as const, elapsedSeconds: 9, finalBytes: 10_000_000 };
+    expect(estimateExportFromHistory(workload, output, "medium", "partition-pipes-v1", [sample], "amf-cqp18").seconds).toBeNull();
+    expect(estimate(workload, [fast]).seconds).toBeNull();
+    expect(estimateExportFromHistory(workload, output, "medium", "partition-pipes-v1", [sample, fast], "amf-cqp18"))
+      .toMatchObject({ seconds: 9, finalBytes: 10_000_000 });
+    expect(estimate(workload, [sample, fast])).toMatchObject({ seconds: 16, finalBytes: 2_400_000 });
   });
 
   it("does not shorten an estimate when duration or clip count increases", () => {

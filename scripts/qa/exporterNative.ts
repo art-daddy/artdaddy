@@ -198,18 +198,9 @@ async function exercise(): Promise<void> {
     const destination = joinPath(root, `promise-${definition.id}.mp4`);
     const stage = joinPath(root, `.promise-${definition.id}.partial`);
     const started = performance.now();
-    const plan = buildRenderCommand(timeline, stage, { engine: "auto", quality: "medium" });
     const fastEncoderProbe = params.get("fastEncoderProbe") ?? "";
-    if (fastEncoderProbe) {
-      check(fastEncoderProbe === "amf-cqp18" && definition.kind === "pilot", "Unsupported private Fast measurement");
-      const codec = plan.args.lastIndexOf("-c:v");
-      check(codec >= 0 && plan.args[codec + 1] === "libx264", "Fast measurement requires the known final software encode");
-      plan.args.splice(codec, 2, "-c:v", "h264_amf", "-usage", "transcoding", "-quality", "quality", "-rc", "cqp",
-        "-qp_i", "18", "-qp_p", "18", "-qp_b", "18");
-      for (let index = plan.args.lastIndexOf("-i") + 2; index < plan.args.length - 1; index++) {
-        if (plan.args[index] === "-crf" || plan.args[index] === "-preset") { plan.args.splice(index, 2); index--; }
-      }
-    }
+    if (fastEncoderProbe) check(fastEncoderProbe === "amf-cqp18" && definition.kind === "pilot", "Unsupported local Fast pilot");
+    const plan = buildRenderCommand(timeline, stage, { engine: "auto", quality: "medium", mode: fastEncoderProbe ? "fast" : "quality" });
     const resources = await resolveExportResources(destination);
     const confirmationOffset = preflightRequests.length;
     let promiseId = "";
@@ -223,7 +214,7 @@ async function exercise(): Promise<void> {
         .catch((error: unknown) => { scratchError = error; });
     });
     const queued = await queueRenderJob(context, { plan, admission: captured, destPath: destination, stagePath: stage,
-      filename: `promise-${definition.id}.mp4`, quality: fastEncoderProbe ? "unqualified-amf-cqp18" : "medium" });
+      filename: `promise-${definition.id}.mp4`, quality: "medium" });
     promiseId = queued.job_id;
     const outcome = await whenExportEnds(queued.job_id);
     await whenExportsSettle();
@@ -247,6 +238,7 @@ async function exercise(): Promise<void> {
       projectFrames: frames, partitions: plan.steps?.length ?? 0, columns, rows, imageHeight,
       selection: plan.selection,
       fastEncoderProbe: fastEncoderProbe || null,
+      localFastEnabled: !!fastEncoderProbe,
       resources, workload: plan.workload,
       publicationVerified, finalIdentity: delivery?.identity,
       stagingCleaned: !(await exists(stage)), scratchCleaned: !!scratchPath && !(await exists(scratchPath)),
@@ -254,7 +246,7 @@ async function exercise(): Promise<void> {
       preflight: preflightRequests.slice(confirmationOffset),
       calibrationRecords: useExportJob.getState().calibrations.filter((sample) => sample.workload.width === definition.width &&
         sample.workload.height === definition.height && sample.workload.durationSeconds === definition.durationSeconds &&
-        sample.workload.peakMediaLayers === definition.videoLayers).length,
+        sample.workload.peakMediaLayers === definition.videoLayers && sample.encoder === (fastEncoderProbe ? "amf-cqp18" : "x264-crf")).length,
       estimateProvided: preflightRequests.slice(confirmationOffset).some((entry) => entry.message.includes("Estimated encoding and saving time: about")) };
     await writeTextFile(joinPath(root, "promise-native-result.json"), JSON.stringify(promiseResult));
     check(outcome?.state === "done", `Promise export failed: ${JSON.stringify(promiseResult)}`);

@@ -356,8 +356,11 @@ try {
     assert.equal(native.preflight?.length, 1, "Promise pilot must use one real request-level preflight confirmation");
     assert.ok(native.preflight[0].message.includes("Estimated time:") || native.preflight[0].message.includes("Estimated encoding and saving time:"),
       "Preflight must show a measured estimate or explicitly unknown time");
-    if (fastEncoderProbe) assert.equal(native.calibrationRecords, 0, "Unqualified Fast measurements must not enter software calibration");
-    else assert.ok(native.calibrationRecords > 0, "Validated published exports must populate local measured history");
+    assert.ok(native.calibrationRecords > 0, "Validated published exports must populate encoder-specific local measured history");
+    if (fastEncoderProbe) {
+      assert.equal(native.resources?.local_fast_candidate, true, "Local Fast pilot requires the measured native device eligibility");
+      assert.equal(native.localFastEnabled, true, "Local Fast pilot must use the real selected-mode encoder path");
+    }
     assert.ok(Number.isSafeInteger(native.resources?.total_memory_bytes) && native.resources.total_memory_bytes > 0,
       "Native resource snapshot did not measure system memory");
     assert.ok(Number.isSafeInteger(native.resources?.scratch_free_bytes) && native.resources.scratch_free_bytes >= 0,

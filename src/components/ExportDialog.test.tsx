@@ -1,15 +1,22 @@
 // The export job the dialog watches. The invariants here are about a bar that must not lie:
 // late progress cannot resurrect a finished render, and a job that never reported a position must
 // say so rather than claiming 0%.
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import ExportDialog from "./ExportDialog";
 import { exportRunning, useExportJob } from "../store/exportJob";
+import { resolveLocalFastEncoder } from "../platform/host";
+
+vi.mock("../platform/host", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../platform/host")>()), resolveLocalFastEncoder: vi.fn().mockResolvedValue(false),
+}));
 
 beforeEach(() => {
   useExportJob.getState().reset();
   useExportJob.getState().setEngine("auto");
+  useExportJob.getState().setMode("quality");
+  vi.mocked(resolveLocalFastEncoder).mockResolvedValue(false);
 });
 
 describe("export job", () => {
@@ -77,7 +84,22 @@ describe("ExportDialog", () => {
     render(<ExportDialog open onCancel={() => {}} onStart={start} />);
     fireEvent.click(screen.getByRole("button", { name: "Export" }));
     expect(useExportJob.getState().engine).toBe("auto");
-    expect(start).toHaveBeenCalledWith({ resolution: "source", quality: "medium", fps: null });
+    expect(start).toHaveBeenCalledWith({ resolution: "source", quality: "medium", fps: null, mode: "quality" });
+  });
+
+  it("offers Fast only after eligibility succeeds and makes the larger-file tradeoff visible", async () => {
+    vi.mocked(resolveLocalFastEncoder).mockResolvedValue(true);
+    const start = vi.fn();
+    const dialog = render(<ExportDialog open onCancel={() => {}} onStart={start} />);
+    await waitFor(() => expect(screen.getByRole("radio", { name: "Fast" })).toBeEnabled());
+    expect(screen.getByRole("radio", { name: "Full quality" })).toBeChecked();
+    fireEvent.click(screen.getByRole("radio", { name: "Fast" }));
+    expect(screen.getByText(/Files can be much larger\. The picture/)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Export" }));
+    expect(start).toHaveBeenCalledWith({ resolution: "source", quality: "medium", fps: null, mode: "fast" });
+    dialog.unmount();
+    open();
+    expect(screen.getByRole("radio", { name: "Full quality" })).toBeChecked();
   });
 
   it("reports an UNKNOWN position as unknown, not as zero", () => {

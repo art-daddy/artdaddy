@@ -227,6 +227,23 @@ pub struct ExportResources {
   pub scratch_free_bytes: Option<u64>,
   pub destination_free_bytes: Option<u64>,
   pub budgets: ExportResourceBudgets,
+  pub local_fast_candidate: bool,
+}
+
+fn local_fast_candidate() -> bool {
+  #[cfg(all(windows, debug_assertions))]
+  {
+    use windows_sys::Win32::Graphics::Gdi::{EnumDisplayDevicesW, DISPLAY_DEVICEW, DISPLAY_DEVICE_ATTACHED_TO_DESKTOP};
+    for index in 0..16 {
+      let mut display: DISPLAY_DEVICEW = unsafe { std::mem::zeroed() };
+      display.cb = std::mem::size_of::<DISPLAY_DEVICEW>() as u32;
+      if unsafe { EnumDisplayDevicesW(std::ptr::null(), index, &mut display, 0) } == 0 { break; }
+      let length = display.DeviceString.iter().position(|character| *character == 0).unwrap_or(display.DeviceString.len());
+      let name = String::from_utf16_lossy(&display.DeviceString[..length]);
+      if display.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP != 0 && name.contains("AMD") && name.contains("780M") { return true; }
+    }
+  }
+  false
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -266,7 +283,8 @@ fn export_resources(destination: &Path, scratch: Option<&Path>, workspace: &Work
     scratch_free_bytes: scratch.and_then(|path| resource_free_bytes(path, &disks)),
     destination_free_bytes: resource_free_bytes(destination, &disks),
     budgets: ExportResourceBudgets { memory_bytes: budget::RENDER_RESIDENT_LIMIT,
-      temporary_bytes: workspace.available_bytes(), execution_seconds: EXPORT_EXECUTION_LIMIT_MS / 1000 } }
+      temporary_bytes: workspace.available_bytes(), execution_seconds: EXPORT_EXECUTION_LIMIT_MS / 1000 },
+    local_fast_candidate: local_fast_candidate() }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]

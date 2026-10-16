@@ -8,6 +8,8 @@
 export type ExportResolution = "source" | "2160p" | "1440p" | "1080p" | "720p" | "480p";
 export type ExportQuality = "high" | "medium" | "low";
 export type ExportEngine = "file-sequence-v1" | "partition-pipes-v1" | "auto";
+export type ExportMode = "quality" | "fast";
+export type ExportEncoder = "x264-crf" | "amf-cqp18";
 
 import type { Branding } from "./branding";
 import type { RenderWorkload } from "./renderPlan";
@@ -31,6 +33,7 @@ export interface ExportCalibration {
   readonly output: { width: number; height: number; fps: number };
   readonly quality: string;
   readonly engine: ExportEngine;
+  readonly encoder?: ExportEncoder;
   readonly elapsedSeconds: number;
   readonly finalBytes: number;
   readonly memoryBytes: number | null;
@@ -43,8 +46,9 @@ export function estimateExportFromHistory(
   quality: string,
   engine: ExportEngine,
   history: readonly ExportCalibration[],
+  encoder: ExportEncoder = "x264-crf",
 ): ExportEstimates {
-  const samples = history.filter((sample) => sample.quality === quality && sample.engine === engine &&
+  const samples = history.filter((sample) => (sample.encoder ?? "x264-crf") === encoder && sample.quality === quality && sample.engine === engine &&
     sample.workload.width === workload.width && sample.workload.height === workload.height && sample.workload.fps === workload.fps &&
     sample.output.width === output.width && sample.output.height === output.height && sample.output.fps === output.fps &&
     sample.workload.peakMediaLayers === workload.peakMediaLayers && sample.workload.peakVisualLayers === workload.peakVisualLayers &&
@@ -123,6 +127,7 @@ export function assessExport(
 
 export interface ExportOptions {
   engine?: ExportEngine;
+  mode?: ExportMode;
   resolution?: ExportResolution;
   quality?: ExportQuality;
   fps?: number;

@@ -16,6 +16,7 @@ import {
 import { undecodableImageReason } from "../tools/imageDims";
 import { runProjectMutation } from "../tools/coordinator";
 import { useExportJob } from "../store/exportJob";
+import { resolveLocalFastEncoder } from "../platform/host";
 import { fetchExportPolicy } from "../api/auth";
 import { isSignedOutGate, useAuth } from "../store/auth";
 import { compileAnim, sampleAnim } from "./anim";
@@ -29,7 +30,7 @@ import {
   progressFraction,
 } from "./ffmpegProgress";
 import { canvasFps, isNum, toSecondsView } from "./frames";
-import { crfFor, outputFps, outputSize, type ExportEngine, type ExportOptions } from "./exportOptions";
+import { crfFor, outputFps, outputSize, type ExportEngine, type ExportMode, type ExportOptions } from "./exportOptions";
 import { clipKind, rendersAsStill } from "./helpers";
 import { extOf, kindOf, REPLAYED_STILL_EXTS } from "../media/formats";
 import { isHeifStill, stillPicture } from "../media/stillPicture";
@@ -2010,11 +2011,15 @@ function buildSingleRenderCommand(
     };
   }
   if (aout) cmd.push("-map", `[${aout}]`);
-  cmd.push("-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", String(outFps));
+  cmd.push("-c:v", options.mode === "fast" ? "h264_amf" : "libx264", "-pix_fmt", "yuv420p", "-r", String(outFps));
   if (options.engine === "partition-pipes-v1") cmd.push("-threads:v", "1");
-  if (options.preset) cmd.push("-preset", options.preset);
-  const crf = crfFor(options.quality);
-  if (crf !== null) cmd.push("-crf", String(crf));
+  if (options.mode === "fast") {
+    cmd.push("-usage", "transcoding", "-quality", "quality", "-rc", "cqp", "-qp_i", "18", "-qp_p", "18", "-qp_b", "18");
+  } else {
+    if (options.preset) cmd.push("-preset", options.preset);
+    const crf = crfFor(options.quality);
+    if (crf !== null) cmd.push("-crf", String(crf));
+  }
   if (aout) cmd.push("-c:a", "aac");
   else cmd.push("-an");
   if (brandedFrames !== undefined)
@@ -2572,9 +2577,9 @@ async function prepareRender(
   | { ok: false; result: Result }
   | { ok: true; plan: RenderPlan; branding?: Branding; admission: RenderAdmission }
 > {
-  const r = await loadForRender(ctx, kind);
+  const r = await loadForRender(ctx, kind, options.mode);
   if (!r.ok) return r;
-  const plan = buildRenderCommand(r.seconds, outPath, { ...options, engine: r.engine, branding: r.branding });
+  const plan = buildRenderCommand(r.seconds, outPath, { ...options, engine: r.engine, mode: r.mode, branding: r.branding });
   if (r.warnings.length) plan.warnings.push(...r.warnings);
   return {
     ok: true,
@@ -2589,6 +2594,7 @@ async function prepareRender(
 export async function loadForRender(
   ctx: ClientToolContext,
   kind: "deliverable" | "working",
+  requestedMode?: ExportMode,
 ): Promise<
   | { ok: false; result: Result }
   | {
@@ -2598,9 +2604,11 @@ export async function loadForRender(
       warnings: string[];
       admission: RenderAdmission;
       engine: ExportEngine;
+      mode: ExportMode;
     }
 > {
   const engine: ExportEngine = kind === "deliverable" ? useExportJob.getState().engine : "file-sequence-v1";
+  const mode: ExportMode = kind === "deliverable" ? requestedMode ?? ctx.exportMode ?? useExportJob.getState().mode : "quality";
   if (engine === "partition-pipes-v1") {
     try {
       if (!(await jobSupervisor())?.delivery)
@@ -2692,6 +2700,7 @@ export async function loadForRender(
     warnings: extraWarnings,
     admission,
     engine,
+    mode,
     ...(branding ? { branding } : {}),
   };
 }
@@ -3424,6 +3433,9 @@ export async function prepareRenderSubmission(
   const jobs = await jobSupervisor();
   if (renderPlan.transport && !jobs?.delivery)
     throw new Error("streaming export requires the matching native job supervisor; select Standard to switch back");
+  const fast = renderPlan.args[renderPlan.args.indexOf("-c:v") + 1] === "h264_amf";
+  if (fast && !(await resolveLocalFastEncoder(ctx.signal)))
+    throw new Error("Fast is unavailable on this device or the encoder check failed. Choose Full quality and export again.");
   const telemetry = {
     duration_s: renderPlan.duration,
     width: renderPlan.output.width,
@@ -3435,7 +3447,8 @@ export async function prepareRenderSubmission(
     project_width: renderPlan.workload.width,
     project_height: renderPlan.workload.height,
     calibration: { workload: renderPlan.workload, output: renderPlan.output,
-      quality: request.quality || "medium", engine: renderPlan.selection.backend },
+      quality: request.quality || "medium", engine: renderPlan.selection.backend,
+      encoder: fast ? "amf-cqp18" as const : "x264-crf" as const },
   };
   const plan: ExportJobPlan = {
     contractVersion: renderPlan.contractVersion,

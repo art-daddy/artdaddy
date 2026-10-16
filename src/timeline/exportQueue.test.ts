@@ -140,6 +140,7 @@ describe("required export preflight", () => {
   it.each(["slow", "batch-space"] as const)("shows the correct measured %s decision rather than a generic pass", async (scenario) => {
     const { store } = make();
     vi.spyOn(host, "resolveExportResources").mockResolvedValue({ total_memory_bytes: 1000, available_memory_bytes: 500,
+      local_fast_candidate: false,
       scratch_free_bytes: scenario === "slow" ? 1000 : 150, destination_free_bytes: scenario === "slow" ? 1000 : 150,
       budgets: { memoryBytes: 500, temporaryBytes: 500, executionSeconds: 28800 } });
     useExportJob.setState({ calibrations: [{ ...calibration, elapsedSeconds: scenario === "slow" ? 30 : 10,

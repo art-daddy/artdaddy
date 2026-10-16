@@ -1,6 +1,7 @@
 import type { CommandRunner } from "./command";
 import type { ProjectStoreAccess } from "./store";
 import type { MutationOrigin } from "../project/MutationGate";
+import type { ExportMode } from "../timeline/exportOptions";
 
 // What a client-side tool handler receives: the co-located project store (for
 // resolving refs + paths) and a command runner (to spawn binaries).
@@ -20,4 +21,5 @@ export interface ClientToolContext {
   /** Work nobody is waiting on: the project's indexer, which took its turn before it started
    *  (`workGate.ts`). Its whisper does not queue among the looks'. Absent: someone is waiting. */
   background?: boolean;
+  exportMode?: ExportMode;
 }

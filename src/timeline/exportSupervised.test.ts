@@ -2,7 +2,10 @@
 // of the page, and the next page commits it exactly as the first would have. These drive the real
 // export tool and the real queue against FakeJobs, which keeps the supervisor's rules (its Rust
 // twin is tested in src-tauri/src/jobs.rs) and lets a test play the ffmpeg process.
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
+import { useExportJob } from "../store/exportJob";
+import * as host from "../platform/host";
 
 import { JobLedger } from "../project/jobLedger";
 import { FakeJobs } from "../test/fakeJobs";
@@ -13,12 +16,13 @@ import type { ClientToolContext } from "../tools/context";
 import { __resetProjectJobs } from "../tools/genJobs";
 import { __resetJobSupervisor, __setJobSupervisor, supervisedRunner } from "../tools/jobSupervisor";
 import { joinPath, ProjectStoreAccess } from "../tools/store";
-import { ensureTimeline } from "./engine";
+import { ensureTimeline, loadTimeline } from "./engine";
 import {
   __resetExportQueue,
   adoptExports,
   cancelExport,
   listExportRecords,
+  localDeliveryPort,
   whenExportEnds,
   whenExportsSettle,
 } from "./exportQueue";
@@ -38,10 +42,25 @@ class Fs extends MemFs {
   async remove(p: string): Promise<void> {
     this.files.delete(joinPath(p));
   }
+  async copyFile(from: string, to: string): Promise<void> {
+    const value = this.files.get(joinPath(from));
+    if (value === undefined) throw new Error(`ENOENT ${from}`);
+    this.files.set(joinPath(to), value);
+  }
   async readBytes(p: string): Promise<Uint8Array> {
     const v = this.files.get(joinPath(p));
     if (v === undefined) throw new Error(`ENOENT ${p}`);
     return new TextEncoder().encode(String(v));
+  }
+  async probeMedia(p: string, headBytes: number) {
+    const bytes = await this.readBytes(p);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    return {
+      id12: sha256.slice(0, 12),
+      sha256,
+      size: bytes.length,
+      head: bytes.slice(0, headBytes),
+    };
   }
 }
 
@@ -61,9 +80,40 @@ async function setup() {
   // Everything but ffmpeg runs under the page as before (the probes, the checks); an ffmpeg that
   // lands here ran under the page, which is what these tests forbid.
   const ran: string[] = [];
+  let jobs: FakeJobs | undefined;
   const runner: CommandRunner = {
-    run: async (program): Promise<CommandResult> => {
+    run: async (program, args): Promise<CommandResult> => {
       ran.push(program);
+      if (program === "ffprobe") {
+        const spec = jobs?.submitted.find((submitted) => submitted.meta.stagePath === args.at(-1));
+        const plan = spec?.meta.plan as
+          | {
+              duration: number;
+              audioExpected: boolean;
+              output: { width: number; height: number; fps: number };
+            }
+          | undefined;
+        const output = plan?.output ?? { width: 1920, height: 1080, fps: 30 };
+        const duration = plan?.duration ?? 2;
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            streams: [
+              {
+                codec_type: "video",
+                width: output.width,
+                height: output.height,
+                avg_frame_rate: `${output.fps}/1`,
+                nb_read_frames: String(Math.ceil(duration * output.fps)),
+                duration: String(duration),
+              },
+              ...(plan?.audioExpected ? [{ codec_type: "audio", duration: String(duration) }] : []),
+            ],
+            format: { duration: String(duration) },
+          }),
+          stderr: "",
+        };
+      }
       return { code: 0, stdout: "", stderr: "" };
     },
   };
@@ -71,7 +121,8 @@ async function setup() {
     { entries: [{ media_ref: "a.mp4", timeline_in: 0, timeline_out: 60 }] },
     { store, runner },
   );
-  const jobs = new FakeJobs();
+  jobs = new FakeJobs();
+  jobs.delivery = localDeliveryPort(store);
   // The process writes its output where it was told: the last argument.
   jobs.onStart = (spec) => fs.writeTextFile(spec.args[spec.args.length - 1], "a whole video");
   __setJobSupervisor(jobs);
@@ -100,6 +151,8 @@ afterEach(async () => {
   __resetExportQueue();
   __resetProjectJobs();
   __resetJobSupervisor();
+  useExportJob.getState().setMode("quality");
+  vi.restoreAllMocks();
 });
 
 async function ledgerStatus(fs: Fs, id: string): Promise<string | undefined> {
@@ -110,6 +163,63 @@ async function ledgerStatus(fs: Fs, id: string): Promise<string | undefined> {
 }
 
 describe("in the app, an export runs as a job of the app process", () => {
+  it("does not submit or publish Fast when the actual availability check refuses it", async () => {
+    const t = await setup();
+    useExportJob.getState().setMode("fast");
+    vi.spyOn(host, "resolveLocalFastEncoder").mockResolvedValue(false);
+    await expect(t.exportNow()).rejects.toThrow("Fast is unavailable");
+    expect(t.jobs.submitted).toHaveLength(0);
+    expect(listExportRecords()).toHaveLength(0);
+    expect(await t.fs.exists(DEST)).toBe(false);
+  });
+
+  it.each(["timeline", "clip"] as const)("retains captured Fast for a %s export after the preference changes", async (kind) => {
+    const t = await setup();
+    useExportJob.getState().setMode("fast");
+    vi.spyOn(host, "resolveLocalFastEncoder").mockResolvedValue(true);
+    const timeline = await loadTimeline(t.store);
+    const clipId = timeline.tracks.flatMap((track) => track.clips)[0].id;
+    const submitted = await exportTimelineTool(kind === "clip" ? { clip_ids: [clipId] } : {},
+      agentToolContext(t.nextPage(), new AbortController().signal)) as Any;
+    expect(submitted.ok).toBe(true);
+    useExportJob.getState().setMode("quality");
+    await flush();
+    const job = t.jobs.submitted[0];
+    expect(job.meta.telemetry.calibration.encoder).toBe("amf-cqp18");
+    t.jobs.exit(job.id, 0);
+    await whenExportsSettle();
+    expect(await t.fs.readTextFile(String(job.meta.destPath))).toBe("a whole video");
+    expect(await ledgerStatus(t.fs, job.id)).toBe("done");
+    expect(useExportJob.getState().calibrations.at(-1)?.encoder).toBe("amf-cqp18");
+  });
+
+  it("preserves the previous complete destination and records no calibration after Fast encoder failure", async () => {
+    const t = await setup();
+    const before = useExportJob.getState().calibrations.length;
+    useExportJob.getState().setMode("fast");
+    vi.spyOn(host, "resolveLocalFastEncoder").mockResolvedValue(true);
+    await t.fs.writeTextFile(DEST, "previous complete output");
+    const submitted = await exportTimelineTool({ output_path: DEST },
+      agentToolContext(t.nextPage(), new AbortController().signal)) as Any;
+    await flush();
+    t.jobs.exit(submitted.job_id, 1);
+    await whenExportsSettle();
+    expect(await t.fs.readTextFile(DEST)).toBe("previous complete output");
+    expect(await ledgerStatus(t.fs, submitted.job_id)).toBe("failed");
+    expect(useExportJob.getState().calibrations).toHaveLength(before);
+  });
+
+  it("does not admit Fast if cancellation is ignored by a late successful capability reply", async () => {
+    const t = await setup();
+    const controller = new AbortController();
+    useExportJob.getState().setMode("fast");
+    vi.spyOn(host, "resolveLocalFastEncoder").mockImplementation(async () => { controller.abort(); return true; });
+    await expect(exportTimelineTool({}, agentToolContext(t.nextPage(), controller.signal))).rejects.toThrow("cancelled");
+    expect(t.jobs.submitted).toHaveLength(0);
+    expect(listExportRecords()).toHaveLength(0);
+    expect(await t.fs.exists(DEST)).toBe(false);
+  });
+
   it("runs ffmpeg there, one export at a time, and delivers each in turn", async () => {
     const t = await setup();
     const a = await t.exportNow();

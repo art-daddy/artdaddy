@@ -196,6 +196,7 @@ async function exportItemsTool(args: Args, ctx: ClientToolContext | null): Promi
       : undefined;
     const plan = buildRenderCommand(loaded!.seconds, stage, {
       engine: loaded!.engine,
+      mode: loaded!.mode,
       resolution: args.resolution as ExportOptions["resolution"],
       quality: args.quality as ExportOptions["quality"],
       fps: typeof args.fps === "number" ? args.fps : undefined,
