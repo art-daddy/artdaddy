@@ -708,7 +708,7 @@ export interface BackendSelection {
   version: 1;
   policy: ExportEngine;
   backend: Exclude<ExportEngine, "auto">;
-  reason: "frame" | "standard-policy" | "explicit-streaming" | "bounded-single-pass" | "input-pressure" | "command-pressure";
+  reason: "frame" | "standard-policy" | "explicit-streaming" | "bounded-single-pass" | "input-pressure" | "command-pressure" | "resource-pressure";
   sourceInputs: number;
 }
 
@@ -951,13 +951,15 @@ export function buildRenderCommand(
   const policy = options.engine ?? "file-sequence-v1";
   if (!["file-sequence-v1", "partition-pipes-v1", "auto"].includes(policy)) throw new Error("unsupported exporter planning policy");
   const commandPressure = commandLength(graphFromFile(plan.args, plan.assFiles).args) > COMMAND_BUDGET;
+  const resourcePressure = workload.peakVisualLayers > 4 ||
+    (workload.width * workload.height > 1920 * 1080 && workload.peakMediaLayers > 1);
   const stream = !window && (policy === "partition-pipes-v1" ||
-    (policy === "auto" && (plan.sources.length > 32 || commandPressure)));
+    (policy === "auto" && (plan.sources.length > 32 || commandPressure || resourcePressure)));
   const selection: BackendSelection = {
     version: 1, policy, backend: stream ? "partition-pipes-v1" : "file-sequence-v1", sourceInputs: plan.sources.length,
     reason: window ? "frame" : policy === "file-sequence-v1" ? "standard-policy"
       : policy === "partition-pipes-v1" ? "explicit-streaming" : commandPressure ? "command-pressure"
-      : stream ? "input-pressure" : "bounded-single-pass",
+      : resourcePressure ? "resource-pressure" : stream ? "input-pressure" : "bounded-single-pass",
   };
   if (window) return { ...plan, selection, workload };
   if (stream)
@@ -2599,7 +2601,7 @@ export async function loadForRender(
     }
 > {
   const engine: ExportEngine = kind === "deliverable" ? useExportJob.getState().engine : "file-sequence-v1";
-  if (engine !== "file-sequence-v1") {
+  if (engine === "partition-pipes-v1") {
     try {
       if (!(await jobSupervisor())?.delivery)
         return { ok: false, result: { ok: false, error: "streaming export requires the matching native job supervisor; select Standard to switch back" } };

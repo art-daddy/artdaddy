@@ -7,7 +7,7 @@
 import { create } from "zustand";
 import type { ExportCalibration, ExportEngine } from "../timeline/exportOptions";
 
-const ENGINE_KEY = "artdaddy-export-engine-v1";
+const ENGINE_KEY = "artdaddy-export-routing-v2";
 const CALIBRATION_KEY = `artdaddy-export-calibration-v2:${__ARTDADDY_RELEASE__}`;
 
 function calibration(value: unknown): ExportCalibration | null {
@@ -38,9 +38,9 @@ function savedCalibrations(): ExportCalibration[] {
 function savedEngine(): ExportEngine {
   try {
     const saved = localStorage.getItem(ENGINE_KEY);
-    return saved === "partition-pipes-v1" || saved === "auto" ? saved : "file-sequence-v1";
+    return saved === "partition-pipes-v1" || saved === "file-sequence-v1" ? saved : "auto";
   } catch {
-    return "file-sequence-v1";
+    return "auto";
   }
 }
 

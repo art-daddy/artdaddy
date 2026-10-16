@@ -392,6 +392,20 @@ describe("buildRenderCommand", () => {
     expect(frame.transport).toBeUndefined();
   });
 
+  it("automatically bounds dense promised projects even when their source count is small", () => {
+    for (const [width, height, layers] of [[3840, 2160, 4], [1920, 1080, 8]]) {
+      const authored = tl(Array.from({ length: layers }, (_, index) => ({ media_ref: `/source-${index}.mp4`,
+        kind: "video", source_in: 0, source_out: 3, timeline_in: 0, timeline_out: 3 })), { width, height, fps: 30 });
+      const automatic = buildRenderCommand(authored, "/automatic.mp4", { engine: "auto" });
+      expect(automatic.selection).toMatchObject({ policy: "auto", backend: "partition-pipes-v1", reason: "resource-pressure" });
+      expect(automatic.workload.peakMediaLayers).toBe(layers);
+      expect(automatic.transport).toBe("partition-pipes-v1");
+      expect(automatic.output).toEqual(buildRenderCommand(authored, "/standard.mp4").output);
+      expect(buildRenderCommand(authored, "/frame.png", { engine: "auto" }, { frame: 0 }).selection)
+        .toMatchObject({ backend: "file-sequence-v1", reason: "frame" });
+    }
+  });
+
   it("compiles one persistent audio producer rather than an audio mix per video partition", () => {
     const plan = buildRenderCommand(tl([
       ...Array.from({ length: 98 }, (_, index) => ({ media_ref: "/video.mp4", source_in: 0, source_out: 1 / 30,

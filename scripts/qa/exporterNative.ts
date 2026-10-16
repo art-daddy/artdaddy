@@ -198,7 +198,7 @@ async function exercise(): Promise<void> {
     const destination = joinPath(root, `promise-${definition.id}.mp4`);
     const stage = joinPath(root, `.promise-${definition.id}.partial`);
     const started = performance.now();
-    const plan = buildRenderCommand(timeline, stage, { engine: "partition-pipes-v1", quality: "medium" });
+    const plan = buildRenderCommand(timeline, stage, { engine: "auto", quality: "medium" });
     const resources = await resolveExportResources(destination);
     const confirmationOffset = preflightRequests.length;
     let promiseId = "";
@@ -234,6 +234,7 @@ async function exercise(): Promise<void> {
     promiseResult = { caseId: definition.id, profile: input.profile, kind: definition.kind, destination, jobId: queued.job_id,
       state: outcome?.state ?? "missing", error: outcome?.error ?? null, elapsedMs: exportElapsedMs,
       projectFrames: frames, partitions: plan.steps?.length ?? 0, columns, rows, imageHeight,
+      selection: plan.selection,
       resources, workload: plan.workload,
       publicationVerified, finalIdentity: delivery?.identity,
       stagingCleaned: !(await exists(stage)), scratchCleaned: !!scratchPath && !(await exists(scratchPath)),

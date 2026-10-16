@@ -145,6 +145,20 @@ export default function ExportDialog({
                 ))}
               </select>
             </Field>
+            <div className="flex items-center gap-3 text-xs text-neutral-400">
+              <span className="w-20 shrink-0">Mode</span>
+              <div role="radiogroup" aria-label="export mode" className="flex min-h-9 min-w-0 flex-1 flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+                <label className="inline-flex items-center gap-2">
+                  <input type="radio" name="export-mode" value="quality" checked readOnly className="accent-accent" />
+                  Full quality
+                </label>
+                <label className="inline-flex items-center gap-2 text-neutral-500"
+                  title="Fast mode is unavailable until hardware-encoding quality has been measured.">
+                  <input type="radio" name="export-mode" value="fast" disabled />
+                  Fast
+                </label>
+              </div>
+            </div>
             <p className="text-[11px] leading-snug text-neutral-500">
               Never upscales: a preset larger than the project is left at the project&apos;s own
               size.

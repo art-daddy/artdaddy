@@ -7,7 +7,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import ExportDialog from "./ExportDialog";
 import { exportRunning, useExportJob } from "../store/exportJob";
 
-beforeEach(() => useExportJob.getState().reset());
+beforeEach(() => {
+  useExportJob.getState().reset();
+  useExportJob.getState().setEngine("auto");
+});
 
 describe("export job", () => {
   it("is not running until it begins, and not after it finishes", () => {
@@ -56,6 +59,25 @@ describe("ExportDialog", () => {
     open();
     expect(screen.getByLabelText("resolution")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Export" })).toBeInTheDocument();
+  });
+
+  it("defaults to full quality and does not enable unmeasured Fast mode", () => {
+    const dialog = open();
+    expect(screen.getByRole("radio", { name: "Full quality" })).toBeChecked();
+    expect(screen.getByRole("radio", { name: "Fast" })).toBeDisabled();
+    expect(screen.queryByLabelText("export engine")).not.toBeInTheDocument();
+    act(() => useExportJob.getState().reset());
+    dialog.unmount();
+    open();
+    expect(screen.getByRole("radio", { name: "Full quality" })).toBeChecked();
+  });
+
+  it("keeps automatic routing separate from requested full-quality delivery settings", () => {
+    const start = vi.fn();
+    render(<ExportDialog open onCancel={() => {}} onStart={start} />);
+    fireEvent.click(screen.getByRole("button", { name: "Export" }));
+    expect(useExportJob.getState().engine).toBe("auto");
+    expect(start).toHaveBeenCalledWith({ resolution: "source", quality: "medium", fps: null });
   });
 
   it("reports an UNKNOWN position as unknown, not as zero", () => {

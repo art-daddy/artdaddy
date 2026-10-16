@@ -299,6 +299,10 @@ try {
     assert.equal(native.state, "done");
     assert.equal(native.publicationVerified, true, "Promise output identity/catalog/ledger publication differs");
     assert.equal(native.stagingCleaned, true, "Promise staging file was not cleaned");
+    assert.equal(native.selection?.policy, "auto", "Promise case must use the approved Automatic policy");
+    if (promiseCase.videoLayers + Number(promiseCase.captions) > 4 ||
+      promiseCase.width * promiseCase.height > 1920 * 1080 && promiseCase.videoLayers > 1)
+      assert.equal(native.selection.backend, "partition-pipes-v1", "Dense promise case must use the bounded existing FFmpeg path");
     assert.equal(native.preflight?.length, 1, "Promise pilot must use one real request-level preflight confirmation");
     assert.ok(native.preflight[0].message.includes("Estimated time:") || native.preflight[0].message.includes("Estimated encoding and saving time:"),
       "Preflight must show a measured estimate or explicitly unknown time");

@@ -71,11 +71,13 @@ complicated change, stop with the measured gap and the simplest proposed fix.
 
 ### Implementation Choice And Boundaries
 
-Retain the current FFmpeg path: small lossless video pieces streamed into one final
-MP4 encode, with one continuous audio mix. This avoids keeping a full lossless movie
-on disk. Existing file-piece support remains available where needed. This is the
-existing exporter, not a persistent-decoder/native-compositor replacement. Routing
-defaults and every user-visible warning/control require owner approval before edits.
+Retain the current FFmpeg path: small jobs use one command; large/heavy jobs use
+small lossless video pieces streamed into one final MP4 encode, with one continuous
+audio mix. This avoids keeping a full lossless movie on disk. Existing file-piece
+support remains available where needed. This is the existing exporter, not a
+persistent-decoder/native-compositor replacement. The owner approved automatic
+routing and the Full quality/Fast controls recorded below; further user-visible
+changes still require approval.
 
 Preview and export remain separate painters. Park native GPU worker, MLT and GPU
 probe code; keep chunking, verified saving, crash recovery and memory/disk guards.
@@ -308,6 +310,24 @@ by the corresponding open items below and cannot be omitted from phase completio
   source/storage-not-ready; no raw error reaches the wire. Preserve the existing
   specific folder refusal and any previously admitted batch jobs. Eighty-eight
   focused queue/batch/collector checks and the11case consent-ordering subset pass.
+- V2-D027: apply the approved user-facing mode simplification: Full quality is
+  selected, Fast is disabled until hardware-encoding quality is measured. Remove
+  the experimental engine picker from the normal dialog. A fresh V2 routing key
+  defaults to Automatic; existing internal Standard/Streaming controls remain for
+  tests and deliberate diagnostics. Do not change CRF, preset, output geometry or
+  frame rate to implement the mode label. Dense above-HD multi-picture and>4thing
+  HD scenes select the existing bounded FFmpeg path, while small jobs and frame
+  reads keep their current paths. Automatic capability checking follows the actual
+  selected backend; an unselected streaming path cannot refuse a small job early.
+- V2-D028: capped pilot1792180714408uses policy auto/backend partition-pipes-v1,
+  reason resource-pressure, one request-level confirmation and actual workload
+  peakVisualLayers8. Product completion is15162msfor10seconds, excluding the
+  QA-only beacon/history drain; the same MP4 hash,300frames, stereo tones,
+  captions, publication and cleanup pass. Whole-tree6GiBcap reports2953089024byte
+  peak accounting, not physical8GBqualification. First-run ETA remains unknown,
+  one successful local calibration is recorded, temporarySpaceQualified/passed
+  remain false and the case stays pilot-only. Eighteen UI/dismissal checks and
+  focused density planner checks pass without reference-output updates.
 
 ## Historical V1 Design And Evidence
 
