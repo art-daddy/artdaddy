@@ -49,8 +49,10 @@ import {
   onCanvasFrames,
   onCanvasSec,
   resolveRenderPlan,
+  summarizeRenderWorkload,
   type BlendKind,
   type FitKind,
+  type RenderWorkload,
   type ResolvedTransition,
 } from "./renderPlan";
 import { buildBandAss, unrenderableFlags, type CaptionSpec } from "./assCaption";
@@ -712,6 +714,7 @@ export interface BackendSelection {
 
 export interface RenderPlan {
   contractVersion: number;
+  workload: RenderWorkload;
   selection?: BackendSelection;
   transport?: "partition-pipes-v1";
   args: string[];
@@ -742,6 +745,8 @@ export interface RenderPlan {
   steps?: CommandStep[];
   audio?: CommandStep;
 }
+
+type CompiledRenderPlan = Omit<RenderPlan, "workload">;
 
 export type AudioRenderPlan = Pick<RenderPlan,
   "args" | "dependencies" | "filterComplex" | "duration" | "warnings" | "assFiles" | "fonts" | "sources">;
@@ -942,6 +947,7 @@ export function buildRenderCommand(
   window?: FrameWindow,
 ): RenderPlan {
   const plan = buildSingleRenderCommand(raw, outPath, options, window);
+  const workload = summarizeRenderWorkload(raw, window ? { from: window.frame, to: window.frame + 1 } : options.range, options.maxDurationSec);
   const policy = options.engine ?? "file-sequence-v1";
   if (!["file-sequence-v1", "partition-pipes-v1", "auto"].includes(policy)) throw new Error("unsupported exporter planning policy");
   const commandPressure = commandLength(graphFromFile(plan.args, plan.assFiles).args) > COMMAND_BUDGET;
@@ -953,11 +959,11 @@ export function buildRenderCommand(
       : policy === "partition-pipes-v1" ? "explicit-streaming" : commandPressure ? "command-pressure"
       : stream ? "input-pressure" : "bounded-single-pass",
   };
-  if (window) return { ...plan, selection };
+  if (window) return { ...plan, selection, workload };
   if (stream)
-    return { ...segmentedRenderPlan(raw, outPath, { ...options, engine: "partition-pipes-v1" }, plan), selection, transport: "partition-pipes-v1" };
-  if (!commandPressure) return { ...plan, selection };
-  return { ...segmentedRenderPlan(raw, outPath, options, plan), selection };
+    return { ...segmentedRenderPlan(raw, outPath, { ...options, engine: "partition-pipes-v1" }, plan), selection, workload, transport: "partition-pipes-v1" };
+  if (!commandPressure) return { ...plan, selection, workload };
+  return { ...segmentedRenderPlan(raw, outPath, options, plan), selection, workload };
 }
 
 export function buildAudioRenderCommand(raw: Timeline, outPath: string, options: ExportOptions = {}): AudioRenderPlan {
@@ -968,7 +974,7 @@ function buildSingleRenderCommand(raw: Timeline, outPath: string, options: Expor
   window: FrameWindow | undefined, composed: ComposedRenderInput | undefined, filePrefix: string,
   pass: "audio"): AudioRenderPlan;
 function buildSingleRenderCommand(raw: Timeline, outPath: string, options?: ExportOptions,
-  window?: FrameWindow, composed?: ComposedRenderInput, filePrefix?: string, pass?: "all" | "video"): RenderPlan;
+  window?: FrameWindow, composed?: ComposedRenderInput, filePrefix?: string, pass?: "all" | "video"): CompiledRenderPlan;
 function buildSingleRenderCommand(
   raw: Timeline,
   outPath: string,
@@ -977,7 +983,7 @@ function buildSingleRenderCommand(
   composed?: ComposedRenderInput,
   filePrefix = "",
   pass: "all" | "video" | "audio" = "all",
-): RenderPlan | AudioRenderPlan {
+): CompiledRenderPlan | AudioRenderPlan {
   const timeline = toSecondsView(raw);
   assertSourcesResolved(timeline);
   const canvas = timeline.canvas;
@@ -2038,8 +2044,8 @@ function segmentedRenderPlan(
   raw: Timeline,
   outPath: string,
   options: ExportOptions,
-  original: RenderPlan,
-): RenderPlan {
+  original: CompiledRenderPlan,
+): CompiledRenderPlan {
   const timeline = toSecondsView(raw);
   const fps = Math.trunc(canvasFps(timeline));
   const videoIds = new Set(
@@ -3416,6 +3422,9 @@ export async function queueRenderJob(
     fps: renderPlan.output.fps,
     quality: request.quality,
     project_id: projectIdOfDir(ctx.store.projectDir),
+    visual_layers: renderPlan.workload.peakVisualLayers,
+    project_width: renderPlan.workload.width,
+    project_height: renderPlan.workload.height,
   };
   const plan: ExportJobPlan = {
     contractVersion: renderPlan.contractVersion,

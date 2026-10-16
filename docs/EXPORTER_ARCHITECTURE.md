@@ -221,6 +221,16 @@ by the corresponding open items below and cannot be omitted from phase completio
   do not certify population reliability or guarantee delivery while offline/rate
   limited. The existing reporting path remains best-effort; qualify rates from
   received reports separately from the controlled promise-library results.
+- V2-D016: derive immutable workload facts from the shared render-plan visibility
+  owner, including project canvas/FPS, scoped/capped duration, visual/caption/audio
+  clip counts and peak simultaneous media/text. Touching cuts do not double-count;
+  transition holds and hidden/disabled/muted eligibility use the existing rules.
+  Attach facts once at the public compiler boundary so cloned submissions keep
+  them without recalculating every FFmpeg partition. Anonymous size bands use
+  project dimensions, not a reduced output preset. The254focused compiler/corpus,
+  queue/recovery and collection checks pass, including100random overlap cases.
+  This is the preflight foundation only: confirmation, native free-space/memory
+  sampling and calibrated time estimation are not yet enabled or accepted.
 
 ## Historical V1 Design And Evidence
 

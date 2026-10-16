@@ -420,6 +420,9 @@ export interface ExportSpec {
     fps: number;
     quality: string;
     project_id: string;
+    visual_layers?: number;
+    project_width?: number;
+    project_height?: number;
   };
   /** The app process's job supervisor, when the encode runs as one of its jobs (3h part 7). It
    *  keeps the order then, so this queue does not hold a job back, and a job's state comes from it. */
@@ -517,13 +520,14 @@ async function reportSettledExport(
       duration_s: spec.meta?.duration_s ?? 0,
       size_bytes: size,
       elapsed_ms: outcome.elapsedMs,
-      width: spec.meta?.width ?? 0,
-      height: spec.meta?.height ?? 0,
+      width: spec.meta?.project_width ?? spec.meta?.width ?? 0,
+      height: spec.meta?.project_height ?? spec.meta?.height ?? 0,
       fps: spec.meta?.fps ?? 0,
       quality: spec.meta?.quality ?? "",
       warnings: outcome.warnings,
       error: outcome.error,
       project_id: spec.meta?.project_id ?? "",
+      visual_layers: spec.meta?.visual_layers,
     });
   } catch {
     /* telemetry is never worth disturbing a finished export over */
