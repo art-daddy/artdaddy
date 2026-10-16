@@ -328,6 +328,25 @@ by the corresponding open items below and cannot be omitted from phase completio
   one successful local calibration is recorded, temporarySpaceQualified/passed
   remain false and the case stays pilot-only. Eighteen UI/dismissal checks and
   focused density planner checks pass without reference-output updates.
+- V2-D029: measure the requested Fast option with the existing FFmpeg AMF encoder,
+  not the parked native GPU worker/MLT/decoder probes. Private measurement
+  report1792181250333uses a retained generated pilot as common decoded input:
+  software x264 medium/CRF23takes9490.7msand2194367bytes; AMF quality/CQP18takes
+  1151.2msand6158085bytes. Each writes300HD30frames. Against that common encoded
+  source, software PSNR/SSIMare48.910083/0.998239and AMFare53.531681/0.998865.
+  This is an encoder-only comparison, not original-compositor, perceptual or
+  other-device quality qualification. The source hash is unchanged.
+- V2-D030: private integrated Fast pilot1792181390585changes only final video
+  encoding, retaining existing FFmpeg pieces/audio/preflight/validation/publication
+  and current native limits. It passes the complete10second heavy pilot in9407.4ms
+  versus15162mssoftware, with all300frames, expected stereo, captions and cleanup.
+  The Fast MP4 is10341706bytes versus2437270bytessoftware (about4.2x); it is not
+  pixel-identical. Direct Full/Fast output comparison across all300frames gives
+  PSNR46.619375dBandSSIM0.996933, which is a difference measurement, not an
+  equivalence threshold. Whole-tree6GiBcap reports2505318400byte peak accounting.
+  Keep Fast-only observations out of software calibration. Production Fast stays
+  disabled pending owner review of the measured visible quality/file-size tradeoff;
+  other encoders, devices, real-world inputs and full-size cases remain unqualified.
 
 ## Historical V1 Design And Evidence
 

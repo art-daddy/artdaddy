@@ -24,11 +24,61 @@ const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "artdaddy-expor
 const identifier = `com.artdaddy.qa.exporter-${Date.now()}`;
 const output = path.join(repository, "reports", "qa", "exporter", `${target}-${Date.now()}`);
 await mkdir(output, { recursive: true });
+const fastQualitySource = process.env.ARTDADDY_QA_FAST_QUALITY_SOURCE ?? "";
+if (fastQualitySource) {
+  assert.equal(process.platform, "win32", "This private Fast measurement targets only the local AMF device");
+  assert.ok(fastQualitySource.replaceAll("\\", "/").includes("/artdaddy-export-native-") &&
+    path.basename(fastQualitySource) === "promise-heavy-eight-things-pilot.mp4", "Fast measurement only accepts the retained generated QA pilot");
+  assert.ok(Number(process.env.ARTDADDY_QA_MEMORY_CAP_BYTES) > 0, "Fast measurement requires the existing process-tree cap harness");
+  const before = createHash("sha256").update(await readFile(fastQualitySource)).digest("hex");
+  const candidates = [
+    { mode: "full-quality", codec: ["-c:v", "libx264", "-preset", "medium", "-crf", "23", "-threads:v", "1"] },
+    { mode: "fast-candidate", codec: ["-c:v", "h264_amf", "-usage", "transcoding", "-quality", "quality", "-rc", "cqp",
+      "-qp_i", "18", "-qp_p", "18", "-qp_b", "18"] },
+  ];
+  const measured = [];
+  for (const candidate of candidates) {
+    const destination = path.join(root, `${candidate.mode}.mp4`);
+    const started = performance.now();
+    const encoded = spawnSync(executable("artdaddy-ffmpeg"), ["-y", "-hide_banner", "-nostdin", "-v", "warning", "-i", fastQualitySource,
+      "-map", "0:v:0", "-an", ...candidate.codec, "-pix_fmt", "yuv420p", "-frames:v", "300", "-movflags", "+faststart", destination],
+      { encoding: "utf8", timeout: 120000, maxBuffer: 2 * 1024 * 1024 });
+    assert.equal(encoded.status, 0, encoded.error?.message ?? encoded.stderr);
+    const encodingMs = performance.now() - started;
+    const probe = spawnSync(executable("artdaddy-ffprobe"), ["-v", "error", "-count_frames", "-select_streams", "v:0", "-show_entries",
+      "stream=width,height,r_frame_rate,nb_read_frames,codec_name", "-of", "json", destination], { encoding: "utf8" });
+    assert.equal(probe.status, 0, probe.stderr);
+    const video = JSON.parse(probe.stdout).streams[0];
+    assert.deepEqual([video.width, video.height, video.r_frame_rate, Number(video.nb_read_frames), video.codec_name], [1920, 1080, "30/1", 300, "h264"]);
+    const metrics = {};
+    for (const metric of ["psnr", "ssim"]) {
+      const checked = spawnSync(executable("artdaddy-ffmpeg"), ["-hide_banner", "-nostdin", "-v", "info", "-i", fastQualitySource, "-i", destination,
+        "-lavfi", `[0:v]setpts=PTS-STARTPTS[reference];[1:v]setpts=PTS-STARTPTS[actual];[reference][actual]${metric}`,
+        "-an", "-f", "null", "-"], { encoding: "utf8", timeout: 120000, maxBuffer: 2 * 1024 * 1024 });
+      assert.equal(checked.status, 0, checked.error?.message ?? checked.stderr);
+      const value = checked.stderr.match(metric === "psnr" ? /average:([\d.]+|inf)/ : /All:([\d.]+)/)?.[1];
+      assert.ok(value, `${metric} did not report an artifact measurement`);
+      metrics[metric] = value;
+    }
+    measured.push({ mode: candidate.mode, encodingMs, bytes: (await stat(destination)).size, video, metrics });
+  }
+  assert.equal(createHash("sha256").update(await readFile(fastQualitySource)).digest("hex"), before);
+  await writeFile(path.join(output, "fast-quality.json"), JSON.stringify({ version: 2, sourceSha256: before,
+    sourceClass: "retained generated seven-video-and-caption pilot, decoded as a common encoder input", sourceUnchanged: true,
+    measured, qualityAccepted: false, productionEnabled: false, physicalQualified: false,
+    scope: "local AMD AMF video-encoder comparison only; not original-timeline, audio, other devices or full-workload qualification" }, null, 2));
+  console.log(`FAST QUALITY ${JSON.stringify({ output, measured, productionEnabled: false })}`);
+  process.exit(0);
+}
+
 const promiseLibrary = JSON.parse(await readFile(path.join(repository, "scripts/qa/exporterPromiseCases.json"), "utf8"));
 const promiseId = process.env.ARTDADDY_QA_PROMISE_CASE ?? "";
 const promiseProfile = process.env.ARTDADDY_QA_PROMISE_PROFILE ?? "16gb";
 const promiseCase = promiseId ? promiseLibrary.cases.find((entry) => entry.id === promiseId) : null;
 assert.ok(!promiseId || promiseCase, "Unknown promise-library case");
+const fastEncoderProbe = process.env.ARTDADDY_QA_FAST_ENCODER_PROBE ?? "";
+assert.ok(!fastEncoderProbe || fastEncoderProbe === "amf-cqp18" && process.platform === "win32" && promiseCase?.kind === "pilot",
+  "Fast encoder integration is a private Windows short-pilot measurement only");
 assert.ok(promiseLibrary.profiles[promiseProfile], "Unknown promise-library profile");
 let promiseFixture;
 if (promiseCase) {
@@ -241,7 +291,7 @@ try {
   const address = vite.httpServer.address();
   assert.equal(typeof address, "object");
   const url = `http://127.0.0.1:${address.port}`;
-  const page = `${url}/scripts/qa/exporterNative.html?${new URLSearchParams({ root, identifier, profileSeconds: String(profileSeconds), denseSourceRoot, promiseId })}`;
+  const page = `${url}/scripts/qa/exporterNative.html?${new URLSearchParams({ root, identifier, profileSeconds: String(profileSeconds), denseSourceRoot, promiseId, fastEncoderProbe })}`;
   const config = path.join(root, "tauri.qa.json");
   await writeFile(config, JSON.stringify({ identifier,
     build: { devUrl: url, beforeDevCommand: "", beforeBuildCommand: "" },
@@ -306,7 +356,8 @@ try {
     assert.equal(native.preflight?.length, 1, "Promise pilot must use one real request-level preflight confirmation");
     assert.ok(native.preflight[0].message.includes("Estimated time:") || native.preflight[0].message.includes("Estimated encoding and saving time:"),
       "Preflight must show a measured estimate or explicitly unknown time");
-    assert.ok(native.calibrationRecords > 0, "Validated published exports must populate local measured history");
+    if (fastEncoderProbe) assert.equal(native.calibrationRecords, 0, "Unqualified Fast measurements must not enter software calibration");
+    else assert.ok(native.calibrationRecords > 0, "Validated published exports must populate local measured history");
     assert.ok(Number.isSafeInteger(native.resources?.total_memory_bytes) && native.resources.total_memory_bytes > 0,
       "Native resource snapshot did not measure system memory");
     assert.ok(Number.isSafeInteger(native.resources?.scratch_free_bytes) && native.resources.scratch_free_bytes >= 0,

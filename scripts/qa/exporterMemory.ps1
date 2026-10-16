@@ -107,7 +107,8 @@ if ($SelfTest) {
   }
   $output = Join-Path $PSScriptRoot '../../reports/qa/exporter'
   [IO.Directory]::CreateDirectory($output) | Out-Null
-  $receipt = [ordered]@{ scope='windows-job-commit-pressure-simulation'; workload='App'; elapsedSeconds=$elapsed.Elapsed.TotalSeconds; verificationRequired=$false; includesArtifactVerification=$null; configuredCommitLimitBytes=$cap;
+  $workload = if ($env:ARTDADDY_QA_FAST_QUALITY_SOURCE) { 'FastQualityMeasurement' } else { 'App' }
+  $receipt = [ordered]@{ scope='windows-job-commit-pressure-simulation'; workload=$workload; elapsedSeconds=$elapsed.Elapsed.TotalSeconds; verificationRequired=$false; includesArtifactVerification=$null; configuredCommitLimitBytes=$cap;
     reportedPeakBytes=$jobType::PeakBytes; exitCode=$result; physicalMinimumMachine=$false; exactPeakCeiling=$false }
   [IO.File]::WriteAllText((Join-Path $output ('memory-' + [Guid]::NewGuid().ToString('N') + '.json')),
     ($receipt | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))

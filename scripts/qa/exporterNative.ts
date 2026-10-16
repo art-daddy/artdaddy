@@ -199,6 +199,17 @@ async function exercise(): Promise<void> {
     const stage = joinPath(root, `.promise-${definition.id}.partial`);
     const started = performance.now();
     const plan = buildRenderCommand(timeline, stage, { engine: "auto", quality: "medium" });
+    const fastEncoderProbe = params.get("fastEncoderProbe") ?? "";
+    if (fastEncoderProbe) {
+      check(fastEncoderProbe === "amf-cqp18" && definition.kind === "pilot", "Unsupported private Fast measurement");
+      const codec = plan.args.lastIndexOf("-c:v");
+      check(codec >= 0 && plan.args[codec + 1] === "libx264", "Fast measurement requires the known final software encode");
+      plan.args.splice(codec, 2, "-c:v", "h264_amf", "-usage", "transcoding", "-quality", "quality", "-rc", "cqp",
+        "-qp_i", "18", "-qp_p", "18", "-qp_b", "18");
+      for (let index = plan.args.lastIndexOf("-i") + 2; index < plan.args.length - 1; index++) {
+        if (plan.args[index] === "-crf" || plan.args[index] === "-preset") { plan.args.splice(index, 2); index--; }
+      }
+    }
     const resources = await resolveExportResources(destination);
     const confirmationOffset = preflightRequests.length;
     let promiseId = "";
@@ -212,7 +223,7 @@ async function exercise(): Promise<void> {
         .catch((error: unknown) => { scratchError = error; });
     });
     const queued = await queueRenderJob(context, { plan, admission: captured, destPath: destination, stagePath: stage,
-      filename: `promise-${definition.id}.mp4`, quality: "medium" });
+      filename: `promise-${definition.id}.mp4`, quality: fastEncoderProbe ? "unqualified-amf-cqp18" : "medium" });
     promiseId = queued.job_id;
     const outcome = await whenExportEnds(queued.job_id);
     await whenExportsSettle();
@@ -235,6 +246,7 @@ async function exercise(): Promise<void> {
       state: outcome?.state ?? "missing", error: outcome?.error ?? null, elapsedMs: exportElapsedMs,
       projectFrames: frames, partitions: plan.steps?.length ?? 0, columns, rows, imageHeight,
       selection: plan.selection,
+      fastEncoderProbe: fastEncoderProbe || null,
       resources, workload: plan.workload,
       publicationVerified, finalIdentity: delivery?.identity,
       stagingCleaned: !(await exists(stage)), scratchCleaned: !!scratchPath && !(await exists(scratchPath)),
