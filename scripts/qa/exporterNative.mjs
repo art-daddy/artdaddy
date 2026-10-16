@@ -24,6 +24,57 @@ const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "artdaddy-expor
 const identifier = `com.artdaddy.qa.exporter-${Date.now()}`;
 const output = path.join(repository, "reports", "qa", "exporter", `${target}-${Date.now()}`);
 await mkdir(output, { recursive: true });
+const promiseLibrary = JSON.parse(await readFile(path.join(repository, "scripts/qa/exporterPromiseCases.json"), "utf8"));
+const promiseId = process.env.ARTDADDY_QA_PROMISE_CASE ?? "";
+const promiseProfile = process.env.ARTDADDY_QA_PROMISE_PROFILE ?? "16gb";
+const promiseCase = promiseId ? promiseLibrary.cases.find((entry) => entry.id === promiseId) : null;
+assert.ok(!promiseId || promiseCase, "Unknown promise-library case");
+assert.ok(promiseLibrary.profiles[promiseProfile], "Unknown promise-library profile");
+let promiseFixture;
+if (promiseCase) {
+  const started = performance.now();
+  const sourceClass = promiseLibrary.sourceClasses[promiseCase.source];
+  const paths = [];
+  if (promiseCase.source !== "generated") {
+    const asset = sourceClass.path ? path.join(repository, sourceClass.path) : null;
+    if (!asset || !(await present(asset))) {
+      await writeFile(path.join(output, "promise-library.json"), JSON.stringify({ version: 2, caseId: promiseId,
+        profile: promiseProfile, status: "blocked-source", passed: false, reason: "Required real-world source is unavailable",
+        realWorld: true, physicalQualified: false }, null, 2));
+      throw new Error(`Promise case${promiseId} is blocked: its required real-world source is unavailable`);
+    }
+    for (let index = 0; index < promiseCase.videoLayers; index++) paths.push(asset);
+  } else {
+    const countPerLayer = Math.floor(promiseCase.visualClips / promiseCase.videoLayers);
+    const seconds = Math.ceil(promiseCase.durationSeconds / countPerLayer) + 1;
+    for (let index = 0; index < promiseCase.videoLayers; index++) {
+      const asset = path.join(root, `promise-source-${index}.mp4`);
+      const generated = spawnSync(executable("artdaddy-ffmpeg"), ["-y", "-nostdin", "-v", "error", "-f", "lavfi", "-i",
+        `testsrc2=s=${promiseCase.width}x${promiseCase.height}:r=${promiseCase.fps}:d=${seconds}`,
+        "-vf", `hue=h=${index * 360 / promiseCase.videoLayers}`, "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
+        "-pix_fmt", "yuv420p", asset], { encoding: "utf8" });
+      assert.equal(generated.status, 0, generated.error?.message ?? generated.stderr);
+      paths.push(asset);
+    }
+  }
+  const sources = [];
+  for (const asset of [...new Set(paths)]) {
+    const result = spawnSync(executable("artdaddy-ffprobe"), ["-v", "error", "-show_streams", "-show_format", "-of", "json", asset], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    const metadata = JSON.parse(result.stdout);
+    const video = metadata.streams.find((entry) => entry.codec_type === "video");
+    assert.ok(video && video.width > 0 && video.height > 0);
+    const duration = Number(video.duration ?? metadata.format.duration);
+    const required = promiseCase.durationSeconds / Math.floor(promiseCase.visualClips / promiseCase.videoLayers);
+    assert.ok(duration + 1 / promiseCase.fps >= required, "A promise fixture may not declare source footage beyond its actual end");
+    sources.push({ path: asset, sha256: createHash("sha256").update(await readFile(asset)).digest("hex"), duration,
+      width: video.width, height: video.height, fps: video.r_frame_rate, averageFps: video.avg_frame_rate,
+      rotation: video.tags?.rotate ?? video.side_data_list?.find((entry) => entry.rotation !== undefined)?.rotation ?? 0 });
+  }
+  promiseFixture = { preparationMs: performance.now() - started, realWorld: sourceClass.realWorld, provenance: sourceClass.provenance, paths, sources };
+  await writeFile(path.join(root, "promise-input.json"), JSON.stringify({ case: promiseCase, profile: promiseProfile,
+    profileSpec: promiseLibrary.profiles[promiseProfile], fixture: promiseFixture }));
+}
 const source = path.join(root, "source.nut");
 const generated = spawnSync(executable("artdaddy-ffmpeg"), ["-y", "-nostdin", "-v", "error", "-f", "lavfi", "-i",
   "testsrc2=s=320x180:r=30:d=1", "-f", "lavfi", "-i", "aevalsrc=0.1*sin(2*PI*440*t)|0.08*sin(2*PI*880*t):s=48000:d=1",
@@ -190,7 +241,7 @@ try {
   const address = vite.httpServer.address();
   assert.equal(typeof address, "object");
   const url = `http://127.0.0.1:${address.port}`;
-  const page = `${url}/scripts/qa/exporterNative.html?${new URLSearchParams({ root, identifier, profileSeconds: String(profileSeconds), denseSourceRoot })}`;
+  const page = `${url}/scripts/qa/exporterNative.html?${new URLSearchParams({ root, identifier, profileSeconds: String(profileSeconds), denseSourceRoot, promiseId })}`;
   const config = path.join(root, "tauri.qa.json");
   await writeFile(config, JSON.stringify({ identifier,
     build: { devUrl: url, beforeDevCommand: "", beforeBuildCommand: "" },
@@ -242,6 +293,114 @@ try {
   assert.notEqual(report.unbound.code, 0, "Unbound interruption must not claim a successful producer");
   assert.equal(report.unbound.planGuessed, false);
   assert.equal(await readFile(report.unbound.delivered, "utf8"), "previous complete output");
+  if (promiseCase) {
+    const native = report.promiseResult;
+    assert.equal(native?.caseId, promiseCase.id);
+    assert.equal(native.state, "done");
+    assert.equal(native.publicationVerified, true, "Promise output identity/catalog/ledger publication differs");
+    assert.equal(native.stagingCleaned, true, "Promise staging file was not cleaned");
+    const probed = spawnSync(executable("artdaddy-ffprobe"), ["-v", "error", "-count_frames", "-show_streams", "-show_format", "-of", "json", native.destination], { encoding: "utf8" });
+    assert.equal(probed.status, 0, probed.stderr);
+    const metadata = JSON.parse(probed.stdout);
+    const video = metadata.streams.filter((entry) => entry.codec_type === "video");
+    const audio = metadata.streams.filter((entry) => entry.codec_type === "audio");
+    assert.equal(video.length, 1);
+    assert.equal(audio.length, Number(promiseCase.audio));
+    assert.equal(video[0].width, promiseCase.width);
+    assert.equal(video[0].height, promiseCase.height);
+    assert.equal(video[0].r_frame_rate, `${promiseCase.fps}/1`);
+    assert.equal(Number(video[0].nb_read_frames), promiseCase.durationSeconds * promiseCase.fps);
+    assert.equal(video[0].codec_name, "h264");
+    assert.ok(metadata.format.format_name.split(",").includes("mp4"));
+    const bytes = await readFile(native.destination);
+    assert.equal(bytes.length, native.finalIdentity.size);
+    assert.equal(createHash("sha256").update(bytes).digest("hex"), native.finalIdentity.sha256);
+    const sampleSize = 160 * 90 * 3;
+    const samples = [0.15, 0.75, Math.min(2, promiseCase.durationSeconds - 0.1)].map((at) => {
+      const decoded = spawnSync(executable("artdaddy-ffmpeg"), ["-nostdin", "-v", "error", "-ss", String(at), "-i", native.destination,
+        "-frames:v", "1", "-vf", "scale=160:90", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"], { maxBuffer: sampleSize + 1024 * 1024 });
+      assert.equal(decoded.status, 0, String(decoded.stderr));
+      assert.equal(decoded.stdout.length, sampleSize);
+      return decoded.stdout;
+    });
+    assert.ok(!samples[0].equals(samples[2]), "Promise picture is frozen");
+    const tiles = Array.from({ length: promiseCase.videoLayers }, (_, index) => {
+      const x = Math.floor(((index % native.columns) + 0.5) * 160 / native.columns);
+      const y = Math.floor((Math.floor(index / native.columns) + 0.5) * 90 * native.imageHeight / native.rows);
+      const values = Buffer.concat(Array.from({ length: 8 }, (_, row) => {
+        const offset = ((y + row - 4) * 160 + x - 8) * 3;
+        return samples[1].subarray(offset, offset + 16 * 3);
+      }));
+      assert.ok(values.some((value) => value > 48), `Promise layer${index} is blank`);
+      return createHash("sha256").update(values).digest("hex");
+    });
+    assert.equal(new Set(tiles).size, promiseCase.videoLayers, "Promise layers collapsed to identical pictures");
+    let captionSamples;
+    if (promiseCase.captions) {
+      const painted = [0.15, 0.75].map((at) => {
+        const decoded = spawnSync(executable("artdaddy-ffmpeg"), ["-nostdin", "-v", "error", "-ss", String(at), "-i", native.destination,
+          "-frames:v", "1", "-vf", "scale=384:216", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"], { maxBuffer: 1024 * 1024 });
+        assert.equal(decoded.status, 0, String(decoded.stderr));
+        assert.equal(decoded.stdout.length, 384 * 216 * 3);
+        let count = 0;
+        for (let row = 172; row < 216; row++) for (let column = 0; column < 384; column++) {
+          const index = (row * 384 + column) * 3;
+          if (decoded.stdout[index] > 150 && decoded.stdout[index + 1] > 150 && decoded.stdout[index + 2] > 150) count++;
+        }
+        return count;
+      });
+      assert.ok(painted[1] > 0 && painted[1] > painted[0], "Promise caption did not visibly fade in");
+      captionSamples = painted;
+    }
+    let sound;
+    if (promiseCase.audio) {
+      assert.equal(audio[0].channels, 2);
+      assert.equal(Number(audio[0].sample_rate), 48000);
+      sound = await new Promise((resolve, reject) => {
+        const child = spawn(executable("artdaddy-ffmpeg"), ["-nostdin", "-v", "error", "-i", native.destination,
+          "-map", "0:a:0", "-ar", "48000", "-ac", "2", "-f", "f64le", "-"], { windowsHide: true });
+        let pending = Buffer.alloc(0), frames = 0, error = "";
+        const energy = [0, 0], real = [0, 0, 0, 0], imaginary = [0, 0, 0, 0];
+        child.stdout.on("data", (chunk) => {
+          const bytes = Buffer.concat([pending, chunk]);
+          const complete = bytes.length - bytes.length % 16;
+          for (let offset = 0; offset < complete; offset += 16) {
+            const values = [bytes.readDoubleLE(offset), bytes.readDoubleLE(offset + 8)];
+            if (!values.every(Number.isFinite)) { error = "non-finite audio sample"; child.kill(); return; }
+            for (let channel = 0; channel < 2; channel++) {
+              energy[channel] += values[channel] ** 2;
+              if (frames < 48000) for (let tone = 0; tone < 2; tone++) {
+                const angle = 2 * Math.PI * (tone ? 880 : 440) * frames / 48000;
+                real[channel * 2 + tone] += values[channel] * Math.cos(angle);
+                imaginary[channel * 2 + tone] += values[channel] * Math.sin(angle);
+              }
+            }
+            frames++;
+          }
+          pending = bytes.subarray(complete);
+        });
+        child.stderr.on("data", (chunk) => { error = (error + String(chunk)).slice(-4096); });
+        child.once("error", reject);
+        child.once("close", (code) => code === 0 && pending.length === 0 ? resolve({ frames, energy,
+          tones: real.map((value, index) => 2 * Math.hypot(value, imaginary[index]) / Math.min(frames, 48000)) }) : reject(new Error(error || `Audio decode failed:${code}`)));
+      });
+      assert.ok(sound.frames >= promiseCase.durationSeconds * 48000 && sound.frames <= promiseCase.durationSeconds * 48000 + 1024);
+      assert.ok(sound.energy.every((value) => value > 0));
+      assert.ok(sound.tones[0] > 0.06 && sound.tones[3] > 0.04 && sound.tones[1] < 0.01 && sound.tones[2] < 0.01,
+        "Promise audio lost, swapped or mixed the authored stereo tones");
+    }
+    const speedLimit = promiseProfile === "16gb" ? promiseCase.speedFactor16gb : null;
+    const timingQualified = speedLimit === null || native.elapsedMs <= promiseCase.durationSeconds * speedLimit * 1000;
+    const cap = Number(process.env.ARTDADDY_QA_MEMORY_CAP_BYTES ?? 0);
+    const profileEnforced = cap > 0 && cap <= promiseLibrary.profiles[promiseProfile].systemMemoryBytes;
+    const temporarySpaceQualified = false;
+    proof.promiseResult = { ...native, fixture: promiseFixture, sound, captionSamples, artifactVerified: true, timingQualified,
+      profileEnforced, physicalQualified: false, temporarySpaceQualified,
+      passed: promiseCase.kind === "promise" && timingQualified && profileEnforced && temporarySpaceQualified && native.scratchCleaned && native.estimateProvided,
+      qualificationStatus: promiseCase.kind === "pilot" ? "pilot-only" : "incomplete-resource-and-estimate-proof" };
+    await writeFile(path.join(output, "promise-library.json"), JSON.stringify(proof.promiseResult, null, 2));
+    console.log(`PROMISE LIBRARY ${JSON.stringify(proof.promiseResult)}`);
+  }
   if (profileSeconds) {
     assert.ok(report.denseProfile, "Requested dense profile did not produce a result");
     const profile = report.denseProfile;

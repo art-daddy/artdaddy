@@ -1,0 +1,42 @@
+{
+  "version": 2,
+  "scope": "ffmpeg-mp4-exporter-promise",
+  "physicalDevicesRequired": true,
+  "temporaryDiskLimitBytes": 20000000000,
+  "profiles": {
+    "8gb": { "systemMemoryBytes": 8589934592, "speedRequired": false, "physicalQualified": false },
+    "16gb": { "systemMemoryBytes": 17179869184, "speedRequired": true, "physicalQualified": false }
+  },
+  "sourceClasses": {
+    "generated": { "realWorld": false, "provenance": "Locally generated moving pattern and distinct stereo tones; never labelled real phone footage." },
+    "screen-recording": { "realWorld": true, "path": "e2e/ui/fixtures/mac-recording-preview.mp4", "provenance": "Existing local macOS screen-recording regression fixture; record its actual metadata and SHA256 at run time." },
+    "phone-vfr-rotation": { "realWorld": true, "path": null, "provenance": "An original phone recording with variable frame rate and rotation is required. Missing input is blocked, never passed or replaced by a synthetic clip." },
+    "web-download": { "realWorld": true, "path": null, "provenance": "A real downloaded clip with recorded origin and redistribution permission is required. Missing input is blocked, never counted as passed." }
+  },
+  "cases": [
+    { "id": "social-portrait", "line": "short-social", "kind": "promise", "source": "generated", "width": 1080, "height": 1920, "fps": 30, "durationSeconds": 15, "visualClips": 8, "videoLayers": 1, "captions": true, "audio": true, "speedFactor16gb": 2 },
+    { "id": "youtube-hd", "line": "ordinary-hd", "kind": "promise", "source": "generated", "width": 1920, "height": 1080, "fps": 30, "durationSeconds": 600, "visualClips": 50, "videoLayers": 1, "captions": true, "audio": true, "speedFactor16gb": 2 },
+    { "id": "long-hd-1000", "line": "long-hd", "kind": "promise", "source": "generated", "width": 1920, "height": 1080, "fps": 30, "durationSeconds": 7200, "visualClips": 1000, "videoLayers": 1, "captions": true, "audio": true, "speedFactor16gb": 2 },
+    { "id": "4k-four-things", "line": "4k", "kind": "promise", "source": "generated", "width": 3840, "height": 2160, "fps": 30, "durationSeconds": 1800, "visualClips": 180, "videoLayers": 3, "captions": true, "audio": true, "speedFactor16gb": 4 },
+    { "id": "4k-four-videos", "line": "4k", "kind": "promise", "source": "generated", "width": 3840, "height": 2160, "fps": 30, "durationSeconds": 1800, "visualClips": 240, "videoLayers": 4, "captions": false, "audio": true, "speedFactor16gb": 4 },
+    { "id": "heavy-eight-things", "line": "heavy-hd", "kind": "promise", "source": "generated", "width": 1920, "height": 1080, "fps": 30, "durationSeconds": 600, "visualClips": 140, "videoLayers": 7, "captions": true, "audio": true, "speedFactor16gb": 4 },
+    { "id": "heavy-eight-videos", "line": "heavy-hd", "kind": "promise", "source": "generated", "width": 1920, "height": 1080, "fps": 30, "durationSeconds": 600, "visualClips": 160, "videoLayers": 8, "captions": false, "audio": true, "speedFactor16gb": 4 },
+    { "id": "hd60", "line": "hd60", "kind": "promise", "source": "generated", "width": 1920, "height": 1080, "fps": 60, "durationSeconds": 60, "visualClips": 20, "videoLayers": 1, "captions": true, "audio": true, "speedFactor16gb": 2 },
+    { "id": "screen-recording", "line": "real-screen-recording", "kind": "promise", "source": "screen-recording", "width": 1920, "height": 1080, "fps": 30, "durationSeconds": 10, "visualClips": 1, "videoLayers": 1, "captions": true, "audio": true, "speedFactor16gb": 2 },
+    { "id": "phone-vfr-rotation", "line": "real-phone-vfr-rotation", "kind": "promise", "source": "phone-vfr-rotation", "width": 1080, "height": 1920, "fps": 30, "durationSeconds": 10, "visualClips": 1, "videoLayers": 1, "captions": true, "audio": true, "speedFactor16gb": 2 },
+    { "id": "web-download", "line": "real-web-download", "kind": "promise", "source": "web-download", "width": 1920, "height": 1080, "fps": 30, "durationSeconds": 10, "visualClips": 1, "videoLayers": 1, "captions": true, "audio": true, "speedFactor16gb": 2 },
+    { "id": "4k60-measured-limit", "line": "4k60-measurement", "kind": "measurement", "source": "generated", "width": 3840, "height": 2160, "fps": 60, "durationSeconds": 60, "visualClips": 12, "videoLayers": 3, "captions": true, "audio": true, "speedFactor16gb": null },
+    { "id": "4k-four-things-pilot", "line": "4k-pilot-only", "kind": "pilot", "source": "generated", "width": 3840, "height": 2160, "fps": 30, "durationSeconds": 10, "visualClips": 6, "videoLayers": 3, "captions": true, "audio": true, "speedFactor16gb": 4 },
+    { "id": "heavy-eight-things-pilot", "line": "heavy-pilot-only", "kind": "pilot", "source": "generated", "width": 1920, "height": 1080, "fps": 30, "durationSeconds": 10, "visualClips": 14, "videoLayers": 7, "captions": true, "audio": true, "speedFactor16gb": 4 },
+    { "id": "legacy-stress-once", "line": "legacy-stretch", "kind": "stretch", "source": "generated", "width": 3840, "height": 2160, "fps": 60, "durationSeconds": 7200, "visualClips": 5000, "videoLayers": 16, "captions": true, "audio": true, "speedFactor16gb": null }
+  ],
+  "resultRules": {
+    "neverCountPartialOrPilotAsPromisePass": true,
+    "missingSourcesAreBlockedNotPassed": true,
+    "includeRuntimeAndVerificationFailures": true,
+    "requireCorrectPictureAudioCaptionsAndCleanup": true,
+    "eightGbRequiresEstimateButNoSpeedPass": true,
+    "physicalQualificationIsSeparate": true,
+    "overallIncludesBlockedRequests": true
+  }
+}

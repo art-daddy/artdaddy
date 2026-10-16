@@ -161,6 +161,38 @@ by the corresponding open items below and cannot be omitted from phase completio
 - V2-D004: no prior report certifies the V2 promise. The verified dense sample is
   correct but slow; thirteen caption and eleven delivery cases prove those classes,
   not a representative pass rate on the new project library or physical machines.
+- V2-D005: the owner approved the proposed export preflight UI, Full quality/Fast
+  controls, plain-language full/light warnings, fixes and Continue/Cancel choices.
+  Fast remains unavailable until quality is measured; Continue cannot disable
+  existing validation, publication or resource guards.
+- V2-D006: the owner approved automatic large-job routing through the existing
+  FFmpeg streamed-piece/continuous-audio path and anonymous export reporting with
+  both privacy-policy updates. No deployment, new engine or raised limit is
+  approved. The accepted disclosure excludes filenames, paths, project content,
+  project IDs and raw diagnostic text.
+- V2-D007: keep the twelve-minute disposable QA deadline unchanged. The owner
+  deferred full-size promise and stretch execution until implementation changes
+  are finished. Run labelled short pilots now; do not silently extend the harness
+  deadline or count a pilot as a full-size pass.
+- V2-D008: exporterPromiseCases.json declares15cases, both software profiles,
+  independent promise lines, measurement/pilot/stretch kinds and source provenance.
+  Original phone-VFR/rotation and permissioned web-download inputs are still
+  missing; those cases stay blocked rather than being replaced with synthetics.
+  The real screen-recording fixture is identified separately. Actual metadata
+  and source hashes are captured at execution, not inferred from filenames.
+- V2-D009: use the existing isolated native QA queue for one library case at a
+  time, with real MP4/frame/tile/caption/audio checks, published identity,
+  catalog/ledger agreement and native-owned scratch cleanup. A valid artifact
+  cannot count as a promise pass without applicable timing, profile enforcement,
+  time-estimate and temporary-space proof. Temporary-space qualification is
+  currently false and is explicitly required by the pass expression.
+- V2-D010: capped8GB-class heavy pilot report1792169561100delivers300HDframes
+  with seven distinct videos plus captions, expected finite left/right tones,
+  verified publication and staging/scratch cleanup in15955.5ms. It is pilot-only:
+  estimateProvided and temporarySpaceQualified are false, physical qualification
+  is false and passed is false. The first run failed caption inspection at low
+  inspection resolution;384x216inspection retains the same brightness/motion
+  checks and the end-to-end rerun passes. No full promise percentage is inferred.
 
 ## Historical V1 Design And Evidence
 

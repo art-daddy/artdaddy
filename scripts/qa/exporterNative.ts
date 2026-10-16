@@ -151,6 +151,83 @@ async function exercise(): Promise<void> {
       selection: plan.selection, continuousAudio: !!plan.audio, encoderThreads });
   }
   let denseProfile: Record<string, unknown> | undefined;
+  let promiseResult: Record<string, unknown> | undefined;
+  if (params.get("promiseId")) {
+    const input = JSON.parse(await readTextFile(joinPath(root, "promise-input.json"))) as {
+      case: { id: string; kind: string; width: number; height: number; fps: number; durationSeconds: number;
+        visualClips: number; videoLayers: number; captions: boolean; audio: boolean; speedFactor16gb: number | null };
+      profile: string; fixture: { paths: string[] };
+    };
+    const definition = input.case;
+    check(definition.id === params.get("promiseId"), "Promise fixture identity mismatch");
+    const timeline = emptyTimeline(definition.width, definition.height, definition.fps);
+    const frames = Math.round(definition.durationSeconds * definition.fps);
+    const columns = Math.ceil(Math.sqrt(definition.videoLayers));
+    const rows = Math.ceil(definition.videoLayers / columns);
+    const imageHeight = definition.captions ? 0.8 : 1;
+    for (let layer = 0; layer < definition.videoLayers; layer++) {
+      const count = Math.floor(definition.visualClips / definition.videoLayers) +
+        Number(layer < definition.visualClips % definition.videoLayers);
+      timeline.tracks.push({ id: `promise-video-${layer}`, kind: "video", z: layer,
+        clips: Array.from({ length: count }, (_, index) => {
+          const from = Math.floor(index * frames / count);
+          const to = Math.floor((index + 1) * frames / count);
+          return { id: `promise-${layer}-${index}`, kind: "video", media_ref: input.fixture.paths[layer], source_in: 0,
+            source_out: to - from, timeline_in: from, timeline_out: to, fit: "stretch",
+            transform: { position: { x: ((layer % columns) + 0.5) / columns, y: (Math.floor(layer / columns) + 0.5) * imageHeight / rows },
+              scale_x: 1 / columns, scale_y: imageHeight / rows } };
+        }) });
+    }
+    if (definition.audio) timeline.tracks.push({ id: "promise-audio", kind: "audio", z: 0, clips: [{ id: "promise-score", kind: "audio",
+      media_ref: armed.source, source_in: 0, source_out: definition.fps, timeline_in: 0, timeline_out: frames, loop: true }] });
+    if (definition.captions) timeline.tracks.push({ id: "promise-caption", kind: "text", z: definition.videoLayers + 1,
+      clips: Array.from({ length: Math.ceil(definition.durationSeconds / 5) }, (_, index) => ({ id: `promise-caption-${index}`, kind: "text",
+        text: `EXPORT ${index + 1}`, timeline_in: index * 5 * definition.fps, timeline_out: Math.min(frames, (index * 5 + 4) * definition.fps),
+        transform: { position: { x: 0.5, y: 0.9 } }, animation: { entrance: "fade", entrance_ms: 500 },
+        style: { font: "Poppins", fontsize: Math.round(definition.height / 22), color: "white" } })) });
+    const snapshot = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(timeline))));
+    const captured = { ...admission, snapshotSha256: Array.from(snapshot, (byte) => byte.toString(16).padStart(2, "0")).join("") };
+    const destination = joinPath(root, `promise-${definition.id}.mp4`);
+    const stage = joinPath(root, `.promise-${definition.id}.partial`);
+    const started = performance.now();
+    const plan = buildRenderCommand(timeline, stage, { engine: "partition-pipes-v1", quality: "medium" });
+    let promiseId = "";
+    let scratchPath: string | undefined;
+    let scratchRead: Promise<void> | undefined;
+    let scratchError: unknown;
+    const detach = supervisor.subscribe((view) => {
+      if (view.id !== promiseId || view.state !== "running" || scratchRead) return;
+      scratchRead = invoke<Array<{ id: string; render_scratch?: { path: string } }>>("jobs_export_intents")
+        .then((entries) => { scratchPath = entries.find((entry) => entry.id === promiseId)?.render_scratch?.path; })
+        .catch((error: unknown) => { scratchError = error; });
+    });
+    const queued = await queueRenderJob(context, { plan, admission: captured, destPath: destination, stagePath: stage,
+      filename: `promise-${definition.id}.mp4`, quality: "medium" });
+    promiseId = queued.job_id;
+    const outcome = await whenExportEnds(queued.job_id);
+    await whenExportsSettle();
+    detach();
+    await scratchRead;
+    const delivery = (await supervisor.delivery.list()).find((entry) => entry.id === queued.job_id);
+    const records = await store.readJson<{ jobs: Array<{ id: string; status: string }> }>(joinPath(projectDir, "internals/jobs.json"), { jobs: [] });
+    const saved = listExportRecords().find((entry) => entry.job_id === queued.job_id);
+    const registered = (await store.listClips()).find((entry) => entry.id === saved?.mediaRef);
+    const measured = await store.probeMedia(destination, 0);
+    const registeredPath = registered ? await store.resolveMediaRef(registered.id) : null;
+    const linked = registeredPath ? await store.probeMedia(registeredPath, 0) : null;
+    const publicationVerified = delivery?.state === "published" && delivery.followups_done &&
+      delivery.identity?.sha256 === measured?.sha256 && delivery.identity?.size === measured?.size &&
+      linked?.sha256 === measured?.sha256 && linked?.size === measured?.size &&
+      records.jobs.find((entry) => entry.id === queued.job_id)?.status === "done";
+    promiseResult = { caseId: definition.id, profile: input.profile, kind: definition.kind, destination, jobId: queued.job_id,
+      state: outcome?.state ?? "missing", error: outcome?.error ?? null, elapsedMs: performance.now() - started,
+      projectFrames: frames, partitions: plan.steps?.length ?? 0, columns, rows, imageHeight,
+      publicationVerified, finalIdentity: delivery?.identity,
+      stagingCleaned: !(await exists(stage)), scratchCleaned: !!scratchPath && !(await exists(scratchPath)),
+      scratchEvidenceError: scratchError ? String(scratchError) : null, estimateProvided: false };
+    await writeTextFile(joinPath(root, "promise-native-result.json"), JSON.stringify(promiseResult));
+    check(outcome?.state === "done", `Promise export failed: ${JSON.stringify(promiseResult)}`);
+  }
   const profileSeconds = Number(params.get("profileSeconds") ?? 0);
   if (profileSeconds) {
     check([6, 15, 30, 60].includes(profileSeconds), "Invalid dense profile duration");
@@ -231,6 +308,7 @@ async function exercise(): Promise<void> {
       { kind: "live-joined", delivered: liveCopy.destination, identity: joinedCopy.identity }],
     unbound: { id: armed.unbound.id, code: unbound.code, error: unbound.stderr_head, delivered: armed.unbound.destination, planGuessed: false },
     compiled,
+    ...(promiseResult ? { promiseResult } : {}),
     ...(denseProfile ? { denseProfile } : {}),
     progress: ended.stdout_tail, scope: "native-owner-capture-and-crash-recovery" }));
   status.textContent = "Native recovery delivered";
