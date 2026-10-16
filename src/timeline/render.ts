@@ -3327,13 +3327,6 @@ export async function exportTimelineTool(
     fps: typeof args.fps === "number" ? args.fps : undefined,
   });
   if (!prepared.ok) return prepared.result;
-  if (folder) {
-    try {
-      await ctx.store.ensureDir(folder.dir);
-    } catch (e) {
-      return { ok: false, error: `could not make the folder ${folder.label}: ${String(e)}` };
-    }
-  }
 
   const sub = await queueRenderJob(ctx, {
     plan: prepared.plan,
@@ -3342,6 +3335,7 @@ export async function exportTimelineTool(
     stagePath: target,
     filename: dest.filename,
     quality: String(args.quality ?? ""),
+    ...(folder ? { outputDirectory: folder.dir } : {}),
   });
 
   // Don't leak the OS Downloads path to the model — return only the filename. When the caller
@@ -3394,6 +3388,7 @@ export async function queueRenderJob(
     stagePath: string;
     filename: string;
     quality: string;
+    outputDirectory?: string;
     batch?: string;
   },
 ): Promise<ExportSubmission> {
@@ -3478,6 +3473,7 @@ export async function prepareRenderSubmission(
     origin: ctx.origin,
     submissionSignal: ctx.signal,
     workload: renderPlan.workload,
+    ...(request.outputDirectory ? { outputDirectory: request.outputDirectory } : {}),
     // Describes the artifact the plan will produce, captured here because a failed encode
     // leaves no file to measure and the metric still has to say what was attempted.
     meta: telemetry,

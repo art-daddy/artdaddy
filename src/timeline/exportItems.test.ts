@@ -4,6 +4,7 @@
 // zip of the project. These drive the real tool door (the registry's `export`) on an in-memory
 // disk and judge what lands there, what the queue reports and what wakes the agent.
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { __setExportConfirmationForTests } from "../lib/confirm";
 
 vi.mock("@tauri-apps/api/path", () => ({ resolveResource: async (r: string) => `C:/res/${r}` }));
 
@@ -425,6 +426,20 @@ describe("export delivers separate files into a folder", () => {
     expect(r.saved_to).toBe("proj.mp4");
     await whenExportsSettle();
     expect(Object.keys(p.disk.under(`${DL}/renders`))).toEqual(["proj.mp4"]);
+  });
+
+  it.each(["whole", "clip", "copy"] as const)("does not create a destination folder after Cancel for %s export", async (kind) => {
+    const p = await project();
+    __setExportConfirmationForTests(async () => "cancel");
+    const args = { output_dir: "not-created-without-consent",
+      ...(kind === "clip" ? { clip_ids: [p.clips.a] } : kind === "copy" ? { media_refs: ["media_aaa"] } : {}) };
+    const result = await exportTool(args, p.ctx).catch((error: unknown) => ({ ok: false, error: String(error) })) as Any;
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("cancelled before submission");
+    expect(p.disk.dirs.has(`${DL}/not-created-without-consent`)).toBe(false);
+    expect(p.disk.under(`${DL}/not-created-without-consent`)).toEqual({});
+    expect(p.ffmpeg).toHaveLength(0);
+    expect(listExportOutcomes()).toHaveLength(0);
   });
 
   // The failure direction: one bad item must leave NOTHING behind, not a half-delivered folder.

@@ -411,6 +411,15 @@ by the corresponding open items below and cannot be omitted from phase completio
   or exact filesystem peak. Metadata/allocation overhead remains extra within
   the existing headroom. The library's full 20 GB temporary-space qualification
   stays open until artifact-level/full-case measurement; no promise counter moves.
+- V2-D036: the real tool's whole/clip/copy Cancel cases exposed that the
+  whole-timeline adapter still made a named destination folder before consent,
+  although the batch adapter had already moved that effect. Whole-timeline now
+  captures the folder intent in its immutable submission and the existing shared
+  admission gate creates it only after Continue, with the same destination and
+  project-lifecycle checks as clip/copy exports. All three Cancel paths leave no
+  folder, deliverable, render command or queue outcome. Successful whole-folder
+  delivery and folder-creation failure still behave correctly. The 109 scoped
+  export/queue/frozen-corpus checks passed with no reference-output changes.
 
 ## Historical V1 Design And Evidence
 
