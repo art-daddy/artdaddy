@@ -17,6 +17,10 @@ pub struct Workspace {
 impl Workspace {
   pub fn new(limit: u64) -> Arc<Self> { Arc::new(Self { limit, entry_limit: 16384, state: Mutex::new(State::default()) }) }
 
+  pub(super) fn available_bytes(&self) -> u64 {
+    self.limit.saturating_sub(self.state.lock().unwrap_or_else(|error| error.into_inner()).used)
+  }
+
   pub fn account_existing(&self, root: &str, bytes: u64, entries: u64) -> Result<(), String> {
     let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
     let previous = state.roots.get(root).copied().unwrap_or((0, 0));

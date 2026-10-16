@@ -246,6 +246,23 @@ by the corresponding open items below and cannot be omitted from phase completio
   cap remains6GiBand reported peak is3572879360bytes, not an exact physical peak
   ceiling. Host RAM is64GB, not a physical8GBmachine. Pilot/estimate/temp-space
   qualification flags remain unchanged; no 99%or full-size pass is inferred.
+- V2-D019: the recovered protocol19native FFmpeg foundation was present in the
+  tested worktree but not included in the initial five-file recovery commit.
+  Commit42cc280records that existing Supervisor/stream/workspace/budget code and
+  required source/destination lease registrations, excluding unrelated native
+  filesystem-scope edits. This is existing FFmpeg support, not parked-engine
+  integration. All121affected native job checks pass; the separate read-only
+  resource-query piece is commitf3d12c6.
+- V2-D020: assess preflight from required workload, resource, estimate and native
+  budget inputs. Never use promise speed targets as synthetic ETA measurements.
+  Invalid or missing inputs remain unknown/full warning; known resource fit and
+  a time estimate above2xproduce a light notice. Check final allocation and
+  temporary space together conservatively when volume sharing is uncertain.
+  The native snapshot supplies the actual resident cutoff, remaining scratch
+  payload after retained reservations and execution limit; none are raised.
+  Twenty-three local-reader/options checks and the real native reservation
+  snapshot check pass. These pure rules are not yet a user confirmation gate:
+  calibration, mandatory single/batch admission and visible controls remain open.
 
 ## Historical V1 Design And Evidence
 

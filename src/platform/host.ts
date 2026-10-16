@@ -5,6 +5,7 @@
 // the web build and for the moment before the first IPC round-trip completes.
 import { platform } from "./index";
 import { settledWithin } from "../lib/settledWithin";
+import type { ExportBudgets } from "../timeline/exportOptions";
 
 export type HostOs = "windows" | "macos" | "linux" | "unknown";
 
@@ -19,11 +20,13 @@ export interface ExportResources {
   readonly available_memory_bytes: number | null;
   readonly scratch_free_bytes: number | null;
   readonly destination_free_bytes: number | null;
+  readonly budgets: ExportBudgets;
 }
 
 export async function resolveExportResources(destination: string, signal?: AbortSignal): Promise<ExportResources> {
   const unknown: ExportResources = { total_memory_bytes: null, available_memory_bytes: null,
-    scratch_free_bytes: null, destination_free_bytes: null };
+    scratch_free_bytes: null, destination_free_bytes: null,
+    budgets: { memoryBytes: null, temporaryBytes: null, executionSeconds: null } };
   if (platform.name !== "tauri" || signal?.aborted) return unknown;
   const pending = (async (): Promise<ExportResources> => {
     const { invoke } = await import("@tauri-apps/api/core");
@@ -37,9 +40,15 @@ export async function resolveExportResources(destination: string, signal?: Abort
     };
     const total = bytes("total_memory_bytes");
     const available = bytes("available_memory_bytes");
+    const limits = raw.budgets && typeof raw.budgets === "object" ? raw.budgets as Record<string, unknown> : {};
+    const limit = (key: string): number | null => {
+      const value = limits[key];
+      return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+    };
     return { total_memory_bytes: total !== null && total > 0 ? total : null,
       available_memory_bytes: total !== null && total > 0 && available !== null && available <= total ? available : null,
-      scratch_free_bytes: bytes("scratch_free_bytes"), destination_free_bytes: bytes("destination_free_bytes") };
+      scratch_free_bytes: bytes("scratch_free_bytes"), destination_free_bytes: bytes("destination_free_bytes"),
+      budgets: { memoryBytes: limit("memoryBytes"), temporaryBytes: limit("temporaryBytes"), executionSeconds: limit("executionSeconds") } };
   })();
   return (await settledWithin(pending, 2000, signal)) ?? unknown;
 }

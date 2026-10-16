@@ -7,10 +7,81 @@
 // existed, and there is a golden gate that says so.
 export type ExportResolution = "source" | "2160p" | "1440p" | "1080p" | "720p" | "480p";
 export type ExportQuality = "high" | "medium" | "low";
+export type ExportEngine = "file-sequence-v1" | "partition-pipes-v1" | "auto";
 
 import type { Branding } from "./branding";
+import type { RenderWorkload } from "./renderPlan";
+import type { ExportResources } from "../platform/host";
+
+export interface ExportEstimates {
+  readonly memoryBytes: number | null;
+  readonly temporaryBytes: number | null;
+  readonly finalBytes: number | null;
+  readonly seconds: number | null;
+}
+
+export interface ExportBudgets {
+  readonly memoryBytes: number | null;
+  readonly temporaryBytes: number | null;
+  readonly executionSeconds: number | null;
+}
+
+export type ExportPreflightReason = "outside_promise" | "memory_unknown" | "memory_shortage" |
+  "disk_unknown" | "disk_shortage" | "temporary_limit" | "time_unknown" | "execution_limit" | "slow";
+
+export interface ExportAssessment {
+  readonly promiseLine: "hd" | "heavy_hd" | "4k" | "outside";
+  readonly severity: "none" | "notice" | "warning";
+  readonly reasons: readonly ExportPreflightReason[];
+  readonly estimates: ExportEstimates;
+}
+
+export function assessExport(
+  workload: RenderWorkload,
+  resources: ExportResources,
+  measured: ExportEstimates,
+  budgets: ExportBudgets,
+): ExportAssessment {
+  const valid = (value: number | null): value is number => value !== null && Number.isFinite(value) && value >= 0;
+  const estimates: ExportEstimates = {
+    memoryBytes: valid(measured.memoryBytes) ? measured.memoryBytes : null,
+    temporaryBytes: valid(measured.temporaryBytes) ? measured.temporaryBytes : null,
+    finalBytes: valid(measured.finalBytes) ? measured.finalBytes : null,
+    seconds: valid(measured.seconds) ? measured.seconds : null,
+  };
+  const short = Math.min(workload.width, workload.height);
+  const long = Math.max(workload.width, workload.height);
+  const usable = Number.isFinite(short) && Number.isFinite(long) && short > 0 &&
+    Number.isFinite(workload.fps) && workload.fps > 0 && Number.isFinite(workload.durationSeconds) && workload.durationSeconds > 0;
+  const hd = usable && short <= 1080 && long <= 1920;
+  const withinHd = hd && workload.durationSeconds <= 7200 && workload.visualClips <= 1000;
+  const within4k = usable && !hd && short <= 2160 && long <= 3840 && workload.durationSeconds <= 1800 &&
+    workload.peakVisualLayers <= 4 && workload.fps <= 30;
+  const normalHd = withinHd && workload.peakVisualLayers <= 4 && workload.fps <= 60;
+  const heavyHd = withinHd && workload.peakVisualLayers <= 8 && workload.fps <= 30;
+  const promiseLine = normalHd ? "hd" : heavyHd ? "heavy_hd" : within4k ? "4k" : "outside";
+  const reasons: ExportPreflightReason[] = [];
+  if (promiseLine === "outside") reasons.push("outside_promise");
+  const memory = estimates.memoryBytes;
+  if (memory === null || !valid(resources.available_memory_bytes) || !valid(budgets.memoryBytes)) reasons.push("memory_unknown");
+  else if (memory > Math.min(resources.available_memory_bytes, budgets.memoryBytes)) reasons.push("memory_shortage");
+  const temporary = estimates.temporaryBytes;
+  const final = estimates.finalBytes;
+  if (temporary === null || final === null || !valid(resources.scratch_free_bytes) ||
+    !valid(resources.destination_free_bytes) || !valid(budgets.temporaryBytes)) reasons.push("disk_unknown");
+  else {
+    if (temporary > budgets.temporaryBytes) reasons.push("temporary_limit");
+    if (temporary + final > resources.scratch_free_bytes || temporary + final > resources.destination_free_bytes) reasons.push("disk_shortage");
+  }
+  if (estimates.seconds === null || !valid(budgets.executionSeconds)) reasons.push("time_unknown");
+  else if (estimates.seconds > budgets.executionSeconds) reasons.push("execution_limit");
+  else if (estimates.seconds > workload.durationSeconds * 2) reasons.push("slow");
+  return { promiseLine, estimates, reasons,
+    severity: reasons.some((reason) => reason !== "slow") ? "warning" : reasons.length ? "notice" : "none" };
+}
 
 export interface ExportOptions {
+  engine?: ExportEngine;
   resolution?: ExportResolution;
   quality?: ExportQuality;
   fps?: number;

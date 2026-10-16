@@ -8,7 +8,8 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 import { resolveExportResources } from "./host";
 
 const UNKNOWN = { total_memory_bytes: null, available_memory_bytes: null,
-  scratch_free_bytes: null, destination_free_bytes: null };
+  scratch_free_bytes: null, destination_free_bytes: null,
+  budgets: { memoryBytes: null, temporaryBytes: null, executionSeconds: null } };
 
 beforeEach(() => { invoke.mockReset(); shell.name = "tauri"; });
 afterEach(() => vi.useRealTimers());
@@ -16,7 +17,8 @@ afterEach(() => vi.useRealTimers());
 describe("local export resource snapshots", () => {
   it("preserves measured zero free space and sends the destination only to native IPC", async () => {
     const snapshot = { total_memory_bytes: 16 * 1024 ** 3, available_memory_bytes: 4 * 1024 ** 3,
-      scratch_free_bytes: 0, destination_free_bytes: 100 * 1024 ** 3 };
+      scratch_free_bytes: 0, destination_free_bytes: 100 * 1024 ** 3,
+      budgets: { memoryBytes: 3 * 1024 ** 3, temporaryBytes: 0, executionSeconds: 28800 } };
     invoke.mockResolvedValue(snapshot);
     expect(await resolveExportResources("C:/qa/movie.mp4")).toEqual(snapshot);
     expect(invoke).toHaveBeenCalledWith("jobs_export_resources", { destination: "C:/qa/movie.mp4" });

@@ -4,7 +4,55 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
-import { crfFor, outputFps, outputSize } from "./exportOptions";
+import { assessExport, crfFor, outputFps, outputSize, type ExportEstimates } from "./exportOptions";
+import type { RenderWorkload } from "./renderPlan";
+
+describe("export preflight assessment", () => {
+  const workload: RenderWorkload = { width: 1920, height: 1080, fps: 30, durationSeconds: 60,
+    visualClips: 10, captionClips: 1, audioClips: 1, peakVisualLayers: 2, peakMediaLayers: 1 };
+  const resources = { total_memory_bytes: 16e9, available_memory_bytes: 8e9, scratch_free_bytes: 100e9, destination_free_bytes: 100e9,
+    budgets: { memoryBytes: 4e9, temporaryBytes: 18e9, executionSeconds: 28800 } };
+  const estimates: ExportEstimates = { memoryBytes: 2e9, temporaryBytes: 1e9, finalBytes: 100e6, seconds: 60 };
+  const budgets = { memoryBytes: 4e9, temporaryBytes: 18e9, executionSeconds: 28800 };
+
+  it("uses the independent HD,4Kandheavy limits and counts captions as things", () => {
+    expect(assessExport(workload, resources, estimates, budgets)).toMatchObject({ promiseLine: "hd", severity: "none" });
+    const fourK = { ...workload, width: 3840, height: 2160, durationSeconds: 1800, peakVisualLayers: 4 };
+    expect(assessExport(fourK, resources, estimates, budgets).promiseLine).toBe("4k");
+    expect(assessExport({ ...fourK, peakVisualLayers: 5 }, resources, estimates, budgets).severity).toBe("warning");
+    expect(assessExport({ ...fourK, fps: 60 }, resources, estimates, budgets).promiseLine).toBe("outside");
+    expect(assessExport({ ...workload, peakVisualLayers: 8 }, resources, estimates, budgets).promiseLine).toBe("heavy_hd");
+    expect(assessExport({ ...workload, peakVisualLayers: 9 }, resources, estimates, budgets).promiseLine).toBe("outside");
+    expect(assessExport({ ...workload, visualClips: 1001 }, resources, estimates, budgets).promiseLine).toBe("outside");
+  });
+
+  it("shows a light notice for a known slow in-scope export but never for unknown resources", () => {
+    expect(assessExport(workload, resources, { ...estimates, seconds: 150 }, budgets)).toMatchObject({ severity: "notice", reasons: ["slow"] });
+    expect(assessExport(workload, resources, { ...estimates, seconds: null }, budgets)).toMatchObject({ severity: "warning", reasons: ["time_unknown"] });
+    expect(assessExport(workload, { ...resources, scratch_free_bytes: null }, estimates, budgets)).toMatchObject({ severity: "warning", reasons: ["disk_unknown"] });
+  });
+
+  it("does not put missing or invalid workload values inside the promise", () => {
+    for (const patch of [{ width: 0 }, { height: NaN }, { fps: 0 }, { fps: Infinity }, { durationSeconds: 0 }])
+      expect(assessExport({ ...workload, ...patch }, resources, estimates, budgets)).toMatchObject({ promiseLine: "outside", severity: "warning" });
+    expect(assessExport(workload, resources, { ...estimates, seconds: NaN, memoryBytes: Infinity }, budgets).reasons)
+      .toEqual(["memory_unknown", "time_unknown"]);
+  });
+
+  it("checks final allocation and temporary space together without assuming separate volumes", () => {
+    expect(assessExport(workload, { ...resources, destination_free_bytes: 1.05e9 }, estimates, budgets)).toMatchObject({ severity: "warning", reasons: ["disk_shortage"] });
+    expect(assessExport(workload, resources, { ...estimates, memoryBytes: 5e9 }, budgets).reasons).toContain("memory_shortage");
+    expect(assessExport(workload, resources, { ...estimates, temporaryBytes: 19e9 }, budgets).reasons).toContain("temporary_limit");
+  });
+
+  it("never downgrades a fit warning when available memory or storage decreases", () => {
+    fc.assert(fc.property(fc.integer({ min: 0, max: 8_000_000_000 }), fc.integer({ min: 0, max: 100_000_000_000 }),
+      (memory, disk) => {
+        const result = assessExport(workload, { ...resources, available_memory_bytes: memory, destination_free_bytes: disk }, estimates, budgets);
+        if (memory < estimates.memoryBytes! || disk < estimates.temporaryBytes! + estimates.finalBytes!) expect(result.severity).toBe("warning");
+      }), { numRuns: 200 });
+  });
+});
 
 describe("outputSize", () => {
   it("reads the preset off the SHORTER side, so it means the same thing in both orientations", () => {

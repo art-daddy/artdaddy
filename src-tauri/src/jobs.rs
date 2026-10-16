@@ -226,6 +226,15 @@ pub struct ExportResources {
   pub available_memory_bytes: Option<u64>,
   pub scratch_free_bytes: Option<u64>,
   pub destination_free_bytes: Option<u64>,
+  pub budgets: ExportResourceBudgets,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportResourceBudgets {
+  memory_bytes: u64,
+  temporary_bytes: u64,
+  execution_seconds: u64,
 }
 
 fn existing_resource_directory(path: &Path) -> Option<PathBuf> {
@@ -247,7 +256,7 @@ fn resource_free_bytes(path: &Path, disks: &sysinfo::Disks) -> Option<u64> {
     .map(|(disk, _)| disk.available_space())
 }
 
-fn export_resources(destination: &Path, scratch: Option<&Path>) -> ExportResources {
+fn export_resources(destination: &Path, scratch: Option<&Path>, workspace: &Workspace) -> ExportResources {
   let mut system = sysinfo::System::new();
   system.refresh_memory();
   let total_memory_bytes = (system.total_memory() > 0).then(|| system.total_memory());
@@ -255,7 +264,9 @@ fn export_resources(destination: &Path, scratch: Option<&Path>) -> ExportResourc
   let disks = sysinfo::Disks::new_with_refreshed_list();
   ExportResources { total_memory_bytes, available_memory_bytes,
     scratch_free_bytes: scratch.and_then(|path| resource_free_bytes(path, &disks)),
-    destination_free_bytes: resource_free_bytes(destination, &disks) }
+    destination_free_bytes: resource_free_bytes(destination, &disks),
+    budgets: ExportResourceBudgets { memory_bytes: budget::RENDER_RESIDENT_LIMIT,
+      temporary_bytes: workspace.available_bytes(), execution_seconds: EXPORT_EXECUTION_LIMIT_MS / 1000 } }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -2030,7 +2041,7 @@ pub fn jobs_export_protocol() -> u32 { 19 }
 #[tauri::command]
 pub async fn jobs_export_resources(jobs: tauri::State<'_, Supervisor>, destination: String) -> Result<ExportResources, String> {
   supervisor_work(jobs.inner().clone(), move |supervisor|
-    Ok(export_resources(Path::new(&destination), supervisor.export_work_root.as_deref()))).await
+    Ok(export_resources(Path::new(&destination), supervisor.export_work_root.as_deref(), &supervisor.workspace))).await
 }
 
 #[tauri::command]
@@ -4042,7 +4053,12 @@ mod tests {
   fn export_resource_snapshot_measures_existing_volumes_without_creating_output() {
     let root = tempfile::tempdir().unwrap();
     let destination = root.path().join("not-created").join("movie.mp4");
-    let measured = export_resources(&destination, Some(root.path()));
+    let workspace = Workspace::new(10_000);
+    workspace.account_existing("retained", 123, 1).unwrap();
+    let measured = export_resources(&destination, Some(root.path()), &workspace);
+    assert_eq!(measured.budgets.temporary_bytes, 9877);
+    assert_eq!(measured.budgets.memory_bytes, budget::RENDER_RESIDENT_LIMIT);
+    assert_eq!(measured.budgets.execution_seconds * 1000, EXPORT_EXECUTION_LIMIT_MS);
     assert!(measured.total_memory_bytes.is_some_and(|bytes| bytes > 1024 * 1024 * 1024));
     assert!(measured.available_memory_bytes.unwrap() <= measured.total_memory_bytes.unwrap());
     assert!(measured.destination_free_bytes.is_some_and(|bytes| bytes > 0), "{measured:?}");
@@ -4050,7 +4066,7 @@ mod tests {
     assert!(!destination.exists());
     assert!(!destination.parent().unwrap().exists());
     assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
-    let unknown = export_resources(Path::new("relative-output.mp4"), None);
+    let unknown = export_resources(Path::new("relative-output.mp4"), None, &workspace);
     assert!(unknown.destination_free_bytes.is_none());
     assert!(unknown.scratch_free_bytes.is_none());
     println!("native resource snapshot: {}", serde_json::to_string(&measured).unwrap());
