@@ -80,6 +80,12 @@ const fastEncoderProbe = process.env.ARTDADDY_QA_FAST_ENCODER_PROBE ?? "";
 assert.ok(!fastEncoderProbe || fastEncoderProbe === "amf-cqp18" && process.platform === "win32" && promiseCase?.kind === "pilot",
   "Fast encoder integration is a private Windows short-pilot measurement only");
 assert.ok(promiseLibrary.profiles[promiseProfile], "Unknown promise-library profile");
+const promiseAttempt = promiseCase ? { version: 2, caseId: promiseCase.id, profile: promiseProfile, kind: promiseCase.kind,
+  line: promiseCase.line, platform: process.platform, profileRunId: process.env.ARTDADDY_QA_MEMORY_RUN_ID ?? null,
+  definition: { width: promiseCase.width, height: promiseCase.height, fps: promiseCase.fps,
+    durationSeconds: promiseCase.durationSeconds, visualClips: promiseCase.visualClips, videoLayers: promiseCase.videoLayers } } : null;
+if (promiseAttempt) await writeFile(path.join(output, "promise-library.json"), JSON.stringify({ ...promiseAttempt,
+  status: "preparing", sourceReady: false, artifactVerified: false, passed: false }, null, 2));
 let promiseFixture;
 if (promiseCase) {
   const started = performance.now();
@@ -88,8 +94,9 @@ if (promiseCase) {
   if (promiseCase.source !== "generated") {
     const asset = sourceClass.path ? path.join(repository, sourceClass.path) : null;
     if (!asset || !(await present(asset))) {
-      await writeFile(path.join(output, "promise-library.json"), JSON.stringify({ version: 2, caseId: promiseId,
-        profile: promiseProfile, status: "blocked-source", passed: false, reason: "Required real-world source is unavailable",
+      await writeFile(path.join(output, "promise-library.json"), JSON.stringify({ ...promiseAttempt, version: 2, caseId: promiseId,
+        profile: promiseProfile, profileRunId: process.env.ARTDADDY_QA_MEMORY_RUN_ID ?? null,
+        status: "blocked-source", passed: false, reason: "Required real-world source is unavailable",
         realWorld: true, physicalQualified: false }, null, 2));
       throw new Error(`Promise case${promiseId} is blocked: its required real-world source is unavailable`);
     }
@@ -124,6 +131,8 @@ if (promiseCase) {
   promiseFixture = { preparationMs: performance.now() - started, realWorld: sourceClass.realWorld, provenance: sourceClass.provenance, paths, sources };
   await writeFile(path.join(root, "promise-input.json"), JSON.stringify({ case: promiseCase, profile: promiseProfile,
     profileSpec: promiseLibrary.profiles[promiseProfile], fixture: promiseFixture }));
+  await writeFile(path.join(output, "promise-library.json"), JSON.stringify({ ...promiseAttempt, status: "prepared",
+    sourceReady: true, artifactVerified: false, passed: false }, null, 2));
 }
 const source = path.join(root, "source.nut");
 const generated = spawnSync(executable("artdaddy-ffmpeg"), ["-y", "-nostdin", "-v", "error", "-f", "lavfi", "-i",
@@ -462,7 +471,11 @@ try {
     const cap = Number(process.env.ARTDADDY_QA_MEMORY_CAP_BYTES ?? 0);
     const profileEnforced = cap > 0 && cap <= promiseLibrary.profiles[promiseProfile].systemMemoryBytes;
     const temporarySpaceQualified = false;
-    proof.promiseResult = { ...native, fixture: promiseFixture, sound, captionSamples, artifactVerified: true, timingQualified,
+    proof.promiseResult = { ...promiseAttempt, ...native, fixture: promiseFixture, sound, captionSamples, sourceReady: true,
+      mode: native.encoder === "libx264" ? "quality" : native.encoder === "h264_amf" ? "fast" : "unknown",
+      encodedVideo: { width: video[0].width, height: video[0].height, fps: video[0].r_frame_rate, frames: Number(video[0].nb_read_frames) },
+      artifactVerified: true, timingQualified,
+      profileRunId: process.env.ARTDADDY_QA_MEMORY_RUN_ID ?? null,
       profileEnforced, physicalQualified: false, temporarySpaceQualified,
       passed: promiseCase.kind === "promise" && timingQualified && profileEnforced && temporarySpaceQualified && native.scratchCleaned && native.estimateProvided,
       qualificationStatus: promiseCase.kind === "pilot" ? "pilot-only" : "incomplete-resource-and-estimate-proof" };
@@ -573,6 +586,9 @@ try {
   proof.error = String(error);
   proof.elapsedMs = Date.now() - started;
   await writeFile(path.join(output, "report.json"), JSON.stringify(proof, null, 2));
+  if (promiseAttempt && !proof.promiseResult) await writeFile(path.join(output, "promise-library.json"), JSON.stringify({ ...promiseAttempt,
+    status: "failed", sourceReady: !!promiseFixture, artifactVerified: false, passed: false,
+    elapsedMs: proof.elapsedMs, physicalQualified: false }, null, 2));
   throw error;
 } finally {
   for (const child of children) stopOwned(child);

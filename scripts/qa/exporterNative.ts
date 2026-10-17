@@ -207,7 +207,12 @@ async function exercise(): Promise<void> {
     let scratchPath: string | undefined;
     let scratchRead: Promise<void> | undefined;
     let scratchError: unknown;
+    let readiness: "ready" | "not_ready" | "unknown" = "unknown";
     const detach = supervisor.subscribe((view) => {
+      if (view.id === promiseId) {
+        const facts = view.meta.telemetry as { readiness?: unknown } | undefined;
+        if (facts?.readiness === "ready" || facts?.readiness === "not_ready") readiness = facts.readiness;
+      }
       if (view.id !== promiseId || view.state !== "running" || scratchRead) return;
       scratchRead = invoke<Array<{ id: string; render_scratch?: { path: string } }>>("jobs_export_intents")
         .then((entries) => { scratchPath = entries.find((entry) => entry.id === promiseId)?.render_scratch?.path; })
@@ -234,6 +239,8 @@ async function exercise(): Promise<void> {
       linked?.sha256 === measured?.sha256 && linked?.size === measured?.size &&
       records.jobs.find((entry) => entry.id === queued.job_id)?.status === "done";
     promiseResult = { caseId: definition.id, profile: input.profile, kind: definition.kind, destination, jobId: queued.job_id,
+      encoder: plan.args[plan.args.lastIndexOf("-c:v") + 1],
+      readiness,
       state: outcome?.state ?? "missing", error: outcome?.error ?? null, elapsedMs: exportElapsedMs,
       projectFrames: frames, partitions: plan.steps?.length ?? 0, columns, rows, imageHeight,
       selection: plan.selection,

@@ -1,0 +1,106 @@
+import { readFile, readdir, stat } from "node:fs/promises";
+import path from "node:path";
+import os from "node:os";
+import { fileURLToPath } from "node:url";
+
+const repository = path.resolve(process.argv[2] ?? path.join(path.dirname(fileURLToPath(import.meta.url)), "../.."));
+const library = JSON.parse(await readFile(path.join(repository, "scripts/qa/exporterPromiseCases.json"), "utf8"));
+const directory = path.join(repository, "reports/qa/exporter");
+const entries = await readdir(directory, { withFileTypes: true }).catch((error) => {
+  if (error.code === "ENOENT") return [];
+  throw error;
+});
+let invalidRecords = 0;
+async function json(file) {
+  try {
+    if ((await stat(file)).size > 4 * 1024 * 1024) { invalidRecords++; return null; }
+    return JSON.parse(await readFile(file, "utf8"));
+  } catch (error) {
+    if (error.code !== "ENOENT") invalidRecords++;
+    return null;
+  }
+}
+const receipts = new Map();
+for (const entry of entries.filter((entry) => entry.isFile() && /^memory-.*\.json$/.test(entry.name))) {
+  const receipt = await json(path.join(directory, entry.name));
+  if (receipt?.runId) receipts.set(receipt.runId, receipt);
+}
+const attempts = [];
+let recoveredLegacyFailures = 0;
+const temporaryRoots = [os.tmpdir(), ...(process.platform === "win32" ? [path.join(os.homedir(), "AppData/Local/Temp")] : [])];
+async function historicalFailure(envelope) {
+  if (envelope?.ok !== false || typeof envelope.root !== "string" || !path.basename(envelope.root).startsWith("artdaddy-export-native-")) return null;
+  const parent = await stat(path.dirname(envelope.root), { bigint: true }).catch(() => null);
+  let owned = false;
+  for (const root of temporaryRoots) {
+    const approved = await stat(root, { bigint: true }).catch(() => null);
+    owned ||= !!parent && !!approved && parent.dev === approved.dev && parent.ino === approved.ino;
+  }
+  if (!owned) return null;
+  const input = await json(path.join(envelope.root, "promise-input.json"));
+  if (!input?.case?.id) return null;
+  recoveredLegacyFailures++;
+  return { caseId: input.case.id, kind: input.case.kind, profile: input.profile, platform: envelope.hardware?.platform,
+    status: "failed", passed: false, artifactVerified: false, readiness: "unknown", elapsedMs: envelope.elapsedMs };
+}
+for (const entry of entries.filter((entry) => entry.isDirectory())) {
+  let result = await json(path.join(directory, entry.name, "promise-library.json"));
+  const envelope = await json(path.join(directory, entry.name, "report.json"));
+  if (!result) result = await historicalFailure(envelope);
+  if (!result) continue;
+  const definition = library.cases.find((candidate) => candidate.id === result.caseId);
+  const platform = result.platform ?? envelope?.hardware?.platform;
+  if (!definition || !library.profiles[result.profile] || !library.platforms.includes(platform)) { invalidRecords++; continue; }
+  const receipt = receipts.get(result.profileRunId);
+  const profileVerified = platform === "win32" && !!receipt && receipt.scope === "windows-job-commit-pressure-simulation" && receipt.workload === "App" &&
+    receipt.exitCode === 0 && receipt.configuredCommitLimitBytes > 0 &&
+    receipt.configuredCommitLimitBytes <= library.profiles[result.profile].systemMemoryBytes;
+  const exactDefinition = result.definition && ["width", "height", "fps", "durationSeconds", "visualClips", "videoLayers"]
+    .every((key) => result.definition[key] === definition[key]);
+  const video = result.encodedVideo;
+  const complete = video?.width === definition.width && video?.height === definition.height && video?.fps === `${definition.fps}/1` &&
+    video?.frames === Math.round(definition.durationSeconds * definition.fps) && result.projectFrames === video.frames;
+  const timing = result.profile === "8gb" || definition.speedFactor16gb === null ||
+    Number.isFinite(result.elapsedMs) && result.elapsedMs <= definition.durationSeconds * definition.speedFactor16gb * 1000;
+  const passed = definition.kind === "promise" && result.kind === "promise" && result.mode === "quality" && exactDefinition && complete &&
+    envelope?.ok === true && result.passed === true && result.artifactVerified === true && result.publicationVerified === true &&
+    result.stagingCleaned === true && result.scratchCleaned === true && result.sourceReady === true &&
+    result.temporarySpaceQualified === true && result.estimateProvided === true && profileVerified && timing;
+  attempts.push({ caseId: definition.id, line: definition.line, kind: definition.kind, profile: result.profile, platform,
+    passed, artifactVerified: result.artifactVerified === true, profileVerified, physical: result.physicalQualified === true,
+    readiness: result.status === "blocked-source" ? "not_ready" : ["ready", "not_ready"].includes(result.readiness) ? result.readiness : "unknown",
+    blockedSource: result.status === "blocked-source", elapsedMs: Number.isFinite(result.elapsedMs) ? result.elapsedMs : null });
+}
+const rate = (successes, total) => total ? successes / total : null;
+const rows = [];
+for (const definition of library.cases) for (const profile of Object.keys(library.profiles)) for (const platform of library.platforms) {
+  const observed = attempts.filter((attempt) => attempt.caseId === definition.id && attempt.profile === profile && attempt.platform === platform);
+  const ready = observed.filter((attempt) => attempt.readiness === "ready");
+  const physical = ready.filter((attempt) => attempt.physical);
+  const source = library.sourceClasses[definition.source];
+  const sourceAvailable = !!source.path && !!(await stat(path.join(repository, source.path)).catch(() => null));
+  const status = observed.some((attempt) => attempt.passed) ? "verified-result" : observed.length ? "attempted-unqualified"
+    : source.realWorld && !sourceAvailable ? "blocked-source" : definition.kind === "pilot" ? "pilot-not-run" : "deferred";
+  rows.push({ caseId: definition.id, line: definition.line, kind: definition.kind, profile, platform, status,
+    attempts: observed.length, readyAttempts: ready.length, passed: observed.filter((attempt) => attempt.passed).length,
+    artifactSuccesses: observed.filter((attempt) => attempt.artifactVerified).length,
+    profileVerifiedAttempts: observed.filter((attempt) => attempt.profileVerified).length,
+    unknownReadiness: observed.filter((attempt) => attempt.readiness === "unknown").length,
+    sourceBlockedAttempts: observed.filter((attempt) => attempt.blockedSource).length,
+    overallPassRate: rate(observed.filter((attempt) => attempt.passed).length, observed.length),
+    readyPassRate: rate(ready.filter((attempt) => attempt.passed).length, ready.length),
+    softwareQualified: definition.kind === "promise" && ready.length > 0 && rate(ready.filter((attempt) => attempt.passed).length, ready.length) >= 0.99,
+    physicalQualified: definition.kind === "promise" && physical.length > 0 && rate(physical.filter((attempt) => attempt.passed).length, physical.length) >= 0.99 });
+}
+const promiseRows = rows.filter((row) => row.kind === "promise");
+const promiseAttempts = attempts.filter((attempt) => attempt.kind === "promise");
+const readyAttempts = promiseAttempts.filter((attempt) => attempt.readiness === "ready");
+console.log(JSON.stringify({ version: 2, scope: "controlled-export-promise-library-not-population-reliability",
+  plannedVariants: promiseRows.length, attemptedVariants: promiseRows.filter((row) => row.attempts > 0).length,
+  overallAttempts: promiseAttempts.length, overallPassed: promiseAttempts.filter((attempt) => attempt.passed).length,
+  overallPassRate: rate(promiseAttempts.filter((attempt) => attempt.passed).length, promiseAttempts.length),
+  readyAttempts: readyAttempts.length, readyPassRate: rate(readyAttempts.filter((attempt) => attempt.passed).length, readyAttempts.length),
+  pilotAttempts: attempts.filter((attempt) => attempt.kind === "pilot").length,
+  softwareLibraryQualified: promiseRows.length > 0 && promiseRows.every((row) => row.softwareQualified),
+  physicalLibraryQualified: promiseRows.length > 0 && promiseRows.every((row) => row.physicalQualified),
+  invalidRecords, recoveredLegacyFailures, rows }, null, 2));

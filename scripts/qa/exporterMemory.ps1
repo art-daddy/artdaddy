@@ -96,7 +96,10 @@ if ($SelfTest) {
   $executable = $node
   $arguments = '"' + $script + '"'
   $previousCap = $env:ARTDADDY_QA_MEMORY_CAP_BYTES
+  $previousRunId = $env:ARTDADDY_QA_MEMORY_RUN_ID
+  $runId = [Guid]::NewGuid().ToString('N')
   $env:ARTDADDY_QA_MEMORY_CAP_BYTES = [string]$cap
+  $env:ARTDADDY_QA_MEMORY_RUN_ID = $runId
   $elapsed = [Diagnostics.Stopwatch]::StartNew()
   try {
     $result = $jobType::Run($executable, $arguments, (Join-Path $PSScriptRoot '../..'), $cap)
@@ -104,11 +107,13 @@ if ($SelfTest) {
     $elapsed.Stop()
     if ($null -eq $previousCap) { Remove-Item Env:ARTDADDY_QA_MEMORY_CAP_BYTES -ErrorAction SilentlyContinue }
     else { $env:ARTDADDY_QA_MEMORY_CAP_BYTES = $previousCap }
+    if ($null -eq $previousRunId) { Remove-Item Env:ARTDADDY_QA_MEMORY_RUN_ID -ErrorAction SilentlyContinue }
+    else { $env:ARTDADDY_QA_MEMORY_RUN_ID = $previousRunId }
   }
   $output = Join-Path $PSScriptRoot '../../reports/qa/exporter'
   [IO.Directory]::CreateDirectory($output) | Out-Null
   $workload = if ($env:ARTDADDY_QA_FAST_QUALITY_SOURCE) { 'FastQualityMeasurement' } else { 'App' }
-  $receipt = [ordered]@{ scope='windows-job-commit-pressure-simulation'; workload=$workload; elapsedSeconds=$elapsed.Elapsed.TotalSeconds; verificationRequired=$false; includesArtifactVerification=$null; configuredCommitLimitBytes=$cap;
+  $receipt = [ordered]@{ scope='windows-job-commit-pressure-simulation'; workload=$workload; runId=$runId; elapsedSeconds=$elapsed.Elapsed.TotalSeconds; verificationRequired=$false; includesArtifactVerification=$null; configuredCommitLimitBytes=$cap;
     reportedPeakBytes=$jobType::PeakBytes; exitCode=$result; physicalMinimumMachine=$false; exactPeakCeiling=$false }
   [IO.File]::WriteAllText((Join-Path $output ('memory-' + [Guid]::NewGuid().ToString('N') + '.json')),
     ($receipt | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))

@@ -443,6 +443,34 @@ by the corresponding open items below and cannot be omitted from phase completio
   host, registry, collection, queue, partial batches, recovery and frozen corpus;
   affected server analytics/privacy checks and language-server diagnostics
   pass too. No golden, output format, engine, resource limit or release changes.
+- V2-D040: report controlled library coverage per named case, software profile
+  and platform. The manifest declares all three platforms and66promise variants;
+  unrun/deferred and missing-source rows remain visible with null unmeasured
+  rates. Pilots, measurements and stretch are separate from promise denominators.
+  Require the captured full definition, complete encoded shape/frame count,
+  Full-quality mode, artifact/publication/cleanup, estimates, temporary-space and
+  profile proof before accepting a full-case result. Do not trust a passed flag
+  or reuse Fast/pilot output as Full-quality qualification.
+- V2-D041: correlate the existing Windows kernel cap receipt and case result
+  with one private run ID; an environment-variable cap label alone is not profile
+  proof. Keep all current cap/deadline values unchanged. Case identity is written
+  before fixture preparation, and runtime/artifact failures retain small failure
+  records. Two identifiable older failed pilots are read from their owned temp
+  fixture metadata without rewriting historical reports. Summary output contains
+  counters/categories, not error text or destination/source paths. Five real CLI
+  checks, including pilot-count properties and historical-failure preservation,
+  pass. A missing-phone run records blocked-source before starting a native app.
+- V2-D042: Full-quality capped pilot1792217293689uses Automatic bounded pieces
+  and passes all300HDframes, seven distinct pictures plus caption, complete
+  expected stereo tones, verified publication and cleanup in12941.9ms. The
+  unchanged6GiBkernel cap reports3716657152bytespeak accounting and its run ID
+  matches the case result. Its output SHA256remains
+  1c6b21cc6b7f73d1b276b58f5f24a58afb1eebe0eb320ee49ddc462a389a42f7.
+  First-run readiness/ETA remain unknown; a successful local calibration is
+  recorded, not used retroactively to upgrade that first attempt. The result is
+  pilot-only, with temporary-space and physical/full-case qualification false.
+  The real summary currently shows no qualified promise variants and an unknown
+  ready rate; it does not certify99%or alter the11/24and13/30trackers.
 
 ## Historical V1 Design And Evidence
 
