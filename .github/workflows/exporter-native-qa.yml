@@ -48,7 +48,17 @@ jobs:
       - name: Promise-library and real-source QA controls
         run: node --test scripts/qa/exporterPromiseReport.test.mjs scripts/qa/exporterSources.test.mjs
       - name: Native job invariants
-        run: "cargo test --manifest-path src-tauri/Cargo.toml --lib jobs::"
+        run: |
+          set -o pipefail
+          mkdir -p reports/qa/exporter
+          cargo test --manifest-path src-tauri/Cargo.toml --lib jobs:: 2>&1 | tee reports/qa/exporter/native-invariants.log
+      - name: Real native worker lifecycle and output bounds
+        run: |
+          set -o pipefail
+          export ARTDADDY_QA_FFMPEG="$(node -e 'const path=require("node:path");const targets={"darwin-arm64":"aarch64-apple-darwin","linux-x64":"x86_64-unknown-linux-gnu"};const target=targets[process.platform+"-"+process.arch];if(!target)throw new Error("Unsupported native QA host");process.stdout.write(path.resolve("src-tauri/binaries/artdaddy-ffmpeg-"+target));')"
+          cargo test --manifest-path src-tauri/Cargo.toml --lib jobs::stream::tests:: -- --include-ignored --skip jobs::stream::tests::resident_allocator_child --nocapture 2>&1 | tee reports/qa/exporter/native-stream-runtime.log
+          cargo test --manifest-path src-tauri/Cargo.toml --lib jobs::export_delivery_tests::final_mp4_staging_cannot_bypass_shared_payload_budget -- --ignored --exact --nocapture 2>&1 | tee reports/qa/exporter/native-output-envelope.log
+          node -e 'const fs=require("node:fs");for(const [name,min] of [["native-stream-runtime.log",17],["native-output-envelope.log",1]]){const text=fs.readFileSync("reports/qa/exporter/"+name,"utf8");const result=text.match(/test result: ok\. (\d+) passed; 0 failed; 0 ignored;/);if(!result||Number(result[1])<min)throw new Error("Missing real native outcomes: "+name);}'
       - name: Native commit failure and volume outcomes
         run: "cargo test --manifest-path src-tauri/Cargo.toml --lib commit -- --nocapture"
       - name: Source clocks, audio DSP and actual native pieces
