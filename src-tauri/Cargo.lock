@@ -114,12 +114,14 @@ checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
 name = "artdaddy"
-version = "0.21.4"
+version = "0.21.5"
 dependencies = [
  "glob",
  "keyring",
  "libc",
  "log",
+ "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",

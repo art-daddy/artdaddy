@@ -263,14 +263,78 @@ pub struct UpdateInfo {
   date: String,
 }
 
+#[cfg(desktop)]
+fn update_error(stage: &str, error: tauri_plugin_updater::Error) -> String {
+  let error = match error {
+    tauri_plugin_updater::Error::Reqwest(error) => {
+      tauri_plugin_updater::Error::Reqwest(error.without_url())
+    }
+    error => error,
+  };
+  let mut detail = error.to_string();
+  let mut source = std::error::Error::source(&error);
+  while let Some(cause) = source {
+    let message = cause.to_string();
+    if !detail.ends_with(&message) {
+      detail.push_str(": ");
+      detail.push_str(&message);
+    }
+    source = cause.source();
+  }
+  format!("{stage}: {detail}")
+}
+
+#[cfg(desktop)]
+async fn retry_update_request<T, Request, Pending>(
+  mut request: Request,
+) -> Result<T, tauri_plugin_updater::Error>
+where
+  Request: FnMut() -> Pending,
+  Pending: std::future::Future<Output = Result<T, tauri_plugin_updater::Error>>,
+{
+  let mut retries = 0;
+  loop {
+    let result = request().await;
+    let retryable = match &result {
+      Err(tauri_plugin_updater::Error::Reqwest(error)) => {
+        error.is_decode() || error.is_timeout() || error.is_connect() || error.is_body()
+      }
+      Err(
+        tauri_plugin_updater::Error::Serialization(_) | tauri_plugin_updater::Error::ReleaseNotFound,
+      ) => true,
+      _ => false,
+    };
+    if !retryable || retries == 2 {
+      return result;
+    }
+    retries += 1;
+    tokio::time::sleep(std::time::Duration::from_millis(250 * retries)).await;
+  }
+}
+
+#[cfg(desktop)]
+async fn available_update(app: &tauri::AppHandle) -> Result<Option<tauri_plugin_updater::Update>, String> {
+  use tauri_plugin_updater::UpdaterExt;
+  let updater = app
+    .updater_builder()
+    .configure_client(|client| {
+      client
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .read_timeout(std::time::Duration::from_secs(30))
+    })
+    .build()
+    .map_err(|error| update_error("Could not prepare the updater", error))?;
+  retry_update_request(|| updater.check())
+    .await
+    .map_err(|error| update_error("Could not read update information. Please retry", error))
+}
+
 /// Ask the update endpoint whether a newer signed build exists. Never throws on a
 /// network failure — being offline is not an error worth interrupting anyone for.
 #[cfg(desktop)]
 #[tauri::command]
 async fn check_for_update(app: tauri::AppHandle) -> Result<Option<UpdateInfo>, String> {
-  use tauri_plugin_updater::UpdaterExt;
-  let updater = app.updater().map_err(|e| e.to_string())?;
-  match updater.check().await {
+  match available_update(&app).await {
     Ok(Some(update)) => Ok(Some(UpdateInfo {
       version: update.version.clone(),
       current_version: update.current_version.clone(),
@@ -296,17 +360,31 @@ async fn download_update(
   app: tauri::AppHandle,
   staged: tauri::State<'_, StagedUpdate>,
 ) -> Result<String, String> {
-  use tauri_plugin_updater::UpdaterExt;
-  let updater = app.updater().map_err(|e| e.to_string())?;
-  let update = updater
-    .check()
-    .await
-    .map_err(|e| e.to_string())?
+  use std::sync::atomic::{AtomicU64, Ordering};
+
+  let update = available_update(&app)
+    .await?
     .ok_or_else(|| "no update available".to_string())?;
-  let bytes = update
-    .download(|_chunk, _total| {}, || {})
-    .await
-    .map_err(|e| e.to_string())?;
+  let received = AtomicU64::new(0);
+  let bytes = retry_update_request(|| {
+    received.store(0, Ordering::Relaxed);
+    update.download(
+      |chunk, _total| {
+        received.fetch_add(chunk as u64, Ordering::Relaxed);
+      },
+      || {},
+    )
+  })
+  .await
+  .map_err(|error| {
+    update_error(
+      &format!(
+        "Could not download and verify the update (received {} bytes)",
+        received.load(Ordering::Relaxed)
+      ),
+      error,
+    )
+  })?;
   let version = update.version.clone();
   *staged.0.lock().map_err(|e| e.to_string())? = Some((update, bytes));
   Ok(version)
@@ -970,6 +1048,137 @@ fn install_macos_menu(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::
 
 #[cfg(test)]
 mod tests {
+  #[cfg(desktop)]
+  mod updater {
+    use super::super::{retry_update_request, update_error};
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::time::Duration;
+
+    fn runtime() -> tokio::runtime::Runtime {
+      let _ = rustls::crypto::ring::default_provider().install_default();
+      tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
+    }
+
+    fn metadata_server(bodies: &[&str]) -> (String, std::thread::JoinHandle<()>) {
+      response_server(
+        "application/json",
+        bodies.iter().map(|body| (body.to_string(), body.len())).collect(),
+      )
+    }
+
+    fn response_server(
+      content_type: &'static str,
+      bodies: Vec<(String, usize)>,
+    ) -> (String, std::thread::JoinHandle<()>) {
+      let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+      let address = format!("http://{}/latest.json", listener.local_addr().unwrap());
+      let server = std::thread::spawn(move || {
+        for (body, declared_length) in bodies {
+          let (mut stream, _) = listener.accept().unwrap();
+          stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+          let mut reader = BufReader::new(&stream);
+          loop {
+            let mut line = String::new();
+            assert!(reader.read_line(&mut line).unwrap() > 0);
+            if line == "\r\n" {
+              break;
+            }
+          }
+          let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {declared_length}\r\nConnection: close\r\n\r\n{body}"
+          );
+          stream.write_all(response.as_bytes()).unwrap();
+        }
+      });
+      (address, server)
+    }
+
+    #[test]
+    fn malformed_http_responses_recover_to_the_actual_manifest() {
+      runtime().block_on(async {
+        let (address, server) = metadata_server(&[
+          "<html>temporary gateway response</html>",
+          "{",
+          r#"{"version":"0.21.4"}"#,
+        ]);
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let manifest = retry_update_request(|| async {
+          Ok(client.get(&address).send().await?.json::<serde_json::Value>().await?)
+        })
+        .await
+        .unwrap();
+        assert_eq!(manifest["version"], "0.21.4");
+        server.join().unwrap();
+      });
+    }
+
+    #[test]
+    fn repeated_bad_responses_stop_and_a_later_request_can_recover() {
+      runtime().block_on(async {
+        let (address, server) = metadata_server(&[
+          "not JSON",
+          "not JSON",
+          "not JSON",
+          r#"{"version":"0.21.4"}"#,
+        ]);
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let request = || async {
+          Ok(client.get(&address).send().await?.json::<serde_json::Value>().await?)
+        };
+        let error = retry_update_request(request).await.unwrap_err();
+        let message = update_error("Could not read update information", error);
+        assert!(message.contains("expected"), "{message}");
+        assert!(!message.contains("127.0.0.1"), "{message}");
+        let manifest = retry_update_request(request).await.unwrap();
+        assert_eq!(manifest["version"], "0.21.4");
+        server.join().unwrap();
+      });
+    }
+
+    #[test]
+    fn interrupted_binary_downloads_retry_without_including_partial_bytes() {
+      runtime().block_on(async {
+        let complete = "MZcomplete";
+        let (address, server) = response_server(
+          "application/octet-stream",
+          vec![
+            ("MZpartial".into(), 64),
+            (String::new(), 64),
+            (complete.into(), complete.len()),
+          ],
+        );
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let delivered = retry_update_request(|| async {
+          let mut response = client.get(&address).send().await?;
+          let mut bytes = Vec::new();
+          while let Some(chunk) = response.chunk().await? {
+            bytes.extend_from_slice(&chunk);
+          }
+          Ok(bytes)
+        })
+        .await
+        .unwrap();
+        assert_eq!(delivered, complete.as_bytes());
+        server.join().unwrap();
+      });
+    }
+
+    #[test]
+    fn invalid_signatures_and_unsupported_targets_are_not_retried() {
+      for error in [
+        tauri_plugin_updater::Error::SignatureUtf8("invalid signature".into()),
+        tauri_plugin_updater::Error::TargetNotFound("unsupported-platform".into()),
+      ] {
+        let mut error = Some(error);
+        let result = runtime().block_on(retry_update_request::<(), _, _>(|| {
+          std::future::ready(Err(error.take().expect("permanent errors must not be retried")))
+        }));
+        assert!(result.is_err());
+      }
+    }
+  }
+
   #[cfg(windows)]
   use super::kill_tree;
   use super::trash_path;

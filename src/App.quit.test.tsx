@@ -441,4 +441,23 @@ describe("Restart & update", () => {
     expect(update.install).not.toHaveBeenCalled();
     expect(screen.getByText(/offline/)).toBeInTheDocument();
   });
+
+  it("keeps the project after a decoding failure and installs only after a successful retry", async () => {
+    update.download
+      .mockRejectedValueOnce(new Error("error decoding response body"))
+      .mockResolvedValueOnce("9.9.9");
+    await clickRestart();
+    expect(screen.getByText(/error decoding response body/)).toBeInTheDocument();
+    expect(useEditor.getState().projectId).toBe("p1");
+    expect(closeProject).not.toHaveBeenCalled();
+    expect(update.install).not.toHaveBeenCalled();
+    expect(windowClosed).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Restart & update" }));
+    for (let attempt = 0; attempt < 6; attempt++) await flush();
+    expect(screen.queryByText(/error decoding response body/)).not.toBeInTheDocument();
+    expect(order).toEqual(["project closed", "update installed"]);
+    expect(update.download).toHaveBeenCalledTimes(2);
+    expect(update.install).toHaveBeenCalledTimes(1);
+  });
 });
