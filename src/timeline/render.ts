@@ -30,7 +30,7 @@ import {
   progressFraction,
 } from "./ffmpegProgress";
 import { canvasFps, isNum, toSecondsView } from "./frames";
-import { crfFor, outputFps, outputSize, type ExportEngine, type ExportMode, type ExportOptions } from "./exportOptions";
+import { crfFor, finalEncoderPolicy, outputFps, outputSize, type ExportEncoder, type ExportEngine, type ExportMode, type ExportOptions } from "./exportOptions";
 import { clipKind, rendersAsStill } from "./helpers";
 import { extOf, kindOf, REPLAYED_STILL_EXTS } from "../media/formats";
 import { isHeifStill, stillPicture } from "../media/stillPicture";
@@ -715,6 +715,7 @@ export interface BackendSelection {
 
 export interface RenderPlan {
   contractVersion: number;
+  encoder?: ExportEncoder;
   workload: RenderWorkload;
   selection?: BackendSelection;
   transport?: "partition-pipes-v1";
@@ -962,11 +963,12 @@ export function buildRenderCommand(
       : policy === "partition-pipes-v1" ? "explicit-streaming" : commandPressure ? "command-pressure"
       : resourcePressure ? "resource-pressure" : stream ? "input-pressure" : "bounded-single-pass",
   };
+  const encoder = finalEncoderPolicy(plan.output, selection.backend, options.mode).encoder;
   if (window) return { ...plan, selection, workload };
   if (stream)
-    return { ...segmentedRenderPlan(raw, outPath, { ...options, engine: "partition-pipes-v1" }, plan), selection, workload, transport: "partition-pipes-v1" };
-  if (!commandPressure) return { ...plan, selection, workload };
-  return { ...segmentedRenderPlan(raw, outPath, options, plan), selection, workload };
+    return { ...segmentedRenderPlan(raw, outPath, { ...options, engine: "partition-pipes-v1" }, plan), selection, workload, encoder, transport: "partition-pipes-v1" };
+  if (!commandPressure) return { ...plan, selection, workload, encoder };
+  return { ...segmentedRenderPlan(raw, outPath, options, plan), selection, workload, encoder };
 }
 
 export function buildAudioRenderCommand(raw: Timeline, outPath: string, options: ExportOptions = {}): AudioRenderPlan {
@@ -2012,7 +2014,8 @@ function buildSingleRenderCommand(
   }
   if (aout) cmd.push("-map", `[${aout}]`);
   cmd.push("-c:v", options.mode === "fast" ? "h264_amf" : "libx264", "-pix_fmt", "yuv420p", "-r", String(outFps));
-  if (options.engine === "partition-pipes-v1") cmd.push("-threads:v", "1");
+  if (options.engine === "partition-pipes-v1")
+    cmd.push("-threads:v", String(composed ? finalEncoderPolicy({ width: ow, height: oh }, options.engine, options.mode).threads : 1));
   if (options.mode === "fast") {
     cmd.push("-usage", "transcoding", "-quality", "quality", "-rc", "cqp", "-qp_i", "18", "-qp_p", "18", "-qp_b", "18");
   } else {
@@ -3443,7 +3446,7 @@ export async function prepareRenderSubmission(
     project_height: renderPlan.workload.height,
     calibration: { workload: renderPlan.workload, output: renderPlan.output,
       quality: request.quality || "medium", engine: renderPlan.selection.backend,
-      encoder: fast ? "amf-cqp18" as const : "x264-crf" as const },
+      encoder: renderPlan.encoder ?? (fast ? "amf-cqp18" as const : "x264-crf" as const) },
   };
   const plan: ExportJobPlan = {
     contractVersion: renderPlan.contractVersion,

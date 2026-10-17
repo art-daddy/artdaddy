@@ -29,8 +29,9 @@ describe("local export calibration records", () => {
     useExportJob.getState().setMode("fast");
     expect(useExportJob.getState().mode).toBe("fast");
     useExportJob.getState().rememberCalibration(sample);
+    useExportJob.getState().rememberCalibration({ ...sample, encoder: "x264-crf-threads2" });
     useExportJob.getState().rememberCalibration({ ...sample, encoder: "amf-cqp18" });
-    expect(useExportJob.getState().calibrations.map((entry) => entry.encoder)).toEqual(["x264-crf", "amf-cqp18"]);
+    expect(useExportJob.getState().calibrations.map((entry) => entry.encoder)).toEqual(["x264-crf", "x264-crf-threads2", "amf-cqp18"]);
   });
 
   it("drops private fields while preserving valid numeric measurements", () => {

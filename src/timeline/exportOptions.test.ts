@@ -78,6 +78,18 @@ describe("local measured export estimates", () => {
     expect(estimate(workload, [sample, { ...sample, elapsedSeconds: 20 }]).seconds).toBe(20);
   });
 
+  it("cannot use old or late encoder-policy measurements for a different policy", () => {
+    const profiles = (["x264-crf", "x264-crf-threads2", "amf-cqp18"] as const)
+      .map((encoder, index) => ({ ...sample, encoder, elapsedSeconds: (index + 1) * 10 }));
+    for (const profile of profiles) {
+      const foreign = profiles.filter((entry) => entry.encoder !== profile.encoder);
+      expect(estimateExportFromHistory(workload, output, "medium", "partition-pipes-v1", foreign, profile.encoder).seconds).toBeNull();
+      for (const history of [[profile, ...foreign], [...foreign, profile]])
+        expect(estimateExportFromHistory(workload, output, "medium", "partition-pipes-v1", history, profile.encoder).seconds)
+          .toBe(profile.elapsedSeconds);
+    }
+  });
+
   it("never estimates Fast from software history or software from Fast history", () => {
     const fast = { ...sample, encoder: "amf-cqp18" as const, elapsedSeconds: 9, finalBytes: 10_000_000 };
     expect(estimateExportFromHistory(workload, output, "medium", "partition-pipes-v1", [sample], "amf-cqp18").seconds).toBeNull();

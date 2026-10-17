@@ -201,15 +201,8 @@ async function exercise(): Promise<void> {
     const fastEncoderProbe = params.get("fastEncoderProbe") ?? "";
     if (fastEncoderProbe) check(fastEncoderProbe === "amf-cqp18" && definition.kind === "pilot", "Unsupported local Fast pilot");
     const plan = buildRenderCommand(timeline, stage, { engine: "auto", quality: "medium", mode: fastEncoderProbe ? "fast" : "quality" });
-    const encoderThreadsProbe = params.get("encoderThreadsProbe") ?? "";
-    if (encoderThreadsProbe) {
-      check(encoderThreadsProbe === "2" && definition.id === "4k-four-videos-pilot" && definition.kind === "pilot" && !fastEncoderProbe,
-        "Unsupported private encoder-thread pilot");
-      const threadsAt = plan.args.lastIndexOf("-threads:v");
-      check(threadsAt >= 0 && plan.args[threadsAt + 1] === "1" && plan.args[plan.args.lastIndexOf("-c:v") + 1] === "libx264",
-        "Private thread comparison must start from the actual single-thread Full-quality plan");
-      plan.args[threadsAt + 1] = encoderThreadsProbe;
-    }
+    const calibrationEncoder = fastEncoderProbe ? "amf-cqp18" : plan.output.width * plan.output.height > 1920 * 1080 &&
+      plan.selection.backend === "partition-pipes-v1" ? "x264-crf-threads2" : "x264-crf";
     const resources = await resolveExportResources(destination);
     const confirmationOffset = preflightRequests.length;
     let promiseId = "";
@@ -228,7 +221,7 @@ async function exercise(): Promise<void> {
         .catch((error: unknown) => { scratchError = error; });
     });
     const queued = await queueRenderJob(context, { plan, admission: captured, destPath: destination, stagePath: stage,
-      filename: `promise-${definition.id}.mp4`, quality: encoderThreadsProbe ? "unqualified-x264-threads-2" : "medium" });
+      filename: `promise-${definition.id}.mp4`, quality: "medium" });
     promiseId = queued.job_id;
     const outcome = await whenExportEnds(queued.job_id);
     await whenExportsSettle();
@@ -249,7 +242,7 @@ async function exercise(): Promise<void> {
       records.jobs.find((entry) => entry.id === queued.job_id)?.status === "done";
     promiseResult = { caseId: definition.id, profile: input.profile, kind: definition.kind, destination, jobId: queued.job_id,
       encoder: plan.args[plan.args.lastIndexOf("-c:v") + 1],
-      encoderThreadsProbe: encoderThreadsProbe || null, encoderThreads: plan.args[plan.args.lastIndexOf("-threads:v") + 1],
+      encoderThreads: plan.args[plan.args.lastIndexOf("-threads:v") + 1], calibrationEncoder,
       readiness,
       state: outcome?.state ?? "missing", error: outcome?.error ?? null, elapsedMs: exportElapsedMs,
       projectFrames: frames, partitions: plan.steps?.length ?? 0, columns, rows, imageHeight,
@@ -263,10 +256,10 @@ async function exercise(): Promise<void> {
       preflight: preflightRequests.slice(confirmationOffset),
       localCalibration: useExportJob.getState().calibrations.filter((sample) => sample.workload.width === definition.width &&
         sample.workload.height === definition.height && sample.workload.durationSeconds === definition.durationSeconds &&
-        sample.workload.peakMediaLayers === definition.videoLayers && sample.encoder === (fastEncoderProbe ? "amf-cqp18" : "x264-crf")).at(-1) ?? null,
+        sample.workload.peakMediaLayers === definition.videoLayers && sample.encoder === calibrationEncoder).at(-1) ?? null,
       calibrationRecords: useExportJob.getState().calibrations.filter((sample) => sample.workload.width === definition.width &&
         sample.workload.height === definition.height && sample.workload.durationSeconds === definition.durationSeconds &&
-        sample.workload.peakMediaLayers === definition.videoLayers && sample.encoder === (fastEncoderProbe ? "amf-cqp18" : "x264-crf")).length,
+        sample.workload.peakMediaLayers === definition.videoLayers && sample.encoder === calibrationEncoder).length,
       estimateProvided: preflightRequests.slice(confirmationOffset).some((entry) => entry.message.includes("Estimated encoding and saving time: about")) };
     await writeTextFile(joinPath(root, "promise-native-result.json"), JSON.stringify(promiseResult));
     check(outcome?.state === "done", `Promise export failed: ${JSON.stringify(promiseResult)}`);

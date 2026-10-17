@@ -501,6 +501,24 @@ by the corresponding open items below and cannot be omitted from phase completio
   for the changed encoder policy. Implementation and post-change proof are
   recorded separately; neither approval nor this short comparison qualifies a
   full promise line or changes the acceptance counters.
+- V2-D047: the shared final-encoder policy selects two x264 threads only for
+  composed streamed Full-quality output above1920x1080pixels. HD/reduced-HD,
+  Standard defaults, Fast and lossless producer threads are unchanged. New
+  compiled requests capture x264-crf-threads2as their local history identity;
+  old/missing one-thread and AMF observations cannot estimate that policy.
+  Accepted/recovered jobs retain their original commands and recorded identity.
+  The362focused mode/compiler/corpus/queue/batch/history checks pass without
+  reference updates;241focused capture/recovery checks pass after binding the
+  identity directly to the immutable compiled plan.
+- V2-D048: production-path capped pilot1792223450126uses Automatic/Full quality
+  with four4Kvideos, two final threads and no private encoder override. All300
+  frames,480000expected stereo sample frames, publication identity, staging and
+  scratch cleanup pass in29808.1ms, inside its40000mspilot target. Its matching
+  kernel receipt runIdc267652344ee4b80bb5ae8a5ad895ab0enforces the unchanged
+  6442450944bytewhole-tree cap and reports3901722624bytespeak accounting.
+  Local calibration records x264-crf-threads2. Readiness/first-run ETA remain
+  unknown; temporary-space/full-case/physical qualification remain false. This
+  is short synthetic pilot evidence, not acceptance of a full promise line.
 
 ## Historical V1 Design And Evidence
 

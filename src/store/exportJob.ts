@@ -22,10 +22,11 @@ function calibration(value: unknown): ExportCalibration | null {
   if (!number(workload.width) || !number(workload.height) || !number(workload.fps) || !number(workload.durationSeconds) ||
     !number(raw.elapsedSeconds) || !number(raw.finalBytes) || !["high", "medium", "low"].includes(String(raw.quality)) ||
     !["file-sequence-v1", "partition-pipes-v1"].includes(String(raw.engine)) ||
-    raw.encoder !== undefined && !["x264-crf", "amf-cqp18"].includes(String(raw.encoder))) return null;
+    raw.encoder !== undefined && !["x264-crf", "x264-crf-threads2", "amf-cqp18"].includes(String(raw.encoder))) return null;
   return { workload: Object.fromEntries(keys.map((key) => [key, workload[key]])) as unknown as ExportCalibration["workload"],
     output: { width: Number(output.width), height: Number(output.height), fps: Number(output.fps) },
-    quality: String(raw.quality), engine: raw.engine as ExportEngine, encoder: raw.encoder === "amf-cqp18" ? "amf-cqp18" : "x264-crf",
+    quality: String(raw.quality), engine: raw.engine as ExportEngine, encoder: raw.encoder === "amf-cqp18" ? "amf-cqp18" :
+      raw.encoder === "x264-crf-threads2" ? "x264-crf-threads2" : "x264-crf",
     elapsedSeconds: Number(raw.elapsedSeconds), finalBytes: Number(raw.finalBytes),
     memoryBytes: number(raw.memoryBytes), temporaryBytes: number(raw.temporaryBytes) };
 }

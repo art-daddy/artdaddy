@@ -79,14 +79,10 @@ assert.ok(!promiseId || promiseCase, "Unknown promise-library case");
 const fastEncoderProbe = process.env.ARTDADDY_QA_FAST_ENCODER_PROBE ?? "";
 assert.ok(!fastEncoderProbe || fastEncoderProbe === "amf-cqp18" && process.platform === "win32" && promiseCase?.kind === "pilot",
   "Fast encoder integration is a private Windows short-pilot measurement only");
-const encoderThreadsProbe = process.env.ARTDADDY_QA_ENCODER_THREADS_PROBE ?? "";
-assert.ok(!encoderThreadsProbe || encoderThreadsProbe === "2" && process.platform === "win32" &&
-  promiseId === "4k-four-videos-pilot" && !fastEncoderProbe && Number(process.env.ARTDADDY_QA_MEMORY_CAP_BYTES) > 0,
-  "Encoder-thread comparison requires the capped private four-video 4K pilot without Fast mode");
+assert.ok(!process.env.ARTDADDY_QA_ENCODER_THREADS_PROBE, "The private thread candidate was retired; measure the approved production policy instead");
 assert.ok(promiseLibrary.profiles[promiseProfile], "Unknown promise-library profile");
 const promiseAttempt = promiseCase ? { version: 2, caseId: promiseCase.id, profile: promiseProfile, kind: promiseCase.kind,
   line: promiseCase.line, platform: process.platform, profileRunId: process.env.ARTDADDY_QA_MEMORY_RUN_ID ?? null,
-  encoderThreadsProbe: encoderThreadsProbe || null,
   definition: { width: promiseCase.width, height: promiseCase.height, fps: promiseCase.fps,
     durationSeconds: promiseCase.durationSeconds, visualClips: promiseCase.visualClips, videoLayers: promiseCase.videoLayers } } : null;
 if (promiseAttempt) await writeFile(path.join(output, "promise-library.json"), JSON.stringify({ ...promiseAttempt,
@@ -305,7 +301,7 @@ try {
   const address = vite.httpServer.address();
   assert.equal(typeof address, "object");
   const url = `http://127.0.0.1:${address.port}`;
-  const page = `${url}/scripts/qa/exporterNative.html?${new URLSearchParams({ root, identifier, profileSeconds: String(profileSeconds), denseSourceRoot, promiseId, fastEncoderProbe, encoderThreadsProbe })}`;
+  const page = `${url}/scripts/qa/exporterNative.html?${new URLSearchParams({ root, identifier, profileSeconds: String(profileSeconds), denseSourceRoot, promiseId, fastEncoderProbe })}`;
   const config = path.join(root, "tauri.qa.json");
   await writeFile(config, JSON.stringify({ identifier,
     build: { devUrl: url, beforeDevCommand: "", beforeBuildCommand: "" },
@@ -370,11 +366,9 @@ try {
     assert.equal(native.preflight?.length, 1, "Promise pilot must use one real request-level preflight confirmation");
     assert.ok(native.preflight[0].message.includes("Estimated time:") || native.preflight[0].message.includes("Estimated encoding and saving time:"),
       "Preflight must show a measured estimate or explicitly unknown time");
-    assert.equal(native.encoderThreadsProbe ?? null, encoderThreadsProbe || null);
-    if (encoderThreadsProbe) {
-      assert.equal(native.encoderThreads, encoderThreadsProbe);
-      assert.equal(native.calibrationRecords, 0, "A private thread candidate must not populate normal Full-quality calibration");
-    } else assert.ok(native.calibrationRecords > 0, "Validated published exports must populate encoder-specific local measured history");
+    if (native.selection.backend === "partition-pipes-v1")
+      assert.equal(native.encoderThreads, !fastEncoderProbe && promiseCase.width * promiseCase.height > 1920 * 1080 ? "2" : "1");
+    assert.ok(native.calibrationRecords > 0, "Validated published exports must populate encoder-specific local measured history");
     if (fastEncoderProbe) {
       assert.equal(native.resources?.local_fast_candidate, true, "Local Fast pilot requires the measured native device eligibility");
       assert.equal(native.localFastEnabled, true, "Local Fast pilot must use the real selected-mode encoder path");
@@ -481,7 +475,7 @@ try {
     const profileEnforced = cap > 0 && cap <= promiseLibrary.profiles[promiseProfile].systemMemoryBytes;
     const temporarySpaceQualified = false;
     proof.promiseResult = { ...promiseAttempt, ...native, fixture: promiseFixture, sound, captionSamples, sourceReady: true,
-      mode: encoderThreadsProbe ? "measurement" : native.encoder === "libx264" ? "quality" : native.encoder === "h264_amf" ? "fast" : "unknown",
+      mode: native.encoder === "libx264" ? "quality" : native.encoder === "h264_amf" ? "fast" : "unknown",
       encodedVideo: { width: video[0].width, height: video[0].height, fps: video[0].r_frame_rate, frames: Number(video[0].nb_read_frames) },
       artifactVerified: true, timingQualified,
       profileRunId: process.env.ARTDADDY_QA_MEMORY_RUN_ID ?? null,

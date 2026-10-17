@@ -15,6 +15,16 @@ import type { Branding } from "./branding";
 import type { RenderWorkload } from "./renderPlan";
 import type { ExportResources } from "../platform/host";
 
+export function finalEncoderPolicy(
+  output: { width: number; height: number },
+  engine: ExportEngine,
+  mode: ExportMode = "quality",
+): { encoder: ExportEncoder; threads: 1 | 2 | null } {
+  const twoThreads = engine === "partition-pipes-v1" && mode === "quality" && output.width * output.height > 1920 * 1080;
+  return { encoder: mode === "fast" ? "amf-cqp18" : twoThreads ? "x264-crf-threads2" : "x264-crf",
+    threads: engine === "partition-pipes-v1" ? twoThreads ? 2 : 1 : null };
+}
+
 export interface ExportEstimates {
   readonly memoryBytes: number | null;
   readonly temporaryBytes: number | null;

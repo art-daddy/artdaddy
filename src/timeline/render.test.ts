@@ -406,6 +406,21 @@ describe("buildRenderCommand", () => {
     }
   });
 
+  it("bounds only final above-HD streamed software encoding to the approved two threads", () => {
+    const authored = tl([{ media_ref: "/video.mp4", source_in: 0, source_out: 2, timeline_in: 0, timeline_out: 2 }],
+      { width: 3840, height: 2160, fps: 30 });
+    const threads = (args: string[]) => args[args.lastIndexOf("-threads:v") + 1];
+    const full = buildRenderCommand(authored, "/four-k.mp4", { engine: "partition-pipes-v1" });
+    expect(full.encoder).toBe("x264-crf-threads2");
+    expect(threads(full.args)).toBe("2");
+    expect(full.steps!.every((step) => threads(step.args) === "1")).toBe(true);
+    const hd = buildRenderCommand(authored, "/hd.mp4", { engine: "partition-pipes-v1", resolution: "1080p" });
+    expect(threads(hd.args)).toBe("1");
+    expect(hd.encoder).toBe("x264-crf");
+    expect(threads(buildRenderCommand(authored, "/fast.mp4", { engine: "partition-pipes-v1", mode: "fast" }).args)).toBe("1");
+    expect(buildRenderCommand(authored, "/standard.mp4").args).not.toContain("-threads:v");
+  });
+
   it("compiles one persistent audio producer rather than an audio mix per video partition", () => {
     const plan = buildRenderCommand(tl([
       ...Array.from({ length: 98 }, (_, index) => ({ media_ref: "/video.mp4", source_in: 0, source_out: 1 / 30,
