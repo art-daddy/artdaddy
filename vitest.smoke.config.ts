@@ -8,6 +8,7 @@ export default defineConfig({
   test: {
     environment: "node",
     env: { VITE_SENTRY_DSN: "" },
+    setupFiles: ["./src/test/smokeSetup.ts"],
     include: ["src/**/*.e2e.ts"],
     testTimeout: 180_000,
     hookTimeout: 30_000,
