@@ -126,7 +126,7 @@ beyond proving the existing implementation and are excluded from that count.
 | E3.4 | Built; proof pending | Native leases, alias checks and volume-safe publication exist; cross-volume, case-sensitive and concurrent failure proof is incomplete. |
 | E3.5 | Built; proof pending | Durable restart and registered-output paths exist; the full V2 real-app/project/fault library has not qualified them. |
 | E4.2 | Built; proof pending | Separate preview/export painters and parity tests exist; all promised real-media timing and visual parity cases are not verified. |
-| E4.3 | Built; proof pending | Continuous mixing, fades, effects and ducking exist; original phone/web/screen audio and full-duration audio proof remain open. |
+| E4.3 | Built; proof pending | Continuous mixing, fades, effects and ducking exist; one short original-phone-audio artifact passes, while original web/screen audio and full-duration proof remain open. |
 | E4.4 | Built; proof pending | Preflight, local estimates, warnings and approved local Fast mode exist; cold/repeated/full-case estimate and device qualification is incomplete. |
 | E5.1 | Built; proof pending | Cross-platform FFmpeg/native paths exist; current protocol-20 macOS/Linux packages and platform-specific behavior are not qualified. |
 | E5.2 | Still incomplete; excluded | The library and Windows capped runner exist, but complete resource/profile qualification inputs and Mac/Linux enforcement paths remain unfinished before full/device runs. |
@@ -702,6 +702,23 @@ beyond proving the existing implementation and are excluded from that count.
   no already-correct code or unrelated content is overwritten. The tracker now
   separates strict11/24acceptance from10of13open boxes with implementations
   present but proof pending; E0.5/E2.4/E5.2remain excluded as incomplete work.
+- V2-D065: original-phone audio now has a separate ten-second measurement case,
+  not a replacement for the existing authored-stereo promise cases. The pinned
+  source has48kHz stereo AAC; its SHA256 matches before and after read-only QA.
+  The actual Full-quality native export in1792242181493takes7708.9ms, preserves
+  all300video frames and passes source-picture/caption, publication and cleanup
+  checks. Source and delivered audio are decoded at48kHz stereo and compared
+  in quarter-second windows, excluding50msat each edge; all80channel windows
+  pass, minimum correlation0.9844488and maximum relative squared error0.0309565.
+  Decoded comparison spans contain480007sample frames; this is lossy-AAC
+  similarity evidence, not byte identity. Controls reject muted, swapped,
+  inverted, frozen, truncated and20msdropout audio; legitimate mono and silence
+  remain accepted. Missing source audio is blocked, never replaced by the score.
+  The Windows whole-tree6GiBcommit cap reports2489044992bytespeak; the64GBhost
+  is not physical8GBqualification. No renderer, source media, goldens, limits or
+  prior evidence changes. Original web/screen audio, full-duration, platform,
+  resource/estimate and physical-device proof remain open. Strict11/24(46%),
+  original13/30(43%), built-but-unproven10of13and99%qualification are unchanged.
 
 ## Historical V1 Design And Evidence
 

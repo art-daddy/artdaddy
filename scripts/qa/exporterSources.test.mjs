@@ -93,6 +93,41 @@ async function checkPictureControls(plain, rotated) {
   }
 }
 
+test("original-audio checks accept preserved sound and reject missing or wrong channels", async () => {
+  const text = await readFile(driver, "utf8");
+  const syntax = typescript.createSourceFile(driver, text, typescript.ScriptTarget.Latest, true, typescript.ScriptKind.JS);
+  const declaration = syntax.statements.find((node) => typescript.isFunctionDeclaration(node) && node.name?.text === "compareOriginalAudio");
+  assert.ok(declaration);
+  const compare = runInNewContext(`${declaration.getText(syntax)}; compareOriginalAudio`, { assert, Buffer });
+  const frames = 48000;
+  const original = Buffer.alloc(frames * 16);
+  const swapped = Buffer.alloc(original.length);
+  const inverted = Buffer.alloc(original.length);
+  const mono = Buffer.alloc(original.length);
+  for (let frame = 0; frame < frames; frame++) for (let channel = 0; channel < 2; channel++) {
+    const value = 0.1 * Math.sin(2 * Math.PI * (channel ? 883 : 431) * frame / 48000);
+    original.writeDoubleLE(value, frame * 16 + channel * 8);
+    swapped.writeDoubleLE(value, frame * 16 + (1 - channel) * 8);
+    inverted.writeDoubleLE(-value, frame * 16 + channel * 8);
+    mono.writeDoubleLE(0.1 * Math.sin(2 * Math.PI * 431 * frame / 48000), frame * 16 + channel * 8);
+  }
+  assert.equal(compare(original, Buffer.from(original)).comparedFrames, frames);
+  assert.equal(compare(mono, Buffer.from(mono)).comparedFrames, frames);
+  assert.equal(compare(Buffer.alloc(original.length), Buffer.alloc(original.length)).comparedFrames, frames);
+  const dropout = Buffer.from(original);
+  dropout.fill(0, Math.round(frames * 0.45) * 16, Math.round(frames * 0.47) * 16);
+  const frozen = Buffer.alloc(original.length);
+  const slice = original.subarray(0, 480 * 16);
+  for (let offset = 0; offset < frozen.length; offset += slice.length) slice.copy(frozen, offset);
+  assert.throws(() => compare(original, Buffer.alloc(original.length)), /Original audio channel/);
+  assert.throws(() => compare(original, swapped), /Original audio channel/);
+  assert.throws(() => compare(original, inverted), /Original audio channel/);
+  assert.throws(() => compare(original, dropout), /Original audio channel/);
+  assert.throws(() => compare(original, frozen), /Original audio channel/);
+  assert.throws(() => compare(original, original.subarray(16)), /comparison spans differ/);
+  assert.throws(() => compare(Buffer.alloc(original.length), original), /Silent original audio/);
+});
+
 test("private-source failures remain blocked before native launch", { skip: !ffmpeg }, async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "artdaddy-source-controls-"));
   try {
@@ -120,6 +155,7 @@ test("private-source failures remain blocked before native launch", { skip: !ffm
     await prepare(root, await mapping(short), /beyond its actual end/);
     await prepare(root, await mapping(plain), /requires actual rotation metadata/);
     await prepare(root, await mapping(rotated), /requires measured variable presentation intervals/);
+    await prepare(root, await mapping(rotated), /requires an actual source audio stream/, "phone-original-audio");
     for (const [sourceClass, requirements] of Object.entries(library.sourceClasses)) {
       if (!requirements.realWorld) continue;
       const definition = library.cases.find((entry) => entry.source === sourceClass);

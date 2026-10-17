@@ -83,20 +83,27 @@ test("unknown/blocked readiness stays separate and private fields never enter th
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("adding any number of pilots cannot raise promise success or qualification", async () => {
-  await fc.assert(fc.asyncProperty(fc.integer({ min: 1, max: 12 }), async (count) => {
-    const root = await fixture([definition, { ...definition, id: "pilot", kind: "pilot" }]);
-    try {
-      await receipt(root);
-      await record(root, "failed", { passed: false });
-      for (let index = 0; index < count; index++) await record(root, `pilot-${index}`, { caseId: "pilot", kind: "pilot" });
-      const result = summary(root);
-      assert.equal(result.pilotAttempts, count);
-      assert.equal(result.overallAttempts, 1);
-      assert.equal(result.overallPassRate, 0);
-      assert.equal(result.softwareLibraryQualified, false);
-    } finally { await rm(root, { recursive: true, force: true }); }
-  }), { numRuns: 8 });
+test("non-promise runs cannot raise promise success or qualification", async () => {
+  for (const kind of ["pilot", "measurement", "stretch"]) {
+    await fc.assert(fc.asyncProperty(fc.integer({ min: 1, max: 12 }), async (count) => {
+      const root = await fixture([definition, { ...definition, id: kind, kind }]);
+      try {
+        await receipt(root);
+        await record(root, "failed", { passed: false });
+        for (let index = 0; index < count; index++) await record(root, `${kind}-${index}`, { caseId: kind, kind });
+        const result = summary(root);
+        const row = result.rows.find((entry) => entry.caseId === kind);
+        assert.equal(row.attempts, count);
+        assert.equal(row.softwareQualified, false);
+        assert.equal(row.physicalQualified, false);
+        assert.equal(result.pilotAttempts, kind === "pilot" ? count : 0);
+        assert.equal(result.plannedVariants, 1);
+        assert.equal(result.overallAttempts, 1);
+        assert.equal(result.overallPassRate, 0);
+        assert.equal(result.softwareLibraryQualified, false);
+      } finally { await rm(root, { recursive: true, force: true }); }
+    }), { numRuns: 4 });
+  }
 });
 
 test("identifiable historical failures remain counted without rewriting evidence", async () => {

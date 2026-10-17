@@ -20,6 +20,39 @@ const present = async (filename) => {
 assert.ok(await present(path.join(userData, "ArtDaddy")) || !(await present(path.join(userData, "Akaru")))?.isDirectory(),
   "QA refused: native startup could migrate an existing legacy data folder; do not alter customer folders for this test");
 const executable = (program) => path.join(repository, "src-tauri", "binaries", `${program}-${target}${process.platform === "win32" ? ".exe" : ""}`);
+
+function compareOriginalAudio(reference, delivered, sampleRate = 48000) {
+  assert.equal(reference.length % 16, 0);
+  assert.equal(delivered.length % 16, 0);
+  assert.equal(delivered.length, reference.length, "Original-audio comparison spans differ");
+  const frames = reference.length / 16;
+  assert.ok(frames >= sampleRate, "Original-audio comparison needs a complete second");
+  const margin = Math.round(sampleRate * 0.05);
+  const windowFrames = Math.round(sampleRate / 4);
+  const channels = [];
+  for (let channel = 0; channel < 2; channel++) for (let start = margin; start < frames - margin; start += windowFrames) {
+    const end = Math.min(start + windowFrames, frames - margin);
+    let sourceEnergy = 0, outputEnergy = 0, errorEnergy = 0, cross = 0;
+    for (let frame = start; frame < end; frame++) {
+      const expected = reference.readDoubleLE(frame * 16 + channel * 8);
+      const actual = delivered.readDoubleLE(frame * 16 + channel * 8);
+      assert.ok(Number.isFinite(expected) && Number.isFinite(actual), "Original-audio comparison contains a non-finite sample");
+      sourceEnergy += expected * expected;
+      outputEnergy += actual * actual;
+      errorEnergy += (actual - expected) ** 2;
+      cross += expected * actual;
+    }
+    const correlation = sourceEnergy > 0 && outputEnergy > 0 ? cross / Math.sqrt(sourceEnergy * outputEnergy) : null;
+    const relativeError = sourceEnergy > 0 ? errorEnergy / sourceEnergy : null;
+    if (sourceEnergy / (end - start) > 1e-8)
+      assert.ok(correlation !== null && correlation >= 0.98 && relativeError !== null && relativeError <= 0.1,
+        `Original audio channel ${channel} is missing, shifted or altered: correlation=${correlation},relativeError=${relativeError}`);
+    else assert.ok(outputEnergy / (end - start) <= 1e-8, "Silent original audio acquired unrelated sound");
+    channels.push({ channel, startFrame: start, endFrame: end, correlation, relativeError, sourceEnergy, outputEnergy });
+  }
+  return { comparedFrames: frames, ignoredEdgeFrames: margin, channels };
+}
+
 const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "artdaddy-export-native-")));
 const prepareOnly = process.argv.includes("--prepare-only");
 const identifier = `com.artdaddy.qa.exporter-${Date.now()}`;
@@ -141,6 +174,8 @@ if (promiseCase) {
     const metadata = JSON.parse(result.stdout);
     const video = metadata.streams.find((entry) => entry.codec_type === "video");
     assert.ok(video && video.width > 0 && video.height > 0);
+    if (promiseCase.sourceAudio) assert.ok(metadata.streams.some((entry) => entry.codec_type === "audio"),
+      "Original-audio measurement requires an actual source audio stream");
     const duration = Number(video.duration ?? metadata.format.duration);
     const required = promiseCase.durationSeconds / Math.floor(promiseCase.visualClips / promiseCase.videoLayers);
     assert.ok(duration + 1 / promiseCase.fps >= required, "A promise fixture may not declare source footage beyond its actual end");
@@ -557,9 +592,21 @@ try {
           tones: real.map((value, index) => 2 * Math.hypot(value, imaginary[index]) / Math.min(frames, 48000)) }) : reject(new Error(error || `Audio decode failed:${code}`)));
       });
       assert.ok(sound.frames >= promiseCase.durationSeconds * 48000 && sound.frames <= promiseCase.durationSeconds * 48000 + 1024);
-      assert.ok(sound.energy.every((value) => value > 0));
-      assert.ok(sound.tones[0] > 0.06 && sound.tones[3] > 0.04 && sound.tones[1] < 0.01 && sound.tones[2] < 0.01,
-        "Promise audio lost, swapped or mixed the authored stereo tones");
+      if (promiseCase.sourceAudio) {
+        const decodeAudio = (filename) => {
+          const result = spawnSync(executable("artdaddy-ffmpeg"), ["-nostdin", "-v", "error", "-i", filename,
+            "-map", "0:a:0", "-t", String(promiseCase.durationSeconds), "-ar", "48000", "-ac", "2", "-f", "f64le", "-"],
+          { maxBuffer: promiseCase.durationSeconds * 48000 * 16 + 1024 * 1024 });
+          assert.equal(result.status, 0, String(result.stderr));
+          assert.ok(result.stdout.length >= promiseCase.durationSeconds * 48000 * 16, "Original audio span is incomplete");
+          return result.stdout;
+        };
+        sound.originalAudio = compareOriginalAudio(decodeAudio(promiseFixture.paths[0]), decodeAudio(native.destination));
+      } else {
+        assert.ok(sound.energy.every((value) => value > 0));
+        assert.ok(sound.tones[0] > 0.06 && sound.tones[3] > 0.04 && sound.tones[1] < 0.01 && sound.tones[2] < 0.01,
+          "Promise audio lost, swapped or mixed the authored stereo tones");
+      }
     }
     const speedLimit = promiseProfile === "16gb" ? promiseCase.speedFactor16gb : null;
     const timingQualified = speedLimit === null || native.elapsedMs <= promiseCase.durationSeconds * speedLimit * 1000;

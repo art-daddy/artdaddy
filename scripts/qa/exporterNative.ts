@@ -163,7 +163,7 @@ async function exercise(): Promise<void> {
   if (params.get("promiseId")) {
     const input = JSON.parse(await readTextFile(joinPath(root, "promise-input.json"))) as {
       case: { id: string; kind: string; width: number; height: number; fps: number; durationSeconds: number;
-        visualClips: number; videoLayers: number; captions: boolean; audio: boolean; speedFactor16gb: number | null };
+        visualClips: number; videoLayers: number; captions: boolean; audio: boolean; sourceAudio?: boolean; speedFactor16gb: number | null };
       profile: string; fixture: { paths: string[] };
     };
     const definition = input.case;
@@ -187,7 +187,8 @@ async function exercise(): Promise<void> {
         }) });
     }
     if (definition.audio) timeline.tracks.push({ id: "promise-audio", kind: "audio", z: 0, clips: [{ id: "promise-score", kind: "audio",
-      media_ref: armed.source, source_in: 0, source_out: definition.fps, timeline_in: 0, timeline_out: frames, loop: true }] });
+      media_ref: definition.sourceAudio ? input.fixture.paths[0] : armed.source,
+      source_in: 0, source_out: definition.sourceAudio ? frames : definition.fps, timeline_in: 0, timeline_out: frames, loop: !definition.sourceAudio }] });
     if (definition.captions) timeline.tracks.push({ id: "promise-caption", kind: "text", z: definition.videoLayers + 1,
       clips: Array.from({ length: Math.ceil(definition.durationSeconds / 5) }, (_, index) => ({ id: `promise-caption-${index}`, kind: "text",
         text: `EXPORT ${index + 1}`, timeline_in: index * 5 * definition.fps, timeline_out: Math.min(frames, (index * 5 + 4) * definition.fps),
