@@ -436,7 +436,7 @@ function effectFilters(effects: unknown, clipId: unknown, warnings: string[]): s
       const col = String(p.color ?? "#00FF00").replace(/^#/, "") || "00FF00";
       const sim = Math.max(0, Math.min(1, num("similarity", 0.3)));
       const bl = Math.max(0, Math.min(1, num("blend", 0.1)));
-      out.push(`chromakey=0x${col}:${sim.toFixed(4)}:${bl.toFixed(4)}`);
+      out.push(`chromakey=0x${col}:${sim.toFixed(4)}:${bl.toFixed(4)}:threads=1`);
     } else if (type === "glow") {
       // Rendered as a bloom sub-graph via the clip.glow path (glowFromEffects), not a comma filter.
     } else if (type === "custom") {
