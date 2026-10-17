@@ -102,11 +102,36 @@ rules. Do not wait for another continue unless an actual approval boundary is re
 
 ## V2 Tracker
 
-**In-scope baseline:11/24accepted checks (46%). Original tracker:13/30(43%).**
+**Strict in-scope acceptance: 11/24 checks (46%). Original tracker: 13/30 (43%).**
+**Built but not yet proven: 10 of the 13 open in-scope boxes.**
+
 These are acceptance checks, not coding hours or a measured99%rate. The denominator
 changes because two items are stretch and four are parked; it is not new feature
 credit. New V2 library, estimation, warnings and reporting obligations are covered
 by the corresponding open items below and cannot be omitted from phase completion.
+
+The second line counts present implementations whose acceptance proof is still
+open. It does not add accepted credit, imply a combined completion percentage or
+say the implementation cannot contain bugs. Three open boxes still require work
+beyond proving the existing implementation and are excluded from that count.
+
+### Open Box Detail
+
+| Box | Implementation Status | Why It Remains Open |
+| --- | --- | --- |
+| E0.5 | Still incomplete; excluded | FFmpeg is selected, but accepted full-case/profile limits and the measured 4K60 limit are not established. |
+| E1.5 | Built; proof pending | Shared consent and admission fences exist; complete UI/agent/MCP and lifecycle qualification remains open. |
+| E2.4 | Still incomplete; excluded | Logical scratch/staging guards exist, but complete allocated temporary-space coverage and the 20 GB physical ceiling are not implemented or proven. |
+| E2.5 | Built; proof pending | Visual, caption and quality rendering exists; the complete supported-feature and real-output conformance matrix is unfinished. |
+| E3.4 | Built; proof pending | Native leases, alias checks and volume-safe publication exist; cross-volume, case-sensitive and concurrent failure proof is incomplete. |
+| E3.5 | Built; proof pending | Durable restart and registered-output paths exist; the full V2 real-app/project/fault library has not qualified them. |
+| E4.2 | Built; proof pending | Separate preview/export painters and parity tests exist; all promised real-media timing and visual parity cases are not verified. |
+| E4.3 | Built; proof pending | Continuous mixing, fades, effects and ducking exist; original phone/web/screen audio and full-duration audio proof remain open. |
+| E4.4 | Built; proof pending | Preflight, local estimates, warnings and approved local Fast mode exist; cold/repeated/full-case estimate and device qualification is incomplete. |
+| E5.1 | Built; proof pending | Cross-platform FFmpeg/native paths exist; current protocol-20 macOS/Linux packages and platform-specific behavior are not qualified. |
+| E5.2 | Still incomplete; excluded | The library and Windows capped runner exist, but complete resource/profile qualification inputs and Mac/Linux enforcement paths remain unfinished before full/device runs. |
+| E5.3 | Built; proof pending | UI/MCP export and warning workflows exist; their complete end-to-end lifecycle and failure matrix is not qualified. |
+| E5.5 | Built; proof pending | Anonymous outcome collection, denominators and library reports exist; full per-line evidence and measured 99% results are not available. |
 
 ### In Scope - 24
 
@@ -670,6 +695,13 @@ by the corresponding open items below and cannot be omitted from phase completio
   physical8/16GB qualification remain open/deferred as previously agreed.
   The local volume still cannot exercise case-sensitive identity. All library
   acceptance counts, temporarySpaceQualified and99%qualification are unchanged.
+- V2-D064: after the reported18:04:47reset, byte-verified private backups precede
+  comparison with21dc34e. ExportQueue and both host files already match that
+  committed checkpoint; only the document's deleted V2-D052throughV2-D063block
+  needs restoration. All four files then match21dc34e. No cause is inferred and
+  no already-correct code or unrelated content is overwritten. The tracker now
+  separates strict11/24acceptance from10of13open boxes with implementations
+  present but proof pending; E0.5/E2.4/E5.2remain excluded as incomplete work.
 
 ## Historical V1 Design And Evidence
 
