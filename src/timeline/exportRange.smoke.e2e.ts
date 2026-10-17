@@ -1923,7 +1923,7 @@ describe("a clip exported on its own is the whole export over its span", () => {
   );
 
   it.each([false, true])(
-    "late audio preserves frozen floating samples with ducking=%s",
+    "late audio matches allocating delay and Windows frozen samples with ducking=%s",
     async (ducked) => {
       onTestFailed(() => {
         retainArtifacts = true;
@@ -1975,9 +1975,36 @@ describe("a clip exported on its own is the whole export over its span", () => {
       const plan = buildAudioRenderCommand(authored, output, {
         range: { from: (onset - 1) * FPS, to: (onset + 5) * FPS },
       });
+      const graphIndex = plan.args.indexOf("-filter_complex") + 1;
+      expect(graphIndex).toBeGreaterThan(0);
+      const delayedIndex = plan.args[graphIndex].match(/\[adelay_source(\d+)\];anullsrc=/)?.[1];
+      expect(delayedIndex).toBeDefined();
+      const virtualDelay =
+        `[adelay_source${delayedIndex}];anullsrc=r=48000:cl=stereo:n=2048:d=${onset.toFixed(3)},` +
+        `aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[adelay_silence${delayedIndex}];` +
+        `[adelay_silence${delayedIndex}][adelay_source${delayedIndex}]concat=n=2:v=0:a=1,asettb=1/48000,asetpts=N/SR/TB`;
+      expect(plan.args[graphIndex]).toContain(virtualDelay);
+      const allocatingArgs = [...plan.args];
+      allocatingArgs[graphIndex] = allocatingArgs[graphIndex].replace(
+        virtualDelay,
+        `,adelay=${onset * 1000}|${onset * 1000}`,
+      );
+      const referenceOutput = path.join(dir, `late-audio-allocating-${ducked}.nut`);
+      allocatingArgs[allocatingArgs.length - 1] = referenceOutput;
+      const referenceResult = await ctx.runner.run(
+        "ffmpeg",
+        allocatingArgs,
+        AbortSignal.timeout(110_000),
+      );
+      expect(referenceResult.code, referenceResult.stderr).toBe(0);
+      const reference = await ffBytes(["-i", referenceOutput, "-map", "0:a:0", "-f", "f64le", "-"]);
       const result = await ctx.runner.run("ffmpeg", plan.args, AbortSignal.timeout(110_000));
       expect(result.code, result.stderr).toBe(0);
       const actual = await ffBytes(["-i", output, "-map", "0:a:0", "-f", "f64le", "-"]);
+      expect(
+        actual.equals(reference),
+        "floating samples differ from the same-platform allocating delay",
+      ).toBe(true);
       expect(actual.length).toBe(6 * RATE * 16);
       expect(actual.subarray(2 * RATE * 16, 3 * RATE * 16).some((byte) => byte !== 0)).toBe(true);
       if (!ducked)
@@ -1985,11 +2012,15 @@ describe("a clip exported on its own is the whole export over its span", () => {
           true,
         );
       const hash = createHash("sha256").update(actual).digest("hex");
-      expect(hash, "floating samples differ from the frozen allocating-delay implementation").toBe(
-        ducked
-          ? "604817d0d8408372745fa8d8de876b2ac1cf14bab99a4823c617ebba8f231de9"
-          : "88bccd2a0eb7d424acc1edc2c7cfe78f1f8a5d3301cf5c15654f929e158df74b",
-      );
+      if (process.platform === "win32")
+        expect(
+          hash,
+          "floating samples differ from the frozen Windows allocating-delay implementation",
+        ).toBe(
+          ducked
+            ? "604817d0d8408372745fa8d8de876b2ac1cf14bab99a4823c617ebba8f231de9"
+            : "88bccd2a0eb7d424acc1edc2c7cfe78f1f8a5d3301cf5c15654f929e158df74b",
+        );
       console.log(
         `LATE AUDIO BASELINE ${JSON.stringify({ onset, ducked, hash, bytes: actual.length })}`,
       );
