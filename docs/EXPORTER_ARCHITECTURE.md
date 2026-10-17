@@ -540,6 +540,36 @@ by the corresponding open items below and cannot be omitted from phase completio
   build define are retained. Recovery checks pass 145 cases. No unrelated edits or
   frozen media were restored over, and no cause for the source regression is
   asserted without evidence. Subsequent patches use disk-context checks.
+- V2-D052: private real-source mappings require bounded provenance/permission,
+  expected SHA-256 and actual ffprobe metadata; downloaded media also needs its
+  HTTPS origin. Phone fixtures must exhibit rotation and measured variable
+  presentation intervals, not merely carry a phone-like filename. Preparation-only
+  runs stay in disposable roots outside export-rate accounting. Six synthetic
+  refusal controls verify the intended rejection reason, blocked/no-pass record
+  and absence of native launch. The rotated constant-rate control is itself
+  probed: the legacy rotate-tag command had silently produced an unrotated file.
+- V2-D053: the first phone attempt1792228822002 failed the mandatory confirmation
+  assertion. Disk comparison found the approved queue admission/reporting code
+  missing amid unrelated working-copy changes. With explicit owner approval,
+  private hash-recorded backups preceded recovery of only exporter-owned code.
+  Queue/calibration match the committed checkpoint; shared-host catalog guards
+  remain intact. The51queue,4calibration and26host checks pass, including the
+  restored mode-capture race/MCP-default test. No cause is inferred, no failing
+  evidence is erased, and no unrelated changes or frozen artifacts are reverted.
+- V2-D054: real-phone run1792229729042 verifies the10-second1080x1920/30fps
+  artifact:300frames, moving picture, caption fade,480000authored stereo-score
+  sample frames, publication identity and staging/scratch cleanup. Export took
+  8065.9ms. At0.15/0.75/2seconds, RGB mean absolute errors against the correctly
+  rotated source are0.71/0.63/2.58, versus59.85/60.13/60.99with rotation ignored.
+  The original file's SHA-256 is unchanged after export. Matching kernel receipt
+  runId07f09b0ec8d44c3da92e66892dc29bd1 records the unchanged6442450944byte
+  whole-tree cap and2561974272bytesreported peak accounting, not an exact physical
+  ceiling. This tests an authored score, not the phone microphone. Readiness and
+  first-run ETA remain unknown; physical and total-temporary-space qualification
+  remain false, so the promise-library pass is deliberately false. The QA capture
+  now reports an absent final thread flag as null rather than the first argument;
+  four absent/one-/two-thread capture controls pass. No encoder policy, production
+  piece span, resource limit, golden or acceptance count changes.
 
 ## Historical V1 Design And Evidence
 

@@ -7,6 +7,7 @@ export default defineConfig({
   define: { __ARTDADDY_RELEASE__: JSON.stringify("artdaddy@test") },
   test: {
     environment: "node",
+    env: { VITE_SENTRY_DSN: "" },
     include: ["src/**/*.e2e.ts"],
     testTimeout: 180_000,
     hookTimeout: 30_000,

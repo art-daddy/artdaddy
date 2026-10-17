@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
-import { createWriteStream, watch } from "node:fs";
+import { createReadStream, createWriteStream, watch } from "node:fs";
 import { mkdir, mkdtemp, readFile, writeFile, realpath, readdir, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -21,8 +21,10 @@ assert.ok(await present(path.join(userData, "ArtDaddy")) || !(await present(path
   "QA refused: native startup could migrate an existing legacy data folder; do not alter customer folders for this test");
 const executable = (program) => path.join(repository, "src-tauri", "binaries", `${program}-${target}${process.platform === "win32" ? ".exe" : ""}`);
 const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "artdaddy-export-native-")));
+const prepareOnly = process.argv.includes("--prepare-only");
 const identifier = `com.artdaddy.qa.exporter-${Date.now()}`;
-const output = path.join(repository, "reports", "qa", "exporter", `${target}-${Date.now()}`);
+const output = prepareOnly ? path.join(root, "source-preparation") :
+  path.join(repository, "reports", "qa", "exporter", `${target}-${Date.now()}`);
 await mkdir(output, { recursive: true });
 const fastQualitySource = process.env.ARTDADDY_QA_FAST_QUALITY_SOURCE ?? "";
 if (fastQualitySource) {
@@ -76,6 +78,7 @@ const promiseId = process.env.ARTDADDY_QA_PROMISE_CASE ?? "";
 const promiseProfile = process.env.ARTDADDY_QA_PROMISE_PROFILE ?? "16gb";
 const promiseCase = promiseId ? promiseLibrary.cases.find((entry) => entry.id === promiseId) : null;
 assert.ok(!promiseId || promiseCase, "Unknown promise-library case");
+assert.ok(!prepareOnly || promiseCase, "Source preparation requires a promise-library case");
 const fastEncoderProbe = process.env.ARTDADDY_QA_FAST_ENCODER_PROBE ?? "";
 assert.ok(!fastEncoderProbe || fastEncoderProbe === "amf-cqp18" && process.platform === "win32" && promiseCase?.kind === "pilot",
   "Fast encoder integration is a private Windows short-pilot measurement only");
@@ -92,13 +95,28 @@ if (promiseCase) {
   const started = performance.now();
   const sourceClass = promiseLibrary.sourceClasses[promiseCase.source];
   const paths = [];
+  let mappedSource;
+  try {
   if (promiseCase.source !== "generated") {
-    const asset = sourceClass.path ? path.join(repository, sourceClass.path) : null;
+    let asset = sourceClass.path ? path.join(repository, sourceClass.path) : null;
+    const manifestPath = process.env.ARTDADDY_QA_SOURCE_MANIFEST;
+    if (manifestPath) {
+      assert.ok((await stat(manifestPath)).size <= 65536, "Private source manifest exceeds 64 KiB");
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+      assert.equal(manifest.version, 1, "Unsupported private source manifest version");
+      mappedSource = manifest.sources?.[promiseCase.source];
+      if (mappedSource) {
+        assert.ok(typeof mappedSource.path === "string" && mappedSource.path.trim(), "Private source path is missing");
+        assert.match(mappedSource.sha256, /^[a-f0-9]{64}$/i, "Private source requires its expected SHA256");
+        for (const field of ["provenance", "permission"])
+          assert.ok(typeof mappedSource[field] === "string" && mappedSource[field].trim() && mappedSource[field].length <= 1000,
+            `Private source requires ${field}`);
+        if (promiseCase.source === "web-download")
+          assert.equal(new URL(mappedSource.origin).protocol, "https:", "Downloaded source requires its recorded HTTPS origin");
+        asset = path.resolve(path.dirname(manifestPath), mappedSource.path);
+      }
+    }
     if (!asset || !(await present(asset))) {
-      await writeFile(path.join(output, "promise-library.json"), JSON.stringify({ ...promiseAttempt, version: 2, caseId: promiseId,
-        profile: promiseProfile, profileRunId: process.env.ARTDADDY_QA_MEMORY_RUN_ID ?? null,
-        status: "blocked-source", passed: false, reason: "Required real-world source is unavailable",
-        realWorld: true, physicalQualified: false }, null, 2));
       throw new Error(`Promise case${promiseId} is blocked: its required real-world source is unavailable`);
     }
     for (let index = 0; index < promiseCase.videoLayers; index++) paths.push(asset);
@@ -117,7 +135,8 @@ if (promiseCase) {
   }
   const sources = [];
   for (const asset of [...new Set(paths)]) {
-    const result = spawnSync(executable("artdaddy-ffprobe"), ["-v", "error", "-show_streams", "-show_format", "-of", "json", asset], { encoding: "utf8" });
+    const result = spawnSync(executable("artdaddy-ffprobe"), ["-v", "error", "-show_streams", "-show_format", "-of", "json", asset],
+      { encoding: "utf8", timeout: 10000, maxBuffer: 2 * 1024 * 1024 });
     assert.equal(result.status, 0, result.stderr);
     const metadata = JSON.parse(result.stdout);
     const video = metadata.streams.find((entry) => entry.codec_type === "video");
@@ -125,15 +144,49 @@ if (promiseCase) {
     const duration = Number(video.duration ?? metadata.format.duration);
     const required = promiseCase.durationSeconds / Math.floor(promiseCase.visualClips / promiseCase.videoLayers);
     assert.ok(duration + 1 / promiseCase.fps >= required, "A promise fixture may not declare source footage beyond its actual end");
-    sources.push({ path: asset, sha256: createHash("sha256").update(await readFile(asset)).digest("hex"), duration,
+    if (sourceClass.realWorld && promiseCase.kind === "promise")
+      assert.ok(Math.max(video.width, video.height) <= 3840 && Math.min(video.width, video.height) <= 2160,
+        "A source above 4K cannot qualify an inside-promise real-world case");
+    const digest = createHash("sha256");
+    for await (const bytes of createReadStream(asset)) digest.update(bytes);
+    const sha256 = digest.digest("hex");
+    if (mappedSource) assert.equal(sha256, mappedSource.sha256.toLowerCase(), "Private source bytes do not match its expected SHA256");
+    const rotation = Number(video.tags?.rotate ?? video.side_data_list?.find((entry) => entry.rotation !== undefined)?.rotation ?? 0);
+    let timingProof;
+    if (promiseCase.source === "phone-vfr-rotation") {
+      assert.ok(Number.isFinite(rotation) && rotation % 360 !== 0, "Phone fixture requires actual rotation metadata");
+      const packets = spawnSync(executable("artdaddy-ffprobe"), ["-v", "error", "-select_streams", "v:0", "-read_intervals", "%+10",
+        "-show_packets", "-show_entries", "packet=pts_time", "-of", "json", asset],
+        { encoding: "utf8", timeout: 10000, maxBuffer: 2 * 1024 * 1024 });
+      assert.equal(packets.status, 0, packets.error?.message ?? packets.stderr);
+      const times = JSON.parse(packets.stdout).packets.map((packet) => Number(packet.pts_time)).filter(Number.isFinite).sort((left, right) => left - right);
+      const intervals = times.slice(1).map((time, index) => Math.round((time - times[index]) * 1000000)).filter((value) => value > 0);
+      const minIntervalMicros = Math.min(...intervals), maxIntervalMicros = Math.max(...intervals);
+      assert.ok(intervals.length > 1 && maxIntervalMicros - minIntervalMicros > 1000, "Phone fixture requires measured variable presentation intervals");
+      timingProof = { windowSeconds: 10, packets: times.length, minIntervalMicros, maxIntervalMicros, variableFrameRate: true };
+    }
+    sources.push({ path: asset, sha256, duration,
       width: video.width, height: video.height, fps: video.r_frame_rate, averageFps: video.avg_frame_rate,
-      rotation: video.tags?.rotate ?? video.side_data_list?.find((entry) => entry.rotation !== undefined)?.rotation ?? 0 });
+      rotation, ...(timingProof ? { timingProof } : {}) });
   }
-  promiseFixture = { preparationMs: performance.now() - started, realWorld: sourceClass.realWorld, provenance: sourceClass.provenance, paths, sources };
+  promiseFixture = { preparationMs: performance.now() - started, realWorld: sourceClass.realWorld,
+    provenance: mappedSource?.provenance ?? sourceClass.provenance,
+    ...(mappedSource ? { permission: mappedSource.permission, origin: mappedSource.origin ?? null } : {}), paths, sources };
   await writeFile(path.join(root, "promise-input.json"), JSON.stringify({ case: promiseCase, profile: promiseProfile,
     profileSpec: promiseLibrary.profiles[promiseProfile], fixture: promiseFixture }));
   await writeFile(path.join(output, "promise-library.json"), JSON.stringify({ ...promiseAttempt, status: "prepared",
     sourceReady: true, artifactVerified: false, passed: false }, null, 2));
+  } catch (error) {
+    await writeFile(path.join(output, "promise-library.json"), JSON.stringify({ ...promiseAttempt,
+      status: "blocked-source", sourceReady: false, artifactVerified: false, passed: false,
+      reason: "Required source was missing or failed identity, metadata or provenance validation", physicalQualified: false }, null, 2));
+    console.error(`SOURCE PREPARATION ${JSON.stringify({ root, output, sourceReady: false })}`);
+    throw error;
+  }
+}
+if (prepareOnly) {
+  console.log(`SOURCE PREPARATION ${JSON.stringify({ root, output, sourceReady: true })}`);
+  process.exit(0);
 }
 const source = path.join(root, "source.nut");
 const generated = spawnSync(executable("artdaddy-ffmpeg"), ["-y", "-nostdin", "-v", "error", "-f", "lavfi", "-i",
@@ -415,6 +468,33 @@ try {
       return createHash("sha256").update(values).digest("hex");
     });
     assert.equal(new Set(tiles).size, promiseCase.videoLayers, "Promise layers collapsed to identical pictures");
+    let orientationProof;
+    if (promiseCase.source === "phone-vfr-rotation") {
+      const height = Math.round(90 * native.imageHeight);
+      const picture = (frame) => Buffer.concat(Array.from({ length: height }, (_, row) =>
+        frame.subarray(row * 160 * 3, (row + 1) * 160 * 3)));
+      orientationProof = [0.15, 0.75, Math.min(2, promiseCase.durationSeconds - 0.1)].map((at, index) => {
+        const sourceFrame = (ignoreRotation) => {
+          const decoded = spawnSync(executable("artdaddy-ffmpeg"), ["-nostdin", "-v", "error",
+            ...(ignoreRotation ? ["-noautorotate"] : []), "-ss", String(at), "-i", promiseFixture.paths[0],
+            "-frames:v", "1", "-vf", `scale=160:${height}`, "-pix_fmt", "rgb24", "-f", "rawvideo", "-"],
+            { maxBuffer: sampleSize + 1024 * 1024 });
+          assert.equal(decoded.status, 0, String(decoded.stderr));
+          assert.equal(decoded.stdout.length, 160 * height * 3);
+          return decoded.stdout;
+        };
+        const actual = picture(samples[index]);
+        const error = (reference) => {
+          let sum = 0;
+          for (let offset = 0; offset < actual.length; offset++) sum += Math.abs(actual[offset] - reference[offset]);
+          return sum / actual.length;
+        };
+        const correctlyRotatedError = error(sourceFrame(false));
+        const ignoredRotationError = error(sourceFrame(true));
+        assert.ok(correctlyRotatedError < ignoredRotationError, "Phone output does not follow the source's rotation metadata");
+        return { at, correctlyRotatedError, ignoredRotationError };
+      });
+    }
     let captionSamples;
     if (promiseCase.captions) {
       const painted = [0.15, 0.75].map((at) => {
@@ -474,7 +554,7 @@ try {
     const cap = Number(process.env.ARTDADDY_QA_MEMORY_CAP_BYTES ?? 0);
     const profileEnforced = cap > 0 && cap <= promiseLibrary.profiles[promiseProfile].systemMemoryBytes;
     const temporarySpaceQualified = false;
-    proof.promiseResult = { ...promiseAttempt, ...native, fixture: promiseFixture, sound, captionSamples, sourceReady: true,
+    proof.promiseResult = { ...promiseAttempt, ...native, fixture: promiseFixture, sound, captionSamples, orientationProof, sourceReady: true,
       mode: native.encoder === "libx264" ? "quality" : native.encoder === "h264_amf" ? "fast" : "unknown",
       encodedVideo: { width: video[0].width, height: video[0].height, fps: video[0].r_frame_rate, frames: Number(video[0].nb_read_frames) },
       artifactVerified: true, timingQualified,

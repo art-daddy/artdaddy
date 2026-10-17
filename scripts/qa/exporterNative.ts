@@ -242,7 +242,7 @@ async function exercise(): Promise<void> {
       records.jobs.find((entry) => entry.id === queued.job_id)?.status === "done";
     promiseResult = { caseId: definition.id, profile: input.profile, kind: definition.kind, destination, jobId: queued.job_id,
       encoder: plan.args[plan.args.lastIndexOf("-c:v") + 1],
-      encoderThreads: plan.args[plan.args.lastIndexOf("-threads:v") + 1], calibrationEncoder,
+      encoderThreads: plan.args.includes("-threads:v") ? plan.args[plan.args.lastIndexOf("-threads:v") + 1] : null, calibrationEncoder,
       readiness,
       state: outcome?.state ?? "missing", error: outcome?.error ?? null, elapsedMs: exportElapsedMs,
       projectFrames: frames, partitions: plan.steps?.length ?? 0, columns, rows, imageHeight,
