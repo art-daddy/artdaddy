@@ -589,6 +589,32 @@ by the corresponding open items below and cannot be omitted from phase completio
   absent-thread capture is null. Readiness/first ETA, physical and total-disk
   proof remain unqualified; the library pass stays false. Source audio is not
   exercised, private media stays local, and no acceptance count is increased.
+- V2-D057: the declared macOS screen fixture has only3.05seconds of video and
+  correctly fails the10-second source-preparation gate. It is not looped, stretched
+  or replaced on disk. An owner-authorized Downloads original already referenced
+  by desktop regressions has no container duration but11.932seconds of measured
+  packet timestamps. A new lossless video-packet excerpt has10.993seconds and
+  three decoded samples identical to that original. Private provenance/hash audits
+  are retained; the original, short fixture, excerpt and export rehash unchanged.
+- V2-D058: a real screen can legitimately have a dark center. Real-source checks
+  therefore use the mapped picture rather than a bright-center proxy: crop out
+  captions, require picture motion, and require lower source error than blank and
+  wrong-image controls. Synthetic layer checks remain unchanged. All12source
+  refusals, three correct dark-centered cases and nine missing/frozen/wrong-picture
+  controls pass across the three real-source classes. Missing video or frozen
+  video with changing caption pixels cannot satisfy these checks. The final
+  checker also replays both frozen phone/web artifacts without changing their
+  recorded source/rotation measurements.
+- V2-D059: screen run1792232160903 verifies300frames at1920x1080/30fps,
+  caption fade,480000authored stereo-score sample frames, publication and cleanup
+  in3118.4ms. Source-picture errors0.18/0.17/0.18compare to blank26.83/27.33/27.35
+  and flipped15.45/16.07/16.12. Matching kernel runId
+  10b4d969e4a748fc90d4c76c725e7f66 records the unchanged6442450944bytecap and
+  2944118784bytesreported peak accounting. All three real-source classes now
+  have short artifact evidence on this Windows host, not physical16GB or full
+  promise qualification. First ETA/readiness and total-temporary-space proof
+  remain unknown/unqualified; all three library passes remain false. No original
+  source-audio, macOS-runtime, raised-limit or acceptance-count claim is made.
 
 ## Historical V1 Design And Evidence
 

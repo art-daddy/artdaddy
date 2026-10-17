@@ -464,7 +464,7 @@ try {
         const offset = ((y + row - 4) * 160 + x - 8) * 3;
         return samples[1].subarray(offset, offset + 16 * 3);
       }));
-      assert.ok(values.some((value) => value > 48), `Promise layer${index} is blank`);
+      if (!promiseFixture.realWorld) assert.ok(values.some((value) => value > 48), `Promise layer${index} is blank`);
       return createHash("sha256").update(values).digest("hex");
     });
     assert.equal(new Set(tiles).size, promiseCase.videoLayers, "Promise layers collapsed to identical pictures");
@@ -477,6 +477,8 @@ try {
       const height = Math.round(90 * native.imageHeight);
       const picture = (frame) => Buffer.concat(Array.from({ length: height }, (_, row) =>
         frame.subarray(row * 160 * 3, (row + 1) * 160 * 3)));
+      const pictures = samples.map(picture);
+      assert.ok(!pictures[0].equals(pictures[2]), "Real-source picture is frozen despite changing captions");
       sourcePictureProof = [0.15, 0.75, Math.min(2, promiseCase.durationSeconds - 0.1)].map((at, index) => {
         const sourceFrame = (wrongControl) => {
           const decoded = spawnSync(executable("artdaddy-ffmpeg"), ["-nostdin", "-v", "error",
@@ -488,16 +490,19 @@ try {
           assert.equal(decoded.stdout.length, 160 * height * 3);
           return decoded.stdout;
         };
-        const actual = picture(samples[index]);
+        const actual = pictures[index];
         const error = (reference) => {
           let sum = 0;
           for (let offset = 0; offset < actual.length; offset++) sum += Math.abs(actual[offset] - reference[offset]);
           return sum / actual.length;
         };
-        const sourceError = error(sourceFrame(false));
+        const reference = sourceFrame(false);
+        const sourceError = error(reference);
+        const blankError = reference.reduce((sum, value) => sum + value, 0) / reference.length;
+        assert.ok(sourceError < blankError, "Real-source picture is missing or no closer than a blank frame");
         const controlError = error(sourceFrame(true));
         assert.ok(sourceError < controlError, "Real-source output does not follow the mapped source picture");
-        return { at, sourceError, controlError, control: phone ? "rotation-ignored" : "vertical-flip" };
+        return { at, sourceError, blankError, controlError, control: phone ? "rotation-ignored" : "vertical-flip" };
       });
       if (phone) orientationProof = sourcePictureProof.map(({ at, sourceError, controlError }) =>
         ({ at, correctlyRotatedError: sourceError, ignoredRotationError: controlError }));
