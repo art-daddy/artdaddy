@@ -468,16 +468,21 @@ try {
       return createHash("sha256").update(values).digest("hex");
     });
     assert.equal(new Set(tiles).size, promiseCase.videoLayers, "Promise layers collapsed to identical pictures");
+    let sourcePictureProof;
     let orientationProof;
-    if (promiseCase.source === "phone-vfr-rotation") {
+    if (promiseFixture.realWorld) {
+      assert.equal(promiseCase.videoLayers, 1, "Source-picture checks require the single-source fixture layout");
+      assert.equal(promiseCase.visualClips, 1, "Source-picture checks require the uncut fixture timeline");
+      const phone = promiseCase.source === "phone-vfr-rotation";
       const height = Math.round(90 * native.imageHeight);
       const picture = (frame) => Buffer.concat(Array.from({ length: height }, (_, row) =>
         frame.subarray(row * 160 * 3, (row + 1) * 160 * 3)));
-      orientationProof = [0.15, 0.75, Math.min(2, promiseCase.durationSeconds - 0.1)].map((at, index) => {
-        const sourceFrame = (ignoreRotation) => {
+      sourcePictureProof = [0.15, 0.75, Math.min(2, promiseCase.durationSeconds - 0.1)].map((at, index) => {
+        const sourceFrame = (wrongControl) => {
           const decoded = spawnSync(executable("artdaddy-ffmpeg"), ["-nostdin", "-v", "error",
-            ...(ignoreRotation ? ["-noautorotate"] : []), "-ss", String(at), "-i", promiseFixture.paths[0],
-            "-frames:v", "1", "-vf", `scale=160:${height}`, "-pix_fmt", "rgb24", "-f", "rawvideo", "-"],
+            ...(wrongControl && phone ? ["-noautorotate"] : []), "-ss", String(at), "-i", promiseFixture.paths[0],
+            "-frames:v", "1", "-vf", `scale=160:${height}${wrongControl && !phone ? ",vflip" : ""}`,
+            "-pix_fmt", "rgb24", "-f", "rawvideo", "-"],
             { maxBuffer: sampleSize + 1024 * 1024 });
           assert.equal(decoded.status, 0, String(decoded.stderr));
           assert.equal(decoded.stdout.length, 160 * height * 3);
@@ -489,11 +494,13 @@ try {
           for (let offset = 0; offset < actual.length; offset++) sum += Math.abs(actual[offset] - reference[offset]);
           return sum / actual.length;
         };
-        const correctlyRotatedError = error(sourceFrame(false));
-        const ignoredRotationError = error(sourceFrame(true));
-        assert.ok(correctlyRotatedError < ignoredRotationError, "Phone output does not follow the source's rotation metadata");
-        return { at, correctlyRotatedError, ignoredRotationError };
+        const sourceError = error(sourceFrame(false));
+        const controlError = error(sourceFrame(true));
+        assert.ok(sourceError < controlError, "Real-source output does not follow the mapped source picture");
+        return { at, sourceError, controlError, control: phone ? "rotation-ignored" : "vertical-flip" };
       });
+      if (phone) orientationProof = sourcePictureProof.map(({ at, sourceError, controlError }) =>
+        ({ at, correctlyRotatedError: sourceError, ignoredRotationError: controlError }));
     }
     let captionSamples;
     if (promiseCase.captions) {
@@ -554,7 +561,7 @@ try {
     const cap = Number(process.env.ARTDADDY_QA_MEMORY_CAP_BYTES ?? 0);
     const profileEnforced = cap > 0 && cap <= promiseLibrary.profiles[promiseProfile].systemMemoryBytes;
     const temporarySpaceQualified = false;
-    proof.promiseResult = { ...promiseAttempt, ...native, fixture: promiseFixture, sound, captionSamples, orientationProof, sourceReady: true,
+    proof.promiseResult = { ...promiseAttempt, ...native, fixture: promiseFixture, sound, captionSamples, sourcePictureProof, orientationProof, sourceReady: true,
       mode: native.encoder === "libx264" ? "quality" : native.encoder === "h264_amf" ? "fast" : "unknown",
       encodedVideo: { width: video[0].width, height: video[0].height, fps: video[0].r_frame_rate, frames: Number(video[0].nb_read_frames) },
       artifactVerified: true, timingQualified,

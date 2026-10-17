@@ -9,15 +9,18 @@ import { test } from "node:test";
 
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const driver = path.join(repository, "scripts/qa/exporterNative.mjs");
+const library = JSON.parse(await readFile(path.join(repository, "scripts/qa/exporterPromiseCases.json"), "utf8"));
 const targets = { "win32-x64": "x86_64-pc-windows-msvc.exe", "darwin-arm64": "aarch64-apple-darwin", "linux-x64": "x86_64-unknown-linux-gnu" };
 const target = targets[`${process.platform}-${process.arch}`];
 const ffmpeg = target ? path.join(repository, "src-tauri/binaries", `artdaddy-ffmpeg-${target}`) : null;
 
-async function prepare(root, source, expectedFailure) {
+async function prepare(root, source, expectedFailure, caseId = "phone-vfr-rotation") {
   const manifest = path.join(root, "source-map.json");
-  await writeFile(manifest, JSON.stringify({ version: 1, sources: { "phone-vfr-rotation": source } }));
+  const definition = library.cases.find((entry) => entry.id === caseId);
+  assert.ok(definition);
+  await writeFile(manifest, JSON.stringify({ version: 1, sources: { [definition.source]: source } }));
   const result = spawnSync(process.execPath, [driver, "--prepare-only"], { cwd: repository,
-    env: { ...process.env, ARTDADDY_QA_PROMISE_CASE: "phone-vfr-rotation", ARTDADDY_QA_PROMISE_PROFILE: "16gb",
+    env: { ...process.env, ARTDADDY_QA_PROMISE_CASE: caseId, ARTDADDY_QA_PROMISE_PROFILE: "16gb",
       ARTDADDY_QA_SOURCE_MANIFEST: manifest, ARTDADDY_QA_FAST_QUALITY_SOURCE: "", ARTDADDY_QA_FAST_ENCODER_PROBE: "" },
     encoding: "utf8", timeout: 30_000, maxBuffer: 2 * 1024 * 1024 });
   const reported = `${result.stdout}\n${result.stderr}`.match(/SOURCE PREPARATION (\{[^\n]+\})/);
@@ -61,6 +64,16 @@ test("private-source failures remain blocked before native launch", { skip: !ffm
     await prepare(root, await mapping(short), /beyond its actual end/);
     await prepare(root, await mapping(plain), /requires actual rotation metadata/);
     await prepare(root, await mapping(rotated), /requires measured variable presentation intervals/);
-    await prepare(root, { ...(await mapping(rotated)), permission: "" }, /requires permission/);
+    for (const [sourceClass, requirements] of Object.entries(library.sourceClasses)) {
+      if (!requirements.realWorld) continue;
+      const definition = library.cases.find((entry) => entry.source === sourceClass);
+      assert.ok(definition, `Real source class ${sourceClass} has no library case`);
+      for (const field of ["provenance", "permission"]) {
+        await prepare(root, { ...(await mapping(plain)), origin: "https://example.invalid/control.mp4", [field]: "" },
+          new RegExp(`requires ${field}`), definition.id);
+      }
+    }
+    await prepare(root, { ...(await mapping(plain)), origin: "http://example.invalid/control.mp4" },
+      /requires its recorded HTTPS origin/, "web-download");
   } finally { await rm(root, { recursive: true, force: true }); }
 });

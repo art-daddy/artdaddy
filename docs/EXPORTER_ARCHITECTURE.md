@@ -570,6 +570,25 @@ by the corresponding open items below and cannot be omitted from phase completio
   now reports an absent final thread flag as null rather than the first argument;
   four absent/one-/two-thread capture controls pass. No encoder policy, production
   piece span, resource limit, golden or acceptance count changes.
+- V2-D055: the refusal controls now walk every declared real-world source class
+  for required provenance and permission, plus the downloaded-source HTTPS rule;
+  all12negative controls pass without native launch or export-rate entries.
+  All current real-source fixtures also compare three actual output pictures to
+  the mapped source and a wrong visual control. The phone rotation comparison
+  replays against its retained artifact and reproduces every frozen pre-change
+  measurement. Originals and both retained artifacts are rehashed unchanged.
+- V2-D056: licensed web run1792230905762 verifies300frames at1920x1080/30fps,
+  caption fade,480000authored stereo-score sample frames, publication and cleanup
+  in4755.4ms. The complete downloaded source is a320x176/25fpsH.264excerpt,
+  not native-HD footage: this proves upscaling/source handling, not native-HD
+  decoding speed. Origin, SHA-256, CC BY3.0permission and Blender Foundation
+  attribution are retained beside the uncommitted source. Three source-picture
+  errors are0.86/0.89/0.97versus34.55/29.16/31.17for the flipped control.
+  Matching kernel runId53624d255e6140e483454a42e7fa7976 records the unchanged
+  6442450944bytecap and2855219200bytesreported peak accounting. The corrected
+  absent-thread capture is null. Readiness/first ETA, physical and total-disk
+  proof remain unqualified; the library pass stays false. Source audio is not
+  exercised, private media stays local, and no acceptance count is increased.
 
 ## Historical V1 Design And Evidence
 
