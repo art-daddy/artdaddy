@@ -52,9 +52,17 @@ for (const entry of entries.filter((entry) => entry.isDirectory())) {
   const platform = result.platform ?? envelope?.hardware?.platform;
   if (!definition || !library.profiles[result.profile] || !library.platforms.includes(platform)) { invalidRecords++; continue; }
   const receipt = receipts.get(result.profileRunId);
-  const profileVerified = platform === "win32" && !!receipt && receipt.scope === "windows-job-commit-pressure-simulation" && receipt.workload === "App" &&
+  const kernelProfileVerified = platform === "win32" && !!receipt && receipt.scope === "windows-job-commit-pressure-simulation" && receipt.workload === "App" &&
     receipt.exitCode === 0 && receipt.configuredCommitLimitBytes > 0 &&
     receipt.configuredCommitLimitBytes <= library.profiles[result.profile].systemMemoryBytes;
+  const host = result.hostProfileEvidence;
+  const hostProfileVerified = ["darwin", "linux"].includes(platform) && host?.scope === "measured-host-memory" &&
+    typeof host.runId === "string" && host.runId.length > 0 && host.runId === envelope?.identifier && host.platform === platform &&
+    envelope?.hardware?.platform === platform && host.nodeTotalMemoryBytes === envelope.hardware.totalMemoryBytes &&
+    host.nativeTotalMemoryBytes === envelope?.native?.resources?.total_memory_bytes &&
+    [host.nodeTotalMemoryBytes, host.nativeTotalMemoryBytes].every((bytes) => Number.isSafeInteger(bytes) && bytes > 0 &&
+      bytes <= library.profiles[result.profile].systemMemoryBytes);
+  const profileVerified = kernelProfileVerified || hostProfileVerified;
   const exactDefinition = result.definition && ["width", "height", "fps", "durationSeconds", "visualClips", "videoLayers"]
     .every((key) => result.definition[key] === definition[key]);
   const video = result.encodedVideo;
@@ -68,6 +76,7 @@ for (const entry of entries.filter((entry) => entry.isDirectory())) {
     result.temporarySpaceQualified === true && result.estimateProvided === true && profileVerified && timing;
   attempts.push({ caseId: definition.id, line: definition.line, kind: definition.kind, profile: result.profile, platform,
     passed, artifactVerified: result.artifactVerified === true, profileVerified, physical: result.physicalQualified === true,
+    profileEvidenceKind: kernelProfileVerified ? "windows-kernel-commit" : hostProfileVerified ? "measured-host-memory" : "unverified",
     readiness: result.status === "blocked-source" ? "not_ready" : ["ready", "not_ready"].includes(result.readiness) ? result.readiness : "unknown",
     blockedSource: result.status === "blocked-source", elapsedMs: Number.isFinite(result.elapsedMs) ? result.elapsedMs : null });
 }
@@ -85,6 +94,7 @@ for (const definition of library.cases) for (const profile of Object.keys(librar
     attempts: observed.length, readyAttempts: ready.length, passed: observed.filter((attempt) => attempt.passed).length,
     artifactSuccesses: observed.filter((attempt) => attempt.artifactVerified).length,
     profileVerifiedAttempts: observed.filter((attempt) => attempt.profileVerified).length,
+    profileEvidenceKinds: [...new Set(observed.map((attempt) => attempt.profileEvidenceKind))].sort(),
     unknownReadiness: observed.filter((attempt) => attempt.readiness === "unknown").length,
     sourceBlockedAttempts: observed.filter((attempt) => attempt.blockedSource).length,
     overallPassRate: rate(observed.filter((attempt) => attempt.passed).length, observed.length),

@@ -403,6 +403,17 @@ try {
   proof.steps.push({ phase: "owned-native-process-crashed" });
   const second = start(config, 2);
   const report = await changedFile(path.join(root, "native-report.json"), (report) => report.ok === true, second);
+  proof.hostProfileEvidence = ["darwin", "linux"].includes(process.platform) ? {
+    scope: "measured-host-memory", runId: identifier, platform: process.platform,
+    nodeTotalMemoryBytes: proof.hardware.totalMemoryBytes,
+    nativeTotalMemoryBytes: report.resources?.total_memory_bytes ?? null,
+  } : null;
+  proof.softwareProfileInputs = Object.fromEntries(Object.entries(promiseLibrary.profiles).map(([profile, limits]) => [profile, {
+    hostWithinMemoryBound: !!proof.hostProfileEvidence &&
+      [proof.hostProfileEvidence.nodeTotalMemoryBytes, proof.hostProfileEvidence.nativeTotalMemoryBytes]
+        .every((bytes) => Number.isSafeInteger(bytes) && bytes > 0 && bytes <= limits.systemMemoryBytes),
+    physicalQualified: false, promiseQualified: false,
+  }]));
   assert.equal(report.producerComplete, true, "Native success must have persisted producer completion");
   assert.equal(report.recoveryAttempts, 1, "Crash must consume the bounded native recovery attempt");
   assert.ok(admitted.progress.includes("frame="), "Crash was not armed after real encoder progress");
@@ -612,13 +623,18 @@ try {
     const speedLimit = promiseProfile === "16gb" ? promiseCase.speedFactor16gb : null;
     const timingQualified = speedLimit === null || native.elapsedMs <= promiseCase.durationSeconds * speedLimit * 1000;
     const cap = Number(process.env.ARTDADDY_QA_MEMORY_CAP_BYTES ?? 0);
-    const profileEnforced = cap > 0 && cap <= promiseLibrary.profiles[promiseProfile].systemMemoryBytes;
+    const profileBound = promiseLibrary.profiles[promiseProfile].systemMemoryBytes;
+    const hostProfileEvidence = proof.hostProfileEvidence;
+    const hostProfileFits = !!hostProfileEvidence && [hostProfileEvidence.nodeTotalMemoryBytes, hostProfileEvidence.nativeTotalMemoryBytes]
+      .every((bytes) => Number.isSafeInteger(bytes) && bytes > 0 && bytes <= profileBound);
+    const profileEnforced = process.platform === "win32" && cap > 0 && cap <= profileBound || hostProfileFits;
     const temporarySpaceQualified = false;
     proof.promiseResult = { ...promiseAttempt, ...native, fixture: promiseFixture, sound, captionSamples, sourcePictureProof, orientationProof, sourceReady: true,
       mode: native.encoder === "libx264" ? "quality" : native.encoder === "h264_amf" ? "fast" : "unknown",
       encodedVideo: { width: video[0].width, height: video[0].height, fps: video[0].r_frame_rate, frames: Number(video[0].nb_read_frames) },
       artifactVerified: true, timingQualified,
       profileRunId: process.env.ARTDADDY_QA_MEMORY_RUN_ID ?? null,
+      hostProfileEvidence,
       profileEnforced, physicalQualified: false, temporarySpaceQualified,
       passed: promiseCase.kind === "promise" && timingQualified && profileEnforced && temporarySpaceQualified && native.scratchCleaned && native.estimateProvided,
       qualificationStatus: promiseCase.kind === "pilot" ? "pilot-only" : "incomplete-resource-and-estimate-proof" };
