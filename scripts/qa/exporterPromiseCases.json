@@ -29,6 +29,8 @@
     { "id": "4k60-measured-limit", "line": "4k60-measurement", "kind": "measurement", "source": "generated", "width": 3840, "height": 2160, "fps": 60, "durationSeconds": 60, "visualClips": 12, "videoLayers": 3, "captions": true, "audio": true, "speedFactor16gb": null },
     { "id": "4k-four-things-pilot", "line": "4k-pilot-only", "kind": "pilot", "source": "generated", "width": 3840, "height": 2160, "fps": 30, "durationSeconds": 10, "visualClips": 6, "videoLayers": 3, "captions": true, "audio": true, "speedFactor16gb": 4 },
     { "id": "heavy-eight-things-pilot", "line": "heavy-pilot-only", "kind": "pilot", "source": "generated", "width": 1920, "height": 1080, "fps": 30, "durationSeconds": 10, "visualClips": 14, "videoLayers": 7, "captions": true, "audio": true, "speedFactor16gb": 4 },
+    { "id": "4k-four-videos-pilot", "line": "4k-video-pilot-only", "kind": "pilot", "source": "generated", "width": 3840, "height": 2160, "fps": 30, "durationSeconds": 10, "visualClips": 8, "videoLayers": 4, "captions": false, "audio": true, "speedFactor16gb": 4 },
+    { "id": "heavy-eight-videos-pilot", "line": "heavy-video-pilot-only", "kind": "pilot", "source": "generated", "width": 1920, "height": 1080, "fps": 30, "durationSeconds": 10, "visualClips": 16, "videoLayers": 8, "captions": false, "audio": true, "speedFactor16gb": 4 },
     { "id": "legacy-stress-once", "line": "legacy-stretch", "kind": "stretch", "source": "generated", "width": 3840, "height": 2160, "fps": 60, "durationSeconds": 7200, "visualClips": 5000, "videoLayers": 16, "captions": true, "audio": true, "speedFactor16gb": null }
   ],
   "resultRules": {

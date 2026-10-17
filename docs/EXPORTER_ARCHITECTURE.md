@@ -471,6 +471,36 @@ by the corresponding open items below and cannot be omitted from phase completio
   pilot-only, with temporary-space and physical/full-case qualification false.
   The real summary currently shows no qualified promise variants and an unknown
   ready rate; it does not certify99%or alter the11/24and13/30trackers.
+- V2-D043: Full-quality 4K pilot1792217717268delivers300frames from three
+  videos plus captions in36565.6ms, inside its40000msshort-pilot target.
+  Picture/motion, complete stereo, publication identity and cleanup pass under
+  the unchanged6GiBwhole-tree cap. This is not the four-video decoder boundary
+  or a30minute/physical-machine/temporary-space qualification.
+- V2-D044: add two explicitly10secondvideo-only pilots, bringing the manifest
+  to17cases without changing its66full-promise variants. Four4Kvideos in
+  report1792218078236pass all300frames, complete stereo, publication and cleanup,
+  but take47428.4ms: the40000mstarget is missed. EightHDvideos in
+  report1792218340237pass the same artifact gates in15147.6ms. A caption-inclusive
+  pilot is not evidence about an additional video decoder. Both retain
+  unknown first-run ETA/readiness and false full-case/physical/temp qualification.
+- V2-D045: private capped four-video4Kreport1792218553505changes only the
+  final x264 thread count from1to2. All300frames,480000stereo sample frames,
+  publication and cleanup pass in30850.2ms. The four source-file hashes exactly
+  match the47428.4msbaseline. Normal calibration records remain zero for this
+  explicitly labelled measurement. Direct decoded comparison across all300frames
+  in v2-4k-final-thread-comparison.json reportsPSNR90.308157dBandSSIM1.000000
+  rounded to six decimals; this is a measurable picture difference, not lossless
+  equivalence or original-timeline quality certification. Complete decoded audio
+  is byte-identical. MP4size changes from10638408to10638998bytes. The unchanged
+  6GiBcap reports3883331584bytespeak accounting, not physical16GBqualification.
+- V2-D046: the owner reviewed the measured timing/picture/file difference and
+  approved two final software-encoder threads for streamed above-HD Full-quality
+  exports. Keep HD output, Fast mode, lossless producer threads, audio, CRF,
+  preset, geometry and native resource/deadline caps unchanged. Do not update
+  golden/reference output automatically. Invalidate older calibration observations
+  for the changed encoder policy. Implementation and post-change proof are
+  recorded separately; neither approval nor this short comparison qualifies a
+  full promise line or changes the acceptance counters.
 
 ## Historical V1 Design And Evidence
 
