@@ -103,7 +103,7 @@ rules. Do not wait for another continue unless an actual approval boundary is re
 ## V2 Tracker
 
 **Strict in-scope acceptance: 11/24 checks (46%). Original tracker: 13/30 (43%).**
-**Built but not yet proven: 10 of the 13 open in-scope boxes.**
+**Built but not yet proven: 9 of the 13 open in-scope boxes.**
 
 These are acceptance checks, not coding hours or a measured99%rate. The denominator
 changes because two items are stretch and four are parked; it is not new feature
@@ -112,7 +112,7 @@ by the corresponding open items below and cannot be omitted from phase completio
 
 The second line counts present implementations whose acceptance proof is still
 open. It does not add accepted credit, imply a combined completion percentage or
-say the implementation cannot contain bugs. Three open boxes still require work
+say the implementation cannot contain bugs. Four open boxes still require work
 beyond proving the existing implementation and are excluded from that count.
 
 ### Open Box Detail
@@ -126,7 +126,7 @@ beyond proving the existing implementation and are excluded from that count.
 | E3.4 | Built; proof pending | Native leases, alias checks and volume-safe publication exist; cross-volume, case-sensitive and concurrent failure proof is incomplete. |
 | E3.5 | Built; proof pending | Durable restart and registered-output paths exist; the full V2 real-app/project/fault library has not qualified them. |
 | E4.2 | Built; proof pending | Separate preview/export painters and parity tests exist; all promised real-media timing and visual parity cases are not verified. |
-| E4.3 | Built; proof pending | Continuous mixing, fades, effects and ducking exist; one short original-phone-audio artifact passes, while original web/screen audio and full-duration proof remain open. |
+| E4.3 | Still incomplete; excluded | A real screen/Opus export loses its 44 ms source-audio delay; shared timestamp repair and the remaining source/full-duration proof are required. |
 | E4.4 | Built; proof pending | Preflight, local estimates, warnings and approved local Fast mode exist; cold/repeated/full-case estimate and device qualification is incomplete. |
 | E5.1 | Built; proof pending | Cross-platform FFmpeg/native paths exist; current protocol-20 macOS/Linux packages and platform-specific behavior are not qualified. |
 | E5.2 | Still incomplete; excluded | The library and Windows capped runner exist, but complete resource/profile qualification inputs and Mac/Linux enforcement paths remain unfinished before full/device runs. |
@@ -719,6 +719,27 @@ beyond proving the existing implementation and are excluded from that count.
   prior evidence changes. Original web/screen audio, full-duration, platform,
   resource/estimate and physical-device proof remain open. Strict11/24(46%),
   original13/30(43%), built-but-unproven10of13and99%qualification are unchanged.
+- V2-D066: a separate original-screen-audio measurement exposes a real source
+  timing defect rather than closing E4.3. A NEW lossless A/V excerpt preserves
+  the authorized original's decoded video at three points and all478080decoded
+  audio sample frames in its first ten seconds. H264packet hashes differ because
+  remux changes AnnexBtoAVCrepresentation; decoded content is unchanged. The
+  Opus stream starts at44mswith video at0. Neither original nor the earlier
+  video-only excerpt is replaced or repinned; its source map remains separate
+  and private. Timestamp-aware reference decoding pads to the media clock and
+  compares an exact480000frame span; frozen phone output still passes with
+  unchanged minimum correlation and maximum relative error. An independent
+  real-FFmpeg delayed-PCM control preserves the44msgap and rejects advancement.
+  Native run1792243122507FAILS the audio sample-count gate: video is10seconds,
+  audio9.956seconds, raw decode477984frames. Artifact correlation independently
+  measures BOTHchannels2112samples(44ms)early; correcting only the comparison
+  lag yields0.99809/0.99810correlation, versus approximatelyzero at no lag.
+  No threshold, renderer, golden, failed record or publication owner is changed.
+  The shared audio compiler currently resets each source with PTS-STARTPTS;
+  timestamp preservation before trim/loop/mix is the proposed smallest repair,
+  subject to owner approval for the audible output change. E4.3therefore needs
+  implementation repair, not merely more proof: built-but-unproven falls to9of13.
+  Strict11/24(46%), original13/30(43%)and99%qualification remain unchanged.
 
 ## Historical V1 Design And Evidence
 

@@ -595,7 +595,8 @@ try {
       if (promiseCase.sourceAudio) {
         const decodeAudio = (filename) => {
           const result = spawnSync(executable("artdaddy-ffmpeg"), ["-nostdin", "-v", "error", "-i", filename,
-            "-map", "0:a:0", "-t", String(promiseCase.durationSeconds), "-ar", "48000", "-ac", "2", "-f", "f64le", "-"],
+            "-map", "0:a:0", "-af", `aresample=48000:async=1:first_pts=0,apad,atrim=end_sample=${promiseCase.durationSeconds * 48000}`,
+            "-ar", "48000", "-ac", "2", "-f", "f64le", "-"],
           { maxBuffer: promiseCase.durationSeconds * 48000 * 16 + 1024 * 1024 });
           assert.equal(result.status, 0, String(result.stderr));
           assert.ok(result.stdout.length >= promiseCase.durationSeconds * 48000 * 16, "Original audio span is incomplete");

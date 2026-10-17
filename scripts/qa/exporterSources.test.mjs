@@ -128,6 +128,41 @@ test("original-audio checks accept preserved sound and reject missing or wrong c
   assert.throws(() => compare(Buffer.alloc(original.length), original), /Silent original audio/);
 });
 
+test("original-audio reference retains a source timestamp gap", { skip: !ffmpeg }, async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "artdaddy-source-audio-clock-"));
+  try {
+    const source = path.join(root, "delayed-source.nut");
+    const generated = spawnSync(ffmpeg, ["-n", "-nostdin", "-v", "error", "-f", "lavfi", "-i", "color=s=16x16:r=30:d=2",
+      "-f", "lavfi", "-i", "aevalsrc=0.1*sin(2*PI*431*t)|0.1*sin(2*PI*883*t):s=48000:d=2",
+      "-af", "asetpts=PTS+0.044/TB", "-c:v", "ffv1", "-c:a", "pcm_f64le", "-f", "nut", source], { encoding: "utf8", timeout: 10000 });
+    assert.equal(generated.status, 0, generated.error?.message ?? generated.stderr);
+    const text = await readFile(driver, "utf8");
+    const syntax = typescript.createSourceFile(driver, text, typescript.ScriptTarget.Latest, true, typescript.ScriptKind.JS);
+    const declaration = syntax.statements.find((node) => typescript.isFunctionDeclaration(node) && node.name?.text === "compareOriginalAudio");
+    let decoder;
+    function visit(node) {
+      if (typescript.isVariableDeclaration(node) && node.name.getText(syntax) === "decodeAudio") decoder = node;
+      typescript.forEachChild(node, visit);
+    }
+    visit(syntax);
+    assert.ok(declaration && decoder);
+    const checker = runInNewContext(`${declaration.getText(syntax)}; const ${decoder.getText(syntax)}; ({compareOriginalAudio, decodeAudio})`,
+      { assert, Buffer, spawnSync, executable: () => ffmpeg, promiseCase: { durationSeconds: 1 } });
+    const reference = checker.decodeAudio(source);
+    const expected = Buffer.alloc(48000 * 16);
+    const delayFrames = 2112;
+    for (let frame = 0; frame < 48000; frame++) for (let channel = 0; channel < 2; channel++) {
+      if (frame < delayFrames) assert.equal(reference.readDoubleLE(frame * 16 + channel * 8), 0);
+      else expected.writeDoubleLE(0.1 * Math.sin(2 * Math.PI * (channel ? 883 : 431) * (frame - delayFrames) / 48000), frame * 16 + channel * 8);
+    }
+    const proof = checker.compareOriginalAudio(expected, reference);
+    assert.ok(proof.channels.every((entry) => entry.correlation > 0.999999 && entry.relativeError < 1e-10));
+    const advanced = Buffer.alloc(reference.length);
+    reference.copy(advanced, 0, delayFrames * 16);
+    assert.throws(() => checker.compareOriginalAudio(expected, advanced), /Original audio channel/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("private-source failures remain blocked before native launch", { skip: !ffmpeg }, async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "artdaddy-source-controls-"));
   try {
