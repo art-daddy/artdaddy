@@ -640,6 +640,37 @@ by the corresponding open items below and cannot be omitted from phase completio
   qualification remain open. temporarySpaceQualified and all acceptance counts
   are unchanged; no library reliability claim is made.
 
+- V2-D062: final regular MP4 writes now use the existing native Workspace at
+  actual execution, for single-command, streamed-consumer and journal-replay
+  paths. An atomic claim reserves remaining payload rather than an arbitrary
+  per-output share; native-only metadata cannot be supplied by a caller. The
+  command receives a native FFmpeg size stop, and reaching it refuses producer
+  completion/publication even when FFmpeg exits0. Private capped output is
+  cleaned; uncertain cleanup keeps its charge. Scoped preparation/copy claims
+  close both capacity orderings, wait outside the delivery/project mutation
+  locks and remain cancellable. Execution clocks stay queued while waiting.
+  Terminal writers release exclusivity while actual pending bytes/source leases
+  remain held: another project can use genuine headroom before acknowledgement.
+  Retained over-budget stage/scratch can load and be cleaned after a crash,
+  but cannot admit more writes. Matching client/native protocol20is required;
+  no new renderer, MP4 format, scheduler or raised resource/deadline limit.
+- V2-D063:104focused native checks pass (79delivery,8workspace,17transport),
+  plus155client protocol/preflight/queue/supervision checks. The real MP4 matrix
+  exercises live/replayed single/streamed execution, fitting output and a64KiB
+  allowance. Each fitting route preserves every decoded frame and all96000
+  authored stereo sample frames; charges equal actual retained stage+scratch
+  bytes, and next-project graph preparation works before publication. Capped
+  outputs are absent before verification, cannot publish, and preserve source
+  and prior destination. FFmpeg's stop is NOT byte-exact: direct output reached
+  275575bytes from a65536stop; streamed stereo reached572810from65264after its
+  manifest allowance. No maximum packet/trailer overshoot or physical20GB ceiling
+  is inferred from these small artifacts. The existing2GBheadroom is unchanged,
+  not newly qualified. Historical orphan cleanup, total allocated-disk proof,
+  original-media audio, full-duration/stretch, current-platform packaged-app and
+  physical8/16GB qualification remain open/deferred as previously agreed.
+  The local volume still cannot exercise case-sensitive identity. All library
+  acceptance counts, temporarySpaceQualified and99%qualification are unchanged.
+
 ## Historical V1 Design And Evidence
 
 Everything below is retained history, not authority for conflicting V2 requirements.

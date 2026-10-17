@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 #[derive(Clone, Copy, Default)]
 struct RootUsage {
@@ -10,20 +10,29 @@ struct RootUsage {
 }
 
 #[derive(Default)]
+struct OutputUsage {
+  users: u64,
+  execution: bool,
+  reserved: bool,
+}
+
+#[derive(Default)]
 struct State {
   used: u64,
   entries: u64,
   roots: HashMap<String, RootUsage>,
+  output_claims: HashMap<String, OutputUsage>,
 }
 
 pub struct Workspace {
   limit: u64,
   entry_limit: u64,
   state: Mutex<State>,
+  changed: Condvar,
 }
 
 impl Workspace {
-  pub fn new(limit: u64) -> Arc<Self> { Arc::new(Self { limit, entry_limit: 16384, state: Mutex::new(State::default()) }) }
+  pub fn new(limit: u64) -> Arc<Self> { Arc::new(Self { limit, entry_limit: 16384, state: Mutex::new(State::default()), changed: Condvar::new() }) }
 
   pub(super) fn available_bytes(&self) -> u64 {
     self.limit.saturating_sub(self.state.lock().unwrap_or_else(|error| error.into_inner()).used)
@@ -35,13 +44,21 @@ impl Workspace {
   }
 
   pub fn account_existing(&self, root: &str, bytes: u64, entries: u64) -> Result<(), String> {
+    self.account_usage(root, bytes, entries, true)
+  }
+
+  pub(super) fn restore_retained(&self, root: &str, bytes: u64, entries: u64) -> Result<(), String> {
+    self.account_usage(root, bytes, entries, false)
+  }
+
+  fn account_usage(&self, root: &str, bytes: u64, entries: u64, require_fit: bool) -> Result<(), String> {
     let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
     let previous = state.roots.get(root).copied().unwrap_or_default();
     let bytes = bytes.max(previous.bytes);
     let entries = entries.max(previous.entries);
     let used = state.used.checked_add(bytes - previous.bytes).ok_or("export workspace size overflow")?;
     let count = state.entries.checked_add(entries - previous.entries).ok_or("export workspace entry overflow")?;
-    if used > self.limit { return Err("export workspace budget exceeded by retained scratch".into()); }
+    if require_fit && used > self.limit { return Err("export workspace budget exceeded by retained scratch".into()); }
     if count > self.entry_limit { return Err("export workspace entry budget exceeded by retained scratch".into()); }
     state.roots.insert(root.to_string(), RootUsage { bytes, entries, peak_bytes: previous.peak_bytes.max(bytes),
       observed_from_creation: previous.observed_from_creation });
@@ -67,6 +84,55 @@ impl Workspace {
     Ok(Charge { owner: self.clone(), root: root.to_string(), bytes, entries, retained: false })
   }
 
+  pub(super) fn reserve_output(self: &Arc<Self>, root: &str) -> Result<(u64, Charge), String> {
+    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+    let output = state.output_claims.get(root).ok_or("pending output has no admitted workspace claim")?;
+    if output.reserved { return Err("pending output already has a native writer".into()); }
+    let remaining = self.limit.checked_sub(state.used).ok_or("export workspace already exceeds its temporary budget")?;
+    let previous = state.roots.get(root).copied().unwrap_or_default();
+    let limit = previous.bytes.checked_add(remaining).filter(|bytes| *bytes > 0)
+      .ok_or("export has no temporary capacity for its pending output")?;
+    state.used += remaining;
+    state.roots.insert(root.to_string(), RootUsage { bytes: limit, peak_bytes: previous.peak_bytes.max(limit), ..previous });
+    state.output_claims.get_mut(root).ok_or("pending output lost its workspace claim")?.reserved = true;
+    Ok((limit, Charge { owner: self.clone(), root: root.to_string(), bytes: remaining, entries: 0, retained: false }))
+  }
+
+  pub(super) fn claim_output(self: &Arc<Self>, root: &str, check: &dyn Fn() -> Result<(), String>) -> Result<OutputClaim, String> {
+    loop {
+      check()?;
+      let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+      if state.output_claims.keys().all(|owner| owner == root) {
+        let output = state.output_claims.entry(root.to_string()).or_default();
+        output.users = output.users.checked_add(1).ok_or("output workspace claim overflow")?;
+        return Ok(OutputClaim { owner: self.clone(), root: root.to_string() });
+      }
+      let (state, _) = self.changed.wait_timeout(state, std::time::Duration::from_millis(100))
+        .unwrap_or_else(|error| error.into_inner());
+      drop(state);
+    }
+  }
+
+  pub(super) fn finish_output_claim(&self, root: &str) {
+    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(output) = state.output_claims.get_mut(root) {
+      output.execution = false;
+      if output.users == 0 && !output.reserved { state.output_claims.remove(root); }
+    }
+    drop(state);
+    self.changed.notify_all();
+  }
+
+  pub(super) fn settle_output_writer(&self, root: &str) {
+    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(output) = state.output_claims.get_mut(root) {
+      output.reserved = false;
+      if output.users == 0 && !output.execution { state.output_claims.remove(root); }
+    }
+    drop(state);
+    self.changed.notify_all();
+  }
+
   pub fn release(&self, root: &str, bytes: u64, entries: u64) {
     let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
     let owned = state.roots.get(root).copied().unwrap_or_default();
@@ -85,6 +151,9 @@ impl Workspace {
       state.used = state.used.saturating_sub(usage.bytes);
       state.entries = state.entries.saturating_sub(usage.entries);
     }
+    state.output_claims.remove(root);
+    drop(state);
+    self.changed.notify_all();
   }
 
   #[cfg(test)]
@@ -117,6 +186,37 @@ impl Drop for Charge {
 mod tests {
   use super::*;
   use std::sync::Barrier;
+
+  #[test]
+  fn scoped_preparation_finishes_before_a_competing_output_can_reserve_capacity() {
+    let directory = tempfile::tempdir().unwrap();
+    let owner = Workspace::new(64);
+    let preparation = owner.claim_output("preparation", &|| Ok(())).unwrap();
+    let competing = owner.clone();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+      let claim = competing.claim_output("final-output", &|| Ok(())).unwrap();
+      let (limit, charge) = competing.reserve_output("final-output").unwrap();
+      sender.send((claim, limit, charge)).unwrap();
+    });
+    assert!(matches!(receiver.recv_timeout(std::time::Duration::from_millis(100)), Err(std::sync::mpsc::RecvTimeoutError::Timeout)));
+    let payload = directory.path().join("filter.ffgraph");
+    owner.reserve("preparation", 12, 1).unwrap().retain();
+    std::fs::write(&payload, b"null[output]").unwrap();
+    assert_eq!(std::fs::read(&payload).unwrap(), b"null[output]");
+    drop(preparation);
+    let (claim, limit, charge) = receiver.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+    assert_eq!(limit, 52);
+    assert_eq!(owner.available_bytes(), 0);
+    drop(charge);
+    drop(claim);
+    owner.release_root("final-output");
+    assert_eq!(owner.available_bytes(), 52);
+    std::fs::remove_file(&payload).unwrap();
+    owner.release_root("preparation");
+    assert_eq!(owner.available_bytes(), 64);
+    worker.join().unwrap();
+  }
 
   #[test]
   fn peak_payload_survives_temporary_file_cleanup_without_holding_released_capacity() {
@@ -267,5 +367,30 @@ mod tests {
     assert_eq!(threads.into_iter().map(|thread| thread.join().unwrap()).filter(|written| *written).count(), 1);
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
     assert_eq!(owner.used(), 0);
+  }
+}
+
+pub(super) struct OutputClaim {
+  owner: Arc<Workspace>,
+  root: String,
+}
+
+impl OutputClaim {
+  pub(super) fn retain(self) {
+    if let Some(output) = self.owner.state.lock().unwrap_or_else(|error| error.into_inner()).output_claims.get_mut(&self.root) {
+      output.execution = true;
+    }
+  }
+}
+
+impl Drop for OutputClaim {
+  fn drop(&mut self) {
+    let mut state = self.owner.state.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(output) = state.output_claims.get_mut(&self.root) {
+      output.users = output.users.saturating_sub(1);
+      if output.users == 0 && !output.execution && !output.reserved { state.output_claims.remove(&self.root); }
+    }
+    drop(state);
+    self.owner.changed.notify_all();
   }
 }

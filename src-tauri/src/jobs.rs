@@ -690,7 +690,7 @@ impl Supervisor {
           Err(error) => return Err(error.to_string()),
         }
       }
-      self.workspace.account_existing(&Self::workspace_key(Path::new(&delivery.stage_path)), bytes, count)?;
+      self.workspace.restore_retained(&Self::workspace_key(Path::new(&delivery.stage_path)), bytes, count)?;
     }
     let Some(work) = &self.export_work_root else { return Ok(()) };
     let arena = work.join("exports");
@@ -708,9 +708,31 @@ impl Supervisor {
       let held_entries = entries.values().filter_map(|delivery| delivery.render_scratch.as_ref())
         .find(|scratch| Self::workspace_key(Path::new(&scratch.path)) == key).map(|scratch| scratch.reserved_entries).unwrap_or(0);
       let (actual, count) = scratch_usage(&entry.path(), Path::new(""))?;
-      self.workspace.account_existing(&key, actual.max(held), count.max(held_entries))?;
+      self.workspace.restore_retained(&key, actual.max(held), count.max(held_entries))?;
     }
     Ok(())
+  }
+
+  fn claim_export_output(&self, id: &str) -> Result<workspace::OutputClaim, String> {
+    let path = self.deliveries.lock().map_err(|error| error.to_string())?.get(id)
+      .ok_or("output capacity has no admitted delivery")?.stage_path.clone();
+    self.workspace.claim_output(&Self::workspace_key(Path::new(&path)), &|| {
+      let entries = self.deliveries.lock().map_err(|error| error.to_string())?;
+      let entry = entries.get(id).ok_or("output intent vanished while waiting for temporary capacity")?;
+      if entry.state != "prepared" || entry.producer_complete { return Err("output intent is no longer eligible while waiting for temporary capacity".into()); }
+      entry.execution_deadline_ms(now_ms())?;
+      if self.lock().jobs.get(id).is_some_and(|job| job.kill_requested ||
+        (matches!(entry.source, DeliverySource::Render { .. }) && job.state == JobState::Exited)) {
+        return Err("output was cancelled or superseded while waiting for temporary capacity".into());
+      }
+      Ok(())
+    })
+  }
+
+  fn finish_output_claim(&self, id: &str) {
+    if let Some(delivery) = self.deliveries.lock().unwrap_or_else(|error| error.into_inner()).get(id) {
+      self.workspace.finish_output_claim(&Self::workspace_key(Path::new(&delivery.stage_path)));
+    }
   }
 
   pub fn stage_render_scratch(&self, id: &str, files: Vec<RenderScratchFile>, fonts: Vec<String>) -> Result<String, String> {
@@ -731,6 +753,7 @@ impl Supervisor {
     for font in &fonts {
       if !safe_name(font) || !names.insert(font.to_lowercase()) { return Err("render font filenames must be unique contained basenames".into()); }
     }
+    let _capacity = self.claim_export_output(id)?;
     let request_sha256 = format!("{:x}", Sha256::digest(serde_json::to_vec(&(&files, &fonts)).map_err(|error| error.to_string())?));
     let root = self.export_root.as_ref().ok_or("native export journal is unavailable")?;
     let mut entries = self.deliveries.lock().map_err(|error| error.to_string())?;
@@ -1414,6 +1437,9 @@ impl Supervisor {
   }
 
   fn copy_delivery_after_sync(&self, id: &str, before_completion_record: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+    let pending = self.deliveries.lock().map_err(|error| error.to_string())?.get(id)
+      .is_some_and(|entry| matches!(entry.source, DeliverySource::Copy { .. }) && entry.state == "prepared" && !entry.producer_complete);
+    let _capacity = if pending { Some(self.claim_export_output(id)?) } else { None };
     let (delivery, view) = {
       let mut entries = self.deliveries.lock().map_err(|error| error.to_string())?;
       self.account_workspace(&entries)?;
@@ -1443,6 +1469,7 @@ impl Supervisor {
       fn drop(&mut self) {
         self.0.copying.lock().unwrap_or_else(|error| error.into_inner()).remove(&self.1);
         self.0.finish_copy_job(&self.1);
+        self.0.finish_output_claim(&self.1);
         self.0.copy_settled.notify_all();
       }
     }
@@ -1539,7 +1566,7 @@ impl Supervisor {
   /// jobs are ahead of it.
   pub fn submit(&self, spec: JobSpec) -> Result<usize, String> {
     if !spec.meta.is_object() { return Err("native job metadata must be an object".into()); }
-    if spec.meta.get("_native_scratch_capture").is_some() || spec.meta.get("_native_execution_deadline").is_some() {
+    if spec.meta.as_object().is_some_and(|meta| meta.keys().any(|key| key.starts_with("_native_"))) {
       return Err("native execution metadata is reserved".into());
     }
     if let Some(transport) = spec.meta.get("renderTransport") {
@@ -1644,6 +1671,14 @@ impl Supervisor {
       self.finish(&spec.id, step, None, None);
       return;
     }
+    let admitted_render = self.deliveries.lock().unwrap_or_else(|error| error.into_inner()).get(&spec.id)
+      .is_some_and(|delivery| matches!(delivery.source, DeliverySource::Render { .. }));
+    let output_claim = if admitted_render {
+      match self.transition_execution_clock(&spec.id, true).and_then(|_| self.claim_export_output(&spec.id)) {
+        Ok(claim) => Some(claim),
+        Err(error) => { self.finish(&spec.id, step, Some(-1), Some(error)); return; }
+      }
+    } else { None };
     if let Err(error) = self.retain_render_job(&dependency_spec) {
       self.finish(&spec.id, step, Some(-1), Some(error));
       return;
@@ -1661,6 +1696,7 @@ impl Supervisor {
           if !valid { self.finish(&spec.id, step, Some(-1), Some("export scratch is outside its owned work root".into())); return; }
         }
         if is_streamed(&spec) {
+          spec.meta["_native_final_stage"] = serde_json::json!(delivery.stage_path);
           for (index, args) in std::iter::once(&spec.args).chain(spec.steps.iter()).enumerate() {
             let mut command = spec.clone();
             command.args = args.clone();
@@ -1684,7 +1720,7 @@ impl Supervisor {
         } else {
           match scratch_capture(&spec, &delivery.stage_path, step == dependency_spec.steps.len()) {
             Ok(Some(capture)) => { spec.meta["_native_scratch_capture"] = capture; }
-            Ok(None) => {}
+            Ok(None) => { spec.meta["_native_final_stage"] = serde_json::json!(delivery.stage_path); }
             Err(error) => { self.finish(&spec.id, step, Some(-1), Some(error)); return; }
           }
         }
@@ -1696,6 +1732,7 @@ impl Supervisor {
     let me = self.clone();
     let id = spec.id.clone();
     let on_event: Arc<dyn Fn(ProcEvent) + Send + Sync> = Arc::new(move |ev| me.on_event(&id, step, ev));
+    if let Some(output_claim) = output_claim { output_claim.retain(); }
     let started = if is_streamed(&spec) {
       let owner = self.clone();
       let retained = dependency_spec;
@@ -1809,6 +1846,7 @@ impl Supervisor {
       }
       (lane, view)
     };
+    self.finish_output_claim(id);
     (self.notify)(Notice::Changed(view));
     self.pump(&lane);
   }
@@ -2147,7 +2185,7 @@ pub fn jobs_launch_id(jobs: tauri::State<'_, Supervisor>) -> String {
 }
 
 #[tauri::command]
-pub fn jobs_export_protocol() -> u32 { 19 }
+pub fn jobs_export_protocol() -> u32 { 20 }
 
 #[tauri::command]
 pub async fn jobs_export_resources(jobs: tauri::State<'_, Supervisor>, destination: String) -> Result<ExportResources, String> {
@@ -3600,6 +3638,122 @@ mod export_delivery_tests {
     }
   }
   #[test]
+  fn caller_cannot_inject_native_output_or_execution_metadata() {
+    let directory = tempfile::tempdir().unwrap();
+    let jobs = owner(&directory.path().join("journal"));
+    let output = directory.path().join("must-not-be-written.mp4");
+    for field in ["_native_final_stage", "_native_execution_deadline", "_native_scratch_capture", "_native_future_guard"] {
+      let mut meta = serde_json::json!({ "kind": "export" });
+      meta[field] = serde_json::Value::Null;
+      let submitted = jobs.submit(JobSpec { id: field.into(), lane: "export".into(), program: "ffmpeg".into(),
+        args: vec!["-f".into(), "mp4".into(), output.to_string_lossy().into()], steps: vec![], cwd: None, meta });
+      assert!(submitted.unwrap_err().contains("native execution metadata is reserved"));
+      assert!(jobs.list().is_empty());
+      assert!(jobs.delivery_list().is_empty());
+      assert!(!output.exists());
+    }
+    jobs.submit(JobSpec { id: "legitimate-metadata".into(), lane: "working".into(), program: "ffmpeg".into(),
+      args: vec!["-version".into()], steps: vec![], cwd: None,
+      meta: serde_json::json!({ "description": "_native_final_stage", "nested": { "_native_example": true } }) }).unwrap();
+    assert_eq!(jobs.list().len(), 1);
+    assert!(!output.exists());
+  }
+  #[test]
+  fn retained_pending_output_overage_survives_restart_without_admitting_more_writes() {
+    let directory = tempfile::tempdir().unwrap();
+    let journal = directory.path().join("journal");
+    let work = directory.path().join("work");
+    let jobs = owner(&journal).with_export_work_root(work.clone());
+    let delivery = jobs.prepare_delivery("interrupted-output-overage".into(), "original-project".into(),
+      directory.path().join("render.partial").to_string_lossy().into(), directory.path().join("render.mp4").to_string_lossy().into(),
+      DeliverySource::Render { paths: vec![] }).unwrap();
+    let scratch = jobs.stage_render_scratch(&delivery.id,
+      vec![RenderScratchFile { name: "filter.ffgraph".into(), content: "null".into() }], vec![]).unwrap();
+    std::fs::write(&delivery.dest_path, b"previous complete file").unwrap();
+    std::fs::write(&delivery.stage_path, [37u8; 72]).unwrap();
+    drop(jobs);
+    let mut recovered = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {}));
+    recovered.workspace = Workspace::new(64);
+    let recovered = recovered.with_export_work_root(work).with_export_root(journal)
+      .expect("an interrupted output must remain visible and cleanable");
+    assert_eq!(recovered.delivery_list().len(), 1);
+    assert_eq!(recovered.workspace.available_bytes(), 0);
+    assert!(recovered.workspace.reserve("peer", 1, 1).is_err());
+    assert!(recovered.verify_delivery(&delivery.id).is_err());
+    assert!(recovered.publish_delivery(&delivery.id).is_err());
+    assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"previous complete file");
+    assert_eq!(std::fs::read(&delivery.stage_path).unwrap(), vec![37u8; 72]);
+    recovered.cancel_delivery(&delivery.id).unwrap();
+    recovered.complete_delivery(&delivery.id).unwrap();
+    assert!(!Path::new(&delivery.stage_path).exists());
+    assert!(!Path::new(&scratch).exists());
+    assert_eq!(recovered.workspace.available_bytes(), 64);
+    recovered.workspace.reserve("peer", 64, 1).unwrap().retain();
+  }
+  #[test]
+  fn queued_preparation_waits_for_output_cleanup_and_cancellation_remains_available() {
+    for (copying, cancelled) in [(false, false), (false, true), (true, false), (true, true)] {
+      let directory = tempfile::tempdir().unwrap();
+      let mut jobs = owner(&directory.path().join("journal")).with_export_work_root(directory.path().join("work"));
+      jobs.workspace = Workspace::new(64);
+      let active = jobs.prepare_delivery("active-output".into(), "original-project".into(),
+        directory.path().join("active.partial").to_string_lossy().into(), directory.path().join("active.mp4").to_string_lossy().into(),
+        DeliverySource::Render { paths: vec![] }).unwrap();
+      let source = directory.path().join("source.wav");
+      std::fs::write(&source, [71u8; 16]).unwrap();
+      let queued = jobs.prepare_delivery("queued-output".into(), "original-project".into(),
+        directory.path().join("queued.partial").to_string_lossy().into(), directory.path().join("queued.mp4").to_string_lossy().into(),
+        if copying { DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_source".into() } }
+        else { DeliverySource::Render { paths: vec![] } }).unwrap();
+      std::fs::write(&queued.dest_path, b"previous complete file").unwrap();
+      jobs.account_workspace(&jobs.deliveries.lock().unwrap()).unwrap();
+      jobs.claim_export_output(&active.id).unwrap().retain();
+      let key = Supervisor::workspace_key(Path::new(&active.stage_path));
+      let (limit, charge) = jobs.workspace.reserve_output(&key).unwrap();
+      assert_eq!(limit, 64);
+      std::fs::write(&active.stage_path, [37u8; 32]).unwrap();
+      charge.retain();
+      let waiting = jobs.clone();
+      let queued_id = queued.id.clone();
+      let (sender, receiver) = std::sync::mpsc::channel();
+      let worker = std::thread::spawn(move || {
+        let result = if copying { waiting.copy_delivery(&queued_id).map(|()| String::new()) }
+          else { waiting.stage_render_scratch(&queued_id, vec![RenderScratchFile { name: "filter.ffgraph".into(), content: "null".into() }], vec![]) };
+        sender.send(result).unwrap();
+      });
+      assert!(matches!(receiver.recv_timeout(std::time::Duration::from_millis(100)), Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
+        "queued work consumed or refused another output's reserved capacity");
+      assert!(jobs.delivery_list().iter().find(|entry| entry.id == queued.id).unwrap().execution_queued_at_ms.is_some());
+      assert!(jobs.delivery_list().iter().find(|entry| entry.id == queued.id).unwrap().render_scratch.is_none());
+      assert_eq!(std::fs::read(&queued.dest_path).unwrap(), b"previous complete file");
+      if cancelled {
+        jobs.cancel_delivery(&queued.id).unwrap();
+        assert!(receiver.recv_timeout(std::time::Duration::from_secs(2)).unwrap().is_err());
+        assert_eq!(jobs.workspace.available_bytes(), 0);
+      }
+      jobs.cancel_delivery(&active.id).unwrap();
+      jobs.complete_delivery(&active.id).unwrap();
+      assert!(!Path::new(&active.stage_path).exists());
+      if !cancelled {
+        let result = receiver.recv_timeout(std::time::Duration::from_secs(2)).unwrap().unwrap();
+        if copying {
+          assert_eq!(std::fs::read(&queued.stage_path).unwrap(), vec![71u8; 16]);
+          assert_eq!(jobs.workspace.available_bytes(), 48);
+          jobs.verify_delivery(&queued.id).unwrap();
+          jobs.publish_delivery(&queued.id).unwrap();
+        } else {
+          assert_eq!(std::fs::read(Path::new(&result).join("filter.ffgraph")).unwrap(), b"null");
+          jobs.cancel_delivery(&queued.id).unwrap();
+        }
+      }
+      worker.join().unwrap();
+      jobs.complete_delivery(&queued.id).unwrap();
+      assert_eq!(jobs.workspace.available_bytes(), 64);
+      assert_eq!(std::fs::read(&source).unwrap(), vec![71u8; 16]);
+      if cancelled { assert_eq!(std::fs::read(&queued.dest_path).unwrap(), b"previous complete file"); }
+    }
+  }
+  #[test]
   fn copy_staging_restart_restores_private_payload_charge_and_cleans_after_cancellation() {
     let directory = tempfile::tempdir().unwrap();
     let journal = directory.path().join("journal");
@@ -3999,6 +4153,144 @@ mod export_delivery_tests {
     let reopened = owner(&root);
     assert!(reopened.recover_exports().is_empty());
     assert!(reopened.list().is_empty());
+  }
+  #[test]
+  #[ignore = "requires the shipped ffmpeg artifact fixture"]
+  fn final_mp4_staging_cannot_bypass_shared_payload_budget() {
+    struct RealSpawner(PathBuf, stream::Registry);
+    impl Spawner for RealSpawner {
+      fn identity(&self, _: &str) -> Result<ArtifactIdentity, String> { artifact_identity(&self.0) }
+      fn spawn(&self, spec: &JobSpec, notify: Arc<dyn Fn(ProcEvent) + Send + Sync>, workspace: Arc<Workspace>) -> Result<u32, String> {
+        stream::spawn_single(&self.0, spec, notify, self.1.clone(), workspace)
+      }
+      fn spawn_stream(&self, spec: &JobSpec, notify: Arc<dyn Fn(ProcEvent) + Send + Sync>,
+        guard: stream::StartGuard, workspace: Arc<Workspace>) -> Result<u32, String> {
+        stream::spawn(&self.0, spec, notify, guard, self.1.clone(), workspace)
+      }
+      fn kill(&self, id: &str, pid: u32) { assert!(stream::cancel(&self.1, id, pid)); }
+    }
+    let binary = PathBuf::from(std::env::var("ARTDADDY_QA_FFMPEG").expect("shipped binary supplied"));
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.mp4");
+    let fixture = std::process::Command::new(&binary).args(["-y", "-nostdin", "-loglevel", "error", "-f", "lavfi", "-i",
+      "testsrc2=s=640x360:r=30:d=2", "-f", "lavfi", "-i", "sine=frequency=523:sample_rate=48000:duration=2",
+      "-vf", "noise=alls=30:allf=t+u", "-af", "pan=stereo|c0=c0|c1=0.25*c0", "-c:a", "alac", "-c:v", "libx264", "-threads", "1",
+      "-crf", "18", "-pix_fmt", "yuv420p"]).arg(&source).output().unwrap();
+    assert!(fixture.status.success(), "{}", String::from_utf8_lossy(&fixture.stderr));
+    let original = artifact_identity(&source).unwrap();
+    assert!(original.size > 64 * 1024 && original.size < 16 * 1024 * 1024);
+    for (streamed, replayed, budget) in [(false, false), (true, false), (false, true), (true, true)].into_iter()
+      .flat_map(|(streamed, replayed)| [16 * 1024 * 1024, 64 * 1024].map(move |budget| (streamed, replayed, budget))) {
+      let (sender, receiver) = std::sync::mpsc::channel();
+      let mut jobs = Supervisor::new(Arc::new(RealSpawner(binary.clone(), Arc::default())), Arc::new(move |notice| {
+        if let Notice::Changed(view) = notice {
+          if view.state == JobState::Exited { let _ = sender.send(view); }
+        }
+      })).with_export_work_root(dir.path().join(format!("work-{streamed}-{replayed}-{budget}")))
+        .with_export_root(dir.path().join(format!("journal-{streamed}-{replayed}-{budget}"))).unwrap();
+      jobs.workspace = Workspace::new(budget);
+      let delivery = jobs.prepare_delivery(format!("bounded-mp4-{budget}"), "original-project".into(),
+        dir.path().join(format!("stage-{budget}.partial")).to_string_lossy().into(),
+        dir.path().join(format!("delivered-{budget}.mp4")).to_string_lossy().into(),
+        DeliverySource::Render { paths: vec![source.to_string_lossy().into()] }).unwrap();
+      std::fs::write(&delivery.dest_path, b"previous complete file").unwrap();
+      let mut spec = JobSpec { id: delivery.id.clone(), lane: "export".into(), program: "ffmpeg".into(),
+        args: vec!["-y".into(), "-nostdin".into(), "-loglevel".into(), "error".into(), "-i".into(), source.to_string_lossy().into(),
+          "-c".into(), "copy".into(), "-f".into(), "mp4".into(), delivery.stage_path.clone()], steps: vec![], cwd: None,
+        meta: serde_json::json!({ "kind": "export", "plan": { "sources": [{ "path": source }] } }) };
+      if streamed {
+        spec.cwd = Some(jobs.stage_render_scratch(&delivery.id, vec![RenderScratchFile { name: "segments.ffconcat".into(),
+          content: "ffconcat version 1.0\nfile 'part0.nut'\nduration 1\nfile 'part1.nut'\nduration 1\n".into() }], vec![]).unwrap());
+        let producer = |start: &str, name: &str| vec!["-y".into(), "-nostdin".into(), "-loglevel".into(), "error".into(),
+          "-ss".into(), start.into(), "-i".into(), source.to_string_lossy().into(), "-t".into(), "1".into(),
+          "-an".into(), "-c:v".into(), "ffv1".into(), "-threads".into(), "1".into(), "-f".into(), "nut".into(), name.into()];
+        spec.args = producer("0", "part0.nut");
+        spec.steps = vec![producer("1", "part1.nut"), vec!["-y".into(), "-nostdin".into(), "-loglevel".into(), "error".into(),
+          "-f".into(), "concat".into(), "-safe".into(), "1".into(), "-i".into(), "segments.ffconcat".into(),
+          "-i".into(), "audio.nut".into(), "-map".into(), "0:v:0".into(), "-map".into(), "1:a:0".into(),
+          "-c:a".into(), "alac".into(), "-c:v".into(), "libx264".into(), "-threads".into(), "1".into(), "-crf".into(), "0".into(),
+          "-f".into(), "mp4".into(), delivery.stage_path.clone()]];
+        spec.meta["renderTransport"] = serde_json::json!("partition-pipes-v1");
+        spec.meta["renderAudio"] = serde_json::json!({ "duration": 2.0, "args": ["-nostdin", "-loglevel", "error",
+          "-i", source, "-map", "0:a:0", "-vn", "-ac", "2", "-ar", "48000", "-t", "2", "-c:a", "pcm_f64le", "-f", "nut", "audio.nut"] });
+      }
+      if replayed {
+        jobs.retain_render_job(&spec).unwrap();
+        let mut recovered = Supervisor::new(jobs.spawner.clone(), jobs.notify.clone());
+        recovered.workspace = Workspace::new(budget);
+        recovered = recovered.with_export_work_root(jobs.export_work_root.clone().unwrap())
+          .with_export_root(jobs.export_root.clone().unwrap()).unwrap();
+        drop(jobs);
+        jobs = recovered;
+        assert!(jobs.recover_exports().is_empty());
+        assert_eq!(jobs.delivery_list()[0].recovery_attempts, 1);
+      } else { jobs.submit(spec).unwrap(); }
+      let ended = receiver.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
+      let diagnostics = {
+        let state = jobs.lock();
+        let job = &state.jobs[&delivery.id];
+        format!("{}{}", job.stderr_head, job.stderr)
+      };
+      assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"previous complete file");
+      assert_eq!(artifact_identity(&source).unwrap().sha256, original.sha256);
+      let retained_scratch = jobs.delivery_list().into_iter().find(|entry| entry.id == delivery.id).unwrap().render_scratch
+        .map(|scratch| scratch_usage(Path::new(&scratch.path), Path::new("")).unwrap().0).unwrap_or(0);
+      let staged_bytes = std::fs::metadata(&delivery.stage_path).map(|metadata| metadata.len()).unwrap_or(0);
+      assert_eq!(jobs.workspace.available_bytes(), budget.saturating_sub(retained_scratch + staged_bytes),
+        "terminal output released its private bytes or invented used capacity before publication");
+      if budget < original.size {
+        assert_ne!(ended.code, Some(0), "pending MP4 output bypassed the shared workspace: {diagnostics}");
+        assert!(diagnostics.contains("temporary-output limit reached"), "over-budget output lost its resource failure: {diagnostics}");
+        println!("pending MP4 budget: streamed={streamed}, replayed={replayed}, allowance={budget}, {}",
+          diagnostics.lines().find(|line| line.contains("temporary-output limit reached")).unwrap());
+        assert!(!Path::new(&delivery.stage_path).exists(), "size-stopped private output was not cleaned");
+        assert!(jobs.verify_delivery(&delivery.id).is_err());
+        assert!(jobs.publish_delivery(&delivery.id).is_err());
+      } else {
+        assert_eq!(ended.code, Some(0), "{diagnostics}");
+        let queued = jobs.prepare_delivery(format!("next-project-{budget}"), "another-project".into(),
+          dir.path().join(format!("next-{streamed}-{replayed}.partial")).to_string_lossy().into(),
+          dir.path().join(format!("next-{streamed}-{replayed}.mp4")).to_string_lossy().into(), DeliverySource::Render { paths: vec![] }).unwrap();
+        let waiting = jobs.clone();
+        let queued_id = queued.id.clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+          sender.send(waiting.stage_render_scratch(&queued_id,
+            vec![RenderScratchFile { name: "filter.ffgraph".into(), content: "null".into() }], vec![])).unwrap();
+        });
+        let prepared = receiver.recv_timeout(std::time::Duration::from_secs(2));
+        if prepared.is_err() {
+          jobs.cancel_delivery(&delivery.id).unwrap();
+          jobs.complete_delivery(&delivery.id).unwrap();
+          worker.join().unwrap();
+          panic!("a completed output blocked another project's usable remaining capacity before acknowledgement");
+        }
+        let next_scratch = prepared.unwrap().unwrap();
+        assert_eq!(std::fs::read(Path::new(&next_scratch).join("filter.ffgraph")).unwrap(), b"null");
+        jobs.cancel_delivery(&queued.id).unwrap();
+        jobs.complete_delivery(&queued.id).unwrap();
+        worker.join().unwrap();
+        let decode = |path: &Path| std::process::Command::new(&binary).args(["-v", "error", "-i"]).arg(path)
+          .args(["-map", "0:v:0", "-an", "-f", "framemd5", "pipe:1"]).output().unwrap();
+        let expected = decode(&source);
+        let staged = decode(Path::new(&delivery.stage_path));
+        assert!(expected.status.success() && staged.status.success());
+        assert_eq!(staged.stdout, expected.stdout);
+        let audio = |path: &Path| std::process::Command::new(&binary).args(["-v", "error", "-i"]).arg(path)
+          .args(["-map", "0:a:0", "-vn", "-ac", "2", "-ar", "48000", "-c:a", "pcm_f64le", "-f", "f64le", "pipe:1"]).output().unwrap();
+        let original_audio = audio(&source);
+        let staged_audio = audio(Path::new(&delivery.stage_path));
+        assert!(original_audio.status.success() && staged_audio.status.success());
+        assert_eq!(original_audio.stdout.len(), 96_000 * 2 * 8);
+        assert_eq!(staged_audio.stdout, original_audio.stdout);
+        jobs.verify_delivery(&delivery.id).unwrap();
+        jobs.publish_delivery(&delivery.id).unwrap();
+      }
+      if ended.code != Some(0) { jobs.fail_delivery(&delivery.id).unwrap(); }
+      jobs.complete_delivery(&delivery.id).unwrap();
+      assert!(!Path::new(&delivery.stage_path).exists());
+      assert_eq!(jobs.workspace.available_bytes(), budget);
+    }
   }
   #[test]
   #[ignore = "requires the shipped ffmpeg artifact fixture"]

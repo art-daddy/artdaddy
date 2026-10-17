@@ -20,6 +20,58 @@ struct ManifestScratch {
   _charge: super::workspace::Charge,
 }
 
+struct FinalOutput {
+  path: std::path::PathBuf,
+  key: String,
+  limit: u64,
+  workspace: Arc<super::Workspace>,
+  charge: Option<super::workspace::Charge>,
+}
+
+impl FinalOutput {
+  fn open(spec: &JobSpec, args: &mut Vec<String>, workspace: Arc<super::Workspace>) -> Result<Option<Self>, String> {
+    let Some(path) = spec.meta.get("_native_final_stage") else { return Ok(None) };
+    let path = path.as_str().ok_or("native pending output has no stage path")?;
+    let output = args.last().ok_or("native pending output command has no target")?;
+    if Path::new(output).canonicalize().map_err(|error| error.to_string())? !=
+      Path::new(path).canonicalize().map_err(|error| error.to_string())? {
+      return Err("native pending output does not target its admitted stage".into());
+    }
+    let key = super::Supervisor::workspace_key(Path::new(path));
+    let (limit, charge) = workspace.reserve_output(&key)?;
+    let output_index = args.len() - 1;
+    args.splice(output_index..output_index, ["-fs".into(), limit.to_string()]);
+    Ok(Some(Self { path: path.into(), key, limit, workspace, charge: Some(charge) }))
+  }
+
+  fn finish(&mut self) -> Result<(), String> {
+    let Some(charge) = self.charge.take() else { return Ok(()) };
+    let measured = std::fs::symlink_metadata(&self.path).map_err(|error| error.to_string());
+    let metadata = match measured {
+      Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => metadata,
+      Ok(_) => { charge.retain(); return Err("native pending output is not a regular file".into()); }
+      Err(error) => { charge.retain(); return Err(error); }
+    };
+    let actual = metadata.len();
+    let capped = actual >= self.limit;
+    if capped {
+      if let Err(error) = std::fs::remove_file(&self.path) {
+        charge.retain();
+        return Err(format!("native temporary-output limit reached and private cleanup failed: {error}"));
+      }
+    }
+    charge.retain();
+    self.workspace.release(&self.key, self.limit.saturating_sub(if capped { 0 } else { actual }), u64::from(capped));
+    self.workspace.settle_output_writer(&self.key);
+    if capped { Err(format!("native temporary-output limit reached: stop={}, observed={actual}", self.limit)) }
+    else { Ok(()) }
+  }
+}
+
+impl Drop for FinalOutput {
+  fn drop(&mut self) { let _ = self.finish(); }
+}
+
 #[derive(Clone, Copy, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum WorkerRole { Single, PartitionProducer, ContinuousAudio, FinalEncoder }
@@ -307,6 +359,7 @@ pub(super) fn spawn_single(executable: &Path, spec: &JobSpec, observer: Observer
     Some(super::ScratchOutput::open_workspace(Path::new(path), used, limit, workspace.clone(), &key)?)
   } else { None };
   let captured = capture.is_some();
+  let mut final_output = FinalOutput::open(spec, &mut args, workspace.clone())?;
   let control = Arc::new(Control::new(execution_deadline(spec)?)?);
   let guard: StartGuard = Arc::new(|| Ok(()));
   let worker = control.spawn(executable, &args, spec.cwd.as_deref(), false, WorkerRole::Single, &guard)?;
@@ -343,6 +396,7 @@ pub(super) fn spawn_single(executable: &Path, spec: &JobSpec, observer: Observer
       let code = if result.is_ok() { 0 } else { -1 };
       result = result.and(capture.finish(Some(code)));
     }
+    if let Some(final_output) = final_output.as_mut() { result = final_output.finish().and(result); }
     observer(ProcEvent::Stderr(control.memory_diagnostics()));
     if let Some(key) = workspace_key { observer(ProcEvent::Stderr(temporary_diagnostics(&workspace, &key))); }
     if let Ok((limit, peak)) = control.budget.commit_accounting() {
@@ -389,7 +443,7 @@ pub(super) fn spawn(executable: &Path, spec: &JobSpec, observer: Observer,
     producers.push(super::captured_output_args(args)?);
   }
   let audio_pipe = audio.as_ref().map(|_| pipe::Pipe::new(root.path(), producers.len())).transpose().map_err(|error| error.to_string())?;
-  let final_args = consumer_args(final_args, &manifest, audio_pipe.as_ref().map(|pipe| pipe.path()))?;
+  let mut final_args = consumer_args(final_args, &manifest, audio_pipe.as_ref().map(|pipe| pipe.path()))?;
   let cwd_path = Path::new(spec.cwd.as_deref().ok_or("streaming manifest has no owned scratch root")?);
   let key = super::Supervisor::workspace_key(cwd_path);
   let (bytes, entries) = super::scratch_usage(cwd_path, Path::new(""))?;
@@ -397,6 +451,7 @@ pub(super) fn spawn(executable: &Path, spec: &JobSpec, observer: Observer,
   let charge = workspace.reserve(&key, manifest_content.len() as u64, producers.len() as u64 + 2 + u64::from(audio.is_some()))?;
   let scratch_guard = ManifestScratch { _directory: root, _charge: charge };
   std::fs::write(&manifest, manifest_content).map_err(|error| error.to_string())?;
+  let mut final_budget = FinalOutput::open(spec, &mut final_args, workspace.clone())?;
   let control = Arc::new(Control::new(execution_deadline(spec)?)?);
   let consumer = control.spawn(executable, &final_args, spec.cwd.as_deref(), false, WorkerRole::FinalEncoder, &guard)?;
   let pid = consumer.child().id();
@@ -458,7 +513,8 @@ pub(super) fn spawn(executable: &Path, spec: &JobSpec, observer: Observer,
     let consumed = join(waiter);
     let output_read = join(final_output);
     let errors_read = join(final_errors);
-    let result = control.settle().and(audio_result).and(produced).and(consumed).and(output_read).and(errors_read);
+    let mut result = control.settle().and(audio_result).and(produced).and(consumed).and(output_read).and(errors_read);
+    if let Some(final_budget) = final_budget.as_mut() { result = final_budget.finish().and(result); }
     observer(ProcEvent::Stderr(control.memory_diagnostics()));
     observer(ProcEvent::Stderr(temporary_diagnostics(&workspace, &key)));
     if let Ok((limit, peak)) = control.budget.commit_accounting() {
