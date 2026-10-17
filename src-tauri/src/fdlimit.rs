@@ -57,6 +57,15 @@ mod tests {
   /// One test, not several: the limit is per PROCESS and the harness runs tests on threads.
   #[test]
   fn a_child_spawned_after_raise_inherits_the_raised_limit() {
+    if std::env::var_os("ARTDADDY_FDLIMIT_ISOLATED").is_none() {
+      let result = std::process::Command::new(std::env::current_exe().expect("test executable"))
+        .args(["--exact", "fdlimit::tests::a_child_spawned_after_raise_inherits_the_raised_limit", "--nocapture"])
+        .env("ARTDADDY_FDLIMIT_ISOLATED", "1")
+        .output().expect("spawn isolated descriptor-limit test");
+      assert!(result.status.success(), "{}\n{}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+      assert!(String::from_utf8_lossy(&result.stdout).contains("inherited-soft-limit-verified"));
+      return;
+    }
     // Start where a Finder-launched app starts.
     set_soft(256);
     let raised = raise().expect("raise failed");
@@ -72,5 +81,6 @@ mod tests {
     assert_eq!(child, now, "the child must inherit the raised limit");
     // Idempotent: a second call has nothing to do.
     assert_eq!(raise().expect("second raise"), None);
+    println!("inherited-soft-limit-verified");
   }
 }
