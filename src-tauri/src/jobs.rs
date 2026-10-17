@@ -2645,7 +2645,9 @@ mod export_delivery_tests {
         let mut retained = jobs.delivery_list().pop().unwrap();
         retained.version = version;
         retained.created_at = now_ms() - EXPORT_EXECUTION_LIMIT_MS - 1;
+        retained.execution_queued_ms = 0;
         retained.execution_queued_at_ms = None;
+        assert!(retained.execution_deadline_ms(now_ms()).is_err(), "restart fixture must already be expired or unsupported");
         persist_delivery(&root, &retained).unwrap();
         drop(jobs);
         let reopened = owner(&root);
