@@ -6,8 +6,9 @@
 import { useEffect, useState } from "react";
 
 import { formatEta } from "../timeline/ffmpegProgress";
-import type { ExportQuality, ExportResolution } from "../timeline/exportOptions";
+import type { ExportMode, ExportQuality, ExportResolution } from "../timeline/exportOptions";
 import { useExportJob } from "../store/exportJob";
+import { resolveLocalFastEncoder } from "../platform/host";
 import ExportQueuePane from "./ExportQueuePane";
 import { cn } from "./ui";
 
@@ -15,6 +16,7 @@ export interface ExportSettings {
   resolution: ExportResolution;
   quality: ExportQuality;
   fps: number | null;
+  mode: ExportMode;
 }
 
 const RESOLUTIONS: { value: ExportResolution; label: string }[] = [
@@ -46,6 +48,9 @@ export default function ExportDialog({
   const [resolution, setResolution] = useState<ExportResolution>("source");
   const [quality, setQuality] = useState<ExportQuality>("medium");
   const [fps, setFps] = useState<number | null>(null);
+  const [fastAvailable, setFastAvailable] = useState(false);
+  const mode = useExportJob((s) => s.mode);
+  const setMode = useExportJob((s) => s.setMode);
 
   const phase = useExportJob((s) => s.phase);
   const fraction = useExportJob((s) => s.fraction);
@@ -63,6 +68,19 @@ export default function ExportDialog({
     const p = useExportJob.getState().phase;
     if (p === "done" || p === "failed" || p === "cancelled") reset();
   }, [open, reset]);
+
+  useEffect(() => {
+    if (!open || phase !== "idle") return;
+    const controller = new AbortController();
+    setFastAvailable(false);
+    setMode("quality");
+    void resolveLocalFastEncoder(controller.signal)
+      .then((available) => {
+        if (!controller.signal.aborted) setFastAvailable(available);
+      })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [open, phase, setMode]);
 
   // Escape dismisses, and only dismisses. It maps to the same door as Hide/Cancel/Close, so a
   // stray keypress during a render hides the dialog instead of killing the render.
@@ -121,8 +139,12 @@ export default function ExportDialog({
               <select
                 aria-label="quality"
                 value={quality}
+                disabled={mode === "fast"}
+                title={
+                  mode === "fast" ? "Fast uses its measured fixed quality profile." : undefined
+                }
                 onChange={(e) => setQuality(e.target.value as ExportQuality)}
-                className={selectCls}
+                className={cn(selectCls, "disabled:opacity-50")}
               >
                 {QUALITIES.map((q) => (
                   <option key={q.value} value={q.value}>
@@ -145,6 +167,53 @@ export default function ExportDialog({
                 ))}
               </select>
             </Field>
+            <div className="flex items-center gap-3 text-xs text-neutral-400">
+              <span className="w-20 shrink-0">Mode</span>
+              <div
+                role="radiogroup"
+                aria-label="export mode"
+                className="flex min-h-9 min-w-0 flex-1 flex-wrap items-center gap-x-4 gap-y-1 text-sm"
+              >
+                <label className="inline-flex items-center gap-2">
+                  <input
+                    type="radio"
+                    name="export-mode"
+                    value="quality"
+                    checked={mode === "quality"}
+                    onChange={() => setMode("quality")}
+                    className="accent-accent"
+                  />
+                  Full quality
+                </label>
+                <label
+                  className={cn(
+                    "inline-flex items-center gap-2",
+                    !fastAvailable && "text-neutral-500",
+                  )}
+                  title={
+                    fastAvailable
+                      ? "Locally measured AMD profile; files can be much larger and the picture can differ."
+                      : "Fast is unavailable on this device or its encoder check has not passed."
+                  }
+                >
+                  <input
+                    type="radio"
+                    name="export-mode"
+                    value="fast"
+                    checked={mode === "fast"}
+                    disabled={!fastAvailable}
+                    onChange={() => setMode("fast")}
+                    className="accent-accent"
+                  />
+                  Fast
+                </label>
+              </div>
+            </div>
+            {mode === "fast" && (
+              <p className="text-xs leading-snug text-amber-300">
+                Files can be much larger. The picture can differ from Full quality.
+              </p>
+            )}
             <p className="text-[11px] leading-snug text-neutral-500">
               Never upscales: a preset larger than the project is left at the project&apos;s own
               size.
@@ -187,7 +256,7 @@ export default function ExportDialog({
               </button>
               <button
                 type="button"
-                onClick={() => onStart({ resolution, quality, fps })}
+                onClick={() => onStart({ resolution, quality, fps, mode })}
                 className={primaryCls}
               >
                 Export
@@ -274,7 +343,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 }
 
 const selectCls =
-  "flex-1 rounded border border-edge bg-neutral-800 px-2 py-1 text-xs text-neutral-100 outline-none";
+  "min-w-0 flex-1 truncate rounded border border-edge bg-neutral-800 px-2 py-1 text-xs text-neutral-100 outline-none";
 const ghostCls = "rounded-md px-3 py-1.5 text-sm text-neutral-300 hover:bg-neutral-800";
 const primaryCls =
   "rounded-md bg-neutral-100 px-3 py-1.5 text-sm font-medium text-neutral-900 hover:bg-white";

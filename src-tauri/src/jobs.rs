@@ -11,11 +11,16 @@
 // the app exits.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::path::{Path, PathBuf};
 use std::io::{Read, Write};
 use sha2::{Digest, Sha256};
+
+mod stream;
+mod budget;
+mod workspace;
+pub use workspace::Workspace;
 
 /// The programs a job may run, as (logical name, bundled sidecar file). A command the page can
 /// call must not become a way to start any process: only the sidecars the long jobs need.
@@ -93,12 +98,19 @@ pub enum ProcEvent {
 /// spawner is the shell plugin's sidecar.
 pub trait Spawner: Send + Sync {
   fn identity(&self, program: &str) -> Result<ArtifactIdentity, String>;
+  fn dependency_identity(&self, path: &Path, check: &dyn Fn() -> Result<(), String>) -> Result<ArtifactIdentity, String> {
+    artifact_identity_checked(path, check)
+  }
   /// Start the job's process and return its pid. Output and the exit arrive through `on_event`,
   /// from any thread, possibly before this returns.
-  fn spawn(&self, spec: &JobSpec, on_event: Arc<dyn Fn(ProcEvent) + Send + Sync>)
+  fn spawn(&self, spec: &JobSpec, on_event: Arc<dyn Fn(ProcEvent) + Send + Sync>, workspace: Arc<Workspace>)
     -> Result<u32, String>;
-  /// Kill the process and everything it started.
-  fn kill(&self, pid: u32);
+  fn spawn_stream(&self, _spec: &JobSpec, _on_event: Arc<dyn Fn(ProcEvent) + Send + Sync>,
+    _guard: Arc<dyn Fn() -> Result<(), String> + Send + Sync>, _workspace: Arc<Workspace>) -> Result<u32, String> {
+    Err("streaming export transport is unavailable".into())
+  }
+  /// Stop the process owned by this logical job, or every member of its streaming group.
+  fn kill(&self, id: &str, pid: u32);
 }
 
 pub enum Notice {
@@ -196,13 +208,102 @@ pub struct Supervisor {
   deliveries: Arc<Mutex<HashMap<String, ExportDelivery>>>,
   export_root: Option<PathBuf>,
   export_work_root: Option<PathBuf>,
+  export_font_root: Option<PathBuf>,
+  workspace: Arc<Workspace>,
   copying: Arc<Mutex<HashSet<String>>>,
+  copy_settled: Arc<Condvar>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ArtifactIdentity {
   pub sha256: String,
   pub size: u64,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ExportResources {
+  pub total_memory_bytes: Option<u64>,
+  pub available_memory_bytes: Option<u64>,
+  pub scratch_free_bytes: Option<u64>,
+  pub destination_free_bytes: Option<u64>,
+  pub budgets: ExportResourceBudgets,
+  pub local_fast_candidate: bool,
+}
+
+fn local_fast_candidate() -> bool {
+  #[cfg(all(windows, debug_assertions))]
+  {
+    use windows_sys::Win32::Graphics::Gdi::{EnumDisplayDevicesW, DISPLAY_DEVICEW, DISPLAY_DEVICE_ATTACHED_TO_DESKTOP};
+    for index in 0..16 {
+      let mut display: DISPLAY_DEVICEW = unsafe { std::mem::zeroed() };
+      display.cb = std::mem::size_of::<DISPLAY_DEVICEW>() as u32;
+      if unsafe { EnumDisplayDevicesW(std::ptr::null(), index, &mut display, 0) } == 0 { break; }
+      let length = display.DeviceString.iter().position(|character| *character == 0).unwrap_or(display.DeviceString.len());
+      let name = String::from_utf16_lossy(&display.DeviceString[..length]);
+      if display.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP != 0 && name.contains("AMD") && name.contains("780M") { return true; }
+    }
+  }
+  false
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportResourceBudgets {
+  memory_bytes: u64,
+  temporary_bytes: u64,
+  execution_seconds: u64,
+}
+
+fn existing_resource_directory(path: &Path) -> Option<PathBuf> {
+  if !path.is_absolute() { return None; }
+  let mut current = path.to_path_buf();
+  loop {
+    if let Ok(resolved) = current.canonicalize() {
+      return if resolved.is_dir() { Some(resolved) } else { resolved.parent().map(Path::to_path_buf) };
+    }
+    if !current.pop() { return None; }
+  }
+}
+
+fn resource_free_bytes(path: &Path, disks: &sysinfo::Disks) -> Option<u64> {
+  let directory = existing_resource_directory(path)?;
+  disks.iter().filter_map(|disk| disk.mount_point().canonicalize().ok().map(|mount| (disk, mount)))
+    .filter(|(_, mount)| directory.starts_with(mount))
+    .max_by_key(|(_, mount)| mount.components().count())
+    .map(|(disk, _)| disk.available_space())
+}
+
+fn export_resources(destination: &Path, scratch: Option<&Path>, workspace: &Workspace) -> ExportResources {
+  let mut system = sysinfo::System::new();
+  system.refresh_memory();
+  let total_memory_bytes = (system.total_memory() > 0).then(|| system.total_memory());
+  let available_memory_bytes = total_memory_bytes.map(|_| system.available_memory());
+  let disks = sysinfo::Disks::new_with_refreshed_list();
+  ExportResources { total_memory_bytes, available_memory_bytes,
+    scratch_free_bytes: scratch.and_then(|path| resource_free_bytes(path, &disks)),
+    destination_free_bytes: resource_free_bytes(destination, &disks),
+    budgets: ExportResourceBudgets { memory_bytes: budget::RENDER_RESIDENT_LIMIT,
+      temporary_bytes: workspace.available_bytes(), execution_seconds: EXPORT_EXECUTION_LIMIT_MS / 1000 },
+    local_fast_candidate: local_fast_candidate() }
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct RenderScratchFile {
+  pub name: String,
+  pub content: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct RenderScratch {
+  pub path: String,
+  pub request_sha256: String,
+  pub ready: bool,
+  #[serde(default)]
+  pub files: Vec<(String, ArtifactIdentity)>,
+  #[serde(default)]
+  pub reserved_bytes: u64,
+  #[serde(default)]
+  pub reserved_entries: u64,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -239,9 +340,67 @@ pub struct ExportDelivery {
   pub worker_identity: Option<ArtifactIdentity>,
   #[serde(default)]
   pub producer_complete: bool,
+  #[serde(default)]
+  pub execution_queued_at_ms: Option<u64>,
+  #[serde(default)]
+  pub execution_queued_ms: u64,
+  #[serde(default)]
+  pub render_scratch: Option<RenderScratch>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub copy_scratch: Option<String>,
+}
+
+impl ExportDelivery {
+  fn copy_scratch_prefix(&self) -> String {
+    format!(".artdaddy-copy-{:x}-", Sha256::digest(self.id.as_bytes()))
+  }
+
+  fn copy_scratch_path(&self) -> Result<Option<&Path>, String> {
+    let Some(path) = &self.copy_scratch else { return Ok(None) };
+    let path = Path::new(path);
+    if !matches!(self.source, DeliverySource::Copy { .. }) || !path.is_absolute() ||
+      path.parent() != Path::new(&self.stage_path).parent() ||
+      !path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.starts_with(&self.copy_scratch_prefix())) {
+      return Err("copy temporary file is outside its admitted namespace".into());
+    }
+    Ok(Some(path))
+  }
+
+  fn execution_deadline_ms(&self, at: u64) -> Result<u64, String> {
+    if self.version != 2 { return Err("retained export has no supported execution clock; export again".into()); }
+    if at < self.created_at { return Err("export execution clock moved before admission".into()); }
+    let pending = self.execution_queued_at_ms.map(|queued| at.checked_sub(queued).ok_or("export queue clock regressed")).transpose()?.unwrap_or(0);
+    let queued = self.execution_queued_ms.checked_add(pending).ok_or("export queue clock overflow")?;
+    let elapsed = at - self.created_at;
+    if queued > elapsed { return Err("export queued duration exceeds its lifetime".into()); }
+    let deadline = self.created_at.checked_add(queued).and_then(|start| start.checked_add(EXPORT_EXECUTION_LIMIT_MS))
+      .ok_or("export execution deadline overflow")?;
+    if at >= deadline { return Err("export exceeded its eight-hour execution budget".into()); }
+    Ok(deadline)
+  }
+
+  fn enqueue_execution(&mut self, at: u64) -> Result<(), String> {
+    self.execution_deadline_ms(at)?;
+    if self.execution_queued_at_ms.is_none() { self.execution_queued_at_ms = Some(at); }
+    Ok(())
+  }
+
+  fn resume_execution(&mut self, at: u64) -> Result<u64, String> {
+    self.execution_deadline_ms(at)?;
+    if let Some(queued) = self.execution_queued_at_ms.take() {
+      self.execution_queued_ms = self.execution_queued_ms.checked_add(at.checked_sub(queued).ok_or("export queue clock regressed")?)
+        .ok_or("export queue clock overflow")?;
+    }
+    self.execution_deadline_ms(at)
+  }
 }
 
 fn artifact_identity(path: &Path) -> Result<ArtifactIdentity, String> {
+  artifact_identity_checked(path, &|| Ok(()))
+}
+
+fn artifact_identity_checked(path: &Path, check: &dyn Fn() -> Result<(), String>) -> Result<ArtifactIdentity, String> {
+  check()?;
   let mut file = std::fs::File::open(path).map_err(|error| error.to_string())?;
   let before = file.metadata().map_err(|error| error.to_string())?;
   if !before.is_file() || before.len() == 0 { return Err("export artifact is empty or not a file".into()); }
@@ -249,28 +408,66 @@ fn artifact_identity(path: &Path) -> Result<ArtifactIdentity, String> {
   let mut buffer = vec![0u8; 1024 * 1024];
   let mut size = 0;
   loop {
+    check()?;
     let count = file.read(&mut buffer).map_err(|error| error.to_string())?;
     if count == 0 { break; }
     size += count as u64;
     hash.update(&buffer[..count]);
   }
   let after = file.metadata().map_err(|error| error.to_string())?;
+  check()?;
   if size != before.len() || size != after.len() || before.modified().ok() != after.modified().ok() {
     return Err("export artifact changed while hashing".into());
   }
   Ok(ArtifactIdentity { sha256: format!("{:x}", hash.finalize()), size })
 }
 
+const EXPORT_RECEIPT_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
+const EXPORT_JOURNAL_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
+
+struct ReceiptWriter<'a> {
+  output: &'a mut std::fs::File,
+  remaining: u64,
+}
+
+impl Write for ReceiptWriter<'_> {
+  fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+    if bytes.len() as u64 > self.remaining {
+      return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "export receipt exceeds its eight-MiB recovery budget"));
+    }
+    let written = self.output.write(bytes)?;
+    self.remaining -= written as u64;
+    Ok(written)
+  }
+  fn flush(&mut self) -> std::io::Result<()> { self.output.flush() }
+}
+
 fn persist_delivery(root: &Path, delivery: &ExportDelivery) -> Result<(), String> {
   std::fs::create_dir_all(root).map_err(|error| error.to_string())?;
   let mut file = tempfile::NamedTempFile::new_in(root).map_err(|error| error.to_string())?;
-  serde_json::to_writer(&mut file, delivery).map_err(|error| error.to_string())?;
+  serde_json::to_writer(ReceiptWriter { output: file.as_file_mut(), remaining: EXPORT_RECEIPT_LIMIT_BYTES }, delivery)
+    .map_err(|error| error.to_string())?;
+  let target = root.join(format!("{}.json", delivery.id));
+  let mut installed = file.as_file().metadata().map_err(|error| error.to_string())?.len();
+  let mut receipts = 1usize;
+  for entry in std::fs::read_dir(root).map_err(|error| error.to_string())? {
+    let entry = entry.map_err(|error| error.to_string())?;
+    if entry.path() == target || entry.path().extension().and_then(|extension| extension.to_str()) != Some("json") { continue; }
+    if !entry.file_type().map_err(|error| error.to_string())?.is_file() { return Err("export recovery receipt must be a regular file".into()); }
+    receipts += 1;
+    installed = installed.checked_add(entry.metadata().map_err(|error| error.to_string())?.len()).ok_or("export journal size overflow")?;
+    if receipts > 4096 || installed > EXPORT_JOURNAL_LIMIT_BYTES {
+      return Err("export recovery journal exceeds its aggregate admission budget; finish pending follow-ups before exporting".into());
+    }
+  }
   file.as_file().sync_all().map_err(|error| error.to_string())?;
-  file.persist(root.join(format!("{}.json", delivery.id))).map_err(|error| error.to_string())?;
+  file.persist(target).map_err(|error| error.to_string())?;
   Ok(())
 }
 
 const EXPORT_SCRATCH_LIMIT_BYTES: u64 = 20_000_000_000;
+const EXPORT_WORKSPACE_PAYLOAD_BYTES: u64 = EXPORT_SCRATCH_LIMIT_BYTES - 2_000_000_000;
+const EXPORT_EXECUTION_LIMIT_MS: u64 = 8 * 60 * 60 * 1000;
 
 struct ScratchOutput {
   file: tempfile::NamedTempFile,
@@ -278,10 +475,19 @@ struct ScratchOutput {
   used: u64,
   limit: u64,
   failed: bool,
+  charge: Option<workspace::Charge>,
+  previous_bytes: u64,
+  previous_exists: bool,
+  workspace: Option<Arc<Workspace>>,
+  workspace_key: String,
 }
 
 impl ScratchOutput {
   fn open(path: &Path, used: u64, limit: u64) -> Result<Self, String> {
+    Self::open_named(path, used, limit, ".tmp")
+  }
+
+  fn open_named(path: &Path, used: u64, limit: u64, prefix: &str) -> Result<Self, String> {
     if used > limit { return Err("export scratch budget already exceeded".into()); }
     if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink() || !metadata.is_file()) {
       return Err("scratch output must be an owned regular file".into());
@@ -289,8 +495,21 @@ impl ScratchOutput {
     let previous = std::fs::metadata(path).map(|metadata| metadata.len()).unwrap_or(0);
     let used = used.checked_add(previous).ok_or("scratch size overflow")?;
     if used > limit { return Err("export scratch budget already exceeded".into()); }
-    let file = tempfile::NamedTempFile::new_in(path.parent().ok_or("scratch output has no parent")?).map_err(|error| error.to_string())?;
-    Ok(Self { file, target: path.to_path_buf(), used, limit, failed: false })
+    let file = tempfile::Builder::new().prefix(prefix).tempfile_in(path.parent().ok_or("scratch output has no parent")?)
+      .map_err(|error| error.to_string())?;
+    Ok(Self { file, target: path.to_path_buf(), used, limit, failed: false, charge: None,
+      previous_bytes: previous, previous_exists: path.exists(), workspace: None, workspace_key: String::new() })
+  }
+
+  fn open_workspace(path: &Path, used: u64, limit: u64, workspace: Arc<Workspace>, key: &str) -> Result<Self, String> {
+    Self::open(path, used, limit)?.with_workspace(workspace, key)
+  }
+
+  fn with_workspace(mut self, workspace: Arc<Workspace>, key: &str) -> Result<Self, String> {
+    self.charge = Some(workspace.reserve(key, 0, 1)?);
+    self.workspace = Some(workspace);
+    self.workspace_key = key.to_string();
+    Ok(self)
   }
 
   fn write(&mut self, bytes: &[u8]) -> Result<(), String> {
@@ -299,21 +518,33 @@ impl ScratchOutput {
       self.failed = true; return Err("export scratch byte count overflow".into());
     };
     if next > self.limit { self.failed = true; return Err("export scratch budget exceeded before write".into()); }
+    if let Some(charge) = self.charge.as_mut() {
+      if let Err(error) = charge.grow(bytes.len() as u64) { self.failed = true; return Err(error); }
+    }
     if let Err(error) = self.file.write_all(bytes) { self.failed = true; return Err(error.to_string()); }
     self.used = next;
     Ok(())
   }
 
-  fn finish(self, exit_code: Option<i32>) -> Result<(), String> {
+  fn finish(mut self, exit_code: Option<i32>) -> Result<(), String> {
     if self.failed { return Err("failed temporary output cannot be installed".into()); }
     if exit_code != Some(0) { return Err("unsuccessful worker cannot install temporary output".into()); }
     self.file.as_file().sync_all().map_err(|error| error.to_string())?;
     self.file.persist(&self.target).map_err(|error| error.to_string())?;
+    if let Some(charge) = self.charge.take() {
+      charge.retain();
+      self.workspace.as_ref().ok_or("temporary output lost its workspace owner")?
+        .release(&self.workspace_key, self.previous_bytes, u64::from(self.previous_exists));
+    }
     Ok(())
   }
 }
 
 fn scratch_bytes(path: &Path, exclude: &Path) -> Result<u64, String> {
+  scratch_usage(path, exclude).map(|usage| usage.0)
+}
+
+fn scratch_usage(path: &Path, exclude: &Path) -> Result<(u64, u64), String> {
   let mut pending = vec![path.to_path_buf()];
   let mut bytes = 0u64;
   let mut entries = 0usize;
@@ -330,7 +561,7 @@ fn scratch_bytes(path: &Path, exclude: &Path) -> Result<u64, String> {
       }
     }
   }
-  Ok(bytes)
+  Ok((bytes, entries as u64 + 1))
 }
 
 fn scratch_capture(spec: &JobSpec, stage_path: &str, final_step: bool) -> Result<Option<serde_json::Value>, String> {
@@ -364,6 +595,10 @@ fn captured_output_args(args: &[String]) -> Result<Vec<String>, String> {
   Ok(args)
 }
 
+fn is_streamed(spec: &JobSpec) -> bool {
+  spec.meta.get("renderTransport").and_then(|value| value.as_str()) == Some("partition-pipes-v1")
+}
+
 fn collect_render_dependencies(path: &Path, paths: &mut Vec<String>) -> Result<(), String> {
   if paths.len() >= 16384 { return Err("export dependency count exceeds journal budget".into()); }
   for entry in std::fs::read_dir(path).map_err(|error| error.to_string())? {
@@ -390,28 +625,41 @@ impl Supervisor {
       deliveries: Arc::default(),
       export_root: None,
       export_work_root: None,
+      export_font_root: None,
+      workspace: Workspace::new(EXPORT_WORKSPACE_PAYLOAD_BYTES),
       copying: Arc::default(),
+      copy_settled: Arc::default(),
     }
   }
 
   pub fn with_export_root(mut self, root: PathBuf) -> Result<Self, String> {
     std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
     let mut deliveries = self.deliveries.lock().map_err(|error| error.to_string())?;
+    let mut installed = 0u64;
     for entry in std::fs::read_dir(&root).map_err(|error| error.to_string())? {
-      let path = entry.map_err(|error| error.to_string())?.path();
+      let entry = entry.map_err(|error| error.to_string())?;
+      let path = entry.path();
       if path.extension().and_then(|value| value.to_str()) != Some("json") { continue; }
-      if deliveries.len() >= 4096 || std::fs::metadata(&path).map_err(|error| error.to_string())?.len() > 8 * 1024 * 1024 {
+      if !entry.file_type().map_err(|error| error.to_string())?.is_file() { return Err("export recovery receipt must be a regular file".into()); }
+      let declared = std::fs::metadata(&path).map_err(|error| error.to_string())?.len();
+      if deliveries.len() >= 4096 || declared > EXPORT_RECEIPT_LIMIT_BYTES || installed.saturating_add(declared) > EXPORT_JOURNAL_LIMIT_BYTES {
         return Err("export journal exceeds the bounded loading budget".into());
       }
-      let bytes = std::fs::read(&path).map_err(|error| error.to_string())?;
+      let mut bytes = Vec::with_capacity(declared as usize + 1);
+      std::fs::File::open(&path).map_err(|error| error.to_string())?.take(EXPORT_RECEIPT_LIMIT_BYTES + 1)
+        .read_to_end(&mut bytes).map_err(|error| error.to_string())?;
+      if bytes.len() as u64 > EXPORT_RECEIPT_LIMIT_BYTES { return Err("export receipt grew beyond its recovery budget".into()); }
+      installed = installed.checked_add(bytes.len() as u64).ok_or("export journal size overflow")?;
+      if installed > EXPORT_JOURNAL_LIMIT_BYTES { return Err("export journal grew beyond its aggregate recovery budget".into()); }
       let delivery: ExportDelivery = serde_json::from_slice(&bytes).map_err(|error| format!("damaged export journal {}: {error}", path.display()))?;
-      if delivery.version != 1 || delivery.id.is_empty() ||
+      if !matches!(delivery.version, 1 | 2) || delivery.id.is_empty() ||
         !delivery.id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-') ||
         path.file_stem().and_then(|value| value.to_str()) != Some(delivery.id.as_str()) {
         return Err("unsupported or invalid export journal identity".into());
       }
       deliveries.insert(delivery.id.clone(), delivery);
     }
+    self.account_workspace(&deliveries)?;
     drop(deliveries);
     self.export_root = Some(root);
     Ok(self)
@@ -419,7 +667,211 @@ impl Supervisor {
 
   pub fn with_export_work_root(mut self, root: PathBuf) -> Self { self.export_work_root = Some(root); self }
 
+  pub fn with_export_font_root(mut self, root: PathBuf) -> Self { self.export_font_root = Some(root); self }
+
+  fn workspace_key(path: &Path) -> String {
+    let normalized = path.canonicalize().unwrap_or_else(|_| path.to_path_buf()).to_string_lossy()
+      .trim_start_matches("\\\\?\\").replace('\\', "/");
+    if cfg!(target_os = "windows") { normalized.to_lowercase() } else { normalized }
+  }
+
+  fn account_workspace(&self, entries: &HashMap<String, ExportDelivery>) -> Result<(), String> {
+    for delivery in entries.values().filter(|delivery| delivery.state != "published" && !delivery.followups_done) {
+      let mut bytes = 0u64;
+      let mut count = 0u64;
+      for path in std::iter::once(Path::new(&delivery.stage_path)).chain(delivery.copy_scratch_path()?) {
+        match std::fs::metadata(path) {
+          Ok(metadata) if metadata.is_file() => {
+            bytes = bytes.checked_add(metadata.len()).ok_or("export staging size overflow")?;
+            count += 1;
+          }
+          Ok(_) => return Err("export stage is not a regular file".into()),
+          Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+          Err(error) => return Err(error.to_string()),
+        }
+      }
+      self.workspace.restore_retained(&Self::workspace_key(Path::new(&delivery.stage_path)), bytes, count)?;
+    }
+    let Some(work) = &self.export_work_root else { return Ok(()) };
+    let arena = work.join("exports");
+    if !arena.exists() { return Ok(()); }
+    let mut count = 0usize;
+    for entry in std::fs::read_dir(&arena).map_err(|error| error.to_string())? {
+      count += 1;
+      if count > 4096 { return Err("export workspace directory budget exceeded".into()); }
+      let entry = entry.map_err(|error| error.to_string())?;
+      let kind = entry.file_type().map_err(|error| error.to_string())?;
+      if !kind.is_dir() || kind.is_symlink() { return Err("export workspace contains an unowned filesystem entry".into()); }
+      let key = Self::workspace_key(&entry.path());
+      let held = entries.values().filter_map(|delivery| delivery.render_scratch.as_ref())
+        .find(|scratch| Self::workspace_key(Path::new(&scratch.path)) == key).map(|scratch| scratch.reserved_bytes).unwrap_or(0);
+      let held_entries = entries.values().filter_map(|delivery| delivery.render_scratch.as_ref())
+        .find(|scratch| Self::workspace_key(Path::new(&scratch.path)) == key).map(|scratch| scratch.reserved_entries).unwrap_or(0);
+      let (actual, count) = scratch_usage(&entry.path(), Path::new(""))?;
+      self.workspace.restore_retained(&key, actual.max(held), count.max(held_entries))?;
+    }
+    Ok(())
+  }
+
+  fn claim_export_output(&self, id: &str) -> Result<workspace::OutputClaim, String> {
+    let path = self.deliveries.lock().map_err(|error| error.to_string())?.get(id)
+      .ok_or("output capacity has no admitted delivery")?.stage_path.clone();
+    self.workspace.claim_output(&Self::workspace_key(Path::new(&path)), &|| {
+      let entries = self.deliveries.lock().map_err(|error| error.to_string())?;
+      let entry = entries.get(id).ok_or("output intent vanished while waiting for temporary capacity")?;
+      if entry.state != "prepared" || entry.producer_complete { return Err("output intent is no longer eligible while waiting for temporary capacity".into()); }
+      entry.execution_deadline_ms(now_ms())?;
+      if self.lock().jobs.get(id).is_some_and(|job| job.kill_requested ||
+        (matches!(entry.source, DeliverySource::Render { .. }) && job.state == JobState::Exited)) {
+        return Err("output was cancelled or superseded while waiting for temporary capacity".into());
+      }
+      Ok(())
+    })
+  }
+
+  fn finish_output_claim(&self, id: &str) {
+    if let Some(delivery) = self.deliveries.lock().unwrap_or_else(|error| error.into_inner()).get(id) {
+      self.workspace.finish_output_claim(&Self::workspace_key(Path::new(&delivery.stage_path)));
+    }
+  }
+
+  pub fn stage_render_scratch(&self, id: &str, files: Vec<RenderScratchFile>, fonts: Vec<String>) -> Result<String, String> {
+    let safe_name = |name: &str| !name.is_empty() && name != "." && name != ".." &&
+      !name.chars().any(|character| character.is_control() || matches!(character, '/' | '\\' | ':' | '"' | '<' | '>' | '|' | '?' | '*')) &&
+      !name.ends_with(['.', ' ']);
+    if files.len().checked_add(fonts.len()).is_none_or(|count| count > 16384) {
+      return Err("render staging entry budget exceeded".into());
+    }
+    let mut names = HashSet::new();
+    let mut bytes = 0usize;
+    for file in &files {
+      if !safe_name(&file.name) || !names.insert(file.name.to_lowercase()) { return Err("render staging filenames must be unique contained basenames".into()); }
+      bytes = bytes.checked_add(file.content.len()).ok_or("render staging size overflow")?;
+      if bytes > 32 * 1024 * 1024 { return Err("render staged text budget exceeded".into()); }
+    }
+    names.clear();
+    for font in &fonts {
+      if !safe_name(font) || !names.insert(font.to_lowercase()) { return Err("render font filenames must be unique contained basenames".into()); }
+    }
+    let _capacity = self.claim_export_output(id)?;
+    let request_sha256 = format!("{:x}", Sha256::digest(serde_json::to_vec(&(&files, &fonts)).map_err(|error| error.to_string())?));
+    let root = self.export_root.as_ref().ok_or("native export journal is unavailable")?;
+    let mut entries = self.deliveries.lock().map_err(|error| error.to_string())?;
+    self.account_workspace(&entries)?;
+    let current = entries.get_mut(id).ok_or("render staging has no admitted delivery intent")?;
+    if !matches!(current.source, DeliverySource::Render { .. }) || current.state != "prepared" || current.producer_complete {
+      return Err("render staging intent is no longer eligible".into());
+    }
+    if let Some(scratch) = &current.render_scratch {
+      if scratch.ready && scratch.request_sha256 == request_sha256 {
+        self.validate_render_scratch(current, Some(&scratch.path))?;
+        return Ok(scratch.path.clone());
+      }
+      return Err("render staging request changed or its previous write did not complete".into());
+    }
+    if current.render_job.is_some() { return Err("render staging cannot replace an admitted worker's inputs".into()); }
+    self.record_execution_clock(current, false)?;
+    let work = self.export_work_root.as_ref().ok_or("native render work root is unavailable")?.join("exports");
+    std::fs::create_dir_all(&work).map_err(|error| error.to_string())?;
+    let directory = tempfile::Builder::new().prefix(&format!("render-{id}-")).tempdir_in(&work).map_err(|error| error.to_string())?;
+    let path = directory.path().to_string_lossy().into_owned();
+    let font_bytes = fonts.iter().try_fold(0u64, |total, font| {
+      let bytes = self.export_font_root.as_ref().and_then(|root| std::fs::metadata(root.join(font)).ok())
+        .map(|metadata| metadata.len()).unwrap_or(32 * 1024 * 1024);
+      total.checked_add(bytes).ok_or("render font workspace size overflow")
+    })?;
+    let reserved_bytes = (bytes as u64).checked_add(font_bytes).ok_or("render staging workspace size overflow")?;
+    let reserved_entries = (files.len() + fonts.len() + usize::from(!fonts.is_empty()) + 1) as u64;
+    let charge = self.workspace.reserve(&Self::workspace_key(directory.path()), reserved_bytes, reserved_entries)?;
+    let mut reserved = current.clone();
+    reserved.render_scratch = Some(RenderScratch { path: path.clone(), request_sha256, ready: false, files: Vec::new(), reserved_bytes, reserved_entries });
+    persist_delivery(root, &reserved)?;
+    *current = reserved;
+    let owned = directory.keep();
+    charge.retain();
+    let mut written_bytes = 0u64;
+    for file in files {
+      current.execution_deadline_ms(now_ms())?;
+      let mut output = std::fs::OpenOptions::new().write(true).create_new(true).open(owned.join(file.name)).map_err(|error| error.to_string())?;
+      output.write_all(file.content.as_bytes()).map_err(|error| error.to_string())?;
+      written_bytes = written_bytes.checked_add(file.content.len() as u64).ok_or("render staging write size overflow")?;
+      output.sync_all().map_err(|error| error.to_string())?;
+    }
+    if !fonts.is_empty() {
+      let font_root = self.export_font_root.as_ref().ok_or("bundled render font root is unavailable")?;
+      std::fs::create_dir(owned.join("fonts")).map_err(|error| error.to_string())?;
+      for font in fonts {
+        current.execution_deadline_ms(now_ms())?;
+        let source = font_root.join(&font);
+        let metadata = std::fs::symlink_metadata(&source).map_err(|error| error.to_string())?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 32 * 1024 * 1024 {
+          return Err("bundled render font is not a bounded regular file".into());
+        }
+        let mut input = std::fs::File::open(source).map_err(|error| error.to_string())?;
+        let expected = input.metadata().map_err(|error| error.to_string())?.len();
+        if expected > reserved_bytes.saturating_sub(written_bytes) { return Err("bundled font grew beyond its admitted workspace charge".into()); }
+        let mut output = std::fs::OpenOptions::new().write(true).create_new(true).open(owned.join("fonts").join(font)).map_err(|error| error.to_string())?;
+        let mut remaining = expected;
+        let mut buffer = vec![0u8; 1024 * 1024];
+        while remaining > 0 {
+          current.execution_deadline_ms(now_ms())?;
+          let take = remaining.min(buffer.len() as u64) as usize;
+          let count = input.read(&mut buffer[..take]).map_err(|error| error.to_string())?;
+          if count == 0 { return Err("bundled font changed while staging".into()); }
+          output.write_all(&buffer[..count]).map_err(|error| error.to_string())?;
+          remaining -= count as u64;
+        }
+        if input.read(&mut buffer[..1]).map_err(|error| error.to_string())? != 0 { return Err("bundled font grew while staging".into()); }
+        written_bytes = written_bytes.checked_add(expected).ok_or("render font write size overflow")?;
+        output.sync_all().map_err(|error| error.to_string())?;
+      }
+    }
+    let mut ready = current.clone();
+    let mut staged = Vec::new();
+    collect_render_dependencies(&owned, &mut staged)?;
+    let identities = staged.into_iter().map(|path| {
+      let relative = Path::new(&path).strip_prefix(&owned).map_err(|error| error.to_string())?.to_string_lossy().into_owned();
+      artifact_identity(Path::new(&path)).map(|identity| (relative, identity))
+    }).collect::<Result<Vec<_>, _>>()?;
+    ready.render_scratch.as_mut().ok_or("render scratch reservation disappeared")?.files = identities;
+    ready.render_scratch.as_mut().ok_or("render scratch reservation disappeared")?.ready = true;
+    persist_delivery(root, &ready)?;
+    *current = ready;
+    Ok(path)
+  }
+
+  fn validate_render_scratch(&self, delivery: &ExportDelivery, cwd: Option<&str>) -> Result<(), String> {
+    let Some(cwd) = cwd else {
+      if delivery.render_scratch.is_some() { return Err("render command omitted its admitted scratch directory".into()); }
+      return Ok(());
+    };
+    let scratch = delivery.render_scratch.as_ref().ok_or("render command has no admitted scratch reservation")?;
+    if !scratch.ready { return Err("render scratch staging has not completed".into()); }
+    let arena = self.export_work_root.as_ref().ok_or("native render work root is unavailable")?.join("exports").canonicalize().map_err(|error| error.to_string())?;
+    let directory = Path::new(&scratch.path);
+    let metadata = std::fs::symlink_metadata(directory).map_err(|error| error.to_string())?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() { return Err("admitted render scratch is not an owned regular directory".into()); }
+    let actual = directory.canonicalize().map_err(|error| error.to_string())?;
+    if actual.parent() != Some(arena.as_path()) || Path::new(cwd).canonicalize().map_err(|error| error.to_string())? != actual {
+      return Err("render command scratch differs from its native reservation".into());
+    }
+    for (relative, expected) in &scratch.files {
+      let path = Path::new(relative);
+      if path.is_absolute() || path.components().any(|component| !matches!(component, std::path::Component::Normal(_))) {
+        return Err("retained render staging manifest has an invalid relative path".into());
+      }
+      let path = actual.join(path);
+      if std::fs::metadata(&path).map_err(|error| error.to_string())?.len() != expected.size {
+        return Err("render staged input changed before worker admission".into());
+      }
+      let identity = artifact_identity_checked(&path, &|| delivery.execution_deadline_ms(now_ms()).map(|_| ()))?;
+      if identity.sha256 != expected.sha256 || identity.size != expected.size { return Err("render staged input changed before worker admission".into()); }
+    }
+    Ok(())
+  }
+
   pub fn prepare_delivery(&self, id: String, project_dir: String, stage_path: String, dest_path: String, source: DeliverySource) -> Result<ExportDelivery, String> {
+    let admitted_at = now_ms();
     let root = self.export_root.as_ref().ok_or("native export journal is unavailable")?;
     if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-') {
       return Err("invalid export intent identity".into());
@@ -453,13 +905,19 @@ impl Supervisor {
         vec![(path.clone(), artifact_identity(Path::new(path))?)]
       }
     };
-    let delivery = ExportDelivery { version: 1, id: id.clone(), project_dir, stage_path, dest_path,
-      state: "prepared".into(), identity: None, created_at: now_ms(), render_job: None, sources, recovery_attempts: 0, source, followups_done: false, command_sha256: None, worker_identity: None, producer_complete: false };
+    let execution_queued_at_ms = Some(now_ms());
+    let delivery = ExportDelivery { version: 2, id: id.clone(), project_dir, stage_path, dest_path,
+      state: "prepared".into(), identity: None, created_at: admitted_at, render_job: None, sources, recovery_attempts: 0, source, followups_done: false,
+      command_sha256: None, worker_identity: None, producer_complete: false, execution_queued_at_ms, execution_queued_ms: 0,
+      render_scratch: None, copy_scratch: None };
     self.require_unleased_path(Path::new(&delivery.dest_path), deliveries.values().chain(std::iter::once(&delivery)))?;
     let stage = std::fs::OpenOptions::new().write(true).create_new(true).open(&delivery.stage_path).map_err(|error| error.to_string())?;
     drop(stage);
     if let Err(error) = persist_delivery(root, &delivery) { let _ = std::fs::remove_file(&delivery.stage_path); return Err(error); }
     deliveries.insert(id, delivery.clone());
+    let queued = if matches!(delivery.source, DeliverySource::Copy { .. }) { Some(self.retain_copy_job(&delivery, JobState::Queued)?) } else { None };
+    drop(deliveries);
+    if let Some(view) = queued { (self.notify)(Notice::Changed(view)); }
     Ok(delivery)
   }
 
@@ -474,17 +932,39 @@ impl Supervisor {
     Ok(())
   }
 
+  fn transition_execution_clock(&self, id: &str, queued: bool) -> Result<Option<ExportDelivery>, String> {
+    let mut entries = self.deliveries.lock().map_err(|error| error.to_string())?;
+    let Some(current) = entries.get_mut(id) else { return Ok(None) };
+    self.record_execution_clock(current, queued).map(Some)
+  }
+
+  fn record_execution_clock(&self, current: &mut ExportDelivery, queued: bool) -> Result<ExportDelivery, String> {
+    if current.state != "prepared" { return Err("export job is not in prepared state".into()); }
+    if current.producer_complete { return Err("completed export producer cannot be run again".into()); }
+    let mut next = current.clone();
+    if queued { next.enqueue_execution(now_ms())?; } else { next.resume_execution(now_ms())?; }
+    if next.execution_queued_at_ms != current.execution_queued_at_ms || next.execution_queued_ms != current.execution_queued_ms {
+      let root = self.export_root.as_ref().ok_or("native export journal is unavailable")?;
+      persist_delivery(root, &next)?;
+      *current = next.clone();
+    }
+    Ok(next)
+  }
+
   pub fn verify_delivery(&self, id: &str) -> Result<ExportDelivery, String> {
     let root = self.export_root.as_ref().ok_or("native export journal is unavailable")?;
     let delivery = self.deliveries.lock().map_err(|error| error.to_string())?.get(id).cloned().ok_or("unknown export intent")?;
     if delivery.state != "prepared" && delivery.state != "verified" { return Err("export intent cannot be verified".into()); }
+    if delivery.execution_queued_at_ms.is_some() { return Err("queued export cannot be verified".into()); }
+    let check = || delivery.execution_deadline_ms(now_ms()).map(|_| ());
+    check()?;
     self.require_completed_producer(&delivery)?;
     for (path, expected) in &delivery.sources {
-      let actual = artifact_identity(Path::new(path))?;
+      let actual = artifact_identity_checked(Path::new(path), &check)?;
       if actual.sha256 != expected.sha256 || actual.size != expected.size { return Err("export dependency changed during rendering".into()); }
     }
     let mut next = delivery.clone();
-    next.identity = Some(artifact_identity(Path::new(&delivery.stage_path))?);
+    next.identity = Some(artifact_identity_checked(Path::new(&delivery.stage_path), &check)?);
     if matches!(delivery.source, DeliverySource::Copy { .. }) {
       let expected = delivery.sources.first().ok_or("copy export has no source identity")?;
       let actual = next.identity.as_ref().ok_or("copy stage has no identity")?;
@@ -494,6 +974,7 @@ impl Supervisor {
     let mut deliveries = self.deliveries.lock().map_err(|error| error.to_string())?;
     let current = deliveries.get_mut(id).ok_or("export intent vanished")?;
     if current.state != "prepared" && current.state != "verified" { return Err("export intent was cancelled or superseded during verification".into()); }
+    current.execution_deadline_ms(now_ms())?;
     self.require_completed_producer(current)?;
     persist_delivery(root, &next)?;
     *current = next;
@@ -506,7 +987,10 @@ impl Supervisor {
     self.require_completed_producer(&captured)?;
     let checked_stage = Path::new(&captured.stage_path).exists() && captured.state != "published";
     let checked_path = if checked_stage { &captured.stage_path } else { &captured.dest_path };
-    let actual = artifact_identity(Path::new(checked_path))?;
+    let actual = artifact_identity_checked(Path::new(checked_path), &|| {
+      if checked_stage { captured.execution_deadline_ms(now_ms())?; }
+      Ok(())
+    })?;
     let expected = captured.identity.as_ref().ok_or("export has no verified identity")?;
     if actual.sha256 != expected.sha256 || actual.size != expected.size { return Err("export artifact identity differs at publication".into()); }
     let mut deliveries = self.deliveries.lock().map_err(|error| error.to_string())?;
@@ -528,6 +1012,7 @@ impl Supervisor {
     let expected = delivery.identity.as_ref().ok_or("verified export has no artifact identity")?;
     let staged = Path::new(&delivery.stage_path);
     if staged.exists() {
+      delivery.execution_deadline_ms(now_ms())?;
       if actual.sha256 != expected.sha256 || actual.size != expected.size { return Err("staged export changed after verification".into()); }
       let mut publishing = delivery.clone();
       publishing.state = "publishing".into();
@@ -547,6 +1032,7 @@ impl Supervisor {
     published.state = "published".into();
     persist_delivery(root, &published)?;
     *delivery = published;
+    self.workspace.release_root(&Self::workspace_key(Path::new(&delivery.stage_path)));
     Ok(delivery.clone())
   }
 
@@ -562,6 +1048,10 @@ impl Supervisor {
     next.state = "cancelled".into();
     persist_delivery(root, &next)?;
     *delivery = next;
+    let queued_copy = matches!(delivery.source, DeliverySource::Copy { .. }) &&
+      self.lock().jobs.get(id).is_some_and(|job| job.state == JobState::Queued);
+    drop(deliveries);
+    if queued_copy { self.finish_copy_job(id); }
     Ok(true)
   }
 
@@ -623,7 +1113,10 @@ impl Supervisor {
         DeliverySource::Render { paths } => paths.iter().map(String::as_str).collect(),
         DeliverySource::Copy { path, .. } => vec![path.as_str()],
       };
+      let staged = delivery.render_scratch.as_ref().map(|scratch| scratch.files.iter()
+        .map(|(relative, _)| Path::new(&scratch.path).join(relative).to_string_lossy().into_owned()).collect::<Vec<_>>()).unwrap_or_default();
       for dependency in declared.into_iter().chain(delivery.sources.iter().map(|(path, _)| path.as_str()))
+        .chain(staged.iter().map(String::as_str)).chain(delivery.copy_scratch.as_deref())
         .chain(stage_owned.then_some(delivery.stage_path.as_str())) {
         let dependency = dependency_path(Path::new(dependency))?;
         if let Some(target_file) = &target_file {
@@ -637,10 +1130,13 @@ impl Supervisor {
         let dependency = key(&dependency);
         if dependency == target || dependency.starts_with(&prefix) { return Err("path is leased by an active export".into()); }
       }
-      if let Some(cwd) = delivery.render_job.as_ref().and_then(|job| job.cwd.as_ref()) {
+      if let Some(cwd) = delivery.render_scratch.as_ref().map(|scratch| &scratch.path)
+        .or_else(|| delivery.render_job.as_ref().and_then(|job| job.cwd.as_ref())) {
         if let Ok(cwd) = Path::new(cwd).canonicalize() {
           let cwd = key(&cwd);
-          if cwd == target || cwd.starts_with(&prefix) { return Err("scratch is leased by an active export".into()); }
+          if cwd == target || cwd.starts_with(&prefix) || target.starts_with(&format!("{}/", cwd.trim_end_matches('/'))) {
+            return Err("scratch is leased by an active export".into());
+          }
         }
       }
     }
@@ -656,20 +1152,39 @@ impl Supervisor {
     next.state = "failed".into();
     persist_delivery(root, &next)?;
     *delivery = next;
+    let queued_copy = matches!(delivery.source, DeliverySource::Copy { .. }) &&
+      self.lock().jobs.get(id).is_some_and(|job| job.state == JobState::Queued);
+    drop(deliveries);
+    if queued_copy { self.finish_copy_job(id); }
     Ok(true)
   }
 
   fn retain_render_job(&self, spec: &JobSpec) -> Result<(), String> {
-    let admitted = self.deliveries.lock().map_err(|error| error.to_string())?.contains_key(&spec.id);
-    if !admitted && spec.lane != "export" && spec.meta.get("kind").and_then(|value| value.as_str()) != Some("export") { return Ok(()); }
-    let worker = self.spawner.identity(&spec.program)?;
+    let mut entries = self.deliveries.lock().map_err(|error| error.to_string())?;
+    if !entries.contains_key(&spec.id) && spec.lane != "export" && spec.meta.get("kind").and_then(|value| value.as_str()) != Some("export") { return Ok(()); }
+    self.account_workspace(&entries)?;
+    let current = entries.get_mut(&spec.id);
     let root = self.export_root.as_ref().ok_or("native export journal is unavailable")?;
-    let mut deliveries = self.deliveries.lock().map_err(|error| error.to_string())?;
-    let delivery = deliveries.get(&spec.id).ok_or("export job has no admitted delivery intent")?;
-    if !matches!(&delivery.source, DeliverySource::Render { .. }) { return Err("copy intent cannot admit a render worker".into()); }
+    let current = current.ok_or("export job has no admitted delivery intent")?;
+    if !matches!(&current.source, DeliverySource::Render { .. }) { return Err("copy intent cannot admit a render worker".into()); }
     if spec.program != "ffmpeg" { return Err("export intent requires the admitted render backend".into()); }
-    if delivery.state != "prepared" { return Err("export job is not in prepared state".into()); }
-    if delivery.producer_complete { return Err("completed export producer cannot be run again".into()); }
+    if spec.lane != "export" { return Err("admitted render work must use the shared export lane".into()); }
+    let delivery = self.record_execution_clock(current, false)?;
+    drop(entries);
+    self.validate_render_scratch(&delivery, spec.cwd.as_deref())?;
+    let before = serde_json::to_vec(&delivery).map_err(|error| error.to_string())?;
+    let check = || -> Result<(), String> {
+      let entries = self.deliveries.lock().map_err(|error| error.to_string())?;
+      let current = entries.get(&spec.id).ok_or("export intent disappeared during dependency checks")?;
+      if current.state != "prepared" || current.producer_complete {
+        return Err("export was cancelled or superseded during dependency checks".into());
+      }
+      current.execution_deadline_ms(now_ms())?;
+      Ok(())
+    };
+    check()?;
+    let worker = self.spawner.identity(&spec.program)?;
+    check()?;
     let mut paths = Vec::new();
     if let DeliverySource::Render { paths: declared } = &delivery.source { paths.extend(declared.iter().cloned()); }
     if let Some(sources) = spec.meta.pointer("/plan/sources").and_then(|value| value.as_array()) {
@@ -677,7 +1192,8 @@ impl Supervisor {
         if let Some(path) = source.get("path").and_then(|value| value.as_str()) { paths.push(path.to_string()); }
       }
     }
-    for command in std::iter::once(&spec.args).chain(spec.steps.iter()) {
+    let audio = stream::audio_producer(spec)?;
+    for command in std::iter::once(&spec.args).chain(spec.steps.iter()).chain(audio.iter().map(|audio| &audio.args)) {
       for pair in command.windows(2) {
         if pair[0] == "-i" && Path::new(&pair[1]).is_file() { paths.push(pair[1].clone()); }
       }
@@ -686,11 +1202,12 @@ impl Supervisor {
       if let Some(cwd) = &spec.cwd { collect_render_dependencies(Path::new(cwd), &mut paths)?; }
     }
     paths.sort(); paths.dedup();
-    let mut next = delivery.clone();
+    let mut next = delivery;
     let first_binding = next.render_job.is_none();
     let command_sha256 = format!("{:x}", Sha256::digest(serde_json::to_vec(spec).map_err(|error| error.to_string())?));
     if first_binding {
-      next.sources = paths.into_iter().map(|path| artifact_identity(Path::new(&path)).map(|identity| (path, identity))).collect::<Result<Vec<_>, _>>()?;
+      next.sources = paths.into_iter().map(|path| self.spawner.dependency_identity(Path::new(&path), &check)
+        .map(|identity| (path, identity))).collect::<Result<Vec<_>, _>>()?;
       next.render_job = Some(spec.clone());
       next.command_sha256 = Some(command_sha256);
       next.worker_identity = Some(worker);
@@ -701,10 +1218,17 @@ impl Supervisor {
         return Err("export worker identity changed; recovery refused".into());
       }
       for (path, expected) in &next.sources {
-        let actual = artifact_identity(Path::new(path))?;
+        let actual = self.spawner.dependency_identity(Path::new(path), &check)?;
         if actual.sha256 != expected.sha256 || actual.size != expected.size { return Err("export source changed; recovery refused".into()); }
       }
     }
+    check()?;
+    let mut deliveries = self.deliveries.lock().map_err(|error| error.to_string())?;
+    let current = deliveries.get(&spec.id).ok_or("export intent disappeared before dependency binding")?;
+    if serde_json::to_vec(current).map_err(|error| error.to_string())? != before {
+      return Err("export intent changed before dependency binding; retry refused".into());
+    }
+    current.execution_deadline_ms(now_ms())?;
     self.require_unleased_path(Path::new(&next.dest_path), deliveries.values().chain(std::iter::once(&next)))?;
     if first_binding {
       persist_delivery(root, &next)?;
@@ -739,6 +1263,9 @@ impl Supervisor {
         self.restore_delivery_view(&delivery);
         continue;
       }
+      if delivery.recovery_attempts < 1 && matches!(delivery.source, DeliverySource::Copy { .. }) {
+        if let Err(error) = self.transition_execution_clock(&delivery.id, false) { failures.push((delivery.id, error)); continue; }
+      }
       if let DeliverySource::Copy { path, .. } = &delivery.source {
         let recovered = (|| -> Result<(), String> {
           if delivery.recovery_attempts >= 1 { return Err("automatic copy recovery budget exhausted".into()); }
@@ -761,7 +1288,10 @@ impl Supervisor {
         if let Err(error) = recovered { failures.push((delivery.id, error)); }
         continue;
       }
-      let Some(spec) = delivery.render_job.clone() else { continue };
+      let Some(spec) = delivery.render_job.clone() else {
+        failures.push((delivery.id, "export was interrupted before its render plan was retained; export again".into()));
+        continue;
+      };
       if delivery.recovery_attempts >= 1 { failures.push((delivery.id, "automatic recovery attempt budget exhausted".into())); continue; }
       if let Err(error) = self.retain_render_job(&spec) { failures.push((delivery.id, error)); continue; }
       let retained = (|| -> Result<(), String> {
@@ -775,6 +1305,7 @@ impl Supervisor {
       if let Err(error) = retained { failures.push((delivery.id, error)); continue; }
       if let Err(error) = self.submit(spec) { failures.push((delivery.id, error)); }
     }
+    for (id, error) in &failures { self.restore_recovery_failure(id, error); }
     failures
   }
 
@@ -788,14 +1319,72 @@ impl Supervisor {
   }
 
   fn restore_delivery_view(&self, delivery: &ExportDelivery) {
-    if let Some(spec) = &delivery.render_job { self.restore_finished_export(spec.clone(), delivery.created_at); return; }
+    self.restore_finished_export(Self::delivery_job_spec(delivery), delivery.created_at);
+  }
+
+  fn restore_recovery_failure(&self, id: &str, error: &str) {
+    let Some(delivery) = self.deliveries.lock().unwrap_or_else(|error| error.into_inner()).get(id).cloned() else { return };
+    self.restore_delivery_view(&delivery);
+    let view = {
+      let mut state = self.lock();
+      let Some(job) = state.jobs.get_mut(id) else { return };
+      if job.state == JobState::Exited && !delivery.producer_complete { job.code = Some(-1); }
+      push_stderr(job, error);
+      job.view()
+    };
+    (self.notify)(Notice::Changed(view));
+  }
+
+  fn delivery_job_spec(delivery: &ExportDelivery) -> JobSpec {
+    let filename = Path::new(&delivery.dest_path).file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut spec = delivery.render_job.clone().unwrap_or_else(|| JobSpec { id: delivery.id.clone(), lane: "export".into(), program: "ffmpeg".into(),
+      args: Vec::new(), steps: Vec::new(), cwd: None, meta: serde_json::json!({}) });
+    if !spec.meta.is_object() { spec.meta = serde_json::json!({}); }
+    let meta = spec.meta.as_object_mut().expect("job metadata normalized to an object");
+    meta.insert("kind".into(), serde_json::json!("export"));
+    meta.insert("projectDir".into(), serde_json::json!(delivery.project_dir));
+    meta.insert("destPath".into(), serde_json::json!(delivery.dest_path));
+    meta.insert("stagePath".into(), serde_json::json!(delivery.stage_path));
+    meta.insert("filename".into(), serde_json::json!(filename));
+    meta.entry("startedBy").or_insert(serde_json::json!("elsewhere"));
+    meta.entry("submittedAt").or_insert(serde_json::json!(delivery.created_at));
     if let DeliverySource::Copy { media_ref, .. } = &delivery.source {
-      let filename = Path::new(&delivery.dest_path).file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-      self.restore_finished_export(JobSpec { id: delivery.id.clone(), lane: "export".into(), program: "ffmpeg".into(),
-        args: Vec::new(), steps: Vec::new(), cwd: None, meta: serde_json::json!({ "kind": "export_copy", "projectDir": delivery.project_dir,
-          "destPath": delivery.dest_path, "stagePath": delivery.stage_path, "filename": filename, "copyOf": media_ref,
-          "startedBy": "elsewhere", "submittedAt": delivery.created_at }) }, delivery.created_at);
+      meta.insert("kind".into(), serde_json::json!("export_copy"));
+      meta.insert("copyOf".into(), serde_json::json!(media_ref));
     }
+    spec
+  }
+
+  fn retain_copy_job(&self, delivery: &ExportDelivery, phase: JobState) -> Result<JobView, String> {
+    if !matches!(delivery.source, DeliverySource::Copy { .. }) { return Err("copy job requires an admitted library source".into()); }
+    let spec = Self::delivery_job_spec(delivery);
+    let view = {
+      let mut state = self.lock();
+      if !state.jobs.contains_key(&delivery.id) { state.order.push(delivery.id.clone()); }
+      state.jobs.insert(delivery.id.clone(), Job { spec, state: phase, pid: None, step: 0, code: None,
+        kill_requested: false, committed: false, stdout: String::new(), stderr_head: String::new(), stderr_elided: 0,
+        stderr: String::new(), queued_at: delivery.created_at, started_at: (phase == JobState::Running).then(now_ms), ended_at: None });
+      state.jobs[&delivery.id].view()
+    };
+    Ok(view)
+  }
+
+  fn finish_copy_job(&self, id: &str) {
+    let (complete, cancelled) = {
+      let deliveries = self.deliveries.lock().unwrap_or_else(|error| error.into_inner());
+      deliveries.get(id).map(|delivery| (delivery.producer_complete && delivery.state != "cancelled" && delivery.state != "failed",
+        delivery.state == "cancelled")).unwrap_or((false, false))
+    };
+    let view = {
+      let mut state = self.lock();
+      let Some(job) = state.jobs.get_mut(id) else { return };
+      job.state = JobState::Exited;
+      job.kill_requested |= cancelled;
+      job.code = Some(if complete && !job.kill_requested { 0 } else { -1 });
+      job.ended_at = Some(now_ms());
+      job.view()
+    };
+    (self.notify)(Notice::Changed(view));
   }
 
   pub fn complete_delivery(&self, id: &str) -> Result<bool, String> {
@@ -809,12 +1398,29 @@ impl Supervisor {
       return Err("running export dependencies cannot be released".into());
     }
     if !["published", "cancelled", "failed"].contains(&entry.state.as_str()) { return Err("active export cannot be retired".into()); }
-    if let (Some(work_root), Some(cwd)) = (&self.export_work_root, entry.render_job.as_ref().and_then(|spec| spec.cwd.as_ref())) {
+    if let (Some(work_root), Some(cwd)) = (&self.export_work_root, entry.render_scratch.as_ref().map(|scratch| &scratch.path)
+      .or_else(|| entry.render_job.as_ref().and_then(|spec| spec.cwd.as_ref()))) {
       if let (Ok(work), Ok(scratch)) = (work_root.canonicalize(), Path::new(cwd).canonicalize()) {
-        if scratch.starts_with(&work) && scratch != work { std::fs::remove_dir_all(scratch).map_err(|error| error.to_string())?; }
+        if scratch.starts_with(&work) && scratch != work {
+          let key = Self::workspace_key(&scratch);
+          std::fs::remove_dir_all(scratch).map_err(|error| error.to_string())?;
+          self.workspace.release_root(&key);
+        }
       }
     }
+    let stage_key = Self::workspace_key(Path::new(&entry.stage_path));
+    for path in entry.copy_scratch_path()?.into_iter().chain((entry.state != "published").then_some(Path::new(&entry.stage_path))) {
+      if let Err(error) = std::fs::remove_file(path) {
+        if error.kind() != std::io::ErrorKind::NotFound { return Err(error.to_string()); }
+      }
+    }
+    self.workspace.release_root(&stage_key);
     let mut next = entry.clone(); next.followups_done = true;
+    next.render_scratch = None;
+    next.copy_scratch = None;
+    next.render_job = None;
+    next.sources.clear();
+    if let DeliverySource::Render { paths } = &mut next.source { paths.clear(); }
     persist_delivery(root, &next)?; *entry = next;
     let mut terminal: Vec<(u64, String)> = entries.values().filter(|entry| entry.followups_done).map(|entry| (entry.created_at, entry.id.clone())).collect();
     terminal.sort();
@@ -827,29 +1433,103 @@ impl Supervisor {
   }
 
   pub fn copy_delivery(&self, id: &str) -> Result<(), String> {
-    let delivery = {
-      let entries = self.deliveries.lock().map_err(|error| error.to_string())?;
-      let entry = entries.get(id).ok_or("unknown copy intent")?;
-      if entry.state != "prepared" { return Err("copy intent was cancelled or already settled".into()); }
+    self.copy_delivery_after_sync(id, || Ok(()))
+  }
+
+  fn copy_delivery_after_sync(&self, id: &str, before_completion_record: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+    let pending = self.deliveries.lock().map_err(|error| error.to_string())?.get(id)
+      .is_some_and(|entry| matches!(entry.source, DeliverySource::Copy { .. }) && entry.state == "prepared" && !entry.producer_complete);
+    let _capacity = if pending { Some(self.claim_export_output(id)?) } else { None };
+    let (delivery, view) = {
+      let mut entries = self.deliveries.lock().map_err(|error| error.to_string())?;
+      self.account_workspace(&entries)?;
+      let entry = entries.get_mut(id).ok_or("unknown copy intent")?;
       if !matches!(entry.source, DeliverySource::Copy { .. }) { return Err("render intent cannot use the copy executor".into()); }
-      if entry.producer_complete { return Ok(()); }
-      if !self.copying.lock().map_err(|error| error.to_string())?.insert(id.to_string()) { return Err("copy intent is already running".into()); }
-      entry.clone()
+      if entry.state == "cancelled" || entry.state == "failed" { return Err("copy intent was cancelled or failed".into()); }
+      let mut copying = self.copying.lock().map_err(|error| error.to_string())?;
+      if copying.contains(id) || self.lock().jobs.get(id).is_some_and(|job| job.state == JobState::Running) {
+        drop(entries);
+        while copying.contains(id) || self.lock().jobs.get(id).is_some_and(|job| job.state == JobState::Running) {
+          copying = self.copy_settled.wait(copying).map_err(|error| error.to_string())?;
+        }
+        drop(copying);
+        let entries = self.deliveries.lock().map_err(|error| error.to_string())?;
+        let entry = entries.get(id).ok_or("copy intent vanished while waiting")?;
+        if entry.state == "cancelled" || entry.state == "failed" { return Err("copy intent was cancelled or failed".into()); }
+        return self.require_completed_producer(entry);
+      }
+      if entry.producer_complete { drop(copying); return self.require_completed_producer(entry); }
+      if entry.state != "prepared" { return Err("copy intent was already settled".into()); }
+      self.record_execution_clock(entry, false)?;
+      copying.insert(id.to_string());
+      (entry.clone(), self.retain_copy_job(entry, JobState::Running)?)
     };
-    struct CopyGuard<'a>(&'a Mutex<HashSet<String>>, String);
-    impl Drop for CopyGuard<'_> { fn drop(&mut self) { self.0.lock().unwrap_or_else(|error| error.into_inner()).remove(&self.1); } }
-    let _guard = CopyGuard(&self.copying, id.to_string());
+    struct CopyGuard<'a>(&'a Supervisor, String);
+    impl Drop for CopyGuard<'_> {
+      fn drop(&mut self) {
+        self.0.copying.lock().unwrap_or_else(|error| error.into_inner()).remove(&self.1);
+        self.0.finish_copy_job(&self.1);
+        self.0.finish_output_claim(&self.1);
+        self.0.copy_settled.notify_all();
+      }
+    }
+    let _guard = CopyGuard(self, id.to_string());
+    (self.notify)(Notice::Changed(view));
+    let result = self.write_copy_artifact(&delivery, before_completion_record);
+    if let Err(error) = &result {
+      if let Some(job) = self.lock().jobs.get_mut(id) { push_stderr(job, error); }
+    }
+    result
+  }
+
+  fn begin_copy_output(&self, delivery: &ExportDelivery, expected_bytes: u64) -> Result<ScratchOutput, String> {
+    let root = self.export_root.as_ref().ok_or("native export journal is unavailable")?;
+    let mut entries = self.deliveries.lock().map_err(|error| error.to_string())?;
+    self.account_workspace(&entries)?;
+    let current = entries.get_mut(&delivery.id).ok_or("copy intent vanished before output preparation")?;
+    if current.state != "prepared" || current.producer_complete || !matches!(current.source, DeliverySource::Copy { .. }) ||
+      !self.copying.lock().map_err(|error| error.to_string())?.contains(&delivery.id) {
+      return Err("copy output has no active admitted producer".into());
+    }
+    current.execution_deadline_ms(now_ms())?;
+    let key = Self::workspace_key(Path::new(&current.stage_path));
+    if let Some(path) = current.copy_scratch_path()? {
+      let previous = match std::fs::metadata(path) {
+        Ok(metadata) => Some(metadata.len()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.to_string()),
+      };
+      if let Some(previous) = previous {
+        std::fs::remove_file(path).map_err(|error| error.to_string())?;
+        self.workspace.release(&key, previous, 1);
+      }
+    }
+    let previous = std::fs::metadata(&current.stage_path).map(|metadata| metadata.len()).unwrap_or(0);
+    if previous > 0 {
+      std::fs::remove_file(&current.stage_path).map_err(|error| error.to_string())?;
+      self.workspace.release(&key, previous, 1);
+    }
+    let output = ScratchOutput::open_named(Path::new(&current.stage_path), 0, expected_bytes, &current.copy_scratch_prefix())?
+      .with_workspace(self.workspace.clone(), &key)?;
+    let mut prepared = current.clone();
+    prepared.copy_scratch = Some(output.file.path().to_string_lossy().into_owned());
+    persist_delivery(root, &prepared)?;
+    *current = prepared;
+    Ok(output)
+  }
+
+  fn write_copy_artifact(&self, delivery: &ExportDelivery, before_completion_record: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+    let id = &delivery.id;
     let DeliverySource::Copy { path, .. } = &delivery.source else { return Err("copy source unavailable".into()) };
     let expected = delivery.sources.first().ok_or("copy source has no identity")?;
-    let actual = artifact_identity(Path::new(path))?;
+    let check = || delivery.execution_deadline_ms(now_ms()).map(|_| ());
+    let actual = artifact_identity_checked(Path::new(path), &check)?;
     if actual.sha256 != expected.1.sha256 || actual.size != expected.1.size { return Err("copy source changed before execution".into()); }
     let mut source = std::fs::File::open(path).map_err(|error| error.to_string())?;
-    let previous = std::fs::metadata(&delivery.stage_path).map_err(|error| error.to_string())?.len();
-    if previous > EXPORT_SCRATCH_LIMIT_BYTES { return Err("retained copy stage exceeds temporary-space budget".into()); }
-    let allocation = previous.checked_add(expected.1.size).ok_or("copy allocation size overflow")?;
-    let mut destination = ScratchOutput::open(Path::new(&delivery.stage_path), 0, allocation)?;
+    let mut destination = self.begin_copy_output(delivery, expected.1.size)?;
     let mut buffer = vec![0u8; 1024 * 1024];
     loop {
+      check()?;
       if self.deliveries.lock().map_err(|error| error.to_string())?.get(id).is_none_or(|entry| entry.state != "prepared") {
         return Err("copy export cancelled".into());
       }
@@ -861,9 +1541,12 @@ impl Supervisor {
     let mut entries = self.deliveries.lock().map_err(|error| error.to_string())?;
     let entry = entries.get_mut(id).ok_or("copy intent vanished before completion")?;
     if entry.state != "prepared" { return Err("copy was cancelled before completion".into()); }
+    entry.execution_deadline_ms(now_ms())?;
     destination.finish(Some(0))?;
+    before_completion_record()?;
     let mut next = entry.clone();
     next.producer_complete = true;
+    next.copy_scratch = None;
     persist_delivery(root, &next)?;
     *entry = next;
     Ok(())
@@ -882,7 +1565,16 @@ impl Supervisor {
   /// Queue a job on its lane; it starts once nothing else in the lane runs. Returns how many
   /// jobs are ahead of it.
   pub fn submit(&self, spec: JobSpec) -> Result<usize, String> {
-    if spec.meta.get("_native_scratch_capture").is_some() { return Err("native output capture metadata is reserved".into()); }
+    if !spec.meta.is_object() { return Err("native job metadata must be an object".into()); }
+    if spec.meta.as_object().is_some_and(|meta| meta.keys().any(|key| key.starts_with("_native_"))) {
+      return Err("native execution metadata is reserved".into());
+    }
+    if let Some(transport) = spec.meta.get("renderTransport") {
+      if transport.as_str() != Some("partition-pipes-v1") || spec.lane != "export" || spec.program != "ffmpeg" || spec.steps.is_empty() {
+        return Err("unsupported native export stream contract".into());
+      }
+    }
+    stream::audio_producer(&spec)?;
     if !SIDECARS.iter().any(|(name, _)| *name == spec.program) {
       return Err(format!("'{}' cannot be run as a job", spec.program));
     }
@@ -893,6 +1585,7 @@ impl Supervisor {
       return Err("a job needs an id and a lane".into());
     }
     self.retain_render_job(&spec)?;
+    self.transition_execution_clock(&spec.id, true)?;
     let lane = spec.lane.clone();
     let (position, view) = {
       let mut st = self.lock();
@@ -971,36 +1664,89 @@ impl Supervisor {
     if step > 0 {
       spec.args = spec.steps[step - 1].clone();
     }
-    spec.steps.clear();
+    if !is_streamed(&spec) { spec.steps.clear(); }
     let cancelled = self.lock().jobs.get(&spec.id)
       .is_none_or(|job| job.kill_requested || job.state != JobState::Running || job.step != step);
     if cancelled {
       self.finish(&spec.id, step, None, None);
       return;
     }
+    let admitted_render = self.deliveries.lock().unwrap_or_else(|error| error.into_inner()).get(&spec.id)
+      .is_some_and(|delivery| matches!(delivery.source, DeliverySource::Render { .. }));
+    let output_claim = if admitted_render {
+      match self.transition_execution_clock(&spec.id, true).and_then(|_| self.claim_export_output(&spec.id)) {
+        Ok(claim) => Some(claim),
+        Err(error) => { self.finish(&spec.id, step, Some(-1), Some(error)); return; }
+      }
+    } else { None };
     if let Err(error) = self.retain_render_job(&dependency_spec) {
       self.finish(&spec.id, step, Some(-1), Some(error));
       return;
     }
     let delivery = self.deliveries.lock().unwrap_or_else(|error| error.into_inner()).get(&spec.id).cloned();
     if let Some(delivery) = delivery {
+      match delivery.execution_deadline_ms(now_ms()) {
+        Ok(deadline) => { spec.meta["_native_execution_deadline"] = serde_json::json!(deadline); }
+        Err(error) => { self.finish(&spec.id, step, Some(-1), Some(error)); return; }
+      }
       if matches!(&delivery.source, DeliverySource::Render { .. }) {
         if let (Some(cwd), Some(work_root)) = (&spec.cwd, &self.export_work_root) {
           let valid = Path::new(cwd).canonicalize().ok().zip(work_root.canonicalize().ok())
             .is_some_and(|(scratch, work)| scratch.starts_with(&work) && scratch != work);
           if !valid { self.finish(&spec.id, step, Some(-1), Some("export scratch is outside its owned work root".into())); return; }
         }
-        match scratch_capture(&spec, &delivery.stage_path, step == dependency_spec.steps.len()) {
-          Ok(Some(capture)) => { spec.meta["_native_scratch_capture"] = capture; }
-          Ok(None) => {}
-          Err(error) => { self.finish(&spec.id, step, Some(-1), Some(error)); return; }
+        if is_streamed(&spec) {
+          spec.meta["_native_final_stage"] = serde_json::json!(delivery.stage_path);
+          for (index, args) in std::iter::once(&spec.args).chain(spec.steps.iter()).enumerate() {
+            let mut command = spec.clone();
+            command.args = args.clone();
+            command.steps.clear();
+            if let Err(error) = scratch_capture(&command, &delivery.stage_path, index == spec.steps.len()) {
+              self.finish(&spec.id, step, Some(-1), Some(error)); return;
+            }
+          }
+          let audio = match stream::audio_producer(&spec) {
+            Ok(audio) => audio,
+            Err(error) => { self.finish(&spec.id, step, Some(-1), Some(error)); return; }
+          };
+          if let Some(audio) = audio {
+            let mut command = spec.clone();
+            command.args = audio.args;
+            command.steps.clear();
+            if let Err(error) = scratch_capture(&command, &delivery.stage_path, false) {
+              self.finish(&spec.id, step, Some(-1), Some(error)); return;
+            }
+          }
+        } else {
+          match scratch_capture(&spec, &delivery.stage_path, step == dependency_spec.steps.len()) {
+            Ok(Some(capture)) => { spec.meta["_native_scratch_capture"] = capture; }
+            Ok(None) => { spec.meta["_native_final_stage"] = serde_json::json!(delivery.stage_path); }
+            Err(error) => { self.finish(&spec.id, step, Some(-1), Some(error)); return; }
+          }
         }
       }
+    }
+    if spec.program == "ffmpeg" && spec.meta.get("_native_execution_deadline").is_none() {
+      spec.meta["_native_execution_deadline"] = serde_json::json!(now_ms().saturating_add(EXPORT_EXECUTION_LIMIT_MS));
     }
     let me = self.clone();
     let id = spec.id.clone();
     let on_event: Arc<dyn Fn(ProcEvent) + Send + Sync> = Arc::new(move |ev| me.on_event(&id, step, ev));
-    match self.spawner.spawn(&spec, on_event) {
+    if let Some(output_claim) = output_claim { output_claim.retain(); }
+    let started = if is_streamed(&spec) {
+      let owner = self.clone();
+      let retained = dependency_spec;
+      let guard: stream::StartGuard = Arc::new(move || {
+        owner.retain_render_job(&retained)?;
+        let state = owner.lock();
+        if state.jobs.get(&retained.id).is_none_or(|job| job.kill_requested || job.state != JobState::Running || job.step != step) {
+          return Err("streaming export was cancelled or superseded".into());
+        }
+        Ok(())
+      });
+      self.spawner.spawn_stream(&spec, on_event, guard, self.workspace.clone())
+    } else { self.spawner.spawn(&spec, on_event, self.workspace.clone()) };
+    match started {
       Ok(pid) => {
         let kill_now = {
           let mut st = self.lock();
@@ -1013,7 +1759,7 @@ impl Supervisor {
           }
         };
         if kill_now {
-          self.spawner.kill(pid);
+          self.spawner.kill(&spec.id, pid);
         }
       }
       Err(e) => self.finish(&spec.id, step, None, Some(format!("could not start {}: {e}", spec.program))),
@@ -1055,7 +1801,7 @@ impl Supervisor {
       if job.state != JobState::Running || job.step != step {
         return;
       }
-      if code == Some(0) && error.is_none() && !job.kill_requested && step < job.spec.steps.len() {
+      if code == Some(0) && error.is_none() && !job.kill_requested && step < job.spec.steps.len() && !is_streamed(&job.spec) {
         job.step += 1;
         job.pid = None;
         job.stdout.clear();
@@ -1071,6 +1817,7 @@ impl Supervisor {
               return Err("render intent was cancelled or superseded before completion".into());
             }
             let root = self.export_root.as_ref().ok_or("native export journal is unavailable")?;
+            delivery.execution_deadline_ms(now_ms())?;
             let mut next = delivery.clone();
             next.producer_complete = true;
             persist_delivery(root, &next)?;
@@ -1099,6 +1846,7 @@ impl Supervisor {
       }
       (lane, view)
     };
+    self.finish_output_claim(id);
     (self.notify)(Notice::Changed(view));
     self.pump(&lane);
   }
@@ -1146,7 +1894,7 @@ impl Supervisor {
       Act::Running(pid) => {
         // No pid yet: `pump` kills it the moment it has one.
         if let Some(pid) = pid {
-          self.spawner.kill(pid);
+          self.spawner.kill(id, pid);
         }
         true
       }
@@ -1232,10 +1980,19 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 
+type ShellChildren = Arc<Mutex<HashMap<(String, u32), CommandChild>>>;
+
+fn stop_shell_child(children: &ShellChildren, key: &(String, u32)) -> Result<(), String> {
+  let child = children.lock().unwrap_or_else(|error| error.into_inner()).remove(key);
+  if let Some(child) = child { child.kill().map_err(|error| error.to_string())?; }
+  Ok(())
+}
+
 struct ShellSpawner<R: Runtime> {
   app: AppHandle<R>,
   /// Held until each process ends: the child owns its stdin pipe, as it does for the page.
-  children: Arc<Mutex<HashMap<u32, CommandChild>>>,
+  children: ShellChildren,
+  streams: stream::Registry,
 }
 
 impl<R: Runtime> Spawner for ShellSpawner<R> {
@@ -1248,9 +2005,14 @@ impl<R: Runtime> Spawner for ShellSpawner<R> {
     &self,
     spec: &JobSpec,
     on_event: Arc<dyn Fn(ProcEvent) + Send + Sync>,
+    workspace: Arc<Workspace>,
   ) -> Result<u32, String> {
     let file = sidecar_file(&spec.program)
       .ok_or_else(|| format!("'{}' is not a bundled program", spec.program))?;
+    if spec.program == "ffmpeg" {
+      let command: std::process::Command = self.app.shell().sidecar(file).map_err(|error| error.to_string())?.into();
+      return stream::spawn_single(Path::new(command.get_program()), spec, on_event, self.streams.clone(), workspace);
+    }
     let mut args = spec.args.clone();
     let mut capture = if let Some(contract) = spec.meta.get("_native_scratch_capture") {
       let path = contract.get("path").and_then(|value| value.as_str()).ok_or("native scratch capture path missing")?;
@@ -1272,7 +2034,8 @@ impl<R: Runtime> Spawner for ShellSpawner<R> {
     }
     let (mut rx, child) = cmd.spawn().map_err(|e| e.to_string())?;
     let pid = child.pid();
-    self.children.lock().unwrap_or_else(|e| e.into_inner()).insert(pid, child);
+    let child_key = (spec.id.clone(), pid);
+    self.children.lock().unwrap_or_else(|e| e.into_inner()).insert(child_key.clone(), child);
     let children = self.children.clone();
     tauri::async_runtime::spawn(async move {
       let mut ended = false;
@@ -1284,7 +2047,7 @@ impl<R: Runtime> Spawner for ShellSpawner<R> {
               if capture_error.is_none() {
                 if let Err(error) = writer.write(&bytes) {
                   capture_error = Some(error);
-                  if let Err(error) = crate::kill_tree(pid) { log::warn!("scratch quota could not stop worker {pid}: {error}"); }
+                  if let Err(error) = stop_shell_child(&children, &child_key) { log::warn!("scratch quota could not stop owned worker: {error}"); }
                 }
               }
             } else { on_event(ProcEvent::Stdout(String::from_utf8_lossy(&bytes).into_owned())); }
@@ -1297,13 +2060,13 @@ impl<R: Runtime> Spawner for ShellSpawner<R> {
           CommandEvent::Error(e) => {
             if captured && capture_error.is_none() {
               capture_error = Some(format!("temporary output reader failed: {e}"));
-              if let Err(error) = crate::kill_tree(pid) { log::warn!("capture error could not stop worker {pid}: {error}"); }
+              if let Err(error) = stop_shell_child(&children, &child_key) { log::warn!("capture error could not stop owned worker: {error}"); }
             }
             on_event(ProcEvent::Stderr(format!("{e}\n")));
           }
           CommandEvent::Terminated(p) => {
             ended = true;
-            children.lock().unwrap_or_else(|e| e.into_inner()).remove(&pid);
+            children.lock().unwrap_or_else(|e| e.into_inner()).remove(&child_key);
             if let Some(writer) = capture.take() {
               if capture_error.is_none() { capture_error = writer.finish(p.code).err(); }
             }
@@ -1317,17 +2080,23 @@ impl<R: Runtime> Spawner for ShellSpawner<R> {
       }
       // The waiter failed and no exit was reported: the job must still end, or its lane stalls.
       if !ended {
-        children.lock().unwrap_or_else(|e| e.into_inner()).remove(&pid);
+        children.lock().unwrap_or_else(|e| e.into_inner()).remove(&child_key);
         on_event(ProcEvent::Exit(None));
       }
     });
     Ok(pid)
   }
 
-  fn kill(&self, pid: u32) {
-    if let Err(e) = crate::kill_tree(pid) {
-      log::warn!("jobs: could not kill process {pid}: {e}");
-    }
+  fn spawn_stream(&self, spec: &JobSpec, on_event: Arc<dyn Fn(ProcEvent) + Send + Sync>,
+    guard: stream::StartGuard, workspace: Arc<Workspace>) -> Result<u32, String> {
+    let file = sidecar_file(&spec.program).ok_or("unknown bundled streaming worker")?;
+    let command: std::process::Command = self.app.shell().sidecar(file).map_err(|error| error.to_string())?.into();
+    stream::spawn(Path::new(command.get_program()), spec, on_event, guard, self.streams.clone(), workspace)
+  }
+
+  fn kill(&self, id: &str, pid: u32) {
+    if stream::cancel(&self.streams, id, pid) { return; }
+    if let Err(error) = stop_shell_child(&self.children, &(id.to_owned(), pid)) { log::warn!("jobs: could not stop owned process: {error}"); }
   }
 }
 
@@ -1348,8 +2117,9 @@ pub fn plugin<R: Runtime>() -> tauri::plugin::TauriPlugin<R> {
           Notice::Stdout { id, chunk } => emitter.emit("jobs:stdout", StdoutEvent { id, chunk }),
         };
       });
-      let spawner = Arc::new(ShellSpawner { app: app.clone(), children: Arc::default() });
+      let spawner = Arc::new(ShellSpawner { app: app.clone(), children: Arc::default(), streams: Arc::default() });
       let base = Supervisor::new(spawner, notify).with_export_work_root(app.path().app_cache_dir()?.join("work"));
+      let base = if let Ok(root) = app.path().resolve("resources/fonts", tauri::path::BaseDirectory::Resource) { base.with_export_font_root(root) } else { base };
       let configured = app.path().app_local_data_dir().map_err(|error| error.to_string())
         .and_then(|path| base.clone().with_export_root(path.join("exports").join("intents-v1")));
       match configured {
@@ -1371,37 +2141,42 @@ pub fn plugin<R: Runtime>() -> tauri::plugin::TauriPlugin<R> {
     .build()
 }
 
-#[tauri::command]
-pub fn jobs_submit(jobs: tauri::State<'_, Supervisor>, spec: JobSpec) -> Result<usize, String> {
-  jobs.submit(spec)
+async fn supervisor_work<T: Send + 'static>(supervisor: Supervisor,
+  operation: impl FnOnce(Supervisor) -> Result<T, String> + Send + 'static) -> Result<T, String> {
+  tauri::async_runtime::spawn_blocking(move || operation(supervisor)).await.map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-pub fn jobs_submit_sequence(jobs: tauri::State<'_, Supervisor>, spec: JobSpec) -> Result<usize, String> {
+pub async fn jobs_submit(jobs: tauri::State<'_, Supervisor>, spec: JobSpec) -> Result<usize, String> {
+  supervisor_work(jobs.inner().clone(), move |supervisor| supervisor.submit(spec)).await
+}
+
+#[tauri::command]
+pub async fn jobs_submit_sequence(jobs: tauri::State<'_, Supervisor>, spec: JobSpec) -> Result<usize, String> {
   if spec.program != "ffmpeg" || spec.steps.is_empty() {
     return Err("a render sequence requires ffmpeg and continuation steps".into());
   }
-  jobs.submit(spec)
+  supervisor_work(jobs.inner().clone(), move |supervisor| supervisor.submit(spec)).await
 }
 
 #[tauri::command]
-pub fn jobs_kill(jobs: tauri::State<'_, Supervisor>, id: String) -> bool {
-  jobs.kill(&id)
+pub async fn jobs_kill(jobs: tauri::State<'_, Supervisor>, id: String) -> Result<bool, String> {
+  supervisor_work(jobs.inner().clone(), move |supervisor| Ok(supervisor.kill(&id))).await
 }
 
 #[tauri::command]
-pub fn jobs_list(jobs: tauri::State<'_, Supervisor>) -> Vec<JobView> {
-  jobs.list()
+pub async fn jobs_list(jobs: tauri::State<'_, Supervisor>) -> Result<Vec<JobView>, String> {
+  supervisor_work(jobs.inner().clone(), |supervisor| Ok(supervisor.list())).await
 }
 
 #[tauri::command]
-pub fn jobs_commit(jobs: tauri::State<'_, Supervisor>, id: String) -> bool {
-  jobs.commit(&id)
+pub async fn jobs_commit(jobs: tauri::State<'_, Supervisor>, id: String) -> Result<bool, String> {
+  supervisor_work(jobs.inner().clone(), move |supervisor| Ok(supervisor.commit(&id))).await
 }
 
 #[tauri::command]
-pub fn jobs_forget(jobs: tauri::State<'_, Supervisor>, id: String) -> bool {
-  jobs.forget(&id)
+pub async fn jobs_forget(jobs: tauri::State<'_, Supervisor>, id: String) -> Result<bool, String> {
+  supervisor_work(jobs.inner().clone(), move |supervisor| Ok(supervisor.forget(&id))).await
 }
 
 #[tauri::command]
@@ -1410,44 +2185,57 @@ pub fn jobs_launch_id(jobs: tauri::State<'_, Supervisor>) -> String {
 }
 
 #[tauri::command]
-pub fn jobs_export_protocol() -> u32 { 11 }
+pub fn jobs_export_protocol() -> u32 { 20 }
+
+#[tauri::command]
+pub async fn jobs_export_resources(jobs: tauri::State<'_, Supervisor>, destination: String) -> Result<ExportResources, String> {
+  supervisor_work(jobs.inner().clone(), move |supervisor|
+    Ok(export_resources(Path::new(&destination), supervisor.export_work_root.as_deref(), &supervisor.workspace))).await
+}
+
+#[tauri::command]
+pub async fn jobs_stage_render_scratch(jobs: tauri::State<'_, Supervisor>, id: String, files: Vec<RenderScratchFile>, fonts: Vec<String>) -> Result<String, String> {
+  supervisor_work(jobs.inner().clone(), move |supervisor| supervisor.stage_render_scratch(&id, files, fonts)).await
+}
 
 #[tauri::command]
 pub async fn jobs_prepare_export(jobs: tauri::State<'_, Supervisor>, id: String, project_dir: String, stage_path: String, dest_path: String, source: DeliverySource) -> Result<ExportDelivery, String> {
-  let supervisor = jobs.inner().clone();
-  tauri::async_runtime::spawn_blocking(move || supervisor.prepare_delivery(id, project_dir, stage_path, dest_path, source)).await.map_err(|error| error.to_string())?
+  supervisor_work(jobs.inner().clone(), move |supervisor| supervisor.prepare_delivery(id, project_dir, stage_path, dest_path, source)).await
 }
 
 #[tauri::command]
 pub async fn jobs_verify_export(jobs: tauri::State<'_, Supervisor>, id: String) -> Result<ExportDelivery, String> {
-  let supervisor = jobs.inner().clone();
-  tauri::async_runtime::spawn_blocking(move || supervisor.verify_delivery(&id)).await.map_err(|error| error.to_string())?
+  supervisor_work(jobs.inner().clone(), move |supervisor| supervisor.verify_delivery(&id)).await
 }
 
 #[tauri::command]
 pub async fn jobs_publish_export(jobs: tauri::State<'_, Supervisor>, id: String) -> Result<ExportDelivery, String> {
-  let supervisor = jobs.inner().clone();
-  tauri::async_runtime::spawn_blocking(move || supervisor.publish_delivery(&id)).await.map_err(|error| error.to_string())?
+  supervisor_work(jobs.inner().clone(), move |supervisor| supervisor.publish_delivery(&id)).await
 }
 
 #[tauri::command]
-pub fn jobs_cancel_export(jobs: tauri::State<'_, Supervisor>, id: String) -> Result<bool, String> {
-  jobs.cancel_delivery(&id)
+pub async fn jobs_cancel_export(jobs: tauri::State<'_, Supervisor>, id: String) -> Result<bool, String> {
+  supervisor_work(jobs.inner().clone(), move |supervisor| supervisor.cancel_delivery(&id)).await
 }
 
 #[tauri::command]
-pub fn jobs_export_intents(jobs: tauri::State<'_, Supervisor>) -> Vec<ExportDelivery> { jobs.delivery_list() }
+pub async fn jobs_export_intents(jobs: tauri::State<'_, Supervisor>) -> Result<Vec<ExportDelivery>, String> {
+  supervisor_work(jobs.inner().clone(), |supervisor| Ok(supervisor.delivery_list())).await
+}
 
 #[tauri::command]
-pub fn jobs_fail_export(jobs: tauri::State<'_, Supervisor>, id: String) -> Result<bool, String> { jobs.fail_delivery(&id) }
+pub async fn jobs_fail_export(jobs: tauri::State<'_, Supervisor>, id: String) -> Result<bool, String> {
+  supervisor_work(jobs.inner().clone(), move |supervisor| supervisor.fail_delivery(&id)).await
+}
 
 #[tauri::command]
-pub fn jobs_complete_export(jobs: tauri::State<'_, Supervisor>, id: String) -> Result<bool, String> { jobs.complete_delivery(&id) }
+pub async fn jobs_complete_export(jobs: tauri::State<'_, Supervisor>, id: String) -> Result<bool, String> {
+  supervisor_work(jobs.inner().clone(), move |supervisor| supervisor.complete_delivery(&id)).await
+}
 
 #[tauri::command]
 pub async fn jobs_copy_export(jobs: tauri::State<'_, Supervisor>, id: String) -> Result<(), String> {
-  let supervisor = jobs.inner().clone();
-  tauri::async_runtime::spawn_blocking(move || supervisor.copy_delivery(&id)).await.map_err(|error| error.to_string())?
+  supervisor_work(jobs.inner().clone(), move |supervisor| supervisor.copy_delivery(&id)).await
 }
 
 #[cfg(test)]
@@ -1579,8 +2367,8 @@ mod export_delivery_tests {
     fn identity(&self, program: &str) -> Result<ArtifactIdentity, String> {
       Ok(ArtifactIdentity { sha256: format!("{:x}", Sha256::digest(program.as_bytes())), size: program.len() as u64 })
     }
-    fn spawn(&self, _: &JobSpec, _: Arc<dyn Fn(ProcEvent) + Send + Sync>) -> Result<u32, String> { Err("unused".into()) }
-    fn kill(&self, _: u32) {}
+    fn spawn(&self, _: &JobSpec, _: Arc<dyn Fn(ProcEvent) + Send + Sync>, _: Arc<Workspace>) -> Result<u32, String> { Err("unused".into()) }
+    fn kill(&self, _: &str, _: u32) {}
   }
   fn owner(root: &Path) -> Supervisor {
     Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {})).with_export_root(root.to_path_buf()).unwrap()
@@ -1589,16 +2377,346 @@ mod export_delivery_tests {
     owner.prepare_delivery(id.into(), "original-project".into(), dir.join(format!("{id}.partial")).to_string_lossy().into(),
       dir.join(format!("{id}.mp4")).to_string_lossy().into(), DeliverySource::Render { paths: Vec::new() }).unwrap()
   }
+
+  #[test]
+  fn reserved_render_scratch_is_leased_and_cleaned_without_a_bound_producer() {
+    for cancelled in [false, true] {
+      let dir = tempfile::tempdir().unwrap();
+      let root = dir.path().join("journal");
+      let work = dir.path().join("work");
+      let jobs = owner(&root).with_export_work_root(work.clone());
+      let delivery = intent(&jobs, dir.path(), "reserved-before-binding");
+      std::fs::write(&delivery.dest_path, b"previous complete output").unwrap();
+      let files = vec![RenderScratchFile { name: "graph.ffgraph".into(), content: "testsrc2=s=320x180:r=30:d=1".into() }];
+      let scratch = jobs.stage_render_scratch(&delivery.id, files.clone(), vec![]).unwrap();
+      assert_eq!(std::fs::read_to_string(Path::new(&scratch).join("graph.ffgraph")).unwrap(), files[0].content);
+      assert_eq!(jobs.stage_render_scratch(&delivery.id, files, vec![]).unwrap(), scratch);
+      assert!(jobs.delivery_list()[0].render_job.is_none());
+      assert!(jobs.with_unleased_path(Path::new(&scratch), || std::fs::remove_dir_all(&scratch).map_err(|error| error.to_string())).is_err());
+      let graph = Path::new(&scratch).join("graph.ffgraph");
+      assert!(jobs.with_unleased_path(&graph, || std::fs::remove_file(&graph).map_err(|error| error.to_string())).is_err());
+      let alias = dir.path().join("staged-alias.ffgraph");
+      std::fs::hard_link(&graph, &alias).unwrap();
+      assert!(jobs.with_unleased_path(&alias, || std::fs::write(&alias, b"changed through alias").map_err(|error| error.to_string())).is_err());
+      assert_eq!(std::fs::read_to_string(&alias).unwrap(), "testsrc2=s=320x180:r=30:d=1");
+      if cancelled { jobs.cancel_delivery(&delivery.id).unwrap(); } else { jobs.fail_delivery(&delivery.id).unwrap(); }
+      drop(jobs);
+      let reopened = owner(&root).with_export_work_root(work);
+      assert!(reopened.complete_delivery(&delivery.id).unwrap());
+      assert!(!Path::new(&scratch).exists());
+      let recorded = reopened.delivery_list().pop().unwrap();
+      assert!(recorded.followups_done);
+      assert!(recorded.render_scratch.is_none());
+      assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"previous complete output");
+    }
+  }
+
+  #[test]
+  fn partially_staged_render_failure_retains_a_cleanup_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("journal");
+    let work = dir.path().join("work");
+    let jobs = owner(&root).with_export_work_root(work.clone());
+    let delivery = intent(&jobs, dir.path(), "partial-staging");
+    let file = RenderScratchFile { name: "captions.ass".into(), content: "staged caption bytes".into() };
+    let error = jobs.stage_render_scratch(&delivery.id, vec![file], vec!["Missing.ttf".into()]).unwrap_err();
+    assert!(error.contains("font root"));
+    let reserved = jobs.delivery_list().pop().unwrap().render_scratch.unwrap();
+    assert!(!reserved.ready);
+    assert_eq!(std::fs::read_to_string(Path::new(&reserved.path).join("captions.ass")).unwrap(), "staged caption bytes");
+    jobs.fail_delivery(&delivery.id).unwrap();
+    drop(jobs);
+    let reopened = owner(&root).with_export_work_root(work);
+    reopened.complete_delivery(&delivery.id).unwrap();
+    assert!(!Path::new(&reserved.path).exists());
+  }
+
+  #[test]
+  fn render_staging_refuses_unowned_and_escaping_requests_before_writing() {
+    let dir = tempfile::tempdir().unwrap();
+    let jobs = owner(&dir.path().join("journal")).with_export_work_root(dir.path().join("work"));
+    let delivery = intent(&jobs, dir.path(), "staging-boundary");
+    for name in ["../outside.ass", "..\\outside.ass", "C:alternate.ass", "two\nlines.ass", ".", ".."] {
+      assert!(jobs.stage_render_scratch(&delivery.id, vec![RenderScratchFile { name: name.into(), content: "not an owned file".into() }], vec![]).is_err());
+      assert!(jobs.delivery_list()[0].render_scratch.is_none());
+    }
+    assert!(jobs.stage_render_scratch("unknown-intent", vec![], vec![]).is_err());
+    jobs.cancel_delivery(&delivery.id).unwrap();
+    assert!(jobs.stage_render_scratch(&delivery.id, vec![], vec![]).is_err());
+    assert!(!dir.path().join("outside.ass").exists());
+    assert!(!dir.path().join("work").exists());
+  }
+
+  #[test]
+  fn changed_or_unreserved_staged_inputs_cannot_bind_a_render_producer() {
+    let dir = tempfile::tempdir().unwrap();
+    let jobs = owner(&dir.path().join("journal")).with_export_work_root(dir.path().join("work"));
+    let delivery = intent(&jobs, dir.path(), "staged-identity");
+    std::fs::write(&delivery.dest_path, b"previous complete output").unwrap();
+    let outside = dir.path().join("unreserved");
+    std::fs::create_dir(&outside).unwrap();
+    let mut spec = JobSpec { id: delivery.id.clone(), lane: "export".into(), program: "ffmpeg".into(), args: vec![delivery.stage_path.clone()],
+      steps: vec![], cwd: Some(outside.to_string_lossy().into()), meta: serde_json::json!({"kind":"export"}) };
+    assert!(jobs.submit(spec.clone()).unwrap_err().contains("no admitted scratch reservation"));
+    let scratch = jobs.stage_render_scratch(&delivery.id, vec![RenderScratchFile { name: "graph.ffgraph".into(), content: "captured graph".into() }], vec![]).unwrap();
+    spec.cwd = Some(scratch.clone());
+    std::fs::write(Path::new(&scratch).join("graph.ffgraph"), b"tampered graph").unwrap();
+    assert!(jobs.stage_render_scratch(&delivery.id, vec![RenderScratchFile { name: "graph.ffgraph".into(), content: "captured graph".into() }], vec![])
+      .unwrap_err().contains("staged input changed"));
+    assert!(jobs.submit(spec).unwrap_err().contains("staged input changed"));
+    assert!(jobs.delivery_list()[0].render_job.is_none());
+    assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"previous complete output");
+    jobs.fail_delivery(&delivery.id).unwrap();
+    jobs.complete_delivery(&delivery.id).unwrap();
+    assert!(!Path::new(&scratch).exists());
+  }
+
+  #[test]
+  fn retained_scratch_consumes_the_shared_budget_after_restart_until_acknowledged_cleanup() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("journal");
+    let work = dir.path().join("work");
+    let mut jobs = owner(&root).with_export_work_root(work.clone());
+    jobs.workspace = Workspace::new(64);
+    let first = intent(&jobs, dir.path(), "space-first");
+    let data = "x".repeat(40);
+    let path = jobs.stage_render_scratch(&first.id, vec![RenderScratchFile { name: "graph.ffgraph".into(), content: data.clone() }], vec![]).unwrap();
+    drop(jobs);
+    let mut reopened = owner(&root).with_export_work_root(work);
+    reopened.workspace = Workspace::new(64);
+    let second = intent(&reopened, dir.path(), "space-second");
+    assert!(reopened.stage_render_scratch(&second.id, vec![RenderScratchFile { name: "graph.ffgraph".into(), content: data.clone() }], vec![])
+      .unwrap_err().contains("workspace budget exceeded"));
+    assert_eq!(std::fs::read_to_string(Path::new(&path).join("graph.ffgraph")).unwrap(), data);
+    assert!(reopened.delivery_list().iter().find(|entry| entry.id == second.id).unwrap().render_scratch.is_none());
+    reopened.fail_delivery(&first.id).unwrap();
+    reopened.complete_delivery(&first.id).unwrap();
+    assert!(!Path::new(&path).exists());
+    let next = reopened.stage_render_scratch(&second.id, vec![RenderScratchFile { name: "graph.ffgraph".into(), content: data.clone() }], vec![]).unwrap();
+    assert_eq!(std::fs::read_to_string(Path::new(&next).join("graph.ffgraph")).unwrap(), data);
+  }
+
+  #[test]
+  fn full_export_scratch_does_not_refuse_unrelated_transcription_admission() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = dir.path().join("work");
+    std::fs::create_dir_all(work.join("exports").join("retained-render")).unwrap();
+    std::fs::write(work.join("exports").join("retained-render").join("retained.bin"), [37u8; 64]).unwrap();
+    let mut jobs = owner(&dir.path().join("journal")).with_export_work_root(work);
+    jobs.workspace = Workspace::new(32);
+    jobs.submit(JobSpec { id: "unrelated-transcription".into(), lane: "transcription".into(), program: "whisper-cli".into(),
+      args: vec![], steps: vec![], cwd: None, meta: serde_json::json!({}) }).unwrap();
+    let view = jobs.list().pop().unwrap();
+    assert_eq!(view.state, JobState::Exited);
+    assert!(view.stderr_head.contains("unused"), "job did not reach its unrelated spawner: {}", view.stderr_head);
+    assert!(!view.stderr_head.contains("workspace budget"));
+  }
+
+  #[test]
+  fn oversized_receipt_cannot_replace_a_reloadable_intent_or_leave_partial_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("journal");
+    let jobs = owner(&root);
+    let delivery = intent(&jobs, dir.path(), "bounded-receipt");
+    let file = root.join("bounded-receipt.json");
+    let before = std::fs::read(&file).unwrap();
+    let mut oversized = delivery;
+    oversized.render_job = Some(JobSpec { id: oversized.id.clone(), lane: "export".into(), program: "ffmpeg".into(),
+      args: vec!["x".repeat(8 * 1024 * 1024)], steps: Vec::new(), cwd: None, meta: serde_json::json!({}) });
+    assert!(persist_delivery(&root, &oversized).is_err(), "writer installed a receipt that its own loader cannot accept");
+    assert_eq!(std::fs::read(&file).unwrap(), before);
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1, "refused receipt left temporary bytes");
+    assert!(owner(&root).delivery_list()[0].render_job.is_none());
+  }
+
+  #[test]
+  fn aggregate_receipt_budget_preserves_prior_bytes_and_refuses_oversized_legacy_loading() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("journal");
+    let jobs = owner(&root);
+    let target = intent(&jobs, dir.path(), "aggregate-target");
+    for index in 0..9 {
+      let mut delivery = intent(&jobs, dir.path(), &format!("aggregate-{index}"));
+      delivery.render_job = Some(JobSpec { id: delivery.id.clone(), lane: "export".into(), program: "ffmpeg".into(),
+        args: vec![delivery.stage_path.clone()], steps: vec![], cwd: None, meta: serde_json::json!({ "payload": "x".repeat(7 * 1024 * 1024) }) });
+      persist_delivery(&root, &delivery).unwrap();
+    }
+    let path = root.join("aggregate-target.json");
+    let before = std::fs::read(&path).unwrap();
+    let mut replacement = target;
+    replacement.render_job = Some(JobSpec { id: replacement.id.clone(), lane: "export".into(), program: "ffmpeg".into(),
+      args: vec![replacement.stage_path.clone()], steps: vec![], cwd: None, meta: serde_json::json!({ "payload": "x".repeat(2 * 1024 * 1024) }) });
+    assert!(persist_delivery(&root, &replacement).unwrap_err().contains("aggregate admission budget"));
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 10);
+    assert_eq!(owner(&root).delivery_list().len(), 10);
+    std::fs::write(&path, serde_json::to_vec(&replacement).unwrap()).unwrap();
+    assert!(Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {})).with_export_root(root).is_err(),
+      "legacy aggregate overflow must be refused before unbounded loading");
+  }
+
+  #[test]
+  fn acknowledgement_releases_large_execution_payload_but_keeps_identity_evidence() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("journal");
+    let jobs = owner(&root);
+    let delivery = intent(&jobs, dir.path(), "compact-acknowledgement");
+    render_bytes(&jobs, &delivery, b"complete verified output");
+    jobs.verify_delivery(&delivery.id).unwrap();
+    jobs.publish_delivery(&delivery.id).unwrap();
+    let file = root.join("compact-acknowledgement.json");
+    {
+      let mut entries = jobs.deliveries.lock().unwrap();
+      let current = entries.get_mut(&delivery.id).unwrap();
+      current.render_job.as_mut().unwrap().meta["diagnostic_payload"] = serde_json::json!("x".repeat(1024 * 1024));
+      persist_delivery(&root, current).unwrap();
+    }
+    let before: ExportDelivery = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert!(std::fs::metadata(&file).unwrap().len() > 1024 * 1024);
+    jobs.complete_delivery(&delivery.id).unwrap();
+    let after: ExportDelivery = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert!(std::fs::metadata(&file).unwrap().len() < 4096);
+    assert!(after.followups_done && after.producer_complete);
+    assert!(after.render_job.is_none() && after.sources.is_empty());
+    assert_eq!(after.identity.unwrap().sha256, before.identity.unwrap().sha256);
+    assert_eq!(after.command_sha256, before.command_sha256);
+    assert_eq!(after.worker_identity.unwrap().sha256, before.worker_identity.unwrap().sha256);
+    assert_eq!(std::fs::read(&after.dest_path).unwrap(), b"complete verified output");
+    assert!(owner(&root).recover_exports().is_empty());
+  }
+
+  #[test]
+  fn execution_clock_charges_active_work_but_not_queue_wait_across_serialization() {
+    let dir = tempfile::tempdir().unwrap();
+    let jobs = owner(&dir.path().join("journal"));
+    let mut delivery = intent(&jobs, dir.path(), "execution-clock");
+    delivery.created_at = 1000;
+    delivery.execution_queued_at_ms = None;
+    let admitted = delivery.execution_deadline_ms(1000).unwrap();
+    delivery.enqueue_execution(2000).unwrap();
+    delivery.enqueue_execution(3000).unwrap();
+    let encoded = serde_json::to_vec(&delivery).unwrap();
+    let mut reopened: ExportDelivery = serde_json::from_slice(&encoded).unwrap();
+    let resumed = reopened.resume_execution(100_000).unwrap();
+    assert_eq!(resumed - admitted, 98_000, "queue time must not consume execution budget");
+    assert_eq!(reopened.execution_deadline_ms(resumed - 1).unwrap(), resumed);
+    assert!(reopened.execution_deadline_ms(resumed).unwrap_err().contains("eight-hour"));
+    reopened.enqueue_execution(resumed - 1).unwrap();
+    let delayed = reopened.resume_execution(resumed + 100_000).unwrap();
+    assert_eq!(delayed, resumed + 100_001);
+    assert!(reopened.execution_deadline_ms(delayed).is_err(), "retry cannot reset active work already consumed");
+  }
+
+  #[test]
+  fn execution_clock_refuses_legacy_and_invalid_time_evidence() {
+    let dir = tempfile::tempdir().unwrap();
+    let jobs = owner(&dir.path().join("journal"));
+    let mut delivery = intent(&jobs, dir.path(), "invalid-clock");
+    delivery.created_at = 1000;
+    delivery.execution_queued_at_ms = None;
+    assert!(delivery.execution_deadline_ms(999).is_err());
+    delivery.execution_queued_ms = 2000;
+    assert!(delivery.execution_deadline_ms(2000).is_err());
+    delivery.execution_queued_ms = 0;
+    delivery.execution_queued_at_ms = Some(3000);
+    assert!(delivery.resume_execution(2000).is_err());
+    delivery.version = 1;
+    assert!(delivery.execution_deadline_ms(4000).unwrap_err().contains("no supported execution clock"));
+  }
+
+  #[test]
+  fn restart_refuses_expired_and_legacy_render_and_copy_execution_without_replacing_output() {
+    for copy in [false, true] {
+      for version in [1, 2] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("journal");
+        let source = dir.path().join("source.bin");
+        std::fs::write(&source, b"unchanged source").unwrap();
+        let jobs = owner(&root);
+        let delivery = jobs.prepare_delivery("expired".into(), "isolated-project".into(), dir.path().join("stage.partial").to_string_lossy().into(),
+          dir.path().join("delivered.mp4").to_string_lossy().into(), if copy {
+            DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_original".into() }
+          } else { DeliverySource::Render { paths: vec![source.to_string_lossy().into()] } }).unwrap();
+        if !copy {
+          jobs.retain_render_job(&JobSpec { id: delivery.id.clone(), lane: "export".into(), program: "ffmpeg".into(),
+            args: vec![delivery.stage_path.clone()], steps: vec![], cwd: None, meta: serde_json::json!({ "kind": "export" }) }).unwrap();
+        }
+        std::fs::write(&delivery.dest_path, b"previous complete destination").unwrap();
+        let mut retained = jobs.delivery_list().pop().unwrap();
+        retained.version = version;
+        retained.created_at = now_ms() - EXPORT_EXECUTION_LIMIT_MS - 1;
+        retained.execution_queued_at_ms = None;
+        persist_delivery(&root, &retained).unwrap();
+        drop(jobs);
+        let reopened = owner(&root);
+        let failures = reopened.recover_exports();
+        let expected = if version == 1 { "supported execution clock" } else { "eight-hour execution budget" };
+        assert!(failures.iter().any(|(_, error)| error.contains(expected)), "{failures:?}");
+        assert_eq!(reopened.list()[0].state, JobState::Exited);
+        assert_ne!(reopened.list()[0].code, Some(0));
+        assert!(!reopened.delivery_list()[0].producer_complete);
+        assert!(reopened.verify_delivery(&delivery.id).is_err());
+        assert!(reopened.publish_delivery(&delivery.id).is_err());
+        assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"previous complete destination");
+        assert_eq!(std::fs::read(&source).unwrap(), b"unchanged source");
+        assert_eq!(std::fs::metadata(&delivery.stage_path).unwrap().len(), 0);
+      }
+    }
+  }
+
+  #[test]
+  fn completed_published_identity_remains_reconcilable_after_its_execution_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("journal");
+    let jobs = owner(&root);
+    let delivery = intent(&jobs, dir.path(), "published-expired-clock");
+    render_bytes(&jobs, &delivery, b"complete verified output");
+    jobs.verify_delivery(&delivery.id).unwrap();
+    let published = jobs.publish_delivery(&delivery.id).unwrap();
+    let mut retained = jobs.delivery_list().pop().unwrap();
+    retained.created_at = now_ms() - EXPORT_EXECUTION_LIMIT_MS - 1;
+    persist_delivery(&root, &retained).unwrap();
+    let reopened = owner(&root);
+    assert!(reopened.recover_exports().is_empty());
+    assert_eq!(reopened.publish_delivery(&delivery.id).unwrap().identity.unwrap().sha256, published.identity.unwrap().sha256);
+    assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"complete verified output");
+  }
+
+  #[test]
+  fn waiting_in_the_page_queue_does_not_expire_an_unstarted_native_export() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("journal");
+    let jobs = owner(&root);
+    let delivery = intent(&jobs, dir.path(), "long-page-queue");
+    let shift = EXPORT_EXECUTION_LIMIT_MS + 60_000;
+    {
+      let mut entries = jobs.deliveries.lock().unwrap();
+      let retained = entries.get_mut(&delivery.id).unwrap();
+      retained.created_at -= shift;
+      let queued = retained.execution_queued_at_ms.as_mut().expect("admitted render must already record page-queue waiting");
+      *queued -= shift;
+      persist_delivery(&root, retained).unwrap();
+    }
+    render_bytes(&jobs, &delivery, b"complete output after legitimate queue wait");
+    let current = jobs.delivery_list().pop().unwrap();
+    assert!(current.producer_complete);
+    assert!(current.execution_queued_at_ms.is_none());
+    assert!(current.execution_queued_ms >= shift);
+    jobs.verify_delivery(&delivery.id).unwrap();
+    jobs.publish_delivery(&delivery.id).unwrap();
+    assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"complete output after legitimate queue wait");
+  }
+
   fn render_bytes(owner: &Supervisor, delivery: &ExportDelivery, bytes: &[u8]) {
     struct WritingSpawner(Vec<u8>);
     impl Spawner for WritingSpawner {
       fn identity(&self, program: &str) -> Result<ArtifactIdentity, String> { NoSpawn.identity(program) }
-      fn spawn(&self, spec: &JobSpec, notify: Arc<dyn Fn(ProcEvent) + Send + Sync>) -> Result<u32, String> {
+      fn spawn(&self, spec: &JobSpec, notify: Arc<dyn Fn(ProcEvent) + Send + Sync>, _: Arc<Workspace>) -> Result<u32, String> {
         std::fs::write(spec.args.last().ok_or("fixture output missing")?, &self.0).map_err(|error| error.to_string())?;
         notify(ProcEvent::Exit(Some(0)));
         Ok(123)
       }
-      fn kill(&self, _: u32) {}
+      fn kill(&self, _: &str, _: u32) {}
     }
     let runner = Supervisor { spawner: Arc::new(WritingSpawner(bytes.to_vec())), ..owner.clone() };
     runner.submit(JobSpec { id: delivery.id.clone(), lane: "export".into(), program: "ffmpeg".into(),
@@ -1667,18 +2785,193 @@ mod export_delivery_tests {
     assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"complete source bytes");
   }
   #[test]
+  fn completed_native_copy_is_visible_to_the_next_page_without_app_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.wav");
+    std::fs::write(&source, b"completed imported source").unwrap();
+    let jobs = owner(&dir.path().join("journal"));
+    let delivery = jobs.prepare_delivery("copy-next-page".into(), "original-project".into(),
+      dir.path().join("copy.partial").to_string_lossy().into(), dir.path().join("copy.wav").to_string_lossy().into(),
+      DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_source".into() }).unwrap();
+    jobs.copy_delivery(&delivery.id).unwrap();
+    let visible = jobs.list().into_iter().find(|view| view.id == delivery.id).expect("a live completed copy must be adoptable after page loss");
+    assert_eq!(visible.state, JobState::Exited);
+    assert_eq!(visible.code, Some(0));
+    assert_eq!(visible.meta["kind"], "export_copy");
+    assert_eq!(visible.meta["copyOf"], "media_source");
+    assert_eq!(visible.meta["projectDir"], "original-project");
+    assert_eq!(std::fs::read(&delivery.stage_path).unwrap(), b"completed imported source");
+    jobs.verify_delivery(&delivery.id).unwrap();
+    jobs.publish_delivery(&delivery.id).unwrap();
+    assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), std::fs::read(&source).unwrap());
+    assert!(jobs.commit(&delivery.id));
+    jobs.complete_delivery(&delivery.id).unwrap();
+    assert!(jobs.forget(&delivery.id));
+    assert!(jobs.list().is_empty());
+  }
+  #[test]
+  fn queued_native_copy_is_adoptable_before_the_page_starts_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("queued.wav");
+    std::fs::write(&source, b"queued source samples").unwrap();
+    let jobs = owner(&dir.path().join("journal"));
+    let delivery = jobs.prepare_delivery("copy-queued-page".into(), "original-project".into(),
+      dir.path().join("queued.partial").to_string_lossy().into(), dir.path().join("queued-copy.wav").to_string_lossy().into(),
+      DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_queued".into() }).unwrap();
+    let queued = jobs.list().into_iter().find(|view| view.id == delivery.id).expect("native admission must retain queued copy work");
+    assert_eq!(queued.state, JobState::Queued);
+    assert!(!jobs.delivery_list()[0].producer_complete);
+    jobs.copy_delivery(&delivery.id).unwrap();
+    jobs.verify_delivery(&delivery.id).unwrap();
+    jobs.publish_delivery(&delivery.id).unwrap();
+    jobs.copy_delivery(&delivery.id).unwrap();
+    assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"queued source samples");
+    assert_eq!(std::fs::read(&source).unwrap(), b"queued source samples");
+    assert_eq!(jobs.list().len(), 1);
+  }
+  #[test]
+  fn native_copy_join_and_cancellation_keep_one_producer() {
+    for cancelled in [false, true] {
+      let dir = tempfile::tempdir().unwrap();
+      let source = dir.path().join("source.wav");
+      std::fs::write(&source, b"one admitted copy source").unwrap();
+      let (started, running) = std::sync::mpsc::channel();
+      let (release, gate) = std::sync::mpsc::channel();
+      let gate = Arc::new(Mutex::new(gate));
+      let observations = Arc::new(Mutex::new(Vec::new()));
+      let observed = observations.clone();
+      let jobs = Supervisor::new(Arc::new(NoSpawn), Arc::new(move |notice| {
+        if let Notice::Changed(view) = notice {
+          observed.lock().unwrap().push(view.clone());
+          if view.state == JobState::Running {
+            started.send(()).unwrap();
+            gate.lock().unwrap().recv_timeout(std::time::Duration::from_secs(3)).unwrap();
+          }
+        }
+      })).with_export_root(dir.path().join("journal")).unwrap();
+      let delivery = jobs.prepare_delivery("copy-joined".into(), "original-project".into(),
+        dir.path().join("copy.partial").to_string_lossy().into(), dir.path().join("copy.wav").to_string_lossy().into(),
+        DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_source".into() }).unwrap();
+      std::fs::write(&delivery.dest_path, b"previous destination").unwrap();
+      let first_owner = jobs.clone();
+      let first_id = delivery.id.clone();
+      let first = std::thread::spawn(move || first_owner.copy_delivery(&first_id));
+      running.recv_timeout(std::time::Duration::from_secs(3)).unwrap();
+      assert_eq!(jobs.list()[0].state, JobState::Running);
+      assert!(jobs.complete_delivery(&delivery.id).is_err());
+      let (finished, result) = std::sync::mpsc::channel();
+      let second_owner = jobs.clone();
+      let second_id = delivery.id.clone();
+      let second = std::thread::spawn(move || {
+        let outcome = second_owner.copy_delivery(&second_id);
+        finished.send(outcome.clone()).unwrap();
+        outcome
+      });
+      let early = result.recv_timeout(std::time::Duration::from_millis(100));
+      if cancelled { assert!(jobs.cancel_delivery(&delivery.id).unwrap()); }
+      release.send(()).unwrap();
+      let original = first.join().unwrap();
+      let joined = second.join().unwrap();
+      assert!(matches!(early, Err(std::sync::mpsc::RecvTimeoutError::Timeout)), "joining must wait for the original producer");
+      assert_eq!(original.is_ok(), !cancelled);
+      assert_eq!(joined.is_ok(), !cancelled);
+      assert_eq!(jobs.list()[0].state, JobState::Exited);
+      assert_eq!(jobs.list()[0].killed, cancelled);
+      assert_eq!(observations.lock().unwrap().iter().filter(|view| view.state == JobState::Running).count(), 1);
+      assert_eq!(std::fs::read(&source).unwrap(), b"one admitted copy source");
+      if cancelled {
+        assert!(jobs.verify_delivery(&delivery.id).is_err());
+        assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"previous destination");
+        let persisted: ExportDelivery = serde_json::from_slice(&std::fs::read(dir.path().join("journal/copy-joined.json")).unwrap()).unwrap();
+        assert_eq!(persisted.state, "cancelled");
+        assert!(!persisted.producer_complete);
+      } else {
+        jobs.verify_delivery(&delivery.id).unwrap();
+        jobs.publish_delivery(&delivery.id).unwrap();
+        assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"one admitted copy source");
+      }
+    }
+  }
+  #[test]
+  fn native_copy_join_waits_for_terminal_handoff_after_durable_completion() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.wav");
+    std::fs::write(&source, b"complete copied source").unwrap();
+    let jobs = owner(&dir.path().join("journal"));
+    let delivery = jobs.prepare_delivery("copy-terminal-handoff".into(), "original-project".into(),
+      dir.path().join("copy.partial").to_string_lossy().into(), dir.path().join("copy.wav").to_string_lossy().into(),
+      DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_source".into() }).unwrap();
+    jobs.copy_delivery(&delivery.id).unwrap();
+    jobs.lock().jobs.get_mut(&delivery.id).unwrap().state = JobState::Running;
+    let (finished, result) = std::sync::mpsc::channel();
+    let next_page = jobs.clone();
+    let id = delivery.id.clone();
+    let joined = std::thread::spawn(move || { finished.send(next_page.copy_delivery(&id)).unwrap(); });
+    let early = result.recv_timeout(std::time::Duration::from_millis(100));
+    jobs.finish_copy_job(&delivery.id);
+    jobs.copy_settled.notify_all();
+    joined.join().unwrap();
+    assert!(matches!(early, Err(std::sync::mpsc::RecvTimeoutError::Timeout)), "durable bytes alone do not finish the running job");
+    result.recv_timeout(std::time::Duration::from_secs(1)).unwrap().unwrap();
+    jobs.verify_delivery(&delivery.id).unwrap();
+    jobs.publish_delivery(&delivery.id).unwrap();
+    assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), std::fs::read(&source).unwrap());
+  }
+  #[test]
+  fn queued_native_copy_cancel_and_failure_retire_without_writing() {
+    for cancelled in [false, true] {
+      let dir = tempfile::tempdir().unwrap();
+      let source = dir.path().join("source.wav");
+      std::fs::write(&source, b"unchanged source").unwrap();
+      let jobs = owner(&dir.path().join("journal"));
+      let delivery = jobs.prepare_delivery("copy-retired".into(), "original-project".into(),
+        dir.path().join("copy.partial").to_string_lossy().into(), dir.path().join("copy.wav").to_string_lossy().into(),
+        DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_source".into() }).unwrap();
+      std::fs::write(&delivery.dest_path, b"previous copied output").unwrap();
+      assert!(if cancelled { jobs.cancel_delivery(&delivery.id).unwrap() } else { jobs.fail_delivery(&delivery.id).unwrap() });
+      assert_eq!(jobs.list()[0].state, JobState::Exited);
+      assert_eq!(jobs.list()[0].killed, cancelled);
+      assert!(jobs.copy_delivery(&delivery.id).is_err());
+      assert_eq!(std::fs::read(&delivery.stage_path).unwrap(), b"");
+      assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"previous copied output");
+      assert_eq!(std::fs::read(&source).unwrap(), b"unchanged source");
+      jobs.complete_delivery(&delivery.id).unwrap();
+      assert!(jobs.forget(&delivery.id));
+    }
+  }
+  #[test]
+  fn failed_native_copy_retains_the_original_error_for_the_next_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.wav");
+    std::fs::write(&source, b"original source identity").unwrap();
+    let jobs = owner(&dir.path().join("journal"));
+    let delivery = jobs.prepare_delivery("copy-error-page".into(), "original-project".into(),
+      dir.path().join("copy.partial").to_string_lossy().into(), dir.path().join("copy.wav").to_string_lossy().into(),
+      DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_source".into() }).unwrap();
+    std::fs::write(&source, b"source changed after admission").unwrap();
+    std::fs::write(&delivery.dest_path, b"previous copied output").unwrap();
+    let error = jobs.copy_delivery(&delivery.id).unwrap_err();
+    let failed = jobs.list().into_iter().find(|view| view.id == delivery.id).unwrap();
+    assert_eq!(failed.state, JobState::Exited);
+    assert_ne!(failed.code, Some(0));
+    assert!(format!("{}{}", failed.stderr_head, failed.stderr_tail).contains(&error), "the next page must retain the actual source failure");
+    assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"previous copied output");
+    assert_eq!(std::fs::read(&source).unwrap(), b"source changed after admission");
+    assert!(jobs.publish_delivery(&delivery.id).is_err());
+  }
+  #[test]
   fn successful_worker_with_failed_completion_record_cannot_publish() {
     struct CompletionFailingSpawner(PathBuf);
     impl Spawner for CompletionFailingSpawner {
       fn identity(&self, program: &str) -> Result<ArtifactIdentity, String> { NoSpawn.identity(program) }
-      fn spawn(&self, spec: &JobSpec, notify: Arc<dyn Fn(ProcEvent) + Send + Sync>) -> Result<u32, String> {
+      fn spawn(&self, spec: &JobSpec, notify: Arc<dyn Fn(ProcEvent) + Send + Sync>, _: Arc<Workspace>) -> Result<u32, String> {
         std::fs::write(spec.args.last().ok_or("fixture output missing")?, b"complete worker bytes").map_err(|error| error.to_string())?;
         std::fs::remove_dir_all(&self.0).map_err(|error| error.to_string())?;
         std::fs::write(&self.0, b"journal unavailable").map_err(|error| error.to_string())?;
         notify(ProcEvent::Exit(Some(0)));
         Ok(123)
       }
-      fn kill(&self, _: u32) {}
+      fn kill(&self, _: &str, _: u32) {}
     }
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("journal");
@@ -1704,10 +2997,15 @@ mod export_delivery_tests {
       dir.path().join("copy.partial").to_string_lossy().into(), dir.path().join("copy.wav").to_string_lossy().into(),
       DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_source".into() }).unwrap();
     std::fs::write(&delivery.dest_path, b"old copied destination").unwrap();
-    std::fs::remove_dir_all(&root).unwrap();
-    std::fs::write(&root, b"journal unavailable").unwrap();
-    assert!(jobs.copy_delivery(&delivery.id).is_err());
+    assert!(jobs.copy_delivery_after_sync(&delivery.id, || {
+      assert_eq!(std::fs::read(&delivery.stage_path).unwrap(), b"admitted library bytes");
+      std::fs::remove_dir_all(&root).unwrap();
+      std::fs::write(&root, b"journal unavailable").unwrap();
+      Ok(())
+    }).is_err());
     assert_eq!(std::fs::read(&delivery.stage_path).unwrap(), b"admitted library bytes");
+    assert_eq!(jobs.list()[0].state, JobState::Exited);
+    assert_ne!(jobs.list()[0].code, Some(0));
     assert!(jobs.verify_delivery(&delivery.id).is_err());
     assert!(jobs.publish_delivery(&delivery.id).is_err());
     assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"old copied destination");
@@ -1727,6 +3025,75 @@ mod export_delivery_tests {
     reopened.verify_delivery(&delivery.id).unwrap();
     reopened.publish_delivery(&delivery.id).unwrap();
     assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"finished before the page restarted");
+  }
+  #[test]
+  fn refused_native_recovery_is_visible_without_reexecuting_or_claiming_delivery() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("journal");
+    let source = dir.path().join("source.wav");
+    std::fs::write(&source, b"admitted source identity").unwrap();
+    let jobs = owner(&root);
+    let delivery = jobs.prepare_delivery("copy-recovery-refused".into(), "original-project".into(),
+      dir.path().join("copy.partial").to_string_lossy().into(), dir.path().join("copy.wav").to_string_lossy().into(),
+      DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_source".into() }).unwrap();
+    std::fs::write(&delivery.dest_path, b"previous complete destination").unwrap();
+    std::fs::write(&source, b"source changed before restart").unwrap();
+    drop(jobs);
+    let reopened = owner(&root);
+    let failures = reopened.recover_exports();
+    assert_eq!(failures.len(), 1);
+    let failed = reopened.list().into_iter().find(|view| view.id == delivery.id).expect("recovery refusals must be visible to the page");
+    assert_eq!(failed.state, JobState::Exited);
+    assert_ne!(failed.code, Some(0));
+    assert!(format!("{}{}", failed.stderr_head, failed.stderr_tail).contains(&failures[0].1));
+    assert!(!reopened.delivery_list()[0].producer_complete);
+    assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"previous complete destination");
+    assert_eq!(std::fs::read(&source).unwrap(), b"source changed before restart");
+  }
+  #[test]
+  fn restart_before_worker_binding_reports_failure_without_inventing_a_render_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("journal");
+    let jobs = owner(&root);
+    let delivery = intent(&jobs, dir.path(), "unbound-before-restart");
+    std::fs::write(&delivery.dest_path, b"previous successful output").unwrap();
+    drop(jobs);
+    let reopened = owner(&root);
+    assert_eq!(reopened.recover_exports().len(), 1);
+    let failed = reopened.list().into_iter().find(|view| view.id == delivery.id).expect("unbound intents must not disappear");
+    assert_eq!(failed.state, JobState::Exited);
+    assert_ne!(failed.code, Some(0));
+    assert_eq!(failed.meta["kind"], "export");
+    assert_eq!(failed.meta["projectDir"], "original-project");
+    assert_eq!(failed.meta["destPath"], delivery.dest_path);
+    assert!(failed.meta.get("plan").is_none());
+    assert!(!reopened.delivery_list()[0].producer_complete);
+    assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"previous successful output");
+  }
+  #[test]
+  fn recovery_publication_failure_preserves_the_completed_producer_proof() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("journal");
+    let source = dir.path().join("source.wav");
+    std::fs::write(&source, b"completed source samples").unwrap();
+    let jobs = owner(&root);
+    let delivery = jobs.prepare_delivery("copy-publication-recovery".into(), "original-project".into(),
+      dir.path().join("copy.partial").to_string_lossy().into(), dir.path().join("blocked.wav").to_string_lossy().into(),
+      DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_source".into() }).unwrap();
+    jobs.copy_delivery(&delivery.id).unwrap();
+    let verified = jobs.verify_delivery(&delivery.id).unwrap();
+    std::fs::create_dir(&delivery.dest_path).unwrap();
+    std::fs::write(Path::new(&delivery.dest_path).join("keep.txt"), b"blocking content").unwrap();
+    drop(jobs);
+    let reopened = owner(&root);
+    assert_eq!(reopened.recover_exports().len(), 1);
+    assert_eq!(reopened.list()[0].code, Some(0));
+    assert!(reopened.delivery_list()[0].producer_complete);
+    assert_eq!(reopened.delivery_list()[0].identity.as_ref().unwrap().sha256, verified.identity.unwrap().sha256);
+    assert_eq!(std::fs::read(Path::new(&delivery.dest_path).join("keep.txt")).unwrap(), b"blocking content");
+    std::fs::remove_dir_all(&delivery.dest_path).unwrap();
+    reopened.publish_delivery(&delivery.id).unwrap();
+    assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), std::fs::read(&source).unwrap());
   }
   #[test]
   fn completed_render_cannot_be_readmitted_as_a_new_producer() {
@@ -1815,7 +3182,7 @@ mod export_delivery_tests {
     assert!(jobs.publish_delivery(&delivery.id).is_err());
     assert!(jobs.fail_delivery(&delivery.id).unwrap(), "a refused rename must still be settleable as failure");
     jobs.complete_delivery(&delivery.id).unwrap();
-    assert_eq!(std::fs::read(&delivery.stage_path).unwrap(), b"complete staged artifact");
+    assert!(!Path::new(&delivery.stage_path).exists());
     assert_eq!(std::fs::read(&marker).unwrap(), b"existing destination content");
     assert_eq!(jobs.delivery_list().iter().find(|entry| entry.id == delivery.id).unwrap().state, "failed");
   }
@@ -2171,8 +3538,8 @@ mod export_delivery_tests {
       fn identity(&self, program: &str) -> Result<ArtifactIdentity, String> {
         Ok(ArtifactIdentity { sha256: format!("{:x}", Sha256::digest(program.as_bytes())), size: program.len() as u64 })
       }
-      fn spawn(&self, _: &JobSpec, _: Arc<dyn Fn(ProcEvent) + Send + Sync>) -> Result<u32, String> { Ok(123) }
-      fn kill(&self, _: u32) {}
+      fn spawn(&self, _: &JobSpec, _: Arc<dyn Fn(ProcEvent) + Send + Sync>, _: Arc<Workspace>) -> Result<u32, String> { Ok(123) }
+      fn kill(&self, _: &str, _: u32) {}
     }
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("media_kept.mp4");
@@ -2231,6 +3598,226 @@ mod export_delivery_tests {
     jobs.complete_delivery(&delivery.id).unwrap();
   }
   #[test]
+  fn native_copy_staging_shares_scratch_capacity_until_publication() {
+    for size in [33usize, 32] {
+      let directory = tempfile::tempdir().unwrap();
+      let source = directory.path().join("source.wav");
+      let destination = directory.path().join("delivered.wav");
+      let peer = directory.path().join("retained-scratch");
+      let bytes = vec![37u8; size];
+      std::fs::write(&source, &bytes).unwrap();
+      std::fs::write(&destination, b"previous complete file").unwrap();
+      std::fs::write(&peer, [41u8; 32]).unwrap();
+      let mut jobs = owner(&directory.path().join("journal"));
+      jobs.workspace = Workspace::new(64);
+      jobs.workspace.account_existing("peer", 32, 1).unwrap();
+      let delivery = jobs.prepare_delivery("shared-copy-budget".into(), "original-project".into(),
+        directory.path().join("copy.partial").to_string_lossy().into(), destination.to_string_lossy().into(),
+        DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_source".into() }).unwrap();
+      let copied = jobs.copy_delivery(&delivery.id);
+      if size > 32 {
+        assert!(copied.is_err(), "copy ignored scratch retained by another export");
+        assert_eq!(std::fs::metadata(&delivery.stage_path).unwrap().len(), 0);
+        assert_eq!(std::fs::read(&destination).unwrap(), b"previous complete file");
+        assert_eq!(jobs.workspace.available_bytes(), 32);
+      } else {
+        copied.unwrap();
+        assert_eq!(std::fs::read(&delivery.stage_path).unwrap(), bytes);
+        let scratch = directory.path().join("blocked.nut");
+        let mut blocked = ScratchOutput::open_workspace(&scratch, 0, 64, jobs.workspace.clone(), "blocked").unwrap();
+        assert!(blocked.write(b"x").is_err(), "pending copy stopped counting before publication");
+        drop(blocked);
+        assert!(!scratch.exists());
+        jobs.verify_delivery(&delivery.id).unwrap();
+        jobs.publish_delivery(&delivery.id).unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), bytes);
+        assert_eq!(jobs.workspace.available_bytes(), 32);
+      }
+      assert_eq!(std::fs::read(&source).unwrap(), bytes);
+      assert_eq!(std::fs::read(&peer).unwrap(), vec![41u8; 32]);
+    }
+  }
+  #[test]
+  fn caller_cannot_inject_native_output_or_execution_metadata() {
+    let directory = tempfile::tempdir().unwrap();
+    let jobs = owner(&directory.path().join("journal"));
+    let output = directory.path().join("must-not-be-written.mp4");
+    for field in ["_native_final_stage", "_native_execution_deadline", "_native_scratch_capture", "_native_future_guard"] {
+      let mut meta = serde_json::json!({ "kind": "export" });
+      meta[field] = serde_json::Value::Null;
+      let submitted = jobs.submit(JobSpec { id: field.into(), lane: "export".into(), program: "ffmpeg".into(),
+        args: vec!["-f".into(), "mp4".into(), output.to_string_lossy().into()], steps: vec![], cwd: None, meta });
+      assert!(submitted.unwrap_err().contains("native execution metadata is reserved"));
+      assert!(jobs.list().is_empty());
+      assert!(jobs.delivery_list().is_empty());
+      assert!(!output.exists());
+    }
+    jobs.submit(JobSpec { id: "legitimate-metadata".into(), lane: "working".into(), program: "ffmpeg".into(),
+      args: vec!["-version".into()], steps: vec![], cwd: None,
+      meta: serde_json::json!({ "description": "_native_final_stage", "nested": { "_native_example": true } }) }).unwrap();
+    assert_eq!(jobs.list().len(), 1);
+    assert!(!output.exists());
+  }
+  #[test]
+  fn retained_pending_output_overage_survives_restart_without_admitting_more_writes() {
+    let directory = tempfile::tempdir().unwrap();
+    let journal = directory.path().join("journal");
+    let work = directory.path().join("work");
+    let jobs = owner(&journal).with_export_work_root(work.clone());
+    let delivery = jobs.prepare_delivery("interrupted-output-overage".into(), "original-project".into(),
+      directory.path().join("render.partial").to_string_lossy().into(), directory.path().join("render.mp4").to_string_lossy().into(),
+      DeliverySource::Render { paths: vec![] }).unwrap();
+    let scratch = jobs.stage_render_scratch(&delivery.id,
+      vec![RenderScratchFile { name: "filter.ffgraph".into(), content: "null".into() }], vec![]).unwrap();
+    std::fs::write(&delivery.dest_path, b"previous complete file").unwrap();
+    std::fs::write(&delivery.stage_path, [37u8; 72]).unwrap();
+    drop(jobs);
+    let mut recovered = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {}));
+    recovered.workspace = Workspace::new(64);
+    let recovered = recovered.with_export_work_root(work).with_export_root(journal)
+      .expect("an interrupted output must remain visible and cleanable");
+    assert_eq!(recovered.delivery_list().len(), 1);
+    assert_eq!(recovered.workspace.available_bytes(), 0);
+    assert!(recovered.workspace.reserve("peer", 1, 1).is_err());
+    assert!(recovered.verify_delivery(&delivery.id).is_err());
+    assert!(recovered.publish_delivery(&delivery.id).is_err());
+    assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"previous complete file");
+    assert_eq!(std::fs::read(&delivery.stage_path).unwrap(), vec![37u8; 72]);
+    recovered.cancel_delivery(&delivery.id).unwrap();
+    recovered.complete_delivery(&delivery.id).unwrap();
+    assert!(!Path::new(&delivery.stage_path).exists());
+    assert!(!Path::new(&scratch).exists());
+    assert_eq!(recovered.workspace.available_bytes(), 64);
+    recovered.workspace.reserve("peer", 64, 1).unwrap().retain();
+  }
+  #[test]
+  fn queued_preparation_waits_for_output_cleanup_and_cancellation_remains_available() {
+    for (copying, cancelled) in [(false, false), (false, true), (true, false), (true, true)] {
+      let directory = tempfile::tempdir().unwrap();
+      let mut jobs = owner(&directory.path().join("journal")).with_export_work_root(directory.path().join("work"));
+      jobs.workspace = Workspace::new(64);
+      let active = jobs.prepare_delivery("active-output".into(), "original-project".into(),
+        directory.path().join("active.partial").to_string_lossy().into(), directory.path().join("active.mp4").to_string_lossy().into(),
+        DeliverySource::Render { paths: vec![] }).unwrap();
+      let source = directory.path().join("source.wav");
+      std::fs::write(&source, [71u8; 16]).unwrap();
+      let queued = jobs.prepare_delivery("queued-output".into(), "original-project".into(),
+        directory.path().join("queued.partial").to_string_lossy().into(), directory.path().join("queued.mp4").to_string_lossy().into(),
+        if copying { DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_source".into() } }
+        else { DeliverySource::Render { paths: vec![] } }).unwrap();
+      std::fs::write(&queued.dest_path, b"previous complete file").unwrap();
+      jobs.account_workspace(&jobs.deliveries.lock().unwrap()).unwrap();
+      jobs.claim_export_output(&active.id).unwrap().retain();
+      let key = Supervisor::workspace_key(Path::new(&active.stage_path));
+      let (limit, charge) = jobs.workspace.reserve_output(&key).unwrap();
+      assert_eq!(limit, 64);
+      std::fs::write(&active.stage_path, [37u8; 32]).unwrap();
+      charge.retain();
+      let waiting = jobs.clone();
+      let queued_id = queued.id.clone();
+      let (sender, receiver) = std::sync::mpsc::channel();
+      let worker = std::thread::spawn(move || {
+        let result = if copying { waiting.copy_delivery(&queued_id).map(|()| String::new()) }
+          else { waiting.stage_render_scratch(&queued_id, vec![RenderScratchFile { name: "filter.ffgraph".into(), content: "null".into() }], vec![]) };
+        sender.send(result).unwrap();
+      });
+      assert!(matches!(receiver.recv_timeout(std::time::Duration::from_millis(100)), Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
+        "queued work consumed or refused another output's reserved capacity");
+      assert!(jobs.delivery_list().iter().find(|entry| entry.id == queued.id).unwrap().execution_queued_at_ms.is_some());
+      assert!(jobs.delivery_list().iter().find(|entry| entry.id == queued.id).unwrap().render_scratch.is_none());
+      assert_eq!(std::fs::read(&queued.dest_path).unwrap(), b"previous complete file");
+      if cancelled {
+        jobs.cancel_delivery(&queued.id).unwrap();
+        assert!(receiver.recv_timeout(std::time::Duration::from_secs(2)).unwrap().is_err());
+        assert_eq!(jobs.workspace.available_bytes(), 0);
+      }
+      jobs.cancel_delivery(&active.id).unwrap();
+      jobs.complete_delivery(&active.id).unwrap();
+      assert!(!Path::new(&active.stage_path).exists());
+      if !cancelled {
+        let result = receiver.recv_timeout(std::time::Duration::from_secs(2)).unwrap().unwrap();
+        if copying {
+          assert_eq!(std::fs::read(&queued.stage_path).unwrap(), vec![71u8; 16]);
+          assert_eq!(jobs.workspace.available_bytes(), 48);
+          jobs.verify_delivery(&queued.id).unwrap();
+          jobs.publish_delivery(&queued.id).unwrap();
+        } else {
+          assert_eq!(std::fs::read(Path::new(&result).join("filter.ffgraph")).unwrap(), b"null");
+          jobs.cancel_delivery(&queued.id).unwrap();
+        }
+      }
+      worker.join().unwrap();
+      jobs.complete_delivery(&queued.id).unwrap();
+      assert_eq!(jobs.workspace.available_bytes(), 64);
+      assert_eq!(std::fs::read(&source).unwrap(), vec![71u8; 16]);
+      if cancelled { assert_eq!(std::fs::read(&queued.dest_path).unwrap(), b"previous complete file"); }
+    }
+  }
+  #[test]
+  fn copy_staging_restart_restores_private_payload_charge_and_cleans_after_cancellation() {
+    let directory = tempfile::tempdir().unwrap();
+    let journal = directory.path().join("journal");
+    let source = directory.path().join("source.wav");
+    let destination = directory.path().join("delivered.wav");
+    std::fs::write(&source, [37u8; 32]).unwrap();
+    std::fs::write(&destination, b"previous complete file").unwrap();
+    let mut jobs = owner(&journal);
+    jobs.workspace = Workspace::new(64);
+    let delivery = jobs.prepare_delivery("copy-restart-payload".into(), "original-project".into(),
+      directory.path().join("copy.partial").to_string_lossy().into(), destination.to_string_lossy().into(),
+      DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_source".into() }).unwrap();
+    jobs.copying.lock().unwrap().insert(delivery.id.clone());
+    let mut output = jobs.begin_copy_output(&delivery, 32).unwrap();
+    output.write(&[41u8; 16]).unwrap();
+    let retained = jobs.delivery_list().into_iter().find(|entry| entry.id == delivery.id).unwrap().copy_scratch.unwrap();
+    let ScratchOutput { file, charge, .. } = output;
+    let (file, path) = file.keep().unwrap();
+    drop(file);
+    drop(charge);
+    assert_eq!(Path::new(&retained), path.as_path());
+    drop(jobs);
+    let mut reopened = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {}));
+    reopened.workspace = Workspace::new(64);
+    let reopened = reopened.with_export_root(journal).unwrap();
+    assert_eq!(reopened.workspace.available_bytes(), 48);
+    assert_eq!(std::fs::read(&retained).unwrap(), vec![41u8; 16]);
+    reopened.cancel_delivery(&delivery.id).unwrap();
+    reopened.complete_delivery(&delivery.id).unwrap();
+    assert!(!Path::new(&retained).exists());
+    assert!(!Path::new(&delivery.stage_path).exists());
+    assert_eq!(reopened.workspace.available_bytes(), 64);
+    assert_eq!(std::fs::read(&source).unwrap(), vec![37u8; 32]);
+    assert_eq!(std::fs::read(&destination).unwrap(), b"previous complete file");
+  }
+
+  #[test]
+  fn copy_staging_journal_refusal_leaves_no_payload_or_unowned_temporary_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let journal = directory.path().join("journal");
+    let source = directory.path().join("source.wav");
+    let destination = directory.path().join("delivered.wav");
+    std::fs::write(&source, [37u8; 32]).unwrap();
+    std::fs::write(&destination, b"previous complete file").unwrap();
+    let mut jobs = owner(&journal);
+    jobs.workspace = Workspace::new(64);
+    let delivery = jobs.prepare_delivery("copy-journal-refused".into(), "original-project".into(),
+      directory.path().join("copy.partial").to_string_lossy().into(), destination.to_string_lossy().into(),
+      DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_source".into() }).unwrap();
+    jobs.copying.lock().unwrap().insert(delivery.id.clone());
+    let saved = directory.path().join("saved-journal");
+    std::fs::rename(&journal, &saved).unwrap();
+    std::fs::write(&journal, b"journal unavailable").unwrap();
+    assert!(jobs.begin_copy_output(&delivery, 32).is_err());
+    assert!(saved.join(format!("{}.json", delivery.id)).exists());
+    assert_eq!(std::fs::metadata(&delivery.stage_path).unwrap().len(), 0);
+    assert!(!std::fs::read_dir(directory.path()).unwrap().any(|entry|
+      entry.unwrap().file_name().to_string_lossy().starts_with(&delivery.copy_scratch_prefix())));
+    assert_eq!(jobs.workspace.available_bytes(), 64);
+    assert_eq!(std::fs::read(&source).unwrap(), vec![37u8; 32]);
+    assert_eq!(std::fs::read(&destination).unwrap(), b"previous complete file");
+  }
+
+  #[test]
   fn replaced_copy_stage_cannot_truncate_its_admitted_source() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("source.wav");
@@ -2286,7 +3873,10 @@ mod export_delivery_tests {
     let failures = reopened.recover_exports();
     assert_eq!(failures.len(), 1);
     assert!(failures[0].1.contains("command identity changed"));
-    assert!(reopened.list().is_empty());
+    assert_eq!(reopened.list().len(), 1);
+    assert_eq!(reopened.list()[0].state, JobState::Exited);
+    assert_ne!(reopened.list()[0].code, Some(0));
+    assert!(reopened.list()[0].stderr_head.contains("command identity changed"));
     assert_eq!(std::fs::read(&source).unwrap(), b"unchanged source bytes");
     assert!(!Path::new(&delivery.dest_path).exists());
   }
@@ -2295,11 +3885,11 @@ mod export_delivery_tests {
     struct BoundWorker { path: PathBuf, started: Arc<std::sync::atomic::AtomicUsize> }
     impl Spawner for BoundWorker {
       fn identity(&self, _: &str) -> Result<ArtifactIdentity, String> { artifact_identity(&self.path) }
-      fn spawn(&self, _: &JobSpec, _: Arc<dyn Fn(ProcEvent) + Send + Sync>) -> Result<u32, String> {
+      fn spawn(&self, _: &JobSpec, _: Arc<dyn Fn(ProcEvent) + Send + Sync>, _: Arc<Workspace>) -> Result<u32, String> {
         self.started.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Err("test worker must never start".into())
       }
-      fn kill(&self, _: u32) {}
+      fn kill(&self, _: &str, _: u32) {}
     }
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("journal");
@@ -2322,7 +3912,10 @@ mod export_delivery_tests {
     let reopened = make_owner();
     let failures = reopened.recover_exports();
     assert!(failures.iter().any(|(_, error)| error.contains("worker identity changed")));
-    assert!(reopened.list().is_empty());
+    assert_eq!(reopened.list().len(), 1);
+    assert_eq!(reopened.list()[0].state, JobState::Exited);
+    assert_ne!(reopened.list()[0].code, Some(0));
+    assert!(reopened.list()[0].stderr_head.contains("worker identity changed"));
     assert_eq!(started.load(std::sync::atomic::Ordering::SeqCst), 0);
     assert_eq!(std::fs::metadata(&delivery.stage_path).unwrap().len(), 0);
     assert!(!Path::new(&delivery.dest_path).exists());
@@ -2357,6 +3950,69 @@ mod export_delivery_tests {
     assert_eq!(owner(&root).list().len(), 0);
   }
   #[test]
+  fn cancellation_during_dependency_reads_persists_before_the_reader_returns() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
+    use std::time::Duration;
+    struct HeldDependency {
+      entered: mpsc::Sender<()>,
+      release: Mutex<mpsc::Receiver<()>>,
+      starts: Arc<AtomicUsize>,
+      ignore_cancellation: bool,
+    }
+    impl Spawner for HeldDependency {
+      fn identity(&self, program: &str) -> Result<ArtifactIdentity, String> { NoSpawn.identity(program) }
+      fn dependency_identity(&self, path: &Path, check: &dyn Fn() -> Result<(), String>) -> Result<ArtifactIdentity, String> {
+        self.entered.send(()).map_err(|error| error.to_string())?;
+        self.release.lock().unwrap().recv().map_err(|error| error.to_string())?;
+        if self.ignore_cancellation { artifact_identity(path) } else { artifact_identity_checked(path, check) }
+      }
+      fn spawn(&self, _: &JobSpec, _: Arc<dyn Fn(ProcEvent) + Send + Sync>, _: Arc<Workspace>) -> Result<u32, String> {
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        Err("cancelled dependencies must never start a producer".into())
+      }
+      fn kill(&self, _: &str, _: u32) {}
+    }
+    for ignore_cancellation in [false, true] {
+      let dir = tempfile::tempdir().unwrap();
+      let root = dir.path().join("journal");
+      let source = dir.path().join("source.mp4");
+      std::fs::write(&source, b"original dependency bytes").unwrap();
+      let (entered, reading) = mpsc::channel();
+      let (release, resume) = mpsc::channel();
+      let starts = Arc::new(AtomicUsize::new(0));
+      let jobs = Supervisor::new(Arc::new(HeldDependency { entered, release: Mutex::new(resume), starts: starts.clone(), ignore_cancellation }),
+        Arc::new(|_| {})).with_export_root(root.clone()).unwrap();
+      let delivery = intent(&jobs, dir.path(), "cancel-reading");
+      std::fs::write(&delivery.dest_path, b"previous complete destination").unwrap();
+      let spec = JobSpec { id: delivery.id.clone(), lane: "export".into(), program: "ffmpeg".into(),
+        args: vec!["-i".into(), source.to_string_lossy().into(), delivery.stage_path.clone()], steps: vec![], cwd: None,
+        meta: serde_json::json!({"kind":"export"}) };
+      let binder = jobs.clone();
+      let binding = std::thread::spawn(move || binder.submit(spec));
+      reading.recv_timeout(Duration::from_secs(5)).expect("dependency reader was not reached");
+      let canceller = jobs.clone();
+      let id = delivery.id.clone();
+      let (cancelled, acknowledged) = mpsc::channel();
+      let cancellation = std::thread::spawn(move || { cancelled.send(canceller.cancel_delivery(&id)).unwrap(); });
+      let outcome = acknowledged.recv_timeout(Duration::from_secs(5));
+      release.send(()).unwrap();
+      let bound = binding.join().unwrap();
+      cancellation.join().unwrap();
+      assert_eq!(outcome.expect("cancellation waited for the blocked dependency reader").unwrap(), true);
+      assert!(bound.is_err(), "cancelled dependency read was admitted");
+      assert_eq!(starts.load(Ordering::SeqCst), 0);
+      let persisted: ExportDelivery = serde_json::from_slice(&std::fs::read(root.join("cancel-reading.json")).unwrap()).unwrap();
+      assert_eq!(persisted.state, "cancelled");
+      assert!(persisted.render_job.is_none());
+      assert!(!persisted.producer_complete);
+      assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"previous complete destination");
+      assert_eq!(std::fs::read(source).unwrap(), b"original dependency bytes");
+      assert_eq!(std::fs::metadata(delivery.stage_path).unwrap().len(), 0);
+    }
+  }
+
+  #[test]
   fn worker_replacement_blocks_queued_start_and_later_sequence_steps() {
     type Callback = Arc<dyn Fn(ProcEvent) + Send + Sync>;
     struct HeldWorker {
@@ -2366,12 +4022,12 @@ mod export_delivery_tests {
     }
     impl Spawner for HeldWorker {
       fn identity(&self, _: &str) -> Result<ArtifactIdentity, String> { artifact_identity(&self.path) }
-      fn spawn(&self, spec: &JobSpec, callback: Callback) -> Result<u32, String> {
+      fn spawn(&self, spec: &JobSpec, callback: Callback, _: Arc<Workspace>) -> Result<u32, String> {
         self.started.lock().unwrap().push(spec.id.clone());
         self.callbacks.lock().unwrap().insert(spec.id.clone(), callback);
         Ok(123)
       }
-      fn kill(&self, _: u32) {}
+      fn kill(&self, _: &str, _: u32) {}
     }
     let dir = tempfile::tempdir().unwrap();
     let binary = dir.path().join("worker.bin");
@@ -2381,7 +4037,7 @@ mod export_delivery_tests {
     let started = Arc::new(Mutex::new(Vec::new()));
     let callbacks = Arc::new(Mutex::new(HashMap::<String, Callback>::new()));
     let jobs = Supervisor::new(Arc::new(HeldWorker { path: binary.clone(), started: started.clone(), callbacks: callbacks.clone() }), Arc::new(|_| {}))
-      .with_export_root(dir.path().join("journal")).unwrap();
+      .with_export_work_root(dir.path().join("work")).with_export_root(dir.path().join("journal")).unwrap();
     let held = intent(&jobs, dir.path(), "lane-holder");
     let blocker = JobSpec { id: held.id, lane: "export".into(), program: "ffmpeg".into(), args: vec![held.stage_path], steps: vec![], cwd: None,
       meta: serde_json::json!({}) };
@@ -2402,8 +4058,7 @@ mod export_delivery_tests {
     assert!(!Path::new(&queued.dest_path).exists());
     std::fs::write(&binary, b"original worker").unwrap();
     let sequence = intent(&jobs, dir.path(), "sequence-bound");
-    let scratch = dir.path().join("sequence-scratch");
-    std::fs::create_dir(&scratch).unwrap();
+    let scratch = PathBuf::from(jobs.stage_render_scratch(&sequence.id, vec![], vec![]).unwrap());
     let sequence_spec = JobSpec { id: sequence.id.clone(), lane: "export".into(), program: "ffmpeg".into(),
       args: vec!["-i".into(), source.to_string_lossy().into(), "-f".into(), "nut".into(), "first-part.nut".into()],
       steps: vec![vec!["-i".into(), source.to_string_lossy().into(), sequence.stage_path.clone()]], cwd: Some(scratch.to_string_lossy().into()),
@@ -2423,11 +4078,11 @@ mod export_delivery_tests {
   fn changed_source_or_staged_font_blocks_recovery_without_output() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("journal");
-    let jobs = owner(&root);
+    let jobs = owner(&root).with_export_work_root(dir.path().join("work"));
     let delivery = intent(&jobs, dir.path(), "changed1");
     let source = dir.path().join("source.mp4");
-    let scratch = dir.path().join("scratch");
-    std::fs::create_dir(&scratch).unwrap();
+    let scratch = PathBuf::from(jobs.stage_render_scratch(&delivery.id,
+      vec![RenderScratchFile { name: "font.ttf".into(), content: "original font".into() }], vec![]).unwrap());
     let font = scratch.join("font.ttf");
     std::fs::write(&source, b"original source").unwrap();
     std::fs::write(&font, b"original font").unwrap();
@@ -2436,15 +4091,22 @@ mod export_delivery_tests {
       cwd: Some(scratch.to_string_lossy().into()), meta: serde_json::json!({ "kind": "export", "plan": { "sources": [{ "path": source }] } }) };
     jobs.retain_render_job(&spec).unwrap();
     std::fs::write(&font, b"changed font").unwrap();
-    let reopened = owner(&root);
+    let reopened = owner(&root).with_export_work_root(dir.path().join("work"));
     assert!(!reopened.recover_exports().is_empty());
-    assert!(reopened.list().is_empty());
+    assert_eq!(reopened.list().len(), 1);
+    assert_eq!(reopened.list()[0].state, JobState::Exited);
+    assert_ne!(reopened.list()[0].code, Some(0));
+    assert_eq!(reopened.list()[0].meta["projectDir"], "original-project");
+    assert!(reopened.list()[0].stderr_head.contains("staged input changed"));
     assert_eq!(std::fs::metadata(&delivery.stage_path).unwrap().len(), 0);
     std::fs::write(&font, b"original font").unwrap();
     std::fs::write(&source, b"changed source").unwrap();
-    let reopened = owner(&root);
+    let reopened = owner(&root).with_export_work_root(dir.path().join("work"));
     assert!(!reopened.recover_exports().is_empty());
-    assert!(reopened.list().is_empty());
+    assert_eq!(reopened.list().len(), 1);
+    assert_eq!(reopened.list()[0].state, JobState::Exited);
+    assert_ne!(reopened.list()[0].code, Some(0));
+    assert!(reopened.list()[0].stderr_head.contains("source changed"));
     assert!(!Path::new(&delivery.dest_path).exists());
     std::fs::write(&delivery.stage_path, b"success-looking rendered bytes").unwrap();
     assert!(jobs.verify_delivery(&delivery.id).is_err());
@@ -2494,17 +4156,155 @@ mod export_delivery_tests {
   }
   #[test]
   #[ignore = "requires the shipped ffmpeg artifact fixture"]
+  fn final_mp4_staging_cannot_bypass_shared_payload_budget() {
+    struct RealSpawner(PathBuf, stream::Registry);
+    impl Spawner for RealSpawner {
+      fn identity(&self, _: &str) -> Result<ArtifactIdentity, String> { artifact_identity(&self.0) }
+      fn spawn(&self, spec: &JobSpec, notify: Arc<dyn Fn(ProcEvent) + Send + Sync>, workspace: Arc<Workspace>) -> Result<u32, String> {
+        stream::spawn_single(&self.0, spec, notify, self.1.clone(), workspace)
+      }
+      fn spawn_stream(&self, spec: &JobSpec, notify: Arc<dyn Fn(ProcEvent) + Send + Sync>,
+        guard: stream::StartGuard, workspace: Arc<Workspace>) -> Result<u32, String> {
+        stream::spawn(&self.0, spec, notify, guard, self.1.clone(), workspace)
+      }
+      fn kill(&self, id: &str, pid: u32) { assert!(stream::cancel(&self.1, id, pid)); }
+    }
+    let binary = PathBuf::from(std::env::var("ARTDADDY_QA_FFMPEG").expect("shipped binary supplied"));
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.mp4");
+    let fixture = std::process::Command::new(&binary).args(["-y", "-nostdin", "-loglevel", "error", "-f", "lavfi", "-i",
+      "testsrc2=s=640x360:r=30:d=2", "-f", "lavfi", "-i", "sine=frequency=523:sample_rate=48000:duration=2",
+      "-vf", "noise=alls=30:allf=t+u", "-af", "pan=stereo|c0=c0|c1=0.25*c0", "-c:a", "alac", "-c:v", "libx264", "-threads", "1",
+      "-crf", "18", "-pix_fmt", "yuv420p"]).arg(&source).output().unwrap();
+    assert!(fixture.status.success(), "{}", String::from_utf8_lossy(&fixture.stderr));
+    let original = artifact_identity(&source).unwrap();
+    assert!(original.size > 64 * 1024 && original.size < 16 * 1024 * 1024);
+    for (streamed, replayed, budget) in [(false, false), (true, false), (false, true), (true, true)].into_iter()
+      .flat_map(|(streamed, replayed)| [16 * 1024 * 1024, 64 * 1024].map(move |budget| (streamed, replayed, budget))) {
+      let (sender, receiver) = std::sync::mpsc::channel();
+      let mut jobs = Supervisor::new(Arc::new(RealSpawner(binary.clone(), Arc::default())), Arc::new(move |notice| {
+        if let Notice::Changed(view) = notice {
+          if view.state == JobState::Exited { let _ = sender.send(view); }
+        }
+      })).with_export_work_root(dir.path().join(format!("work-{streamed}-{replayed}-{budget}")))
+        .with_export_root(dir.path().join(format!("journal-{streamed}-{replayed}-{budget}"))).unwrap();
+      jobs.workspace = Workspace::new(budget);
+      let delivery = jobs.prepare_delivery(format!("bounded-mp4-{budget}"), "original-project".into(),
+        dir.path().join(format!("stage-{budget}.partial")).to_string_lossy().into(),
+        dir.path().join(format!("delivered-{budget}.mp4")).to_string_lossy().into(),
+        DeliverySource::Render { paths: vec![source.to_string_lossy().into()] }).unwrap();
+      std::fs::write(&delivery.dest_path, b"previous complete file").unwrap();
+      let mut spec = JobSpec { id: delivery.id.clone(), lane: "export".into(), program: "ffmpeg".into(),
+        args: vec!["-y".into(), "-nostdin".into(), "-loglevel".into(), "error".into(), "-i".into(), source.to_string_lossy().into(),
+          "-c".into(), "copy".into(), "-f".into(), "mp4".into(), delivery.stage_path.clone()], steps: vec![], cwd: None,
+        meta: serde_json::json!({ "kind": "export", "plan": { "sources": [{ "path": source }] } }) };
+      if streamed {
+        spec.cwd = Some(jobs.stage_render_scratch(&delivery.id, vec![RenderScratchFile { name: "segments.ffconcat".into(),
+          content: "ffconcat version 1.0\nfile 'part0.nut'\nduration 1\nfile 'part1.nut'\nduration 1\n".into() }], vec![]).unwrap());
+        let producer = |start: &str, name: &str| vec!["-y".into(), "-nostdin".into(), "-loglevel".into(), "error".into(),
+          "-ss".into(), start.into(), "-i".into(), source.to_string_lossy().into(), "-t".into(), "1".into(),
+          "-an".into(), "-c:v".into(), "ffv1".into(), "-threads".into(), "1".into(), "-f".into(), "nut".into(), name.into()];
+        spec.args = producer("0", "part0.nut");
+        spec.steps = vec![producer("1", "part1.nut"), vec!["-y".into(), "-nostdin".into(), "-loglevel".into(), "error".into(),
+          "-f".into(), "concat".into(), "-safe".into(), "1".into(), "-i".into(), "segments.ffconcat".into(),
+          "-i".into(), "audio.nut".into(), "-map".into(), "0:v:0".into(), "-map".into(), "1:a:0".into(),
+          "-c:a".into(), "alac".into(), "-c:v".into(), "libx264".into(), "-threads".into(), "1".into(), "-crf".into(), "0".into(),
+          "-f".into(), "mp4".into(), delivery.stage_path.clone()]];
+        spec.meta["renderTransport"] = serde_json::json!("partition-pipes-v1");
+        spec.meta["renderAudio"] = serde_json::json!({ "duration": 2.0, "args": ["-nostdin", "-loglevel", "error",
+          "-i", source, "-map", "0:a:0", "-vn", "-ac", "2", "-ar", "48000", "-t", "2", "-c:a", "pcm_f64le", "-f", "nut", "audio.nut"] });
+      }
+      if replayed {
+        jobs.retain_render_job(&spec).unwrap();
+        let mut recovered = Supervisor::new(jobs.spawner.clone(), jobs.notify.clone());
+        recovered.workspace = Workspace::new(budget);
+        recovered = recovered.with_export_work_root(jobs.export_work_root.clone().unwrap())
+          .with_export_root(jobs.export_root.clone().unwrap()).unwrap();
+        drop(jobs);
+        jobs = recovered;
+        assert!(jobs.recover_exports().is_empty());
+        assert_eq!(jobs.delivery_list()[0].recovery_attempts, 1);
+      } else { jobs.submit(spec).unwrap(); }
+      let ended = receiver.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
+      let diagnostics = {
+        let state = jobs.lock();
+        let job = &state.jobs[&delivery.id];
+        format!("{}{}", job.stderr_head, job.stderr)
+      };
+      assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"previous complete file");
+      assert_eq!(artifact_identity(&source).unwrap().sha256, original.sha256);
+      let retained_scratch = jobs.delivery_list().into_iter().find(|entry| entry.id == delivery.id).unwrap().render_scratch
+        .map(|scratch| scratch_usage(Path::new(&scratch.path), Path::new("")).unwrap().0).unwrap_or(0);
+      let staged_bytes = std::fs::metadata(&delivery.stage_path).map(|metadata| metadata.len()).unwrap_or(0);
+      assert_eq!(jobs.workspace.available_bytes(), budget.saturating_sub(retained_scratch + staged_bytes),
+        "terminal output released its private bytes or invented used capacity before publication");
+      if budget < original.size {
+        assert_ne!(ended.code, Some(0), "pending MP4 output bypassed the shared workspace: {diagnostics}");
+        assert!(diagnostics.contains("temporary-output limit reached"), "over-budget output lost its resource failure: {diagnostics}");
+        println!("pending MP4 budget: streamed={streamed}, replayed={replayed}, allowance={budget}, {}",
+          diagnostics.lines().find(|line| line.contains("temporary-output limit reached")).unwrap());
+        assert!(!Path::new(&delivery.stage_path).exists(), "size-stopped private output was not cleaned");
+        assert!(jobs.verify_delivery(&delivery.id).is_err());
+        assert!(jobs.publish_delivery(&delivery.id).is_err());
+      } else {
+        assert_eq!(ended.code, Some(0), "{diagnostics}");
+        let queued = jobs.prepare_delivery(format!("next-project-{budget}"), "another-project".into(),
+          dir.path().join(format!("next-{streamed}-{replayed}.partial")).to_string_lossy().into(),
+          dir.path().join(format!("next-{streamed}-{replayed}.mp4")).to_string_lossy().into(), DeliverySource::Render { paths: vec![] }).unwrap();
+        let waiting = jobs.clone();
+        let queued_id = queued.id.clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+          sender.send(waiting.stage_render_scratch(&queued_id,
+            vec![RenderScratchFile { name: "filter.ffgraph".into(), content: "null".into() }], vec![])).unwrap();
+        });
+        let prepared = receiver.recv_timeout(std::time::Duration::from_secs(2));
+        if prepared.is_err() {
+          jobs.cancel_delivery(&delivery.id).unwrap();
+          jobs.complete_delivery(&delivery.id).unwrap();
+          worker.join().unwrap();
+          panic!("a completed output blocked another project's usable remaining capacity before acknowledgement");
+        }
+        let next_scratch = prepared.unwrap().unwrap();
+        assert_eq!(std::fs::read(Path::new(&next_scratch).join("filter.ffgraph")).unwrap(), b"null");
+        jobs.cancel_delivery(&queued.id).unwrap();
+        jobs.complete_delivery(&queued.id).unwrap();
+        worker.join().unwrap();
+        let decode = |path: &Path| std::process::Command::new(&binary).args(["-v", "error", "-i"]).arg(path)
+          .args(["-map", "0:v:0", "-an", "-f", "framemd5", "pipe:1"]).output().unwrap();
+        let expected = decode(&source);
+        let staged = decode(Path::new(&delivery.stage_path));
+        assert!(expected.status.success() && staged.status.success());
+        assert_eq!(staged.stdout, expected.stdout);
+        let audio = |path: &Path| std::process::Command::new(&binary).args(["-v", "error", "-i"]).arg(path)
+          .args(["-map", "0:a:0", "-vn", "-ac", "2", "-ar", "48000", "-c:a", "pcm_f64le", "-f", "f64le", "pipe:1"]).output().unwrap();
+        let original_audio = audio(&source);
+        let staged_audio = audio(Path::new(&delivery.stage_path));
+        assert!(original_audio.status.success() && staged_audio.status.success());
+        assert_eq!(original_audio.stdout.len(), 96_000 * 2 * 8);
+        assert_eq!(staged_audio.stdout, original_audio.stdout);
+        jobs.verify_delivery(&delivery.id).unwrap();
+        jobs.publish_delivery(&delivery.id).unwrap();
+      }
+      if ended.code != Some(0) { jobs.fail_delivery(&delivery.id).unwrap(); }
+      jobs.complete_delivery(&delivery.id).unwrap();
+      assert!(!Path::new(&delivery.stage_path).exists());
+      assert_eq!(jobs.workspace.available_bytes(), budget);
+    }
+  }
+  #[test]
+  #[ignore = "requires the shipped ffmpeg artifact fixture"]
   fn crash_recovery_renders_and_publishes_a_real_video() {
     struct RealSpawner(PathBuf);
     impl Spawner for RealSpawner {
       fn identity(&self, _: &str) -> Result<ArtifactIdentity, String> { artifact_identity(&self.0) }
-      fn spawn(&self, spec: &JobSpec, notify: Arc<dyn Fn(ProcEvent) + Send + Sync>) -> Result<u32, String> {
+      fn spawn(&self, spec: &JobSpec, notify: Arc<dyn Fn(ProcEvent) + Send + Sync>, _: Arc<Workspace>) -> Result<u32, String> {
         let output = std::process::Command::new(&self.0).args(&spec.args).output().map_err(|error| error.to_string())?;
         notify(ProcEvent::Stderr(String::from_utf8_lossy(&output.stderr).into_owned()));
         notify(ProcEvent::Exit(output.status.code()));
         Ok(1)
       }
-      fn kill(&self, _: u32) {}
+      fn kill(&self, _: &str, _: u32) {}
     }
     let binary = PathBuf::from(std::env::var("ARTDADDY_QA_FFMPEG").expect("shipped binary supplied"));
     let dir = tempfile::tempdir().unwrap();
@@ -2578,6 +4378,7 @@ mod tests {
       &self,
       spec: &JobSpec,
       on_event: Arc<dyn Fn(ProcEvent) + Send + Sync>,
+      _workspace: Arc<Workspace>,
     ) -> Result<u32, String> {
       if self.fail.lock().unwrap().contains(&spec.id) {
         return Err("no such file".into());
@@ -2590,7 +4391,7 @@ mod tests {
       }
       Ok(pid)
     }
-    fn kill(&self, pid: u32) {
+    fn kill(&self, _id: &str, pid: u32) {
       self.killed.lock().unwrap().push(pid);
     }
   }
@@ -2714,12 +4515,12 @@ mod tests {
       fn identity(&self, program: &str) -> Result<ArtifactIdentity, String> {
         Ok(ArtifactIdentity { sha256: format!("{:x}", Sha256::digest(program.as_bytes())), size: program.len() as u64 })
       }
-      fn spawn(&self, _spec: &JobSpec, event: Arc<dyn Fn(ProcEvent) + Send + Sync>) -> Result<u32, String> {
+      fn spawn(&self, _spec: &JobSpec, event: Arc<dyn Fn(ProcEvent) + Send + Sync>, _: Arc<Workspace>) -> Result<u32, String> {
         let pid = self.0.fetch_add(1, Ordering::SeqCst);
         event(ProcEvent::Exit(Some(0)));
         Ok(pid)
       }
-      fn kill(&self, _pid: u32) {
+      fn kill(&self, _id: &str, _pid: u32) {
         panic!("an exited render must not be killed");
       }
     }
@@ -2755,52 +4556,149 @@ mod tests {
   }
 
   #[test]
+  fn export_resource_snapshot_measures_existing_volumes_without_creating_output() {
+    let root = tempfile::tempdir().unwrap();
+    let destination = root.path().join("not-created").join("movie.mp4");
+    let workspace = Workspace::new(10_000);
+    workspace.account_existing("retained", 123, 1).unwrap();
+    let measured = export_resources(&destination, Some(root.path()), &workspace);
+    assert_eq!(measured.budgets.temporary_bytes, 9877);
+    assert_eq!(measured.budgets.memory_bytes, budget::RENDER_RESIDENT_LIMIT);
+    assert_eq!(measured.budgets.execution_seconds * 1000, EXPORT_EXECUTION_LIMIT_MS);
+    assert!(measured.total_memory_bytes.is_some_and(|bytes| bytes > 1024 * 1024 * 1024));
+    assert!(measured.available_memory_bytes.unwrap() <= measured.total_memory_bytes.unwrap());
+    assert!(measured.destination_free_bytes.is_some_and(|bytes| bytes > 0), "{measured:?}");
+    assert_eq!(measured.scratch_free_bytes, measured.destination_free_bytes);
+    assert!(!destination.exists());
+    assert!(!destination.parent().unwrap().exists());
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    let unknown = export_resources(Path::new("relative-output.mp4"), None, &workspace);
+    assert!(unknown.destination_free_bytes.is_none());
+    assert!(unknown.scratch_free_bytes.is_none());
+    println!("native resource snapshot: {}", serde_json::to_string(&measured).unwrap());
+  }
+
+  #[test]
   #[ignore = "invoked by exportRange.smoke.e2e.ts with a private real-ffmpeg fixture"]
   fn render_sequence_real_artifact() {
-    struct RealSpawner(String);
+    struct RealSpawner(String, stream::Registry);
     impl Spawner for RealSpawner {
       fn identity(&self, _: &str) -> Result<ArtifactIdentity, String> { artifact_identity(Path::new(&self.0)) }
-      fn spawn(&self, spec: &JobSpec, on_event: Arc<dyn Fn(ProcEvent) + Send + Sync>) -> Result<u32, String> {
-        let child = std::process::Command::new(&self.0)
-          .args(&spec.args)
+      fn spawn(&self, spec: &JobSpec, on_event: Arc<dyn Fn(ProcEvent) + Send + Sync>, _: Arc<Workspace>) -> Result<u32, String> {
+        let mut capture = spec.meta.get("_native_scratch_capture").map(|contract| {
+          ScratchOutput::open(Path::new(contract["path"].as_str().ok_or("missing capture path")?),
+            contract["used"].as_u64().ok_or("missing capture usage")?, contract["limit"].as_u64().ok_or("missing capture limit")?)
+        }).transpose()?;
+        let args = if capture.is_some() { captured_output_args(&spec.args)? } else { spec.args.clone() };
+        let mut child = std::process::Command::new(&self.0)
+          .args(&args)
           .current_dir(spec.cwd.as_ref().ok_or("real render needs a private cwd")?)
           .stdout(std::process::Stdio::piped())
           .stderr(std::process::Stdio::piped())
           .spawn().map_err(|error| error.to_string())?;
         let pid = child.id();
-        std::thread::spawn(move || match child.wait_with_output() {
-          Ok(output) => {
-            on_event(ProcEvent::Stdout(String::from_utf8_lossy(&output.stdout).into_owned()));
-            on_event(ProcEvent::Stderr(String::from_utf8_lossy(&output.stderr).into_owned()));
-            on_event(ProcEvent::Exit(output.status.code()));
+        let mut stdout = child.stdout.take().ok_or("missing fixture stdout")?;
+        let mut stderr = child.stderr.take().ok_or("missing fixture stderr")?;
+        std::thread::spawn(move || {
+          let errors = on_event.clone();
+          let stderr_reader = std::thread::spawn(move || -> std::io::Result<()> {
+            let mut buffer = [0u8; 65536];
+            loop {
+              let count = stderr.read(&mut buffer)?;
+              if count == 0 { return Ok(()); }
+              errors(ProcEvent::Stderr(String::from_utf8_lossy(&buffer[..count]).into_owned()));
+            }
+          });
+          let copied = (|| -> Result<(), String> {
+            let mut buffer = [0u8; 65536];
+            loop {
+              let count = stdout.read(&mut buffer).map_err(|error| error.to_string())?;
+              if count == 0 { return Ok(()); }
+              if let Some(writer) = capture.as_mut() { writer.write(&buffer[..count])?; }
+              else { on_event(ProcEvent::Stdout(String::from_utf8_lossy(&buffer[..count]).into_owned())); }
+            }
+          })();
+          if copied.is_err() { let _ = crate::kill_tree(pid); }
+          let mut code = child.wait().ok().and_then(|status| status.code());
+          let stderr_ok = stderr_reader.join().is_ok_and(|result| result.is_ok());
+          if let Err(error) = copied {
+            on_event(ProcEvent::Stderr(error));
+            code = None;
           }
-          Err(error) => {
-            on_event(ProcEvent::Stderr(error.to_string()));
-            on_event(ProcEvent::Exit(None));
+          if !stderr_ok { code = None; }
+          if let Some(writer) = capture {
+            if let Err(error) = writer.finish(code) { on_event(ProcEvent::Stderr(error)); code = None; }
           }
+          on_event(ProcEvent::Exit(code));
         });
         Ok(pid)
       }
-      fn kill(&self, pid: u32) {
+      fn spawn_stream(&self, spec: &JobSpec, on_event: Arc<dyn Fn(ProcEvent) + Send + Sync>,
+        guard: stream::StartGuard, workspace: Arc<Workspace>) -> Result<u32, String> {
+        stream::spawn(Path::new(&self.0), spec, on_event, guard, self.1.clone(), workspace)
+      }
+      fn kill(&self, id: &str, pid: u32) {
+        if stream::cancel(&self.1, id, pid) { return; }
         crate::kill_tree(pid).expect("kill real render");
       }
     }
     let file = std::env::var("ARTDADDY_QA_RENDER_SPEC").expect("private fixture spec");
     let binary = std::env::var("ARTDADDY_QA_FFMPEG").expect("shipped ffmpeg");
-    let spec: JobSpec = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+    let mut spec: JobSpec = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+    let trace = std::env::var("ARTDADDY_QA_RENDER_TRACE").unwrap_or_default();
+    if trace == "1" || trace == "debug" {
+      let producer_steps = spec.steps.len().saturating_sub(1);
+      for args in std::iter::once(&mut spec.args).chain(spec.steps.iter_mut().take(producer_steps)) {
+        if let Some(option) = args.iter().position(|arg| arg == "-loglevel") {
+          args[option + 1] = if trace == "debug" { "debug" } else { "verbose" }.into();
+        } else { args.splice(0..0, ["-loglevel".into(), if trace == "debug" { "debug" } else { "verbose" }.into()]); }
+        if trace == "debug" { args.insert(0, "-debug_ts".into()); }
+      }
+    }
+    let fixture = PathBuf::from(spec.cwd.as_ref().expect("fixture input directory"));
     assert_eq!(spec.program, "ffmpeg");
     assert!(!spec.steps.is_empty(), "the fixture must exercise a real sequence");
+    let journal = tempfile::tempdir().unwrap();
     let (sender, receiver) = std::sync::mpsc::channel();
-    let supervisor = Supervisor::new(Arc::new(RealSpawner(binary)), Arc::new(move |notice| {
+    let supervisor = Supervisor::new(Arc::new(RealSpawner(binary, Arc::default())), Arc::new(move |notice| {
       if let Notice::Changed(view) = notice {
         if view.state == JobState::Exited {
           sender.send(view).unwrap();
         }
       }
-    }));
-    let expected_steps = spec.steps.len();
+    })).with_export_work_root(journal.path().join("work")).with_export_font_root(fixture.join("fonts"))
+      .with_export_root(journal.path().join("journal")).unwrap();
+    let stage = PathBuf::from(spec.steps.last().and_then(|args| args.last()).expect("sequence final output"));
+    let destination = stage.with_file_name("native-sequence-delivered.mkv");
+    let dependencies: Vec<String> = spec.meta.get("dependencies").map(|value| serde_json::from_value(value.clone()).unwrap()).unwrap_or_default();
+    supervisor.prepare_delivery(spec.id.clone(), "fixture-project".into(), stage.to_string_lossy().into(), destination.to_string_lossy().into(),
+      DeliverySource::Render { paths: dependencies }).unwrap();
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(&fixture).unwrap() {
+      let entry = entry.unwrap();
+      if entry.file_type().unwrap().is_file() && entry.file_name() != "native-spec.json" {
+        files.push(RenderScratchFile { name: entry.file_name().to_string_lossy().into(), content: std::fs::read_to_string(entry.path()).unwrap() });
+      }
+    }
+    let fonts = if fixture.join("fonts").is_dir() { std::fs::read_dir(fixture.join("fonts")).unwrap()
+      .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned()).collect() } else { Vec::new() };
+    spec.cwd = Some(supervisor.stage_render_scratch(&spec.id, files, fonts).unwrap());
+    let expected_steps = if is_streamed(&spec) { 0 } else { spec.steps.len() };
+    let id = spec.id.clone();
+    let wait_ms = std::env::var("ARTDADDY_QA_RENDER_WAIT_MS").ok()
+      .map(|value| value.parse::<u64>().expect("private fixture wait must be milliseconds")).unwrap_or(120_000);
+    assert!((1_000..=120_000).contains(&wait_ms));
     supervisor.submit(spec).unwrap();
-    let result = receiver.recv_timeout(std::time::Duration::from_secs(120)).expect("real render ended");
+    let result = match receiver.recv_timeout(std::time::Duration::from_millis(wait_ms)) {
+      Ok(result) => result,
+      Err(error) => {
+        let before = supervisor.list().into_iter().find(|view| view.id == id).expect("owned fixture still exists");
+        supervisor.kill(&id);
+        let stopped = receiver.recv_timeout(std::time::Duration::from_secs(10)).expect("timed-out fixture workers settled after cancellation");
+        panic!("real render ended: {error}; last progress={}\nsettled diagnostics={}\n{}",
+          before.stdout_tail, stopped.stderr_head, stopped.stderr_tail);
+      }
+    };
     assert_eq!(result.code, Some(0), "{}\n{}", result.stderr_head, result.stderr_tail);
     assert!(!result.killed);
     assert_eq!(result.step, expected_steps);

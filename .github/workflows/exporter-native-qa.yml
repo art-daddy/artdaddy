@@ -49,6 +49,10 @@ jobs:
         run: "cargo test --manifest-path src-tauri/Cargo.toml --lib jobs::"
       - name: Native commit failure and volume outcomes
         run: "cargo test --manifest-path src-tauri/Cargo.toml --lib commit -- --nocapture"
+      - name: Source clocks, audio DSP and actual native pieces
+        run: |
+          node node_modules/vitest/vitest.mjs run --config vitest.smoke.config.ts src/timeline/exportRange.smoke.e2e.ts --testNamePattern 'source audio gap before mixing|keeps delayed source timing|one-pass audio preserves|partition-pipes-v1 chunk seams|audio.*preserves actual frames and floating stereo across partitions' --reporter=json --outputFile=reports/qa/exporter/source-clock-dsp.json
+          node -e 'const fs=require("node:fs");const result=JSON.parse(fs.readFileSync("reports/qa/exporter/source-clock-dsp.json","utf8"));if(result.numPassedTests!==15||result.numFailedTests!==0)throw new Error("Expected all15source-clock/DSP/native-piece cases to pass");'
       - name: Native macOS capture and crash recovery
         if: runner.os == 'macOS'
         run: node scripts/qa/exporterNative.mjs

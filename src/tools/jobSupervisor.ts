@@ -5,6 +5,7 @@
 // was there. The page still does all the thinking (the plan, the checks, the rename, the project's
 // records); the supervisor only runs the process, in order, and remembers how it ended.
 import type { CommandResult, CommandRunner } from "./command";
+import type { AssFile } from "./assScratch";
 
 export type JobState = "queued" | "running" | "exited";
 
@@ -12,7 +13,7 @@ export type JobState = "queued" | "running" | "exited";
  *  src-tauri/src/jobs.rs, its twin (a test holds the two together). */
 export const JOB_PROGRAMS = ["ffmpeg", "whisper-cli"] as const;
 export type JobProgram = (typeof JOB_PROGRAMS)[number];
-export const EXPORT_PROTOCOL_VERSION = 11;
+export const EXPORT_PROTOCOL_VERSION = 20;
 
 export interface JobView {
   id: string;
@@ -82,6 +83,7 @@ export type ExportDeliverySource =
 
 export interface ExportDeliveryPort {
   protocol(): Promise<number>;
+  stageScratch(id: string, files: readonly AssFile[], fonts: readonly string[]): Promise<string>;
   prepare(
     id: string,
     projectDir: string,
@@ -115,6 +117,8 @@ export function jobResult(job: JobView): CommandResult {
 class TauriJobSupervisor implements JobSupervisor {
   readonly delivery: ExportDeliveryPort = {
     protocol: () => this.invoke<number>("jobs_export_protocol"),
+    stageScratch: (id, files, fonts) =>
+      this.invoke<string>("jobs_stage_render_scratch", { id, files, fonts }),
     prepare: (id, projectDir, stagePath, destPath, source) =>
       this.invoke<ExportDelivery>("jobs_prepare_export", {
         id,
@@ -240,7 +244,7 @@ export function supervisedRunner(
 ): CommandRunner {
   let used = false;
   const runner: CommandRunner = {
-    runSequence(steps, signal, cwd, onStdout) {
+    runSequence(steps, signal, cwd, onStdout, audio) {
       if (used || !steps.length)
         return Promise.resolve({
           code: -1,
@@ -257,7 +261,11 @@ export function supervisedRunner(
           args: steps[0].args,
           steps: steps.slice(1).map((step) => step.args),
           cwd: cwd ?? null,
-          meta: { ...job.meta, scratch: cwd ?? null },
+          meta: {
+            ...job.meta,
+            scratch: cwd ?? null,
+            ...(audio ? { renderAudio: { args: [...audio.args], duration: audio.duration } } : {}),
+          },
         },
         signal,
         onStdout,
@@ -282,13 +290,27 @@ export function supervisedRunner(
       );
     },
   };
-  if (sup.delivery && job.lane === "export") durableScratchRunners.add(runner);
+  if (sup.delivery && job.lane === "export")
+    durableScratchRunners.set(runner, { delivery: sup.delivery, id: job.id });
   return runner;
 }
 
-const durableScratchRunners = new WeakSet<CommandRunner>();
+const durableScratchRunners = new WeakMap<
+  CommandRunner,
+  { delivery: ExportDeliveryPort; id: string }
+>();
 export function jobOwnsScratch(runner: CommandRunner): boolean {
   return durableScratchRunners.has(runner);
+}
+
+export function stageJobScratch(
+  runner: CommandRunner,
+  files: readonly AssFile[],
+  fonts: readonly string[],
+): Promise<string> {
+  const owner = durableScratchRunners.get(runner);
+  if (!owner) throw new Error("render staging requires its admitted native owner");
+  return owner.delivery.stageScratch(owner.id, files, fonts);
 }
 
 /** Run `spec` as a job of the app process and resolve the way a CommandRunner reports a process:

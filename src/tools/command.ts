@@ -31,6 +31,7 @@ export interface CommandRunner {
     signal?: AbortSignal,
     cwd?: string,
     onStdout?: (chunk: string) => void,
+    audio?: CommandStep,
   ): Promise<CommandResult>;
 }
 

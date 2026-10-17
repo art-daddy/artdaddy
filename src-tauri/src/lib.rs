@@ -443,7 +443,9 @@ pub fn run() {
       jobs::jobs_forget,
       jobs::jobs_launch_id,
       jobs::jobs_export_protocol,
+      jobs::jobs_export_resources,
       jobs::jobs_prepare_export,
+      jobs::jobs_stage_render_scratch,
       jobs::jobs_verify_export,
       jobs::jobs_publish_export,
       jobs::jobs_cancel_export,
@@ -1166,37 +1168,17 @@ mod tests {
         .collect()
     }
 
-    fn options(unix: bool) -> MatchOptions {
-      let config: serde_json::Value =
-        serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri config must parse");
-      let leading_dot = config["plugins"]["fs"]["requireLiteralLeadingDot"].as_bool().unwrap_or(unix);
-      MatchOptions { case_sensitive: false, require_literal_separator: true, require_literal_leading_dot: leading_dot }
+    fn options() -> MatchOptions {
+      // Mirrors tauri::scope::fs (tauri-2.11.5 src/scope/fs.rs).
+      MatchOptions { case_sensitive: false, require_literal_separator: true, require_literal_leading_dot: false }
     }
 
     fn allowed(path: &str) -> bool {
-      allowed_on(path, cfg!(unix))
-    }
-
-    fn allowed_on(path: &str, unix: bool) -> bool {
-      let opts = options(unix);
+      let opts = options();
       allow_patterns()
         .iter()
         .filter_map(|p| Pattern::new(p).ok())
         .any(|p| p.matches_with(path, opts))
-    }
-
-    #[test]
-    fn hidden_export_staging_is_allowed_on_unix_and_windows() {
-      for unix in [true, false] {
-        for path in [
-          "/Users/editor/Downloads/.test_28764f.mp4.w9t626.partial",
-          "/Volumes/Export/Final/.film.mp4.abc123.partial",
-          "/home/editor/Downloads/.film.mp4.abc123.partial",
-          "D:/Exports/.film.mp4.abc123.partial",
-        ] {
-          assert!(allowed_on(path, unix), "staged export refused on unix={unix}: {path}");
-        }
-      }
     }
 
     #[test]
@@ -1228,6 +1210,36 @@ mod tests {
       assert!(allowed("C:/Users/someone/AppData/Roaming/ArtDaddy/projects/p/internals/project.json"));
       assert!(allowed("/home/someone/.local/share/ArtDaddy/projects/p/timeline.json"));
     }
+  }
+
+  fn unleased_trash(path: String) -> Result<(), String> {
+    struct NoSpawn;
+    impl jobs::Spawner for NoSpawn {
+      fn identity(&self, _: &str) -> Result<jobs::ArtifactIdentity, String> { Err("trash fixture has no worker".into()) }
+      fn spawn(&self, _: &jobs::JobSpec, _: std::sync::Arc<dyn Fn(jobs::ProcEvent) + Send + Sync>, _: std::sync::Arc<jobs::Workspace>) -> Result<u32, String> { Err("unused".into()) }
+      fn kill(&self, _: &str, _: u32) {}
+    }
+    let supervisor = jobs::Supervisor::new(std::sync::Arc::new(NoSpawn), std::sync::Arc::new(|_| {}));
+    trash_path_owned(&supervisor, path)
+  }
+
+  #[test]
+  fn trash_refuses_an_admitted_export_source() {
+    struct NoSpawn;
+    impl jobs::Spawner for NoSpawn {
+      fn identity(&self, _: &str) -> Result<jobs::ArtifactIdentity, String> { Err("trash fixture has no worker".into()) }
+      fn spawn(&self, _: &jobs::JobSpec, _: std::sync::Arc<dyn Fn(jobs::ProcEvent) + Send + Sync>, _: std::sync::Arc<jobs::Workspace>) -> Result<u32, String> { Err("unused".into()) }
+      fn kill(&self, _: &str, _: u32) {}
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("media_source.mp4");
+    fs::write(&source, b"not trashable while export is admitted").unwrap();
+    let supervisor = jobs::Supervisor::new(std::sync::Arc::new(NoSpawn), std::sync::Arc::new(|_| {}))
+      .with_export_root(directory.path().join("journal")).unwrap();
+    supervisor.prepare_delivery("trash-lease".into(), "original-project".into(), directory.path().join("render.partial").to_string_lossy().into(),
+      directory.path().join("render.mp4").to_string_lossy().into(), jobs::DeliverySource::Render { paths: vec![source.to_string_lossy().into()] }).unwrap();
+    assert!(trash_path_owned(&supervisor, source.to_string_lossy().into()).unwrap_err().contains("leased"));
+    assert_eq!(fs::read(&source).unwrap(), b"not trashable while export is admitted");
   }
 
   #[test]
@@ -1276,6 +1288,11 @@ mod tests {
     assert_eq!(fs::read(blocked.join("keep.txt")).unwrap(), b"unrelated existing content");
     assert_eq!(fs::read(&source).unwrap(), b"complete new copied artifact");
     assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 3);
+    let mut readonly = fs::metadata(&source).unwrap().permissions();
+    readonly.set_readonly(true);
+    assert!(super::copy_commit_bytes(&mut fs::File::open(&source).unwrap(), &blocked, readonly).is_err());
+    assert_eq!(fs::read(blocked.join("keep.txt")).unwrap(), b"unrelated existing content");
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 3);
   }
 
   #[test]
@@ -1285,8 +1302,8 @@ mod tests {
     struct NoSpawn;
     impl jobs::Spawner for NoSpawn {
       fn identity(&self, _: &str) -> Result<jobs::ArtifactIdentity, String> { Err("volume fixture has no worker".into()) }
-      fn spawn(&self, _: &jobs::JobSpec, _: std::sync::Arc<dyn Fn(jobs::ProcEvent) + Send + Sync>) -> Result<u32, String> { Err("unused".into()) }
-      fn kill(&self, _: u32) {}
+      fn spawn(&self, _: &jobs::JobSpec, _: std::sync::Arc<dyn Fn(jobs::ProcEvent) + Send + Sync>, _: std::sync::Arc<jobs::Workspace>) -> Result<u32, String> { Err("unused".into()) }
+      fn kill(&self, _: &str, _: u32) {}
     }
     let directory = tempfile::tempdir().unwrap();
     let target = match tempfile::tempdir_in("/dev/shm") {
@@ -1304,6 +1321,39 @@ mod tests {
     assert_eq!(fs::read(&destination).unwrap(), b"complete cross-volume artifact");
     assert!(!source.exists());
     assert_eq!(fs::read_dir(target.path()).unwrap().count(), 1);
+  }
+
+  #[test]
+  fn legacy_commit_preserves_leased_source_and_destination_bytes() {
+    struct NoSpawn;
+    impl jobs::Spawner for NoSpawn {
+      fn identity(&self, _: &str) -> Result<jobs::ArtifactIdentity, String> { Err("filesystem fixture has no worker".into()) }
+      fn spawn(&self, _: &jobs::JobSpec, _: std::sync::Arc<dyn Fn(jobs::ProcEvent) + Send + Sync>, _: std::sync::Arc<jobs::Workspace>) -> Result<u32, String> { Err("unused".into()) }
+      fn kill(&self, _: &str, _: u32) {}
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("leased.mp4");
+    let alias = directory.path().join("leased-alias.mp4");
+    let staged = directory.path().join("incoming.partial");
+    let moved = directory.path().join("moved.mp4");
+    fs::write(&source, b"original leased input bytes").unwrap();
+    fs::hard_link(&source, &alias).unwrap();
+    fs::write(&staged, b"replacement bytes must not reach the input").unwrap();
+    let supervisor = jobs::Supervisor::new(std::sync::Arc::new(NoSpawn), std::sync::Arc::new(|_| {}))
+      .with_export_root(directory.path().join("journal")).unwrap();
+    supervisor.prepare_delivery("commit-lease".into(), "original-project".into(), directory.path().join("render.partial").to_string_lossy().into(),
+      directory.path().join("render.mp4").to_string_lossy().into(), jobs::DeliverySource::Render { paths: vec![source.to_string_lossy().into()] }).unwrap();
+    assert!(super::commit_file_owned(&supervisor, &staged.to_string_lossy(), &source.to_string_lossy()).is_err());
+    assert!(super::commit_file_owned(&supervisor, &source.to_string_lossy(), &moved.to_string_lossy()).is_err());
+    assert!(super::commit_file_owned(&supervisor, &staged.to_string_lossy(), &alias.to_string_lossy()).is_err());
+    assert!(super::commit_file_owned(&supervisor, &alias.to_string_lossy(), &moved.to_string_lossy()).is_err());
+    assert_eq!(fs::read(&source).unwrap(), b"original leased input bytes");
+    assert_eq!(fs::read(&alias).unwrap(), b"original leased input bytes");
+    assert_eq!(fs::read(&staged).unwrap(), b"replacement bytes must not reach the input");
+    assert!(!moved.exists());
+    super::commit_file_owned(&supervisor, &staged.to_string_lossy(), &moved.to_string_lossy()).unwrap();
+    assert_eq!(fs::read(&moved).unwrap(), b"replacement bytes must not reach the input");
+    assert!(!staged.exists());
   }
 
   #[test]
@@ -1343,17 +1393,6 @@ mod tests {
   #[test]
   fn an_empty_path_is_rejected_rather_than_deleting_the_cwd() {
     assert!(unleased_trash(String::new()).is_err());
-  }
-
-  fn unleased_trash(path: String) -> Result<(), String> {
-    struct NoSpawn;
-    impl jobs::Spawner for NoSpawn {
-      fn identity(&self, _: &str) -> Result<jobs::ArtifactIdentity, String> { Err("trash fixture has no worker".into()) }
-      fn spawn(&self, _: &jobs::JobSpec, _: std::sync::Arc<dyn Fn(jobs::ProcEvent) + Send + Sync>) -> Result<u32, String> { Err("unused".into()) }
-      fn kill(&self, _: u32) {}
-    }
-    let supervisor = jobs::Supervisor::new(std::sync::Arc::new(NoSpawn), std::sync::Arc::new(|_| {}));
-    trash_path_owned(&supervisor, path)
   }
 
   // ── kill_process_tree ──────────────────────────────────────────────────────

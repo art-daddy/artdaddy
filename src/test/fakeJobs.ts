@@ -7,9 +7,12 @@ import {
   type JobSpec,
   type JobSupervisor,
   type JobView,
+  type ExportDelivery,
+  type ExportDeliveryPort,
 } from "../tools/jobSupervisor";
 
 export class FakeJobs implements JobSupervisor {
+  delivery?: ExportDeliveryPort;
   readonly submitted: JobSpec[] = [];
   /** Jobs whose process was started, in order. */
   readonly started: string[] = [];
@@ -25,8 +28,15 @@ export class FakeJobs implements JobSupervisor {
   private readonly lanes = new Map<string, { running: string | null; queue: string[] }>();
   private readonly changeFns = new Set<(v: JobView) => void>();
   private readonly stdoutFns = new Set<(id: string, chunk: string) => void>();
+  private readonly copies = new Map<string, Promise<void>>();
 
   constructor(readonly launch = "launch-test") {}
+
+  restoreJob(view: JobView): void {
+    if (!this.jobs.has(view.id)) this.order.push(view.id);
+    this.jobs.set(view.id, { ...view });
+    this.emit(view.id);
+  }
 
   private emit(id: string): void {
     const v = this.jobs.get(id);
@@ -78,6 +88,61 @@ export class FakeJobs implements JobSupervisor {
     this.emit(spec.id);
     this.pump(spec.lane);
     return position;
+  }
+
+  queueCopy(delivery: ExportDelivery): void {
+    if (delivery?.source?.kind !== "copy")
+      throw new Error("copy requires an admitted library source");
+    const id = delivery.id;
+    if (this.jobs.has(id)) return;
+    this.order.push(id);
+    this.jobs.set(id, {
+      id,
+      lane: "export",
+      state: "queued",
+      code: null,
+      killed: false,
+      committed: false,
+      meta: {
+        kind: "export_copy",
+        projectDir: delivery.project_dir,
+        destPath: delivery.dest_path,
+        stagePath: delivery.stage_path,
+        filename: delivery.dest_path.split(/[\\/]/).at(-1),
+        copyOf: delivery.source.media_ref,
+        startedBy: "elsewhere",
+        submittedAt: delivery.created_at,
+      },
+      stdout_tail: "",
+      stderr_head: "",
+      stderr_elided: 0,
+      stderr_tail: "",
+      queued_at: delivery.created_at,
+      started_at: null,
+      ended_at: null,
+    });
+    this.emit(id);
+  }
+
+  async runCopy(id: string, write: () => Promise<void>): Promise<void> {
+    const existing = this.copies.get(id);
+    if (existing) return existing;
+    const job = this.jobs.get(id);
+    if (!job || job.meta.kind !== "export_copy") throw new Error("copy requires native admission");
+    job.state = "running";
+    job.started_at = Date.now();
+    this.emit(id);
+    const copy = (async () => {
+      try {
+        await write();
+        this.exit(id, 0);
+      } catch (error) {
+        this.exit(id, -1, String(error));
+        throw error;
+      }
+    })();
+    this.copies.set(id, copy);
+    return copy;
   }
 
   /** The process prints to stdout. */

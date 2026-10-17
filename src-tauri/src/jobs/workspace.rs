@@ -1,0 +1,396 @@
+use std::collections::HashMap;
+use std::sync::{Arc, Condvar, Mutex};
+
+#[derive(Clone, Copy, Default)]
+struct RootUsage {
+  bytes: u64,
+  entries: u64,
+  peak_bytes: u64,
+  observed_from_creation: bool,
+}
+
+#[derive(Default)]
+struct OutputUsage {
+  users: u64,
+  execution: bool,
+  reserved: bool,
+}
+
+#[derive(Default)]
+struct State {
+  used: u64,
+  entries: u64,
+  roots: HashMap<String, RootUsage>,
+  output_claims: HashMap<String, OutputUsage>,
+}
+
+pub struct Workspace {
+  limit: u64,
+  entry_limit: u64,
+  state: Mutex<State>,
+  changed: Condvar,
+}
+
+impl Workspace {
+  pub fn new(limit: u64) -> Arc<Self> { Arc::new(Self { limit, entry_limit: 16384, state: Mutex::new(State::default()), changed: Condvar::new() }) }
+
+  pub(super) fn available_bytes(&self) -> u64 {
+    self.limit.saturating_sub(self.state.lock().unwrap_or_else(|error| error.into_inner()).used)
+  }
+
+  pub(super) fn peak_bytes(&self, root: &str) -> Option<u64> {
+    self.state.lock().unwrap_or_else(|error| error.into_inner()).roots.get(root)
+      .filter(|usage| usage.observed_from_creation).map(|usage| usage.peak_bytes)
+  }
+
+  pub fn account_existing(&self, root: &str, bytes: u64, entries: u64) -> Result<(), String> {
+    self.account_usage(root, bytes, entries, true)
+  }
+
+  pub(super) fn restore_retained(&self, root: &str, bytes: u64, entries: u64) -> Result<(), String> {
+    self.account_usage(root, bytes, entries, false)
+  }
+
+  fn account_usage(&self, root: &str, bytes: u64, entries: u64, require_fit: bool) -> Result<(), String> {
+    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+    let previous = state.roots.get(root).copied().unwrap_or_default();
+    let bytes = bytes.max(previous.bytes);
+    let entries = entries.max(previous.entries);
+    let used = state.used.checked_add(bytes - previous.bytes).ok_or("export workspace size overflow")?;
+    let count = state.entries.checked_add(entries - previous.entries).ok_or("export workspace entry overflow")?;
+    if require_fit && used > self.limit { return Err("export workspace budget exceeded by retained scratch".into()); }
+    if count > self.entry_limit { return Err("export workspace entry budget exceeded by retained scratch".into()); }
+    state.roots.insert(root.to_string(), RootUsage { bytes, entries, peak_bytes: previous.peak_bytes.max(bytes),
+      observed_from_creation: previous.observed_from_creation });
+    state.used = used;
+    state.entries = count;
+    Ok(())
+  }
+
+  pub(super) fn reserve(self: &Arc<Self>, root: &str, bytes: u64, entries: u64) -> Result<Charge, String> {
+    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+    let used = state.used.checked_add(bytes).ok_or("export workspace size overflow")?;
+    if used > self.limit { return Err("export workspace budget exceeded before write".into()); }
+    let count = state.entries.checked_add(entries).ok_or("export workspace entry overflow")?;
+    if count > self.entry_limit { return Err("export workspace entry budget exceeded before write".into()); }
+    let previous = state.roots.get(root).copied().unwrap_or(RootUsage { observed_from_creation: true, ..RootUsage::default() });
+    let owned_bytes = previous.bytes.checked_add(bytes).ok_or("owned export workspace size overflow")?;
+    let owned = RootUsage { bytes: owned_bytes,
+      entries: previous.entries.checked_add(entries).ok_or("owned export entry size overflow")?, peak_bytes: previous.peak_bytes.max(owned_bytes),
+      observed_from_creation: previous.observed_from_creation };
+    state.roots.insert(root.to_string(), owned);
+    state.used = used;
+    state.entries = count;
+    Ok(Charge { owner: self.clone(), root: root.to_string(), bytes, entries, retained: false })
+  }
+
+  pub(super) fn reserve_output(self: &Arc<Self>, root: &str) -> Result<(u64, Charge), String> {
+    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+    let output = state.output_claims.get(root).ok_or("pending output has no admitted workspace claim")?;
+    if output.reserved { return Err("pending output already has a native writer".into()); }
+    let remaining = self.limit.checked_sub(state.used).ok_or("export workspace already exceeds its temporary budget")?;
+    let previous = state.roots.get(root).copied().unwrap_or_default();
+    let limit = previous.bytes.checked_add(remaining).filter(|bytes| *bytes > 0)
+      .ok_or("export has no temporary capacity for its pending output")?;
+    state.used += remaining;
+    state.roots.insert(root.to_string(), RootUsage { bytes: limit, peak_bytes: previous.peak_bytes.max(limit), ..previous });
+    state.output_claims.get_mut(root).ok_or("pending output lost its workspace claim")?.reserved = true;
+    Ok((limit, Charge { owner: self.clone(), root: root.to_string(), bytes: remaining, entries: 0, retained: false }))
+  }
+
+  pub(super) fn claim_output(self: &Arc<Self>, root: &str, check: &dyn Fn() -> Result<(), String>) -> Result<OutputClaim, String> {
+    loop {
+      check()?;
+      let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+      if state.output_claims.keys().all(|owner| owner == root) {
+        let output = state.output_claims.entry(root.to_string()).or_default();
+        output.users = output.users.checked_add(1).ok_or("output workspace claim overflow")?;
+        return Ok(OutputClaim { owner: self.clone(), root: root.to_string() });
+      }
+      let (state, _) = self.changed.wait_timeout(state, std::time::Duration::from_millis(100))
+        .unwrap_or_else(|error| error.into_inner());
+      drop(state);
+    }
+  }
+
+  pub(super) fn finish_output_claim(&self, root: &str) {
+    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(output) = state.output_claims.get_mut(root) {
+      output.execution = false;
+      if output.users == 0 && !output.reserved { state.output_claims.remove(root); }
+    }
+    drop(state);
+    self.changed.notify_all();
+  }
+
+  pub(super) fn settle_output_writer(&self, root: &str) {
+    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(output) = state.output_claims.get_mut(root) {
+      output.reserved = false;
+      if output.users == 0 && !output.execution { state.output_claims.remove(root); }
+    }
+    drop(state);
+    self.changed.notify_all();
+  }
+
+  pub fn release(&self, root: &str, bytes: u64, entries: u64) {
+    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+    let owned = state.roots.get(root).copied().unwrap_or_default();
+    let released = bytes.min(owned.bytes);
+    let released_entries = entries.min(owned.entries);
+    state.used = state.used.saturating_sub(released);
+    state.entries = state.entries.saturating_sub(released_entries);
+    if released == owned.bytes && released_entries == owned.entries { state.roots.remove(root); }
+    else { state.roots.insert(root.to_string(), RootUsage { bytes: owned.bytes - released,
+      entries: owned.entries - released_entries, peak_bytes: owned.peak_bytes, observed_from_creation: owned.observed_from_creation }); }
+  }
+
+  pub fn release_root(&self, root: &str) {
+    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(usage) = state.roots.remove(root) {
+      state.used = state.used.saturating_sub(usage.bytes);
+      state.entries = state.entries.saturating_sub(usage.entries);
+    }
+    state.output_claims.remove(root);
+    drop(state);
+    self.changed.notify_all();
+  }
+
+  #[cfg(test)]
+  fn used(&self) -> u64 { self.state.lock().unwrap().used }
+}
+
+pub(super) struct Charge {
+  owner: Arc<Workspace>,
+  root: String,
+  bytes: u64,
+  entries: u64,
+  retained: bool,
+}
+
+impl Charge {
+  pub fn grow(&mut self, bytes: u64) -> Result<(), String> {
+    let total = self.bytes.checked_add(bytes).ok_or("temporary workspace charge overflow")?;
+    self.owner.reserve(&self.root, bytes, 0)?.retain();
+    self.bytes = total;
+    Ok(())
+  }
+  pub fn retain(mut self) { self.retained = true; }
+}
+
+impl Drop for Charge {
+  fn drop(&mut self) { if !self.retained { self.owner.release(&self.root, self.bytes, self.entries); } }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use std::sync::Barrier;
+
+  #[test]
+  fn scoped_preparation_finishes_before_a_competing_output_can_reserve_capacity() {
+    let directory = tempfile::tempdir().unwrap();
+    let owner = Workspace::new(64);
+    let preparation = owner.claim_output("preparation", &|| Ok(())).unwrap();
+    let competing = owner.clone();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+      let claim = competing.claim_output("final-output", &|| Ok(())).unwrap();
+      let (limit, charge) = competing.reserve_output("final-output").unwrap();
+      sender.send((claim, limit, charge)).unwrap();
+    });
+    assert!(matches!(receiver.recv_timeout(std::time::Duration::from_millis(100)), Err(std::sync::mpsc::RecvTimeoutError::Timeout)));
+    let payload = directory.path().join("filter.ffgraph");
+    owner.reserve("preparation", 12, 1).unwrap().retain();
+    std::fs::write(&payload, b"null[output]").unwrap();
+    assert_eq!(std::fs::read(&payload).unwrap(), b"null[output]");
+    drop(preparation);
+    let (claim, limit, charge) = receiver.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+    assert_eq!(limit, 52);
+    assert_eq!(owner.available_bytes(), 0);
+    drop(charge);
+    drop(claim);
+    owner.release_root("final-output");
+    assert_eq!(owner.available_bytes(), 52);
+    std::fs::remove_file(&payload).unwrap();
+    owner.release_root("preparation");
+    assert_eq!(owner.available_bytes(), 64);
+    worker.join().unwrap();
+  }
+
+  #[test]
+  fn peak_payload_survives_temporary_file_cleanup_without_holding_released_capacity() {
+    let directory = tempfile::tempdir().unwrap();
+    let owner = Workspace::new(64);
+    let root = directory.path().to_string_lossy().into_owned();
+    let first = directory.path().join("retained");
+    let second = directory.path().join("temporary");
+    owner.reserve(&root, 32, 1).unwrap().retain();
+    std::fs::write(&first, [37u8; 32]).unwrap();
+    let temporary = owner.reserve(&root, 16, 1).unwrap();
+    std::fs::write(&second, [41u8; 16]).unwrap();
+    let observed = std::fs::metadata(&first).unwrap().len() + std::fs::metadata(&second).unwrap().len();
+    assert_eq!(owner.peak_bytes(&root), Some(observed));
+    std::fs::remove_file(&second).unwrap();
+    drop(temporary);
+    assert_eq!(owner.peak_bytes(&root), Some(observed));
+    let peer = owner.reserve("peer", 32, 1).unwrap();
+    let peer_path = directory.path().join("peer");
+    std::fs::write(&peer_path, [43u8; 32]).unwrap();
+    assert_eq!(std::fs::read(&peer_path).unwrap(), vec![43u8; 32]);
+    assert!(owner.reserve("blocked", 1, 1).is_err());
+    assert_eq!(owner.peak_bytes(&root), Some(observed));
+    std::fs::remove_file(&peer_path).unwrap();
+    drop(peer);
+    std::fs::remove_file(&first).unwrap();
+    owner.release_root(&root);
+    assert_eq!(owner.peak_bytes(&root), None);
+  }
+
+  #[test]
+  fn recovered_files_enforce_capacity_without_inventing_an_unobserved_peak() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().to_string_lossy().into_owned();
+    let retained = directory.path().join("retained");
+    std::fs::write(&retained, [37u8; 32]).unwrap();
+    let owner = Workspace::new(64);
+    owner.account_existing(&root, std::fs::metadata(&retained).unwrap().len(), 1).unwrap();
+    assert_eq!(owner.peak_bytes(&root), None);
+    let temporary = owner.reserve(&root, 32, 1).unwrap();
+    assert!(owner.reserve("blocked", 1, 1).is_err());
+    assert_eq!(owner.peak_bytes(&root), None);
+    drop(temporary);
+    assert_eq!(std::fs::read(&retained).unwrap(), vec![37u8; 32]);
+    owner.release_root(&root);
+    let fresh = owner.reserve(&root, 16, 1).unwrap();
+    assert_eq!(owner.peak_bytes(&root), Some(16));
+    drop(fresh);
+    assert_eq!(owner.peak_bytes(&root), None);
+  }
+
+  #[test]
+  fn concurrent_owned_writers_cannot_each_spend_the_same_remaining_bytes() {
+    let directory = tempfile::tempdir().unwrap();
+    let owner = Workspace::new(48);
+    let gate = Arc::new(Barrier::new(3));
+    let threads = ["first", "second"].into_iter().map(|name| {
+      let owner = owner.clone();
+      let gate = gate.clone();
+      let path = directory.path().join(name);
+      std::thread::spawn(move || {
+        gate.wait();
+        let Ok(charge) = owner.reserve(name, 32, 1) else { return false; };
+        std::fs::write(path, [37u8; 32]).unwrap();
+        charge.retain();
+        true
+      })
+    }).collect::<Vec<_>>();
+    gate.wait();
+    let written = threads.into_iter().map(|thread| thread.join().unwrap()).filter(|written| *written).count();
+    assert_eq!(written, 1);
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    assert_eq!(owner.used(), 32);
+  }
+
+  #[test]
+  fn failure_releases_uninstalled_bytes_but_retained_files_keep_their_charge() {
+    let owner = Workspace::new(64);
+    owner.account_existing("old", 32, 1).unwrap();
+    {
+      let _temporary = owner.reserve("new", 32, 1).unwrap();
+      assert!(owner.reserve("other", 1, 1).is_err());
+    }
+    assert_eq!(owner.used(), 32);
+    owner.reserve("new", 32, 1).unwrap().retain();
+    assert!(owner.reserve("other", 1, 1).is_err());
+    owner.release_root("old");
+    assert_eq!(owner.used(), 32);
+    owner.reserve("other", 32, 1).unwrap().retain();
+    assert_eq!(owner.used(), 64);
+  }
+
+  #[test]
+  fn retained_accounting_never_overwrites_a_larger_live_reservation() {
+    let owner = Workspace::new(64);
+    owner.reserve("render", 48, 1).unwrap().retain();
+    owner.account_existing("render", 16, 1).unwrap();
+    assert!(owner.reserve("other", 17, 1).is_err());
+    owner.account_existing("render", 56, 1).unwrap();
+    assert_eq!(owner.used(), 56);
+    assert!(owner.account_existing("retained", 9, 1).is_err());
+    assert_eq!(owner.used(), 56);
+  }
+
+  #[test]
+  fn entry_pressure_blocks_a_write_even_when_the_byte_budget_is_empty() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut owner = Workspace::new(64);
+    Arc::get_mut(&mut owner).unwrap().entry_limit = 2;
+    let retained = directory.path().join("retained");
+    std::fs::write(&retained, []).unwrap();
+    owner.account_existing("old", 0, 1).unwrap();
+    let temporary = directory.path().join("temporary");
+    let charge = owner.reserve("new", 0, 1).unwrap();
+    std::fs::write(&temporary, []).unwrap();
+    assert!(owner.reserve("blocked", 0, 1).err().unwrap().contains("entry budget"));
+    assert_eq!(owner.used(), 0);
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
+    std::fs::remove_file(&temporary).unwrap();
+    drop(charge);
+    let admitted = owner.reserve("after-cleanup", 1, 1).unwrap();
+    std::fs::write(directory.path().join("after-cleanup"), [37]).unwrap();
+    admitted.retain();
+    assert!(owner.account_existing("recovered", 0, 1).is_err());
+    assert_eq!(std::fs::read(&retained).unwrap(), Vec::<u8>::new());
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
+  }
+
+  #[test]
+  fn concurrent_writers_cannot_each_spend_the_last_filesystem_entry() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut owner = Workspace::new(64);
+    Arc::get_mut(&mut owner).unwrap().entry_limit = 1;
+    let gate = Arc::new(Barrier::new(3));
+    let threads = ["first", "second"].into_iter().map(|name| {
+      let owner = owner.clone();
+      let gate = gate.clone();
+      let target = directory.path().join(name);
+      std::thread::spawn(move || {
+        gate.wait();
+        let Ok(charge) = owner.reserve(name, 0, 1) else { return false; };
+        std::fs::write(target, []).unwrap();
+        charge.retain();
+        true
+      })
+    }).collect::<Vec<_>>();
+    gate.wait();
+    assert_eq!(threads.into_iter().map(|thread| thread.join().unwrap()).filter(|written| *written).count(), 1);
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    assert_eq!(owner.used(), 0);
+  }
+}
+
+pub(super) struct OutputClaim {
+  owner: Arc<Workspace>,
+  root: String,
+}
+
+impl OutputClaim {
+  pub(super) fn retain(self) {
+    if let Some(output) = self.owner.state.lock().unwrap_or_else(|error| error.into_inner()).output_claims.get_mut(&self.root) {
+      output.execution = true;
+    }
+  }
+}
+
+impl Drop for OutputClaim {
+  fn drop(&mut self) {
+    let mut state = self.owner.state.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(output) = state.output_claims.get_mut(&self.root) {
+      output.users = output.users.saturating_sub(1);
+      if output.users == 0 && !output.execution && !output.reserved { state.output_claims.remove(&self.root); }
+    }
+    drop(state);
+    self.owner.changed.notify_all();
+  }
+}

@@ -7,6 +7,7 @@ import { ProjectStoreAccess, type FsLike } from "./store";
 import { ClientToolRegistry } from "./registry";
 import { __resetAgentEvents, flushAgentEvents, setAgentContext } from "../api/agentEvents";
 import { useAuth } from "../store/auth";
+import { useExportJob } from "../store/exportJob";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -42,7 +43,7 @@ vi.mock("../api/auth", () => ({
 vi.mock(".", () => ({
   createToolRegistry: (getCtx: () => Any) => {
     const registry = new ClientToolRegistry();
-    for (const name of ["download_video", "get_timeline", "add_clips", "library_op"]) {
+    for (const name of ["download_video", "get_timeline", "add_clips", "library_op", "export"]) {
       registry.register(name, async () => {
         toolCtx = getCtx();
         return toolGate;
@@ -63,6 +64,7 @@ beforeEach(() => {
   );
   toolGate = Promise.resolve({ ok: true });
   toolCtx = null;
+  useExportJob.getState().setMode("quality");
 });
 afterEach(() => {
   __resetAgentEvents();
@@ -73,6 +75,27 @@ afterEach(() => {
 });
 
 describe("openToolHost", () => {
+  it("captures the submitted export mode before host initialization or later preference changes", async () => {
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    makeTauriContext.mockImplementationOnce(async () => {
+      await waiting;
+      return { store: {} as never, runner: {} as never };
+    });
+    const host = openToolHost("p1");
+    useExportJob.getState().setMode("fast");
+    const submitted = host.run("export", {}, { surface: "app", exportMode: "fast" });
+    useExportJob.getState().setMode("quality");
+    release();
+    await submitted;
+    expect(toolCtx.exportMode).toBe("fast");
+    useExportJob.getState().setMode("fast");
+    await host.run("export", {}, { surface: "mcp" });
+    expect(toolCtx.exportMode).toBe("quality");
+  });
+
   it("keeps an MCP tool under its bound project without inheriting the chat's labels", async () => {
     setAgentContext({
       surface: "app",

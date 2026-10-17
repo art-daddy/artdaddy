@@ -16,7 +16,7 @@
 // therefore NOT yet structurally enforced here. Parity is guaranteed *for looks*, not claimed for
 // compositing.
 import type { Animatable, Clip, Timeline } from "./model";
-import { canvasFps, isNum } from "./frames";
+import { canvasFps, isNum, toSecondsView } from "./frames";
 import { clipPlays, outputGate } from "./visibility";
 import { parseTransitionIn, TRANSITION_KINDS, type TransitionKind } from "./transition";
 import { lineWidthPx } from "./fontMetrics";
@@ -320,13 +320,13 @@ function resolveTransition(clip: Clip): ResolvedTransition | null {
  *  non-"cover" branch in render.ts::boxOf and scene.ts::clipRects), blend→"normal" (parseBlend returns
  *  null, i.e. no blend chain) — so the resolved value is byte-identical to today for every in-contract
  *  input and can never be out of union. Source of truth: timeline.schema.json fit/blend enums. */
-export const FIT_KINDS = ["contain", "cover"] as const;
+export const FIT_KINDS = ["contain", "cover", "stretch"] as const;
 export type FitKind = (typeof FIT_KINDS)[number];
 export const BLEND_KINDS = ["normal", "multiply", "screen", "overlay", "add"] as const;
 export type BlendKind = (typeof BLEND_KINDS)[number];
 
 export function resolveFit(v: unknown): FitKind {
-  return v === "cover" ? "cover" : "contain";
+  return v === "cover" || v === "stretch" ? v : "contain";
 }
 function resolveBlend(v: unknown): BlendKind {
   return (BLEND_KINDS as readonly string[]).includes(v as string) ? (v as BlendKind) : "normal";
@@ -900,6 +900,82 @@ export function onCanvasFrames(pc: PlanClip, fps: number): { first: number; end:
 
 /** Resolve the shared look plan from a SECONDS-view timeline. Pure; ordering + duration + transition +
  *  hold mirror render.ts exactly so the exporter can consume this byte-for-byte. */
+export interface RenderWorkload {
+  readonly width: number;
+  readonly height: number;
+  readonly fps: number;
+  readonly durationSeconds: number;
+  readonly visualClips: number;
+  readonly captionClips: number;
+  readonly audioClips: number;
+  readonly peakVisualLayers: number;
+  readonly peakMediaLayers: number;
+}
+
+export function summarizeRenderWorkload(
+  raw: Timeline,
+  range?: { from: number; to: number },
+  maxDurationSeconds?: number,
+): RenderWorkload {
+  const plan = resolveRenderPlan(toSecondsView(raw));
+  const fps = plan.canvas.fps;
+  const first = Math.max(0, Math.trunc(range?.from ?? 0));
+  const end = Math.max(
+    first,
+    Math.min(
+      Math.trunc(range?.to ?? Math.round(plan.durationSec * fps)),
+      first + Math.ceil((maxDurationSeconds ?? Infinity) * fps),
+    ),
+  );
+  const events = new Map<number, { visual: number; media: number }>();
+  let visualClips = 0;
+  let captionClips = 0;
+  let audioClips = 0;
+  for (const clip of plan.clips) {
+    const visible = onCanvasFrames(clip, fps);
+    const start = Math.max(first, visible.first);
+    const finish = Math.min(end, visible.end);
+    if (finish <= start) continue;
+    if (clip.kind === "audio") {
+      audioClips++;
+      continue;
+    }
+    const media = clip.kind !== "text";
+    if (media) visualClips++;
+    else captionClips++;
+    for (const [frame, delta] of [
+      [start, 1],
+      [finish, -1],
+    ]) {
+      const event = events.get(frame) ?? { visual: 0, media: 0 };
+      event.visual += delta;
+      if (media) event.media += delta;
+      events.set(frame, event);
+    }
+  }
+  let visual = 0;
+  let media = 0;
+  let peakVisualLayers = 0;
+  let peakMediaLayers = 0;
+  for (const [, event] of [...events].sort(([left], [right]) => left - right)) {
+    visual += event.visual;
+    media += event.media;
+    peakVisualLayers = Math.max(peakVisualLayers, visual);
+    peakMediaLayers = Math.max(peakMediaLayers, media);
+  }
+  return {
+    width: Number(raw.canvas.width),
+    height: Number(raw.canvas.height),
+    fps,
+    durationSeconds: (end - first) / fps,
+    visualClips,
+    captionClips,
+    audioClips,
+    peakVisualLayers,
+    peakMediaLayers,
+  };
+}
+
 export function resolveRenderPlan(timeline: Timeline): SecondsRenderPlan {
   const { w, h } = planCanvas(timeline);
   // NOT truncated: the preview inverts durSec -> frames with `Math.round(durSec * fps)`, which only

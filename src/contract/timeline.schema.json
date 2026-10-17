@@ -323,8 +323,8 @@
           "$ref": "#/$defs/animatableNumber"
         },
         "fit": {
-          "enum": ["contain", "cover"],
-          "description": "'contain' letterboxes inside the box; 'cover' crops to fill it."
+          "enum": ["contain", "cover", "stretch"],
+          "description": "'contain' letterboxes inside the box; 'cover' crops to fill it; 'stretch' fills it without preserving source aspect."
         }
       }
     },

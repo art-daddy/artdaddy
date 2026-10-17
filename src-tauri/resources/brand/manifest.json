@@ -1,0 +1,11 @@
+{
+  "version": "v1",
+  "assets": {
+    "endcard-16x9.mp4": { "bytes": 105118, "sha256": "54bc7453c0b408df6fac0cdc757b84061d72eaefd7db06ddfd564038dfea1fef" },
+    "endcard-1x1.mp4": { "bytes": 82209, "sha256": "cd5148beed4efbb0c4a34abc4fabc738886846e61ab248c76b652a99937cf4ab" },
+    "endcard-9x16.mp4": { "bytes": 96970, "sha256": "254f9d214e7242c9b792329ba7e0ca7440aec5bd28b4e3e0e723c6d0c4ffa670" },
+    "watermark-16x9.png": { "bytes": 99202, "sha256": "be50a9c70778ddeb35c6dfc7818f833f70a7dabe23ea2d45e070df5263a52b9e" },
+    "watermark-1x1.png": { "bytes": 56593, "sha256": "00137d5dcc58052aceb9426368bd33b237f1010ba61ec860441efa0aee12b01f" },
+    "watermark-9x16.png": { "bytes": 87285, "sha256": "7a528391ecac532f5e930526e9a46e97fc30936783b5317fc74dce01e61848a7" }
+  }
+}

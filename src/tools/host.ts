@@ -12,6 +12,7 @@ import type { ProjectStoreAccess } from "./store";
 import { ProjectClosingError, type MutationOrigin } from "../project/MutationGate";
 import { openDocumentById } from "../project/openDocuments";
 import { isJobEffect, toolEffect } from "../contract/effects";
+import type { ExportMode } from "../timeline/exportOptions";
 import {
   agentEventContext,
   createToolTrace,
@@ -26,6 +27,7 @@ export interface ToolRunOptions {
   model?: string;
   transcriptId?: string;
   trace?: ToolTrace;
+  exportMode?: ExportMode;
 }
 
 /** A tool runtime bound to ONE project. The agent runner captures the host for
@@ -91,6 +93,7 @@ class ProjectToolHost implements ToolHost {
     args: Record<string, unknown>,
     options: ToolRunOptions,
   ): Promise<unknown> {
+    const capturedOptions = { ...options, exportMode: options.exportMode ?? ("quality" as const) };
     const submitted = agentEventContext();
     const labels: AgentEventContext = {
       ...submitted,
@@ -104,7 +107,7 @@ class ProjectToolHost implements ToolHost {
     };
     const trace = options.trace ?? createToolTrace(name, args, labels);
     try {
-      const result = await this.execute(name, args, options, trace);
+      const result = await this.execute(name, args, capturedOptions, trace);
       trace.result(result);
       return result;
     } catch (error) {
@@ -136,7 +139,10 @@ class ProjectToolHost implements ToolHost {
           this.runTool(name, args, trace, combineSignals(signal, jobSignal)),
         );
       }
-      return await this.runTool(name, args, trace, signal);
+      return await this.runTool(name, args, trace, signal, {
+        mode: options.exportMode ?? "quality",
+        origin,
+      });
     } catch (e) {
       // The job scope refused admission because the project began closing — report a clean tool
       // failure rather than reject the turn (the registry path already returns { ok:false } too).
@@ -154,9 +160,19 @@ class ProjectToolHost implements ToolHost {
     args: Record<string, unknown>,
     trace: ToolTrace,
     signal?: AbortSignal,
+    captured?: { mode: ExportMode; origin?: MutationOrigin },
   ): Promise<unknown> {
     this.currentSignal = signal;
     try {
+      const base = this.holder.ctx;
+      if (name === "export" && captured && base) {
+        const context = agentToolContext(
+          { ...base, exportMode: captured.mode },
+          signal,
+          captured.origin,
+        );
+        return await createToolRegistry(() => context).run(name, args, trace.context, trace);
+      }
       return await this.registry.run(name, args, trace.context, trace);
     } finally {
       this.currentSignal = undefined;

@@ -17,22 +17,36 @@
 //   one owner    - a destination already queued is REFUSED rather than raced, so two exports
 //                  cannot interleave writes to one path.
 import { openProjectJobs } from "../tools/genJobs";
-import type { ProjectStoreAccess } from "../tools/store";
+import { joinPath, type ProjectStoreAccess } from "../tools/store";
 import type { ClientToolContext } from "../tools/context";
 import {
+  EXPORT_PROTOCOL_VERSION,
   jobResult,
   jobSupervisor,
+  jobStderr,
   whenJobEnds,
   type JobSupervisor,
   type JobView,
+  type ExportDeliveryPort,
+  type ExportDelivery,
 } from "../tools/jobSupervisor";
 import type { MutationOrigin } from "../project/MutationGate";
 import { notifyJobSettled, type SettledJob } from "../store/jobNotes";
 import { useExportJob } from "../store/exportJob";
 import { beginSessionActivity } from "../observability/crashWatch";
-import { createProgressReader, etaSeconds, progressFraction } from "./ffmpegProgress";
 import { recordStaging, releaseStaging } from "./exportStaging";
 import { setExportsBusy } from "../tools/workGate";
+import { projectKeyOfDir } from "../tools/dataRoot";
+import { resolveExportResources, type ExportResources } from "../platform/host";
+import { confirmExport } from "../lib/confirm";
+import {
+  assessExport,
+  estimateExportFromHistory,
+  type ExportAssessment,
+  type ExportCalibration,
+} from "./exportOptions";
+import type { RenderWorkload } from "./renderPlan";
+import { runProjectMutation } from "../tools/coordinator";
 
 /** Destinations with an export queued or running, so a second one is refused rather than raced. */
 const reserved = new Set<string>();
@@ -72,11 +86,132 @@ function flushBatch(id: string): void {
 }
 
 /** In-flight exports, awaited by {@link whenExportsSettle}. */
-const inflight = new Set<Promise<unknown>>();
+const inflight = new Map<string, { task: Promise<unknown>; retry?: () => Promise<unknown> }>();
 
 /** Per-job cancellation. Making the export outlive its turn removed the only way to stop one —
  *  the turn's own abort — so the queue owns that now. */
 const controllers = new Map<string, AbortController>();
+const deliveryPorts = new Map<string, ExportDeliveryPort>();
+
+export function localDeliveryPort(store: ProjectStoreAccess): ExportDeliveryPort {
+  const entries = new Map<string, ExportDelivery>();
+  const scratch = new Map<string, string>();
+  const entry = (id: string) => {
+    const value = entries.get(id);
+    if (!value) throw new Error("unknown export intent");
+    return value;
+  };
+  const identity = async (file: string) => {
+    const probe = await store.probeMedia(file, 0);
+    if (!probe || probe.size <= 0) throw new Error("streaming artifact identity is unavailable");
+    return { sha256: probe.sha256, size: probe.size };
+  };
+  return {
+    protocol: async () => EXPORT_PROTOCOL_VERSION,
+    stageScratch: async (id, files, fonts) => {
+      const value = entry(id);
+      if (value.state !== "prepared" || value.source?.kind !== "render")
+        throw new Error("render staging intent is no longer eligible");
+      if (scratch.has(id)) throw new Error("render scratch is already staged");
+      const first = await store.prepareWork(`renderer/export-${id}/.reserved`);
+      const cwd = first.slice(0, first.lastIndexOf("/"));
+      scratch.set(id, cwd);
+      for (const file of files) {
+        if (entry(id).state !== "prepared") throw new Error("render staging was cancelled");
+        await store.writeText(joinPath(cwd, file.name), file.content);
+      }
+      if (fonts.length) {
+        const fontRoot = await (await import("../tools/assScratch")).bundledFontDir();
+        if (!fontRoot) throw new Error("bundled render font root is unavailable");
+        for (const font of fonts) {
+          if (entry(id).state !== "prepared") throw new Error("render font staging was cancelled");
+          await store.writeBytes(
+            joinPath(cwd, "fonts", font),
+            await store.readBytes(joinPath(fontRoot, font)),
+          );
+        }
+      }
+      return cwd;
+    },
+    prepare: async (id, projectDir, stagePath, destPath, source) => {
+      if (!store.canRename || stagePath === destPath)
+        throw new Error("export needs a distinct atomic staging path");
+      const value: ExportDelivery = {
+        version: 1,
+        id,
+        project_dir: projectDir,
+        stage_path: stagePath,
+        dest_path: destPath,
+        state: "prepared",
+        identity: null,
+        created_at: Date.now(),
+        followups_done: false,
+        source,
+      };
+      entries.set(id, value);
+      return { ...value };
+    },
+    verify: async (id) => {
+      const value = entry(id);
+      if (value.state !== "prepared" && value.state !== "verified")
+        throw new Error("export intent cannot be verified");
+      const proof = await identity(value.stage_path);
+      const currentState = entry(id).state;
+      if (currentState === "cancelled" || currentState === "failed")
+        throw new Error("export intent was cancelled or failed");
+      value.identity = proof;
+      value.state = "verified";
+      return { ...value };
+    },
+    publish: async (id) => {
+      const value = entry(id);
+      if (value.state !== "verified" && value.state !== "publishing" && value.state !== "published")
+        throw new Error("export intent is not verified");
+      const staged = await store.exists(value.stage_path).catch(() => true);
+      const actual = await identity(staged ? value.stage_path : value.dest_path);
+      if (
+        !value.identity ||
+        actual.sha256 !== value.identity.sha256 ||
+        actual.size !== value.identity.size
+      )
+        throw new Error("export artifact identity changed");
+      const currentState = entry(id).state;
+      if (currentState === "cancelled" || currentState === "failed")
+        throw new Error("export intent was cancelled or failed");
+      if (staged) await store.rename(value.stage_path, value.dest_path);
+      value.state = "published";
+      return { ...value };
+    },
+    cancel: async (id) => {
+      const value = entry(id);
+      if (value.state === "published" || value.state === "cancelled") return false;
+      value.state = "cancelled";
+      return true;
+    },
+    fail: async (id) => {
+      const value = entry(id);
+      if (value.state === "published" || value.state === "cancelled") return false;
+      value.state = "failed";
+      return true;
+    },
+    list: async () => [...entries.values()].map((value) => ({ ...value })),
+    complete: async (id) => {
+      const cwd = scratch.get(id);
+      if (cwd) {
+        await store.remove(cwd);
+        scratch.delete(id);
+      }
+      entry(id).followups_done = true;
+      return true;
+    },
+    copy: async (id) => {
+      const value = entry(id);
+      if (value.state !== "prepared" || value.source?.kind !== "copy")
+        throw new Error("copy intent is unavailable");
+      await store.copyFile(value.source.path, value.stage_path);
+    },
+  };
+}
 
 export interface QueuedExport {
   job_id: string;
@@ -215,7 +350,15 @@ export function listExportOutcomes(): Array<Record<string, unknown>> {
 export function cancelExport(jobId: string): boolean {
   const c = controllers.get(jobId);
   if (!c) return false;
-  c.abort();
+  const port = deliveryPorts.get(jobId);
+  if (port)
+    void port
+      .cancel(jobId)
+      .then((cancelled) => {
+        if (cancelled) c.abort();
+      })
+      .catch(() => undefined);
+  else c.abort();
   return true;
 }
 
@@ -238,6 +381,20 @@ export async function manageExportsTool(
 
   const jobId = String(args.job_id ?? "").trim();
   if (!jobId) return { ok: false, error: "job_id is required to cancel an export" };
+  const port = deliveryPorts.get(jobId);
+  if (port && controllers.has(jobId)) {
+    try {
+      const cancelled = await port.cancel(jobId);
+      if (cancelled) controllers.get(jobId)?.abort();
+      return {
+        ok: true,
+        cancelled,
+        ...(cancelled ? {} : { state: "done", note: "the verified export was already published" }),
+      };
+    } catch (error) {
+      return { ok: false, error: `export cancellation could not be committed: ${String(error)}` };
+    }
+  }
   if (cancelExport(jobId)) return { ok: true, cancelled: true };
   const record = records.find((r) => r.job_id === jobId);
   if (!record)
@@ -258,8 +415,22 @@ export interface ExportSubmission {
   queue_position: number;
 }
 
+export class ExportRequestError extends Error {
+  result?: Record<string, unknown>;
+  constructor(
+    message: string,
+    readonly submitted: readonly ExportSubmission[],
+    readonly status: "blocked" | "declined" | "cancelled" = "blocked",
+    readonly workload?: RenderWorkload,
+  ) {
+    super(message);
+    this.name = "ExportRequestError";
+  }
+}
+
 export interface ExportSpec {
   store: ProjectStoreAccess;
+  dependencies: readonly string[];
   /** Final destination. Reserved until the job settles. */
   destPath: string;
   /** Where the encode actually writes. Chosen by the caller, because the ffmpeg plan is built
@@ -271,6 +442,9 @@ export interface ExportSpec {
    *  external MCP agent run the SAME tool (deliberately — one renderer), so this is the only thing
    *  that tells them apart, and it decides whether finishing resumes the conversation. */
   origin?: MutationOrigin;
+  submissionSignal?: AbortSignal;
+  workload?: RenderWorkload;
+  outputDirectory?: string;
   /** What is being delivered, for the export metric. Describes the PLANNED artifact, so it is
    *  still reportable when the encode fails and no file exists to measure. */
   meta?: {
@@ -280,18 +454,27 @@ export interface ExportSpec {
     fps: number;
     quality: string;
     project_id: string;
+    visual_layers?: number;
+    project_width?: number;
+    project_height?: number;
+    readiness?: "ready" | "not_ready" | "unknown";
+    calibration?: Pick<ExportCalibration, "workload" | "output" | "quality" | "engine" | "encoder">;
   };
   /** The app process's job supervisor, when the encode runs as one of its jobs (3h part 7). It
    *  keeps the order then, so this queue does not hold a job back, and a job's state comes from it. */
   supervisor?: JobSupervisor;
-  /** A library file delivered as it is: no encode, no export metric, and the delivered row names
+  /** A library file delivered as it is: no encode, and the delivered row names
    *  this library ref rather than cataloguing the same bytes a second time. */
   copyOf?: string;
   /** The export call this job is one file of (see {@link sealExportBatch}). */
   batch?: string;
   /** Runs the encode. Rejects with a message on failure. `jobId` names the job everywhere: the
    *  ledger, this queue and the supervisor. */
-  run: (signal: AbortSignal, jobId: string) => Promise<{ warnings?: string[] }>;
+  run: (
+    signal: AbortSignal,
+    jobId: string,
+    meta: ExportSpec["meta"],
+  ) => Promise<{ warnings?: string[] }>;
 }
 
 /** A background encode failed after producing process diagnostics. Keeping this typed prevents
@@ -321,7 +504,8 @@ function normalizeDest(p: string): string {
  *  which the gate's origin fence would refuse. The close fence still applies. */
 async function registerExportInLibrary(
   store: ProjectStoreAccess,
-  spec: Pick<ExportSpec, "destPath" | "filename">,
+  spec: Pick<ExportSpec, "destPath" | "filename"> & { jobId: string },
+  identity: ExportDelivery["identity"],
 ): Promise<string | null> {
   try {
     const { registerLibraryClip, stageByPath } = await import("../tools/import");
@@ -333,7 +517,7 @@ async function registerExportInLibrary(
       src,
       spec.filename,
       "video",
-      { kind: "export", job_id: spec.filename },
+      { kind: "export", job_id: spec.jobId, identity },
       spec.destPath,
     );
     return entry.id;
@@ -343,7 +527,8 @@ async function registerExportInLibrary(
 }
 
 /** Resolve once every export started in this process has settled (tests and a deliberate drain). */ export async function whenExportsSettle(): Promise<void> {
-  while (inflight.size) await Promise.allSettled([...inflight]);
+  while (inflight.size)
+    await Promise.allSettled([...inflight.values()].map((activity) => activity.task));
 }
 
 /** In-flight export metrics. Separate from `inflight` on purpose — see the call site. */
@@ -358,30 +543,82 @@ export async function whenExportTelemetrySettles(): Promise<void> {
 /** Report one settled export to the server's analytics. Fire-and-forget by contract: the file is
  *  already delivered, so nothing here may fail, delay or alter the export. */
 async function reportSettledExport(
-  spec: Pick<ExportSpec, "store" | "destPath" | "meta">,
+  spec: Pick<ExportSpec, "store" | "destPath" | "meta" | "supervisor" | "copyOf"> & {
+    jobId?: string;
+  },
   outcome: {
     status: "done" | "failed" | "cancelled";
     elapsedMs: number;
     warnings: number;
     error: string;
+    finalSizeBytes?: number;
   },
 ): Promise<void> {
   try {
+    const native =
+      outcome.status === "done" && spec.supervisor && spec.jobId
+        ? (await spec.supervisor.list()).find((view) => view.id === spec.jobId)
+        : null;
     // Only a delivered file has a size; a failed encode leaves nothing to measure.
-    const size = outcome.status === "done" ? ((await spec.store.byteSize(spec.destPath)) ?? 0) : 0;
+    const size =
+      outcome.status === "done"
+        ? (outcome.finalSizeBytes ?? (await spec.store.byteSize(spec.destPath)) ?? 0)
+        : 0;
+    if (outcome.status === "done" && !spec.copyOf && spec.meta?.calibration && size > 0) {
+      let memoryBytes: number | null = null;
+      let temporaryBytes: number | null = null;
+      const diagnostics = native ? jobStderr(native).split(/\r?\n/).reverse() : [];
+      const summary = diagnostics.find((line) => line.startsWith("native render resident: "));
+      if (summary) {
+        try {
+          const parsed: unknown = JSON.parse(summary.slice("native render resident: ".length));
+          const peak =
+            parsed && typeof parsed === "object"
+              ? (parsed as Record<string, unknown>).sampled_peak
+              : null;
+          if (typeof peak === "number" && Number.isSafeInteger(peak) && peak > 0)
+            memoryBytes = peak;
+        } catch {}
+      }
+      const temporary = diagnostics.find((line) => line.startsWith("native render temporary: "));
+      if (temporary) {
+        try {
+          const parsed: unknown = JSON.parse(temporary.slice("native render temporary: ".length));
+          const peak =
+            parsed && typeof parsed === "object"
+              ? (parsed as Record<string, unknown>).accounted_peak_payload_bytes
+              : null;
+          if (typeof peak === "number" && Number.isSafeInteger(peak) && peak >= 0)
+            temporaryBytes = peak;
+        } catch {}
+      }
+      const queuedMs = native?.started_at ? Math.max(0, native.started_at - native.queued_at) : 0;
+      useExportJob
+        .getState()
+        .rememberCalibration({
+          ...spec.meta.calibration,
+          elapsedSeconds: Math.max(0, outcome.elapsedMs - queuedMs) / 1000,
+          finalBytes: size,
+          memoryBytes,
+          temporaryBytes,
+        });
+    }
     const { reportExport } = await import("../api/exportEvents");
     await reportExport({
       status: outcome.status,
+      operation: spec.copyOf ? "copy" : "render",
+      readiness: spec.meta?.readiness ?? "unknown",
       duration_s: spec.meta?.duration_s ?? 0,
       size_bytes: size,
       elapsed_ms: outcome.elapsedMs,
-      width: spec.meta?.width ?? 0,
-      height: spec.meta?.height ?? 0,
+      width: spec.meta?.project_width ?? spec.meta?.width ?? 0,
+      height: spec.meta?.project_height ?? spec.meta?.height ?? 0,
       fps: spec.meta?.fps ?? 0,
       quality: spec.meta?.quality ?? "",
       warnings: outcome.warnings,
       error: outcome.error,
       project_id: spec.meta?.project_id ?? "",
+      visual_layers: spec.meta?.visual_layers,
     });
   } catch {
     /* telemetry is never worth disturbing a finished export over */
@@ -394,6 +631,7 @@ export function __resetExportQueue(): void {
   inflight.clear();
   beacons.clear();
   controllers.clear();
+  deliveryPorts.clear();
   records.length = 0;
   snapshot = [];
   setExportsBusy(false);
@@ -405,20 +643,278 @@ export function __resetExportQueue(): void {
 
 /** Record the job, queue the encode, and return immediately. */
 export async function submitExport(spec: ExportSpec): Promise<ExportSubmission> {
+  return (await submitExports([spec]))[0];
+}
+
+async function confirmExportRequest(specs: readonly ExportSpec[]): Promise<boolean> {
+  const refuse = async (status: "cancelled" | "declined" | "blocked"): Promise<never> => {
+    throw new ExportRequestError(
+      status === "blocked"
+        ? "export could not be confirmed; no job was submitted"
+        : "export cancelled before submission",
+      [],
+      status,
+      specs[0].workload,
+    );
+  };
+  const checks: ExportAssessment[] = [];
+  const snapshots: ExportResources[] = [];
+  for (const spec of specs) {
+    if (spec.submissionSignal?.aborted || !spec.store.sessionLive()) return refuse("cancelled");
+    const resources = await resolveExportResources(spec.destPath, spec.submissionSignal);
+    snapshots.push(resources);
+    const workload = spec.workload ?? {
+      width: spec.meta?.project_width ?? spec.meta?.width ?? 0,
+      height: spec.meta?.project_height ?? spec.meta?.height ?? 0,
+      fps: spec.meta?.fps ?? 0,
+      durationSeconds: spec.meta?.duration_s ?? 0,
+      visualClips: 0,
+      captionClips: 0,
+      audioClips: 0,
+      peakVisualLayers: spec.meta?.visual_layers ?? 0,
+      peakMediaLayers: 0,
+    };
+    const descriptor = spec.meta?.calibration;
+    const estimates = descriptor
+      ? estimateExportFromHistory(
+          workload,
+          descriptor.output,
+          descriptor.quality,
+          descriptor.engine,
+          useExportJob.getState().calibrations,
+          descriptor.encoder,
+        )
+      : { memoryBytes: null, temporaryBytes: null, finalBytes: null, seconds: null };
+    checks.push(assessExport(workload, resources, estimates, resources.budgets));
+  }
+  if (specs.some((spec) => spec.submissionSignal?.aborted || !spec.store.sessionLive()))
+    return refuse("cancelled");
+  const reasons = new Set(checks.flatMap((check) => check.reasons));
+  if (
+    checks.every(
+      (check) => check.estimates.temporaryBytes !== null && check.estimates.finalBytes !== null,
+    )
+  ) {
+    const temporary = checks.reduce((total, check) => total + check.estimates.temporaryBytes!, 0);
+    const final = checks.reduce((total, check) => total + check.estimates.finalBytes!, 0);
+    if (
+      snapshots.some(
+        (snapshot) =>
+          (snapshot.scratch_free_bytes !== null &&
+            temporary + final > snapshot.scratch_free_bytes) ||
+          (snapshot.destination_free_bytes !== null &&
+            temporary + final > snapshot.destination_free_bytes),
+      )
+    )
+      reasons.add("disk_shortage");
+    if (
+      snapshots.some(
+        (snapshot) =>
+          snapshot.budgets.temporaryBytes !== null &&
+          temporary + final > snapshot.budgets.temporaryBytes,
+      )
+    )
+      reasons.add("temporary_limit");
+  }
+  const warning = [...reasons].some((reason) => reason !== "slow");
+  const storageReady = !["disk_unknown", "disk_shortage", "temporary_limit"].some((reason) =>
+    reasons.has(reason as (typeof checks)[number]["reasons"][number]),
+  );
+  if (!warning && checks.every((check) => check.severity === "none")) return storageReady;
+  const outside = checks.some((check) => check.promiseLine === "outside");
+  const explanations = {
+    outside_promise:
+      "The project exceeds an individual promised size, frame-rate, clip-count or on-screen limit, or those details are unavailable.",
+    memory_unknown:
+      "Memory fit cannot be estimated yet because a comparable observation or native measurement is missing.",
+    memory_shortage:
+      "The estimated worker memory exceeds currently available memory or the existing worker cutoff.",
+    disk_unknown: "Temporary-file or final-file space cannot be estimated yet.",
+    disk_shortage:
+      "There may not be enough free space for the temporary files and all finished outputs together.",
+    temporary_limit: "Estimated temporary files exceed the remaining export workspace allowance.",
+    time_unknown: "A comparable successful local run is not available to estimate time.",
+    execution_limit: "The estimated active time exceeds the existing export execution limit.",
+    slow: "This export is estimated to take more than twice the video length.",
+  };
+  const time = checks.every((check) => check.estimates.seconds !== null)
+    ? `Estimated encoding and saving time: about ${Math.max(1, Math.ceil(checks.reduce((total, check) => total + check.estimates.seconds!, 0) / 60))} minute(s), based on comparable successful exports on this device. This is a rough estimate; different media and effects can take longer. Preparation and queue wait are extra.`
+    : "Estimated time: unknown (no comparable local measurement yet).";
+  const message = [
+    `Check ${specs.length === 1 ? "this export" : `these ${specs.length} exports`} before starting.`,
+    outside
+      ? "This request is outside the measured project promise, or its project details are unavailable."
+      : warning
+        ? "This project is within the declared size limits; resource fit has not yet been established."
+        : "This project is within the declared size limits.",
+    [...reasons].map((reason) => explanations[reason]).join("\n"),
+    ...(specs.some((spec) => spec.meta?.calibration?.encoder === "amf-cqp18")
+      ? [
+          "Fast uses the locally measured AMD profile. Files can be much larger, and the picture can differ from Full quality.",
+        ]
+      : []),
+    time,
+    checks.every((check) => check.estimates.memoryBytes !== null)
+      ? `Estimated worker memory: about ${(Math.max(...checks.map((check) => check.estimates.memoryBytes!)) / 1024 ** 3).toFixed(1)} GiB, from observed worker samples; this is not a guaranteed peak.`
+      : "Estimated memory: unknown. Native resource limits still apply.",
+    checks.every(
+      (check) => check.estimates.temporaryBytes !== null && check.estimates.finalBytes !== null,
+    )
+      ? `Estimated temporary payload: about ${(checks.reduce((total, check) => total + check.estimates.temporaryBytes! + check.estimates.finalBytes!, 0) / 1e9).toFixed(1)} GB, including pending output files and accounted scratch observations. Filesystem metadata and allocation overhead are extra within the existing headroom; this is not an exact disk peak.`
+      : "Estimated temporary disk: unknown. Safe-file and temporary-space limits still apply.",
+    "You can lower the export resolution or export a smaller section. Cancel to change settings.",
+    warning ? "Continue anyway?" : "Continue?",
+  ].join("\n\n");
+  const decision = await confirmExport(message, warning);
+  if (specs.some((spec) => spec.submissionSignal?.aborted || !spec.store.sessionLive()))
+    return refuse("cancelled");
+  if (decision === "continue") return storageReady;
+  return refuse(decision === "cancel" ? "declined" : "blocked");
+}
+
+export async function submitExports(request: readonly ExportSpec[]): Promise<ExportSubmission[]> {
+  if (!request.length || request.length > 50)
+    throw new Error("one export request must contain between 1 and 50 files");
+  const specs = request.map((spec) => ({
+    ...spec,
+    dependencies: [...spec.dependencies],
+    ...(spec.meta ? { meta: structuredClone(spec.meta) } : {}),
+    ...(spec.workload ? { workload: structuredClone(spec.workload) } : {}),
+  }));
+  const destinations = new Set<string>();
+  const projectDir = specs[0].store.projectDir;
+  for (const spec of specs) {
+    if (spec.store.projectDir !== projectDir)
+      throw new Error("one export request belongs to one project");
+    if (spec.stagePath === spec.destPath || !spec.store.canRename)
+      throw new Error(
+        "export requires atomic destination-volume staging; direct-output fallback is not supported",
+      );
+    const key = normalizeDest(spec.destPath);
+    if (reserved.has(key) || destinations.has(key))
+      throw new Error("export destination is already reserved");
+    destinations.add(key);
+  }
+  const storageReady = await confirmExportRequest(specs);
+  const submitted: ExportSubmission[] = [];
+  try {
+    for (const spec of specs) submitted.push(await admitExport(spec, storageReady));
+  } catch (error) {
+    const failed = specs[submitted.length];
+    throw new ExportRequestError(
+      error instanceof Error ? error.message : String(error),
+      [...submitted],
+      failed.submissionSignal?.aborted || !failed.store.sessionLive() ? "cancelled" : "blocked",
+      failed.workload,
+    );
+  }
+  return submitted;
+}
+
+async function admitExport(spec: ExportSpec, storageReady: boolean): Promise<ExportSubmission> {
+  spec = {
+    ...spec,
+    dependencies: [...spec.dependencies],
+    ...(spec.meta ? { meta: { ...spec.meta } } : {}),
+  };
+  if (spec.stagePath === spec.destPath || !spec.store.canRename)
+    throw new Error(
+      "export requires atomic destination-volume staging; direct-output fallback is not supported",
+    );
   const key = normalizeDest(spec.destPath);
-  const ledger = await openProjectJobs(spec.store);
+  if (reserved.has(key)) throw new Error("export destination is already reserved");
+  reserved.add(key);
+  let supervisor: JobSupervisor | null;
+  try {
+    supervisor = spec.supervisor ?? (await jobSupervisor());
+  } catch (error) {
+    reserved.delete(key);
+    throw error;
+  }
+  if (
+    typeof window !== "undefined" &&
+    (window.__TAURI_INTERNALS__ ?? window.__TAURI__) &&
+    !supervisor?.delivery
+  ) {
+    reserved.delete(key);
+    throw new Error("desktop export requires the verified native delivery protocol");
+  }
+  if (supervisor) spec = { ...spec, supervisor };
+  const port = supervisor?.delivery ?? localDeliveryPort(spec.store);
+  let ledger: Ledger;
+  try {
+    ledger = await openProjectJobs(spec.store);
+  } catch (error) {
+    reserved.delete(key);
+    throw error;
+  }
   // A supervised export lives as long as the app does, not the page: its record says so, or the
   // next page's ledger would call it interrupted while it is still running (jobLedger.ts).
   const session = spec.supervisor
     ? await spec.supervisor.launchId().catch(() => undefined)
     : undefined;
-  const jobId = await ledger.begin({
-    kind: "export",
-    tool: "export",
-    label: `the export ${spec.filename}`,
-    ...(session ? { session } : {}),
-  });
-  reserved.add(key);
+  let jobId = "";
+  try {
+    await runProjectMutation(
+      spec.store.projectDir,
+      "admit confirmed export",
+      async (_document, lease) => {
+        if (!spec.store.sessionLive() || spec.submissionSignal?.aborted)
+          throw new Error("export belongs to a closed or cancelled request");
+        lease?.assertCanCommit();
+        if (spec.outputDirectory) {
+          if (
+            normalizeDest(spec.outputDirectory) !==
+            normalizeDest(spec.destPath.replace(/[\\/][^\\/]+$/, ""))
+          )
+            throw new Error("export output folder differs from its captured destination");
+          try {
+            await spec.store.ensureDir(spec.outputDirectory);
+          } catch (error) {
+            throw new Error(`could not make the folder ${spec.outputDirectory}: ${String(error)}`);
+          }
+          lease?.assertCanCommit();
+        }
+        jobId = await ledger.begin({
+          kind: "export",
+          tool: "export",
+          label: `the export ${spec.filename}`,
+          ...(session ? { session } : {}),
+        });
+        const copyPath = spec.copyOf ? await spec.store.resolveMediaRef(spec.copyOf) : null;
+        if (spec.copyOf && !copyPath) throw new Error("copy export source is unavailable");
+        lease?.assertCanCommit();
+        await port.prepare(
+          jobId,
+          spec.store.projectDir,
+          spec.stagePath,
+          spec.destPath,
+          spec.copyOf
+            ? { kind: "copy", path: copyPath!, media_ref: spec.copyOf }
+            : { kind: "render", paths: [...spec.dependencies] },
+        );
+        lease?.assertCanCommit();
+        if (!spec.store.sessionLive() || spec.submissionSignal?.aborted)
+          throw new Error("export cancelled during native preparation");
+        if (spec.meta) spec.meta = { ...spec.meta, readiness: storageReady ? "ready" : "unknown" };
+        lease?.markCommitted();
+      },
+      { origin: spec.origin, signal: spec.submissionSignal },
+    );
+  } catch (error) {
+    reserved.delete(key);
+    if (jobId) {
+      const retired = await port.cancel(jobId).catch(() => false);
+      if (retired) await port.complete(jobId).catch(() => false);
+      await ledger.settle(jobId, {
+        status:
+          spec.submissionSignal?.aborted || !spec.store.sessionLive() ? "cancelled" : "failed",
+        error: String(error),
+      });
+    }
+    throw error;
+  }
+  deliveryPorts.set(jobId, port);
   controllers.set(jobId, new AbortController());
   if (spec.batch) batchOf(spec.batch).open++;
   const queuePosition = Math.max(0, reserved.size - 1);
@@ -443,18 +939,24 @@ export async function submitExport(spec: ExportSpec): Promise<ExportSubmission> 
 
   // The supervisor runs one export at a time itself, and keeps doing so with no page attached; in
   // the page alone, this queue does.
-  const task = spec.supervisor
-    ? encode(spec, ledger, jobId, key)
-    : spec.copyOf
-      ? (copyTail = copyTail.then(() => encode(spec, ledger, jobId, key)))
+  const task = spec.copyOf
+    ? (copyTail = copyTail.then(() => encode(spec, ledger, jobId, key)))
+    : spec.supervisor
+      ? encode(spec, ledger, jobId, key)
       : (queueTail = queueTail.then(() => encode(spec, ledger, jobId, key)));
-  track(task);
+  track(jobId, task);
   return { job_id: jobId, queue_position: queuePosition };
 }
 
-function track(task: Promise<unknown>): void {
-  inflight.add(task);
-  void task.finally(() => inflight.delete(task));
+function track(jobId: string, task: Promise<unknown>): void {
+  const activity: { task: Promise<unknown>; retry?: () => Promise<unknown> } = { task };
+  const release = async () => {
+    if (inflight.get(jobId) !== activity) return;
+    inflight.delete(jobId);
+    await activity.retry?.().catch(() => undefined);
+  };
+  activity.task = task.then(release, release);
+  inflight.set(jobId, activity);
 }
 
 type Ledger = Awaited<ReturnType<typeof openProjectJobs>>;
@@ -489,7 +991,18 @@ async function encode(spec: ExportSpec, ledger: Ledger, jobId: string, key: stri
     // Listed until it is renamed into place or removed, so a partial a crash or a quit leaves
     // behind is removed at the next launch (exportStaging.ts).
     if (staged) await recordStaging(spec.stagePath);
-    run.warnings = (await spec.run(signal, jobId)).warnings ?? [];
+    if (signal.aborted) throw new Error("export cancelled");
+    if (spec.copyOf) {
+      const port = deliveryPorts.get(jobId);
+      if (!port) throw new Error("copy delivery owner is missing");
+      await port.copy(jobId);
+    } else {
+      run.warnings = (await spec.run(signal, jobId, spec.meta)).warnings ?? [];
+    }
+    if (signal.aborted) throw new Error("export cancelled");
+    const port = deliveryPorts.get(jobId);
+    if (!port) throw new Error("export delivery owner is missing");
+    await port.verify(jobId);
     if (signal.aborted) throw new Error("export cancelled");
   } catch (e) {
     // A killed ffmpeg reports its own confusing error; the reason the user needs is the cancel.
@@ -538,17 +1051,30 @@ interface Settle {
 /** Commit the file, then the project's records. The one path for an export this page ran and for
  *  one it adopted after a crash of the page, so both end exactly the same way. */
 async function settle(x: Settle): Promise<void> {
+  const delivery = deliveryPorts.get(x.jobId);
   // Committing by rename keeps the destination either untouched or complete. When the fs cannot
   // rename, the caller already pointed the encode at the destination and there is nothing to move.
   const staged = x.stagePath !== x.destPath;
   let { error } = x.run;
+  let publishedIdentity: ExportDelivery["identity"] = null;
+  let publicationPending = false;
   const { cancelled, stderrTail, warnings } = x.run;
   if (!error && staged) {
     try {
-      // A page that renamed it and died before telling the supervisor left it already in place.
-      const alreadyMoved =
-        !(await x.store.exists(x.stagePath)) && (await x.store.exists(x.destPath));
-      if (!alreadyMoved) await x.store.rename(x.stagePath, x.destPath);
+      const port = deliveryPorts.get(x.jobId);
+      if (!port) throw new Error("export delivery owner is missing");
+      publicationPending = true;
+      let published: ExportDelivery;
+      try {
+        published = await port.publish(x.jobId);
+      } catch (error) {
+        const receipt = (await port.list()).find((intent) => intent.id === x.jobId);
+        if (!receipt?.identity || (receipt.state !== "publishing" && receipt.state !== "published"))
+          throw error;
+        published = await port.publish(x.jobId);
+      }
+      publishedIdentity = published.identity;
+      publicationPending = false;
       await releaseStaging(x.stagePath);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -557,19 +1083,29 @@ async function settle(x: Settle): Promise<void> {
   // Never leave a partial file where a finished export belongs. One that cannot be removed now
   // stays listed, for the next launch to remove.
   if (error && staged) {
-    await x.store.remove(x.stagePath).then(
-      () => releaseStaging(x.stagePath),
-      () => undefined,
-    );
+    const failed = await delivery?.fail(x.jobId).catch(() => false);
+    if (publicationPending) {
+      const receipt = failed
+        ? undefined
+        : (await delivery?.list().catch(() => []))?.find((intent) => intent.id === x.jobId);
+      publicationPending =
+        !failed && (!receipt || (receipt.state !== "failed" && receipt.state !== "cancelled"));
+    }
+    if (!publicationPending) {
+      await x.store.remove(x.stagePath).then(
+        () => releaseStaging(x.stagePath),
+        () => undefined,
+      );
+    }
   }
   // From here a page that takes over must not touch the file again.
-  await x.supervisor?.commit(x.jobId).catch(() => false);
-  reserved.delete(x.key);
+  if (!publicationPending) await x.supervisor?.commit(x.jobId).catch(() => false);
   controllers.delete(x.jobId);
+  deliveryPorts.delete(x.jobId);
   patch(x.jobId, {
     state: error ? (cancelled ? "cancelled" : "failed") : "done",
     endedAt: Date.now(),
-    ...(error && !cancelled ? { error } : {}),
+    error: error && !cancelled ? error : undefined,
     ...(stderrTail ? { stderrTail } : {}),
     ...(warnings.length ? { warnings } : {}),
   });
@@ -580,8 +1116,11 @@ async function settle(x: Settle): Promise<void> {
   // Linked, never copied — the destination is often outside the project and can be hundreds of MB.
   // A cancelled run sets `error`, so nothing half-written is ever catalogued. A copy of a library
   // file is that file's bytes, so it is that file's ref.
-  const mediaRef = error ? null : (x.copyOf ?? (await registerExportInLibrary(x.store, x)));
+  const mediaRef = error
+    ? null
+    : (x.copyOf ?? (await registerExportInLibrary(x.store, x, publishedIdentity)));
   if (mediaRef) patch(x.jobId, { mediaRef });
+  if (!publicationPending) reserved.delete(x.key);
 
   await x.ledger.settle(
     x.jobId,
@@ -599,10 +1138,10 @@ async function settle(x: Settle): Promise<void> {
   //
   // Deliberately NOT in `inflight`: that set is what a drain on quit waits for, and making
   // someone's app hang on a telemetry socket to save a metric row is the wrong trade.
-  // A copy is not an encode: counting it would dilute the export failure rate it exists to show.
-  if (!x.copyOf) {
+  {
     const beacon = reportSettledExport(x, {
       status: error ? (cancelled ? "cancelled" : "failed") : "done",
+      finalSizeBytes: publishedIdentity?.size,
       elapsedMs: Date.now() - x.startedAt,
       warnings: warnings.length,
       error: error && !cancelled ? error : "",
@@ -610,7 +1149,10 @@ async function settle(x: Settle): Promise<void> {
     beacons.add(beacon);
     void beacon.finally(() => beacons.delete(beacon));
   }
-  await x.supervisor?.forget(x.jobId).catch(() => false);
+  if (!publicationPending && (error || mediaRef || x.copyOf)) {
+    if (await delivery?.complete(x.jobId).catch(() => false))
+      await x.supervisor?.forget(x.jobId).catch(() => false);
+  }
   const note = warnings.length
     ? `saved as ${x.filename} (${warnings.length} warning${warnings.length > 1 ? "s" : ""}: ${warnings.join("; ")})`
     : `saved as ${x.filename}`;
@@ -634,38 +1176,44 @@ async function settle(x: Settle): Promise<void> {
 
 /** What render.ts gives an export job, for a page that did not start it. */
 interface ExportJobMeta {
-  kind: "export";
+  kind: "export" | "export_copy";
   projectDir: string;
   destPath: string;
   stagePath: string;
   filename: string;
   startedBy: "chat" | "elsewhere";
   submittedAt: number;
-  plan: import("./render").ExportJobPlan;
+  plan?: import("./render").ExportJobPlan;
+  copyOf?: string;
   telemetry?: ExportSpec["meta"];
   scratch?: string | null;
 }
 
 function exportMeta(v: JobView): ExportJobMeta | null {
   const m = v.meta as Partial<ExportJobMeta> | undefined;
-  if (v.lane !== "export" || m?.kind !== "export") return null;
-  if (!m.projectDir || !m.destPath || !m.stagePath || !m.filename || !m.plan) return null;
+  const failed = v.state === "exited" && (v.killed || v.code !== 0);
+  if (v.lane !== "export" || (m?.kind !== "export" && m?.kind !== "export_copy")) return null;
+  if (
+    !m.projectDir ||
+    !m.destPath ||
+    !m.stagePath ||
+    !m.filename ||
+    (m.kind === "export" ? !m.plan && !failed : !m.copyOf)
+  )
+    return null;
   return m as ExportJobMeta;
 }
 
 /** Follow a running export's progress into the export dialog's job, the way the page that started
  *  it did. */
-function followProgress(sup: JobSupervisor, v: JobView, durationSec: number): () => void {
-  const totalMs = Math.max(0, durationSec * 1000);
-  const read = createProgressReader((r) =>
-    useExportJob.getState().update({
-      phase: "rendering",
-      fraction: progressFraction(r.outMs, totalMs),
-      etaSec: etaSeconds(r.outMs, totalMs, r.speed),
-      speed: r.speed,
-      frame: r.frame,
-    }),
-  );
+async function followProgress(
+  sup: JobSupervisor,
+  v: JobView,
+  plan: import("./render").ExportJobPlan,
+): Promise<() => void> {
+  const { exportProgressReporter } = await import("./render");
+  const read = exportProgressReporter(plan);
+  if (plan.stepDurations) read(`artdaddy_step=${v.step ?? 0}\n`);
   read(v.stdout_tail);
   return sup.subscribe(
     () => {},
@@ -680,17 +1228,27 @@ function followProgress(sup: JobSupervisor, v: JobView, durationSec: number): ()
  *  running is followed, and committed when it ends. Its records, file and project follow-ups end
  *  exactly as if this page had started it (3h part 7). */
 export async function adoptExports(
-  opts: { contextFor?: (projectDir: string) => ClientToolContext } = {},
+  opts: { contextFor?: (projectDir: string) => ClientToolContext; projectId?: string } = {},
 ): Promise<number> {
   const sup = await jobSupervisor();
   if (!sup) return 0;
+  const port = sup.delivery;
+  if (!port) throw new Error("page adoption requires verified native delivery state");
+  const intents = await port.list();
   const contextFor = opts.contextFor ?? (await import("../tools/tauri")).makeTauriContext;
   let adopted = 0;
   for (const v of await sup.list()) {
     const m = exportMeta(v);
-    if (!m || records.some((r) => r.job_id === v.id)) continue;
-    if (v.committed) {
-      // The page that committed it died before it could let go; its records were written then.
+    if (!m) continue;
+    if (opts.projectId && projectKeyOfDir(m.projectDir) !== opts.projectId) continue;
+    const active = inflight.get(v.id);
+    if (active) {
+      active.retry = () => adoptExports({ ...opts });
+      continue;
+    }
+    const intent = intents.find((intent) => intent.id === v.id);
+    if (!intent) continue;
+    if (intent.followups_done) {
       await sup.forget(v.id).catch(() => false);
       continue;
     }
@@ -700,15 +1258,25 @@ export async function adoptExports(
     const controller = new AbortController();
     controller.signal.addEventListener("abort", () => void sup.kill(v.id).catch(() => false));
     controllers.set(v.id, controller);
-    records.push({
-      job_id: v.id,
-      filename: m.filename,
-      destPath: m.destPath,
-      state: v.state === "queued" ? "queued" : "running",
-      startedAt: m.submittedAt || v.queued_at,
-    });
+    deliveryPorts.set(v.id, port);
+    const current = records.find((record) => record.job_id === v.id);
+    if (!current) {
+      records.push({
+        job_id: v.id,
+        filename: m.filename,
+        destPath: m.destPath,
+        state: v.state === "queued" ? "queued" : "running",
+        startedAt: m.submittedAt || v.queued_at,
+      });
+    } else {
+      Object.assign(current, {
+        state: v.state === "queued" ? "queued" : "running",
+        error: undefined,
+        endedAt: undefined,
+      });
+    }
     changed();
-    track(finishAdopted(sup, v, m, key, contextFor));
+    track(v.id, finishAdopted(sup, v, m, key, contextFor));
   }
   return adopted;
 }
@@ -723,44 +1291,81 @@ async function finishAdopted(
   let unfollowState: (() => void) | undefined;
   let unfollowProgress: (() => void) | undefined;
   let ended: JobView | null = v.state === "exited" ? v : null;
+  let copyError: string | null = null;
   if (!ended) {
     unfollowState = sup.subscribe((c) => {
       if (c.id === v.id && c.state === "running") patch(v.id, { state: "running" });
     });
-    if (v.state === "running") {
+    if (v.state === "running" && m.plan) {
       useExportJob.getState().begin(() => cancelExport(v.id));
-      unfollowProgress = followProgress(sup, v, m.plan.duration);
+      unfollowProgress = await followProgress(sup, v, m.plan);
     }
-    ended = await whenJobEnds(sup, v.id);
+    if (m.copyOf && v.state === "queued") {
+      try {
+        const port = deliveryPorts.get(v.id);
+        if (!port) throw new Error("copy delivery owner is missing");
+        await port.copy(v.id);
+      } catch (error) {
+        copyError = error instanceof Error ? error.message : String(error);
+      }
+    }
+    ended = copyError
+      ? ((await sup.list()).find((job) => job.id === v.id) ?? null)
+      : await whenJobEnds(sup, v.id);
     unfollowState?.();
     unfollowProgress?.();
   }
   const ctx = contextFor(m.projectDir);
   const ledger = await openProjectJobs(ctx.store);
-  const run: RunOutcome = { error: null, cancelled: false, warnings: m.plan.warnings ?? [] };
-  if (!ended || ended.killed) {
+  const run: RunOutcome = { error: null, cancelled: false, warnings: m.plan?.warnings ?? [] };
+  if (copyError && !ended?.killed) {
+    run.error = copyError;
+  } else if (!ended || ended.killed) {
     run.cancelled = true;
     run.error = "export cancelled";
     if (m.scratch) await ctx.store.remove(m.scratch).catch(() => undefined);
-  } else if (
-    ended.code === 0 &&
-    !(await ctx.store.exists(m.stagePath)) &&
-    (await ctx.store.exists(m.destPath))
-  ) {
-    // The page that ran it renamed the file into place and died before saying so: it was checked
-    // then, and checking the empty staging path now would call a delivered export a failure.
-    if (m.scratch) await ctx.store.remove(m.scratch).catch(() => undefined);
+  } else if ((m.copyOf || !m.plan) && ended.code !== 0) {
+    run.stderrTail = jobResult(ended).stderr;
+    run.error =
+      run.stderrTail ||
+      `${m.copyOf ? "native library copy" : "native export"} failed (code=${ended.code ?? "unknown"})`;
+  } else if (!m.copyOf && (!m.plan || (await import("./render")).renderContractError(m.plan))) {
+    run.error = m.plan
+      ? (await import("./render")).renderContractError(m.plan)
+      : "unsupported render contract; export again with the current client";
   } else {
-    const { finishRenderJob } = await import("./render");
-    const res = (await finishRenderJob(ctx, m, jobResult(ended))) as {
-      ok?: boolean;
-      error?: string;
-      stderr_tail?: string;
-      warnings?: string[];
-    };
-    if (!res.ok) {
-      run.error = String(res.error ?? "render failed");
-      if (typeof res.stderr_tail === "string") run.stderrTail = res.stderr_tail;
+    const port = deliveryPorts.get(v.id);
+    const delivery = port ? (await port.list()).find((intent) => intent.id === v.id) : undefined;
+    if (
+      ended.code === 0 &&
+      delivery?.identity &&
+      ["verified", "publishing", "published"].includes(delivery.state) &&
+      !(await ctx.store.exists(m.stagePath))
+    ) {
+      if (m.scratch) await ctx.store.remove(m.scratch).catch(() => undefined);
+    } else {
+      const { finishRenderJob } = await import("./render");
+      const res = (
+        m.copyOf
+          ? { ok: true }
+          : await finishRenderJob(ctx, { ...m, plan: m.plan! }, jobResult(ended))
+      ) as {
+        ok?: boolean;
+        error?: string;
+        stderr_tail?: string;
+        warnings?: string[];
+      };
+      if (!res.ok) {
+        run.error = String(res.error ?? "render failed");
+        if (typeof res.stderr_tail === "string") run.stderrTail = res.stderr_tail;
+      } else {
+        try {
+          if (!port) throw new Error("export delivery owner is missing");
+          await port.verify(v.id);
+        } catch (error) {
+          run.error = String(error);
+        }
+      }
     }
   }
   await settle({
@@ -775,6 +1380,7 @@ async function finishAdopted(
     startedAt: m.submittedAt || v.queued_at,
     ledger,
     supervisor: sup,
+    copyOf: m.copyOf,
     run,
   });
   const done = records.find((r) => r.job_id === v.id);

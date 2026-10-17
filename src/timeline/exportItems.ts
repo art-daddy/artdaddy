@@ -10,7 +10,14 @@
 import type { ClientToolContext } from "../tools/context";
 import type { LibraryClip } from "../tools/store";
 import { loadTimeline } from "./engine";
-import { isDestinationReserved, sealExportBatch, submitExport } from "./exportQueue";
+import {
+  ExportRequestError,
+  isDestinationReserved,
+  sealExportBatch,
+  submitExports,
+  type ExportSpec,
+} from "./exportQueue";
+import type { ExportRefusalFacts } from "../api/agentEvents";
 import type { ExportOptions } from "./exportOptions";
 import { canvasFps } from "./frames";
 import type { Timeline } from "./model";
@@ -22,7 +29,7 @@ import {
   freeName,
   loadForRender,
   offlineSources,
-  queueRenderJob,
+  prepareRenderSubmission,
   safeName,
   stagingPathFor,
   type RenderPlan,
@@ -36,9 +43,35 @@ export const MAX_EXPORT_ITEMS = 50;
 
 /** The `export` tool: separate files when the call names any, else the whole timeline. */
 export async function exportTool(args: Args, ctx: ClientToolContext | null): Promise<Result> {
-  return args.media_refs !== undefined || args.clip_ids !== undefined
-    ? exportItemsTool(args, ctx)
-    : exportTimelineTool(args, ctx);
+  let result: Result;
+  let status: "blocked" | "declined" | "cancelled" = "blocked";
+  let workload: import("./renderPlan").RenderWorkload | undefined;
+  try {
+    result = await (args.media_refs !== undefined || args.clip_ids !== undefined
+      ? exportItemsTool(args, ctx)
+      : exportTimelineTool(args, ctx));
+  } catch (error) {
+    if (error instanceof ExportRequestError) {
+      status = error.status;
+      workload = error.workload;
+    }
+    result =
+      error instanceof ExportRequestError && error.result
+        ? error.result
+        : { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+  if (result.ok === false) {
+    if (ctx?.signal?.aborted || (ctx && !ctx.store.sessionLive())) status = "cancelled";
+    const facts: ExportRefusalFacts = {
+      status,
+      width: workload?.width,
+      height: workload?.height,
+      visual_layers: workload?.peakVisualLayers,
+    };
+    result = { ...result };
+    Object.defineProperty(result, "export_refusal", { value: facts });
+  }
+  return result;
 }
 
 type Planned =
@@ -55,6 +88,11 @@ type Planned =
 
 async function exportItemsTool(args: Args, ctx: ClientToolContext | null): Promise<Result> {
   if (!ctx) return { ok: false, error: "client tool runtime not ready" };
+  if (!ctx.store.canRename)
+    return {
+      ok: false,
+      error: "export requires atomic destination-volume staging on this platform",
+    };
   if (typeof args.output_path === "string" && args.output_path.trim())
     return {
       ok: false,
@@ -121,6 +159,9 @@ async function exportItemsTool(args: Args, ctx: ClientToolContext | null): Promi
     seconds: Timeline;
     branding?: import("./branding").Branding;
     warnings: string[];
+    admission: import("./render").RenderAdmission;
+    engine: import("./exportOptions").ExportEngine;
+    mode: import("./exportOptions").ExportMode;
   } | null = null;
   let fps = 30;
   if (clipIds.length) {
@@ -160,7 +201,7 @@ async function exportItemsTool(args: Args, ctx: ClientToolContext | null): Promi
     total > 1 ? `${String(i + 1).padStart(width, "0")} ${stem}` : stem;
   const taken = new Set<string>();
   const planned: Planned[] = [];
-  const stageOf = (path: string): string => (ctx.store.canRename ? stagingPathFor(path) : path);
+  const stageOf = (path: string): string => stagingPathFor(path);
   let i = 0;
   for (const m of media) {
     const { filename, path } = await freeName(
@@ -188,6 +229,8 @@ async function exportItemsTool(args: Args, ctx: ClientToolContext | null): Promi
       ? { ...loaded!.branding, endcard: null, endcardDuration: 0 }
       : undefined;
     const plan = buildRenderCommand(loaded!.seconds, stage, {
+      engine: loaded!.engine,
+      mode: loaded!.mode,
       resolution: args.resolution as ExportOptions["resolution"],
       quality: args.quality as ExportOptions["quality"],
       fps: typeof args.fps === "number" ? args.fps : undefined,
@@ -206,41 +249,48 @@ async function exportItemsTool(args: Args, ctx: ClientToolContext | null): Promi
     });
   }
 
-  if (typeof args.output_dir === "string" && args.output_dir.trim()) {
-    try {
-      await ctx.store.ensureDir(folder.dir);
-    } catch (e) {
-      return { ok: false, error: `could not make the folder ${folder.label}: ${String(e)}` };
-    }
-  }
-
   const batch = `exports_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
   const delivered: Result[] = [];
   try {
+    const requests: ExportSpec[] = [];
     for (const p of planned) {
-      const sub =
+      const request: ExportSpec =
         p.kind === "media"
-          ? await submitExport({
+          ? {
               store: ctx.store,
+              dependencies: [p.src],
               destPath: p.path,
               stagePath: p.stage,
               filename: p.filename,
               origin: ctx.origin,
+              submissionSignal: ctx.signal,
               copyOf: p.ref,
               batch,
               run: async () => {
                 await ctx.store.copyFile(p.src, p.stage);
                 return { warnings: [] };
               },
-            })
-          : await queueRenderJob(ctx, {
+            }
+          : await prepareRenderSubmission(ctx, {
               plan: p.plan,
+              admission: loaded!.admission,
               destPath: p.path,
               stagePath: p.stage,
               filename: p.filename,
               quality: String(args.quality ?? ""),
               batch,
             });
+      requests.push({
+        ...request,
+        ...(typeof args.output_dir === "string" && args.output_dir.trim()
+          ? { outputDirectory: folder.dir }
+          : {}),
+      });
+    }
+    const submitted = await submitExports(requests);
+    for (let index = 0; index < planned.length; index++) {
+      const p = planned[index];
+      const sub = submitted[index];
       delivered.push({
         job_id: sub.job_id,
         saved_to: p.filename,
@@ -250,6 +300,31 @@ async function exportItemsTool(args: Args, ctx: ClientToolContext | null): Promi
         queue_position: sub.queue_position,
       });
     }
+  } catch (error) {
+    if (error instanceof ExportRequestError) {
+      for (let index = 0; index < error.submitted.length; index++) {
+        const item = planned[index];
+        const submission = error.submitted[index];
+        delivered.push({
+          job_id: submission.job_id,
+          saved_to: item.filename,
+          queue_position: submission.queue_position,
+          ...(item.kind === "media"
+            ? { media_ref: item.ref }
+            : { clip_id: item.clipId, duration_s: Math.round(item.seconds * 1000) / 1000 }),
+        });
+      }
+    }
+    const result = {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+      ...(delivered.length ? { exports: delivered } : {}),
+    };
+    if (error instanceof ExportRequestError) {
+      error.result = result;
+      throw error;
+    }
+    return result;
   } finally {
     sealExportBatch(batch);
   }

@@ -4,6 +4,8 @@
 // desktop answer comes from Rust (`std::env::consts`), with the user-agent only as a fallback for
 // the web build and for the moment before the first IPC round-trip completes.
 import { platform } from "./index";
+import { settledWithin } from "../lib/settledWithin";
+import type { ExportBudgets } from "../timeline/exportOptions";
 
 export type HostOs = "windows" | "macos" | "linux" | "unknown";
 
@@ -11,6 +13,152 @@ export interface HostInfo {
   os: HostOs;
   /** "x86_64" | "aarch64" | … — empty until Rust answers (always empty on web). */
   arch: string;
+}
+
+export interface ExportResources {
+  readonly total_memory_bytes: number | null;
+  readonly available_memory_bytes: number | null;
+  readonly scratch_free_bytes: number | null;
+  readonly destination_free_bytes: number | null;
+  readonly budgets: ExportBudgets;
+  readonly local_fast_candidate: boolean;
+}
+
+export async function resolveExportResources(
+  destination: string,
+  signal?: AbortSignal,
+): Promise<ExportResources> {
+  const unknown: ExportResources = {
+    total_memory_bytes: null,
+    available_memory_bytes: null,
+    scratch_free_bytes: null,
+    destination_free_bytes: null,
+    budgets: { memoryBytes: null, temporaryBytes: null, executionSeconds: null },
+    local_fast_candidate: false,
+  };
+  if (platform.name !== "tauri" || signal?.aborted) return unknown;
+  const pending = (async (): Promise<ExportResources> => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    if (signal?.aborted) return unknown;
+    const response = await invoke<unknown>("jobs_export_resources", { destination });
+    if (!response || typeof response !== "object" || Array.isArray(response)) return unknown;
+    const raw = response as Record<string, unknown>;
+    const bytes = (key: string): number | null => {
+      const value = raw[key];
+      return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+    };
+    const total = bytes("total_memory_bytes");
+    const available = bytes("available_memory_bytes");
+    const limits =
+      raw.budgets && typeof raw.budgets === "object"
+        ? (raw.budgets as Record<string, unknown>)
+        : {};
+    const limit = (key: string): number | null => {
+      const value = limits[key];
+      return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+    };
+    return {
+      total_memory_bytes: total !== null && total > 0 ? total : null,
+      available_memory_bytes:
+        total !== null && total > 0 && available !== null && available <= total ? available : null,
+      scratch_free_bytes: bytes("scratch_free_bytes"),
+      destination_free_bytes: bytes("destination_free_bytes"),
+      budgets: {
+        memoryBytes: limit("memoryBytes"),
+        temporaryBytes: limit("temporaryBytes"),
+        executionSeconds: limit("executionSeconds"),
+      },
+      local_fast_candidate: raw.local_fast_candidate === true,
+    };
+  })();
+  return (await settledWithin(pending, 2000, signal)) ?? unknown;
+}
+
+export async function resolveLocalFastEncoder(signal?: AbortSignal): Promise<boolean> {
+  if (signal?.aborted || !(await resolveExportResources("", signal)).local_fast_candidate)
+    return false;
+  const { jobSupervisor, whenJobEnds } = await import("../tools/jobSupervisor");
+  const jobs = await settledWithin(
+    jobSupervisor().catch(() => null),
+    2000,
+    signal,
+  );
+  if (!jobs || signal?.aborted) return false;
+  const active = await settledWithin(
+    jobs.list().catch(() => null),
+    2000,
+    signal,
+  );
+  if (!active || signal?.aborted) return false;
+  if (active.some((job) => job.lane === "export" && job.state !== "exited")) return false;
+  const id = `fast_probe_${crypto.randomUUID().replaceAll("-", "")}`;
+  try {
+    await jobs.submit({
+      id,
+      lane: "fast-capability",
+      program: "ffmpeg",
+      args: [
+        "-hide_banner",
+        "-nostdin",
+        "-v",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=black:s=1920x1080:r=30:d=0.1",
+        "-frames:v",
+        "1",
+        "-an",
+        "-c:v",
+        "h264_amf",
+        "-usage",
+        "transcoding",
+        "-quality",
+        "quality",
+        "-rc",
+        "cqp",
+        "-qp_i",
+        "18",
+        "-qp_p",
+        "18",
+        "-qp_b",
+        "18",
+        "-f",
+        "null",
+        "-",
+      ],
+      meta: { kind: "local-fast-capability" },
+    });
+    const ended = await settledWithin(whenJobEnds(jobs, id), 10000, signal);
+    if (!ended || signal?.aborted) return false;
+    return ended.code === 0 && !ended.killed;
+  } catch {
+    return false;
+  } finally {
+    let ended = (
+      await settledWithin(
+        jobs.list().catch(() => []),
+        2000,
+      )
+    )?.find((job) => job.id === id);
+    if (ended?.state !== "exited") {
+      const killed = await settledWithin(
+        jobs.kill(id).catch(() => false),
+        2000,
+      );
+      if (killed) ended = (await settledWithin(whenJobEnds(jobs, id), 5000)) ?? undefined;
+    }
+    if (ended?.state === "exited") {
+      await settledWithin(
+        jobs.commit(id).catch(() => false),
+        2000,
+      );
+      await settledWithin(
+        jobs.forget(id).catch(() => false),
+        2000,
+      );
+    }
+  }
 }
 
 export function osFromUserAgent(ua: string): HostOs {

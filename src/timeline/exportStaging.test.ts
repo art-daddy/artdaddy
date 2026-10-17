@@ -1,6 +1,7 @@
 // UJ-022: a partial export left by a crash, a kill or a quit is removed at the next launch. The
 // queue removes its own partial when an export settles; these cover what it cannot.
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
 
 import { MemFs } from "../test/timelineKit";
 import { joinPath, ProjectStoreAccess } from "../tools/store";
@@ -16,6 +17,19 @@ import { __setStagingBackend, sweepStaging } from "./exportStaging";
 
 class Fs extends MemFs {
   locked = new Set<string>();
+  async readBytes(p: string): Promise<Uint8Array> {
+    return new TextEncoder().encode(await this.readTextFile(p));
+  }
+  async probeMedia(p: string, headBytes: number) {
+    const bytes = await this.readBytes(p);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    return {
+      id12: sha256.slice(0, 12),
+      sha256,
+      size: bytes.length,
+      head: bytes.slice(0, headBytes),
+    };
+  }
   async rename(from: string, to: string): Promise<void> {
     const v = this.files.get(joinPath(from));
     if (v === undefined) throw new Error(`ENOENT ${from}`);
@@ -89,6 +103,7 @@ describe("the queue records each partial while it is being written", () => {
     let release!: () => void;
     const sub = await submitExport({
       store,
+      dependencies: [],
       destPath: "D:/Videos/cut.mp4",
       stagePath: stage,
       filename: "cut.mp4",

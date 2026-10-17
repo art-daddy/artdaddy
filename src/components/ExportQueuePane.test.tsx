@@ -22,7 +22,14 @@ vi.mock("../tools/genJobs", () => ({
 }));
 vi.mock("../store/jobNotes", () => ({ notifyJobSettled: () => undefined }));
 
-const store = { projectDir: "/proj", rename: async () => undefined, remove: async () => undefined };
+const store = {
+  projectDir: "/proj",
+  canRename: true,
+  rename: async () => undefined,
+  remove: async () => undefined,
+  exists: async () => true,
+  probeMedia: async () => ({ sha256: "1".repeat(64), size: 1 }),
+};
 
 /** An encode that only finishes when we say so, so a QUEUED row is observable. */
 function gated(): { run: (s: AbortSignal) => Promise<{ warnings?: string[] }>; open: () => void } {
@@ -40,8 +47,9 @@ function gated(): { run: (s: AbortSignal) => Promise<{ warnings?: string[] }>; o
 const submit = (filename: string, run: (s: AbortSignal) => Promise<{ warnings?: string[] }>) =>
   submitExport({
     store: store as Any,
+    dependencies: [],
     destPath: `/out/${filename}`,
-    stagePath: `/out/${filename}`,
+    stagePath: `/out/${filename}.partial`,
     filename,
     run,
   });
@@ -98,15 +106,21 @@ describe("ExportQueuePane", () => {
   it("cancels a running export from its own row", async () => {
     const g = gated();
     let sawAbort = false;
+    let started!: () => void;
+    const running = new Promise<void>((resolve) => {
+      started = resolve;
+    });
     await submit("slow.mp4", async (signal) => {
       signal.addEventListener("abort", () => {
         sawAbort = true;
         g.open();
       });
+      started();
       await g.run(signal);
       if (signal.aborted) throw new Error("export cancelled");
       return {};
     });
+    await running;
     render(<ExportQueuePane />);
 
     fireEvent.click(screen.getByLabelText("cancel slow.mp4"));

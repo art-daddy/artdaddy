@@ -4,8 +4,10 @@ import { defineConfig } from "vitest/config";
 // the unit suite: `npx vitest run --config vitest.smoke.config.ts`.
 // Network tools require ARTDADDY_SMOKE_NET=1.
 export default defineConfig({
+  define: { __ARTDADDY_RELEASE__: JSON.stringify("artdaddy@test") },
   test: {
     environment: "node",
+    env: { VITE_SENTRY_DSN: "" },
     include: ["src/**/*.e2e.ts"],
     testTimeout: 180_000,
     hookTimeout: 30_000,
