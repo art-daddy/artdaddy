@@ -375,18 +375,21 @@ describe("render corpus (UJ-007: clips whose size does not animate)", () => {
           baselines[`render corpus (UJ-007: clips whose size does not animate) > ${name} 1`],
         ) as string;
         expect(legacy).toMatchSnapshot();
-        const expected = name === "grade + glow + static rotate + crop + flip"
-          ? legacy
-              .replace(":ow=iw:oh=ih", ":ow='ceil(hypot(iw,ih)/2)*2':oh=ow")
-              .replace(
-                "overlay=x=-192:y=-108:",
-                "overlay=x='round((-192.000000)+((2304)-overlay_w)/2)':y='round((-108.000000)+((1296)-overlay_h)/2)':",
-              )
-          : legacy.replace(
-              "chromakey=0x00FF00:0.3000:0.1000",
-              "chromakey=0x00FF00:0.3000:0.1000:threads=1",
-            );
-        expect(fc(one(clip)), "only reviewed graph changes differ from the frozen corpus").toBe(expected);
+        const expected =
+          name === "grade + glow + static rotate + crop + flip"
+            ? legacy
+                .replace(":ow=iw:oh=ih", ":ow='ceil(hypot(iw,ih)/2)*2':oh=ow")
+                .replace(
+                  "overlay=x=-192:y=-108:",
+                  "overlay=x='round((-192.000000)+((2304)-overlay_w)/2)':y='round((-108.000000)+((1296)-overlay_h)/2)':",
+                )
+            : legacy.replace(
+                "chromakey=0x00FF00:0.3000:0.1000",
+                "chromakey=0x00FF00:0.3000:0.1000:threads=1",
+              );
+        expect(fc(one(clip)), "only reviewed graph changes differ from the frozen corpus").toBe(
+          expected,
+        );
       } else expect(fc(one(clip))).toMatchSnapshot();
     });
   }

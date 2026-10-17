@@ -73,13 +73,11 @@ describe("local export calibration records", () => {
     fc.assert(
       fc.property(fc.string(), (text) => {
         const secret = `private:${text}`;
-        useExportJob
-          .getState()
-          .rememberCalibration({
-            ...sample,
-            ...{ filename: secret, project_id: secret, error: secret },
-            workload: { ...sample.workload, ...{ content: secret } },
-          });
+        useExportJob.getState().rememberCalibration({
+          ...sample,
+          ...{ filename: secret, project_id: secret, error: secret },
+          workload: { ...sample.workload, ...{ content: secret } },
+        });
         const kept = useExportJob.getState().calibrations.at(-1)!;
         expect(kept.elapsedSeconds).toBe(16);
         expect(JSON.stringify(kept)).not.toContain(secret);

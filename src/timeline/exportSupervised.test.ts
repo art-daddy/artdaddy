@@ -234,7 +234,8 @@ describe("in the app, an export runs as a job of the app process", () => {
   it("retains an opted-in engine across page loss and delivers through the existing owner", async () => {
     const t = await setup();
     useExportJob.getState().setEngine("partition-pipes-v1");
-    t.jobs.onStart = (spec) => t.fs.writeTextFile(String(spec.meta.stagePath), "complete streamed video");
+    t.jobs.onStart = (spec) =>
+      t.fs.writeTextFile(String(spec.meta.stagePath), "complete streamed video");
     const submitted = await t.exportNow();
     expect(submitted.ok).toBe(true);
     await flush();
@@ -255,7 +256,8 @@ describe("in the app, an export runs as a job of the app process", () => {
 
   it("switches later exports back without changing an already admitted engine", async () => {
     const t = await setup();
-    t.jobs.onStart = (spec) => t.fs.writeTextFile(String(spec.meta.stagePath), `complete ${spec.id}`);
+    t.jobs.onStart = (spec) =>
+      t.fs.writeTextFile(String(spec.meta.stagePath), `complete ${spec.id}`);
     useExportJob.getState().setEngine("partition-pipes-v1");
     const first = await t.exportNow();
     await flush();

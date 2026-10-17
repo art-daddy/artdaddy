@@ -135,12 +135,10 @@ describe("no caller may reach for window.confirm", () => {
     const offenders: string[] = [];
     for (let start = 0; start < files.length; start += 32) {
       const checked = await Promise.all(
-        files
-          .slice(start, start + 32)
-          .map(async (file) => ({
-            file,
-            unsafe: /\bwindow\.confirm\s*\(/.test(await fs.readFile(file, "utf8")),
-          })),
+        files.slice(start, start + 32).map(async (file) => ({
+          file,
+          unsafe: /\bwindow\.confirm\s*\(/.test(await fs.readFile(file, "utf8")),
+        })),
       );
       offenders.push(...checked.filter((result) => result.unsafe).map((result) => result.file));
     }

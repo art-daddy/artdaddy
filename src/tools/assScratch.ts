@@ -57,7 +57,13 @@ export async function withAssScratch<T>(
     byName.set(f.name, f.content);
   }
   if (jobOwnsScratch(ctx.runner))
-    return fn(await stageJobScratch(ctx.runner, [...byName].map(([name, content]) => ({ name, content })), [...new Set(fonts)]));
+    return fn(
+      await stageJobScratch(
+        ctx.runner,
+        [...byName].map(([name, content]) => ({ name, content })),
+        [...new Set(fonts)],
+      ),
+    );
   const relBase = `renderer/caps-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const first = await ctx.store.prepareWork(`${relBase}/${byName.keys().next().value}`);
   const scratch = first.slice(0, first.lastIndexOf("/"));

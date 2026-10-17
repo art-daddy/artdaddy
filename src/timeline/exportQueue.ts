@@ -593,15 +593,13 @@ async function reportSettledExport(
         } catch {}
       }
       const queuedMs = native?.started_at ? Math.max(0, native.started_at - native.queued_at) : 0;
-      useExportJob
-        .getState()
-        .rememberCalibration({
-          ...spec.meta.calibration,
-          elapsedSeconds: Math.max(0, outcome.elapsedMs - queuedMs) / 1000,
-          finalBytes: size,
-          memoryBytes,
-          temporaryBytes,
-        });
+      useExportJob.getState().rememberCalibration({
+        ...spec.meta.calibration,
+        elapsedSeconds: Math.max(0, outcome.elapsedMs - queuedMs) / 1000,
+        finalBytes: size,
+        memoryBytes,
+        temporaryBytes,
+      });
     }
     const { reportExport } = await import("../api/exportEvents");
     await reportExport({
