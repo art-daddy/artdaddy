@@ -346,9 +346,26 @@ pub struct ExportDelivery {
   pub execution_queued_ms: u64,
   #[serde(default)]
   pub render_scratch: Option<RenderScratch>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub copy_scratch: Option<String>,
 }
 
 impl ExportDelivery {
+  fn copy_scratch_prefix(&self) -> String {
+    format!(".artdaddy-copy-{:x}-", Sha256::digest(self.id.as_bytes()))
+  }
+
+  fn copy_scratch_path(&self) -> Result<Option<&Path>, String> {
+    let Some(path) = &self.copy_scratch else { return Ok(None) };
+    let path = Path::new(path);
+    if !matches!(self.source, DeliverySource::Copy { .. }) || !path.is_absolute() ||
+      path.parent() != Path::new(&self.stage_path).parent() ||
+      !path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.starts_with(&self.copy_scratch_prefix())) {
+      return Err("copy temporary file is outside its admitted namespace".into());
+    }
+    Ok(Some(path))
+  }
+
   fn execution_deadline_ms(&self, at: u64) -> Result<u64, String> {
     if self.version != 2 { return Err("retained export has no supported execution clock; export again".into()); }
     if at < self.created_at { return Err("export execution clock moved before admission".into()); }
@@ -467,6 +484,10 @@ struct ScratchOutput {
 
 impl ScratchOutput {
   fn open(path: &Path, used: u64, limit: u64) -> Result<Self, String> {
+    Self::open_named(path, used, limit, ".tmp")
+  }
+
+  fn open_named(path: &Path, used: u64, limit: u64, prefix: &str) -> Result<Self, String> {
     if used > limit { return Err("export scratch budget already exceeded".into()); }
     if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink() || !metadata.is_file()) {
       return Err("scratch output must be an owned regular file".into());
@@ -474,17 +495,21 @@ impl ScratchOutput {
     let previous = std::fs::metadata(path).map(|metadata| metadata.len()).unwrap_or(0);
     let used = used.checked_add(previous).ok_or("scratch size overflow")?;
     if used > limit { return Err("export scratch budget already exceeded".into()); }
-    let file = tempfile::NamedTempFile::new_in(path.parent().ok_or("scratch output has no parent")?).map_err(|error| error.to_string())?;
+    let file = tempfile::Builder::new().prefix(prefix).tempfile_in(path.parent().ok_or("scratch output has no parent")?)
+      .map_err(|error| error.to_string())?;
     Ok(Self { file, target: path.to_path_buf(), used, limit, failed: false, charge: None,
       previous_bytes: previous, previous_exists: path.exists(), workspace: None, workspace_key: String::new() })
   }
 
   fn open_workspace(path: &Path, used: u64, limit: u64, workspace: Arc<Workspace>, key: &str) -> Result<Self, String> {
-    let mut output = Self::open(path, used, limit)?;
-    output.charge = Some(workspace.reserve(key, 0, 1)?);
-    output.workspace = Some(workspace);
-    output.workspace_key = key.to_string();
-    Ok(output)
+    Self::open(path, used, limit)?.with_workspace(workspace, key)
+  }
+
+  fn with_workspace(mut self, workspace: Arc<Workspace>, key: &str) -> Result<Self, String> {
+    self.charge = Some(workspace.reserve(key, 0, 1)?);
+    self.workspace = Some(workspace);
+    self.workspace_key = key.to_string();
+    Ok(self)
   }
 
   fn write(&mut self, bytes: &[u8]) -> Result<(), String> {
@@ -634,6 +659,7 @@ impl Supervisor {
       }
       deliveries.insert(delivery.id.clone(), delivery);
     }
+    self.account_workspace(&deliveries)?;
     drop(deliveries);
     self.export_root = Some(root);
     Ok(self)
@@ -650,6 +676,22 @@ impl Supervisor {
   }
 
   fn account_workspace(&self, entries: &HashMap<String, ExportDelivery>) -> Result<(), String> {
+    for delivery in entries.values().filter(|delivery| delivery.state != "published" && !delivery.followups_done) {
+      let mut bytes = 0u64;
+      let mut count = 0u64;
+      for path in std::iter::once(Path::new(&delivery.stage_path)).chain(delivery.copy_scratch_path()?) {
+        match std::fs::metadata(path) {
+          Ok(metadata) if metadata.is_file() => {
+            bytes = bytes.checked_add(metadata.len()).ok_or("export staging size overflow")?;
+            count += 1;
+          }
+          Ok(_) => return Err("export stage is not a regular file".into()),
+          Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+          Err(error) => return Err(error.to_string()),
+        }
+      }
+      self.workspace.account_existing(&Self::workspace_key(Path::new(&delivery.stage_path)), bytes, count)?;
+    }
     let Some(work) = &self.export_work_root else { return Ok(()) };
     let arena = work.join("exports");
     if !arena.exists() { return Ok(()); }
@@ -843,7 +885,8 @@ impl Supervisor {
     let execution_queued_at_ms = Some(now_ms());
     let delivery = ExportDelivery { version: 2, id: id.clone(), project_dir, stage_path, dest_path,
       state: "prepared".into(), identity: None, created_at: admitted_at, render_job: None, sources, recovery_attempts: 0, source, followups_done: false,
-      command_sha256: None, worker_identity: None, producer_complete: false, execution_queued_at_ms, execution_queued_ms: 0, render_scratch: None };
+      command_sha256: None, worker_identity: None, producer_complete: false, execution_queued_at_ms, execution_queued_ms: 0,
+      render_scratch: None, copy_scratch: None };
     self.require_unleased_path(Path::new(&delivery.dest_path), deliveries.values().chain(std::iter::once(&delivery)))?;
     let stage = std::fs::OpenOptions::new().write(true).create_new(true).open(&delivery.stage_path).map_err(|error| error.to_string())?;
     drop(stage);
@@ -966,6 +1009,7 @@ impl Supervisor {
     published.state = "published".into();
     persist_delivery(root, &published)?;
     *delivery = published;
+    self.workspace.release_root(&Self::workspace_key(Path::new(&delivery.stage_path)));
     Ok(delivery.clone())
   }
 
@@ -1049,7 +1093,8 @@ impl Supervisor {
       let staged = delivery.render_scratch.as_ref().map(|scratch| scratch.files.iter()
         .map(|(relative, _)| Path::new(&scratch.path).join(relative).to_string_lossy().into_owned()).collect::<Vec<_>>()).unwrap_or_default();
       for dependency in declared.into_iter().chain(delivery.sources.iter().map(|(path, _)| path.as_str()))
-        .chain(staged.iter().map(String::as_str)).chain(stage_owned.then_some(delivery.stage_path.as_str())) {
+        .chain(staged.iter().map(String::as_str)).chain(delivery.copy_scratch.as_deref())
+        .chain(stage_owned.then_some(delivery.stage_path.as_str())) {
         let dependency = dependency_path(Path::new(dependency))?;
         if let Some(target_file) = &target_file {
           match same_file::Handle::from_path(&dependency) {
@@ -1340,8 +1385,16 @@ impl Supervisor {
         }
       }
     }
+    let stage_key = Self::workspace_key(Path::new(&entry.stage_path));
+    for path in entry.copy_scratch_path()?.into_iter().chain((entry.state != "published").then_some(Path::new(&entry.stage_path))) {
+      if let Err(error) = std::fs::remove_file(path) {
+        if error.kind() != std::io::ErrorKind::NotFound { return Err(error.to_string()); }
+      }
+    }
+    self.workspace.release_root(&stage_key);
     let mut next = entry.clone(); next.followups_done = true;
     next.render_scratch = None;
+    next.copy_scratch = None;
     next.render_job = None;
     next.sources.clear();
     if let DeliverySource::Render { paths } = &mut next.source { paths.clear(); }
@@ -1357,8 +1410,13 @@ impl Supervisor {
   }
 
   pub fn copy_delivery(&self, id: &str) -> Result<(), String> {
+    self.copy_delivery_after_sync(id, || Ok(()))
+  }
+
+  fn copy_delivery_after_sync(&self, id: &str, before_completion_record: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
     let (delivery, view) = {
       let mut entries = self.deliveries.lock().map_err(|error| error.to_string())?;
+      self.account_workspace(&entries)?;
       let entry = entries.get_mut(id).ok_or("unknown copy intent")?;
       if !matches!(entry.source, DeliverySource::Copy { .. }) { return Err("render intent cannot use the copy executor".into()); }
       if entry.state == "cancelled" || entry.state == "failed" { return Err("copy intent was cancelled or failed".into()); }
@@ -1390,14 +1448,50 @@ impl Supervisor {
     }
     let _guard = CopyGuard(self, id.to_string());
     (self.notify)(Notice::Changed(view));
-    let result = self.write_copy_artifact(&delivery);
+    let result = self.write_copy_artifact(&delivery, before_completion_record);
     if let Err(error) = &result {
       if let Some(job) = self.lock().jobs.get_mut(id) { push_stderr(job, error); }
     }
     result
   }
 
-  fn write_copy_artifact(&self, delivery: &ExportDelivery) -> Result<(), String> {
+  fn begin_copy_output(&self, delivery: &ExportDelivery, expected_bytes: u64) -> Result<ScratchOutput, String> {
+    let root = self.export_root.as_ref().ok_or("native export journal is unavailable")?;
+    let mut entries = self.deliveries.lock().map_err(|error| error.to_string())?;
+    self.account_workspace(&entries)?;
+    let current = entries.get_mut(&delivery.id).ok_or("copy intent vanished before output preparation")?;
+    if current.state != "prepared" || current.producer_complete || !matches!(current.source, DeliverySource::Copy { .. }) ||
+      !self.copying.lock().map_err(|error| error.to_string())?.contains(&delivery.id) {
+      return Err("copy output has no active admitted producer".into());
+    }
+    current.execution_deadline_ms(now_ms())?;
+    let key = Self::workspace_key(Path::new(&current.stage_path));
+    if let Some(path) = current.copy_scratch_path()? {
+      let previous = match std::fs::metadata(path) {
+        Ok(metadata) => Some(metadata.len()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.to_string()),
+      };
+      if let Some(previous) = previous {
+        std::fs::remove_file(path).map_err(|error| error.to_string())?;
+        self.workspace.release(&key, previous, 1);
+      }
+    }
+    let previous = std::fs::metadata(&current.stage_path).map(|metadata| metadata.len()).unwrap_or(0);
+    if previous > 0 {
+      std::fs::remove_file(&current.stage_path).map_err(|error| error.to_string())?;
+      self.workspace.release(&key, previous, 1);
+    }
+    let output = ScratchOutput::open_named(Path::new(&current.stage_path), 0, expected_bytes, &current.copy_scratch_prefix())?
+      .with_workspace(self.workspace.clone(), &key)?;
+    let mut prepared = current.clone();
+    prepared.copy_scratch = Some(output.file.path().to_string_lossy().into_owned());
+    persist_delivery(root, &prepared)?;
+    *current = prepared;
+    Ok(output)
+  }
+
+  fn write_copy_artifact(&self, delivery: &ExportDelivery, before_completion_record: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
     let id = &delivery.id;
     let DeliverySource::Copy { path, .. } = &delivery.source else { return Err("copy source unavailable".into()) };
     let expected = delivery.sources.first().ok_or("copy source has no identity")?;
@@ -1405,10 +1499,7 @@ impl Supervisor {
     let actual = artifact_identity_checked(Path::new(path), &check)?;
     if actual.sha256 != expected.1.sha256 || actual.size != expected.1.size { return Err("copy source changed before execution".into()); }
     let mut source = std::fs::File::open(path).map_err(|error| error.to_string())?;
-    let previous = std::fs::metadata(&delivery.stage_path).map_err(|error| error.to_string())?.len();
-    if previous > EXPORT_SCRATCH_LIMIT_BYTES { return Err("retained copy stage exceeds temporary-space budget".into()); }
-    let allocation = previous.checked_add(expected.1.size).ok_or("copy allocation size overflow")?;
-    let mut destination = ScratchOutput::open(Path::new(&delivery.stage_path), 0, allocation)?;
+    let mut destination = self.begin_copy_output(delivery, expected.1.size)?;
     let mut buffer = vec![0u8; 1024 * 1024];
     loop {
       check()?;
@@ -1425,8 +1516,10 @@ impl Supervisor {
     if entry.state != "prepared" { return Err("copy was cancelled before completion".into()); }
     entry.execution_deadline_ms(now_ms())?;
     destination.finish(Some(0))?;
+    before_completion_record()?;
     let mut next = entry.clone();
     next.producer_complete = true;
+    next.copy_scratch = None;
     persist_delivery(root, &next)?;
     *entry = next;
     Ok(())
@@ -2861,18 +2954,17 @@ mod export_delivery_tests {
     let root = dir.path().join("journal");
     let source = dir.path().join("source.wav");
     std::fs::write(&source, b"admitted library bytes").unwrap();
-    let failed_root = root.clone();
-    let jobs = Supervisor::new(Arc::new(NoSpawn), Arc::new(move |notice| {
-      if matches!(notice, Notice::Changed(job) if job.id == "copy-record-failed" && job.state == JobState::Running) {
-        std::fs::remove_dir_all(&failed_root).unwrap();
-        std::fs::write(&failed_root, b"journal unavailable").unwrap();
-      }
-    })).with_export_root(root.clone()).unwrap();
+    let jobs = owner(&root);
     let delivery = jobs.prepare_delivery("copy-record-failed".into(), "original-project".into(),
       dir.path().join("copy.partial").to_string_lossy().into(), dir.path().join("copy.wav").to_string_lossy().into(),
       DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_source".into() }).unwrap();
     std::fs::write(&delivery.dest_path, b"old copied destination").unwrap();
-    assert!(jobs.copy_delivery(&delivery.id).is_err());
+    assert!(jobs.copy_delivery_after_sync(&delivery.id, || {
+      assert_eq!(std::fs::read(&delivery.stage_path).unwrap(), b"admitted library bytes");
+      std::fs::remove_dir_all(&root).unwrap();
+      std::fs::write(&root, b"journal unavailable").unwrap();
+      Ok(())
+    }).is_err());
     assert_eq!(std::fs::read(&delivery.stage_path).unwrap(), b"admitted library bytes");
     assert_eq!(jobs.list()[0].state, JobState::Exited);
     assert_ne!(jobs.list()[0].code, Some(0));
@@ -3052,7 +3144,7 @@ mod export_delivery_tests {
     assert!(jobs.publish_delivery(&delivery.id).is_err());
     assert!(jobs.fail_delivery(&delivery.id).unwrap(), "a refused rename must still be settleable as failure");
     jobs.complete_delivery(&delivery.id).unwrap();
-    assert_eq!(std::fs::read(&delivery.stage_path).unwrap(), b"complete staged artifact");
+    assert!(!Path::new(&delivery.stage_path).exists());
     assert_eq!(std::fs::read(&marker).unwrap(), b"existing destination content");
     assert_eq!(jobs.delivery_list().iter().find(|entry| entry.id == delivery.id).unwrap().state, "failed");
   }
@@ -3467,6 +3559,110 @@ mod export_delivery_tests {
     assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), bytes);
     jobs.complete_delivery(&delivery.id).unwrap();
   }
+  #[test]
+  fn native_copy_staging_shares_scratch_capacity_until_publication() {
+    for size in [33usize, 32] {
+      let directory = tempfile::tempdir().unwrap();
+      let source = directory.path().join("source.wav");
+      let destination = directory.path().join("delivered.wav");
+      let peer = directory.path().join("retained-scratch");
+      let bytes = vec![37u8; size];
+      std::fs::write(&source, &bytes).unwrap();
+      std::fs::write(&destination, b"previous complete file").unwrap();
+      std::fs::write(&peer, [41u8; 32]).unwrap();
+      let mut jobs = owner(&directory.path().join("journal"));
+      jobs.workspace = Workspace::new(64);
+      jobs.workspace.account_existing("peer", 32, 1).unwrap();
+      let delivery = jobs.prepare_delivery("shared-copy-budget".into(), "original-project".into(),
+        directory.path().join("copy.partial").to_string_lossy().into(), destination.to_string_lossy().into(),
+        DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_source".into() }).unwrap();
+      let copied = jobs.copy_delivery(&delivery.id);
+      if size > 32 {
+        assert!(copied.is_err(), "copy ignored scratch retained by another export");
+        assert_eq!(std::fs::metadata(&delivery.stage_path).unwrap().len(), 0);
+        assert_eq!(std::fs::read(&destination).unwrap(), b"previous complete file");
+        assert_eq!(jobs.workspace.available_bytes(), 32);
+      } else {
+        copied.unwrap();
+        assert_eq!(std::fs::read(&delivery.stage_path).unwrap(), bytes);
+        let scratch = directory.path().join("blocked.nut");
+        let mut blocked = ScratchOutput::open_workspace(&scratch, 0, 64, jobs.workspace.clone(), "blocked").unwrap();
+        assert!(blocked.write(b"x").is_err(), "pending copy stopped counting before publication");
+        drop(blocked);
+        assert!(!scratch.exists());
+        jobs.verify_delivery(&delivery.id).unwrap();
+        jobs.publish_delivery(&delivery.id).unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), bytes);
+        assert_eq!(jobs.workspace.available_bytes(), 32);
+      }
+      assert_eq!(std::fs::read(&source).unwrap(), bytes);
+      assert_eq!(std::fs::read(&peer).unwrap(), vec![41u8; 32]);
+    }
+  }
+  #[test]
+  fn copy_staging_restart_restores_private_payload_charge_and_cleans_after_cancellation() {
+    let directory = tempfile::tempdir().unwrap();
+    let journal = directory.path().join("journal");
+    let source = directory.path().join("source.wav");
+    let destination = directory.path().join("delivered.wav");
+    std::fs::write(&source, [37u8; 32]).unwrap();
+    std::fs::write(&destination, b"previous complete file").unwrap();
+    let mut jobs = owner(&journal);
+    jobs.workspace = Workspace::new(64);
+    let delivery = jobs.prepare_delivery("copy-restart-payload".into(), "original-project".into(),
+      directory.path().join("copy.partial").to_string_lossy().into(), destination.to_string_lossy().into(),
+      DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_source".into() }).unwrap();
+    jobs.copying.lock().unwrap().insert(delivery.id.clone());
+    let mut output = jobs.begin_copy_output(&delivery, 32).unwrap();
+    output.write(&[41u8; 16]).unwrap();
+    let retained = jobs.delivery_list().into_iter().find(|entry| entry.id == delivery.id).unwrap().copy_scratch.unwrap();
+    let ScratchOutput { file, charge, .. } = output;
+    let (file, path) = file.keep().unwrap();
+    drop(file);
+    drop(charge);
+    assert_eq!(Path::new(&retained), path.as_path());
+    drop(jobs);
+    let mut reopened = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {}));
+    reopened.workspace = Workspace::new(64);
+    let reopened = reopened.with_export_root(journal).unwrap();
+    assert_eq!(reopened.workspace.available_bytes(), 48);
+    assert_eq!(std::fs::read(&retained).unwrap(), vec![41u8; 16]);
+    reopened.cancel_delivery(&delivery.id).unwrap();
+    reopened.complete_delivery(&delivery.id).unwrap();
+    assert!(!Path::new(&retained).exists());
+    assert!(!Path::new(&delivery.stage_path).exists());
+    assert_eq!(reopened.workspace.available_bytes(), 64);
+    assert_eq!(std::fs::read(&source).unwrap(), vec![37u8; 32]);
+    assert_eq!(std::fs::read(&destination).unwrap(), b"previous complete file");
+  }
+
+  #[test]
+  fn copy_staging_journal_refusal_leaves_no_payload_or_unowned_temporary_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let journal = directory.path().join("journal");
+    let source = directory.path().join("source.wav");
+    let destination = directory.path().join("delivered.wav");
+    std::fs::write(&source, [37u8; 32]).unwrap();
+    std::fs::write(&destination, b"previous complete file").unwrap();
+    let mut jobs = owner(&journal);
+    jobs.workspace = Workspace::new(64);
+    let delivery = jobs.prepare_delivery("copy-journal-refused".into(), "original-project".into(),
+      directory.path().join("copy.partial").to_string_lossy().into(), destination.to_string_lossy().into(),
+      DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_source".into() }).unwrap();
+    jobs.copying.lock().unwrap().insert(delivery.id.clone());
+    let saved = directory.path().join("saved-journal");
+    std::fs::rename(&journal, &saved).unwrap();
+    std::fs::write(&journal, b"journal unavailable").unwrap();
+    assert!(jobs.begin_copy_output(&delivery, 32).is_err());
+    assert!(saved.join(format!("{}.json", delivery.id)).exists());
+    assert_eq!(std::fs::metadata(&delivery.stage_path).unwrap().len(), 0);
+    assert!(!std::fs::read_dir(directory.path()).unwrap().any(|entry|
+      entry.unwrap().file_name().to_string_lossy().starts_with(&delivery.copy_scratch_prefix())));
+    assert_eq!(jobs.workspace.available_bytes(), 64);
+    assert_eq!(std::fs::read(&source).unwrap(), vec![37u8; 32]);
+    assert_eq!(std::fs::read(&destination).unwrap(), b"previous complete file");
+  }
+
   #[test]
   fn replaced_copy_stage_cannot_truncate_its_admitted_source() {
     let dir = tempfile::tempdir().unwrap();

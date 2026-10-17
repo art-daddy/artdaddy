@@ -53,6 +53,18 @@ describe("export preflight assessment", () => {
         if (memory < estimates.memoryBytes! || disk < estimates.temporaryBytes! + estimates.finalBytes!) expect(result.severity).toBe("warning");
       }), { numRuns: 200 });
   });
+
+  it("fits scratch and pending output together rather than giving each the whole allowance", () => {
+    expect(assessExport(workload, resources, { ...estimates, temporaryBytes: 10e9, finalBytes: 10e9 }, budgets))
+      .toMatchObject({ severity: "warning", reasons: ["temporary_limit"] });
+    fc.assert(fc.property(fc.integer({ min: 0, max: 18_000_000_000 }), fc.integer({ min: 0, max: 18_000_000_000 }),
+      (scratch, staging) => {
+        const combined = assessExport(workload, resources, { ...estimates, temporaryBytes: scratch, finalBytes: staging }, budgets);
+        const reversed = assessExport(workload, resources, { ...estimates, temporaryBytes: staging, finalBytes: scratch }, budgets);
+        expect(combined.severity === "none").toBe(scratch + staging <= budgets.temporaryBytes);
+        expect(reversed.reasons).toEqual(combined.reasons);
+      }), { numRuns: 200 });
+  });
 });
 
 describe("local measured export estimates", () => {

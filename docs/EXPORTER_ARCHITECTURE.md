@@ -616,6 +616,30 @@ by the corresponding open items below and cannot be omitted from phase completio
   remain unknown/unqualified; all three library passes remain false. No original
   source-audio, macOS-runtime, raised-limit or acceptance-count claim is made.
 
+- V2-D060: the owner approved extending the existing shared temporary-payload
+  guard to pending output files, with no new engine, format or raised limit.
+  Single/batch preflight now compares accounted scratch PLUS pending outputs
+  with the remaining shared allowance and available disk; an unknown component
+  stays unknown. The public estimate names pending output explicitly. Native
+  validation remains mandatory after Continue; this preflight change alone is
+  not output-write enforcement.
+- V2-D061: native copies now write through the existing pooled ScratchOutput,
+  journal the exact owned temporary sibling before payload, and keep a complete
+  private stage charged until durable publication or confirmed cleanup. The
+  journal-load boundary immediately restores retained stage/copy charges. A
+  recreated64-byte workspace with16retained bytes reports48free, not64;
+  cancellation/cleanup restores64and preserves source and prior destination.
+  A33-byte copy cannot consume the32bytes left by a peer; the32-byte sibling can
+  finish but blocks a further byte until publication. Journal refusal before
+  payload leaves no unowned file; failure after sync cannot publish. All75native
+  delivery checks pass, including real FFmpeg recovery/capture, plus76focused
+  preflight/queue checks and clean touched TypeScript diagnostics. The Windows
+  volume cannot exercise the case-sensitive identity branch. Final MP4 writes
+  still bypass this pooled writer: render-stage enforcement, historical orphan
+  cleanup, allocated-disk/metadata peak, other platforms and full-size/physical
+  qualification remain open. temporarySpaceQualified and all acceptance counts
+  are unchanged; no library reliability claim is made.
+
 ## Historical V1 Design And Evidence
 
 Everything below is retained history, not authority for conflicting V2 requirements.

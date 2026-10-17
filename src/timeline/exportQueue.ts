@@ -631,7 +631,7 @@ async function confirmExportRequest(specs: readonly ExportSpec[]): Promise<boole
     const final = checks.reduce((total, check) => total + check.estimates.finalBytes!, 0);
     if (snapshots.some((snapshot) => snapshot.scratch_free_bytes !== null && temporary + final > snapshot.scratch_free_bytes ||
       snapshot.destination_free_bytes !== null && temporary + final > snapshot.destination_free_bytes)) reasons.add("disk_shortage");
-    if (snapshots.some((snapshot) => snapshot.budgets.temporaryBytes !== null && temporary > snapshot.budgets.temporaryBytes)) reasons.add("temporary_limit");
+    if (snapshots.some((snapshot) => snapshot.budgets.temporaryBytes !== null && temporary + final > snapshot.budgets.temporaryBytes)) reasons.add("temporary_limit");
   }
   const warning = [...reasons].some((reason) => reason !== "slow");
   const storageReady = !["disk_unknown", "disk_shortage", "temporary_limit"].some((reason) => reasons.has(reason as typeof checks[number]["reasons"][number]));
@@ -663,8 +663,8 @@ async function confirmExportRequest(specs: readonly ExportSpec[]): Promise<boole
     checks.every((check) => check.estimates.memoryBytes !== null)
       ? `Estimated worker memory: about ${(Math.max(...checks.map((check) => check.estimates.memoryBytes!)) / 1024 ** 3).toFixed(1)} GiB, from observed worker samples; this is not a guaranteed peak.`
       : "Estimated memory: unknown. Native resource limits still apply.",
-    checks.every((check) => check.estimates.temporaryBytes !== null)
-      ? `Estimated temporary payload: about ${(checks.reduce((total, check) => total + check.estimates.temporaryBytes!, 0) / 1e9).toFixed(1)} GB, from conservative accounted scratch observations. Filesystem metadata and allocation overhead are extra within the existing headroom; this is not an exact disk peak.`
+    checks.every((check) => check.estimates.temporaryBytes !== null && check.estimates.finalBytes !== null)
+      ? `Estimated temporary payload: about ${(checks.reduce((total, check) => total + check.estimates.temporaryBytes! + check.estimates.finalBytes!, 0) / 1e9).toFixed(1)} GB, including pending output files and accounted scratch observations. Filesystem metadata and allocation overhead are extra within the existing headroom; this is not an exact disk peak.`
       : "Estimated temporary disk: unknown. Safe-file and temporary-space limits still apply.",
     "You can lower the export resolution or export a smaller section. Cancel to change settings.",
     warning ? "Continue anyway?" : "Continue?",

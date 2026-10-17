@@ -125,7 +125,7 @@ export function assessExport(
   if (temporary === null || final === null || !valid(resources.scratch_free_bytes) ||
     !valid(resources.destination_free_bytes) || !valid(budgets.temporaryBytes)) reasons.push("disk_unknown");
   else {
-    if (temporary > budgets.temporaryBytes) reasons.push("temporary_limit");
+    if (temporary + final > budgets.temporaryBytes) reasons.push("temporary_limit");
     if (temporary + final > resources.scratch_free_bytes || temporary + final > resources.destination_free_bytes) reasons.push("disk_shortage");
   }
   if (estimates.seconds === null || !valid(budgets.executionSeconds)) reasons.push("time_unknown");
