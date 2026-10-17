@@ -1013,6 +1013,42 @@ describe("a clip exported on its own is the whole export over its span", () => {
     await expectSpanOfWhole(whole, tl, 150, 300, "clipB");
   });
 
+  it.skipIf(!process.env.ARTDADDY_QA_CONTINUOUS_REFERENCE)("continuous low-input pieces preserve frozen pictures and DSP across two minutes", async () => {
+    retainArtifacts = true;
+    const referencePath = process.env.ARTDADDY_QA_CONTINUOUS_REFERENCE!;
+    const frozen = JSON.parse(await fsp.readFile(referencePath, "utf8")) as {
+      timeline: Timeline; output: string; frames: number; pictureSha256: string; stereoSha256: string;
+    };
+    const saved = await decoded(frozen.output, "f64le");
+    const pictureHash = (frames: Buffer[]) => {
+      const digest = createHash("sha256");
+      for (const frame of frames) digest.update(frame);
+      return digest.digest("hex");
+    };
+    expect(saved.frames).toHaveLength(frozen.frames);
+    expect(pictureHash(saved.frames)).toBe(frozen.pictureSha256);
+    expect(createHash("sha256").update(saved.pcm).digest("hex")).toBe(frozen.stereoSha256);
+    const results: Array<{ candidate: boolean; elapsedMs: number; partitions: number }> = [];
+    for (const candidate of [false, true]) {
+      const options: ExportOptions = { engine: "partition-pipes-v1", ...(candidate ? { __qaPieceSpanSeconds: 180 as const } : {}) };
+      const plan = buildRenderCommand(frozen.timeline, path.join(dir, `continuous-plan-${candidate}.mp4`), options);
+      const started = performance.now();
+      const output = await renderLossless(frozen.timeline, `continuous-replay-${candidate}`, options, true, "pcm_f64le");
+      const elapsedMs = performance.now() - started;
+      const actual = await decoded(output, "f64le");
+      expect(actual.frames).toHaveLength(frozen.frames);
+      for (let frame = 0; frame < frozen.frames; frame++)
+        expect(actual.frames[frame].equals(saved.frames[frame]), `candidate=${candidate} frame${frame}`).toBe(true);
+      expect(actual.pcm.equals(saved.pcm), `candidate=${candidate} floating stereo changed`).toBe(true);
+      results.push({ candidate, elapsedMs, partitions: plan.steps!.length });
+    }
+    expect(results[1].partitions).toBeLessThan(results[0].partitions);
+    const result = { results, frozenReference: referencePath, pictureSha256: frozen.pictureSha256,
+      stereoSha256: frozen.stereoSha256, fullPromiseQualified: false };
+    await fsp.writeFile(path.join(dir, "continuous-piece-comparison.json"), JSON.stringify(result));
+    console.log(`CONTINUOUS PIECES ${JSON.stringify(result)}`);
+  }, 240_000);
+
   it("a span at the very start and one at the very end", async () => {
     await expectSpanOfWhole(whole, tl, 0, 60, "head");
     await expectSpanOfWhole(whole, tl, 330, 390, "tail");

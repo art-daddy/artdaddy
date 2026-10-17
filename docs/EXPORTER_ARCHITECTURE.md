@@ -520,6 +520,27 @@ by the corresponding open items below and cannot be omitted from phase completio
   unknown; temporary-space/full-case/physical qualification remain false. This
   is short synthetic pilot evidence, not acceptance of a full promise line.
 
+- V2-D049: the owner authorized a private longer-piece comparison, not a new
+  engine, changed product default or raised execution/resource limit. Preserve
+  the existing 60-second default; the explicit QA-only 180-second candidate is
+  limited to at most 8 media inputs and retains reader/command subdivision and native
+  guards. Private renders do not enter normal calibration history.
+- V2-D050: frozen baseline artifacts in the recorded private continuous-scene
+  directory remain unchanged. The 128-second/3,840-frame low-resolution fixture has
+  four distinct moving inputs, a caption fade after one minute and continuous
+  reverberant/ducked stereo. Replays compare every frame and floating sample to
+  frozen hashes. The warmed baseline uses 4 producers in 46,776.2 ms; the candidate
+  uses 1 in 5,208.5 ms with identical output. The report
+  `v2-continuous-pieces-comparison.json` passes 1 case. This is not 4K,
+  physical-device or full-promise speed qualification;
+  no production piece-span policy has been changed.
+- V2-D051: another backed-up working-copy regression removed committed exporter
+  code and ledger sections while leaving frozen artifacts. Only the five owned
+  file reversions were restored from c145589; the live backup and new smoke-lane
+  build define are retained. Recovery checks pass 145 cases. No unrelated edits or
+  frozen media were restored over, and no cause for the source regression is
+  asserted without evidence. Subsequent patches use disk-context checks.
+
 ## Historical V1 Design And Evidence
 
 Everything below is retained history, not authority for conflicting V2 requirements.

@@ -136,6 +136,7 @@ export function assessExport(
 }
 
 export interface ExportOptions {
+  __qaPieceSpanSeconds?: 180;
   engine?: ExportEngine;
   mode?: ExportMode;
   resolution?: ExportResolution;

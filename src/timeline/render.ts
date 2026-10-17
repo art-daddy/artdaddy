@@ -2074,7 +2074,8 @@ function segmentedRenderPlan(
   const steps: CommandStep[] = [];
   const persistentAudio = options.engine === "partition-pipes-v1" && original.audioExpected;
   const append = (start: number, end: number): void => {
-    if (options.engine === "partition-pipes-v1" && end - start > fps * 60) {
+    const spanLimit = options.__qaPieceSpanSeconds === 180 ? 180 : 60;
+    if (options.engine === "partition-pipes-v1" && end - start > fps * spanLimit) {
       const middle = start + Math.floor((end - start) / 2);
       append(start, middle);
       append(middle, end);
@@ -2101,6 +2102,12 @@ function segmentedRenderPlan(
     if (commandLength(staged.args) > COMMAND_BUDGET)
       staged = shortInputPaths(staged, part.stillImages, prefix);
     const videos = part.sources.filter((source) => videoIds.has(source.clipId)).length;
+    if (options.__qaPieceSpanSeconds === 180 && videos > 8 && end - start > fps * 60) {
+      const middle = start + Math.floor((end - start) / 2);
+      append(start, middle);
+      append(middle, end);
+      return;
+    }
     const readerLimit = options.engine === "partition-pipes-v1" ? 32 : 96;
     if (commandLength(staged.args) > COMMAND_BUDGET || (videos > readerLimit && (options.engine === "partition-pipes-v1" || end - start > 1))) {
       if (end - start <= 1)
