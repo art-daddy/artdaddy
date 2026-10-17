@@ -62,6 +62,11 @@ class RecFs implements FsLike {
   async writeTextFile(p: string, c: string): Promise<void> {
     this.files.set(this.k(p), c);
   }
+  async rename(from: string, to: string): Promise<void> {
+    const contents = await this.readTextFile(from);
+    this.files.delete(this.k(from));
+    this.files.set(this.k(to), contents);
+  }
   async readBytes(p: string): Promise<Uint8Array> {
     this.see(p);
     if (!this.files.has(this.k(p))) throw new Error(`ENOENT ${p}`);

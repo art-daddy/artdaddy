@@ -111,7 +111,39 @@ describe("export golden", () => {
     // What is frozen here is the ffmpeg command, not how git chose to store the file: with no
     // .gitattributes, a Windows checkout rewrites this to CRLF and the compare fails on bytes
     // that have nothing to do with the render.
-    expect(actual).toBe(readFileSync(GOLDEN, "utf8").replace(/\r\n/g, "\n"));
+    const legacy = readFileSync(GOLDEN, "utf8").replace(/\r\n/g, "\n");
+    expect(legacy.split("asetpts=PTS-STARTPTS,adelay=")).toHaveLength(5);
+    let reviewedRotations = 0;
+    const expected = legacy
+      .replace(
+        /(rotate=a='[^']+':c=black@0:ow=iw:oh=ih),([^;]+?)(\[v[01]\])/g,
+        (_match, rotation: string, alpha: string, label: string) => {
+          reviewedRotations++;
+          return `${alpha},${rotation.replace("ow=iw:oh=ih", "ow='ceil(hypot(iw,ih)/2)*2':oh=ow")}${label}`;
+        },
+      )
+      .replaceAll(
+        "overlay=x=288:y=378:",
+        "overlay=x='round((288.000000)+((960)-overlay_w)/2)':y='round((378.000000)+((540)-overlay_h)/2)':",
+      )
+      .replaceAll(
+        "overlay=x=0:y=0:",
+        "overlay=x='round((0.000000)+((1920)-overlay_w)/2)':y='round((0.000000)+((1080)-overlay_h)/2)':",
+      )
+      .replaceAll(
+        "asetpts=PTS-STARTPTS,adelay=",
+        "aresample=48000:async=1:first_pts=0,asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,adelay=",
+      )
+      .replaceAll("[amix];", "[amix];[amix]aresample=48000[amix_rate];")
+      .replaceAll("-map [amix] ", "-map [amix_rate] ");
+    expect(
+      reviewedRotations,
+      "two reviewed rotations in both the graph and serialized command",
+    ).toBe(4);
+    expect(
+      actual,
+      "only reviewed audio normalization and centre-preserving unclipped rotation may differ",
+    ).toBe(expected);
   });
 
   it("still renders a keyframed volume as an envelope, not a level", () => {

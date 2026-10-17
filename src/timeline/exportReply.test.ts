@@ -5,12 +5,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@tauri-apps/api/path", () => ({ resolveResource: async (r: string) => `C:/res/${r}` }));
 
-import { MemFs, registerTestDocument, resetTestDocuments } from "../test/timelineKit";
+import { ExportMemFs, registerTestDocument, resetTestDocuments } from "../test/timelineKit";
 import { ensureTimeline } from "./engine";
 import { __resetExportQueue, whenExportsSettle } from "./exportQueue";
 import { addClipsTool } from "./placement";
 import { exportTimelineTool } from "./render";
 import { ProjectStoreAccess } from "../tools/store";
+import { setClerkTokenProvider } from "../api/auth";
+import { useAuth } from "../store/auth";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -19,11 +21,15 @@ afterEach(async () => {
   await whenExportsSettle();
   __resetExportQueue();
   await resetTestDocuments();
+  setClerkTokenProvider(null);
+  useAuth.setState({ status: "checking", profile: null });
+  vi.unstubAllGlobals();
 });
 
 /** Exports a 9 s timeline (270 frames at 30 fps); the end card measures 2.033 s. */
 async function exportNineSeconds(o: { brandAssets: boolean; outputPath?: string }): Promise<Any> {
-  const fs = new MemFs();
+  const fs = new ExportMemFs();
+  await fs.writeTextFile("C:/proj/a.mp4", "source video");
   if (o.brandAssets)
     for (const r of ["16x9", "1x1", "9x16"])
       for (const f of [`watermark-${r}.png`, `endcard-${r}.mp4`])
@@ -34,6 +40,16 @@ async function exportNineSeconds(o: { brandAssets: boolean; outputPath?: string 
   await ensureTimeline(store);
   const runner = {
     run: async (program: string, args: string[]) => {
+      if (
+        program === "ffprobe" &&
+        args.includes("-select_streams") &&
+        !args.includes("-count_frames")
+      )
+        return {
+          code: 0,
+          stdout: args[args.indexOf("-select_streams") + 1] === "v" ? "1" : "",
+          stderr: "",
+        };
       if (program === "ffprobe" && args.includes("format=duration"))
         // The end card measures 2.033 s; a.mp4 is long enough for its 9 s clip (a clip is never
         // placed longer than its media).
@@ -42,6 +58,26 @@ async function exportNineSeconds(o: { brandAssets: boolean; outputPath?: string 
           stdout: /endcard-/.test(args[args.length - 1]) ? "2.033\n" : "60\n",
           stderr: "",
         };
+      if (program === "ffprobe") {
+        const frames = o.brandAssets ? 331 : 270;
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            streams: [
+              {
+                codec_type: "video",
+                width: 1080,
+                height: 1920,
+                avg_frame_rate: "30/1",
+                nb_read_frames: frames,
+                duration: String(frames / 30),
+              },
+            ],
+            format: { duration: String(frames / 30) },
+          }),
+          stderr: "",
+        };
+      }
       if (program === "ffmpeg") await fs.writeTextFile(args[args.length - 1], "video");
       return { code: 0, stdout: "", stderr: "" };
     },
@@ -52,13 +88,47 @@ async function exportNineSeconds(o: { brandAssets: boolean; outputPath?: string 
 }
 
 describe("the export reply", () => {
+  it("reports an account exemption without removing the end-card duration", async () => {
+    setClerkTokenProvider(async () => "account-token");
+    useAuth.setState({
+      status: "unlocked",
+      profile: {
+        user_id: "user_exempt",
+        email: "",
+        display_name: "",
+        image_url: "",
+        metered: true,
+      },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              user_id: "user_exempt",
+              watermark: false,
+              end_card: true,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+      ),
+    );
+    const reply = await exportNineSeconds({ brandAssets: true });
+    expect(reply.ok, JSON.stringify(reply)).toBe(true);
+    expect(reply.duration_s).toBeCloseTo(11.033, 3);
+    expect(reply.branding).toEqual({ watermark: false, end_card_s: 2.033, timeline_s: 9 });
+    expect(String(reply.note)).toContain("corner watermark is disabled for this account");
+    expect(String(reply.note)).toContain("2.0 s end card");
+  });
+
   it("says the watermark and end card are always added, and what that does to the length", async () => {
     const r = await exportNineSeconds({ brandAssets: true });
-    expect(r.ok).toBe(true);
+    expect(r.ok, JSON.stringify(r)).toBe(true);
     expect(r.duration_s).toBeCloseTo(11.033, 3);
     expect(r.branding).toEqual({ watermark: true, end_card_s: 2.033, timeline_s: 9 });
     const note = String(r.note);
-    expect(note).toMatch(/watermark and end card are always added to an export/i);
+    expect(note).toMatch(/watermark and end card are added/i);
     expect(note).toContain("11.0 s");
     expect(note).toContain("9.0 s of timeline");
     expect(note).toContain("2.0 s end card");
@@ -67,8 +137,8 @@ describe("the export reply", () => {
 
   it("says it for an export to a path the caller chose as well", async () => {
     const r = await exportNineSeconds({ brandAssets: true, outputPath: "D:/Videos/cut.mp4" });
-    expect(r.ok).toBe(true);
-    expect(String(r.note)).toMatch(/always added to an export/i);
+    expect(r.ok, JSON.stringify(r)).toBe(true);
+    expect(String(r.note)).toMatch(/watermark and end card are added/i);
     expect(String(r.note)).not.toContain("Downloads");
   });
 
@@ -76,7 +146,7 @@ describe("the export reply", () => {
   // and a reply claiming a watermark and end card would be false.
   it("claims nothing about branding for an export that went out without it", async () => {
     const r = await exportNineSeconds({ brandAssets: false });
-    expect(r.ok).toBe(true);
+    expect(r.ok, JSON.stringify(r)).toBe(true);
     expect(r.branding).toBeUndefined();
     expect(String(r.note ?? "")).not.toMatch(/end card|watermark/i);
     expect((r.warnings as string[]).join(" ")).toMatch(/unbranded/);

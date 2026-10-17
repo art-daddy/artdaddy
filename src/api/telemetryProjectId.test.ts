@@ -16,7 +16,8 @@ vi.mock("./auth", () => ({
   hasSession: async () => true,
   authedFetch: (url: string, init: RequestInit = {}) => fetch(url, init),
 }));
-vi.mock("../platform/host", () => ({
+vi.mock("../platform/host", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../platform/host")>()),
   hostInfo: () => ({ os: "windows", arch: "x86_64" }),
   resolveHostInfo: async () => undefined,
 }));
@@ -182,7 +183,9 @@ describe("the project_id the app sends", () => {
     const imported = await importInto(DEFAULT);
     const exported = await exportFrom(DEFAULT, ID);
     expect(imported).toMatchObject({ event: "media_import", ok: true, project_id: ID });
-    expect(exported).toMatchObject({ status: "done", project_id: ID });
+    expect(exported).toMatchObject({ status: "done" });
+    expect(exported).not.toHaveProperty("project_id");
+    expect(JSON.stringify(exported)).not.toContain(ID);
     expect(JSON.stringify([imported, exported])).not.toMatch(LEAK);
   });
 
@@ -194,7 +197,9 @@ describe("the project_id the app sends", () => {
     const imported = await importInto(SAVED);
     const exported = await exportFrom(SAVED, ID);
     expect(imported.project_id).toBe(ID);
-    expect(exported.project_id).toBe(ID);
+    expect(exported).toMatchObject({ status: "done" });
+    expect(exported).not.toHaveProperty("project_id");
+    expect(JSON.stringify(exported)).not.toContain(ID);
     expect(JSON.stringify([imported, exported])).not.toMatch(LEAK);
   });
 

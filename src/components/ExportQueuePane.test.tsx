@@ -10,6 +10,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ExportQueuePane from "./ExportQueuePane";
 import { __resetExportQueue, submitExport, whenExportsSettle } from "../timeline/exportQueue";
 import { useExportJob } from "../store/exportJob";
+import { ExportMemFs, registerTestDocument, resetTestDocuments } from "../test/timelineKit";
+import { ProjectStoreAccess } from "../tools/store";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -22,14 +24,7 @@ vi.mock("../tools/genJobs", () => ({
 }));
 vi.mock("../store/jobNotes", () => ({ notifyJobSettled: () => undefined }));
 
-const store = {
-  projectDir: "/proj",
-  canRename: true,
-  rename: async () => undefined,
-  remove: async () => undefined,
-  exists: async () => true,
-  probeMedia: async () => ({ sha256: "1".repeat(64), size: 1 }),
-};
+let store: ProjectStoreAccess;
 
 /** An encode that only finishes when we say so, so a QUEUED row is observable. */
 function gated(): { run: (s: AbortSignal) => Promise<{ warnings?: string[] }>; open: () => void } {
@@ -44,18 +39,27 @@ function gated(): { run: (s: AbortSignal) => Promise<{ warnings?: string[] }>; o
   };
 }
 
-const submit = (filename: string, run: (s: AbortSignal) => Promise<{ warnings?: string[] }>) =>
-  submitExport({
-    store: store as Any,
+const submit = (filename: string, run: (s: AbortSignal) => Promise<{ warnings?: string[] }>) => {
+  const captured = store;
+  return submitExport({
+    store: captured,
     dependencies: [],
     destPath: `/out/${filename}`,
     stagePath: `/out/${filename}.partial`,
     filename,
-    run,
+    run: async (signal) => {
+      const result = await run(signal);
+      await captured.fs.writeTextFile(`/out/${filename}.partial`, "complete encoded output");
+      return result;
+    },
   });
+};
 
-beforeEach(() => {
+beforeEach(async () => {
   __resetExportQueue();
+  await resetTestDocuments();
+  store = new ProjectStoreAccess("/proj", new ExportMemFs());
+  registerTestDocument("/proj");
   useExportJob.setState({ fraction: 0.5 } as Any);
 });
 afterEach(() => __resetExportQueue());

@@ -10,7 +10,7 @@ import type { MutationOrigin } from "../project/MutationGate";
 import { setOpenDocumentResolver } from "../project/openDocuments";
 import { ProjectDocument } from "../project/ProjectDocument";
 import { asProjectId } from "../project/types";
-import { MemFs, registerTestDocument, resetTestDocuments } from "../test/timelineKit";
+import { ExportMemFs, registerTestDocument, resetTestDocuments } from "../test/timelineKit";
 import { agentToolContext } from "../tools/agentStore";
 import type { CommandResult, CommandRunner } from "../tools/command";
 import type { ClientToolContext } from "../tools/context";
@@ -29,7 +29,7 @@ import { exportTimelineTool } from "./render";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
 
-class RenamingFs extends MemFs {
+class RenamingFs extends ExportMemFs {
   async rename(from: string, to: string): Promise<void> {
     const v = this.files.get(joinPath(from));
     if (v === undefined) throw new Error(`ENOENT ${from}`);
@@ -55,7 +55,25 @@ function processLikeRunner(fs: RenamingFs) {
   const released = new Promise<void>((r) => (release = r));
   const runner: CommandRunner = {
     run: async (program, args, signal): Promise<CommandResult> => {
-      if (program !== "ffmpeg") return { code: 0, stdout: "", stderr: "" };
+      if (program !== "ffmpeg")
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            streams: [
+              {
+                codec_type: "video",
+                width: 1080,
+                height: 1920,
+                avg_frame_rate: "30/1",
+                nb_read_frames: 60,
+                duration: "2",
+              },
+              { codec_type: "audio", duration: "2" },
+            ],
+            format: { duration: "2" },
+          }),
+          stderr: "",
+        };
       seen.push({ args, signal });
       await fs.writeTextFile(args[args.length - 1], "partial video");
       const killed = new Promise<CommandResult>((resolve) => {
@@ -74,6 +92,7 @@ async function agentExport(
   opts: { origin?: MutationOrigin; isOriginCurrent?: (o: MutationOrigin) => boolean } = {},
 ) {
   const fs = new RenamingFs();
+  await fs.writeTextFile("C:/proj/a.mp4", "source video");
   const store = new ProjectStoreAccess("C:/proj", fs);
   if (opts.isOriginCurrent) {
     // The chat's own fence: a commit carrying a retired turn's origin is refused.
@@ -112,15 +131,16 @@ describe("an export belongs to the queue, not to the turn that started it", () =
     await new Promise((x) => setTimeout(x, 0));
     expect(proc.seen[0].signal?.aborted ?? false).toBe(false); // ffmpeg is still running
     proc.release();
-    expect((await whenExportEnds(jobId))?.state).toBe("done");
+    const ended = await whenExportEnds(jobId);
+    expect(ended?.state, ended?.error).toBe("done");
     expect(await fs.readTextFile(dest)).toBe("partial video"); // delivered where it belongs
   });
 
   it("is stopped by Cancel: ffmpeg is killed, the job reads cancelled, nothing is left behind", async () => {
     const { fs, proc, jobId, dest } = await agentExport();
     expect(cancelExport(jobId)).toBe(true);
-    expect(proc.seen[0].signal?.aborted).toBe(true);
     expect((await whenExportEnds(jobId))?.state).toBe("cancelled");
+    expect(proc.seen[0].signal?.aborted).toBe(true);
     expect(await fs.exists(dest)).toBe(false);
     expect(await fs.exists(proc.seen[0].args[proc.seen[0].args.length - 1])).toBe(false);
   });
@@ -148,7 +168,8 @@ describe("an export belongs to the queue, not to the turn that started it", () =
     current = 8; // the user's next message retires the turn...
     turn.abort(); // ...and aborts it
     proc.release();
-    expect((await whenExportEnds(jobId))?.state).toBe("done");
+    const ended = await whenExportEnds(jobId);
+    expect(ended?.state, ended?.error).toBe("done");
     await whenExportsSettle();
     const rec = listExportRecords().find((r) => r.job_id === jobId);
     expect(rec?.mediaRef).toMatch(/^media_/);

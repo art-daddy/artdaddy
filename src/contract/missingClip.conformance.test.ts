@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import catalog from "./catalog.json";
-import { seededCtx } from "../test/timelineKit";
+import { ExportMemFs, seededCtx } from "../test/timelineKit";
 import { createToolRegistry } from "../tools";
 import { loadTimeline } from "../timeline/engine";
 
@@ -75,7 +75,7 @@ describe("every clip-id tool explains a missing clip actionably", () => {
   });
 
   const check = async (name: string, args: Record<string, unknown>) => {
-    const { ctx, store } = await seededCtx();
+    const { ctx, store } = await seededCtx(undefined, undefined, new ExportMemFs());
     const reg = createToolRegistry(() => ctx as Any) as Any;
     const before = JSON.stringify(await loadTimeline(store));
 

@@ -13,6 +13,13 @@ if [ $? -ne 0 ]; then
   exit 1
 fi
 
+echo "[pre-push] Node exporter QA controls..."
+node --test scripts/qa/exporterPromiseReport.test.mjs scripts/qa/exporterSources.test.mjs
+if [ $? -ne 0 ]; then
+  echo "[pre-push] Node exporter QA controls FAILED - push aborted."
+  exit 1
+fi
+
 # The Rust side has its own tests and NOTHING was running them: the MCP server-name
 # assertion sat red for the whole rename, invisible to `npm test` and to `cargo check`
 # (which compiles the lib but not the test cfg).

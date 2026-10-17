@@ -45,6 +45,8 @@ jobs:
           command -v update-desktop-database
       - run: npm ci
       - run: node scripts/fetch-sidecars.mjs --only ffmpeg,ffprobe
+      - name: Promise-library and real-source QA controls
+        run: node --test scripts/qa/exporterPromiseReport.test.mjs scripts/qa/exporterSources.test.mjs
       - name: Native job invariants
         run: "cargo test --manifest-path src-tauri/Cargo.toml --lib jobs::"
       - name: Native commit failure and volume outcomes
