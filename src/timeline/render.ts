@@ -2608,7 +2608,7 @@ export async function loadForRender(
     }
 > {
   const engine: ExportEngine = kind === "deliverable" ? useExportJob.getState().engine : "file-sequence-v1";
-  const mode: ExportMode = kind === "deliverable" ? requestedMode ?? ctx.exportMode ?? useExportJob.getState().mode : "quality";
+  const mode: ExportMode = kind === "deliverable" ? requestedMode ?? ctx.exportMode ?? "quality" : "quality";
   if (engine === "partition-pipes-v1") {
     try {
       if (!(await jobSupervisor())?.delivery)
@@ -3479,7 +3479,7 @@ export async function prepareRenderSubmission(
     meta: telemetry,
     supervisor: jobs ?? undefined,
     ...(request.batch ? { batch: request.batch } : {}),
-    run: async (signal, jobId) => {
+    run: async (signal, jobId, submittedMeta) => {
       // Not bound to the turn: it is over by the time ffmpeg runs, and Stop, the next message or a
       // project switch must not kill a render nobody cancelled. Only the queue's signal reaches it.
       const base = ctx.detach?.() ?? ctx;
@@ -3497,7 +3497,7 @@ export async function prepareRenderSubmission(
               startedBy: ctx.origin ? "chat" : "elsewhere",
               submittedAt,
               plan,
-              telemetry,
+              telemetry: submittedMeta ?? telemetry,
             },
           })
         : base.runner;

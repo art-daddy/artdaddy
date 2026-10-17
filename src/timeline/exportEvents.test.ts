@@ -10,7 +10,7 @@ vi.mock("../api/exportEvents", () => ({ reportExport }));
 import {
   __resetExportQueue,
   cancelExport,
-  submitExport,
+  submitExport as submitWithDependencies,
   whenExportsSettle,
   whenExportTelemetrySettles,
   ExportRunError,
@@ -18,14 +18,17 @@ import {
 import { __resetJobNotes } from "../store/jobNotes";
 import { __resetProjectJobs } from "../tools/genJobs";
 import { joinPath, ProjectStoreAccess, type DirEntry, type FsLike } from "../tools/store";
-import { resetTestDocuments } from "../test/timelineKit";
+import { ExportMemFs, resetTestDocuments } from "../test/timelineKit";
 
 const DIR = "C:/proj";
 const DEST = "C:/out/final.mp4";
 const STAGE = `${DEST}.part-x`;
+const submitExport = (
+  request: Omit<Parameters<typeof submitWithDependencies>[0], "dependencies">,
+) => submitWithDependencies({ ...request, dependencies: [] });
 
 /** Carries `stat`, so a delivered file has a real size to report. */
-class Fs implements FsLike {
+class Fs extends ExportMemFs implements FsLike {
   files = new Map<string, string>();
   bytes = new Map<string, Uint8Array>();
   async exists(p: string): Promise<boolean> {

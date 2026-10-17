@@ -11,6 +11,7 @@ import type { ClientToolContext } from "../tools/context";
 import type { LibraryClip } from "../tools/store";
 import { loadTimeline } from "./engine";
 import { ExportRequestError, isDestinationReserved, sealExportBatch, submitExports, type ExportSpec } from "./exportQueue";
+import type { ExportRefusalFacts } from "../api/agentEvents";
 import type { ExportOptions } from "./exportOptions";
 import { canvasFps } from "./frames";
 import type { Timeline } from "./model";
@@ -36,9 +37,24 @@ export const MAX_EXPORT_ITEMS = 50;
 
 /** The `export` tool: separate files when the call names any, else the whole timeline. */
 export async function exportTool(args: Args, ctx: ClientToolContext | null): Promise<Result> {
-  return args.media_refs !== undefined || args.clip_ids !== undefined
-    ? exportItemsTool(args, ctx)
-    : exportTimelineTool(args, ctx);
+  let result: Result;
+  let status: "blocked" | "declined" | "cancelled" = "blocked";
+  let workload: import("./renderPlan").RenderWorkload | undefined;
+  try {
+    result = await (args.media_refs !== undefined || args.clip_ids !== undefined
+      ? exportItemsTool(args, ctx) : exportTimelineTool(args, ctx));
+  } catch (error) {
+    if (error instanceof ExportRequestError) { status = error.status; workload = error.workload; }
+    result = error instanceof ExportRequestError && error.result ? error.result
+      : { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+  if (result.ok === false) {
+    if (ctx?.signal?.aborted || ctx && !ctx.store.sessionLive()) status = "cancelled";
+    const facts: ExportRefusalFacts = { status, width: workload?.width, height: workload?.height, visual_layers: workload?.peakVisualLayers };
+    result = { ...result };
+    Object.defineProperty(result, "export_refusal", { value: facts });
+  }
+  return result;
 }
 
 type Planned =
@@ -128,6 +144,7 @@ async function exportItemsTool(args: Args, ctx: ClientToolContext | null): Promi
     warnings: string[];
     admission: import("./render").RenderAdmission;
     engine: import("./exportOptions").ExportEngine;
+    mode: import("./exportOptions").ExportMode;
   } | null = null;
   let fps = 30;
   if (clipIds.length) {
@@ -271,8 +288,10 @@ async function exportItemsTool(args: Args, ctx: ClientToolContext | null): Promi
           ...(item.kind === "media" ? { media_ref: item.ref } : { clip_id: item.clipId, duration_s: Math.round(item.seconds * 1000) / 1000 }) });
       }
     }
-    return { ok: false, error: error instanceof Error ? error.message : String(error),
+    const result = { ok: false, error: error instanceof Error ? error.message : String(error),
       ...(delivered.length ? { exports: delivered } : {}) };
+    if (error instanceof ExportRequestError) { error.result = result; throw error; }
+    return result;
   } finally {
     sealExportBatch(batch);
   }

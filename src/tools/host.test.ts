@@ -81,11 +81,12 @@ describe("openToolHost", () => {
     makeTauriContext.mockImplementationOnce(async () => { await waiting; return { store: {} as never, runner: {} as never }; });
     const host = openToolHost("p1");
     useExportJob.getState().setMode("fast");
-    const submitted = host.run("export", {}, { surface: "app" });
+    const submitted = host.run("export", {}, { surface: "app", exportMode: "fast" });
     useExportJob.getState().setMode("quality");
     release();
     await submitted;
     expect(toolCtx.exportMode).toBe("fast");
+    useExportJob.getState().setMode("fast");
     await host.run("export", {}, { surface: "mcp" });
     expect(toolCtx.exportMode).toBe("quality");
   });

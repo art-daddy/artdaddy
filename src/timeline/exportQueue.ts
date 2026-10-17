@@ -404,7 +404,11 @@ export interface ExportSubmission {
 }
 
 export class ExportRequestError extends Error {
-  constructor(message: string, readonly submitted: readonly ExportSubmission[]) { super(message); this.name = "ExportRequestError"; }
+  result?: Record<string, unknown>;
+  constructor(message: string, readonly submitted: readonly ExportSubmission[],
+    readonly status: "blocked" | "declined" | "cancelled" = "blocked", readonly workload?: RenderWorkload) {
+    super(message); this.name = "ExportRequestError";
+  }
 }
 
 export interface ExportSpec {
@@ -436,19 +440,20 @@ export interface ExportSpec {
     visual_layers?: number;
     project_width?: number;
     project_height?: number;
+    readiness?: "ready" | "not_ready" | "unknown";
     calibration?: Pick<ExportCalibration, "workload" | "output" | "quality" | "engine" | "encoder">;
   };
   /** The app process's job supervisor, when the encode runs as one of its jobs (3h part 7). It
    *  keeps the order then, so this queue does not hold a job back, and a job's state comes from it. */
   supervisor?: JobSupervisor;
-  /** A library file delivered as it is: no encode, no export metric, and the delivered row names
+  /** A library file delivered as it is: no encode, and the delivered row names
    *  this library ref rather than cataloguing the same bytes a second time. */
   copyOf?: string;
   /** The export call this job is one file of (see {@link sealExportBatch}). */
   batch?: string;
   /** Runs the encode. Rejects with a message on failure. `jobId` names the job everywhere: the
    *  ledger, this queue and the supervisor. */
-  run: (signal: AbortSignal, jobId: string) => Promise<{ warnings?: string[] }>;
+  run: (signal: AbortSignal, jobId: string, meta: ExportSpec["meta"]) => Promise<{ warnings?: string[] }>;
 }
 
 /** A background encode failed after producing process diagnostics. Keeping this typed prevents
@@ -517,7 +522,7 @@ export async function whenExportTelemetrySettles(): Promise<void> {
 /** Report one settled export to the server's analytics. Fire-and-forget by contract: the file is
  *  already delivered, so nothing here may fail, delay or alter the export. */
 async function reportSettledExport(
-  spec: Pick<ExportSpec, "store" | "destPath" | "meta" | "supervisor"> & { jobId?: string },
+  spec: Pick<ExportSpec, "store" | "destPath" | "meta" | "supervisor" | "copyOf"> & { jobId?: string },
   outcome: {
     status: "done" | "failed" | "cancelled";
     elapsedMs: number;
@@ -531,7 +536,7 @@ async function reportSettledExport(
       ? (await spec.supervisor.list()).find((view) => view.id === spec.jobId) : null;
     // Only a delivered file has a size; a failed encode leaves nothing to measure.
     const size = outcome.status === "done" ? (outcome.finalSizeBytes ?? (await spec.store.byteSize(spec.destPath)) ?? 0) : 0;
-    if (outcome.status === "done" && spec.meta?.calibration && size > 0) {
+    if (outcome.status === "done" && !spec.copyOf && spec.meta?.calibration && size > 0) {
       let memoryBytes: number | null = null;
       let temporaryBytes: number | null = null;
       const diagnostics = native ? jobStderr(native).split(/\r?\n/).reverse() : [];
@@ -559,6 +564,8 @@ async function reportSettledExport(
     const { reportExport } = await import("../api/exportEvents");
     await reportExport({
       status: outcome.status,
+      operation: spec.copyOf ? "copy" : "render",
+      readiness: spec.meta?.readiness ?? "unknown",
       duration_s: spec.meta?.duration_s ?? 0,
       size_bytes: size,
       elapsed_ms: outcome.elapsedMs,
@@ -597,20 +604,10 @@ export async function submitExport(spec: ExportSpec): Promise<ExportSubmission> 
   return (await submitExports([spec]))[0];
 }
 
-async function confirmExportRequest(specs: readonly ExportSpec[]): Promise<void> {
-  const started = Date.now();
+async function confirmExportRequest(specs: readonly ExportSpec[]): Promise<boolean> {
   const refuse = async (status: "cancelled" | "declined" | "blocked"): Promise<never> => {
-    try {
-      const { reportExport } = await import("../api/exportEvents");
-      for (const spec of specs) {
-        const beacon = reportExport({ status, reason_code: status === "blocked" ? "unknown" : status, readiness: "unknown",
-          elapsed_ms: Date.now() - started, width: spec.workload?.width, height: spec.workload?.height,
-          visual_layers: spec.workload?.peakVisualLayers }).catch(() => undefined);
-        beacons.add(beacon);
-        void beacon.finally(() => beacons.delete(beacon));
-      }
-    } catch {}
-    throw new Error(status === "blocked" ? "export could not be confirmed; no job was submitted" : "export cancelled before submission");
+    throw new ExportRequestError(status === "blocked" ? "export could not be confirmed; no job was submitted"
+      : "export cancelled before submission", [], status, specs[0].workload);
   };
   const checks: ExportAssessment[] = [];
   const snapshots: ExportResources[] = [];
@@ -637,7 +634,8 @@ async function confirmExportRequest(specs: readonly ExportSpec[]): Promise<void>
     if (snapshots.some((snapshot) => snapshot.budgets.temporaryBytes !== null && temporary > snapshot.budgets.temporaryBytes)) reasons.add("temporary_limit");
   }
   const warning = [...reasons].some((reason) => reason !== "slow");
-  if (!warning && checks.every((check) => check.severity === "none")) return;
+  const storageReady = !["disk_unknown", "disk_shortage", "temporary_limit"].some((reason) => reasons.has(reason as typeof checks[number]["reasons"][number]));
+  if (!warning && checks.every((check) => check.severity === "none")) return storageReady;
   const outside = checks.some((check) => check.promiseLine === "outside");
   const explanations = {
     outside_promise: "The project exceeds an individual promised size, frame-rate, clip-count or on-screen limit, or those details are unavailable.",
@@ -673,7 +671,7 @@ async function confirmExportRequest(specs: readonly ExportSpec[]): Promise<void>
   ].join("\n\n");
   const decision = await confirmExport(message, warning);
   if (specs.some((spec) => spec.submissionSignal?.aborted || !spec.store.sessionLive())) return refuse("cancelled");
-  if (decision === "continue") return;
+  if (decision === "continue") return storageReady;
   return refuse(decision === "cancel" ? "declined" : "blocked");
 }
 
@@ -692,27 +690,19 @@ export async function submitExports(request: readonly ExportSpec[]): Promise<Exp
     if (reserved.has(key) || destinations.has(key)) throw new Error("export destination is already reserved");
     destinations.add(key);
   }
-  await confirmExportRequest(specs);
+  const storageReady = await confirmExportRequest(specs);
   const submitted: ExportSubmission[] = [];
-  const admissionStarted = Date.now();
   try {
-    for (const spec of specs) submitted.push(await admitExport(spec));
+    for (const spec of specs) submitted.push(await admitExport(spec, storageReady));
   } catch (error) {
     const failed = specs[submitted.length];
-    try {
-      const { reportExport } = await import("../api/exportEvents");
-      const beacon = reportExport({ status: failed.submissionSignal?.aborted || !failed.store.sessionLive() ? "cancelled" : "blocked",
-        elapsed_ms: Date.now() - admissionStarted, error: error instanceof Error ? error.message : String(error),
-        width: failed.workload?.width, height: failed.workload?.height, visual_layers: failed.workload?.peakVisualLayers }).catch(() => undefined);
-      beacons.add(beacon);
-      void beacon.finally(() => beacons.delete(beacon));
-    } catch {}
-    throw new ExportRequestError(error instanceof Error ? error.message : String(error), [...submitted]);
+    throw new ExportRequestError(error instanceof Error ? error.message : String(error), [...submitted],
+      failed.submissionSignal?.aborted || !failed.store.sessionLive() ? "cancelled" : "blocked", failed.workload);
   }
   return submitted;
 }
 
-async function admitExport(spec: ExportSpec): Promise<ExportSubmission> {
+async function admitExport(spec: ExportSpec, storageReady: boolean): Promise<ExportSubmission> {
   spec = {
     ...spec,
     dependencies: [...spec.dependencies],
@@ -775,6 +765,7 @@ async function admitExport(spec: ExportSpec): Promise<ExportSubmission> {
         spec.copyOf ? { kind: "copy", path: copyPath!, media_ref: spec.copyOf } : { kind: "render", paths: [...spec.dependencies] });
       lease?.assertCanCommit();
       if (!spec.store.sessionLive() || spec.submissionSignal?.aborted) throw new Error("export cancelled during native preparation");
+      if (spec.meta) spec.meta = { ...spec.meta, readiness: storageReady ? "ready" : "unknown" };
       lease?.markCommitted();
     }, { origin: spec.origin, signal: spec.submissionSignal });
   } catch (error) {
@@ -869,7 +860,7 @@ async function encode(spec: ExportSpec, ledger: Ledger, jobId: string, key: stri
       if (!port) throw new Error("copy delivery owner is missing");
       await port.copy(jobId);
     } else {
-      run.warnings = (await spec.run(signal, jobId)).warnings ?? [];
+      run.warnings = (await spec.run(signal, jobId, spec.meta)).warnings ?? [];
     }
     if (signal.aborted) throw new Error("export cancelled");
     const port = deliveryPorts.get(jobId);
@@ -1010,8 +1001,7 @@ async function settle(x: Settle): Promise<void> {
   //
   // Deliberately NOT in `inflight`: that set is what a drain on quit waits for, and making
   // someone's app hang on a telemetry socket to save a metric row is the wrong trade.
-  // A copy is not an encode: counting it would dilute the export failure rate it exists to show.
-  if (!x.copyOf) {
+  {
     const beacon = reportSettledExport(x, {
       status: error ? (cancelled ? "cancelled" : "failed") : "done",
       finalSizeBytes: publishedIdentity?.size,

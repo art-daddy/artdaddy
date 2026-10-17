@@ -12,7 +12,6 @@ import type { ProjectStoreAccess } from "./store";
 import { ProjectClosingError, type MutationOrigin } from "../project/MutationGate";
 import { openDocumentById } from "../project/openDocuments";
 import { isJobEffect, toolEffect } from "../contract/effects";
-import { useExportJob } from "../store/exportJob";
 import type { ExportMode } from "../timeline/exportOptions";
 import {
   agentEventContext,
@@ -94,7 +93,7 @@ class ProjectToolHost implements ToolHost {
     args: Record<string, unknown>,
     options: ToolRunOptions,
   ): Promise<unknown> {
-    const capturedOptions = { ...options, exportMode: options.exportMode ?? useExportJob.getState().mode };
+    const capturedOptions = { ...options, exportMode: options.exportMode ?? "quality" as const };
     const submitted = agentEventContext();
     const labels: AgentEventContext = {
       ...submitted,

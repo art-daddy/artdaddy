@@ -4,9 +4,11 @@
 // zip of the project. These drive the real tool door (the registry's `export`) on an in-memory
 // disk and judge what lands there, what the queue reports and what wakes the agent.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { __setExportConfirmationForTests } from "../lib/confirm";
+import { createHash } from "node:crypto";
 
 vi.mock("@tauri-apps/api/path", () => ({ resolveResource: async (r: string) => `C:/res/${r}` }));
+const exportBeacon = vi.hoisted(() => vi.fn(async (_event: Record<string, unknown>) => undefined));
+vi.mock("../api/exportEvents", () => ({ reportExport: exportBeacon }));
 
 import { MemFs, registerTestDocument, resetTestDocuments } from "../test/timelineKit";
 import { ensureTimeline } from "./engine";
@@ -15,11 +17,19 @@ import {
   listExportOutcomes,
   __resetExportQueue,
   whenExportsSettle,
+  whenExportTelemetrySettles,
+  localDeliveryPort,
 } from "./exportQueue";
 import { exportTool } from "./exportItems";
 import { addClipsTool, addTextClipsTool } from "./placement";
 import { ProjectStoreAccess, joinPath } from "../tools/store";
 import { __resetJobNotes, pendingJobNotes } from "../store/jobNotes";
+import { setClerkTokenProvider } from "../api/auth";
+import { useAuth } from "../store/auth";
+import { __setExportConfirmationForTests } from "../lib/confirm";
+import { ClientToolRegistry } from "../tools/registry";
+import { FakeJobs } from "../test/fakeJobs";
+import { __resetJobSupervisor, __setJobSupervisor } from "../tools/jobSupervisor";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -28,11 +38,22 @@ const DIR = "C:/proj";
 const DL = "C:/Users/test/Downloads";
 const AGENT = { chatSessionId: "t1", branchId: 0, executionId: 1 };
 
+function requestedExport(args: Record<string, unknown>, ctx: Parameters<typeof exportTool>[1]) {
+  const registry = new ClientToolRegistry();
+  registry.register("export", (input) => exportTool(input, ctx));
+  return registry.run("export", args);
+}
+
 afterEach(async () => {
   await whenExportsSettle();
+  await whenExportTelemetrySettles();
+  exportBeacon.mockClear();
   __resetExportQueue();
   __resetJobNotes();
   await resetTestDocuments();
+  setClerkTokenProvider(null);
+  useAuth.setState({ status: "checking", profile: null });
+  vi.unstubAllGlobals();
 });
 
 /** An in-memory disk with the operations an export uses, and a gate to hold a copy mid-way. */
@@ -40,6 +61,19 @@ class Disk extends MemFs {
   dirs = new Set<string>();
   gates = new Map<string, Promise<void>>();
   failCopy = new Set<string>();
+  async readBytes(p: string): Promise<Uint8Array> {
+    return new TextEncoder().encode(await this.readTextFile(p));
+  }
+  async probeMedia(p: string, headBytes: number) {
+    const bytes = await this.readBytes(p);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    return {
+      id12: sha256.slice(0, 12),
+      sha256,
+      size: bytes.length,
+      head: bytes.slice(0, headBytes),
+    };
+  }
   async mkdir(p?: string): Promise<void> {
     if (p) this.dirs.add(joinPath(p));
   }
@@ -125,6 +159,55 @@ async function project(
   const hold: Setup["hold"] = { gate: null };
   const runner = {
     run: async (program: string, args: string[]) => {
+      if (program === "ffprobe" && args.includes("stream=codec_type,duration:format=duration")) {
+        const command = ffmpeg.find((command) => command.at(-1) === args.at(-1));
+        const graph = command?.[command.indexOf("-filter_complex") + 1] ?? "";
+        const main = Number(
+          /color=(?:c=)?[^:;]+:s=\d+x\d+:r=[\d.]+:d=([\d.]+)/.exec(graph)?.[1] ?? 8,
+        );
+        const duration = main + 2.033;
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            streams: [
+              { codec_type: "video", duration: String(duration) },
+              ...(command?.includes("-an")
+                ? []
+                : [{ codec_type: "audio", duration: String(duration) }]),
+            ],
+            format: { duration: String(duration) },
+          }),
+          stderr: "",
+        };
+      }
+      if (program === "ffprobe" && args.includes("-count_frames")) {
+        const command = ffmpeg.find((command) => command.at(-1) === args.at(-1));
+        const graph = command?.[command.indexOf("-filter_complex") + 1] ?? "";
+        const canvas = /color=(?:c=)?[^:;]+:s=(\d+)x(\d+):r=([\d.]+):d=([\d.]+)/.exec(graph);
+        const fps = Number(command?.[command.indexOf("-r") + 1] ?? canvas?.[3] ?? 30);
+        const duration = command?.includes("-shortest")
+          ? Number(canvas?.[4] ?? 0) + 2.033
+          : command?.includes("-t")
+            ? Number(command[command.lastIndexOf("-t") + 1])
+            : Number(canvas?.[4] ?? 0);
+        const frames = Math.ceil(duration * fps - 1e-6);
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            streams: [
+              {
+                codec_type: "video",
+                width: Number(canvas?.[1] ?? 1920),
+                height: Number(canvas?.[2] ?? 1080),
+                avg_frame_rate: `${fps}/1`,
+                nb_read_frames: String(frames),
+                duration: String(frames / fps),
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
       if (program === "ffprobe" && args.includes("format=duration"))
         // The brand end card measures 2.033 s; library media is long enough for the clips placed
         // on it (a clip is never placed longer than its media).
@@ -166,6 +249,49 @@ async function project(
 }
 
 describe("export delivers separate files into a folder", () => {
+  it.each([false, true])(
+    "uses the account policy for timeline clips, including agent exports: %s",
+    async (origin) => {
+      setClerkTokenProvider(async () => "account-token");
+      useAuth.setState({
+        status: "unlocked",
+        profile: {
+          user_id: "user_exempt",
+          email: "",
+          display_name: "",
+          image_url: "",
+          metered: true,
+        },
+      });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(
+          async () =>
+            new Response(
+              JSON.stringify({
+                user_id: "user_exempt",
+                watermark: false,
+                end_card: true,
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            ),
+        ),
+      );
+      const setup = await project({ origin });
+      const reply = (await exportTool(
+        { clip_ids: [setup.clips.a, setup.clips.b], output_dir: "clean clips" },
+        setup.ctx,
+      )) as Any;
+      expect(reply.ok).toBe(true);
+      await whenExportsSettle();
+      expect(Object.keys(setup.disk.under(`${DL}/clean clips`))).toHaveLength(2);
+      expect(setup.ffmpeg).toHaveLength(2);
+      for (const args of setup.ffmpeg)
+        expect(args.some((arg) => /watermark-|endcard-/.test(arg))).toBe(false);
+      expect(String(reply.note)).not.toMatch(/carries the ArtDaddy watermark/i);
+    },
+  );
+
   it("copies library files byte for byte into a folder made in Downloads, numbered as asked", async () => {
     const p = await project();
     const r = (await exportTool(
@@ -425,6 +551,10 @@ describe("export delivers separate files into a folder", () => {
     expect(r.ok, r.error).toBe(true);
     expect(r.saved_to).toBe("proj.mp4");
     await whenExportsSettle();
+    const outcome = listExportOutcomes().find((outcome) => outcome.job_id === r.job_id);
+    expect(outcome?.state, String(outcome?.error ?? "whole timeline delivery outcome")).toBe(
+      "done",
+    );
     expect(Object.keys(p.disk.under(`${DL}/renders`))).toEqual(["proj.mp4"]);
   });
 
@@ -433,13 +563,94 @@ describe("export delivers separate files into a folder", () => {
     __setExportConfirmationForTests(async () => "cancel");
     const args = { output_dir: "not-created-without-consent",
       ...(kind === "clip" ? { clip_ids: [p.clips.a] } : kind === "copy" ? { media_refs: ["media_aaa"] } : {}) };
-    const result = await exportTool(args, p.ctx).catch((error: unknown) => ({ ok: false, error: String(error) })) as Any;
+    const result = await requestedExport(args, p.ctx) as Any;
     expect(result.ok).toBe(false);
     expect(result.error).toContain("cancelled before submission");
     expect(p.disk.dirs.has(`${DL}/not-created-without-consent`)).toBe(false);
     expect(p.disk.under(`${DL}/not-created-without-consent`)).toEqual({});
     expect(p.ffmpeg).toHaveLength(0);
     expect(listExportOutcomes()).toHaveLength(0);
+    await whenExportTelemetrySettles();
+    expect(exportBeacon).toHaveBeenCalledTimes(1);
+    expect(exportBeacon.mock.calls[0][0]).toMatchObject({ status: "declined", readiness: "unknown" });
+  });
+
+  it.each(["whole", "clip", "copy", "no-context"] as const)("counts an early %s refusal once without admitting a job", async (kind) => {
+    const p = await project({ extra: [{ id: "media_ext", path: "D:/footage/ext.mp4", filename: "ext.mp4", kind: "video", external: true }] });
+    let args: Record<string, unknown> = {};
+    if (kind === "whole" || kind === "clip") {
+      await p.disk.writeTextFile("D:/footage/ext.mp4", "linked footage");
+      const placed = await addClipsTool({ entries: [{ media_ref: "media_ext", timeline_in: 240, timeline_out: 270 }] }, p.ctx) as Any;
+      expect(placed.ok).toBe(true);
+      const source = await p.store.resolveMediaRef("media_ext");
+      expect(source).not.toBeNull();
+      await p.disk.remove(source!);
+      if (kind === "clip") args = { clip_ids: [p.clips.a] };
+    } else if (kind === "copy") args = { media_refs: ["not-in-the-library"] };
+    const result = await requestedExport(args, kind === "no-context" ? null : p.ctx) as Any;
+    expect(result.ok).toBe(false);
+    expect(listExportOutcomes()).toHaveLength(0);
+    await whenExportTelemetrySettles();
+    expect(exportBeacon).toHaveBeenCalledTimes(1);
+    expect(exportBeacon.mock.calls[0][0]).toMatchObject({ status: "blocked", readiness: "unknown" });
+  });
+
+  it.each([null, { unexpected_export_param: true }])("counts protocol-refused export arguments before any handler runs: %s", async (args) => {
+    const p = await project();
+    const handler = vi.fn((input: Record<string, unknown>) => exportTool(input, p.ctx));
+    const registry = new ClientToolRegistry();
+    registry.register("export", handler);
+    const result = await registry.run("export", args as Any) as Any;
+    expect(result.ok).toBe(false);
+    expect(handler).not.toHaveBeenCalled();
+    expect(exportBeacon).toHaveBeenCalledTimes(1);
+    expect(exportBeacon.mock.calls[0][0]).toMatchObject({ status: "blocked", readiness: "unknown" });
+    expect(listExportOutcomes()).toHaveLength(0);
+  });
+
+  it.each(["render", "copy"] as const)("counts an accepted %s once through the real dispatch and file outcome", async (operation) => {
+    const p = await project();
+    const result = await requestedExport(operation === "copy" ? { media_refs: ["media_aaa"] } : { clip_ids: [p.clips.a] }, p.ctx) as Any;
+    expect(result.ok, result.error).toBe(true);
+    await whenExportsSettle();
+    await whenExportTelemetrySettles();
+    expect(Object.keys(p.disk.under(DL))).toHaveLength(1);
+    expect(exportBeacon).toHaveBeenCalledTimes(1);
+    expect(exportBeacon.mock.calls[0][0]).toMatchObject({ status: "done", operation });
+  });
+
+  it.each([1, 2])("counts every output once when native batch admission fails at position %s", async (failureAt) => {
+    const p = await project();
+    const jobs = new FakeJobs();
+    jobs.delivery = localDeliveryPort(p.store);
+    const prepare = jobs.delivery.prepare.bind(jobs.delivery);
+    const copy = jobs.delivery.copy.bind(jobs.delivery);
+    let calls = 0;
+    jobs.delivery.prepare = async (...args) => {
+      if (++calls === failureAt) throw new Error("native intent write failed");
+      const delivery = await prepare(...args);
+      jobs.queueCopy(delivery);
+      return delivery;
+    };
+    jobs.delivery.copy = (id) => jobs.runCopy(id, () => copy(id));
+    __setJobSupervisor(jobs);
+    try {
+      const result = await requestedExport({ media_refs: ["media_aaa", "media_bbb"] }, p.ctx) as Any;
+      expect(result.ok).toBe(false);
+      expect(result.exports?.length ?? 0).toBe(failureAt - 1);
+      expect(JSON.stringify(result)).not.toContain("export_refusal");
+      await whenExportsSettle();
+      await whenExportTelemetrySettles();
+      expect(exportBeacon).toHaveBeenCalledTimes(2);
+      const events = exportBeacon.mock.calls.map(([event]) => event);
+      expect(events.every((event) => event.operation === "copy")).toBe(true);
+      expect(events.filter((event) => event.status === "done")).toHaveLength(failureAt - 1);
+      expect(events.filter((event) => event.status === "blocked")).toHaveLength(3 - failureAt);
+      expect(Object.values(p.disk.under(DL))).toEqual(failureAt === 2 ? ["bytes of Tape 14.mp4"] : []);
+    } finally {
+      await whenExportsSettle();
+      __resetJobSupervisor();
+    }
   });
 
   // The failure direction: one bad item must leave NOTHING behind, not a half-delivered folder.

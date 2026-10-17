@@ -127,10 +127,10 @@ async function setup() {
   jobs.onStart = (spec) => fs.writeTextFile(spec.args[spec.args.length - 1], "a whole video");
   __setJobSupervisor(jobs);
   const base: ClientToolContext = { store, runner };
-  const exportNow = async (name?: string) =>
+  const exportNow = async (name?: string, exportMode: "quality" | "fast" = "quality") =>
     (await exportTimelineTool(
       name ? { name } : {},
-      agentToolContext(base, new AbortController().signal),
+      agentToolContext({ ...base, exportMode }, new AbortController().signal),
     )) as Any;
   // A new page: its own store over the same disk, and no memory of the last page.
   const nextPage = () => ({ store: new ProjectStoreAccess(DIR, fs), runner });
@@ -167,7 +167,7 @@ describe("in the app, an export runs as a job of the app process", () => {
     const t = await setup();
     useExportJob.getState().setMode("fast");
     vi.spyOn(host, "resolveLocalFastEncoder").mockResolvedValue(false);
-    await expect(t.exportNow()).rejects.toThrow("Fast is unavailable");
+    await expect(t.exportNow(undefined, "fast")).rejects.toThrow("Fast is unavailable");
     expect(t.jobs.submitted).toHaveLength(0);
     expect(listExportRecords()).toHaveLength(0);
     expect(await t.fs.exists(DEST)).toBe(false);
@@ -180,7 +180,7 @@ describe("in the app, an export runs as a job of the app process", () => {
     const timeline = await loadTimeline(t.store);
     const clipId = timeline.tracks.flatMap((track) => track.clips)[0].id;
     const submitted = await exportTimelineTool(kind === "clip" ? { clip_ids: [clipId] } : {},
-      agentToolContext(t.nextPage(), new AbortController().signal)) as Any;
+      agentToolContext({ ...t.nextPage(), exportMode: "fast" }, new AbortController().signal)) as Any;
     expect(submitted.ok).toBe(true);
     useExportJob.getState().setMode("quality");
     await flush();
@@ -200,7 +200,7 @@ describe("in the app, an export runs as a job of the app process", () => {
     vi.spyOn(host, "resolveLocalFastEncoder").mockResolvedValue(true);
     await t.fs.writeTextFile(DEST, "previous complete output");
     const submitted = await exportTimelineTool({ output_path: DEST },
-      agentToolContext(t.nextPage(), new AbortController().signal)) as Any;
+      agentToolContext({ ...t.nextPage(), exportMode: "fast" }, new AbortController().signal)) as Any;
     await flush();
     t.jobs.exit(submitted.job_id, 1);
     await whenExportsSettle();
@@ -214,7 +214,7 @@ describe("in the app, an export runs as a job of the app process", () => {
     const controller = new AbortController();
     useExportJob.getState().setMode("fast");
     vi.spyOn(host, "resolveLocalFastEncoder").mockImplementation(async () => { controller.abort(); return true; });
-    await expect(exportTimelineTool({}, agentToolContext(t.nextPage(), controller.signal))).rejects.toThrow("cancelled");
+    await expect(exportTimelineTool({}, agentToolContext({ ...t.nextPage(), exportMode: "fast" }, controller.signal))).rejects.toThrow("cancelled");
     expect(t.jobs.submitted).toHaveLength(0);
     expect(listExportRecords()).toHaveLength(0);
     expect(await t.fs.exists(DEST)).toBe(false);

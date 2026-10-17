@@ -185,6 +185,40 @@ describe("required export preflight", () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it.each([
+    { known: true, succeeds: true }, { known: true, succeeds: false },
+    { known: false, succeeds: true }, { known: false, succeeds: false },
+  ])("uses the same checked readiness for known=$known success=$succeeds", async ({ known, succeeds }) => {
+    const { fs, store } = make();
+    await whenExportTelemetrySettles();
+    exportBeacon.mockClear();
+    if (known) {
+      vi.spyOn(host, "resolveExportResources").mockResolvedValue({ total_memory_bytes: 16e9, available_memory_bytes: 8e9,
+        scratch_free_bytes: 100e9, destination_free_bytes: 100e9, local_fast_candidate: false,
+        budgets: { memoryBytes: 3.5e9, temporaryBytes: 18e9, executionSeconds: 28800 } });
+      useExportJob.setState({ calibrations: [{ ...calibration, elapsedSeconds: 16, finalBytes: 100,
+        memoryBytes: 1024, temporaryBytes: 4096 }] });
+    }
+    let captured: string | undefined;
+    const submitted = await submitExport({ store, destPath: DEST, stagePath: STAGE, filename: "final.mp4",
+      workload: calibration.workload,
+      meta: { duration_s: 10, width: 1920, height: 1080, fps: 30, quality: "medium", project_id: "", calibration,
+        readiness: known ? "not_ready" : "ready" },
+      run: async (_, _id, meta) => {
+        captured = meta?.readiness;
+        if (!succeeds) throw new Error("encoder failed after source admission");
+        await fs.writeBytes(STAGE, new Uint8Array([1, 2, 3]));
+        return {};
+      } });
+    await whenExportsSettle();
+    await whenExportTelemetrySettles();
+    expect((await whenExportEnds(submitted.job_id))?.state).toBe(succeeds ? "done" : "failed");
+    expect(captured).toBe(known ? "ready" : "unknown");
+    expect(exportBeacon).toHaveBeenCalledTimes(1);
+    expect(exportBeacon.mock.calls[0][0]).toMatchObject({ status: succeeds ? "done" : "failed", readiness: captured });
+    expect(await fs.exists(DEST)).toBe(succeeds);
+  });
+
   it.each([0, 4096, null, -1, "4096"])("keeps only valid native temporary-payload observations: %s", async (peak) => {
     const { fs, store } = make();
     const jobs = new FakeJobs();

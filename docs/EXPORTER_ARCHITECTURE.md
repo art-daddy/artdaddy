@@ -420,6 +420,29 @@ by the corresponding open items below and cannot be omitted from phase completio
   folder, deliverable, render command or queue outcome. Successful whole-folder
   delivery and folder-creation failure still behave correctly. The 109 scoped
   export/queue/frozen-corpus checks passed with no reference-output changes.
+- V2-D037: count pre-admission export outcomes at the existing once-only tool
+  result trace, including registry validation before the export handler runs.
+  Accepted jobs remain reported by their queue owner; partial batches report
+  only unadmitted outputs early and keep accepted job IDs/results intact.
+  Signed-out, repeated-result and stalled-transport tests check actual wire
+  bodies, privacy and non-blocking completion. Missing-source fixtures use
+  registered external media whose resolved bytes are actually removed.
+- V2-D038: readiness is captured from shared preflight/storage checks and
+  successful source admission, not inferred from a successful result. Done
+  and failed jobs carry the same admission classification through recovery;
+  caller labels cannot override it and inconclusive facts stay unknown.
+  Anonymous outcomes include a finite render/copy/unknown operation label.
+  Successful copies are counted in overall results but cannot inflate the
+  separate render-only rate. Legacy missing operation remains unknown and
+  historical rows are not rewritten. Reporting remains best-effort, not proof
+  of offline delivery or population reliability.
+- V2-D039: Fast is an explicit per-request app choice, captured before host
+  initialization/save-dialog awaits. A Fast selection remaining in a hidden
+  or cancelled dialog cannot change a later agent/MCP request: omitted mode
+  always means Full quality. The latest273scoped client checks pass across
+  host, registry, collection, queue, partial batches, recovery and frozen corpus;
+  affected server analytics/privacy checks and language-server diagnostics
+  pass too. No golden, output format, engine, resource limit or release changes.
 
 ## Historical V1 Design And Evidence
 

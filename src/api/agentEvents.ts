@@ -12,6 +12,7 @@
 //
 // Carries NO identity: the server takes that from the authenticated request.
 import { apiBase } from "./config";
+import { reportExport } from "./exportEvents";
 import { authedFetch, hasSession } from "./auth";
 import { hostInfo } from "../platform/host";
 import { useAuth } from "../store/auth";
@@ -95,6 +96,13 @@ export function setAgentContext(next: Partial<typeof context>): void {
   context = { ...context, ...next };
 }
 
+export interface ExportRefusalFacts {
+  readonly status: "blocked" | "declined" | "cancelled";
+  readonly width?: number;
+  readonly height?: number;
+  readonly visual_layers?: number;
+}
+
 export interface ToolTrace {
   readonly context: Readonly<AgentEventContext>;
   result: (value: unknown) => void;
@@ -117,6 +125,26 @@ export function createToolTrace(
     const object =
       value !== null && typeof value === "object" ? (value as Record<string, unknown>) : null;
     const failed = object?.ok === false || object?.isError === true;
+    if (name === "export" && failed) {
+      const request = args && typeof args === "object" && !Array.isArray(args) ? args as Record<string, unknown> : {};
+      const lists = [request.media_refs, request.clip_ids];
+      const valid = lists.every((list) => list === undefined || Array.isArray(list) && list.every((item) => typeof item === "string" && item.trim()));
+      const operations: ("render" | "copy" | "unknown")[] = valid ? lists.flatMap((list, index) =>
+        Array.isArray(list) ? Array.from(new Set(list.map((item: string) => item.trim())), () => index === 0 ? "copy" as const : "render" as const) : []) : ["unknown"];
+      if (!operations.length) operations.push("render");
+      const requested = Math.min(50, operations.length);
+      const admitted = Array.isArray(object?.exports)
+        ? new Set(object.exports.filter((item) => item && typeof item.job_id === "string").map((item) => item.job_id)).size : 0;
+      const facts = object?.export_refusal as ExportRefusalFacts | undefined;
+      for (let index = admitted; index < requested; index++) {
+        try {
+          void reportExport({ status: facts?.status ?? "blocked", elapsed_ms: Date.now() - started,
+            operation: operations[index],
+            error: String(object?.error ?? ""), readiness: "unknown", width: facts?.width, height: facts?.height,
+            visual_layers: facts?.visual_layers }).catch(() => undefined);
+        } catch {}
+      }
+    }
     recordToolCall(
       {
         name,
