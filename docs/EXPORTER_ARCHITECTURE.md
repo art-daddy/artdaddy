@@ -103,7 +103,7 @@ rules. Do not wait for another continue unless an actual approval boundary is re
 ## V2 Tracker
 
 **Strict in-scope acceptance: 11/24 checks (46%). Original tracker: 13/30 (43%).**
-**Built but not yet proven: 9 of the 13 open in-scope boxes.**
+**Built but not yet proven: 10 of the 13 open in-scope boxes.**
 
 These are acceptance checks, not coding hours or a measured99%rate. The denominator
 changes because two items are stretch and four are parked; it is not new feature
@@ -112,7 +112,7 @@ by the corresponding open items below and cannot be omitted from phase completio
 
 The second line counts present implementations whose acceptance proof is still
 open. It does not add accepted credit, imply a combined completion percentage or
-say the implementation cannot contain bugs. Four open boxes still require work
+say the implementation cannot contain bugs. Three open boxes still require work
 beyond proving the existing implementation and are excluded from that count.
 
 ### Open Box Detail
@@ -126,7 +126,7 @@ beyond proving the existing implementation and are excluded from that count.
 | E3.4 | Built; proof pending | Native leases, alias checks and volume-safe publication exist; cross-volume, case-sensitive and concurrent failure proof is incomplete. |
 | E3.5 | Built; proof pending | Durable restart and registered-output paths exist; the full V2 real-app/project/fault library has not qualified them. |
 | E4.2 | Built; proof pending | Separate preview/export painters and parity tests exist; all promised real-media timing and visual parity cases are not verified. |
-| E4.3 | Still incomplete; excluded | A real screen/Opus export loses its 44 ms source-audio delay; shared timestamp repair and the remaining source/full-duration proof are required. |
+| E4.3 | Built; proof pending | Shared source-clock normalization now preserves the measured 44 ms screen/Opus delay; delayed mono/resample/trim/loop/range/native-piece and original phone/screen checks pass, but complete source/full-duration/platform proof remains open. |
 | E4.4 | Built; proof pending | Preflight, local estimates, warnings and approved local Fast mode exist; cold/repeated/full-case estimate and device qualification is incomplete. |
 | E5.1 | Built; proof pending | Cross-platform FFmpeg/native paths exist; current protocol-20 macOS/Linux packages and platform-specific behavior are not qualified. |
 | E5.2 | Still incomplete; excluded | The library and Windows capped runner exist, but complete resource/profile qualification inputs and Mac/Linux enforcement paths remain unfinished before full/device runs. |
@@ -740,6 +740,59 @@ beyond proving the existing implementation and are excluded from that count.
   subject to owner approval for the audible output change. E4.3therefore needs
   implementation repair, not merely more proof: built-but-unproven falls to9of13.
   Strict11/24(46%), original13/30(43%)and99%qualification remain unchanged.
+
+- V2-D067: the owner approved a shared FFmpeg audio-timestamp repair after the
+  measured44msadvance. Preserve the source-relative clock before trim/loop/mix;
+  do not merely pad the delivered tail or shift the QA reference. Existing
+  zero-offset audio references must stay exact, and source/range/loop/native
+  outcomes must be checked before crediting E4.3as built again. No new engine,
+  output format, golden update, publication owner or resource-limit change is
+  approved. The prior screen failure remains retained evidence.
+
+- V2-D068: after the delayed-source regression and real screen A/V artifact
+  passed, the owner separately approved the single filter-graph expected-string
+  addition `aresample=48000:async=1:first_pts=0`. The immutable legacy snapshot
+  file and its pinned SHA, floating-audio hashes, picture references, QA thresholds
+  and resource limits remain unchanged.
+
+- V2-D069: source-clock repair evidence and closure:
+  - Guaranteed: the existing shared audio compiler normalizes source timestamps
+    before its clip-relative reset, loop, tempo, effects and mix. This changes no
+    queue, recovery, cancellation, native publication or resource-limit owner.
+  - Proof: the new lossless A/V regression first failed on the old compiler with
+    93,888 rather than 96,000 stereo sample frames, an exact 44 ms loss. It now
+    preserves the leading gap, full count and source-clock waveform. Eleven
+    focused cases pass, including 44.1 kHz mono, source trim, loop, range, DSP,
+    frozen ducked/unducked hashes and delayed looped audio across actual native
+    video pieces. All six authored audio effects preserve every picture and
+    floating sample against retained pre-fix artifacts; those seven reference
+    files, including the source waveform, retain their original SHA256 values.
+    All 257 compiler/corpus/queue/delivery regressions pass. The first effect
+    selector matched zero cases; it is excluded from proof. The corrected run
+    explicitly requires six actual passes.
+  - Proof: compare retained failed screen run 1792243122507 with repaired native
+    run 1792244769139. The repaired ten-second MP4 has 300 pictures and 480,000
+    stereo sample frames rather than advancing sound and shortening its span.
+    All 80 clock-aligned channel windows pass: minimum correlation 0.9884562,
+    maximum relative squared error 0.0229627. It takes 3,137.4 ms; final identity
+    is d821c6d8ad24ee9bb11c996d3d9912a8894585bc57bcf68a2e6c354a6f78344c,
+    447,551 bytes. The earlier failed artifact and failed library attempt remain.
+  - Proof: sibling phone run 1792246084309 preserves all 300 portrait pictures
+    and a 480,000-frame clock-aligned stereo span in 8,681.4 ms. Its 80-window
+    minimum correlation 0.9844488013 and maximum relative squared error
+    0.0309564706 match the earlier phone measurement. Its complete MP4 identity
+    differs; no whole-file byte-identity claim is made. Both native runs verify
+    publication, staging/scratch cleanup and unchanged pinned source SHA256.
+    Matching whole-tree 6 GiB cap receipts exit zero, reporting 2,499,854,336
+    and 3,129,298,944 bytes peak respectively, not physical-memory ceilings.
+  - Residual: short measurement runs do not establish complete media-class,
+    discontinuity, full-duration, cross-platform, physical-machine, speed,
+    estimate, allocated temporary-space or 99% library qualification. Their
+    physical/temporary qualification and promise-pass fields stay false.
+  - Deferred: owner-deferred full-size/stretch execution and physical devices
+    remain last. No new renderer, limits, goldens beyond D068, push or release.
+    E4.3 returns to built/proof-pending, making 10 of 13 open boxes implemented;
+    strict acceptance stays 11/24 (46%), historical acceptance 13/30 (43%).
 
 ## Historical V1 Design And Evidence
 

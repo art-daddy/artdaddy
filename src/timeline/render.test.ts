@@ -534,7 +534,7 @@ describe("buildRenderCommand", () => {
     const seam = "[1:a]asetpts=PTS-STARTPTS,adelay=0|0";
     expect(legacy.split(seam)).toHaveLength(2);
     const normalized =
-      "[1:a]asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,adelay=0|0";
+      "[1:a]aresample=48000:async=1:first_pts=0,asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,adelay=0|0";
     const expected = legacy
       .replace(seam, normalized)
       .replace("[a0];", "[a0];[a0]aresample=48000[amix_rate];")

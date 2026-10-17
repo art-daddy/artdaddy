@@ -1778,7 +1778,7 @@ function buildSingleRenderCommand(
     const DECLICK_SEC = 0.005; // 5ms edge micro-fade: declick hard cuts (pops)
     const MIX_FORMAT = "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo";
     arecs.forEach((r, i) => {
-      const filt = ["asetpts=PTS-STARTPTS", MIX_FORMAT];
+      const filt = ["aresample=48000:async=1:first_pts=0", "asetpts=PTS-STARTPTS", MIX_FORMAT];
       let audioInput = `[${r.inputIdx}:a]`;
       // Loop fill: resample to a known rate so aloop's sample-count `size` is
       // exact, repeat the trimmed source forever, then cut to the clip's slot.

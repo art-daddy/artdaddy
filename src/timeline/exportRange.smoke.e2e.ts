@@ -1075,6 +1075,72 @@ describe("a clip exported on its own is the whole export over its span", () => {
     await expectSpanOfWhole(expected, authored, 589, 614, "sparse-gap-boundary");
   }, 60_000);
 
+  it("preserves a source audio gap before mixing instead of advancing sound to zero", async () => {
+    onTestFailed(() => { retainArtifacts = true; });
+    const source = path.join(dir, "source-audio-delay.nut");
+    await ff(["-y", "-f", "lavfi", "-i", `color=c=black:s=${W}x${H}:r=${FPS}:d=2`,
+      "-f", "lavfi", "-i", `aevalsrc=0.1*sin(2*PI*440*t)|0.08*sin(2*PI*880*t):s=${RATE}:d=1.956`,
+      "-af", "asetpts=PTS+0.044/TB", "-c:v", "ffv1", "-c:a", "pcm_f64le", "-f", "nut", source]);
+    const authored = timeline([track("original-audio", 0, [aclip(source, 0, 60)], "audio")]);
+    const output = path.join(dir, "source-audio-delay-rendered.nut");
+    const plan = buildAudioRenderCommand(authored, output);
+    const result = await ctx.runner.run("ffmpeg", plan.args, AbortSignal.timeout(20_000));
+    expect(result.code, result.stderr).toBe(0);
+    const actual = await ffBytes(["-i", output, "-map", "0:a:0", "-f", "f64le", "-"]);
+    const reference = await ffBytes(["-i", source, "-map", "0:a:0", "-af",
+      `aresample=${RATE}:async=1:first_pts=0,apad,atrim=end_sample=${2 * RATE}`, "-f", "f64le", "-"]);
+    expect(actual.length, "the source gap must not shorten the mix").toBe(2 * RATE * 16);
+    expect(actual.subarray(0, Math.floor(RATE * 0.04) * 16).every((byte) => byte === 0), "leading source silence was removed").toBe(true);
+    let maximumError = 0;
+    for (let offset = Math.floor(RATE * 0.05) * 16; offset < Math.floor(RATE * 1.95) * 16; offset += 8)
+      maximumError = Math.max(maximumError, Math.abs(actual.readDoubleLE(offset) - reference.readDoubleLE(offset)));
+    expect(maximumError, "source samples moved relative to their media timestamps").toBeLessThan(1e-7);
+  }, 30_000);
+
+  it.each(["mono-resample", "trim", "loop", "range", "native-pieces"])("keeps delayed source timing through %s", async (kind) => {
+    onTestFailed(() => { retainArtifacts = true; });
+    const source = path.join(dir, `source-clock-${kind}.nut`);
+    const mono = kind === "mono-resample";
+    const rate = mono ? 44100 : RATE;
+    await ff(["-y", "-f", "lavfi", "-i", `color=c=black:s=${W}x${H}:r=${FPS}:d=2`,
+      "-f", "lavfi", "-i", `aevalsrc=${mono ? "0.1*sin(2*PI*440*t)" : "0.1*sin(2*PI*440*t)|0.08*sin(2*PI*880*t)"}:s=${rate}:d=1.956`,
+      "-af", "asetpts=PTS+0.044/TB", "-c:v", "ffv1", "-c:a", "pcm_f64le", "-f", "nut", source]);
+    const sourceIn = kind === "trim" ? 0.5 : 0;
+    const sourceOut = kind === "trim" ? 1.5 : 2;
+    const looped = kind === "loop" || kind === "native-pieces";
+    const duration = looped ? 4 : sourceOut - sourceIn;
+    const authored = timeline([track("source-clock", 0, [{ kind: "audio", media_ref: source,
+      source_in: sourceIn, source_out: sourceOut, timeline_in: 0, timeline_out: duration, ...(looped ? { loop: true } : {}) }], "audio")]);
+    const options = kind === "range" ? { range: { from: 15, to: 45 } } : {};
+    if (kind === "native-pieces") {
+      authored.tracks.push(track("source-clock-video", 0, Array.from({ length: 120 }, (_, index) => ({
+        ...vclip(src.a, index, index + 1), id: `source-clock-video-${index}`,
+      }))));
+      expect(buildRenderCommand(authored, path.join(dir, "source-clock-pieces.mp4"), { engine: "partition-pipes-v1" }).steps!.length).toBeGreaterThan(1);
+    }
+    const output = kind === "native-pieces"
+      ? await renderLossless(authored, "source-clock-native-pieces", { engine: "partition-pipes-v1" }, true, "pcm_f64le")
+      : path.join(dir, `source-clock-${kind}-rendered.nut`);
+    if (kind !== "native-pieces") {
+      const result = await ctx.runner.run("ffmpeg", buildAudioRenderCommand(authored, output, options).args, AbortSignal.timeout(20_000));
+      expect(result.code, result.stderr).toBe(0);
+    }
+    const actual = await ffBytes(["-i", output, "-map", "0:a:0", "-f", "f64le", "-"]);
+    const reference = await ffBytes(["-i", source, "-map", "0:a:0", "-af",
+      `aresample=${RATE}:async=1:first_pts=0,aformat=sample_fmts=fltp:sample_rates=${RATE}:channel_layouts=stereo,apad,atrim=end_sample=${2 * RATE}`,
+      "-f", "f64le", "-"]);
+    const outSeconds = kind === "range" ? 1 : duration;
+    expect(actual.length, `${kind} changed the delivered sample count`).toBe(outSeconds * RATE * 16);
+    let maximumError = 0;
+    for (let frame = Math.floor(RATE * 0.05); frame < (outSeconds - 0.05) * RATE; frame++) {
+      const sourceFrame = (frame + Math.round((sourceIn + (kind === "range" ? 0.5 : 0)) * RATE)) % (2 * RATE);
+      if (sourceFrame < RATE * 0.05 || sourceFrame >= RATE * 1.95) continue;
+      for (let channel = 0; channel < 2; channel++) maximumError = Math.max(maximumError,
+        Math.abs(actual.readDoubleLE(frame * 16 + channel * 8) - reference.readDoubleLE(sourceFrame * 16 + channel * 8)));
+    }
+    expect(maximumError, `${kind} advanced or changed source samples`).toBeLessThan(1e-7);
+  });
+
   it.each([undefined, { from: 143, to: 211 }])("one-pass audio preserves the complete mix and DSP state for %j", async (range) => {
     onTestFailed(() => { retainArtifacts = true; });
     const authored = busy();
