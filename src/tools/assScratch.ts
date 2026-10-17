@@ -4,6 +4,7 @@
 // stages it and always removes it, whatever the run does.
 import type { ClientToolContext } from "./context";
 import { joinPath } from "./store";
+import { jobOwnsScratch, stageJobScratch } from "./jobSupervisor";
 
 // The bundled font directory (resources/fonts), resolved lazily via the Tauri path API and
 // cached. Outside a Tauri context (tests / browser bundle) it is whatever `useFontDirOutsideTauri`
@@ -55,11 +56,14 @@ export async function withAssScratch<T>(
       throw new Error(`two different .ass files are both named ${f.name}`);
     byName.set(f.name, f.content);
   }
+  if (jobOwnsScratch(ctx.runner))
+    return fn(await stageJobScratch(ctx.runner, [...byName].map(([name, content]) => ({ name, content })), [...new Set(fonts)]));
   const relBase = `renderer/caps-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-  const scratch = ctx.store.artifactPath(relBase);
+  const first = await ctx.store.prepareWork(`${relBase}/${byName.keys().next().value}`);
+  const scratch = first.slice(0, first.lastIndexOf("/"));
   try {
     for (const [name, content] of byName)
-      await ctx.store.writeText(await ctx.store.prepareArtifact(`${relBase}/${name}`), content);
+      await ctx.store.writeText(joinPath(scratch, name), content);
     const fontDir = fonts.length ? await bundledFontDir() : null;
     if (fontDir) {
       for (const file of new Set(fonts)) {
@@ -75,6 +79,6 @@ export async function withAssScratch<T>(
     }
     return await fn(scratch);
   } finally {
-    await ctx.store.remove(scratch).catch(() => undefined);
+    if (!jobOwnsScratch(ctx.runner)) await ctx.store.remove(scratch).catch(() => undefined);
   }
 }
