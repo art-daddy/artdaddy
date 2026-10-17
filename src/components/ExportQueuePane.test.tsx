@@ -25,6 +25,7 @@ vi.mock("../tools/genJobs", () => ({
 vi.mock("../store/jobNotes", () => ({ notifyJobSettled: () => undefined }));
 
 let store: ProjectStoreAccess;
+let files: ExportMemFs;
 
 /** An encode that only finishes when we say so, so a QUEUED row is observable. */
 function gated(): { run: (s: AbortSignal) => Promise<{ warnings?: string[] }>; open: () => void } {
@@ -41,6 +42,7 @@ function gated(): { run: (s: AbortSignal) => Promise<{ warnings?: string[] }>; o
 
 const submit = (filename: string, run: (s: AbortSignal) => Promise<{ warnings?: string[] }>) => {
   const captured = store;
+  const capturedFiles = files;
   return submitExport({
     store: captured,
     dependencies: [],
@@ -49,7 +51,7 @@ const submit = (filename: string, run: (s: AbortSignal) => Promise<{ warnings?: 
     filename,
     run: async (signal) => {
       const result = await run(signal);
-      await captured.fs.writeTextFile(`/out/${filename}.partial`, "complete encoded output");
+      await capturedFiles.writeTextFile(`/out/${filename}.partial`, "complete encoded output");
       return result;
     },
   });
@@ -58,7 +60,8 @@ const submit = (filename: string, run: (s: AbortSignal) => Promise<{ warnings?: 
 beforeEach(async () => {
   __resetExportQueue();
   await resetTestDocuments();
-  store = new ProjectStoreAccess("/proj", new ExportMemFs());
+  files = new ExportMemFs();
+  store = new ProjectStoreAccess("/proj", files);
   registerTestDocument("/proj");
   useExportJob.setState({ fraction: 0.5 } as Any);
 });
