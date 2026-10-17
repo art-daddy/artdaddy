@@ -9,7 +9,7 @@ export type ExportResolution = "source" | "2160p" | "1440p" | "1080p" | "720p" |
 export type ExportQuality = "high" | "medium" | "low";
 export type ExportEngine = "file-sequence-v1" | "partition-pipes-v1" | "auto";
 export type ExportMode = "quality" | "fast";
-export type ExportEncoder = "x264-crf" | "amf-cqp18";
+export type ExportEncoder = "x264-crf" | "x264-crf-threads2" | "amf-cqp18";
 
 import type { Branding } from "./branding";
 import type { RenderWorkload } from "./renderPlan";

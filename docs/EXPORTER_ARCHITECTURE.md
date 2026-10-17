@@ -794,6 +794,21 @@ beyond proving the existing implementation and are excluded from that count.
     E4.3 returns to built/proof-pending, making 10 of 13 open boxes implemented;
     strict acceptance stays 11/24 (46%), historical acceptance 13/30 (43%).
 
+- V2-D070: the owner approved a scoped `qa/exporter-v2-20261017` branch push
+  and standard public macOS/Linux CI for the current FFmpeg exporter, with no
+  main push, release, paid runner, personal media or full-size/device run. The
+  isolated snapshot starts from the previously verified native QA baseline;
+  unrelated auth/catalog/evaluation work and parked engines stay out. Required
+  push gates remain enabled. Its first typecheck exposed exporter delivery,
+  progress, synthetic helper and company-brand dependencies present locally
+  but absent from the committed snapshot; those exact dependencies are retained
+  in the isolated QA copy rather than claiming the incomplete snapshot compiles.
+  The already-approved two-thread encoder identity was also missing from its
+  TypeScript union; declaring that existing identity changes no runtime policy.
+  Portable CI compares actual source-clock, DSP and native-piece artifacts on
+  each platform; Windows-specific frozen hashes are not relabeled portable.
+  No remote result or additional acceptance credit is claimed before evidence.
+
 ## Historical V1 Design And Evidence
 
 Everything below is retained history, not authority for conflicting V2 requirements.
