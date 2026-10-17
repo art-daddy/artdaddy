@@ -21,6 +21,7 @@ import {
   flushE2EDoc,
   resetE2EDocuments,
   libRef,
+  runNativeRenderSequence,
 } from "../tools/__e2e";
 import type { ClientToolContext } from "../tools/context";
 import { shippedSidecar, shippedSidecarPath } from "../test/sidecars";
@@ -148,42 +149,7 @@ async function renderLossless(
     }
     jobs.onStart = async (spec) => {
       try {
-        const file = path.join(spec.cwd!, "native-spec.json");
-        await fsp.writeFile(file, JSON.stringify(spec));
-        const result = await new Promise<{ code: number | null; stderr: string }>(
-          (resolve, reject) => {
-            const child = spawn(
-              "cargo",
-              [
-                "test",
-                "--lib",
-                "jobs::tests::render_sequence_real_artifact",
-                "--",
-                "--ignored",
-                "--exact",
-                "--nocapture",
-              ],
-              {
-                cwd: path.resolve(process.cwd(), "src-tauri"),
-                env: {
-                  ...process.env,
-                  ARTDADDY_QA_RENDER_SPEC: file,
-                  ARTDADDY_QA_FFMPEG: ffmpegPath(),
-                },
-                windowsHide: true,
-              },
-            );
-            let stderr = "";
-            child.stdout.on("data", (chunk) => {
-              stderr += String(chunk);
-            });
-            child.stderr.on("data", (chunk) => {
-              stderr += String(chunk);
-            });
-            child.on("error", reject);
-            child.on("close", (code) => resolve({ code, stderr }));
-          },
-        );
+        const result = await runNativeRenderSequence(spec);
         if (plan.transport && spec.cwd && result.code === 0)
           await fsp.rm(spec.cwd, { recursive: true, force: true });
         jobs.exit(spec.id, result.code, result.stderr);

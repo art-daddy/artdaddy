@@ -12,6 +12,7 @@ import path from "node:path";
 
 import type { CommandResult, CommandRunner } from "./command";
 import type { ClientToolContext } from "./context";
+import type { JobSpec } from "./jobSupervisor";
 import { useFontDirOutsideTauri } from "./assScratch";
 import { ffmpegPolicy } from "./ffmpegPolicy";
 import { kindOf, type MediaKind } from "../media/formats";
@@ -22,7 +23,7 @@ import { renderTimelineTool } from "../timeline/render";
 import { ProjectDocument } from "../project/ProjectDocument";
 import { setOpenDocumentResolver } from "../project/openDocuments";
 import { asProjectId } from "../project/types";
-import { shippedFontsDir, shippedSidecar } from "../test/sidecars";
+import { shippedFontsDir, shippedSidecar, shippedSidecarPath } from "../test/sidecars";
 import { SIDECAR_BINS } from "./sidecar";
 
 type Rec = Record<string, unknown>;
@@ -278,6 +279,46 @@ export async function have(program: string): Promise<boolean> {
 /** A fresh project context rooted at `dir` (real fs + real runner). */
 export function mkCtx(dir: string): ClientToolContext {
   return { store: new ProjectStoreAccess(dir, nodeFs), runner: nodeRunner };
+}
+
+export async function runNativeRenderSequence(
+  spec: JobSpec,
+): Promise<{ code: number | null; stderr: string }> {
+  if (!spec.cwd) throw new Error("native render fixture requires a private working directory");
+  const file = path.join(spec.cwd, "native-spec.json");
+  await fsp.writeFile(file, JSON.stringify(spec));
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      "cargo",
+      [
+        "test",
+        "--lib",
+        "jobs::tests::render_sequence_real_artifact",
+        "--",
+        "--ignored",
+        "--exact",
+        "--nocapture",
+      ],
+      {
+        cwd: path.resolve(process.cwd(), "src-tauri"),
+        env: {
+          ...process.env,
+          ARTDADDY_QA_RENDER_SPEC: file,
+          ARTDADDY_QA_FFMPEG: shippedSidecar("ffmpeg") ?? shippedSidecarPath("ffmpeg"),
+        },
+        windowsHide: true,
+      },
+    );
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    child.on("error", reject);
+    child.on("close", (code) => resolve({ code, stderr }));
+  });
 }
 
 /** Run ffmpeg, throwing (with stderr) on a non-zero exit. */
