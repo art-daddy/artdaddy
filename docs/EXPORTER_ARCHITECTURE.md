@@ -1306,7 +1306,26 @@ beyond proving the existing implementation and are excluded from that count.
   - Initial checks: all 16 focused Node controls, 11 frontend resource-adapter
     cases and both portable native parser cases pass on Windows. These are
     parser/receipt preparation only, not actual Linux enforcement evidence.
-    The full publication gate and exact-source Linux/Mac execution remain pending.
+  - Publication: the first c33dae5 attempt correctly refused five TypeScript
+    narrowing errors. Explicit returning failure branches fixed the typing
+    without casts; fa90f59 passed the full mandatory hook (5,704 unit, 16 Node,
+    213 native and 616 real-FFmpeg smoke cases, with existing explicit skips).
+    All 996 tracked raw source hashes and six protected inputs stayed unchanged.
+    Only the isolated QA branch was published; no main push or release.
+  - Actual Linux attempt: native CI39146450487 proved the 192 MiB control,
+    detached-grandchild refusal under128MiBand increased kernel oom_kill.
+    The app and first native observation matched the8GiB/swap-zero cgroup,
+    but whole-cgroup executable enumeration then failed EACCES on a sibling.
+    Keep that failed run and receipts: this is not complete app/recovery proof.
+    Inspect readable kernel command names before selecting encoder candidates;
+    retain every selected encoder's actual executable/hash and cgroup checks.
+    Do not ignore encoder permission errors, disable sandboxing or elevate the app.
+    The same run's macOS job passed all three actual-app and portable repetitions.
+    Independent checks matched all 751 applicable source hashes across those
+    three Mac reports and the failed Linux report; the latter stays unqualified.
+    Replacement330cca5adds filesystem-backed selection properties and passes
+    all17Node controls. Its full mandatory publication gate is running with a
+    new996-file freeze; actual replacement Linux/Mac execution remains pending.
 
 ## Historical V1 Design And Evidence
 
