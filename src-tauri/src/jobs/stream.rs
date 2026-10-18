@@ -889,6 +889,54 @@ mod tests {
     }
   }
 
+  #[cfg(target_os = "macos")]
+  #[test]
+  fn terminal_sampling_cannot_release_a_final_writer_or_its_output_capacity() {
+    use std::io::{BufRead, Write};
+    let dir = tempfile::tempdir().unwrap();
+    let stage = dir.path().join("completed.bin");
+    std::fs::File::create(&stage).unwrap();
+    let workspace = super::super::Workspace::new(64);
+    let key = super::super::Supervisor::workspace_key(&stage);
+    let _claim = workspace.claim_output(&key, &|| Ok(())).unwrap();
+    let mut admitted = spec(dir.path());
+    admitted.meta["_native_final_stage"] = serde_json::json!(stage.to_string_lossy());
+    let mut final_args = vec![stage.to_string_lossy().into_owned()];
+    let final_output = FinalOutput::open(&admitted, &mut final_args, workspace.clone()).unwrap().unwrap();
+    let control = Arc::new(Control::new(super::super::now_ms() + 10_000, Some(final_output)).unwrap());
+    let args = strings(&["-c", "printf 'ready\\n'; read -r finish; printf completed > completed.bin"]);
+    let guard: StartGuard = Arc::new(|| Ok(()));
+    let worker = control.spawn(Path::new("/bin/sh"), &args, dir.path().to_str(), true, WorkerRole::FinalEncoder, &guard).unwrap();
+    let pid = worker.child().id();
+    let mut input = worker.child().take_stdin().unwrap();
+    let mut output = std::io::BufReader::new(worker.child().take_stdout().unwrap());
+    let mut ready = String::new();
+    output.read_line(&mut ready).unwrap();
+    assert_eq!(ready.trim(), "ready");
+    let (_, live) = super::super::budget::resident_samples(&[worker.child.as_ref().unwrap().clone()]).unwrap();
+    assert_eq!(live.len(), 1);
+    assert!(live[0].1 > 0);
+    input.write_all(b"finish\n").unwrap();
+    drop(input);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+      let (_, live) = super::super::budget::resident_samples(&[worker.child.as_ref().unwrap().clone()]).unwrap();
+      if live.is_empty() { break; }
+      assert!(Instant::now() < deadline, "terminal writer remained a live memory sample");
+      std::thread::yield_now();
+    }
+    assert!(control.state.lock().unwrap().children.contains_key(&pid));
+    assert!(control.finish_output(Ok(())).unwrap_err().contains("unsettled writers"));
+    assert_eq!(workspace.available_bytes(), 0);
+    assert!(workspace.reserve("peer", 1, 1).is_err(), "sampling released a writer's reserved output capacity");
+    worker.wait().unwrap();
+    control.finish_output(Ok(())).unwrap();
+    assert_eq!(std::fs::read(&stage).unwrap(), b"completed");
+    let _peer = workspace.reserve("peer", 55, 1).unwrap();
+    assert!(workspace.reserve("overflow", 1, 1).is_err());
+    control.settle().unwrap();
+  }
+
   #[test]
   fn refuses_unknown_transport_before_starting_workers() {
     let dir = tempfile::tempdir().unwrap();

@@ -5,6 +5,13 @@ use std::sync::Arc;
 pub(super) const RENDER_COMMIT_LIMIT: usize = 4 * 1024 * 1024 * 1024;
 pub(super) const RENDER_RESIDENT_LIMIT: u64 = 7 * 1024 * 1024 * 1024 / 2;
 
+#[derive(Debug)]
+enum ResidentObservation {
+  Live(u64),
+  #[cfg(target_os = "macos")]
+  Retiring,
+}
+
 #[cfg(target_os = "macos")]
 #[derive(Debug)]
 enum TaskInfoError {
@@ -30,23 +37,25 @@ fn macos_resident_bytes(pid: u32) -> Result<u64, TaskInfoError> {
 }
 
 #[cfg(target_os = "macos")]
-fn macos_missing_process_sample(child: &SharedChild, detail: String) -> Result<Option<u64>, String> {
+fn macos_missing_task_observation(child: &SharedChild, detail: String) -> Result<ResidentObservation, String> {
+  // Public Darwin proc_info.h ABI; the pinned libc does not expose this flag.
+  const PROC_FLAG_INEXIT: u32 = 4;
   let pid = child.id();
   let process: libc::c_int = pid.try_into().map_err(|_| format!("owned render worker {pid} PID is outside the supported range"))?;
   let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
   let expected = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
   let observed = unsafe { libc::proc_pidinfo(process, libc::PROC_PIDTBSDINFO, 1, info.as_mut_ptr().cast(), expected) };
   let error = std::io::Error::last_os_error();
-  let status = if observed == expected { Some(unsafe { info.assume_init() }.pbi_status) } else { None };
-  // Darwin task lookup excludes zombies while another waiter can still own exit
-  // notification. A complete zombie record permits joining this owned child.
-  if status == Some(libc::SZOMB) {
-    child.wait().map_err(|error| format!("cannot confirm owned render worker {pid} exit: {error}"))?;
-    return Ok(None);
+  let info = if observed == expected { Some(unsafe { info.assume_init() }) } else { None };
+  // Kernel exit starts before SZOMB. Observe it without waiting here: Control
+  // retains the child and its output reservation until the actual waiter settles.
+  if info.as_ref().is_some_and(|info| info.pbi_flags & PROC_FLAG_INEXIT != 0) ||
+    observed == 0 && error.raw_os_error() == Some(libc::ESRCH) {
+    return Ok(ResidentObservation::Retiring);
   }
-  if child.try_wait().map_err(|error| error.to_string())?.is_some() { return Ok(None); }
-  let exit_detail = match status {
-    Some(status) => format!("BSD status={status}"),
+  if child.try_wait().map_err(|error| error.to_string())?.is_some() { return Ok(ResidentObservation::Retiring); }
+  let exit_detail = match info {
+    Some(info) => format!("BSD status={}, flags={:#x}", info.pbi_status, info.pbi_flags),
     None => format!("BSD bytes={observed}, expected={expected}, error={error}"),
   };
   Err(format!("{detail}; owned worker exit is unconfirmed: {exit_detail}"))
@@ -63,8 +72,8 @@ pub(super) fn resident_samples(children: &[Arc<SharedChild>]) -> Result<(u64, Ve
     let pid = child.id();
     #[cfg(target_os = "macos")]
     let measured = match macos_resident_bytes(pid) {
-      Ok(bytes) => Ok(Some(bytes)),
-      Err(TaskInfoError::MissingProcess(detail)) => macos_missing_process_sample(child, detail),
+      Ok(bytes) => Ok(ResidentObservation::Live(bytes)),
+      Err(TaskInfoError::MissingProcess(detail)) => macos_missing_task_observation(child, detail),
       Err(TaskInfoError::Unavailable(detail)) => Err(detail),
     };
     #[cfg(not(target_os = "macos"))]
@@ -74,9 +83,13 @@ pub(super) fn resident_samples(children: &[Arc<SharedChild>]) -> Result<(u64, Ve
         system.process(process).map(|process| process.memory())
           .ok_or_else(|| format!("owned render worker {pid} has no memory sample"))
       } else { Err(format!("cannot measure a live owned render worker {pid}")) }
-    }.map(Some);
+    }.map(ResidentObservation::Live);
     if child.try_wait().map_err(|error| error.to_string())?.is_some() { continue; }
-    let Some(memory) = measured? else { continue; };
+    let memory = match measured? {
+      ResidentObservation::Live(memory) => memory,
+      #[cfg(target_os = "macos")]
+      ResidentObservation::Retiring => continue,
+    };
     total = total.checked_add(memory).ok_or("resident memory accounting overflow")?;
     samples.push((pid, memory));
   }
@@ -216,7 +229,7 @@ mod resident_tests {
 
   #[cfg(target_os = "macos")]
   #[test]
-  fn a_real_zombie_is_joined_as_exited_not_reported_as_zero_memory() {
+  fn a_terminal_writer_preserves_its_exit_and_output_without_a_live_zero_sample() {
     use super::*;
     let root = tempfile::tempdir().unwrap();
     let child = SharedChild::spawn(Command::new("/bin/sh")
@@ -238,8 +251,11 @@ mod resident_tests {
       }
       std::thread::yield_now();
     };
-    assert!(macos_missing_process_sample(&child, missing).unwrap().is_none());
-    assert!(child.try_wait().unwrap().unwrap().success());
+    assert!(matches!(macos_missing_task_observation(&child, missing).unwrap(), ResidentObservation::Retiring));
+    assert!(child.wait().unwrap().success());
+    let (total, live) = resident_samples(&[Arc::new(child)]).unwrap();
+    assert_eq!(total, 0);
+    assert!(live.is_empty());
     assert_eq!(std::fs::read(root.path().join("completed.bin")).unwrap(), b"completed");
   }
 
@@ -257,7 +273,7 @@ mod resident_tests {
       assert!(matches!(signal, Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Timeout)));
       input.write_all(b"finish\n").unwrap();
     });
-    let result = macos_missing_process_sample(&child, "controlled missing task measurement".into());
+    let result = macos_missing_task_observation(&child, "controlled missing task measurement".into());
     let live = child.try_wait().unwrap().is_none();
     let signal = release.send(());
     releaser.join().unwrap();
@@ -273,7 +289,7 @@ mod resident_tests {
     use super::*;
     use std::io::{BufRead, Write};
     let root = tempfile::tempdir().unwrap();
-    for iteration in 0..64 {
+    for iteration in 0..256 {
       let child = Arc::new(SharedChild::spawn(Command::new("/bin/sh")
         .args(["-c", "printf 'ready\\n'; read -r finish; printf completed > completed.bin"])
         .current_dir(root.path()).stdin(std::process::Stdio::piped())
