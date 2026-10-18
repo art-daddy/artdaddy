@@ -338,6 +338,7 @@ async function exercise(): Promise<void> {
     } finally { detach(); await checkpoint; }
   }
   await writeTextFile(reportPath, JSON.stringify({ ok: true, protocol: EXPORT_PROTOCOL_VERSION, launch: await supervisor.launchId(),
+    resources: await resolveExportResources(armed.destination),
     delivered: armed.destination, captured: joinPath(armed.cwd, "captured.nut"), source: armed.source, identity: published.identity,
     producerComplete: receipt.producer_complete, recoveryAttempts: receipt.recovery_attempts,
     workerIdentity: receipt.worker_identity, commandSha256: receipt.command_sha256,

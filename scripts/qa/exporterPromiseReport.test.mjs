@@ -10,12 +10,12 @@ import fc from "fast-check";
 const script = fileURLToPath(new URL("./exporterPromiseReport.mjs", import.meta.url));
 const definition = { id: "hd-full", line: "hd", kind: "promise", source: "generated", width: 1920, height: 1080,
   fps: 30, durationSeconds: 60, visualClips: 10, videoLayers: 1, speedFactor16gb: 2 };
-async function fixture(cases = [definition]) {
+async function fixture(cases = [definition], platforms = ["win32"]) {
   const root = await mkdtemp(path.join(os.tmpdir(), "artdaddy-promise-report-"));
   await mkdir(path.join(root, "scripts/qa"), { recursive: true });
   await mkdir(path.join(root, "reports/qa/exporter"), { recursive: true });
   await writeFile(path.join(root, "scripts/qa/exporterPromiseCases.json"), JSON.stringify({ version: 2,
-    platforms: ["win32"], profiles: { "8gb": { systemMemoryBytes: 8 * 1024 ** 3 } },
+    platforms, profiles: { "8gb": { systemMemoryBytes: 8 * 1024 ** 3 } },
     sourceClasses: { generated: { realWorld: false }, missing: { realWorld: true, path: null } }, cases }));
   return root;
 }
@@ -27,6 +27,7 @@ async function record(root, name, override = {}) {
     mode: "quality", definition, encodedVideo: { width: 1920, height: 1080, fps: "30/1", frames: 1800 }, projectFrames: 1800,
     elapsedMs: 60_000, passed: true, artifactVerified: true, publicationVerified: true, stagingCleaned: true, scratchCleaned: true,
     sourceReady: true, temporarySpaceQualified: true, estimateProvided: true, readiness: "ready", profileRunId: "kernel-proof", ...override }));
+  return dir;
 }
 async function receipt(root) {
   await writeFile(path.join(root, "reports/qa/exporter/memory-proof.json"), JSON.stringify({ runId: "kernel-proof", workload: "App",
@@ -65,6 +66,51 @@ test("profile labels and short or Fast artifacts cannot replace complete Full-qu
     assert.equal(result.readyPassRate, 1 / 3);
     assert.equal(result.softwareLibraryQualified, false);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Unix host evidence qualifies only matching independently measured bounded runs", async () => {
+  for (const platform of ["darwin", "linux"]) {
+    await fc.assert(fc.asyncProperty(fc.integer({ min: 256, max: 32768 }), fc.integer({ min: 256, max: 32768 }),
+      async (nodeMiB, nativeMiB) => {
+        const root = await fixture([definition], [platform]);
+        try {
+          const host = { scope: "measured-host-memory", runId: "isolated-run", platform,
+            nodeTotalMemoryBytes: nodeMiB * 1024 ** 2, nativeTotalMemoryBytes: nativeMiB * 1024 ** 2 };
+          const dir = await record(root, "host", { platform, hostProfileEvidence: host });
+          const envelope = { ok: true, identifier: host.runId,
+            hardware: { platform, totalMemoryBytes: host.nodeTotalMemoryBytes },
+            native: { resources: { total_memory_bytes: host.nativeTotalMemoryBytes } } };
+          await writeFile(path.join(dir, "report.json"), JSON.stringify(envelope));
+          const result = summary(root);
+          const fits = nodeMiB <= 8192 && nativeMiB <= 8192;
+          assert.equal(result.overallPassed, Number(fits));
+          assert.equal(result.physicalLibraryQualified, false);
+          assert.deepEqual(result.rows[0].profileEvidenceKinds, [fits ? "measured-host-memory" : "unverified"]);
+          envelope.identifier = "different-run";
+          await writeFile(path.join(dir, "report.json"), JSON.stringify(envelope));
+          assert.equal(summary(root).overallPassed, 0);
+          envelope.identifier = host.runId;
+          envelope.native.resources.total_memory_bytes += 1;
+          await writeFile(path.join(dir, "report.json"), JSON.stringify(envelope));
+          assert.equal(summary(root).overallPassed, 0);
+        } finally { await rm(root, { recursive: true, force: true }); }
+      }), { numRuns: 8, examples: [[7168, 7168], [8192, 8192], [8193, 7168], [7168, 8193]] });
+  }
+});
+
+test("missing and non-finite host measurements never turn profile labels into proof", async () => {
+  for (const measurement of [null, 0, -1, "7516192768", 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    const root = await fixture([definition], ["darwin"]);
+    try {
+      const host = { scope: "measured-host-memory", runId: "isolated-run", platform: "darwin",
+        nodeTotalMemoryBytes: measurement, nativeTotalMemoryBytes: measurement };
+      const dir = await record(root, "unknown", { platform: "darwin", hostProfileEvidence: host, profileEnforced: true });
+      await writeFile(path.join(dir, "report.json"), JSON.stringify({ ok: true, identifier: host.runId,
+        hardware: { platform: "darwin", totalMemoryBytes: measurement },
+        native: { resources: { total_memory_bytes: measurement } } }));
+      assert.equal(summary(root).overallPassed, 0);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }
 });
 
 test("unknown/blocked readiness stays separate and private fields never enter the summary", async () => {

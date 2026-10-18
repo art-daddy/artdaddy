@@ -1014,6 +1014,25 @@ beyond proving the existing implementation and are excluded from that count.
     pass. These are qualified-source backports, not a claim that dirty main's
     preserved manifest/lock conflict or every combined-main gate is resolved.
 
+- V2-D084: integrate the qualified software-profile evidence adapter, not a
+  new memory policy or a physical-device claim.
+  - Authority/surface: the existing native resource query and independent Node
+    host observation belong to one isolated run identity. The native-page
+    receipt, Node envelope, promise row and summary all carry/check that same
+    identity and platform. Windows retains its separate kernel-cap receipt.
+  - Lifecycle/commit point: query native resources for the admitted destination
+    after actual native recovery and before creating the report. A Unix profile
+    qualifies only if both positive safe-integer totals fit its bound and match
+    the source envelope exactly. Reporting cannot turn a label into enforcement.
+  - Failure matrix: missing/zero/non-finite/over-bound readings, wrong platform,
+    altered native bytes and cross-run substitution stay unverified. Pilot,
+    readiness, complete output, timing, temporary-space and estimate gates
+    remain independent; all physical qualification stays false.
+  - Proof/residual: port exact `2be0682` reporter/property controls and resource
+    fields already exercised by qualified QA. A measured 16 GiB Linux host is
+    16 GiB input evidence, not 8 GiB input, a kernel cap, whole-space proof or
+    a physical minimum-machine test. No acceptance increase follows.
+
 ## Historical V1 Design And Evidence
 
 Everything below is retained history, not authority for conflicting V2 requirements.
