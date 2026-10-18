@@ -5,20 +5,42 @@ use std::sync::Arc;
 pub(super) const RENDER_COMMIT_LIMIT: usize = 4 * 1024 * 1024 * 1024;
 pub(super) const RENDER_RESIDENT_LIMIT: u64 = 7 * 1024 * 1024 * 1024 / 2;
 
+#[cfg(target_os = "macos")]
+fn macos_resident_bytes(pid: u32) -> Result<u64, String> {
+  let process: libc::c_int = pid.try_into().map_err(|_| "owned worker PID is outside the supported range")?;
+  let mut info = std::mem::MaybeUninit::<libc::proc_taskinfo>::uninit();
+  let expected = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
+  let observed = unsafe { libc::proc_pidinfo(process, libc::PROC_PIDTASKINFO, 0, info.as_mut_ptr().cast(), expected) };
+  if observed != expected {
+    return Err(format!("cannot measure owned render worker {pid}: task bytes={observed}, expected={expected}, error={}",
+      std::io::Error::last_os_error()));
+  }
+  Ok(unsafe { info.assume_init() }.pti_resident_size)
+}
+
 pub(super) fn resident_samples(children: &[Arc<SharedChild>]) -> Result<(u64, Vec<(u32, u64)>), String> {
   if !sysinfo::IS_SUPPORTED_SYSTEM { return Err("resident memory accounting is unavailable on this platform".into()); }
+  #[cfg(not(target_os = "macos"))]
   let mut system = sysinfo::System::new();
   let mut total = 0u64;
   let mut samples = Vec::with_capacity(children.len());
   for child in children {
     if child.try_wait().map_err(|error| error.to_string())?.is_some() { continue; }
-    let pid = sysinfo::Pid::from_u32(child.id());
-    let found = system.refresh_process_specifics(pid, sysinfo::ProcessRefreshKind::new().with_memory());
+    let pid = child.id();
+    #[cfg(target_os = "macos")]
+    let measured = macos_resident_bytes(pid);
+    #[cfg(not(target_os = "macos"))]
+    let measured = {
+      let process = sysinfo::Pid::from_u32(pid);
+      if system.refresh_process_specifics(process, sysinfo::ProcessRefreshKind::new().with_memory()) {
+        system.process(process).map(|process| process.memory())
+          .ok_or_else(|| format!("owned render worker {pid} has no memory sample"))
+      } else { Err(format!("cannot measure a live owned render worker {pid}")) }
+    };
     if child.try_wait().map_err(|error| error.to_string())?.is_some() { continue; }
-    if !found { return Err("cannot measure a live owned render worker".into()); }
-    let memory = system.process(pid).ok_or("owned render worker has no memory sample")?.memory();
+    let memory = measured?;
     total = total.checked_add(memory).ok_or("resident memory accounting overflow")?;
-    samples.push((child.id(), memory));
+    samples.push((pid, memory));
   }
   Ok((total, samples))
 }
@@ -127,18 +149,31 @@ pub(super) use platform::Budget;
 mod resident_tests {
   #[test]
   fn memory_only_sampling_observes_a_real_touched_allocation() {
-    let mut system = sysinfo::System::new();
-    let pid = sysinfo::Pid::from_u32(std::process::id());
-    let kind = sysinfo::ProcessRefreshKind::new().with_memory();
-    assert!(system.refresh_process_specifics(pid, kind));
-    let before = system.process(pid).unwrap().memory();
+    let resident = || {
+      #[cfg(target_os = "macos")]
+      { super::macos_resident_bytes(std::process::id()).unwrap() }
+      #[cfg(not(target_os = "macos"))]
+      {
+        let mut system = sysinfo::System::new();
+        let pid = sysinfo::Pid::from_u32(std::process::id());
+        assert!(system.refresh_process_specifics(pid, sysinfo::ProcessRefreshKind::new().with_memory()));
+        system.process(pid).unwrap().memory()
+      }
+    };
+    let before = resident();
     let mut bytes = vec![0u8; 32 * 1024 * 1024];
     for offset in (0..bytes.len()).step_by(4096) { bytes[offset] = 37; }
     std::hint::black_box(&bytes);
-    assert!(system.refresh_process_specifics(pid, kind));
-    let after = system.process(pid).unwrap().memory();
+    let after = resident();
     assert!(after >= before + 16 * 1024 * 1024, "resident sampling did not observe touched memory: before={before}, after={after}");
     assert!(bytes.iter().step_by(4096).all(|byte| *byte == 37));
+  }
+
+  #[cfg(target_os = "macos")]
+  #[test]
+  fn unavailable_task_information_is_an_error_not_a_zero_memory_sample() {
+    assert!(super::macos_resident_bytes(i32::MAX as u32).is_err());
+    assert!(super::macos_resident_bytes(u32::MAX).is_err());
   }
 }
 

@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use shared_child::SharedChild;
 
 mod pipe;
+mod output;
 
 pub(super) type StartGuard = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
 pub(super) type Registry = Arc<Mutex<HashMap<(String, u32), Arc<Control>>>>;
@@ -26,6 +27,7 @@ struct FinalOutput {
   limit: u64,
   workspace: Arc<super::Workspace>,
   charge: Option<super::workspace::Charge>,
+  output_limit: Option<output::OutputLimit>,
 }
 
 impl FinalOutput {
@@ -39,12 +41,15 @@ impl FinalOutput {
     }
     let key = super::Supervisor::workspace_key(Path::new(path));
     let (limit, charge) = workspace.reserve_output(&key)?;
+    let mut reserved = Self { path: path.into(), key, limit, workspace, charge: Some(charge), output_limit: None };
+    reserved.output_limit = Some(output::OutputLimit::open(Path::new(path), limit)?);
     let output_index = args.len() - 1;
     args.splice(output_index..output_index, ["-fs".into(), limit.to_string()]);
-    Ok(Some(Self { path: path.into(), key, limit, workspace, charge: Some(charge) }))
+    Ok(Some(reserved))
   }
 
-  fn finish(&mut self) -> Result<(), String> {
+  fn finish(&mut self, producer_complete: bool) -> Result<(), String> {
+    self.output_limit.take();
     let Some(charge) = self.charge.take() else { return Ok(()) };
     let measured = std::fs::symlink_metadata(&self.path).map_err(|error| error.to_string());
     let metadata = match measured {
@@ -54,22 +59,24 @@ impl FinalOutput {
     };
     let actual = metadata.len();
     let capped = actual >= self.limit;
-    if capped {
+    let discard = capped || !producer_complete;
+    if discard {
       if let Err(error) = std::fs::remove_file(&self.path) {
         charge.retain();
-        return Err(format!("native temporary-output limit reached and private cleanup failed: {error}"));
+        return Err(format!("native incomplete output could not be cleaned: {error}"));
       }
     }
     charge.retain();
-    self.workspace.release(&self.key, self.limit.saturating_sub(if capped { 0 } else { actual }), u64::from(capped));
+    self.workspace.release(&self.key, self.limit.saturating_sub(if discard { 0 } else { actual }), u64::from(discard));
     self.workspace.settle_output_writer(&self.key);
-    if capped { Err(format!("native temporary-output limit reached: stop={}, observed={actual}", self.limit)) }
+    if discard { Err(format!("native output write boundary refused completion: {}",
+      serde_json::json!({ "limit": self.limit, "observed": actual, "producer_complete": producer_complete, "cleaned": true }))) }
     else { Ok(()) }
   }
 }
 
 impl Drop for FinalOutput {
-  fn drop(&mut self) { let _ = self.finish(); }
+  fn drop(&mut self) { let _ = self.finish(false); }
 }
 
 #[derive(Clone, Copy, serde::Serialize)]
@@ -101,6 +108,7 @@ struct State {
   resident_peak: u64,
   resident_workers: Vec<ResidentWorker>,
   children: HashMap<u32, RegisteredWorker>,
+  final_output: Option<FinalOutput>,
 }
 
 pub(super) struct Control {
@@ -113,11 +121,11 @@ pub(super) struct Control {
 }
 
 impl Control {
-  fn new(deadline_ms: u64) -> Result<Self, String> {
+  fn new(deadline_ms: u64, final_output: Option<FinalOutput>) -> Result<Self, String> {
     let remaining = deadline_ms.checked_sub(super::now_ms()).filter(|remaining| *remaining > 0)
       .ok_or("render execution deadline has already expired")?;
     let deadline = Instant::now().checked_add(Duration::from_millis(remaining)).ok_or("render execution deadline overflow")?;
-    Ok(Self { state: Mutex::new(State::default()), wake: pipe::Wake::new().map_err(|error| error.to_string())?,
+    Ok(Self { state: Mutex::new(State { final_output, ..State::default() }), wake: pipe::Wake::new().map_err(|error| error.to_string())?,
       budget: super::budget::Budget::new(super::budget::RENDER_COMMIT_LIMIT)?, deadline, settled: Condvar::new(),
       resident_limit: super::budget::RENDER_RESIDENT_LIMIT })
   }
@@ -132,6 +140,9 @@ impl Control {
     command.args(args).stdin(if input { Stdio::piped() } else { Stdio::null() })
       .stdout(Stdio::piped()).stderr(Stdio::piped());
     if let Some(cwd) = cwd { command.current_dir(cwd); }
+    if let Some(output) = state.final_output.as_ref() {
+      output.output_limit.as_ref().ok_or("native output write limit is missing")?.configure(&mut command);
+    }
     #[cfg(windows)]
     {
       use std::os::windows::process::CommandExt;
@@ -203,6 +214,18 @@ impl Control {
     let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
     format!("native render resident: {}\n", serde_json::json!({ "sampled_peak": state.resident_peak,
       "limit": self.resident_limit, "workers_at_peak": state.resident_workers }))
+  }
+
+  fn finish_output(&self, producer: Result<(), String>) -> Result<(), String> {
+    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+    let cleanup = if !state.children.is_empty() { Err("native output still has unsettled writers".into()) }
+      else if let Some(output) = state.final_output.as_mut() { output.finish(producer.is_ok()) }
+      else { Ok(()) };
+    match (producer, cleanup) {
+      (Err(primary), Err(cleanup)) => Err(format!("{primary}\n{cleanup}")),
+      (Err(primary), Ok(())) => Err(primary),
+      (Ok(()), cleanup) => cleanup,
+    }
   }
 
   fn settle(&self) -> Result<(), String> {
@@ -359,8 +382,8 @@ pub(super) fn spawn_single(executable: &Path, spec: &JobSpec, observer: Observer
     Some(super::ScratchOutput::open_workspace(Path::new(path), used, limit, workspace.clone(), &key)?)
   } else { None };
   let captured = capture.is_some();
-  let mut final_output = FinalOutput::open(spec, &mut args, workspace.clone())?;
-  let control = Arc::new(Control::new(execution_deadline(spec)?)?);
+  let final_output = FinalOutput::open(spec, &mut args, workspace.clone())?;
+  let control = Arc::new(Control::new(execution_deadline(spec)?, final_output)?);
   let guard: StartGuard = Arc::new(|| Ok(()));
   let worker = control.spawn(executable, &args, spec.cwd.as_deref(), false, WorkerRole::Single, &guard)?;
   let pid = worker.child().id();
@@ -396,7 +419,7 @@ pub(super) fn spawn_single(executable: &Path, spec: &JobSpec, observer: Observer
       let code = if result.is_ok() { 0 } else { -1 };
       result = result.and(capture.finish(Some(code)));
     }
-    if let Some(final_output) = final_output.as_mut() { result = final_output.finish().and(result); }
+    result = control.finish_output(result);
     observer(ProcEvent::Stderr(control.memory_diagnostics()));
     if let Some(key) = workspace_key { observer(ProcEvent::Stderr(temporary_diagnostics(&workspace, &key))); }
     if let Ok((limit, peak)) = control.budget.commit_accounting() {
@@ -451,8 +474,8 @@ pub(super) fn spawn(executable: &Path, spec: &JobSpec, observer: Observer,
   let charge = workspace.reserve(&key, manifest_content.len() as u64, producers.len() as u64 + 2 + u64::from(audio.is_some()))?;
   let scratch_guard = ManifestScratch { _directory: root, _charge: charge };
   std::fs::write(&manifest, manifest_content).map_err(|error| error.to_string())?;
-  let mut final_budget = FinalOutput::open(spec, &mut final_args, workspace.clone())?;
-  let control = Arc::new(Control::new(execution_deadline(spec)?)?);
+  let final_budget = FinalOutput::open(spec, &mut final_args, workspace.clone())?;
+  let control = Arc::new(Control::new(execution_deadline(spec)?, final_budget)?);
   let consumer = control.spawn(executable, &final_args, spec.cwd.as_deref(), false, WorkerRole::FinalEncoder, &guard)?;
   let pid = consumer.child().id();
   let output = consumer.child().take_stdout().ok_or("streaming consumer has no progress stream")?;
@@ -514,7 +537,7 @@ pub(super) fn spawn(executable: &Path, spec: &JobSpec, observer: Observer,
     let output_read = join(final_output);
     let errors_read = join(final_errors);
     let mut result = control.settle().and(audio_result).and(produced).and(consumed).and(output_read).and(errors_read);
-    if let Some(final_budget) = final_budget.as_mut() { result = final_budget.finish().and(result); }
+    result = control.finish_output(result);
     observer(ProcEvent::Stderr(control.memory_diagnostics()));
     observer(ProcEvent::Stderr(temporary_diagnostics(&workspace, &key)));
     if let Ok((limit, peak)) = control.budget.commit_accounting() {
@@ -546,6 +569,40 @@ mod tests {
     let target = if cfg!(target_os = "windows") { "x86_64-pc-windows-msvc.exe" }
       else if cfg!(target_os = "macos") { "aarch64-apple-darwin" } else { "x86_64-unknown-linux-gnu" };
     Path::new(env!("CARGO_MANIFEST_DIR")).join("binaries").join(format!("artdaddy-ffmpeg-{target}"))
+  }
+
+  #[test]
+  fn output_write_limit_blocks_encoder_overshoot_and_preserves_a_fitting_movie() {
+    let root = tempfile::tempdir().unwrap();
+    let encode = |path: &Path, limit: u64, guarded: bool| {
+      std::fs::File::create(path).unwrap();
+      let bound = guarded.then(|| output::OutputLimit::open(path, limit).unwrap());
+      let mut command = Command::new(ffmpeg());
+      command.args(["-y", "-v", "error", "-nostdin", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=3",
+        "-c:v", "libx264", "-preset", "ultrafast", "-qp", "0", "-an", "-fs", &limit.to_string(), "-movflags", "+faststart"])
+        .arg(path);
+      if let Some(bound) = bound.as_ref() { bound.configure(&mut command); }
+      let result = command.output().unwrap();
+      let bytes = std::fs::metadata(path).unwrap().len();
+      (result, bytes)
+    };
+    let (control, control_bytes) = encode(&root.path().join("control.mp4"), 65536, false);
+    assert!(control.status.success(), "{}", String::from_utf8_lossy(&control.stderr));
+    assert!(control_bytes > 65536, "control cannot exhibit the original packet/trailer overshoot: {control_bytes}");
+    let (capped, capped_bytes) = encode(&root.path().join("capped.mp4"), 65536, true);
+    assert!(capped_bytes <= 65536, "native output crossed its admitted write boundary: {capped_bytes}");
+    assert!(!capped.status.success(), "bounded incomplete output must not claim producer success");
+    let fitting = root.path().join("fitting.mp4");
+    let (completed, bytes) = encode(&fitting, 2 * 1024 * 1024, true);
+    assert!(completed.status.success(), "{}", String::from_utf8_lossy(&completed.stderr));
+    assert!(bytes > 65536 && bytes <= 2 * 1024 * 1024);
+    let decoded = Command::new(ffmpeg()).args(["-v", "error", "-i"]).arg(&fitting)
+      .args(["-map", "0:v:0", "-pix_fmt", "yuv420p", "-f", "rawvideo", "-"]).output().unwrap();
+    assert!(decoded.status.success(), "{}", String::from_utf8_lossy(&decoded.stderr));
+    let frame_bytes = 320 * 180 * 3 / 2;
+    assert_eq!(decoded.stdout.len(), frame_bytes * 90);
+    assert_ne!(&decoded.stdout[..frame_bytes], &decoded.stdout[frame_bytes * 89..]);
+    println!("native output bytes: unguarded={control_bytes}, guarded={capped_bytes}, fitting={bytes}; fitting_frames=90");
   }
 
   fn spec(root: &Path) -> JobSpec {
@@ -790,7 +847,7 @@ mod tests {
     use std::io::{BufRead, Write};
     for (limit, refused) in [(512 * 1024 * 1024, false), (32 * 1024 * 1024, true)] {
       let dir = tempfile::Builder::new().prefix("artdaddy-memory-qa-").tempdir().unwrap();
-      let mut control = Control::new(super::super::now_ms() + 10_000).unwrap();
+      let mut control = Control::new(super::super::now_ms() + 10_000, None).unwrap();
       control.resident_limit = limit;
       let control = Arc::new(control);
       let args = strings(&["--exact", "jobs::stream::tests::resident_allocator_child", "--ignored", "--nocapture"]);

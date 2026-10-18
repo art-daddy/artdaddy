@@ -809,6 +809,126 @@ beyond proving the existing implementation and are excluded from that count.
   each platform; Windows-specific frozen hashes are not relabeled portable.
   No remote result or additional acceptance credit is claimed before evidence.
 
+- V2-D076: resume the approved isolated QA work without changing scratch
+  ownership. Repair the obsolete caption cleanup fixture at the project/app-work
+  owner boundary and verify actual filesystem outcomes: legacy project cleanup,
+  active-launch retention, prior-launch orphan removal and staging completion.
+  Commit `53bfd6e` passes four real-disk and 35 existing owner/safety cases and
+  reaches the QA branch through every existing hook: build, 5,697 unit, ten Node,
+  211 Rust (20 ignored separately), 606 smoke passes/234 skips and backend bundle
+  checks. The frozen corpus bytes remain unchanged.
+  - Proof: exact-source Windows native capture/recovery verifies protocol 20,
+    one recovery, 744 source hashes, worker/app/publication identities, complete
+    frame/sample comparisons and four actual caption-pixel observations.
+    Native CI `39105650057` passes Linux's 18-case lane and real app recovery;
+    both Unix systems pass all 17 native runtime cases and the eight output
+    branches. Their unguarded 265,663-byte control is stopped at 65,536 bytes
+    by the Unix write guard. The Windows guard observes 48 bytes. All fitting
+    671,963-byte controls decode 90 moving frames.
+  - Residual: that run fails two macOS artifact cases (live-worker measurement
+    refusal and a separate scaler/encoder failure); macOS app recovery is skipped.
+    These results do not close whole allocated-space, physical-device or promise
+    qualification. Strict acceptance remains 11/24 (46%); built/unaccepted 10/13.
+
+- V2-D077: repair macOS RSS measurement at the existing mandatory worker budget
+  boundary, not with retries, grace periods, zero samples or a raised budget.
+  The dependency's refresh unnecessarily requires process-name/argument metadata
+  and does not check task-query success. Commit `298f254` uses a checked kernel
+  task-memory query and accepts only the complete expected structure.
+  - Authority/surface: the existing native Control owns live worker PIDs and
+    the shared resident cutoff. Single, partition producer, continuous audio and
+    final encoder all use its sampler in both live and recovered execution.
+    Copy operations do not create those render workers; bare render workers do
+    not gain an alternative sampler. No new owner or per-endpoint opt-in.
+  - Lifecycle/failure: keep the before/after child-exit checks. Only a confirmed
+    exited child can disappear from a sample; unavailable information for a live
+    child remains an explicit accounting failure. The existing owner stops and
+    settles writers, removes incomplete private output and refuses publication.
+    Cancellation, process failure and restart keep the existing job authority.
+  - Commit point: the existing guarded worker spawn remains unchanged; the
+    kernel read supplies only a checked observation, not admission or permission
+    to publish. A failed or partial read cannot become a successful zero sample.
+    Failure before, during or after observation must preserve those rules.
+  - Proof: Windows memory controls pass three cases/one ignored and all 17
+    explicit runtime cases pass. The macOS-only reader and negative case still
+    need actual platform compilation/execution. CI now requires every one of
+    three complete 18-case macOS artifact executions to pass and keeps separate
+    attempt-named artifacts. YAML/Bash and failure-aggregation controls pass;
+    they are not media qualification. The old Windows receipt is not fresh
+    evidence for this changed source. The independent scaler error stays open.
+
+- V2-D078: standard CI `39105649969` at `53bfd6e` is a retained failure, not
+  superseded by a green local hook or a narrow native lane. Build/unit, the full
+  Windows desktop build and both browser-pixel jobs pass. Full smoke fails:
+  macOS 42/557/241, Linux 120/479/241 and Windows 4/598/238 (failed/passed/skipped).
+  Both Unix Cargo jobs run the real write-guard case against non-executable
+  stand-ins. Linux smoke's actual Rust fixture additionally cannot compile
+  without GTK development packages; diagnostics identify missing `gdk-3.0`.
+  - Decision: stage the real shipped FFmpeg for jobs that execute it, and compile
+    the native smoke fixture before per-case deadlines with the same existing
+    library-test resource configuration. Do not skip the case or raise deadlines.
+    This CI prerequisite repair is pending; the current QA push stays frozen.
+  - Residual: complete-stereo equality, Windows vibrance pixels, scaler/encoder
+    initialization and timeout outcomes need actual diagnosis and fresh artifacts.
+    The new macOS sampler is not assumed to fix independent failures. No reference,
+    quality policy, global threading, budget or acceptance count is changed.
+
+- V2-D079: qualify and integrate the native envelope as a bounded slice, not as
+  acceptance of every exporter surface. At `298f254`, native CI `39108805827`
+  passes on both Unix platforms: all 17 real runtime cases, the eight-branch
+  output matrix, actual app crash/recovery, Linux's 18 portable cases and all
+  three distinct 18-case macOS executions. Each platform's 744 recorded source
+  files matches the exact Git blob bytes. macOS actually executes the checked
+  reader's touched-allocation and unavailable-information cases and the real
+  owned-worker cutoff case. This replaces the pending-reader proof in D077.
+  - Invariant: admitted final render output stays behind its native reservation
+    until every owned writer settles; failed or incomplete production cannot
+    publish. Every live owned render worker supplies valid memory evidence or
+    its job is refused. Sampled RSS is not a kernel-enforced physical ceiling.
+  - Authority: the existing Supervisor owns the stable delivery/job identity,
+    Workspace owns its canonical stage-key reservation, and Control owns the
+    worker group. No parallel persistence, quota or publication owner is added.
+  - Surface: Supervisor prepares the private final stage for live and recovered
+    single/sequential and streamed jobs. ShellSpawner routes every FFmpeg worker
+    through the shared native launcher. Single, partition producer, continuous
+    audio and final encoder use Control; its mandatory spawn installs the
+    admitted output guard. Intermediate captures keep the existing pooled pipe
+    writer. Copy operations retain their separate existing delivery path.
+    Bare non-delivery FFmpeg cannot supply trusted final-stage metadata itself.
+  - Lifecycle/commit point: reserve the private output, install the OS guard,
+    recheck the existing start/cancellation/deadline authority under Control's
+    mutex, then spawn. Unix sets the file limit before exec; Windows assigns the
+    suspended worker to its budget before resuming it. There is no intervening
+    async context handoff. Release the output guard only after writer settlement,
+    then measure/clean private output before existing verification/publication.
+  - Failure matrix: reservation/guard/spawn refusal cannot publish; worker
+    failure, cancellation or timeout stops and joins the group before cleanup.
+    Preserve producer/admission diagnostics if cleanup also fails. Incomplete or
+    capped output is removed; fitting complete output preserves existing exact
+    picture/audio checks and the previous destination. Recovery reuses the same
+    owning boundaries rather than trusting an old process or optional callback.
+  - Residual: process-crash Windows lock-release/worker-kill ordering, mapped
+    writes, complete allocated-space/metadata coverage, whole-profile promises
+    and main's combined-source integration proof remain open. The original
+    macOS scaler failure is not reproduced in three new complete executions;
+    its independent cause is not proven, so it is not silently closed.
+    Downloaded Unix artifacts contain receipts/logs, not executable/media bytes;
+    source and receipt consistency were independently checked, while actual
+    media/binary checks ran inside the identity-bound harness. No acceptance
+    credit, main push, release or resource-limit change follows from this slice.
+  - Main integration: the qualified native guard, Control wiring, macOS reader,
+    artifact regressions and expired-restart fixture are now ported without
+    replacing unrelated work or changing main's 0.21.2 version. The three native
+    module sources match `298f254` after explicit checkout-newline normalization;
+    the new output module has only an additional final newline. This is source
+    equivalence, not execution of the combined main application.
+  - Combined-source gate: the focused `cargo test --locked` attempt refuses
+    before compilation. Main's pre-existing dirty root lock adds `reqwest` and
+    `rustls`, neither declared by its manifest. Those unrelated lock edits are
+    preserved, not silently regenerated or removed. No main test/build pass is
+    claimed; that gate remains blocked until the existing manifest/lock work is
+    reconciled by its owner.
+
 ## Historical V1 Design And Evidence
 
 Everything below is retained history, not authority for conflicting V2 requirements.

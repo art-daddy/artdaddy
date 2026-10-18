@@ -4,20 +4,156 @@ Updated: 2026-10-18. Internal engineering handover, not release notes or a claim
 that the exporter is finished. This document covers both the active rescoped
 FFmpeg exporter and the original, now-deferred new-renderer effort.
 
-Revision facts below were captured before this handover's documentation-only
-commit. That commit can advance main without changing its implementation baseline.
-Recheck current heads when resuming; do not mistake documentation history for a
-new exporter build or qualification result.
+Original handover facts in sections 1-15 were captured before this document's
+first documentation-only commit. The continuation checkpoint below supersedes
+their execution state, not the design, approval boundaries or deferred work.
+Recheck current heads when resuming; documentation history is not a new exporter
+build or qualification result.
+
+## Continuation Checkpoint - 2026-10-18
+
+**Strict acceptance remains 11/24 (46%). Built but unaccepted remains 10/13.**
+No acceptance box was closed by the following short software/control runs.
+
+### Completed Software And Local Gates
+
+- Recovered the original "Code review for akaru project (RECOVERED 8)" transcript
+  and confirmed the existing QA-branch/public-CI permission. Main pushes, releases,
+  paid work, personal-media uploads and the deferred full-size/device runs remain
+  outside that permission.
+- Commit `53bfd6ee2fe83a949016d7cec8e84a9f37257330` repairs the caption cleanup
+  smoke fixture at its actual owner. Legacy project-cache cleanup is still
+  exercised. Actual caption staging additionally proves current-launch app-work
+  retention, previous-launch orphan removal and ordinary staging cleanup.
+  Production ownership was not moved back into the project to satisfy the test.
+- Four real-filesystem cleanup cases and 35 existing ownership/safety cases pass.
+  The subsequent QA-only push passed the unchanged hook: client build, 5,697 unit
+  tests, ten Node exporter controls, 211 Rust tests (20 ignored separately),
+  606 real-FFmpeg smoke passes (234 skips) and the backend bundle guard.
+  The backend guard inspects its configured sibling main-client contract; it
+  does not independently compare every isolated-QA contract byte.
+- Current-source Windows evidence at `53bfd6e` includes 17 explicitly enabled
+  real native worker/lifecycle cases, the eight-branch output matrix and actual
+  native-app crash/recovery. Independent receipt inspection checked protocol 20,
+  one recovery, 744 source-file hashes, actual worker/app/publication identities,
+  complete decoded video/audio and four caption-pixel observations.
+  This receipt predates the following memory-reader change; do not reuse it as
+  current-source proof for that candidate.
+
+### Exact-Source Remote Results - Failures Retained
+
+- Native CI run `39105650057`, source `53bfd6e`: Linux passes all 18 portable
+  artifact cases and real native-app recovery. Both Unix platforms pass the
+  17 real worker/write-limit/lifecycle cases and eight-branch output matrix.
+  Unguarded FFmpeg writes 265,663 bytes against a 65,536-byte request; Unix
+  enforcement stops at 65,536 bytes, while the Windows guarded control writes
+  48 bytes. Fitting movies are 671,963 bytes and decode all 90 moving frames.
+  These are file-write observations, not complete allocated-space proof.
+- That native run fails macOS with 16/18 portable cases passing. One native
+  audio/denoise export loses a live-worker memory measurement despite a recorded
+  peak around 89 MB. The other case fails the Standard/reference encode with
+  swscaler "Resource temporarily unavailable" and libx264 initialization errors.
+  Real macOS app recovery is consequently not executed. Neither failure is
+  discarded or treated as resolved by a retry.
+- Standard CI run `39105649969`, same source: build/unit, full Windows desktop
+  build and Windows/macOS browser-pixel jobs pass. Full smoke fails on macOS
+  (42 failed, 557 passed, 241 skipped), Linux (120 failed, 479 passed, 241 skipped)
+  and Windows (four failed, 598 passed, 238 skipped).
+- Both standard Unix Cargo jobs attempt the intentionally non-executable
+  stand-in FFmpeg in the new real output-guard regression and fail with
+  permission denied. Linux export smoke additionally lacks the native GTK
+  development prerequisites required by the actual Rust sequence fixture:
+  its repeated failures contain missing `gdk-3.0`/pkg-config diagnostics.
+  Fix staging/compilation at the owning CI jobs, not by skipping real cases.
+- Remaining artifact failures must still be diagnosed: macOS complete-stereo
+  equality, Windows vibrance frame equality, resolution/cold-native-build
+  timeouts and a Windows loudness timeout. Cold compilation is a confirmed
+  fixture prerequisite, not yet proof of the cause of every timeout. Do not
+  raise deadlines, normalize differences or update golden output to get green.
+
+### Qualified Native Slice And Current Candidate
+
+- QA commit `298f254` changes the
+  mandatory native RSS sampler on macOS to a checked `PROC_PIDTASKINFO` query.
+  Only a complete kernel structure is accepted; missing live-worker data stays
+  an explicit failure, not a zero-memory observation or a metadata fallback.
+  Other platforms retain their existing sampling. Limits and encoder/thread
+  policies are unchanged.
+- The same candidate requires three complete 18-case macOS portable executions;
+  any execution or verification failure fails the job. Artifacts include the
+  workflow attempt identity so reruns cannot collide with retained evidence.
+  Windows memory controls pass three cases (one ignored separately), all 17
+  explicit native lifecycle cases pass, and YAML/Bash/failure-aggregation controls
+  pass. Native CI `39108805827` now also passes on macOS and Linux: all 17 real
+  runtime cases, the eight-branch output matrix, actual app crash/recovery,
+  Linux's 18 portable cases and all three distinct 18-case macOS executions.
+  macOS actually executes positive/negative kernel-reader controls and the
+  real owned-worker cutoff. Each platform's 744 source hashes matches the exact
+  Git blobs. Downloaded artifacts contain logs/receipts, not media or executable
+  bytes; their actual byte checks run inside the source-bound native harness.
+  The earlier scaler failure did not recur, but its independent cause is not
+  proven and is not declared closed.
+- The unchanged QA push hook passed at both `298f254` and the current remote/local
+  HEAD `ea12d7fd61a5e5b9e1c0fd2b8fcab6eef71478ec`: build, 5,697 unit cases,
+  ten Node controls, 211 Rust cases (20 ignored), 606 real-FFmpeg smoke passes
+  (234 skips) and the backend bundle guard. The latest smoke took 1,248.18 s.
+- Standard CI `39108805696` at `298f254` still fails: macOS 40 failed/559
+  passed/241 skipped, Linux 120/479/241, Windows 3/599/238. Both Unix Cargo
+  jobs retain the stand-in FFmpeg failure. It also finds a real shared-name
+  counterexample, `" .0."`, seed `-32425172`; trimming exposes a leading dot.
+- `ea12d7f` stages real pinned FFmpeg in Unix Cargo jobs, installs the required
+  Linux native packages and compiles the actual Rust smoke fixture before
+  per-case deadlines. It always retains the full smoke JSON and bounded first
+  failed transition/colour media, complete frame/PCM hashes and failed render
+  plans. Assertions, references, deadlines, budgets and production threading
+  are unchanged. Actual helper controls verify the saved bytes, ownership and
+  size refusals; workflow preparation is not remote execution.
+- Exact-source standard CI `39111883014` and native CI `39111883008` are now
+  running at `ea12d7f`. Inspect their results and retained actual failure media.
+- Main now has the qualified native output guard/shared Control wiring,
+  checked macOS reader and existing output/restart outcome regressions.
+  Main remains 0.21.2. The three native modules match qualified Git source
+  after explicit CRLF normalization, with only one additional EOF newline.
+  Focused combined-main `cargo --locked` refused before compilation because
+  the pre-existing dirty root lock adds `reqwest`/`rustls` absent from the
+  manifest. Preserve those unrelated edits: combined-main execution is blocked,
+  not passed. Other qualified exporter slices still require surgical backport.
+- Next: fix the shared dot/whitespace boundary invariant, including project-name
+  fallback and truncation ordering; inspect the new standard CI artifacts;
+  continue only qualified exporter-owned integration without wholesale merges.
+- Larger residuals remain: complete allocated temporary-space/20 GB coverage,
+  Linux 8 GB and other complete software-profile evidence, combined-main gates,
+  complete UI/agent/MCP/copy/lifecycle/filesystem coverage, visual/audio/preview
+  parity and estimate/reporting qualification. Owner-deferred full-size/stress,
+  physical devices, pilot, release and deployment remain separate.
+
+Continuation evidence is under the isolated QA worktree's `reports/qa/exporter`:
+`continuation-cleanup-before.json`, `continuation-cleanup-after.json`,
+`continuation-cleanup-owners.json`, `continuation-windows-receipt-inspection-53bfd6e.json`,
+`ci-39105650057`, `continuation-standard-ci-39105649969-failed.log`,
+`continuation-memory-reader-controls.log`,
+`continuation-native-workflow-controls.json`,
+`continuation-native-receipt-inspection-298f254.json`,
+`continuation-macos-memory-reader-proof-298f254.json`,
+`continuation-conformance-diagnostic-controls.json`,
+`continuation-standard-ci-prerequisite-controls.json` and
+`continuation-qa-push-ea12d7f-1792310798097.json`. Main's own reports include
+`continuation-native-backport-equivalence-298f254.json` and
+`continuation-main-native-integration-1792312282490.json`.
+Preserve failed evidence and exact
+source identities. Native/profile success is still not physical-device,
+full-duration, whole-space or 99% promise qualification.
 
 ## 1. Start Here
 
 The owner asked to finish implementation of the approved rescoped design without
 routine approval pauses, recording assumptions and decisions for later review.
-The latest request is to prepare this handover because the chat is too long.
+This original handover was requested because the previous chat was too long.
 Do not resume the old new-renderer plan by mistake.
 
-The next implementation action is to investigate one failing cleanup smoke test,
-not to launch another renderer project or declare cross-platform qualification.
+At handover the next action was the failing cleanup smoke test, not another
+renderer project. Use the continuation checkpoint for the current next action;
+the following table preserves the original handover state.
 
 | Item | State At Handover |
 | --- | --- |
@@ -995,19 +1131,25 @@ docs/EXPORTER_ARCHITECTURE.md. Historical V1/new-engine work is parked.
 Main implementation baseline is 540dd3e; handover-only commits may follow.
 The main worktree is dirty/diverged.
 The isolated QA worktree is C:/Users/akshaydagar/qa-exporter-v2-20261017,
-branch qa/exporter-v2-20261017, local HEAD a758126.
-Remote QA remains 2bc9721; seven later commits are local only.
+branch qa/exporter-v2-20261017, remote/local HEAD ea12d7f at this checkpoint.
+Recheck heads before acting; the checkpoint at the top is the current authority.
 
-The last hook passed build, 5697 unit cases, Node controls and 211 Rust cases
-(20 ignored), then smoke had 604 pass, 1 fail and 234 skips. Backend not reached.
-Start with src/tools/projectTemps.smoke.e2e.ts, the stale caption-folder case.
-Read its actual owner: it creates app-work scratch but calls the project-only
-sweeper. Treat that as an investigation lead, not an already-proven fix.
-Keep production ownership/staleness guards and preserve old orphan cleanup.
+Caption cleanup is repaired and the checked macOS reader/native output slice
+is qualified on the actual native Windows/Mac/Linux paths. The last QA hook
+passes build, 5697 unit cases, 10 Node controls, 211 Rust cases (20 ignored),
+606 real-FFmpeg smoke cases (234 skips), and the backend bundle guard.
+Standard cross-platform conformance still fails; retain those failures.
+ea12d7f's exact-source standard CI 39111883014 and native CI 39111883008 run
+the new real-FFmpeg/native-compilation prerequisites and failure diagnostics.
 
-Run the focused test immediately after a grounded repair. Commit each slice
-locally, then retry the already-approved QA branch with ALL pre-push hooks.
-Inspect exact-SHA standard Windows/Mac/Linux CI and native artifact outcomes.
+Main has the native slice, version 0.21.2, with source-equivalence evidence.
+Its focused locked Cargo gate refuses before compilation because unrelated
+pre-existing root-lock reqwest/rustls entries are absent from the manifest.
+Preserve that work and do not call combined-main execution qualified.
+
+Fix the shared name-boundary counterexample and inspect actual failed
+frame/PCM artifacts. Commit each owned slice locally; any already-approved
+QA push must retain ALL hooks. Inspect exact-SHA standard and native outcomes.
 Backport qualified exporter-only changes into main without overwriting unrelated
 auth/catalog/updater work. Do not wholesale merge/reset dirty worktrees.
 
