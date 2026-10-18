@@ -60,6 +60,9 @@ const FPS = 30;
 const RATE = 48000;
 const FRAME_BYTES = (W * H * 3) / 2;
 const dir = path.join(os.tmpdir(), `artdaddy-range-${Date.now()}`);
+const diagnosticDir = path.resolve("reports/qa/exporter", path.basename(dir));
+const decodedFiles = new WeakMap<object, string>();
+const retainedComparisons = new Set<string>();
 let ctx: ClientToolContext;
 let retainArtifacts = false;
 const src: Record<string, string> = {};
@@ -105,7 +108,47 @@ async function decoded(
   for (let o = 0; o + FRAME_BYTES <= yuv.length; o += FRAME_BYTES)
     frames.push(yuv.subarray(o, o + FRAME_BYTES));
   const pcm = await ffBytes(["-i", file, "-map", "0:a", "-f", audioFormat, "-"]);
-  return { frames, pcm };
+  const artifact = { frames, pcm };
+  decodedFiles.set(artifact, file);
+  return artifact;
+}
+
+function retainFailedComparison(
+  kind: string,
+  label: string,
+  expected: { frames: Buffer[]; pcm: Buffer },
+  actual: { frames: Buffer[]; pcm: Buffer },
+): void {
+  onTestFailed(async () => {
+    if (retainedComparisons.has(kind)) return;
+    retainedComparisons.add(kind);
+    await fsp.mkdir(diagnosticDir, { recursive: true });
+    const artifacts = [];
+    for (const [side, artifact] of [
+      ["expected", expected],
+      ["actual", actual],
+    ] as const) {
+      const filename = decodedFiles.get(artifact);
+      if (!filename || path.dirname(filename) !== dir)
+        throw new Error("comparison evidence must be a generated synthetic render");
+      const metadata = await fsp.lstat(filename);
+      if (!metadata.isFile() || metadata.size > 32 * 1024 * 1024)
+        throw new Error("comparison evidence exceeds its regular-file diagnostic bound");
+      const name = `${kind}-${side}${path.extname(filename)}`;
+      await fsp.copyFile(filename, path.join(diagnosticDir, name));
+      artifacts.push({
+        name,
+        bytes: metadata.size,
+        frames: artifact.frames.map((frame) => createHash("sha256").update(frame).digest("hex")),
+        pcmBytes: artifact.pcm.length,
+        pcmSha256: createHash("sha256").update(artifact.pcm).digest("hex"),
+      });
+    }
+    await fsp.writeFile(
+      path.join(diagnosticDir, `${kind}.json`),
+      JSON.stringify({ label, artifacts }, null, 2),
+    );
+  });
 }
 
 /** The export's own plan, encoded losslessly so nothing but the graph can differ. */
@@ -169,6 +212,17 @@ async function renderLossless(
     };
   }
   const r = await runRenderPlan(renderContext, { ...plan, args });
+  if (r.code !== 0) {
+    await fsp.mkdir(diagnosticDir, { recursive: true });
+    await fsp.writeFile(
+      path.join(diagnosticDir, `${createHash("sha256").update(tag).digest("hex")}.json`),
+      JSON.stringify(
+        { tag, options, native, args, filterComplex: plan.filterComplex, files: plan.assFiles },
+        null,
+        2,
+      ),
+    );
+  }
   expect(r.code, r.stderr).toBe(0);
   return out;
 }
@@ -793,6 +847,7 @@ describe("streaming transition conformance", () => {
           true,
         ),
       );
+      retainFailedComparison("transition", kind, reference, delivered);
       expect(delivered.frames).toHaveLength(196);
       let transitionVisible = false;
       for (let frame = 0; frame < reference.frames.length; frame++) {
@@ -901,6 +956,7 @@ describe("streaming colour catalog conformance", () => {
           true,
         ),
       );
+      retainFailedComparison("colour", parameter.key, reference, delivered);
       expect(delivered.frames).toHaveLength(196);
       let changesPixels = false;
       for (let frame = 0; frame < reference.frames.length; frame++) {

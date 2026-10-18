@@ -79,6 +79,16 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Native export fixture dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libayatana-appindicator3-dev libssl-dev \
+            libwebkit2gtk-4.1-dev librsvg2-dev
       - name: fetch sidecars
         if: runner.os == 'Windows'
         run: npm run fetch:sidecars
@@ -92,16 +102,25 @@ jobs:
       - name: the bundled browser's Linux runtime dependencies
         if: runner.os == 'Linux'
         run: npx playwright install-deps chromium
+      - name: Compile the real native export fixture before case deadlines
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib --no-run
       - name: export suite (real ffmpeg)
         env:
           # The one sidecar this lane deliberately did not stage. Release lanes set nothing here.
           ARTDADDY_E2E_SKIP_SIDECARS: ${{ runner.os != 'Windows' && 'whisper-cli' || '' }}
-        run: npx vitest run --config vitest.smoke.config.ts
+        run: npx vitest run --config vitest.smoke.config.ts --reporter=default --reporter=json --outputFile=reports/qa/exporter/full-smoke.json
+      - name: Preserve real export results and bounded synthetic failure artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: exporter-smoke-${{ matrix.os }}-${{ github.sha }}-attempt-${{ github.run_attempt }}
+          path: reports/qa/exporter/**
+          if-no-files-found: warn
 
   # The Rust shell's unit tests on the platforms the `desktop` job never runs. Some behaviour is
   # Unix-only (the open-file limit every sidecar inherits, UJ-020) and had no test anywhere. This
-  # compiles and tests; it bundles nothing, so the sidecars and generated resources build.rs
-  # checks for only have to EXIST.
+  # compiles and tests; it bundles nothing. The output-write regression executes real pinned
+  # ffmpeg; unrelated sidecars and generated resources only have to exist for build.rs.
   rust-unix:
     name: cargo test (${{ matrix.os }})
     strategy:
@@ -111,6 +130,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -121,12 +143,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential libayatana-appindicator3-dev libssl-dev \
             libwebkit2gtk-4.1-dev librsvg2-dev gnome-keyring dbus-x11
-      - name: stand-in sidecars and resources (build.rs only checks they exist)
+      - name: Real pinned FFmpeg for native output-write regression
+        run: node scripts/fetch-sidecars.mjs --only ffmpeg,ffprobe
+      - name: Other stand-in sidecars and resources (build.rs only checks they exist)
         shell: bash
         run: |
           triple="$(rustc -vV | sed -n 's/^host: //p')"
           mkdir -p src-tauri/binaries src-tauri/resources/ms-playwright src-tauri/resources/node_modules
-          for n in ffmpeg ffprobe yt-dlp whisper-cli browser; do touch "src-tauri/binaries/artdaddy-$n-$triple"; done
+          for n in yt-dlp whisper-cli browser; do touch "src-tauri/binaries/artdaddy-$n-$triple"; done
           touch src-tauri/resources/artdaddy-browser.mjs src-tauri/resources/artdaddy.mcpb
           touch src-tauri/resources/ms-playwright/placeholder src-tauri/resources/node_modules/placeholder
       # The sign-in token tests use the REAL credential store. On Linux that is the Secret Service
