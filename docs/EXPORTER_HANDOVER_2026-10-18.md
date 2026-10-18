@@ -93,8 +93,8 @@ No acceptance box was closed by the following short software/control runs.
   bytes; their actual byte checks run inside the source-bound native harness.
   The earlier scaler failure did not recur, but its independent cause is not
   proven and is not declared closed.
-- The unchanged QA push hook passed at both `298f254` and the current remote/local
-  HEAD `ea12d7fd61a5e5b9e1c0fd2b8fcab6eef71478ec`: build, 5,697 unit cases,
+- The unchanged QA push hook passed at both `298f254` and the last published
+  candidate `ea12d7fd61a5e5b9e1c0fd2b8fcab6eef71478ec`: build, 5,697 unit cases,
   ten Node controls, 211 Rust cases (20 ignored), 606 real-FFmpeg smoke passes
   (234 skips) and the backend bundle guard. The latest smoke took 1,248.18 s.
 - Standard CI `39108805696` at `298f254` still fails: macOS 40 failed/559
@@ -108,8 +108,29 @@ No acceptance box was closed by the following short software/control runs.
   plans. Assertions, references, deadlines, budgets and production threading
   are unchanged. Actual helper controls verify the saved bytes, ownership and
   size refusals; workflow preparation is not remote execution.
-- Exact-source standard CI `39111883014` and native CI `39111883008` are now
-  running at `ea12d7f`. Inspect their results and retained actual failure media.
+- Exact-source standard CI `39111883014` at `ea12d7f` proves the prerequisite
+  repair: both Unix Cargo jobs pass, Linux full smoke passes 599 cases with
+  241 skips, and Windows passes 602 with 238 skips. Both browser jobs, unit/build
+  and the Windows desktop build pass. macOS still fails 44/555/241: seven
+  resident-accounting failures and 37 other conformance failures.
+- Native CI `39111883008` passes Linux's actual app recovery, all native controls
+  and 18 portable cases. macOS passes its native controls and all three 18-case
+  executions but the actual file-sequence app export fails with kernel `ESRCH`
+  at about 300 MB resident memory. This reopens the worker-exit classification;
+  do not cite the earlier green run as complete sampler-lifecycle qualification.
+  The private partial is cleaned and publication refused, not delivered as success.
+- Public XNU source explains the relevant distinction: task lookup excludes
+  zombies; BSD-info argument 1 can confirm `SZOMB` before synchronizing with
+  the same owned SharedChild. A QA candidate adds this classification, real
+  zombie/live/concurrent-writer tests and three required macOS app executions.
+  Windows still passes three memory controls (one ignored separately).
+  Actual macOS compilation/execution of this new candidate remains pending;
+  live or unconfirmed missing memory stays an error, never a zero fallback.
+- Actual retained macOS crossfade/exposure media have identical complete
+  196-frame hashes and equal audio lengths. Their 456 differing PCM samples
+  differ by one 16-bit step, with the same expected/actual PCM hashes in both
+  classes. Keep the original media and strict assertions while investigating
+  integer-quantization versus the existing float64 transport oracle.
 - Main now has the qualified native output guard/shared Control wiring,
   checked macOS reader and existing output/restart outcome regressions.
   Main remains 0.21.2. The three native modules match qualified Git source
@@ -118,9 +139,15 @@ No acceptance box was closed by the following short software/control runs.
   the pre-existing dirty root lock adds `reqwest`/`rustls` absent from the
   manifest. Preserve those unrelated edits: combined-main execution is blocked,
   not passed. Other qualified exporter slices still require surgical backport.
-- Next: fix the shared dot/whitespace boundary invariant, including project-name
-  fallback and truncation ordering; inspect the new standard CI artifacts;
-  continue only qualified exporter-owned integration without wholesale merges.
+- QA local commit `400457d` fixes the shared dot/whitespace boundary invariant,
+  including project-name fallback and post-truncation Unicode boundaries.
+  Its exact CI witness, properties, returned default destination, invalid-folder
+  refusal and existing media/clip regressions pass 81 cases; formatting passes.
+  The same bounded naming slice is in main; complete component-byte/device-name
+  qualification remains explicitly separate. See architecture decision D080.
+- Next: qualify the owned-worker exit candidate on actual macOS, resolve the
+  remaining audio-comparison precision evidence without weakening assertions,
+  and continue qualified exporter-owned integration without wholesale merges.
 - Larger residuals remain: complete allocated temporary-space/20 GB coverage,
   Linux 8 GB and other complete software-profile evidence, combined-main gates,
   complete UI/agent/MCP/copy/lifecycle/filesystem coverage, visual/audio/preview
@@ -137,7 +164,11 @@ Continuation evidence is under the isolated QA worktree's `reports/qa/exporter`:
 `continuation-macos-memory-reader-proof-298f254.json`,
 `continuation-conformance-diagnostic-controls.json`,
 `continuation-standard-ci-prerequisite-controls.json` and
-`continuation-qa-push-ea12d7f-1792310798097.json`. Main's own reports include
+`continuation-qa-push-ea12d7f-1792310798097.json`,
+`ci-39111883008`, `ci-39111883014`,
+`continuation-standard-smoke-ea12d7f-summary.json`,
+`continuation-macos-comparison-inspection-ea12d7f.json` and
+`continuation-export-name-boundaries.json`. Main's own reports include
 `continuation-native-backport-equivalence-298f254.json` and
 `continuation-main-native-integration-1792312282490.json`.
 Preserve failed evidence and exact
@@ -1131,24 +1162,28 @@ docs/EXPORTER_ARCHITECTURE.md. Historical V1/new-engine work is parked.
 Main implementation baseline is 540dd3e; handover-only commits may follow.
 The main worktree is dirty/diverged.
 The isolated QA worktree is C:/Users/akshaydagar/qa-exporter-v2-20261017,
-branch qa/exporter-v2-20261017, remote/local HEAD ea12d7f at this checkpoint.
+branch qa/exporter-v2-20261017, remote HEAD ea12d7f and local HEAD 400457d
+plus the owned-worker exit candidate at this checkpoint.
 Recheck heads before acting; the checkpoint at the top is the current authority.
 
-Caption cleanup is repaired and the checked macOS reader/native output slice
-is qualified on the actual native Windows/Mac/Linux paths. The last QA hook
+Caption cleanup and the native output slice are qualified. Later macOS app
+ESRCH failures reopen resident-worker exit classification despite the earlier
+green run; a zombie/live/concurrent-writer repair is awaiting actual macOS proof.
+The last QA hook
 passes build, 5697 unit cases, 10 Node controls, 211 Rust cases (20 ignored),
 606 real-FFmpeg smoke cases (234 skips), and the backend bundle guard.
-Standard cross-platform conformance still fails; retain those failures.
-ea12d7f's exact-source standard CI 39111883014 and native CI 39111883008 run
-the new real-FFmpeg/native-compilation prerequisites and failure diagnostics.
+At ea12d7f, Linux/Windows full smoke and both Unix Cargo jobs pass. macOS full
+smoke still fails 44 cases and native app recovery fails. Preserve the reports
+from standard CI 39111883014 and native CI 39111883008, including actual media.
 
 Main has the native slice, version 0.21.2, with source-equivalence evidence.
 Its focused locked Cargo gate refuses before compilation because unrelated
 pre-existing root-lock reqwest/rustls entries are absent from the manifest.
 Preserve that work and do not call combined-main execution qualified.
 
-Fix the shared name-boundary counterexample and inspect actual failed
-frame/PCM artifacts. Commit each owned slice locally; any already-approved
+The shared name-boundary repair passes 81 focused QA cases at 400457d.
+Finish worker-exit and remaining PCM precision qualification. Commit each owned
+slice locally; any already-approved
 QA push must retain ALL hooks. Inspect exact-SHA standard and native outcomes.
 Backport qualified exporter-only changes into main without overwriting unrelated
 auth/catalog/updater work. Do not wholesale merge/reset dirty worktrees.

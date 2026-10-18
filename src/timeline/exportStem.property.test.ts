@@ -11,7 +11,7 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 
-import { exportStem } from "./render";
+import { defaultExportStem, exportDestination, exportFolder, exportStem, safeName } from "./render";
 
 const FALLBACK = "project";
 
@@ -69,7 +69,7 @@ describe("exportStem — nothing injectable survives", () => {
     expect(exportStem("console", FALLBACK)).toBe("console"); // not reserved — only the exact name
   });
 
-  it("returns a name a filesystem will actually accept", () => {
+  it("keeps canonical basename boundaries within the code-point budget", () => {
     fc.assert(
       fc.property(fc.string({ maxLength: 300 }), (raw) => {
         const stem = exportStem(raw, FALLBACK);
@@ -88,6 +88,110 @@ describe("exportStem — nothing injectable survives", () => {
     expect([...stem].length).toBe(80);
     expect(UNPAIRED_SURROGATE.test(stem)).toBe(false);
     expect(stem).toBe("😀".repeat(80));
+  });
+});
+
+describe("shared export names - canonicalization boundaries", () => {
+  const boundaryCharacter = fc.constantFrom(
+    ".",
+    " ",
+    "\t",
+    "\n",
+    "\u00a0",
+    "\u2002",
+    "\u2028",
+    "\u2029",
+    "\u202f",
+    "\u3000",
+  );
+  const boundary = fc.array(boundaryCharacter, { maxLength: 24 }).map((s) => s.join(""));
+  const label = fc
+    .array(fc.constantFrom("a", "B", "0", "é", "夏", "영", "😀", "_", "-"), {
+      minLength: 1,
+      maxLength: 30,
+    })
+    .map((s) => `cut-${s.join("")}`);
+
+  it("retains the exact CI counterexample without exposing a hidden filename", () => {
+    expect(exportStem(" .0.", FALLBACK)).toBe("0");
+  });
+
+  it("preserves the name through every ordering of boundary dots and whitespace", () => {
+    fc.assert(
+      fc.property(boundary, label, boundary, (prefix, name, suffix) => {
+        const raw = `${prefix}${name}${suffix}`;
+        expect(safeName(raw, FALLBACK)).toBe(name);
+        expect(exportStem(`${raw}.mp4`, FALLBACK)).toBe(name);
+        expect(defaultExportStem(`C:\\projects\\${raw}`)).toBe(name);
+      }),
+      { numRuns: 300 },
+    );
+  });
+
+  it("does not expose a trailing dot when truncation removes the rest of a name", () => {
+    fc.assert(
+      fc.property(
+        label,
+        fc.array(
+          boundaryCharacter.filter((c) => c !== "\t" && c !== "\n"),
+          { minLength: 80, maxLength: 120 },
+        ),
+        (name, padding) => {
+          const raw = `${name}${padding.join("")}tail`;
+          expect(safeName(raw, FALLBACK)).toBe(name);
+          expect(exportStem(`${raw}.mp4`, FALLBACK)).toBe(name);
+          expect(defaultExportStem(`C:\\projects\\${raw}`)).toBe(name);
+        },
+      ),
+      { numRuns: 300 },
+    );
+  });
+
+  it("returns the same safe default destination as the Save As project stem", async () => {
+    await fc.assert(
+      fc.asyncProperty(boundary, label, boundary, async (prefix, name, suffix) => {
+        const projectDir = `C:\\projects\\${prefix}${name}${suffix}`;
+        const result = await exportDestination(
+          {
+            projectDir,
+            exportPath: async (filename: string) => `C:\\Downloads\\${filename}`,
+            isDirectory: async () => false,
+            exists: async () => false,
+          },
+          { name: ".." },
+        );
+        expect(result).toEqual({
+          ok: true,
+          filename: `${name}.mp4`,
+          path: `C:\\Downloads\\${name}.mp4`,
+          defaulted: true,
+        });
+      }),
+      { numRuns: 200 },
+    );
+  });
+
+  it("keeps invalid requested folders an explicit refusal, not a fallback folder", async () => {
+    await fc.assert(
+      fc.asyncProperty(boundary, boundary, async (prefix, suffix) => {
+        const raw = `${prefix}.${suffix}`;
+        expect(safeName(raw, "")).toBe("");
+        const result = await exportFolder(
+          {
+            downloadDir: async () => "C:\\Downloads",
+            artifactPath: () => "C:\\project\\internals\\exports",
+            exists: async () => false,
+            isDirectory: async () => false,
+          },
+          raw,
+        );
+        expect(result).toMatchObject({
+          ok: false,
+          error: expect.stringContaining("not a usable folder name"),
+        });
+      }),
+      { numRuns: 200 },
+    );
   });
 });
 

@@ -929,6 +929,67 @@ beyond proving the existing implementation and are excluded from that count.
     claimed; that gate remains blocked until the existing manifest/lock work is
     reconciled by its owner.
 
+- V2-D080: close generated-name boundary canonicalization at the shared
+  sanitizer after standard CI finds `" .0."` (seed `-32425172`).
+  - Invariant/authority: generated stems have no leading dot/whitespace and no
+    trailing dot/whitespace after removal and code-point truncation. `safeName`
+    owns that rule; project-derived fallbacks must pass through it as well.
+  - Surface: timeline export/default destination, folder export, media-copy and
+    clip-export stems already use the shared sanitizer. `defaultExportStem`
+    also supplies the Save As prefill and both timeline-export fallback paths.
+    Numeric batch prefixes and collision suffixes remain unchanged. Explicit
+    user-selected absolute output paths are validated, not silently renamed.
+  - Lifecycle/commit point: canonicalization is synchronous, before the
+    existing path/reservation/queue/publication boundaries. No new async gap,
+    filesystem writer, authorization context or owner is introduced. An invalid
+    requested folder must retain its empty sentinel and explicit refusal.
+  - Failure matrix: cover whitespace exposing a leading dot, interleaved
+    dot/whitespace prefixes, truncation exposing trailing dot/Unicode whitespace,
+    an unsafe project-name fallback, and invalid-folder rejection. Preserve
+    legitimate scripts, punctuation and complete code points in the opposite
+    direction; assert returned names/destinations, not a particular regex.
+  - Scope/residual: retain the existing 80-code-point policy. Complete UTF-8
+    component/staging/suffix budgets, reserved device names with internal
+    extensions and lone-surrogate inputs are separate known naming residuals,
+    not a proven portable-filesystem guarantee. Their later work must include
+    actual filesystem outcomes without opening reserved devices. This bounded
+    canonicalization repair alone cannot close E2.5/E3.4 or increase acceptance.
+  - Proof: the exact CI witness, boundary/truncation properties, returned
+    default destinations, invalid-folder outcomes and existing media/clip
+    regressions pass 81 cases in QA commit `400457d`. Legitimate-Unicode tests
+    and the 80-code-point expectation are unchanged. Formatting passes.
+
+- V2-D081: reopen resident-worker exit classification after `ea12d7f` native
+  CI `39111883008` passes Linux but fails the actual macOS app. All three
+  macOS 18-case portable runs and native controls pass; the file-sequence app
+  export instead sees `PROC_PIDTASKINFO` return `ESRCH` at about 300 MB RSS.
+  Standard CI `39111883014` now passes Linux, Windows and both Unix Cargo jobs,
+  proving the real-tool/native-build prerequisite repair. macOS still fails
+  44 cases: seven resident-measurement failures and 37 other conformance
+  failures. Successful earlier retries are not closure of this lifecycle.
+  - Invariant/authority: a missing live-worker measurement must refuse work;
+    a confirmed terminated owned worker is retired, never reported as a
+    zero-memory live sample. Control/SharedChild retain worker lifetime
+    authority; the mandatory platform sampler must use that owned child.
+  - Surface: the one resident sampler covers single, partition producer,
+    continuous-audio and final-encoder workers, including actual app/recovery
+    and the real Rust sequence fixture. No endpoint or worker opts in.
+  - Lifecycle/commit point: sample a live owned child; if Darwin task lookup
+    reports `ESRCH`, distinguish an actual zombie with a complete BSD record
+    requested with zombie inclusion. Only the kernel's `SZOMB` proof permits
+    synchronizing with that same SharedChild's waiter and excluding it.
+    Running, unavailable, partial or unconfirmed state remains an error.
+  - Failure matrix: task disappearance before/during another wait, already
+    reaped children, genuine live measurement failure, concurrent short
+    writers, over-budget allocation and cancellation remain distinct cases.
+    No sleep/retry grace, zero fallback, raised limit or relaxed assertion.
+  - Evidence basis: public XNU `bsd/kern/proc_info.c` excludes zombies from
+    task lookup; BSD-info argument 1 includes its zombie list and reports
+    `pbi_status`. Pinned shared_child 1.1.1 already polls its concurrent waiter;
+    do not attribute the failure to the older library's removed shortcut.
+    Add real zombie/live/concurrent-writer outcomes and require every repeated
+    macOS app execution to pass before closing this candidate.
+
 ## Historical V1 Design And Evidence
 
 Everything below is retained history, not authority for conflicting V2 requirements.
