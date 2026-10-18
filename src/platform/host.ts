@@ -75,7 +75,7 @@ export async function resolveExportResources(
       };
       const value = raw.memory_cgroup;
       if (!value || typeof value !== "object" || Array.isArray(value))
-        invalid();
+        return invalid();
       const group = value as Record<string, unknown>;
       const memory = group.memory_max_bytes;
       const swap = group.swap_max_bytes;
@@ -90,7 +90,7 @@ export async function resolveExportResources(
         typeof identity !== "string" || !/^\d+:\d+$/.test(identity) ||
         typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 0 ||
         !validLimit(memory) || !validLimit(swap))
-        invalid();
+        return invalid();
       memoryCgroup = { version: 2, path: groupPath, identity, process_id: pid,
         memory_max_bytes: memory, swap_max_bytes: swap };
     }
