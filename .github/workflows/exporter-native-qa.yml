@@ -1,0 +1,90 @@
+name: Exporter native recovery QA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["qa/exporter-*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: exporter-native-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-14, ubuntu-22.04]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      VITE_API_BASE_URL: http://127.0.0.1:9
+      VITE_SENTRY_DSN: ""
+      SENTRY_DSN: ""
+      CARGO_BUILD_JOBS: "2"
+      TAURI_CONFIG: '{"bundle":{"externalBin":["binaries/artdaddy-ffmpeg","binaries/artdaddy-ffprobe"],"resources":[]}}'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Linux native GUI dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libayatana-appindicator3-dev libssl-dev libwebkit2gtk-4.1-dev librsvg2-dev patchelf xvfb dbus-x11 xdg-utils desktop-file-utils
+          command -v xdg-mime
+          command -v update-desktop-database
+      - run: npm ci
+      - run: node scripts/fetch-sidecars.mjs --only ffmpeg,ffprobe
+      - name: Promise-library and real-source QA controls
+        run: node --test scripts/qa/exporterPromiseReport.test.mjs scripts/qa/exporterSources.test.mjs
+      - name: Native job invariants
+        run: |
+          set -o pipefail
+          mkdir -p reports/qa/exporter
+          cargo test --manifest-path src-tauri/Cargo.toml --lib jobs:: 2>&1 | tee reports/qa/exporter/native-invariants.log
+      - name: Real native worker lifecycle and output bounds
+        run: |
+          set -o pipefail
+          export ARTDADDY_QA_FFMPEG="$(node -e 'const path=require("node:path");const targets={"darwin-arm64":"aarch64-apple-darwin","linux-x64":"x86_64-unknown-linux-gnu"};const target=targets[process.platform+"-"+process.arch];if(!target)throw new Error("Unsupported native QA host");process.stdout.write(path.resolve("src-tauri/binaries/artdaddy-ffmpeg-"+target));')"
+          cargo test --manifest-path src-tauri/Cargo.toml --lib jobs::stream::tests:: -- --include-ignored --skip jobs::stream::tests::resident_allocator_child --nocapture 2>&1 | tee reports/qa/exporter/native-stream-runtime.log
+          cargo test --manifest-path src-tauri/Cargo.toml --lib jobs::export_delivery_tests::final_mp4_staging_cannot_bypass_shared_payload_budget -- --ignored --exact --nocapture 2>&1 | tee reports/qa/exporter/native-output-envelope.log
+          node -e 'const fs=require("node:fs");for(const [name,min] of [["native-stream-runtime.log",17],["native-output-envelope.log",1]]){const text=fs.readFileSync("reports/qa/exporter/"+name,"utf8");const result=text.match(/test result: ok\. (\d+) passed; 0 failed; 0 ignored;/);if(!result||Number(result[1])<min)throw new Error("Missing real native outcomes: "+name);}'
+      - name: Native commit failure and volume outcomes
+        run: "cargo test --manifest-path src-tauri/Cargo.toml --lib commit -- --nocapture"
+      - name: Source clocks, audio DSP and actual native pieces
+        run: |
+          runs=1
+          if [ "$RUNNER_OS" = "macOS" ]; then runs=3; fi
+          failed=0
+          for iteration in 1 2 3; do
+            if [ "$iteration" -gt "$runs" ]; then break; fi
+            suffix=""
+            if [ "$iteration" -gt 1 ]; then suffix="-repeat-$iteration"; fi
+            report="reports/qa/exporter/source-clock-dsp$suffix.json"
+            if ! node node_modules/vitest/vitest.mjs run --config vitest.smoke.config.ts src/timeline/exportRange.smoke.e2e.ts --testNamePattern 'source audio gap before mixing|keeps delayed source timing|one-pass audio preserves|partition-pipes-v1 chunk seams|audio.*preserves actual frames and floating stereo across partitions|video.*chroma.*preserves actual frames|late audio matches allocating delay' --reporter=json --outputFile="$report"; then failed=1; fi
+            if ! node -e 'const fs=require("node:fs");const result=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(result.numPassedTests!==18||result.numFailedTests!==0)throw new Error("Expected all18source-clock/DSP/chroma/delay/native-piece cases to pass");' "$report"; then failed=1; fi
+          done
+          exit "$failed"
+      - name: Native macOS capture and crash recovery
+        if: runner.os == 'macOS'
+        run: node scripts/qa/exporterNative.mjs
+      - name: Native Linux capture and crash recovery
+        if: runner.os == 'Linux'
+        run: xvfb-run -a dbus-run-session -- node scripts/qa/exporterNative.mjs
+      - name: Preserve actual outcomes and build identities
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: exporter-native-${{ matrix.runner }}-${{ github.sha }}-attempt-${{ github.run_attempt }}
+          path: reports/qa/exporter/**
+          if-no-files-found: error

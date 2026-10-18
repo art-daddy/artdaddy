@@ -1058,6 +1058,27 @@ beyond proving the existing implementation and are excluded from that count.
     the one pre-existing type-only assertion difference. Syntax checks are
     separate from a combined-main type/build/execution pass.
 
+- V2-D087: bring the existing native-QA workflow draft up to the qualified
+  `ea12d7f` gate, preserving its QA-branch/manual triggers and 45-minute budget.
+  - Authority/surface: the existing native job owns tool staging, real native
+    lifecycle/output controls, exact portable artifact cases and actual-app
+    recovery. Add the previously qualified report/source controls, complete
+    native logs and attempt-bound evidence names; no release/main-push gate
+    or application resource policy is changed.
+  - Lifecycle/commit point: require actual native worker outcomes and the final
+    output-envelope test, not successful compilation alone. Every macOS
+    portable execution must pass; Linux keeps its one complete execution.
+    Actual app recovery and full artifact verification remain separate steps.
+  - Failure matrix: missing native outcome counts, missing/failed portable
+    JSON, failure in any repeat or missing artifact evidence fails the job.
+    A later successful execution cannot erase an earlier failure. Preserve
+    all existing dependency, pinned-tool, permission and publication boundaries.
+  - Proof/residual: compare the whole parsed workflow and Bash syntax against
+    qualified `ea12d7f`, preserving the existing draft's common settings.
+    This is source-level integration, not combined-main execution or closure
+    of the newly reopened macOS exit transition. Its newer three-app candidate
+    is still isolated in QA pending actual platform evidence.
+
 ## Historical V1 Design And Evidence
 
 Everything below is retained history, not authority for conflicting V2 requirements.
