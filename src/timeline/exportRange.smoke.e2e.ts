@@ -113,51 +113,58 @@ async function decoded(
   return artifact;
 }
 
+async function retainComparison(
+  kind: string,
+  label: string,
+  expected: { frames: Buffer[]; pcm: Buffer },
+  actual: { frames: Buffer[]; pcm: Buffer },
+): Promise<void> {
+  if (retainedComparisons.has(kind)) return;
+  retainedComparisons.add(kind);
+  await fsp.mkdir(diagnosticDir, { recursive: true });
+  const artifacts = [];
+  for (const [side, artifact] of [
+    ["expected", expected],
+    ["actual", actual],
+  ] as const) {
+    const filename = decodedFiles.get(artifact);
+    if (!filename || path.dirname(filename) !== dir)
+      throw new Error("comparison evidence must be a generated synthetic render");
+    const metadata = await fsp.lstat(filename);
+    if (!metadata.isFile() || metadata.size > 32 * 1024 * 1024)
+      throw new Error("comparison evidence exceeds its regular-file diagnostic bound");
+    const name = `${kind}-${side}${path.extname(filename)}`;
+    await fsp.copyFile(filename, path.join(diagnosticDir, name));
+    artifacts.push({
+      name,
+      bytes: metadata.size,
+      frames: artifact.frames.map((frame) => createHash("sha256").update(frame).digest("hex")),
+      pcmBytes: artifact.pcm.length,
+      pcmSha256: createHash("sha256").update(artifact.pcm).digest("hex"),
+    });
+  }
+  await fsp.writeFile(
+    path.join(diagnosticDir, `${kind}.json`),
+    JSON.stringify({ label, artifacts }, null, 2),
+  );
+}
+
 function retainFailedComparison(
   kind: string,
   label: string,
   expected: { frames: Buffer[]; pcm: Buffer },
   actual: { frames: Buffer[]; pcm: Buffer },
 ): void {
-  onTestFailed(async () => {
-    if (retainedComparisons.has(kind)) return;
-    retainedComparisons.add(kind);
-    await fsp.mkdir(diagnosticDir, { recursive: true });
-    const artifacts = [];
-    for (const [side, artifact] of [
-      ["expected", expected],
-      ["actual", actual],
-    ] as const) {
-      const filename = decodedFiles.get(artifact);
-      if (!filename || path.dirname(filename) !== dir)
-        throw new Error("comparison evidence must be a generated synthetic render");
-      const metadata = await fsp.lstat(filename);
-      if (!metadata.isFile() || metadata.size > 32 * 1024 * 1024)
-        throw new Error("comparison evidence exceeds its regular-file diagnostic bound");
-      const name = `${kind}-${side}${path.extname(filename)}`;
-      await fsp.copyFile(filename, path.join(diagnosticDir, name));
-      artifacts.push({
-        name,
-        bytes: metadata.size,
-        frames: artifact.frames.map((frame) => createHash("sha256").update(frame).digest("hex")),
-        pcmBytes: artifact.pcm.length,
-        pcmSha256: createHash("sha256").update(artifact.pcm).digest("hex"),
-      });
-    }
-    await fsp.writeFile(
-      path.join(diagnosticDir, `${kind}.json`),
-      JSON.stringify({ label, artifacts }, null, 2),
-    );
-  });
+  onTestFailed(() => retainComparison(kind, label, expected, actual));
 }
 
-/** The export's own plan, encoded losslessly so nothing but the graph can differ. */
+/** Float64 keeps graph probes at the native carrier's precision, before integer quantization. */
 async function renderLossless(
   tl: Timeline,
   tag: string,
   options: ExportOptions = {},
   native = false,
-  audioCodec = "pcm_s16le",
+  audioCodec = "pcm_f64le",
   delivery = false,
 ): Promise<string> {
   const out = path.join(dir, `${tag}.${delivery ? "mp4" : "mkv"}`);
@@ -811,8 +818,158 @@ describe("streaming transition conformance", () => {
     ]);
   let hardCut: { frames: Buffer[]; pcm: Buffer };
   beforeAll(async () => {
-    hardCut = await decoded(await renderLossless(make(), "transition-hard-cut"));
+    hardCut = await decoded(
+      await renderLossless(make(), "transition-hard-cut", {}, false, "pcm_s16le"),
+    );
   });
+
+  it("preserves the complete unquantized audio oracle before integer codec conversion", async () => {
+    const referenceFile = await renderLossless(
+      make(),
+      "precision-reference",
+      {},
+      false,
+      "pcm_f64le",
+    );
+    const deliveredFile = await renderLossless(
+      make(),
+      "precision-stream",
+      { engine: "partition-pipes-v1" },
+      true,
+      "pcm_f64le",
+    );
+    for (const file of [referenceFile, deliveredFile]) {
+      const metadata = await ctx.runner.run("ffprobe", [
+        "-v",
+        "error",
+        "-select_streams",
+        "a",
+        "-show_entries",
+        "stream=codec_name,sample_fmt,sample_rate,channels",
+        "-of",
+        "json",
+        file,
+      ]);
+      expect(metadata.code, metadata.stderr).toBe(0);
+      expect(JSON.parse(metadata.stdout).streams).toEqual([
+        {
+          codec_name: "pcm_f64le",
+          sample_fmt: "dbl",
+          sample_rate: String(RATE),
+          channels: 2,
+        },
+      ]);
+    }
+    const reference = await decoded(referenceFile, "f64le");
+    const delivered = await decoded(deliveredFile, "f64le");
+    await retainComparison("float-oracle", "unquantized stereo", reference, delivered);
+    expect(delivered.frames).toHaveLength(196);
+    expect(delivered.frames.every((frame, index) => frame.equals(reference.frames[index]))).toBe(
+      true,
+    );
+    expect(reference.pcm.length).toBe((196 * RATE * 2 * 8) / FPS);
+    expect(delivered.pcm.equals(reference.pcm)).toBe(true);
+    for (const channel of [0, 1]) {
+      let energy = 0;
+      for (let offset = channel * 8; offset < delivered.pcm.length; offset += 16)
+        energy += delivered.pcm.readDoubleLE(offset) ** 2;
+      expect(Number.isFinite(energy)).toBe(true);
+      expect(Math.sqrt(energy / (delivered.pcm.length / 16))).toBeGreaterThan(0.02);
+    }
+
+    const direct = await ffBytes(["-i", deliveredFile, "-map", "0:a", "-f", "s16le", "-"]);
+    const throughMixerFormat = await ffBytes([
+      "-i",
+      deliveredFile,
+      "-map",
+      "0:a",
+      "-af",
+      "aformat=sample_fmts=fltp",
+      "-f",
+      "s16le",
+      "-",
+    ]);
+    expect(direct.length).toBe(hardCut.pcm.length);
+    expect(throughMixerFormat.equals(hardCut.pcm)).toBe(true);
+    let differentSamples = 0;
+    let largestStep = 0;
+    for (let offset = 0; offset < direct.length; offset += 2) {
+      const difference = Math.abs(
+        direct.readInt16LE(offset) - throughMixerFormat.readInt16LE(offset),
+      );
+      if (difference) differentSamples++;
+      largestStep = Math.max(largestStep, difference);
+    }
+    const hash = (bytes: Buffer): string => createHash("sha256").update(bytes).digest("hex");
+    await fsp.writeFile(
+      path.join(diagnosticDir, "audio-precision.json"),
+      JSON.stringify(
+        {
+          platform: process.platform,
+          architecture: process.arch,
+          inputStereoSha256: hash(await fsp.readFile(src.stereo)),
+          referenceFloat64Sha256: hash(reference.pcm),
+          streamedFloat64Sha256: hash(delivered.pcm),
+          originalReferenceS16Sha256: hash(hardCut.pcm),
+          directCarrierS16Sha256: hash(direct),
+          mixerFormatS16Sha256: hash(throughMixerFormat),
+          differentSamples,
+          largestStep,
+        },
+        null,
+        2,
+      ),
+    );
+  }, 180_000);
+
+  it("preserves the complete real MP4 AAC output and both authored channels", async () => {
+    const referenceFile = await renderLossless(
+      make(),
+      "precision-aac-reference",
+      {},
+      false,
+      "pcm_s16le",
+      true,
+    );
+    const deliveredFile = await renderLossless(
+      make(),
+      "precision-aac-stream",
+      { engine: "partition-pipes-v1" },
+      true,
+      "pcm_s16le",
+      true,
+    );
+    for (const file of [referenceFile, deliveredFile]) {
+      const metadata = await ctx.runner.run("ffprobe", [
+        "-v",
+        "error",
+        "-select_streams",
+        "a",
+        "-show_entries",
+        "stream=codec_name,channels:format=format_name",
+        "-of",
+        "json",
+        file,
+      ]);
+      expect(metadata.code, metadata.stderr).toBe(0);
+      const actual = JSON.parse(metadata.stdout);
+      expect(actual.streams).toEqual([{ codec_name: "aac", channels: 2 }]);
+      expect(actual.format.format_name.split(",")).toContain("mp4");
+    }
+    const reference = await decoded(referenceFile);
+    const delivered = await decoded(deliveredFile);
+    await retainComparison("aac-oracle", "production AAC stereo", reference, delivered);
+    expect(reference.frames).toHaveLength(196);
+    expect(delivered.frames).toHaveLength(196);
+    expect(delivered.pcm.length).toBe(reference.pcm.length);
+    expect(delivered.pcm.equals(reference.pcm)).toBe(true);
+    for (const channel of [0, 1]) {
+      let energy = 0;
+      for (let offset = channel * 2; offset < delivered.pcm.length; offset += 4)
+        energy += (delivered.pcm.readInt16LE(offset) / 32768) ** 2;
+      expect(Math.sqrt(energy / (delivered.pcm.length / 4))).toBeGreaterThan(0.02);
+    }
+  }, 180_000);
 
   it.each(TRANSITION_KINDS)(
     "%s preserves the centred cut across native partitions",
@@ -838,14 +995,19 @@ describe("streaming transition conformance", () => {
         }),
         "cut must lie on a tested partition boundary",
       ).toBe(true);
-      const reference = await decoded(await renderLossless(tl, `transition-reference-${kind}`));
+      const reference = await decoded(
+        await renderLossless(tl, `transition-reference-${kind}`, {}, false, "pcm_f64le"),
+        "f64le",
+      );
       const delivered = await decoded(
         await renderLossless(
           tl,
           `transition-stream-${kind}`,
           { engine: "partition-pipes-v1" },
           true,
+          "pcm_f64le",
         ),
+        "f64le",
       );
       retainFailedComparison("transition", kind, reference, delivered);
       expect(delivered.frames).toHaveLength(196);
@@ -905,7 +1067,10 @@ describe("streaming colour catalog conformance", () => {
       for (const green of [0, 1])
         for (const red of [0, 1]) rows.push(`${1 - red} ${green} ${blue}`);
     await fsp.writeFile(lut, `${rows.join("\n")}\n`);
-    neutral = await decoded(await renderLossless(make({}), "colour-neutral"));
+    neutral = await decoded(
+      await renderLossless(make({}), "colour-neutral", {}, false, "pcm_f64le"),
+      "f64le",
+    );
   });
 
   it.each(parameters)(
@@ -939,10 +1104,20 @@ describe("streaming colour catalog conformance", () => {
       expect(resolved.error).toBeUndefined();
       const tl = make(resolved.grade!);
       const control = Object.keys(context).length
-        ? await decoded(await renderLossless(make(context), `colour-control-${parameter.key}`))
+        ? await decoded(
+            await renderLossless(
+              make(context),
+              `colour-control-${parameter.key}`,
+              {},
+              false,
+              "pcm_f64le",
+            ),
+            "f64le",
+          )
         : neutral;
       const reference = await decoded(
-        await renderLossless(tl, `colour-reference-${parameter.key}`),
+        await renderLossless(tl, `colour-reference-${parameter.key}`, {}, false, "pcm_f64le"),
+        "f64le",
       );
       const plan = buildRenderCommand(tl, path.join(dir, "colour-check.mkv"), {
         engine: "partition-pipes-v1",
@@ -954,7 +1129,9 @@ describe("streaming colour catalog conformance", () => {
           `colour-stream-${parameter.key}`,
           { engine: "partition-pipes-v1" },
           true,
+          "pcm_f64le",
         ),
+        "f64le",
       );
       retainFailedComparison("colour", parameter.key, reference, delivered);
       expect(delivered.frames).toHaveLength(196);
