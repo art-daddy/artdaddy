@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import fc from "fast-check";
 import { cgroupMembership, memoryLimit, memoryHierarchy, cgroupFits, sameCgroup,
-  discriminatorVerified, linuxProfileVerified } from "./exporterLinuxMemory.mjs";
+  cgroupEncoderPids, discriminatorVerified, linuxProfileVerified } from "./exporterLinuxMemory.mjs";
 
 test("nested membership parsing preserves supported names and cannot escape its mount", () => {
   const component = fc.array(fc.constantFrom("a", "Z", "0", " ", "'", ":", ";", ".", "ü"), { minLength: 1, maxLength: 24 })
@@ -60,6 +60,37 @@ test("all ancestor caps constrain the result, independent of which level owns th
         await assert.rejects(memoryHierarchy(root, current));
       } finally { await rm(root, { recursive: true, force: true }); }
     }), { numRuns: 24 });
+});
+
+test("encoder selection tolerates protected non-worker siblings without discarding actual workers", async () => {
+  await fc.assert(fc.asyncProperty(fc.uniqueArray(fc.record({
+    pid: fc.integer({ min: 1, max: 1_000_000 }),
+    name: fc.constantFrom("artdaddy-ffmpeg", "WebKitNetworkPr", "WebKitWebProces", "node", "Xvfb"),
+  }), { selector: (member) => member.pid, minLength: 2, maxLength: 12 }), async (members) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "artdaddy-cgroup-processes-"));
+    try {
+      const proc = path.join(root, "proc");
+      await mkdir(proc);
+      await writeFile(path.join(root, "cgroup.procs"), `${members.map((member) => member.pid).join("\n")}\n`);
+      for (const member of members) {
+        const directory = path.join(proc, String(member.pid));
+        await mkdir(directory);
+        await writeFile(path.join(directory, "comm"), `${member.name}\n`);
+        await writeFile(path.join(directory, "exe"), "Not a readable executable symlink");
+      }
+      const actual = await cgroupEncoderPids(root, proc);
+      assert.deepEqual(actual, members.filter((member) => member.name === "artdaddy-ffmpeg").map((member) => member.pid));
+      await writeFile(path.join(root, "cgroup.procs"), `${members[0].pid}\n9007199254740992\n`);
+      await assert.rejects(cgroupEncoderPids(root, proc));
+      await writeFile(path.join(root, "cgroup.procs"), `${members[0].pid}\n../escaped\n`);
+      await assert.rejects(cgroupEncoderPids(root, proc));
+      await writeFile(path.join(proc, String(members[0].pid), "comm"), "artdaddy-ffmpeg\n");
+      await rm(path.join(proc, String(members[0].pid), "comm"));
+      await mkdir(path.join(proc, String(members[0].pid), "comm"));
+      await writeFile(path.join(root, "cgroup.procs"), `${members[0].pid}\n`);
+      await assert.rejects(cgroupEncoderPids(root, proc), "A failed candidate observation must not become an empty success");
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }), { numRuns: 24 });
 });
 
 function linuxEvidence(limit = 8 * 1024 ** 3) {

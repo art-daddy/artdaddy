@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer, normalizePath } from "vite";
-import { readLinuxMemoryCgroup, cgroupFits, sameCgroup } from "./exporterLinuxMemory.mjs";
+import { readLinuxMemoryCgroup, cgroupFits, sameCgroup, cgroupEncoderPids } from "./exporterLinuxMemory.mjs";
 
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const targets = { "win32-x64": "x86_64-pc-windows-msvc", "darwin-arm64": "aarch64-apple-darwin", "linux-x64": "x86_64-unknown-linux-gnu" };
@@ -416,8 +416,7 @@ try {
     assert.deepEqual(await readLinuxMemoryCgroup(evidence.nativeBefore.process_id), evidence.nativeBefore,
       "Native cgroup evidence did not match its actual process");
     const workers = [];
-    const members = (await readFile(path.join("/sys/fs/cgroup", evidence.nodeBefore.path, "cgroup.procs"), "utf8"))
-      .trim().split("\n").map(Number);
+    const members = await cgroupEncoderPids(path.join("/sys/fs/cgroup", evidence.nodeBefore.path), "/proc");
     for (const pid of members) {
       let executablePath;
       try { executablePath = await readlink(`/proc/${pid}/exe`); }

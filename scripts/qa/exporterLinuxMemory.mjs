@@ -87,6 +87,23 @@ export function sameCgroup(first, second) {
     ["version", "path", "identity", "memory_max_bytes", "swap_max_bytes"].every((key) => first[key] === second[key]);
 }
 
+export async function cgroupEncoderPids(directory, procDirectory) {
+  const text = (await readFile(path.join(directory, "cgroup.procs"), "utf8")).trim();
+  const members = text ? text.split("\n") : [];
+  const encoders = [];
+  for (const member of members) {
+    assert.match(member, /^[1-9]\d*$/, "Cgroup process identity is malformed");
+    const pid = Number(member);
+    assert.ok(Number.isSafeInteger(pid), "Cgroup process identity is outside the supported range");
+    let name;
+    try { name = await readFile(path.join(procDirectory, member, "comm"), "utf8"); }
+    catch (error) { if (error.code === "ENOENT") continue; throw error; }
+    // WebKit siblings can deny exe inspection; comm only selects candidates for the mandatory executable/hash checks.
+    if (name === "artdaddy-ffmpeg\n") encoders.push(pid);
+  }
+  return encoders;
+}
+
 export function discriminatorVerified(receipt) {
   return receipt?.scope === scope && receipt.workload === "Discriminator" && receipt.exitCode === 0 &&
     receipt.configuredMemoryLimitBytes === discriminatorCap && receipt.control?.exitCode === 0 &&
