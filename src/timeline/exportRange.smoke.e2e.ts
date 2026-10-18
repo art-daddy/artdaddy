@@ -11,7 +11,16 @@ import os from "node:os";
 import path from "node:path";
 
 import fc from "fast-check";
-import { afterAll, beforeAll, describe, expect, it, onTestFailed, vi } from "vitest";
+import {
+  afterAll,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  onTestFailed,
+  onTestFinished,
+  vi,
+} from "vitest";
 
 import {
   ff,
@@ -1662,6 +1671,51 @@ describe("long timelines stay renderable on Windows", () => {
   });
 
   it("also delivers 349 separate audio inputs without losing the mix history", async () => {
+    const started = performance.now();
+    const phases: Array<{
+      phase: string;
+      elapsedMs: number;
+      wallClockMs: number;
+      rssBytes: number;
+      heapUsedBytes: number;
+      externalBytes: number;
+      arrayBufferBytes: number;
+      hostAvailableBytes: number;
+    }> = [];
+    const checkpoint = (phase: string) => {
+      const memory = process.memoryUsage();
+      phases.push({
+        phase,
+        elapsedMs: performance.now() - started,
+        wallClockMs: Date.now(),
+        rssBytes: memory.rss,
+        heapUsedBytes: memory.heapUsed,
+        externalBytes: memory.external,
+        arrayBufferBytes: memory.arrayBuffers,
+        hostAvailableBytes: os.freemem(),
+      });
+    };
+    onTestFinished(async (context) => {
+      checkpoint("test-settlement");
+      await fsp.mkdir(diagnosticDir, { recursive: true });
+      await fsp.writeFile(
+        path.join(diagnosticDir, "audio-input-lifecycle.json"),
+        JSON.stringify(
+          {
+            fixture: path.basename(dir),
+            platform: process.platform,
+            arch: process.arch,
+            inputs: 349,
+            state: context.task.result?.state ?? "unreported",
+            errors: context.task.result?.errors?.map((error) => error.message),
+            phases,
+          },
+          null,
+          2,
+        ),
+      );
+    });
+    checkpoint("preparing-inputs");
     const mediaDir = path.join(dir, `Director's-original-audio-export-${"project-".repeat(10)}`);
     await fsp.mkdir(mediaDir, { recursive: true });
     const clips: Any[] = [];
@@ -1673,15 +1727,20 @@ describe("long timelines stay renderable on Windows", () => {
       await fsp.link(src.music, file);
       clips.push({ ...aclip(file, index * 3, (index + 1) * 3), id: `audio-${index}` });
     }
+    checkpoint("inputs-ready");
     const tl = timeline([track("sound", 0, clips, "audio")]);
     const before = JSON.stringify(tl);
-    const reference = await decoded(
-      await renderLossless(
-        timeline([track("sound", 0, [aclip(src.music, 0, 3)], "audio")]),
-        "audio-reference",
-      ),
+    const referenceFile = await renderLossless(
+      timeline([track("sound", 0, [aclip(src.music, 0, 3)], "audio")]),
+      "audio-reference",
     );
-    const delivered = await decoded(await renderLossless(tl, "audio-heavy-timeline"));
+    checkpoint("reference-rendered");
+    const reference = await decoded(referenceFile);
+    checkpoint("reference-decoded");
+    const deliveredFile = await renderLossless(tl, "audio-heavy-timeline");
+    checkpoint("timeline-rendered");
+    const delivered = await decoded(deliveredFile);
+    checkpoint("timeline-decoded");
     expect(delivered.frames).toHaveLength(349 * 3);
     expect(delivered.pcm.length).toBe(reference.pcm.length * 349);
     for (let index = 0; index < 349; index++)
@@ -1692,6 +1751,7 @@ describe("long timelines stay renderable on Windows", () => {
         `audio ${index}`,
       ).toBe(true);
     expect(JSON.stringify(tl)).toBe(before);
+    checkpoint("all-output-assertions-passed");
   });
 
   it("stages legitimate quoted paths without changing their bytes and refuses directive injection", async () => {
