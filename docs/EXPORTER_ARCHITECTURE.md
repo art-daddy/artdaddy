@@ -1323,9 +1323,20 @@ beyond proving the existing implementation and are excluded from that count.
     The same run's macOS job passed all three actual-app and portable repetitions.
     Independent checks matched all 751 applicable source hashes across those
     three Mac reports and the failed Linux report; the latter stays unqualified.
-    Replacement330cca5adds filesystem-backed selection properties and passes
-    all17Node controls. Its full mandatory publication gate is running with a
-    new996-file freeze; actual replacement Linux/Mac execution remains pending.
+    Replacement `330cca5` adds filesystem-backed selection properties and passes
+    all 17 Node controls. Its publication gate was deliberately stopped before
+    pushing when the original standard CI exposed a separate formatting refusal.
+    All 996 frozen hashes, six protected inputs, HEAD, index and handover were
+    checked unchanged; the remote remained at `fa90f59`.
+  - Standard CI39146450482: every native, desktop, browser and export job passed.
+    Export artifacts contain 609 passing cases on Mac/Linux and 612 on Windows,
+    no failures, all 35 colour cases and all eight complete raw layouts on each.
+    The workflow remains failed: its build/unit job refused Prettier in exactly
+    the two owned resource-adapter TS files, before building or running units.
+    Apply the existing formatter only there. Both complete typed and runtime
+    ASTs were frozen first and remain identical afterwards; targeted style checks
+    pass. Candidate `ffb4a87` now runs the full mandatory publication gate under
+    a new 996-file freeze. Actual replacement Linux/Mac execution is still pending.
 
 ## Historical V1 Design And Evidence
 
