@@ -1163,6 +1163,88 @@ describe("streaming colour catalog conformance", () => {
     180_000,
   );
 
+  it.each([
+    { format: "rgb24", bytesPerPixel: 3 },
+    { format: "bgr24", bytesPerPixel: 3 },
+    { format: "rgb48le", bytesPerPixel: 6 },
+    { format: "bgr48le", bytesPerPixel: 6 },
+    { format: "rgba", bytesPerPixel: 4 },
+    { format: "bgra", bytesPerPixel: 4 },
+    { format: "rgba64le", bytesPerPixel: 8 },
+    { format: "bgra64le", bytesPerPixel: 8 },
+  ])(
+    "keeps complete $format grades independent of source sharing and slice scheduling",
+    async ({ format, bytesPerPixel }) => {
+      const plan = buildRenderCommand(
+        make({ vibrance: 0.25 }),
+        path.join(dir, "vibrance-layout.mkv"),
+      );
+      const match = plan.filterComplex?.match(/(?:^|,)(vibrance=[^,;[\]]+)/);
+      if (!match) throw new Error("authored vibrance is missing from the export colour compiler");
+      const compiledGrade = match[1];
+      const render = (filter: string, shared: boolean) =>
+        ffBytes([
+          "-filter_complex_threads",
+          "5",
+          "-f",
+          "lavfi",
+          "-i",
+          "color=c=0x804020@0.5:s=320x180:r=30:d=0.4,format=rgba",
+          "-filter_complex",
+          shared
+            ? `[0:v]format=${format},split[src][keep];[src]${filter}[grade];[grade][keep]hstack=inputs=2,format=${format}[out]`
+            : `[0:v]format=${format},${filter},format=${format}[out]`,
+          "-map",
+          "[out]",
+          "-frames:v",
+          "12",
+          "-c:v",
+          "rawvideo",
+          "-threads:v",
+          "1",
+          "-pix_fmt",
+          format,
+          "-f",
+          "rawvideo",
+          "-",
+        ]);
+      for (const shared of [false, true]) {
+        const reference = await render("vibrance=intensity=0.25:threads=1", shared);
+        const actual = await render(compiledGrade, shared);
+        const width = shared ? 640 : 320;
+        const frameBytes = width * H * bytesPerPixel;
+        expect(actual.length).toBe(frameBytes * 12);
+        expect(
+          actual.equals(reference),
+          `${format}, shared=${shared}: complete graded pixels`,
+        ).toBe(true);
+        if (shared) {
+          const rowBytes = 320 * bytesPerPixel;
+          for (let frame = 0; frame < 12; frame++) {
+            const start = frame * frameBytes;
+            expect(
+              actual
+                .subarray(start, start + rowBytes)
+                .equals(actual.subarray(start + rowBytes, start + rowBytes * 2)),
+              `${format} frame ${frame}: grade must actually change pixels`,
+            ).toBe(false);
+          }
+          if (format.includes("a")) {
+            const sampleBytes = bytesPerPixel / 4;
+            const alpha = actual.subarray(sampleBytes * 3, sampleBytes * 4);
+            expect(
+              alpha.equals(actual.subarray(rowBytes + sampleBytes * 3, rowBytes + sampleBytes * 4)),
+            ).toBe(true);
+            expect(
+              [...alpha].some((value) => value !== 255),
+              "the alpha fixture must actually be translucent",
+            ).toBe(true);
+          }
+        }
+      }
+    },
+  );
+
   it("keeps legitimate LUT path bytes and prevents filter delimiters from changing rendered media", async () => {
     onTestFailed(() => {
       retainArtifacts = true;
