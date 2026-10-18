@@ -3215,7 +3215,7 @@ export function defaultExportStem(projectDir: string): string {
     .replace(/[\\/]+$/, "")
     .split(/[\\/]/)
     .pop();
-  return (base && base.trim()) || "artdaddy-export";
+  return safeName(base ?? "", "artdaddy-export");
 }
 
 /** Windows refuses these names outright, whatever the extension follows them. */
@@ -3249,16 +3249,14 @@ export function safeName(raw: string, fallback: string): string {
       /[\/\\<>:"|?*\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]+/gu,
       "",
     )
-    .replace(/^\.+/, "") // no leading dots ("..", hidden files)
+    .replace(/^[.\s]+/u, "") // no leading dots, including ones exposed by trimming
     .trim();
-  // Filenames are bounded (255 bytes everywhere we ship), and Windows cannot create one that
-  // ends in a dot or a space. Slice by CODE POINT so a multi-byte character is never cut in
-  // half into an unpaired surrogate.
+  // Bound stems by code point, not UTF-16 unit. Truncation can expose another
+  // dot/whitespace boundary, so canonicalize the end after slicing as well.
   const bounded = [...cleaned]
     .slice(0, 80)
     .join("")
-    .replace(/[. ]+$/, "")
-    .trim();
+    .replace(/[.\s]+$/u, "");
   if (!bounded || RESERVED_DEVICE_NAME.test(bounded)) return fallback;
   return bounded;
 }
