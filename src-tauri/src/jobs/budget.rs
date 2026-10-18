@@ -6,16 +6,50 @@ pub(super) const RENDER_COMMIT_LIMIT: usize = 4 * 1024 * 1024 * 1024;
 pub(super) const RENDER_RESIDENT_LIMIT: u64 = 7 * 1024 * 1024 * 1024 / 2;
 
 #[cfg(target_os = "macos")]
-fn macos_resident_bytes(pid: u32) -> Result<u64, String> {
-  let process: libc::c_int = pid.try_into().map_err(|_| "owned worker PID is outside the supported range")?;
+#[derive(Debug)]
+enum TaskInfoError {
+  MissingProcess(String),
+  Unavailable(String),
+}
+
+#[cfg(target_os = "macos")]
+fn macos_resident_bytes(pid: u32) -> Result<u64, TaskInfoError> {
+  let process: libc::c_int = pid.try_into().map_err(|_| TaskInfoError::Unavailable(
+    format!("owned render worker {pid} PID is outside the supported range")))?;
   let mut info = std::mem::MaybeUninit::<libc::proc_taskinfo>::uninit();
   let expected = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
   let observed = unsafe { libc::proc_pidinfo(process, libc::PROC_PIDTASKINFO, 0, info.as_mut_ptr().cast(), expected) };
   if observed != expected {
-    return Err(format!("cannot measure owned render worker {pid}: task bytes={observed}, expected={expected}, error={}",
-      std::io::Error::last_os_error()));
+    let error = std::io::Error::last_os_error();
+    let detail = format!("cannot measure owned render worker {pid}: task bytes={observed}, expected={expected}, error={error}");
+    return Err(if observed == 0 && error.raw_os_error() == Some(libc::ESRCH) {
+      TaskInfoError::MissingProcess(detail)
+    } else { TaskInfoError::Unavailable(detail) });
   }
   Ok(unsafe { info.assume_init() }.pti_resident_size)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_missing_process_sample(child: &SharedChild, detail: String) -> Result<Option<u64>, String> {
+  let pid = child.id();
+  let process: libc::c_int = pid.try_into().map_err(|_| format!("owned render worker {pid} PID is outside the supported range"))?;
+  let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+  let expected = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+  let observed = unsafe { libc::proc_pidinfo(process, libc::PROC_PIDTBSDINFO, 1, info.as_mut_ptr().cast(), expected) };
+  let error = std::io::Error::last_os_error();
+  let status = if observed == expected { Some(unsafe { info.assume_init() }.pbi_status) } else { None };
+  // Darwin task lookup excludes zombies while another waiter can still own exit
+  // notification. A complete zombie record permits joining this owned child.
+  if status == Some(libc::SZOMB) {
+    child.wait().map_err(|error| format!("cannot confirm owned render worker {pid} exit: {error}"))?;
+    return Ok(None);
+  }
+  if child.try_wait().map_err(|error| error.to_string())?.is_some() { return Ok(None); }
+  let exit_detail = match status {
+    Some(status) => format!("BSD status={status}"),
+    None => format!("BSD bytes={observed}, expected={expected}, error={error}"),
+  };
+  Err(format!("{detail}; owned worker exit is unconfirmed: {exit_detail}"))
 }
 
 pub(super) fn resident_samples(children: &[Arc<SharedChild>]) -> Result<(u64, Vec<(u32, u64)>), String> {
@@ -28,7 +62,11 @@ pub(super) fn resident_samples(children: &[Arc<SharedChild>]) -> Result<(u64, Ve
     if child.try_wait().map_err(|error| error.to_string())?.is_some() { continue; }
     let pid = child.id();
     #[cfg(target_os = "macos")]
-    let measured = macos_resident_bytes(pid);
+    let measured = match macos_resident_bytes(pid) {
+      Ok(bytes) => Ok(Some(bytes)),
+      Err(TaskInfoError::MissingProcess(detail)) => macos_missing_process_sample(child, detail),
+      Err(TaskInfoError::Unavailable(detail)) => Err(detail),
+    };
     #[cfg(not(target_os = "macos"))]
     let measured = {
       let process = sysinfo::Pid::from_u32(pid);
@@ -36,9 +74,9 @@ pub(super) fn resident_samples(children: &[Arc<SharedChild>]) -> Result<(u64, Ve
         system.process(process).map(|process| process.memory())
           .ok_or_else(|| format!("owned render worker {pid} has no memory sample"))
       } else { Err(format!("cannot measure a live owned render worker {pid}")) }
-    };
+    }.map(Some);
     if child.try_wait().map_err(|error| error.to_string())?.is_some() { continue; }
-    let memory = measured?;
+    let Some(memory) = measured? else { continue; };
     total = total.checked_add(memory).ok_or("resident memory accounting overflow")?;
     samples.push((pid, memory));
   }
@@ -174,6 +212,101 @@ mod resident_tests {
   fn unavailable_task_information_is_an_error_not_a_zero_memory_sample() {
     assert!(super::macos_resident_bytes(i32::MAX as u32).is_err());
     assert!(super::macos_resident_bytes(u32::MAX).is_err());
+  }
+
+  #[cfg(target_os = "macos")]
+  #[test]
+  fn a_real_zombie_is_joined_as_exited_not_reported_as_zero_memory() {
+    use super::*;
+    let root = tempfile::tempdir().unwrap();
+    let child = SharedChild::spawn(Command::new("/bin/sh")
+      .args(["-c", "printf completed > completed.bin"]).current_dir(root.path())).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let missing = loop {
+      match macos_resident_bytes(child.id()) {
+        Err(TaskInfoError::MissingProcess(detail)) => break detail,
+        Err(TaskInfoError::Unavailable(detail)) => {
+          child.wait().unwrap();
+          panic!("{detail}");
+        }
+        Ok(_) => {}
+      }
+      if std::time::Instant::now() >= deadline {
+        child.kill().unwrap();
+        child.wait().unwrap();
+        panic!("short owned writer did not reach its zombie state");
+      }
+      std::thread::yield_now();
+    };
+    assert!(macos_missing_process_sample(&child, missing).unwrap().is_none());
+    assert!(child.try_wait().unwrap().unwrap().success());
+    assert_eq!(std::fs::read(root.path().join("completed.bin")).unwrap(), b"completed");
+  }
+
+  #[cfg(target_os = "macos")]
+  #[test]
+  fn a_missing_task_report_for_a_live_owned_child_stays_an_error() {
+    use super::*;
+    use std::io::Write;
+    let child = SharedChild::spawn(Command::new("/bin/sh").args(["-c", "read -r finish"])
+      .stdin(std::process::Stdio::piped())).unwrap();
+    let mut input = child.take_stdin().unwrap();
+    let (release, released) = std::sync::mpsc::channel();
+    let releaser = std::thread::spawn(move || {
+      let signal = released.recv_timeout(std::time::Duration::from_secs(2));
+      assert!(matches!(signal, Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Timeout)));
+      input.write_all(b"finish\n").unwrap();
+    });
+    let result = macos_missing_process_sample(&child, "controlled missing task measurement".into());
+    let live = child.try_wait().unwrap().is_none();
+    let signal = release.send(());
+    releaser.join().unwrap();
+    assert!(child.wait().unwrap().success());
+    assert!(live, "measurement error blocked until a genuinely live worker exited");
+    assert!(result.unwrap_err().contains("exit is unconfirmed"));
+    signal.unwrap();
+  }
+
+  #[cfg(target_os = "macos")]
+  #[test]
+  fn concurrent_owned_waiters_preserve_every_short_writer_outcome() {
+    use super::*;
+    use std::io::{BufRead, Write};
+    let root = tempfile::tempdir().unwrap();
+    for iteration in 0..64 {
+      let child = Arc::new(SharedChild::spawn(Command::new("/bin/sh")
+        .args(["-c", "printf 'ready\\n'; read -r finish; printf completed > completed.bin"])
+        .current_dir(root.path()).stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())).unwrap());
+      let mut input = child.take_stdin().unwrap();
+      let mut output = std::io::BufReader::new(child.take_stdout().unwrap());
+      let mut ready = String::new();
+      output.read_line(&mut ready).unwrap();
+      assert_eq!(ready.trim(), "ready");
+      let (_, live) = resident_samples(&[child.clone()]).unwrap();
+      assert_eq!(live.len(), 1);
+      assert!(live[0].1 > 0);
+      let waiting = child.clone();
+      let waiter = std::thread::spawn(move || waiting.wait().unwrap());
+      input.write_all(b"finish\n").unwrap();
+      drop(input);
+      let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+      let mut failure = None;
+      loop {
+        if let Err(error) = resident_samples(&[child.clone()]) { failure = Some(error); break; }
+        if child.try_wait().unwrap().is_some() { break; }
+        if std::time::Instant::now() >= deadline {
+          failure = Some("short owned writer did not exit".into());
+          child.kill().unwrap();
+          break;
+        }
+        std::thread::yield_now();
+      }
+      assert!(waiter.join().unwrap().success());
+      assert!(failure.is_none(), "iteration {iteration}: {failure:?}");
+      assert_eq!(std::fs::read(root.path().join("completed.bin")).unwrap(), b"completed");
+      std::fs::remove_file(root.path().join("completed.bin")).unwrap();
+    }
   }
 }
 
