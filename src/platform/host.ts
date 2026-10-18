@@ -15,6 +15,15 @@ export interface HostInfo {
   arch: string;
 }
 
+export interface LinuxMemoryCgroup {
+  readonly version: 2;
+  readonly path: string;
+  readonly identity: string;
+  readonly process_id: number;
+  readonly memory_max_bytes: number | null;
+  readonly swap_max_bytes: number | null;
+}
+
 export interface ExportResources {
   readonly total_memory_bytes: number | null;
   readonly available_memory_bytes: number | null;
@@ -22,6 +31,7 @@ export interface ExportResources {
   readonly destination_free_bytes: number | null;
   readonly budgets: ExportBudgets;
   readonly local_fast_candidate: boolean;
+  readonly memory_cgroup?: LinuxMemoryCgroup;
 }
 
 export async function resolveExportResources(
@@ -57,6 +67,33 @@ export async function resolveExportResources(
       const value = limits[key];
       return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
     };
+    let memoryCgroup: LinuxMemoryCgroup | undefined;
+    if (raw.memory_cgroup !== undefined) {
+      const invalid = (): never => {
+        console.warn("Native cgroup resource evidence is malformed; resource snapshot is unavailable");
+        throw new Error("Native cgroup resource evidence is malformed");
+      };
+      const value = raw.memory_cgroup;
+      if (!value || typeof value !== "object" || Array.isArray(value))
+        invalid();
+      const group = value as Record<string, unknown>;
+      const memory = group.memory_max_bytes;
+      const swap = group.swap_max_bytes;
+      const groupPath = group.path;
+      const identity = group.identity;
+      const pid = group.process_id;
+      const validLimit = (bytes: unknown): bytes is number | null =>
+        bytes === null || typeof bytes === "number" && Number.isSafeInteger(bytes) && bytes >= 0;
+      if (group.version !== 2 || typeof groupPath !== "string" || !groupPath.startsWith("/") ||
+        /[\0\r\n]/.test(groupPath) || groupPath !== "/" &&
+          groupPath.slice(1).split("/").some((part) => !part || part === "." || part === "..") ||
+        typeof identity !== "string" || !/^\d+:\d+$/.test(identity) ||
+        typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 0 ||
+        !validLimit(memory) || !validLimit(swap))
+        invalid();
+      memoryCgroup = { version: 2, path: groupPath, identity, process_id: pid,
+        memory_max_bytes: memory, swap_max_bytes: swap };
+    }
     return {
       total_memory_bytes: total !== null && total > 0 ? total : null,
       available_memory_bytes:
@@ -69,6 +106,7 @@ export async function resolveExportResources(
         executionSeconds: limit("executionSeconds"),
       },
       local_fast_candidate: raw.local_fast_candidate === true,
+      ...(memoryCgroup ? { memory_cgroup: memoryCgroup } : {}),
     };
   })();
   return (await settledWithin(pending, 2000, signal)) ?? unknown;

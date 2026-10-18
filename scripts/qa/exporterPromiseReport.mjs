@@ -2,6 +2,7 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
+import { linuxProfileVerified } from "./exporterLinuxMemory.mjs";
 
 const repository = path.resolve(process.argv[2] ?? path.join(path.dirname(fileURLToPath(import.meta.url)), "../.."));
 const library = JSON.parse(await readFile(path.join(repository, "scripts/qa/exporterPromiseCases.json"), "utf8"));
@@ -62,7 +63,8 @@ for (const entry of entries.filter((entry) => entry.isDirectory())) {
     host.nativeTotalMemoryBytes === envelope?.native?.resources?.total_memory_bytes &&
     [host.nodeTotalMemoryBytes, host.nativeTotalMemoryBytes].every((bytes) => Number.isSafeInteger(bytes) && bytes > 0 &&
       bytes <= library.profiles[result.profile].systemMemoryBytes);
-  const profileVerified = kernelProfileVerified || hostProfileVerified;
+  const cgroupProfileVerified = linuxProfileVerified(result, envelope, receipt, library.profiles[result.profile].systemMemoryBytes);
+  const profileVerified = kernelProfileVerified || hostProfileVerified || cgroupProfileVerified;
   const exactDefinition = result.definition && ["width", "height", "fps", "durationSeconds", "visualClips", "videoLayers"]
     .every((key) => result.definition[key] === definition[key]);
   const video = result.encodedVideo;
@@ -76,7 +78,8 @@ for (const entry of entries.filter((entry) => entry.isDirectory())) {
     result.temporarySpaceQualified === true && result.estimateProvided === true && profileVerified && timing;
   attempts.push({ caseId: definition.id, line: definition.line, kind: definition.kind, profile: result.profile, platform,
     passed, artifactVerified: result.artifactVerified === true, profileVerified, physical: result.physicalQualified === true,
-    profileEvidenceKind: kernelProfileVerified ? "windows-kernel-commit" : hostProfileVerified ? "measured-host-memory" : "unverified",
+    profileEvidenceKind: kernelProfileVerified ? "windows-kernel-commit" : cgroupProfileVerified ? "linux-kernel-cgroup-v2" :
+      hostProfileVerified ? "measured-host-memory" : "unverified",
     readiness: result.status === "blocked-source" ? "not_ready" : ["ready", "not_ready"].includes(result.readiness) ? result.readiness : "unknown",
     blockedSource: result.status === "blocked-source", elapsedMs: Number.isFinite(result.elapsedMs) ? result.elapsedMs : null });
 }

@@ -71,7 +71,8 @@ async function exercise(): Promise<void> {
     });
     const job = (await supervisor.list()).find((entry) => entry.id === id);
     check(job?.state === "running", `Crash target is not running: ${JSON.stringify(job)}`);
-    await writeTextFile(armedPath, JSON.stringify({ id, cwd, source, stage, destination, queuedCopy, unbound, identifier, progress, protocol: EXPORT_PROTOCOL_VERSION }));
+    await writeTextFile(armedPath, JSON.stringify({ id, cwd, source, stage, destination, queuedCopy, unbound, identifier, progress,
+      resources: await resolveExportResources(destination), protocol: EXPORT_PROTOCOL_VERSION }));
     status.textContent = "Native job armed";
     return;
   }

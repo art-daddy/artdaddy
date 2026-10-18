@@ -20,6 +20,7 @@ use sha2::{Digest, Sha256};
 mod stream;
 mod budget;
 mod workspace;
+mod resources;
 pub use workspace::Workspace;
 
 /// The programs a job may run, as (logical name, bundled sidecar file). A command the page can
@@ -228,6 +229,8 @@ pub struct ExportResources {
   pub destination_free_bytes: Option<u64>,
   pub budgets: ExportResourceBudgets,
   pub local_fast_candidate: bool,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub memory_cgroup: Option<resources::LinuxMemoryCgroup>,
 }
 
 fn local_fast_candidate() -> bool {
@@ -284,7 +287,7 @@ fn export_resources(destination: &Path, scratch: Option<&Path>, workspace: &Work
     destination_free_bytes: resource_free_bytes(destination, &disks),
     budgets: ExportResourceBudgets { memory_bytes: budget::RENDER_RESIDENT_LIMIT,
       temporary_bytes: workspace.available_bytes(), execution_seconds: EXPORT_EXECUTION_LIMIT_MS / 1000 },
-    local_fast_candidate: local_fast_candidate() }
+    local_fast_candidate: local_fast_candidate(), memory_cgroup: resources::memory_cgroup() }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]

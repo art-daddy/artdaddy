@@ -14,7 +14,7 @@ if [ $? -ne 0 ]; then
 fi
 
 echo "[pre-push] Node exporter QA controls..."
-node --test scripts/qa/exporterPromiseReport.test.mjs scripts/qa/exporterSources.test.mjs
+node --test scripts/qa/exporterPromiseReport.test.mjs scripts/qa/exporterSources.test.mjs scripts/qa/exporterLinuxMemory.test.mjs
 if [ $? -ne 0 ]; then
   echo "[pre-push] Node exporter QA controls FAILED - push aborted."
   exit 1
