@@ -1337,6 +1337,16 @@ beyond proving the existing implementation and are excluded from that count.
     ASTs were frozen first and remain identical afterwards; targeted style checks
     pass. Candidate `ffb4a87` now runs the full mandatory publication gate under
     a new 996-file freeze. Actual replacement Linux/Mac execution is still pending.
+  - Retained `ffb4a87` gate refusal: the first full hook stopped after 1,973.993 s
+    on the 24 fps native-delivery case's unchanged 180 s deadline; 615 other
+    smoke cases passed. Its retained output independently has the expected
+    854x480 H.264/yuv420p, 24 fps, 12 frames and 0.5 s container/frame contract.
+    Stage creation was 177.774 s after the preceding output's last write, with
+    its own last write 7.055 s later. The precise pre-output stall is unproven.
+    Identical-source isolated 24/60 fps cases pass in 8.270/7.564 s; this does
+    not fix or erase the failed full run. Repeat the unchanged full gate with
+    independent owned-process timing observations, preserving both attempts.
+    No timeout, resource limit, tolerance, hook or QA source byte was changed.
 
 ## Historical V1 Design And Evidence
 
