@@ -1152,6 +1152,99 @@ beyond proving the existing implementation and are excluded from that count.
     of the newly reopened macOS exit transition. Its newer three-app candidate
     is still isolated in QA pending actual platform evidence.
 
+- V2-D088: replace zombie-only sampling with the owned worker's irreversible
+  kernel-exit lifecycle. Exact-source native CI `39124301139` compiles on
+  macOS, then the real concurrent-writer test fails at iteration 2: task
+  lookup returns ESRCH while the complete BSD status is still 2. The earlier
+  design hypothesis is false, not an assertion or compiler-prerequisite issue.
+  - Invariant/authority: every running owned worker needs a valid RSS sample;
+    a kernel-confirmed retiring worker is a distinct observation, never a
+    zero-memory live worker. Only Control/TrackedChild may settle it or release
+    its output guard/reservation. Sampling must not wait for kernel teardown
+    and thereby block cancellation or the existing execution deadline.
+  - Surface: the mandatory sampler covers single, partition, continuous-audio
+    and final-encoder workers, direct/native fixtures and actual-app recovery.
+    SharedChild 1.1.1 retains its PID with WNOWAIT and publishes reaping under
+    its state lock; no endpoint, optional token or second coordinator opts in.
+  - Lifecycle: macOS 14 XNU sets P_LEXIT before task termination and exposes it
+    as PROC_FLAG_INEXIT, including before SZOMB. Replace the zombie-only check
+    with this lifecycle proof. A missing BSD lookup with ESRCH also identifies
+    a retiring owned PID; permission, partial and other unavailable results do
+    not. A full running record without the exit flag remains an error.
+  - Commit point: the sampler neither removes registered workers nor releases
+    capacity. Control still requires its tracked writer's actual wait and an
+    empty owned-child set before output settlement; verification/publication
+    retain their existing subsequent checks.
+  - Failure matrix/proof: preserve the failing attempt and its full live-negative,
+    already-terminal and concurrent-writer controls; extend real concurrent
+    output checks and add an actual final-writer/output-capacity retention case.
+    Exercise the opposite exit/wait order, cancelled/over-budget workers and
+    all three actual macOS app executions. No retry grace, live zero fallback,
+    higher limit or main backport before actual qualification.
+  - Evidence basis: public XNU tag `xnu-10002.81.5`, `proc_info.h`,
+    `proc_info.c`, `kern_exit.c` and `kern_proc.c` define the flag and lifecycle.
+    The pinned libc does not expose the flag constant; retain its documented
+    public ABI value rather than invent a new process-state number.
+  - Actual-source proof: `a2e5c8d` passes every unchanged Windows publication
+    hook and exact native CI `39127685698`. macOS runs 116 invariant cases,
+    all 256 concurrent writers, the live-negative/terminal/unavailable controls,
+    the actual final-writer reservation case and 18 real runtime cases. All
+    three mandatory portable executions and three actual-app recovery executions
+    pass; Linux passes 111 invariant cases, 17 real runtime cases, its portable
+    execution and actual-app recovery. Every one of four app reports matches
+    all 744 applicable Git source blobs, worker/command identities and protocol
+    20. Four capped output branches per OS retain cleanup and actual byte bounds.
+    This qualifies the scoped source port, not combined main, a physical laptop,
+    full 20 GB allocated space or the still-separate vibrance repair.
+    Exact standard CI `39127685689` also passes both Cargo jobs, desktop build
+    and both browser jobs. Its full smoke reports no owned-exit failures:
+    macOS/Linux each have 600 passes and Windows 603, with only vibrance failing
+    once per OS. Fit modes, both 349-input siblings and both audio probes pass.
+
+- V2-D089: contain the shipped FFmpeg vibrance packed-frame slice race at the
+  one shared colour compiler, not by weakening artifact equality.
+  - Invariant/authority: an authored grade must emit the same complete pixels
+    regardless of source sharing, native partitioning or filter slice scheduling.
+    `colorFilters` is the single export-grade compiler, reached through the
+    common visual-record `preAlpha` chain for single and partitioned rendering.
+    Preview shading is not a replacement renderer or changed by this repair.
+  - Surface/lifecycle: saved/manual/agent colour values resolve through that
+    same compiler before source splitting, clip transforms, producer execution,
+    native capture and final encoding. Preserve required Control ownership,
+    cancellation, guards, verification and publication; no caller opts in.
+  - Commit point: enforce the constraint on the vibrance filter before its
+    FFmpeg process executes. Do not change global graph/encoder threading,
+    pixel format/depth, mixer, quality, profile budgets or frozen references.
+  - Failure matrix: force non-writable shared input as well as writable input;
+    compare packed RGB/BGR at 8 and 16 bits, alpha-bearing controls, and the
+    complete native colour registry. Reference the old correct single-thread
+    operation, not a newly regenerated multi-thread golden or a pixel tolerance.
+  - Actual diagnosis: standard CI `39124301166` retains 47 changed Mac vibrance
+    frames and 177 Windows frames. Independent decoding reproduces all recorded
+    hashes; the first Windows frame differs in five YUV bytes, up to ten steps.
+    Public shipped FFmpeg `e0c94b2d1c` copies an alpha component even for packed
+    three-component output when the input is shared. At aligned row boundaries
+    that copy races the next slice's first red component.
+  - Before-change proof: a real shared-frame constant-colour probe compares
+    old single-thread bytes with five slices. All three RGB24 trials differ in
+    48 bytes, and RGB48 in 96 bytes, at x=0 and rows 36/72/108/144. RGBA and
+    RGBA64 controls differ in zero bytes. The old correct RGB24 SHA256 is
+    `c94ebba79507a1374ea46a7a42e46ec88e21767bd14358ef651413d5d8ce89a2`;
+    RGB48 is `c4cda9f9c4e285b0b6f07ae1b09e77f668556180250a7a63221d98f39272fdbe`.
+    Constrain only this filter to one slice and require actual before/after
+    output, sibling-layout and all-platform proof before integration/closure.
+  - Local outcome: the new real regression fails on the old compiler for all
+    four shared no-alpha layouts; all four translucent-alpha controls pass.
+    With the filter-local cap, all eight shared/unshared 8/16-bit RGB/BGR/alpha
+    cases and the complete 35-case colour registry suite pass. These compare
+    complete emitted bytes with the unchanged old correct one-thread reference,
+    not just filter strings. QA `62bce94` contains the repair; its unchanged
+    full publication hook is running with all 993 tracked file hashes frozen.
+    macOS/Linux evidence and its main port are still pending. Strict acceptance
+    stays 11/24 (46%); ten of the thirteen open boxes remain built but unaccepted.
+    The retained `a2e5c8d` full CI also exposes the same vibrance defect on Linux;
+    this is the same mandatory filter boundary, not a new opt-in workaround.
+
 ## Historical V1 Design And Evidence
 
 Everything below is retained history, not authority for conflicting V2 requirements.

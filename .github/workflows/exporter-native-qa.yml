@@ -77,7 +77,12 @@ jobs:
           exit "$failed"
       - name: Native macOS capture and crash recovery
         if: runner.os == 'macOS'
-        run: node scripts/qa/exporterNative.mjs
+        run: |
+          failed=0
+          for iteration in 1 2 3; do
+            if ! node scripts/qa/exporterNative.mjs; then failed=1; fi
+          done
+          exit "$failed"
       - name: Native Linux capture and crash recovery
         if: runner.os == 'Linux'
         run: xvfb-run -a dbus-run-session -- node scripts/qa/exporterNative.mjs
