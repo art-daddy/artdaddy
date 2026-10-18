@@ -990,6 +990,30 @@ beyond proving the existing implementation and are excluded from that count.
     Add real zombie/live/concurrent-writer outcomes and require every repeated
     macOS app execution to pass before closing this candidate.
 
+- V2-D083: integrate the already-qualified chroma, cleanup and CI prerequisite
+  slices without a wholesale QA merge.
+  - Authority/surface: typed chroma uses the one shared effect compiler; add
+    only its reviewed filter-local thread bound, not global encoder/graph
+    settings. Adapt the two affected corpus expectations from their immutable
+    baseline, preserving unrelated existing rotation/audio adapters.
+  - Cleanup lifecycle: the existing app-work owner retains current-launch
+    scratch and removes abandoned previous launches; project cleanup still
+    removes legacy project scratch. Port the real-filesystem outcomes, not
+    production ownership changes. The Node filesystem supplies a fresh private
+    work directory per test file, never the installed app's user directory.
+  - CI commit boundary: stage real pinned FFmpeg for native tests and compile
+    their actual fixture before individual case clocks start. Retain full smoke
+    JSON/artifacts and attempt identities; do not skip real renderer tests or
+    extend their deadlines. Isolate the process-wide descriptor fixture in its
+    own subprocess so it cannot lower sibling native tests' inherited limits;
+    retain its real inherited-limit and repeat-call assertions.
+    Desktop/release/auth-store gates are unchanged.
+  - Proof/residual: chroma's real frame/alpha and floating-audio outcomes pass
+    on the qualified Windows/macOS/Linux QA paths. Cleanup's four real-disk
+    cases and the actual standard Unix Cargo/Linux/Windows prerequisite jobs
+    pass. These are qualified-source backports, not a claim that dirty main's
+    preserved manifest/lock conflict or every combined-main gate is resolved.
+
 ## Historical V1 Design And Evidence
 
 Everything below is retained history, not authority for conflicting V2 requirements.

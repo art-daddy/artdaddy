@@ -305,6 +305,26 @@ describe("render corpus (UJ-007: clips whose size does not animate)", () => {
   };
   for (const [name, clip] of Object.entries(CASES)) {
     it(name, () => {
+      if (name === "every effect, cover, scaled" || name === "every effect, contain") {
+        const filename = "src/timeline/__snapshots__/render.corpus.test.ts.snap";
+        expect(createHash("sha256").update(readFileSync(filename)).digest("hex")).toBe(
+          "b3b06281570d7721efd325d4800fab104777760b06be1ad34404d42cfe22c274",
+        );
+        const baselines = createRequire(`${process.cwd()}/package.json`)(`./${filename}`) as Record<
+          string,
+          string
+        >;
+        const legacy = JSON.parse(
+          baselines[`render corpus (UJ-007: clips whose size does not animate) > ${name} 1`],
+        ) as string;
+        expect(legacy).toMatchSnapshot();
+        const chroma = "chromakey=0x00FF00:0.3000:0.1000";
+        expect(legacy.split(chroma)).toHaveLength(2);
+        expect(fc(one(clip)), "only the reviewed chroma thread bound differs").toBe(
+          legacy.replace(chroma, `${chroma}:threads=1`),
+        );
+        return;
+      }
       expect(fc(one(clip))).toMatchSnapshot();
     });
   }

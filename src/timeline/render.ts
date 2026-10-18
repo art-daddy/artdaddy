@@ -30,7 +30,16 @@ import {
   progressFraction,
 } from "./ffmpegProgress";
 import { canvasFps, isNum, toSecondsView } from "./frames";
-import { crfFor, finalEncoderPolicy, outputFps, outputSize, type ExportEncoder, type ExportEngine, type ExportMode, type ExportOptions } from "./exportOptions";
+import {
+  crfFor,
+  finalEncoderPolicy,
+  outputFps,
+  outputSize,
+  type ExportEncoder,
+  type ExportEngine,
+  type ExportMode,
+  type ExportOptions,
+} from "./exportOptions";
 import { clipKind, rendersAsStill } from "./helpers";
 import { extOf, kindOf, REPLAYED_STILL_EXTS } from "../media/formats";
 import { isHeifStill, stillPicture } from "../media/stillPicture";
@@ -427,7 +436,7 @@ function effectFilters(effects: unknown, clipId: unknown, warnings: string[]): s
       const col = String(p.color ?? "#00FF00").replace(/^#/, "") || "00FF00";
       const sim = Math.max(0, Math.min(1, num("similarity", 0.3)));
       const bl = Math.max(0, Math.min(1, num("blend", 0.1)));
-      out.push(`chromakey=0x${col}:${sim.toFixed(4)}:${bl.toFixed(4)}`);
+      out.push(`chromakey=0x${col}:${sim.toFixed(4)}:${bl.toFixed(4)}:threads=1`);
     } else if (type === "glow") {
       // Rendered as a bloom sub-graph via the clip.glow path (glowFromEffects), not a comma filter.
     } else if (type === "custom") {
@@ -709,7 +718,14 @@ export interface BackendSelection {
   version: 1;
   policy: ExportEngine;
   backend: Exclude<ExportEngine, "auto">;
-  reason: "frame" | "standard-policy" | "explicit-streaming" | "bounded-single-pass" | "input-pressure" | "command-pressure" | "resource-pressure";
+  reason:
+    | "frame"
+    | "standard-policy"
+    | "explicit-streaming"
+    | "bounded-single-pass"
+    | "input-pressure"
+    | "command-pressure"
+    | "resource-pressure";
   sourceInputs: number;
 }
 
@@ -750,8 +766,17 @@ export interface RenderPlan {
 
 type CompiledRenderPlan = Omit<RenderPlan, "workload">;
 
-export type AudioRenderPlan = Pick<RenderPlan,
-  "args" | "dependencies" | "filterComplex" | "duration" | "warnings" | "assFiles" | "fonts" | "sources">;
+export type AudioRenderPlan = Pick<
+  RenderPlan,
+  | "args"
+  | "dependencies"
+  | "filterComplex"
+  | "duration"
+  | "warnings"
+  | "assFiles"
+  | "fonts"
+  | "sources"
+>;
 
 interface ComposedRenderInput {
   duration: number;
@@ -949,37 +974,82 @@ export function buildRenderCommand(
   window?: FrameWindow,
 ): RenderPlan {
   const plan = buildSingleRenderCommand(raw, outPath, options, window);
-  const workload = summarizeRenderWorkload(raw, window ? { from: window.frame, to: window.frame + 1 } : options.range, options.maxDurationSec);
+  const workload = summarizeRenderWorkload(
+    raw,
+    window ? { from: window.frame, to: window.frame + 1 } : options.range,
+    options.maxDurationSec,
+  );
   const policy = options.engine ?? "file-sequence-v1";
-  if (!["file-sequence-v1", "partition-pipes-v1", "auto"].includes(policy)) throw new Error("unsupported exporter planning policy");
-  const commandPressure = commandLength(graphFromFile(plan.args, plan.assFiles).args) > COMMAND_BUDGET;
-  const resourcePressure = workload.peakVisualLayers > 4 ||
+  if (!["file-sequence-v1", "partition-pipes-v1", "auto"].includes(policy))
+    throw new Error("unsupported exporter planning policy");
+  const commandPressure =
+    commandLength(graphFromFile(plan.args, plan.assFiles).args) > COMMAND_BUDGET;
+  const resourcePressure =
+    workload.peakVisualLayers > 4 ||
     (workload.width * workload.height > 1920 * 1080 && workload.peakMediaLayers > 1);
-  const stream = !window && (policy === "partition-pipes-v1" ||
-    (policy === "auto" && (plan.sources.length > 32 || commandPressure || resourcePressure)));
+  const stream =
+    !window &&
+    (policy === "partition-pipes-v1" ||
+      (policy === "auto" && (plan.sources.length > 32 || commandPressure || resourcePressure)));
   const selection: BackendSelection = {
-    version: 1, policy, backend: stream ? "partition-pipes-v1" : "file-sequence-v1", sourceInputs: plan.sources.length,
-    reason: window ? "frame" : policy === "file-sequence-v1" ? "standard-policy"
-      : policy === "partition-pipes-v1" ? "explicit-streaming" : commandPressure ? "command-pressure"
-      : resourcePressure ? "resource-pressure" : stream ? "input-pressure" : "bounded-single-pass",
+    version: 1,
+    policy,
+    backend: stream ? "partition-pipes-v1" : "file-sequence-v1",
+    sourceInputs: plan.sources.length,
+    reason: window
+      ? "frame"
+      : policy === "file-sequence-v1"
+        ? "standard-policy"
+        : policy === "partition-pipes-v1"
+          ? "explicit-streaming"
+          : commandPressure
+            ? "command-pressure"
+            : resourcePressure
+              ? "resource-pressure"
+              : stream
+                ? "input-pressure"
+                : "bounded-single-pass",
   };
   const encoder = finalEncoderPolicy(plan.output, selection.backend, options.mode).encoder;
   if (window) return { ...plan, selection, workload };
   if (stream)
-    return { ...segmentedRenderPlan(raw, outPath, { ...options, engine: "partition-pipes-v1" }, plan), selection, workload, encoder, transport: "partition-pipes-v1" };
+    return {
+      ...segmentedRenderPlan(raw, outPath, { ...options, engine: "partition-pipes-v1" }, plan),
+      selection,
+      workload,
+      encoder,
+      transport: "partition-pipes-v1",
+    };
   if (!commandPressure) return { ...plan, selection, workload, encoder };
   return { ...segmentedRenderPlan(raw, outPath, options, plan), selection, workload, encoder };
 }
 
-export function buildAudioRenderCommand(raw: Timeline, outPath: string, options: ExportOptions = {}): AudioRenderPlan {
+export function buildAudioRenderCommand(
+  raw: Timeline,
+  outPath: string,
+  options: ExportOptions = {},
+): AudioRenderPlan {
   return buildSingleRenderCommand(raw, outPath, options, undefined, undefined, "audio_", "audio");
 }
 
-function buildSingleRenderCommand(raw: Timeline, outPath: string, options: ExportOptions,
-  window: FrameWindow | undefined, composed: ComposedRenderInput | undefined, filePrefix: string,
-  pass: "audio"): AudioRenderPlan;
-function buildSingleRenderCommand(raw: Timeline, outPath: string, options?: ExportOptions,
-  window?: FrameWindow, composed?: ComposedRenderInput, filePrefix?: string, pass?: "all" | "video"): CompiledRenderPlan;
+function buildSingleRenderCommand(
+  raw: Timeline,
+  outPath: string,
+  options: ExportOptions,
+  window: FrameWindow | undefined,
+  composed: ComposedRenderInput | undefined,
+  filePrefix: string,
+  pass: "audio",
+): AudioRenderPlan;
+function buildSingleRenderCommand(
+  raw: Timeline,
+  outPath: string,
+  options?: ExportOptions,
+  window?: FrameWindow,
+  composed?: ComposedRenderInput,
+  filePrefix?: string,
+  pass?: "all" | "video",
+): CompiledRenderPlan;
 function buildSingleRenderCommand(
   raw: Timeline,
   outPath: string,
@@ -1038,7 +1108,8 @@ function buildSingleRenderCommand(
 
   for (const pc of composed ? [] : plan.clips) {
     const clip = pc.clipRef;
-    if ((pass === "audio" && clip.kind !== "audio") || (pass === "video" && clip.kind === "audio")) continue;
+    if ((pass === "audio" && clip.kind !== "audio") || (pass === "video" && clip.kind === "audio"))
+      continue;
     if (clip.kind === "audio") {
       if (win) continue; // a frame has no sound
       const aSi = Number(clip.source_in) || 0;
@@ -1339,7 +1410,8 @@ function buildSingleRenderCommand(
     "-progress",
     "pipe:1",
   ];
-  const decoder = options.engine === "partition-pipes-v1" && pass !== "audio" ? ["-threads:v", "1"] : [];
+  const decoder =
+    options.engine === "partition-pipes-v1" && pass !== "audio" ? ["-threads:v", "1"] : [];
   if (composed) {
     cmd.push(...decoder, "-f", "concat", "-safe", "1", "-i", "segments.ffconcat");
     if (composed.audioInput !== undefined) cmd.push("-f", "nut", "-i", "audio.nut");
@@ -1361,7 +1433,15 @@ function buildSingleRenderCommand(
         inp.path,
       );
     else
-      cmd.push("-ss", inp.seekArg ?? inp.si.toFixed(6), "-to", inp.so.toFixed(6), ...decoder, "-i", inp.path);
+      cmd.push(
+        "-ss",
+        inp.seekArg ?? inp.si.toFixed(6),
+        "-to",
+        inp.so.toFixed(6),
+        ...decoder,
+        "-i",
+        inp.path,
+      );
   }
   // The branding inputs go LAST so every clip keeps the input index it had; an unbranded plan
   // pushes nothing and is byte-identical to what it was before branding existed.
@@ -1392,7 +1472,8 @@ function buildSingleRenderCommand(
       : rng
         ? `color=${spec}:s=${cw}x${ch}:r=${fps}:d=${((rng.to - rng.from - 0.5) / fps).toFixed(6)},setpts=PTS+${rng.from}`
         : `color=${spec}:s=${cw}x${ch}:r=${fps}:d=${duration.toFixed(6)}`;
-  const chains: string[] = pass === "audio" ? [] : [composed ? "[0:v]null[base]" : `${colorSrc("c=black")}[base]`];
+  const chains: string[] =
+    pass === "audio" ? [] : [composed ? "[0:v]null[base]" : `${colorSrc("c=black")}[base]`];
   let last = "base";
   // Caption z-bands interleave with the video overlays by `ord`: each band burns ONE libass `ass` filter
   // straight onto the running `last` (the .ass Dialogue lines carry their own timing, so NO enable= gate).
@@ -1804,7 +1885,9 @@ function buildSingleRenderCommand(
         : `'${compileAnim(r.volume, "t", r.tin)}':eval=frame`;
       if (delayMs > 30_000) {
         chains.push(`${audioInput}${filt.join(",")}[adelay_source${i}]`);
-        chains.push(`anullsrc=r=48000:cl=stereo:n=2048:d=${(delayMs / 1000).toFixed(3)},${MIX_FORMAT}[adelay_silence${i}]`);
+        chains.push(
+          `anullsrc=r=48000:cl=stereo:n=2048:d=${(delayMs / 1000).toFixed(3)},${MIX_FORMAT}[adelay_silence${i}]`,
+        );
         audioInput = `[adelay_silence${i}][adelay_source${i}]`;
         filt.splice(0, filt.length, "concat=n=2:v=0:a=1", "asettb=1/48000", "asetpts=N/SR/TB");
       } else filt.push(`adelay=${delayMs}|${delayMs}`);
@@ -1908,10 +1991,32 @@ function buildSingleRenderCommand(
   if (pass === "audio") {
     if (!aout) throw new Error("audio producer has no admitted audio mix");
     const filterComplex = chains.join(";");
-    cmd.push("-filter_complex", filterComplex, "-map", `[${aout}]`, "-vn", "-c:a", "pcm_f64le", "-ar", "48000",
-      "-t", outDuration.toFixed(6), "-f", "nut", outPath);
-    return { args: cmd, dependencies: [...new Set(inputs.map((input) => input.path))], filterComplex, duration: outDuration,
-      warnings, assFiles, fonts: [], sources: inputs.map((input) => ({ clipId: input.clipId, path: input.path })) };
+    cmd.push(
+      "-filter_complex",
+      filterComplex,
+      "-map",
+      `[${aout}]`,
+      "-vn",
+      "-c:a",
+      "pcm_f64le",
+      "-ar",
+      "48000",
+      "-t",
+      outDuration.toFixed(6),
+      "-f",
+      "nut",
+      outPath,
+    );
+    return {
+      args: cmd,
+      dependencies: [...new Set(inputs.map((input) => input.path))],
+      filterComplex,
+      duration: outDuration,
+      warnings,
+      assFiles,
+      fonts: [],
+      sources: inputs.map((input) => ({ clipId: input.clipId, path: input.path })),
+    };
   }
 
   // Delivery size is applied once, at the END of the composite — as a chain inside the graph,
@@ -2013,11 +2118,38 @@ function buildSingleRenderCommand(
     };
   }
   if (aout) cmd.push("-map", `[${aout}]`);
-  cmd.push("-c:v", options.mode === "fast" ? "h264_amf" : "libx264", "-pix_fmt", "yuv420p", "-r", String(outFps));
+  cmd.push(
+    "-c:v",
+    options.mode === "fast" ? "h264_amf" : "libx264",
+    "-pix_fmt",
+    "yuv420p",
+    "-r",
+    String(outFps),
+  );
   if (options.engine === "partition-pipes-v1")
-    cmd.push("-threads:v", String(composed ? finalEncoderPolicy({ width: ow, height: oh }, options.engine, options.mode).threads : 1));
+    cmd.push(
+      "-threads:v",
+      String(
+        composed
+          ? finalEncoderPolicy({ width: ow, height: oh }, options.engine, options.mode).threads
+          : 1,
+      ),
+    );
   if (options.mode === "fast") {
-    cmd.push("-usage", "transcoding", "-quality", "quality", "-rc", "cqp", "-qp_i", "18", "-qp_p", "18", "-qp_b", "18");
+    cmd.push(
+      "-usage",
+      "transcoding",
+      "-quality",
+      "quality",
+      "-rc",
+      "cqp",
+      "-qp_i",
+      "18",
+      "-qp_p",
+      "18",
+      "-qp_b",
+      "18",
+    );
   } else {
     if (options.preset) cmd.push("-preset", options.preset);
     const crf = crfFor(options.quality);
@@ -2098,7 +2230,12 @@ function segmentedRenderPlan(
     if (audio >= 0) args.splice(audio, 2, "-c:a", "pcm_f64le");
     const format = args.lastIndexOf("-f");
     args.splice(format, 2, "-f", "nut");
-    let staged = graphFromFile(args, part.assFiles, `${prefix}${GRAPH_FILE}`, options.engine === "partition-pipes-v1");
+    let staged = graphFromFile(
+      args,
+      part.assFiles,
+      `${prefix}${GRAPH_FILE}`,
+      options.engine === "partition-pipes-v1",
+    );
     if (commandLength(staged.args) > COMMAND_BUDGET)
       staged = shortInputPaths(staged, part.stillImages, prefix);
     const videos = part.sources.filter((source) => videoIds.has(source.clipId)).length;
@@ -2109,7 +2246,10 @@ function segmentedRenderPlan(
       return;
     }
     const readerLimit = options.engine === "partition-pipes-v1" ? 32 : 96;
-    if (commandLength(staged.args) > COMMAND_BUDGET || (videos > readerLimit && (options.engine === "partition-pipes-v1" || end - start > 1))) {
+    if (
+      commandLength(staged.args) > COMMAND_BUDGET ||
+      (videos > readerLimit && (options.engine === "partition-pipes-v1" || end - start > 1))
+    ) {
       if (end - start <= 1)
         throw new Error(
           `too many simultaneous source inputs at project frame ${start} for the safe render command/native reader budget`,
@@ -2133,7 +2273,9 @@ function segmentedRenderPlan(
     let staged = graphFromFile(mix.args, mix.assFiles, "audio_graph.ffgraph", true);
     if (commandLength(staged.args) > COMMAND_BUDGET) staged = shortInputPaths(staged, [], "audio_");
     if (commandLength(staged.args) > COMMAND_BUDGET)
-      throw new Error("continuous audio mix exceeds the native command budget; active-source audio scheduling is required");
+      throw new Error(
+        "continuous audio mix exceeds the native command budget; active-source audio scheduling is required",
+      );
     files.push(...staged.files);
     audio = { args: staged.args, duration: mix.duration };
   }
@@ -2356,7 +2498,8 @@ export function graphFromFile(
   force = false,
 ): { args: string[]; files: { name: string; content: string }[] } {
   const at = args.indexOf("-filter_complex");
-  if (at < 0 || (!force && commandLength(args) <= ARG_BUDGET)) return { args: [...args], files: [...assFiles] };
+  if (at < 0 || (!force && commandLength(args) <= ARG_BUDGET))
+    return { args: [...args], files: [...assFiles] };
   const out = [...args];
   out.splice(at, 2, "-/filter_complex", graphFile);
   return { args: out, files: [...assFiles, { name: graphFile, content: args[at + 1] }] };
@@ -2376,7 +2519,11 @@ export async function runRenderPlan(
   const contractError = renderContractError(plan);
   if (contractError) return { code: -1, stdout: "", stderr: contractError };
   if (plan.transport && !jobOwnsScratch(ctx.runner))
-    return { code: -1, stdout: "", stderr: "streaming export requires the matching native job supervisor" };
+    return {
+      code: -1,
+      stdout: "",
+      stderr: "streaming export requires the matching native job supervisor",
+    };
   const refused = await undecodableStill(ctx, plan.stillImages);
   if (refused) return refused;
   let staged = graphFromFile(plan.args, plan.assFiles);
@@ -2589,7 +2736,12 @@ async function prepareRender(
 > {
   const r = await loadForRender(ctx, kind, options.mode);
   if (!r.ok) return r;
-  const plan = buildRenderCommand(r.seconds, outPath, { ...options, engine: r.engine, mode: r.mode, branding: r.branding });
+  const plan = buildRenderCommand(r.seconds, outPath, {
+    ...options,
+    engine: r.engine,
+    mode: r.mode,
+    branding: r.branding,
+  });
   if (r.warnings.length) plan.warnings.push(...r.warnings);
   return {
     ok: true,
@@ -2617,12 +2769,21 @@ export async function loadForRender(
       mode: ExportMode;
     }
 > {
-  const engine: ExportEngine = kind === "deliverable" ? useExportJob.getState().engine : "file-sequence-v1";
-  const mode: ExportMode = kind === "deliverable" ? requestedMode ?? ctx.exportMode ?? "quality" : "quality";
+  const engine: ExportEngine =
+    kind === "deliverable" ? useExportJob.getState().engine : "file-sequence-v1";
+  const mode: ExportMode =
+    kind === "deliverable" ? (requestedMode ?? ctx.exportMode ?? "quality") : "quality";
   if (engine === "partition-pipes-v1") {
     try {
       if (!(await jobSupervisor())?.delivery)
-        return { ok: false, result: { ok: false, error: "streaming export requires the matching native job supervisor; select Standard to switch back" } };
+        return {
+          ok: false,
+          result: {
+            ok: false,
+            error:
+              "streaming export requires the matching native job supervisor; select Standard to switch back",
+          },
+        };
     } catch (error) {
       return { ok: false, result: { ok: false, error: String(error) } };
     }
@@ -2728,11 +2889,20 @@ async function executeRender(
 export function renderContractError(
   plan: Pick<
     RenderPlan,
-    "contractVersion" | "duration" | "output" | "frame" | "audioExpected" | "audioMustSpanVideo" | "transport"
+    | "contractVersion"
+    | "duration"
+    | "output"
+    | "frame"
+    | "audioExpected"
+    | "audioMustSpanVideo"
+    | "transport"
   >,
 ): string | null {
-  if (plan.contractVersion !== RENDER_CONTRACT_VERSION || typeof plan.audioExpected !== "boolean" ||
-      (plan.transport !== undefined && plan.transport !== "partition-pipes-v1")) {
+  if (
+    plan.contractVersion !== RENDER_CONTRACT_VERSION ||
+    typeof plan.audioExpected !== "boolean" ||
+    (plan.transport !== undefined && plan.transport !== "partition-pipes-v1")
+  ) {
     return "unsupported render contract; export again with the current client";
   }
   const frames = plan.duration * plan.output?.fps;
@@ -3409,8 +3579,11 @@ export async function prepareRenderSubmission(
 ): Promise<Parameters<typeof submitExport>[0]> {
   const request = structuredClone(job);
   const renderPlan = request.plan;
-  if (!renderPlan.selection || renderPlan.selection.version !== 1 ||
-    renderPlan.selection.backend !== (renderPlan.transport ?? "file-sequence-v1"))
+  if (
+    !renderPlan.selection ||
+    renderPlan.selection.version !== 1 ||
+    renderPlan.selection.backend !== (renderPlan.transport ?? "file-sequence-v1")
+  )
     throw new Error("export requires a captured shared backend-planner decision");
   const contractError = renderContractError(renderPlan);
   if (contractError) throw new Error(`${contractError} at export submission`);
@@ -3435,10 +3608,14 @@ export async function prepareRenderSubmission(
   );
   const jobs = await jobSupervisor();
   if (renderPlan.transport && !jobs?.delivery)
-    throw new Error("streaming export requires the matching native job supervisor; select Standard to switch back");
+    throw new Error(
+      "streaming export requires the matching native job supervisor; select Standard to switch back",
+    );
   const fast = renderPlan.args[renderPlan.args.indexOf("-c:v") + 1] === "h264_amf";
   if (fast && !(await resolveLocalFastEncoder(ctx.signal)))
-    throw new Error("Fast is unavailable on this device or the encoder check failed. Choose Full quality and export again.");
+    throw new Error(
+      "Fast is unavailable on this device or the encoder check failed. Choose Full quality and export again.",
+    );
   const telemetry = {
     duration_s: renderPlan.duration,
     width: renderPlan.output.width,
@@ -3449,9 +3626,13 @@ export async function prepareRenderSubmission(
     visual_layers: renderPlan.workload.peakVisualLayers,
     project_width: renderPlan.workload.width,
     project_height: renderPlan.workload.height,
-    calibration: { workload: renderPlan.workload, output: renderPlan.output,
-      quality: request.quality || "medium", engine: renderPlan.selection.backend,
-      encoder: renderPlan.encoder ?? (fast ? "amf-cqp18" as const : "x264-crf" as const) },
+    calibration: {
+      workload: renderPlan.workload,
+      output: renderPlan.output,
+      quality: request.quality || "medium",
+      engine: renderPlan.selection.backend,
+      encoder: renderPlan.encoder ?? (fast ? ("amf-cqp18" as const) : ("x264-crf" as const)),
+    },
   };
   const plan: ExportJobPlan = {
     contractVersion: renderPlan.contractVersion,
