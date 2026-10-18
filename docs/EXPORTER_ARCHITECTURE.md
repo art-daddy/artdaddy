@@ -1238,12 +1238,36 @@ beyond proving the existing implementation and are excluded from that count.
     With the filter-local cap, all eight shared/unshared 8/16-bit RGB/BGR/alpha
     cases and the complete 35-case colour registry suite pass. These compare
     complete emitted bytes with the unchanged old correct one-thread reference,
-    not just filter strings. QA `62bce94` contains the repair; its unchanged
-    full publication hook is running with all 993 tracked file hashes frozen.
-    macOS/Linux evidence and its main port are still pending. Strict acceptance
+    not just filter strings. QA `62bce94` passes the unchanged full publication
+    hook: 5,702 unit cases, ten Node controls, 211 Rust cases/20 ignored,
+    616 real smoke passes/234 skips and the backend guard. All 993 tracked
+    file hashes and six protected dirty paths remain unchanged.
+  - Cross-platform proof: exact standard CI `39131037052` now passes every
+    job. Windows has 612 real smoke passes/238 skips; Linux and macOS each have
+    609 passes/241 skips, with no failures. All 35 colour cases, including
+    the original native-partition vibrance comparison and all eight complete
+    raw-layout regressions, explicitly execute and pass on every platform.
+    The retained first Mac attempt failed fetching pinned FFmpeg before any
+    export test ran. Only that job was repeated, on the identical source;
+    no artifact failure, assertion, timeout or reference was waived.
+  - Lifecycle regression proof: exact native CI `39131037054` also passes.
+    All three mandatory Mac portable/app executions, the Linux portable/app
+    execution, concurrent writers and capped-output branches retain their
+    actual outcomes. All four app receipts match the 744 applicable exact
+    Git source blobs, worker/command identities and protocol 20.
+  - Main integration: port only the shared compiler constraint and eight
+    real-output regressions. The whole fixture runtime AST and shared colour
+    compiler match exact qualified `62bce94`; the rest of the renderer matches
+    its previous committed bytes. Earlier chroma/naming fixes remain intact.
+    Preserve main 0.21.2, all frozen references, the owner's 111 architecture
+    lines and the separately owner-preserved handover edits.
+  - Residual/deferred: this is scoped source qualification, not combined-main
+    execution/type-check, packaged release, physical-machine qualification,
+    the allocated-space/metadata/20 GB ceiling or a full promise-library pass.
+    Main manifest/lock reconciliation remains separate. Strict acceptance
     stays 11/24 (46%); ten of the thirteen open boxes remain built but unaccepted.
-    The retained `a2e5c8d` full CI also exposes the same vibrance defect on Linux;
-    this is the same mandatory filter boundary, not a new opt-in workaround.
+    The retained `a2e5c8d` full CI also exposes the old defect on Linux; the
+    repair remains one mandatory filter boundary, not an opt-in workaround.
 
 ## Historical V1 Design And Evidence
 

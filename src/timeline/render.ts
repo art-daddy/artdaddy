@@ -323,7 +323,10 @@ function colorFilters(color: unknown): string[] {
   if (isNum(c.temperature))
     out.push(`colortemperature=temperature=${filterKelvin(num("temperature", 6500)).toFixed(1)}`);
   if (isNum(c.tint)) out.push(`colorbalance=gm=${num("tint", 0).toFixed(4)}`);
-  if (isNum(c.vibrance)) out.push(`vibrance=intensity=${num("vibrance", 0).toFixed(4)}`);
+  if (isNum(c.vibrance)) {
+    // FFmpeg's shared RGB24/RGB48 copy can overwrite the next slice's first sample.
+    out.push(`vibrance=intensity=${num("vibrance", 0).toFixed(4)}:threads=1`);
+  }
   // Levels: black/white points (colorlevels). blacks >0 lifts (faded) / <0 crushes;
   // whites >0 brightens highlights / <0 dims.
   const blacks = num("blacks", 0);
