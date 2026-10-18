@@ -13,7 +13,7 @@ import path from "node:path";
 import fc from "fast-check";
 import { afterAll, beforeAll, describe, expect, it, onTestFailed, vi } from "vitest";
 
-import { ff, mkCtx, installE2EDocuments, openE2EDoc, flushE2EDoc, resetE2EDocuments, libRef } from "../tools/__e2e";
+import { ff, mkCtx, installE2EDocuments, openE2EDoc, flushE2EDoc, resetE2EDocuments, libRef, runNativeRenderSequence } from "../tools/__e2e";
 import type { ClientToolContext } from "../tools/context";
 import { shippedSidecar, shippedSidecarPath } from "../test/sidecars";
 import { FakeJobs } from "../test/fakeJobs";
@@ -126,42 +126,7 @@ async function renderLossless(
     }
     jobs.onStart = async (spec) => {
       try {
-        const file = path.join(spec.cwd!, "native-spec.json");
-        await fsp.writeFile(file, JSON.stringify(spec));
-        const result = await new Promise<{ code: number | null; stderr: string }>(
-          (resolve, reject) => {
-            const child = spawn(
-              "cargo",
-              [
-                "test",
-                "--lib",
-                "jobs::tests::render_sequence_real_artifact",
-                "--",
-                "--ignored",
-                "--exact",
-                "--nocapture",
-              ],
-              {
-                cwd: path.resolve(process.cwd(), "src-tauri"),
-                env: {
-                  ...process.env,
-                  ARTDADDY_QA_RENDER_SPEC: file,
-                  ARTDADDY_QA_FFMPEG: ffmpegPath(),
-                },
-                windowsHide: true,
-              },
-            );
-            let stderr = "";
-            child.stdout.on("data", (chunk) => {
-              stderr += String(chunk);
-            });
-            child.stderr.on("data", (chunk) => {
-              stderr += String(chunk);
-            });
-            child.on("error", reject);
-            child.on("close", (code) => resolve({ code, stderr }));
-          },
-        );
+        const result = await runNativeRenderSequence(spec);
         if (plan.transport && spec.cwd && result.code === 0)
           await fsp.rm(spec.cwd, { recursive: true, force: true });
         jobs.exit(spec.id, result.code, result.stderr);
@@ -1160,7 +1125,7 @@ describe("a clip exported on its own is the whole export over its span", () => {
     expect(plan.sources.every((source) => source.path.endsWith(".wav"))).toBe(true);
   });
 
-  it.each([false, true])("late audio preserves frozen floating samples with ducking=%s", async (ducked) => {
+  it.each([false, true])("late audio matches allocating delay and Windows frozen samples with ducking=%s", async (ducked) => {
     onTestFailed(() => { retainArtifacts = true; });
     const onset = process.env.ARTDADDY_QA_LONG_AUDIO === "1" ? 3601 : 31;
     const authored = emptyTimeline(W, H, FPS);
@@ -1171,16 +1136,44 @@ describe("a clip exported on its own is the whole export over its span", () => {
       source_in: 0, source_out: 14 * FPS, timeline_in: 0, timeline_out: (onset + 6) * FPS, loop: true, volume: 0.25, duck: { against: "late-voice" } }] });
     const output = path.join(dir, `late-audio-${ducked}.nut`);
     const plan = buildAudioRenderCommand(authored, output, { range: { from: (onset - 1) * FPS, to: (onset + 5) * FPS } });
+    const graphIndex = plan.args.indexOf("-filter_complex") + 1;
+    expect(graphIndex).toBeGreaterThan(0);
+    const delayedIndex = plan.args[graphIndex].match(/\[adelay_source(\d+)\];anullsrc=/)?.[1];
+    expect(delayedIndex).toBeDefined();
+    const virtualDelay =
+      `[adelay_source${delayedIndex}];anullsrc=r=48000:cl=stereo:n=2048:d=${onset.toFixed(3)},` +
+      `aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[adelay_silence${delayedIndex}];` +
+      `[adelay_silence${delayedIndex}][adelay_source${delayedIndex}]concat=n=2:v=0:a=1,asettb=1/48000,asetpts=N/SR/TB`;
+    expect(plan.args[graphIndex]).toContain(virtualDelay);
+    const allocatingArgs = [...plan.args];
+    allocatingArgs[graphIndex] = allocatingArgs[graphIndex].replace(
+      virtualDelay,
+      `,adelay=${onset * 1000}|${onset * 1000}`,
+    );
+    const referenceOutput = path.join(dir, `late-audio-allocating-${ducked}.nut`);
+    allocatingArgs[allocatingArgs.length - 1] = referenceOutput;
+    const referenceResult = await ctx.runner.run(
+      "ffmpeg",
+      allocatingArgs,
+      AbortSignal.timeout(110_000),
+    );
+    expect(referenceResult.code, referenceResult.stderr).toBe(0);
+    const reference = await ffBytes(["-i", referenceOutput, "-map", "0:a:0", "-f", "f64le", "-"]);
     const result = await ctx.runner.run("ffmpeg", plan.args, AbortSignal.timeout(110_000));
     expect(result.code, result.stderr).toBe(0);
     const actual = await ffBytes(["-i", output, "-map", "0:a:0", "-f", "f64le", "-"]);
+    expect(
+      actual.equals(reference),
+      "floating samples differ from the same-platform allocating delay",
+    ).toBe(true);
     expect(actual.length).toBe(6 * RATE * 16);
     expect(actual.subarray(2 * RATE * 16, 3 * RATE * 16).some((byte) => byte !== 0)).toBe(true);
     if (!ducked) expect(actual.subarray(0, Math.floor(RATE * 0.9) * 16).every((byte) => byte === 0)).toBe(true);
     const hash = createHash("sha256").update(actual).digest("hex");
-    expect(hash, "floating samples differ from the frozen allocating-delay implementation").toBe(ducked
-      ? "604817d0d8408372745fa8d8de876b2ac1cf14bab99a4823c617ebba8f231de9"
-      : "88bccd2a0eb7d424acc1edc2c7cfe78f1f8a5d3301cf5c15654f929e158df74b");
+    if (process.platform === "win32")
+      expect(hash, "floating samples differ from the frozen Windows allocating-delay implementation").toBe(ducked
+        ? "604817d0d8408372745fa8d8de876b2ac1cf14bab99a4823c617ebba8f231de9"
+        : "88bccd2a0eb7d424acc1edc2c7cfe78f1f8a5d3301cf5c15654f929e158df74b");
     console.log(`LATE AUDIO BASELINE ${JSON.stringify({ onset, ducked, hash, bytes: actual.length })}`);
   }, 120_000);
 

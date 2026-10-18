@@ -22,13 +22,16 @@ import {
   nodeRunner,
   openE2EDoc,
   resetE2EDocuments,
+  runNativeRenderSequence,
 } from "../tools/__e2e";
+import { __resetJobSupervisor, __setJobSupervisor } from "../tools/jobSupervisor";
+import { FakeJobs } from "../test/fakeJobs";
 import { joinPath } from "../tools/store";
 import { ensureTimeline } from "./engine";
 import { setCanvasTool } from "./ops";
 import { addClipsTool } from "./placement";
 import { exportTimelineTool } from "./render";
-import { whenExportEnds } from "./exportQueue";
+import { localDeliveryPort, whenExportEnds, whenExportsSettle } from "./exportQueue";
 
 type Rec = Record<string, unknown>;
 
@@ -38,6 +41,8 @@ const LEN = 5; // frames per clip
 
 beforeAll(() => installE2EDocuments());
 afterAll(async () => {
+  await whenExportsSettle();
+  __resetJobSupervisor();
   await resetE2EDocuments();
   await fsp.rm(ROOT, { recursive: true, force: true }).catch(() => undefined);
 });
@@ -72,6 +77,17 @@ describe("a montage of 120 short clips", () => {
     await nodeFs.mkdir(dir);
     await openE2EDoc(dir);
     const ctx = mkCtx(dir);
+    const jobs = new FakeJobs();
+    jobs.delivery = localDeliveryPort(ctx.store);
+    jobs.onStart = async (spec) => {
+      try {
+        const result = await runNativeRenderSequence(spec);
+        jobs.exit(spec.id, result.code, result.stderr);
+      } catch (error) {
+        jobs.exit(spec.id, -1, String(error));
+      }
+    };
+    __setJobSupervisor(jobs);
     await ensureTimeline(ctx.store);
     expect(((await setCanvasTool({ width: 160, height: 90, fps: 30 }, ctx)) as Rec).ok).toBe(true);
     const red = joinPath(dir, "a phone clip from the summer holiday (red).mp4");
@@ -95,6 +111,9 @@ describe("a montage of 120 short clips", () => {
     expect(res.ok, JSON.stringify(res)).toBe(true);
     const ended = await whenExportEnds(String(res.job_id));
     expect(ended?.state, JSON.stringify(ended)).toBe("done");
+    expect(jobs.submitted).toHaveLength(1);
+    expect(jobs.submitted[0].meta.renderTransport).toBe("partition-pipes-v1");
+    expect(jobs.submitted[0].steps!.length).toBeGreaterThan(1);
 
     const frames = await chroma(await ctx.store.exportPath("montage.mp4"));
     expect(frames.length).toBeGreaterThanOrEqual(CLIPS * LEN);

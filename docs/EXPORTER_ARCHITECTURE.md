@@ -1033,6 +1033,31 @@ beyond proving the existing implementation and are excluded from that count.
     16 GiB input evidence, not 8 GiB input, a kernel cap, whole-space proof or
     a physical minimum-machine test. No acceptance increase follows.
 
+- V2-D085: integrate the qualified real-native smoke owner and portable late
+  audio oracle without changing production admission or references.
+  - Authority/surface: the shared smoke launcher writes the admitted JobSpec
+    inside its private work directory and executes the existing Rust sequence
+    artifact test. Both range probes and the 120-clip Automatic montage use it;
+    neither forces Standard or substitutes a JavaScript renderer. Their Node
+    delivery port remains a test double, not real-app publication proof.
+  - Lifecycle/commit point: test-only explicit export consent is installed by
+    the smoke setup; production consent remains fail-closed. Jobs settle before
+    supervisor/document cleanup, and all 120 delivered clip colours are checked
+    after actual Rust/FFmpeg execution.
+  - Failure matrix: missing private cwd refuses native fixture launch; native
+    errors propagate as failed jobs; late audio compares complete float samples
+    against the same-platform allocating-delay implementation with and without
+    ducking. Windows additionally retains both immutable historical hashes.
+    A same-platform comparison cannot erase source delay, samples or mix state.
+  - Proof/residual: these exact fixture/control slices pass in the qualified
+    QA gates and actual Unix portable runs. Their combined-main execution is
+    still separate, and no frozen snapshot/media, deadline, consent policy,
+    budget, supported promise or acceptance count is changed by this backport.
+    Main's launcher, montage, consent and configuration match the qualified
+    source; its range fixture has the same runtime AST as `a758126`, retaining
+    the one pre-existing type-only assertion difference. Syntax checks are
+    separate from a combined-main type/build/execution pass.
+
 ## Historical V1 Design And Evidence
 
 Everything below is retained history, not authority for conflicting V2 requirements.
