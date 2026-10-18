@@ -198,7 +198,13 @@ export default function MenuBar() {
           ...(settings.fps === null ? {} : { fps: settings.fps }),
           ...(outputPath ? { output_path: outputPath } : {}),
         },
-        { surface: "app", signal: controller.signal, model: "", transcriptId: "", exportMode: settings.mode },
+        {
+          surface: "app",
+          signal: controller.signal,
+          model: "",
+          transcriptId: "",
+          exportMode: settings.mode,
+        },
       )) as {
         ok?: boolean;
         error?: string;

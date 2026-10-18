@@ -20,7 +20,11 @@ concurrency:
 jobs:
   test:
     name: build + unit tests
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-14, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -30,14 +34,20 @@ jobs:
       - run: npm ci
       - run: npm run format:check
       - run: npm run build # tsc --noEmit && vite build
-      - run: npm test # vitest run
+      - run: npm test -- --maxWorkers=2 --reporter=default --reporter=json --outputFile=reports/qa/signoff/unit.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: signoff-unit-${{ matrix.os }}
+          path: reports/qa/signoff/unit.json
+          if-no-files-found: warn
 
   browser:
     name: real-browser UI + compositor pixels (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-14]
+        os: [windows-latest, macos-14, ubuntu-22.04]
     runs-on: ${{ matrix.os }}
     env:
       ARTDADDY_E2E_SKIP_SIDECARS: "whisper-cli,yt-dlp,artdaddy-browser"
@@ -108,7 +118,7 @@ jobs:
         env:
           # The one sidecar this lane deliberately did not stage. Release lanes set nothing here.
           ARTDADDY_E2E_SKIP_SIDECARS: ${{ runner.os != 'Windows' && 'whisper-cli' || '' }}
-        run: npx vitest run --config vitest.smoke.config.ts --reporter=default --reporter=json --outputFile=reports/qa/exporter/full-smoke.json
+        run: npx vitest run --config vitest.smoke.config.ts --maxWorkers=2 --reporter=default --reporter=json --outputFile=reports/qa/exporter/full-smoke.json
       - name: Preserve real export results and bounded synthetic failure artifacts
         if: always()
         uses: actions/upload-artifact@v4

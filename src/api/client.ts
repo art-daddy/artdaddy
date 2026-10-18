@@ -60,8 +60,7 @@ export const api = {
 
   health: () => req<{ ok: boolean }>("/health"),
 
-  // Tool catalog (contract), pulled at RUNTIME by the contract module — the
-  // server's live tool registry is the source of truth (no build-time bundling).
+  // Diagnostic server view only. Runtime schemas and MCP use the client-authored bundle.
   contract: () => req<ContractResponse>("/contract/tools"),
 
   // The composed system prompt, so the local MCP server hands an external agent the same

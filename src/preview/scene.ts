@@ -332,6 +332,8 @@ function boxOf(clip: Clip, cw: number, ch: number, atFrame: number): Rect {
 export function fitRects(box: Rect, img: AssetDims, fit: FitKind): { dst: Rect; src: Rect } {
   const scale = fitScale(box, img, fit);
   switch (fit) {
+    case "stretch":
+      return { dst: { ...box }, src: { x: 0, y: 0, w: 1, h: 1 } };
     case "cover": {
       const visW = box.w / scale;
       const visH = box.h / scale;

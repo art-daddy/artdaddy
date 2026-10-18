@@ -15,7 +15,7 @@ export default defineConfig({
     // Stryker's own inner runs execute INSIDE the sandbox, where this pattern doesn't match.
     // `e2e/**` holds the Playwright + WebdriverIO lanes; vitest's default include covers
     // `*.spec.*` too, so without this it tries to run them and fails on their globals.
-    exclude: [...configDefaults.exclude, ".stryker-tmp/**", "e2e/**"],
+    exclude: [...configDefaults.exclude, ".stryker-tmp/**", "e2e/**", "scripts/qa/**/*.test.mjs"],
     // Vite loads .env for tests too, so a REAL VITE_SENTRY_DSN would make initSentry()
     // arm the live project from the suite. Blank it at the baseline (not via stubEnv —
     // vi.unstubAllEnvs() would restore the real value).

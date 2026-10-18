@@ -1,8 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-// ensureContract is a best-effort preload; stub it so inferRound doesn't hit the
-// real contract loader.
-vi.mock("../contract", () => ({ ensureContract: vi.fn(async () => {}) }));
 // Keep real auth-header logic; spy the 401 side effect.
 vi.mock("../api/auth", async (io) => {
   const actual = await io<typeof import("../api/auth")>();
@@ -20,6 +17,8 @@ import { isExpected, toUserMessage } from "../lib/errors";
 import { apiBase, setApiBase } from "../api/config";
 import { CreditLimitError, markOverLimit } from "../api/usage";
 import { inferRound, inferRoundStreaming, type InferBody } from "./api";
+import { catalogIdentity } from "../contract";
+import { ClientUpdateRequiredError } from "../update/updater";
 
 function res(data: unknown, status = 200): Response {
   return new Response(typeof data === "string" ? data : JSON.stringify(data), {
@@ -28,6 +27,20 @@ function res(data: unknown, status = 200): Response {
   });
 }
 const body: InferBody = { round_input: { user_text: "hi" } };
+
+it.each(["plain", "stream"])(
+  "a catalog refusal stops the %s request without retrying",
+  async (route) => {
+    const fetcher = vi.fn(async () => res({ detail: { error: "client_update_required" } }, 426));
+    vi.stubGlobal("fetch", fetcher);
+    const operation =
+      route === "plain" ? inferRound(body) : inferRoundStreaming(body, () => undefined);
+    await expect(operation).rejects.toBeInstanceOf(ClientUpdateRequiredError);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    const request = fetcher.mock.calls[0] as unknown as [string, RequestInit];
+    expect(JSON.parse(request[1].body as string).catalog_id).toBe(catalogIdentity());
+  },
+);
 
 afterEach(() => {
   setClerkTokenProvider(null);

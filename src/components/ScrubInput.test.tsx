@@ -1,4 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react";
+import { StrictMode, useRef, useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import { ScrubInput } from "./ScrubInput";
@@ -33,6 +34,47 @@ describe("ScrubInput", () => {
     ptr("pointerup", {});
     expect(onChange).toHaveBeenCalledTimes(1);
     expect(onChange).toHaveBeenCalledWith(50);
+  });
+
+  it("creates one reversible edit when a controlled parent re-renders in StrictMode", () => {
+    function ControlledScrub() {
+      const [value, setValue] = useState(10);
+      const history = useRef<number[]>([]);
+      return (
+        <>
+          <ScrubInput
+            value={value}
+            step={2}
+            aria-label="controlled value"
+            onChange={(next) => {
+              history.current.push(value);
+              setValue(next);
+            }}
+          />
+          <output aria-label="committed edits">{history.current.length}</output>
+          <button
+            disabled={!history.current.length}
+            onClick={() => setValue(history.current.pop()!)}
+          >
+            Undo scrub
+          </button>
+        </>
+      );
+    }
+    render(
+      <StrictMode>
+        <ControlledScrub />
+      </StrictMode>,
+    );
+    fireEvent.pointerDown(screen.getByLabelText("controlled value"), { clientX: 0 });
+    for (const position of [3, 7, 11, 15, 20]) ptr("pointermove", { clientX: position });
+    expect(screen.getByLabelText("committed edits")).toHaveTextContent("0");
+    ptr("pointerup", {});
+    expect(screen.getByLabelText("controlled value")).toHaveTextContent("50");
+    expect(screen.getByLabelText("committed edits")).toHaveTextContent("1");
+    fireEvent.click(screen.getByRole("button", { name: "Undo scrub" }));
+    expect(screen.getByLabelText("controlled value")).toHaveTextContent("10");
+    expect(screen.getByRole("button", { name: "Undo scrub" })).toBeDisabled();
   });
 
   it("keeps tracking when the PARENT re-renders mid-drag", () => {

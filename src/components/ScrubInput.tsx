@@ -42,7 +42,9 @@ export function ScrubInput({
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState("");
   const [live, setLive] = useState<number | null>(null);
-  const drag = useRef<{ x: number; start: number; moved: boolean } | null>(null);
+  const drag = useRef<{ x: number; start: number; moved: boolean; pending: number | null } | null>(
+    null,
+  );
   const inputRef = useRef<HTMLInputElement>(null);
   const onMoveRef = useRef<(e: PointerEvent) => void>();
   const onUpRef = useRef<() => void>();
@@ -60,7 +62,8 @@ export function ScrubInput({
       if (!d) return;
       const dx = e.clientX - d.x;
       if (Math.abs(dx) > 2) d.moved = true;
-      setLive(clamp(d.start + dx * step, min, max));
+      d.pending = clamp(d.start + dx * step, min, max);
+      setLive(d.pending);
     },
     [step, min, max],
   );
@@ -69,10 +72,8 @@ export function ScrubInput({
     window.removeEventListener("pointermove", winMove);
     window.removeEventListener("pointerup", winUp);
     drag.current = null;
-    setLive((pending) => {
-      if (d?.moved && pending !== null) commit(pending);
-      return null;
-    });
+    setLive(null);
+    if (d?.moved && d.pending !== null) commit(d.pending);
     if (d && !d.moved) {
       setText(String(value));
       setEditing(true);
@@ -131,7 +132,7 @@ export function ScrubInput({
       tabIndex={0}
       onPointerDown={(e) => {
         e.preventDefault();
-        drag.current = { x: e.clientX, start: value, moved: false };
+        drag.current = { x: e.clientX, start: value, moved: false, pending: null };
         window.addEventListener("pointermove", winMove);
         window.addEventListener("pointerup", winUp);
       }}

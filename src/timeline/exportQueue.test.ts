@@ -31,7 +31,7 @@ import type { ExportCalibration } from "./exportOptions";
 import { FakeJobs } from "../test/fakeJobs";
 import * as host from "../platform/host";
 
-const exportBeacon = vi.hoisted(() => vi.fn(async () => undefined));
+const exportBeacon = vi.hoisted(() => vi.fn(async (_event: unknown) => undefined));
 vi.mock("../api/exportEvents", () => ({ reportExport: exportBeacon }));
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -132,116 +132,247 @@ afterEach(async () => {
 
 describe("required export preflight", () => {
   const calibration: Pick<ExportCalibration, "workload" | "output" | "quality" | "engine"> = {
-    workload: { width: 1920, height: 1080, fps: 30, durationSeconds: 10,
-      visualClips: 14, captionClips: 2, audioClips: 1, peakVisualLayers: 8, peakMediaLayers: 7 },
-    output: { width: 1920, height: 1080, fps: 30 }, quality: "medium", engine: "partition-pipes-v1",
+    workload: {
+      width: 1920,
+      height: 1080,
+      fps: 30,
+      durationSeconds: 10,
+      visualClips: 14,
+      captionClips: 2,
+      audioClips: 1,
+      peakVisualLayers: 8,
+      peakMediaLayers: 7,
+    },
+    output: { width: 1920, height: 1080, fps: 30 },
+    quality: "medium",
+    engine: "partition-pipes-v1",
   };
 
-  it.each(["slow", "batch-space"] as const)("shows the correct measured %s decision rather than a generic pass", async (scenario) => {
-    const { store } = make();
-    vi.spyOn(host, "resolveExportResources").mockResolvedValue({ total_memory_bytes: 1000, available_memory_bytes: 500,
-      local_fast_candidate: false,
-      scratch_free_bytes: scenario === "slow" ? 1000 : 150, destination_free_bytes: scenario === "slow" ? 1000 : 150,
-      budgets: { memoryBytes: 500, temporaryBytes: 500, executionSeconds: 28800 } });
-    useExportJob.setState({ calibrations: [{ ...calibration, elapsedSeconds: scenario === "slow" ? 30 : 10,
-      finalBytes: 100, memoryBytes: 100, temporaryBytes: 10 }] });
-    let shown: { message: string; warning: boolean } | undefined;
-    __setExportConfirmationForTests(async (message, warning) => { shown = { message, warning }; return "cancel"; });
-    const requests = (scenario === "slow" ? [DEST] : [DEST, "C:/out/second.mp4"]).map((destPath) => ({
-      store, dependencies: [], destPath, stagePath: `${destPath}.part`, filename: "movie.mp4", workload: calibration.workload,
-      meta: { duration_s: 10, width: 1920, height: 1080, fps: 30, quality: "medium", project_id: "", calibration },
-      run: async () => ({}),
-    }));
-    await expect(submitExports(requests)).rejects.toThrow("cancelled before submission");
-    expect(shown?.warning).toBe(scenario === "batch-space");
-    expect(shown?.message).toContain(scenario === "slow" ? "more than twice" : "all finished outputs together");
-    expect(shown?.message).not.toContain("Estimated time: unknown");
-    expect(listExportRecords()).toHaveLength(0);
-  });
+  it.each(["slow", "batch-space"] as const)(
+    "shows the correct measured %s decision rather than a generic pass",
+    async (scenario) => {
+      const { store } = make();
+      vi.spyOn(host, "resolveExportResources").mockResolvedValue({
+        total_memory_bytes: 1000,
+        available_memory_bytes: 500,
+        local_fast_candidate: false,
+        scratch_free_bytes: scenario === "slow" ? 1000 : 150,
+        destination_free_bytes: scenario === "slow" ? 1000 : 150,
+        budgets: { memoryBytes: 500, temporaryBytes: 500, executionSeconds: 28800 },
+      });
+      useExportJob.setState({
+        calibrations: [
+          {
+            ...calibration,
+            elapsedSeconds: scenario === "slow" ? 30 : 10,
+            finalBytes: 100,
+            memoryBytes: 100,
+            temporaryBytes: 10,
+          },
+        ],
+      });
+      let shown: { message: string; warning: boolean } | undefined;
+      __setExportConfirmationForTests(async (message, warning) => {
+        shown = { message, warning };
+        return "cancel";
+      });
+      const requests = (scenario === "slow" ? [DEST] : [DEST, "C:/out/second.mp4"]).map(
+        (destPath) => ({
+          store,
+          dependencies: [],
+          destPath,
+          stagePath: `${destPath}.part`,
+          filename: "movie.mp4",
+          workload: calibration.workload,
+          meta: {
+            duration_s: 10,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            quality: "medium",
+            project_id: "",
+            calibration,
+          },
+          run: async () => ({}),
+        }),
+      );
+      await expect(submitExports(requests)).rejects.toThrow("cancelled before submission");
+      expect(shown?.warning).toBe(scenario === "batch-space");
+      expect(shown?.message).toContain(
+        scenario === "slow" ? "more than twice" : "all finished outputs together",
+      );
+      expect(shown?.message).not.toContain("Estimated time: unknown");
+      expect(listExportRecords()).toHaveLength(0);
+    },
+  );
 
-  it.each([true, false])("records comparable calibration only after published success=%s", async (succeeds) => {
-    const { fs, store } = make();
-    useExportJob.setState({ calibrations: [] });
-    vi.useFakeTimers({ now: 5000 });
-    try {
-      const submitted = await submitExport({ store, destPath: DEST, stagePath: STAGE, filename: "final.mp4",
+  it.each([true, false])(
+    "records comparable calibration only after published success=%s",
+    async (succeeds) => {
+      const { fs, store } = make();
+      useExportJob.setState({ calibrations: [] });
+      vi.useFakeTimers({ now: 5000 });
+      try {
+        const submitted = await submitExport({
+          store,
+          destPath: DEST,
+          stagePath: STAGE,
+          filename: "final.mp4",
+          workload: calibration.workload,
+          meta: {
+            duration_s: 10,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            quality: "medium",
+            project_id: "",
+            calibration,
+          },
+          run: async () => {
+            vi.setSystemTime(21000);
+            if (!succeeds) throw new Error("render failed");
+            await fs.writeBytes(STAGE, new Uint8Array([1, 2, 3]));
+            return {};
+          },
+        });
+        await whenExportsSettle();
+        await whenExportTelemetrySettles();
+        expect((await whenExportEnds(submitted.job_id))?.state).toBe(succeeds ? "done" : "failed");
+        const history = useExportJob.getState().calibrations;
+        expect(history).toHaveLength(Number(succeeds));
+        if (succeeds) {
+          expect(await fs.readBytes(DEST)).toEqual(new Uint8Array([1, 2, 3]));
+          expect(history[0]).toMatchObject({
+            elapsedSeconds: 16,
+            finalBytes: 3,
+            memoryBytes: null,
+            temporaryBytes: null,
+          });
+        }
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each([
+    { known: true, succeeds: true },
+    { known: true, succeeds: false },
+    { known: false, succeeds: true },
+    { known: false, succeeds: false },
+  ])(
+    "uses the same checked readiness for known=$known success=$succeeds",
+    async ({ known, succeeds }) => {
+      const { fs, store } = make();
+      await whenExportTelemetrySettles();
+      exportBeacon.mockClear();
+      if (known) {
+        vi.spyOn(host, "resolveExportResources").mockResolvedValue({
+          total_memory_bytes: 16e9,
+          available_memory_bytes: 8e9,
+          scratch_free_bytes: 100e9,
+          destination_free_bytes: 100e9,
+          local_fast_candidate: false,
+          budgets: { memoryBytes: 3.5e9, temporaryBytes: 18e9, executionSeconds: 28800 },
+        });
+        useExportJob.setState({
+          calibrations: [
+            {
+              ...calibration,
+              elapsedSeconds: 16,
+              finalBytes: 100,
+              memoryBytes: 1024,
+              temporaryBytes: 4096,
+            },
+          ],
+        });
+      }
+      let captured: string | undefined;
+      const submitted = await submitExport({
+        store,
+        destPath: DEST,
+        stagePath: STAGE,
+        filename: "final.mp4",
         workload: calibration.workload,
-        meta: { duration_s: 10, width: 1920, height: 1080, fps: 30, quality: "medium", project_id: "", calibration },
-        run: async () => {
-          vi.setSystemTime(21000);
-          if (!succeeds) throw new Error("render failed");
+        meta: {
+          duration_s: 10,
+          width: 1920,
+          height: 1080,
+          fps: 30,
+          quality: "medium",
+          project_id: "",
+          calibration,
+          readiness: known ? "not_ready" : "ready",
+        },
+        run: async (_, _id, meta) => {
+          captured = meta?.readiness;
+          if (!succeeds) throw new Error("encoder failed after source admission");
           await fs.writeBytes(STAGE, new Uint8Array([1, 2, 3]));
           return {};
-        } });
+        },
+      });
       await whenExportsSettle();
       await whenExportTelemetrySettles();
       expect((await whenExportEnds(submitted.job_id))?.state).toBe(succeeds ? "done" : "failed");
-      const history = useExportJob.getState().calibrations;
-      expect(history).toHaveLength(Number(succeeds));
-      if (succeeds) {
+      expect(captured).toBe(known ? "ready" : "unknown");
+      expect(exportBeacon).toHaveBeenCalledTimes(1);
+      expect(exportBeacon.mock.calls[0][0]).toMatchObject({
+        status: succeeds ? "done" : "failed",
+        readiness: captured,
+      });
+      expect(await fs.exists(DEST)).toBe(succeeds);
+    },
+  );
+
+  it.each([0, 4096, null, -1, "4096"])(
+    "keeps only valid native temporary-payload observations: %s",
+    async (peak) => {
+      const { fs, store } = make();
+      const jobs = new FakeJobs();
+      vi.useFakeTimers({ now: 5000 });
+      try {
+        const submitted = await submitExport({
+          store,
+          supervisor: jobs,
+          destPath: DEST,
+          stagePath: STAGE,
+          filename: "final.mp4",
+          workload: calibration.workload,
+          meta: {
+            duration_s: 10,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            quality: "medium",
+            project_id: "",
+            calibration,
+          },
+          run: async (_, id) => {
+            await jobs.submit({ id, lane: "measurement", program: "ffmpeg", args: [], meta: {} });
+            vi.setSystemTime(21000);
+            jobs.exit(
+              id,
+              0,
+              `native render resident: {"sampled_peak":1024}\nnative render temporary: ${JSON.stringify({ accounted_peak_payload_bytes: peak })}\n`,
+            );
+            await fs.writeBytes(STAGE, new Uint8Array([1, 2, 3]));
+            return {};
+          },
+        });
+        await whenExportsSettle();
+        await whenExportTelemetrySettles();
+        expect((await whenExportEnds(submitted.job_id))?.state).toBe("done");
         expect(await fs.readBytes(DEST)).toEqual(new Uint8Array([1, 2, 3]));
-        expect(history[0]).toMatchObject({ elapsedSeconds: 16, finalBytes: 3, memoryBytes: null, temporaryBytes: null });
+        expect(useExportJob.getState().calibrations[0]).toMatchObject({
+          elapsedSeconds: 16,
+          memoryBytes: 1024,
+          temporaryBytes: typeof peak === "number" && peak >= 0 ? peak : null,
+        });
+      } finally {
+        vi.useRealTimers();
       }
-    } finally { vi.useRealTimers(); }
-  });
-
-  it.each([
-    { known: true, succeeds: true }, { known: true, succeeds: false },
-    { known: false, succeeds: true }, { known: false, succeeds: false },
-  ])("uses the same checked readiness for known=$known success=$succeeds", async ({ known, succeeds }) => {
-    const { fs, store } = make();
-    await whenExportTelemetrySettles();
-    exportBeacon.mockClear();
-    if (known) {
-      vi.spyOn(host, "resolveExportResources").mockResolvedValue({ total_memory_bytes: 16e9, available_memory_bytes: 8e9,
-        scratch_free_bytes: 100e9, destination_free_bytes: 100e9, local_fast_candidate: false,
-        budgets: { memoryBytes: 3.5e9, temporaryBytes: 18e9, executionSeconds: 28800 } });
-      useExportJob.setState({ calibrations: [{ ...calibration, elapsedSeconds: 16, finalBytes: 100,
-        memoryBytes: 1024, temporaryBytes: 4096 }] });
-    }
-    let captured: string | undefined;
-    const submitted = await submitExport({ store, destPath: DEST, stagePath: STAGE, filename: "final.mp4",
-      workload: calibration.workload,
-      meta: { duration_s: 10, width: 1920, height: 1080, fps: 30, quality: "medium", project_id: "", calibration,
-        readiness: known ? "not_ready" : "ready" },
-      run: async (_, _id, meta) => {
-        captured = meta?.readiness;
-        if (!succeeds) throw new Error("encoder failed after source admission");
-        await fs.writeBytes(STAGE, new Uint8Array([1, 2, 3]));
-        return {};
-      } });
-    await whenExportsSettle();
-    await whenExportTelemetrySettles();
-    expect((await whenExportEnds(submitted.job_id))?.state).toBe(succeeds ? "done" : "failed");
-    expect(captured).toBe(known ? "ready" : "unknown");
-    expect(exportBeacon).toHaveBeenCalledTimes(1);
-    expect(exportBeacon.mock.calls[0][0]).toMatchObject({ status: succeeds ? "done" : "failed", readiness: captured });
-    expect(await fs.exists(DEST)).toBe(succeeds);
-  });
-
-  it.each([0, 4096, null, -1, "4096"])("keeps only valid native temporary-payload observations: %s", async (peak) => {
-    const { fs, store } = make();
-    const jobs = new FakeJobs();
-    vi.useFakeTimers({ now: 5000 });
-    try {
-      const submitted = await submitExport({ store, supervisor: jobs, destPath: DEST, stagePath: STAGE, filename: "final.mp4",
-        workload: calibration.workload,
-        meta: { duration_s: 10, width: 1920, height: 1080, fps: 30, quality: "medium", project_id: "", calibration },
-        run: async (_, id) => {
-          await jobs.submit({ id, lane: "measurement", program: "ffmpeg", args: [], meta: {} });
-          vi.setSystemTime(21000);
-          jobs.exit(id, 0, `native render resident: {"sampled_peak":1024}\nnative render temporary: ${JSON.stringify({ accounted_peak_payload_bytes: peak })}\n`);
-          await fs.writeBytes(STAGE, new Uint8Array([1, 2, 3]));
-          return {};
-        } });
-      await whenExportsSettle();
-      await whenExportTelemetrySettles();
-      expect((await whenExportEnds(submitted.job_id))?.state).toBe("done");
-      expect(await fs.readBytes(DEST)).toEqual(new Uint8Array([1, 2, 3]));
-      expect(useExportJob.getState().calibrations[0]).toMatchObject({ elapsedSeconds: 16, memoryBytes: 1024,
-        temporaryBytes: typeof peak === "number" && peak >= 0 ? peak : null });
-    } finally { vi.useRealTimers(); }
-  });
+    },
+  );
 
   it("waits for one batch decision before reserving or writing anything", async () => {
     const { fs, store } = make();
@@ -249,14 +380,24 @@ describe("required export preflight", () => {
     let requests = 0;
     __setExportConfirmationForTests(async () => {
       requests++;
-      return new Promise<ExportConfirmation>((resolve) => { decide = resolve; });
+      return new Promise<ExportConfirmation>((resolve) => {
+        decide = resolve;
+      });
     });
     const paths = [DEST, "C:/out/second.mp4"];
-    const pending = submitExports(paths.map((destPath) => ({ store, dependencies: [], destPath,
-      stagePath: `${destPath}.part`, filename: "movie.mp4", run: async () => {
-        await fs.writeBytes(`${destPath}.part`, new Uint8Array([1, 2, 3]));
-        return {};
-      } })));
+    const pending = submitExports(
+      paths.map((destPath) => ({
+        store,
+        dependencies: [],
+        destPath,
+        stagePath: `${destPath}.part`,
+        filename: "movie.mp4",
+        run: async () => {
+          await fs.writeBytes(`${destPath}.part`, new Uint8Array([1, 2, 3]));
+          return {};
+        },
+      })),
+    );
     await vi.waitFor(() => expect(requests).toBe(1));
     expect(listExportRecords()).toHaveLength(0);
     expect(paths.some(isDestinationReserved)).toBe(false);
@@ -268,26 +409,50 @@ describe("required export preflight", () => {
     for (const path of paths) expect(await fs.readBytes(path)).toEqual(new Uint8Array([1, 2, 3]));
   });
 
-  it.each(["cancel", "unavailable"] as const)("admits no job or output after %s, including a copy request", async (choice) => {
-    const { fs, store } = make();
-    const run = vi.fn(async () => ({}));
-    __setExportConfirmationForTests(async () => choice);
-    await expect(submitExport({ store, destPath: DEST, stagePath: STAGE, filename: "final.mp4", copyOf: "media_copy", run }))
-      .rejects.toThrow(choice === "cancel" ? "cancelled before submission" : "could not be confirmed");
-    expect(run).not.toHaveBeenCalled();
-    expect(listExportRecords()).toHaveLength(0);
-    expect(isDestinationReserved(DEST)).toBe(false);
-    expect(fs.files.size + fs.bytes.size).toBe(0);
-  });
+  it.each(["cancel", "unavailable"] as const)(
+    "admits no job or output after %s, including a copy request",
+    async (choice) => {
+      const { fs, store } = make();
+      const run = vi.fn(async () => ({}));
+      __setExportConfirmationForTests(async () => choice);
+      await expect(
+        submitExport({
+          store,
+          destPath: DEST,
+          stagePath: STAGE,
+          filename: "final.mp4",
+          copyOf: "media_copy",
+          run,
+        }),
+      ).rejects.toThrow(
+        choice === "cancel" ? "cancelled before submission" : "could not be confirmed",
+      );
+      expect(run).not.toHaveBeenCalled();
+      expect(listExportRecords()).toHaveLength(0);
+      expect(isDestinationReserved(DEST)).toBe(false);
+      expect(fs.files.size + fs.bytes.size).toBe(0);
+    },
+  );
 
   it("does not admit a request aborted while its confirmation was open", async () => {
     const { fs, store } = make();
     const controller = new AbortController();
     let decide!: (choice: ExportConfirmation) => void;
-    __setExportConfirmationForTests(() => new Promise<ExportConfirmation>((resolve) => { decide = resolve; }));
+    __setExportConfirmationForTests(
+      () =>
+        new Promise<ExportConfirmation>((resolve) => {
+          decide = resolve;
+        }),
+    );
     const run = vi.fn(async () => ({}));
-    const pending = submitExport({ store, destPath: DEST, stagePath: STAGE, filename: "final.mp4",
-      submissionSignal: controller.signal, run });
+    const pending = submitExport({
+      store,
+      destPath: DEST,
+      stagePath: STAGE,
+      filename: "final.mp4",
+      submissionSignal: controller.signal,
+      run,
+    });
     await vi.waitFor(() => expect(decide).toBeTypeOf("function"));
     controller.abort();
     decide("continue");
@@ -300,9 +465,20 @@ describe("required export preflight", () => {
   it("does not admit an old-session request after the project closes during confirmation", async () => {
     const { fs, store } = make();
     let decide!: (choice: ExportConfirmation) => void;
-    __setExportConfirmationForTests(() => new Promise<ExportConfirmation>((resolve) => { decide = resolve; }));
+    __setExportConfirmationForTests(
+      () =>
+        new Promise<ExportConfirmation>((resolve) => {
+          decide = resolve;
+        }),
+    );
     const run = vi.fn(async () => ({}));
-    const pending = submitExport({ store, destPath: DEST, stagePath: STAGE, filename: "final.mp4", run });
+    const pending = submitExport({
+      store,
+      destPath: DEST,
+      stagePath: STAGE,
+      filename: "final.mp4",
+      run,
+    });
     await vi.waitFor(() => expect(decide).toBeTypeOf("function"));
     endProjectSession(DIR);
     decide("continue");
@@ -325,8 +501,17 @@ describe("required export preflight", () => {
     const jobs = new FakeJobs();
     jobs.delivery = delivery;
     const run = vi.fn(async () => ({}));
-    await expect(submitExport({ store, destPath: DEST, stagePath: STAGE, filename: "final.mp4",
-      supervisor: jobs, submissionSignal: controller.signal, run })).rejects.toThrow();
+    await expect(
+      submitExport({
+        store,
+        destPath: DEST,
+        stagePath: STAGE,
+        filename: "final.mp4",
+        supervisor: jobs,
+        submissionSignal: controller.signal,
+        run,
+      }),
+    ).rejects.toThrow();
     expect(run).not.toHaveBeenCalled();
     const intents = await delivery.list();
     expect(intents).toHaveLength(1);
@@ -347,11 +532,23 @@ describe("required export preflight", () => {
     const jobs = new FakeJobs();
     jobs.delivery = delivery;
     const paths = [DEST, "C:/out/second.mp4"];
-    const failure = await submitExports(paths.map((destPath) => ({ store, supervisor: jobs, dependencies: [], destPath,
-      stagePath: `${destPath}.part`, filename: "movie.mp4", run: async () => {
-        await fs.writeBytes(`${destPath}.part`, new Uint8Array([1, 2, 3]));
-        return {};
-      } }))).then(() => null, (error: unknown) => error);
+    const failure = await submitExports(
+      paths.map((destPath) => ({
+        store,
+        supervisor: jobs,
+        dependencies: [],
+        destPath,
+        stagePath: `${destPath}.part`,
+        filename: "movie.mp4",
+        run: async () => {
+          await fs.writeBytes(`${destPath}.part`, new Uint8Array([1, 2, 3]));
+          return {};
+        },
+      })),
+    ).then(
+      () => null,
+      (error: unknown) => error,
+    );
     expect(failure).toBeInstanceOf(ExportRequestError);
     expect((failure as ExportRequestError).submitted).toHaveLength(1);
     const first = (failure as ExportRequestError).submitted[0];

@@ -51,6 +51,38 @@ describe("Inspector", () => {
     }
   });
 
+  it.each(["px", "py", "scale", "scale x", "scale y", "rotate", "opacity", "volume"])(
+    "scrubbing %s does not implicitly enable keyframes",
+    (name) => {
+      const audio = name === "volume";
+      const clip = {
+        id: "scrub-clip",
+        kind: audio ? "audio" : "video",
+        media_ref: "media_scrub_fixture",
+        timeline_in: 0,
+        timeline_out: 60,
+        source_in: 0,
+        source_out: 60,
+      };
+      h.state = state([{ id: "scrub-track", kind: clip.kind, clips: [clip] }], clip.id);
+      h.state.setClipProperties.mockImplementation((id: string, props: object) => {
+        expect(id).toBe(clip.id);
+        Object.assign(clip, props);
+      });
+      const view = render(<Inspector />);
+      const initial = screen.getByLabelText(name).textContent;
+      fireEvent.pointerDown(screen.getByLabelText(name), { clientX: 0 });
+      fireEvent(window, new MouseEvent("pointermove", { clientX: -10 }));
+      fireEvent(window, new MouseEvent("pointerup"));
+      view.rerender(<Inspector />);
+      expect(screen.getByLabelText(name).textContent).not.toBe(initial);
+      fireEvent.click(screen.getByLabelText(name));
+      view.rerender(<Inspector />);
+      expect(screen.getByLabelText(`keyframe ${name}`)).toHaveAttribute("aria-pressed", "false");
+      expect(screen.queryByLabelText(`toggle keyframe ${name}`)).not.toBeInTheDocument();
+    },
+  );
+
   it("editing opacity writes via setClipProperties", () => {
     render(<Inspector />);
     fireEvent.pointerDown(screen.getByLabelText("opacity"), { clientX: 0 });

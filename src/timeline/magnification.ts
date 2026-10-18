@@ -32,7 +32,7 @@ export const MAX_MAGNIFICATION = 6;
  *  says "this is 13.8x" and a picture that is actually 13.8x cannot drift apart. */
 export function fitScale(box: Dims, img: Dims, fit: FitKind): number {
   if (!(img.w > 0) || !(img.h > 0) || !(box.w > 0) || !(box.h > 0)) return 1;
-  return fit === "cover"
+  return fit === "cover" || fit === "stretch"
     ? Math.max(box.w / img.w, box.h / img.h)
     : Math.min(box.w / img.w, box.h / img.h);
 }

@@ -4,6 +4,7 @@
 // committed catalog, and a substitute catalog would agree with itself while the shipped file was
 // empty or names-only — the exact regression bundling was meant to end.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { WITHDRAWN_TOOLS } from "../contract/withdrawn";
 
 async function listTools(): Promise<Record<string, unknown>> {
   const { dispatch } = await import("./bridge");
@@ -129,42 +130,40 @@ describe("manage_project under the sign-in gate", () => {
 describe("a tool withdrawn from the catalog", () => {
   beforeEach(() => {
     vi.resetModules();
+    vi.doUnmock("../contract");
   });
 
-  it("is refused even though its implementation is still registered", async () => {
-    const ran = vi.fn();
-    vi.doMock("../contract", () => ({
-      allTools: () => [{ name: "add_clips", description: "", parameters: {} }],
-      paramSchema: () => undefined,
-      contractStatus: () => "ready",
-      ensureContract: async () => {},
-    }));
-    vi.doMock("../store/projects", () => ({
-      useProjects: { getState: () => ({ activeId: "p1", refresh: async () => {} }) },
-    }));
-    vi.doMock("../store/auth", () => ({
-      isSignedOutGate: () => false,
-      useAuth: {
-        getState: () => ({ status: "unlocked", hasStoredSession: true }),
-        subscribe: () => () => undefined,
-      },
-    }));
-    vi.doMock("../project/openDocuments", () => ({ openDocumentById: () => ({}) }));
-    vi.doMock("../tools/host", () => ({
-      openToolHost: () => ({ ready: Promise.resolve(), has: () => true, run: ran }),
-    }));
+  it.each(WITHDRAWN_TOOLS)(
+    "refuses %s even though its implementation is still registered",
+    async (name) => {
+      const ran = vi.fn();
+      vi.doMock("../store/projects", () => ({
+        useProjects: { getState: () => ({ activeId: "p1", refresh: async () => {} }) },
+      }));
+      vi.doMock("../store/auth", () => ({
+        isSignedOutGate: () => false,
+        useAuth: {
+          getState: () => ({ status: "unlocked", hasStoredSession: true }),
+          subscribe: () => () => undefined,
+        },
+      }));
+      vi.doMock("../project/openDocuments", () => ({ openDocumentById: () => ({}) }));
+      vi.doMock("../tools/host", () => ({
+        openToolHost: () => ({ ready: Promise.resolve(), has: () => true, run: ran }),
+      }));
 
-    const { dispatch } = await import("./bridge");
-    const res = (await dispatch({
-      id: 9,
-      method: "tools/call",
-      params: { name: "extract_style", arguments: {} },
-    } as never)) as { isError?: boolean; content: Array<{ text: string }> };
+      const { dispatch } = await import("./bridge");
+      const res = (await dispatch({
+        id: 9,
+        method: "tools/call",
+        params: { name, arguments: {} },
+      } as never)) as { isError?: boolean; content: Array<{ text: string }> };
 
-    expect(res.isError).toBe(true);
-    expect(res.content[0].text).toMatch(/unknown tool/i);
-    expect(ran, "a withdrawn tool must never reach its implementation").not.toHaveBeenCalled();
-  });
+      expect(res.isError).toBe(true);
+      expect(res.content[0].text).toMatch(/unknown tool/i);
+      expect(ran, "a withdrawn tool must never reach its implementation").not.toHaveBeenCalled();
+    },
+  );
 });
 
 // manage_project refused a gated app from the start; every OTHER tool discarded the same answer

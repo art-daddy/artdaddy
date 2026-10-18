@@ -1,8 +1,5 @@
-// `project_id` on every row the app sends is the project's id, wherever the project's folder is.
-// Seen live (2026-10-09): an import reported the project's whole folder path, the Windows user's
-// name inside it, while every other event sent the id; and an export reported the name the user
-// gave a folder Save As made. These drive the real import and the real export all the way to the
-// request the app sends, for the three places a project can be.
+// Import telemetry uses the logical project id, wherever its folder is. Anonymous export
+// telemetry omits project identity entirely. Neither request may expose filesystem paths.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const readTextFile = vi.fn<(p: string) => Promise<string>>();
@@ -56,7 +53,7 @@ const LEAK = /someone|client work|hero cut|edits|wedding/i;
 
 /** {@link MemFs} that also keeps bytes (an import writes the file into the library) and moves files
  *  (an export lands by rename). */
-class Fs extends MemFs {
+class Fs extends ExportMemFs {
   bytes = new Map<string, Uint8Array>();
   override async exists(p: string): Promise<boolean> {
     return this.bytes.has(joinPath(p)) || super.exists(p);
@@ -89,7 +86,24 @@ class Fs extends MemFs {
 }
 
 const runner: CommandRunner = {
-  run: async (): Promise<CommandResult> => ({ code: 0, stdout: "", stderr: "" }),
+  run: async (): Promise<CommandResult> => ({
+    code: 0,
+    stdout: JSON.stringify({
+      streams: [
+        {
+          codec_type: "video",
+          width: 1080,
+          height: 1920,
+          avg_frame_rate: "30/1",
+          nb_read_frames: 60,
+          duration: "2",
+        },
+        { codec_type: "audio", duration: "2" },
+      ],
+      format: { duration: "2" },
+    }),
+    stderr: "",
+  }),
 };
 
 const posted: { path: string; body: Record<string, unknown> }[] = [];
@@ -136,6 +150,7 @@ async function importInto(dir: string) {
  *  the app told the server. */
 async function exportFrom(dir: string, id: string) {
   const fs = new Fs();
+  await fs.writeTextFile(joinPath(dir, "a.mp4"), "source video");
   const store = new ProjectStoreAccess(dir, fs);
   registerTestDocument(dir, id);
   await ensureTimeline(store);
@@ -160,8 +175,8 @@ async function exportFrom(dir: string, id: string) {
   return sent("/telemetry/export")!;
 }
 
-describe("the project_id the app sends", () => {
-  it("is the id for a project in the app folder, never its folder's path", async () => {
+describe("project identity in import and anonymous export telemetry", () => {
+  it("keeps the default project's import id and omits identity from its export", async () => {
     const imported = await importInto(DEFAULT);
     const exported = await exportFrom(DEFAULT, ID);
     expect(imported).toMatchObject({ event: "media_import", ok: true, project_id: ID });
@@ -170,7 +185,7 @@ describe("the project_id the app sends", () => {
     expect(JSON.stringify([imported, exported])).not.toMatch(LEAK);
   });
 
-  it("is the id for a project Save As moved, never the name the user gave its folder", async () => {
+  it("keeps a moved project's import id while its export remains anonymous", async () => {
     readTextFile.mockResolvedValue(
       JSON.stringify({ version: 1, projects: [{ id: ID, path: SAVED }] }),
     );
@@ -178,6 +193,7 @@ describe("the project_id the app sends", () => {
     const imported = await importInto(SAVED);
     const exported = await exportFrom(SAVED, ID);
     expect(imported.project_id).toBe(ID);
+    expect(exported).toMatchObject({ status: "done" });
     expect(exported).not.toHaveProperty("project_id");
     expect(JSON.stringify([imported, exported])).not.toMatch(LEAK);
   });

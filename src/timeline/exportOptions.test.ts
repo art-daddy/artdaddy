@@ -4,75 +4,202 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
-import { assessExport, crfFor, estimateExportFromHistory, outputFps, outputSize, type ExportCalibration, type ExportEstimates } from "./exportOptions";
+import {
+  assessExport,
+  crfFor,
+  estimateExportFromHistory,
+  outputFps,
+  outputSize,
+  type ExportCalibration,
+  type ExportEstimates,
+} from "./exportOptions";
 import type { RenderWorkload } from "./renderPlan";
 
 describe("export preflight assessment", () => {
-  const workload: RenderWorkload = { width: 1920, height: 1080, fps: 30, durationSeconds: 60,
-    visualClips: 10, captionClips: 1, audioClips: 1, peakVisualLayers: 2, peakMediaLayers: 1 };
-  const resources = { total_memory_bytes: 16e9, available_memory_bytes: 8e9, scratch_free_bytes: 100e9, destination_free_bytes: 100e9,
+  const workload: RenderWorkload = {
+    width: 1920,
+    height: 1080,
+    fps: 30,
+    durationSeconds: 60,
+    visualClips: 10,
+    captionClips: 1,
+    audioClips: 1,
+    peakVisualLayers: 2,
+    peakMediaLayers: 1,
+  };
+  const resources = {
+    total_memory_bytes: 16e9,
+    available_memory_bytes: 8e9,
+    scratch_free_bytes: 100e9,
+    destination_free_bytes: 100e9,
     local_fast_candidate: false,
-    budgets: { memoryBytes: 4e9, temporaryBytes: 18e9, executionSeconds: 28800 } };
-  const estimates: ExportEstimates = { memoryBytes: 2e9, temporaryBytes: 1e9, finalBytes: 100e6, seconds: 60 };
+    budgets: { memoryBytes: 4e9, temporaryBytes: 18e9, executionSeconds: 28800 },
+  };
+  const estimates: ExportEstimates = {
+    memoryBytes: 2e9,
+    temporaryBytes: 1e9,
+    finalBytes: 100e6,
+    seconds: 60,
+  };
   const budgets = { memoryBytes: 4e9, temporaryBytes: 18e9, executionSeconds: 28800 };
 
   it("uses the independent HD,4Kandheavy limits and counts captions as things", () => {
-    expect(assessExport(workload, resources, estimates, budgets)).toMatchObject({ promiseLine: "hd", severity: "none" });
-    const fourK = { ...workload, width: 3840, height: 2160, durationSeconds: 1800, peakVisualLayers: 4 };
+    expect(assessExport(workload, resources, estimates, budgets)).toMatchObject({
+      promiseLine: "hd",
+      severity: "none",
+    });
+    const fourK = {
+      ...workload,
+      width: 3840,
+      height: 2160,
+      durationSeconds: 1800,
+      peakVisualLayers: 4,
+    };
     expect(assessExport(fourK, resources, estimates, budgets).promiseLine).toBe("4k");
-    expect(assessExport({ ...fourK, peakVisualLayers: 5 }, resources, estimates, budgets).severity).toBe("warning");
-    expect(assessExport({ ...fourK, fps: 60 }, resources, estimates, budgets).promiseLine).toBe("outside");
-    expect(assessExport({ ...workload, peakVisualLayers: 8 }, resources, estimates, budgets).promiseLine).toBe("heavy_hd");
-    expect(assessExport({ ...workload, peakVisualLayers: 9 }, resources, estimates, budgets).promiseLine).toBe("outside");
-    expect(assessExport({ ...workload, visualClips: 1001 }, resources, estimates, budgets).promiseLine).toBe("outside");
+    expect(
+      assessExport({ ...fourK, peakVisualLayers: 5 }, resources, estimates, budgets).severity,
+    ).toBe("warning");
+    expect(assessExport({ ...fourK, fps: 60 }, resources, estimates, budgets).promiseLine).toBe(
+      "outside",
+    );
+    expect(
+      assessExport({ ...workload, peakVisualLayers: 8 }, resources, estimates, budgets).promiseLine,
+    ).toBe("heavy_hd");
+    expect(
+      assessExport({ ...workload, peakVisualLayers: 9 }, resources, estimates, budgets).promiseLine,
+    ).toBe("outside");
+    expect(
+      assessExport({ ...workload, visualClips: 1001 }, resources, estimates, budgets).promiseLine,
+    ).toBe("outside");
   });
 
   it("shows a light notice for a known slow in-scope export but never for unknown resources", () => {
-    expect(assessExport(workload, resources, { ...estimates, seconds: 150 }, budgets)).toMatchObject({ severity: "notice", reasons: ["slow"] });
-    expect(assessExport(workload, resources, { ...estimates, seconds: null }, budgets)).toMatchObject({ severity: "warning", reasons: ["time_unknown"] });
-    expect(assessExport(workload, { ...resources, scratch_free_bytes: null }, estimates, budgets)).toMatchObject({ severity: "warning", reasons: ["disk_unknown"] });
+    expect(
+      assessExport(workload, resources, { ...estimates, seconds: 150 }, budgets),
+    ).toMatchObject({ severity: "notice", reasons: ["slow"] });
+    expect(
+      assessExport(workload, resources, { ...estimates, seconds: null }, budgets),
+    ).toMatchObject({ severity: "warning", reasons: ["time_unknown"] });
+    expect(
+      assessExport(workload, { ...resources, scratch_free_bytes: null }, estimates, budgets),
+    ).toMatchObject({ severity: "warning", reasons: ["disk_unknown"] });
   });
 
   it("does not put missing or invalid workload values inside the promise", () => {
-    for (const patch of [{ width: 0 }, { height: NaN }, { fps: 0 }, { fps: Infinity }, { durationSeconds: 0 }])
-      expect(assessExport({ ...workload, ...patch }, resources, estimates, budgets)).toMatchObject({ promiseLine: "outside", severity: "warning" });
-    expect(assessExport(workload, resources, { ...estimates, seconds: NaN, memoryBytes: Infinity }, budgets).reasons)
-      .toEqual(["memory_unknown", "time_unknown"]);
+    for (const patch of [
+      { width: 0 },
+      { height: NaN },
+      { fps: 0 },
+      { fps: Infinity },
+      { durationSeconds: 0 },
+    ])
+      expect(assessExport({ ...workload, ...patch }, resources, estimates, budgets)).toMatchObject({
+        promiseLine: "outside",
+        severity: "warning",
+      });
+    expect(
+      assessExport(
+        workload,
+        resources,
+        { ...estimates, seconds: NaN, memoryBytes: Infinity },
+        budgets,
+      ).reasons,
+    ).toEqual(["memory_unknown", "time_unknown"]);
   });
 
   it("checks final allocation and temporary space together without assuming separate volumes", () => {
-    expect(assessExport(workload, { ...resources, destination_free_bytes: 1.05e9 }, estimates, budgets)).toMatchObject({ severity: "warning", reasons: ["disk_shortage"] });
-    expect(assessExport(workload, resources, { ...estimates, memoryBytes: 5e9 }, budgets).reasons).toContain("memory_shortage");
-    expect(assessExport(workload, resources, { ...estimates, temporaryBytes: 19e9 }, budgets).reasons).toContain("temporary_limit");
+    expect(
+      assessExport(workload, { ...resources, destination_free_bytes: 1.05e9 }, estimates, budgets),
+    ).toMatchObject({ severity: "warning", reasons: ["disk_shortage"] });
+    expect(
+      assessExport(workload, resources, { ...estimates, memoryBytes: 5e9 }, budgets).reasons,
+    ).toContain("memory_shortage");
+    expect(
+      assessExport(workload, resources, { ...estimates, temporaryBytes: 19e9 }, budgets).reasons,
+    ).toContain("temporary_limit");
   });
 
   it("never downgrades a fit warning when available memory or storage decreases", () => {
-    fc.assert(fc.property(fc.integer({ min: 0, max: 8_000_000_000 }), fc.integer({ min: 0, max: 100_000_000_000 }),
-      (memory, disk) => {
-        const result = assessExport(workload, { ...resources, available_memory_bytes: memory, destination_free_bytes: disk }, estimates, budgets);
-        if (memory < estimates.memoryBytes! || disk < estimates.temporaryBytes! + estimates.finalBytes!) expect(result.severity).toBe("warning");
-      }), { numRuns: 200 });
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 0, max: 8_000_000_000 }),
+        fc.integer({ min: 0, max: 100_000_000_000 }),
+        (memory, disk) => {
+          const result = assessExport(
+            workload,
+            { ...resources, available_memory_bytes: memory, destination_free_bytes: disk },
+            estimates,
+            budgets,
+          );
+          if (
+            memory < estimates.memoryBytes! ||
+            disk < estimates.temporaryBytes! + estimates.finalBytes!
+          )
+            expect(result.severity).toBe("warning");
+        },
+      ),
+      { numRuns: 200 },
+    );
   });
 
   it("fits scratch and pending output together rather than giving each the whole allowance", () => {
-    expect(assessExport(workload, resources, { ...estimates, temporaryBytes: 10e9, finalBytes: 10e9 }, budgets))
-      .toMatchObject({ severity: "warning", reasons: ["temporary_limit"] });
-    fc.assert(fc.property(fc.integer({ min: 0, max: 18_000_000_000 }), fc.integer({ min: 0, max: 18_000_000_000 }),
-      (scratch, staging) => {
-        const combined = assessExport(workload, resources, { ...estimates, temporaryBytes: scratch, finalBytes: staging }, budgets);
-        const reversed = assessExport(workload, resources, { ...estimates, temporaryBytes: staging, finalBytes: scratch }, budgets);
-        expect(combined.severity === "none").toBe(scratch + staging <= budgets.temporaryBytes);
-        expect(reversed.reasons).toEqual(combined.reasons);
-      }), { numRuns: 200 });
+    expect(
+      assessExport(
+        workload,
+        resources,
+        { ...estimates, temporaryBytes: 10e9, finalBytes: 10e9 },
+        budgets,
+      ),
+    ).toMatchObject({ severity: "warning", reasons: ["temporary_limit"] });
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 0, max: 18_000_000_000 }),
+        fc.integer({ min: 0, max: 18_000_000_000 }),
+        (scratch, staging) => {
+          const combined = assessExport(
+            workload,
+            resources,
+            { ...estimates, temporaryBytes: scratch, finalBytes: staging },
+            budgets,
+          );
+          const reversed = assessExport(
+            workload,
+            resources,
+            { ...estimates, temporaryBytes: staging, finalBytes: scratch },
+            budgets,
+          );
+          expect(combined.severity === "none").toBe(scratch + staging <= budgets.temporaryBytes);
+          expect(reversed.reasons).toEqual(combined.reasons);
+        },
+      ),
+      { numRuns: 200 },
+    );
   });
 });
 
 describe("local measured export estimates", () => {
-  const workload: RenderWorkload = { width: 1920, height: 1080, fps: 30, durationSeconds: 10,
-    visualClips: 14, captionClips: 2, audioClips: 1, peakVisualLayers: 8, peakMediaLayers: 7 };
+  const workload: RenderWorkload = {
+    width: 1920,
+    height: 1080,
+    fps: 30,
+    durationSeconds: 10,
+    visualClips: 14,
+    captionClips: 2,
+    audioClips: 1,
+    peakVisualLayers: 8,
+    peakMediaLayers: 7,
+  };
   const output = { width: 1920, height: 1080, fps: 30 };
-  const sample: ExportCalibration = { workload, output, quality: "medium", engine: "partition-pipes-v1",
-    elapsedSeconds: 16, finalBytes: 2_400_000, memoryBytes: 1_000_000_000, temporaryBytes: null };
+  const sample: ExportCalibration = {
+    workload,
+    output,
+    quality: "medium",
+    engine: "partition-pipes-v1",
+    elapsedSeconds: 16,
+    finalBytes: 2_400_000,
+    memoryBytes: 1_000_000_000,
+    temporaryBytes: null,
+  };
   const estimate = (target = workload, history: readonly ExportCalibration[] = [sample]) =>
     estimateExportFromHistory(target, output, "medium", "partition-pipes-v1", history);
 
@@ -80,44 +207,112 @@ describe("local measured export estimates", () => {
     const unknown = { seconds: null, memoryBytes: null, temporaryBytes: null, finalBytes: null };
     expect(estimate(workload, [])).toEqual(unknown);
     expect(estimate({ ...workload, peakMediaLayers: 1 })).toEqual(unknown);
-    expect(estimateExportFromHistory(workload, output, "high", "partition-pipes-v1", [sample])).toEqual(unknown);
-    expect(estimateExportFromHistory(workload, { ...output, fps: 60 }, "medium", "partition-pipes-v1", [sample])).toEqual(unknown);
+    expect(
+      estimateExportFromHistory(workload, output, "high", "partition-pipes-v1", [sample]),
+    ).toEqual(unknown);
+    expect(
+      estimateExportFromHistory(workload, { ...output, fps: 60 }, "medium", "partition-pipes-v1", [
+        sample,
+      ]),
+    ).toEqual(unknown);
   });
 
   it("uses successful measurements without replacing missing observations by zero", () => {
-    expect(estimate()).toEqual({ seconds: 16, finalBytes: 2_400_000, memoryBytes: 1_000_000_000, temporaryBytes: null });
+    expect(estimate()).toEqual({
+      seconds: 16,
+      finalBytes: 2_400_000,
+      memoryBytes: 1_000_000_000,
+      temporaryBytes: null,
+    });
     expect(estimate(workload, [{ ...sample, elapsedSeconds: NaN }]).seconds).toBeNull();
     expect(estimate(workload, [sample, { ...sample, elapsedSeconds: 20 }]).seconds).toBe(20);
   });
 
   it("cannot use old or late encoder-policy measurements for a different policy", () => {
-    const profiles = (["x264-crf", "x264-crf-threads2", "amf-cqp18"] as const)
-      .map((encoder, index) => ({ ...sample, encoder, elapsedSeconds: (index + 1) * 10 }));
+    const profiles = (["x264-crf", "x264-crf-threads2", "amf-cqp18"] as const).map(
+      (encoder, index) => ({ ...sample, encoder, elapsedSeconds: (index + 1) * 10 }),
+    );
     for (const profile of profiles) {
       const foreign = profiles.filter((entry) => entry.encoder !== profile.encoder);
-      expect(estimateExportFromHistory(workload, output, "medium", "partition-pipes-v1", foreign, profile.encoder).seconds).toBeNull();
-      for (const history of [[profile, ...foreign], [...foreign, profile]])
-        expect(estimateExportFromHistory(workload, output, "medium", "partition-pipes-v1", history, profile.encoder).seconds)
-          .toBe(profile.elapsedSeconds);
+      expect(
+        estimateExportFromHistory(
+          workload,
+          output,
+          "medium",
+          "partition-pipes-v1",
+          foreign,
+          profile.encoder,
+        ).seconds,
+      ).toBeNull();
+      for (const history of [
+        [profile, ...foreign],
+        [...foreign, profile],
+      ])
+        expect(
+          estimateExportFromHistory(
+            workload,
+            output,
+            "medium",
+            "partition-pipes-v1",
+            history,
+            profile.encoder,
+          ).seconds,
+        ).toBe(profile.elapsedSeconds);
     }
   });
 
   it("never estimates Fast from software history or software from Fast history", () => {
-    const fast = { ...sample, encoder: "amf-cqp18" as const, elapsedSeconds: 9, finalBytes: 10_000_000 };
-    expect(estimateExportFromHistory(workload, output, "medium", "partition-pipes-v1", [sample], "amf-cqp18").seconds).toBeNull();
+    const fast = {
+      ...sample,
+      encoder: "amf-cqp18" as const,
+      elapsedSeconds: 9,
+      finalBytes: 10_000_000,
+    };
+    expect(
+      estimateExportFromHistory(
+        workload,
+        output,
+        "medium",
+        "partition-pipes-v1",
+        [sample],
+        "amf-cqp18",
+      ).seconds,
+    ).toBeNull();
     expect(estimate(workload, [fast]).seconds).toBeNull();
-    expect(estimateExportFromHistory(workload, output, "medium", "partition-pipes-v1", [sample, fast], "amf-cqp18"))
-      .toMatchObject({ seconds: 9, finalBytes: 10_000_000 });
-    expect(estimate(workload, [sample, fast])).toMatchObject({ seconds: 16, finalBytes: 2_400_000 });
+    expect(
+      estimateExportFromHistory(
+        workload,
+        output,
+        "medium",
+        "partition-pipes-v1",
+        [sample, fast],
+        "amf-cqp18",
+      ),
+    ).toMatchObject({ seconds: 9, finalBytes: 10_000_000 });
+    expect(estimate(workload, [sample, fast])).toMatchObject({
+      seconds: 16,
+      finalBytes: 2_400_000,
+    });
   });
 
   it("does not shorten an estimate when duration or clip count increases", () => {
-    fc.assert(fc.property(fc.integer({ min: 1, max: 1000 }), fc.integer({ min: 1, max: 1000 }), (seconds, clips) => {
-      const first = estimate({ ...workload, durationSeconds: seconds, visualClips: clips });
-      const more = estimate({ ...workload, durationSeconds: seconds + 1, visualClips: clips + 1 });
-      expect(more.seconds!).toBeGreaterThanOrEqual(first.seconds!);
-      expect(more.finalBytes!).toBeGreaterThanOrEqual(first.finalBytes!);
-    }), { numRuns: 100 });
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 1, max: 1000 }),
+        fc.integer({ min: 1, max: 1000 }),
+        (seconds, clips) => {
+          const first = estimate({ ...workload, durationSeconds: seconds, visualClips: clips });
+          const more = estimate({
+            ...workload,
+            durationSeconds: seconds + 1,
+            visualClips: clips + 1,
+          });
+          expect(more.seconds!).toBeGreaterThanOrEqual(first.seconds!);
+          expect(more.finalBytes!).toBeGreaterThanOrEqual(first.finalBytes!);
+        },
+      ),
+      { numRuns: 100 },
+    );
   });
 });
 

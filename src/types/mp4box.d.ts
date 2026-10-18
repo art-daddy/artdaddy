@@ -55,6 +55,14 @@ declare module "mp4box" {
     offset: number;
     size: number;
     number: number;
+    moof_number?: number;
+  }
+  export interface MP4Fragment {
+    start: number;
+    trafs: Array<{
+      tfhd: { track_id: number; flags: number; base_data_offset: number };
+      truns: Array<{ flags: number; sample_count: number; data_offset: number }>;
+    }>;
   }
   export interface MP4Track {
     mdia: { minf: { stbl: { stsd: { entries: StsdEntry[] } } } };
@@ -70,6 +78,7 @@ declare module "mp4box" {
     flush(): void;
     setExtractionOptions(id: number, user?: unknown, opts?: { nbSamples?: number }): void;
     getTrackById(id: number): MP4Track;
+    moofs: MP4Fragment[];
     /** The movie header's display matrix (mvhd) is read UNSIGNED by mp4box: -1.0 arrives as 2^32 - 65536. */
     moov?: { mvhd?: { matrix?: Uint32Array } };
   }

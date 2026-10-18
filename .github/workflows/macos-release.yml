@@ -367,7 +367,10 @@ jobs:
         continue-on-error: true
         with:
           name: artdaddy-macos-${{ env.TRIPLE }}-unsigned
-          path: ${{ steps.verify.outputs.path }}
+          path: |
+            ${{ steps.verify.outputs.path }}
+            ${{ steps.updater.outputs.tarball }}
+            ${{ steps.updater.outputs.sig }}
           if-no-files-found: error
 
       # Everything above inspects the artifact. This is the first step that RUNS the app: it

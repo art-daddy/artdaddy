@@ -31,7 +31,15 @@ void import("./timeline/exportStaging").then((m) => m.sweepStaging()).catch(() =
 void import("./tools/workFolder").then((m) => m.sweepWork()).catch(() => undefined);
 // After a crash or reload of the page, the app process may still hold exports this page did not
 // start: follow them, and commit the ones that ended while no page was there (3h part 7).
-void import("./timeline/exportQueue").then((m) => m.adoptExports()).catch(() => undefined);
+void Promise.all([import("./timeline/exportQueue"), import("./project/documentRegistry")])
+  .then(([exports, registry]) => {
+    const unsubscribe = registry.projectDocuments.subscribeOpened((document) =>
+      exports.adoptExports({ projectId: String(document.id) }).then(() => undefined),
+    );
+    import.meta.hot?.dispose(unsubscribe);
+    return exports.adoptExports();
+  })
+  .catch(() => undefined);
 // ...and the transcriptions: their words are kept, and one still running is waited for, not run
 // again (4i).
 void import("./tools/transcribe").then((m) => m.adoptTranscriptions()).catch(() => undefined);

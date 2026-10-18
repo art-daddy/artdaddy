@@ -133,8 +133,12 @@ export async function sweepOwnedMedia(store: ProjectStoreAccess): Promise<{ remo
     if (isTempName(e.name)) continue;
     const id = e.name.replace(/\.[a-z0-9]+$/i, ""); // a library file is `<id><ext>`; the id is `media_<hash>`
     if (!id.startsWith("media_") || blob.includes(id)) continue; // non-owned, or still referenced -> keep
-    await store.remove(joinPath(libDir, e.name)).catch(() => undefined);
-    removed.push(e.name);
+    try {
+      await store.remove(joinPath(libDir, e.name));
+      removed.push(e.name);
+    } catch {
+      continue;
+    }
   }
   return { removed };
 }
@@ -217,8 +221,12 @@ export async function sweepArtifactCache(
       const rel = `${sub.name}/${e.name}`;
       if (refBlob.includes(e.name)) continue; // a checkpoint/timeline/catalog can still reach it
       if (assetDerived && liveKeys.some((k) => e.name.includes(k))) continue; // still-live asset
-      await store.remove(joinPath(cacheDir, rel)).catch(() => undefined);
-      removed.push(rel);
+      try {
+        await store.remove(joinPath(cacheDir, rel));
+        removed.push(rel);
+      } catch {
+        continue;
+      }
     }
   }
   return { removed };

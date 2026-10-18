@@ -543,7 +543,7 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
           transcriptId: traceLabels.transcript_id,
           trace,
           origin: {
-            chatSessionId: get().transcriptId ?? "",
+            chatSessionId: traceLabels.transcript_id,
             branchId: 0,
             executionId: exec.token,
           },
@@ -596,15 +596,17 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
         }));
       } else {
         if (!isExpected(e)) captureError(e, { phase: "turn" });
+        const message = toUserMessage(e);
         finishTurn((s) => ({
           streaming: false,
-          error: toUserMessage(e),
+          error: message,
           turns: withLast(s.turns, (t) => ({
             ...t,
             status: "error",
-            parts: isExpected(e)
-              ? [...t.parts, { kind: "error", error: toUserMessage(e), code: e.code }]
-              : t.parts,
+            parts: [
+              ...t.parts,
+              { kind: "error", error: message, ...(isExpected(e) ? { code: e.code } : {}) },
+            ],
           })),
         }));
       }
@@ -745,7 +747,10 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
       }));
     },
 
-    resume: () => set({ closing: false }), // "Keep editing" lowers the fence; the retired turn stays gone
+    resume: () => {
+      set({ closing: false });
+      persistCurrentSession();
+    },
     whenQuiescent: () => whenOpsIdle(), // close SAVE awaits already-admitted undo/redo/restore (finding #2)
 
     load: async (projectId) => {
@@ -1194,11 +1199,12 @@ export function whenChatQuiescent(projectId: string): Promise<void> {
  *  report success — the document close SAVE phase uses this so a transcript write failure is SURFACED,
  *  not swallowed. Reads the CURRENT chat state (a retry re-persists the latest). Callers MUST
  *  {@link quiesceChatProject} first so no producer can enqueue a snapshot after this one. Returns true
- *  when there is nothing to persist (no chat instance, or the editor already switched away). */
+ *  when there is no chat instance. An owned chat without its matching editor store is not saved. */
 export async function saveProjectSessionNow(projectId: string): Promise<boolean> {
   const s = chatStores.get(projectId)?.getState();
   const ed = useEditor.getState();
-  if (!s || !ed.store || ed.projectId !== projectId) return true;
+  if (!s) return true;
+  if (!ed.store || ed.projectId !== projectId) return false;
   const session = {
     requests: buildRequests(s.turns),
     providerSnapshot: s.providerSnapshot,

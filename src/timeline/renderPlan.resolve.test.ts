@@ -15,6 +15,7 @@ import { describe, expect, it } from "vitest";
 import type { Timeline } from "./model";
 import { resolveRenderPlan } from "./renderPlan";
 import { lineWidthPx } from "./fontMetrics";
+import timelineSchema from "../contract/timeline.schema.json";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -170,12 +171,19 @@ describe("resolveRenderPlan — canonical order, identity, duration", () => {
 });
 
 describe("resolveRenderPlan — media composite (the dual-backend authority)", () => {
+  it.each(timelineSchema.$defs.layout.properties.fit.enum)(
+    "preserves the schema-supported %s fit mode",
+    (fit) => {
+      expect(one(vclip({ fit })).media.fit).toBe(fit);
+    },
+  );
+
   it("resolves fit/blend to the closed union and coerces unknowns to the neutral both backends fall back to", () => {
     expect(one(vclip({ fit: "cover", blend: "screen" })).media).toMatchObject({
       fit: "cover",
       blend: "screen",
     });
-    expect(one(vclip({ fit: "stretch", blend: "burn" })).media).toMatchObject({
+    expect(one(vclip({ fit: "not-a-fit", blend: "burn" })).media).toMatchObject({
       fit: "contain",
       blend: "normal",
     });

@@ -74,9 +74,11 @@ export default function ExportDialog({
     const controller = new AbortController();
     setFastAvailable(false);
     setMode("quality");
-    void resolveLocalFastEncoder(controller.signal).then((available) => {
-      if (!controller.signal.aborted) setFastAvailable(available);
-    }).catch(() => undefined);
+    void resolveLocalFastEncoder(controller.signal)
+      .then((available) => {
+        if (!controller.signal.aborted) setFastAvailable(available);
+      })
+      .catch(() => undefined);
     return () => controller.abort();
   }, [open, phase, setMode]);
 
@@ -138,7 +140,9 @@ export default function ExportDialog({
                 aria-label="quality"
                 value={quality}
                 disabled={mode === "fast"}
-                title={mode === "fast" ? "Fast uses its measured fixed quality profile." : undefined}
+                title={
+                  mode === "fast" ? "Fast uses its measured fixed quality profile." : undefined
+                }
                 onChange={(e) => setQuality(e.target.value as ExportQuality)}
                 className={cn(selectCls, "disabled:opacity-50")}
               >
@@ -165,21 +169,51 @@ export default function ExportDialog({
             </Field>
             <div className="flex items-center gap-3 text-xs text-neutral-400">
               <span className="w-20 shrink-0">Mode</span>
-              <div role="radiogroup" aria-label="export mode" className="flex min-h-9 min-w-0 flex-1 flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+              <div
+                role="radiogroup"
+                aria-label="export mode"
+                className="flex min-h-9 min-w-0 flex-1 flex-wrap items-center gap-x-4 gap-y-1 text-sm"
+              >
                 <label className="inline-flex items-center gap-2">
-                  <input type="radio" name="export-mode" value="quality" checked={mode === "quality"} onChange={() => setMode("quality")} className="accent-accent" />
+                  <input
+                    type="radio"
+                    name="export-mode"
+                    value="quality"
+                    checked={mode === "quality"}
+                    onChange={() => setMode("quality")}
+                    className="accent-accent"
+                  />
                   Full quality
                 </label>
-                <label className={cn("inline-flex items-center gap-2", !fastAvailable && "text-neutral-500")}
-                  title={fastAvailable ? "Locally measured AMD profile; files can be much larger and the picture can differ."
-                    : "Fast is unavailable on this device or its encoder check has not passed."}>
-                  <input type="radio" name="export-mode" value="fast" checked={mode === "fast"} disabled={!fastAvailable}
-                    onChange={() => setMode("fast")} className="accent-accent" />
+                <label
+                  className={cn(
+                    "inline-flex items-center gap-2",
+                    !fastAvailable && "text-neutral-500",
+                  )}
+                  title={
+                    fastAvailable
+                      ? "Locally measured AMD profile; files can be much larger and the picture can differ."
+                      : "Fast is unavailable on this device or its encoder check has not passed."
+                  }
+                >
+                  <input
+                    type="radio"
+                    name="export-mode"
+                    value="fast"
+                    checked={mode === "fast"}
+                    disabled={!fastAvailable}
+                    onChange={() => setMode("fast")}
+                    className="accent-accent"
+                  />
                   Fast
                 </label>
               </div>
             </div>
-            {mode === "fast" && <p className="text-xs leading-snug text-amber-300">Files can be much larger. The picture can differ from Full quality.</p>}
+            {mode === "fast" && (
+              <p className="text-xs leading-snug text-amber-300">
+                Files can be much larger. The picture can differ from Full quality.
+              </p>
+            )}
             <p className="text-[11px] leading-snug text-neutral-500">
               Never upscales: a preset larger than the project is left at the project&apos;s own
               size.

@@ -703,7 +703,7 @@ export default function ChatView({ onHide }: { onHide?: () => void } = {}) {
             </Button>
           </div>
         )}
-        <div className="flex items-end gap-2">
+        <div className="flex min-w-0 flex-col gap-2">
           <input
             ref={fileInputRef}
             type="file"
@@ -712,25 +712,9 @@ export default function ChatView({ onHide }: { onHide?: () => void } = {}) {
             className="hidden"
             onChange={(e) => void onPickFiles(e)}
           />
-          <Button
-            variant="ghost"
-            disabled={!projectId || streaming || uploading || !aiReady}
-            onClick={() => void onAttachClick()}
-            title="Attach images, video, or audio"
-          >
-            {uploading ? "\u2026" : "\uD83D\uDCCE"}
-          </Button>
-          <Button
-            variant="ghost"
-            disabled={!projectId || streaming || !aiReady}
-            onClick={() => (picker && !picker.fromAt ? setPicker(null) : openPicker("", false))}
-            title="Add editor context — playhead, range, clip, gap, or media"
-          >
-            @
-          </Button>
           {/* The halo lives on a wrapper, not the textarea: a textarea's pseudo-elements are
               unreliable across engines, and the ring has to sit OUTSIDE the input's own box. */}
-          <div className={cn("halo relative min-w-0 flex-1 rounded-lg", streaming && "halo-on")}>
+          <div className={cn("halo relative min-w-0 w-full rounded-lg", streaming && "halo-on")}>
             <textarea
               value={text}
               ref={composerRef}
@@ -748,22 +732,41 @@ export default function ChatView({ onHide }: { onHide?: () => void } = {}) {
               className="relative z-10 h-10 min-h-10 w-full resize-none overflow-y-hidden rounded-lg border border-edge bg-neutral-900 px-3 py-2 text-sm leading-5 outline-none focus:border-accent"
             />
           </div>
-          {streaming ? (
-            <Button variant="danger" onClick={() => void stop()}>
-              ⏹ Stop
-            </Button>
-          ) : (
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
             <Button
-              variant="primary"
-              disabled={uploading || !text.trim() || !aiReady}
-              onClick={onSend}
+              variant="ghost"
+              disabled={!projectId || streaming || uploading || !aiReady}
+              onClick={() => void onAttachClick()}
+              title="Attach images, video, or audio"
             >
-              Send
+              {uploading ? "\u2026" : "\uD83D\uDCCE"}
             </Button>
-          )}
+            <Button
+              variant="ghost"
+              disabled={!projectId || streaming || !aiReady}
+              onClick={() => (picker && !picker.fromAt ? setPicker(null) : openPicker("", false))}
+              title="Add editor context — playhead, range, clip, gap, or media"
+            >
+              @
+            </Button>
+            {streaming ? (
+              <Button className="ml-auto shrink-0" variant="danger" onClick={() => void stop()}>
+                ⏹ Stop
+              </Button>
+            ) : (
+              <Button
+                className="ml-auto shrink-0"
+                variant="primary"
+                disabled={uploading || !text.trim() || !aiReady}
+                onClick={onSend}
+              >
+                Send
+              </Button>
+            )}
+          </div>
         </div>
 
-        <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
+        <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5 text-xs [&>select]:max-w-full [&>select]:min-w-0">
           <Select
             value={model}
             onChange={(v) =>
@@ -804,7 +807,7 @@ export default function ChatView({ onHide }: { onHide?: () => void } = {}) {
             ↷
           </button>
           <McpChip />
-          <div className="ml-auto">
+          <div className="ml-auto min-w-0 max-w-full">
             <ContextMeter session={session} model={model} />
           </div>
         </div>
@@ -841,12 +844,14 @@ function McpChip() {
           : "Let Claude, Cursor or Codex edit this project"
       }
       className={cn(
-        "flex items-center gap-1 whitespace-nowrap rounded px-1.5 py-1 hover:bg-neutral-800",
+        "flex min-w-0 max-w-full items-center gap-1 rounded px-1.5 py-1 hover:bg-neutral-800",
         running ? "text-brand" : "text-neutral-400",
       )}
     >
-      <span className={cn("h-1.5 w-1.5 rounded-full", running ? "bg-brand" : "bg-neutral-600")} />
-      Connect your own agent/MCP
+      <span
+        className={cn("h-1.5 w-1.5 shrink-0 rounded-full", running ? "bg-brand" : "bg-neutral-600")}
+      />
+      <span className="min-w-0 truncate">Connect your own agent/MCP</span>
     </button>
   );
 }
@@ -862,7 +867,7 @@ function ContextMeter({ session, model }: { session: SessionState | null; model:
   }, [session?.cost_usd]);
   return (
     <div
-      className="flex items-center gap-2 text-[11px] text-neutral-500"
+      className="flex min-w-0 max-w-full flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-neutral-500"
       title={`${used.toLocaleString()} / ${max.toLocaleString()} context tokens`}
     >
       <div className="h-1.5 w-16 overflow-hidden rounded-full bg-neutral-800">
@@ -880,7 +885,7 @@ function ContextMeter({ session, model }: { session: SessionState | null; model:
       {usage.metered &&
         (usage.globalPaused ? (
           <span className="tabular-nums text-amber-400" title={CREDITS_PAUSED}>
-            {formatCredits(Math.max(0, usage.remaining))} cr left · AI paused
+            AI paused - {formatCredits(Math.max(0, usage.remaining))} cr left
           </span>
         ) : usage.over ? (
           // At zero the number is the least useful thing we can show: it states the dead end

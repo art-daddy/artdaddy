@@ -31,6 +31,7 @@ export class ProjectDocumentRegistry {
    *  still receive + REJECT mutations, so a write during close can't slip past the gate via the
    *  executor's no-document fallback (reviewer blocker 1). Ownership ≠ UI open-visibility. */
   private readonly closingDocs = new Map<ProjectId, ProjectDocument>();
+  private readonly openListeners = new Set<(document: ProjectDocument) => void | Promise<void>>();
 
   /** @param makeChildren builds the (injected) child lifecycle for a given project id.
    *  @param makeDocumentOpts optional per-document options (e.g. the origin-fence isOriginCurrent
@@ -55,6 +56,21 @@ export class ProjectDocumentRegistry {
 
   listOpen(): readonly ProjectDocument[] {
     return [...this.openDocs.values()];
+  }
+
+  subscribeOpened(listener: (document: ProjectDocument) => void | Promise<void>): () => void {
+    this.openListeners.add(listener);
+    return () => {
+      this.openListeners.delete(listener);
+    };
+  }
+
+  private notifyOpened(document: ProjectDocument): void {
+    for (const listener of this.openListeners) {
+      try {
+        void Promise.resolve(listener(document)).catch(() => undefined);
+      } catch {}
+    }
   }
 
   /** The first document whose final save FAILED on close — it is retained (live, editable, memory +
@@ -111,6 +127,7 @@ export class ProjectDocumentRegistry {
     // the current pending, which a reopen may have replaced) keeps the two opens distinct.
     if (entry.doomed) return doc;
     this.openDocs.set(id, doc);
+    this.notifyOpened(doc);
     return doc;
   }
 
@@ -221,7 +238,10 @@ export class ProjectDocumentRegistry {
 
   /** Cancel a failed close: return the document to editing (fresh gate/job scope); it stays open. */
   cancelClose(id: ProjectId): void {
-    this.openDocs.get(id)?.cancelClose();
+    const document = this.openDocs.get(id);
+    if (document?.phase() !== "close-failed") return;
+    document.cancelClose();
+    if (document.phase() === "open") this.notifyOpened(document);
   }
 
   /** Resolve once every in-flight close has settled. Shell awaits this before opening the

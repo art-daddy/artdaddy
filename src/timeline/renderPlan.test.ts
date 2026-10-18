@@ -33,53 +33,190 @@ describe("export workload facts", () => {
   it("counts touching cuts once and includes captions in simultaneous things", () => {
     const raw = emptyTimeline(1920, 1080, 30);
     raw.tracks = [
-      { id: "video", kind: "video", z: 0, clips: [
-        { id: "first", kind: "video", media_ref: "media_first", source_in: 0, source_out: 30, timeline_in: 0, timeline_out: 30 },
-        { id: "next", kind: "video", media_ref: "media_next", source_in: 0, source_out: 30, timeline_in: 30, timeline_out: 60 },
-      ] },
-      { id: "caption", kind: "text", z: 1, clips: [{ id: "words", kind: "text", text: "words", timeline_in: 15, timeline_out: 45 }] },
+      {
+        id: "video",
+        kind: "video",
+        z: 0,
+        clips: [
+          {
+            id: "first",
+            kind: "video",
+            media_ref: "media_first",
+            source_in: 0,
+            source_out: 30,
+            timeline_in: 0,
+            timeline_out: 30,
+          },
+          {
+            id: "next",
+            kind: "video",
+            media_ref: "media_next",
+            source_in: 0,
+            source_out: 30,
+            timeline_in: 30,
+            timeline_out: 60,
+          },
+        ],
+      },
+      {
+        id: "caption",
+        kind: "text",
+        z: 1,
+        clips: [{ id: "words", kind: "text", text: "words", timeline_in: 15, timeline_out: 45 }],
+      },
     ];
-    expect(summarizeRenderWorkload(raw)).toEqual({ width: 1920, height: 1080, fps: 30, durationSeconds: 2, visualClips: 2, captionClips: 1,
-      audioClips: 0, peakVisualLayers: 2, peakMediaLayers: 1 });
-    expect(summarizeRenderWorkload(raw, { from: 45, to: 60 })).toMatchObject({ durationSeconds: 0.5,
-      visualClips: 1, captionClips: 0, peakVisualLayers: 1, peakMediaLayers: 1 });
-    expect(summarizeRenderWorkload(raw, undefined, 0.5)).toMatchObject({ durationSeconds: 0.5,
-      visualClips: 1, captionClips: 0, peakVisualLayers: 1 });
+    expect(summarizeRenderWorkload(raw)).toEqual({
+      width: 1920,
+      height: 1080,
+      fps: 30,
+      durationSeconds: 2,
+      visualClips: 2,
+      captionClips: 1,
+      audioClips: 0,
+      peakVisualLayers: 2,
+      peakMediaLayers: 1,
+    });
+    expect(summarizeRenderWorkload(raw, { from: 45, to: 60 })).toMatchObject({
+      durationSeconds: 0.5,
+      visualClips: 1,
+      captionClips: 0,
+      peakVisualLayers: 1,
+      peakMediaLayers: 1,
+    });
+    expect(summarizeRenderWorkload(raw, undefined, 0.5)).toMatchObject({
+      durationSeconds: 0.5,
+      visualClips: 1,
+      captionClips: 0,
+      peakVisualLayers: 1,
+    });
   });
 
   it("uses shared transition visibility and excludes disabled, hidden and muted content", () => {
     const raw = emptyTimeline(1920, 1080, 30);
     raw.tracks = [
-      { id: "video", kind: "video", z: 0, clips: [
-        { id: "before", kind: "video", media_ref: "media_before", source_in: 0, source_out: 30, timeline_in: 0, timeline_out: 30 },
-        { id: "after", kind: "video", media_ref: "media_after", source_in: 0, source_out: 30, timeline_in: 30, timeline_out: 60,
-          transition_in: { kind: "crossfade", duration: 30 } },
-        { id: "disabled", kind: "video", disabled: true, media_ref: "media_disabled", source_in: 0, source_out: 60, timeline_in: 0, timeline_out: 60 },
-      ] },
-      { id: "hidden", kind: "video", z: 1, hidden: true, clips: [
-        { id: "hidden-video", kind: "video", media_ref: "media_hidden", source_in: 0, source_out: 60, timeline_in: 0, timeline_out: 60 },
-      ] },
-      { id: "muted", kind: "audio", z: 0, mute: true, clips: [
-        { id: "muted-audio", kind: "audio", media_ref: "media_muted", source_in: 0, source_out: 60, timeline_in: 0, timeline_out: 60 },
-      ] },
+      {
+        id: "video",
+        kind: "video",
+        z: 0,
+        clips: [
+          {
+            id: "before",
+            kind: "video",
+            media_ref: "media_before",
+            source_in: 0,
+            source_out: 30,
+            timeline_in: 0,
+            timeline_out: 30,
+          },
+          {
+            id: "after",
+            kind: "video",
+            media_ref: "media_after",
+            source_in: 0,
+            source_out: 30,
+            timeline_in: 30,
+            timeline_out: 60,
+            transition_in: { kind: "crossfade", duration: 30 },
+          },
+          {
+            id: "disabled",
+            kind: "video",
+            disabled: true,
+            media_ref: "media_disabled",
+            source_in: 0,
+            source_out: 60,
+            timeline_in: 0,
+            timeline_out: 60,
+          },
+        ],
+      },
+      {
+        id: "hidden",
+        kind: "video",
+        z: 1,
+        hidden: true,
+        clips: [
+          {
+            id: "hidden-video",
+            kind: "video",
+            media_ref: "media_hidden",
+            source_in: 0,
+            source_out: 60,
+            timeline_in: 0,
+            timeline_out: 60,
+          },
+        ],
+      },
+      {
+        id: "muted",
+        kind: "audio",
+        z: 0,
+        mute: true,
+        clips: [
+          {
+            id: "muted-audio",
+            kind: "audio",
+            media_ref: "media_muted",
+            source_in: 0,
+            source_out: 60,
+            timeline_in: 0,
+            timeline_out: 60,
+          },
+        ],
+      },
     ];
-    expect(summarizeRenderWorkload(raw)).toMatchObject({ visualClips: 2, captionClips: 0, audioClips: 0,
-      peakVisualLayers: 2, peakMediaLayers: 2 });
+    expect(summarizeRenderWorkload(raw)).toMatchObject({
+      visualClips: 2,
+      captionClips: 0,
+      audioClips: 0,
+      peakVisualLayers: 2,
+      peakMediaLayers: 2,
+    });
   });
 
   it("matches direct per-frame overlap counting for arbitrary valid single-clip tracks", () => {
-    fc.assert(fc.property(fc.array(fc.record({ start: fc.integer({ min: 0, max: 90 }), length: fc.integer({ min: 1, max: 30 }) }),
-      { maxLength: 20 }), (clips) => {
-      const raw = emptyTimeline(1920, 1080, 30);
-      raw.tracks = clips.map((clip, index) => ({ id: `track-${index}`, kind: "video", z: index, clips: [{
-        id: `clip-${index}`, kind: "video", media_ref: `media_${index}`, source_in: 0, source_out: clip.length,
-        timeline_in: clip.start, timeline_out: clip.start + clip.length,
-      }] }));
-      const expected = Math.max(0, ...Array.from({ length: 120 }, (_, frame) =>
-        clips.filter((clip) => clip.start <= frame && frame < clip.start + clip.length).length));
-      expect(summarizeRenderWorkload(raw).peakVisualLayers).toBe(expected);
-      expect(summarizeRenderWorkload(raw).visualClips).toBe(clips.length);
-    }), { numRuns: 100 });
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.record({
+            start: fc.integer({ min: 0, max: 90 }),
+            length: fc.integer({ min: 1, max: 30 }),
+          }),
+          { maxLength: 20 },
+        ),
+        (clips) => {
+          const raw = emptyTimeline(1920, 1080, 30);
+          raw.tracks = clips.map((clip, index) => ({
+            id: `track-${index}`,
+            kind: "video",
+            z: index,
+            clips: [
+              {
+                id: `clip-${index}`,
+                kind: "video",
+                media_ref: `media_${index}`,
+                source_in: 0,
+                source_out: clip.length,
+                timeline_in: clip.start,
+                timeline_out: clip.start + clip.length,
+              },
+            ],
+          }));
+          const expected = Math.max(
+            0,
+            ...Array.from(
+              { length: 120 },
+              (_, frame) =>
+                clips.filter((clip) => clip.start <= frame && frame < clip.start + clip.length)
+                  .length,
+            ),
+          );
+          expect(summarizeRenderWorkload(raw).peakVisualLayers).toBe(expected);
+          expect(summarizeRenderWorkload(raw).visualClips).toBe(clips.length);
+        },
+      ),
+      { numRuns: 100 },
+    );
   });
 });
 
@@ -115,7 +252,8 @@ describe("renderPlan <-> contract drift", () => {
   });
 
   it("models exactly the fit modes admitted by the property tool", () => {
-    const admitted = (paramSchema("set_clip_properties")!.properties!.fit as { enum: string[] }).enum;
+    const admitted = (paramSchema("set_clip_properties")!.properties!.fit as { enum: string[] })
+      .enum;
     expect([...FIT_KINDS].sort()).toEqual([...admitted].sort());
     expect([...schemaFit].sort()).toEqual([...admitted].sort());
   });

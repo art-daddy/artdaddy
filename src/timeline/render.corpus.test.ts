@@ -10,6 +10,9 @@
 // After the refactor it is re-run WITHOUT `-u`; any diff is proof the extraction changed export
 // output, not a snapshot to bless. Existing render.test.ts snapshots must likewise stay untouched.
 import { describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
+import { readFileSync } from "node:fs";
 
 import type { Timeline } from "./model";
 import { buildRenderCommand } from "./render";
@@ -99,7 +102,36 @@ describe("render corpus (Commit-1 byte-identical gate)", () => {
         },
       ]),
     ]);
-    expect(fc(t)).toMatchSnapshot();
+    const filename = "src/timeline/__snapshots__/render.corpus.test.ts.snap";
+    expect(createHash("sha256").update(readFileSync(filename)).digest("hex")).toBe(
+      "b3b06281570d7721efd325d4800fab104777760b06be1ad34404d42cfe22c274",
+    );
+    const baselines = createRequire(`${process.cwd()}/package.json`)(`./${filename}`) as Record<
+      string,
+      string
+    >;
+    const legacy = JSON.parse(
+      baselines[
+        "render corpus (Commit-1 byte-identical gate) > Ken-Burns size animation recentres the aspect-preserved clip in its box (cover) 1"
+      ],
+    ) as string;
+    expect(legacy).toMatchSnapshot();
+    const width =
+      "max(2,round((if(lt(T,0.000000),1920.000000,if(lt(T,2.000000),(1920.000000+(384.000000)*clip((T-0.000000)/2.000000,0,1)),2304.000000)))/2)*2)";
+    const height =
+      "max(2,round((if(lt(T,0.000000),1080.000000,if(lt(T,2.000000),(1080.000000+(216.000000)*clip((T-0.000000)/2.000000,0,1)),1296.000000)))/2)*2)";
+    const scale = `max((${width})/W,(${height})/H)`;
+    const apertureWidth = `((${width})/(${scale}))`;
+    const apertureHeight = `((${height})/(${scale}))`;
+    const aperture =
+      `format=yuva420p,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*` +
+      `gte(X,(W-(${apertureWidth}))/2)*lt(X,(W+(${apertureWidth}))/2)*` +
+      `gte(Y,(H-(${apertureHeight}))/2)*lt(Y,(H+(${apertureHeight}))/2)',`;
+    const seam = "setpts=PTS-STARTPTS+0,scale=w=";
+    expect(legacy.split(seam)).toHaveLength(2);
+    expect(fc(t), "v2 adds only the approved stable-size cover aperture").toBe(
+      legacy.replace(seam, `setpts=PTS-STARTPTS+0,${aperture}scale=w=`),
+    );
   });
 
   it("blend mode composites via the split/alphamerge chain", () => {
@@ -208,7 +240,31 @@ describe("render corpus (Commit-1 byte-identical gate)", () => {
         },
       ]),
     ]);
-    expect(fc(t)).toMatchSnapshot();
+    const filename = "src/timeline/__snapshots__/render.corpus.test.ts.snap";
+    const baselines = createRequire(`${process.cwd()}/package.json`)(`./${filename}`) as Record<
+      string,
+      string
+    >;
+    const legacy = JSON.parse(
+      baselines[
+        "render corpus (Commit-1 byte-identical gate) > rotate + opacity animation + visual fade stack on one clip 1"
+      ],
+    ) as string;
+    expect(legacy).toMatchSnapshot();
+    const oldRotation = legacy.match(/rotate=a='[^']+':c=black@0:ow=iw:oh=ih/)?.[0];
+    expect(oldRotation).toBeDefined();
+    const rotation = oldRotation!.replace(":ow=iw:oh=ih", ":ow='ceil(hypot(iw,ih)/2)*2':oh=ow");
+    const expected = legacy
+      .replace(`${oldRotation},`, "")
+      .replace("[v0]", `,${rotation}[v0]`)
+      .replace(
+        "overlay=x=0:y=0:",
+        "overlay=x='round((0.000000)+((1920)-overlay_w)/2)':y='round((0.000000)+((1080)-overlay_h)/2)':",
+      );
+    expect(
+      fc(t),
+      "reviewed rotation preserves corners and applies fit-space alpha before rotation",
+    ).toBe(expected);
   });
 });
 
@@ -325,7 +381,24 @@ describe("render corpus (UJ-007: clips whose size does not animate)", () => {
         );
         return;
       }
-      expect(fc(one(clip))).toMatchSnapshot();
+      if (name === "grade + glow + static rotate + crop + flip") {
+        const filename = "src/timeline/__snapshots__/render.corpus.test.ts.snap";
+        const baselines = createRequire(`${process.cwd()}/package.json`)(`./${filename}`) as Record<
+          string,
+          string
+        >;
+        const legacy = JSON.parse(
+          baselines[`render corpus (UJ-007: clips whose size does not animate) > ${name} 1`],
+        ) as string;
+        expect(legacy).toMatchSnapshot();
+        const expected = legacy
+          .replace(":ow=iw:oh=ih", ":ow='ceil(hypot(iw,ih)/2)*2':oh=ow")
+          .replace(
+            "overlay=x=-192:y=-108:",
+            "overlay=x='round((-192.000000)+((2304)-overlay_w)/2)':y='round((-108.000000)+((1296)-overlay_h)/2)':",
+          );
+        expect(fc(one(clip)), "reviewed rotation bounds retain the authored centre").toBe(expected);
+      } else expect(fc(one(clip))).toMatchSnapshot();
     });
   }
 });

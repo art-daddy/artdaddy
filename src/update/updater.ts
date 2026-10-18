@@ -1,10 +1,12 @@
 // Desktop auto-update. The check/download/install runs in RUST (see src-tauri/src/lib.rs)
 // and is invoked here, so no updater JS package is needed.
 //
-// Being out of date is not an error state: every failure path here resolves to "no
-// update" rather than surfacing, because an unreachable release host must never block
-// someone from using the app they already have installed.
+// Optional update checks are non-fatal. The separate compatibility authority decides whether
+// this build may work; an unreachable update host cannot override a known required update.
+import { captureError } from "../observability/sentry";
 import { platform } from "../platform";
+
+export { ClientUpdateRequiredError } from "./compatibility";
 
 export interface UpdateInfo {
   version: string;
@@ -16,8 +18,20 @@ export interface UpdateInfo {
 const isDesktop = (): boolean => platform.name === "tauri";
 
 async function invokeCmd<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  const { invoke } = await import("@tauri-apps/api/core");
-  return invoke<T>(cmd, args);
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return await invoke<T>(cmd, args);
+  } catch (error) {
+    try {
+      captureError(error instanceof Error ? error : new Error(String(error)), {
+        scope: "updater",
+        command: cmd,
+      });
+    } catch {
+      console.debug("[update] could not report failure");
+    }
+    throw error;
+  }
 }
 
 /** An available update, or null when current / offline / not on desktop. */

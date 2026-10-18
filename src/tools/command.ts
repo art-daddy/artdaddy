@@ -6,6 +6,11 @@ export interface CommandResult {
   stderr: string;
 }
 
+export interface CommandStep {
+  args: string[];
+  duration: number;
+}
+
 export interface CommandRunner {
   /** Run a binary. When `signal` is provided and it aborts, a running process is
    *  killed and the result comes back with a "cancelled" stderr. `cwd` sets the process working
@@ -20,6 +25,13 @@ export interface CommandRunner {
     signal?: AbortSignal,
     cwd?: string,
     onStdout?: (chunk: string) => void,
+  ): Promise<CommandResult>;
+  runSequence?(
+    steps: readonly CommandStep[],
+    signal?: AbortSignal,
+    cwd?: string,
+    onStdout?: (chunk: string) => void,
+    audio?: CommandStep,
   ): Promise<CommandResult>;
 }
 

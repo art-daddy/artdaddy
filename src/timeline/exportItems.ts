@@ -10,7 +10,13 @@
 import type { ClientToolContext } from "../tools/context";
 import type { LibraryClip } from "../tools/store";
 import { loadTimeline } from "./engine";
-import { ExportRequestError, isDestinationReserved, sealExportBatch, submitExports, type ExportSpec } from "./exportQueue";
+import {
+  ExportRequestError,
+  isDestinationReserved,
+  sealExportBatch,
+  submitExports,
+  type ExportSpec,
+} from "./exportQueue";
 import type { ExportRefusalFacts } from "../api/agentEvents";
 import type { ExportOptions } from "./exportOptions";
 import { canvasFps } from "./frames";
@@ -42,15 +48,26 @@ export async function exportTool(args: Args, ctx: ClientToolContext | null): Pro
   let workload: import("./renderPlan").RenderWorkload | undefined;
   try {
     result = await (args.media_refs !== undefined || args.clip_ids !== undefined
-      ? exportItemsTool(args, ctx) : exportTimelineTool(args, ctx));
+      ? exportItemsTool(args, ctx)
+      : exportTimelineTool(args, ctx));
   } catch (error) {
-    if (error instanceof ExportRequestError) { status = error.status; workload = error.workload; }
-    result = error instanceof ExportRequestError && error.result ? error.result
-      : { ok: false, error: error instanceof Error ? error.message : String(error) };
+    if (error instanceof ExportRequestError) {
+      status = error.status;
+      workload = error.workload;
+    }
+    result =
+      error instanceof ExportRequestError && error.result
+        ? error.result
+        : { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
   if (result.ok === false) {
-    if (ctx?.signal?.aborted || ctx && !ctx.store.sessionLive()) status = "cancelled";
-    const facts: ExportRefusalFacts = { status, width: workload?.width, height: workload?.height, visual_layers: workload?.peakVisualLayers };
+    if (ctx?.signal?.aborted || (ctx && !ctx.store.sessionLive())) status = "cancelled";
+    const facts: ExportRefusalFacts = {
+      status,
+      width: workload?.width,
+      height: workload?.height,
+      visual_layers: workload?.peakVisualLayers,
+    };
     result = { ...result };
     Object.defineProperty(result, "export_refusal", { value: facts });
   }
@@ -263,8 +280,12 @@ async function exportItemsTool(args: Args, ctx: ClientToolContext | null): Promi
               quality: String(args.quality ?? ""),
               batch,
             });
-      requests.push({ ...request,
-        ...(typeof args.output_dir === "string" && args.output_dir.trim() ? { outputDirectory: folder.dir } : {}) });
+      requests.push({
+        ...request,
+        ...(typeof args.output_dir === "string" && args.output_dir.trim()
+          ? { outputDirectory: folder.dir }
+          : {}),
+      });
     }
     const submitted = await submitExports(requests);
     for (let index = 0; index < planned.length; index++) {
@@ -284,13 +305,25 @@ async function exportItemsTool(args: Args, ctx: ClientToolContext | null): Promi
       for (let index = 0; index < error.submitted.length; index++) {
         const item = planned[index];
         const submission = error.submitted[index];
-        delivered.push({ job_id: submission.job_id, saved_to: item.filename, queue_position: submission.queue_position,
-          ...(item.kind === "media" ? { media_ref: item.ref } : { clip_id: item.clipId, duration_s: Math.round(item.seconds * 1000) / 1000 }) });
+        delivered.push({
+          job_id: submission.job_id,
+          saved_to: item.filename,
+          queue_position: submission.queue_position,
+          ...(item.kind === "media"
+            ? { media_ref: item.ref }
+            : { clip_id: item.clipId, duration_s: Math.round(item.seconds * 1000) / 1000 }),
+        });
       }
     }
-    const result = { ok: false, error: error instanceof Error ? error.message : String(error),
-      ...(delivered.length ? { exports: delivered } : {}) };
-    if (error instanceof ExportRequestError) { error.result = result; throw error; }
+    const result = {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+      ...(delivered.length ? { exports: delivered } : {}),
+    };
+    if (error instanceof ExportRequestError) {
+      error.result = result;
+      throw error;
+    }
     return result;
   } finally {
     sealExportBatch(batch);

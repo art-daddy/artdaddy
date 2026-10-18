@@ -47,6 +47,79 @@ function fakeChildren(openResults: Array<"loaded" | "failed"> = []) {
 }
 
 describe("ProjectDocumentRegistry", () => {
+  it("notifies only published usable opens and never waits for observers", async () => {
+    const reg = new ProjectDocumentRegistry(() => ({
+      open: async () => "loaded",
+      dispose: async () => {},
+    }));
+    const project = asProjectId("available-project");
+    const observed: string[] = [];
+    reg.subscribeOpened(() => {
+      throw new Error("observer failure");
+    });
+    reg.subscribeOpened(async () => {
+      throw new Error("async observer failure");
+    });
+    reg.subscribeOpened(() => new Promise<void>(() => {}));
+    const unsubscribe = reg.subscribeOpened((document) => {
+      expect(reg.get(project)).toBe(document);
+      expect(document.phase()).toBe("open");
+      observed.push(String(document.id));
+    });
+    await Promise.all([reg.open(project), reg.open(project)]);
+    expect(observed).toEqual(["available-project"]);
+    await reg.open(project);
+    expect(observed).toHaveLength(1);
+    await reg.close(project);
+    await reg.open(project);
+    expect(observed).toHaveLength(2);
+    unsubscribe();
+    await reg.close(project);
+    await reg.open(project);
+    expect(observed).toHaveLength(2);
+  });
+
+  it("does not publish failed or close-doomed opens to observers", async () => {
+    const opening = deferred<"loaded" | "failed">();
+    const reg = new ProjectDocumentRegistry((id) => ({
+      open: () => (String(id) === "failed-project" ? Promise.resolve("failed") : opening.promise),
+      dispose: async () => {},
+    }));
+    const observed: string[] = [];
+    reg.subscribeOpened((document) => {
+      observed.push(String(document.id));
+    });
+    await expect(reg.open(asProjectId("failed-project"))).rejects.toThrow(/could not open/);
+    const project = asProjectId("doomed-project");
+    const open = reg.open(project);
+    const close = reg.close(project);
+    opening.resolve("loaded");
+    await open;
+    await close;
+    expect(observed).toEqual([]);
+    expect(reg.getAuthority(project)).toBeUndefined();
+  });
+
+  it("notifies when a failed close returns to an editable document", async () => {
+    const reg = new ProjectDocumentRegistry(() => ({
+      open: async () => "loaded",
+      saveTranscript: async () => false,
+      dispose: async () => {},
+    }));
+    const project = asProjectId("cancelled-close");
+    const observed: string[] = [];
+    reg.subscribeOpened((document) => {
+      observed.push(document.phase());
+    });
+    await reg.open(project);
+    expect((await reg.close(project)).ok).toBe(false);
+    expect(observed).toEqual(["open"]);
+    reg.cancelClose(project);
+    expect(observed).toEqual(["open", "open"]);
+    reg.cancelClose(project);
+    expect(observed).toHaveLength(2);
+  });
+
   it("dedupes concurrent open(A) to one in-flight open and one instance", async () => {
     const openD = deferred<"loaded" | "failed">();
     let openCalls = 0;

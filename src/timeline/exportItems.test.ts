@@ -558,100 +558,151 @@ describe("export delivers separate files into a folder", () => {
     expect(Object.keys(p.disk.under(`${DL}/renders`))).toEqual(["proj.mp4"]);
   });
 
-  it.each(["whole", "clip", "copy"] as const)("does not create a destination folder after Cancel for %s export", async (kind) => {
-    const p = await project();
-    __setExportConfirmationForTests(async () => "cancel");
-    const args = { output_dir: "not-created-without-consent",
-      ...(kind === "clip" ? { clip_ids: [p.clips.a] } : kind === "copy" ? { media_refs: ["media_aaa"] } : {}) };
-    const result = await requestedExport(args, p.ctx) as Any;
-    expect(result.ok).toBe(false);
-    expect(result.error).toContain("cancelled before submission");
-    expect(p.disk.dirs.has(`${DL}/not-created-without-consent`)).toBe(false);
-    expect(p.disk.under(`${DL}/not-created-without-consent`)).toEqual({});
-    expect(p.ffmpeg).toHaveLength(0);
-    expect(listExportOutcomes()).toHaveLength(0);
-    await whenExportTelemetrySettles();
-    expect(exportBeacon).toHaveBeenCalledTimes(1);
-    expect(exportBeacon.mock.calls[0][0]).toMatchObject({ status: "declined", readiness: "unknown" });
-  });
-
-  it.each(["whole", "clip", "copy", "no-context"] as const)("counts an early %s refusal once without admitting a job", async (kind) => {
-    const p = await project({ extra: [{ id: "media_ext", path: "D:/footage/ext.mp4", filename: "ext.mp4", kind: "video", external: true }] });
-    let args: Record<string, unknown> = {};
-    if (kind === "whole" || kind === "clip") {
-      await p.disk.writeTextFile("D:/footage/ext.mp4", "linked footage");
-      const placed = await addClipsTool({ entries: [{ media_ref: "media_ext", timeline_in: 240, timeline_out: 270 }] }, p.ctx) as Any;
-      expect(placed.ok).toBe(true);
-      const source = await p.store.resolveMediaRef("media_ext");
-      expect(source).not.toBeNull();
-      await p.disk.remove(source!);
-      if (kind === "clip") args = { clip_ids: [p.clips.a] };
-    } else if (kind === "copy") args = { media_refs: ["not-in-the-library"] };
-    const result = await requestedExport(args, kind === "no-context" ? null : p.ctx) as Any;
-    expect(result.ok).toBe(false);
-    expect(listExportOutcomes()).toHaveLength(0);
-    await whenExportTelemetrySettles();
-    expect(exportBeacon).toHaveBeenCalledTimes(1);
-    expect(exportBeacon.mock.calls[0][0]).toMatchObject({ status: "blocked", readiness: "unknown" });
-  });
-
-  it.each([null, { unexpected_export_param: true }])("counts protocol-refused export arguments before any handler runs: %s", async (args) => {
-    const p = await project();
-    const handler = vi.fn((input: Record<string, unknown>) => exportTool(input, p.ctx));
-    const registry = new ClientToolRegistry();
-    registry.register("export", handler);
-    const result = await registry.run("export", args as Any) as Any;
-    expect(result.ok).toBe(false);
-    expect(handler).not.toHaveBeenCalled();
-    expect(exportBeacon).toHaveBeenCalledTimes(1);
-    expect(exportBeacon.mock.calls[0][0]).toMatchObject({ status: "blocked", readiness: "unknown" });
-    expect(listExportOutcomes()).toHaveLength(0);
-  });
-
-  it.each(["render", "copy"] as const)("counts an accepted %s once through the real dispatch and file outcome", async (operation) => {
-    const p = await project();
-    const result = await requestedExport(operation === "copy" ? { media_refs: ["media_aaa"] } : { clip_ids: [p.clips.a] }, p.ctx) as Any;
-    expect(result.ok, result.error).toBe(true);
-    await whenExportsSettle();
-    await whenExportTelemetrySettles();
-    expect(Object.keys(p.disk.under(DL))).toHaveLength(1);
-    expect(exportBeacon).toHaveBeenCalledTimes(1);
-    expect(exportBeacon.mock.calls[0][0]).toMatchObject({ status: "done", operation });
-  });
-
-  it.each([1, 2])("counts every output once when native batch admission fails at position %s", async (failureAt) => {
-    const p = await project();
-    const jobs = new FakeJobs();
-    jobs.delivery = localDeliveryPort(p.store);
-    const prepare = jobs.delivery.prepare.bind(jobs.delivery);
-    const copy = jobs.delivery.copy.bind(jobs.delivery);
-    let calls = 0;
-    jobs.delivery.prepare = async (...args) => {
-      if (++calls === failureAt) throw new Error("native intent write failed");
-      const delivery = await prepare(...args);
-      jobs.queueCopy(delivery);
-      return delivery;
-    };
-    jobs.delivery.copy = (id) => jobs.runCopy(id, () => copy(id));
-    __setJobSupervisor(jobs);
-    try {
-      const result = await requestedExport({ media_refs: ["media_aaa", "media_bbb"] }, p.ctx) as Any;
+  it.each(["whole", "clip", "copy"] as const)(
+    "does not create a destination folder after Cancel for %s export",
+    async (kind) => {
+      const p = await project();
+      __setExportConfirmationForTests(async () => "cancel");
+      const args = {
+        output_dir: "not-created-without-consent",
+        ...(kind === "clip"
+          ? { clip_ids: [p.clips.a] }
+          : kind === "copy"
+            ? { media_refs: ["media_aaa"] }
+            : {}),
+      };
+      const result = (await requestedExport(args, p.ctx)) as Any;
       expect(result.ok).toBe(false);
-      expect(result.exports?.length ?? 0).toBe(failureAt - 1);
-      expect(JSON.stringify(result)).not.toContain("export_refusal");
+      expect(result.error).toContain("cancelled before submission");
+      expect(p.disk.dirs.has(`${DL}/not-created-without-consent`)).toBe(false);
+      expect(p.disk.under(`${DL}/not-created-without-consent`)).toEqual({});
+      expect(p.ffmpeg).toHaveLength(0);
+      expect(listExportOutcomes()).toHaveLength(0);
+      await whenExportTelemetrySettles();
+      expect(exportBeacon).toHaveBeenCalledTimes(1);
+      expect(exportBeacon.mock.calls[0][0]).toMatchObject({
+        status: "declined",
+        readiness: "unknown",
+      });
+    },
+  );
+
+  it.each(["whole", "clip", "copy", "no-context"] as const)(
+    "counts an early %s refusal once without admitting a job",
+    async (kind) => {
+      const p = await project({
+        extra: [
+          {
+            id: "media_ext",
+            path: "D:/footage/ext.mp4",
+            filename: "ext.mp4",
+            kind: "video",
+            external: true,
+          },
+        ],
+      });
+      let args: Record<string, unknown> = {};
+      if (kind === "whole" || kind === "clip") {
+        await p.disk.writeTextFile("D:/footage/ext.mp4", "linked footage");
+        const placed = (await addClipsTool(
+          { entries: [{ media_ref: "media_ext", timeline_in: 240, timeline_out: 270 }] },
+          p.ctx,
+        )) as Any;
+        expect(placed.ok).toBe(true);
+        const source = await p.store.resolveMediaRef("media_ext");
+        expect(source).not.toBeNull();
+        await p.disk.remove(source!);
+        if (kind === "clip") args = { clip_ids: [p.clips.a] };
+      } else if (kind === "copy") args = { media_refs: ["not-in-the-library"] };
+      const result = (await requestedExport(args, kind === "no-context" ? null : p.ctx)) as Any;
+      expect(result.ok).toBe(false);
+      expect(listExportOutcomes()).toHaveLength(0);
+      await whenExportTelemetrySettles();
+      expect(exportBeacon).toHaveBeenCalledTimes(1);
+      expect(exportBeacon.mock.calls[0][0]).toMatchObject({
+        status: "blocked",
+        readiness: "unknown",
+      });
+    },
+  );
+
+  it.each([null, { unexpected_export_param: true }])(
+    "counts protocol-refused export arguments before any handler runs: %s",
+    async (args) => {
+      const p = await project();
+      const handler = vi.fn((input: Record<string, unknown>) => exportTool(input, p.ctx));
+      const registry = new ClientToolRegistry();
+      registry.register("export", handler);
+      const result = (await registry.run("export", args as Any)) as Any;
+      expect(result.ok).toBe(false);
+      expect(handler).not.toHaveBeenCalled();
+      expect(exportBeacon).toHaveBeenCalledTimes(1);
+      expect(exportBeacon.mock.calls[0][0]).toMatchObject({
+        status: "blocked",
+        readiness: "unknown",
+      });
+      expect(listExportOutcomes()).toHaveLength(0);
+    },
+  );
+
+  it.each(["render", "copy"] as const)(
+    "counts an accepted %s once through the real dispatch and file outcome",
+    async (operation) => {
+      const p = await project();
+      const result = (await requestedExport(
+        operation === "copy" ? { media_refs: ["media_aaa"] } : { clip_ids: [p.clips.a] },
+        p.ctx,
+      )) as Any;
+      expect(result.ok, result.error).toBe(true);
       await whenExportsSettle();
       await whenExportTelemetrySettles();
-      expect(exportBeacon).toHaveBeenCalledTimes(2);
-      const events = exportBeacon.mock.calls.map(([event]) => event);
-      expect(events.every((event) => event.operation === "copy")).toBe(true);
-      expect(events.filter((event) => event.status === "done")).toHaveLength(failureAt - 1);
-      expect(events.filter((event) => event.status === "blocked")).toHaveLength(3 - failureAt);
-      expect(Object.values(p.disk.under(DL))).toEqual(failureAt === 2 ? ["bytes of Tape 14.mp4"] : []);
-    } finally {
-      await whenExportsSettle();
-      __resetJobSupervisor();
-    }
-  });
+      expect(Object.keys(p.disk.under(DL))).toHaveLength(1);
+      expect(exportBeacon).toHaveBeenCalledTimes(1);
+      expect(exportBeacon.mock.calls[0][0]).toMatchObject({ status: "done", operation });
+    },
+  );
+
+  it.each([1, 2])(
+    "counts every output once when native batch admission fails at position %s",
+    async (failureAt) => {
+      const p = await project();
+      const jobs = new FakeJobs();
+      jobs.delivery = localDeliveryPort(p.store);
+      const prepare = jobs.delivery.prepare.bind(jobs.delivery);
+      const copy = jobs.delivery.copy.bind(jobs.delivery);
+      let calls = 0;
+      jobs.delivery.prepare = async (...args) => {
+        if (++calls === failureAt) throw new Error("native intent write failed");
+        const delivery = await prepare(...args);
+        jobs.queueCopy(delivery);
+        return delivery;
+      };
+      jobs.delivery.copy = (id) => jobs.runCopy(id, () => copy(id));
+      __setJobSupervisor(jobs);
+      try {
+        const result = (await requestedExport(
+          { media_refs: ["media_aaa", "media_bbb"] },
+          p.ctx,
+        )) as Any;
+        expect(result.ok).toBe(false);
+        expect(result.exports?.length ?? 0).toBe(failureAt - 1);
+        expect(JSON.stringify(result)).not.toContain("export_refusal");
+        await whenExportsSettle();
+        await whenExportTelemetrySettles();
+        expect(exportBeacon).toHaveBeenCalledTimes(2);
+        const events = exportBeacon.mock.calls.map(([event]) => event);
+        expect(events.every((event) => event.operation === "copy")).toBe(true);
+        expect(events.filter((event) => event.status === "done")).toHaveLength(failureAt - 1);
+        expect(events.filter((event) => event.status === "blocked")).toHaveLength(3 - failureAt);
+        expect(Object.values(p.disk.under(DL))).toEqual(
+          failureAt === 2 ? ["bytes of Tape 14.mp4"] : [],
+        );
+      } finally {
+        await whenExportsSettle();
+        __resetJobSupervisor();
+      }
+    },
+  );
 
   // The failure direction: one bad item must leave NOTHING behind, not a half-delivered folder.
   it.each([

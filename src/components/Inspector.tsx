@@ -154,12 +154,16 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
   // it). `flex-wrap` + a basis lets the control drop under its label instead of
   // being squeezed out when the panel is dragged narrow.
   return (
-    <label className="flex flex-wrap items-center gap-x-2 gap-y-0.5 py-0.5">
+    <div
+      role="group"
+      aria-label={label}
+      className="flex flex-wrap items-center gap-x-2 gap-y-0.5 py-0.5"
+    >
       <span className="w-16 shrink-0 text-[10px] uppercase tracking-wider text-neutral-500">
         {label}
       </span>
       <div className="flex min-w-0 flex-1 basis-24 items-center gap-1">{children}</div>
-    </label>
+    </div>
   );
 }
 // Sections remember whether they are open, keyed by title — panel groups in other NLEs, which is a

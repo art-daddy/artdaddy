@@ -6,18 +6,26 @@ import {
   isChatExecutionCurrent,
   quiesceChatProject,
   resumeChatProject,
+  saveProjectSessionNow,
   resetHistoryModeSupport,
   useChat,
 } from "./chat";
 import { useEditor } from "./editor";
 import { peekFirstPrompt, setFirstPrompt } from "./firstPrompt";
 import { __resetJobNotes, notifyJobSettled, pendingJobNotes, type SettledJob } from "./jobNotes";
-import { loadClientSession, persistSession, persistSessionSoon } from "./transcriptFile";
+import {
+  loadClientSession,
+  persistSession,
+  persistSessionNow,
+  persistSessionSoon,
+} from "./transcriptFile";
 import { inferRoundStreaming } from "../agent/api";
 import { TIMELINE_CHANGED_NOTE } from "../agent/compose";
+import { agentEventContext, createToolTrace, setAgentContext } from "../api/agentEvents";
 import { setOpenDocumentResolver } from "../project/openDocuments";
 import { emptyTimeline, type Timeline } from "../timeline/model";
-import { openToolHost } from "../tools/host";
+import { openToolHost, type ToolRunOptions } from "../tools/host";
+import { joinPath, type ProjectStoreAccess } from "../tools/store";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -155,6 +163,152 @@ describe("isChatExecutionCurrent (origin fence source)", () => {
     ).toBe(false); // no chat instance
     disposeChatStore("pf");
   });
+});
+
+describe("owned chat final-save durability", () => {
+  it("retries the retained brief on Keep Editing after storage becomes writable", async () => {
+    const actual = await vi.importActual<typeof import("./transcriptFile")>("./transcriptFile");
+    const projectId = "failed-save-resume-retry";
+    const projectDir = `C:/qa/${projectId}`;
+    const transcriptPath = joinPath(projectDir, actual.SESSION_REL);
+    const files = new Map<string, string>([
+      [transcriptPath, JSON.stringify({ requests: [], provider_snapshot: null })],
+    ]);
+    const before = files.get(transcriptPath);
+    let writable = false;
+    const store = {
+      projectDir,
+      sessionLive: () => true,
+      writeProjectText: async (target: string, body: string, guard?: () => boolean) => {
+        if (guard && !guard()) return false;
+        if (!writable) throw new Error("QA transcript write denied");
+        files.set(target, body);
+        return true;
+      },
+      readJson: async <Value>(target: string, fallback: Value): Promise<Value> =>
+        files.has(target) ? (JSON.parse(files.get(target)!) as Value) : fallback,
+    } as unknown as ProjectStoreAccess;
+    const soon = vi.mocked(persistSessionSoon);
+    const now = vi.mocked(persistSessionNow);
+    soon.mockImplementation(actual.persistSessionSoon);
+    now.mockImplementation(actual.persistSessionNow);
+    try {
+      useEditor.setState({ projectId, store });
+      loadSess.mockResolvedValueOnce({ requests: [], providerSnapshot: null });
+      const chat = getChatStore(projectId);
+      await chat.getState().load(projectId);
+      runnerStart.mockImplementationOnce(async () => {
+        emit("error", { error: "The server could not complete this request." });
+      });
+      await chat.getState().send("KEEP THE BRIEF WITHOUT ANOTHER MESSAGE");
+      quiesceChatProject(projectId);
+      expect(await saveProjectSessionNow(projectId)).toBe(false);
+      expect(files.get(transcriptPath)).toBe(before);
+      resumeChatProject(projectId);
+      await actual._persistIdle(projectDir);
+      expect(files.get(transcriptPath)).toBe(before);
+      expect(chat.getState().turns[0].userText).toBe("KEEP THE BRIEF WITHOUT ANOTHER MESSAGE");
+      expect(runnerStart).toHaveBeenCalledTimes(1);
+      quiesceChatProject(projectId);
+      expect(await saveProjectSessionNow(projectId)).toBe(false);
+      writable = true;
+      resumeChatProject(projectId);
+      await actual._persistIdle(projectDir);
+      const restored = await actual.loadSession(store);
+      expect(restored.requests).toHaveLength(1);
+      expect(restored.requests[0].message?.text).toBe("KEEP THE BRIEF WITHOUT ANOTHER MESSAGE");
+      expect(restored.requests[0].response).toEqual([
+        { kind: "error", error: "The server could not complete this request." },
+      ]);
+      expect(runnerStart).toHaveBeenCalledTimes(1);
+    } finally {
+      await actual._persistIdle(projectDir);
+      disposeChatStore(projectId);
+      soon.mockReset();
+      now.mockReset().mockResolvedValue(true);
+    }
+  });
+
+  it.each(["detached", "another-project"] as const)(
+    "does not acknowledge an unsaved brief when its editor is %s after Keep Editing",
+    async (boundary) => {
+      const actual = await vi.importActual<typeof import("./transcriptFile")>("./transcriptFile");
+      const projectId = `failed-save-${boundary}`;
+      const projectDir = `C:/qa/${projectId}`;
+      const transcriptPath = joinPath(projectDir, actual.SESSION_REL);
+      const otherProjectDir = `C:/qa/${projectId}-other`;
+      const otherTranscriptPath = joinPath(otherProjectDir, actual.SESSION_REL);
+      const files = new Map<string, string>([
+        [transcriptPath, JSON.stringify({ requests: [], provider_snapshot: null })],
+        [otherTranscriptPath, JSON.stringify({ requests: [], provider_snapshot: null })],
+      ]);
+      const before = files.get(transcriptPath);
+      const otherBefore = files.get(otherTranscriptPath);
+      let writable = false;
+      const store = {
+        projectDir,
+        sessionLive: () => true,
+        writeProjectText: async (target: string, body: string, guard?: () => boolean) => {
+          if (guard && !guard()) return false;
+          if (!writable) throw new Error("QA transcript write denied");
+          files.set(target, body);
+          return true;
+        },
+        readJson: async <Value>(target: string, fallback: Value): Promise<Value> =>
+          files.has(target) ? (JSON.parse(files.get(target)!) as Value) : fallback,
+      } as unknown as ProjectStoreAccess;
+      const otherStore = { ...store, projectDir: otherProjectDir } as ProjectStoreAccess;
+      const soon = vi.mocked(persistSessionSoon);
+      const now = vi.mocked(persistSessionNow);
+      soon.mockImplementation(actual.persistSessionSoon);
+      now.mockImplementation(actual.persistSessionNow);
+      try {
+        useEditor.setState({ projectId, store });
+        loadSess.mockResolvedValueOnce({ requests: [], providerSnapshot: null });
+        const chat = getChatStore(projectId);
+        await chat.getState().load(projectId);
+        runnerStart.mockImplementationOnce(async () => {
+          emit("error", { error: "The server could not complete this request." });
+        });
+        await chat.getState().send("KEEP THE FAILED SAVE BRIEF");
+        quiesceChatProject(projectId);
+        expect(await saveProjectSessionNow(projectId)).toBe(false);
+        expect(files.get(transcriptPath)).toBe(before);
+        resumeChatProject(projectId);
+        await actual._persistIdle(projectDir);
+        expect(files.get(transcriptPath)).toBe(before);
+        writable = true;
+        useEditor.setState({
+          projectId: boundary === "detached" ? null : "different-project",
+          store: boundary === "detached" ? null : otherStore,
+        });
+        quiesceChatProject(projectId);
+        expect(await saveProjectSessionNow(projectId)).toBe(false);
+        expect(files.get(transcriptPath)).toBe(before);
+        expect(files.get(otherTranscriptPath)).toBe(otherBefore);
+        expect(chat.getState().turns[0].userText).toBe("KEEP THE FAILED SAVE BRIEF");
+        resumeChatProject(projectId);
+        await actual._persistIdle(projectDir);
+        expect(files.get(transcriptPath)).toBe(before);
+        expect(files.get(otherTranscriptPath)).toBe(otherBefore);
+        useEditor.setState({ projectId, store });
+        quiesceChatProject(projectId);
+        expect(await saveProjectSessionNow(projectId)).toBe(true);
+        const restored = await actual.loadSession(store);
+        expect(restored.requests).toHaveLength(1);
+        expect(restored.requests[0].message?.text).toBe("KEEP THE FAILED SAVE BRIEF");
+        expect(restored.requests[0].response).toEqual([
+          { kind: "error", error: "The server could not complete this request." },
+        ]);
+        expect(files.get(otherTranscriptPath)).toBe(otherBefore);
+      } finally {
+        await actual._persistIdle(projectDir);
+        disposeChatStore(projectId);
+        soon.mockReset();
+        now.mockReset().mockResolvedValue(true);
+      }
+    },
+  );
 });
 
 // The wake is a CHAIN — a job settles, a queue debounces it, a sink delivers it, the store starts
@@ -851,6 +1005,69 @@ describe("useChat loop deps + remaining actions", () => {
     expect(await lastDeps.runTool("nope", {})).toEqual({ ok: false, error: "unknown tool: nope" });
   });
 
+  it("keeps tool events attached to their original chat when another driver changes the global context", async () => {
+    const previous = agentEventContext();
+    const transcriptId = useChat.getState().transcriptId;
+    try {
+      setDesktop("p1");
+      useChat.setState({ projectId: "p1", transcriptId: "chat-a", model: "gpt-5.6-luna" });
+      await useChat.getState().send("work in this project");
+      const original = lastDeps.eventContext();
+      expect(original).toMatchObject({
+        surface: "app",
+        project_id: "p1",
+        transcript_id: "chat-a",
+        model: "gpt-5.6-luna",
+      });
+      setAgentContext({
+        surface: "mcp",
+        project_id: "p2",
+        transcript_id: "chat-b",
+        model: "other",
+      });
+      expect(lastDeps.eventContext()).toEqual(original);
+    } finally {
+      setAgentContext({
+        surface: previous.surface,
+        project_id: previous.project_id,
+        transcript_id: previous.transcript_id,
+        model: previous.model,
+      });
+      useChat.setState({ transcriptId });
+    }
+  });
+
+  it("Stop reaches a running tool through the current host API and preserves its trace", async () => {
+    const run = vi.fn(
+      async (_name: string, _args: Record<string, unknown>, options: ToolRunOptions) =>
+        new Promise<unknown>((resolve) => {
+          if (!options.signal) return resolve({ ok: false, error: "missing Stop signal" });
+          options.signal.addEventListener("abort", () => resolve({ ok: false, error: "stopped" }), {
+            once: true,
+          });
+        }),
+    );
+    vi.mocked(openToolHost).mockImplementationOnce(
+      (id: string) =>
+        ({
+          projectId: id,
+          ready: Promise.resolve(),
+          has: () => true,
+          run,
+          store: () => null,
+        }) as Any,
+    );
+    setDesktop("p1");
+    useChat.setState({ projectId: "p1" });
+    await useChat.getState().send("inspect the timeline");
+    const trace = createToolTrace("get_timeline", {}, lastDeps.eventContext(), "tool-1");
+    const pending = lastDeps.runTool("get_timeline", {}, trace);
+    expect(run.mock.calls[0][2].trace).toBe(trace);
+    expect(run.mock.calls[0][2].origin?.executionId).toBe(useChat.getState().execToken);
+    await useChat.getState().stop();
+    expect(await pending).toEqual({ ok: false, error: "stopped" });
+  });
+
   it("wires onToolError / onUsage / mode / stopped / session", async () => {
     setDesktop("p1");
     useChat.setState({ projectId: "p1", mode: "autopilot" });
@@ -1031,6 +1248,7 @@ describe("useChat loop deps + remaining actions", () => {
       return calls[calls.length - 1][1] as {
         requests: Array<{
           message: { text: string };
+          response?: Array<{ kind: string; error?: string; code?: string }>;
           checkpoint?: { timeline?: unknown };
         }>;
       };
@@ -1068,14 +1286,110 @@ describe("useChat loop deps + remaining actions", () => {
       expect(useChat.getState().turns.map((t) => t.userText)).toContain("add 25 clips");
     });
 
-    it("persists a turn that ends in an ERROR, not just a clean one", async () => {
-      setDesktop("p1");
-      useChat.setState({ projectId: "p1" });
-      runnerStart.mockRejectedValueOnce(new Error("boom"));
-      await useChat.getState().send("do a thing");
-      expect(useChat.getState().turns[0].status).toBe("error");
-      expect(lastPersisted().requests.map((r) => r.message.text)).toContain("do a thing");
-    });
+    it.each([
+      { label: "unexpected failure", failure: new Error("private transport diagnostic") },
+      { label: "network failure", failure: new TypeError("Failed to fetch") },
+    ])(
+      "keeps the safe $label reply and failed status after reload without retrying",
+      async ({ failure }) => {
+        setDesktop("p1");
+        useChat.setState({ projectId: "p1" });
+        runnerStart.mockRejectedValueOnce(failure);
+        await useChat.getState().send("do a thing");
+        expect(useChat.getState().turns[0].status).toBe("error");
+        const message = useChat.getState().error;
+        expect(message).toBeTruthy();
+        expect(message).not.toContain(failure.message);
+        const saved = lastPersisted();
+        expect(saved.requests[0].response?.filter((part) => part.kind === "error")).toEqual([
+          { kind: "error", error: message },
+        ]);
+        loadSess.mockResolvedValueOnce({
+          requests: saved.requests,
+          providerSnapshot: null,
+          session: null,
+        });
+        await useChat.getState().load("p1");
+        const restored = useChat.getState().turns[0];
+        expect(restored.userText).toBe("do a thing");
+        expect(restored.status).toBe("error");
+        expect(restored.parts.filter((part) => part.kind === "error")).toEqual([
+          { kind: "error", error: message },
+        ]);
+        expect(runnerStart).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it.each(["transport", "terminal event", "host startup"] as const)(
+      "keeps a %s failure through the real session writer and loader",
+      async (failurePath) => {
+        const actual = await vi.importActual<typeof import("./transcriptFile")>("./transcriptFile");
+        const files: Record<string, string> = {};
+        const store = {
+          projectDir: "C:/proj/failed-chat-roundtrip",
+          sessionLive: () => true,
+          writeProjectText: async (path: string, content: string, guard?: () => boolean) => {
+            if (guard && !guard()) return false;
+            files[path] = content;
+            return true;
+          },
+          readJson: async <Value>(path: string, fallback: Value): Promise<Value> =>
+            path in files ? (JSON.parse(files[path]) as Value) : fallback,
+        } as unknown as ProjectStoreAccess;
+        const soon = vi.mocked(persistSessionSoon);
+        soon.mockImplementation(actual.persistSessionSoon);
+        try {
+          setDesktop("p1");
+          useEditor.setState({ store });
+          useChat.setState({ projectId: "p1" });
+          if (failurePath === "transport") {
+            runnerStart.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+          } else if (failurePath === "terminal event") {
+            runnerStart.mockImplementationOnce(async () => {
+              emit("reasoning", { text: "Checking the source footage." });
+              emit("error", { error: "The server could not complete this request." });
+            });
+          } else {
+            vi.mocked(openToolHost).mockImplementationOnce(
+              () =>
+                ({
+                  projectId: "p1",
+                  ready: Promise.reject(new Error("private host startup diagnostic")),
+                  has: () => false,
+                  run: vi.fn(),
+                  store: () => null,
+                }) as Any,
+            );
+          }
+          await useChat.getState().send("keep my original edit brief");
+          const message = useChat.getState().error;
+          expect(message).toBeTruthy();
+          await actual._persistIdle(store.projectDir);
+          const saved = JSON.parse(files[joinPath(store.projectDir, actual.SESSION_REL)]);
+          expect(
+            saved.requests[0].response.filter((part: { kind: string }) => part.kind === "error"),
+          ).toEqual([{ kind: "error", error: message }]);
+          loadSess.mockResolvedValueOnce(await actual.loadSession(store));
+          await useChat.getState().load("p1");
+          const restored = useChat.getState().turns[0];
+          expect(restored).toMatchObject({
+            userText: "keep my original edit brief",
+            status: "error",
+          });
+          expect(restored.parts).toEqual(saved.requests[0].response);
+          if (failurePath === "terminal event") {
+            expect(restored.parts[0]).toEqual({
+              kind: "reasoning",
+              text: "Checking the source footage.",
+            });
+          }
+          expect(runnerStart).toHaveBeenCalledTimes(failurePath === "host startup" ? 0 : 1);
+        } finally {
+          await actual._persistIdle(store.projectDir);
+          soon.mockReset();
+        }
+      },
+    );
 
     // Reported in alpha: after a crash the chat showed the user's message and NOTHING else --
     // the transcript was written at send and again at turn end, so a turn that never ended lost

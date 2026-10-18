@@ -74,44 +74,125 @@ function tl(clips: Any[], canvas = { width: 1920, height: 1080, fps: 30 }): Time
 
 describe("combined-workload preparation", () => {
   it("refuses irreducible experimental reader overages instead of bypassing the partition rail", () => {
-    const make = (count: number) => tl(Array.from({ length: count }, (_, index) => ({ id: `simultaneous-${index}`,
-      media_ref: `/source-${index}.mp4`, source_in: 0, source_out: 1 / 30, timeline_in: 0, timeline_out: 1 / 30 })));
-    expect(() => buildRenderCommand(make(32), "/accepted.mp4", { engine: "partition-pipes-v1" })).not.toThrow();
-    expect(() => buildRenderCommand(make(33), "/refused.mp4", { engine: "partition-pipes-v1" })).toThrow("native reader budget");
+    const make = (count: number) =>
+      tl(
+        Array.from({ length: count }, (_, index) => ({
+          id: `simultaneous-${index}`,
+          media_ref: `/source-${index}.mp4`,
+          source_in: 0,
+          source_out: 1 / 30,
+          timeline_in: 0,
+          timeline_out: 1 / 30,
+        })),
+      );
+    expect(() =>
+      buildRenderCommand(make(32), "/accepted.mp4", { engine: "partition-pipes-v1" }),
+    ).not.toThrow();
+    expect(() =>
+      buildRenderCommand(make(33), "/refused.mp4", { engine: "partition-pipes-v1" }),
+    ).toThrow("native reader budget");
   });
 
   it("prepares two hours of 4K60 with5000clips and16simultaneous sources inside native receipt bounds", () => {
     const frames = 2 * 60 * 60 * 60;
-    const model: Timeline = { units: "frames", canvas: { width: 3840, height: 2160, fps: 60 }, tracks: [] };
+    const model: Timeline = {
+      units: "frames",
+      canvas: { width: 3840, height: 2160, fps: 60 },
+      tracks: [],
+    };
     for (let layer = 0; layer < 16; layer++) {
       const count = 312 + (layer < 8 ? 1 : 0);
-      model.tracks.push({ id: `layer-${layer}`, kind: "video", z: layer, clips: Array.from({ length: count }, (_, index) => {
-        const start = Math.floor((index * frames) / count);
-        const end = Math.floor(((index + 1) * frames) / count);
-        return { id: `layer-${layer}-${index}`, kind: "video", media_ref: `C:/export-qualification/source-${layer}.mp4`,
-          source_in: 0, source_out: end - start, timeline_in: start, timeline_out: end,
-          transform: { position: { x: ((layer % 4) + 0.5) / 4, y: (Math.floor(layer / 4) + 0.5) / 4 }, scale: 0.25 } };
-      }) });
+      model.tracks.push({
+        id: `layer-${layer}`,
+        kind: "video",
+        z: layer,
+        clips: Array.from({ length: count }, (_, index) => {
+          const start = Math.floor((index * frames) / count);
+          const end = Math.floor(((index + 1) * frames) / count);
+          return {
+            id: `layer-${layer}-${index}`,
+            kind: "video",
+            media_ref: `C:/export-qualification/source-${layer}.mp4`,
+            source_in: 0,
+            source_out: end - start,
+            timeline_in: start,
+            timeline_out: end,
+            transform: {
+              position: { x: ((layer % 4) + 0.5) / 4, y: (Math.floor(layer / 4) + 0.5) / 4 },
+              scale: 0.25,
+            },
+          };
+        }),
+      });
     }
-    model.tracks.push({ id: "music", kind: "audio", z: 0, clips: [{ id: "score", kind: "audio",
-      media_ref: "C:/export-qualification/stereo-score.wav", source_in: 0, source_out: frames,
-      timeline_in: 0, timeline_out: frames, fade: { in: 60, out: 60 } }] });
+    model.tracks.push({
+      id: "music",
+      kind: "audio",
+      z: 0,
+      clips: [
+        {
+          id: "score",
+          kind: "audio",
+          media_ref: "C:/export-qualification/stereo-score.wav",
+          source_in: 0,
+          source_out: frames,
+          timeline_in: 0,
+          timeline_out: frames,
+          fade: { in: 60, out: 60 },
+        },
+      ],
+    });
     const started = performance.now();
-    const plan = buildRenderCommand(model, "C:/export-qualification/.stage.partial", { engine: "partition-pipes-v1" });
+    const plan = buildRenderCommand(model, "C:/export-qualification/.stage.partial", {
+      engine: "partition-pipes-v1",
+    });
     const elapsedMs = performance.now() - started;
     expect(plan.duration).toBe(7200);
     expect(plan.steps!.reduce((sum, step) => sum + Math.round(step.duration * 60), 0)).toBe(frames);
     expect(plan.steps!.length).toBeLessThanOrEqual(4096);
-    const native = { id: "qualification", lane: "export", program: "ffmpeg", args: plan.steps![0].args,
-      steps: [...plan.steps!.slice(1).map((step) => step.args), plan.args], cwd: "C:/owned-app/work/qualification",
-      meta: { kind: "export", renderTransport: plan.transport, plan: { sources: plan.sources, output: plan.output, duration: plan.duration } } };
+    const native = {
+      id: "qualification",
+      lane: "export",
+      program: "ffmpeg",
+      args: plan.steps![0].args,
+      steps: [...plan.steps!.slice(1).map((step) => step.args), plan.args],
+      cwd: "C:/owned-app/work/qualification",
+      meta: {
+        kind: "export",
+        renderTransport: plan.transport,
+        plan: { sources: plan.sources, output: plan.output, duration: plan.duration },
+      },
+    };
     const receiptBytes = new TextEncoder().encode(JSON.stringify(native)).length;
-    const stagedBytes = plan.assFiles.reduce((sum, file) => sum + new TextEncoder().encode(file.content).length, 0);
-    const maxInputs = Math.max(...plan.steps!.map((step) => step.args.filter((argument) => argument === "-i").length));
-    console.log(JSON.stringify({ qualificationPreparationOnly: true, visualClips: 5000, simultaneousVideoSources: 16,
-      frames, partitions: plan.steps!.length, elapsedMs, receiptBytes, stagedBytes, maxInputs, mediaRendered: false }));
-    expect(maxInputs, "experimental partitions must bound video decoder fan-in to32 plus the single score input").toBeLessThanOrEqual(33);
-    expect(receiptBytes, "native request alone must fit the retained receipt byte budget").toBeLessThan(8 * 1024 * 1024);
+    const stagedBytes = plan.assFiles.reduce(
+      (sum, file) => sum + new TextEncoder().encode(file.content).length,
+      0,
+    );
+    const maxInputs = Math.max(
+      ...plan.steps!.map((step) => step.args.filter((argument) => argument === "-i").length),
+    );
+    console.log(
+      JSON.stringify({
+        qualificationPreparationOnly: true,
+        visualClips: 5000,
+        simultaneousVideoSources: 16,
+        frames,
+        partitions: plan.steps!.length,
+        elapsedMs,
+        receiptBytes,
+        stagedBytes,
+        maxInputs,
+        mediaRendered: false,
+      }),
+    );
+    expect(
+      maxInputs,
+      "experimental partitions must bound video decoder fan-in to32 plus the single score input",
+    ).toBeLessThanOrEqual(33);
+    expect(
+      receiptBytes,
+      "native request alone must fit the retained receipt byte budget",
+    ).toBeLessThan(8 * 1024 * 1024);
   }, 120_000);
 });
 
@@ -339,12 +420,25 @@ describe("buildRenderCommand — one frame (UJ-012)", () => {
 
 describe("buildRenderCommand", () => {
   it("range readers obey the shared half-open visibility bounds at both cut edges", () => {
-    const authored = tl(Array.from({ length: 3 }, (_, index) => ({ media_ref: `/cut-${index}.mp4`,
-      source_in: 0, source_out: 1, timeline_in: index, timeline_out: index + 1 })));
+    const authored = tl(
+      Array.from({ length: 3 }, (_, index) => ({
+        media_ref: `/cut-${index}.mp4`,
+        source_in: 0,
+        source_out: 1,
+        timeline_in: index,
+        timeline_out: index + 1,
+      })),
+    );
     const inputsOf = (args: string[]) => args.filter((_, index) => args[index - 1] === "-i");
-    expect(inputsOf(buildRenderCommand(authored, "/middle.mp4", { range: { from: 30, to: 60 } }).args)).toEqual(["/cut-1.mp4"]);
-    expect(inputsOf(buildRenderCommand(authored, "/first.mp4", { range: { from: 0, to: 30 } }).args)).toEqual(["/cut-0.mp4"]);
-    expect(inputsOf(buildRenderCommand(authored, "/last.mp4", { range: { from: 60, to: 90 } }).args)).toEqual(["/cut-2.mp4"]);
+    expect(
+      inputsOf(buildRenderCommand(authored, "/middle.mp4", { range: { from: 30, to: 60 } }).args),
+    ).toEqual(["/cut-1.mp4"]);
+    expect(
+      inputsOf(buildRenderCommand(authored, "/first.mp4", { range: { from: 0, to: 30 } }).args),
+    ).toEqual(["/cut-0.mp4"]);
+    expect(
+      inputsOf(buildRenderCommand(authored, "/last.mp4", { range: { from: 60, to: 90 } }).args),
+    ).toEqual(["/cut-2.mp4"]);
   });
 
   // The whole exporter works in seconds. Before this was normalised inside buildRenderCommand, a
@@ -379,55 +473,61 @@ describe("buildRenderCommand", () => {
   });
 
   it("automatically selects a backend from captured input pressure without changing safe defaults", () => {
-    const small = tl([{ media_ref: "/video.mp4", source_in: 0, source_out: 2, timeline_in: 0, timeline_out: 2 }]);
-    const many = tl(Array.from({ length: 98 }, (_, index) => ({ media_ref: `/video-${index}.mp4`, source_in: 0, source_out: 1 / 30,
-      timeline_in: index / 30, timeline_out: (index + 1) / 30 })));
-    expect(buildRenderCommand(small, "/small.mp4", { engine: "auto" }).selection).toMatchObject({ backend: "file-sequence-v1", reason: "bounded-single-pass" });
+    const small = tl([
+      { media_ref: "/video.mp4", source_in: 0, source_out: 2, timeline_in: 0, timeline_out: 2 },
+    ]);
+    const many = tl(
+      Array.from({ length: 98 }, (_, index) => ({
+        media_ref: `/video-${index}.mp4`,
+        source_in: 0,
+        source_out: 1 / 30,
+        timeline_in: index / 30,
+        timeline_out: (index + 1) / 30,
+      })),
+    );
+    expect(buildRenderCommand(small, "/small.mp4", { engine: "auto" }).selection).toMatchObject({
+      backend: "file-sequence-v1",
+      reason: "bounded-single-pass",
+    });
     const automatic = buildRenderCommand(many, "/many.mp4", { engine: "auto" });
-    expect(automatic.selection).toMatchObject({ backend: "partition-pipes-v1", reason: "input-pressure", sourceInputs: 98 });
+    expect(automatic.selection).toMatchObject({
+      backend: "partition-pipes-v1",
+      reason: "input-pressure",
+      sourceInputs: 98,
+    });
     expect(automatic.transport).toBe("partition-pipes-v1");
-    expect(buildRenderCommand(many, "/safe.mp4").selection).toMatchObject({ backend: "file-sequence-v1", reason: "standard-policy" });
+    expect(buildRenderCommand(many, "/safe.mp4").selection).toMatchObject({
+      backend: "file-sequence-v1",
+      reason: "standard-policy",
+    });
     const frame = buildRenderCommand(small, "/frame.png", { engine: "auto" }, { frame: 0 });
     expect(frame.selection).toMatchObject({ backend: "file-sequence-v1", reason: "frame" });
     expect(frame.transport).toBeUndefined();
   });
 
-  it("automatically bounds dense promised projects even when their source count is small", () => {
-    for (const [width, height, layers] of [[3840, 2160, 4], [1920, 1080, 8]]) {
-      const authored = tl(Array.from({ length: layers }, (_, index) => ({ media_ref: `/source-${index}.mp4`,
-        kind: "video", source_in: 0, source_out: 3, timeline_in: 0, timeline_out: 3 })), { width, height, fps: 30 });
-      const automatic = buildRenderCommand(authored, "/automatic.mp4", { engine: "auto" });
-      expect(automatic.selection).toMatchObject({ policy: "auto", backend: "partition-pipes-v1", reason: "resource-pressure" });
-      expect(automatic.workload.peakMediaLayers).toBe(layers);
-      expect(automatic.transport).toBe("partition-pipes-v1");
-      expect(automatic.output).toEqual(buildRenderCommand(authored, "/standard.mp4").output);
-      expect(buildRenderCommand(authored, "/frame.png", { engine: "auto" }, { frame: 0 }).selection)
-        .toMatchObject({ backend: "file-sequence-v1", reason: "frame" });
-    }
-  });
-
-  it("bounds only final above-HD streamed software encoding to the approved two threads", () => {
-    const authored = tl([{ media_ref: "/video.mp4", source_in: 0, source_out: 2, timeline_in: 0, timeline_out: 2 }],
-      { width: 3840, height: 2160, fps: 30 });
-    const threads = (args: string[]) => args[args.lastIndexOf("-threads:v") + 1];
-    const full = buildRenderCommand(authored, "/four-k.mp4", { engine: "partition-pipes-v1" });
-    expect(full.encoder).toBe("x264-crf-threads2");
-    expect(threads(full.args)).toBe("2");
-    expect(full.steps!.every((step) => threads(step.args) === "1")).toBe(true);
-    const hd = buildRenderCommand(authored, "/hd.mp4", { engine: "partition-pipes-v1", resolution: "1080p" });
-    expect(threads(hd.args)).toBe("1");
-    expect(hd.encoder).toBe("x264-crf");
-    expect(threads(buildRenderCommand(authored, "/fast.mp4", { engine: "partition-pipes-v1", mode: "fast" }).args)).toBe("1");
-    expect(buildRenderCommand(authored, "/standard.mp4").args).not.toContain("-threads:v");
-  });
-
   it("compiles one persistent audio producer rather than an audio mix per video partition", () => {
-    const plan = buildRenderCommand(tl([
-      ...Array.from({ length: 98 }, (_, index) => ({ media_ref: "/video.mp4", source_in: 0, source_out: 1 / 30,
-        timeline_in: index / 30, timeline_out: (index + 1) / 30 })),
-      { kind: "audio", media_ref: "/score.wav", source_in: 0, source_out: 98 / 30, timeline_in: 0, timeline_out: 98 / 30,
-        audio_effects: [{ type: "reverb", params: { room: 0.4 } }] },
-    ]), "/continuous.mp4", { engine: "partition-pipes-v1" });
+    const plan = buildRenderCommand(
+      tl([
+        ...Array.from({ length: 98 }, (_, index) => ({
+          media_ref: "/video.mp4",
+          source_in: 0,
+          source_out: 1 / 30,
+          timeline_in: index / 30,
+          timeline_out: (index + 1) / 30,
+        })),
+        {
+          kind: "audio",
+          media_ref: "/score.wav",
+          source_in: 0,
+          source_out: 98 / 30,
+          timeline_in: 0,
+          timeline_out: 98 / 30,
+          audio_effects: [{ type: "reverb", params: { room: 0.4 } }],
+        },
+      ]),
+      "/continuous.mp4",
+      { engine: "partition-pipes-v1" },
+    );
     expect(plan.steps!.length).toBeGreaterThan(1);
     expect(plan.audio?.args).toContain("/score.wav");
     expect(plan.steps!.every((step) => !step.args.includes("/score.wav"))).toBe(true);

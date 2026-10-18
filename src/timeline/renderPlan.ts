@@ -912,12 +912,21 @@ export interface RenderWorkload {
   readonly peakMediaLayers: number;
 }
 
-export function summarizeRenderWorkload(raw: Timeline, range?: { from: number; to: number }, maxDurationSeconds?: number): RenderWorkload {
+export function summarizeRenderWorkload(
+  raw: Timeline,
+  range?: { from: number; to: number },
+  maxDurationSeconds?: number,
+): RenderWorkload {
   const plan = resolveRenderPlan(toSecondsView(raw));
   const fps = plan.canvas.fps;
   const first = Math.max(0, Math.trunc(range?.from ?? 0));
-  const end = Math.max(first, Math.min(Math.trunc(range?.to ?? Math.round(plan.durationSec * fps)),
-    first + Math.ceil((maxDurationSeconds ?? Infinity) * fps)));
+  const end = Math.max(
+    first,
+    Math.min(
+      Math.trunc(range?.to ?? Math.round(plan.durationSec * fps)),
+      first + Math.ceil((maxDurationSeconds ?? Infinity) * fps),
+    ),
+  );
   const events = new Map<number, { visual: number; media: number }>();
   let visualClips = 0;
   let captionClips = 0;
@@ -927,11 +936,17 @@ export function summarizeRenderWorkload(raw: Timeline, range?: { from: number; t
     const start = Math.max(first, visible.first);
     const finish = Math.min(end, visible.end);
     if (finish <= start) continue;
-    if (clip.kind === "audio") { audioClips++; continue; }
+    if (clip.kind === "audio") {
+      audioClips++;
+      continue;
+    }
     const media = clip.kind !== "text";
     if (media) visualClips++;
     else captionClips++;
-    for (const [frame, delta] of [[start, 1], [finish, -1]]) {
+    for (const [frame, delta] of [
+      [start, 1],
+      [finish, -1],
+    ]) {
       const event = events.get(frame) ?? { visual: 0, media: 0 };
       event.visual += delta;
       if (media) event.media += delta;
@@ -948,8 +963,17 @@ export function summarizeRenderWorkload(raw: Timeline, range?: { from: number; t
     peakVisualLayers = Math.max(peakVisualLayers, visual);
     peakMediaLayers = Math.max(peakMediaLayers, media);
   }
-  return { width: Number(raw.canvas.width), height: Number(raw.canvas.height), fps,
-    durationSeconds: (end - first) / fps, visualClips, captionClips, audioClips, peakVisualLayers, peakMediaLayers };
+  return {
+    width: Number(raw.canvas.width),
+    height: Number(raw.canvas.height),
+    fps,
+    durationSeconds: (end - first) / fps,
+    visualClips,
+    captionClips,
+    audioClips,
+    peakVisualLayers,
+    peakMediaLayers,
+  };
 }
 
 export function resolveRenderPlan(timeline: Timeline): SecondsRenderPlan {

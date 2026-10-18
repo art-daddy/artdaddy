@@ -10,13 +10,11 @@
 // (renderSec / videoSec): >1 means the render takes LONGER than the clip's runtime.
 //
 // Run (needs ffmpeg): npx vitest run --config vitest.smoke.config.ts src/tools/bench_render.e2e.ts
-import { spawn, type ChildProcess } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createReadStream, promises as fsp } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { Transform } from "node:stream";
-import { pipeline } from "node:stream/promises";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -24,7 +22,6 @@ import {
   ff,
   have,
   installE2EDocuments,
-  libRef,
   mkCtx,
   openE2EDoc,
   probe,
@@ -35,7 +32,6 @@ import { shippedSidecar } from "../test/sidecars";
 import type { ClientToolContext } from "./context";
 import { ensureTimeline, replaceTimeline } from "../timeline/engine";
 import type { Animatable, Clip, Timeline, Track } from "../timeline/model";
-import { buildScene } from "../preview/scene";
 import {
   buildRenderCommand,
   finishRenderJob,
@@ -45,7 +41,6 @@ import {
   type ExportJobPlan,
 } from "../timeline/render";
 import { whenExportEnds } from "../timeline/exportQueue";
-import { resolveRenderPlan } from "../timeline/renderPlan";
 
 const EXPORT_PROBE = process.env.ARTDADDY_EXPORT_PROBE === "1";
 const PROBE_4K = EXPORT_PROBE && process.env.ARTDADDY_EXPORT_PROBE_4K === "1";
@@ -467,69 +462,6 @@ function bytesFromFfmpeg(args: string[], program?: string): Promise<Buffer> {
   });
 }
 
-async function framesFromFfmpeg(
-  args: string[],
-  frameBytes: number,
-  expectedFrames: number,
-  consume: (frame: Buffer, index: number) => void,
-  cwd?: string,
-): Promise<void> {
-  if (
-    !Number.isSafeInteger(frameBytes) ||
-    frameBytes < 1 ||
-    !Number.isSafeInteger(expectedFrames) ||
-    expectedFrames < 1 ||
-    !Number.isSafeInteger(frameBytes * expectedFrames)
-  )
-    throw new Error("invalid artifact frame budget");
-  const binary = shippedSidecar("ffmpeg");
-  if (!binary) throw new Error("shipped ffmpeg missing");
-  const child = spawn(binary, ["-hide_banner", "-loglevel", "error", ...args], {
-    windowsHide: true,
-    cwd,
-  });
-  let stderr = "";
-  const closed = new Promise<number | null>((resolve, reject) => {
-    child.once("error", reject);
-    child.once("close", resolve);
-  });
-  void closed.catch(() => undefined);
-  child.stderr.on("data", (chunk) => {
-    stderr = (stderr + String(chunk)).slice(-8192);
-  });
-  const deadline = setTimeout(() => child.kill("SIGKILL"), 60_000);
-  const frame = Buffer.allocUnsafe(frameBytes);
-  let filled = 0;
-  let frames = 0;
-  try {
-    for await (const chunk of child.stdout) {
-      let offset = 0;
-      while (offset < chunk.length) {
-        if (frames >= expectedFrames) throw new Error("artifact decode emitted extra frames");
-        const count = Math.min(frameBytes - filled, chunk.length - offset);
-        chunk.copy(frame, filled, offset, offset + count);
-        offset += count;
-        filled += count;
-        if (filled === frameBytes) {
-          consume(frame, frames++);
-          filled = 0;
-        }
-      }
-    }
-    const code = await closed;
-    if (code !== 0 || filled !== 0 || frames !== expectedFrames)
-      throw new Error(
-        `artifact decode ${code}, frames ${frames}/${expectedFrames}, trailing ${filled}: ${stderr.slice(-1000)}`,
-      );
-  } catch (error) {
-    child.kill("SIGKILL");
-    await closed.catch(() => undefined);
-    throw error;
-  } finally {
-    clearTimeout(deadline);
-  }
-}
-
 async function hashFile(file: string): Promise<string> {
   const hash = createHash("sha256");
   for await (const chunk of createReadStream(file)) hash.update(chunk);
@@ -556,57 +488,6 @@ function toneMagnitude(samples: Buffer, channel: number, frequency: number): num
     imaginary += value * Math.sin(angle);
   }
   return count ? (2 * Math.hypot(real, imaginary)) / count : 0;
-}
-
-async function stereoTonesFromFfmpeg(args: string[], expectedSamples: number) {
-  const real = [0, 0, 0, 0];
-  const imaginary = [0, 0, 0, 0];
-  let samples = 0;
-  await framesFromFfmpeg(args, 8, expectedSamples, (pair, index) => {
-    const left = pair.readFloatLE(0),
-      right = pair.readFloatLE(4);
-    for (let frequencyIndex = 0; frequencyIndex < 2; frequencyIndex++) {
-      const angle = (2 * Math.PI * (frequencyIndex === 0 ? 440 : 880) * index) / 48000;
-      const cosine = Math.cos(angle),
-        sine = Math.sin(angle);
-      real[frequencyIndex] += left * cosine;
-      imaginary[frequencyIndex] += left * sine;
-      real[frequencyIndex + 2] += right * cosine;
-      imaginary[frequencyIndex + 2] += right * sine;
-    }
-    samples = index + 1;
-  });
-  const magnitude = real.map((value, index) => (2 * Math.hypot(value, imaginary[index])) / samples);
-  return {
-    samples,
-    left440: magnitude[0],
-    left880: magnitude[1],
-    right440: magnitude[2],
-    right880: magnitude[3],
-  };
-}
-
-function temporalCorrelation(
-  reference: Buffer,
-  candidate: Buffer,
-  first: number,
-  last: number,
-  frameBytes: number,
-): number {
-  const referenceLast = reference.length - frameBytes;
-  let dot = 0;
-  let referenceEnergy = 0;
-  let candidateEnergy = 0;
-  for (let pixel = 0; pixel < frameBytes; pixel++) {
-    const expected = reference[referenceLast + pixel] - reference[pixel];
-    const actual = candidate[last + pixel] - candidate[first + pixel];
-    dot += expected * actual;
-    referenceEnergy += expected * expected;
-    candidateEnergy += actual * actual;
-  }
-  return referenceEnergy && candidateEnergy
-    ? dot / Math.sqrt(referenceEnergy * candidateEnergy)
-    : 0;
 }
 
 describe.skipIf(process.env.ARTDADDY_EXPORT_BOUNDARY !== "1")(

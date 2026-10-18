@@ -64,6 +64,7 @@ const invoke = vi.fn(async (cmd: string, args?: unknown): Promise<unknown> => {
       if (autoFinish) resolve(autoFinish);
     });
   if (cmd === "sidecar_kill") return true;
+  if (cmd === "jobs_export_protocol") return EXPORT_PROTOCOL_VERSION;
   return undefined;
 });
 const downloadDir = vi.fn(async () => "/Users/me/Downloads");
@@ -90,7 +91,8 @@ vi.mock("./sidecar", async () => ({
 
 const { TauriCommandRunner, TauriFs, makeTauriContext } = await import("./tauri");
 const { BROWSER_BIN, packagedSidecarName } = await import("./sidecar");
-const { JOB_PROGRAMS, jobSupervisor, __resetJobSupervisor } = await import("./jobSupervisor");
+const { EXPORT_PROTOCOL_VERSION, JOB_PROGRAMS, jobSupervisor, __resetJobSupervisor } =
+  await import("./jobSupervisor");
 
 /** Let the runner's awaits (resource lookups, the invoke) run. */
 const settle = async (): Promise<void> => {
@@ -311,6 +313,39 @@ describe("the app's jobs start each program as the runner does", () => {
     }
     expect(cwds.includes("/app/resources/whisper")).toBe(os === "Windows");
   });
+
+  it("applies the ffmpeg launch rule to every continuation and requires a sequence-capable shell", async () => {
+    const sup = (await jobSupervisor())!;
+    const audio = ["-i", "/in/a.wav", "-c:a", "aac", "-ar", "16000", "/out/a.mp4"];
+    const lossless = ["-i", "/in/a.wav", "-c:a", "pcm_f64le", "/out/a.nut"];
+    await sup.submit({
+      id: "sequence",
+      lane: "export",
+      program: "ffmpeg",
+      args: lossless,
+      steps: [lossless, audio],
+      cwd: "/scratch",
+      meta: {},
+    });
+    const { spec } = calls("jobs_submit_sequence").at(-1) as {
+      spec: { args: string[]; steps: string[][] };
+    };
+    expect(spec.args).toEqual(lossless);
+    expect(spec.steps[0]).toEqual(lossless);
+    expect(spec.steps[1]).toContain("48000");
+    expect(spec.steps[1]).not.toContain("16000");
+    invoke.mockRejectedValueOnce(new Error("Command jobs_submit_sequence not found"));
+    await expect(
+      sup.submit({
+        id: "old-shell",
+        lane: "export",
+        program: "ffmpeg",
+        args: lossless,
+        steps: [audio],
+        meta: {},
+      }),
+    ).rejects.toThrow("jobs_submit_sequence not found");
+  });
 });
 
 describe("TauriCommandRunner — cancellation", () => {
@@ -447,7 +482,16 @@ describe("TauriFs", () => {
 
   it("remove is recursive (a project dir is never empty)", async () => {
     await new TauriFs().remove("/p");
-    expect(fs.remove).toHaveBeenCalledWith("/p", { recursive: true });
+    expect(invoke).toHaveBeenCalledWith("remove_file", { path: "/p" });
+    expect(fs.remove).not.toHaveBeenCalled();
+  });
+
+  it("a native source-lease refusal cannot fall back to unguarded removal", async () => {
+    invoke.mockRejectedValueOnce(new Error("path is leased by an active export"));
+    await expect(new TauriFs().remove("/p/source.mp4")).rejects.toThrow(
+      "leased by an active export",
+    );
+    expect(fs.remove).not.toHaveBeenCalled();
   });
 
   it("mkdir is recursive", async () => {
@@ -483,17 +527,18 @@ describe("TauriFs", () => {
     it("does NOT reach for the native command on an ordinary failure", async () => {
       // The failure direction: a real ENOENT / permission error must still surface. Falling
       // back on ANY error would turn a genuine problem into a second, more confusing one.
-      fs.rename.mockImplementationOnce(() => {
-        throw new Error("ENOENT: no such file or directory");
-      });
+      invoke.mockRejectedValueOnce(new Error("ENOENT: no such file or directory"));
       await expect(new TauriFs().rename("/a", "/b")).rejects.toThrow(/ENOENT/);
-      expect(invoke).not.toHaveBeenCalledWith("commit_file", expect.anything());
+      expect(fs.rename).not.toHaveBeenCalled();
     });
 
-    it("uses the plugin, not the native command, when the path IS in scope", async () => {
+    it("uses the native lease owner even when the path IS in plugin scope", async () => {
       await new TauriFs().rename("/home/me/a.part.mp4", "/home/me/a.mp4");
-      expect(fs.rename).toHaveBeenCalledWith("/home/me/a.part.mp4", "/home/me/a.mp4");
-      expect(invoke).not.toHaveBeenCalledWith("commit_file", expect.anything());
+      expect(invoke).toHaveBeenCalledWith("commit_file", {
+        from: "/home/me/a.part.mp4",
+        to: "/home/me/a.mp4",
+      });
+      expect(fs.rename).not.toHaveBeenCalled();
     });
   });
 
@@ -516,7 +561,8 @@ describe("TauriFs", () => {
     await expect(t.downloadDir()).resolves.toBe("/Users/me/Downloads");
     expect(fs.writeTextFile).toHaveBeenCalledWith("/p", "x");
     expect(fs.copyFile).toHaveBeenCalledWith("/a", "/b");
-    expect(fs.rename).toHaveBeenCalledWith("/a", "/b");
+    expect(invoke).toHaveBeenCalledWith("commit_file", { from: "/a", to: "/b" });
+    expect(fs.rename).not.toHaveBeenCalled();
   });
 });
 

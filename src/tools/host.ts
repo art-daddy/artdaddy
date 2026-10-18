@@ -12,7 +12,7 @@ import type { ProjectStoreAccess } from "./store";
 import { ProjectClosingError, type MutationOrigin } from "../project/MutationGate";
 import { openDocumentById } from "../project/openDocuments";
 import { isJobEffect, toolEffect } from "../contract/effects";
-import type { ExportMode } from "../timeline/exportOptions";
+import { toolByName } from "../contract";
 import {
   agentEventContext,
   createToolTrace,
@@ -27,7 +27,7 @@ export interface ToolRunOptions {
   model?: string;
   transcriptId?: string;
   trace?: ToolTrace;
-  exportMode?: ExportMode;
+  exportMode?: ClientToolContext["exportMode"];
 }
 
 /** A tool runtime bound to ONE project. The agent runner captures the host for
@@ -73,6 +73,7 @@ class ProjectToolHost implements ToolHost {
   private currentSignal: AbortSignal | undefined;
   // The current turn's agent origin (chat execution), set for the duration of one run() call.
   private currentOrigin: MutationOrigin | undefined;
+  private currentExportMode: ClientToolContext["exportMode"];
   constructor(readonly projectId: string) {
     this.registry = createToolRegistry(() => this.viewCtx());
     this.ready = buildContext(projectId, this.holder);
@@ -83,17 +84,20 @@ class ProjectToolHost implements ToolHost {
   private viewCtx(): ClientToolContext | null {
     const base = this.holder.ctx;
     if (!base) return null;
-    return agentToolContext(base, this.currentSignal, this.currentOrigin);
+    return agentToolContext(
+      { ...base, exportMode: this.currentExportMode },
+      this.currentSignal,
+      this.currentOrigin,
+    );
   }
   has(name: string): boolean {
-    return this.registry.has(name);
+    return !!toolByName(name) && this.registry.has(name);
   }
   async run(
     name: string,
     args: Record<string, unknown>,
     options: ToolRunOptions,
   ): Promise<unknown> {
-    const capturedOptions = { ...options, exportMode: options.exportMode ?? "quality" as const };
     const submitted = agentEventContext();
     const labels: AgentEventContext = {
       ...submitted,
@@ -107,7 +111,7 @@ class ProjectToolHost implements ToolHost {
     };
     const trace = options.trace ?? createToolTrace(name, args, labels);
     try {
-      const result = await this.execute(name, args, capturedOptions, trace);
+      const result = await this.execute(name, args, options, trace);
       trace.result(result);
       return result;
     } catch (error) {
@@ -122,8 +126,9 @@ class ProjectToolHost implements ToolHost {
     options: ToolRunOptions,
     trace: ToolTrace,
   ): Promise<unknown> {
-    const { signal, origin } = options;
+    const { signal, origin, exportMode } = options;
     await this.ready;
+    if (!this.has(name)) return { ok: false, error: `unknown agent tool: ${name}` };
     this.currentOrigin = origin;
     try {
       // Effect classification (single source of truth) decides the mandatory runtime boundary. A
@@ -136,10 +141,10 @@ class ProjectToolHost implements ToolHost {
         effect && isJobEffect(effect) ? openDocumentById(this.projectId)?.jobs : undefined;
       if (jobs) {
         return await jobs.run({ kind: `tool.${name}` }, (jobSignal) =>
-          this.runTool(name, args, trace, combineSignals(signal, jobSignal)),
+          this.runTool(name, args, trace, combineSignals(signal, jobSignal), exportMode),
         );
       }
-      return await this.runTool(name, args, trace, signal, { mode: options.exportMode ?? "quality", origin });
+      return await this.runTool(name, args, trace, signal, exportMode);
     } catch (e) {
       // The job scope refused admission because the project began closing — report a clean tool
       // failure rather than reject the turn (the registry path already returns { ok:false } too).
@@ -157,18 +162,15 @@ class ProjectToolHost implements ToolHost {
     args: Record<string, unknown>,
     trace: ToolTrace,
     signal?: AbortSignal,
-    captured?: { mode: ExportMode; origin?: MutationOrigin },
+    exportMode?: ClientToolContext["exportMode"],
   ): Promise<unknown> {
     this.currentSignal = signal;
+    this.currentExportMode = exportMode;
     try {
-      const base = this.holder.ctx;
-      if (name === "export" && captured && base) {
-        const context = agentToolContext({ ...base, exportMode: captured.mode }, signal, captured.origin);
-        return await createToolRegistry(() => context).run(name, args, trace.context, trace);
-      }
       return await this.registry.run(name, args, trace.context, trace);
     } finally {
       this.currentSignal = undefined;
+      this.currentExportMode = undefined;
     }
   }
   store(): ProjectStoreAccess | null {

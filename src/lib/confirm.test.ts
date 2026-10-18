@@ -70,11 +70,17 @@ describe("export confirmation", () => {
     dialogConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
     expect(await confirmExport("Memory may not fit", true)).toBe("continue");
     expect(dialogConfirm).toHaveBeenLastCalledWith("Memory may not fit", {
-      title: "Export check", kind: "warning", okLabel: "Continue anyway", cancelLabel: "Cancel",
+      title: "Export check",
+      kind: "warning",
+      okLabel: "Continue anyway",
+      cancelLabel: "Cancel",
     });
     expect(await confirmExport("About three minutes", false)).toBe("cancel");
     expect(dialogConfirm).toHaveBeenLastCalledWith("About three minutes", {
-      title: "Export check", kind: "info", okLabel: "Continue", cancelLabel: "Cancel",
+      title: "Export check",
+      kind: "info",
+      okLabel: "Continue",
+      cancelLabel: "Cancel",
     });
   });
 
@@ -103,15 +109,37 @@ describe("no caller may reach for window.confirm", () => {
   // use of it is a destructive action running unasked. This fails on the next one added.
   it("finds none outside lib/confirm.ts", async () => {
     const root = join(__dirname, "../..");
-    const candidates = spawnSync("git", ["grep", "--no-index", "--no-exclude-standard", "-a", "-l", "-z", "-F", "window.confirm", "--", "src"],
-      { cwd: root, encoding: "utf8" });
+    const candidates = spawnSync(
+      "git",
+      [
+        "grep",
+        "--no-index",
+        "--no-exclude-standard",
+        "-a",
+        "-l",
+        "-z",
+        "-F",
+        "window.confirm",
+        "--",
+        "src",
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
     expect([0, 1].includes(candidates.status ?? -1), candidates.stderr).toBe(true);
-    const files = candidates.stdout.split("\0").filter((file) => /\.(ts|tsx)$/.test(file) && !/[\\/]lib[\\/]confirm\.(ts|test\.ts)$/.test(file))
+    const files = candidates.stdout
+      .split("\0")
+      .filter(
+        (file) => /\.(ts|tsx)$/.test(file) && !/[\\/]lib[\\/]confirm\.(ts|test\.ts)$/.test(file),
+      )
       .map((file) => join(root, file));
     const offenders: string[] = [];
     for (let start = 0; start < files.length; start += 32) {
-      const checked = await Promise.all(files.slice(start, start + 32).map(async (file) => ({ file,
-        unsafe: /\bwindow\.confirm\s*\(/.test(await fs.readFile(file, "utf8")) })));
+      const checked = await Promise.all(
+        files.slice(start, start + 32).map(async (file) => ({
+          file,
+          unsafe: /\bwindow\.confirm\s*\(/.test(await fs.readFile(file, "utf8")),
+        })),
+      );
       offenders.push(...checked.filter((result) => result.unsafe).map((result) => result.file));
     }
     expect(offenders).toEqual([]);

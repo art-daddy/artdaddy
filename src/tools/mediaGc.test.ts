@@ -68,6 +68,21 @@ function seed(fs: MockFs, s: Seed): void {
 const has = (fs: MockFs, f: string): Promise<boolean> => fs.exists(joinPath(DIR, `library/${f}`));
 
 describe("sweepOwnedMedia (deferred close-time GC)", () => {
+  it("does not report or remove owned bytes when the physical removal refuses an export lease", async () => {
+    const fs = new MockFs();
+    seed(fs, {
+      catalog: { clips: [] },
+      timeline: { tracks: [] },
+      libFiles: ["media_queued_export.mp4"],
+    });
+    fs.remove = async () => {
+      throw new Error("path is leased by an active export");
+    };
+    const result = await sweepOwnedMedia(new ProjectStoreAccess(DIR, fs));
+    expect(result.removed).toEqual([]);
+    expect(await has(fs, "media_queued_export.mp4")).toBe(true);
+  });
+
   it("removes an orphaned owned file (no catalog / timeline / checkpoint reference)", async () => {
     const fs = new MockFs();
     seed(fs, {

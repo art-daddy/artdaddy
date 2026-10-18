@@ -10,9 +10,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ExportQueuePane from "./ExportQueuePane";
 import { __resetExportQueue, submitExport, whenExportsSettle } from "../timeline/exportQueue";
 import { useExportJob } from "../store/exportJob";
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type Any = any;
+import { ExportMemFs } from "../test/timelineKit";
+import { ProjectStoreAccess } from "../tools/store";
 
 vi.mock("../tools/genJobs", () => ({
   openProjectJobs: async () => ({
@@ -22,12 +21,15 @@ vi.mock("../tools/genJobs", () => ({
 }));
 vi.mock("../store/jobNotes", () => ({ notifyJobSettled: () => undefined }));
 
-const store = { projectDir: "/proj", rename: async () => undefined, remove: async () => undefined };
+let fs: ExportMemFs;
+let store: ProjectStoreAccess;
+const pendingGates: Array<() => void> = [];
 
 /** An encode that only finishes when we say so, so a QUEUED row is observable. */
 function gated(): { run: (s: AbortSignal) => Promise<{ warnings?: string[] }>; open: () => void } {
   let release!: () => void;
   const gate = new Promise<void>((r) => (release = r));
+  pendingGates.push(release);
   return {
     run: async () => {
       await gate;
@@ -37,20 +39,33 @@ function gated(): { run: (s: AbortSignal) => Promise<{ warnings?: string[] }>; o
   };
 }
 
-const submit = (filename: string, run: (s: AbortSignal) => Promise<{ warnings?: string[] }>) =>
-  submitExport({
-    store: store as Any,
+const submit = (filename: string, run: (s: AbortSignal) => Promise<{ warnings?: string[] }>) => {
+  const requestFs = fs;
+  return submitExport({
+    store,
+    dependencies: [],
     destPath: `/out/${filename}`,
-    stagePath: `/out/${filename}`,
+    stagePath: `/out/${filename}.partial`,
     filename,
-    run,
+    run: async (signal) => {
+      const result = await run(signal);
+      await requestFs.writeTextFile(`/out/${filename}.partial`, `encoded ${filename}`);
+      return result;
+    },
   });
+};
 
 beforeEach(() => {
   __resetExportQueue();
-  useExportJob.setState({ fraction: 0.5 } as Any);
+  fs = new ExportMemFs();
+  store = new ProjectStoreAccess("/proj", fs);
+  useExportJob.setState({ fraction: 0.5 });
 });
-afterEach(() => __resetExportQueue());
+afterEach(async () => {
+  for (const release of pendingGates.splice(0)) release();
+  await whenExportsSettle();
+  __resetExportQueue();
+});
 
 describe("ExportQueuePane", () => {
   it("renders nothing until an export exists", () => {
@@ -91,6 +106,8 @@ describe("ExportQueuePane", () => {
     render(<ExportQueuePane />);
 
     expect(screen.getByText("Completed")).toBeTruthy();
+    expect(await fs.readTextFile("/out/good.mp4")).toBe("encoded good.mp4");
+    expect(await fs.exists("/out/good.mp4.partial")).toBe(false);
     fireEvent.click(screen.getByLabelText("dismiss good.mp4"));
     expect(screen.queryByText("good.mp4")).toBeNull();
   });
@@ -98,21 +115,28 @@ describe("ExportQueuePane", () => {
   it("cancels a running export from its own row", async () => {
     const g = gated();
     let sawAbort = false;
+    let started!: () => void;
+    const running = new Promise<void>((resolve) => {
+      started = resolve;
+    });
     await submit("slow.mp4", async (signal) => {
       signal.addEventListener("abort", () => {
         sawAbort = true;
         g.open();
       });
+      started();
       await g.run(signal);
       if (signal.aborted) throw new Error("export cancelled");
       return {};
     });
+    await running;
     render(<ExportQueuePane />);
 
     fireEvent.click(screen.getByLabelText("cancel slow.mp4"));
     await whenExportsSettle();
     expect(sawAbort).toBe(true);
     expect(screen.getByText("Cancelled")).toBeTruthy();
+    expect(await fs.exists("/out/slow.mp4")).toBe(false);
   });
 
   it("clears every settled row and leaves the unsettled one", async () => {

@@ -20,9 +20,14 @@ export function finalEncoderPolicy(
   engine: ExportEngine,
   mode: ExportMode = "quality",
 ): { encoder: ExportEncoder; threads: 1 | 2 | null } {
-  const twoThreads = engine === "partition-pipes-v1" && mode === "quality" && output.width * output.height > 1920 * 1080;
-  return { encoder: mode === "fast" ? "amf-cqp18" : twoThreads ? "x264-crf-threads2" : "x264-crf",
-    threads: engine === "partition-pipes-v1" ? twoThreads ? 2 : 1 : null };
+  const twoThreads =
+    engine === "partition-pipes-v1" &&
+    mode === "quality" &&
+    output.width * output.height > 1920 * 1080;
+  return {
+    encoder: mode === "fast" ? "amf-cqp18" : twoThreads ? "x264-crf-threads2" : "x264-crf",
+    threads: engine === "partition-pipes-v1" ? (twoThreads ? 2 : 1) : null,
+  };
 }
 
 export interface ExportEstimates {
@@ -58,31 +63,72 @@ export function estimateExportFromHistory(
   history: readonly ExportCalibration[],
   encoder: ExportEncoder = "x264-crf",
 ): ExportEstimates {
-  const samples = history.filter((sample) => (sample.encoder ?? "x264-crf") === encoder && sample.quality === quality && sample.engine === engine &&
-    sample.workload.width === workload.width && sample.workload.height === workload.height && sample.workload.fps === workload.fps &&
-    sample.output.width === output.width && sample.output.height === output.height && sample.output.fps === output.fps &&
-    sample.workload.peakMediaLayers === workload.peakMediaLayers && sample.workload.peakVisualLayers === workload.peakVisualLayers &&
-    sample.workload.durationSeconds > 0 && sample.elapsedSeconds > 0 && Number.isFinite(sample.elapsedSeconds) &&
-    sample.finalBytes > 0 && Number.isFinite(sample.finalBytes));
+  const samples = history.filter(
+    (sample) =>
+      (sample.encoder ?? "x264-crf") === encoder &&
+      sample.quality === quality &&
+      sample.engine === engine &&
+      sample.workload.width === workload.width &&
+      sample.workload.height === workload.height &&
+      sample.workload.fps === workload.fps &&
+      sample.output.width === output.width &&
+      sample.output.height === output.height &&
+      sample.output.fps === output.fps &&
+      sample.workload.peakMediaLayers === workload.peakMediaLayers &&
+      sample.workload.peakVisualLayers === workload.peakVisualLayers &&
+      sample.workload.durationSeconds > 0 &&
+      sample.elapsedSeconds > 0 &&
+      Number.isFinite(sample.elapsedSeconds) &&
+      sample.finalBytes > 0 &&
+      Number.isFinite(sample.finalBytes),
+  );
   const maximum = (values: (number | null)[]) => {
-    const valid = values.filter((value): value is number => value !== null && Number.isFinite(value) && value >= 0);
+    const valid = values.filter(
+      (value): value is number => value !== null && Number.isFinite(value) && value >= 0,
+    );
     return valid.length ? Math.ceil(Math.max(...valid)) : null;
   };
-  const scale = (sample: ExportCalibration) => Math.max(workload.durationSeconds / sample.workload.durationSeconds,
-    workload.visualClips / Math.max(1, sample.workload.visualClips),
-    workload.captionClips / Math.max(1, sample.workload.captionClips),
-    workload.audioClips / Math.max(1, sample.workload.audioClips));
+  const scale = (sample: ExportCalibration) =>
+    Math.max(
+      workload.durationSeconds / sample.workload.durationSeconds,
+      workload.visualClips / Math.max(1, sample.workload.visualClips),
+      workload.captionClips / Math.max(1, sample.workload.captionClips),
+      workload.audioClips / Math.max(1, sample.workload.audioClips),
+    );
   return {
     seconds: maximum(samples.map((sample) => sample.elapsedSeconds * scale(sample))),
-    finalBytes: maximum(samples.map((sample) => sample.finalBytes * workload.durationSeconds / sample.workload.durationSeconds)),
+    finalBytes: maximum(
+      samples.map(
+        (sample) =>
+          (sample.finalBytes * workload.durationSeconds) / sample.workload.durationSeconds,
+      ),
+    ),
     memoryBytes: maximum(samples.map((sample) => sample.memoryBytes)),
-    temporaryBytes: maximum(samples.map((sample) => sample.temporaryBytes === null ? null : sample.temporaryBytes * Math.max(1,
-      workload.visualClips / Math.max(1, sample.workload.visualClips), workload.captionClips / Math.max(1, sample.workload.captionClips)))),
+    temporaryBytes: maximum(
+      samples.map((sample) =>
+        sample.temporaryBytes === null
+          ? null
+          : sample.temporaryBytes *
+            Math.max(
+              1,
+              workload.visualClips / Math.max(1, sample.workload.visualClips),
+              workload.captionClips / Math.max(1, sample.workload.captionClips),
+            ),
+      ),
+    ),
   };
 }
 
-export type ExportPreflightReason = "outside_promise" | "memory_unknown" | "memory_shortage" |
-  "disk_unknown" | "disk_shortage" | "temporary_limit" | "time_unknown" | "execution_limit" | "slow";
+export type ExportPreflightReason =
+  | "outside_promise"
+  | "memory_unknown"
+  | "memory_shortage"
+  | "disk_unknown"
+  | "disk_shortage"
+  | "temporary_limit"
+  | "time_unknown"
+  | "execution_limit"
+  | "slow";
 
 export interface ExportAssessment {
   readonly promiseLine: "hd" | "heavy_hd" | "4k" | "outside";
@@ -97,7 +143,8 @@ export function assessExport(
   measured: ExportEstimates,
   budgets: ExportBudgets,
 ): ExportAssessment {
-  const valid = (value: number | null): value is number => value !== null && Number.isFinite(value) && value >= 0;
+  const valid = (value: number | null): value is number =>
+    value !== null && Number.isFinite(value) && value >= 0;
   const estimates: ExportEstimates = {
     memoryBytes: valid(measured.memoryBytes) ? measured.memoryBytes : null,
     temporaryBytes: valid(measured.temporaryBytes) ? measured.temporaryBytes : null,
@@ -106,33 +153,65 @@ export function assessExport(
   };
   const short = Math.min(workload.width, workload.height);
   const long = Math.max(workload.width, workload.height);
-  const usable = Number.isFinite(short) && Number.isFinite(long) && short > 0 &&
-    Number.isFinite(workload.fps) && workload.fps > 0 && Number.isFinite(workload.durationSeconds) && workload.durationSeconds > 0;
+  const usable =
+    Number.isFinite(short) &&
+    Number.isFinite(long) &&
+    short > 0 &&
+    Number.isFinite(workload.fps) &&
+    workload.fps > 0 &&
+    Number.isFinite(workload.durationSeconds) &&
+    workload.durationSeconds > 0;
   const hd = usable && short <= 1080 && long <= 1920;
   const withinHd = hd && workload.durationSeconds <= 7200 && workload.visualClips <= 1000;
-  const within4k = usable && !hd && short <= 2160 && long <= 3840 && workload.durationSeconds <= 1800 &&
-    workload.peakVisualLayers <= 4 && workload.fps <= 30;
+  const within4k =
+    usable &&
+    !hd &&
+    short <= 2160 &&
+    long <= 3840 &&
+    workload.durationSeconds <= 1800 &&
+    workload.peakVisualLayers <= 4 &&
+    workload.fps <= 30;
   const normalHd = withinHd && workload.peakVisualLayers <= 4 && workload.fps <= 60;
   const heavyHd = withinHd && workload.peakVisualLayers <= 8 && workload.fps <= 30;
   const promiseLine = normalHd ? "hd" : heavyHd ? "heavy_hd" : within4k ? "4k" : "outside";
   const reasons: ExportPreflightReason[] = [];
   if (promiseLine === "outside") reasons.push("outside_promise");
   const memory = estimates.memoryBytes;
-  if (memory === null || !valid(resources.available_memory_bytes) || !valid(budgets.memoryBytes)) reasons.push("memory_unknown");
-  else if (memory > Math.min(resources.available_memory_bytes, budgets.memoryBytes)) reasons.push("memory_shortage");
+  if (memory === null || !valid(resources.available_memory_bytes) || !valid(budgets.memoryBytes))
+    reasons.push("memory_unknown");
+  else if (memory > Math.min(resources.available_memory_bytes, budgets.memoryBytes))
+    reasons.push("memory_shortage");
   const temporary = estimates.temporaryBytes;
   const final = estimates.finalBytes;
-  if (temporary === null || final === null || !valid(resources.scratch_free_bytes) ||
-    !valid(resources.destination_free_bytes) || !valid(budgets.temporaryBytes)) reasons.push("disk_unknown");
+  if (
+    temporary === null ||
+    final === null ||
+    !valid(resources.scratch_free_bytes) ||
+    !valid(resources.destination_free_bytes) ||
+    !valid(budgets.temporaryBytes)
+  )
+    reasons.push("disk_unknown");
   else {
     if (temporary + final > budgets.temporaryBytes) reasons.push("temporary_limit");
-    if (temporary + final > resources.scratch_free_bytes || temporary + final > resources.destination_free_bytes) reasons.push("disk_shortage");
+    if (
+      temporary + final > resources.scratch_free_bytes ||
+      temporary + final > resources.destination_free_bytes
+    )
+      reasons.push("disk_shortage");
   }
   if (estimates.seconds === null || !valid(budgets.executionSeconds)) reasons.push("time_unknown");
   else if (estimates.seconds > budgets.executionSeconds) reasons.push("execution_limit");
   else if (estimates.seconds > workload.durationSeconds * 2) reasons.push("slow");
-  return { promiseLine, estimates, reasons,
-    severity: reasons.some((reason) => reason !== "slow") ? "warning" : reasons.length ? "notice" : "none" };
+  return {
+    promiseLine,
+    estimates,
+    reasons,
+    severity: reasons.some((reason) => reason !== "slow")
+      ? "warning"
+      : reasons.length
+        ? "notice"
+        : "none",
+  };
 }
 
 export interface ExportOptions {

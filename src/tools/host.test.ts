@@ -7,7 +7,7 @@ import { ProjectStoreAccess, type FsLike } from "./store";
 import { ClientToolRegistry } from "./registry";
 import { __resetAgentEvents, flushAgentEvents, setAgentContext } from "../api/agentEvents";
 import { useAuth } from "../store/auth";
-import { useExportJob } from "../store/exportJob";
+import { WITHDRAWN_TOOLS } from "../contract/withdrawn";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -43,7 +43,14 @@ vi.mock("../api/auth", () => ({
 vi.mock(".", () => ({
   createToolRegistry: (getCtx: () => Any) => {
     const registry = new ClientToolRegistry();
-    for (const name of ["download_video", "get_timeline", "add_clips", "library_op", "export"]) {
+    for (const name of [
+      "download_video",
+      "get_timeline",
+      "add_clips",
+      "library_op",
+      "export",
+      ...WITHDRAWN_TOOLS,
+    ]) {
       registry.register(name, async () => {
         toolCtx = getCtx();
         return toolGate;
@@ -64,7 +71,6 @@ beforeEach(() => {
   );
   toolGate = Promise.resolve({ ok: true });
   toolCtx = null;
-  useExportJob.getState().setMode("quality");
 });
 afterEach(() => {
   __resetAgentEvents();
@@ -75,20 +81,112 @@ afterEach(() => {
 });
 
 describe("openToolHost", () => {
-  it("captures the submitted export mode before host initialization or later preference changes", async () => {
-    let release!: () => void;
-    const waiting = new Promise<void>((resolve) => { release = resolve; });
-    makeTauriContext.mockImplementationOnce(async () => { await waiting; return { store: {} as never, runner: {} as never }; });
-    const host = openToolHost("p1");
-    useExportJob.getState().setMode("fast");
-    const submitted = host.run("export", {}, { surface: "app", exportMode: "fast" });
-    useExportJob.getState().setMode("quality");
-    release();
-    await submitted;
-    expect(toolCtx.exportMode).toBe("fast");
-    useExportJob.getState().setMode("fast");
+  it.each(["quality", "fast"] as const)(
+    "forwards the explicit %s export mode into active and detached tool contexts",
+    async (exportMode) => {
+      const host = openToolHost("export-mode-project");
+      await host.run(
+        "export",
+        {},
+        {
+          surface: "app",
+          signal: new AbortController().signal,
+          exportMode,
+        },
+      );
+      expect(toolCtx.exportMode).toBe(exportMode);
+      expect(toolCtx.detach().exportMode).toBe(exportMode);
+    },
+  );
+
+  it("isolates overlapping export modes through ignored cancellation and leaves an omitted MCP mode unset", async () => {
+    const host = openToolHost("export-mode-project");
+    await host.ready;
+    const controller = new AbortController();
+    let release!: (value: unknown) => void;
+    toolGate = new Promise((resolve) => {
+      release = resolve;
+    });
+    const fast = host.run(
+      "export",
+      {},
+      {
+        surface: "app",
+        signal: controller.signal,
+        exportMode: "fast",
+      },
+    );
+    await vi.waitFor(() => expect(toolCtx).not.toBeNull());
+    const fastContext = toolCtx;
+    toolCtx = null;
+    const quality = host.run(
+      "export",
+      {},
+      {
+        surface: "app",
+        signal: new AbortController().signal,
+        exportMode: "quality",
+      },
+    );
+    await vi.waitFor(() => expect(toolCtx).not.toBeNull());
+    const qualityContext = toolCtx;
+    controller.abort();
+    release({ ok: true });
+    await expect(Promise.all([fast, quality])).resolves.toEqual([{ ok: true }, { ok: true }]);
+    expect(fastContext.signal.aborted).toBe(true);
+    expect(qualityContext.signal.aborted).toBe(false);
+    expect(fastContext.exportMode).toBe("fast");
+    expect(fastContext.detach().exportMode).toBe("fast");
+    expect(qualityContext.exportMode).toBe("quality");
+    expect(qualityContext.detach().exportMode).toBe("quality");
+    toolGate = Promise.resolve({ ok: true });
     await host.run("export", {}, { surface: "mcp" });
-    expect(toolCtx.exportMode).toBe("quality");
+    expect(toolCtx.exportMode).toBeUndefined();
+  });
+
+  it("does not retain an export mode after a failed tool or mutate the cached base context", async () => {
+    const host = openToolHost("failed-export-mode-project");
+    await host.ready;
+    const base = await makeTauriContext.mock.results.at(-1)!.value;
+    let fail!: (reason: Error) => void;
+    toolGate = new Promise((_, reject) => {
+      fail = reject;
+    });
+    const pending = host.run(
+      "export",
+      {},
+      {
+        surface: "app",
+        signal: new AbortController().signal,
+        exportMode: "fast",
+      },
+    );
+    await vi.waitFor(() => expect(toolCtx?.exportMode).toBe("fast"));
+    fail(new Error("controlled export failure"));
+    await expect(pending).resolves.toMatchObject({ ok: false });
+    expect(base).not.toHaveProperty("exportMode");
+    toolGate = Promise.resolve({ ok: true });
+    await host.run("export", {}, { surface: "mcp" });
+    expect(toolCtx.exportMode).toBeUndefined();
+  });
+
+  it.each(
+    WITHDRAWN_TOOLS.flatMap((name) => [
+      { name, surface: "app" as const },
+      { name, surface: "mcp" as const },
+    ]),
+  )("refuses a cached $name call from $surface before any tool work", async ({ name, surface }) => {
+    const scope = new ProjectJobScope();
+    const admitted = vi.spyOn(scope, "run");
+    setOpenDocumentResolver(() => ({ jobs: scope }) as Any);
+    const host = openToolHost("p1");
+    expect(host.has(name)).toBe(false);
+    expect(await host.run(name, {}, { surface })).toEqual({
+      ok: false,
+      error: `unknown agent tool: ${name}`,
+    });
+    expect(toolCtx).toBeNull();
+    expect(admitted).not.toHaveBeenCalled();
   });
 
   it("keeps an MCP tool under its bound project without inheriting the chat's labels", async () => {

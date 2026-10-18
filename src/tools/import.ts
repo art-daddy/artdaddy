@@ -68,11 +68,14 @@ function baseName(p: string): string {
 }
 
 async function sha256Hex12(bytes: Uint8Array): Promise<string> {
+  return (await sha256Hex(bytes)).slice(0, 12);
+}
+
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", bytes as BufferSource);
   return Array.from(new Uint8Array(digest))
     .map((b) => b.toString(16).padStart(2, "0"))
-    .join("")
-    .slice(0, 12);
+    .join("");
 }
 
 /** Ceilings on the two COPY sources. A referenced local file has no cap — we never read it.
@@ -350,6 +353,43 @@ async function registerLibraryClipInner(
         }>(catPath, { version: 1, clips: [], folders: [] });
         cat.clips ??= [];
         const already = cat.clips.find((c) => c && c.id === id);
+        if (source?.kind === "export") {
+          const expected = source.identity as
+            { sha256?: unknown; size?: unknown } | null | undefined;
+          if (
+            !external ||
+            typeof source.job_id !== "string" ||
+            !source.job_id.trim() ||
+            typeof expected?.sha256 !== "string" ||
+            !/^[a-f0-9]{64}$/.test(expected.sha256) ||
+            typeof expected.size !== "number" ||
+            !Number.isSafeInteger(expected.size) ||
+            expected.size < 0
+          )
+            throw new Error("export registration requires its published artifact identity");
+          if (size !== expected.size || id !== `media_${expected.sha256.slice(0, 12)}`)
+            throw new Error("delivered export changed before library registration");
+          const paths = [rel];
+          if (already) {
+            const existing = await store.resolveMediaRef(id);
+            if (!existing) throw new Error("existing export media reference is unavailable");
+            paths.push(existing);
+          }
+          for (const currentPath of new Set(paths)) {
+            let actual: { sha256: string; size: number } | null = await store.probeMedia(
+              currentPath,
+              0,
+            );
+            if (!actual) {
+              const current = await store.readBytes(currentPath);
+              actual = { sha256: await sha256Hex(current), size: current.length };
+            }
+            if (actual.sha256 !== expected.sha256 || actual.size !== expected.size)
+              throw new Error(
+                "delivered export media identity changed before library registration",
+              );
+          }
+        }
         if (already)
           return {
             id,
@@ -544,21 +584,13 @@ export async function failPendingClip(
  *  landed while the project was closed, so the mutation gate refused the row. Bytes are written
  *  before the flip precisely so this is recoverable. Returns the ids it completed. */
 export async function reconcilePendingMedia(store: ProjectStoreAccess): Promise<string[]> {
-  const cat = await readCatalog(store);
-  const pending = (cat.clips ?? []).filter((c) => c && c.status === "generating");
-  if (!pending.length) return [];
-  const landed: Record<string, unknown>[] = [];
-  for (const row of pending) {
-    const rel = String(row.path ?? "");
-    if (rel && (await store.exists(joinPath(store.projectDir, rel)))) landed.push(row);
-  }
-  if (!landed.length) return [];
   return runProjectMutation(store.projectDir, "library.reconcile", async (_doc, gctx) => {
     const fresh = await readCatalog(store);
     const done: string[] = [];
     for (const row of fresh.clips ?? []) {
       if (!row || row.status !== "generating") continue;
-      if (!landed.some((l) => l.id === row.id)) continue;
+      const rel = String(row.path ?? "");
+      if (!rel || !(await store.exists(joinPath(store.projectDir, rel)))) continue;
       delete row.status;
       delete row.error;
       done.push(String(row.id));

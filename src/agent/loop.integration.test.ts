@@ -4,9 +4,9 @@
 // per-module unit tests (loop.test.ts mocks runTool) can't see.
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 
-import { seededCtx, videoRunner } from "../test/timelineKit";
+import { ExportMemFs, seededCtx, videoRunner } from "../test/timelineKit";
 import { loadTimeline } from "../timeline/engine";
-import { __resetExportQueue, whenExportsSettle } from "../timeline/exportQueue";
+import { __resetExportQueue, whenExportEnds, whenExportsSettle } from "../timeline/exportQueue";
 import type { CommandRunner } from "../tools/command";
 import { createToolRegistry } from "../tools";
 import { ClientTurnRunner, type ApprovalMode, type LoopDeps } from "./loop";
@@ -49,7 +49,12 @@ async function harness(
   mode: ApprovalMode = "autopilot",
   makeCtxRunner?: (store: Any) => CommandRunner,
 ): Promise<Any> {
-  const { store } = await seededCtx(videoRunner);
+  const { store } = await seededCtx(
+    videoRunner,
+    undefined,
+    makeCtxRunner ? new ExportMemFs() : undefined,
+  );
+  if (makeCtxRunner) await store.writeText(`${store.projectDir}/a.mp4`, "source video");
   const ctxRunner = makeCtxRunner ? makeCtxRunner(store) : videoRunner;
   const registry = createToolRegistry(() => ({ store, runner: ctxRunner }));
   const events: Array<{ event: string; data: Any }> = [];
@@ -247,14 +252,34 @@ describe("agent loop integration (real registry + applyOp + store)", () => {
           await store.writeText(args[args.length - 1], "video"); // the rendered mp4
           return { code: 0, stdout: "", stderr: "" };
         }
-        if (program === "ffprobe" && args.includes("-select_streams")) {
+        if (
+          program === "ffprobe" &&
+          args.includes("-select_streams") &&
+          !args.includes("-count_frames")
+        ) {
           return {
             code: 0,
             stdout: args[args.indexOf("-select_streams") + 1] === "v" ? "1" : "",
             stderr: "",
           };
         }
-        return { code: 0, stdout: "", stderr: "" };
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            streams: [
+              {
+                codec_type: "video",
+                width: 1080,
+                height: 1920,
+                avg_frame_rate: "30/1",
+                nb_read_frames: 30,
+                duration: "1",
+              },
+            ],
+            format: { duration: "1" },
+          }),
+          stderr: "",
+        };
       },
     }));
     let exportResult: Any = null;
@@ -279,6 +304,9 @@ describe("agent loop integration (real registry + applyOp + store)", () => {
     await h.runner.start("build and export");
     await whenExportsSettle();
     expect(exportResult.ok).toBe(true);
+    const ended = await whenExportEnds(exportResult.job_id);
+    expect(ended?.state, ended?.error).toBe("done");
+    expect(await h.store.readText("C:/Users/test/Downloads/proj.mp4")).toBe("video");
     expect(exportResult.saved_to).toBe("proj.mp4"); // default deliverable name = project basename
     expect(h.ev("text")[0].data.text).toBe("exported");
   });
@@ -298,14 +326,34 @@ describe("agent loop integration (real registry + applyOp + store)", () => {
           await store.writeText(args[args.length - 1], "video"); // the rendered mp4
           return { code: 0, stdout: "", stderr: "" };
         }
-        if (program === "ffprobe" && args.includes("-select_streams")) {
+        if (
+          program === "ffprobe" &&
+          args.includes("-select_streams") &&
+          !args.includes("-count_frames")
+        ) {
           return {
             code: 0,
             stdout: args[args.indexOf("-select_streams") + 1] === "v" ? "1" : "",
             stderr: "",
           };
         }
-        return { code: 0, stdout: "", stderr: "" };
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            streams: [
+              {
+                codec_type: "video",
+                width: 1080,
+                height: 1920,
+                avg_frame_rate: "30/1",
+                nb_read_frames: 30,
+                duration: "1",
+              },
+            ],
+            format: { duration: "1" },
+          }),
+          stderr: "",
+        };
       },
     }));
     let exportResult: Any = null;
@@ -336,6 +384,8 @@ describe("agent loop integration (real registry + applyOp + store)", () => {
     await whenExportsSettle();
 
     expect(exportResult.ok).toBe(true); // the agent reached a real export
+    const ended = await whenExportEnds(exportResult.job_id);
+    expect(ended?.state, ended?.error).toBe("done");
     // The agent USED the caption capability: a text clip is committed to the timeline.
     const finalTl = await loadTimeline(h.store);
     const textClips = (finalTl.tracks ?? []).flatMap((t: Any) =>

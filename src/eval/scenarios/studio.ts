@@ -274,22 +274,6 @@ export const STUDIO_SCENARIOS: Scenario[] = [
         throw new Error("answered without inspecting the media");
     },
   },
-  {
-    id: "clip_window_from_source",
-    title: "Pull one window out of a long source",
-    tags: ["studio", "clip_video"],
-    surface: "studio",
-    seed: emptyProject,
-    prompt:
-      `Take ${STUDIO_URL} — I only want the bit from two minutes in to two and a half ` +
-      "minutes. Get just that and put it on the timeline.",
-    expectTools: ["clip_video", "add_clips"],
-    maxRounds: 12,
-    expect: (final) => {
-      if (allClips(final).length === 0) throw new Error("nothing reached the timeline");
-    },
-  },
-
   // ── vision: look at it, then act on what you saw ──────────────────────────
   {
     id: "find_moment_and_trim",
@@ -683,6 +667,21 @@ export const STUDIO_SCENARIOS: Scenario[] = [
  *  them, so running one of these would fail on the withdrawal rather than on the behaviour it
  *  tests. Bringing the tool back is moving the scenario up into the list above. */
 export const WITHDRAWN_SCENARIOS: Scenario[] = [
+  {
+    id: "clip_window_from_source",
+    title: "Pull one window out of a long source",
+    tags: ["studio", "clip_video"],
+    surface: "studio",
+    seed: emptyProject,
+    prompt:
+      `Take ${STUDIO_URL} — I only want the bit from two minutes in to two and a half ` +
+      "minutes. Get just that and put it on the timeline.",
+    expectTools: ["clip_video", "add_clips"],
+    maxRounds: 12,
+    expect: (final) => {
+      if (allClips(final).length === 0) throw new Error("nothing reached the timeline");
+    },
+  },
   {
     id: "extract_style_from_reference",
     title: "Turn reference edits into a reusable style",

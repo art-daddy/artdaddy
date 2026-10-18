@@ -7,6 +7,8 @@ import { apiBase } from "./config";
 import { fetchWithRetry, RateLimitError, type RetryOpts } from "./http";
 import { CreditLimitError, markOverLimit } from "./usage";
 import { correlationBody } from "../observability/sentry";
+import { catalogIdentity } from "../contract";
+import { ClientUpdateRequiredError } from "../update/updater";
 
 export interface AiMedia {
   b64: string;
@@ -50,11 +52,12 @@ export async function callAiProxy<R = Record<string, unknown>>(
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...body, ...correlationBody() }),
+      body: JSON.stringify({ ...body, ...correlationBody(), catalog_id: catalogIdentity() }),
     },
     (u, init) => fetchWithRetry(u, init, signal, opts),
   );
   if (!res.ok) {
+    if (res.status === 426) throw new ClientUpdateRequiredError();
     if (res.status === 401) notifyAuthFailure();
     const text = await res.text().catch(() => "");
     // The sign-in prompt is already up (notifyAuthFailure). What the MODEL needs is to stop: it

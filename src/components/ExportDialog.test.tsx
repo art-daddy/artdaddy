@@ -9,7 +9,8 @@ import { exportRunning, useExportJob } from "../store/exportJob";
 import { resolveLocalFastEncoder } from "../platform/host";
 
 vi.mock("../platform/host", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../platform/host")>()), resolveLocalFastEncoder: vi.fn().mockResolvedValue(false),
+  ...(await importOriginal<typeof import("../platform/host")>()),
+  resolveLocalFastEncoder: vi.fn().mockResolvedValue(false),
 }));
 
 beforeEach(() => {
@@ -84,7 +85,12 @@ describe("ExportDialog", () => {
     render(<ExportDialog open onCancel={() => {}} onStart={start} />);
     fireEvent.click(screen.getByRole("button", { name: "Export" }));
     expect(useExportJob.getState().engine).toBe("auto");
-    expect(start).toHaveBeenCalledWith({ resolution: "source", quality: "medium", fps: null, mode: "quality" });
+    expect(start).toHaveBeenCalledWith({
+      resolution: "source",
+      quality: "medium",
+      fps: null,
+      mode: "quality",
+    });
   });
 
   it("offers Fast only after eligibility succeeds and makes the larger-file tradeoff visible", async () => {
@@ -96,7 +102,12 @@ describe("ExportDialog", () => {
     fireEvent.click(screen.getByRole("radio", { name: "Fast" }));
     expect(screen.getByText(/Files can be much larger\. The picture/)).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Export" }));
-    expect(start).toHaveBeenCalledWith({ resolution: "source", quality: "medium", fps: null, mode: "fast" });
+    expect(start).toHaveBeenCalledWith({
+      resolution: "source",
+      quality: "medium",
+      fps: null,
+      mode: "fast",
+    });
     dialog.unmount();
     open();
     expect(screen.getByRole("radio", { name: "Full quality" })).toBeChecked();

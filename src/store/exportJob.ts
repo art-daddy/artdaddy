@@ -13,29 +13,78 @@ const CALIBRATION_KEY = `artdaddy-export-calibration-v3:${__ARTDADDY_RELEASE__}`
 function calibration(value: unknown): ExportCalibration | null {
   if (!value || typeof value !== "object") return null;
   const raw = value as Record<string, unknown>;
-  if (!raw.workload || typeof raw.workload !== "object" || !raw.output || typeof raw.output !== "object") return null;
+  if (
+    !raw.workload ||
+    typeof raw.workload !== "object" ||
+    !raw.output ||
+    typeof raw.output !== "object"
+  )
+    return null;
   const workload = raw.workload as Record<string, unknown>;
   const output = raw.output as Record<string, unknown>;
-  const number = (value: unknown): number | null => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
-  const keys = ["width", "height", "fps", "durationSeconds", "visualClips", "captionClips", "audioClips", "peakVisualLayers", "peakMediaLayers"] as const;
-  if (keys.some((key) => number(workload[key]) === null) || ["width", "height", "fps"].some((key) => !number(output[key]))) return null;
-  if (!number(workload.width) || !number(workload.height) || !number(workload.fps) || !number(workload.durationSeconds) ||
-    !number(raw.elapsedSeconds) || !number(raw.finalBytes) || !["high", "medium", "low"].includes(String(raw.quality)) ||
+  const number = (value: unknown): number | null =>
+    typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+  const keys = [
+    "width",
+    "height",
+    "fps",
+    "durationSeconds",
+    "visualClips",
+    "captionClips",
+    "audioClips",
+    "peakVisualLayers",
+    "peakMediaLayers",
+  ] as const;
+  if (
+    keys.some((key) => number(workload[key]) === null) ||
+    ["width", "height", "fps"].some((key) => !number(output[key]))
+  )
+    return null;
+  if (
+    !number(workload.width) ||
+    !number(workload.height) ||
+    !number(workload.fps) ||
+    !number(workload.durationSeconds) ||
+    !number(raw.elapsedSeconds) ||
+    !number(raw.finalBytes) ||
+    !["high", "medium", "low"].includes(String(raw.quality)) ||
     !["file-sequence-v1", "partition-pipes-v1"].includes(String(raw.engine)) ||
-    raw.encoder !== undefined && !["x264-crf", "x264-crf-threads2", "amf-cqp18"].includes(String(raw.encoder))) return null;
-  return { workload: Object.fromEntries(keys.map((key) => [key, workload[key]])) as unknown as ExportCalibration["workload"],
+    (raw.encoder !== undefined &&
+      !["x264-crf", "x264-crf-threads2", "amf-cqp18"].includes(String(raw.encoder)))
+  )
+    return null;
+  return {
+    workload: Object.fromEntries(
+      keys.map((key) => [key, workload[key]]),
+    ) as unknown as ExportCalibration["workload"],
     output: { width: Number(output.width), height: Number(output.height), fps: Number(output.fps) },
-    quality: String(raw.quality), engine: raw.engine as ExportEngine, encoder: raw.encoder === "amf-cqp18" ? "amf-cqp18" :
-      raw.encoder === "x264-crf-threads2" ? "x264-crf-threads2" : "x264-crf",
-    elapsedSeconds: Number(raw.elapsedSeconds), finalBytes: Number(raw.finalBytes),
-    memoryBytes: number(raw.memoryBytes), temporaryBytes: number(raw.temporaryBytes) };
+    quality: String(raw.quality),
+    engine: raw.engine as ExportEngine,
+    encoder:
+      raw.encoder === "amf-cqp18"
+        ? "amf-cqp18"
+        : raw.encoder === "x264-crf-threads2"
+          ? "x264-crf-threads2"
+          : "x264-crf",
+    elapsedSeconds: Number(raw.elapsedSeconds),
+    finalBytes: Number(raw.finalBytes),
+    memoryBytes: number(raw.memoryBytes),
+    temporaryBytes: number(raw.temporaryBytes),
+  };
 }
 
 function savedCalibrations(): ExportCalibration[] {
   try {
     const raw: unknown = JSON.parse(localStorage.getItem(CALIBRATION_KEY) ?? "[]");
-    return Array.isArray(raw) ? raw.slice(-24).map(calibration).filter((sample): sample is ExportCalibration => sample !== null) : [];
-  } catch { return []; }
+    return Array.isArray(raw)
+      ? raw
+          .slice(-24)
+          .map(calibration)
+          .filter((sample): sample is ExportCalibration => sample !== null)
+      : [];
+  } catch {
+    return [];
+  }
 }
 
 function savedEngine(): ExportEngine {
@@ -97,15 +146,20 @@ export const useExportJob = create<ExportState>((set, get) => ({
     const sample = calibration(value);
     if (!sample) return;
     const calibrations = [...get().calibrations, sample].slice(-24);
-    try { localStorage.setItem(CALIBRATION_KEY, JSON.stringify(calibrations)); } catch {}
+    try {
+      localStorage.setItem(CALIBRATION_KEY, JSON.stringify(calibrations));
+    } catch {}
     set({ calibrations });
   },
   engine: savedEngine(),
   mode: "quality",
   setMode: (mode) => set({ mode: mode === "fast" ? "fast" : "quality" }),
   setEngine: (engine) => {
-    const selected = engine === "partition-pipes-v1" || engine === "auto" ? engine : "file-sequence-v1";
-    try { localStorage.setItem(ENGINE_KEY, selected); } catch {}
+    const selected =
+      engine === "partition-pipes-v1" || engine === "auto" ? engine : "file-sequence-v1";
+    try {
+      localStorage.setItem(ENGINE_KEY, selected);
+    } catch {}
     set({ engine: selected });
   },
   abort: null,

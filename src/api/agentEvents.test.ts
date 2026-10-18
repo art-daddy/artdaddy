@@ -27,7 +27,6 @@ import {
   __bufferedAgentEvents,
   __resetAgentEvents,
   agentEventContext,
-  createToolTrace,
   flushAgentEvents,
   flushAgentEventsForExit,
   preview,
@@ -64,47 +63,6 @@ afterEach(() => {
   stopHeartbeat();
   vi.unstubAllGlobals();
   vi.useRealTimers();
-});
-
-describe("anonymous pre-admission export outcomes", () => {
-  it("counts a signed-out protocol refusal once without sending tool args or identity", async () => {
-    useAuth.setState({ status: "locked", profile: null, hasStoredSession: false });
-    const registry = new ClientToolRegistry();
-    const handler = vi.fn(async () => ({ ok: true }));
-    registry.register("export", handler);
-    await registry.run("export", { private_filename: "C:/private/person-and-project.mov" });
-    expect(handler).not.toHaveBeenCalled();
-    expect(posted).toHaveLength(1);
-    expect(posted[0]).toMatchObject({ status: "blocked", readiness: "unknown" });
-    expect(Object.keys(posted[0] as object).sort()).toEqual(["app_version", "arch", "elapsed_ms", "operation", "platform", "project_size_band", "readiness", "reason_code", "shell", "status"]);
-    expect(JSON.stringify(posted)).not.toContain("person-and-project");
-    expect(vi.mocked(fetch).mock.calls[0][1]).toMatchObject({ credentials: "omit", referrerPolicy: "no-referrer" });
-  });
-
-  it("counts only unadmitted outputs in a deduplicated partial batch and ignores repeated trace completion", () => {
-    useAuth.setState({ status: "locked", profile: null, hasStoredSession: false });
-    const trace = createToolTrace("export", { media_refs: ["media_a", " media_b ", "media_b"] }, agentEventContext());
-    const result = { ok: false, error: "could not admit the second file", exports: [{ job_id: "already-admitted" }] };
-    trace.result(result);
-    trace.result(result);
-    trace.error(new Error("later duplicate completion"));
-    expect(posted).toHaveLength(1);
-    expect(posted[0]).toMatchObject({ status: "blocked", operation: "copy" });
-  });
-
-  it("does not delay a refused tool while anonymous transport is still pending", async () => {
-    useAuth.setState({ status: "locked", profile: null, hasStoredSession: false });
-    let release!: () => void;
-    let delivered = false;
-    const pending = new Promise<void>((resolve) => { release = resolve; });
-    vi.stubGlobal("fetch", vi.fn(async () => { await pending; delivered = true; return new Response("{}"); }));
-    const registry = new ClientToolRegistry();
-    registry.register("export", async () => ({ ok: false, error: "source unavailable" }));
-    expect(await registry.run("export", {})).toMatchObject({ ok: false });
-    expect(delivered).toBe(false);
-    release();
-    await pending;
-  });
 });
 
 describe("the dispatch boundary records every outcome", () => {

@@ -118,8 +118,38 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: artdaddy-windows-x64
-          path: ${{ steps.verify.outputs.path }}
+          path: |
+            ${{ steps.verify.outputs.path }}
+            src-tauri/target/release/bundle/nsis/*.exe.sig
           if-no-files-found: error
+
+      - name: Install and paint the candidate in the disposable runner
+        shell: pwsh
+        run: |
+          $destination = Join-Path $env:RUNNER_TEMP "ArtDaddyCandidate"
+          $install = Start-Process "${{ steps.verify.outputs.path }}" -ArgumentList @('/S', "/D=$destination") -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "Installer failed: $($install.ExitCode)" }
+          $installed = Join-Path $destination "artdaddy.exe"
+          if (-not (Test-Path $installed)) { throw "The installed executable is absent" }
+          $env:ARTDADDY_QA_INSTALLED_EXE = $installed
+          $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=18877'
+          $application = Start-Process $installed -PassThru
+          try {
+            $null = $application.WaitForInputIdle(30000)
+            node scripts/qa/installedArtifact.mjs
+            if ($LASTEXITCODE -ne 0) { throw 'Installed WebView qualification failed' }
+            if (-not $application.WaitForExit(30000)) { throw 'Installed app did not close normally' }
+            if ($application.ExitCode -ne 0) { throw "Installed app exited with $($application.ExitCode)" }
+          } finally {
+            $application.Refresh()
+            if (-not $application.HasExited) { Stop-Process -Id $application.Id -Force }
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: signoff-windows-installed
+          path: reports/qa/installed/**
+          if-no-files-found: warn
 
       - name: Publish installer to the GitHub release
         if: inputs.publish

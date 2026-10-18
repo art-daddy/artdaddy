@@ -39,7 +39,12 @@ import { setExportsBusy } from "../tools/workGate";
 import { projectKeyOfDir } from "../tools/dataRoot";
 import { resolveExportResources, type ExportResources } from "../platform/host";
 import { confirmExport } from "../lib/confirm";
-import { assessExport, estimateExportFromHistory, type ExportAssessment, type ExportCalibration } from "./exportOptions";
+import {
+  assessExport,
+  estimateExportFromHistory,
+  type ExportAssessment,
+  type ExportCalibration,
+} from "./exportOptions";
 import type { RenderWorkload } from "./renderPlan";
 import { runProjectMutation } from "../tools/coordinator";
 
@@ -105,7 +110,8 @@ export function localDeliveryPort(store: ProjectStoreAccess): ExportDeliveryPort
     protocol: async () => EXPORT_PROTOCOL_VERSION,
     stageScratch: async (id, files, fonts) => {
       const value = entry(id);
-      if (value.state !== "prepared" || value.source?.kind !== "render") throw new Error("render staging intent is no longer eligible");
+      if (value.state !== "prepared" || value.source?.kind !== "render")
+        throw new Error("render staging intent is no longer eligible");
       if (scratch.has(id)) throw new Error("render scratch is already staged");
       const first = await store.prepareWork(`renderer/export-${id}/.reserved`);
       const cwd = first.slice(0, first.lastIndexOf("/"));
@@ -119,7 +125,10 @@ export function localDeliveryPort(store: ProjectStoreAccess): ExportDeliveryPort
         if (!fontRoot) throw new Error("bundled render font root is unavailable");
         for (const font of fonts) {
           if (entry(id).state !== "prepared") throw new Error("render font staging was cancelled");
-          await store.writeBytes(joinPath(cwd, "fonts", font), await store.readBytes(joinPath(fontRoot, font)));
+          await store.writeBytes(
+            joinPath(cwd, "fonts", font),
+            await store.readBytes(joinPath(fontRoot, font)),
+          );
         }
       }
       return cwd;
@@ -188,7 +197,10 @@ export function localDeliveryPort(store: ProjectStoreAccess): ExportDeliveryPort
     list: async () => [...entries.values()].map((value) => ({ ...value })),
     complete: async (id) => {
       const cwd = scratch.get(id);
-      if (cwd) { await store.remove(cwd); scratch.delete(id); }
+      if (cwd) {
+        await store.remove(cwd);
+        scratch.delete(id);
+      }
       entry(id).followups_done = true;
       return true;
     },
@@ -405,9 +417,14 @@ export interface ExportSubmission {
 
 export class ExportRequestError extends Error {
   result?: Record<string, unknown>;
-  constructor(message: string, readonly submitted: readonly ExportSubmission[],
-    readonly status: "blocked" | "declined" | "cancelled" = "blocked", readonly workload?: RenderWorkload) {
-    super(message); this.name = "ExportRequestError";
+  constructor(
+    message: string,
+    readonly submitted: readonly ExportSubmission[],
+    readonly status: "blocked" | "declined" | "cancelled" = "blocked",
+    readonly workload?: RenderWorkload,
+  ) {
+    super(message);
+    this.name = "ExportRequestError";
   }
 }
 
@@ -453,7 +470,11 @@ export interface ExportSpec {
   batch?: string;
   /** Runs the encode. Rejects with a message on failure. `jobId` names the job everywhere: the
    *  ledger, this queue and the supervisor. */
-  run: (signal: AbortSignal, jobId: string, meta: ExportSpec["meta"]) => Promise<{ warnings?: string[] }>;
+  run: (
+    signal: AbortSignal,
+    jobId: string,
+    meta: ExportSpec["meta"],
+  ) => Promise<{ warnings?: string[] }>;
 }
 
 /** A background encode failed after producing process diagnostics. Keeping this typed prevents
@@ -522,7 +543,9 @@ export async function whenExportTelemetrySettles(): Promise<void> {
 /** Report one settled export to the server's analytics. Fire-and-forget by contract: the file is
  *  already delivered, so nothing here may fail, delay or alter the export. */
 async function reportSettledExport(
-  spec: Pick<ExportSpec, "store" | "destPath" | "meta" | "supervisor" | "copyOf"> & { jobId?: string },
+  spec: Pick<ExportSpec, "store" | "destPath" | "meta" | "supervisor" | "copyOf"> & {
+    jobId?: string;
+  },
   outcome: {
     status: "done" | "failed" | "cancelled";
     elapsedMs: number;
@@ -532,10 +555,15 @@ async function reportSettledExport(
   },
 ): Promise<void> {
   try {
-    const native = outcome.status === "done" && spec.supervisor && spec.jobId
-      ? (await spec.supervisor.list()).find((view) => view.id === spec.jobId) : null;
+    const native =
+      outcome.status === "done" && spec.supervisor && spec.jobId
+        ? (await spec.supervisor.list()).find((view) => view.id === spec.jobId)
+        : null;
     // Only a delivered file has a size; a failed encode leaves nothing to measure.
-    const size = outcome.status === "done" ? (outcome.finalSizeBytes ?? (await spec.store.byteSize(spec.destPath)) ?? 0) : 0;
+    const size =
+      outcome.status === "done"
+        ? (outcome.finalSizeBytes ?? (await spec.store.byteSize(spec.destPath)) ?? 0)
+        : 0;
     if (outcome.status === "done" && !spec.copyOf && spec.meta?.calibration && size > 0) {
       let memoryBytes: number | null = null;
       let temporaryBytes: number | null = null;
@@ -544,22 +572,34 @@ async function reportSettledExport(
       if (summary) {
         try {
           const parsed: unknown = JSON.parse(summary.slice("native render resident: ".length));
-          const peak = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>).sampled_peak : null;
-          if (typeof peak === "number" && Number.isSafeInteger(peak) && peak > 0) memoryBytes = peak;
+          const peak =
+            parsed && typeof parsed === "object"
+              ? (parsed as Record<string, unknown>).sampled_peak
+              : null;
+          if (typeof peak === "number" && Number.isSafeInteger(peak) && peak > 0)
+            memoryBytes = peak;
         } catch {}
       }
       const temporary = diagnostics.find((line) => line.startsWith("native render temporary: "));
       if (temporary) {
         try {
           const parsed: unknown = JSON.parse(temporary.slice("native render temporary: ".length));
-          const peak = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>).accounted_peak_payload_bytes : null;
-          if (typeof peak === "number" && Number.isSafeInteger(peak) && peak >= 0) temporaryBytes = peak;
+          const peak =
+            parsed && typeof parsed === "object"
+              ? (parsed as Record<string, unknown>).accounted_peak_payload_bytes
+              : null;
+          if (typeof peak === "number" && Number.isSafeInteger(peak) && peak >= 0)
+            temporaryBytes = peak;
         } catch {}
       }
       const queuedMs = native?.started_at ? Math.max(0, native.started_at - native.queued_at) : 0;
-      useExportJob.getState().rememberCalibration({ ...spec.meta.calibration,
-        elapsedSeconds: Math.max(0, outcome.elapsedMs - queuedMs) / 1000, finalBytes: size,
-        memoryBytes, temporaryBytes });
+      useExportJob.getState().rememberCalibration({
+        ...spec.meta.calibration,
+        elapsedSeconds: Math.max(0, outcome.elapsedMs - queuedMs) / 1000,
+        finalBytes: size,
+        memoryBytes,
+        temporaryBytes,
+      });
     }
     const { reportExport } = await import("../api/exportEvents");
     await reportExport({
@@ -606,8 +646,14 @@ export async function submitExport(spec: ExportSpec): Promise<ExportSubmission> 
 
 async function confirmExportRequest(specs: readonly ExportSpec[]): Promise<boolean> {
   const refuse = async (status: "cancelled" | "declined" | "blocked"): Promise<never> => {
-    throw new ExportRequestError(status === "blocked" ? "export could not be confirmed; no job was submitted"
-      : "export cancelled before submission", [], status, specs[0].workload);
+    throw new ExportRequestError(
+      status === "blocked"
+        ? "export could not be confirmed; no job was submitted"
+        : "export cancelled before submission",
+      [],
+      status,
+      specs[0].workload,
+    );
   };
   const checks: ExportAssessment[] = [];
   const snapshots: ExportResources[] = [];
@@ -615,34 +661,75 @@ async function confirmExportRequest(specs: readonly ExportSpec[]): Promise<boole
     if (spec.submissionSignal?.aborted || !spec.store.sessionLive()) return refuse("cancelled");
     const resources = await resolveExportResources(spec.destPath, spec.submissionSignal);
     snapshots.push(resources);
-    const workload = spec.workload ?? { width: spec.meta?.project_width ?? spec.meta?.width ?? 0,
-      height: spec.meta?.project_height ?? spec.meta?.height ?? 0, fps: spec.meta?.fps ?? 0,
-      durationSeconds: spec.meta?.duration_s ?? 0, visualClips: 0, captionClips: 0, audioClips: 0,
-      peakVisualLayers: spec.meta?.visual_layers ?? 0, peakMediaLayers: 0 };
+    const workload = spec.workload ?? {
+      width: spec.meta?.project_width ?? spec.meta?.width ?? 0,
+      height: spec.meta?.project_height ?? spec.meta?.height ?? 0,
+      fps: spec.meta?.fps ?? 0,
+      durationSeconds: spec.meta?.duration_s ?? 0,
+      visualClips: 0,
+      captionClips: 0,
+      audioClips: 0,
+      peakVisualLayers: spec.meta?.visual_layers ?? 0,
+      peakMediaLayers: 0,
+    };
     const descriptor = spec.meta?.calibration;
-    const estimates = descriptor ? estimateExportFromHistory(workload, descriptor.output, descriptor.quality, descriptor.engine,
-      useExportJob.getState().calibrations, descriptor.encoder) : { memoryBytes: null, temporaryBytes: null, finalBytes: null, seconds: null };
+    const estimates = descriptor
+      ? estimateExportFromHistory(
+          workload,
+          descriptor.output,
+          descriptor.quality,
+          descriptor.engine,
+          useExportJob.getState().calibrations,
+          descriptor.encoder,
+        )
+      : { memoryBytes: null, temporaryBytes: null, finalBytes: null, seconds: null };
     checks.push(assessExport(workload, resources, estimates, resources.budgets));
   }
-  if (specs.some((spec) => spec.submissionSignal?.aborted || !spec.store.sessionLive())) return refuse("cancelled");
+  if (specs.some((spec) => spec.submissionSignal?.aborted || !spec.store.sessionLive()))
+    return refuse("cancelled");
   const reasons = new Set(checks.flatMap((check) => check.reasons));
-  if (checks.every((check) => check.estimates.temporaryBytes !== null && check.estimates.finalBytes !== null)) {
+  if (
+    checks.every(
+      (check) => check.estimates.temporaryBytes !== null && check.estimates.finalBytes !== null,
+    )
+  ) {
     const temporary = checks.reduce((total, check) => total + check.estimates.temporaryBytes!, 0);
     const final = checks.reduce((total, check) => total + check.estimates.finalBytes!, 0);
-    if (snapshots.some((snapshot) => snapshot.scratch_free_bytes !== null && temporary + final > snapshot.scratch_free_bytes ||
-      snapshot.destination_free_bytes !== null && temporary + final > snapshot.destination_free_bytes)) reasons.add("disk_shortage");
-    if (snapshots.some((snapshot) => snapshot.budgets.temporaryBytes !== null && temporary + final > snapshot.budgets.temporaryBytes)) reasons.add("temporary_limit");
+    if (
+      snapshots.some(
+        (snapshot) =>
+          (snapshot.scratch_free_bytes !== null &&
+            temporary + final > snapshot.scratch_free_bytes) ||
+          (snapshot.destination_free_bytes !== null &&
+            temporary + final > snapshot.destination_free_bytes),
+      )
+    )
+      reasons.add("disk_shortage");
+    if (
+      snapshots.some(
+        (snapshot) =>
+          snapshot.budgets.temporaryBytes !== null &&
+          temporary + final > snapshot.budgets.temporaryBytes,
+      )
+    )
+      reasons.add("temporary_limit");
   }
   const warning = [...reasons].some((reason) => reason !== "slow");
-  const storageReady = !["disk_unknown", "disk_shortage", "temporary_limit"].some((reason) => reasons.has(reason as typeof checks[number]["reasons"][number]));
+  const storageReady = !["disk_unknown", "disk_shortage", "temporary_limit"].some((reason) =>
+    reasons.has(reason as (typeof checks)[number]["reasons"][number]),
+  );
   if (!warning && checks.every((check) => check.severity === "none")) return storageReady;
   const outside = checks.some((check) => check.promiseLine === "outside");
   const explanations = {
-    outside_promise: "The project exceeds an individual promised size, frame-rate, clip-count or on-screen limit, or those details are unavailable.",
-    memory_unknown: "Memory fit cannot be estimated yet because a comparable observation or native measurement is missing.",
-    memory_shortage: "The estimated worker memory exceeds currently available memory or the existing worker cutoff.",
+    outside_promise:
+      "The project exceeds an individual promised size, frame-rate, clip-count or on-screen limit, or those details are unavailable.",
+    memory_unknown:
+      "Memory fit cannot be estimated yet because a comparable observation or native measurement is missing.",
+    memory_shortage:
+      "The estimated worker memory exceeds currently available memory or the existing worker cutoff.",
     disk_unknown: "Temporary-file or final-file space cannot be estimated yet.",
-    disk_shortage: "There may not be enough free space for the temporary files and all finished outputs together.",
+    disk_shortage:
+      "There may not be enough free space for the temporary files and all finished outputs together.",
     temporary_limit: "Estimated temporary files exceed the remaining export workspace allowance.",
     time_unknown: "A comparable successful local run is not available to estimate time.",
     execution_limit: "The estimated active time exceeds the existing export execution limit.",
@@ -653,41 +740,57 @@ async function confirmExportRequest(specs: readonly ExportSpec[]): Promise<boole
     : "Estimated time: unknown (no comparable local measurement yet).";
   const message = [
     `Check ${specs.length === 1 ? "this export" : `these ${specs.length} exports`} before starting.`,
-    outside ? "This request is outside the measured project promise, or its project details are unavailable."
-      : warning ? "This project is within the declared size limits; resource fit has not yet been established."
-      : "This project is within the declared size limits.",
+    outside
+      ? "This request is outside the measured project promise, or its project details are unavailable."
+      : warning
+        ? "This project is within the declared size limits; resource fit has not yet been established."
+        : "This project is within the declared size limits.",
     [...reasons].map((reason) => explanations[reason]).join("\n"),
     ...(specs.some((spec) => spec.meta?.calibration?.encoder === "amf-cqp18")
-      ? ["Fast uses the locally measured AMD profile. Files can be much larger, and the picture can differ from Full quality."] : []),
+      ? [
+          "Fast uses the locally measured AMD profile. Files can be much larger, and the picture can differ from Full quality.",
+        ]
+      : []),
     time,
     checks.every((check) => check.estimates.memoryBytes !== null)
       ? `Estimated worker memory: about ${(Math.max(...checks.map((check) => check.estimates.memoryBytes!)) / 1024 ** 3).toFixed(1)} GiB, from observed worker samples; this is not a guaranteed peak.`
       : "Estimated memory: unknown. Native resource limits still apply.",
-    checks.every((check) => check.estimates.temporaryBytes !== null && check.estimates.finalBytes !== null)
+    checks.every(
+      (check) => check.estimates.temporaryBytes !== null && check.estimates.finalBytes !== null,
+    )
       ? `Estimated temporary payload: about ${(checks.reduce((total, check) => total + check.estimates.temporaryBytes! + check.estimates.finalBytes!, 0) / 1e9).toFixed(1)} GB, including pending output files and accounted scratch observations. Filesystem metadata and allocation overhead are extra within the existing headroom; this is not an exact disk peak.`
       : "Estimated temporary disk: unknown. Safe-file and temporary-space limits still apply.",
     "You can lower the export resolution or export a smaller section. Cancel to change settings.",
     warning ? "Continue anyway?" : "Continue?",
   ].join("\n\n");
   const decision = await confirmExport(message, warning);
-  if (specs.some((spec) => spec.submissionSignal?.aborted || !spec.store.sessionLive())) return refuse("cancelled");
+  if (specs.some((spec) => spec.submissionSignal?.aborted || !spec.store.sessionLive()))
+    return refuse("cancelled");
   if (decision === "continue") return storageReady;
   return refuse(decision === "cancel" ? "declined" : "blocked");
 }
 
 export async function submitExports(request: readonly ExportSpec[]): Promise<ExportSubmission[]> {
-  if (!request.length || request.length > 50) throw new Error("one export request must contain between 1 and 50 files");
-  const specs = request.map((spec) => ({ ...spec, dependencies: [...spec.dependencies],
+  if (!request.length || request.length > 50)
+    throw new Error("one export request must contain between 1 and 50 files");
+  const specs = request.map((spec) => ({
+    ...spec,
+    dependencies: [...spec.dependencies],
     ...(spec.meta ? { meta: structuredClone(spec.meta) } : {}),
-    ...(spec.workload ? { workload: structuredClone(spec.workload) } : {}) }));
+    ...(spec.workload ? { workload: structuredClone(spec.workload) } : {}),
+  }));
   const destinations = new Set<string>();
   const projectDir = specs[0].store.projectDir;
   for (const spec of specs) {
-    if (spec.store.projectDir !== projectDir) throw new Error("one export request belongs to one project");
+    if (spec.store.projectDir !== projectDir)
+      throw new Error("one export request belongs to one project");
     if (spec.stagePath === spec.destPath || !spec.store.canRename)
-      throw new Error("export requires atomic destination-volume staging; direct-output fallback is not supported");
+      throw new Error(
+        "export requires atomic destination-volume staging; direct-output fallback is not supported",
+      );
     const key = normalizeDest(spec.destPath);
-    if (reserved.has(key) || destinations.has(key)) throw new Error("export destination is already reserved");
+    if (reserved.has(key) || destinations.has(key))
+      throw new Error("export destination is already reserved");
     destinations.add(key);
   }
   const storageReady = await confirmExportRequest(specs);
@@ -696,8 +799,12 @@ export async function submitExports(request: readonly ExportSpec[]): Promise<Exp
     for (const spec of specs) submitted.push(await admitExport(spec, storageReady));
   } catch (error) {
     const failed = specs[submitted.length];
-    throw new ExportRequestError(error instanceof Error ? error.message : String(error), [...submitted],
-      failed.submissionSignal?.aborted || !failed.store.sessionLive() ? "cancelled" : "blocked", failed.workload);
+    throw new ExportRequestError(
+      error instanceof Error ? error.message : String(error),
+      [...submitted],
+      failed.submissionSignal?.aborted || !failed.store.sessionLive() ? "cancelled" : "blocked",
+      failed.workload,
+    );
   }
   return submitted;
 }
@@ -746,34 +853,62 @@ async function admitExport(spec: ExportSpec, storageReady: boolean): Promise<Exp
     : undefined;
   let jobId = "";
   try {
-    await runProjectMutation(spec.store.projectDir, "admit confirmed export", async (_document, lease) => {
-      if (!spec.store.sessionLive() || spec.submissionSignal?.aborted) throw new Error("export belongs to a closed or cancelled request");
-      lease?.assertCanCommit();
-      if (spec.outputDirectory) {
-        if (normalizeDest(spec.outputDirectory) !== normalizeDest(spec.destPath.replace(/[\\/][^\\/]+$/, "")))
-          throw new Error("export output folder differs from its captured destination");
-        try { await spec.store.ensureDir(spec.outputDirectory); }
-        catch (error) { throw new Error(`could not make the folder ${spec.outputDirectory}: ${String(error)}`); }
+    await runProjectMutation(
+      spec.store.projectDir,
+      "admit confirmed export",
+      async (_document, lease) => {
+        if (!spec.store.sessionLive() || spec.submissionSignal?.aborted)
+          throw new Error("export belongs to a closed or cancelled request");
         lease?.assertCanCommit();
-      }
-      jobId = await ledger.begin({ kind: "export", tool: "export", label: `the export ${spec.filename}`,
-        ...(session ? { session } : {}) });
-      const copyPath = spec.copyOf ? await spec.store.resolveMediaRef(spec.copyOf) : null;
-      if (spec.copyOf && !copyPath) throw new Error("copy export source is unavailable");
-      lease?.assertCanCommit();
-      await port.prepare(jobId, spec.store.projectDir, spec.stagePath, spec.destPath,
-        spec.copyOf ? { kind: "copy", path: copyPath!, media_ref: spec.copyOf } : { kind: "render", paths: [...spec.dependencies] });
-      lease?.assertCanCommit();
-      if (!spec.store.sessionLive() || spec.submissionSignal?.aborted) throw new Error("export cancelled during native preparation");
-      if (spec.meta) spec.meta = { ...spec.meta, readiness: storageReady ? "ready" : "unknown" };
-      lease?.markCommitted();
-    }, { origin: spec.origin, signal: spec.submissionSignal });
+        if (spec.outputDirectory) {
+          if (
+            normalizeDest(spec.outputDirectory) !==
+            normalizeDest(spec.destPath.replace(/[\\/][^\\/]+$/, ""))
+          )
+            throw new Error("export output folder differs from its captured destination");
+          try {
+            await spec.store.ensureDir(spec.outputDirectory);
+          } catch (error) {
+            throw new Error(`could not make the folder ${spec.outputDirectory}: ${String(error)}`);
+          }
+          lease?.assertCanCommit();
+        }
+        jobId = await ledger.begin({
+          kind: "export",
+          tool: "export",
+          label: `the export ${spec.filename}`,
+          ...(session ? { session } : {}),
+        });
+        const copyPath = spec.copyOf ? await spec.store.resolveMediaRef(spec.copyOf) : null;
+        if (spec.copyOf && !copyPath) throw new Error("copy export source is unavailable");
+        lease?.assertCanCommit();
+        await port.prepare(
+          jobId,
+          spec.store.projectDir,
+          spec.stagePath,
+          spec.destPath,
+          spec.copyOf
+            ? { kind: "copy", path: copyPath!, media_ref: spec.copyOf }
+            : { kind: "render", paths: [...spec.dependencies] },
+        );
+        lease?.assertCanCommit();
+        if (!spec.store.sessionLive() || spec.submissionSignal?.aborted)
+          throw new Error("export cancelled during native preparation");
+        if (spec.meta) spec.meta = { ...spec.meta, readiness: storageReady ? "ready" : "unknown" };
+        lease?.markCommitted();
+      },
+      { origin: spec.origin, signal: spec.submissionSignal },
+    );
   } catch (error) {
     reserved.delete(key);
     if (jobId) {
       const retired = await port.cancel(jobId).catch(() => false);
       if (retired) await port.complete(jobId).catch(() => false);
-      await ledger.settle(jobId, { status: spec.submissionSignal?.aborted || !spec.store.sessionLive() ? "cancelled" : "failed", error: String(error) });
+      await ledger.settle(jobId, {
+        status:
+          spec.submissionSignal?.aborted || !spec.store.sessionLive() ? "cancelled" : "failed",
+        error: String(error),
+      });
     }
     throw error;
   }

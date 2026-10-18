@@ -2,6 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import type { ClientToolContext } from "./context";
 import { joinPath, ProjectStoreAccess, type FsLike } from "./store";
 import { withAssScratch } from "./assScratch";
+import { endProjectSession } from "./coordinator";
+import { FakeJobs } from "../test/fakeJobs";
+import { localDeliveryPort } from "../timeline/exportQueue";
+import { supervisedRunner } from "./jobSupervisor";
 
 // Pretend to be the desktop app, whose bundled fonts live in resources/fonts.
 vi.mock("@tauri-apps/api/path", () => ({ resolveResource: async () => "C:/res/fonts" }));
@@ -33,6 +37,12 @@ class DirFs implements FsLike {
     this.files.set(joinPath(p), d);
   }
   async mkdir(): Promise<void> {}
+  async rename(from: string, to: string): Promise<void> {
+    const value = this.files.get(joinPath(from));
+    if (value === undefined) throw new Error(`ENOENT ${from}`);
+    this.files.set(joinPath(to), value);
+    this.files.delete(joinPath(from));
+  }
   async remove(p: string): Promise<void> {
     const k = joinPath(p);
     for (const f of [...this.files.keys()])
@@ -54,6 +64,75 @@ function setup(): { fs: DirFs; ctx: ClientToolContext } {
 }
 
 describe("withAssScratch", () => {
+  it.each(["submission", "font staging"])(
+    "keeps %s failure scratch owned until terminal acknowledgement",
+    async (failure) => {
+      const { fs, ctx } = setup();
+      const jobs = new FakeJobs();
+      jobs.delivery = localDeliveryPort(ctx.store);
+      const id = `reserved-${failure.replace(/ /g, "-")}`;
+      await jobs.delivery.prepare(
+        id,
+        ctx.store.projectDir,
+        "C:/outputs/.reserved.partial",
+        "C:/outputs/reserved.mp4",
+        { kind: "render", paths: [] },
+      );
+      const runner = supervisedRunner(ctx.runner, jobs, {
+        id,
+        lane: "export",
+        meta: { kind: "export" },
+      });
+      let invoked = false;
+      await expect(
+        withAssScratch(
+          { ...ctx, runner },
+          [{ name: "captions.ass", content: "captured caption bytes" }],
+          failure === "font staging" ? ["Missing.ttf"] : [],
+          async () => {
+            invoked = true;
+            throw new Error("submission refused before binding");
+          },
+        ),
+      ).rejects.toThrow();
+      expect(invoked).toBe(failure === "submission");
+      expect(fs.under(ctx.store.projectDir).some((file) => file.endsWith("/captions.ass"))).toBe(
+        true,
+      );
+      expect(jobs.submitted).toEqual([]);
+      await jobs.delivery.fail(id);
+      await jobs.delivery.complete(id);
+      expect(fs.under(ctx.store.projectDir)).toEqual([]);
+      expect((await jobs.delivery.list())[0].followups_done).toBe(true);
+    },
+  );
+
+  it("stages native work outside the project and cleans it after the project session ends", async () => {
+    class WorkFs extends DirFs {
+      async workDir(): Promise<string> {
+        return "C:/owned-app/work";
+      }
+    }
+    const fs = new WorkFs();
+    const store = new ProjectStoreAccess("C:/scratch-proj", fs);
+    const ctx = { store, runner: { run: async () => ({ code: 0, stdout: "", stderr: "" }) } };
+    let scratch = "";
+    await withAssScratch(
+      ctx,
+      [{ name: "graph.ffgraph", content: "real staged graph" }],
+      [],
+      async (cwd) => {
+        scratch = cwd!;
+        expect(scratch.startsWith("C:/owned-app/work/")).toBe(true);
+        expect(await fs.readTextFile(joinPath(scratch, "graph.ffgraph"))).toBe("real staged graph");
+        expect(fs.under(store.projectDir)).toEqual([]);
+        endProjectSession(store.projectDir);
+      },
+    );
+    expect(fs.under(store.projectDir)).toEqual([]);
+    expect(await fs.exists(scratch)).toBe(false);
+  });
+
   it("stages every .ass file and its fonts BEFORE the run, then removes the dir", async () => {
     const { fs, ctx } = setup();
     let seen: string[] = [];

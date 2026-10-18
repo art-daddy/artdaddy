@@ -6,8 +6,18 @@ import { platform } from "../platform";
 import { hostInfo } from "../platform/host";
 
 export const EXPORT_REASON_CODES = [
-  "none", "source_unavailable", "storage_unavailable", "storage_full", "memory_limit", "time_limit",
-  "verification_failed", "render_failed", "interrupted", "cancelled", "declined", "unknown",
+  "none",
+  "source_unavailable",
+  "storage_unavailable",
+  "storage_full",
+  "memory_limit",
+  "time_limit",
+  "verification_failed",
+  "render_failed",
+  "interrupted",
+  "cancelled",
+  "declined",
+  "unknown",
 ] as const;
 export const EXPORT_SIZE_BANDS = ["hd", "4k", "heavy_hd", "other", "unknown"] as const;
 export const EXPORT_OPERATIONS = ["render", "copy", "unknown"] as const;
@@ -45,20 +55,31 @@ function reasonFor(ev: ExportEvent): ExportReasonCode {
   if (ev.status === "cancelled") return "cancelled";
   if (ev.status === "declined") return "declined";
   if (EXPORT_REASON_CODES.includes(ev.reason_code as ExportReasonCode)) return ev.reason_code!;
-  const error = String(ev.error ?? "").slice(0, 32_768).toLowerCase();
+  const error = String(ev.error ?? "")
+    .slice(0, 32_768)
+    .toLowerCase();
   if (/no space left|enospc|disk.*full/.test(error)) return "storage_full";
-  if (/no such file|source.*(?:missing|unavailable)|enoent|\bis offline\b|\bmedia files? (?:are|is) offline\b|still (?:being )?generat(?:ing|ed)|failed to generate|is not in the library/.test(error)) return "source_unavailable";
-  if (/permission denied|access is denied|eacces|read.only|destination.*unavailable/.test(error)) return "storage_unavailable";
-  if (/memory.*(?:budget|limit|exceeded)|cannot allocate memory|out of memory/.test(error)) return "memory_limit";
+  if (
+    /no such file|source.*(?:missing|unavailable)|enoent|\bis offline\b|\bmedia files? (?:are|is) offline\b|still (?:being )?generat(?:ing|ed)|failed to generate|is not in the library/.test(
+      error,
+    )
+  )
+    return "source_unavailable";
+  if (/permission denied|access is denied|eacces|read.only|destination.*unavailable/.test(error))
+    return "storage_unavailable";
+  if (/memory.*(?:budget|limit|exceeded)|cannot allocate memory|out of memory/.test(error))
+    return "memory_limit";
   if (/deadline|execution.*expired|timed out/.test(error)) return "time_limit";
-  if (/artifact|verification|frame.*count|duration.*mismatch/.test(error)) return "verification_failed";
+  if (/artifact|verification|frame.*count|duration.*mismatch/.test(error))
+    return "verification_failed";
   if (/interrupted|restart|crash/.test(error)) return "interrupted";
   if (/ffmpeg|encoder|render/.test(error)) return "render_failed";
   return "unknown";
 }
 
 function sizeBand(ev: ExportEvent): ExportSizeBand {
-  if (EXPORT_SIZE_BANDS.includes(ev.project_size_band as ExportSizeBand)) return ev.project_size_band!;
+  if (EXPORT_SIZE_BANDS.includes(ev.project_size_band as ExportSizeBand))
+    return ev.project_size_band!;
   const short = Math.min(ev.width ?? 0, ev.height ?? 0);
   const long = Math.max(ev.width ?? 0, ev.height ?? 0);
   if (!(short > 0 && Number.isFinite(short) && Number.isFinite(long))) return "unknown";
@@ -79,12 +100,19 @@ export async function reportExport(ev: ExportEvent): Promise<void> {
       // reports them the same way, so no call site can get them wrong or leave them out.
       // `platform` is the SHELL (tauri/web); the OS is what a per-platform failure is read by.
       body: JSON.stringify({
-        status: ["done", "failed", "cancelled", "blocked", "declined"].includes(ev.status) ? ev.status : "failed",
-        elapsed_ms: Number.isFinite(elapsed) ? Math.round(Math.max(0, Math.min(elapsed, 10_000_000_000))) : 0,
+        status: ["done", "failed", "cancelled", "blocked", "declined"].includes(ev.status)
+          ? ev.status
+          : "failed",
+        elapsed_ms: Number.isFinite(elapsed)
+          ? Math.round(Math.max(0, Math.min(elapsed, 10_000_000_000)))
+          : 0,
         reason_code: reason,
-        operation: EXPORT_OPERATIONS.includes(ev.operation as (typeof EXPORT_OPERATIONS)[number]) ? ev.operation : "unknown",
+        operation: EXPORT_OPERATIONS.includes(ev.operation as (typeof EXPORT_OPERATIONS)[number])
+          ? ev.operation
+          : "unknown",
         project_size_band: sizeBand(ev),
-        readiness: ["ready", "not_ready", "unknown"].includes(ev.readiness ?? "") ? ev.readiness
+        readiness: ["ready", "not_ready", "unknown"].includes(ev.readiness ?? "")
+          ? ev.readiness
           : "unknown",
         app_version: __ARTDADDY_RELEASE__,
         platform: hostInfo().os,
