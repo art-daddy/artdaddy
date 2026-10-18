@@ -15,6 +15,7 @@ import type { CommandResult, CommandRunner } from "./command";
 import { sweepProjectTemps } from "./projectTemps";
 import { joinPath, ProjectStoreAccess } from "./store";
 import { TEMP_STALE_MS } from "./tempNames";
+import { sweepWork, workRoot } from "./workFolder";
 import { have, nodeFs, nodeRunner, srcSolid } from "./__e2e";
 
 const proj = joinPath(os.tmpdir(), `artdaddy-temps-${Date.now()}`);
@@ -64,23 +65,71 @@ describe("the temp sweep on a real disk", () => {
     60_000,
   );
 
-  it("a caption folder left behind is judged by the folder's own time, and goes whole", async () => {
-    let folder = "";
-    void withAssScratch(
-      { store, runner: nodeRunner },
-      [{ name: "a.ass", content: "[Script Info]" }],
-      [],
-      (cwd) => {
-        folder = cwd!;
-        return new Promise(() => {});
-      },
-    );
-    await vi.waitFor(() => expect(folder).not.toBe(""));
+  it("a caption folder left behind in the legacy project cache is judged by the folder's own time, and goes whole", async () => {
+    const folder = store.artifactPath("renderer/caps-legacy-orphan");
+    await fsp.mkdir(path.join(folder, "fonts"), { recursive: true });
+    await fsp.writeFile(path.join(folder, "a.ass"), "[Script Info]");
+    await fsp.writeFile(path.join(folder, "fonts", "legacy.ttf"), "legacy font");
     expect(existsSync(path.join(folder, "a.ass"))).toBe(true);
     expect((await sweepProjectTemps(store)).removed).toEqual([]);
     await quietFor(folder, TEMP_STALE_MS + 1000);
     expect((await sweepProjectTemps(store)).removed).toEqual([folder.slice(proj.length + 1)]);
     expect(existsSync(folder)).toBe(false);
+  });
+
+  it("app-work captions survive same-launch sweeps and a later launch removes the abandoned tree", async () => {
+    const root = await workRoot(nodeFs);
+    if (!root) throw new Error("the real-disk fixture requires an app work folder");
+    expect(root).not.toBe(joinPath(proj));
+    expect(root.startsWith(`${joinPath(proj)}/`)).toBe(false);
+    const base = joinPath(path.dirname(root));
+    const previousLaunch = joinPath(base, "launch-dead-beef");
+    let abandoned = "";
+    await withAssScratch(
+      { store, runner: nodeRunner },
+      [{ name: "a.ass", content: "abandoned captions" }],
+      [],
+      async (cwd) => {
+        if (!cwd) throw new Error("caption staging did not create its work folder");
+        expect(cwd.startsWith(`${root}/renderer/`)).toBe(true);
+        await quietFor(cwd, TEMP_STALE_MS + 1000);
+        expect((await sweepProjectTemps(store)).removed).toEqual([]);
+        expect(await sweepWork(nodeFs)).toEqual([]);
+        expect(await fsp.readFile(path.join(cwd, "a.ass"), "utf8")).toBe("abandoned captions");
+        // Replay the real staging bytes under a previous launch's identity.
+        abandoned = joinPath(previousLaunch, "renderer", path.basename(cwd));
+        await fsp.mkdir(path.dirname(abandoned), { recursive: true });
+        await fsp.rename(cwd, abandoned);
+      },
+    );
+    expect(await fsp.readFile(path.join(abandoned, "a.ass"), "utf8")).toBe("abandoned captions");
+    const unrelated = joinPath(base, "my-notes");
+    await fsp.mkdir(unrelated, { recursive: true });
+    await fsp.writeFile(path.join(unrelated, "keep.txt"), "not app scratch");
+    const ordinaryFile = joinPath(base, "launch-cafe-babe");
+    await fsp.writeFile(ordinaryFile, "not a launch folder");
+
+    let active = "";
+    await withAssScratch(
+      { store, runner: nodeRunner },
+      [{ name: "current.ass", content: "active captions" }],
+      [],
+      async (cwd) => {
+        if (!cwd) throw new Error("caption staging did not create its work folder");
+        active = cwd;
+        await quietFor(cwd, TEMP_STALE_MS + 1000);
+        expect((await sweepProjectTemps(store)).removed).toEqual([]);
+        expect(await sweepWork(nodeFs)).toEqual([previousLaunch]);
+        expect(existsSync(previousLaunch)).toBe(false);
+        expect(await fsp.readFile(path.join(cwd, "current.ass"), "utf8")).toBe("active captions");
+        expect(await fsp.readFile(path.join(unrelated, "keep.txt"), "utf8")).toBe(
+          "not app scratch",
+        );
+        expect(await fsp.readFile(ordinaryFile, "utf8")).toBe("not a launch folder");
+        expect(await sweepWork(nodeFs)).toEqual([]);
+      },
+    );
+    expect(existsSync(active)).toBe(false);
   });
 
   it("a project file's temp goes, and the file it was replacing stays", async () => {
