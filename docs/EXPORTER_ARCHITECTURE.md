@@ -1435,28 +1435,73 @@ beyond proving the existing implementation and are excluded from that count.
     that directory timestamps detect a real create/delete before relying
     on an unchanged timestamp; filename controls use real tempfile outputs.
     Unix symlink evidence is not relabelled a Windows reparse-point test.
-  - Candidate `1c5f7a1` changes only the isolated QA native jobs source.
-    Rust syntax/whitespace checks pass; all 995 other tracked raw files and
-    six protected inputs remain unchanged. The new controls are not yet
-    claimed passing. First publication correctly refused after 254.016 s:
-    build/type-check, 5,704 unit and 17 Node controls passed, but Git Bash
-    selected its GNU link.exe for MSVC build-script arguments. Retain that
-    log and refusal. A full unchanged-source gate now explicitly selects the
-    verified MSVC linker in its execution environment; no source, timeout,
-    resource, tolerance or mandatory lane is weakened to get past the refusal.
-    The candidate is not yet source-integrated into main or CI-qualified.
+  - Qualified source: `1c5f7a1` changes only the isolated QA native jobs source.
+    First publication correctly refused after 254.016 s: build/type-check,
+    5,704 unit and 17 Node controls passed, but Git Bash selected its GNU
+    link.exe for MSVC build-script arguments. Retain that failure. Selecting
+    the verified MSVC linker only in the execution environment let the same
+    source pass the full mandatory hook in 2,243.369 s: 5,704 unit, 17 Node,
+    220 Rust and 616 real-FFmpeg cases, with 20 existing native ignores and
+    234 existing smoke skips, plus the five backend contract controls.
+    All 996 tracked raw hashes, six protected inputs, HEAD, index and owner
+    handover stayed unchanged. No timeout, budget, tolerance or lane changed.
+  - Proof/native: exact-source CI39168166252 passes Linux and macOS. Every one
+    of the 751 applicable Git source hashes matches all three Mac app/recovery
+    reports and the Linux report. Actual runtime, all four output-cap orderings
+    and all three mandatory Mac portable/app repetitions pass. Linux again
+    proves the inherited 8 GiB/swap-zero boundary across the first app, actual
+    staged encoder and recovered app, with the successful 192 MiB control,
+    detached-grandchild refusal under 128 MiB and increased kernel OOM kills.
+    Membership derived from the exact old/new Git test annotations verifies
+    every new filesystem control actually ran: seven in Windows CI and eight
+    each in Linux/macOS CI. Changing an actual passing outcome to ignored or
+    FAILED is refused by the independent case verifier.
+  - Proof/standard: CI39168166248 has all nine jobs passing after repeating
+    only its failed Mac browser job on unchanged source. The three attempt-one
+    export artifacts retain 609 passes/241 skips each on Mac/Linux and
+    612 passes/238 skips on Windows. All 850 smoke identities and outcomes per
+    OS match the qualified baseline; all 35 colour cases and eight complete
+    raw layouts pass on each OS. Both older timing witnesses pass below their
+    unchanged deadlines. The first Mac Chromium browser attempt instead
+    measured red=0 at the blend sample, where >60 is required: 111 other cases
+    passed and two were skipped. Keep its 58,694-byte failed log. The identical
+    repeat passes all 112 cases with two skips, including that Chromium sample
+    and its WebKit sibling. No screenshot/trace bytes were uploaded by this
+    lane, and the later pass does not establish a pixel-failure cause or fix.
+    This candidate changes no browser, preview, smoke or workflow source.
+  - Main integration proof: the complete jobs source equals exactly the
+    qualified journal patch applied to the frozen owner working source;
+    reversing only that patch reconstructs the original remainder. Only D091
+    changes in this document. The owner's 111 unrelated architecture additions,
+    two additions/ten deletions in job tests and handover bytes remain intact.
+    All other inputs in the fresh 1,015-file main freeze, all 996 QA raw sources
+    and six protected QA inputs are unchanged. Scoped source/Rust parser
+    checks do not claim the owner's combined dirty main build or type-check.
+    Version remains 0.21.2; no main push or release.
+  - Guaranteed: canonical identity and encoded-size admission precede receipt
+    creation; the shared writer admits final payload/entries and the existing
+    old-plus-new overlap before writing, then rechecks before installation.
+    Loader and pruning share its process I/O lock. Failed installs preserve
+    old receipt bytes, and failed temporary cleanup is explicitly reported.
+    Unknown regular files stay charged; only the exact reserved uncommitted
+    tempfile namespaces in the dedicated private root are cleanup candidates.
   - Separate allocation witness: three tiny, fully written NTFS files use
     0/4,096/8,192 allocated bytes for 0/1,024/4,097 logical bytes, measured by
     the actual native handle API on 4,096-byte clusters. All 5,121 written
     bytes and the owned fixture were cleaned up. This demonstrates logical
     under-accounting, not metadata attribution, a full-size/profile run or
     failure of the existing 2 GB headroom.
-  - Residual/deferred: capture, graph/font and pipe/manifest staging, initial
-    stages, final encoder output, copies, retained/orphan restoration and
-    filesystem metadata still require complete allocation-aware coverage.
-    Physical 20 GB, full promise/device qualification and both older timing
-    causes remain open. Strict acceptance stays 11/24 (46%); ten of thirteen
-    open boxes are built but unaccepted. Main version remains 0.21.2.
+  - Residual: these are cooperative, single-app-process payload/entry bounds,
+    not an OS filesystem quota or cryptographic proof of a temporary's origin.
+    Directory-fsync/power-loss durability is not strengthened. Capture,
+    graph/font and pipe/manifest staging, initial stages, final encoder output,
+    copies, retained/orphan restoration and filesystem metadata still need
+    complete allocation-aware coverage. Both older timing causes and the
+    newly retained Mac browser pixel failure remain unproven.
+  - Deferred: physical 20 GB, full promise/profile/device qualification, pilot
+    and release remain open. This closes only the journal substep, not E2.4.
+    Strict acceptance stays 11/24 (46%); ten of thirteen open boxes are built
+    but unaccepted. Main version remains 0.21.2.
 
 ## Historical V1 Design And Evidence
 
