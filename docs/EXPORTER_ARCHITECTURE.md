@@ -1023,6 +1023,18 @@ beyond proving the existing implementation and are excluded from that count.
     MP4 files are actually probed as two-channel AAC and compare every decoded
     sample with both channels independently present. Windows's two integer
     conversions are identical; this does not prove the ARM-specific hypothesis.
+  - Actual-source qualification (`3c1814b`, standard CI `39124301166`): both
+    precision probes pass on macOS ARM64, Windows and Linux. Every float64
+    sample hashes to `f07a41a33546796d01d45bccebd8a43c1cf91c68730819ae014802de895409a2`.
+    ARM reproduces exactly the earlier 456 one-step integer differences with
+    the original two s16 hashes; x64 reproduces none. Downloaded reference and
+    streamed AAC MP4 bytes are identical on each platform; independently
+    decoding both verifies all 196 frame hashes, complete sound and both
+    channels. Windows decoding of ARM AAC has a different PCM hash from ARM
+    decoding, explicitly not misreported as a verified originating checksum.
+    The full CI remains red: Windows vibrance pixels, macOS vibrance pixels
+    and three owned-exit races. The fixture/oracle port does not fix these or
+    qualify combined main, full conformance, physical devices or 20 GB space.
 
 - V2-D083: integrate the already-qualified chroma, cleanup and CI prerequisite
   slices without a wholesale QA merge.
