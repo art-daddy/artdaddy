@@ -2,11 +2,12 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { createReadStream, createWriteStream, watch } from "node:fs";
-import { mkdir, mkdtemp, readFile, writeFile, realpath, readdir, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile, realpath, readdir, readlink, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer, normalizePath } from "vite";
+import { readLinuxMemoryCgroup, cgroupFits, sameCgroup, cgroupEncoderPids } from "./exporterLinuxMemory.mjs";
 
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const targets = { "win32-x64": "x86_64-pc-windows-msvc", "darwin-arm64": "aarch64-apple-darwin", "linux-x64": "x86_64-unknown-linux-gnu" };
@@ -359,6 +360,7 @@ function start(config, run) {
 }
 
 const started = Date.now();
+const linuxMemoryRunId = process.platform === "linux" ? process.env.ARTDADDY_QA_MEMORY_RUN_ID : undefined;
 const proof = { version: 1, scope: "native-owner-capture-and-crash-recovery", target, root, identifier,
   memorySimulation: { configuredCommitLimitBytes: Number(process.env.ARTDADDY_QA_MEMORY_CAP_BYTES ?? 0),
     physicalMinimumMachine: false, exactPeakCeiling: false },
@@ -375,11 +377,20 @@ const proof = { version: 1, scope: "native-owner-capture-and-crash-recovery", ta
     }
   }
 try {
+    if (linuxMemoryRunId) {
+      assert.match(linuxMemoryRunId, /^[a-f0-9]{32}$/, "Invalid Linux memory run identity");
+      const nodeBefore = await readLinuxMemoryCgroup();
+      assert.ok(cgroupFits(nodeBefore, Number(process.env.ARTDADDY_QA_MEMORY_CAP_BYTES)), "Requested Linux kernel cap is absent");
+      assert.ok(nodeBefore.path.endsWith(`/artdaddy-export-qa-${linuxMemoryRunId}.service`), "Native harness entered the wrong memory cgroup");
+      proof.memoryCgroupEvidence = { runId: linuxMemoryRunId, nodeBefore };
+    }
     await collectSources("src");
     await collectSources("src-tauri/src");
     sourceFiles.push("package.json", "package-lock.json", "src-tauri/Cargo.toml", "src-tauri/Cargo.lock",
       "src-tauri/tauri.conf.json", "scripts/qa/exporterNative.mjs", "scripts/qa/exporterNative.ts", "scripts/qa/exporterNative.html",
-      "scripts/qa/exporterMemory.ps1");
+      "scripts/qa/exporterMemory.ps1", "scripts/qa/exporterLinuxMemory.mjs", "scripts/qa/exporterPromiseCases.json",
+      "scripts/qa/exporterPromiseReport.mjs", "scripts/qa/exporterLinuxMemory.test.mjs",
+      "scripts/qa/exporterPromiseReport.test.mjs", ".github/workflows/exporter-native-qa.yml");
     proof.sourceFiles = await Promise.all(sourceFiles.sort().map(async (filename) => ({ path: filename.replaceAll(path.sep, "/"), sha256: await fileHash(path.join(repository, filename)) })));
     proof.sourceSetSha256 = createHash("sha256").update(JSON.stringify(proof.sourceFiles)).digest("hex");
     proof.inputSha256 = await fileHash(source);
@@ -398,11 +409,43 @@ try {
     plugins: { "deep-link": { desktop: { schemes: ["artdaddy-exporter-qa"] } } } }));
   const first = start(config, 1);
   const admitted = await changedFile(path.join(root, "native-armed.json"), (report) => Boolean(report.id), first);
+  if (proof.memoryCgroupEvidence) {
+    const evidence = proof.memoryCgroupEvidence;
+    evidence.nativeBefore = admitted.resources?.memory_cgroup;
+    assert.ok(sameCgroup(evidence.nodeBefore, evidence.nativeBefore), "First native app did not inherit the kernel cap");
+    assert.deepEqual(await readLinuxMemoryCgroup(evidence.nativeBefore.process_id), evidence.nativeBefore,
+      "Native cgroup evidence did not match its actual process");
+    const workers = [];
+    const members = await cgroupEncoderPids(path.join("/sys/fs/cgroup", evidence.nodeBefore.path), "/proc");
+    for (const pid of members) {
+      let executablePath;
+      try { executablePath = await readlink(`/proc/${pid}/exe`); }
+      catch (error) { if (error.code === "ENOENT") continue; throw error; }
+      if (!/^artdaddy-ffmpeg(?:-|$)/.test(path.basename(executablePath))) continue;
+      const cgroup = await readLinuxMemoryCgroup(pid);
+      assert.ok(sameCgroup(evidence.nodeBefore, cgroup), "Actual encoder escaped the kernel cap");
+      const sha256 = await fileHash(executablePath);
+      assert.equal(sha256, await fileHash(executable("artdaddy-ffmpeg")), "Observed capped encoder is not the staged worker");
+      workers.push({ cgroup, sha256 });
+    }
+    assert.ok(workers.length > 0, "No actual encoder was observed inside the memory cgroup");
+    evidence.workers = workers;
+  }
   proof.steps.push({ phase: "native-job-armed", ...admitted });
   stopOwned(first);
   proof.steps.push({ phase: "owned-native-process-crashed" });
   const second = start(config, 2);
   const report = await changedFile(path.join(root, "native-report.json"), (report) => report.ok === true, second);
+  if (proof.memoryCgroupEvidence) {
+    const evidence = proof.memoryCgroupEvidence;
+    evidence.nativeAfter = report.resources?.memory_cgroup;
+    evidence.nodeAfter = await readLinuxMemoryCgroup();
+    assert.ok([evidence.nativeAfter, evidence.nodeAfter].every((group) => sameCgroup(evidence.nodeBefore, group)),
+      "Recovery or final reporting did not retain the kernel cap");
+    assert.notEqual(evidence.nativeBefore.process_id, evidence.nativeAfter.process_id, "Recovery did not replace the app process");
+    assert.deepEqual(await readLinuxMemoryCgroup(evidence.nativeAfter.process_id), evidence.nativeAfter,
+      "Recovered app evidence did not match its actual process");
+  }
   proof.hostProfileEvidence = ["darwin", "linux"].includes(process.platform) ? {
     scope: "measured-host-memory", runId: identifier, platform: process.platform,
     nodeTotalMemoryBytes: proof.hardware.totalMemoryBytes,
@@ -412,6 +455,8 @@ try {
     hostWithinMemoryBound: !!proof.hostProfileEvidence &&
       [proof.hostProfileEvidence.nodeTotalMemoryBytes, proof.hostProfileEvidence.nativeTotalMemoryBytes]
         .every((bytes) => Number.isSafeInteger(bytes) && bytes > 0 && bytes <= limits.systemMemoryBytes),
+    cgroupWithinMemoryBound: !!proof.memoryCgroupEvidence &&
+      cgroupFits(proof.memoryCgroupEvidence.nodeBefore, limits.systemMemoryBytes),
     physicalQualified: false, promiseQualified: false,
   }]));
   assert.equal(report.producerComplete, true, "Native success must have persisted producer completion");
@@ -627,7 +672,9 @@ try {
     const hostProfileEvidence = proof.hostProfileEvidence;
     const hostProfileFits = !!hostProfileEvidence && [hostProfileEvidence.nodeTotalMemoryBytes, hostProfileEvidence.nativeTotalMemoryBytes]
       .every((bytes) => Number.isSafeInteger(bytes) && bytes > 0 && bytes <= profileBound);
-    const profileEnforced = process.platform === "win32" && cap > 0 && cap <= profileBound || hostProfileFits;
+    const cgroupFitsProfile = !!proof.memoryCgroupEvidence &&
+      cgroupFits(proof.memoryCgroupEvidence.nodeBefore, profileBound);
+    const profileEnforced = process.platform === "win32" && cap > 0 && cap <= profileBound || hostProfileFits || cgroupFitsProfile;
     const temporarySpaceQualified = false;
     proof.promiseResult = { ...promiseAttempt, ...native, fixture: promiseFixture, sound, captionSamples, sourcePictureProof, orientationProof, sourceReady: true,
       mode: native.encoder === "libx264" ? "quality" : native.encoder === "h264_amf" ? "fast" : "unknown",

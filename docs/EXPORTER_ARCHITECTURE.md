@@ -1347,6 +1347,60 @@ beyond proving the existing implementation and are excluded from that count.
     not fix or erase the failed full run. Repeat the unchanged full gate with
     independent owned-process timing observations, preserving both attempts.
     No timeout, resource limit, tolerance, hook or QA source byte was changed.
+  - Unchanged-source publication: the observed repeat passed the full mandatory
+    hook in 2,285.759 s: 5,704 unit, 17 Node, 213 native and 616 real-FFmpeg
+    smoke cases, with the existing 20 native ignores and 234 smoke skips.
+    All 996 tracked raw hashes and six protected inputs remained unchanged;
+    only the isolated QA branch advanced to exact `ffb4a87`. The 24 fps case
+    took 4.785 s and the 349-input audio case 32.376 s. The retained failed
+    attempts remain failures. The 135 owned-tree observer snapshots describe
+    this successful run only, not the cause of either earlier timing refusal.
+  - Replacement native CI39157103667: both jobs pass at exact `ffb4a87`.
+    Independent verification matches every one of the 751 applicable Git source
+    blobs in all three Mac app/recovery reports and the Linux report. Actual
+    runtime checks pass (18 Mac, 17 Linux), as do all four direct/streamed,
+    first/replayed output-cap orderings on each OS. All 18 portable cases pass
+    in each of the three mandatory Mac executions and the Linux execution.
+    Linux independently demonstrates the 192 MiB control, detached-grandchild
+    refusal under 128 MiB and an increased kernel OOM-kill count. Node, first
+    app, actual staged-encoder identity, recovered app and final receipt agree
+    on the same inherited 8 GiB/swap-zero cgroup and kernel directory identity.
+    The selected encoder remains subject to actual executable/hash checks.
+  - Replacement standard CI39157103672: all nine jobs pass at the same SHA,
+    including the repaired format/build/unit lane, native and desktop lanes,
+    actual browser checks and all three export jobs. Mac/Linux have 609 passes
+    and 241 explicit skips each; Windows has 612 passes and 238 explicit skips.
+    No export case fails. Each OS passes all 35 colour cases and eight complete
+    raw layouts. The two previously timed-out witnesses pass here as well;
+    this does not establish a timing-cause fix.
+  - Main integration proof: all eleven source/harness/workflow/hook surfaces
+    match the exact qualified candidate, including complete typed/runtime ASTs
+    for the frontend adapters and harness. Reversing only the native resource
+    additions reconstructs the owner's original jobs source. Reversing only
+    D090 reconstructs the original architecture bytes, preserving its 111
+    unrelated added lines. The owner-preserved handover is unchanged.
+    A 1,012-file main freeze found one separate concurrent Cargo.lock change,
+    now equal to committed HEAD; this task did not write dependencies, restore
+    that file or include it in the exporter commit. Every other unowned frozen
+    file, all 996 QA raw sources and all six protected QA inputs are unchanged.
+    Main stays 0.21.2; no main push, release or combined-main execution is claimed.
+  - Guaranteed: the supported Linux QA input requires actual kernel cap effect
+    and stable app/worker/recovery evidence, not a requested label. The integrated
+    main offline authority accepts the retained real receipt for both declared
+    software-profile bounds and refuses missing or no-OOM-effect receipts.
+    Independently corrupting real final identity or worker hash also refuses.
+    These are two input bounds from one 8 GiB run, not two physical machines.
+  - Residual: the original 24 fps and 349-input timing causes remain unproven.
+    Nonstandard cgroup layouts remain unavailable. Artifact source verification
+    covers the declared 751-file set, not every repository file; downloaded
+    reports do not permit independent rehashing of complete native binaries or
+    media. Scoped main source/parser/style and real-receipt checks do not prove
+    the owner's combined dirty main build/type-check or reconcile dependencies.
+  - Deferred: full promise/profile runs, physical devices, allocated temporary
+    space/metadata and a proven 20 GB ceiling, pilot and release remain open.
+    This adds QA input evidence, not a production-wide RAM policy or a completed
+    E5.2 box. Strict acceptance remains 11/24 (46%); ten of thirteen open boxes
+    remain built but unaccepted.
 
 ## Historical V1 Design And Evidence
 

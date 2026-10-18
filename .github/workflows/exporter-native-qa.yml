@@ -46,7 +46,7 @@ jobs:
       - run: npm ci
       - run: node scripts/fetch-sidecars.mjs --only ffmpeg,ffprobe
       - name: Promise-library and real-source QA controls
-        run: node --test scripts/qa/exporterPromiseReport.test.mjs scripts/qa/exporterSources.test.mjs
+        run: node --test scripts/qa/exporterPromiseReport.test.mjs scripts/qa/exporterSources.test.mjs scripts/qa/exporterLinuxMemory.test.mjs
       - name: Native job invariants
         run: |
           set -o pipefail
@@ -85,7 +85,7 @@ jobs:
           exit "$failed"
       - name: Native Linux capture and crash recovery
         if: runner.os == 'Linux'
-        run: xvfb-run -a dbus-run-session -- node scripts/qa/exporterNative.mjs
+        run: node scripts/qa/exporterLinuxMemory.mjs
       - name: Preserve actual outcomes and build identities
         if: always()
         uses: actions/upload-artifact@v4
