@@ -1402,6 +1402,62 @@ beyond proving the existing implementation and are excluded from that count.
     E5.2 box. Strict acceptance remains 11/24 (46%); ten of thirteen open boxes
     remain built but unaccepted.
 
+- V2-D091: admit recovery-journal payload before creating a temporary receipt,
+  including retained entries and replacement overlap. This is one E2.4 substep,
+  not completion of the allocated-space or physical 20 GB boundary.
+  - Authority: the app-private journal root and canonical export ID. All 17
+    production write sites use one mandatory native writer; startup loading,
+    uncommitted-temp cleanup and canonical-receipt pruning share its process
+    I/O lock. The production desktop already enforces a single app instance.
+    Parent delivery locks continue to order cancellation and settlement.
+  - Surface: admission, render staging, queue clocks, verification, publication
+    and retry, cancellation/failure, render retention/completion, copy staging
+    and completion, recovery and retirement. There is no endpoint opt-in.
+    Read and deletion paths cannot race the writer's capacity observation.
+  - Lifecycle/commit point: measure the same immutable serde serialization
+    without allocating a file; admit its final occupancy and old-plus-new
+    overlap; write and sync a named temporary; recheck capacity; then replace
+    the canonical receipt while retaining the journal lock. Failed installation
+    preserves the old receipt. Cleanup errors remain explicit and cannot
+    silently release bytes that still exist.
+  - Budget/ownership: retain the existing 8 MiB receipt, 64 MiB journal payload
+    and 4,096-entry limits. Explicitly bound the existing one-receipt temporary
+    overlap at 72 MiB, within existing headroom, not a raised export budget.
+    Unknown regular files remain intact and count toward admission. Only
+    regular uncommitted files in the app-private current/legacy tempfile
+    namespaces are eligible for crash cleanup; directories and links refuse.
+    These are payload/entry bounds, not measured filesystem allocation.
+  - Failure matrix: pre-write size/aggregate/entry refusal, both competing
+    writer orderings, actual old/new overlap, failed rename and failed cleanup,
+    partial crash leftovers, installed data with stale process memory, and
+    real render-staging/copy/retirement producers. Controls use actual stored
+    bytes and filesystem effects. The refusal control first demonstrates
+    that directory timestamps detect a real create/delete before relying
+    on an unchanged timestamp; filename controls use real tempfile outputs.
+    Unix symlink evidence is not relabelled a Windows reparse-point test.
+  - Candidate `1c5f7a1` changes only the isolated QA native jobs source.
+    Rust syntax/whitespace checks pass; all 995 other tracked raw files and
+    six protected inputs remain unchanged. The new controls are not yet
+    claimed passing. First publication correctly refused after 254.016 s:
+    build/type-check, 5,704 unit and 17 Node controls passed, but Git Bash
+    selected its GNU link.exe for MSVC build-script arguments. Retain that
+    log and refusal. A full unchanged-source gate now explicitly selects the
+    verified MSVC linker in its execution environment; no source, timeout,
+    resource, tolerance or mandatory lane is weakened to get past the refusal.
+    The candidate is not yet source-integrated into main or CI-qualified.
+  - Separate allocation witness: three tiny, fully written NTFS files use
+    0/4,096/8,192 allocated bytes for 0/1,024/4,097 logical bytes, measured by
+    the actual native handle API on 4,096-byte clusters. All 5,121 written
+    bytes and the owned fixture were cleaned up. This demonstrates logical
+    under-accounting, not metadata attribution, a full-size/profile run or
+    failure of the existing 2 GB headroom.
+  - Residual/deferred: capture, graph/font and pipe/manifest staging, initial
+    stages, final encoder output, copies, retained/orphan restoration and
+    filesystem metadata still require complete allocation-aware coverage.
+    Physical 20 GB, full promise/device qualification and both older timing
+    causes remain open. Strict acceptance stays 11/24 (46%); ten of thirteen
+    open boxes are built but unaccepted. Main version remains 0.21.2.
+
 ## Historical V1 Design And Evidence
 
 Everything below is retained history, not authority for conflicting V2 requirements.
