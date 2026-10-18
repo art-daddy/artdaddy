@@ -63,8 +63,18 @@ jobs:
         run: "cargo test --manifest-path src-tauri/Cargo.toml --lib commit -- --nocapture"
       - name: Source clocks, audio DSP and actual native pieces
         run: |
-          node node_modules/vitest/vitest.mjs run --config vitest.smoke.config.ts src/timeline/exportRange.smoke.e2e.ts --testNamePattern 'source audio gap before mixing|keeps delayed source timing|one-pass audio preserves|partition-pipes-v1 chunk seams|audio.*preserves actual frames and floating stereo across partitions|video.*chroma.*preserves actual frames|late audio matches allocating delay' --reporter=json --outputFile=reports/qa/exporter/source-clock-dsp.json
-          node -e 'const fs=require("node:fs");const result=JSON.parse(fs.readFileSync("reports/qa/exporter/source-clock-dsp.json","utf8"));if(result.numPassedTests!==18||result.numFailedTests!==0)throw new Error("Expected all18source-clock/DSP/chroma/delay/native-piece cases to pass");'
+          runs=1
+          if [ "$RUNNER_OS" = "macOS" ]; then runs=3; fi
+          failed=0
+          for iteration in 1 2 3; do
+            if [ "$iteration" -gt "$runs" ]; then break; fi
+            suffix=""
+            if [ "$iteration" -gt 1 ]; then suffix="-repeat-$iteration"; fi
+            report="reports/qa/exporter/source-clock-dsp$suffix.json"
+            if ! node node_modules/vitest/vitest.mjs run --config vitest.smoke.config.ts src/timeline/exportRange.smoke.e2e.ts --testNamePattern 'source audio gap before mixing|keeps delayed source timing|one-pass audio preserves|partition-pipes-v1 chunk seams|audio.*preserves actual frames and floating stereo across partitions|video.*chroma.*preserves actual frames|late audio matches allocating delay' --reporter=json --outputFile="$report"; then failed=1; fi
+            if ! node -e 'const fs=require("node:fs");const result=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(result.numPassedTests!==18||result.numFailedTests!==0)throw new Error("Expected all18source-clock/DSP/chroma/delay/native-piece cases to pass");' "$report"; then failed=1; fi
+          done
+          exit "$failed"
       - name: Native macOS capture and crash recovery
         if: runner.os == 'macOS'
         run: node scripts/qa/exporterNative.mjs
@@ -75,6 +85,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: exporter-native-${{ matrix.runner }}-${{ github.sha }}
+          name: exporter-native-${{ matrix.runner }}-${{ github.sha }}-attempt-${{ github.run_attempt }}
           path: reports/qa/exporter/**
           if-no-files-found: error
