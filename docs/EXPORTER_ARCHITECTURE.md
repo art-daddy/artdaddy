@@ -990,6 +990,40 @@ beyond proving the existing implementation and are excluded from that count.
     Add real zombie/live/concurrent-writer outcomes and require every repeated
     macOS app execution to pass before closing this candidate.
 
+- V2-D082: separate graph/transport conformance from integer-codec rounding.
+  Actual `ea12d7f` macOS crossfade and exposure witnesses have all 196 matching
+  frame hashes, equal complete audio lengths and the same 456 one-step s16
+  differences. Their audio hashes are identical across these two classes.
+  Source inspection finds an fltp mixer and float64 transport followed by a
+  test-only s16 encode; existing effect/DSP probes already use float64.
+  - Invariant/authority: a transport probe compares every unquantized float64
+    sample and frame; a separate real MP4/AAC probe compares the complete
+    delivered sound and requires both authored channels. Output codec and
+    decode precision are part of the fixture identity, not a tolerance.
+  - Surface/lifecycle: make the shared lossless fixture retain float64 by
+    default, rather than opt in only selected classes. The same integer-oracle
+    mismatch also affects fit-mode and 349-input comparisons; they must not
+    remain on a different default. Every schema-driven transition and colour
+    probe additionally compares all float64 sample bytes, matching the effect
+    probes. Keep legacy s16 range decode comparisons, production AAC, mixer graphs, encoder policy,
+    frozen outputs, equality predicates and all failure refusals unchanged.
+  - Failure matrix/proof gate: preserve the old s16 witnesses; compare actual
+    single/streamed float64 files, independently replay float64-to-s16 versus
+    fltp-to-s16 conversion, and compare actual single/streamed MP4/AAC files.
+    Any frame, complete float sample, AAC sample, length or channel-presence
+    failure still fails. Windows alone cannot establish ARM rounding behaviour.
+  - Commit point/evidence: retain the actual float64/AAC probe files and their
+    full frame/PCM hashes through the existing synthetic-directory/regular-file/
+    32 MiB checks. Two diagnostic failure classes plus two precision probes
+    bound capture to eight media files, not an unbounded passing-case archive.
+    Do not claim the rounding hypothesis proven until actual macOS execution
+    and before/after artifact comparisons support it.
+  - Local evidence: all 36 transition/colour/precision/LUT cases pass on
+    Windows. Saved float64 files have identical complete PCM hashes; the real
+    MP4 files are actually probed as two-channel AAC and compare every decoded
+    sample with both channels independently present. Windows's two integer
+    conversions are identical; this does not prove the ARM-specific hypothesis.
+
 - V2-D083: integrate the already-qualified chroma, cleanup and CI prerequisite
   slices without a wholesale QA merge.
   - Authority/surface: typed chroma uses the one shared effect compiler; add
@@ -1057,6 +1091,33 @@ beyond proving the existing implementation and are excluded from that count.
     source; its range fixture has the same runtime AST as `a758126`, retaining
     the one pre-existing type-only assertion difference. Syntax checks are
     separate from a combined-main type/build/execution pass.
+
+- V2-D086: preserve and instrument the newly observed 349-audio-input timeout,
+  rather than raise its deadline or call an isolated pass a repair.
+  - Authority/surface: the existing synthetic 349-input timeline and shared
+    lossless fixture remain the oracle. Observe source preparation, reference
+    render/decode, full render/decode and complete segment comparisons, keyed
+    by the existing private fixture/run directory.
+  - Lifecycle/commit point: record bounded phase timing, actual process memory
+    and host availability through test settlement; retain the diagnostic JSON
+    whether the test passes or fails. Actual generated media and all frame,
+    audio-history and unchanged-timeline assertions remain authoritative.
+  - Failure matrix: distinguish a blocked phase, exhausted machine, wall-clock
+    discontinuity and output mismatch using evidence, not a guessed cause.
+    Do not extend the 180-second case deadline, skip inputs, change production
+    threading/budgets, or discard the earlier failed attempt.
+  - Evidence/residual: `db6687f` passes build, 5,702 unit cases, ten Node controls
+    and 211 Rust cases (20 ignored), but the unchanged push is refused at smoke:
+    607 pass, one failure, 234 skips. The audio case reports 1,193.970 seconds
+    against its unchanged 180-second deadline. Its unmodified isolated rerun
+    passes all output assertions in 17.161 seconds. This does not identify or
+    resolve the full-run failure. The pinned Vitest runner clears per-test
+    failure hooks; do not invent an accumulating-hook explanation.
+    QA `3c1814b` records eight bounded phases and actual process/host readings
+    without changing the assertions. Its instrumented isolated case passes
+    in 15.045 seconds and retains the complete pass/settlement artifact.
+    The next unchanged full push is pending, not a successful publication.
+    Keep strict acceptance at 11/24 (46%), built but unaccepted at 10/13.
 
 - V2-D087: bring the existing native-QA workflow draft up to the qualified
   `ea12d7f` gate, preserving its QA-branch/manual triggers and 45-minute budget.

@@ -15,6 +15,22 @@ build or qualification result.
 **Strict acceptance remains 11/24 (46%). Built but unaccepted remains 10/13.**
 No acceptance box was closed by the following short software/control runs.
 
+### Current Source Boundaries
+
+| Source | Current State |
+| --- | --- |
+| Main implementation checkpoint | `d93557d257fc1f1c78be3750547913d122f6d366`; local commits only, version 0.21.2 |
+| Isolated QA candidate | `3c1814bad319731090eeeb66539cd197cdaf448f`; frozen while its unchanged pre-push gate runs |
+| Last verified published QA source | `ea12d7fd61a5e5b9e1c0fd2b8fcab6eef71478ec` |
+| Previous candidate publication | `db6687f` was refused locally: 607 smoke passes, one 349-audio-input timeout, 234 skips |
+| Combined-main execution | Blocked before compilation by preserved unrelated manifest/lock drift; source equivalence is not an execution pass |
+| Actual macOS candidate execution | Pending; the zombie-exit classification and float64/AAC oracle have not been certified by Windows results |
+
+Do not edit the isolated candidate during the push. The new attempt includes
+bounded phase diagnostics, not a proven repair for the earlier timeout. No main
+push, release, deployment, paid call, personal-media upload or deferred full-size/
+physical-device run is authorized or performed by these continuation gates.
+
 ### Completed Software And Local Gates
 
 - Recovered the original "Code review for akaru project (RECOVERED 8)" transcript
@@ -138,16 +154,58 @@ No acceptance box was closed by the following short software/control runs.
   Focused combined-main `cargo --locked` refused before compilation because
   the pre-existing dirty root lock adds `reqwest`/`rustls` absent from the
   manifest. Preserve those unrelated edits: combined-main execution is blocked,
-  not passed. Other qualified exporter slices still require surgical backport.
+  not passed.
+- Additional qualified-source main integrations are now committed locally:
+  `917a40e` ports filter-local chroma threading, immutable corpus adapters,
+  actual-owner cleanup, real-native CI prerequisites and descriptor-test
+  isolation. `0366793` removes only self-introduced formatting churn; the
+  production render delta against `6df6121` is exactly the approved chroma
+  option. `08808d7` ports the identity-bound software-profile evidence adapter.
+  None of these commits changes the existing version, unrelated user changes,
+  frozen corpus bytes, budgets or encoder policy.
+- Main `7d8fe26` ports the shared real Rust sequence launcher, Automatic
+  120-clip montage owner, explicit smoke consent and same-platform allocating
+  late-audio oracle. Every delivered clip colour and every delayed floating
+  sample remains checked; both historical Windows hashes remain intact.
+  All five fixture sources match qualified runtime ASTs and have zero syntax
+  diagnostics. The sole pre-existing type-only assertion difference is explicit;
+  these checks are not combined-main type/build/execution proof.
+- Main `d93557d` completes the existing native-QA workflow draft using qualified
+  `ea12d7f`: actual native outcome counts, all required portable executions and
+  attempt-bound artifacts. The whole parsed workflow matches that source and
+  all ten shell bodies pass Bash syntax. QA-only/manual triggers, permissions,
+  tools, 45-minute job budget and production limits are unchanged.
 - QA local commit `400457d` fixes the shared dot/whitespace boundary invariant,
   including project-name fallback and post-truncation Unicode boundaries.
   Its exact CI witness, properties, returned default destination, invalid-folder
   refusal and existing media/clip regressions pass 81 cases; formatting passes.
   The same bounded naming slice is in main; complete component-byte/device-name
   qualification remains explicitly separate. See architecture decision D080.
-- Next: qualify the owned-worker exit candidate on actual macOS, resolve the
-  remaining audio-comparison precision evidence without weakening assertions,
-  and continue qualified exporter-owned integration without wholesale merges.
+- QA `db6687f` makes the shared lossless fixture float64, with complete
+  transition/colour sample equality and separate actual MP4/AAC/dual-channel
+  controls. The 36 focused Windows cases pass; original macOS s16 witnesses
+  and newly retained float64/AAC files remain available. Windows integer
+  conversions are identical, so the ARM rounding hypothesis is not yet proven.
+  Fit modes and 349-input siblings share the new fixture default rather than
+  remaining on an inconsistent integer oracle. Production audio is unchanged.
+- Its unchanged push passes build, 5,702 unit cases, ten Node controls and 211
+  Rust cases (20 ignored), then refuses at real smoke: 607 pass, one fail,
+  234 skipped. The 349-audio-input case reports 1,193.970 seconds against its
+  existing 180-second deadline. Its unmodified isolated run passes every output
+  assertion in 17.161 seconds; this is not root-cause closure.
+- QA `3c1814b` adds only a bounded lifecycle JSON for that existing case:
+  actual preparation/render/decode/assertion/settlement times, process memory
+  and host availability. The instrumented case passes in 15.045 seconds and
+  retains its actual pass artifact. The full unchanged QA-only push is currently
+  running; do not assume publication or a new remote result. Do not raise the
+  deadline, reduce the 349 inputs, change production policy or discard the
+  earlier failure if the next attempt passes.
+- Next: finish the frozen QA gate, inspect its exact-source remote native and
+  standard runs if publication succeeds, and verify all three macOS actual-app
+  executions plus all portable executions. Compare original s16 witnesses with
+  actual float64/AAC and conversion artifacts before declaring the precision
+  hypothesis proved. Reopen the shared worker-lifetime boundary if the new exit
+  classification fails. Only then port those still-unqualified slices to main.
 - Larger residuals remain: complete allocated temporary-space/20 GB coverage,
   Linux 8 GB and other complete software-profile evidence, combined-main gates,
   complete UI/agent/MCP/copy/lifecycle/filesystem coverage, visual/audio/preview
@@ -168,9 +226,19 @@ Continuation evidence is under the isolated QA worktree's `reports/qa/exporter`:
 `ci-39111883008`, `ci-39111883014`,
 `continuation-standard-smoke-ea12d7f-summary.json`,
 `continuation-macos-comparison-inspection-ea12d7f.json` and
-`continuation-export-name-boundaries.json`. Main's own reports include
+`continuation-export-name-boundaries.json`,
+`continuation-precision-conformance.json`,
+`continuation-qa-push-db6687f-1792317826590.json`,
+`continuation-349-audio-isolated-db6687f.json`,
+`continuation-349-audio-diagnostics.json` and
+`continuation-349-audio-diagnostic-source.json`.
+The active attempt's log is
+`continuation-qa-push-3c1814b-1792322259079.log`; its completion report is not yet
+available at this checkpoint. Main's own reports include
 `continuation-native-backport-equivalence-298f254.json` and
-`continuation-main-native-integration-1792312282490.json`.
+`continuation-main-native-integration-1792312282490.json`,
+`continuation-main-fixture-integration.json` and
+`continuation-main-native-workflow-integration.json`.
 Preserve failed evidence and exact
 source identities. Native/profile success is still not physical-device,
 full-duration, whole-space or 99% promise qualification.
