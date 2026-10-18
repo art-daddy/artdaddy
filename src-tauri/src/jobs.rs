@@ -2448,7 +2448,7 @@ mod export_delivery_tests {
     }
   }
   use super::*;
-  struct NoSpawn;
+  pub(super) struct NoSpawn;
   impl Spawner for NoSpawn {
     fn identity(&self, program: &str) -> Result<ArtifactIdentity, String> {
       Ok(ArtifactIdentity { sha256: format!("{:x}", Sha256::digest(program.as_bytes())), size: program.len() as u64 })
@@ -2464,7 +2464,7 @@ mod export_delivery_tests {
       dir.join(format!("{id}.mp4")).to_string_lossy().into(), DeliverySource::Render { paths: Vec::new() }).unwrap()
   }
 
-  fn journal_write_clock(root: &Path) -> SystemTime {
+  pub(super) fn journal_write_clock(root: &Path) -> SystemTime {
     fn stamp(root: &Path, time: SystemTime) {
       let mut options = std::fs::OpenOptions::new();
       options.read(true);
