@@ -32,27 +32,53 @@ afterEach(() => vi.useRealTimers());
 
 describe("local export resource snapshots", () => {
   it("preserves complete native cgroup evidence instead of losing it at the resource adapter", async () => {
-    await fc.assert(fc.asyncProperty(fc.integer({ min: 1, max: Number.MAX_SAFE_INTEGER }),
-      fc.integer({ min: 1, max: 65536 }), async (memory, pid) => {
-        const memory_cgroup = { version: 2, path: "/system.slice/native-qa.service", identity: "29:712",
-          process_id: pid, memory_max_bytes: memory, swap_max_bytes: 0 };
-        invoke.mockResolvedValue({ memory_cgroup });
-        expect((await resolveExportResources("")).memory_cgroup).toEqual(memory_cgroup);
-      }), { numRuns: 40 });
+    await fc.assert(
+      fc.asyncProperty(
+        fc.integer({ min: 1, max: Number.MAX_SAFE_INTEGER }),
+        fc.integer({ min: 1, max: 65536 }),
+        async (memory, pid) => {
+          const memory_cgroup = {
+            version: 2,
+            path: "/system.slice/native-qa.service",
+            identity: "29:712",
+            process_id: pid,
+            memory_max_bytes: memory,
+            swap_max_bytes: 0,
+          };
+          invoke.mockResolvedValue({ memory_cgroup });
+          expect((await resolveExportResources("")).memory_cgroup).toEqual(memory_cgroup);
+        },
+      ),
+      { numRuns: 40 },
+    );
   });
 
   it("keeps malformed cgroup evidence explicitly unavailable, never a valid profile label", async () => {
     const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
-      const group = { version: 2, path: "/system.slice/native-qa.service", identity: "29:712",
-        process_id: 123, memory_max_bytes: 8 * 1024 ** 3, swap_max_bytes: 0 };
-      for (const patch of [{ path: "/../peer" }, { identity: "not-an-inode" }, { process_id: 0 },
-        { memory_max_bytes: Number.MAX_SAFE_INTEGER + 1 }, { swap_max_bytes: "0" }, { version: 1 }]) {
+      const group = {
+        version: 2,
+        path: "/system.slice/native-qa.service",
+        identity: "29:712",
+        process_id: 123,
+        memory_max_bytes: 8 * 1024 ** 3,
+        swap_max_bytes: 0,
+      };
+      for (const patch of [
+        { path: "/../peer" },
+        { identity: "not-an-inode" },
+        { process_id: 0 },
+        { memory_max_bytes: Number.MAX_SAFE_INTEGER + 1 },
+        { swap_max_bytes: "0" },
+        { version: 1 },
+      ]) {
         invoke.mockResolvedValue({ memory_cgroup: { ...group, ...patch } });
         expect(await resolveExportResources("")).toEqual(UNKNOWN);
       }
       expect(warning).toHaveBeenCalledTimes(6);
-    } finally { warning.mockRestore(); }
+    } finally {
+      warning.mockRestore();
+    }
   });
 
   it("preserves measured zero free space and sends the destination only to native IPC", async () => {

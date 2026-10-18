@@ -70,12 +70,13 @@ export async function resolveExportResources(
     let memoryCgroup: LinuxMemoryCgroup | undefined;
     if (raw.memory_cgroup !== undefined) {
       const invalid = (): never => {
-        console.warn("Native cgroup resource evidence is malformed; resource snapshot is unavailable");
+        console.warn(
+          "Native cgroup resource evidence is malformed; resource snapshot is unavailable",
+        );
         throw new Error("Native cgroup resource evidence is malformed");
       };
       const value = raw.memory_cgroup;
-      if (!value || typeof value !== "object" || Array.isArray(value))
-        return invalid();
+      if (!value || typeof value !== "object" || Array.isArray(value)) return invalid();
       const group = value as Record<string, unknown>;
       const memory = group.memory_max_bytes;
       const swap = group.swap_max_bytes;
@@ -83,16 +84,34 @@ export async function resolveExportResources(
       const identity = group.identity;
       const pid = group.process_id;
       const validLimit = (bytes: unknown): bytes is number | null =>
-        bytes === null || typeof bytes === "number" && Number.isSafeInteger(bytes) && bytes >= 0;
-      if (group.version !== 2 || typeof groupPath !== "string" || !groupPath.startsWith("/") ||
-        /[\0\r\n]/.test(groupPath) || groupPath !== "/" &&
-          groupPath.slice(1).split("/").some((part) => !part || part === "." || part === "..") ||
-        typeof identity !== "string" || !/^\d+:\d+$/.test(identity) ||
-        typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 0 ||
-        !validLimit(memory) || !validLimit(swap))
+        bytes === null || (typeof bytes === "number" && Number.isSafeInteger(bytes) && bytes >= 0);
+      if (
+        group.version !== 2 ||
+        typeof groupPath !== "string" ||
+        !groupPath.startsWith("/") ||
+        /[\0\r\n]/.test(groupPath) ||
+        (groupPath !== "/" &&
+          groupPath
+            .slice(1)
+            .split("/")
+            .some((part) => !part || part === "." || part === "..")) ||
+        typeof identity !== "string" ||
+        !/^\d+:\d+$/.test(identity) ||
+        typeof pid !== "number" ||
+        !Number.isSafeInteger(pid) ||
+        pid <= 0 ||
+        !validLimit(memory) ||
+        !validLimit(swap)
+      )
         return invalid();
-      memoryCgroup = { version: 2, path: groupPath, identity, process_id: pid,
-        memory_max_bytes: memory, swap_max_bytes: swap };
+      memoryCgroup = {
+        version: 2,
+        path: groupPath,
+        identity,
+        process_id: pid,
+        memory_max_bytes: memory,
+        swap_max_bytes: swap,
+      };
     }
     return {
       total_memory_bytes: total !== null && total > 0 ? total : null,
