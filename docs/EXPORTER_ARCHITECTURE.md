@@ -1269,6 +1269,45 @@ beyond proving the existing implementation and are excluded from that count.
     The retained `a2e5c8d` full CI also exposes the old defect on Linux; the
     repair remains one mandatory filter boundary, not an opt-in workaround.
 
+- V2-D090: qualify Linux software-profile inputs at the actual inherited kernel
+  memory boundary, not from a nominal runner size or an environment label.
+  - Authority: the current cgroup v2 directory identity and the intersection of
+    its actual memory/swap limits with every visible ancestor. A requested cap
+    is an expectation to verify, never evidence that enforcement exists.
+  - Surface: native resource snapshots, the frontend resource adapter, both
+    native app launches, the QA launcher, retained memory receipts and the
+    offline promise report must agree. Existing measured-host evidence and the
+    Windows Job receipt remain separate supported inputs.
+  - Lifecycle/commit point: install the inherited process-tree cap before
+    launching any app or encoder; match independent Node/native observations
+    during first execution and recovery, then recheck before recording success.
+    The kernel cap survives sessions, child spawning and the intentional app
+    crash. Missing, malformed, migrated or changed evidence cannot qualify.
+  - Failure matrix: first prove a small allocation succeeds without the cap
+    and is actually refused under a smaller cap, including a detached grandchild.
+    Exercise nested/ancestor limits, unavailable controllers, both admission
+    orderings, forged labels, mismatched runs and failure receipts. Preserve
+    all failed attempts; do not retry artifact failures into a pass.
+  - Scope: unified cgroup v2 at the standard Linux mount is the initial supported
+    enforcement path; unsupported layouts stay explicitly unqualified. This
+    adds local evidence, not new render policy, raised budgets or anonymous
+    telemetry fields. Full-size, physical-device, pilot and release runs remain
+    deferred. E5.2 and strict 11/24 (46%) remain open pending actual proof.
+  - Candidate implementation: use a non-root transient systemd service with
+    MemoryMax=8 GiB, swap disabled and no controller delegation. The kernel
+    boundary covers the app, webview, detached encoders and recovery launch.
+    The bounded discriminator compares a complete 192 MiB allocation with a
+    128 MiB cgroup refusal and an increased kernel OOM-kill count.
+    Independent native/Node identity observations and an actual staged-encoder
+    hash must match before a retained receipt can qualify in the offline report.
+    Native provenance now also includes the cap helper, profile definitions,
+    offline authority, its controls and the workflow. Physical host readings
+    retain their original meaning; no measured-host field is relabelled a cap.
+  - Initial checks: all 16 focused Node controls, 11 frontend resource-adapter
+    cases and both portable native parser cases pass on Windows. These are
+    parser/receipt preparation only, not actual Linux enforcement evidence.
+    The full publication gate and exact-source Linux/Mac execution remain pending.
+
 ## Historical V1 Design And Evidence
 
 Everything below is retained history, not authority for conflicting V2 requirements.
