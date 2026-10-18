@@ -427,9 +427,66 @@ fn artifact_identity_checked(path: &Path, check: &dyn Fn() -> Result<(), String>
 
 const EXPORT_RECEIPT_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
 const EXPORT_JOURNAL_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
+const EXPORT_JOURNAL_ENTRY_LIMIT: usize = 4096;
+const EXPORT_JOURNAL_TRANSIENT_BYTES: u64 = EXPORT_JOURNAL_LIMIT_BYTES + EXPORT_RECEIPT_LIMIT_BYTES;
+const EXPORT_RECEIPT_TEMP_PREFIX: &str = ".receipt-";
+static EXPORT_JOURNAL_IO: Mutex<()> = Mutex::new(());
+
+fn valid_delivery_id(id: &str) -> bool {
+  !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+fn lock_export_journal() -> Result<MutexGuard<'static, ()>, String> {
+  EXPORT_JOURNAL_IO.lock().map_err(|error| format!("export recovery journal I/O lock failed: {error}"))
+}
+
+fn owned_receipt_temporary(name: &str) -> bool {
+  let random = name.strip_prefix(EXPORT_RECEIPT_TEMP_PREFIX).and_then(|name| name.strip_suffix(".tmp"))
+    .filter(|name| name.len() == 16)
+    .or_else(|| name.strip_prefix(".tmp").filter(|name| name.len() == 6));
+  random.is_some_and(|name| name.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+}
+
+fn cleanup_receipt_temporaries(root: &Path) -> Result<(), String> {
+  for (index, entry) in std::fs::read_dir(root).map_err(|error| error.to_string())?.enumerate() {
+    if index > EXPORT_JOURNAL_ENTRY_LIMIT { return Err("export recovery journal exceeds its temporary cleanup entry budget".into()); }
+    let entry = entry.map_err(|error| error.to_string())?;
+    if !entry.file_name().to_str().is_some_and(owned_receipt_temporary) { continue; }
+    let kind = entry.file_type().map_err(|error| error.to_string())?;
+    if !kind.is_file() || kind.is_symlink() { return Err("uncommitted export receipt must be an owned regular file".into()); }
+    std::fs::remove_file(entry.path()).map_err(|error| format!("could not clean uncommitted export receipt: {error}"))?;
+  }
+  Ok(())
+}
+
+fn check_journal_capacity(root: &Path, target: Option<&Path>, next_bytes: u64, pending: Option<&Path>) -> Result<(), String> {
+  let mut installed = next_bytes;
+  let mut entries = usize::from(target.is_some());
+  let mut transient = next_bytes;
+  let mut transient_entries = entries;
+  for entry in std::fs::read_dir(root).map_err(|error| error.to_string())? {
+    let entry = entry.map_err(|error| error.to_string())?;
+    let path = entry.path();
+    if pending == Some(path.as_path()) { continue; }
+    let kind = entry.file_type().map_err(|error| error.to_string())?;
+    if !kind.is_file() || kind.is_symlink() { return Err("export recovery journal must contain only regular files".into()); }
+    let bytes = entry.metadata().map_err(|error| error.to_string())?.len();
+    transient = transient.checked_add(bytes).ok_or("export journal transient size overflow")?;
+    transient_entries = transient_entries.checked_add(1).ok_or("export journal transient entry overflow")?;
+    if target != Some(path.as_path()) {
+      installed = installed.checked_add(bytes).ok_or("export journal size overflow")?;
+      entries = entries.checked_add(1).ok_or("export journal entry overflow")?;
+    }
+    if installed > EXPORT_JOURNAL_LIMIT_BYTES || entries > EXPORT_JOURNAL_ENTRY_LIMIT ||
+      transient > EXPORT_JOURNAL_TRANSIENT_BYTES || transient_entries > EXPORT_JOURNAL_ENTRY_LIMIT + 1 {
+      return Err("export recovery journal exceeds its aggregate admission budget; finish pending follow-ups before exporting".into());
+    }
+  }
+  Ok(())
+}
 
 struct ReceiptWriter<'a> {
-  output: &'a mut std::fs::File,
+  output: &'a mut dyn Write,
   remaining: u64,
 }
 
@@ -446,26 +503,50 @@ impl Write for ReceiptWriter<'_> {
 }
 
 fn persist_delivery(root: &Path, delivery: &ExportDelivery) -> Result<(), String> {
-  std::fs::create_dir_all(root).map_err(|error| error.to_string())?;
-  let mut file = tempfile::NamedTempFile::new_in(root).map_err(|error| error.to_string())?;
-  serde_json::to_writer(ReceiptWriter { output: file.as_file_mut(), remaining: EXPORT_RECEIPT_LIMIT_BYTES }, delivery)
-    .map_err(|error| error.to_string())?;
-  let target = root.join(format!("{}.json", delivery.id));
-  let mut installed = file.as_file().metadata().map_err(|error| error.to_string())?.len();
-  let mut receipts = 1usize;
-  for entry in std::fs::read_dir(root).map_err(|error| error.to_string())? {
-    let entry = entry.map_err(|error| error.to_string())?;
-    if entry.path() == target || entry.path().extension().and_then(|extension| extension.to_str()) != Some("json") { continue; }
-    if !entry.file_type().map_err(|error| error.to_string())?.is_file() { return Err("export recovery receipt must be a regular file".into()); }
-    receipts += 1;
-    installed = installed.checked_add(entry.metadata().map_err(|error| error.to_string())?.len()).ok_or("export journal size overflow")?;
-    if receipts > 4096 || installed > EXPORT_JOURNAL_LIMIT_BYTES {
-      return Err("export recovery journal exceeds its aggregate admission budget; finish pending follow-ups before exporting".into());
-    }
+  persist_delivery_after_sync(root, delivery, |_| Ok(()))
+}
+
+fn discard_receipt(file: tempfile::NamedTempFile, primary: String) -> String {
+  match file.close() {
+    Ok(()) => primary,
+    Err(error) => format!("{primary}; uninstalled export receipt cleanup failed: {error}"),
   }
-  file.as_file().sync_all().map_err(|error| error.to_string())?;
-  file.persist(target).map_err(|error| error.to_string())?;
-  Ok(())
+}
+
+fn persist_delivery_after_sync(root: &Path, delivery: &ExportDelivery, after_sync: impl FnOnce(&Path) -> Result<(), String>) -> Result<(), String> {
+  let _journal = lock_export_journal()?;
+  if !valid_delivery_id(&delivery.id) { return Err("invalid export intent identity".into()); }
+  let mut sink = std::io::sink();
+  let mut measured = ReceiptWriter { output: &mut sink, remaining: EXPORT_RECEIPT_LIMIT_BYTES };
+  serde_json::to_writer(&mut measured, delivery).map_err(|error| error.to_string())?;
+  let expected_bytes = EXPORT_RECEIPT_LIMIT_BYTES - measured.remaining;
+  std::fs::create_dir_all(root).map_err(|error| error.to_string())?;
+  cleanup_receipt_temporaries(root)?;
+  let target = root.join(format!("{}.json", delivery.id));
+  check_journal_capacity(root, Some(&target), expected_bytes, None)?;
+  let mut file = tempfile::Builder::new().prefix(EXPORT_RECEIPT_TEMP_PREFIX).rand_bytes(16).suffix(".tmp")
+    .tempfile_in(root).map_err(|error| error.to_string())?;
+  let written = (|| -> Result<(), String> {
+    serde_json::to_writer(ReceiptWriter { output: file.as_file_mut(), remaining: expected_bytes }, delivery)
+      .map_err(|error| error.to_string())?;
+    if file.as_file().metadata().map_err(|error| error.to_string())?.len() != expected_bytes {
+      return Err("export receipt size changed after admission".into());
+    }
+    file.as_file().sync_all().map_err(|error| error.to_string())?;
+    after_sync(file.path())?;
+    check_journal_capacity(root, Some(&target), expected_bytes, Some(file.path()))
+  })();
+  if let Err(error) = written { return Err(discard_receipt(file, error)); }
+  match file.persist(target) {
+    Ok(_) => Ok(()),
+    Err(error) => Err(discard_receipt(error.file, error.error.to_string())),
+  }
+}
+
+fn remove_delivery_receipt(root: &Path, id: &str) -> Result<(), String> {
+  let _journal = lock_export_journal()?;
+  if !valid_delivery_id(id) { return Err("invalid export intent identity".into()); }
+  std::fs::remove_file(root.join(format!("{id}.json"))).map_err(|error| error.to_string())
 }
 
 const EXPORT_SCRATCH_LIMIT_BYTES: u64 = 20_000_000_000;
@@ -638,6 +719,9 @@ impl Supervisor {
   pub fn with_export_root(mut self, root: PathBuf) -> Result<Self, String> {
     std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
     let mut deliveries = self.deliveries.lock().map_err(|error| error.to_string())?;
+    let _journal = lock_export_journal()?;
+    cleanup_receipt_temporaries(&root)?;
+    check_journal_capacity(&root, None, 0, None)?;
     let mut installed = 0u64;
     for entry in std::fs::read_dir(&root).map_err(|error| error.to_string())? {
       let entry = entry.map_err(|error| error.to_string())?;
@@ -645,7 +729,7 @@ impl Supervisor {
       if path.extension().and_then(|value| value.to_str()) != Some("json") { continue; }
       if !entry.file_type().map_err(|error| error.to_string())?.is_file() { return Err("export recovery receipt must be a regular file".into()); }
       let declared = std::fs::metadata(&path).map_err(|error| error.to_string())?.len();
-      if deliveries.len() >= 4096 || declared > EXPORT_RECEIPT_LIMIT_BYTES || installed.saturating_add(declared) > EXPORT_JOURNAL_LIMIT_BYTES {
+      if deliveries.len() >= EXPORT_JOURNAL_ENTRY_LIMIT || declared > EXPORT_RECEIPT_LIMIT_BYTES || installed.saturating_add(declared) > EXPORT_JOURNAL_LIMIT_BYTES {
         return Err("export journal exceeds the bounded loading budget".into());
       }
       let mut bytes = Vec::with_capacity(declared as usize + 1);
@@ -655,8 +739,7 @@ impl Supervisor {
       installed = installed.checked_add(bytes.len() as u64).ok_or("export journal size overflow")?;
       if installed > EXPORT_JOURNAL_LIMIT_BYTES { return Err("export journal grew beyond its aggregate recovery budget".into()); }
       let delivery: ExportDelivery = serde_json::from_slice(&bytes).map_err(|error| format!("damaged export journal {}: {error}", path.display()))?;
-      if !matches!(delivery.version, 1 | 2) || delivery.id.is_empty() ||
-        !delivery.id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-') ||
+      if !matches!(delivery.version, 1 | 2) || !valid_delivery_id(&delivery.id) ||
         path.file_stem().and_then(|value| value.to_str()) != Some(delivery.id.as_str()) {
         return Err("unsupported or invalid export journal identity".into());
       }
@@ -876,7 +959,7 @@ impl Supervisor {
   pub fn prepare_delivery(&self, id: String, project_dir: String, stage_path: String, dest_path: String, source: DeliverySource) -> Result<ExportDelivery, String> {
     let admitted_at = now_ms();
     let root = self.export_root.as_ref().ok_or("native export journal is unavailable")?;
-    if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-') {
+    if !valid_delivery_id(&id) {
       return Err("invalid export intent identity".into());
     }
     let stage = PathBuf::from(&stage_path);
@@ -890,7 +973,7 @@ impl Supervisor {
     let destination_key = |path: &str| if cfg!(target_os = "windows") { path.to_lowercase() } else { path.to_string() };
     if destination_key(&stage_path) == destination_key(&dest_path) { return Err("staging aliases the destination".into()); }
     let mut deliveries = self.deliveries.lock().map_err(|error| error.to_string())?;
-    if deliveries.len() >= 4096 { return Err("export recovery-intent budget is full; finish pending follow-ups before exporting".into()); }
+    if deliveries.len() >= EXPORT_JOURNAL_ENTRY_LIMIT { return Err("export recovery-intent budget is full; finish pending follow-ups before exporting".into()); }
     if deliveries.values().any(|entry| destination_key(&entry.dest_path) == destination_key(&dest_path) && entry.state != "published" && entry.state != "cancelled" && entry.state != "failed") {
       return Err("export destination is already reserved".into());
     }
@@ -1429,7 +1512,7 @@ impl Supervisor {
     terminal.sort();
     let remove_count = terminal.len().saturating_sub(50);
     for (_, old_id) in terminal.into_iter().take(remove_count) {
-      std::fs::remove_file(root.join(format!("{old_id}.json"))).map_err(|error| error.to_string())?;
+      remove_delivery_receipt(root, &old_id)?;
       entries.remove(&old_id);
     }
     Ok(true)
@@ -2381,6 +2464,30 @@ mod export_delivery_tests {
       dir.join(format!("{id}.mp4")).to_string_lossy().into(), DeliverySource::Render { paths: Vec::new() }).unwrap()
   }
 
+  fn journal_write_clock(root: &Path) -> SystemTime {
+    fn stamp(root: &Path, time: SystemTime) {
+      let mut options = std::fs::OpenOptions::new();
+      options.read(true);
+      #[cfg(windows)]
+      {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES, FILE_WRITE_ATTRIBUTES};
+        options.access_mode(FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES).custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+      }
+      options.open(root).unwrap().set_times(std::fs::FileTimes::new().set_modified(time)).unwrap();
+    }
+    let time = UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
+    stamp(root, time);
+    let control = root.join("directory-clock-control");
+    std::fs::write(&control, b"control").unwrap();
+    std::fs::remove_file(control).unwrap();
+    assert_ne!(root.metadata().unwrap().modified().unwrap(), time, "filesystem control did not observe real directory writes");
+    stamp(root, time);
+    let observed = root.metadata().unwrap().modified().unwrap();
+    assert_eq!(observed, time);
+    observed
+  }
+
   #[test]
   fn reserved_render_scratch_is_leased_and_cleaned_without_a_bound_producer() {
     for cancelled in [false, true] {
@@ -2556,6 +2663,276 @@ mod export_delivery_tests {
     std::fs::write(&path, serde_json::to_vec(&replacement).unwrap()).unwrap();
     assert!(Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {})).with_export_root(root).is_err(),
       "legacy aggregate overflow must be refused before unbounded loading");
+  }
+
+  #[test]
+  fn refused_receipts_cannot_write_a_temporary_or_mutate_the_journal() {
+    for reason in ["receipt", "bytes", "entries", "identity"] {
+      let dir = tempfile::tempdir().unwrap();
+      let root = dir.path().join("journal");
+      let jobs = owner(&root);
+      let original = intent(&jobs, dir.path(), "prewrite-target");
+      let target = root.join("prewrite-target.json");
+      let before = std::fs::read(&target).unwrap();
+      let mut replacement = original.clone();
+      let payload = if reason == "receipt" { 8 * 1024 * 1024 } else { 1024 };
+      replacement.render_job = Some(JobSpec { id: replacement.id.clone(), lane: "export".into(), program: "ffmpeg".into(),
+        args: vec![replacement.stage_path.clone()], steps: vec![], cwd: None, meta: serde_json::json!({ "payload": "x".repeat(payload) }) });
+      if reason == "bytes" {
+        std::fs::File::create(root.join("retained-charge.bin")).unwrap()
+          .set_len(EXPORT_JOURNAL_LIMIT_BYTES - before.len() as u64).unwrap();
+      } else if reason == "entries" {
+        for index in 0..EXPORT_JOURNAL_ENTRY_LIMIT - 1 {
+          std::fs::File::create(root.join(format!("retained-{index}.bin"))).unwrap();
+        }
+        replacement.id = "additional-receipt".into();
+      } else if reason == "identity" { replacement.id = "../escaped".into(); }
+      let count = std::fs::read_dir(&root).unwrap().count();
+      let clock = journal_write_clock(&root);
+      let error = persist_delivery(&root, &replacement).unwrap_err();
+      assert!(error.contains(match reason {
+        "receipt" => "eight-MiB", "identity" => "invalid export intent identity", _ => "aggregate admission budget",
+      }), "{reason}: {error}");
+      assert_eq!(root.metadata().unwrap().modified().unwrap(), clock, "{reason}: refused work changed the directory");
+      assert_eq!(std::fs::read(&target).unwrap(), before);
+      assert_eq!(std::fs::read_dir(&root).unwrap().count(), count);
+      assert!(!dir.path().join("escaped.json").exists());
+      assert!(!root.join("additional-receipt.json").exists());
+      assert_eq!(owner(&root).delivery_list().len(), 1);
+    }
+  }
+
+  #[test]
+  fn journal_recovery_removes_only_owned_uncommitted_temporaries() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("journal");
+    let jobs = owner(&root);
+    intent(&jobs, dir.path(), "retained-receipt");
+    let before = std::fs::read(root.join("retained-receipt.json")).unwrap();
+    let current = tempfile::Builder::new().prefix(EXPORT_RECEIPT_TEMP_PREFIX).rand_bytes(16).suffix(".tmp").tempfile_in(&root).unwrap();
+    let legacy = tempfile::NamedTempFile::new_in(&root).unwrap();
+    let mut templates = Vec::new();
+    for file in [current, legacy] {
+      let (mut file, path) = file.keep().unwrap();
+      file.write_all(b"{\"interrupted\":").unwrap();
+      file.sync_all().unwrap();
+      templates.push(path.file_name().unwrap().to_str().unwrap().to_string());
+    }
+    let mut owned = HashSet::new();
+    let mut unknown = HashSet::new();
+    for template in templates {
+      let (start, length) = if template.starts_with(EXPORT_RECEIPT_TEMP_PREFIX) { (EXPORT_RECEIPT_TEMP_PREFIX.len(), 16) } else { (4, 6) };
+      owned.insert(template.clone());
+      for (index, byte) in b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789".iter().enumerate() {
+        let mut bytes = template.as_bytes().to_vec();
+        bytes[start + index % length] = *byte;
+        let name = String::from_utf8(bytes).unwrap();
+        std::fs::write(root.join(&name), b"interrupted receipt").unwrap();
+        owned.insert(name);
+      }
+      for position in 0..length {
+        for replacement in ["_", ".", " ", "é", "中"] {
+          let name = format!("{}{}{}", &template[..start + position], replacement, &template[start + position + 1..]);
+          std::fs::write(root.join(&name), b"unknown retained bytes").unwrap();
+          unknown.insert(name);
+        }
+      }
+    }
+    for name in ["operator-note.bin", ".tmpkeep-this-file", ".receipt-not-owned.tmp"] {
+      std::fs::write(root.join(name), b"unknown retained bytes").unwrap();
+      unknown.insert(name.to_string());
+    }
+    for name in ["../.tmpabcdef", "..\\.tmpabcdef", ".tmpabc/ef", ".tmpabc\\ef", ".tmpabc\0ef", ".tmpabc\nef", ".tmpabc\ref"] {
+      assert!(!owned_receipt_temporary(name));
+    }
+    let retained_count = std::fs::read_dir(&root).unwrap()
+      .filter(|entry| !owned.contains(entry.as_ref().unwrap().file_name().to_str().unwrap())).count();
+    let recovered = owner(&root);
+    assert_eq!(recovered.delivery_list().len(), 1);
+    assert_eq!(std::fs::read(root.join("retained-receipt.json")).unwrap(), before);
+    for name in &owned { assert!(!root.join(name).exists(), "legitimate uncommitted receipt was not cleaned: {name}"); }
+    for name in &unknown { assert_eq!(std::fs::read(root.join(name)).unwrap(), b"unknown retained bytes", "unknown file was dropped: {name}"); }
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), retained_count);
+  }
+
+  #[test]
+  fn journal_cleanup_cannot_delete_an_owned_looking_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("journal");
+    let jobs = owner(&root);
+    intent(&jobs, dir.path(), "safe-receipt");
+    let before = std::fs::read(root.join("safe-receipt.json")).unwrap();
+    let name = root.join(".receipt-0123456789abcdef.tmp");
+    std::fs::create_dir(&name).unwrap();
+    std::fs::write(name.join("retained.bin"), b"unowned directory content").unwrap();
+    let result = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {})).with_export_root(root.clone());
+    assert!(result.is_err(), "nonregular temporary was silently deleted or accepted");
+    assert_eq!(std::fs::read(name.join("retained.bin")).unwrap(), b"unowned directory content");
+    assert_eq!(std::fs::read(root.join("safe-receipt.json")).unwrap(), before);
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn journal_cleanup_cannot_follow_an_owned_looking_symbolic_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("journal");
+    let jobs = owner(&root);
+    intent(&jobs, dir.path(), "safe-receipt");
+    let before = std::fs::read(root.join("safe-receipt.json")).unwrap();
+    let outside = dir.path().join("retained-source");
+    std::fs::write(&outside, b"original source").unwrap();
+    let name = root.join(".receipt-0123456789abcdef.tmp");
+    std::os::unix::fs::symlink(&outside, &name).unwrap();
+    let result = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {})).with_export_root(root.clone());
+    assert!(result.is_err(), "symbolic-link temporary was silently deleted or accepted");
+    assert!(std::fs::symlink_metadata(&name).unwrap().file_type().is_symlink());
+    assert_eq!(std::fs::read(&outside).unwrap(), b"original source");
+    assert_eq!(std::fs::read(root.join("safe-receipt.json")).unwrap(), before);
+  }
+
+  #[test]
+  fn admitted_journal_replacement_keeps_its_capacity_in_both_writer_orderings() {
+    for first in 0..2 {
+      let dir = tempfile::tempdir().unwrap();
+      let root = dir.path().join("journal");
+      let jobs = owner(&root);
+      let mut deliveries = Vec::new();
+      let mut before = Vec::new();
+      let mut occupied = 0u64;
+      let mut allowance = 0u64;
+      for index in 0..2 {
+        let mut delivery = intent(&jobs, dir.path(), &format!("competing-{index}"));
+        let bytes = std::fs::read(root.join(format!("{}.json", delivery.id))).unwrap();
+        occupied += bytes.len() as u64;
+        delivery.render_job = Some(JobSpec { id: delivery.id.clone(), lane: "export".into(), program: "ffmpeg".into(),
+          args: vec![delivery.stage_path.clone()], steps: vec![], cwd: None, meta: serde_json::json!({ "payload": "x".repeat(4096) }) });
+        allowance = allowance.max(serde_json::to_vec(&delivery).unwrap().len() as u64 - bytes.len() as u64);
+        before.push(bytes);
+        deliveries.push(delivery);
+      }
+      std::fs::File::create(root.join("retained-charge.bin")).unwrap()
+        .set_len(EXPORT_JOURNAL_LIMIT_BYTES - occupied - allowance).unwrap();
+      let (entered, ready) = std::sync::mpsc::channel();
+      let (release, continue_write) = std::sync::mpsc::channel();
+      let first_root = root.clone();
+      let first_delivery = deliveries[first].clone();
+      let writer = std::thread::spawn(move || persist_delivery_after_sync(&first_root, &first_delivery, |path| {
+        entered.send(path.to_path_buf()).map_err(|error| error.to_string())?;
+        continue_write.recv_timeout(std::time::Duration::from_secs(30)).map_err(|error| error.to_string())?;
+        Ok(())
+      }));
+      let pending = ready.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
+      let candidate: ExportDelivery = serde_json::from_slice(&std::fs::read(&pending).unwrap()).unwrap();
+      assert_eq!(candidate.id, deliveries[first].id);
+      let live: u64 = std::fs::read_dir(&root).unwrap().map(|entry| entry.unwrap().metadata().unwrap().len()).sum();
+      assert!(live <= EXPORT_JOURNAL_TRANSIENT_BYTES, "actual old-plus-new journal payload exceeded its transient bound");
+      for index in 0..2 { assert_eq!(std::fs::read(root.join(format!("{}.json", deliveries[index].id))).unwrap(), before[index]); }
+      let (started, attempted) = std::sync::mpsc::channel();
+      let peer_root = root.clone();
+      let peer_delivery = deliveries[1 - first].clone();
+      let peer = std::thread::spawn(move || {
+        started.send(()).unwrap();
+        persist_delivery(&peer_root, &peer_delivery)
+      });
+      attempted.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
+      release.send(()).unwrap();
+      writer.join().unwrap().unwrap();
+      assert!(peer.join().unwrap().unwrap_err().contains("aggregate admission budget"));
+      let recovered = owner(&root).delivery_list();
+      assert_eq!(recovered.iter().filter(|delivery| delivery.render_job.is_some()).count(), 1);
+      assert!(recovered.iter().find(|delivery| delivery.id == deliveries[first].id).unwrap().render_job.is_some());
+      assert_eq!(std::fs::read(root.join(format!("{}.json", deliveries[1 - first].id))).unwrap(), before[1 - first]);
+      let retained: u64 = std::fs::read_dir(&root).unwrap().map(|entry| entry.unwrap().metadata().unwrap().len()).sum();
+      assert!(retained <= EXPORT_JOURNAL_LIMIT_BYTES);
+    }
+  }
+
+  #[test]
+  fn failed_journal_install_preserves_reloadable_bytes_and_reports_retained_cleanup() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("journal");
+    let jobs = owner(&root);
+    let mut replacement = intent(&jobs, dir.path(), "failed-install");
+    let target = root.join("failed-install.json");
+    let before = std::fs::read(&target).unwrap();
+    replacement.state = "cancelled".into();
+    #[cfg(unix)]
+    let original_permissions = root.metadata().unwrap().permissions();
+    #[cfg(unix)]
+    assert_ne!(unsafe { libc::geteuid() }, 0, "permission-failure discriminator requires the non-root CI user");
+    #[cfg(windows)]
+    let held = {
+      use std::os::windows::fs::OpenOptionsExt;
+      use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+      std::fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE).open(&target).unwrap()
+    };
+    let result = persist_delivery_after_sync(&root, &replacement, |path| {
+      assert!(path.is_file());
+      #[cfg(unix)]
+      {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o500)).map_err(|error| error.to_string())?;
+      }
+      Ok(())
+    });
+    #[cfg(unix)]
+    std::fs::set_permissions(&root, original_permissions).unwrap();
+    #[cfg(windows)]
+    drop(held);
+    let error = result.unwrap_err();
+    #[cfg(unix)]
+    assert!(error.contains("uninstalled export receipt cleanup failed"), "failed cleanup was not surfaced: {error}");
+    #[cfg(not(unix))]
+    assert!(!error.is_empty());
+    assert_eq!(std::fs::read(&target).unwrap(), before);
+    assert_eq!(owner(&root).delivery_list()[0].state, "prepared");
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1, "restart retained or forgot an owned failed-install temporary");
+  }
+
+  #[test]
+  fn successful_journal_install_survives_stale_process_memory() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("journal");
+    let jobs = owner(&root);
+    let mut replacement = intent(&jobs, dir.path(), "installed-before-crash");
+    replacement.state = "cancelled".into();
+    persist_delivery(&root, &replacement).unwrap();
+    assert_eq!(jobs.delivery_list()[0].state, "prepared");
+    drop(jobs);
+    let recovered = owner(&root).delivery_list();
+    assert_eq!(recovered[0].state, "cancelled");
+    assert!(!recovered[0].producer_complete);
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+  }
+
+  #[test]
+  fn journal_roundtrips_real_staging_copy_and_retirement_producers() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("journal");
+    let jobs = owner(&root).with_export_work_root(dir.path().join("work"));
+    let render = intent(&jobs, dir.path(), "render-journal");
+    let scratch = jobs.stage_render_scratch(&render.id,
+      vec![RenderScratchFile { name: "graph.ffgraph".into(), content: "null[output]".into() }], vec![]).unwrap();
+    assert_eq!(std::fs::read_to_string(Path::new(&scratch).join("graph.ffgraph")).unwrap(), "null[output]");
+    let source = dir.path().join("imported-source.mp4");
+    std::fs::write(&source, b"exact imported source bytes").unwrap();
+    let copy = jobs.prepare_delivery("copy-journal".into(), "original-project".into(),
+      dir.path().join("copy-journal.partial").to_string_lossy().into(), dir.path().join("copy-journal.mp4").to_string_lossy().into(),
+      DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "imported-source".into() }).unwrap();
+    jobs.copy_delivery(&copy.id).unwrap();
+    assert_eq!(std::fs::read(&copy.stage_path).unwrap(), std::fs::read(&source).unwrap());
+    jobs.cancel_delivery(&render.id).unwrap();
+    jobs.complete_delivery(&render.id).unwrap();
+    assert!(!Path::new(&scratch).exists());
+    let recovered = owner(&root).delivery_list();
+    let render = recovered.iter().find(|delivery| delivery.id == render.id).unwrap();
+    let copy = recovered.iter().find(|delivery| delivery.id == copy.id).unwrap();
+    assert!(render.followups_done);
+    assert!(render.render_scratch.is_none());
+    assert!(copy.producer_complete);
+    assert!(!copy.followups_done);
+    assert!(copy.copy_scratch.is_none());
+    assert_eq!(std::fs::read(&copy.stage_path).unwrap(), b"exact imported source bytes");
   }
 
   #[test]
