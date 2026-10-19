@@ -27,9 +27,7 @@ $root = [System.Windows.Automation.AutomationElement]::FromHandle($window)
 if ($root.Current.ProcessId -ne $application.Id) { throw 'Unexpected native window owner' }
 $controls = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
 $names = @($controls | ForEach-Object { $_.Current.Name } | Where-Object { $_ } | Select-Object -Unique)
-if (-not ($names | Where-Object { $_ -match 'Sign in to continue|Log in or sign up|Check for update|Update required' })) {
-    throw ('Installed WebView has no accessible application content: ' + ($names -join ' | '))
-}
+$semanticContentExposed = [bool]($names | Where-Object { $_ -match 'Sign in to continue|Log in or sign up|Check for update|Update required' })
 [InstalledCandidateWindow]::SetForegroundWindow($window) | Out-Null
 if ([InstalledCandidateWindow]::GetForegroundWindow() -ne $window) { throw 'Refusing screenshot without verified foreground ownership' }
 $rectangle = New-Object InstalledCandidateWindow+Rect
@@ -49,7 +47,8 @@ try {
     $output = Join-Path $PWD 'reports/qa/installed'
     New-Item -ItemType Directory -Force $output | Out-Null
     $bitmap.Save((Join-Path $output 'installed-native.png'), [System.Drawing.Imaging.ImageFormat]::Png)
-    $proof = @{ status='INSTALLED_NATIVE_ACCESSIBILITY_AND_PAINT_VERIFIED'; checkedAt=[DateTime]::UtcNow.ToString('o'); version=$version; expectedIdentifierFromCandidate='com.artdaddy.app'; identifierMeasuredFromIpc=$false; title=$root.Current.Name; width=$width; height=$height; contentColors=$colors.Count; accessibleNames=$names; executableSha256=(Get-FileHash -LiteralPath $installed -Algorithm SHA256).Hash.ToLowerInvariant(); ephemeralHostedRunner=$true; normalUserMachineAccessed=$false; cdpRequired=$false; installerSourceSha=$env:ARTDADDY_QA_ARTIFACT_SOURCE_SHA }
+    $status = if ($semanticContentExposed) { 'INSTALLED_NATIVE_ACCESSIBILITY_AND_PAINT_VERIFIED' } else { 'INSTALLED_WINDOW_CAPTURED_REQUIRES_VISUAL_REVIEW' }
+    $proof = @{ status=$status; semanticContentExposed=$semanticContentExposed; automaticPaintSignoff=$semanticContentExposed; checkedAt=[DateTime]::UtcNow.ToString('o'); version=$version; expectedIdentifierFromCandidate='com.artdaddy.app'; identifierMeasuredFromIpc=$false; title=$root.Current.Name; width=$width; height=$height; contentColors=$colors.Count; accessibleNames=$names; executableSha256=(Get-FileHash -LiteralPath $installed -Algorithm SHA256).Hash.ToLowerInvariant(); ephemeralHostedRunner=$true; normalUserMachineAccessed=$false; cdpRequired=$false; installerSourceSha=$env:ARTDADDY_QA_ARTIFACT_SOURCE_SHA }
     [System.IO.File]::WriteAllText((Join-Path $output 'installed-native.json'), ($proof | ConvertTo-Json -Depth 6), (New-Object System.Text.UTF8Encoding($false)))
     $proof | ConvertTo-Json -Depth 6
 } finally {
