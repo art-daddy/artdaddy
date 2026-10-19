@@ -3906,6 +3906,92 @@ mod export_delivery_tests {
     observed
   }
 
+  fn native_journal_fixture_entries(root: &Path, work: Option<&Path>) -> u64 {
+    let mut paths = HashSet::new();
+    for directory in std::iter::once(root.to_path_buf()).chain(work.map(|work| work.join("exports"))) {
+      for ancestor in canonical_export_path(&directory).unwrap().ancestors() {
+        if ancestor.is_dir() { paths.insert(export_path_key(ancestor)); }
+      }
+    }
+    for entry in std::fs::read_dir(root).unwrap() {
+      paths.insert(export_path_key(&entry.unwrap().path().canonicalize().unwrap()));
+    }
+    paths.len() as u64
+  }
+
+  #[test]
+  fn native_journal_and_payload_share_one_entry_budget_before_either_producer_creates_a_stage() {
+    for copy in [false, true] {
+      let directory = tempfile::tempdir().unwrap();
+      let root = directory.path().join("journal");
+      let jobs = owner(&root);
+      let prior = intent(&jobs, directory.path(), "entry-budget-owner");
+      std::fs::write(root.join("operator-note.bin"), b"retained operator evidence").unwrap();
+      let before = namespace_snapshot(&root);
+      let source = directory.path().join("source.bin");
+      std::fs::write(&source, b"complete imported media").unwrap();
+      jobs.account_workspace(&jobs.deliveries.lock().unwrap()).unwrap();
+      let metadata_entries = native_journal_fixture_entries(&root, None);
+      let pressure = jobs.workspace.reserve("peer-payload", 0, 16384 - metadata_entries - 1 - 1).unwrap();
+      let stage = directory.path().join("entry-budget-new.partial");
+      let destination = directory.path().join("entry-budget-new.mp4");
+      let prepare = || jobs.prepare_delivery("entry-budget-new".into(), "original-project".into(),
+        stage.to_string_lossy().into(), destination.to_string_lossy().into(),
+        if copy { DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_entry".into() } }
+        else { DeliverySource::Render { paths: vec![source.to_string_lossy().into()] } });
+      let clock = journal_write_clock(&root);
+      let result = prepare();
+      assert!(!stage.exists(), "new payload entry was created while journal entries already occupied the global budget");
+      assert!(result.unwrap_err().contains("entry budget"));
+      assert_eq!(root.metadata().unwrap().modified().unwrap(), clock);
+      assert_eq!(namespace_snapshot(&root), before);
+      assert_eq!(std::fs::metadata(&prior.stage_path).unwrap().len(), 0);
+      assert_eq!(std::fs::read(&source).unwrap(), b"complete imported media");
+      drop(pressure);
+      let delivery = prepare().unwrap();
+      if copy { jobs.copy_delivery(&delivery.id).unwrap(); }
+      else { render_bytes(&jobs, &delivery, b"complete imported media"); }
+      jobs.verify_delivery(&delivery.id).unwrap();
+      jobs.publish_delivery(&delivery.id).unwrap();
+      assert_eq!(std::fs::read(&destination).unwrap(), b"complete imported media");
+      jobs.complete_delivery(&delivery.id).unwrap();
+      assert_eq!(std::fs::read(root.join("operator-note.bin")).unwrap(), b"retained operator evidence");
+    }
+  }
+
+  #[test]
+  fn atomic_receipt_replacement_keeps_the_last_global_entry_out_of_live_payload_writers() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("journal");
+    let jobs = owner(&root);
+    let mut replacement = intent(&jobs, directory.path(), "replacement-headroom");
+    let target = root.join("replacement-headroom.json");
+    let before = std::fs::read(&target).unwrap();
+    let metadata_entries = native_journal_fixture_entries(&root, None);
+    let _entries = jobs.workspace.reserve("peer-entry-pressure", 0, 16384 - metadata_entries - 1 - 1).unwrap();
+    let _bytes = jobs.workspace.reserve("peer-byte-pressure", jobs.workspace.available_bytes(), 0).unwrap();
+    let intruder = directory.path().join("payload-used-recovery-slot");
+    let captured = Mutex::new(None);
+    replacement.state = "cancelled".into();
+    persist_delivery_after_sync(jobs.journal().unwrap(), &replacement, |pending| {
+      *captured.lock().map_err(|error| error.to_string())? =
+        Some((std::fs::read(pending).map_err(|error| error.to_string())?,
+          std::fs::read(&target).map_err(|error| error.to_string())?));
+      if let Ok(charge) = jobs.workspace.reserve("competing-payload", 0, 1) {
+        std::fs::write(&intruder, []).map_err(|error| error.to_string())?;
+        charge.retain();
+      }
+      Ok(())
+    }).unwrap();
+    assert!(!intruder.exists(), "a live payload writer consumed the entry required for durable receipt replacement");
+    let (pending, installed_before_commit) = captured.into_inner().unwrap().unwrap();
+    assert_eq!(installed_before_commit, before);
+    assert_eq!(serde_json::from_slice::<ExportDelivery>(&pending).unwrap().state, "cancelled");
+    assert_eq!(std::fs::read(&target).unwrap(), pending);
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+    assert_eq!(owner(&root).delivery_list()[0].state, "cancelled");
+  }
+
   #[test]
   fn reserved_render_scratch_is_leased_and_cleaned_without_a_bound_producer() {
     for cancelled in [false, true] {
