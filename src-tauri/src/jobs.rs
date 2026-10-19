@@ -21,6 +21,7 @@ mod stream;
 mod budget;
 mod workspace;
 mod resources;
+mod allocation;
 pub use workspace::Workspace;
 
 /// The programs a job may run, as (logical name, bundled sidecar file). A command the page can
@@ -580,7 +581,8 @@ impl ScratchOutput {
     let used = used.checked_add(previous).ok_or("scratch size overflow")?;
     if used > limit { return Err("export scratch budget already exceeded".into()); }
     let parent = path.parent().ok_or("scratch output has no parent")?;
-    let charge = workspace.reserve(key, 0, 1)?;
+    let volume = allocation::AllocationUnit::for_directory(parent)?;
+    let charge = workspace.reserve_in(key, 0, 1, volume)?;
     let file = if let Some(temporary) = temporary {
       if !temporary.is_absolute() || temporary.parent() != Some(parent) || temporary == path {
         return Err("temporary output is outside its admitted parent".into());
@@ -616,8 +618,8 @@ impl ScratchOutput {
     let args = captured_output_args(&spec.args)?;
     let cwd = Path::new(spec.cwd.as_deref().ok_or("temporary output has no admitted scratch root")?);
     let key = Supervisor::workspace_key(cwd);
-    let (bytes, entries) = scratch_usage(cwd, Path::new(""))?;
-    workspace.account_existing(&key, bytes, entries)?;
+    let usage = measured_scratch_usage(cwd, Path::new(""))?;
+    workspace.account_allocated(&key, usage.bytes, usage.entries, usage.allocated, usage.volume)?;
     Ok(Some((Self::open_workspace(Path::new(path), used, limit, workspace, &key)?, args)))
   }
 
@@ -687,8 +689,21 @@ fn scratch_bytes(path: &Path, exclude: &Path) -> Result<u64, String> {
 }
 
 fn scratch_usage(path: &Path, exclude: &Path) -> Result<(u64, u64), String> {
+  measured_scratch_usage(path, exclude).map(|usage| (usage.bytes, usage.entries))
+}
+
+struct ScratchUsage {
+  bytes: u64,
+  allocated: u64,
+  entries: u64,
+  volume: allocation::AllocationUnit,
+}
+
+fn measured_scratch_usage(path: &Path, exclude: &Path) -> Result<ScratchUsage, String> {
+  let volume = allocation::AllocationUnit::for_directory(path)?;
   let mut pending = vec![path.to_path_buf()];
   let mut bytes = 0u64;
+  let mut allocated = allocation::usage(path)?.allocated;
   let mut entries = 0usize;
   while let Some(directory) = pending.pop() {
     for child in std::fs::read_dir(directory).map_err(|error| error.to_string())? {
@@ -697,13 +712,18 @@ fn scratch_usage(path: &Path, exclude: &Path) -> Result<(u64, u64), String> {
       let child = child.map_err(|error| error.to_string())?;
       let kind = child.file_type().map_err(|error| error.to_string())?;
       if kind.is_symlink() { return Err("export scratch cannot contain symbolic links".into()); }
-      if kind.is_dir() { pending.push(child.path()); }
+      if kind.is_dir() {
+        allocated = allocated.checked_add(allocation::usage(&child.path())?.allocated).ok_or("scratch allocation size overflow")?;
+        pending.push(child.path());
+      }
       else if kind.is_file() && child.path() != exclude {
-        bytes = bytes.checked_add(child.metadata().map_err(|error| error.to_string())?.len()).ok_or("scratch size overflow")?;
+        let usage = allocation::usage(&child.path())?;
+        bytes = bytes.checked_add(usage.bytes).ok_or("scratch size overflow")?;
+        allocated = allocated.checked_add(usage.allocated).ok_or("scratch allocation size overflow")?;
       }
     }
   }
-  Ok((bytes, entries as u64 + 1))
+  Ok(ScratchUsage { bytes, allocated, entries: entries as u64 + 1, volume })
 }
 
 fn scratch_capture(spec: &JobSpec, stage_path: &str, final_step: bool) -> Result<Option<serde_json::Value>, String> {
@@ -822,11 +842,14 @@ impl Supervisor {
   fn account_workspace(&self, entries: &HashMap<String, ExportDelivery>) -> Result<(), String> {
     for delivery in entries.values().filter(|delivery| delivery.state != "published" && !delivery.followups_done) {
       let mut bytes = 0u64;
+      let mut allocated = 0u64;
       let mut count = 0u64;
       for path in std::iter::once(Path::new(&delivery.stage_path)).chain(delivery.copy_scratch_path()?) {
         match std::fs::metadata(path) {
           Ok(metadata) if metadata.is_file() => {
-            bytes = bytes.checked_add(metadata.len()).ok_or("export staging size overflow")?;
+            let usage = allocation::usage(path)?;
+            bytes = bytes.checked_add(usage.bytes).ok_or("export staging size overflow")?;
+            allocated = allocated.checked_add(usage.allocated).ok_or("export staging allocation size overflow")?;
             count += 1;
           }
           Ok(_) => return Err("export stage is not a regular file".into()),
@@ -834,7 +857,10 @@ impl Supervisor {
           Err(error) => return Err(error.to_string()),
         }
       }
-      self.workspace.restore_retained(&Self::workspace_key(Path::new(&delivery.stage_path)), bytes, count)?;
+      if count > 0 {
+        let volume = allocation::AllocationUnit::for_directory(Path::new(&delivery.stage_path).parent().ok_or("export stage has no parent")?)?;
+        self.workspace.restore_allocated(&Self::workspace_key(Path::new(&delivery.stage_path)), bytes, count, allocated, volume)?;
+      }
     }
     let Some(work) = &self.export_work_root else { return Ok(()) };
     let arena = work.join("exports");
@@ -851,8 +877,8 @@ impl Supervisor {
         .find(|scratch| Self::workspace_key(Path::new(&scratch.path)) == key).map(|scratch| scratch.reserved_bytes).unwrap_or(0);
       let held_entries = entries.values().filter_map(|delivery| delivery.render_scratch.as_ref())
         .find(|scratch| Self::workspace_key(Path::new(&scratch.path)) == key).map(|scratch| scratch.reserved_entries).unwrap_or(0);
-      let (actual, count) = scratch_usage(&entry.path(), Path::new(""))?;
-      self.workspace.restore_retained(&key, actual.max(held), count.max(held_entries))?;
+      let usage = measured_scratch_usage(&entry.path(), Path::new(""))?;
+      self.workspace.restore_allocated(&key, usage.bytes.max(held), usage.entries.max(held_entries), usage.allocated, usage.volume)?;
     }
     Ok(())
   }
@@ -926,7 +952,8 @@ impl Supervisor {
     })?;
     let reserved_bytes = (bytes as u64).checked_add(font_bytes).ok_or("render staging workspace size overflow")?;
     let reserved_entries = (files.len() + fonts.len() + usize::from(!fonts.is_empty()) + 1) as u64;
-    let charge = self.workspace.reserve(&Self::workspace_key(directory.path()), reserved_bytes, reserved_entries)?;
+    let volume = allocation::AllocationUnit::for_directory(directory.path())?;
+    let charge = self.workspace.reserve_in(&Self::workspace_key(directory.path()), reserved_bytes, reserved_entries, volume)?;
     let mut reserved = current.clone();
     reserved.render_scratch = Some(RenderScratch { path: path.clone(), request_sha256, ready: false, files: Vec::new(), reserved_bytes, reserved_entries });
     persist_delivery(root, &reserved)?;
@@ -4101,6 +4128,156 @@ mod export_delivery_tests {
     } else {
       ScratchOutput::capture(spec, jobs.workspace.clone()).map(|output| output.unwrap().0)
     }
+  }
+
+  #[test]
+  fn native_allocation_pressure_refuses_each_payload_producer_and_cleanup_restores_it() {
+    for producer in ["text", "font", "capture", "copy"] {
+      let directory = tempfile::tempdir().unwrap();
+      let volume = allocation::AllocationUnit::for_directory(directory.path()).unwrap();
+      let unit = volume.bytes();
+      assert!(unit <= 1024 * 1024, "fixture allocation unit exceeds its bounded write budget");
+      let bytes = allocation::fixture_bytes(usize::try_from(unit + 1).unwrap());
+      let source = directory.path().join("source.wav");
+      let fonts = directory.path().join("bundled-fonts");
+      std::fs::create_dir(&fonts).unwrap();
+      std::fs::write(fonts.join("Valid.ttf"), &bytes).unwrap();
+      std::fs::write(&source, &bytes).unwrap();
+      let mut jobs = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {}))
+        .with_export_work_root(directory.path().join("work")).with_export_font_root(fonts);
+      jobs.workspace = Workspace::allocation_fixture(32 * unit, 8 * unit);
+      let jobs = jobs.with_export_root(directory.path().join("journal")).unwrap();
+      let destination = directory.path().join("delivered.wav");
+      std::fs::write(&destination, b"previous complete file").unwrap();
+      let delivery = jobs.prepare_delivery(format!("allocated-{producer}"), "original-project".into(),
+        directory.path().join("result.partial").to_string_lossy().into(), destination.to_string_lossy().into(),
+        if producer == "copy" { DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_source".into() } }
+        else { DeliverySource::Render { paths: vec![source.to_string_lossy().into()] } }).unwrap();
+      let capture = if producer == "capture" {
+        let cwd = jobs.stage_render_scratch(&delivery.id, vec![], vec![]).unwrap();
+        let target = Path::new(&cwd).join("part.nut");
+        Some(JobSpec { id: delivery.id.clone(), lane: "export".into(), program: "ffmpeg".into(),
+          args: vec!["-f".into(), "nut".into(), "part.nut".into()], steps: vec![], cwd: Some(cwd),
+          meta: serde_json::json!({ "_native_scratch_capture": { "path": target, "used": 0, "limit": 32 * unit } }) })
+      } else { None };
+      let text = bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+      let stage_inputs = || {
+        if producer == "font" { (vec![], vec!["Valid.ttf".into()]) }
+        else { (vec![RenderScratchFile { name: "filter.ffgraph".into(), content: text.clone() }], vec![]) }
+      };
+      let peer = intent(&jobs, directory.path(), "allocated-retained-peer");
+      let peer_bytes = allocation::fixture_bytes(usize::try_from(6 * unit + 1).unwrap());
+      let mut retained = std::fs::OpenOptions::new().write(true).open(&peer.stage_path).unwrap();
+      retained.write_all(&peer_bytes).unwrap();
+      retained.sync_all().unwrap();
+      drop(retained);
+      let observed = allocation::usage(Path::new(&peer.stage_path)).unwrap();
+      assert!(observed.allocated > observed.bytes, "filesystem did not exhibit allocation rounding");
+      jobs.account_workspace(&jobs.deliveries.lock().unwrap()).unwrap();
+      let error = match producer {
+        "copy" => jobs.copy_delivery(&delivery.id).unwrap_err(),
+        "capture" => ScratchOutput::capture(capture.as_ref().unwrap(), jobs.workspace.clone()).err().unwrap(),
+        _ => { let (files, fonts) = stage_inputs(); jobs.stage_render_scratch(&delivery.id, files, fonts).unwrap_err() }
+      };
+      assert!(error.contains("allocation budget"), "{producer}: {error}");
+      assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"previous complete file");
+      assert_eq!(std::fs::read(&delivery.stage_path).unwrap(), Vec::<u8>::new());
+      assert_eq!(std::fs::read(&peer.stage_path).unwrap(), peer_bytes);
+      assert!(!jobs.delivery_list().iter().find(|entry| entry.id == delivery.id).unwrap().producer_complete);
+      jobs.fail_delivery(&peer.id).unwrap();
+      jobs.complete_delivery(&peer.id).unwrap();
+      assert!(!Path::new(&peer.stage_path).exists());
+      match producer {
+        "copy" => {
+          jobs.copy_delivery(&delivery.id).unwrap();
+          assert_eq!(std::fs::read(&delivery.stage_path).unwrap(), bytes);
+          jobs.verify_delivery(&delivery.id).unwrap();
+          jobs.publish_delivery(&delivery.id).unwrap();
+          assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), bytes);
+        }
+        "capture" => {
+          let (mut output, _) = ScratchOutput::capture(capture.as_ref().unwrap(), jobs.workspace.clone()).unwrap().unwrap();
+          output.write(&bytes).unwrap();
+          output.finish(Some(0)).unwrap();
+          assert_eq!(std::fs::read(Path::new(capture.as_ref().unwrap().cwd.as_ref().unwrap()).join("part.nut")).unwrap(), bytes);
+          jobs.fail_delivery(&delivery.id).unwrap();
+        }
+        _ => {
+          let (files, fonts) = stage_inputs();
+          let scratch = jobs.stage_render_scratch(&delivery.id, files, fonts).unwrap();
+          if producer == "font" { assert_eq!(std::fs::read(Path::new(&scratch).join("fonts").join("Valid.ttf")).unwrap(), bytes); }
+          else { assert_eq!(std::fs::read_to_string(Path::new(&scratch).join("filter.ffgraph")).unwrap(), text); }
+          jobs.fail_delivery(&delivery.id).unwrap();
+        }
+      }
+      jobs.complete_delivery(&delivery.id).unwrap();
+      assert_eq!(std::fs::read(source).unwrap(), bytes);
+      assert_eq!(jobs.workspace.available_bytes(), 8 * unit);
+    }
+  }
+
+  #[test]
+  fn restart_restores_actual_extent_pressure_before_new_copy_work() {
+    let directory = tempfile::tempdir().unwrap();
+    let volume = allocation::AllocationUnit::for_directory(directory.path()).unwrap();
+    let unit = volume.bytes();
+    assert!(unit <= 1024 * 1024, "fixture allocation unit exceeds its bounded write budget");
+    let journal = directory.path().join("journal");
+    let original = owner(&journal);
+    let peer = intent(&original, directory.path(), "crashed-allocated-peer");
+    let peer_bytes = allocation::fixture_bytes(usize::try_from(6 * unit + 1).unwrap());
+    let mut file = std::fs::OpenOptions::new().write(true).open(&peer.stage_path).unwrap();
+    file.write_all(&peer_bytes).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    let actual = allocation::usage(Path::new(&peer.stage_path)).unwrap();
+    assert!(actual.allocated > actual.bytes);
+    drop(original);
+    let mut restored = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {}));
+    restored.workspace = Workspace::allocation_fixture(32 * unit, 8 * unit);
+    let restored = restored.with_export_root(journal).unwrap();
+    let source = directory.path().join("source.wav");
+    let bytes = allocation::fixture_bytes(usize::try_from(unit + 1).unwrap());
+    std::fs::write(&source, &bytes).unwrap();
+    let delivery = restored.prepare_delivery("copy-after-allocated-restart".into(), "original-project".into(),
+      directory.path().join("result.partial").to_string_lossy().into(), directory.path().join("result.wav").to_string_lossy().into(),
+      DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_source".into() }).unwrap();
+    std::fs::write(&delivery.dest_path, b"previous complete file").unwrap();
+    assert!(restored.copy_delivery(&delivery.id).unwrap_err().contains("allocation budget"));
+    assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"previous complete file");
+    assert_eq!(std::fs::read(&peer.stage_path).unwrap(), peer_bytes);
+    restored.fail_delivery(&peer.id).unwrap();
+    restored.complete_delivery(&peer.id).unwrap();
+    restored.copy_delivery(&delivery.id).unwrap();
+    assert_eq!(std::fs::read(&delivery.stage_path).unwrap(), bytes);
+    restored.verify_delivery(&delivery.id).unwrap();
+    restored.publish_delivery(&delivery.id).unwrap();
+    assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), bytes);
+    restored.complete_delivery(&delivery.id).unwrap();
+    assert_eq!(restored.workspace.available_bytes(), 8 * unit);
+  }
+
+  #[test]
+  fn absent_retained_stage_does_not_require_an_unavailable_previous_volume() {
+    let directory = tempfile::tempdir().unwrap();
+    let journal = directory.path().join("journal");
+    let previous_volume = directory.path().join("previous-volume");
+    std::fs::create_dir(&previous_volume).unwrap();
+    let original = owner(&journal);
+    let delivery = intent(&original, &previous_volume, "missing-previous-volume");
+    std::fs::remove_file(&delivery.stage_path).unwrap();
+    std::fs::remove_dir(&previous_volume).unwrap();
+    drop(original);
+    let restored = owner(&journal);
+    assert_eq!(restored.delivery_list()[0].id, delivery.id);
+    let failures = restored.recover_exports();
+    assert!(failures.iter().any(|(id, error)| id == &delivery.id && error.contains("render plan")));
+    restored.fail_delivery(&delivery.id).unwrap();
+    restored.complete_delivery(&delivery.id).unwrap();
+    let unrelated = intent(&restored, directory.path(), "available-volume");
+    assert!(Path::new(&unrelated.stage_path).is_file());
+    restored.fail_delivery(&unrelated.id).unwrap();
+    restored.complete_delivery(&unrelated.id).unwrap();
   }
 
   #[test]

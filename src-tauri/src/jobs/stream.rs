@@ -22,9 +22,9 @@ struct ManifestScratch {
 
 impl ManifestScratch {
   fn open(cwd: &Path, workspace: &Arc<super::Workspace>, key: &str, entries: u64) -> Result<Self, String> {
-    let (bytes, existing_entries) = super::scratch_usage(cwd, Path::new(""))?;
-    workspace.account_existing(key, bytes, existing_entries)?;
-    let charge = workspace.reserve(key, 0, entries)?;
+    let usage = super::measured_scratch_usage(cwd, Path::new(""))?;
+    workspace.account_allocated(key, usage.bytes, usage.entries, usage.allocated, usage.volume)?;
+    let charge = workspace.reserve_in(key, 0, entries, usage.volume)?;
     let directory = tempfile::Builder::new().prefix("native-stream-").tempdir_in(cwd).map_err(|error| error.to_string())?;
     let scratch = Self { owned: Some((directory, charge)) };
     #[cfg(unix)]
@@ -105,6 +105,9 @@ impl FinalOutput {
       return Err("native pending output does not target its admitted stage".into());
     }
     let key = super::Supervisor::workspace_key(Path::new(path));
+    let usage = super::allocation::usage(Path::new(path))?;
+    let volume = super::allocation::AllocationUnit::for_directory(Path::new(path).parent().ok_or("native pending output has no parent")?)?;
+    workspace.account_allocated(&key, usage.bytes, 1, usage.allocated, volume)?;
     let (limit, charge) = workspace.reserve_output(&key)?;
     let mut reserved = Self { path: path.into(), key, limit, workspace, charge: Some(charge), output_limit: None };
     reserved.output_limit = Some(output::OutputLimit::open(Path::new(path), limit)?);
