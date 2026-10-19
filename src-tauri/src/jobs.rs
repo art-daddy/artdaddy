@@ -2811,6 +2811,242 @@ mod export_delivery_tests {
       dir.join(format!("{id}.mp4")).to_string_lossy().into(), DeliverySource::Render { paths: Vec::new() }).unwrap()
   }
 
+  fn namespace_snapshot(root: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut result = Vec::new();
+    while let Some(directory) = pending.pop() {
+      for entry in std::fs::read_dir(directory).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if entry.file_type().unwrap().is_dir() {
+          pending.push(path.clone());
+          result.push((path.strip_prefix(root).unwrap().to_path_buf(), None));
+        } else {
+          result.push((path.strip_prefix(root).unwrap().to_path_buf(), Some(std::fs::read(path).unwrap())));
+        }
+      }
+    }
+    result.sort_by(|left, right| left.0.cmp(&right.0));
+    result
+  }
+
+  #[test]
+  fn private_receipt_destination_cannot_replace_exported_bytes_with_journal_json() {
+    for copy in [false, true] {
+      let dir = tempfile::tempdir().unwrap();
+      let root = dir.path().join("journal");
+      let jobs = owner(&root);
+      let source = dir.path().join("imported.bin");
+      std::fs::write(&source, b"complete imported media").unwrap();
+      let stage = root.join("private-receipt.partial");
+      let destination = root.join("private-receipt.json");
+      let source_kind = if copy {
+        DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_imported".into() }
+      } else { DeliverySource::Render { paths: Vec::new() } };
+      let result = jobs.prepare_delivery("private-receipt".into(), "original-project".into(),
+        stage.to_string_lossy().into(), destination.to_string_lossy().into(), source_kind);
+      if let Ok(delivery) = &result {
+        if copy { jobs.copy_delivery(&delivery.id).unwrap(); }
+        else { render_bytes(&jobs, delivery, b"complete imported media"); }
+        jobs.verify_delivery(&delivery.id).unwrap();
+        jobs.publish_delivery(&delivery.id).unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"complete imported media",
+          "receipt installation replaced the actual exported artifact");
+      }
+      assert!(result.is_err(), "private recovery receipt was admitted as a public destination");
+      assert!(!stage.exists());
+      assert!(!destination.exists());
+      assert!(jobs.delivery_list().is_empty());
+      assert_eq!(std::fs::read(&source).unwrap(), b"complete imported media");
+    }
+  }
+
+  #[test]
+  fn private_namespaces_refuse_both_producers_and_every_public_path_role_without_writes() {
+    for copy in [false, true] {
+      for journal in [false, true] {
+        for stage_role in [false, true] {
+          for alias in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join("journal");
+            let work = dir.path().join("work");
+            let arena = work.join("exports");
+            std::fs::create_dir_all(&arena).unwrap();
+            let jobs = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {}))
+              .with_export_work_root(work).with_export_root(root.clone()).unwrap();
+            let namespace = if journal { root.clone() } else { arena };
+            let parent = if alias { namespace.join("..").join(namespace.file_name().unwrap()) } else { namespace };
+            let source = dir.path().join("imported.bin");
+            std::fs::write(&source, b"unchanged imported source").unwrap();
+            std::fs::write(dir.path().join("previous.mp4"), b"previous complete destination").unwrap();
+            let stage = parent.join(if stage_role { ".receipt-abcdefghijklmnop.tmp" } else { "private-target.partial" });
+            let destination = parent.join(if journal { "private-target.json" } else { "private-target.mp4" });
+            if journal && !stage_role { std::fs::write(&destination, b"previous private bytes").unwrap(); }
+            let before = namespace_snapshot(dir.path());
+            let source_kind = if copy {
+              DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_imported".into() }
+            } else { DeliverySource::Render { paths: Vec::new() } };
+            let result = jobs.prepare_delivery("private-target".into(), "original-project".into(),
+              stage.to_string_lossy().into(), destination.to_string_lossy().into(), source_kind);
+            assert!(result.is_err(), "private namespace admitted a public producer: copy={copy}, journal={journal}, stage={stage_role}, alias={alias}");
+            assert_eq!(namespace_snapshot(dir.path()), before, "refusal changed actual namespace entries or bytes");
+            assert!(jobs.delivery_list().is_empty());
+          }
+        }
+      }
+    }
+  }
+
+  #[test]
+  fn private_namespaces_survive_failed_loading_and_refuse_ordinary_mutations_and_ancestors() {
+    for target in 0..5 {
+      let dir = tempfile::tempdir().unwrap();
+      let root = dir.path().join("journal");
+      let work = dir.path().join("work");
+      let arena = work.join("exports");
+      std::fs::create_dir_all(&root).unwrap();
+      std::fs::create_dir_all(&arena).unwrap();
+      std::fs::write(root.join("damaged.json"), b"damaged retained recovery evidence").unwrap();
+      std::fs::write(arena.join("retained.bin"), b"retained private scratch bytes").unwrap();
+      let base = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {})).with_export_work_root(work.clone());
+      assert!(base.clone().with_export_root(root.clone()).is_err());
+      let before = namespace_snapshot(dir.path());
+      let path = match target {
+        0 => root.join("..").join("journal").join("damaged.json"),
+        1 => root.clone(),
+        2 => arena.clone(),
+        3 => work,
+        _ => dir.path().to_path_buf(),
+      };
+      let result = base.with_unleased_path(&path, || {
+        if path.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) }
+          .map_err(|error| error.to_string())
+      });
+      assert!(result.is_err(), "failed loading forgot a private namespace or its ancestor");
+      assert_eq!(namespace_snapshot(dir.path()), before);
+      let public = dir.path().join("public.bin");
+      std::fs::write(&public, b"ordinary editing must remain available").unwrap();
+      base.with_unleased_path(&public, || std::fs::remove_file(&public).map_err(|error| error.to_string())).unwrap();
+      assert!(!public.exists());
+      assert_eq!(namespace_snapshot(dir.path()), before);
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("unconfigured.bin");
+    std::fs::write(&path, b"no-context mutation must be refused").unwrap();
+    let bare = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {}));
+    assert!(bare.with_unleased_path(&path, || std::fs::remove_file(&path).map_err(|error| error.to_string())).is_err());
+    assert_eq!(std::fs::read(path).unwrap(), b"no-context mutation must be refused");
+  }
+
+  #[test]
+  fn private_legacy_rows_are_refused_before_receipt_temporary_cleanup() {
+    for version in [1, 2, 3] {
+      for copy in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("journal");
+        let jobs = owner(&root);
+        let mut delivery = intent(&jobs, dir.path(), "unsafe-legacy");
+        delivery.version = version;
+        delivery.stage_path = root.join(".receipt-abcdefghijklmnop.tmp").to_string_lossy().into();
+        if copy {
+          delivery.source = DeliverySource::Copy { path: dir.path().join("imported.bin").to_string_lossy().into(), media_ref: "media_imported".into() };
+        }
+        std::fs::write(&delivery.stage_path, b"unconfirmed legacy stage must not be deleted").unwrap();
+        std::fs::write(root.join("unsafe-legacy.json"), serde_json::to_vec(&delivery).unwrap()).unwrap();
+        let before = namespace_snapshot(dir.path());
+        drop(jobs);
+        let reopened = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {})).with_export_root(root);
+        assert!(reopened.is_err(), "unsafe legacy row was adopted");
+        assert_eq!(namespace_snapshot(dir.path()), before, "loader deleted a stage before recognizing its unsafe saved owner");
+      }
+    }
+  }
+
+  #[test]
+  fn private_saved_destinations_cannot_publish_replay_or_cleanup_in_either_ordering() {
+    for copy in [false, true] {
+      for stage_present in [false, true] {
+        for cleanup in [false, true] {
+          let dir = tempfile::tempdir().unwrap();
+          let root = dir.path().join("journal");
+          let jobs = owner(&root);
+          let mut delivery = intent(&jobs, dir.path(), "unsafe-replay");
+          let source = dir.path().join("imported.bin");
+          std::fs::write(&source, b"verified media payload").unwrap();
+          if copy {
+            delivery.source = DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_imported".into() };
+            delivery.sources = vec![(source.to_string_lossy().into(), artifact_identity(&source).unwrap())];
+          }
+          delivery.dest_path = root.join("private-payload.mp4").to_string_lossy().into();
+          delivery.identity = Some(artifact_identity(&source).unwrap());
+          delivery.producer_complete = true;
+          delivery.execution_queued_at_ms = None;
+          delivery.state = if cleanup { "cancelled".into() } else { "publishing".into() };
+          std::fs::write(&delivery.dest_path, b"verified media payload").unwrap();
+          if stage_present { std::fs::write(&delivery.stage_path, b"verified media payload").unwrap(); }
+          else { std::fs::remove_file(&delivery.stage_path).unwrap(); }
+          jobs.deliveries.lock().unwrap().insert(delivery.id.clone(), delivery.clone());
+          let before = namespace_snapshot(dir.path());
+          let result = if cleanup { jobs.complete_delivery(&delivery.id).map(|_| ()) }
+            else { jobs.publish_delivery(&delivery.id).map(|_| ()) };
+          assert!(result.is_err(), "unsafe saved row reached publication/replay/cleanup");
+          assert_eq!(namespace_snapshot(dir.path()), before);
+        }
+      }
+    }
+  }
+
+  #[test]
+  fn private_journal_writer_refuses_invalid_rows_before_cleaning_or_installing_receipts() {
+    for stage_role in [false, true] {
+      let dir = tempfile::tempdir().unwrap();
+      let root = dir.path().join("journal");
+      let jobs = owner(&root);
+      let mut delivery = intent(&jobs, dir.path(), "writer-boundary");
+      if stage_role { delivery.stage_path = root.join("private-stage.bin").to_string_lossy().into(); }
+      else { delivery.dest_path = root.join("writer-boundary.json").to_string_lossy().into(); }
+      std::fs::write(root.join(".receipt-abcdefghijklmnop.tmp"), b"retained ambiguous bytes").unwrap();
+      let before = namespace_snapshot(dir.path());
+      assert!(persist_delivery(&root, &delivery).is_err(), "bare journal writer accepted an unsafe row");
+      assert_eq!(namespace_snapshot(dir.path()), before);
+    }
+  }
+
+  #[test]
+  fn private_namespaces_preserve_real_public_copy_and_native_render_scratch_lifecycles() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("journal");
+    let work = dir.path().join("work");
+    let fonts = dir.path().join("fonts");
+    std::fs::create_dir(&fonts).unwrap();
+    std::fs::write(fonts.join("fixture.ttf"), b"actual retained font fixture").unwrap();
+    let jobs = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {})).with_export_work_root(work.clone())
+      .with_export_font_root(fonts).with_export_root(root.clone()).unwrap();
+    let source = dir.path().join("imported.bin");
+    std::fs::write(&source, b"actual copied media payload").unwrap();
+    let delivery = jobs.prepare_delivery("public-copy".into(), "original-project".into(),
+      dir.path().join("public-copy.partial").to_string_lossy().into(), dir.path().join("public-copy.mp4").to_string_lossy().into(),
+      DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_imported".into() }).unwrap();
+    jobs.copy_delivery(&delivery.id).unwrap();
+    jobs.verify_delivery(&delivery.id).unwrap();
+    jobs.publish_delivery(&delivery.id).unwrap();
+    assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"actual copied media payload");
+    let render = intent(&jobs, dir.path(), "public-render");
+    let scratch = jobs.stage_render_scratch(&render.id,
+      vec![RenderScratchFile { name: "graph.ffgraph".into(), content: "actual generated graph".into() }], vec!["fixture.ttf".into()]).unwrap();
+    assert_eq!(std::fs::read(Path::new(&scratch).join("graph.ffgraph")).unwrap(), b"actual generated graph");
+    assert_eq!(std::fs::read(Path::new(&scratch).join("fonts").join("fixture.ttf")).unwrap(), b"actual retained font fixture");
+    assert!(jobs.with_unleased_path(Path::new(&scratch), || std::fs::remove_dir_all(&scratch).map_err(|error| error.to_string())).is_err());
+    jobs.cancel_delivery(&render.id).unwrap();
+    jobs.complete_delivery(&render.id).unwrap();
+    assert!(!Path::new(&scratch).exists());
+    assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"actual copied media payload");
+    let reopened = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {})).with_export_work_root(work)
+      .with_export_root(root).unwrap();
+    assert!(reopened.recover_exports().is_empty());
+    assert_eq!(std::fs::read(delivery.dest_path).unwrap(), b"actual copied media payload");
+  }
+
   fn initial_entry_fixture(dir: &Path, kind: InitialEntryKind) -> Supervisor {
     std::fs::write(dir.join("source.bin"), b"original imported source").unwrap();
     std::fs::write(dir.join("initial-boundary.mp4"), b"previous complete destination").unwrap();
