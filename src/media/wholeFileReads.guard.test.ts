@@ -45,6 +45,10 @@ const BOUNDED = new Map<string, string>([
   ],
   ["preview/__probe_video.ts", "dev-only probe page, not in the production bundle"],
   [
+    "preview/__probeStream.ts",
+    "dev-only probe decodes only the worker's own JPEG capture capped at a 160-pixel edge, never source media",
+  ],
+  [
     "preview/stillAnimation.ts",
     "fetches the frame pack our own generator wrote, never the source: packSize caps its frames " +
       "at 64 M pixels together (media/stillFrames.ts), and each frame is decoded on its own",
