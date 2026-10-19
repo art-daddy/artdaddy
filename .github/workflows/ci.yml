@@ -60,6 +60,8 @@ jobs:
         env:
           PLAYWRIGHT_JSON_OUTPUT_NAME: reports/qa/browser/results.json
         run: npm run e2e:ui -- --reporter=list,json
+      - name: Verify real failing-browser evidence capture
+        run: node scripts/qa/browserFailureArtifacts.mjs
       - name: Preserve real browser results and failure artifacts
         if: always()
         uses: actions/upload-artifact@v4
