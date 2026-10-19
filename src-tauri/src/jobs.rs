@@ -5315,13 +5315,14 @@ mod export_delivery_tests {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("media_source.mp4");
     std::fs::write(&source, b"owned media needed by queued export").unwrap();
-    let root = dir.path().join("journal");
+    let journal = tempfile::tempdir().unwrap();
+    let root = journal.path().join("journal");
     let jobs = owner(&root);
     let delivery = jobs.prepare_delivery("leased1".into(), "original-project".into(), dir.path().join("render.partial").to_string_lossy().into(),
       dir.path().join("render.mp4").to_string_lossy().into(), DeliverySource::Render { paths: vec![source.to_string_lossy().into()] }).unwrap();
     let remove = || std::fs::remove_file(&source).map_err(|error| error.to_string());
     assert!(jobs.with_unleased_path(&source, remove).is_err());
-    assert!(jobs.with_unleased_path(dir.path(), || Err::<(), _>("must never run".into())).unwrap_err().contains("leased"));
+    assert!(jobs.with_unleased_path(dir.path(), || std::fs::remove_dir_all(dir.path()).map_err(|error| error.to_string())).unwrap_err().contains("leased"));
     assert_eq!(std::fs::read(&source).unwrap(), b"owned media needed by queued export");
     jobs.cancel_delivery(&delivery.id).unwrap();
     assert!(jobs.with_unleased_path(&source, remove).is_err());
@@ -5330,6 +5331,9 @@ mod export_delivery_tests {
     assert!(!source.exists());
     assert!(jobs.prepare_delivery("late1".into(), "original-project".into(), dir.path().join("late.partial").to_string_lossy().into(),
       dir.path().join("late.mp4").to_string_lossy().into(), DeliverySource::Render { paths: vec![source.to_string_lossy().into()] }).is_err());
+    jobs.with_unleased_path(dir.path(), || std::fs::remove_dir(dir.path()).map_err(|error| error.to_string())).unwrap();
+    assert!(!dir.path().exists());
+    assert!(root.is_dir());
   }
   #[test]
   fn process_ignoring_cancel_keeps_dependencies_until_its_actual_exit() {
