@@ -3969,7 +3969,8 @@ mod export_delivery_tests {
     let before = std::fs::read(&target).unwrap();
     let metadata_entries = native_journal_fixture_entries(&root, None);
     let _entries = jobs.workspace.reserve("peer-entry-pressure", 0, 16384 - metadata_entries - 1 - 1).unwrap();
-    let _bytes = jobs.workspace.reserve("peer-byte-pressure", jobs.workspace.available_bytes(), 0).unwrap();
+    // Leave the competing entry's one-byte fixture rounding available to isolate entry admission.
+    let _bytes = jobs.workspace.reserve("peer-byte-pressure", jobs.workspace.available_bytes() - 1, 0).unwrap();
     let intruder = directory.path().join("payload-used-recovery-slot");
     let captured = Mutex::new(None);
     replacement.state = "cancelled".into();
