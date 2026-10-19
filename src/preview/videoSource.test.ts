@@ -137,3 +137,98 @@ it("a paused seek reaches later frames without exhausting a small native frame p
   }
   expect(sources.size).toBe(0);
 });
+
+it.each([2, 4, 8])(
+  "live rewind recovers with a %i-frame pool without restarting cached frames",
+  async (capacity) => {
+    const data = readFileSync(path.resolve("e2e/ui/fixtures/mac-recording-preview.mp4"));
+    const live = new Set<{ timestamp: number; close: () => void }>();
+    vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+      const range = new Headers(init.headers).get("Range")!.match(/bytes=(\d+)-(\d+)/)!;
+      const start = Number(range[1]);
+      const end = Math.min(Number(range[2]) + 1, data.length);
+      return new Response(new Uint8Array(data.subarray(start, end)), {
+        status: 206,
+        headers: { "Content-Range": `bytes ${start}-${end - 1}/${data.length}` },
+      });
+    });
+    vi.stubGlobal(
+      "EncodedVideoChunk",
+      class {
+        constructor(public input: { timestamp: number }) {}
+        get timestamp() {
+          return this.input.timestamp;
+        }
+      },
+    );
+    vi.stubGlobal(
+      "VideoDecoder",
+      class {
+        state = "configured";
+        private queue: Array<{ timestamp: number }> = [];
+        private scheduled = false;
+        constructor(private options: { output: (frame: unknown) => void }) {}
+        configure() {}
+        decode(chunk: { timestamp: number }) {
+          this.queue.push(chunk);
+          this.drain();
+        }
+        flush() {
+          this.drain();
+          return Promise.resolve();
+        }
+        close() {
+          this.state = "closed";
+          this.queue = [];
+        }
+        private drain() {
+          if (this.scheduled || this.state === "closed") return;
+          this.scheduled = true;
+          queueMicrotask(() => {
+            this.scheduled = false;
+            while (this.state !== "closed" && this.queue.length && live.size < capacity) {
+              const chunk = this.queue.shift()!;
+              const frame = {
+                timestamp: chunk.timestamp,
+                close: () => {
+                  live.delete(frame);
+                  this.drain();
+                },
+              };
+              live.add(frame);
+              this.options.output(frame);
+            }
+          });
+        }
+      },
+    );
+    const source = new VideoSource("fixture.mp4");
+    const at = async (seconds: number) =>
+      vi.waitFor(() => {
+        source.pump(seconds);
+        const timestamp = source.nearestFrame(seconds)?.timestamp;
+        expect(timestamp).toBeGreaterThanOrEqual((seconds - 0.05) * 1e6);
+        return timestamp!;
+      });
+    try {
+      await source.whenReady();
+      const early = await at(0.4);
+      for (let frame = 13; frame <= 60; frame++) await at(frame / 30);
+      expect(await at(0.4)).toBe(early);
+      const starts = source.decoderStarts;
+      for (let repeat = 0; repeat < 4; repeat++) expect(await at(0.4)).toBe(early);
+      expect(source.decoderStarts).toBe(starts);
+      source.pump(2);
+      source.pump(0.4);
+      source.pump(2);
+      expect(await at(2)).toBeGreaterThan(early);
+      source.idle();
+      expect(live.size).toBe(0);
+      expect(await at(0.4)).toBe(early);
+      expect(live.size).toBeLessThanOrEqual(capacity);
+    } finally {
+      source.close();
+    }
+    expect(live.size).toBe(0);
+  },
+);

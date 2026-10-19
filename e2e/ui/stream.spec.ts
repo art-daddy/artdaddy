@@ -12,7 +12,7 @@
 // (frame types I B B B P B B B P P, has_b_frames=2, 512 ticks of 1/15360 s per frame).
 import { type Page, expect, test } from "@playwright/test";
 
-import type { StreamShot } from "../../src/preview/__probeStream";
+import type { StreamShot, WorkerSeekResult } from "../../src/preview/__probeStream";
 
 let page: Page;
 let shots: Record<string, StreamShot>;
@@ -31,6 +31,21 @@ test.afterAll(async () => {
 });
 
 const FRAME_US = 1e6 / 30;
+
+test("backward seek replaces the live worker picture with the original early frame", async () => {
+  const result = await page.evaluate(
+    () => (window as unknown as { __workerSeek: WorkerSeekResult }).__workerSeek,
+  );
+  await test.info().attach("live-worker-seek-pixels", {
+    body: JSON.stringify(result, null, 2),
+    contentType: "application/json",
+  });
+  expect(result.errors).toEqual([]);
+  expect(result.shots).toHaveLength(5);
+  for (const shot of result.shots) {
+    expect(shot.matched, `seek ${shot.time}: actual pixel ${shot.pixel}`).toBe(true);
+  }
+});
 
 test.describe("playback shows every frame of a video (real WebCodecs)", () => {
   for (const [name, frames] of [

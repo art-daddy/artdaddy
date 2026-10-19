@@ -263,13 +263,7 @@ export class VideoSource {
     if (cached) return cached;
 
     const ki = this.keyframeBefore(ti);
-    if (
-      !this.decoder ||
-      this.runStart < 0 ||
-      ti < this.runStart ||
-      targetTs <= this.maxOutputTs ||
-      ki > this.requestedIndex + 1
-    ) {
+    if (this.needsRestart(ti, targetTs, ki)) {
       this.restartAt(ki);
     }
     return new Promise<VideoFrame | null>((resolve) => {
@@ -308,7 +302,7 @@ export class VideoSource {
     const end = Math.min(ti + LOOKAHEAD, this.samples.length - 1);
     if (this.buffer.has(this.keepTs) && this.fedIndex >= end) return; // target + lookahead ready
     const ki = this.keyframeBefore(ti);
-    if (!this.decoder || this.runStart < 0 || ti < this.runStart || ki > this.requestedIndex + 1) {
+    if (this.needsRestart(ti, this.keepTs, ki)) {
       this.restartAt(ki);
     }
     this.feedRange(this.fedIndex + 1, end);
@@ -403,6 +397,16 @@ export class VideoSource {
     this.fedIndex = -1;
     this.requestedIndex = -1;
     this.maxOutputTs = -1;
+  }
+
+  private needsRestart(index: number, timestamp: number, keyframe: number): boolean {
+    return (
+      !this.decoder ||
+      this.runStart < 0 ||
+      index < this.runStart ||
+      (!this.buffer.has(timestamp) && timestamp <= this.maxOutputTs) ||
+      keyframe > this.requestedIndex + 1
+    );
   }
 
   private restartAt(ki: number): void {
