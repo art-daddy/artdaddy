@@ -273,6 +273,57 @@ mod tests {
     actual
   }
 
+  #[test]
+  fn native_inventory_holds_live_writer_extents_without_payload_read_access() {
+    let (directory, volume, payload) = allocation_fixture();
+    let path = directory.path().join("live-writer.bin");
+    let actual = write_allocated(&path, &payload);
+    #[cfg(windows)]
+    let blocker = {
+      use std::os::windows::fs::OpenOptionsExt;
+      std::fs::OpenOptions::new().write(true).share_mode(0).open(&path).unwrap()
+    };
+    #[cfg(unix)]
+    let blocker = {
+      use std::os::unix::fs::PermissionsExt;
+      assert_ne!(unsafe { libc::geteuid() }, 0, "payload-access discriminator requires the non-root CI user");
+      struct RestorePermissions(std::path::PathBuf, std::fs::Permissions);
+      impl Drop for RestorePermissions {
+        fn drop(&mut self) {
+          std::fs::set_permissions(&self.0, self.1.clone()).expect("could not restore the payload-access fixture permissions");
+        }
+      }
+      let permissions = path.metadata().unwrap().permissions();
+      std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o200)).unwrap();
+      RestorePermissions(path.clone(), permissions)
+    };
+    assert!(path.exists());
+    let denied = std::fs::read(&path).unwrap_err();
+    #[cfg(windows)]
+    assert_eq!(denied.raw_os_error(), Some(32));
+    #[cfg(unix)]
+    assert_eq!(denied.raw_os_error(), Some(libc::EACCES));
+    let inventory = Inventory::for_file(&path).unwrap();
+    assert_eq!(inventory.bytes, actual.bytes);
+    assert_eq!(inventory.allocated, actual.allocated);
+    let cap = 3 * volume.bytes();
+    let owner = Workspace::allocation_fixture(8 * volume.bytes(), cap);
+    owner.restore_allocated("retained", inventory, 0, 0).unwrap();
+    let next = directory.path().join("not-admitted.bin");
+    assert!(owner.reserve_in("new", payload.len() as u64, 1, volume).err().unwrap().contains("allocation budget"));
+    assert!(!next.exists());
+    drop(blocker);
+    assert_eq!(std::fs::read(&path).unwrap(), payload);
+    std::fs::remove_file(path).unwrap();
+    owner.release_root("retained");
+    assert_eq!(owner.available_bytes(), cap);
+    let charge = owner.reserve_in("after-cleanup", payload.len() as u64, 1, volume).unwrap();
+    assert!(write_allocated(&next, &payload).allocated <= cap);
+    std::fs::remove_file(next).unwrap();
+    drop(charge);
+    assert_eq!(owner.available_bytes(), cap);
+  }
+
   fn preallocated_root() -> (tempfile::TempDir, AllocationUnit, std::fs::File, Inventory) {
     let (directory, volume, _) = allocation_fixture();
     let file = allocation::preallocated_fixture(&directory.path().join("retained.bin"), volume);

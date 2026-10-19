@@ -119,8 +119,8 @@ pub(super) fn usage(path: &Path) -> Result<Usage, String> {
     use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{GetFileInformationByHandleEx, FileStandardInfo,
-      FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_STANDARD_INFO};
-    let file = std::fs::OpenOptions::new().read(true)
+      FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_STANDARD_INFO};
+    let file = std::fs::OpenOptions::new().access_mode(FILE_READ_ATTRIBUTES)
       .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
       .open(path).map_err(|error| error.to_string())?;
     let mut info: FILE_STANDARD_INFO = unsafe { std::mem::zeroed() };
