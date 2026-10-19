@@ -11,12 +11,22 @@ on:
         description: "Produce signed auto-update artifacts (needs the TAURI_SIGNING_PRIVATE_KEY secret)"
         type: boolean
         default: true
+      artifact_run_id:
+        description: "QA only: qualify an existing signed installer instead of rebuilding"
+        type: string
+        default: ""
+      artifact_head_sha:
+        description: "Expected immutable source commit of that existing artifact"
+        type: string
+        default: ""
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   build:
+    if: inputs.artifact_run_id == ''
     runs-on: windows-latest
     env:
       VITE_API_BASE_URL: https://akaru-server.ambitioustree-4d826744.centralindia.azurecontainerapps.io
@@ -130,6 +140,7 @@ jobs:
         shell: pwsh
         run: |
           $destination = Join-Path $env:RUNNER_TEMP "ArtDaddyCandidate"
+          $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=18877'
           $install = Start-Process "${{ steps.verify.outputs.path }}" -ArgumentList @('/S', "/D=$destination") -Wait -PassThru
           if ($install.ExitCode -ne 0) { throw "Installer failed: $($install.ExitCode)" }
           $installed = Join-Path $destination "artdaddy.exe"
@@ -137,6 +148,7 @@ jobs:
           $env:ARTDADDY_QA_INSTALLED_EXE = $installed
           $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=18877'
           $application = Start-Process $installed -PassThru
+          $env:ARTDADDY_QA_INSTALLED_PID = [string]$application.Id
           try {
             $null = $application.WaitForInputIdle(30000)
             node scripts/qa/installedArtifact.mjs
@@ -193,4 +205,65 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit 1 }
             Write-Host "::notice::signature published. It is inert until latest.json advertises it:"
             Write-Host "::notice::  npm run update:platform -- windows-x86_64 $version <path-to>.exe.sig"
+              }
+
+  qualify-existing:
+    if: inputs.artifact_run_id != '' && !inputs.publish
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Require the exact completed artifact source
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARTIFACT_RUN: ${{ inputs.artifact_run_id }}
+          EXPECTED_SHA: ${{ inputs.artifact_head_sha }}
+        run: |
+          if ($env:ARTIFACT_RUN -notmatch '^\d+$' -or $env:EXPECTED_SHA -notmatch '^[a-f0-9]{40}$') { throw 'Exact artifact run and SHA are required' }
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:ARTIFACT_RUN" | ConvertFrom-Json
+          if ($run.head_sha -ne $env:EXPECTED_SHA -or $run.status -ne 'completed') { throw 'Artifact source does not match the approved completed candidate' }
+      - uses: actions/download-artifact@v4
+        with:
+          name: artdaddy-windows-x64
+          path: candidate-artifact
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ inputs.artifact_run_id }}
+      - name: Verify, install and paint the existing signed candidate
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem candidate-artifact -Recurse -File -Filter '*.exe')
+          $signatures = @(Get-ChildItem candidate-artifact -Recurse -File -Filter '*.sig')
+          if ($installers.Count -ne 1 -or $signatures.Count -ne 1) { throw 'Expected one installer and one updater signature' }
+          node scripts/verify-release-signature.mjs $installers[0].FullName $signatures[0].FullName
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate signature is invalid' }
+          New-Item -ItemType Directory -Force reports/qa/installed | Out-Null
+          $destination = Join-Path $env:RUNNER_TEMP 'ArtDaddyCandidate'
+          $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=18877'
+          $env:WEBVIEW2_USER_DATA_FOLDER = Join-Path $env:RUNNER_TEMP 'ArtDaddyCandidateWebView'
+          $install = Start-Process $installers[0].FullName -ArgumentList @('/S', "/D=$destination") -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "Installer failed: $($install.ExitCode)" }
+          $installed = Join-Path $destination 'artdaddy.exe'
+          if (-not (Test-Path $installed)) { throw 'Installed executable is missing' }
+          $env:ARTDADDY_QA_INSTALLED_EXE = $installed
+          $existing = @(Get-Process artdaddy -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $installed })
+          $application = if ($existing.Count -eq 1) { $existing[0] } else { Start-Process $installed -PassThru -RedirectStandardOutput reports/qa/installed/app.out -RedirectStandardError reports/qa/installed/app.err }
+          $env:ARTDADDY_QA_INSTALLED_PID = [string]$application.Id
+          try {
+            $null = $application.WaitForInputIdle(30000)
+            node scripts/qa/installedArtifact.mjs
+            if ($LASTEXITCODE -ne 0) { throw 'Installed WebView qualification failed' }
+            if (-not $application.WaitForExit(30000)) { throw 'Installed app did not close normally' }
+            if ($application.ExitCode -ne 0) { throw "Installed app exited with $($application.ExitCode)" }
+          } finally {
+            $application.Refresh()
+            if (-not $application.HasExited) { Stop-Process -Id $application.Id -Force }
           }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: signoff-windows-existing-installed
+          path: reports/qa/installed/**
+          if-no-files-found: warn

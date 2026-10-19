@@ -12,8 +12,23 @@ assert.ok(installed.toLowerCase().startsWith((runner + path.sep).toLowerCase()))
 const output = path.resolve("reports/qa/installed");
 mkdirSync(output, { recursive: true });
 const require = createRequire(import.meta.url);
-const { chromium } = require(path.resolve("src-tauri/resources/node_modules/playwright-core"));
-const browser = await chromium.connectOverCDP("http://127.0.0.1:18877", { timeout: 30000 });
+const { chromium } = require(path.join(path.dirname(installed), "resources/node_modules/playwright-core"));
+const processId = Number(process.env.ARTDADDY_QA_INSTALLED_PID);
+assert.ok(Number.isSafeInteger(processId) && processId > 0);
+const started = Date.now();
+let browser;
+let lastError;
+while (Date.now() - started < 30000) {
+  process.kill(processId, 0);
+  try {
+    browser = await chromium.connectOverCDP("http://127.0.0.1:18877", { timeout: 5000 });
+    break;
+  } catch (error) {
+    lastError = error.message;
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
+}
+assert.ok(browser, `Installed process stayed alive but CDP never became ready: ${lastError}`);
 try {
   const pages = browser.contexts().flatMap(context => context.pages());
   const page = pages.find(candidate => /^(?:http:\/\/tauri\.localhost|tauri:\/\/localhost)/.test(candidate.url()));
