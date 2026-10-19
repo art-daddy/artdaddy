@@ -182,6 +182,13 @@ describe("project lock — heartbeat", () => {
     expect(await fs.exists(LOCK)).toBe(false);
   });
 
+  it("releases the same heartbeat when the project path uses different separators", async () => {
+    await claimProjectLock(fs, DIR);
+    await releaseProjectLock(fs, DIR.replaceAll("/", "\\"));
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_MS * 3);
+    expect(await fs.exists(LOCK)).toBe(false);
+  });
+
   it("does not recreate a closed project's lock when a heartbeat write was already in flight", async () => {
     await claimProjectLock(fs, DIR);
     const write = fs.writeTextFile.bind(fs);
@@ -233,6 +240,41 @@ describe("project lock — heartbeat", () => {
     const closed = releaseProjectLock(fs, DIR);
     unblock();
     await Promise.all([opened, closed]);
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_MS * 3);
+    expect(await fs.exists(LOCK)).toBe(false);
+  });
+
+  it("drains a heartbeat owned by another loaded copy of the lock module", async () => {
+    await claimProjectLock(fs, DIR);
+    const modulePath = "./projectLock.ts?lock-copy=close-race";
+    const other = (await import(modulePath)) as typeof import("./projectLock");
+    const write = fs.writeTextFile.bind(fs);
+    let unblock!: () => void;
+    let started!: () => void;
+    let finished!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      unblock = resolve;
+    });
+    const entered = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const written = new Promise<void>((resolve) => {
+      finished = resolve;
+    });
+    fs.writeTextFile = async (file, text) => {
+      started();
+      await waiting;
+      await write(file, text);
+      finished();
+    };
+    vi.advanceTimersByTime(HEARTBEAT_MS);
+    await entered;
+    const closed = other.releaseProjectLock(fs, DIR);
+    for (let round = 0; round < 10; round++) await Promise.resolve();
+    unblock();
+    await written;
+    await closed;
+    expect(await fs.exists(LOCK)).toBe(false);
     await vi.advanceTimersByTimeAsync(HEARTBEAT_MS * 3);
     expect(await fs.exists(LOCK)).toBe(false);
   });

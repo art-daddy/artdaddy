@@ -9,7 +9,14 @@
 import { INTERNAL_DIR, joinPath, type FsLike } from "./store";
 
 const LOCK = `${INTERNAL_DIR}/.lock`;
-const writes = new Map<string, Promise<void>>();
+const realm = globalThis as {
+  __artdaddyLockRuntime?: {
+    writes: Map<string, Promise<void>>;
+    beats: Map<string, ReturnType<typeof setInterval>>;
+  };
+};
+const runtime = (realm.__artdaddyLockRuntime ??= { writes: new Map(), beats: new Map() });
+const { writes, beats } = runtime;
 
 function sequenceLock(projectDir: string, run: () => Promise<void>): Promise<void> {
   const key = joinPath(projectDir);
@@ -110,16 +117,15 @@ export async function claimProjectLock(fs: FsLike, projectDir: string): Promise<
     );
     // Node/test runners would otherwise be held open by the interval.
     (timer as unknown as { unref?: () => void }).unref?.();
-    beats.set(projectDir, timer);
+    beats.set(joinPath(projectDir), timer);
   });
 }
 
-const beats = new Map<string, ReturnType<typeof setInterval>>();
-
 function stopHeartbeat(projectDir: string): void {
-  const t = beats.get(projectDir);
+  const key = joinPath(projectDir);
+  const t = beats.get(key);
   if (t !== undefined) clearInterval(t);
-  beats.delete(projectDir);
+  beats.delete(key);
 }
 
 async function stamp(fs: FsLike, projectDir: string): Promise<void> {

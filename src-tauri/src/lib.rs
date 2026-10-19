@@ -20,7 +20,19 @@ fn trash_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
 }
 
 fn trash_path_owned(jobs: &jobs::Supervisor, path: String) -> Result<(), String> {
-  jobs.with_unleased_path(std::path::Path::new(&path), || trash::delete(&path).map_err(|e| e.to_string()))
+  jobs.with_unleased_path(std::path::Path::new(&path), || {
+    #[cfg(target_os = "macos")]
+    {
+      use trash::macos::{DeleteMethod, TrashContextExtMacos};
+      let mut context = trash::TrashContext::default();
+      context.set_delete_method(DeleteMethod::NsFileManager);
+      context.delete(&path).map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+      trash::delete(&path).map_err(|e| e.to_string())
+    }
+  })
 }
 
 /// Terminate a process AND everything it spawned. The shell plugin's `Child::kill`

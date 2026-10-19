@@ -89,7 +89,7 @@ jobs:
       - name: Project ownership lifecycle and branding preflight
         id: ownership
         continue-on-error: true
-        run: npx vitest run src/tools/projectLock.test.ts src/project/documentRegistry.temps.test.ts src/timeline/branding.test.ts src/timeline/brandRecovery.test.ts --reporter=json --outputFile=reports/mac-rca/unit.json
+        run: npx vitest run src/tools/projectLock.test.ts src/project/documentRegistry.temps.test.ts src/preview/videoSource.test.ts src/timeline/branding.test.ts src/timeline/brandRecovery.test.ts --reporter=json --outputFile=reports/mac-rca/unit.json
       - name: Exact five Keychain and Trash witnesses in the real OS session
         id: facilities
         continue-on-error: true
@@ -103,6 +103,18 @@ jobs:
             grep -q 'running 1 test' "$log" || status=1
           done
           exit "$status"
+      - name: Native Trash works without Finder automation permission
+        id: native_trash
+        continue-on-error: true
+        shell: bash
+        run: |
+          log="reports/mac-rca/native-trash-no-appleevents.log"
+          status=0
+          sandbox-exec -p '(version 1)(allow default)(deny appleevent-send)' cargo test --locked --manifest-path src-tauri/Cargo.toml --lib trashes_a_ >"$log" 2>&1 || status=$?
+          cat "$log"
+          test "$status" -eq 0
+          grep -q 'running 2 tests' "$log"
+          grep -q '2 passed; 0 failed' "$log"
       - name: Four retained export witnesses and all branding ratios
         id: exports
         continue-on-error: true
@@ -124,8 +136,8 @@ jobs:
       - name: All requested lanes must pass
         if: always()
         env:
-          OUTCOMES: ${{ steps.transport.outcome }},${{ steps.ownership.outcome }},${{ steps.facilities.outcome }},${{ steps.exports.outcome }},${{ steps.audio.outcome }}
-        run: node -e "const outcomes=process.env.OUTCOMES.split(','); if(outcomes.length!==5||outcomes.some(value=>value!=='success')) process.exit(1)"
+          OUTCOMES: ${{ steps.transport.outcome }},${{ steps.ownership.outcome }},${{ steps.facilities.outcome }},${{ steps.native_trash.outcome }},${{ steps.exports.outcome }},${{ steps.audio.outcome }}
+        run: node -e "const outcomes=process.env.OUTCOMES.split(','); if(outcomes.length!==6||outcomes.some(value=>value!=='success')) process.exit(1)"
 
   native-hotfix:
     if: ${{ inputs.native_hotfix_only && !inputs.mac_rca_only }}
