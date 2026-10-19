@@ -1275,6 +1275,7 @@ impl Supervisor {
     check_journal_capacity(journal, None, 0, None)?;
     self.account_payload_workspace(&loaded)?;
     *deliveries = loaded;
+    drop(_journal);
     drop(deliveries);
     self.export_root = Some(root);
     Ok(self)
