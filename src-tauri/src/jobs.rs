@@ -421,10 +421,12 @@ impl ExportJournal<'_> {
         let directory = canonical_export_path(&namespace.path)?;
         scopes.push(export_path_key(&directory));
         for ancestor in directory.ancestors() {
+          let key = export_path_key(ancestor);
+          if observed.contains_key(&key) { continue; }
           match std::fs::symlink_metadata(ancestor) {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
               let usage = allocation::usage(ancestor)?;
-              observed.insert(export_path_key(ancestor), allocation::Inventory { bytes: 0, allocated: usage.allocated,
+              observed.insert(key, allocation::Inventory { bytes: 0, allocated: usage.allocated,
                 entries: 1, volume: allocation::AllocationUnit::for_directory(ancestor)? });
             }
             Ok(_) => return Err("export infrastructure scaffolding must contain only regular directories".into()),
@@ -439,13 +441,15 @@ impl ExportJournal<'_> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error.to_string()),
       }
+      let volume = observed.get(&export_path_key(&root)).ok_or("export journal allocation directory was not observed")?.volume;
       for (index, entry) in std::fs::read_dir(&root).map_err(|error| error.to_string())?.enumerate() {
         if index > EXPORT_JOURNAL_ENTRY_LIMIT { return Err("export recovery journal exceeds its native inventory entry budget".into()); }
         let entry = entry.map_err(|error| error.to_string())?;
         let kind = entry.file_type().map_err(|error| error.to_string())?;
         if !kind.is_file() || kind.is_symlink() { return Err("export recovery journal must contain only regular files".into()); }
         let path = entry.path();
-        observed.insert(export_path_key(&path), allocation::Inventory::for_file(&path)?);
+        let usage = allocation::usage(&path)?;
+        observed.insert(export_path_key(&path), allocation::Inventory { bytes: usage.bytes, allocated: usage.allocated, entries: 1, volume });
       }
       Ok(())
     })();
