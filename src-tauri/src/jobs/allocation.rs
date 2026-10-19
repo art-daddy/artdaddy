@@ -14,17 +14,6 @@ impl AllocationUnit {
     Ok(Self(bytes))
   }
 
-  #[cfg(test)]
-  pub(super) fn fixture_bytes(length: usize) -> Vec<u8> {
-    use sha2::{Digest, Sha256};
-    let mut bytes = Vec::with_capacity(length);
-    for block in 0..length.div_ceil(32) {
-      bytes.extend_from_slice(&Sha256::digest(u64::try_from(block).unwrap().to_le_bytes()));
-    }
-    bytes.truncate(length);
-    bytes
-  }
-
   pub(super) fn bytes(self) -> u64 { self.0 }
 
   pub(super) fn from_admitted(bytes: u64) -> Self {
@@ -34,6 +23,17 @@ impl AllocationUnit {
 
   #[cfg(test)]
   pub(super) fn logical_fixture() -> Self { Self(1) }
+}
+
+#[cfg(test)]
+pub(super) fn fixture_bytes(length: usize) -> Vec<u8> {
+  use sha2::{Digest, Sha256};
+  let mut bytes = Vec::with_capacity(length);
+  for block in 0..length.div_ceil(32) {
+    bytes.extend_from_slice(&Sha256::digest(u64::try_from(block).unwrap().to_le_bytes()));
+  }
+  bytes.truncate(length);
+  bytes
 }
 
 #[derive(Clone, Copy, Default)]
