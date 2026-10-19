@@ -32,12 +32,17 @@ struct State {
   allocated: u64,
   entries: u64,
   roots: HashMap<String, RootUsage>,
+  metadata: HashMap<String, RootUsage>,
+  metadata_allocated: u64,
+  metadata_active: bool,
+  metadata_fault: Option<String>,
   output_claims: HashMap<String, OutputUsage>,
 }
 
 pub struct Workspace {
   limit: u64,
   allocation_limit: u64,
+  metadata_limit: u64,
   entry_limit: u64,
   state: Mutex<State>,
   changed: Condvar,
@@ -45,11 +50,106 @@ pub struct Workspace {
 
 impl Workspace {
   pub fn new(limit: u64) -> Arc<Self> { Arc::new(Self { limit, allocation_limit: super::EXPORT_WORKSPACE_PAYLOAD_BYTES,
+    metadata_limit: super::EXPORT_SCRATCH_LIMIT_BYTES - super::EXPORT_WORKSPACE_PAYLOAD_BYTES,
     entry_limit: 16384, state: Mutex::new(State::default()), changed: Condvar::new() }) }
 
   pub(super) fn available_bytes(&self) -> u64 {
     let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+    if self.metadata_fit(&state).is_err() { return 0; }
     self.limit.saturating_sub(state.used).min(self.allocation_limit.saturating_sub(state.allocated))
+  }
+
+  fn metadata_fit(&self, state: &State) -> Result<(), String> {
+    if let Some(error) = &state.metadata_fault { return Err(format!("export infrastructure allocation is unavailable: {error}")); }
+    if state.metadata_allocated > self.metadata_limit { return Err("export infrastructure allocation budget exceeded".into()); }
+    if state.entries > self.entry_limit { return Err("export workspace entry budget exceeded by retained infrastructure".into()); }
+    Ok(())
+  }
+
+  pub(super) fn require_metadata_fit(&self) -> Result<(), String> {
+    self.metadata_fit(&self.state.lock().unwrap_or_else(|error| error.into_inner()))
+  }
+
+  pub(super) fn metadata_unavailable(&self, error: &str) {
+    self.state.lock().unwrap_or_else(|error| error.into_inner()).metadata_fault = Some(error.to_string());
+  }
+
+  pub(super) fn inventory_metadata(&self, scopes: &[String], inventory: &HashMap<String, Inventory>, complete: bool) -> Result<(), String> {
+    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+    state.metadata_active = true;
+    let mut next = state.metadata.clone();
+    if complete {
+      next.retain(|key, _| !scopes.iter().any(|scope| super::export_paths_overlap(key, scope)) || inventory.contains_key(key));
+    }
+    let observed = (|| -> Result<(u64, u64), String> {
+      for (key, actual) in inventory {
+        if actual.entries != 1 { return Err("native export infrastructure inventory must describe one entry".into()); }
+        let previous = next.get(key).copied().unwrap_or_default();
+        let rounded = actual.bytes.checked_add(actual.volume.bytes()).ok_or("export infrastructure inventory size overflow")?;
+        next.insert(key.clone(), RootUsage { bytes: previous.bytes.max(actual.bytes), entries: 1,
+          allocation_unit: previous.allocation_unit.max(actual.volume.bytes()),
+          allocated_excess: previous.allocated_excess.max(actual.allocated.saturating_sub(rounded)), ..previous });
+      }
+      let allocated = next.values().try_fold(0u64, |total, usage| total.checked_add(usage.allocated()?)
+        .ok_or_else(|| "export infrastructure allocation total overflow".to_string()))?;
+      let payload_entries = state.roots.values().try_fold(0u64, |total, usage| total.checked_add(usage.entries)
+        .ok_or_else(|| "export workspace entry total overflow".to_string()))?;
+      let entries = payload_entries.checked_add(next.len() as u64).ok_or("export infrastructure entry total overflow")?;
+      Ok((allocated, entries))
+    })();
+    state.metadata = next;
+    match observed {
+      Ok((allocated, entries)) => {
+        state.metadata_allocated = allocated;
+        state.entries = entries;
+        if complete { state.metadata_fault = None; }
+        Ok(())
+      }
+      Err(error) => {
+        state.metadata_fault = Some(error.clone());
+        Err(error)
+      }
+    }
+  }
+
+  pub(super) fn reserve_metadata_in(self: &Arc<Self>, key: &str, bytes: u64, volume: AllocationUnit,
+    replacing: Option<&str>) -> Result<MetadataCharge, String> {
+    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+    state.metadata_active = true;
+    self.metadata_fit(&state)?;
+    if state.metadata.contains_key(key) { return Err("export infrastructure entry already has an allocation owner".into()); }
+    let replacement = replacing.is_some_and(|target| state.metadata.contains_key(target));
+    if replacing.is_some() && !replacement { return Err("export receipt replacement has no retained allocation owner".into()); }
+    let entries = state.entries.checked_add(1).ok_or("export infrastructure entry size overflow")?;
+    if entries > self.entry_limit.saturating_sub(u64::from(!replacement)) {
+      return Err("export workspace entry budget exceeded before infrastructure creation".into());
+    }
+    let owned = RootUsage { bytes, entries: 1, allocation_unit: volume.bytes(), ..RootUsage::default() };
+    let allocated = state.metadata_allocated.checked_add(owned.allocated()?).ok_or("export infrastructure allocation total overflow")?;
+    if allocated > self.metadata_limit { return Err("export infrastructure allocation budget exceeded before creation".into()); }
+    state.metadata.insert(key.to_string(), owned);
+    state.metadata_allocated = allocated;
+    state.entries = entries;
+    Ok(MetadataCharge { owner: self.clone(), key: key.to_string(), retained: false })
+  }
+
+  pub(super) fn release_metadata(&self, key: &str) {
+    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(usage) = state.metadata.remove(key) {
+      state.metadata_allocated = state.metadata_allocated.saturating_sub(usage.allocated().expect("admitted infrastructure allocation fits"));
+      state.entries = state.entries.saturating_sub(1);
+    }
+  }
+
+  pub(super) fn install_metadata(&self, temporary: &str, target: &str) -> Result<(), String> {
+    let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+    let installed = state.metadata.remove(temporary).ok_or("installed export receipt lost its temporary allocation owner")?;
+    if let Some(previous) = state.metadata.insert(target.to_string(), installed) {
+      state.metadata_allocated = state.metadata_allocated.checked_sub(previous.allocated()?)
+        .ok_or("export infrastructure replacement allocation underflow")?;
+      state.entries = state.entries.checked_sub(1).ok_or("export infrastructure replacement entry underflow")?;
+    }
+    Ok(())
   }
 
   pub(super) fn peak_bytes(&self, root: &str) -> Option<u64> {
@@ -87,6 +187,7 @@ impl Workspace {
     state.allocated = total_allocated;
     state.entries = count;
     if count > self.entry_limit { return Err("export workspace entry budget exceeded by retained scratch".into()); }
+    if require_fit { self.metadata_fit(&state)?; }
     if require_fit && used > self.limit { return Err("export workspace budget exceeded by retained scratch".into()); }
     if require_fit && total_allocated > self.allocation_limit { return Err("export workspace allocation budget exceeded by retained scratch".into()); }
     Ok(())
@@ -94,10 +195,13 @@ impl Workspace {
 
   pub(super) fn reserve_in(self: &Arc<Self>, root: &str, bytes: u64, entries: u64, volume: AllocationUnit) -> Result<Charge, String> {
     let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+    self.metadata_fit(&state)?;
     let used = state.used.checked_add(bytes).ok_or("export workspace size overflow")?;
     if used > self.limit { return Err("export workspace budget exceeded before write".into()); }
     let count = state.entries.checked_add(entries).ok_or("export workspace entry overflow")?;
-    if count > self.entry_limit { return Err("export workspace entry budget exceeded before write".into()); }
+    if count > self.entry_limit.saturating_sub(u64::from(state.metadata_active && entries > 0)) {
+      return Err("export workspace entry budget exceeded before write".into());
+    }
     let previous = state.roots.get(root).copied().unwrap_or(RootUsage { observed_from_creation: true, ..RootUsage::default() });
     let owned_bytes = previous.bytes.checked_add(bytes).ok_or("owned export workspace size overflow")?;
     let owned = RootUsage { bytes: owned_bytes,
@@ -118,6 +222,7 @@ impl Workspace {
 
   pub(super) fn reserve_output(self: &Arc<Self>, root: &str) -> Result<(u64, Charge), String> {
     let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+    self.metadata_fit(&state)?;
     let output = state.output_claims.get(root).ok_or("pending output has no admitted workspace claim")?;
     if output.reserved { return Err("pending output already has a native writer".into()); }
     let remaining = self.limit.checked_sub(state.used).ok_or("export workspace already exceeds its temporary budget")?
@@ -213,6 +318,22 @@ impl Workspace {
   }
 
   #[cfg(test)]
+  pub(super) fn metadata_fixture(limit: u64, metadata_limit: u64) -> Arc<Self> {
+    let mut owner = Self::new(limit);
+    Arc::get_mut(&mut owner).unwrap().metadata_limit = metadata_limit;
+    owner
+  }
+
+  #[cfg(test)]
+  pub(super) fn available_entries(&self) -> u64 {
+    let state = self.state.lock().unwrap();
+    self.entry_limit.saturating_sub(state.entries).saturating_sub(u64::from(state.metadata_active))
+  }
+
+  #[cfg(test)]
+  pub(super) fn metadata_allocated(&self) -> u64 { self.state.lock().unwrap().metadata_allocated }
+
+  #[cfg(test)]
   pub(super) fn account_existing(&self, root: &str, bytes: u64, entries: u64) -> Result<(), String> {
     self.account_allocated(root, Inventory { bytes, entries, allocated: bytes, volume: AllocationUnit::logical_fixture() })
   }
@@ -221,6 +342,20 @@ impl Workspace {
   pub(super) fn reserve(self: &Arc<Self>, root: &str, bytes: u64, entries: u64) -> Result<Charge, String> {
     self.reserve_in(root, bytes, entries, AllocationUnit::logical_fixture())
   }
+}
+
+pub(super) struct MetadataCharge {
+  owner: Arc<Workspace>,
+  key: String,
+  retained: bool,
+}
+
+impl MetadataCharge {
+  pub(super) fn retain(mut self) { self.retained = true; }
+}
+
+impl Drop for MetadataCharge {
+  fn drop(&mut self) { if !self.retained { self.owner.release_metadata(&self.key); } }
 }
 
 pub(super) struct Charge {
