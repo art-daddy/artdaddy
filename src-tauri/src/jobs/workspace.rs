@@ -55,7 +55,6 @@ impl Workspace {
 
   pub(super) fn available_bytes(&self) -> u64 {
     let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-    if self.metadata_fit(&state).is_err() { return 0; }
     self.limit.saturating_sub(state.used).min(self.allocation_limit.saturating_sub(state.allocated))
   }
 

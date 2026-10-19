@@ -11,7 +11,7 @@
 // the app exits.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::path::{Path, PathBuf};
 use std::io::{Read, Write};
@@ -280,6 +280,7 @@ impl ExportNamespace {
 #[derive(Default)]
 struct ExportInfrastructure {
   journal: OnceLock<ExportNamespace>,
+  journal_io: OnceLock<Result<Arc<Mutex<()>>, String>>,
   scratch: OnceLock<ExportNamespace>,
 }
 
@@ -292,7 +293,10 @@ struct ExportJournal<'a> {
 
 impl ExportInfrastructure {
   fn configure_journal(&self, path: PathBuf) -> Result<(), String> {
-    self.journal.get_or_init(|| ExportNamespace::new(path.clone())).require_path(&path)?;
+    let namespace = self.journal.get_or_init(|| ExportNamespace::new(path.clone()));
+    namespace.require_path(&path)?;
+    self.journal_io.get_or_init(|| namespace.key().and_then(journal_io_for_namespace))
+      .as_ref().map_err(Clone::clone)?;
     self.validate_namespaces()
   }
 
@@ -499,7 +503,7 @@ impl ExportJournal<'_> {
       self.observe_result(created)?;
       self.workspace.require_metadata_fit()?;
     }
-    self.inventory()
+    Ok(())
   }
 }
 
@@ -793,14 +797,26 @@ const EXPORT_JOURNAL_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
 const EXPORT_JOURNAL_ENTRY_LIMIT: usize = 4096;
 const EXPORT_JOURNAL_TRANSIENT_BYTES: u64 = EXPORT_JOURNAL_LIMIT_BYTES + EXPORT_RECEIPT_LIMIT_BYTES;
 const EXPORT_RECEIPT_TEMP_PREFIX: &str = ".receipt-";
-static EXPORT_JOURNAL_IO: Mutex<()> = Mutex::new(());
+static EXPORT_JOURNAL_IO: OnceLock<Mutex<HashMap<String, Weak<Mutex<()>>>>> = OnceLock::new();
 
 fn valid_delivery_id(id: &str) -> bool {
   !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
-fn lock_export_journal() -> Result<MutexGuard<'static, ()>, String> {
-  EXPORT_JOURNAL_IO.lock().map_err(|error| format!("export recovery journal I/O lock failed: {error}"))
+fn journal_io_for_namespace(key: &str) -> Result<Arc<Mutex<()>>, String> {
+  let mut owners = EXPORT_JOURNAL_IO.get_or_init(Mutex::default).lock()
+    .map_err(|error| format!("export journal owner registry lock failed: {error}"))?;
+  owners.retain(|_, owner| owner.strong_count() > 0);
+  if let Some(owner) = owners.get(key).and_then(Weak::upgrade) { return Ok(owner); }
+  let owner = Arc::new(Mutex::new(()));
+  owners.insert(key.to_string(), Arc::downgrade(&owner));
+  Ok(owner)
+}
+
+fn lock_export_journal<'a>(journal: ExportJournal<'a>) -> Result<MutexGuard<'a, ()>, String> {
+  journal.infrastructure.validate_namespaces()?;
+  journal.infrastructure.journal_io.get().ok_or("export journal I/O owner is unavailable")?
+    .as_ref().map_err(Clone::clone)?.lock().map_err(|error| format!("export recovery journal I/O lock failed: {error}"))
 }
 
 fn owned_receipt_temporary(name: &str) -> bool {
@@ -812,8 +828,8 @@ fn owned_receipt_temporary(name: &str) -> bool {
 
 fn cleanup_receipt_temporaries(journal: ExportJournal<'_>) -> Result<(), String> {
   journal.infrastructure.validate_namespaces()?;
-  journal.inventory()?;
   let root = journal.root;
+  let mut changed = false;
   let cleaned = (|| -> Result<(), String> {
     for (index, entry) in std::fs::read_dir(root).map_err(|error| error.to_string())?.enumerate() {
       if index > EXPORT_JOURNAL_ENTRY_LIMIT { return Err("export recovery journal exceeds its temporary cleanup entry budget".into()); }
@@ -822,11 +838,12 @@ fn cleanup_receipt_temporaries(journal: ExportJournal<'_>) -> Result<(), String>
       let kind = entry.file_type().map_err(|error| error.to_string())?;
       if !kind.is_file() || kind.is_symlink() { return Err("uncommitted export receipt must be an owned regular file".into()); }
       journal.infrastructure.validate_namespaces()?;
+      changed = true;
       std::fs::remove_file(entry.path()).map_err(|error| format!("could not clean uncommitted export receipt: {error}"))?;
     }
     Ok(())
   })();
-  journal.observe_result(cleaned)
+  if changed || cleaned.is_err() { journal.observe_result(cleaned) } else { Ok(()) }
 }
 
 fn check_journal_capacity(journal: ExportJournal<'_>, target: Option<&Path>, next_bytes: u64, pending: Option<&Path>) -> Result<(), String> {
@@ -887,7 +904,7 @@ fn discard_receipt(journal: ExportJournal<'_>, file: tempfile::NamedTempFile, pr
 }
 
 fn persist_delivery_after_sync(journal: ExportJournal<'_>, delivery: &ExportDelivery, after_sync: impl FnOnce(&Path) -> Result<(), String>) -> Result<(), String> {
-  let _journal = lock_export_journal()?;
+  let _journal = lock_export_journal(journal)?;
   journal.validate_delivery(delivery)?;
   let root = journal.root;
   let mut sink = std::io::sink();
@@ -962,7 +979,7 @@ fn persist_delivery_after_sync(journal: ExportJournal<'_>, delivery: &ExportDeli
 }
 
 fn remove_delivery_receipt(journal: ExportJournal<'_>, id: &str) -> Result<(), String> {
-  let _journal = lock_export_journal()?;
+  let _journal = lock_export_journal(journal)?;
   if !valid_delivery_id(id) { return Err("invalid export intent identity".into()); }
   journal.infrastructure.validate_namespaces()?;
   journal.inventory()?;
@@ -1227,7 +1244,7 @@ impl Supervisor {
     self.infrastructure.configure_journal(root.clone())?;
     let journal = self.infrastructure.journal(&self.workspace)?;
     let mut deliveries = self.deliveries.lock().map_err(|error| error.to_string())?;
-    let _journal = lock_export_journal()?;
+    let _journal = lock_export_journal(journal)?;
     journal.ensure_exists()?;
     let mut loaded = HashMap::new();
     let mut installed = 0u64;
@@ -1291,8 +1308,9 @@ impl Supervisor {
 
   fn account_workspace(&self, entries: &HashMap<String, ExportDelivery>) -> Result<(), String> {
     {
-      let _journal = lock_export_journal()?;
-      self.journal()?.inventory()?;
+      let journal = self.journal()?;
+      let _journal = lock_export_journal(journal)?;
+      journal.inventory()?;
     }
     self.account_payload_workspace(entries)
   }
@@ -1510,7 +1528,7 @@ impl Supervisor {
     self.record_execution_clock(current, false)?;
     let work = self.infrastructure.scratch_arena()?;
     {
-      let _journal = lock_export_journal()?;
+      let _journal = lock_export_journal(root)?;
       root.ensure_directory(work)?;
     }
     let path = work.join(format!("render-{id}-{}", &request_sha256[..16])).to_string_lossy().into_owned();
@@ -4428,6 +4446,57 @@ mod export_delivery_tests {
       jobs.publish_delivery(&delivery.id).unwrap();
       assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"complete imported media");
       assert_eq!(std::fs::read(&source).unwrap(), b"complete imported media");
+    }
+  }
+
+  #[test]
+  fn canonical_journal_aliases_serialize_but_independent_owners_keep_making_durable_progress() {
+    for aliased in [false, true] {
+      let directory = tempfile::tempdir().unwrap();
+      let first_root = directory.path().join("first-journal");
+      let second_root = if aliased {
+        let alias = directory.path().join("parent-alias");
+        std::fs::create_dir(&alias).unwrap();
+        alias.join("..").join("first-journal")
+      } else { directory.path().join("independent-journal") };
+      let first_owner = owner(&first_root);
+      let mut first_delivery = intent(&first_owner, directory.path(), "io-first");
+      let second_owner = owner(&second_root);
+      let mut second_delivery = intent(&second_owner, directory.path(), "io-second");
+      first_delivery.state = "cancelled".into();
+      second_delivery.state = "cancelled".into();
+      let first_expected = serde_json::to_vec(&first_delivery).unwrap();
+      let second_expected = serde_json::to_vec(&second_delivery).unwrap();
+      let (entered, ready) = std::sync::mpsc::channel();
+      let (release, continue_write) = std::sync::mpsc::channel();
+      let first = std::thread::spawn(move || persist_delivery_after_sync(first_owner.journal()?, &first_delivery, |_| {
+        entered.send(()).map_err(|error| error.to_string())?;
+        continue_write.recv_timeout(std::time::Duration::from_secs(30)).map_err(|error| error.to_string())
+      }));
+      ready.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
+      let (done, completed) = std::sync::mpsc::channel();
+      let second = std::thread::spawn(move || {
+        let result = persist_delivery(second_owner.journal()?, &second_delivery);
+        done.send(()).map_err(|error| error.to_string())?;
+        result
+      });
+      let before_release = completed.recv_timeout(if aliased { std::time::Duration::from_millis(100) }
+        else { std::time::Duration::from_secs(2) });
+      release.send(()).unwrap();
+      first.join().unwrap().unwrap();
+      second.join().unwrap().unwrap();
+      if aliased {
+        assert!(matches!(before_release, Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
+          "canonical aliases admitted simultaneous journal commit points");
+      } else {
+        assert!(before_release.is_ok(), "an independent journal was blocked by another owner's paused receipt");
+      }
+      assert_eq!(std::fs::read(first_root.join("io-first.json")).unwrap(), first_expected);
+      assert_eq!(std::fs::read(second_root.join("io-second.json")).unwrap(), second_expected);
+      for root in [&first_root, &second_root] {
+        assert!(!std::fs::read_dir(root).unwrap().any(|entry|
+          entry.unwrap().file_name().to_str().is_some_and(owned_receipt_temporary)));
+      }
     }
   }
 
