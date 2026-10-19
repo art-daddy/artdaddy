@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
-import { connect } from "./cdp.mjs";
+import { connect } from "../cdp.mjs";
 
 const originalSocket = globalThis.WebSocket;
 let socket;

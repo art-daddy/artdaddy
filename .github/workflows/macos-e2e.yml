@@ -85,7 +85,7 @@ jobs:
       - name: Browser disconnect outcomes
         id: transport
         continue-on-error: true
-        run: node --test scripts/cdp.test.mjs
+        run: node --test scripts/qa/cdpTransport.test.mjs
       - name: Project ownership lifecycle and branding preflight
         id: ownership
         continue-on-error: true
