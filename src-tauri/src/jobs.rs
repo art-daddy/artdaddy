@@ -327,6 +327,12 @@ enum InitialEntryKind {
   RenderScratch,
 }
 
+#[derive(Clone, Copy)]
+enum PathLeaseOperation<'a> {
+  Mutation,
+  ExportDestination(&'a ExportDelivery),
+}
+
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InitialEntryPoint {
@@ -1019,7 +1025,7 @@ impl Supervisor {
       }
     };
     if !path.is_absolute() || count == 0 { return Err("initial export entry has no admitted absolute identity".into()); }
-    self.require_unleased_path(&path, entries.values())?;
+    self.require_unleased_path(&path, entries.values(), PathLeaseOperation::Mutation)?;
     self.account_workspace(entries)?;
     let parent = path.parent().ok_or("initial export entry has no parent")?;
     if kind == InitialEntryKind::RenderScratch {
@@ -1274,7 +1280,7 @@ impl Supervisor {
       state: "failed".into(), identity: None, created_at: admitted_at, render_job: None, sources, recovery_attempts: 0, source, followups_done: false,
       command_sha256: None, worker_identity: None, producer_complete: false, execution_queued_at_ms, execution_queued_ms: 0,
       render_scratch: None, copy_scratch: None, stage_ownership: Some(InitialEntryOwnership::Planned) };
-    self.require_unleased_path(Path::new(&delivery.dest_path), deliveries.values().chain(std::iter::once(&delivery)))?;
+    self.require_unleased_path(Path::new(&delivery.dest_path), deliveries.values().chain(std::iter::once(&delivery)), PathLeaseOperation::Mutation)?;
     let delivery = self.create_initial_entry(&mut deliveries, delivery, InitialEntryKind::Stage)?;
     let queued = if matches!(delivery.source, DeliverySource::Copy { .. }) { Some(self.retain_copy_job(&delivery, JobState::Queued)?) } else { None };
     drop(deliveries);
@@ -1358,8 +1364,8 @@ impl Supervisor {
     if actual.sha256 != expected.sha256 || actual.size != expected.size { return Err("export artifact identity differs at publication".into()); }
     let mut deliveries = self.deliveries.lock().map_err(|error| error.to_string())?;
     if checked_stage {
-      let destination = &deliveries.get(id).ok_or("unknown export intent")?.dest_path;
-      self.require_unleased_path(Path::new(destination), deliveries.values())?;
+      let owner = deliveries.get(id).ok_or("unknown export intent")?;
+      self.require_unleased_path(Path::new(&owner.dest_path), deliveries.values(), PathLeaseOperation::ExportDestination(owner))?;
     }
     let delivery = deliveries.get_mut(id).ok_or("unknown export intent")?;
     self.require_completed_producer(delivery)?;
@@ -1428,11 +1434,12 @@ impl Supervisor {
 
   pub fn with_unleased_paths<T>(&self, paths: &[&Path], operation: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
     let deliveries = self.deliveries.lock().map_err(|error| error.to_string())?;
-    for path in paths { self.require_unleased_path(path, deliveries.values())?; }
+    for path in paths { self.require_unleased_path(path, deliveries.values(), PathLeaseOperation::Mutation)?; }
     operation()
   }
 
-  fn require_unleased_path<'a>(&self, path: &Path, deliveries: impl Iterator<Item = &'a ExportDelivery>) -> Result<(), String> {
+  fn require_unleased_path<'a>(&self, path: &Path, deliveries: impl Iterator<Item = &'a ExportDelivery>,
+    operation: PathLeaseOperation<'_>) -> Result<(), String> {
     let key = |path: &Path| {
       let value = path.to_string_lossy().replace('\\', "/");
       if cfg!(target_os = "windows") { value.to_lowercase() } else { value }
@@ -1461,6 +1468,15 @@ impl Supervisor {
     };
     let canonical = dependency_path(path)?;
     let target = key(&canonical);
+    let destination_owner = match operation {
+      PathLeaseOperation::Mutation => None,
+      PathLeaseOperation::ExportDestination(owner) => {
+        if key(&dependency_path(Path::new(&owner.dest_path))?) != target {
+          return Err("export destination operation does not match its admitted owner".into());
+        }
+        Some(owner.id.as_str())
+      }
+    };
     let prefix = format!("{}/", target.trim_end_matches('/'));
     let target_file = if canonical.is_file() {
       Some(same_file::Handle::from_path(&canonical).map_err(|error| error.to_string())?)
@@ -1480,7 +1496,8 @@ impl Supervisor {
         .map(|(relative, _)| Path::new(&scratch.path).join(relative).to_string_lossy().into_owned()).collect::<Vec<_>>()).unwrap_or_default();
       for dependency in declared.into_iter().chain(delivery.sources.iter().map(|(path, _)| path.as_str()))
         .chain(staged.iter().map(String::as_str)).chain(delivery.copy_scratch.as_deref())
-        .chain(stage_owned.then_some(delivery.stage_path.as_str())).chain(stage_owned.then_some(delivery.dest_path.as_str())) {
+        .chain(stage_owned.then_some(delivery.stage_path.as_str()))
+        .chain((stage_owned && destination_owner != Some(delivery.id.as_str())).then_some(delivery.dest_path.as_str())) {
         let dependency = dependency_path(Path::new(dependency))?;
         if let Some(target_file) = &target_file {
           match same_file::Handle::from_path(&dependency) {
@@ -1592,7 +1609,8 @@ impl Supervisor {
       return Err("export intent changed before dependency binding; retry refused".into());
     }
     current.execution_deadline_ms(now_ms())?;
-    self.require_unleased_path(Path::new(&next.dest_path), deliveries.values().chain(std::iter::once(&next)))?;
+    self.require_unleased_path(Path::new(&next.dest_path), deliveries.values().chain(std::iter::once(&next)),
+      PathLeaseOperation::ExportDestination(&next))?;
     if first_binding {
       persist_delivery(root, &next)?;
       deliveries.insert(spec.id.clone(), next);
