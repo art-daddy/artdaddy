@@ -3038,7 +3038,7 @@ mod export_delivery_tests {
       jobs.initial_entry_hook = Some(Arc::new(move |_, point, path| {
         if point == InitialEntryPoint::Created {
           *observed.lock().unwrap() = Some((path.to_path_buf(), std::fs::read(&receipt).unwrap()));
-          *blocker.lock().unwrap() = Some(CleanupBlocker::new(&receipt));
+          *blocker.lock().unwrap() = Some(CleanupBlocker::open(&receipt));
         }
         Ok(())
       }));
