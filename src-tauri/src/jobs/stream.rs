@@ -836,7 +836,7 @@ mod tests {
       let work = directory.path().join("work");
       let journal = directory.path().join("journal");
       let mut jobs = Supervisor::new(Arc::new(super::super::export_delivery_tests::NoSpawn), Arc::new(|_| {}))
-        .with_export_work_root(work.clone()).with_export_root(journal.clone()).unwrap();
+        .with_export_work_root(work.clone()).unwrap().with_export_root(journal.clone()).unwrap();
       jobs.workspace = super::super::Workspace::new(1024 * 1024);
       let delivery = jobs.prepare_delivery("retained-stream".into(), "original-project".into(),
         directory.path().join("render.partial").to_string_lossy().into(), directory.path().join("previous.mp4").to_string_lossy().into(),
@@ -869,7 +869,7 @@ mod tests {
       let limit = before.len() as u64 - 1;
       let mut recovered = Supervisor::new(Arc::new(super::super::export_delivery_tests::NoSpawn), Arc::new(|_| {}));
       recovered.workspace = super::super::Workspace::new(limit);
-      let recovered = recovered.with_export_work_root(work).with_export_root(journal).unwrap();
+      let recovered = recovered.with_export_work_root(work).unwrap().with_export_root(journal).unwrap();
       assert_eq!(recovered.workspace.available_bytes(), 0);
       assert!(recovered.workspace.reserve("cannot-reuse-retained-bytes", 1, 1).is_err());
       recovered.cancel_delivery(&delivery.id).unwrap();
@@ -1463,7 +1463,7 @@ mod tests {
     let work = dir.path().join("work");
     let legacy_starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let worker = Arc::new(NativeStreamSpawner { registry: Arc::default(), legacy_starts: legacy_starts.clone() });
-    let original = Supervisor::new(worker.clone(), Arc::new(|_| {})).with_export_work_root(work.clone()).with_export_root(journal.clone()).unwrap();
+    let original = Supervisor::new(worker.clone(), Arc::new(|_| {})).with_export_work_root(work.clone()).unwrap().with_export_root(journal.clone()).unwrap();
     let mut spec = spec(&work);
     spec.meta = serde_json::json!({ "kind": "export", "renderTransport": "partition-pipes-v1" });
     let stage = dir.path().join("delivered.partial");
@@ -1481,7 +1481,7 @@ mod tests {
     let (sender, receiver) = mpsc::channel();
     let recovered = Supervisor::new(worker, Arc::new(move |notice| {
       if let Notice::Changed(job) = notice { if job.state == JobState::Exited { sender.send(job).unwrap(); } }
-    })).with_export_work_root(work).with_export_root(journal).unwrap();
+    })).with_export_work_root(work).unwrap().with_export_root(journal).unwrap();
     assert!(recovered.recover_exports().is_empty());
     let job = receiver.recv_timeout(Duration::from_secs(30)).expect("recovered stream did not settle");
     assert_eq!(job.code, Some(0), "{}{}", job.stderr_head, job.stderr_tail);
@@ -1520,7 +1520,7 @@ mod tests {
       },
       Notice::Changed(job) if job.state == JobState::Exited => { sender.send(job).unwrap(); },
       _ => {},
-    })).with_export_work_root(dir.path().join("work")).with_export_root(dir.path().join("journal")).unwrap();
+    })).with_export_work_root(dir.path().join("work")).unwrap().with_export_root(dir.path().join("journal")).unwrap();
     let mut spec = spec(dir.path());
     spec.args.splice(0..0, strings(&["-progress", "pipe:1"]));
     spec.meta = serde_json::json!({ "kind": "export", "renderTransport": "partition-pipes-v1" });

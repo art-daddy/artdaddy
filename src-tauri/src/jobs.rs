@@ -11,7 +11,7 @@
 // the app exits.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::path::{Path, PathBuf};
 use std::io::{Read, Write};
@@ -208,6 +208,7 @@ pub struct Supervisor {
   notify: Arc<dyn Fn(Notice) + Send + Sync>,
   launch_id: Arc<str>,
   deliveries: Arc<Mutex<HashMap<String, ExportDelivery>>>,
+  infrastructure: Arc<ExportInfrastructure>,
   export_root: Option<PathBuf>,
   export_work_root: Option<PathBuf>,
   export_font_root: Option<PathBuf>,
@@ -216,6 +217,197 @@ pub struct Supervisor {
   copy_settled: Arc<Condvar>,
   #[cfg(test)]
   initial_entry_hook: Option<InitialEntryHook>,
+}
+
+fn canonical_export_path(path: &Path) -> Result<PathBuf, String> {
+  if !path.is_absolute() { return Err("native filesystem ownership requires an absolute path".into()); }
+  for ancestor in path.ancestors() {
+    match ancestor.canonicalize() {
+      Ok(mut resolved) => {
+        for component in path.strip_prefix(ancestor).map_err(|error| error.to_string())?.components() {
+          match component {
+            std::path::Component::ParentDir => { resolved.pop(); }
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(name) => resolved.push(name),
+            _ => return Err("native filesystem ownership has an invalid absolute suffix".into()),
+          }
+        }
+        return Ok(resolved);
+      }
+      Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+      Err(error) => return Err(error.to_string()),
+    }
+  }
+  Err("native filesystem ownership has no resolvable ancestor".into())
+}
+
+fn export_path_key(path: &Path) -> String {
+  let value = path.to_string_lossy().trim_start_matches("\\\\?\\").replace('\\', "/");
+  if cfg!(target_os = "windows") { value.to_lowercase() } else { value }
+}
+
+fn export_paths_overlap(left: &str, right: &str) -> bool {
+  left == right || left.starts_with(&format!("{}/", right.trim_end_matches('/'))) ||
+    right.starts_with(&format!("{}/", left.trim_end_matches('/')))
+}
+
+struct ExportNamespace {
+  path: PathBuf,
+  identity: Result<String, String>,
+}
+
+impl ExportNamespace {
+  fn new(path: PathBuf) -> Self {
+    let identity = canonical_export_path(&path).map(|path| export_path_key(&path));
+    Self { path, identity }
+  }
+
+  fn key(&self) -> Result<&str, String> {
+    let expected = self.identity.as_ref().map_err(Clone::clone)?;
+    let actual = export_path_key(&canonical_export_path(&self.path)?);
+    if actual != *expected { return Err("private export infrastructure namespace changed; restart is required".into()); }
+    Ok(expected)
+  }
+
+  fn require_path(&self, path: &Path) -> Result<(), String> {
+    if self.key()? != export_path_key(&canonical_export_path(path)?) {
+      return Err("private export infrastructure cannot be reconfigured on an existing supervisor".into());
+    }
+    Ok(())
+  }
+}
+
+#[derive(Default)]
+struct ExportInfrastructure {
+  journal: OnceLock<ExportNamespace>,
+  scratch: OnceLock<ExportNamespace>,
+}
+
+#[derive(Clone, Copy)]
+struct ExportJournal<'a> {
+  infrastructure: &'a ExportInfrastructure,
+  root: &'a Path,
+}
+
+impl ExportInfrastructure {
+  fn configure_journal(&self, path: PathBuf) -> Result<(), String> {
+    self.journal.get_or_init(|| ExportNamespace::new(path.clone())).require_path(&path)?;
+    self.validate_namespaces()
+  }
+
+  fn configure_scratch(&self, path: PathBuf) -> Result<(), String> {
+    self.scratch.get_or_init(|| ExportNamespace::new(path.clone())).require_path(&path)?;
+    if self.journal.get().is_some() { self.validate_namespaces()?; }
+    Ok(())
+  }
+
+  fn validate_namespaces(&self) -> Result<(), String> {
+    let journal = self.journal.get().ok_or("private export infrastructure is not configured; filesystem mutation refused")?.key()?;
+    if let Some(scratch) = self.scratch.get() {
+      if export_paths_overlap(journal, scratch.key()?) { return Err("private export infrastructure namespaces must not overlap".into()); }
+    }
+    Ok(())
+  }
+
+  fn journal(&self) -> Result<ExportJournal<'_>, String> {
+    self.validate_namespaces()?;
+    Ok(ExportJournal { infrastructure: self, root: &self.journal.get().ok_or("private export journal is not configured")?.path })
+  }
+
+  fn scratch_arena(&self) -> Result<&Path, String> {
+    self.validate_namespaces()?;
+    Ok(&self.scratch.get().ok_or("native render work root is unavailable")?.path)
+  }
+
+  fn public_path(&self, path: &Path) -> Result<PathBuf, String> {
+    self.validate_namespaces()?;
+    let canonical = canonical_export_path(path)?;
+    let target = export_path_key(&canonical);
+    for namespace in self.journal.get().into_iter().chain(self.scratch.get()) {
+      if export_paths_overlap(&target, namespace.key()?) {
+        return Err("path overlaps private export infrastructure; public filesystem mutation refused".into());
+      }
+    }
+    Ok(canonical)
+  }
+
+  fn owned_scratch(&self, delivery: &ExportDelivery) -> Result<PathBuf, String> {
+    let scratch = delivery.render_scratch.as_ref().ok_or("native render directory has no admitted owner")?;
+    let path = Path::new(&scratch.path);
+    match std::fs::symlink_metadata(path) {
+      Ok(metadata) if !metadata.is_dir() || metadata.file_type().is_symlink() =>
+        return Err("private export scratch must be an owned regular directory".into()),
+      Ok(_) => {}
+      Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+      Err(error) => return Err(error.to_string()),
+    }
+    let actual = canonical_export_path(path)?;
+    let parent = actual.parent().ok_or("native render directory has no parent")?;
+    if export_path_key(parent) != export_path_key(&canonical_export_path(self.scratch_arena()?)?) {
+      return Err("render directory is outside its private export infrastructure arena".into());
+    }
+    if delivery.version == 3 {
+      if scratch.request_sha256.len() != 64 || !scratch.request_sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("native render directory has no valid request identity".into());
+      }
+      let expected = format!("render-{}-{}", delivery.id, &scratch.request_sha256[..16]);
+      if path.file_name().and_then(|name| name.to_str()) != Some(expected.as_str()) {
+        return Err("native render directory does not match its admitted owner".into());
+      }
+    }
+    Ok(actual)
+  }
+
+  fn validate_delivery(&self, delivery: &ExportDelivery) -> Result<(), String> {
+    if !valid_delivery_id(&delivery.id) { return Err("invalid export intent identity".into()); }
+    delivery.validate_initial_ownership()?;
+    self.public_path(Path::new(&delivery.stage_path))?;
+    self.public_path(Path::new(&delivery.dest_path))?;
+    if let Some(path) = delivery.copy_scratch_path()? { self.public_path(path)?; }
+    let scratch = if delivery.render_scratch.is_some() { Some(self.owned_scratch(delivery)?) } else { None };
+    if let Some(cwd) = delivery.render_job.as_ref().and_then(|spec| spec.cwd.as_deref()) {
+      if let Some(scratch) = scratch {
+        if export_path_key(&canonical_export_path(Path::new(cwd))?) != export_path_key(&scratch) {
+          return Err("retained render command differs from its private scratch owner".into());
+        }
+      } else { self.public_path(Path::new(cwd))?; }
+    }
+    Ok(())
+  }
+
+  fn authorize_path(&self, path: &Path, operation: PathLeaseOperation<'_>) -> Result<PathBuf, String> {
+    match operation {
+      PathLeaseOperation::Mutation => self.public_path(path),
+      PathLeaseOperation::ExportDestination(owner) => {
+        self.validate_delivery(owner)?;
+        let canonical = self.public_path(path)?;
+        if export_path_key(&canonical) != export_path_key(&canonical_export_path(Path::new(&owner.dest_path))?) {
+          return Err("export destination operation does not match its admitted owner".into());
+        }
+        Ok(canonical)
+      }
+      PathLeaseOperation::RenderScratch(owner) => {
+        self.validate_delivery(owner)?;
+        let canonical = canonical_export_path(path)?;
+        if export_path_key(&canonical) != export_path_key(&self.owned_scratch(owner)?) {
+          return Err("native render directory operation does not match its admitted owner".into());
+        }
+        Ok(canonical)
+      }
+    }
+  }
+}
+
+impl ExportJournal<'_> {
+  fn validate_delivery(self, delivery: &ExportDelivery) -> Result<(), String> {
+    self.infrastructure.validate_delivery(delivery)
+  }
+
+  fn ensure_exists(self) -> Result<(), String> {
+    self.infrastructure.validate_namespaces()?;
+    std::fs::create_dir_all(self.root).map_err(|error| error.to_string())?;
+    self.infrastructure.validate_namespaces()
+  }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -331,6 +523,7 @@ enum InitialEntryKind {
 enum PathLeaseOperation<'a> {
   Mutation,
   ExportDestination(&'a ExportDelivery),
+  RenderScratch(&'a ExportDelivery),
 }
 
 #[cfg(test)]
@@ -524,19 +717,24 @@ fn owned_receipt_temporary(name: &str) -> bool {
   random.is_some_and(|name| name.bytes().all(|byte| byte.is_ascii_alphanumeric()))
 }
 
-fn cleanup_receipt_temporaries(root: &Path) -> Result<(), String> {
+fn cleanup_receipt_temporaries(journal: ExportJournal<'_>) -> Result<(), String> {
+  journal.infrastructure.validate_namespaces()?;
+  let root = journal.root;
   for (index, entry) in std::fs::read_dir(root).map_err(|error| error.to_string())?.enumerate() {
     if index > EXPORT_JOURNAL_ENTRY_LIMIT { return Err("export recovery journal exceeds its temporary cleanup entry budget".into()); }
     let entry = entry.map_err(|error| error.to_string())?;
     if !entry.file_name().to_str().is_some_and(owned_receipt_temporary) { continue; }
     let kind = entry.file_type().map_err(|error| error.to_string())?;
     if !kind.is_file() || kind.is_symlink() { return Err("uncommitted export receipt must be an owned regular file".into()); }
+    journal.infrastructure.validate_namespaces()?;
     std::fs::remove_file(entry.path()).map_err(|error| format!("could not clean uncommitted export receipt: {error}"))?;
   }
   Ok(())
 }
 
-fn check_journal_capacity(root: &Path, target: Option<&Path>, next_bytes: u64, pending: Option<&Path>) -> Result<(), String> {
+fn check_journal_capacity(journal: ExportJournal<'_>, target: Option<&Path>, next_bytes: u64, pending: Option<&Path>) -> Result<(), String> {
+  journal.infrastructure.validate_namespaces()?;
+  let root = journal.root;
   let mut installed = next_bytes;
   let mut entries = usize::from(target.is_some());
   let mut transient = next_bytes;
@@ -579,8 +777,8 @@ impl Write for ReceiptWriter<'_> {
   fn flush(&mut self) -> std::io::Result<()> { self.output.flush() }
 }
 
-fn persist_delivery(root: &Path, delivery: &ExportDelivery) -> Result<(), String> {
-  persist_delivery_after_sync(root, delivery, |_| Ok(()))
+fn persist_delivery(journal: ExportJournal<'_>, delivery: &ExportDelivery) -> Result<(), String> {
+  persist_delivery_after_sync(journal, delivery, |_| Ok(()))
 }
 
 fn discard_receipt(file: tempfile::NamedTempFile, primary: String) -> String {
@@ -590,18 +788,18 @@ fn discard_receipt(file: tempfile::NamedTempFile, primary: String) -> String {
   }
 }
 
-fn persist_delivery_after_sync(root: &Path, delivery: &ExportDelivery, after_sync: impl FnOnce(&Path) -> Result<(), String>) -> Result<(), String> {
+fn persist_delivery_after_sync(journal: ExportJournal<'_>, delivery: &ExportDelivery, after_sync: impl FnOnce(&Path) -> Result<(), String>) -> Result<(), String> {
   let _journal = lock_export_journal()?;
-  if !valid_delivery_id(&delivery.id) { return Err("invalid export intent identity".into()); }
-  delivery.validate_initial_ownership()?;
+  journal.validate_delivery(delivery)?;
+  let root = journal.root;
   let mut sink = std::io::sink();
   let mut measured = ReceiptWriter { output: &mut sink, remaining: EXPORT_RECEIPT_LIMIT_BYTES };
   serde_json::to_writer(&mut measured, delivery).map_err(|error| error.to_string())?;
   let expected_bytes = EXPORT_RECEIPT_LIMIT_BYTES - measured.remaining;
-  std::fs::create_dir_all(root).map_err(|error| error.to_string())?;
-  cleanup_receipt_temporaries(root)?;
+  journal.ensure_exists()?;
+  cleanup_receipt_temporaries(journal)?;
   let target = root.join(format!("{}.json", delivery.id));
-  check_journal_capacity(root, Some(&target), expected_bytes, None)?;
+  check_journal_capacity(journal, Some(&target), expected_bytes, None)?;
   let mut file = tempfile::Builder::new().prefix(EXPORT_RECEIPT_TEMP_PREFIX).rand_bytes(16).suffix(".tmp")
     .tempfile_in(root).map_err(|error| error.to_string())?;
   let written = (|| -> Result<(), String> {
@@ -612,7 +810,8 @@ fn persist_delivery_after_sync(root: &Path, delivery: &ExportDelivery, after_syn
     }
     file.as_file().sync_all().map_err(|error| error.to_string())?;
     after_sync(file.path())?;
-    check_journal_capacity(root, Some(&target), expected_bytes, Some(file.path()))
+    journal.validate_delivery(delivery)?;
+    check_journal_capacity(journal, Some(&target), expected_bytes, Some(file.path()))
   })();
   if let Err(error) = written { return Err(discard_receipt(file, error)); }
   match file.persist(target) {
@@ -621,10 +820,11 @@ fn persist_delivery_after_sync(root: &Path, delivery: &ExportDelivery, after_syn
   }
 }
 
-fn remove_delivery_receipt(root: &Path, id: &str) -> Result<(), String> {
+fn remove_delivery_receipt(journal: ExportJournal<'_>, id: &str) -> Result<(), String> {
   let _journal = lock_export_journal()?;
   if !valid_delivery_id(id) { return Err("invalid export intent identity".into()); }
-  std::fs::remove_file(root.join(format!("{id}.json"))).map_err(|error| error.to_string())
+  journal.infrastructure.validate_namespaces()?;
+  std::fs::remove_file(journal.root.join(format!("{id}.json"))).map_err(|error| error.to_string())
 }
 
 const EXPORT_SCRATCH_LIMIT_BYTES: u64 = 20_000_000_000;
@@ -868,6 +1068,7 @@ impl Supervisor {
       notify,
       launch_id: format!("launch-{nanos:x}-{:x}", std::process::id()).into(),
       deliveries: Arc::default(),
+      infrastructure: Arc::default(),
       export_root: None,
       export_work_root: None,
       export_font_root: None,
@@ -880,11 +1081,12 @@ impl Supervisor {
   }
 
   pub fn with_export_root(mut self, root: PathBuf) -> Result<Self, String> {
-    std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+    self.infrastructure.configure_journal(root.clone())?;
+    let journal = self.infrastructure.journal()?;
     let mut deliveries = self.deliveries.lock().map_err(|error| error.to_string())?;
     let _journal = lock_export_journal()?;
-    cleanup_receipt_temporaries(&root)?;
-    check_journal_capacity(&root, None, 0, None)?;
+    journal.ensure_exists()?;
+    let mut loaded = HashMap::new();
     let mut installed = 0u64;
     for entry in std::fs::read_dir(&root).map_err(|error| error.to_string())? {
       let entry = entry.map_err(|error| error.to_string())?;
@@ -892,7 +1094,7 @@ impl Supervisor {
       if path.extension().and_then(|value| value.to_str()) != Some("json") { continue; }
       if !entry.file_type().map_err(|error| error.to_string())?.is_file() { return Err("export recovery receipt must be a regular file".into()); }
       let declared = std::fs::metadata(&path).map_err(|error| error.to_string())?.len();
-      if deliveries.len() >= EXPORT_JOURNAL_ENTRY_LIMIT || declared > EXPORT_RECEIPT_LIMIT_BYTES || installed.saturating_add(declared) > EXPORT_JOURNAL_LIMIT_BYTES {
+      if loaded.len() >= EXPORT_JOURNAL_ENTRY_LIMIT || declared > EXPORT_RECEIPT_LIMIT_BYTES || installed.saturating_add(declared) > EXPORT_JOURNAL_LIMIT_BYTES {
         return Err("export journal exceeds the bounded loading budget".into());
       }
       let mut bytes = Vec::with_capacity(declared as usize + 1);
@@ -906,18 +1108,30 @@ impl Supervisor {
         path.file_stem().and_then(|value| value.to_str()) != Some(delivery.id.as_str()) {
         return Err("unsupported or invalid export journal identity".into());
       }
-      delivery.validate_initial_ownership()?;
-      deliveries.insert(delivery.id.clone(), delivery);
+      journal.validate_delivery(&delivery)?;
+      loaded.insert(delivery.id.clone(), delivery);
     }
-    self.account_workspace(&deliveries)?;
+    cleanup_receipt_temporaries(journal)?;
+    check_journal_capacity(journal, None, 0, None)?;
+    self.account_workspace(&loaded)?;
+    *deliveries = loaded;
     drop(deliveries);
     self.export_root = Some(root);
     Ok(self)
   }
 
-  pub fn with_export_work_root(mut self, root: PathBuf) -> Self { self.export_work_root = Some(root); self }
+  pub fn with_export_work_root(mut self, root: PathBuf) -> Result<Self, String> {
+    self.infrastructure.configure_scratch(root.join("exports"))?;
+    self.export_work_root = Some(root);
+    Ok(self)
+  }
 
   pub fn with_export_font_root(mut self, root: PathBuf) -> Self { self.export_font_root = Some(root); self }
+
+  fn journal(&self) -> Result<ExportJournal<'_>, String> {
+    self.export_root.as_ref().ok_or("native export journal is unavailable")?;
+    self.infrastructure.journal()
+  }
 
   fn workspace_key(path: &Path) -> String {
     let resolved = path.canonicalize().or_else(|error| {
@@ -983,6 +1197,7 @@ impl Supervisor {
     self.workspace.claim_output(&Self::workspace_key(Path::new(&path)), &|| {
       let entries = self.deliveries.lock().map_err(|error| error.to_string())?;
       let entry = entries.get(id).ok_or("output intent vanished while waiting for temporary capacity")?;
+      self.journal()?.validate_delivery(entry)?;
       entry.require_confirmed_initial_entries()?;
       if entry.state != "prepared" || entry.producer_complete { return Err("output intent is no longer eligible while waiting for temporary capacity".into()); }
       entry.execution_deadline_ms(now_ms())?;
@@ -1025,12 +1240,15 @@ impl Supervisor {
       }
     };
     if !path.is_absolute() || count == 0 { return Err("initial export entry has no admitted absolute identity".into()); }
-    self.require_unleased_path(&path, entries.values(), PathLeaseOperation::Mutation)?;
+    let operation = match kind {
+      InitialEntryKind::Stage => PathLeaseOperation::Mutation,
+      InitialEntryKind::RenderScratch => PathLeaseOperation::RenderScratch(&planned),
+    };
+    self.require_unleased_path(&path, entries.values(), operation)?;
     self.account_workspace(entries)?;
     let parent = path.parent().ok_or("initial export entry has no parent")?;
     if kind == InitialEntryKind::RenderScratch {
-      let arena = self.export_work_root.as_ref().ok_or("native render work root is unavailable")?.join("exports")
-        .canonicalize().map_err(|error| error.to_string())?;
+      let arena = self.infrastructure.scratch_arena()?.canonicalize().map_err(|error| error.to_string())?;
       if parent.canonicalize().map_err(|error| error.to_string())? != arena {
         return Err("initial render directory is outside its admitted arena".into());
       }
@@ -1039,13 +1257,14 @@ impl Supervisor {
     let admitted_path = parent.canonicalize().map_err(|error| error.to_string())?
       .join(path.file_name().ok_or("initial export entry has no filename")?);
     let charge = self.workspace.reserve_in(&Self::workspace_key(&admitted_path), bytes, count, volume)?;
-    let root = self.export_root.as_ref().ok_or("native export journal is unavailable")?;
+    let root = self.journal()?;
     persist_delivery(root, &planned)?;
     entries.insert(planned.id.clone(), planned.clone());
     let charge = InitialEntryCharge(Some(charge));
     #[cfg(test)]
     if let Some(hook) = &self.initial_entry_hook { hook(kind, InitialEntryPoint::IntentPersisted, &path)?; }
     planned.execution_deadline_ms(now_ms())?;
+    self.infrastructure.authorize_path(&path, operation)?;
     let created = match kind {
       InitialEntryKind::Stage => {
         let mut options = std::fs::OpenOptions::new();
@@ -1122,7 +1341,7 @@ impl Supervisor {
     }
     let _capacity = self.claim_export_output(id)?;
     let request_sha256 = format!("{:x}", Sha256::digest(serde_json::to_vec(&(&files, &fonts)).map_err(|error| error.to_string())?));
-    let root = self.export_root.as_ref().ok_or("native export journal is unavailable")?;
+    let root = self.journal()?;
     let mut entries = self.deliveries.lock().map_err(|error| error.to_string())?;
     self.account_workspace(&entries)?;
     let current = entries.get_mut(id).ok_or("render staging has no admitted delivery intent")?;
@@ -1138,8 +1357,9 @@ impl Supervisor {
     }
     if current.render_job.is_some() { return Err("render staging cannot replace an admitted worker's inputs".into()); }
     self.record_execution_clock(current, false)?;
-    let work = self.export_work_root.as_ref().ok_or("native render work root is unavailable")?.join("exports");
-    std::fs::create_dir_all(&work).map_err(|error| error.to_string())?;
+    let work = self.infrastructure.scratch_arena()?;
+    std::fs::create_dir_all(work).map_err(|error| error.to_string())?;
+    self.infrastructure.validate_namespaces()?;
     let path = work.join(format!("render-{id}-{}", &request_sha256[..16])).to_string_lossy().into_owned();
     let font_bytes = fonts.iter().try_fold(0u64, |total, font| {
       let bytes = self.export_font_root.as_ref().and_then(|root| std::fs::metadata(root.join(font)).ok())
@@ -1212,13 +1432,14 @@ impl Supervisor {
   }
 
   fn validate_render_scratch(&self, delivery: &ExportDelivery, cwd: Option<&str>) -> Result<(), String> {
+    self.journal()?.validate_delivery(delivery)?;
     let Some(cwd) = cwd else {
       if delivery.render_scratch.is_some() { return Err("render command omitted its admitted scratch directory".into()); }
       return Ok(());
     };
     let scratch = delivery.render_scratch.as_ref().ok_or("render command has no admitted scratch reservation")?;
     if !scratch.ready { return Err("render scratch staging has not completed".into()); }
-    let arena = self.export_work_root.as_ref().ok_or("native render work root is unavailable")?.join("exports").canonicalize().map_err(|error| error.to_string())?;
+    let arena = self.infrastructure.scratch_arena()?.canonicalize().map_err(|error| error.to_string())?;
     let directory = Path::new(&scratch.path);
     let metadata = std::fs::symlink_metadata(directory).map_err(|error| error.to_string())?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() { return Err("admitted render scratch is not an owned regular directory".into()); }
@@ -1291,6 +1512,7 @@ impl Supervisor {
   }
 
   fn require_completed_producer(&self, delivery: &ExportDelivery) -> Result<(), String> {
+    self.journal()?.validate_delivery(delivery)?;
     delivery.require_confirmed_initial_entries()?;
     if !delivery.producer_complete { return Err("export producer has no durable successful completion".into()); }
     if self.copying.lock().map_err(|error| error.to_string())?.contains(&delivery.id) {
@@ -1309,13 +1531,14 @@ impl Supervisor {
   }
 
   fn record_execution_clock(&self, current: &mut ExportDelivery, queued: bool) -> Result<ExportDelivery, String> {
+    self.journal()?.validate_delivery(current)?;
     current.require_confirmed_initial_entries()?;
     if current.state != "prepared" { return Err("export job is not in prepared state".into()); }
     if current.producer_complete { return Err("completed export producer cannot be run again".into()); }
     let mut next = current.clone();
     if queued { next.enqueue_execution(now_ms())?; } else { next.resume_execution(now_ms())?; }
     if next.execution_queued_at_ms != current.execution_queued_at_ms || next.execution_queued_ms != current.execution_queued_ms {
-      let root = self.export_root.as_ref().ok_or("native export journal is unavailable")?;
+      let root = self.journal()?;
       persist_delivery(root, &next)?;
       *current = next.clone();
     }
@@ -1323,7 +1546,7 @@ impl Supervisor {
   }
 
   pub fn verify_delivery(&self, id: &str) -> Result<ExportDelivery, String> {
-    let root = self.export_root.as_ref().ok_or("native export journal is unavailable")?;
+    let root = self.journal()?;
     let delivery = self.deliveries.lock().map_err(|error| error.to_string())?.get(id).cloned().ok_or("unknown export intent")?;
     if delivery.state != "prepared" && delivery.state != "verified" { return Err("export intent cannot be verified".into()); }
     if delivery.execution_queued_at_ms.is_some() { return Err("queued export cannot be verified".into()); }
@@ -1353,7 +1576,7 @@ impl Supervisor {
   }
 
   pub fn publish_delivery(&self, id: &str) -> Result<ExportDelivery, String> {
-    let root = self.export_root.as_ref().ok_or("native export journal is unavailable")?;
+    let root = self.journal()?;
     let captured = self.deliveries.lock().map_err(|error| error.to_string())?.get(id).cloned().ok_or("unknown export intent")?;
     self.require_completed_producer(&captured)?;
     let checked_stage = Path::new(&captured.stage_path).exists() && captured.state != "published";
@@ -1408,7 +1631,7 @@ impl Supervisor {
   }
 
   pub fn cancel_delivery(&self, id: &str) -> Result<bool, String> {
-    let root = self.export_root.as_ref().ok_or("native export journal is unavailable")?;
+    let root = self.journal()?;
     let pending_publication = self.deliveries.lock().map_err(|error| error.to_string())?.get(id)
       .is_some_and(|entry| entry.state == "publishing" && !Path::new(&entry.stage_path).exists());
     if pending_publication { self.publish_delivery(id)?; return Ok(false); }
@@ -1435,6 +1658,8 @@ impl Supervisor {
   }
 
   pub fn with_unleased_paths<T>(&self, paths: &[&Path], operation: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    self.infrastructure.validate_namespaces()?;
+    if paths.is_empty() { return Err("filesystem mutation has no admitted paths".into()); }
     let deliveries = self.deliveries.lock().map_err(|error| error.to_string())?;
     for path in paths { self.require_unleased_path(path, deliveries.values(), PathLeaseOperation::Mutation)?; }
     operation()
@@ -1442,36 +1667,12 @@ impl Supervisor {
 
   fn require_unleased_path<'a>(&self, path: &Path, deliveries: impl Iterator<Item = &'a ExportDelivery>,
     operation: PathLeaseOperation<'_>) -> Result<(), String> {
-    let key = |path: &Path| {
-      let value = path.to_string_lossy().replace('\\', "/");
-      if cfg!(target_os = "windows") { value.to_lowercase() } else { value }
-    };
-    let dependency_path = |path: &Path| -> Result<PathBuf, String> {
-      for ancestor in path.ancestors() {
-        if ancestor.as_os_str().is_empty() { break; }
-        match ancestor.canonicalize() {
-          Ok(mut resolved) => {
-            let remainder = path.strip_prefix(ancestor).map_err(|error| error.to_string())?;
-            for component in remainder.components() {
-              match component {
-                std::path::Component::ParentDir => { resolved.pop(); }
-                std::path::Component::CurDir => {}
-                std::path::Component::Normal(name) => resolved.push(name),
-                _ => return Err("export dependency has an invalid absolute suffix".into()),
-              }
-            }
-            return Ok(resolved);
-          }
-          Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-          Err(error) => return Err(error.to_string()),
-        }
-      }
-      Ok(path.to_path_buf())
-    };
-    let canonical = dependency_path(path)?;
+    let key = export_path_key;
+    let dependency_path = canonical_export_path;
+    let canonical = self.infrastructure.authorize_path(path, operation)?;
     let target = key(&canonical);
     let destination_owner = match operation {
-      PathLeaseOperation::Mutation => None,
+      PathLeaseOperation::Mutation | PathLeaseOperation::RenderScratch(_) => None,
       PathLeaseOperation::ExportDestination(owner) => {
         if key(&dependency_path(Path::new(&owner.dest_path))?) != target {
           return Err("export destination operation does not match its admitted owner".into());
@@ -1526,7 +1727,7 @@ impl Supervisor {
   }
 
   pub fn fail_delivery(&self, id: &str) -> Result<bool, String> {
-    let root = self.export_root.as_ref().ok_or("native export journal is unavailable")?;
+    let root = self.journal()?;
     let mut deliveries = self.deliveries.lock().map_err(|error| error.to_string())?;
     let Some(delivery) = deliveries.get_mut(id) else { return Ok(false) };
     if delivery.state == "published" || delivery.state == "cancelled" || delivery.state == "publishing" { return Ok(false); }
@@ -1546,7 +1747,7 @@ impl Supervisor {
     if !entries.contains_key(&spec.id) && spec.lane != "export" && spec.meta.get("kind").and_then(|value| value.as_str()) != Some("export") { return Ok(()); }
     self.account_workspace(&entries)?;
     let current = entries.get_mut(&spec.id);
-    let root = self.export_root.as_ref().ok_or("native export journal is unavailable")?;
+    let root = self.journal()?;
     let current = current.ok_or("export job has no admitted delivery intent")?;
     if !matches!(&current.source, DeliverySource::Render { .. }) { return Err("copy intent cannot admit a render worker".into()); }
     if spec.program != "ffmpeg" { return Err("export intent requires the admitted render backend".into()); }
@@ -1659,7 +1860,7 @@ impl Supervisor {
           let expected = delivery.sources.first().ok_or("copy export has no source fingerprint")?;
           let actual = artifact_identity(Path::new(path))?;
           if actual.sha256 != expected.1.sha256 || actual.size != expected.1.size { return Err("copy source changed; recovery refused".into()); }
-          let root = self.export_root.as_ref().ok_or("export journal unavailable")?;
+          let root = self.journal()?;
           {
             let mut entries = self.deliveries.lock().map_err(|error| error.to_string())?;
             let entry = entries.get_mut(&delivery.id).ok_or("copy intent missing")?;
@@ -1682,7 +1883,7 @@ impl Supervisor {
       if delivery.recovery_attempts >= 1 { failures.push((delivery.id, "automatic recovery attempt budget exhausted".into())); continue; }
       if let Err(error) = self.retain_render_job(&spec) { failures.push((delivery.id, error)); continue; }
       let retained = (|| -> Result<(), String> {
-        let root = self.export_root.as_ref().ok_or("native export journal is unavailable")?;
+        let root = self.journal()?;
         let mut deliveries = self.deliveries.lock().map_err(|error| error.to_string())?;
         let entry = deliveries.get_mut(&delivery.id).ok_or("missing export intent")?;
         let mut next = entry.clone(); next.recovery_attempts += 1;
@@ -1775,9 +1976,10 @@ impl Supervisor {
   }
 
   pub fn complete_delivery(&self, id: &str) -> Result<bool, String> {
-    let root = self.export_root.as_ref().ok_or("export journal unavailable")?;
+    let root = self.journal()?;
     let mut entries = self.deliveries.lock().map_err(|error| error.to_string())?;
     let Some(entry) = entries.get_mut(id) else { return Ok(false) };
+    root.validate_delivery(entry)?;
     if self.copying.lock().map_err(|error| error.to_string())?.contains(id) {
       return Err("running copy dependencies cannot be released".into());
     }
@@ -1886,10 +2088,11 @@ impl Supervisor {
   }
 
   fn begin_copy_output(&self, delivery: &ExportDelivery, expected_bytes: u64) -> Result<ScratchOutput, String> {
-    let root = self.export_root.as_ref().ok_or("native export journal is unavailable")?;
+    let root = self.journal()?;
     let mut entries = self.deliveries.lock().map_err(|error| error.to_string())?;
     self.account_workspace(&entries)?;
     let current = entries.get_mut(&delivery.id).ok_or("copy intent vanished before output preparation")?;
+    root.validate_delivery(current)?;
     if current.state != "prepared" || current.producer_complete || !matches!(current.source, DeliverySource::Copy { .. }) ||
       !self.copying.lock().map_err(|error| error.to_string())?.contains(&delivery.id) {
       return Err("copy output has no active admitted producer".into());
@@ -1927,7 +2130,7 @@ impl Supervisor {
 
   fn write_copy_artifact(&self, delivery: &ExportDelivery, before_completion_record: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
     let id = &delivery.id;
-    let root = self.export_root.as_ref().ok_or("native export journal is unavailable")?;
+    let root = self.journal()?;
     let DeliverySource::Copy { path, .. } = &delivery.source else { return Err("copy source unavailable".into()) };
     let expected = delivery.sources.first().ok_or("copy source has no identity")?;
     let check = || delivery.execution_deadline_ms(now_ms()).map(|_| ());
@@ -2229,7 +2432,7 @@ impl Supervisor {
             if delivery.state != "prepared" || !matches!(delivery.source, DeliverySource::Render { .. }) {
               return Err("render intent was cancelled or superseded before completion".into());
             }
-            let root = self.export_root.as_ref().ok_or("native export journal is unavailable")?;
+            let root = self.journal()?;
             delivery.execution_deadline_ms(now_ms())?;
             let mut next = delivery.clone();
             next.producer_complete = true;
@@ -2506,7 +2709,7 @@ pub fn plugin<R: Runtime>() -> tauri::plugin::TauriPlugin<R> {
         };
       });
       let spawner = Arc::new(ShellSpawner { app: app.clone(), children: Arc::default(), streams: Arc::default() });
-      let base = Supervisor::new(spawner, notify).with_export_work_root(app.path().app_cache_dir()?.join("work"));
+      let base = Supervisor::new(spawner, notify).with_export_work_root(app.path().app_cache_dir()?.join("work"))?;
       let base = if let Ok(root) = app.path().resolve("resources/fonts", tauri::path::BaseDirectory::Resource) { base.with_export_font_root(root) } else { base };
       let configured = app.path().app_local_data_dir().map_err(|error| error.to_string())
         .and_then(|path| base.clone().with_export_root(path.join("exports").join("intents-v1")));
@@ -2806,6 +3009,10 @@ mod export_delivery_tests {
   fn owner(root: &Path) -> Supervisor {
     Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {})).with_export_root(root.to_path_buf()).unwrap()
   }
+  fn owner_with_work(root: &Path, work: PathBuf) -> Supervisor {
+    Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {})).with_export_work_root(work).unwrap()
+      .with_export_root(root.to_path_buf()).unwrap()
+  }
   fn intent(owner: &Supervisor, dir: &Path, id: &str) -> ExportDelivery {
     owner.prepare_delivery(id.into(), "original-project".into(), dir.join(format!("{id}.partial")).to_string_lossy().into(),
       dir.join(format!("{id}.mp4")).to_string_lossy().into(), DeliverySource::Render { paths: Vec::new() }).unwrap()
@@ -2822,7 +3029,10 @@ mod export_delivery_tests {
           pending.push(path.clone());
           result.push((path.strip_prefix(root).unwrap().to_path_buf(), None));
         } else {
-          result.push((path.strip_prefix(root).unwrap().to_path_buf(), Some(std::fs::read(path).unwrap())));
+          result.push((
+            path.strip_prefix(root).unwrap().to_path_buf(),
+            Some(std::fs::read(path).unwrap()),
+          ));
         }
       }
     }
@@ -2841,19 +3051,38 @@ mod export_delivery_tests {
       let stage = root.join("private-receipt.partial");
       let destination = root.join("private-receipt.json");
       let source_kind = if copy {
-        DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_imported".into() }
-      } else { DeliverySource::Render { paths: Vec::new() } };
-      let result = jobs.prepare_delivery("private-receipt".into(), "original-project".into(),
-        stage.to_string_lossy().into(), destination.to_string_lossy().into(), source_kind);
+        DeliverySource::Copy {
+          path: source.to_string_lossy().into(),
+          media_ref: "media_imported".into(),
+        }
+      } else {
+        DeliverySource::Render { paths: Vec::new() }
+      };
+      let result = jobs.prepare_delivery(
+        "private-receipt".into(),
+        "original-project".into(),
+        stage.to_string_lossy().into(),
+        destination.to_string_lossy().into(),
+        source_kind,
+      );
       if let Ok(delivery) = &result {
-        if copy { jobs.copy_delivery(&delivery.id).unwrap(); }
-        else { render_bytes(&jobs, delivery, b"complete imported media"); }
+        if copy {
+          jobs.copy_delivery(&delivery.id).unwrap();
+        } else {
+          render_bytes(&jobs, delivery, b"complete imported media");
+        }
         jobs.verify_delivery(&delivery.id).unwrap();
         jobs.publish_delivery(&delivery.id).unwrap();
-        assert_eq!(std::fs::read(&destination).unwrap(), b"complete imported media",
-          "receipt installation replaced the actual exported artifact");
+        assert_eq!(
+          std::fs::read(&destination).unwrap(),
+          b"complete imported media",
+          "receipt installation replaced the actual exported artifact"
+        );
       }
-      assert!(result.is_err(), "private recovery receipt was admitted as a public destination");
+      assert!(
+        result.is_err(),
+        "private recovery receipt was admitted as a public destination"
+      );
       assert!(!stage.exists());
       assert!(!destination.exists());
       assert!(jobs.delivery_list().is_empty());
@@ -2867,30 +3096,81 @@ mod export_delivery_tests {
       for journal in [false, true] {
         for stage_role in [false, true] {
           for alias in [false, true] {
-            let dir = tempfile::tempdir().unwrap();
-            let root = dir.path().join("journal");
-            let work = dir.path().join("work");
-            let arena = work.join("exports");
-            std::fs::create_dir_all(&arena).unwrap();
-            let jobs = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {}))
-              .with_export_work_root(work).with_export_root(root.clone()).unwrap();
-            let namespace = if journal { root.clone() } else { arena };
-            let parent = if alias { namespace.join("..").join(namespace.file_name().unwrap()) } else { namespace };
-            let source = dir.path().join("imported.bin");
-            std::fs::write(&source, b"unchanged imported source").unwrap();
-            std::fs::write(dir.path().join("previous.mp4"), b"previous complete destination").unwrap();
-            let stage = parent.join(if stage_role { ".receipt-abcdefghijklmnop.tmp" } else { "private-target.partial" });
-            let destination = parent.join(if journal { "private-target.json" } else { "private-target.mp4" });
-            if journal && !stage_role { std::fs::write(&destination, b"previous private bytes").unwrap(); }
-            let before = namespace_snapshot(dir.path());
-            let source_kind = if copy {
-              DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_imported".into() }
-            } else { DeliverySource::Render { paths: Vec::new() } };
-            let result = jobs.prepare_delivery("private-target".into(), "original-project".into(),
-              stage.to_string_lossy().into(), destination.to_string_lossy().into(), source_kind);
-            assert!(result.is_err(), "private namespace admitted a public producer: copy={copy}, journal={journal}, stage={stage_role}, alias={alias}");
-            assert_eq!(namespace_snapshot(dir.path()), before, "refusal changed actual namespace entries or bytes");
-            assert!(jobs.delivery_list().is_empty());
+            for namespace_root in [false, true] {
+              let dir = tempfile::tempdir().unwrap();
+              let root = dir.path().join("journal");
+              let work = dir.path().join("work");
+              let arena = work.join("exports");
+              std::fs::create_dir_all(&arena).unwrap();
+              let jobs = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {}))
+                .with_export_work_root(work)
+                .unwrap()
+                .with_export_root(root.clone())
+                .unwrap();
+              let protected = if journal { root.clone() } else { arena };
+              let namespace = if namespace_root {
+                protected.parent().unwrap().to_path_buf()
+              } else {
+                protected.clone()
+              };
+              let parent = if alias {
+                namespace.join("..").join(namespace.file_name().unwrap())
+              } else {
+                namespace
+              };
+              let source = dir.path().join("imported.bin");
+              std::fs::write(&source, b"unchanged imported source").unwrap();
+              std::fs::write(
+                dir.path().join("previous.mp4"),
+                b"previous complete destination",
+              )
+              .unwrap();
+              let restricted = parent.join(protected.file_name().unwrap());
+              let stage = if namespace_root && stage_role {
+                restricted.clone()
+              } else {
+                parent.join(if stage_role {
+                  ".receipt-abcdefghijklmnop.tmp"
+                } else {
+                  "private-target.partial"
+                })
+              };
+              let destination = if namespace_root && !stage_role {
+                restricted
+              } else {
+                parent.join(if journal {
+                  "private-target.json"
+                } else {
+                  "private-target.mp4"
+                })
+              };
+              if journal && !stage_role && !namespace_root {
+                std::fs::write(&destination, b"previous private bytes").unwrap();
+              }
+              let before = namespace_snapshot(dir.path());
+              let source_kind = if copy {
+                DeliverySource::Copy {
+                  path: source.to_string_lossy().into(),
+                  media_ref: "media_imported".into(),
+                }
+              } else {
+                DeliverySource::Render { paths: Vec::new() }
+              };
+              let result = jobs.prepare_delivery(
+                "private-target".into(),
+                "original-project".into(),
+                stage.to_string_lossy().into(),
+                destination.to_string_lossy().into(),
+                source_kind,
+              );
+              assert!(result.is_err(), "private namespace admitted a public producer: copy={copy}, journal={journal}, stage={stage_role}, alias={alias}, root={namespace_root}");
+              assert_eq!(
+                namespace_snapshot(dir.path()),
+                before,
+                "refusal changed actual namespace entries or bytes"
+              );
+              assert!(jobs.delivery_list().is_empty());
+            }
           }
         }
       }
@@ -2906,9 +3186,19 @@ mod export_delivery_tests {
       let arena = work.join("exports");
       std::fs::create_dir_all(&root).unwrap();
       std::fs::create_dir_all(&arena).unwrap();
-      std::fs::write(root.join("damaged.json"), b"damaged retained recovery evidence").unwrap();
-      std::fs::write(arena.join("retained.bin"), b"retained private scratch bytes").unwrap();
-      let base = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {})).with_export_work_root(work.clone());
+      std::fs::write(
+        root.join("damaged.json"),
+        b"damaged retained recovery evidence",
+      )
+      .unwrap();
+      std::fs::write(
+        arena.join("retained.bin"),
+        b"retained private scratch bytes",
+      )
+      .unwrap();
+      let base = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {}))
+        .with_export_work_root(work.clone())
+        .unwrap();
       assert!(base.clone().with_export_root(root.clone()).is_err());
       let before = namespace_snapshot(dir.path());
       let path = match target {
@@ -2919,14 +3209,25 @@ mod export_delivery_tests {
         _ => dir.path().to_path_buf(),
       };
       let result = base.with_unleased_path(&path, || {
-        if path.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) }
-          .map_err(|error| error.to_string())
+        if path.is_dir() {
+          std::fs::remove_dir_all(&path)
+        } else {
+          std::fs::remove_file(&path)
+        }
+        .map_err(|error| error.to_string())
       });
-      assert!(result.is_err(), "failed loading forgot a private namespace or its ancestor");
+      assert!(
+        result.is_err(),
+        "failed loading forgot a private namespace or its ancestor"
+      );
       assert_eq!(namespace_snapshot(dir.path()), before);
       let public = dir.path().join("public.bin");
       std::fs::write(&public, b"ordinary editing must remain available").unwrap();
-      base.with_unleased_path(&public, || std::fs::remove_file(&public).map_err(|error| error.to_string())).unwrap();
+      base
+        .with_unleased_path(&public, || {
+          std::fs::remove_file(&public).map_err(|error| error.to_string())
+        })
+        .unwrap();
       assert!(!public.exists());
       assert_eq!(namespace_snapshot(dir.path()), before);
     }
@@ -2934,8 +3235,23 @@ mod export_delivery_tests {
     let path = dir.path().join("unconfigured.bin");
     std::fs::write(&path, b"no-context mutation must be refused").unwrap();
     let bare = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {}));
-    assert!(bare.with_unleased_path(&path, || std::fs::remove_file(&path).map_err(|error| error.to_string())).is_err());
-    assert_eq!(std::fs::read(path).unwrap(), b"no-context mutation must be refused");
+    assert!(bare
+      .with_unleased_path(&path, || std::fs::remove_file(&path)
+        .map_err(|error| error.to_string()))
+      .is_err());
+    assert_eq!(
+      std::fs::read(&path).unwrap(),
+      b"no-context mutation must be refused"
+    );
+    let configured = owner(&dir.path().join("journal"));
+    assert!(configured
+      .with_unleased_paths(&[], || std::fs::remove_file(&path)
+        .map_err(|error| error.to_string()))
+      .is_err());
+    assert_eq!(
+      std::fs::read(path).unwrap(),
+      b"no-context mutation must be refused"
+    );
   }
 
   #[test]
@@ -2947,17 +3263,35 @@ mod export_delivery_tests {
         let jobs = owner(&root);
         let mut delivery = intent(&jobs, dir.path(), "unsafe-legacy");
         delivery.version = version;
-        delivery.stage_path = root.join(".receipt-abcdefghijklmnop.tmp").to_string_lossy().into();
+        delivery.stage_path = root
+          .join(".receipt-abcdefghijklmnop.tmp")
+          .to_string_lossy()
+          .into();
         if copy {
-          delivery.source = DeliverySource::Copy { path: dir.path().join("imported.bin").to_string_lossy().into(), media_ref: "media_imported".into() };
+          delivery.source = DeliverySource::Copy {
+            path: dir.path().join("imported.bin").to_string_lossy().into(),
+            media_ref: "media_imported".into(),
+          };
         }
-        std::fs::write(&delivery.stage_path, b"unconfirmed legacy stage must not be deleted").unwrap();
-        std::fs::write(root.join("unsafe-legacy.json"), serde_json::to_vec(&delivery).unwrap()).unwrap();
+        std::fs::write(
+          &delivery.stage_path,
+          b"unconfirmed legacy stage must not be deleted",
+        )
+        .unwrap();
+        std::fs::write(
+          root.join("unsafe-legacy.json"),
+          serde_json::to_vec(&delivery).unwrap(),
+        )
+        .unwrap();
         let before = namespace_snapshot(dir.path());
         drop(jobs);
         let reopened = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {})).with_export_root(root);
         assert!(reopened.is_err(), "unsafe legacy row was adopted");
-        assert_eq!(namespace_snapshot(dir.path()), before, "loader deleted a stage before recognizing its unsafe saved owner");
+        assert_eq!(
+          namespace_snapshot(dir.path()),
+          before,
+          "loader deleted a stage before recognizing its unsafe saved owner"
+        );
       }
     }
   }
@@ -2974,22 +3308,45 @@ mod export_delivery_tests {
           let source = dir.path().join("imported.bin");
           std::fs::write(&source, b"verified media payload").unwrap();
           if copy {
-            delivery.source = DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_imported".into() };
-            delivery.sources = vec![(source.to_string_lossy().into(), artifact_identity(&source).unwrap())];
+            delivery.source = DeliverySource::Copy {
+              path: source.to_string_lossy().into(),
+              media_ref: "media_imported".into(),
+            };
+            delivery.sources = vec![(
+              source.to_string_lossy().into(),
+              artifact_identity(&source).unwrap(),
+            )];
           }
           delivery.dest_path = root.join("private-payload.mp4").to_string_lossy().into();
           delivery.identity = Some(artifact_identity(&source).unwrap());
           delivery.producer_complete = true;
           delivery.execution_queued_at_ms = None;
-          delivery.state = if cleanup { "cancelled".into() } else { "publishing".into() };
+          delivery.state = if cleanup {
+            "cancelled".into()
+          } else {
+            "publishing".into()
+          };
           std::fs::write(&delivery.dest_path, b"verified media payload").unwrap();
-          if stage_present { std::fs::write(&delivery.stage_path, b"verified media payload").unwrap(); }
-          else { std::fs::remove_file(&delivery.stage_path).unwrap(); }
-          jobs.deliveries.lock().unwrap().insert(delivery.id.clone(), delivery.clone());
+          if stage_present {
+            std::fs::write(&delivery.stage_path, b"verified media payload").unwrap();
+          } else {
+            std::fs::remove_file(&delivery.stage_path).unwrap();
+          }
+          jobs
+            .deliveries
+            .lock()
+            .unwrap()
+            .insert(delivery.id.clone(), delivery.clone());
           let before = namespace_snapshot(dir.path());
-          let result = if cleanup { jobs.complete_delivery(&delivery.id).map(|_| ()) }
-            else { jobs.publish_delivery(&delivery.id).map(|_| ()) };
-          assert!(result.is_err(), "unsafe saved row reached publication/replay/cleanup");
+          let result = if cleanup {
+            jobs.complete_delivery(&delivery.id).map(|_| ())
+          } else {
+            jobs.publish_delivery(&delivery.id).map(|_| ())
+          };
+          assert!(
+            result.is_err(),
+            "unsafe saved row reached publication/replay/cleanup"
+          );
           assert_eq!(namespace_snapshot(dir.path()), before);
         }
       }
@@ -3003,11 +3360,21 @@ mod export_delivery_tests {
       let root = dir.path().join("journal");
       let jobs = owner(&root);
       let mut delivery = intent(&jobs, dir.path(), "writer-boundary");
-      if stage_role { delivery.stage_path = root.join("private-stage.bin").to_string_lossy().into(); }
-      else { delivery.dest_path = root.join("writer-boundary.json").to_string_lossy().into(); }
-      std::fs::write(root.join(".receipt-abcdefghijklmnop.tmp"), b"retained ambiguous bytes").unwrap();
+      if stage_role {
+        delivery.stage_path = root.join("private-stage.bin").to_string_lossy().into();
+      } else {
+        delivery.dest_path = root.join("writer-boundary.json").to_string_lossy().into();
+      }
+      std::fs::write(
+        root.join(".receipt-abcdefghijklmnop.tmp"),
+        b"retained ambiguous bytes",
+      )
+      .unwrap();
       let before = namespace_snapshot(dir.path());
-      assert!(persist_delivery(&root, &delivery).is_err(), "bare journal writer accepted an unsafe row");
+      assert!(
+        persist_delivery(jobs.journal().unwrap(), &delivery).is_err(),
+        "journal writer accepted an unsafe row"
+      );
       assert_eq!(namespace_snapshot(dir.path()), before);
     }
   }
@@ -3020,37 +3387,83 @@ mod export_delivery_tests {
     let fonts = dir.path().join("fonts");
     std::fs::create_dir(&fonts).unwrap();
     std::fs::write(fonts.join("fixture.ttf"), b"actual retained font fixture").unwrap();
-    let jobs = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {})).with_export_work_root(work.clone())
-      .with_export_font_root(fonts).with_export_root(root.clone()).unwrap();
+    let jobs = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {}))
+      .with_export_work_root(work.clone())
+      .unwrap()
+      .with_export_font_root(fonts)
+      .with_export_root(root.clone())
+      .unwrap();
     let source = dir.path().join("imported.bin");
     std::fs::write(&source, b"actual copied media payload").unwrap();
-    let delivery = jobs.prepare_delivery("public-copy".into(), "original-project".into(),
-      dir.path().join("public-copy.partial").to_string_lossy().into(), dir.path().join("public-copy.mp4").to_string_lossy().into(),
-      DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_imported".into() }).unwrap();
+    let delivery = jobs
+      .prepare_delivery(
+        "public-copy".into(),
+        "original-project".into(),
+        dir
+          .path()
+          .join("public-copy.partial")
+          .to_string_lossy()
+          .into(),
+        dir.path().join("public-copy.mp4").to_string_lossy().into(),
+        DeliverySource::Copy {
+          path: source.to_string_lossy().into(),
+          media_ref: "media_imported".into(),
+        },
+      )
+      .unwrap();
     jobs.copy_delivery(&delivery.id).unwrap();
     jobs.verify_delivery(&delivery.id).unwrap();
     jobs.publish_delivery(&delivery.id).unwrap();
-    assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"actual copied media payload");
+    assert_eq!(
+      std::fs::read(&delivery.dest_path).unwrap(),
+      b"actual copied media payload"
+    );
     let render = intent(&jobs, dir.path(), "public-render");
-    let scratch = jobs.stage_render_scratch(&render.id,
-      vec![RenderScratchFile { name: "graph.ffgraph".into(), content: "actual generated graph".into() }], vec!["fixture.ttf".into()]).unwrap();
-    assert_eq!(std::fs::read(Path::new(&scratch).join("graph.ffgraph")).unwrap(), b"actual generated graph");
-    assert_eq!(std::fs::read(Path::new(&scratch).join("fonts").join("fixture.ttf")).unwrap(), b"actual retained font fixture");
-    assert!(jobs.with_unleased_path(Path::new(&scratch), || std::fs::remove_dir_all(&scratch).map_err(|error| error.to_string())).is_err());
+    let scratch = jobs
+      .stage_render_scratch(
+        &render.id,
+        vec![RenderScratchFile {
+          name: "graph.ffgraph".into(),
+          content: "actual generated graph".into(),
+        }],
+        vec!["fixture.ttf".into()],
+      )
+      .unwrap();
+    assert_eq!(
+      std::fs::read(Path::new(&scratch).join("graph.ffgraph")).unwrap(),
+      b"actual generated graph"
+    );
+    assert_eq!(
+      std::fs::read(Path::new(&scratch).join("fonts").join("fixture.ttf")).unwrap(),
+      b"actual retained font fixture"
+    );
+    assert!(jobs
+      .with_unleased_path(Path::new(&scratch), || std::fs::remove_dir_all(&scratch)
+        .map_err(|error| error.to_string()))
+      .is_err());
     jobs.cancel_delivery(&render.id).unwrap();
     jobs.complete_delivery(&render.id).unwrap();
     assert!(!Path::new(&scratch).exists());
-    assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"actual copied media payload");
-    let reopened = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {})).with_export_work_root(work)
-      .with_export_root(root).unwrap();
+    assert_eq!(
+      std::fs::read(&delivery.dest_path).unwrap(),
+      b"actual copied media payload"
+    );
+    let reopened = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {}))
+      .with_export_work_root(work)
+      .unwrap()
+      .with_export_root(root)
+      .unwrap();
     assert!(reopened.recover_exports().is_empty());
-    assert_eq!(std::fs::read(delivery.dest_path).unwrap(), b"actual copied media payload");
+    assert_eq!(
+      std::fs::read(delivery.dest_path).unwrap(),
+      b"actual copied media payload"
+    );
   }
 
   fn initial_entry_fixture(dir: &Path, kind: InitialEntryKind) -> Supervisor {
     std::fs::write(dir.join("source.bin"), b"original imported source").unwrap();
     std::fs::write(dir.join("initial-boundary.mp4"), b"previous complete destination").unwrap();
-    let jobs = owner(&dir.join("journal")).with_export_work_root(dir.join("work"));
+    let jobs = owner_with_work(&dir.join("journal"), dir.join("work"));
     if kind == InitialEntryKind::RenderScratch {
       initial_entry_attempt(&jobs, dir, InitialEntryKind::Stage, false).unwrap();
     }
@@ -3079,7 +3492,7 @@ mod export_delivery_tests {
   }
 
   fn initial_entry_reopen(dir: &Path, workspace: Arc<Workspace>) -> Supervisor {
-    let mut jobs = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {})).with_export_work_root(dir.join("work"));
+    let mut jobs = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {})).with_export_work_root(dir.join("work")).unwrap();
     jobs.workspace = workspace;
     jobs.with_export_root(dir.join("journal")).unwrap()
   }
@@ -3357,7 +3770,7 @@ mod export_delivery_tests {
         if omit_root { damaged["render_scratch"].as_object_mut().unwrap().remove("ownership"); }
         else { damaged.as_object_mut().unwrap().remove("stage_ownership"); }
         std::fs::write(&receipt, serde_json::to_vec(&damaged).unwrap()).unwrap();
-        let error = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {})).with_export_work_root(dir.path().join("work"))
+        let error = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {})).with_export_work_root(dir.path().join("work")).unwrap()
           .with_export_root(dir.path().join("journal")).err().expect("current receipt must retain its ownership evidence");
         assert!(error.contains("ownership"));
         assert!(path.exists());
@@ -3499,7 +3912,7 @@ mod export_delivery_tests {
       let dir = tempfile::tempdir().unwrap();
       let root = dir.path().join("journal");
       let work = dir.path().join("work");
-      let jobs = owner(&root).with_export_work_root(work.clone());
+      let jobs = owner_with_work(&root, work.clone());
       let delivery = intent(&jobs, dir.path(), "reserved-before-binding");
       std::fs::write(&delivery.dest_path, b"previous complete output").unwrap();
       let files = vec![RenderScratchFile { name: "graph.ffgraph".into(), content: "testsrc2=s=320x180:r=30:d=1".into() }];
@@ -3516,7 +3929,7 @@ mod export_delivery_tests {
       assert_eq!(std::fs::read_to_string(&alias).unwrap(), "testsrc2=s=320x180:r=30:d=1");
       if cancelled { jobs.cancel_delivery(&delivery.id).unwrap(); } else { jobs.fail_delivery(&delivery.id).unwrap(); }
       drop(jobs);
-      let reopened = owner(&root).with_export_work_root(work);
+      let reopened = owner_with_work(&root, work);
       assert!(reopened.complete_delivery(&delivery.id).unwrap());
       assert!(!Path::new(&scratch).exists());
       let recorded = reopened.delivery_list().pop().unwrap();
@@ -3531,7 +3944,7 @@ mod export_delivery_tests {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("journal");
     let work = dir.path().join("work");
-    let jobs = owner(&root).with_export_work_root(work.clone());
+    let jobs = owner_with_work(&root, work.clone());
     let delivery = intent(&jobs, dir.path(), "partial-staging");
     let file = RenderScratchFile { name: "captions.ass".into(), content: "staged caption bytes".into() };
     let error = jobs.stage_render_scratch(&delivery.id, vec![file], vec!["Missing.ttf".into()]).unwrap_err();
@@ -3541,7 +3954,7 @@ mod export_delivery_tests {
     assert_eq!(std::fs::read_to_string(Path::new(&reserved.path).join("captions.ass")).unwrap(), "staged caption bytes");
     jobs.fail_delivery(&delivery.id).unwrap();
     drop(jobs);
-    let reopened = owner(&root).with_export_work_root(work);
+    let reopened = owner_with_work(&root, work);
     reopened.complete_delivery(&delivery.id).unwrap();
     assert!(!Path::new(&reserved.path).exists());
   }
@@ -3549,7 +3962,7 @@ mod export_delivery_tests {
   #[test]
   fn render_staging_refuses_unowned_and_escaping_requests_before_writing() {
     let dir = tempfile::tempdir().unwrap();
-    let jobs = owner(&dir.path().join("journal")).with_export_work_root(dir.path().join("work"));
+    let jobs = owner_with_work(&dir.path().join("journal"), dir.path().join("work"));
     let delivery = intent(&jobs, dir.path(), "staging-boundary");
     for name in ["../outside.ass", "..\\outside.ass", "C:alternate.ass", "two\nlines.ass", ".", ".."] {
       assert!(jobs.stage_render_scratch(&delivery.id, vec![RenderScratchFile { name: name.into(), content: "not an owned file".into() }], vec![]).is_err());
@@ -3565,7 +3978,7 @@ mod export_delivery_tests {
   #[test]
   fn changed_or_unreserved_staged_inputs_cannot_bind_a_render_producer() {
     let dir = tempfile::tempdir().unwrap();
-    let jobs = owner(&dir.path().join("journal")).with_export_work_root(dir.path().join("work"));
+    let jobs = owner_with_work(&dir.path().join("journal"), dir.path().join("work"));
     let delivery = intent(&jobs, dir.path(), "staged-identity");
     std::fs::write(&delivery.dest_path, b"previous complete output").unwrap();
     let outside = dir.path().join("unreserved");
@@ -3591,13 +4004,13 @@ mod export_delivery_tests {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("journal");
     let work = dir.path().join("work");
-    let mut jobs = owner(&root).with_export_work_root(work.clone());
+    let mut jobs = owner_with_work(&root, work.clone());
     jobs.workspace = Workspace::new(64);
     let first = intent(&jobs, dir.path(), "space-first");
     let data = "x".repeat(40);
     let path = jobs.stage_render_scratch(&first.id, vec![RenderScratchFile { name: "graph.ffgraph".into(), content: data.clone() }], vec![]).unwrap();
     drop(jobs);
-    let mut reopened = owner(&root).with_export_work_root(work);
+    let mut reopened = owner_with_work(&root, work);
     reopened.workspace = Workspace::new(64);
     let second = intent(&reopened, dir.path(), "space-second");
     assert!(reopened.stage_render_scratch(&second.id, vec![RenderScratchFile { name: "graph.ffgraph".into(), content: data.clone() }], vec![])
@@ -3617,7 +4030,7 @@ mod export_delivery_tests {
     let work = dir.path().join("work");
     std::fs::create_dir_all(work.join("exports").join("retained-render")).unwrap();
     std::fs::write(work.join("exports").join("retained-render").join("retained.bin"), [37u8; 64]).unwrap();
-    let mut jobs = owner(&dir.path().join("journal")).with_export_work_root(work);
+    let mut jobs = owner_with_work(&dir.path().join("journal"), work);
     jobs.workspace = Workspace::new(32);
     jobs.submit(JobSpec { id: "unrelated-transcription".into(), lane: "transcription".into(), program: "whisper-cli".into(),
       args: vec![], steps: vec![], cwd: None, meta: serde_json::json!({}) }).unwrap();
@@ -3638,7 +4051,7 @@ mod export_delivery_tests {
     let mut oversized = delivery;
     oversized.render_job = Some(JobSpec { id: oversized.id.clone(), lane: "export".into(), program: "ffmpeg".into(),
       args: vec!["x".repeat(8 * 1024 * 1024)], steps: Vec::new(), cwd: None, meta: serde_json::json!({}) });
-    assert!(persist_delivery(&root, &oversized).is_err(), "writer installed a receipt that its own loader cannot accept");
+    assert!(persist_delivery(jobs.journal().unwrap(), &oversized).is_err(), "writer installed a receipt that its own loader cannot accept");
     assert_eq!(std::fs::read(&file).unwrap(), before);
     assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1, "refused receipt left temporary bytes");
     assert!(owner(&root).delivery_list()[0].render_job.is_none());
@@ -3654,14 +4067,14 @@ mod export_delivery_tests {
       let mut delivery = intent(&jobs, dir.path(), &format!("aggregate-{index}"));
       delivery.render_job = Some(JobSpec { id: delivery.id.clone(), lane: "export".into(), program: "ffmpeg".into(),
         args: vec![delivery.stage_path.clone()], steps: vec![], cwd: None, meta: serde_json::json!({ "payload": "x".repeat(7 * 1024 * 1024) }) });
-      persist_delivery(&root, &delivery).unwrap();
+      persist_delivery(jobs.journal().unwrap(), &delivery).unwrap();
     }
     let path = root.join("aggregate-target.json");
     let before = std::fs::read(&path).unwrap();
     let mut replacement = target;
     replacement.render_job = Some(JobSpec { id: replacement.id.clone(), lane: "export".into(), program: "ffmpeg".into(),
       args: vec![replacement.stage_path.clone()], steps: vec![], cwd: None, meta: serde_json::json!({ "payload": "x".repeat(2 * 1024 * 1024) }) });
-    assert!(persist_delivery(&root, &replacement).unwrap_err().contains("aggregate admission budget"));
+    assert!(persist_delivery(jobs.journal().unwrap(), &replacement).unwrap_err().contains("aggregate admission budget"));
     assert_eq!(std::fs::read(&path).unwrap(), before);
     assert_eq!(std::fs::read_dir(&root).unwrap().count(), 10);
     assert_eq!(owner(&root).delivery_list().len(), 10);
@@ -3694,7 +4107,7 @@ mod export_delivery_tests {
       } else if reason == "identity" { replacement.id = "../escaped".into(); }
       let count = std::fs::read_dir(&root).unwrap().count();
       let clock = journal_write_clock(&root);
-      let error = persist_delivery(&root, &replacement).unwrap_err();
+      let error = persist_delivery(jobs.journal().unwrap(), &replacement).unwrap_err();
       assert!(error.contains(match reason {
         "receipt" => "eight-MiB", "identity" => "invalid export intent identity", _ => "aggregate admission budget",
       }), "{reason}: {error}");
@@ -3819,9 +4232,9 @@ mod export_delivery_tests {
         .set_len(EXPORT_JOURNAL_LIMIT_BYTES - occupied - allowance).unwrap();
       let (entered, ready) = std::sync::mpsc::channel();
       let (release, continue_write) = std::sync::mpsc::channel();
-      let first_root = root.clone();
+      let first_owner = jobs.clone();
       let first_delivery = deliveries[first].clone();
-      let writer = std::thread::spawn(move || persist_delivery_after_sync(&first_root, &first_delivery, |path| {
+      let writer = std::thread::spawn(move || persist_delivery_after_sync(first_owner.journal()?, &first_delivery, |path| {
         entered.send(path.to_path_buf()).map_err(|error| error.to_string())?;
         continue_write.recv_timeout(std::time::Duration::from_secs(30)).map_err(|error| error.to_string())?;
         Ok(())
@@ -3833,11 +4246,11 @@ mod export_delivery_tests {
       assert!(live <= EXPORT_JOURNAL_TRANSIENT_BYTES, "actual old-plus-new journal payload exceeded its transient bound");
       for index in 0..2 { assert_eq!(std::fs::read(root.join(format!("{}.json", deliveries[index].id))).unwrap(), before[index]); }
       let (started, attempted) = std::sync::mpsc::channel();
-      let peer_root = root.clone();
+      let peer_owner = jobs.clone();
       let peer_delivery = deliveries[1 - first].clone();
       let peer = std::thread::spawn(move || {
         started.send(()).unwrap();
-        persist_delivery(&peer_root, &peer_delivery)
+        persist_delivery(peer_owner.journal()?, &peer_delivery)
       });
       attempted.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
       release.send(()).unwrap();
@@ -3871,7 +4284,7 @@ mod export_delivery_tests {
       use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
       std::fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE).open(&target).unwrap()
     };
-    let result = persist_delivery_after_sync(&root, &replacement, |path| {
+    let result = persist_delivery_after_sync(jobs.journal().unwrap(), &replacement, |path| {
       assert!(path.is_file());
       #[cfg(unix)]
       {
@@ -3901,7 +4314,7 @@ mod export_delivery_tests {
     let jobs = owner(&root);
     let mut replacement = intent(&jobs, dir.path(), "installed-before-crash");
     replacement.state = "cancelled".into();
-    persist_delivery(&root, &replacement).unwrap();
+    persist_delivery(jobs.journal().unwrap(), &replacement).unwrap();
     assert_eq!(jobs.delivery_list()[0].state, "prepared");
     drop(jobs);
     let recovered = owner(&root).delivery_list();
@@ -3914,7 +4327,7 @@ mod export_delivery_tests {
   fn journal_roundtrips_real_staging_copy_and_retirement_producers() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("journal");
-    let jobs = owner(&root).with_export_work_root(dir.path().join("work"));
+    let jobs = owner_with_work(&root, dir.path().join("work"));
     let render = intent(&jobs, dir.path(), "render-journal");
     let scratch = jobs.stage_render_scratch(&render.id,
       vec![RenderScratchFile { name: "graph.ffgraph".into(), content: "null[output]".into() }], vec![]).unwrap();
@@ -3954,7 +4367,7 @@ mod export_delivery_tests {
       let mut entries = jobs.deliveries.lock().unwrap();
       let current = entries.get_mut(&delivery.id).unwrap();
       current.render_job.as_mut().unwrap().meta["diagnostic_payload"] = serde_json::json!("x".repeat(1024 * 1024));
-      persist_delivery(&root, current).unwrap();
+      persist_delivery(jobs.journal().unwrap(), current).unwrap();
     }
     let before: ExportDelivery = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
     assert!(std::fs::metadata(&file).unwrap().len() > 1024 * 1024);
@@ -4033,7 +4446,7 @@ mod export_delivery_tests {
         retained.execution_queued_ms = 0;
         retained.execution_queued_at_ms = None;
         assert!(retained.execution_deadline_ms(now_ms()).is_err(), "restart fixture must already be expired or unsupported");
-        persist_delivery(&root, &retained).unwrap();
+        persist_delivery(jobs.journal().unwrap(), &retained).unwrap();
         drop(jobs);
         let reopened = owner(&root);
         let failures = reopened.recover_exports();
@@ -4062,7 +4475,7 @@ mod export_delivery_tests {
     let published = jobs.publish_delivery(&delivery.id).unwrap();
     let mut retained = jobs.delivery_list().pop().unwrap();
     retained.created_at = now_ms() - EXPORT_EXECUTION_LIMIT_MS - 1;
-    persist_delivery(&root, &retained).unwrap();
+    persist_delivery(jobs.journal().unwrap(), &retained).unwrap();
     let reopened = owner(&root);
     assert!(reopened.recover_exports().is_empty());
     assert_eq!(reopened.publish_delivery(&delivery.id).unwrap().identity.unwrap().sha256, published.identity.unwrap().sha256);
@@ -4082,7 +4495,7 @@ mod export_delivery_tests {
       retained.created_at -= shift;
       let queued = retained.execution_queued_at_ms.as_mut().expect("admitted render must already record page-queue waiting");
       *queued -= shift;
-      persist_delivery(&root, retained).unwrap();
+      persist_delivery(jobs.journal().unwrap(), retained).unwrap();
     }
     render_bytes(&jobs, &delivery, b"complete output after legitimate queue wait");
     let current = jobs.delivery_list().pop().unwrap();
@@ -4771,7 +5184,7 @@ mod export_delivery_tests {
     jobs.copy_delivery(&delivery.id).unwrap();
     let mut retained = jobs.verify_delivery(&delivery.id).unwrap();
     retained.dest_path = source.to_string_lossy().into();
-    persist_delivery(&root, &retained).unwrap();
+    persist_delivery(jobs.journal().unwrap(), &retained).unwrap();
     assert!(owner(&root).publish_delivery(&delivery.id).is_err());
     assert_eq!(std::fs::read(&source).unwrap(), b"original library source");
     assert_eq!(std::fs::read(&delivery.stage_path).unwrap(), b"original library source");
@@ -4889,7 +5302,7 @@ mod export_delivery_tests {
     {
       let mut entries = jobs.deliveries.lock().unwrap();
       let entry = entries.get_mut(&delivery.id).unwrap(); entry.state = "publishing".into();
-      persist_delivery(&root, entry).unwrap();
+      persist_delivery(jobs.journal().unwrap(), entry).unwrap();
     }
     std::fs::rename(&delivery.stage_path, &delivery.dest_path).unwrap();
     assert!(!jobs.fail_delivery(&delivery.id).unwrap());
@@ -4991,7 +5404,7 @@ mod export_delivery_tests {
     let destination = directory.path().join("delivered.wav");
     std::fs::write(&source, [37u8; 32]).unwrap();
     std::fs::write(&destination, b"previous complete file").unwrap();
-    let mut jobs = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {})).with_export_work_root(directory.path().join("work"));
+    let mut jobs = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {})).with_export_work_root(directory.path().join("work")).unwrap();
     jobs.workspace = Workspace::new(64);
     let jobs = jobs.with_export_root(directory.path().join("journal")).unwrap();
     let source = if copy { DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_source".into() } }
@@ -5025,7 +5438,7 @@ mod export_delivery_tests {
     let directory = tempfile::tempdir().unwrap();
     let volume = allocation::AllocationUnit::for_directory(directory.path()).unwrap();
     let mut jobs = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {}))
-      .with_export_work_root(directory.path().join("work")).with_export_root(directory.path().join("journal")).unwrap();
+      .with_export_work_root(directory.path().join("work")).unwrap().with_export_root(directory.path().join("journal")).unwrap();
     let delivery = intent(&jobs, directory.path(), "same-root-allocated-capture");
     std::fs::write(&delivery.dest_path, b"previous complete file").unwrap();
     let cwd = jobs.stage_render_scratch(&delivery.id, vec![], vec![]).unwrap();
@@ -5070,7 +5483,7 @@ mod export_delivery_tests {
       std::fs::write(fonts.join("Valid.ttf"), &bytes).unwrap();
       std::fs::write(&source, &bytes).unwrap();
       let mut jobs = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {}))
-        .with_export_work_root(directory.path().join("work")).with_export_font_root(fonts);
+        .with_export_work_root(directory.path().join("work")).unwrap().with_export_font_root(fonts);
       jobs.workspace = Workspace::allocation_fixture(32 * unit, 8 * unit);
       let jobs = jobs.with_export_root(directory.path().join("journal")).unwrap();
       let destination = directory.path().join("delivered.wav");
@@ -5263,7 +5676,7 @@ mod export_delivery_tests {
         assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"previous complete file");
         drop(jobs);
         let mut reopened = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {}))
-          .with_export_work_root(directory.path().join("work"));
+          .with_export_work_root(directory.path().join("work")).unwrap();
         reopened.workspace = Workspace::new(15);
         let reopened = reopened.with_export_root(directory.path().join("journal")).unwrap();
         assert!(reopened.workspace.reserve("restart-cannot-reuse", 1, 1).is_err());
@@ -5399,7 +5812,7 @@ mod export_delivery_tests {
     let directory = tempfile::tempdir().unwrap();
     let journal = directory.path().join("journal");
     let work = directory.path().join("work");
-    let jobs = owner(&journal).with_export_work_root(work.clone());
+    let jobs = owner_with_work(&journal, work.clone());
     let delivery = jobs.prepare_delivery("interrupted-output-overage".into(), "original-project".into(),
       directory.path().join("render.partial").to_string_lossy().into(), directory.path().join("render.mp4").to_string_lossy().into(),
       DeliverySource::Render { paths: vec![] }).unwrap();
@@ -5410,7 +5823,7 @@ mod export_delivery_tests {
     drop(jobs);
     let mut recovered = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {}));
     recovered.workspace = Workspace::new(64);
-    let recovered = recovered.with_export_work_root(work).with_export_root(journal)
+    let recovered = recovered.with_export_work_root(work).unwrap().with_export_root(journal)
       .expect("an interrupted output must remain visible and cleanable");
     assert_eq!(recovered.delivery_list().len(), 1);
     assert_eq!(recovered.workspace.available_bytes(), 0);
@@ -5430,7 +5843,7 @@ mod export_delivery_tests {
   fn queued_preparation_waits_for_output_cleanup_and_cancellation_remains_available() {
     for (copying, cancelled) in [(false, false), (false, true), (true, false), (true, true)] {
       let directory = tempfile::tempdir().unwrap();
-      let mut jobs = owner(&directory.path().join("journal")).with_export_work_root(directory.path().join("work"));
+      let mut jobs = owner_with_work(&directory.path().join("journal"), directory.path().join("work"));
       jobs.workspace = Workspace::new(64);
       let active = jobs.prepare_delivery("active-output".into(), "original-project".into(),
         directory.path().join("active.partial").to_string_lossy().into(), directory.path().join("active.mp4").to_string_lossy().into(),
@@ -5605,7 +6018,7 @@ mod export_delivery_tests {
     jobs.retain_render_job(&spec).unwrap();
     let mut changed = jobs.delivery_list()[0].clone();
     changed.render_job.as_mut().unwrap().args.insert(0, "-an".into());
-    persist_delivery(&root, &changed).unwrap();
+    persist_delivery(jobs.journal().unwrap(), &changed).unwrap();
     let reopened = owner(&root);
     let failures = reopened.recover_exports();
     assert_eq!(failures.len(), 1);
@@ -5659,7 +6072,7 @@ mod export_delivery_tests {
     std::fs::write(&binary, b"admitted worker version one").unwrap();
     let mut legacy = jobs.delivery_list()[0].clone();
     legacy.worker_identity = None;
-    persist_delivery(&root, &legacy).unwrap();
+    persist_delivery(jobs.journal().unwrap(), &legacy).unwrap();
     let legacy_owner = make_owner();
     assert!(legacy_owner.recover_exports().iter().any(|(_, error)| error.contains("no supported worker identity")));
     assert_eq!(started.load(std::sync::atomic::Ordering::SeqCst), 0);
@@ -5774,7 +6187,7 @@ mod export_delivery_tests {
     let started = Arc::new(Mutex::new(Vec::new()));
     let callbacks = Arc::new(Mutex::new(HashMap::<String, Callback>::new()));
     let jobs = Supervisor::new(Arc::new(HeldWorker { path: binary.clone(), started: started.clone(), callbacks: callbacks.clone() }), Arc::new(|_| {}))
-      .with_export_work_root(dir.path().join("work")).with_export_root(dir.path().join("journal")).unwrap();
+      .with_export_work_root(dir.path().join("work")).unwrap().with_export_root(dir.path().join("journal")).unwrap();
     let held = intent(&jobs, dir.path(), "lane-holder");
     let blocker = JobSpec { id: held.id, lane: "export".into(), program: "ffmpeg".into(), args: vec![held.stage_path], steps: vec![], cwd: None,
       meta: serde_json::json!({}) };
@@ -5815,7 +6228,7 @@ mod export_delivery_tests {
   fn changed_source_or_staged_font_blocks_recovery_without_output() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("journal");
-    let jobs = owner(&root).with_export_work_root(dir.path().join("work"));
+    let jobs = owner_with_work(&root, dir.path().join("work"));
     let delivery = intent(&jobs, dir.path(), "changed1");
     let source = dir.path().join("source.mp4");
     let scratch = PathBuf::from(jobs.stage_render_scratch(&delivery.id,
@@ -5828,7 +6241,7 @@ mod export_delivery_tests {
       cwd: Some(scratch.to_string_lossy().into()), meta: serde_json::json!({ "kind": "export", "plan": { "sources": [{ "path": source }] } }) };
     jobs.retain_render_job(&spec).unwrap();
     std::fs::write(&font, b"changed font").unwrap();
-    let reopened = owner(&root).with_export_work_root(dir.path().join("work"));
+    let reopened = owner_with_work(&root, dir.path().join("work"));
     assert!(!reopened.recover_exports().is_empty());
     assert_eq!(reopened.list().len(), 1);
     assert_eq!(reopened.list()[0].state, JobState::Exited);
@@ -5838,7 +6251,7 @@ mod export_delivery_tests {
     assert_eq!(std::fs::metadata(&delivery.stage_path).unwrap().len(), 0);
     std::fs::write(&font, b"original font").unwrap();
     std::fs::write(&source, b"changed source").unwrap();
-    let reopened = owner(&root).with_export_work_root(dir.path().join("work"));
+    let reopened = owner_with_work(&root, dir.path().join("work"));
     assert!(!reopened.recover_exports().is_empty());
     assert_eq!(reopened.list().len(), 1);
     assert_eq!(reopened.list()[0].state, JobState::Exited);
@@ -5873,7 +6286,7 @@ mod export_delivery_tests {
     std::fs::create_dir_all(&scratch).unwrap();
     std::fs::write(scratch.join("caption.ass"), b"caption").unwrap();
     let root = dir.path().join("journal");
-    let jobs = owner(&root).with_export_work_root(work);
+    let jobs = owner_with_work(&root, work);
     let delivery = intent(&jobs, dir.path(), "retire1");
     render_bytes(&jobs, &delivery, b"verified bytes");
     jobs.verify_delivery(&delivery.id).unwrap();
@@ -5923,7 +6336,7 @@ mod export_delivery_tests {
         if let Notice::Changed(view) = notice {
           if view.state == JobState::Exited { let _ = sender.send(view); }
         }
-      })).with_export_work_root(dir.path().join(format!("work-{streamed}-{replayed}-{budget}")))
+      })).with_export_work_root(dir.path().join(format!("work-{streamed}-{replayed}-{budget}"))).unwrap()
         .with_export_root(dir.path().join(format!("journal-{streamed}-{replayed}-{budget}"))).unwrap();
       jobs.workspace = Workspace::new(budget);
       let delivery = jobs.prepare_delivery(format!("bounded-mp4-{budget}"), "original-project".into(),
@@ -5955,7 +6368,7 @@ mod export_delivery_tests {
         jobs.retain_render_job(&spec).unwrap();
         let mut recovered = Supervisor::new(jobs.spawner.clone(), jobs.notify.clone());
         recovered.workspace = Workspace::new(budget);
-        recovered = recovered.with_export_work_root(jobs.export_work_root.clone().unwrap())
+        recovered = recovered.with_export_work_root(jobs.export_work_root.clone().unwrap()).unwrap()
           .with_export_root(jobs.export_root.clone().unwrap()).unwrap();
         drop(jobs);
         jobs = recovered;
@@ -6408,7 +6821,7 @@ mod tests {
           sender.send(view).unwrap();
         }
       }
-    })).with_export_work_root(journal.path().join("work")).with_export_font_root(fixture.join("fonts"))
+    })).with_export_work_root(journal.path().join("work")).unwrap().with_export_font_root(fixture.join("fonts"))
       .with_export_root(journal.path().join("journal")).unwrap();
     let stage = PathBuf::from(spec.steps.last().and_then(|args| args.last()).expect("sequence final output"));
     let destination = stage.with_file_name("native-sequence-delivered.mkv");

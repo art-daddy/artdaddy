@@ -1219,7 +1219,9 @@ mod tests {
       fn spawn(&self, _: &jobs::JobSpec, _: std::sync::Arc<dyn Fn(jobs::ProcEvent) + Send + Sync>, _: std::sync::Arc<jobs::Workspace>) -> Result<u32, String> { Err("unused".into()) }
       fn kill(&self, _: &str, _: u32) {}
     }
-    let supervisor = jobs::Supervisor::new(std::sync::Arc::new(NoSpawn), std::sync::Arc::new(|_| {}));
+    let journal = tempfile::tempdir().unwrap();
+    let supervisor = jobs::Supervisor::new(std::sync::Arc::new(NoSpawn), std::sync::Arc::new(|_| {}))
+      .with_export_root(journal.path().join("journal"))?;
     trash_path_owned(&supervisor, path)
   }
 
@@ -1240,6 +1242,10 @@ mod tests {
       directory.path().join("render.mp4").to_string_lossy().into(), jobs::DeliverySource::Render { paths: vec![source.to_string_lossy().into()] }).unwrap();
     assert!(trash_path_owned(&supervisor, source.to_string_lossy().into()).unwrap_err().contains("leased"));
     assert_eq!(fs::read(&source).unwrap(), b"not trashable while export is admitted");
+    let receipt = directory.path().join("journal").join("trash-lease.json");
+    let before = fs::read(&receipt).unwrap();
+    assert!(trash_path_owned(&supervisor, receipt.to_string_lossy().into()).is_err());
+    assert_eq!(fs::read(receipt).unwrap(), before);
   }
 
   #[test]
@@ -1316,7 +1322,8 @@ mod tests {
     let destination = target.path().join("delivered.mp4");
     fs::write(&source, b"complete cross-volume artifact").unwrap();
     fs::write(&destination, b"previous complete delivery").unwrap();
-    let owner = jobs::Supervisor::new(std::sync::Arc::new(NoSpawn), std::sync::Arc::new(|_| {}));
+    let owner = jobs::Supervisor::new(std::sync::Arc::new(NoSpawn), std::sync::Arc::new(|_| {}))
+      .with_export_root(directory.path().join("journal")).unwrap();
     super::commit_file_owned(&owner, &source.to_string_lossy(), &destination.to_string_lossy()).unwrap();
     assert_eq!(fs::read(&destination).unwrap(), b"complete cross-volume artifact");
     assert!(!source.exists());
@@ -1354,6 +1361,14 @@ mod tests {
     super::commit_file_owned(&supervisor, &staged.to_string_lossy(), &moved.to_string_lossy()).unwrap();
     assert_eq!(fs::read(&moved).unwrap(), b"replacement bytes must not reach the input");
     assert!(!staged.exists());
+    let receipt = directory.path().join("journal").join("commit-lease.json");
+    let before = fs::read(&receipt).unwrap();
+    let receipt_destination = directory.path().join("moved-receipt.json");
+    assert!(super::commit_file_owned(&supervisor, &moved.to_string_lossy(), &receipt.to_string_lossy()).is_err());
+    assert!(super::commit_file_owned(&supervisor, &receipt.to_string_lossy(), &receipt_destination.to_string_lossy()).is_err());
+    assert_eq!(fs::read(&receipt).unwrap(), before);
+    assert_eq!(fs::read(&moved).unwrap(), b"replacement bytes must not reach the input");
+    assert!(!receipt_destination.exists());
   }
 
   #[test]
