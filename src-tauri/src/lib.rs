@@ -250,19 +250,99 @@ fn probe_media_blocking(
 }
 
 #[cfg(windows)]
+fn observe_windows_process(pid: u32) -> Result<Option<(std::os::windows::io::OwnedHandle, u64)>, String> {
+  use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+  use windows_sys::Win32::Foundation::{GetLastError, ERROR_INVALID_PARAMETER, FILETIME};
+  use windows_sys::Win32::System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+  let process = unsafe { OpenProcess(0x0010_0000 | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+  if process.is_null() {
+    let error = unsafe { GetLastError() };
+    return if error == ERROR_INVALID_PARAMETER { Ok(None) }
+      else { Err(format!("could not observe Windows process {pid} (Windows error {error})")) };
+  }
+  let process = unsafe { OwnedHandle::from_raw_handle(process) };
+  let (mut created, mut exited, mut kernel, mut user) = (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
+  if unsafe { GetProcessTimes(process.as_raw_handle(), &mut created, &mut exited, &mut kernel, &mut user) } == 0 {
+    return Err(format!("could not identify Windows process {pid}: {}", std::io::Error::last_os_error()));
+  }
+  Ok(Some((process, (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))))
+}
+
+#[cfg(windows)]
+fn windows_process_tree(pid: u32) -> Result<Vec<(u32, std::os::windows::io::OwnedHandle)>, String> {
+  use std::collections::{HashMap, HashSet};
+  use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+  use windows_sys::Win32::Foundation::{GetLastError, ERROR_NO_MORE_FILES, INVALID_HANDLE_VALUE};
+  use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+  };
+
+  if pid == 0 { return Err("Windows process-tree stop requires a nonzero PID".into()); }
+  let Some((root, created)) = observe_windows_process(pid)? else { return Ok(Vec::new()); };
+  let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+  if snapshot == INVALID_HANDLE_VALUE { return Err(format!("could not snapshot Windows process tree: {}", std::io::Error::last_os_error())); }
+  let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot) };
+  let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+  entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>().try_into().map_err(|_| "Windows process snapshot ABI size overflow")?;
+  let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+  let mut found = unsafe { Process32FirstW(snapshot.as_raw_handle(), &mut entry) };
+  loop {
+    if found == 0 {
+      let error = unsafe { GetLastError() };
+      if error == ERROR_NO_MORE_FILES { break; }
+      return Err(format!("could not enumerate Windows process tree (Windows error {error})"));
+    }
+    children.entry(entry.th32ParentProcessID).or_default().push(entry.th32ProcessID);
+    found = unsafe { Process32NextW(snapshot.as_raw_handle(), &mut entry) };
+  }
+  let mut pending = vec![(pid, created)];
+  let mut visited = HashSet::from([pid]);
+  let mut captured = vec![(pid, root)];
+  while let Some((parent, parent_created)) = pending.pop() {
+    for id in children.remove(&parent).unwrap_or_default() {
+      if !visited.insert(id) { continue; }
+      let Some((process, created)) = observe_windows_process(id)? else { continue; };
+      if created < parent_created { continue; }
+      captured.push((id, process));
+      pending.push((id, created));
+    }
+  }
+  Ok(captured)
+}
+
+#[cfg(windows)]
+fn verify_windows_tree_stopped(processes: &[(u32, std::os::windows::io::OwnedHandle)],
+  status: std::process::ExitStatus) -> Result<(), String> {
+  use std::os::windows::io::AsRawHandle;
+  use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
+  use windows_sys::Win32::System::Threading::WaitForSingleObject;
+
+  let started = std::time::Instant::now();
+  for (pid, process) in processes {
+    let remaining = std::time::Duration::from_secs(2).saturating_sub(started.elapsed());
+    let timeout = remaining.as_millis().try_into().map_err(|_| "Windows process stop wait overflow")?;
+    match unsafe { WaitForSingleObject(process.as_raw_handle(), timeout) } {
+      WAIT_OBJECT_0 => {}
+      WAIT_TIMEOUT => return Err(format!("Windows process {pid} survived tree stop (taskkill status {:?})", status.code())),
+      result => return Err(format!("could not verify stopped Windows process {pid}: wait result {result}, {}", std::io::Error::last_os_error())),
+    }
+  }
+  Ok(())
+}
+
+#[cfg(windows)]
 fn kill_tree(pid: u32) -> Result<(), String> {
   use std::os::windows::process::CommandExt;
-  const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+  let processes = windows_process_tree(pid)?;
+  if processes.is_empty() { return Ok(()); }
   let status = std::process::Command::new("taskkill")
     .args(["/PID", &pid.to_string(), "/T", "/F"])
-    .creation_flags(CREATE_NO_WINDOW)
+    .creation_flags(0x0800_0000)
     .status()
-    .map_err(|e| e.to_string())?;
-  match status.code() {
-    // 128 = "process not found": it already exited, which is the state we wanted.
-    Some(0) | Some(128) | None => Ok(()),
-    Some(code) => Err(format!("taskkill exited with {code}")),
-  }
+    .map_err(|error| error.to_string())?;
+  verify_windows_tree_stopped(&processes, status)?;
+  if !status.success() { log::debug!("taskkill status {:?}; every captured process termination was verified", status.code()); }
+  Ok(())
 }
 
 #[cfg(not(windows))]
@@ -1408,6 +1488,49 @@ mod tests {
   #[test]
   fn an_empty_path_is_rejected_rather_than_deleting_the_cwd() {
     assert!(unleased_trash(String::new()).is_err());
+  }
+
+  #[test]
+  #[cfg(windows)]
+  fn windows_tree_stop_checks_surviving_descendants_and_verified_nonzero_exits() {
+    use std::os::windows::io::AsRawHandle;
+    use std::os::windows::process::{CommandExt, ExitStatusExt};
+    use std::process::{Command, ExitStatus, Stdio};
+    use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::WaitForSingleObject;
+
+    let mut parent = Command::new("cmd").args(["/C", "cmd /C ping -n 120 127.0.0.1 > nul"])
+      .creation_flags(0x0800_0000).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+    let pid = parent.id();
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    let mut captured = Vec::new();
+    let witness = (|| -> Result<_, String> {
+      captured = super::windows_process_tree(pid)?;
+      parent.kill().map_err(|error| error.to_string())?;
+      parent.wait().map_err(|error| error.to_string())?;
+      let parent_stopped = captured.iter().any(|(id, process)|
+        *id == pid && unsafe { WaitForSingleObject(process.as_raw_handle(), 0) } == WAIT_OBJECT_0);
+      let surviving_descendants = captured.iter().filter(|(id, process)|
+        *id != pid && unsafe { WaitForSingleObject(process.as_raw_handle(), 0) } == WAIT_TIMEOUT).count();
+      Ok((parent_stopped, surviving_descendants, super::verify_windows_tree_stopped(&captured, ExitStatus::from_raw(0))))
+    })();
+    let cleanup: Vec<_> = captured.iter().filter(|(_, process)|
+      unsafe { WaitForSingleObject(process.as_raw_handle(), 0) } == WAIT_TIMEOUT).map(|(id, _)| *id)
+      .chain((captured.is_empty()).then_some(pid)).map(|id| {
+        (id, Command::new("taskkill").args(["/PID", &id.to_string(), "/T", "/F"])
+          .creation_flags(0x0800_0000).status())
+      }).collect();
+    let stopped = super::verify_windows_tree_stopped(&captured, ExitStatus::from_raw(255));
+    let reaped = parent.wait();
+    let (parent_stopped, survivors, false_success) = witness.unwrap();
+    assert!(captured.len() >= 3, "the real root/child/grandchild fixture did not exist");
+    assert!(parent_stopped && survivors > 0, "the fixture must leave a live descendant behind a dead parent");
+    assert!(false_success.is_err(), "a zero command status hid a surviving captured descendant");
+    assert!(stopped.is_ok(), "a nonzero status hid verified termination: {stopped:?}; cleanup: {cleanup:?}");
+    reaped.unwrap();
+    for (id, process) in captured {
+      assert_eq!(unsafe { WaitForSingleObject(process.as_raw_handle(), 0) }, WAIT_OBJECT_0, "captured process {id} survived");
+    }
   }
 
   // ── kill_process_tree ──────────────────────────────────────────────────────
