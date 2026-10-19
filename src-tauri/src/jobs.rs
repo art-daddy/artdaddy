@@ -554,46 +554,93 @@ const EXPORT_WORKSPACE_PAYLOAD_BYTES: u64 = EXPORT_SCRATCH_LIMIT_BYTES - 2_000_0
 const EXPORT_EXECUTION_LIMIT_MS: u64 = 8 * 60 * 60 * 1000;
 
 struct ScratchOutput {
-  file: tempfile::NamedTempFile,
+  owned: Option<(tempfile::NamedTempFile, workspace::Charge)>,
   target: PathBuf,
   used: u64,
   limit: u64,
   failed: bool,
-  charge: Option<workspace::Charge>,
   previous_bytes: u64,
   previous_exists: bool,
-  workspace: Option<Arc<Workspace>>,
+  workspace: Arc<Workspace>,
   workspace_key: String,
 }
 
 impl ScratchOutput {
-  fn open(path: &Path, used: u64, limit: u64) -> Result<Self, String> {
-    Self::open_named(path, used, limit, ".tmp")
-  }
-
-  fn open_named(path: &Path, used: u64, limit: u64, prefix: &str) -> Result<Self, String> {
+  fn open(path: &Path, used: u64, limit: u64, workspace: Arc<Workspace>, key: &str,
+    temporary: Option<&Path>) -> Result<Self, String> {
     if used > limit { return Err("export scratch budget already exceeded".into()); }
-    if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink() || !metadata.is_file()) {
-      return Err("scratch output must be an owned regular file".into());
-    }
-    let previous = std::fs::metadata(path).map(|metadata| metadata.len()).unwrap_or(0);
+    let previous = match std::fs::symlink_metadata(path) {
+      Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => Some(metadata.len()),
+      Ok(_) => return Err("scratch output must be an owned regular file".into()),
+      Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+      Err(error) => return Err(error.to_string()),
+    };
+    let previous_exists = previous.is_some();
+    let previous = previous.unwrap_or(0);
     let used = used.checked_add(previous).ok_or("scratch size overflow")?;
     if used > limit { return Err("export scratch budget already exceeded".into()); }
-    let file = tempfile::Builder::new().prefix(prefix).tempfile_in(path.parent().ok_or("scratch output has no parent")?)
-      .map_err(|error| error.to_string())?;
-    Ok(Self { file, target: path.to_path_buf(), used, limit, failed: false, charge: None,
-      previous_bytes: previous, previous_exists: path.exists(), workspace: None, workspace_key: String::new() })
+    let parent = path.parent().ok_or("scratch output has no parent")?;
+    let charge = workspace.reserve(key, 0, 1)?;
+    let file = if let Some(temporary) = temporary {
+      if !temporary.is_absolute() || temporary.parent() != Some(parent) || temporary == path {
+        return Err("temporary output is outside its admitted parent".into());
+      }
+      let mut temporary = tempfile::TempPath::try_from_path(temporary).map_err(|error| error.to_string())?;
+      temporary.disable_cleanup(true);
+      let mut options = std::fs::OpenOptions::new();
+      options.read(true).write(true).create_new(true);
+      #[cfg(unix)]
+      {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+      }
+      let file = options.open(&temporary).map_err(|error| error.to_string())?;
+      temporary.disable_cleanup(false);
+      tempfile::NamedTempFile::from_parts(file, temporary)
+    } else {
+      tempfile::Builder::new().prefix(".tmp").tempfile_in(parent).map_err(|error| error.to_string())?
+    };
+    Ok(Self { owned: Some((file, charge)), target: path.to_path_buf(), used, limit, failed: false,
+      previous_bytes: previous, previous_exists, workspace, workspace_key: key.to_string() })
   }
 
   fn open_workspace(path: &Path, used: u64, limit: u64, workspace: Arc<Workspace>, key: &str) -> Result<Self, String> {
-    Self::open(path, used, limit)?.with_workspace(workspace, key)
+    Self::open(path, used, limit, workspace, key, None)
   }
 
-  fn with_workspace(mut self, workspace: Arc<Workspace>, key: &str) -> Result<Self, String> {
-    self.charge = Some(workspace.reserve(key, 0, 1)?);
-    self.workspace = Some(workspace);
-    self.workspace_key = key.to_string();
-    Ok(self)
+  fn capture(spec: &JobSpec, workspace: Arc<Workspace>) -> Result<Option<(Self, Vec<String>)>, String> {
+    let Some(contract) = spec.meta.get("_native_scratch_capture") else { return Ok(None) };
+    let path = contract.get("path").and_then(|value| value.as_str()).ok_or("native scratch capture path missing")?;
+    let used = contract.get("used").and_then(|value| value.as_u64()).ok_or("native scratch capture byte count missing")?;
+    let limit = contract.get("limit").and_then(|value| value.as_u64()).ok_or("native scratch capture limit missing")?;
+    let args = captured_output_args(&spec.args)?;
+    let cwd = Path::new(spec.cwd.as_deref().ok_or("temporary output has no admitted scratch root")?);
+    let key = Supervisor::workspace_key(cwd);
+    let (bytes, entries) = scratch_usage(cwd, Path::new(""))?;
+    workspace.account_existing(&key, bytes, entries)?;
+    Ok(Some((Self::open_workspace(Path::new(path), used, limit, workspace, &key)?, args)))
+  }
+
+  fn file(&self) -> &tempfile::NamedTempFile {
+    &self.owned.as_ref().expect("temporary output is owned until settlement").0
+  }
+
+  fn cleanup(&mut self) -> Result<(), String> {
+    let Some((file, charge)) = self.owned.take() else { return Ok(()) };
+    match file.close() {
+      Ok(()) => Ok(()),
+      Err(error) => {
+        charge.retain();
+        Err(format!("temporary output cleanup failed; workspace reservation retained: {error}"))
+      }
+    }
+  }
+
+  fn abort(mut self, primary: String) -> String {
+    match self.cleanup() {
+      Ok(()) => primary,
+      Err(cleanup) => format!("{primary}; {cleanup}"),
+    }
   }
 
   fn write(&mut self, bytes: &[u8]) -> Result<(), String> {
@@ -602,25 +649,36 @@ impl ScratchOutput {
       self.failed = true; return Err("export scratch byte count overflow".into());
     };
     if next > self.limit { self.failed = true; return Err("export scratch budget exceeded before write".into()); }
-    if let Some(charge) = self.charge.as_mut() {
-      if let Err(error) = charge.grow(bytes.len() as u64) { self.failed = true; return Err(error); }
-    }
-    if let Err(error) = self.file.write_all(bytes) { self.failed = true; return Err(error.to_string()); }
+    let (file, charge) = self.owned.as_mut().expect("temporary output is owned until settlement");
+    if let Err(error) = charge.grow(bytes.len() as u64) { self.failed = true; return Err(error); }
+    if let Err(error) = file.write_all(bytes) { self.failed = true; return Err(error.to_string()); }
     self.used = next;
     Ok(())
   }
 
   fn finish(mut self, exit_code: Option<i32>) -> Result<(), String> {
-    if self.failed { return Err("failed temporary output cannot be installed".into()); }
-    if exit_code != Some(0) { return Err("unsuccessful worker cannot install temporary output".into()); }
-    self.file.as_file().sync_all().map_err(|error| error.to_string())?;
-    self.file.persist(&self.target).map_err(|error| error.to_string())?;
-    if let Some(charge) = self.charge.take() {
-      charge.retain();
-      self.workspace.as_ref().ok_or("temporary output lost its workspace owner")?
-        .release(&self.workspace_key, self.previous_bytes, u64::from(self.previous_exists));
+    if self.failed { return Err(self.abort("failed temporary output cannot be installed".into())); }
+    if exit_code != Some(0) { return Err(self.abort("unsuccessful worker cannot install temporary output".into())); }
+    if let Err(error) = self.file().as_file().sync_all() { return Err(self.abort(error.to_string())); }
+    let (file, charge) = self.owned.take().expect("temporary output is owned until settlement");
+    match file.persist(&self.target) {
+      Ok(_) => {
+        charge.retain();
+        self.workspace.release(&self.workspace_key, self.previous_bytes, u64::from(self.previous_exists));
+        Ok(())
+      }
+      Err(error) => {
+        let primary = error.error.to_string();
+        self.owned = Some((error.file, charge));
+        Err(self.abort(primary))
+      }
     }
-    Ok(())
+  }
+}
+
+impl Drop for ScratchOutput {
+  fn drop(&mut self) {
+    if let Err(error) = self.cleanup() { log::warn!("abandoned native temporary output: {error}"); }
   }
 }
 
@@ -1595,17 +1653,22 @@ impl Supervisor {
       std::fs::remove_file(&current.stage_path).map_err(|error| error.to_string())?;
       self.workspace.release(&key, previous, 1);
     }
-    let output = ScratchOutput::open_named(Path::new(&current.stage_path), 0, expected_bytes, &current.copy_scratch_prefix())?
-      .with_workspace(self.workspace.clone(), &key)?;
     let mut prepared = current.clone();
-    prepared.copy_scratch = Some(output.file.path().to_string_lossy().into_owned());
+    let temporary = Path::new(&current.stage_path).with_file_name(format!("{}pending", current.copy_scratch_prefix()));
+    match std::fs::symlink_metadata(&temporary) {
+      Ok(_) => return Err("copy temporary namespace is already occupied".into()),
+      Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+      Err(error) => return Err(error.to_string()),
+    }
+    prepared.copy_scratch = Some(temporary.to_string_lossy().into_owned());
     persist_delivery(root, &prepared)?;
     *current = prepared;
-    Ok(output)
+    ScratchOutput::open(Path::new(&current.stage_path), 0, expected_bytes, self.workspace.clone(), &key, Some(&temporary))
   }
 
   fn write_copy_artifact(&self, delivery: &ExportDelivery, before_completion_record: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
     let id = &delivery.id;
+    let root = self.export_root.as_ref().ok_or("native export journal is unavailable")?;
     let DeliverySource::Copy { path, .. } = &delivery.source else { return Err("copy source unavailable".into()) };
     let expected = delivery.sources.first().ok_or("copy source has no identity")?;
     let check = || delivery.execution_deadline_ms(now_ms()).map(|_| ());
@@ -1614,20 +1677,25 @@ impl Supervisor {
     let mut source = std::fs::File::open(path).map_err(|error| error.to_string())?;
     let mut destination = self.begin_copy_output(delivery, expected.1.size)?;
     let mut buffer = vec![0u8; 1024 * 1024];
-    loop {
-      check()?;
-      if self.deliveries.lock().map_err(|error| error.to_string())?.get(id).is_none_or(|entry| entry.state != "prepared") {
-        return Err("copy export cancelled".into());
+    let copied = (|| -> Result<(), String> {
+      loop {
+        check()?;
+        if self.deliveries.lock().map_err(|error| error.to_string())?.get(id).is_none_or(|entry| entry.state != "prepared") {
+          return Err("copy export cancelled".into());
+        }
+        let count = source.read(&mut buffer).map_err(|error| error.to_string())?;
+        if count == 0 { return Ok(()) }
+        destination.write(&buffer[..count])?;
       }
-      let count = source.read(&mut buffer).map_err(|error| error.to_string())?;
-      if count == 0 { break; }
-      destination.write(&buffer[..count])?;
-    }
-    let root = self.export_root.as_ref().ok_or("native export journal is unavailable")?;
-    let mut entries = self.deliveries.lock().map_err(|error| error.to_string())?;
-    let entry = entries.get_mut(id).ok_or("copy intent vanished before completion")?;
-    if entry.state != "prepared" { return Err("copy was cancelled before completion".into()); }
-    entry.execution_deadline_ms(now_ms())?;
+    })();
+    if let Err(error) = copied { return Err(destination.abort(error)); }
+    let mut entries = match self.deliveries.lock() {
+      Ok(entries) => entries,
+      Err(error) => return Err(destination.abort(error.to_string())),
+    };
+    let Some(entry) = entries.get_mut(id) else { return Err(destination.abort("copy intent vanished before completion".into())) };
+    if entry.state != "prepared" { return Err(destination.abort("copy was cancelled before completion".into())); }
+    if let Err(error) = entry.execution_deadline_ms(now_ms()) { return Err(destination.abort(error)); }
     destination.finish(Some(0))?;
     before_completion_record()?;
     let mut next = entry.clone();
@@ -2099,21 +2167,15 @@ impl<R: Runtime> Spawner for ShellSpawner<R> {
       let command: std::process::Command = self.app.shell().sidecar(file).map_err(|error| error.to_string())?.into();
       return stream::spawn_single(Path::new(command.get_program()), spec, on_event, self.streams.clone(), workspace);
     }
-    let mut args = spec.args.clone();
-    let mut capture = if let Some(contract) = spec.meta.get("_native_scratch_capture") {
-      let path = contract.get("path").and_then(|value| value.as_str()).ok_or("native scratch capture path missing")?;
-      let used = contract.get("used").and_then(|value| value.as_u64()).ok_or("native scratch capture byte count missing")?;
-      let limit = contract.get("limit").and_then(|value| value.as_u64()).ok_or("native scratch capture limit missing")?;
-      args = captured_output_args(&args)?;
-      Some(ScratchOutput::open(Path::new(path), used, limit)?)
-    } else { None };
-    let captured = capture.is_some();
+    if spec.meta.get("_native_scratch_capture").is_some() {
+      return Err("native scratch capture requires the owned FFmpeg worker boundary".into());
+    }
     let mut cmd = self
       .app
       .shell()
       .sidecar(file)
       .map_err(|e| e.to_string())?
-      .args(&args)
+      .args(&spec.args)
       .set_raw_out(true);
     if let Some(cwd) = spec.cwd.as_deref().filter(|c| !c.is_empty()) {
       cmd = cmd.current_dir(cwd);
@@ -2125,41 +2187,22 @@ impl<R: Runtime> Spawner for ShellSpawner<R> {
     let children = self.children.clone();
     tauri::async_runtime::spawn(async move {
       let mut ended = false;
-      let mut capture_error = None;
       while let Some(ev) = rx.recv().await {
         match ev {
           CommandEvent::Stdout(bytes) => {
-            if let Some(writer) = capture.as_mut() {
-              if capture_error.is_none() {
-                if let Err(error) = writer.write(&bytes) {
-                  capture_error = Some(error);
-                  if let Err(error) = stop_shell_child(&children, &child_key) { log::warn!("scratch quota could not stop owned worker: {error}"); }
-                }
-              }
-            } else { on_event(ProcEvent::Stdout(String::from_utf8_lossy(&bytes).into_owned())); }
+            on_event(ProcEvent::Stdout(String::from_utf8_lossy(&bytes).into_owned()));
           }
           CommandEvent::Stderr(bytes) => {
             let text = String::from_utf8_lossy(&bytes).into_owned();
-            if captured { on_event(ProcEvent::Stdout(text.clone())); }
             on_event(ProcEvent::Stderr(text));
           }
           CommandEvent::Error(e) => {
-            if captured && capture_error.is_none() {
-              capture_error = Some(format!("temporary output reader failed: {e}"));
-              if let Err(error) = stop_shell_child(&children, &child_key) { log::warn!("capture error could not stop owned worker: {error}"); }
-            }
             on_event(ProcEvent::Stderr(format!("{e}\n")));
           }
           CommandEvent::Terminated(p) => {
             ended = true;
             children.lock().unwrap_or_else(|e| e.into_inner()).remove(&child_key);
-            if let Some(writer) = capture.take() {
-              if capture_error.is_none() { capture_error = writer.finish(p.code).err(); }
-            }
-            if let Some(error) = capture_error.take() {
-              on_event(ProcEvent::Stderr(format!("native temporary output failed: {error}\n")));
-              on_event(ProcEvent::Exit(Some(-1)));
-            } else { on_event(ProcEvent::Exit(p.code)); }
+            on_event(ProcEvent::Exit(p.code));
           }
           _ => {}
         }
@@ -2326,6 +2369,13 @@ pub async fn jobs_copy_export(jobs: tauri::State<'_, Supervisor>, id: String) ->
 
 #[cfg(test)]
 mod export_delivery_tests {
+  fn scratch_writer(path: &Path, used: u64, limit: u64) -> Result<ScratchOutput, String> {
+    let workspace = Workspace::new(EXPORT_WORKSPACE_PAYLOAD_BYTES);
+    let key = Supervisor::workspace_key(path.parent().unwrap());
+    if let Ok(metadata) = path.metadata() { workspace.account_existing(&key, metadata.len(), 1)?; }
+    ScratchOutput::open_workspace(path, used, limit, workspace, &key)
+  }
+
   #[test]
   fn final_file_exemption_cannot_hide_intermediate_writes() {
     let dir = tempfile::tempdir().unwrap();
@@ -2371,7 +2421,7 @@ mod export_delivery_tests {
     let mut stderr = child.stderr.take().unwrap();
     let errors = std::thread::spawn(move || { let mut bytes = Vec::new(); stderr.read_to_end(&mut bytes).unwrap(); bytes });
     let mut output = child.stdout.take().unwrap();
-    let mut writer = ScratchOutput::open(&captured, 0, EXPORT_SCRATCH_LIMIT_BYTES).unwrap();
+    let mut writer = scratch_writer(&captured, 0, EXPORT_SCRATCH_LIMIT_BYTES).unwrap();
     let mut buffer = [0u8; 65536];
     loop {
       let count = output.read(&mut buffer).unwrap();
@@ -2400,14 +2450,14 @@ mod export_delivery_tests {
     let part = dir.path().join("part.nut");
     let destination = dir.path().join("previous.mp4");
     std::fs::write(&destination, b"previous delivered file").unwrap();
-    let mut writer = ScratchOutput::open(&part, 6, 12).unwrap();
+    let mut writer = scratch_writer(&part, 6, 12).unwrap();
     writer.write(b"1234").unwrap();
     assert!(writer.write(b"567").is_err());
-    assert_eq!(writer.file.as_file().metadata().unwrap().len(), 4);
+    assert_eq!(writer.file().as_file().metadata().unwrap().len(), 4);
     assert!(writer.finish(Some(0)).is_err());
     assert!(!part.exists());
     assert_eq!(std::fs::read(&destination).unwrap(), b"previous delivered file");
-    assert!(ScratchOutput::open(&dir.path().join("overflow.nut"), 13, 12).is_err());
+    assert!(scratch_writer(&dir.path().join("overflow.nut"), 13, 12).is_err());
     assert!(!dir.path().join("overflow.nut").exists());
     assert_eq!(EXPORT_SCRATCH_LIMIT_BYTES, 20_000_000_000);
   }
@@ -2419,12 +2469,12 @@ mod export_delivery_tests {
     std::fs::write(&source, b"old source bytes").unwrap();
     std::fs::hard_link(&source, &part).unwrap();
     {
-      let mut refused = ScratchOutput::open(&part, 0, 17).unwrap();
+      let mut refused = scratch_writer(&part, 0, 17).unwrap();
       assert!(refused.write(b"too many new bytes").is_err());
     }
     assert_eq!(std::fs::read(&source).unwrap(), b"old source bytes");
     assert_eq!(std::fs::read(&part).unwrap(), b"old source bytes");
-    let mut writer = ScratchOutput::open(&part, 0, 100).unwrap();
+    let mut writer = scratch_writer(&part, 0, 100).unwrap();
     writer.write(b"complete new part").unwrap();
     assert_eq!(std::fs::read(&part).unwrap(), b"old source bytes");
     writer.finish(Some(0)).unwrap();
@@ -2439,7 +2489,7 @@ mod export_delivery_tests {
     std::fs::write(&source, b"verified old source").unwrap();
     std::fs::hard_link(&source, &part).unwrap();
     for code in [Some(1), Some(-1), None] {
-      let mut writer = ScratchOutput::open(&part, 0, 1024).unwrap();
+      let mut writer = scratch_writer(&part, 0, 1024).unwrap();
       writer.write(b"incomplete replacement bytes").unwrap();
       assert!(writer.finish(code).is_err());
       assert_eq!(std::fs::read(&part).unwrap(), b"verified old source");
@@ -2448,6 +2498,44 @@ mod export_delivery_tests {
     }
   }
   use super::*;
+  pub(super) struct CleanupBlocker {
+    #[cfg(windows)]
+    _file: std::fs::File,
+    #[cfg(unix)]
+    path: PathBuf,
+    #[cfg(unix)]
+    permissions: std::fs::Permissions,
+  }
+
+  impl CleanupBlocker {
+    pub(super) fn open(file: &Path) -> Self {
+      #[cfg(windows)]
+      {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+        Self { _file: std::fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE).open(file).unwrap() }
+      }
+      #[cfg(unix)]
+      {
+        use std::os::unix::fs::PermissionsExt;
+        assert_ne!(unsafe { libc::geteuid() }, 0, "cleanup-failure discriminator requires the non-root CI user");
+        let path = file.parent().unwrap().to_path_buf();
+        let permissions = path.metadata().unwrap().permissions();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o500)).unwrap();
+        Self { path, permissions }
+      }
+    }
+  }
+
+  impl Drop for CleanupBlocker {
+    fn drop(&mut self) {
+      #[cfg(unix)]
+      if let Err(error) = std::fs::set_permissions(&self.path, self.permissions.clone()) {
+        panic!("could not restore the cleanup-failure fixture permissions: {error}");
+      }
+    }
+  }
+
   pub(super) struct NoSpawn;
   impl Spawner for NoSpawn {
     fn identity(&self, program: &str) -> Result<ArtifactIdentity, String> {
@@ -3979,6 +4067,164 @@ mod export_delivery_tests {
     assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), bytes);
     jobs.complete_delivery(&delivery.id).unwrap();
   }
+
+  fn replacement_fixture(copy: bool) -> (tempfile::TempDir, Supervisor, ExportDelivery, JobSpec) {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.wav");
+    let destination = directory.path().join("delivered.wav");
+    std::fs::write(&source, [37u8; 32]).unwrap();
+    std::fs::write(&destination, b"previous complete file").unwrap();
+    let mut jobs = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {})).with_export_work_root(directory.path().join("work"));
+    jobs.workspace = Workspace::new(64);
+    let jobs = jobs.with_export_root(directory.path().join("journal")).unwrap();
+    let source = if copy { DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_source".into() } }
+      else { DeliverySource::Render { paths: vec![source.to_string_lossy().into()] } };
+    let delivery = jobs.prepare_delivery("replacement-lifetime".into(), "original-project".into(),
+      directory.path().join("result.partial").to_string_lossy().into(), destination.to_string_lossy().into(), source).unwrap();
+    let mut spec = JobSpec { id: delivery.id.clone(), lane: "export".into(), program: "ffmpeg".into(),
+      args: vec!["-f".into(), "nut".into(), "part.nut".into()], steps: vec![], cwd: None, meta: serde_json::json!({}) };
+    if !copy {
+      let cwd = jobs.stage_render_scratch(&delivery.id,
+        vec![RenderScratchFile { name: "filter.ffgraph".into(), content: "null".into() }], vec![]).unwrap();
+      let part = Path::new(&cwd).join("part.nut");
+      std::fs::write(&part, b"old part").unwrap();
+      spec.meta["_native_scratch_capture"] = serde_json::json!({ "path": part, "used": 4, "limit": 64 });
+      spec.cwd = Some(cwd);
+    }
+    (directory, jobs, delivery, spec)
+  }
+
+  fn replacement_output(jobs: &Supervisor, delivery: &ExportDelivery, spec: &JobSpec, copy: bool) -> Result<ScratchOutput, String> {
+    if copy {
+      jobs.copying.lock().unwrap().insert(delivery.id.clone());
+      jobs.begin_copy_output(delivery, 32)
+    } else {
+      ScratchOutput::capture(spec, jobs.workspace.clone()).map(|output| output.unwrap().0)
+    }
+  }
+
+  #[test]
+  fn replacement_entry_refusal_cannot_create_capture_or_copy_temporaries() {
+    for copy in [false, true] {
+      let (directory, jobs, delivery, spec) = replacement_fixture(copy);
+      jobs.account_workspace(&jobs.deliveries.lock().unwrap()).unwrap();
+      let entries = 1 + spec.cwd.as_deref().map(|cwd| scratch_usage(Path::new(cwd), Path::new("")).unwrap().1).unwrap_or(0);
+      let pressure = jobs.workspace.reserve("entry-pressure", 0, 16384 - entries).unwrap();
+      let parent = spec.cwd.as_deref().map(Path::new).unwrap_or(directory.path());
+      let clock = journal_write_clock(parent);
+      let before = std::fs::read_dir(parent).unwrap().map(|entry| entry.unwrap().file_name()).collect::<HashSet<_>>();
+      let error = replacement_output(&jobs, &delivery, &spec, copy).err().unwrap();
+      assert!(error.contains("entry budget"), "{error}");
+      assert_eq!(std::fs::metadata(parent).unwrap().modified().unwrap(), clock, "refused entry creation touched its parent");
+      assert_eq!(std::fs::read_dir(parent).unwrap().map(|entry| entry.unwrap().file_name()).collect::<HashSet<_>>(), before);
+      assert!(!jobs.delivery_list()[0].producer_complete);
+      assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"previous complete file");
+      drop(pressure);
+      let output = replacement_output(&jobs, &delivery, &spec, copy).unwrap();
+      let temporary = output.file().path().to_path_buf();
+      assert!(temporary.is_file(), "reusable capacity did not create a real temporary");
+      drop(output);
+      assert!(!temporary.exists());
+    }
+  }
+
+  #[test]
+  fn failed_replacement_cleanup_retains_payload_and_both_errors_through_restart() {
+    for copy in [false, true] {
+      for failure in ["abort", "install", "drop"] {
+        let (directory, jobs, delivery, spec) = replacement_fixture(copy);
+        let mut output = replacement_output(&jobs, &delivery, &spec, copy).unwrap();
+        output.write(&[41u8; 16]).unwrap();
+        let temporary = output.file().path().to_path_buf();
+        let blocker = CleanupBlocker::open(&temporary);
+        match failure {
+          "abort" => {
+            let error = output.abort("original producer refusal".into());
+            assert!(error.contains("original producer refusal"), "{error}");
+            assert!(error.contains("cleanup failed; workspace reservation retained"), "{error}");
+          }
+          "install" => {
+            let error = output.finish(Some(0)).unwrap_err();
+            assert!(error.contains("; temporary output cleanup failed; workspace reservation retained"), "{error}");
+          }
+          _ => drop(output),
+        }
+        assert_eq!(std::fs::read(&temporary).unwrap(), vec![41u8; 16]);
+        assert!(jobs.workspace.reserve("cannot-reuse-retained-payload", 64 - 16 + 1, 1).is_err());
+        if let Some(cwd) = &spec.cwd { assert_eq!(std::fs::read(Path::new(cwd).join("part.nut")).unwrap(), b"old part"); }
+        assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"previous complete file");
+        drop(jobs);
+        let mut reopened = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {}))
+          .with_export_work_root(directory.path().join("work"));
+        reopened.workspace = Workspace::new(15);
+        let reopened = reopened.with_export_root(directory.path().join("journal")).unwrap();
+        assert!(reopened.workspace.reserve("restart-cannot-reuse", 1, 1).is_err());
+        assert_eq!(std::fs::read(&temporary).unwrap(), vec![41u8; 16]);
+        reopened.cancel_delivery(&delivery.id).unwrap();
+        assert!(reopened.complete_delivery(&delivery.id).is_err(), "failed retirement must not release retained bytes");
+        assert!(reopened.workspace.reserve("failed-retirement-cannot-reuse", 1, 1).is_err());
+        drop(blocker);
+        reopened.complete_delivery(&delivery.id).unwrap();
+        assert!(!temporary.exists());
+        assert_eq!(reopened.workspace.available_bytes(), 15);
+        assert_eq!(std::fs::read(directory.path().join("source.wav")).unwrap(), vec![37u8; 32]);
+        assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"previous complete file");
+      }
+    }
+  }
+
+  #[test]
+  fn installed_replacements_keep_only_existing_payload_charged() {
+    for copy in [false, true] {
+      let (_directory, jobs, delivery, spec) = replacement_fixture(copy);
+      let mut output = replacement_output(&jobs, &delivery, &spec, copy).unwrap();
+      output.write(&[41u8; 16]).unwrap();
+      let temporary = output.file().path().to_path_buf();
+      let target = output.target.clone();
+      output.finish(Some(0)).unwrap();
+      assert!(!temporary.exists());
+      assert_eq!(std::fs::read(&target).unwrap(), vec![41u8; 16]);
+      let retained = std::fs::metadata(&delivery.stage_path).unwrap().len()
+        + spec.cwd.as_deref().map(|cwd| scratch_usage(Path::new(cwd), Path::new("")).unwrap().0).unwrap_or(0);
+      assert_eq!(jobs.workspace.available_bytes() + retained, 64, "installed bytes were uncharged or replaced bytes stayed charged");
+      let remaining = jobs.workspace.reserve("reused-only-after-install", jobs.workspace.available_bytes(), 1).unwrap();
+      assert!(jobs.workspace.reserve("cannot-overbook", 1, 1).is_err());
+      drop(remaining);
+      assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"previous complete file");
+    }
+  }
+
+  #[test]
+  fn copy_receipt_before_creation_recovers_a_refused_private_file() {
+    let (directory, jobs, delivery, spec) = replacement_fixture(true);
+    let pressure = jobs.workspace.reserve("entry-pressure", 0, 16383).unwrap();
+    assert!(replacement_output(&jobs, &delivery, &spec, true).is_err());
+    let receipt: ExportDelivery = serde_json::from_slice(&std::fs::read(directory.path().join("journal")
+      .join(format!("{}.json", delivery.id))).unwrap()).unwrap();
+    let temporary = receipt.copy_scratch_path().unwrap().unwrap().to_path_buf();
+    assert!(!temporary.exists());
+    assert!(!receipt.producer_complete);
+    assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"previous complete file");
+    drop(pressure);
+    drop(jobs);
+    let recovered = owner(&directory.path().join("journal"));
+    assert!(recovered.recover_exports().is_empty());
+    assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), vec![37u8; 32]);
+    assert_eq!(std::fs::read(directory.path().join("source.wav")).unwrap(), vec![37u8; 32]);
+    assert!(!temporary.exists());
+    assert_eq!(recovered.delivery_list()[0].state, "published");
+  }
+
+  #[test]
+  fn copy_creation_refuses_an_existing_private_name_without_adopting_it() {
+    let (_directory, jobs, delivery, spec) = replacement_fixture(true);
+    let temporary = Path::new(&delivery.stage_path).with_file_name(format!("{}pending", delivery.copy_scratch_prefix()));
+    std::fs::write(&temporary, b"unowned collision must survive").unwrap();
+    assert!(replacement_output(&jobs, &delivery, &spec, true).err().unwrap().contains("namespace is already occupied"));
+    assert_eq!(std::fs::read(&temporary).unwrap(), b"unowned collision must survive");
+    assert!(jobs.delivery_list()[0].copy_scratch.is_none());
+    assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"previous complete file");
+  }
   #[test]
   fn native_copy_staging_shares_scratch_capacity_until_publication() {
     for size in [33usize, 32] {
@@ -4152,10 +4398,11 @@ mod export_delivery_tests {
     let mut output = jobs.begin_copy_output(&delivery, 32).unwrap();
     output.write(&[41u8; 16]).unwrap();
     let retained = jobs.delivery_list().into_iter().find(|entry| entry.id == delivery.id).unwrap().copy_scratch.unwrap();
-    let ScratchOutput { file, charge, .. } = output;
+    let (file, charge) = output.owned.take().unwrap();
     let (file, path) = file.keep().unwrap();
     drop(file);
-    drop(charge);
+    charge.retain();
+    drop(output);
     assert_eq!(Path::new(&retained), path.as_path());
     drop(jobs);
     let mut reopened = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {}));
@@ -4972,12 +5219,11 @@ mod tests {
     struct RealSpawner(String, stream::Registry);
     impl Spawner for RealSpawner {
       fn identity(&self, _: &str) -> Result<ArtifactIdentity, String> { artifact_identity(Path::new(&self.0)) }
-      fn spawn(&self, spec: &JobSpec, on_event: Arc<dyn Fn(ProcEvent) + Send + Sync>, _: Arc<Workspace>) -> Result<u32, String> {
-        let mut capture = spec.meta.get("_native_scratch_capture").map(|contract| {
-          ScratchOutput::open(Path::new(contract["path"].as_str().ok_or("missing capture path")?),
-            contract["used"].as_u64().ok_or("missing capture usage")?, contract["limit"].as_u64().ok_or("missing capture limit")?)
-        }).transpose()?;
-        let args = if capture.is_some() { captured_output_args(&spec.args)? } else { spec.args.clone() };
+      fn spawn(&self, spec: &JobSpec, on_event: Arc<dyn Fn(ProcEvent) + Send + Sync>, workspace: Arc<Workspace>) -> Result<u32, String> {
+        let (mut capture, args) = match ScratchOutput::capture(spec, workspace)? {
+          Some((capture, args)) => (Some(capture), args),
+          None => (None, spec.args.clone()),
+        };
         let mut child = std::process::Command::new(&self.0)
           .args(&args)
           .current_dir(spec.cwd.as_ref().ok_or("real render needs a private cwd")?)

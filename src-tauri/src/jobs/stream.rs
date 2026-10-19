@@ -439,27 +439,27 @@ pub(super) fn cancel(registry: &Registry, id: &str, pid: u32) -> bool {
 }
 
 pub(super) fn spawn_single(executable: &Path, spec: &JobSpec, observer: Observer, registry: Registry, workspace: Arc<super::Workspace>) -> Result<u32, String> {
-  let mut args = spec.args.clone();
+  let deadline = execution_deadline(spec)?;
   let workspace_key = spec.cwd.as_deref().map(|cwd| super::Supervisor::workspace_key(Path::new(cwd)));
-  let mut capture = if let Some(contract) = spec.meta.get("_native_scratch_capture") {
-    let path = contract.get("path").and_then(|value| value.as_str()).ok_or("native scratch capture path missing")?;
-    let used = contract.get("used").and_then(|value| value.as_u64()).ok_or("native scratch capture byte count missing")?;
-    let limit = contract.get("limit").and_then(|value| value.as_u64()).ok_or("native scratch capture limit missing")?;
-    args = super::captured_output_args(&args)?;
-    let cwd = spec.cwd.as_deref().ok_or("temporary output has no admitted scratch root")?;
-    let key = super::Supervisor::workspace_key(Path::new(cwd));
-    let (bytes, entries) = super::scratch_usage(Path::new(cwd), Path::new(""))?;
-    workspace.account_existing(&key, bytes, entries)?;
-    Some(super::ScratchOutput::open_workspace(Path::new(path), used, limit, workspace.clone(), &key)?)
-  } else { None };
+  let (mut capture, mut args) = match super::ScratchOutput::capture(spec, workspace.clone())? {
+    Some((capture, args)) => (Some(capture), args),
+    None => (None, spec.args.clone()),
+  };
   let captured = capture.is_some();
-  let final_output = FinalOutput::open(spec, &mut args, workspace.clone())?;
-  let control = Arc::new(Control::new(execution_deadline(spec)?, final_output)?);
-  let guard: StartGuard = Arc::new(|| Ok(()));
-  let worker = control.spawn(executable, &args, spec.cwd.as_deref(), false, WorkerRole::Single, &guard)?;
+  let started = (|| -> Result<_, String> {
+    let final_output = FinalOutput::open(spec, &mut args, workspace.clone())?;
+    let control = Arc::new(Control::new(deadline, final_output)?);
+    let guard: StartGuard = Arc::new(|| Ok(()));
+    let worker = control.spawn(executable, &args, spec.cwd.as_deref(), false, WorkerRole::Single, &guard)?;
+    let output = worker.child().take_stdout().ok_or("native worker has no output stream")?;
+    let errors = worker.child().take_stderr().ok_or("native worker has no error stream")?;
+    Ok((control, worker, output, errors))
+  })();
+  let (control, worker, mut output, errors) = match started {
+    Ok(started) => started,
+    Err(error) => return Err(match capture { Some(capture) => capture.abort(error), None => error }),
+  };
   let pid = worker.child().id();
-  let mut output = worker.child().take_stdout().ok_or("native worker has no output stream")?;
-  let errors = worker.child().take_stderr().ok_or("native worker has no error stream")?;
   let key = (spec.id.clone(), pid);
   registry.lock().unwrap_or_else(|error| error.into_inner()).insert(key.clone(), control.clone());
   control.watch();
@@ -487,8 +487,10 @@ pub(super) fn spawn_single(executable: &Path, spec: &JobSpec, observer: Observer
     let diagnostics = join(stderr);
     let mut result = control.settle().and(read).and(diagnostics).and(ended);
     if let Some(capture) = capture {
-      let code = if result.is_ok() { 0 } else { -1 };
-      result = result.and(capture.finish(Some(code)));
+      result = match result {
+        Ok(()) => capture.finish(Some(0)),
+        Err(error) => Err(capture.abort(error)),
+      };
     }
     result = control.finish_output(result);
     observer(ProcEvent::Stderr(control.memory_diagnostics()));
@@ -727,43 +729,7 @@ mod tests {
     spec
   }
 
-  struct CleanupBlocker {
-    #[cfg(windows)]
-    _file: std::fs::File,
-    #[cfg(unix)]
-    path: std::path::PathBuf,
-    #[cfg(unix)]
-    permissions: std::fs::Permissions,
-  }
-
-  impl CleanupBlocker {
-    fn open(manifest: &Path) -> Self {
-      #[cfg(windows)]
-      {
-        use std::os::windows::fs::OpenOptionsExt;
-        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
-        Self { _file: std::fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE).open(manifest).unwrap() }
-      }
-      #[cfg(unix)]
-      {
-        use std::os::unix::fs::PermissionsExt;
-        assert_ne!(unsafe { libc::geteuid() }, 0, "cleanup-failure discriminator requires the non-root CI user");
-        let path = manifest.parent().unwrap().to_path_buf();
-        let permissions = path.metadata().unwrap().permissions();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o500)).unwrap();
-        Self { path, permissions }
-      }
-    }
-  }
-
-  impl Drop for CleanupBlocker {
-    fn drop(&mut self) {
-      #[cfg(unix)]
-      if let Err(error) = std::fs::set_permissions(&self.path, self.permissions.clone()) {
-        panic!("could not restore the cleanup-failure fixture permissions: {error}");
-      }
-    }
-  }
+  use super::super::export_delivery_tests::CleanupBlocker;
 
   fn stream_directory(cwd: &Path) -> std::path::PathBuf {
     let found = std::fs::read_dir(cwd).unwrap().map(|entry| entry.unwrap().path())
@@ -1048,6 +1014,88 @@ mod tests {
       };
       assert!(decode(&target) == decode(&dir.path().join("part0.nut")), "captured {stream} bytes differ");
     }
+  }
+
+  #[test]
+  fn capture_setup_refusal_cleans_its_actual_file_before_reusing_capacity() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory.path().join("captured.nut");
+    std::fs::write(&target, b"previous verified target").unwrap();
+    let workspace = super::super::Workspace::new(2_000_000);
+    let mut spec = spec(directory.path());
+    spec.steps.clear();
+    spec.meta["_native_scratch_capture"] = serde_json::json!({ "path": target, "used": 0, "limit": 2_000_000 });
+    let error = spawn_single(&directory.path().join("absent-native-worker"), &spec, Arc::new(|_| {}),
+      Arc::default(), workspace.clone()).unwrap_err();
+    assert!(!error.is_empty());
+    assert_eq!(std::fs::read(&target).unwrap(), b"previous verified target");
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    assert_eq!(workspace.available_bytes() + std::fs::metadata(&target).unwrap().len(), 2_000_000);
+  }
+
+  #[test]
+  fn complete_captured_media_cannot_hide_failed_install_and_cleanup() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut spec = spec(directory.path());
+    spec.steps.clear();
+    spec.args.splice(0..0, strings(&["-progress", "pipe:1"]));
+    let baseline = Command::new(ffmpeg()).args(&spec.args).current_dir(directory.path()).output().unwrap();
+    assert!(baseline.status.success(), "{}", String::from_utf8_lossy(&baseline.stderr));
+    let target = directory.path().join("captured.nut");
+    std::fs::write(&target, b"previous verified target").unwrap();
+    spec.meta["_native_scratch_capture"] = serde_json::json!({ "path": target, "used": 0, "limit": 2_000_000 });
+    let workspace = super::super::Workspace::new(4_000_000);
+    let blocker = Arc::new(Mutex::new(None));
+    let retained = Arc::new(Mutex::new(None));
+    let install_blocker = blocker.clone();
+    let save_path = retained.clone();
+    let cwd = directory.path().to_path_buf();
+    let registry: Registry = Arc::default();
+    let watched = registry.clone();
+    let owner = workspace.clone();
+    let (code, diagnostics) = observed(|observer, _| {
+      let blocked: Observer = Arc::new(move |event| {
+        if matches!(&event, ProcEvent::Stdout(text) | ProcEvent::Stderr(text) if text.contains("progress=end")) {
+          let mut blocker = install_blocker.lock().unwrap();
+          if blocker.is_none() {
+            let files = std::fs::read_dir(&cwd).unwrap().map(|entry| entry.unwrap().path())
+              .filter(|path| path.file_name().unwrap().to_string_lossy().starts_with(".tmp")).collect::<Vec<_>>();
+            assert_eq!(files.len(), 1);
+            *blocker = Some(CleanupBlocker::open(&files[0]));
+            *save_path.lock().unwrap() = Some(files[0].clone());
+          }
+        }
+        observer(event);
+      });
+      spawn_single(&ffmpeg(), &spec, blocked, watched, owner)
+    });
+    assert_ne!(code, 0, "complete encoded bytes cannot make failed installation look successful");
+    assert!(diagnostics.contains("temporary output cleanup failed; workspace reservation retained"), "{diagnostics}");
+    assert!(registry.lock().unwrap().is_empty());
+    assert_eq!(std::fs::read(&target).unwrap(), b"previous verified target");
+    let temporary = retained.lock().unwrap().clone().expect("the real producer never reached completion");
+    let payload = std::fs::metadata(&temporary).unwrap().len();
+    assert!(payload > 0);
+    assert!(workspace.reserve("cannot-reuse-orphan", 4_000_000 - payload + 1, 1).is_err());
+    for (stream, format, expected) in [("0:v:0", "rawvideo", 2_592_000), ("0:a:0", "f64le", 768_000)] {
+      let decode = |path: &Path| {
+        let output = Command::new(ffmpeg()).args(["-nostdin", "-v", "error", "-i"]).arg(path)
+          .args(["-map", stream, "-f", format, "pipe:1"]).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(output.stdout.len(), expected);
+        output.stdout
+      };
+      let actual = decode(&temporary);
+      assert_eq!(actual, decode(&directory.path().join("part0.nut")), "retained {stream} is incomplete or different");
+      if stream == "0:v:0" {
+        assert_ne!(&actual[..320 * 180 * 3 / 2], &actual[actual.len() - 320 * 180 * 3 / 2..]);
+      }
+    }
+    drop(blocker.lock().unwrap().take());
+    let key = super::super::Supervisor::workspace_key(directory.path());
+    directory.close().unwrap();
+    workspace.release_root(&key);
+    assert_eq!(workspace.available_bytes(), 4_000_000);
   }
 
   #[test]
