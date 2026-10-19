@@ -12,6 +12,7 @@ const SOURCE = join(CLIENT_DIR, "src/contract/catalog.json");
 const CHECK = process.argv.includes("--check");
 const LEGACY_RELEASE = "0.21.5";
 const LEGACY_SOURCE_SHA256 = "37a97dc95368bd889d31b358f6e45afacbcabced2e56e19234b55c51b38aa88a";
+const LEGACY_SNAPSHOT_ID = "15f51a071da6f7ad5789a5e1e757a37caefdbca21a9d4429eac692279c2e98d5";
 const LEGACY_SOURCE = join(CLIENT_DIR, "src/contract/legacy", `${LEGACY_RELEASE}.json`);
 
 function write(path, content) {
@@ -108,6 +109,7 @@ async function main() {
   };
   const legacySnapshot = JSON.stringify(legacy, null, 2) + "\n";
   const legacyId = createHash("sha256").update(legacySnapshot).digest("hex");
+  if (legacyId !== LEGACY_SNAPSHOT_ID) throw new Error("immutable legacy snapshot metadata differs from the reviewed release");
   write(join(CLIENT_DIR, "src/contract/identity.json"), JSON.stringify({ version: catalog.version, id }, null, 2) + "\n");
   if (existsSync(join(SERVER_DIR, "src/akaru/turn/tools"))) {
     const current = join(SERVER_DIR, "src/akaru/turn/tools/generated/catalog.json");

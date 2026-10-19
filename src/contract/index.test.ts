@@ -112,9 +112,14 @@ describe("generated trusted catalog artifacts", () => {
     const artifacts = join(server, "src/akaru/turn/tools/generated");
     mkdirSync(join(client, "scripts"), { recursive: true });
     mkdirSync(join(client, "src/contract"), { recursive: true });
+    mkdirSync(join(client, "src/contract/legacy"), { recursive: true });
     mkdirSync(artifacts, { recursive: true });
     copyFileSync(script, join(client, "scripts/codegen.mjs"));
     copyFileSync(canonical, source);
+    copyFileSync(
+      join(__dirname, "legacy/0.21.5.json"),
+      join(client, "src/contract/legacy/0.21.5.json"),
+    );
     const run = (check = false) =>
       spawnSync(
         process.execPath,
@@ -173,6 +178,33 @@ describe("generated trusted catalog artifacts", () => {
         const result = environment.run();
         expect(result.status).toBe(1);
         expect(() => readFileSync(join(environment.artifacts, "catalog.json"))).toThrow();
+      } finally {
+        rmSync(environment.root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each(["released-bytes", "canonical-metadata"])(
+    "refuses changed legacy %s without replacing retained artifacts",
+    (change) => {
+      const environment = fixture();
+      try {
+        expect(environment.run().status).toBe(0);
+        const current = readFileSync(join(environment.artifacts, "catalog.json"));
+        const legacy = readFileSync(join(environment.artifacts, "legacy.json"));
+        if (change === "released-bytes")
+          writeFileSync(join(environment.client, "src/contract/legacy/0.21.5.json"), "{}\n");
+        else {
+          const source = JSON.parse(readFileSync(environment.source, "utf8"));
+          source.tools.find((tool: { name: string }) => tool.name === "get_timeline").effect =
+            "app-operation";
+          writeFileSync(environment.source, JSON.stringify(source) + "\n");
+        }
+        expect(environment.run().status).toBe(1);
+        expect(readFileSync(join(environment.artifacts, "catalog.json")).equals(current)).toBe(
+          true,
+        );
+        expect(readFileSync(join(environment.artifacts, "legacy.json")).equals(legacy)).toBe(true);
       } finally {
         rmSync(environment.root, { recursive: true, force: true });
       }
