@@ -214,6 +214,8 @@ pub struct Supervisor {
   workspace: Arc<Workspace>,
   copying: Arc<Mutex<HashSet<String>>>,
   copy_settled: Arc<Condvar>,
+  #[cfg(test)]
+  initial_entry_hook: Option<InitialEntryHook>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -308,7 +310,32 @@ pub struct RenderScratch {
   pub reserved_bytes: u64,
   #[serde(default)]
   pub reserved_entries: u64,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub ownership: Option<InitialEntryOwnership>,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InitialEntryOwnership {
+  Planned,
+  Created,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InitialEntryKind {
+  Stage,
+  RenderScratch,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InitialEntryPoint {
+  IntentPersisted,
+  Created,
+}
+
+#[cfg(test)]
+type InitialEntryHook = Arc<dyn Fn(InitialEntryKind, InitialEntryPoint, &Path) -> Result<(), String> + Send + Sync>;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -352,9 +379,52 @@ pub struct ExportDelivery {
   pub render_scratch: Option<RenderScratch>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub copy_scratch: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub stage_ownership: Option<InitialEntryOwnership>,
 }
 
 impl ExportDelivery {
+  fn validate_initial_ownership(&self) -> Result<(), String> {
+    if self.version != 3 { return Ok(()); }
+    if self.stage_ownership.is_none() || self.render_scratch.as_ref().is_some_and(|scratch| scratch.ownership.is_none()) {
+      return Err("export recovery receipt has no initial-entry ownership evidence".into());
+    }
+    if matches!(self.state.as_str(), "prepared" | "verified" | "publishing" | "published") &&
+      self.stage_ownership != Some(InitialEntryOwnership::Created) {
+      return Err("active export has no confirmed staging-file ownership".into());
+    }
+    if self.render_scratch.as_ref().is_some_and(|scratch| scratch.ready && scratch.ownership != Some(InitialEntryOwnership::Created)) {
+      return Err("ready render scratch has no confirmed directory ownership".into());
+    }
+    Ok(())
+  }
+
+  fn has_unconfirmed_initial_entry(&self) -> bool {
+    self.stage_ownership == Some(InitialEntryOwnership::Planned) ||
+      self.render_scratch.as_ref().is_some_and(|scratch| scratch.ownership == Some(InitialEntryOwnership::Planned))
+  }
+
+  fn require_confirmed_initial_entries(&self) -> Result<(), String> {
+    self.validate_initial_ownership()?;
+    if self.has_unconfirmed_initial_entry() { return Err("initial export entry ownership was not confirmed; export again".into()); }
+    Ok(())
+  }
+
+  fn check_unconfirmed_cleanup(path: &Path, ownership: Option<InitialEntryOwnership>) -> Result<(), String> {
+    if ownership != Some(InitialEntryOwnership::Planned) { return Ok(()); }
+    match std::fs::symlink_metadata(path) {
+      Ok(_) => Err("initial export entry has unconfirmed ownership; retained without deletion".into()),
+      Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+        let parent = path.parent().ok_or("initial export entry has no parent")?;
+        if !std::fs::metadata(parent).map_err(|error| error.to_string())?.is_dir() {
+          return Err("initial export entry parent is unavailable for cleanup".into());
+        }
+        Ok(())
+      }
+      Err(error) => Err(error.to_string()),
+    }
+  }
+
   fn copy_scratch_prefix(&self) -> String {
     format!(".artdaddy-copy-{:x}-", Sha256::digest(self.id.as_bytes()))
   }
@@ -371,7 +441,7 @@ impl ExportDelivery {
   }
 
   fn execution_deadline_ms(&self, at: u64) -> Result<u64, String> {
-    if self.version != 2 { return Err("retained export has no supported execution clock; export again".into()); }
+    if !matches!(self.version, 2 | 3) { return Err("retained export has no supported execution clock; export again".into()); }
     if at < self.created_at { return Err("export execution clock moved before admission".into()); }
     let pending = self.execution_queued_at_ms.map(|queued| at.checked_sub(queued).ok_or("export queue clock regressed")).transpose()?.unwrap_or(0);
     let queued = self.execution_queued_ms.checked_add(pending).ok_or("export queue clock overflow")?;
@@ -517,6 +587,7 @@ fn discard_receipt(file: tempfile::NamedTempFile, primary: String) -> String {
 fn persist_delivery_after_sync(root: &Path, delivery: &ExportDelivery, after_sync: impl FnOnce(&Path) -> Result<(), String>) -> Result<(), String> {
   let _journal = lock_export_journal()?;
   if !valid_delivery_id(&delivery.id) { return Err("invalid export intent identity".into()); }
+  delivery.validate_initial_ownership()?;
   let mut sink = std::io::sink();
   let mut measured = ReceiptWriter { output: &mut sink, remaining: EXPORT_RECEIPT_LIMIT_BYTES };
   serde_json::to_writer(&mut measured, delivery).map_err(|error| error.to_string())?;
@@ -553,6 +624,19 @@ fn remove_delivery_receipt(root: &Path, id: &str) -> Result<(), String> {
 const EXPORT_SCRATCH_LIMIT_BYTES: u64 = 20_000_000_000;
 const EXPORT_WORKSPACE_PAYLOAD_BYTES: u64 = EXPORT_SCRATCH_LIMIT_BYTES - 2_000_000_000;
 const EXPORT_EXECUTION_LIMIT_MS: u64 = 8 * 60 * 60 * 1000;
+
+// A persisted plan may have created its entry even when confirmation failed.
+struct InitialEntryCharge(Option<workspace::Charge>);
+
+impl InitialEntryCharge {
+  fn release_uncreated(mut self) { drop(self.0.take()); }
+}
+
+impl Drop for InitialEntryCharge {
+  fn drop(&mut self) {
+    if let Some(charge) = self.0.take() { charge.retain(); }
+  }
+}
 
 struct ScratchOutput {
   owned: Option<(tempfile::NamedTempFile, workspace::Charge)>,
@@ -784,6 +868,8 @@ impl Supervisor {
       workspace: Workspace::new(EXPORT_WORKSPACE_PAYLOAD_BYTES),
       copying: Arc::default(),
       copy_settled: Arc::default(),
+      #[cfg(test)]
+      initial_entry_hook: None,
     }
   }
 
@@ -810,10 +896,11 @@ impl Supervisor {
       installed = installed.checked_add(bytes.len() as u64).ok_or("export journal size overflow")?;
       if installed > EXPORT_JOURNAL_LIMIT_BYTES { return Err("export journal grew beyond its aggregate recovery budget".into()); }
       let delivery: ExportDelivery = serde_json::from_slice(&bytes).map_err(|error| format!("damaged export journal {}: {error}", path.display()))?;
-      if !matches!(delivery.version, 1 | 2) || !valid_delivery_id(&delivery.id) ||
+      if !matches!(delivery.version, 1 | 2 | 3) || !valid_delivery_id(&delivery.id) ||
         path.file_stem().and_then(|value| value.to_str()) != Some(delivery.id.as_str()) {
         return Err("unsupported or invalid export journal identity".into());
       }
+      delivery.validate_initial_ownership()?;
       deliveries.insert(delivery.id.clone(), delivery);
     }
     self.account_workspace(&deliveries)?;
@@ -827,7 +914,14 @@ impl Supervisor {
   pub fn with_export_font_root(mut self, root: PathBuf) -> Self { self.export_font_root = Some(root); self }
 
   fn workspace_key(path: &Path) -> String {
-    let normalized = path.canonicalize().unwrap_or_else(|_| path.to_path_buf()).to_string_lossy()
+    let resolved = path.canonicalize().or_else(|error| {
+      if error.kind() != std::io::ErrorKind::NotFound { return Err(error); }
+      match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => parent.canonicalize().map(|parent| parent.join(name)),
+        _ => Err(error),
+      }
+    }).unwrap_or_else(|_| path.to_path_buf());
+    let normalized = resolved.to_string_lossy()
       .trim_start_matches("\\\\?\\").replace('\\', "/");
     if cfg!(target_os = "windows") { normalized.to_lowercase() } else { normalized }
   }
@@ -883,6 +977,7 @@ impl Supervisor {
     self.workspace.claim_output(&Self::workspace_key(Path::new(&path)), &|| {
       let entries = self.deliveries.lock().map_err(|error| error.to_string())?;
       let entry = entries.get(id).ok_or("output intent vanished while waiting for temporary capacity")?;
+      entry.require_confirmed_initial_entries()?;
       if entry.state != "prepared" || entry.producer_complete { return Err("output intent is no longer eligible while waiting for temporary capacity".into()); }
       entry.execution_deadline_ms(now_ms())?;
       if self.lock().jobs.get(id).is_some_and(|job| job.kill_requested ||
@@ -897,6 +992,108 @@ impl Supervisor {
     if let Some(delivery) = self.deliveries.lock().unwrap_or_else(|error| error.into_inner()).get(id) {
       self.workspace.finish_output_claim(&Self::workspace_key(Path::new(&delivery.stage_path)));
     }
+  }
+
+  fn create_initial_entry(&self, entries: &mut HashMap<String, ExportDelivery>, planned: ExportDelivery,
+    kind: InitialEntryKind) -> Result<ExportDelivery, String> {
+    if planned.version != 3 { return Err("new export entries require versioned ownership evidence".into()); }
+    planned.validate_initial_ownership()?;
+    let previous = entries.get(&planned.id).cloned();
+    let (path, bytes, count) = match kind {
+      InitialEntryKind::Stage => {
+        if previous.is_some() || planned.stage_ownership != Some(InitialEntryOwnership::Planned) || planned.state != "failed" {
+          return Err("initial staging file has no exclusive uncreated intent".into());
+        }
+        (PathBuf::from(&planned.stage_path), 0, 1)
+      }
+      InitialEntryKind::RenderScratch => {
+        if previous.as_ref().is_none_or(|entry| entry.render_scratch.is_some()) ||
+          planned.state != "prepared" || !matches!(planned.source, DeliverySource::Render { .. }) {
+          return Err("initial render directory has no exclusive uncreated intent".into());
+        }
+        let scratch = planned.render_scratch.as_ref().ok_or("render directory has no initial ownership plan")?;
+        if scratch.ready || scratch.ownership != Some(InitialEntryOwnership::Planned) {
+          return Err("render directory ownership plan was already used".into());
+        }
+        (PathBuf::from(&scratch.path), scratch.reserved_bytes, scratch.reserved_entries)
+      }
+    };
+    if !path.is_absolute() || count == 0 { return Err("initial export entry has no admitted absolute identity".into()); }
+    self.require_unleased_path(&path, entries.values())?;
+    self.account_workspace(entries)?;
+    let parent = path.parent().ok_or("initial export entry has no parent")?;
+    if kind == InitialEntryKind::RenderScratch {
+      let arena = self.export_work_root.as_ref().ok_or("native render work root is unavailable")?.join("exports")
+        .canonicalize().map_err(|error| error.to_string())?;
+      if parent.canonicalize().map_err(|error| error.to_string())? != arena {
+        return Err("initial render directory is outside its admitted arena".into());
+      }
+    }
+    let volume = allocation::AllocationUnit::for_directory(parent)?;
+    let admitted_path = parent.canonicalize().map_err(|error| error.to_string())?
+      .join(path.file_name().ok_or("initial export entry has no filename")?);
+    let charge = self.workspace.reserve_in(&Self::workspace_key(&admitted_path), bytes, count, volume)?;
+    let root = self.export_root.as_ref().ok_or("native export journal is unavailable")?;
+    persist_delivery(root, &planned)?;
+    entries.insert(planned.id.clone(), planned.clone());
+    let charge = InitialEntryCharge(Some(charge));
+    #[cfg(test)]
+    if let Some(hook) = &self.initial_entry_hook { hook(kind, InitialEntryPoint::IntentPersisted, &path)?; }
+    planned.execution_deadline_ms(now_ms())?;
+    let created = match kind {
+      InitialEntryKind::Stage => {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+          use std::os::unix::fs::OpenOptionsExt;
+          options.mode(0o600);
+        }
+        options.open(&path).map(Some)
+      }
+      InitialEntryKind::RenderScratch => {
+        let mut directory = std::fs::DirBuilder::new();
+        directory.recursive(false);
+        #[cfg(unix)]
+        {
+          use std::os::unix::fs::DirBuilderExt;
+          directory.mode(0o700);
+        }
+        directory.create(&path).map(|_| None)
+      }
+    };
+    let file = match created {
+      Ok(file) => file,
+      Err(error) => {
+        let rollback = match &previous {
+          Some(previous) => persist_delivery(root, previous),
+          None => remove_delivery_receipt(root, &planned.id),
+        };
+        if let Err(rollback) = rollback {
+          return Err(format!("initial export entry creation failed: {error}; ownership rollback failed and reservation is retained: {rollback}"));
+        }
+        if let Some(previous) = previous { entries.insert(planned.id.clone(), previous); }
+        else { entries.remove(&planned.id); }
+        charge.release_uncreated();
+        return Err(format!("initial export entry creation failed without adopting the occupied path: {error}"));
+      }
+    };
+    if let Some(file) = file { file.sync_all().map_err(|error| error.to_string())?; }
+    #[cfg(test)]
+    if let Some(hook) = &self.initial_entry_hook { hook(kind, InitialEntryPoint::Created, &path)?; }
+    let mut confirmed = planned;
+    match kind {
+      InitialEntryKind::Stage => {
+        confirmed.stage_ownership = Some(InitialEntryOwnership::Created);
+        confirmed.state = "prepared".into();
+      }
+      InitialEntryKind::RenderScratch => {
+        confirmed.render_scratch.as_mut().ok_or("render ownership plan disappeared")?.ownership = Some(InitialEntryOwnership::Created);
+      }
+    }
+    persist_delivery(root, &confirmed)?;
+    entries.insert(confirmed.id.clone(), confirmed.clone());
+    Ok(confirmed)
   }
 
   pub fn stage_render_scratch(&self, id: &str, files: Vec<RenderScratchFile>, fonts: Vec<String>) -> Result<String, String> {
@@ -937,8 +1134,7 @@ impl Supervisor {
     self.record_execution_clock(current, false)?;
     let work = self.export_work_root.as_ref().ok_or("native render work root is unavailable")?.join("exports");
     std::fs::create_dir_all(&work).map_err(|error| error.to_string())?;
-    let directory = tempfile::Builder::new().prefix(&format!("render-{id}-")).tempdir_in(&work).map_err(|error| error.to_string())?;
-    let path = directory.path().to_string_lossy().into_owned();
+    let path = work.join(format!("render-{id}-{}", &request_sha256[..16])).to_string_lossy().into_owned();
     let font_bytes = fonts.iter().try_fold(0u64, |total, font| {
       let bytes = self.export_font_root.as_ref().and_then(|root| std::fs::metadata(root.join(font)).ok())
         .map(|metadata| metadata.len()).unwrap_or(32 * 1024 * 1024);
@@ -946,14 +1142,18 @@ impl Supervisor {
     })?;
     let reserved_bytes = (bytes as u64).checked_add(font_bytes).ok_or("render staging workspace size overflow")?;
     let reserved_entries = (files.len() + fonts.len() + usize::from(!fonts.is_empty()) + 1) as u64;
-    let volume = allocation::AllocationUnit::for_directory(directory.path())?;
-    let charge = self.workspace.reserve_in(&Self::workspace_key(directory.path()), reserved_bytes, reserved_entries, volume)?;
     let mut reserved = current.clone();
-    reserved.render_scratch = Some(RenderScratch { path: path.clone(), request_sha256, ready: false, files: Vec::new(), reserved_bytes, reserved_entries });
-    persist_delivery(root, &reserved)?;
-    *current = reserved;
-    let owned = directory.keep();
-    charge.retain();
+    if reserved.version == 2 {
+      let stage = std::fs::symlink_metadata(&reserved.stage_path).map_err(|error| error.to_string())?;
+      if !stage.is_file() || stage.file_type().is_symlink() { return Err("legacy staging ownership cannot be upgraded from an unavailable regular file".into()); }
+      reserved.version = 3;
+      reserved.stage_ownership = Some(InitialEntryOwnership::Created);
+    }
+    reserved.render_scratch = Some(RenderScratch { path: path.clone(), request_sha256, ready: false, files: Vec::new(), reserved_bytes, reserved_entries,
+      ownership: Some(InitialEntryOwnership::Planned) });
+    self.create_initial_entry(&mut entries, reserved, InitialEntryKind::RenderScratch)?;
+    let current = entries.get_mut(id).ok_or("initial render intent disappeared")?;
+    let owned = PathBuf::from(&path);
     let mut written_bytes = 0u64;
     for file in files {
       current.execution_deadline_ms(now_ms())?;
@@ -1037,7 +1237,6 @@ impl Supervisor {
 
   pub fn prepare_delivery(&self, id: String, project_dir: String, stage_path: String, dest_path: String, source: DeliverySource) -> Result<ExportDelivery, String> {
     let admitted_at = now_ms();
-    let root = self.export_root.as_ref().ok_or("native export journal is unavailable")?;
     if !valid_delivery_id(&id) {
       return Err("invalid export intent identity".into());
     }
@@ -1071,15 +1270,12 @@ impl Supervisor {
       }
     };
     let execution_queued_at_ms = Some(now_ms());
-    let delivery = ExportDelivery { version: 2, id: id.clone(), project_dir, stage_path, dest_path,
-      state: "prepared".into(), identity: None, created_at: admitted_at, render_job: None, sources, recovery_attempts: 0, source, followups_done: false,
+    let delivery = ExportDelivery { version: 3, id: id.clone(), project_dir, stage_path, dest_path,
+      state: "failed".into(), identity: None, created_at: admitted_at, render_job: None, sources, recovery_attempts: 0, source, followups_done: false,
       command_sha256: None, worker_identity: None, producer_complete: false, execution_queued_at_ms, execution_queued_ms: 0,
-      render_scratch: None, copy_scratch: None };
+      render_scratch: None, copy_scratch: None, stage_ownership: Some(InitialEntryOwnership::Planned) };
     self.require_unleased_path(Path::new(&delivery.dest_path), deliveries.values().chain(std::iter::once(&delivery)))?;
-    let stage = std::fs::OpenOptions::new().write(true).create_new(true).open(&delivery.stage_path).map_err(|error| error.to_string())?;
-    drop(stage);
-    if let Err(error) = persist_delivery(root, &delivery) { let _ = std::fs::remove_file(&delivery.stage_path); return Err(error); }
-    deliveries.insert(id, delivery.clone());
+    let delivery = self.create_initial_entry(&mut deliveries, delivery, InitialEntryKind::Stage)?;
     let queued = if matches!(delivery.source, DeliverySource::Copy { .. }) { Some(self.retain_copy_job(&delivery, JobState::Queued)?) } else { None };
     drop(deliveries);
     if let Some(view) = queued { (self.notify)(Notice::Changed(view)); }
@@ -1087,6 +1283,7 @@ impl Supervisor {
   }
 
   fn require_completed_producer(&self, delivery: &ExportDelivery) -> Result<(), String> {
+    delivery.require_confirmed_initial_entries()?;
     if !delivery.producer_complete { return Err("export producer has no durable successful completion".into()); }
     if self.copying.lock().map_err(|error| error.to_string())?.contains(&delivery.id) {
       return Err("export copy is still running".into());
@@ -1104,6 +1301,7 @@ impl Supervisor {
   }
 
   fn record_execution_clock(&self, current: &mut ExportDelivery, queued: bool) -> Result<ExportDelivery, String> {
+    current.require_confirmed_initial_entries()?;
     if current.state != "prepared" { return Err("export job is not in prepared state".into()); }
     if current.producer_complete { return Err("completed export producer cannot be run again".into()); }
     let mut next = current.clone();
@@ -1282,7 +1480,7 @@ impl Supervisor {
         .map(|(relative, _)| Path::new(&scratch.path).join(relative).to_string_lossy().into_owned()).collect::<Vec<_>>()).unwrap_or_default();
       for dependency in declared.into_iter().chain(delivery.sources.iter().map(|(path, _)| path.as_str()))
         .chain(staged.iter().map(String::as_str)).chain(delivery.copy_scratch.as_deref())
-        .chain(stage_owned.then_some(delivery.stage_path.as_str())) {
+        .chain(stage_owned.then_some(delivery.stage_path.as_str())).chain(stage_owned.then_some(delivery.dest_path.as_str())) {
         let dependency = dependency_path(Path::new(dependency))?;
         if let Some(target_file) = &target_file {
           match same_file::Handle::from_path(&dependency) {
@@ -1412,6 +1610,10 @@ impl Supervisor {
             !self.copying.lock().unwrap_or_else(|error| error.into_inner()).contains(&delivery.id) {
           if let Err(error) = self.complete_delivery(&delivery.id) { failures.push((delivery.id, error)); }
         }
+        continue;
+      }
+      if delivery.has_unconfirmed_initial_entry() {
+        failures.push((delivery.id, "export was interrupted before initial entry ownership was confirmed; existing entries are retained without adoption or deletion".into()));
         continue;
       }
       if delivery.state == "verified" || delivery.state == "publishing" {
@@ -1563,15 +1765,31 @@ impl Supervisor {
       return Err("running export dependencies cannot be released".into());
     }
     if !["published", "cancelled", "failed"].contains(&entry.state.as_str()) { return Err("active export cannot be retired".into()); }
+    if let Some(scratch) = &entry.render_scratch {
+      ExportDelivery::check_unconfirmed_cleanup(Path::new(&scratch.path), scratch.ownership)?;
+      if self.export_work_root.is_none() { return Err("render work root is unavailable for cleanup".into()); }
+    }
+    if entry.state != "published" { ExportDelivery::check_unconfirmed_cleanup(Path::new(&entry.stage_path), entry.stage_ownership)?; }
     if let (Some(work_root), Some(cwd)) = (&self.export_work_root, entry.render_scratch.as_ref().map(|scratch| &scratch.path)
       .or_else(|| entry.render_job.as_ref().and_then(|spec| spec.cwd.as_ref()))) {
-      if let (Ok(work), Ok(scratch)) = (work_root.canonicalize(), Path::new(cwd).canonicalize()) {
-        if scratch.starts_with(&work) && scratch != work {
-          let key = Self::workspace_key(&scratch);
+      let key = Self::workspace_key(Path::new(cwd));
+      match std::fs::symlink_metadata(cwd) {
+        Ok(metadata) => {
+          if !metadata.is_dir() || metadata.file_type().is_symlink() { return Err("render scratch cleanup requires an owned regular directory".into()); }
+          let work = work_root.canonicalize().map_err(|error| error.to_string())?;
+          let scratch = Path::new(cwd).canonicalize().map_err(|error| error.to_string())?;
+          if !scratch.starts_with(&work) || scratch == work { return Err("render scratch cleanup is outside its admitted work root".into()); }
           std::fs::remove_dir_all(scratch).map_err(|error| error.to_string())?;
-          self.workspace.release_root(&key);
         }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+          let parent = Path::new(cwd).parent().ok_or("render scratch has no cleanup parent")?;
+          if !std::fs::metadata(parent).map_err(|error| error.to_string())?.is_dir() {
+            return Err("render scratch cleanup parent is unavailable".into());
+          }
+        }
+        Err(error) => return Err(error.to_string()),
       }
+      self.workspace.release_root(&key);
     }
     let stage_key = Self::workspace_key(Path::new(&entry.stage_path));
     for path in entry.copy_scratch_path()?.into_iter().chain((entry.state != "published").then_some(Path::new(&entry.stage_path))) {
@@ -2571,6 +2789,391 @@ mod export_delivery_tests {
   fn intent(owner: &Supervisor, dir: &Path, id: &str) -> ExportDelivery {
     owner.prepare_delivery(id.into(), "original-project".into(), dir.join(format!("{id}.partial")).to_string_lossy().into(),
       dir.join(format!("{id}.mp4")).to_string_lossy().into(), DeliverySource::Render { paths: Vec::new() }).unwrap()
+  }
+
+  fn initial_entry_fixture(dir: &Path, kind: InitialEntryKind) -> Supervisor {
+    std::fs::write(dir.join("source.bin"), b"original imported source").unwrap();
+    std::fs::write(dir.join("initial-boundary.mp4"), b"previous complete destination").unwrap();
+    let jobs = owner(&dir.join("journal")).with_export_work_root(dir.join("work"));
+    if kind == InitialEntryKind::RenderScratch {
+      initial_entry_attempt(&jobs, dir, InitialEntryKind::Stage, false).unwrap();
+    }
+    jobs
+  }
+
+  fn initial_entry_attempt(jobs: &Supervisor, dir: &Path, kind: InitialEntryKind, copy: bool) -> Result<PathBuf, String> {
+    match kind {
+      InitialEntryKind::Stage => jobs.prepare_delivery("initial-boundary".into(), "original-project".into(),
+        dir.join("initial-boundary.partial").to_string_lossy().into(), dir.join("initial-boundary.mp4").to_string_lossy().into(),
+        if copy { DeliverySource::Copy { path: dir.join("source.bin").to_string_lossy().into(), media_ref: "media_initial".into() } }
+        else { DeliverySource::Render { paths: vec![dir.join("source.bin").to_string_lossy().into()] } })
+        .map(|delivery| PathBuf::from(delivery.stage_path)),
+      InitialEntryKind::RenderScratch => jobs.stage_render_scratch("initial-boundary",
+        vec![RenderScratchFile { name: "graph.ffgraph".into(), content: "captured render graph".into() }], vec![]).map(PathBuf::from),
+    }
+  }
+
+  fn initial_entry_limit(dir: &Path, kind: InitialEntryKind) -> u64 {
+    let unit = allocation::AllocationUnit::for_directory(dir).unwrap().bytes();
+    if kind == InitialEntryKind::Stage { unit } else { unit * 3 + "captured render graph".len() as u64 }
+  }
+
+  fn initial_entry_row(dir: &Path) -> ExportDelivery {
+    serde_json::from_slice(&std::fs::read(dir.join("journal").join("initial-boundary.json")).unwrap()).unwrap()
+  }
+
+  fn initial_entry_reopen(dir: &Path, workspace: Arc<Workspace>) -> Supervisor {
+    let mut jobs = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {})).with_export_work_root(dir.join("work"));
+    jobs.workspace = workspace;
+    jobs.with_export_root(dir.join("journal")).unwrap()
+  }
+
+  fn assert_initial_sources_unchanged(dir: &Path) {
+    assert_eq!(std::fs::read(dir.join("source.bin")).unwrap(), b"original imported source");
+    assert_eq!(std::fs::read(dir.join("initial-boundary.mp4")).unwrap(), b"previous complete destination");
+  }
+
+  #[test]
+  fn initial_entry_refusal_creates_no_stage_or_render_root_and_no_new_ownership_record() {
+    for (kind, copy) in [(InitialEntryKind::Stage, false), (InitialEntryKind::Stage, true), (InitialEntryKind::RenderScratch, false)] {
+      let dir = tempfile::tempdir().unwrap();
+      let mut jobs = initial_entry_fixture(dir.path(), kind);
+      jobs.workspace = Workspace::allocation_fixture(64, 0);
+      assert!(initial_entry_attempt(&jobs, dir.path(), kind, copy).unwrap_err().contains("allocation budget"));
+      if kind == InitialEntryKind::Stage {
+        assert!(!dir.path().join("initial-boundary.partial").exists());
+        assert!(!dir.path().join("journal").join("initial-boundary.json").exists());
+        assert!(jobs.delivery_list().is_empty());
+      } else {
+        assert_eq!(std::fs::read_dir(dir.path().join("work").join("exports")).unwrap().count(), 0);
+        assert!(initial_entry_row(dir.path()).render_scratch.is_none());
+        assert!(jobs.delivery_list()[0].render_scratch.is_none());
+      }
+      assert_initial_sources_unchanged(dir.path());
+    }
+  }
+
+  #[test]
+  fn initial_entry_intent_and_full_allocation_charge_precede_real_creation_for_every_producer() {
+    for (kind, copy) in [(InitialEntryKind::Stage, false), (InitialEntryKind::Stage, true), (InitialEntryKind::RenderScratch, false)] {
+      let dir = tempfile::tempdir().unwrap();
+      let mut jobs = initial_entry_fixture(dir.path(), kind);
+      jobs.workspace = Workspace::allocation_fixture(64, initial_entry_limit(dir.path(), kind));
+      let workspace = jobs.workspace.clone();
+      let root = dir.path().to_path_buf();
+      let visits = Arc::new(Mutex::new(Vec::new()));
+      let observed = visits.clone();
+      jobs.initial_entry_hook = Some(Arc::new(move |actual, point, path| {
+        assert_eq!(actual, kind);
+        if point == InitialEntryPoint::IntentPersisted {
+          assert!(!path.exists(), "the persisted plan must precede the filesystem entry");
+          let row = initial_entry_row(&root);
+          assert_eq!(row.version, 3);
+          match kind {
+            InitialEntryKind::Stage => assert_eq!(row.stage_ownership, Some(InitialEntryOwnership::Planned)),
+            InitialEntryKind::RenderScratch => assert_eq!(row.render_scratch.unwrap().ownership, Some(InitialEntryOwnership::Planned)),
+          }
+          let volume = allocation::AllocationUnit::for_directory(path.parent().unwrap()).unwrap();
+          assert!(workspace.reserve_in("unadmitted-sibling", 0, 1, volume).is_err());
+        }
+        observed.lock().unwrap().push(point);
+        Ok(())
+      }));
+      let path = initial_entry_attempt(&jobs, dir.path(), kind, copy).unwrap();
+      assert_eq!(*visits.lock().unwrap(), [InitialEntryPoint::IntentPersisted, InitialEntryPoint::Created]);
+      let row = initial_entry_row(dir.path());
+      assert_eq!(row.state, "prepared");
+      assert_eq!(row.stage_ownership, Some(InitialEntryOwnership::Created));
+      match kind {
+        InitialEntryKind::Stage => assert_eq!(std::fs::metadata(&path).unwrap().len(), 0),
+        InitialEntryKind::RenderScratch => {
+          let scratch = row.render_scratch.unwrap();
+          assert_eq!(scratch.ownership, Some(InitialEntryOwnership::Created));
+          assert!(scratch.ready);
+          assert_eq!(std::fs::read(path.join("graph.ffgraph")).unwrap(), b"captured render graph");
+        }
+      }
+      assert_initial_sources_unchanged(dir.path());
+    }
+  }
+
+  #[test]
+  fn initial_entry_collision_after_durable_intent_never_adopts_or_deletes_foreign_data() {
+    for (kind, copy) in [(InitialEntryKind::Stage, false), (InitialEntryKind::Stage, true), (InitialEntryKind::RenderScratch, false)] {
+      let dir = tempfile::tempdir().unwrap();
+      let mut jobs = initial_entry_fixture(dir.path(), kind);
+      let occupied = Arc::new(Mutex::new(None));
+      let saved = occupied.clone();
+      jobs.initial_entry_hook = Some(Arc::new(move |_, point, path| {
+        if point == InitialEntryPoint::IntentPersisted {
+          if kind == InitialEntryKind::RenderScratch {
+            std::fs::create_dir(path).unwrap();
+            std::fs::write(path.join("foreign.bin"), b"foreign data").unwrap();
+          } else { std::fs::write(path, b"foreign data").unwrap(); }
+          *saved.lock().unwrap() = Some(path.to_path_buf());
+        }
+        Ok(())
+      }));
+      assert!(initial_entry_attempt(&jobs, dir.path(), kind, copy).unwrap_err().contains("without adopting"));
+      let path = occupied.lock().unwrap().clone().unwrap();
+      let foreign = if kind == InitialEntryKind::Stage { path.clone() } else { path.join("foreign.bin") };
+      assert_eq!(std::fs::read(&foreign).unwrap(), b"foreign data");
+      if kind == InitialEntryKind::Stage {
+        assert!(jobs.delivery_list().is_empty());
+        assert!(!dir.path().join("journal").join("initial-boundary.json").exists());
+      } else { assert!(initial_entry_row(dir.path()).render_scratch.is_none()); }
+      drop(jobs);
+      let reopened = initial_entry_reopen(dir.path(), Workspace::new(64));
+      reopened.recover_exports();
+      assert_eq!(std::fs::read(&foreign).unwrap(), b"foreign data");
+      assert!(!reopened.delivery_list().iter().any(|entry| entry.render_scratch.as_ref().is_some_and(|scratch| Path::new(&scratch.path) == path)));
+      assert_initial_sources_unchanged(dir.path());
+    }
+  }
+
+  #[test]
+  fn initial_entry_interruption_before_creation_restarts_without_inventing_or_replaying_a_write() {
+    for (kind, copy) in [(InitialEntryKind::Stage, false), (InitialEntryKind::Stage, true), (InitialEntryKind::RenderScratch, false)] {
+      let dir = tempfile::tempdir().unwrap();
+      let mut jobs = initial_entry_fixture(dir.path(), kind);
+      let path = Arc::new(Mutex::new(None));
+      let saved = path.clone();
+      jobs.initial_entry_hook = Some(Arc::new(move |_, point, path| {
+        if point == InitialEntryPoint::IntentPersisted {
+          *saved.lock().unwrap() = Some(path.to_path_buf());
+          return Err("interrupted before creation".into());
+        }
+        Ok(())
+      }));
+      assert!(initial_entry_attempt(&jobs, dir.path(), kind, copy).unwrap_err().contains("interrupted before creation"));
+      let path = path.lock().unwrap().clone().unwrap();
+      assert!(!path.exists());
+      assert!(initial_entry_row(dir.path()).has_unconfirmed_initial_entry());
+      drop(jobs);
+      let reopened = initial_entry_reopen(dir.path(), Workspace::new(64));
+      assert!(reopened.recover_exports().iter().any(|(_, error)| error.contains("ownership was confirmed")));
+      assert!(!path.exists());
+      assert!(reopened.verify_delivery("initial-boundary").is_err());
+      reopened.cancel_delivery("initial-boundary").unwrap();
+      reopened.complete_delivery("initial-boundary").unwrap();
+      assert!(initial_entry_row(dir.path()).followups_done);
+      assert_initial_sources_unchanged(dir.path());
+    }
+  }
+
+  #[test]
+  fn unconfirmed_created_entries_remain_charged_and_untouched_through_restart_and_cancellation() {
+    for (kind, copy) in [(InitialEntryKind::Stage, false), (InitialEntryKind::Stage, true), (InitialEntryKind::RenderScratch, false)] {
+      let dir = tempfile::tempdir().unwrap();
+      let mut jobs = initial_entry_fixture(dir.path(), kind);
+      let cap = initial_entry_limit(dir.path(), kind);
+      jobs.workspace = Workspace::allocation_fixture(64, cap);
+      let path = Arc::new(Mutex::new(None));
+      let saved = path.clone();
+      jobs.initial_entry_hook = Some(Arc::new(move |_, point, path| {
+        if point == InitialEntryPoint::Created {
+          *saved.lock().unwrap() = Some(path.to_path_buf());
+          return Err("interrupted after creation".into());
+        }
+        Ok(())
+      }));
+      assert!(initial_entry_attempt(&jobs, dir.path(), kind, copy).unwrap_err().contains("interrupted after creation"));
+      let path = path.lock().unwrap().clone().unwrap();
+      assert!(path.exists());
+      assert!(initial_entry_row(dir.path()).has_unconfirmed_initial_entry());
+      assert!(jobs.prepare_delivery("blocked-live".into(), "original-project".into(),
+        dir.path().join("blocked-live.partial").to_string_lossy().into(), dir.path().join("blocked-live.mp4").to_string_lossy().into(),
+        DeliverySource::Render { paths: vec![] }).unwrap_err().contains("allocation budget"));
+      assert!(!dir.path().join("blocked-live.partial").exists());
+      drop(jobs);
+      let reopened = initial_entry_reopen(dir.path(), Workspace::allocation_fixture(64, cap));
+      assert!(reopened.prepare_delivery("blocked-restart".into(), "original-project".into(),
+        dir.path().join("blocked-restart.partial").to_string_lossy().into(), dir.path().join("blocked-restart.mp4").to_string_lossy().into(),
+        DeliverySource::Render { paths: vec![] }).unwrap_err().contains("allocation budget"));
+      assert!(!dir.path().join("blocked-restart.partial").exists());
+      assert!(reopened.recover_exports().iter().any(|(_, error)| error.contains("ownership was confirmed")));
+      reopened.cancel_delivery("initial-boundary").unwrap();
+      assert!(reopened.complete_delivery("initial-boundary").unwrap_err().contains("unconfirmed ownership"));
+      assert!(path.exists());
+      if kind == InitialEntryKind::Stage { std::fs::remove_file(&path).unwrap(); }
+      else { std::fs::remove_dir(&path).unwrap(); }
+      reopened.complete_delivery("initial-boundary").unwrap();
+      let next = reopened.prepare_delivery("after-removal".into(), "original-project".into(),
+        dir.path().join("after-removal.partial").to_string_lossy().into(), dir.path().join("after-removal.mp4").to_string_lossy().into(),
+        DeliverySource::Render { paths: vec![] }).unwrap();
+      assert_eq!(std::fs::metadata(next.stage_path).unwrap().len(), 0);
+      assert_initial_sources_unchanged(dir.path());
+    }
+  }
+
+  #[test]
+  fn initial_entry_confirmation_write_failure_preserves_the_planned_receipt_and_capacity_hold() {
+    for (kind, copy) in [(InitialEntryKind::Stage, false), (InitialEntryKind::Stage, true), (InitialEntryKind::RenderScratch, false)] {
+      let dir = tempfile::tempdir().unwrap();
+      let mut jobs = initial_entry_fixture(dir.path(), kind);
+      jobs.workspace = Workspace::allocation_fixture(64, initial_entry_limit(dir.path(), kind));
+      let receipt = dir.path().join("journal").join("initial-boundary.json");
+      let blocked = Arc::new(Mutex::new(None::<CleanupBlocker>));
+      let blocker = blocked.clone();
+      let saved = Arc::new(Mutex::new(None));
+      let observed = saved.clone();
+      jobs.initial_entry_hook = Some(Arc::new(move |_, point, path| {
+        if point == InitialEntryPoint::Created {
+          *observed.lock().unwrap() = Some((path.to_path_buf(), std::fs::read(&receipt).unwrap()));
+          *blocker.lock().unwrap() = Some(CleanupBlocker::new(&receipt));
+        }
+        Ok(())
+      }));
+      assert!(initial_entry_attempt(&jobs, dir.path(), kind, copy).is_err());
+      drop(blocked.lock().unwrap().take());
+      let (path, planned) = saved.lock().unwrap().clone().unwrap();
+      assert!(path.exists());
+      assert_eq!(std::fs::read(dir.path().join("journal").join("initial-boundary.json")).unwrap(), planned);
+      assert!(initial_entry_row(dir.path()).has_unconfirmed_initial_entry());
+      drop(jobs);
+      let reopened = initial_entry_reopen(dir.path(), Workspace::allocation_fixture(64, initial_entry_limit(dir.path(), kind)));
+      assert!(reopened.prepare_delivery("blocked-confirmation".into(), "original-project".into(),
+        dir.path().join("blocked-confirmation.partial").to_string_lossy().into(), dir.path().join("blocked-confirmation.mp4").to_string_lossy().into(),
+        DeliverySource::Render { paths: vec![] }).unwrap_err().contains("allocation budget"));
+      assert!(!dir.path().join("blocked-confirmation.partial").exists());
+      assert_initial_sources_unchanged(dir.path());
+    }
+  }
+
+  #[test]
+  fn cancellation_serializes_with_initial_creation_and_releases_capacity_only_after_real_cleanup() {
+    for (kind, copy) in [(InitialEntryKind::Stage, false), (InitialEntryKind::Stage, true), (InitialEntryKind::RenderScratch, false)] {
+      let dir = tempfile::tempdir().unwrap();
+      let mut jobs = initial_entry_fixture(dir.path(), kind);
+      jobs.workspace = Workspace::allocation_fixture(64, initial_entry_limit(dir.path(), kind));
+      let (reached, waiting) = std::sync::mpsc::channel();
+      let (resume, go) = std::sync::mpsc::channel();
+      let go = Mutex::new(go);
+      jobs.initial_entry_hook = Some(Arc::new(move |_, point, _| {
+        if point == InitialEntryPoint::IntentPersisted {
+          reached.send(()).unwrap();
+          go.lock().unwrap().recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        }
+        Ok(())
+      }));
+      let worker = jobs.clone();
+      let root = dir.path().to_path_buf();
+      let creating = std::thread::spawn(move || initial_entry_attempt(&worker, &root, kind, copy));
+      waiting.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+      assert!(jobs.deliveries.try_lock().is_err(), "the creation commit must share the cancellation lock");
+      let cancelling = jobs.clone();
+      let (requested, request) = std::sync::mpsc::channel();
+      let cancel = std::thread::spawn(move || {
+        requested.send(()).unwrap();
+        cancelling.cancel_delivery("initial-boundary")
+      });
+      request.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+      resume.send(()).unwrap();
+      let path = creating.join().unwrap().unwrap();
+      assert!(cancel.join().unwrap().unwrap());
+      assert!(path.exists());
+      assert_eq!(initial_entry_row(dir.path()).state, "cancelled");
+      jobs.complete_delivery("initial-boundary").unwrap();
+      assert!(!path.exists());
+      assert!(!dir.path().join("initial-boundary.partial").exists());
+      assert!(initial_entry_row(dir.path()).followups_done);
+      jobs.initial_entry_hook = None;
+      let next = jobs.prepare_delivery("after-cancel".into(), "original-project".into(),
+        dir.path().join("after-cancel.partial").to_string_lossy().into(), dir.path().join("after-cancel.mp4").to_string_lossy().into(),
+        DeliverySource::Render { paths: vec![] }).unwrap();
+      assert_eq!(std::fs::metadata(next.stage_path).unwrap().len(), 0);
+      assert_initial_sources_unchanged(dir.path());
+    }
+  }
+
+  #[test]
+  fn initial_entry_schema_refuses_missing_current_evidence_and_preserves_legacy_receipt_behavior() {
+    for (kind, copy) in [(InitialEntryKind::Stage, false), (InitialEntryKind::Stage, true), (InitialEntryKind::RenderScratch, false)] {
+      let dir = tempfile::tempdir().unwrap();
+      let jobs = initial_entry_fixture(dir.path(), kind);
+      let path = initial_entry_attempt(&jobs, dir.path(), kind, copy).unwrap();
+      let receipt = dir.path().join("journal").join("initial-boundary.json");
+      let original = std::fs::read(&receipt).unwrap();
+      drop(jobs);
+      for omit_root in [false, true] {
+        if omit_root && kind != InitialEntryKind::RenderScratch { continue; }
+        let mut damaged: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        if omit_root { damaged["render_scratch"].as_object_mut().unwrap().remove("ownership"); }
+        else { damaged.as_object_mut().unwrap().remove("stage_ownership"); }
+        std::fs::write(&receipt, serde_json::to_vec(&damaged).unwrap()).unwrap();
+        let error = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {})).with_export_work_root(dir.path().join("work"))
+          .with_export_root(dir.path().join("journal")).err().expect("current receipt must retain its ownership evidence");
+        assert!(error.contains("ownership"));
+        assert!(path.exists());
+      }
+      let mut legacy: serde_json::Value = serde_json::from_slice(&original).unwrap();
+      legacy["version"] = serde_json::json!(2);
+      legacy.as_object_mut().unwrap().remove("stage_ownership");
+      if let Some(scratch) = legacy["render_scratch"].as_object_mut() { scratch.remove("ownership"); }
+      std::fs::write(&receipt, serde_json::to_vec(&legacy).unwrap()).unwrap();
+      let reopened = initial_entry_reopen(dir.path(), Workspace::new(64));
+      if !copy {
+        let graph = reopened.stage_render_scratch("initial-boundary",
+          vec![RenderScratchFile { name: "graph.ffgraph".into(), content: "captured render graph".into() }], vec![]).unwrap();
+        assert_eq!(std::fs::read(Path::new(&graph).join("graph.ffgraph")).unwrap(), b"captured render graph");
+      }
+      reopened.cancel_delivery("initial-boundary").unwrap();
+      reopened.complete_delivery("initial-boundary").unwrap();
+      assert!(!path.exists());
+      assert_initial_sources_unchanged(dir.path());
+    }
+  }
+
+  #[test]
+  fn initial_entry_parent_alias_keeps_one_charge_through_observation_external_removal_and_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut jobs = initial_entry_fixture(dir.path(), InitialEntryKind::RenderScratch);
+    std::fs::create_dir(dir.path().join("work-alias")).unwrap();
+    jobs.export_work_root = Some(dir.path().join("work-alias").join("..").join("work"));
+    jobs.workspace = Workspace::allocation_fixture(64, initial_entry_limit(dir.path(), InitialEntryKind::RenderScratch));
+    let path = initial_entry_attempt(&jobs, dir.path(), InitialEntryKind::RenderScratch, false).unwrap();
+    jobs.account_workspace(&jobs.deliveries.lock().unwrap()).unwrap();
+    assert_eq!(std::fs::read(path.join("graph.ffgraph")).unwrap(), b"captured render graph");
+    std::fs::remove_dir_all(&path).unwrap();
+    jobs.cancel_delivery("initial-boundary").unwrap();
+    jobs.complete_delivery("initial-boundary").unwrap();
+    let next = jobs.prepare_delivery("after-parent-alias".into(), "original-project".into(),
+      dir.path().join("after-parent-alias.partial").to_string_lossy().into(), dir.path().join("after-parent-alias.mp4").to_string_lossy().into(),
+      DeliverySource::Render { paths: vec![] }).unwrap();
+    let graph = jobs.stage_render_scratch(&next.id,
+      vec![RenderScratchFile { name: "graph.ffgraph".into(), content: "captured render graph".into() }], vec![]).unwrap();
+    assert_eq!(std::fs::read(Path::new(&graph).join("graph.ffgraph")).unwrap(), b"captured render graph");
+    assert_initial_sources_unchanged(dir.path());
+  }
+
+  #[test]
+  fn initial_entry_namespace_refuses_reserved_outputs_before_either_creation_or_destination_reuse() {
+    for copy in [false, true] {
+      for alias_as_stage in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let jobs = initial_entry_fixture(dir.path(), InitialEntryKind::Stage);
+        let reserved = jobs.prepare_delivery("namespace-owner".into(), "original-project".into(),
+          dir.path().join("owner.partial").to_string_lossy().into(), dir.path().join("owner.mp4").to_string_lossy().into(),
+          DeliverySource::Render { paths: vec![] }).unwrap();
+        let before = std::fs::read(dir.path().join("journal").join("namespace-owner.json")).unwrap();
+        assert!(!Path::new(&reserved.dest_path).exists());
+        let (stage, destination) = if alias_as_stage {
+          (reserved.dest_path.clone(), dir.path().join("other.mp4").to_string_lossy().into_owned())
+        } else {
+          (dir.path().join("other.partial").to_string_lossy().into_owned(), reserved.stage_path.clone())
+        };
+        let error = jobs.prepare_delivery("namespace-intruder".into(), "original-project".into(), stage, destination,
+          if copy { DeliverySource::Copy { path: dir.path().join("source.bin").to_string_lossy().into(), media_ref: "media_initial".into() } }
+          else { DeliverySource::Render { paths: vec![] } }).unwrap_err();
+        assert!(error.contains("leased"));
+        assert!(!Path::new(&reserved.dest_path).exists());
+        assert_eq!(std::fs::metadata(&reserved.stage_path).unwrap().len(), 0);
+        assert!(!dir.path().join("other.partial").exists());
+        assert!(!dir.path().join("journal").join("namespace-intruder.json").exists());
+        assert_eq!(std::fs::read(dir.path().join("journal").join("namespace-owner.json")).unwrap(), before);
+        assert_initial_sources_unchanged(dir.path());
+      }
+    }
   }
 
   pub(super) fn journal_write_clock(root: &Path) -> SystemTime {
