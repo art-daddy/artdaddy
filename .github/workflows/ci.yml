@@ -99,6 +99,8 @@ jobs:
       - run: npm ci
       - name: fetch sidecars
         if: runner.os == 'Windows'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: npm run fetch:sidecars
       # mac and Linux have no whisper prebuilt: their RELEASE workflows compile it, which is
       # ~10 minutes this per-push lane does not need. Everything else is the shipped set.
@@ -212,6 +214,8 @@ jobs:
       # gate passed by being SKIPPED, and the first capability change in months — which is
       # exactly what it is meant to catch — turned it red.
       - name: fetch sidecars
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: npm run fetch:sidecars
       - name: build node sidecar
         run: npm run build:sidecar

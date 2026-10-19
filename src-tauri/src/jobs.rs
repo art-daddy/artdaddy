@@ -3007,7 +3007,7 @@ mod export_delivery_tests {
   #[test]
   fn restart_refuses_expired_and_legacy_render_and_copy_execution_without_replacing_output() {
     for copy in [false, true] {
-      for version in [1, 2] {
+      for (version, queued_ms) in [(1, 0), (1, 60_000), (2, 0), (2, 60_000)] {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("journal");
         let source = dir.path().join("source.bin");
@@ -3024,16 +3024,18 @@ mod export_delivery_tests {
         std::fs::write(&delivery.dest_path, b"previous complete destination").unwrap();
         let mut retained = jobs.delivery_list().pop().unwrap();
         retained.version = version;
-        retained.created_at = now_ms() - EXPORT_EXECUTION_LIMIT_MS - 1;
         retained.execution_queued_at_ms = None;
+        retained.execution_queued_ms = queued_ms;
+        retained.created_at = now_ms() - EXPORT_EXECUTION_LIMIT_MS - queued_ms - 1;
         persist_delivery(&root, &retained).unwrap();
         drop(jobs);
         let reopened = owner(&root);
+        assert_eq!(serde_json::to_value(reopened.delivery_list()).unwrap(), serde_json::json!([retained]));
         let before_recovery = serde_json::to_string(&reopened.delivery_list()).unwrap();
         let failures = reopened.recover_exports();
         let expected = if version == 1 { "supported execution clock" } else { "eight-hour execution budget" };
         assert!(failures.iter().any(|(_, error)| error.contains(expected)),
-          "copy={copy} version={version} failures={failures:?} before={before_recovery} after={}",
+          "copy={copy} version={version} queued_ms={queued_ms} failures={failures:?} before={before_recovery} after={}",
           serde_json::to_string(&reopened.delivery_list()).unwrap());
         assert_eq!(reopened.list()[0].state, JobState::Exited);
         assert_ne!(reopened.list()[0].code, Some(0));

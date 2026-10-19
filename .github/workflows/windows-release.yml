@@ -47,6 +47,8 @@ jobs:
 
       - run: npm ci
       - run: npm run fetch:sidecars
+        env:
+          GH_TOKEN: ${{ github.token }}
       - run: npm run build:sidecar
       - run: npm run build:mcpb
       - run: npm run bundle:browser
@@ -141,20 +143,20 @@ jobs:
         run: |
           $destination = Join-Path $env:RUNNER_TEMP "ArtDaddyCandidate"
           $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=18877'
+          $env:WEBVIEW2_USER_DATA_FOLDER = Join-Path $env:RUNNER_TEMP 'ArtDaddyCandidateWebView'
           $install = Start-Process "${{ steps.verify.outputs.path }}" -ArgumentList @('/S', "/D=$destination") -Wait -PassThru
           if ($install.ExitCode -ne 0) { throw "Installer failed: $($install.ExitCode)" }
           $installed = Join-Path $destination "artdaddy.exe"
           if (-not (Test-Path $installed)) { throw "The installed executable is absent" }
           $env:ARTDADDY_QA_INSTALLED_EXE = $installed
-          $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=18877'
-          $application = Start-Process $installed -PassThru
+          $env:ARTDADDY_QA_ARTIFACT_SOURCE_SHA = $env:GITHUB_SHA
+          New-Item -ItemType Directory -Force reports/qa/installed | Out-Null
+          $existing = @(Get-Process artdaddy -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $installed })
+          $application = if ($existing.Count -eq 1) { $existing[0] } else { Start-Process $installed -PassThru -RedirectStandardOutput reports/qa/installed/app.out -RedirectStandardError reports/qa/installed/app.err }
           $env:ARTDADDY_QA_INSTALLED_PID = [string]$application.Id
           try {
             $null = $application.WaitForInputIdle(30000)
-            node scripts/qa/installedArtifact.mjs
-            if ($LASTEXITCODE -ne 0) { throw 'Installed WebView qualification failed' }
-            if (-not $application.WaitForExit(30000)) { throw 'Installed app did not close normally' }
-            if ($application.ExitCode -ne 0) { throw "Installed app exited with $($application.ExitCode)" }
+            & ./scripts/qa/installedWindow.ps1
           } finally {
             $application.Refresh()
             if (-not $application.HasExited) { Stop-Process -Id $application.Id -Force }
@@ -256,8 +258,6 @@ jobs:
           try {
             $null = $application.WaitForInputIdle(30000)
             & ./scripts/qa/installedWindow.ps1
-            if (-not $application.WaitForExit(30000)) { throw 'Installed app did not close normally' }
-            if ($application.ExitCode -ne 0) { throw "Installed app exited with $($application.ExitCode)" }
           } finally {
             $application.Refresh()
             if (-not $application.HasExited) { Stop-Process -Id $application.Id -Force }

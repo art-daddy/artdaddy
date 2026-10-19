@@ -140,6 +140,37 @@ test.afterAll(async () => {
   await page?.close();
 });
 
+test("failed calibration selects normalization without waiting for stalled original decoders", async ({
+  browser,
+}) => {
+  const controlPage = await browser.newPage();
+  const fixtureRequests: string[] = [];
+  try {
+    controlPage.on("request", (request) => {
+      if (request.url().includes("/fixtures/rotation/")) fixtureRequests.push(request.url());
+    });
+    await controlPage.route("**/h264Calibration.mp4", (route) => route.abort());
+    await controlPage.addInitScript(() => {
+      if (typeof VideoDecoder !== "undefined") {
+        VideoDecoder.prototype.decode = function () {};
+        VideoDecoder.prototype.flush = function () {
+          return new Promise<void>(() => {});
+        };
+      }
+    });
+    await controlPage.goto("/preview-probe-rotation.html");
+    await controlPage.waitForFunction(() => "__rotation" in window, undefined, { timeout: 10_000 });
+    const result = await controlPage.evaluate(
+      () => (window as unknown as { __rotation: Record<string, RotationShot> }).__rotation,
+    );
+    expect(result["native-h264"].decoded).toBe(false);
+    expect(Object.keys(result)).toEqual(["native-h264"]);
+    expect(fixtureRequests).toEqual([]);
+  } finally {
+    await controlPage.close();
+  }
+});
+
 const dist = (a: readonly number[], b: readonly number[]) =>
   Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
 

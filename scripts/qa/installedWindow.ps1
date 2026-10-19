@@ -5,6 +5,7 @@ $temporary = [System.IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\') + '\'
 if (-not $installed.StartsWith($temporary, [StringComparison]::OrdinalIgnoreCase)) { throw 'Installed path must be under RUNNER_TEMP' }
 $application = Get-Process -Id ([int]$env:ARTDADDY_QA_INSTALLED_PID) -ErrorAction Stop
 if ($application.Path -ne $installed) { throw 'Unexpected installed process identity' }
+if ($application.Handle -eq [IntPtr]::Zero) { throw 'Cannot retain installed process handle' }
 $version = (Get-Item -LiteralPath $installed).VersionInfo.ProductVersion
 if ($version -notmatch '^0\.21\.6(?:\.0)?$') { throw "Unexpected installed version $version" }
 Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes,System.Drawing
@@ -57,4 +58,10 @@ try {
 }
 if (-not $application.CloseMainWindow()) { throw 'Installed app did not accept normal native close' }
 if (-not $application.WaitForExit(30000)) { throw 'Installed app did not exit normally after native close' }
-if ($application.ExitCode -ne 0) { throw "Installed app exited with $($application.ExitCode)" }
+$exitCode = $application.ExitCode
+$proof.nativeCloseAccepted = $true
+$proof.processExited = $true
+$proof.exitCode = $exitCode
+[System.IO.File]::WriteAllText((Join-Path $output 'installed-native.json'), ($proof | ConvertTo-Json -Depth 6), (New-Object System.Text.UTF8Encoding($false)))
+if ($null -eq $exitCode -or $exitCode -ne 0) { throw "Installed app exit code was not zero: $exitCode" }
+$proof | ConvertTo-Json -Depth 6

@@ -174,6 +174,11 @@ void (async () => {
       corners: [],
       at: {},
     };
+    if (!out["native-h264"].decoded && Object.keys(sources).length === 0) {
+      progress("normalization-required");
+      (window as unknown as { __rotation: unknown }).__rotation = out;
+      return;
+    }
     const renderer = new PreviewRenderer(canvas);
     for (const fx of ROTATION_FIXTURES) out[fx.file] = await shoot(renderer, fx.file, "plain", {});
     for (const file of ["h264_size_control.mp4", "h264_baseline_control.mp4"]) {
