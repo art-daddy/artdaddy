@@ -58,7 +58,12 @@ async function normalizedSources(info: TestInfo): Promise<Record<string, string>
 test.beforeAll(async ({ browser }, info) => {
   info.setTimeout(180_000);
   const nativeEngine = info.project.name === "system-wkwebview";
-  if (!nativeEngine) page = await browser.newPage();
+  if (!nativeEngine) {
+    page = await browser.newPage();
+    page.on("console", (message) => {
+      if (message.text().startsWith("rotation-stage")) console.log(message.text());
+    });
+  }
   const load = async (url: string, phase: string): Promise<Record<string, RotationShot>> => {
     if (nativeEngine) {
       const reportPath = info.outputPath(`system-wkwebview-${phase}.json`);
@@ -77,7 +82,22 @@ test.beforeAll(async ({ browser }, info) => {
       return native.shots;
     }
     await page.goto(url);
-    await page.waitForFunction(() => "__rotation" in window, undefined, { timeout: 60_000 });
+    try {
+      await page.waitForFunction(() => "__rotation" in window, undefined, { timeout: 60_000 });
+    } catch (error) {
+      const stage = await page.evaluate(
+        () =>
+          (window as unknown as { __rotationStage?: string }).__rotationStage ??
+          "module-not-started",
+      );
+      await info.attach("rotation-initialization-stage", {
+        body: JSON.stringify({ phase, stage, url }),
+        contentType: "application/json",
+      });
+      throw new Error(
+        `Rotation probe did not finish during ${phase}; stage=${stage}: ${String(error)}`,
+      );
+    }
     return page.evaluate(
       () => (window as unknown as { __rotation: Record<string, RotationShot> }).__rotation,
     );

@@ -12,6 +12,10 @@ import { CORNERS, ROTATION_FIXTURES, classify } from "./__rotationFixtures";
 import type { Timeline } from "../timeline/model";
 
 const SIZE = 200;
+const progress = (stage: string) => {
+  (window as unknown as { __rotationStage: string }).__rotationStage = stage;
+  console.log("rotation-stage", stage);
+};
 
 export interface RotationShot {
   decoded: boolean;
@@ -66,9 +70,11 @@ async function shoot(
   clip: Record<string, unknown>,
   points: Record<string, [number, number]> = {},
 ): Promise<RotationShot> {
+  progress(`${tag}:${file}:open`);
   const vs = new VideoSource(sourceUrl(file));
   try {
     await vs.whenReady();
+    progress(`${tag}:${file}:frame`);
     const frame = await vs.frameAt(0);
     if (!frame) return { decoded: false, box: null, corners: [], at: {} };
     const raw = document.createElement("canvas");
@@ -86,6 +92,7 @@ async function shoot(
       return [data[0], data[1], data[2]];
     });
     const frameBytes = new Uint8Array(frame.allocationSize());
+    progress(`${tag}:${file}:copy`);
     const layout = await frame.copyTo(frameBytes);
     const corrected = new VideoFrame(frameBytes, {
       format: frame.format!,
@@ -160,6 +167,7 @@ async function shoot(
 void (async () => {
   const out: Record<string, RotationShot> = {};
   try {
+    progress("native-h264-calibration");
     out["native-h264"] = {
       decoded: await highH264DecodesCorrectly(),
       box: null,
@@ -224,16 +232,19 @@ void (async () => {
     });
     document.body.append(video);
     try {
+      progress("html-video:load");
       video.src = sourceUrl("h264_rot0.mp4");
       await new Promise<void>((resolve, reject) => {
         video.onloadeddata = () => resolve();
         video.onerror = () => reject(new Error("HTML video control did not decode"));
         video.load();
       });
+      progress("html-video:present");
       await new Promise<void>((resolve, reject) => {
         video.requestVideoFrameCallback(() => resolve());
         void video.play().catch(reject);
       });
+      progress("html-video:animation-frame");
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
       const htmlCanvas = document.createElement("canvas");
       htmlCanvas.width = video.videoWidth;
@@ -265,6 +276,7 @@ void (async () => {
       video.load();
       video.remove();
     }
+    progress("complete");
     (window as unknown as { __rotation: unknown }).__rotation = out;
   } catch (e) {
     (window as unknown as { __rotation: unknown }).__rotation = { error: String(e) };

@@ -3029,9 +3029,12 @@ mod export_delivery_tests {
         persist_delivery(&root, &retained).unwrap();
         drop(jobs);
         let reopened = owner(&root);
+        let before_recovery = serde_json::to_string(&reopened.delivery_list()).unwrap();
         let failures = reopened.recover_exports();
         let expected = if version == 1 { "supported execution clock" } else { "eight-hour execution budget" };
-        assert!(failures.iter().any(|(_, error)| error.contains(expected)), "{failures:?}");
+        assert!(failures.iter().any(|(_, error)| error.contains(expected)),
+          "copy={copy} version={version} failures={failures:?} before={before_recovery} after={}",
+          serde_json::to_string(&reopened.delivery_list()).unwrap());
         assert_eq!(reopened.list()[0].state, JobState::Exited);
         assert_ne!(reopened.list()[0].code, Some(0));
         assert!(!reopened.delivery_list()[0].producer_complete);

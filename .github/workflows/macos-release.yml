@@ -191,11 +191,14 @@ jobs:
 
       - run: npm run bundle:browser
 
+      - name: Compile the native export fixture before media case deadlines
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib --no-run
+
       # The export suite against the very sidecars this dmg is about to ship. A release that
       # cannot export is not a release, so this gates the build and has no opt-out: under CI a
       # sidecar the suite cannot find fails it rather than skipping (src/test/sidecars.ts).
       - name: Export suite (real ffmpeg, the shipped sidecars)
-        run: npx vitest run --config vitest.smoke.config.ts
+        run: npx vitest run --config vitest.smoke.config.ts --maxWorkers=2
 
       - name: Build the app
         env:
