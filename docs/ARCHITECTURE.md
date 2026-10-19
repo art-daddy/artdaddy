@@ -246,9 +246,10 @@ Handlers register against these definitions; MCP-only `manage_project` is part o
   **`clamp.ts`** applies the declared numeric bounds. Conformance tests check real handler coverage,
   and the backend guard checks the exact generated copy. `node scripts/codegen.mjs --check`
   refuses stale identities, current copies and modified retained snapshots.
-- Every inference/stream/proxy request carries the compiled **`catalog_id`**. The server selects
+- Every catalog-aware inference/stream/proxy request carries the compiled **`catalog_id`**. The server selects
   that exact trusted snapshot, never the newest schema as a fallback. Missing, unknown or
-  no-longer-supported identities receive HTTP 426 before model/provider dispatch. Requests cannot
+  no-longer-supported identities receive HTTP 426 before model/provider dispatch, except for the
+  explicitly retained legacy protocol described below. Requests cannot
   upload tool descriptions or replace the server-owned system prompt.
 
 ### Required updates and offline work
@@ -256,7 +257,11 @@ Handlers register against these definitions; MCP-only `manage_project` is part o
 `compatibility.generation` identifies a compatibility generation; `minimum_generation` is the
 server's supported floor. Ordinary optional releases retain the generation and old snapshots.
 A deliberately required release increments the generation and raises the floor; this migration
-starts at generation 1 and requires an update from pre-identity apps.
+starts at generation 1. The approved 0.21.5 transition retains an immutable snapshot of its
+released client catalog. Its inference marker and unversioned generation protocol select only
+that legacy snapshot; explicit unsupported catalog IDs never fall back. This preserves the
+legacy protocol, not proof of a particular installed binary. Auth and paid-call admission still
+apply, and new clients keep the required-update gate below.
 
 The authenticated, non-spending `POST /client/compatibility` verifies the installed catalog.
 The desktop's single `update/compatibility.ts` authority gates the editing surface, input/native

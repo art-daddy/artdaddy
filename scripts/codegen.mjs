@@ -2,6 +2,7 @@
 import { writeFileSync, readFileSync, mkdirSync, existsSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const CLIENT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -9,6 +10,9 @@ const SERVER_DIR = process.env.ARTDADDY_SERVER_DIR
   ? resolve(process.env.ARTDADDY_SERVER_DIR) : resolve(CLIENT_DIR, "../Akaru");
 const SOURCE = join(CLIENT_DIR, "src/contract/catalog.json");
 const CHECK = process.argv.includes("--check");
+const LEGACY_RELEASE = "0.21.5";
+const LEGACY_SOURCE_SHA256 = "37a97dc95368bd889d31b358f6e45afacbcabced2e56e19234b55c51b38aa88a";
+const LEGACY_SOURCE = join(CLIENT_DIR, "src/contract/legacy", `${LEGACY_RELEASE}.json`);
 
 function write(path, content) {
   if (CHECK) {
@@ -76,6 +80,34 @@ function buildCatalog() {
 
 async function main() {
   const { source, catalog, id } = buildCatalog();
+  if (process.argv.includes("--import-legacy-release")) {
+    if (CHECK) throw new Error("legacy import cannot run in check mode");
+    const released = execFileSync("git", ["show", `v${LEGACY_RELEASE}:src/contract/catalog.json`], { cwd: CLIENT_DIR, encoding: "utf8" });
+    if (createHash("sha256").update(released).digest("hex") !== LEGACY_SOURCE_SHA256) throw new Error("released legacy catalog differs from its reviewed bytes");
+    retain(LEGACY_SOURCE, released);
+  }
+  const legacySource = readFileSync(LEGACY_SOURCE, "utf8").replace(/\r\n/g, "\n");
+  if (createHash("sha256").update(legacySource).digest("hex") !== LEGACY_SOURCE_SHA256) throw new Error("immutable released legacy catalog was modified");
+  const released = JSON.parse(legacySource);
+  const byName = new Map(catalog.tools.map(tool => [tool.name, tool]));
+  const legacy = {
+    version: released.version,
+    compatibility: { generation: 1, minimum_generation: 1 },
+    authored_in: "src/contract/catalog.json",
+    retained_release: LEGACY_RELEASE,
+    released_bundle_sha256: LEGACY_SOURCE_SHA256,
+    tools: released.tools.map(tool => {
+      const metadata = byName.get(tool.name);
+      if (!metadata) throw new Error(`legacy tool has no canonical metadata: ${tool.name}`);
+      return { ...tool, status: "active", surfaces: ["app"], effect: metadata.effect,
+        ...(metadata.omit_for_native_video ? { omit_for_native_video: true } : {}),
+        ...(tool.name === "inspect_media" ? { text_variant: { description: tool.description, parameters: tool.parameters } } : {}) };
+    }),
+    effects: released.effects,
+    removed_tools: [],
+  };
+  const legacySnapshot = JSON.stringify(legacy, null, 2) + "\n";
+  const legacyId = createHash("sha256").update(legacySnapshot).digest("hex");
   write(join(CLIENT_DIR, "src/contract/identity.json"), JSON.stringify({ version: catalog.version, id }, null, 2) + "\n");
   if (existsSync(join(SERVER_DIR, "src/akaru/turn/tools"))) {
     const current = join(SERVER_DIR, "src/akaru/turn/tools/generated/catalog.json");
@@ -95,6 +127,8 @@ async function main() {
     }
     write(join(SERVER_DIR, "src/akaru/turn/tools/generated/catalog.json"), source);
     retain(join(retained, `${id}.json`), source);
+    retain(join(retained, `${legacyId}.json`), legacySnapshot);
+    write(join(SERVER_DIR, "src/akaru/turn/tools/generated/legacy.json"), JSON.stringify({ releases: { [LEGACY_RELEASE]: legacyId } }, null, 2) + "\n");
   }
   console.log(`client catalog ${catalog.version}: ${catalog.tools.length} retained definitions, ${id}`);
   console.log("codegen complete.");
