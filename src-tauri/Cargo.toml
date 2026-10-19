@@ -48,6 +48,8 @@ tokio = { version = "1", features = ["time"] }
 # resolves so the test evaluates the same matcher the app does.
 [dev-dependencies]
 glob = "0.3"
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 
 # Desktop-only: there is no updater on mobile, and the plugin doesn't build there.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]

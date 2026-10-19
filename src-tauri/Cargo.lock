@@ -120,6 +120,8 @@ dependencies = [
  "keyring",
  "libc",
  "log",
+ "reqwest",
+ "rustls",
  "same-file",
  "serde",
  "serde_json",
