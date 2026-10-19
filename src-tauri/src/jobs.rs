@@ -1248,10 +1248,12 @@ impl Supervisor {
     }
     let stage = PathBuf::from(&stage_path);
     let dest = PathBuf::from(&dest_path);
-    if !stage.is_absolute() || !dest.is_absolute() || stage == dest || stage.parent() != dest.parent() {
+    if !stage.is_absolute() || !dest.is_absolute() || stage == dest {
       return Err("export needs a distinct destination-volume staging sibling".into());
     }
     let parent = dest.parent().ok_or("export destination has no parent")?.canonicalize().map_err(|error| error.to_string())?;
+    let stage_parent = stage.parent().ok_or("export stage has no parent")?.canonicalize().map_err(|error| error.to_string())?;
+    if stage_parent != parent { return Err("export needs a distinct destination-volume staging sibling".into()); }
     let stage_path = parent.join(stage.file_name().ok_or("export stage has no filename")?).to_string_lossy().into_owned();
     let dest_path = parent.join(dest.file_name().ok_or("export destination has no filename")?).to_string_lossy().into_owned();
     let destination_key = |path: &str| if cfg!(target_os = "windows") { path.to_lowercase() } else { path.to_string() };
@@ -3183,7 +3185,7 @@ mod export_delivery_tests {
         let error = jobs.prepare_delivery("namespace-intruder".into(), "original-project".into(), stage, destination,
           if copy { DeliverySource::Copy { path: dir.path().join("source.bin").to_string_lossy().into(), media_ref: "media_initial".into() } }
           else { DeliverySource::Render { paths: vec![] } }).unwrap_err();
-        assert!(error.contains("leased"));
+        assert!(error.contains("leased"), "{error}");
         assert!(!Path::new(&reserved.dest_path).exists());
         assert_eq!(std::fs::metadata(&reserved.stage_path).unwrap().len(), 0);
         assert!(!dir.path().join("other.partial").exists());
@@ -3191,6 +3193,43 @@ mod export_delivery_tests {
         assert_eq!(std::fs::read(dir.path().join("journal").join("namespace-owner.json")).unwrap(), before);
         assert_initial_sources_unchanged(dir.path());
       }
+      let dir = tempfile::tempdir().unwrap();
+      let jobs = initial_entry_fixture(dir.path(), InitialEntryKind::Stage);
+      let alias = dir.path().join("parent-alias");
+      let different = dir.path().join("different-parent");
+      std::fs::create_dir(&alias).unwrap();
+      std::fs::create_dir(&different).unwrap();
+      let source = || if copy {
+        DeliverySource::Copy { path: dir.path().join("source.bin").to_string_lossy().into(), media_ref: "media_initial".into() }
+      } else {
+        DeliverySource::Render { paths: vec![dir.path().join("source.bin").to_string_lossy().into()] }
+      };
+      let destination = dir.path().join("canonical-sibling.mp4");
+      let error = jobs.prepare_delivery("different-parent".into(), "original-project".into(),
+        different.join("foreign.partial").to_string_lossy().into(), destination.to_string_lossy().into(), source()).unwrap_err();
+      assert!(error.contains("distinct destination-volume staging sibling"), "{error}");
+      assert!(!different.join("foreign.partial").exists());
+      assert!(!dir.path().join("foreign.partial").exists());
+      assert!(!dir.path().join("journal").join("different-parent.json").exists());
+      let delivery = jobs.prepare_delivery("canonical-sibling".into(), "original-project".into(),
+        alias.join("..").join("canonical-sibling.partial").to_string_lossy().into(), destination.to_string_lossy().into(), source()).unwrap();
+      assert_eq!(std::fs::metadata(&delivery.stage_path).unwrap().len(), 0);
+      let receipt: ExportDelivery = serde_json::from_slice(&std::fs::read(dir.path().join("journal").join("canonical-sibling.json")).unwrap()).unwrap();
+      assert_eq!(receipt.stage_ownership, Some(InitialEntryOwnership::Created));
+      if copy {
+        jobs.copy_delivery(&delivery.id).unwrap();
+        jobs.verify_delivery(&delivery.id).unwrap();
+        jobs.publish_delivery(&delivery.id).unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"original imported source");
+      } else {
+        let scratch = jobs.stage_render_scratch(&delivery.id,
+          vec![RenderScratchFile { name: "graph.ffgraph".into(), content: "captured render graph".into() }], vec![]).unwrap();
+        assert_eq!(std::fs::read(Path::new(&scratch).join("graph.ffgraph")).unwrap(), b"captured render graph");
+        jobs.fail_delivery(&delivery.id).unwrap();
+      }
+      jobs.complete_delivery(&delivery.id).unwrap();
+      assert!(!Path::new(&delivery.stage_path).exists());
+      assert_initial_sources_unchanged(dir.path());
     }
   }
 
@@ -4890,15 +4929,20 @@ mod export_delivery_tests {
     let source = directory.path().join("source.wav");
     let bytes = allocation::fixture_bytes(usize::try_from(unit + 1).unwrap());
     std::fs::write(&source, &bytes).unwrap();
-    let delivery = restored.prepare_delivery("copy-after-allocated-restart".into(), "original-project".into(),
-      directory.path().join("result.partial").to_string_lossy().into(), directory.path().join("result.wav").to_string_lossy().into(),
-      DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_source".into() }).unwrap();
-    std::fs::write(&delivery.dest_path, b"previous complete file").unwrap();
-    assert!(restored.copy_delivery(&delivery.id).unwrap_err().contains("allocation budget"));
-    assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"previous complete file");
+    let stage = directory.path().join("result.partial");
+    let destination = directory.path().join("result.wav");
+    std::fs::write(&destination, b"previous complete file").unwrap();
+    let prepare = || restored.prepare_delivery("copy-after-allocated-restart".into(), "original-project".into(),
+      stage.to_string_lossy().into(), destination.to_string_lossy().into(),
+      DeliverySource::Copy { path: source.to_string_lossy().into(), media_ref: "media_source".into() });
+    assert!(prepare().unwrap_err().contains("allocation budget"));
+    assert!(!stage.exists());
+    assert!(!directory.path().join("journal").join("copy-after-allocated-restart.json").exists());
+    assert_eq!(std::fs::read(&destination).unwrap(), b"previous complete file");
     assert_eq!(std::fs::read(&peer.stage_path).unwrap(), peer_bytes);
     restored.fail_delivery(&peer.id).unwrap();
     restored.complete_delivery(&peer.id).unwrap();
+    let delivery = prepare().unwrap();
     restored.copy_delivery(&delivery.id).unwrap();
     assert_eq!(std::fs::read(&delivery.stage_path).unwrap(), bytes);
     restored.verify_delivery(&delivery.id).unwrap();
