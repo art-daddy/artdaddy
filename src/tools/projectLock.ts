@@ -9,6 +9,19 @@
 import { INTERNAL_DIR, joinPath, type FsLike } from "./store";
 
 const LOCK = `${INTERNAL_DIR}/.lock`;
+const writes = new Map<string, Promise<void>>();
+
+function sequenceLock(projectDir: string, run: () => Promise<void>): Promise<void> {
+  const key = joinPath(projectDir);
+  const previous = writes.get(key) ?? Promise.resolve();
+  const current = previous.catch(() => undefined).then(run);
+  writes.set(key, current);
+  const settled = () => {
+    if (writes.get(key) === current) writes.delete(key);
+  };
+  void current.then(settled, settled);
+  return current;
+}
 
 /** How often the holder re-stamps its claim while the project is open. */
 export const HEARTBEAT_MS = 20_000;
@@ -87,12 +100,18 @@ export async function foreignProjectLock(
 /** Claim the project and keep the claim ALIVE. Best-effort by design: a read-only volume or a
  *  full disk must not stop someone opening their own project, so a failed claim is silent. */
 export async function claimProjectLock(fs: FsLike, projectDir: string): Promise<void> {
-  await stamp(fs, projectDir);
   stopHeartbeat(projectDir);
-  const timer = setInterval(() => void beat(fs, projectDir), HEARTBEAT_MS);
-  // Node/test runners would otherwise be held open by the interval.
-  (timer as unknown as { unref?: () => void }).unref?.();
-  beats.set(projectDir, timer);
+  await sequenceLock(projectDir, async () => {
+    await stamp(fs, projectDir);
+    stopHeartbeat(projectDir);
+    const timer = setInterval(
+      () => void sequenceLock(projectDir, () => beat(fs, projectDir)).catch(() => undefined),
+      HEARTBEAT_MS,
+    );
+    // Node/test runners would otherwise be held open by the interval.
+    (timer as unknown as { unref?: () => void }).unref?.();
+    beats.set(projectDir, timer);
+  });
 }
 
 const beats = new Map<string, ReturnType<typeof setInterval>>();
@@ -134,11 +153,14 @@ async function beat(fs: FsLike, projectDir: string): Promise<void> {
  *  another machine has since claimed would hand them a false all-clear. */
 export async function releaseProjectLock(fs: FsLike, projectDir: string): Promise<void> {
   stopHeartbeat(projectDir); // before the delete, so no beat can resurrect the file
-  try {
-    const raw = JSON.parse(await fs.readTextFile(lockPath(projectDir))) as Partial<ProjectLock>;
-    if (raw.instance !== (await instanceId())) return;
-    await fs.remove?.(lockPath(projectDir));
-  } catch {
-    /* no lock, unreadable, or no delete support: nothing to release */
-  }
+  await sequenceLock(projectDir, async () => {
+    stopHeartbeat(projectDir);
+    try {
+      const raw = JSON.parse(await fs.readTextFile(lockPath(projectDir))) as Partial<ProjectLock>;
+      if (raw.instance !== (await instanceId())) return;
+      await fs.remove?.(lockPath(projectDir));
+    } catch {
+      /* no lock, unreadable, or no delete support: nothing to release */
+    }
+  });
 }

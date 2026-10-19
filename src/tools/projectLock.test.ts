@@ -182,6 +182,101 @@ describe("project lock — heartbeat", () => {
     expect(await fs.exists(LOCK)).toBe(false);
   });
 
+  it("does not recreate a closed project's lock when a heartbeat write was already in flight", async () => {
+    await claimProjectLock(fs, DIR);
+    const write = fs.writeTextFile.bind(fs);
+    let unblock!: () => void;
+    let started!: () => void;
+    let finished!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      unblock = resolve;
+    });
+    const entered = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const written = new Promise<void>((resolve) => {
+      finished = resolve;
+    });
+    fs.writeTextFile = async (file, text) => {
+      started();
+      await waiting;
+      await write(file, text);
+      finished();
+    };
+    vi.advanceTimersByTime(HEARTBEAT_MS);
+    await entered;
+    const closed = releaseProjectLock(fs, DIR);
+    for (let round = 0; round < 10; round++) await Promise.resolve();
+    unblock();
+    await written;
+    await closed;
+    expect(await fs.exists(LOCK)).toBe(false);
+  });
+
+  it("drains an initial claim before a close that arrived during its write", async () => {
+    const write = fs.writeTextFile.bind(fs);
+    let unblock!: () => void;
+    let started!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      unblock = resolve;
+    });
+    const entered = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    fs.writeTextFile = async (file, text) => {
+      started();
+      await waiting;
+      return write(file, text);
+    };
+    const opened = claimProjectLock(fs, DIR);
+    await entered;
+    const closed = releaseProjectLock(fs, DIR);
+    unblock();
+    await Promise.all([opened, closed]);
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_MS * 3);
+    expect(await fs.exists(LOCK)).toBe(false);
+  });
+
+  it("does not let an old release delete the claim of a queued reopen", async () => {
+    await claimProjectLock(fs, DIR);
+    const remove = fs.remove.bind(fs);
+    let unblock!: () => void;
+    let started!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      unblock = resolve;
+    });
+    const entered = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    fs.remove = async (file) => {
+      started();
+      await waiting;
+      return remove(file);
+    };
+    const closed = releaseProjectLock(fs, DIR);
+    await entered;
+    const reopened = claimProjectLock(fs, DIR);
+    unblock();
+    await Promise.all([closed, reopened]);
+    expect(await fs.exists(LOCK)).toBe(true);
+    expect(await foreignProjectLock(fs, DIR)).toBeNull();
+  });
+
+  it("can close and reopen after a heartbeat fails at the filesystem write", async () => {
+    await claimProjectLock(fs, DIR);
+    const write = fs.writeTextFile.bind(fs);
+    fs.writeTextFile = async () => {
+      throw new Error("disk disconnected");
+    };
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_MS);
+    await releaseProjectLock(fs, DIR);
+    expect(await fs.exists(LOCK)).toBe(false);
+    fs.writeTextFile = write;
+    await claimProjectLock(fs, DIR);
+    expect(await fs.exists(LOCK)).toBe(true);
+    expect(await foreignProjectLock(fs, DIR)).toBeNull();
+  });
+
   it("does not stamp over a claim another run has taken", async () => {
     vi.setSystemTime(new Date("2026-08-17T10:00:00Z"));
     await claimProjectLock(fs, DIR);

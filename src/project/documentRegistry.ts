@@ -75,7 +75,7 @@ export function makeProjectChildren(id: ProjectId): ProjectChildren {
       const outcome = editorResult.status === "fulfilled" ? editorResult.value : "failed";
       if (outcome !== "loaded") return "failed";
       // Claim the project AFTER a successful load, so a refused open leaves no lock behind.
-      void noteAndClaimProjectLock(id);
+      await noteAndClaimProjectLock(id);
       // Warm the WS-free tool host so local tools can run (fire-and-forget, as before).
       openToolHost(id).ready.catch(() => undefined);
       return "loaded";

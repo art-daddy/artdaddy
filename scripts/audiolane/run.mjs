@@ -23,6 +23,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { build } from "esbuild";
+import { connect } from "../cdp.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "../..");
 const OUT = path.join(ROOT, "reports", "audiolane");
@@ -234,49 +235,15 @@ async function waitForPort(userDataDir, timeoutMs = 30_000) {
   const file = path.join(userDataDir, "DevToolsActivePort");
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (existsSync(file)) {
+    try {
       const port = readFileSync(file, "utf8").split("\n")[0].trim();
-      if (port) return port;
+      if (/^\d+$/.test(port) && Number(port) > 0 && Number(port) <= 65535) return port;
+    } catch (error) {
+      if (error.code !== "ENOENT" && error.code !== "EBUSY") throw error;
     }
     await new Promise((r) => setTimeout(r, 100));
   }
   throw new Error("browser never reported a debugging port");
-}
-
-function connect(url) {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(url);
-    const pending = new Map();
-    const exceptions = [];
-    let id = 0;
-    ws.onmessage = (ev) => {
-      const msg = JSON.parse(ev.data);
-      if (msg.method === "Runtime.exceptionThrown") {
-        const d = msg.params?.exceptionDetails;
-        exceptions.push(d?.exception?.description ?? d?.text ?? "unknown exception");
-        return;
-      }
-      if (!msg.id) return;
-      const p = pending.get(msg.id);
-      if (!p) return;
-      pending.delete(msg.id);
-      msg.error ? p.reject(new Error(JSON.stringify(msg.error))) : p.resolve(msg.result);
-    };
-    ws.onerror = () => reject(new Error(`cannot connect to ${url}`));
-    ws.onopen = () =>
-      resolve({
-        send(method, params = {}) {
-          id += 1;
-          const mid = id;
-          return new Promise((res, rej) => {
-            pending.set(mid, { resolve: res, reject: rej });
-            ws.send(JSON.stringify({ id: mid, method, params }));
-          });
-        },
-        exceptions,
-        close: () => ws.close(),
-      });
-  });
 }
 
 async function measureInBrowser(pageUrl) {
@@ -300,7 +267,12 @@ async function measureInBrowser(pageUrl) {
     const targets = await fetch(`http://127.0.0.1:${port}/json`).then((r) => r.json());
     const page = targets.find((t) => t.type === "page");
     if (!page) throw new Error("browser opened no page target");
-    const cdp = await connect(page.webSocketDebuggerUrl);
+    const exceptions = [];
+    const cdp = await connect(page.webSocketDebuggerUrl, (message) => {
+      if (message.method !== "Runtime.exceptionThrown") return;
+      const detail = message.params?.exceptionDetails;
+      exceptions.push(detail?.exception?.description ?? detail?.text ?? "unknown exception");
+    });
     // Replays exceptions already thrown, so a bundle that died on load says why.
     await cdp.send("Runtime.enable");
     // The bundle may still be evaluating when the target appears.
@@ -313,7 +285,7 @@ async function measureInBrowser(pageUrl) {
       });
       if (ready.result?.value === true) break;
       if (Date.now() > deadline) {
-        const why = cdp.exceptions.length ? `: ${cdp.exceptions[0].slice(0, 600)}` : "";
+        const why = exceptions.length ? `: ${exceptions[0].slice(0, 600)}` : "";
         throw new Error(`probe never installed its entry points${why}`);
       }
       await new Promise((r) => setTimeout(r, 100));

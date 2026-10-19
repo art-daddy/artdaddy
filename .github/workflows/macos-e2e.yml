@@ -30,6 +30,10 @@ on:
         description: "Run only native recording and hidden-stage export QA; no paid calls"
         type: boolean
         default: false
+      mac_rca_only:
+        description: "Run the retained Mac failure checks only; no providers or publication"
+        type: boolean
+        default: false
       run_agent_lane:
         description: "Run the agent lane (spends model credits; needs the ARTDADDY_EVAL_TOKEN secret)"
         type: boolean
@@ -48,8 +52,83 @@ on:
         default: "v1.9.2"
 
 jobs:
+  mac-rca:
+    if: ${{ inputs.mac_rca_only }}
+    runs-on: ${{ inputs.runner || 'macos-14' }}
+    timeout-minutes: 40
+    env:
+      VITE_API_BASE_URL: http://127.0.0.1:9
+      VITE_SENTRY_DSN: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+      - run: node scripts/fetch-sidecars.mjs --only ffmpeg,ffprobe
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Prepare unused build-only resources and compile the real native fixture
+        shell: bash
+        run: |
+          triple="$(rustc -vV | sed -n 's/^host: //p')"
+          mkdir -p reports/mac-rca src-tauri/binaries src-tauri/resources/ms-playwright src-tauri/resources/node_modules
+          for name in yt-dlp whisper-cli browser; do touch "src-tauri/binaries/artdaddy-$name-$triple"; done
+          touch src-tauri/resources/artdaddy-browser.mjs src-tauri/resources/artdaddy.mcpb
+          touch src-tauri/resources/ms-playwright/placeholder src-tauri/resources/node_modules/placeholder
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib --no-run
+      - name: Browser disconnect outcomes
+        id: transport
+        continue-on-error: true
+        run: node --test scripts/cdp.test.mjs
+      - name: Project ownership lifecycle and branding preflight
+        id: ownership
+        continue-on-error: true
+        run: npx vitest run src/tools/projectLock.test.ts src/project/documentRegistry.temps.test.ts src/timeline/branding.test.ts src/timeline/brandRecovery.test.ts --reporter=json --outputFile=reports/mac-rca/unit.json
+      - name: Exact five Keychain and Trash witnesses in the real OS session
+        id: facilities
+        continue-on-error: true
+        shell: bash
+        run: |
+          status=0
+          for name in clearing_an_absent_refresh_token_is_a_no_op_not_an_error a_session_saved_without_a_keyring_moves_into_it_at_the_next_rotation refresh_token_round_trips_through_the_real_keychain trashes_a_directory_and_its_contents trashes_a_file_so_the_path_is_gone; do
+            log="reports/mac-rca/$name.log"
+            cargo test --locked --manifest-path src-tauri/Cargo.toml --lib -- "tests::$name" --exact >"$log" 2>&1 || status=1
+            cat "$log"
+            grep -q 'running 1 test' "$log" || status=1
+          done
+          exit "$status"
+      - name: Four retained export witnesses and all branding ratios
+        id: exports
+        continue-on-error: true
+        run: npx vitest run --config vitest.smoke.config.ts src/timeline/exportRange.smoke.e2e.ts src/timeline/branding.smoke.e2e.ts --maxWorkers=2 --reporter=json --outputFile=reports/mac-rca/media.json
+      - name: Real browser audio measurements
+        id: audio
+        continue-on-error: true
+        run: node --experimental-websocket scripts/audiolane/run.mjs
+      - name: Retain Mac RCA evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-rca-${{ inputs.runner || 'macos-14' }}-${{ github.sha }}
+          path: |
+            reports/mac-rca/**
+            reports/audiolane/**
+            reports/qa/exporter/**
+          if-no-files-found: error
+      - name: All requested lanes must pass
+        if: always()
+        env:
+          OUTCOMES: ${{ steps.transport.outcome }},${{ steps.ownership.outcome }},${{ steps.facilities.outcome }},${{ steps.exports.outcome }},${{ steps.audio.outcome }}
+        run: node -e "const outcomes=process.env.OUTCOMES.split(','); if(outcomes.length!==5||outcomes.some(value=>value!=='success')) process.exit(1)"
+
   native-hotfix:
-    if: ${{ inputs.native_hotfix_only }}
+    if: ${{ inputs.native_hotfix_only && !inputs.mac_rca_only }}
     runs-on: ${{ inputs.runner || 'macos-14' }}
     timeout-minutes: 35
     steps:
@@ -78,7 +157,7 @@ jobs:
           if-no-files-found: error
 
   native-pixels:
-    if: ${{ !inputs.native_hotfix_only }}
+    if: ${{ !inputs.native_hotfix_only && !inputs.mac_rca_only }}
     runs-on: ${{ inputs.runner || 'macos-14' }}
     timeout-minutes: 10
     env:
@@ -105,7 +184,7 @@ jobs:
           if-no-files-found: warn
 
   e2e:
-    if: ${{ !inputs.native_pixels_only && !inputs.native_hotfix_only }}
+    if: ${{ !inputs.native_pixels_only && !inputs.native_hotfix_only && !inputs.mac_rca_only }}
     runs-on: ${{ inputs.runner || 'macos-14' }}
     # Every lane pipes to `tail`, and a pipeline's status is the LAST command's - so without
     # pipefail each lane reported success no matter what happened, and the whole run went green

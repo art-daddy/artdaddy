@@ -87,6 +87,34 @@ describe("a project's temps are swept", () => {
     expect(captureErr).not.toHaveBeenCalled();
   });
 
+  it("does not finish opening while its project claim is still writing", async () => {
+    let unblock!: () => void;
+    let started!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      unblock = resolve;
+    });
+    const entered = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    claimLock.mockImplementationOnce(async () => {
+      started();
+      await waiting;
+    });
+    let loaded = false;
+    const opened = makeProjectChildren(id)
+      .open(ctx())
+      .then((outcome) => {
+        loaded = true;
+        return outcome;
+      });
+    await entered;
+    for (let round = 0; round < 10; round++) await Promise.resolve();
+    const finishedBeforeClaim = loaded;
+    unblock();
+    expect(await opened).toBe("loaded");
+    expect(finishedBeforeClaim).toBe(false);
+  });
+
   it("never when another machine had it open: its writers are invisible from here", async () => {
     foreignLock.mockResolvedValueOnce({ instance: "another-machine", at: Date.now() });
     expect(await makeProjectChildren(id).open(ctx())).toBe("loaded");

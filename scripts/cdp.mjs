@@ -36,13 +36,36 @@ async function pageTarget() {
   return page.webSocketDebuggerUrl;
 }
 
-function connect(url, onEvent) {
+function connect(url, onEvent, timeoutMs = 30_000) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return Promise.reject(new Error("CDP deadline must be finite and positive"));
+  }
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(url);
     const pending = new Map();
+    let closed = false;
     let id = 0;
+    const stop = (error) => {
+      if (closed) return;
+      closed = true;
+      clearTimeout(openTimer);
+      for (const request of pending.values()) {
+        clearTimeout(request.timer);
+        request.reject(error);
+      }
+      pending.clear();
+      reject(error);
+      ws.close();
+    };
+    const openTimer = setTimeout(() => stop(new Error("CDP connection timed out")), timeoutMs);
     ws.onmessage = (ev) => {
-      const msg = JSON.parse(ev.data);
+      let msg;
+      try {
+        msg = JSON.parse(ev.data);
+      } catch {
+        stop(new Error("CDP returned malformed JSON"));
+        return;
+      }
       if (!msg.id) {
         onEvent?.(msg); // unsolicited: Input.dragIntercepted, console, exceptions
         return;
@@ -50,21 +73,32 @@ function connect(url, onEvent) {
       const p = pending.get(msg.id);
       if (!p) return;
       pending.delete(msg.id);
+      clearTimeout(p.timer);
       msg.error ? p.reject(new Error(JSON.stringify(msg.error))) : p.resolve(msg.result);
     };
-    ws.onerror = () => reject(new Error(`cannot connect to ${url}`));
-    ws.onopen = () =>
+    ws.onerror = () => stop(new Error("CDP connection failed"));
+    ws.onclose = () => stop(new Error("CDP connection closed"));
+    ws.onopen = () => {
+      if (closed) return;
+      clearTimeout(openTimer);
       resolve({
         send(method, params = {}) {
+          if (closed) return Promise.reject(new Error("CDP connection closed"));
           id += 1;
           const mid = id;
           return new Promise((res, rej) => {
-            pending.set(mid, { resolve: res, reject: rej });
-            ws.send(JSON.stringify({ id: mid, method, params }));
+            const timer = setTimeout(() => stop(new Error(`CDP ${method} timed out`)), timeoutMs);
+            pending.set(mid, { resolve: res, reject: rej, timer });
+            try {
+              ws.send(JSON.stringify({ id: mid, method, params }));
+            } catch (error) {
+              stop(error);
+            }
           });
         },
-        close: () => ws.close(),
+        close: () => stop(new Error("CDP connection closed")),
       });
+    };
   });
 }
 
