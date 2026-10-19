@@ -36,6 +36,67 @@ pub(super) fn fixture_bytes(length: usize) -> Vec<u8> {
   bytes
 }
 
+#[cfg(test)]
+pub(super) fn preallocated_fixture(path: &Path, volume: AllocationUnit) -> std::fs::File {
+  use std::io::Write;
+  assert!(volume.bytes() <= 1024 * 1024, "fixture allocation unit exceeds its bounded allocation budget");
+  let mut file = std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(path).unwrap();
+  file.write_all(&[0x5a]).unwrap();
+  let requested = i64::try_from(volume.bytes().checked_mul(8).unwrap()).unwrap();
+  #[cfg(windows)]
+  {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{SetFileInformationByHandle, FileAllocationInfo, FILE_ALLOCATION_INFO};
+    let info = FILE_ALLOCATION_INFO { AllocationSize: requested };
+    let size = std::mem::size_of::<FILE_ALLOCATION_INFO>().try_into().unwrap();
+    let ok = unsafe { SetFileInformationByHandle(file.as_raw_handle(), FileAllocationInfo,
+      &info as *const _ as *const _, size) };
+    assert_ne!(ok, 0, "native fixture preallocation failed: {}", std::io::Error::last_os_error());
+  }
+  #[cfg(target_os = "linux")]
+  {
+    use std::os::fd::AsRawFd;
+    let code = unsafe { libc::fallocate(file.as_raw_fd(), libc::FALLOC_FL_KEEP_SIZE, 0, requested) };
+    assert_eq!(code, 0, "native fixture preallocation failed: {}", std::io::Error::last_os_error());
+  }
+  #[cfg(target_os = "macos")]
+  {
+    use std::os::fd::AsRawFd;
+    let mut store = libc::fstore_t { fst_flags: libc::F_ALLOCATEALL, fst_posmode: libc::F_PEOFPOSMODE,
+      fst_offset: 0, fst_length: requested, fst_bytesalloc: 0 };
+    let code = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_PREALLOCATE, &mut store) };
+    assert_eq!(code, 0, "native fixture preallocation failed: {}", std::io::Error::last_os_error());
+  }
+  #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+  panic!("native preallocation fixture has no adapter for this platform");
+  file.sync_all().unwrap();
+  let actual = usage(path).unwrap();
+  assert_eq!(actual.bytes, 1);
+  assert!(actual.allocated > actual.bytes + volume.bytes(),
+    "filesystem did not exhibit native allocated excess beyond logical length and entry rounding");
+  file
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct Inventory {
+  pub bytes: u64,
+  pub allocated: u64,
+  pub entries: u64,
+  pub volume: AllocationUnit,
+}
+
+impl Inventory {
+  pub(super) fn for_file(path: &Path) -> Result<Self, String> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+      return Err("export allocation inventory needs a regular file".into());
+    }
+    let actual = usage(path)?;
+    let parent = path.parent().ok_or("export allocation file has no parent")?;
+    Ok(Self { bytes: actual.bytes, allocated: actual.allocated, entries: 1, volume: AllocationUnit::for_directory(parent)? })
+  }
+}
+
 #[derive(Clone, Copy, Default)]
 pub(super) struct Usage {
   pub bytes: u64,

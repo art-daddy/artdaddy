@@ -23,7 +23,7 @@ struct ManifestScratch {
 impl ManifestScratch {
   fn open(cwd: &Path, workspace: &Arc<super::Workspace>, key: &str, entries: u64) -> Result<Self, String> {
     let usage = super::measured_scratch_usage(cwd, Path::new(""))?;
-    workspace.account_allocated(key, usage.bytes, usage.entries, usage.allocated, usage.volume)?;
+    workspace.account_allocated(key, usage)?;
     let charge = workspace.reserve_in(key, 0, entries, usage.volume)?;
     let directory = tempfile::Builder::new().prefix("native-stream-").tempdir_in(cwd).map_err(|error| error.to_string())?;
     let scratch = Self { owned: Some((directory, charge)) };
@@ -105,9 +105,7 @@ impl FinalOutput {
       return Err("native pending output does not target its admitted stage".into());
     }
     let key = super::Supervisor::workspace_key(Path::new(path));
-    let usage = super::allocation::usage(Path::new(path))?;
-    let volume = super::allocation::AllocationUnit::for_directory(Path::new(path).parent().ok_or("native pending output has no parent")?)?;
-    workspace.account_allocated(&key, usage.bytes, 1, usage.allocated, volume)?;
+    workspace.account_allocated(&key, super::allocation::Inventory::for_file(Path::new(path))?)?;
     let (limit, charge) = workspace.reserve_output(&key)?;
     let mut reserved = Self { path: path.into(), key, limit, workspace, charge: Some(charge), output_limit: None };
     reserved.output_limit = Some(output::OutputLimit::open(Path::new(path), limit)?);
@@ -643,6 +641,35 @@ mod tests {
   use std::time::Duration;
 
   fn strings(args: &[&str]) -> Vec<String> { args.iter().map(|arg| (*arg).to_owned()).collect() }
+
+  #[test]
+  fn manifest_reservation_cannot_absorb_retained_native_extent_excess() {
+    let directory = tempfile::tempdir().unwrap();
+    let volume = super::super::allocation::AllocationUnit::for_directory(directory.path()).unwrap();
+    let path = directory.path().join("retained.bin");
+    let retained = super::super::allocation::preallocated_fixture(&path, volume);
+    let inventory = super::super::measured_scratch_usage(directory.path(), Path::new("")).unwrap();
+    let cap = inventory.allocated;
+    let workspace = super::super::Workspace::allocation_fixture(64 * volume.bytes(), cap);
+    let key = Supervisor::workspace_key(directory.path());
+    assert!(ManifestScratch::open(directory.path(), &workspace, &key, 1).err().unwrap().contains("allocation budget"));
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    assert_eq!(std::fs::read(&path).unwrap(), [0x5a]);
+    drop(retained);
+    directory.close().unwrap();
+    workspace.release_root(&key);
+    assert_eq!(workspace.available_bytes(), cap);
+    let fresh = tempfile::tempdir().unwrap();
+    let fresh_key = Supervisor::workspace_key(fresh.path());
+    let scratch = ManifestScratch::open(fresh.path(), &workspace, &fresh_key, 1).unwrap();
+    let created = scratch.path().to_path_buf();
+    assert!(created.is_dir());
+    scratch.close().unwrap();
+    assert!(!created.exists());
+    fresh.close().unwrap();
+    workspace.release_root(&fresh_key);
+    assert_eq!(workspace.available_bytes(), cap);
+  }
 
   fn ffmpeg() -> std::path::PathBuf {
     let target = if cfg!(target_os = "windows") { "x86_64-pc-windows-msvc.exe" }

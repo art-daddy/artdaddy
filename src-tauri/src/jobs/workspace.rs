@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex};
-use super::allocation::AllocationUnit;
+use super::allocation::{AllocationUnit, Inventory};
 
 #[derive(Clone, Copy, Default)]
 struct RootUsage {
@@ -9,13 +9,13 @@ struct RootUsage {
   peak_bytes: u64,
   observed_from_creation: bool,
   allocation_unit: u64,
-  allocated_floor: u64,
+  allocated_excess: u64,
 }
 
 impl RootUsage {
   fn allocated(&self) -> Result<u64, String> {
     self.entries.checked_mul(self.allocation_unit).and_then(|rounding| self.bytes.checked_add(rounding))
-      .map(|bytes| bytes.max(self.allocated_floor)).ok_or("export workspace allocation size overflow".into())
+      .and_then(|bytes| bytes.checked_add(self.allocated_excess)).ok_or("export workspace allocation size overflow".into())
   }
 }
 
@@ -57,35 +57,38 @@ impl Workspace {
       .filter(|usage| usage.observed_from_creation).map(|usage| usage.peak_bytes)
   }
 
-  pub(super) fn account_allocated(&self, root: &str, bytes: u64, entries: u64, allocated: u64, volume: AllocationUnit) -> Result<(), String> {
-    self.account_usage(root, bytes, entries, allocated, volume, true)
+  pub(super) fn account_allocated(&self, root: &str, inventory: Inventory) -> Result<(), String> {
+    self.account_usage(root, inventory, 0, 0, true)
   }
 
-  pub(super) fn restore_allocated(&self, root: &str, bytes: u64, entries: u64, allocated: u64, volume: AllocationUnit) -> Result<(), String> {
-    self.account_usage(root, bytes, entries, allocated, volume, false)
+  pub(super) fn restore_allocated(&self, root: &str, inventory: Inventory, reserved_bytes: u64, reserved_entries: u64) -> Result<(), String> {
+    self.account_usage(root, inventory, reserved_bytes, reserved_entries, false)
   }
 
-  fn account_usage(&self, root: &str, bytes: u64, entries: u64, allocated: u64, volume: AllocationUnit, require_fit: bool) -> Result<(), String> {
+  fn account_usage(&self, root: &str, inventory: Inventory, reserved_bytes: u64, reserved_entries: u64, require_fit: bool) -> Result<(), String> {
     let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
     let previous = state.roots.get(root).copied().unwrap_or_default();
-    let bytes = bytes.max(previous.bytes);
-    let entries = entries.max(previous.entries);
+    let observed_payload = inventory.entries.checked_mul(inventory.volume.bytes())
+      .and_then(|rounding| inventory.bytes.checked_add(rounding)).ok_or("export observed allocation size overflow")?;
+    let allocated_excess = inventory.allocated.saturating_sub(observed_payload);
+    let bytes = inventory.bytes.max(reserved_bytes).max(previous.bytes);
+    let entries = inventory.entries.max(reserved_entries).max(previous.entries);
     let used = state.used.checked_add(bytes - previous.bytes).ok_or("export workspace size overflow")?;
     let count = state.entries.checked_add(entries - previous.entries).ok_or("export workspace entry overflow")?;
-    if require_fit && used > self.limit { return Err("export workspace budget exceeded by retained scratch".into()); }
-    if count > self.entry_limit { return Err("export workspace entry budget exceeded by retained scratch".into()); }
     let owned = RootUsage { bytes, entries, peak_bytes: previous.peak_bytes.max(bytes),
-      observed_from_creation: previous.observed_from_creation, allocation_unit: previous.allocation_unit.max(volume.bytes()),
-      allocated_floor: previous.allocated_floor.max(allocated) };
+      observed_from_creation: previous.observed_from_creation, allocation_unit: previous.allocation_unit.max(inventory.volume.bytes()),
+      allocated_excess: previous.allocated_excess.max(allocated_excess) };
     let previous_allocated = previous.allocated()?;
     let owned_allocated = owned.allocated()?;
     let total_allocated = state.allocated.checked_sub(previous_allocated).and_then(|bytes| bytes.checked_add(owned_allocated))
       .ok_or("export workspace allocation total overflow")?;
-    if require_fit && total_allocated > self.allocation_limit { return Err("export workspace allocation budget exceeded by retained scratch".into()); }
     state.roots.insert(root.to_string(), owned);
     state.used = used;
     state.allocated = total_allocated;
     state.entries = count;
+    if count > self.entry_limit { return Err("export workspace entry budget exceeded by retained scratch".into()); }
+    if require_fit && used > self.limit { return Err("export workspace budget exceeded by retained scratch".into()); }
+    if require_fit && total_allocated > self.allocation_limit { return Err("export workspace allocation budget exceeded by retained scratch".into()); }
     Ok(())
   }
 
@@ -100,7 +103,7 @@ impl Workspace {
     let owned = RootUsage { bytes: owned_bytes,
       entries: previous.entries.checked_add(entries).ok_or("owned export entry size overflow")?, peak_bytes: previous.peak_bytes.max(owned_bytes),
       observed_from_creation: previous.observed_from_creation, allocation_unit: previous.allocation_unit.max(volume.bytes()),
-      allocated_floor: previous.allocated_floor };
+      allocated_excess: previous.allocated_excess };
     let previous_allocated = previous.allocated()?;
     let owned_allocated = owned.allocated()?;
     let total_allocated = state.allocated.checked_sub(previous_allocated).and_then(|bytes| bytes.checked_add(owned_allocated))
@@ -178,7 +181,7 @@ impl Workspace {
     let released_entries = entries.min(owned.entries);
     state.used = state.used.saturating_sub(released);
     state.entries = state.entries.saturating_sub(released_entries);
-    let remaining = if released == owned.bytes && released_entries == owned.entries { None }
+    let remaining = if released == owned.bytes && released_entries == owned.entries && owned.allocated_excess == 0 { None }
       else { Some(RootUsage { bytes: owned.bytes - released, entries: owned.entries - released_entries, ..owned }) };
     let released_allocated = owned.allocated().expect("admitted allocation fits")
       - remaining.map(|usage| usage.allocated().expect("smaller allocation fits")).unwrap_or(0);
@@ -211,7 +214,7 @@ impl Workspace {
 
   #[cfg(test)]
   pub(super) fn account_existing(&self, root: &str, bytes: u64, entries: u64) -> Result<(), String> {
-    self.account_allocated(root, bytes, entries, bytes, AllocationUnit::logical_fixture())
+    self.account_allocated(root, Inventory { bytes, entries, allocated: bytes, volume: AllocationUnit::logical_fixture() })
   }
 
   #[cfg(test)]
@@ -268,6 +271,148 @@ mod tests {
     assert_eq!(actual.bytes, payload.len() as u64);
     assert!(actual.allocated > actual.bytes, "filesystem did not exhibit the allocation-rounding witness");
     actual
+  }
+
+  fn preallocated_root() -> (tempfile::TempDir, AllocationUnit, std::fs::File, Inventory) {
+    let (directory, volume, _) = allocation_fixture();
+    let file = allocation::preallocated_fixture(&directory.path().join("retained.bin"), volume);
+    let inventory = super::super::measured_scratch_usage(directory.path(), std::path::Path::new("")).unwrap();
+    assert!(inventory.allocated > inventory.bytes + inventory.entries * volume.bytes(),
+      "native root inventory did not exhibit allocation beyond payload and entry rounding");
+    (directory, volume, file, inventory)
+  }
+
+  #[test]
+  fn same_root_observed_excess_cannot_pay_for_another_actual_file() {
+    let (directory, volume, retained, inventory) = preallocated_root();
+    let cap = inventory.allocated;
+    let owner = Workspace::allocation_fixture(64 * volume.bytes(), cap);
+    owner.restore_allocated("shared", inventory, 0, 0).unwrap();
+    let next = directory.path().join("not-admitted.bin");
+    assert!(owner.reserve_in("shared", volume.bytes() + 1, 1, volume).err().unwrap().contains("allocation budget"));
+    assert!(!next.exists());
+    assert_eq!(std::fs::read(directory.path().join("retained.bin")).unwrap(), [0x5a]);
+    assert_eq!(owner.available_bytes(), 0);
+    drop(retained);
+    directory.close().unwrap();
+    owner.release_root("shared");
+    assert_eq!(owner.available_bytes(), cap);
+    let fresh = tempfile::tempdir().unwrap();
+    let payload = allocation::fixture_bytes(usize::try_from(volume.bytes() + 1).unwrap());
+    let charge = owner.reserve_in("after-cleanup", payload.len() as u64, 1, volume).unwrap();
+    let path = fresh.path().join("admitted.bin");
+    assert!(write_allocated(&path, &payload).allocated <= cap);
+    std::fs::remove_file(path).unwrap();
+    drop(charge);
+    assert_eq!(owner.available_bytes(), cap);
+  }
+
+  #[test]
+  fn unwritten_reservations_cannot_hide_native_excess_in_either_observation_order() {
+    for recovered in [false, true] {
+      let (directory, volume, retained, inventory) = preallocated_root();
+      let cap = inventory.allocated + 2 * volume.bytes();
+      let owner = Workspace::allocation_fixture(64 * volume.bytes(), cap);
+      let active = if recovered {
+        owner.restore_allocated("shared", inventory, 4 * volume.bytes(), inventory.entries).unwrap();
+        None
+      } else {
+        let charge = owner.reserve_in("shared", 4 * volume.bytes(), inventory.entries, volume).unwrap();
+        assert!(owner.account_allocated("shared", inventory).err().unwrap().contains("allocation budget"));
+        Some(charge)
+      };
+      assert_eq!(owner.available_bytes(), 0);
+      assert!(owner.account_allocated("shared", Inventory { bytes: 0, entries: 0, allocated: 0, volume }).is_err());
+      assert!(owner.reserve_in("shared", 1, 1, volume).is_err());
+      assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+      assert_eq!(std::fs::read(directory.path().join("retained.bin")).unwrap(), [0x5a]);
+      drop(retained);
+      directory.close().unwrap();
+      drop(active);
+      owner.release_root("shared");
+      assert_eq!(owner.available_bytes(), cap);
+    }
+  }
+
+  #[test]
+  fn refused_inventory_admission_still_blocks_spending_against_actual_retained_extents() {
+    let (directory, volume, retained, inventory) = preallocated_root();
+    let cap = 3 * volume.bytes();
+    assert!(inventory.allocated > cap);
+    let owner = Workspace::allocation_fixture(64 * volume.bytes(), cap);
+    let charge = owner.reserve_in("shared", 0, inventory.entries, volume).unwrap();
+    assert!(owner.account_allocated("shared", inventory).err().unwrap().contains("allocation budget"));
+    assert!(owner.reserve_in("unrelated", volume.bytes() + 1, 1, volume).is_err());
+    assert_eq!(owner.available_bytes(), 0);
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    assert_eq!(std::fs::read(directory.path().join("retained.bin")).unwrap(), [0x5a]);
+    drop(retained);
+    directory.close().unwrap();
+    drop(charge);
+    owner.release_root("shared");
+    assert_eq!(owner.available_bytes(), cap);
+  }
+
+  #[test]
+  fn concurrent_same_root_writers_cannot_reuse_retained_native_extent_excess() {
+    let (directory, volume, retained, inventory) = preallocated_root();
+    let payload = allocation::fixture_bytes(usize::try_from(volume.bytes() + 1).unwrap());
+    let cap = inventory.allocated + 2 * volume.bytes() + 1;
+    let owner = Workspace::allocation_fixture(64 * volume.bytes(), cap);
+    owner.restore_allocated("shared", inventory, 0, 0).unwrap();
+    let gate = Arc::new(Barrier::new(3));
+    let workers = ["first.bin", "second.bin"].into_iter().map(|name| {
+      let owner = owner.clone();
+      let gate = gate.clone();
+      let payload = payload.clone();
+      let path = directory.path().join(name);
+      std::thread::spawn(move || {
+        gate.wait();
+        match owner.reserve_in("shared", payload.len() as u64, 1, volume) {
+          Ok(charge) => { write_allocated(&path, &payload); charge.retain(); true }
+          Err(error) => { assert!(error.contains("allocation budget"), "{error}"); false }
+        }
+      })
+    }).collect::<Vec<_>>();
+    gate.wait();
+    assert_eq!(workers.into_iter().map(|worker| worker.join().unwrap()).filter(|written| *written).count(), 1);
+    let files = std::fs::read_dir(directory.path()).unwrap().map(|entry| entry.unwrap().path())
+      .filter(|path| path.file_name().unwrap() != "retained.bin").collect::<Vec<_>>();
+    assert_eq!(files.len(), 1);
+    assert_eq!(std::fs::read(&files[0]).unwrap(), payload);
+    let actual = super::super::measured_scratch_usage(directory.path(), std::path::Path::new("")).unwrap();
+    assert!(actual.allocated <= cap, "actual concurrent files exceeded their native allocation allowance");
+    drop(retained);
+    directory.close().unwrap();
+    owner.release_root("shared");
+    assert_eq!(owner.available_bytes(), cap);
+  }
+
+  #[test]
+  fn pending_output_cannot_reuse_its_retained_native_extent_excess() {
+    use std::io::{Seek, SeekFrom};
+    let (directory, volume, mut retained, _) = preallocated_root();
+    let path = directory.path().join("retained.bin");
+    let inventory = Inventory::for_file(&path).unwrap();
+    let cap = inventory.allocated + 4 * volume.bytes();
+    let owner = Workspace::allocation_fixture(64 * volume.bytes(), cap);
+    owner.account_allocated("stage", inventory).unwrap();
+    let claim = owner.claim_output("stage", &|| Ok(())).unwrap();
+    let (limit, charge) = owner.reserve_output("stage").unwrap();
+    assert!(owner.reserve_in("unrelated", volume.bytes() + 1, 1, volume).is_err());
+    assert_eq!(owner.available_bytes(), 0);
+    let payload = allocation::fixture_bytes(usize::try_from(limit - 1).unwrap());
+    retained.seek(SeekFrom::Start(0)).unwrap();
+    retained.write_all(&payload).unwrap();
+    retained.sync_all().unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), payload);
+    assert!(allocation::usage(&path).unwrap().allocated <= cap);
+    drop(retained);
+    directory.close().unwrap();
+    drop(charge);
+    drop(claim);
+    owner.release_root("stage");
+    assert_eq!(owner.available_bytes(), cap);
   }
 
   #[test]
@@ -329,11 +474,11 @@ mod tests {
     let cap = 3 * volume.bytes();
     assert!(actual.allocated <= cap && 2 * actual.allocated > cap);
     let owner = Workspace::allocation_fixture(8 * volume.bytes(), cap);
-    owner.restore_allocated("retained", actual.bytes, 1, actual.allocated, volume).unwrap();
+    owner.restore_allocated("retained", Inventory::for_file(&retained).unwrap(), 0, 0).unwrap();
     assert_eq!(owner.peak_bytes("retained"), None);
     assert!(owner.limit - owner.used() >= payload.len() as u64);
     assert!(owner.reserve_in("next", payload.len() as u64, 1, volume).err().unwrap().contains("allocation budget"));
-    owner.account_allocated("retained", 0, 0, 0, volume).unwrap();
+    owner.account_allocated("retained", Inventory { bytes: 0, entries: 0, allocated: 0, volume }).unwrap();
     assert!(owner.state.lock().unwrap().allocated >= actual.allocated);
     assert!(owner.reserve_in("next", payload.len() as u64, 1, volume).is_err());
     assert_eq!(std::fs::read(&retained).unwrap(), payload);
@@ -388,11 +533,10 @@ mod tests {
     let actual = write_allocated(&retained, &payload);
     let cap = 5 * volume.bytes();
     let owner = Workspace::allocation_fixture(8 * volume.bytes(), cap);
-    owner.restore_allocated("retained", actual.bytes, 1, actual.allocated, volume).unwrap();
+    owner.restore_allocated("retained", Inventory::for_file(&retained).unwrap(), 0, 0).unwrap();
     let stage = directory.path().join("stage.bin");
     std::fs::File::create(&stage).unwrap();
-    let initial = allocation::usage(&stage).unwrap();
-    owner.account_allocated("stage", initial.bytes, 1, initial.allocated, volume).unwrap();
+    owner.account_allocated("stage", Inventory::for_file(&stage).unwrap()).unwrap();
     let claim = owner.claim_output("stage", &|| Ok(())).unwrap();
     let logical_available = owner.limit - owner.used();
     let (limit, charge) = owner.reserve_output("stage").unwrap();
@@ -565,7 +709,8 @@ mod tests {
     owner.account_existing("render", 56, 1).unwrap();
     assert_eq!(owner.used(), 56);
     assert!(owner.account_existing("retained", 9, 1).is_err());
-    assert_eq!(owner.used(), 56);
+    assert_eq!(owner.used(), 65);
+    assert!(owner.reserve("after-refused-inventory", 1, 1).is_err());
   }
 
   #[test]

@@ -619,7 +619,7 @@ impl ScratchOutput {
     let cwd = Path::new(spec.cwd.as_deref().ok_or("temporary output has no admitted scratch root")?);
     let key = Supervisor::workspace_key(cwd);
     let usage = measured_scratch_usage(cwd, Path::new(""))?;
-    workspace.account_allocated(&key, usage.bytes, usage.entries, usage.allocated, usage.volume)?;
+    workspace.account_allocated(&key, usage)?;
     Ok(Some((Self::open_workspace(Path::new(path), used, limit, workspace, &key)?, args)))
   }
 
@@ -692,14 +692,7 @@ fn scratch_usage(path: &Path, exclude: &Path) -> Result<(u64, u64), String> {
   measured_scratch_usage(path, exclude).map(|usage| (usage.bytes, usage.entries))
 }
 
-struct ScratchUsage {
-  bytes: u64,
-  allocated: u64,
-  entries: u64,
-  volume: allocation::AllocationUnit,
-}
-
-fn measured_scratch_usage(path: &Path, exclude: &Path) -> Result<ScratchUsage, String> {
+fn measured_scratch_usage(path: &Path, exclude: &Path) -> Result<allocation::Inventory, String> {
   let volume = allocation::AllocationUnit::for_directory(path)?;
   let mut pending = vec![path.to_path_buf()];
   let mut bytes = 0u64;
@@ -723,7 +716,7 @@ fn measured_scratch_usage(path: &Path, exclude: &Path) -> Result<ScratchUsage, S
       }
     }
   }
-  Ok(ScratchUsage { bytes, allocated, entries: entries as u64 + 1, volume })
+  Ok(allocation::Inventory { bytes, allocated, entries: entries as u64 + 1, volume })
 }
 
 fn scratch_capture(spec: &JobSpec, stage_path: &str, final_step: bool) -> Result<Option<serde_json::Value>, String> {
@@ -859,7 +852,8 @@ impl Supervisor {
       }
       if count > 0 {
         let volume = allocation::AllocationUnit::for_directory(Path::new(&delivery.stage_path).parent().ok_or("export stage has no parent")?)?;
-        self.workspace.restore_allocated(&Self::workspace_key(Path::new(&delivery.stage_path)), bytes, count, allocated, volume)?;
+        self.workspace.restore_allocated(&Self::workspace_key(Path::new(&delivery.stage_path)),
+          allocation::Inventory { bytes, entries: count, allocated, volume }, 0, 0)?;
       }
     }
     let Some(work) = &self.export_work_root else { return Ok(()) };
@@ -878,7 +872,7 @@ impl Supervisor {
       let held_entries = entries.values().filter_map(|delivery| delivery.render_scratch.as_ref())
         .find(|scratch| Self::workspace_key(Path::new(&scratch.path)) == key).map(|scratch| scratch.reserved_entries).unwrap_or(0);
       let usage = measured_scratch_usage(&entry.path(), Path::new(""))?;
-      self.workspace.restore_allocated(&key, usage.bytes.max(held), usage.entries.max(held_entries), usage.allocated, usage.volume)?;
+      self.workspace.restore_allocated(&key, usage, held, held_entries)?;
     }
     Ok(())
   }
@@ -4128,6 +4122,42 @@ mod export_delivery_tests {
     } else {
       ScratchOutput::capture(spec, jobs.workspace.clone()).map(|output| output.unwrap().0)
     }
+  }
+
+  #[test]
+  fn same_root_retained_extents_block_capture_until_failed_cleanup_settles() {
+    let directory = tempfile::tempdir().unwrap();
+    let volume = allocation::AllocationUnit::for_directory(directory.path()).unwrap();
+    let mut jobs = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {}))
+      .with_export_work_root(directory.path().join("work")).with_export_root(directory.path().join("journal")).unwrap();
+    let delivery = intent(&jobs, directory.path(), "same-root-allocated-capture");
+    std::fs::write(&delivery.dest_path, b"previous complete file").unwrap();
+    let cwd = jobs.stage_render_scratch(&delivery.id, vec![], vec![]).unwrap();
+    let retained_path = Path::new(&cwd).join("retained.nut");
+    let retained = allocation::preallocated_fixture(&retained_path, volume);
+    let inventory = measured_scratch_usage(Path::new(&cwd), Path::new("")).unwrap();
+    let cap = inventory.allocated + volume.bytes();
+    jobs.workspace = Workspace::allocation_fixture(64 * volume.bytes(), cap);
+    jobs.account_workspace(&jobs.deliveries.lock().unwrap()).unwrap();
+    let target = Path::new(&cwd).join("not-admitted.nut");
+    let spec = JobSpec { id: delivery.id.clone(), lane: "export".into(), program: "ffmpeg".into(),
+      args: vec!["-f".into(), "nut".into(), "not-admitted.nut".into()], steps: vec![], cwd: Some(cwd.clone()),
+      meta: serde_json::json!({ "_native_scratch_capture": { "path": target, "used": inventory.bytes, "limit": 64 * volume.bytes() } }) };
+    assert!(ScratchOutput::capture(&spec, jobs.workspace.clone()).err().unwrap().contains("allocation budget"));
+    assert!(!target.exists());
+    assert_eq!(std::fs::read(&retained_path).unwrap(), [0x5a]);
+    let blocker = CleanupBlocker::open(&retained_path);
+    drop(retained);
+    jobs.fail_delivery(&delivery.id).unwrap();
+    assert!(jobs.complete_delivery(&delivery.id).is_err());
+    assert!(retained_path.exists());
+    assert!(jobs.workspace.reserve_in("unrelated", volume.bytes() + 1, 1, volume).is_err());
+    assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"previous complete file");
+    drop(blocker);
+    jobs.complete_delivery(&delivery.id).unwrap();
+    assert!(!Path::new(&cwd).exists());
+    assert!(!Path::new(&delivery.stage_path).exists());
+    assert_eq!(jobs.workspace.available_bytes(), cap);
   }
 
   #[test]
