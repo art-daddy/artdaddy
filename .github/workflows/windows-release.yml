@@ -233,6 +233,8 @@ jobs:
           run-id: ${{ inputs.artifact_run_id }}
       - name: Verify, install and paint the existing signed candidate
         shell: pwsh
+        env:
+          ARTDADDY_QA_ARTIFACT_SOURCE_SHA: ${{ inputs.artifact_head_sha }}
         run: |
           $installers = @(Get-ChildItem candidate-artifact -Recurse -File -Filter '*.exe')
           $signatures = @(Get-ChildItem candidate-artifact -Recurse -File -Filter '*.sig')
@@ -253,8 +255,7 @@ jobs:
           $env:ARTDADDY_QA_INSTALLED_PID = [string]$application.Id
           try {
             $null = $application.WaitForInputIdle(30000)
-            node scripts/qa/installedArtifact.mjs
-            if ($LASTEXITCODE -ne 0) { throw 'Installed WebView qualification failed' }
+            & ./scripts/qa/installedWindow.ps1
             if (-not $application.WaitForExit(30000)) { throw 'Installed app did not close normally' }
             if ($application.ExitCode -ne 0) { throw "Installed app exited with $($application.ExitCode)" }
           } finally {
