@@ -56,7 +56,20 @@ jobs:
       - run: npm i --no-save @playwright/test@1.61.1
       - run: npx playwright install --with-deps chromium webkit
       - run: node scripts/fetch-sidecars.mjs --only ffmpeg,ffprobe
-      - run: npm run e2e:ui
+      - name: Real browser UI and compositor pixels
+        env:
+          PLAYWRIGHT_JSON_OUTPUT_NAME: reports/qa/browser/results.json
+        run: npm run e2e:ui -- --reporter=list,json
+      - name: Preserve real browser results and failure artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: exporter-browser-${{ matrix.os }}-${{ github.sha }}-attempt-${{ github.run_attempt }}
+          path: |
+            reports/qa/browser/**
+            test-results/**
+          if-no-files-found: error
+          retention-days: 7
 
   # The export suite (vitest.smoke.config.ts: render, export, captions, presets, frames) against
   # the ffmpeg each platform's INSTALLER ships, on that platform. Every earlier run of this suite
