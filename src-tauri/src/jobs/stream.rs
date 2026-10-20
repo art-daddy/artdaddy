@@ -108,14 +108,19 @@ impl FinalOutput {
     workspace.account_allocated(&key, super::allocation::Inventory::for_file(Path::new(path))?)?;
     let (limit, charge) = workspace.reserve_output(&key)?;
     let mut reserved = Self { path: path.into(), key, limit, workspace, charge: Some(charge), output_limit: None };
-    reserved.output_limit = Some(output::OutputLimit::open(Path::new(path), limit)?);
+    reserved.output_limit = Some(output::OutputLimit::open(Path::new(path), limit, args,
+      admitted_deadline(execution_deadline(spec)?)?)?);
     let output_index = args.len() - 1;
     args.splice(output_index..output_index, ["-fs".into(), limit.to_string()]);
     Ok(Some(reserved))
   }
 
   fn finish(&mut self, producer_complete: bool) -> Result<(), String> {
-    self.output_limit.take();
+    let boundary = match self.output_limit.take() {
+      Some(mut limit) => limit.finish(producer_complete),
+      None if self.charge.is_some() => Err("native output write limit is missing at settlement".into()),
+      None => Ok(()),
+    };
     let Some(charge) = self.charge.take() else { return Ok(()) };
     let measured = std::fs::symlink_metadata(&self.path).map_err(|error| error.to_string());
     let metadata = match measured {
@@ -125,7 +130,7 @@ impl FinalOutput {
     };
     let actual = metadata.len();
     let capped = actual >= self.limit;
-    let discard = capped || !producer_complete;
+    let discard = capped || !producer_complete || boundary.is_err();
     if discard {
       if let Err(error) = std::fs::remove_file(&self.path) {
         charge.retain();
@@ -136,13 +141,18 @@ impl FinalOutput {
     self.workspace.release(&self.key, self.limit.saturating_sub(if discard { 0 } else { actual }), u64::from(discard));
     self.workspace.settle_output_writer(&self.key);
     if discard { Err(format!("native output write boundary refused completion: {}",
-      serde_json::json!({ "limit": self.limit, "observed": actual, "producer_complete": producer_complete, "cleaned": true }))) }
+      serde_json::json!({ "limit": self.limit, "observed": actual, "producer_complete": producer_complete,
+        "sink_error": boundary.err(), "cleaned": true }))) }
     else { Ok(()) }
   }
 }
 
 impl Drop for FinalOutput {
-  fn drop(&mut self) { let _ = self.finish(false); }
+  fn drop(&mut self) {
+    if self.charge.is_some() {
+      if let Err(error) = self.finish(false) { log::warn!("native final output abandoned before confirmed settlement: {error}"); }
+    }
+  }
 }
 
 #[derive(Clone, Copy, serde::Serialize)]
@@ -186,11 +196,15 @@ pub(super) struct Control {
   resident_limit: u64,
 }
 
+fn admitted_deadline(deadline_ms: u64) -> Result<Instant, String> {
+  let remaining = deadline_ms.checked_sub(super::now_ms()).filter(|remaining| *remaining > 0)
+    .ok_or("render execution deadline has already expired")?;
+  Instant::now().checked_add(Duration::from_millis(remaining)).ok_or_else(|| "render execution deadline overflow".into())
+}
+
 impl Control {
   fn new(deadline_ms: u64, final_output: Option<FinalOutput>) -> Result<Self, String> {
-    let remaining = deadline_ms.checked_sub(super::now_ms()).filter(|remaining| *remaining > 0)
-      .ok_or("render execution deadline has already expired")?;
-    let deadline = Instant::now().checked_add(Duration::from_millis(remaining)).ok_or("render execution deadline overflow")?;
+    let deadline = admitted_deadline(deadline_ms)?;
     Ok(Self { state: Mutex::new(State { final_output, ..State::default() }), wake: pipe::Wake::new().map_err(|error| error.to_string())?,
       budget: super::budget::Budget::new(super::budget::RENDER_COMMIT_LIMIT)?, deadline, settled: Condvar::new(),
       resident_limit: super::budget::RENDER_RESIDENT_LIMIT })
@@ -224,12 +238,18 @@ impl Control {
       let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
       if state.cancelled { return; }
       state.cancelled = true;
+      if let Some(limit) = state.final_output.as_ref().and_then(|output| output.output_limit.as_ref()) { limit.cancel(); }
       state.children.values().map(|worker| worker.child.clone()).collect::<Vec<_>>()
     };
     self.wake.signal();
     for child in children {
       if let Err(error) = child.kill() { log::warn!("could not stop owned streaming worker: {error}"); }
     }
+  }
+
+  fn redactor(&self) -> output::Redactor {
+    self.state.lock().unwrap_or_else(|error| error.into_inner()).final_output.as_ref()
+      .and_then(|output| output.output_limit.as_ref()).map(output::OutputLimit::redactor).unwrap_or_default()
   }
 
   fn watch(self: &Arc<Self>) {
@@ -417,19 +437,23 @@ fn reader(input: impl Read + Send + 'static, observer: Observer, control: Arc<Co
   std::thread::spawn(move || {
     let mut input = input;
     let mut buffer = [0u8; 8192];
+    let mut redactor = control.redactor();
     loop {
       let count = match input.read(&mut buffer) {
-        Ok(0) => return Ok(()),
         Ok(count) => count,
         Err(error) => { control.stop(); return Err(error.to_string()); }
       };
-      let text = String::from_utf8_lossy(&buffer[..count]).into_owned();
-      if let Some((step, enabled)) = &progress {
-        if enabled.load(Ordering::Acquire) {
-          observer(ProcEvent::Stdout(if let Some(step) = step { format!("artdaddy_step={step}\n{text}") } else { text.clone() }));
+      let filtered = redactor.push(&buffer[..count], count == 0);
+      let text = String::from_utf8_lossy(&filtered).into_owned();
+      if !text.is_empty() {
+        if let Some((step, enabled)) = &progress {
+          if enabled.load(Ordering::Acquire) {
+            observer(ProcEvent::Stdout(if let Some(step) = step { format!("artdaddy_step={step}\n{text}") } else { text.clone() }));
+          }
         }
+        if diagnostic { observer(ProcEvent::Stderr(text)); }
       }
-      if diagnostic { observer(ProcEvent::Stderr(text)); }
+      if count == 0 { return Ok(()); }
     }
   })
 }
@@ -470,13 +494,19 @@ pub(super) fn spawn_single(executable: &Path, spec: &JobSpec, observer: Observer
     let output_observer = observer.clone();
     let output_control = control.clone();
     let stdout = std::thread::spawn(move || {
+      let mut redactor = output_control.redactor();
       let read = (|| -> Result<(), String> {
         let mut buffer = [0u8; 65536];
         loop {
           let count = output.read(&mut buffer).map_err(|error| error.to_string())?;
+          if let Some(writer) = capture.as_mut() {
+            if count != 0 { writer.write(&buffer[..count])?; }
+          }
+          else {
+            let filtered = redactor.push(&buffer[..count], count == 0);
+            if !filtered.is_empty() { output_observer(ProcEvent::Stdout(String::from_utf8_lossy(&filtered).into_owned())); }
+          }
           if count == 0 { break; }
-          if let Some(writer) = capture.as_mut() { writer.write(&buffer[..count])?; }
-          else { output_observer(ProcEvent::Stdout(String::from_utf8_lossy(&buffer[..count]).into_owned())); }
         }
         Ok(())
       })();
@@ -682,25 +712,30 @@ mod tests {
     let root = tempfile::tempdir().unwrap();
     let encode = |path: &Path, limit: u64, guarded: bool| {
       std::fs::File::create(path).unwrap();
-      let bound = guarded.then(|| output::OutputLimit::open(path, limit).unwrap());
+      let mut args = strings(&["-y", "-v", "error", "-nostdin", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=3",
+        "-c:v", "libx264", "-preset", "ultrafast", "-qp", "0", "-an", "-fs", &limit.to_string(), "-movflags", "+faststart"]);
+      args.push(path.to_string_lossy().into_owned());
+      let mut bound = guarded.then(|| output::OutputLimit::open(path, limit, &mut args,
+        Instant::now() + Duration::from_secs(30)).unwrap());
       let mut command = Command::new(ffmpeg());
-      command.args(["-y", "-v", "error", "-nostdin", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=3",
-        "-c:v", "libx264", "-preset", "ultrafast", "-qp", "0", "-an", "-fs", &limit.to_string(), "-movflags", "+faststart"])
-        .arg(path);
+      command.args(args);
       if let Some(bound) = bound.as_ref() { bound.configure(&mut command); }
       let result = command.output().unwrap();
+      let completed = bound.as_mut().map(|bound| bound.finish(result.status.success()));
       let bytes = std::fs::metadata(path).unwrap().len();
-      (result, bytes)
+      (result, bytes, completed)
     };
-    let (control, control_bytes) = encode(&root.path().join("control.mp4"), 65536, false);
+    let (control, control_bytes, _) = encode(&root.path().join("control.mp4"), 65536, false);
     assert!(control.status.success(), "{}", String::from_utf8_lossy(&control.stderr));
     assert!(control_bytes > 65536, "control cannot exhibit the original packet/trailer overshoot: {control_bytes}");
-    let (capped, capped_bytes) = encode(&root.path().join("capped.mp4"), 65536, true);
+    let (capped, capped_bytes, boundary) = encode(&root.path().join("capped.mp4"), 65536, true);
     assert!(capped_bytes <= 65536, "native output crossed its admitted write boundary: {capped_bytes}");
     assert!(!capped.status.success(), "bounded incomplete output must not claim producer success");
+    assert!(boundary.unwrap().is_err());
     let fitting = root.path().join("fitting.mp4");
-    let (completed, bytes) = encode(&fitting, 2 * 1024 * 1024, true);
+    let (completed, bytes, boundary) = encode(&fitting, 2 * 1024 * 1024, true);
     assert!(completed.status.success(), "{}", String::from_utf8_lossy(&completed.stderr));
+    assert!(boundary.unwrap().is_ok());
     assert!(bytes > 65536 && bytes <= 2 * 1024 * 1024);
     let decoded = Command::new(ffmpeg()).args(["-v", "error", "-i"]).arg(&fitting)
       .args(["-map", "0:v:0", "-pix_fmt", "yuv420p", "-f", "rawvideo", "-"]).output().unwrap();
