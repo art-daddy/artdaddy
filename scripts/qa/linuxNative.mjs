@@ -73,7 +73,12 @@ async function nativeJourney(session, profile) {
   record("native keyring writes and reads the same disposable credential", restored);
   assert.equal(restored.error, undefined);
   assert.equal(restored.matches, true, "Native keyring did not return the stored session");
-  await session.exec("location.reload();return true;");
+  await session.exec(
+    "window.__TAURI_INTERNALS__.invoke('plugin:window|close').catch(()=>{});return true;",
+  );
+  await session.quit();
+  Object.assign(session, await newSession(process.env.ARTDADDY_APP_BINARY));
+  record("actual app session closed and relaunched with the saved native credential");
   await waitFor(
     () =>
       session.exec(
@@ -311,15 +316,19 @@ async function nativeJourney(session, profile) {
     bytes: readFileSync(delivered).length,
     sha256: createHash("sha256").update(readFileSync(delivered)).digest("hex"),
   });
-  await session.exec("location.reload();return true;");
+  await session.exec(
+    "window.__TAURI_INTERNALS__.invoke('plugin:window|close').catch(()=>{});return true;",
+  );
+  await session.quit();
+  Object.assign(session, await newSession(process.env.ARTDADDY_APP_BINARY));
   await waitFor(
     () =>
       session.exec(
         "return [...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='File');",
       ),
-    { timeout: 60_000, label: "native auth restored after editor reload" },
+    { timeout: 60_000, label: "native auth restored after actual app relaunch" },
   );
-  record("native keyring session restores again after editor reload");
+  record("native keyring session restores again after actual app relaunch");
   await screenshot("journey-restored.png");
   writeFileSync(
     path.join(output, "journey.json"),
@@ -529,9 +538,18 @@ try {
     try {
       await nativeJourney(session, profile);
     } catch (error) {
+      await session
+        .exec(
+          "globalThis.__qaFailureRead={done:false};window.__TAURI_INTERNALS__.invoke('load_refresh_token').then(token=>globalThis.__qaFailureRead={done:true,present:Boolean(token)}).catch(error=>globalThis.__qaFailureRead={done:true,error:String(error)});return true;",
+        )
+        .catch(() => {});
+      await waitFor(() => session.exec("return globalThis.__qaFailureRead?.done;"), {
+        timeout: 10000,
+        label: "redacted native failure credential readback",
+      }).catch(() => {});
       const state = await session
         .exec(
-          "return {origin:location.origin,path:location.pathname,apiBase:localStorage.getItem('artdaddy.api_base'),ready:document.readyState,bodyText:document.body.innerText};",
+          "return {origin:location.origin,path:location.pathname,apiBase:localStorage.getItem('artdaddy.api_base'),ready:document.readyState,bodyText:document.body.innerText,credential:globalThis.__qaFailureRead};",
         )
         .catch((failure) => ({ unavailable: String(failure) }));
       writeFileSync(
