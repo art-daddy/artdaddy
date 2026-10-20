@@ -62,6 +62,17 @@ async function nativeJourney(session, profile) {
     { label: "native Secret Service session storage" },
   );
   assert.equal(stored.error, undefined);
+  await session.exec(
+    "globalThis.__qaRead={done:false};window.__TAURI_INTERNALS__.invoke('load_refresh_token').then(value=>globalThis.__qaRead={done:true,matches:value===arguments[0],missing:value===null}).catch(error=>globalThis.__qaRead={done:true,error:String(error)});return true;",
+    [bootstrap.refresh_token],
+  );
+  const restored = await waitFor(
+    () => session.exec("return globalThis.__qaRead?.done?globalThis.__qaRead:null;"),
+    { label: "native keyring session readback" },
+  );
+  record("native keyring writes and reads the same disposable credential", restored);
+  assert.equal(restored.error, undefined);
+  assert.equal(restored.matches, true, "Native keyring did not return the stored session");
   await session.exec("location.reload();return true;");
   await waitFor(
     () =>
@@ -514,7 +525,30 @@ try {
       2,
     ),
   );
-  if (process.argv.includes("--journey")) await nativeJourney(session, profile);
+  if (process.argv.includes("--journey")) {
+    try {
+      await nativeJourney(session, profile);
+    } catch (error) {
+      const state = await session
+        .exec(
+          "return {origin:location.origin,path:location.pathname,apiBase:localStorage.getItem('artdaddy.api_base'),ready:document.readyState,bodyText:document.body.innerText};",
+        )
+        .catch((failure) => ({ unavailable: String(failure) }));
+      writeFileSync(
+        path.join(output, "journey-failure.json"),
+        JSON.stringify({ error: String(error), state }, null, 2),
+      );
+      const screenshot = await fetch(`http://127.0.0.1:4444/session/${session.id}/screenshot`)
+        .then((response) => response.json())
+        .catch(() => null);
+      if (typeof screenshot?.value === "string")
+        writeFileSync(
+          path.join(output, "journey-failure.png"),
+          Buffer.from(screenshot.value, "base64"),
+        );
+      throw error;
+    }
+  }
 } finally {
   if (session) {
     try {
