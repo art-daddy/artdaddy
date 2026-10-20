@@ -166,12 +166,14 @@ test("offline report requires the actual receipt for every declared Linux softwa
       }));
       const { result, envelope, receipt } = linuxEvidence(limits.systemMemoryBytes);
       const frames = Math.round(definition.durationSeconds * definition.fps);
-      const attempt = { ...result, caseId: definition.id, kind: "promise", profile, mode: "quality", definition,
+      const attempt = { ...result, version: library.version, temporarySpace: library.temporarySpace,
+        caseId: definition.id, kind: "promise", profile, mode: "quality", definition,
         encodedVideo: { width: definition.width, height: definition.height, fps: `${definition.fps}/1`, frames },
         projectFrames: frames, elapsedMs: 1000, readiness: "ready", passed: true, artifactVerified: true,
         publicationVerified: true, stagingCleaned: true, scratchCleaned: true, sourceReady: true,
         temporarySpaceQualified: true, estimateProvided: true, physicalQualified: false };
       envelope.ok = true;
+      envelope.native.resources.temporary_space = library.temporarySpace;
       await writeFile(path.join(directory, "promise-library.json"), JSON.stringify(attempt));
       await writeFile(path.join(directory, "report.json"), JSON.stringify(envelope));
       const summary = () => {

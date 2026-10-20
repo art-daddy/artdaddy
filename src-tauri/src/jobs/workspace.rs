@@ -53,6 +53,13 @@ impl Workspace {
     metadata_limit: super::EXPORT_SCRATCH_LIMIT_BYTES - super::EXPORT_WORKSPACE_PAYLOAD_BYTES,
     entry_limit: 16384, state: Mutex::new(State::default()), changed: Condvar::new() }) }
 
+  pub(super) fn temporary_space(&self) -> super::ExportTemporarySpace {
+    let payload_bytes = self.limit.min(self.allocation_limit);
+    super::ExportTemporarySpace { scope: "app-managed-allocation-v1",
+      total_bytes: payload_bytes + self.metadata_limit, payload_bytes,
+      infrastructure_bytes: self.metadata_limit, entry_limit: self.entry_limit }
+  }
+
   pub(super) fn available_bytes(&self) -> u64 {
     let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
     self.limit.saturating_sub(state.used).min(self.allocation_limit.saturating_sub(state.allocated))

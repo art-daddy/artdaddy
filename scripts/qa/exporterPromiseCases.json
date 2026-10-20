@@ -1,9 +1,20 @@
 {
-  "version": 2,
+  "version": 3,
   "scope": "ffmpeg-mp4-exporter-promise",
   "physicalDevicesRequired": true,
   "platforms": ["win32", "darwin", "linux"],
-  "temporaryDiskLimitBytes": 20000000000,
+  "temporarySpace": {
+    "scope": "app-managed-allocation-v1",
+    "totalBytes": 20000000000,
+    "payloadBytes": 18000000000,
+    "infrastructureBytes": 2000000000,
+    "entryLimit": 16384
+  },
+  "temporarySpaceExclusions": [
+    "Original source media and retained published deliverables are not temporary cleanup material.",
+    "OS snapshots and independently retained third-party data are outside this managed-allocation budget.",
+    "Owned workers and failed app cleanup remain inside the managed boundary."
+  ],
   "profiles": {
     "8gb": { "systemMemoryBytes": 8589934592, "speedRequired": false, "physicalQualified": false },
     "16gb": { "systemMemoryBytes": 17179869184, "speedRequired": true, "physicalQualified": false }

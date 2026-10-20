@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
@@ -8,23 +8,27 @@ import { test } from "node:test";
 import fc from "fast-check";
 
 const script = fileURLToPath(new URL("./exporterPromiseReport.mjs", import.meta.url));
-const definition = { id: "hd-full", line: "hd", kind: "promise", source: "generated", width: 1920, height: 1080,
-  fps: 30, durationSeconds: 60, visualClips: 10, videoLayers: 1, speedFactor16gb: 2 };
+const library = JSON.parse(await readFile(new URL("./exporterPromiseCases.json", import.meta.url), "utf8"));
+const definition = library.cases.find((entry) => entry.id === "youtube-hd");
+assert.ok(definition);
 async function fixture(cases = [definition], platforms = ["win32"]) {
   const root = await mkdtemp(path.join(os.tmpdir(), "artdaddy-promise-report-"));
   await mkdir(path.join(root, "scripts/qa"), { recursive: true });
   await mkdir(path.join(root, "reports/qa/exporter"), { recursive: true });
-  await writeFile(path.join(root, "scripts/qa/exporterPromiseCases.json"), JSON.stringify({ version: 2,
-    platforms, profiles: { "8gb": { systemMemoryBytes: 8 * 1024 ** 3 } },
-    sourceClasses: { generated: { realWorld: false }, missing: { realWorld: true, path: null } }, cases }));
+  await writeFile(path.join(root, "scripts/qa/exporterPromiseCases.json"), JSON.stringify({ ...library,
+    platforms, profiles: { "8gb": library.profiles["8gb"] },
+    sourceClasses: { ...library.sourceClasses, missing: { realWorld: true, path: null } }, cases }));
   return root;
 }
 async function record(root, name, override = {}) {
   const dir = path.join(root, "reports/qa/exporter", name);
   await mkdir(dir);
-  await writeFile(path.join(dir, "report.json"), JSON.stringify({ ok: true }));
-  await writeFile(path.join(dir, "promise-library.json"), JSON.stringify({ caseId: definition.id, kind: "promise", profile: "8gb", platform: "win32",
-    mode: "quality", definition, encodedVideo: { width: 1920, height: 1080, fps: "30/1", frames: 1800 }, projectFrames: 1800,
+  await writeFile(path.join(dir, "report.json"), JSON.stringify({ ok: true,
+    native: { resources: { temporary_space: library.temporarySpace } } }));
+  const frames = Math.round(definition.durationSeconds * definition.fps);
+  await writeFile(path.join(dir, "promise-library.json"), JSON.stringify({ version: library.version, temporarySpace: library.temporarySpace,
+    caseId: definition.id, kind: "promise", profile: "8gb", platform: "win32",
+    mode: "quality", definition, encodedVideo: { width: definition.width, height: definition.height, fps: `${definition.fps}/1`, frames }, projectFrames: frames,
     elapsedMs: 60_000, passed: true, artifactVerified: true, publicationVerified: true, stagingCleaned: true, scratchCleaned: true,
     sourceReady: true, temporarySpaceQualified: true, estimateProvided: true, readiness: "ready", profileRunId: "kernel-proof", ...override }));
   return dir;
@@ -79,7 +83,7 @@ test("Unix host evidence qualifies only matching independently measured bounded 
           const dir = await record(root, "host", { platform, hostProfileEvidence: host });
           const envelope = { ok: true, identifier: host.runId,
             hardware: { platform, totalMemoryBytes: host.nodeTotalMemoryBytes },
-            native: { resources: { total_memory_bytes: host.nativeTotalMemoryBytes } } };
+            native: { resources: { total_memory_bytes: host.nativeTotalMemoryBytes, temporary_space: library.temporarySpace } } };
           await writeFile(path.join(dir, "report.json"), JSON.stringify(envelope));
           const result = summary(root);
           const fits = nodeMiB <= 8192 && nativeMiB <= 8192;
@@ -107,7 +111,7 @@ test("missing and non-finite host measurements never turn profile labels into pr
       const dir = await record(root, "unknown", { platform: "darwin", hostProfileEvidence: host, profileEnforced: true });
       await writeFile(path.join(dir, "report.json"), JSON.stringify({ ok: true, identifier: host.runId,
         hardware: { platform: "darwin", totalMemoryBytes: measurement },
-        native: { resources: { total_memory_bytes: measurement } } }));
+        native: { resources: { total_memory_bytes: measurement, temporary_space: library.temporarySpace } } }));
       assert.equal(summary(root).overallPassed, 0);
     } finally { await rm(root, { recursive: true, force: true }); }
   }
@@ -126,6 +130,66 @@ test("unknown/blocked readiness stays separate and private fields never enter th
     assert.equal(result.rows[0].unknownReadiness, 1);
     assert.equal(result.rows[0].sourceBlockedAttempts, 1);
     assert(!JSON.stringify(result).includes("private"));
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("every schema-defined temporary field must match both the attempt and native evidence", async () => {
+  const root = await fixture();
+  try {
+    await receipt(root);
+    await record(root, "current");
+    let attempts = 1;
+    for (const [key, expected] of Object.entries(library.temporarySpace)) {
+      const mutations = [undefined, null, typeof expected === "number" ? expected + 1 : `${expected}-other`];
+      for (const value of mutations) for (const surface of ["attempt", "native"]) {
+        const name = `${surface}-${key}-${attempts}`;
+        const changed = { ...library.temporarySpace, [key]: value };
+        const dir = await record(root, name, surface === "attempt" ? { temporarySpace: changed } : {});
+        if (surface === "native")
+          await writeFile(path.join(dir, "report.json"), JSON.stringify({ ok: true, native: { resources: { temporary_space: changed } } }));
+        attempts++;
+      }
+    }
+    const result = summary(root);
+    assert.equal(result.overallAttempts, attempts);
+    assert.equal(result.overallPassed, 1);
+    assert.equal(result.overallPassRate, 1 / attempts);
+    assert.equal(result.rows[0].temporarySpaceQualifiedAttempts, 1);
+    assert.deepEqual(result.rows[0].temporarySpaceEvidenceKinds,
+      [library.temporarySpace.scope, "legacy-or-mismatched-contract"].sort());
+    assert.equal(result.physicalLibraryQualified, false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("legacy and future-version flags cannot acquire current managed qualification or leave the denominator", async () => {
+  await fc.assert(fc.asyncProperty(fc.integer({ min: 0, max: 1000 }).filter((version) => version !== library.version), async (version) => {
+    const root = await fixture();
+    try {
+      await receipt(root);
+      const dir = await record(root, "other-version", { version });
+      const original = await readFile(path.join(dir, "promise-library.json"), "utf8");
+      const result = summary(root);
+      assert.equal(result.overallAttempts, 1);
+      assert.equal(result.overallPassed, 0);
+      assert.equal(result.rows[0].temporarySpaceQualifiedAttempts, 0);
+      assert.equal(result.rows[0].status, "attempted-unqualified");
+      assert.equal(await readFile(path.join(dir, "promise-library.json"), "utf8"), original);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }), { numRuns: 12, examples: [[0], [library.version - 1], [library.version + 1]] });
+});
+
+test("declaring the current managed contract does not replace qualification or physical-device proof", async () => {
+  const root = await fixture();
+  try {
+    await receipt(root);
+    await record(root, "declared-only", { temporarySpaceQualified: false });
+    await record(root, "unspecified", { version: undefined, temporarySpace: undefined });
+    const result = summary(root);
+    assert.equal(result.overallAttempts, 2);
+    assert.equal(result.overallPassed, 0);
+    assert.equal(result.rows[0].temporarySpaceQualifiedAttempts, 0);
+    assert.deepEqual(result.rows[0].temporarySpaceEvidenceKinds, ["legacy-or-mismatched-contract", "unqualified"]);
+    assert.equal(result.physicalLibraryQualified, false);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

@@ -13,6 +13,7 @@ vi.mock("../tools/jobSupervisor", async (importOriginal) => ({
 
 import { resolveExportResources, resolveLocalFastEncoder } from "./host";
 import { FakeJobs } from "../test/fakeJobs";
+import promiseLibrary from "../../scripts/qa/exporterPromiseCases.json";
 
 const UNKNOWN = {
   total_memory_bytes: null,
@@ -31,6 +32,76 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 
 describe("local export resource snapshots", () => {
+  it("preserves the complete schema-defined native temporary budget and a measured zero allowance", async () => {
+    const snapshot = {
+      ...UNKNOWN,
+      scratch_free_bytes: 0,
+      destination_free_bytes: 0,
+      budgets: { ...UNKNOWN.budgets, temporaryBytes: 0 },
+      temporary_space: promiseLibrary.temporarySpace,
+    };
+    invoke.mockResolvedValue(snapshot);
+    expect(await resolveExportResources("")).toEqual(snapshot);
+  });
+
+  it("preserves valid smaller native workspace limits without inventing available capacity", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.integer({ min: 0, max: 18_000_000_000 }),
+        fc.integer({ min: 0, max: 2_000_000_000 }),
+        async (payloadBytes, infrastructureBytes) => {
+          const temporary_space = {
+            ...promiseLibrary.temporarySpace,
+            payloadBytes,
+            infrastructureBytes,
+            totalBytes: payloadBytes + infrastructureBytes,
+          };
+          invoke.mockResolvedValue({ ...UNKNOWN, temporary_space });
+          expect(await resolveExportResources("")).toEqual({ ...UNKNOWN, temporary_space });
+        },
+      ),
+      { numRuns: 40 },
+    );
+  });
+
+  it("makes malformed or incomplete temporary-space contracts explicitly unavailable", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const declared = promiseLibrary.temporarySpace;
+      const invalid: unknown[] = [
+        null,
+        [],
+        { ...declared, totalBytes: declared.totalBytes + 1 },
+        { ...declared, entryLimit: 0 },
+      ];
+      for (const [key, original] of Object.entries(declared)) {
+        const values =
+          typeof original === "string"
+            ? [undefined, null, "", 1]
+            : [
+                undefined,
+                null,
+                -1,
+                String(original),
+                1.5,
+                NaN,
+                Infinity,
+                Number.MAX_SAFE_INTEGER + 1,
+              ];
+        for (const value of values) {
+          invalid.push({ ...declared, [key]: value });
+        }
+      }
+      for (const temporary_space of invalid) {
+        invoke.mockResolvedValue({ ...UNKNOWN, temporary_space });
+        expect(await resolveExportResources("")).toEqual(UNKNOWN);
+      }
+      expect(warning).toHaveBeenCalledTimes(invalid.length);
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
   it("preserves complete native cgroup evidence instead of losing it at the resource adapter", async () => {
     await fc.assert(
       fc.asyncProperty(

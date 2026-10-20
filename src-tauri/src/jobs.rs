@@ -524,6 +524,7 @@ pub struct ExportResources {
   pub scratch_free_bytes: Option<u64>,
   pub destination_free_bytes: Option<u64>,
   pub budgets: ExportResourceBudgets,
+  pub temporary_space: ExportTemporarySpace,
   pub local_fast_candidate: bool,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub memory_cgroup: Option<resources::LinuxMemoryCgroup>,
@@ -551,6 +552,16 @@ pub struct ExportResourceBudgets {
   memory_bytes: u64,
   temporary_bytes: u64,
   execution_seconds: u64,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportTemporarySpace {
+  scope: &'static str,
+  total_bytes: u64,
+  payload_bytes: u64,
+  infrastructure_bytes: u64,
+  entry_limit: u64,
 }
 
 fn existing_resource_directory(path: &Path) -> Option<PathBuf> {
@@ -583,6 +594,7 @@ fn export_resources(destination: &Path, scratch: Option<&Path>, workspace: &Work
     destination_free_bytes: resource_free_bytes(destination, &disks),
     budgets: ExportResourceBudgets { memory_bytes: budget::RENDER_RESIDENT_LIMIT,
       temporary_bytes: workspace.available_bytes(), execution_seconds: EXPORT_EXECUTION_LIMIT_MS / 1000 },
+    temporary_space: workspace.temporary_space(),
     local_fast_candidate: local_fast_candidate(), memory_cgroup: resources::memory_cgroup() }
 }
 
@@ -7344,6 +7356,13 @@ mod tests {
   }
 
   #[test]
+  fn native_temporary_space_contract_matches_the_promise_schema() {
+    let library: serde_json::Value = serde_json::from_str(include_str!("../../scripts/qa/exporterPromiseCases.json")).unwrap();
+    let workspace = Workspace::new(EXPORT_WORKSPACE_PAYLOAD_BYTES);
+    assert_eq!(serde_json::to_value(workspace.temporary_space()).unwrap(), library["temporarySpace"]);
+  }
+
+  #[test]
   fn export_resource_snapshot_measures_existing_volumes_without_creating_output() {
     let root = tempfile::tempdir().unwrap();
     let destination = root.path().join("not-created").join("movie.mp4");
@@ -7353,6 +7372,9 @@ mod tests {
     assert_eq!(measured.budgets.temporary_bytes, 9877);
     assert_eq!(measured.budgets.memory_bytes, budget::RENDER_RESIDENT_LIMIT);
     assert_eq!(measured.budgets.execution_seconds * 1000, EXPORT_EXECUTION_LIMIT_MS);
+    assert_eq!(measured.temporary_space.payload_bytes, 10_000);
+    assert_eq!(measured.temporary_space.total_bytes, 10_000 + measured.temporary_space.infrastructure_bytes);
+    assert!(measured.budgets.temporary_bytes < measured.temporary_space.payload_bytes);
     assert!(measured.total_memory_bytes.is_some_and(|bytes| bytes > 1024 * 1024 * 1024));
     assert!(measured.available_memory_bytes.unwrap() <= measured.total_memory_bytes.unwrap());
     assert!(measured.destination_free_bytes.is_some_and(|bytes| bytes > 0), "{measured:?}");

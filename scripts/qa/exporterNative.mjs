@@ -118,7 +118,8 @@ assert.ok(!fastEncoderProbe || fastEncoderProbe === "amf-cqp18" && process.platf
   "Fast encoder integration is a private Windows short-pilot measurement only");
 assert.ok(!process.env.ARTDADDY_QA_ENCODER_THREADS_PROBE, "The private thread candidate was retired; measure the approved production policy instead");
 assert.ok(promiseLibrary.profiles[promiseProfile], "Unknown promise-library profile");
-const promiseAttempt = promiseCase ? { version: 2, caseId: promiseCase.id, profile: promiseProfile, kind: promiseCase.kind,
+const promiseAttempt = promiseCase ? { version: promiseLibrary.version, temporarySpace: promiseLibrary.temporarySpace,
+  caseId: promiseCase.id, profile: promiseProfile, kind: promiseCase.kind,
   line: promiseCase.line, platform: process.platform, profileRunId: process.env.ARTDADDY_QA_MEMORY_RUN_ID ?? null,
   definition: { width: promiseCase.width, height: promiseCase.height, fps: promiseCase.fps,
     durationSeconds: promiseCase.durationSeconds, visualClips: promiseCase.visualClips, videoLayers: promiseCase.videoLayers } } : null;
@@ -675,6 +676,7 @@ try {
     const cgroupFitsProfile = !!proof.memoryCgroupEvidence &&
       cgroupFits(proof.memoryCgroupEvidence.nodeBefore, profileBound);
     const profileEnforced = process.platform === "win32" && cap > 0 && cap <= profileBound || hostProfileFits || cgroupFitsProfile;
+    // A declared scope is not fresh qualification of managed allocation.
     const temporarySpaceQualified = false;
     proof.promiseResult = { ...promiseAttempt, ...native, fixture: promiseFixture, sound, captionSamples, sourcePictureProof, orientationProof, sourceReady: true,
       mode: native.encoder === "libx264" ? "quality" : native.encoder === "h264_amf" ? "fast" : "unknown",
