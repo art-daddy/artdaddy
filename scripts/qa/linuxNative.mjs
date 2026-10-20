@@ -263,6 +263,7 @@ async function nativeJourney(session, profile) {
   record("close/reopen preserves the saved document and imported references");
   await screenshot("journey-editor.png");
   const destination = path.join(projectsRoot(), "native-journey-export.mp4");
+  record("submitting native export", { destination });
   const accepted = await tool("export", {
     output_path: destination,
     resolution: "480p",
@@ -546,6 +547,20 @@ try {
     } catch (error) {
       await session
         .exec(
+          "globalThis.__qaJobs={done:false};window.__TAURI_INTERNALS__.invoke('jobs_list').then(jobs=>globalThis.__qaJobs={done:true,jobs}).catch(error=>globalThis.__qaJobs={done:true,error:String(error)});return true;",
+        )
+        .catch(() => {});
+      await waitFor(() => session.exec("return globalThis.__qaJobs?.done;"), {
+        timeout: 10000,
+        label: "native export failure job state",
+      }).catch(() => {});
+      const jobs = await session.exec("return globalThis.__qaJobs??null;").catch(() => null);
+      writeFileSync(path.join(output, "journey-native-jobs.json"), JSON.stringify(jobs, null, 2));
+      const destination = path.join(projectsRoot(), "native-journey-export.mp4");
+      if (existsSync(destination))
+        writeFileSync(path.join(output, "journey-partial-export.mp4"), readFileSync(destination));
+      await session
+        .exec(
           "globalThis.__qaFailureRead={done:false};window.__TAURI_INTERNALS__.invoke('load_refresh_token').then(token=>globalThis.__qaFailureRead={done:true,present:Boolean(token)}).catch(error=>globalThis.__qaFailureRead={done:true,error:String(error)});return true;",
         )
         .catch(() => {});
@@ -560,7 +575,7 @@ try {
         .catch((failure) => ({ unavailable: String(failure) }));
       writeFileSync(
         path.join(output, "journey-failure.json"),
-        JSON.stringify({ error: String(error), state }, null, 2),
+        JSON.stringify({ error: String(error), stack: error?.stack, state }, null, 2),
       );
       const screenshot = await fetch(`http://127.0.0.1:4444/session/${session.id}/screenshot`)
         .then((response) => response.json())
