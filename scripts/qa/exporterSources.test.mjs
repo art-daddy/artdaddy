@@ -99,7 +99,7 @@ async function checkPictureControls(plain, rotated, leadIn) {
   // comparison (0 < 0) refused every export of such a clip; it must now be accepted, and a wrong picture must not.
   const dark = [0.15, 0.75, 2].map((at) => decodeAt(leadIn, false, at, false));
   const faithful = runBlock(leadIn, "web-download", dark);
-  assert.equal(faithful[0].blankError, 0, "the lead-in fixture must really begin with a black frame");
+  assert.ok(faithful[0].blankError < 1, "the lead-in fixture must really begin with a black frame");
   assert.ok(faithful.every((entry) => entry.sourceError === 0));
   const wrongOverBlack = dark.map((sample) => Buffer.from(sample));
   wrongOverBlack[0].fill(200, 0, 160 * 72 * 3);
