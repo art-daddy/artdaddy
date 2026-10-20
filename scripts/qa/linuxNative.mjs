@@ -12,6 +12,16 @@ const manifest = JSON.parse(
   readFileSync(path.join(root, "src-tauri/resources/brand/manifest.json"), "utf8"),
 );
 const version = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8")).version;
+function executablePath(name, searchPath = process.env.PATH ?? "") {
+  const found = path.isAbsolute(name)
+    ? name
+    : searchPath
+        .split(path.delimiter)
+        .map((directory) => path.resolve(directory, name))
+        .find(existsSync);
+  assert.ok(found && path.isAbsolute(found) && existsSync(found), `Executable not found: ${name}`);
+  return found;
+}
 const program = `
 import {getVersion} from '@tauri-apps/api/app';
 import {resourceDir,resolveResource,appDataDir,appCacheDir} from '@tauri-apps/api/path';
@@ -46,6 +56,14 @@ const compiled = await build({
 assert.equal(compiled.errors.length, 0);
 assert.equal(Object.keys(manifest.assets).length, 6);
 if (process.argv.includes("--check")) {
+  assert.equal(
+    executablePath(path.basename(process.execPath), path.dirname(process.execPath)),
+    process.execPath,
+  );
+  assert.throws(
+    () => executablePath("artdaddy-nonexistent-qa-driver", path.dirname(process.execPath)),
+    /Executable not found/,
+  );
   console.log("Native Linux diagnostic bundles the real Tauri APIs and six manifest assets");
   process.exit(0);
 }
@@ -71,7 +89,8 @@ let finishDriver;
 const driverFinished = new Promise((resolve) => {
   finishDriver = resolve;
 });
-const driver = spawn("tauri-driver", ["--native-driver", "WebKitWebDriver"], {
+const nativeDriver = executablePath(process.env.NATIVE_DRIVER ?? "WebKitWebDriver");
+const driver = spawn("tauri-driver", ["--native-driver", nativeDriver], {
   stdio: ["ignore", "pipe", "pipe"],
 });
 let diagnostics = "";
