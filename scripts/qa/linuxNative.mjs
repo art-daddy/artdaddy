@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import { build } from "esbuild";
 import { newSession, projectsRoot, waitFor } from "../../e2e/desktop/webdriver.mjs";
@@ -13,6 +20,62 @@ const manifest = JSON.parse(
 );
 const version = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8")).version;
 async function nativeJourney(session, profile) {
+  const nativeDialog = async (choice) => {
+    const driver = process.env.ARTDADDY_QA_DIALOG_DRIVER;
+    assert.ok(driver && path.isAbsolute(driver) && existsSync(driver));
+    const payload = realpathSync(process.env.ARTDADDY_LINUX_PAYLOAD_BINARY);
+    const processes = readdirSync("/proc")
+      .filter((name) => /^\d+$/.test(name))
+      .filter((name) => {
+        try {
+          return realpathSync(`/proc/${name}/exe`) === payload;
+        } catch (error) {
+          if (["ENOENT", "EACCES", "EPERM", "ESRCH"].includes(error.code)) return false;
+          throw error;
+        }
+      });
+    assert.equal(
+      processes.length,
+      1,
+      "Exactly one isolated app process must own the export dialog",
+    );
+    const args = [
+      driver,
+      "--pid",
+      processes[0],
+      "--expect-exe",
+      payload,
+      "--choice",
+      choice,
+      "--screenshot",
+      path.join(output, `journey-export-${choice}-dialog.png`),
+    ];
+    const child = spawn(process.env.ARTDADDY_QA_DIALOG_PYTHON ?? "/usr/bin/python3", args, {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    const code = await new Promise((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", resolve);
+    });
+    writeFileSync(path.join(output, `journey-export-${choice}-dialog-driver.log`), stderr);
+    const observed = JSON.parse(stdout);
+    writeFileSync(
+      path.join(output, `journey-export-${choice}-dialog.json`),
+      JSON.stringify(observed, null, 2),
+    );
+    assert.equal(code, 0, JSON.stringify(observed));
+    assert.equal(observed.ok, true);
+    assert.equal(observed.owned, true);
+    return observed;
+  };
   const api = process.env.ARTDADDY_QA_API;
   assert.equal(api, "http://127.0.0.1:18766");
   const bootstrapPath = process.env.ARTDADDY_QA_BOOTSTRAP;
@@ -117,10 +180,14 @@ async function nativeJourney(session, profile) {
     capabilities: {},
     clientInfo: { name: "linux-native-journey", version: "1" },
   });
-  const tool = async (name, args = {}) => {
+  const toolResult = async (name, args = {}) => {
     const result = await rpc("tools/call", { name, arguments: args });
-    assert.ok(!result.isError, JSON.stringify(result));
     const value = JSON.parse(result.content[0].text);
+    return { result, value };
+  };
+  const tool = async (name, args = {}) => {
+    const { result, value } = await toolResult(name, args);
+    assert.ok(!result.isError, JSON.stringify(result));
     assert.notEqual(value.ok, false, JSON.stringify(value));
     return value;
   };
@@ -263,13 +330,34 @@ async function nativeJourney(session, profile) {
   record("close/reopen preserves the saved document and imported references");
   await screenshot("journey-editor.png");
   const destination = path.join(projectsRoot(), "native-journey-export.mp4");
-  record("submitting native export", { destination });
-  const accepted = await tool("export", {
-    output_path: destination,
-    resolution: "480p",
-    quality: "low",
+  const exportArgs = { output_path: destination, resolution: "480p", quality: "low" };
+  const cancelledRequest = toolResult("export", exportArgs);
+  void cancelledRequest.catch(() => {});
+  const cancelledDialog = await nativeDialog("cancel");
+  const cancelled = await cancelledRequest;
+  assert.equal(cancelled.value.ok, false, JSON.stringify(cancelled));
+  assert.match(cancelled.value.error, /cancel|declin/i);
+  assert.equal(existsSync(destination), false);
+  const afterCancel = await tool("manage_exports", { action: "list" });
+  assert.deepEqual(afterCancel.exports, []);
+  writeFileSync(
+    path.join(output, "journey-cancelled-exports.json"),
+    JSON.stringify(afterCancel, null, 2),
+  );
+  record("real native export confirmation Cancel refuses without a delivered file", {
+    dialog: cancelledDialog,
+    result: cancelled.value,
   });
+  record("submitting native export after explicit Continue", { destination });
+  const acceptedRequest = tool("export", exportArgs);
+  void acceptedRequest.catch(() => {});
+  const continuedDialog = await nativeDialog("continue");
+  const accepted = await acceptedRequest;
   assert.equal(accepted.ok, true);
+  record("real native export confirmation Continue admits an export job", {
+    dialog: continuedDialog,
+    job_id: accepted.job_id,
+  });
   await waitFor(
     async () => {
       const active = await tool("manage_exports", { action: "list" });
