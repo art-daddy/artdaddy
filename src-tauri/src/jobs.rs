@@ -3007,6 +3007,9 @@ pub async fn jobs_copy_export(jobs: tauri::State<'_, Supervisor>, id: String) ->
 
 #[cfg(test)]
 mod export_delivery_tests {
+  #[cfg(windows)]
+  mod windows_crash;
+
   fn scratch_writer(path: &Path, used: u64, limit: u64) -> Result<ScratchOutput, String> {
     let workspace = Workspace::new(EXPORT_WORKSPACE_PAYLOAD_BYTES);
     let key = Supervisor::workspace_key(path.parent().unwrap());
@@ -6906,66 +6909,82 @@ mod export_delivery_tests {
     assert!(reopened.recover_exports().is_empty());
     assert!(reopened.list().is_empty());
   }
-  #[test]
-  #[ignore = "requires the shipped ffmpeg artifact fixture"]
-  fn final_mp4_staging_cannot_bypass_shared_payload_budget() {
-    struct RealSpawner(PathBuf, stream::Registry);
-    impl Spawner for RealSpawner {
-      fn identity(&self, _: &str) -> Result<ArtifactIdentity, String> { artifact_identity(&self.0) }
-      fn spawn(&self, spec: &JobSpec, notify: Arc<dyn Fn(ProcEvent) + Send + Sync>, workspace: Arc<Workspace>) -> Result<u32, String> {
-        stream::spawn_single(&self.0, spec, notify, self.1.clone(), workspace)
-      }
-      fn spawn_stream(&self, spec: &JobSpec, notify: Arc<dyn Fn(ProcEvent) + Send + Sync>,
-        guard: stream::StartGuard, workspace: Arc<Workspace>) -> Result<u32, String> {
-        stream::spawn(&self.0, spec, notify, guard, self.1.clone(), workspace)
-      }
-      fn kill(&self, id: &str, pid: u32) { assert!(stream::cancel(&self.1, id, pid)); }
+  struct NativeDeliverySpawner(PathBuf, stream::Registry);
+  impl Spawner for NativeDeliverySpawner {
+    fn identity(&self, _: &str) -> Result<ArtifactIdentity, String> { artifact_identity(&self.0) }
+    fn spawn(&self, spec: &JobSpec, notify: Arc<dyn Fn(ProcEvent) + Send + Sync>, workspace: Arc<Workspace>) -> Result<u32, String> {
+      stream::spawn_single(&self.0, spec, notify, self.1.clone(), workspace)
     }
-    let binary = PathBuf::from(std::env::var("ARTDADDY_QA_FFMPEG").expect("shipped binary supplied"));
-    let dir = tempfile::tempdir().unwrap();
-    let source = dir.path().join("source.mp4");
-    let fixture = std::process::Command::new(&binary).args(["-y", "-nostdin", "-loglevel", "error", "-f", "lavfi", "-i",
+    fn spawn_stream(&self, spec: &JobSpec, notify: Arc<dyn Fn(ProcEvent) + Send + Sync>,
+      guard: stream::StartGuard, workspace: Arc<Workspace>) -> Result<u32, String> {
+      stream::spawn(&self.0, spec, notify, guard, self.1.clone(), workspace)
+    }
+    fn kill(&self, id: &str, pid: u32) { assert!(stream::cancel(&self.1, id, pid)); }
+  }
+
+  fn final_mp4_source(binary: &Path, directory: &Path) -> PathBuf {
+    let source = directory.join("source.mp4");
+    let fixture = std::process::Command::new(binary).args(["-y", "-nostdin", "-loglevel", "error", "-f", "lavfi", "-i",
       "testsrc2=s=640x360:r=30:d=2", "-f", "lavfi", "-i", "sine=frequency=523:sample_rate=48000:duration=2",
       "-vf", "noise=alls=30:allf=t+u", "-af", "pan=stereo|c0=c0|c1=0.25*c0", "-c:a", "alac", "-c:v", "libx264", "-threads", "1",
       "-crf", "18", "-pix_fmt", "yuv420p"]).arg(&source).output().unwrap();
     assert!(fixture.status.success(), "{}", String::from_utf8_lossy(&fixture.stderr));
+    source
+  }
+
+  fn final_mp4_spec(jobs: &Supervisor, delivery: &ExportDelivery, source: &Path, streamed: bool) -> JobSpec {
+    let mut spec = JobSpec { id: delivery.id.clone(), lane: "export".into(), program: "ffmpeg".into(),
+      args: vec!["-y".into(), "-nostdin".into(), "-loglevel".into(), "error".into(), "-i".into(), source.to_string_lossy().into(),
+        "-c".into(), "copy".into(), "-f".into(), "mp4".into(), delivery.stage_path.clone()], steps: vec![], cwd: None,
+      meta: serde_json::json!({ "kind": "export", "plan": { "sources": [{ "path": source }] } }) };
+    if streamed {
+      spec.cwd = Some(jobs.stage_render_scratch(&delivery.id, vec![RenderScratchFile { name: "segments.ffconcat".into(),
+        content: "ffconcat version 1.0\nfile 'part0.nut'\nduration 1\nfile 'part1.nut'\nduration 1\n".into() }], vec![]).unwrap());
+      let producer = |start: &str, name: &str| vec!["-y".into(), "-nostdin".into(), "-loglevel".into(), "error".into(),
+        "-ss".into(), start.into(), "-i".into(), source.to_string_lossy().into(), "-t".into(), "1".into(),
+        "-an".into(), "-c:v".into(), "ffv1".into(), "-threads".into(), "1".into(), "-f".into(), "nut".into(), name.into()];
+      spec.args = producer("0", "part0.nut");
+      spec.steps = vec![producer("1", "part1.nut"), vec!["-y".into(), "-nostdin".into(), "-loglevel".into(), "error".into(),
+        "-f".into(), "concat".into(), "-safe".into(), "1".into(), "-i".into(), "segments.ffconcat".into(),
+        "-i".into(), "audio.nut".into(), "-map".into(), "0:v:0".into(), "-map".into(), "1:a:0".into(),
+        "-c:a".into(), "alac".into(), "-c:v".into(), "libx264".into(), "-threads".into(), "1".into(), "-crf".into(), "0".into(),
+        "-f".into(), "mp4".into(), delivery.stage_path.clone()]];
+      spec.meta["renderTransport"] = serde_json::json!("partition-pipes-v1");
+      spec.meta["renderAudio"] = serde_json::json!({ "duration": 2.0, "args": ["-nostdin", "-loglevel", "error",
+        "-i", source, "-map", "0:a:0", "-vn", "-ac", "2", "-ar", "48000", "-t", "2", "-c:a", "pcm_f64le", "-f", "nut", "audio.nut"] });
+    }
+    spec
+  }
+
+  #[test]
+  #[ignore = "requires the shipped ffmpeg artifact fixture"]
+  fn final_mp4_staging_cannot_bypass_shared_payload_budget() {
+    assert_eq!(exercise_final_mp4_budget(Path::new(&std::env::var("ARTDADDY_QA_FFMPEG").expect("shipped binary supplied"))).len(), 8);
+  }
+
+  fn exercise_final_mp4_budget(binary: &Path) -> Vec<serde_json::Value> {
+    let dir = tempfile::tempdir().unwrap();
+    let source = final_mp4_source(binary, dir.path());
     let original = artifact_identity(&source).unwrap();
     assert!(original.size > 64 * 1024 && original.size < 16 * 1024 * 1024);
+    let mut outcomes = Vec::new();
     for (streamed, replayed, budget) in [(false, false), (true, false), (false, true), (true, true)].into_iter()
       .flat_map(|(streamed, replayed)| [16 * 1024 * 1024, 64 * 1024].map(move |budget| (streamed, replayed, budget))) {
       let (sender, receiver) = std::sync::mpsc::channel();
-      let mut jobs = Supervisor::new(Arc::new(RealSpawner(binary.clone(), Arc::default())), Arc::new(move |notice| {
+      let mut jobs = Supervisor::new(Arc::new(NativeDeliverySpawner(binary.to_path_buf(), Arc::default())), Arc::new(move |notice| {
         if let Notice::Changed(view) = notice {
           if view.state == JobState::Exited { let _ = sender.send(view); }
         }
-      })).with_export_work_root(dir.path().join(format!("work-{streamed}-{replayed}-{budget}"))).unwrap()
-        .with_export_root(dir.path().join(format!("journal-{streamed}-{replayed}-{budget}"))).unwrap();
+      }));
       jobs.workspace = Workspace::new(budget);
+      let mut jobs = jobs.with_export_work_root(dir.path().join(format!("work-{streamed}-{replayed}-{budget}"))).unwrap()
+        .with_export_root(dir.path().join(format!("journal-{streamed}-{replayed}-{budget}"))).unwrap();
       let delivery = jobs.prepare_delivery(format!("bounded-mp4-{budget}"), "original-project".into(),
         dir.path().join(format!("stage-{budget}.partial")).to_string_lossy().into(),
         dir.path().join(format!("delivered-{budget}.mp4")).to_string_lossy().into(),
         DeliverySource::Render { paths: vec![source.to_string_lossy().into()] }).unwrap();
       std::fs::write(&delivery.dest_path, b"previous complete file").unwrap();
-      let mut spec = JobSpec { id: delivery.id.clone(), lane: "export".into(), program: "ffmpeg".into(),
-        args: vec!["-y".into(), "-nostdin".into(), "-loglevel".into(), "error".into(), "-i".into(), source.to_string_lossy().into(),
-          "-c".into(), "copy".into(), "-f".into(), "mp4".into(), delivery.stage_path.clone()], steps: vec![], cwd: None,
-        meta: serde_json::json!({ "kind": "export", "plan": { "sources": [{ "path": source }] } }) };
-      if streamed {
-        spec.cwd = Some(jobs.stage_render_scratch(&delivery.id, vec![RenderScratchFile { name: "segments.ffconcat".into(),
-          content: "ffconcat version 1.0\nfile 'part0.nut'\nduration 1\nfile 'part1.nut'\nduration 1\n".into() }], vec![]).unwrap());
-        let producer = |start: &str, name: &str| vec!["-y".into(), "-nostdin".into(), "-loglevel".into(), "error".into(),
-          "-ss".into(), start.into(), "-i".into(), source.to_string_lossy().into(), "-t".into(), "1".into(),
-          "-an".into(), "-c:v".into(), "ffv1".into(), "-threads".into(), "1".into(), "-f".into(), "nut".into(), name.into()];
-        spec.args = producer("0", "part0.nut");
-        spec.steps = vec![producer("1", "part1.nut"), vec!["-y".into(), "-nostdin".into(), "-loglevel".into(), "error".into(),
-          "-f".into(), "concat".into(), "-safe".into(), "1".into(), "-i".into(), "segments.ffconcat".into(),
-          "-i".into(), "audio.nut".into(), "-map".into(), "0:v:0".into(), "-map".into(), "1:a:0".into(),
-          "-c:a".into(), "alac".into(), "-c:v".into(), "libx264".into(), "-threads".into(), "1".into(), "-crf".into(), "0".into(),
-          "-f".into(), "mp4".into(), delivery.stage_path.clone()]];
-        spec.meta["renderTransport"] = serde_json::json!("partition-pipes-v1");
-        spec.meta["renderAudio"] = serde_json::json!({ "duration": 2.0, "args": ["-nostdin", "-loglevel", "error",
-          "-i", source, "-map", "0:a:0", "-vn", "-ac", "2", "-ar", "48000", "-t", "2", "-c:a", "pcm_f64le", "-f", "nut", "audio.nut"] });
-      }
+      let spec = final_mp4_spec(&jobs, &delivery, &source, streamed);
       if replayed {
         jobs.retain_render_job(&spec).unwrap();
         let mut recovered = Supervisor::new(jobs.spawner.clone(), jobs.notify.clone());
@@ -6990,6 +7009,9 @@ mod export_delivery_tests {
       let staged_bytes = std::fs::metadata(&delivery.stage_path).map(|metadata| metadata.len()).unwrap_or(0);
       assert_eq!(jobs.workspace.available_bytes(), budget.saturating_sub(retained_scratch + staged_bytes),
         "terminal output released its private bytes or invented used capacity before publication");
+      let staged_identity = Path::new(&delivery.stage_path).exists().then(|| artifact_identity(Path::new(&delivery.stage_path)).unwrap());
+      let mut boundary_record = None;
+      let mut decoded_record = None;
       if budget < original.size {
         assert_ne!(ended.code, Some(0), "pending MP4 output bypassed the shared workspace: {diagnostics}");
         let boundary = diagnostics.lines().find_map(|line| line.split_once("native output write boundary refused completion: ")
@@ -7004,6 +7026,7 @@ mod export_delivery_tests {
         assert!(!Path::new(&delivery.stage_path).exists(), "size-stopped private output was not cleaned");
         assert!(jobs.verify_delivery(&delivery.id).is_err());
         assert!(jobs.publish_delivery(&delivery.id).is_err());
+        boundary_record = Some(boundary);
       } else {
         assert_eq!(ended.code, Some(0), "{diagnostics}");
         let queued = jobs.prepare_delivery(format!("next-project-{budget}"), "another-project".into(),
@@ -7041,6 +7064,8 @@ mod export_delivery_tests {
         assert!(original_audio.status.success() && staged_audio.status.success());
         assert_eq!(original_audio.stdout.len(), 96_000 * 2 * 8);
         assert_eq!(staged_audio.stdout, original_audio.stdout);
+        decoded_record = Some(serde_json::json!({ "video": format!("{:x}", Sha256::digest(&staged.stdout)),
+          "audio": format!("{:x}", Sha256::digest(&staged_audio.stdout)), "audio_bytes": staged_audio.stdout.len() }));
         jobs.verify_delivery(&delivery.id).unwrap();
         jobs.publish_delivery(&delivery.id).unwrap();
       }
@@ -7048,7 +7073,12 @@ mod export_delivery_tests {
       jobs.complete_delivery(&delivery.id).unwrap();
       assert!(!Path::new(&delivery.stage_path).exists());
       assert_eq!(jobs.workspace.available_bytes(), budget);
+      outcomes.push(serde_json::json!({ "streamed": streamed, "replayed": replayed, "budget": budget,
+        "source": original, "stage": staged_identity, "boundary": boundary_record, "decoded": decoded_record,
+        "destination": artifact_identity(Path::new(&delivery.dest_path)).unwrap(),
+        "remaining_payload": jobs.workspace.available_bytes(), "stage_removed": true }));
     }
+    outcomes
   }
   #[test]
   #[ignore = "requires the shipped ffmpeg artifact fixture"]
