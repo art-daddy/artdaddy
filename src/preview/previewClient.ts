@@ -6,7 +6,7 @@
 // so we never re-clone a 300-clip timeline across the worker boundary per frame.
 import { loadBundledFonts } from "./fonts";
 import { setAssetDims } from "./assetDims";
-import type { PreviewInbound, PreviewOutbound, StillAnimation } from "./protocol";
+import type { PreviewEndpoint, PreviewInbound, PreviewOutbound, StillAnimation } from "./protocol";
 import { timelineSources } from "./protocol";
 import { resolvePosterUrl, resolvePreviewUrl, resolveStillAnimation } from "./resolve";
 import type { TextLayer } from "./scene";
@@ -31,6 +31,7 @@ export interface PreviewClient {
 export interface PreviewClientDeps {
   /** Override worker construction (tests inject a fake). */
   createWorker?: () => Worker;
+  createFallback?: () => PreviewEndpoint | Promise<PreviewEndpoint>;
   /** Override source resolution (tests inject a fake). */
   resolve?: (store: ProjectStoreAccess, source: string) => Promise<string | null>;
   /** Override the animated-still lookup (tests inject a fake). */
@@ -65,27 +66,121 @@ export function createPreviewClient(
 ): PreviewClient {
   const resolve = deps.resolve ?? resolvePreviewUrl;
   const resolveAnimation = deps.resolveAnimation ?? resolveStillAnimation;
-  const worker = deps.createWorker
-    ? deps.createWorker()
-    : new Worker(new URL("./previewWorker.ts", import.meta.url), { type: "module" });
+  let worker: Worker | null = null;
+  try {
+    worker = deps.createWorker
+      ? deps.createWorker()
+      : new Worker(new URL("./previewWorker.ts", import.meta.url), { type: "module" });
+  } catch {}
 
-  const offscreen = canvas.transferControlToOffscreen();
-  worker.postMessage({ type: "init", canvas: offscreen } satisfies PreviewInbound, [offscreen]);
-  const pendingCaptures = new Map<number, (bytes: Uint8Array | null) => void>();
-  worker.onmessage = (e: MessageEvent<PreviewOutbound>): void => {
-    if (e.data.type === "error") deps.onError?.(e.data.message);
+  let ready = false;
+  let disposed = false;
+  let failed = false;
+  let startingFallback = false;
+  let endpoint: PreviewEndpoint | null = worker;
+  let probeTimer: ReturnType<typeof setTimeout> | null = null;
+  const queued: Array<{ message: PreviewInbound; transfer: Transferable[] }> = [];
+  const post = (message: PreviewInbound, transfer: Transferable[] = []): void => {
+    if (disposed || failed) {
+      if (message.type === "textBitmap") message.bitmap?.close();
+      return;
+    }
+    if (!ready) queued.push({ message, transfer });
+    else endpoint?.postMessage(message, transfer);
+  };
+  const pendingCaptures = new Map<
+    number,
+    {
+      settle: (bytes: Uint8Array | null) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >();
+  const settleCaptures = (): void => {
+    for (const pending of pendingCaptures.values()) {
+      clearTimeout(pending.timer);
+      pending.settle(null);
+    }
+    pendingCaptures.clear();
+  };
+  const retireQueued = (): void => {
+    for (const pending of queued.splice(0)) {
+      if (pending.message.type === "textBitmap") pending.message.bitmap?.close();
+    }
+  };
+  const fail = (message: string): void => {
+    if (disposed || failed) return;
+    failed = true;
+    if (probeTimer !== null) clearTimeout(probeTimer);
+    retireQueued();
+    settleCaptures();
+    endpoint?.terminate();
+    deps.onError?.(message);
+  };
+  const receive = (e: MessageEvent<PreviewOutbound>): void => {
+    if (disposed || failed) return;
+    if (e.data.type === "capabilities") {
+      if (ready || startingFallback) return;
+      if (!e.data.webgl2) {
+        void startFallback();
+        return;
+      }
+      if (probeTimer !== null) clearTimeout(probeTimer);
+      try {
+        const offscreen = canvas.transferControlToOffscreen();
+        endpoint?.postMessage({ type: "init", canvas: offscreen } satisfies PreviewInbound, [
+          offscreen,
+        ]);
+        ready = true;
+        flushQueued();
+      } catch (error) {
+        fail(String(error));
+      }
+    } else if (e.data.type === "error") fail(e.data.message);
     else if (e.data.type === "stalled") deps.onStalled?.(e.data.stalled);
     else if (e.data.type === "firstFrame") mark("first-frame");
     else if (e.data.type === "needText") void answerText(e.data.key, e.data.layer);
     else if (e.data.type === "dims") setAssetDims(e.data.source, { w: e.data.w, h: e.data.h });
     else if (e.data.type === "captured") {
-      const resolve = pendingCaptures.get(e.data.requestId);
-      if (resolve) {
+      const pending = pendingCaptures.get(e.data.requestId);
+      if (pending) {
         pendingCaptures.delete(e.data.requestId);
-        resolve(e.data.bytes ? new Uint8Array(e.data.bytes) : null);
+        clearTimeout(pending.timer);
+        pending.settle(e.data.bytes ? new Uint8Array(e.data.bytes) : null);
       }
     }
   };
+  const attach = (next: PreviewEndpoint): void => {
+    next.onmessage = (event) => {
+      if (endpoint === next) receive(event);
+    };
+  };
+  function flushQueued(): void {
+    for (const pending of queued.splice(0))
+      endpoint?.postMessage(pending.message, pending.transfer);
+  }
+  async function startFallback(): Promise<void> {
+    if (disposed || failed || ready || startingFallback) return;
+    startingFallback = true;
+    if (probeTimer !== null) clearTimeout(probeTimer);
+    endpoint = null;
+    worker?.terminate();
+    try {
+      const local = deps.createFallback
+        ? await deps.createFallback()
+        : (await import("./previewRuntime")).createMainThreadPreview();
+      if (disposed || failed) {
+        local.terminate();
+        return;
+      }
+      endpoint = local;
+      attach(local);
+      local.postMessage({ type: "init", canvas } satisfies PreviewInbound);
+      ready = true;
+      flushQueued();
+    } catch (error) {
+      fail(String(error));
+    }
+  }
 
   /** Rasterize a caption HERE, not in the worker: a FontFace registered on a
    *  worker loads but never reaches its OffscreenCanvas, so the worker would draw
@@ -99,7 +194,11 @@ export function createPreviewClient(
     } catch {
       /* fall through: the worker skips a layer it never receives a bitmap for */
     }
-    worker.postMessage(
+    if (disposed || failed) {
+      bitmap?.close();
+      return;
+    }
+    post(
       { type: "textBitmap", key, ...(bitmap ? { bitmap } : {}) } satisfies PreviewInbound,
       bitmap ? [bitmap] : [],
     );
@@ -157,7 +256,7 @@ export function createPreviewClient(
     mark("urls-resolved");
     if (mine !== token) return; // a newer timeline superseded this resolve
     const drawn = withStillKinds(timeline, (ref) => kinds.get(ref) ?? null);
-    worker.postMessage({
+    post({
       type: "render",
       timeline: drawn,
       time,
@@ -167,34 +266,59 @@ export function createPreviewClient(
     } satisfies PreviewInbound);
   }
 
+  if (worker) {
+    attach(worker);
+    worker.onerror = (event) => {
+      if (endpoint !== worker || disposed || failed) return;
+      if (ready) fail(event.message || "Preview worker failed");
+      else void startFallback();
+    };
+    probeTimer = setTimeout(() => {
+      void startFallback();
+    }, 3000);
+    worker.postMessage({ type: "probe" } satisfies PreviewInbound);
+  } else {
+    void startFallback();
+  }
+
   return {
     render(timeline, time) {
-      if (!timeline) return;
+      if (disposed || failed || !timeline) return;
       if (timeline !== lastTimeline) {
         lastTimeline = timeline;
         void resolveAndRender(timeline, time);
       } else {
-        worker.postMessage({ type: "seek", time } satisfies PreviewInbound);
+        post({ type: "seek", time } satisfies PreviewInbound);
       }
     },
     setStore(next) {
+      if (disposed || failed) return;
+      if (store !== next) {
+        token++;
+        lastTimeline = null;
+      }
       store = next;
     },
     capture(maxEdge) {
+      if (disposed || failed) return Promise.resolve(null);
       return new Promise<Uint8Array | null>((resolve) => {
         const requestId = ++captureSeq;
-        pendingCaptures.set(requestId, resolve);
-        worker.postMessage({ type: "capture", requestId, maxEdge } satisfies PreviewInbound);
         // Never hang the caller if the worker is wedged / WebGL is unavailable.
-        setTimeout(() => {
+        const timer = setTimeout(() => {
           if (pendingCaptures.delete(requestId)) resolve(null);
         }, 4000);
+        pendingCaptures.set(requestId, { settle: resolve, timer });
+        post({ type: "capture", requestId, maxEdge } satisfies PreviewInbound);
       });
     },
     dispose() {
+      disposed = true;
       token++; // strand any in-flight resolve
-      pendingCaptures.clear();
-      worker.terminate();
+      if (probeTimer !== null) clearTimeout(probeTimer);
+      retireQueued();
+      settleCaptures();
+      endpoint?.terminate();
+      if (endpoint !== worker) worker?.terminate();
     },
   };
 }

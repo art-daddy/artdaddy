@@ -7,8 +7,10 @@
 // A clip of two frames never drew in playback (UJ-034): the decoder holds the last frames of a
 // stream back to reorder them, and pump never told it the stream had ended. Not part of the build.
 import { VideoSource } from "./videoSource";
-import type { PreviewOutbound } from "./protocol";
+import { createPreviewClient } from "./previewClient";
+import type { PreviewInbound } from "./protocol";
 import type { Timeline } from "../timeline/model";
+import type { ProjectStoreAccess } from "../tools/store";
 
 export interface WorkerSeekShot {
   time: number;
@@ -19,6 +21,7 @@ export interface WorkerSeekShot {
 export interface WorkerSeekResult {
   shots: WorkerSeekShot[];
   errors: string[];
+  backend: "worker" | "main-thread" | "unselected";
 }
 
 export interface StreamShot {
@@ -64,28 +67,55 @@ async function seekInWorker(): Promise<WorkerSeekResult> {
   canvas.width = 160;
   canvas.height = 96;
   document.body.append(canvas);
-  const worker = new Worker(new URL("./previewWorker.ts", import.meta.url), { type: "module" });
-  const captures = new Map<number, (bytes: Uint8Array | null) => void>();
   const errors: string[] = [];
-  let sequence = 0;
-  worker.onmessage = (event: MessageEvent<PreviewOutbound>) => {
-    const message = event.data;
-    if (message.type === "error") errors.push(message.message);
-    if (message.type !== "captured") return;
-    const complete = captures.get(message.requestId);
-    if (!complete) return;
-    captures.delete(message.requestId);
-    complete(message.bytes ? new Uint8Array(message.bytes) : null);
-  };
-  const capture = () =>
-    new Promise<Uint8Array | null>((resolve) => {
-      const requestId = ++sequence;
-      captures.set(requestId, resolve);
-      worker.postMessage({ type: "capture", requestId, maxEdge: 160 });
-      setTimeout(() => {
-        if (captures.delete(requestId)) resolve(null);
-      }, 4000);
-    });
+  let backend: WorkerSeekResult["backend"] = "unselected";
+  const forced = new URLSearchParams(location.search).has("forceWorkerUnavailable");
+  const unavailable = forced
+    ? URL.createObjectURL(
+        new Blob(['onmessage=()=>postMessage({type:"capabilities",webgl2:false});'], {
+          type: "text/javascript",
+        }),
+      )
+    : null;
+  const client = createPreviewClient(canvas, {
+    createWorker: () => {
+      const worker = unavailable
+        ? new Worker(unavailable)
+        : new Worker(new URL("./previewWorker.ts", import.meta.url), { type: "module" });
+      return {
+        get onmessage() {
+          return worker.onmessage;
+        },
+        set onmessage(handler: Worker["onmessage"]) {
+          worker.onmessage = handler;
+        },
+        get onerror() {
+          return worker.onerror;
+        },
+        set onerror(handler: Worker["onerror"]) {
+          worker.onerror = handler;
+        },
+        postMessage(message: PreviewInbound, transfer: Transferable[] = []) {
+          if (message.type === "init") backend = "worker";
+          worker.postMessage(message, transfer);
+        },
+        terminate() {
+          worker.terminate();
+        },
+      } as unknown as Worker;
+    },
+    createFallback: async () => {
+      backend = "main-thread";
+      return (await import("./previewRuntime")).createMainThreadPreview();
+    },
+    resolve: async () => new URL("/e2e/ui/fixtures/mac-recording-preview.mp4", location.href).href,
+    resolveAnimation: async () => null,
+    onError: (message) => errors.push(message),
+  });
+  client.setStore({
+    projectDir: "preview-probe",
+    resolveRef: async () => "/e2e/ui/fixtures/mac-recording-preview.mp4",
+  } as unknown as ProjectStoreAccess);
   const timeline: Timeline = {
     units: "frames",
     canvas: { width: 160, height: 96, fps: 30 },
@@ -110,16 +140,7 @@ async function seekInWorker(): Promise<WorkerSeekResult> {
   };
   const shots: WorkerSeekShot[] = [];
   try {
-    const offscreen = canvas.transferControlToOffscreen();
-    worker.postMessage({ type: "init", canvas: offscreen }, [offscreen]);
-    worker.postMessage({
-      type: "render",
-      timeline,
-      time: 0.4,
-      urls: {
-        recording: new URL("/e2e/ui/fixtures/mac-recording-preview.mp4", location.href).href,
-      },
-    });
+    client.render(timeline, 0.4);
     let previousTime = 0.4;
     for (const [time, expected] of [
       [0.4, "red"],
@@ -129,14 +150,14 @@ async function seekInWorker(): Promise<WorkerSeekResult> {
       [0.4, "red"],
     ] as const) {
       for (let frame = Math.round(previousTime * 30) + 1; frame < Math.round(time * 30); frame++) {
-        worker.postMessage({ type: "seek", time: frame / 30 });
+        client.render(timeline, frame / 30);
         await sleep(TICK_MS);
       }
-      worker.postMessage({ type: "seek", time });
+      client.render(timeline, time);
       let pixel: number[] = [];
       let matched = false;
       for (let attempt = 0; attempt < PATIENCE && !matched; attempt++) {
-        const bytes = await capture();
+        const bytes = await client.capture(160);
         if (bytes) {
           const bitmap = await createImageBitmap(
             new Blob([bytes as Uint8Array<ArrayBuffer>], { type: "image/jpeg" }),
@@ -160,9 +181,10 @@ async function seekInWorker(): Promise<WorkerSeekResult> {
       shots.push({ time, pixel, matched });
       previousTime = time;
     }
-    return { shots, errors };
+    return { shots, errors, backend };
   } finally {
-    worker.terminate();
+    client.dispose();
+    if (unavailable) URL.revokeObjectURL(unavailable);
     canvas.remove();
   }
 }
