@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { build } from "esbuild";
-import { newSession, waitFor } from "../../e2e/desktop/webdriver.mjs";
+import { newSession, projectsRoot, waitFor } from "../../e2e/desktop/webdriver.mjs";
 
 const root = path.resolve(import.meta.dirname, "../..");
 const output = path.join(root, "reports/linux-qa");
@@ -12,6 +12,320 @@ const manifest = JSON.parse(
   readFileSync(path.join(root, "src-tauri/resources/brand/manifest.json"), "utf8"),
 );
 const version = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8")).version;
+async function nativeJourney(session, profile) {
+  const api = process.env.ARTDADDY_QA_API;
+  assert.equal(api, "http://127.0.0.1:18766");
+  const bootstrapPath = process.env.ARTDADDY_QA_BOOTSTRAP;
+  assert.ok(bootstrapPath?.startsWith(`${profile}/`));
+  await waitFor(async () => existsSync(bootstrapPath) && (await fetch(`${api}/health`)).ok, {
+    timeout: 20_000,
+    label: "isolated signed-session fixture ready",
+  });
+  const bootstrap = JSON.parse(readFileSync(bootstrapPath, "utf8"));
+  const checks = [];
+  const record = (label, detail = {}) => {
+    checks.push({ label, ...detail });
+    writeFileSync(
+      path.join(output, "journey.json"),
+      JSON.stringify({ checks, complete: false }, null, 2),
+    );
+  };
+  const screenshot = async (name) => {
+    const response = await fetch(`http://127.0.0.1:4444/session/${session.id}/screenshot`).then(
+      (r) => r.json(),
+    );
+    assert.equal(typeof response.value, "string");
+    const bytes = Buffer.from(response.value, "base64");
+    const file = path.join(output, name);
+    writeFileSync(file, bytes);
+    return { file, sha256: createHash("sha256").update(bytes).digest("hex") };
+  };
+  const click = async (label) => {
+    const selector = await session.exec(
+      "const buttons=[...document.querySelectorAll('button')];const index=buttons.findIndex(b=>!b.disabled&&(b.textContent.trim()===arguments[0]||b.querySelector('span')?.textContent.trim()===arguments[0]));if(index<0)throw new Error('Missing enabled button: '+arguments[0]);buttons[index].setAttribute('data-native-qa-target','true');return 'button[data-native-qa-target=true]';",
+      [label],
+    );
+    try {
+      await session.click(await session.find(selector));
+    } finally {
+      await session.exec(
+        "document.querySelector('[data-native-qa-target]')?.removeAttribute('data-native-qa-target');return true;",
+      );
+    }
+  };
+  await session.exec(
+    "localStorage.setItem('artdaddy.api_base',arguments[0]);globalThis.__qaStore={done:false};window.__TAURI_INTERNALS__.invoke('store_refresh_token',{token:arguments[1]}).then(()=>globalThis.__qaStore={done:true}).catch(error=>globalThis.__qaStore={done:true,error:String(error)});return true;",
+    [api, bootstrap.refresh_token],
+  );
+  const stored = await waitFor(
+    () => session.exec("return globalThis.__qaStore?.done?globalThis.__qaStore:null;"),
+    { label: "native Secret Service session storage" },
+  );
+  assert.equal(stored.error, undefined);
+  await session.exec("location.reload();return true;");
+  await waitFor(
+    () =>
+      session.exec(
+        "return [...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='File');",
+      ),
+    { timeout: 60_000, label: "authenticated native editor" },
+  );
+  record("native keyring restore, signed authentication and compatibility admission", {
+    authBypass: false,
+    provider: "isolated backend fixture",
+  });
+  await screenshot("journey-authenticated.png");
+  let rpcId = 0;
+  let rpcSession;
+  const rpc = async (method, params) => {
+    const response = await fetch("http://127.0.0.1:19787/mcp", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        ...(rpcSession ? { "mcp-session-id": rpcSession } : {}),
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method, params }),
+    });
+    rpcSession = response.headers.get("mcp-session-id") ?? rpcSession;
+    assert.equal(response.status, 200);
+    const value = await response.json();
+    assert.equal(value.error, undefined, JSON.stringify(value.error));
+    return value.result;
+  };
+  await waitFor(async () => Boolean(await rpc("ping", {}).catch(() => null)), {
+    label: "authenticated native MCP bridge",
+  });
+  await rpc("initialize", {
+    protocolVersion: "2025-06-18",
+    capabilities: {},
+    clientInfo: { name: "linux-native-journey", version: "1" },
+  });
+  const tool = async (name, args = {}) => {
+    const result = await rpc("tools/call", { name, arguments: args });
+    assert.ok(!result.isError, JSON.stringify(result));
+    const value = JSON.parse(result.content[0].text);
+    assert.notEqual(value.ok, false, JSON.stringify(value));
+    return value;
+  };
+  const project = await tool("manage_project", {
+    action: "create",
+    name: "linux-native-journey",
+    aspect: "16:9",
+    fps: 30,
+  });
+  assert.equal(typeof project.created, "string", JSON.stringify(project));
+  const projectDir = path.join(projectsRoot(), project.created);
+  assert.ok(projectDir.startsWith(`${profile}/`));
+  const timelinePath = path.join(projectDir, "internals/timeline.json");
+  const clips = () =>
+    JSON.parse(readFileSync(timelinePath, "utf8")).tracks.flatMap((track) =>
+      track.clips.map((clip) => ({ ...clip, trackKind: track.kind })),
+    );
+  const source = path.join(projectsRoot(), "native-red-green.mp4");
+  execFileSync("ffmpeg", [
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-y",
+    "-f",
+    "lavfi",
+    "-i",
+    "color=c=0xdc201f:s=320x180:r=30:d=2",
+    "-f",
+    "lavfi",
+    "-i",
+    "sine=frequency=440:duration=2",
+    "-vf",
+    "drawbox=x=0:y=0:w=iw:h=ih:color=0x1acb32:t=fill:enable='gte(t,1)'",
+    "-c:v",
+    "libx264",
+    "-pix_fmt",
+    "yuv420p",
+    "-c:a",
+    "aac",
+    "-shortest",
+    source,
+  ]);
+  const media = await tool("import_media", { source: { path: source } });
+  assert.match(media.media_ref, /^media_/);
+  await tool("add_clips", { entries: [{ media_ref: media.media_ref, timeline_in: 0 }] });
+  await waitFor(() => clips().filter((clip) => clip.kind === "video").length === 1, {
+    label: "real imported video persisted",
+  });
+  const original = readFileSync(timelinePath);
+  writeFileSync(path.join(output, "timeline-before.json"), original);
+  const video = clips().find((clip) => clip.kind === "video");
+  await waitFor(() => session.find(`[data-clip-id='${video.id}']`), {
+    label: "imported clip in native timeline",
+  });
+  await session.click(await session.find(`[data-clip-id='${video.id}']`));
+  const clipBox = await session.box(`[data-clip-id='${video.id}']`);
+  const ruler = await session.box("[aria-label='timeline scrubber']");
+  assert.ok(clipBox?.w > 5 && ruler?.w > 0);
+  const seek = async (fraction) => {
+    const point = { x: clipBox.x - clipBox.w / 2 + clipBox.w * fraction, y: ruler.y };
+    await session.drag(point, point, 1);
+  };
+  const previewPixels = [];
+  for (const [fraction, color] of [
+    [0.125, "red"],
+    [0.625, "green"],
+  ]) {
+    await seek(fraction);
+    const sampled = await waitFor(
+      async () => {
+        const bounds = await session.exec(
+          "const canvas=document.querySelector('canvas.block.h-full.w-full');if(!canvas)return null;const box=canvas.getBoundingClientRect();return {x:box.x+box.width/2,y:box.y+box.height/2,width:innerWidth,height:innerHeight};",
+        );
+        if (!bounds) return null;
+        const image = await screenshot(`journey-preview-${color}.png`);
+        const png = readFileSync(image.file);
+        const sampleX = Math.floor((bounds.x * png.readUInt32BE(16)) / bounds.width);
+        const sampleY = Math.floor((bounds.y * png.readUInt32BE(20)) / bounds.height);
+        const pixel = Array.from(
+          execFileSync("ffmpeg", [
+            "-v",
+            "error",
+            "-i",
+            image.file,
+            "-vf",
+            `crop=1:1:${sampleX}:${sampleY}`,
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgba",
+            "pipe:1",
+          ]),
+        );
+        const matched =
+          color === "red" ? pixel[0] > 150 && pixel[1] < 100 : pixel[1] > 140 && pixel[0] < 100;
+        return matched ? { color, pixel, screenshot: image, sampleX, sampleY } : null;
+      },
+      { timeout: 30_000, label: `real native preview ${color} frame` },
+    );
+    previewPixels.push(sampled);
+  }
+  assert.notDeepEqual(previewPixels[0].pixel, previewPixels[1].pixel);
+  record("production native preview changes expected frames after real playhead seeking", {
+    samples: previewPixels,
+  });
+  await seek(0.5);
+  await click("Edit");
+  await click("Split at Playhead");
+  await waitFor(() => clips().filter((clip) => clip.kind === "video").length === 2, {
+    label: "manual split persisted",
+  });
+  writeFileSync(path.join(output, "timeline-split.json"), readFileSync(timelinePath));
+  await click("Edit");
+  await click("Undo");
+  await waitFor(() => readFileSync(timelinePath).equals(original), {
+    label: "one manual undo restores exact document bytes",
+  });
+  record("real UI split and one undo restore byte-identical persisted timeline", {
+    sha256: createHash("sha256").update(original).digest("hex"),
+  });
+  await click("File");
+  await click("Close Project");
+  await waitFor(() => session.exec("return !document.querySelector('[data-clip-id]');"), {
+    label: "native project close",
+  });
+  await tool("manage_project", { action: "open", id: project.created });
+  await waitFor(() => session.find(`[data-clip-id='${video.id}']`), {
+    label: "same project reopened from disk",
+  });
+  assert.ok(readFileSync(timelinePath).equals(original));
+  writeFileSync(path.join(output, "timeline-reopened.json"), readFileSync(timelinePath));
+  record("close/reopen preserves the saved document and imported references");
+  await screenshot("journey-editor.png");
+  const destination = path.join(projectsRoot(), "native-journey-export.mp4");
+  const accepted = await tool("export", {
+    output_path: destination,
+    resolution: "480p",
+    quality: "low",
+  });
+  assert.equal(accepted.ok, true);
+  await waitFor(
+    async () => {
+      const active = await tool("manage_exports", { action: "list" });
+      return (
+        existsSync(destination) &&
+        readFileSync(destination).length > 10000 &&
+        JSON.stringify(active).includes(accepted.job_id) === false
+      );
+    },
+    { timeout: 120_000, label: "native export completes with actual file bytes" },
+  );
+  const probe = JSON.parse(
+    execFileSync(
+      "ffprobe",
+      ["-v", "error", "-show_streams", "-show_format", "-of", "json", destination],
+      { encoding: "utf8" },
+    ),
+  );
+  assert.ok(Number(probe.format.duration) >= 1.95);
+  assert.ok(probe.streams.some((stream) => stream.codec_type === "video" && stream.height === 480));
+  assert.ok(probe.streams.some((stream) => stream.codec_type === "audio"));
+  const pixels = [0.25, 1.25].map((time) =>
+    Array.from(
+      execFileSync("ffmpeg", [
+        "-v",
+        "error",
+        "-ss",
+        String(time),
+        "-i",
+        destination,
+        "-vf",
+        "crop=2:2:iw/2:ih/2,scale=1:1",
+        "-frames:v",
+        "1",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgba",
+        "pipe:1",
+      ]),
+    ),
+  );
+  assert.ok(pixels[0][0] > 150 && pixels[0][1] < 100, `first frame must be red: ${pixels[0]}`);
+  assert.ok(pixels[1][1] > 140 && pixels[1][0] < 100, `later frame must be green: ${pixels[1]}`);
+  assert.notDeepEqual(pixels[0], pixels[1]);
+  const delivered = path.join(output, "native-journey-export.mp4");
+  writeFileSync(delivered, readFileSync(destination));
+  writeFileSync(path.join(output, "export-probe.json"), JSON.stringify(probe, null, 2));
+  record("actual native sidecar export contains changing expected video frames and audio", {
+    pixels,
+    bytes: readFileSync(delivered).length,
+    sha256: createHash("sha256").update(readFileSync(delivered)).digest("hex"),
+  });
+  await session.exec("location.reload();return true;");
+  await waitFor(
+    () =>
+      session.exec(
+        "return [...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='File');",
+      ),
+    { timeout: 60_000, label: "native auth restored after editor reload" },
+  );
+  record("native keyring session restores again after editor reload");
+  await screenshot("journey-restored.png");
+  writeFileSync(
+    path.join(output, "journey.json"),
+    JSON.stringify(
+      {
+        complete: true,
+        checks,
+        authBypass: false,
+        externalClerkBrowserLoginTested: false,
+        hardware: "Ubuntu 22.04 CI runner",
+        authenticatedNativeEditing: true,
+      },
+      null,
+      2,
+    ),
+  );
+}
 function executablePath(name, searchPath = process.env.PATH ?? "") {
   const found = path.isAbsolute(name)
     ? name
@@ -200,6 +514,7 @@ try {
       2,
     ),
   );
+  if (process.argv.includes("--journey")) await nativeJourney(session, profile);
 } finally {
   if (session) {
     try {
