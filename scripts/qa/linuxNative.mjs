@@ -69,14 +69,19 @@ if (process.argv.includes("--check")) {
 }
 assert.equal(process.platform, "linux");
 const application = process.env.ARTDADDY_APP_BINARY;
+const payload = process.env.ARTDADDY_LINUX_PAYLOAD_BINARY;
 const profile = process.env.ARTDADDY_LINUX_QA_ROOT;
 assert.ok(application && path.isAbsolute(application) && existsSync(application));
+assert.ok(payload && path.isAbsolute(payload) && existsSync(payload));
 assert.ok(profile && path.isAbsolute(profile) && profile.includes("artdaddy-linux-qa-"));
+assert.ok(application.startsWith(`${profile}/squashfs-root/`));
+assert.ok(payload.startsWith(`${profile}/squashfs-root/`));
 for (const name of ["XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME"])
   assert.ok(process.env[name]?.startsWith(`${profile}/`), `Isolated ${name} is required`);
 assert.equal(process.env.TAURI_AUTOMATION, "1");
 mkdirSync(output, { recursive: true });
-const binaryHash = createHash("sha256").update(readFileSync(application)).digest("hex");
+const binaryHash = createHash("sha256").update(readFileSync(payload)).digest("hex");
+const launcherHash = createHash("sha256").update(readFileSync(application)).digest("hex");
 const originalFetch = globalThis.fetch;
 globalThis.fetch = (input, init = {}) =>
   originalFetch(input, {
@@ -143,8 +148,10 @@ try {
     JSON.stringify(
       {
         checkedAt: new Date().toISOString(),
-        binary: application,
+        binary: payload,
         binarySha256: binaryHash,
+        launcher: application,
+        launcherSha256: launcherHash,
         observed,
         screenshot: {
           bytes: png.length,

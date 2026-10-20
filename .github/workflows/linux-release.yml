@@ -106,7 +106,9 @@ jobs:
           name="$(node -p "require('./src-tauri/tauri.conf.json').mainBinaryName||require('./src-tauri/tauri.conf.json').productName")"
           mapfile -t executables < <(find "$root/squashfs-root" -type f -name "$name" -executable)
           test "${#executables[@]}" -eq 1
-          export ARTDADDY_APP_BINARY="${executables[0]}"
+          test -x "$root/squashfs-root/AppRun"
+          export ARTDADDY_APP_BINARY="$root/squashfs-root/AppRun"
+          export ARTDADDY_LINUX_PAYLOAD_BINARY="${executables[0]}"
           export ARTDADDY_LINUX_QA_ROOT="$root"
           export XDG_DATA_HOME="$root/data" XDG_CACHE_HOME="$root/cache" XDG_CONFIG_HOME="$root/config"
           export TAURI_AUTOMATION=1
