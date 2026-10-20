@@ -366,7 +366,7 @@ impl OwnedHost {
   }
 
   fn identities(&self) -> Vec<serde_json::Value> {
-    self.processes.iter().map(|process| serde_json::json!({ "pid": process.pid, "created": process.created })).collect()
+    self.processes.iter().map(|process| serde_json::json!({ "pid": process.pid, "created": process.created.to_string() })).collect()
   }
 }
 
