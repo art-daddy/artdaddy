@@ -172,13 +172,19 @@ async function nativeJourney(session, profile) {
   const original = readFileSync(timelinePath);
   writeFileSync(path.join(output, "timeline-before.json"), original);
   const video = clips().find((clip) => clip.kind === "video");
-  await waitFor(() => session.find(`[data-clip-id='${video.id}']`), {
+  const clipSelector = `[data-artdaddy-drop='track'] [data-clip-id='${video.id}']`;
+  await waitFor(() => session.find(clipSelector), {
     label: "imported clip in native timeline",
   });
-  await session.click(await session.find(`[data-clip-id='${video.id}']`));
-  const clipBox = await session.box(`[data-clip-id='${video.id}']`);
+  await session.click(await session.find(clipSelector));
+  const clipBox = await session.box(clipSelector);
   const ruler = await session.box("[aria-label='timeline scrubber']");
   assert.ok(clipBox?.w > 5 && ruler?.w > 0);
+  record("native seek uses the timeline clip, not the stage overlay", {
+    clipSelector,
+    clipBox,
+    ruler,
+  });
   const seek = async (fraction) => {
     const point = { x: clipBox.x - clipBox.w / 2 + clipBox.w * fraction, y: ruler.y };
     await session.drag(point, point, 1);
@@ -249,7 +255,7 @@ async function nativeJourney(session, profile) {
     label: "native project close",
   });
   await tool("manage_project", { action: "open", id: project.created });
-  await waitFor(() => session.find(`[data-clip-id='${video.id}']`), {
+  await waitFor(() => session.find(clipSelector), {
     label: "same project reopened from disk",
   });
   assert.ok(readFileSync(timelinePath).equals(original));
