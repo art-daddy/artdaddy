@@ -358,17 +358,24 @@ async function nativeJourney(session, profile) {
     dialog: continuedDialog,
     job_id: accepted.job_id,
   });
-  await waitFor(
+  const terminalExport = await waitFor(
     async () => {
-      const active = await tool("manage_exports", { action: "list" });
-      return (
-        existsSync(destination) &&
-        readFileSync(destination).length > 10000 &&
-        JSON.stringify(active).includes(accepted.job_id) === false
-      );
+      const outcome = await tool("manage_exports", { action: "list" });
+      const job = outcome.exports.find((entry) => entry.job_id === accepted.job_id);
+      return job && ["done", "failed", "cancelled"].includes(job.state) ? job : null;
     },
-    { timeout: 120_000, label: "native export completes with actual file bytes" },
+    { timeout: 120_000, label: "native export terminal outcome" },
   );
+  writeFileSync(
+    path.join(output, "journey-export-outcome.json"),
+    JSON.stringify(terminalExport, null, 2),
+  );
+  assert.equal(
+    terminalExport.state,
+    "done",
+    terminalExport.error ?? JSON.stringify(terminalExport),
+  );
+  assert.ok(existsSync(destination) && readFileSync(destination).length > 10000);
   const probe = JSON.parse(
     execFileSync(
       "ffprobe",
