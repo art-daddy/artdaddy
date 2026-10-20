@@ -8,6 +8,7 @@ import { test } from "node:test";
 import fc from "fast-check";
 import { cgroupMembership, memoryLimit, memoryHierarchy, cgroupFits, sameCgroup,
   cgroupEncoderPids, discriminatorVerified, linuxProfileVerified } from "./exporterLinuxMemory.mjs";
+import { qualifiedEvidence } from "./exporterQualification.fixtures.mjs";
 
 test("nested membership parsing preserves supported names and cannot escape its mount", () => {
   const component = fc.array(fc.constantFrom("a", "Z", "0", " ", "'", ":", ";", ".", "ü"), { minLength: 1, maxLength: 24 })
@@ -171,7 +172,8 @@ test("offline report requires the actual receipt for every declared Linux softwa
         encodedVideo: { width: definition.width, height: definition.height, fps: `${definition.fps}/1`, frames },
         projectFrames: frames, elapsedMs: 1000, readiness: "ready", passed: true, artifactVerified: true,
         publicationVerified: true, stagingCleaned: true, scratchCleaned: true, sourceReady: true,
-        temporarySpaceQualified: true, estimateProvided: true, physicalQualified: false };
+        temporarySpaceQualified: true, estimateProvided: true, physicalQualified: false,
+        ...qualifiedEvidence(library.temporarySpace) };
       envelope.ok = true;
       envelope.native.resources.temporary_space = library.temporarySpace;
       await writeFile(path.join(directory, "promise-library.json"), JSON.stringify(attempt));

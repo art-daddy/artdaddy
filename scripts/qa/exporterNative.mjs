@@ -8,6 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer, normalizePath } from "vite";
 import { readLinuxMemoryCgroup, cgroupFits, sameCgroup, cgroupEncoderPids } from "./exporterLinuxMemory.mjs";
+import { captionsFadedIn, describePictureFailures, estimateFailures, judgeSourcePictures, temporarySpaceFailures } from "./exporterQualification.mjs";
 
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const targets = { "win32-x64": "x86_64-pc-windows-msvc", "darwin-arm64": "aarch64-apple-darwin", "linux-x64": "x86_64-unknown-linux-gnu" };
@@ -499,7 +500,7 @@ try {
   assert.equal(report.unbound.planGuessed, false);
   assert.equal(await readFile(report.unbound.delivered, "utf8"), "previous complete output");
   if (promiseCase) {
-    const native = report.promiseResult;
+    const verifyPromiseOutput = async (native, label) => {
     assert.equal(native?.caseId, promiseCase.id);
     assert.equal(native.state, "done");
     assert.equal(native.publicationVerified, true, "Promise output identity/catalog/ledger publication differs");
@@ -508,9 +509,14 @@ try {
     if (promiseCase.videoLayers + Number(promiseCase.captions) > 4 ||
       promiseCase.width * promiseCase.height > 1920 * 1080 && promiseCase.videoLayers > 1)
       assert.equal(native.selection.backend, "partition-pipes-v1", "Dense promise case must use the bounded existing FFmpeg path");
-    assert.equal(native.preflight?.length, 1, "Promise pilot must use one real request-level preflight confirmation");
-    assert.ok(native.preflight[0].message.includes("Estimated time:") || native.preflight[0].message.includes("Estimated encoding and saving time:"),
-      "Preflight must show a measured estimate or explicitly unknown time");
+    // A cold export is always asked about once. A repeated one is asked about at most once: the product asks nothing
+    // when every estimate is known and fits, and estimateFailures() decides whether what it did show was honest.
+    if (label === "estimate") assert.ok(native.preflight?.length <= 1, "A repeated promise export must show at most one request-level confirmation");
+    else {
+      assert.equal(native.preflight?.length, 1, "Promise pilot must use one real request-level preflight confirmation");
+      assert.ok(native.preflight[0].message.includes("Estimated time:") || native.preflight[0].message.includes("Estimated encoding and saving time:"),
+        "Preflight must show a measured estimate or explicitly unknown time");
+    }
     if (native.selection.backend === "partition-pipes-v1")
       assert.equal(native.encoderThreads, !fastEncoderProbe && promiseCase.width * promiseCase.height > 1920 * 1080 ? "2" : "1");
     assert.ok(native.calibrationRecords > 0, "Validated published exports must populate encoder-specific local measured history");
@@ -591,11 +597,11 @@ try {
         const reference = sourceFrame(false);
         const sourceError = error(reference);
         const blankError = reference.reduce((sum, value) => sum + value, 0) / reference.length;
-        assert.ok(sourceError < blankError, "Real-source picture is missing or no closer than a blank frame");
         const controlError = error(sourceFrame(true));
-        assert.ok(sourceError < controlError, "Real-source output does not follow the mapped source picture");
         return { at, sourceError, blankError, controlError, control: phone ? "rotation-ignored" : "vertical-flip" };
       });
+      const pictureVerdict = judgeSourcePictures(sourcePictureProof);
+      assert.ok(pictureVerdict.ok, describePictureFailures(pictureVerdict));
       if (phone) orientationProof = sourcePictureProof.map(({ at, sourceError, controlError }) =>
         ({ at, correctlyRotatedError: sourceError, ignoredRotationError: controlError }));
     }
@@ -613,7 +619,7 @@ try {
         }
         return count;
       });
-      assert.ok(painted[1] > 0 && painted[1] > painted[0], "Promise caption did not visibly fade in");
+      assert.ok(captionsFadedIn(painted), "Promise caption did not visibly fade in");
       captionSamples = painted;
     }
     let sound;
@@ -666,8 +672,17 @@ try {
           "Promise audio lost, swapped or mixed the authored stereo tones");
       }
     }
+    return { encodedVideo: { width: video[0].width, height: video[0].height, fps: video[0].r_frame_rate, frames: Number(video[0].nb_read_frames) },
+      sound, captionSamples, sourcePictureProof, orientationProof };
+    };
+    const native = report.promiseResult;
+    const cold = native?.coldPass ?? null;
+    assert.equal(!!cold, promiseCase.kind === "promise", "A promise line is exported cold and then again; every other kind is exported once");
+    const coldVerified = cold ? await verifyPromiseOutput(cold, "cold") : null;
+    const { encodedVideo, sound, captionSamples, sourcePictureProof, orientationProof } = await verifyPromiseOutput(native, cold ? "estimate" : "cold");
     const speedLimit = promiseProfile === "16gb" ? promiseCase.speedFactor16gb : null;
-    const timingQualified = speedLimit === null || native.elapsedMs <= promiseCase.durationSeconds * speedLimit * 1000;
+    const withinSpeed = (pass) => speedLimit === null || pass.elapsedMs <= promiseCase.durationSeconds * speedLimit * 1000;
+    const timingQualified = withinSpeed(native) && (!cold || withinSpeed(cold));
     const cap = Number(process.env.ARTDADDY_QA_MEMORY_CAP_BYTES ?? 0);
     const profileBound = promiseLibrary.profiles[promiseProfile].systemMemoryBytes;
     const hostProfileEvidence = proof.hostProfileEvidence;
@@ -676,17 +691,36 @@ try {
     const cgroupFitsProfile = !!proof.memoryCgroupEvidence &&
       cgroupFits(proof.memoryCgroupEvidence.nodeBefore, profileBound);
     const profileEnforced = process.platform === "win32" && cap > 0 && cap <= profileBound || hostProfileFits || cgroupFitsProfile;
-    // A declared scope is not fresh qualification of managed allocation.
-    const temporarySpaceQualified = false;
+    // Verdicts are derived from the raw measurements recorded beside them; exporterPromiseReport.mjs re-derives them the same way.
+    const passEvidence = (label, pass) => ({ label, observed: pass.resources?.temporary_space, beforeBytes: pass.resources?.budgets?.temporaryBytes ?? null,
+      samples: pass.allowanceSamples, state: pass.state, error: pass.error, publicationVerified: pass.publicationVerified,
+      stagingCleaned: pass.stagingCleaned, scratchCleaned: pass.scratchCleaned });
+    const temporarySpaceEvidence = cold ? { version: 1, passes: [passEvidence("cold", cold), passEvidence("estimate", native)] } : null;
+    const temporarySpaceReasons = temporarySpaceFailures(promiseLibrary.temporarySpace, temporarySpaceEvidence);
+    const temporarySpaceQualified = temporarySpaceReasons.length === 0;
+    const estimateEvidence = cold ? { version: 1,
+      cold: { historySamples: cold.historySamples, estimateSeconds: cold.estimateSeconds, preflight: cold.preflight },
+      estimate: { historySamples: native.historySamples, estimateSeconds: native.estimateSeconds, actualSeconds: native.elapsedMs / 1000,
+        preflight: native.preflight, readiness: native.readiness } } : null;
+    const estimateReasons = estimateFailures(estimateEvidence);
+    const estimateProvided = estimateReasons.length === 0;
+    const passed = promiseCase.kind === "promise" && timingQualified && profileEnforced && temporarySpaceQualified &&
+      native.scratchCleaned && (!cold || cold.scratchCleaned) && estimateProvided;
     proof.promiseResult = { ...promiseAttempt, ...native, fixture: promiseFixture, sound, captionSamples, sourcePictureProof, orientationProof, sourceReady: true,
       mode: native.encoder === "libx264" ? "quality" : native.encoder === "h264_amf" ? "fast" : "unknown",
-      encodedVideo: { width: video[0].width, height: video[0].height, fps: video[0].r_frame_rate, frames: Number(video[0].nb_read_frames) },
+      encodedVideo,
       artifactVerified: true, timingQualified,
       profileRunId: process.env.ARTDADDY_QA_MEMORY_RUN_ID ?? null,
       hostProfileEvidence,
-      profileEnforced, physicalQualified: false, temporarySpaceQualified,
-      passed: promiseCase.kind === "promise" && timingQualified && profileEnforced && temporarySpaceQualified && native.scratchCleaned && native.estimateProvided,
-      qualificationStatus: promiseCase.kind === "pilot" ? "pilot-only" : "incomplete-resource-and-estimate-proof" };
+      profileEnforced, physicalQualified: false,
+      temporarySpaceEvidence, temporarySpaceQualified, temporarySpaceFailures: temporarySpaceReasons,
+      estimateEvidence, estimateProvided, estimateFailures: estimateReasons,
+      estimateAccuracy: cold ? { estimateSeconds: native.estimateSeconds, actualSeconds: native.elapsedMs / 1000,
+        ratio: native.estimateSeconds > 0 ? native.elapsedMs / 1000 / native.estimateSeconds : null } : null,
+      coldVerification: coldVerified,
+      passed,
+      qualificationStatus: promiseCase.kind === "pilot" ? "pilot-only" : promiseCase.kind !== "promise" ? "measurement-only" :
+        passed ? "attempt-evidence-complete" : "attempt-evidence-incomplete" };
     await writeFile(path.join(output, "promise-library.json"), JSON.stringify(proof.promiseResult, null, 2));
     console.log(`PROMISE LIBRARY ${JSON.stringify(proof.promiseResult)}`);
   }

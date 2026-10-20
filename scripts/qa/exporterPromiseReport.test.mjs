@@ -6,17 +6,18 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import fc from "fast-check";
+import { REAL_CAPTION_SAMPLES, REAL_COLD_MESSAGE, REAL_PHONE_PICTURES, qualifiedEvidence } from "./exporterQualification.fixtures.mjs";
 
 const script = fileURLToPath(new URL("./exporterPromiseReport.mjs", import.meta.url));
 const library = JSON.parse(await readFile(new URL("./exporterPromiseCases.json", import.meta.url), "utf8"));
 const definition = library.cases.find((entry) => entry.id === "youtube-hd");
 assert.ok(definition);
-async function fixture(cases = [definition], platforms = ["win32"]) {
+async function fixture(cases = [definition], platforms = ["win32"], profiles = ["8gb"]) {
   const root = await mkdtemp(path.join(os.tmpdir(), "artdaddy-promise-report-"));
   await mkdir(path.join(root, "scripts/qa"), { recursive: true });
   await mkdir(path.join(root, "reports/qa/exporter"), { recursive: true });
   await writeFile(path.join(root, "scripts/qa/exporterPromiseCases.json"), JSON.stringify({ ...library,
-    platforms, profiles: { "8gb": library.profiles["8gb"] },
+    platforms, profiles: Object.fromEntries(profiles.map((name) => [name, library.profiles[name]])),
     sourceClasses: { ...library.sourceClasses, missing: { realWorld: true, path: null } }, cases }));
   return root;
 }
@@ -30,7 +31,8 @@ async function record(root, name, override = {}) {
     caseId: definition.id, kind: "promise", profile: "8gb", platform: "win32",
     mode: "quality", definition, encodedVideo: { width: definition.width, height: definition.height, fps: `${definition.fps}/1`, frames }, projectFrames: frames,
     elapsedMs: 60_000, passed: true, artifactVerified: true, publicationVerified: true, stagingCleaned: true, scratchCleaned: true,
-    sourceReady: true, temporarySpaceQualified: true, estimateProvided: true, readiness: "ready", profileRunId: "kernel-proof", ...override }));
+    sourceReady: true, temporarySpaceQualified: true, estimateProvided: true, readiness: "ready", profileRunId: "kernel-proof",
+    ...qualifiedEvidence(library.temporarySpace), ...override }));
   return dir;
 }
 async function receipt(root) {
@@ -233,4 +235,106 @@ test("identifiable historical failures remain counted without rewriting evidence
     assert.equal(await (await import("node:fs/promises")).readFile(path.join(dir, "report.json"), "utf8"), report);
     assert(!JSON.stringify(result).includes("private"));
   } finally { await rm(root, { recursive: true, force: true }); await rm(owned, { recursive: true, force: true }); }
+});
+
+test("recorded booleans cannot qualify an attempt without the raw measurements they claim to summarize", async () => {
+  const good = qualifiedEvidence(library.temporarySpace);
+  const mutated = (pick, change) => { const copy = structuredClone(good); change(pick(copy)); return copy; };
+  const failures = {
+    "no-temporary-evidence": { temporarySpaceEvidence: undefined },
+    "no-estimate-evidence": { estimateEvidence: undefined },
+    "allowance-still-held-after-settlement": { temporarySpaceEvidence: mutated((e) => e.temporarySpaceEvidence,
+      (evidence) => evidence.passes[1].samples.push({ atMs: 500, temporaryBytes: evidence.passes[1].beforeBytes - 4096 })).temporarySpaceEvidence },
+    "cold-export-leaked-its-allowance": { temporarySpaceEvidence: mutated((e) => e.temporarySpaceEvidence,
+      (evidence) => { evidence.passes[0].samples = [{ atMs: 0, temporaryBytes: evidence.passes[0].beforeBytes - 1 }]; }).temporarySpaceEvidence },
+    "repeated-export-left-its-scratch-behind": { temporarySpaceEvidence: mutated((e) => e.temporarySpaceEvidence,
+      (evidence) => { evidence.passes[1].scratchCleaned = false; }).temporarySpaceEvidence },
+    "estimate-hidden-by-the-confirmation": { estimateEvidence: mutated((e) => e.estimateEvidence,
+      (evidence) => { evidence.estimate.preflight = [{ message: REAL_COLD_MESSAGE, warning: true }]; }).estimateEvidence },
+    "cold-export-was-not-cold": { estimateEvidence: mutated((e) => e.estimateEvidence, (evidence) => { evidence.cold.historySamples = 1; }).estimateEvidence },
+    "silent-without-readiness": { estimateEvidence: mutated((e) => e.estimateEvidence, (evidence) => { evidence.estimate.readiness = "unknown"; }).estimateEvidence },
+  };
+  for (const [name, override] of Object.entries(failures)) {
+    const root = await fixture();
+    try {
+      await receipt(root);
+      // The flags still claim qualification: only the evidence differs.
+      await record(root, name, { ...override, temporarySpaceQualified: true, estimateProvided: true });
+      const result = summary(root);
+      assert.equal(result.overallAttempts, 1, name);
+      assert.equal(result.overallPassed, 0, name);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }
+  const root = await fixture();
+  try {
+    await receipt(root);
+    await record(root, "honest");
+    const result = summary(root);
+    assert.equal(result.overallPassed, 1);
+    assert.equal(result.rows[0].temporarySpaceQualifiedAttempts, 1);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a promise line must meet its speed line on the cold export as well as the repeated one, but only on 16 GB", async () => {
+  const limitMs = definition.durationSeconds * definition.speedFactor16gb * 1000;
+  for (const [cold, repeated, passes] of [[limitMs, limitMs, 1], [limitMs + 1, 1000, 0], [1000, limitMs + 1, 0], [undefined, 1000, 0], [Number.NaN, 1000, 0]]) {
+    const root = await fixture([definition], ["win32"], ["16gb"]);
+    try {
+      await receipt(root);
+      await record(root, "attempt", { profile: "16gb", elapsedMs: repeated, coldPass: { elapsedMs: cold } });
+      assert.equal(summary(root).overallPassed, passes, `cold=${cold} repeated=${repeated}`);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }
+  const root = await fixture();
+  try {
+    await receipt(root);
+    await record(root, "slow-cold-on-8gb", { coldPass: { elapsedMs: 10 ** 9 } });
+    assert.equal(summary(root).overallPassed, 1);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("an artifact flag cannot qualify an attempt whose recorded caption measurements fail on either export", async () => {
+  const failures = {
+    "captions-never-painted-on-the-repeated-export": { captionSamples: [0, 0] },
+    "captions-already-visible-before-the-fade": { captionSamples: [270, 270] },
+    "captions-missing-from-the-repeated-export": { captionSamples: undefined },
+    "captions-never-painted-on-the-cold-export": { coldVerification: { captionSamples: [0, 0] } },
+    "cold-export-was-never-verified": { coldVerification: undefined },
+  };
+  for (const [name, override] of Object.entries(failures)) {
+    const root = await fixture();
+    try {
+      await receipt(root);
+      await record(root, name, { ...override, artifactVerified: true });
+      assert.equal(summary(root).overallPassed, 0, name);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }
+});
+
+test("a real-world source needs its recorded picture proof on both exports, and a record cannot opt out", async () => {
+  const phone = library.cases.find((entry) => entry.id === "phone-vfr-rotation");
+  assert.equal(library.sourceClasses[phone.source].realWorld, true);
+  const frames = Math.round(phone.durationSeconds * phone.fps);
+  const attempt = (override = {}) => ({ caseId: phone.id, definition: phone, projectFrames: frames,
+    encodedVideo: { width: phone.width, height: phone.height, fps: `${phone.fps}/1`, frames },
+    sourcePictureProof: REAL_PHONE_PICTURES, coldVerification: { captionSamples: REAL_CAPTION_SAMPLES, sourcePictureProof: REAL_PHONE_PICTURES }, ...override });
+  const lost = REAL_PHONE_PICTURES.map((sample, index) => index === 1 ? { ...sample, sourceError: sample.blankError } : sample);
+  const rotationIgnored = REAL_PHONE_PICTURES.map((sample, index) => index === 2 ? { ...sample, sourceError: sample.controlError } : sample);
+  const cases = {
+    "no-picture-proof": [attempt({ sourcePictureProof: undefined }), 0],
+    "record-claims-it-is-not-real-world": [attempt({ sourcePictureProof: undefined, fixture: { realWorld: false } }), 0],
+    "repeated-export-lost-its-picture": [attempt({ sourcePictureProof: lost }), 0],
+    "repeated-export-ignored-the-rotation": [attempt({ sourcePictureProof: rotationIgnored }), 0],
+    "cold-export-has-no-picture-proof": [attempt({ coldVerification: { captionSamples: REAL_CAPTION_SAMPLES } }), 0],
+    "cold-export-lost-its-picture": [attempt({ coldVerification: { captionSamples: REAL_CAPTION_SAMPLES, sourcePictureProof: lost } }), 0],
+    "both-exports-proven": [attempt(), 1],
+  };
+  for (const [name, [override, passes]] of Object.entries(cases)) {
+    const root = await fixture([phone]);
+    try {
+      await receipt(root);
+      await record(root, name, { ...override, artifactVerified: true });
+      assert.equal(summary(root).overallPassed, passes, name);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }
 });

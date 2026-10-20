@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
 import typescript from "typescript";
+import { describePictureFailures, judgeSourcePictures } from "./exporterQualification.mjs";
 
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const driver = path.join(repository, "scripts/qa/exporterNative.mjs");
@@ -40,7 +41,7 @@ async function prepare(root, source, expectedFailure, caseId = "phone-vfr-rotati
   } finally { await rm(outcome.root, { recursive: true, force: true }); }
 }
 
-async function checkPictureControls(plain, rotated) {
+async function checkPictureControls(plain, rotated, leadIn) {
   const text = await readFile(driver, "utf8");
   const syntax = typescript.createSourceFile(driver, text, typescript.ScriptTarget.Latest, true, typescript.ScriptKind.JS);
   let block;
@@ -56,29 +57,32 @@ async function checkPictureControls(plain, rotated) {
   visit(syntax);
   assert.ok(block, "Native real-source picture check is missing");
   assert.ok(layerCheck, "Native layer picture check is missing");
+  const decodeAt = (source, phone, at, wrongControl) => {
+    const result = spawnSync(ffmpeg, ["-nostdin", "-v", "error", ...(wrongControl && phone ? ["-noautorotate"] : []),
+      "-ss", String(at), "-i", source, "-frames:v", "1", "-vf", `scale=160:72${wrongControl && !phone ? ",vflip" : ""}`,
+      "-pix_fmt", "rgb24", "-f", "rawvideo", "-"], { maxBuffer: 1024 * 1024 });
+    assert.equal(result.status, 0, String(result.stderr));
+    assert.equal(result.stdout.length, 160 * 72 * 3);
+    const sample = Buffer.alloc(160 * 90 * 3);
+    result.stdout.copy(sample);
+    sample.fill(Math.round(at * 50), 160 * 72 * 3);
+    return sample;
+  };
+  // Runs the harness's own extracted picture check, with the shared verdict module it imports.
+  const runBlock = (source, sourceClass, values) => JSON.parse(JSON.stringify(runInNewContext(
+    `let sourcePictureProof, orientationProof; ${layerCheck} ${block}; sourcePictureProof`, {
+      assert, Buffer, spawnSync, createHash, executable: () => ffmpeg, judgeSourcePictures, describePictureFailures,
+      promiseFixture: { realWorld: true, paths: [source] },
+      promiseCase: { source: sourceClass, videoLayers: 1, visualClips: 1, durationSeconds: 10 },
+      native: { imageHeight: 0.8, columns: 1, rows: 1 }, samples: values, sampleSize: 160 * 90 * 3,
+    }, { timeout: 10000 })));
   for (const [sourceClass, requirements] of Object.entries(library.sourceClasses)) {
     if (!requirements.realWorld) continue;
     const phone = sourceClass === "phone-vfr-rotation";
     const source = phone ? rotated : plain;
-    const decode = (at, wrongControl) => {
-      const result = spawnSync(ffmpeg, ["-nostdin", "-v", "error", ...(wrongControl && phone ? ["-noautorotate"] : []),
-        "-ss", String(at), "-i", source, "-frames:v", "1", "-vf", `scale=160:72${wrongControl && !phone ? ",vflip" : ""}`,
-        "-pix_fmt", "rgb24", "-f", "rawvideo", "-"], { maxBuffer: 1024 * 1024 });
-      assert.equal(result.status, 0, String(result.stderr));
-      assert.equal(result.stdout.length, 160 * 72 * 3);
-      const sample = Buffer.alloc(160 * 90 * 3);
-      result.stdout.copy(sample);
-      sample.fill(Math.round(at * 50), 160 * 72 * 3);
-      return sample;
-    };
+    const decode = (at, wrongControl) => decodeAt(source, phone, at, wrongControl);
     const samples = [0.15, 0.75, 2].map((at) => decode(at, false));
-    const check = (values) => JSON.parse(JSON.stringify(runInNewContext(
-      `let sourcePictureProof, orientationProof; ${layerCheck} ${block}; sourcePictureProof`, {
-        assert, Buffer, spawnSync, createHash, executable: () => ffmpeg,
-        promiseFixture: { realWorld: true, paths: [source] },
-        promiseCase: { source: sourceClass, videoLayers: 1, visualClips: 1, durationSeconds: 10 },
-        native: { imageHeight: 0.8, columns: 1, rows: 1 }, samples: values, sampleSize: 160 * 90 * 3,
-      }, { timeout: 10000 })));
+    const check = (values) => runBlock(source, sourceClass, values);
     assert.ok(check(samples).every((entry) => entry.sourceError === 0));
     const missing = samples.map((sample) => Buffer.from(sample));
     missing[0].fill(0, 0, 160 * 72 * 3);
@@ -91,6 +95,18 @@ async function checkPictureControls(plain, rotated) {
     assert.throws(() => check(frozen), /picture is frozen/);
     assert.throws(() => check([0.15, 0.75, 2].map((at) => decode(at, true))), /picture is missing|does not follow/);
   }
+  // A source whose first sampled frame is black can only prove the output is black there. The earlier blank-frame
+  // comparison (0 < 0) refused every export of such a clip; it must now be accepted, and a wrong picture must not.
+  const dark = [0.15, 0.75, 2].map((at) => decodeAt(leadIn, false, at, false));
+  const faithful = runBlock(leadIn, "web-download", dark);
+  assert.equal(faithful[0].blankError, 0, "the lead-in fixture must really begin with a black frame");
+  assert.ok(faithful.every((entry) => entry.sourceError === 0));
+  const wrongOverBlack = dark.map((sample) => Buffer.from(sample));
+  wrongOverBlack[0].fill(200, 0, 160 * 72 * 3);
+  assert.throws(() => runBlock(leadIn, "web-download", wrongOverBlack), /near-black reference/);
+  const lostBehindBlack = dark.map((sample) => Buffer.from(sample));
+  lostBehindBlack[1].fill(0, 0, 160 * 72 * 3);
+  assert.throws(() => runBlock(leadIn, "web-download", lostBehindBlack), /picture is missing/);
 }
 
 test("original-audio checks accept preserved sound and reject missing or wrong channels", async () => {
@@ -178,6 +194,11 @@ test("private-source failures remain blocked before native launch", { skip: !ffm
     const remuxed = spawnSync(ffmpeg, ["-y", "-nostdin", "-v", "error", "-display_rotation", "90", "-i", plain,
       "-c", "copy", rotated], { encoding: "utf8" });
     assert.equal(remuxed.status, 0, remuxed.stderr);
+    const leadIn = path.join(root, "black-lead-in.mp4");
+    const darkStart = spawnSync(ffmpeg, ["-y", "-nostdin", "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=128x72:r=30:d=0.5",
+      "-f", "lavfi", "-i", "testsrc2=s=128x72:r=30:d=12", "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]", "-map", "[v]",
+      "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", leadIn], { encoding: "utf8" });
+    assert.equal(darkStart.status, 0, darkStart.stderr);
     const probe = spawnSync(path.join(repository, "src-tauri/binaries", `artdaddy-ffprobe-${target}`),
       ["-v", "error", "-show_streams", "-of", "json", rotated], { encoding: "utf8" });
     assert.equal(probe.status, 0, probe.stderr);
@@ -202,6 +223,6 @@ test("private-source failures remain blocked before native launch", { skip: !ffm
     }
     await prepare(root, { ...(await mapping(plain)), origin: "http://example.invalid/control.mp4" },
       /requires its recorded HTTPS origin/, "web-download");
-    await checkPictureControls(plain, rotated);
+    await checkPictureControls(plain, rotated, leadIn);
   } finally { await rm(root, { recursive: true, force: true }); }
 });

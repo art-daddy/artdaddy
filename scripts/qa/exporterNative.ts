@@ -11,6 +11,7 @@ import { buildRenderCommand, queueRenderJob } from "../../src/timeline/render";
 import { listExportRecords, whenExportEnds, whenExportsSettle, whenExportTelemetrySettles } from "../../src/timeline/exportQueue";
 import { ensureTimeline } from "../../src/timeline/engine";
 import { resolveExportResources } from "../../src/platform/host";
+import { estimateExportFromHistory } from "../../src/timeline/exportOptions";
 import { __setExportConfirmationForTests } from "../../src/lib/confirm";
 import { useExportJob } from "../../src/store/exportJob";
 
@@ -23,6 +24,19 @@ const status = document.getElementById("status")!;
 
 function check(value: unknown, message: string): asserts value {
   if (!value) throw new Error(message);
+}
+
+// The native payload allowance returns as the last owner of an export's files lets go, which can trail the terminal
+// state. Sample it inside a bounded window and keep every sample: the last one is what the verdict is derived from.
+async function allowanceAfterSettlement(destination: string, floor: number | null): Promise<{ samples: Array<{ atMs: number; temporaryBytes: number | null }> }> {
+  const began = performance.now();
+  const samples: Array<{ atMs: number; temporaryBytes: number | null }> = [];
+  for (;;) {
+    const temporaryBytes = (await resolveExportResources(destination)).budgets.temporaryBytes;
+    samples.push({ atMs: Math.round(performance.now() - began), temporaryBytes });
+    if (floor === null || (temporaryBytes !== null && temporaryBytes >= floor) || performance.now() - began > 30_000) return { samples };
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
 }
 
 async function exercise(): Promise<void> {
@@ -197,14 +211,25 @@ async function exercise(): Promise<void> {
         style: { font: "Poppins", fontsize: Math.round(definition.height / 22), color: "white" } })) });
     const snapshot = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(timeline))));
     const captured = { ...admission, snapshotSha256: Array.from(snapshot, (byte) => byte.toString(16).padStart(2, "0")).join("") };
-    const destination = joinPath(root, `promise-${definition.id}.mp4`);
-    const stage = joinPath(root, `.promise-${definition.id}.partial`);
-    const started = performance.now();
     const fastEncoderProbe = params.get("fastEncoderProbe") ?? "";
     if (fastEncoderProbe) check(fastEncoderProbe === "amf-cqp18" && definition.kind === "pilot", "Unsupported local Fast pilot");
+    // A promise line is exported twice in one profile: cold, then again with the comparable measurement the first one left behind.
+    const labels: Array<"cold" | "estimate"> = definition.kind === "promise" ? ["cold", "estimate"] : ["cold"];
+    const runPromiseExport = async (label: "cold" | "estimate", coldPass?: Record<string, unknown>): Promise<Record<string, unknown>> => {
+    const name = labels.length === 1 || label === "estimate" ? `promise-${definition.id}` : `promise-${definition.id}-cold`;
+    const destination = joinPath(root, `${name}.mp4`);
+    const stage = joinPath(root, `.${name}.partial`);
+    const started = performance.now();
     const plan = buildRenderCommand(timeline, stage, { engine: "auto", quality: "medium", mode: fastEncoderProbe ? "fast" : "quality" });
     const calibrationEncoder = fastEncoderProbe ? "amf-cqp18" : plan.output.width * plan.output.height > 1920 * 1080 &&
       plan.selection.backend === "partition-pipes-v1" ? "x264-crf-threads2" : "x264-crf";
+    const comparable = () => useExportJob.getState().calibrations.filter((sample) => sample.workload.width === definition.width &&
+      sample.workload.height === definition.height && sample.workload.durationSeconds === definition.durationSeconds &&
+      sample.workload.peakMediaLayers === definition.videoLayers && sample.encoder === calibrationEncoder);
+    const historySamples = comparable().length;
+    // The product's own estimator over the real history, asked exactly as the export request asks it.
+    const estimateSeconds = estimateExportFromHistory(plan.workload, plan.output, "medium", plan.selection.backend,
+      useExportJob.getState().calibrations, calibrationEncoder).seconds;
     const resources = await resolveExportResources(destination);
     const confirmationOffset = preflightRequests.length;
     let promiseId = "";
@@ -223,7 +248,7 @@ async function exercise(): Promise<void> {
         .catch((error: unknown) => { scratchError = error; });
     });
     const queued = await queueRenderJob(context, { plan, admission: captured, destPath: destination, stagePath: stage,
-      filename: `promise-${definition.id}.mp4`, quality: "medium" });
+      filename: `${name}.mp4`, quality: "medium" });
     promiseId = queued.job_id;
     const outcome = await whenExportEnds(queued.job_id);
     await whenExportsSettle();
@@ -231,6 +256,7 @@ async function exercise(): Promise<void> {
     detach();
     await scratchRead;
     await whenExportTelemetrySettles();
+    const allowance = await allowanceAfterSettlement(destination, resources.budgets.temporaryBytes);
     const delivery = (await supervisor.delivery.list()).find((entry) => entry.id === queued.job_id);
     const records = await store.readJson<{ jobs: Array<{ id: string; status: string }> }>(joinPath(projectDir, "internals/jobs.json"), { jobs: [] });
     const saved = listExportRecords().find((entry) => entry.job_id === queued.job_id);
@@ -242,7 +268,7 @@ async function exercise(): Promise<void> {
       delivery.identity?.sha256 === measured?.sha256 && delivery.identity?.size === measured?.size &&
       linked?.sha256 === measured?.sha256 && linked?.size === measured?.size &&
       records.jobs.find((entry) => entry.id === queued.job_id)?.status === "done";
-    promiseResult = { caseId: definition.id, profile: input.profile, kind: definition.kind, destination, jobId: queued.job_id,
+    const result: Record<string, unknown> = { caseId: definition.id, pass: label, profile: input.profile, kind: definition.kind, destination, jobId: queued.job_id,
       encoder: plan.args[plan.args.lastIndexOf("-c:v") + 1],
       encoderThreads: plan.args.includes("-threads:v") ? plan.args[plan.args.lastIndexOf("-threads:v") + 1] : null, calibrationEncoder,
       readiness,
@@ -252,19 +278,20 @@ async function exercise(): Promise<void> {
       fastEncoderProbe: fastEncoderProbe || null,
       localFastEnabled: !!fastEncoderProbe,
       resources, workload: plan.workload,
+      allowanceSamples: allowance.samples, historySamples, estimateSeconds,
       publicationVerified, finalIdentity: delivery?.identity,
       stagingCleaned: !(await exists(stage)), scratchCleaned: !!scratchPath && !(await exists(scratchPath)),
       scratchEvidenceError: scratchError ? String(scratchError) : null,
       preflight: preflightRequests.slice(confirmationOffset),
-      localCalibration: useExportJob.getState().calibrations.filter((sample) => sample.workload.width === definition.width &&
-        sample.workload.height === definition.height && sample.workload.durationSeconds === definition.durationSeconds &&
-        sample.workload.peakMediaLayers === definition.videoLayers && sample.encoder === calibrationEncoder).at(-1) ?? null,
-      calibrationRecords: useExportJob.getState().calibrations.filter((sample) => sample.workload.width === definition.width &&
-        sample.workload.height === definition.height && sample.workload.durationSeconds === definition.durationSeconds &&
-        sample.workload.peakMediaLayers === definition.videoLayers && sample.encoder === calibrationEncoder).length,
-      estimateProvided: preflightRequests.slice(confirmationOffset).some((entry) => entry.message.includes("Estimated encoding and saving time: about")) };
-    await writeTextFile(joinPath(root, "promise-native-result.json"), JSON.stringify(promiseResult));
-    check(outcome?.state === "done", `Promise export failed: ${JSON.stringify(promiseResult)}`);
+      localCalibration: comparable().at(-1) ?? null,
+      calibrationRecords: comparable().length };
+    const combined = coldPass ? { ...result, coldPass } : result;
+    await writeTextFile(joinPath(root, "promise-native-result.json"), JSON.stringify(combined));
+    check(outcome?.state === "done", `Promise ${label} export failed: ${JSON.stringify(result)}`);
+    return combined;
+    };
+    const coldResult = await runPromiseExport("cold");
+    promiseResult = labels.length > 1 ? await runPromiseExport("estimate", coldResult) : coldResult;
   }
   const profileSeconds = Number(params.get("profileSeconds") ?? 0);
   if (profileSeconds) {
