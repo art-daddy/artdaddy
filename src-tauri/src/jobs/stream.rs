@@ -439,9 +439,9 @@ fn reader(input: impl Read + Send + 'static, observer: Observer, control: Arc<Co
     let mut buffer = [0u8; 8192];
     let mut redactor = control.redactor();
     loop {
-      let count = match input.read(&mut buffer) {
-        Ok(count) => count,
-        Err(error) => { control.stop(); return Err(error.to_string()); }
+      let (count, failure) = match input.read(&mut buffer) {
+        Ok(count) => (count, None),
+        Err(error) => { control.stop(); (0, Some(error)) }
       };
       let filtered = redactor.push(&buffer[..count], count == 0);
       let text = String::from_utf8_lossy(&filtered).into_owned();
@@ -453,6 +453,7 @@ fn reader(input: impl Read + Send + 'static, observer: Observer, control: Arc<Co
         }
         if diagnostic { observer(ProcEvent::Stderr(text)); }
       }
+      if let Some(error) = failure { return Err(error.to_string()); }
       if count == 0 { return Ok(()); }
     }
   })
@@ -510,7 +511,13 @@ pub(super) fn spawn_single(executable: &Path, spec: &JobSpec, observer: Observer
         }
         Ok(())
       })();
-      if read.is_err() { output_control.stop(); }
+      if read.is_err() {
+        output_control.stop();
+        if capture.is_none() {
+          let filtered = redactor.push(&[], true);
+          if !filtered.is_empty() { output_observer(ProcEvent::Stdout(String::from_utf8_lossy(&filtered).into_owned())); }
+        }
+      }
       (read, capture)
     });
     let ended = worker.wait();
@@ -705,6 +712,44 @@ mod tests {
     let target = if cfg!(target_os = "windows") { "x86_64-pc-windows-msvc.exe" }
       else if cfg!(target_os = "macos") { "aarch64-apple-darwin" } else { "x86_64-unknown-linux-gnu" };
     Path::new(env!("CARGO_MANIFEST_DIR")).join("binaries").join(format!("artdaddy-ffmpeg-{target}"))
+  }
+
+  #[cfg(windows)]
+  #[test]
+  fn failed_diagnostic_read_retains_the_pending_response_and_settles_the_failed_stage() {
+    struct FailsAfterText(bool);
+    impl Read for FailsAfterText {
+      fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if self.0 { return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "diagnostic source failed")); }
+        self.0 = true;
+        let text = b"provider diagnostic tail\n";
+        buffer[..text.len()].copy_from_slice(text);
+        Ok(text.len())
+      }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let stage = directory.path().join("pending.mp4");
+    std::fs::File::create(&stage).unwrap();
+    let cap = 1024 * 1024;
+    let workspace = super::super::Workspace::new(cap);
+    let key = super::super::Supervisor::workspace_key(&stage);
+    let _claim = workspace.claim_output(&key, &|| Ok(())).unwrap();
+    let mut admitted = spec(directory.path());
+    admitted.meta["_native_final_stage"] = serde_json::json!(stage.to_string_lossy());
+    let mut args = vec![stage.to_string_lossy().into_owned()];
+    let final_output = FinalOutput::open(&admitted, &mut args, workspace.clone()).unwrap().unwrap();
+    let control = Arc::new(Control::new(super::super::now_ms() + 10_000, Some(final_output)).unwrap());
+    let messages = Arc::new(Mutex::new(String::new()));
+    let observed = messages.clone();
+    let observer: Observer = Arc::new(move |event| {
+      if let ProcEvent::Stderr(text) = event { observed.lock().unwrap().push_str(&text); }
+    });
+    let result = join(reader(FailsAfterText(false), observer, control.clone(), None, true));
+    assert!(result.as_ref().unwrap_err().contains("diagnostic source failed"));
+    assert_eq!(messages.lock().unwrap().as_str(), "provider diagnostic tail\n");
+    assert!(control.finish_output(result).is_err());
+    assert!(!stage.exists());
+    assert_eq!(workspace.available_bytes(), cap);
   }
 
   #[test]
