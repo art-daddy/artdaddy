@@ -550,14 +550,28 @@ describe("buildRenderCommand", () => {
         [{ media_ref: "/video.mp4", source_in: 0, source_out: 2, timeline_in: 0, timeline_out: 2 }],
         canvas,
       );
-      for (const resolution of [undefined, "source", "2160p", "1440p", "1080p", "720p", "480p"] as const) {
+      for (const resolution of [
+        undefined,
+        "source",
+        "2160p",
+        "1440p",
+        "1080p",
+        "720p",
+        "480p",
+      ] as const) {
         const label = `${canvas.width}x${canvas.height} ${resolution}`;
-        const plan = buildRenderCommand(authored, "/out.mp4", { engine: "partition-pipes-v1", resolution });
+        const plan = buildRenderCommand(authored, "/out.mp4", {
+          engine: "partition-pipes-v1",
+          resolution,
+        });
         const expected = plan.output.width * plan.output.height >= hdPixels ? 2 : 1;
         twoThreadPlans += expected === 2 ? 1 : 0;
         expect(threads(plan.args), label).toBe(String(expected));
         expect(plan.encoder, label).toBe(expected === 2 ? "x264-crf-threads2" : "x264-crf");
-        expect(plan.steps!.every((step) => threads(step.args) === "1"), label).toBe(true);
+        expect(
+          plan.steps!.every((step) => threads(step.args) === "1"),
+          label,
+        ).toBe(true);
         const fast = buildRenderCommand(authored, "/fast.mp4", {
           engine: "partition-pipes-v1",
           resolution,
@@ -572,7 +586,9 @@ describe("buildRenderCommand", () => {
     expect(twoThreadPlans).toBeLessThan(28);
     expect(
       buildRenderCommand(
-        tl([{ media_ref: "/video.mp4", source_in: 0, source_out: 2, timeline_in: 0, timeline_out: 2 }]),
+        tl([
+          { media_ref: "/video.mp4", source_in: 0, source_out: 2, timeline_in: 0, timeline_out: 2 },
+        ]),
         "/standard.mp4",
       ).args,
     ).not.toContain("-threads:v");
