@@ -8,7 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer, normalizePath } from "vite";
 import { readLinuxMemoryCgroup, cgroupFits, sameCgroup, cgroupEncoderPids } from "./exporterLinuxMemory.mjs";
-import { captionsFadedIn, describePictureFailures, estimateFailures, judgeSourcePictures, temporarySpaceFailures } from "./exporterQualification.mjs";
+import { BASE_OUTCOME_BUDGET_MS, captionsFadedIn, describePictureFailures, estimateFailures, judgeSourcePictures, outcomeBudgetMs, temporarySpaceFailures } from "./exporterQualification.mjs";
 
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const targets = { "win32-x64": "x86_64-pc-windows-msvc", "darwin-arm64": "aarch64-apple-darwin", "linux-x64": "x86_64-unknown-linux-gnu" };
@@ -293,7 +293,7 @@ const vite = await createServer({ root: repository, configFile: path.join(reposi
 const children = [];
 const logs = [];
 
-function changedFile(filename, accept, child) {
+function changedFile(filename, accept, child, budgetMs = BASE_OUTCOME_BUDGET_MS) {
   return new Promise((resolve, reject) => {
     let reading = false;
     let completed = false;
@@ -328,7 +328,7 @@ function changedFile(filename, accept, child) {
     };
     const failed = (error) => finish(error);
     const exited = (code, signal) => finish(new Error(`Owned native QA exited before its outcome: code=${code} signal=${signal}; inspect native log`));
-    const timeout = setTimeout(() => finish(new Error(`No native outcome: ${filename}`)), 12 * 60_000);
+    const timeout = setTimeout(() => finish(new Error(`No native outcome within ${Math.round(budgetMs / 60_000)} minutes: ${filename}`)), budgetMs);
     child.once("error", failed);
     child.once("exit", exited);
     if (child.exitCode !== null || child.signalCode !== null) { exited(child.exitCode, child.signalCode); return; }
@@ -437,7 +437,7 @@ try {
   stopOwned(first);
   proof.steps.push({ phase: "owned-native-process-crashed" });
   const second = start(config, 2);
-  const report = await changedFile(path.join(root, "native-report.json"), (report) => report.ok === true, second);
+  const report = await changedFile(path.join(root, "native-report.json"), (report) => report.ok === true, second, outcomeBudgetMs(promiseCase));
   if (proof.memoryCgroupEvidence) {
     const evidence = proof.memoryCgroupEvidence;
     evidence.nativeAfter = report.resources?.memory_cgroup;

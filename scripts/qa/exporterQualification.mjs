@@ -128,3 +128,16 @@ export function estimateFailures(evidence) {
   } else failures.push("estimate: the user was shown more than one confirmation");
   return failures;
 }
+
+// The wait for a native run's outcome: a fixed allowance for launch, crash recovery and the compiled-engine regression, plus
+// every export of the line at its slowest accepted speed, twice over. A slow or failing run must be observed and reported,
+// not cut off by a timeout that hides the result. A run with no promise line (the CI recovery runs) keeps the fixed allowance.
+export const BASE_OUTCOME_BUDGET_MS = 12 * 60_000;
+export function outcomeBudgetMs(definition) {
+  const positive = (value) => (typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0);
+  const seconds = positive(definition?.durationSeconds);
+  if (!seconds) return BASE_OUTCOME_BUDGET_MS;
+  const exports = definition?.kind === "promise" ? 2 : 1;
+  const speed = positive(definition?.speedFactor16gb) || 4;
+  return BASE_OUTCOME_BUDGET_MS + Math.ceil(exports * seconds * speed * 2 * 1000);
+}

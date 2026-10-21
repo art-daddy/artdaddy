@@ -3,8 +3,8 @@ import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import fc from "fast-check";
 import {
-  MIN_INFORMATIVE_SAMPLES, NEAR_BLANK_LEVEL, NEAR_EXACT_ERROR, REQUIRED_PASSES,
-  captionsFadedIn, describePictureFailures, estimateFacts, estimateFailures, judgeSourcePictures, temporarySpaceFailures,
+  BASE_OUTCOME_BUDGET_MS, MIN_INFORMATIVE_SAMPLES, NEAR_BLANK_LEVEL, NEAR_EXACT_ERROR, REQUIRED_PASSES,
+  captionsFadedIn, describePictureFailures, estimateFacts, estimateFailures, judgeSourcePictures, outcomeBudgetMs, temporarySpaceFailures,
 } from "./exporterQualification.mjs";
 import { REAL_ALLOWANCE_BYTES, REAL_CAPTION_SAMPLES, REAL_COLD_MESSAGE, REAL_PHONE_PICTURES, REAL_WEB_PICTURES } from "./exporterQualification.fixtures.mjs";
 
@@ -343,4 +343,34 @@ test("captions count as painted only when nothing shows early and something show
     assert.equal(captionsFadedIn([early + extra, early]), false);
     assert.equal(captionsFadedIn([early, early]), false);
   }), { numRuns: 100 });
+});
+
+test("the outcome wait outlasts every library line running exactly at its speed line, and runs without a line keep the old wait", () => {
+  // Every previously green CI and local run waited 12 minutes for launch, crash recovery and the compiled-engine regression.
+  assert.ok(BASE_OUTCOME_BUDGET_MS >= 12 * 60_000, "the fixed allowance must never shrink below what green runs already needed");
+  assert.equal(outcomeBudgetMs(null), 12 * 60_000, "a run without a promise line must keep exactly the old wait");
+  for (const none of [null, undefined, {}, "youtube-hd", 7, { durationSeconds: 0 }, { durationSeconds: -5 }, { durationSeconds: Number.NaN },
+    { durationSeconds: "600" }, { durationSeconds: Number.POSITIVE_INFINITY }]) assert.equal(outcomeBudgetMs(none), BASE_OUTCOME_BUDGET_MS, JSON.stringify(none));
+  for (const definition of library.cases) {
+    const budget = outcomeBudgetMs(definition);
+    const exportsNeeded = definition.kind === "promise" ? 2 : 1;
+    assert.ok(Number.isSafeInteger(budget) && budget <= 2 ** 31 - 1, `${definition.id}: not a usable timer delay`);
+    // Base allowance plus each export running exactly at the accepted speed (4x when the line has no speed requirement).
+    assert.ok(budget >= BASE_OUTCOME_BUDGET_MS + exportsNeeded * definition.durationSeconds * (definition.speedFactor16gb ?? 4) * 1000, definition.id);
+  }
+  const youtube = library.cases.find((entry) => entry.id === "youtube-hd");
+  assert.ok(outcomeBudgetMs(youtube) >= (12 + 2 * 600 * 2 / 60) * 60_000, "two 10-minute exports at the 2x speed line must fit");
+  // The old fixed 12 minutes could not even hold one such export, which is why a long line looked like a hang.
+  assert.ok(outcomeBudgetMs(youtube) > 4 * BASE_OUTCOME_BUDGET_MS);
+});
+
+test("property: the outcome wait never shrinks as a line gets longer or slower, and a promise line waits for two exports", () => {
+  const speed = fc.double({ min: 0.5, max: 8, noNaN: true });
+  fc.assert(fc.property(fc.integer({ min: 1, max: 20_000 }), fc.integer({ min: 0, max: 20_000 }), speed, speed, (seconds, more, slow, extra) => {
+    const at = (durationSeconds, speedFactor16gb, kind = "promise") => outcomeBudgetMs({ durationSeconds, speedFactor16gb, kind });
+    assert.ok(at(seconds + more, slow) >= at(seconds, slow));
+    assert.ok(at(seconds, slow + extra) >= at(seconds, slow));
+    assert.ok(at(seconds, slow) > at(seconds, slow, "measurement"), "a promise line exports twice");
+    assert.ok(at(seconds, slow, "measurement") >= BASE_OUTCOME_BUDGET_MS);
+  }), { numRuns: 200 });
 });
