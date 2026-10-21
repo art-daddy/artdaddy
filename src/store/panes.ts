@@ -79,8 +79,10 @@ export const usePanes = create<PanesState>((set) => ({
   },
   resetLayout: () => {
     try {
-      for (const k of Object.keys(localStorage))
-        if (k.startsWith("react-resizable-panels:")) localStorage.removeItem(k);
+      for (let index = localStorage.length - 1; index >= 0; index--) {
+        const key = localStorage.key(index);
+        if (key?.startsWith("react-resizable-panels:")) localStorage.removeItem(key);
+      }
     } catch {
       /* private mode: nothing was saved */
     }

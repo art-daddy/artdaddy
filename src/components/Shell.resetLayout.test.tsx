@@ -110,4 +110,39 @@ describe("Reset Panel Layout", () => {
     expect(localStorage.getItem("artdaddy-panes-v1")).not.toBeNull();
     expect(localStorage.getItem("unrelated")).toBe("keep");
   });
+
+  it("clears adjacent panel entries through the Storage API without enumerable entry names", () => {
+    const savedPanes = JSON.stringify({ chat: false });
+    const entries = new Map<string, string>([
+      [OUTER, "{}"],
+      ["react-resizable-panels:artdaddy-top-v1", "{}"],
+      ["react-resizable-panels:artdaddy-bottom-v1", "{}"],
+      ["artdaddy-panes-v1", savedPanes],
+      ["unrelated", "keep"],
+    ]);
+    const storage: Storage = {
+      get length() {
+        return entries.size;
+      },
+      key: (index) => [...entries.keys()][index] ?? null,
+      getItem: (key) => entries.get(String(key)) ?? null,
+      setItem: (key, value) => void entries.set(String(key), String(value)),
+      removeItem: (key) => void entries.delete(String(key)),
+      clear: () => entries.clear(),
+    };
+    const { visible, layoutEpoch } = usePanes.getState();
+    vi.stubGlobal("localStorage", storage);
+    try {
+      expect(Object.keys(storage)).not.toContain(OUTER);
+      act(() => usePanes.getState().resetLayout());
+      expect([...entries]).toEqual([
+        ["artdaddy-panes-v1", savedPanes],
+        ["unrelated", "keep"],
+      ]);
+      expect(usePanes.getState().visible).toEqual(visible);
+      expect(usePanes.getState().layoutEpoch).toBe(layoutEpoch + 1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });

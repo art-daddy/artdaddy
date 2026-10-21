@@ -44,6 +44,14 @@ the heaviest test suite (see §14).
 - **Entry**: `src/main.tsx` → `src/App.tsx`. Capability detection in
   `src/platform/` (desktop vs web — web disables the client-only tools).
 
+### Workspace layout persistence
+
+Panel visibility and saved panel sizes are global UI preferences, not project data.
+Reset Panel Layout removes only `react-resizable-panels:` entries and remounts the
+panel groups in place, preserving pane visibility, unrelated storage and active work.
+It enumerates the standard `Storage.length`/`Storage.key()` API backwards so removing
+adjacent entries cannot skip one and saved keys need not be enumerable object properties.
+
 ---
 
 ## 3. Source map (`src/`)
