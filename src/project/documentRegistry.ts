@@ -146,6 +146,11 @@ export function makeProjectChildren(id: ProjectId): ProjectChildren {
 
 /** The single source of truth for which project is open. Shell routes activation through
  *  `projectDocuments.open(id)` / `.close(id)` instead of orchestrating the stores directly. */
+function rearmEditorTimeline(doc: ProjectDocument): void {
+  const editor = useEditor.getState();
+  if (editor.store && editor.projectId === doc.id) rearmTimelinePersist(editor.store, doc);
+}
+
 export const projectDocuments = new ProjectDocumentRegistry(makeProjectChildren, (id) => ({
   // Origin fence: a commit carrying a superseded chat execution's origin is rejected at the gate.
   isOriginCurrent: (o) => isChatExecutionCurrent(id, o),
@@ -159,10 +164,7 @@ export const projectDocuments = new ProjectDocumentRegistry(makeProjectChildren,
   // timeline still dirty (finding #3): a Retry after the async autosave exhausted its retries must
   // re-attempt the actual disk write, not just re-flush a drained autosave. Guarded to the still-live
   // editor store for THIS project so it can never write the in-memory timeline into another project.
-  rearmTimelineSave: (doc) => {
-    const ed = useEditor.getState();
-    if (ed.store && ed.projectId === doc.id) rearmTimelinePersist(ed.store, doc);
-  },
+  rearmTimelineSave: rearmEditorTimeline,
   // A child teardown that threw AFTER a durable save (finding #4): the close still completes (data is
   // safe); report the leak instead of retaining a half-disposed document as editable.
   onDisposeFailed: (pid, error) =>
@@ -174,12 +176,19 @@ export const projectDocuments = new ProjectDocumentRegistry(makeProjectChildren,
   onReopen: (pid) => {
     resumeChatProject(pid);
     const doc = projectDocuments.get(pid);
-    if (doc) void recoverGeneratedMedia(doc);
+    if (doc) {
+      rearmEditorTimeline(doc);
+      void recoverGeneratedMedia(doc);
+    }
   },
   // Close chat admission the INSTANT close begins (finding #2): raise the fence + retire the turn +
   // normalize its state synchronously, so no chat op is admitted from the start of close, not just once
   // the SAVE phase is reached.
-  onBeginClose: (pid) => quiesceChatProject(pid),
+  onBeginClose: (pid) => {
+    quiesceChatProject(pid);
+    const editor = useEditor.getState();
+    if (editor.store && editor.projectId === pid) cancelWriteRecovery(editor.store.projectDir);
+  },
 }));
 
 // Inject the DIR -> AUTHORITY-document lookup the mutation executor uses to route commits through this

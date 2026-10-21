@@ -696,6 +696,39 @@ describe.skipIf(!FF || !FP)("branded export (real ffmpeg)", () => {
     expect(await lumaAt(branded, t, rest)).toBeCloseTo(await lumaAt(plain, t, rest), 0);
   }, 120_000);
 
+  it("keeps chromatic portrait footage unchanged outside the watermark", async () => {
+    const cwd = await scratch();
+    const src = path.resolve("e2e/ui/fixtures/mac-recording-preview.mp4");
+    const canvas = { width: 360, height: 640 };
+    const endcard = path.join(BRAND_DIR, endcardFile("9x16"));
+    const base = { endcard, endcardDuration: await durationOf(endcard) };
+    const branded = await render(cwd, src, true, "chromatic-portrait-branded", {
+      canvas,
+      withAudio: true,
+      branding: { ...base, watermark: path.join(BRAND_DIR, watermarkFile("9x16")) },
+    });
+    const exempt = await render(cwd, src, true, "chromatic-portrait-exempt", {
+      canvas,
+      withAudio: true,
+      branding: { ...base, watermark: null },
+    });
+    const rest = "crop=360:384:0:0";
+    const corner = "crop=126:128:234:512";
+    const measured = {
+      brandedRest: await lumaAt(branded, 1.55, rest),
+      exemptRest: await lumaAt(exempt, 1.55, rest),
+      brandedCorner: await lumaAt(branded, 1.55, corner),
+      exemptCorner: await lumaAt(exempt, 1.55, corner),
+    };
+    const evidence = path.resolve("reports/qa/branding", `chromatic-portrait-${Date.now()}`);
+    await fsp.mkdir(evidence, { recursive: true });
+    await fsp.copyFile(branded, path.join(evidence, "branded.mp4"));
+    await fsp.copyFile(exempt, path.join(evidence, "exempt.mp4"));
+    await fsp.writeFile(path.join(evidence, "measured.json"), JSON.stringify(measured, null, 2));
+    expect(measured.brandedCorner - measured.exemptCorner).toBeGreaterThan(2);
+    expect(measured.brandedRest).toBeCloseTo(measured.exemptRest, 0);
+  }, 120_000);
+
   it("keeps an unbranded render free of both", async () => {
     const cwd = await scratch();
     const src = await source(cwd);

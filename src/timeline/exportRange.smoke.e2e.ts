@@ -72,8 +72,10 @@ const dir = path.join(os.tmpdir(), `artdaddy-range-${Date.now()}`);
 const diagnosticDir = path.resolve("reports/qa/exporter", path.basename(dir));
 const decodedFiles = new WeakMap<object, string>();
 const retainedComparisons = new Set<string>();
+const retainRequested = process.env.ARTDADDY_QA_RETAIN_EXPORT_ARTIFACTS === "1";
+let renderDiagnosticIndex = 0;
 let ctx: ClientToolContext;
-let retainArtifacts = false;
+let retainArtifacts = retainRequested;
 const src: Record<string, string> = {};
 
 function ffmpegPath(): string {
@@ -190,6 +192,16 @@ async function renderLossless(
     const format = args.lastIndexOf("-f");
     if (format >= 0 && args[format + 1] === "mp4") args.splice(format, 2, "-f", "matroska");
   }
+  if (!native) {
+    args.unshift("-filter_complex_threads", "1", "-filter_threads", "1");
+    for (let index = 0; index < args.length; index++) {
+      if (args[index] === "-i") {
+        args.splice(index, 0, "-threads", "1");
+        index += 2;
+      }
+    }
+    if (!delivery) args.splice(args.lastIndexOf("-c:v") + 2, 0, "-threads:v", "1");
+  }
   let renderContext = ctx;
   if (native) {
     const jobs = new FakeJobs();
@@ -209,7 +221,14 @@ async function renderLossless(
     jobs.onStart = async (spec) => {
       try {
         const result = await runNativeRenderSequence(spec);
-        if (plan.transport && spec.cwd && result.code === 0)
+        if (retainRequested) {
+          await fsp.mkdir(diagnosticDir, { recursive: true });
+          await fsp.writeFile(
+            path.join(diagnosticDir, `${++renderDiagnosticIndex}-native-job.json`),
+            JSON.stringify({ tag, spec, result }, null, 2),
+          );
+        }
+        if (plan.transport && spec.cwd && result.code === 0 && !retainRequested)
           await fsp.rm(spec.cwd, { recursive: true, force: true });
         jobs.exit(spec.id, result.code, result.stderr);
       } catch (error) {
@@ -227,13 +246,29 @@ async function renderLossless(
       }),
     };
   }
+  const started = performance.now();
   const r = await runRenderPlan(renderContext, { ...plan, args });
-  if (r.code !== 0) {
+  if (r.code !== 0 || retainRequested) {
     await fsp.mkdir(diagnosticDir, { recursive: true });
     await fsp.writeFile(
-      path.join(diagnosticDir, `${createHash("sha256").update(tag).digest("hex")}.json`),
+      path.join(
+        diagnosticDir,
+        `${++renderDiagnosticIndex}-${createHash("sha256").update(tag).digest("hex")}.json`,
+      ),
       JSON.stringify(
-        { tag, options, native, args, filterComplex: plan.filterComplex, files: plan.assFiles },
+        {
+          tag,
+          options,
+          native,
+          args,
+          filterComplex: plan.filterComplex,
+          files: plan.assFiles,
+          result: r,
+          elapsedMs: performance.now() - started,
+          workerPid: process.pid,
+          workerMemory: process.memoryUsage(),
+          hostAvailableBytes: os.freemem(),
+        },
         null,
         2,
       ),

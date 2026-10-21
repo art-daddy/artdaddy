@@ -222,6 +222,61 @@ describe("ProjectDocument", () => {
     expect(disposed).toBe(1);
   });
 
+  it("discard fencing: closes producer admission before asynchronous disposal", async () => {
+    let fenced = false;
+    let fencedAtDispose = false;
+    let phaseAtDispose = "";
+    const doc = new ProjectDocument(
+      asProjectId("A"),
+      {
+        open: async () => "loaded",
+        dispose: async () => {
+          fencedAtDispose = fenced;
+          phaseAtDispose = doc.phase();
+          await Promise.resolve();
+        },
+      },
+      {
+        onBeginClose: () => {
+          fenced = true;
+        },
+      },
+    );
+    await doc.open();
+    await doc.discardClose();
+    expect(fencedAtDispose).toBe(true);
+    expect(phaseAtDispose).toBe("closing");
+    expect(doc.phase()).toBe("closed");
+  });
+
+  it("discard fencing: a producer-fence error never skips destructive teardown", async () => {
+    let disposed = false;
+    const errors: unknown[] = [];
+    const error = new Error("fixture fence failure");
+    const doc = new ProjectDocument(
+      asProjectId("A"),
+      {
+        open: async () => "loaded",
+        dispose: async () => {
+          disposed = true;
+        },
+      },
+      {
+        onBeginClose: () => {
+          throw error;
+        },
+        onDisposeFailed: (_id, failure) => {
+          errors.push(failure);
+        },
+      },
+    );
+    await doc.open();
+    await doc.discardClose();
+    expect(disposed).toBe(true);
+    expect(doc.phase()).toBe("closed");
+    expect(errors).toEqual([error]);
+  });
+
   it("discardClose tears down DESPITE a dirty state (destructive)", async () => {
     let disposed = 0;
     const doc = new ProjectDocument(asProjectId("A"), {

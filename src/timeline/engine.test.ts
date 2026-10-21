@@ -4,6 +4,7 @@ import { ProjectStoreAccess, joinPath, type FsLike } from "../tools/store";
 import {
   applyOp,
   applyTimelineTransition,
+  cancelWriteRecovery,
   ctxApplyOp,
   doRedo,
   doUndo,
@@ -355,6 +356,90 @@ describe("timeline commits routed through an open document's in-memory session",
     // writes, never an unbounded loop. Pins the `attempt < cap` boundary (a `<=` off-by-one that
     // retried once more would make 5) — the close-barrier must stop, not spin.
     expect(writes).toBe(4);
+  });
+
+  it("failed-close recovery: a recovered folder cannot autosave before Discard is decided", async () => {
+    vi.useFakeTimers();
+    const fs = new MemFs();
+    const s = store(fs);
+    const held = new ProjectDocument(
+      asProjectId("proj"),
+      { open: async () => "loaded", dispose: async () => {} },
+      { rearmTimelineSave: (document) => rearmTimelinePersist(s, document) },
+    );
+    await held.open();
+    setOpenDocumentResolver((id) => (id === asProjectId("proj") ? held : undefined));
+    try {
+      await ensureTimeline(s);
+      const before = await fs.readTextFile(joinPath(DIR, "internals/timeline.json"));
+      let broken = true;
+      const write = fs.writeTextFile.bind(fs);
+      vi.spyOn(fs, "writeTextFile").mockImplementation(async (p, value) => {
+        if (p.includes("timeline") && broken) throw new Error("fixture folder unavailable");
+        return write(p, value);
+      });
+      await applyOp(s, "dirty", (timeline) => {
+        timeline.canvas.fps = 31;
+      });
+      await vi.advanceTimersByTimeAsync(500);
+      await held.autosave.flush();
+      const closing = held.close();
+      await vi.advanceTimersByTimeAsync(500);
+      expect(await closing).toEqual({ ok: false });
+      expect(held.phase()).toBe("close-failed");
+      broken = false;
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(await fs.readTextFile(joinPath(DIR, "internals/timeline.json"))).toBe(before);
+      expect(held.timeline?.isDirty()).toBe(true);
+      await held.discardClose();
+    } finally {
+      cancelWriteRecovery(DIR);
+      vi.useRealTimers();
+    }
+  });
+
+  it("failed-close recovery: Keep editing re-arms persistence after the close fence", async () => {
+    vi.useFakeTimers();
+    const fs = new MemFs();
+    const s = store(fs);
+    const held: ProjectDocument = new ProjectDocument(
+      asProjectId("proj"),
+      { open: async () => "loaded", dispose: async () => {} },
+      {
+        rearmTimelineSave: (document) => rearmTimelinePersist(s, document),
+        onReopen: () => rearmTimelinePersist(s, held),
+      },
+    );
+    await held.open();
+    setOpenDocumentResolver((id) => (id === asProjectId("proj") ? held : undefined));
+    try {
+      await ensureTimeline(s);
+      let broken = true;
+      const write = fs.writeTextFile.bind(fs);
+      vi.spyOn(fs, "writeTextFile").mockImplementation(async (p, value) => {
+        if (p.includes("timeline") && broken) throw new Error("fixture folder unavailable");
+        return write(p, value);
+      });
+      await applyOp(s, "dirty", (timeline) => {
+        timeline.canvas.fps = 31;
+      });
+      await vi.advanceTimersByTimeAsync(500);
+      const closing = held.close();
+      await vi.advanceTimersByTimeAsync(500);
+      expect(await closing).toEqual({ ok: false });
+      broken = false;
+      held.cancelClose();
+      await vi.advanceTimersByTimeAsync(500);
+      await held.autosave.flush();
+      expect(held.phase()).toBe("open");
+      expect(held.timeline?.isDirty()).toBe(false);
+      expect(
+        JSON.parse(await fs.readTextFile(joinPath(DIR, "internals/timeline.json"))).canvas.fps,
+      ).toBe(31);
+    } finally {
+      cancelWriteRecovery(DIR);
+      vi.useRealTimers();
+    }
   });
 
   it("Retry after a recovered disk RE-ATTEMPTS the timeline write, not a drained-autosave no-op (finding #3)", async () => {
