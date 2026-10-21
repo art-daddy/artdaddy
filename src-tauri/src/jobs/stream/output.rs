@@ -56,9 +56,9 @@ impl OutputLimit {
     #[cfg(windows)]
     {
       let statistics = self.broker.statistics();
-      return format!("native output sink: cap={} high_water={} written={} uploads={} completed_uploads={} readbacks={} rejected={} peers={} tasks={} file_open={}",
+      return format!("native output sink: cap={} high_water={} written={} uploads={} completed_uploads={} readbacks={} rejected={} idle_wakeups={} peers={} tasks={} file_open={}",
         statistics.cap, statistics.high_water, statistics.written, statistics.uploads,
-        statistics.completed_uploads, statistics.readbacks, statistics.rejected,
+        statistics.completed_uploads, statistics.readbacks, statistics.rejected, statistics.idle_wakeups,
         statistics.peers, statistics.tasks, statistics.file_open);
     }
     #[cfg(unix)]

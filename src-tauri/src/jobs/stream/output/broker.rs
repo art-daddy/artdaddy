@@ -37,6 +37,7 @@ pub(super) struct Statistics {
   pub completed_uploads: u64,
   pub readbacks: u64,
   pub rejected: u64,
+  pub idle_wakeups: u64,
   pub peers: usize,
   pub tasks: usize,
   pub file_open: bool,
@@ -60,6 +61,7 @@ struct Shared {
   completed_uploads: AtomicU64,
   readbacks: AtomicU64,
   rejected: AtomicU64,
+  idle_wakeups: AtomicU64,
 }
 
 enum PeerError {
@@ -119,6 +121,11 @@ impl Shared {
         "native output refused a non-loopback peer".into(),
       ));
     }
+    // Both listeners are non-blocking and Winsock hands that mode to every accepted socket, which would turn the
+    // timeouts below into no-ops and every idle read into an immediate retry.
+    socket
+      .set_nonblocking(false)
+      .map_err(|error| PeerError::Failed(error.to_string()))?;
     socket
       .set_read_timeout(Some(POLL))
       .map_err(|error| PeerError::Failed(error.to_string()))?;
@@ -217,6 +224,7 @@ impl Shared {
       completed_uploads: self.completed_uploads.load(Ordering::Acquire),
       readbacks: self.readbacks.load(Ordering::Acquire),
       rejected: self.rejected.load(Ordering::Acquire),
+      idle_wakeups: self.idle_wakeups.load(Ordering::Acquire),
       peers: self
         .peers
         .lock()
@@ -349,6 +357,7 @@ impl Lines {
         }
         Ok(count) => self.pending.extend_from_slice(&bytes[..count]),
         Err(error) if timeout(&error) => {
+          shared.idle_wakeups.fetch_add(1, Ordering::Relaxed);
           if shared.closing.load(Ordering::Acquire) {
             return Ok(if self.pending.is_empty() {
               Line::Closed
@@ -455,7 +464,9 @@ fn upload(socket: &mut TcpStream, shared: &Shared, mut offset: u64) -> Result<()
         shared.write_at(&bytes[..count], offset)?;
         offset += count as u64;
       }
-      Err(error) if timeout(&error) && !shared.closing.load(Ordering::Acquire) => {}
+      Err(error) if timeout(&error) && !shared.closing.load(Ordering::Acquire) => {
+        shared.idle_wakeups.fetch_add(1, Ordering::Relaxed);
+      }
       Err(error) => return Err(format!("native output upload ended without EOF: {error}")),
     }
   }
@@ -481,7 +492,9 @@ fn readback(
       match socket.write(remaining) {
         Ok(0) => return Err("native output readback write made no progress".into()),
         Ok(count) => remaining = &remaining[count..],
-        Err(error) if timeout(&error) && !shared.closing.load(Ordering::Acquire) => {}
+        Err(error) if timeout(&error) && !shared.closing.load(Ordering::Acquire) => {
+          shared.idle_wakeups.fetch_add(1, Ordering::Relaxed);
+        }
         Err(_) if abort.load(Ordering::Acquire) => return Ok(()),
         Err(error) => return Err(format!("native output readback transport failed: {error}")),
       }
@@ -866,6 +879,7 @@ impl Broker {
       completed_uploads: AtomicU64::new(0),
       readbacks: AtomicU64::new(0),
       rejected: AtomicU64::new(0),
+      idle_wakeups: AtomicU64::new(0),
     });
     let state = shared.clone();
     let credential = password.clone();
@@ -1126,5 +1140,88 @@ mod tests {
       (statistics.peers, statistics.tasks, statistics.file_open),
       (0, 0, false)
     );
+  }
+
+  // Winsock gives an accepted socket the non-blocking mode of its listener, which silently disables its receive
+  // timeout: every idle read then returns at once and the retry loops pin a core per connection for a whole export.
+  fn accepted_by_a_nonblocking_listener() -> (TcpStream, TcpStream) {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+      match listener.accept() {
+        Ok((accepted, _)) => return (accepted, client),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline => {
+          thread::sleep(Duration::from_millis(1))
+        }
+        Err(error) => panic!("loopback accept failed: {error}"),
+      }
+    }
+  }
+
+  #[test]
+  fn an_admitted_peer_waits_out_its_poll_interval_instead_of_returning_at_once() {
+    let (_directory, _path, mut broker) = sink(65536);
+    let (accepted, _client) = accepted_by_a_nonblocking_listener();
+    let mut peer = match broker.shared.register(accepted) {
+      Ok(peer) => peer,
+      Err(_) => panic!("a loopback peer must be admitted"),
+    };
+    let mut byte = [0u8; 1];
+    for _ in 0..3 {
+      let begin = Instant::now();
+      let error = peer.socket.read(&mut byte).unwrap_err();
+      assert!(timeout(&error), "{error}");
+      assert!(
+        begin.elapsed() >= POLL / 2,
+        "an idle read returned after {:?}",
+        begin.elapsed()
+      );
+    }
+    drop(peer);
+    assert!(broker.finish(false).is_err());
+  }
+
+  #[test]
+  fn idle_control_and_data_connections_wake_once_per_poll_interval_not_in_a_hot_loop() {
+    let (_directory, path, mut broker) = sink(65536);
+    let (control, mut data) = upload_peer(&broker);
+    thread::sleep(Duration::from_millis(600));
+    // Each of the two connections may wake about six times in 600 ms; a busy loop wakes hundreds of thousands of times.
+    let idle = broker.statistics().idle_wakeups;
+    assert!(idle <= 40, "{idle} idle wake-ups in 600 ms");
+    control.get_ref().shutdown(Shutdown::Both).unwrap();
+    drop(control);
+    let bytes = vec![0x5a; 8192];
+    data.write_all(&bytes).unwrap();
+    data.shutdown(Shutdown::Write).unwrap();
+    broker.finish(true).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    let statistics = broker.statistics();
+    assert_eq!(
+      (statistics.peers, statistics.tasks, statistics.file_open),
+      (0, 0, false)
+    );
+  }
+
+  #[test]
+  fn blocking_peers_cannot_hold_the_broker_open_after_cancellation() {
+    let (_directory, _path, mut broker) = sink(65536);
+    let (control, data) = upload_peer(&broker);
+    let begin = Instant::now();
+    broker.cancel();
+    assert!(broker.finish(false).is_err());
+    assert!(
+      begin.elapsed() < Duration::from_secs(3),
+      "cancellation took {:?}",
+      begin.elapsed()
+    );
+    let statistics = broker.statistics();
+    assert_eq!(
+      (statistics.peers, statistics.tasks, statistics.file_open),
+      (0, 0, false)
+    );
+    drop((control, data));
   }
 }
