@@ -19,6 +19,66 @@ const manifest = JSON.parse(
   readFileSync(path.join(root, "src-tauri/resources/brand/manifest.json"), "utf8"),
 );
 const version = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8")).version;
+const lifecycleObservations = [];
+async function observeLifecycle(phase) {
+  const processes = [];
+  for (const entry of readdirSync("/proc").filter((name) => /^\d+$/.test(name))) {
+    try {
+      const exe = realpathSync(`/proc/${entry}/exe`);
+      if (
+        exe !== realpathSync(process.env.ARTDADDY_LINUX_PAYLOAD_BINARY) &&
+        !["tauri-driver", "WebKitWebDriver"].includes(path.basename(exe))
+      )
+        continue;
+      const status = readFileSync(`/proc/${entry}/status`, "utf8");
+      const parent = Number(
+        status
+          .split("\n")
+          .find((line) => line.startsWith("PPid:"))
+          ?.split(":")[1]
+          .trim(),
+      );
+      const start = readFileSync(`/proc/${entry}/stat`, "utf8")
+        .split(") ")
+        .slice(1)
+        .join(") ")
+        .split(" ")[19];
+      processes.push({ pid: Number(entry), parent, exe, start });
+    } catch (error) {
+      if (!["ENOENT", "EACCES", "EPERM", "ESRCH"].includes(error.code)) throw error;
+    }
+  }
+  let status;
+  try {
+    const response = await fetch("http://127.0.0.1:4444/status", {
+      signal: AbortSignal.timeout(2000),
+    });
+    status = { http: response.status, body: await response.json() };
+  } catch (error) {
+    status = { error: String(error) };
+  }
+  lifecycleObservations.push({ phase, at: new Date().toISOString(), processes, status });
+  writeFileSync(
+    path.join(output, "session-lifecycle.json"),
+    JSON.stringify(lifecycleObservations, null, 2),
+  );
+}
+async function recreateSession(session, phase) {
+  await observeLifecycle(`${phase}:before-close`);
+  await session.exec(
+    "window.__TAURI_INTERNALS__.invoke('plugin:window|close').catch(()=>{});return true;",
+  );
+  await observeLifecycle(`${phase}:close-requested`);
+  await session.quit();
+  await observeLifecycle(`${phase}:webdriver-session-deleted`);
+  try {
+    Object.assign(session, await newSession(process.env.ARTDADDY_APP_BINARY));
+  } catch (error) {
+    await observeLifecycle(`${phase}:new-session-failed`);
+    throw error;
+  }
+  await observeLifecycle(`${phase}:new-session-created`);
+}
 async function nativeJourney(session, profile) {
   const nativeDialog = async (choice) => {
     const driver = process.env.ARTDADDY_QA_DIALOG_DRIVER;
@@ -136,11 +196,7 @@ async function nativeJourney(session, profile) {
   record("native keyring writes and reads the same disposable credential", restored);
   assert.equal(restored.error, undefined);
   assert.equal(restored.matches, true, "Native keyring did not return the stored session");
-  await session.exec(
-    "window.__TAURI_INTERNALS__.invoke('plugin:window|close').catch(()=>{});return true;",
-  );
-  await session.quit();
-  Object.assign(session, await newSession(process.env.ARTDADDY_APP_BINARY));
+  await recreateSession(session, "initial-restore");
   record("actual app session closed and relaunched with the saved native credential");
   await waitFor(
     () =>
@@ -418,11 +474,7 @@ async function nativeJourney(session, profile) {
     bytes: readFileSync(delivered).length,
     sha256: createHash("sha256").update(readFileSync(delivered)).digest("hex"),
   });
-  await session.exec(
-    "window.__TAURI_INTERNALS__.invoke('plugin:window|close').catch(()=>{});return true;",
-  );
-  await session.quit();
-  Object.assign(session, await newSession(process.env.ARTDADDY_APP_BINARY));
+  await recreateSession(session, "post-export-restore");
   await waitFor(
     () =>
       session.exec(
