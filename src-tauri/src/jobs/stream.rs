@@ -347,7 +347,7 @@ pub(super) struct AudioProducer {
 
 pub(super) fn audio_producer(spec: &JobSpec) -> Result<Option<AudioProducer>, String> {
   let Some(value) = spec.meta.get("renderAudio") else { return Ok(None) };
-  if !super::is_streamed(spec) || spec.program != "ffmpeg" || spec.lane != "export" || spec.steps.is_empty() {
+  if !super::is_streamed(spec) || spec.program != "ffmpeg" || spec.lane != super::EXPORT_LANE || spec.steps.is_empty() {
     return Err("continuous audio requires an admitted streaming render".into());
   }
   let audio: AudioProducer = serde_json::from_value(value.clone()).map_err(|error| format!("invalid continuous audio contract: {error}"))?;

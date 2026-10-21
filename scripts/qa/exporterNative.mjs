@@ -392,7 +392,8 @@ try {
     sourceFiles.push("package.json", "package-lock.json", "src-tauri/Cargo.toml", "src-tauri/Cargo.lock",
       "src-tauri/tauri.conf.json", "scripts/qa/exporterNative.mjs", "scripts/qa/exporterNative.ts", "scripts/qa/exporterNative.html",
       "scripts/qa/exporterMemory.ps1", "scripts/qa/exporterLinuxMemory.mjs", "scripts/qa/exporterPromiseCases.json",
-      "scripts/qa/exporterPromiseReport.mjs", "scripts/qa/exporterLinuxMemory.test.mjs",
+      "scripts/qa/exporterPromiseReport.mjs", "scripts/qa/exporterQualification.mjs", "scripts/qa/exporterVite.mjs",
+      "scripts/qa/exporterLinuxMemory.test.mjs",
       "scripts/qa/exporterPromiseReport.test.mjs", ".github/workflows/exporter-native-qa.yml");
     proof.sourceFiles = await Promise.all(sourceFiles.sort().map(async (filename) => ({ path: filename.replaceAll(path.sep, "/"), sha256: await fileHash(path.join(repository, filename)) })));
     proof.sourceSetSha256 = createHash("sha256").update(JSON.stringify(proof.sourceFiles)).digest("hex");

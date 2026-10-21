@@ -25,6 +25,10 @@ mod resources;
 mod allocation;
 pub use workspace::Workspace;
 
+/// The lane every admitted export job runs on. The supervisor refuses export work on any other, and the keep-awake tracker watches
+/// this one, so the two cannot drift apart.
+const EXPORT_LANE: &str = "export";
+
 /// The programs a job may run, as (logical name, bundled sidecar file). A command the page can
 /// call must not become a way to start any process: only the sidecars the long jobs need.
 pub const SIDECARS: &[(&str, &str)] =
@@ -216,6 +220,7 @@ pub struct Supervisor {
   workspace: Arc<Workspace>,
   copying: Arc<Mutex<HashSet<String>>>,
   copy_settled: Arc<Condvar>,
+  awake: Option<Arc<awake::ExportAwake>>,
   #[cfg(test)]
   initial_entry_hook: Option<InitialEntryHook>,
 }
@@ -1252,6 +1257,7 @@ impl Supervisor {
       workspace: Workspace::new(EXPORT_WORKSPACE_PAYLOAD_BYTES),
       copying: Arc::default(),
       copy_settled: Arc::default(),
+      awake: None,
       #[cfg(test)]
       initial_entry_hook: None,
     }
@@ -1305,6 +1311,13 @@ impl Supervisor {
   }
 
   pub fn with_export_font_root(mut self, root: PathBuf) -> Self { self.export_font_root = Some(root); self }
+
+  /// Joins this supervisor's export work to the keep-awake tracker. Production reaches it only through `supervisor_with_awake`.
+  fn with_awake(mut self, awake: Arc<awake::ExportAwake>) -> Self { self.awake = Some(awake); self }
+
+  /// A claim on the machine's wakefulness for export work that runs between jobs and sends no notice (hashing to admit, verify,
+  /// publish or recover an export), held until the returned value is dropped. None when no tracker is joined, as in most tests.
+  fn busy(&self) -> Option<awake::Busy> { self.awake.as_ref().map(|awake| awake.busy()) }
 
   fn journal(&self) -> Result<ExportJournal<'_>, String> {
     self.export_root.as_ref().ok_or("native export journal is unavailable")?;
@@ -1652,6 +1665,7 @@ impl Supervisor {
   }
 
   pub fn prepare_delivery(&self, id: String, project_dir: String, stage_path: String, dest_path: String, source: DeliverySource) -> Result<ExportDelivery, String> {
+    let _busy = self.busy();
     let admitted_at = now_ms();
     if !valid_delivery_id(&id) {
       return Err("invalid export intent identity".into());
@@ -1735,6 +1749,7 @@ impl Supervisor {
   }
 
   pub fn verify_delivery(&self, id: &str) -> Result<ExportDelivery, String> {
+    let _busy = self.busy();
     let root = self.journal()?;
     let delivery = self.deliveries.lock().map_err(|error| error.to_string())?.get(id).cloned().ok_or("unknown export intent")?;
     if delivery.state != "prepared" && delivery.state != "verified" { return Err("export intent cannot be verified".into()); }
@@ -1765,6 +1780,7 @@ impl Supervisor {
   }
 
   pub fn publish_delivery(&self, id: &str) -> Result<ExportDelivery, String> {
+    let _busy = self.busy();
     let root = self.journal()?;
     let captured = self.deliveries.lock().map_err(|error| error.to_string())?.get(id).cloned().ok_or("unknown export intent")?;
     self.require_completed_producer(&captured)?;
@@ -1932,15 +1948,18 @@ impl Supervisor {
   }
 
   fn retain_render_job(&self, spec: &JobSpec) -> Result<(), String> {
+    // Export work: it hashes every source before the job can start. The claim comes first so it is dropped after the lock below.
+    let export_work = spec.lane == EXPORT_LANE || spec.meta.get("kind").and_then(|value| value.as_str()) == Some("export");
+    let _busy = export_work.then(|| self.busy()).flatten();
     let mut entries = self.deliveries.lock().map_err(|error| error.to_string())?;
-    if !entries.contains_key(&spec.id) && spec.lane != "export" && spec.meta.get("kind").and_then(|value| value.as_str()) != Some("export") { return Ok(()); }
+    if !entries.contains_key(&spec.id) && !export_work { return Ok(()); }
     self.account_workspace(&entries)?;
     let current = entries.get_mut(&spec.id);
     let root = self.journal()?;
     let current = current.ok_or("export job has no admitted delivery intent")?;
     if !matches!(&current.source, DeliverySource::Render { .. }) { return Err("copy intent cannot admit a render worker".into()); }
     if spec.program != "ffmpeg" { return Err("export intent requires the admitted render backend".into()); }
-    if spec.lane != "export" { return Err("admitted render work must use the shared export lane".into()); }
+    if spec.lane != EXPORT_LANE { return Err("admitted render work must use the shared export lane".into()); }
     let delivery = self.record_execution_clock(current, false)?;
     drop(entries);
     self.validate_render_scratch(&delivery, spec.cwd.as_deref())?;
@@ -2047,6 +2066,8 @@ impl Supervisor {
         let recovered = (|| -> Result<(), String> {
           if delivery.recovery_attempts >= 1 { return Err("automatic copy recovery budget exhausted".into()); }
           let expected = delivery.sources.first().ok_or("copy export has no source fingerprint")?;
+          // The one hash of recovery that no other claim covers (a normal launch has nothing to recover and takes no claim at all).
+          let _busy = self.busy();
           let actual = artifact_identity(Path::new(path))?;
           if actual.sha256 != expected.1.sha256 || actual.size != expected.1.size { return Err("copy source changed; recovery refused".into()); }
           let root = self.journal()?;
@@ -2114,7 +2135,7 @@ impl Supervisor {
 
   fn delivery_job_spec(delivery: &ExportDelivery) -> JobSpec {
     let filename = Path::new(&delivery.dest_path).file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-    let mut spec = delivery.render_job.clone().unwrap_or_else(|| JobSpec { id: delivery.id.clone(), lane: "export".into(), program: "ffmpeg".into(),
+    let mut spec = delivery.render_job.clone().unwrap_or_else(|| JobSpec { id: delivery.id.clone(), lane: EXPORT_LANE.into(), program: "ffmpeg".into(),
       args: Vec::new(), steps: Vec::new(), cwd: None, meta: serde_json::json!({}) });
     if !spec.meta.is_object() { spec.meta = serde_json::json!({}); }
     let meta = spec.meta.as_object_mut().expect("job metadata normalized to an object");
@@ -2375,7 +2396,7 @@ impl Supervisor {
       return Err("native execution metadata is reserved".into());
     }
     if let Some(transport) = spec.meta.get("renderTransport") {
-      if transport.as_str() != Some("partition-pipes-v1") || spec.lane != "export" || spec.program != "ffmpeg" || spec.steps.is_empty() {
+      if transport.as_str() != Some("partition-pipes-v1") || spec.lane != EXPORT_LANE || spec.program != "ffmpeg" || spec.steps.is_empty() {
         return Err("unsupported native export stream contract".into());
       }
     }
@@ -2886,6 +2907,13 @@ struct StdoutEvent {
   chunk: String,
 }
 
+/// The one place a supervisor is joined to the keep-awake tracker: the machine stays awake while an export job runs and while the
+/// supervisor does export work between jobs, however either ends, and every notice still reaches the page untouched. Production
+/// builds its supervisor here, so the tracker cannot be left unwired.
+fn supervisor_with_awake(spawner: Arc<dyn Spawner>, notify: Arc<dyn Fn(Notice) + Send + Sync>, tracker: Arc<awake::ExportAwake>) -> Supervisor {
+  Supervisor::new(spawner, awake::observing(tracker.clone(), notify)).with_awake(tracker)
+}
+
 /// Manages the supervisor and kills every job when the app exits.
 pub fn plugin<R: Runtime>() -> tauri::plugin::TauriPlugin<R> {
   tauri::plugin::Builder::new("jobs")
@@ -2897,10 +2925,8 @@ pub fn plugin<R: Runtime>() -> tauri::plugin::TauriPlugin<R> {
           Notice::Stdout { id, chunk } => emitter.emit("jobs:stdout", StdoutEvent { id, chunk }),
         };
       });
-      // The machine stays awake while an export runs, however it ends; every notice still reaches the page untouched.
-      let notify = awake::observing(awake::ExportAwake::new(), notify);
       let spawner = Arc::new(ShellSpawner { app: app.clone(), children: Arc::default(), streams: Arc::default() });
-      let base = Supervisor::new(spawner, notify).with_export_work_root(app.path().app_cache_dir()?.join("work"))?;
+      let base = supervisor_with_awake(spawner, notify, awake::ExportAwake::new()).with_export_work_root(app.path().app_cache_dir()?.join("work"))?;
       let base = if let Ok(root) = app.path().resolve("resources/fonts", tauri::path::BaseDirectory::Resource) { base.with_export_font_root(root) } else { base };
       let configured = app.path().app_local_data_dir().map_err(|error| error.to_string())
         .and_then(|path| base.clone().with_export_root(path.join("exports").join("intents-v1")));
