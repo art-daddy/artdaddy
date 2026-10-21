@@ -139,6 +139,12 @@ Proposed exporter boundaries, reliability SLO, recovery, artifact verification a
 phase gates: [Exporter Architecture and Reliability](EXPORTER_ARCHITECTURE.md).
 That is a design proposal, not certification of the current exporter or a release.
 
+Delivery watermark composition stays in TV-range YUV420, matching the completed
+picture. The watermark is converted to YUVA420 and the overlay output is explicitly
+YUV420; automatic RGB negotiation otherwise shifts chromatic footage outside the
+visible mark. The chromatic-portrait smoke regression checks both visible corner
+pixels and the unchanged rest-of-picture luma tolerance.
+
 ### Bounded export execution (2026-10-13, local; not released)
 
 An external filtergraph alone does not fix Windows error 206: hundreds of absolute
@@ -466,6 +472,21 @@ surface (dialogs, external-media preview, fs/asset scopes, thumbnail-capture) â€
 - **Codegen**: `npm run codegen` (client source -> compiled identity and trusted backend snapshots).
 - **Git hooks**: `.githooks/pre-push` runs build + unit tests, then the e2e goldens
   when ffmpeg is present (`git config core.hooksPath .githooks` after a fresh clone).
+
+### macOS native Quit
+
+Cocoa's application Quit action can terminate the process without a Tauri window-close
+request. `src-tauri/src/macos_quit.m` forwards the existing application delegate and
+routes `applicationShouldTerminate` through the main window's existing close owner.
+The original request is cancelled while that owner saves/closes the document; closing
+the final window then exits normally. Failed-close Retry/Discard/Cancel remains owned
+by the same frontend coordinator, so native Quit cannot leave a live project claim by
+skipping it. The bridge is macOS-only; programmatic Tauri exit/restart paths are unchanged.
+
+Slow disk-recovery timers run only while a document is open. Beginning close cancels
+them, and a failed close must wait for an explicit Retry rather than saving behind the
+recovery dialog. Keep editing re-arms persistence for the still-dirty document.
+Discard raises the same producer fence before teardown and never re-admits recovery writes.
 
 ## 16. Shipping: distribution & auto-update
 

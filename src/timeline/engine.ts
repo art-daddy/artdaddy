@@ -180,6 +180,7 @@ const RECOVERY_MS = 5000;
 const recoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 function scheduleWriteRecovery(store: ProjectStoreAccess, doc: ProjectDocument): void {
+  if (doc.phase() !== "open") return;
   const key = store.projectDir;
   if (recoveryTimers.has(key)) return;
   useProjectNotice
@@ -189,7 +190,7 @@ function scheduleWriteRecovery(store: ProjectStoreAccess, doc: ProjectDocument):
     );
   const t = setTimeout(() => {
     recoveryTimers.delete(key);
-    if (!store.sessionLive() || !doc.timeline?.isDirty()) return;
+    if (!store.sessionLive() || doc.phase() !== "open" || !doc.timeline?.isDirty()) return;
     rearmTimelinePersist(store, doc);
   }, RECOVERY_MS);
   recoveryTimers.set(key, t);

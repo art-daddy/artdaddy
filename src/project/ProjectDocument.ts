@@ -218,8 +218,18 @@ export class ProjectDocument {
   /** Discard: tear down DESPITE a dirty/unsaved state. Destructive — the caller confirms first. */
   async discardClose(): Promise<void> {
     if (this._phase === "closed") return;
+    this._phase = "closing";
+    try {
+      this.onBeginClose?.(this.id);
+    } catch (error) {
+      this.safeReport(() => this.onDisposeFailed?.(this.id, error));
+    }
     try {
       await Promise.all([this.gate.beginClose(), this.jobs.beginClose()]); // idempotent if already drained
+    } catch (error) {
+      this.safeReport(() => this.onDisposeFailed?.(this.id, error));
+    }
+    try {
       await this.children.dispose({ id: this.id, sessionId: this.sessionId });
     } catch (e) {
       // Destructive intent: a partial-teardown throw must NOT leave the doc close-failed (the dialog

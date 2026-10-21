@@ -2,6 +2,8 @@ mod fdlimit;
 #[cfg(desktop)]
 mod jobs;
 mod mcp;
+#[cfg(target_os = "macos")]
+mod macos_quit;
 mod reload_guard;
 #[cfg(desktop)]
 mod runtime_health;
@@ -485,6 +487,9 @@ pub fn run() {
     .plugin(tauri_plugin_fs::init())
     .plugin(tauri_plugin_dialog::init())
     .plugin(tauri_plugin_deep_link::init());
+
+  #[cfg(target_os = "macos")]
+  let builder = builder.plugin(macos_quit::plugin());
 
   let guard = std::sync::Arc::new(reload_guard::GuardState::default());
   #[cfg(target_os = "macos")]
