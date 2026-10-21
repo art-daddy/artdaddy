@@ -287,9 +287,9 @@ describe("branded render plan", () => {
     // The bug is inset for the frame it was authored at, so it must be scaled to whatever the
     // export actually delivers. Overlaying a 1920-wide asset onto a 1280-wide frame would push
     // the bug off the right edge — invisible, and the string assertion would still pass.
-    expect(branded.filterComplex).toContain("[1:v]scale=1280:720[wm]");
+    expect(branded.filterComplex).toContain("[1:v]scale=1280:720:out_range=tv,format=yuva420p[wm]");
     expect(branded.filterComplex).toContain("[scaled]scale=out_range=tv,format=yuv420p[tv]");
-    expect(branded.filterComplex).toMatch(/\[tv]\[wm]overlay=0:0/);
+    expect(branded.filterComplex).toContain("[tv][wm]overlay=0:0:format=yuv420[branded]");
   });
 
   it("concatenates the end card after the watermarked picture, not before", () => {

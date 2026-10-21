@@ -3,6 +3,7 @@ import { MemFs } from "../test/timelineKit";
 import { ProjectStoreAccess, joinPath } from "../tools/store";
 import { __resetProjectJobs, openProjectJobs } from "../tools/genJobs";
 import { notifyJobSettled, pendingJobNotes, __resetJobNotes } from "../store/jobNotes";
+import { cancelWriteRecovery, rearmTimelinePersist } from "../timeline/engine";
 
 const activateEditor = vi.fn();
 const activateChat = vi.fn();
@@ -35,6 +36,7 @@ vi.mock("../store/chat", () => ({
 }));
 vi.mock("../timeline/engine", () => ({
   rearmTimelinePersist: vi.fn(),
+  cancelWriteRecovery: vi.fn(),
 }));
 vi.mock("../tools/host", () => ({
   openToolHost: (id: string) => openHost(id),
@@ -81,8 +83,10 @@ describe("makeProjectChildren", () => {
     recoverMedia.mockClear();
     saveSession.mockResolvedValue(false);
     expect(await projectDocuments.close(projectId)).toMatchObject({ ok: false });
+    expect(cancelWriteRecovery).toHaveBeenCalledWith(`/root/projects/${projectId}`);
     doc.cancelClose();
     expect(resumeChat).toHaveBeenCalledWith(projectId);
+    expect(rearmTimelinePersist).toHaveBeenCalledWith(editorState.store, doc);
     expect(recoverMedia).toHaveBeenCalledTimes(1);
     saveSession.mockResolvedValue(true);
     await projectDocuments.close(projectId);
@@ -127,6 +131,7 @@ describe("makeProjectChildren", () => {
     try {
       await new Promise((resolve) => setTimeout(resolve, 0));
       expect(saveSession).not.toHaveBeenCalled();
+      expect(cancelWriteRecovery).toHaveBeenCalledWith(dir);
       expect(doc.phase()).toBe("closing");
     } finally {
       release();
