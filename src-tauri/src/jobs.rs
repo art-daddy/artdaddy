@@ -18,6 +18,7 @@ use std::io::{Read, Write};
 use sha2::{Digest, Sha256};
 
 mod stream;
+mod awake;
 mod budget;
 mod workspace;
 mod resources;
@@ -2896,6 +2897,8 @@ pub fn plugin<R: Runtime>() -> tauri::plugin::TauriPlugin<R> {
           Notice::Stdout { id, chunk } => emitter.emit("jobs:stdout", StdoutEvent { id, chunk }),
         };
       });
+      // The machine stays awake while an export runs, however it ends; every notice still reaches the page untouched.
+      let notify = awake::observing(awake::ExportAwake::new(), notify);
       let spawner = Arc::new(ShellSpawner { app: app.clone(), children: Arc::default(), streams: Arc::default() });
       let base = Supervisor::new(spawner, notify).with_export_work_root(app.path().app_cache_dir()?.join("work"))?;
       let base = if let Ok(root) = app.path().resolve("resources/fonts", tauri::path::BaseDirectory::Resource) { base.with_export_font_root(root) } else { base };
