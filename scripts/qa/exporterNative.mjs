@@ -8,6 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer, normalizePath } from "vite";
 import { readLinuxMemoryCgroup, cgroupFits, sameCgroup, cgroupEncoderPids } from "./exporterLinuxMemory.mjs";
+import { qaServerOptions } from "./exporterVite.mjs";
 import { BASE_OUTCOME_BUDGET_MS, captionsFadedIn, describePictureFailures, estimateFailures, judgeSourcePictures, outcomeBudgetMs, temporarySpaceFailures } from "./exporterQualification.mjs";
 
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -277,7 +278,7 @@ Object.assign(process.env, { ARTDADDY_DATA_DIR: root, ARTDADDY_PROJECTS_DIR: pat
 const nativeCore = `/@fs/${normalizePath(path.join(repository, "node_modules", "@tauri-apps", "api", "core.js"))}`;
 const virtualCore = "\0exporter-qa-isolated-core";
 const vite = await createServer({ root: repository, configFile: path.join(repository, "vite.config.ts"),
-  server: { host: "127.0.0.1", port: 0, strictPort: true },
+  server: qaServerOptions,
   plugins: [{ name: "exporter-qa-isolated-root", enforce: "pre",
     resolveId: (name) => name === "@tauri-apps/api/core" ? virtualCore : undefined,
     load: (name) => name === virtualCore ? `

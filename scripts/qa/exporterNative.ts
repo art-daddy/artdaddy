@@ -40,6 +40,10 @@ async function allowanceAfterSettlement(destination: string, floor: number | nul
 }
 
 async function exercise(): Promise<void> {
+  // A reload would restart this script while the app keeps working, and the second pass would judge the first one's leftovers.
+  // The dev server's hot-reload socket is off (exporterVite.mjs); this names any other cause instead of letting a later check fail oddly.
+  check(sessionStorage.getItem("exporter-qa-page-started") === null, "The QA page reloaded while a run was in progress; its script state is gone, so this run is void");
+  sessionStorage.setItem("exporter-qa-page-started", new Date().toISOString());
   check(root.includes("artdaddy-export-native-"), "Not an isolated exporter directory");
   check(await getIdentifier() === identifier && identifier.startsWith("com.artdaddy.qa.exporter-"), "Wrong native app identity");
   check((await dataRoot()).replace(/\\/g, "/") === root.replace(/\\/g, "/"), "Native project root is not isolated");

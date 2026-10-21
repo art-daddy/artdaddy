@@ -1,11 +1,17 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import http from "node:http";
+import os from "node:os";
+import path from "node:path";
 import { test } from "node:test";
 import fc from "fast-check";
+import { createServer } from "vite";
 import {
   BASE_OUTCOME_BUDGET_MS, MIN_INFORMATIVE_SAMPLES, NEAR_BLANK_LEVEL, NEAR_EXACT_ERROR, REQUIRED_PASSES,
   captionsFadedIn, describePictureFailures, estimateFacts, estimateFailures, judgeSourcePictures, outcomeBudgetMs, temporarySpaceFailures,
 } from "./exporterQualification.mjs";
+import { qaServerOptions } from "./exporterVite.mjs";
 import { REAL_ALLOWANCE_BYTES, REAL_CAPTION_SAMPLES, REAL_COLD_MESSAGE, REAL_PHONE_PICTURES, REAL_WEB_PICTURES } from "./exporterQualification.fixtures.mjs";
 
 const library = JSON.parse(await readFile(new URL("./exporterPromiseCases.json", import.meta.url), "utf8"));
@@ -373,4 +379,40 @@ test("property: the outcome wait never shrinks as a line gets longer or slower, 
     assert.ok(at(seconds, slow) > at(seconds, slow, "measurement"), "a promise line exports twice");
     assert.ok(at(seconds, slow, "measurement") >= BASE_OUTCOME_BUDGET_MS);
   }), { numRuns: 200 });
+});
+
+// Vite's client reloads its page when the hot-module socket drops, which restarts the harness page while the app keeps exporting.
+// The page is only safe when no such socket can be opened at all.
+async function hotSocketAccepted(options) {
+  const root = await mkdtemp(path.join(os.tmpdir(), "exporter-vite-"));
+  await writeFile(path.join(root, "index.html"), "<!doctype html><title>qa</title>");
+  const server = await createServer({ root, configFile: false, logLevel: "silent", server: options });
+  try {
+    await server.listen();
+    const { port } = server.httpServer.address();
+    return await new Promise((resolve, reject) => {
+      const request = http.request({ host: "127.0.0.1", port, path: "/", headers: { Connection: "Upgrade", Upgrade: "websocket",
+        "Sec-WebSocket-Version": "13", "Sec-WebSocket-Protocol": "vite-hmr", "Sec-WebSocket-Key": randomBytes(16).toString("base64") } });
+      request.on("upgrade", (response, socket) => { socket.destroy(); resolve(response.statusCode === 101); });
+      request.on("response", (response) => { response.resume(); resolve(false); });
+      request.on("error", () => resolve(false));
+      request.setTimeout(5000, () => { request.destroy(); reject(new Error("the hot-socket probe timed out")); });
+      request.end();
+    });
+  } finally {
+    await server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+test("the harness's dev server offers no hot-module socket, so Vite's reload-on-disconnect cannot fire", async () => {
+  // The control proves the probe can tell the difference: a stock dev server does accept the socket.
+  assert.equal(await hotSocketAccepted({ host: "127.0.0.1", port: 0, strictPort: true }), true, "the probe must see a stock dev server's hot socket");
+  assert.equal(await hotSocketAccepted(qaServerOptions), false, "the harness's dev server must not accept a hot-module socket");
+});
+
+test("the native harness serves its page with those options and carries no private copy of them", async () => {
+  const source = await readFile(new URL("./exporterNative.mjs", import.meta.url), "utf8");
+  assert.match(source, /server: qaServerOptions,/);
+  assert.doesNotMatch(source, /server: \{ host: "127\.0\.0\.1"/);
 });
