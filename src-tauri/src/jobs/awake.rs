@@ -490,14 +490,14 @@ mod tests {
     let ledger = Arc::new(Ledger::default());
     let made = ledger.clone();
     let acquire: Acquire = Box::new(move |_| { made.acquired.fetch_add(1, Ordering::SeqCst); Some(Box::new(Token(made.clone()))) });
-    let awake = ExportAwake::with("export", acquire, Duration::from_millis(150), Box::new(wait_then_release));
+    let awake = ExportAwake::with("export", acquire, Duration::from_millis(1000), Box::new(wait_then_release));
     awake.observe("a", "export", JobState::Running);
     awake.observe("a", "export", JobState::Exited);
     assert!(ledger.held(), "held at the instant the export ends");
     let began = Instant::now();
     while ledger.held() && began.elapsed() < Duration::from_secs(10) { std::thread::sleep(Duration::from_millis(20)); }
     assert!(!ledger.held(), "the timer thread never released the request");
-    assert!(began.elapsed() >= Duration::from_millis(100), "released before its grace: {:?}", began.elapsed());
+    assert!(began.elapsed() >= Duration::from_millis(500), "released before its grace: {:?}", began.elapsed());
     awake.observe("b", "export", JobState::Running);
     assert_eq!(ledger.counts(), (2, 1));
     awake.observe("b", "export", JobState::Exited);
@@ -555,9 +555,13 @@ mod tests {
     eventually("Windows does not report the request while an export runs", || system_execution_state() & ES_SYSTEM_REQUIRED != 0);
     awake.observe("a", "export", JobState::Exited);
     assert!(system_execution_state() & ES_SYSTEM_REQUIRED != 0, "the request must outlive the export that took it");
-    if !before {
-      eventually("the real timer never dropped the real request", || system_execution_state() & ES_SYSTEM_REQUIRED == 0);
+    // The tracker's own account does not depend on what else is running: another program (the publishing gate holds one) may keep
+    // Windows' aggregate set after ours is dropped, so only the tracker is waited on unconditionally.
+    eventually("the real timer never let go of the request", || awake.locked().held.is_none());
+    if before {
+      eprintln!("another program already held a system-required request, so Windows' report cannot show this request going away here");
+    } else {
+      eventually("Windows still reports the request after the real timer dropped it", || system_execution_state() & ES_SYSTEM_REQUIRED == 0);
     }
-    assert!(awake.locked().held.is_none(), "the tracker still thinks it holds a request");
   }
 }
