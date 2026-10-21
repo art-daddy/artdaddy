@@ -536,29 +536,46 @@ describe("buildRenderCommand", () => {
     }
   });
 
-  it("bounds only final above-HD streamed software encoding to the approved two threads", () => {
-    const authored = tl(
-      [{ media_ref: "/video.mp4", source_in: 0, source_out: 2, timeline_in: 0, timeline_out: 2 }],
-      { width: 3840, height: 2160, fps: 30 },
-    );
+  it("bounds final HD-and-above streamed software encoding to two threads and nothing below it", () => {
     const threads = (args: string[]) => args[args.lastIndexOf("-threads:v") + 1];
-    const full = buildRenderCommand(authored, "/four-k.mp4", { engine: "partition-pipes-v1" });
-    expect(full.encoder).toBe("x264-crf-threads2");
-    expect(threads(full.args)).toBe("2");
-    expect(full.steps!.every((step) => threads(step.args) === "1")).toBe(true);
-    const hd = buildRenderCommand(authored, "/hd.mp4", {
-      engine: "partition-pipes-v1",
-      resolution: "1080p",
-    });
-    expect(threads(hd.args)).toBe("1");
-    expect(hd.encoder).toBe("x264-crf");
+    const hdPixels = 1920 * 1080;
+    let twoThreadPlans = 0;
+    for (const canvas of [
+      { width: 3840, height: 2160, fps: 30 },
+      { width: 1920, height: 1080, fps: 30 },
+      { width: 1080, height: 1920, fps: 30 },
+      { width: 1280, height: 720, fps: 30 },
+    ]) {
+      const authored = tl(
+        [{ media_ref: "/video.mp4", source_in: 0, source_out: 2, timeline_in: 0, timeline_out: 2 }],
+        canvas,
+      );
+      for (const resolution of [undefined, "source", "2160p", "1440p", "1080p", "720p", "480p"] as const) {
+        const label = `${canvas.width}x${canvas.height} ${resolution}`;
+        const plan = buildRenderCommand(authored, "/out.mp4", { engine: "partition-pipes-v1", resolution });
+        const expected = plan.output.width * plan.output.height >= hdPixels ? 2 : 1;
+        twoThreadPlans += expected === 2 ? 1 : 0;
+        expect(threads(plan.args), label).toBe(String(expected));
+        expect(plan.encoder, label).toBe(expected === 2 ? "x264-crf-threads2" : "x264-crf");
+        expect(plan.steps!.every((step) => threads(step.args) === "1"), label).toBe(true);
+        const fast = buildRenderCommand(authored, "/fast.mp4", {
+          engine: "partition-pipes-v1",
+          resolution,
+          mode: "fast",
+        });
+        expect(threads(fast.args), label).toBe("1");
+        expect(fast.encoder, label).toBe("amf-cqp18");
+      }
+    }
+    // The walk must reach both sides of the rule or it proves nothing about the boundary.
+    expect(twoThreadPlans).toBeGreaterThan(0);
+    expect(twoThreadPlans).toBeLessThan(28);
     expect(
-      threads(
-        buildRenderCommand(authored, "/fast.mp4", { engine: "partition-pipes-v1", mode: "fast" })
-          .args,
-      ),
-    ).toBe("1");
-    expect(buildRenderCommand(authored, "/standard.mp4").args).not.toContain("-threads:v");
+      buildRenderCommand(
+        tl([{ media_ref: "/video.mp4", source_in: 0, source_out: 2, timeline_in: 0, timeline_out: 2 }]),
+        "/standard.mp4",
+      ).args,
+    ).not.toContain("-threads:v");
   });
 
   it("compiles one persistent audio producer rather than an audio mix per video partition", () => {

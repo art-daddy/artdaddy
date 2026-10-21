@@ -220,9 +220,14 @@ async function exercise(): Promise<void> {
     const destination = joinPath(root, `${name}.mp4`);
     const stage = joinPath(root, `.${name}.partial`);
     const started = performance.now();
+    // Cumulative marks (ms since this pass began) that say where a pass spends its wall time outside the encoder.
+    const phaseMs: Record<string, number> = {};
+    const mark = (name: string) => { phaseMs[name] ??= performance.now() - started; };
     const plan = buildRenderCommand(timeline, stage, { engine: "auto", quality: "medium", mode: fastEncoderProbe ? "fast" : "quality" });
-    const calibrationEncoder = fastEncoderProbe ? "amf-cqp18" : plan.output.width * plan.output.height > 1920 * 1080 &&
-      plan.selection.backend === "partition-pipes-v1" ? "x264-crf-threads2" : "x264-crf";
+    mark("compiled");
+    // The history identity the product compiled into this plan. The harness never carries its own copy of the encoder policy.
+    check(plan.encoder !== undefined, "The compiled plan carries no encoder history identity");
+    const calibrationEncoder = plan.encoder;
     const comparable = () => useExportJob.getState().calibrations.filter((sample) => sample.workload.width === definition.width &&
       sample.workload.height === definition.height && sample.workload.durationSeconds === definition.durationSeconds &&
       sample.workload.peakMediaLayers === definition.videoLayers && sample.encoder === calibrationEncoder);
@@ -231,6 +236,7 @@ async function exercise(): Promise<void> {
     const estimateSeconds = estimateExportFromHistory(plan.workload, plan.output, "medium", plan.selection.backend,
       useExportJob.getState().calibrations, calibrationEncoder).seconds;
     const resources = await resolveExportResources(destination);
+    mark("resourcesReady");
     const confirmationOffset = preflightRequests.length;
     let promiseId = "";
     let scratchPath: string | undefined;
@@ -241,6 +247,7 @@ async function exercise(): Promise<void> {
       if (view.id === promiseId) {
         const facts = view.meta.telemetry as { readiness?: unknown } | undefined;
         if (facts?.readiness === "ready" || facts?.readiness === "not_ready") readiness = facts.readiness;
+        if (view.state === "running") mark("running");
       }
       if (view.id !== promiseId || view.state !== "running" || scratchRead) return;
       scratchRead = invoke<Array<{ id: string; render_scratch?: { path: string } }>>("jobs_export_intents")
@@ -249,10 +256,13 @@ async function exercise(): Promise<void> {
     });
     const queued = await queueRenderJob(context, { plan, admission: captured, destPath: destination, stagePath: stage,
       filename: `${name}.mp4`, quality: "medium" });
+    mark("queued");
     promiseId = queued.job_id;
     const outcome = await whenExportEnds(queued.job_id);
+    mark("ended");
     await whenExportsSettle();
     const exportElapsedMs = performance.now() - started;
+    mark("settled");
     detach();
     await scratchRead;
     await whenExportTelemetrySettles();
@@ -272,7 +282,7 @@ async function exercise(): Promise<void> {
       encoder: plan.args[plan.args.lastIndexOf("-c:v") + 1],
       encoderThreads: plan.args.includes("-threads:v") ? plan.args[plan.args.lastIndexOf("-threads:v") + 1] : null, calibrationEncoder,
       readiness,
-      state: outcome?.state ?? "missing", error: outcome?.error ?? null, elapsedMs: exportElapsedMs,
+      state: outcome?.state ?? "missing", error: outcome?.error ?? null, elapsedMs: exportElapsedMs, phaseMs,
       projectFrames: frames, partitions: plan.steps?.length ?? 0, columns, rows, imageHeight,
       selection: plan.selection,
       fastEncoderProbe: fastEncoderProbe || null,

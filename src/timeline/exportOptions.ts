@@ -15,6 +15,8 @@ import type { Branding } from "./branding";
 import type { RenderWorkload } from "./renderPlan";
 import type { ExportResources } from "../platform/host";
 
+// Streamed (partition-pipes) output is paced by its one final software encoder, so its thread count is the export
+// speed. HD and above get two threads; smaller output stays at one. Fast (hardware) and the other engines are unchanged.
 export function finalEncoderPolicy(
   output: { width: number; height: number },
   engine: ExportEngine,
@@ -23,7 +25,7 @@ export function finalEncoderPolicy(
   const twoThreads =
     engine === "partition-pipes-v1" &&
     mode === "quality" &&
-    output.width * output.height > 1920 * 1080;
+    output.width * output.height >= 1920 * 1080;
   return {
     encoder: mode === "fast" ? "amf-cqp18" : twoThreads ? "x264-crf-threads2" : "x264-crf",
     threads: engine === "partition-pipes-v1" ? (twoThreads ? 2 : 1) : null,

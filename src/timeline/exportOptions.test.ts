@@ -8,12 +8,40 @@ import {
   assessExport,
   crfFor,
   estimateExportFromHistory,
+  finalEncoderPolicy,
   outputFps,
   outputSize,
   type ExportCalibration,
   type ExportEstimates,
 } from "./exportOptions";
 import type { RenderWorkload } from "./renderPlan";
+
+describe("final encoder policy", () => {
+  it("gives streamed software output of HD and above two threads and smaller output one", () => {
+    const hd = { width: 1920, height: 1080 };
+    expect(finalEncoderPolicy(hd, "partition-pipes-v1")).toEqual({
+      encoder: "x264-crf-threads2",
+      threads: 2,
+    });
+    expect(finalEncoderPolicy({ width: 1080, height: 1920 }, "partition-pipes-v1").threads).toBe(2);
+    expect(finalEncoderPolicy({ width: 3840, height: 2160 }, "partition-pipes-v1").threads).toBe(2);
+    expect(finalEncoderPolicy({ width: 1918, height: 1080 }, "partition-pipes-v1")).toEqual({
+      encoder: "x264-crf",
+      threads: 1,
+    });
+    expect(finalEncoderPolicy({ width: 1280, height: 720 }, "partition-pipes-v1").threads).toBe(1);
+  });
+
+  it("leaves Fast on its hardware encoder and the other engines without a thread bound", () => {
+    const hd = { width: 1920, height: 1080 };
+    expect(finalEncoderPolicy(hd, "partition-pipes-v1", "fast")).toEqual({
+      encoder: "amf-cqp18",
+      threads: 1,
+    });
+    for (const engine of ["file-sequence-v1", "auto"] as const)
+      expect(finalEncoderPolicy(hd, engine).threads).toBeNull();
+  });
+});
 
 describe("export preflight assessment", () => {
   const workload: RenderWorkload = {

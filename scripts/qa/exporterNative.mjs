@@ -517,8 +517,11 @@ try {
       assert.ok(native.preflight[0].message.includes("Estimated time:") || native.preflight[0].message.includes("Estimated encoding and saving time:"),
         "Preflight must show a measured estimate or explicitly unknown time");
     }
+    // The command's thread count and the history identity are two views of one product decision: assert that they agree instead of
+    // carrying a second copy of the thread policy here (the product's own tests walk the policy for every preset).
     if (native.selection.backend === "partition-pipes-v1")
-      assert.equal(native.encoderThreads, !fastEncoderProbe && promiseCase.width * promiseCase.height > 1920 * 1080 ? "2" : "1");
+      assert.equal(native.encoderThreads, native.calibrationEncoder === "x264-crf-threads2" ? "2" : "1",
+        `Final encoder threads ${native.encoderThreads} disagree with the recorded history identity ${native.calibrationEncoder}`);
     assert.ok(native.calibrationRecords > 0, "Validated published exports must populate encoder-specific local measured history");
     if (fastEncoderProbe) {
       assert.equal(native.resources?.local_fast_candidate, true, "Local Fast pilot requires the measured native device eligibility");
