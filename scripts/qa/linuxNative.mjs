@@ -20,7 +20,7 @@ const manifest = JSON.parse(
 );
 const version = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8")).version;
 const lifecycleObservations = [];
-async function observeLifecycle(phase) {
+function lifecycleProcesses() {
   const processes = [];
   for (const entry of readdirSync("/proc").filter((name) => /^\d+$/.test(name))) {
     try {
@@ -48,6 +48,10 @@ async function observeLifecycle(phase) {
       if (!["ENOENT", "EACCES", "EPERM", "ESRCH"].includes(error.code)) throw error;
     }
   }
+  return processes;
+}
+async function observeLifecycle(phase) {
+  const processes = lifecycleProcesses();
   let status;
   try {
     const response = await fetch("http://127.0.0.1:4444/status", {
@@ -62,15 +66,47 @@ async function observeLifecycle(phase) {
     path.join(output, "session-lifecycle.json"),
     JSON.stringify(lifecycleObservations, null, 2),
   );
+  return lifecycleObservations.at(-1);
 }
 async function recreateSession(session, phase) {
-  await observeLifecycle(`${phase}:before-close`);
+  const before = await observeLifecycle(`${phase}:before-close`);
+  const oldApp = before.processes.filter((process) => process.exe === realpathSync(payload));
+  assert.equal(oldApp.length, 1, "Exactly one isolated app must be running before graceful close");
   await session.exec(
     "window.__TAURI_INTERNALS__.invoke('plugin:window|close').catch(()=>{});return true;",
   );
   await observeLifecycle(`${phase}:close-requested`);
+  await waitFor(
+    () => !lifecycleProcesses().some((process) => process.exe === realpathSync(payload)),
+    {
+      timeout: 20_000,
+      label: `${phase}: actual app exits after its normal close request`,
+    },
+  );
+  await observeLifecycle(`${phase}:app-exited-gracefully`);
   await session.quit();
-  await observeLifecycle(`${phase}:webdriver-session-deleted`);
+  const retired = (await observeLifecycle(`${phase}:webdriver-session-deleted`)).processes.filter(
+    (process) => process.pid === driver.pid || process.parent === driver.pid,
+  );
+  driver.kill();
+  await waitFor(() => Boolean(driverExit), {
+    timeout: 20_000,
+    label: `${phase}: owned automation proxy exits`,
+  });
+  await waitFor(
+    () =>
+      !lifecycleProcesses().some((process) =>
+        retired.some((old) => old.pid === process.pid && old.start === process.start),
+      ),
+    {
+      timeout: 20_000,
+      label: `${phase}: owned automation processes are gone`,
+    },
+  );
+  await observeLifecycle(`${phase}:automation-retired`);
+  startAutomationDriver();
+  await waitForAutomationReady();
+  await observeLifecycle(`${phase}:fresh-automation-ready`);
   try {
     Object.assign(session, await newSession(process.env.ARTDADDY_APP_BINARY));
   } catch (error) {
@@ -579,38 +615,48 @@ globalThis.fetch = (input, init = {}) =>
 let driverError;
 let driverExit;
 let finishDriver;
-const driverFinished = new Promise((resolve) => {
-  finishDriver = resolve;
-});
+let driverFinished;
 const nativeDriver = executablePath(process.env.NATIVE_DRIVER ?? "WebKitWebDriver");
-const driver = spawn("tauri-driver", ["--native-driver", nativeDriver], {
-  stdio: ["ignore", "pipe", "pipe"],
-});
+let driver;
 let diagnostics = "";
-for (const stream of [driver.stdout, driver.stderr])
-  stream.on("data", (chunk) => {
-    diagnostics = (diagnostics + chunk).slice(-20000);
+function startAutomationDriver() {
+  driverError = undefined;
+  driverExit = undefined;
+  driverFinished = new Promise((resolve) => {
+    finishDriver = resolve;
   });
-driver.once("error", (error) => {
-  driverError = error;
-  finishDriver();
-});
-driver.once("exit", (code, signal) => {
-  driverExit = { code, signal };
-  finishDriver();
-});
-let session;
-let closeRequested = false;
-try {
+  driver = spawn("tauri-driver", ["--native-driver", nativeDriver], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  for (const stream of [driver.stdout, driver.stderr])
+    stream.on("data", (chunk) => {
+      diagnostics = (diagnostics + chunk).slice(-20000);
+    });
+  driver.once("error", (error) => {
+    driverError = error;
+    finishDriver();
+  });
+  driver.once("exit", (code, signal) => {
+    driverExit = { code, signal };
+    finishDriver();
+  });
+}
+async function waitForAutomationReady() {
   await waitFor(
     async () => {
       if (driverError || driverExit)
         throw driverError ?? new Error(`Driver exited ${JSON.stringify(driverExit)}`);
       const response = await fetch("http://127.0.0.1:4444/status");
-      return response.ok;
+      return response.ok && (await response.json()).value?.ready === true;
     },
-    { timeout: 20_000, label: "isolated native WebDriver" },
+    { timeout: 20_000, label: "ready isolated native WebDriver" },
   );
+}
+startAutomationDriver();
+let session;
+let closeRequested = false;
+try {
+  await waitForAutomationReady();
   session = await newSession(application);
   await waitFor(
     () =>
