@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
@@ -12,6 +13,7 @@ import {
   captionsFadedIn, describePictureFailures, estimateFacts, estimateFailures, judgeSourcePictures, outcomeBudgetMs, temporarySpaceFailures,
 } from "./exporterQualification.mjs";
 import { qaServerOptions } from "./exporterVite.mjs";
+import { startRecovery } from "./exporterRecovery.mjs";
 import { REAL_ALLOWANCE_BYTES, REAL_CAPTION_SAMPLES, REAL_COLD_MESSAGE, REAL_PHONE_PICTURES, REAL_WEB_PICTURES } from "./exporterQualification.fixtures.mjs";
 
 const library = JSON.parse(await readFile(new URL("./exporterPromiseCases.json", import.meta.url), "utf8"));
@@ -415,4 +417,70 @@ test("the native harness serves its page with those options and carries no priva
   const source = await readFile(new URL("./exporterNative.mjs", import.meta.url), "utf8");
   assert.match(source, /server: qaServerOptions,/);
   assert.doesNotMatch(source, /server: \{ host: "127\.0\.0\.1"/);
+});
+
+// The recovery instance that exited 0 a moment after starting, in two of sixteen back-to-back pilots on 2026-10-23, was the single-instance
+// guard handing over to a killed instance that was still being torn down. These fakes exit (or not) the way the real child did.
+const recoveryDelays = { windowMs: 60, delayMs: 1 };
+function fakeApp(exitsAfterMs, code = 0) {
+  const child = new EventEmitter();
+  child.exitCode = null;
+  child.signalCode = null;
+  if (exitsAfterMs !== null) setTimeout(() => { child.exitCode = code; child.emit("exit", code, null); }, exitsAfterMs);
+  return child;
+}
+const handover = (attempt) => ["recovery-instance-handed-over-to-the-dying-one", attempt, 0];
+
+test("a recovery instance that hands over to the dying one is started again, and each handover is recorded", async () => {
+  const plan = [fakeApp(2), fakeApp(2), fakeApp(null)];
+  const labels = [], steps = [];
+  const child = await startRecovery((label) => { labels.push(label); return plan[labels.length - 1]; }, steps, recoveryDelays);
+  assert.equal(child, plan[2]);
+  assert.deepEqual(labels, ["2", "2-retry1", "2-retry2"]);
+  assert.deepEqual(steps.map((step) => [step.phase, step.attempt, step.exitCode]), [handover(1), handover(2)]);
+});
+
+test("only a quick exit 0 is retried: another exit code, or an instance that stays up, is returned at once", async () => {
+  for (const [instance, what] of [[fakeApp(2, 1), "exit 1"], [fakeApp(2, 101), "exit 101"], [fakeApp(null), "still running"]]) {
+    const labels = [], steps = [];
+    const child = await startRecovery((label) => { labels.push(label); return instance; }, steps, recoveryDelays);
+    assert.equal(child, instance, what);
+    assert.deepEqual(labels, ["2"], what);
+    assert.deepEqual(steps, [], what);
+  }
+});
+
+test("a recovery instance that really exits 0 cannot pass: the last quick exit 0 is returned as it is", async () => {
+  const plan = [fakeApp(2), fakeApp(2), fakeApp(2)];
+  const labels = [], steps = [];
+  const child = await startRecovery((label) => { labels.push(label); return plan[labels.length - 1]; }, steps, recoveryDelays);
+  assert.equal(child, plan[2]);
+  assert.equal(child.exitCode, 0);
+  assert.equal(labels.length, 3);
+  assert.equal(steps.length, 2);
+});
+
+test("an instance that is already gone when it is checked counts as a quick exit", async () => {
+  const gone = Object.assign(new EventEmitter(), { exitCode: 0, signalCode: null });
+  const plan = [gone, fakeApp(null)];
+  const labels = [], steps = [];
+  const child = await startRecovery((label) => { labels.push(label); return plan[labels.length - 1]; }, steps, recoveryDelays);
+  assert.equal(child, plan[1]);
+  assert.deepEqual(steps.map((step) => [step.phase, step.attempt, step.exitCode]), [handover(1)]);
+});
+
+test("however many instances hand over, no more than three are started and each handover is recorded", async () => {
+  await fc.assert(fc.asyncProperty(fc.integer({ min: 0, max: 6 }), async (handovers) => {
+    const labels = [], steps = [];
+    await startRecovery((label) => { labels.push(label); return fakeApp(labels.length <= handovers ? 1 : null); }, steps, { windowMs: 40, delayMs: 0 });
+    const started = Math.min(handovers, 2) + 1;
+    assert.equal(labels.length, started);
+    assert.equal(steps.length, started - 1);
+  }), { numRuns: 14 });
+});
+
+test("the native harness starts its recovery instance through that retry, never directly", async () => {
+  const source = await readFile(new URL("./exporterNative.mjs", import.meta.url), "utf8");
+  assert.match(source, /const second = await startRecovery\(\(label\) => start\(config, label\), proof\.steps\);/);
+  assert.doesNotMatch(source, /const second = start\(config/);
 });

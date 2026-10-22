@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { createServer, normalizePath } from "vite";
 import { readLinuxMemoryCgroup, cgroupFits, sameCgroup, cgroupEncoderPids } from "./exporterLinuxMemory.mjs";
 import { qaServerOptions } from "./exporterVite.mjs";
+import { startRecovery } from "./exporterRecovery.mjs";
 import { BASE_OUTCOME_BUDGET_MS, captionsFadedIn, describePictureFailures, estimateFailures, judgeSourcePictures, outcomeBudgetMs, temporarySpaceFailures } from "./exporterQualification.mjs";
 
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -370,6 +371,7 @@ function start(config, run) {
   return child;
 }
 
+
 const started = Date.now();
 const linuxMemoryRunId = process.platform === "linux" ? process.env.ARTDADDY_QA_MEMORY_RUN_ID : undefined;
 const proof = { version: 1, scope: "native-owner-capture-and-crash-recovery", target, root, identifier,
@@ -446,7 +448,7 @@ try {
   proof.steps.push({ phase: "native-job-armed", ...admitted });
   stopOwned(first);
   proof.steps.push({ phase: "owned-native-process-crashed" });
-  const second = start(config, 2);
+  const second = await startRecovery((label) => start(config, label), proof.steps);
   const report = await changedFile(path.join(root, "native-report.json"), (report) => report.ok === true, second, outcomeBudgetMs(promiseCase));
   if (proof.memoryCgroupEvidence) {
     const evidence = proof.memoryCgroupEvidence;
