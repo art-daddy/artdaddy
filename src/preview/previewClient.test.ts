@@ -23,9 +23,13 @@ const storeOfSize = (size: number | null = 1024) =>
 class FakeWorker {
   posted: Posted[] = [];
   onmessage: ((e: MessageEvent) => void) | null = null;
+  onerror: ((event: ErrorEvent) => void) | null = null;
   terminated = false;
+  constructor(readonly available: boolean | null = true) {}
   postMessage(msg: unknown, transfer?: Transferable[]): void {
     this.posted.push({ msg: msg as Msg, transfer });
+    if ((msg as Msg).type === "probe" && this.available !== null)
+      this.emit({ type: "capabilities", webgl2: this.available });
   }
   terminate(): void {
     this.terminated = true;
@@ -58,8 +62,12 @@ const flush = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 // "nothing was reported" assertion pass or fail on test ORDER.
 beforeEach(() => useProjectNotice.getState().clear());
 
-function setup(resolveImpl?: (s: ProjectStoreAccess, src: string) => Promise<string | null>) {
-  const worker = new FakeWorker();
+function setup(
+  resolveImpl?: (s: ProjectStoreAccess, src: string) => Promise<string | null>,
+  available: boolean | null = true,
+  fallback?: () => FakeWorker | Promise<FakeWorker>,
+) {
+  const worker = new FakeWorker(available);
   const offscreen = {} as OffscreenCanvas;
   const transferControlToOffscreen = vi.fn(() => offscreen);
   const canvas = { transferControlToOffscreen } as unknown as HTMLCanvasElement;
@@ -70,14 +78,164 @@ function setup(resolveImpl?: (s: ProjectStoreAccess, src: string) => Promise<str
   );
   const client = createPreviewClient(canvas, {
     createWorker: () => worker as unknown as Worker,
+    ...(fallback ? { createFallback: fallback } : {}),
     resolve,
     onError,
     onStalled,
   });
-  return { worker, offscreen, transferControlToOffscreen, onError, onStalled, resolve, client };
+  return {
+    worker,
+    canvas,
+    offscreen,
+    transferControlToOffscreen,
+    onError,
+    onStalled,
+    resolve,
+    client,
+  };
 }
 
 describe("createPreviewClient", () => {
+  it("can start the local preview when worker construction itself fails", async () => {
+    const fallback = new FakeWorker();
+    const transfer = vi.fn();
+    const canvas = { transferControlToOffscreen: transfer } as unknown as HTMLCanvasElement;
+    const client = createPreviewClient(canvas, {
+      createWorker: () => {
+        throw new Error("workers unavailable");
+      },
+      createFallback: () => fallback,
+    });
+    await flush();
+    expect(fallback.ofType("init")[0].canvas).toBe(canvas);
+    expect(transfer).not.toHaveBeenCalled();
+    client.dispose();
+    expect(fallback.terminated).toBe(true);
+  });
+
+  it("falls back on startup failure but ignores errors from the retired worker", async () => {
+    const fallback = new FakeWorker();
+    const { worker, client, onError } = setup(undefined, null, () => fallback);
+    worker.onerror?.({ message: "startup refused" } as ErrorEvent);
+    await flush();
+    worker.onerror?.({ message: "late worker error" } as ErrorEvent);
+    expect(fallback.ofType("init")).toHaveLength(1);
+    expect(onError).not.toHaveBeenCalled();
+    expect(fallback.terminated).toBe(false);
+    client.dispose();
+  });
+
+  it("fails a transferred worker cleanly without reusing its consumed canvas", async () => {
+    const fallback = vi.fn(() => new FakeWorker());
+    const { worker, client, onError, transferControlToOffscreen } = setup(
+      undefined,
+      true,
+      fallback,
+    );
+    const capture = client.capture();
+    worker.onerror?.({ message: "worker exited" } as ErrorEvent);
+    expect(await capture).toBeNull();
+    expect(onError).toHaveBeenCalledWith("worker exited");
+    expect(fallback).not.toHaveBeenCalled();
+    expect(transferControlToOffscreen).toHaveBeenCalledOnce();
+    expect(worker.terminated).toBe(true);
+    client.dispose();
+  });
+
+  it("uses the original canvas and preserves rendering and captures when worker graphics are unavailable", async () => {
+    const fallback = new FakeWorker();
+    const { worker, canvas, client, onError, transferControlToOffscreen } = setup(
+      undefined,
+      false,
+      () => fallback,
+    );
+    client.setStore(storeOfSize());
+    client.render(tl([{ media_ref: "a.mp4" }]), 0.4);
+    await flush();
+    expect(worker.terminated).toBe(true);
+    expect(transferControlToOffscreen).not.toHaveBeenCalled();
+    expect(fallback.ofType("init")[0].canvas).toBe(canvas);
+    expect(fallback.ofType("render")[0].time).toBe(0.4);
+    const capture = client.capture();
+    const request = fallback.ofType("capture")[0];
+    fallback.emit({
+      type: "captured",
+      requestId: request.requestId,
+      bytes: new Uint8Array([42]).buffer,
+    });
+    expect(await capture).toEqual(new Uint8Array([42]));
+    expect(onError).not.toHaveBeenCalled();
+    client.dispose();
+    expect(fallback.terminated).toBe(true);
+  });
+
+  it("retires a fallback that arrives after disposal and settles its queued capture", async () => {
+    let release!: (worker: FakeWorker) => void;
+    const pending = new Promise<FakeWorker>((resolve) => {
+      release = resolve;
+    });
+    const { client, transferControlToOffscreen } = setup(undefined, false, () => pending);
+    const capture = client.capture();
+    client.dispose();
+    expect(await capture).toBeNull();
+    const late = new FakeWorker();
+    release(late);
+    await flush();
+    expect(late.terminated).toBe(true);
+    expect(late.posted).toHaveLength(0);
+    expect(transferControlToOffscreen).not.toHaveBeenCalled();
+  });
+
+  it("settles captures and refuses further work when neither preview path can start", async () => {
+    const { client, onError, worker } = setup(undefined, false, async () => {
+      throw new Error("main graphics unavailable");
+    });
+    const capture = client.capture();
+    await flush();
+    expect(await capture).toBeNull();
+    expect(await client.capture()).toBeNull();
+    expect(onError).toHaveBeenCalledOnce();
+    expect(onError).toHaveBeenCalledWith(expect.stringContaining("main graphics unavailable"));
+    client.render(tl([{ media_ref: "a.mp4" }]), 1);
+    await flush();
+    expect(worker.ofType("render")).toHaveLength(0);
+    client.dispose();
+  });
+
+  it("does not transfer a disposed canvas when a late capability reply arrives", () => {
+    const { worker, client, transferControlToOffscreen } = setup(undefined, null);
+    client.dispose();
+    worker.emit({ type: "capabilities", webgl2: true });
+    expect(transferControlToOffscreen).not.toHaveBeenCalled();
+  });
+
+  it("falls back once when a worker never reports capabilities", async () => {
+    vi.useFakeTimers();
+    const fallback = new FakeWorker();
+    const create = vi.fn(() => fallback);
+    const { worker, client, transferControlToOffscreen } = setup(undefined, null, create);
+    try {
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(create).toHaveBeenCalledOnce();
+      expect(worker.terminated).toBe(true);
+      expect(fallback.ofType("init")).toHaveLength(1);
+      expect(transferControlToOffscreen).not.toHaveBeenCalled();
+      worker.emit({ type: "capabilities", webgl2: true });
+      expect(transferControlToOffscreen).not.toHaveBeenCalled();
+    } finally {
+      client.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the canvas available until the worker confirms a usable graphics context", () => {
+    const { worker, client, transferControlToOffscreen } = setup(undefined, null);
+    expect(transferControlToOffscreen).not.toHaveBeenCalled();
+    worker.emit({ type: "capabilities", webgl2: true });
+    expect(transferControlToOffscreen).toHaveBeenCalledOnce();
+    client.dispose();
+  });
+
   it("transfers the canvas and posts an init message with the offscreen canvas", () => {
     const { worker, offscreen, transferControlToOffscreen } = setup();
     expect(transferControlToOffscreen).toHaveBeenCalledOnce();

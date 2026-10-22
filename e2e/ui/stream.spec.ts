@@ -41,9 +41,39 @@ test("backward seek replaces the live worker picture with the original early fra
     contentType: "application/json",
   });
   expect(result.errors).toEqual([]);
+  expect(["worker", "main-thread"]).toContain(result.backend);
   expect(result.shots).toHaveLength(5);
   for (const shot of result.shots) {
     expect(shot.matched, `seek ${shot.time}: actual pixel ${shot.pixel}`).toBe(true);
+  }
+});
+
+test("unavailable worker graphics use the same live preview frames on the main thread", async ({
+  browser,
+}) => {
+  const fallback = await browser.newPage();
+  try {
+    await fallback.goto("/preview-probe-stream.html?forceWorkerUnavailable=1");
+    await fallback.waitForFunction(() => "__workerSeek" in window);
+    const actual = await fallback.evaluate(
+      () => (window as unknown as { __workerSeek: WorkerSeekResult }).__workerSeek,
+    );
+    const normal = await page.evaluate(
+      () => (window as unknown as { __workerSeek: WorkerSeekResult }).__workerSeek,
+    );
+    await test.info().attach("fallback-seek-pixels", {
+      body: JSON.stringify(actual, null, 2),
+      contentType: "application/json",
+    });
+    expect(actual.backend).toBe("main-thread");
+    expect(actual.errors).toEqual([]);
+    expect(actual.shots).toHaveLength(5);
+    expect(actual.shots.every((shot) => shot.matched)).toBe(true);
+    expect(actual.shots.map(({ time, pixel }) => ({ time, pixel }))).toEqual(
+      normal.shots.map(({ time, pixel }) => ({ time, pixel })),
+    );
+  } finally {
+    await fallback.close();
   }
 });
 

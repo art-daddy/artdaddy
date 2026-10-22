@@ -16,7 +16,10 @@ export interface StillAnimation {
 
 export interface PreviewInit {
   type: "init";
-  canvas: OffscreenCanvas;
+  canvas: OffscreenCanvas | HTMLCanvasElement;
+}
+export interface PreviewProbe {
+  type: "probe";
 }
 export interface PreviewRenderMsg {
   type: "render";
@@ -54,11 +57,20 @@ export interface PreviewTextBitmapMsg {
   bitmap?: ImageBitmap;
 }
 export type PreviewInbound =
-  PreviewInit | PreviewRenderMsg | PreviewSeekMsg | PreviewCaptureMsg | PreviewTextBitmapMsg;
+  | PreviewProbe
+  | PreviewInit
+  | PreviewRenderMsg
+  | PreviewSeekMsg
+  | PreviewCaptureMsg
+  | PreviewTextBitmapMsg;
 
 export interface PreviewRendered {
   type: "rendered";
   time: number;
+}
+export interface PreviewCapabilities {
+  type: "capabilities";
+  webgl2: boolean;
 }
 /** Caption text must be rasterized on the MAIN thread: a FontFace added to a
  *  worker's FontFaceSet loads fine but is NOT applied to OffscreenCanvas text
@@ -105,6 +117,7 @@ export interface PreviewFirstFrame {
   source: string;
 }
 export type PreviewOutbound =
+  | PreviewCapabilities
   | PreviewRendered
   | PreviewErrored
   | PreviewCaptured
@@ -112,6 +125,12 @@ export type PreviewOutbound =
   | PreviewDims
   | PreviewStalled
   | PreviewFirstFrame;
+
+export interface PreviewEndpoint {
+  postMessage(message: PreviewInbound, transfer?: Transferable[]): void;
+  onmessage: ((event: MessageEvent<PreviewOutbound>) => void) | null;
+  terminate(): void;
+}
 
 /** Distinct image/video sources referenced by the timeline, in first-seen
  *  order (audio/text and non-media sources are skipped). */
