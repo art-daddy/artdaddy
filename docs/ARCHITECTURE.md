@@ -494,6 +494,9 @@ The original request is cancelled while that owner saves/closes the document; cl
 the final window then exits normally. Failed-close Retry/Discard/Cancel remains owned
 by the same frontend coordinator, so native Quit cannot leave a live project claim by
 skipping it. The bridge is macOS-only; programmatic Tauri exit/restart paths are unchanged.
+If the delegate cannot be installed, the error is logged and launch continues with
+the platform's standard Quit behavior; coordinated native Quit is unavailable in
+that fallback. Duplicate coordinator initialization remains an error.
 
 Slow disk-recovery timers run only while a document is open. Beginning close cancels
 them, and a failed close must wait for an explicit Retry rather than saving behind the
