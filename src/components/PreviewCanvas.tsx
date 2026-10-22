@@ -1,8 +1,6 @@
-// Live preview: hands its canvas to a Web Worker that composites the timeline
-// off the main thread (OffscreenCanvas + WebGL2 + WebCodecs). The canvas is
-// transferred to the worker on mount, so this component only forwards the
-// timeline/playhead and the project store; all decoding/compositing happens
-// off-thread. Degrades to an error label where the worker/WebGL2 is unavailable.
+// Live preview delegates the timeline, playhead and store to one preview client.
+// Its shared compositor/decoder runtime runs off-thread when worker WebGL2 is
+// available, or locally without transferring the canvas when it is not.
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { createPreviewClient, type PreviewClient } from "../preview/previewClient";

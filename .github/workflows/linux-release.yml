@@ -19,12 +19,120 @@ on:
         description: "Sign the AppImage for auto-update (requires the existing updater key secret)"
         type: boolean
         default: false
+      checks_only:
+        description: "Verify an existing Linux artifact and missing runtime lanes; never publish"
+        type: boolean
+        default: false
+      artifact_run_id:
+        description: "Completed Linux build run containing the exact artifact to test"
+        type: string
+        default: ""
+      artifact_head_sha:
+        description: "Immutable source commit required for that Linux artifact"
+        type: string
+        default: ""
 
 permissions:
   contents: write
 
 jobs:
+  linux-checks:
+    if: ${{ inputs.checks_only }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      actions: read
+    env:
+      VITE_API_BASE_URL: http://127.0.0.1:9
+      VITE_SENTRY_DSN: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Require a completed exact-source artifact and refuse publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_RUN: ${{ inputs.artifact_run_id }}
+          EXPECTED_SHA: ${{ inputs.artifact_head_sha }}
+          PUBLISH: ${{ inputs.publish }}
+          SIGN: ${{ inputs.enable_auto_update }}
+        run: |
+          test "$PUBLISH" = false && test "$SIGN" = false
+          [[ "$ARTIFACT_RUN" =~ ^[0-9]+$ && "$EXPECTED_SHA" =~ ^[a-f0-9]{40}$ ]]
+          mkdir -p reports/linux-qa
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ARTIFACT_RUN" > reports/linux-qa/artifact-source.json
+          node -e 'const r=require("./reports/linux-qa/artifact-source.json"); if(r.head_sha!==process.env.EXPECTED_SHA||r.status!=="completed"||r.conclusion!=="success") process.exit(1)'
+      - uses: actions/download-artifact@v4
+        with:
+          name: artdaddy-linux-x86_64
+          path: candidate-artifact
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.artifact_run_id }}
+      - name: Install native test runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libayatana-appindicator3-dev libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev xvfb webkit2gtk-driver desktop-file-utils xdg-utils gstreamer1.0-libav gstreamer1.0-plugins-bad gstreamer1.0-plugins-good
+          command -v update-desktop-database
+          command -v xdg-mime
+          command -v WebKitWebDriver
+      - run: npm ci
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install the existing native WebDriver bridge
+        run: cargo install tauri-driver --locked
+      - name: Stage only real media sidecars for audio fixtures
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/fetch-sidecars.mjs --only ffmpeg,ffprobe
+      - name: Node transport and ownership/decoder outcomes
+        id: focused
+        continue-on-error: true
+        run: |
+          node --test scripts/qa/cdpTransport.test.mjs
+          npx vitest run src/tools/projectLock.test.ts src/project/documentRegistry.temps.test.ts src/preview/videoSource.test.ts --reporter=json --outputFile=reports/linux-qa/focused.json
+      - name: Real Linux audio measurements
+        id: audio
+        continue-on-error: true
+        run: node --experimental-websocket scripts/audiolane/run.mjs
+      - name: Inspect and drive the actual AppImage payload
+        id: native
+        continue-on-error: true
+        run: |
+          mapfile -t bundles < <(find candidate-artifact -type f -name '*.AppImage')
+          test "${#bundles[@]}" -eq 1
+          root="$(mktemp -d /tmp/artdaddy-linux-qa-XXXXXX)"
+          bundle="$(realpath "${bundles[0]}")"
+          chmod +x "$bundle"
+          (cd "$root" && "$bundle" --appimage-extract > /dev/null)
+          name="$(node -p "require('./src-tauri/tauri.conf.json').mainBinaryName||require('./src-tauri/tauri.conf.json').productName")"
+          mapfile -t executables < <(find "$root/squashfs-root" -type f -name "$name" -executable)
+          test "${#executables[@]}" -eq 1
+          test -x "$root/squashfs-root/AppRun"
+          export ARTDADDY_APP_BINARY="$root/squashfs-root/AppRun"
+          export ARTDADDY_LINUX_PAYLOAD_BINARY="${executables[0]}"
+          export ARTDADDY_LINUX_QA_ROOT="$root"
+          export XDG_DATA_HOME="$root/data" XDG_CACHE_HOME="$root/cache" XDG_CONFIG_HOME="$root/config"
+          export TAURI_AUTOMATION=1
+          xvfb-run -a node scripts/qa/linuxNative.mjs
+      - name: Preserve Linux verification artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-runtime-${{ github.sha }}
+          path: |
+            reports/linux-qa/**
+            reports/audiolane/**
+          if-no-files-found: error
+      - name: All requested runtime lanes must pass
+        if: always()
+        env:
+          OUTCOMES: ${{ steps.focused.outcome }},${{ steps.audio.outcome }},${{ steps.native.outcome }}
+        run: node -e "const outcomes=process.env.OUTCOMES.split(','); if(outcomes.length!==3||outcomes.some(value=>value!=='success')) process.exit(1)"
+
   build:
+    if: ${{ !inputs.checks_only }}
     runs-on: ubuntu-22.04
     env:
       TRIPLE: x86_64-unknown-linux-gnu
