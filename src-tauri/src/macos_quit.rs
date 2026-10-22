@@ -31,22 +31,38 @@ extern "C" fn request_close() -> bool {
   }
 }
 
+fn finish_delegate_installation(installed: bool) -> Result<(), Box<dyn std::error::Error>> {
+  if !installed {
+    log::error!(
+      "could not install the macOS application quit coordinator; continuing without native Quit coordination"
+    );
+  }
+  Ok(())
+}
+
 pub fn plugin() -> TauriPlugin<tauri::Wry> {
   tauri::plugin::Builder::new("macos-quit-guard")
     .setup(|app, _| {
       APP.set(app.clone()).map_err(|_| std::io::Error::other("macOS quit coordinator already installed"))?;
-      if !unsafe { artdaddy_install_quit_delegate(request_close) } {
-        return Err(std::io::Error::other("could not install the macOS application quit coordinator").into());
-      }
-      Ok(())
+      finish_delegate_installation(unsafe { artdaddy_install_quit_delegate(request_close) })
     })
     .build()
 }
 
 #[cfg(test)]
 mod tests {
-  use super::coordinate_window_close;
+  use super::{coordinate_window_close, finish_delegate_installation};
   use std::cell::Cell;
+
+  #[test]
+  fn a_failed_delegate_installation_does_not_abort_startup() {
+    assert!(finish_delegate_installation(false).is_ok());
+  }
+
+  #[test]
+  fn a_successful_delegate_installation_allows_startup() {
+    assert!(finish_delegate_installation(true).is_ok());
+  }
 
   #[test]
   fn native_quit_requests_the_existing_close_owner_once() {
