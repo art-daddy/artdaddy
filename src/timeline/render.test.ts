@@ -2768,6 +2768,26 @@ async function renderCtx(
   return { ctx: { store, runner }, fs };
 }
 
+/** A context whose ffprobe frame-count validations pass through `handler` first. `next()` is the real mock's answer, so a
+ *  handler can observe a call, alter its answer, or replace it. */
+type ProbeAnswer = { code: number; stdout: string; stderr: string };
+function spyOnProbes(
+  ctx: ClientToolContext,
+  handler: (args: string[], next: () => Promise<ProbeAnswer>) => Promise<ProbeAnswer>,
+): ClientToolContext {
+  return {
+    ...ctx,
+    runner: {
+      run: async (program: string, args: string[], signal?: AbortSignal) => {
+        const next = () => ctx.runner.run(program, args, signal) as Promise<ProbeAnswer>;
+        return program === "ffprobe" && args.includes("-count_frames")
+          ? handler(args, next)
+          : next();
+      },
+    },
+  } as ClientToolContext;
+}
+
 /** A timeline whose one video clip (`v1c`) reads /media/gone.mp4, with an ffmpeg that fails the way
  *  it would: ENOENT when the file is missing, an unrelated filter error when it is there. */
 async function goneMediaCtx(o: { present: boolean }): Promise<{ ctx: ClientToolContext }> {
@@ -3251,6 +3271,81 @@ describe("renderTimelineTool", () => {
     expect(r.ok, JSON.stringify(r)).toBe(true);
     expect(String(r.final_mp4)).toContain("renderer/final.mp4");
     expect(r.duration_s).toBe(2);
+  });
+
+  // The acceptance check decodes every frame of the finished file. ffprobe does that on one thread unless told otherwise:
+  // 16 minutes of every 30-minute 4K export, which is what pushed the 4K videos line to its limit (2026-10-22).
+  describe("validating the finished file", () => {
+    const place = (ctx: ClientToolContext) =>
+      addClipsTool({ entries: [{ media_ref: "a.mp4", timeline_in: 0, timeline_out: 60 }] }, ctx);
+
+    it("decodes it on every processor, before the frame count is read", async () => {
+      const { ctx } = await renderCtx(() => ({ code: 0, stderr: "" }));
+      const probes: string[][] = [];
+      const spied = spyOnProbes(ctx, async (args, next) => {
+        probes.push(args);
+        return next();
+      });
+      await place(spied);
+      const r = (await renderTimelineTool({}, spied)) as Any;
+      expect(r.ok, JSON.stringify(r)).toBe(true);
+      expect(probes).toHaveLength(1);
+      expect(probes[0].slice(0, 4)).toEqual(["-v", "error", "-threads", "0"]);
+      expect(probes[0].indexOf("-threads")).toBeLessThan(probes[0].indexOf("-count_frames"));
+    });
+
+    it("still decodes every frame and still counts them, threads or not", async () => {
+      const { ctx } = await renderCtx(() => ({ code: 0, stderr: "" }));
+      const probes: string[][] = [];
+      const spied = spyOnProbes(ctx, async (args, next) => {
+        probes.push(args);
+        const real = await next();
+        // One frame short, the way a truncated or half-decoded file would read.
+        const payload = JSON.parse(real.stdout);
+        payload.streams[0].nb_read_frames = String(Number(payload.streams[0].nb_read_frames) - 1);
+        return { ...real, stdout: JSON.stringify(payload) };
+      });
+      await place(spied);
+      const r = (await renderTimelineTool({}, spied)) as Any;
+      expect(r.ok).toBe(false);
+      expect(String(r.error)).toMatch(/failed validation.*frames/);
+      expect(probes).toHaveLength(1);
+    });
+
+    it("retries once without the option when ffprobe does not know it, and only then", async () => {
+      const { ctx } = await renderCtx(() => ({ code: 0, stderr: "" }));
+      const probes: string[][] = [];
+      const spied = spyOnProbes(ctx, async (args, next) => {
+        probes.push(args);
+        return args.includes("-threads")
+          ? {
+              code: 1,
+              stdout: "",
+              stderr: "Failed to set value '0' for option 'threads': Option not found",
+            }
+          : next();
+      });
+      await place(spied);
+      const r = (await renderTimelineTool({}, spied)) as Any;
+      expect(r.ok, JSON.stringify(r)).toBe(true);
+      expect(probes).toHaveLength(2);
+      expect(probes[1]).not.toContain("-threads");
+      expect(probes[1]).toContain("-count_frames");
+    });
+
+    it("does not retry a real failure, and reports it", async () => {
+      const { ctx } = await renderCtx(() => ({ code: 0, stderr: "" }));
+      const probes: string[][] = [];
+      const spied = spyOnProbes(ctx, async (args) => {
+        probes.push(args);
+        return { code: 1, stdout: "", stderr: "Invalid data found when processing input" };
+      });
+      await place(spied);
+      const r = (await renderTimelineTool({}, spied)) as Any;
+      expect(r.ok).toBe(false);
+      expect(String(r.error)).toContain("Invalid data found");
+      expect(probes).toHaveLength(1);
+    });
   });
 
   it("surfaces an ffmpeg failure", async () => {

@@ -23,6 +23,14 @@ const present = async (filename) => {
 assert.ok(await present(path.join(userData, "ArtDaddy")) || !(await present(path.join(userData, "Akaru")))?.isDirectory(),
   "QA refused: native startup could migrate an existing legacy data folder; do not alter customer folders for this test");
 const executable = (program) => path.join(repository, "src-tauri", "binaries", `${program}-${target}${process.platform === "win32" ? ".exe" : ""}`);
+// The same -count_frames check the product runs on every finished file. ffprobe decodes on ONE thread unless told otherwise, so the 30-minute
+// 4K lines spent about 16 minutes per verified output in it; `-threads 0` counts the same frames several times faster. A ffprobe that does not
+// know the option fails loudly and is retried once without it, exactly as the product does.
+function probeFrames(args, options) {
+  const run = (threads) => spawnSync(executable("artdaddy-ffprobe"), ["-v", "error", ...threads, ...args], options);
+  const threaded = run(["-threads", "0"]);
+  return threaded.status !== 0 && /option not found|unrecognized option|unknown option/i.test(String(threaded.stderr)) ? run([]) : threaded;
+}
 
 function compareOriginalAudio(reference, delivered, sampleRate = 48000) {
   assert.equal(reference.length % 16, 0);
@@ -535,7 +543,7 @@ try {
       "Native resource snapshot did not measure scratch free space");
     assert.ok(Number.isSafeInteger(native.resources?.destination_free_bytes) && native.resources.destination_free_bytes >= 0,
       "Native resource snapshot did not measure destination free space");
-    const probed = spawnSync(executable("artdaddy-ffprobe"), ["-v", "error", "-count_frames", "-show_streams", "-show_format", "-of", "json", native.destination], { encoding: "utf8" });
+    const probed = probeFrames(["-count_frames", "-show_streams", "-show_format", "-of", "json", native.destination], { encoding: "utf8" });
     assert.equal(probed.status, 0, probed.stderr);
     const metadata = JSON.parse(probed.stdout);
     const video = metadata.streams.filter((entry) => entry.codec_type === "video");

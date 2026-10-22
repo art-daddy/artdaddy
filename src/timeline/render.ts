@@ -3021,6 +3021,15 @@ export async function finishRenderJob(
   }
 }
 
+/** The acceptance check decodes every frame of the finished file, and ffprobe decodes on ONE thread unless told otherwise:
+ *  about 56 frames a second at 4K, which is 16 minutes of a 30-minute 4K export (a seventh of the time the export is
+ *  allowed) with ten of sixteen processors idle. `-threads 0` lets the decoder use the machine: 7x faster on a 4K clip,
+ *  the same frames counted, so the check is exactly as strong and only shorter.
+ *  A decoder that does not know the option fails loudly ("Option not found", exit 1). That case, and only that case, is
+ *  retried once without it, so an older ffprobe on another platform can never turn a good export into a failed one. */
+const VALIDATION_DECODE_THREADS = ["-threads", "0"] as const;
+const OPTION_NOT_FOUND = /option not found|unrecognized option|unknown option/i;
+
 /** Did ffmpeg produce a file the caller may commit? */
 async function validateRendered(
   ctx: ClientToolContext,
@@ -3066,23 +3075,27 @@ async function validateRendered(
   }
   if (plan.frame !== true) {
     let probe: CommandResult;
+    const validationArgs = (threads: readonly string[]): string[] => [
+      "-v",
+      "error",
+      ...threads,
+      "-count_frames",
+      "-select_streams",
+      "v",
+      "-show_entries",
+      "stream=codec_type,width,height,avg_frame_rate,nb_read_frames,duration:format=duration",
+      "-of",
+      "json",
+      outPath,
+    ];
     try {
       probe = await ctx.runner.run(
         "ffprobe",
-        [
-          "-v",
-          "error",
-          "-count_frames",
-          "-select_streams",
-          "v",
-          "-show_entries",
-          "stream=codec_type,width,height,avg_frame_rate,nb_read_frames,duration:format=duration",
-          "-of",
-          "json",
-          outPath,
-        ],
+        validationArgs(VALIDATION_DECODE_THREADS),
         ctx.signal,
       );
+      if (probe.code !== 0 && OPTION_NOT_FOUND.test(String(probe.stderr ?? "")))
+        probe = await ctx.runner.run("ffprobe", validationArgs([]), ctx.signal);
     } catch (error) {
       return {
         ok: false,
