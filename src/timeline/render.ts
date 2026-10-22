@@ -2046,9 +2046,8 @@ function buildSingleRenderCommand(
   let totalDuration = outDuration;
   let brandedFrames: number | undefined;
   if (brand?.watermark) {
-    // Keep the TV-range delivery picture out of an RGB round-trip outside the mark.
-    chains.push(`[${wmIdx}:v]scale=${ow}:${oh}:out_range=tv,format=yuva420p[wm]`);
-    chains.push(`[${last}][wm]overlay=0:0:format=yuv420[branded]`);
+    chains.push(`[${wmIdx}:v]scale=${ow}:${oh}[wm]`);
+    chains.push(`[${last}][wm]overlay=0:0:format=auto[branded]`);
     last = "branded";
   }
   if (brand?.endcard) {
