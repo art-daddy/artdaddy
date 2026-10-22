@@ -568,8 +568,10 @@ describe("buildRenderCommand", () => {
         twoThreadPlans += expected === 2 ? 1 : 0;
         expect(threads(plan.args), label).toBe(String(expected));
         expect(plan.encoder, label).toBe(expected === 2 ? "x264-crf-threads2" : "x264-crf");
+        // The lossless intermediate of every producer is sliced (see the next test); the final encoder's own rule is the one above.
+        expect(Math.min(plan.output.width, plan.output.height), label).toBeGreaterThanOrEqual(64);
         expect(
-          plan.steps!.every((step) => threads(step.args) === "1"),
+          plan.steps!.every((step) => threads(step.args) === "4"),
           label,
         ).toBe(true);
         const fast = buildRenderCommand(authored, "/fast.mp4", {
@@ -592,6 +594,60 @@ describe("buildRenderCommand", () => {
         "/standard.mp4",
       ).args,
     ).not.toContain("-threads:v");
+  });
+
+  it("slices the lossless intermediate of streamed partition producers, and only where ffv1 can", () => {
+    const threads = (args: string[]) => args[args.lastIndexOf("-threads:v") + 1];
+    // ffv1 refuses 4 slices on a 2x2 canvas ("Unsupported number 4 of slices requested"), so a canvas with a side
+    // under 64 keeps the single-thread encode it always had. 62 is the largest even side below the boundary. It
+    // refuses them at the other end too (8192x2432 is 19.9 million pixels), so a canvas over 4096x4096 keeps it as well.
+    const cases: [{ width: number; height: number }, boolean][] = [
+      [{ width: 2, height: 2 }, false],
+      [{ width: 16, height: 16 }, false],
+      [{ width: 62, height: 62 }, false],
+      [{ width: 64, height: 36 }, false],
+      [{ width: 36, height: 64 }, false],
+      [{ width: 64, height: 64 }, true],
+      [{ width: 128, height: 72 }, true],
+      [{ width: 1280, height: 720 }, true],
+      [{ width: 3840, height: 2160 }, true],
+      [{ width: 4096, height: 4096 }, true],
+      [{ width: 8192, height: 2048 }, true],
+      [{ width: 2048, height: 8192 }, true],
+      [{ width: 4098, height: 4096 }, false],
+      [{ width: 5760, height: 3240 }, false],
+      [{ width: 7680, height: 4320 }, false],
+      [{ width: 8192, height: 8192 }, false],
+    ];
+    for (const [canvas, sliced] of cases) {
+      const label = `${canvas.width}x${canvas.height}`;
+      const authored = tl(
+        [{ media_ref: "/video.mp4", source_in: 0, source_out: 2, timeline_in: 0, timeline_out: 2 }],
+        { ...canvas, fps: 30 },
+      );
+      const plan = buildRenderCommand(authored, "/out.mp4", { engine: "partition-pipes-v1" });
+      expect(plan.output, label).toMatchObject(canvas);
+      expect(plan.steps!.length, label).toBeGreaterThan(0);
+      for (const step of plan.steps!) {
+        const codec = step.args.indexOf("-c:v");
+        expect(step.args[codec + 1], label).toBe("ffv1");
+        if (sliced) {
+          expect(step.args.slice(codec + 2, codec + 4), label).toEqual(["-slices", "4"]);
+          expect(threads(step.args), label).toBe("4");
+        } else {
+          expect(step.args, label).not.toContain("-slices");
+          expect(threads(step.args), label).toBe("1");
+        }
+      }
+      // Only the lossless intermediate is sliced: the delivered encode and the other engines keep their commands.
+      expect(plan.args, label).not.toContain("-slices");
+      expect(buildRenderCommand(authored, "/standard.mp4").args, label).not.toContain("-slices");
+      expect(
+        buildRenderCommand(authored, "/fast.mp4", { engine: "partition-pipes-v1", mode: "fast" })
+          .args,
+        label,
+      ).not.toContain("-slices");
+    }
   });
 
   it("compiles one persistent audio producer rather than an audio mix per video partition", () => {

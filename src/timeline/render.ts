@@ -2228,7 +2228,9 @@ function segmentedRenderPlan(
       persistentAudio ? "video" : "all",
     );
     const args = [...part.args];
-    args.splice(args.indexOf("-c:v"), 2, "-c:v", "ffv1");
+    const codec = args.indexOf("-c:v");
+    args.splice(codec, 2, "-c:v", "ffv1");
+    sliceIntermediate(args, codec, part.output);
     const audio = args.indexOf("-c:a");
     if (audio >= 0) args.splice(audio, 2, "-c:a", "pcm_f64le");
     const format = args.lastIndexOf("-f");
@@ -2461,6 +2463,43 @@ const COMMAND_BUDGET = 28_000;
 
 /** Staged beside the caption files, and named so no caption band can take the name. */
 const GRAPH_FILE = "graph.ffgraph";
+
+/** A partition producer's last stage is a lossless FFV1 encode, and on one thread it is the slowest stage of a
+ *  streamed export: measured at 97-99% of one core on 1080p, and the hottest thread of the producer on 4K, while
+ *  the final encoder behind it waited (its x264 threads ran at 60-85%). FFV1 slices are encoded in parallel and the
+ *  stream decodes to exactly the same pixels, so slicing cannot change a byte of the delivered video; only how long
+ *  the producer takes.
+ *
+ *  ffv1 accepts a slice count only inside a window of frame sizes, and a refusal kills the export, so slicing is
+ *  confined to the sizes where it is known to work and every other canvas keeps the single-thread encode it always had:
+ *  - too small: 4 slices fail at 2x2 (6 at 4x4), so a shorter side under MIN_SLICED_SIDE is left alone;
+ *  - too big: ffv1 refuses a slice over 8<<24 / (3 planes * 9 bits) = 4,971,026 pixels, so 4 slices were accepted up to
+ *    19.8 million pixels and refused from 19.9 million (8192x2432), whatever the aspect ratio. MAX_SLICED_PIXELS stays
+ *    well inside that (4096x4096, which covers every canvas up to 5K) and 6K and 8K canvases are not sliced. */
+const INTERMEDIATE_SLICES = 4;
+const MIN_SLICED_SIDE = 64;
+const MAX_SLICED_PIXELS = 4096 * 4096;
+
+/** How many slices a producer's lossless encode of a `width` x `height` frame is cut into; 0 keeps one thread. */
+export function intermediateSlices(width: number, height: number): number {
+  return Math.min(width, height) >= MIN_SLICED_SIDE && width * height <= MAX_SLICED_PIXELS
+    ? INTERMEDIATE_SLICES
+    : 0;
+}
+
+/** Switches a producer's lossless encode to slice threading. `codec` is the index of its `-c:v ffv1`. */
+function sliceIntermediate(
+  args: string[],
+  codec: number,
+  output: { width: number; height: number },
+): void {
+  const slices = intermediateSlices(output.width, output.height);
+  if (slices === 0) return;
+  const threads = args.indexOf("-threads:v", codec);
+  if (threads < 0) return;
+  args[threads + 1] = String(slices);
+  args.splice(codec + 2, 0, "-slices", String(slices));
+}
 
 /** Conservative Windows command length, including quotes, escapes and spaces. */
 function commandLength(args: readonly string[]): number {
