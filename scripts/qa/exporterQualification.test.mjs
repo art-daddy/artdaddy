@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -10,7 +10,7 @@ import fc from "fast-check";
 import { createServer } from "vite";
 import {
   BASE_OUTCOME_BUDGET_MS, MIN_INFORMATIVE_SAMPLES, NEAR_BLANK_LEVEL, NEAR_EXACT_ERROR, REQUIRED_PASSES,
-  captionsFadedIn, describePictureFailures, estimateFacts, estimateFailures, judgeSourcePictures, outcomeBudgetMs, temporarySpaceFailures,
+  captionsFadedIn, describePictureFailures, estimateFacts, estimateFailures, judgeSourcePictures, outcomeBudgetMs, sha256OfFile, temporarySpaceFailures,
 } from "./exporterQualification.mjs";
 import { qaServerOptions } from "./exporterVite.mjs";
 import { startRecovery } from "./exporterRecovery.mjs";
@@ -483,4 +483,75 @@ test("the native harness starts its recovery instance through that retry, never 
   const source = await readFile(new URL("./exporterNative.mjs", import.meta.url), "utf8");
   assert.match(source, /const second = await startRecovery\(\(label\) => start\(config, label\), proof\.steps\);/);
   assert.doesNotMatch(source, /const second = start\(config/);
+});
+
+// A two-hour export is 3.6 GB. The first two-hour promise runs (2026-10-23) finished both exports and then died in the harness: it read the
+// delivered file whole to hash it, and Node refuses a read of 2 GiB or more (ERR_FS_FILE_TOO_LARGE). The four 4K lines had passed first
+// because their files are under 2 GiB, so no earlier control could have seen it. These controls use a real file past that limit.
+const NODE_READ_LIMIT = 2 ** 31;
+async function withTemporaryFile(action) {
+  const root = await mkdtemp(path.join(os.tmpdir(), "artdaddy-hash-"));
+  try { return await action(path.join(root, "delivered.mp4")); } finally { await rm(root, { recursive: true, force: true }); }
+}
+
+test("a delivered file is hashed to the digest of its bytes, whatever its length against the read chunk", async () => {
+  const chunk = 4 * 1024 * 1024;
+  await withTemporaryFile(async (file) => {
+    for (const length of [0, 1, chunk - 1, chunk, chunk + 1, 2 * chunk + 12345]) {
+      const bytes = randomBytes(length);
+      await writeFile(file, bytes);
+      assert.equal(await sha256OfFile(file), createHash("sha256").update(bytes).digest("hex"), `${length} bytes`);
+    }
+  });
+});
+
+test("a file past Node's 2 GiB read limit is still hashed, and a plain read of that very file fails", async () => {
+  await withTemporaryFile(async (file) => {
+    const size = NODE_READ_LIMIT + 1024 * 1024 + 3;
+    const handle = await open(file, "w");
+    try { await handle.truncate(size); } finally { await handle.close(); }
+    await assert.rejects(readFile(file), { code: "ERR_FS_FILE_TOO_LARGE" }, "the control must reach the failure it guards against");
+    // The file is all zero bytes, so its digest is known without reading it back: the oracle never touches the file.
+    const zeros = Buffer.alloc(1024 * 1024);
+    const oracle = createHash("sha256");
+    for (let written = 0; written < size - 3; written += zeros.length) oracle.update(zeros);
+    oracle.update(Buffer.alloc(3));
+    assert.equal(await sha256OfFile(file), oracle.digest("hex"));
+  });
+});
+
+// Every `name(` call in a source text with its top-level arguments as written, so a conformance check reads the real call sites
+// instead of a hand-kept list. Quotes are skipped, so a comma inside a string or a template never splits an argument.
+function callsOf(source, name) {
+  const calls = [];
+  for (let at = source.indexOf(`${name}(`); at >= 0; at = source.indexOf(`${name}(`, at + 1)) {
+    const paren = at + name.length;
+    const args = [];
+    let depth = 0, quote = null, from = paren + 1;
+    for (let index = paren; index < source.length; index++) {
+      const char = source[index];
+      if (quote) { if (char === "\\") index++; else if (char === quote) quote = null; continue; }
+      if (char === '"' || char === "'" || char === "`") quote = char;
+      else if (char === "(" || char === "[" || char === "{") depth++;
+      else if (char === ")" || char === "]" || char === "}") { if (--depth === 0) { args.push(source.slice(from, index).trim()); break; } }
+      else if (char === "," && depth === 1) { args.push(source.slice(from, index).trim()); from = index + 1; }
+    }
+    calls.push(args);
+  }
+  return calls;
+}
+
+test("the native harness reads no media file whole: binary reads are only the small recovery fixtures", async () => {
+  const source = await readFile(new URL("./exporterNative.mjs", import.meta.url), "utf8");
+  // The recovery run's own files (a generated source.nut and its copies and deliveries) are small by construction. Everything else that
+  // can be large - a delivered promise output, a fixture source, an operator-supplied clip, the app - is hashed as a stream.
+  const smallFixtures = new Set(["report.delivered", "source", "copy.delivered"]);
+  const reads = callsOf(source, "readFile").concat(callsOf(source, "readFileSync"));
+  assert.ok(reads.length >= 8, "the walk must find the harness's real readFile call sites");
+  for (const args of reads) {
+    const text = args.length >= 2 && /^["']utf8["']$/.test(args[1]);
+    assert.ok(text || smallFixtures.has(args[0]), `readFile(${args.join(", ")}) reads a binary file whole; hash it with sha256OfFile or stream it`);
+  }
+  assert.match(source, /await sha256OfFile\(native\.destination\)/);
+  assert.doesNotMatch(source, /readFile\(native\.destination/);
 });

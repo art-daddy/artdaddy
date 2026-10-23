@@ -1,7 +1,18 @@
+import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 
 // Pure verdicts shared by the native harness (which records raw measurements) and the report consumer (which
 // re-derives every verdict from those measurements instead of trusting a recorded boolean).
+
+// The SHA-256 of a file of any size, read as a stream. Node refuses to read a file of 2 GiB or more into one Buffer
+// (ERR_FS_FILE_TOO_LARGE), and a two-hour export is 3.6 GB: a verification that holds the delivered file in memory
+// cannot judge the longest promise line at all, whatever the product did.
+export async function sha256OfFile(filename) {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(filename, { highWaterMark: 4 * 1024 * 1024 })) hash.update(chunk);
+  return hash.digest("hex");
+}
 
 // Both picture discriminators ("closer than a blank frame", "closer than the wrong-orientation control") collapse
 // on a near-black reference: its blank error is about zero and a flipped black frame is still black. Such a sample

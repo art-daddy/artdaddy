@@ -10,7 +10,7 @@ import { createServer, normalizePath } from "vite";
 import { readLinuxMemoryCgroup, cgroupFits, sameCgroup, cgroupEncoderPids } from "./exporterLinuxMemory.mjs";
 import { qaServerOptions } from "./exporterVite.mjs";
 import { startRecovery } from "./exporterRecovery.mjs";
-import { BASE_OUTCOME_BUDGET_MS, captionsFadedIn, describePictureFailures, estimateFailures, judgeSourcePictures, outcomeBudgetMs, temporarySpaceFailures } from "./exporterQualification.mjs";
+import { BASE_OUTCOME_BUDGET_MS, captionsFadedIn, describePictureFailures, estimateFailures, judgeSourcePictures, outcomeBudgetMs, sha256OfFile, temporarySpaceFailures } from "./exporterQualification.mjs";
 
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const targets = { "win32-x64": "x86_64-pc-windows-msvc", "darwin-arm64": "aarch64-apple-darwin", "linux-x64": "x86_64-unknown-linux-gnu" };
@@ -77,7 +77,7 @@ if (fastQualitySource) {
   assert.ok(fastQualitySource.replaceAll("\\", "/").includes("/artdaddy-export-native-") &&
     path.basename(fastQualitySource) === "promise-heavy-eight-things-pilot.mp4", "Fast measurement only accepts the retained generated QA pilot");
   assert.ok(Number(process.env.ARTDADDY_QA_MEMORY_CAP_BYTES) > 0, "Fast measurement requires the existing process-tree cap harness");
-  const before = createHash("sha256").update(await readFile(fastQualitySource)).digest("hex");
+  const before = await sha256OfFile(fastQualitySource);
   const candidates = [
     { mode: "full-quality", codec: ["-c:v", "libx264", "-preset", "medium", "-crf", "23", "-threads:v", "1"] },
     { mode: "fast-candidate", codec: ["-c:v", "h264_amf", "-usage", "transcoding", "-quality", "quality", "-rc", "cqp",
@@ -109,7 +109,7 @@ if (fastQualitySource) {
     }
     measured.push({ mode: candidate.mode, encodingMs, bytes: (await stat(destination)).size, video, metrics });
   }
-  assert.equal(createHash("sha256").update(await readFile(fastQualitySource)).digest("hex"), before);
+  assert.equal(await sha256OfFile(fastQualitySource), before);
   await writeFile(path.join(output, "fast-quality.json"), JSON.stringify({ version: 2, sourceSha256: before,
     sourceClass: "retained generated seven-video-and-caption pilot, decoded as a common encoder input", sourceUnchanged: true,
     measured, qualityAccepted: false, productionEnabled: false, physicalQualified: false,
@@ -379,7 +379,7 @@ const proof = { version: 1, scope: "native-owner-capture-and-crash-recovery", ta
     physicalMinimumMachine: false, exactPeakCeiling: false },
   hardware: { platform: os.platform(), release: os.release(), arch: os.arch(), cpu: os.cpus()[0]?.model, logicalCpus: os.cpus().length,
     totalMemoryBytes: os.totalmem(), minimumMachineQualified: false }, paidCalls: 0, customerProjectsTouched: false, steps: [] };
-  const fileHash = async (filename) => createHash("sha256").update(await readFile(filename)).digest("hex");
+  const fileHash = (filename) => sha256OfFile(filename);
   const sourceFiles = [];
   async function collectSources(directory) {
     for (const entry of await readdir(path.join(repository, directory), { withFileTypes: true })) {
@@ -558,9 +558,8 @@ try {
     assert.equal(Number(video[0].nb_read_frames), promiseCase.durationSeconds * promiseCase.fps);
     assert.equal(video[0].codec_name, "h264");
     assert.ok(metadata.format.format_name.split(",").includes("mp4"));
-    const bytes = await readFile(native.destination);
-    assert.equal(bytes.length, native.finalIdentity.size);
-    assert.equal(createHash("sha256").update(bytes).digest("hex"), native.finalIdentity.sha256);
+    assert.equal((await stat(native.destination)).size, native.finalIdentity.size);
+    assert.equal(await sha256OfFile(native.destination), native.finalIdentity.sha256);
     const sampleSize = 160 * 90 * 3;
     const samples = [0.15, 0.75, Math.min(2, promiseCase.durationSeconds - 0.1)].map((at) => {
       const decoded = spawnSync(executable("artdaddy-ffmpeg"), ["-nostdin", "-v", "error", "-ss", String(at), "-i", native.destination,
