@@ -7,6 +7,10 @@ import { _resetAppCaches } from "../tools/appCache";
 import { __resetWorkGate } from "../tools/workGate";
 import { __setExportConfirmationForTests } from "../lib/confirm";
 import { clearOutbox } from "../api/exportOutbox";
+import { installNetworkGuard } from "./networkGuard";
+
+// A test that runs the real export reporter would otherwise file a row in production analytics.
+installNetworkGuard();
 
 beforeEach(() => __setExportConfirmationForTests(async () => "continue"));
 afterEach(() => __setExportConfirmationForTests(null));
