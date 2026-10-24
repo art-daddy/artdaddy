@@ -5,7 +5,7 @@
 // are already members, so it would show nothing to exactly the people it is meant to reach.
 import { platform } from "../platform";
 
-export const DISCORD_URL = "https://discord.gg/eJmUhD6vx";
+export const DISCORD_URL = "https://discord.gg/cQqZfchard";
 
 /** Open the community link in the user's real browser / Discord app.
  *
