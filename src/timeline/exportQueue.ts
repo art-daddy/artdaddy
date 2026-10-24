@@ -552,19 +552,36 @@ async function reportSettledExport(
     warnings: number;
     error: string;
     finalSizeBytes?: number;
+    /** A later launch of the app finished this export (see `finishAdopted`). */
+    recovered?: boolean;
   },
 ): Promise<void> {
   try {
+    // Read first and for every outcome: the app process still holds the job here, and the span it
+    // measured is the only run time that excludes the time the app was not running.
     const native =
-      outcome.status === "done" && spec.supervisor && spec.jobId
+      spec.supervisor && spec.jobId
         ? (await spec.supervisor.list()).find((view) => view.id === spec.jobId)
         : null;
+    const activeMs =
+      native && native.started_at !== null && native.ended_at !== null
+        ? Math.max(0, native.ended_at - native.started_at)
+        : 0;
     // Only a delivered file has a size; a failed encode leaves nothing to measure.
     const size =
       outcome.status === "done"
         ? (outcome.finalSizeBytes ?? (await spec.store.byteSize(spec.destPath)) ?? 0)
         : 0;
-    if (outcome.status === "done" && !spec.copyOf && spec.meta?.calibration && size > 0) {
+    // A recovered export's elapsed time spans however long the app was closed. The estimator keeps
+    // the MAXIMUM of the matching samples, so one such run would make every later estimate for
+    // that kind of project read as days.
+    if (
+      outcome.status === "done" &&
+      !spec.copyOf &&
+      !outcome.recovered &&
+      spec.meta?.calibration &&
+      size > 0
+    ) {
       let memoryBytes: number | null = null;
       let temporaryBytes: number | null = null;
       const diagnostics = native ? jobStderr(native).split(/\r?\n/).reverse() : [];
@@ -609,6 +626,8 @@ async function reportSettledExport(
       duration_s: spec.meta?.duration_s ?? 0,
       size_bytes: size,
       elapsed_ms: outcome.elapsedMs,
+      active_ms: activeMs,
+      recovered: outcome.recovered === true,
       width: spec.meta?.project_width ?? spec.meta?.width ?? 0,
       height: spec.meta?.project_height ?? spec.meta?.height ?? 0,
       fps: spec.meta?.fps ?? 0,
@@ -1044,6 +1063,8 @@ interface Settle {
   copyOf?: string;
   batch?: string;
   run: RunOutcome;
+  /** A later launch of the app is finishing this export; see `finishAdopted`. */
+  recovered?: boolean;
 }
 
 /** Commit the file, then the project's records. The one path for an export this page ran and for
@@ -1143,6 +1164,7 @@ async function settle(x: Settle): Promise<void> {
       elapsedMs: Date.now() - x.startedAt,
       warnings: warnings.length,
       error: error && !cancelled ? error : "",
+      recovered: x.recovered,
     });
     beacons.add(beacon);
     void beacon.finally(() => beacons.delete(beacon));
@@ -1315,6 +1337,13 @@ async function finishAdopted(
   }
   const ctx = contextFor(m.projectDir);
   const ledger = await openProjectJobs(ctx.store);
+  // The ledger closes a job's record as `interrupted` when the app LAUNCH that owned it is gone, and
+  // keeps it `running` when only the page died (the app process still holds the job). So an
+  // interrupted record here means an earlier run of the app ended mid-export -- a crash, a
+  // force-quit, a shutdown, a power cut -- and this launch is finishing what it left.
+  const recovered = ledger
+    .list()
+    .some((record) => record.id === v.id && record.status === "interrupted");
   const run: RunOutcome = { error: null, cancelled: false, warnings: m.plan?.warnings ?? [] };
   if (copyError && !ended?.killed) {
     run.error = copyError;
@@ -1380,6 +1409,7 @@ async function finishAdopted(
     supervisor: sup,
     copyOf: m.copyOf,
     run,
+    recovered,
   });
   const done = records.find((r) => r.job_id === v.id);
   if (done && useExportJob.getState().abort && done.state !== "running" && done.state !== "queued")

@@ -27,6 +27,7 @@ import {
   manageExportsTool,
   submitExport,
   whenExportEnds,
+  whenExportTelemetrySettles,
   whenExportsSettle,
 } from "./exportQueue";
 import { addClipsTool } from "./placement";
@@ -35,7 +36,17 @@ import { exportTimelineTool, RENDER_CONTRACT_VERSION } from "./render";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
 
-vi.mock("../api/exportEvents", () => ({ reportExport: async () => undefined }));
+// Recorded rather than discarded: what the export reports about HOW it ended is the point of the
+// tests on a recovered export below.
+const reported = vi.hoisted(() => [] as Record<string, unknown>[]);
+vi.mock("../api/exportEvents", () => ({
+  reportExport: async (event: Record<string, unknown>) => {
+    reported.push(event);
+  },
+}));
+beforeEach(() => {
+  reported.length = 0;
+});
 
 class Fs extends MemFs {
   async rename(from: string, to: string): Promise<void> {
@@ -1290,6 +1301,83 @@ describe("an export outlives a crash of the page", () => {
     __setJobSupervisor(new FakeJobs("launch-after-restart"));
     const after = await JobLedger.open(new ProjectStoreAccess(DIR, t.fs));
     expect(after.list().find((r) => r.id === a.job_id)?.status).toBe("interrupted");
+  });
+});
+
+describe("what an export reports about how it ended when the app was not running for part of it", () => {
+  /** What a restart looks like to the export queue: a NEW run of the app process whose journal still
+   *  holds the job the old run was working on. The old run's file is on disk, as it was left. */
+  async function appRestarts(t: Awaited<ReturnType<typeof setup>>, jobId: string, exit: number) {
+    const before = t.jobs.view(jobId)!;
+    pageCrashes(t.jobs);
+    const restarted = new FakeJobs("launch-after-restart");
+    restarted.delivery = t.jobs.delivery;
+    restarted.restoreJob({
+      ...before,
+      state: "exited",
+      code: exit,
+      stderr_head: exit === 0 ? "" : "ffmpeg died",
+      started_at: null,
+      ended_at: Date.now(),
+    });
+    __setJobSupervisor(restarted);
+    return restarted;
+  }
+
+  it("reports the app process's own run time, apart from the time since the export was submitted", async () => {
+    const t = await setup();
+    const a = await t.exportNow();
+    await flush();
+    t.jobs.exit(a.job_id, 0);
+    t.jobs.restoreJob({ ...t.jobs.view(a.job_id)!, started_at: 10_000, ended_at: 70_000 });
+    expect((await whenExportEnds(a.job_id))?.state).toBe("done");
+    await whenExportsSettle();
+    await whenExportTelemetrySettles();
+    expect(reported.at(-1)).toMatchObject({ status: "done", recovered: false, active_ms: 60_000 });
+  });
+
+  it("an export the app finished after only the PAGE died is not recovered, and still teaches the estimator", async () => {
+    const t = await setup();
+    useExportJob.setState({ calibrations: [] });
+    const a = await t.exportNow();
+    await flush();
+    pageCrashes(t.jobs);
+    t.jobs.exit(a.job_id, 0);
+    await adoptExports({ contextFor: t.nextPage });
+    expect((await whenExportEnds(a.job_id))?.state).toBe("done");
+    await whenExportsSettle();
+    await whenExportTelemetrySettles();
+    expect(reported.at(-1)).toMatchObject({ status: "done", recovered: false });
+    // The control for the next test: this export DOES leave a timing sample, so a missing one
+    // below means the recovery was recognised, not that exports never record one.
+    expect(useExportJob.getState().calibrations).toHaveLength(1);
+  });
+
+  it("an export a LATER LAUNCH of the app finishes is reported as recovered, and its elapsed time teaches the estimator nothing", async () => {
+    const t = await setup();
+    useExportJob.setState({ calibrations: [] });
+    const a = await t.exportNow();
+    await flush();
+    await appRestarts(t, a.job_id, 0);
+    await adoptExports({ contextFor: t.nextPage });
+    expect((await whenExportEnds(a.job_id))?.state).toBe("done");
+    await whenExportsSettle();
+    await whenExportTelemetrySettles();
+    expect(reported.at(-1)).toMatchObject({ status: "done", recovered: true });
+    // elapsed spans the downtime, so a sample from it would make every later estimate read as days.
+    expect(useExportJob.getState().calibrations).toHaveLength(0);
+  });
+
+  it("a recovered export that then FAILS is reported as failed AND recovered", async () => {
+    const t = await setup();
+    const a = await t.exportNow();
+    await flush();
+    await appRestarts(t, a.job_id, 1);
+    await adoptExports({ contextFor: t.nextPage });
+    expect((await whenExportEnds(a.job_id))?.state).toBe("failed");
+    await whenExportsSettle();
+    await whenExportTelemetrySettles();
+    expect(reported.at(-1)).toMatchObject({ status: "failed", recovered: true });
   });
 });
 

@@ -45,6 +45,7 @@ async function sentBody(error: string): Promise<Record<string, unknown>> {
 
 /** Every key the server's ExportEventBody takes from this beacon, and nothing else. */
 const REPORT_KEYS = [
+  "active_ms",
   "app_version",
   "arch",
   "duration_s",
@@ -59,6 +60,7 @@ const REPORT_KEYS = [
   "quality",
   "readiness",
   "reason_code",
+  "recovered",
   "shell",
   "size_bytes",
   "status",
@@ -71,6 +73,7 @@ const SERVER_BOUNDS: Record<string, number> = {
   duration_s: 86_400,
   size_bytes: 1e13,
   elapsed_ms: 10_000_000_000,
+  active_ms: 10_000_000_000,
   width: 16_384,
   height: 16_384,
   fps: 1_000,
@@ -148,6 +151,21 @@ describe("the export beacon", () => {
     expect(Object.keys(body).sort()).toEqual(REPORT_KEYS);
   });
 
+  it("says an export was finished by a later launch, and how long its last run took", async () => {
+    const recovered = await sent({ status: "done", recovered: true, active_ms: 3_600_000 });
+    expect(recovered).toMatchObject({ recovered: true, active_ms: 3_600_000 });
+    // An ordinary export is not recovered, and an unknown run time reads as 0, never as a guess.
+    expect(await sent({ status: "done" })).toMatchObject({ recovered: false, active_ms: 0 });
+  });
+
+  it.each([1, "true", "yes", {}, [], null, undefined, 0])(
+    "treats %j as not recovered: only a real true flags an export",
+    async (value) => {
+      const body = await sent({ status: "done", ...({ recovered: value } as object) });
+      expect(body.recovered).toBe(false);
+    },
+  );
+
   it("keeps the failure text that explains a failure, next to its reason", async () => {
     const body = await sentBody("ffmpeg render failed (code=-22): Conversion failed!");
     expect(body).toMatchObject({
@@ -221,6 +239,7 @@ describe("the export beacon", () => {
           await reportExport({
             status: "failed",
             elapsed_ms: weird,
+            active_ms: weird,
             error: text,
             project_id: text,
             quality: text,

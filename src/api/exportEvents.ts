@@ -50,6 +50,14 @@ export interface ExportEvent {
   readiness?: "ready" | "not_ready" | "unknown";
   visual_layers?: number;
   operation?: (typeof EXPORT_OPERATIONS)[number];
+  /** How long the export's last run took, ms, as the app process measured it. `elapsed_ms` runs from
+   *  SUBMISSION, so it also counts every minute the app was not running; a speed figure wants this one.
+   *  0 when unknown. */
+  active_ms?: number;
+  /** True when a later launch of the app finished an export an earlier launch had started: the app
+   *  ended mid-export (crash, force-quit, shutdown, power loss) and the export was picked up again.
+   *  `elapsed_ms` then spans the downtime, which can be days. */
+  recovered?: boolean;
 }
 
 /** The server's bound on `error` (ExportEventBody, pinned by the server's tests). Over it, a
@@ -132,6 +140,8 @@ export async function reportExport(ev: ExportEvent): Promise<void> {
         duration_s: bounded(ev.duration_s, 86_400),
         size_bytes: Math.round(bounded(ev.size_bytes, 1e13)),
         elapsed_ms: Math.round(bounded(ev.elapsed_ms, 10_000_000_000)),
+        active_ms: Math.round(bounded(ev.active_ms, 10_000_000_000)),
+        recovered: ev.recovered === true,
         width: Math.round(bounded(ev.width, 16_384)),
         height: Math.round(bounded(ev.height, 16_384)),
         fps: bounded(ev.fps, 1_000),
