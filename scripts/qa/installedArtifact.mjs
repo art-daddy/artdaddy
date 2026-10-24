@@ -45,7 +45,7 @@ try {
       bodyHeight: document.body.getBoundingClientRect().height,
     };
   });
-  assert.equal(actual.version, "0.21.6");
+  assert.equal(actual.version, "0.21.7");
   assert.equal(actual.identifier, "com.artdaddy.app");
   assert.ok(actual.width >= 900 && actual.height >= 500 && actual.bodyHeight > 0);
   assert.match(actual.text, /ArtDaddy|Sign in|compatibility|update/i);
