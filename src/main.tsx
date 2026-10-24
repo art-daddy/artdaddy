@@ -23,6 +23,17 @@ installCrashWatch({ release: __ARTDADDY_RELEASE__ });
 // Last-resort boundaries for errors that escape React's tree (async rejections,
 // event-handler throws). Expected, handled control-flow errors are skipped.
 installGlobalErrorHandlers();
+// A report of a finished export that could not be sent when it ended (no session, offline, the server
+// waking) is kept and sent when it can be. Installed before exports are adopted below, so the reports
+// those produce are retried too.
+void import("./api/exportEvents")
+  .then((m) => m.installExportReportDelivery())
+  .catch(() => undefined);
+// Who the session's own token names is known before the profile loads: an export asked for, or a
+// report built, in those first moments is filed under the right account instead of a guess.
+void Promise.all([import("./api/exportOwner"), import("./api/desktopAuth")])
+  .then(([owner, desktop]) => owner.setSessionUserReader(desktop.getUserId))
+  .catch(() => undefined);
 // An export the app did not live to finish leaves a hidden partial beside its destination. Remove
 // the ones an earlier launch recorded (UJ-022). A no-op outside the desktop app.
 void import("./timeline/exportStaging").then((m) => m.sweepStaging()).catch(() => undefined);

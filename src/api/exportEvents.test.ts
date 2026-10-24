@@ -43,7 +43,8 @@ async function sentBody(error: string): Promise<Record<string, unknown>> {
   return sent({ status: "failed", error });
 }
 
-/** Every key the server's ExportEventBody takes from this beacon, and nothing else. */
+/** Every key the server's ExportEventBody takes from this beacon, and nothing else. `owner_id` is
+ *  not here: it is sent only for a report whose account the app knows (see exportReportDelivery). */
 const REPORT_KEYS = [
   "active_ms",
   "app_version",
@@ -51,8 +52,10 @@ const REPORT_KEYS = [
   "duration_s",
   "elapsed_ms",
   "error",
+  "event_id",
   "fps",
   "height",
+  "occurred_at",
   "operation",
   "platform",
   "project_id",

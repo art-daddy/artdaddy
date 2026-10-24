@@ -6,6 +6,7 @@ import { afterEach, beforeEach } from "vitest";
 import { _resetAppCaches } from "../tools/appCache";
 import { __resetWorkGate } from "../tools/workGate";
 import { __setExportConfirmationForTests } from "../lib/confirm";
+import { clearOutbox } from "../api/exportOutbox";
 
 beforeEach(() => __setExportConfirmationForTests(async () => "continue"));
 afterEach(() => __setExportConfirmationForTests(null));
@@ -15,6 +16,9 @@ afterEach(() => __setExportConfirmationForTests(null));
 afterEach(() => _resetAppCaches());
 // So is the work gate, one per page: a case that ends holding a turn would stall the next case's.
 afterEach(() => __resetWorkGate());
+// Export reports that could not be sent wait in localStorage, which outlives a test: one case's
+// unsent report would otherwise be sent by the next case's.
+afterEach(() => clearOutbox());
 
 // Property failures must carry their own evidence. Without this, a seed-dependent failure
 // reports only "Property failed after N tests" in the JSON reporter — the counterexample and the

@@ -5,6 +5,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { useExportJob } from "../store/exportJob";
+import { useAuth } from "../store/auth";
 
 import { JobLedger } from "../project/jobLedger";
 import { FakeJobs } from "../test/fakeJobs";
@@ -46,6 +47,7 @@ vi.mock("../api/exportEvents", () => ({
 }));
 beforeEach(() => {
   reported.length = 0;
+  useAuth.setState({ profile: null });
 });
 
 class Fs extends MemFs {
@@ -1378,6 +1380,27 @@ describe("what an export reports about how it ended when the app was not running
     await whenExportsSettle();
     await whenExportTelemetrySettles();
     expect(reported.at(-1)).toMatchObject({ status: "failed", recovered: true });
+  });
+
+  it("an export a later launch finishes is reported under the account that asked for it, not the one signed in then", async () => {
+    const person = (id: string) => ({
+      user_id: id,
+      email: "",
+      display_name: "",
+      image_url: "",
+      metered: true,
+    });
+    const t = await setup();
+    useAuth.setState({ profile: person("user_alice") });
+    const a = await t.exportNow();
+    await flush();
+    useAuth.setState({ profile: person("user_bob") }); // the next launch belongs to somebody else
+    await appRestarts(t, a.job_id, 0);
+    await adoptExports({ contextFor: t.nextPage });
+    expect((await whenExportEnds(a.job_id))?.state).toBe("done");
+    await whenExportsSettle();
+    await whenExportTelemetrySettles();
+    expect(reported.at(-1)).toMatchObject({ status: "done", recovered: true, owner: "user_alice" });
   });
 });
 

@@ -35,6 +35,7 @@ import { notifyJobSettled, type SettledJob } from "../store/jobNotes";
 import { useExportJob } from "../store/exportJob";
 import { beginSessionActivity } from "../observability/crashWatch";
 import { recordStaging, releaseStaging } from "./exportStaging";
+import { exportOwnerNow } from "../api/exportOwner";
 import { setExportsBusy } from "../tools/workGate";
 import { projectKeyOfDir } from "../tools/dataRoot";
 import { resolveExportResources, type ExportResources } from "../platform/host";
@@ -458,6 +459,9 @@ export interface ExportSpec {
     project_width?: number;
     project_height?: number;
     readiness?: "ready" | "not_ready" | "unknown";
+    /** The account that asked for this export, stamped when it is admitted so it travels with the
+     *  job (and its native record) to the report, whoever is signed in when the export ends. */
+    owner?: string;
     calibration?: Pick<ExportCalibration, "workload" | "output" | "quality" | "engine" | "encoder">;
   };
   /** The app process's job supervisor, when the encode runs as one of its jobs (3h part 7). It
@@ -466,6 +470,11 @@ export interface ExportSpec {
   /** A library file delivered as it is: no encode, and the delivered row names
    *  this library ref rather than cataloguing the same bytes a second time. */
   copyOf?: string;
+  /** The account that asked for this export, captured as the request is submitted (before the
+   *  confirmation, the native admission or any other wait, in any of which the signed-in account can
+   *  change). It is what the export is reported under. A render also carries it in its telemetry meta
+   *  so the native job record keeps it through a restart; a copy has no such record to put it in. */
+  owner?: string;
   /** The export call this job is one file of (see {@link sealExportBatch}). */
   batch?: string;
   /** Runs the encode. Rejects with a message on failure. `jobId` names the job everywhere: the
@@ -543,7 +552,7 @@ export async function whenExportTelemetrySettles(): Promise<void> {
 /** Report one settled export to the server's analytics. Fire-and-forget by contract: the file is
  *  already delivered, so nothing here may fail, delay or alter the export. */
 async function reportSettledExport(
-  spec: Pick<ExportSpec, "store" | "destPath" | "meta" | "supervisor" | "copyOf"> & {
+  spec: Pick<ExportSpec, "store" | "destPath" | "meta" | "supervisor" | "copyOf" | "owner"> & {
     jobId?: string;
   },
   outcome: {
@@ -636,6 +645,7 @@ async function reportSettledExport(
       error: outcome.error,
       project_id: spec.meta?.project_id ?? "",
       visual_layers: spec.meta?.visual_layers,
+      owner: spec.owner ?? spec.meta?.owner,
     });
   } catch {
     /* telemetry is never worth disturbing a finished export over */
@@ -792,8 +802,12 @@ async function confirmExportRequest(specs: readonly ExportSpec[]): Promise<boole
 export async function submitExports(request: readonly ExportSpec[]): Promise<ExportSubmission[]> {
   if (!request.length || request.length > 50)
     throw new Error("one export request must contain between 1 and 50 files");
+  // Decided now, before the first await: the confirmation, the native admission and the render all
+  // take time, and the signed-in account can change in any of them.
+  const owner = exportOwnerNow();
   const specs = request.map((spec) => ({
     ...spec,
+    ...(spec.owner || owner ? { owner: spec.owner || owner } : {}),
     dependencies: [...spec.dependencies],
     ...(spec.meta ? { meta: structuredClone(spec.meta) } : {}),
     ...(spec.workload ? { workload: structuredClone(spec.workload) } : {}),
@@ -913,7 +927,13 @@ async function admitExport(spec: ExportSpec, storageReady: boolean): Promise<Exp
         lease?.assertCanCommit();
         if (!spec.store.sessionLive() || spec.submissionSignal?.aborted)
           throw new Error("export cancelled during native preparation");
-        if (spec.meta) spec.meta = { ...spec.meta, readiness: storageReady ? "ready" : "unknown" };
+        if (spec.meta) {
+          spec.meta = {
+            ...spec.meta,
+            readiness: storageReady ? "ready" : "unknown",
+            ...(spec.owner ? { owner: spec.owner } : {}),
+          };
+        }
         lease?.markCommitted();
       },
       { origin: spec.origin, signal: spec.submissionSignal },
@@ -1038,6 +1058,7 @@ async function encode(spec: ExportSpec, ledger: Ledger, jobId: string, key: stri
     stagePath: spec.stagePath,
     filename: spec.filename,
     meta: spec.meta,
+    owner: spec.owner,
     startedBy: spec.origin ? "chat" : "elsewhere",
     startedAt,
     ledger,
@@ -1056,6 +1077,8 @@ interface Settle {
   stagePath: string;
   filename: string;
   meta?: ExportSpec["meta"];
+  /** The account that asked for the export (an adopted render carries it in `meta`). */
+  owner?: string;
   startedBy: "chat" | "elsewhere";
   startedAt: number;
   ledger: Ledger;
