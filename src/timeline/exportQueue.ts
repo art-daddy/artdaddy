@@ -35,6 +35,7 @@ import { notifyJobSettled, type SettledJob } from "../store/jobNotes";
 import { useExportJob } from "../store/exportJob";
 import { beginSessionActivity } from "../observability/crashWatch";
 import { recordStaging, releaseStaging } from "./exportStaging";
+import { exportOwnerNow } from "../api/exportOwner";
 import { setExportsBusy } from "../tools/workGate";
 import { projectKeyOfDir } from "../tools/dataRoot";
 import { resolveExportResources, type ExportResources } from "../platform/host";
@@ -458,6 +459,9 @@ export interface ExportSpec {
     project_width?: number;
     project_height?: number;
     readiness?: "ready" | "not_ready" | "unknown";
+    /** The account that asked for this export, stamped when it is admitted so it travels with the
+     *  job (and its native record) to the report, whoever is signed in when the export ends. */
+    owner?: string;
     calibration?: Pick<ExportCalibration, "workload" | "output" | "quality" | "engine" | "encoder">;
   };
   /** The app process's job supervisor, when the encode runs as one of its jobs (3h part 7). It
@@ -466,6 +470,11 @@ export interface ExportSpec {
   /** A library file delivered as it is: no encode, and the delivered row names
    *  this library ref rather than cataloguing the same bytes a second time. */
   copyOf?: string;
+  /** The account that asked for this export, captured as the request is submitted (before the
+   *  confirmation, the native admission or any other wait, in any of which the signed-in account can
+   *  change). It is what the export is reported under. A render also carries it in its telemetry meta
+   *  so the native job record keeps it through a restart; a copy has no such record to put it in. */
+  owner?: string;
   /** The export call this job is one file of (see {@link sealExportBatch}). */
   batch?: string;
   /** Runs the encode. Rejects with a message on failure. `jobId` names the job everywhere: the
@@ -543,7 +552,7 @@ export async function whenExportTelemetrySettles(): Promise<void> {
 /** Report one settled export to the server's analytics. Fire-and-forget by contract: the file is
  *  already delivered, so nothing here may fail, delay or alter the export. */
 async function reportSettledExport(
-  spec: Pick<ExportSpec, "store" | "destPath" | "meta" | "supervisor" | "copyOf"> & {
+  spec: Pick<ExportSpec, "store" | "destPath" | "meta" | "supervisor" | "copyOf" | "owner"> & {
     jobId?: string;
   },
   outcome: {
@@ -552,19 +561,36 @@ async function reportSettledExport(
     warnings: number;
     error: string;
     finalSizeBytes?: number;
+    /** A later launch of the app finished this export (see `finishAdopted`). */
+    recovered?: boolean;
   },
 ): Promise<void> {
   try {
+    // Read first and for every outcome: the app process still holds the job here, and the span it
+    // measured is the only run time that excludes the time the app was not running.
     const native =
-      outcome.status === "done" && spec.supervisor && spec.jobId
+      spec.supervisor && spec.jobId
         ? (await spec.supervisor.list()).find((view) => view.id === spec.jobId)
         : null;
+    const activeMs =
+      native && native.started_at !== null && native.ended_at !== null
+        ? Math.max(0, native.ended_at - native.started_at)
+        : 0;
     // Only a delivered file has a size; a failed encode leaves nothing to measure.
     const size =
       outcome.status === "done"
         ? (outcome.finalSizeBytes ?? (await spec.store.byteSize(spec.destPath)) ?? 0)
         : 0;
-    if (outcome.status === "done" && !spec.copyOf && spec.meta?.calibration && size > 0) {
+    // A recovered export's elapsed time spans however long the app was closed. The estimator keeps
+    // the MAXIMUM of the matching samples, so one such run would make every later estimate for
+    // that kind of project read as days.
+    if (
+      outcome.status === "done" &&
+      !spec.copyOf &&
+      !outcome.recovered &&
+      spec.meta?.calibration &&
+      size > 0
+    ) {
       let memoryBytes: number | null = null;
       let temporaryBytes: number | null = null;
       const diagnostics = native ? jobStderr(native).split(/\r?\n/).reverse() : [];
@@ -609,6 +635,8 @@ async function reportSettledExport(
       duration_s: spec.meta?.duration_s ?? 0,
       size_bytes: size,
       elapsed_ms: outcome.elapsedMs,
+      active_ms: activeMs,
+      recovered: outcome.recovered === true,
       width: spec.meta?.project_width ?? spec.meta?.width ?? 0,
       height: spec.meta?.project_height ?? spec.meta?.height ?? 0,
       fps: spec.meta?.fps ?? 0,
@@ -617,6 +645,7 @@ async function reportSettledExport(
       error: outcome.error,
       project_id: spec.meta?.project_id ?? "",
       visual_layers: spec.meta?.visual_layers,
+      owner: spec.owner ?? spec.meta?.owner,
     });
   } catch {
     /* telemetry is never worth disturbing a finished export over */
@@ -773,8 +802,12 @@ async function confirmExportRequest(specs: readonly ExportSpec[]): Promise<boole
 export async function submitExports(request: readonly ExportSpec[]): Promise<ExportSubmission[]> {
   if (!request.length || request.length > 50)
     throw new Error("one export request must contain between 1 and 50 files");
+  // Decided now, before the first await: the confirmation, the native admission and the render all
+  // take time, and the signed-in account can change in any of them.
+  const owner = exportOwnerNow();
   const specs = request.map((spec) => ({
     ...spec,
+    ...(spec.owner || owner ? { owner: spec.owner || owner } : {}),
     dependencies: [...spec.dependencies],
     ...(spec.meta ? { meta: structuredClone(spec.meta) } : {}),
     ...(spec.workload ? { workload: structuredClone(spec.workload) } : {}),
@@ -894,7 +927,13 @@ async function admitExport(spec: ExportSpec, storageReady: boolean): Promise<Exp
         lease?.assertCanCommit();
         if (!spec.store.sessionLive() || spec.submissionSignal?.aborted)
           throw new Error("export cancelled during native preparation");
-        if (spec.meta) spec.meta = { ...spec.meta, readiness: storageReady ? "ready" : "unknown" };
+        if (spec.meta) {
+          spec.meta = {
+            ...spec.meta,
+            readiness: storageReady ? "ready" : "unknown",
+            ...(spec.owner ? { owner: spec.owner } : {}),
+          };
+        }
         lease?.markCommitted();
       },
       { origin: spec.origin, signal: spec.submissionSignal },
@@ -1019,6 +1058,7 @@ async function encode(spec: ExportSpec, ledger: Ledger, jobId: string, key: stri
     stagePath: spec.stagePath,
     filename: spec.filename,
     meta: spec.meta,
+    owner: spec.owner,
     startedBy: spec.origin ? "chat" : "elsewhere",
     startedAt,
     ledger,
@@ -1037,6 +1077,8 @@ interface Settle {
   stagePath: string;
   filename: string;
   meta?: ExportSpec["meta"];
+  /** The account that asked for the export (an adopted render carries it in `meta`). */
+  owner?: string;
   startedBy: "chat" | "elsewhere";
   startedAt: number;
   ledger: Ledger;
@@ -1044,6 +1086,8 @@ interface Settle {
   copyOf?: string;
   batch?: string;
   run: RunOutcome;
+  /** A later launch of the app is finishing this export; see `finishAdopted`. */
+  recovered?: boolean;
 }
 
 /** Commit the file, then the project's records. The one path for an export this page ran and for
@@ -1143,6 +1187,7 @@ async function settle(x: Settle): Promise<void> {
       elapsedMs: Date.now() - x.startedAt,
       warnings: warnings.length,
       error: error && !cancelled ? error : "",
+      recovered: x.recovered,
     });
     beacons.add(beacon);
     void beacon.finally(() => beacons.delete(beacon));
@@ -1315,6 +1360,13 @@ async function finishAdopted(
   }
   const ctx = contextFor(m.projectDir);
   const ledger = await openProjectJobs(ctx.store);
+  // The ledger closes a job's record as `interrupted` when the app LAUNCH that owned it is gone, and
+  // keeps it `running` when only the page died (the app process still holds the job). So an
+  // interrupted record here means an earlier run of the app ended mid-export -- a crash, a
+  // force-quit, a shutdown, a power cut -- and this launch is finishing what it left.
+  const recovered = ledger
+    .list()
+    .some((record) => record.id === v.id && record.status === "interrupted");
   const run: RunOutcome = { error: null, cancelled: false, warnings: m.plan?.warnings ?? [] };
   if (copyError && !ended?.killed) {
     run.error = copyError;
@@ -1380,6 +1432,7 @@ async function finishAdopted(
     supervisor: sup,
     copyOf: m.copyOf,
     run,
+    recovered,
   });
   const done = records.find((r) => r.job_id === v.id);
   if (done && useExportJob.getState().abort && done.state !== "running" && done.state !== "queued")

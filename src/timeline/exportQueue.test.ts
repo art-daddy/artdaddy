@@ -27,6 +27,7 @@ import { resetTestDocuments } from "../test/timelineKit";
 import { __setExportConfirmationForTests, type ExportConfirmation } from "../lib/confirm";
 import { endProjectSession } from "../tools/coordinator";
 import { useExportJob } from "../store/exportJob";
+import { useAuth } from "../store/auth";
 import type { ExportCalibration } from "./exportOptions";
 import { FakeJobs } from "../test/fakeJobs";
 import * as host from "../platform/host";
@@ -128,6 +129,7 @@ afterEach(async () => {
   await resetTestDocuments();
   vi.restoreAllMocks();
   useExportJob.setState({ calibrations: [] });
+  useAuth.setState({ profile: null });
 });
 
 describe("required export preflight", () => {
@@ -1343,5 +1345,76 @@ describe("manage_exports", () => {
       error: "render validation failed",
       stderr_tail: "Non-monotonic DTS",
     });
+  });
+});
+
+describe("whose export it is reported as", () => {
+  const person = (id: string) => ({
+    user_id: id,
+    email: "",
+    display_name: "",
+    image_url: "",
+    metered: true,
+  });
+  const meta = {
+    duration_s: 10,
+    width: 1920,
+    height: 1080,
+    fps: 30,
+    quality: "medium",
+    project_id: "",
+  };
+
+  it("is the account that asked for it, even when a different one is signed in as it ends", async () => {
+    const { fs, store } = make();
+    await whenExportTelemetrySettles();
+    exportBeacon.mockClear();
+    useAuth.setState({ profile: person("user_alice") });
+    let release!: () => void;
+    const rendering = new Promise<void>((resolve) => (release = resolve));
+    let stamped: string | undefined;
+    const submitted = await submitExport({
+      store,
+      destPath: DEST,
+      stagePath: STAGE,
+      filename: "final.mp4",
+      meta,
+      run: async (_, _id, runMeta) => {
+        stamped = runMeta?.owner;
+        await rendering;
+        await fs.writeBytes(STAGE, new Uint8Array([1, 2, 3]));
+        return {};
+      },
+    });
+    useAuth.setState({ profile: person("user_bob") }); // while it renders, somebody else signs in
+    release();
+    await whenExportsSettle();
+    await whenExportTelemetrySettles();
+    expect((await whenExportEnds(submitted.job_id))?.state).toBe("done");
+    expect(stamped).toBe("user_alice"); // carried in the job's own record, so a restart keeps it too
+    expect(exportBeacon.mock.calls[0][0]).toMatchObject({ status: "done", owner: "user_alice" });
+  });
+
+  it("names nobody when nobody is known, rather than guessing", async () => {
+    const { fs, store } = make();
+    await whenExportTelemetrySettles();
+    exportBeacon.mockClear();
+    let stamped: unknown = "unset";
+    await submitExport({
+      store,
+      destPath: DEST,
+      stagePath: STAGE,
+      filename: "final.mp4",
+      meta,
+      run: async (_, _id, runMeta) => {
+        stamped = runMeta?.owner;
+        await fs.writeBytes(STAGE, new Uint8Array([1]));
+        return {};
+      },
+    });
+    await whenExportsSettle();
+    await whenExportTelemetrySettles();
+    expect(stamped).toBeUndefined();
+    expect(exportBeacon.mock.calls[0][0]).not.toHaveProperty("owner", expect.anything());
   });
 });

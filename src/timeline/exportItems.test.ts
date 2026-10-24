@@ -794,6 +794,30 @@ describe("export delivers separate files into a folder", () => {
     await whenExportsSettle();
     expect(p.disk.under(`${DL}/VHS clips`)).toEqual({ "Tape 14.mp4": "bytes of Tape 14.mp4" });
   });
+  it("reports a copy under the account that asked for it, even when another is signed in as it ends", async () => {
+    const person = (id: string) => ({
+      user_id: id,
+      email: "",
+      display_name: "",
+      image_url: "",
+      metered: true,
+    });
+    const p = await project();
+    useAuth.setState({ profile: person("user_alice") });
+    let release!: () => void;
+    p.disk.gates.set(`${DIR}/library/media_aaa.mp4`, new Promise<void>((r) => (release = r)));
+    const r = (await exportTool({ media_refs: ["media_aaa"] }, p.ctx)) as Any;
+    expect(r.ok, r.error).toBe(true);
+    useAuth.setState({ profile: person("user_bob") }); // the copy is still going when bob signs in
+    release();
+    await whenExportsSettle();
+    await whenExportTelemetrySettles();
+    expect(exportBeacon.mock.calls.at(-1)?.[0]).toMatchObject({
+      operation: "copy",
+      status: "done",
+      owner: "user_alice",
+    });
+  });
 });
 
 describe("one export call wakes the agent once", () => {

@@ -1,5 +1,8 @@
-// Import telemetry uses the logical project id, wherever its folder is. Anonymous export
-// telemetry omits project identity entirely. Neither request may expose filesystem paths.
+// `project_id` on every row the app sends is the project's id, wherever the project's folder is.
+// Seen live (2026-10-09): an import reported the project's whole folder path, the Windows user's
+// name inside it, while every other event sent the id; and an export reported the name the user
+// gave a folder Save As made. These drive the real import and the real export all the way to the
+// request the app sends, for the three places a project can be.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const readTextFile = vi.fn<(p: string) => Promise<string>>();
@@ -175,17 +178,16 @@ async function exportFrom(dir: string, id: string) {
   return sent("/telemetry/export")!;
 }
 
-describe("project identity in import and anonymous export telemetry", () => {
-  it("keeps the default project's import id and omits identity from its export", async () => {
+describe("the project_id the app sends", () => {
+  it("is the id for a project in the app folder, never its folder's path", async () => {
     const imported = await importInto(DEFAULT);
     const exported = await exportFrom(DEFAULT, ID);
     expect(imported).toMatchObject({ event: "media_import", ok: true, project_id: ID });
-    expect(exported).toMatchObject({ status: "done" });
-    expect(exported).not.toHaveProperty("project_id");
+    expect(exported).toMatchObject({ status: "done", project_id: ID });
     expect(JSON.stringify([imported, exported])).not.toMatch(LEAK);
   });
 
-  it("keeps a moved project's import id while its export remains anonymous", async () => {
+  it("is the id for a project Save As moved, never the name the user gave its folder", async () => {
     readTextFile.mockResolvedValue(
       JSON.stringify({ version: 1, projects: [{ id: ID, path: SAVED }] }),
     );
@@ -193,8 +195,7 @@ describe("project identity in import and anonymous export telemetry", () => {
     const imported = await importInto(SAVED);
     const exported = await exportFrom(SAVED, ID);
     expect(imported.project_id).toBe(ID);
-    expect(exported).toMatchObject({ status: "done" });
-    expect(exported).not.toHaveProperty("project_id");
+    expect(exported.project_id).toBe(ID);
     expect(JSON.stringify([imported, exported])).not.toMatch(LEAK);
   });
 
