@@ -1,7 +1,12 @@
 // Tells the server one export finished. Rendering is entirely local, so this row is the only
 // evidence the server ever gets that an export happened at all.
 //
+// It carries NO identity in its body: the server takes that from the authenticated request. A
+// user id in this body would be a value the client chose, and a per-user metric the client can
+// choose is not a metric. The request therefore MUST travel with the session (authedFetch);
+// release 0.21.6 sent it with no credentials at all, so every report was anonymous (V2-D109).
 import { apiBase } from "./config";
+import { authedFetch, hasSession } from "./auth";
 import { platform } from "../platform";
 import { hostInfo } from "../platform/host";
 
@@ -47,8 +52,27 @@ export interface ExportEvent {
   operation?: (typeof EXPORT_OPERATIONS)[number];
 }
 
-/** Legacy request-text bound retained for mixed-version compatibility. This collector sends no raw error text. */
+/** The server's bound on `error` (ExportEventBody, pinned by the server's tests). Over it, a
+ *  server that refuses long text dropped the whole row: every failed export went unreported. */
 export const MAX_EXPORT_ERROR = 300;
+
+/** A failure's text within the bound, keeping both ends: the exit code and cause come first, and
+ *  ffmpeg's verdict ("Conversion failed!") last. */
+function boundedError(error: string | undefined): string {
+  const e = error ?? "";
+  if (e.length <= MAX_EXPORT_ERROR) return e;
+  const marker = " ... ";
+  const head = Math.floor(((MAX_EXPORT_ERROR - marker.length) * 3) / 5);
+  const tail = MAX_EXPORT_ERROR - marker.length - head;
+  return e.slice(0, head) + marker + e.slice(e.length - tail);
+}
+
+/** A non-negative number within the server's bound for it. The server refuses a number outside
+ *  its bound, which drops the whole row, so the client clamps rather than lose the report. */
+function bounded(value: unknown, max: number): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.max(0, Math.min(n, max)) : 0;
+}
 
 function reasonFor(ev: ExportEvent): ExportReasonCode {
   if (ev.status === "done") return "none";
@@ -91,22 +115,31 @@ function sizeBand(ev: ExportEvent): ExportSizeBand {
  *  the user's file is already on disk, so a telemetry failure must be invisible to them. */
 export async function reportExport(ev: ExportEvent): Promise<void> {
   try {
-    const reason = reasonFor(ev);
-    const elapsed = Number(ev.elapsed_ms ?? 0);
-    await fetch(`${apiBase()}/telemetry/export`, {
+    // Signed out: there is no account to file the row under and the server would answer 401, so
+    // a beacon sends nothing rather than a guaranteed refusal.
+    if (!(await hasSession())) return;
+    await authedFetch(`${apiBase()}/telemetry/export`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      // Which build and which OS is the client's to state, not the caller's — every export
-      // reports them the same way, so no call site can get them wrong or leave them out.
+      // An explicit allow-list, never `...ev`: an export or job object spread into the body
+      // would send whatever fields it ever grows. Which build and which OS is the client's to
+      // state, not the caller's, so no call site can get them wrong or leave them out.
       // `platform` is the SHELL (tauri/web); the OS is what a per-platform failure is read by.
       body: JSON.stringify({
         status: ["done", "failed", "cancelled", "blocked", "declined"].includes(ev.status)
           ? ev.status
           : "failed",
-        elapsed_ms: Number.isFinite(elapsed)
-          ? Math.round(Math.max(0, Math.min(elapsed, 10_000_000_000)))
-          : 0,
-        reason_code: reason,
+        duration_s: bounded(ev.duration_s, 86_400),
+        size_bytes: Math.round(bounded(ev.size_bytes, 1e13)),
+        elapsed_ms: Math.round(bounded(ev.elapsed_ms, 10_000_000_000)),
+        width: Math.round(bounded(ev.width, 16_384)),
+        height: Math.round(bounded(ev.height, 16_384)),
+        fps: bounded(ev.fps, 1_000),
+        quality: String(ev.quality ?? "").slice(0, 20),
+        warnings: Math.round(bounded(ev.warnings, 10_000)),
+        error: boundedError(ev.error),
+        project_id: String(ev.project_id ?? "").slice(0, 200),
+        reason_code: reasonFor(ev),
         operation: EXPORT_OPERATIONS.includes(ev.operation as (typeof EXPORT_OPERATIONS)[number])
           ? ev.operation
           : "unknown",
@@ -119,8 +152,6 @@ export async function reportExport(ev: ExportEvent): Promise<void> {
         arch: hostInfo().arch,
         shell: platform.name,
       }),
-      credentials: "omit",
-      referrerPolicy: "no-referrer",
       // A background beacon must not be able to hang a shutdown drain on a stalled socket.
       signal: AbortSignal.timeout(10_000),
     });
