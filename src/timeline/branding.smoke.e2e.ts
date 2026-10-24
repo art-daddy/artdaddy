@@ -102,6 +102,39 @@ async function streamDurations(file: string): Promise<{ video: number; audio: nu
   };
 }
 
+type VideoColorInfo = {
+  pix_fmt: string | null;
+  color_range: string | null;
+  color_space: string | null;
+  color_transfer: string | null;
+  color_primaries: string | null;
+};
+
+async function videoColorInfo(file: string): Promise<VideoColorInfo> {
+  const r = await run(FP!, [
+    "-v",
+    "error",
+    "-select_streams",
+    "v:0",
+    "-show_entries",
+    "stream=pix_fmt,color_range,color_space,color_transfer,color_primaries",
+    "-of",
+    "json",
+    file,
+  ]);
+  expect(r.code, `ffprobe failed: ${r.stderr.slice(-300)}`).toBe(0);
+  const payload = JSON.parse(r.stdout) as { streams?: Partial<VideoColorInfo>[] };
+  const video = payload.streams?.[0];
+  if (!video) throw new Error(`ffprobe reported no video stream for ${file}`);
+  return {
+    pix_fmt: video.pix_fmt ?? null,
+    color_range: video.color_range ?? null,
+    color_space: video.color_space ?? null,
+    color_transfer: video.color_transfer ?? null,
+    color_primaries: video.color_primaries ?? null,
+  };
+}
+
 /** Average luma of ONE frame at `t`, optionally within a crop. Sampling a single instant is
  *  the point: a whole-file average would hide a bug that is present for two frames. */
 async function lumaAt(file: string, t: number, crop = ""): Promise<number> {
@@ -223,6 +256,7 @@ async function render(
     endcard?: string;
     branding?: Branding;
     canvas?: { width: number; height: number };
+    lossless?: boolean;
   } = {},
 ): Promise<string> {
   const out = path.join(cwd, `${tag}.mp4`);
@@ -239,7 +273,19 @@ async function render(
           }
         : undefined),
   });
-  const r = await run(FF!, plan.args, cwd);
+  const args = [...plan.args];
+  if (opts.lossless) {
+    expect(args[args.indexOf("-c:v") + 1], "lossless fixture requires libx264").toBe("libx264");
+    const crf = args.indexOf("-crf");
+    if (crf >= 0) args[crf + 1] = "0";
+    else args.splice(args.length - 1, 0, "-crf", "0");
+  }
+  const r = await run(FF!, args, cwd);
+  if (opts.lossless)
+    await fsp.writeFile(
+      path.join(cwd, `${tag}.render.json`),
+      JSON.stringify({ args, stderr: r.stderr }, null, 2),
+    );
   expect(r.code, `ffmpeg failed: ${r.stderr.slice(-800)}`).toBe(0);
   return out;
 }
@@ -694,6 +740,63 @@ describe.skipIf(!FF || !FP)("branded export (real ffmpeg)", () => {
     // would pass the assertion above while ruining every export.
     const rest = `crop=${W}:${Math.round(H * 0.6)}:0:0`;
     expect(await lumaAt(branded, t, rest)).toBeCloseTo(await lumaAt(plain, t, rest), 0);
+  }, 120_000);
+
+  it("keeps chromatic portrait footage unchanged outside the watermark", async () => {
+    const cwd = await scratch();
+    const src = path.resolve("e2e/ui/fixtures/mac-recording-preview.mp4");
+    const canvas = { width: 360, height: 640 };
+    const endcard = path.join(BRAND_DIR, endcardFile("9x16"));
+    const base = { endcard, endcardDuration: await durationOf(endcard) };
+    const branded = await render(cwd, src, true, "chromatic-portrait-branded", {
+      canvas,
+      withAudio: true,
+      lossless: true,
+      branding: { ...base, watermark: path.join(BRAND_DIR, watermarkFile("9x16")) },
+    });
+    const exempt = await render(cwd, src, true, "chromatic-portrait-exempt", {
+      canvas,
+      withAudio: true,
+      lossless: true,
+      branding: { ...base, watermark: null },
+    });
+    const version = await run(FF!, ["-version"]);
+    expect(version.code, version.stderr).toBe(0);
+    const ffmpegVersion = `${version.stdout}\n${version.stderr}`
+      .split(/\r?\n/)
+      .find((line) => line.startsWith("ffmpeg version "));
+    expect(ffmpegVersion).toMatch(/^ffmpeg version /);
+    const rest = "crop=360:384:0:0";
+    const corner = "crop=126:128:234:512";
+    const measured = {
+      brandedRest: await lumaAt(branded, 1.55, rest),
+      exemptRest: await lumaAt(exempt, 1.55, rest),
+      brandedCorner: await lumaAt(branded, 1.55, corner),
+      exemptCorner: await lumaAt(exempt, 1.55, corner),
+      videoEncoding: { encoder: "libx264", crf: 0 },
+      ffmpegVersion,
+      videoStreams: {
+        branded: await videoColorInfo(branded),
+        exempt: await videoColorInfo(exempt),
+      },
+    };
+    const evidence = path.resolve(
+      "reports/qa/exporter/branding",
+      `chromatic-portrait-${Date.now()}`,
+    );
+    await fsp.mkdir(evidence, { recursive: true });
+    await fsp.copyFile(branded, path.join(evidence, "branded.mp4"));
+    await fsp.copyFile(exempt, path.join(evidence, "exempt.mp4"));
+    for (const tag of ["branded", "exempt"])
+      await fsp.copyFile(
+        path.join(cwd, `chromatic-portrait-${tag}.render.json`),
+        path.join(evidence, `${tag}.render.json`),
+      );
+    await fsp.writeFile(path.join(evidence, "measured.json"), JSON.stringify(measured, null, 2));
+    const diagnostic = JSON.stringify(measured, null, 2);
+    expect(measured.brandedCorner - measured.exemptCorner, diagnostic).toBeGreaterThan(2);
+    // Windows/Linux ffmpeg is 0.52 off with either graph; the macOS RGB round trip this guards against is 1.04 off.
+    expect(Math.abs(measured.brandedRest - measured.exemptRest), diagnostic).toBeLessThan(0.75);
   }, 120_000);
 
   it("keeps an unbranded render free of both", async () => {

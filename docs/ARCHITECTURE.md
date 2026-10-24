@@ -147,6 +147,18 @@ Proposed exporter boundaries, reliability SLO, recovery, artifact verification a
 phase gates: [Exporter Architecture and Reliability](EXPORTER_ARCHITECTURE.md).
 That is a design proposal, not certification of the current exporter or a release.
 
+Delivery watermark composition stays in TV-range YUV420, matching the completed
+picture. The watermark is converted to YUVA420 and the overlay output is explicitly
+YUV420; automatic RGB negotiation otherwise shifts chromatic footage outside the
+visible mark. The chromatic-portrait smoke regression checks both visible corner
+pixels and that the rest-of-picture luma stays within 0.75 of a level (the macOS RGB
+round trip moves it 1.04; the Windows and Linux FFmpeg sits 0.52 off with either
+graph) using lossless H.264 video,
+so lossy encoder noise cannot masquerade as a colour shift. Its retained evidence
+and assertion messages include all four luma values, the FFmpeg version, and each
+output's pixel format and colour metadata. Evidence is written beneath
+`reports/qa/exporter/branding` so the existing CI export-artifact upload includes it.
+
 ### Bounded export execution (2026-10-13, local; not released)
 
 An external filtergraph alone does not fix Windows error 206: hundreds of absolute
