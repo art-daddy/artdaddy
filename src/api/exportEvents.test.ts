@@ -261,7 +261,9 @@ describe("the export beacon", () => {
           });
           const request = fetchMock.mock.calls[0][1];
           const body = JSON.parse(String(request.body));
-          expect((request.headers as Record<string, string>).Authorization).toBe("Bearer tok_alice");
+          expect((request.headers as Record<string, string>).Authorization).toBe(
+            "Bearer tok_alice",
+          );
           expect(Object.keys(body).sort()).toEqual(REPORT_KEYS);
           expect(body).toMatchObject({
             reason_code: reason,
