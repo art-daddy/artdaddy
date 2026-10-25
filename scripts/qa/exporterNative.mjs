@@ -8,7 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer, normalizePath } from "vite";
 import { readLinuxMemoryCgroup, cgroupFits, sameCgroup, cgroupEncoderPids } from "./exporterLinuxMemory.mjs";
-import { qaServerOptions } from "./exporterVite.mjs";
+import { qaServerOptionsForRun } from "./exporterVite.mjs";
 import { startRecovery } from "./exporterRecovery.mjs";
 import { BASE_OUTCOME_BUDGET_MS, captionsFadedIn, describePictureFailures, estimateFailures, judgeSourcePictures, outcomeBudgetMs, sha256OfFile, temporarySpaceFailures } from "./exporterQualification.mjs";
 
@@ -287,7 +287,7 @@ Object.assign(process.env, { ARTDADDY_DATA_DIR: root, ARTDADDY_PROJECTS_DIR: pat
 const nativeCore = `/@fs/${normalizePath(path.join(repository, "node_modules", "@tauri-apps", "api", "core.js"))}`;
 const virtualCore = "\0exporter-qa-isolated-core";
 const vite = await createServer({ root: repository, configFile: path.join(repository, "vite.config.ts"),
-  server: qaServerOptions,
+  server: await qaServerOptionsForRun(),
   plugins: [{ name: "exporter-qa-isolated-root", enforce: "pre",
     resolveId: (name) => name === "@tauri-apps/api/core" ? virtualCore : undefined,
     load: (name) => name === virtualCore ? `
@@ -402,7 +402,7 @@ try {
     sourceFiles.push("package.json", "package-lock.json", "src-tauri/Cargo.toml", "src-tauri/Cargo.lock",
       "src-tauri/tauri.conf.json", "scripts/qa/exporterNative.mjs", "scripts/qa/exporterNative.ts", "scripts/qa/exporterNative.html",
       "scripts/qa/exporterMemory.ps1", "scripts/qa/exporterLinuxMemory.mjs", "scripts/qa/exporterPromiseCases.json",
-      "scripts/qa/exporterPromiseReport.mjs", "scripts/qa/exporterQualification.mjs", "scripts/qa/exporterVite.mjs",
+      "scripts/qa/exporterPromiseReport.mjs", "scripts/qa/exporterQualification.mjs", "scripts/qa/exporterVite.mjs", "scripts/qa/exporterColdStart.mjs",
       "scripts/qa/exporterLinuxMemory.test.mjs",
       "scripts/qa/exporterPromiseReport.test.mjs", ".github/workflows/exporter-native-qa.yml");
     proof.sourceFiles = await Promise.all(sourceFiles.sort().map(async (filename) => ({ path: filename.replaceAll(path.sep, "/"), sha256: await fileHash(path.join(repository, filename)) })));
@@ -414,6 +414,7 @@ try {
   const address = vite.httpServer.address();
   assert.equal(typeof address, "object");
   const url = `http://127.0.0.1:${address.port}`;
+  proof.pageOrigin = url;
   const page = `${url}/scripts/qa/exporterNative.html?${new URLSearchParams({ root, identifier, profileSeconds: String(profileSeconds), denseSourceRoot, promiseId, fastEncoderProbe })}`;
   const config = path.join(root, "tauri.qa.json");
   await writeFile(config, JSON.stringify({ identifier,

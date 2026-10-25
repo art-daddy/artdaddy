@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
+import { coldStartFailure } from "./exporterColdStart.mjs";
 
 // Pure verdicts shared by the native harness (which records raw measurements) and the report consumer (which
 // re-derives every verdict from those measurements instead of trusting a recorded boolean).
@@ -121,7 +122,8 @@ export function estimateFailures(evidence) {
   if (!evidence || evidence.version !== 1 || !evidence.cold || !evidence.estimate) return ["no recorded estimate evidence"];
   const failures = [];
   const { cold, estimate } = evidence;
-  if (cold.historySamples !== 0 || cold.estimateSeconds !== null) failures.push("cold: the export was not cold, comparable local history already existed");
+  const notCold = coldStartFailure(cold);
+  if (notCold) failures.push(`cold: ${notCold}`);
   if (!Array.isArray(cold.preflight) || cold.preflight.length !== 1) failures.push("cold: the user was not shown exactly one confirmation");
   else {
     const facts = estimateFacts(cold.preflight);

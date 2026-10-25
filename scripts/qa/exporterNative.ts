@@ -11,9 +11,10 @@ import { buildRenderCommand, queueRenderJob } from "../../src/timeline/render";
 import { listExportRecords, whenExportEnds, whenExportsSettle, whenExportTelemetrySettles } from "../../src/timeline/exportQueue";
 import { ensureTimeline } from "../../src/timeline/engine";
 import { resolveExportResources } from "../../src/platform/host";
-import { estimateExportFromHistory } from "../../src/timeline/exportOptions";
+import { estimateExportFromHistory, type ExportCalibration } from "../../src/timeline/exportOptions";
 import { __setExportConfirmationForTests } from "../../src/lib/confirm";
 import { useExportJob } from "../../src/store/exportJob";
+import { coldStartFailure } from "./exporterColdStart.mjs";
 
 const params = new URLSearchParams(location.search);
 const root = params.get("root") ?? "";
@@ -25,6 +26,13 @@ const status = document.getElementById("status")!;
 function check(value: unknown, message: string): asserts value {
   if (!value) throw new Error(message);
 }
+
+// What the product's history holds, in the terms its estimator matches on: enough to see where a sample came from.
+const describeSample = (sample: ExportCalibration) => ({
+  width: sample.workload.width, height: sample.workload.height, fps: sample.workload.fps, durationSeconds: sample.workload.durationSeconds,
+  mediaLayers: sample.workload.peakMediaLayers, visualLayers: sample.workload.peakVisualLayers, engine: sample.engine,
+  encoder: sample.encoder ?? null, quality: sample.quality, elapsedSeconds: sample.elapsedSeconds, memoryBytes: sample.memoryBytes,
+});
 
 // The native payload allowance returns as the last owner of an export's files lets go, which can trail the terminal
 // state. Sample it inside a bounded window and keep every sample: the last one is what the verdict is derived from.
@@ -239,6 +247,13 @@ async function exercise(): Promise<void> {
     // The product's own estimator over the real history, asked exactly as the export request asks it.
     const estimateSeconds = estimateExportFromHistory(plan.workload, plan.output, "medium", plan.selection.backend,
       useExportJob.getState().calibrations, calibrationEncoder).seconds;
+    // A cold export is one the product has nothing to estimate from, so it must ask. That only holds if no earlier run's history reached
+    // this page (a web view whose storage outlives the app can carry it over). Say so now, before minutes of encoding, instead of
+    // letting the missing confirmation fail a later check with a misleading message.
+    const historyAtStart = useExportJob.getState().calibrations.map(describeSample);
+    const notCold = label === "cold" ? coldStartFailure({ historySamples, estimateSeconds }) : null;
+    check(!notCold, `The ${definition.id} cold pass is not cold (${notCold}). An earlier run's history reached this run, so the run is void: ` +
+      JSON.stringify({ origin: location.origin, estimateSeconds, historyAtStart }));
     const resources = await resolveExportResources(destination);
     mark("resourcesReady");
     const confirmationOffset = preflightRequests.length;
@@ -292,7 +307,7 @@ async function exercise(): Promise<void> {
       fastEncoderProbe: fastEncoderProbe || null,
       localFastEnabled: !!fastEncoderProbe,
       resources, workload: plan.workload,
-      allowanceSamples: allowance.samples, historySamples, estimateSeconds,
+      allowanceSamples: allowance.samples, historySamples, estimateSeconds, pageOrigin: location.origin, historyAtStart,
       publicationVerified, finalIdentity: delivery?.identity,
       stagingCleaned: !(await exists(stage)), scratchCleaned: !!scratchPath && !(await exists(scratchPath)),
       scratchEvidenceError: scratchError ? String(scratchError) : null,

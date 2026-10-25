@@ -3,6 +3,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -12,7 +13,8 @@ import {
   BASE_OUTCOME_BUDGET_MS, MIN_INFORMATIVE_SAMPLES, NEAR_BLANK_LEVEL, NEAR_EXACT_ERROR, REQUIRED_PASSES,
   captionsFadedIn, describePictureFailures, estimateFacts, estimateFailures, judgeSourcePictures, outcomeBudgetMs, sha256OfFile, temporarySpaceFailures,
 } from "./exporterQualification.mjs";
-import { qaServerOptions } from "./exporterVite.mjs";
+import { coldStartFailure } from "./exporterColdStart.mjs";
+import { freeLoopbackPort, qaServerOptionsForRun } from "./exporterVite.mjs";
 import { startRecovery } from "./exporterRecovery.mjs";
 import { REAL_ALLOWANCE_BYTES, REAL_CAPTION_SAMPLES, REAL_COLD_MESSAGE, REAL_PHONE_PICTURES, REAL_WEB_PICTURES } from "./exporterQualification.fixtures.mjs";
 
@@ -409,14 +411,89 @@ async function hotSocketAccepted(options) {
 
 test("the harness's dev server offers no hot-module socket, so Vite's reload-on-disconnect cannot fire", async () => {
   // The control proves the probe can tell the difference: a stock dev server does accept the socket.
-  assert.equal(await hotSocketAccepted({ host: "127.0.0.1", port: 0, strictPort: true }), true, "the probe must see a stock dev server's hot socket");
-  assert.equal(await hotSocketAccepted(qaServerOptions), false, "the harness's dev server must not accept a hot-module socket");
+  assert.equal(await hotSocketAccepted({ host: "127.0.0.1", port: await freeLoopbackPort(), strictPort: true }), true, "the probe must see a stock dev server's hot socket");
+  assert.equal(await hotSocketAccepted(await qaServerOptionsForRun()), false, "the harness's dev server must not accept a hot-module socket");
 });
 
 test("the native harness serves its page with those options and carries no private copy of them", async () => {
   const source = await readFile(new URL("./exporterNative.mjs", import.meta.url), "utf8");
-  assert.match(source, /server: qaServerOptions,/);
+  assert.match(source, /server: await qaServerOptionsForRun\(\),/);
   assert.doesNotMatch(source, /server: \{ host: "127\.0\.0\.1"/);
+});
+
+// Vite 5.4 reads a configured port of 0 as "not set" and serves on 5173, so every run once shared one page origin, and with it any
+// export history a web view kept between runs (macOS shares one WebKit store between unbundled debug builds). The options must name
+// a port, and the server must really listen on it.
+test("each run's dev server listens on the port it was given, so no two runs share a page origin", async () => {
+  const options = await qaServerOptionsForRun();
+  assert.ok(Number.isInteger(options.port) && options.port > 0 && options.port < 65536, `the options must name a real port, got ${options.port}`);
+  assert.equal(options.strictPort, true);
+  const root = await mkdtemp(path.join(os.tmpdir(), "exporter-vite-"));
+  await writeFile(path.join(root, "index.html"), "<!doctype html><title>qa</title>");
+  const servers = [];
+  try {
+    // Two runs at once: the second must not collide with the first, which a free-port pick allows and Vite's default does not.
+    for (const next of [options, await qaServerOptionsForRun()]) {
+      const server = await createServer({ root, configFile: false, logLevel: "silent", server: next });
+      servers.push(server);
+      await server.listen();
+      assert.equal(server.httpServer.address().port, next.port, "the server must listen on the port the options name, not on Vite's default");
+    }
+    assert.notEqual(servers[0].httpServer.address().port, servers[1].httpServer.address().port, "two runs must not share an origin");
+  } finally {
+    for (const server of servers) await server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the free-port pick never returns a port that is already held", async () => {
+  const held = [];
+  try {
+    for (let index = 0; index < 6; index++) {
+      const port = await freeLoopbackPort();
+      assert.ok(!held.some((server) => server.address().port === port), `port ${port} was already held`);
+      const server = net.createServer();
+      await new Promise((resolve, reject) => { server.once("error", reject); server.listen(port, "127.0.0.1", resolve); });
+      held.push(server);
+    }
+  } finally {
+    for (const server of held) await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+// A cold export is one the product has nothing to estimate from. Two consumers judge it (the page, before it spends minutes encoding, and the
+// report consumer afterwards); they must never disagree, so both take the rule from one module.
+test("the page's cold-start rule and the report consumer's agree on every history the product could have had", () => {
+  // What the rule means, stated without reference to its implementation: a leftover sample from an earlier run (a pilot of the same
+  // shape, say) means the product can estimate, so it will not ask, and the export is not cold.
+  assert.equal(coldStartFailure({ historySamples: 0, estimateSeconds: null }), null);
+  for (const [historySamples, estimateSeconds] of [[1, 360], [3, 11], [0, 5], [1, null], [24, 0]])
+    assert.notEqual(coldStartFailure({ historySamples, estimateSeconds }), null, `${historySamples} samples, estimate ${estimateSeconds}`);
+  for (const missing of [undefined, null, "cold", 0]) assert.notEqual(coldStartFailure(missing), null, String(missing));
+  // And the two consumers must never disagree, whichever history the product could have had.
+  const history = fc.oneof(fc.constant(0), fc.integer({ min: 1, max: 24 }), fc.constant(-1), fc.constant(null), fc.constant(undefined), fc.constant("0"));
+  const estimate = fc.oneof(fc.constant(null), fc.double({ min: 0, max: 10_000, noNaN: true }), fc.constant(undefined), fc.constant("5"));
+  fc.assert(fc.property(history, estimate, (historySamples, estimateSeconds) => {
+    const start = { ...cold(), historySamples, estimateSeconds };
+    const consumerSaysNotCold = estimateFailures(estimates(silent(), start)).some((message) => message.startsWith("cold: the export was not cold"));
+    assert.equal(coldStartFailure(start) !== null, consumerSaysNotCold);
+  }), { numRuns: 300 });
+});
+
+test("the harness page refuses a cold pass that is not cold before it queues the export, by the shared rule", async () => {
+  const page = await readFile(new URL("./exporterNative.ts", import.meta.url), "utf8");
+  const rule = page.indexOf("coldStartFailure({");
+  const refusal = page.indexOf("check(!notCold");
+  const queued = page.indexOf("const queued = await queueRenderJob(context, { plan, admission: captured");
+  assert.ok(rule > 0 && rule < refusal && refusal < queued, "the cold-start rule must be applied, and the run stopped, before the cold export is queued");
+  assert.doesNotMatch(page, /historySamples\s*!==?\s*0/, "the page must use the shared rule, not its own copy of it");
+  assert.match(page, /pageOrigin: location\.origin/, "a result must say which origin its page was served from");
+});
+
+test("the native proof's source set names every harness module a run depends on", async () => {
+  const source = await readFile(new URL("./exporterNative.mjs", import.meta.url), "utf8");
+  for (const name of ["exporterVite.mjs", "exporterColdStart.mjs", "exporterQualification.mjs"])
+    assert.ok(source.includes(`"scripts/qa/${name}"`), `${name} is missing from the proof's source set`);
 });
 
 // The recovery instance that exited 0 a moment after starting, in two of sixteen back-to-back pilots on 2026-10-23, was the single-instance
