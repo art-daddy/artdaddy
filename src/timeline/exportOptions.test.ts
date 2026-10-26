@@ -5,13 +5,16 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
 import {
+  EXPORT_SPEED_REVISION,
   assessExport,
   crfFor,
   estimateExportFromHistory,
+  isKnownProblem,
   outputFps,
   outputSize,
   type ExportCalibration,
   type ExportEstimates,
+  type ExportPreflightReason,
 } from "./exportOptions";
 import type { RenderWorkload } from "./renderPlan";
 
@@ -79,10 +82,56 @@ describe("export preflight assessment", () => {
     ).toMatchObject({ severity: "notice", reasons: ["slow"] });
     expect(
       assessExport(workload, resources, { ...estimates, seconds: null }, budgets),
-    ).toMatchObject({ severity: "warning", reasons: ["time_unknown"] });
+    ).toMatchObject({ severity: "none", reasons: ["time_unknown"] });
     expect(
       assessExport(workload, { ...resources, scratch_free_bytes: null }, estimates, budgets),
-    ).toMatchObject({ severity: "warning", reasons: ["disk_unknown"] });
+    ).toMatchObject({ severity: "none", reasons: ["disk_unknown"] });
+  });
+
+  it("asks only about a problem the export is known to have, never about a missing measurement", () => {
+    // One scenario per reason, each producing exactly that reason; adding a reason breaks the build here.
+    const scenario: Record<ExportPreflightReason, () => ReturnType<typeof assessExport>> = {
+      outside_promise: () =>
+        assessExport({ ...workload, peakVisualLayers: 9 }, resources, estimates, budgets),
+      memory_shortage: () =>
+        assessExport(workload, resources, { ...estimates, memoryBytes: 5e9 }, budgets),
+      disk_shortage: () =>
+        assessExport(
+          workload,
+          { ...resources, destination_free_bytes: 1.05e9 },
+          estimates,
+          budgets,
+        ),
+      temporary_limit: () =>
+        assessExport(workload, resources, { ...estimates, temporaryBytes: 19e9 }, budgets),
+      execution_limit: () =>
+        assessExport(workload, resources, { ...estimates, seconds: 28801 }, budgets),
+      memory_unknown: () =>
+        assessExport(workload, resources, { ...estimates, memoryBytes: null }, budgets),
+      disk_unknown: () =>
+        assessExport(workload, { ...resources, scratch_free_bytes: null }, estimates, budgets),
+      time_unknown: () =>
+        assessExport(workload, resources, { ...estimates, seconds: null }, budgets),
+      slow: () => assessExport(workload, resources, { ...estimates, seconds: 150 }, budgets),
+    };
+    // Written out, not derived from isKnownProblem, so this pins which reasons ask.
+    const asked: Record<ExportPreflightReason, "warning" | "notice" | "none"> = {
+      outside_promise: "warning",
+      memory_shortage: "warning",
+      disk_shortage: "warning",
+      temporary_limit: "warning",
+      execution_limit: "warning",
+      slow: "notice",
+      memory_unknown: "none",
+      disk_unknown: "none",
+      time_unknown: "none",
+    };
+    for (const reason of Object.keys(scenario) as ExportPreflightReason[]) {
+      const result = scenario[reason]();
+      expect(result.reasons, reason).toEqual([reason]);
+      expect(result.severity, reason).toBe(asked[reason]);
+      expect(isKnownProblem(reason), reason).toBe(asked[reason] === "warning");
+    }
   });
 
   it("does not put missing or invalid workload values inside the promise", () => {
@@ -195,6 +244,7 @@ describe("local measured export estimates", () => {
     output,
     quality: "medium",
     engine: "partition-pipes-v1",
+    revision: EXPORT_SPEED_REVISION,
     elapsedSeconds: 16,
     finalBytes: 2_400_000,
     memoryBytes: 1_000_000_000,
@@ -202,6 +252,19 @@ describe("local measured export estimates", () => {
   };
   const estimate = (target = workload, history: readonly ExportCalibration[] = [sample]) =>
     estimateExportFromHistory(target, output, "medium", "partition-pipes-v1", history);
+
+  it("estimates only from measurements made under the current speed revision", () => {
+    const unknown = { seconds: null, memoryBytes: null, temporaryBytes: null, finalBytes: null };
+    for (const revision of [undefined, EXPORT_SPEED_REVISION - 1, EXPORT_SPEED_REVISION + 1])
+      expect(estimate(workload, [{ ...sample, revision }])).toEqual(unknown);
+    expect(
+      estimate(workload, [
+        { ...sample, revision: EXPORT_SPEED_REVISION - 1, elapsedSeconds: 500 },
+        sample,
+        { ...sample, revision: EXPORT_SPEED_REVISION + 1, elapsedSeconds: 900 },
+      ]).seconds,
+    ).toBe(16);
+  });
 
   it("does not invent observations for absent or incompatible history", () => {
     const unknown = { seconds: null, memoryBytes: null, temporaryBytes: null, finalBytes: null };

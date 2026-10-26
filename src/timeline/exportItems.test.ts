@@ -27,6 +27,8 @@ import { __resetJobNotes, pendingJobNotes } from "../store/jobNotes";
 import { setClerkTokenProvider } from "../api/auth";
 import { useAuth } from "../store/auth";
 import { __setExportConfirmationForTests } from "../lib/confirm";
+import { useExportJob } from "../store/exportJob";
+import * as host from "../platform/host";
 import { ClientToolRegistry } from "../tools/registry";
 import { FakeJobs } from "../test/fakeJobs";
 import { __resetJobSupervisor, __setJobSupervisor } from "../tools/jobSupervisor";
@@ -558,11 +560,35 @@ describe("export delivers separate files into a folder", () => {
     expect(Object.keys(p.disk.under(`${DL}/renders`))).toEqual(["proj.mp4"]);
   });
 
+  /** Gives the next export of these args a known problem to be asked about: a past run of the
+   *  same export is on record as having overrun the time limit. */
+  async function recordAnOverrun(p: Setup, args: Record<string, unknown>): Promise<void> {
+    vi.spyOn(host, "resolveExportResources").mockResolvedValue({
+      total_memory_bytes: 16e9,
+      available_memory_bytes: 8e9,
+      local_fast_candidate: false,
+      scratch_free_bytes: 100e9,
+      destination_free_bytes: 100e9,
+      budgets: { memoryBytes: 4e9, temporaryBytes: 18e9, executionSeconds: 28800 },
+    });
+    const warmUp = (await requestedExport({ ...args, output_dir: "warm-up" }, p.ctx)) as Any;
+    expect(warmUp.ok, warmUp.error).toBe(true);
+    await whenExportsSettle();
+    await whenExportTelemetrySettles();
+    const measured = useExportJob.getState().calibrations;
+    expect(measured.length, "the warm-up export recorded no measurement").toBeGreaterThan(0);
+    useExportJob.setState({
+      calibrations: measured.map((entry) => ({ ...entry, elapsedSeconds: 40_000 })),
+    });
+    p.ffmpeg.length = 0;
+    __resetExportQueue();
+    exportBeacon.mockClear();
+  }
+
   it.each(["whole", "clip", "copy"] as const)(
     "does not create a destination folder after Cancel for %s export",
     async (kind) => {
       const p = await project();
-      __setExportConfirmationForTests(async () => "cancel");
       const args = {
         output_dir: "not-created-without-consent",
         ...(kind === "clip"
@@ -571,6 +597,9 @@ describe("export delivers separate files into a folder", () => {
             ? { media_refs: ["media_aaa"] }
             : {}),
       };
+      // A copy has no workload, so it is asked about regardless; the other two only for a known problem.
+      if (kind !== "copy") await recordAnOverrun(p, args);
+      __setExportConfirmationForTests(async () => "cancel");
       const result = (await requestedExport(args, p.ctx)) as Any;
       expect(result.ok).toBe(false);
       expect(result.error).toContain("cancelled before submission");

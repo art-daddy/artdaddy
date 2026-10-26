@@ -1,8 +1,8 @@
 import fc from "fast-check";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useExportJob } from "./exportJob";
-import type { ExportCalibration } from "../timeline/exportOptions";
+import { EXPORT_SPEED_REVISION, type ExportCalibration } from "../timeline/exportOptions";
 
 const sample: ExportCalibration = {
   workload: {
@@ -19,6 +19,7 @@ const sample: ExportCalibration = {
   output: { width: 1920, height: 1080, fps: 30 },
   quality: "medium",
   engine: "partition-pipes-v1",
+  revision: EXPORT_SPEED_REVISION,
   elapsedSeconds: 16,
   finalBytes: 2_400_000,
   memoryBytes: null,
@@ -83,5 +84,38 @@ describe("local export calibration records", () => {
       }),
       { numRuns: 40 },
     );
+  });
+
+  it("keeps the speed revision a measurement was made under and omits a malformed one", () => {
+    useExportJob.getState().rememberCalibration({ ...sample, revision: 7 });
+    for (const revision of [-1, NaN, Infinity, "1", null, {}])
+      useExportJob
+        .getState()
+        .rememberCalibration(JSON.parse(JSON.stringify({ ...sample, revision })));
+    const [made, ...malformed] = useExportJob.getState().calibrations;
+    expect(made.revision).toBe(7);
+    expect(malformed).toHaveLength(6);
+    for (const entry of malformed) expect(entry.revision).toBeUndefined();
+  });
+
+  it("saves history under a name that does not change with the app version", () => {
+    localStorage.clear();
+    useExportJob.getState().rememberCalibration(sample);
+    const keys = Array.from({ length: localStorage.length }, (_, index) =>
+      localStorage.key(index)!,
+    );
+    const history = keys.filter((key) => key.includes("calibration"));
+    expect(history).toHaveLength(1);
+    expect(history[0]).not.toContain(__ARTDADDY_RELEASE__);
+  });
+
+  it("starts a new session from what the last one measured", async () => {
+    localStorage.clear();
+    useExportJob.getState().rememberCalibration({ ...sample, elapsedSeconds: 33 });
+    vi.resetModules();
+    const reopened = (await import("./exportJob")).useExportJob;
+    expect(reopened.getState().calibrations).toEqual([
+      expect.objectContaining({ elapsedSeconds: 33, revision: EXPORT_SPEED_REVISION }),
+    ]);
   });
 });

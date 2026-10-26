@@ -15,6 +15,9 @@ import type { Branding } from "./branding";
 import type { RenderWorkload } from "./renderPlan";
 import type { ExportResources } from "../platform/host";
 
+/** Bump when exports get faster, slower or hungrier; measurements from before then stop estimating. */
+export const EXPORT_SPEED_REVISION = 1;
+
 export function finalEncoderPolicy(
   output: { width: number; height: number },
   engine: ExportEngine,
@@ -49,6 +52,7 @@ export interface ExportCalibration {
   readonly quality: string;
   readonly engine: ExportEngine;
   readonly encoder?: ExportEncoder;
+  readonly revision?: number;
   readonly elapsedSeconds: number;
   readonly finalBytes: number;
   readonly memoryBytes: number | null;
@@ -66,6 +70,7 @@ export function estimateExportFromHistory(
   const samples = history.filter(
     (sample) =>
       (sample.encoder ?? "x264-crf") === encoder &&
+      sample.revision === EXPORT_SPEED_REVISION &&
       sample.quality === quality &&
       sample.engine === engine &&
       sample.workload.width === workload.width &&
@@ -129,6 +134,21 @@ export type ExportPreflightReason =
   | "time_unknown"
   | "execution_limit"
   | "slow";
+
+// The user is asked about a problem the export is known to have, never about a measurement that is missing.
+const KNOWN_PROBLEM: Record<ExportPreflightReason, boolean> = {
+  outside_promise: true,
+  memory_shortage: true,
+  disk_shortage: true,
+  temporary_limit: true,
+  execution_limit: true,
+  memory_unknown: false,
+  disk_unknown: false,
+  time_unknown: false,
+  slow: false,
+};
+
+export const isKnownProblem = (reason: ExportPreflightReason): boolean => KNOWN_PROBLEM[reason];
 
 export interface ExportAssessment {
   readonly promiseLine: "hd" | "heavy_hd" | "4k" | "outside";
@@ -206,9 +226,9 @@ export function assessExport(
     promiseLine,
     estimates,
     reasons,
-    severity: reasons.some((reason) => reason !== "slow")
+    severity: reasons.some(isKnownProblem)
       ? "warning"
-      : reasons.length
+      : reasons.includes("slow")
         ? "notice"
         : "none",
   };

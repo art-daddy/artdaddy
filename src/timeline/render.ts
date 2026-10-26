@@ -31,6 +31,7 @@ import {
 } from "./ffmpegProgress";
 import { canvasFps, isNum, toSecondsView } from "./frames";
 import {
+  EXPORT_SPEED_REVISION,
   crfFor,
   finalEncoderPolicy,
   outputFps,
@@ -3635,6 +3636,7 @@ export async function prepareRenderSubmission(
       quality: request.quality || "medium",
       engine: renderPlan.selection.backend,
       encoder: renderPlan.encoder ?? (fast ? ("amf-cqp18" as const) : ("x264-crf" as const)),
+      revision: EXPORT_SPEED_REVISION,
     },
   };
   const plan: ExportJobPlan = {

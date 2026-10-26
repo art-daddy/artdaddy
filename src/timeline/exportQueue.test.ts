@@ -28,7 +28,7 @@ import { __setExportConfirmationForTests, type ExportConfirmation } from "../lib
 import { endProjectSession } from "../tools/coordinator";
 import { useExportJob } from "../store/exportJob";
 import { useAuth } from "../store/auth";
-import type { ExportCalibration } from "./exportOptions";
+import { EXPORT_SPEED_REVISION, type ExportCalibration } from "./exportOptions";
 import { FakeJobs } from "../test/fakeJobs";
 import * as host from "../platform/host";
 
@@ -133,7 +133,10 @@ afterEach(async () => {
 });
 
 describe("required export preflight", () => {
-  const calibration: Pick<ExportCalibration, "workload" | "output" | "quality" | "engine"> = {
+  const calibration: Pick<
+    ExportCalibration,
+    "workload" | "output" | "quality" | "engine" | "revision"
+  > = {
     workload: {
       width: 1920,
       height: 1080,
@@ -148,6 +151,7 @@ describe("required export preflight", () => {
     output: { width: 1920, height: 1080, fps: 30 },
     quality: "medium",
     engine: "partition-pipes-v1",
+    revision: EXPORT_SPEED_REVISION,
   };
 
   it.each(["slow", "batch-space"] as const)(
@@ -207,6 +211,109 @@ describe("required export preflight", () => {
       expect(listExportRecords()).toHaveLength(0);
     },
   );
+
+  const roomy = {
+    total_memory_bytes: 1000,
+    available_memory_bytes: 500,
+    local_fast_candidate: false,
+    scratch_free_bytes: 1000,
+    destination_free_bytes: 1000,
+    budgets: { memoryBytes: 500, temporaryBytes: 500, executionSeconds: 28800 },
+  };
+
+  /** Submit one in-scope export and report what the user was asked, and whether it then started. */
+  async function submitAsked(opts: {
+    fps?: number;
+    history?: Partial<ExportCalibration>;
+    scratch?: number;
+  }) {
+    const { fs, store } = make();
+    vi.spyOn(host, "resolveExportResources").mockResolvedValue({
+      ...roomy,
+      scratch_free_bytes: opts.scratch ?? roomy.scratch_free_bytes,
+    });
+    useExportJob.setState({
+      calibrations: opts.history
+        ? [
+            {
+              ...calibration,
+              elapsedSeconds: 10,
+              finalBytes: 100,
+              memoryBytes: 100,
+              temporaryBytes: 10,
+              ...opts.history,
+            },
+          ]
+        : [],
+    });
+    let shown: { message: string; warning: boolean } | undefined;
+    __setExportConfirmationForTests(async (message, warning) => {
+      shown = { message, warning };
+      return "cancel";
+    });
+    let readiness: string | undefined;
+    const workload = { ...calibration.workload, fps: opts.fps ?? calibration.workload.fps };
+    const result = await submitExports([
+      {
+        store,
+        dependencies: [],
+        destPath: DEST,
+        stagePath: `${DEST}.part`,
+        filename: "movie.mp4",
+        workload,
+        meta: {
+          duration_s: 10,
+          width: 1920,
+          height: 1080,
+          fps: workload.fps,
+          quality: "medium",
+          project_id: "",
+          calibration,
+        },
+        run: async (_, _id, meta) => {
+          readiness = meta?.readiness;
+          await fs.writeBytes(`${DEST}.part`, new Uint8Array([1, 2, 3]));
+          return {};
+        },
+      },
+    ]).then(
+      () => "started",
+      (error: Error) => error.message,
+    );
+    await whenExportsSettle();
+    return { shown, result, readiness };
+  }
+
+  it("starts an in-scope export without asking when only measurements are missing", async () => {
+    const { shown, result, readiness } = await submitAsked({});
+    expect(shown).toBeUndefined();
+    expect(result).toBe("started");
+    // Starting silently must not claim storage was checked.
+    expect(readiness).toBe("unknown");
+  });
+
+  it.each([
+    ["outside the promise", { fps: 120 }],
+    ["memory", { history: { memoryBytes: 600 } }],
+    ["storage", { history: { temporaryBytes: 400 }, scratch: 300 }],
+    ["time limit", { history: { elapsedSeconds: 40_000 } }],
+  ] as const)(
+    "asks, with the warning wording, about a known problem: %s",
+    async (_problem, opts) => {
+      const { shown, result } = await submitAsked(opts);
+      expect(result).toContain("cancelled before submission");
+      expect(shown?.warning).toBe(true);
+      expect(shown?.message).toContain("Continue anyway?");
+    },
+  );
+
+  it("does not warn from a measurement made under another speed revision", async () => {
+    const { shown, result } = await submitAsked({
+      history: { revision: EXPORT_SPEED_REVISION - 1, elapsedSeconds: 40_000 },
+    });
+    expect(shown).toBeUndefined();
+    expect(result).toBe("started");
+  });
 
   it.each([true, false])(
     "records comparable calibration only after published success=%s",
