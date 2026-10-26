@@ -14,6 +14,7 @@ import { ensureTimeline, loadTimeline } from "./engine";
 import type { Timeline } from "./model";
 import { addClipsTool, addTextClipsTool } from "./placement";
 import {
+  buildAudioRenderCommand,
   buildRenderCommand,
   canvasDuration,
   exportDestination,
@@ -70,6 +71,32 @@ function tl(clips: Any[], canvas = { width: 1920, height: 1080, fps: 30 }): Time
     }),
   );
   return { canvas, tracks } as Timeline;
+}
+
+/** One entry per `-i` of a command: the input, and the options between the previous input and it (its own input options). */
+function optionsBeforeEachInput(args: string[]): { input: string; options: string[] }[] {
+  const entries: { input: string; options: string[] }[] = [];
+  let start = 0;
+  args.forEach((arg, index) => {
+    if (arg !== "-i") return;
+    entries.push({ input: args[index + 1], options: args.slice(start, index) });
+    start = index + 2;
+  });
+  return entries;
+}
+
+/** The decoder thread count among an input's own options, or null when it carries none. */
+function decoderThreadsOfInput(options: string[]): number | null {
+  const at = options.indexOf("-threads:v");
+  return at >= 0 ? Number(options[at + 1]) : null;
+}
+
+/** Every input of a command with the decoder thread count it carries (null: none). */
+function decoderFlags(args: string[]): { input: string; threads: number | null }[] {
+  return optionsBeforeEachInput(args).map((entry) => ({
+    input: entry.input,
+    threads: decoderThreadsOfInput(entry.options),
+  }));
 }
 
 describe("combined-workload preparation", () => {
@@ -503,6 +530,182 @@ describe("buildRenderCommand", () => {
     const frame = buildRenderCommand(small, "/frame.png", { engine: "auto" }, { frame: 0 });
     expect(frame.selection).toMatchObject({ backend: "file-sequence-v1", reason: "frame" });
     expect(frame.transport).toBeUndefined();
+  });
+
+  it("shares a fixed budget of decoder threads between the inputs of a many-input one-pass command, and leaves small commands exactly as they were", () => {
+    const sequence = (count: number) =>
+      tl(
+        Array.from({ length: count }, (_, index) => ({
+          media_ref: `/clip-${index}.mp4`,
+          source_in: 0,
+          source_out: 1,
+          timeline_in: index,
+          timeline_out: index + 1,
+        })),
+      );
+    // One entry per `-i`: the decoder thread count its own input options carry, or null when it has none.
+    const decoderThreadsOf = (args: string[]) => decoderFlags(args).map((entry) => entry.threads);
+    for (const engine of [undefined, "file-sequence-v1", "auto"] as const) {
+      for (let count = 1; count <= 32; count++) {
+        const plan = buildRenderCommand(sequence(count), "/out.mp4", engine ? { engine } : {});
+        const label = `${engine} ${count} clips`;
+        const threads = decoderThreadsOf(plan.args);
+        expect(plan.selection?.backend, label).toBe("file-sequence-v1");
+        expect(threads, label).toHaveLength(count);
+        if (count <= 2) {
+          // The commands of small projects are exactly what they were: no decoder flag at all.
+          expect(plan.args, label).not.toContain("-threads:v");
+        } else {
+          // Every input gets the same allowance, at least one thread, and the command's total stays inside the budget of 24;
+          // with room for more than one thread each (up to 12 inputs) it does not hand out just one.
+          const each = threads[0] as number;
+          expect(
+            threads.every((entry) => entry === each),
+            label,
+          ).toBe(true);
+          expect(each, label).toBeGreaterThanOrEqual(1);
+          expect(each * count, label).toBeLessThanOrEqual(Math.max(24, count));
+          if (count <= 12) expect(each, label).toBeGreaterThanOrEqual(2);
+          else expect(each, label).toBe(1);
+        }
+        // A thread flag after the codec would be the encoder's: the one-pass engine leaves its encoder alone either way.
+        expect(plan.args.indexOf("-threads:v", plan.args.lastIndexOf("-c:v")), label).toBe(-1);
+      }
+    }
+    // The streamed engine gave every input one thread before this policy existed, even a single one, and still does.
+    const streamed = buildRenderCommand(sequence(1), "/out.mp4", { engine: "partition-pipes-v1" });
+    expect(streamed.steps!.length).toBeGreaterThan(0);
+    for (const step of streamed.steps!) {
+      expect(decoderThreadsOf(step.args).length).toBeGreaterThan(0);
+      expect(decoderThreadsOf(step.args).every((entry) => entry === 1)).toBe(true);
+    }
+    // Beyond 32 sources the automatic policy streams, and that command decodes every input on one thread as well.
+    const crowded = buildRenderCommand(sequence(40), "/out.mp4", { engine: "auto" });
+    expect(crowded.selection?.backend).toBe("partition-pipes-v1");
+    expect(decoderThreadsOf(crowded.args).every((entry) => entry === 1)).toBe(true);
+  });
+
+  it("counts only the inputs that decode video: stills and sound do not take a clip over the threshold", () => {
+    const video = (index: number) => ({
+      media_ref: `/clip-${index}.mp4`,
+      source_in: 0,
+      source_out: 1,
+      timeline_in: index,
+      timeline_out: index + 1,
+    });
+    const stills = Array.from({ length: 6 }, (_, index) => ({
+      media_ref: `/still-${index}.png`,
+      timeline_in: index,
+      timeline_out: index + 1,
+    }));
+    const sound = Array.from({ length: 4 }, (_, index) => ({
+      kind: "audio",
+      media_ref: `/sound-${index}.wav`,
+      source_in: 0,
+      source_out: 1,
+      timeline_in: index,
+      timeline_out: index + 1,
+    }));
+    const two = buildRenderCommand(tl([video(0), video(1), ...stills, ...sound]), "/two.mp4");
+    expect(two.args).not.toContain("-threads:v");
+    const three = buildRenderCommand(
+      tl([video(0), video(1), video(2), ...stills, ...sound]),
+      "/three.mp4",
+    );
+    expect(three.args).toContain("-threads:v");
+    // The budget belongs to the video inputs only: a still, which decodes one frame, and sound keep the rule they always had (no flag on
+    // the one-pass engine), and the three clips share the budget (floor(24 / 3) = 8 each), not ten more inputs' worth.
+    const flags = decoderFlags(three.args);
+    const of = (extension: string) =>
+      flags.filter((entry) => entry.input.endsWith(extension)).map((entry) => entry.threads);
+    expect(of(".mp4")).toEqual([8, 8, 8]);
+    expect(of(".png")).toEqual(Array(6).fill(null));
+    expect(of(".wav")).toEqual(Array(4).fill(null));
+    // On the streamed engine every input, a still included, has always been flagged with one thread and still is.
+    const streamed = buildRenderCommand(tl([video(0), video(1), video(2), ...stills]), "/s.mp4", {
+      engine: "partition-pipes-v1",
+    });
+    for (const step of streamed.steps!)
+      for (const entry of decoderFlags(step.args)) expect(entry.threads, entry.input).toBe(1);
+    // No decoder flag in the audio-only pass of the same project, whichever engine plans it: sound has no frame threads to bound.
+    for (const engine of ["file-sequence-v1", "partition-pipes-v1"] as const)
+      expect(
+        buildAudioRenderCommand(tl([video(0), video(1), video(2), ...sound]), "/sound.m4a", {
+          engine,
+        }).args,
+        engine,
+      ).not.toContain("-threads:v");
+  });
+
+  it("leaves the branding inputs and the concat input of a segmented one-pass plan on the rule they had", () => {
+    const sequence = (count: number) =>
+      tl(
+        Array.from({ length: count }, (_, index) => ({
+          media_ref: `/clip-${index}.mp4`,
+          source_in: 0,
+          source_out: 1,
+          timeline_in: index,
+          timeline_out: index + 1,
+        })),
+      );
+    const branding = { watermark: "/wm.png", endcard: "/card.mp4", endcardDuration: 1 };
+    // One pass: the six clips share the budget (floor(24 / 6) = 4 each); the watermark and the end card are not clips and carry none.
+    const branded = decoderFlags(
+      buildRenderCommand(sequence(6), "/branded.mp4", { branding }).args,
+    );
+    expect(
+      branded.filter((entry) => entry.input.startsWith("/clip-")).map((entry) => entry.threads),
+    ).toEqual(Array(6).fill(4));
+    expect(branded.filter((entry) => !entry.input.startsWith("/clip-"))).toEqual([
+      { input: "/wm.png", threads: null },
+      { input: "/card.mp4", threads: null },
+    ]);
+    // Streamed: every input of the final command, the branding included, has always carried one thread.
+    const streamed = buildRenderCommand(sequence(3), "/streamed.mp4", {
+      engine: "partition-pipes-v1",
+      branding,
+    });
+    const finalInputs = decoderFlags(streamed.args);
+    expect(finalInputs.map((entry) => entry.input)).toEqual(
+      expect.arrayContaining(["segments.ffconcat", "/wm.png", "/card.mp4"]),
+    );
+    for (const entry of finalInputs)
+      if (entry.input !== "audio.nut") expect(entry.threads, entry.input).toBe(1);
+    // A one-pass plan too long for one command is cut into steps: the concat input of its final command is not a clip and carries no
+    // flag, and each step is its own command that shares the budget between its own video inputs.
+    const segmented = buildRenderCommand(
+      tl(
+        Array.from({ length: 349 }, (_, index) => ({
+          media_ref: `/long-original-directory-${"source-".repeat(25)}/${index}.mp4`,
+          source_in: 0,
+          source_out: 1 / 30,
+          timeline_in: index / 30,
+          timeline_out: (index + 1) / 30,
+        })),
+      ),
+      "/segmented.mp4",
+    );
+    expect(segmented.selection?.backend).toBe("file-sequence-v1");
+    expect(segmented.steps!.length).toBeGreaterThan(1);
+    expect(
+      decoderFlags(segmented.args).find((entry) => entry.input === "segments.ffconcat"),
+    ).toEqual({
+      input: "segments.ffconcat",
+      threads: null,
+    });
+    for (const step of segmented.steps!) {
+      const stepFlags = decoderFlags(step.args);
+      expect(stepFlags.length, step.args.join(" ")).toBeGreaterThan(0);
+      const each = stepFlags[0].threads;
+      for (const entry of stepFlags) expect(entry.threads, entry.input).toBe(each);
+      if (stepFlags.length <= 2) expect(each).toBeNull();
+      else {
+        expect(each).toBeGreaterThanOrEqual(1);
+        expect((each as number) * stepFlags.length).toBeLessThanOrEqual(
+          Math.max(24, stepFlags.length),
+        );
+      }
+    }
   });
 
   it("compiles one persistent audio producer rather than an audio mix per video partition", () => {
