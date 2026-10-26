@@ -8,7 +8,8 @@ import { create } from "zustand";
 import type { ExportCalibration, ExportEngine, ExportMode } from "../timeline/exportOptions";
 
 const ENGINE_KEY = "artdaddy-export-routing-v2";
-const CALIBRATION_KEY = `artdaddy-export-calibration-v3:${__ARTDADDY_RELEASE__}`;
+// Not per release: a measurement stays usable until EXPORT_SPEED_REVISION says the pipeline changed.
+const CALIBRATION_KEY = "artdaddy-export-calibration-v4";
 
 function calibration(value: unknown): ExportCalibration | null {
   if (!value || typeof value !== "object") return null;
@@ -53,6 +54,7 @@ function calibration(value: unknown): ExportCalibration | null {
       !["x264-crf", "x264-crf-threads2", "amf-cqp18"].includes(String(raw.encoder)))
   )
     return null;
+  const revision = number(raw.revision);
   return {
     workload: Object.fromEntries(
       keys.map((key) => [key, workload[key]]),
@@ -66,6 +68,7 @@ function calibration(value: unknown): ExportCalibration | null {
         : raw.encoder === "x264-crf-threads2"
           ? "x264-crf-threads2"
           : "x264-crf",
+    ...(revision === null ? {} : { revision }),
     elapsedSeconds: Number(raw.elapsedSeconds),
     finalBytes: Number(raw.finalBytes),
     memoryBytes: number(raw.memoryBytes),

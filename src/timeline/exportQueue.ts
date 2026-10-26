@@ -43,6 +43,7 @@ import { confirmExport } from "../lib/confirm";
 import {
   assessExport,
   estimateExportFromHistory,
+  isKnownProblem,
   type ExportAssessment,
   type ExportCalibration,
 } from "./exportOptions";
@@ -462,7 +463,10 @@ export interface ExportSpec {
     /** The account that asked for this export, stamped when it is admitted so it travels with the
      *  job (and its native record) to the report, whoever is signed in when the export ends. */
     owner?: string;
-    calibration?: Pick<ExportCalibration, "workload" | "output" | "quality" | "engine" | "encoder">;
+    calibration?: Pick<
+      ExportCalibration,
+      "workload" | "output" | "quality" | "engine" | "encoder" | "revision"
+    >;
   };
   /** The app process's job supervisor, when the encode runs as one of its jobs (3h part 7). It
    *  keeps the order then, so this queue does not hold a job back, and a job's state comes from it. */
@@ -743,7 +747,7 @@ async function confirmExportRequest(specs: readonly ExportSpec[]): Promise<boole
     )
       reasons.add("temporary_limit");
   }
-  const warning = [...reasons].some((reason) => reason !== "slow");
+  const warning = [...reasons].some(isKnownProblem);
   const storageReady = !["disk_unknown", "disk_shortage", "temporary_limit"].some((reason) =>
     reasons.has(reason as (typeof checks)[number]["reasons"][number]),
   );
