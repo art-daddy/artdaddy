@@ -6,13 +6,17 @@ import { describe, expect, it } from "vitest";
 
 import {
   EXPORT_SPEED_REVISION,
+  LONG_EXPORT_SECONDS,
   assessExport,
   crfFor,
+  estimateExport,
   estimateExportFromHistory,
+  guessExportSeconds,
   isKnownProblem,
   outputFps,
   outputSize,
   type ExportCalibration,
+  type ExportEncoder,
   type ExportEstimates,
   type ExportPreflightReason,
 } from "./exportOptions";
@@ -113,6 +117,8 @@ describe("export preflight assessment", () => {
       time_unknown: () =>
         assessExport(workload, resources, { ...estimates, seconds: null }, budgets),
       slow: () => assessExport(workload, resources, { ...estimates, seconds: 150 }, budgets),
+      long: () =>
+        assessExport(workload, resources, { ...estimates, seconds: LONG_EXPORT_SECONDS }, budgets),
     };
     // Written out, not derived from isKnownProblem, so this pins which reasons ask.
     const asked: Record<ExportPreflightReason, "warning" | "notice" | "none"> = {
@@ -122,6 +128,7 @@ describe("export preflight assessment", () => {
       temporary_limit: "warning",
       execution_limit: "warning",
       slow: "notice",
+      long: "notice",
       memory_unknown: "none",
       disk_unknown: "none",
       time_unknown: "none",
@@ -132,6 +139,42 @@ describe("export preflight assessment", () => {
       expect(result.severity, reason).toBe(asked[reason]);
       expect(isKnownProblem(reason), reason).toBe(asked[reason] === "warning");
     }
+  });
+
+  it("asks about a long export, measured or guessed, and stays quiet just under the line", () => {
+    const atTheLine = { ...estimates, seconds: LONG_EXPORT_SECONDS };
+    expect(assessExport(workload, resources, atTheLine, budgets)).toMatchObject({
+      severity: "notice",
+      reasons: ["long"],
+    });
+    expect(
+      assessExport(workload, resources, { ...atTheLine, secondsGuessed: true }, budgets),
+    ).toMatchObject({ severity: "notice", reasons: ["long"], estimates: { secondsGuessed: true } });
+    // A guess is never called "unknown", and under the line it asks about nothing.
+    const under = { ...estimates, seconds: LONG_EXPORT_SECONDS - 1, secondsGuessed: true };
+    expect(assessExport(workload, resources, under, budgets)).toMatchObject({
+      severity: "none",
+      reasons: [],
+    });
+  });
+
+  it("holds a guess to long and to the time limit only, never to 'twice the video'", () => {
+    const quick = { ...estimates, seconds: 150, secondsGuessed: true }; // 2.5x a 60 s video
+    expect(assessExport(workload, resources, quick, budgets).reasons).toEqual([]);
+    expect(
+      assessExport(workload, resources, { ...quick, secondsGuessed: false }, budgets).reasons,
+    ).toEqual(["slow"]);
+    expect(assessExport(workload, resources, { ...quick, seconds: 28801 }, budgets)).toMatchObject({
+      severity: "warning",
+      reasons: ["execution_limit"],
+    });
+  });
+
+  it("does not let a guess hide a known problem the resources show", () => {
+    const guessed = { ...estimates, seconds: 30, secondsGuessed: true };
+    expect(
+      assessExport(workload, resources, { ...guessed, memoryBytes: 5e9 }, budgets).severity,
+    ).toBe("warning");
   });
 
   it("does not put missing or invalid workload values inside the promise", () => {
@@ -376,6 +419,172 @@ describe("local measured export estimates", () => {
       ),
       { numRuns: 100 },
     );
+  });
+});
+
+describe("a rough time for an export nobody has measured", () => {
+  const hd: RenderWorkload = {
+    width: 1920,
+    height: 1080,
+    fps: 30,
+    durationSeconds: 600,
+    visualClips: 50,
+    captionClips: 120,
+    audioClips: 1,
+    peakVisualLayers: 1,
+    peakMediaLayers: 1,
+  };
+  const hdOut = { width: 1920, height: 1080, fps: 30 };
+  const fourK: RenderWorkload = { ...hd, width: 3840, height: 2160, peakVisualLayers: 3 };
+  const fourKOut = { width: 3840, height: 2160, fps: 30 };
+
+  it("puts an ordinary HD export near the video's own length, as measured", () => {
+    // Measured on a fast laptop: 0.6 to 1.2 times the length; one x264 thread caps it at 2.
+    const seconds = guessExportSeconds(hd, hdOut)!;
+    expect(seconds).toBeGreaterThan(600 * 0.5);
+    expect(seconds).toBeLessThan(600 * 2);
+  });
+
+  it("calls a half-hour 4K export hours, and a ten-minute HD one short of long", () => {
+    expect(guessExportSeconds({ ...fourK, durationSeconds: 1800 }, fourKOut)!).toBeGreaterThan(
+      2 * 3600,
+    );
+    expect(guessExportSeconds(hd, hdOut)!).toBeLessThan(LONG_EXPORT_SECONDS);
+    expect(guessExportSeconds({ ...hd, durationSeconds: 7200 }, hdOut)!).toBeGreaterThan(
+      LONG_EXPORT_SECONDS,
+    );
+  });
+
+  it("never says an export is quicker because it got longer, bigger, faster or heavier", () => {
+    const sizes = fc.constantFrom(
+      { width: 640, height: 360 },
+      { width: 1280, height: 720 },
+      { width: 1920, height: 1080 },
+      { width: 2560, height: 1440 },
+      { width: 3840, height: 2160 },
+    );
+    fc.assert(
+      fc.property(
+        sizes,
+        sizes,
+        fc.integer({ min: 1, max: 7200 }),
+        fc.integer({ min: 10, max: 120 }),
+        fc.integer({ min: 1, max: 15 }),
+        (canvas, delivered, seconds, fps, layers) => {
+          const base = {
+            ...hd,
+            ...canvas,
+            durationSeconds: seconds,
+            fps,
+            peakVisualLayers: layers,
+          };
+          const out = { ...delivered, fps };
+          const here = guessExportSeconds(base, out)!;
+          expect(here).toBeGreaterThan(0);
+          expect(Number.isInteger(here)).toBe(true);
+          const more = (workload: RenderWorkload, output: ExportCalibration["output"] = out) =>
+            guessExportSeconds(workload, output)!;
+          expect(more({ ...base, durationSeconds: seconds + 1 })).toBeGreaterThanOrEqual(here);
+          expect(more({ ...base, peakVisualLayers: layers + 1 })).toBeGreaterThanOrEqual(here);
+          expect(more({ ...base, fps: fps + 1 }, { ...out, fps: fps + 1 })).toBeGreaterThanOrEqual(
+            here,
+          );
+          expect(
+            more(base, { ...out, width: out.width * 2, height: out.height * 2 }),
+          ).toBeGreaterThanOrEqual(here);
+        },
+      ),
+      { numRuns: 200 },
+    );
+  });
+
+  it("never says an export takes less time than starting and finishing one takes", () => {
+    expect(guessExportSeconds({ ...hd, durationSeconds: 0.01 }, hdOut)!).toBeGreaterThanOrEqual(10);
+  });
+
+  it("charges for the larger of the project's size and the delivered size", () => {
+    const small = guessExportSeconds(hd, hdOut)!;
+    // Composited at 4K and delivered at 1080p, or composited at 1080p and delivered at 4K.
+    expect(guessExportSeconds({ ...hd, width: 3840, height: 2160 }, hdOut)!).toBeGreaterThan(small);
+    expect(guessExportSeconds(hd, fourKOut)!).toBeGreaterThan(small);
+  });
+
+  it("makes no guess for the fast hardware encoder, or for sizes that are not sizes", () => {
+    expect(guessExportSeconds(hd, hdOut, "amf-cqp18")).toBeNull();
+    for (const patch of [
+      { width: 0 },
+      { height: -1 },
+      { fps: NaN },
+      { durationSeconds: 0 },
+      { durationSeconds: Infinity },
+    ])
+      expect(guessExportSeconds({ ...hd, ...patch }, hdOut), JSON.stringify(patch)).toBeNull();
+    expect(guessExportSeconds(hd, { ...hdOut, width: 0 })).toBeNull();
+    expect(guessExportSeconds({ ...hd, peakVisualLayers: NaN }, hdOut)).not.toBeNull();
+  });
+});
+
+describe("the estimate an export gets: measured when there is history, a guess when there is none", () => {
+  const workload: RenderWorkload = {
+    width: 1920,
+    height: 1080,
+    fps: 30,
+    durationSeconds: 7200,
+    visualClips: 14,
+    captionClips: 2,
+    audioClips: 1,
+    peakVisualLayers: 1,
+    peakMediaLayers: 1,
+  };
+  const output = { width: 1920, height: 1080, fps: 30 };
+  const sample: ExportCalibration = {
+    workload: { ...workload, durationSeconds: 100 },
+    output,
+    quality: "medium",
+    engine: "partition-pipes-v1",
+    revision: EXPORT_SPEED_REVISION,
+    elapsedSeconds: 20,
+    finalBytes: 1_000_000,
+    memoryBytes: 1_000_000_000,
+    temporaryBytes: null,
+  };
+  const estimate = (history: readonly ExportCalibration[], encoder?: ExportEncoder) =>
+    estimateExport(workload, output, "medium", "partition-pipes-v1", history, encoder);
+
+  it("trusts a comparable measurement over the guess, and does not call it a guess", () => {
+    const measured = estimate([sample]);
+    expect(measured.seconds).toBe(1440); // 20 s for 100 s of video, scaled to 7200 s
+    expect(measured.secondsGuessed).toBeUndefined();
+    expect(measured).toEqual(
+      estimateExportFromHistory(workload, output, "medium", "partition-pipes-v1", [sample]),
+    );
+  });
+
+  it("guesses the time, and only the time, when nothing comparable was measured", () => {
+    const histories = [
+      [],
+      [{ ...sample, revision: EXPORT_SPEED_REVISION - 1 }],
+      [{ ...sample, quality: "high" }],
+    ];
+    for (const history of histories) {
+      const guessed = estimate(history);
+      expect(guessed.seconds).toBe(guessExportSeconds(workload, output));
+      expect(guessed.secondsGuessed).toBe(true);
+      expect([guessed.memoryBytes, guessed.temporaryBytes, guessed.finalBytes]).toEqual([
+        null,
+        null,
+        null,
+      ]);
+    }
+  });
+
+  it("stays unknown where it cannot guess", () => {
+    expect(estimate([], "amf-cqp18")).toEqual({
+      seconds: null,
+      memoryBytes: null,
+      temporaryBytes: null,
+      finalBytes: null,
+    });
   });
 });
 

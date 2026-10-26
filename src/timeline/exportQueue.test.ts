@@ -226,6 +226,9 @@ describe("required export preflight", () => {
     fps?: number;
     history?: Partial<ExportCalibration>;
     scratch?: number;
+    duration?: number;
+    size?: { width: number; height: number };
+    layers?: number;
   }) {
     const { fs, store } = make();
     vi.spyOn(host, "resolveExportResources").mockResolvedValue({
@@ -252,7 +255,16 @@ describe("required export preflight", () => {
       return "cancel";
     });
     let readiness: string | undefined;
-    const workload = { ...calibration.workload, fps: opts.fps ?? calibration.workload.fps };
+    const workload = {
+      ...calibration.workload,
+      fps: opts.fps ?? calibration.workload.fps,
+      durationSeconds: opts.duration ?? calibration.workload.durationSeconds,
+      ...opts.size,
+      ...(opts.layers === undefined ? {} : { peakVisualLayers: opts.layers }),
+    };
+    const descriptor = opts.size
+      ? { ...calibration, output: { ...opts.size, fps: workload.fps } }
+      : calibration;
     const result = await submitExports([
       {
         store,
@@ -262,13 +274,13 @@ describe("required export preflight", () => {
         filename: "movie.mp4",
         workload,
         meta: {
-          duration_s: 10,
-          width: 1920,
-          height: 1080,
+          duration_s: workload.durationSeconds,
+          width: workload.width,
+          height: workload.height,
           fps: workload.fps,
           quality: "medium",
           project_id: "",
-          calibration,
+          calibration: descriptor,
         },
         run: async (_, _id, meta) => {
           readiness = meta?.readiness;
@@ -306,6 +318,58 @@ describe("required export preflight", () => {
       expect(shown?.message).toContain("Continue anyway?");
     },
   );
+
+  describe("with no history to go by, the size of the export decides", () => {
+    it("asks a plain Continue, and says it is a guess, when the export looks long", async () => {
+      const { shown, result } = await submitAsked({ duration: 3600 }); // an hour of HD, 8 layers
+      expect(result).toContain("cancelled before submission");
+      expect(shown?.warning).toBe(false);
+      expect(shown?.message).toContain("Continue?");
+      expect(shown?.message).not.toContain("Continue anyway?");
+      expect(shown?.message).toContain("rough guess");
+      expect(shown?.message).toContain("about 103 minute");
+      expect(shown?.message).toContain("expected to take a long time");
+      // Not a measurement, so it must not read as one, nor as "unknown".
+      expect(shown?.message).not.toContain("Estimated encoding and saving time");
+      expect(shown?.message).not.toContain("Estimated time: unknown");
+    });
+
+    it("starts without asking when the export is big but short", async () => {
+      const { shown, result } = await submitAsked({
+        duration: 30,
+        size: { width: 3840, height: 2160 },
+        layers: 3,
+      });
+      expect(shown).toBeUndefined();
+      expect(result).toBe("started");
+    });
+
+    it("asks with the warning wording when even the guess passes the time limit", async () => {
+      const { shown } = await submitAsked({ duration: 20_000 });
+      expect(shown?.warning).toBe(true);
+      expect(shown?.message).toContain("exceeds the existing export execution limit");
+      expect(shown?.message).toContain("rough guess");
+    });
+
+    it("lets a measurement beat the guess, in both directions", async () => {
+      // A small output, so storage is not what is being asked about.
+      // 10 s of video took 10 s: an hour of it is an hour, so it asks, as a measurement.
+      const slow = await submitAsked({
+        duration: 3600,
+        history: { elapsedSeconds: 10, finalBytes: 1 },
+      });
+      expect(slow.shown?.warning).toBe(false);
+      expect(slow.shown?.message).toContain("Estimated encoding and saving time: about 60 minute");
+      expect(slow.shown?.message).not.toContain("rough guess");
+      // 10 s of video took 1 s: the same hour is six minutes, and the guess no longer asks.
+      const quick = await submitAsked({
+        duration: 3600,
+        history: { elapsedSeconds: 1, finalBytes: 1 },
+      });
+      expect(quick.shown).toBeUndefined();
+      expect(quick.result).toBe("started");
+    });
+  });
 
   it("does not warn from a measurement made under another speed revision", async () => {
     const { shown, result } = await submitAsked({

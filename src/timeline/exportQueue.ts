@@ -42,7 +42,7 @@ import { resolveExportResources, type ExportResources } from "../platform/host";
 import { confirmExport } from "../lib/confirm";
 import {
   assessExport,
-  estimateExportFromHistory,
+  estimateExport,
   isKnownProblem,
   type ExportAssessment,
   type ExportCalibration,
@@ -707,7 +707,7 @@ async function confirmExportRequest(specs: readonly ExportSpec[]): Promise<boole
     };
     const descriptor = spec.meta?.calibration;
     const estimates = descriptor
-      ? estimateExportFromHistory(
+      ? estimateExport(
           workload,
           descriptor.output,
           descriptor.quality,
@@ -767,10 +767,18 @@ async function confirmExportRequest(specs: readonly ExportSpec[]): Promise<boole
     time_unknown: "A comparable successful local run is not available to estimate time.",
     execution_limit: "The estimated active time exceeds the existing export execution limit.",
     slow: "This export is estimated to take more than twice the video length.",
+    long: "This export is expected to take a long time.",
   };
-  const time = checks.every((check) => check.estimates.seconds !== null)
-    ? `Estimated encoding and saving time: about ${Math.max(1, Math.ceil(checks.reduce((total, check) => total + check.estimates.seconds!, 0) / 60))} minute(s), based on comparable successful exports on this device. This is a rough estimate; different media and effects can take longer. Preparation and queue wait are extra.`
-    : "Estimated time: unknown (no comparable local measurement yet).";
+  const totalMinutes = () =>
+    Math.max(
+      1,
+      Math.ceil(checks.reduce((total, check) => total + check.estimates.seconds!, 0) / 60),
+    );
+  const time = !checks.every((check) => check.estimates.seconds !== null)
+    ? "Estimated time: unknown (no comparable local measurement yet)."
+    : checks.some((check) => check.estimates.secondsGuessed)
+      ? `Estimated time: about ${totalMinutes()} minute(s), a rough guess from the size of the video: no comparable export has been measured on this device yet. Preparation and queue wait are extra.`
+      : `Estimated encoding and saving time: about ${totalMinutes()} minute(s), based on comparable successful exports on this device. This is a rough estimate; different media and effects can take longer. Preparation and queue wait are extra.`;
   const message = [
     `Check ${specs.length === 1 ? "this export" : `these ${specs.length} exports`} before starting.`,
     outside
