@@ -57,15 +57,16 @@ function powershell(script) {
 const productVersion = (exe) =>
   powershell(`(Get-Item -LiteralPath '${exe}').VersionInfo.ProductVersion`).replace(/\.0$/, "");
 
-/** Every running artdaddy.exe that is THIS install's, with the moment it started. */
+/** Every running artdaddy.exe that is THIS install's, with the moment it started and its window title. */
 function runningApps(exe) {
   const json = powershell(
     `ConvertTo-Json -InputObject @(Get-Process artdaddy -ErrorAction SilentlyContinue | ` +
       `Where-Object { $_.Path -eq '${exe}' } | ` +
-      `ForEach-Object { @{ id = $_.Id; started = $_.StartTime.ToString('o') } }) -Compress`,
+      `ForEach-Object { @{ id = $_.Id; started = $_.StartTime.ToString('o'); title = $_.MainWindowTitle } }) -Compress`,
   );
   return JSON.parse(json || "[]");
 }
+const sameProcess = (a, b) => a.id === b.id && a.started === b.started;
 
 function screenshot(file) {
   powershell(
@@ -143,7 +144,9 @@ try {
   if (before !== FROM) throw new Error(`installed ${before}, expected ${FROM}`);
 
   // 4. Start it with a debugging port. The installer the app later runs inherits this environment,
-  // so the relaunched app listens on the same port.
+  // so the relaunched app listens on the same port. An app the installer started on its own would have
+  // no port, and a second launch only hands over to it, so clear any first.
+  spawnSync("taskkill", ["/F", "/IM", "artdaddy.exe", "/T"], { windowsHide: true });
   process.env.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = `--remote-debugging-port=${PORT}`;
   process.env.WEBVIEW2_USER_DATA_FOLDER = path.join(TEMP, "ArtDaddyCanaryWebView");
   const log = (name) => openSync(path.join(OUT, name), "w");
@@ -193,8 +196,13 @@ try {
     } catch {
       /* the installer is replacing the file */
     }
-    const apps = runningApps(exe);
-    const fresh = apps.filter((app) => !old.some((was) => was.id === app.id));
+    let apps = [];
+    try {
+      apps = runningApps(exe);
+    } catch {
+      /* a process went away while it was being read */
+    }
+    const fresh = apps.filter((app) => !old.some((was) => sameProcess(app, was)));
     if (version === manifest.version && fresh.length) {
       outcome = { version, processes: apps, relaunched: true, seconds: Math.round((Date.now() - installStarted) / 1000) };
       break;
@@ -209,19 +217,35 @@ try {
   await sleep(10_000);
   screenshot("after-update.png");
 
-  // 8. The relaunched app must actually be alive: ask it, over the same port.
+  // 8. The relaunched app must actually be alive: ask it over the same port, or, when the installer's
+  // relaunch did not carry the port, require a process that owns a window.
   if (outcome.relaunched && (await cdpUp(60_000))) {
     const reconnected = await chromium.connectOverCDP(CDP);
     const afterPage = await pageOf(reconnected);
     await afterPage.waitForFunction(() => document.body?.innerText?.trim().length > 20, undefined, { timeout: 60_000 });
-    const seen = await afterPage.evaluate(() => ({
+    const seen = await afterPage.evaluate(async () => ({
       title: document.title,
       text: document.body.innerText.slice(0, 300),
+      version: await window.__TAURI_INTERNALS__.invoke("plugin:app|version").catch(() => null),
+      offeredNext: await window.__TAURI_INTERNALS__.invoke("check_for_update").catch((error) => `error: ${error}`),
     }));
     note("relaunched app answers", seen);
     await reconnected.close().catch(() => undefined);
+    if (seen.version !== null && seen.version !== manifest.version) {
+      throw new Error(`the relaunched app says it is ${seen.version}, expected ${manifest.version}`);
+    }
+    if (seen.offeredNext !== null && !String(seen.offeredNext).startsWith("error:")) {
+      throw new Error(`the relaunched app is still offered ${seen.offeredNext?.version}`);
+    }
   } else if (outcome.relaunched) {
-    note("relaunched app has no debugging port; judged by process and window only");
+    let titled = [];
+    const windowDeadline = Date.now() + 60_000;
+    while (!titled.length && Date.now() < windowDeadline) {
+      titled = runningApps(exe).filter((app) => app.title && !old.some((was) => sameProcess(app, was)));
+      if (!titled.length) await sleep(2_000);
+    }
+    note("relaunched app has no debugging port; judged by process and window", { titled });
+    if (!titled.length) throw new Error("the relaunched app has no window");
   }
   if (!outcome.relaunched) throw new Error("the app was updated but not relaunched");
   evidence.passed = true;

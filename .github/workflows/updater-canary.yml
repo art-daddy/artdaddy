@@ -1,12 +1,12 @@
-# In-place update canary (Windows). Installs a PUBLIC release on a disposable GitHub-hosted runner and
-# updates it through the LIVE updater manifest, the way a user's app does: the app checks, downloads
-# and verifies the signed installer, the installer replaces the running app, and the app is
+# In-place update canary (Windows and Linux). Installs a PUBLIC release on a disposable GitHub-hosted
+# runner and updates it through the LIVE updater manifest, the way a user's app does: the app checks,
+# downloads and verifies the signed installer, the installer replaces the running app, and the app is
 # relaunched. It reads the public release and the public manifest only; nothing is published.
 #
-# Runs on dispatch, and on a push to a qa/** branch that changes this workflow or its script (so a
-# change to either is tried as soon as it is pushed). `from_version` must be older than the version
+# Runs on dispatch, and on a push to a qa/** branch that changes this workflow or a script (so a
+# change to any of them is tried as soon as it is pushed). `from_version` must be older than the version
 # the live manifest offers, or there is nothing to update to.
-name: updater canary (Windows)
+name: updater canary
 
 on:
   workflow_dispatch:
@@ -20,6 +20,7 @@ on:
     paths:
       - ".github/workflows/updater-canary.yml"
       - "scripts/qa/windowsUpdateCanary.mjs"
+      - "scripts/qa/linuxUpdateCanary.mjs"
 
 permissions:
   contents: read
@@ -51,5 +52,33 @@ jobs:
         if: always()
         with:
           name: updater-canary-windows
+          path: reports/qa/updater-canary/**
+          if-no-files-found: warn
+
+  linux:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install what the app and the WebDriver bridge need
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libayatana-appindicator3-dev libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev xvfb webkit2gtk-driver x11-utils imagemagick desktop-file-utils xdg-utils gstreamer1.0-libav gstreamer1.0-plugins-bad gstreamer1.0-plugins-good
+          command -v WebKitWebDriver
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install the WebDriver bridge
+        run: cargo install tauri-driver --locked
+      - name: Update an installed AppImage through the live manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FROM_VERSION: ${{ inputs.from_version || '0.21.6' }}
+        run: xvfb-run -a -s "-screen 0 1280x1024x24" node scripts/qa/linuxUpdateCanary.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: updater-canary-linux
           path: reports/qa/updater-canary/**
           if-no-files-found: warn
