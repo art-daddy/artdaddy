@@ -507,9 +507,13 @@ try {
     if (promiseCase.videoLayers + Number(promiseCase.captions) > 4 ||
       promiseCase.width * promiseCase.height > 1920 * 1080 && promiseCase.videoLayers > 1)
       assert.equal(native.selection.backend, "partition-pipes-v1", "Dense promise case must use the bounded existing FFmpeg path");
-    assert.equal(native.preflight?.length, 1, "Promise pilot must use one real request-level preflight confirmation");
-    assert.ok(native.preflight[0].message.includes("Estimated time:") || native.preflight[0].message.includes("Estimated encoding and saving time:"),
-      "Preflight must show a measured estimate or explicitly unknown time");
+    // The product asks only about a problem the export is known to have; a missing measurement (a
+    // cold export, or the first one after an update) is not one. So a pilot that starts cleanly
+    // sees no confirmation, and one that IS asked still has to say what it knows about the time.
+    assert.ok((native.preflight?.length ?? 0) <= 1, "Promise pilot must not need more than one request-level preflight confirmation");
+    for (const asked of native.preflight ?? [])
+      assert.ok(asked.message.includes("Estimated time:") || asked.message.includes("Estimated encoding and saving time:"),
+        "Preflight must show a measured estimate or explicitly unknown time");
     if (native.selection.backend === "partition-pipes-v1")
       assert.equal(native.encoderThreads, !fastEncoderProbe && promiseCase.width * promiseCase.height > 1920 * 1080 ? "2" : "1");
     assert.ok(native.calibrationRecords > 0, "Validated published exports must populate encoder-specific local measured history");
