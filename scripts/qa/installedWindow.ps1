@@ -7,7 +7,7 @@ $application = Get-Process -Id ([int]$env:ARTDADDY_QA_INSTALLED_PID) -ErrorActio
 if ($application.Path -ne $installed) { throw 'Unexpected installed process identity' }
 if ($application.Handle -eq [IntPtr]::Zero) { throw 'Cannot retain installed process handle' }
 $version = (Get-Item -LiteralPath $installed).VersionInfo.ProductVersion
-if ($version -notmatch '^0\.21\.7(?:\.0)?$') { throw "Unexpected installed version $version" }
+if ($version -notmatch '^0\.21\.8(?:\.0)?$') { throw "Unexpected installed version $version" }
 Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes,System.Drawing
 Add-Type -TypeDefinition @'
 using System;
