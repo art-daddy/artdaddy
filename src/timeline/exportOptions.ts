@@ -38,6 +38,8 @@ export interface ExportEstimates {
   readonly temporaryBytes: number | null;
   readonly finalBytes: number | null;
   readonly seconds: number | null;
+  /** `seconds` is a guess from the size of the export, not a measurement made on this device. */
+  readonly secondsGuessed?: boolean;
 }
 
 export interface ExportBudgets {
@@ -124,6 +126,56 @@ export function estimateExportFromHistory(
   };
 }
 
+/** What counts as a long export: past this the person is asked, measured or guessed. */
+export const LONG_EXPORT_SECONDS = 20 * 60;
+
+const HD30_PIXELS_PER_SECOND = 1920 * 1080 * 30;
+
+/** A rough time for an export no measurement on this device matches, from its size alone. */
+export function guessExportSeconds(
+  workload: RenderWorkload,
+  output: ExportCalibration["output"],
+  encoder: ExportEncoder = "x264-crf",
+): number | null {
+  if (encoder === "amf-cqp18") return null;
+  const sizes = [
+    workload.width,
+    workload.height,
+    workload.fps,
+    workload.durationSeconds,
+    output.width,
+    output.height,
+    output.fps,
+  ];
+  if (!sizes.every((value) => Number.isFinite(value) && value > 0)) return null;
+  const pixelRate = (width: number, height: number, fps: number) =>
+    (width * height * fps) / HD30_PIXELS_PER_SECOND;
+  const picture = Math.max(
+    pixelRate(workload.width, workload.height, workload.fps),
+    pixelRate(output.width, output.height, output.fps),
+  );
+  const layers = Number.isFinite(workload.peakVisualLayers)
+    ? Math.max(1, workload.peakVisualLayers)
+    : 1;
+  // Measured on one fast laptop: 1080p30 took 0.6-1.2x the video's length (one x264 thread caps it at 2x), 4K about 4x.
+  return Math.ceil(10 + workload.durationSeconds * picture * (1 + 0.1 * (layers - 1)));
+}
+
+/** What the history says, and a guess at the time where it says nothing. */
+export function estimateExport(
+  workload: RenderWorkload,
+  output: ExportCalibration["output"],
+  quality: string,
+  engine: ExportEngine,
+  history: readonly ExportCalibration[],
+  encoder: ExportEncoder = "x264-crf",
+): ExportEstimates {
+  const measured = estimateExportFromHistory(workload, output, quality, engine, history, encoder);
+  if (measured.seconds !== null) return measured;
+  const guess = guessExportSeconds(workload, output, encoder);
+  return guess === null ? measured : { ...measured, seconds: guess, secondsGuessed: true };
+}
+
 export type ExportPreflightReason =
   | "outside_promise"
   | "memory_unknown"
@@ -133,7 +185,8 @@ export type ExportPreflightReason =
   | "temporary_limit"
   | "time_unknown"
   | "execution_limit"
-  | "slow";
+  | "slow"
+  | "long";
 
 // The user is asked about a problem the export is known to have, never about a measurement that is missing.
 const KNOWN_PROBLEM: Record<ExportPreflightReason, boolean> = {
@@ -146,6 +199,7 @@ const KNOWN_PROBLEM: Record<ExportPreflightReason, boolean> = {
   disk_unknown: false,
   time_unknown: false,
   slow: false,
+  long: false,
 };
 
 export const isKnownProblem = (reason: ExportPreflightReason): boolean => KNOWN_PROBLEM[reason];
@@ -170,6 +224,7 @@ export function assessExport(
     temporaryBytes: valid(measured.temporaryBytes) ? measured.temporaryBytes : null,
     finalBytes: valid(measured.finalBytes) ? measured.finalBytes : null,
     seconds: valid(measured.seconds) ? measured.seconds : null,
+    ...(valid(measured.seconds) && measured.secondsGuessed ? { secondsGuessed: true } : {}),
   };
   const short = Math.min(workload.width, workload.height);
   const long = Math.max(workload.width, workload.height);
@@ -221,14 +276,16 @@ export function assessExport(
   }
   if (estimates.seconds === null || !valid(budgets.executionSeconds)) reasons.push("time_unknown");
   else if (estimates.seconds > budgets.executionSeconds) reasons.push("execution_limit");
-  else if (estimates.seconds > workload.durationSeconds * 2) reasons.push("slow");
+  else if (estimates.seconds >= LONG_EXPORT_SECONDS) reasons.push("long");
+  else if (!estimates.secondsGuessed && estimates.seconds > workload.durationSeconds * 2)
+    reasons.push("slow");
   return {
     promiseLine,
     estimates,
     reasons,
     severity: reasons.some(isKnownProblem)
       ? "warning"
-      : reasons.includes("slow")
+      : reasons.some((reason) => reason === "slow" || reason === "long")
         ? "notice"
         : "none",
   };
