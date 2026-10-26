@@ -363,6 +363,71 @@ async function completeDeepLinkCallback(url: string): Promise<Outcome> {
   return { ok: true };
 }
 
+/** The one native read of the saved session, kept apart from its caller's patience.
+ *
+ *  On macOS the read blocks behind a permission dialog until a person answers it. After an update
+ *  that is every launch: the new build is a different code identity to the keychain, and the answer
+ *  can take longer than KEYCHAIN_TIMEOUT_MS. The call cannot be cancelled, so asking again opens a
+ *  SECOND dialog, and an "Allow" that is not "Always Allow" answers only the request it was shown
+ *  for. So at most one read is open per session, a later attempt joins it, and an answer that
+ *  arrives after an attempt stopped waiting is kept for the next attempt, which uses it once. */
+type StoredRead = { generation: number; promise: Promise<string | null>; abandoned: boolean };
+let storedRead: StoredRead | null = null;
+let lateAnswer: { generation: number; token: string | null } | null = null;
+
+function startStoredRead(
+  invoke: (command: string) => Promise<unknown>,
+  generation: number,
+): StoredRead {
+  let read!: StoredRead;
+  const promise = Promise.resolve(invoke("load_refresh_token") as Promise<string | null>).then(
+    (token) => {
+      if (storedRead === read) storedRead = null;
+      // Nobody is waiting any more. Only the session this was asked for may use the answer.
+      if (read.abandoned && sessionGeneration === generation) lateAnswer = { generation, token };
+      return token;
+    },
+    (error: unknown) => {
+      if (storedRead === read) storedRead = null;
+      throw error;
+    },
+  );
+  read = { generation, promise, abandoned: false };
+  return read;
+}
+
+function waitForStoredToken(
+  invoke: (command: string) => Promise<unknown>,
+  generation: number,
+): Promise<string | null> {
+  if (lateAnswer && lateAnswer.generation !== generation) lateAnswer = null;
+  if (lateAnswer) {
+    const { token } = lateAnswer;
+    lateAnswer = null;
+    return Promise.resolve(token);
+  }
+  const read =
+    storedRead?.generation === generation ? storedRead : startStoredRead(invoke, generation);
+  storedRead = read;
+  read.abandoned = false;
+  return new Promise<string | null>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      read.abandoned = true;
+      reject(new Error("timed out"));
+    }, KEYCHAIN_TIMEOUT_MS);
+    void read.promise.then(
+      (token) => {
+        clearTimeout(timer);
+        resolve(token);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
 let refreshInFlight: { generation: number; promise: Promise<DesktopSessionRefresh> } | null = null;
 
 /** Restore a session from the OS keychain, rotating the refresh token on success.
@@ -398,10 +463,7 @@ async function refreshDesktopSessionOnce(
   });
   try {
     const { invoke } = await import("@tauri-apps/api/core");
-    const stored = await withTimeout(
-      invoke("load_refresh_token") as Promise<string | null>,
-      KEYCHAIN_TIMEOUT_MS,
-    );
+    const stored = await waitForStoredToken(invoke, expectedGeneration);
     if (sessionGeneration !== expectedGeneration) return superseded();
     storedSession = Boolean(stored);
     if (!stored) {
@@ -474,6 +536,7 @@ export async function signOutDesktop(): Promise<void> {
   refreshBlocked = true;
   sessionGeneration += 1;
   desiredRefreshToken = null;
+  lateAnswer = null;
   storedSession = false;
   writePending(null);
   const stored = await mutateKeychain(async () => {

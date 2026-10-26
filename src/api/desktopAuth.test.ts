@@ -471,6 +471,202 @@ describe("refreshDesktopSession", () => {
   });
 });
 
+// After an update macOS holds the native keychain read behind a permission dialog until a person
+// answers it, and the app (a different build, so a different code identity) is asked every time. The
+// restore stops waiting after a few seconds, but the native call cannot be cancelled: a second read
+// is a SECOND dialog, and "Allow" without "Always Allow" answers only the request it was shown for.
+describe("a keychain read that waits for a person", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** Every read puts its own dialog on screen and stays open until THAT dialog is answered. */
+  function keychainThatAsksAPerson() {
+    const dialogs: Array<(token: string | null) => void> = [];
+    invoke.mockImplementation((cmd: string) =>
+      cmd === "load_refresh_token"
+        ? new Promise<string | null>((resolve) => dialogs.push(resolve))
+        : Promise.resolve(undefined),
+    );
+    return {
+      dialogsShown: () => dialogs.length,
+      answerFirstDialog: (token: string | null) => dialogs[0]?.(token),
+    };
+  }
+
+  /** One restore attempt, left to run until it stops waiting for the keychain. */
+  async function attempt(refresh: () => Promise<unknown>) {
+    const outcome = refresh();
+    await vi.advanceTimersByTimeAsync(8_000);
+    return outcome;
+  }
+
+  const unanswered = { status: "unavailable", hasStoredSession: null };
+
+  it("puts one dialog on screen however often the restore is retried while nobody answers", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const keychain = keychainThatAsksAPerson();
+    const { refreshDesktopSession } = await importFresh();
+
+    for (let tries = 0; tries < 3; tries++) {
+      await expect(attempt(refreshDesktopSession)).resolves.toEqual(unanswered);
+    }
+
+    expect(keychain.dialogsShown()).toBe(1);
+  });
+
+  it("finishes the restore from the answer of a read it had stopped waiting for", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const keychain = keychainThatAsksAPerson();
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, { access_token: "at-2", refresh_token: "rt-rotated", expires_in: 900 }),
+    );
+    const { refreshDesktopSession, getAccessToken } = await importFresh();
+    await expect(attempt(refreshDesktopSession)).resolves.toEqual(unanswered);
+
+    keychain.answerFirstDialog("rt-allowed-once"); // the person clicks Allow, after the app gave up
+    await vi.advanceTimersByTimeAsync(1);
+
+    await expect(attempt(refreshDesktopSession)).resolves.toEqual({
+      status: "refreshed",
+      hasStoredSession: true,
+    });
+    expect(getAccessToken()).toBe("at-2");
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
+      refresh_token: "rt-allowed-once",
+    });
+    expect(keychain.dialogsShown(), "the answer was used, not asked for again").toBe(1);
+  });
+
+  it("uses an answer once: a later restore asks for the rotated token, never replays the spent one", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const keychain = keychainThatAsksAPerson();
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, { access_token: "at-2", refresh_token: "rt-rotated", expires_in: 900 }),
+    );
+    const { refreshDesktopSession } = await importFresh();
+    await attempt(refreshDesktopSession);
+    keychain.answerFirstDialog("rt-allowed-once");
+    await vi.advanceTimersByTimeAsync(1);
+    await attempt(refreshDesktopSession); // consumes the answer; the server rotates the token
+
+    await expect(attempt(refreshDesktopSession)).resolves.toEqual(unanswered);
+
+    expect(keychain.dialogsShown(), "the second restore had to ask the keychain itself").toBe(2);
+    expect(fetchMock, "the spent token was submitted again").toHaveBeenCalledTimes(1);
+  });
+
+  it("does not keep an answer it handed over in time", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const keychain = keychainThatAsksAPerson();
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, { access_token: "at-2", refresh_token: "rt-rotated", expires_in: 900 }),
+    );
+    const { refreshDesktopSession } = await importFresh();
+
+    const first = refreshDesktopSession();
+    await vi.advanceTimersByTimeAsync(1_000); // still inside the wait
+    keychain.answerFirstDialog("rt-1");
+    await expect(first).resolves.toEqual({ status: "refreshed", hasStoredSession: true });
+
+    await expect(attempt(refreshDesktopSession)).resolves.toEqual(unanswered);
+
+    expect(keychain.dialogsShown(), "a second restore replayed the first answer").toBe(2);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not keep an answer a retried restore received while it was waiting", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const keychain = keychainThatAsksAPerson();
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, { access_token: "at-2", refresh_token: "rt-rotated", expires_in: 900 }),
+    );
+    const { refreshDesktopSession } = await importFresh();
+    await expect(attempt(refreshDesktopSession)).resolves.toEqual(unanswered); // gave up
+
+    const retry = refreshDesktopSession(); // joins the dialog that is still open
+    await vi.advanceTimersByTimeAsync(1_000);
+    keychain.answerFirstDialog("rt-1"); // answered while the retry is waiting
+    await expect(retry).resolves.toEqual({ status: "refreshed", hasStoredSession: true });
+
+    await expect(attempt(refreshDesktopSession)).resolves.toEqual(unanswered);
+
+    expect(keychain.dialogsShown(), "the answer was kept and replayed").toBe(2);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("asks again after a read that failed outright, instead of joining the failure", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let reads = 0;
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd !== "load_refresh_token") return Promise.resolve(undefined);
+      reads += 1;
+      return reads === 1
+        ? Promise.reject(new Error("keychain unavailable"))
+        : Promise.resolve("rt-ok");
+    });
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, { access_token: "at-2", refresh_token: "rt-rotated", expires_in: 900 }),
+    );
+    const { refreshDesktopSession } = await importFresh();
+
+    await expect(refreshDesktopSession()).resolves.toEqual(unanswered);
+    await expect(refreshDesktopSession()).resolves.toEqual({
+      status: "refreshed",
+      hasStoredSession: true,
+    });
+
+    expect(reads).toBe(2);
+  });
+
+  it("reads a denied dialog as no saved session instead of asking again", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const keychain = keychainThatAsksAPerson();
+    const { refreshDesktopSession } = await importFresh();
+    await expect(attempt(refreshDesktopSession)).resolves.toEqual(unanswered);
+
+    keychain.answerFirstDialog(null); // Deny: the app is told there is nothing it may read
+    await vi.advanceTimersByTimeAsync(1);
+
+    await expect(attempt(refreshDesktopSession)).resolves.toEqual({
+      status: "missing",
+      hasStoredSession: false,
+    });
+    expect(keychain.dialogsShown()).toBe(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  // A new sign-in replaces the session: an answer given for the old one must not restore it.
+  it("drops an answer given for a session that a new sign-in has since replaced", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const keychain = keychainThatAsksAPerson();
+    const { refreshDesktopSession, startDesktopSignIn, handleDeepLinkCallback } =
+      await importFresh();
+    await attempt(refreshDesktopSession);
+    keychain.answerFirstDialog("rt-old-session");
+    await vi.advanceTimersByTimeAsync(1);
+
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, { access_token: "at-new", refresh_token: "rt-new", expires_in: 900 }),
+    );
+    await startDesktopSignIn();
+    const opened = invoke.mock.calls.find(([cmd]) => cmd === "open_desktop_auth");
+    const state = new URL(opened![1].url).searchParams.get("state")!;
+    await expect(
+      handleDeepLinkCallback(`artdaddy://auth/callback?code=good&state=${state}`),
+    ).resolves.toEqual({ ok: true });
+    fetchMock.mockClear();
+
+    await attempt(refreshDesktopSession);
+
+    const submitted = fetchMock.mock.calls.map(([, init]) => init.body as string);
+    expect(submitted.join(" ")).not.toContain("rt-old-session");
+    expect(keychain.dialogsShown(), "the restore had to ask the keychain for the new session").toBe(
+      2,
+    );
+  });
+});
+
 describe("signOutDesktop", () => {
   it("drops the in-memory access token and clears the OS keychain entry", async () => {
     invoke.mockResolvedValue(undefined);
