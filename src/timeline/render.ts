@@ -33,6 +33,7 @@ import { canvasFps, isNum, toSecondsView } from "./frames";
 import {
   crfFor,
   decoderThreads,
+  exceedsFileSequencePicture,
   finalEncoderPolicy,
   outputFps,
   outputSize,
@@ -988,9 +989,12 @@ export function buildRenderCommand(
     throw new Error("unsupported exporter planning policy");
   const commandPressure =
     commandLength(graphFromFile(plan.args, plan.assFiles).args) > COMMAND_BUDGET;
+  // The size the render composites at (the authored canvas made even), not the authored one: 2561 x 1439 composites at 2562 x 1440.
+  const composite = canvasPx(raw);
   const resourcePressure =
     workload.peakVisualLayers > 4 ||
-    (workload.width * workload.height > 1920 * 1080 && workload.peakMediaLayers > 1);
+    (workload.width * workload.height > 1920 * 1080 && workload.peakMediaLayers > 1) ||
+    exceedsFileSequencePicture({ width: composite.w, height: composite.h });
   const stream =
     !window &&
     (policy === "partition-pipes-v1" ||

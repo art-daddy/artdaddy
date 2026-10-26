@@ -520,7 +520,8 @@ try {
     assert.equal(native.stagingCleaned, true, "Promise staging file was not cleaned");
     assert.equal(native.selection?.policy, "auto", "Promise case must use the approved Automatic policy");
     if (promiseCase.videoLayers + Number(promiseCase.captions) > 4 ||
-      promiseCase.width * promiseCase.height > 1920 * 1080 && promiseCase.videoLayers > 1)
+      promiseCase.width * promiseCase.height > 1920 * 1080 && promiseCase.videoLayers > 1 ||
+      promiseCase.width * promiseCase.height > 2560 * 1440) // the one-pass picture ceiling, FILE_SEQUENCE_MAX_PIXELS in src/timeline/exportOptions.ts
       assert.equal(native.selection.backend, "partition-pipes-v1", "Dense promise case must use the bounded existing FFmpeg path");
     // A cold export is always asked about once. A repeated one is asked about at most once: the product asks nothing
     // when every estimate is known and fits, and estimateFailures() decides whether what it did show was honest.
