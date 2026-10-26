@@ -144,26 +144,31 @@ test("the command line's exit code says whether the batch can be trusted", async
   }
 });
 
-test("the workflow names real cases, pinned commits and scripts that exist", async () => {
+test("the workflow pairs two pinned commits on one machine, and names real cases and scripts that exist", async () => {
   const yaml = (await import("js-yaml")).default;
   const text = await readFile(path.join(repository, ".github/workflows/exporter-linux-bounds-qa.yml"), "utf8");
   const workflow = yaml.load(text);
-  const legs = workflow.jobs.bounds.strategy.matrix.include;
   const known = new Set([...library.cases, ...scratch].map((entry) => entry.id));
-  assert.ok(legs.length >= 2);
-  assert.equal(new Set(legs.map((leg) => leg.code)).size, legs.length, "each leg tests a different commit");
-  assert.ok(legs.some((leg) => leg.must_pass === true), "at least one leg can fail the job");
-  for (const leg of legs) {
-    assert.match(leg.code, /^[0-9a-f]{40}$/, `${leg.leg}: a pinned commit is a full hash, not a name that can move`);
-    assert.equal(typeof leg.must_pass, "boolean");
-    const cases = leg.cases.split(/\s+/);
-    assert.equal(new Set(cases).size, cases.length, `${leg.leg}: no case twice`);
-    for (const id of cases) assert.ok(known.has(id), `${leg.leg}: ${id} is defined nowhere`);
-  }
+  for (const key of ["BASE_SHA", "BRANCH_SHA"]) assert.match(workflow.env[key], /^[0-9a-f]{40}$/, `${key}: a pinned commit is a full hash, not a name that can move`);
+  assert.notEqual(workflow.env.BASE_SHA, workflow.env.BRANCH_SHA, "the two codes differ");
+  const defaults = /\|\|\s*'([^']+)'/.exec(workflow.env.CASES)?.[1];
+  assert.ok(defaults, "CASES carries a default list");
+  const cases = defaults.split(/\s+/);
+  assert.equal(new Set(cases).size, cases.length, "no case twice");
+  for (const id of cases) assert.ok(known.has(id), `${id} is defined nowhere`);
+  const reps = workflow.jobs.paired.strategy.matrix.include;
+  assert.ok(reps.length >= 3, "enough repetitions to tell the machine from the code");
+  assert.equal(new Set(reps.map((rep) => rep.rep)).size, reps.length);
+  for (const rep of reps) assert.deepEqual([rep.first, rep.second].sort(), ["base", "branch"], `repetition ${rep.rep} runs each code once per case`);
+  assert.ok(reps.some((rep) => rep.first === "base") && reps.some((rep) => rep.first === "branch"), "each code goes first in some repetition, so an order effect shows");
   assert.ok(workflow.jobs.instrument, "the instrument's own tests run in the workflow");
-  assert.equal(workflow.jobs.bounds.needs, undefined, "the legs do not wait for the instrument's tests: a failure there is a separate, visible signal, and hours of evidence are not held up by it");
+  assert.equal(workflow.jobs.paired.needs, undefined, "the pairs do not wait for the instrument's tests: a failure there is a separate, visible signal, and the evidence is not held up by it");
   const on = workflow.on ?? workflow[true];
   assert.deepEqual(on.push.branches, ["qa/linux-bounds-*"]);
+  assert.match(text, /START leg=\$leg case=\$c attempt=\$attempt /, "the status lines are in the form the report reads");
+  assert.match(text, /END leg=\$leg case=\$c attempt=\$attempt exit=\$code seconds=/);
+  const strict = [...text.matchAll(/\(cd "\$GITHUB_WORKSPACE\/(base|branch)" && node [^)]*linuxBoundsVerdict\.mjs[^)]*\)/g)];
+  assert.deepEqual(strict.map((entry) => [entry[1], entry[0].includes("--must-pass")]), [["base", false], ["branch", true]], "only the branch's exports must all finish");
   for (const [, name] of text.matchAll(/scripts\/qa\/([A-Za-z0-9_.-]+\.m?js)\b/g)) assert.ok(existsSync(path.join(here, name)), `${name} is run by the workflow but is not in scripts/qa`);
   for (const [, name] of text.matchAll(/node --test (?:\S+\s+)*?scripts\/qa\/(\S+\.test\.mjs)/g)) assert.ok(existsSync(path.join(here, name)), name);
 });
