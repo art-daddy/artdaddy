@@ -263,19 +263,68 @@ fn probe_media_blocking(
   })
 }
 
+/// How long a root that `taskkill` has just killed may take to finish exiting before it counts as
+/// still running. Bounded because Stop runs on the main thread.
+#[cfg(windows)]
+const ROOT_EXIT_GRACE_MS: u32 = 1_000;
+
 #[cfg(windows)]
 fn kill_tree(pid: u32) -> Result<(), String> {
+  kill_tree_with(pid, run_taskkill, |pid| process_gone(pid, ROOT_EXIT_GRACE_MS))
+}
+
+#[cfg(windows)]
+fn run_taskkill(pid: u32) -> Result<Option<i32>, String> {
   use std::os::windows::process::CommandExt;
   const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-  let status = std::process::Command::new("taskkill")
+  std::process::Command::new("taskkill")
     .args(["/PID", &pid.to_string(), "/T", "/F"])
     .creation_flags(CREATE_NO_WINDOW)
     .status()
-    .map_err(|e| e.to_string())?;
-  match status.code() {
+    .map(|status| status.code())
+    .map_err(|e| e.to_string())
+}
+
+/// Stopping succeeded when the process we were asked to stop is gone. `taskkill`'s exit code is
+/// not that answer: it follows the last member it tried, and a member that ends by itself between
+/// its snapshot and its kill (a worker that exits when its child is killed, the yt-dlp shape this
+/// exists for) fails that attempt although the tree is gone. The same run can print "could not be
+/// terminated" and still exit 0. So a code that is neither success nor "not found" is a failure
+/// only while the root still runs, or when that cannot be told.
+#[cfg(windows)]
+fn kill_tree_with(
+  pid: u32,
+  taskkill: impl FnOnce(u32) -> Result<Option<i32>, String>,
+  gone: impl FnOnce(u32) -> Option<bool>,
+) -> Result<(), String> {
+  match taskkill(pid)? {
     // 128 = "process not found": it already exited, which is the state we wanted.
     Some(0) | Some(128) | None => Ok(()),
-    Some(code) => Err(format!("taskkill exited with {code}")),
+    Some(code) => match gone(pid) {
+      Some(true) => Ok(()),
+      _ => Err(format!("taskkill exited with {code}")),
+    },
+  }
+}
+
+/// `Some(true)` once nothing runs under this id (it never did, or it finished exiting within
+/// `grace_ms`), `Some(false)` while it still runs, `None` when that cannot be told.
+#[cfg(windows)]
+fn process_gone(pid: u32, grace_ms: u32) -> Option<bool> {
+  use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+  use windows_sys::Win32::Foundation::{ERROR_INVALID_PARAMETER, WAIT_OBJECT_0, WAIT_TIMEOUT};
+  use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
+  let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+  if handle.is_null() {
+    // An id nothing runs under answers "the parameter is incorrect"; any other refusal (access
+    // denied, say) says nothing about whether the process is gone.
+    return (std::io::Error::last_os_error().raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32)).then_some(true);
+  }
+  let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+  match unsafe { WaitForSingleObject(handle.as_raw_handle(), grace_ms) } {
+    WAIT_OBJECT_0 => Some(true),
+    WAIT_TIMEOUT => Some(false),
+    _ => None,
   }
 }
 
@@ -1231,7 +1280,7 @@ mod tests {
   }
 
   #[cfg(windows)]
-  use super::kill_tree;
+  use super::{kill_tree, kill_tree_with, process_gone, run_taskkill};
   use super::trash_path_owned;
   use crate::jobs;
   use std::fs;
@@ -1672,6 +1721,89 @@ mod tests {
     let pid = p.id();
     let _ = p.wait();
     assert!(kill_tree(pid).is_ok(), "a dead pid must be treated as success");
+  }
+
+  /// `taskkill` exits 255 when a member of the tree ended by itself while it was being killed
+  /// (killing the ping makes its cmd exit), although the tree is gone, and the pre-push gate failed
+  /// on it about one run in ten. The REAL taskkill kills a REAL tree here and only the exit code it
+  /// reports is swapped for the racing one, so what must decide is the outcome: the root is gone.
+  #[test]
+  #[cfg(windows)]
+  fn a_racing_taskkill_exit_code_is_not_a_failed_stop_when_the_tree_is_gone() {
+    use std::process::{Command, Stdio};
+    use std::thread::sleep;
+    use std::time::Duration;
+
+    let parent = Command::new("cmd")
+      .args(["/C", "cmd /C ping -n 120 127.0.0.1 > nul"])
+      .stdout(Stdio::null())
+      .stderr(Stdio::null())
+      .spawn()
+      .expect("spawn parent");
+    let pid = parent.id();
+    sleep(Duration::from_millis(1500)); // let the grandchild come up
+    let descendants = descendant_pids(pid);
+    assert!(!descendants.is_empty(), "expected at least one descendant to kill");
+
+    let result = kill_tree_with(pid, |pid| run_taskkill(pid).map(|_| Some(255)), |pid| process_gone(pid, 5_000));
+
+    assert_eq!(result, Ok(()), "a stop that left nothing running must not be reported as failed");
+    sleep(Duration::from_millis(1500));
+    for d in descendants {
+      assert!(!pid_alive(d), "descendant {d} survived the tree kill");
+    }
+    assert!(!pid_alive(pid), "the parent survived the tree kill");
+  }
+
+  /// The opposite direction: a failing taskkill with the process still running IS a failed stop,
+  /// and so is one whose outcome cannot be checked, or one that never started.
+  #[test]
+  #[cfg(windows)]
+  fn a_failing_taskkill_is_a_failed_stop_while_the_process_still_runs() {
+    use std::process::{Command, Stdio};
+
+    let mut running = Command::new("ping")
+      .args(["-n", "60", "127.0.0.1"])
+      .stdout(Stdio::null())
+      .spawn()
+      .expect("spawn");
+    let pid = running.id();
+
+    let result = kill_tree_with(pid, |_| Ok(Some(255)), |pid| process_gone(pid, 300));
+    let judged_while_running = process_gone(pid, 0) == Some(false);
+    let _ = running.kill();
+    let _ = running.wait();
+
+    assert!(judged_while_running, "the process had to be running when the stop was judged");
+    assert_eq!(result, Err("taskkill exited with 255".to_string()));
+    assert!(kill_tree_with(1, |_| Ok(Some(255)), |_| None).is_err(), "an unchecked failure must stay a failure");
+    assert!(kill_tree_with(1, |_| Ok(Some(255)), |_| Some(false)).is_err());
+    assert!(kill_tree_with(1, |_| Err("no taskkill".to_string()), |_| Some(true)).is_err(), "taskkill not starting is a failure");
+  }
+
+  #[test]
+  #[cfg(windows)]
+  fn a_taskkill_that_reports_success_or_not_found_needs_no_second_opinion() {
+    for code in [Some(0), Some(128), None] {
+      let result = kill_tree_with(1, move |_| Ok(code), |_| panic!("asked about a stop taskkill reported done"));
+      assert_eq!(result, Ok(()), "exit code {code:?}");
+    }
+  }
+
+  #[test]
+  #[cfg(windows)]
+  fn process_gone_tells_a_running_process_from_an_ended_one_and_from_one_that_never_was() {
+    use std::process::{Command, Stdio};
+
+    let mut running = Command::new("ping").args(["-n", "60", "127.0.0.1"]).stdout(Stdio::null()).spawn().expect("spawn");
+    let pid = running.id();
+    assert_eq!(process_gone(pid, 100), Some(false), "a running process is not gone");
+    let _ = running.kill();
+    let _ = running.wait();
+    // Ended but still referenced by our handle: the process object exists and is signalled.
+    assert_eq!(process_gone(pid, 1_000), Some(true), "an ended process is gone");
+    // An id no process can hold: OpenProcess itself refuses, which is how a vanished process answers.
+    assert_eq!(process_gone(0xFFFF_FFF0, 1_000), Some(true), "an id nothing runs under is gone");
   }
 
   #[cfg(windows)]
