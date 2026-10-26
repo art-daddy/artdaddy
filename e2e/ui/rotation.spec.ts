@@ -19,6 +19,7 @@ import {
   type RotationExpected,
 } from "../../src/preview/__rotationFixtures";
 import type { RotationShot } from "../../src/preview/__probeRotation";
+import { ProbeStalled, retryStalledProbe } from "../../src/test/probeRetry";
 
 const EXPECTED = JSON.parse(
   readFileSync(path.resolve(process.cwd(), "e2e/ui/fixtures/rotation/expected.json"), "utf8"),
@@ -26,6 +27,38 @@ const EXPECTED = JSON.parse(
 
 let page: Page;
 let shots: Record<string, RotationShot>;
+
+/** The probe's last reported stage, without trusting a page that may be too stuck to answer. */
+async function stageOf(target: Page): Promise<string> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      target.evaluate(
+        () =>
+          (window as unknown as { __rotationStage?: string }).__rotationStage ??
+          "module-not-started",
+      ),
+      new Promise<string>((resolve) => {
+        timer = setTimeout(() => resolve("page-unresponsive"), 5_000);
+      }),
+    ]);
+  } catch {
+    return "page-unreachable";
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function closeWithin(target: Page, ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    target.close().catch(() => undefined),
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, ms);
+    }),
+  ]);
+  clearTimeout(timer);
+}
 
 async function normalizedSources(info: TestInfo): Promise<Record<string, string>> {
   const reportPath = info.outputPath("normalized-sources.json");
@@ -56,14 +89,19 @@ async function normalizedSources(info: TestInfo): Promise<Record<string, string>
 }
 
 test.beforeAll(async ({ browser }, info) => {
-  info.setTimeout(180_000);
+  // Every try at the probe is bounded (30 s to load, 60 s to report, a few seconds to diagnose and
+  // replace the page), a stall earns one more try, and the normalization pass can need both. The
+  // old 180 s was for a single try.
+  info.setTimeout(480_000);
   const nativeEngine = info.project.name === "system-wkwebview";
-  if (!nativeEngine) {
-    page = await browser.newPage();
-    page.on("console", (message) => {
+  const openPage = async (): Promise<Page> => {
+    const fresh = await browser.newPage();
+    fresh.on("console", (message) => {
       if (message.text().startsWith("rotation-stage")) console.log(message.text());
     });
-  }
+    return fresh;
+  };
+  if (!nativeEngine) page = await openPage();
   const load = async (url: string, phase: string): Promise<Record<string, RotationShot>> => {
     if (nativeEngine) {
       const reportPath = info.outputPath(`system-wkwebview-${phase}.json`);
@@ -81,25 +119,36 @@ test.beforeAll(async ({ browser }, info) => {
       });
       return native.shots;
     }
-    await page.goto(url);
-    try {
-      await page.waitForFunction(() => "__rotation" in window, undefined, { timeout: 60_000 });
-    } catch (error) {
-      const stage = await page.evaluate(
-        () =>
-          (window as unknown as { __rotationStage?: string }).__rotationStage ??
-          "module-not-started",
-      );
-      await info.attach("rotation-initialization-stage", {
-        body: JSON.stringify({ phase, stage, url }),
-        contentType: "application/json",
-      });
-      throw new Error(
-        `Rotation probe did not finish during ${phase}; stage=${stage}: ${String(error)}`,
-      );
-    }
-    return page.evaluate(
-      () => (window as unknown as { __rotation: Record<string, RotationShot> }).__rotation,
+    // A page that stalls (macos-14's Chrome did, twice in three runs) is replaced and asked once
+    // more; a probe that stalls on every try, or any other failure, still fails.
+    return retryStalledProbe(
+      async () => {
+        try {
+          await page.goto(url, { timeout: 30_000 });
+          await page.waitForFunction(() => "__rotation" in window, undefined, { timeout: 60_000 });
+        } catch (error) {
+          const stage = await stageOf(page);
+          await info.attach("rotation-initialization-stage", {
+            body: JSON.stringify({ phase, stage, url }),
+            contentType: "application/json",
+          });
+          throw new ProbeStalled(
+            `Rotation probe did not finish during ${phase}; stage=${stage}: ${String(error)}`,
+            stage,
+          );
+        }
+        return page.evaluate(
+          () => (window as unknown as { __rotation: Record<string, RotationShot> }).__rotation,
+        );
+      },
+      async (stalled, tryNumber) => {
+        console.log(
+          `rotation-probe-stalled phase=${phase} try=${tryNumber} stage=${stalled.stage}; trying again on a fresh page`,
+        );
+        const stale = page;
+        page = await openPage();
+        await closeWithin(stale, 10_000);
+      },
     );
   };
   const url = new URL("/preview-probe-rotation.html", info.project.use.baseURL!);
@@ -173,6 +222,30 @@ test("failed calibration selects normalization without waiting for stalled origi
 
 const dist = (a: readonly number[], b: readonly number[]) =>
   Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+
+// The browser's own <video> is a control the log shows beside the decoder path; nothing holds a
+// picture to it. On macos-14 it once never presented a frame and the whole probe page waited on it
+// for good (`stage=html-video:present`), failing every test below. It must be reported, not waited on.
+test("a video control that never presents a frame is reported, not waited on", async ({
+  browser,
+}) => {
+  const controlPage = await browser.newPage();
+  try {
+    await controlPage.addInitScript(() => {
+      HTMLVideoElement.prototype.requestVideoFrameCallback = () => 0; // never calls back
+    });
+    await controlPage.goto("/preview-probe-rotation.html?controlOnly=1&controlMs=1500");
+    await controlPage.waitForFunction(() => "__rotation" in window, undefined, { timeout: 15_000 });
+    const result = await controlPage.evaluate(
+      () => (window as unknown as { __rotation: Record<string, RotationShot> }).__rotation,
+    );
+    const control = result["html-video:h264_rot0.mp4"];
+    expect(control.decoded).toBe(false);
+    expect(control.error).toMatch(/HTML video control/);
+  } finally {
+    await controlPage.close();
+  }
+});
 
 test.describe("a rotated video previews as it exports (real WebCodecs + WebGL2)", () => {
   for (const file of ["h264_size_control.mp4", "h264_baseline_control.mp4"]) {
