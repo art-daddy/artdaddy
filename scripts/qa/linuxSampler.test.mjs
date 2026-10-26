@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import fc from "fast-check";
-import { COLUMNS, classify, parseEvents, parseMeminfo, parsePressure, parseStat, parseStatusRss, readSample, threadFlags } from "./linuxSampler.mjs";
+import { COLUMNS, alive, classify, parseEvents, parseMeminfo, parsePressure, parseStat, parseStatusRss, readSample, threadFlags } from "./linuxSampler.mjs";
 
 const script = fileURLToPath(new URL("./linuxSampler.mjs", import.meta.url));
 const KIB = 1024;
@@ -166,18 +167,59 @@ test("an unlimited cgroup says so, and a unit that is not the QA service's is ig
   } finally { await rm(machine.root, { recursive: true, force: true }); }
 });
 
+const samplerEnv = (machine) => ({ ...process.env, QA_PROC_ROOT: machine.proc, QA_CGROUP_ROOT: machine.cgroup });
+
 test("a header and one row per sample are written, and the sampler ends when its parent does", async () => {
   const machine = await fakeMachine({ ...ALL, processes: PROCESSES });
   const out = path.join(machine.root, "samples.tsv");
   const parent = spawn(process.execPath, ["-e", "setTimeout(() => {}, 2500)"], { stdio: "ignore" });
   try {
-    const sampler = spawnSync(process.execPath, [script, out, "1", String(parent.pid)], { encoding: "utf8", timeout: 30_000,
-      env: { ...process.env, QA_PROC_ROOT: machine.proc, QA_CGROUP_ROOT: machine.cgroup } });
-    assert.equal(sampler.status, 0, sampler.stderr);
+    // Asynchronous, so that this process can reap the parent when it ends, as the shell that starts the sampler is reaped by its own parent.
+    const sampler = spawn(process.execPath, [script, out, "1", String(parent.pid)], { stdio: ["ignore", "ignore", "pipe"], env: samplerEnv(machine) });
+    let stderr = "";
+    sampler.stderr.on("data", (chunk) => { stderr += chunk; });
+    const status = await new Promise((resolve) => {
+      const timer = setTimeout(() => { sampler.kill(); resolve(null); }, 30_000);
+      sampler.once("exit", (code) => { clearTimeout(timer); resolve(code); });
+    });
+    assert.equal(status, 0, stderr || "the sampler outlived its parent");
     const lines = (await readFile(out, "utf8")).trimEnd().split("\n");
     assert.equal(lines[0], COLUMNS.join("\t"));
     assert.ok(lines.length >= 4, `expected the header and at least three rows, got ${lines.length} lines`);
     for (const line of lines.slice(1)) assert.equal(row(line).workers, "2");
+  } finally {
+    parent.kill();
+    await rm(machine.root, { recursive: true, force: true });
+  }
+});
+
+test("a parent that has exited but has not been reaped is not alive, whatever kill(pid, 0) says", async () => {
+  const machine = await fakeMachine({});
+  try {
+    await mkdir(path.join(machine.proc, String(process.pid)));
+    const status = path.join(machine.proc, String(process.pid), "status");
+    for (const [state, expected] of [["S (sleeping)", true], ["R (running)", true], ["D (disk sleep)", true], ["T (stopped)", true], ["Z (zombie)", false], ["X (dead)", false]]) {
+      await writeFile(status, `Name:\tnode\nState:\t${state}\nTgid:\t${process.pid}\n`, "utf8");
+      assert.equal(alive(process.pid, machine.proc), expected, state);
+    }
+    await rm(status);
+    assert.equal(alive(process.pid, machine.proc), true, "with nothing to read, kill(pid, 0) is all there is to go on");
+    assert.equal(alive(2 ** 22 + 12345, machine.proc), false, "no such process");
+  } finally { await rm(machine.root, { recursive: true, force: true }); }
+});
+
+test("a parent that has ended but not been reaped is an ended parent", { skip: process.platform !== "linux" }, async () => {
+  const machine = await fakeMachine({ ...ALL, processes: PROCESSES });
+  const out = path.join(machine.root, "samples.tsv");
+  const parent = spawn(process.execPath, ["-e", "setTimeout(() => {}, 2000)"], { stdio: "ignore" });
+  try {
+    // spawnSync keeps this process's event loop from reaping the parent, so it ends as a zombie, and a zombie still answers kill(pid, 0).
+    const started = Date.now();
+    const sampler = spawnSync(process.execPath, [script, out, "1", String(parent.pid)], { encoding: "utf8", timeout: 20_000, env: samplerEnv(machine) });
+    const waited = Date.now() - started;
+    assert.match(readFileSync(`/proc/${parent.pid}/status`, "utf8"), /^State:\s+Z/m, "the premise of this test: the parent really is a zombie");
+    assert.equal(sampler.status, 0, sampler.stderr || "the sampler never saw the zombie parent end");
+    assert.ok(waited >= 1500, `it must not stop before the parent does (waited ${waited} ms)`);
   } finally {
     parent.kill();
     await rm(machine.root, { recursive: true, force: true });
