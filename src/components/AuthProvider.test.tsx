@@ -37,6 +37,7 @@ const mocks = vi.hoisted(() => {
     offOpenUrl: vi.fn(),
     startUrls: null as string[] | null,
     platformName: "tauri" as "tauri" | "web",
+    hostOs: "windows" as "windows" | "macos" | "linux",
   };
 });
 
@@ -44,6 +45,11 @@ vi.mock("../platform", () => ({
   get platform() {
     return { name: mocks.platformName };
   },
+}));
+
+vi.mock("../platform/host", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../platform/host")>()),
+  hostInfo: () => ({ os: mocks.hostOs, arch: "" }),
 }));
 
 vi.mock("../store/auth", async () => {
@@ -112,6 +118,7 @@ afterEach(() => {
   mocks.onOpenUrlCb = null;
   mocks.startUrls = null;
   mocks.platformName = "tauri";
+  mocks.hostOs = "windows";
   mocks.refreshDesktopSession.mockReset().mockResolvedValue({
     status: "refreshed",
     hasStoredSession: true,
@@ -540,5 +547,171 @@ describe("AuthProvider", () => {
     mocks.authFailureCb?.();
     expect(mocks.markLocked).toHaveBeenCalledOnce();
     expect(mocks.refreshDesktopSession).not.toHaveBeenCalled();
+  });
+});
+
+// After an update macOS keeps the saved-session read behind a permission dialog. The restore stops
+// waiting after a few seconds, but the dialog is still open: whoever answers it must land in the app
+// without finding a button, and must never be asked twice for the same thing.
+describe("AuthProvider, a keychain waiting for a person", () => {
+  const unanswered: DesktopSessionRefresh = { status: "unavailable", hasStoredSession: null };
+  const mount = () =>
+    render(
+      <AuthProvider>
+        <span>editor</span>
+      </AuthProvider>,
+    );
+  const pass = (ms: number) =>
+    act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  const clock = () => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+
+  it("asks again by itself and finishes the restore once the person has answered, with no click", async () => {
+    clock();
+    mocks.refreshDesktopSession
+      .mockResolvedValueOnce(unanswered)
+      .mockResolvedValueOnce(unanswered)
+      .mockResolvedValue({ status: "refreshed", hasStoredSession: true });
+    mount();
+    await pass(0);
+    expect(screen.getByText(/couldn't read your saved session/i)).toBeInTheDocument();
+    expect(mocks.verify).not.toHaveBeenCalled();
+
+    await pass(3_000);
+    await pass(3_000);
+
+    expect(mocks.refreshDesktopSession).toHaveBeenCalledTimes(3);
+    expect(mocks.verify).toHaveBeenCalledOnce();
+    expect(mocks.markLocked).not.toHaveBeenCalled();
+  });
+
+  it("stops asking once the restore has succeeded", async () => {
+    clock();
+    mocks.refreshDesktopSession
+      .mockResolvedValueOnce(unanswered)
+      .mockResolvedValue({ status: "refreshed", hasStoredSession: true });
+    mount();
+    await pass(0);
+    await pass(3_000);
+    expect(mocks.verify).toHaveBeenCalledOnce();
+
+    await pass(60_000);
+    window.dispatchEvent(new Event("focus"));
+
+    expect(mocks.refreshDesktopSession).toHaveBeenCalledTimes(2);
+  });
+
+  it("asks again the moment the window regains focus, without waiting for the timer", async () => {
+    clock();
+    mocks.refreshDesktopSession.mockResolvedValue(unanswered);
+    mount();
+    await pass(0);
+    expect(mocks.refreshDesktopSession).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+
+    expect(mocks.refreshDesktopSession).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the explanation and both buttons on screen while an automatic retry is waiting", async () => {
+    clock();
+    mocks.refreshDesktopSession
+      .mockResolvedValueOnce(unanswered)
+      .mockReturnValue(new Promise<never>(() => undefined));
+    mount();
+    await pass(0);
+    await pass(3_000);
+
+    expect(mocks.refreshDesktopSession).toHaveBeenCalledTimes(2);
+    expect(screen.getByText(/couldn't read your saved session/i)).toBeInTheDocument();
+    expect(screen.queryByText(/restoring your saved session/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /sign in again/i })).toBeInTheDocument();
+  });
+
+  it("still shows the plain restoring message when the person presses Retry themselves", async () => {
+    clock();
+    mocks.refreshDesktopSession
+      .mockResolvedValueOnce(unanswered)
+      .mockReturnValue(new Promise<never>(() => undefined));
+    mount();
+    await pass(0);
+    await pass(3_000); // an automatic retry has already run
+    expect(mocks.refreshDesktopSession).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Retry" }).click();
+    });
+
+    expect(screen.getByText(/restoring your saved session/i)).toBeInTheDocument();
+  });
+
+  it("stops asking once the person chooses Sign in again", async () => {
+    clock();
+    mocks.refreshDesktopSession.mockResolvedValue(unanswered);
+    const view = mount();
+    await pass(0);
+    await act(async () => {
+      screen.getByRole("button", { name: /sign in again/i }).click();
+    });
+    expect(mocks.markLocked).toHaveBeenCalledOnce();
+    mocks.authStatus = "locked"; // what the real store does when markLocked runs
+    view.rerender(
+      <AuthProvider>
+        <span>editor</span>
+      </AuthProvider>,
+    );
+    mocks.refreshDesktopSession.mockClear();
+
+    await pass(30_000);
+    window.dispatchEvent(new Event("focus"));
+
+    expect(mocks.refreshDesktopSession).not.toHaveBeenCalled();
+  });
+
+  it("stops asking when the screen goes away", async () => {
+    clock();
+    mocks.refreshDesktopSession.mockResolvedValue(unanswered);
+    const view = mount();
+    await pass(0);
+    view.unmount();
+    mocks.refreshDesktopSession.mockClear();
+
+    await pass(30_000);
+    window.dispatchEvent(new Event("focus"));
+
+    expect(mocks.refreshDesktopSession).not.toHaveBeenCalled();
+  });
+
+  it("does not ask again after the person said no: nothing saved reads as signed out", async () => {
+    clock();
+    mocks.refreshDesktopSession.mockResolvedValue({ status: "missing", hasStoredSession: false });
+    mount();
+    await pass(0);
+    expect(mocks.markLocked).toHaveBeenCalledOnce();
+
+    await pass(30_000);
+    window.dispatchEvent(new Event("focus"));
+
+    expect(mocks.refreshDesktopSession).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["macos", true],
+    ["windows", false],
+    ["linux", false],
+  ] as const)("on %s, tells the person what to click: %s", async (os, told) => {
+    clock();
+    mocks.hostOs = os;
+    mocks.refreshDesktopSession.mockResolvedValue(unanswered);
+    mount();
+    await pass(0);
+
+    expect(screen.getByText(/couldn't read your saved session/i)).toBeInTheDocument();
+    if (told) expect(screen.getByText(/click Always Allow/i)).toBeInTheDocument();
+    else expect(screen.queryByText(/Always Allow/i)).not.toBeInTheDocument();
   });
 });

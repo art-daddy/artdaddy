@@ -5,7 +5,7 @@
 // web domain nor a browser Clerk trusts — see api/desktopAuth.ts), so sign-in happens in the
 // system browser at the real https://artdaddy.app/auth origin and hands a one-time code back
 // here via an `artdaddy://` deep link.
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   ensureFreshAccessToken,
@@ -20,17 +20,25 @@ import { onAuthFailure, setClerkTokenProvider, setSessionRenewer } from "../api/
 import { reportLaunchOnce } from "../api/appEvents";
 import { identifyUser } from "../observability/sentry";
 import { platform } from "../platform";
+import { hostInfo } from "../platform/host";
 import { useAuth, isSignedOutGate, authBypassed } from "../store/auth";
 import SignInScreen from "./SignInScreen";
 
 /** How long launch waits on the session before opening (offline) for one that is stored. */
 const BOOT_PATIENCE_MS = 15_000;
+/** How long after the keychain did not answer before the restore asks it again. */
+const KEYCHAIN_RETRY_MS = 3_000;
 
 export default function AuthProvider({ children }: { children: React.ReactNode }) {
   const status = useAuth((s) => s.status);
   const hasStoredSession = useAuth((s) => s.hasStoredSession);
   const [restoreAttempt, setRestoreAttempt] = useState(0);
   const [restoreUnavailable, setRestoreUnavailable] = useState(false);
+  // From the moment a restore ends with the keychain still unanswered until the next one starts.
+  const [keychainUnanswered, setKeychainUnanswered] = useState(false);
+  // Set by an automatic retry, so the screen keeps explaining instead of flashing back to
+  // "Restoring" every few seconds.
+  const automaticRetry = useRef(false);
   useEffect(() => {
     const restoreDesktopSession = async (): Promise<void> => {
       const result = await refreshDesktopSession();
@@ -121,7 +129,9 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
   useEffect(() => {
     if (platform.name !== "tauri") return;
     let cancelled = false;
-    setRestoreUnavailable(false);
+    if (!automaticRetry.current) setRestoreUnavailable(false);
+    automaticRetry.current = false;
+    setKeychainUnanswered(false);
     void (async () => {
       const restoring = refreshDesktopSession();
       let patience: ReturnType<typeof setTimeout> | undefined;
@@ -156,6 +166,7 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
       }
       if (result.status === "unavailable" && result.hasStoredSession === null) {
         setRestoreUnavailable(true);
+        setKeychainUnanswered(true);
         return;
       }
       if (result.status === "unavailable") useAuth.getState().markOffline();
@@ -179,6 +190,24 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
     return () => clearTimeout(timer);
   }, [status, restoreAttempt]);
 
+  // macOS keeps the saved-session read behind a permission dialog that the restore stops waiting
+  // for, and the dialog stays open. Its answer must not depend on finding a button: ask again
+  // shortly, and at once when the window comes back to the front, which is what answering does.
+  // Asking again joins the read that is still open, so it never opens a second dialog.
+  useEffect(() => {
+    if (!keychainUnanswered || status !== "checking") return;
+    const askAgain = () => {
+      automaticRetry.current = true;
+      setRestoreAttempt((attempt) => attempt + 1);
+    };
+    const timer = setTimeout(askAgain, KEYCHAIN_RETRY_MS);
+    window.addEventListener("focus", askAgain);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener("focus", askAgain);
+    };
+  }, [keychainUnanswered, status]);
+
   if (authBypassed()) return <>{children}</>;
   if (status === "checking")
     return (
@@ -190,6 +219,12 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
               ? "ArtDaddy couldn't read your saved session."
               : "Restoring your saved session."}
           </div>
+          {restoreUnavailable && hostInfo().os === "macos" ? (
+            <div className="mt-2 text-sm text-neutral-400">
+              If macOS asks to use your saved sign-in, enter your Mac password and click Always
+              Allow. ArtDaddy then continues by itself.
+            </div>
+          ) : null}
           {restoreUnavailable ? (
             <div className="mt-5 flex justify-center gap-3">
               <button
