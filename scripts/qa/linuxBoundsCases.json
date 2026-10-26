@@ -1,0 +1,11 @@
+[
+  { "id": "seq4k-n1", "line": "scratch-4k-sequence", "kind": "promise", "source": "generated", "width": 3840, "height": 2160, "fps": 30, "durationSeconds": 24, "visualClips": 1, "videoLayers": 1, "captions": false, "audio": true, "speedFactor16gb": 4 },
+  { "id": "seq4k", "line": "scratch-4k-sequence", "kind": "promise", "source": "generated", "width": 3840, "height": 2160, "fps": 30, "durationSeconds": 24, "visualClips": 8, "videoLayers": 1, "captions": false, "audio": true, "speedFactor16gb": 4 },
+  { "id": "seq4k-n1-ci", "line": "scratch-4k-sequence-ci", "kind": "promise", "source": "generated", "width": 3840, "height": 2160, "fps": 30, "durationSeconds": 12, "visualClips": 1, "videoLayers": 1, "captions": false, "audio": true, "speedFactor16gb": 4 },
+  { "id": "seq4k-ci", "line": "scratch-4k-sequence-ci", "kind": "promise", "source": "generated", "width": 3840, "height": 2160, "fps": 30, "durationSeconds": 12, "visualClips": 8, "videoLayers": 1, "captions": false, "audio": true, "speedFactor16gb": 4 },
+  { "id": "seq1440-n1", "line": "scratch-1440-sequence", "kind": "promise", "source": "generated", "width": 2560, "height": 1440, "fps": 30, "durationSeconds": 24, "visualClips": 1, "videoLayers": 1, "captions": false, "audio": true, "speedFactor16gb": 4 },
+  { "id": "seq1440", "line": "scratch-1440-sequence", "kind": "promise", "source": "generated", "width": 2560, "height": 1440, "fps": 30, "durationSeconds": 24, "visualClips": 8, "videoLayers": 1, "captions": false, "audio": true, "speedFactor16gb": 4 },
+  { "id": "layers1080x3", "line": "scratch-1080-layers", "kind": "promise", "source": "generated", "width": 1920, "height": 1080, "fps": 30, "durationSeconds": 60, "visualClips": 6, "videoLayers": 3, "captions": false, "audio": true, "speedFactor16gb": 4 },
+  { "id": "seq1080-n24", "line": "scratch-1080-sequence", "kind": "promise", "source": "generated", "width": 1920, "height": 1080, "fps": 30, "durationSeconds": 40, "visualClips": 24, "videoLayers": 1, "captions": false, "audio": true, "speedFactor16gb": 4 },
+  { "id": "seq1080-n30", "line": "scratch-1080-sequence", "kind": "promise", "source": "generated", "width": 1920, "height": 1080, "fps": 30, "durationSeconds": 40, "visualClips": 30, "videoLayers": 1, "captions": false, "audio": true, "speedFactor16gb": 4 }
+]
