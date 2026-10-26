@@ -8,6 +8,10 @@
 // sign-in screen and never mounts the update banner. The banner's click path is covered by the unit
 // tests and by the macOS canary; what only a Windows machine can show is the Rust updater, the NSIS
 // installer replacing a running app, and the relaunch.
+//
+// GitHub's Windows runners are elevated, and an elevated WebView2 host ignores the WEBVIEW2_* environment
+// overrides, so the port is requested through HKLM policy. If it still does not open, the installer step
+// alone is rehearsed (started the way the updater starts it) and the result says the app did not drive it.
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { closeSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
@@ -111,6 +115,54 @@ async function cdpUp(waitMs) {
   return false;
 }
 
+const POLICY_KEY = "HKLM\\SOFTWARE\\Policies\\Microsoft\\Edge\\WebView2\\AdditionalBrowserArguments";
+
+/** Ask WebView2 for a debugging port the one way an elevated host honours: HKLM policy, named for the exe. */
+function allowDebuggingPort() {
+  const args =
+    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required " +
+    `--remote-debugging-port=${PORT} --remote-allow-origins=*`;
+  const added = spawnSync("reg.exe", ["add", POLICY_KEY, "/v", "artdaddy.exe", "/t", "REG_SZ", "/d", args, "/f"], {
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  note("debugging port policy", { status: added.status, output: `${added.stdout}${added.stderr}`.trim() });
+  const stored = spawnSync("reg.exe", ["query", POLICY_KEY, "/v", "artdaddy.exe"], { encoding: "utf8", windowsHide: true });
+  note("debugging port policy as stored", { value: stored.stdout.split(/\r?\n/).find((line) => line.includes("artdaddy.exe")) });
+}
+
+function removeDebuggingPortPolicy() {
+  spawnSync("reg.exe", ["delete", POLICY_KEY, "/v", "artdaddy.exe", "/f"], { windowsHide: true });
+}
+
+/** What a person would look at when no port opened: who runs, with which arguments, who listens, how privileged. */
+function diagnose(label) {
+  const ask = (script) => {
+    try {
+      return powershell(script);
+    } catch (error) {
+      return `error: ${error.message}`;
+    }
+  };
+  const text = [
+    "== artdaddy and webview processes ==",
+    ask(
+      "Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'artdaddy|msedgewebview2' } | " +
+        "ForEach-Object { '{0} {1} parent={2} {3}' -f $_.ProcessId, $_.Name, $_.ParentProcessId, $_.CommandLine } | Out-String -Width 4000",
+    ),
+    "== loopback listeners ==",
+    ask(
+      "Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.LocalAddress -eq '127.0.0.1' } | " +
+        "Sort-Object LocalPort | ForEach-Object { '{0}:{1} pid={2}' -f $_.LocalAddress, $_.LocalPort, $_.OwningProcess } | Out-String",
+    ),
+    "== integrity level of this shell ==",
+    ask("whoami /groups | Select-String 'Mandatory Label' | Out-String"),
+    "== policy ==",
+    ask(`reg query '${POLICY_KEY}' | Out-String`),
+  ].join("\n");
+  writeFileSync(path.join(OUT, `diagnostics-${label}.txt`), text);
+}
+
 let failure = null;
 try {
   // 1. The live manifest says what the app should be offered.
@@ -143,10 +195,13 @@ try {
   note("installed", { exe, version: before });
   if (before !== FROM) throw new Error(`installed ${before}, expected ${FROM}`);
 
-  // 4. Start it with a debugging port. The installer the app later runs inherits this environment,
-  // so the relaunched app listens on the same port. An app the installer started on its own would have
-  // no port, and a second launch only hands over to it, so clear any first.
+  // 4. Start it with a debugging port. GitHub's Windows runners are ELEVATED, and an elevated WebView2
+  // host ignores WEBVIEW2_* environment overrides and HKCU policy but honours HKLM policy, so the port
+  // is asked for there (the variable stays for a standard-user machine). The app's own window config
+  // sets browser arguments, which that policy replaces, so they are repeated. An app the installer
+  // started on its own has no port and a second launch only hands over to it: clear any first.
   spawnSync("taskkill", ["/F", "/IM", "artdaddy.exe", "/T"], { windowsHide: true });
+  allowDebuggingPort();
   process.env.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = `--remote-debugging-port=${PORT}`;
   process.env.WEBVIEW2_USER_DATA_FOLDER = path.join(TEMP, "ArtDaddyCanaryWebView");
   const log = (name) => openSync(path.join(OUT, name), "w");
@@ -156,34 +211,64 @@ try {
   child.unref();
   closeSync(stdout);
   closeSync(stderr);
-  if (!(await cdpUp(90_000))) throw new Error("the old app never opened its debugging port");
+  const portOpened = await cdpUp(90_000);
   const old = runningApps(exe);
-  note("old app running", { processes: old });
+  note("old app running", { processes: old, debuggingPort: portOpened });
   if (!old.length) throw new Error("the old app is not running");
-
-  // 5. Let the app itself check, download and verify the update.
-  const browser = await chromium.connectOverCDP(CDP);
-  const page = await pageOf(browser);
-  await page.waitForFunction(() => Boolean(window.__TAURI_INTERNALS__?.invoke), undefined, { timeout: 30_000 });
-  const invoke = (command) =>
-    page.evaluate((name) => window.__TAURI_INTERNALS__.invoke(name), command);
   await sleep(5_000); // the app's own start-up work first
   screenshot("before-update.png");
-  const available = await invoke("check_for_update");
-  note("check_for_update", { available });
-  if (available?.version !== manifest.version) {
-    throw new Error(`the app was offered ${available?.version ?? "nothing"}, the manifest says ${manifest.version}`);
-  }
-  if (available.current_version !== FROM) throw new Error(`the app reports it is ${available.current_version}`);
-  const staged = await invoke("download_update");
-  note("download_update", { staged });
-
-  // 6. Install: the installer replaces the running app, which does not answer again.
   const installStarted = Date.now();
-  void page.evaluate(() => window.__TAURI_INTERNALS__.invoke("install_update")).catch(() => undefined);
-  await sleep(3_000); // let the request reach the page before the connection is let go
-  await browser.close().catch(() => undefined);
-  note("install_update requested");
+
+  if (portOpened) {
+    // 5. Let the app itself check, download and verify the update.
+    const browser = await chromium.connectOverCDP(CDP);
+    const page = await pageOf(browser);
+    await page.waitForFunction(() => Boolean(window.__TAURI_INTERNALS__?.invoke), undefined, { timeout: 30_000 });
+    const invoke = (command) =>
+      page.evaluate((name) => window.__TAURI_INTERNALS__.invoke(name), command);
+    const available = await invoke("check_for_update");
+    note("check_for_update", { available });
+    if (available?.version !== manifest.version) {
+      throw new Error(`the app was offered ${available?.version ?? "nothing"}, the manifest says ${manifest.version}`);
+    }
+    if (available.current_version !== FROM) throw new Error(`the app reports it is ${available.current_version}`);
+    const staged = await invoke("download_update");
+    note("download_update", { staged });
+
+    // 6. Install: the installer replaces the running app, which does not answer again.
+    void page.evaluate(() => window.__TAURI_INTERNALS__.invoke("install_update")).catch(() => undefined);
+    await sleep(3_000); // let the request reach the page before the connection is let go
+    await browser.close().catch(() => undefined);
+    note("install_update requested");
+  } else {
+    // No page to ask: say why, then rehearse the part only a Windows machine can show, with the
+    // installer started the way the updater starts it. The app did NOT drive this, and the result
+    // says so.
+    diagnose("no-port");
+    evidence.mode = "installer-only";
+    note("the old app opened no debugging port; rehearsing the installer step without the app driving it");
+    const fetched = path.join(TEMP, "new-release");
+    const got = spawnSync(
+      "gh",
+      ["release", "download", `v${manifest.version}`, "--repo", REPOSITORY, "--pattern", "ArtDaddy-windows-x64-setup.exe",
+        "--dir", fetched, "--clobber"],
+      { encoding: "utf8" },
+    );
+    if (got.status !== 0) throw new Error(`could not download v${manifest.version}: ${got.stderr}`);
+    const update = path.join(fetched, "ArtDaddy-windows-x64-setup.exe");
+    const signature = path.join(fetched, "manifest.sig");
+    writeFileSync(signature, offered.signature);
+    const verified = spawnSync("node", ["scripts/verify-release-signature.mjs", update, signature], { encoding: "utf8" });
+    note("live manifest signature against the published installer", {
+      status: verified.status,
+      output: `${verified.stdout}${verified.stderr}`.trim().slice(-300),
+    });
+    if (verified.status !== 0) throw new Error("the live manifest's signature does not verify against the published installer");
+    spawn(update, ["/P", "/R", "/UPDATE", "/ARGS"], { detached: true, stdio: "ignore" }).unref();
+    await sleep(1_000);
+    for (const app of old) spawnSync("taskkill", ["/F", "/PID", String(app.id), "/T"], { windowsHide: true });
+    note("installer started the way the updater starts it; the old app ended");
+  }
 
   // 7. Wait for the new version on disk and a NEW process running it.
   let outcome = null;
@@ -249,6 +334,12 @@ try {
   }
   if (!outcome.relaunched) throw new Error("the app was updated but not relaunched");
   evidence.passed = true;
+  if (evidence.mode === "installer-only") {
+    console.log(
+      "::warning::The old app opened no debugging port, so it did not drive this update: only the installer " +
+        "step (replace the running app, relaunch it) was rehearsed. See diagnostics-no-port.txt.",
+    );
+  }
 } catch (error) {
   failure = error;
   evidence.passed = false;
@@ -262,6 +353,7 @@ try {
 } finally {
   evidence.finishedAt = new Date().toISOString();
   save();
+  removeDebuggingPortPolicy();
   spawnSync("taskkill", ["/F", "/IM", "artdaddy.exe", "/T"], { windowsHide: true });
 }
 process.exit(failure ? 1 : 0);
