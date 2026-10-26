@@ -224,6 +224,8 @@ pub struct ArtifactIdentity {
 #[derive(Debug, serde::Serialize)]
 pub struct ExportResources {
   pub total_memory_bytes: Option<u64>,
+  /// What a new process can get without the system paging out running apps. macOS asks the kernel (`resources::memory_figures`); every other
+  /// system uses `sysinfo`'s own figure.
   pub available_memory_bytes: Option<u64>,
   pub scratch_free_bytes: Option<u64>,
   pub destination_free_bytes: Option<u64>,
@@ -277,10 +279,7 @@ fn resource_free_bytes(path: &Path, disks: &sysinfo::Disks) -> Option<u64> {
 }
 
 fn export_resources(destination: &Path, scratch: Option<&Path>, workspace: &Workspace) -> ExportResources {
-  let mut system = sysinfo::System::new();
-  system.refresh_memory();
-  let total_memory_bytes = (system.total_memory() > 0).then(|| system.total_memory());
-  let available_memory_bytes = total_memory_bytes.map(|_| system.available_memory());
+  let (total_memory_bytes, available_memory_bytes) = resources::memory_figures();
   let disks = sysinfo::Disks::new_with_refreshed_list();
   ExportResources { total_memory_bytes, available_memory_bytes,
     scratch_free_bytes: scratch.and_then(|path| resource_free_bytes(path, &disks)),
