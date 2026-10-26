@@ -10,6 +10,11 @@
 // variable is all the updater reads to know what to replace and what to relaunch, and extracting avoids
 // asking a CI runner for FUSE. The proof is what is on disk and running afterwards: the published bytes in
 // place of the file, and a new process running the published payload's binary, byte for byte.
+//
+// A window that exists is not a window that shows anything, so the relaunched app is also looked at: its
+// screen capture is counted for colours (a black rectangle has one), and the updated file is started three
+// other ways (on its own, with the first app's environment, with software drawing) to tell a relaunch
+// problem from a limit of the virtual display. That part is evidence and never changes the verdict.
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -103,6 +108,52 @@ function screenshot(file) {
   const shot = spawnSync("import", ["-window", "root", path.join(OUT, file)], { encoding: "utf8" });
   return shot.status === 0;
 }
+
+/** How many distinct colours a capture holds: the sign-in screen has hundreds, a window that never painted one. */
+function colourCount(file) {
+  const counted = spawnSync("identify", ["-format", "%k", path.join(OUT, file)], { encoding: "utf8" });
+  return counted.status === 0 ? Number(counted.stdout.trim()) : null;
+}
+const PAINTED_COLOURS = 16;
+
+/** Everything that says whether the app's window is alive AND painted right now. It never throws. */
+function observe(label) {
+  const taken = screenshot(`${label}.png`);
+  listProcesses(label);
+  const tree = spawnSync("xwininfo", ["-root", "-tree"], { encoding: "utf8" });
+  if (tree.status === 0) writeFileSync(path.join(OUT, `windows-${label}.txt`), tree.stdout);
+  const every = spawnSync("ps", ["-eo", "args"], { encoding: "utf8" }).stdout ?? "";
+  const webProcesses = every.split("\n").filter((line) => /WebKit(Web|Network|GPU)Process/.test(line)).length;
+  const colours = taken ? colourCount(`${label}.png`) : null;
+  return { label, colours, painted: colours === null ? null : colours > PAINTED_COLOURS, webProcesses };
+}
+
+/** Read something about a process that may already be gone; say so instead of failing. */
+function tryRead(read) {
+  try {
+    return read();
+  } catch (error) {
+    return { unavailable: String(error?.message ?? error) };
+  }
+}
+
+/** The whole environment a process was started with (kept in memory to start a copy; never written down). */
+function environmentOf(pid) {
+  const all = {};
+  for (const entry of readFileSync(`/proc/${pid}/environ`, "utf8").split("\0")) {
+    const at = entry.indexOf("=");
+    if (at > 0) all[entry.slice(0, at)] = entry.slice(at + 1);
+  }
+  return all;
+}
+const commandLineOf = (pid) => readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
+
+/** The part of an environment worth comparing between two launches. A CI job's environment holds tokens, so
+ * this is an allow-list by name: nothing that can carry a secret matches it. */
+const COMPARABLE_VARIABLE =
+  /^(APPDIR|APPIMAGE|APPIMAGE_EXTRACT_AND_RUN|ARGV0|OWD|DISPLAY|LD_LIBRARY_PATH|GDK_[A-Z_]+|GTK_[A-Z_]+|GIO_[A-Z_]+|GSETTINGS_SCHEMA_DIR|LIBGL_[A-Z_]+|MESA_[A-Z_]+|WEBKIT_[A-Z_]+|TAURI_AUTOMATION|XDG_DATA_HOME|XDG_CONFIG_HOME|XDG_CACHE_HOME|XDG_DATA_DIRS|GST_[A-Z_]+|QT_[A-Z_]+)$/;
+const describeEnvironment = (environment) =>
+  Object.fromEntries(Object.entries(environment).filter(([name]) => COMPARABLE_VARIABLE.test(name)));
 
 function extract(appImage, into) {
   mkdirSync(into, { recursive: true });
@@ -225,6 +276,43 @@ async function killApp() {
   for (let i = 0; i < 20 && appProcesses().length; i++) await sleep(500);
 }
 
+/** What a person's desktop session hands the app: a display and a home, none of the test harness. */
+function cleanEnvironment(extra = {}) {
+  const own = {
+    PATH: process.env.PATH,
+    HOME: process.env.HOME,
+    LANG: process.env.LANG ?? "C.UTF-8",
+    DISPLAY: process.env.DISPLAY,
+    XAUTHORITY: process.env.XAUTHORITY,
+    XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,
+    XDG_DATA_HOME: process.env.XDG_DATA_HOME,
+    XDG_CACHE_HOME: process.env.XDG_CACHE_HOME,
+    XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
+    APPIMAGE_EXTRACT_AND_RUN: "1",
+    ...extra,
+  };
+  return Object.fromEntries(Object.entries(own).filter(([, value]) => value !== undefined));
+}
+
+/** Start the updated AppImage by itself, as launched by whoever is asked for, and see whether its window paints. */
+async function paintControl(label, appImage, environment) {
+  let output = "";
+  const child = spawn(appImage, [], { env: environment, stdio: ["ignore", "pipe", "pipe"] });
+  child.on("error", (error) => (output += `\n[spawn failed: ${error.message}]`)); // evidence only: never a crash
+  for (const stream of [child.stdout, child.stderr]) {
+    stream.on("data", (chunk) => (output = (output + chunk).slice(-8_000)));
+  }
+  try {
+    const window = await waitForWindow(60_000);
+    await sleep(15_000); // the page's own start-up, then a look
+    return { label, window, ...observe(`control-${label}`) };
+  } finally {
+    child.kill("SIGKILL");
+    await killApp();
+    writeFileSync(path.join(OUT, `control-${label}.log`), output);
+  }
+}
+
 /** Ask the updated app itself, in a fresh session. Extra evidence: a failure here is recorded, not fatal. */
 async function verifyWithWebDriver(appRun, appImage, expectedVersion) {
   try {
@@ -269,6 +357,12 @@ try {
   const expected = digest.replace(/^sha256:/, "");
   if (!/^[0-9a-f]{64}$/.test(expected)) throw new Error(`the release shows no sha256 for ${ASSET}: ${digest}`);
   note("expected AppImage", { version: manifest.version, sha256: expected });
+  const packages = spawnSync(
+    "sh",
+    ["-c", "dpkg-query -W -f='${Package} ${Version}\\n' 'libwebkit2gtk*' xvfb libgl1-mesa-dri 'imagemagick*' 2>/dev/null"],
+    { encoding: "utf8" },
+  );
+  note("runner", { packages: (packages.stdout ?? "").split("\n").filter(Boolean) });
 
   // 2. The old release, as a user has it, started from the file they would have.
   const home = path.join(TEMP, "canary");
@@ -294,7 +388,17 @@ try {
   const running = appProcesses();
   note("old app running", { processes: running });
   if (!running.length) throw new Error("the old app is not running");
-  screenshot("before-update.png");
+  let firstEnvironment = null;
+  try {
+    firstEnvironment = environmentOf(running[0].id);
+  } catch {
+    /* the "inherited" control below then has nothing to start from, and says so */
+  }
+  evidence.firstInstance = {
+    ...observe("before-update"),
+    commandLine: tryRead(() => commandLineOf(running[0].id)),
+    environment: firstEnvironment && describeEnvironment(firstEnvironment),
+  };
   const available = await invoke(session, "check_for_update");
   note("check_for_update", { available });
   if (available?.version !== manifest.version) {
@@ -339,7 +443,12 @@ try {
   if (!outcome) throw new Error("the AppImage never became the offered file, with a new process running it");
   note("after update", outcome);
   if (!outcome.relaunched) throw new Error("the AppImage was replaced but the app was not relaunched by itself");
-  listProcesses("after-update");
+  const relaunched = outcome.processes[0];
+  evidence.relaunched = {
+    commandLine: tryRead(() => commandLineOf(relaunched.id)),
+    environment: tryRead(() => describeEnvironment(environmentOf(relaunched.id))),
+    observations: [observe("after-update-1")],
+  };
 
   // 6. What came back is the published app: the very same binary, running from the new file.
   const publishedRun = extract(appImage, path.join(home, "new"));
@@ -352,10 +461,37 @@ try {
 
   // Its window. A relaunch inherits the WebDriver environment it was started under, so it can take a while.
   const shown = await waitForWindow(60_000);
-  screenshot("after-update.png");
-  const tree = spawnSync("xwininfo", ["-root", "-tree"], { encoding: "utf8" });
-  if (tree.status === 0) writeFileSync(path.join(OUT, "windows-after-update.txt"), tree.stdout);
-  note("relaunched app window", { shown });
+  evidence.relaunched.observations.push(observe("after-update-2"));
+  note("relaunched app window", { shown, observation: evidence.relaunched.observations.at(-1) });
+  await sleep(20_000); // a page that is merely slow to paint would have painted by now
+  evidence.relaunched.observations.push(observe("after-update-3"));
+
+  // A window that exists can still be a black rectangle. Is that the update's doing or the virtual display's?
+  // Start the updated file on its own three ways and compare. Evidence only: it cannot change the verdict.
+  evidence.controls = [];
+  const software = { WEBKIT_DISABLE_COMPOSITING_MODE: "1", WEBKIT_DISABLE_DMABUF_RENDERER: "1", LIBGL_ALWAYS_SOFTWARE: "1" };
+  for (const [label, environment] of [
+    ["clean", cleanEnvironment()],
+    ["inherited", firstEnvironment],
+    ["software", cleanEnvironment(software)],
+  ]) {
+    if (!environment) {
+      evidence.controls.push({ label, skipped: "the first app's environment could not be read" });
+      continue;
+    }
+    try {
+      await killApp();
+      evidence.controls.push(await paintControl(label, appImage, environment));
+    } catch (error) {
+      evidence.controls.push({ label, error: String(error?.message ?? error) });
+    }
+  }
+  note("paint controls", { controls: evidence.controls });
+  if (evidence.relaunched.observations.at(-1).painted === false) {
+    console.log(
+      "::warning::The relaunched Linux app's window exists but its capture is blank; see evidence.json (relaunched, controls) for whether the cause is the update or the virtual display.",
+    );
+  }
 
   // Best effort and never the verdict: ask the updated app itself, in a fresh session, once nothing else runs.
   evidence.verification = await verifyWithWebDriver(publishedRun, appImage, manifest.version);
