@@ -4,19 +4,23 @@ name: Exporter Linux bounds QA
 # engine) on GitHub's standard Ubuntu runner (4 vCPU, about 16 GB), with every case run inside the same kernel-enforced 8 GiB cgroup the native
 # recovery job uses (scripts/qa/exporterLinuxMemory.mjs), so the "8gb" class is held by the kernel and not by a promise.
 #
-# The code under test is PINNED in the matrix, never the head of this branch: a later commit here cannot change what a result means. This
-# branch only carries the instrument (this file, the sampler, the extra cases, the verdict). Each leg runs its cases one after another and a case
-# that fails does not stop the batch; the branch leg then fails the job unless every export finished and was verified, the base leg is a
-# comparison and only has to leave a result for every case. The first case (social-portrait) doubles as the warm-up for a cold dev-server
-# cache, a plausible (not proven) trigger of the one transient this harness is known for: the test page failing to load one of its own files
-# from its web server. That failure is re-run once, with both logs kept.
+# PAIRED: both codes are built in ONE job and run case by case on ONE machine, the two alternating (which goes first is swapped from one
+# repetition to the next), because the runner pool mixes CPU models and a time or a file hash compared across two machines says nothing about the
+# code (a first, unpaired run had the legs on different CPUs: a case with an identical command ran 55 % slower on one). Three repetitions, three
+# machines, show how much of any difference is the machine.
+#
+# The code under test is PINNED below, never the head of this branch: a later commit here cannot change what a result means. This branch only
+# carries the instrument (this file, the sampler, the extra cases, the verdict). A case that fails does not stop the batch; the branch's leg fails
+# the job unless every export finished and was verified, the base's leg is a comparison and only has to leave a result for every case. The first
+# case (social-portrait) doubles as the warm-up for a cold dev-server cache, a plausible (not proven) trigger of the one transient this harness
+# is known for: the test page failing to load one of its own files from its web server. That failure is re-run once, with both logs kept.
 on:
   push:
     branches: ["qa/linux-bounds-*"]
   workflow_dispatch:
     inputs:
       cases:
-        description: "Cases to run, space separated (empty: each leg's own list)"
+        description: "Cases to run, space separated (empty: the default list)"
         required: false
         default: ""
 
@@ -26,6 +30,11 @@ permissions:
 concurrency:
   group: exporter-linux-bounds-${{ github.ref }}
   cancel-in-progress: false
+
+env:
+  BASE_SHA: 369bf7b3b528edc3a5d34a10577f7045cb4729fa
+  BRANCH_SHA: cc3b74ae03c8509a1fc318e310f7839479fcd9b0
+  CASES: ${{ inputs.cases || 'social-portrait hd60 seq1080-n24 seq1080-n30 layers1080x3 seq1440-n1 seq1440 seq4k-n1 seq4k' }}
 
 jobs:
   instrument:
@@ -44,64 +53,76 @@ jobs:
       - name: Sampler, case merge, verdict and this workflow's own consistency
         run: node --test scripts/qa/linuxSampler.test.mjs scripts/qa/linuxBounds.test.mjs
 
-  bounds:
-    name: ${{ matrix.leg }}
+  paired:
+    name: paired ${{ matrix.rep }} (${{ matrix.first }} first)
     strategy:
       fail-fast: false
       matrix:
         include:
-          - leg: branch-cc3b74a
-            code: cc3b74ae03c8509a1fc318e310f7839479fcd9b0
-            must_pass: true
-            cases: "social-portrait hd60 seq1080-n24 seq1080-n30 layers1080x3 seq1440-n1 seq1440 seq4k-n1-ci seq4k-ci"
-          - leg: base-369bf7b
-            code: 369bf7b3b528edc3a5d34a10577f7045cb4729fa
-            must_pass: false
-            cases: "social-portrait hd60 seq1080-n24 seq1080-n30 layers1080x3 seq1440-n1 seq1440 seq4k-n1-ci seq4k-ci"
+          - rep: 1
+            first: base
+            second: branch
+          - rep: 2
+            first: branch
+            second: base
+          - rep: 3
+            first: base
+            second: branch
     runs-on: ubuntu-22.04
-    timeout-minutes: 180
+    timeout-minutes: 240
     env:
       VITE_API_BASE_URL: http://127.0.0.1:9
       VITE_SENTRY_DSN: ""
       SENTRY_DSN: ""
       CARGO_BUILD_JOBS: "2"
       TAURI_CONFIG: '{"bundle":{"externalBin":["binaries/artdaddy-ffmpeg","binaries/artdaddy-ffprobe"],"resources":[]}}'
-      CASES: ${{ inputs.cases || matrix.cases }}
       OUT: ${{ github.workspace }}/out
+      FIRST: ${{ matrix.first }}
+      SECOND: ${{ matrix.second }}
     steps:
       - name: Instrument (this commit)
         uses: actions/checkout@v4
         with:
           path: tools
           persist-credentials: false
-      - name: Code under test (pinned)
+      - name: Base code (pinned)
         uses: actions/checkout@v4
         with:
-          ref: ${{ matrix.code }}
-          path: app
+          ref: ${{ env.BASE_SHA }}
+          path: base
+          persist-credentials: false
+      - name: Branch code (pinned)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BRANCH_SHA }}
+          path: branch
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: app/package-lock.json
+          cache-dependency-path: branch/package-lock.json
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: app/src-tauri
+          workspaces: |
+            base/src-tauri
+            branch/src-tauri
           cache-on-failure: true
       - name: Linux native GUI dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential libayatana-appindicator3-dev libssl-dev libwebkit2gtk-4.1-dev librsvg2-dev patchelf xvfb dbus-x11 xdg-utils desktop-file-utils
-      - name: Install and stage the encoder
-        working-directory: app
+      - name: Install and stage the encoder, in both
         run: |
-          npm ci
-          node scripts/fetch-sidecars.mjs --only ffmpeg,ffprobe
-      - name: Add the scratch cases to the library, and refuse a case that does not exist
-        working-directory: app
-        run: node ../tools/scripts/qa/linuxBoundsCases.mjs scripts/qa/exporterPromiseCases.json
+          for tree in base branch; do
+            (cd "$GITHUB_WORKSPACE/$tree" && npm ci && node scripts/fetch-sidecars.mjs --only ffmpeg,ffprobe) || exit 1
+          done
+      - name: Add the scratch cases to each library, and refuse a case that does not exist
+        run: |
+          for tree in base branch; do
+            (cd "$GITHUB_WORKSPACE/$tree" && node ../tools/scripts/qa/linuxBoundsCases.mjs scripts/qa/exporterPromiseCases.json) || exit 1
+          done
       - name: Machine
         run: |
           set +e
@@ -110,72 +131,81 @@ jobs:
             echo "== os"; head -4 /etc/os-release
             echo "== kernel"; uname -a
             echo "== cpu"; lscpu | grep -E 'Model name|^CPU\(s\)|Thread|Core|Socket'
+            lscpu | grep -E '^Flags' | tr ' ' '\n' | grep -E '^(avx|avx2|avx512[a-z_0-9]*|sse4_2|fma|bmi2)$' | sort -u | tr '\n' ' '; echo
             echo "== memory"; free -m
             echo "== cgroup"; cat /proc/self/cgroup; stat -fc %T /sys/fs/cgroup
-            echo "== disk"; df -h / /mnt
+            echo "== disk"; df -h /
             echo "== tools"; node --version; cargo --version; rustc --version
-            "$GITHUB_WORKSPACE/app/src-tauri/binaries/artdaddy-ffmpeg-x86_64-unknown-linux-gnu" -version | head -1
+            "$GITHUB_WORKSPACE/branch/src-tauri/binaries/artdaddy-ffmpeg-x86_64-unknown-linux-gnu" -version | head -1
             echo "== systemd"; systemctl --version | head -1
-            echo "== code under test"; git -C "$GITHUB_WORKSPACE/app" rev-parse HEAD
+            echo "== base"; git -C "$GITHUB_WORKSPACE/base" rev-parse HEAD
+            echo "== branch"; git -C "$GITHUB_WORKSPACE/branch" rev-parse HEAD
             echo "== instrument"; git -C "$GITHUB_WORKSPACE/tools" rev-parse HEAD
+            echo "== order"; echo "rep ${{ matrix.rep }}: $FIRST first, then $SECOND"
           } > "$OUT/hardware.txt" 2>&1
           cat "$OUT/hardware.txt"
-      - name: Build the app once, so that no case spends its time compiling
-        working-directory: app
+      - name: Build both apps once, so that no case spends its time compiling
         env:
           CARGO_BUILD_JOBS: "4"
-        run: cargo build --manifest-path src-tauri/Cargo.toml
-      - name: Run the cases inside the 8 GiB kernel cap
-        working-directory: app
+        run: |
+          for tree in "$FIRST" "$SECOND"; do
+            (cd "$GITHUB_WORKSPACE/$tree" && cargo build --manifest-path src-tauri/Cargo.toml) || exit 1
+          done
+      - name: Run the cases inside the 8 GiB kernel cap, the two codes alternating
         run: |
           set +e
           status="$OUT/status.txt"
           read -ra cases <<< "$CASES"
-          node ../tools/scripts/qa/linuxSampler.mjs "$OUT/memsamples.tsv" 10 $$ &
+          node "$GITHUB_WORKSPACE/tools/scripts/qa/linuxSampler.mjs" "$OUT/memsamples.txt" 2 $$ &
           sampler=$!
           trap 'kill $sampler 2>/dev/null' EXIT
           for c in "${cases[@]}"; do
-            for attempt in 1 2; do
-              log="$OUT/logs/$c.$attempt.log"
-              t0=$(date +%s)
-              echo "$(date '+%F %T') START case=$c attempt=$attempt profile=8gb cap=8GiB log=$log" >> "$status"
-              ARTDADDY_QA_PROMISE_CASE="$c" ARTDADDY_QA_PROMISE_PROFILE=8gb timeout 55m node scripts/qa/exporterLinuxMemory.mjs > "$log" 2>&1
-              code=$?
-              echo "$(date '+%F %T') END case=$c attempt=$attempt exit=$code seconds=$(( $(date +%s) - t0 ))" >> "$status"
-              if [ "$code" -ne 0 ] && [ "$attempt" -eq 1 ] && grep -q 'Failed to fetch dynamically imported module' "$log"; then continue; fi
-              break
+            for leg in "$FIRST" "$SECOND"; do
+              for attempt in 1 2; do
+                log="$OUT/logs/$leg.$c.$attempt.log"
+                t0=$(date +%s)
+                echo "$(date '+%F %T') START leg=$leg case=$c attempt=$attempt profile=8gb cap=8GiB log=$log" >> "$status"
+                (cd "$GITHUB_WORKSPACE/$leg" && ARTDADDY_QA_PROMISE_CASE="$c" ARTDADDY_QA_PROMISE_PROFILE=8gb timeout 55m node scripts/qa/exporterLinuxMemory.mjs) > "$log" 2>&1
+                code=$?
+                echo "$(date '+%F %T') END leg=$leg case=$c attempt=$attempt exit=$code seconds=$(( $(date +%s) - t0 ))" >> "$status"
+                if [ "$code" -ne 0 ] && [ "$attempt" -eq 1 ] && grep -q 'Failed to fetch dynamically imported module' "$log"; then continue; fi
+                break
+              done
             done
           done
           echo "$(date '+%F %T') DONE" >> "$status"
           exit 0
       - name: Keep each stopped run's job ledger, then summarise
         if: always()
-        working-directory: app
         run: |
           set +e
-          for report in reports/qa/exporter/*/report.json; do
-            [ -f "$report" ] || continue
-            root=$(node -e 'try{process.stdout.write(String(JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")).root||""))}catch{}' "$report")
-            if [ -n "$root" ] && [ -f "$root/compiled-project/internals/jobs.json" ]; then cp "$root/compiled-project/internals/jobs.json" "$(dirname "$report")/jobs-ledger.json"; fi
+          for tree in base branch; do
+            (
+              cd "$GITHUB_WORKSPACE/$tree" || exit 0
+              for report in reports/qa/exporter/*/report.json; do
+                [ -f "$report" ] || continue
+                root=$(node -e 'try{process.stdout.write(String(JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")).root||""))}catch{}' "$report")
+                if [ -n "$root" ] && [ -f "$root/compiled-project/internals/jobs.json" ]; then cp "$root/compiled-project/internals/jobs.json" "$(dirname "$report")/jobs-ledger.json"; fi
+              done
+              node ../tools/scripts/qa/qaSummary.mjs > "$OUT/summary-$tree.txt" 2>&1
+            )
+            cat "$OUT/summary-$tree.txt"
+            { echo "### rep ${{ matrix.rep }}: $tree"; echo '```'; cat "$OUT/summary-$tree.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           done
-          node ../tools/scripts/qa/qaSummary.mjs > "$OUT/summary.txt" 2>&1
-          cat "$OUT/summary.txt"
-          { echo "### ${{ matrix.leg }}"; echo '```'; cat "$OUT/summary.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - name: Keep the actual outcomes
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: linux-bounds-${{ matrix.leg }}-attempt-${{ github.run_attempt }}
+          name: linux-paired-rep${{ matrix.rep }}-attempt-${{ github.run_attempt }}
           path: |
-            app/reports/qa/exporter/**
+            base/reports/qa/exporter/**
+            branch/reports/qa/exporter/**
             out/**
           if-no-files-found: warn
-      - name: Every case has a result (on the branch leg, every export finished and was verified)
-        working-directory: app
-        env:
-          MUST_PASS: ${{ matrix.must_pass }}
+      - name: Every case has a result in both codes, and every branch export finished and was verified
         run: |
           read -ra cases <<< "$CASES"
-          args=(reports/qa/exporter "${cases[@]}")
-          if [ "$MUST_PASS" = "true" ]; then args+=(--must-pass); fi
-          node ../tools/scripts/qa/linuxBoundsVerdict.mjs "${args[@]}"
+          status=0
+          (cd "$GITHUB_WORKSPACE/base" && node ../tools/scripts/qa/linuxBoundsVerdict.mjs reports/qa/exporter "${cases[@]}") || status=1
+          (cd "$GITHUB_WORKSPACE/branch" && node ../tools/scripts/qa/linuxBoundsVerdict.mjs reports/qa/exporter "${cases[@]}" --must-pass) || status=1
+          exit "$status"
