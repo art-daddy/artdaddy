@@ -244,7 +244,8 @@ async function exercise(): Promise<void> {
       records.jobs.find((entry) => entry.id === queued.job_id)?.status === "done";
     promiseResult = { caseId: definition.id, profile: input.profile, kind: definition.kind, destination, jobId: queued.job_id,
       encoder: plan.args[plan.args.lastIndexOf("-c:v") + 1],
-      encoderThreads: plan.args.includes("-threads:v") ? plan.args[plan.args.lastIndexOf("-threads:v") + 1] : null, calibrationEncoder,
+      // The encoder's own thread flag follows its codec; the decoders' flags come before the inputs, so they are not read as the encoder's.
+      encoderThreads: ((at) => at >= 0 ? plan.args[at + 1] : null)(plan.args.indexOf("-threads:v", plan.args.lastIndexOf("-c:v"))), calibrationEncoder,
       readiness,
       state: outcome?.state ?? "missing", error: outcome?.error ?? null, elapsedMs: exportElapsedMs,
       projectFrames: frames, partitions: plan.steps?.length ?? 0, columns, rows, imageHeight,

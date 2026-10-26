@@ -33,6 +33,25 @@ export function finalEncoderPolicy(
   };
 }
 
+// ffmpeg opens every input of a command at the start and decodes each on its own pool of frame threads, so the decoders hold (inputs x
+// threads) decoded frames at once. Its default thread count follows the processor count, up to 16, so memory grew with the machine as well as
+// the project: 21 clips of 1080p peaked at 3.2 GiB of the 3.5 GiB a worker may use on a 16-processor machine and 1.4 GiB with one thread per
+// input, and at each of 4, 8 and 16 processors the delivered file was byte for byte the same with and without the limit. A command therefore
+// shares a budget of decoder frame threads between its video inputs instead of giving each a pool: floor(24 / inputs) each, so 8 for 3 inputs, 4
+// for 6, 3 for 8, 2 up to 12 and 1 from 13 (at least one each, so past 24 inputs the total is the number of inputs). That keeps the parallelism
+// where there are few inputs to decode and bounds the memory where there are many. Up to FRAME_THREADED_INPUTS_MAX inputs a command keeps
+// ffmpeg's defaults, so the commands of small projects do not change. The streamed engine decodes every input on one thread. A count that is not
+// a whole number of inputs gets the most conservative answer, one thread.
+export const FRAME_THREADED_INPUTS_MAX = 2;
+export const DECODER_FRAME_THREAD_BUDGET = 24;
+
+export function decoderThreads(engine: ExportEngine, videoInputs: number): number | null {
+  if (engine === "partition-pipes-v1") return 1;
+  if (!Number.isInteger(videoInputs) || videoInputs < 0) return 1;
+  if (videoInputs <= FRAME_THREADED_INPUTS_MAX) return null;
+  return Math.max(1, Math.floor(DECODER_FRAME_THREAD_BUDGET / videoInputs));
+}
+
 export interface ExportEstimates {
   readonly memoryBytes: number | null;
   readonly temporaryBytes: number | null;
