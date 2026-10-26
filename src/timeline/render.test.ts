@@ -708,6 +708,76 @@ describe("buildRenderCommand", () => {
     }
   });
 
+  it("keeps a 4K canvas on the streamed engine for a range export and for a lower delivery resolution", () => {
+    const authored = tl(
+      [{ media_ref: "/video.mp4", source_in: 0, source_out: 2, timeline_in: 0, timeline_out: 2 }],
+      { width: 3840, height: 2160, fps: 30 },
+    );
+    const ranged = buildRenderCommand(authored, "/range.mp4", {
+      engine: "auto",
+      range: { from: 0, to: 30 },
+    });
+    expect(ranged.selection?.backend).toBe("partition-pipes-v1");
+    // The delivered picture is smaller, but the decoders and the composite still work at the canvas's size.
+    const smaller = buildRenderCommand(authored, "/small.mp4", {
+      engine: "auto",
+      resolution: "1080p",
+    });
+    expect(smaller.selection?.backend).toBe("partition-pipes-v1");
+    expect(smaller.output.width * smaller.output.height).toBe(1920 * 1080);
+  });
+
+  it("streams every canvas above 1440p under the Automatic policy, however few layers it has, and nothing at or below it", () => {
+    const oneClip = [
+      { media_ref: "/video.mp4", source_in: 0, source_out: 2, timeline_in: 0, timeline_out: 2 },
+    ];
+    const cases: [number, number, boolean][] = [
+      [1280, 720, false],
+      [1920, 1080, false],
+      [1080, 1920, false],
+      [2560, 1440, false],
+      [1440, 2560, false],
+      // An odd authored size composites at the next even one: 2561 x 1439 is 3,685,279 pixels authored and 3,689,280 composited.
+      [2561, 1439, true],
+      [2559, 1439, false],
+      [2560, 1441, true],
+      [2562, 1440, true],
+      [2560, 1600, true],
+      [3440, 1440, true],
+      [3840, 2160, true],
+      [2160, 3840, true],
+      [4096, 2160, true],
+      [7680, 4320, true],
+    ];
+    for (const [width, height, streamed] of cases) {
+      const label = `${width}x${height}`;
+      const authored = tl(oneClip, { width, height, fps: 30 });
+      const automatic = buildRenderCommand(authored, "/auto.mp4", { engine: "auto" });
+      expect(automatic.selection?.backend, label).toBe(
+        streamed ? "partition-pipes-v1" : "file-sequence-v1",
+      );
+      expect(automatic.selection?.reason, label).toBe(
+        streamed ? "resource-pressure" : "bounded-single-pass",
+      );
+      expect(automatic.transport, label).toBe(streamed ? "partition-pipes-v1" : undefined);
+      // The other ways in are untouched: an explicit one-pass policy, the default, and a single frame never change engine.
+      expect(
+        buildRenderCommand(authored, "/one-pass.mp4", { engine: "file-sequence-v1" }).selection
+          ?.backend,
+        label,
+      ).toBe("file-sequence-v1");
+      expect(buildRenderCommand(authored, "/default.mp4").selection?.backend, label).toBe(
+        "file-sequence-v1",
+      );
+      expect(
+        buildRenderCommand(authored, "/frame.png", { engine: "auto" }, { frame: 0 }).selection,
+        label,
+      ).toMatchObject({ backend: "file-sequence-v1", reason: "frame" });
+      // Whatever the engine, the delivered picture is the canvas's.
+      expect(automatic.output, label).toEqual(buildRenderCommand(authored, "/standard.mp4").output);
+    }
+  });
+
   it("compiles one persistent audio producer rather than an audio mix per video partition", () => {
     const plan = buildRenderCommand(
       tl([
