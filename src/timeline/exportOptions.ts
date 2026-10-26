@@ -52,6 +52,18 @@ export function decoderThreads(engine: ExportEngine, videoInputs: number): numbe
   return Math.max(1, Math.floor(DECODER_FRAME_THREAD_BUDGET / videoInputs));
 }
 
+// The one-pass engine's software encoder keeps frame and lookahead buffers per thread, and its default thread count follows the processor
+// count (one and a half per processor), so its memory grows with the machine as well as the picture. At 4K with every default, one clip failed
+// outright on a 16-processor Windows machine (the 4 GiB job limit, x264 could not allocate a frame) and finished at 74 % of the resident cutoff on
+// 8; eight clips failed on 4, 8 and 16. The streamed engine, whose final encoder is pinned to two threads, finished the same projects at 2.1-2.7
+// GiB on 4, 8 and 16 processors. Pictures above this size therefore leave the one-pass engine under the Automatic policy. The size is the one the
+// render composites at (the authored canvas made even), and a delivery preset never exceeds it because presets never upscale.
+export const FILE_SEQUENCE_MAX_PIXELS = 2560 * 1440;
+
+export function exceedsFileSequencePicture(canvas: { width: number; height: number }): boolean {
+  return canvas.width * canvas.height > FILE_SEQUENCE_MAX_PIXELS;
+}
+
 export interface ExportEstimates {
   readonly memoryBytes: number | null;
   readonly temporaryBytes: number | null;

@@ -505,7 +505,8 @@ try {
     assert.equal(native.stagingCleaned, true, "Promise staging file was not cleaned");
     assert.equal(native.selection?.policy, "auto", "Promise case must use the approved Automatic policy");
     if (promiseCase.videoLayers + Number(promiseCase.captions) > 4 ||
-      promiseCase.width * promiseCase.height > 1920 * 1080 && promiseCase.videoLayers > 1)
+      promiseCase.width * promiseCase.height > 1920 * 1080 && promiseCase.videoLayers > 1 ||
+      promiseCase.width * promiseCase.height > 2560 * 1440) // the one-pass picture ceiling, FILE_SEQUENCE_MAX_PIXELS in src/timeline/exportOptions.ts
       assert.equal(native.selection.backend, "partition-pipes-v1", "Dense promise case must use the bounded existing FFmpeg path");
     // The product asks only about a problem the export is known to have; a missing measurement (a
     // cold export, or the first one after an update) is not one. So a pilot that starts cleanly

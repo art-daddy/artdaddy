@@ -13,6 +13,8 @@ import {
   decoderThreads,
   estimateExport,
   estimateExportFromHistory,
+  exceedsFileSequencePicture,
+  FILE_SEQUENCE_MAX_PIXELS,
   FRAME_THREADED_INPUTS_MAX,
   guessExportSeconds,
   isKnownProblem,
@@ -24,6 +26,34 @@ import {
   type ExportPreflightReason,
 } from "./exportOptions";
 import type { RenderWorkload } from "./renderPlan";
+
+describe("one-pass picture ceiling", () => {
+  it("is 2560x1440 pixels and moves with a single pixel", () => {
+    expect(FILE_SEQUENCE_MAX_PIXELS).toBe(2560 * 1440);
+    expect(exceedsFileSequencePicture({ width: 2560, height: 1440 })).toBe(false);
+    expect(exceedsFileSequencePicture({ width: 1440, height: 2560 })).toBe(false);
+    expect(exceedsFileSequencePicture({ width: 3_686_400, height: 1 })).toBe(false);
+    expect(exceedsFileSequencePicture({ width: 3_686_401, height: 1 })).toBe(true);
+    expect(exceedsFileSequencePicture({ width: 3840, height: 2160 })).toBe(true);
+  });
+
+  it("depends on the number of pixels only: orientation never matters and a bigger picture never goes back", () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 1, max: 8192 }),
+        fc.integer({ min: 1, max: 8192 }),
+        (width, height) => {
+          const over = exceedsFileSequencePicture({ width, height });
+          expect(exceedsFileSequencePicture({ width: height, height: width })).toBe(over);
+          if (over) {
+            expect(exceedsFileSequencePicture({ width: width + 1, height })).toBe(true);
+            expect(exceedsFileSequencePicture({ width, height: height + 1 })).toBe(true);
+          }
+        },
+      ),
+    );
+  });
+});
 
 describe("decoder thread policy", () => {
   it("leaves a command of up to two video inputs on ffmpeg's defaults and shares a fixed budget of threads between the inputs of a larger one", () => {
