@@ -8,7 +8,8 @@
 // linuxNative.mjs), because a signed-out app shows the sign-in screen and never mounts the update banner.
 // The AppImage is extracted once and its AppRun started with APPIMAGE pointing at the real file: that
 // variable is all the updater reads to know what to replace and what to relaunch, and extracting avoids
-// asking a CI runner for FUSE.
+// asking a CI runner for FUSE. The proof is what is on disk and running afterwards: the published bytes in
+// place of the file, and a new process running the published payload's binary, byte for byte.
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -178,6 +179,77 @@ async function appSession(appRun, appImage) {
   return session;
 }
 
+/** Who is running and how they were started: the one thing a hang cannot be diagnosed without. */
+function listProcesses(label) {
+  const ps = spawnSync("ps", ["-eo", "pid,ppid,etimes,args", "--sort=start_time"], { encoding: "utf8" });
+  const lines = (ps.stdout ?? "").split("\n").filter((line) => /PID|artdaddy|WebKit|tauri-driver|AppRun|Xvfb/.test(line));
+  writeFileSync(path.join(OUT, `processes-${label}.txt`), lines.join("\n"));
+}
+
+/** The app's own binary inside an extracted AppImage. */
+function payloadBinary(squashfsRoot) {
+  const direct = path.join(squashfsRoot, "usr", "bin", MAIN_BINARY);
+  if (existsSync(direct)) return direct;
+  const found = readdirSync(squashfsRoot, { recursive: true }).find((entry) => path.basename(String(entry)) === MAIN_BINARY);
+  if (!found) throw new Error(`no ${MAIN_BINARY} in ${squashfsRoot}`);
+  return path.join(squashfsRoot, String(found));
+}
+
+/** The largest window the app has on the virtual display, once one is big enough to be its real window. */
+async function waitForWindow(ms) {
+  const end = Date.now() + ms;
+  let best = null;
+  while (Date.now() < end) {
+    const tree = spawnSync("xwininfo", ["-root", "-tree"], { encoding: "utf8" });
+    for (const line of tree.status === 0 ? tree.stdout.split("\n") : []) {
+      const match = line.match(/artdaddy.*?\s(\d+)x(\d+)\+/i);
+      if (!match) continue;
+      const size = { width: Number(match[1]), height: Number(match[2]) };
+      if (!best || size.width * size.height > best.width * best.height) best = size;
+    }
+    if (best && best.width >= 640 && best.height >= 400) return best;
+    await sleep(2_000);
+  }
+  return best;
+}
+
+async function killApp() {
+  for (const app of appProcesses()) {
+    try {
+      process.kill(app.id, "SIGKILL");
+    } catch {
+      /* already gone */
+    }
+  }
+  spawnSync("pkill", ["-9", "-f", "WebKitWebProcess|WebKitNetworkProcess|WebKitGPUProcess"]);
+  for (let i = 0; i < 20 && appProcesses().length; i++) await sleep(500);
+}
+
+/** Ask the updated app itself, in a fresh session. Extra evidence: a failure here is recorded, not fatal. */
+async function verifyWithWebDriver(appRun, appImage, expectedVersion) {
+  try {
+    await stopDriver();
+    await killApp();
+    const attempt = appSession(appRun, appImage);
+    attempt.catch(() => undefined); // if the clock wins, this one's later failure must not crash the run
+    const timer = sleep(40_000).then(() => {
+      throw new Error("no WebDriver session within 40 s");
+    });
+    timer.catch(() => undefined);
+    const session = await Promise.race([attempt, timer]);
+    const next = await invoke(session, "check_for_update", { timeout: 30_000 });
+    const version = await invoke(session, "plugin:app|version", { timeout: 15_000 }).catch(
+      (error) => `unavailable: ${error.message}`,
+    );
+    // An app still on the old version would be offered the new one; null means nothing newer than itself exists.
+    const sure = /^\d+\.\d+\.\d+$/.test(version);
+    return { ok: next === null && (!sure || version === expectedVersion), version, offeredNext: next };
+  } catch (error) {
+    listProcesses("verification-failed");
+    return { ok: false, error: String(error?.message ?? error) };
+  }
+}
+
 let failure = null;
 try {
   // 1. What the live manifest offers, and the bytes the finished update must be.
@@ -266,38 +338,44 @@ try {
   }
   if (!outcome) throw new Error("the AppImage never became the offered file, with a new process running it");
   note("after update", outcome);
-  await sleep(10_000);
+  if (!outcome.relaunched) throw new Error("the AppImage was replaced but the app was not relaunched by itself");
+  listProcesses("after-update");
+
+  // 6. What came back is the published app: the very same binary, running from the new file.
+  const publishedRun = extract(appImage, path.join(home, "new"));
+  const runningHash = await sha256(outcome.processes[0].exe);
+  const publishedHash = await sha256(payloadBinary(path.dirname(publishedRun)));
+  const replacedHash = await sha256(payloadBinary(path.dirname(appRun)));
+  note("relaunched payload", { running: runningHash, published: publishedHash, replaced: replacedHash });
+  if (runningHash !== publishedHash) throw new Error("the relaunched app is not the published payload");
+  if (runningHash === replacedHash) throw new Error("the relaunched app is still the old payload");
+
+  // Its window. A relaunch inherits the WebDriver environment it was started under, so it can take a while.
+  const shown = await waitForWindow(60_000);
   screenshot("after-update.png");
   const tree = spawnSync("xwininfo", ["-root", "-tree"], { encoding: "utf8" });
   if (tree.status === 0) writeFileSync(path.join(OUT, "windows-after-update.txt"), tree.stdout);
-  await stopDriver();
+  note("relaunched app window", { shown });
 
-  // 6. The updated file must be what actually runs: start it fresh and ask it.
-  spawnSync("pkill", ["-f", `/${MAIN_BINARY}$`]);
-  await sleep(3_000);
-  const verifyRun = extract(appImage, path.join(home, "new"));
-  const again = await appSession(verifyRun, appImage);
-  const next = await invoke(again, "check_for_update");
-  const version = await invoke(again, "plugin:app|version").catch((error) => `unavailable: ${error.message}`);
-  note("updated app answers", { version, offeredNext: next });
-  // An app still on the old version would be offered the new one; null means nothing newer than itself exists.
-  if (next !== null) throw new Error(`the updated app is still offered ${next.version}`);
-  if (/^\d+\.\d+\.\d+$/.test(version) && version !== manifest.version) {
-    throw new Error(`the updated app says it is ${version}, expected ${manifest.version}`);
+  // Best effort and never the verdict: ask the updated app itself, in a fresh session, once nothing else runs.
+  evidence.verification = await verifyWithWebDriver(publishedRun, appImage, manifest.version);
+  note("fresh session on the updated app", evidence.verification);
+  if (!evidence.verification.ok) {
+    console.log("::warning::The updated app was replaced, relaunched and shown to be the published payload, but a fresh WebDriver session on it was not possible; see evidence.json.");
   }
-  if (!outcome.relaunched) throw new Error("the app was updated but not relaunched by itself");
   evidence.passed = true;
 } catch (error) {
   failure = error;
   evidence.passed = false;
   evidence.error = String(error?.stack ?? error);
   console.error(`[canary] FAILED: ${evidence.error}`);
+  listProcesses("failure");
   screenshot("failure.png");
 } finally {
   evidence.finishedAt = new Date().toISOString();
   writeFileSync(path.join(OUT, "driver.log"), driverLog);
   save();
   await stopDriver();
-  spawnSync("pkill", ["-f", `/${MAIN_BINARY}$`]);
+  await killApp();
 }
 process.exit(failure ? 1 : 0);
