@@ -21,6 +21,7 @@
 //                                     most inputs (-i) any one worker has; "-" when none is set
 //   app_rss_gib, webkit_rss_gib, node_rss_gib         the app (comm "artdaddy"), WebKit's processes, and node (the harness and its web server)
 // A value that cannot be read is "-", never a guess.
+import { readFileSync } from "node:fs";
 import { appendFile, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -150,8 +151,10 @@ export async function readSample({ proc = "/proc", cgroup = "/sys/fs/cgroup", no
     gib(total.node)].join("\t");
 }
 
-function alive(pid) {
-  try { process.kill(pid, 0); return true; } catch (error) { return error.code === "EPERM"; }
+export function alive(pid, proc = "/proc") {
+  try { process.kill(pid, 0); } catch (error) { return error.code === "EPERM"; }
+  // A parent that has exited but has not been reaped still answers kill(pid, 0); on Linux its state says what it is.
+  try { return !/^State:\s+[ZX]/m.test(readFileSync(path.join(proc, String(pid), "status"), "utf8")); } catch { return true; }
 }
 
 export async function sampleUntilParentExits({ out, seconds, parent, proc, cgroup }) {
