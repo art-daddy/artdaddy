@@ -164,9 +164,109 @@ async function shoot(
   }
 }
 
+// The HTML <video> control normally takes about 0.2 s. A runner whose media pipeline has stalled
+// (macos-14, 2026-10-25: `stage=html-video:present`, twice in three runs) never presents the frame
+// it waits for, and nothing in this page ever gave up on it.
+const HTML_VIDEO_CONTROL_MS = 10_000;
+const query = new URLSearchParams(location.search);
+const controlLimitMs = (): number => Number(query.get("controlMs")) || HTML_VIDEO_CONTROL_MS;
+
+function within<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} did not finish within ${ms} ms`)), ms);
+  });
+  return Promise.race([work, deadline]).finally(() => clearTimeout(timer));
+}
+
+/** The browser's own <video> decoding the same file, so the log shows what it does beside the
+ *  decoder path. It gates NOTHING: no test holds a picture to it. So it is bounded, and when it
+ *  fails the failure is recorded and the probe carries on, rather than the whole page waiting for a
+ *  frame that never comes. */
+async function htmlVideoControl(limitMs: number): Promise<RotationShot> {
+  const video = document.createElement("video");
+  video.muted = true;
+  video.playsInline = true;
+  Object.assign(video.style, {
+    position: "fixed",
+    left: "0",
+    top: "0",
+    width: "160px",
+    height: "96px",
+  });
+  document.body.append(video);
+  // Once the wait is over the video is torn down; a step still pending then does nothing more.
+  const stillWanted = () => {
+    if (!video.isConnected) throw new Error("the HTML video control was abandoned");
+  };
+  try {
+    return await within(
+      (async (): Promise<RotationShot> => {
+        progress("html-video:load");
+        video.src = sourceUrl("h264_rot0.mp4");
+        await new Promise<void>((resolve, reject) => {
+          video.onloadeddata = () => resolve();
+          video.onerror = () => reject(new Error("HTML video control did not decode"));
+          video.load();
+        });
+        stillWanted();
+        progress("html-video:present");
+        await new Promise<void>((resolve, reject) => {
+          video.requestVideoFrameCallback(() => resolve());
+          void video.play().catch(reject);
+        });
+        stillWanted();
+        progress("html-video:animation-frame");
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        stillWanted();
+        const htmlCanvas = document.createElement("canvas");
+        htmlCanvas.width = video.videoWidth;
+        htmlCanvas.height = video.videoHeight;
+        const htmlContext = htmlCanvas.getContext("2d", { willReadFrequently: true })!;
+        htmlContext.drawImage(video, 0, 0);
+        const htmlCorners = CORNERS.map(([x, y]): [number, number, number] => {
+          const data = htmlContext.getImageData(
+            Math.floor(x * htmlCanvas.width),
+            Math.floor(y * htmlCanvas.height),
+            1,
+            1,
+          ).data;
+          return [data[0], data[1], data[2]];
+        });
+        if (!htmlCorners.some((pixel) => pixel.some((channel) => channel > 60))) {
+          throw new Error("HTML video control produced no visible pixels");
+        }
+        return {
+          decoded: true,
+          box: { x: 0, y: 0, w: video.videoWidth, h: video.videoHeight },
+          corners: htmlCorners.map(classify),
+          rawCorners: htmlCorners,
+          at: {},
+        };
+      })(),
+      limitMs,
+      "the HTML video control",
+    );
+  } catch (e) {
+    return { decoded: false, box: null, corners: [], at: {}, error: String(e) };
+  } finally {
+    video.pause();
+    video.removeAttribute("src");
+    video.load();
+    video.remove();
+  }
+}
+
 void (async () => {
   const out: Record<string, RotationShot> = {};
   try {
+    if (query.has("controlOnly")) {
+      // The regression test for a control that never presents a frame needs that control alone.
+      out["html-video:h264_rot0.mp4"] = await htmlVideoControl(controlLimitMs());
+      progress("complete");
+      (window as unknown as { __rotation: unknown }).__rotation = out;
+      return;
+    }
     progress("native-h264-calibration");
     out["native-h264"] = {
       decoded: await highH264DecodesCorrectly(),
@@ -225,62 +325,7 @@ void (async () => {
     } finally {
       VideoDecoder.prototype.configure = configure;
     }
-    const video = document.createElement("video");
-    video.muted = true;
-    video.playsInline = true;
-    Object.assign(video.style, {
-      position: "fixed",
-      left: "0",
-      top: "0",
-      width: "160px",
-      height: "96px",
-    });
-    document.body.append(video);
-    try {
-      progress("html-video:load");
-      video.src = sourceUrl("h264_rot0.mp4");
-      await new Promise<void>((resolve, reject) => {
-        video.onloadeddata = () => resolve();
-        video.onerror = () => reject(new Error("HTML video control did not decode"));
-        video.load();
-      });
-      progress("html-video:present");
-      await new Promise<void>((resolve, reject) => {
-        video.requestVideoFrameCallback(() => resolve());
-        void video.play().catch(reject);
-      });
-      progress("html-video:animation-frame");
-      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-      const htmlCanvas = document.createElement("canvas");
-      htmlCanvas.width = video.videoWidth;
-      htmlCanvas.height = video.videoHeight;
-      const htmlContext = htmlCanvas.getContext("2d", { willReadFrequently: true })!;
-      htmlContext.drawImage(video, 0, 0);
-      const htmlCorners = CORNERS.map(([x, y]): [number, number, number] => {
-        const data = htmlContext.getImageData(
-          Math.floor(x * htmlCanvas.width),
-          Math.floor(y * htmlCanvas.height),
-          1,
-          1,
-        ).data;
-        return [data[0], data[1], data[2]];
-      });
-      if (!htmlCorners.some((pixel) => pixel.some((channel) => channel > 60))) {
-        throw new Error("HTML video control produced no visible pixels");
-      }
-      out["html-video:h264_rot0.mp4"] = {
-        decoded: true,
-        box: { x: 0, y: 0, w: video.videoWidth, h: video.videoHeight },
-        corners: htmlCorners.map(classify),
-        rawCorners: htmlCorners,
-        at: {},
-      };
-    } finally {
-      video.pause();
-      video.removeAttribute("src");
-      video.load();
-      video.remove();
-    }
+    out["html-video:h264_rot0.mp4"] = await htmlVideoControl(controlLimitMs());
     progress("complete");
     (window as unknown as { __rotation: unknown }).__rotation = out;
   } catch (e) {
