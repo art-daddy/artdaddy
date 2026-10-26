@@ -1,0 +1,55 @@
+# In-place update canary (Windows). Installs a PUBLIC release on a disposable GitHub-hosted runner and
+# updates it through the LIVE updater manifest, the way a user's app does: the app checks, downloads
+# and verifies the signed installer, the installer replaces the running app, and the app is
+# relaunched. It reads the public release and the public manifest only; nothing is published.
+#
+# Runs on dispatch, and on a push to a qa/** branch that changes this workflow or its script (so a
+# change to either is tried as soon as it is pushed). `from_version` must be older than the version
+# the live manifest offers, or there is nothing to update to.
+name: updater canary (Windows)
+
+on:
+  workflow_dispatch:
+    inputs:
+      from_version:
+        description: "Public release to install first (older than the live manifest's version)"
+        required: false
+        default: "0.21.6"
+  push:
+    branches: ["qa/**"]
+    paths:
+      - ".github/workflows/updater-canary.yml"
+      - "scripts/qa/windowsUpdateCanary.mjs"
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install the CDP client beside the checkout
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'cdp-client'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          npm install --prefix $dir --no-audit --no-fund playwright-core@1.61.1
+          if ($LASTEXITCODE -ne 0) { throw 'could not install playwright-core' }
+          "CDP_CLIENT_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Update an installed app through the live manifest
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FROM_VERSION: ${{ inputs.from_version || '0.21.6' }}
+        run: node scripts/qa/windowsUpdateCanary.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: updater-canary-windows
+          path: reports/qa/updater-canary/**
+          if-no-files-found: warn
