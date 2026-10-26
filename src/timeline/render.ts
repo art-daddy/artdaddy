@@ -32,6 +32,7 @@ import {
 import { canvasFps, isNum, toSecondsView } from "./frames";
 import {
   crfFor,
+  decoderThreads,
   finalEncoderPolicy,
   outputFps,
   outputSize,
@@ -1413,13 +1414,24 @@ function buildSingleRenderCommand(
     "-progress",
     "pipe:1",
   ];
+  // The concat input of a segmented plan, sound, stills and branding keep the rule they always had: one decoder thread each on the streamed
+  // engine, ffmpeg's defaults otherwise. Only the clips' video inputs follow the budget below, because that is what was measured.
   const decoder =
     options.engine === "partition-pipes-v1" && pass !== "audio" ? ["-threads:v", "1"] : [];
+  // A still holds one frame, so only the inputs that decode video count towards the decoder-thread policy, and only they carry its answer.
+  const videoInputIndices = new Set(
+    vrecs.filter((rec) => !inputs[rec.inputIdx].isImage).map((rec) => rec.inputIdx),
+  );
+  const videoThreads =
+    pass === "audio"
+      ? null
+      : decoderThreads(options.engine ?? "file-sequence-v1", videoInputIndices.size);
+  const videoDecoder = videoThreads === null ? [] : ["-threads:v", String(videoThreads)];
   if (composed) {
     cmd.push(...decoder, "-f", "concat", "-safe", "1", "-i", "segments.ffconcat");
     if (composed.audioInput !== undefined) cmd.push("-f", "nut", "-i", "audio.nut");
   }
-  for (const inp of inputs) {
+  for (const [index, inp] of inputs.entries()) {
     const dur = Math.max(0, inp.so - inp.si);
     if (inp.isImage && inp.frozenFrame !== undefined)
       // One pass, read whole: its frame can be anywhere in it. Its length is cut in the graph.
@@ -1441,7 +1453,7 @@ function buildSingleRenderCommand(
         inp.seekArg ?? inp.si.toFixed(6),
         "-to",
         inp.so.toFixed(6),
-        ...decoder,
+        ...(videoInputIndices.has(index) ? videoDecoder : decoder),
         "-i",
         inp.path,
       );

@@ -7,14 +7,71 @@ import { describe, expect, it } from "vitest";
 import {
   assessExport,
   crfFor,
+  DECODER_FRAME_THREAD_BUDGET,
+  decoderThreads,
   estimateExportFromHistory,
   finalEncoderPolicy,
+  FRAME_THREADED_INPUTS_MAX,
   outputFps,
   outputSize,
   type ExportCalibration,
   type ExportEstimates,
 } from "./exportOptions";
 import type { RenderWorkload } from "./renderPlan";
+
+describe("decoder thread policy", () => {
+  it("leaves a command of up to two video inputs on ffmpeg's defaults and shares a fixed budget of threads between the inputs of a larger one", () => {
+    // The boundary and the budget are frozen here so that moving either is a decision, not a drift.
+    expect(FRAME_THREADED_INPUTS_MAX).toBe(2);
+    expect(DECODER_FRAME_THREAD_BUDGET).toBe(24);
+    // Written out rather than recomputed: 3 -> 8, 4 -> 6, 5 and 6 -> 4, 7 and 8 -> 3, 9 to 12 -> 2, 13 and more -> 1.
+    const perInput: [number, number][] = [
+      [3, 8],
+      [4, 6],
+      [5, 4],
+      [6, 4],
+      [7, 3],
+      [8, 3],
+      [9, 2],
+      [10, 2],
+      [11, 2],
+      [12, 2],
+      [13, 1],
+      [21, 1],
+      [24, 1],
+      [25, 1],
+      [200, 1],
+    ];
+    for (const engine of ["file-sequence-v1", "auto"] as const) {
+      for (let inputs = 0; inputs <= FRAME_THREADED_INPUTS_MAX; inputs++)
+        expect(decoderThreads(engine, inputs), `${engine} ${inputs}`).toBeNull();
+      for (const [inputs, threads] of perInput)
+        expect(decoderThreads(engine, inputs), `${engine} ${inputs}`).toBe(threads);
+    }
+    // The streamed engine has always decoded every input on one thread, however few.
+    for (let inputs = 0; inputs <= 200; inputs++)
+      expect(decoderThreads("partition-pipes-v1", inputs), `streamed ${inputs}`).toBe(1);
+    // A count that is not a whole number of inputs is never a reason to leave memory unbounded.
+    for (const nonsense of [Number.NaN, -1, 2.5, Number.POSITIVE_INFINITY])
+      expect(decoderThreads("file-sequence-v1", nonsense), String(nonsense)).toBe(1);
+  });
+
+  it("bounds the frame threads of a whole command whatever the project size or the machine", () => {
+    // The rule that has to survive a rewrite: past two inputs a command never asks for more than 24 decoder frame threads in all, never gives an
+    // input fewer than one, and the allowance of an input only ever shrinks as inputs are added. (At two or fewer, ffmpeg's own default of at
+    // most 16 per input applies, so a command cannot hold more than 32.)
+    for (const engine of ["file-sequence-v1", "auto"] as const) {
+      let previous = Number.POSITIVE_INFINITY;
+      for (let inputs = FRAME_THREADED_INPUTS_MAX + 1; inputs <= 400; inputs++) {
+        const threads = decoderThreads(engine, inputs) as number;
+        expect(Number.isInteger(threads) && threads >= 1, `${engine} ${inputs}`).toBe(true);
+        expect(inputs * threads, `${engine} ${inputs}`).toBeLessThanOrEqual(Math.max(24, inputs));
+        expect(threads, `${engine} ${inputs}`).toBeLessThanOrEqual(previous);
+        previous = threads;
+      }
+    }
+  });
+});
 
 describe("final encoder policy", () => {
   it("gives streamed software output of HD and above two threads and smaller output one", () => {
