@@ -35,3 +35,32 @@ export async function retryStalledProbe<T>(
     }
   }
 }
+
+/** What a seek probe (src/preview/__probeStream.ts) reports. Only what telling a stall from a
+ *  wrong picture needs, so this stays free of the browser-side module. */
+export interface SeekReport {
+  shots: ReadonlyArray<{
+    time: number;
+    pixel: ReadonlyArray<number>;
+    matched: boolean;
+    waitedMs: number;
+  }>;
+  errors: ReadonlyArray<string>;
+}
+
+// Nothing came back, or the canvas still holds the opaque black it starts with.
+const drewNothing = (pixel: ReadonlyArray<number>) => pixel.slice(0, 3).every((v) => v === 0);
+
+/** The first seek that showed nothing, when showing nothing is ALL that went wrong; null otherwise.
+ *
+ *  macos-14's decoders stall, and then the preview draws nothing: a blank canvas or no picture at
+ *  all, on the worker and on the main thread alike (CI runs of 2026-10-20 and 2026-10-27). That is
+ *  an environment stall and is asked again on a fresh page. A WRONG picture (the stale frame a
+ *  backward seek used to leave), any error the preview reported, or a wrong picture next to a blank
+ *  one is a verdict about the code under test and is never a stall. */
+export function seekStall(report: SeekReport): { time: number; waitedMs: number } | null {
+  if (report.errors.length > 0) return null;
+  const missed = report.shots.filter((shot) => !shot.matched);
+  if (missed.length === 0 || !missed.every((shot) => drewNothing(shot.pixel))) return null;
+  return { time: missed[0].time, waitedMs: missed[0].waitedMs };
+}
