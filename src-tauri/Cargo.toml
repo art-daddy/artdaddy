@@ -1,6 +1,6 @@
 [package]
 name = "artdaddy"
-version = "0.21.8"
+version = "0.21.9"
 description = "ArtDaddy desktop app"
 authors = ["you"]
 license = ""
