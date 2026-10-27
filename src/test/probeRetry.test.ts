@@ -1,6 +1,7 @@
+import fc from "fast-check";
 import { describe, expect, it, vi } from "vitest";
 
-import { ProbeStalled, retryStalledProbe } from "./probeRetry";
+import { ProbeStalled, type SeekReport, retryStalledProbe, seekStall } from "./probeRetry";
 
 const stall = (stage = "html-video:present") => new ProbeStalled(`stalled at ${stage}`, stage);
 
@@ -116,5 +117,98 @@ describe("retryStalledProbe", () => {
       ProbeStalled,
     );
     expect(alwaysStalls).toHaveBeenCalledTimes(3);
+  });
+});
+
+// What CI really captured (e2e/ui/stream.spec.ts, macos-14, chromium). The runs of 2026-10-20 and
+// 2026-10-27 were recorded before `waitedMs` existed; 8000 is what the probe now records for a
+// shot that never matched.
+const RED = [220, 32, 31, 255];
+const GREEN = [26, 203, 50, 255];
+const SEEKS = [0.4, 2, 0.4, 2.9, 0.4];
+const shot = (index: number, pixel: ReadonlyArray<number>, matched: boolean) => ({
+  time: SEEKS[index],
+  pixel,
+  matched,
+  waitedMs: matched ? 40 : 8000,
+});
+const report = (pixels: Array<number[] | "match">, errors: string[] = []): SeekReport => ({
+  shots: pixels.map((pixel, index) =>
+    pixel === "match"
+      ? shot(index, index === 1 || index === 3 ? GREEN : RED, true)
+      : shot(index, pixel, false),
+  ),
+  errors,
+});
+
+describe("seekStall", () => {
+  it("calls a worker that went black after the seek to 2.9 s a stall (CI, 2026-10-20, twice)", () => {
+    const seen = report(["match", "match", "match", [0, 0, 0, 255], []]);
+    expect(seekStall(seen)).toEqual({ time: 2.9, waitedMs: 8000 });
+  });
+
+  it("calls a page that showed nothing from the seek to 2 s on a stall (CI, 2026-10-20)", () => {
+    expect(seekStall(report(["match", [], [], [], []]))).toEqual({ time: 2, waitedMs: 8000 });
+  });
+
+  it("calls the same blank picture on the main thread a stall (CI main, 2026-10-27)", () => {
+    expect(seekStall(report(["match", "match", "match", [0, 0, 0, 255], []]))?.time).toBe(2.9);
+  });
+
+  it("does not call a picture that came, on every seek, a stall", () => {
+    expect(seekStall(report(["match", "match", "match", "match", "match"]))).toBeNull();
+  });
+
+  it("leaves a preview that REPORTED an error to the test (ubuntu webkit, 10 runs)", () => {
+    const failed = report(
+      [[], [], [], [], []],
+      ["Error: WebGL2 is not available in this environment"],
+    );
+    expect(seekStall(failed)).toBeNull();
+  });
+
+  it("leaves a WRONG picture to the test: the stale frame a backward seek used to leave", () => {
+    // Red where green was asked for, at the seek to 2 s.
+    expect(seekStall(report(["match", RED, "match", "match", "match"]))).toBeNull();
+  });
+
+  it("does not let a blank shot excuse a wrong one in the same run", () => {
+    expect(seekStall(report(["match", RED, "match", [0, 0, 0, 255], []]))).toBeNull();
+  });
+
+  it("is a stall only when every missed shot drew nothing, whatever the pixels and errors", () => {
+    const byte = fc.integer({ min: 0, max: 255 });
+    const shotArb = fc.oneof(
+      fc.constant({ kind: "matched" as const, pixel: RED }),
+      fc
+        .constantFrom([], [0, 0, 0, 255], [0, 0, 0, 0])
+        .map((pixel) => ({ kind: "blank" as const, pixel })),
+      // Any colour with a trace of something in it: a picture, just not the right one.
+      fc
+        .tuple(byte, byte, byte)
+        .filter(([r, g, b]) => r + g + b > 0)
+        .map(([r, g, b]) => ({ kind: "wrong" as const, pixel: [r, g, b, 255] })),
+    );
+    fc.assert(
+      fc.property(
+        fc.array(shotArb, { minLength: 5, maxLength: 5 }),
+        fc.array(fc.string({ minLength: 1 }), { maxLength: 2 }),
+        (made, errors) => {
+          const shots = made.map(({ kind, pixel }, index) =>
+            shot(index, pixel, kind === "matched"),
+          );
+          const missed = made.flatMap((m, index) =>
+            m.kind === "matched" ? [] : [{ ...m, index }],
+          );
+          const blankOnly = missed.length > 0 && missed.every((m) => m.kind === "blank");
+
+          const stall = seekStall({ shots, errors });
+
+          if (errors.length === 0 && blankOnly) expect(stall?.time).toBe(SEEKS[missed[0].index]);
+          else expect(stall).toBeNull();
+        },
+      ),
+      { numRuns: 500 },
+    );
   });
 });

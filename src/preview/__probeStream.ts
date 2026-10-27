@@ -16,6 +16,8 @@ export interface WorkerSeekShot {
   time: number;
   pixel: number[];
   matched: boolean;
+  /** How long the picture took to appear, in ms: the whole deadline when it never did. */
+  waitedMs: number;
 }
 
 export interface WorkerSeekResult {
@@ -33,7 +35,10 @@ export interface StreamShot {
 }
 
 const TICK_MS = 16; // the worker's loop
-const PATIENCE = 90; // ticks (~1.5 s) a frame may take before it counts as never shown
+// How long a frame may take before it counts as never shown. A count of ticks was not a duration
+// (about 1.5 s plus however long each capture took), and macos-14's decoders stall for seconds at a
+// time: the run of 2026-10-27 captured a blank canvas after a seek and nothing at all after the next.
+const FRAME_DEADLINE_MS = 8_000;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -47,7 +52,8 @@ async function play(file: string, frames: number, fps: number): Promise<StreamSh
       let frame: VideoFrame | null = null;
       // The worker holds the playhead while a visible layer has no frame (its "stalled" signal),
       // so a frame that is merely slow still shows; one that never comes out does not.
-      for (let n = 0; n < PATIENCE && !frame; n++) {
+      const deadline = performance.now() + FRAME_DEADLINE_MS;
+      while (!frame && performance.now() < deadline) {
         vs.pump(t);
         frame = vs.nearestFrame(t);
         if (!frame) await sleep(TICK_MS);
@@ -156,7 +162,8 @@ async function seekInWorker(): Promise<WorkerSeekResult> {
       client.render(timeline, time);
       let pixel: number[] = [];
       let matched = false;
-      for (let attempt = 0; attempt < PATIENCE && !matched; attempt++) {
+      const started = performance.now();
+      while (!matched && performance.now() - started < FRAME_DEADLINE_MS) {
         const bytes = await client.capture(160);
         if (bytes) {
           const bitmap = await createImageBitmap(
@@ -178,7 +185,7 @@ async function seekInWorker(): Promise<WorkerSeekResult> {
         }
         if (!matched) await sleep(TICK_MS);
       }
-      shots.push({ time, pixel, matched });
+      shots.push({ time, pixel, matched, waitedMs: Math.round(performance.now() - started) });
       previousTime = time;
     }
     return { shots, errors, backend };

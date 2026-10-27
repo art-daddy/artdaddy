@@ -10,21 +10,92 @@
 //   ffmpeg -f lavfi -i testsrc2=s=64x48:r=30 -frames:v 10 -c:v libx264 -profile:v high -bf 3
 //          -pix_fmt yuv420p -movflags +faststart ten_frames.mp4
 // (frame types I B B B P B B B P P, has_b_frames=2, 512 ticks of 1/15360 s per frame).
-import { type Page, expect, test } from "@playwright/test";
+import { type Browser, type Page, expect, test } from "@playwright/test";
 
 import type { StreamShot, WorkerSeekResult } from "../../src/preview/__probeStream";
+import { ProbeStalled, retryStalledProbe, seekStall } from "../../src/test/probeRetry";
 
 let page: Page;
 let shots: Record<string, StreamShot>;
+let liveSeek: WorkerSeekResult;
+
+// macos-14's decoders stall, and a page that drew nothing is no verdict (CI, 2026-10-20 and
+// 2026-10-27: a black canvas after the seek to 2.9 s, on the worker and on the main thread alike).
+// Such a page is replaced and asked once more. A wrong picture, an error the preview reported, a
+// probe that fails to run, or a page that draws nothing on EVERY try still fails.
+const TRIES = 2;
+const PROBE_LIMIT_MS = 60_000;
+
+/** A fresh probe page, loaded until it has reported. One that reports nothing in time stalled. */
+async function openProbe(browser: Browser, query = ""): Promise<Page> {
+  const probe = await browser.newPage();
+  try {
+    await probe.goto(`/preview-probe-stream.html${query}`);
+    try {
+      await probe.waitForFunction(() => "__stream" in window, undefined, {
+        timeout: PROBE_LIMIT_MS,
+      });
+    } catch (error) {
+      throw new ProbeStalled(
+        `the probe reported nothing in ${PROBE_LIMIT_MS / 1000} s: ${String(error)}`,
+        "load",
+      );
+    }
+    return probe;
+  } catch (error) {
+    await probe.close();
+    throw error;
+  }
+}
+
+async function readProbe(probe: Page) {
+  const { streams, seek } = await probe.evaluate(() => {
+    const reported = window as unknown as {
+      __stream: Record<string, StreamShot>;
+      __workerSeek: WorkerSeekResult;
+    };
+    return { streams: reported.__stream, seek: reported.__workerSeek };
+  });
+  expect((streams as { error?: string }).error, "the probe failed to run").toBeUndefined();
+  return { streams, seek };
+}
+
+const stalledAt = (stall: { time: number; waitedMs: number }) =>
+  new ProbeStalled(
+    `no picture at ${stall.time} s after ${stall.waitedMs} ms`,
+    `seek-${stall.time}`,
+  );
+
+const logStall = async (stalled: ProbeStalled, tryNumber: number) => {
+  console.log(
+    `stream-probe-stalled try=${tryNumber} stage=${stalled.stage}: ${stalled.message}; trying again on a fresh page`,
+  );
+};
 
 test.beforeAll(async ({ browser }) => {
-  page = await browser.newPage();
-  await page.goto("/preview-probe-stream.html");
-  await page.waitForFunction(() => "__stream" in window, undefined, { timeout: 60_000 });
-  shots = await page.evaluate(
-    () => (window as unknown as { __stream: Record<string, StreamShot> }).__stream,
+  test.setTimeout(240_000);
+  const loaded = await retryStalledProbe(
+    async (tryNumber) => {
+      const probe = await openProbe(browser);
+      let kept = false;
+      try {
+        const { streams, seek } = await readProbe(probe);
+        // The last try keeps what it saw: a worker that never draws then fails its own test, and
+        // not every test in the file.
+        const stall = tryNumber < TRIES ? seekStall(seek) : null;
+        if (stall) throw stalledAt(stall);
+        kept = true;
+        return { probe, streams, seek };
+      } finally {
+        if (!kept) await probe.close();
+      }
+    },
+    logStall,
+    TRIES,
   );
-  expect((shots as { error?: string }).error, "the probe failed to run").toBeUndefined();
+  page = loaded.probe;
+  shots = loaded.streams;
+  liveSeek = loaded.seek;
 });
 test.afterAll(async () => {
   await page?.close();
@@ -33,9 +104,7 @@ test.afterAll(async () => {
 const FRAME_US = 1e6 / 30;
 
 test("backward seek replaces the live worker picture with the original early frame", async () => {
-  const result = await page.evaluate(
-    () => (window as unknown as { __workerSeek: WorkerSeekResult }).__workerSeek,
-  );
+  const result = liveSeek;
   await test.info().attach("live-worker-seek-pixels", {
     body: JSON.stringify(result, null, 2),
     contentType: "application/json",
@@ -51,30 +120,33 @@ test("backward seek replaces the live worker picture with the original early fra
 test("unavailable worker graphics use the same live preview frames on the main thread", async ({
   browser,
 }) => {
-  const fallback = await browser.newPage();
-  try {
-    await fallback.goto("/preview-probe-stream.html?forceWorkerUnavailable=1");
-    await fallback.waitForFunction(() => "__workerSeek" in window);
-    const actual = await fallback.evaluate(
-      () => (window as unknown as { __workerSeek: WorkerSeekResult }).__workerSeek,
-    );
-    const normal = await page.evaluate(
-      () => (window as unknown as { __workerSeek: WorkerSeekResult }).__workerSeek,
-    );
-    await test.info().attach("fallback-seek-pixels", {
-      body: JSON.stringify(actual, null, 2),
-      contentType: "application/json",
-    });
-    expect(actual.backend).toBe("main-thread");
-    expect(actual.errors).toEqual([]);
-    expect(actual.shots).toHaveLength(5);
-    expect(actual.shots.every((shot) => shot.matched)).toBe(true);
-    expect(actual.shots.map(({ time, pixel }) => ({ time, pixel }))).toEqual(
-      normal.shots.map(({ time, pixel }) => ({ time, pixel })),
-    );
-  } finally {
-    await fallback.close();
-  }
+  test.setTimeout(240_000);
+  const actual = await retryStalledProbe(
+    async (tryNumber) => {
+      const fallback = await openProbe(browser, "?forceWorkerUnavailable=1");
+      try {
+        const { seek } = await readProbe(fallback);
+        await test.info().attach(`fallback-seek-pixels-try-${tryNumber}`, {
+          body: JSON.stringify(seek, null, 2),
+          contentType: "application/json",
+        });
+        const stall = seekStall(seek);
+        if (stall) throw stalledAt(stall);
+        return seek;
+      } finally {
+        await fallback.close();
+      }
+    },
+    logStall,
+    TRIES,
+  );
+  expect(actual.backend).toBe("main-thread");
+  expect(actual.errors).toEqual([]);
+  expect(actual.shots).toHaveLength(5);
+  expect(actual.shots.every((shot) => shot.matched)).toBe(true);
+  expect(actual.shots.map(({ time, pixel }) => ({ time, pixel }))).toEqual(
+    liveSeek.shots.map(({ time, pixel }) => ({ time, pixel })),
+  );
 });
 
 test.describe("playback shows every frame of a video (real WebCodecs)", () => {
