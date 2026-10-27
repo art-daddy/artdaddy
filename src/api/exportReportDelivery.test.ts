@@ -781,6 +781,33 @@ describe("whatever order things happen in", () => {
     { weight: 6, arbitrary: fc.constantFrom(...replies).map((r): Action => ({ t: "reply", r })) },
   );
 
+  // Found by generation, then kept so they run every time: a restart while the delivery pass that
+  // the previous action left behind was still running (see the restart action below).
+  const restartsWithWorkInFlight: Action[][] = [
+    [
+      { t: "switch", who: "alice" },
+      { t: "reply", r: "busy" },
+      { t: "reply", r: "ok" },
+      { t: "settle" },
+      { t: "reply", r: "ok" },
+      { t: "reply", r: "lost-answer" },
+      { t: "settle" },
+      { t: "restart" },
+      { t: "flush" },
+    ],
+    [
+      { t: "reply", r: "offline" },
+      { t: "switch", who: "bob" },
+      { t: "settle" },
+      { t: "reply", r: "ok" },
+      { t: "reply", r: "lost-answer" },
+      { t: "settle" },
+      { t: "restart" },
+      { t: "switch", who: "bob" },
+      { t: "settle" },
+    ],
+  ];
+
   it("every attributable report reaches the server once, under its own account", async () => {
     await fc.assert(
       fc
@@ -836,8 +863,14 @@ describe("whatever order things happen in", () => {
               const clean = behaving();
               await flushExportReports();
               if (clean) expectProgress(before);
-            } else if (a.t === "restart") __resetExportReports();
-            else {
+            } else if (a.t === "restart") {
+              // A relaunch ends the old process and everything it had started. reportExport leaves a
+              // pass running for the backlog without waiting for it, and resetting the module only makes
+              // it forget that pass: the old one would carry on beside the next, and the second could
+              // send a report the first had already confirmed. No real restart leaves work behind.
+              await flushExportReports();
+              __resetExportReports();
+            } else {
               if (shown) lastUser = shown;
               const id = `r-${counter + 1}`;
               ownerOf.set(id, shown ?? lastUser);
@@ -891,7 +924,10 @@ describe("whatever order things happen in", () => {
           vi.unstubAllGlobals();
           setClerkTokenProvider(null);
         }),
-      { numRuns: 150 },
+      {
+        numRuns: 150,
+        examples: restartsWithWorkInFlight.map((actions) => [actions] as [Action[]]),
+      },
     );
   });
 });
