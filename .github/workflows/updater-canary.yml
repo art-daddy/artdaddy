@@ -19,6 +19,10 @@ on:
         description: "Public release to install first (older than the live manifest's version)"
         required: false
         default: "0.21.6"
+      to_version:
+        description: "Windows only: judge THIS release's installer directly (installer-only) instead of what the live manifest offers"
+        required: false
+        default: ""
   push:
     branches: ["qa/**"]
     paths:
@@ -54,6 +58,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FROM_VERSION: ${{ inputs.from_version || '0.21.6' }}
+          TO_VERSION: ${{ inputs.to_version }}
         run: node scripts/qa/windowsUpdateCanary.mjs
       - uses: actions/upload-artifact@v4
         if: always()

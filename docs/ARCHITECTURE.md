@@ -585,8 +585,10 @@ present. Keep it that way unless the registry situation changes.
 
 ### Releasing (draft first)
 
-Nothing below is public until step 5, and the manifest in step 6 is what actually offers the
-release to installed apps. 0.21.9 shipped this way.
+Nothing below is public until step 5, and the manifest in step 7 is what actually offers the
+release to installed apps. 0.21.9 shipped this way. 0.22.0 showed why the Windows update test must
+run BEFORE the manifest switch (step 6): it ran after, so a failure had already been offered to users
+for 17 minutes and the offer had to be rolled back.
 
 1. **Pins.** `npm run bump:yt-dlp -- --check` says how far behind the pinned yt-dlp is
    (`scripts/sidecarStaging.mjs` pins it, with SHA-256s, like ffmpeg). Bump it on purpose
@@ -607,14 +609,21 @@ release to installed apps. 0.21.9 shipped this way.
 5. **Publish.** `gh release edit vX.Y.Z --draft=false --latest --target <sha>`, then
    `node scripts/publishReleaseAssets.mjs --tag vX.Y.Z --verify-only --latest`: every asset
    answers publicly with the size the release lists, and this release is the latest.
-6. **Switch (landing repo).** Edit `landing/updates/latest.json` (version, notes, `pub_date`), run
+6. **Judge the installers before the switch.** Dispatch `updater canary` with `from_version` = the
+   previous release and `to_version` = this one. On Windows the old app is replaced by THIS release's
+   installer the way the updater replaces it (nothing is read from the manifest, so nobody is offered
+   anything); a failure writes `state-*.txt/png` (who ran, where Windows says the app is installed,
+   what Defender and the Application log said). Do not switch the manifest until it is green.
+7. **Switch (landing repo).** Edit `landing/updates/latest.json` (version, notes, `pub_date`), run
    `node scripts/add-platform-update.mjs <platform> <version> <sig>` for each platform, commit
    that, then the download labels in the HTML, `npm run check:downloads`, push `main` (Cloudflare
    Pages deploys it). Verify the LIVE manifest by parsing it (invariant 3).
-7. **Canary.** Dispatch `updater canary` with `from_version` = the previous release. Windows and
+8. **Canary, through the live manifest.** Dispatch `updater canary` with `from_version` = the previous
+   release (no `to_version`). Windows and
    Linux call the app's own updater commands. macOS cannot be driven that way (WKWebView has no
    remote debugging port and a signed-out app never shows the banner), so its job installs the
    previous release's `.app`, runs the shipped updater plugin against it (`src-tauri/tests/
    update_canary.rs`), then checks every file of the bundle that is left against the published
    tarball, `codesign --verify`, and that the updated app starts (`scripts/qa/macUpdateCanary.mjs`).
-   It does not exercise the app's command wrappers or `app.restart()`.
+   It does not exercise the app's command wrappers or `app.restart()`. If it fails, revert the
+   manifest commit first and diagnose second.
