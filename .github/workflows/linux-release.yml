@@ -19,6 +19,10 @@ on:
         description: "Sign the AppImage for auto-update (requires the existing updater key secret)"
         type: boolean
         default: false
+      release_tag:
+        description: "QA only: attach to this existing release instead of v<version> (a rehearsal on a throwaway draft)"
+        type: string
+        default: ""
       checks_only:
         description: "Verify an existing Linux artifact and missing runtime lanes; never publish"
         type: boolean
@@ -349,6 +353,9 @@ jobs:
             ${{ steps.artifact.outputs.appimage }}.sig
           if-no-files-found: warn
 
+      # A draft release is the safe way to build one: nothing is public until it is published. So the
+      # upload is verified on the release itself (size and SHA-256 as GitHub holds them), and the public
+      # URL only once the release is public: scripts/publishReleaseAssets.mjs.
       - name: Publish Linux assets to the existing GitHub release
         if: ${{ inputs.publish }}
         env:
@@ -356,17 +363,14 @@ jobs:
           APPIMAGE: ${{ steps.artifact.outputs.appimage }}
           DEB: ${{ steps.artifact.outputs.deb }}
           ENABLE_AUTO_UPDATE: ${{ inputs.enable_auto_update }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           SIG="${APPIMAGE}.sig"
           if [ "$ENABLE_AUTO_UPDATE" = "true" ]; then
             test -s "$SIG" || { echo "::error::signed AppImage has no .sig"; exit 1; }
           fi
           VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
-          TAG="v$VERSION"
-          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "::error::release $TAG does not exist yet - publish the Windows release first."
-            exit 1
-          fi
+          TAG="${RELEASE_TAG:-v$VERSION}"
           cp "$APPIMAGE" /tmp/ArtDaddy-linux-x86_64.AppImage
           cp "$DEB" /tmp/ArtDaddy-linux-x86_64.deb
           ASSETS=(
@@ -377,23 +381,11 @@ jobs:
             cp "$SIG" /tmp/ArtDaddy-linux-x86_64.AppImage.sig
             ASSETS+=(/tmp/ArtDaddy-linux-x86_64.AppImage.sig)
           fi
-          gh release upload "$TAG" "${ASSETS[@]}" --repo "$GITHUB_REPOSITORY" --clobber
-          for LOCAL in "${ASSETS[@]}"; do
-            ASSET="$(basename "$LOCAL")"
-            LOCAL="/tmp/$ASSET"
-            URL="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$ASSET"
-            CODE="$(curl -sL -o /dev/null -w '%{http_code}' -I "$URL")"
-            REMOTE="$(curl -sIL "$URL" | awk 'tolower($1) ~ /^content-length/ {print $2}' | tail -1 | tr -d '\r')"
-            SIZE="$(stat -c%s "$LOCAL")"
-            test "$CODE" = "200" && test "$REMOTE" = "$SIZE" || {
-              echo "::error::$ASSET verification failed: HTTP $CODE, remote=$REMOTE local=$SIZE"
-              exit 1
-            }
-          done
+          node scripts/publishReleaseAssets.mjs --tag "$TAG" "${ASSETS[@]}"
           if [ "$ENABLE_AUTO_UPDATE" = "true" ]; then
-            echo "::notice::Linux assets are signed and public. In art-daddy/akaru-landing run:"
+            echo "::notice::Linux assets are signed and attached to $TAG. After it is published, in art-daddy/akaru-landing run:"
             echo "::notice::npm run update:platform -- linux-x86_64 $VERSION /path/to/ArtDaddy-linux-x86_64.AppImage.sig"
             echo "::notice::then deploy that repository to enable Linux auto-update."
           else
-            echo "::notice::Unsigned Linux first-install assets are public; auto-update remains disabled."
+            echo "::notice::Unsigned Linux first-install assets are attached to $TAG; auto-update remains disabled."
           fi
