@@ -801,6 +801,7 @@ async function confirmExportRequest(specs: readonly ExportSpec[]): Promise<boole
     )
       ? `Estimated temporary payload: about ${(checks.reduce((total, check) => total + check.estimates.temporaryBytes! + check.estimates.finalBytes!, 0) / 1e9).toFixed(1)} GB, including pending output files and accounted scratch observations. Filesystem metadata and allocation overhead are extra within the existing headroom; this is not an exact disk peak.`
       : "Estimated temporary disk: unknown. Safe-file and temporary-space limits still apply.",
+    "The workspace allowance covers app-managed temporary allocation, not total disk use. Other apps and OS-retained data can consume additional space, and free space can change during export. Published outputs remain on disk.",
     "You can lower the export resolution or export a smaller section. Cancel to change settings.",
     warning ? "Continue anyway?" : "Continue?",
   ].join("\n\n");

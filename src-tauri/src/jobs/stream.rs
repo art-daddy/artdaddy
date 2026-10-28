@@ -17,8 +17,73 @@ pub(super) type Registry = Arc<Mutex<HashMap<(String, u32), Arc<Control>>>>;
 type Observer = Arc<dyn Fn(ProcEvent) + Send + Sync>;
 
 struct ManifestScratch {
-  _directory: tempfile::TempDir,
-  _charge: super::workspace::Charge,
+  owned: Option<(tempfile::TempDir, super::workspace::Charge)>,
+}
+
+impl ManifestScratch {
+  fn open(cwd: &Path, workspace: &Arc<super::Workspace>, key: &str, entries: u64) -> Result<Self, String> {
+    let usage = super::measured_scratch_usage(cwd, Path::new(""))?;
+    workspace.account_allocated(key, usage)?;
+    let charge = workspace.reserve_in(key, 0, entries, usage.volume)?;
+    let directory = tempfile::Builder::new().prefix("native-stream-").tempdir_in(cwd).map_err(|error| error.to_string())?;
+    let scratch = Self { owned: Some((directory, charge)) };
+    #[cfg(unix)]
+    {
+      use std::os::unix::fs::PermissionsExt;
+      if let Err(error) = std::fs::set_permissions(scratch.path(), std::fs::Permissions::from_mode(0o700)) {
+        return Err(scratch.cleanup_error(error.to_string()));
+      }
+    }
+    Ok(scratch)
+  }
+
+  fn path(&self) -> &Path { self.owned.as_ref().expect("live streaming scratch owner").0.path() }
+
+  fn admit_manifest(&mut self, bytes: u64) -> Result<(), String> {
+    self.owned.as_mut().expect("live streaming scratch owner").1.grow(bytes)
+  }
+
+  fn close(mut self) -> Result<(), String> {
+    let (directory, charge) = self.owned.take().expect("live streaming scratch owner");
+    match directory.close() {
+      Ok(()) => { drop(charge); Ok(()) }
+      Err(error) => {
+        charge.retain();
+        Err(format!("native streaming scratch cleanup failed; workspace reservation retained: {error}"))
+      }
+    }
+  }
+
+  fn cleanup_error(self, primary: String) -> String {
+    match self.close() {
+      Ok(()) => primary,
+      Err(cleanup) => format!("{primary}\n{cleanup}"),
+    }
+  }
+
+  fn retain(&mut self) {
+    if let Some((directory, charge)) = self.owned.take() {
+      directory.keep();
+      charge.retain();
+    }
+  }
+}
+
+impl Drop for ManifestScratch {
+  fn drop(&mut self) {
+    if self.owned.is_some() {
+      self.retain();
+      log::warn!("native streaming scratch abandoned before confirmed settlement; files and workspace reservation retained");
+    }
+  }
+}
+
+fn with_cleanup(primary: Result<(), String>, cleanup: Result<(), String>) -> Result<(), String> {
+  match (primary, cleanup) {
+    (Err(primary), Err(cleanup)) => Err(format!("{primary}\n{cleanup}")),
+    (Err(primary), Ok(())) => Err(primary),
+    (Ok(()), cleanup) => cleanup,
+  }
 }
 
 struct FinalOutput {
@@ -40,16 +105,22 @@ impl FinalOutput {
       return Err("native pending output does not target its admitted stage".into());
     }
     let key = super::Supervisor::workspace_key(Path::new(path));
+    workspace.account_allocated(&key, super::allocation::Inventory::for_file(Path::new(path))?)?;
     let (limit, charge) = workspace.reserve_output(&key)?;
     let mut reserved = Self { path: path.into(), key, limit, workspace, charge: Some(charge), output_limit: None };
-    reserved.output_limit = Some(output::OutputLimit::open(Path::new(path), limit)?);
+    reserved.output_limit = Some(output::OutputLimit::open(Path::new(path), limit, args,
+      admitted_deadline(execution_deadline(spec)?)?)?);
     let output_index = args.len() - 1;
     args.splice(output_index..output_index, ["-fs".into(), limit.to_string()]);
     Ok(Some(reserved))
   }
 
   fn finish(&mut self, producer_complete: bool) -> Result<(), String> {
-    self.output_limit.take();
+    let boundary = match self.output_limit.take() {
+      Some(mut limit) => limit.finish(producer_complete),
+      None if self.charge.is_some() => Err("native output write limit is missing at settlement".into()),
+      None => Ok(()),
+    };
     let Some(charge) = self.charge.take() else { return Ok(()) };
     let measured = std::fs::symlink_metadata(&self.path).map_err(|error| error.to_string());
     let metadata = match measured {
@@ -59,7 +130,7 @@ impl FinalOutput {
     };
     let actual = metadata.len();
     let capped = actual >= self.limit;
-    let discard = capped || !producer_complete;
+    let discard = capped || !producer_complete || boundary.is_err();
     if discard {
       if let Err(error) = std::fs::remove_file(&self.path) {
         charge.retain();
@@ -70,13 +141,18 @@ impl FinalOutput {
     self.workspace.release(&self.key, self.limit.saturating_sub(if discard { 0 } else { actual }), u64::from(discard));
     self.workspace.settle_output_writer(&self.key);
     if discard { Err(format!("native output write boundary refused completion: {}",
-      serde_json::json!({ "limit": self.limit, "observed": actual, "producer_complete": producer_complete, "cleaned": true }))) }
+      serde_json::json!({ "limit": self.limit, "observed": actual, "producer_complete": producer_complete,
+        "sink_error": boundary.err(), "cleaned": true }))) }
     else { Ok(()) }
   }
 }
 
 impl Drop for FinalOutput {
-  fn drop(&mut self) { let _ = self.finish(false); }
+  fn drop(&mut self) {
+    if self.charge.is_some() {
+      if let Err(error) = self.finish(false) { log::warn!("native final output abandoned before confirmed settlement: {error}"); }
+    }
+  }
 }
 
 #[derive(Clone, Copy, serde::Serialize)]
@@ -120,11 +196,15 @@ pub(super) struct Control {
   resident_limit: u64,
 }
 
+fn admitted_deadline(deadline_ms: u64) -> Result<Instant, String> {
+  let remaining = deadline_ms.checked_sub(super::now_ms()).filter(|remaining| *remaining > 0)
+    .ok_or("render execution deadline has already expired")?;
+  Instant::now().checked_add(Duration::from_millis(remaining)).ok_or_else(|| "render execution deadline overflow".into())
+}
+
 impl Control {
   fn new(deadline_ms: u64, final_output: Option<FinalOutput>) -> Result<Self, String> {
-    let remaining = deadline_ms.checked_sub(super::now_ms()).filter(|remaining| *remaining > 0)
-      .ok_or("render execution deadline has already expired")?;
-    let deadline = Instant::now().checked_add(Duration::from_millis(remaining)).ok_or("render execution deadline overflow")?;
+    let deadline = admitted_deadline(deadline_ms)?;
     Ok(Self { state: Mutex::new(State { final_output, ..State::default() }), wake: pipe::Wake::new().map_err(|error| error.to_string())?,
       budget: super::budget::Budget::new(super::budget::RENDER_COMMIT_LIMIT)?, deadline, settled: Condvar::new(),
       resident_limit: super::budget::RENDER_RESIDENT_LIMIT })
@@ -158,12 +238,18 @@ impl Control {
       let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
       if state.cancelled { return; }
       state.cancelled = true;
+      if let Some(limit) = state.final_output.as_ref().and_then(|output| output.output_limit.as_ref()) { limit.cancel(); }
       state.children.values().map(|worker| worker.child.clone()).collect::<Vec<_>>()
     };
     self.wake.signal();
     for child in children {
       if let Err(error) = child.kill() { log::warn!("could not stop owned streaming worker: {error}"); }
     }
+  }
+
+  fn redactor(&self) -> output::Redactor {
+    self.state.lock().unwrap_or_else(|error| error.into_inner()).final_output.as_ref()
+      .and_then(|output| output.output_limit.as_ref()).map(output::OutputLimit::redactor).unwrap_or_default()
   }
 
   fn watch(self: &Arc<Self>) {
@@ -221,11 +307,17 @@ impl Control {
     let cleanup = if !state.children.is_empty() { Err("native output still has unsettled writers".into()) }
       else if let Some(output) = state.final_output.as_mut() { output.finish(producer.is_ok()) }
       else { Ok(()) };
-    match (producer, cleanup) {
-      (Err(primary), Err(cleanup)) => Err(format!("{primary}\n{cleanup}")),
-      (Err(primary), Ok(())) => Err(primary),
-      (Ok(()), cleanup) => cleanup,
+    with_cleanup(producer, cleanup)
+  }
+
+  fn finish_scratch(&self, mut scratch: ManifestScratch) -> Result<(), String> {
+    let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+    if !state.settled || !state.children.is_empty() {
+      scratch.retain();
+      return Err("native streaming scratch still has unsettled workers; files and workspace reservation retained".into());
     }
+    drop(state);
+    scratch.close()
   }
 
   fn settle(&self) -> Result<(), String> {
@@ -255,7 +347,7 @@ pub(super) struct AudioProducer {
 
 pub(super) fn audio_producer(spec: &JobSpec) -> Result<Option<AudioProducer>, String> {
   let Some(value) = spec.meta.get("renderAudio") else { return Ok(None) };
-  if !super::is_streamed(spec) || spec.program != "ffmpeg" || spec.lane != "export" || spec.steps.is_empty() {
+  if !super::is_streamed(spec) || spec.program != "ffmpeg" || spec.lane != super::EXPORT_LANE || spec.steps.is_empty() {
     return Err("continuous audio requires an admitted streaming render".into());
   }
   let audio: AudioProducer = serde_json::from_value(value.clone()).map_err(|error| format!("invalid continuous audio contract: {error}"))?;
@@ -345,19 +437,24 @@ fn reader(input: impl Read + Send + 'static, observer: Observer, control: Arc<Co
   std::thread::spawn(move || {
     let mut input = input;
     let mut buffer = [0u8; 8192];
+    let mut redactor = control.redactor();
     loop {
-      let count = match input.read(&mut buffer) {
-        Ok(0) => return Ok(()),
-        Ok(count) => count,
-        Err(error) => { control.stop(); return Err(error.to_string()); }
+      let (count, failure) = match input.read(&mut buffer) {
+        Ok(count) => (count, None),
+        Err(error) => { control.stop(); (0, Some(error)) }
       };
-      let text = String::from_utf8_lossy(&buffer[..count]).into_owned();
-      if let Some((step, enabled)) = &progress {
-        if enabled.load(Ordering::Acquire) {
-          observer(ProcEvent::Stdout(if let Some(step) = step { format!("artdaddy_step={step}\n{text}") } else { text.clone() }));
+      let filtered = redactor.push(&buffer[..count], count == 0);
+      let text = String::from_utf8_lossy(&filtered).into_owned();
+      if !text.is_empty() {
+        if let Some((step, enabled)) = &progress {
+          if enabled.load(Ordering::Acquire) {
+            observer(ProcEvent::Stdout(if let Some(step) = step { format!("artdaddy_step={step}\n{text}") } else { text.clone() }));
+          }
         }
+        if diagnostic { observer(ProcEvent::Stderr(text)); }
       }
-      if diagnostic { observer(ProcEvent::Stderr(text)); }
+      if let Some(error) = failure { return Err(error.to_string()); }
+      if count == 0 { return Ok(()); }
     }
   })
 }
@@ -368,27 +465,27 @@ pub(super) fn cancel(registry: &Registry, id: &str, pid: u32) -> bool {
 }
 
 pub(super) fn spawn_single(executable: &Path, spec: &JobSpec, observer: Observer, registry: Registry, workspace: Arc<super::Workspace>) -> Result<u32, String> {
-  let mut args = spec.args.clone();
+  let deadline = execution_deadline(spec)?;
   let workspace_key = spec.cwd.as_deref().map(|cwd| super::Supervisor::workspace_key(Path::new(cwd)));
-  let mut capture = if let Some(contract) = spec.meta.get("_native_scratch_capture") {
-    let path = contract.get("path").and_then(|value| value.as_str()).ok_or("native scratch capture path missing")?;
-    let used = contract.get("used").and_then(|value| value.as_u64()).ok_or("native scratch capture byte count missing")?;
-    let limit = contract.get("limit").and_then(|value| value.as_u64()).ok_or("native scratch capture limit missing")?;
-    args = super::captured_output_args(&args)?;
-    let cwd = spec.cwd.as_deref().ok_or("temporary output has no admitted scratch root")?;
-    let key = super::Supervisor::workspace_key(Path::new(cwd));
-    let (bytes, entries) = super::scratch_usage(Path::new(cwd), Path::new(""))?;
-    workspace.account_existing(&key, bytes, entries)?;
-    Some(super::ScratchOutput::open_workspace(Path::new(path), used, limit, workspace.clone(), &key)?)
-  } else { None };
+  let (mut capture, mut args) = match super::ScratchOutput::capture(spec, workspace.clone())? {
+    Some((capture, args)) => (Some(capture), args),
+    None => (None, spec.args.clone()),
+  };
   let captured = capture.is_some();
-  let final_output = FinalOutput::open(spec, &mut args, workspace.clone())?;
-  let control = Arc::new(Control::new(execution_deadline(spec)?, final_output)?);
-  let guard: StartGuard = Arc::new(|| Ok(()));
-  let worker = control.spawn(executable, &args, spec.cwd.as_deref(), false, WorkerRole::Single, &guard)?;
+  let started = (|| -> Result<_, String> {
+    let final_output = FinalOutput::open(spec, &mut args, workspace.clone())?;
+    let control = Arc::new(Control::new(deadline, final_output)?);
+    let guard: StartGuard = Arc::new(|| Ok(()));
+    let worker = control.spawn(executable, &args, spec.cwd.as_deref(), false, WorkerRole::Single, &guard)?;
+    let output = worker.child().take_stdout().ok_or("native worker has no output stream")?;
+    let errors = worker.child().take_stderr().ok_or("native worker has no error stream")?;
+    Ok((control, worker, output, errors))
+  })();
+  let (control, worker, mut output, errors) = match started {
+    Ok(started) => started,
+    Err(error) => return Err(match capture { Some(capture) => capture.abort(error), None => error }),
+  };
   let pid = worker.child().id();
-  let mut output = worker.child().take_stdout().ok_or("native worker has no output stream")?;
-  let errors = worker.child().take_stderr().ok_or("native worker has no error stream")?;
   let key = (spec.id.clone(), pid);
   registry.lock().unwrap_or_else(|error| error.into_inner()).insert(key.clone(), control.clone());
   control.watch();
@@ -398,17 +495,29 @@ pub(super) fn spawn_single(executable: &Path, spec: &JobSpec, observer: Observer
     let output_observer = observer.clone();
     let output_control = control.clone();
     let stdout = std::thread::spawn(move || {
+      let mut redactor = output_control.redactor();
       let read = (|| -> Result<(), String> {
         let mut buffer = [0u8; 65536];
         loop {
           let count = output.read(&mut buffer).map_err(|error| error.to_string())?;
+          if let Some(writer) = capture.as_mut() {
+            if count != 0 { writer.write(&buffer[..count])?; }
+          }
+          else {
+            let filtered = redactor.push(&buffer[..count], count == 0);
+            if !filtered.is_empty() { output_observer(ProcEvent::Stdout(String::from_utf8_lossy(&filtered).into_owned())); }
+          }
           if count == 0 { break; }
-          if let Some(writer) = capture.as_mut() { writer.write(&buffer[..count])?; }
-          else { output_observer(ProcEvent::Stdout(String::from_utf8_lossy(&buffer[..count]).into_owned())); }
         }
         Ok(())
       })();
-      if read.is_err() { output_control.stop(); }
+      if read.is_err() {
+        output_control.stop();
+        if capture.is_none() {
+          let filtered = redactor.push(&[], true);
+          if !filtered.is_empty() { output_observer(ProcEvent::Stdout(String::from_utf8_lossy(&filtered).into_owned())); }
+        }
+      }
       (read, capture)
     });
     let ended = worker.wait();
@@ -416,8 +525,10 @@ pub(super) fn spawn_single(executable: &Path, spec: &JobSpec, observer: Observer
     let diagnostics = join(stderr);
     let mut result = control.settle().and(read).and(diagnostics).and(ended);
     if let Some(capture) = capture {
-      let code = if result.is_ok() { 0 } else { -1 };
-      result = result.and(capture.finish(Some(code)));
+      result = match result {
+        Ok(()) => capture.finish(Some(0)),
+        Err(error) => Err(capture.abort(error)),
+      };
     }
     result = control.finish_output(result);
     observer(ProcEvent::Stderr(control.memory_diagnostics()));
@@ -441,17 +552,9 @@ pub(super) fn spawn(executable: &Path, spec: &JobSpec, observer: Observer,
   guard: StartGuard, registry: Registry, workspace: Arc<super::Workspace>) -> Result<u32, String> {
   let (final_args, remaining) = spec.steps.split_last().ok_or("streaming render needs producers and a final command")?;
   let audio = audio_producer(spec)?;
-  let root = tempfile::Builder::new().prefix("native-stream-").tempdir_in(spec.cwd.as_ref().ok_or("streaming render needs owned scratch")?)
-    .map_err(|error| error.to_string())?;
-  #[cfg(unix)]
-  {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).map_err(|error| error.to_string())?;
-  }
-  let manifest = root.path().join("segments.ffconcat");
+  let deadline = execution_deadline(spec)?;
   let mut producers = Vec::new();
-  let mut pipes = Vec::new();
-  let mut manifest_content = "ffconcat version 1.0\n".to_owned();
+  let mut durations = Vec::new();
   for args in std::iter::once(&spec.args).chain(remaining.iter()) {
     if !args.windows(2).any(|pair| pair == ["-f", "nut"]) {
       return Err("streaming producer must emit lossless NUT".into());
@@ -460,26 +563,37 @@ pub(super) fn spawn(executable: &Path, spec: &JobSpec, observer: Observer,
       .and_then(|pair| pair[1].parse::<f64>().ok()).filter(|duration| duration.is_finite() && *duration > 0.0)
       .ok_or("streaming producer has no finite positive duration")?;
     if producers.len() >= 4096 { return Err("streaming partition count exceeds its native handle budget".into()); }
-    let pipe = pipe::Pipe::new(root.path(), producers.len()).map_err(|error| error.to_string())?;
-    manifest_content.push_str(&format!("file '{}'\nduration {duration:.9}\n", pipe.path().replace('\'', "'\\''")));
-    pipes.push(pipe);
+    durations.push(duration);
     producers.push(super::captured_output_args(args)?);
   }
-  let audio_pipe = audio.as_ref().map(|_| pipe::Pipe::new(root.path(), producers.len())).transpose().map_err(|error| error.to_string())?;
-  let mut final_args = consumer_args(final_args, &manifest, audio_pipe.as_ref().map(|pipe| pipe.path()))?;
-  let cwd_path = Path::new(spec.cwd.as_deref().ok_or("streaming manifest has no owned scratch root")?);
+  let cwd_path = Path::new(spec.cwd.as_deref().ok_or("streaming render needs owned scratch")?);
   let key = super::Supervisor::workspace_key(cwd_path);
-  let (bytes, entries) = super::scratch_usage(cwd_path, Path::new(""))?;
-  workspace.account_existing(&key, bytes, entries)?;
-  let charge = workspace.reserve(&key, manifest_content.len() as u64, producers.len() as u64 + 2 + u64::from(audio.is_some()))?;
-  let scratch_guard = ManifestScratch { _directory: root, _charge: charge };
-  std::fs::write(&manifest, manifest_content).map_err(|error| error.to_string())?;
-  let final_budget = FinalOutput::open(spec, &mut final_args, workspace.clone())?;
-  let control = Arc::new(Control::new(execution_deadline(spec)?, final_budget)?);
-  let consumer = control.spawn(executable, &final_args, spec.cwd.as_deref(), false, WorkerRole::FinalEncoder, &guard)?;
+  let mut scratch_guard = ManifestScratch::open(cwd_path, &workspace, &key, producers.len() as u64 + 2 + u64::from(audio.is_some()))?;
+  let started = (|| -> Result<_, String> {
+    let manifest = scratch_guard.path().join("segments.ffconcat");
+    let mut pipes = Vec::new();
+    let mut manifest_content = "ffconcat version 1.0\n".to_owned();
+    for (index, duration) in durations.iter().enumerate() {
+      let pipe = pipe::Pipe::new(scratch_guard.path(), index).map_err(|error| error.to_string())?;
+      manifest_content.push_str(&format!("file '{}'\nduration {duration:.9}\n", pipe.path().replace('\'', "'\\''")));
+      pipes.push(pipe);
+    }
+    let audio_pipe = audio.as_ref().map(|_| pipe::Pipe::new(scratch_guard.path(), producers.len())).transpose().map_err(|error| error.to_string())?;
+    let mut final_args = consumer_args(final_args, &manifest, audio_pipe.as_ref().map(|pipe| pipe.path()))?;
+    scratch_guard.admit_manifest(manifest_content.len() as u64)?;
+    std::fs::write(&manifest, manifest_content).map_err(|error| error.to_string())?;
+    let final_budget = FinalOutput::open(spec, &mut final_args, workspace.clone())?;
+    let control = Arc::new(Control::new(deadline, final_budget)?);
+    let consumer = control.spawn(executable, &final_args, spec.cwd.as_deref(), false, WorkerRole::FinalEncoder, &guard)?;
+    let output = consumer.child().take_stdout().ok_or("streaming consumer has no progress stream")?;
+    let errors = consumer.child().take_stderr().ok_or("streaming consumer has no error stream")?;
+    Ok((control, consumer, output, errors, pipes, audio_pipe))
+  })();
+  let (control, consumer, output, errors, pipes, audio_pipe) = match started {
+    Ok(started) => started,
+    Err(error) => return Err(scratch_guard.cleanup_error(error)),
+  };
   let pid = consumer.child().id();
-  let output = consumer.child().take_stdout().ok_or("streaming consumer has no progress stream")?;
-  let errors = consumer.child().take_stderr().ok_or("streaming consumer has no error stream")?;
   let child_key = (spec.id.clone(), pid);
   registry.lock().unwrap_or_else(|error| error.into_inner()).insert(child_key.clone(), control.clone());
   control.watch();
@@ -543,7 +657,7 @@ pub(super) fn spawn(executable: &Path, spec: &JobSpec, observer: Observer,
     if let Ok((limit, peak)) = control.budget.commit_accounting() {
       observer(ProcEvent::Stderr(format!("native render budget: configured_commit={limit}, reported_peak={peak}; peak is accounting, not an exact physical ceiling\n")));
     }
-    drop(scratch_guard);
+    result = with_cleanup(result, control.finish_scratch(scratch_guard));
     registry.lock().unwrap_or_else(|error| error.into_inner()).remove(&child_key);
     match result {
       Ok(()) => observer(ProcEvent::Exit(Some(0))),
@@ -565,10 +679,77 @@ mod tests {
 
   fn strings(args: &[&str]) -> Vec<String> { args.iter().map(|arg| (*arg).to_owned()).collect() }
 
+  #[test]
+  fn manifest_reservation_cannot_absorb_retained_native_extent_excess() {
+    let directory = tempfile::tempdir().unwrap();
+    let volume = super::super::allocation::AllocationUnit::for_directory(directory.path()).unwrap();
+    let path = directory.path().join("retained.bin");
+    let retained = super::super::allocation::preallocated_fixture(&path, volume);
+    let inventory = super::super::measured_scratch_usage(directory.path(), Path::new("")).unwrap();
+    let cap = inventory.allocated;
+    let workspace = super::super::Workspace::allocation_fixture(64 * volume.bytes(), cap);
+    let key = Supervisor::workspace_key(directory.path());
+    assert!(ManifestScratch::open(directory.path(), &workspace, &key, 1).err().unwrap().contains("allocation budget"));
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    assert_eq!(std::fs::read(&path).unwrap(), [0x5a]);
+    drop(retained);
+    directory.close().unwrap();
+    workspace.release_root(&key);
+    assert_eq!(workspace.available_bytes(), cap);
+    let fresh = tempfile::tempdir().unwrap();
+    let fresh_key = Supervisor::workspace_key(fresh.path());
+    let scratch = ManifestScratch::open(fresh.path(), &workspace, &fresh_key, 1).unwrap();
+    let created = scratch.path().to_path_buf();
+    assert!(created.is_dir());
+    scratch.close().unwrap();
+    assert!(!created.exists());
+    fresh.close().unwrap();
+    workspace.release_root(&fresh_key);
+    assert_eq!(workspace.available_bytes(), cap);
+  }
+
   fn ffmpeg() -> std::path::PathBuf {
     let target = if cfg!(target_os = "windows") { "x86_64-pc-windows-msvc.exe" }
       else if cfg!(target_os = "macos") { "aarch64-apple-darwin" } else { "x86_64-unknown-linux-gnu" };
     Path::new(env!("CARGO_MANIFEST_DIR")).join("binaries").join(format!("artdaddy-ffmpeg-{target}"))
+  }
+
+  #[cfg(windows)]
+  #[test]
+  fn failed_diagnostic_read_retains_the_pending_response_and_settles_the_failed_stage() {
+    struct FailsAfterText(bool);
+    impl Read for FailsAfterText {
+      fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if self.0 { return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "diagnostic source failed")); }
+        self.0 = true;
+        let text = b"provider diagnostic tail\n";
+        buffer[..text.len()].copy_from_slice(text);
+        Ok(text.len())
+      }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let stage = directory.path().join("pending.mp4");
+    std::fs::File::create(&stage).unwrap();
+    let cap = 1024 * 1024;
+    let workspace = super::super::Workspace::new(cap);
+    let key = super::super::Supervisor::workspace_key(&stage);
+    let _claim = workspace.claim_output(&key, &|| Ok(())).unwrap();
+    let mut admitted = spec(directory.path());
+    admitted.meta["_native_final_stage"] = serde_json::json!(stage.to_string_lossy());
+    let mut args = vec![stage.to_string_lossy().into_owned()];
+    let final_output = FinalOutput::open(&admitted, &mut args, workspace.clone()).unwrap().unwrap();
+    let control = Arc::new(Control::new(super::super::now_ms() + 10_000, Some(final_output)).unwrap());
+    let messages = Arc::new(Mutex::new(String::new()));
+    let observed = messages.clone();
+    let observer: Observer = Arc::new(move |event| {
+      if let ProcEvent::Stderr(text) = event { observed.lock().unwrap().push_str(&text); }
+    });
+    let result = join(reader(FailsAfterText(false), observer, control.clone(), None, true));
+    assert!(result.as_ref().unwrap_err().contains("diagnostic source failed"));
+    assert_eq!(messages.lock().unwrap().as_str(), "provider diagnostic tail\n");
+    assert!(control.finish_output(result).is_err());
+    assert!(!stage.exists());
+    assert_eq!(workspace.available_bytes(), cap);
   }
 
   #[test]
@@ -576,25 +757,30 @@ mod tests {
     let root = tempfile::tempdir().unwrap();
     let encode = |path: &Path, limit: u64, guarded: bool| {
       std::fs::File::create(path).unwrap();
-      let bound = guarded.then(|| output::OutputLimit::open(path, limit).unwrap());
+      let mut args = strings(&["-y", "-v", "error", "-nostdin", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=3",
+        "-c:v", "libx264", "-preset", "ultrafast", "-qp", "0", "-an", "-fs", &limit.to_string(), "-movflags", "+faststart"]);
+      args.push(path.to_string_lossy().into_owned());
+      let mut bound = guarded.then(|| output::OutputLimit::open(path, limit, &mut args,
+        Instant::now() + Duration::from_secs(30)).unwrap());
       let mut command = Command::new(ffmpeg());
-      command.args(["-y", "-v", "error", "-nostdin", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=3",
-        "-c:v", "libx264", "-preset", "ultrafast", "-qp", "0", "-an", "-fs", &limit.to_string(), "-movflags", "+faststart"])
-        .arg(path);
+      command.args(args);
       if let Some(bound) = bound.as_ref() { bound.configure(&mut command); }
       let result = command.output().unwrap();
+      let completed = bound.as_mut().map(|bound| bound.finish(result.status.success()));
       let bytes = std::fs::metadata(path).unwrap().len();
-      (result, bytes)
+      (result, bytes, completed)
     };
-    let (control, control_bytes) = encode(&root.path().join("control.mp4"), 65536, false);
+    let (control, control_bytes, _) = encode(&root.path().join("control.mp4"), 65536, false);
     assert!(control.status.success(), "{}", String::from_utf8_lossy(&control.stderr));
     assert!(control_bytes > 65536, "control cannot exhibit the original packet/trailer overshoot: {control_bytes}");
-    let (capped, capped_bytes) = encode(&root.path().join("capped.mp4"), 65536, true);
+    let (capped, capped_bytes, boundary) = encode(&root.path().join("capped.mp4"), 65536, true);
     assert!(capped_bytes <= 65536, "native output crossed its admitted write boundary: {capped_bytes}");
     assert!(!capped.status.success(), "bounded incomplete output must not claim producer success");
+    assert!(boundary.unwrap().is_err());
     let fitting = root.path().join("fitting.mp4");
-    let (completed, bytes) = encode(&fitting, 2 * 1024 * 1024, true);
+    let (completed, bytes, boundary) = encode(&fitting, 2 * 1024 * 1024, true);
     assert!(completed.status.success(), "{}", String::from_utf8_lossy(&completed.stderr));
+    assert!(boundary.unwrap().is_ok());
     assert!(bytes > 65536 && bytes <= 2 * 1024 * 1024);
     let decoded = Command::new(ffmpeg()).args(["-v", "error", "-i"]).arg(&fitting)
       .args(["-map", "0:v:0", "-pix_fmt", "yuv420p", "-f", "rawvideo", "-"]).output().unwrap();
@@ -651,6 +837,194 @@ mod tests {
         "aevalsrc=0.1*sin(2*PI*440*t)|0.08*sin(2*PI*880*t):s=48000:d=2", "-map", "0:a:0", "-vn", "-c:a", "pcm_f64le",
         "-ar", "48000", "-t", "2", "-f", "nut", "audio.nut"]) });
     spec
+  }
+
+  use super::super::export_delivery_tests::CleanupBlocker;
+
+  fn stream_directory(cwd: &Path) -> std::path::PathBuf {
+    let found = std::fs::read_dir(cwd).unwrap().map(|entry| entry.unwrap().path())
+      .filter(|path| path.file_name().unwrap().to_string_lossy().starts_with("native-stream-")).collect::<Vec<_>>();
+    assert_eq!(found.len(), 1);
+    found[0].clone()
+  }
+
+  #[test]
+  fn stream_entry_refusal_and_late_invalid_producers_cannot_create_staging() {
+    for audio in [false, true] {
+      for refusal in ["entries", "late-producer"] {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = super::super::Workspace::new(1024 * 1024);
+        let mut spec = if audio { continuous_spec(directory.path()) } else { spec(directory.path()) };
+        if refusal == "entries" {
+          workspace.reserve("entry-pressure", 0, 16382).unwrap().retain();
+        } else {
+          let format = spec.steps[0].iter().rposition(|arg| arg == "nut").unwrap();
+          spec.steps[0][format] = "mp4".into();
+        }
+        let stamp = super::super::export_delivery_tests::journal_write_clock(directory.path());
+        let result = spawn(&directory.path().join("must-not-start"), &spec, Arc::new(|_| panic!("refused staging emitted a worker event")),
+          Arc::new(|| panic!("refused staging reached worker admission")), Arc::default(), workspace.clone());
+        let error = result.unwrap_err();
+        assert!(error.contains(if refusal == "entries" { "entry budget" } else { "lossless NUT" }), "{error}");
+        assert_eq!(directory.path().metadata().unwrap().modified().unwrap(), stamp, "{refusal}: staging was created before admission");
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+        assert_eq!(workspace.available_bytes(), 1024 * 1024);
+        if refusal == "entries" {
+          let last = workspace.reserve("still-available", 0, 1).unwrap();
+          assert!(workspace.reserve("overflow", 0, 1).is_err());
+          drop(last);
+        }
+      }
+    }
+  }
+
+  #[test]
+  fn stream_setup_failures_clean_actual_artifacts_before_releasing_capacity() {
+    for audio in [false, true] {
+      for refusal in ["bytes", "consumer", "spawn"] {
+        let directory = tempfile::tempdir().unwrap();
+        let retained = directory.path().join("retained.bin");
+        std::fs::write(&retained, [37u8; 32]).unwrap();
+        let limit = if refusal == "bytes" { 32 } else { 1024 * 1024 };
+        let workspace = super::super::Workspace::new(limit);
+        let mut spec = if audio { continuous_spec(directory.path()) } else { spec(directory.path()) };
+        if refusal == "consumer" {
+          let args = spec.steps.last_mut().unwrap();
+          let manifest = args.iter().position(|arg| arg == "segments.ffconcat").unwrap();
+          args[manifest] = "unadmitted.ffconcat".into();
+        }
+        let result = spawn(&directory.path().join("missing-worker"), &spec, Arc::new(|_| panic!("failed setup emitted a worker event")),
+          Arc::new(|| Ok(())), Arc::default(), workspace.clone());
+        let error = result.unwrap_err();
+        assert!(!error.is_empty());
+        if refusal == "bytes" { assert!(error.contains("workspace budget exceeded"), "{error}"); }
+        if refusal == "consumer" { assert!(error.contains("composed input"), "{error}"); }
+        assert_eq!(std::fs::read(&retained).unwrap(), vec![37u8; 32]);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1, "{refusal}: failed setup left staging behind");
+        assert_eq!(workspace.available_bytes(), limit - 32);
+        let remaining_entries = workspace.reserve("entry-reuse", 0, 16382).unwrap();
+        assert!(workspace.reserve("one-too-many", 0, 1).is_err());
+        drop(remaining_entries);
+      }
+    }
+  }
+
+  #[test]
+  fn failed_stream_setup_cleanup_keeps_both_errors_bytes_and_restart_charge() {
+    for audio in [false, true] {
+      let directory = tempfile::tempdir().unwrap();
+      let work = directory.path().join("work");
+      let journal = directory.path().join("journal");
+      let mut jobs = Supervisor::new(Arc::new(super::super::export_delivery_tests::NoSpawn), Arc::new(|_| {}))
+        .with_export_work_root(work.clone()).unwrap().with_export_root(journal.clone()).unwrap();
+      jobs.workspace = super::super::Workspace::new(1024 * 1024);
+      let delivery = jobs.prepare_delivery("retained-stream".into(), "original-project".into(),
+        directory.path().join("render.partial").to_string_lossy().into(), directory.path().join("previous.mp4").to_string_lossy().into(),
+        DeliverySource::Render { paths: vec![] }).unwrap();
+      std::fs::write(&delivery.dest_path, b"previous complete destination").unwrap();
+      let cwd = jobs.stage_render_scratch(&delivery.id, vec![], vec![]).unwrap();
+      let cwd = Path::new(&cwd);
+      let spec = if audio { continuous_spec(cwd) } else { spec(cwd) };
+      let blocked = Arc::new(Mutex::new(None));
+      let obstruction = blocked.clone();
+      let manifest_before = Arc::new(Mutex::new(Vec::new()));
+      let saved = manifest_before.clone();
+      let inspected = cwd.to_path_buf();
+      let result = spawn(&directory.path().join("must-not-start"), &spec, Arc::new(|_| panic!("refused worker emitted an event")),
+        Arc::new(move || {
+          let manifest = stream_directory(&inspected).join("segments.ffconcat");
+          *saved.lock().unwrap() = std::fs::read(&manifest).unwrap();
+          *obstruction.lock().unwrap() = Some(CleanupBlocker::open(&manifest));
+          Err("primary worker-admission refusal".into())
+        }), Arc::default(), jobs.workspace.clone());
+      drop(blocked.lock().unwrap().take());
+      let error = result.unwrap_err();
+      assert!(error.contains("primary worker-admission refusal"), "{error}");
+      assert!(error.contains("scratch cleanup failed; workspace reservation retained"), "{error}");
+      let before = manifest_before.lock().unwrap().clone();
+      assert!(!before.is_empty());
+      assert_eq!(std::fs::read(stream_directory(cwd).join("segments.ffconcat")).unwrap(), before);
+      assert_eq!(jobs.workspace.available_bytes(), 1024 * 1024 - before.len() as u64);
+      drop(jobs);
+      let limit = before.len() as u64 - 1;
+      let mut recovered = Supervisor::new(Arc::new(super::super::export_delivery_tests::NoSpawn), Arc::new(|_| {}));
+      recovered.workspace = super::super::Workspace::new(limit);
+      let recovered = recovered.with_export_work_root(work).unwrap().with_export_root(journal).unwrap();
+      assert_eq!(recovered.workspace.available_bytes(), 0);
+      assert!(recovered.workspace.reserve("cannot-reuse-retained-bytes", 1, 1).is_err());
+      recovered.cancel_delivery(&delivery.id).unwrap();
+      recovered.complete_delivery(&delivery.id).unwrap();
+      assert!(!cwd.exists());
+      assert_eq!(recovered.workspace.available_bytes(), limit);
+      assert_eq!(std::fs::read(&delivery.dest_path).unwrap(), b"previous complete destination");
+    }
+  }
+
+  #[test]
+  fn abandoned_or_unsettled_stream_staging_never_releases_a_live_reservation() {
+    for unsettled in [false, true] {
+      let directory = tempfile::tempdir().unwrap();
+      let workspace = super::super::Workspace::new(64);
+      let key = super::super::Supervisor::workspace_key(directory.path());
+      let mut scratch = ManifestScratch::open(directory.path(), &workspace, &key, 2).unwrap();
+      scratch.admit_manifest(16).unwrap();
+      let path = scratch.path().to_path_buf();
+      let manifest = path.join("segments.ffconcat");
+      std::fs::write(&manifest, [37u8; 16]).unwrap();
+      if unsettled {
+        let control = Control::new(super::super::now_ms() + 60_000, None).unwrap();
+        assert!(control.finish_scratch(scratch).unwrap_err().contains("unsettled workers"));
+      } else { drop(scratch); }
+      assert_eq!(std::fs::read(&manifest).unwrap(), vec![37u8; 16]);
+      assert_eq!(workspace.available_bytes(), 48);
+      assert!(workspace.reserve("cannot-reuse", 49, 1).is_err());
+      std::fs::remove_dir_all(&path).unwrap();
+      workspace.release(&key, 16, 2);
+      assert_eq!(workspace.available_bytes(), 64);
+    }
+  }
+
+  #[test]
+  fn successful_stream_workers_cannot_report_success_after_failed_scratch_cleanup() {
+    for audio in [false, true] {
+      let directory = tempfile::tempdir().unwrap();
+      let spec = if audio { continuous_spec(directory.path()) } else { spec(directory.path()) };
+      let workspace = super::super::Workspace::new(1024 * 1024);
+      let inspected = directory.path().to_path_buf();
+      let blocked = Arc::new(Mutex::new(None));
+      let obstruction = blocked.clone();
+      let guard: StartGuard = Arc::new(move || {
+        let mut blocked = obstruction.lock().unwrap();
+        if blocked.is_none() {
+          *blocked = Some(CleanupBlocker::open(&stream_directory(&inspected).join("segments.ffconcat")));
+        }
+        Ok(())
+      });
+      let watched: Registry = Arc::default();
+      let registry = watched.clone();
+      let owner = workspace.clone();
+      let (code, diagnostics) = observed(|observer, _| spawn(&ffmpeg(), &spec, observer, guard, registry, owner));
+      drop(blocked.lock().unwrap().take());
+      assert_ne!(code, 0, "successful workers hid a failed cleanup");
+      assert!(diagnostics.contains("scratch cleanup failed; workspace reservation retained"), "{diagnostics}");
+      assert!(watched.lock().unwrap().is_empty(), "cleanup failure left owned workers running");
+      let manifest = stream_directory(directory.path()).join("segments.ffconcat");
+      let bytes = std::fs::read(&manifest).unwrap();
+      assert!(!bytes.is_empty());
+      assert_eq!(workspace.available_bytes(), 1024 * 1024 - bytes.len() as u64);
+      let delivered = directory.path().join("delivered.nut");
+      let decoded = Command::new(ffmpeg()).args(["-v", "error", "-i"]).arg(&delivered)
+        .args(["-map", "0:v:0", "-pix_fmt", "yuv420p", "-f", "rawvideo", "-"]).output().unwrap();
+      assert!(decoded.status.success(), "{}", String::from_utf8_lossy(&decoded.stderr));
+      let frame_bytes = 320 * 180 * 3 / 2;
+      assert_eq!(decoded.stdout.len(), frame_bytes * 60);
+      assert_ne!(&decoded.stdout[..frame_bytes], &decoded.stdout[frame_bytes * 59..]);
+      std::fs::remove_dir_all(manifest.parent().unwrap()).unwrap();
+      let key = super::super::Supervisor::workspace_key(directory.path());
+      workspace.release(&key, bytes.len() as u64, 4 + u64::from(audio));
+      assert_eq!(workspace.available_bytes(), 1024 * 1024);
+      println!("native streaming cleanup refusal: audio={audio}, workers_reaped=true, decoded_frames=60, retained_manifest_bytes={}", bytes.len());
+    }
   }
 
   #[test]
@@ -750,6 +1124,88 @@ mod tests {
       };
       assert!(decode(&target) == decode(&dir.path().join("part0.nut")), "captured {stream} bytes differ");
     }
+  }
+
+  #[test]
+  fn capture_setup_refusal_cleans_its_actual_file_before_reusing_capacity() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory.path().join("captured.nut");
+    std::fs::write(&target, b"previous verified target").unwrap();
+    let workspace = super::super::Workspace::new(2_000_000);
+    let mut spec = spec(directory.path());
+    spec.steps.clear();
+    spec.meta["_native_scratch_capture"] = serde_json::json!({ "path": target, "used": 0, "limit": 2_000_000 });
+    let error = spawn_single(&directory.path().join("absent-native-worker"), &spec, Arc::new(|_| {}),
+      Arc::default(), workspace.clone()).unwrap_err();
+    assert!(!error.is_empty());
+    assert_eq!(std::fs::read(&target).unwrap(), b"previous verified target");
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    assert_eq!(workspace.available_bytes() + std::fs::metadata(&target).unwrap().len(), 2_000_000);
+  }
+
+  #[test]
+  fn complete_captured_media_cannot_hide_failed_install_and_cleanup() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut spec = spec(directory.path());
+    spec.steps.clear();
+    spec.args.splice(0..0, strings(&["-progress", "pipe:1"]));
+    let baseline = Command::new(ffmpeg()).args(&spec.args).current_dir(directory.path()).output().unwrap();
+    assert!(baseline.status.success(), "{}", String::from_utf8_lossy(&baseline.stderr));
+    let target = directory.path().join("captured.nut");
+    std::fs::write(&target, b"previous verified target").unwrap();
+    spec.meta["_native_scratch_capture"] = serde_json::json!({ "path": target, "used": 0, "limit": 2_000_000 });
+    let workspace = super::super::Workspace::new(4_000_000);
+    let blocker = Arc::new(Mutex::new(None));
+    let retained = Arc::new(Mutex::new(None));
+    let install_blocker = blocker.clone();
+    let save_path = retained.clone();
+    let cwd = directory.path().to_path_buf();
+    let registry: Registry = Arc::default();
+    let watched = registry.clone();
+    let owner = workspace.clone();
+    let (code, diagnostics) = observed(|observer, _| {
+      let blocked: Observer = Arc::new(move |event| {
+        if matches!(&event, ProcEvent::Stdout(text) | ProcEvent::Stderr(text) if text.contains("progress=end")) {
+          let mut blocker = install_blocker.lock().unwrap();
+          if blocker.is_none() {
+            let files = std::fs::read_dir(&cwd).unwrap().map(|entry| entry.unwrap().path())
+              .filter(|path| path.file_name().unwrap().to_string_lossy().starts_with(".tmp")).collect::<Vec<_>>();
+            assert_eq!(files.len(), 1);
+            *blocker = Some(CleanupBlocker::open(&files[0]));
+            *save_path.lock().unwrap() = Some(files[0].clone());
+          }
+        }
+        observer(event);
+      });
+      spawn_single(&ffmpeg(), &spec, blocked, watched, owner)
+    });
+    assert_ne!(code, 0, "complete encoded bytes cannot make failed installation look successful");
+    assert!(diagnostics.contains("temporary output cleanup failed; workspace reservation retained"), "{diagnostics}");
+    assert!(registry.lock().unwrap().is_empty());
+    assert_eq!(std::fs::read(&target).unwrap(), b"previous verified target");
+    let temporary = retained.lock().unwrap().clone().expect("the real producer never reached completion");
+    let payload = std::fs::metadata(&temporary).unwrap().len();
+    assert!(payload > 0);
+    assert!(workspace.reserve("cannot-reuse-orphan", 4_000_000 - payload + 1, 1).is_err());
+    for (stream, format, expected) in [("0:v:0", "rawvideo", 2_592_000), ("0:a:0", "f64le", 768_000)] {
+      let decode = |path: &Path| {
+        let output = Command::new(ffmpeg()).args(["-nostdin", "-v", "error", "-i"]).arg(path)
+          .args(["-map", stream, "-f", format, "pipe:1"]).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(output.stdout.len(), expected);
+        output.stdout
+      };
+      let actual = decode(&temporary);
+      assert_eq!(actual, decode(&directory.path().join("part0.nut")), "retained {stream} is incomplete or different");
+      if stream == "0:v:0" {
+        assert_ne!(&actual[..320 * 180 * 3 / 2], &actual[actual.len() - 320 * 180 * 3 / 2..]);
+      }
+    }
+    drop(blocker.lock().unwrap().take());
+    let key = super::super::Supervisor::workspace_key(directory.path());
+    directory.close().unwrap();
+    workspace.release_root(&key);
+    assert_eq!(workspace.available_bytes(), 4_000_000);
   }
 
   #[test]
@@ -1087,7 +1543,7 @@ mod tests {
     let work = dir.path().join("work");
     let legacy_starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let worker = Arc::new(NativeStreamSpawner { registry: Arc::default(), legacy_starts: legacy_starts.clone() });
-    let original = Supervisor::new(worker.clone(), Arc::new(|_| {})).with_export_work_root(work.clone()).with_export_root(journal.clone()).unwrap();
+    let original = Supervisor::new(worker.clone(), Arc::new(|_| {})).with_export_work_root(work.clone()).unwrap().with_export_root(journal.clone()).unwrap();
     let mut spec = spec(&work);
     spec.meta = serde_json::json!({ "kind": "export", "renderTransport": "partition-pipes-v1" });
     let stage = dir.path().join("delivered.partial");
@@ -1105,7 +1561,7 @@ mod tests {
     let (sender, receiver) = mpsc::channel();
     let recovered = Supervisor::new(worker, Arc::new(move |notice| {
       if let Notice::Changed(job) = notice { if job.state == JobState::Exited { sender.send(job).unwrap(); } }
-    })).with_export_work_root(work).with_export_root(journal).unwrap();
+    })).with_export_work_root(work).unwrap().with_export_root(journal).unwrap();
     assert!(recovered.recover_exports().is_empty());
     let job = receiver.recv_timeout(Duration::from_secs(30)).expect("recovered stream did not settle");
     assert_eq!(job.code, Some(0), "{}{}", job.stderr_head, job.stderr_tail);
@@ -1144,7 +1600,7 @@ mod tests {
       },
       Notice::Changed(job) if job.state == JobState::Exited => { sender.send(job).unwrap(); },
       _ => {},
-    })).with_export_work_root(dir.path().join("work")).with_export_root(dir.path().join("journal")).unwrap();
+    })).with_export_work_root(dir.path().join("work")).unwrap().with_export_root(dir.path().join("journal")).unwrap();
     let mut spec = spec(dir.path());
     spec.args.splice(0..0, strings(&["-progress", "pipe:1"]));
     spec.meta = serde_json::json!({ "kind": "export", "renderTransport": "partition-pipes-v1" });

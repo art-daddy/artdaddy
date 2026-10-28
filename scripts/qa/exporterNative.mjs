@@ -8,6 +8,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer, normalizePath } from "vite";
 import { readLinuxMemoryCgroup, cgroupFits, sameCgroup, cgroupEncoderPids } from "./exporterLinuxMemory.mjs";
+import { qaServerOptionsForRun } from "./exporterVite.mjs";
+import { startRecovery } from "./exporterRecovery.mjs";
+import { BASE_OUTCOME_BUDGET_MS, captionsFadedIn, describePictureFailures, estimateFailures, judgeSourcePictures, outcomeBudgetMs, sha256OfFile, temporarySpaceFailures } from "./exporterQualification.mjs";
 
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const targets = { "win32-x64": "x86_64-pc-windows-msvc", "darwin-arm64": "aarch64-apple-darwin", "linux-x64": "x86_64-unknown-linux-gnu" };
@@ -21,6 +24,14 @@ const present = async (filename) => {
 assert.ok(await present(path.join(userData, "ArtDaddy")) || !(await present(path.join(userData, "Akaru")))?.isDirectory(),
   "QA refused: native startup could migrate an existing legacy data folder; do not alter customer folders for this test");
 const executable = (program) => path.join(repository, "src-tauri", "binaries", `${program}-${target}${process.platform === "win32" ? ".exe" : ""}`);
+// The same -count_frames check the product runs on every finished file. ffprobe decodes on ONE thread unless told otherwise, so the 30-minute
+// 4K lines spent about 16 minutes per verified output in it; `-threads 0` counts the same frames several times faster. A ffprobe that does not
+// know the option fails loudly and is retried once without it, exactly as the product does.
+function probeFrames(args, options) {
+  const run = (threads) => spawnSync(executable("artdaddy-ffprobe"), ["-v", "error", ...threads, ...args], options);
+  const threaded = run(["-threads", "0"]);
+  return threaded.status !== 0 && /option not found|unrecognized option|unknown option/i.test(String(threaded.stderr)) ? run([]) : threaded;
+}
 
 function compareOriginalAudio(reference, delivered, sampleRate = 48000) {
   assert.equal(reference.length % 16, 0);
@@ -66,7 +77,7 @@ if (fastQualitySource) {
   assert.ok(fastQualitySource.replaceAll("\\", "/").includes("/artdaddy-export-native-") &&
     path.basename(fastQualitySource) === "promise-heavy-eight-things-pilot.mp4", "Fast measurement only accepts the retained generated QA pilot");
   assert.ok(Number(process.env.ARTDADDY_QA_MEMORY_CAP_BYTES) > 0, "Fast measurement requires the existing process-tree cap harness");
-  const before = createHash("sha256").update(await readFile(fastQualitySource)).digest("hex");
+  const before = await sha256OfFile(fastQualitySource);
   const candidates = [
     { mode: "full-quality", codec: ["-c:v", "libx264", "-preset", "medium", "-crf", "23", "-threads:v", "1"] },
     { mode: "fast-candidate", codec: ["-c:v", "h264_amf", "-usage", "transcoding", "-quality", "quality", "-rc", "cqp",
@@ -98,7 +109,7 @@ if (fastQualitySource) {
     }
     measured.push({ mode: candidate.mode, encodingMs, bytes: (await stat(destination)).size, video, metrics });
   }
-  assert.equal(createHash("sha256").update(await readFile(fastQualitySource)).digest("hex"), before);
+  assert.equal(await sha256OfFile(fastQualitySource), before);
   await writeFile(path.join(output, "fast-quality.json"), JSON.stringify({ version: 2, sourceSha256: before,
     sourceClass: "retained generated seven-video-and-caption pilot, decoded as a common encoder input", sourceUnchanged: true,
     measured, qualityAccepted: false, productionEnabled: false, physicalQualified: false,
@@ -118,7 +129,8 @@ assert.ok(!fastEncoderProbe || fastEncoderProbe === "amf-cqp18" && process.platf
   "Fast encoder integration is a private Windows short-pilot measurement only");
 assert.ok(!process.env.ARTDADDY_QA_ENCODER_THREADS_PROBE, "The private thread candidate was retired; measure the approved production policy instead");
 assert.ok(promiseLibrary.profiles[promiseProfile], "Unknown promise-library profile");
-const promiseAttempt = promiseCase ? { version: 2, caseId: promiseCase.id, profile: promiseProfile, kind: promiseCase.kind,
+const promiseAttempt = promiseCase ? { version: promiseLibrary.version, temporarySpace: promiseLibrary.temporarySpace,
+  caseId: promiseCase.id, profile: promiseProfile, kind: promiseCase.kind,
   line: promiseCase.line, platform: process.platform, profileRunId: process.env.ARTDADDY_QA_MEMORY_RUN_ID ?? null,
   definition: { width: promiseCase.width, height: promiseCase.height, fps: promiseCase.fps,
     durationSeconds: promiseCase.durationSeconds, visualClips: promiseCase.visualClips, videoLayers: promiseCase.videoLayers } } : null;
@@ -275,7 +287,7 @@ Object.assign(process.env, { ARTDADDY_DATA_DIR: root, ARTDADDY_PROJECTS_DIR: pat
 const nativeCore = `/@fs/${normalizePath(path.join(repository, "node_modules", "@tauri-apps", "api", "core.js"))}`;
 const virtualCore = "\0exporter-qa-isolated-core";
 const vite = await createServer({ root: repository, configFile: path.join(repository, "vite.config.ts"),
-  server: { host: "127.0.0.1", port: 0, strictPort: true },
+  server: await qaServerOptionsForRun(),
   plugins: [{ name: "exporter-qa-isolated-root", enforce: "pre",
     resolveId: (name) => name === "@tauri-apps/api/core" ? virtualCore : undefined,
     load: (name) => name === virtualCore ? `
@@ -291,7 +303,7 @@ const vite = await createServer({ root: repository, configFile: path.join(reposi
 const children = [];
 const logs = [];
 
-function changedFile(filename, accept, child) {
+function changedFile(filename, accept, child, budgetMs = BASE_OUTCOME_BUDGET_MS) {
   return new Promise((resolve, reject) => {
     let reading = false;
     let completed = false;
@@ -326,7 +338,7 @@ function changedFile(filename, accept, child) {
     };
     const failed = (error) => finish(error);
     const exited = (code, signal) => finish(new Error(`Owned native QA exited before its outcome: code=${code} signal=${signal}; inspect native log`));
-    const timeout = setTimeout(() => finish(new Error(`No native outcome: ${filename}`)), 12 * 60_000);
+    const timeout = setTimeout(() => finish(new Error(`No native outcome within ${Math.round(budgetMs / 60_000)} minutes: ${filename}`)), budgetMs);
     child.once("error", failed);
     child.once("exit", exited);
     if (child.exitCode !== null || child.signalCode !== null) { exited(child.exitCode, child.signalCode); return; }
@@ -359,6 +371,7 @@ function start(config, run) {
   return child;
 }
 
+
 const started = Date.now();
 const linuxMemoryRunId = process.platform === "linux" ? process.env.ARTDADDY_QA_MEMORY_RUN_ID : undefined;
 const proof = { version: 1, scope: "native-owner-capture-and-crash-recovery", target, root, identifier,
@@ -366,7 +379,7 @@ const proof = { version: 1, scope: "native-owner-capture-and-crash-recovery", ta
     physicalMinimumMachine: false, exactPeakCeiling: false },
   hardware: { platform: os.platform(), release: os.release(), arch: os.arch(), cpu: os.cpus()[0]?.model, logicalCpus: os.cpus().length,
     totalMemoryBytes: os.totalmem(), minimumMachineQualified: false }, paidCalls: 0, customerProjectsTouched: false, steps: [] };
-  const fileHash = async (filename) => createHash("sha256").update(await readFile(filename)).digest("hex");
+  const fileHash = (filename) => sha256OfFile(filename);
   const sourceFiles = [];
   async function collectSources(directory) {
     for (const entry of await readdir(path.join(repository, directory), { withFileTypes: true })) {
@@ -389,7 +402,8 @@ try {
     sourceFiles.push("package.json", "package-lock.json", "src-tauri/Cargo.toml", "src-tauri/Cargo.lock",
       "src-tauri/tauri.conf.json", "scripts/qa/exporterNative.mjs", "scripts/qa/exporterNative.ts", "scripts/qa/exporterNative.html",
       "scripts/qa/exporterMemory.ps1", "scripts/qa/exporterLinuxMemory.mjs", "scripts/qa/exporterPromiseCases.json",
-      "scripts/qa/exporterPromiseReport.mjs", "scripts/qa/exporterLinuxMemory.test.mjs",
+      "scripts/qa/exporterPromiseReport.mjs", "scripts/qa/exporterQualification.mjs", "scripts/qa/exporterVite.mjs", "scripts/qa/exporterColdStart.mjs",
+      "scripts/qa/exporterLinuxMemory.test.mjs",
       "scripts/qa/exporterPromiseReport.test.mjs", ".github/workflows/exporter-native-qa.yml");
     proof.sourceFiles = await Promise.all(sourceFiles.sort().map(async (filename) => ({ path: filename.replaceAll(path.sep, "/"), sha256: await fileHash(path.join(repository, filename)) })));
     proof.sourceSetSha256 = createHash("sha256").update(JSON.stringify(proof.sourceFiles)).digest("hex");
@@ -400,6 +414,7 @@ try {
   const address = vite.httpServer.address();
   assert.equal(typeof address, "object");
   const url = `http://127.0.0.1:${address.port}`;
+  proof.pageOrigin = url;
   const page = `${url}/scripts/qa/exporterNative.html?${new URLSearchParams({ root, identifier, profileSeconds: String(profileSeconds), denseSourceRoot, promiseId, fastEncoderProbe })}`;
   const config = path.join(root, "tauri.qa.json");
   await writeFile(config, JSON.stringify({ identifier,
@@ -434,8 +449,8 @@ try {
   proof.steps.push({ phase: "native-job-armed", ...admitted });
   stopOwned(first);
   proof.steps.push({ phase: "owned-native-process-crashed" });
-  const second = start(config, 2);
-  const report = await changedFile(path.join(root, "native-report.json"), (report) => report.ok === true, second);
+  const second = await startRecovery((label) => start(config, label), proof.steps);
+  const report = await changedFile(path.join(root, "native-report.json"), (report) => report.ok === true, second, outcomeBudgetMs(promiseCase));
   if (proof.memoryCgroupEvidence) {
     const evidence = proof.memoryCgroupEvidence;
     evidence.nativeAfter = report.resources?.memory_cgroup;
@@ -498,7 +513,7 @@ try {
   assert.equal(report.unbound.planGuessed, false);
   assert.equal(await readFile(report.unbound.delivered, "utf8"), "previous complete output");
   if (promiseCase) {
-    const native = report.promiseResult;
+    const verifyPromiseOutput = async (native, label) => {
     assert.equal(native?.caseId, promiseCase.id);
     assert.equal(native.state, "done");
     assert.equal(native.publicationVerified, true, "Promise output identity/catalog/ledger publication differs");
@@ -515,8 +530,11 @@ try {
     for (const asked of native.preflight ?? [])
       assert.ok(asked.message.includes("Estimated time:") || asked.message.includes("Estimated encoding and saving time:"),
         "Preflight must show a measured estimate or explicitly unknown time");
+    // The command's thread count and the history identity are two views of one product decision: assert that they agree instead of
+    // carrying a second copy of the thread policy here (the product's own tests walk the policy for every preset).
     if (native.selection.backend === "partition-pipes-v1")
-      assert.equal(native.encoderThreads, !fastEncoderProbe && promiseCase.width * promiseCase.height > 1920 * 1080 ? "2" : "1");
+      assert.equal(native.encoderThreads, native.calibrationEncoder === "x264-crf-threads2" ? "2" : "1",
+        `Final encoder threads ${native.encoderThreads} disagree with the recorded history identity ${native.calibrationEncoder}`);
     assert.ok(native.calibrationRecords > 0, "Validated published exports must populate encoder-specific local measured history");
     if (fastEncoderProbe) {
       assert.equal(native.resources?.local_fast_candidate, true, "Local Fast pilot requires the measured native device eligibility");
@@ -528,7 +546,7 @@ try {
       "Native resource snapshot did not measure scratch free space");
     assert.ok(Number.isSafeInteger(native.resources?.destination_free_bytes) && native.resources.destination_free_bytes >= 0,
       "Native resource snapshot did not measure destination free space");
-    const probed = spawnSync(executable("artdaddy-ffprobe"), ["-v", "error", "-count_frames", "-show_streams", "-show_format", "-of", "json", native.destination], { encoding: "utf8" });
+    const probed = probeFrames(["-count_frames", "-show_streams", "-show_format", "-of", "json", native.destination], { encoding: "utf8" });
     assert.equal(probed.status, 0, probed.stderr);
     const metadata = JSON.parse(probed.stdout);
     const video = metadata.streams.filter((entry) => entry.codec_type === "video");
@@ -541,9 +559,8 @@ try {
     assert.equal(Number(video[0].nb_read_frames), promiseCase.durationSeconds * promiseCase.fps);
     assert.equal(video[0].codec_name, "h264");
     assert.ok(metadata.format.format_name.split(",").includes("mp4"));
-    const bytes = await readFile(native.destination);
-    assert.equal(bytes.length, native.finalIdentity.size);
-    assert.equal(createHash("sha256").update(bytes).digest("hex"), native.finalIdentity.sha256);
+    assert.equal((await stat(native.destination)).size, native.finalIdentity.size);
+    assert.equal(await sha256OfFile(native.destination), native.finalIdentity.sha256);
     const sampleSize = 160 * 90 * 3;
     const samples = [0.15, 0.75, Math.min(2, promiseCase.durationSeconds - 0.1)].map((at) => {
       const decoded = spawnSync(executable("artdaddy-ffmpeg"), ["-nostdin", "-v", "error", "-ss", String(at), "-i", native.destination,
@@ -595,11 +612,11 @@ try {
         const reference = sourceFrame(false);
         const sourceError = error(reference);
         const blankError = reference.reduce((sum, value) => sum + value, 0) / reference.length;
-        assert.ok(sourceError < blankError, "Real-source picture is missing or no closer than a blank frame");
         const controlError = error(sourceFrame(true));
-        assert.ok(sourceError < controlError, "Real-source output does not follow the mapped source picture");
         return { at, sourceError, blankError, controlError, control: phone ? "rotation-ignored" : "vertical-flip" };
       });
+      const pictureVerdict = judgeSourcePictures(sourcePictureProof);
+      assert.ok(pictureVerdict.ok, describePictureFailures(pictureVerdict));
       if (phone) orientationProof = sourcePictureProof.map(({ at, sourceError, controlError }) =>
         ({ at, correctlyRotatedError: sourceError, ignoredRotationError: controlError }));
     }
@@ -617,7 +634,7 @@ try {
         }
         return count;
       });
-      assert.ok(painted[1] > 0 && painted[1] > painted[0], "Promise caption did not visibly fade in");
+      assert.ok(captionsFadedIn(painted), "Promise caption did not visibly fade in");
       captionSamples = painted;
     }
     let sound;
@@ -670,8 +687,17 @@ try {
           "Promise audio lost, swapped or mixed the authored stereo tones");
       }
     }
+    return { encodedVideo: { width: video[0].width, height: video[0].height, fps: video[0].r_frame_rate, frames: Number(video[0].nb_read_frames) },
+      sound, captionSamples, sourcePictureProof, orientationProof };
+    };
+    const native = report.promiseResult;
+    const cold = native?.coldPass ?? null;
+    assert.equal(!!cold, promiseCase.kind === "promise", "A promise line is exported cold and then again; every other kind is exported once");
+    const coldVerified = cold ? await verifyPromiseOutput(cold, "cold") : null;
+    const { encodedVideo, sound, captionSamples, sourcePictureProof, orientationProof } = await verifyPromiseOutput(native, cold ? "estimate" : "cold");
     const speedLimit = promiseProfile === "16gb" ? promiseCase.speedFactor16gb : null;
-    const timingQualified = speedLimit === null || native.elapsedMs <= promiseCase.durationSeconds * speedLimit * 1000;
+    const withinSpeed = (pass) => speedLimit === null || pass.elapsedMs <= promiseCase.durationSeconds * speedLimit * 1000;
+    const timingQualified = withinSpeed(native) && (!cold || withinSpeed(cold));
     const cap = Number(process.env.ARTDADDY_QA_MEMORY_CAP_BYTES ?? 0);
     const profileBound = promiseLibrary.profiles[promiseProfile].systemMemoryBytes;
     const hostProfileEvidence = proof.hostProfileEvidence;
@@ -680,16 +706,36 @@ try {
     const cgroupFitsProfile = !!proof.memoryCgroupEvidence &&
       cgroupFits(proof.memoryCgroupEvidence.nodeBefore, profileBound);
     const profileEnforced = process.platform === "win32" && cap > 0 && cap <= profileBound || hostProfileFits || cgroupFitsProfile;
-    const temporarySpaceQualified = false;
+    // Verdicts are derived from the raw measurements recorded beside them; exporterPromiseReport.mjs re-derives them the same way.
+    const passEvidence = (label, pass) => ({ label, observed: pass.resources?.temporary_space, beforeBytes: pass.resources?.budgets?.temporaryBytes ?? null,
+      samples: pass.allowanceSamples, state: pass.state, error: pass.error, publicationVerified: pass.publicationVerified,
+      stagingCleaned: pass.stagingCleaned, scratchCleaned: pass.scratchCleaned });
+    const temporarySpaceEvidence = cold ? { version: 1, passes: [passEvidence("cold", cold), passEvidence("estimate", native)] } : null;
+    const temporarySpaceReasons = temporarySpaceFailures(promiseLibrary.temporarySpace, temporarySpaceEvidence);
+    const temporarySpaceQualified = temporarySpaceReasons.length === 0;
+    const estimateEvidence = cold ? { version: 1,
+      cold: { historySamples: cold.historySamples, estimateSeconds: cold.estimateSeconds, preflight: cold.preflight },
+      estimate: { historySamples: native.historySamples, estimateSeconds: native.estimateSeconds, actualSeconds: native.elapsedMs / 1000,
+        preflight: native.preflight, readiness: native.readiness } } : null;
+    const estimateReasons = estimateFailures(estimateEvidence);
+    const estimateProvided = estimateReasons.length === 0;
+    const passed = promiseCase.kind === "promise" && timingQualified && profileEnforced && temporarySpaceQualified &&
+      native.scratchCleaned && (!cold || cold.scratchCleaned) && estimateProvided;
     proof.promiseResult = { ...promiseAttempt, ...native, fixture: promiseFixture, sound, captionSamples, sourcePictureProof, orientationProof, sourceReady: true,
       mode: native.encoder === "libx264" ? "quality" : native.encoder === "h264_amf" ? "fast" : "unknown",
-      encodedVideo: { width: video[0].width, height: video[0].height, fps: video[0].r_frame_rate, frames: Number(video[0].nb_read_frames) },
+      encodedVideo,
       artifactVerified: true, timingQualified,
       profileRunId: process.env.ARTDADDY_QA_MEMORY_RUN_ID ?? null,
       hostProfileEvidence,
-      profileEnforced, physicalQualified: false, temporarySpaceQualified,
-      passed: promiseCase.kind === "promise" && timingQualified && profileEnforced && temporarySpaceQualified && native.scratchCleaned && native.estimateProvided,
-      qualificationStatus: promiseCase.kind === "pilot" ? "pilot-only" : "incomplete-resource-and-estimate-proof" };
+      profileEnforced, physicalQualified: false,
+      temporarySpaceEvidence, temporarySpaceQualified, temporarySpaceFailures: temporarySpaceReasons,
+      estimateEvidence, estimateProvided, estimateFailures: estimateReasons,
+      estimateAccuracy: cold ? { estimateSeconds: native.estimateSeconds, actualSeconds: native.elapsedMs / 1000,
+        ratio: native.estimateSeconds > 0 ? native.elapsedMs / 1000 / native.estimateSeconds : null } : null,
+      coldVerification: coldVerified,
+      passed,
+      qualificationStatus: promiseCase.kind === "pilot" ? "pilot-only" : promiseCase.kind !== "promise" ? "measurement-only" :
+        passed ? "attempt-evidence-complete" : "attempt-evidence-incomplete" };
     await writeFile(path.join(output, "promise-library.json"), JSON.stringify(proof.promiseResult, null, 2));
     console.log(`PROMISE LIBRARY ${JSON.stringify(proof.promiseResult)}`);
   }
