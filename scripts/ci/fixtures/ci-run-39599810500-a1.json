@@ -1,0 +1,201 @@
+{
+  "_provenance": "Real GitHub REST payloads for art-daddy/artdaddy run 39599810500 attempt 1 (GET actions/runs/{id}/attempts/{n}, .../jobs, check-runs/{job}/annotations), trimmed to the fields the requeue decision reads (the steps of jobs that succeeded are omitted): a newer push cancelled the whole run: its jobs, macOS ones included, were cancelled before they started.",
+  "run": {
+    "id": 39599810500,
+    "workflow_id": 358098751,
+    "event": "push",
+    "status": "completed",
+    "conclusion": "cancelled",
+    "run_attempt": 1,
+    "head_sha": "d153b7945d819b8c0b5cd5a66528edd3b9f66893",
+    "head_branch": "qa/exporter-v2-20261017",
+    "head_repository": {
+      "full_name": "art-daddy/artdaddy"
+    },
+    "repository": {
+      "full_name": "art-daddy/artdaddy"
+    }
+  },
+  "jobs": [
+    {
+      "id": 119221153494,
+      "name": "real-browser UI + compositor pixels (windows-latest)",
+      "status": "completed",
+      "conclusion": "cancelled",
+      "labels": [
+        "windows-latest"
+      ],
+      "run_attempt": 1,
+      "started_at": "2026-10-21T12:28:02Z",
+      "completed_at": "2026-10-21T12:28:03Z",
+      "steps": [],
+      "annotations": [
+        {
+          "annotation_level": "failure",
+          "message": "Canceling since a higher priority waiting request for ci-CI-refs/heads/qa/exporter-v2-20261017 exists",
+          "title": ""
+        }
+      ]
+    },
+    {
+      "id": 119221153617,
+      "name": "real-browser UI + compositor pixels (macos-14)",
+      "status": "completed",
+      "conclusion": "cancelled",
+      "labels": [
+        "macos-14"
+      ],
+      "run_attempt": 1,
+      "started_at": "2026-10-21T12:28:02Z",
+      "completed_at": "2026-10-21T12:28:03Z",
+      "steps": [],
+      "annotations": [
+        {
+          "annotation_level": "failure",
+          "message": "Canceling since a higher priority waiting request for ci-CI-refs/heads/qa/exporter-v2-20261017 exists",
+          "title": ""
+        }
+      ]
+    },
+    {
+      "id": 119221153621,
+      "name": "export suite (macos-14)",
+      "status": "completed",
+      "conclusion": "cancelled",
+      "labels": [
+        "macos-14"
+      ],
+      "run_attempt": 1,
+      "started_at": "2026-10-21T12:28:02Z",
+      "completed_at": "2026-10-21T12:28:03Z",
+      "steps": [],
+      "annotations": [
+        {
+          "annotation_level": "failure",
+          "message": "Canceling since a higher priority waiting request for ci-CI-refs/heads/qa/exporter-v2-20261017 exists",
+          "title": ""
+        }
+      ]
+    },
+    {
+      "id": 119221153691,
+      "name": "cargo test (macos-14)",
+      "status": "completed",
+      "conclusion": "cancelled",
+      "labels": [
+        "macos-14"
+      ],
+      "run_attempt": 1,
+      "started_at": "2026-10-21T12:28:02Z",
+      "completed_at": "2026-10-21T12:28:03Z",
+      "steps": [],
+      "annotations": [
+        {
+          "annotation_level": "failure",
+          "message": "Canceling since a higher priority waiting request for ci-CI-refs/heads/qa/exporter-v2-20261017 exists",
+          "title": ""
+        }
+      ]
+    },
+    {
+      "id": 119221153740,
+      "name": "cargo test (ubuntu-22.04)",
+      "status": "completed",
+      "conclusion": "cancelled",
+      "labels": [
+        "ubuntu-22.04"
+      ],
+      "run_attempt": 1,
+      "started_at": "2026-10-21T12:28:02Z",
+      "completed_at": "2026-10-21T12:28:03Z",
+      "steps": [],
+      "annotations": [
+        {
+          "annotation_level": "failure",
+          "message": "Canceling since a higher priority waiting request for ci-CI-refs/heads/qa/exporter-v2-20261017 exists",
+          "title": ""
+        }
+      ]
+    },
+    {
+      "id": 119221153791,
+      "name": "tauri desktop build (windows)",
+      "status": "completed",
+      "conclusion": "cancelled",
+      "labels": [
+        "windows-latest"
+      ],
+      "run_attempt": 1,
+      "started_at": "2026-10-21T12:28:02Z",
+      "completed_at": "2026-10-21T12:28:03Z",
+      "steps": [],
+      "annotations": [
+        {
+          "annotation_level": "failure",
+          "message": "Canceling since a higher priority waiting request for ci-CI-refs/heads/qa/exporter-v2-20261017 exists",
+          "title": ""
+        }
+      ]
+    },
+    {
+      "id": 119221153853,
+      "name": "export suite (windows-latest)",
+      "status": "completed",
+      "conclusion": "cancelled",
+      "labels": [
+        "windows-latest"
+      ],
+      "run_attempt": 1,
+      "started_at": "2026-10-21T12:28:02Z",
+      "completed_at": "2026-10-21T12:28:03Z",
+      "steps": [],
+      "annotations": [
+        {
+          "annotation_level": "failure",
+          "message": "Canceling since a higher priority waiting request for ci-CI-refs/heads/qa/exporter-v2-20261017 exists",
+          "title": ""
+        }
+      ]
+    },
+    {
+      "id": 119221153928,
+      "name": "export suite (ubuntu-22.04)",
+      "status": "completed",
+      "conclusion": "cancelled",
+      "labels": [
+        "ubuntu-22.04"
+      ],
+      "run_attempt": 1,
+      "started_at": "2026-10-21T12:28:02Z",
+      "completed_at": "2026-10-21T12:28:03Z",
+      "steps": [],
+      "annotations": [
+        {
+          "annotation_level": "failure",
+          "message": "Canceling since a higher priority waiting request for ci-CI-refs/heads/qa/exporter-v2-20261017 exists",
+          "title": ""
+        }
+      ]
+    },
+    {
+      "id": 119221153964,
+      "name": "build + unit tests",
+      "status": "completed",
+      "conclusion": "cancelled",
+      "labels": [
+        "windows-latest"
+      ],
+      "run_attempt": 1,
+      "started_at": "2026-10-21T12:28:02Z",
+      "completed_at": "2026-10-21T12:28:03Z",
+      "steps": [],
+      "annotations": [
+        {
+          "annotation_level": "failure",
+          "message": "Canceling since a higher priority waiting request for ci-CI-refs/heads/qa/exporter-v2-20261017 exists",
+          "title": ""
+        }
+      ]
+    }
+  ]
+}

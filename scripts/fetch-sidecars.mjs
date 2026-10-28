@@ -24,12 +24,14 @@ import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  describeDownloadFailure,
   describeGhFailure,
+  downloadVerified,
   ffmpegPin,
+  httpFailure,
   isPinnedBuild,
   matchesSha256,
   stalePaths,
-  verifySha256,
   ytDlpPin,
 } from "./sidecarStaging.mjs";
 import { checkWhisper, verifyWhisperUnicodeProof } from "./smoke-whisper.mjs";
@@ -72,12 +74,19 @@ const staged = (name) => join(binariesDir, `${packagedName(name)}-${triple}${ext
 const stagedId = (name) => join(binariesDir, `${name}-${triple}${ext}`);
 const want = (name) => !only || only.has(name);
 
+async function fetchBytes(url) {
+  const res = await fetch(url, { redirect: "follow" });
+  if (!res.ok) throw httpFailure(res.status, url);
+  return Buffer.from(await res.arrayBuffer());
+}
+// A dropped connection or a 5xx is tried again (a macOS runner lost its ffmpeg download twice in a
+// month with a bare "fetch failed"); bytes that do not match the pin are never fetched twice.
 async function downloadPinned({ url, sha256 }, dest) {
   console.log(`  GET ${url}`);
-  const res = await fetch(url, { redirect: "follow" });
-  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
-  const bytes = Buffer.from(await res.arrayBuffer());
-  verifySha256(bytes, sha256, url);
+  const bytes = await downloadVerified({ url, sha256 }, fetchBytes, {
+    onRetry: ({ failed, of, error, waitMs }) =>
+      console.warn(`  ${describeDownloadFailure(error)}; attempt ${failed} of ${of} failed, trying again in ${waitMs / 1000}s`),
+  });
   writeFileSync(dest, bytes);
   return dest;
 }

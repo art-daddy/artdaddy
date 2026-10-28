@@ -1,0 +1,63 @@
+# Re-queues macOS CI jobs that never got a runner. GitHub's macOS arm64 pool runs short of capacity: a job
+# that waits about twenty minutes for one is cancelled ("The job was not acquired by Runner of type hosted
+# even after multiple attempts") and the run goes red although no code ran. Every decision, and every reason
+# to leave a run alone, is in scripts/ci/macosRequeue.mjs and its tests; this file gives it a trigger and a
+# token. Read that script's header before changing anything here.
+name: CI macOS requeue
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: The CI run to look at (the number in its URL)
+        required: true
+      attempt:
+        description: The attempt to look at (blank = the latest)
+        required: false
+      dry_run:
+        description: Only say what would happen
+        type: boolean
+        default: true
+
+# Least privilege: re-running a run is `actions: write`; the "not acquired" marker is a check annotation.
+permissions:
+  actions: write
+  checks: read
+  contents: read
+
+concurrency:
+  group: ci-macos-requeue-${{ github.event.workflow_run.id || inputs.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  requeue:
+    name: re-queue macOS jobs that never got a runner
+    # A cheap filter only: the script re-reads the run from the API and decides for itself.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      # A workflow_run workflow runs the DEFAULT branch's copy of the repository: reviewed code, never the
+      # pushed branch's.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      # Values reach the script as environment variables, never spliced into the command line.
+      - name: Re-queue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
+          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt || inputs.attempt }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        run: node scripts/ci/macosRequeue.mjs
