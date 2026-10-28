@@ -18,40 +18,73 @@ import { shippedSidecar } from "../test/sidecars";
 // The shipped ffmpeg has libass (a PATH one may not).
 const FF = shippedSidecar("ffmpeg");
 const FONTS_SRC = path.resolve(process.cwd(), "src-tauri/resources/fonts");
+// Promise.all can reject while sibling probes still read their rendered input.
+const activeProbes = new Set<Promise<unknown>>();
+
+function trackProbe<T>(measure: () => Promise<T>): Promise<T> {
+  const pending = measure();
+  activeProbes.add(pending);
+  return pending.finally(() => {
+    activeProbes.delete(pending);
+  });
+}
 
 function run(
   program: string,
   args: string[],
   cwd?: string,
 ): Promise<{ code: number; stderr: string }> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const child = spawn(program, args, { cwd, windowsHide: true });
     let stderr = "";
     child.stderr?.on("data", (d) => (stderr += String(d)));
-    child.on("error", (e) => resolve({ code: -1, stderr: String(e) }));
-    child.on("close", (code) => resolve({ code: code ?? -1, stderr }));
+    child.once("error", reject);
+    child.once("close", (code, signal) => {
+      if (code !== 0) {
+        reject(
+          new Error(
+            `ffmpeg command failed (code ${code}, signal ${signal}): ${JSON.stringify(args)}\n${stderr.slice(-6000)}`,
+          ),
+        );
+        return;
+      }
+      resolve({ code, stderr });
+    });
   });
+}
+
+function peakLuma(stderr: string, field: "YMAX" | "YAVG"): number {
+  const pattern = new RegExp(`lavfi\\.signalstats\\.${field}=([^\\r\\n]*)`, "g");
+  let peak: number | undefined;
+  for (const match of stderr.matchAll(pattern)) {
+    const text = match[1].trim();
+    const value = Number(text);
+    if (!/^(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(text) || !Number.isFinite(value))
+      throw new Error(`Invalid ${field} measurement: ${match[1]}\n${stderr.slice(-6000)}`);
+    peak = peak === undefined ? value : Math.max(peak, value);
+  }
+  if (peak === undefined)
+    throw new Error(`ffmpeg emitted no ${field} measurements:\n${stderr.slice(-6000)}`);
+  return peak;
 }
 
 /** Max luma across all frames of a rendered file (libass draws white text ~235; a black canvas ~16).
  *  `pre` is an optional filter (e.g. a crop) applied before signalstats to measure a sub-region. */
 async function maxLuma(ff: string, file: string, pre = ""): Promise<number> {
-  const vf = pre ? `${pre},signalstats,metadata=print` : "signalstats,metadata=print";
-  const r = await run(ff, ["-hide_banner", "-i", file, "-vf", vf, "-f", "null", "-"]);
-  let max = -1;
-  for (const m of r.stderr.matchAll(/lavfi\.signalstats\.YMAX=(\d+)/g))
-    max = Math.max(max, Number(m[1]));
-  return max;
+  return trackProbe(async () => {
+    const vf = pre ? `${pre},signalstats,metadata=print` : "signalstats,metadata=print";
+    const r = await run(ff, ["-hide_banner", "-i", file, "-vf", vf, "-f", "null", "-"]);
+    return peakLuma(r.stderr, "YMAX");
+  });
 }
 
 /** Mean luma of a (optionally cropped) region — solid fills (a box) raise it far above thin glyphs. */
 async function avgLuma(ff: string, file: string, pre = ""): Promise<number> {
-  const vf = pre ? `${pre},signalstats,metadata=print` : "signalstats,metadata=print";
-  const r = await run(ff, ["-hide_banner", "-i", file, "-vf", vf, "-f", "null", "-"]);
-  let max = -1;
-  for (const m of r.stderr.matchAll(/lavfi\.signalstats\.YAVG=([\d.]+)/g))
-    max = Math.max(max, Number(m[1]));
-  return max;
+  return trackProbe(async () => {
+    const vf = pre ? `${pre},signalstats,metadata=print` : "signalstats,metadata=print";
+    const r = await run(ff, ["-hide_banner", "-i", file, "-vf", vf, "-f", "null", "-"]);
+    return peakLuma(r.stderr, "YAVG");
+  });
 }
 
 /** {max,avg} luma of the frame at time `t` seconds (extracts a lossless PNG first). */
@@ -60,40 +93,41 @@ async function frameStats(
   mp4: string,
   t: number,
 ): Promise<{ max: number; avg: number }> {
-  const png = `${mp4}.${Math.round(t * 1000)}.png`;
-  await run(ff, ["-y", "-ss", String(t), "-i", mp4, "-frames:v", "1", png]);
-  const r = await run(ff, [
-    "-hide_banner",
-    "-i",
-    png,
-    "-vf",
-    "signalstats,metadata=print",
-    "-f",
-    "null",
-    "-",
-  ]);
-  const mx = r.stderr.match(/lavfi\.signalstats\.YMAX=(\d+)/);
-  const av = r.stderr.match(/lavfi\.signalstats\.YAVG=([\d.]+)/);
-  return { max: mx ? Number(mx[1]) : -1, avg: av ? Number(av[1]) : -1 };
+  return trackProbe(async () => {
+    const png = path.join(await scratch(), "frame.png");
+    await run(ff, ["-y", "-ss", String(t), "-i", mp4, "-frames:v", "1", png]);
+    const r = await run(ff, [
+      "-hide_banner",
+      "-i",
+      png,
+      "-vf",
+      "signalstats,metadata=print",
+      "-f",
+      "null",
+      "-",
+    ]);
+    return { max: peakLuma(r.stderr, "YMAX"), avg: peakLuma(r.stderr, "YAVG") };
+  });
 }
 
 /** Peak luma of a CROPPED region of the frame at `t`. Whole-frame stats answer "how much ink"; a
  *  reveal has to be asked "is there ink over HERE yet", which only a region can answer. */
 async function regionMaxLuma(ff: string, mp4: string, t: number, crop: string): Promise<number> {
-  const png = `${mp4}.r${Math.round(t * 1000)}.png`;
-  await run(ff, ["-y", "-ss", String(t), "-i", mp4, "-frames:v", "1", png]);
-  const r = await run(ff, [
-    "-hide_banner",
-    "-i",
-    png,
-    "-vf",
-    `${crop},signalstats,metadata=print`,
-    "-f",
-    "null",
-    "-",
-  ]);
-  const mx = r.stderr.match(/lavfi\.signalstats\.YMAX=(\d+)/);
-  return mx ? Number(mx[1]) : -1;
+  return trackProbe(async () => {
+    const png = path.join(await scratch(), "frame.png");
+    await run(ff, ["-y", "-ss", String(t), "-i", mp4, "-frames:v", "1", png]);
+    const r = await run(ff, [
+      "-hide_banner",
+      "-i",
+      png,
+      "-vf",
+      `${crop},signalstats,metadata=print`,
+      "-f",
+      "null",
+      "-",
+    ]);
+    return peakLuma(r.stderr, "YMAX");
+  });
 }
 
 /** Bounding box of the lit pixels (luma > 128) in the frame at `t`, in canvas pixels. */
@@ -104,26 +138,30 @@ async function inkBox(
   w: number,
   h: number,
 ): Promise<{ width: number; height: number; x0: number; x1: number }> {
-  const raw = `${mp4}.k${Math.round(t * 1000)}.gray`;
-  await run(
-    ff,
-    ["-y", "-ss", String(t), "-i", mp4, "-frames:v", "1", "-f", "rawvideo"].concat([
-      "-pix_fmt",
-      "gray",
-      raw,
-    ]),
-  );
-  const px = await fsp.readFile(raw);
-  let [x0, x1, y0, y1] = [w, -1, h, -1];
-  for (let y = 0; y < h; y++)
-    for (let x = 0; x < w; x++)
-      if (px[y * w + x] > 128) {
-        x0 = Math.min(x0, x);
-        x1 = Math.max(x1, x);
-        y0 = Math.min(y0, y);
-        y1 = Math.max(y1, y);
-      }
-  return { width: x1 - x0 + 1, height: y1 - y0 + 1, x0, x1 };
+  return trackProbe(async () => {
+    const raw = path.join(await scratch(), "frame.gray");
+    await run(
+      ff,
+      ["-y", "-ss", String(t), "-i", mp4, "-frames:v", "1", "-f", "rawvideo"].concat([
+        "-pix_fmt",
+        "gray",
+        raw,
+      ]),
+    );
+    const px = await fsp.readFile(raw);
+    if (px.length !== w * h)
+      throw new Error(`Incomplete gray frame: expected ${w * h} bytes, received ${px.length}`);
+    let [x0, x1, y0, y1] = [w, -1, h, -1];
+    for (let y = 0; y < h; y++)
+      for (let x = 0; x < w; x++)
+        if (px[y * w + x] > 128) {
+          x0 = Math.min(x0, x);
+          x1 = Math.max(x1, x);
+          y0 = Math.min(y0, y);
+          y1 = Math.max(y1, y);
+        }
+    return { width: x1 - x0 + 1, height: y1 - y0 + 1, x0, x1 };
+  });
 }
 
 /** Stage the plan's .ass + referenced fonts into `cwd` (mirrors runRenderPlan) and render. The graph
@@ -149,8 +187,14 @@ async function scratch(): Promise<string> {
   return d;
 }
 afterAll(async () => {
-  for (const d of scratches)
-    await fsp.rm(d, { recursive: true, force: true }).catch(() => undefined);
+  const probes = await Promise.allSettled(activeProbes);
+  const cleanup = await Promise.allSettled(
+    scratches.map((d) => fsp.rm(d, { recursive: true, force: true })),
+  );
+  const failures: unknown[] = [];
+  for (const result of [...probes, ...cleanup])
+    if (result.status === "rejected") failures.push(result.reason);
+  if (failures.length) throw new AggregateError(failures, "Caption probes or cleanup failed");
 });
 
 const canvas = { width: 320, height: 240, fps: 30 };

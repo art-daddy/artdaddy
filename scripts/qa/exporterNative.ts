@@ -11,8 +11,10 @@ import { buildRenderCommand, queueRenderJob } from "../../src/timeline/render";
 import { listExportRecords, whenExportEnds, whenExportsSettle, whenExportTelemetrySettles } from "../../src/timeline/exportQueue";
 import { ensureTimeline } from "../../src/timeline/engine";
 import { resolveExportResources } from "../../src/platform/host";
+import { estimateExportFromHistory, type ExportCalibration } from "../../src/timeline/exportOptions";
 import { __setExportConfirmationForTests } from "../../src/lib/confirm";
 import { useExportJob } from "../../src/store/exportJob";
+import { coldStartFailure } from "./exporterColdStart.mjs";
 
 const params = new URLSearchParams(location.search);
 const root = params.get("root") ?? "";
@@ -25,7 +27,31 @@ function check(value: unknown, message: string): asserts value {
   if (!value) throw new Error(message);
 }
 
+// What the product's history holds, in the terms its estimator matches on: enough to see where a sample came from.
+const describeSample = (sample: ExportCalibration) => ({
+  width: sample.workload.width, height: sample.workload.height, fps: sample.workload.fps, durationSeconds: sample.workload.durationSeconds,
+  mediaLayers: sample.workload.peakMediaLayers, visualLayers: sample.workload.peakVisualLayers, engine: sample.engine,
+  encoder: sample.encoder ?? null, quality: sample.quality, elapsedSeconds: sample.elapsedSeconds, memoryBytes: sample.memoryBytes,
+});
+
+// The native payload allowance returns as the last owner of an export's files lets go, which can trail the terminal
+// state. Sample it inside a bounded window and keep every sample: the last one is what the verdict is derived from.
+async function allowanceAfterSettlement(destination: string, floor: number | null): Promise<{ samples: Array<{ atMs: number; temporaryBytes: number | null }> }> {
+  const began = performance.now();
+  const samples: Array<{ atMs: number; temporaryBytes: number | null }> = [];
+  for (;;) {
+    const temporaryBytes = (await resolveExportResources(destination)).budgets.temporaryBytes;
+    samples.push({ atMs: Math.round(performance.now() - began), temporaryBytes });
+    if (floor === null || (temporaryBytes !== null && temporaryBytes >= floor) || performance.now() - began > 30_000) return { samples };
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+}
+
 async function exercise(): Promise<void> {
+  // A reload would restart this script while the app keeps working, and the second pass would judge the first one's leftovers.
+  // The dev server's hot-reload socket is off (exporterVite.mjs); this names any other cause instead of letting a later check fail oddly.
+  check(sessionStorage.getItem("exporter-qa-page-started") === null, "The QA page reloaded while a run was in progress; its script state is gone, so this run is void");
+  sessionStorage.setItem("exporter-qa-page-started", new Date().toISOString());
   check(root.includes("artdaddy-export-native-"), "Not an isolated exporter directory");
   check(await getIdentifier() === identifier && identifier.startsWith("com.artdaddy.qa.exporter-"), "Wrong native app identity");
   check((await dataRoot()).replace(/\\/g, "/") === root.replace(/\\/g, "/"), "Native project root is not isolated");
@@ -197,15 +223,39 @@ async function exercise(): Promise<void> {
         style: { font: "Poppins", fontsize: Math.round(definition.height / 22), color: "white" } })) });
     const snapshot = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(timeline))));
     const captured = { ...admission, snapshotSha256: Array.from(snapshot, (byte) => byte.toString(16).padStart(2, "0")).join("") };
-    const destination = joinPath(root, `promise-${definition.id}.mp4`);
-    const stage = joinPath(root, `.promise-${definition.id}.partial`);
-    const started = performance.now();
     const fastEncoderProbe = params.get("fastEncoderProbe") ?? "";
     if (fastEncoderProbe) check(fastEncoderProbe === "amf-cqp18" && definition.kind === "pilot", "Unsupported local Fast pilot");
+    // A promise line is exported twice in one profile: cold, then again with the comparable measurement the first one left behind.
+    const labels: Array<"cold" | "estimate"> = definition.kind === "promise" ? ["cold", "estimate"] : ["cold"];
+    const runPromiseExport = async (label: "cold" | "estimate", coldPass?: Record<string, unknown>): Promise<Record<string, unknown>> => {
+    const name = labels.length === 1 || label === "estimate" ? `promise-${definition.id}` : `promise-${definition.id}-cold`;
+    const destination = joinPath(root, `${name}.mp4`);
+    const stage = joinPath(root, `.${name}.partial`);
+    const started = performance.now();
+    // Cumulative marks (ms since this pass began) that say where a pass spends its wall time outside the encoder.
+    const phaseMs: Record<string, number> = {};
+    const mark = (name: string) => { phaseMs[name] ??= performance.now() - started; };
     const plan = buildRenderCommand(timeline, stage, { engine: "auto", quality: "medium", mode: fastEncoderProbe ? "fast" : "quality" });
-    const calibrationEncoder = fastEncoderProbe ? "amf-cqp18" : plan.output.width * plan.output.height > 1920 * 1080 &&
-      plan.selection.backend === "partition-pipes-v1" ? "x264-crf-threads2" : "x264-crf";
+    mark("compiled");
+    // The history identity the product compiled into this plan. The harness never carries its own copy of the encoder policy.
+    check(plan.encoder !== undefined, "The compiled plan carries no encoder history identity");
+    const calibrationEncoder = plan.encoder;
+    const comparable = () => useExportJob.getState().calibrations.filter((sample) => sample.workload.width === definition.width &&
+      sample.workload.height === definition.height && sample.workload.durationSeconds === definition.durationSeconds &&
+      sample.workload.peakMediaLayers === definition.videoLayers && sample.encoder === calibrationEncoder);
+    const historySamples = comparable().length;
+    // The product's own estimator over the real history, asked exactly as the export request asks it.
+    const estimateSeconds = estimateExportFromHistory(plan.workload, plan.output, "medium", plan.selection.backend,
+      useExportJob.getState().calibrations, calibrationEncoder).seconds;
+    // A cold export is one the product has nothing to estimate from, so it must ask. That only holds if no earlier run's history reached
+    // this page (a web view whose storage outlives the app can carry it over). Say so now, before minutes of encoding, instead of
+    // letting the missing confirmation fail a later check with a misleading message.
+    const historyAtStart = useExportJob.getState().calibrations.map(describeSample);
+    const notCold = label === "cold" ? coldStartFailure({ historySamples, estimateSeconds }) : null;
+    check(!notCold, `The ${definition.id} cold pass is not cold (${notCold}). An earlier run's history reached this run, so the run is void: ` +
+      JSON.stringify({ origin: location.origin, estimateSeconds, historyAtStart }));
     const resources = await resolveExportResources(destination);
+    mark("resourcesReady");
     const confirmationOffset = preflightRequests.length;
     let promiseId = "";
     let scratchPath: string | undefined;
@@ -216,6 +266,7 @@ async function exercise(): Promise<void> {
       if (view.id === promiseId) {
         const facts = view.meta.telemetry as { readiness?: unknown } | undefined;
         if (facts?.readiness === "ready" || facts?.readiness === "not_ready") readiness = facts.readiness;
+        if (view.state === "running") mark("running");
       }
       if (view.id !== promiseId || view.state !== "running" || scratchRead) return;
       scratchRead = invoke<Array<{ id: string; render_scratch?: { path: string } }>>("jobs_export_intents")
@@ -223,14 +274,18 @@ async function exercise(): Promise<void> {
         .catch((error: unknown) => { scratchError = error; });
     });
     const queued = await queueRenderJob(context, { plan, admission: captured, destPath: destination, stagePath: stage,
-      filename: `promise-${definition.id}.mp4`, quality: "medium" });
+      filename: `${name}.mp4`, quality: "medium" });
+    mark("queued");
     promiseId = queued.job_id;
     const outcome = await whenExportEnds(queued.job_id);
+    mark("ended");
     await whenExportsSettle();
     const exportElapsedMs = performance.now() - started;
+    mark("settled");
     detach();
     await scratchRead;
     await whenExportTelemetrySettles();
+    const allowance = await allowanceAfterSettlement(destination, resources.budgets.temporaryBytes);
     const delivery = (await supervisor.delivery.list()).find((entry) => entry.id === queued.job_id);
     const records = await store.readJson<{ jobs: Array<{ id: string; status: string }> }>(joinPath(projectDir, "internals/jobs.json"), { jobs: [] });
     const saved = listExportRecords().find((entry) => entry.job_id === queued.job_id);
@@ -242,30 +297,31 @@ async function exercise(): Promise<void> {
       delivery.identity?.sha256 === measured?.sha256 && delivery.identity?.size === measured?.size &&
       linked?.sha256 === measured?.sha256 && linked?.size === measured?.size &&
       records.jobs.find((entry) => entry.id === queued.job_id)?.status === "done";
-    promiseResult = { caseId: definition.id, profile: input.profile, kind: definition.kind, destination, jobId: queued.job_id,
+    const result: Record<string, unknown> = { caseId: definition.id, pass: label, profile: input.profile, kind: definition.kind, destination, jobId: queued.job_id,
       encoder: plan.args[plan.args.lastIndexOf("-c:v") + 1],
       // The encoder's own thread flag follows its codec; the decoders' flags come before the inputs, so they are not read as the encoder's.
       encoderThreads: ((at) => at >= 0 ? plan.args[at + 1] : null)(plan.args.indexOf("-threads:v", plan.args.lastIndexOf("-c:v"))), calibrationEncoder,
       readiness,
-      state: outcome?.state ?? "missing", error: outcome?.error ?? null, elapsedMs: exportElapsedMs,
+      state: outcome?.state ?? "missing", error: outcome?.error ?? null, elapsedMs: exportElapsedMs, phaseMs,
       projectFrames: frames, partitions: plan.steps?.length ?? 0, columns, rows, imageHeight,
       selection: plan.selection,
       fastEncoderProbe: fastEncoderProbe || null,
       localFastEnabled: !!fastEncoderProbe,
       resources, workload: plan.workload,
+      allowanceSamples: allowance.samples, historySamples, estimateSeconds, pageOrigin: location.origin, historyAtStart,
       publicationVerified, finalIdentity: delivery?.identity,
       stagingCleaned: !(await exists(stage)), scratchCleaned: !!scratchPath && !(await exists(scratchPath)),
       scratchEvidenceError: scratchError ? String(scratchError) : null,
       preflight: preflightRequests.slice(confirmationOffset),
-      localCalibration: useExportJob.getState().calibrations.filter((sample) => sample.workload.width === definition.width &&
-        sample.workload.height === definition.height && sample.workload.durationSeconds === definition.durationSeconds &&
-        sample.workload.peakMediaLayers === definition.videoLayers && sample.encoder === calibrationEncoder).at(-1) ?? null,
-      calibrationRecords: useExportJob.getState().calibrations.filter((sample) => sample.workload.width === definition.width &&
-        sample.workload.height === definition.height && sample.workload.durationSeconds === definition.durationSeconds &&
-        sample.workload.peakMediaLayers === definition.videoLayers && sample.encoder === calibrationEncoder).length,
-      estimateProvided: preflightRequests.slice(confirmationOffset).some((entry) => entry.message.includes("Estimated encoding and saving time: about")) };
-    await writeTextFile(joinPath(root, "promise-native-result.json"), JSON.stringify(promiseResult));
-    check(outcome?.state === "done", `Promise export failed: ${JSON.stringify(promiseResult)}`);
+      localCalibration: comparable().at(-1) ?? null,
+      calibrationRecords: comparable().length };
+    const combined = coldPass ? { ...result, coldPass } : result;
+    await writeTextFile(joinPath(root, "promise-native-result.json"), JSON.stringify(combined));
+    check(outcome?.state === "done", `Promise ${label} export failed: ${JSON.stringify(result)}`);
+    return combined;
+    };
+    const coldResult = await runPromiseExport("cold");
+    promiseResult = labels.length > 1 ? await runPromiseExport("estimate", coldResult) : coldResult;
   }
   const profileSeconds = Number(params.get("profileSeconds") ?? 0);
   if (profileSeconds) {

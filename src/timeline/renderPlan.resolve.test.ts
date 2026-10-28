@@ -183,7 +183,11 @@ describe("resolveRenderPlan — media composite (the dual-backend authority)", (
       fit: "cover",
       blend: "screen",
     });
-    expect(one(vclip({ fit: "not-a-fit", blend: "burn" })).media).toMatchObject({
+    expect(one(vclip({ fit: "stretch", blend: "burn" })).media).toMatchObject({
+      fit: "stretch",
+      blend: "normal",
+    });
+    expect(one(vclip({ fit: "unsupported-fit", blend: "burn" })).media).toMatchObject({
       fit: "contain",
       blend: "normal",
     });

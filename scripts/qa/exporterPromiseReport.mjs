@@ -2,7 +2,9 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 import { linuxProfileVerified } from "./exporterLinuxMemory.mjs";
+import { captionsFadedIn, estimateFailures, judgeSourcePictures, temporarySpaceFailures } from "./exporterQualification.mjs";
 
 const repository = path.resolve(process.argv[2] ?? path.join(path.dirname(fileURLToPath(import.meta.url)), "../.."));
 const library = JSON.parse(await readFile(path.join(repository, "scripts/qa/exporterPromiseCases.json"), "utf8"));
@@ -70,14 +72,34 @@ for (const entry of entries.filter((entry) => entry.isDirectory())) {
   const video = result.encodedVideo;
   const complete = video?.width === definition.width && video?.height === definition.height && video?.fps === `${definition.fps}/1` &&
     video?.frames === Math.round(definition.durationSeconds * definition.fps) && result.projectFrames === video.frames;
-  const timing = result.profile === "8gb" || definition.speedFactor16gb === null ||
-    Number.isFinite(result.elapsedMs) && result.elapsedMs <= definition.durationSeconds * definition.speedFactor16gb * 1000;
+  const withinSpeed = (elapsedMs) => result.profile === "8gb" || definition.speedFactor16gb === null ||
+    Number.isFinite(elapsedMs) && elapsedMs <= definition.durationSeconds * definition.speedFactor16gb * 1000;
+  // A promise line is exported cold and then again; both exports have to meet its speed line.
+  const timing = withinSpeed(result.elapsedMs) && withinSpeed(result.coldPass?.elapsedMs);
+  const currentTemporaryContract = Number.isSafeInteger(library.version) &&
+    typeof library.temporarySpace?.scope === "string" && library.temporarySpace.scope.length > 0 &&
+    result.version === library.version &&
+    isDeepStrictEqual(result.temporarySpace, library.temporarySpace) &&
+    isDeepStrictEqual(envelope?.native?.resources?.temporary_space, library.temporarySpace);
+  // A recorded boolean is never evidence: both verdicts are re-derived from the raw measurements stored beside them.
+  const temporarySpaceQualified = currentTemporaryContract && result.temporarySpaceQualified === true &&
+    temporarySpaceFailures(library.temporarySpace, result.temporarySpaceEvidence).length === 0;
+  const estimateProvided = result.estimateProvided === true && estimateFailures(result.estimateEvidence).length === 0;
+  // The artifact flag is not evidence either: the recorded picture and caption measurements of BOTH exports are re-judged,
+  // and whether a real source needs a picture proof comes from the library, never from the record.
+  const realSource = library.sourceClasses[definition.source]?.realWorld === true;
+  const outputProven = (pass) => (!realSource || judgeSourcePictures(pass?.sourcePictureProof).ok) &&
+    (!definition.captions || captionsFadedIn(pass?.captionSamples));
+  const outputEvidence = outputProven(result) && outputProven(result.coldVerification);
   const passed = definition.kind === "promise" && result.kind === "promise" && result.mode === "quality" && exactDefinition && complete &&
     envelope?.ok === true && result.passed === true && result.artifactVerified === true && result.publicationVerified === true &&
-    result.stagingCleaned === true && result.scratchCleaned === true && result.sourceReady === true &&
-    result.temporarySpaceQualified === true && result.estimateProvided === true && profileVerified && timing;
+    result.stagingCleaned === true && result.scratchCleaned === true && result.sourceReady === true && outputEvidence &&
+    temporarySpaceQualified && estimateProvided && profileVerified && timing;
   attempts.push({ caseId: definition.id, line: definition.line, kind: definition.kind, profile: result.profile, platform,
     passed, artifactVerified: result.artifactVerified === true, profileVerified, physical: result.physicalQualified === true,
+    temporarySpaceQualified,
+    temporarySpaceEvidenceKind: !currentTemporaryContract ? "legacy-or-mismatched-contract" :
+      temporarySpaceQualified ? library.temporarySpace.scope : "unqualified",
     profileEvidenceKind: kernelProfileVerified ? "windows-kernel-commit" : cgroupProfileVerified ? "linux-kernel-cgroup-v2" :
       hostProfileVerified ? "measured-host-memory" : "unverified",
     readiness: result.status === "blocked-source" ? "not_ready" : ["ready", "not_ready"].includes(result.readiness) ? result.readiness : "unknown",
@@ -98,6 +120,8 @@ for (const definition of library.cases) for (const profile of Object.keys(librar
     artifactSuccesses: observed.filter((attempt) => attempt.artifactVerified).length,
     profileVerifiedAttempts: observed.filter((attempt) => attempt.profileVerified).length,
     profileEvidenceKinds: [...new Set(observed.map((attempt) => attempt.profileEvidenceKind))].sort(),
+    temporarySpaceQualifiedAttempts: observed.filter((attempt) => attempt.temporarySpaceQualified).length,
+    temporarySpaceEvidenceKinds: [...new Set(observed.map((attempt) => attempt.temporarySpaceEvidenceKind))].sort(),
     unknownReadiness: observed.filter((attempt) => attempt.readiness === "unknown").length,
     sourceBlockedAttempts: observed.filter((attempt) => attempt.blockedSource).length,
     overallPassRate: rate(observed.filter((attempt) => attempt.passed).length, observed.length),
@@ -108,7 +132,8 @@ for (const definition of library.cases) for (const profile of Object.keys(librar
 const promiseRows = rows.filter((row) => row.kind === "promise");
 const promiseAttempts = attempts.filter((attempt) => attempt.kind === "promise");
 const readyAttempts = promiseAttempts.filter((attempt) => attempt.readiness === "ready");
-console.log(JSON.stringify({ version: 2, scope: "controlled-export-promise-library-not-population-reliability",
+console.log(JSON.stringify({ version: 3, libraryVersion: library.version, temporarySpace: library.temporarySpace,
+  scope: "controlled-export-promise-library-not-population-reliability",
   plannedVariants: promiseRows.length, attemptedVariants: promiseRows.filter((row) => row.attempts > 0).length,
   overallAttempts: promiseAttempts.length, overallPassed: promiseAttempts.filter((attempt) => attempt.passed).length,
   overallPassRate: rate(promiseAttempts.filter((attempt) => attempt.passed).length, promiseAttempts.length),

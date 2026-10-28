@@ -24,6 +24,14 @@ export interface LinuxMemoryCgroup {
   readonly swap_max_bytes: number | null;
 }
 
+export interface ExportTemporarySpace {
+  readonly scope: string;
+  readonly totalBytes: number;
+  readonly payloadBytes: number;
+  readonly infrastructureBytes: number;
+  readonly entryLimit: number;
+}
+
 export interface ExportResources {
   readonly total_memory_bytes: number | null;
   readonly available_memory_bytes: number | null;
@@ -31,6 +39,7 @@ export interface ExportResources {
   readonly destination_free_bytes: number | null;
   readonly budgets: ExportBudgets;
   readonly local_fast_candidate: boolean;
+  readonly temporary_space?: ExportTemporarySpace;
   readonly memory_cgroup?: LinuxMemoryCgroup;
 }
 
@@ -67,6 +76,35 @@ export async function resolveExportResources(
       const value = limits[key];
       return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
     };
+    let temporarySpace: ExportTemporarySpace | undefined;
+    if (raw.temporary_space !== undefined) {
+      const invalid = (): never => {
+        console.warn(
+          "Native temporary-space contract is malformed; resource snapshot is unavailable",
+        );
+        throw new Error("Native temporary-space contract is malformed");
+      };
+      const value = raw.temporary_space;
+      if (!value || typeof value !== "object" || Array.isArray(value)) return invalid();
+      const { scope, totalBytes, payloadBytes, infrastructureBytes, entryLimit } = value as Record<
+        string,
+        unknown
+      >;
+      const validBytes = (bytes: unknown): bytes is number =>
+        typeof bytes === "number" && Number.isSafeInteger(bytes) && bytes >= 0;
+      if (
+        typeof scope !== "string" ||
+        !/^[a-z0-9][a-z0-9.-]{0,63}$/.test(scope) ||
+        !validBytes(totalBytes) ||
+        !validBytes(payloadBytes) ||
+        !validBytes(infrastructureBytes) ||
+        !validBytes(entryLimit) ||
+        entryLimit < 1 ||
+        payloadBytes + infrastructureBytes !== totalBytes
+      )
+        return invalid();
+      temporarySpace = { scope, totalBytes, payloadBytes, infrastructureBytes, entryLimit };
+    }
     let memoryCgroup: LinuxMemoryCgroup | undefined;
     if (raw.memory_cgroup !== undefined) {
       const invalid = (): never => {
@@ -125,6 +163,7 @@ export async function resolveExportResources(
         executionSeconds: limit("executionSeconds"),
       },
       local_fast_candidate: raw.local_fast_candidate === true,
+      ...(temporarySpace ? { temporary_space: temporarySpace } : {}),
       ...(memoryCgroup ? { memory_cgroup: memoryCgroup } : {}),
     };
   })();

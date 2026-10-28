@@ -66,7 +66,22 @@ jobs:
       - run: npm i --no-save @playwright/test@1.61.1
       - run: npx playwright install --with-deps chromium webkit
       - run: node scripts/fetch-sidecars.mjs --only ffmpeg,ffprobe
-      - run: npm run e2e:ui
+      - name: Real browser UI and compositor pixels
+        env:
+          PLAYWRIGHT_JSON_OUTPUT_NAME: reports/qa/browser/results.json
+        run: npm run e2e:ui -- --reporter=list,json
+      - name: Verify real failing-browser evidence capture
+        run: node scripts/qa/browserFailureArtifacts.mjs
+      - name: Preserve real browser results and failure artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: exporter-browser-${{ matrix.os }}-${{ github.sha }}-attempt-${{ github.run_attempt }}
+          path: |
+            reports/qa/browser/**
+            test-results/**
+          if-no-files-found: error
+          retention-days: 7
       - uses: actions/upload-artifact@v4
         if: always()
         with:

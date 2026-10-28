@@ -46,7 +46,7 @@ jobs:
       - run: npm ci
       - run: node scripts/fetch-sidecars.mjs --only ffmpeg,ffprobe
       - name: Promise-library and real-source QA controls
-        run: node --test scripts/qa/exporterPromiseReport.test.mjs scripts/qa/exporterSources.test.mjs scripts/qa/exporterLinuxMemory.test.mjs
+        run: node --test scripts/qa/exporterPromiseReport.test.mjs scripts/qa/exporterSources.test.mjs scripts/qa/exporterLinuxMemory.test.mjs scripts/qa/exporterQualification.test.mjs
       - name: Native job invariants
         run: |
           set -o pipefail
