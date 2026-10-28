@@ -1,4 +1,4 @@
-// Two decisions taken out of fetch-sidecars.mjs so they can be tested: that script calls
+// Decisions taken out of fetch-sidecars.mjs so they can be tested: that script calls
 // main() at import, so nothing in it can be imported without downloading sidecars.
 
 import { createHash } from "node:crypto";
@@ -170,6 +170,100 @@ export function verifySha256(bytes, sha256, url) {
   const got = createHash("sha256").update(bytes).digest("hex");
   if (got !== sha256)
     throw new Error(`${url} is not the pinned build: expected sha256 ${sha256}, got ${got}`);
+}
+
+/** An HTTP answer that is not a success, as an error that carries its status: a retry has to tell a
+ *  hiccup (503) from an answer that will not change (404). The message is the one the log always showed. */
+export function httpFailure(status, url) {
+  return Object.assign(new Error(`HTTP ${status} for ${url}`), { status });
+}
+
+/** Answers that mean "the server or something in front of it stumbled", not "this is wrong". A 404 or
+ *  403 on a pinned URL is left out on purpose: asking again cannot fix it. */
+const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
+
+/** Socket and DNS failures Node reports when a connection dies or never forms. */
+const TRANSPORT_CODES = new Set([
+  "ECONNRESET",
+  "ECONNABORTED",
+  "ECONNREFUSED",
+  "ETIMEDOUT",
+  "EPIPE",
+  "ENETDOWN",
+  "ENETUNREACH",
+  "EHOSTUNREACH",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "UND_ERR_SOCKET",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_BODY_TIMEOUT",
+]);
+
+/** Reasons a rejected fetch gives that a second try cannot fix: a certificate that does not verify
+ *  (retrying must never be how that gets through) and a URL that does not parse. */
+const PERMANENT_CODE = /^(CERT_|UNABLE_TO_|DEPTH_ZERO_|SELF_SIGNED_|ERR_TLS_CERT|ERR_INVALID_|ERR_UNESCAPED|UND_ERR_INVALID)/;
+
+const isObject = (value) => typeof value === "object" && value !== null;
+
+/** `error` and the chain of `.cause`s behind it. Node's fetch hides the real reason one level down. */
+function causeChain(error) {
+  const chain = [];
+  for (let e = error; isObject(e) && chain.length < 5; e = e.cause) chain.push(e);
+  return chain;
+}
+
+/** Whether a failed download is worth another try: a dropped connection, a stalled body or a 5xx.
+ *  A wrong answer is not: a 404, a certificate that does not verify, bytes that do not match the pin. */
+export function isTransientDownloadFailure(error) {
+  if (!isObject(error)) return false;
+  if (Number.isInteger(error.status)) return RETRYABLE_STATUS.has(error.status);
+  const codes = causeChain(error)
+    .map((e) => e.code)
+    .filter((code) => typeof code === "string");
+  if (codes.some((code) => PERMANENT_CODE.test(code))) return false;
+  if (codes.some((code) => TRANSPORT_CODES.has(code))) return true;
+  // Node's fetch rejects every network failure with TypeError("fetch failed"), and a body that dies
+  // half-way with TypeError("terminated"); the reason, when it gives one, is on .cause.
+  return error.name === "TypeError" && /^(fetch failed|terminated)$/.test(String(error.message));
+}
+
+/** A failed download in words that name the real reason: Node's own message is just "fetch failed". */
+export function describeDownloadFailure(error) {
+  const message = isObject(error) && typeof error.message === "string" ? error.message : String(error);
+  const code = causeChain(error)
+    .map((e) => e.code)
+    .find((c) => typeof c === "string");
+  return code && !message.includes(code) ? `${message} (${code})` : message;
+}
+
+/** Runs `attempt` and, when it fails in a way `isTransientDownloadFailure` calls a hiccup, tries it
+ *  again after each of `delaysMs`. Anything else is thrown at once, untouched. When the tries run out
+ *  the error says how many there were and why the last one failed. */
+export async function withDownloadRetries(
+  attempt,
+  { delaysMs = [2_000, 6_000], sleep = (ms) => new Promise((done) => setTimeout(done, ms)), onRetry = () => {} } = {},
+) {
+  for (let failed = 0; ; failed++) {
+    try {
+      return await attempt();
+    } catch (error) {
+      if (!isTransientDownloadFailure(error)) throw error;
+      if (failed >= delaysMs.length)
+        throw new Error(`${describeDownloadFailure(error)}; gave up after ${failed + 1} attempts`, { cause: error });
+      onRetry({ failed: failed + 1, of: delaysMs.length + 1, error, waitMs: delaysMs[failed] });
+      await sleep(delaysMs[failed]);
+    }
+  }
+}
+
+/** The pinned bytes of `pin.url`: fetched with a few tries for a hiccup, then checked ONCE, outside the
+ *  tries. Bytes that do not match the pin are a different file, not a bad connection: fetching again
+ *  must never be how they get accepted, and a retry must never make that failure look transient. */
+export async function downloadVerified(pin, fetchBytes, options) {
+  const bytes = await withDownloadRetries(() => fetchBytes(pin.url), options);
+  verifySha256(bytes, pin.sha256, pin.url);
+  return bytes;
 }
 
 /** Staged files that the incoming set does not contain, i.e. leftovers from an earlier fetch.
