@@ -11,8 +11,13 @@ import {
   ffmpegPin,
   FFMPEG_PINS,
   isPinnedBuild,
+  matchesSha256,
+  parseSha256Sums,
+  rewriteYtDlpPin,
   stalePaths,
   verifySha256,
+  YT_DLP_PIN,
+  ytDlpPin,
 } from "./sidecarStaging.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -223,6 +228,137 @@ describe("describeGhFailure", () => {
         // line, which reads as "no reason given" rather than "we could not tell".
         expect(describeGhFailure({ ghInstalled, stderr }).trim().length).toBeGreaterThan(0);
       }),
+    );
+  });
+});
+
+describe("the yt-dlp each platform ships is pinned", () => {
+  const platforms = { win: "yt-dlp.exe", mac: "yt-dlp_macos", linux: "yt-dlp_linux" };
+
+  it("names the asset each platform downloads, at a tag that cannot move, with the digest it must have", () => {
+    for (const [os, asset] of Object.entries(platforms)) {
+      const pin = ytDlpPin(os);
+      expect(pin.name, os).toBe(asset);
+      expect(pin.version, os).toMatch(/^\d{4}\.\d{2}\.\d{2}(\.\d+)?$/);
+      expect(pin.url, os).toBe(`https://github.com/yt-dlp/yt-dlp/releases/download/${pin.version}/${asset}`);
+      expect(pin.url, os).not.toMatch(/latest/i);
+      expect(pin.sha256, os).toMatch(/^[0-9a-f]{64}$/);
+    }
+    // A digest copied to the wrong platform would download fine and fail every build, or worse pass.
+    const digests = Object.keys(platforms).map((os) => ytDlpPin(os).sha256);
+    expect(new Set(digests).size).toBe(digests.length);
+  });
+
+  it("refuses a platform it has no pin for, rather than guessing one", () => {
+    expect(() => ytDlpPin("freebsd")).toThrow(/no pinned yt-dlp/i);
+  });
+
+  // The behaviour this replaces was a fetch of releases/latest, which is invisible in every test
+  // that stages a binary. Pin the SOURCE of the fetcher, so the next download added there cannot
+  // quietly go back to whatever the day serves.
+  it("leaves the fetcher no way to ask upstream for 'latest'", () => {
+    const fetcher = readFileSync(join(here, "fetch-sidecars.mjs"), "utf8");
+    expect(fetcher).not.toMatch(/releases\/latest/);
+    expect(fetcher).not.toMatch(/async function download\(/);
+  });
+
+  it("matchesSha256 accepts only the exact bytes", () => {
+    const bytes = Buffer.from("a yt-dlp build");
+    const digest = createHash("sha256").update(bytes).digest("hex");
+    expect(matchesSha256(bytes, digest)).toBe(true);
+    const changed = Buffer.from(bytes);
+    changed[3] ^= 1;
+    expect(matchesSha256(changed, digest)).toBe(false);
+    expect(matchesSha256(Buffer.alloc(0), digest)).toBe(false);
+  });
+});
+
+describe("moving the yt-dlp pin", () => {
+  const source = readFileSync(join(here, "sidecarStaging.mjs"), "utf8");
+  const current = Object.fromEntries(Object.values(YT_DLP_PIN.assets).map((a) => [a.name, a.sha256]));
+  const sums = (over = {}) => ({
+    "yt-dlp.exe": "a".repeat(64),
+    "yt-dlp_macos": "b".repeat(64),
+    "yt-dlp_linux": "c".repeat(64),
+    ...over,
+  });
+  /** The pin a rewritten source declares, read by running its block, not by pattern-matching it. */
+  const pinOf = (text) => {
+    const block = /\/\/ <yt-dlp-pin>([\s\S]*?)\/\/ <\/yt-dlp-pin>/.exec(text)[1].replace("export const", "const");
+    return new Function(`${block}; return YT_DLP_PIN;`)();
+  };
+
+  it("reads the upstream checksum file, whatever its line endings or binary-mode marker", () => {
+    const text = `${"a".repeat(64)}  yt-dlp.exe\r\n${"B".repeat(64)} *yt-dlp_macos\n\nnot a checksum line\n${"c".repeat(63)}  short\n`;
+    expect(parseSha256Sums(text)).toEqual({ "yt-dlp.exe": "a".repeat(64), "yt-dlp_macos": "b".repeat(64) });
+  });
+
+  it("rewrites to the current pin without changing a byte", () => {
+    expect(rewriteYtDlpPin(source, YT_DLP_PIN.version, current)).toBe(source);
+  });
+
+  it("changes the pin and nothing else, and the result is a module that says what was asked", () => {
+    const moved = rewriteYtDlpPin(source, "2026.11.02", sums());
+    expect(pinOf(moved)).toEqual({
+      version: "2026.11.02",
+      assets: {
+        win: { name: "yt-dlp.exe", sha256: "a".repeat(64) },
+        mac: { name: "yt-dlp_macos", sha256: "b".repeat(64) },
+        linux: { name: "yt-dlp_linux", sha256: "c".repeat(64) },
+      },
+    });
+    const outside = (text) => text.replace(/\/\/ <yt-dlp-pin>[\s\S]*?\/\/ <\/yt-dlp-pin>/, "");
+    expect(outside(moved)).toBe(outside(source));
+  });
+
+  it("keeps the file's line endings, so a Windows checkout is not left with mixed ones", () => {
+    const crlf = source.replace(/\r?\n/g, "\r\n");
+    const moved = rewriteYtDlpPin(crlf, "2026.11.02", sums());
+    expect(moved.match(/(?<!\r)\n/g)).toBeNull();
+    expect(pinOf(moved).version).toBe("2026.11.02");
+  });
+
+  it("accepts a dated re-release tag", () => {
+    expect(pinOf(rewriteYtDlpPin(source, "2026.11.02.1", sums())).version).toBe("2026.11.02.1");
+  });
+
+  it("refuses a release that does not list every asset, or lists a digest that is not one", () => {
+    for (const missing of ["yt-dlp.exe", "yt-dlp_macos", "yt-dlp_linux"]) {
+      const partial = sums();
+      delete partial[missing];
+      expect(() => rewriteYtDlpPin(source, "2026.11.02", partial), missing).toThrow(new RegExp(missing.replace(".", "\\.")));
+    }
+    for (const bad of ["", "g".repeat(64), "a".repeat(63), "a".repeat(65), undefined])
+      expect(() => rewriteYtDlpPin(source, "2026.11.02", sums({ "yt-dlp_linux": bad })), String(bad)).toThrow();
+  });
+
+  it("refuses anything that is not a release tag, rather than writing it into source", () => {
+    for (const tag of ["latest", "v2026.11.02", "2026.11", "2026.11.02 ", '2026.11.02"; process.exit(1); "', "", "../2026.11.02"])
+      expect(() => rewriteYtDlpPin(source, tag, sums()), JSON.stringify(tag)).toThrow(/not a yt-dlp release tag/);
+  });
+
+  it("refuses a file that has lost its markers instead of appending a second pin", () => {
+    expect(() => rewriteYtDlpPin("export const nothing = 1;\n", "2026.11.02", sums())).toThrow(/markers/);
+  });
+
+  it("round-trips any tag and digests it is given", () => {
+    const hex = fc.stringMatching(/^[0-9a-f]{64}$/);
+    const tag = fc
+      .tuple(fc.integer({ min: 2024, max: 2040 }), fc.integer({ min: 1, max: 12 }), fc.integer({ min: 1, max: 28 }))
+      .map(([y, m, d]) => `${y}.${String(m).padStart(2, "0")}.${String(d).padStart(2, "0")}`);
+    fc.assert(
+      fc.property(tag, hex, hex, hex, (version, win, mac, linux) => {
+        const moved = rewriteYtDlpPin(source, version, { "yt-dlp.exe": win, "yt-dlp_macos": mac, "yt-dlp_linux": linux });
+        expect(pinOf(moved)).toEqual({
+          version,
+          assets: {
+            win: { name: "yt-dlp.exe", sha256: win },
+            mac: { name: "yt-dlp_macos", sha256: mac },
+            linux: { name: "yt-dlp_linux", sha256: linux },
+          },
+        });
+      }),
+      { numRuns: 50 },
     );
   });
 });
