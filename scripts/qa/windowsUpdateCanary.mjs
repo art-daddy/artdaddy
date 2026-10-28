@@ -12,6 +12,11 @@
 // GitHub's Windows runners are elevated, and an elevated WebView2 host ignores the WEBVIEW2_* environment
 // overrides, so the port is requested through HKLM policy. If it still does not open, the installer step
 // alone is rehearsed (started the way the updater starts it) and the result says the app did not drive it.
+//
+// TO_VERSION (optional) judges that release's installer directly instead of the live manifest's: the old app
+// is replaced the way the updater replaces it, so a release can be tested without offering it to anyone.
+// Whenever the new version does not land, state-*.txt/png record who ran, where Windows says the app is
+// installed, what the installer left behind, what Defender and the Application log said, and the screen.
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { closeSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
@@ -24,6 +29,9 @@ if (process.platform !== "win32" || process.env.GITHUB_ACTIONS !== "true") {
 
 const REPOSITORY = process.env.GITHUB_REPOSITORY;
 const FROM = process.env.FROM_VERSION;
+// Optional: judge THIS release's installer directly (installer-only mode) instead of whatever the live
+// manifest offers, so a release can be tested before, or without, offering it to anyone.
+const TO = process.env.TO_VERSION ?? "";
 const MANIFEST_URL = "https://artdaddy.app/updates/latest.json";
 const PORT = 18877;
 const CDP = `http://127.0.0.1:${PORT}`;
@@ -32,6 +40,7 @@ const OUT = path.resolve("reports/qa/updater-canary");
 if (!REPOSITORY || !/^\d+\.\d+\.\d+$/.test(FROM ?? "") || !TEMP) {
   throw new Error("GITHUB_REPOSITORY, RUNNER_TEMP and FROM_VERSION (x.y.z) are required");
 }
+if (TO && !/^\d+\.\d+\.\d+$/.test(TO)) throw new Error("TO_VERSION must be x.y.z when given");
 mkdirSync(OUT, { recursive: true });
 
 // playwright-core is installed beside this run, not into the project: the canary needs only its
@@ -163,15 +172,89 @@ function diagnose(label) {
   writeFileSync(path.join(OUT, `diagnostics-${label}.txt`), text);
 }
 
+/**
+ * Everything worth knowing when an update did not land: the installed file and its version, who runs (the
+ * installer and its children included), where Windows says the app is installed, what the installer left in
+ * the temp folders, what Defender and the Application log said, and the screen. Written as state-<label>.*.
+ */
+function snapshot(label, exe) {
+  // Every query ends with `exit 0`: "no matching events" is an answer here, not a failure.
+  const run = (script) => {
+    try {
+      return powershell(`${script}; exit 0`);
+    } catch (error) {
+      return `error: ${error.message}`;
+    }
+  };
+  const destination = path.dirname(exe);
+  const text = [
+    `== ${new Date().toISOString()} (${label}) ==`,
+    "== installed exe ==",
+    run(
+      `$f = Get-Item -LiteralPath '${exe}' -ErrorAction SilentlyContinue; if ($f) { ` +
+        "'{0} bytes, written {1}, ProductVersion {2}' -f $f.Length, $f.LastWriteTime.ToString('o'), $f.VersionInfo.ProductVersion " +
+        "} else { 'MISSING' }",
+    ),
+    "== processes: artdaddy, installers, webview ==",
+    run(
+      "Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'artdaddy|setup|nsis|install|msedgewebview2|ffmpeg|yt-dlp' } | " +
+        "ForEach-Object { '{0} {1} parent={2} created={3} path={4} cmd={5}' -f $_.ProcessId, $_.Name, $_.ParentProcessId, " +
+        "$_.CreationDate, $_.ExecutablePath, $_.CommandLine } | Out-String -Width 4000",
+    ),
+    "== where Windows says the app is installed ==",
+    run(
+      "Get-ChildItem 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall','HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall' " +
+        "-ErrorAction SilentlyContinue | ForEach-Object { Get-ItemProperty $_.PSPath } | Where-Object { $_.DisplayName -match 'artdaddy' } | " +
+        "Select-Object DisplayName, DisplayVersion, InstallLocation, UninstallString | Format-List | Out-String -Width 4000",
+    ),
+    "== install folder, newest first ==",
+    run(
+      `Get-ChildItem -LiteralPath '${destination}' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | ` +
+        "Select-Object -First 20 | ForEach-Object { '{0} {1,12} {2}' -f $_.LastWriteTime.ToString('o'), $_.Length, $_.Name } | Out-String",
+    ),
+    "== what updaters and installers left in the temp folders ==",
+    run(
+      "Get-ChildItem $env:TEMP, $env:RUNNER_TEMP -Recurse -Depth 2 -ErrorAction SilentlyContinue | " +
+        "Where-Object { $_.Name -match 'updater|setup|nsis' } | Select-Object -First 40 | " +
+        "ForEach-Object { '{0} {1,12} {2}' -f $_.LastWriteTime.ToString('o'), $_.Length, $_.FullName } | Out-String -Width 4000",
+    ),
+    "== Defender state and recent events ==",
+    run(
+      "Get-MpComputerStatus -ErrorAction SilentlyContinue | Select-Object AMServiceEnabled, AntivirusEnabled, " +
+        "RealTimeProtectionEnabled, BehaviorMonitorEnabled, IoavProtectionEnabled | Format-List | Out-String",
+    ),
+    run("Get-MpThreatDetection -ErrorAction SilentlyContinue | Select-Object -First 10 | Format-List | Out-String -Width 4000"),
+    run(
+      "Get-WinEvent -LogName 'Microsoft-Windows-Windows Defender/Operational' -MaxEvents 30 -ErrorAction SilentlyContinue | " +
+        "ForEach-Object { '{0} id={1} {2}' -f $_.TimeCreated.ToString('o'), $_.Id, (($_.Message -split \"`n\")[0]) } | Out-String -Width 4000",
+    ),
+    "== Application log: errors and warnings of the last 15 minutes ==",
+    run(
+      "Get-WinEvent -FilterHashtable @{ LogName = 'Application'; Level = 2,3; StartTime = (Get-Date).AddMinutes(-15) } -MaxEvents 40 " +
+        "-ErrorAction SilentlyContinue | ForEach-Object { '{0} {1} id={2} {3}' -f $_.TimeCreated.ToString('o'), $_.ProviderName, " +
+        "$_.Id, (($_.Message -split \"`n\")[0]) } | Out-String -Width 4000",
+    ),
+    "== windows with a title ==",
+    run("Get-Process | Where-Object { $_.MainWindowTitle } | ForEach-Object { '{0} {1} {2}' -f $_.Id, $_.ProcessName, $_.MainWindowTitle } | Out-String -Width 4000"),
+  ].join("\n");
+  writeFileSync(path.join(OUT, `state-${label}.txt`), text);
+  try {
+    screenshot(`state-${label}.png`);
+  } catch {
+    /* no desktop to capture */
+  }
+}
+
 let failure = null;
 try {
   // 1. The live manifest says what the app should be offered.
   const manifest = await (await fetch(MANIFEST_URL, { headers: { "cache-control": "no-cache" } })).json();
   const offered = manifest.platforms?.["windows-x86_64"];
-  note("live manifest", { version: manifest.version, windowsUrl: offered?.url });
-  if (!offered?.url || !offered?.signature) throw new Error("the live manifest has no Windows entry");
-  if (!newer(manifest.version, FROM)) {
-    throw new Error(`the live manifest (${manifest.version}) is not newer than ${FROM}; nothing to update to`);
+  note("live manifest", { version: manifest.version, windowsUrl: offered?.url, judging: TO ? `${TO} directly, not through the manifest` : undefined });
+  const target = TO || manifest.version;
+  if (!TO && (!offered?.url || !offered?.signature)) throw new Error("the live manifest has no Windows entry");
+  if (!newer(target, FROM)) {
+    throw new Error(`${TO ? "the release" : "the live manifest"} (${target}) is not newer than ${FROM}; nothing to update to`);
   }
 
   // 2. The old release, as a user would have it.
@@ -219,7 +302,7 @@ try {
   screenshot("before-update.png");
   const installStarted = Date.now();
 
-  if (portOpened) {
+  if (portOpened && !TO) {
     // 5. Let the app itself check, download and verify the update.
     const browser = await chromium.connectOverCDP(CDP);
     const page = await pageOf(browser);
@@ -235,31 +318,45 @@ try {
     const staged = await invoke("download_update");
     note("download_update", { staged });
 
-    // 6. Install: the installer replaces the running app, which does not answer again.
-    void page.evaluate(() => window.__TAURI_INTERNALS__.invoke("install_update")).catch(() => undefined);
-    await sleep(3_000); // let the request reach the page before the connection is let go
+    // 6. Install: the updater runs the installer and ends the app itself (it ignores whether the installer
+    // started, then exits), so the call never comes back on success. An error that DOES come back is the one
+    // outcome that must not be swallowed: the app would be left exactly as it was.
+    const installCall = page
+      .evaluate(() => window.__TAURI_INTERNALS__.invoke("install_update"))
+      .then(
+        () => ({ settled: "resolved" }),
+        (error) => ({ settled: "rejected", message: String(error?.message ?? error).slice(0, 400) }),
+      );
+    const settled = await Promise.race([installCall, sleep(6_000).then(() => ({ settled: "pending" }))]);
     await browser.close().catch(() => undefined);
-    note("install_update requested");
+    note("install_update requested", settled);
+    if (settled.settled === "rejected" && !/closed|disconnected|target|navigat|context|session|destroyed/i.test(settled.message)) {
+      throw new Error(`install_update answered with an error instead of ending the app: ${settled.message}`);
+    }
   } else {
     // No page to ask: say why, then rehearse the part only a Windows machine can show, with the
     // installer started the way the updater starts it. The app did NOT drive this, and the result
     // says so.
-    diagnose("no-port");
+    if (!TO) diagnose("no-port");
     evidence.mode = "installer-only";
-    note("the old app opened no debugging port; rehearsing the installer step without the app driving it");
+    note(
+      TO
+        ? `judging ${TO}'s installer directly: the running old app is replaced the way the updater replaces it`
+        : "the old app opened no debugging port; rehearsing the installer step without the app driving it",
+    );
     const fetched = path.join(TEMP, "new-release");
     const got = spawnSync(
       "gh",
-      ["release", "download", `v${manifest.version}`, "--repo", REPOSITORY, "--pattern", "ArtDaddy-windows-x64-setup.exe",
+      ["release", "download", `v${target}`, "--repo", REPOSITORY, "--pattern", "ArtDaddy-windows-x64-setup.exe*",
         "--dir", fetched, "--clobber"],
       { encoding: "utf8" },
     );
-    if (got.status !== 0) throw new Error(`could not download v${manifest.version}: ${got.stderr}`);
+    if (got.status !== 0) throw new Error(`could not download v${target}: ${got.stderr}`);
     const update = path.join(fetched, "ArtDaddy-windows-x64-setup.exe");
-    const signature = path.join(fetched, "manifest.sig");
-    writeFileSync(signature, offered.signature);
+    const signature = TO ? path.join(fetched, "ArtDaddy-windows-x64-setup.exe.sig") : path.join(fetched, "manifest.sig");
+    if (!TO) writeFileSync(signature, offered.signature);
     const verified = spawnSync("node", ["scripts/verify-release-signature.mjs", update, signature], { encoding: "utf8" });
-    note("live manifest signature against the published installer", {
+    note(TO ? "release signature against the committed key" : "live manifest signature against the published installer", {
       status: verified.status,
       output: `${verified.stdout}${verified.stderr}`.trim().slice(-300),
     });
@@ -272,9 +369,19 @@ try {
 
   // 7. Wait for the new version on disk and a NEW process running it.
   let outcome = null;
+  let lastVersion = null;
+  let lastApps = [];
+  let snapshots = 0;
   const deadline = Date.now() + 300_000;
   while (Date.now() < deadline) {
     await sleep(3_000);
+    if (snapshots === 0 && Date.now() - installStarted > 20_000) {
+      snapshots = 1;
+      snapshot("after-20s", exe);
+    } else if (snapshots === 1 && Date.now() - installStarted > 90_000) {
+      snapshots = 2;
+      snapshot("after-90s", exe);
+    }
     let version = null;
     try {
       version = productVersion(exe);
@@ -287,17 +394,25 @@ try {
     } catch {
       /* a process went away while it was being read */
     }
+    lastVersion = version;
+    lastApps = apps;
     const fresh = apps.filter((app) => !old.some((was) => sameProcess(app, was)));
-    if (version === manifest.version && fresh.length) {
+    if (version === target && fresh.length) {
       outcome = { version, processes: apps, relaunched: true, seconds: Math.round((Date.now() - installStarted) / 1000) };
       break;
     }
-    if (version === manifest.version && !apps.length && Date.now() - installStarted > 120_000) {
+    if (version === target && !apps.length && Date.now() - installStarted > 120_000) {
       outcome = { version, processes: apps, relaunched: false, seconds: Math.round((Date.now() - installStarted) / 1000) };
       break;
     }
   }
-  if (!outcome) throw new Error("the installed version never became the offered one, with a new process");
+  if (!outcome) {
+    snapshot("timeout", exe);
+    throw new Error(
+      `the installed version never became the offered one (${target}), with a new process; last read: ` +
+        `version ${lastVersion}, processes ${JSON.stringify(lastApps)} (see state-timeout.txt)`,
+    );
+  }
   note("after update", outcome);
   await sleep(10_000);
   screenshot("after-update.png");
@@ -316,8 +431,8 @@ try {
     }));
     note("relaunched app answers", seen);
     await reconnected.close().catch(() => undefined);
-    if (seen.version !== null && seen.version !== manifest.version) {
-      throw new Error(`the relaunched app says it is ${seen.version}, expected ${manifest.version}`);
+    if (seen.version !== null && seen.version !== target) {
+      throw new Error(`the relaunched app says it is ${seen.version}, expected ${target}`);
     }
     if (seen.offeredNext !== null && !String(seen.offeredNext).startsWith("error:")) {
       throw new Error(`the relaunched app is still offered ${seen.offeredNext?.version}`);
@@ -336,8 +451,11 @@ try {
   evidence.passed = true;
   if (evidence.mode === "installer-only") {
     console.log(
-      "::warning::The old app opened no debugging port, so it did not drive this update: only the installer " +
-        "step (replace the running app, relaunch it) was rehearsed. See diagnostics-no-port.txt.",
+      TO
+        ? `::warning::TO_VERSION=${TO} was given, so only the installer step (replace the running app, relaunch it) was judged; ` +
+            "the app's own updater did not drive this update."
+        : "::warning::The old app opened no debugging port, so it did not drive this update: only the installer " +
+            "step (replace the running app, relaunch it) was rehearsed. See diagnostics-no-port.txt.",
     );
   }
 } catch (error) {
