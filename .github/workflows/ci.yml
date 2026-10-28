@@ -70,6 +70,13 @@ jobs:
         env:
           PLAYWRIGHT_JSON_OUTPUT_NAME: reports/qa/browser/results.json
         run: npm run e2e:ui -- --reporter=list,json
+      # macOS CI runs a failed test again on a fresh page (src/test/browserRunPolicy.ts). A green run
+      # that needed one is only honest if it says so: this lists those tests as warnings on the run.
+      # Advisory: a bug in the report must not turn a lane red.
+      - name: Report browser tests that passed only on a retry
+        if: always()
+        continue-on-error: true
+        run: node scripts/ci/browserFlakeReport.mjs reports/qa/browser/results.json
       - name: Verify real failing-browser evidence capture
         run: node scripts/qa/browserFailureArtifacts.mjs
       - name: Preserve real browser results and failure artifacts

@@ -1,0 +1,237 @@
+{
+  "_provenance": "Real GitHub REST payloads for art-daddy/artdaddy run 40177121333 attempt 1 (GET actions/runs/{id}/attempts/{n}, .../jobs, check-runs/{job}/annotations), trimmed to the fields the requeue decision reads (the steps of jobs that succeeded are omitted): a macOS browser job failed on a beforeAll hook timeout after it had run.",
+  "run": {
+    "id": 40177121333,
+    "workflow_id": 358098751,
+    "event": "push",
+    "status": "completed",
+    "conclusion": "failure",
+    "run_attempt": 1,
+    "head_sha": "cd2748b499f430955b08f293ae211cb3d34aefc5",
+    "head_branch": "qa/0.21.7-unified-20261024",
+    "head_repository": {
+      "full_name": "art-daddy/artdaddy"
+    },
+    "repository": {
+      "full_name": "art-daddy/artdaddy"
+    }
+  },
+  "jobs": [
+    {
+      "id": 121120109224,
+      "name": "cargo test (macos-14)",
+      "status": "completed",
+      "conclusion": "success",
+      "labels": [
+        "macos-14"
+      ],
+      "run_attempt": 1,
+      "started_at": "2026-10-25T08:33:58Z",
+      "completed_at": "2026-10-25T08:35:20Z"
+    },
+    {
+      "id": 121120109424,
+      "name": "build + unit tests (windows-latest)",
+      "status": "completed",
+      "conclusion": "success",
+      "labels": [
+        "windows-latest"
+      ],
+      "run_attempt": 1,
+      "started_at": "2026-10-25T08:33:58Z",
+      "completed_at": "2026-10-25T08:40:59Z"
+    },
+    {
+      "id": 121120109435,
+      "name": "real-browser UI + compositor pixels (macos-14)",
+      "status": "completed",
+      "conclusion": "failure",
+      "labels": [
+        "macos-14"
+      ],
+      "run_attempt": 1,
+      "started_at": "2026-10-25T08:33:59Z",
+      "completed_at": "2026-10-25T08:43:06Z",
+      "steps": [
+        {
+          "name": "Set up job",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run actions/checkout@v4",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run actions/setup-node@v4",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run npm ci",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run npm i --no-save @playwright/test@1.61.1",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run npx playwright install --with-deps chromium webkit",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run node scripts/fetch-sidecars.mjs --only ffmpeg,ffprobe",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run npm run e2e:ui",
+          "conclusion": "failure"
+        },
+        {
+          "name": "Run actions/upload-artifact@v4",
+          "conclusion": "success"
+        },
+        {
+          "name": "Post Run actions/setup-node@v4",
+          "conclusion": "skipped"
+        },
+        {
+          "name": "Post Run actions/checkout@v4",
+          "conclusion": "success"
+        },
+        {
+          "name": "Complete job",
+          "conclusion": "success"
+        }
+      ],
+      "annotations": [
+        {
+          "annotation_level": "warning",
+          "message": "Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@v4, actions/setup-node@v4, actions/upload-artifact@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/",
+          "title": ""
+        },
+        {
+          "annotation_level": "failure",
+          "message": "Process completed with exit code 1.",
+          "title": ""
+        },
+        {
+          "annotation_level": "warning",
+          "message": "You are using a frozen webkit browser which does not receive updates anymore on mac14-arm64. Please update to the latest version of your operating system to test up-to-date browsers.",
+          "title": "Playwright"
+        },
+        {
+          "annotation_level": "notice",
+          "message": "Due to capacity constraints, jobs targeting macOS arm64 runners may experience longer queue times.",
+          "title": ""
+        }
+      ]
+    },
+    {
+      "id": 121120109457,
+      "name": "export suite (windows-latest)",
+      "status": "completed",
+      "conclusion": "success",
+      "labels": [
+        "windows-latest"
+      ],
+      "run_attempt": 1,
+      "started_at": "2026-10-25T08:33:58Z",
+      "completed_at": "2026-10-25T08:57:04Z"
+    },
+    {
+      "id": 121120109484,
+      "name": "build + unit tests (ubuntu-22.04)",
+      "status": "completed",
+      "conclusion": "success",
+      "labels": [
+        "ubuntu-22.04"
+      ],
+      "run_attempt": 1,
+      "started_at": "2026-10-25T08:33:59Z",
+      "completed_at": "2026-10-25T08:38:26Z"
+    },
+    {
+      "id": 121120109485,
+      "name": "tauri desktop build (windows)",
+      "status": "completed",
+      "conclusion": "success",
+      "labels": [
+        "windows-latest"
+      ],
+      "run_attempt": 1,
+      "started_at": "2026-10-25T08:33:59Z",
+      "completed_at": "2026-10-25T08:48:50Z"
+    },
+    {
+      "id": 121120109505,
+      "name": "export suite (macos-14)",
+      "status": "completed",
+      "conclusion": "success",
+      "labels": [
+        "macos-14"
+      ],
+      "run_attempt": 1,
+      "started_at": "2026-10-25T08:33:59Z",
+      "completed_at": "2026-10-25T08:52:38Z"
+    },
+    {
+      "id": 121120109517,
+      "name": "real-browser UI + compositor pixels (windows-latest)",
+      "status": "completed",
+      "conclusion": "success",
+      "labels": [
+        "windows-latest"
+      ],
+      "run_attempt": 1,
+      "started_at": "2026-10-25T08:33:59Z",
+      "completed_at": "2026-10-25T08:40:04Z"
+    },
+    {
+      "id": 121120109530,
+      "name": "export suite (ubuntu-22.04)",
+      "status": "completed",
+      "conclusion": "success",
+      "labels": [
+        "ubuntu-22.04"
+      ],
+      "run_attempt": 1,
+      "started_at": "2026-10-25T08:33:58Z",
+      "completed_at": "2026-10-25T08:44:05Z"
+    },
+    {
+      "id": 121120109554,
+      "name": "cargo test (ubuntu-22.04)",
+      "status": "completed",
+      "conclusion": "success",
+      "labels": [
+        "ubuntu-22.04"
+      ],
+      "run_attempt": 1,
+      "started_at": "2026-10-25T08:33:59Z",
+      "completed_at": "2026-10-25T08:36:08Z"
+    },
+    {
+      "id": 121120109593,
+      "name": "real-browser UI + compositor pixels (ubuntu-22.04)",
+      "status": "completed",
+      "conclusion": "success",
+      "labels": [
+        "ubuntu-22.04"
+      ],
+      "run_attempt": 1,
+      "started_at": "2026-10-25T08:33:59Z",
+      "completed_at": "2026-10-25T08:37:41Z"
+    },
+    {
+      "id": 121120109629,
+      "name": "build + unit tests (macos-14)",
+      "status": "completed",
+      "conclusion": "success",
+      "labels": [
+        "macos-14"
+      ],
+      "run_attempt": 1,
+      "started_at": "2026-10-25T08:34:00Z",
+      "completed_at": "2026-10-25T08:36:40Z"
+    }
+  ]
+}

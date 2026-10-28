@@ -1,5 +1,9 @@
 import { defineConfig, devices } from "@playwright/test";
 
+import { browserRunPolicy } from "./src/test/browserRunPolicy";
+
+const policy = browserRunPolicy(process.env, process.platform);
+
 // Real-browser lane. happy-dom has no WebGL, no layout and no real pointer input,
 // so three whole classes of bug are invisible to the unit suite:
 //   * the app white-screens on boot (a bad import / CSP / bundle split),
@@ -29,6 +33,13 @@ export default defineConfig({
   expect: { timeout: 10_000 },
   fullyParallel: false,
   workers: 1,
+  // A GPU test that fails once on a macOS CI runner is run again on a fresh page, and the run stops
+  // early if many fail for good (src/test/browserRunPolicy.ts). Everywhere else a failure is final.
+  // The policy is recorded in the report so browserFailureArtifacts.mjs can hold what Playwright
+  // APPLIED to what was meant: a per-project override or an ignored option would otherwise be silent.
+  retries: policy.retries,
+  maxFailures: policy.maxFailures,
+  metadata: { browserRunPolicy: policy },
   reporter: [["list"]],
   use: {
     baseURL: "http://127.0.0.1:5199",

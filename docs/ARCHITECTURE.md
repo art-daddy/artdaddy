@@ -475,6 +475,24 @@ only): the **browser-only render runtime** — `renderer.ts` (WebGL2), `videoSou
 surface (dialogs, external-media preview, fs/asset scopes, thumbnail-capture) — manual
 `npx tauri dev` only.
 
+### CI retries (macOS)
+
+The macOS lanes run on GitHub's GPU-less arm64 pool, which fails in three different ways, and each
+has its own answer. Nothing else is retried: a test or job that ran and failed stays red.
+
+| What happens | Answer | Where |
+| --- | --- | --- |
+| One GPU/compositor test fails on a macOS VM (a pixel read of 0, WebGL2 missing, a probe that never reports) while about 115 others pass | Playwright runs it again on a fresh page, twice at most, **macOS CI only**; the run stops after 10 tests that failed for good | `src/test/browserRunPolicy.ts`, `playwright.config.ts` |
+| A retry is what made the run green | The run says so: a warning per test and a table in the job summary | `scripts/ci/browserFlakeReport.mjs` (the "Report browser tests that passed only on a retry" step) |
+| A sidecar download (macOS ffmpeg comes from martin-riedl.de) drops with a bare `fetch failed` | Network errors and 5xx are tried again, twice. A 404, a bad certificate or bytes that do not match the pin never are | `scripts/sidecarStaging.mjs` (`downloadVerified`) |
+| A macOS job never gets a runner ("The job was not acquired by Runner of type hosted even after multiple attempts": GitHub's capacity) and the run goes red though no code ran | `ci-macos-requeue.yml` re-runs the failed jobs after a wait, three attempts in all | `scripts/ci/macosRequeue.mjs`, `.github/workflows/ci-macos-requeue.yml` |
+
+The requeue acts only on a job that provably never started (cancelled, no step run, a macOS label,
+GitHub's own "not acquired" annotation), in a push run of this repository whose branch has not moved
+and has no other CI run active: CI cancels in-progress runs of the same ref, so re-running an old run
+would cancel the newer one. To see what it would do for a run: Actions, "CI macOS requeue", Run
+workflow with the run's number (a dry run unless you untick it).
+
 ---
 
 ## 15. Build & run

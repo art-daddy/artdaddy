@@ -191,6 +191,22 @@ test("failure evidence negative control", async ({ page }, info) => {
     const schema = result.config.metadata.failureEvidence;
     assert.equal(schema.token, token);
     assert.equal(schema.configSha256, configSha256);
+    // Retries only exist if Playwright APPLIED them. The config records the policy it meant; every
+    // project must resolve to exactly that, so a per-project override or an ignored option is loud.
+    const policy = result.config.metadata.browserRunPolicy;
+    assert.ok(
+      policy && Number.isInteger(policy.retries) && Number.isInteger(policy.maxFailures),
+      "playwright.config.ts no longer records its retry policy",
+    );
+    assert.equal(result.config.maxFailures, policy.maxFailures);
+    for (const project of result.config.projects)
+      assert.equal(
+        project.retries,
+        policy.retries,
+        `${project.name} does not run with the retry policy the config declares`,
+      );
+    if (process.platform === "darwin" && process.env.CI)
+      assert.ok(policy.retries >= 1, "A flaky browser test on a macOS CI runner must be retried");
     fs.writeFileSync(schemaFile, JSON.stringify(schema, null, 2), { flag: "wx" });
     assert.equal(
       result.errors.length,

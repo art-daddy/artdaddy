@@ -1,0 +1,786 @@
+{
+  "_provenance": "Trimmed from the real macOS CI report of run 40679950578 attempt 1 (artifact exporter-browser-macos-14-<sha>-attempt-1, Playwright 1.61.1): a macOS runner whose browser never started, so the rotation spec's beforeAll hook hit its timeout and the rest of its tests did not run. Every value kept is as Playwright wrote it; stdout, attachments, stacks and commit text were removed, and stats were recounted for the specs kept.",
+  "config": {
+    "maxFailures": 0,
+    "projects": [
+      {
+        "id": "chromium",
+        "name": "chromium",
+        "retries": 0,
+        "repeatEach": 1,
+        "timeout": 60000
+      },
+      {
+        "id": "webkit",
+        "name": "webkit",
+        "retries": 0,
+        "repeatEach": 1,
+        "timeout": 60000
+      }
+    ],
+    "metadata": {}
+  },
+  "suites": [
+    {
+      "title": "boot.spec.ts",
+      "file": "boot.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [],
+      "suites": [
+        {
+          "title": "app boot",
+          "file": "boot.spec.ts",
+          "column": 6,
+          "line": 13,
+          "specs": [
+            {
+              "title": "mounts something into #root and does not white-screen",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 60000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 3851,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-28T11:27:35.802Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "3be9e5b40a014dc58fa3-886f907e07d36dfef38b",
+              "file": "boot.spec.ts",
+              "line": 14,
+              "column": 3
+            },
+            {
+              "title": "throws no uncaught error or unhandled rejection while booting",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 60000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 3828,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-28T11:27:42.387Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "3be9e5b40a014dc58fa3-6b8445de66d53795f38b",
+              "file": "boot.spec.ts",
+              "line": 23,
+              "column": 3
+            }
+          ],
+          "suites": []
+        }
+      ]
+    },
+    {
+      "title": "rotation.spec.ts",
+      "file": "rotation.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "failed calibration selects normalization without waiting for stalled original decoders",
+          "ok": false,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 60000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "chromium",
+              "projectName": "chromium",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "timedOut",
+                  "duration": 0,
+                  "error": {
+                    "message": "\u001b[31m\"beforeAll\" hook timeout of 480000ms exceeded.\u001b[39m"
+                  },
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-28T11:28:35.425Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "unexpected"
+            }
+          ],
+          "id": "168c8994e64e4b747b55-44283472bc8fbde811e5",
+          "file": "rotation.spec.ts",
+          "line": 192,
+          "column": 1
+        },
+        {
+          "title": "a video control that never presents a frame is reported, not waited on",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 60000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "chromium",
+              "projectName": "chromium",
+              "results": [
+                {
+                  "workerIndex": -1,
+                  "parallelIndex": -1,
+                  "status": "skipped",
+                  "duration": 0,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-28T11:38:16.174Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "skipped"
+            }
+          ],
+          "id": "168c8994e64e4b747b55-cfbe0b0cd6fdd71e23ed",
+          "file": "rotation.spec.ts",
+          "line": 229,
+          "column": 1
+        },
+        {
+          "title": "failed calibration selects normalization without waiting for stalled original decoders",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 60000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "webkit",
+              "projectName": "webkit",
+              "results": [
+                {
+                  "workerIndex": 2,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 929,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-28T11:40:16.415Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "168c8994e64e4b747b55-1feec8b8b41df8d7abff",
+          "file": "rotation.spec.ts",
+          "line": 192,
+          "column": 1
+        },
+        {
+          "title": "a video control that never presents a frame is reported, not waited on",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 60000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "webkit",
+              "projectName": "webkit",
+              "results": [
+                {
+                  "workerIndex": 2,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 2056,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-28T11:40:26.257Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "168c8994e64e4b747b55-dd1a535145042c5d7ccd",
+          "file": "rotation.spec.ts",
+          "line": 229,
+          "column": 1
+        }
+      ],
+      "suites": [
+        {
+          "title": "a rotated video previews as it exports (real WebCodecs + WebGL2)",
+          "file": "rotation.spec.ts",
+          "column": 6,
+          "line": 250,
+          "specs": [
+            {
+              "title": "h264_size_control.mp4 preserves the original picture",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 60000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-28T11:38:16.174Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "skipped"
+                }
+              ],
+              "id": "168c8994e64e4b747b55-a991fed7047cfb73a31e",
+              "file": "rotation.spec.ts",
+              "line": 252,
+              "column": 5
+            },
+            {
+              "title": "h264_baseline_control.mp4 preserves the original picture",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 60000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-28T11:38:16.174Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "skipped"
+                }
+              ],
+              "id": "168c8994e64e4b747b55-c3096f6e648ede8ae7d1",
+              "file": "rotation.spec.ts",
+              "line": 252,
+              "column": 5
+            },
+            {
+              "title": "h264_rot0.mp4",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 60000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-28T11:38:16.174Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "skipped"
+                }
+              ],
+              "id": "168c8994e64e4b747b55-3f575fb5bdb8cecec577",
+              "file": "rotation.spec.ts",
+              "line": 260,
+              "column": 5
+            },
+            {
+              "title": "h264_rot0_hflip.mp4",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 60000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-28T11:38:16.174Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "skipped"
+                }
+              ],
+              "id": "168c8994e64e4b747b55-f881d8f89088419f9266",
+              "file": "rotation.spec.ts",
+              "line": 260,
+              "column": 5
+            },
+            {
+              "title": "h264_rot90.mp4",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 60000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-28T11:38:16.174Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "skipped"
+                }
+              ],
+              "id": "168c8994e64e4b747b55-8762660b65e080c174b5",
+              "file": "rotation.spec.ts",
+              "line": 260,
+              "column": 5
+            },
+            {
+              "title": "h264_rot90_hflip.mp4",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 60000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-28T11:38:16.174Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "skipped"
+                }
+              ],
+              "id": "168c8994e64e4b747b55-154fe0b681dcb875c3cf",
+              "file": "rotation.spec.ts",
+              "line": 260,
+              "column": 5
+            },
+            {
+              "title": "h264_rot180.mp4",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 60000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-28T11:38:16.174Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "skipped"
+                }
+              ],
+              "id": "168c8994e64e4b747b55-729de2c18f4d171714e3",
+              "file": "rotation.spec.ts",
+              "line": 260,
+              "column": 5
+            },
+            {
+              "title": "h264_rot180_hflip.mp4",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 60000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-28T11:38:16.174Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "skipped"
+                }
+              ],
+              "id": "168c8994e64e4b747b55-26d7508fd8f508ff34a2",
+              "file": "rotation.spec.ts",
+              "line": 260,
+              "column": 5
+            },
+            {
+              "title": "h264_rot270.mp4",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 60000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-28T11:38:16.174Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "skipped"
+                }
+              ],
+              "id": "168c8994e64e4b747b55-0c475704afbd7cda15c5",
+              "file": "rotation.spec.ts",
+              "line": 260,
+              "column": 5
+            },
+            {
+              "title": "h264_rot270_hflip.mp4",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 60000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-28T11:38:16.174Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "skipped"
+                }
+              ],
+              "id": "168c8994e64e4b747b55-8dd90e464773af30e607",
+              "file": "rotation.spec.ts",
+              "line": 260,
+              "column": 5
+            },
+            {
+              "title": "h264_rot0_movie90.mp4",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 60000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-28T11:38:16.174Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "skipped"
+                }
+              ],
+              "id": "168c8994e64e4b747b55-6f69f2266c31ccf5af31",
+              "file": "rotation.spec.ts",
+              "line": 260,
+              "column": 5
+            },
+            {
+              "title": "h264_rot90_movie90.mp4",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 60000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-28T11:38:16.174Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "skipped"
+                }
+              ],
+              "id": "168c8994e64e4b747b55-58d6e8f075617bea0bf9",
+              "file": "rotation.spec.ts",
+              "line": 260,
+              "column": 5
+            },
+            {
+              "title": "h264_rot0_hflip_movie90.mp4",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 60000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-28T11:38:16.174Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "skipped"
+                }
+              ],
+              "id": "168c8994e64e4b747b55-00c96dd17fc7a2666509",
+              "file": "rotation.spec.ts",
+              "line": 260,
+              "column": 5
+            },
+            {
+              "title": "a crop cuts the shown picture, not the stored one",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 60000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-28T11:38:16.174Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "skipped"
+                }
+              ],
+              "id": "168c8994e64e4b747b55-058a927a6453740c8d60",
+              "file": "rotation.spec.ts",
+              "line": 284,
+              "column": 3
+            },
+            {
+              "title": "the motion smear runs across the shown picture, not along the stored frame",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 60000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-28T11:38:16.175Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "skipped"
+                }
+              ],
+              "id": "168c8994e64e4b747b55-eade075dd3bd13c03b3d",
+              "file": "rotation.spec.ts",
+              "line": 295,
+              "column": 3
+            }
+          ],
+          "suites": []
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "stats": {
+    "expected": 4,
+    "skipped": 16,
+    "unexpected": 1,
+    "flaky": 0
+  }
+}

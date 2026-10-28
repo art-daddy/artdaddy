@@ -7,15 +7,20 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
 import {
+  describeDownloadFailure,
   describeGhFailure,
+  downloadVerified,
   ffmpegPin,
   FFMPEG_PINS,
+  httpFailure,
   isPinnedBuild,
+  isTransientDownloadFailure,
   matchesSha256,
   parseSha256Sums,
   rewriteYtDlpPin,
   stalePaths,
   verifySha256,
+  withDownloadRetries,
   YT_DLP_PIN,
   ytDlpPin,
 } from "./sidecarStaging.mjs";
@@ -360,5 +365,186 @@ describe("moving the yt-dlp pin", () => {
       }),
       { numRuns: 50 },
     );
+  });
+});
+
+// A macOS runner lost its ffmpeg download twice in a month with a bare "fetch failed" and the whole
+// lane went red for a connection that a second try would have kept. These tests hold the OUTCOME of
+// a download, in both directions: a hiccup is absorbed, a wrong file never is.
+describe("a download that hiccups is tried again; one that is wrong never is", () => {
+  const bytes = Buffer.from("the pinned ffmpeg build");
+  const pin = { url: "https://example.test/ffmpeg.zip", sha256: createHash("sha256").update(bytes).digest("hex") };
+  const dropped = (code) =>
+    new TypeError("fetch failed", code ? { cause: Object.assign(new Error(`read ${code}`), { code }) } : undefined);
+  const transientFailures = [
+    () => dropped("ECONNRESET"),
+    () => dropped("ETIMEDOUT"),
+    () => dropped("UND_ERR_CONNECT_TIMEOUT"),
+    () => dropped("EAI_AGAIN"),
+    () => dropped(),
+    () => new TypeError("terminated", { cause: Object.assign(new Error("other side closed"), { code: "UND_ERR_SOCKET" }) }),
+    () => httpFailure(503, pin.url),
+    () => httpFailure(429, pin.url),
+  ];
+  const permanentFailures = [
+    () => httpFailure(404, pin.url),
+    () => httpFailure(403, pin.url),
+    () => httpFailure(401, pin.url),
+    () => dropped("CERT_HAS_EXPIRED"),
+    () => dropped("UNABLE_TO_VERIFY_LEAF_SIGNATURE"),
+    () => dropped("DEPTH_ZERO_SELF_SIGNED_CERT"),
+    () => dropped("ERR_TLS_CERT_ALTNAME_INVALID"),
+    () => dropped("ERR_INVALID_URL"),
+    () => new Error("not even a network error"),
+  ];
+
+  /** Fails with each of `failures` in turn, then serves `served`; remembers how often it was asked. */
+  function fetcher(failures, served = bytes) {
+    const asked = [];
+    return {
+      asked,
+      fetchBytes: async (url) => {
+        asked.push(url);
+        if (asked.length <= failures.length) throw failures[asked.length - 1]();
+        return served;
+      },
+    };
+  }
+  const clock = () => {
+    const waited = [];
+    return { waited, sleep: async (ms) => void waited.push(ms) };
+  };
+
+  it("serves the pinned bytes after a dropped connection and a 503, and logs what it retried", async () => {
+    const f = fetcher([() => dropped("ECONNRESET"), () => httpFailure(503, pin.url)]);
+    const { waited, sleep } = clock();
+    const retried = [];
+    const got = await downloadVerified(pin, f.fetchBytes, { sleep, onRetry: (r) => retried.push(r) });
+    expect(got.equals(bytes)).toBe(true);
+    expect(f.asked).toEqual([pin.url, pin.url, pin.url]);
+    expect(waited).toEqual([2_000, 6_000]);
+    expect(retried.map((r) => describeDownloadFailure(r.error))).toEqual([
+      "fetch failed (ECONNRESET)",
+      `HTTP 503 for ${pin.url}`,
+    ]);
+    expect(retried.map((r) => `${r.failed}/${r.of}`)).toEqual(["1/3", "2/3"]);
+  });
+
+  it("never fetches a build that fails its checksum a second time", async () => {
+    const f = fetcher([], Buffer.from("some other file"));
+    const { waited, sleep } = clock();
+    await expect(downloadVerified(pin, f.fetchBytes, { sleep })).rejects.toThrow(/not the pinned build/);
+    expect(f.asked).toHaveLength(1);
+    expect(waited).toEqual([]);
+  });
+
+  it("retries a hiccup but not the wrong file that follows it", async () => {
+    const f = fetcher([() => dropped("ECONNRESET")], Buffer.from("some other file"));
+    const { sleep } = clock();
+    await expect(downloadVerified(pin, f.fetchBytes, { sleep })).rejects.toThrow(/not the pinned build/);
+    expect(f.asked).toHaveLength(2);
+  });
+
+  it("asks exactly once when the answer cannot change, and throws the fetcher's own error untouched", async () => {
+    for (const make of permanentFailures) {
+      const thrown = make();
+      const asked = [];
+      const { waited, sleep } = clock();
+      const rejected = await downloadVerified(
+        pin,
+        async (url) => {
+          asked.push(url);
+          throw thrown;
+        },
+        { sleep },
+      ).catch((e) => e);
+      expect(rejected, thrown.message).toBe(thrown);
+      expect(asked, thrown.message).toHaveLength(1);
+      expect(waited, thrown.message).toEqual([]);
+    }
+    expect(httpFailure(404, pin.url).message).toBe(`HTTP 404 for ${pin.url}`);
+  });
+
+  it("gives up after three attempts, saying how many and why the last one failed", async () => {
+    const f = fetcher([() => dropped("ETIMEDOUT"), () => dropped("ETIMEDOUT"), () => dropped("ETIMEDOUT"), () => dropped("ETIMEDOUT")]);
+    const { waited, sleep } = clock();
+    const failure = await downloadVerified(pin, f.fetchBytes, { sleep }).catch((e) => e);
+    expect(failure.message).toBe("fetch failed (ETIMEDOUT); gave up after 3 attempts");
+    expect(failure.cause.cause.code).toBe("ETIMEDOUT");
+    expect(f.asked).toHaveLength(3);
+    expect(waited).toEqual([2_000, 6_000]);
+  });
+
+  it("holds for every kind of failure: a hiccup is absorbed within the budget, a wrong answer is final at once", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.integer({ min: 0, max: 2 }),
+        fc.constantFrom(...transientFailures),
+        async (hiccups, make) => {
+          const f = fetcher(Array.from({ length: hiccups }, () => make));
+          const { waited, sleep } = clock();
+          const got = await downloadVerified(pin, f.fetchBytes, { sleep });
+          expect(got.equals(bytes)).toBe(true);
+          expect(f.asked).toHaveLength(hiccups + 1);
+          expect(waited).toEqual([2_000, 6_000].slice(0, hiccups));
+        },
+      ),
+      { numRuns: 60 },
+    );
+    await fc.assert(
+      fc.asyncProperty(fc.constantFrom(...permanentFailures), async (make) => {
+        const f = fetcher([make, make, make]);
+        const { waited, sleep } = clock();
+        await expect(downloadVerified(pin, f.fetchBytes, { sleep })).rejects.toBeDefined();
+        expect(f.asked).toHaveLength(1);
+        expect(waited).toEqual([]);
+      }),
+      { numRuns: 60 },
+    );
+  });
+
+  it("retries every status that means the server stumbled, and none that means the request is wrong", () => {
+    for (const status of [408, 425, 429, 500, 502, 503, 504])
+      expect(isTransientDownloadFailure(httpFailure(status, pin.url)), String(status)).toBe(true);
+    for (const status of [400, 401, 403, 404, 410, 416, 451])
+      expect(isTransientDownloadFailure(httpFailure(status, pin.url)), String(status)).toBe(false);
+  });
+
+  it("is not fooled by something that is not an error at all", () => {
+    for (const odd of [undefined, null, "fetch failed", 503, {}, { status: "503" }])
+      expect(isTransientDownloadFailure(odd), String(odd)).toBe(false);
+  });
+
+  it("uses the delays it is given and stops at the last one", async () => {
+    const { waited, sleep } = clock();
+    let asked = 0;
+    const failure = await withDownloadRetries(
+      async () => {
+        asked++;
+        throw dropped("ECONNRESET");
+      },
+      { delaysMs: [5, 7, 11, 13], sleep },
+    ).catch((e) => e);
+    expect(asked).toBe(5);
+    expect(waited).toEqual([5, 7, 11, 13]);
+    expect(failure.message).toMatch(/gave up after 5 attempts/);
+  });
+
+  it("names the reason Node hides behind 'fetch failed'", () => {
+    expect(describeDownloadFailure(dropped("ECONNRESET"))).toBe("fetch failed (ECONNRESET)");
+    expect(describeDownloadFailure(dropped())).toBe("fetch failed");
+    expect(describeDownloadFailure(httpFailure(502, pin.url))).toBe(`HTTP 502 for ${pin.url}`);
+    expect(describeDownloadFailure("a string")).toBe("a string");
+  });
+
+  // fetch-sidecars.mjs cannot be imported (it downloads at import), so hold its SOURCE: every
+  // pinned download goes through the retried-then-verified path, and nothing in it can fetch bytes
+  // or check them any other way.
+  it("leaves the fetcher no download that skips the retried-then-verified path", () => {
+    const fetcher = readFileSync(join(here, "fetch-sidecars.mjs"), "utf8");
+    expect(fetcher.match(/\bfetch\(/g)).toHaveLength(1);
+    expect(fetcher).toMatch(/async function fetchBytes\(url\) \{\s*const res = await fetch\(url/);
+    expect(fetcher).toMatch(/await downloadVerified\(\{ url, sha256 \}, fetchBytes/);
+    expect(fetcher).not.toMatch(/\bverifySha256\b/);
   });
 });
