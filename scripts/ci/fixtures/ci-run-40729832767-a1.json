@@ -1,0 +1,188 @@
+{
+  "_provenance": "Real GitHub REST payloads for art-daddy/artdaddy run 40729832767 attempt 1 (GET actions/runs/{id}/attempts/{n}, .../jobs, check-runs/{job}/annotations), trimmed to the fields the requeue decision reads (the steps of jobs that succeeded are omitted): the macOS browser job never got a runner and the run went red on main (re-run by hand afterwards; it then passed).",
+  "run": {
+    "id": 40729832767,
+    "workflow_id": 358098751,
+    "event": "push",
+    "status": "completed",
+    "conclusion": "failure",
+    "run_attempt": 1,
+    "head_sha": "0265aba8a5c2a054ff399812f8009294b1134855",
+    "head_branch": "main",
+    "head_repository": {
+      "full_name": "art-daddy/artdaddy"
+    },
+    "repository": {
+      "full_name": "art-daddy/artdaddy"
+    }
+  },
+  "jobs": [
+    {
+      "id": 122962831312,
+      "name": "tauri desktop build (windows)",
+      "status": "completed",
+      "conclusion": "success",
+      "labels": [
+        "windows-latest"
+      ],
+      "run_attempt": 1,
+      "started_at": "2026-10-28T16:50:04Z",
+      "completed_at": "2026-10-28T17:06:53Z"
+    },
+    {
+      "id": 122962831530,
+      "name": "real-browser UI + compositor pixels (ubuntu-22.04)",
+      "status": "completed",
+      "conclusion": "success",
+      "labels": [
+        "ubuntu-22.04"
+      ],
+      "run_attempt": 1,
+      "started_at": "2026-10-28T16:50:04Z",
+      "completed_at": "2026-10-28T16:53:45Z"
+    },
+    {
+      "id": 122962831602,
+      "name": "real-browser UI + compositor pixels (macos-14)",
+      "status": "completed",
+      "conclusion": "cancelled",
+      "labels": [
+        "macos-14"
+      ],
+      "run_attempt": 1,
+      "started_at": "2026-10-28T16:50:01Z",
+      "completed_at": "2026-10-28T17:12:42Z",
+      "steps": [],
+      "annotations": [
+        {
+          "annotation_level": "failure",
+          "message": "The job was not acquired by Runner of type hosted even after multiple attempts",
+          "title": ""
+        },
+        {
+          "annotation_level": "notice",
+          "message": "Due to capacity constraints, jobs targeting macOS arm64 runners may experience longer queue times.",
+          "title": ""
+        },
+        {
+          "annotation_level": "notice",
+          "message": "Due to capacity constraints, jobs targeting macOS arm64 runners may experience longer queue times.",
+          "title": ""
+        },
+        {
+          "annotation_level": "notice",
+          "message": "Due to capacity constraints, jobs targeting macOS arm64 runners may experience longer queue times.",
+          "title": ""
+        }
+      ]
+    },
+    {
+      "id": 122962831614,
+      "name": "cargo test (macos-14)",
+      "status": "completed",
+      "conclusion": "success",
+      "labels": [
+        "macos-14"
+      ],
+      "run_attempt": 1,
+      "started_at": "2026-10-28T17:07:14Z",
+      "completed_at": "2026-10-28T17:08:42Z"
+    },
+    {
+      "id": 122962831696,
+      "name": "export suite (ubuntu-22.04)",
+      "status": "completed",
+      "conclusion": "success",
+      "labels": [
+        "ubuntu-22.04"
+      ],
+      "run_attempt": 1,
+      "started_at": "2026-10-28T16:50:04Z",
+      "completed_at": "2026-10-28T17:09:07Z"
+    },
+    {
+      "id": 122962831727,
+      "name": "cargo test (ubuntu-22.04)",
+      "status": "completed",
+      "conclusion": "success",
+      "labels": [
+        "ubuntu-22.04"
+      ],
+      "run_attempt": 1,
+      "started_at": "2026-10-28T16:50:04Z",
+      "completed_at": "2026-10-28T16:51:47Z"
+    },
+    {
+      "id": 122962831740,
+      "name": "real-browser UI + compositor pixels (windows-latest)",
+      "status": "completed",
+      "conclusion": "success",
+      "labels": [
+        "windows-latest"
+      ],
+      "run_attempt": 1,
+      "started_at": "2026-10-28T16:53:00Z",
+      "completed_at": "2026-10-28T16:59:39Z"
+    },
+    {
+      "id": 122962831750,
+      "name": "build + unit tests (windows-latest)",
+      "status": "completed",
+      "conclusion": "success",
+      "labels": [
+        "windows-latest"
+      ],
+      "run_attempt": 1,
+      "started_at": "2026-10-28T16:50:04Z",
+      "completed_at": "2026-10-28T16:57:08Z"
+    },
+    {
+      "id": 122962831763,
+      "name": "build + unit tests (macos-14)",
+      "status": "completed",
+      "conclusion": "success",
+      "labels": [
+        "macos-14"
+      ],
+      "run_attempt": 1,
+      "started_at": "2026-10-28T16:50:06Z",
+      "completed_at": "2026-10-28T16:56:03Z"
+    },
+    {
+      "id": 122962831807,
+      "name": "export suite (windows-latest)",
+      "status": "completed",
+      "conclusion": "success",
+      "labels": [
+        "windows-latest"
+      ],
+      "run_attempt": 1,
+      "started_at": "2026-10-28T16:50:04Z",
+      "completed_at": "2026-10-28T17:06:39Z"
+    },
+    {
+      "id": 122962832012,
+      "name": "export suite (macos-14)",
+      "status": "completed",
+      "conclusion": "success",
+      "labels": [
+        "macos-14"
+      ],
+      "run_attempt": 1,
+      "started_at": "2026-10-28T17:06:31Z",
+      "completed_at": "2026-10-28T17:23:48Z"
+    },
+    {
+      "id": 122962832183,
+      "name": "build + unit tests (ubuntu-22.04)",
+      "status": "completed",
+      "conclusion": "success",
+      "labels": [
+        "ubuntu-22.04"
+      ],
+      "run_attempt": 1,
+      "started_at": "2026-10-28T16:50:04Z",
+      "completed_at": "2026-10-28T16:53:04Z"
+    }
+  ]
+}

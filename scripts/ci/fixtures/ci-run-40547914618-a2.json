@@ -1,0 +1,211 @@
+{
+  "_provenance": "Real GitHub REST payloads for art-daddy/artdaddy run 40547914618 attempt 2 (GET actions/runs/{id}/attempts/{n}, .../jobs, check-runs/{job}/annotations), trimmed to the fields the requeue decision reads (the steps of jobs that succeeded are omitted): the manual rerun of the run above hit the capacity wall again for two jobs while a third passed.",
+  "run": {
+    "id": 40547914618,
+    "workflow_id": 358098751,
+    "event": "push",
+    "status": "completed",
+    "conclusion": "failure",
+    "run_attempt": 2,
+    "head_sha": "d50830a5edbc8b0abf96a16b163c7f150ffc9020",
+    "head_branch": "main",
+    "head_repository": {
+      "full_name": "art-daddy/artdaddy"
+    },
+    "repository": {
+      "full_name": "art-daddy/artdaddy"
+    }
+  },
+  "jobs": [
+    {
+      "id": 122376030989,
+      "name": "build + unit tests (macos-14)",
+      "status": "completed",
+      "conclusion": "success",
+      "labels": [
+        "macos-14"
+      ],
+      "run_attempt": 2,
+      "started_at": "2026-10-27T18:18:22Z",
+      "completed_at": "2026-10-27T18:20:51Z"
+    },
+    {
+      "id": 122376031324,
+      "name": "real-browser UI + compositor pixels (macos-14)",
+      "status": "completed",
+      "conclusion": "cancelled",
+      "labels": [
+        "macos-14"
+      ],
+      "run_attempt": 2,
+      "started_at": "2026-10-27T18:08:15Z",
+      "completed_at": "2026-10-27T18:23:17Z",
+      "steps": [],
+      "annotations": [
+        {
+          "annotation_level": "failure",
+          "message": "The job was not acquired by Runner of type hosted even after multiple attempts",
+          "title": ""
+        },
+        {
+          "annotation_level": "notice",
+          "message": "Due to capacity constraints, jobs targeting macOS arm64 runners may experience longer queue times.",
+          "title": ""
+        },
+        {
+          "annotation_level": "notice",
+          "message": "Due to capacity constraints, jobs targeting macOS arm64 runners may experience longer queue times.",
+          "title": ""
+        },
+        {
+          "annotation_level": "notice",
+          "message": "Due to capacity constraints, jobs targeting macOS arm64 runners may experience longer queue times.",
+          "title": ""
+        }
+      ]
+    },
+    {
+      "id": 122376031618,
+      "name": "export suite (macos-14)",
+      "status": "completed",
+      "conclusion": "cancelled",
+      "labels": [
+        "macos-14"
+      ],
+      "run_attempt": 2,
+      "started_at": "2026-10-27T18:08:15Z",
+      "completed_at": "2026-10-27T18:23:17Z",
+      "steps": [],
+      "annotations": [
+        {
+          "annotation_level": "failure",
+          "message": "The job was not acquired by Runner of type hosted even after multiple attempts",
+          "title": ""
+        },
+        {
+          "annotation_level": "notice",
+          "message": "Due to capacity constraints, jobs targeting macOS arm64 runners may experience longer queue times.",
+          "title": ""
+        },
+        {
+          "annotation_level": "notice",
+          "message": "Due to capacity constraints, jobs targeting macOS arm64 runners may experience longer queue times.",
+          "title": ""
+        },
+        {
+          "annotation_level": "notice",
+          "message": "Due to capacity constraints, jobs targeting macOS arm64 runners may experience longer queue times.",
+          "title": ""
+        }
+      ]
+    },
+    {
+      "id": 122376032768,
+      "name": "cargo test (ubuntu-22.04)",
+      "status": "completed",
+      "conclusion": "success",
+      "labels": [
+        "ubuntu-22.04"
+      ],
+      "run_attempt": 2,
+      "started_at": "2026-10-27T17:09:42Z",
+      "completed_at": "2026-10-27T17:11:47Z"
+    },
+    {
+      "id": 122376033070,
+      "name": "export suite (windows-latest)",
+      "status": "completed",
+      "conclusion": "success",
+      "labels": [
+        "windows-latest"
+      ],
+      "run_attempt": 2,
+      "started_at": "2026-10-27T17:09:41Z",
+      "completed_at": "2026-10-27T17:29:46Z"
+    },
+    {
+      "id": 122376033349,
+      "name": "cargo test (macos-14)",
+      "status": "completed",
+      "conclusion": "success",
+      "labels": [
+        "macos-14"
+      ],
+      "run_attempt": 2,
+      "started_at": "2026-10-27T17:09:44Z",
+      "completed_at": "2026-10-27T17:10:39Z"
+    },
+    {
+      "id": 122376033892,
+      "name": "tauri desktop build (windows)",
+      "status": "completed",
+      "conclusion": "success",
+      "labels": [
+        "windows-latest"
+      ],
+      "run_attempt": 2,
+      "started_at": "2026-10-27T17:09:41Z",
+      "completed_at": "2026-10-27T17:24:26Z"
+    },
+    {
+      "id": 122376034576,
+      "name": "real-browser UI + compositor pixels (windows-latest)",
+      "status": "completed",
+      "conclusion": "success",
+      "labels": [
+        "windows-latest"
+      ],
+      "run_attempt": 2,
+      "started_at": "2026-10-27T17:09:43Z",
+      "completed_at": "2026-10-27T17:15:42Z"
+    },
+    {
+      "id": 122376084764,
+      "name": "real-browser UI + compositor pixels (ubuntu-22.04)",
+      "status": "completed",
+      "conclusion": "success",
+      "labels": [
+        "ubuntu-22.04"
+      ],
+      "run_attempt": 2,
+      "started_at": "2026-10-27T17:09:41Z",
+      "completed_at": "2026-10-27T17:13:39Z"
+    },
+    {
+      "id": 122376096004,
+      "name": "export suite (ubuntu-22.04)",
+      "status": "completed",
+      "conclusion": "success",
+      "labels": [
+        "ubuntu-22.04"
+      ],
+      "run_attempt": 2,
+      "started_at": "2026-10-27T17:09:42Z",
+      "completed_at": "2026-10-27T17:43:58Z"
+    },
+    {
+      "id": 122376109130,
+      "name": "build + unit tests (windows-latest)",
+      "status": "completed",
+      "conclusion": "success",
+      "labels": [
+        "windows-latest"
+      ],
+      "run_attempt": 2,
+      "started_at": "2026-10-27T17:09:41Z",
+      "completed_at": "2026-10-27T17:15:57Z"
+    },
+    {
+      "id": 122376114079,
+      "name": "build + unit tests (ubuntu-22.04)",
+      "status": "completed",
+      "conclusion": "success",
+      "labels": [
+        "ubuntu-22.04"
+      ],
+      "run_attempt": 2,
+      "started_at": "2026-10-27T17:09:41Z",
+      "completed_at": "2026-10-27T17:13:40Z"
+    }
+  ]
+}
