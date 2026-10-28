@@ -11,6 +11,10 @@ on:
         description: "Produce signed auto-update artifacts (needs the TAURI_SIGNING_PRIVATE_KEY secret)"
         type: boolean
         default: true
+      release_tag:
+        description: "QA only: attach to this existing release instead of v<version> (a rehearsal on a throwaway draft)"
+        type: string
+        default: ""
       artifact_run_id:
         description: "QA only: qualify an existing signed installer instead of rebuilding"
         type: string
@@ -168,46 +172,41 @@ jobs:
           path: reports/qa/installed/**
           if-no-files-found: warn
 
+      # A draft release is the safe way to build one: nothing is public until it is published. So the
+      # upload is verified on the release itself (size and SHA-256 as GitHub holds them), and the public
+      # URL only once the release is public: scripts/publishReleaseAssets.mjs. The installer and its
+      # signature go up in ONE call, so a failure cannot leave one without the other.
       - name: Publish installer to the GitHub release
         if: inputs.publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          ENABLE_AUTO_UPDATE: ${{ inputs.enable_auto_update }}
+          INSTALLER: ${{ steps.verify.outputs.path }}
+          INSTALLER_SIZE: ${{ steps.verify.outputs.size }}
+          UPDATER_SIGNATURE: ${{ steps.updater.outputs.path }}
         shell: pwsh
         run: |
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          $tag = "v$version"
-          gh release view $tag --repo $env:GITHUB_REPOSITORY
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "::error::release $tag does not exist"
+          $tag = if ($env:RELEASE_TAG) { $env:RELEASE_TAG } else { "v$version" }
+          if ((Get-Item $env:INSTALLER).Length -ne [int64]$env:INSTALLER_SIZE) {
+            Write-Host "::error::the staged installer is not the size the build verified"
             exit 1
           }
-          $asset = "${{ steps.verify.outputs.path }}"
-          gh release upload $tag $asset --repo $env:GITHUB_REPOSITORY --clobber
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-
-          $url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/ArtDaddy-windows-x64-setup.exe"
-          $response = Invoke-WebRequest -UseBasicParsing -Method Head $url
-          if ($response.StatusCode -ne 200) {
-            Write-Host "::error::published URL returned $($response.StatusCode)"
-            exit 1
-          }
-          # pwsh 7 returns header values as String[]; a bare [int64] cast of the array throws.
-          $length = $response.Headers.'Content-Length' | Select-Object -First 1
-          if ([int64]$length -ne [int64]"${{ steps.verify.outputs.size }}") {
-            Write-Host "::error::published size does not match the built installer"
-            exit 1
-          }
-
+          $files = @($env:INSTALLER)
           # The .sig is what an installed client verifies before replacing itself. Uploaded under
           # the same version-less name the manifest will point at.
-          if ("${{ inputs.enable_auto_update }}" -eq "true") {
+          if ($env:ENABLE_AUTO_UPDATE -eq "true") {
             $sigAsset = Join-Path $env:RUNNER_TEMP "ArtDaddy-windows-x64-setup.exe.sig"
-            Copy-Item "${{ steps.updater.outputs.path }}" $sigAsset
-            gh release upload $tag $sigAsset --repo $env:GITHUB_REPOSITORY --clobber
-            if ($LASTEXITCODE -ne 0) { exit 1 }
-            Write-Host "::notice::signature published. It is inert until latest.json advertises it:"
+            Copy-Item $env:UPDATER_SIGNATURE $sigAsset
+            $files += $sigAsset
+          }
+          node scripts/publishReleaseAssets.mjs --tag $tag @files
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          if ($env:ENABLE_AUTO_UPDATE -eq "true") {
+            Write-Host "::notice::signature attached. It is inert until latest.json advertises it:"
             Write-Host "::notice::  npm run update:platform -- windows-x86_64 $version <path-to>.exe.sig"
-              }
+          }
 
   qualify-existing:
     if: inputs.artifact_run_id != '' && !inputs.publish

@@ -583,4 +583,38 @@ present. Keep it that way unless the registry situation changes.
   `IDEA-UPDATE-001` in `../Akaru/ideas.md` for the split, and the whisper-stub guard that
   has to move with it.
 
-Step-by-step release commands live in the README (`Releasing an update`).
+### Releasing (draft first)
+
+Nothing below is public until step 5, and the manifest in step 6 is what actually offers the
+release to installed apps. 0.21.9 shipped this way.
+
+1. **Pins.** `npm run bump:yt-dlp -- --check` says how far behind the pinned yt-dlp is
+   (`scripts/sidecarStaging.mjs` pins it, with SHA-256s, like ffmpeg). Bump it on purpose
+   (`npm run bump:yt-dlp`) so the gate tests it; a release never takes whatever "latest" is
+   that day. The release commit bumps the version in the files `src/lib/versionPins.test.ts` guards.
+2. **Gate.** Push a `qa/**` branch (the pre-push hook is the full local gate, CI runs on it),
+   then push `main`.
+3. **Draft.** `gh release create vX.Y.Z --draft --target <sha>`.
+4. **Builds.** Dispatch the Windows, macOS and Linux build workflows from the `qa/**` ref with
+   `publish=true` and `enable_auto_update=true` (macOS and Linux also `whisper_ref=v1.9.2`). Each
+   attaches its files through `scripts/publishReleaseAssets.mjs`, which verifies them ON THE
+   DRAFT (size and SHA-256 as GitHub holds them), so a draft run ends green. It never replaces
+   a published asset with different bytes (`--replace-published`, on purpose only), because the
+   live manifest carries the signature of the bytes users are offered. To rehearse the wiring
+   without touching a real release, make a throwaway draft and pass `release_tag=<its tag>`.
+   Check each `.sig` against the committed key too: `node scripts/verify-release-signature.mjs
+   <asset> <asset>.sig`.
+5. **Publish.** `gh release edit vX.Y.Z --draft=false --latest --target <sha>`, then
+   `node scripts/publishReleaseAssets.mjs --tag vX.Y.Z --verify-only --latest`: every asset
+   answers publicly with the size the release lists, and this release is the latest.
+6. **Switch (landing repo).** Edit `landing/updates/latest.json` (version, notes, `pub_date`), run
+   `node scripts/add-platform-update.mjs <platform> <version> <sig>` for each platform, commit
+   that, then the download labels in the HTML, `npm run check:downloads`, push `main` (Cloudflare
+   Pages deploys it). Verify the LIVE manifest by parsing it (invariant 3).
+7. **Canary.** Dispatch `updater canary` with `from_version` = the previous release. Windows and
+   Linux call the app's own updater commands. macOS cannot be driven that way (WKWebView has no
+   remote debugging port and a signed-out app never shows the banner), so its job installs the
+   previous release's `.app`, runs the shipped updater plugin against it (`src-tauri/tests/
+   update_canary.rs`), then checks every file of the bundle that is left against the published
+   tarball, `codesign --verify`, and that the updated app starts (`scripts/qa/macUpdateCanary.mjs`).
+   It does not exercise the app's command wrappers or `app.restart()`.

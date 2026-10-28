@@ -45,6 +45,10 @@ on:
         description: "Produce signed auto-update artifacts (needs the TAURI_SIGNING_PRIVATE_KEY secret)"
         type: boolean
         default: true
+      release_tag:
+        description: "QA only: attach to this existing release instead of v<version> (a rehearsal on a throwaway draft)"
+        type: string
+        default: ""
 
 # The organisation defaults the token to read-only, and that default is NOT raised by asking
 # nicely at the step level - a workflow that needs write has to declare it here or the upload
@@ -453,49 +457,41 @@ jobs:
       #
       # Opt-in per run, because most dispatches are test builds and should not touch what is
       # published.
+      #
+      # A draft release is the safe way to build one: nothing is public until it is published. So the
+      # upload is verified on the release itself (size and SHA-256 as GitHub holds them), and the public
+      # URL only once the release is public: scripts/publishReleaseAssets.mjs. The dmg, the tarball the
+      # updater fetches and its signature go up in ONE call.
       - name: Publish the dmg to the GitHub release
         if: inputs.publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           DMG="${{ steps.verify.outputs.path }}"
           VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
-          TAG="v$VERSION"
+          TAG="${RELEASE_TAG:-v$VERSION}"
           ASSET="ArtDaddy-macos-arm64.dmg"
           cp "$DMG" "/tmp/$ASSET"
-
-          # The Windows release creates the tag; this only ever adds to it. Creating one here
-          # would publish a release advertising a mac build and no installer.
-          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "::error::release $TAG does not exist yet - publish the Windows release first."
-            exit 1
-          fi
-          gh release upload "$TAG" "/tmp/$ASSET" --repo "$GITHUB_REPOSITORY" --clobber
+          FILES=("/tmp/$ASSET")
 
           # The updater fetches the tarball, not the dmg. Version-less names for the same reason
           # as above: latest.json points at /releases/latest/download/<name>.
           if [ "${{ inputs.enable_auto_update }}" = "true" ]; then
             cp "${{ steps.updater.outputs.tarball }}" /tmp/ArtDaddy-macos-arm64.app.tar.gz
             cp "${{ steps.updater.outputs.sig }}"     /tmp/ArtDaddy-macos-arm64.app.tar.gz.sig
-            gh release upload "$TAG" \
-              /tmp/ArtDaddy-macos-arm64.app.tar.gz \
-              /tmp/ArtDaddy-macos-arm64.app.tar.gz.sig \
-              --repo "$GITHUB_REPOSITORY" --clobber
-            echo "::notice::mac updater artifacts uploaded. They are inert until latest.json"
+            FILES+=(/tmp/ArtDaddy-macos-arm64.app.tar.gz /tmp/ArtDaddy-macos-arm64.app.tar.gz.sig)
+          fi
+
+          # The release must already exist: the tag is created by whoever drafts it, and this only
+          # ever adds to it. The script says so, and attaches nothing, when it does not.
+          node scripts/publishReleaseAssets.mjs --tag "$TAG" "${FILES[@]}"
+
+          if [ "${{ inputs.enable_auto_update }}" = "true" ]; then
+            echo "::notice::mac updater artifacts are attached to $TAG. They are inert until latest.json"
             echo "::notice::carries a darwin-aarch64 entry - run this in the landing repo:"
             echo "::notice::  npm run update:platform -- darwin-aarch64 $VERSION /path/to/ArtDaddy-macos-arm64.app.tar.gz.sig"
           fi
-
-          # Read it back ANONYMOUSLY: a 2xx from the upload only says the request was accepted,
-          # not that a user can now download the bytes we built.
-          PUB="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$ASSET"
-          CODE="$(curl -sL -o /dev/null -w '%{http_code}' -I "$PUB")"
-          REMOTE="$(curl -sIL "$PUB" | awk 'tolower($1) ~ /^content-length/ {print $2}' | tail -1 | tr -d '\r')"
-          LOCAL="$(stat -f%z "$DMG")"
-          echo "published: $PUB"
-          echo "  http $CODE, remote $REMOTE bytes, local $LOCAL bytes"
-          [ "$CODE" = "200" ] || { echo "::error::published URL returned $CODE"; exit 1; }
-          [ "$REMOTE" = "$LOCAL" ] || { echo "::error::published size $REMOTE != built size $LOCAL"; exit 1; }
 
       - name: Say plainly what this is not
         run: |
