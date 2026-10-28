@@ -52,6 +52,12 @@ glob = "0.3"
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 
+# tests/update_canary.rs (macOS only) runs the real updater plugin on tauri's mock runtime. The `test`
+# feature is for test builds only and is not part of the shipped app. On Windows a binary that links
+# the mock runtime will not start without a Common Controls v6 manifest, so it is kept off that target.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+tauri = { version = "2.11.3", features = ["protocol-asset", "test"] }
+
 # Desktop-only: there is no updater on mobile, and the plugin doesn't build there.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-updater = "2"
