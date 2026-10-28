@@ -12,6 +12,15 @@ export function newer(a, b) {
 }
 
 /**
+ * The x.y.z an installed exe's ProductVersion stands for. Windows keeps four components, so a resource can
+ * read "0.21.9.0"; the fourth is dropped ONLY when there are four. Dropping any trailing ".0" turns a real
+ * "0.22.0" into "0.22", which is how a successful update to 0.22.0 was reported as a failed one.
+ */
+export function normalizeProductVersion(raw) {
+  return String(raw ?? "").trim().replace(/^(\d+\.\d+\.\d+)\.0$/, "$1");
+}
+
+/**
  * What the live manifest offers an installed app of `platform` at version `from`, or why it is not an
  * offer an app could take: a version that is not newer, no entry for the platform, a signature that is
  * not one, or a URL that is not an asset of that very version of this repository (the manifest and its

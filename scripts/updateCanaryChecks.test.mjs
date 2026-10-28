@@ -1,11 +1,12 @@
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import fc from "fast-check";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { describeTree, diffTrees, manifestOffer, newer, parseCanaryOutput } from "./updateCanaryChecks.mjs";
+import { describeTree, diffTrees, manifestOffer, newer, normalizeProductVersion, parseCanaryOutput } from "./updateCanaryChecks.mjs";
 
 const REPO = "art-daddy/artdaddy";
 // The shape the live manifest really has: one entry per platform, each with a signature and an asset URL.
@@ -28,6 +29,45 @@ describe("newer", () => {
     expect(newer("0.21.9", "0.21.10")).toBe(false);
     expect(newer("1.0.0", "0.99.99")).toBe(true);
     expect(newer("0.21.9", "0.21.9")).toBe(false);
+  });
+});
+
+// The 0.22.0 Windows update worked (the new exe was installed and running) and was reported as a failure,
+// because "0.22.0" lost its trailing ".0" and no longer equalled "0.22.0". No earlier release had a patch of 0.
+describe("the version an installed exe reports", () => {
+  it("keeps a real x.y.z, a zero patch included: the case that was reported as a failed update", () => {
+    for (const version of ["0.22.0", "1.0.0", "0.21.9", "10.0.0", "0.0.0", "0.21.10"])
+      expect(normalizeProductVersion(version), version).toBe(version);
+  });
+
+  it("drops the fourth component of a four-part version, and only a zero one", () => {
+    expect(normalizeProductVersion("0.21.9.0")).toBe("0.21.9");
+    expect(normalizeProductVersion("0.22.0.0")).toBe("0.22.0");
+    expect(normalizeProductVersion("0.21.9.3")).toBe("0.21.9.3");
+  });
+
+  it("is the identity on every x.y.z and strips exactly the one zero of x.y.z.0", () => {
+    const part = fc.nat({ max: 120 });
+    fc.assert(
+      fc.property(part, part, part, (a, b, c) => {
+        const version = `${a}.${b}.${c}`;
+        return normalizeProductVersion(version) === version && normalizeProductVersion(`${version}.0`) === version;
+      }),
+    );
+  });
+
+  it("ignores the line ending PowerShell adds", () => {
+    expect(normalizeProductVersion("0.22.0\r\n")).toBe("0.22.0");
+    expect(normalizeProductVersion(undefined)).toBe("");
+  });
+
+  it("is what the Windows canary uses, never a blanket strip of a trailing .0", () => {
+    const harness = readFileSync(
+      path.join(path.dirname(fileURLToPath(import.meta.url)), "qa", "windowsUpdateCanary.mjs"),
+      "utf8",
+    );
+    expect(harness).toMatch(/normalizeProductVersion\(\s*powershell\(/);
+    expect(harness).not.toMatch(/\.replace\(\/\\\.0\$\//);
   });
 });
 

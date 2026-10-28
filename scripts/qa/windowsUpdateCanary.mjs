@@ -22,6 +22,7 @@ import { createHash } from "node:crypto";
 import { closeSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
+import { normalizeProductVersion } from "../updateCanaryChecks.mjs";
 
 if (process.platform !== "win32" || process.env.GITHUB_ACTIONS !== "true") {
   throw new Error("The update canary runs only on a disposable GitHub-hosted Windows runner");
@@ -68,7 +69,7 @@ function powershell(script) {
 }
 
 const productVersion = (exe) =>
-  powershell(`(Get-Item -LiteralPath '${exe}').VersionInfo.ProductVersion`).replace(/\.0$/, "");
+  normalizeProductVersion(powershell(`(Get-Item -LiteralPath '${exe}').VersionInfo.ProductVersion`));
 
 /** Every running artdaddy.exe that is THIS install's, with the moment it started and its window title. */
 function runningApps(exe) {
