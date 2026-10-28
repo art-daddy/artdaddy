@@ -23,7 +23,15 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { describeGhFailure, ffmpegPin, isPinnedBuild, stalePaths, verifySha256 } from "./sidecarStaging.mjs";
+import {
+  describeGhFailure,
+  ffmpegPin,
+  isPinnedBuild,
+  matchesSha256,
+  stalePaths,
+  verifySha256,
+  ytDlpPin,
+} from "./sidecarStaging.mjs";
 import { checkWhisper, verifyWhisperUnicodeProof } from "./smoke-whisper.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -64,13 +72,6 @@ const staged = (name) => join(binariesDir, `${packagedName(name)}-${triple}${ext
 const stagedId = (name) => join(binariesDir, `${name}-${triple}${ext}`);
 const want = (name) => !only || only.has(name);
 
-async function download(url, dest) {
-  console.log(`  GET ${url}`);
-  const res = await fetch(url, { redirect: "follow" });
-  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
-  writeFileSync(dest, Buffer.from(await res.arrayBuffer()));
-  return dest;
-}
 async function downloadPinned({ url, sha256 }, dest) {
   console.log(`  GET ${url}`);
   const res = await fetch(url, { redirect: "follow" });
@@ -87,6 +88,8 @@ function stagedVersion(name) {
 }
 const stagedFfmpegIsPinned = () =>
   ["ffmpeg", "ffprobe"].every((n) => isPinnedBuild(stagedVersion(n), ffmpegPin(triple)));
+/** The staged yt-dlp is byte-for-byte the pinned one. Needs no run, so it also holds for a cross build. */
+const stagedYtDlpIsPinned = () => existsSync(staged("yt-dlp")) && matchesSha256(readFileSync(staged("yt-dlp")), ytDlpPin(osName).sha256);
 function extract(archive, outDir) {
   mkdirSync(outDir, { recursive: true });
   execSync(`tar -xf "${archive}" -C "${outDir}"`, { stdio: "inherit" }); // bsdtar handles .zip + .tar.*
@@ -122,15 +125,8 @@ function findFiles(dir, pred) {
 }
 
 async function fetchYtDlp() {
-  const asset =
-    osName === "win" ? "yt-dlp.exe" : osName === "mac" ? "yt-dlp_macos" : "yt-dlp_linux";
-  stage(
-    "yt-dlp",
-    await download(
-      `https://github.com/yt-dlp/yt-dlp/releases/latest/download/${asset}`,
-      join(tmp, asset),
-    ),
-  );
+  const pin = ytDlpPin(osName);
+  stage("yt-dlp", await downloadPinned(pin, join(tmp, pin.name)));
 }
 
 async function fetchFfmpeg() {
@@ -407,6 +403,8 @@ async function main() {
       // A staged ffmpeg from before the pin (or an older pin) is replaced, never kept.
       if (key === "ffmpeg" && nativeBuild && !stagedFfmpegIsPinned()) {
         console.log(`  ${key} is staged but is not the pinned ${ffmpegPin(triple).version}; refetching`);
+      } else if (key === "yt-dlp" && !stagedYtDlpIsPinned()) {
+        console.log(`  ${key} is staged but is not the pinned ${ytDlpPin(osName).version}; refetching`);
       } else if (key === "whisper-cli" && osName === "win" && !existsSync(`${staged("whisper-cli")}.unicode.json`)) {
         console.log("  whisper-cli lacks Unicode-path proof; refetching the corrected artifact");
       } else {
@@ -443,6 +441,17 @@ async function main() {
     console.log(
       `[fetch-sidecars] verified all ${required.length} externalBin present for ${triple}.`,
     );
+  }
+
+  // The artifact, not the download: a failed fetch is only a warning above and would leave an
+  // older yt-dlp staged, which every guard so far accepts.
+  if (want("yt-dlp")) {
+    const pin = ytDlpPin(osName);
+    if (!stagedYtDlpIsPinned()) {
+      console.error(`\n[fetch-sidecars] the staged yt-dlp (${staged("yt-dlp")}) is not the pinned ${pin.version} (sha256 ${pin.sha256}).`);
+      process.exit(1);
+    }
+    console.log(`[fetch-sidecars] verified yt-dlp is the pinned ${pin.version}.`);
   }
 
   // The artifact, not the download: a failed fetch is only a warning above and would leave an

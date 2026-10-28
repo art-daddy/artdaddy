@@ -61,6 +61,84 @@ export const FFMPEG_PINS = {
   },
 };
 
+/** The yt-dlp each platform ships. It used to be whatever `releases/latest` served on the day of the
+ *  build, so a release could carry a downloader nobody had looked at, and one commit built twice a day
+ *  apart shipped two different ones. A pin is bumped on purpose with `npm run bump:yt-dlp`, which
+ *  rewrites the block below from the upstream release's own SHA2-256SUMS; the release gate then tests
+ *  the new build like any other change.
+ *
+ *  yt-dlp breaks when a site changes, so a pin nobody bumps is a download feature that quietly stops
+ *  working. `npm run bump:yt-dlp -- --check` says how far behind it is; run it before every release.
+ *  Assets: the Windows and Linux builds are x64, the macOS one is a universal binary. */
+// <yt-dlp-pin>
+export const YT_DLP_PIN = {
+  version: "2026.10.26",
+  assets: {
+    win: { name: "yt-dlp.exe", sha256: "f5389d3698ecde4ef06f4e6b1ce0294fe9ac1396228c8990b8d3416d6d177a7d" },
+    mac: { name: "yt-dlp_macos", sha256: "0f922c15ccc0b83eefa1c8bc9104e434318c4bf16e408e1ee93b7745a6efe0aa" },
+    linux: { name: "yt-dlp_linux", sha256: "767ba9dce7052aa196f8b12652f433d76de128ba168966fa84b6394d5e6c6795" },
+  },
+};
+// </yt-dlp-pin>
+
+/** The pinned yt-dlp for a platform ("win" | "mac" | "linux"): its asset, its tag-addressed URL (a tag
+ *  is not "latest", and it is what the SHA-256 is checked against) and the digest it must have. */
+export function ytDlpPin(osName, pin = YT_DLP_PIN) {
+  const asset = pin.assets[osName];
+  if (!asset) throw new Error(`no pinned yt-dlp for ${osName}`);
+  return {
+    version: pin.version,
+    name: asset.name,
+    url: `https://github.com/yt-dlp/yt-dlp/releases/download/${pin.version}/${asset.name}`,
+    sha256: asset.sha256,
+  };
+}
+
+/** Whether `bytes` are exactly the build a pin names (the staged file, not the download). */
+export function matchesSha256(bytes, sha256) {
+  return createHash("sha256").update(bytes).digest("hex") === sha256;
+}
+
+/** yt-dlp's `SHA2-256SUMS` ("<64 hex>  <asset>", one per line, `*` before the name for binary mode)
+ *  as `{ asset: sha256 }`. Lines that are not a checksum are ignored, never guessed at. */
+export function parseSha256Sums(text) {
+  const sums = {};
+  for (const line of String(text).split(/\r?\n/)) {
+    const m = /^([0-9a-f]{64})\s+\*?(\S+)\s*$/i.exec(line);
+    if (m) sums[m[2]] = m[1].toLowerCase();
+  }
+  return sums;
+}
+
+/** `source` with its yt-dlp pin block replaced by the one for `version`, taking each platform's digest
+ *  from `sums` (a `parseSha256Sums` result). Everything outside the markers is returned untouched,
+ *  line endings included, and a release that does not list one of the three assets is refused. */
+export function rewriteYtDlpPin(source, version, sums) {
+  if (!/^\d{4}\.\d{2}\.\d{2}(?:\.\d+)?$/.test(version)) throw new Error(`not a yt-dlp release tag: ${version}`);
+  const eol = source.includes("\r\n") ? "\r\n" : "\n";
+  const entry = (os) => {
+    const { name } = YT_DLP_PIN.assets[os];
+    const sha256 = sums[name];
+    if (!/^[0-9a-f]{64}$/.test(sha256 ?? "")) throw new Error(`the ${version} checksums do not list ${name}`);
+    return `    ${os}: { name: "${name}", sha256: "${sha256}" },`;
+  };
+  const block = [
+    "// <yt-dlp-pin>",
+    "export const YT_DLP_PIN = {",
+    `  version: "${version}",`,
+    "  assets: {",
+    entry("win"),
+    entry("mac"),
+    entry("linux"),
+    "  },",
+    "};",
+    "// </yt-dlp-pin>",
+  ].join(eol);
+  const markers = /\/\/ <yt-dlp-pin>[\s\S]*?\/\/ <\/yt-dlp-pin>/;
+  if (!markers.test(source)) throw new Error("the yt-dlp pin markers are missing");
+  return source.replace(markers, () => block);
+}
+
 /** The pinned ffmpeg for a Rust target triple. */
 export function ffmpegPin(triple) {
   const key = triple.includes("windows")
