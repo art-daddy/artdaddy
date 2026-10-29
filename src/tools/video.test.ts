@@ -1010,3 +1010,61 @@ describe("video_find_moment: the contract promises what the tool returns", () =>
     expect(params).not.toContain("top_k");
   });
 });
+
+// The size a clip is uploaded at depends on how long the part that is analysed is (the A/B behind the rule is in
+// videoEdge.test.ts): longer than a minute -> 480p, otherwise 720p, and a length nobody could read keeps 720p.
+describe("the size a clip is encoded at", () => {
+  const edgeOf = () => (encode.mock.calls.at(-1)?.[2] as Any).maxDim as number;
+
+  describe("video_ask", () => {
+    it.each([
+      [30, 720],
+      [60, 720],
+      [61, 480],
+      [120, 480],
+      [900, 480],
+    ])("a %s s clip is encoded at %sp", async (seconds, edge) => {
+      await runTool("video_ask", { media_ref: "media_a", prompt: "what happens?" }, ctxWith(probeRunner(seconds)));
+      expect(edgeOf()).toBe(edge);
+    });
+
+    it("keeps 720p when the length cannot be read", async () => {
+      await runTool("video_ask", { media_ref: "media_a", prompt: "what happens?" }, ctxWith(probeRunner(null)));
+      expect(edgeOf()).toBe(720);
+    });
+
+    it("sizes it by the part that is analysed, not by the whole file", async () => {
+      await runTool("video_ask", { media_ref: "media_a", prompt: "x", start_seconds: 10, end_seconds: 40 }, ctxWith(probeRunner(600)));
+      expect(edgeOf()).toBe(720);
+      await runTool("video_ask", { media_ref: "media_a", prompt: "x", start_seconds: 0, end_seconds: 120 }, ctxWith(probeRunner(600)));
+      expect(edgeOf()).toBe(480);
+    });
+
+    it("changes nothing else about the recipe", async () => {
+      await runTool("video_ask", { media_ref: "media_a", prompt: "x" }, ctxWith(probeRunner(300)));
+      expect(encode.mock.calls.at(-1)?.[2]).toMatchObject({ fps: 4, keepAudio: false, tag: "gemini", budget: { durationS: 300 } });
+    });
+  });
+
+  describe("video_find_moment", () => {
+    it.each([
+      [30, 720],
+      [60, 720],
+      [61, 480],
+      [300, 480],
+    ])("a %s s clip is encoded at %sp", async (seconds, edge) => {
+      await runTool("video_find_moment", { media_ref: "media_a", query: "rocket" }, ctxWith(probeRunner(seconds)));
+      expect(edgeOf()).toBe(edge);
+    });
+
+    it("keeps 720p when the length cannot be read", async () => {
+      await runTool("video_find_moment", { media_ref: "media_a", query: "rocket" }, ctxWith(probeRunner(null)));
+      expect(edgeOf()).toBe(720);
+    });
+
+    it("changes nothing else about the recipe", async () => {
+      await runTool("video_find_moment", { media_ref: "media_a", query: "rocket" }, ctxWith(probeRunner(300)));
+      expect(encode.mock.calls.at(-1)?.[2]).toMatchObject({ fps: 4, keepAudio: false, tag: "gemini", budget: { durationS: 300 } });
+    });
+  });
+});
