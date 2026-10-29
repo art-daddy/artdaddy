@@ -3,6 +3,7 @@
 // explicit user action (thumbs up/down or "report a problem").
 import { authedFetch, notifyAuthFailure } from "./auth";
 import { apiBase } from "./config";
+import type { ReportContext } from "../observability/reportContext";
 
 export type FeedbackKind = "up" | "down" | "report";
 
@@ -19,6 +20,9 @@ export interface FeedbackPayload {
   note?: string;
   request_id?: string;
   bundle: FeedbackBundle;
+  /** Which build, machine class and model the report came from, the credit state, and the last failures' codes and
+   *  request ids. Facts only. An older server ignores it. */
+  context?: ReportContext;
 }
 
 /** Send one feedback item. Returns whether the server stored it (best-effort;

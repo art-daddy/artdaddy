@@ -22,6 +22,7 @@ import {
 import { inferRoundStreaming } from "../agent/api";
 import { TIMELINE_CHANGED_NOTE } from "../agent/compose";
 import { agentEventContext, createToolTrace, setAgentContext } from "../api/agentEvents";
+import { clearRecentFailures, noteFailure } from "../observability/recentFailures";
 import { setOpenDocumentResolver } from "../project/openDocuments";
 import { emptyTimeline, type Timeline } from "../timeline/model";
 import { openToolHost, type ToolRunOptions } from "../tools/host";
@@ -1560,6 +1561,33 @@ describe("useChat loop deps + remaining actions", () => {
     expect(await useChat.getState().sendFeedback("up")).toBe(true);
     expect(f).toHaveBeenCalled();
   });
+
+  // UJ-072: a report used to be a note and a transcript. It now says which build, machine class and model it came
+  // from, the credit state, and the last failures' codes and request ids, so the failure can be found.
+  it.each(["report", "up", "down"] as const)(
+    "a %s carries the app's technical context and the failures it just met",
+    async (kind) => {
+      clearRecentFailures();
+      noteFailure({ where: "turn", code: "content_policy", requestId: "failed-call-1", at: 1793000000 });
+      setDesktop("p1");
+      useChat.setState({ projectId: "p1", transcriptId: "tx1", model: "gpt-5.6-luna" });
+      const f = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+      vi.stubGlobal("fetch", f);
+
+      await useChat.getState().sendFeedback(kind, { note: "it broke" });
+
+      const body = JSON.parse(((f.mock.calls[0] as unknown[])[1] as RequestInit).body as string);
+      expect(body).toMatchObject({ kind, note: "it broke", transcript_id: "tx1", project_id: "p1" });
+      expect(body.context).toMatchObject({
+        app_version: __ARTDADDY_RELEASE__,
+        model: "gpt-5.6-luna",
+        surface: "app",
+        failures: [{ where: "turn", code: "content_policy", request_id: "failed-call-1", at: 1793000000 }],
+      });
+      expect(body.context.credit).toEqual(expect.objectContaining({ metered: expect.any(Boolean) }));
+      clearRecentFailures();
+    },
+  );
 
   it("sendFeedback is a no-op without a project", async () => {
     useChat.setState({ projectId: null });
