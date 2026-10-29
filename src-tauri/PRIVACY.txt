@@ -1,6 +1,6 @@
 ARTDADDY PRIVACY POLICY
 
-Last reviewed 24 October 2026. The current version is always at https://artdaddy.app/privacy
+Last reviewed 30 October 2026. The current version is always at https://artdaddy.app/privacy
 
 ArtDaddy is a desktop application. Your footage, your projects and your edits stay on your computer. The only things that leave are the AI requests you explicitly make, plus the usage data described in full below.
 
@@ -41,13 +41,14 @@ We record the following so we can tell a product that is working from one that i
 - the text of prompts you send to the agent, stored against your account;
 - which editing tools the agent called, the arguments it passed them, whether each succeeded, and the text of the agent's replies;
 - application events (launch, project opened, media imported, export finished or failed, and a sample of how fast speech transcription ran and on which kind of processor, never what was said) and error messages, which can include file paths on your machine;
+- when an AI request fails and ends your turn: a short error code (for example "content_policy" or "provider_timeout") and the request's ID, never your prompt or the message you were shown;
 - crash and error reports, via Sentry.
 
 We keep prompt text indefinitely rather than expiring it, because it is the record of what people actually ask the product to do. Agent activity is kept for 400 days. None of it is sold, shared with advertisers, or used to train any model.
 
 When you send feedback
 
-Rating a reply or choosing "Report this problem" uploads that conversation, your timeline, and your project files - never the media itself - so we can reproduce what went wrong. It is only sent when you take that action, and it is deleted automatically after 60 days.
+Rating a reply or choosing "Report this problem" uploads that conversation, your timeline, and your project files - never the media itself - so we can reproduce what went wrong. It also says which app it came from: the app version, your operating system and processor type, the AI model in use, your credit balance and whether it had run out, and the error codes and request IDs of the last few failures the app showed you (never their text). It is only sent when you take that action, and it is deleted automatically after 60 days.
 
 The website
 
