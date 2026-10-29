@@ -6,6 +6,7 @@ import { authedFetch, notifyAuthFailure } from "./auth";
 import { apiBase } from "./config";
 import { fetchWithRetry, RateLimitError, type RetryOpts } from "./http";
 import { CreditLimitError, markOverLimit } from "./usage";
+import { SerialGate } from "../lib/serialGate";
 import { correlationBody } from "../observability/sentry";
 import { catalogIdentity } from "../contract";
 import { ClientUpdateRequiredError } from "../update/updater";
@@ -40,6 +41,12 @@ export interface AiProxyResult<R = Record<string, unknown>> {
   metrics?: { cost_usd?: number };
 }
 
+/** A request body above this is "big" and is sent one at a time. It is deliberately the size the server holds one at a
+ *  time (ARTDADDY_HEAVY_BODY_MB, default 8): a body costs the server about 7-8 times its size in memory, so it turns the
+ *  rest away busy, and firing four clip uploads at once used to get three of them refused. */
+export const BIG_UPLOAD_BYTES = 8 * 1024 * 1024;
+const bigUploads = new SerialGate();
+
 /** POST one thin external-API call. Throws CreditLimitError on 402, notifies on 401. */
 export async function callAiProxy<R = Record<string, unknown>>(
   name: string,
@@ -47,15 +54,19 @@ export async function callAiProxy<R = Record<string, unknown>>(
   signal?: AbortSignal,
   opts: RetryOpts = {},
 ): Promise<AiProxyResult<R>> {
-  const res = await authedFetch(
-    `${apiBase()}/ai/${name}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...body, ...correlationBody(), catalog_id: catalogIdentity() }),
-    },
-    (u, init) => fetchWithRetry(u, init, signal, opts),
-  );
+  const payload = JSON.stringify({ ...body, ...correlationBody(), catalog_id: catalogIdentity() });
+  const send = () =>
+    authedFetch(
+      `${apiBase()}/ai/${name}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: payload,
+      },
+      (u, init) => fetchWithRetry(u, init, signal, opts),
+    );
+  // Judged by the request actually sent (JSON of base64 is ASCII, so characters are bytes). Small calls are never held.
+  const res = payload.length > BIG_UPLOAD_BYTES ? await bigUploads.run(send, signal) : await send();
   if (!res.ok) {
     if (res.status === 426) throw new ClientUpdateRequiredError();
     if (res.status === 401) notifyAuthFailure();
