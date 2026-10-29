@@ -24,6 +24,11 @@ export interface RoundResultDTO {
   pending_calls: PendingCall[];
   final_text: string;
   error: string;
+  /** Why a failed round failed, as a code the app can act on (content_policy, provider_timeout, ...). Present only on
+   *  an error round from a server that types its failures. */
+  error_code?: string;
+  /** The X-Request-ID the server stamped on the call that produced this result. Added by the app, not the server. */
+  request_id?: string;
   credit_limit?: unknown;
   finish_reason: string;
   usage: Usage;

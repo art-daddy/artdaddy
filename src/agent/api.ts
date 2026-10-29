@@ -22,10 +22,10 @@ async function postJson<T>(url: string, body: unknown, signal?: AbortSignal): Pr
     (u, init) => fetchWithRetry(u, init, signal),
   );
   if (!res.ok) {
-    if (res.status === 426) throw new ClientUpdateRequiredError();
+    if (res.status === 426) throw failedCall(new ClientUpdateRequiredError(), res);
     if (res.status === 401) notifyAuthFailure();
     const text = await res.text().catch(() => "");
-    if (res.status === 401) throw new SessionExpiredError();
+    if (res.status === 401) throw failedCall(new SessionExpiredError(), res);
     if (res.status === 402) {
       let detail: unknown = text;
       try {
@@ -34,13 +34,28 @@ async function postJson<T>(url: string, body: unknown, signal?: AbortSignal): Pr
         /* keep raw text */
       }
       markOverLimit(detail);
-      throw new CreditLimitError(detail);
+      throw failedCall(new CreditLimitError(detail), res);
     }
     // Retries exhausted: a clean, non-Sentry error the turn surfaces to the user.
-    if (res.status === 429) throw new RateLimitError();
-    throw new Error(`${res.status}: ${text || res.statusText}`);
+    if (res.status === 429) throw failedCall(new RateLimitError(), res);
+    throw failedCall(new Error(`${res.status}: ${text || res.statusText}`), res);
   }
-  return (await res.json()) as T;
+  return withRequestId((await res.json()) as T, res);
+}
+
+/** The id the server stamped on this call (X-Request-ID), carried on the round's result so a failure can be reported by
+ *  the call that failed. Added only when the server sent one: an answer without it is passed on exactly as sent. */
+function withRequestId<T>(data: T, res: Response): T {
+  const id = res.headers?.get?.("x-request-id");
+  if (id && data && typeof data === "object") (data as { request_id?: string }).request_id = id;
+  return data;
+}
+
+/** A failure that THROWS (the call never produced a round) names the call it came from, so the turn's error report can. */
+function failedCall<E extends Error>(error: E, res: Response): E {
+  const id = res.headers?.get?.("x-request-id");
+  if (id) (error as E & { requestId?: string }).requestId = id;
+  return error;
 }
 
 export interface InferBody {
@@ -214,10 +229,10 @@ async function streamRound(
     return inferRound(body, userSignal);
   }
   if (!res.ok) {
-    if (res.status === 426) throw new ClientUpdateRequiredError();
+    if (res.status === 426) throw failedCall(new ClientUpdateRequiredError(), res);
     if (res.status === 401) notifyAuthFailure();
     const text = await res.text().catch(() => "");
-    if (res.status === 401) throw new SessionExpiredError();
+    if (res.status === 401) throw failedCall(new SessionExpiredError(), res);
     if (res.status === 402) {
       let detail: unknown = text;
       try {
@@ -226,10 +241,10 @@ async function streamRound(
         /* keep raw text */
       }
       markOverLimit(detail);
-      throw new CreditLimitError(detail);
+      throw failedCall(new CreditLimitError(detail), res);
     }
-    if (res.status === 429) throw new RateLimitError();
-    throw new Error(`${res.status}: ${text || res.statusText}`);
+    if (res.status === 429) throw failedCall(new RateLimitError(), res);
+    throw failedCall(new Error(`${res.status}: ${text || res.statusText}`), res);
   }
   if (!res.body) throw new Error("no response body for the inference stream");
 
@@ -248,5 +263,5 @@ async function streamRound(
     markOverLimit(terminal.credit_limit);
     throw new CreditLimitError(terminal.credit_limit);
   }
-  return terminal;
+  return withRequestId(terminal, res);
 }

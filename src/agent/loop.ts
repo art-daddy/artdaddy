@@ -222,7 +222,13 @@ export class ClientTurnRunner {
   private async handle(rr: RoundResultDTO): Promise<void> {
     this.d.onUsage(rr.usage ?? {});
     if (rr.kind === "error") {
-      this.d.emit("error", { error: rr.error || "error" });
+      // The typed code and the failed call's id travel with the sentence when the round has them, so the store can
+      // report the turn by the failure's name. A round without them emits exactly what it always did.
+      this.d.emit("error", {
+        error: rr.error || "error",
+        ...(rr.error_code ? { error_code: rr.error_code } : {}),
+        ...(rr.request_id ? { request_id: rr.request_id } : {}),
+      });
       return;
     }
     // The round's encrypted reasoning goes into the transcript BEFORE anything the round

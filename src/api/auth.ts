@@ -4,6 +4,7 @@
 // changes, so a signed-out user (or a revoked session) re-prompts.
 import { apiBase, onApiBaseChange } from "./config";
 import { settledWithin } from "../lib/settledWithin";
+import { noteFailedRequest, noteFailedResponse } from "../observability/paidCallFailures";
 
 type TokenProvider = () => Promise<string | null>;
 let clerkTokenProvider: TokenProvider | null = null;
@@ -47,12 +48,27 @@ export function setSessionRenewer(renewer: SessionRenewer | null): () => void {
 type Send = (url: string, init: RequestInit) => Promise<Response>;
 
 /** The one way a request carries the session's token. The server checks it before doing any work,
- *  so a 401 means nothing ran: renew and send the same request once more (UJ-010). */
+ *  so a 401 means nothing ran: renew and send the same request once more (UJ-010).
+ *
+ *  It is also the one place a failed PAID call is noted for a problem report (the final answer only: a 429 the
+ *  retry layer waited out never reaches here as a failure). Noting only observes. */
 export async function authedFetch(
   url: string,
   init: RequestInit = {},
   send: Send = (u, i) => fetch(u, i),
 ): Promise<Response> {
+  let res: Response;
+  try {
+    res = await sendRenewing(url, init, send);
+  } catch (error) {
+    noteFailedRequest(url, error);
+    throw error;
+  }
+  await noteFailedResponse(url, res);
+  return res;
+}
+
+async function sendRenewing(url: string, init: RequestInit, send: Send): Promise<Response> {
   const attempt = async () => {
     const token = await getAccessToken();
     const headers = {

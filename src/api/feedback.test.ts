@@ -40,6 +40,24 @@ describe("submitFeedback", () => {
     expect(notifyAuthFailure).not.toHaveBeenCalled();
   });
 
+  it("sends the technical context it is given, unchanged", async () => {
+    setClerkTokenProvider(async () => "tok");
+    const f = vi.fn(async () => jsonResponse({ ok: true }));
+    vi.stubGlobal("fetch", f);
+    const context = {
+      app_version: "artdaddy@0.22.1",
+      os: "windows",
+      arch: "x86_64",
+      shell: "tauri",
+      surface: "app",
+      model: "gpt-5.6-luna",
+      failures: [{ at: 1, where: "turn", code: "account_busy", request_id: "r1", status: 429 }],
+    };
+    expect(await submitFeedback({ kind: "report", bundle: {}, context })).toBe(true);
+    const init = (f.mock.calls[0] as unknown[])[1] as RequestInit;
+    expect(JSON.parse(init.body as string).context).toEqual(context);
+  });
+
   it("omits the auth header when no secret is set", async () => {
     const f = vi.fn(async () => jsonResponse({ ok: true }));
     vi.stubGlobal("fetch", f);

@@ -10,6 +10,8 @@ import { historyAttachments } from "../agent/historyFrames";
 import type { InferenceAttachment, RoundInput, ToolResultItem, Usage } from "../agent/types";
 import { captureError, setCorrelation } from "../observability/sentry";
 import { isExpected, toUserMessage } from "../lib/errors";
+import { noteTurnError, requestIdOf, turnErrorCode } from "../agent/turnError";
+import { buildReportContext } from "../observability/reportContext";
 import { submitFeedback, type FeedbackKind } from "../api/feedback";
 import { agentEventContext, setAgentContext } from "../api/agentEvents";
 import type { SSEMessage } from "../api/sse";
@@ -406,6 +408,11 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
         break;
       }
       case "error":
+        // The turn ended in an error the person is shown. A typed round carries its code and the failed call's id.
+        noteTurnError(
+          typeof data?.error_code === "string" ? data.error_code : "unknown",
+          typeof data?.request_id === "string" ? data.request_id : undefined,
+        );
         finishTurn((s) => ({
           error: String(data?.error ?? "error"),
           turns: withLast(s.turns, (t) => ({
@@ -596,6 +603,7 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
         }));
       } else {
         if (!isExpected(e)) captureError(e, { phase: "turn" });
+        noteTurnError(turnErrorCode(e), requestIdOf(e));
         const message = toUserMessage(e);
         finishTurn((s) => ({
           streaming: false,
@@ -840,6 +848,7 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
         // forever (RF8). Only the still-current turn owns the shared UI state.
         if (exec === currentExec) {
           captureError(e, { phase: "host" });
+          noteTurnError("host_unavailable");
           const msg = toUserMessage(e);
           finishTurn((s) => ({
             streaming: false,
@@ -1073,6 +1082,7 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
         note: opts.note,
         request_id: opts.requestId,
         bundle,
+        context: buildReportContext({ model: get().model }),
       });
     },
   };

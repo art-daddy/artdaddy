@@ -10,6 +10,7 @@ import { authedFetch, hasSession } from "./auth";
 import { platform } from "../platform";
 import { hostInfo, resolveHostInfo } from "../platform/host";
 import { useAuth } from "../store/auth";
+import { legalText } from "../observability/recentFailures";
 import type { WhisperRunFacts } from "../tools/whisperFacts";
 
 export type AppEvent =
@@ -19,13 +20,17 @@ export type AppEvent =
   | "media_import"
   | "app_error"
   | "credits_exhausted"
-  | "transcription";
+  | "transcription"
+  | "turn_error";
 
 interface AppEventDetail {
   projectId?: string;
   ok?: boolean;
   reason?: string;
   via?: string;
+  /** turn_error: the code the person was shown, and the id of the failed request. Codes and ids only. */
+  errorCode?: string;
+  requestId?: string;
   eventId?: string;
   occurredAt?: number;
   ownerId?: string;
@@ -130,6 +135,8 @@ export async function reportAppEvent(
           ...(snapshot.ok === undefined ? {} : { ok: snapshot.ok }),
           ...(snapshot.reason ? { reason: snapshot.reason.slice(0, 300) } : {}),
           ...(snapshot.via ? { via: snapshot.via.slice(0, 30) } : {}),
+          ...(snapshot.errorCode ? { error_code: snapshot.errorCode } : {}),
+          ...(snapshot.requestId ? { request_id: snapshot.requestId } : {}),
           ...(snapshot.eventId ? { event_id: snapshot.eventId } : {}),
           ...(snapshot.occurredAt === undefined ? {} : { occurred_at: snapshot.occurredAt }),
         }),
@@ -227,6 +234,27 @@ export function resetCreditsExhausted(): void {
   reportedExhausted = false;
 }
 
+// A turn that ended in an error, as the code the person was shown and the failed request's id. Nothing they wrote.
+// A failed request is reported once however many places notice it; failures with no id (the connection never answered)
+// are each their own. Remembered ids are bounded, oldest forgotten first.
+const reportedTurnErrors = new Set<string>();
+const MAX_REMEMBERED_TURN_ERRORS = 50;
+
+export function reportTurnError(code: string, requestId = ""): void {
+  const id = legalText(requestId, 128);
+  if (id) {
+    if (reportedTurnErrors.has(id)) return;
+    reportedTurnErrors.add(id);
+    if (reportedTurnErrors.size > MAX_REMEMBERED_TURN_ERRORS)
+      reportedTurnErrors.delete(reportedTurnErrors.values().next().value as string);
+  }
+  void reportAppEvent("turn_error", {
+    ok: false,
+    errorCode: legalText(code, 40) || "unknown",
+    requestId: id,
+  });
+}
+
 // Sampled: short runs are mostly model load, and all of a user's app events share one server budget.
 const TRANSCRIPTION_MIN_AUDIO_S = 30;
 const TRANSCRIPTION_EVERY_MS = 60_000;
@@ -258,6 +286,7 @@ export function __resetAppEvents(): void {
   openedProjects.clear();
   importedProjects.clear();
   reportedExhausted = false;
+  reportedTurnErrors.clear();
   lastTranscriptionReport = -Infinity;
   stopHeartbeat();
 }
