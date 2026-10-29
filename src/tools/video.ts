@@ -12,6 +12,7 @@ import { stillPicture } from "../media/stillPicture";
 import { unresolvedRefMessage } from "./refState";
 import type { ClientToolRegistry } from "./registry";
 import { MAX_HEAP_READ_BYTES } from "./store";
+import { videoEdgeFor } from "./videoEdge";
 import { loadTimeline } from "../timeline/engine";
 import { canvasFps } from "../timeline/frames";
 import { clipSpanToFrames, findClip } from "../timeline/helpers";
@@ -208,7 +209,7 @@ async function videoAsk(
   try {
     encoded = await encodeVideoForGemini(ctx, localPath, {
       fps: VIDEO_ASK_FIXED_FPS,
-      maxDim: 720,
+      maxDim: videoEdgeFor(analyzedS),
       keepAudio: false,
       start: winStart ?? undefined,
       end: winEnd ?? undefined,
@@ -457,7 +458,7 @@ async function videoFindMoment(
   try {
     encoded = await encodeVideoForGemini(ctx, localPath, {
       fps: 4,
-      maxDim: 720,
+      maxDim: videoEdgeFor(duration),
       keepAudio: false,
       tag: "gemini",
       ...(duration ? { budget: { maxBytes: MAX_HEAP_READ_BYTES, durationS: duration } } : {}),
