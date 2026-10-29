@@ -144,3 +144,41 @@ export async function fetchWithRetry(
     rateLimited += 1;
   }
 }
+
+// The server's own "not now" answers. Both mean it has not started the request and has charged nothing, so asking again
+// is free; any other 429 (an upstream rate limit, say) is not waited out here.
+const BUSY_ERRORS = new Set(["account_busy", "server_busy"]);
+
+/** Whether a 429 is the server's own busy answer, and how long it asked to wait (from the body: the header may not be
+ *  readable by every host). Reads a COPY of the body so the caller can still read the original. */
+async function busyAnswer(res: Response): Promise<{ delayMs: number | null } | null> {
+  try {
+    const body = (await res.clone().json()) as {
+      detail?: { error?: unknown; retry_after_s?: unknown };
+    } | null;
+    const detail = body?.detail;
+    if (typeof detail?.error !== "string" || !BUSY_ERRORS.has(detail.error)) return null;
+    const seconds = Number(detail.retry_after_s);
+    return { delayMs: Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : null };
+  } catch {
+    return null;
+  }
+}
+
+/** `fetch` for the streaming chat route: waits out the server's typed busy answers (bounded by the same retry budget and
+ *  ceiling as {@link fetchWithRetry}, honouring `Retry-After`) and hands every other answer back at once. A user Stop
+ *  ends the wait immediately. Safe to repeat: a busy answer means nothing ran. */
+export async function fetchRetryingBusy(
+  url: string,
+  init: RequestInit,
+  signal?: AbortSignal,
+): Promise<Response> {
+  for (let attempt = 0; ; attempt += 1) {
+    const res = await fetchCompatibleClient(url, { ...init, signal });
+    if (res.status !== 429 || attempt >= rateLimitConfig.retries) return res;
+    const busy = await busyAnswer(res);
+    if (!busy) return res;
+    await res.body?.cancel().catch(() => undefined);
+    await sleep(backoffMs(attempt, retryAfterMs(res.headers.get("Retry-After")) ?? busy.delayMs), signal);
+  }
+}

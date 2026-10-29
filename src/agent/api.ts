@@ -2,14 +2,13 @@
 // thin proxy. Plain request/response, plus an opt-in SSE variant of the same round.
 import { authedFetch, notifyAuthFailure } from "../api/auth";
 import { api } from "../api/client";
-import { fetchWithRetry, RateLimitError, SessionExpiredError } from "../api/http";
+import { fetchRetryingBusy, fetchWithRetry, RateLimitError, SessionExpiredError } from "../api/http";
 import { readSSE } from "../api/sse";
 import { CreditLimitError, markOverLimit } from "../api/usage";
 import { hostInfo } from "../platform/host";
 import type { InferenceAttachment, RoundInput, RoundResultDTO } from "./types";
 import { catalogIdentity } from "../contract";
 import { ClientUpdateRequiredError } from "../update/updater";
-import { fetchCompatibleClient } from "../update/compatibility";
 
 async function postJson<T>(url: string, body: unknown, signal?: AbortSignal): Promise<T> {
   const res = await authedFetch(
@@ -219,7 +218,8 @@ async function streamRound(
       body: JSON.stringify(withClientInfo(body)),
       signal,
     },
-    fetchCompatibleClient,
+    // The server's typed busy answers (account_busy, server_busy) mean nothing ran: wait them out, bounded.
+    (u, init) => fetchRetryingBusy(u, init, signal),
   );
 
   if (res.status === 404 || res.status === 405) {
