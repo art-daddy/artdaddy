@@ -22,6 +22,7 @@ import {
   OrderExpiredError,
   OrderFailedError,
   OrderNotFoundError,
+  orderKnownToServer,
   OrderUnreachableError,
   OrderWaitSuspended,
   orderPolling,
@@ -40,6 +41,8 @@ beforeEach(() => {
   sleeps = [];
   orderPolling.sleep = async (ms: number) => {
     sleeps.push(ms);
+    // a loop that never ends is a failure of the code under test, not a hung test run
+    if (sleeps.length > 200) throw new Error("the test ran out of patience: the code kept asking");
   };
   rateLimitConfig.transientBackoffS = 0.001;
   setClerkTokenProvider(async () => "tok");
@@ -291,6 +294,34 @@ describe("waiting for an order", () => {
     const asked = server.calls.length;
     await Promise.resolve();
     expect(server.calls).toHaveLength(asked);
+  });
+});
+
+describe("whether the server has an order", () => {
+  it("says yes for an order of any state, without moving it on", async () => {
+    server.behaviour.pollsUntilDone = 99;
+    server.seed(ID, "generate_image", "running");
+    expect(await orderKnownToServer(ID)).toBe(true);
+    expect(server.orders.get(ID)?.state).toBe("running");
+  });
+
+  it("says no only when the server itself says it has no such order", async () => {
+    expect(await orderKnownToServer(ID)).toBe(false);
+  });
+
+  it("keeps asking while the server cannot answer, and asks to sign in once if the session lapsed", async () => {
+    server.seed(ID, "generate_image", "running");
+    server.fault(/^GET \/orders/, 2, "drop");
+    server.fault(/^GET \/orders/, 2, 401);
+    expect(await orderKnownToServer(ID)).toBe(true);
+    expect(sleeps).toEqual([2000, 4000, 15_000, 15_000]);
+    expect(notifyAuthFailure).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops without ending the order when this build may no longer ask", async () => {
+    server.seed(ID, "generate_image", "running");
+    server.fault(/^GET \/orders/, 1, 426);
+    await expect(orderKnownToServer(ID)).rejects.toBeInstanceOf(OrderWaitSuspended);
   });
 });
 

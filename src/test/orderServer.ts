@@ -49,19 +49,17 @@ export class FakeOrderServer {
     failure: { code: "generation_failed", message: "The generation did not complete. Nothing was charged to you." },
     response: () => ({ result: { ok: true, count: 1 }, media: [{ b64: "aGVsbG8=", ext: ".png", kind: "image" }] }),
   };
-  /** The next requests whose path matches get this instead of a real answer. */
-  private faults: { match: RegExp; left: number; make: () => Response | Error }[] = [];
+  /** The next requests whose path matches get this instead of a real answer. `lose-answer`: the server handles the request (an
+   *  order is made, a result is collected) but the answer never reaches the app. */
+  private faults: { match: RegExp; left: number; kind: "drop" | "lose-answer" | number }[] = [];
   /** Links that have been used once and now answer 403, as an expired signed link does. */
   expireLinksOnce = false;
   private expiredLinks = new Set<string>();
 
-  /** Answer the next `times` requests whose "METHOD path" matches with a network drop or a given status. */
-  fault(match: RegExp, times: number, kind: "drop" | number): void {
-    this.faults.push({
-      match,
-      left: times,
-      make: () => (kind === "drop" ? new TypeError("Failed to fetch") : new Response("{}", { status: kind })),
-    });
+  /** Answer the next `times` requests whose "METHOD path" matches with a network drop or a given status, or (`lose-answer`)
+   *  handle them for real and then drop the connection before the answer gets back. */
+  fault(match: RegExp, times: number, kind: "drop" | "lose-answer" | number): void {
+    this.faults.push({ match, left: times, kind });
   }
 
   private view(order: FakeOrder): View {
@@ -106,10 +104,15 @@ export class FakeOrderServer {
     const fault = this.faults.find((f) => f.left > 0 && f.match.test(line));
     if (fault) {
       fault.left -= 1;
-      const made = fault.make();
-      if (made instanceof Error) throw made;
-      return made;
+      if (fault.kind === "drop") throw new TypeError("Failed to fetch");
+      if (typeof fault.kind === "number") return new Response("{}", { status: fault.kind });
+      await this.handle(method, path, url, init); // lose-answer: it happened, but the app never hears
+      throw new TypeError("Failed to fetch");
     }
+    return this.handle(method, path, url, init);
+  };
+
+  private async handle(method: string, path: string, url: URL, init?: RequestInit): Promise<Response> {
     const bodyText = typeof init?.body === "string" ? init.body : "{}";
 
     if (method === "POST" && /^\/ai\/[^/]+$/.test(path)) return this.submit(path.slice(4), JSON.parse(bodyText));
@@ -122,7 +125,7 @@ export class FakeOrderServer {
     }
     if (method === "GET" && url.origin === STORAGE) return this.download(url);
     return new Response("not found", { status: 404 });
-  };
+  }
 
   private submit(proxy: string, body: Record<string, unknown>): Response {
     const id = body.order_id;
@@ -173,11 +176,11 @@ export class FakeOrderServer {
   }
 
   /** Make an order exist already, as if the app had submitted it before it was closed. */
-  seed(id: string, proxy: string, state: FakeOrder["state"], response?: unknown): FakeOrder {
+  seed(id: string, proxy: string, state: FakeOrder["state"], response?: unknown, args: unknown = {}): FakeOrder {
     const order: FakeOrder = {
       id,
       proxy,
-      body: { order_id: id, args: {} },
+      body: { order_id: id, args },
       state,
       polls: 0,
       response: response ?? this.behaviour.response(proxy, {}),
