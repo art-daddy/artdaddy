@@ -397,3 +397,51 @@ export function audioModelsInfo(category?: string): Record<string, unknown>[] {
   }
   return out;
 }
+
+// ── What a generation call is made of ────────────────────────────────────────────────────────────────────────────
+// The tools and the approval bar's price quote (holdInputs.ts) both derive the inputs that move a call's price from
+// these functions, so the price shown cannot drift from the call that is sent.
+
+/** The model a generation call names (the default when it names none), or null when that is not a model of this kind. */
+export function resolveGenModel(id: string, kind: "image" | "video", dflt: string): GenModel | null {
+  const m = GEN_BY_ID[(id || dflt).trim()];
+  return m && m.kind === kind ? m : null;
+}
+
+/** How many images a call asks for: at least one, never more than the model allows. */
+export function imageCount(m: GenModel, requested: unknown): number {
+  return Math.max(1, Math.min(m.max_images ?? 1, Math.trunc(Number(requested ?? 1)) || 1));
+}
+
+/** The reference images a video call names, blank entries dropped. */
+export function videoReferences(raw: unknown): string[] {
+  return (Array.isArray(raw) ? raw : []).map(String).filter((s) => s.trim());
+}
+
+/** The seconds a video call asks for: 8 unless told otherwise, and always 8 in reference-image mode. */
+export function videoSeconds(requested: unknown, withReferences: boolean): number {
+  const asked = Math.trunc(Number(requested ?? 8)) || 8;
+  return withReferences ? 8 : asked;
+}
+
+export const DEFAULT_TTS_BACKEND =
+  AUDIO_BY_ID[DEFAULTS.tts]?.backend_id ?? "gemini-3.1-flash-tts-preview";
+
+/** The backend a voiceover call uses for the model it names (the default when it names none), or null for anything else. */
+export function resolveTtsBackend(model: unknown): string | null {
+  if (!model) return DEFAULT_TTS_BACKEND;
+  const am = AUDIO_BY_ID[String(model).trim()];
+  return am && am.category === "tts" ? am.backend_id : null;
+}
+
+/** The music model a call uses for the model it names (the default when it names none), or null for anything else. */
+export function resolveMusicModel(model: unknown): AudioModel | null {
+  if (!model) return AUDIO_BY_ID[DEFAULTS.music];
+  const am = AUDIO_BY_ID[String(model).trim()];
+  return am && am.category === "music" ? am : null;
+}
+
+/** What a voiceover call sends as its text: the style as a prefix when there is one. */
+export function voiceoverContents(text: string, style: string): string {
+  return style ? `${style.replace(/:+$/, "")}: ${text}` : text;
+}
