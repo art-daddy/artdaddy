@@ -255,18 +255,15 @@ export async function getOrder(orderId: string, signal?: AbortSignal): Promise<O
   return parseOrderView(body);
 }
 
-/** Wait for an order to be ready and give it back. Throws the server's verdict if it failed, expired or was already collected,
- *  or `OrderNotFoundError`; throws `OrderWaitSuspended` when this build may no longer ask. Otherwise it keeps asking: nothing
- *  that only means the server is out of reach ends it. */
-export async function waitForOrder(orderId: string, opts: { signal?: AbortSignal } = {}): Promise<ReadyOrder> {
-  const { signal } = opts;
-  let answers = 0;
+/** Ask about an order until the server answers, however long that takes: an unreachable server or a dropped connection is waited
+ *  out with a growing pause, and a lapsed session asks the person to sign in once and is then asked again every so often. Throws
+ *  only what means something about the order (`OrderNotFoundError`) or the build (`OrderWaitSuspended`). */
+async function askUntilAnswered(orderId: string, signal?: AbortSignal): Promise<OrderView> {
   let failures = 0;
   let toldToSignIn = false;
   for (;;) {
-    let view: OrderView;
     try {
-      view = await getOrder(orderId, signal);
+      return await getOrder(orderId, signal);
     } catch (e) {
       if (e instanceof ClientUpdateRequiredError) throw new OrderWaitSuspended();
       if (!(e instanceof OrderUnreachableError)) throw e;
@@ -280,10 +277,29 @@ export async function waitForOrder(orderId: string, opts: { signal?: AbortSignal
         failures += 1;
         await orderPolling.sleep(retryDelayMs(failures), signal);
       }
-      continue;
     }
-    failures = 0;
-    toldToSignIn = false;
+  }
+}
+
+/** Whether the server has this order, asking until it can say. For a submit whose answer was lost: the order exists if the
+ *  request got there, and sending it again would be a second attempt at something that may already be running. */
+export async function orderKnownToServer(orderId: string, signal?: AbortSignal): Promise<boolean> {
+  try {
+    await askUntilAnswered(orderId, signal);
+    return true;
+  } catch (e) {
+    if (e instanceof OrderNotFoundError) return false;
+    throw e;
+  }
+}
+
+/** Wait for an order to be ready and give it back. Throws the server's verdict if it failed, expired or was already collected,
+ *  or `OrderNotFoundError`; throws `OrderWaitSuspended` when this build may no longer ask. Otherwise it keeps asking: nothing
+ *  that only means the server is out of reach ends it. */
+export async function waitForOrder(orderId: string, opts: { signal?: AbortSignal } = {}): Promise<ReadyOrder> {
+  const { signal } = opts;
+  for (let answers = 0; ; answers += 1) {
+    const view = await askUntilAnswered(orderId, signal);
     switch (view.state) {
       case "ready":
         return view as ReadyOrder;
@@ -295,7 +311,6 @@ export async function waitForOrder(orderId: string, opts: { signal?: AbortSignal
         throw new OrderCollectedError();
       case "running":
         await orderPolling.sleep(pollDelayMs(answers), signal);
-        answers += 1;
     }
   }
 }
