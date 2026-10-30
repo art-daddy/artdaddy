@@ -1,0 +1,50 @@
+{
+  "link": "https://storage.example.test/results/h/0123456789abcdef/response.json?sig=abc",
+  "views": {
+    "running": {
+      "order_id": "0123456789abcdef",
+      "state": "running",
+      "created_at": 1800000000.0,
+      "updated_at": 1800000000.0
+    },
+    "ready": {
+      "order_id": "0123456789abcdef",
+      "state": "ready",
+      "created_at": 1800000000.0,
+      "updated_at": 1800000004.0,
+      "result": {
+        "url": "https://storage.example.test/results/h/0123456789abcdef/response.json?sig=abc",
+        "bytes": 1234,
+        "content_type": "application/json",
+        "expires_at": 1800604804.0
+      },
+      "charged_credits": 96.0
+    },
+    "failed": {
+      "order_id": "0123456789abcdef",
+      "state": "failed",
+      "created_at": 1800000000.0,
+      "updated_at": 1800000009.0,
+      "error": {
+        "code": "provider_refused",
+        "message": "Azure refused it.",
+        "retryable": false
+      }
+    },
+    "collected": {
+      "order_id": "0123456789abcdef",
+      "state": "collected",
+      "created_at": 1800000000.0,
+      "updated_at": 1800000099.0,
+      "charged_credits": 96.0
+    },
+    "expired": {
+      "order_id": "0123456789abcdef",
+      "state": "expired",
+      "created_at": 1800000000.0,
+      "updated_at": 1800604804.0,
+      "charged_credits": 96.0
+    }
+  },
+  "codes_the_app_acts_on": ["rate_limited", "credit_limit_reached"]
+}
