@@ -22,6 +22,8 @@ vi.mock("../lib/upload", () => ({
   MEDIA_RE: /\.(mp4|mov|webm|mkv|m4v|png|jpe?g|gif|webp|bmp|avif|mp3|wav|m4a|aac|flac|ogg)$/i,
 }));
 vi.mock("../lib/files", () => ({ listProjectFiles: () => Promise.resolve([]) }));
+// The approval bar asks the server what a generation may cost; these tests must not reach for the network.
+vi.mock("../api/quote", () => ({ quoteHold: vi.fn(async () => null) }));
 // Stable snapshot (same reference each call) so useSyncExternalStore doesn't loop — which is
 // also why `over` is flipped in place rather than the object being replaced.
 const usageMock = vi.hoisted(() => ({
@@ -31,6 +33,7 @@ const usageMock = vi.hoisted(() => ({
   used: 10,
   limit: 100,
   remaining: 1_500_000,
+  held: undefined as number | undefined,
 }));
 vi.mock("../api/usage", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../api/usage")>()),
@@ -90,6 +93,9 @@ beforeEach(() => {
   usageMock.over = false;
   usageMock.globalPaused = undefined;
   usageMock.remaining = 1_500_000;
+  usageMock.used = 10;
+  usageMock.limit = 100;
+  usageMock.held = undefined;
   vi.mocked(importPaths).mockResolvedValue([]);
   vi.mocked(filesFromItems).mockReturnValue([]);
 });
@@ -215,6 +221,29 @@ describe("ChatView", () => {
     render(<ChatView />);
     expect(screen.getByText("0.001 cr left")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /join our discord/i })).not.toBeInTheDocument();
+  });
+
+  it("says in the tooltip how much of what is used is reserved for generations in progress", () => {
+    Object.assign(usageMock, { used: 96, limit: 150, remaining: 54, held: 96 });
+    render(<ChatView />);
+    expect(screen.getByText("54 cr left")).toHaveAttribute(
+      "title",
+      "96 / 150 credits used (96 reserved for generations in progress)",
+    );
+  });
+
+  it("leaves the tooltip as it was when nothing is held", () => {
+    render(<ChatView />);
+    expect(screen.getByText(/cr left/)).toHaveAttribute("title", "10 / 100 credits used");
+  });
+
+  it("carries the same tooltip on the way out once the balance is spent", () => {
+    Object.assign(usageMock, { over: true, used: 150, limit: 150, remaining: 0, held: 30 });
+    render(<ChatView />);
+    expect(screen.getByRole("button", { name: /join our discord/i })).toHaveAttribute(
+      "title",
+      "150 / 150 credits used (30 reserved for generations in progress)",
+    );
   });
 
   it("shows the shared pause without pretending the user's remaining credit is zero", () => {

@@ -35,6 +35,8 @@ describe("what counts as a paid call", () => {
     "https://api.example/telemetry/app",
     "https://api.example/telemetry/feedback",
     "https://api.example/billing/checkout",
+    "https://api.example/ai/generate_image/quote",
+    "https://api.example/ai/voiceover/quote",
     "not a url",
     "",
   ])("%s is not", (url) => expect(paidCallWhere(url)).toBeNull());
