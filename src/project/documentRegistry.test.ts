@@ -410,10 +410,50 @@ describe("makeProjectChildren", () => {
       }
     });
 
+    it("whose job failed while the project was closed does not spin for ever: opening the project says why it failed", async () => {
+      const actual = await vi.importActual<typeof import("../tools/import")>("../tools/import");
+      recoverMedia.mockImplementation(actual.reconcilePendingMedia);
+      const projectId = asProjectId("failed-while-closed");
+      const dir = `/root/projects/${projectId}`;
+      const fs = new BytesFs();
+      const store = new ProjectStoreAccess(dir, fs);
+      await actual.registerPendingClip(store, { id: "media_gen_late", filename: "late.png", kind: "image" });
+      fs.files.set(
+        joinPath(dir, "internals/jobs.json"),
+        JSON.stringify({
+          version: 1,
+          jobs: [
+            { id: "late", kind: "generation", tool: "generate_image", label: "an image", status: "failed", error: "the provider refused this", media_refs: ["media_gen_late"], started_at: 1, ended_at: 2, session: "a-previous-launch" },
+          ],
+        }),
+      );
+      editorState = { projectId, store };
+      activateChat.mockResolvedValue(undefined);
+      activateEditor.mockResolvedValue("loaded");
+      try {
+        await projectDocuments.open(projectId);
+        await vi.waitFor(async () => expect((await store.listClips())[0]).toMatchObject({ status: "failed", error: "the provider refused this" }));
+        // and a second opening in the same launch, with the job state already cached, does the same for a job that failed since
+        await projectDocuments.close(projectId);
+        await actual.registerPendingClip(store, { id: "media_gen_later", filename: "later.png", kind: "image" });
+        await projectDocuments.open(projectId);
+        await vi.waitFor(async () => {
+          const rows = await store.listClips();
+          expect(rows.find((c) => c.id === "media_gen_later")).toMatchObject({ status: "failed" });
+        });
+      } finally {
+        await projectDocuments.close(projectId);
+      }
+    });
+
     it("that cannot be looked into is reported, and never left as an unhandled failure", async () => {
       const projectId = asProjectId("order-unreadable");
       const store = {
         projectDir: `/root/projects/${projectId}`,
+        exists: async () => true,
+        readText: async () => {
+          throw new Error("the disk went away");
+        },
         readJson: async () => {
           throw new Error("the disk went away");
         },
@@ -424,9 +464,10 @@ describe("makeProjectChildren", () => {
       try {
         await projectDocuments.open(projectId);
         await vi.waitFor(() =>
-          expect(captureErr).toHaveBeenCalledWith(expect.objectContaining({ message: "the disk went away" }), {
-            scope: "project.open.generation-orders",
-          }),
+          expect(captureErr).toHaveBeenCalledWith(
+            expect.objectContaining({ name: "JobLedgerUnreadableError", reason: "the disk went away" }),
+            { scope: "project.open.generation-orders" },
+          ),
         );
       } finally {
         await projectDocuments.close(projectId);

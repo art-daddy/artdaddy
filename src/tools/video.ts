@@ -3,7 +3,7 @@
 // video-understanding call via the thin server proxy (/ai/vision_video). The
 // compact clip bytes cross the wire; the model credential stays server-side.
 // Ported from the server's research.py video tools (now client-side).
-import { callAiProxy, toB64 } from "../api/ai";
+import { callAiProxy } from "../api/ai";
 import type { ClientToolContext } from "./context";
 import { missingClipMessage } from "../contract/params";
 import { encodeVideoForGemini } from "./geminiEncode";
@@ -234,7 +234,7 @@ async function videoAsk(
           video: "video",
           max_output_tokens: 2000,
         },
-        media: { video: { b64: toB64(bytes), ext: ".mp4" } },
+        media: { video: { clip: bytes, ext: ".mp4" } },
       },
       ctx.signal,
       // Idempotent read: a 5xx / provider timeout is worth one re-fire.
@@ -481,7 +481,7 @@ async function videoFindMoment(
           video: "video",
           max_output_tokens: 2000,
         },
-        media: { video: { b64: toB64(bytes), ext: ".mp4" } },
+        media: { video: { clip: bytes, ext: ".mp4" } },
       },
       ctx.signal,
       // Idempotent read: a 5xx / provider timeout is worth one re-fire.

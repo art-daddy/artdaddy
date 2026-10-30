@@ -1,0 +1,47 @@
+{
+  "_about": "What the server answers for direct uploads (POST /uploads, DELETE /uploads/{id}, and a paid call that names an upload). The app's fake server is built from this file and the server's own tests (tests/integration/test_uploads_contract.py) are held to it, so neither side can drift from the other without a test failing. Values are examples; the SHAPE (keys and types) is the contract.",
+  "ticket": {
+    "upload": {
+      "id": "0123456789abcdef0123456789abcdef",
+      "method": "PUT",
+      "url": "https://storage.test/uploads/ticket",
+      "headers": {
+        "Content-Type": "video/mp4",
+        "x-goog-content-length-range": "1024,1024"
+      },
+      "expires_in": 1200,
+      "max_bytes": 67108864
+    }
+  },
+  "removed": { "ok": true },
+  "errors": {
+    "upload_missing": {
+      "status": 400,
+      "body": {
+        "detail": {
+          "error": "upload_missing",
+          "reason": "An uploaded clip is no longer available. Send it again.",
+          "keys": ["video"]
+        }
+      }
+    },
+    "uploads_off": { "status": 501, "body": { "detail": { "error": "uploads_off" } } },
+    "uploads_unavailable": { "status": 503, "body": { "detail": { "error": "uploads_unavailable" } } },
+    "uploads_rate_limited": {
+      "status": 429,
+      "body": { "detail": { "error": "uploads_rate_limited", "retry_after_s": 30 } }
+    },
+    "upload_refused": {
+      "status": 413,
+      "body": {
+        "detail": {
+          "error": "upload_refused",
+          "reason": "The clip is larger than the server accepts.",
+          "why": "too_large",
+          "max_bytes": 67108864
+        }
+      }
+    }
+  },
+  "codes_the_app_acts_on": ["upload_missing", "uploads_unavailable"]
+}

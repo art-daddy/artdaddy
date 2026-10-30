@@ -10,14 +10,15 @@ vi.mock("./auth", async (io) => {
 });
 vi.mock("./usage", async (io) => {
   const actual = await io<typeof import("./usage")>();
-  return { ...actual, markOverLimit: vi.fn() };
+  return { ...actual, markOverLimit: vi.fn(), refreshUsage: vi.fn(async () => undefined) };
 });
 
 import { setClerkTokenProvider } from "./auth";
+import orderViews from "./__fixtures__/orderViews.json";
 import { callAiProxy } from "./ai";
 import { rateLimitConfig, RateLimitError, SessionExpiredError, SessionRenewalUnavailableError } from "./http";
 import { __resetOrderPolling, isAcceptedOrder, orderPolling, OrderFailedError, OrderWaitSuspended } from "./orders";
-import { CreditLimitError, markOverLimit } from "./usage";
+import { CreditLimitError, markOverLimit, refreshUsage } from "./usage";
 import { FakeOrderServer } from "../test/orderServer";
 import { ClientUpdateRequiredError } from "../update/updater";
 
@@ -49,6 +50,7 @@ afterEach(() => {
   setClerkTokenProvider(null);
   vi.unstubAllGlobals();
   vi.mocked(markOverLimit).mockClear();
+  vi.mocked(refreshUsage).mockClear();
 });
 
 const posts = () => server.calls.filter((c) => c.startsWith("POST /ai/"));
@@ -131,6 +133,65 @@ describe("a paid call with an order number", () => {
     await expect(callAiProxy("generate_image", body)).rejects.toBeInstanceOf(RateLimitError);
   });
 
+  describe("an order the server refused for lack of credit after taking it", () => {
+    const unaffordable = { scope: "user", used: 120, limit: 150, requested: 96, remaining: 30 };
+    const exhausted = { scope: "user", used: 150, limit: 150, requested: 40, remaining: 0 };
+    const paused = { scope: "global", used: 9000, limit: 9000, requested: 40, remaining: 0 };
+    const refused = (detail?: Record<string, unknown>) => {
+      server.behaviour.outcome = "failed";
+      server.behaviour.failure = { code: "credit_limit_reached", message: "The server's own words. Nothing was charged.", retryable: false, ...(detail ? { detail } : {}) };
+    };
+
+    it.each([
+      ["a request that costs more than what is left", unaffordable, "credit_request_unaffordable"],
+      ["an account with nothing left", exhausted, undefined],
+      ["the shared budget being used up", paused, undefined],
+    ])("ends as the credit-limit error the tools and the balance display already know, for %s", async (_label, detail, code) => {
+      refused(detail);
+      const error = (await callAiProxy("generate_image", body).catch((e: unknown) => e)) as CreditLimitError;
+      expect(error).toBeInstanceOf(CreditLimitError);
+      expect(error.code).toBe(code ?? new CreditLimitError(detail).code);
+      expect(error.message).toBe(new CreditLimitError(detail).message); // exactly what the live call's 402 would have said
+      expect(error.userMessage).toBe(new CreditLimitError(detail).userMessage);
+      expect(error.detail).toEqual(detail);
+      expect(markOverLimit).toHaveBeenCalledTimes(1);
+      expect(markOverLimit).toHaveBeenCalledWith(detail);
+    });
+
+    it("does not claim the account is over when the server gave no numbers, and asks for the real balance instead", async () => {
+      refused();
+      const error = (await callAiProxy("generate_image", body).catch((e: unknown) => e)) as OrderFailedError;
+      expect(error).toBeInstanceOf(OrderFailedError);
+      expect(error.message).toBe("The server's own words. Nothing was charged.");
+      expect(markOverLimit).not.toHaveBeenCalled();
+      expect(refreshUsage).toHaveBeenCalled();
+    });
+
+    it("leaves every other refusal alone: no balance is touched", async () => {
+      server.behaviour.outcome = "failed";
+      server.behaviour.failure = { code: "provider_refused", message: "Azure refused it.", retryable: false, detail: unaffordable };
+      const error = await callAiProxy("generate_image", body).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(OrderFailedError);
+      expect(markOverLimit).not.toHaveBeenCalled();
+    });
+  });
+
+  it.each(orderViews.codes_the_app_acts_on)(
+    "really acts on %s, as the contract fixture says: it is never handed on as a plain failed order",
+    async (code) => {
+      server.behaviour.outcome = "failed";
+      server.behaviour.failure = {
+        code,
+        message: "x",
+        retryable: false,
+        detail: { scope: "user", used: 10, limit: 150, requested: 96, remaining: 20 },
+      };
+      const error = await callAiProxy("generate_image", body).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(Error);
+      expect(error).not.toBeInstanceOf(OrderFailedError);
+    },
+  );
+
   it("still turns a refusal for lack of credit at the door into the credit-limit error", async () => {
     vi.stubGlobal("fetch", async () => new Response(JSON.stringify({ detail: { used: 10, limit: 10 } }), { status: 402 }));
     await expect(callAiProxy("generate_image", body)).rejects.toBeInstanceOf(CreditLimitError);
@@ -160,6 +221,33 @@ describe("a paid call with an order number", () => {
     server.fault(/^POST \/ai/, 1, 503);
     await expect(callAiProxy("generate_image", body)).rejects.toThrow(/^503: /);
     expect(posts()).toHaveLength(1);
+  });
+
+  it("collects an order whose acceptance came back with a body that is not JSON: it was accepted, whatever the body says", async () => {
+    const real = server.fetch;
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const answer = await real(input, init);
+      return String(input).includes("/ai/") && (init?.method ?? "GET") === "POST" ? new Response("<html>accepted</html>", { status: 202 }) : answer;
+    });
+    const onOrder = vi.fn();
+    expect(await callAiProxy("generate_image", body, undefined, { onOrder })).toEqual(IMAGE);
+    expect(posts()).toHaveLength(1);
+    expect(onOrder).toHaveBeenCalledWith(ID);
+  });
+
+  it("collects an order whose acceptance came back with an empty body", async () => {
+    const real = server.fetch;
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const answer = await real(input, init);
+      return String(input).includes("/ai/") && (init?.method ?? "GET") === "POST" ? new Response(null, { status: 202 }) : answer;
+    });
+    expect(await callAiProxy("generate_image", body)).toEqual(IMAGE);
+    expect(posts()).toHaveLength(1);
+  });
+
+  it("still fails a plain call whose answer is not JSON", async () => {
+    vi.stubGlobal("fetch", async () => new Response("<html>oops</html>", { status: 200 }));
+    await expect(callAiProxy("generate_image", { args: {}, media: {} })).rejects.toBeInstanceOf(Error);
   });
 });
 

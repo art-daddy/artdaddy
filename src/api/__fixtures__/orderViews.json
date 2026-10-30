@@ -46,5 +46,17 @@
       "charged_credits": 96.0
     }
   },
+  "failed_for_credit": {
+    "order_id": "0123456789abcdef",
+    "state": "failed",
+    "created_at": 1800000000.0,
+    "updated_at": 1800000009.0,
+    "error": {
+      "code": "credit_limit_reached",
+      "message": "This needs up to 96 credits and you have 30 left. Nothing was charged.",
+      "retryable": false,
+      "detail": { "scope": "user", "used": 120.0, "limit": 150.0, "requested": 96.0, "remaining": 30.0 }
+    }
+  },
   "codes_the_app_acts_on": ["rate_limited", "credit_limit_reached"]
 }

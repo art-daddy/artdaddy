@@ -9,12 +9,11 @@ import { registerStyleTools } from "./style";
 
 // extract_style leans on exactly ONE hosted call — the whole-video style pass via
 // the /ai/style_analyze proxy — plus local ffprobe/ffmpeg/yt-dlp driven through the
-// injected CommandRunner. Mock the proxy + toB64 so no network runs and the encoded
+// injected CommandRunner. Mock the proxy so no network runs and the encoded
 // bytes never have to be real. Everything else (store, media hashing, styleSchema
 // parsing, versioning) runs for real against a MockFs.
 vi.mock("../api/ai", () => ({
   callAiProxy: vi.fn(),
-  toB64: () => "b64data",
 }));
 
 import { callAiProxy } from "../api/ai";
@@ -292,7 +291,8 @@ describe("extract_style · happy path", () => {
     const { name, body } = lastProxyCall();
     expect(name).toBe("style_analyze");
     expect(body.args).toMatchObject({ fps: 16, n: 1, videos: ["v0"], durations: [10] });
-    expect(body.media.v0).toEqual({ b64: "b64data", ext: ".mp4" });
+    // Each encoded reference reaches the call as bytes, for the call to upload; none is turned into text here.
+    expect(body.media.v0).toEqual({ clip: new Uint8Array([1, 2, 3]), ext: ".mp4" });
 
     // style.md + the versioned copy + meta.json + analyze.json all landed on disk.
     expect(fs.files.get(joinPath(STYLES, "kinetic", "style.md"))).toBe(FULL_MD);

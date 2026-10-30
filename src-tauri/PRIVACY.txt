@@ -27,6 +27,8 @@ Asking the agent to do something, generating a shot, or asking a question about 
 
 When you generate an image, video, voiceover or music bed, our hosted service keeps the finished file in private storage (Google Cloud Storage, in the United States) so your app can collect it even if you closed the app, lost your connection or our service restarted while it was being made. It is deleted as soon as your app confirms it has it, and in any case after 7 days. It is not used for anything else.
 
+When you ask a question about a video clip, or have ArtDaddy learn a style from reference videos, the app first sends a compact, reduced-quality copy of that footage straight to the same private storage, and the AI model reads it from there. That copy is deleted as soon as the request has been answered, and in any case within 2 days. It is not used for anything else.
+
 If you never use an AI feature, none of this happens. ArtDaddy is a complete editor without it.
 
 Your account
@@ -59,7 +61,7 @@ artdaddy.app sets no cookies and stores no IP addresses. A visitor is counted as
 
 WHO ELSE PROCESSES YOUR DATA
 
-- Google (Gemini / Vertex AI, Cloud Storage): video, image, music and voiceover generation; keeping a finished generation for up to 7 days until your app collects it; questions about footage; the agent when a Gemini model is selected.
+- Google (Gemini / Vertex AI, Cloud Storage): video, image, music and voiceover generation; keeping a finished generation for up to 7 days until your app collects it; briefly holding a compact copy of footage you ask about, until the question is answered (and in any case for no more than 2 days); questions about footage; the agent when a Gemini model is selected.
 - Microsoft Azure OpenAI: the agent when a GPT model is selected; GPT-Image generation.
 - Microsoft (MAI): MAI image generation.
 - Microsoft Azure: hosting and the usage database.

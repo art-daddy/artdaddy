@@ -613,6 +613,35 @@ export async function reconcilePendingMedia(store: ProjectStoreAccess): Promise<
   });
 }
 
+/** Fail the placeholders still marked as being made that nothing is making any more. A generation that failed (or was cut short)
+ *  while its project was closed could not say so in the catalog, because the gate refuses a write from a session that ended, so its
+ *  clip would spin for ever. ``owns`` says which placeholders a running job still owns; one whose file has arrived is finished, not
+ *  lost, and is left to ``reconcilePendingMedia``. Only generation placeholders are ever touched. Returns the ids it failed. */
+export async function failUnownedPendingClips(
+  store: ProjectStoreAccess,
+  owns: (id: string) => boolean,
+  why: (id: string) => string,
+): Promise<string[]> {
+  return runProjectMutation(store.projectDir, "library.orphans", async (_doc, gctx) => {
+    const fresh = await readCatalog(store);
+    const failed: string[] = [];
+    for (const row of fresh.clips ?? []) {
+      if (!row || row.status !== "generating" || row.added_by !== "generation") continue;
+      const id = String(row.id);
+      if (owns(id)) continue;
+      const rel = String(row.path ?? "");
+      if (rel && (await store.exists(joinPath(store.projectDir, rel)))) continue;
+      row.status = "failed" satisfies ClipStatus;
+      row.error = why(id);
+      failed.push(id);
+    }
+    if (!failed.length) return failed;
+    await commitCatalog(store, fresh);
+    gctx?.markCommitted();
+    return failed;
+  });
+}
+
 interface Catalog {
   version?: number;
   clips?: Record<string, unknown>[];

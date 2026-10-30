@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { APP_SESSION, JobLedger, jobsPath, type JobRecord } from "./jobLedger";
+import {
+  APP_SESSION,
+  JobLedger,
+  JobLedgerUnreadableError,
+  JobRecordError,
+  jobsPath,
+  type JobRecord,
+} from "./jobLedger";
 import { DIR, MemFs } from "../test/timelineKit";
-import { ProjectStoreAccess } from "../tools/store";
+import { markProjectDirDead, ProjectStoreAccess, reviveProjectDir } from "../tools/store";
 
 const PATH = jobsPath(DIR);
 
@@ -166,6 +173,155 @@ describe("job ledger", () => {
     const { store } = make();
     const ledger = await JobLedger.open(store);
     expect(ledger.list()).toEqual([]);
+  });
+
+  describe("a job is on disk before its paid call goes out, or the call does not go out", () => {
+    const spec = { kind: "generation" as const, tool: "generate_video", label: "a 5s video", order_id: "0123456789abcdef0123456789abcdef" };
+
+    it("refuses to begin when the record cannot be written, and leaves nothing behind in memory", async () => {
+      const { fs, store } = make();
+      const ledger = await JobLedger.open(store);
+      fs.writeTextFile = async () => {
+        throw new Error("disk full");
+      };
+      await expect(ledger.begin(spec)).rejects.toBeInstanceOf(JobRecordError);
+      expect(ledger.list()).toEqual([]);
+      expect(ledger.running()).toEqual([]);
+      expect(onDisk(fs)).toEqual([]);
+    });
+
+    it("says why, in words that tell the person nothing was charged", async () => {
+      const { fs, store } = make();
+      const ledger = await JobLedger.open(store);
+      fs.writeTextFile = async () => {
+        throw new Error("disk full");
+      };
+      const error = (await ledger.begin(spec).catch((e: unknown) => e)) as Error;
+      expect(error.message).toMatch(/not started/i);
+      expect(error.message).toMatch(/nothing was charged/i);
+    });
+
+    it("is not wedged by one failed write: the next begin works and carries only what really began", async () => {
+      const { fs, store } = make();
+      const ledger = await JobLedger.open(store);
+      const realWrite = fs.writeTextFile.bind(fs);
+      fs.writeTextFile = async () => {
+        throw new Error("disk full");
+      };
+      await expect(ledger.begin(spec)).rejects.toBeInstanceOf(JobRecordError);
+      fs.writeTextFile = realWrite;
+      const id = await ledger.begin({ ...spec, label: "second" });
+      expect(onDisk(fs).map((r) => r.id)).toEqual([id]);
+    });
+
+    it("refuses to begin in a project that has closed, where every write is dropped", async () => {
+      const { fs, store } = make();
+      const ledger = await JobLedger.open(store);
+      markProjectDirDead(DIR);
+      try {
+        await expect(ledger.begin(spec)).rejects.toBeInstanceOf(JobRecordError);
+        expect(ledger.running()).toEqual([]);
+      } finally {
+        reviveProjectDir(DIR);
+      }
+      expect(onDisk(fs)).toEqual([]);
+    });
+
+    it("never lets a failure to write the END of a job reach the job: it was done, whatever the disk says", async () => {
+      const { fs, store } = make();
+      const ledger = await JobLedger.open(store);
+      const id = await ledger.begin(spec);
+      const realWrite = fs.writeTextFile.bind(fs);
+      fs.writeTextFile = async () => {
+        throw new Error("disk full");
+      };
+      await expect(ledger.settle(id, { status: "done", media_refs: ["m"] })).resolves.toBe(true);
+      fs.writeTextFile = realWrite;
+      await ledger.begin({ ...spec, label: "third" });
+      expect(onDisk(fs).find((r) => r.id === id)?.status).toBe("done");
+    });
+  });
+
+  describe("a ledger file that is there but cannot be read is never written over", () => {
+    const spec = { kind: "generation" as const, tool: "generate_video", label: "a 5s video", order_id: "0123456789abcdef0123456789abcdef" };
+
+    function unreadable(fs: MemFs): { fix: () => void } {
+      const realRead = fs.readTextFile.bind(fs);
+      fs.readTextFile = async (p: string) => {
+        if (p === PATH) throw new Error("EACCES: the file is locked");
+        return realRead(p);
+      };
+      return {
+        fix: () => {
+          fs.readTextFile = realRead;
+        },
+      };
+    }
+
+    it("opens, but refuses to begin a paid job, and leaves the file exactly as it was", async () => {
+      const { fs, store } = make();
+      seed(fs, [{ id: "keep", session: "a-previous-launch", order_id: "0123456789abcdef0123456789abcdef" }] as Partial<JobRecord>[]);
+      const before = fs.files.get(PATH);
+      unreadable(fs);
+      const ledger = await JobLedger.open(store);
+      expect(ledger.list()).toEqual([]);
+      expect(ledger.readable, "a ledger that could not be read says it is fine").toBe(false);
+      expect(ledger.unreadableReason).toContain("EACCES: the file is locked");
+      const refusal = await ledger.begin(spec).catch((e: unknown) => e);
+      expect(refusal).toBeInstanceOf(JobLedgerUnreadableError);
+      expect((refusal as JobLedgerUnreadableError).reason, "the refusal does not say why").toContain("EACCES: the file is locked");
+      expect(fs.files.get(PATH)).toBe(before);
+    });
+
+    it("never writes while it cannot read, whatever else happens to it", async () => {
+      const { fs, store } = make();
+      seed(fs, [{ id: "keep", session: "a-previous-launch", order_id: "0123456789abcdef0123456789abcdef" }] as Partial<JobRecord>[]);
+      const before = fs.files.get(PATH);
+      unreadable(fs);
+      const ledger = await JobLedger.open(store);
+      await ledger.settle("anything", { status: "failed", error: "x" });
+      await ledger.begin({ ...spec, kind: "export" }).catch(() => undefined);
+      expect(fs.files.get(PATH)).toBe(before);
+    });
+
+    it("refuses at the write itself, not only at the doors that lead to it", async () => {
+      const { fs, store } = make();
+      seed(fs, [{ id: "keep", session: "a-previous-launch", order_id: "0123456789abcdef0123456789abcdef" }] as Partial<JobRecord>[]);
+      const before = fs.files.get(PATH);
+      unreadable(fs);
+      const ledger = await JobLedger.open(store);
+      // No public call reaches the write while the file is unreadable today; one added later must still be stopped here.
+      const write = (ledger as unknown as { write(): Promise<void> }).write.bind(ledger);
+      await expect(write()).rejects.toBeInstanceOf(JobLedgerUnreadableError);
+      expect(fs.files.get(PATH)).toBe(before);
+    });
+
+    it("reads it again at the next begin, so a lock that clears needs no restart, and nothing it holds is lost", async () => {
+      const { fs, store } = make();
+      seed(fs, [{ id: "keep", session: "a-previous-launch", order_id: "0123456789abcdef0123456789abcdef" }] as Partial<JobRecord>[]);
+      const lock = unreadable(fs);
+      const ledger = await JobLedger.open(store);
+      await expect(ledger.begin(spec)).rejects.toBeInstanceOf(JobLedgerUnreadableError);
+      lock.fix();
+      const id = await ledger.begin(spec);
+      expect(ledger.readable, "a lock that cleared is still reported").toBe(true);
+      expect(ledger.unreadableReason).toBe("");
+      const disk = onDisk(fs).map((r) => r.id);
+      expect(disk).toContain("keep");
+      expect(disk).toContain(id);
+    });
+
+    it("still opens an empty ledger for a file that is MISSING, and sets a CORRUPT one aside without losing its bytes", async () => {
+      const { fs, store } = make();
+      expect((await JobLedger.open(store)).list()).toEqual([]);
+      fs.files.set(PATH, "{not json");
+      const ledger = await JobLedger.open(store);
+      expect(ledger.list()).toEqual([]);
+      const aside = [...fs.files.keys()].filter((k) => k.startsWith(`${PATH}.corrupt-`));
+      expect(aside).toHaveLength(1);
+      expect(fs.files.get(aside[0])).toBe("{not json");
+      await expect(ledger.begin(spec)).resolves.toBeTruthy();
+    });
   });
 
   describe("a generation the server holds as an order", () => {

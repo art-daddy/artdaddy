@@ -18,7 +18,15 @@ import {
   orderKnownToServer,
   waitForOrder,
 } from "./orders";
-import { CreditLimitError, markOverLimit } from "./usage";
+import { creditWallFromBody } from "./creditWall";
+import {
+  discardUploads,
+  pauseUploads,
+  UploadMissingError,
+  uploadClip,
+  UploadsUnavailableError,
+} from "./uploads";
+import { CreditLimitError, markOverLimit, refreshUsage } from "./usage";
 import { SerialGate } from "../lib/serialGate";
 import { correlationBody } from "../observability/sentry";
 import { catalogIdentity } from "../contract";
@@ -29,11 +37,24 @@ export interface AiMedia {
   ext?: string;
 }
 
+/** A clip as bytes. The app uploads it straight to the bucket and the call carries only its id; if that cannot be done the clip is
+ *  sent inline, exactly as a `{ b64 }` entry would have been (see ./uploads). Only clips the server reads by address (a video
+ *  question, a style pass) may be given this way. */
+export interface AiClip {
+  clip: Uint8Array;
+  ext?: string;
+}
+
+/** What goes over the wire for a clip that was uploaded. */
+interface AiRef {
+  ref: string;
+}
+
 export interface AiProxyBody {
   /** The call's params (incl. which `media` keys to send, in order). */
   args: Record<string, unknown>;
-  /** ref -> {b64, ext?}: bytes for any client media the call reads. */
-  media?: Record<string, AiMedia>;
+  /** ref -> {b64, ext?}: bytes for any client media the call reads; a `{ clip }` is uploaded instead of being sent in the request. */
+  media?: Record<string, AiMedia | AiClip>;
   /** Correlation ids for observability (Sentry tags); added automatically. */
   project_id?: string;
   transcript_id?: string;
@@ -41,6 +62,9 @@ export interface AiProxyBody {
    *  sent again is the same order, never a second charge. Ignored (answered inline) by a server that cannot keep results. */
   order_id?: string;
 }
+
+/** The body as it is sent: no clip is ever in it as bytes. */
+type SentBody = Omit<AiProxyBody, "media"> & { media?: Record<string, AiMedia | AiRef> };
 
 export interface AiCallOpts extends RetryOpts {
   /** Called once the server has taken the call as an order. From then on the server owns the wait: the answer cannot be lost. */
@@ -71,10 +95,115 @@ const bigUploads = new SerialGate();
 /** POST one thin external-API call. Throws CreditLimitError on 402, notifies on 401.
  *
  *  With an `order_id` (generation only) the call is an ORDER when the server can keep results: it answers at once, and this waits
- *  for the order and returns exactly what the live call would have. A server that cannot answers inline, as it always did. */
+ *  for the order and returns exactly what the live call would have. A server that cannot answers inline, as it always did.
+ *
+ *  A `{ clip }` in the media is uploaded straight to the bucket and the call names it by id, so the server never carries the clip.
+ *  That is only ever an optimisation: whatever goes wrong with an upload, the clip is sent inline as it always was. */
 export async function callAiProxy<R = Record<string, unknown>>(
   name: string,
   body: AiProxyBody,
+  signal?: AbortSignal,
+  opts: AiCallOpts = {},
+): Promise<AiProxyResult<R>> {
+  const clips = Object.entries(body.media ?? {}).filter((entry): entry is [string, AiClip] =>
+    isClip(entry[1]),
+  );
+  if (clips.length === 0) return sendAiProxy<R>(name, body as SentBody, signal, opts);
+  const refs = new Map<string, string>();
+  try {
+    await uploadAll(clips, refs, signal);
+    // An upload the server cannot find is sent again, once, and only that one; if that fails too, or the server says it cannot look
+    // in the bucket at all, every clip goes inline as it always did. Neither answer is given after any work was done, so sending
+    // again is safe, and an inline call cannot be refused for either: at most three tries.
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await sendAiProxy<R>(name, withClips(body, refs), signal, opts);
+      } catch (e) {
+        const gone = e instanceof UploadMissingError;
+        if (!(gone || e instanceof UploadsUnavailableError) || attempt >= 2) throw e;
+        if (gone && attempt === 0) {
+          for (const key of e.keys) refs.delete(key);
+          await uploadAll(
+            clips.filter(([key]) => e.keys.includes(key)),
+            refs,
+            signal,
+          );
+        } else {
+          void discardUploads([...refs.values()]);
+          refs.clear();
+          if (!gone) pauseUploads();
+        }
+      }
+    }
+  } catch (e) {
+    // The call did not complete: nothing has used what was uploaded (or it ran and the server has already removed it, which is fine).
+    void discardUploads([...refs.values()]);
+    throw e;
+  }
+}
+
+function isClip(entry: AiMedia | AiClip): entry is AiClip {
+  return "clip" in entry;
+}
+
+/** Upload every clip at once and note the id of each that went, by media key. If one cannot be sent for a reason that ends the call
+ *  (the credit wall, a Stop), the ones that did arrive are taken back out and that reason is what is thrown. */
+async function uploadAll(
+  clips: [string, AiClip][],
+  refs: Map<string, string>,
+  signal?: AbortSignal,
+): Promise<void> {
+  const settled = await Promise.allSettled(
+    clips.map(([, entry]) => uploadClip(entry.clip, signal)),
+  );
+  const arrived = settled.flatMap((s) => (s.status === "fulfilled" && s.value ? [s.value] : []));
+  const ended = settled.find((s): s is PromiseRejectedResult => s.status === "rejected");
+  if (ended) {
+    void discardUploads(arrived);
+    throw ended.reason;
+  }
+  settled.forEach((s, i) => {
+    if (s.status === "fulfilled" && s.value) refs.set(clips[i][0], s.value);
+  });
+}
+
+/** The body to send: a clip that was uploaded is its id, any other is its bytes as text, exactly as it was before uploads. */
+function withClips(body: AiProxyBody, refs: Map<string, string>): SentBody {
+  const media: Record<string, AiMedia | AiRef> = {};
+  for (const [key, entry] of Object.entries(body.media ?? {})) {
+    if (!isClip(entry)) media[key] = entry;
+    else if (refs.has(key)) media[key] = { ref: refs.get(key)! };
+    else media[key] = { b64: toB64(entry.clip), ...(entry.ext ? { ext: entry.ext } : {}) };
+  }
+  return { ...body, media };
+}
+
+/** The media keys of a 400 that says uploads are gone, else null. */
+function missingUploadKeys(text: string): string[] | null {
+  try {
+    const detail = (JSON.parse(text) as { detail?: { error?: unknown; keys?: unknown } } | null)
+      ?.detail;
+    if (detail?.error !== "upload_missing" || !Array.isArray(detail.keys)) return null;
+    const keys = detail.keys.filter((key): key is string => typeof key === "string");
+    return keys.length ? keys : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether a 503 is the server saying it cannot look in the bucket right now (it says so before doing any work). */
+function bucketUnavailable(text: string): boolean {
+  try {
+    const detail = (JSON.parse(text) as { detail?: { error?: unknown } } | null)?.detail;
+    return detail?.error === "uploads_unavailable";
+  } catch {
+    return false;
+  }
+}
+
+async function sendAiProxy<R = Record<string, unknown>>(
+  name: string,
+  body: SentBody,
   signal?: AbortSignal,
   opts: AiCallOpts = {},
 ): Promise<AiProxyResult<R>> {
@@ -111,16 +240,14 @@ export async function callAiProxy<R = Record<string, unknown>>(
         `${name} could not run: the session has expired and the user has been asked to sign in again. ` +
           `Do NOT retry this or any other paid call — say the sign-in is needed and stop.`,
       );
-    if (res.status === 402) {
-      let detail: unknown = text;
-      try {
-        detail = (JSON.parse(text) as { detail?: unknown }).detail ?? text;
-      } catch {
-        /* keep raw text */
-      }
-      markOverLimit(detail);
-      throw new CreditLimitError(detail);
+    if (res.status === 402) throw creditWallFromBody(text);
+    // The server could not find an upload the call named: the caller sends those clips again (see callAiProxy).
+    if (res.status === 400) {
+      const gone = missingUploadKeys(text);
+      if (gone) throw new UploadMissingError(gone);
     }
+    // It could not look in the bucket right now: the caller sends the clips inline instead (see callAiProxy).
+    if (bucketUnavailable(text)) throw new UploadsUnavailableError();
     // Retries are already exhausted here, so the message has to tell the MODEL what
     // to do next — otherwise it just fires the same call again and burns the turn.
     if (res.status === 429)
@@ -134,8 +261,13 @@ export async function callAiProxy<R = Record<string, unknown>>(
     if (orderId && res.status >= 500) return recoverLostSubmit<R>(orderId, failure, signal, onOrder);
     throw failure;
   }
-  const answer = (await res.json()) as AiProxyResult<R> | { order: unknown };
-  if (orderId && (res.status === 202 || isOrderAnswer(answer))) return collectOrder<R>(orderId, signal, onOrder);
+  const answer = res.status === 202 && orderId ? null : ((await res.json()) as AiProxyResult<R> | { order: unknown });
+  // A 202 is the server saying it took the order: whatever the body is, the order exists and is waited for (a body that cannot be
+  // read must not make a paid, running order look like a failed call).
+  if (orderId && (res.status === 202 || isOrderAnswer(answer))) {
+    await res.body?.cancel().catch(() => undefined);
+    return collectOrder<R>(orderId, signal, onOrder);
+  }
   return answer as AiProxyResult<R>;
 }
 
@@ -180,11 +312,24 @@ async function collectOrder<R>(
   try {
     ready = await waitForOrder(orderId, { signal });
   } catch (e) {
-    // The tools already know how to explain a rate limit to the model and the person.
+    // The tools already know how to explain a rate limit and a credit wall to the model and the person.
     if (e instanceof OrderFailedError && e.code === "rate_limited") throw new RateLimitError(e.message);
+    if (e instanceof OrderFailedError && e.code === "credit_limit_reached") throw creditWall(e);
     throw e;
   }
   return (await downloadOrderResult(ready, signal)) as AiProxyResult<R>;
+}
+
+/** The server took the order and then found the account unable to pay for it. A live call's 402 says so with the balance on it, and
+ *  the balance display and the tools act on that; this says the same from the numbers the order carries. Without numbers the
+ *  account is not claimed to be over (it may be one request that costs more than what is left): the real balance is asked for. */
+function creditWall(e: OrderFailedError): Error {
+  if (!e.detail) {
+    void refreshUsage();
+    return e;
+  }
+  markOverLimit(e.detail);
+  return new CreditLimitError(e.detail);
 }
 
 export function toB64(bytes: Uint8Array): string {
