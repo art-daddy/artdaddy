@@ -4,6 +4,7 @@
 // argument is what makes the call consequential (a URL, a file about to be deleted) that
 // argument is shown too.
 import { EXTERNAL_FETCH_TOOLS, PAID_TOOLS, isDestructive } from "../agent/loop";
+import { formatCredits, type UsageState } from "../api/usage";
 
 export type ApprovalReason = "paid" | "external" | "destructive";
 
@@ -72,4 +73,17 @@ export function describeApproval(
     because: BECAUSE[reason],
     approveLabel: reason === "destructive" ? "Delete" : "Allow",
   };
+}
+
+/** "Up to 96 credits · you have 120 left": what a generation may spend, and what the person has to spend it from. The
+ *  balance already leaves out credits held for work in progress. It is left out for an account with no limit. */
+export function priceLine(
+  credits: number,
+  usage: Pick<UsageState, "metered" | "limit" | "remaining">,
+): string {
+  const price = formatCredits(credits);
+  const upTo = `Up to ${price} credit${price === "1" ? "" : "s"}`;
+  return usage.metered && usage.limit > 0
+    ? `${upTo} · you have ${formatCredits(Math.max(0, usage.remaining))} left`
+    : upTo;
 }

@@ -10,7 +10,7 @@ import {
 
 import { startDesktopSignIn } from "../api/desktopAuth";
 import type { ApprovalMode, Attachment, FileNode, SessionState } from "../api/types";
-import { formatCredits, getUsage, refreshUsage, subscribeUsage } from "../api/usage";
+import { creditsTitle, formatCredits, getUsage, refreshUsage, subscribeUsage } from "../api/usage";
 import type { FeedbackKind } from "../api/feedback";
 import { BRAND } from "../brand";
 import { openDiscord } from "../lib/community";
@@ -893,16 +893,13 @@ function ContextMeter({ session, model }: { session: SessionState | null; model:
           <button
             type="button"
             onClick={() => void openDiscord()}
-            title={`${formatCredits(usage.used)} / ${formatCredits(usage.limit)} credits used`}
+            title={creditsTitle(usage)}
             className="whitespace-nowrap font-medium text-red-400 underline underline-offset-2 hover:text-red-300"
           >
             0 cr — Join our Discord to get more
           </button>
         ) : (
-          <span
-            className="tabular-nums text-neutral-400"
-            title={`${formatCredits(usage.used)} / ${formatCredits(usage.limit)} credits used`}
-          >
+          <span className="tabular-nums text-neutral-400" title={creditsTitle(usage)}>
             {formatCredits(Math.max(0, usage.remaining))} cr left
           </span>
         ))}

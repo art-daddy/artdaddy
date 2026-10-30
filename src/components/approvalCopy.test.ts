@@ -4,7 +4,7 @@
 import { describe, expect, it } from "vitest";
 
 import { EXTERNAL_FETCH_TOOLS, PAID_TOOLS, needsApproval } from "../agent/loop";
-import { approvalReason, describeApproval } from "./approvalCopy";
+import { approvalReason, describeApproval, priceLine } from "./approvalCopy";
 
 describe("every gated tool has copy a non-engineer can read", () => {
   for (const name of [...PAID_TOOLS, ...EXTERNAL_FETCH_TOOLS]) {
@@ -57,5 +57,35 @@ describe("the consequential argument is shown", () => {
 
   it("has no subject when nothing meaningful was passed", () => {
     expect(describeApproval("generate_music", { seconds: 30 })?.subject).toBeUndefined();
+  });
+});
+
+describe("the price line", () => {
+  const account = { metered: true, used: 30, limit: 150, remaining: 120, over: false };
+
+  it("says up to how many credits the call may spend and how many the person has left", () => {
+    expect(priceLine(96, account)).toBe("Up to 96 credits · you have 120 left");
+  });
+
+  it("says credit in the singular for exactly one", () => {
+    expect(priceLine(1, account)).toBe("Up to 1 credit · you have 120 left");
+    expect(priceLine(1.5, account)).toBe("Up to 1.5 credits · you have 120 left");
+  });
+
+  it("leaves out what is left for an account with no limit, and for one that is not metered", () => {
+    expect(priceLine(96, { ...account, limit: 0, remaining: 0 })).toBe("Up to 96 credits");
+    expect(priceLine(96, { ...account, metered: false })).toBe("Up to 96 credits");
+  });
+
+  it("never shows a negative balance", () => {
+    expect(priceLine(96, { ...account, remaining: -5 })).toBe("Up to 96 credits · you have 0 left");
+  });
+
+  it("formats credits like the rest of the readout", () => {
+    expect(priceLine(0.1 + 0.2, { ...account, remaining: 0.1 + 0.2 })).toBe("Up to 0.3 credits · you have 0.3 left");
+  });
+
+  it("states a price that does not fit the balance too: the server refuses it in its own words", () => {
+    expect(priceLine(96, { ...account, remaining: 30 })).toBe("Up to 96 credits · you have 30 left");
   });
 });

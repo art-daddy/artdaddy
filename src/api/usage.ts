@@ -20,6 +20,8 @@ export interface UsageState {
   remaining: number;
   over: boolean;
   globalPaused?: true;
+  /** The part of `used` reserved for generations still running; it comes back if they fail. Absent when nothing is held. */
+  held?: number;
 }
 
 let state: UsageState = { metered: false, used: 0, limit: 0, remaining: 0, over: false };
@@ -34,6 +36,19 @@ export function formatCredits(value: number): string {
   return String(Number(value.toPrecision(6)));
 }
 
+/** Hover text of the credit readout. `held` is the part of `used` reserved for generations in progress. */
+export function creditsTitle(u: Pick<UsageState, "used" | "limit" | "held">): string {
+  const base = `${formatCredits(u.used)} / ${formatCredits(u.limit)} credits used`;
+  return typeof u.held === "number" && u.held > 0
+    ? `${base} (${formatCredits(u.held)} reserved for generations in progress)`
+    : base;
+}
+
+/** What the server says is held for generations in progress: a positive finite number, else nothing. */
+function heldFrom(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
 export function subscribeUsage(fn: () => void): () => void {
   listeners.add(fn);
   return () => {
@@ -44,6 +59,7 @@ export function subscribeUsage(fn: () => void): () => void {
 function set(next: Partial<UsageState>): void {
   const merged = { ...state, ...next };
   if (!merged.metered || !merged.over || merged.globalPaused !== true) delete merged.globalPaused;
+  if (!merged.metered || !(typeof merged.held === "number" && merged.held > 0)) delete merged.held;
   // Keep object identity stable when nothing changed (avoids useSyncExternalStore churn).
   if (
     merged.metered === state.metered &&
@@ -51,7 +67,8 @@ function set(next: Partial<UsageState>): void {
     merged.limit === state.limit &&
     merged.remaining === state.remaining &&
     merged.over === state.over &&
-    merged.globalPaused === state.globalPaused
+    merged.globalPaused === state.globalPaused &&
+    merged.held === state.held
   ) {
     return;
   }
@@ -83,6 +100,7 @@ export async function refreshUsage(): Promise<void> {
       remaining,
       over: globalPaused === true || j.over === true || (limit > 0 && remaining <= 0),
       globalPaused,
+      held: heldFrom(j.held),
     });
   } catch {
     /* offline / unreachable — leave the last known balance */
