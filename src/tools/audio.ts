@@ -3,7 +3,7 @@
 // proxies make only the authed provider call. Both tools SUBMIT and return a
 // placeholder media_ref -- word timings come from the library's own transcription
 // pass, read back through get_transcript. Ported from the server's audio.py.
-import { callAiProxy, fromB64 } from "../api/ai";
+import { callAiProxy } from "../api/ai";
 import type { ClientToolContext } from "./context";
 import {
   DEFAULT_VOICE,
@@ -15,57 +15,11 @@ import {
   voiceoverContents,
 } from "./genModels";
 import { submitGeneration } from "./genJobs";
-import { probePath, shortHash } from "./media";
+import { decodeMusic, decodeVoiceover, musicScratchKeys } from "./generationResults";
 import type { ClientToolRegistry } from "./registry";
 
 type Result = Record<string, unknown>;
 const NOT_READY: Result = { ok: false, error: "client tool runtime not ready" };
-const round3 = (n: number): number => Math.round(n * 1000) / 1000;
-
-/** (sample_rate, channels) from a PCM mime like 'audio/l16; rate=24000; channels=1'. */
-function parsePcmMime(mime: string): [number, number] {
-  let rate = 24000;
-  let channels = 1;
-  for (const part of (mime || "").split(";")) {
-    const p = part.trim().toLowerCase();
-    if (p.startsWith("rate=")) {
-      const v = parseInt(p.slice(5), 10);
-      if (!Number.isNaN(v)) rate = v;
-    } else if (p.startsWith("channels=")) {
-      const v = parseInt(p.slice(9), 10);
-      if (!Number.isNaN(v)) channels = v;
-    }
-  }
-  return [rate, channels];
-}
-
-/** Wrap signed-16-bit PCM in a minimal RIFF/WAVE container (ports _pcm_to_wav). */
-function pcmToWav(pcm: Uint8Array, rate: number, channels: number): Uint8Array {
-  const ch = Math.max(1, channels);
-  const bitsPerSample = 16;
-  const byteRate = (rate * ch * bitsPerSample) / 8;
-  const blockAlign = (ch * bitsPerSample) / 8;
-  const out = new Uint8Array(44 + pcm.length);
-  const dv = new DataView(out.buffer);
-  const str = (off: number, s: string): void => {
-    for (let i = 0; i < s.length; i += 1) dv.setUint8(off + i, s.charCodeAt(i));
-  };
-  str(0, "RIFF");
-  dv.setUint32(4, 36 + pcm.length, true);
-  str(8, "WAVE");
-  str(12, "fmt ");
-  dv.setUint32(16, 16, true);
-  dv.setUint16(20, 1, true);
-  dv.setUint16(22, ch, true);
-  dv.setUint32(24, rate, true);
-  dv.setUint32(28, byteRate, true);
-  dv.setUint16(32, blockAlign, true);
-  dv.setUint16(34, bitsPerSample, true);
-  str(36, "data");
-  dv.setUint32(40, pcm.length, true);
-  out.set(pcm, 44);
-  return out;
-}
 
 /** Generate a voiceover (ports generate_voiceover_tool). */
 async function generateVoiceover(
@@ -103,34 +57,19 @@ async function generateVoiceover(
     origin: ctx.origin,
     model: backend,
     // No ctx.signal on purpose: Stop and project-close must not cancel a call already paid for.
-    run: async () => {
+    run: async (order) => {
       const dto = await callAiProxy<{
         ok?: boolean;
         error?: string;
         pcm_b64?: string;
         mime?: string;
-      }>("voiceover", { args: { model: backend, text: contents, voice, language } });
-      const r = dto.result ?? {};
-      if (r.ok === false || !r.pcm_b64)
-        throw new Error(String(r.error ?? "voiceover synthesis failed"));
-
-      const pcm = fromB64(r.pcm_b64);
-      const [rate, channels] = parsePcmMime(String(r.mime ?? ""));
-      return [
-        {
-          bytes: pcmToWav(pcm, rate, channels),
-          ext: ".wav",
-          // Only knowable here — the mime carries the real rate, and the length is the byte
-          // count. Word timings deliberately are NOT here: the library indexes every audio
-          // asset, so `get_transcript` serves them in project frames, already mapped through
-          // the clip's trim and speed. Transcribing inline did it a second time, in seconds.
-          meta: {
-            duration_s: round3(pcm.length / 2 / Math.max(1, channels) / rate),
-            sample_rate: rate,
-            channels,
-          },
-        },
-      ];
+      }>(
+        "voiceover",
+        { args: { model: backend, text: contents, voice, language }, order_id: order.orderId },
+        undefined,
+        { onOrder: order.orderAccepted },
+      );
+      return decodeVoiceover(dto);
     },
   });
 
@@ -230,76 +169,33 @@ async function generateMusic(
     origin: ctx.origin,
     model: backend,
     // No ctx.signal on purpose: Stop and project-close must not cancel a call already paid for.
-    run: async () => {
+    run: async (order) => {
       const dto = await callAiProxy<{
         ok?: boolean;
         error?: string;
         audio_b64?: string;
         format?: string;
         lyrics?: string;
-      }>("music", {
-        args: {
-          backend_id: backend,
-          prompt: composed,
-          interactions: Boolean(am.interactions),
-          negative_prompt: negative,
-          seed: seedVal,
-        },
-      });
-      const r = dto.result ?? {};
-      if (r.ok === false || !r.audio_b64)
-        throw new Error(String(r.error ?? "music generation failed"));
-      const audioBytes = fromB64(r.audio_b64);
-      const format = String(r.format ?? "wav");
-
-      const srcPath = await ctx.store.prepareArtifact(
-        `generated/music_src_${shortHash(composed)}.${format === "mp3" ? "mp3" : "wav"}`,
-      );
-      await ctx.store.writeBytes(srcPath, audioBytes);
-      const outPath = await ctx.store.prepareArtifact(
-        `generated/music_${shortHash(`${composed}|${backend}`)}.wav`,
-      );
-      let wavPath = outPath;
-      const rr = await ctx.runner.run("ffmpeg", [
-        "-nostdin",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-y",
-        "-i",
-        srcPath,
-        "-c:a",
-        "pcm_s16le",
-        outPath,
-      ]);
-      if (rr.code !== 0 || !(await ctx.store.exists(outPath))) wavPath = srcPath;
-      let durationS = 0;
-      let sampleRate = 48000;
-      let channels = 2;
-      try {
-        const p = await probePath(ctx.runner, wavPath);
-        if (typeof p.duration_s === "number") durationS = round3(p.duration_s);
-        const a = (p.audio ?? null) as { sample_rate?: string; channels?: number } | null;
-        const sr = a?.sample_rate ? parseInt(String(a.sample_rate), 10) : NaN;
-        if (!Number.isNaN(sr)) sampleRate = sr;
-        if (typeof a?.channels === "number") channels = a.channels;
-      } catch {
-        /* metadata probe failed; use defaults */
-      }
-      return [
+      }>(
+        "music",
         {
-          bytes: await ctx.store.readBytes(wavPath),
-          ext: ".wav",
-          // Only knowable here: the sung lyrics come back from the model, and the measured
-          // length/format come from the probe. Both would be lost by returning early.
-          meta: {
-            lyrics: String(r.lyrics ?? "") || null,
-            duration_s: durationS,
-            sample_rate: sampleRate,
-            channels,
+          args: {
+            backend_id: backend,
+            prompt: composed,
+            interactions: Boolean(am.interactions),
+            negative_prompt: negative,
+            seed: seedVal,
           },
+          order_id: order.orderId,
         },
-      ];
+        undefined,
+        { onOrder: order.orderAccepted },
+      );
+      return decodeMusic(dto, {
+        store: ctx.store,
+        runner: ctx.runner,
+        ...musicScratchKeys(composed, backend),
+      });
     },
   });
 

@@ -9,18 +9,32 @@
 // abort that signal, and cancelling the fetch would throw away media the vendor has already been
 // paid for -- the money is committed at submit, so abandoning the result is pure loss. This is
 // also why generation must not stay a `cancelOnClose` job.
-import { JobLedger } from "../project/jobLedger";
+import { JobLedger, type JobRecord } from "../project/jobLedger";
 import { ProjectClosingError, type MutationOrigin } from "../project/MutationGate";
+import type { AiProxyResult } from "../api/ai";
 import { CreditLimitError, getUsage, refreshUsage } from "../api/usage";
+import {
+  ackOrder,
+  acknowledgeAcceptedOrder,
+  downloadOrderResult,
+  newOrderId,
+  OrderNotFoundError,
+  OrderWaitSuspended,
+  waitForOrder,
+} from "../api/orders";
 import { notifyJobSettled } from "../store/jobNotes";
+import { decodeGenerated, isResultTool, type GeneratedOutput, type ResultTool } from "./generationResults";
 import {
   failPendingClip,
   finalizePendingClip,
   newPendingMediaId,
+  pendingMediaState,
   reconcilePendingMedia,
   registerPendingClip,
 } from "./import";
 import type { ProjectStoreAccess } from "./store";
+
+export type { GeneratedOutput } from "./generationResults";
 
 /** One ledger per project dir for the life of the process. A second instance would race the
  *  first on writes, and reopening a project whose jobs are still running must see the SAME
@@ -94,19 +108,34 @@ function releaseModelSlot(model: string | undefined): void {
 }
 
 /** Open (or reuse) a project's job state, settling anything a previous launch left running and
- *  finishing placeholders whose bytes landed while the project was closed. */
-export function openProjectJobs(store: ProjectStoreAccess): Promise<JobLedger> {
+ *  finishing placeholders whose bytes landed while the project was closed. A generation the server
+ *  holds as an order is NOT given up on: it is taken over, and its result is collected.
+ *
+ *  ``reconciled``: the caller has JUST finished placeholders whose bytes had landed (the project-open
+ *  recovery does), so the first open does not do it a second time. */
+export function openProjectJobs(
+  store: ProjectStoreAccess,
+  opts: { reconciled?: boolean } = {},
+): Promise<JobLedger> {
   const key = store.projectDir;
   let existing = ledgers.get(key);
   if (!existing) {
     existing = (async () => {
       const ledger = await JobLedger.open(store);
-      await reconcilePendingMedia(store).catch(() => []);
+      if (!opts.reconciled) await reconcilePendingMedia(store).catch(() => []);
+      for (const rec of ledger.adopted()) track(resumeOrderJob(store, ledger, rec));
       return ledger;
     })();
     ledgers.set(key, existing);
   }
   return existing;
+}
+
+/** Keep a detached job alive until it is done, and never let it become an unhandled rejection. */
+function track(task: Promise<unknown>): void {
+  const held = task.catch(() => undefined);
+  inflight.add(held);
+  void held.finally(() => inflight.delete(held));
 }
 
 /** Resolve once every generation started in this process has settled. For tests and for a
@@ -124,11 +153,13 @@ export function __resetProjectJobs(): void {
   slotsUsed = 0;
 }
 
-export interface GeneratedOutput {
-  bytes: Uint8Array;
-  ext?: string;
-  /** Result facts that exist only in the provider's response; merged into the library row. */
-  meta?: Record<string, unknown>;
+/** What a generation's paid call is handed: the number that makes it an order, and how to say the server took it. */
+export interface GenerationRunContext {
+  /** The generation's order number. Sent with the paid call: the same number again is the same order, never a second charge. */
+  orderId: string;
+  /** Call this once the server has taken the call as an order. From then on the SERVER owns the wait, so the deadline (a guard
+   *  against a call that never answers) stops applying: an order is never given up on by the app's own clock. */
+  orderAccepted: () => void;
 }
 
 export interface SubmitSpec {
@@ -150,7 +181,7 @@ export interface SubmitSpec {
   /** Provider model id, so concurrency is capped PER MODEL as well as overall. */
   model?: string;
   /** Makes the paid call. Runs detached; must not take the turn's signal. */
-  run: () => Promise<GeneratedOutput[]>;
+  run: (ctx: GenerationRunContext) => Promise<GeneratedOutput[]>;
 }
 
 export interface SubmitResult {
@@ -202,43 +233,70 @@ export async function submitGeneration(spec: SubmitSpec): Promise<SubmitResult> 
     );
   }
 
-  // Recorded BEFORE the paid call, so a crash mid-call still leaves a trace of money spent.
+  // Recorded BEFORE the paid call, so a crash mid-call still leaves a trace of money spent. The order number goes in with it: it is
+  // what lets a later launch ask the server for the result, and what makes sending the call again the same order, never a second one.
+  // Only THIS chat's tool calls carry an origin (host.run passes the chat execution); the menu and an external MCP agent do not, and
+  // neither is part of the conversation to resume.
+  const orderId = newOrderId();
   const jobId = await ledger.begin({
     kind: "generation",
     tool: spec.tool,
     label: spec.label,
     media_refs: ids,
+    order_id: orderId,
+    started_by: spec.origin ? "chat" : "elsewhere",
   });
 
-  const task = settleLater(spec, ledger, jobId, ids).finally(refreshUsage);
+  const task = settleLater(spec, ledger, jobId, ids, orderId).finally(refreshUsage);
   inflight.add(task);
   void task.finally(() => inflight.delete(task));
   return { media_refs: ids, job_id: jobId };
 }
 
-/** Fail a generation that never resolves, so its ref stops being unanswerable. */
+/** The time allowed for a call to answer has run out. Not a verdict on the generation: with an order number the server may well
+ *  hold it (and have charged it), so the job is handed to the code that takes an order over after a restart, which asks the server
+ *  and only gives up when the server says it never had the call. */
+class GenerationOverdue extends Error {
+  constructor(label: string) {
+    super(
+      `${label} never came back (no result after ${Math.round(GENERATION_DEADLINE_MS / 60_000)} minutes), so it was given up on. Nothing further will arrive for this ref — submit it again if you still want it.`,
+    );
+    this.name = "GenerationOverdue";
+  }
+}
+
+/** Stop waiting on a call that never resolves, so its ref stops being unanswerable. The clock stops the moment the server takes the
+ *  call as an order (`start` is handed the way to say so): from then on the server owns the wait, and an order is never given up
+ *  on by the app's own clock, only by the server's verdict. If it runs out first the call is `GenerationOverdue`. */
 async function withDeadline(
-  call: Promise<GeneratedOutput[]>,
+  start: (orderAccepted: () => void) => Promise<GeneratedOutput[]>,
   label: string,
 ): Promise<GeneratedOutput[]> {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  const disarm = (): void => {
+    if (timer !== undefined) clearTimeout(timer);
+    timer = undefined;
+  };
   const expiry = new Promise<never>((_, reject) => {
-    timer = setTimeout(
-      () =>
-        reject(
-          new Error(
-            `${label} never came back (no result after ${Math.round(GENERATION_DEADLINE_MS / 60_000)} minutes), so it was given up on. Nothing further will arrive for this ref — submit it again if you still want it.`,
-          ),
-        ),
-      GENERATION_DEADLINE_MS,
-    );
+    timer = setTimeout(() => reject(new GenerationOverdue(label)), GENERATION_DEADLINE_MS);
     (timer as unknown as { unref?: () => void }).unref?.();
   });
   try {
-    return await Promise.race([call, expiry]);
+    return await Promise.race([start(disarm), expiry]);
   } finally {
-    if (timer !== undefined) clearTimeout(timer);
+    disarm();
   }
+}
+
+/** One generation, as the functions below see it: where it is, which placeholders it fills, and who asked. */
+interface JobInfo {
+  store: ProjectStoreAccess;
+  ledger: JobLedger;
+  jobId: string;
+  ids: string[];
+  tool: string;
+  label: string;
+  startedBy: "chat" | "elsewhere";
 }
 
 async function settleLater(
@@ -246,35 +304,78 @@ async function settleLater(
   ledger: JobLedger,
   jobId: string,
   ids: string[],
+  orderId: string,
 ): Promise<void> {
-  const { store } = spec;
-  // Only THIS chat's tool calls carry an origin (host.run passes the chat execution); the menu and
-  // an external MCP agent do not, and neither is part of the conversation to resume.
-  const startedBy = spec.origin ? "chat" : "elsewhere";
+  const job: JobInfo = {
+    store: spec.store,
+    ledger,
+    jobId,
+    ids,
+    tool: spec.tool,
+    label: spec.label,
+    startedBy: spec.origin ? "chat" : "elsewhere",
+  };
   let outputs: GeneratedOutput[];
+  let overdue: GenerationOverdue | null = null;
   await acquireSlot();
   await acquireModelSlot(spec.model);
   try {
-    outputs = await withDeadline(spec.run(), spec.label);
+    outputs = await withDeadline((orderAccepted) => spec.run({ orderId, orderAccepted }), spec.label);
   } catch (e) {
-    const error = e instanceof Error ? e.message : String(e);
-    await Promise.allSettled(ids.map((id) => failPendingClip(store, id, error)));
-    await ledger.settle(jobId, { status: "failed", error });
-    notifyJobSettled(store.projectDir, {
-      id: jobId,
-      tool: spec.tool,
-      label: spec.label,
-      status: "failed",
-      startedBy,
-      error,
-    });
-    return;
+    // The order is fine and this build is only barred from asking about it: leave the job running, the placeholders as they are and
+    // nobody told anything. The next run that may ask collects it.
+    if (e instanceof OrderWaitSuspended) return;
+    if (!(e instanceof GenerationOverdue)) {
+      await failJob(job, e instanceof Error ? e.message : String(e));
+      return;
+    }
+    overdue = e;
+    outputs = [];
   } finally {
     // Only the paid call is capped; writing the bytes is local and must not hold a slot.
     releaseSlot();
     releaseModelSlot(spec.model);
   }
 
+  if (overdue) {
+    // A tool whose results cannot be brought back has no order to ask about: it is simply given up on, as it always was.
+    if (!isResultTool(job.tool)) await failJob(job, overdue.message);
+    else await takeOverOrder(job, orderId, { notFound: { message: overdue.message, status: "failed" } });
+    return;
+  }
+
+  // The server keeps the finished file until the app says it has it, so say so only once it is on disk and the job is settled.
+  if ((await landOutputs(job, outputs)) > 0) await acknowledgeAcceptedOrder(orderId);
+}
+
+/** Fail a job: its placeholders still being made are failed (one that already landed is not undone by a job that failed for the
+ *  rest), the ledger row is closed and the chat is told. */
+async function failJob(job: JobInfo, error: string, status: "failed" | "interrupted" = "failed"): Promise<void> {
+  const { store, ledger, jobId } = job;
+  await Promise.allSettled(
+    job.ids.map(async (id) => {
+      if ((await pendingMediaState(store, id)) === "generating") await failPendingClip(store, id, error);
+    }),
+  );
+  await ledger.settle(jobId, { status, error });
+  notifyJobSettled(store.projectDir, {
+    id: jobId,
+    tool: job.tool,
+    label: job.label,
+    status: "failed",
+    startedBy: job.startedBy,
+    error,
+  });
+}
+
+/** Put the outputs where the placeholders are, settle the job and tell the chat. Returns how many outputs are in place (the job is
+ *  done when at least one is). ``alreadyLanded`` are the placeholders whose bytes are already there. */
+async function landOutputs(
+  job: JobInfo,
+  outputs: GeneratedOutput[],
+  alreadyLanded: ReadonlySet<number> = new Set(),
+): Promise<number> {
+  const { store, ledger, jobId, ids } = job;
   const landed: string[] = [];
   const deferred: string[] = [];
   const failures: string[] = [];
@@ -285,6 +386,10 @@ async function settleLater(
     "the provider returned nothing for this one — usually a content filter. Change the prompt " +
     "(or the reference image, which is filtered separately) rather than retrying it unchanged";
   for (let i = 0; i < ids.length; i += 1) {
+    if (alreadyLanded.has(i)) {
+      landed.push(ids[i]);
+      continue;
+    }
     const out = outputs[i];
     if (!out) {
       failures.push(`${ids[i]}: ${missing}`);
@@ -315,11 +420,80 @@ async function settleLater(
   });
   notifyJobSettled(store.projectDir, {
     id: jobId,
-    tool: spec.tool,
-    label: spec.label,
+    tool: job.tool,
+    label: job.label,
     status: ok.length ? "done" : "failed",
-    startedBy,
+    startedBy: job.startedBy,
     ...(ok.length ? { media_refs: ok } : {}),
     ...(failures.length ? { error: failures.join("; ") } : {}),
   });
+  return ok.length;
+}
+
+/** The ffmpeg a result brought back after a restart may need (a music bed is re-muxed), or null where there is none. */
+async function ffmpegOrNull() {
+  try {
+    const { previewRunner } = await import("../preview/conformAudio");
+    return await previewRunner();
+  } catch {
+    return null;
+  }
+}
+
+/** What to say, and how to close the job, when the server answers that it has no such order. After a restart the call may simply
+ *  never have left the app; once the time allowed ran out it is the same story as always: it never came back. */
+interface NotFound {
+  message: string;
+  status: "failed" | "interrupted";
+}
+
+const CLOSED_BEFORE_IT_FINISHED: NotFound = {
+  message: "the app closed before this finished; it may still have been charged",
+  status: "interrupted",
+};
+
+/** A generation the app was closed on: ask the server for it and finish what the closed app could not. */
+async function resumeOrderJob(store: ProjectStoreAccess, ledger: JobLedger, rec: JobRecord): Promise<void> {
+  const job: JobInfo = {
+    store,
+    ledger,
+    jobId: rec.id,
+    ids: rec.media_refs ?? [],
+    tool: rec.tool,
+    label: rec.label,
+    startedBy: rec.started_by ?? "elsewhere",
+  };
+  if (!isResultTool(rec.tool)) {
+    await failJob(job, `${rec.label} cannot be brought back by this version of the app.`);
+    return;
+  }
+  await takeOverOrder(job, rec.order_id as string, { notFound: CLOSED_BEFORE_IT_FINISHED });
+}
+
+/** Take a generation over from whoever started it (an app that was closed, or a call that never answered in time): ask the server
+ *  for the order and finish the job from its answer. It never gives up on the order itself (see waitForOrder); only the server's
+ *  verdict, or a result it cannot read, ends it. */
+async function takeOverOrder(job: JobInfo, orderId: string, opts: { notFound: NotFound }): Promise<void> {
+  const { store, ids } = job;
+  try {
+    const states = await Promise.all(ids.map((id) => pendingMediaState(store, id)));
+    const alreadyLanded = new Set(states.flatMap((s, i) => (s === "ready" ? [i] : [])));
+    if (ids.length > 0 && alreadyLanded.size === ids.length) {
+      // The app stopped after the files landed and before it said so: only the bookkeeping is left.
+      await landOutputs(job, [], alreadyLanded);
+      await ackOrder(orderId);
+      return;
+    }
+    const ready = await waitForOrder(orderId);
+    const dto = (await downloadOrderResult(ready)) as AiProxyResult<unknown>;
+    const outputs = await decodeGenerated(job.tool as ResultTool, dto, { store, runner: await ffmpegOrNull(), orderId });
+    if ((await landOutputs(job, outputs, alreadyLanded)) > 0) await ackOrder(orderId);
+  } catch (e) {
+    if (e instanceof OrderWaitSuspended) return;
+    if (e instanceof OrderNotFoundError) {
+      await failJob(job, opts.notFound.message, opts.notFound.status);
+      return;
+    }
+    await failJob(job, e instanceof Error ? e.message : String(e));
+  }
 }

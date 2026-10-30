@@ -11,7 +11,10 @@ vi.mock("@tauri-apps/api/path", () => ({
   dataDir: async () => "C:/Users/someone/AppData/Roaming",
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: async () => null }));
-vi.mock("./config", () => ({ apiBase: () => "https://example.invalid" }));
+vi.mock("./config", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./config")>()),
+  apiBase: () => "https://example.invalid",
+}));
 vi.mock("./auth", () => ({
   hasSession: async () => true,
   authedFetch: (url: string, init: RequestInit = {}) => fetch(url, init),

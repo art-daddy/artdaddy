@@ -42,6 +42,8 @@ export class FakeOrderServer {
   readonly orders = new Map<string, FakeOrder>();
   /** Every request seen, in order: `METHOD path`. */
   readonly calls: string[] = [];
+  /** Called when the app confirms an order, just before the server collects it. */
+  onAck: ((order: FakeOrder) => void) | null = null;
   behaviour: ServerBehaviour = {
     orders: true,
     pollsUntilDone: 1,
@@ -51,14 +53,15 @@ export class FakeOrderServer {
   };
   /** The next requests whose path matches get this instead of a real answer. `lose-answer`: the server handles the request (an
    *  order is made, a result is collected) but the answer never reaches the app. */
-  private faults: { match: RegExp; left: number; kind: "drop" | "lose-answer" | number }[] = [];
+  private faults: { match: RegExp; left: number; kind: "drop" | "lose-answer" | "hang" | "hang-after" | number }[] = [];
   /** Links that have been used once and now answer 403, as an expired signed link does. */
   expireLinksOnce = false;
   private expiredLinks = new Set<string>();
 
-  /** Answer the next `times` requests whose "METHOD path" matches with a network drop or a given status, or (`lose-answer`)
-   *  handle them for real and then drop the connection before the answer gets back. */
-  fault(match: RegExp, times: number, kind: "drop" | "lose-answer" | number): void {
+  /** Answer the next `times` requests whose "METHOD path" matches with a network drop or a given status. `lose-answer`: the server
+   *  handles the request (an order is made, a result is collected) but the answer never reaches the app. `hang`: the request never
+   *  gets anywhere and never answers. `hang-after`: the server handles it, and the answer never comes. */
+  fault(match: RegExp, times: number, kind: "drop" | "lose-answer" | "hang" | "hang-after" | number): void {
     this.faults.push({ match, left: times, kind });
   }
 
@@ -106,7 +109,9 @@ export class FakeOrderServer {
       fault.left -= 1;
       if (fault.kind === "drop") throw new TypeError("Failed to fetch");
       if (typeof fault.kind === "number") return new Response("{}", { status: fault.kind });
-      await this.handle(method, path, url, init); // lose-answer: it happened, but the app never hears
+      if (fault.kind === "hang") return new Promise<Response>(() => undefined);
+      await this.handle(method, path, url, init); // lose-answer / hang-after: it happened, but the app never hears
+      if (fault.kind === "hang-after") return new Promise<Response>(() => undefined);
       throw new TypeError("Failed to fetch");
     }
     return this.handle(method, path, url, init);
@@ -160,6 +165,7 @@ export class FakeOrderServer {
 
   private collect(order: FakeOrder): Response {
     if (order.state === "running") return this.json({ detail: { error: "order_not_ready" } }, 409);
+    this.onAck?.(order);
     if (order.state === "ready") order.state = "collected";
     return this.json({ order: this.view(order) });
   }

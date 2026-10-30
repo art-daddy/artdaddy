@@ -25,6 +25,11 @@ export interface JobRecord {
   status: JobStatus;
   /** Placeholder media ids this job resolves when it lands. */
   media_refs?: string[];
+  /** The order number of a generation the server may hold for us (the server's order desk). While the server has the order the job
+   *  is never given up on, even when the launch that started it is gone: the next launch asks the server and collects the result. */
+  order_id?: string;
+  /** Who asked: only "chat" wakes the conversation when the job lands, and that has to survive a restart. */
+  started_by?: "chat" | "elsewhere";
   error?: string;
   /** Bounded process output for diagnosing background failures after the originating turn ended. */
   stderr_tail?: string;
@@ -73,13 +78,16 @@ function isTerminal(r: JobRecord): boolean {
 /** The per-project ledger. Load it once when the project opens; every mutation persists. */
 export class JobLedger {
   private records: JobRecord[] = [];
+  /** Order jobs of an earlier launch that this open() took over rather than gave up on. */
+  private taken: JobRecord[] = [];
   /** Serializes writes so two jobs settling together cannot interleave read-modify-write. */
   private tail: Promise<unknown> = Promise.resolve();
 
   private constructor(private readonly store: ProjectStoreAccess) {}
 
   /** Read the project's ledger and settle anything a previous launch left running. Returns the
-   *  ledger; `interrupted()` reports what this reconciliation just closed out. */
+   *  ledger; `interrupted()` reports what this reconciliation just closed out, and `adopted()` the
+   *  generations it did NOT give up on because the server holds them as orders. */
   static async open(store: ProjectStoreAccess): Promise<JobLedger> {
     const ledger = new JobLedger(store);
     const file = await store.readJson<LedgerFile>(jobsPath(store.projectDir), emptyFile());
@@ -95,6 +103,15 @@ export class JobLedger {
     let changed = false;
     for (const r of jobs) {
       if (!isOrphaned(r, alive)) continue;
+      if (r.order_id) {
+        // The in-flight fetch died with that launch, but the ORDER did not: the server has it (or its result). Take the job over
+        // as this launch's own and let the caller ask the server; closing it out as "interrupted" would throw away a result
+        // that has been paid for.
+        r.session = APP_SESSION;
+        ledger.taken.push(r);
+        changed = true;
+        continue;
+      }
       r.status = "interrupted";
       r.ended_at = Date.now();
       r.error ??= "the app closed before this finished; it may still have been charged";
@@ -114,6 +131,11 @@ export class JobLedger {
     return this.records.filter((r) => r.status === "interrupted");
   }
 
+  /** Order jobs this open() took over from an earlier launch: still running, and waiting for someone to ask the server. */
+  adopted(): readonly JobRecord[] {
+    return this.taken;
+  }
+
   running(): readonly JobRecord[] {
     return this.records.filter((r) => r.status === "running");
   }
@@ -127,6 +149,9 @@ export class JobLedger {
     media_refs?: string[];
     /** The session that owns the work, when it is not this page (an export the app process runs). */
     session?: string;
+    /** The order number the generation is sent under, so a later launch can ask the server for it. */
+    order_id?: string;
+    started_by?: "chat" | "elsewhere";
   }): Promise<string> {
     const rec: JobRecord = {
       id: newId(),
@@ -135,6 +160,8 @@ export class JobLedger {
       label: spec.label,
       status: "running",
       media_refs: spec.media_refs,
+      ...(spec.order_id ? { order_id: spec.order_id } : {}),
+      ...(spec.started_by ? { started_by: spec.started_by } : {}),
       started_at: Date.now(),
       session: spec.session ?? APP_SESSION,
     };

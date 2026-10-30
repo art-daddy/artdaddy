@@ -580,6 +580,17 @@ export async function failPendingClip(
   );
 }
 
+/** Where a placeholder stands: still being made, failed, finished (its bytes landed), or not in the library at all. */
+export async function pendingMediaState(
+  store: ProjectStoreAccess,
+  id: string,
+): Promise<"generating" | "failed" | "ready" | "missing"> {
+  const cat = await readCatalog(store);
+  const row = (cat.clips ?? []).find((c) => c && c.id === id);
+  if (!row) return "missing";
+  return row.status === "generating" ? "generating" : row.status === "failed" ? "failed" : "ready";
+}
+
 /** Finish placeholders whose bytes reached disk but whose catalog flip never did — the job
  *  landed while the project was closed, so the mutation gate refused the row. Bytes are written
  *  before the flip precisely so this is recoverable. Returns the ids it completed. */

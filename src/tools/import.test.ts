@@ -6,6 +6,7 @@ import {
   finalizePendingClip,
   importMediaTool,
   newPendingMediaId,
+  pendingMediaState,
   readMediaTool,
   registerLibraryClip,
   registerPendingClip,
@@ -667,6 +668,27 @@ describe("pending (still-generating) media", () => {
 
   it("issues distinct ids — a placeholder cannot be content-addressed", () => {
     expect(newPendingMediaId()).not.toBe(newPendingMediaId());
+  });
+
+  it("says where a placeholder stands: being made, failed, finished, or not here at all", async () => {
+    const fs = new MockFs();
+    const store = new ProjectStoreAccess(DIR, fs);
+    const [making, failed, done] = [newPendingMediaId(), newPendingMediaId(), newPendingMediaId()];
+    await registerPendingClip(store, { id: making, filename: "a.png", kind: "image" });
+    await registerPendingClip(store, { id: failed, filename: "b.png", kind: "image" });
+    await registerPendingClip(store, { id: done, filename: "c.png", kind: "image" });
+    await failPendingClip(store, failed, "content filter");
+    await finalizePendingClip(store, done, PNG);
+
+    expect(await pendingMediaState(store, making)).toBe("generating");
+    expect(await pendingMediaState(store, failed)).toBe("failed");
+    expect(await pendingMediaState(store, done)).toBe("ready");
+    expect(await pendingMediaState(store, "media_gen_nobody")).toBe("missing");
+  });
+
+  it("says a project with no library yet has no such placeholder", async () => {
+    const store = new ProjectStoreAccess(DIR, new MockFs());
+    expect(await pendingMediaState(store, "media_gen_x")).toBe("missing");
   });
 });
 

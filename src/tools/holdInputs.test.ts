@@ -102,7 +102,7 @@ beforeEach(() => {
     .mockReset()
     .mockImplementation((async (spec: Any) => {
       try {
-        await spec.run();
+        await spec.run({ orderId: "0123456789abcdef0123456789abcdef", orderAccepted: () => undefined });
       } catch {
         /* a job that settled as failed: the call it made is all this file looks at */
       }
