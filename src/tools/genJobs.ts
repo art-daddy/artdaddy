@@ -9,23 +9,29 @@
 // abort that signal, and cancelling the fetch would throw away media the vendor has already been
 // paid for -- the money is committed at submit, so abandoning the result is pure loss. This is
 // also why generation must not stay a `cancelOnClose` job.
-import { JobLedger, type JobRecord } from "../project/jobLedger";
+import { JobLedger, JobLedgerUnreadableError, type JobRecord } from "../project/jobLedger";
 import { ProjectClosingError, type MutationOrigin } from "../project/MutationGate";
 import type { AiProxyResult } from "../api/ai";
+import { reportAppError } from "../api/appEvents";
+import { apiBase } from "../api/config";
+import { signedInUser } from "../api/exportOwner";
 import { CreditLimitError, getUsage, refreshUsage } from "../api/usage";
 import {
   ackOrder,
   acknowledgeAcceptedOrder,
   downloadOrderResult,
+  isOrderVerdict,
   newOrderId,
   OrderNotFoundError,
+  orderPolling,
   OrderWaitSuspended,
   waitForOrder,
 } from "../api/orders";
 import { notifyJobSettled } from "../store/jobNotes";
-import { decodeGenerated, isResultTool, type GeneratedOutput, type ResultTool } from "./generationResults";
+import { decodeGenerated, GeneratedResultError, isResultTool, type GeneratedOutput, type ResultTool } from "./generationResults";
 import {
   failPendingClip,
+  failUnownedPendingClips,
   finalizePendingClip,
   newPendingMediaId,
   pendingMediaState,
@@ -123,12 +129,45 @@ export function openProjectJobs(
     existing = (async () => {
       const ledger = await JobLedger.open(store);
       if (!opts.reconciled) await reconcilePendingMedia(store).catch(() => []);
-      for (const rec of ledger.adopted()) track(resumeOrderJob(store, ledger, rec));
+      await failOrphanedPlaceholders(store, ledger).catch(() => []);
+      for (const rec of ledger.adopted()) track(resumeOrderJob(store, ledger, rec).finally(refreshUsage));
       return ledger;
     })();
     ledgers.set(key, existing);
   }
   return existing;
+}
+
+const NO_RECORD =
+  "this generation did not finish, and the app has no record of it still running. It may still have been charged";
+const LANDED_NOWHERE = "the finished file could not be found in the project";
+
+/** Fail the placeholders no running job is making any more, with the reason the job's own record gives. A generation that failed
+ *  while its project was closed could not say so in the catalog (the gate refuses a write from a session that ended), so its clip
+ *  would otherwise spin for ever. Nothing is concluded when the ledger could not be read: what it does not list is then unknown. */
+async function failOrphanedPlaceholders(store: ProjectStoreAccess, ledger: JobLedger): Promise<string[]> {
+  if (!ledger.readable) return [];
+  const owned = new Set(ledger.running().flatMap((r) => r.media_refs ?? []));
+  const said = new Map<string, string>();
+  for (const r of ledger.list()) {
+    if (r.status === "running") continue;
+    for (const id of r.media_refs ?? []) said.set(id, r.error ?? (r.status === "done" ? LANDED_NOWHERE : NO_RECORD));
+  }
+  return failUnownedPendingClips(
+    store,
+    (id) => owned.has(id),
+    (id) => said.get(id) ?? NO_RECORD,
+  );
+}
+
+/** What a project's opening does about generations: take over the ones the server holds (once per launch), and fail the placeholders
+ *  that nothing is making any more. Every time the project is opened, not only the first, because a job can fail after its project
+ *  closed within the same launch. A job record that cannot be read is reported (it throws): the project still opens, but nothing new
+ *  is started in it until the record can be read. */
+export async function reconcileGenerations(store: ProjectStoreAccess): Promise<void> {
+  const ledger = await openProjectJobs(store, { reconciled: true });
+  if (!ledger.readable) throw new JobLedgerUnreadableError(ledger.unreadableReason);
+  await failOrphanedPlaceholders(store, ledger);
 }
 
 /** Keep a detached job alive until it is done, and never let it become an unhandled rejection. */
@@ -238,16 +277,27 @@ export async function submitGeneration(spec: SubmitSpec): Promise<SubmitResult> 
   // Only THIS chat's tool calls carry an origin (host.run passes the chat execution); the menu and an external MCP agent do not, and
   // neither is part of the conversation to resume.
   const orderId = newOrderId();
-  const jobId = await ledger.begin({
-    kind: "generation",
-    tool: spec.tool,
-    label: spec.label,
-    media_refs: ids,
-    order_id: orderId,
-    started_by: spec.origin ? "chat" : "elsewhere",
-  });
+  const sentAs = { ...(signedInUser() ? { owner: signedInUser() } : {}), api: apiBase() };
+  let jobId: string;
+  try {
+    jobId = await ledger.begin({
+      kind: "generation",
+      tool: spec.tool,
+      label: spec.label,
+      media_refs: ids,
+      order_id: orderId,
+      ...sentAs,
+      started_by: spec.origin ? "chat" : "elsewhere",
+    });
+  } catch (e) {
+    // Not recorded, so not started: nothing has been paid for and nothing will be. The placeholders made for it are failed, so
+    // nothing is left spinning, and the person is told why.
+    const why = e instanceof Error ? e.message : String(e);
+    await Promise.allSettled(ids.map((id) => failPendingClip(store, id, why)));
+    throw e;
+  }
 
-  const task = settleLater(spec, ledger, jobId, ids, orderId).finally(refreshUsage);
+  const task = settleLater(spec, ledger, jobId, ids, orderId, sentAs).finally(refreshUsage);
   inflight.add(task);
   void task.finally(() => inflight.delete(task));
   return { media_refs: ids, job_id: jobId };
@@ -297,6 +347,17 @@ interface JobInfo {
   tool: string;
   label: string;
   startedBy: "chat" | "elsewhere";
+  /** The account that sent it and the server it went to (absent on a record from before they were kept). */
+  owner?: string;
+  api?: string;
+}
+
+/** Whether whoever is asking about this generation now is not who it was sent as: another sign-in, or another server. The server's
+ *  "no such order" is then only about the asker, not a verdict on the order, which is paid for and still there for its owner. */
+function askedAsSomeoneElse(job: JobInfo): boolean {
+  const now = signedInUser();
+  if (job.owner && now && job.owner !== now) return true;
+  return !!job.api && job.api !== apiBase();
 }
 
 async function settleLater(
@@ -305,6 +366,7 @@ async function settleLater(
   jobId: string,
   ids: string[],
   orderId: string,
+  sentAs: { owner?: string; api?: string },
 ): Promise<void> {
   const job: JobInfo = {
     store: spec.store,
@@ -314,17 +376,40 @@ async function settleLater(
     tool: spec.tool,
     label: spec.label,
     startedBy: spec.origin ? "chat" : "elsewhere",
+    ...sentAs,
   };
   let outputs: GeneratedOutput[];
   let overdue: GenerationOverdue | null = null;
+  // Set once the server has taken the call as an order. From then on the result is charged for and the server holds it, so nothing
+  // the APP trips over ends the job: only the server's own verdict does (see `isOrderVerdict`).
+  let accepted = false;
   await acquireSlot();
   await acquireModelSlot(spec.model);
   try {
-    outputs = await withDeadline((orderAccepted) => spec.run({ orderId, orderAccepted }), spec.label);
+    outputs = await withDeadline(
+      (disarm) =>
+        spec.run({
+          orderId,
+          orderAccepted: () => {
+            accepted = true;
+            disarm();
+          },
+        }),
+      spec.label,
+    );
   } catch (e) {
     // The order is fine and this build is only barred from asking about it: leave the job running, the placeholders as they are and
     // nobody told anything. The next run that may ask collects it.
     if (e instanceof OrderWaitSuspended) return;
+    // "No such order" asked as someone else is no verdict on an order that is paid for: it is left for the account it belongs to.
+    if (e instanceof OrderNotFoundError && askedAsSomeoneElse(job)) {
+      keepRunning(job, e);
+      return;
+    }
+    if (accepted && !endsTheJob(e)) {
+      keepRunning(job, e);
+      return;
+    }
     if (!(e instanceof GenerationOverdue)) {
       await failJob(job, e instanceof Error ? e.message : String(e));
       return;
@@ -345,7 +430,21 @@ async function settleLater(
   }
 
   // The server keeps the finished file until the app says it has it, so say so only once it is on disk and the job is settled.
-  if ((await landOutputs(job, outputs)) > 0) await acknowledgeAcceptedOrder(orderId);
+  const landed = await landOutputs(job, outputs);
+  if (landed.ok > 0 && landed.deferred === 0) await acknowledgeAcceptedOrder(orderId);
+}
+
+/** Something went wrong after the server took the order, and it was not the server's verdict: the result is charged for and still
+ *  there, so the job is left as it is (its ledger row running, its placeholders as they were) and the next run, which adopts it,
+ *  collects it. Not told to the chat: nothing has failed that the person could act on. */
+function keepRunning(job: JobInfo, e: unknown): void {
+  const why = e instanceof Error ? e.message : String(e);
+  reportAppError(`generation_left_running: ${job.tool}: ${why}`.slice(0, 300));
+}
+
+/** What ends a job once the server has taken its order: the server's verdict, or a result that holds no usable file. */
+function endsTheJob(e: unknown): boolean {
+  return isOrderVerdict(e) || e instanceof GeneratedResultError;
 }
 
 /** Fail a job: its placeholders still being made are failed (one that already landed is not undone by a job that failed for the
@@ -368,13 +467,43 @@ async function failJob(job: JobInfo, error: string, status: "failed" | "interrup
   });
 }
 
-/** Put the outputs where the placeholders are, settle the job and tell the chat. Returns how many outputs are in place (the job is
- *  done when at least one is). ``alreadyLanded`` are the placeholders whose bytes are already there. */
+/** What a person is told when a finished result could not be written to the project: it is not lost, and not confirmed to the
+ *  server, which therefore keeps it. */
+function notSavedText(why: string): string {
+  return (
+    `could not be saved on this computer (${why}). The finished file is kept for 7 days, so free some space and try again, ` +
+    "or use Report a problem if it does not come back"
+  );
+}
+
+/** Write one output into its placeholder, trying again a couple of times: a file another program holds for a moment, or a disk
+ *  that is briefly busy, should not cost a result that has been paid for. A project that closed is not retried. */
+async function finalizeWithRetries(store: ProjectStoreAccess, id: string, out: GeneratedOutput): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await finalizePendingClip(store, id, out.bytes, { meta: out.meta });
+      return;
+    } catch (e) {
+      if (e instanceof ProjectClosingError || attempt >= 2) throw e;
+      await orderPolling.sleep(2000 * (attempt + 1));
+    }
+  }
+}
+
+/** How a landing went: how many outputs are in place (the job is done when at least one is), and how many of those are only in
+ *  place on disk because the project closed before their rows could be finished. */
+interface Landing {
+  ok: number;
+  deferred: number;
+}
+
+/** Put the outputs where the placeholders are, settle the job and tell the chat. ``alreadyLanded`` are the placeholders whose
+ *  bytes are already there. */
 async function landOutputs(
   job: JobInfo,
   outputs: GeneratedOutput[],
   alreadyLanded: ReadonlySet<number> = new Set(),
-): Promise<number> {
+): Promise<Landing> {
   const { store, ledger, jobId, ids } = job;
   const landed: string[] = [];
   const deferred: string[] = [];
@@ -397,7 +526,7 @@ async function landOutputs(
       continue;
     }
     try {
-      await finalizePendingClip(store, ids[i], out.bytes, { meta: out.meta });
+      await finalizeWithRetries(store, ids[i], out);
       landed.push(ids[i]);
     } catch (e) {
       // The project closed before the row could be flipped. The BYTES are already on disk, so
@@ -406,7 +535,7 @@ async function landOutputs(
         deferred.push(ids[i]);
         continue;
       }
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = notSavedText(e instanceof Error ? e.message : String(e));
       failures.push(`${ids[i]}: ${msg}`);
       await failPendingClip(store, ids[i], msg).catch(() => undefined);
     }
@@ -427,7 +556,7 @@ async function landOutputs(
     ...(ok.length ? { media_refs: ok } : {}),
     ...(failures.length ? { error: failures.join("; ") } : {}),
   });
-  return ok.length;
+  return { ok: ok.length, deferred: deferred.length };
 }
 
 /** The ffmpeg a result brought back after a restart may need (a music bed is re-muxed), or null where there is none. */
@@ -462,6 +591,8 @@ async function resumeOrderJob(store: ProjectStoreAccess, ledger: JobLedger, rec:
     tool: rec.tool,
     label: rec.label,
     startedBy: rec.started_by ?? "elsewhere",
+    ...(rec.owner ? { owner: rec.owner } : {}),
+    ...(rec.api ? { api: rec.api } : {}),
   };
   if (!isResultTool(rec.tool)) {
     await failJob(job, `${rec.label} cannot be brought back by this version of the app.`);
@@ -472,7 +603,7 @@ async function resumeOrderJob(store: ProjectStoreAccess, ledger: JobLedger, rec:
 
 /** Take a generation over from whoever started it (an app that was closed, or a call that never answered in time): ask the server
  *  for the order and finish the job from its answer. It never gives up on the order itself (see waitForOrder); only the server's
- *  verdict, or a result it cannot read, ends it. */
+ *  verdict, or a result that holds nothing usable, ends it. Any other trouble leaves the job running for the next run. */
 async function takeOverOrder(job: JobInfo, orderId: string, opts: { notFound: NotFound }): Promise<void> {
   const { store, ids } = job;
   try {
@@ -485,13 +616,30 @@ async function takeOverOrder(job: JobInfo, orderId: string, opts: { notFound: No
       return;
     }
     const ready = await waitForOrder(orderId);
-    const dto = (await downloadOrderResult(ready)) as AiProxyResult<unknown>;
-    const outputs = await decodeGenerated(job.tool as ResultTool, dto, { store, runner: await ffmpegOrNull(), orderId });
-    if ((await landOutputs(job, outputs, alreadyLanded)) > 0) await ackOrder(orderId);
+    // Waiting costs nothing, but fetching, decoding and writing a result do, in memory: a project that comes back to many finished
+    // generations must not do all of them at once, any more than live ones do.
+    await acquireSlot();
+    try {
+      const dto = (await downloadOrderResult(ready)) as AiProxyResult<unknown>;
+      const outputs = await decodeGenerated(job.tool as ResultTool, dto, { store, runner: await ffmpegOrNull(), orderId });
+      const landed = await landOutputs(job, outputs, alreadyLanded);
+      if (landed.ok > 0 && landed.deferred === 0) await ackOrder(orderId);
+    } finally {
+      releaseSlot();
+    }
   } catch (e) {
     if (e instanceof OrderWaitSuspended) return;
     if (e instanceof OrderNotFoundError) {
+      // Asked as someone else (another sign-in, another server), "no such order" says nothing about the order: it is left for its owner.
+      if (askedAsSomeoneElse(job)) {
+        keepRunning(job, e);
+        return;
+      }
       await failJob(job, opts.notFound.message, opts.notFound.status);
+      return;
+    }
+    if (!endsTheJob(e)) {
+      keepRunning(job, e);
       return;
     }
     await failJob(job, e instanceof Error ? e.message : String(e));

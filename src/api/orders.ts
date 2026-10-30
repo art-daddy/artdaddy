@@ -15,7 +15,8 @@ import { ClientUpdateRequiredError } from "../update/updater";
 import { fetchCompatibleClient } from "../update/compatibility";
 import { authedFetch, notifyAuthFailure } from "./auth";
 import { apiBase } from "./config";
-import { fetchWithRetry } from "./http";
+import { RateLimitError } from "./http";
+import { CreditLimitError } from "./usage";
 
 /** The numbers the server accepts: the same rule as its `ORDER_ID`. */
 export const ORDER_ID = /^[A-Za-z0-9_-]{16,64}$/;
@@ -30,10 +31,22 @@ export interface OrderResultLink {
   expires_at: number;
 }
 
+/** What the server says about the balance when it refused an order for lack of credit: the credit amounts and which pool ran out,
+ *  exactly as the live call's 402 carries them. Only finite, non-negative numbers and a known scope are ever kept. */
+export interface CreditRefusalDetail {
+  scope?: "user" | "global";
+  used?: number;
+  limit?: number;
+  requested?: number;
+  remaining?: number;
+}
+
 export interface OrderFailure {
   code: string;
   message: string;
   retryable: boolean;
+  /** Only on a refusal for credit, and only when the server said something usable about the balance. */
+  detail?: CreditRefusalDetail;
 }
 
 export interface OrderView {
@@ -70,6 +83,7 @@ export class OrderFailedError extends ArtDaddyError {
     message: string,
     code = "generation_failed",
     readonly retryable = false,
+    readonly detail?: CreditRefusalDetail,
   ) {
     super(message);
     this.name = "OrderFailedError";
@@ -119,6 +133,40 @@ export class OrderWaitSuspended extends ArtDaddyError {
     super("This build must be updated before it can ask about a generation that is still being made.");
     this.name = "OrderWaitSuspended";
   }
+}
+
+/** The finished result could not be read as a result: what the server holds is broken, so asking again cannot help. */
+export class OrderResultUnreadableError extends ArtDaddyError {
+  readonly code = "order_result_unreadable";
+  readonly expected = true;
+  constructor() {
+    super("The finished result could not be read.");
+    this.name = "OrderResultUnreadableError";
+  }
+}
+
+/** The server says the result is ready, and has been charged for it, but the app has not been able to fetch it for a long time.
+ *  Not a verdict, so not the end of the order: whoever waits leaves it as it is and the next run asks again. */
+export class OrderResultUnavailableError extends Error {
+  constructor() {
+    super("The finished result could not be downloaded just now.");
+    this.name = "OrderResultUnavailableError";
+  }
+}
+
+/** The server's own word on an order: the only things that end a job once the server has taken the order. Anything else that goes
+ *  wrong afterwards (a dropped connection, a link that ran out, a full disk) is the app's own trouble, and the result, which has
+ *  been charged for, is still there to be collected. The rate and credit limits are verdicts too, as the tools translate them. */
+export function isOrderVerdict(e: unknown): boolean {
+  return (
+    e instanceof OrderFailedError ||
+    e instanceof OrderNotFoundError ||
+    e instanceof OrderExpiredError ||
+    e instanceof OrderCollectedError ||
+    e instanceof OrderResultUnreadableError ||
+    e instanceof RateLimitError ||
+    e instanceof CreditLimitError
+  );
 }
 
 /** The server could not be reached or did not answer usefully: ask again later. Never the end of an order. */
@@ -190,6 +238,21 @@ function unreadable(): OrderUnreachableError {
 const isNumber = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 const isString = (v: unknown): v is string => typeof v === "string";
 
+const CREDIT_NUMBERS = ["used", "limit", "requested", "remaining"] as const;
+
+/** The numbers of a credit refusal, or nothing when there is nothing usable in what the server sent. */
+function parseCreditDetail(raw: unknown): CreditRefusalDetail | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const r = raw as Record<string, unknown>;
+  const detail: CreditRefusalDetail = {};
+  for (const key of CREDIT_NUMBERS) {
+    const value = r[key];
+    if (isNumber(value) && value >= 0) detail[key] = value;
+  }
+  if (r.scope === "user" || r.scope === "global") detail.scope = r.scope;
+  return Object.keys(detail).length > 0 ? detail : undefined;
+}
+
 /** An order as the server says it, or an error when what came back is not one. */
 export function parseOrderView(raw: unknown): OrderView {
   const o = (raw as { order?: unknown } | null)?.order as Record<string, unknown> | undefined;
@@ -213,10 +276,12 @@ export function parseOrderView(raw: unknown): OrderView {
   } else if (view.state === "failed") {
     const e = o.error as Record<string, unknown> | undefined;
     if (!e || !isString(e.message)) throw unreadable();
+    const detail = parseCreditDetail(e.detail);
     view.error = {
       code: isString(e.code) ? e.code : "generation_failed",
       message: e.message,
       retryable: e.retryable === true,
+      ...(detail ? { detail } : {}),
     };
   }
   return view;
@@ -240,7 +305,12 @@ export async function getOrder(orderId: string, signal?: AbortSignal): Promise<O
     await res.body?.cancel().catch(() => undefined);
     throw new OrderUnreachableError("The session has lapsed.", "session");
   }
-  if (res.status === 404) throw new OrderNotFoundError(orderId);
+  if (res.status === 404) {
+    // Only the server's own "no such order" is a verdict about the order. A 404 from anything else (a gateway, a deploy in progress,
+    // the wrong server) says nothing about it, and an order is paid for: it is waited out, never written off.
+    if (await isOrderNotFoundAnswer(res)) throw new OrderNotFoundError(orderId);
+    throw new OrderUnreachableError("The server answered 404 without saying the order is gone.", "server");
+  }
   if (res.status === 429 || res.status >= 500) {
     await res.body?.cancel().catch(() => undefined);
     throw new OrderUnreachableError(`The server answered ${res.status}.`, "server");
@@ -253,6 +323,16 @@ export async function getOrder(orderId: string, signal?: AbortSignal): Promise<O
     throw unreadable();
   }
   return parseOrderView(body);
+}
+
+/** Whether a 404 is the server saying, in its own words, that it has no such order. */
+async function isOrderNotFoundAnswer(res: Response): Promise<boolean> {
+  try {
+    const body = (await res.json()) as { detail?: { error?: unknown } } | null;
+    return body?.detail?.error === "order_not_found";
+  } catch {
+    return false;
+  }
 }
 
 /** Ask about an order until the server answers, however long that takes: an unreachable server or a dropped connection is waited
@@ -281,15 +361,23 @@ async function askUntilAnswered(orderId: string, signal?: AbortSignal): Promise<
   }
 }
 
+/** How long a request whose answer was lost is given to reach the server before the order is called unknown: the request that made it
+ *  may only have been slow, and an order that appears later would be paid for with nobody waiting for it. */
+export const LOST_SUBMIT_GRACE_MS = 5000;
+
 /** Whether the server has this order, asking until it can say. For a submit whose answer was lost: the order exists if the
- *  request got there, and sending it again would be a second attempt at something that may already be running. */
+ *  request got there, and sending it again would be a second attempt at something that may already be running. Not having it is
+ *  said only after one more ask, a little later, because the request may still have been on its way. */
 export async function orderKnownToServer(orderId: string, signal?: AbortSignal): Promise<boolean> {
-  try {
-    await askUntilAnswered(orderId, signal);
-    return true;
-  } catch (e) {
-    if (e instanceof OrderNotFoundError) return false;
-    throw e;
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await askUntilAnswered(orderId, signal);
+      return true;
+    } catch (e) {
+      if (!(e instanceof OrderNotFoundError)) throw e;
+      if (attempt > 0) return false;
+      await orderPolling.sleep(LOST_SUBMIT_GRACE_MS, signal);
+    }
   }
 }
 
@@ -304,7 +392,7 @@ export async function waitForOrder(orderId: string, opts: { signal?: AbortSignal
       case "ready":
         return view as ReadyOrder;
       case "failed":
-        throw new OrderFailedError(view.error!.message, view.error!.code, view.error!.retryable);
+        throw new OrderFailedError(view.error!.message, view.error!.code, view.error!.retryable, view.error!.detail);
       case "expired":
         throw new OrderExpiredError();
       case "collected":
@@ -315,37 +403,82 @@ export async function waitForOrder(orderId: string, opts: { signal?: AbortSignal
   }
 }
 
-/** The finished result, exactly as the live call would have returned it (`{result, media?, metrics?}`). Fetches the private link,
- *  asking for a fresh one if it has expired. The link carries its own permission, so the account's token is NOT sent to it. */
+/** After this many answers in a row that the link does not work, while the server still says the order is ready, the app stops
+ *  trying for now and the next run tries again. A ready order whose file is really gone is ended by the server's own verdict long
+ *  before this. */
+const LINK_REFRESHES = 10;
+/** The same for a download that keeps failing in transit: about ten minutes of trying at the longest pause. */
+const TRANSIT_FAILURES = 20;
+
+type Attempt =
+  | { kind: "done"; body: unknown }
+  | { kind: "retry" } // the network, or a server that is busy
+  | { kind: "refresh" } // the link does not (or no longer) work: ask for a fresh one
+  | { kind: "refused"; status: number };
+
+/** One try at the private link. The link carries its own permission, so no account token goes to it; and the build compatibility
+ *  gate, which guards calls to our own server, does not apply to reading a file that has already been paid for. */
+async function attemptDownload(url: string, signal?: AbortSignal): Promise<Attempt> {
+  let res: Response;
+  try {
+    res = await fetch(url, { method: "GET", signal });
+  } catch (e) {
+    if (signal?.aborted) throw e;
+    return { kind: "retry" };
+  }
+  if (res.ok) {
+    let body: unknown;
+    try {
+      body = await res.json();
+    } catch (e) {
+      if (signal?.aborted) throw e;
+      return { kind: "retry" }; // the connection died before the end of the answer
+    }
+    const result = (body as { result?: unknown } | null)?.result;
+    if (!body || typeof body !== "object" || Array.isArray(body) || !result || typeof result !== "object")
+      throw new OrderResultUnreadableError();
+    return { kind: "done", body };
+  }
+  await res.body?.cancel().catch(() => undefined);
+  // Google answers 400 for a link that ran out and 403 for one that does not fit the file; 404 for a file that is not there (yet).
+  if (res.status === 400 || res.status === 401 || res.status === 403 || res.status === 404) return { kind: "refresh" };
+  if (res.status === 408 || res.status === 429 || res.status >= 500) return { kind: "retry" };
+  return { kind: "refused", status: res.status };
+}
+
+/** The finished result, exactly as the live call would have returned it (`{result, media?, metrics?}`). The order is ready, so it
+ *  has been charged for: this is as patient as the wait for it was. A dropped connection, a busy server, an answer cut off and a
+ *  link that ran out are all waited out (asking the server for a fresh link as often as it takes), and only the server's own
+ *  verdict, or a result that cannot be read as one, ends it. If it still cannot be fetched after a long time the order is left as
+ *  it is (`OrderResultUnavailableError`) for the next run, never given up on. */
 export async function downloadOrderResult(ready: ReadyOrder, signal?: AbortSignal): Promise<unknown> {
   let view = ready;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const res = await fetchWithRetry(view.result.url, { method: "GET" }, signal, { transientRetries: 3 });
-    if (res.ok) {
-      let body: unknown;
-      try {
-        body = await res.json();
-      } catch {
-        body = null;
-      }
-      const result = (body as { result?: unknown } | null)?.result;
-      if (!body || typeof body !== "object" || Array.isArray(body) || !result || typeof result !== "object")
-        throw new Error("The finished result could not be read.");
-      return body;
+  let failures = 0;
+  let refreshes = 0;
+  for (;;) {
+    const attempt = await attemptDownload(view.result.url, signal);
+    if (attempt.kind === "done") return attempt.body;
+    if (attempt.kind === "refused") throw new Error(`The finished result could not be downloaded (${attempt.status}).`);
+    if (attempt.kind === "retry") {
+      refreshes = 0;
+      failures += 1;
+      if (failures > TRANSIT_FAILURES) throw new OrderResultUnavailableError();
+      await orderPolling.sleep(retryDelayMs(failures), signal);
+      if (failures % 3 !== 0) continue; // every third failure, also ask whether the link needs replacing
+    } else {
+      refreshes += 1;
+      if (refreshes > LINK_REFRESHES) throw new OrderResultUnavailableError();
+      if (refreshes > 1) await orderPolling.sleep(1000, signal);
     }
-    await res.body?.cancel().catch(() => undefined);
-    if (res.status !== 403 && res.status !== 404)
-      throw new Error(`The finished result could not be downloaded (${res.status}).`);
-    // The link has expired, or the file is gone: only the server can say which.
-    const fresh = await getOrder(view.order_id, signal).catch((e: unknown) => {
-      if (e instanceof OrderUnreachableError) throw new Error("The finished result could not be downloaded.");
-      throw e;
-    });
-    if (fresh.state === "collected") throw new OrderCollectedError();
-    if (fresh.state !== "ready") throw new OrderExpiredError();
-    view = fresh as ReadyOrder;
+    // The server's answer decides whether this is still worth trying (a fresh link) or over (it says so).
+    const fresh = await askUntilAnswered(view.order_id, signal);
+    if (fresh.state === "ready") view = fresh as ReadyOrder;
+    else if (fresh.state === "collected") throw new OrderCollectedError();
+    else if (fresh.state === "expired") throw new OrderExpiredError();
+    else if (fresh.state === "failed")
+      throw new OrderFailedError(fresh.error!.message, fresh.error!.code, fresh.error!.retryable, fresh.error!.detail);
+    // "running" cannot follow "ready"; were it to, the old link is simply tried again
   }
-  throw new Error("The finished result could not be downloaded.");
 }
 
 /** Tell the server the app has the file, so it can delete it. Never throws: the file is simply kept until it expires if this

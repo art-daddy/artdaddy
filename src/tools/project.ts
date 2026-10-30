@@ -26,6 +26,7 @@ import {
 } from "./store";
 import { runProjectMutation, withProjectLock } from "./coordinator";
 import type { MutationOrigin } from "../project/MutationGate";
+import { releaseCopiedWork } from "../project/copiedWork";
 import { isSafeProjectId } from "./dataRoot";
 
 type Result = Record<string, unknown>;
@@ -544,6 +545,8 @@ export class ProjectRegistry {
     // Copy AUTHORITATIVE state only (see notCopied): the derived cache rebuilds on demand in the
     // duplicate, and the lock belongs to whoever has the ORIGINAL open.
     await copyDir(this.fs, src, dst, notCopied(src));
+    // ...and none of the original's running work: the copy must never collect, or confirm, an order that is the original's.
+    await releaseCopiedWork(this.fs, dst);
     // Flat consistency bridge: copyDir cloned the source's ON-DISK timeline.json, but the source may
     // be OPEN with unsaved in-memory edits ahead of disk. Re-materialize the copy's timeline from the
     // same read model every reader uses, so the duplicate captures those edits — only when an open
@@ -593,6 +596,9 @@ export class ProjectRegistry {
       throw new Error(`there is already a project in "${baseName(dst)}"`);
     reviveProjectDir(dst);
     await copyDir(this.fs, src, dst, notCopied(src));
+    // The project goes on in the new folder, but the generations it has running belong to the folder they were started in: the
+    // copy must never collect, or confirm, an order that the original is still waiting for.
+    await releaseCopiedWork(this.fs, dst);
     // The open document's in-memory timeline is ahead of disk; the copy must carry the
     // edits the user can see, not the last autosave.
     try {

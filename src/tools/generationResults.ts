@@ -64,15 +64,24 @@ export function pcmToWav(pcm: Uint8Array, rate: number, channels: number): Uint8
   return out;
 }
 
+/** The finished result holds no usable file, or says the generation failed: a fact about what the provider returned, which asking
+ *  again cannot change. (As opposed to the app's own trouble while collecting or saving it, which can.) */
+export class GeneratedResultError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "GeneratedResultError";
+  }
+}
+
 export function decodeImages(dto: AiProxyResult<unknown>, model?: string): GeneratedOutput[] {
   const media = dto.media ?? [];
-  if (!media.length) throw new Error(`image generation returned no images${forModel(model)}`);
+  if (!media.length) throw new GeneratedResultError(`image generation returned no images${forModel(model)}`);
   return media.map((gm) => ({ bytes: fromB64(gm.b64), ext: gm.ext }));
 }
 
 export function decodeVideo(dto: AiProxyResult<unknown>, model?: string): GeneratedOutput[] {
   const media = dto.media ?? [];
-  if (!media.length) throw new Error(`video generation returned no downloadable file${forModel(model)}`);
+  if (!media.length) throw new GeneratedResultError(`video generation returned no downloadable file${forModel(model)}`);
   return [{ bytes: fromB64(media[0].b64), ext: media[0].ext }];
 }
 
@@ -80,7 +89,7 @@ export function decodeVoiceover(
   dto: AiProxyResult<{ ok?: boolean; error?: string; pcm_b64?: string; mime?: string }>,
 ): GeneratedOutput[] {
   const r = dto.result ?? {};
-  if (r.ok === false || !r.pcm_b64) throw new Error(String(r.error ?? "voiceover synthesis failed"));
+  if (r.ok === false || !r.pcm_b64) throw new GeneratedResultError(String(r.error ?? "voiceover synthesis failed"));
   const pcm = fromB64(r.pcm_b64);
   const [rate, channels] = parsePcmMime(String(r.mime ?? ""));
   return [
@@ -114,7 +123,7 @@ export async function decodeMusic(
   env: MusicDecodeEnv,
 ): Promise<GeneratedOutput[]> {
   const r = dto.result ?? {};
-  if (r.ok === false || !r.audio_b64) throw new Error(String(r.error ?? "music generation failed"));
+  if (r.ok === false || !r.audio_b64) throw new GeneratedResultError(String(r.error ?? "music generation failed"));
   const { store, runner } = env;
   const audioBytes = fromB64(r.audio_b64);
   const format = String(r.format ?? "wav");

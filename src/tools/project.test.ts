@@ -453,6 +453,239 @@ describe("ProjectRegistry.migrateUnsafeIds (F4)", () => {
   });
 });
 
+describe("a copy of a project never owns the original's running work", () => {
+  const SRC = `${PROJECTS}/hero_a1b2c3`;
+  const DEST = "D:/Client Work/Hero Cut";
+  const ORDER = "0123456789abcdef0123456789abcdef";
+
+  /** A project with a generation running (its order held by the server, its placeholder still being made), one that finished, and
+   *  clips that are not generations at all. */
+  async function seeded(): Promise<{ fs: MemFs; jobs: string; library: string }> {
+    const fs = new MemFs();
+    await fs.writeTextFile(
+      `${SRC}/internals/project.json`,
+      JSON.stringify({ id: "hero_a1b2c3", name: "Hero" }),
+    );
+    await fs.writeTextFile(`${SRC}/internals/timeline.json`, JSON.stringify({ tracks: [] }));
+    const jobs = JSON.stringify({
+      version: 1,
+      jobs: [
+        {
+          id: "running",
+          kind: "generation",
+          tool: "generate_video",
+          label: "a video",
+          status: "running",
+          media_refs: ["media_gen_run"],
+          order_id: ORDER,
+          started_by: "chat",
+          started_at: 10,
+          session: "some-launch",
+        },
+        {
+          id: "finished",
+          kind: "generation",
+          tool: "generate_image",
+          label: "an image",
+          status: "done",
+          media_refs: ["media_gen_done"],
+          order_id: `${ORDER.slice(0, -1)}1`,
+          started_at: 5,
+          ended_at: 6,
+          session: "some-launch",
+        },
+        {
+          id: "export",
+          kind: "export",
+          tool: "export",
+          label: "an export",
+          status: "done",
+          started_at: 1,
+          ended_at: 2,
+          session: "some-launch",
+        },
+      ],
+    });
+    const library = JSON.stringify({
+      version: 1,
+      folders: [],
+      clips: [
+        {
+          id: "media_gen_run",
+          filename: "run.mp4",
+          path: "library/media_gen_run.mp4",
+          kind: "video",
+          status: "generating",
+          added_by: "generation",
+        },
+        {
+          id: "media_gen_done",
+          filename: "done.png",
+          path: "library/media_gen_done.png",
+          kind: "image",
+          added_by: "generation",
+        },
+        {
+          id: "media_import",
+          filename: "i.mp4",
+          path: "library/i.mp4",
+          kind: "video",
+          added_by: "import",
+        },
+        {
+          id: "media_gen_old_fail",
+          filename: "f.png",
+          path: "library/f.png",
+          kind: "image",
+          status: "failed",
+          error: "earlier reason",
+          added_by: "generation",
+        },
+        // Not a generation: whatever else may be in progress is not this feature's to fail.
+        {
+          id: "media_import_busy",
+          filename: "busy.mp4",
+          path: "library/busy.mp4",
+          kind: "video",
+          status: "generating",
+          added_by: "import",
+        },
+      ],
+    });
+    await fs.writeTextFile(`${SRC}/internals/jobs.json`, jobs);
+    await fs.writeTextFile(`${SRC}/internals/library.json`, library);
+    await fs.writeTextFile(
+      REGISTRY,
+      JSON.stringify({
+        version: 1,
+        activeProjectId: "hero_a1b2c3",
+        projects: [{ id: "hero_a1b2c3", name: "Hero", path: SRC }],
+      }),
+    );
+    return { fs, jobs, library };
+  }
+
+  const readJobs = async (fs: MemFs, dir: string) =>
+    JSON.parse(await fs.readTextFile(`${dir}/internals/jobs.json`)).jobs as Any[];
+  const readClips = async (fs: MemFs, dir: string) =>
+    JSON.parse(await fs.readTextFile(`${dir}/internals/library.json`)).clips as Any[];
+
+  const copies: [string, (fs: MemFs) => Promise<string>][] = [
+    [
+      "Duplicate",
+      async (fs) =>
+        (
+          await ProjectRegistry.fromProjectDir(ACTIVE, fs).duplicateProject(
+            "hero_a1b2c3",
+            "Hero copy",
+          )
+        ).path,
+    ],
+    [
+      "Save As",
+      async (fs) =>
+        (await ProjectRegistry.fromProjectDir(ACTIVE, fs).saveProjectAs("hero_a1b2c3", DEST)).path,
+    ],
+  ];
+
+  it.each(copies)(
+    "%s: nothing in the copy is running, and nothing in it names an order",
+    async (_name, copy) => {
+      const { fs } = await seeded();
+      const dir = await copy(fs);
+      const jobs = await readJobs(fs, dir);
+      expect(jobs.filter((j) => j.status === "running")).toEqual([]);
+      expect(jobs.some((j) => "order_id" in j)).toBe(false);
+      const was = jobs.find((j) => j.id === "running");
+      expect(was).toMatchObject({ status: "interrupted", media_refs: ["media_gen_run"] });
+      expect(was.error).toMatch(/copied/i);
+      expect(typeof was.ended_at).toBe("number");
+      expect(jobs.find((j) => j.id === "finished")).toMatchObject({
+        status: "done",
+        media_refs: ["media_gen_done"],
+      });
+      expect(jobs.find((j) => j.id === "export")).toMatchObject({ status: "done" });
+    },
+  );
+
+  it.each(copies)(
+    "%s: the placeholder still being made is failed in the copy, and no other clip is touched",
+    async (_name, copy) => {
+      const { fs } = await seeded();
+      const dir = await copy(fs);
+      const byId = Object.fromEntries((await readClips(fs, dir)).map((c) => [c.id, c]));
+      expect(byId.media_gen_run.status).toBe("failed");
+      expect(byId.media_gen_run.error).toMatch(/copied/i);
+      expect(byId.media_gen_done.status).toBeUndefined();
+      expect(byId.media_import.status).toBeUndefined();
+      expect(byId.media_gen_old_fail).toMatchObject({ status: "failed", error: "earlier reason" });
+      expect(
+        byId.media_import_busy.status,
+        "a clip that is not a generation was failed in the copy",
+      ).toBe("generating");
+    },
+  );
+
+  it.each(copies)(
+    "%s: the original is left exactly as it was, still owning its order",
+    async (_name, copy) => {
+      const { fs, jobs, library } = await seeded();
+      await copy(fs);
+      expect(await fs.readTextFile(`${SRC}/internals/jobs.json`)).toBe(jobs);
+      expect(await fs.readTextFile(`${SRC}/internals/library.json`)).toBe(library);
+    },
+  );
+
+  it.each(copies)(
+    "%s: opening the copy finds nothing to take over, so it can never collect or confirm the original's order",
+    async (_name, copy) => {
+      const { fs } = await seeded();
+      const dir = await copy(fs);
+      const { JobLedger } = await import("../project/jobLedger");
+      const ledger = await JobLedger.open(new ProjectStoreAccess(dir, fs));
+      expect(ledger.adopted()).toEqual([]);
+      expect(ledger.running()).toEqual([]);
+    },
+  );
+
+  it.each(copies)(
+    "%s: a project with no job record or catalog is copied as it always was, and none is invented",
+    async (_name, copy) => {
+      const { fs } = await seeded();
+      await fs.remove(`${SRC}/internals/jobs.json`);
+      await fs.remove(`${SRC}/internals/library.json`);
+      const dir = await copy(fs);
+      expect(await fs.exists(`${dir}/internals/jobs.json`)).toBe(false);
+      expect(await fs.exists(`${dir}/internals/library.json`)).toBe(false);
+    },
+  );
+
+  it("Duplicate: when the copy cannot be made safe it is not made at all: nothing is registered that could adopt the order", async () => {
+    const { fs } = await seeded();
+    const real = fs.writeTextFile.bind(fs);
+    fs.writeTextFile = async (p: string, c: string) => {
+      if (p.includes("hero_copy") && p.endsWith("internals/jobs.json"))
+        throw new Error("disk full");
+      return real(p, c);
+    };
+    const reg = ProjectRegistry.fromProjectDir(ACTIVE, fs);
+    await expect(reg.duplicateProject("hero_a1b2c3", "hero copy")).rejects.toThrow(/disk full/);
+    expect((await readRegistry(fs)).projects.map((p: Any) => p.id)).toEqual(["hero_a1b2c3"]);
+  });
+
+  it("Save As: when the copy cannot be made safe the project stays where it was", async () => {
+    const { fs } = await seeded();
+    const real = fs.writeTextFile.bind(fs);
+    fs.writeTextFile = async (p: string, c: string) => {
+      if (p.startsWith(DEST) && p.endsWith("internals/jobs.json")) throw new Error("disk full");
+      return real(p, c);
+    };
+    const reg = ProjectRegistry.fromProjectDir(ACTIVE, fs);
+    await expect(reg.saveProjectAs("hero_a1b2c3", DEST)).rejects.toThrow(/disk full/);
+    expect(await reg.dirFor("hero_a1b2c3")).toBe(SRC);
+  });
+});
+
 describe("ProjectRegistry.saveProjectAs", () => {
   const SRC = `${PROJECTS}/hero_a1b2c3`;
   const DEST = "D:/Client Work/Hero Cut";

@@ -3,7 +3,7 @@
 // via the thin /ai/style_analyze proxy, then parse + version + write the style into
 // the project's `internals/styles/<name>/`. Ports style_extraction/pipeline.py — the
 // deterministic cv2 "measure" path is dead code and is NOT part of this flow.
-import { callAiProxy, toB64 } from "../api/ai";
+import { callAiProxy, type AiClip } from "../api/ai";
 import type { ClientToolContext } from "./context";
 import { probePath, shortHash } from "./media";
 import type { ClientToolRegistry } from "./registry";
@@ -154,7 +154,7 @@ async function extractStyle(
     return { ok: false, error: `style '${styleName}' already exists; choose another name` };
   }
 
-  const media: Record<string, { b64: string; ext?: string }> = {};
+  const media: Record<string, AiClip> = {};
   const videoKeys: string[] = [];
   const durations: number[] = [];
   let payload = 0;
@@ -179,7 +179,7 @@ async function extractStyle(
       };
     }
     const key = `v${i}`;
-    media[key] = { b64: toB64(bytes), ext: ".mp4" };
+    media[key] = { clip: bytes, ext: ".mp4" };
     videoKeys.push(key);
   }
 

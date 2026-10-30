@@ -7,11 +7,10 @@ import { ProjectStoreAccess, joinPath, type FsLike } from "./store";
 import { registerVideoTools } from "./video";
 
 // The ONE hosted video-understanding call + the local pre-encode are the two
-// side-effects video.ts owns; mock both so no network / ffmpeg runs. toB64 is
-// kept as a stub so the (mocked-away) encoded bytes never have to be real.
+// side-effects video.ts owns; mock both so no network / ffmpeg runs. The encoded bytes are
+// a stub: what matters here is that they reach the call as bytes, for the call to upload.
 vi.mock("../api/ai", () => ({
   callAiProxy: vi.fn(),
-  toB64: () => "b64data",
 }));
 vi.mock("./geminiEncode", () => ({
   encodeVideoForGemini: vi.fn(),
@@ -476,6 +475,16 @@ describe("video_ask — prompt, encode/proxy & response parsing", () => {
     expect(body.args.reasoning_mode).toBe("deep");
   });
 
+  it("gives the call the encoded clip as bytes, for the call to upload, and as nothing else", async () => {
+    proxyText("something");
+    await runTool("video_ask", { media_ref: "media_a", prompt: "describe" }, ctxWith(probeRunner()));
+    const { body } = lastProxyCall();
+    expect(Object.keys(body.media)).toEqual([body.args.video]);
+    expect(body.media.video.clip).toEqual(new Uint8Array([1, 2, 3]));
+    expect(body.media.video.ext).toBe(".mp4");
+    expect(body.media.video.b64).toBeUndefined();
+  });
+
   it("surfaces a model-side failure with its error", async () => {
     proxy.mockResolvedValue({ result: { ok: false, error: "model boom" } } as Any);
     const r = await runTool("video_ask", { media_ref: "media_a" }, ctxWith(probeRunner()));
@@ -685,6 +694,16 @@ describe("video_find_moment — prompt construction", () => {
     expect(body.args.prompt).toContain("INTENT: rocket");
     expect(body.args.prompt).toContain("00:12.500"); // secondsToMmss(12.5) bounds
     expect(body.args.prompt).toContain("VISUAL-ONLY MODE");
+  });
+
+  it("gives the call the encoded clip as bytes, for the call to upload, and as nothing else", async () => {
+    proxy.mockResolvedValue({ result: { ok: true, text: MOMENT_2_SHOTS } } as Any);
+    await runTool("video_find_moment", { media_ref: "media_a", query: "rocket" }, ctxWith(probeRunner()));
+    const { body } = lastProxyCall();
+    expect(Object.keys(body.media)).toEqual([body.args.video]);
+    expect(body.media.video.clip).toEqual(new Uint8Array([1, 2, 3]));
+    expect(body.media.video.ext).toBe(".mp4");
+    expect(body.media.video.b64).toBeUndefined();
   });
 
   it("omits the bounds line and visual block when duration is unknown and visual_only is false", async () => {

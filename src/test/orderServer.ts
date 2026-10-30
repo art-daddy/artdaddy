@@ -17,9 +17,11 @@ export interface FakeOrder {
   state: "running" | "ready" | "failed" | "collected" | "expired";
   /** Polls answered so far (the order moves on when it has been asked about this many times). */
   polls: number;
+  /** Links handed out so far: the one in the latest answer is the one that works when `strictLinks` is on. */
+  links: number;
   /** What the order answers with once it is ready (the legacy `{result, media}` response). */
   response: unknown;
-  failure?: { code: string; message: string; retryable?: boolean };
+  failure?: { code: string; message: string; retryable?: boolean; detail?: Record<string, unknown> };
 }
 
 export interface ServerBehaviour {
@@ -29,7 +31,7 @@ export interface ServerBehaviour {
   pollsUntilDone: number;
   /** What every order ends up as. */
   outcome: "ready" | "failed";
-  failure: { code: string; message: string; retryable?: boolean };
+  failure: { code: string; message: string; retryable?: boolean; detail?: Record<string, unknown> };
   /** The result a ready order holds, by proxy. */
   response: (proxy: string, body: Record<string, unknown>) => unknown;
 }
@@ -53,16 +55,25 @@ export class FakeOrderServer {
   };
   /** The next requests whose path matches get this instead of a real answer. `lose-answer`: the server handles the request (an
    *  order is made, a result is collected) but the answer never reaches the app. */
-  private faults: { match: RegExp; left: number; kind: "drop" | "lose-answer" | "hang" | "hang-after" | number }[] = [];
-  /** Links that have been used once and now answer 403, as an expired signed link does. */
+  private faults: { match: RegExp; left: number; kind: "drop" | "lose-answer" | "hang" | "hang-after" | "cut-body" | number }[] = [];
+  /** True: the link in an order's FIRST answer has already run out (every later one works), as a link that waited too long does. */
   expireLinksOnce = false;
-  private expiredLinks = new Set<string>();
+  /** True: only the link in the LATEST answer about an order works, as if every earlier one had run out. */
+  strictLinks = false;
+  /** Called when a result is being downloaded, before it is served: a test can change the order here, as time passing would. */
+  onDownload: ((order: FakeOrder | undefined) => void) | null = null;
 
   /** Answer the next `times` requests whose "METHOD path" matches with a network drop or a given status. `lose-answer`: the server
    *  handles the request (an order is made, a result is collected) but the answer never reaches the app. `hang`: the request never
-   *  gets anywhere and never answers. `hang-after`: the server handles it, and the answer never comes. */
-  fault(match: RegExp, times: number, kind: "drop" | "lose-answer" | "hang" | "hang-after" | number): void {
+   *  gets anywhere and never answers. `hang-after`: the server handles it, and the answer never comes. `cut-body`: the answer starts
+   *  (200) and the connection dies before it ends. */
+  fault(match: RegExp, times: number, kind: "drop" | "lose-answer" | "hang" | "hang-after" | "cut-body" | number): void {
     this.faults.push({ match, left: times, kind });
+  }
+
+  /** Forget every fault still waiting: the trouble is over. */
+  clearFaults(): void {
+    this.faults = [];
   }
 
   private view(order: FakeOrder): View {
@@ -77,7 +88,8 @@ export class FakeOrderServer {
         return base("running");
       case "ready": {
         const v = base("ready");
-        (v.result as View).url = `${STORAGE}/results/${order.id}.json`;
+        order.links += 1; // every answer carries a link of its own
+        (v.result as View).url = `${STORAGE}/results/${order.id}.json?sig=${order.links}`;
         return v;
       }
       case "failed": {
@@ -110,6 +122,15 @@ export class FakeOrderServer {
       if (fault.kind === "drop") throw new TypeError("Failed to fetch");
       if (typeof fault.kind === "number") return new Response("{}", { status: fault.kind });
       if (fault.kind === "hang") return new Promise<Response>(() => undefined);
+      if (fault.kind === "cut-body") {
+        const cut = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('{"result":'));
+            controller.error(new TypeError("network error"));
+          },
+        });
+        return new Response(cut, { status: 200, headers: { "Content-Type": "application/json" } });
+      }
       await this.handle(method, path, url, init); // lose-answer / hang-after: it happened, but the app never hears
       if (fault.kind === "hang-after") return new Promise<Response>(() => undefined);
       throw new TypeError("Failed to fetch");
@@ -146,6 +167,7 @@ export class FakeOrderServer {
       body,
       state: "running",
       polls: 0,
+      links: 0,
       response: this.behaviour.response(proxy, body),
     };
     this.orders.set(id, order);
@@ -173,11 +195,10 @@ export class FakeOrderServer {
   private download(url: URL): Response {
     const id = /\/results\/([^/.]+)\.json$/.exec(url.pathname)?.[1];
     const order = id ? this.orders.get(id) : undefined;
-    if (this.expireLinksOnce && !this.expiredLinks.has(url.href)) {
-      this.expiredLinks.add(url.href);
-      return new Response("expired", { status: 403 });
-    }
+    this.onDownload?.(order);
+    if (this.expireLinksOnce && url.searchParams.get("sig") === "1") return new Response("expired", { status: 403 });
     if (!order || order.state !== "ready") return new Response("gone", { status: 404 });
+    if (this.strictLinks && url.searchParams.get("sig") !== String(order.links)) return new Response("expired", { status: 403 });
     return this.json(order.response);
   }
 
@@ -189,6 +210,7 @@ export class FakeOrderServer {
       body: { order_id: id, args },
       state,
       polls: 0,
+      links: 0,
       response: response ?? this.behaviour.response(proxy, {}),
       failure: this.behaviour.failure,
     };
