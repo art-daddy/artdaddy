@@ -5,7 +5,15 @@
 // pass, read back through get_transcript. Ported from the server's audio.py.
 import { callAiProxy, fromB64 } from "../api/ai";
 import type { ClientToolContext } from "./context";
-import { AUDIO_BY_ID, DEFAULT_VOICE, DEFAULTS, MUSIC_IDS, TTS_IDS, TTS_VOICES } from "./genModels";
+import {
+  DEFAULT_VOICE,
+  MUSIC_IDS,
+  resolveMusicModel,
+  resolveTtsBackend,
+  TTS_IDS,
+  TTS_VOICES,
+  voiceoverContents,
+} from "./genModels";
 import { submitGeneration } from "./genJobs";
 import { probePath, shortHash } from "./media";
 import type { ClientToolRegistry } from "./registry";
@@ -13,8 +21,6 @@ import type { ClientToolRegistry } from "./registry";
 type Result = Record<string, unknown>;
 const NOT_READY: Result = { ok: false, error: "client tool runtime not ready" };
 const round3 = (n: number): number => Math.round(n * 1000) / 1000;
-
-const DEFAULT_TTS_BACKEND = AUDIO_BY_ID[DEFAULTS.tts]?.backend_id ?? "gemini-3.1-flash-tts-preview";
 
 /** (sample_rate, channels) from a PCM mime like 'audio/l16; rate=24000; channels=1'. */
 function parsePcmMime(mime: string): [number, number] {
@@ -78,17 +84,13 @@ async function generateVoiceover(
   }
   const style = String(args.style ?? "").trim();
   const language = String(args.language ?? "").trim();
-  let backend = DEFAULT_TTS_BACKEND;
-  if (args.model) {
-    const am = AUDIO_BY_ID[String(args.model).trim()];
-    if (!am || am.category !== "tts")
-      return {
-        ok: false,
-        error: `unknown tts model '${args.model}'; options: ${TTS_IDS.join(", ")}`,
-      };
-    backend = am.backend_id;
-  }
-  const contents = style ? `${style.replace(/:+$/, "")}: ${text}` : text;
+  const backend = resolveTtsBackend(args.model);
+  if (!backend)
+    return {
+      ok: false,
+      error: `unknown tts model '${args.model}'; options: ${TTS_IDS.join(", ")}`,
+    };
+  const contents = voiceoverContents(text, style);
 
   const sub = await submitGeneration({
     store: ctx.store,
@@ -194,16 +196,12 @@ async function generateMusic(
   if (seedVal !== null && Number.isNaN(seedVal))
     return { ok: false, error: "seed must be an integer" };
 
-  let am = AUDIO_BY_ID[DEFAULTS.music];
-  if (args.model) {
-    const m = AUDIO_BY_ID[String(args.model).trim()];
-    if (!m || m.category !== "music")
-      return {
-        ok: false,
-        error: `unknown music model '${args.model}'; options: ${MUSIC_IDS.join(", ")}`,
-      };
-    am = m;
-  }
+  const am = resolveMusicModel(args.model);
+  if (!am)
+    return {
+      ok: false,
+      error: `unknown music model '${args.model}'; options: ${MUSIC_IDS.join(", ")}`,
+    };
   const backend = am.backend_id;
 
   if (lyrics && !am.supports_lyrics) lyrics = "";

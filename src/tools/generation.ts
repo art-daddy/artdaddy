@@ -7,13 +7,15 @@ import type { ClientToolContext } from "./context";
 import {
   audioModelsInfo,
   DEFAULTS,
-  GEN_BY_ID,
   IMAGE_IDS,
   IMAGE_MODELS,
+  imageCount,
   modelInfo,
+  resolveGenModel,
+  videoReferences,
+  videoSeconds,
   VIDEO_IDS,
   VIDEO_MODELS,
-  type GenModel,
 } from "./genModels";
 import { encodeImageForGemini } from "./geminiEncode";
 import { submitGeneration } from "./genJobs";
@@ -29,11 +31,6 @@ function rateLimited(id: string, kind: "image" | "video"): Result {
     reason: "rate_limited",
     error: `${id} is rate-limited / out of quota right now (429). Do NOT retry the same model — either switch to a DIFFERENT ${kind} model (call list_models for options), or if none is available, tell the user it's rate-limited and to try again shortly.`,
   };
-}
-
-function resolveGenModel(id: string, kind: "image" | "video", dflt: string): GenModel | null {
-  const m = GEN_BY_ID[(id || dflt).trim()];
-  return m && m.kind === kind ? m : null;
 }
 
 /** Name the reference image as a suspect when a generation is refused while one is attached.
@@ -100,7 +97,7 @@ async function generateImage(
       ok: false,
       error: `unknown image model ${JSON.stringify(args.model)}; call list_models (options: ${IMAGE_IDS.join(", ")})`,
     };
-  const count = Math.max(1, Math.min(m.max_images ?? 1, Math.trunc(Number(args.count ?? 1)) || 1));
+  const count = imageCount(m, args.count);
   const suppliedRefs = args.reference_images ?? [];
   if (
     !Array.isArray(suppliedRefs) ||
@@ -223,12 +220,9 @@ async function generateVideo(
       ok: false,
       error: `unknown video model ${JSON.stringify(args.model)}; call list_models (options: ${VIDEO_IDS.join(", ")})`,
     };
-  let dur = Math.trunc(Number(args.duration ?? 8)) || 8;
   const startFrame = args.start_frame != null ? String(args.start_frame) : "";
   const endFrame = args.end_frame != null ? String(args.end_frame) : "";
-  const refRefs = (Array.isArray(args.reference_images) ? args.reference_images : [])
-    .map(String)
-    .filter((s) => s.trim());
+  const refRefs = videoReferences(args.reference_images);
   if (startFrame && !m.supports_start_frame)
     return { ok: false, error: `${m.id} does not support a start frame (image-to-video)` };
   if (endFrame && !m.supports_end_frame)
@@ -258,7 +252,7 @@ async function generateVideo(
       ok: false,
       error: `${m.id} aspect_ratio must be one of ${JSON.stringify(m.aspect_ratios)}`,
     };
-  if (refRefs.length && dur !== 8) dur = 8; // reference-image mode is 8s only
+  const dur = videoSeconds(args.duration, refRefs.length > 0); // reference-image mode is 8s only
 
   const media: Record<string, { b64: string; ext?: string }> = {};
   const addFrame = async (ref: string, key: string): Promise<string> => {

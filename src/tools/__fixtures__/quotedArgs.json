@@ -1,0 +1,12 @@
+{
+  "args": {
+    "generate_image": ["backend_id", "count"],
+    "generate_video": ["backend_id", "duration"],
+    "voiceover": ["model", "text"],
+    "music": ["backend_id"]
+  },
+  "length_only": {
+    "voiceover": ["text"]
+  },
+  "text_cap": 20000
+}
