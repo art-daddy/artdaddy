@@ -52,12 +52,17 @@ vi.mock("../tools/dataRoot", async (orig) => ({
 vi.mock("../observability/sentry", () => ({
   captureError: (...args: unknown[]) => captureErr(...args),
 }));
-vi.mock("../tools/import", () => ({
+vi.mock("../tools/import", async (orig) => ({
+  ...(await orig<typeof import("../tools/import")>()),
   reconcilePendingMedia: (store: ProjectStoreAccess) => recoverMedia(store),
 }));
 
 import { makeProjectChildren, projectDocuments } from "./documentRegistry";
 import { asProjectId, newSessionId } from "./types";
+import { setClerkTokenProvider } from "../api/auth";
+import { toB64 } from "../api/ai";
+import { __resetOrderPolling, orderPolling } from "../api/orders";
+import { FakeOrderServer } from "../test/orderServer";
 
 const id = asProjectId("p1");
 const ctx = () => ({ id, sessionId: newSessionId() });
@@ -301,6 +306,133 @@ describe("makeProjectChildren", () => {
       await projectDocuments.close(projectId);
     },
   );
+
+  describe("a generation the app was closed on", () => {
+    class BytesFs extends MemFs {
+      bytes = new Map<string, Uint8Array>();
+      override async exists(p: string): Promise<boolean> {
+        return (await super.exists(p)) || this.bytes.has(joinPath(p));
+      }
+      async readBytes(p: string): Promise<Uint8Array> {
+        const v = this.bytes.get(joinPath(p));
+        if (!v) throw new Error(`ENOENT ${p}`);
+        return v;
+      }
+      async writeBytes(p: string, b: Uint8Array): Promise<void> {
+        this.bytes.set(joinPath(p), b);
+      }
+      async remove(p: string): Promise<void> {
+        this.files.delete(joinPath(p));
+        this.bytes.delete(joinPath(p));
+      }
+    }
+    const png = new Uint8Array([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0,
+    ]);
+    const orderId = "0123456789abcdef0123456789abcdef";
+
+    /** A project whose last launch was closed in the middle of a generation the server holds as an order in ``state``. */
+    async function closedOnAnOrder(name: string, state: "ready" | "running") {
+      const server = new FakeOrderServer();
+      server.behaviour.pollsUntilDone = 1_000_000;
+      server.seed(orderId, "generate_image", state, {
+        result: { ok: true, count: 1 },
+        media: [{ b64: toB64(png), ext: ".png", kind: "image" }],
+      });
+      vi.stubGlobal("fetch", server.fetch);
+      setClerkTokenProvider(async () => "tok");
+      orderPolling.sleep = async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      };
+      const actual = await vi.importActual<typeof import("../tools/import")>("../tools/import");
+      recoverMedia.mockImplementation(actual.reconcilePendingMedia);
+      const projectId = asProjectId(name);
+      const dir = `/root/projects/${projectId}`;
+      const fs = new BytesFs();
+      const store = new ProjectStoreAccess(dir, fs);
+      await actual.registerPendingClip(store, { id: "media_gen_old", filename: "old.png", kind: "image" });
+      fs.files.set(
+        joinPath(dir, "internals/jobs.json"),
+        JSON.stringify({
+          version: 1,
+          jobs: [
+            {
+              id: "old",
+              kind: "generation",
+              tool: "generate_image",
+              label: "an image",
+              status: "running",
+              media_refs: ["media_gen_old"],
+              order_id: orderId,
+              started_by: "chat",
+              started_at: 1,
+              session: "a-previous-launch",
+            },
+          ],
+        }),
+      );
+      editorState = { projectId, store };
+      activateChat.mockResolvedValue(undefined);
+      activateEditor.mockResolvedValue("loaded");
+      return { server, fs, store, dir, projectId };
+    }
+    const cleanUp = async (projectId: ReturnType<typeof asProjectId>) => {
+      await projectDocuments.close(projectId);
+      vi.unstubAllGlobals();
+      setClerkTokenProvider(null);
+      __resetOrderPolling();
+    };
+
+    it("is collected when the project is opened, without waiting for anything to be generated", async () => {
+      const { server, fs, store, dir, projectId } = await closedOnAnOrder("order-on-open", "ready");
+      try {
+        await projectDocuments.open(projectId);
+        await vi.waitFor(async () => expect((await store.listClips())[0].status).toBeUndefined());
+        expect(await fs.readBytes(joinPath(dir, "library/media_gen_old.png"))).toEqual(png);
+        await vi.waitFor(() => expect(server.orders.get(orderId)?.state).toBe("collected"));
+        expect(pendingJobNotes(dir).map((n) => [n.id, n.status])).toEqual([["old", "done"]]);
+      } finally {
+        await cleanUp(projectId);
+      }
+    });
+
+    it("is asked about at open, and opening looks for finished placeholders once, as it always did", async () => {
+      const { server, store, projectId } = await closedOnAnOrder("order-still-running", "running");
+      try {
+        await projectDocuments.open(projectId);
+        await vi.waitFor(() => expect(server.calls.filter((c) => c.startsWith("GET /orders/")).length).toBeGreaterThan(1));
+        // The server is still making it: nothing landed, so nothing but the open itself asked the library to look again.
+        expect((await store.listClips())[0].status).toBe("generating");
+        expect(recoverMedia).toHaveBeenCalledTimes(1);
+        expect(pendingJobNotes(`/root/projects/${projectId}`)).toEqual([]);
+      } finally {
+        await cleanUp(projectId);
+      }
+    });
+
+    it("that cannot be looked into is reported, and never left as an unhandled failure", async () => {
+      const projectId = asProjectId("order-unreadable");
+      const store = {
+        projectDir: `/root/projects/${projectId}`,
+        readJson: async () => {
+          throw new Error("the disk went away");
+        },
+      };
+      editorState = { projectId, store };
+      activateChat.mockResolvedValue(undefined);
+      activateEditor.mockResolvedValue("loaded");
+      try {
+        await projectDocuments.open(projectId);
+        await vi.waitFor(() =>
+          expect(captureErr).toHaveBeenCalledWith(expect.objectContaining({ message: "the disk went away" }), {
+            scope: "project.open.generation-orders",
+          }),
+        );
+      } finally {
+        await projectDocuments.close(projectId);
+      }
+    });
+  });
 
   it("rechecks completed generated media on each successful project reopen", async () => {
     const projectId = asProjectId("generated-media-reopen");

@@ -18,6 +18,7 @@ import { closeToolHost, openToolHost } from "../tools/host";
 import { sweepArtifactCache, sweepOwnedMedia } from "../tools/mediaGc";
 import { sweepProjectTemps } from "../tools/projectTemps";
 import { reconcilePendingMedia } from "../tools/import";
+import { openProjectJobs } from "../tools/genJobs";
 import { storeForProject } from "../lib/desktop";
 import { projectDirFor } from "../tools/dataRoot";
 import { captureError } from "../observability/sentry";
@@ -213,6 +214,11 @@ async function recoverGeneratedMedia(doc: ProjectDocument): Promise<void> {
         .getState()
         .notify("Could not update generated media. Reopen the project to retry.");
   }
+  // A generation the app was closed on may still be in the server's hands, or finished there. Ask once per launch (the ledger is
+  // cached per project), so the result lands in the library as soon as the project is open, not whenever something is next generated.
+  openProjectJobs(store, { reconciled: true }).catch((error) =>
+    captureError(error, { scope: "project.open.generation-orders" }),
+  );
 }
 
 projectDocuments.subscribeOpened(recoverGeneratedMedia);

@@ -1,7 +1,7 @@
 // AI generation tools (client): model selection + validation + result persistence
 // live here; the thin /ai/generate/* proxies make only the authed provider call.
 // list_models has NO external call at all — it's a pure client-side catalog.
-import { callAiProxy, fromB64, toB64 } from "../api/ai";
+import { callAiProxy, toB64 } from "../api/ai";
 import { RateLimitError } from "../api/http";
 import type { ClientToolContext } from "./context";
 import {
@@ -19,6 +19,7 @@ import {
 } from "./genModels";
 import { encodeImageForGemini } from "./geminiEncode";
 import { submitGeneration } from "./genJobs";
+import { decodeImages, decodeVideo } from "./generationResults";
 import type { ClientToolRegistry } from "./registry";
 
 type Result = Record<string, unknown>;
@@ -173,7 +174,7 @@ async function generateImage(
     origin: ctx.origin,
     model: m.id,
     // No ctx.signal on purpose: Stop and project-close must not cancel a call already paid for.
-    run: async () => {
+    run: async (order) => {
       let dto;
       try {
         dto = await callAiProxy<{ ok?: boolean; error?: string; reason?: string }>(
@@ -181,7 +182,10 @@ async function generateImage(
           {
             args: provArgs,
             media,
+            order_id: order.orderId,
           },
+          undefined,
+          { onOrder: order.orderAccepted },
         );
       } catch (e) {
         if (e instanceof RateLimitError) throw new Error(String(rateLimited(m.id, "image").error));
@@ -192,9 +196,7 @@ async function generateImage(
         if (r.reason === "rate_limited") throw new Error(String(rateLimited(m.id, "image").error));
         throw new Error(String(r.error ?? "image generation failed"));
       }
-      const outMedia = dto.media ?? [];
-      if (!outMedia.length) throw new Error(`image generation returned no images (model=${m.id})`);
-      return outMedia.map((gm) => ({ bytes: fromB64(gm.b64), ext: gm.ext }));
+      return decodeImages(dto, m.id);
     },
   });
   return {
@@ -296,7 +298,7 @@ async function generateVideo(
     origin: ctx.origin,
     model: m.id,
     // No ctx.signal on purpose: Stop and project-close must not cancel a call already paid for.
-    run: async () => {
+    run: async (order) => {
       let dto;
       try {
         dto = await callAiProxy<{
@@ -304,7 +306,12 @@ async function generateVideo(
           error?: string;
           reason?: string;
           controls?: unknown;
-        }>("generate_video", { args: provArgs, media });
+        }>(
+          "generate_video",
+          { args: provArgs, media, order_id: order.orderId },
+          undefined,
+          { onOrder: order.orderAccepted },
+        );
       } catch (e) {
         if (e instanceof RateLimitError) throw new Error(String(rateLimited(m.id, "video").error));
         throw e;
@@ -314,10 +321,7 @@ async function generateVideo(
         if (r.reason === "rate_limited") throw new Error(String(rateLimited(m.id, "video").error));
         throw new Error(withReferenceHint(String(r.error ?? "video generation failed"), provArgs));
       }
-      const outMedia = dto.media ?? [];
-      if (!outMedia.length)
-        throw new Error(`video generation returned no downloadable file (model=${m.id})`);
-      return [{ bytes: fromB64(outMedia[0].b64), ext: outMedia[0].ext }];
+      return decodeVideo(dto, m.id);
     },
   });
   return {

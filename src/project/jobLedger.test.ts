@@ -17,6 +17,8 @@ function seed(fs: MemFs, jobs: Partial<JobRecord>[]): void {
     error: j.error,
     stderr_tail: j.stderr_tail,
     media_refs: j.media_refs,
+    order_id: j.order_id,
+    started_by: j.started_by,
     session: j.session ?? APP_SESSION,
   }));
   fs.files.set(PATH, JSON.stringify({ version: 1, jobs: full }));
@@ -164,6 +166,89 @@ describe("job ledger", () => {
     const { store } = make();
     const ledger = await JobLedger.open(store);
     expect(ledger.list()).toEqual([]);
+  });
+
+  describe("a generation the server holds as an order", () => {
+    it("records the order number and who asked BEFORE the paid call goes out", async () => {
+      const { fs, store } = make();
+      const ledger = await JobLedger.open(store);
+      const id = await ledger.begin({
+        kind: "generation",
+        tool: "generate_video",
+        label: "a 5s video",
+        media_refs: ["media_gen_a"],
+        order_id: "0123456789abcdef0123456789abcdef",
+        started_by: "chat",
+      });
+      const rec = onDisk(fs).find((r) => r.id === id)!;
+      expect(rec).toMatchObject({
+        status: "running",
+        order_id: "0123456789abcdef0123456789abcdef",
+        started_by: "chat",
+        session: APP_SESSION,
+      });
+    });
+
+    it("is not given up on when the launch that made it is gone: it is taken over, still running", async () => {
+      const { fs, store } = make();
+      seed(fs, [
+        { id: "kept", session: "a-previous-launch", order_id: "0123456789abcdef0123456789abcdef", started_by: "chat" },
+        { id: "plain", session: "a-previous-launch" },
+      ] as Partial<JobRecord>[]);
+
+      const ledger = await JobLedger.open(store);
+
+      expect(ledger.adopted().map((r) => r.id)).toEqual(["kept"]);
+      expect(ledger.running().map((r) => r.id)).toEqual(["kept"]);
+      expect(ledger.interrupted().map((r) => r.id)).toEqual(["plain"]);
+      const disk = onDisk(fs);
+      expect(disk.find((r) => r.id === "kept")).toMatchObject({ status: "running", session: APP_SESSION, started_by: "chat" });
+      expect(disk.find((r) => r.id === "kept")?.error).toBeUndefined();
+    });
+
+    it("is taken over only once: the next open finds it already this launch's own", async () => {
+      const { fs, store } = make();
+      seed(fs, [{ id: "kept", session: "a-previous-launch", order_id: "0123456789abcdef0123456789abcdef" }] as Partial<JobRecord>[]);
+      await JobLedger.open(store);
+      const again = await JobLedger.open(store);
+      expect(again.adopted()).toEqual([]);
+      expect(again.running().map((r) => r.id)).toEqual(["kept"]);
+    });
+
+    it("is left to the launch that owns it", async () => {
+      const { fs, store } = make();
+      seed(fs, [{ id: "mine", session: APP_SESSION, order_id: "0123456789abcdef0123456789abcdef" }] as Partial<JobRecord>[]);
+      const ledger = await JobLedger.open(store);
+      expect(ledger.adopted()).toEqual([]);
+      expect(ledger.running().map((r) => r.id)).toEqual(["mine"]);
+    });
+
+    it("keeps its order number and who asked when it settles", async () => {
+      const { fs, store } = make();
+      const ledger = await JobLedger.open(store);
+      const id = await ledger.begin({
+        kind: "generation",
+        tool: "generate_image",
+        label: "an image",
+        order_id: "0123456789abcdef0123456789abcdef",
+        started_by: "elsewhere",
+      });
+      await ledger.settle(id, { status: "done", media_refs: ["media_x"] });
+      expect(onDisk(fs)[0]).toMatchObject({
+        status: "done",
+        order_id: "0123456789abcdef0123456789abcdef",
+        started_by: "elsewhere",
+      });
+    });
+
+    it("is never dropped by the cap on history while it runs", async () => {
+      const { fs, store } = make();
+      const old: Partial<JobRecord>[] = Array.from({ length: 60 }, (_, i) => ({ id: `old${i}`, status: "done" as const, started_at: i, ended_at: i }));
+      seed(fs, [...old, { id: "kept", session: "a-previous-launch", order_id: "0123456789abcdef0123456789abcdef" }] as Partial<JobRecord>[]);
+      const ledger = await JobLedger.open(store);
+      await ledger.begin({ kind: "generation", tool: "generate_image", label: "new" });
+      expect(onDisk(fs).filter((r) => r.status === "running").map((r) => r.id)).toContain("kept");
+    });
   });
 
   it("caps terminal history but never drops a running job", async () => {
