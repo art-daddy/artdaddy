@@ -327,7 +327,8 @@ describe("makeProjectChildren", () => {
       }
     }
     const png = new Uint8Array([
-      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0,
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52, 0, 0,
+      0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0,
     ]);
     const orderId = "0123456789abcdef0123456789abcdef";
 
@@ -350,7 +351,11 @@ describe("makeProjectChildren", () => {
       const dir = `/root/projects/${projectId}`;
       const fs = new BytesFs();
       const store = new ProjectStoreAccess(dir, fs);
-      await actual.registerPendingClip(store, { id: "media_gen_old", filename: "old.png", kind: "image" });
+      await actual.registerPendingClip(store, {
+        id: "media_gen_old",
+        filename: "old.png",
+        kind: "image",
+      });
       fs.files.set(
         joinPath(dir, "internals/jobs.json"),
         JSON.stringify({
@@ -400,7 +405,11 @@ describe("makeProjectChildren", () => {
       const { server, store, projectId } = await closedOnAnOrder("order-still-running", "running");
       try {
         await projectDocuments.open(projectId);
-        await vi.waitFor(() => expect(server.calls.filter((c) => c.startsWith("GET /orders/")).length).toBeGreaterThan(1));
+        await vi.waitFor(() =>
+          expect(server.calls.filter((c) => c.startsWith("GET /orders/")).length).toBeGreaterThan(
+            1,
+          ),
+        );
         // The server is still making it: nothing landed, so nothing but the open itself asked the library to look again.
         expect((await store.listClips())[0].status).toBe("generating");
         expect(recoverMedia).toHaveBeenCalledTimes(1);
@@ -417,13 +426,28 @@ describe("makeProjectChildren", () => {
       const dir = `/root/projects/${projectId}`;
       const fs = new BytesFs();
       const store = new ProjectStoreAccess(dir, fs);
-      await actual.registerPendingClip(store, { id: "media_gen_late", filename: "late.png", kind: "image" });
+      await actual.registerPendingClip(store, {
+        id: "media_gen_late",
+        filename: "late.png",
+        kind: "image",
+      });
       fs.files.set(
         joinPath(dir, "internals/jobs.json"),
         JSON.stringify({
           version: 1,
           jobs: [
-            { id: "late", kind: "generation", tool: "generate_image", label: "an image", status: "failed", error: "the provider refused this", media_refs: ["media_gen_late"], started_at: 1, ended_at: 2, session: "a-previous-launch" },
+            {
+              id: "late",
+              kind: "generation",
+              tool: "generate_image",
+              label: "an image",
+              status: "failed",
+              error: "the provider refused this",
+              media_refs: ["media_gen_late"],
+              started_at: 1,
+              ended_at: 2,
+              session: "a-previous-launch",
+            },
           ],
         }),
       );
@@ -432,10 +456,19 @@ describe("makeProjectChildren", () => {
       activateEditor.mockResolvedValue("loaded");
       try {
         await projectDocuments.open(projectId);
-        await vi.waitFor(async () => expect((await store.listClips())[0]).toMatchObject({ status: "failed", error: "the provider refused this" }));
+        await vi.waitFor(async () =>
+          expect((await store.listClips())[0]).toMatchObject({
+            status: "failed",
+            error: "the provider refused this",
+          }),
+        );
         // and a second opening in the same launch, with the job state already cached, does the same for a job that failed since
         await projectDocuments.close(projectId);
-        await actual.registerPendingClip(store, { id: "media_gen_later", filename: "later.png", kind: "image" });
+        await actual.registerPendingClip(store, {
+          id: "media_gen_later",
+          filename: "later.png",
+          kind: "image",
+        });
         await projectDocuments.open(projectId);
         await vi.waitFor(async () => {
           const rows = await store.listClips();
@@ -465,7 +498,10 @@ describe("makeProjectChildren", () => {
         await projectDocuments.open(projectId);
         await vi.waitFor(() =>
           expect(captureErr).toHaveBeenCalledWith(
-            expect.objectContaining({ name: "JobLedgerUnreadableError", reason: "the disk went away" }),
+            expect.objectContaining({
+              name: "JobLedgerUnreadableError",
+              reason: "the disk went away",
+            }),
             { scope: "project.open.generation-orders" },
           ),
         );

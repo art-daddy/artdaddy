@@ -27,7 +27,10 @@ const balance = (extra: Record<string, unknown> = {}) => ({
 });
 
 function serve(body: unknown) {
-  vi.stubGlobal("fetch", vi.fn(async () => json(body)));
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => json(body)),
+  );
 }
 
 afterEach(() => vi.unstubAllGlobals());
@@ -37,7 +40,14 @@ describe("held credits in the readout", () => {
     const { refreshUsage, getUsage } = await load();
     serve(balance({ held: 96 }));
     await refreshUsage();
-    expect(getUsage()).toEqual({ metered: true, used: 96, limit: 150, remaining: 54, over: false, held: 96 });
+    expect(getUsage()).toEqual({
+      metered: true,
+      used: 96,
+      limit: 150,
+      remaining: 54,
+      over: false,
+      held: 96,
+    });
   });
 
   it("is absent, not zero, when nothing is held or the server does not say", async () => {
@@ -45,17 +55,26 @@ describe("held credits in the readout", () => {
     for (const body of [balance({ held: 0 }), balance()]) {
       serve(body);
       await refreshUsage();
-      expect(getUsage()).toEqual({ metered: true, used: 96, limit: 150, remaining: 54, over: false });
+      expect(getUsage()).toEqual({
+        metered: true,
+        used: 96,
+        limit: 150,
+        remaining: 54,
+        over: false,
+      });
       expect("held" in getUsage()).toBe(false);
     }
   });
 
-  it.each([-5, "7", null, true, [], {}])("ignores a held that is not a positive number (%j)", async (held) => {
-    const { refreshUsage, getUsage } = await load();
-    serve(balance({ held }));
-    await refreshUsage();
-    expect("held" in getUsage()).toBe(false);
-  });
+  it.each([-5, "7", null, true, [], {}])(
+    "ignores a held that is not a positive number (%j)",
+    async (held) => {
+      const { refreshUsage, getUsage } = await load();
+      serve(balance({ held }));
+      await refreshUsage();
+      expect("held" in getUsage()).toBe(false);
+    },
+  );
 
   it("follows the server: a later refresh without a hold clears it", async () => {
     const { refreshUsage, getUsage } = await load();
@@ -126,6 +145,7 @@ describe("creditsTitle", () => {
 
   it("says nothing about a hold that is zero or negative", async () => {
     const { creditsTitle } = await load();
-    for (const held of [0, -3, NaN]) expect(creditsTitle({ used: 5, limit: 10, held })).toBe("5 / 10 credits used");
+    for (const held of [0, -3, NaN])
+      expect(creditsTitle({ used: 5, limit: 10, held })).toBe("5 / 10 credits used");
   });
 });

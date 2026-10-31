@@ -44,7 +44,8 @@ describe("what counts as a paid call", () => {
 
 describe("the ring", () => {
   it("keeps the last ten, oldest first", () => {
-    for (let i = 0; i < 25; i += 1) noteFailure({ where: "turn", code: `c${i}`, requestId: `r${i}` });
+    for (let i = 0; i < 25; i += 1)
+      noteFailure({ where: "turn", code: `c${i}`, requestId: `r${i}` });
     const kept = recentFailures();
     expect(kept).toHaveLength(MAX_RECENT_FAILURES);
     expect(kept.map((f) => f.code)).toEqual(Array.from({ length: 10 }, (_, i) => `c${i + 15}`));

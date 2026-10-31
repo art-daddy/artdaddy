@@ -58,7 +58,8 @@ describe("imageCount", () => {
     const m = IMAGE_MODELS[0];
     expect(m.max_images).toBeGreaterThan(1);
     for (const asked of [0, -1, -3, -1e9]) expect(imageCount(m, asked)).toBe(1);
-    for (const asked of [m.max_images! + 1, 99, 1e9]) expect(imageCount(m, asked)).toBe(m.max_images);
+    for (const asked of [m.max_images! + 1, 99, 1e9])
+      expect(imageCount(m, asked)).toBe(m.max_images);
   });
 
   it("allows one image from a model that does not say how many it can make", () => {
@@ -72,7 +73,8 @@ describe("videoSeconds", () => {
   });
 
   it("is 8 when told nothing or something unusable, and otherwise the whole seconds asked", () => {
-    for (const asked of [undefined, null, 0, "soon", "", NaN]) expect(videoSeconds(asked, false), String(asked)).toBe(8);
+    for (const asked of [undefined, null, 0, "soon", "", NaN])
+      expect(videoSeconds(asked, false), String(asked)).toBe(8);
     expect(videoSeconds(4, false)).toBe(4);
     expect(videoSeconds(6, false)).toBe(6);
     expect(videoSeconds("5", false)).toBe(5);
@@ -87,13 +89,15 @@ describe("videoReferences", () => {
   });
 
   it("is empty when what was sent is not a list", () => {
-    for (const raw of [undefined, null, "a.png", 7, {}]) expect(videoReferences(raw), String(raw)).toEqual([]);
+    for (const raw of [undefined, null, "a.png", 7, {}])
+      expect(videoReferences(raw), String(raw)).toEqual([]);
   });
 });
 
 describe("resolveGenModel", () => {
   it("finds a model of the kind asked for, ignoring surrounding space", () => {
-    for (const m of IMAGE_MODELS) expect(resolveGenModel(`  ${m.id} `, "image", DEFAULTS.image)).toBe(m);
+    for (const m of IMAGE_MODELS)
+      expect(resolveGenModel(`  ${m.id} `, "image", DEFAULTS.image)).toBe(m);
     for (const m of VIDEO_MODELS) expect(resolveGenModel(m.id, "video", DEFAULTS.video)).toBe(m);
   });
 
@@ -113,24 +117,28 @@ describe("resolveGenModel", () => {
 describe("resolveTtsBackend", () => {
   it("is the default voice backend when no model is named", () => {
     expect(DEFAULT_TTS_BACKEND).toBe(AUDIO_BY_ID[DEFAULTS.tts].backend_id);
-    for (const none of [undefined, null, "", 0]) expect(resolveTtsBackend(none)).toBe(DEFAULT_TTS_BACKEND);
+    for (const none of [undefined, null, "", 0])
+      expect(resolveTtsBackend(none)).toBe(DEFAULT_TTS_BACKEND);
   });
 
   it("is the backend of the voice model named, and nothing for any other model", () => {
     for (const m of TTS_MODELS) expect(resolveTtsBackend(` ${m.id} `)).toBe(m.backend_id);
-    for (const other of [...IMAGE_MODELS, ...VIDEO_MODELS, ...MUSIC_MODELS]) expect(resolveTtsBackend(other.id), other.id).toBeNull();
+    for (const other of [...IMAGE_MODELS, ...VIDEO_MODELS, ...MUSIC_MODELS])
+      expect(resolveTtsBackend(other.id), other.id).toBeNull();
     expect(resolveTtsBackend("no-such-model")).toBeNull();
   });
 });
 
 describe("resolveMusicModel", () => {
   it("is the default music model when none is named", () => {
-    for (const none of [undefined, null, "", 0]) expect(resolveMusicModel(none)).toBe(AUDIO_BY_ID[DEFAULTS.music]);
+    for (const none of [undefined, null, "", 0])
+      expect(resolveMusicModel(none)).toBe(AUDIO_BY_ID[DEFAULTS.music]);
   });
 
   it("is the music model named, and nothing for any other model", () => {
     for (const m of MUSIC_MODELS) expect(resolveMusicModel(` ${m.id} `)).toBe(m);
-    for (const other of [...IMAGE_MODELS, ...VIDEO_MODELS, ...TTS_MODELS]) expect(resolveMusicModel(other.id), other.id).toBeNull();
+    for (const other of [...IMAGE_MODELS, ...VIDEO_MODELS, ...TTS_MODELS])
+      expect(resolveMusicModel(other.id), other.id).toBeNull();
     expect(resolveMusicModel("no-such-model")).toBeNull();
   });
 });

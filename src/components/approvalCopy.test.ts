@@ -82,10 +82,14 @@ describe("the price line", () => {
   });
 
   it("formats credits like the rest of the readout", () => {
-    expect(priceLine(0.1 + 0.2, { ...account, remaining: 0.1 + 0.2 })).toBe("Up to 0.3 credits · you have 0.3 left");
+    expect(priceLine(0.1 + 0.2, { ...account, remaining: 0.1 + 0.2 })).toBe(
+      "Up to 0.3 credits · you have 0.3 left",
+    );
   });
 
   it("states a price that does not fit the balance too: the server refuses it in its own words", () => {
-    expect(priceLine(96, { ...account, remaining: 30 })).toBe("Up to 96 credits · you have 30 left");
+    expect(priceLine(96, { ...account, remaining: 30 })).toBe(
+      "Up to 96 credits · you have 30 left",
+    );
   });
 });

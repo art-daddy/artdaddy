@@ -87,7 +87,9 @@ describe("SerialGate", () => {
     const stop = new AbortController();
     stop.abort();
     let ran = false;
-    await expect(gate.run(async () => void (ran = true), stop.signal)).rejects.toMatchObject({ name: "AbortError" });
+    await expect(gate.run(async () => void (ran = true), stop.signal)).rejects.toMatchObject({
+      name: "AbortError",
+    });
     expect(ran).toBe(false);
     expect(await gate.run(async () => "next")).toBe("next");
   });
@@ -131,7 +133,14 @@ describe("SerialGate", () => {
   it("never runs two tasks at once and always finishes them all, whatever fails or stops", async () => {
     await fc.assert(
       fc.asyncProperty(
-        fc.array(fc.record({ fail: fc.boolean(), stopEarly: fc.boolean(), steps: fc.integer({ min: 0, max: 3 }) }), { maxLength: 12 }),
+        fc.array(
+          fc.record({
+            fail: fc.boolean(),
+            stopEarly: fc.boolean(),
+            steps: fc.integer({ min: 0, max: 3 }),
+          }),
+          { maxLength: 12 },
+        ),
         async (specs) => {
           const gate = new SerialGate();
           let running = 0;

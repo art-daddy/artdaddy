@@ -93,10 +93,16 @@ afterEach(() => clearRecentFailures());
 describe("an error round", () => {
   it("is reported by its typed code and request id, and kept for a problem report", async () => {
     await startTurn();
-    emit("error", { error: "Our own sentence.", error_code: "content_policy", request_id: "3f9c1a2b7d4e5f60" });
+    emit("error", {
+      error: "Our own sentence.",
+      error_code: "content_policy",
+      request_id: "3f9c1a2b7d4e5f60",
+    });
     expect(reportTurnError).toHaveBeenCalledTimes(1);
     expect(reportTurnError).toHaveBeenCalledWith("content_policy", "3f9c1a2b7d4e5f60");
-    expect(recentFailures()).toMatchObject([{ where: "turn", code: "content_policy", requestId: "3f9c1a2b7d4e5f60" }]);
+    expect(recentFailures()).toMatchObject([
+      { where: "turn", code: "content_policy", requestId: "3f9c1a2b7d4e5f60" },
+    ]);
   });
 
   it("shows the person exactly the sentence it always did, with the code kept on the part", async () => {
@@ -120,7 +126,12 @@ describe("an error round", () => {
 
 describe("a turn that throws", () => {
   it.each([
-    ["a busy answer that ran out of retries, naming its call", Object.assign(new RateLimitError(), { requestId: "rid2" }), "rate_limited", "rid2"],
+    [
+      "a busy answer that ran out of retries, naming its call",
+      Object.assign(new RateLimitError(), { requestId: "rid2" }),
+      "rate_limited",
+      "rid2",
+    ],
     ["an HTTP failure", new Error("503: upstream down"), "http_503", undefined],
     ["a dropped connection", new TypeError("Failed to fetch"), "network", undefined],
     ["something nobody recognised", new Error("weird"), "unexpected", undefined],

@@ -477,7 +477,11 @@ describe("video_ask — prompt, encode/proxy & response parsing", () => {
 
   it("gives the call the encoded clip as bytes, for the call to upload, and as nothing else", async () => {
     proxyText("something");
-    await runTool("video_ask", { media_ref: "media_a", prompt: "describe" }, ctxWith(probeRunner()));
+    await runTool(
+      "video_ask",
+      { media_ref: "media_a", prompt: "describe" },
+      ctxWith(probeRunner()),
+    );
     const { body } = lastProxyCall();
     expect(Object.keys(body.media)).toEqual([body.args.video]);
     expect(body.media.video.clip).toEqual(new Uint8Array([1, 2, 3]));
@@ -698,7 +702,11 @@ describe("video_find_moment — prompt construction", () => {
 
   it("gives the call the encoded clip as bytes, for the call to upload, and as nothing else", async () => {
     proxy.mockResolvedValue({ result: { ok: true, text: MOMENT_2_SHOTS } } as Any);
-    await runTool("video_find_moment", { media_ref: "media_a", query: "rocket" }, ctxWith(probeRunner()));
+    await runTool(
+      "video_find_moment",
+      { media_ref: "media_a", query: "rocket" },
+      ctxWith(probeRunner()),
+    );
     const { body } = lastProxyCall();
     expect(Object.keys(body.media)).toEqual([body.args.video]);
     expect(body.media.video.clip).toEqual(new Uint8Array([1, 2, 3]));
@@ -1043,25 +1051,46 @@ describe("the size a clip is encoded at", () => {
       [120, 480],
       [900, 480],
     ])("a %s s clip is encoded at %sp", async (seconds, edge) => {
-      await runTool("video_ask", { media_ref: "media_a", prompt: "what happens?" }, ctxWith(probeRunner(seconds)));
+      await runTool(
+        "video_ask",
+        { media_ref: "media_a", prompt: "what happens?" },
+        ctxWith(probeRunner(seconds)),
+      );
       expect(edgeOf()).toBe(edge);
     });
 
     it("keeps 720p when the length cannot be read", async () => {
-      await runTool("video_ask", { media_ref: "media_a", prompt: "what happens?" }, ctxWith(probeRunner(null)));
+      await runTool(
+        "video_ask",
+        { media_ref: "media_a", prompt: "what happens?" },
+        ctxWith(probeRunner(null)),
+      );
       expect(edgeOf()).toBe(720);
     });
 
     it("sizes it by the part that is analysed, not by the whole file", async () => {
-      await runTool("video_ask", { media_ref: "media_a", prompt: "x", start_seconds: 10, end_seconds: 40 }, ctxWith(probeRunner(600)));
+      await runTool(
+        "video_ask",
+        { media_ref: "media_a", prompt: "x", start_seconds: 10, end_seconds: 40 },
+        ctxWith(probeRunner(600)),
+      );
       expect(edgeOf()).toBe(720);
-      await runTool("video_ask", { media_ref: "media_a", prompt: "x", start_seconds: 0, end_seconds: 120 }, ctxWith(probeRunner(600)));
+      await runTool(
+        "video_ask",
+        { media_ref: "media_a", prompt: "x", start_seconds: 0, end_seconds: 120 },
+        ctxWith(probeRunner(600)),
+      );
       expect(edgeOf()).toBe(480);
     });
 
     it("changes nothing else about the recipe", async () => {
       await runTool("video_ask", { media_ref: "media_a", prompt: "x" }, ctxWith(probeRunner(300)));
-      expect(encode.mock.calls.at(-1)?.[2]).toMatchObject({ fps: 4, keepAudio: false, tag: "gemini", budget: { durationS: 300 } });
+      expect(encode.mock.calls.at(-1)?.[2]).toMatchObject({
+        fps: 4,
+        keepAudio: false,
+        tag: "gemini",
+        budget: { durationS: 300 },
+      });
     });
   });
 
@@ -1072,18 +1101,35 @@ describe("the size a clip is encoded at", () => {
       [61, 480],
       [300, 480],
     ])("a %s s clip is encoded at %sp", async (seconds, edge) => {
-      await runTool("video_find_moment", { media_ref: "media_a", query: "rocket" }, ctxWith(probeRunner(seconds)));
+      await runTool(
+        "video_find_moment",
+        { media_ref: "media_a", query: "rocket" },
+        ctxWith(probeRunner(seconds)),
+      );
       expect(edgeOf()).toBe(edge);
     });
 
     it("keeps 720p when the length cannot be read", async () => {
-      await runTool("video_find_moment", { media_ref: "media_a", query: "rocket" }, ctxWith(probeRunner(null)));
+      await runTool(
+        "video_find_moment",
+        { media_ref: "media_a", query: "rocket" },
+        ctxWith(probeRunner(null)),
+      );
       expect(edgeOf()).toBe(720);
     });
 
     it("changes nothing else about the recipe", async () => {
-      await runTool("video_find_moment", { media_ref: "media_a", query: "rocket" }, ctxWith(probeRunner(300)));
-      expect(encode.mock.calls.at(-1)?.[2]).toMatchObject({ fps: 4, keepAudio: false, tag: "gemini", budget: { durationS: 300 } });
+      await runTool(
+        "video_find_moment",
+        { media_ref: "media_a", query: "rocket" },
+        ctxWith(probeRunner(300)),
+      );
+      expect(encode.mock.calls.at(-1)?.[2]).toMatchObject({
+        fps: 4,
+        keepAudio: false,
+        tag: "gemini",
+        budget: { durationS: 300 },
+      });
     });
   });
 });

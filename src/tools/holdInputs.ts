@@ -60,7 +60,8 @@ function scriptLength(contents: string): number {
 /** What the server needs to price this tool call, or null when the call has no price to show: not a generation tool, or one
  *  the tool itself would refuse for its model or its text (nothing would be sent). Never throws: it runs while drawing. */
 export function holdInputs(tool: string, raw: Record<string, unknown>): HoldInputs | null {
-  if (!GENERATION_TOOLS.has(tool) || !raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  if (!GENERATION_TOOLS.has(tool) || !raw || typeof raw !== "object" || Array.isArray(raw))
+    return null;
   try {
     // The registry hands a handler these, not what the model wrote.
     const args = clampArgs(tool, dropStrictNulls(tool, raw));
@@ -68,13 +69,19 @@ export function holdInputs(tool: string, raw: Record<string, unknown>): HoldInpu
       case "generate_image": {
         const m = resolveGenModel(String(args.model ?? ""), "image", DEFAULTS.image);
         return m
-          ? { proxy: "generate_image", args: { backend_id: m.backend_id, count: imageCount(m, args.count) } }
+          ? {
+              proxy: "generate_image",
+              args: { backend_id: m.backend_id, count: imageCount(m, args.count) },
+            }
           : null;
       }
       case "generate_video": {
         const m = resolveGenModel(String(args.model ?? ""), "video", DEFAULTS.video);
         if (!m) return null;
-        const seconds = videoSeconds(args.duration, videoReferences(args.reference_images).length > 0);
+        const seconds = videoSeconds(
+          args.duration,
+          videoReferences(args.reference_images).length > 0,
+        );
         return { proxy: "generate_video", args: { backend_id: m.backend_id, duration: seconds } };
       }
       case "generate_voiceover": {

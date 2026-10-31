@@ -306,12 +306,9 @@ async function generateVideo(
           error?: string;
           reason?: string;
           controls?: unknown;
-        }>(
-          "generate_video",
-          { args: provArgs, media, order_id: order.orderId },
-          undefined,
-          { onOrder: order.orderAccepted },
-        );
+        }>("generate_video", { args: provArgs, media, order_id: order.orderId }, undefined, {
+          onOrder: order.orderAccepted,
+        });
       } catch (e) {
         if (e instanceof RateLimitError) throw new Error(String(rateLimited(m.id, "video").error));
         throw e;

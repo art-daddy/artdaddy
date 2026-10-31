@@ -7,7 +7,16 @@ import { ClientTurnRunner, type LoopDeps } from "./loop";
 import type { RoundResultDTO } from "./types";
 
 function round(over: Partial<RoundResultDTO>): RoundResultDTO {
-  return { kind: "error", pending_calls: [], final_text: "", error: "boom", finish_reason: "", usage: {}, provider_snapshot: {}, ...over };
+  return {
+    kind: "error",
+    pending_calls: [],
+    final_text: "",
+    error: "boom",
+    finish_reason: "",
+    usage: {},
+    provider_snapshot: {},
+    ...over,
+  };
 }
 
 async function runOnce(result: RoundResultDTO) {
@@ -29,8 +38,23 @@ async function runOnce(result: RoundResultDTO) {
 
 describe("an error round", () => {
   it("emits the sentence with the typed code and the request id the round carried", async () => {
-    const errors = await runOnce(round({ error: "Our own sentence.", error_code: "content_policy", request_id: "3f9c1a2b7d4e5f60" }));
-    expect(errors).toEqual([{ event: "error", data: { error: "Our own sentence.", error_code: "content_policy", request_id: "3f9c1a2b7d4e5f60" } }]);
+    const errors = await runOnce(
+      round({
+        error: "Our own sentence.",
+        error_code: "content_policy",
+        request_id: "3f9c1a2b7d4e5f60",
+      }),
+    );
+    expect(errors).toEqual([
+      {
+        event: "error",
+        data: {
+          error: "Our own sentence.",
+          error_code: "content_policy",
+          request_id: "3f9c1a2b7d4e5f60",
+        },
+      },
+    ]);
   });
 
   it("emits exactly what it always did when the round carried neither", async () => {
@@ -39,8 +63,14 @@ describe("an error round", () => {
   });
 
   it("emits only the one it has", async () => {
-    expect((await runOnce(round({ error_code: "provider_timeout" })))[0].data).toEqual({ error: "boom", error_code: "provider_timeout" });
-    expect((await runOnce(round({ request_id: "rid" })))[0].data).toEqual({ error: "boom", request_id: "rid" });
+    expect((await runOnce(round({ error_code: "provider_timeout" })))[0].data).toEqual({
+      error: "boom",
+      error_code: "provider_timeout",
+    });
+    expect((await runOnce(round({ request_id: "rid" })))[0].data).toEqual({
+      error: "boom",
+      request_id: "rid",
+    });
   });
 
   it("still says something when the server gave no sentence", async () => {

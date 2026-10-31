@@ -69,7 +69,10 @@ export interface ReadyOrder extends OrderView {
 export function newOrderId(): string {
   const c = globalThis.crypto;
   if (c && typeof c.randomUUID === "function") return c.randomUUID().replace(/-/g, "");
-  const hex = () => Math.floor(Math.random() * 0x100000000).toString(16).padStart(8, "0");
+  const hex = () =>
+    Math.floor(Math.random() * 0x100000000)
+      .toString(16)
+      .padStart(8, "0");
   return `${Date.now().toString(16).padStart(12, "0")}${hex()}${hex()}`.slice(0, 32);
 }
 
@@ -130,7 +133,9 @@ export class OrderWaitSuspended extends ArtDaddyError {
   readonly code = "order_wait_suspended";
   readonly expected = true;
   constructor() {
-    super("This build must be updated before it can ask about a generation that is still being made.");
+    super(
+      "This build must be updated before it can ask about a generation that is still being made.",
+    );
     this.name = "OrderWaitSuspended";
   }
 }
@@ -232,7 +237,10 @@ const SIGNED_OUT_DELAY_MS = 15_000;
 const STATES: readonly OrderState[] = ["running", "ready", "failed", "collected", "expired"];
 
 function unreadable(): OrderUnreachableError {
-  return new OrderUnreachableError("The server's answer about an order could not be understood.", "unreadable");
+  return new OrderUnreachableError(
+    "The server's answer about an order could not be understood.",
+    "unreadable",
+  );
 }
 
 const isNumber = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
@@ -256,7 +264,13 @@ function parseCreditDetail(raw: unknown): CreditRefusalDetail | undefined {
 /** An order as the server says it, or an error when what came back is not one. */
 export function parseOrderView(raw: unknown): OrderView {
   const o = (raw as { order?: unknown } | null)?.order as Record<string, unknown> | undefined;
-  if (!o || typeof o !== "object" || !isString(o.order_id) || !STATES.includes(o.state as OrderState)) throw unreadable();
+  if (
+    !o ||
+    typeof o !== "object" ||
+    !isString(o.order_id) ||
+    !STATES.includes(o.state as OrderState)
+  )
+    throw unreadable();
   if (!isNumber(o.created_at) || !isNumber(o.updated_at)) throw unreadable();
   const view: OrderView = {
     order_id: o.order_id,
@@ -266,9 +280,21 @@ export function parseOrderView(raw: unknown): OrderView {
   };
   if (view.state === "ready") {
     const r = o.result as Record<string, unknown> | undefined;
-    if (!r || !isString(r.url) || !isNumber(r.bytes) || !isString(r.content_type) || !isNumber(r.expires_at)) throw unreadable();
+    if (
+      !r ||
+      !isString(r.url) ||
+      !isNumber(r.bytes) ||
+      !isString(r.content_type) ||
+      !isNumber(r.expires_at)
+    )
+      throw unreadable();
     if (!isNumber(o.charged_credits)) throw unreadable();
-    view.result = { url: r.url, bytes: r.bytes, content_type: r.content_type, expires_at: r.expires_at };
+    view.result = {
+      url: r.url,
+      bytes: r.bytes,
+      content_type: r.content_type,
+      expires_at: r.expires_at,
+    };
     view.charged_credits = o.charged_credits;
   } else if (view.state === "collected" || view.state === "expired") {
     if (!isNumber(o.charged_credits)) throw unreadable();
@@ -295,7 +321,9 @@ function orderUrl(orderId: string, suffix = ""): string {
 export async function getOrder(orderId: string, signal?: AbortSignal): Promise<OrderView> {
   let res: Response;
   try {
-    res = await authedFetch(orderUrl(orderId), { method: "GET" }, (u, i) => fetchCompatibleClient(u, { ...i, signal }));
+    res = await authedFetch(orderUrl(orderId), { method: "GET" }, (u, i) =>
+      fetchCompatibleClient(u, { ...i, signal }),
+    );
   } catch (e) {
     if (e instanceof ClientUpdateRequiredError || signal?.aborted) throw e;
     throw new OrderUnreachableError(e instanceof Error ? e.message : String(e), "server");
@@ -309,13 +337,17 @@ export async function getOrder(orderId: string, signal?: AbortSignal): Promise<O
     // Only the server's own "no such order" is a verdict about the order. A 404 from anything else (a gateway, a deploy in progress,
     // the wrong server) says nothing about it, and an order is paid for: it is waited out, never written off.
     if (await isOrderNotFoundAnswer(res)) throw new OrderNotFoundError(orderId);
-    throw new OrderUnreachableError("The server answered 404 without saying the order is gone.", "server");
+    throw new OrderUnreachableError(
+      "The server answered 404 without saying the order is gone.",
+      "server",
+    );
   }
   if (res.status === 429 || res.status >= 500) {
     await res.body?.cancel().catch(() => undefined);
     throw new OrderUnreachableError(`The server answered ${res.status}.`, "server");
   }
-  if (!res.ok) throw new Error(`${res.status}: ${(await res.text().catch(() => "")) || res.statusText}`);
+  if (!res.ok)
+    throw new Error(`${res.status}: ${(await res.text().catch(() => "")) || res.statusText}`);
   let body: unknown;
   try {
     body = await res.json();
@@ -384,7 +416,10 @@ export async function orderKnownToServer(orderId: string, signal?: AbortSignal):
 /** Wait for an order to be ready and give it back. Throws the server's verdict if it failed, expired or was already collected,
  *  or `OrderNotFoundError`; throws `OrderWaitSuspended` when this build may no longer ask. Otherwise it keeps asking: nothing
  *  that only means the server is out of reach ends it. */
-export async function waitForOrder(orderId: string, opts: { signal?: AbortSignal } = {}): Promise<ReadyOrder> {
+export async function waitForOrder(
+  orderId: string,
+  opts: { signal?: AbortSignal } = {},
+): Promise<ReadyOrder> {
   const { signal } = opts;
   for (let answers = 0; ; answers += 1) {
     const view = await askUntilAnswered(orderId, signal);
@@ -392,7 +427,12 @@ export async function waitForOrder(orderId: string, opts: { signal?: AbortSignal
       case "ready":
         return view as ReadyOrder;
       case "failed":
-        throw new OrderFailedError(view.error!.message, view.error!.code, view.error!.retryable, view.error!.detail);
+        throw new OrderFailedError(
+          view.error!.message,
+          view.error!.code,
+          view.error!.retryable,
+          view.error!.detail,
+        );
       case "expired":
         throw new OrderExpiredError();
       case "collected":
@@ -435,13 +475,20 @@ async function attemptDownload(url: string, signal?: AbortSignal): Promise<Attem
       return { kind: "retry" }; // the connection died before the end of the answer
     }
     const result = (body as { result?: unknown } | null)?.result;
-    if (!body || typeof body !== "object" || Array.isArray(body) || !result || typeof result !== "object")
+    if (
+      !body ||
+      typeof body !== "object" ||
+      Array.isArray(body) ||
+      !result ||
+      typeof result !== "object"
+    )
       throw new OrderResultUnreadableError();
     return { kind: "done", body };
   }
   await res.body?.cancel().catch(() => undefined);
   // Google answers 400 for a link that ran out and 403 for one that does not fit the file; 404 for a file that is not there (yet).
-  if (res.status === 400 || res.status === 401 || res.status === 403 || res.status === 404) return { kind: "refresh" };
+  if (res.status === 400 || res.status === 401 || res.status === 403 || res.status === 404)
+    return { kind: "refresh" };
   if (res.status === 408 || res.status === 429 || res.status >= 500) return { kind: "retry" };
   return { kind: "refused", status: res.status };
 }
@@ -451,14 +498,18 @@ async function attemptDownload(url: string, signal?: AbortSignal): Promise<Attem
  *  link that ran out are all waited out (asking the server for a fresh link as often as it takes), and only the server's own
  *  verdict, or a result that cannot be read as one, ends it. If it still cannot be fetched after a long time the order is left as
  *  it is (`OrderResultUnavailableError`) for the next run, never given up on. */
-export async function downloadOrderResult(ready: ReadyOrder, signal?: AbortSignal): Promise<unknown> {
+export async function downloadOrderResult(
+  ready: ReadyOrder,
+  signal?: AbortSignal,
+): Promise<unknown> {
   let view = ready;
   let failures = 0;
   let refreshes = 0;
   for (;;) {
     const attempt = await attemptDownload(view.result.url, signal);
     if (attempt.kind === "done") return attempt.body;
-    if (attempt.kind === "refused") throw new Error(`The finished result could not be downloaded (${attempt.status}).`);
+    if (attempt.kind === "refused")
+      throw new Error(`The finished result could not be downloaded (${attempt.status}).`);
     if (attempt.kind === "retry") {
       refreshes = 0;
       failures += 1;
@@ -476,7 +527,12 @@ export async function downloadOrderResult(ready: ReadyOrder, signal?: AbortSigna
     else if (fresh.state === "collected") throw new OrderCollectedError();
     else if (fresh.state === "expired") throw new OrderExpiredError();
     else if (fresh.state === "failed")
-      throw new OrderFailedError(fresh.error!.message, fresh.error!.code, fresh.error!.retryable, fresh.error!.detail);
+      throw new OrderFailedError(
+        fresh.error!.message,
+        fresh.error!.code,
+        fresh.error!.retryable,
+        fresh.error!.detail,
+      );
     // "running" cannot follow "ready"; were it to, the old link is simply tried again
   }
 }
@@ -486,7 +542,9 @@ export async function downloadOrderResult(ready: ReadyOrder, signal?: AbortSigna
 export async function ackOrder(orderId: string): Promise<boolean> {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
-      const res = await authedFetch(orderUrl(orderId, "/ack"), { method: "POST" }, (u, i) => fetchCompatibleClient(u, i));
+      const res = await authedFetch(orderUrl(orderId, "/ack"), { method: "POST" }, (u, i) =>
+        fetchCompatibleClient(u, i),
+      );
       await res.body?.cancel().catch(() => undefined);
       if (res.ok || res.status === 404) return true;
     } catch {

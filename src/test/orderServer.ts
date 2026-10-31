@@ -21,7 +21,12 @@ export interface FakeOrder {
   links: number;
   /** What the order answers with once it is ready (the legacy `{result, media}` response). */
   response: unknown;
-  failure?: { code: string; message: string; retryable?: boolean; detail?: Record<string, unknown> };
+  failure?: {
+    code: string;
+    message: string;
+    retryable?: boolean;
+    detail?: Record<string, unknown>;
+  };
 }
 
 export interface ServerBehaviour {
@@ -50,12 +55,22 @@ export class FakeOrderServer {
     orders: true,
     pollsUntilDone: 1,
     outcome: "ready",
-    failure: { code: "generation_failed", message: "The generation did not complete. Nothing was charged to you." },
-    response: () => ({ result: { ok: true, count: 1 }, media: [{ b64: "aGVsbG8=", ext: ".png", kind: "image" }] }),
+    failure: {
+      code: "generation_failed",
+      message: "The generation did not complete. Nothing was charged to you.",
+    },
+    response: () => ({
+      result: { ok: true, count: 1 },
+      media: [{ b64: "aGVsbG8=", ext: ".png", kind: "image" }],
+    }),
   };
   /** The next requests whose path matches get this instead of a real answer. `lose-answer`: the server handles the request (an
    *  order is made, a result is collected) but the answer never reaches the app. */
-  private faults: { match: RegExp; left: number; kind: "drop" | "lose-answer" | "hang" | "hang-after" | "cut-body" | number }[] = [];
+  private faults: {
+    match: RegExp;
+    left: number;
+    kind: "drop" | "lose-answer" | "hang" | "hang-after" | "cut-body" | number;
+  }[] = [];
   /** True: the link in an order's FIRST answer has already run out (every later one works), as a link that waited too long does. */
   expireLinksOnce = false;
   /** True: only the link in the LATEST answer about an order works, as if every earlier one had run out. */
@@ -67,7 +82,11 @@ export class FakeOrderServer {
    *  handles the request (an order is made, a result is collected) but the answer never reaches the app. `hang`: the request never
    *  gets anywhere and never answers. `hang-after`: the server handles it, and the answer never comes. `cut-body`: the answer starts
    *  (200) and the connection dies before it ends. */
-  fault(match: RegExp, times: number, kind: "drop" | "lose-answer" | "hang" | "hang-after" | "cut-body" | number): void {
+  fault(
+    match: RegExp,
+    times: number,
+    kind: "drop" | "lose-answer" | "hang" | "hang-after" | "cut-body" | number,
+  ): void {
     this.faults.push({ match, left: times, kind });
   }
 
@@ -105,15 +124,23 @@ export class FakeOrderServer {
   }
 
   private json(data: unknown, status = 200): Response {
-    return new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } });
+    return new Response(JSON.stringify(data), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
   /** `fetch`, as the app calls it. */
   fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-    const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    const url = new URL(
+      typeof input === "string" ? input : input instanceof URL ? input.href : input.url,
+    );
     const method = (init?.method ?? "GET").toUpperCase();
     const base = new URL(apiBase());
-    const path = url.origin === base.origin ? url.pathname.slice(base.pathname.replace(/\/$/, "").length) : url.href;
+    const path =
+      url.origin === base.origin
+        ? url.pathname.slice(base.pathname.replace(/\/$/, "").length)
+        : url.href;
     const line = `${method} ${path}`;
     this.calls.push(line);
     const fault = this.faults.find((f) => f.left > 0 && f.match.test(line));
@@ -138,10 +165,16 @@ export class FakeOrderServer {
     return this.handle(method, path, url, init);
   };
 
-  private async handle(method: string, path: string, url: URL, init?: RequestInit): Promise<Response> {
+  private async handle(
+    method: string,
+    path: string,
+    url: URL,
+    init?: RequestInit,
+  ): Promise<Response> {
     const bodyText = typeof init?.body === "string" ? init.body : "{}";
 
-    if (method === "POST" && /^\/ai\/[^/]+$/.test(path)) return this.submit(path.slice(4), JSON.parse(bodyText));
+    if (method === "POST" && /^\/ai\/[^/]+$/.test(path))
+      return this.submit(path.slice(4), JSON.parse(bodyText));
     const found = /^\/orders\/([^/]+)(\/ack)?$/.exec(path);
     if (found) {
       const order = this.orders.get(decodeURIComponent(found[1]));
@@ -155,11 +188,14 @@ export class FakeOrderServer {
 
   private submit(proxy: string, body: Record<string, unknown>): Response {
     const id = body.order_id;
-    if (!this.behaviour.orders || typeof id !== "string") return this.json(this.behaviour.response(proxy, body));
+    if (!this.behaviour.orders || typeof id !== "string")
+      return this.json(this.behaviour.response(proxy, body));
     const existing = this.orders.get(id);
     if (existing) {
       const same = JSON.stringify(existing.body.args) === JSON.stringify(body.args);
-      return same ? this.json({ order: this.view(existing) }) : this.json({ detail: { error: "order_id_reused" } }, 409);
+      return same
+        ? this.json({ order: this.view(existing) })
+        : this.json({ detail: { error: "order_id_reused" } }, 409);
     }
     const order: FakeOrder = {
       id,
@@ -196,14 +232,22 @@ export class FakeOrderServer {
     const id = /\/results\/([^/.]+)\.json$/.exec(url.pathname)?.[1];
     const order = id ? this.orders.get(id) : undefined;
     this.onDownload?.(order);
-    if (this.expireLinksOnce && url.searchParams.get("sig") === "1") return new Response("expired", { status: 403 });
+    if (this.expireLinksOnce && url.searchParams.get("sig") === "1")
+      return new Response("expired", { status: 403 });
     if (!order || order.state !== "ready") return new Response("gone", { status: 404 });
-    if (this.strictLinks && url.searchParams.get("sig") !== String(order.links)) return new Response("expired", { status: 403 });
+    if (this.strictLinks && url.searchParams.get("sig") !== String(order.links))
+      return new Response("expired", { status: 403 });
     return this.json(order.response);
   }
 
   /** Make an order exist already, as if the app had submitted it before it was closed. */
-  seed(id: string, proxy: string, state: FakeOrder["state"], response?: unknown, args: unknown = {}): FakeOrder {
+  seed(
+    id: string,
+    proxy: string,
+    state: FakeOrder["state"],
+    response?: unknown,
+    args: unknown = {},
+  ): FakeOrder {
     const order: FakeOrder = {
       id,
       proxy,

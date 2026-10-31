@@ -8,7 +8,8 @@ async function codeOf(res: Response): Promise<string> {
   try {
     const body = (await res.clone().json()) as { detail?: unknown; error?: unknown } | null;
     const detail = body?.detail;
-    const typed = detail && typeof detail === "object" ? (detail as { error?: unknown }).error : undefined;
+    const typed =
+      detail && typeof detail === "object" ? (detail as { error?: unknown }).error : undefined;
     if (typeof typed === "string" && typed) return typed;
     if (typeof body?.error === "string" && body.error) return body.error;
   } catch {

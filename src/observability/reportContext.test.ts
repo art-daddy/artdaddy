@@ -18,7 +18,10 @@ vi.mock("../platform", async (io) => {
   return { ...actual, platform: { ...actual.platform, name: "tauri" } };
 });
 const usage = vi.hoisted(() => ({
-  current: { metered: true, used: 150.83, limit: 150, remaining: 0, over: true } as Record<string, unknown>,
+  current: { metered: true, used: 150.83, limit: 150, remaining: 0, over: true } as Record<
+    string,
+    unknown
+  >,
   fail: false,
 }));
 vi.mock("../api/usage", async (io) => ({
@@ -36,8 +39,19 @@ beforeEach(() => {
   clearRecentFailures();
   usage.fail = false;
   usage.current = { metered: true, used: 150.83, limit: 150, remaining: 0, over: true };
-  noteFailure({ where: "turn", code: "account_busy", requestId: "3f9c1a2b7d4e5f60", status: 429, at: 1793000000.5 });
-  noteFailure({ where: "turn", code: "content_policy", requestId: "a1b2c3d4e5f60718", at: 1793000090 });
+  noteFailure({
+    where: "turn",
+    code: "account_busy",
+    requestId: "3f9c1a2b7d4e5f60",
+    status: 429,
+    at: 1793000000.5,
+  });
+  noteFailure({
+    where: "turn",
+    code: "content_policy",
+    requestId: "a1b2c3d4e5f60718",
+    at: 1793000090,
+  });
 });
 
 describe("buildReportContext", () => {
@@ -47,15 +61,42 @@ describe("buildReportContext", () => {
 
   it("carries only the fields it declares (no free text can ride along)", () => {
     const context = buildReportContext({ model: "m" }) as unknown as Record<string, unknown>;
-    expect(Object.keys(context).sort()).toEqual(["app_version", "arch", "credit", "failures", "model", "os", "shell", "surface"]);
-    expect(Object.keys(context.credit as object).sort()).toEqual(["limit", "metered", "over", "paused", "remaining", "used"]);
+    expect(Object.keys(context).sort()).toEqual([
+      "app_version",
+      "arch",
+      "credit",
+      "failures",
+      "model",
+      "os",
+      "shell",
+      "surface",
+    ]);
+    expect(Object.keys(context.credit as object).sort()).toEqual([
+      "limit",
+      "metered",
+      "over",
+      "paused",
+      "remaining",
+      "used",
+    ]);
     for (const failure of context.failures as object[]) {
-      expect(Object.keys(failure).every((key) => ["at", "where", "code", "request_id", "status"].includes(key))).toBe(true);
+      expect(
+        Object.keys(failure).every((key) =>
+          ["at", "where", "code", "request_id", "status"].includes(key),
+        ),
+      ).toBe(true);
     }
   });
 
   it("says the credit wall is a global pause when it is one", () => {
-    usage.current = { metered: true, used: 5, limit: 100, remaining: 95, over: true, globalPaused: true };
+    usage.current = {
+      metered: true,
+      used: 5,
+      limit: 100,
+      remaining: 95,
+      over: true,
+      globalPaused: true,
+    };
     expect(buildReportContext({ model: "m" }).credit).toMatchObject({ over: true, paused: true });
   });
 

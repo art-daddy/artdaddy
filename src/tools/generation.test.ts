@@ -131,7 +131,10 @@ beforeEach(() => {
     // the TOOL has already succeeded by returning a placeholder, so a provider error surfaces
     // later as a job failure, not as this call's result.
     try {
-      await spec.run({ orderId: "0123456789abcdef0123456789abcdef", orderAccepted: () => undefined });
+      await spec.run({
+        orderId: "0123456789abcdef0123456789abcdef",
+        orderAccepted: () => undefined,
+      });
     } catch (e) {
       jobError = e instanceof Error ? e.message : String(e);
     }
