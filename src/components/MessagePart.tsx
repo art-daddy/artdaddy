@@ -32,6 +32,16 @@ export default function MessagePart({ part }: { part: TranscriptPart }) {
     // the raw payload behind its chevron. Reaching here means a caller bypassed that.
     return null;
   }
+  if (kind === "notice") {
+    // Something the app did on the person's behalf, said once (UJ-046). Not an error: nothing failed, and the answer follows.
+    const text = String(part.text ?? "");
+    if (!text) return null;
+    return (
+      <div className="rounded-md border border-neutral-800 bg-neutral-900/60 px-3 py-1.5 text-[11px] text-neutral-400">
+        {text}
+      </div>
+    );
+  }
   if (kind === "error") {
     return (
       <div className="rounded bg-red-500/10 px-3 py-2 text-xs text-red-300">

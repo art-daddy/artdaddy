@@ -7,6 +7,7 @@ import { composeModelText, TIMELINE_CHANGED_NOTE } from "../agent/compose";
 import { sameTimeline, TimelineAwareness, type DocReading } from "../agent/timelineAwareness";
 import { collectInferenceAttachments } from "../agent/attachments";
 import { historyAttachments } from "../agent/historyFrames";
+import { markRefusedFrames, refusedFramesOf, refusedNotice } from "../agent/refusedFrames";
 import type { InferenceAttachment, RoundInput, ToolResultItem, Usage } from "../agent/types";
 import { captureError, setCorrelation } from "../observability/sentry";
 import { isExpected, toUserMessage } from "../lib/errors";
@@ -384,6 +385,21 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
           turns: withLast(s.turns, (t) => ({ ...t, status: "awaiting" })),
         }));
         break;
+      // The provider refused pictures the app re-sends and the server found which (UJ-046). They are marked wherever the
+      // conversation holds them, so no later round sends them, and the person is told once, on the running turn. Persisted with
+      // the conversation: the mark must hold after a restart, or the same refusal comes back.
+      case "frames_refused": {
+        let count = 0;
+        set((s) => {
+          const out = markRefusedFrames(s.turns, refusedFramesOf(data?.frames));
+          count = out.marked;
+          if (!count) return s;
+          const notice = { kind: "notice", code: "frames_refused", text: refusedNotice(count) };
+          return { turns: withLast(out.turns, (t) => ({ ...t, parts: [...t.parts, notice] })) };
+        });
+        if (count) persistCurrentSession();
+        break;
+      }
       case "turn_paused":
         set({
           session: data as SessionState,

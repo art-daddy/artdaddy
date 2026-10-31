@@ -46,6 +46,7 @@ const startDesktopSignIn = vi.hoisted(() => vi.fn());
 vi.mock("../api/desktopAuth", () => ({ startDesktopSignIn }));
 
 import { uploadFiles, importViaDialog, importPaths, filesFromItems } from "../lib/upload";
+import { refusedNotice } from "../agent/refusedFrames";
 import { DISCORD_URL } from "../lib/community";
 import { toUserMessage } from "../lib/errors";
 import { peekFirstPrompt, setFirstPrompt, takeFirstPrompt } from "../store/firstPrompt";
@@ -380,6 +381,46 @@ describe("ChatView", () => {
     render(<ChatView />);
     expect(screen.getByText("hi")).toBeInTheDocument();
     expect(screen.getByText("reply")).toBeInTheDocument();
+  });
+
+  it("shows what was left out of the conversation before the answer, and does not treat the turn as failed", () => {
+    state.turns = [
+      {
+        id: "t1",
+        userText: "hi",
+        attachments: [],
+        parts: [
+          { kind: "notice", code: "frames_refused", text: refusedNotice(1) },
+          { kind: "text", text: "reply" },
+        ],
+        status: "done",
+      },
+    ];
+    render(<ChatView />);
+    const note = screen.getByText(refusedNotice(1));
+    expect(
+      note.compareDocumentPosition(screen.getByText("reply")) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(screen.queryByText("Report this problem")).toBeNull();
+  });
+
+  it("shows the notice and still offers the report on a turn that failed", () => {
+    state.turns = [
+      {
+        id: "t1",
+        userText: "hi",
+        attachments: [],
+        parts: [
+          { kind: "notice", code: "frames_refused", text: refusedNotice(1) },
+          { kind: "error", error: "Our own sentence." },
+        ],
+        status: "error",
+      },
+    ];
+    render(<ChatView />);
+    expect(screen.getByText(refusedNotice(1))).toBeInTheDocument();
+    expect(screen.getByText(/Our own sentence\./)).toBeInTheDocument();
+    expect(screen.getByText("Report this problem")).toBeInTheDocument();
   });
 
   it("asks in plain English and wires the buttons to the store", () => {

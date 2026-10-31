@@ -482,3 +482,89 @@ describe("historyAttachments", () => {
     expect(atts.map((a) => a.index)).toEqual(Array.from({ length: fit }, (_, i) => 20 - fit + i));
   }, 30_000);
 });
+
+// UJ-046: the provider refused a picture and the server named it; the app wrote `refused: true` on its entry. It must never ride a round again.
+describe("a frame the provider refused", () => {
+  const marked = (callId: string, n: number, refusedAt: number[], mark: unknown = true) => ({
+    kind: "tool_result",
+    call_id: callId,
+    name: "inspect_media",
+    model_result: { ok: true },
+    frame_refs: Array.from({ length: n }, (_, i) => ({
+      path: `f/${callId}_${i}.jpg`,
+      caption: `@${i}s`,
+      ...(refusedAt.includes(i) ? { refused: mark } : {}),
+    })),
+  });
+
+  it("is not listed, and the frames after it keep the place the server knows them by", () => {
+    const refs = historyFrameRefs([turn("t1", [marked("a", 4, [1])])]);
+    expect(refs.map((r) => [r.call_id, r.index, r.path])).toEqual([
+      ["a", 0, "f/a_0.jpg"],
+      ["a", 2, "f/a_2.jpg"],
+      ["a", 3, "f/a_3.jpg"],
+    ]);
+  });
+
+  it("counts only a mark that is exactly true: anything else is still a picture to send", () => {
+    for (const mark of [false, "true", "yes", 1, null, {}]) {
+      const refs = historyFrameRefs([turn("t1", [marked("a", 2, [0], mark)])]);
+      expect(
+        refs.map((r) => r.index),
+        `refused: ${JSON.stringify(mark)}`,
+      ).toEqual([0, 1]);
+    }
+  });
+
+  it("takes no place among the newest frames: older ones are not pushed out by it", () => {
+    const turns = [
+      turn("t0", [result("old", 1)]),
+      turn("t1", [marked("a", HISTORY_FRAMES_MAX, [])]),
+      turn("t2", [marked("b", 6, [0, 1, 2, 3, 4, 5])]),
+    ];
+    const kept = keptFrames(historyFrameRefs(turns));
+    // 41 pictures that can be sent: one batch goes, exactly as if the six refused ones had never been shown
+    expect(kept).toEqual(keptFrames(historyFrameRefs([turns[0], turns[1]])));
+    expect(kept.some((r) => r.call_id === "b")).toBe(false);
+  });
+
+  it("is never read from disk, and its bytes are never sent; the others are, with their own place", async () => {
+    const fs = new MemFs();
+    const DIR = "C:/proj";
+    for (let i = 0; i < 3; i++) fs.bytes.set(joinPath(DIR, `f/a_${i}.jpg`), JPEG);
+    const atts = await historyAttachments(
+      [turn("t1", [marked("a", 3, [1])])],
+      new ProjectStoreAccess(DIR, fs),
+    );
+    expect(atts.map((a) => [a.call_id, a.index])).toEqual([
+      ["a", 0],
+      ["a", 2],
+    ]);
+    expect(fs.reads).not.toContain(joinPath(DIR, "f/a_1.jpg"));
+    expect(fs.reads).toHaveLength(2);
+  });
+
+  it("holds over any pattern: exactly the unmarked frames are read and sent, newest last, each at its own place", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(fc.boolean(), { minLength: 1, maxLength: HISTORY_FRAMES_MAX }),
+        async (flags) => {
+          const fs = new MemFs();
+          const DIR = "C:/proj";
+          flags.forEach((_, i) => fs.bytes.set(joinPath(DIR, `f/a_${i}.jpg`), JPEG));
+          const refusedAt = flags.flatMap((f, i) => (f ? [i] : []));
+          const atts = await historyAttachments(
+            [turn("t1", [marked("a", flags.length, refusedAt)])],
+            new ProjectStoreAccess(DIR, fs),
+          );
+          const expected = flags.flatMap((f, i) => (f ? [] : [i]));
+          expect(atts.map((a) => a.index)).toEqual(expected);
+          expect(fs.reads.sort()).toEqual(
+            expected.map((i) => joinPath(DIR, `f/a_${i}.jpg`)).sort(),
+          );
+        },
+      ),
+      { numRuns: 100 },
+    );
+  });
+});

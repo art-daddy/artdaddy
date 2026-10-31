@@ -1,6 +1,7 @@
 import { render, screen, fireEvent } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
+import { refusedNotice } from "../agent/refusedFrames";
 import MessagePart from "./MessagePart";
 
 describe("MessagePart", () => {
@@ -40,6 +41,27 @@ describe("MessagePart", () => {
   it("renders an error part", () => {
     render(<MessagePart part={{ kind: "error", error: "kaboom" }} />);
     expect(screen.getByText(/kaboom/)).toBeInTheDocument();
+  });
+
+  it("renders a notice as a quiet note, never as an error", () => {
+    const text = refusedNotice(2);
+    const { container } = render(
+      <MessagePart part={{ kind: "notice", code: "frames_refused", text }} />,
+    );
+    expect(screen.getByText(text)).toBeInTheDocument();
+    // nothing failed and the person did nothing wrong: no red box, no warning sign
+    expect(container.innerHTML).not.toMatch(/red-|⚠/);
+  });
+
+  it("renders nothing for a notice that says nothing", () => {
+    const { container } = render(
+      <MessagePart part={{ kind: "notice", code: "frames_refused", text: "" }} />,
+    );
+    expect(container.firstChild).toBeNull();
+    const { container: bare } = render(
+      <MessagePart part={{ kind: "notice", code: "frames_refused" }} />,
+    );
+    expect(bare.firstChild).toBeNull();
   });
 
   it("renders nothing for an unknown kind", () => {

@@ -17,6 +17,7 @@ import type {
 import { capToolResult } from "./truncate";
 import { scrubAbsolutePaths } from "./scrubPaths";
 import { MAX_CONCURRENT_READS, toolEffect } from "./toolEffect";
+import { refusedFramesOf } from "./refusedFrames";
 import {
   createToolTrace,
   flushAgentEvents,
@@ -221,6 +222,10 @@ export class ClientTurnRunner {
 
   private async handle(rr: RoundResultDTO): Promise<void> {
     this.d.onUsage(rr.usage ?? {});
+    // Pictures the provider refused go to the store FIRST, whatever the round became: they are marked in the transcript before
+    // the round's own events land, so the next round, even a retry of this one, no longer carries them.
+    const refused = refusedFramesOf(rr.refused_frames);
+    if (refused.length) this.d.emit("frames_refused", { frames: refused });
     if (rr.kind === "error") {
       // The typed code and the failed call's id travel with the sentence when the round has them, so the store can
       // report the turn by the failure's name. A round without them emits exactly what it always did.

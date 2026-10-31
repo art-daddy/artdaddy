@@ -1,0 +1,35 @@
+{
+  "_about": "What the server says when a search found pictures the AI provider refused, and what the app writes in its transcript so they are never sent again (UJ-046). The app's tests and the server's own (tests/integration/test_frame_isolation_contract.py) are both held to this file, so neither side can drift from the other without a test failing. Values are examples; the SHAPE (keys and types) is the contract.",
+  "round_result": {
+    "kind": "text",
+    "final_text": "Here is the cut.",
+    "refused_frames": [
+      { "call_id": "call_9", "index": 2 },
+      { "call_id": "call_11", "index": 0 }
+    ]
+  },
+  "transcript_before": {
+    "kind": "tool_result",
+    "call_id": "call_9",
+    "name": "inspect_media",
+    "model_result": { "ok": true },
+    "frame_refs": [
+      { "path": "internals/cache/inspect/a.jpg" },
+      { "path": "internals/cache/inspect/b.jpg", "caption": "t=2s" },
+      { "path": "internals/cache/inspect/c.jpg" }
+    ]
+  },
+  "transcript_after": {
+    "kind": "tool_result",
+    "call_id": "call_9",
+    "name": "inspect_media",
+    "model_result": { "ok": true },
+    "frame_refs": [
+      { "path": "internals/cache/inspect/a.jpg" },
+      { "path": "internals/cache/inspect/b.jpg", "caption": "t=2s" },
+      { "path": "internals/cache/inspect/c.jpg", "refused": true }
+    ]
+  },
+  "note_words": "refused by the AI provider",
+  "request": { "marks_refused_frames": true }
+}
