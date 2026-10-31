@@ -31,7 +31,7 @@ export interface FrameRef {
   caption?: string;
 }
 
-/** Every frame the applied (not undone) history showed the model, oldest first. */
+/** Every frame the applied (not undone) history showed the model, oldest first, except the ones the provider refused. */
 export function historyFrameRefs(turns: Turn[]): FrameRef[] {
   const out: FrameRef[] = [];
   for (const t of turns) {
@@ -45,6 +45,9 @@ export function historyFrameRefs(turns: Turn[]): FrameRef[] {
       refs.forEach((r, index) => {
         const path = (r as { path?: unknown })?.path;
         if (typeof path !== "string" || !path) return;
+        // The provider refused this picture (UJ-046, markRefusedFrames): it is never sent again. Its place is
+        // kept, so the server still knows the others by the same index.
+        if ((r as { refused?: unknown }).refused === true) return;
         const caption = (r as { caption?: unknown }).caption;
         out.push(
           typeof caption === "string" && caption

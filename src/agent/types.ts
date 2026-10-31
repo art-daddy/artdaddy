@@ -38,6 +38,9 @@ export interface RoundResultDTO {
   reasoning_items?: Array<{ id: string; encrypted_content: string }>;
   /** Echoed only when the server actually rebuilt the input from the transcript. */
   history_mode?: "client";
+  /** Pictures the provider refused and the server found: the tool call that showed each and its place in that call's
+   *  frames. Present on any kind of round, only when something was found (UJ-046). Treat as outside data: see refusedFramesOf. */
+  refused_frames?: Array<{ call_id: string; index: number }>;
 }
 
 export interface ToolResultItem {

@@ -2,7 +2,12 @@
 // thin proxy. Plain request/response, plus an opt-in SSE variant of the same round.
 import { authedFetch, notifyAuthFailure } from "../api/auth";
 import { api } from "../api/client";
-import { fetchRetryingBusy, fetchWithRetry, RateLimitError, SessionExpiredError } from "../api/http";
+import {
+  fetchRetryingBusy,
+  fetchWithRetry,
+  RateLimitError,
+  SessionExpiredError,
+} from "../api/http";
 import { readSSE } from "../api/sse";
 import { CreditLimitError, markOverLimit } from "../api/usage";
 import { hostInfo } from "../platform/host";
@@ -90,6 +95,10 @@ function withClientInfo(body: InferBody): InferBody & Record<string, unknown> {
     client_arch: arch,
     app_version: __ARTDADDY_RELEASE__,
     surface: "app",
+    // A statement about the app, never a choice of one round: this app writes `refused: true` on a picture the server names in
+    // `refused_frames` and never sends it again, so the server may search for a refused picture (UJ-046). An app that does not
+    // say it is not searched for: it would re-send the picture every round and pay for the search again each time.
+    marks_refused_frames: true,
   };
 }
 
