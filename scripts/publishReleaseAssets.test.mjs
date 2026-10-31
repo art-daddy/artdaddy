@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,7 +7,14 @@ import { fileURLToPath } from "node:url";
 import fc from "fast-check";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { assetProblems, parseArgs, publicProblems, publish, verifyPublished } from "./publishReleaseAssets.mjs";
+import {
+  assetProblems,
+  parseArgs,
+  publicProblems,
+  publish,
+  removeScratch,
+  verifyPublished,
+} from "./publishReleaseAssets.mjs";
 
 const REPO = "owner/app";
 const TAG = "v0.22.0";
@@ -451,5 +458,21 @@ describe("the verdict helpers", () => {
   it("accepts a public answer that is 200 with the listed size and nothing else", () => {
     expect(publicProblems({ name: "a.bin", size: 4 }, { status: 200, length: 4 })).toEqual([]);
     for (const status of [301, 403, 404, 500]) expect(publicProblems({ name: "a.bin", size: 4 }, { status, length: 4 })).toHaveLength(1);
+  });
+});
+
+describe("clearing the scratch folder of a downloaded asset", () => {
+  it("removes a folder with a file in it", () => {
+    const scratch = mkdtempSync(join(tmpdir(), "scratch-test-"));
+    writeFileSync(join(scratch, "a.bin"), "x");
+    expect(removeScratch(scratch)).toBe(true);
+    expect(existsSync(scratch)).toBe(false);
+  });
+  it("never turns a folder Windows will not release into a failure of the publish", () => {
+    const heldByTheScanner = () => {
+      throw Object.assign(new Error("ENOTEMPTY: directory not empty, rmdir"), { code: "ENOTEMPTY" });
+    };
+    expect(() => removeScratch("C:/tmp/held", heldByTheScanner)).not.toThrow();
+    expect(removeScratch("C:/tmp/held", heldByTheScanner)).toBe(false);
   });
 });

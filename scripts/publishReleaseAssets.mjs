@@ -98,6 +98,19 @@ async function findRelease(gh, repo, tag) {
   return null;
 }
 
+/**
+ * Remove a scratch folder. Windows can still hold a just-written file for a moment (ENOTEMPTY, EBUSY), and a
+ * leftover temp folder must never fail a publish whose hash is already known. True when the folder is gone.
+ */
+export function removeScratch(dir, rm = rmSync) {
+  try {
+    rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** The bytes GitHub serves for an asset, hashed, for the assets it has no digest for. */
 async function downloadedHash({ gh, repo, tag, name, hashOf }) {
   const dir = mkdtempSync(join(tmpdir(), "release-asset-"));
@@ -105,7 +118,7 @@ async function downloadedHash({ gh, repo, tag, name, hashOf }) {
     gh(["release", "download", tag, "--repo", repo, "--pattern", name, "--dir", dir, "--clobber"]);
     return await hashOf(join(dir, name));
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeScratch(dir);
   }
 }
 
