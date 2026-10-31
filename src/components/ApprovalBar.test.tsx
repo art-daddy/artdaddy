@@ -61,10 +61,32 @@ describe("the price beside the buttons", () => {
     const [inputs, signal] = quoteHold.mock.calls[0];
     expect(inputs).toEqual({
       proxy: "generate_video",
-      args: { backend_id: "veo-3.1-generate-001", duration: 8 },
+      args: { backend_id: "veo-3.1-generate-001", duration: 8, generate_audio: true },
     });
     expect(JSON.stringify(inputs)).not.toMatch(/private|secret/);
     expect(signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("asks about the setting the person chose, not the model's default", async () => {
+    render(
+      bar(
+        pending("generate_video", {
+          ...VIDEO,
+          resolution: "1080p",
+          generate_audio: false,
+        }),
+      ),
+    );
+    await screen.findByText(/Up to 96/);
+    expect(quoteHold.mock.calls[0][0]).toEqual({
+      proxy: "generate_video",
+      args: {
+        backend_id: "veo-3.1-generate-001",
+        duration: 8,
+        resolution: "1080p",
+        generate_audio: false,
+      },
+    });
   });
 
   it("shows only the price to an account with no limit", async () => {
