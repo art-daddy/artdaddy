@@ -1,7 +1,7 @@
 {
   "args": {
-    "generate_image": ["backend_id", "count"],
-    "generate_video": ["backend_id", "duration"],
+    "generate_image": ["backend_id", "count", "resolution"],
+    "generate_video": ["backend_id", "duration", "resolution", "generate_audio"],
     "voiceover": ["model", "text"],
     "music": ["backend_id"]
   },

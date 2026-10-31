@@ -6,12 +6,14 @@ import { RateLimitError } from "../api/http";
 import type { ClientToolContext } from "./context";
 import {
   audioModelsInfo,
+  callResolution,
   DEFAULTS,
   IMAGE_IDS,
   IMAGE_MODELS,
   imageCount,
   modelInfo,
   resolveGenModel,
+  videoAudio,
   videoReferences,
   videoSeconds,
   VIDEO_IDS,
@@ -114,21 +116,19 @@ async function generateImage(
       error: `${m.id} supports at most ${m.max_reference_images ?? 0} reference image(s) per ArtDaddy request; got ${refRefs.length}. Choose another model from list_models or use fewer reference_images.`,
     };
   let quality = args.quality != null ? String(args.quality) : undefined;
-  let resolution = args.resolution != null ? String(args.resolution) : undefined;
   const aspect = String(args.aspect_ratio ?? "9:16");
   if (quality && !m.qualities?.length) quality = undefined;
   else if (quality && !m.qualities?.includes(quality))
     return { ok: false, error: `${m.id} quality must be one of ${JSON.stringify(m.qualities)}` };
-  if (resolution && !m.resolutions?.length) resolution = undefined;
-  else if (resolution && !m.resolutions?.includes(resolution))
+  // Defaults to the model's first resolution when it HAS a resolution lever and none was given, so the server always sets
+  // Gemini's ImageConfig and the requested aspect_ratio is enforced at the API level, not merely as a prompt hint (R11-1).
+  // The approval bar's quote reads the same function (holdInputs.ts), so the price shown is about the call sent.
+  const resolution = callResolution(m, args.resolution, true);
+  if (resolution === null)
     return {
       ok: false,
       error: `${m.id} resolution must be one of ${JSON.stringify(m.resolutions)}`,
     };
-  // parity with established NLEs: default the resolution to the model's first when it HAS a resolution
-  // lever and none was given, so the server always sets Gemini's ImageConfig and the
-  // requested aspect_ratio is enforced at the API level, not merely as a prompt hint (R11-1).
-  if (!resolution && m.resolutions?.length) resolution = m.resolutions[0];
   if (aspect && !m.aspect_ratios.includes(aspect))
     return {
       ok: false,
@@ -241,9 +241,9 @@ async function generateVideo(
       ok: false,
       error: "reference_images is a separate mode; don't combine it with start_frame/end_frame",
     };
-  let resolution = args.resolution != null ? String(args.resolution) : undefined;
-  if (resolution && !m.resolutions?.length) resolution = undefined;
-  else if (resolution && !m.resolutions?.includes(resolution))
+  // A video sends no resolution unless asked (the provider's default is the model's first, which is how the server prices it).
+  const resolution = callResolution(m, args.resolution, false);
+  if (resolution === null)
     return {
       ok: false,
       error: `${m.id} resolution must be one of ${JSON.stringify(m.resolutions)}`,
@@ -270,7 +270,7 @@ async function generateVideo(
     prompt,
     aspect_ratio: aspect,
     duration: dur,
-    generate_audio: args.generate_audio !== false,
+    generate_audio: videoAudio(args.generate_audio),
   };
   if (resolution) provArgs.resolution = resolution;
   if (args.seed != null) provArgs.seed = args.seed;

@@ -159,6 +159,27 @@ function rows(): Row[] {
         ...(count === undefined ? {} : { count }),
       });
     }
+    // The resolution is what moves a Gemini image's price: asked for, left out (the tool then defaults it) or dropped (a
+    // model without the lever ignores it), and one the model does not offer is refused.
+    for (const resolution of [undefined, null, "", "1K", "2K", "4K"]) {
+      const offered = !resolution || !m.resolutions?.length || m.resolutions.includes(resolution);
+      add(
+        `image ${m.id} resolution=${JSON.stringify(resolution)}`,
+        "generate_image",
+        {
+          prompt: "a red car",
+          model: m.id,
+          ...(resolution === undefined ? {} : { resolution }),
+        },
+        offered,
+      );
+    }
+    add(
+      `image ${m.id} resolution="8K" (not offered)`,
+      "generate_image",
+      { prompt: "a red car", model: m.id, resolution: "8K" },
+      !m.resolutions?.length, // a model with no lever drops it; one with a lever refuses it
+    );
   }
   add("video: the default model, nothing else", "generate_video", { prompt: "a van" });
   for (const m of VIDEO_MODELS) {
@@ -169,6 +190,29 @@ function rows(): Row[] {
         ...(duration === undefined ? {} : { duration }),
       });
     }
+    // Resolution and sound are what move a video's price once its length is set (720p and 1080p, with and without audio).
+    for (const resolution of [undefined, null, "", ...(m.resolutions ?? [])]) {
+      for (const generate_audio of [undefined, null, true, false]) {
+        add(
+          `video ${m.id} resolution=${JSON.stringify(resolution)} generate_audio=${JSON.stringify(generate_audio)}`,
+          "generate_video",
+          {
+            prompt: "a van",
+            model: m.id,
+            duration: 4,
+            ...(resolution === undefined ? {} : { resolution }),
+            ...(generate_audio === undefined ? {} : { generate_audio }),
+          },
+        );
+      }
+    }
+    // A resolution the model does not offer is refused by the tool, so nothing is sent and nothing is quoted.
+    add(
+      `video ${m.id} resolution="4K" (not offered)`,
+      "generate_video",
+      { prompt: "a van", model: m.id, resolution: "4K" },
+      false,
+    );
     for (const duration of [4, 6, 8]) {
       add(
         `video ${m.id} in reference mode, duration=${duration}`,
@@ -277,6 +321,8 @@ describe("the quote follows what the registry does to the arguments before a too
       expect(holdInputs("generate_video", args)?.args).toEqual({
         backend_id: sent?.args.backend_id,
         duration: sent?.args.duration,
+        resolution: sent?.args.resolution,
+        generate_audio: sent?.args.generate_audio,
       });
     }
   });

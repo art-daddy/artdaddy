@@ -428,6 +428,27 @@ export function videoSeconds(requested: unknown, withReferences: boolean): numbe
   return withReferences ? 8 : asked;
 }
 
+/** The resolution a call sends for a model, from what was asked: a string to send, `undefined` to send none (the model has no
+ *  resolution lever, or none was asked and the provider's own default applies), or `null` when the model does not offer the
+ *  resolution asked for, which the tool refuses. An image defaults to the model's first resolution (R11-1); a video sends
+ *  none unless told, and the server prices that as the model's first. */
+export function callResolution(
+  m: GenModel,
+  requested: unknown,
+  defaultToFirst: boolean,
+): string | undefined | null {
+  const asked = requested != null ? String(requested) : undefined;
+  if (asked && !m.resolutions?.length) return undefined;
+  if (asked && !m.resolutions?.includes(asked)) return null;
+  if (!asked && defaultToFirst && m.resolutions?.length) return m.resolutions[0];
+  return asked || undefined;
+}
+
+/** Whether a video call asks for sound: yes, unless it says no. Sound is a dearer rate, so the price follows it. */
+export function videoAudio(requested: unknown): boolean {
+  return requested !== false;
+}
+
 export const DEFAULT_TTS_BACKEND =
   AUDIO_BY_ID[DEFAULTS.tts]?.backend_id ?? "gemini-3.1-flash-tts-preview";
 

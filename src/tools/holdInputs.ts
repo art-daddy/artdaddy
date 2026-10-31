@@ -1,6 +1,7 @@
 // What a generation will HOLD is decided on the server from a few of the arguments of the paid call (model, how many
-// images, how many seconds, how long a script is). The approval bar shows "Up to N credits" beforehand by asking the
-// server to price those same arguments (POST /ai/{name}/quote, api/quote.ts).
+// images, the resolution of an image or a video, how many seconds and whether there is sound, how long a script is). The
+// approval bar shows "Up to N credits" beforehand by asking the server to price those same arguments (POST /ai/{name}/quote,
+// api/quote.ts). A video's hold is exactly its price; an image's is an estimate above it.
 //
 // The quote is only honest if it is about the SAME call, so every input here comes from the code the tools themselves use
 // (genModels.ts) after the same two normalisations the registry applies before a handler runs. tools/holdInputs.test.ts
@@ -12,11 +13,13 @@
 // a name, and a script only as a placeholder of the same length (the price depends on its length alone).
 import { clampArgs, dropStrictNulls } from "../contract/clamp";
 import {
+  callResolution,
   DEFAULTS,
   imageCount,
   resolveGenModel,
   resolveMusicModel,
   resolveTtsBackend,
+  videoAudio,
   videoReferences,
   videoSeconds,
   voiceoverContents,
@@ -27,8 +30,8 @@ import {
  *  (ARTDADDY_MAX_TTS_CHARS), past which the price no longer changes. */
 export const QUOTE_CONTRACT = {
   args: {
-    generate_image: ["backend_id", "count"],
-    generate_video: ["backend_id", "duration"],
+    generate_image: ["backend_id", "count", "resolution"],
+    generate_video: ["backend_id", "duration", "resolution", "generate_audio"],
     voiceover: ["model", "text"],
     music: ["backend_id"],
   },
@@ -68,21 +71,33 @@ export function holdInputs(tool: string, raw: Record<string, unknown>): HoldInpu
     switch (tool) {
       case "generate_image": {
         const m = resolveGenModel(String(args.model ?? ""), "image", DEFAULTS.image);
-        return m
-          ? {
-              proxy: "generate_image",
-              args: { backend_id: m.backend_id, count: imageCount(m, args.count) },
-            }
-          : null;
+        if (!m) return null;
+        const resolution = callResolution(m, args.resolution, true);
+        // The tool refuses a resolution the model does not offer, so nothing would be sent and there is no price to show.
+        if (resolution === null) return null;
+        return {
+          proxy: "generate_image",
+          args: { backend_id: m.backend_id, count: imageCount(m, args.count), resolution },
+        };
       }
       case "generate_video": {
         const m = resolveGenModel(String(args.model ?? ""), "video", DEFAULTS.video);
         if (!m) return null;
+        const resolution = callResolution(m, args.resolution, false);
+        if (resolution === null) return null;
         const seconds = videoSeconds(
           args.duration,
           videoReferences(args.reference_images).length > 0,
         );
-        return { proxy: "generate_video", args: { backend_id: m.backend_id, duration: seconds } };
+        return {
+          proxy: "generate_video",
+          args: {
+            backend_id: m.backend_id,
+            duration: seconds,
+            resolution,
+            generate_audio: videoAudio(args.generate_audio),
+          },
+        };
       }
       case "generate_voiceover": {
         const text = String(args.text ?? "").trim();
