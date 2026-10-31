@@ -403,7 +403,11 @@ export function audioModelsInfo(category?: string): Record<string, unknown>[] {
 // these functions, so the price shown cannot drift from the call that is sent.
 
 /** The model a generation call names (the default when it names none), or null when that is not a model of this kind. */
-export function resolveGenModel(id: string, kind: "image" | "video", dflt: string): GenModel | null {
+export function resolveGenModel(
+  id: string,
+  kind: "image" | "video",
+  dflt: string,
+): GenModel | null {
   const m = GEN_BY_ID[(id || dflt).trim()];
   return m && m.kind === kind ? m : null;
 }

@@ -7,10 +7,26 @@ import { fetchRetryingBusy, rateLimitConfig } from "./http";
 
 const ORIGINAL = { ...rateLimitConfig };
 
-function busy(error: "account_busy" | "server_busy", retryAfter?: string, retryAfterS?: number): Response {
+function busy(
+  error: "account_busy" | "server_busy",
+  retryAfter?: string,
+  retryAfterS?: number,
+): Response {
   return new Response(
-    JSON.stringify({ detail: { error, reason: "line_full", ...(retryAfterS === undefined ? {} : { retry_after_s: retryAfterS }) } }),
-    { status: 429, headers: { "Content-Type": "application/json", ...(retryAfter === undefined ? {} : { "Retry-After": retryAfter }) } },
+    JSON.stringify({
+      detail: {
+        error,
+        reason: "line_full",
+        ...(retryAfterS === undefined ? {} : { retry_after_s: retryAfterS }),
+      },
+    }),
+    {
+      status: 429,
+      headers: {
+        "Content-Type": "application/json",
+        ...(retryAfter === undefined ? {} : { "Retry-After": retryAfter }),
+      },
+    },
   );
 }
 
@@ -40,17 +56,20 @@ afterEach(() => {
 });
 
 describe("a typed busy answer", () => {
-  it.each(["account_busy", "server_busy"] as const)("%s is waited out and the request goes again", async (error) => {
-    const { fn, at } = script(busy(error, "2"), ok());
-    const pending = fetchRetryingBusy("https://api.example/inference/stream", { method: "POST" });
-    await vi.advanceTimersByTimeAsync(1_999);
-    expect(fn).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(2);
-    const res = await pending;
-    expect(res.status).toBe(200);
-    expect(fn).toHaveBeenCalledTimes(2);
-    expect(at[1] - at[0]).toBe(2_000);
-  });
+  it.each(["account_busy", "server_busy"] as const)(
+    "%s is waited out and the request goes again",
+    async (error) => {
+      const { fn, at } = script(busy(error, "2"), ok());
+      const pending = fetchRetryingBusy("https://api.example/inference/stream", { method: "POST" });
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(fn).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(2);
+      const res = await pending;
+      expect(res.status).toBe(200);
+      expect(fn).toHaveBeenCalledTimes(2);
+      expect(at[1] - at[0]).toBe(2_000);
+    },
+  );
 
   it("honours the delay in the body when the header cannot be read", async () => {
     const { fn } = script(busy("account_busy", undefined, 7), ok());
@@ -117,12 +136,30 @@ describe("a typed busy answer", () => {
 
 describe("what is NOT waited out", () => {
   it.each([
-    ["a 429 that is not the server's busy answer", () => new Response(JSON.stringify({ detail: "rate limited" }), { status: 429 })],
+    [
+      "a 429 that is not the server's busy answer",
+      () => new Response(JSON.stringify({ detail: "rate limited" }), { status: 429 }),
+    ],
     ["a 429 with no body", () => new Response("", { status: 429 })],
-    ["a 429 naming some other error", () => new Response(JSON.stringify({ detail: { error: "rate_limited" } }), { status: 429 })],
-    ["the credit wall", () => new Response(JSON.stringify({ detail: { error: "credit_limit_reached" } }), { status: 402 })],
+    [
+      "a 429 naming some other error",
+      () => new Response(JSON.stringify({ detail: { error: "rate_limited" } }), { status: 429 }),
+    ],
+    [
+      "the credit wall",
+      () =>
+        new Response(JSON.stringify({ detail: { error: "credit_limit_reached" } }), {
+          status: 402,
+        }),
+    ],
     ["a server error", () => new Response("boom", { status: 503 })],
-    ["a refusal of this build", () => new Response(JSON.stringify({ detail: { error: "client_update_required" } }), { status: 426 })],
+    [
+      "a refusal of this build",
+      () =>
+        new Response(JSON.stringify({ detail: { error: "client_update_required" } }), {
+          status: 426,
+        }),
+    ],
     ["an expired session", () => new Response("nope", { status: 401 })],
   ])("%s is handed back at once", async (_name, make) => {
     const { fn } = script(make(), ok());
@@ -134,7 +171,10 @@ describe("what is NOT waited out", () => {
 
   it("a busy answer on a call that then works costs the caller nothing but the wait", async () => {
     const { fn } = script(busy("account_busy", "1"), busy("server_busy", "1"), ok());
-    const pending = fetchRetryingBusy("https://api.example/inference/stream", { method: "POST", body: "{}" });
+    const pending = fetchRetryingBusy("https://api.example/inference/stream", {
+      method: "POST",
+      body: "{}",
+    });
     await vi.advanceTimersByTimeAsync(5_000);
     const res = await pending;
     expect(res.status).toBe(200);

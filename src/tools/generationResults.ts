@@ -75,13 +75,17 @@ export class GeneratedResultError extends Error {
 
 export function decodeImages(dto: AiProxyResult<unknown>, model?: string): GeneratedOutput[] {
   const media = dto.media ?? [];
-  if (!media.length) throw new GeneratedResultError(`image generation returned no images${forModel(model)}`);
+  if (!media.length)
+    throw new GeneratedResultError(`image generation returned no images${forModel(model)}`);
   return media.map((gm) => ({ bytes: fromB64(gm.b64), ext: gm.ext }));
 }
 
 export function decodeVideo(dto: AiProxyResult<unknown>, model?: string): GeneratedOutput[] {
   const media = dto.media ?? [];
-  if (!media.length) throw new GeneratedResultError(`video generation returned no downloadable file${forModel(model)}`);
+  if (!media.length)
+    throw new GeneratedResultError(
+      `video generation returned no downloadable file${forModel(model)}`,
+    );
   return [{ bytes: fromB64(media[0].b64), ext: media[0].ext }];
 }
 
@@ -89,7 +93,8 @@ export function decodeVoiceover(
   dto: AiProxyResult<{ ok?: boolean; error?: string; pcm_b64?: string; mime?: string }>,
 ): GeneratedOutput[] {
   const r = dto.result ?? {};
-  if (r.ok === false || !r.pcm_b64) throw new GeneratedResultError(String(r.error ?? "voiceover synthesis failed"));
+  if (r.ok === false || !r.pcm_b64)
+    throw new GeneratedResultError(String(r.error ?? "voiceover synthesis failed"));
   const pcm = fromB64(r.pcm_b64);
   const [rate, channels] = parsePcmMime(String(r.mime ?? ""));
   return [
@@ -119,16 +124,25 @@ export interface MusicDecodeEnv {
 }
 
 export async function decodeMusic(
-  dto: AiProxyResult<{ ok?: boolean; error?: string; audio_b64?: string; format?: string; lyrics?: string }>,
+  dto: AiProxyResult<{
+    ok?: boolean;
+    error?: string;
+    audio_b64?: string;
+    format?: string;
+    lyrics?: string;
+  }>,
   env: MusicDecodeEnv,
 ): Promise<GeneratedOutput[]> {
   const r = dto.result ?? {};
-  if (r.ok === false || !r.audio_b64) throw new GeneratedResultError(String(r.error ?? "music generation failed"));
+  if (r.ok === false || !r.audio_b64)
+    throw new GeneratedResultError(String(r.error ?? "music generation failed"));
   const { store, runner } = env;
   const audioBytes = fromB64(r.audio_b64);
   const format = String(r.format ?? "wav");
 
-  const srcPath = await store.prepareArtifact(`generated/music_src_${env.sourceKey}.${format === "mp3" ? "mp3" : "wav"}`);
+  const srcPath = await store.prepareArtifact(
+    `generated/music_src_${env.sourceKey}.${format === "mp3" ? "mp3" : "wav"}`,
+  );
   await store.writeBytes(srcPath, audioBytes);
   const outPath = await store.prepareArtifact(`generated/music_${env.outputKey}.wav`);
   let wavPath = outPath;
@@ -181,12 +195,20 @@ export async function decodeMusic(
 }
 
 /** The scratch-file names the music tool has always used, from the composed prompt and the model. */
-export function musicScratchKeys(composed: string, backend: string): { sourceKey: string; outputKey: string } {
+export function musicScratchKeys(
+  composed: string,
+  backend: string,
+): { sourceKey: string; outputKey: string } {
   return { sourceKey: shortHash(composed), outputKey: shortHash(`${composed}|${backend}`) };
 }
 
 /** Which tools make something to collect, and how their answer becomes media. A tool that is not here cannot be reconciled. */
-export const RESULT_TOOLS = ["generate_image", "generate_video", "generate_voiceover", "generate_music"] as const;
+export const RESULT_TOOLS = [
+  "generate_image",
+  "generate_video",
+  "generate_voiceover",
+  "generate_music",
+] as const;
 export type ResultTool = (typeof RESULT_TOOLS)[number];
 
 export function isResultTool(tool: string): tool is ResultTool {

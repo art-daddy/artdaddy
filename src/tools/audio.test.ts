@@ -149,7 +149,10 @@ beforeEach(() => {
   submit.mockReset().mockImplementation(async (spec: Any) => {
     jobOutputs = [];
     try {
-      jobOutputs = (await spec.run({ orderId: "0123456789abcdef0123456789abcdef", orderAccepted: () => undefined })) as Any[];
+      jobOutputs = (await spec.run({
+        orderId: "0123456789abcdef0123456789abcdef",
+        orderAccepted: () => undefined,
+      })) as Any[];
     } catch (e) {
       jobError = e instanceof Error ? e.message : String(e);
     }

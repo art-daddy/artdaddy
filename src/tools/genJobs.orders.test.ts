@@ -5,7 +5,10 @@ vi.mock("../observability/sentry", () => ({
   identifyUser: async () => undefined,
 }));
 // The beacon for "left running" is checked, not sent: a real one would be one more call to the fake server.
-vi.mock("../api/appEvents", async (importOriginal) => ({ ...(await importOriginal<object>()), reportAppError: vi.fn() }));
+vi.mock("../api/appEvents", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  reportAppError: vi.fn(),
+}));
 
 import { setClerkTokenProvider } from "../api/auth";
 import { callAiProxy, toB64 } from "../api/ai";
@@ -13,7 +16,14 @@ import { reportAppError } from "../api/appEvents";
 import { apiBase } from "../api/config";
 import { setSessionUserReader } from "../api/exportOwner";
 import { rateLimitConfig } from "../api/http";
-import { __resetOrderPolling, orderPolling, OrderCollectedError, OrderExpiredError, OrderFailedError, OrderNotFoundError } from "../api/orders";
+import {
+  __resetOrderPolling,
+  orderPolling,
+  OrderCollectedError,
+  OrderExpiredError,
+  OrderFailedError,
+  OrderNotFoundError,
+} from "../api/orders";
 import { clearUsage } from "../api/usage";
 import { setPreviewAudioRunner } from "../preview/conformAudio";
 import { APP_SESSION, JobLedgerUnreadableError, JobRecordError } from "../project/jobLedger";
@@ -87,15 +97,22 @@ class Fs implements FsLike {
 }
 
 const PNG = new Uint8Array([
-  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0,
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52, 0, 0, 0, 1,
+  0, 0, 0, 1, 8, 6, 0, 0, 0,
 ]);
 const VIDEO = new Uint8Array([9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 1, 2]);
 const PCM = new Uint8Array(48_000); // one second of 24 kHz mono 16-bit silence
 const MUSIC = new Uint8Array([82, 73, 70, 70, 1, 2, 3, 4, 5, 6]);
 
 const ANSWERS: Record<string, unknown> = {
-  generate_image: { result: { ok: true, count: 1 }, media: [{ b64: toB64(PNG), ext: ".png", kind: "image" }] },
-  generate_video: { result: { ok: true, count: 1 }, media: [{ b64: toB64(VIDEO), ext: ".mp4", kind: "video" }] },
+  generate_image: {
+    result: { ok: true, count: 1 },
+    media: [{ b64: toB64(PNG), ext: ".png", kind: "image" }],
+  },
+  generate_video: {
+    result: { ok: true, count: 1 },
+    media: [{ b64: toB64(VIDEO), ext: ".mp4", kind: "video" }],
+  },
   voiceover: { result: { ok: true, pcm_b64: toB64(PCM), mime: "audio/l16; rate=24000" } },
   music: { result: { ok: true, audio_b64: toB64(MUSIC), format: "wav", lyrics: "la la" } },
 };
@@ -106,8 +123,10 @@ let server: FakeOrderServer;
 let sleeps: number[];
 const realTransientBackoff = rateLimitConfig.transientBackoffS;
 
-const clips = async (): Promise<Any[]> => JSON.parse(await fs.readTextFile(joinPath(DIR, "internals/library.json"))).clips;
-const jobs = async (): Promise<Any[]> => JSON.parse(await fs.readTextFile(joinPath(DIR, "internals/jobs.json"))).jobs;
+const clips = async (): Promise<Any[]> =>
+  JSON.parse(await fs.readTextFile(joinPath(DIR, "internals/library.json"))).clips;
+const jobs = async (): Promise<Any[]> =>
+  JSON.parse(await fs.readTextFile(joinPath(DIR, "internals/jobs.json"))).jobs;
 
 beforeEach(() => {
   clearUsage();
@@ -141,9 +160,12 @@ afterEach(async () => {
 
 /** What a generation tool does with the context it is given. */
 const imageRun = (ctx: GenerationRunContext) =>
-  callAiProxy("generate_image", { args: { prompt: "a van" }, media: {}, order_id: ctx.orderId }, undefined, { onOrder: ctx.orderAccepted }).then(
-    (dto) => decodeImages(dto),
-  );
+  callAiProxy(
+    "generate_image",
+    { args: { prompt: "a van" }, media: {}, order_id: ctx.orderId },
+    undefined,
+    { onOrder: ctx.orderAccepted },
+  ).then((dto) => decodeImages(dto));
 
 const submitImage = (extra: Partial<Parameters<typeof submitGeneration>[0]> = {}) =>
   submitGeneration({
@@ -202,10 +224,18 @@ describe("a generation sent as an order", () => {
 
   it("fails the job with the server's own words when the order failed, and confirms nothing", async () => {
     server.behaviour.outcome = "failed";
-    server.behaviour.failure = { code: "provider_refused", message: "Azure refused it.", retryable: false };
+    server.behaviour.failure = {
+      code: "provider_refused",
+      message: "Azure refused it.",
+      retryable: false,
+    };
     const { media_refs } = await submitImage();
     await whenGenerationsSettle();
-    expect((await clips())[0]).toMatchObject({ id: media_refs[0], status: "failed", error: "Azure refused it." });
+    expect((await clips())[0]).toMatchObject({
+      id: media_refs[0],
+      status: "failed",
+      error: "Azure refused it.",
+    });
     expect((await jobs())[0]).toMatchObject({ status: "failed", error: "Azure refused it." });
     expect(server.calls.some((c) => c.includes("/ack"))).toBe(false);
     expect(pendingJobNotes(DIR).map((n) => n.status)).toEqual(["failed"]);
@@ -223,7 +253,10 @@ describe("a generation sent as an order", () => {
     const huge = new Uint8Array(PNG); // a PNG header declaring 60000 x 60000: more than any decoder will take
     huge.set([0, 0, 0xea, 0x60], 16);
     huge.set([0, 0, 0xea, 0x60], 20);
-    server.behaviour.response = () => ({ result: { ok: true, count: 1 }, media: [{ b64: toB64(huge), ext: ".png" }] });
+    server.behaviour.response = () => ({
+      result: { ok: true, count: 1 },
+      media: [{ b64: toB64(huge), ext: ".png" }],
+    });
     await submitImage();
     await whenGenerationsSettle();
     expect((await jobs())[0]).toMatchObject({ status: "failed" });
@@ -353,11 +386,21 @@ describe("how long a generation may take", () => {
 /** A generation the previous launch started and the app closed on: its placeholders and its ledger row. */
 async function closedMidGeneration(
   tool: string,
-  opts: { kind?: string; count?: number; startedBy?: "chat" | "elsewhere" | null; filename?: string } = {},
+  opts: {
+    kind?: string;
+    count?: number;
+    startedBy?: "chat" | "elsewhere" | null;
+    filename?: string;
+  } = {},
 ): Promise<string[]> {
   const kind = opts.kind ?? "image";
   const ids = Array.from({ length: opts.count ?? 1 }, (_, i) => `media_gen_old${i}`);
-  for (const id of ids) await registerPendingClip(store, { id, filename: opts.filename ?? `old.${kind === "image" ? "png" : "mp4"}`, kind });
+  for (const id of ids)
+    await registerPendingClip(store, {
+      id,
+      filename: opts.filename ?? `old.${kind === "image" ? "png" : "mp4"}`,
+      kind,
+    });
   await fs.writeTextFile(
     joinPath(DIR, "internals/jobs.json"),
     JSON.stringify({
@@ -438,7 +481,20 @@ describe("a placeholder nothing is making any more", () => {
       joinPath(DIR, "internals/jobs.json"),
       JSON.stringify({
         version: 1,
-        jobs: [{ id: "job-late", kind: "generation", tool: "generate_image", label: "an image", status: "failed", ...(error ? { error } : {}), media_refs: [id], started_at: 1, ended_at: 2, session: APP_SESSION }],
+        jobs: [
+          {
+            id: "job-late",
+            kind: "generation",
+            tool: "generate_image",
+            label: "an image",
+            status: "failed",
+            ...(error ? { error } : {}),
+            media_refs: [id],
+            started_at: 1,
+            ended_at: 2,
+            session: APP_SESSION,
+          },
+        ],
       }),
     );
   }
@@ -501,10 +557,37 @@ describe("a placeholder nothing is making any more", () => {
         version: 1,
         folders: [],
         clips: [
-          { id: "imported", filename: "i.mp4", path: "library/i.mp4", kind: "video", added_by: "import" },
-          { id: "ready_gen", filename: "g.png", path: "library/g.png", kind: "image", added_by: "generation" },
-          { id: "other_failed", filename: "f.png", path: "library/f.png", kind: "image", added_by: "generation", status: "failed", error: "earlier" },
-          { id: "imported_pending", filename: "p.mp4", path: "library/p.mp4", kind: "video", status: "generating", added_by: "import" },
+          {
+            id: "imported",
+            filename: "i.mp4",
+            path: "library/i.mp4",
+            kind: "video",
+            added_by: "import",
+          },
+          {
+            id: "ready_gen",
+            filename: "g.png",
+            path: "library/g.png",
+            kind: "image",
+            added_by: "generation",
+          },
+          {
+            id: "other_failed",
+            filename: "f.png",
+            path: "library/f.png",
+            kind: "image",
+            added_by: "generation",
+            status: "failed",
+            error: "earlier",
+          },
+          {
+            id: "imported_pending",
+            filename: "p.mp4",
+            path: "library/p.mp4",
+            kind: "video",
+            status: "generating",
+            added_by: "import",
+          },
         ],
       }),
     );
@@ -523,7 +606,18 @@ describe("a placeholder nothing is making any more", () => {
       jobsFile,
       JSON.stringify({
         version: 1,
-        jobs: [{ id: "job-live", kind: "generation", tool: "generate_image", label: "an image", status: "running", media_refs: ["media_gen_maybe"], started_at: 1, session: "another-launch" }],
+        jobs: [
+          {
+            id: "job-live",
+            kind: "generation",
+            tool: "generate_image",
+            label: "an image",
+            status: "running",
+            media_refs: ["media_gen_maybe"],
+            started_at: 1,
+            session: "another-launch",
+          },
+        ],
       }),
     );
     const realRead = fs.readTextFile.bind(fs);
@@ -533,7 +627,10 @@ describe("a placeholder nothing is making any more", () => {
     };
     await openProjectJobs(store);
     // What the unreadable file says about this clip is unknown: it may well be a generation that is still running.
-    expect(await pendingMediaState(store, "media_gen_maybe"), "a placeholder was failed on the strength of a record nobody could read").toBe("generating");
+    expect(
+      await pendingMediaState(store, "media_gen_maybe"),
+      "a placeholder was failed on the strength of a record nobody could read",
+    ).toBe("generating");
     const refusal = await reconcileGenerations(store).catch((e: unknown) => e);
     expect(refusal).toBeInstanceOf(JobLedgerUnreadableError);
     expect((refusal as JobLedgerUnreadableError).reason).toContain("EACCES: the file is locked");
@@ -546,7 +643,19 @@ describe("a placeholder nothing is making any more", () => {
       joinPath(DIR, "internals/jobs.json"),
       JSON.stringify({
         version: 1,
-        jobs: [{ id: "job-done", kind: "generation", tool: "generate_image", label: "an image", status: "done", media_refs: ["media_gen_gone"], started_at: 1, ended_at: 2, session: APP_SESSION }],
+        jobs: [
+          {
+            id: "job-done",
+            kind: "generation",
+            tool: "generate_image",
+            label: "an image",
+            status: "done",
+            media_refs: ["media_gen_gone"],
+            started_at: 1,
+            ended_at: 2,
+            session: APP_SESSION,
+          },
+        ],
       }),
     );
     await openProjectJobs(store);
@@ -557,9 +666,14 @@ describe("a placeholder nothing is making any more", () => {
   });
 
   it("does every placeholder of the project in one go", async () => {
-    for (const id of ["media_gen_a", "media_gen_b", "media_gen_c"]) await registerPendingClip(store, { id, filename: `${id}.png`, kind: "image" });
+    for (const id of ["media_gen_a", "media_gen_b", "media_gen_c"])
+      await registerPendingClip(store, { id, filename: `${id}.png`, kind: "image" });
     await openProjectJobs(store);
-    expect(await Promise.all(["media_gen_a", "media_gen_b", "media_gen_c"].map((id) => pendingMediaState(store, id)))).toEqual(["failed", "failed", "failed"]);
+    expect(
+      await Promise.all(
+        ["media_gen_a", "media_gen_b", "media_gen_c"].map((id) => pendingMediaState(store, id)),
+      ),
+    ).toEqual(["failed", "failed", "failed"]);
   });
 });
 
@@ -570,37 +684,46 @@ describe("a generation still being waited for", () => {
     ["the server has no such order", (id) => new OrderNotFoundError(id)],
     ["the result expired uncollected", () => new OrderExpiredError()],
     ["the result was already taken", () => new OrderCollectedError()],
-    ["the order failed", () => new OrderFailedError("Azure refused it.", "provider_refused", false)],
+    [
+      "the order failed",
+      () => new OrderFailedError("Azure refused it.", "provider_refused", false),
+    ],
   ];
 
-  it.each(verdicts)("is ended, with the placeholders failed and the server's own words, when %s", async (_label, make) => {
-    const { media_refs } = await submitImage({
-      run: async (ctx) => {
-        ctx.orderAccepted();
-        throw make(ctx.orderId);
-      },
-    });
-    await whenGenerationsSettle();
-    const row = (await jobs())[0];
-    expect(row.status).toBe("failed");
-    expect(row.error).toBe(make(row.order_id).message);
-    expect(await pendingMediaState(store, media_refs[0])).toBe("failed");
-  });
+  it.each(verdicts)(
+    "is ended, with the placeholders failed and the server's own words, when %s",
+    async (_label, make) => {
+      const { media_refs } = await submitImage({
+        run: async (ctx) => {
+          ctx.orderAccepted();
+          throw make(ctx.orderId);
+        },
+      });
+      await whenGenerationsSettle();
+      const row = (await jobs())[0];
+      expect(row.status).toBe("failed");
+      expect(row.error).toBe(make(row.order_id).message);
+      expect(await pendingMediaState(store, media_refs[0])).toBe("failed");
+    },
+  );
 
   it.each([
     ["the connection drops", () => new TypeError("Failed to fetch")],
     ["something this build cannot make sense of", () => new Error("500: boom")],
-  ])("is left running, not failed, when %s: that is not the server's verdict", async (_label, make) => {
-    const { media_refs } = await submitImage({
-      run: async (ctx) => {
-        ctx.orderAccepted();
-        throw make();
-      },
-    });
-    await whenGenerationsSettle();
-    expect((await jobs())[0]).toMatchObject({ status: "running" });
-    expect(await pendingMediaState(store, media_refs[0])).toBe("generating");
-  });
+  ])(
+    "is left running, not failed, when %s: that is not the server's verdict",
+    async (_label, make) => {
+      const { media_refs } = await submitImage({
+        run: async (ctx) => {
+          ctx.orderAccepted();
+          throw make();
+        },
+      });
+      await whenGenerationsSettle();
+      expect((await jobs())[0]).toMatchObject({ status: "running" });
+      expect(await pendingMediaState(store, media_refs[0])).toBe("generating");
+    },
+  );
 });
 
 // ── whose generation it is ────────────────────────────────────────────────────────────────────────────────────────────
@@ -636,16 +759,25 @@ describe("whose generation it is", () => {
 
   it.each([
     ["another account", { owner: A }, () => setSessionUserReader(() => B)],
-    ["another server", { api: "https://some-other-server.example" }, () => setSessionUserReader(() => A)],
-  ])("is not written off on a 'no such order' asked as %s: that is no verdict about the order, which is left for its owner", async (_label, stamp, signIn) => {
-    const ids = await stampedClosedOn(stamp);
-    signIn();
-    await openProjectJobs(store); // the server has no such order for whoever is asking
-    await whenGenerationsSettle();
-    expect((await jobs())[0]).toMatchObject({ status: "running" });
-    expect(await pendingMediaState(store, ids[0])).toBe("generating");
-    expect(vi.mocked(reportAppError)).toHaveBeenCalledWith(expect.stringMatching(/generation_left_running/));
-  });
+    [
+      "another server",
+      { api: "https://some-other-server.example" },
+      () => setSessionUserReader(() => A),
+    ],
+  ])(
+    "is not written off on a 'no such order' asked as %s: that is no verdict about the order, which is left for its owner",
+    async (_label, stamp, signIn) => {
+      const ids = await stampedClosedOn(stamp);
+      signIn();
+      await openProjectJobs(store); // the server has no such order for whoever is asking
+      await whenGenerationsSettle();
+      expect((await jobs())[0]).toMatchObject({ status: "running" });
+      expect(await pendingMediaState(store, ids[0])).toBe("generating");
+      expect(vi.mocked(reportAppError)).toHaveBeenCalledWith(
+        expect.stringMatching(/generation_left_running/),
+      );
+    },
+  );
 
   it("is still written off on a 'no such order' when the account and server are the ones it was sent as", async () => {
     const ids = await stampedClosedOn({ owner: A, api: apiBase() });
@@ -670,7 +802,9 @@ describe("whose generation it is", () => {
       setSessionUserReader(() => asking);
       await openProjectJobs(store);
       await whenGenerationsSettle();
-      expect((await jobs())[0], JSON.stringify({ stamp, asking })).toMatchObject({ status: "interrupted" });
+      expect((await jobs())[0], JSON.stringify({ stamp, asking })).toMatchObject({
+        status: "interrupted",
+      });
       expect(await pendingMediaState(store, ids[0])).toBe("failed");
     }
   });
@@ -714,10 +848,24 @@ describe("taking over several generations at once", () => {
       const order = `${ID.slice(0, -1)}${n}`;
       await registerPendingClip(store, { id, filename: `m${n}.png`, kind: "image" });
       ids.push(id);
-      jobsOnFile.push({ id: `job-many${n}`, kind: "generation", tool: "generate_image", label: "an image", status: "running", media_refs: [id], order_id: order, started_by: "elsewhere", started_at: n, session: PREVIOUS });
+      jobsOnFile.push({
+        id: `job-many${n}`,
+        kind: "generation",
+        tool: "generate_image",
+        label: "an image",
+        status: "running",
+        media_refs: [id],
+        order_id: order,
+        started_by: "elsewhere",
+        started_at: n,
+        session: PREVIOUS,
+      });
       server.seed(order, "generate_image", "ready", ANSWERS.generate_image);
     }
-    await fs.writeTextFile(joinPath(DIR, "internals/jobs.json"), JSON.stringify({ version: 1, jobs: jobsOnFile }));
+    await fs.writeTextFile(
+      joinPath(DIR, "internals/jobs.json"),
+      JSON.stringify({ version: 1, jobs: jobsOnFile }),
+    );
     let downloading = 0;
     let most = 0;
     const real = server.fetch;
@@ -788,7 +936,23 @@ describe("a generation whose record cannot be saved", () => {
   });
 
   it("is refused outright when the file that holds the other jobs cannot be read, and that file is left as it is", async () => {
-    await fs.writeTextFile(joinPath(DIR, "internals/jobs.json"), JSON.stringify({ version: 1, jobs: [{ id: "keep", kind: "generation", tool: "x", label: "x", status: "done", started_at: 1, session: PREVIOUS }] }));
+    await fs.writeTextFile(
+      joinPath(DIR, "internals/jobs.json"),
+      JSON.stringify({
+        version: 1,
+        jobs: [
+          {
+            id: "keep",
+            kind: "generation",
+            tool: "x",
+            label: "x",
+            status: "done",
+            started_at: 1,
+            session: PREVIOUS,
+          },
+        ],
+      }),
+    );
     const before = await fs.readTextFile(joinPath(DIR, "internals/jobs.json"));
     const realRead = fs.readTextFile.bind(fs);
     fs.readTextFile = async (p: string) => {
@@ -822,9 +986,16 @@ describe("coming back after the app was closed", () => {
 
     expect(await pendingMediaState(store, ids[0])).toBe("ready");
     expect(await fs.readBytes(joinPath(DIR, `library/${ids[0]}.png`))).toEqual(PNG);
-    expect((await jobs())[0]).toMatchObject({ id: "job-old", status: "done", media_refs: ids, order_id: ID });
+    expect((await jobs())[0]).toMatchObject({
+      id: "job-old",
+      status: "done",
+      media_refs: ids,
+      order_id: ID,
+    });
     expect(server.orders.get(ID)?.state).toBe("collected");
-    expect(pendingJobNotes(DIR).map((n) => [n.id, n.status, n.startedBy])).toEqual([["job-old", "done", "chat"]]);
+    expect(pendingJobNotes(DIR).map((n) => [n.id, n.status, n.startedBy])).toEqual([
+      ["job-old", "done", "chat"],
+    ]);
   });
 
   it("goes on waiting for one the server is still making, and collects it when it lands", async () => {
@@ -850,11 +1021,19 @@ describe("coming back after the app was closed", () => {
 
   it("tells the person, and fails the placeholders, when the server failed it", async () => {
     const ids = await closedMidGeneration("generate_image");
-    server.behaviour.failure = { code: "provider_refused", message: "Azure refused it.", retryable: false };
+    server.behaviour.failure = {
+      code: "provider_refused",
+      message: "Azure refused it.",
+      retryable: false,
+    };
     server.seed(ID, "generate_image", "failed");
     await openProjectJobs(store);
     await whenGenerationsSettle();
-    expect((await clips())[0]).toMatchObject({ id: ids[0], status: "failed", error: "Azure refused it." });
+    expect((await clips())[0]).toMatchObject({
+      id: ids[0],
+      status: "failed",
+      error: "Azure refused it.",
+    });
     expect((await jobs())[0]).toMatchObject({ status: "failed", error: "Azure refused it." });
     expect(pendingJobNotes(DIR).map((n) => n.status)).toEqual(["failed"]);
   });
@@ -938,7 +1117,11 @@ describe("coming back after the app was closed", () => {
 
   it("does not wake the conversation for a failure of something it did not start either", async () => {
     await closedMidGeneration("generate_image", { startedBy: "elsewhere" });
-    server.behaviour.failure = { code: "provider_refused", message: "Azure refused it.", retryable: false };
+    server.behaviour.failure = {
+      code: "provider_refused",
+      message: "Azure refused it.",
+      retryable: false,
+    };
     server.seed(ID, "generate_image", "failed");
     await openProjectJobs(store);
     await whenGenerationsSettle();
@@ -1020,7 +1203,21 @@ describe("coming back after the app was closed", () => {
     await registerPendingClip(store, { id: "media_gen_old0", filename: "old.png", kind: "image" });
     await fs.writeTextFile(
       joinPath(DIR, "internals/jobs.json"),
-      JSON.stringify({ version: 1, jobs: [{ id: "plain", kind: "generation", tool: "generate_image", label: "x", status: "running", media_refs: ["media_gen_old0"], started_at: 1, session: PREVIOUS }] }),
+      JSON.stringify({
+        version: 1,
+        jobs: [
+          {
+            id: "plain",
+            kind: "generation",
+            tool: "generate_image",
+            label: "x",
+            status: "running",
+            media_refs: ["media_gen_old0"],
+            started_at: 1,
+            session: PREVIOUS,
+          },
+        ],
+      }),
     );
     await openProjectJobs(store);
     await whenGenerationsSettle();
@@ -1034,20 +1231,30 @@ describe("coming back after the app was closed", () => {
     await Promise.all([openProjectJobs(store), openProjectJobs(store)]);
     await openProjectJobs(store);
     await whenGenerationsSettle();
-    expect(server.calls.filter((c) => c.startsWith("POST /orders") && c.endsWith("/ack"))).toHaveLength(1);
+    expect(
+      server.calls.filter((c) => c.startsWith("POST /orders") && c.endsWith("/ack")),
+    ).toHaveLength(1);
   });
 
   it("brings back every kind of generation the same way the tool would have made it", async () => {
     const cases: [string, string, string, (bytes: Uint8Array) => void][] = [
       ["generate_video", "video", "generate_video", (b) => expect(b).toEqual(VIDEO)],
-      ["generate_voiceover", "audio", "voiceover", (b) => expect(String.fromCharCode(...b.slice(0, 4))).toBe("RIFF")],
+      [
+        "generate_voiceover",
+        "audio",
+        "voiceover",
+        (b) => expect(String.fromCharCode(...b.slice(0, 4))).toBe("RIFF"),
+      ],
       ["generate_music", "audio", "music", (b) => expect(b).toEqual(MUSIC)],
     ];
     for (const [tool, kind, proxy, check] of cases) {
       __resetProjectJobs();
       fs = new Fs();
       store = new ProjectStoreAccess(DIR, fs);
-      const ids = await closedMidGeneration(tool, { kind, filename: kind === "audio" ? "x.wav" : "x.mp4" });
+      const ids = await closedMidGeneration(tool, {
+        kind,
+        filename: kind === "audio" ? "x.wav" : "x.mp4",
+      });
       server.orders.clear();
       server.seed(ID, proxy, "ready", ANSWERS[proxy]);
       await openProjectJobs(store);
@@ -1055,8 +1262,10 @@ describe("coming back after the app was closed", () => {
       expect(await pendingMediaState(store, ids[0])).toBe("ready");
       const row = (await clips())[0];
       check(await fs.readBytes(joinPath(DIR, String(row.path))));
-      if (tool === "generate_voiceover") expect(row.source).toMatchObject({ sample_rate: 24000, channels: 1, duration_s: 1 });
-      if (tool === "generate_music") expect(row.source).toMatchObject({ lyrics: "la la", sample_rate: 48000 });
+      if (tool === "generate_voiceover")
+        expect(row.source).toMatchObject({ sample_rate: 24000, channels: 1, duration_s: 1 });
+      if (tool === "generate_music")
+        expect(row.source).toMatchObject({ lyrics: "la la", sample_rate: 48000 });
       expect((await jobs())[0]).toMatchObject({ status: "done" });
     }
   });
@@ -1151,7 +1360,10 @@ describe("a result that is ready has been charged, so only the server's own verd
     // The next launch, with the trouble over.
     server.clearFaults();
     __resetProjectJobs();
-    await fs.writeTextFile(joinPath(DIR, "internals/jobs.json"), (await fs.readTextFile(joinPath(DIR, "internals/jobs.json"))).replace(APP_SESSION, PREVIOUS));
+    await fs.writeTextFile(
+      joinPath(DIR, "internals/jobs.json"),
+      (await fs.readTextFile(joinPath(DIR, "internals/jobs.json"))).replace(APP_SESSION, PREVIOUS),
+    );
     await openProjectJobs(store);
     await whenGenerationsSettle();
     expect(await pendingMediaState(store, media_refs[0])).toBe("ready");
@@ -1189,7 +1401,10 @@ describe("a result that is ready has been charged, so only the server's own verd
       },
     });
     await whenGenerationsSettle();
-    expect((await jobs())[0]).toMatchObject({ status: "failed", error: "400: that prompt is not allowed" });
+    expect((await jobs())[0]).toMatchObject({
+      status: "failed",
+      error: "400: that prompt is not allowed",
+    });
     expect(await pendingMediaState(store, media_refs[0])).toBe("failed");
   });
 
@@ -1197,7 +1412,9 @@ describe("a result that is ready has been charged, so only the server's own verd
     const ids = await closedMidGeneration("generate_image");
     server.seed(ID, "generate_image", "ready", ANSWERS.generate_image);
     // The first thing taking an order over does is read the state of its placeholders: make that fail, once.
-    const spy = vi.spyOn(importModule, "pendingMediaState").mockRejectedValueOnce(new Error("EIO: i/o error"));
+    const spy = vi
+      .spyOn(importModule, "pendingMediaState")
+      .mockRejectedValueOnce(new Error("EIO: i/o error"));
     try {
       await openProjectJobs(store);
       await whenGenerationsSettle();

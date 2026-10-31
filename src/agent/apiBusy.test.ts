@@ -12,13 +12,27 @@ import { inferRoundStreaming, type InferBody } from "./api";
 
 const body: InferBody = { round_input: { user_text: "hi" } };
 const ORIGINAL = { ...rateLimitConfig };
-const DTO = { kind: "text", final_text: "done", pending_calls: [], finish_reason: "stop", usage: {}, provider_snapshot: {} };
+const DTO = {
+  kind: "text",
+  final_text: "done",
+  pending_calls: [],
+  finish_reason: "stop",
+  usage: {},
+  provider_snapshot: {},
+};
 
 const busy = (error = "account_busy", retryAfter = "2") =>
-  new Response(JSON.stringify({ detail: { error, reason: "line_full", retry_after_s: Number(retryAfter) } }), {
-    status: 429,
-    headers: { "Content-Type": "application/json", "Retry-After": retryAfter, "x-request-id": "busy-call" },
-  });
+  new Response(
+    JSON.stringify({ detail: { error, reason: "line_full", retry_after_s: Number(retryAfter) } }),
+    {
+      status: 429,
+      headers: {
+        "Content-Type": "application/json",
+        "Retry-After": retryAfter,
+        "x-request-id": "busy-call",
+      },
+    },
+  );
 
 const served = () =>
   new Response(new TextEncoder().encode(`event: result\ndata: ${JSON.stringify(DTO)}\n\n`), {
@@ -52,15 +66,18 @@ afterEach(() => {
 });
 
 describe("a busy answer on the streaming chat route", () => {
-  it.each(["account_busy", "server_busy"])("%s is waited out and the round then completes", async (error) => {
-    const fn = script(busy(error, "2"), served());
-    const pending = inferRoundStreaming(body, () => undefined);
-    await vi.advanceTimersByTimeAsync(1_999);
-    expect(fn).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(2);
-    await expect(pending).resolves.toMatchObject({ kind: "text", final_text: "done" });
-    expect(fn).toHaveBeenCalledTimes(2);
-  });
+  it.each(["account_busy", "server_busy"])(
+    "%s is waited out and the round then completes",
+    async (error) => {
+      const fn = script(busy(error, "2"), served());
+      const pending = inferRoundStreaming(body, () => undefined);
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(fn).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(2);
+      await expect(pending).resolves.toMatchObject({ kind: "text", final_text: "done" });
+      expect(fn).toHaveBeenCalledTimes(2);
+    },
+  );
 
   it("repeats the identical request each time (nothing ran, so nothing can be doubled)", async () => {
     const fn = script(busy("account_busy", "1"), busy("server_busy", "1"), served());
@@ -89,7 +106,9 @@ describe("a busy answer on the streaming chat route", () => {
     expect(error).toBeInstanceOf(RateLimitError);
     expect(error.requestId).toBe("busy-call");
     expect(fn).toHaveBeenCalledTimes(rateLimitConfig.retries + 1);
-    expect(recentFailures()).toMatchObject([{ where: "turn", code: "account_busy", requestId: "busy-call", status: 429 }]);
+    expect(recentFailures()).toMatchObject([
+      { where: "turn", code: "account_busy", requestId: "busy-call", status: 429 },
+    ]);
   });
 
   it("ends the wait when the person presses Stop, and asks nothing more", async () => {
@@ -106,14 +125,22 @@ describe("a busy answer on the streaming chat route", () => {
 
 describe("what the streaming route still does at once", () => {
   it("throws the busy sentence for a 429 that is not the server's busy answer", async () => {
-    const fn = script(new Response(JSON.stringify({ detail: "rate limited" }), { status: 429 }), served());
+    const fn = script(
+      new Response(JSON.stringify({ detail: "rate limited" }), { status: 429 }),
+      served(),
+    );
     await expect(inferRoundStreaming(body, () => undefined)).rejects.toBeInstanceOf(RateLimitError);
     expect(fn).toHaveBeenCalledTimes(1);
   });
 
   it("throws the credit wall for a 402", async () => {
-    const fn = script(new Response(JSON.stringify({ detail: { error: "credit_limit_reached" } }), { status: 402 }), served());
-    await expect(inferRoundStreaming(body, () => undefined)).rejects.toBeInstanceOf(CreditLimitError);
+    const fn = script(
+      new Response(JSON.stringify({ detail: { error: "credit_limit_reached" } }), { status: 402 }),
+      served(),
+    );
+    await expect(inferRoundStreaming(body, () => undefined)).rejects.toBeInstanceOf(
+      CreditLimitError,
+    );
     expect(fn).toHaveBeenCalledTimes(1);
   });
 
@@ -125,7 +152,9 @@ describe("what the streaming route still does at once", () => {
 
   it("serves a round that was never busy exactly as before", async () => {
     const fn = script(served());
-    await expect(inferRoundStreaming(body, () => undefined)).resolves.toMatchObject({ final_text: "done" });
+    await expect(inferRoundStreaming(body, () => undefined)).resolves.toMatchObject({
+      final_text: "done",
+    });
     expect(fn).toHaveBeenCalledTimes(1);
   });
 });

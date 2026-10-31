@@ -28,7 +28,13 @@ import {
   waitForOrder,
 } from "../api/orders";
 import { notifyJobSettled } from "../store/jobNotes";
-import { decodeGenerated, GeneratedResultError, isResultTool, type GeneratedOutput, type ResultTool } from "./generationResults";
+import {
+  decodeGenerated,
+  GeneratedResultError,
+  isResultTool,
+  type GeneratedOutput,
+  type ResultTool,
+} from "./generationResults";
 import {
   failPendingClip,
   failUnownedPendingClips,
@@ -130,7 +136,8 @@ export function openProjectJobs(
       const ledger = await JobLedger.open(store);
       if (!opts.reconciled) await reconcilePendingMedia(store).catch(() => []);
       await failOrphanedPlaceholders(store, ledger).catch(() => []);
-      for (const rec of ledger.adopted()) track(resumeOrderJob(store, ledger, rec).finally(refreshUsage));
+      for (const rec of ledger.adopted())
+        track(resumeOrderJob(store, ledger, rec).finally(refreshUsage));
       return ledger;
     })();
     ledgers.set(key, existing);
@@ -145,13 +152,17 @@ const LANDED_NOWHERE = "the finished file could not be found in the project";
 /** Fail the placeholders no running job is making any more, with the reason the job's own record gives. A generation that failed
  *  while its project was closed could not say so in the catalog (the gate refuses a write from a session that ended), so its clip
  *  would otherwise spin for ever. Nothing is concluded when the ledger could not be read: what it does not list is then unknown. */
-async function failOrphanedPlaceholders(store: ProjectStoreAccess, ledger: JobLedger): Promise<string[]> {
+async function failOrphanedPlaceholders(
+  store: ProjectStoreAccess,
+  ledger: JobLedger,
+): Promise<string[]> {
   if (!ledger.readable) return [];
   const owned = new Set(ledger.running().flatMap((r) => r.media_refs ?? []));
   const said = new Map<string, string>();
   for (const r of ledger.list()) {
     if (r.status === "running") continue;
-    for (const id of r.media_refs ?? []) said.set(id, r.error ?? (r.status === "done" ? LANDED_NOWHERE : NO_RECORD));
+    for (const id of r.media_refs ?? [])
+      said.set(id, r.error ?? (r.status === "done" ? LANDED_NOWHERE : NO_RECORD));
   }
   return failUnownedPendingClips(
     store,
@@ -425,7 +436,10 @@ async function settleLater(
   if (overdue) {
     // A tool whose results cannot be brought back has no order to ask about: it is simply given up on, as it always was.
     if (!isResultTool(job.tool)) await failJob(job, overdue.message);
-    else await takeOverOrder(job, orderId, { notFound: { message: overdue.message, status: "failed" } });
+    else
+      await takeOverOrder(job, orderId, {
+        notFound: { message: overdue.message, status: "failed" },
+      });
     return;
   }
 
@@ -449,11 +463,16 @@ function endsTheJob(e: unknown): boolean {
 
 /** Fail a job: its placeholders still being made are failed (one that already landed is not undone by a job that failed for the
  *  rest), the ledger row is closed and the chat is told. */
-async function failJob(job: JobInfo, error: string, status: "failed" | "interrupted" = "failed"): Promise<void> {
+async function failJob(
+  job: JobInfo,
+  error: string,
+  status: "failed" | "interrupted" = "failed",
+): Promise<void> {
   const { store, ledger, jobId } = job;
   await Promise.allSettled(
     job.ids.map(async (id) => {
-      if ((await pendingMediaState(store, id)) === "generating") await failPendingClip(store, id, error);
+      if ((await pendingMediaState(store, id)) === "generating")
+        await failPendingClip(store, id, error);
     }),
   );
   await ledger.settle(jobId, { status, error });
@@ -478,7 +497,11 @@ function notSavedText(why: string): string {
 
 /** Write one output into its placeholder, trying again a couple of times: a file another program holds for a moment, or a disk
  *  that is briefly busy, should not cost a result that has been paid for. A project that closed is not retried. */
-async function finalizeWithRetries(store: ProjectStoreAccess, id: string, out: GeneratedOutput): Promise<void> {
+async function finalizeWithRetries(
+  store: ProjectStoreAccess,
+  id: string,
+  out: GeneratedOutput,
+): Promise<void> {
   for (let attempt = 0; ; attempt += 1) {
     try {
       await finalizePendingClip(store, id, out.bytes, { meta: out.meta });
@@ -582,7 +605,11 @@ const CLOSED_BEFORE_IT_FINISHED: NotFound = {
 };
 
 /** A generation the app was closed on: ask the server for it and finish what the closed app could not. */
-async function resumeOrderJob(store: ProjectStoreAccess, ledger: JobLedger, rec: JobRecord): Promise<void> {
+async function resumeOrderJob(
+  store: ProjectStoreAccess,
+  ledger: JobLedger,
+  rec: JobRecord,
+): Promise<void> {
   const job: JobInfo = {
     store,
     ledger,
@@ -604,7 +631,11 @@ async function resumeOrderJob(store: ProjectStoreAccess, ledger: JobLedger, rec:
 /** Take a generation over from whoever started it (an app that was closed, or a call that never answered in time): ask the server
  *  for the order and finish the job from its answer. It never gives up on the order itself (see waitForOrder); only the server's
  *  verdict, or a result that holds nothing usable, ends it. Any other trouble leaves the job running for the next run. */
-async function takeOverOrder(job: JobInfo, orderId: string, opts: { notFound: NotFound }): Promise<void> {
+async function takeOverOrder(
+  job: JobInfo,
+  orderId: string,
+  opts: { notFound: NotFound },
+): Promise<void> {
   const { store, ids } = job;
   try {
     const states = await Promise.all(ids.map((id) => pendingMediaState(store, id)));
@@ -621,7 +652,11 @@ async function takeOverOrder(job: JobInfo, orderId: string, opts: { notFound: No
     await acquireSlot();
     try {
       const dto = (await downloadOrderResult(ready)) as AiProxyResult<unknown>;
-      const outputs = await decodeGenerated(job.tool as ResultTool, dto, { store, runner: await ffmpegOrNull(), orderId });
+      const outputs = await decodeGenerated(job.tool as ResultTool, dto, {
+        store,
+        runner: await ffmpegOrNull(),
+        orderId,
+      });
       const landed = await landOutputs(job, outputs, alreadyLanded);
       if (landed.ok > 0 && landed.deferred === 0) await ackOrder(orderId);
     } finally {

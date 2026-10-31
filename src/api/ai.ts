@@ -225,7 +225,8 @@ async function sendAiProxy<R = Record<string, unknown>>(
   try {
     res = payload.length > BIG_UPLOAD_BYTES ? await bigUploads.run(send, signal) : await send();
   } catch (e) {
-    if (orderId && submitMayHaveArrived(e, signal)) return recoverLostSubmit<R>(orderId, e, signal, onOrder);
+    if (orderId && submitMayHaveArrived(e, signal))
+      return recoverLostSubmit<R>(orderId, e, signal, onOrder);
     throw e;
   }
   if (!res.ok) {
@@ -258,10 +259,14 @@ async function sendAiProxy<R = Record<string, unknown>>(
       );
     const failure = new Error(`${res.status}: ${text || res.statusText}`);
     // A server error may have come AFTER the server made the order: ask rather than assume it did not.
-    if (orderId && res.status >= 500) return recoverLostSubmit<R>(orderId, failure, signal, onOrder);
+    if (orderId && res.status >= 500)
+      return recoverLostSubmit<R>(orderId, failure, signal, onOrder);
     throw failure;
   }
-  const answer = res.status === 202 && orderId ? null : ((await res.json()) as AiProxyResult<R> | { order: unknown });
+  const answer =
+    res.status === 202 && orderId
+      ? null
+      : ((await res.json()) as AiProxyResult<R> | { order: unknown });
   // A 202 is the server saying it took the order: whatever the body is, the order exists and is waited for (a body that cannot be
   // read must not make a paid, running order look like a failed call).
   if (orderId && (res.status === 202 || isOrderAnswer(answer))) {
@@ -273,7 +278,9 @@ async function sendAiProxy<R = Record<string, unknown>>(
 
 /** An answer about an order, as opposed to the live call's `{result, ...}`. */
 function isOrderAnswer(answer: unknown): boolean {
-  return typeof answer === "object" && answer !== null && "order" in answer && !("result" in answer);
+  return (
+    typeof answer === "object" && answer !== null && "order" in answer && !("result" in answer)
+  );
 }
 
 /** Whether a failure to send may still have reached the server. Not when the request demonstrably never left. */
@@ -313,7 +320,8 @@ async function collectOrder<R>(
     ready = await waitForOrder(orderId, { signal });
   } catch (e) {
     // The tools already know how to explain a rate limit and a credit wall to the model and the person.
-    if (e instanceof OrderFailedError && e.code === "rate_limited") throw new RateLimitError(e.message);
+    if (e instanceof OrderFailedError && e.code === "rate_limited")
+      throw new RateLimitError(e.message);
     if (e instanceof OrderFailedError && e.code === "credit_limit_reached") throw creditWall(e);
     throw e;
   }

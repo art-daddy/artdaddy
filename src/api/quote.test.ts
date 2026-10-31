@@ -9,7 +9,10 @@ import { clearRecentFailures, recentFailures } from "../observability/recentFail
 import type { HoldInputs } from "../tools/holdInputs";
 import { quoteHold } from "./quote";
 
-const INPUTS: HoldInputs = { proxy: "generate_video", args: { backend_id: "veo-3.1-generate-001", duration: 8 } };
+const INPUTS: HoldInputs = {
+  proxy: "generate_video",
+  args: { backend_id: "veo-3.1-generate-001", duration: 8 },
+};
 
 const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } });
@@ -38,7 +41,9 @@ describe("what the quote asks", () => {
     try {
       const f = serve(() => json({ priced: true, credits: 3 }));
       await quoteHold(INPUTS);
-      expect((f.mock.calls[0][1].headers as Record<string, string>).Authorization).toBe("Bearer tok-1");
+      expect((f.mock.calls[0][1].headers as Record<string, string>).Authorization).toBe(
+        "Bearer tok-1",
+      );
     } finally {
       off();
     }
@@ -83,10 +88,13 @@ describe("what the quote believes", () => {
 });
 
 describe("what the quote must never do", () => {
-  it.each([401, 403, 404, 426, 429, 500, 503])("shows nothing, and does not throw, on a %i", async (status) => {
-    serve(() => json({ detail: "nope" }, status));
-    expect(await quoteHold(INPUTS)).toBeNull();
-  });
+  it.each([401, 403, 404, 426, 429, 500, 503])(
+    "shows nothing, and does not throw, on a %i",
+    async (status) => {
+      serve(() => json({ detail: "nope" }, status));
+      expect(await quoteHold(INPUTS)).toBeNull();
+    },
+  );
 
   it("does not believe a price-shaped body on an error status", async () => {
     for (const status of [401, 404, 500, 503]) {

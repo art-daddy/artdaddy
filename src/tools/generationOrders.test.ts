@@ -3,7 +3,10 @@
 // number the result of a closed app is silently lost again.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../api/ai", async (orig) => ({ ...(await orig<typeof import("../api/ai")>()), callAiProxy: vi.fn() }));
+vi.mock("../api/ai", async (orig) => ({
+  ...(await orig<typeof import("../api/ai")>()),
+  callAiProxy: vi.fn(),
+}));
 vi.mock("./genJobs", () => ({ submitGeneration: vi.fn() }));
 vi.mock("./geminiEncode", () => ({ encodeImageForGemini: vi.fn() }));
 
@@ -57,15 +60,26 @@ const CALLS: { tool: string; proxy: string; args: Record<string, unknown>; answe
     tool: "generate_image",
     proxy: "generate_image",
     args: { prompt: "a van" },
-    answer: { result: { ok: true }, media: [{ b64: toB64(new Uint8Array([1, 2, 3])), ext: ".png" }] },
+    answer: {
+      result: { ok: true },
+      media: [{ b64: toB64(new Uint8Array([1, 2, 3])), ext: ".png" }],
+    },
   },
   {
     tool: "generate_video",
     proxy: "generate_video",
     args: { prompt: "a van driving" },
-    answer: { result: { ok: true }, media: [{ b64: toB64(new Uint8Array([1, 2, 3])), ext: ".mp4" }] },
+    answer: {
+      result: { ok: true },
+      media: [{ b64: toB64(new Uint8Array([1, 2, 3])), ext: ".mp4" }],
+    },
   },
-  { tool: "generate_voiceover", proxy: "voiceover", args: { text: "hello there" }, answer: { result: { ok: true, pcm_b64: toB64(new Uint8Array(4)) } } },
+  {
+    tool: "generate_voiceover",
+    proxy: "voiceover",
+    args: { text: "hello there" },
+    answer: { result: { ok: true, pcm_b64: toB64(new Uint8Array(4)) } },
+  },
   {
     tool: "generate_music",
     proxy: "music",
@@ -104,19 +118,22 @@ describe("every tool that makes something to collect", () => {
     expect(isResultTool("style_analyze")).toBe(false);
   });
 
-  it.each(CALLS)("$tool sends its order number and says when the server took the order", async ({ tool, proxy: name, args, answer }) => {
-    proxy.mockResolvedValue(answer as Any);
-    const ctx = context();
-    const registry = new ClientToolRegistry();
-    registerGenerationTools(registry, () => ctx);
-    registerAudioTools(registry, () => ctx);
-    await registry.run(tool, args);
+  it.each(CALLS)(
+    "$tool sends its order number and says when the server took the order",
+    async ({ tool, proxy: name, args, answer }) => {
+      proxy.mockResolvedValue(answer as Any);
+      const ctx = context();
+      const registry = new ClientToolRegistry();
+      registerGenerationTools(registry, () => ctx);
+      registerAudioTools(registry, () => ctx);
+      await registry.run(tool, args);
 
-    expect(proxy).toHaveBeenCalledTimes(1);
-    const [calledName, body, signal, opts] = proxy.mock.calls[0] as Any[];
-    expect(calledName).toBe(name);
-    expect(body.order_id).toBe(ORDER);
-    expect(signal).toBeUndefined(); // Stop must not cancel a call that is paid for
-    expect(opts?.onOrder).toBe(accepted);
-  });
+      expect(proxy).toHaveBeenCalledTimes(1);
+      const [calledName, body, signal, opts] = proxy.mock.calls[0] as Any[];
+      expect(calledName).toBe(name);
+      expect(body.order_id).toBe(ORDER);
+      expect(signal).toBeUndefined(); // Stop must not cancel a call that is paid for
+      expect(opts?.onOrder).toBe(accepted);
+    },
+  );
 });

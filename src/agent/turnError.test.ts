@@ -22,11 +22,17 @@ beforeEach(() => {
 afterEach(() => clearRecentFailures());
 
 describe("turnErrorCode", () => {
-  const timeout = Object.assign(new Error("the model did not respond within 10 minutes"), { name: "RoundTimeoutError" });
+  const timeout = Object.assign(new Error("the model did not respond within 10 minutes"), {
+    name: "RoundTimeoutError",
+  });
   it.each([
     ["a busy answer that ran out of retries", new RateLimitError(), "rate_limited"],
     ["an expired session", new SessionExpiredError(), "session_expired"],
-    ["a session that could not be renewed", new SessionRenewalUnavailableError(), "session_renewal_unavailable"],
+    [
+      "a session that could not be renewed",
+      new SessionRenewalUnavailableError(),
+      "session_renewal_unavailable",
+    ],
     ["a build the server refuses", new ClientUpdateRequiredError(), "client_update_required"],
     ["the round deadline", timeout, "round_timeout"],
     ["an HTTP failure", new Error("503: upstream down"), "http_503"],
@@ -38,7 +44,9 @@ describe("turnErrorCode", () => {
   ])("%s", (_name, error, code) => expect(turnErrorCode(error)).toBe(code));
 
   it("keeps the credit wall's own code", () => {
-    expect(turnErrorCode(new CreditLimitError({ error: "credit_limit_reached" }))).toBe(new CreditLimitError({}).code);
+    expect(turnErrorCode(new CreditLimitError({ error: "credit_limit_reached" }))).toBe(
+      new CreditLimitError({}).code,
+    );
   });
 });
 
@@ -55,7 +63,9 @@ describe("requestIdOf", () => {
 describe("noteTurnError", () => {
   it("notes the failure for a problem report and reports it as a turn_error", () => {
     noteTurnError("content_policy", "rid1");
-    expect(recentFailures()).toMatchObject([{ where: "turn", code: "content_policy", requestId: "rid1" }]);
+    expect(recentFailures()).toMatchObject([
+      { where: "turn", code: "content_policy", requestId: "rid1" },
+    ]);
     expect(reportTurnError).toHaveBeenCalledWith("content_policy", "rid1");
   });
 

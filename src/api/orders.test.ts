@@ -89,7 +89,14 @@ describe("order numbers", () => {
   });
 
   it("are checked by the same rule the server uses", () => {
-    for (const bad of ["", "short", "a".repeat(15), "a".repeat(65), "has space in it 123", "slash/in/the/middle1"])
+    for (const bad of [
+      "",
+      "short",
+      "a".repeat(15),
+      "a".repeat(65),
+      "has space in it 123",
+      "slash/in/the/middle1",
+    ])
       expect(ORDER_ID.test(bad)).toBe(false);
     for (const good of ["a".repeat(16), "a".repeat(64), "123e4567-e89b-12d3-a456-426614174000"])
       expect(ORDER_ID.test(good)).toBe(true);
@@ -134,8 +141,15 @@ describe("asking about an order", () => {
     it.each([
       ["a gateway's own page", () => new Response("<h1>404 Not Found</h1>", { status: 404 })],
       ["an empty answer", () => new Response(null, { status: 404 })],
-      ["another server's JSON", () => new Response(JSON.stringify({ detail: "Not Found" }), { status: 404 })],
-      ["a different error code", () => new Response(JSON.stringify({ detail: { error: "something_else" } }), { status: 404 })],
+      [
+        "another server's JSON",
+        () => new Response(JSON.stringify({ detail: "Not Found" }), { status: 404 }),
+      ],
+      [
+        "a different error code",
+        () =>
+          new Response(JSON.stringify({ detail: { error: "something_else" } }), { status: 404 }),
+      ],
       ["a bare object", () => new Response("{}", { status: 404 })],
     ])("%s is the server being out of reach, not the order being gone", async (_label, make) => {
       vi.stubGlobal("fetch", async () => make());
@@ -143,7 +157,11 @@ describe("asking about an order", () => {
     });
 
     it("is still one when the server's own error code is there", async () => {
-      vi.stubGlobal("fetch", async () => new Response(JSON.stringify({ detail: { error: "order_not_found" } }), { status: 404 }));
+      vi.stubGlobal(
+        "fetch",
+        async () =>
+          new Response(JSON.stringify({ detail: { error: "order_not_found" } }), { status: 404 }),
+      );
       await expect(getOrder(ID)).rejects.toBeInstanceOf(OrderNotFoundError);
     });
 
@@ -164,13 +182,19 @@ describe("asking about an order", () => {
     expect(server.calls.at(-1)).toBe("GET /orders/..%2F..%2Fai%2Fgenerate_image");
   });
 
-  it.each([401, 429, 500, 502, 503])("treats a %i as the server being out of reach, not as the order being gone", async (status) => {
-    server.fault(/^GET \/orders/, 1, status);
-    await expect(getOrder(ID)).rejects.toBeInstanceOf(OrderUnreachableError);
-  });
+  it.each([401, 429, 500, 502, 503])(
+    "treats a %i as the server being out of reach, not as the order being gone",
+    async (status) => {
+      server.fault(/^GET \/orders/, 1, status);
+      await expect(getOrder(ID)).rejects.toBeInstanceOf(OrderUnreachableError);
+    },
+  );
 
   it("does not take an answer it cannot read for an order", async () => {
-    vi.stubGlobal("fetch", async () => new Response(JSON.stringify({ order: { state: "teleporting" } })));
+    vi.stubGlobal(
+      "fetch",
+      async () => new Response(JSON.stringify({ order: { state: "teleporting" } })),
+    );
     await expect(getOrder(ID)).rejects.toThrow(/could not be understood/);
     vi.stubGlobal("fetch", async () => new Response("not json at all"));
     await expect(getOrder(ID)).rejects.toThrow(/could not be understood/);
@@ -178,7 +202,12 @@ describe("asking about an order", () => {
 
   it("does not take a ready order without its link or its charge, or a failed one without its reason", async () => {
     const stamps = { order_id: ID, created_at: 1, updated_at: 1 };
-    const link = { url: "https://x.test/r", bytes: 1, content_type: "application/json", expires_at: 2 };
+    const link = {
+      url: "https://x.test/r",
+      bytes: 1,
+      content_type: "application/json",
+      expires_at: 2,
+    };
     for (const bad of [
       { ...stamps, state: "ready", charged_credits: 1 },
       { ...stamps, state: "ready", result: link },
@@ -198,7 +227,18 @@ describe("asking about an order", () => {
   it("fills in what a failed order leaves out, rather than refusing it", async () => {
     vi.stubGlobal(
       "fetch",
-      async () => new Response(JSON.stringify({ order: { order_id: ID, state: "failed", created_at: 1, updated_at: 1, error: { message: "No." } } })),
+      async () =>
+        new Response(
+          JSON.stringify({
+            order: {
+              order_id: ID,
+              state: "failed",
+              created_at: 1,
+              updated_at: 1,
+              error: { message: "No." },
+            },
+          }),
+        ),
     );
     const view = await getOrder(ID);
     expect(view.error).toEqual({ code: "generation_failed", message: "No.", retryable: false });
@@ -209,42 +249,69 @@ describe("asking about an order", () => {
     const failedWith = (detail: unknown) =>
       new Response(
         JSON.stringify({
-          order: { order_id: ID, state: "failed", created_at: 1, updated_at: 1, error: { code: "credit_limit_reached", message: "No.", retryable: false, detail } },
+          order: {
+            order_id: ID,
+            state: "failed",
+            created_at: 1,
+            updated_at: 1,
+            error: { code: "credit_limit_reached", message: "No.", retryable: false, detail },
+          },
         }),
       );
     const allowed = new Set(["scope", "used", "limit", "requested", "remaining"]);
 
     it("are kept exactly, with the failure", async () => {
       vi.stubGlobal("fetch", async () => failedWith(wall));
-      expect((await getOrder(ID)).error).toEqual({ code: "credit_limit_reached", message: "No.", retryable: false, detail: wall });
+      expect((await getOrder(ID)).error).toEqual({
+        code: "credit_limit_reached",
+        message: "No.",
+        retryable: false,
+        detail: wall,
+      });
     });
 
-    it.each([undefined, null, {}, "text", 5, [1, 2], { scope: "everyone" }, { used: -1 }, { used: "12" }, { email: "a@b.c", error: "x" }])(
-      "leave no detail at all when there is nothing usable in %j",
-      async (detail) => {
-        vi.stubGlobal("fetch", async () => failedWith(detail));
-        const view = await getOrder(ID);
-        expect(view.error).toBeDefined();
-        expect("detail" in (view.error ?? {})).toBe(false);
-      },
-    );
+    it.each([
+      undefined,
+      null,
+      {},
+      "text",
+      5,
+      [1, 2],
+      { scope: "everyone" },
+      { used: -1 },
+      { used: "12" },
+      { email: "a@b.c", error: "x" },
+    ])("leave no detail at all when there is nothing usable in %j", async (detail) => {
+      vi.stubGlobal("fetch", async () => failedWith(detail));
+      const view = await getOrder(ID);
+      expect(view.error).toBeDefined();
+      expect("detail" in (view.error ?? {})).toBe(false);
+    });
 
     it("are never anything but finite non-negative credit numbers and a known scope, whatever the server sends", async () => {
       const responses: Response[] = [];
       await fc.assert(
-        fc.asyncProperty(fc.jsonValue(), fc.dictionary(fc.constantFrom(...allowed, "email", "x"), fc.jsonValue()), async (junk, mixed) => {
-          for (const detail of [junk, mixed]) {
-            vi.stubGlobal("fetch", async () => failedWith(detail));
-            const found = (await getOrder(ID)).error?.detail as Record<string, unknown> | undefined;
-            if (!found) continue;
-            expect(Object.keys(found).every((k) => allowed.has(k))).toBe(true);
-            for (const [key, value] of Object.entries(found)) {
-              if (key === "scope") expect(["user", "global"]).toContain(value);
-              else expect(typeof value === "number" && Number.isFinite(value) && value >= 0).toBe(true);
+        fc.asyncProperty(
+          fc.jsonValue(),
+          fc.dictionary(fc.constantFrom(...allowed, "email", "x"), fc.jsonValue()),
+          async (junk, mixed) => {
+            for (const detail of [junk, mixed]) {
+              vi.stubGlobal("fetch", async () => failedWith(detail));
+              const found = (await getOrder(ID)).error?.detail as
+                Record<string, unknown> | undefined;
+              if (!found) continue;
+              expect(Object.keys(found).every((k) => allowed.has(k))).toBe(true);
+              for (const [key, value] of Object.entries(found)) {
+                if (key === "scope") expect(["user", "global"]).toContain(value);
+                else
+                  expect(typeof value === "number" && Number.isFinite(value) && value >= 0).toBe(
+                    true,
+                  );
+              }
             }
-          }
-          responses.length = 0;
-        }),
+            responses.length = 0;
+          },
+        ),
         { numRuns: 120 },
       );
     });
@@ -270,7 +337,12 @@ describe("asking about an order", () => {
 
     it("reach the error a waiting caller is given", async () => {
       server.behaviour.outcome = "failed";
-      server.behaviour.failure = { code: "credit_limit_reached", message: "No.", retryable: false, detail: wall };
+      server.behaviour.failure = {
+        code: "credit_limit_reached",
+        message: "No.",
+        retryable: false,
+        detail: wall,
+      };
       server.seed(ID, "generate_image", "running");
       const error = (await waitForOrder(ID).catch((e: unknown) => e)) as OrderFailedError;
       expect(error).toBeInstanceOf(OrderFailedError);
@@ -357,7 +429,11 @@ describe("waiting for an order", () => {
 
   it("fails with the server's own reason, code and advice when the order failed", async () => {
     server.behaviour.outcome = "failed";
-    server.behaviour.failure = { code: "provider_refused", message: "Azure refused it.", retryable: true };
+    server.behaviour.failure = {
+      code: "provider_refused",
+      message: "Azure refused it.",
+      retryable: true,
+    };
     server.seed(ID, "generate_image", "running");
     const error = (await waitForOrder(ID).catch((e: unknown) => e)) as OrderFailedError;
     expect(error).toBeInstanceOf(OrderFailedError);
@@ -365,9 +441,15 @@ describe("waiting for an order", () => {
     expect(error.code).toBe("provider_refused");
     expect(error.retryable).toBe(true);
     server.orders.clear();
-    server.behaviour.failure = { code: "provider_refused", message: "Azure refused it.", retryable: false };
+    server.behaviour.failure = {
+      code: "provider_refused",
+      message: "Azure refused it.",
+      retryable: false,
+    };
     server.seed(ID, "generate_image", "running");
-    expect(((await waitForOrder(ID).catch((e: unknown) => e)) as OrderFailedError).retryable).toBe(false);
+    expect(((await waitForOrder(ID).catch((e: unknown) => e)) as OrderFailedError).retryable).toBe(
+      false,
+    );
   });
 
   it("says the order is not there when the server has never heard of it", async () => {
@@ -402,7 +484,9 @@ describe("waiting for an order", () => {
       stop.abort();
       throw new DOMException("Aborted", "AbortError");
     };
-    await expect(waitForOrder(ID, { signal: stop.signal })).rejects.toMatchObject({ name: "AbortError" });
+    await expect(waitForOrder(ID, { signal: stop.signal })).rejects.toMatchObject({
+      name: "AbortError",
+    });
     const asked = server.calls.length;
     await Promise.resolve();
     expect(server.calls).toHaveLength(asked);
@@ -461,7 +545,10 @@ describe("whether the server has an order", () => {
 });
 
 describe("collecting the result", () => {
-  const dto = { result: { ok: true, count: 1 }, media: [{ b64: "aGVsbG8=", ext: ".png", kind: "image" }] };
+  const dto = {
+    result: { ok: true, count: 1 },
+    media: [{ b64: "aGVsbG8=", ext: ".png", kind: "image" }],
+  };
 
   it("downloads exactly the response the live call would have returned", async () => {
     server.seed(ID, "generate_image", "ready", dto);
@@ -474,7 +561,8 @@ describe("collecting the result", () => {
     const seen: Record<string, string>[] = [];
     const real = server.fetch;
     vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
-      if (String(input).startsWith("https://storage.test")) seen.push({ ...((init?.headers as Record<string, string>) ?? {}) });
+      if (String(input).startsWith("https://storage.test"))
+        seen.push({ ...((init?.headers as Record<string, string>) ?? {}) });
       return real(input, init);
     });
     await downloadOrderResult(await waitForOrder(ID));
@@ -528,7 +616,11 @@ describe("collecting the result", () => {
     const ready = await waitForOrder(ID);
     vi.mocked(fetchCompatibleClient).mockClear();
     await downloadOrderResult(ready);
-    expect(vi.mocked(fetchCompatibleClient).mock.calls.filter(([url]) => String(url).startsWith("https://storage.test"))).toEqual([]);
+    expect(
+      vi
+        .mocked(fetchCompatibleClient)
+        .mock.calls.filter(([url]) => String(url).startsWith("https://storage.test")),
+    ).toEqual([]);
   });
 
   it("keeps trying through far more than four failures, pausing longer each time, and asks for a fresh link every third", async () => {
@@ -559,23 +651,31 @@ describe("collecting the result", () => {
     expect(storageCalls()).toBe(3);
   });
 
-  it.each([400, 401, 403, 404])("treats a %s from the link as one that ran out and asks the server for a fresh one", async (status) => {
-    server.seed(ID, "generate_image", "ready", dto);
-    const ready = await waitForOrder(ID);
-    server.calls.length = 0;
-    server.fault(STORAGE_GET, 1, status);
-    expect(await downloadOrderResult(ready)).toEqual(dto);
-    expect(server.calls.filter((c) => c.startsWith("GET /orders"))).toHaveLength(1);
-  });
+  it.each([400, 401, 403, 404])(
+    "treats a %s from the link as one that ran out and asks the server for a fresh one",
+    async (status) => {
+      server.seed(ID, "generate_image", "ready", dto);
+      const ready = await waitForOrder(ID);
+      server.calls.length = 0;
+      server.fault(STORAGE_GET, 1, status);
+      expect(await downloadOrderResult(ready)).toEqual(dto);
+      expect(server.calls.filter((c) => c.startsWith("GET /orders"))).toHaveLength(1);
+    },
+  );
 
-  it.each([405, 409, 410, 418])("does not wait out a %s: nothing about it will change", async (status) => {
-    server.seed(ID, "generate_image", "ready", dto);
-    const ready = await waitForOrder(ID);
-    server.calls.length = 0;
-    server.fault(STORAGE_GET, 9, status);
-    await expect(downloadOrderResult(ready)).rejects.toThrow(new RegExp(`could not be downloaded \\(${status}\\)`));
-    expect(storageCalls()).toBe(1);
-  });
+  it.each([405, 409, 410, 418])(
+    "does not wait out a %s: nothing about it will change",
+    async (status) => {
+      server.seed(ID, "generate_image", "ready", dto);
+      const ready = await waitForOrder(ID);
+      server.calls.length = 0;
+      server.fault(STORAGE_GET, 9, status);
+      await expect(downloadOrderResult(ready)).rejects.toThrow(
+        new RegExp(`could not be downloaded \\(${status}\\)`),
+      );
+      expect(storageCalls()).toBe(1);
+    },
+  );
 
   it("goes on with the fresh link it is given, not the old one", async () => {
     server.seed(ID, "generate_image", "ready", dto);
@@ -631,7 +731,9 @@ describe("collecting the result", () => {
       if (sleeps.length === 2) controller.abort();
       if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
     };
-    await expect(downloadOrderResult(ready, controller.signal)).rejects.toMatchObject({ name: "AbortError" });
+    await expect(downloadOrderResult(ready, controller.signal)).rejects.toMatchObject({
+      name: "AbortError",
+    });
     expect(storageCalls()).toBe(2);
   });
 

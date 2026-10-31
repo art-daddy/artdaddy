@@ -37,10 +37,14 @@ describe("videoEdgeFor", () => {
 
   it("never gives a longer clip a larger picture than a shorter one", () => {
     fc.assert(
-      fc.property(fc.double({ min: 0, max: 10_000, noNaN: true }), fc.double({ min: 0, max: 10_000, noNaN: true }), (a, b) => {
-        const [short, long] = a <= b ? [a, b] : [b, a];
-        expect(videoEdgeFor(long)).toBeLessThanOrEqual(videoEdgeFor(short));
-      }),
+      fc.property(
+        fc.double({ min: 0, max: 10_000, noNaN: true }),
+        fc.double({ min: 0, max: 10_000, noNaN: true }),
+        (a, b) => {
+          const [short, long] = a <= b ? [a, b] : [b, a];
+          expect(videoEdgeFor(long)).toBeLessThanOrEqual(videoEdgeFor(short));
+        },
+      ),
     );
   });
 });

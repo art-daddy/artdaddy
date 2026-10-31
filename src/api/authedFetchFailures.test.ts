@@ -65,7 +65,9 @@ describe("a failed paid call is noted once, with its code and request id", () =>
   it("falls back to the status when the body says nothing typed", async () => {
     serve(reply(503, "<html>bad gateway</html>", { "x-request-id": "rid2" }));
     await authedFetch(`${BASE}/inference`, { method: "POST" });
-    expect(recentFailures()).toMatchObject([{ where: "turn", code: "http_503", status: 503, requestId: "rid2" }]);
+    expect(recentFailures()).toMatchObject([
+      { where: "turn", code: "http_503", status: 503, requestId: "rid2" },
+    ]);
   });
 
   it("notes a call that never got an answer as a network failure, and rethrows the same error", async () => {
@@ -83,25 +85,37 @@ describe("what is not a failure the person met", () => {
     expect(recentFailures()).toEqual([]);
   });
 
-  it.each(["/usage", "/me", "/auth/verify", "/telemetry/app", "/telemetry/feedback", "/billing/checkout"])(
-    "notes nothing for a failing %s, which is not a paid call",
-    async (path) => {
-      serve(reply(500, { detail: { error: "boom" } }, { "x-request-id": "rid" }));
-      await authedFetch(`${BASE}${path}`);
-      expect(recentFailures()).toEqual([]);
-    },
-  );
+  it.each([
+    "/usage",
+    "/me",
+    "/auth/verify",
+    "/telemetry/app",
+    "/telemetry/feedback",
+    "/billing/checkout",
+  ])("notes nothing for a failing %s, which is not a paid call", async (path) => {
+    serve(reply(500, { detail: { error: "boom" } }, { "x-request-id": "rid" }));
+    await authedFetch(`${BASE}${path}`);
+    expect(recentFailures()).toEqual([]);
+  });
 
   it("notes nothing when the person pressed Stop", async () => {
     serve(new DOMException("Aborted", "AbortError"));
-    await expect(authedFetch(`${BASE}/inference/stream`, { method: "POST" })).rejects.toThrow("Aborted");
+    await expect(authedFetch(`${BASE}/inference/stream`, { method: "POST" })).rejects.toThrow(
+      "Aborted",
+    );
     expect(recentFailures()).toEqual([]);
   });
 
   it("notes nothing for a 429 the retry layer waited out", async () => {
     Object.assign(rateLimitConfig, { baseS: 0, capS: 1, retries: 3 });
-    serve(reply(429, { detail: { error: "account_busy" } }), reply(429, { detail: { error: "account_busy" } }), reply(200, { ok: true }));
-    const res = await authedFetch(`${BASE}/ai/vision_video`, { method: "POST" }, (u, i) => fetchWithRetry(u, i));
+    serve(
+      reply(429, { detail: { error: "account_busy" } }),
+      reply(429, { detail: { error: "account_busy" } }),
+      reply(200, { ok: true }),
+    );
+    const res = await authedFetch(`${BASE}/ai/vision_video`, { method: "POST" }, (u, i) =>
+      fetchWithRetry(u, i),
+    );
     expect(res.status).toBe(200);
     expect(recentFailures()).toEqual([]);
   });
@@ -109,7 +123,9 @@ describe("what is not a failure the person met", () => {
   it("notes the answer that finally ended a retry budget", async () => {
     Object.assign(rateLimitConfig, { baseS: 0, capS: 1, retries: 1 });
     serve(reply(429, { detail: { error: "account_busy" } }, { "x-request-id": "last" }));
-    const res = await authedFetch(`${BASE}/ai/vision_video`, { method: "POST" }, (u, i) => fetchWithRetry(u, i));
+    const res = await authedFetch(`${BASE}/ai/vision_video`, { method: "POST" }, (u, i) =>
+      fetchWithRetry(u, i),
+    );
     expect(res.status).toBe(429);
     expect(recentFailures()).toMatchObject([{ code: "account_busy", requestId: "last" }]);
   });
@@ -125,8 +141,16 @@ describe("what is not a failure the person met", () => {
 
 describe("observing never changes what the caller gets", () => {
   it("hands back a response it could not copy, unchanged", async () => {
-    const fake = { status: 500, ok: false, headers: new Headers({ "x-request-id": "rid" }), text: async () => "x" };
-    vi.stubGlobal("fetch", vi.fn(async () => fake));
+    const fake = {
+      status: 500,
+      ok: false,
+      headers: new Headers({ "x-request-id": "rid" }),
+      text: async () => "x",
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => fake),
+    );
     const res = await authedFetch(`${BASE}/inference`, { method: "POST" });
     expect(res).toBe(fake);
     expect(recentFailures()).toMatchObject([{ code: "http_500", requestId: "rid" }]);
@@ -134,7 +158,10 @@ describe("observing never changes what the caller gets", () => {
 
   it("hands back a response with no headers at all, unchanged", async () => {
     const fake = { status: 502 };
-    vi.stubGlobal("fetch", vi.fn(async () => fake));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => fake),
+    );
     const res = await authedFetch(`${BASE}/ai/generate_image`, { method: "POST" });
     expect(res).toBe(fake);
     expect(recentFailures()).toMatchObject([{ where: "generation", code: "http_502" }]);

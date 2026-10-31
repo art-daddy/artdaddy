@@ -9,7 +9,9 @@ export const SHORT_CLIP_EDGE = 720;
 /** The picture height a clip of `durationS` seconds is encoded at. A length that is not a usable number keeps the
  *  old, larger size: not knowing how long a clip is is not a reason to make it worse. */
 export function videoEdgeFor(durationS: number | null | undefined): number {
-  return typeof durationS === "number" && Number.isFinite(durationS) && durationS > LONG_CLIP_SECONDS
+  return typeof durationS === "number" &&
+    Number.isFinite(durationS) &&
+    durationS > LONG_CLIP_SECONDS
     ? LONG_CLIP_EDGE
     : SHORT_CLIP_EDGE;
 }

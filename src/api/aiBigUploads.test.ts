@@ -22,14 +22,22 @@ function manualFetch() {
   const fn = vi.fn((_url: string, init?: RequestInit) => {
     return new Promise<Response>((resolve, reject) => {
       pending.push({ body: String(init?.body ?? ""), respond: resolve });
-      init?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+      init?.signal?.addEventListener(
+        "abort",
+        () => reject(new DOMException("Aborted", "AbortError")),
+        { once: true },
+      );
     });
   });
   vi.stubGlobal("fetch", fn);
   return { fn, pending };
 }
 
-const answer = (status = 200) => new Response(JSON.stringify({ result: { ok: true } }), { status, headers: { "Content-Type": "application/json" } });
+const answer = (status = 200) =>
+  new Response(JSON.stringify({ result: { ok: true } }), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 beforeEach(() => setClerkTokenProvider(async () => "tok"));
@@ -60,7 +68,10 @@ describe("big uploads", () => {
 
   it("go in the order they were asked for", async () => {
     const { pending } = manualFetch();
-    const bodies = ["one", "two", "three"].map((tag) => ({ args: { tag }, media: { video: { b64: mib(9) } } }));
+    const bodies = ["one", "two", "three"].map((tag) => ({
+      args: { tag },
+      media: { video: { b64: mib(9) } },
+    }));
     const runs = bodies.map((b) => callAiProxy("vision_video", b));
     for (let i = 0; i < bodies.length; i += 1) {
       await tick();
@@ -118,7 +129,10 @@ describe("big uploads", () => {
     const first = callAiProxy("vision_video", big());
     const stop = new AbortController();
     const waiting = callAiProxy("vision_video", big(), stop.signal).catch((e: unknown) => e);
-    const third = callAiProxy("vision_video", { args: { tag: "third" }, media: { video: { b64: mib(9) } } });
+    const third = callAiProxy("vision_video", {
+      args: { tag: "third" },
+      media: { video: { b64: mib(9) } },
+    });
     await tick();
     stop.abort();
     expect(await waiting).toMatchObject({ name: "AbortError" });

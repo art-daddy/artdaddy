@@ -1568,7 +1568,12 @@ describe("useChat loop deps + remaining actions", () => {
     "a %s carries the app's technical context and the failures it just met",
     async (kind) => {
       clearRecentFailures();
-      noteFailure({ where: "turn", code: "content_policy", requestId: "failed-call-1", at: 1793000000 });
+      noteFailure({
+        where: "turn",
+        code: "content_policy",
+        requestId: "failed-call-1",
+        at: 1793000000,
+      });
       setDesktop("p1");
       useChat.setState({ projectId: "p1", transcriptId: "tx1", model: "gpt-5.6-luna" });
       const f = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
@@ -1577,14 +1582,23 @@ describe("useChat loop deps + remaining actions", () => {
       await useChat.getState().sendFeedback(kind, { note: "it broke" });
 
       const body = JSON.parse(((f.mock.calls[0] as unknown[])[1] as RequestInit).body as string);
-      expect(body).toMatchObject({ kind, note: "it broke", transcript_id: "tx1", project_id: "p1" });
+      expect(body).toMatchObject({
+        kind,
+        note: "it broke",
+        transcript_id: "tx1",
+        project_id: "p1",
+      });
       expect(body.context).toMatchObject({
         app_version: __ARTDADDY_RELEASE__,
         model: "gpt-5.6-luna",
         surface: "app",
-        failures: [{ where: "turn", code: "content_policy", request_id: "failed-call-1", at: 1793000000 }],
+        failures: [
+          { where: "turn", code: "content_policy", request_id: "failed-call-1", at: 1793000000 },
+        ],
       });
-      expect(body.context.credit).toEqual(expect.objectContaining({ metered: expect.any(Boolean) }));
+      expect(body.context.credit).toEqual(
+        expect.objectContaining({ metered: expect.any(Boolean) }),
+      );
       clearRecentFailures();
     },
   );

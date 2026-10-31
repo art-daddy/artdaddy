@@ -10,7 +10,13 @@ const quoteHold = vi.hoisted(() => vi.fn());
 vi.mock("../api/quote", () => ({ quoteHold }));
 
 // Stable snapshot (same reference each call) so useSyncExternalStore does not loop.
-const usage = vi.hoisted(() => ({ metered: true, used: 30, limit: 150, remaining: 120, over: false }));
+const usage = vi.hoisted(() => ({
+  metered: true,
+  used: 30,
+  limit: 150,
+  remaining: 120,
+  over: false,
+}));
 vi.mock("../api/usage", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../api/usage")>()),
   getUsage: () => usage,
@@ -45,11 +51,18 @@ describe("the price beside the buttons", () => {
   });
 
   it("asks about what the tool will send, and carries nothing of the person's", async () => {
-    render(bar(pending("generate_video", { ...VIDEO, prompt: "my private prompt", name: "secret-name" })));
+    render(
+      bar(
+        pending("generate_video", { ...VIDEO, prompt: "my private prompt", name: "secret-name" }),
+      ),
+    );
     await screen.findByText(/Up to 96/);
     expect(quoteHold).toHaveBeenCalledTimes(1);
     const [inputs, signal] = quoteHold.mock.calls[0];
-    expect(inputs).toEqual({ proxy: "generate_video", args: { backend_id: "veo-3.1-generate-001", duration: 8 } });
+    expect(inputs).toEqual({
+      proxy: "generate_video",
+      args: { backend_id: "veo-3.1-generate-001", duration: 8 },
+    });
     expect(JSON.stringify(inputs)).not.toMatch(/private|secret/);
     expect(signal).toBeInstanceOf(AbortSignal);
   });
@@ -94,15 +107,20 @@ describe("the price never gets in the way", () => {
 });
 
 describe("it only asks about a call that holds credits", () => {
-  it.each(["video_ask", "image_ask", "vision_describe", "find_content", "extract_style", "get_page_image", "download_video"])(
-    "%s settles its real cost afterwards: no price, and nobody is asked",
-    async (name) => {
-      render(bar(pending(name, { prompt: "p", question: "q", url: "https://example.com/v.mp4" })));
-      await settle();
-      expect(quoteHold).not.toHaveBeenCalled();
-      expect(screen.queryByText(/Up to/)).not.toBeInTheDocument();
-    },
-  );
+  it.each([
+    "video_ask",
+    "image_ask",
+    "vision_describe",
+    "find_content",
+    "extract_style",
+    "get_page_image",
+    "download_video",
+  ])("%s settles its real cost afterwards: no price, and nobody is asked", async (name) => {
+    render(bar(pending(name, { prompt: "p", question: "q", url: "https://example.com/v.mp4" })));
+    await settle();
+    expect(quoteHold).not.toHaveBeenCalled();
+    expect(screen.queryByText(/Up to/)).not.toBeInTheDocument();
+  });
 
   it("does not ask about a call the tool will refuse", async () => {
     render(bar(pending("generate_image", { prompt: "p", model: "no-such-model" })));
@@ -133,7 +151,10 @@ describe("it asks again only when the price would change", () => {
 
   it("drops a price that arrives after the question was withdrawn", async () => {
     let answer: (quote: { credits: number } | null) => void = () => {};
-    quoteHold.mockReset().mockReturnValueOnce(new Promise((resolve) => (answer = resolve))).mockReturnValueOnce(new Promise(() => {}));
+    quoteHold
+      .mockReset()
+      .mockReturnValueOnce(new Promise((resolve) => (answer = resolve)))
+      .mockReturnValueOnce(new Promise(() => {}));
     const { rerender } = render(bar(pending("generate_image", { prompt: "a car", count: 2 })));
     await waitFor(() => expect(quoteHold).toHaveBeenCalledTimes(1));
     rerender(bar(pending("generate_image", { prompt: "a car", count: 4 })));

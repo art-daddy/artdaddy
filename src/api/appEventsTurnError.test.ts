@@ -58,7 +58,17 @@ describe("reportTurnError", () => {
       request_id: "3f9c1a2b7d4e5f60",
     });
     expect(Object.keys(calls[0]).sort()).toEqual(
-      ["app_version", "arch", "error_code", "event", "ok", "os", "project_id", "request_id", "shell"].sort(),
+      [
+        "app_version",
+        "arch",
+        "error_code",
+        "event",
+        "ok",
+        "os",
+        "project_id",
+        "request_id",
+        "shell",
+      ].sort(),
     );
   });
 
@@ -74,7 +84,10 @@ describe("reportTurnError", () => {
     const calls = captureFetch();
     reportTurnError("no way! <x>".padEnd(80, "y"), "id\r\nX: 1".padEnd(200, "z"));
     await vi.waitFor(() => expect(calls).toHaveLength(1));
-    const { error_code: code, request_id: id } = calls[0] as { error_code: string; request_id: string };
+    const { error_code: code, request_id: id } = calls[0] as {
+      error_code: string;
+      request_id: string;
+    };
     expect(code).toMatch(/^[A-Za-z0-9_.:-]{1,40}$/);
     expect(id).toMatch(/^[A-Za-z0-9_.:-]{1,128}$/);
     expect(code.startsWith("no_way___x_")).toBe(true);
@@ -106,7 +119,10 @@ describe("reportTurnError", () => {
   });
 
   it("never throws, even when the network is down (a beacon is not a feature)", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => Promise.reject(new TypeError("Failed to fetch"))));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Promise.reject(new TypeError("Failed to fetch"))),
+    );
     expect(() => reportTurnError("network", "r")).not.toThrow();
     await new Promise((resolve) => setTimeout(resolve, 20));
   });

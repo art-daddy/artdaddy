@@ -179,6 +179,9 @@ export async function fetchRetryingBusy(
     const busy = await busyAnswer(res);
     if (!busy) return res;
     await res.body?.cancel().catch(() => undefined);
-    await sleep(backoffMs(attempt, retryAfterMs(res.headers.get("Retry-After")) ?? busy.delayMs), signal);
+    await sleep(
+      backoffMs(attempt, retryAfterMs(res.headers.get("Retry-After")) ?? busy.delayMs),
+      signal,
+    );
   }
 }

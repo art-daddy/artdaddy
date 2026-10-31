@@ -33,10 +33,18 @@ vi.mock("../contract", async (importOriginal) => {
     ...actual,
     paramSchema: (name: string) => {
       const schema = actual.paramSchema(name);
-      if (narrowed.imageCountMax === null || name !== "generate_image" || !schema?.properties?.count) return schema;
+      if (
+        narrowed.imageCountMax === null ||
+        name !== "generate_image" ||
+        !schema?.properties?.count
+      )
+        return schema;
       return {
         ...schema,
-        properties: { ...schema.properties, count: { ...schema.properties.count, maximum: narrowed.imageCountMax } },
+        properties: {
+          ...schema.properties,
+          count: { ...schema.properties.count, maximum: narrowed.imageCountMax },
+        },
       };
     },
   };
@@ -102,11 +110,17 @@ beforeEach(() => {
     .mockReset()
     .mockImplementation((async (spec: Any) => {
       try {
-        await spec.run({ orderId: "0123456789abcdef0123456789abcdef", orderAccepted: () => undefined });
+        await spec.run({
+          orderId: "0123456789abcdef0123456789abcdef",
+          orderAccepted: () => undefined,
+        });
       } catch {
         /* a job that settled as failed: the call it made is all this file looks at */
       }
-      return { media_refs: Array.from({ length: spec.count }, (_, i) => `media_gen_${i}`), job_id: "job_1" };
+      return {
+        media_refs: Array.from({ length: spec.count }, (_, i) => `media_gen_${i}`),
+        job_id: "job_1",
+      };
     }) as Any);
 });
 
@@ -134,7 +148,8 @@ interface Row {
 
 function rows(): Row[] {
   const out: Row[] = [];
-  const add = (label: string, tool: string, args: Args, call = true) => out.push({ label, tool, args, call });
+  const add = (label: string, tool: string, args: Args, call = true) =>
+    out.push({ label, tool, args, call });
   add("image: the default model, nothing else", "generate_image", { prompt: "a red car" });
   for (const m of IMAGE_MODELS) {
     for (const count of [undefined, null, 0, -3, 1, 2.9, "3", 4, 9, "many"]) {
@@ -175,16 +190,21 @@ function rows(): Row[] {
   for (const model of models) {
     for (const [name, text] of scripts) {
       for (const style of [undefined, "calm", "calm::", "  "]) {
-        add(`voiceover ${model ?? "default"} ${name} style=${JSON.stringify(style)}`, "generate_voiceover", {
-          text,
-          ...(model ? { model } : {}),
-          ...(style === undefined ? {} : { style }),
-        });
+        add(
+          `voiceover ${model ?? "default"} ${name} style=${JSON.stringify(style)}`,
+          "generate_voiceover",
+          {
+            text,
+            ...(model ? { model } : {}),
+            ...(style === undefined ? {} : { style }),
+          },
+        );
       }
     }
   }
   add("music: the default model", "generate_music", { prompt: "lofi beat" });
-  for (const m of MUSIC_MODELS) add(`music ${m.id}`, "generate_music", { prompt: "lofi beat", model: m.id });
+  for (const m of MUSIC_MODELS)
+    add(`music ${m.id}`, "generate_music", { prompt: "lofi beat", model: m.id });
   return out;
 }
 
@@ -200,24 +220,35 @@ describe("what the bar quotes is what the tool sends", () => {
 
   it("walks every model of every generation tool", () => {
     const labels = all.map((r) => r.label).join("\n");
-    for (const m of [...IMAGE_MODELS, ...VIDEO_MODELS, ...TTS_MODELS, ...MUSIC_MODELS]) expect(labels).toContain(m.id);
+    for (const m of [...IMAGE_MODELS, ...VIDEO_MODELS, ...TTS_MODELS, ...MUSIC_MODELS])
+      expect(labels).toContain(m.id);
     expect(all.length).toBeGreaterThan(200);
   });
 
   for (const row of all) {
     it(row.label, async () => {
       const sent = await paidCall(row.tool, row.args);
-      expect(sent !== null, row.call ? "the real tool should have made its paid call" : "the real tool should have refused").toBe(row.call);
+      expect(
+        sent !== null,
+        row.call
+          ? "the real tool should have made its paid call"
+          : "the real tool should have refused",
+      ).toBe(row.call);
       const quoted = holdInputs(row.tool, row.args);
       if (!sent) return; // refused before any paid call: nothing is spent, so a price shown would be harmless
-      expect(quoted, "the tool made a paid call, so the app has to be able to quote it").not.toBeNull();
+      expect(
+        quoted,
+        "the tool made a paid call, so the app has to be able to quote it",
+      ).not.toBeNull();
       expect(quoted!.proxy).toBe(sent.name);
       const names = (contract.args as Record<string, string[]>)[sent.name];
       expect(Object.keys(quoted!.args).sort()).toEqual([...names].sort());
       const lengthOnly = (contract.length_only as Record<string, string[]>)[sent.name] ?? [];
       for (const name of names) {
         if (lengthOnly.includes(name)) {
-          expect(codePoints(quoted!.args[name])).toBe(Math.min(codePoints(sent.args[name]), QUOTE_TEXT_CAP));
+          expect(codePoints(quoted!.args[name])).toBe(
+            Math.min(codePoints(sent.args[name]), QUOTE_TEXT_CAP),
+          );
         } else {
           expect(quoted!.args[name], name).toEqual(sent.args[name]);
         }
@@ -231,7 +262,9 @@ describe("the quote follows what the registry does to the arguments before a too
     narrowed.imageCountMax = 2;
     const args = { prompt: "p", model: "nano-banana", count: 4 };
     const sent = await paidCall("generate_image", args);
-    expect(sent?.args.count, "the registry clamped count to the contract before the tool ran").toBe(2);
+    expect(sent?.args.count, "the registry clamped count to the contract before the tool ran").toBe(
+      2,
+    );
     expect(holdInputs("generate_image", args)?.args.count).toBe(2);
   });
 
@@ -252,14 +285,30 @@ describe("the quote follows what the registry does to the arguments before a too
 describe("a price is only ever shown for a call that can be priced", () => {
   const refused: [string, string, Args][] = [
     ["an unknown image model", "generate_image", { prompt: "p", model: "no-such-model" }],
-    ["a video model given to the image tool", "generate_image", { prompt: "p", model: VIDEO_MODELS[0].id }],
+    [
+      "a video model given to the image tool",
+      "generate_image",
+      { prompt: "p", model: VIDEO_MODELS[0].id },
+    ],
     ["an unknown video model", "generate_video", { prompt: "p", model: "no-such-model" }],
-    ["an image model given to the video tool", "generate_video", { prompt: "p", model: IMAGE_MODELS[0].id }],
+    [
+      "an image model given to the video tool",
+      "generate_video",
+      { prompt: "p", model: IMAGE_MODELS[0].id },
+    ],
     ["a voiceover with no text", "generate_voiceover", { text: "   " }],
     ["an unknown voice model", "generate_voiceover", { text: "hi", model: "no-such-model" }],
-    ["a music model given to the voiceover tool", "generate_voiceover", { text: "hi", model: MUSIC_MODELS[0].id }],
+    [
+      "a music model given to the voiceover tool",
+      "generate_voiceover",
+      { text: "hi", model: MUSIC_MODELS[0].id },
+    ],
     ["an unknown music model", "generate_music", { prompt: "p", model: "no-such-model" }],
-    ["a voice model given to the music tool", "generate_music", { prompt: "p", model: TTS_MODELS[0].id }],
+    [
+      "a voice model given to the music tool",
+      "generate_music",
+      { prompt: "p", model: TTS_MODELS[0].id },
+    ],
   ];
   for (const [label, tool, args] of refused) {
     it(`${label}: the tool refuses and nothing is quoted`, async () => {
@@ -320,37 +369,62 @@ describe("holdInputs never throws, whatever the model sent", () => {
     fc.array(fc.oneof(fc.string(), fc.integer(), fc.constant(null)), { maxLength: 4 }),
     fc.dictionary(fc.string({ maxLength: 6 }), fc.oneof(fc.string(), fc.integer()), { maxKeys: 3 }),
   );
-  const tools = fc.constantFrom("generate_image", "generate_video", "generate_voiceover", "generate_music", "other");
+  const tools = fc.constantFrom(
+    "generate_image",
+    "generate_video",
+    "generate_voiceover",
+    "generate_music",
+    "other",
+  );
 
   it("returns null or exactly the contracted arguments", () => {
     fc.assert(
       fc.property(
         tools,
-        fc.record({ model: junk, count: junk, duration: junk, text: junk, style: junk, reference_images: junk, prompt: junk }),
+        fc.record({
+          model: junk,
+          count: junk,
+          duration: junk,
+          text: junk,
+          style: junk,
+          reference_images: junk,
+          prompt: junk,
+        }),
         (tool, args) => {
           const quoted = holdInputs(tool, args as Args);
           if (quoted === null) return true;
           const names = (contract.args as Record<string, string[]>)[quoted.proxy];
-          return JSON.stringify(Object.keys(quoted.args).sort()) === JSON.stringify([...names].sort());
+          return (
+            JSON.stringify(Object.keys(quoted.args).sort()) === JSON.stringify([...names].sort())
+          );
         },
       ),
       { numRuns: 400 },
     );
   });
 
-  it.each([null, undefined, 7, "text", [], [1, 2]])("a non-object argument list (%j) quotes nothing", (args) => {
-    expect(holdInputs("generate_image", args as Any)).toBeNull();
-  });
+  it.each([null, undefined, 7, "text", [], [1, 2]])(
+    "a non-object argument list (%j) quotes nothing",
+    (args) => {
+      expect(holdInputs("generate_image", args as Any)).toBeNull();
+    },
+  );
 
   it("counts a script in characters the way the server does, for any text", () => {
     fc.assert(
       fc.property(
-        fc.array(fc.integer({ min: 0, max: 0x10ffff }).filter((cp) => cp < 0xd800 || cp > 0xdfff), { minLength: 1, maxLength: 300 }),
+        fc.array(
+          fc.integer({ min: 0, max: 0x10ffff }).filter((cp) => cp < 0xd800 || cp > 0xdfff),
+          { minLength: 1, maxLength: 300 },
+        ),
         (points) => {
           const text = String.fromCodePoint(...points);
           if (!text.trim()) return true;
           const quoted = holdInputs("generate_voiceover", { text });
-          return quoted !== null && codePoints(quoted.args.text) === Math.min(codePoints(text.trim()), QUOTE_TEXT_CAP);
+          return (
+            quoted !== null &&
+            codePoints(quoted.args.text) === Math.min(codePoints(text.trim()), QUOTE_TEXT_CAP)
+          );
         },
       ),
       { numRuns: 300 },

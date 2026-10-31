@@ -176,7 +176,12 @@ describe("job ledger", () => {
   });
 
   describe("a job is on disk before its paid call goes out, or the call does not go out", () => {
-    const spec = { kind: "generation" as const, tool: "generate_video", label: "a 5s video", order_id: "0123456789abcdef0123456789abcdef" };
+    const spec = {
+      kind: "generation" as const,
+      tool: "generate_video",
+      label: "a 5s video",
+      order_id: "0123456789abcdef0123456789abcdef",
+    };
 
     it("refuses to begin when the record cannot be written, and leaves nothing behind in memory", async () => {
       const { fs, store } = make();
@@ -243,7 +248,12 @@ describe("job ledger", () => {
   });
 
   describe("a ledger file that is there but cannot be read is never written over", () => {
-    const spec = { kind: "generation" as const, tool: "generate_video", label: "a 5s video", order_id: "0123456789abcdef0123456789abcdef" };
+    const spec = {
+      kind: "generation" as const,
+      tool: "generate_video",
+      label: "a 5s video",
+      order_id: "0123456789abcdef0123456789abcdef",
+    };
 
     function unreadable(fs: MemFs): { fix: () => void } {
       const realRead = fs.readTextFile.bind(fs);
@@ -260,7 +270,9 @@ describe("job ledger", () => {
 
     it("opens, but refuses to begin a paid job, and leaves the file exactly as it was", async () => {
       const { fs, store } = make();
-      seed(fs, [{ id: "keep", session: "a-previous-launch", order_id: "0123456789abcdef0123456789abcdef" }] as Partial<JobRecord>[]);
+      seed(fs, [
+        { id: "keep", session: "a-previous-launch", order_id: "0123456789abcdef0123456789abcdef" },
+      ] as Partial<JobRecord>[]);
       const before = fs.files.get(PATH);
       unreadable(fs);
       const ledger = await JobLedger.open(store);
@@ -269,13 +281,18 @@ describe("job ledger", () => {
       expect(ledger.unreadableReason).toContain("EACCES: the file is locked");
       const refusal = await ledger.begin(spec).catch((e: unknown) => e);
       expect(refusal).toBeInstanceOf(JobLedgerUnreadableError);
-      expect((refusal as JobLedgerUnreadableError).reason, "the refusal does not say why").toContain("EACCES: the file is locked");
+      expect(
+        (refusal as JobLedgerUnreadableError).reason,
+        "the refusal does not say why",
+      ).toContain("EACCES: the file is locked");
       expect(fs.files.get(PATH)).toBe(before);
     });
 
     it("never writes while it cannot read, whatever else happens to it", async () => {
       const { fs, store } = make();
-      seed(fs, [{ id: "keep", session: "a-previous-launch", order_id: "0123456789abcdef0123456789abcdef" }] as Partial<JobRecord>[]);
+      seed(fs, [
+        { id: "keep", session: "a-previous-launch", order_id: "0123456789abcdef0123456789abcdef" },
+      ] as Partial<JobRecord>[]);
       const before = fs.files.get(PATH);
       unreadable(fs);
       const ledger = await JobLedger.open(store);
@@ -286,7 +303,9 @@ describe("job ledger", () => {
 
     it("refuses at the write itself, not only at the doors that lead to it", async () => {
       const { fs, store } = make();
-      seed(fs, [{ id: "keep", session: "a-previous-launch", order_id: "0123456789abcdef0123456789abcdef" }] as Partial<JobRecord>[]);
+      seed(fs, [
+        { id: "keep", session: "a-previous-launch", order_id: "0123456789abcdef0123456789abcdef" },
+      ] as Partial<JobRecord>[]);
       const before = fs.files.get(PATH);
       unreadable(fs);
       const ledger = await JobLedger.open(store);
@@ -298,7 +317,9 @@ describe("job ledger", () => {
 
     it("reads it again at the next begin, so a lock that clears needs no restart, and nothing it holds is lost", async () => {
       const { fs, store } = make();
-      seed(fs, [{ id: "keep", session: "a-previous-launch", order_id: "0123456789abcdef0123456789abcdef" }] as Partial<JobRecord>[]);
+      seed(fs, [
+        { id: "keep", session: "a-previous-launch", order_id: "0123456789abcdef0123456789abcdef" },
+      ] as Partial<JobRecord>[]);
       const lock = unreadable(fs);
       const ledger = await JobLedger.open(store);
       await expect(ledger.begin(spec)).rejects.toBeInstanceOf(JobLedgerUnreadableError);
@@ -348,7 +369,12 @@ describe("job ledger", () => {
     it("is not given up on when the launch that made it is gone: it is taken over, still running", async () => {
       const { fs, store } = make();
       seed(fs, [
-        { id: "kept", session: "a-previous-launch", order_id: "0123456789abcdef0123456789abcdef", started_by: "chat" },
+        {
+          id: "kept",
+          session: "a-previous-launch",
+          order_id: "0123456789abcdef0123456789abcdef",
+          started_by: "chat",
+        },
         { id: "plain", session: "a-previous-launch" },
       ] as Partial<JobRecord>[]);
 
@@ -358,13 +384,19 @@ describe("job ledger", () => {
       expect(ledger.running().map((r) => r.id)).toEqual(["kept"]);
       expect(ledger.interrupted().map((r) => r.id)).toEqual(["plain"]);
       const disk = onDisk(fs);
-      expect(disk.find((r) => r.id === "kept")).toMatchObject({ status: "running", session: APP_SESSION, started_by: "chat" });
+      expect(disk.find((r) => r.id === "kept")).toMatchObject({
+        status: "running",
+        session: APP_SESSION,
+        started_by: "chat",
+      });
       expect(disk.find((r) => r.id === "kept")?.error).toBeUndefined();
     });
 
     it("is taken over only once: the next open finds it already this launch's own", async () => {
       const { fs, store } = make();
-      seed(fs, [{ id: "kept", session: "a-previous-launch", order_id: "0123456789abcdef0123456789abcdef" }] as Partial<JobRecord>[]);
+      seed(fs, [
+        { id: "kept", session: "a-previous-launch", order_id: "0123456789abcdef0123456789abcdef" },
+      ] as Partial<JobRecord>[]);
       await JobLedger.open(store);
       const again = await JobLedger.open(store);
       expect(again.adopted()).toEqual([]);
@@ -373,7 +405,9 @@ describe("job ledger", () => {
 
     it("is left to the launch that owns it", async () => {
       const { fs, store } = make();
-      seed(fs, [{ id: "mine", session: APP_SESSION, order_id: "0123456789abcdef0123456789abcdef" }] as Partial<JobRecord>[]);
+      seed(fs, [
+        { id: "mine", session: APP_SESSION, order_id: "0123456789abcdef0123456789abcdef" },
+      ] as Partial<JobRecord>[]);
       const ledger = await JobLedger.open(store);
       expect(ledger.adopted()).toEqual([]);
       expect(ledger.running().map((r) => r.id)).toEqual(["mine"]);
@@ -399,11 +433,23 @@ describe("job ledger", () => {
 
     it("is never dropped by the cap on history while it runs", async () => {
       const { fs, store } = make();
-      const old: Partial<JobRecord>[] = Array.from({ length: 60 }, (_, i) => ({ id: `old${i}`, status: "done" as const, started_at: i, ended_at: i }));
-      seed(fs, [...old, { id: "kept", session: "a-previous-launch", order_id: "0123456789abcdef0123456789abcdef" }] as Partial<JobRecord>[]);
+      const old: Partial<JobRecord>[] = Array.from({ length: 60 }, (_, i) => ({
+        id: `old${i}`,
+        status: "done" as const,
+        started_at: i,
+        ended_at: i,
+      }));
+      seed(fs, [
+        ...old,
+        { id: "kept", session: "a-previous-launch", order_id: "0123456789abcdef0123456789abcdef" },
+      ] as Partial<JobRecord>[]);
       const ledger = await JobLedger.open(store);
       await ledger.begin({ kind: "generation", tool: "generate_image", label: "new" });
-      expect(onDisk(fs).filter((r) => r.status === "running").map((r) => r.id)).toContain("kept");
+      expect(
+        onDisk(fs)
+          .filter((r) => r.status === "running")
+          .map((r) => r.id),
+      ).toContain("kept");
     });
   });
 
