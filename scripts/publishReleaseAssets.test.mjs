@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -24,7 +24,7 @@ let dir;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "publish-assets-test-"));
 });
-afterEach(() => rmSync(dir, { recursive: true, force: true }));
+afterEach(() => removeScratch(dir));
 
 /** Files with deterministic, distinct contents, named as the release workflows name theirs. */
 function makeFiles(specs) {

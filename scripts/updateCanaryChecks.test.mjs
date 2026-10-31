@@ -136,7 +136,7 @@ describe("comparing the installed bundle with the published one", () => {
   beforeEach(() => {
     dir = mkdtempSync(path.join(tmpdir(), "canary-tree-"));
   });
-  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+  afterEach(() => rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
 
   /** A small bundle shaped like a .app: nested directories, an empty one, executables and a link. */
   function bundle(name, files = {}) {
