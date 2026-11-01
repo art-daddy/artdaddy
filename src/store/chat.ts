@@ -12,7 +12,8 @@ import { runBounded, timedOutResult, toolBoundMs } from "../agent/toolBound";
 import { useLiveWait } from "./liveWait";
 import type { InferenceAttachment, RoundInput, ToolResultItem, Usage } from "../agent/types";
 import { captureError, setCorrelation } from "../observability/sentry";
-import { isExpected, toUserMessage } from "../lib/errors";
+import { isExpected } from "../lib/errors";
+import { describeTurnFailure } from "../agent/failureCopy";
 import { noteTurnError, requestIdOf, turnErrorCode } from "../agent/turnError";
 import { buildReportContext } from "../observability/reportContext";
 import { submitFeedback, type FeedbackKind } from "../api/feedback";
@@ -81,6 +82,9 @@ interface ChatState {
   /** True when an autonomous run paused at the loop cap (Cursor-style) and the
    *  user can resume it with the Continue button. */
   canContinue: boolean;
+  /** The turn ended in a failure that sending the same round again can help, and the runner still holds
+   *  that round. Offers "Try again". */
+  canRetry: boolean;
   /** Admission fence: true while the project is CLOSING (final-save/close-failed). Every mutating chat
    *  action (send/approve/deny/continue/undo/redo/restore) refuses while set, so no NEW turn or
    *  transcript write can race the close's final snapshot. Cleared by resume() on "Keep editing". */
@@ -121,6 +125,8 @@ interface ChatState {
   restoreTo: (turnId: string) => Promise<RestoredPrompt | null>;
   stop: () => Promise<void>;
   continueRun: () => Promise<void>;
+  /** Send the round that failed again, exactly as it was, without retyping anything. */
+  retry: () => Promise<void>;
   refreshState: () => Promise<void>;
   sendFeedback: (
     kind: FeedbackKind,
@@ -235,7 +241,7 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
     currentExec = null;
     currentRunner = null;
     useLiveWait.getState().clear();
-    set({ execToken: null }); // no live execution -> its origin is no longer current
+    set({ execToken: null, canRetry: false }); // no live execution -> its origin is no longer current
   }
   /** Quiesce transcript producers: retire the in-flight turn (its `emit()` halts, so no more
    *  persistSessionSoon fires) AND retire any pending load (so a stale loadClientSession can't
@@ -447,6 +453,9 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
         );
         finishTurn((s) => ({
           error: String(data?.error ?? "error"),
+          // An error round is worth sending again: the provider may have recovered, and a picture it
+          // refused is already marked, so the round no longer carries it.
+          canRetry: Boolean(currentRunner?.canRetry),
           turns: withLast(s.turns, (t) => ({
             ...t,
             status: "error",
@@ -638,7 +647,7 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
   }
 
   async function runTurn(exec: TurnExecution, action: () => Promise<void>): Promise<void> {
-    set({ streaming: true, error: null, canContinue: false });
+    set({ streaming: true, error: null, canContinue: false, canRetry: false });
     // A fresh run starts from nothing waiting: a call the last run abandoned (one that ignored Stop)
     // must not be shown as this run's wait.
     if (exec.inflight === 0) useLiveWait.getState().clear();
@@ -666,10 +675,12 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
       } else {
         if (!isExpected(e)) captureError(e, { phase: "turn" });
         noteTurnError(turnErrorCode(e), requestIdOf(e));
-        const message = toUserMessage(e);
+        const failure = describeTurnFailure(e);
+        const message = failure.message;
         finishTurn((s) => ({
           streaming: false,
           error: message,
+          canRetry: failure.retryable && Boolean(currentRunner?.canRetry),
           turns: withLast(s.turns, (t) => ({
             ...t,
             status: "error",
@@ -760,6 +771,7 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
     canContinue: false,
     closing: false,
     error: null,
+    canRetry: false,
     // Luna at high effort costs a fraction of a cent a round; the picker offers gpt-6.1-sol.
     model: "gpt-5.6-luna",
     effort: "high",
@@ -912,7 +924,7 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
         if (exec === currentExec) {
           captureError(e, { phase: "host" });
           noteTurnError("host_unavailable");
-          const msg = toUserMessage(e);
+          const msg = describeTurnFailure(e).message;
           finishTurn((s) => ({
             streaming: false,
             error: msg,
@@ -1105,6 +1117,7 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
         streaming: false,
         pending: null,
         canContinue: false,
+        canRetry: false,
         providerSnapshot: null,
         turns: withLast(s.turns, (t) =>
           t.status === "streaming" || t.status === "awaiting" ? { ...t, status: "done" } : t,
@@ -1121,6 +1134,24 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
       }));
       rearm(currentExec);
       await runTurn(currentExec, () => currentRunner!.continueRun());
+    },
+
+    retry: async () => {
+      const { projectId, streaming, closing, canRetry } = get();
+      if (!projectId || streaming || closing || !canRetry || !currentRunner || !currentExec) return;
+      if (!currentRunner.canRetry) return;
+      // The failed attempt is replaced by the new one: its sentence is gone from the turn (the failure itself
+      // stays in the report context), so a success does not leave an error above it.
+      set((s) => ({
+        canRetry: false,
+        turns: withLast(s.turns, (t) => ({
+          ...t,
+          status: "streaming",
+          parts: t.parts.filter((p) => p.kind !== "error"),
+        })),
+      }));
+      rearm(currentExec);
+      await runTurn(currentExec, () => currentRunner!.retry());
     },
 
     refreshState: async () => {

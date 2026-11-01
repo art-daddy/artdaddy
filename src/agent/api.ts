@@ -14,6 +14,7 @@ import { hostInfo } from "../platform/host";
 import type { InferenceAttachment, RoundInput, RoundResultDTO } from "./types";
 import { catalogIdentity } from "../contract";
 import { ClientUpdateRequiredError } from "../update/updater";
+import { RoundHttpError, serverCodeOf } from "./failureCopy";
 
 async function postJson<T>(url: string, body: unknown, signal?: AbortSignal): Promise<T> {
   const res = await authedFetch(
@@ -42,7 +43,10 @@ async function postJson<T>(url: string, body: unknown, signal?: AbortSignal): Pr
     }
     // Retries exhausted: a clean, non-Sentry error the turn surfaces to the user.
     if (res.status === 429) throw failedCall(new RateLimitError(), res);
-    throw failedCall(new Error(`${res.status}: ${text || res.statusText}`), res);
+    throw failedCall(
+      new RoundHttpError(res.status, serverCodeOf(text), text || res.statusText),
+      res,
+    );
   }
   return withRequestId((await res.json()) as T, res);
 }
@@ -139,7 +143,7 @@ const STREAM_IDLE_MS = 90_000;
 /** The round ran out of time on OUR side. Separate from an abort so the turn can tell the
  *  user their connection died instead of silently behaving as if they had pressed Stop. */
 export class RoundTimeoutError extends Error {
-  constructor(ms: number) {
+  constructor(readonly ms: number) {
     super(
       `the model did not respond within ${Math.round(ms / 60_000)} minutes — ` +
         `the connection was probably lost. Nothing was changed; try again.`,
@@ -253,7 +257,10 @@ async function streamRound(
       throw failedCall(new CreditLimitError(detail), res);
     }
     if (res.status === 429) throw failedCall(new RateLimitError(), res);
-    throw failedCall(new Error(`${res.status}: ${text || res.statusText}`), res);
+    throw failedCall(
+      new RoundHttpError(res.status, serverCodeOf(text), text || res.statusText),
+      res,
+    );
   }
   if (!res.body) throw new Error("no response body for the inference stream");
 

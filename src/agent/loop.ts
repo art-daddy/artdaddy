@@ -162,6 +162,13 @@ export class ClientTurnRunner {
   // later round never inherits a decision the user made about a different call.
   private decisions = new Map<string, { allowed: boolean; reason?: string }>();
   private autoSteps = 0;
+  /** The model round that has no answer yet (it threw, or came back as an error): what it was sent and
+   *  which tool outputs rode it. Null whenever the last round answered. */
+  private lastRound: {
+    input: RoundInput;
+    atts: InferenceAttachment[];
+    sent: ToolResultItem[];
+  } | null = null;
   // Per call of the current round: its round marker, and the round's prose (first call only).
   private callRound = new Map<string, number>();
   private rationale = new Map<string, string>();
@@ -192,7 +199,7 @@ export class ClientTurnRunner {
       ? { tool_results: carried, extra_texts: userText ? [userText] : [] }
       : { user_text: userText };
     try {
-      await this.handle(await this.d.infer(input, []));
+      await this.runRound(input, []);
     } finally {
       void flushAgentEvents();
     }
@@ -332,14 +339,46 @@ export class ClientTurnRunner {
     const sent = this.results;
     this.results = [];
     this.addRoundNote(sent);
+    await this.runRound({ tool_results: sent }, atts, sent);
+  }
+
+  /** Send one model round and carry on with its answer. The round is remembered while it has no
+   *  answer: if it throws, or comes back as an error, it can be sent again exactly as it was
+   *  ({@link retry}), and what it carried is still owed to a later message. A round that answers
+   *  (a reply or tool calls) is forgotten. */
+  private async runRound(
+    input: RoundInput,
+    atts: InferenceAttachment[],
+    sent: ToolResultItem[] = [],
+  ): Promise<void> {
+    this.lastRound = { input, atts, sent };
     let next: RoundResultDTO;
     try {
-      next = await this.d.infer({ tool_results: sent }, atts);
+      next = await this.d.infer(input, atts);
     } catch (e) {
       this.results = [...sent, ...this.results];
       throw e;
     }
+    if (next.kind !== "error") this.lastRound = null;
     await this.handle(next);
+  }
+
+  /** Whether the round that failed can be sent again as it was. */
+  get canRetry(): boolean {
+    return this.lastRound !== null;
+  }
+
+  /** Send the round that failed again, exactly as it was: the same input and pictures, nothing
+   *  retyped. What the round carried rides it again, so it is no longer owed to a later message. */
+  async retry(): Promise<void> {
+    const last = this.lastRound;
+    if (!last) return;
+    this.results = this.results.filter((r) => !last.sent.includes(r));
+    try {
+      await this.runRound(last.input, last.atts, last.sent);
+    } finally {
+      void flushAgentEvents();
+    }
   }
 
   /** Merge the app's note for this round into its LAST output. A note rides inside a tool output,

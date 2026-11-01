@@ -3,6 +3,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const runnerStart = vi.fn(async (_t: string) => {});
+const runnerRetry = vi.fn(async () => {});
+// Whether the live runner still holds a round that can be sent again.
+const runnerState = { canRetry: true };
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let lastDeps: any = null;
 vi.mock("../agent/loop", () => ({
@@ -17,6 +20,10 @@ vi.mock("../agent/loop", () => ({
     approve = async () => {};
     deny = async () => {};
     continueRun = async () => {};
+    retry = () => runnerRetry();
+    get canRetry() {
+      return runnerState.canRetry;
+    }
   },
 }));
 const hostReady: { current: Promise<void> } = { current: Promise.resolve() };
@@ -46,7 +53,10 @@ vi.mock("../api/appEvents", async (io) => ({
 }));
 
 import { reportTurnError } from "../api/appEvents";
-import { RateLimitError } from "../api/http";
+import { RateLimitError, SessionExpiredError } from "../api/http";
+import { CreditLimitError } from "../api/usage";
+import { RoundHttpError } from "../agent/failureCopy";
+import { ClientUpdateRequiredError } from "../update/updater";
 import { clearRecentFailures, recentFailures } from "../observability/recentFailures";
 import { useChat } from "./chat";
 import { useEditor } from "./editor";
@@ -149,6 +159,163 @@ describe("a turn that throws", () => {
     await startTurn();
     expect(reportTurnError).not.toHaveBeenCalled();
     expect(recentFailures()).toEqual([]);
+  });
+});
+
+// What the person reads, by the same failures: a sentence that says what happened and what to do, never the
+// generic apology an unrecognised error used to get.
+describe("what the person is told when a turn throws", () => {
+  it.each([
+    [
+      "a round that timed out",
+      Object.assign(new Error("x"), { name: "RoundTimeoutError", ms: 600_000 }),
+      /10 minutes.*Nothing was changed/,
+    ],
+    [
+      "a stream that went quiet",
+      Object.assign(new Error("x"), { name: "StreamStalledError", idleMs: 90_000 }),
+      /nothing arrived for 90 seconds/,
+    ],
+    [
+      "the ledger unreachable",
+      new RoundHttpError(503, "metering_unavailable", "{}"),
+      /credit balance.*nothing was charged/i,
+    ],
+    ["a gateway restart", new RoundHttpError(502, null, "<html>"), /restarting or overloaded/],
+    ["a dropped connection", new TypeError("Failed to fetch"), /Couldn't reach the server/],
+    ["an error nobody typed", new Error("ECONNRESET"), /couldn't tell why/],
+  ])("%s", async (_name, error, words) => {
+    runnerStart.mockRejectedValueOnce(error);
+    await startTurn();
+    const shown = useChat.getState().turns[0].parts.at(-1) as unknown as { error: string };
+    expect(shown.error).toMatch(words);
+    expect(useChat.getState().error).toBe(shown.error);
+    expect(shown.error).not.toMatch(/something went wrong|ECONNRESET/i);
+  });
+});
+
+// Sending a failed turn again: one click, nothing retyped, and only when it can help.
+describe("trying a failed turn again", () => {
+  const credit = () => new CreditLimitError({ used: 99, limit: 100, remaining: 1, scope: "user" });
+
+  beforeEach(() => {
+    runnerState.canRetry = true;
+    runnerRetry.mockReset();
+    runnerRetry.mockResolvedValue(undefined);
+  });
+
+  it.each([
+    ["a dropped connection", () => new TypeError("Failed to fetch"), true],
+    ["a gateway restart", () => new RoundHttpError(502, null, "<html>"), true],
+    [
+      "a round that timed out",
+      () => Object.assign(new Error("x"), { name: "RoundTimeoutError", ms: 6e5 }),
+      true,
+    ],
+    ["no credits left", credit, false],
+    ["an update that is needed", () => new ClientUpdateRequiredError(), false],
+    ["a session that is gone", () => new SessionExpiredError(), false],
+  ])(
+    "after %s, is offered only if sending the round again can help",
+    async (_name, make, offered) => {
+      runnerStart.mockRejectedValueOnce(make());
+      await startTurn();
+      expect(useChat.getState().turns[0].status).toBe("error");
+      expect(useChat.getState().canRetry).toBe(offered);
+    },
+  );
+
+  it("is offered after an error round, and not when the runner holds no round to send again", async () => {
+    await startTurn();
+    emit("error", { error: "The AI provider had a problem.", error_code: "provider_unavailable" });
+    expect(useChat.getState().canRetry).toBe(true);
+
+    useChat.setState({ canRetry: false });
+    runnerState.canRetry = false;
+    emit("error", { error: "again" });
+    expect(useChat.getState().canRetry).toBe(false);
+  });
+
+  it("sends the round again without retyping: the turn runs again, its error is gone, its earlier words stay", async () => {
+    runnerStart.mockImplementationOnce(async () => {
+      emit("tool_call", { call_id: "c1", name: "inspect_media", args: {} });
+      emit("tool_result", { call_id: "c1", name: "inspect_media", ok: true });
+      throw new TypeError("Failed to fetch");
+    });
+    await startTurn();
+    expect(useChat.getState().turns[0].parts.some((p) => p.kind === "error")).toBe(true);
+
+    let seen: { streaming: boolean; status: string; kinds: string[] } | null = null;
+    runnerRetry.mockImplementationOnce(async () => {
+      const s = useChat.getState();
+      seen = {
+        streaming: s.streaming,
+        status: s.turns[0].status,
+        kinds: s.turns[0].parts.map((p) => String(p.kind)),
+      };
+      emit("text", { text: "here you go" });
+      emit("turn_done", { cost_usd: 0 });
+    });
+    await useChat.getState().retry();
+
+    expect(runnerRetry).toHaveBeenCalledTimes(1);
+    expect(runnerStart).toHaveBeenCalledTimes(1); // the message was not sent again
+    expect(seen).toEqual({
+      streaming: true,
+      status: "streaming",
+      kinds: ["tool_call", "tool_result"],
+    });
+    const after = useChat.getState();
+    expect(after.turns[0].status).toBe("done");
+    expect(after.turns[0].userText).toBe("go");
+    expect(after.turns[0].parts.some((p) => p.kind === "error")).toBe(false);
+    expect(after.error).toBeNull();
+    expect(after.canRetry).toBe(false);
+  });
+
+  it("is offered again, with the new failure and only one error shown, when the retry fails too", async () => {
+    runnerStart.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    await startTurn();
+    runnerRetry.mockRejectedValueOnce(new RoundHttpError(503, "metering_unavailable", "{}"));
+    await useChat.getState().retry();
+
+    const s = useChat.getState();
+    const errors = s.turns[0].parts.filter((p) => p.kind === "error") as unknown as Array<{
+      error: string;
+    }>;
+    expect(errors).toHaveLength(1);
+    expect(errors[0].error).toMatch(/credit balance/);
+    expect(s.canRetry).toBe(true);
+  });
+
+  it("does nothing when it is not offered, while a run is in progress, or once the project is closing", async () => {
+    runnerStart.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    await startTurn();
+    for (const blocked of [{ canRetry: false }, { streaming: true }, { closing: true }]) {
+      useChat.setState({ canRetry: true, streaming: false, closing: false, ...blocked });
+      await useChat.getState().retry();
+    }
+    expect(runnerRetry).not.toHaveBeenCalled();
+  });
+
+  it("is not offered for a round the runner no longer holds", async () => {
+    runnerStart.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    await startTurn();
+    runnerState.canRetry = false;
+    await useChat.getState().retry();
+    expect(runnerRetry).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["a new message", async () => useChat.getState().send("something else")],
+    ["Stop", async () => useChat.getState().stop()],
+    ["leaving the project", async () => useChat.getState().deactivate()],
+  ])("is no longer offered after %s", async (_name, act) => {
+    runnerStart.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    await startTurn();
+    expect(useChat.getState().canRetry).toBe(true);
+    await act();
+    expect(useChat.getState().canRetry).toBe(false);
   });
 });
 
