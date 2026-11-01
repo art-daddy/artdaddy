@@ -782,39 +782,46 @@ describe("the release build's gate on the minimum macOS", () => {
 // ---- Apple's own tool as the second opinion --------------------------------------------------------------
 
 describe.skipIf(process.platform !== "darwin")("against otool, on this Mac", () => {
-  /** `{ arch: "11.0" }` for a universal file, `{ "": "11.0" }` for a thin one, as `otool -l` prints them. */
-  function fromOtool(target) {
-    const text = execFileSync("otool", ["-l", target], {
+  /** What `otool -l` prints as the minimum macOS of ONE thin Mach-O file: LC_BUILD_VERSION's, else
+   *  LC_VERSION_MIN_MACOSX's. A universal file is cut into its slices first (lipo -thin): otool's
+   *  own choice of slices to print for a universal file depends on its version and on the host. */
+  function otoolMinimum(thin) {
+    const text = execFileSync("otool", ["-l", thin], {
       encoding: "utf8",
       maxBuffer: 256 * 1024 * 1024,
     });
-    const parts = text.split(/^.*\(architecture (\S+)\):$/m);
-    const sections =
-      parts.length === 1
-        ? [["", parts[0]]]
-        : Array.from({ length: (parts.length - 1) / 2 }, (_, i) => [
-            parts[1 + i * 2],
-            parts[2 + i * 2],
-          ]);
-    const out = {};
-    for (const [arch, body] of sections) {
-      const build = /cmd LC_BUILD_VERSION[\s\S]*?platform (MACOS|1)\s+minos (\S+)/.exec(body);
-      const min = /cmd LC_VERSION_MIN_MACOSX[\s\S]*?version (\S+)/.exec(body);
-      out[arch] = (build ?? min)?.[build ? 2 : 1] ?? null;
-    }
-    return out;
+    const build = /cmd LC_BUILD_VERSION[\s\S]*?platform (?:MACOS|1)\s+minos (\S+)/.exec(text);
+    const min = /cmd LC_VERSION_MIN_MACOSX[\s\S]*?version (\S+)/.exec(text);
+    return build?.[1] ?? min?.[1] ?? null;
   }
 
   it("reads the same minimum as otool -l in every slice of real binaries (thin and universal)", () => {
-    const targets = [process.execPath, "/bin/ls", "/usr/bin/true", "/usr/bin/otool"];
-    for (const target of targets) {
-      const mine = scanTree(target)[0];
-      expect(mine, target).toBeDefined();
-      const theirs = fromOtool(target);
-      for (const slice of mine.slices) {
-        const expected = mine.slices.length > 1 ? theirs[slice.arch] : Object.values(theirs)[0];
-        expect(formatVersion(slice.minos), `${target} ${slice.arch}`).toBe(expected);
+    const scratch = mkdtempSync(path.join(tmpdir(), "minos-"));
+    try {
+      let compared = 0;
+      for (const target of [process.execPath, "/bin/ls", "/usr/bin/true", "/usr/bin/otool"]) {
+        const mine = scanTree(target)[0];
+        expect(mine, target).toBeDefined();
+        let comparedHere = 0;
+        for (const slice of mine.slices) {
+          let thin = target;
+          if (mine.slices.length > 1) {
+            thin = path.join(scratch, `${path.basename(target)}.${slice.arch}`);
+            try {
+              execFileSync("lipo", [target, "-thin", slice.arch, "-output", thin]);
+            } catch {
+              continue; // a slice lipo will not cut out says nothing about the reader
+            }
+          }
+          expect(formatVersion(slice.minos), `${target} ${slice.arch}`).toBe(otoolMinimum(thin));
+          comparedHere++;
+        }
+        expect(comparedHere, `${target}: at least one slice was compared`).toBeGreaterThan(0);
+        compared += comparedHere;
       }
+      expect(compared).toBeGreaterThanOrEqual(4);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
     }
   });
 });
