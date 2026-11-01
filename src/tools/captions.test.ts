@@ -99,7 +99,7 @@ describe("add_captions", () => {
     await resetTestDocuments();
   });
 
-  // UJ-030 / Palmier's rule: a caption is as long as fits ONE line of its box, so how long that is
+  // UJ-030: a caption is as long as fits ONE line of its box, so how long that is
   // depends on the canvas and the type size, and no caption it places wraps.
   describe("how long a caption is", () => {
     const SPEECH =

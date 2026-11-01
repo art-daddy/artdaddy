@@ -73,7 +73,7 @@ function assertEditable(track: Track): void {
  *  A bare "not found" tells the model nothing it can act on, so it retries the same dead id.
  *  The id was almost always valid when it was read: a manual delete, an undo, or a checkpoint
  *  restore moved underneath the turn, and nothing reports those to the agent. Name the
- *  recovery, as Palmier does ("re-read with get_timeline for current ids"). */
+ *  recovery ("re-read with get_timeline for current ids"). */
 export function missingClip(clipId: unknown): OpError {
   return new OpError(
     `clip '${String(clipId)}' no longer exists — it was removed, or the timeline changed ` +

@@ -40,7 +40,7 @@ const wordArb = fc
     return tokens.map(([t, bump], i) => w(t, i, i + 0.9, (seg += bump === 3 ? 1 : 0)));
   });
 
-describe("chunkWords: a caption is as long as fits one line (UJ-030, Palmier's rule)", () => {
+describe("chunkWords: a caption is as long as fits one line (UJ-030)", () => {
   it("never loses or reorders a word, whatever the line or the caps", () => {
     fc.assert(
       fc.property(

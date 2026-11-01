@@ -3,8 +3,8 @@
 // Someone waiting on a look gets its whisper at once, one look at a time: L3's four whispers at once
 // (the background's and three windows, 8 threads each) made every one of them several times slower.
 // The indexer's work is nobody's wait, so it takes turns: one whisper and one loudness measurement at
-// a time across every project, and none STARTS while an export is queued or running (Palmier's
-// indexer waits while an export runs) or while a look's whisper runs or waits. A job already running
+// a time across every project, and none STARTS while an export is queued or running
+// or while a look's whisper runs or waits. A job already running
 // is never stopped for one: the next simply does not start.
 
 export type BackgroundKind = "whisper" | "loudness";
