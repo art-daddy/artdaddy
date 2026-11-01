@@ -26,6 +26,12 @@ function deadCall(name: string, args = {}): ToolCallView {
   return { name, args, text, running, ok, interrupted, error };
 }
 
+/** A call that has its answer, as the chat builds the row for it. */
+function answered(name: string, result: Record<string, unknown>): ToolCallView {
+  const { text, running, ok, interrupted, pending, error } = summarizeCall(name, {}, result, ctx);
+  return { name, args: {}, result, text, running, ok, interrupted, pending, error };
+}
+
 describe("a call the turn never answered", () => {
   // Reported from production: spinners still turning long after the turn ended. A call was
   // rendered "in flight" purely because it had no result, so pressing Stop mid-tool left one
@@ -51,6 +57,63 @@ describe("a call the turn never answered", () => {
   it("is not counted as a failure — nothing reported an error", () => {
     render(<ToolCalls calls={[deadCall("export")]} ctx={ctx} />);
     expect(screen.queryByText("✗")).toBeNull();
+  });
+});
+
+describe("a call that is still going in the background", () => {
+  const waiting = {
+    ok: false,
+    pending: true,
+    status: "in_progress",
+    error: "Captions were NOT added: the speech is still being transcribed.",
+  };
+
+  it("shows a neutral mark: not the tick that means done, and not the cross that means failed", () => {
+    render(<ToolCalls calls={[answered("add_captions", waiting)]} ctx={ctx} />);
+    expect(screen.queryByText("✓")).toBeNull();
+    expect(screen.queryByText("✗")).toBeNull();
+    expect(screen.getByText("…")).toBeInTheDocument();
+    expect(screen.getByText(/not finished yet/)).toBeInTheDocument();
+  });
+
+  it("does not print the sentence written for the model", () => {
+    render(<ToolCalls calls={[answered("add_captions", waiting)]} ctx={ctx} />);
+    expect(screen.queryByText(/Captions were NOT added/)).toBeNull();
+  });
+
+  it("is not hidden behind a failure elsewhere in the same run", () => {
+    render(
+      <ToolCalls
+        calls={[
+          answered("add_captions", waiting),
+          answered("export", { ok: false, error: "disk full" }),
+        ]}
+        ctx={ctx}
+      />,
+    );
+    expect(screen.getByText("✗")).toBeInTheDocument();
+    expect(screen.queryByText("…")).toBeNull();
+  });
+});
+
+describe("a call stopped at its time limit", () => {
+  const modelSentence =
+    "video_find_moment did not finish within 5 minutes and was stopped. Nothing was changed. Do not repeat the same call: tell the user it took too long.";
+  const timedOut = { ok: false, timed_out: true, bound_s: 300, error: modelSentence };
+
+  it("tells the person what happened in plain words, without the tool's identifier or our instructions to the model", () => {
+    render(<ToolCalls calls={[answered("video_find_moment", timedOut)]} ctx={ctx} />);
+    expect(screen.getByText("✗")).toBeInTheDocument();
+    expect(
+      screen.getByText("It took longer than 5 minutes, so it was stopped. Nothing was changed."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/video_find_moment/)).toBeNull();
+    expect(screen.queryByText(/Do not repeat/)).toBeNull();
+  });
+
+  it("leaves the model's own sentence untouched: the row is for the person, the result for the model", () => {
+    answered("video_find_moment", timedOut);
+    expect(timedOut.error).toBe(modelSentence);
   });
 });
 

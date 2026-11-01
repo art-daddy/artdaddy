@@ -41,11 +41,12 @@ import MessagePart from "./MessagePart";
 import { Pane } from "./Pane";
 import ReportProblemDialog from "./ReportProblemDialog";
 import { trackLabelById } from "./timeline/labels";
+import StatusLine from "./StatusLine";
 import ToolCalls from "./ToolCalls";
 import { buildRows, type SummaryContext } from "./toolSummary";
 import { STARTER_PROMPTS } from "./starterPrompts";
 import { jobNoteSummary } from "./jobNoteSummary";
-import { Button, Spinner, cn } from "./ui";
+import { Button, cn } from "./ui";
 import { useMcpPanel } from "../store/mcpPanel";
 import { useProjectNotice } from "../store/projectNotice";
 import { attachmentKindFromName, mediaKindFromName } from "./chatMedia";
@@ -494,12 +495,7 @@ export default function ChatView({ onHide }: { onHide?: () => void } = {}) {
                       <MessagePart key={row.key} part={row.part} />
                     ),
                   )}
-                  {turn.status === "streaming" && (
-                    <div className="flex items-center gap-2 text-xs">
-                      <Spinner />
-                      <span className="shimmer">working…</span>
-                    </div>
-                  )}
+                  {(turn.status === "streaming" || turn.status === "awaiting") && <StatusLine />}
                 </div>
               </div>
             )}

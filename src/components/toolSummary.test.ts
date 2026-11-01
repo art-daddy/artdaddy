@@ -77,16 +77,52 @@ describe("every tool the model can call has a sentence", () => {
     // add_captions answers this way while the words are still being made: nothing was added.
     const pending = { ok: false, pending: true, status: "in_progress", error: "NOT added" };
     for (const name of TOOLS) {
-      const { text, ok, running, error } = summarizeCall(name, {}, pending, ctx);
+      const { text, ok, running, error, pending: flagged } = summarizeCall(name, {}, pending, ctx);
       expect(text, name).toMatch(/not finished yet$/);
       expect(text, name).not.toMatch(/^Couldn't|^Added|^Generated/);
       expect(ok, name).toBe(true);
       expect(running, name).toBe(false);
       expect(error, name).toBeUndefined();
+      expect(flagged, name).toBe(true);
     }
     expect(summarizeCall("add_captions", {}, pending, ctx).text).toBe(
       "Captioning the audio — not finished yet",
     );
+  });
+
+  it("tells the person a tool was stopped at its limit in plain words, for ANY tool, and the model's sentence stays out of the row", () => {
+    const sentence = (name: string) =>
+      `${name} did not finish within 5 minutes and was stopped. Nothing was changed. Do not repeat the same call.`;
+    for (const name of TOOLS) {
+      const { ok, running, error, text } = summarizeCall(
+        name,
+        {},
+        { ok: false, timed_out: true, bound_s: 300, error: sentence(name) },
+        ctx,
+      );
+      expect(ok, name).toBe(false);
+      expect(running, name).toBe(false);
+      expect(text, name).toMatch(/^Couldn't /);
+      expect(error, name).toBe(
+        "It took longer than 5 minutes, so it was stopped. Nothing was changed.",
+      );
+      expect(error, name).not.toContain(name);
+    }
+  });
+
+  it("says the limit in the person's minutes, whatever the model-side number is", () => {
+    const minutes = (bound_s: unknown) =>
+      summarizeCall("inspect_media", {}, { ok: false, timed_out: true, bound_s }, ctx).error;
+    expect(minutes(60)).toBe(
+      "It took longer than 1 minute, so it was stopped. Nothing was changed.",
+    );
+    expect(minutes(120)).toBe(
+      "It took longer than 2 minutes, so it was stopped. Nothing was changed.",
+    );
+    for (const odd of [undefined, "soon", NaN, -5, 0, null])
+      expect(minutes(odd), String(odd)).toMatch(
+        /^It took longer than \d+ minutes?, so it was stopped/,
+      );
   });
 });
 

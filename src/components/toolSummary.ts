@@ -448,6 +448,17 @@ function fallback(name: string): Phrase {
   return { bare: words, ing: `${sentence}…`, done: () => sentence };
 }
 
+/** The phrase for `name`: ours when we have one, else a plain restatement of the name. A tool name
+ *  comes from the model, so `constructor` or `toString` must not find what an object inherits. */
+function phraseOf(name: string): Phrase {
+  return Object.prototype.hasOwnProperty.call(PHRASES, name) ? PHRASES[name] : fallback(name);
+}
+
+/** The sentence for a tool that is running ("Captioning the audio"), without a closing ellipsis. */
+export function runningPhrase(name: string): string {
+  return phraseOf(name).ing.replace(/(…|\.\.\.)$/, "");
+}
+
 function generationVerb(result: Result): string {
   return result.status === "queued" || result.status === "generating" ? "Requested" : "Generated";
 }
@@ -463,6 +474,9 @@ export interface ToolCallView {
   /** Started, never answered, and the turn is over — Stop, a supersede, or a crash. Distinct
    *  from `!ok`: nothing reported a failure, the answer simply never came. */
   interrupted?: boolean;
+  /** Answered, but the work is still going in the background and the call can be repeated: neither
+   *  done nor failed. */
+  pending?: boolean;
   /** The raw failure, kept for the expanded view rather than the summary line. */
   error?: string;
 }
@@ -478,8 +492,15 @@ export function summarizeCall(
   result: Result | undefined,
   ctx: SummaryContext,
   live = true,
-): { text: string; running: boolean; ok: boolean; interrupted?: boolean; error?: string } {
-  const phrase = PHRASES[name] ?? fallback(name);
+): {
+  text: string;
+  running: boolean;
+  ok: boolean;
+  interrupted?: boolean;
+  pending?: boolean;
+  error?: string;
+} {
+  const phrase = phraseOf(name);
   if (!result) {
     if (live) return { text: phrase.ing, running: true, ok: true };
     return {
@@ -496,6 +517,18 @@ export function summarizeCall(
       text: `${phrase.ing.replace(/…$/, "")} — not finished yet`,
       running: false,
       ok: true,
+      pending: true,
+    };
+  }
+  // Stopped at its time limit. The model was told in words meant for it (which tool, what not to
+  // repeat); the person is told what happened, without the tool's identifier or our instructions.
+  if (result.timed_out === true) {
+    const minutes = Math.max(1, Math.round((num(result.bound_s) ?? 300) / 60));
+    return {
+      text: `Couldn't ${phrase.bare}`,
+      running: false,
+      ok: false,
+      error: `It took longer than ${minutes} minute${minutes === 1 ? "" : "s"}, so it was stopped. Nothing was changed.`,
     };
   }
   const error = errorOf(result);
@@ -570,14 +603,24 @@ export function buildRows(
       const name = s(p.name);
       const args = (p.args ?? p.arguments ?? {}) as Args;
       const result = results.get(s(p.call_id));
-      const { text, running, ok, interrupted, error } = summarizeCall(
+      const { text, running, ok, interrupted, pending, error } = summarizeCall(
         name,
         args,
         result,
         ctx,
         live,
       );
-      const view: ToolCallView = { name, args, result, text, running, ok, interrupted, error };
+      const view: ToolCallView = {
+        name,
+        args,
+        result,
+        text,
+        running,
+        ok,
+        interrupted,
+        pending,
+        error,
+      };
 
       // A failure is the headline, never a parenthetical inside someone else's sentence.
       if (!ok) {
@@ -634,7 +677,7 @@ export function rowSummary(calls: ToolCallView[], ctx: SummaryContext): string {
  *  would claim something the calls did not do. */
 function mergeSameTool(calls: ToolCallView[], ctx: SummaryContext): string | null {
   const name = calls[0].name;
-  const phrase = PHRASES[name];
+  const phrase = Object.prototype.hasOwnProperty.call(PHRASES, name) ? PHRASES[name] : undefined;
   if (!phrase) return null;
   const keys = ["count", "removed", "moved", "updated", "linked", "unlinked", "n"];
   const totals: Result = {};
