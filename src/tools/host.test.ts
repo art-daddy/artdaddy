@@ -99,6 +99,35 @@ describe("openToolHost", () => {
     },
   );
 
+  // What a tool may promise depends on who is asking (refState.ts): the in-app agent is told when
+  // background work lands, an MCP agent never is. The host is shared, and runs overlap, so the
+  // caller has to travel with each run and not sit on the host where the next run could read it.
+  it("gives each overlapping run its own caller: an MCP call and the in-app agent never see each other's surface", async () => {
+    const host = openToolHost("surface-project");
+    await host.ready;
+    let release!: (value: unknown) => void;
+    toolGate = new Promise((resolve) => {
+      release = resolve;
+    });
+    const mcp = host.run("library_op", {}, { surface: "mcp" });
+    await vi.waitFor(() => expect(toolCtx).not.toBeNull());
+    const mcpContext = toolCtx;
+    toolCtx = null;
+    const app = host.run(
+      "library_op",
+      {},
+      { surface: "app", signal: new AbortController().signal },
+    );
+    await vi.waitFor(() => expect(toolCtx).not.toBeNull());
+    const appContext = toolCtx;
+    release({ ok: true });
+    await Promise.all([mcp, app]);
+    expect(mcpContext.surface).toBe("mcp");
+    expect(appContext.surface).toBe("app");
+    // The work a tool hands off to outlive its turn keeps the caller too.
+    expect(appContext.detach().surface).toBe("app");
+  });
+
   it("isolates overlapping export modes through ignored cancellation and leaves an omitted MCP mode unset", async () => {
     const host = openToolHost("export-mode-project");
     await host.ready;

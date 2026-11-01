@@ -208,7 +208,7 @@ export async function probeMediaTool(
   const path = await ctx.store.resolveMediaRef(mediaRef);
   if (!path) {
     return unresolvedRefError(
-      ctx.store,
+      ctx,
       mediaRef,
       `media not found: ${mediaRef}. Pass a library asset id or filename (not a system path).`,
     );
@@ -248,7 +248,7 @@ export async function runFfmpegTool(
     const p = await ctx.store.resolveMediaRef(inputs[i] as string);
     if (!p) {
       return unresolvedRefError(
-        ctx.store,
+        ctx,
         String(inputs[i]),
         `input ${i} not found: ${String(inputs[i])}. Pass a library asset id or filename (not a system path).`,
       );
@@ -372,7 +372,7 @@ export async function clipVideoTool(
   const resolved = await ctx.store.resolveRef(inputRef);
   if (!resolved)
     return unresolvedRefError(
-      ctx.store,
+      ctx,
       inputRef,
       `input not found: ${inputRef}. Pass a library id or filename (import_media a local file first).`,
     );
@@ -420,7 +420,7 @@ export async function cropImageTool(
   const src = await ctx.store.resolveRef(ref);
   if (!src)
     return unresolvedRefError(
-      ctx.store,
+      ctx,
       ref,
       `image not found: ${ref}. Pass a library id or filename (import_media a local file first).`,
     );

@@ -37,6 +37,8 @@ const KNOWN_TOP_LEVEL_TIME_PARAMS: string[] = [
   "inspect_timeline.end_frame",
   "inspect_timeline.max_frames",
   "inspect_timeline.start_frame",
+  // SECONDS: how long the call waits for exports to end, the same kind of real-world wait.
+  "manage_exports.wait_seconds",
   "ripple_delete.end",
   "ripple_delete.ranges",
   "ripple_delete.start",

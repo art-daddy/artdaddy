@@ -345,6 +345,8 @@ export function listExportOutcomes(): Array<Record<string, unknown>> {
     ...(r.error ? { error: r.error } : {}),
     ...(r.warnings?.length ? { warnings: r.warnings } : {}),
     ...(r.endedAt ? { duration_s: Math.round((r.endedAt - r.startedAt) / 100) / 10 } : {}),
+    // How long an unfinished export has been at it (or waiting), so an agent can judge it.
+    ...(isOpen(r) ? { elapsed_s: Math.max(0, Math.round((Date.now() - r.startedAt) / 1000)) } : {}),
   }));
 }
 
@@ -371,13 +373,78 @@ const NOTHING_TO_CANCEL: Partial<Record<ExportState, string>> = {
   cancelled: "that export was already cancelled",
 };
 
+/** Longest one `manage_exports` call waits for exports to end. */
+export const MAX_EXPORT_WAIT_S = 60;
+
+/** The wait a caller asked for, in ms: 0 (no wait, today's answer) unless it is a finite number
+ *  above zero, never above {@link MAX_EXPORT_WAIT_S}. Anything else is not an error, just no wait
+ *  (the same reading `inspect_media` gives its own `wait_seconds`). */
+export function exportWaitMs(raw: unknown): number {
+  if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) return 0;
+  return Math.round(Math.min(raw, MAX_EXPORT_WAIT_S) * 1000);
+}
+
+const isOpen = (r: ExportRecord): boolean => r.state === "running" || r.state === "queued";
+
+/** Resolve when no export (or, given `jobId`, that one) is running or queued, after at most `ms`,
+ *  or when `signal` aborts (Stop). Always resolves: what it found is read afterwards. */
+export function waitForExports(
+  jobId: string | null,
+  ms: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  const open = (): boolean =>
+    records.some((r) => (jobId === null || r.job_id === jobId) && isOpen(r));
+  if (ms <= 0 || signal?.aborted || !open()) return Promise.resolve();
+  return new Promise((resolve) => {
+    const finish = (): void => {
+      clearTimeout(timer);
+      stop();
+      signal?.removeEventListener("abort", finish);
+      resolve();
+    };
+    const stop = subscribeExports(() => {
+      if (!open()) finish();
+    });
+    const timer = setTimeout(finish, ms);
+    signal?.addEventListener("abort", finish, { once: true });
+  });
+}
+
+/** What manage_exports adds to a list that still holds unfinished exports: the model is told not
+ *  to poll, because a polling agent asked 237 times in one session. */
+function unfinishedHint(open: number, waitedMs: number): Record<string, unknown> {
+  const what = open === 1 ? "1 export is" : `${open} exports are`;
+  return {
+    retry_after_s: waitedMs > 0 ? MAX_EXPORT_WAIT_S : 15,
+    note:
+      waitedMs > 0
+        ? `${what} still unfinished after waiting ${Math.round(waitedMs / 1000)} s. Do other work, or call manage_exports again with wait_seconds: it answers the moment they end.`
+        : `${what} unfinished. Do not call this in a loop: pass wait_seconds (up to ${MAX_EXPORT_WAIT_S}) and it answers the moment they end.`,
+  };
+}
+
 /** manage_exports: the only route to cancellation. Without it an async export could be started
- *  and never stopped, which is a capability the synchronous version had. */
+ *  and never stopped, which is a capability the synchronous version had. `signal` is the turn's
+ *  Stop: a wait ends the moment it fires. */
 export async function manageExportsTool(
   args: Record<string, unknown>,
+  signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
   const action = String(args.action ?? "list").trim() || "list";
-  if (action === "list") return { ok: true, exports: listExportOutcomes() };
+  if (action === "list") {
+    const only = String(args.job_id ?? "").trim() || null;
+    if (only && !records.some((r) => r.job_id === only))
+      return {
+        ok: false,
+        error: `no export with job_id '${only}' in this session; manage_exports action='list' shows them`,
+      };
+    const waitedMs = exportWaitMs(args.wait_seconds);
+    await waitForExports(only, waitedMs, signal);
+    const rows = listExportOutcomes().filter((r) => only === null || r.job_id === only);
+    const open = rows.filter((r) => r.state === "running" || r.state === "queued").length;
+    return { ok: true, exports: rows, ...(open > 0 ? unfinishedHint(open, waitedMs) : {}) };
+  }
   if (action !== "cancel")
     return { ok: false, error: `unknown action '${action}'; use 'list' or 'cancel'` };
 

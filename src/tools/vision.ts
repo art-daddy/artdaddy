@@ -29,7 +29,7 @@ async function visionDescribe(
   const abs = await ctx.store.resolveMediaRef(mediaRef);
   if (!abs) {
     return unresolvedRefError(
-      ctx.store,
+      ctx,
       mediaRef,
       `image not found: ${mediaRef}. Pass a library asset id or a project-relative artifact ref (not a system path).`,
     );
@@ -306,7 +306,7 @@ async function findContent(
   const resolved = await ctx.store.resolveMediaRef(mediaRef);
   if (!resolved)
     return {
-      ...(await unresolvedRefError(ctx.store, mediaRef, `image not found: ${mediaRef}`)),
+      ...(await unresolvedRefError(ctx, mediaRef, `image not found: ${mediaRef}`)),
       prompt,
     };
   // A HEIF-family still is measured and sliced as its decoded picture (media/stillPicture.ts).

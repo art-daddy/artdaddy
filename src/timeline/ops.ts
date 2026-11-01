@@ -353,5 +353,5 @@ export function registerTimelineTools(
   registry.register("unlink_clips", (args) => unlinkClipsTool(args, getCtx()));
   // export (8f)
   registry.register("export", (args) => exportTool(args, getCtx()));
-  registry.register("manage_exports", (args) => manageExportsTool(args));
+  registry.register("manage_exports", (args) => manageExportsTool(args, getCtx()?.signal));
 }

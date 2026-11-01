@@ -2467,7 +2467,7 @@
     },
     {
       "name": "manage_exports",
-      "description": "List exports and their outcomes, or cancel one that has not finished. Exports are queued: `export` returns a `job_id` and the render continues in the background.\n\naction 'list' (default) returns {ok, exports:[{job_id, filename, state, media_ref?, error?, warnings?, duration_s?}]} for EVERY export this session, including finished ones. state is 'running' (encoding now), 'queued' (waiting its turn), 'done', 'failed' or 'cancelled'. A 'failed' row carries the `error` explaining why. This is the ONLY way to learn how a background export ended, so check it before telling the user their file is ready — an export that started successfully can still fail.\n\nA 'done' row carries `media_ref` for the delivered file, which is registered in the library: pass it to inspect_media to look at what actually shipped, rather than at the timeline it was rendered from.\n\naction 'cancel' needs `job_id` and stops that export: the partly written file is discarded and any file already at the destination is left untouched. Returns {ok, cancelled:true|false}. `false` means that job had already ended, and `state` says how: 'done' (the file was delivered), 'failed' or 'cancelled'. That is not an error; an ended export cannot be recalled. A job_id this session never started is refused (ok:false).\n\nUse it when the user asks what is still rendering, or asks to stop an export, or to check whether a job you started earlier has finished.",
+      "description": "List exports and their outcomes, or cancel one that has not finished. Exports are queued: `export` returns a `job_id` and the render continues in the background.\n\naction 'list' (default) returns {ok, exports:[{job_id, filename, state, media_ref?, error?, warnings?, duration_s?, elapsed_s?}]} for EVERY export this session, including finished ones. state is 'running' (encoding now), 'queued' (waiting its turn), 'done', 'failed' or 'cancelled'. A 'failed' row carries the `error` explaining why. This is the ONLY way to learn how a background export ended, so check it before telling the user their file is ready — an export that started successfully can still fail.\n\nDon't poll in a loop. To wait for an export, pass `wait_seconds` (0 to 60, default 0) with action 'list': it answers the moment nothing is running or queued, or after that many seconds. Add `job_id` to wait for, and list, only that export. An unfinished row carries `elapsed_s` (seconds so far), and while any export is unfinished the reply carries `retry_after_s` and a `note`.\n\nA 'done' row carries `media_ref` for the delivered file, which is registered in the library: pass it to inspect_media to look at what actually shipped, rather than at the timeline it was rendered from.\n\naction 'cancel' needs `job_id` and stops that export: the partly written file is discarded and any file already at the destination is left untouched. Returns {ok, cancelled:true|false}. `false` means that job had already ended, and `state` says how: 'done' (the file was delivered), 'failed' or 'cancelled'. That is not an error; an ended export cannot be recalled. A job_id this session never started is refused (ok:false).\n\nUse it when the user asks what is still rendering, or asks to stop an export, or to check whether a job you started earlier has finished.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -2481,7 +2481,11 @@
           },
           "job_id": {
             "type": "string",
-            "description": "Required for 'cancel'. The `job_id` the `export` call returned."
+            "description": "Required for 'cancel'. The `job_id` the `export` call returned. With 'list' it is optional and narrows the answer, and the wait, to that export."
+          },
+          "wait_seconds": {
+            "type": "number",
+            "description": "Optional, for 'list'. SECONDS to wait (0 to 60, default 0) for running or queued exports to finish before answering. Use it instead of calling again and again."
           }
         },
         "required": [],
