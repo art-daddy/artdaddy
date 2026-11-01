@@ -8,6 +8,7 @@ import { sameTimeline, TimelineAwareness, type DocReading } from "../agent/timel
 import { collectInferenceAttachments } from "../agent/attachments";
 import { historyAttachments } from "../agent/historyFrames";
 import { markRefusedFrames, refusedFramesOf, refusedNotice } from "../agent/refusedFrames";
+import { runBounded, timedOutResult, toolBoundMs } from "../agent/toolBound";
 import type { InferenceAttachment, RoundInput, ToolResultItem, Usage } from "../agent/types";
 import { captureError, setCorrelation } from "../observability/sentry";
 import { isExpected, toUserMessage } from "../lib/errors";
@@ -558,19 +559,27 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
             ? docReading(exec.host.projectId)
             : null;
         // Carry THIS execution's origin so a commit that lands after a supersede/restore is rejected
-        // at the mutation gate (the mandatory backstop under the halted() guard above).
-        const out = await exec.host.run(name, args, {
-          surface: "app",
-          signal: exec.controller.signal,
-          model: traceLabels.model,
-          transcriptId: traceLabels.transcript_id,
-          trace,
-          origin: {
-            chatSessionId: traceLabels.transcript_id,
-            branchId: 0,
-            executionId: exec.token,
-          },
-        });
+        // at the mutation gate (the mandatory backstop under the halted() guard above). A tool that
+        // only looks or waits is time-boxed (toolBound.ts); the call gets its own signal, which ends
+        // with the turn's Stop and at the bound.
+        const bounded = await runBounded(
+          (signal) =>
+            exec.host.run(name, args, {
+              surface: "app",
+              signal,
+              model: traceLabels.model,
+              transcriptId: traceLabels.transcript_id,
+              trace,
+              origin: {
+                chatSessionId: traceLabels.transcript_id,
+                branchId: 0,
+                executionId: exec.token,
+              },
+            }),
+          { boundMs: toolBoundMs(name), signal: exec.controller.signal },
+        );
+        if (bounded.timedOut) return timedOutResult(name, bounded.boundMs);
+        const out = bounded.value;
         if (wholeRead && !superseded() && (out as { ok?: unknown } | null)?.ok !== false)
           awareness.sawWholeTimeline(wholeRead);
         return out;
