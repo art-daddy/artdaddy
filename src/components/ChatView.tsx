@@ -131,6 +131,8 @@ export default function ChatView({ onHide }: { onHide?: () => void } = {}) {
     stop,
     canContinue,
     continueRun,
+    canRetry,
+    retry,
     pendingMentions,
     addMention,
     removeMention,
@@ -541,14 +543,21 @@ export default function ChatView({ onHide }: { onHide?: () => void } = {}) {
               </div>
             )}
             {turn.status === "error" && (
-              <button
-                type="button"
-                onClick={() => setReportingTurn(turn.id)}
-                disabled={Boolean(rated[turn.id])}
-                className="self-start text-[11px] text-red-300/80 underline hover:text-red-200 disabled:text-neutral-500 disabled:no-underline"
-              >
-                {rated[turn.id] ? "Report sent — thanks" : "Report this problem"}
-              </button>
+              <div className="flex flex-wrap items-center gap-3 self-start">
+                {canRetry && turn.id === turns.at(-1)?.id && (
+                  <Button variant="primary" onClick={() => void retry()}>
+                    ↻ Try again
+                  </Button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setReportingTurn(turn.id)}
+                  disabled={Boolean(rated[turn.id])}
+                  className="text-[11px] text-red-300/80 underline hover:text-red-200 disabled:text-neutral-500 disabled:no-underline"
+                >
+                  {rated[turn.id] ? "Report sent — thanks" : "Report this problem"}
+                </button>
+              </div>
             )}
           </div>
         ))}

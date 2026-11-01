@@ -74,6 +74,8 @@ function baseState() {
     clearMentions: vi.fn(),
     canContinue: false,
     continueRun: vi.fn(),
+    canRetry: false,
+    retry: vi.fn(),
     setControls: vi.fn(),
     send: vi.fn(),
     approve: vi.fn(),
@@ -479,6 +481,47 @@ describe("ChatView", () => {
     render(<ChatView />);
     fireEvent.click(screen.getByRole("button", { name: /Stop/ }));
     expect(state.stop).toHaveBeenCalled();
+  });
+
+  describe("a turn that failed", () => {
+    const failedTurn = (id: string) => ({
+      id,
+      userText: "make a reel",
+      attachments: [],
+      parts: [{ kind: "error", error: "ArtDaddy's service is restarting or overloaded." }],
+      status: "error",
+    });
+
+    it("offers Try again, which sends the round again without retyping", () => {
+      state.turns = [failedTurn("t1")];
+      state.canRetry = true;
+      render(<ChatView />);
+      fireEvent.click(screen.getByRole("button", { name: /Try again/ }));
+      expect(state.retry).toHaveBeenCalledTimes(1);
+      expect(state.send).not.toHaveBeenCalled();
+    });
+
+    it("offers it only when sending the round again can help", () => {
+      state.turns = [failedTurn("t1")];
+      state.canRetry = false;
+      render(<ChatView />);
+      expect(screen.queryByRole("button", { name: /Try again/ })).toBeNull();
+      expect(screen.getByText("Report this problem")).toBeInTheDocument();
+    });
+
+    it("offers it on the latest turn only, never on an older failure", () => {
+      state.turns = [failedTurn("t1"), { ...failedTurn("t2"), status: "done", parts: [] }];
+      state.canRetry = true;
+      render(<ChatView />);
+      expect(screen.queryByRole("button", { name: /Try again/ })).toBeNull();
+    });
+
+    it("still offers the report beside it", () => {
+      state.turns = [failedTurn("t1")];
+      state.canRetry = true;
+      render(<ChatView />);
+      expect(screen.getByText("Report this problem")).toBeInTheDocument();
+    });
   });
 
   describe("the line under a running turn says what it is waiting on", () => {
