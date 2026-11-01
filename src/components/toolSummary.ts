@@ -489,6 +489,15 @@ export function summarizeCall(
       interrupted: true,
     };
   }
+  // Not a failure and not done: the work is going on in the background and the call can be
+  // repeated (captions waiting for words). Reading it as "Couldn't ..." would say the wrong thing.
+  if (result.pending === true) {
+    return {
+      text: `${phrase.ing.replace(/…$/, "")} — not finished yet`,
+      running: false,
+      ok: true,
+    };
+  }
   const error = errorOf(result);
   if (error) {
     const bare = phrase.bare;

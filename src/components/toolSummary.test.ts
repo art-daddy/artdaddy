@@ -72,6 +72,22 @@ describe("every tool the model can call has a sentence", () => {
       expect(text.trim().length).toBeGreaterThan(0);
     }
   });
+
+  it("reads a call that is waiting on background work as waiting, never as a failure and never as done", () => {
+    // add_captions answers this way while the words are still being made: nothing was added.
+    const pending = { ok: false, pending: true, status: "in_progress", error: "NOT added" };
+    for (const name of TOOLS) {
+      const { text, ok, running, error } = summarizeCall(name, {}, pending, ctx);
+      expect(text, name).toMatch(/not finished yet$/);
+      expect(text, name).not.toMatch(/^Couldn't|^Added|^Generated/);
+      expect(ok, name).toBe(true);
+      expect(running, name).toBe(false);
+      expect(error, name).toBeUndefined();
+    }
+    expect(summarizeCall("add_captions", {}, pending, ctx).text).toBe(
+      "Captioning the audio — not finished yet",
+    );
+  });
 });
 
 // ── tense ────────────────────────────────────────────────────────────────────

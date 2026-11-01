@@ -22,7 +22,9 @@ import type { Clip, Timeline } from "../timeline/model";
 import { lineWidthIn, planCanvas, textBox } from "../timeline/renderPlan";
 import type { ClientToolContext } from "./context";
 import type { ClientToolRegistry } from "./registry";
-import { ensureTranscript, transcriptionFailureText } from "./transcribe";
+import { captionWords, pendingCaptionsResult } from "./captionTranscript";
+import { TRANSCRIPT_WAIT_MS } from "./transcribe";
+import type { InProgressTranscript } from "./transcriptWait";
 
 type Args = Record<string, unknown>;
 type Result = Record<string, unknown>;
@@ -182,23 +184,26 @@ export async function addCaptionsTool(args: Args, ctx: ClientToolContext | null)
   const candidates = wantTrack ? [wantTrack] : [...byTrack.keys()];
   const cuesByTrack = new Map<string, Cue[]>();
   const failures: Array<{ clip_id: string; error: string }> = [];
+  // Words not made yet are waited for at most as long as get_transcript waits, in all.
+  const until = Date.now() + TRANSCRIPT_WAIT_MS;
+  const waiting: Array<{ clip_id: string; track_id: string }> = [];
+  let waitingStatus: InProgressTranscript | null = null;
   for (const trackId of candidates) {
     const cues: Cue[] = [];
     for (const clip of byTrack.get(trackId) ?? []) {
-      let words: Array<{
-        word: string;
-        start_seconds: number;
-        end_seconds: number;
-        segment_id: number;
-      }>;
-      try {
-        words = (await ensureTranscript(ctx, String(clip.media_ref), undefined, language)).parsed
-          .words;
-      } catch (e) {
-        // One unreadable source must not sink the rest, but it must not read as silence either.
-        failures.push({ clip_id: String(clip.id), error: transcriptionFailureText(e) });
+      const got = await captionWords(ctx, String(clip.media_ref), language, until);
+      if (got.kind === "cancelled") return { ok: false, error: "cancelled" };
+      if (got.kind === "pending") {
+        waiting.push({ clip_id: String(clip.id), track_id: trackId });
+        waitingStatus ??= got.status;
         continue;
       }
+      if (got.kind === "failed") {
+        // One unreadable source must not sink the rest, but it must not read as silence either.
+        failures.push({ clip_id: String(clip.id), error: got.error });
+        continue;
+      }
+      const words = got.transcript.words;
       const timed: CaptionWord[] = words
         .filter((w) => Number.isFinite(w.start_seconds) && Number.isFinite(w.end_seconds))
         .map((w) => ({
@@ -237,6 +242,10 @@ export async function addCaptionsTool(args: Args, ctx: ClientToolContext | null)
     }
     if (cues.length) cuesByTrack.set(trackId, cues);
   }
+
+  // Captions from the words that ARE ready could name the wrong track or leave a gap, so nothing is
+  // placed until every clip has its words.
+  if (waiting.length && waitingStatus) return pendingCaptionsResult(waiting, waitingStatus);
 
   if (!cuesByTrack.size) {
     if (failures.length) {

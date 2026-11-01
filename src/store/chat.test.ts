@@ -21,6 +21,7 @@ import {
 } from "./transcriptFile";
 import { inferRoundStreaming } from "../agent/api";
 import { TIMELINE_CHANGED_NOTE } from "../agent/compose";
+import { ABORT_GRACE_MS, READ_BOUND_MS, timedOutResult } from "../agent/toolBound";
 import { agentEventContext, createToolTrace, setAgentContext } from "../api/agentEvents";
 import { clearRecentFailures, noteFailure } from "../observability/recentFailures";
 import { setOpenDocumentResolver } from "../project/openDocuments";
@@ -1067,6 +1068,78 @@ describe("useChat loop deps + remaining actions", () => {
     expect(run.mock.calls[0][2].origin?.executionId).toBe(useChat.getState().execToken);
     await useChat.getState().stop();
     expect(await pending).toEqual({ ok: false, error: "stopped" });
+  });
+
+  it("a tool that only looks is stopped at its bound, and the model is told in words it can use", async () => {
+    let told: AbortSignal | undefined;
+    const run = vi.fn(
+      async (_name: string, _args: Record<string, unknown>, options: ToolRunOptions) =>
+        new Promise<unknown>(() => {
+          told = options.signal; // ignores the stop: the worst case
+        }),
+    );
+    vi.mocked(openToolHost).mockImplementationOnce(
+      (id: string) =>
+        ({
+          projectId: id,
+          ready: Promise.resolve(),
+          has: () => true,
+          run,
+          store: () => null,
+        }) as Any,
+    );
+    setDesktop("p1");
+    useChat.setState({ projectId: "p1" });
+    await useChat.getState().send("find the moment");
+    vi.useFakeTimers();
+    try {
+      let answer: unknown = "pending";
+      void lastDeps.runTool("video_find_moment", {}).then((a: unknown) => (answer = a));
+      await vi.advanceTimersByTimeAsync(READ_BOUND_MS - 1);
+      expect(told?.aborted).toBe(false);
+      expect(answer).toBe("pending");
+      await vi.advanceTimersByTimeAsync(1 + ABORT_GRACE_MS);
+      expect(told?.aborted).toBe(true);
+      expect(answer).toEqual(timedOutResult("video_find_moment", READ_BOUND_MS));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a tool that makes something is never cut off, however long it takes", async () => {
+    let told: AbortSignal | undefined;
+    const run = vi.fn(
+      async (_name: string, _args: Record<string, unknown>, options: ToolRunOptions) =>
+        new Promise<unknown>((resolve) => {
+          told = options.signal;
+          setTimeout(() => resolve({ ok: true, imported: 1 }), 45 * 60_000);
+        }),
+    );
+    vi.mocked(openToolHost).mockImplementationOnce(
+      (id: string) =>
+        ({
+          projectId: id,
+          ready: Promise.resolve(),
+          has: () => true,
+          run,
+          store: () => null,
+        }) as Any,
+    );
+    setDesktop("p1");
+    useChat.setState({ projectId: "p1" });
+    await useChat.getState().send("import it");
+    vi.useFakeTimers();
+    try {
+      let answer: unknown = "pending";
+      void lastDeps.runTool("import_media", {}).then((a: unknown) => (answer = a));
+      await vi.advanceTimersByTimeAsync(44 * 60_000);
+      expect(answer).toBe("pending");
+      expect(told?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(answer).toEqual({ ok: true, imported: 1 });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("wires onToolError / onUsage / mode / stopped / session", async () => {
