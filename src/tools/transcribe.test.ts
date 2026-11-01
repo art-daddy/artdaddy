@@ -24,6 +24,8 @@ import {
 import { useModelDownload } from "../store/modelDownload";
 import { isExpected } from "../lib/errors";
 import {
+  __setDownloadPolicy,
+  cancelModelDownload,
   clipWordFrames,
   ensureTranscript,
   ensureWhisperModel,
@@ -33,8 +35,10 @@ import {
   isSpeechEngineUnavailable,
   normLanguage,
   parseWhisperCppJson,
+  PATIENT_DOWNLOAD,
   peekTranscript,
   runWhisper,
+  SINGLE_ATTEMPT,
   TRANSCRIPT_WAIT_MS,
   transcriptCacheSlot,
   WHISPER_MODELS,
@@ -45,6 +49,11 @@ import { registerBackgroundTranscriber } from "./transcriptQueue";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
+
+// These tests were written when a download made one attempt and was done; the patient policy (retries,
+// back-off, stall clock) has its own tests below and must not turn a refused fake origin into minutes.
+beforeEach(() => __setDownloadPolicy(SINGLE_ATTEMPT));
+afterEach(() => __setDownloadPolicy(PATIENT_DOWNLOAD));
 
 class MockFs implements FsLike {
   files = new Map<string, string>();
@@ -1074,6 +1083,265 @@ describe("ensureWhisperModel", () => {
     expect(seen).toContainEqual([0, 4]);
     expect(seen).toContainEqual([4, 4]);
     expect(seen.at(-1), "the readout must not outlive the download").toEqual([0, 0]);
+  });
+});
+
+// A download of 465 MB over a bad connection: the origin stalls, resets, answers 503, or serves
+// something that is not the model. None of that may cost the person more than waiting, and none of
+// it may put a wrong byte in the file that lands.
+describe("a patient download", () => {
+  type Turn =
+    | { status: number }
+    | { refuse: unknown }
+    | { never: true }
+    | { wrong: true }
+    | { cutAt: number; then: "stall" | "end" | "error" };
+
+  function scripted(
+    chunks: Uint8Array[],
+    ending: "done" | "stall" | "error",
+    status: number,
+    declared: number,
+  ): Response {
+    let at = 0;
+    return {
+      ok: true,
+      status,
+      headers: new Headers({ "content-length": String(declared) }),
+      body: {
+        getReader: () => ({
+          read: async () => {
+            if (at < chunks.length) return { done: false, value: chunks[at++] };
+            if (ending === "stall") return new Promise(() => undefined);
+            if (ending === "error") throw new TypeError("network error");
+            return { done: true, value: undefined };
+          },
+          cancel: async () => undefined,
+          releaseLock: () => undefined,
+        }),
+      },
+    } as unknown as Response;
+  }
+
+  /** An origin holding `bytes` that does what `turns` say, one entry per request in order, and
+   *  serves properly (Range honoured, 206) once the script is used up. */
+  function origin(bytes: Uint8Array, turns: Turn[] = []) {
+    const requests: { url: string; from: number; at: number }[] = [];
+    const script = [...turns];
+    const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
+      const range = (init?.headers as Record<string, string> | undefined)?.Range;
+      const from = range ? Number(/bytes=(\d+)-/.exec(range)![1]) : 0;
+      requests.push({ url, from, at: Date.now() });
+      const turn = script.shift();
+      if (turn && "refuse" in turn) throw turn.refuse;
+      if (turn && "never" in turn) return new Promise<Response>(() => undefined);
+      if (turn && "status" in turn) return streamedResponse([], { status: turn.status });
+      const body = turn && "wrong" in turn ? bytes.map((b) => (b + 1) & 255) : bytes;
+      const to =
+        turn && "cutAt" in turn ? Math.max(from, Math.min(bytes.length, turn.cutAt)) : bytes.length;
+      const chunks: Uint8Array[] = [];
+      for (let i = from; i < to; i += 2) chunks.push(body.slice(i, Math.min(to, i + 2)));
+      const ending = turn && "cutAt" in turn && to < bytes.length ? turn.then : "done";
+      return scripted(
+        chunks,
+        ending === "end" ? "done" : ending,
+        range ? 206 : 200,
+        bytes.length - from,
+      );
+    });
+    return { fetchImpl, requests };
+  }
+
+  const MIRROR = "https://mirror.test/ggml-small.bin";
+  const BYTES = Uint8Array.from({ length: 10 }, (_, i) => i + 1);
+
+  /** Starts the install and lets the fake clock run until it settles. */
+  async function install(
+    fs: MockFs,
+    spec: WhisperModelSpec,
+    fetchImpl: ReturnType<typeof origin>["fetchImpl"],
+    signal?: AbortSignal,
+  ) {
+    const t0 = Date.now();
+    const seen: { at: number | null; ok?: unknown; error?: string } = { at: null };
+    void ensureWhisperModel(
+      { ...ctxWith(transcribeRunner(fs), fs), signal },
+      "small",
+      fetchImpl as Any,
+      spec,
+    ).then(
+      (r) => Object.assign(seen, { at: Date.now() - t0, ok: r }),
+      (e: Error) => Object.assign(seen, { at: Date.now() - t0, error: e.message }),
+    );
+    for (let i = 0; i < 400 && seen.at === null; i++) await vi.advanceTimersByTimeAsync(500);
+    return seen;
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    __setDownloadPolicy(PATIENT_DOWNLOAD);
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it("goes on from where a stalled transfer stopped, after 30 s of nothing and a 2 s pause", async () => {
+    const fs = new MockFs();
+    const spec = await specFor(BYTES);
+    const { fetchImpl, requests } = origin(BYTES, [{ cutAt: 4, then: "stall" }]);
+    const seen = await install(fs, spec, fetchImpl);
+    expect(seen.ok).toEqual({ path: MODEL, downloaded: true });
+    expect(
+      requests.map((r) => r.from),
+      "the second request asked only for what was missing",
+    ).toEqual([0, 4]);
+    expect(
+      requests.map((r) => r.at - requests[0].at),
+      "30 s of nothing, then the 2 s pause",
+    ).toEqual([0, 32_000]);
+    expect(fs.bytes.get(MODEL), "the file that landed is the model, byte for byte").toEqual(BYTES);
+  });
+
+  it("ends a request that is never answered after 30 s, and asks again", async () => {
+    const fs = new MockFs();
+    const spec = await specFor(BYTES);
+    const { fetchImpl, requests } = origin(BYTES, [{ never: true }]);
+    const seen = await install(fs, spec, fetchImpl);
+    expect(requests.map((r) => r.at - requests[0].at)).toEqual([0, 32_000]);
+    expect(fs.bytes.get(MODEL)).toEqual(BYTES);
+    expect(seen.ok).toBeTruthy();
+  });
+
+  it("waits 2, 10 then 30 s between attempts while the origin keeps failing, and says how many it made", async () => {
+    const fs = new MockFs();
+    const spec = await specFor(BYTES);
+    const { fetchImpl, requests } = origin(BYTES, [
+      { status: 503 },
+      { status: 503 },
+      { status: 503 },
+      { status: 503 },
+    ]);
+    const seen = await install(fs, spec, fetchImpl);
+    expect(requests.map((r) => r.at - requests[0].at)).toEqual([0, 2_000, 12_000, 42_000]);
+    expect(seen.error).toMatch(/HTTP 503 \(after 4 attempts\)/);
+    expect(seen.at).toBe(42_000);
+  });
+
+  it("keeps what a connection that drops had delivered, and resumes from it", async () => {
+    const fs = new MockFs();
+    const spec = await specFor(BYTES);
+    const { fetchImpl, requests } = origin(BYTES, [
+      { cutAt: 6, then: "error" },
+      { refuse: new TypeError("offline") },
+    ]);
+    const seen = await install(fs, spec, fetchImpl);
+    expect(requests.map((r) => r.from)).toEqual([0, 6, 6]);
+    expect(seen.ok).toBeTruthy();
+    expect(fs.bytes.get(MODEL)).toEqual(BYTES);
+  });
+
+  it("does not ask again for a file its only origin says is not there", async () => {
+    const fs = new MockFs();
+    const spec = await specFor(BYTES);
+    const { fetchImpl, requests } = origin(BYTES, [{ status: 404 }]);
+    const seen = await install(fs, spec, fetchImpl);
+    expect(requests).toHaveLength(1);
+    expect(seen.error).toBe("whisper model download failed: HTTP 404");
+    expect(seen.at).toBe(0);
+  });
+
+  it("goes to the mirror at once when the first origin refuses", async () => {
+    const fs = new MockFs();
+    const spec = { ...(await specFor(BYTES)), mirrors: [MIRROR] };
+    const { fetchImpl, requests } = origin(BYTES, [{ status: 404 }]);
+    const seen = await install(fs, spec, fetchImpl);
+    expect(requests.map((r) => r.url)).toEqual([
+      "https://huggingface.co/ggerganov/whisper.cpp/resolve/test-revision/ggml-small.bin",
+      MIRROR,
+    ]);
+    expect(requests[1].at, "a refusal is not waited out").toBe(requests[0].at);
+    expect(seen.ok).toBeTruthy();
+    expect(fs.bytes.get(MODEL)).toEqual(BYTES);
+  });
+
+  it("never installs a copy whose checksum is wrong, and finds a right one at the next origin", async () => {
+    const fs = new MockFs();
+    const spec = { ...(await specFor(BYTES)), mirrors: [MIRROR] };
+    const { fetchImpl } = origin(BYTES, [{ wrong: true }]);
+    const seen = await install(fs, spec, fetchImpl);
+    expect(seen.ok).toBeTruthy();
+    expect(fs.bytes.get(MODEL), "the wrong bytes were never promoted").toEqual(BYTES);
+    expect([...fs.bytes.keys()].filter((p) => p.endsWith(".part"))).toEqual([]);
+  });
+
+  it("stops at once when Stop comes during a pause, with what it had fetched kept", async () => {
+    const fs = new MockFs();
+    const spec = await specFor(BYTES);
+    const stop = new AbortController();
+    const { fetchImpl } = origin(BYTES, [
+      { cutAt: 4, then: "end" },
+      { status: 503 },
+      { status: 503 },
+    ]);
+    const seen: { at: number | null; error?: string } = { at: null };
+    const t0 = Date.now();
+    ensureWhisperModel(
+      { ...ctxWith(transcribeRunner(fs), fs), signal: stop.signal },
+      "small",
+      fetchImpl as Any,
+      spec,
+    ).catch((e: Error) => Object.assign(seen, { at: Date.now() - t0, error: e.message }));
+    await vi.advanceTimersByTimeAsync(3_000); // the first attempt ended early, the 2 s pause is over, 503, now pausing 10 s
+    stop.abort();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(seen.at).toBe(3_000);
+    expect(seen.error).toMatch(/cancelled at 40% of/);
+    expect(fs.bytes.get(partFor(spec))).toEqual(BYTES.slice(0, 4));
+  });
+
+  it("is stopped by the person's Cancel whoever is waiting for it, and what it fetched is kept", async () => {
+    const fs = new MockFs();
+    const spec = await specFor(BYTES);
+    const { fetchImpl } = origin(BYTES, [{ cutAt: 4, then: "stall" }]);
+    const outcomes: string[] = [];
+    const wait = (): void => {
+      ensureWhisperModel(ctxWith(transcribeRunner(fs), fs), "small", fetchImpl as Any, spec).catch(
+        (e: Error) => outcomes.push(e.message),
+      );
+    };
+    wait();
+    wait(); // the indexer and a look, both waiting for the same download
+    await vi.advanceTimersByTimeAsync(5_000);
+    cancelModelDownload();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(outcomes).toHaveLength(2);
+    for (const o of outcomes) expect(o).toMatch(/speech model download cancelled at 40% of/);
+    expect(fs.bytes.get(partFor(spec))).toEqual(BYTES.slice(0, 4));
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  // The rule that survives any rewrite of the retry logic: whatever the origin does on the way,
+  // what lands is the model, and nothing else, and nothing is left behind.
+  it("property: however the origin cuts the transfer, the file that lands is the model, byte for byte", async () => {
+    const cut = fc.record({
+      cutAt: fc.integer({ min: 0, max: 70 }),
+      then: fc.constantFrom("stall", "end", "error"),
+    });
+    await fc.assert(
+      fc.asyncProperty(
+        fc.integer({ min: 8, max: 60 }),
+        fc.array(cut, { maxLength: 3 }),
+        async (length, cuts) => {
+          const fs = new MockFs();
+          const bytes = Uint8Array.from({ length }, (_, i) => (i * 7 + 3) & 255);
+          const spec = await specFor(bytes);
+          const { fetchImpl } = origin(bytes, cuts);
+          const seen = await install(fs, spec, fetchImpl);
+          expect(seen.ok, seen.error).toBeTruthy();
+          expect(fs.bytes.get(MODEL)).toEqual(bytes);
+          expect([...fs.bytes.keys()].filter((p) => p.endsWith(".part"))).toEqual([]);
+        },
+      ),
+      { numRuns: 25 },
+    );
   });
 });
 

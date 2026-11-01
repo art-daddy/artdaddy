@@ -5,16 +5,27 @@
 // hang even when the window is perfectly responsive.
 //
 // The speech model shares this area: it is a 465 MiB download that installs once, and the same
-// silence cost us a user who waited 2m21s on a caption request with nothing on screen.
+// silence cost us a user who waited 2m21s on a caption request with nothing on screen. It says
+// what it is, how far it is and how long is left, that it only happens once, and it can be stopped.
 import { useImportJobs } from "../store/importJobs";
-import { modelDownloadMessage, percent, useModelDownload } from "../store/modelDownload";
+import {
+  downloadEtaSeconds,
+  MODEL_DOWNLOAD_NOTE,
+  modelDownloadMessage,
+  percent,
+  useModelDownload,
+} from "../store/modelDownload";
 
 export default function ImportProgress(): JSX.Element | null {
   const jobs = useImportJobs((s) => s.jobs);
   const received = useModelDownload((s) => s.received);
   const total = useModelDownload((s) => s.total);
+  const startedAt = useModelDownload((s) => s.startedAt);
+  const startReceived = useModelDownload((s) => s.startReceived);
+  const cancel = useModelDownload((s) => s.cancel);
   const modelPct = total > 0 ? percent(received, total) : null;
   if (!jobs.length && modelPct === null) return null;
+  const eta = downloadEtaSeconds({ received, total, startedAt, startReceived });
   return (
     <div
       role="status"
@@ -27,13 +38,23 @@ export default function ImportProgress(): JSX.Element | null {
           data-pct={String(modelPct)}
           className="rounded-md border border-edge bg-panel/95 px-3 py-2 text-xs text-neutral-200 shadow-xl"
         >
-          <div className="leading-snug">{modelDownloadMessage(received, total)}</div>
+          <div className="leading-snug">{modelDownloadMessage(received, total, eta)}</div>
+          <div className="mt-0.5 leading-snug text-neutral-400">{MODEL_DOWNLOAD_NOTE}</div>
           <div className="mt-1.5 h-1 overflow-hidden rounded bg-neutral-800">
             <div
               className="h-full rounded bg-accent transition-[width] duration-200"
               style={{ width: `${modelPct}%` }}
             />
           </div>
+          {cancel && (
+            <button
+              type="button"
+              onClick={cancel}
+              className="pointer-events-auto mt-1.5 text-neutral-400 underline hover:text-neutral-200"
+            >
+              Cancel
+            </button>
+          )}
         </div>
       )}
       {jobs.map((j) => (

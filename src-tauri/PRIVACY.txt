@@ -1,6 +1,6 @@
 ARTDADDY PRIVACY POLICY
 
-Last reviewed 30 October 2026. The current version is always at https://artdaddy.app/privacy
+Last reviewed 1 November 2026. The current version is always at https://artdaddy.app/privacy
 
 ArtDaddy is a desktop application. Your footage, your projects and your edits stay on your computer. The only things that leave are the AI requests you explicitly make, plus the usage data described in full below.
 
@@ -9,7 +9,7 @@ WHAT NEVER LEAVES YOUR MACHINE
 
 - Your media. Files are referenced where they already sit on disk. They are not copied to a cloud library and they are not uploaded in order to be edited.
 - Editing and export. Rendering runs locally through a bundled copy of ffmpeg. Exported files are written to a folder you choose.
-- Transcription. Speech-to-text runs on your own machine using Whisper. Audio is not sent anywhere for captioning or search.
+- Transcription. Speech-to-text runs on your own machine using Whisper. Audio is not sent anywhere for captioning or search. The Whisper speech model itself, about 465 MB, is downloaded once, the first time you start the app (see "The speech model" below).
 - Your projects. A project is an ordinary folder on your disk.
 
 The application is open source under GPL-3.0, so the code that touches your files is public: https://github.com/art-daddy/artdaddy
@@ -30,6 +30,10 @@ When you generate an image, video, voiceover or music bed, our hosted service ke
 When you ask a question about a video clip, or have ArtDaddy learn a style from reference videos, the app first sends a compact, reduced-quality copy of that footage straight to the same private storage, and the AI model reads it from there. That copy is deleted as soon as the request has been answered, and in any case within 2 days. It is not used for anything else.
 
 If you never use an AI feature, none of this happens. ArtDaddy is a complete editor without it.
+
+The speech model
+
+The first time you start ArtDaddy it downloads the speech-recognition model that Whisper uses, about 465 MB, once. It comes from Hugging Face (huggingface.co), where the model is published. Hugging Face sees your IP address and which file you asked for, as any website does; nothing about you, your media or your projects is sent with the request. The app checks the file against a fixed checksum before it uses it. You can cancel the download from the progress shown in the app; transcription then waits until the model has been downloaded.
 
 Your account
 
@@ -68,6 +72,7 @@ WHO ELSE PROCESSES YOUR DATA
 - Clerk: sign-in, email address and display name.
 - Sentry: crash and error reports.
 - Cloudflare: serving the artdaddy.app website.
+- Hugging Face: serving the one-time download of the speech-recognition model.
 - GitHub: hosting the source code and the release downloads.
 
 AI providers process the content of requests you make under their own terms. We do not grant them permission to train on your content, and we do not sell data to anyone.

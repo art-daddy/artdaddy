@@ -38,6 +38,16 @@ export default function App() {
   useEffect(() => {
     void initMcp();
     if (!workAllowed) return;
+    // The speech model is fetched now, not at the first transcript (tools/modelPrefetch.ts), a few
+    // seconds in so the window paints and signing in is not competing with a 465 MB download for
+    // the first moments. Loaded on demand: the transcription code stays out of the main bundle.
+    const prefetch =
+      platform.name === "tauri"
+        ? setTimeout(
+            () => void import("./tools/modelPrefetch").then((m) => m.startSpeechModelPrefetch()),
+            3_000,
+          )
+        : undefined;
     const prevent = (e: DragEvent) => {
       if (e.dataTransfer?.types.includes("Files")) e.preventDefault();
     };
@@ -54,6 +64,7 @@ export default function App() {
     // only, and a failure to start never blocks the editor.
     return () => {
       cancelled = true;
+      clearTimeout(prefetch);
       stop?.();
       window.removeEventListener("dragover", prevent);
       window.removeEventListener("drop", prevent);

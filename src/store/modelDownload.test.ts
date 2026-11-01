@@ -4,10 +4,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   clearModelDownload,
   downloadEtaSeconds,
+  formatEta,
   megabytes,
+  MODEL_DOWNLOAD_NOTE,
   modelDownloadMessage,
   percent,
   reportModelDownload,
+  setModelDownloadCancel,
   useModelDownload,
 } from "./modelDownload";
 import { WHISPER_MODELS } from "../tools/transcribe";
@@ -20,7 +23,21 @@ describe("modelDownloadMessage", () => {
   // instead of leaving the UI quoting a size the download no longer has.
   it("reads exactly as the user is told, for the model we actually ship", () => {
     expect(modelDownloadMessage(Math.round(TOTAL * 0.4), TOTAL)).toBe(
-      "downloading speech model - this only happens the first time post install, 465 MB, 40%",
+      "Downloading the speech model (one time, about 465 MB) - 40%",
+    );
+  });
+
+  it("adds how long is left once that can be told", () => {
+    expect(modelDownloadMessage(Math.round(TOTAL * 0.4), TOTAL, 130)).toBe(
+      "Downloading the speech model (one time, about 465 MB) - 40%, about 3 min left",
+    );
+  });
+
+  // The owner's wording (2026-11-01): a 465 MB download that appears on its own has to say that it
+  // is not a thing that happens every time.
+  it("says it only happens when the app is started for the first time", () => {
+    expect(MODEL_DOWNLOAD_NOTE).toBe(
+      "This only happens when you start the app for the first time.",
     );
   });
 
@@ -38,6 +55,41 @@ describe("modelDownloadMessage", () => {
     expect(percent(10, 0)).toBe(0);
     expect(percent(-5, 100)).toBe(0);
     expect(percent(200, 100)).toBe(100);
+  });
+});
+
+describe("formatEta", () => {
+  it("says it in the unit a person would", () => {
+    expect(formatEta(0)).toBe("about 1 s");
+    expect(formatEta(40)).toBe("about 40 s");
+    expect(formatEta(89)).toBe("about 89 s");
+    expect(formatEta(90)).toBe("about 2 min");
+    expect(formatEta(130)).toBe("about 3 min");
+    expect(formatEta(5000)).toBe("about 84 min");
+    expect(formatEta(6000)).toBe("about 2 h");
+  });
+
+  it("is never shorter than the wait it describes, and never more than one unit longer", () => {
+    fc.assert(
+      fc.property(fc.double({ min: 0, max: 200_000, noNaN: true }), (seconds) => {
+        const m = /^about (\d+) (s|min|h)$/.exec(formatEta(seconds));
+        expect(m).not.toBeNull();
+        const unit = { s: 1, min: 60, h: 3600 }[m![2] as "s" | "min" | "h"];
+        const said = Number(m![1]) * unit;
+        expect(said).toBeGreaterThanOrEqual(seconds);
+        expect(said - Math.max(1, seconds)).toBeLessThan(unit);
+      }),
+    );
+  });
+});
+
+describe("the download's Cancel", () => {
+  it("is there while a download is under way and gone when it is over", () => {
+    const cancel = vi.fn();
+    setModelDownloadCancel(cancel);
+    expect(useModelDownload.getState().cancel).toBe(cancel);
+    clearModelDownload();
+    expect(useModelDownload.getState().cancel).toBeNull();
   });
 });
 

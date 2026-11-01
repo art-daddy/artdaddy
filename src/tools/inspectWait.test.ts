@@ -5,17 +5,21 @@
 // look ANSWERS rather than how it got there.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { reportAppError } = vi.hoisted(() => ({ reportAppError: vi.fn() }));
+const { reportAppError, reportTranscription } = vi.hoisted(() => ({
+  reportAppError: vi.fn(),
+  reportTranscription: vi.fn(),
+}));
 vi.mock("../api/appEvents", async (orig) => ({
   ...(await orig<object>()),
   reportAppError,
-  reportTranscription: vi.fn(),
+  reportTranscription,
 }));
 vi.mock("@tauri-apps/api/path", () => ({ resolveResource: async () => "C:/res/fonts" }));
 
 import type { ClientToolContext } from "./context";
 import { buildTranscript } from "./inspect";
 import { clearModelDownload } from "../store/modelDownload";
+import { cpuOnlyNow, CPU_ONLY_HOLD_MS } from "./speechBackend";
 import { TRANSCRIPT_FAILURE_REASONS, type TranscriptFailureReason } from "./speechFailure";
 import { readPace } from "./speechPace";
 import { transcriptCacheSlot, WHISPER_MODELS, whisperModelPath } from "./transcribe";
@@ -58,8 +62,17 @@ interface RigOptions {
   /** The first N engine runs fail (exit 1); later ones succeed. */
   engineFailures?: number;
   ffmpegExit?: number;
+  /** Crashes with this exit status, having named a GPU, whenever the engine runs on the GPU. */
+  gpuCrash?: number;
+  /** The engine crashes with the GPU off too (the GPU was not the cause). */
+  cpuCrashes?: boolean;
   signal?: AbortSignal;
 }
+
+/** What whisper-cli printed before it crashed on one AMD machine (no names of people or files). */
+const GPU_LOG =
+  "ggml_vulkan: Found 1 Vulkan devices:\nggml_vulkan: 0 = AMD Radeon(TM) Graphics (AMD proprietary driver) | uma: 1\n" +
+  "whisper_init_from_file_with_params_no_state: loading model from 'ggml-small.bin'\n";
 
 /** Aborted after every test: a fake engine and a stalled download both end on their signal. */
 const stops: AbortController[] = [];
@@ -127,9 +140,15 @@ function rig(opts: RigOptions = {}) {
         return { code: 0, stdout: "", stderr: "" };
       }
       engineStarts++;
+      const cpuOnly = args.includes("-ng");
+      if (opts.gpuCrash !== undefined && (!cpuOnly || opts.cpuCrashes)) {
+        if (opts.engineMs) await sleep(opts.engineMs, s); // a crash comes when it comes, Stop or not
+        return { code: opts.gpuCrash, stdout: "", stderr: GPU_LOG };
+      }
       if (opts.engineMs && (await sleep(opts.engineMs, s)))
         return { code: 1, stdout: "", stderr: "cancelled" };
-      const stderr = opts.engineStderr ?? "";
+      const stderr =
+        (cpuOnly ? "whisper_backend_init_gpu: no GPU found\n" : "") + (opts.engineStderr ?? "");
       if (failuresLeft > 0) {
         failuresLeft--;
         return { code: 1, stdout: "", stderr: "device lost" };
@@ -377,6 +396,27 @@ describe("a look that has to wait for the speech model", () => {
     expect(origin.requests(), "the four looks shared one download").toBe(1);
   });
 
+  // Not set in this file, so this is what the app does: an origin that keeps failing is tried again
+  // from where it stopped, after 2, 10 and 30 s, and only then is the failure the look's.
+  it("is patient by default: a failing origin is retried with back-off, and the look says how often", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: false,
+      status: 503,
+      headers: new Headers(),
+      body: null,
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { ctx } = rig({ model: false });
+    const seen = startLook(ctx, freshSrc(), look(30, { waitMs: 60_000 }));
+    await vi.advanceTimersByTimeAsync(41_999);
+    expect(seen.at, "still trying").toBeNull();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(seen.at).toBe(42_000);
+    expect(seen.result).toMatchObject({ status: "failed", reason: "model_unavailable" });
+    expect(seen.result.error).toMatch(/HTTP 503 \(after 4 attempts\)/);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
   it("does not hold the download hostage: Stop ends the look, and the download stops with it", async () => {
     const origin = stalledOrigin();
     vi.stubGlobal("fetch", origin.fetch);
@@ -443,6 +483,95 @@ describe("a look that names a language", () => {
     expect(got).toMatchObject({ status: "failed", reason: "language_rejected" });
     expect(got.error).toBe('the speech engine did not accept the language "zz"');
     expect(String(got.error), "never the engine's help text").not.toMatch(/usage/i);
+  });
+});
+
+// UJ-052/UJ-063: on some machines whisper-cli crashes outright on the GPU (exit 0xC0000409 right
+// after it began to load the model, on AMD, Intel and NVIDIA), and every transcription there failed
+// the same way, three times per file in the background indexer: 226 retries from three users.
+describe("an engine that crashes on the GPU", () => {
+  const CRASH = -1073740791; // 0xC0000409
+  const onCpu = (calls: { program: string; args: string[] }[]): boolean[] =>
+    calls.filter((c) => c.program === "whisper-cli").map((c) => c.args.includes("-ng"));
+
+  it("is retried once with the GPU off, and the look gets its words", async () => {
+    const { ctx, calls } = rig({ gpuCrash: CRASH });
+    const got = await buildTranscript(ctx, freshSrc(), look(30));
+    expect(got.segments).toEqual([["hello there", 0, 2]]);
+    expect(onCpu(calls), "one run on the GPU, then one without it").toEqual([false, true]);
+  });
+
+  it("is remembered: the next file goes straight to the CPU, and nothing after it crashes first", async () => {
+    const { ctx, calls } = rig({ gpuCrash: CRASH });
+    await buildTranscript(ctx, freshSrc(), look(30));
+    for (let i = 0; i < 3; i++) await buildTranscript(ctx, freshSrc(), look(30));
+    expect(onCpu(calls)).toEqual([false, true, true, true, true]);
+  });
+
+  it("is given the GPU again after a week, because drivers are updated", async () => {
+    const { ctx, calls } = rig({ gpuCrash: CRASH });
+    await buildTranscript(ctx, freshSrc(), look(30));
+    vi.setSystemTime(Date.now() + CPU_ONLY_HOLD_MS - 1);
+    await buildTranscript(ctx, freshSrc(), look(30));
+    expect(onCpu(calls).slice(2), "still off one ms before the week is out").toEqual([true]);
+    vi.setSystemTime(Date.now() + 2);
+    await buildTranscript(ctx, freshSrc(), look(30));
+    expect(onCpu(calls).slice(3), "tried again, and crashed again, and retried").toEqual([
+      false,
+      true,
+    ]);
+  });
+
+  it("is not blamed on the GPU when the CPU run crashes too: nothing is remembered, and the look says it failed", async () => {
+    const { ctx, calls } = rig({ gpuCrash: CRASH, cpuCrashes: true });
+    const got = await buildTranscript(ctx, freshSrc(), look(30));
+    expect(onCpu(calls), "two runs, never a third").toEqual([false, true]);
+    expect(got).toMatchObject({ status: "failed", reason: "engine_failed" });
+    expect(cpuOnlyNow(), "the GPU was not proved to be the cause").toBe(false);
+    await buildTranscript(ctx, freshSrc(), look(30));
+    expect(onCpu(calls).slice(2), "the next file tries the GPU first again").toEqual([false, true]);
+  });
+
+  it("is not retried for a failure that is not a crash, or a crash that is not the GPU's", async () => {
+    const plain = rig({ engineExit: 1, engineStderr: GPU_LOG });
+    await buildTranscript(plain.ctx, freshSrc(), look(30));
+    expect(onCpu(plain.calls)).toEqual([false]);
+
+    const noGpu = rig({ engineExit: CRASH, engineStderr: "whisper_init_from_file: loading model" });
+    await buildTranscript(noGpu.ctx, freshSrc(), look(30));
+    expect(onCpu(noGpu.calls), "it never named a GPU").toEqual([false]);
+
+    const cannotStart = rig({ engineExit: -1073741515, engineStderr: GPU_LOG });
+    expect(await buildTranscript(cannotStart.ctx, freshSrc(), look(30))).toMatchObject({
+      reason: "engine_unavailable",
+    });
+    expect(onCpu(cannotStart.calls), "a missing DLL is not the GPU").toEqual([false]);
+  });
+
+  it("is not retried once Stop has been pressed", async () => {
+    const stop = new AbortController();
+    const { ctx, calls } = rig({ gpuCrash: CRASH, engineMs: 5_000, signal: stop.signal });
+    const seen = startLook(ctx, freshSrc(), look(30, { waitMs: 60_000 }));
+    await vi.advanceTimersByTimeAsync(1_000);
+    stop.abort();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(seen.result).toEqual({ error: "cancelled" });
+    expect(onCpu(calls), "the crash after Stop did not start another run").toEqual([false]);
+  });
+
+  it("tells the telemetry once what happened, and which way the transcription then ran", async () => {
+    reportTranscription.mockClear();
+    const { ctx } = rig({ gpuCrash: -1073740940, engineStderr: timings(30, 20) });
+    for (let i = 0; i < 3; i++) await buildTranscript(ctx, freshSrc(), look(30));
+    const reports = reportAppError.mock.calls
+      .map(([r]) => r)
+      .filter((r) => /speech_gpu_crash/.test(r));
+    expect(reports, "the same news once per session, not once per file").toHaveLength(1);
+    expect(reports[0]).toMatch(/exit -1073740940.*the CPU run worked/);
+    expect(
+      reportTranscription.mock.calls.map(([facts]) => facts.backend),
+      "every run that was kept says it ran on the CPU",
+    ).toEqual(["cpu", "cpu", "cpu"]);
   });
 });
 
