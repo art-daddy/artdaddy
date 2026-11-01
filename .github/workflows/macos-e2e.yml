@@ -16,12 +16,13 @@ on:
   workflow_dispatch:
     inputs:
       runner:
-        description: "Native macOS runtime for QA; this does not change the release target"
+        description: "Native macOS runtime for QA: both images by default; this does not change the release target"
         type: choice
         options:
-          - macos-14
+          - both
           - macos-15
-        default: macos-14
+          - macos-26
+        default: both
       native_pixels_only:
         description: "Run only the system WKWebView pixel discriminator; no paid calls"
         type: boolean
@@ -54,7 +55,11 @@ on:
 jobs:
   mac-rca:
     if: ${{ inputs.mac_rca_only }}
-    runs-on: ${{ inputs.runner || 'macos-14' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ${{ fromJSON(inputs.runner == 'both' && '["macos-15","macos-26"]' || format('["{0}"]', inputs.runner)) }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
     env:
       VITE_API_BASE_URL: http://127.0.0.1:9
@@ -127,7 +132,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: mac-rca-${{ inputs.runner || 'macos-14' }}-${{ github.sha }}
+          name: mac-rca-${{ matrix.runner }}-${{ github.sha }}
           path: |
             reports/mac-rca/**
             reports/audiolane/**
@@ -141,7 +146,11 @@ jobs:
 
   native-hotfix:
     if: ${{ inputs.native_hotfix_only && !inputs.mac_rca_only }}
-    runs-on: ${{ inputs.runner || 'macos-14' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ${{ fromJSON(inputs.runner == 'both' && '["macos-15","macos-26"]' || format('["{0}"]', inputs.runner)) }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
@@ -164,13 +173,17 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: mac-hotfix-${{ inputs.runner || 'macos-14' }}
+          name: mac-hotfix-${{ matrix.runner }}
           path: test-results/mac-hotfix/**
           if-no-files-found: error
 
   native-pixels:
     if: ${{ !inputs.native_hotfix_only && !inputs.mac_rca_only }}
-    runs-on: ${{ inputs.runner || 'macos-14' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ${{ fromJSON(inputs.runner == 'both' && '["macos-15","macos-26"]' || format('["{0}"]', inputs.runner)) }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
     env:
       ARTDADDY_SYSTEM_WKWEBVIEW: "1"
@@ -191,13 +204,17 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: system-wkwebview-pixels-${{ inputs.runner || 'macos-14' }}
+          name: system-wkwebview-pixels-${{ matrix.runner }}
           path: test-results/**
           if-no-files-found: warn
 
   e2e:
     if: ${{ !inputs.native_pixels_only && !inputs.native_hotfix_only && !inputs.mac_rca_only }}
-    runs-on: ${{ inputs.runner || 'macos-14' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ${{ fromJSON(inputs.runner == 'both' && '["macos-15","macos-26"]' || format('["{0}"]', inputs.runner)) }}
+    runs-on: ${{ matrix.runner }}
     # Every lane pipes to `tail`, and a pipeline's status is the LAST command's - so without
     # pipefail each lane reported success no matter what happened, and the whole run went green
     # while the agent lane was 401ing on every scenario.
@@ -223,7 +240,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: whisper-out
-          key: whisper-${{ env.TRIPLE }}-${{ inputs.whisper_ref }}
+          key: whisper-${{ env.TRIPLE }}-${{ matrix.runner }}-${{ inputs.whisper_ref }}
 
       # Cloned OUTSIDE the checkout: whisper.cpp carries its own *.spec.js, and vitest's default
       # include picks them up as if they were ours — the unit lane failed on an addon.node module
@@ -334,6 +351,18 @@ jobs:
           hdiutil detach "$MNT" -quiet || true
           xattr -cr /Applications/artdaddy.app || true
 
+      # The app this runner just built, read the way a user's Mac reads it: the minimum macOS written into
+      # every binary's header. A newer image's toolchain can raise it without anything else failing, so
+      # this is the early warning for the image the release is built on (scripts/ci/macosMinOs.mjs).
+      - name: The built app must run on the macOS we advertise
+        id: minos
+        continue-on-error: true
+        run: |
+          node scripts/ci/macosMinOs.mjs /Applications/artdaddy.app \
+            --config src-tauri/tauri.conf.json \
+            --baseline scripts/ci/macosMinOs.baseline.json \
+            --expect-config src-tauri/tauri.conf.json
+
       - name: Walk the UI
         id: walk
         continue-on-error: true
@@ -347,7 +376,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: macos-e2e-evidence
+          name: macos-e2e-evidence-${{ matrix.runner }}
           path: |
             reports/eval/**
             test-results/**
@@ -363,12 +392,13 @@ jobs:
         run: |
           fail=0
           unverified=0
-          for lane in unit smoke audio playwright agent walk; do
+          for lane in unit smoke audio playwright agent walk minos; do
             case "$lane" in
               unit) r="${{ steps.unit.outcome }}" ;;
               smoke) r="${{ steps.smoke.outcome }}" ;;
               audio) r="${{ steps.audio.outcome }}" ;;
               playwright) r="${{ steps.playwright.outcome }}" ;;
+              minos) r="${{ steps.minos.outcome }}" ;;
               agent)
                 r="${{ steps.agent.outcome }}"
                 # Opt-in: not asked for is not a failure, and not a pass either.

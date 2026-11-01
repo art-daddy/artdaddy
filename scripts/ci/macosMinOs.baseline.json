@@ -1,0 +1,18 @@
+{
+  "_provenance": "Measured on 2026-11-01 with scripts/ci/macosMinOs.mjs on the published 0.22.1 macOS bundle (ArtDaddy-macos-arm64.app.tar.gz, sha256 AE82F6C42C3E5367573CE90D8002627C4A2A05DC14C72D982D8C2E731A6CD657, 12 Mach-O files).",
+  "_why": "tauri.conf.json advertises macOS 11.0 and these files already need more. The owner decided on 2026-11-01 to leave the advertised version as it is and revisit it later. Until then each entry is a CEILING for its files: a build fails when a file needs MORE than its ceiling (and, for a file not listed here, more than the advertised minimum). So the runner move or a toolchain change cannot raise any floor unnoticed. When the advertised version is raised to cover the highest ceiling below (or the over-claimers are removed from the bundle), delete this file.",
+  "entries": [
+    { "match": "artdaddy-ffmpeg*", "minos": "12.0", "note": "the bundled static ffmpeg" },
+    { "match": "artdaddy-ffprobe*", "minos": "12.0", "note": "the bundled static ffprobe" },
+    {
+      "match": "**/ms-playwright/chromium_headless_shell-*/**",
+      "minos": "13.0",
+      "note": "the browser engine behind the web tools (Chromium) and its libraries"
+    },
+    {
+      "match": "**/ms-playwright/ffmpeg-*/*",
+      "minos": "15.0",
+      "note": "Playwright's own video-recording ffmpeg; the app never records browser video. Remove it from the bundle when the advertised version is revisited"
+    }
+  ]
+}

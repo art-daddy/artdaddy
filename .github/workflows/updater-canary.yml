@@ -96,7 +96,14 @@ jobs:
           if-no-files-found: warn
 
   macos:
-    runs-on: macos-14
+    name: macos (${{ matrix.runner }})
+    # Both the release's image and the newest: an installed release has to update and relaunch on the macOS
+    # a user has today, and the 15 image is the one the next release is built on.
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-26]
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -123,6 +130,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: updater-canary-macos
+          name: updater-canary-macos-${{ matrix.runner }}
           path: reports/qa/updater-canary/**
           if-no-files-found: warn
