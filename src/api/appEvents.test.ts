@@ -908,6 +908,26 @@ describe("the transcription sample", () => {
     expect([calls[0].via, calls[0].reason]).toEqual(["unknown", "audio_s=45.0"]);
   });
 
+  // How the run was decoded: numbers and a flag. The speed of the faster setting is only worth
+  // anything next to which setting ran, and a re-run says the first guess was too narrow.
+  it("says how it was decoded, and that it replaced a run that was too narrow", async () => {
+    const calls = captureFetch();
+    reportTranscription(run, T0, { beam: 1 });
+    reportTranscription(run, T0 + 60_000, { beam: 5, rerun: true });
+    await vi.waitFor(() => expect(calls).toHaveLength(2));
+    expect(calls.map((c) => c.reason)).toEqual([
+      "audio_s=612.3 wall_s=66.1 x=9.26 model=small threads=8 beam=1",
+      "audio_s=612.3 wall_s=66.1 x=9.26 model=small threads=8 beam=5 rerun=1",
+    ]);
+  });
+
+  it("is byte for byte what it was when nothing is said about decoding", async () => {
+    const calls = captureFetch();
+    reportTranscription(run, T0, {});
+    await vi.waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0].reason).toBe("audio_s=612.3 wall_s=66.1 x=9.26 model=small threads=8");
+  });
+
   it("sends the first sample of a launch", async () => {
     const calls = captureFetch();
     vi.resetModules();

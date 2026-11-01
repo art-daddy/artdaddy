@@ -23,6 +23,7 @@ import {
 } from "./store";
 import { useModelDownload } from "../store/modelDownload";
 import { isExpected } from "../lib/errors";
+import { lastSpeechLanguage, rememberSpeechLanguage } from "./speechDecoding";
 import {
   __setDownloadPolicy,
   cancelModelDownload,
@@ -52,7 +53,12 @@ type Any = any;
 
 // These tests were written when a download made one attempt and was done; the patient policy (retries,
 // back-off, stall clock) has its own tests below and must not turn a refused fake origin into minutes.
-beforeEach(() => __setDownloadPolicy(SINGLE_ATTEMPT));
+beforeEach(() => {
+  __setDownloadPolicy(SINGLE_ATTEMPT);
+  // What this machine last heard (speechDecoding.ts) decides the next run's beam, so one test's
+  // English must not make the next test's first run a greedy one.
+  localStorage.clear();
+});
 afterEach(() => __setDownloadPolicy(PATIENT_DOWNLOAD));
 
 class MockFs implements FsLike {
@@ -1794,8 +1800,11 @@ describe("whisper as a job of the app process (4i)", () => {
     expect(jobs.forgotten).toEqual([jobs.submitted[0].id]);
     expect(under(fs, WORK)).toEqual([]);
     expect(await peekTranscript(ctxWith(runner, fs), SRC)).not.toBeNull();
-    // ...and what the run said about itself goes out once: which backend, and how fast.
-    expect(reportTranscription.mock.calls).toEqual([[expect.objectContaining(VULKAN_RUN)]]);
+    // ...and what the run said about itself goes out once: which backend, how fast, and how it was
+    // decoded (a machine with no history yet runs at the engine's default beam of 5).
+    expect(reportTranscription.mock.calls).toEqual([
+      [expect.objectContaining(VULKAN_RUN), undefined, expect.objectContaining({ beam: 5 })],
+    ]);
   });
 
   it("kills the job on Stop and answers cancelled", async () => {
@@ -1834,7 +1843,57 @@ describe("whisper as a job of the app process (4i)", () => {
     expect(under(fs, WORK)).toEqual([]);
     expect(await next.transcribe.peekTranscript(next.ctx, SRC)).not.toBeNull();
     // The page that finished it reports it, once; the one that died never did.
-    expect(reportTranscription.mock.calls).toEqual([[expect.objectContaining(VULKAN_RUN)]]);
+    expect(reportTranscription.mock.calls).toEqual([
+      [expect.objectContaining(VULKAN_RUN), undefined, expect.objectContaining({ beam: 5 })],
+    ]);
+  });
+
+  it("refuses a run that was too narrow for its language when the page that adopts it finishes it, and runs it again wider", async () => {
+    const fs = disk();
+    const jobs = new FakeJobs();
+    __setJobSupervisor(jobs);
+    // The page that starts it predicts English from what the machine last heard: a greedy run.
+    rememberSpeechLanguage("en");
+    void runWhisper(ctxWith(transcribeRunner(fs), fs), SRC).catch(() => undefined);
+    await until(() => jobs.started.length === 1);
+    const [id] = jobs.started;
+    expect(jobs.submitted[0].args).toContain("-bs");
+    const next = await nextPage(fs, jobs);
+    expect(await next.transcribe.adoptTranscriptions(next.io)).toBe(1);
+    const joined = next.transcribe.runWhisper(next.ctx, SRC);
+    // Let the request attach to the run it is waiting on, as the earlier test does: it starts nothing.
+    for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 1));
+    expect(jobs.submitted).toHaveLength(1);
+    const korean = JSON.stringify({
+      result: { language: "ko" },
+      transcription: [
+        {
+          offsets: { from: 0, to: 1000 },
+          text: " annyeong",
+          tokens: [{ text: " annyeong", offsets: { from: 0, to: 1000 }, p: 0.9 }],
+        },
+      ],
+    });
+    const writeAndExit = async (spec: (typeof jobs.submitted)[number]): Promise<void> => {
+      await fs.writeTextFile(`${spec.args[spec.args.indexOf("-of") + 1]}.json`, korean);
+      jobs.exit(spec.id, 0, VULKAN_STDERR);
+    };
+    // The process finished it, and what it heard was Korean: too narrow, so it is refused...
+    await writeAndExit(jobs.submitted[0]);
+    // ...nothing of it is kept, and the request that was waiting on it makes a second, wider run.
+    await until(() => jobs.submitted.length === 2);
+    expect(jobs.submitted[1].args.join(" ")).not.toContain("-bs");
+    // What the process heard is remembered even though that transcript was not kept.
+    expect(lastSpeechLanguage()).toBe("ko");
+    expect(await next.transcribe.peekTranscript(next.ctx, SRC)).toBeNull();
+    await writeAndExit(jobs.submitted[1]);
+    expect(words(await joined)).toEqual(["annyeong"]);
+    expect(words((await next.transcribe.peekTranscript(next.ctx, SRC))!)).toEqual(["annyeong"]);
+    await until(() => jobs.forgotten.includes(id) && jobs.forgotten.length === 2);
+    expect(under(fs, WORK)).toEqual([]);
+    // Only the run that was kept is reported, as the re-run it was.
+    expect(reportTranscription.mock.calls).toHaveLength(1);
+    expect(reportTranscription.mock.calls[0][2]).toMatchObject({ beam: 5, rerun: true });
   });
 
   it("keeps the words of one that ended while no page was there", async () => {
