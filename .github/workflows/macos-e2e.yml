@@ -283,18 +283,23 @@ jobs:
         run: npx vitest run --reporter=dot 2>&1 | tail -40
 
       # The native render cases the smoke lane runs compile this crate (`cargo test --lib`), and its
-      # build script insists on the bundle's resources, which are only built much later, for the app.
-      # None of these lanes uses them: empty placeholders, as the mac-rca job has, and one compile
-      # before any case has a deadline. They are removed again before the app is built.
-      - name: Prepare unused build-only resources and compile the native fixture
+      # build script insists on the bundle's generated resources (tauri.conf.json lists them), as does
+      # the browser sidecar's own test. They are built here the way the release builds them, before
+      # anything compiles the crate. Empty stand-ins were tried and were wrong twice: the browser test
+      # ran against an empty script and failed, and removing them afterwards removed a real sidecar
+      # that an earlier step had staged.
+      - name: Build the generated bundle resources
+        id: resources
+        run: |
+          npm run build:sidecar
+          npm run build:mcpb
+          npm run bundle:browser
+
+      # One compile before any case has a deadline.
+      - name: Compile the native fixture
         id: native
         continue-on-error: true
-        run: |
-          mkdir -p src-tauri/resources/ms-playwright src-tauri/resources/node_modules
-          touch src-tauri/resources/artdaddy-browser.mjs src-tauri/resources/artdaddy.mcpb
-          touch src-tauri/resources/ms-playwright/placeholder src-tauri/resources/node_modules/placeholder
-          touch "src-tauri/binaries/artdaddy-browser-${TRIPLE}"
-          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib --no-run
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib --no-run
 
       # The one lane that proves render/export/captions against the REAL mac ffmpeg rather
       # than the Windows one every previous run used.
@@ -302,13 +307,6 @@ jobs:
         id: smoke
         continue-on-error: true
         run: npx vitest run --config vitest.smoke.config.ts --reporter=dot 2>&1 | tail -60
-
-      - name: Remove the placeholders before the app is built
-        if: always()
-        run: |
-          rm -f "src-tauri/binaries/artdaddy-browser-${TRIPLE}" \
-            src-tauri/resources/artdaddy-browser.mjs src-tauri/resources/artdaddy.mcpb \
-            src-tauri/resources/ms-playwright/placeholder src-tauri/resources/node_modules/placeholder
 
       - name: Audio engine (real Web Audio)
         id: audio
@@ -354,11 +352,7 @@ jobs:
       - name: Build the app
         id: build
         run: |
-          npm run build:sidecar
-          # Generated and gitignored, yet tauri.conf.json lists it as a required resource:
-          # without it `tauri build` dies with "resource path doesn't exist".
-          npm run build:mcpb
-          npm run bundle:browser
+          # The generated resources were built above, before the native fixture was compiled.
           npx tauri build --bundles dmg \
             --config '{"bundle":{"createUpdaterArtifacts":false,"macOS":{"signingIdentity":"-"}}}'
 
