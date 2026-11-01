@@ -12,6 +12,7 @@ import {
 } from "./chat";
 import { useEditor } from "./editor";
 import { peekFirstPrompt, setFirstPrompt } from "./firstPrompt";
+import { resetLiveWait, useLiveWait } from "./liveWait";
 import { __resetJobNotes, notifyJobSettled, pendingJobNotes, type SettledJob } from "./jobNotes";
 import {
   loadClientSession,
@@ -1912,4 +1913,157 @@ describe("useChat tells the model when the timeline changed outside the chat (UJ
     await useChat.getState().send("third");
     expect(lastStart()).not.toContain(TIMELINE_CHANGED_NOTE);
   });
+});
+
+// What the person is shown a running turn is waiting on comes from three places in this store: the
+// events a turn emits (a tool call, a question), the model round it makes, and every way a turn ends.
+describe("useChat tells the status line what the turn is waiting on", () => {
+  const live = () => useLiveWait.getState();
+  const nothing = () => ({
+    round: live().round,
+    calls: live().calls,
+    approval: live().approvalSince,
+  });
+  const NOTHING = { round: null, calls: [], approval: null };
+  const ANSWER = {
+    kind: "text",
+    final_text: "ok",
+    usage: {},
+    provider_snapshot: {},
+    history_mode: "client",
+  };
+
+  beforeEach(() => {
+    resetLiveWait();
+    resetHistoryModeSupport();
+  });
+  afterEach(() => resetLiveWait());
+
+  async function startTurn(): Promise<void> {
+    setDesktop("p1");
+    useChat.setState({ projectId: "p1", transcriptId: "tx1" });
+    await useChat.getState().send("hi");
+  }
+
+  it("has a tool call running from its call to its result, and only that one", async () => {
+    await startTurn();
+    emit("tool_call", { call_id: "c1", name: "video_ask", args: {} });
+    emit("tool_call", { call_id: "c2", name: "inspect_media", args: {} });
+    expect(live().calls.map((c) => c.name)).toEqual(["video_ask", "inspect_media"]);
+    emit("tool_result", { call_id: "c1", name: "video_ask", ok: true });
+    expect(live().calls.map((c) => c.name)).toEqual(["inspect_media"]);
+  });
+
+  it("is waiting on the person when the turn stops to ask, with nothing running", async () => {
+    await startTurn();
+    emit("awaiting_approval", { calls: [{ call_id: "c1", name: "add_clips", arguments: {} }] });
+    emit("turn_paused", snap());
+    expect(live().approvalSince).not.toBeNull();
+    expect(live().calls).toEqual([]);
+    expect(live().round).toBeNull();
+  });
+
+  it("follows a model round: building the request, waiting for the first word, writing, then nothing", async () => {
+    await startTurn();
+    const seen: Array<string | undefined> = [];
+    (inferRoundStreaming as Any).mockImplementationOnce(
+      async (_body: Any, onDelta: (d: Any) => void) => {
+        seen.push(live().round?.phase);
+        onDelta({ kind: "text", text: "hel" });
+        seen.push(live().round?.phase);
+        return ANSWER;
+      },
+    );
+    const done = lastDeps.infer({ user_text: "hi" }, []);
+    expect(live().round?.phase).toBe("preparing");
+    await done;
+    expect(seen).toEqual(["waiting", "writing"]);
+    expect(live().round).toBeNull();
+  });
+
+  it("is not waiting on a round that failed", async () => {
+    await startTurn();
+    (inferRoundStreaming as Any).mockRejectedValueOnce(new Error("boom"));
+    await expect(lastDeps.infer({ user_text: "hi" }, [])).rejects.toThrow("boom");
+    expect(live().round).toBeNull();
+  });
+
+  it("does not let a retired turn's round ending wipe the round of the turn that replaced it", async () => {
+    await startTurn();
+    const first = lastDeps;
+    let finishFirst!: (v: unknown) => void;
+    (inferRoundStreaming as Any).mockImplementationOnce(
+      () => new Promise((resolve) => (finishFirst = resolve)),
+    );
+    const firstRound = first.infer({ user_text: "hi" }, []);
+    await useChat.getState().send("second message"); // retires the first turn
+    (inferRoundStreaming as Any).mockImplementationOnce(() => new Promise(() => undefined));
+    void lastDeps.infer({ user_text: "second" }, []);
+    expect(live().round?.phase).toBe("preparing");
+
+    finishFirst(ANSWER);
+    await firstRound;
+    expect(live().round).not.toBeNull();
+  });
+
+  it.each(["turn_done", "error"])(
+    "shows nothing once the turn has ended with %s",
+    async (event) => {
+      await startTurn();
+      live().roundStarted();
+      emit("tool_call", { call_id: "c1", name: "video_ask", args: {} });
+      emit(event, event === "error" ? { error: "boom" } : snap());
+      expect(nothing()).toEqual(NOTHING);
+    },
+  );
+
+  // Stop must end every kind of wait at once, whatever the turn was waiting on.
+  it.each([
+    [
+      "a model round",
+      async () => {
+        (inferRoundStreaming as Any).mockImplementationOnce(() => new Promise(() => undefined));
+        void lastDeps.infer({ user_text: "hi" }, []);
+        expect(live().round).not.toBeNull();
+      },
+    ],
+    [
+      "a tool call",
+      async () => {
+        emit("tool_call", { call_id: "c1", name: "video_ask", args: {} });
+        expect(live().calls).toHaveLength(1);
+      },
+    ],
+    [
+      "an approval",
+      async () => {
+        emit("awaiting_approval", { calls: [{ call_id: "c1", name: "add_clips", arguments: {} }] });
+        emit("turn_paused", snap());
+        expect(live().approvalSince).not.toBeNull();
+      },
+    ],
+  ])("Stop ends a wait on %s at once and leaves nothing showing", async (_name, arrange) => {
+    await startTurn();
+    await arrange();
+    await useChat.getState().stop();
+    expect(useChat.getState().streaming).toBe(false);
+    expect(useChat.getState().turns.at(-1)?.status).toBe("done");
+    expect(nothing()).toEqual(NOTHING);
+  });
+
+  it.each([
+    ["a new message", () => useChat.getState().send("try again")],
+    ["Continue", () => useChat.getState().continueRun()],
+  ])(
+    "starts the next run (%s) from nothing waiting, even if the last run abandoned a call that ignored Stop",
+    async (_name, next) => {
+      await startTurn();
+      emit("tool_call", { call_id: "stuck", name: "video_ask", args: {} });
+      await useChat.getState().stop();
+      emit("tool_call", { call_id: "late", name: "video_ask", args: {} }); // arrives after Stop
+      expect(live().calls).toHaveLength(1);
+      await next();
+      expect(nothing()).toEqual(NOTHING);
+    },
+  );
 });

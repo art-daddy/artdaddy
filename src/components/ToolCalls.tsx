@@ -15,6 +15,7 @@ export default function ToolCalls({ calls, ctx }: { calls: ToolCallView[]; ctx: 
   const running = calls.some((c) => c.running);
   const failed = calls.filter((c) => !c.ok);
   const interrupted = !running && !failed.length && calls.some((c) => c.interrupted);
+  const waiting = !running && !failed.length && !interrupted && calls.some((c) => c.pending);
   const summary = rowSummary(calls, ctx);
 
   return (
@@ -30,6 +31,10 @@ export default function ToolCalls({ calls, ctx }: { calls: ToolCallView[]; ctx: 
         ) : interrupted ? (
           <span className="text-neutral-500" title="stopped before it finished">
             ⊘
+          </span>
+        ) : waiting ? (
+          <span className="text-amber-400" title="still going in the background">
+            …
           </span>
         ) : (
           <span className={failed.length ? "text-red-400" : "text-emerald-500/70"}>

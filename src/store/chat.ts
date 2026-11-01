@@ -9,6 +9,7 @@ import { collectInferenceAttachments } from "../agent/attachments";
 import { historyAttachments } from "../agent/historyFrames";
 import { markRefusedFrames, refusedFramesOf, refusedNotice } from "../agent/refusedFrames";
 import { runBounded, timedOutResult, toolBoundMs } from "../agent/toolBound";
+import { useLiveWait } from "./liveWait";
 import type { InferenceAttachment, RoundInput, ToolResultItem, Usage } from "../agent/types";
 import { captureError, setCorrelation } from "../observability/sentry";
 import { isExpected, toUserMessage } from "../lib/errors";
@@ -233,6 +234,7 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
     }
     currentExec = null;
     currentRunner = null;
+    useLiveWait.getState().clear();
     set({ execToken: null }); // no live execution -> its origin is no longer current
   }
   /** Quiesce transcript producers: retire the in-flight turn (its `emit()` halts, so no more
@@ -298,8 +300,21 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
       : new Promise((resolve) => opsIdleWaiters.push(resolve));
   }
 
+  /** What the running turn is waiting on, for the status line: a tool call is running from its
+   *  `tool_call` to its `tool_result`, and a turn that stops to ask the person is waiting on them.
+   *  Model rounds are tracked where they are made; a turn's end clears it all (finishTurn). */
+  function trackWait(event: string, data: Record<string, unknown> | undefined): void {
+    const wait = useLiveWait.getState();
+    if (event === "tool_call")
+      wait.callStarted(String(data?.call_id ?? ""), String(data?.name ?? ""));
+    else if (event === "tool_result") wait.callEnded(String(data?.call_id ?? ""));
+    else if (event === "awaiting_approval") wait.approvalAsked();
+    else if (event === "turn_paused") wait.pausedForInput();
+  }
+
   function apply(msg: SSEMessage) {
     const { event, data } = msg;
+    trackWait(event, data);
     switch (event) {
       // ── streamed output ────────────────────────────────────────────────────
       // Deltas are LIVE PRESENTATION. They grow a provisional part so the user sees
@@ -489,65 +504,84 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
       model: get().model,
       transcript_id: get().transcriptId ?? "",
     };
+    // A model round is the turn's wait from the moment its request starts being built until it
+    // returns. Only the live execution writes it: a retired turn's late end must not wipe the next
+    // turn's round.
+    const inLiveRound = async <T>(body: () => Promise<T>): Promise<T> => {
+      if (!superseded()) useLiveWait.getState().roundStarted();
+      try {
+        return await body();
+      } finally {
+        if (!superseded()) useLiveWait.getState().roundEnded();
+      }
+    };
     return {
       eventContext: () => ({ ...traceLabels }),
-      infer: async (roundInput: RoundInput, attachments?: InferenceAttachment[]) => {
-        const { model, effort, providerSnapshot, projectId, transcriptId } = get();
-        traceLabels = { ...traceLabels, model };
-        const ed = useEditor.getState();
-        const cfg = ed.store ? await projectConfig(ed.store) : undefined;
-        setCorrelation({ project_id: projectId, transcript_id: transcriptId, model_id: model });
-        // Same three facts the crash reporter needs, for the same reason: a tool trace that
-        // cannot say which model and which transcript produced it answers no question worth
-        // asking. Set per round, because the picker can change between them.
-        setAgentContext({
-          surface: "app",
-          model,
-          project_id: traceLabels.project_id,
-          transcript_id: traceLabels.transcript_id,
-        });
-        // Client-owned history (Phase 1, option A): ask the server to rebuild the model's whole
-        // input from the transcript. Until a server has said it does that for this model, the
-        // request stays valid for the chained path too (round_input, the chain token, this
-        // round's frames). The history's own frames ride `history_frames` from the first round,
-        // which a server without the mode ignores, so the first round after a restart already
-        // shows them; once the mode is confirmed, nothing rides `attachments` twice.
-        const turns = get().turns;
-        const modelKey = String(model ?? "");
-        const support = historyModeSupport.get(modelKey);
-        const history = support !== false;
-        const historyFrames = history ? await historyAttachments(turns, exec.host.store()) : [];
-        const dto = await inferRoundStreaming(
-          {
-            round_input: roundInput,
-            attachments: support === true ? [] : attachments,
+      infer: (roundInput: RoundInput, attachments?: InferenceAttachment[]) =>
+        inLiveRound(async () => {
+          const { model, effort, providerSnapshot, projectId, transcriptId } = get();
+          traceLabels = { ...traceLabels, model };
+          const ed = useEditor.getState();
+          const cfg = ed.store ? await projectConfig(ed.store) : undefined;
+          setCorrelation({ project_id: projectId, transcript_id: transcriptId, model_id: model });
+          // Same three facts the crash reporter needs, for the same reason: a tool trace that
+          // cannot say which model and which transcript produced it answers no question worth
+          // asking. Set per round, because the picker can change between them.
+          setAgentContext({
+            surface: "app",
             model,
-            effort,
-            project_id: projectId ?? undefined,
-            transcript_id: transcriptId ?? undefined,
-            transcript: history
-              ? { requests: requestsForHistory(turns) }
-              : transcriptForRound(base, roundInput, turns),
-            provider_snapshot: providerSnapshot,
-            ...(history ? { history_mode: "client" as const, history_frames: historyFrames } : {}),
-            project: cfg ?? null,
-          },
-          // Deltas are live presentation only. They go through the SAME supersede
-          // guard as every other event, so a stale turn cannot paint into the new one.
-          (d) => {
-            if (!superseded()) apply({ event: `delta_${d.kind}`, data: { text: d.text } });
-          },
-          exec.controller.signal,
-        );
-        // Learn the mode from a real answer only: an error round may come from a path that
-        // never got as far as choosing one, and must not demote this model to the chain.
-        if (dto.history_mode === "client") historyModeSupport.set(modelKey, true);
-        else if (history && dto.kind !== "error") historyModeSupport.set(modelKey, false);
-        const ranHistory = dto.history_mode === "client";
-        if (!superseded())
-          set({ providerSnapshot: ranHistory ? {} : (dto.provider_snapshot ?? providerSnapshot) });
-        return dto;
-      },
+            project_id: traceLabels.project_id,
+            transcript_id: traceLabels.transcript_id,
+          });
+          // Client-owned history (Phase 1, option A): ask the server to rebuild the model's whole
+          // input from the transcript. Until a server has said it does that for this model, the
+          // request stays valid for the chained path too (round_input, the chain token, this
+          // round's frames). The history's own frames ride `history_frames` from the first round,
+          // which a server without the mode ignores, so the first round after a restart already
+          // shows them; once the mode is confirmed, nothing rides `attachments` twice.
+          const turns = get().turns;
+          const modelKey = String(model ?? "");
+          const support = historyModeSupport.get(modelKey);
+          const history = support !== false;
+          const historyFrames = history ? await historyAttachments(turns, exec.host.store()) : [];
+          if (!superseded()) useLiveWait.getState().roundSent();
+          const dto = await inferRoundStreaming(
+            {
+              round_input: roundInput,
+              attachments: support === true ? [] : attachments,
+              model,
+              effort,
+              project_id: projectId ?? undefined,
+              transcript_id: transcriptId ?? undefined,
+              transcript: history
+                ? { requests: requestsForHistory(turns) }
+                : transcriptForRound(base, roundInput, turns),
+              provider_snapshot: providerSnapshot,
+              ...(history
+                ? { history_mode: "client" as const, history_frames: historyFrames }
+                : {}),
+              project: cfg ?? null,
+            },
+            // Deltas are live presentation only. They go through the SAME supersede
+            // guard as every other event, so a stale turn cannot paint into the new one.
+            (d) => {
+              if (superseded()) return;
+              useLiveWait.getState().roundWriting();
+              apply({ event: `delta_${d.kind}`, data: { text: d.text } });
+            },
+            exec.controller.signal,
+          );
+          // Learn the mode from a real answer only: an error round may come from a path that
+          // never got as far as choosing one, and must not demote this model to the chain.
+          if (dto.history_mode === "client") historyModeSupport.set(modelKey, true);
+          else if (history && dto.kind !== "error") historyModeSupport.set(modelKey, false);
+          const ranHistory = dto.history_mode === "client";
+          if (!superseded())
+            set({
+              providerSnapshot: ranHistory ? {} : (dto.provider_snapshot ?? providerSnapshot),
+            });
+          return dto;
+        }),
       runTool: async (name, args, trace) => {
         // Core fix: a superseded/stopped turn NEVER runs a tool -> no hidden edits on
         // its old project after a switch. Bound to THIS turn's host + abort signal.
@@ -605,6 +639,9 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
 
   async function runTurn(exec: TurnExecution, action: () => Promise<void>): Promise<void> {
     set({ streaming: true, error: null, canContinue: false });
+    // A fresh run starts from nothing waiting: a call the last run abandoned (one that ignored Stop)
+    // must not be shown as this run's wait.
+    if (exec.inflight === 0) useLiveWait.getState().clear();
     exec.inflight += 1;
     try {
       await action();
@@ -693,6 +730,7 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
    *  Stop, then a project switch, did: `load()` clears `turns` and refills from
    *  disk, so the unpersisted turn is gone while its 25 clips remain. */
   function finishTurn(updater: (s: ChatState) => Partial<ChatState>): void {
+    useLiveWait.getState().clear();
     // Only a turn that was actually in flight is ending; a stray Stop after one
     // finished must not re-stamp its redo target with the user's later edits.
     const last = get().turns.at(-1);

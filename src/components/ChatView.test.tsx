@@ -1,7 +1,7 @@
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { StrictMode } from "react";
 import fc from "fast-check";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const state: any = {};
@@ -51,6 +51,7 @@ import { DISCORD_URL } from "../lib/community";
 import { toUserMessage } from "../lib/errors";
 import { peekFirstPrompt, setFirstPrompt, takeFirstPrompt } from "../store/firstPrompt";
 import ChatView from "./ChatView";
+import { resetLiveWait, useLiveWait } from "../store/liveWait";
 import { STARTER_PROMPTS } from "./starterPrompts";
 import { useCompatibility } from "../update/compatibility";
 
@@ -478,6 +479,57 @@ describe("ChatView", () => {
     render(<ChatView />);
     fireEvent.click(screen.getByRole("button", { name: /Stop/ }));
     expect(state.stop).toHaveBeenCalled();
+  });
+
+  describe("the line under a running turn says what it is waiting on", () => {
+    const runningTurn = (status: string) => ({
+      id: "t1",
+      userText: "caption it",
+      attachments: [],
+      parts: [{ kind: "tool_call", call_id: "c1", name: "add_captions", args: {} }],
+      status,
+    });
+    afterEach(() => resetLiveWait());
+
+    it("names the tool that is running, in the chat's own words, with the time it has taken", () => {
+      vi.useFakeTimers();
+      try {
+        state.streaming = true;
+        state.turns = [runningTurn("streaming")];
+        useLiveWait.getState().callStarted("c1", "add_captions", Date.now() - 42_000);
+        const { container } = render(<ChatView />);
+        const line = screen.getByTestId("status-line");
+        expect(line.textContent).toContain("Captioning the audio…");
+        expect(line.textContent).toContain("0:42");
+        expect(line.textContent).toMatch(/Still working on this/);
+        expect(container.textContent).not.toContain("working…");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("says the model is thinking when no tool is running", () => {
+      state.streaming = true;
+      state.turns = [runningTurn("streaming")];
+      useLiveWait.getState().roundStarted(Date.now());
+      useLiveWait.getState().roundSent();
+      render(<ChatView />);
+      expect(screen.getByTestId("status-line").textContent).toContain("Thinking…");
+    });
+
+    it("says it is waiting for the person when the turn is waiting for their OK", () => {
+      state.turns = [runningTurn("awaiting")];
+      useLiveWait.getState().approvalAsked(Date.now());
+      render(<ChatView />);
+      expect(screen.getByTestId("status-line").textContent).toContain("Waiting for your OK…");
+    });
+
+    it("is not shown for a turn that has finished, even if a stale record is left behind", () => {
+      state.turns = [runningTurn("done")];
+      useLiveWait.getState().callStarted("c1", "add_captions", Date.now());
+      render(<ChatView />);
+      expect(screen.queryByTestId("status-line")).toBeNull();
+    });
   });
 
   it("lights the composer halo only while the agent is working", () => {
