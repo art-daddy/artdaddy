@@ -1,0 +1,787 @@
+{
+ "format": 1,
+ "rule": {
+  "pass_if": "diff_points <= 1.0 and ci_high <= 2.0",
+  "fail_if": "diff_points > 1.0",
+  "otherwise": "weak",
+  "bootstrap_draws": 2000,
+  "ci": "95% paired bootstrap over utterances, seeded per set and setting"
+ },
+ "engine": "whisper.cpp v1.9.2",
+ "baseline": {
+  "id": "B",
+  "variant": "f16",
+  "beam": 5,
+  "model": "ggml-small.bin",
+  "flags": []
+ },
+ "settings": {
+  "G": {
+   "variant": "f16",
+   "beam": 1,
+   "model": "ggml-small.bin",
+   "flags": [
+    "-bs",
+    "1",
+    "-bo",
+    "1"
+   ]
+  },
+  "Q": {
+   "variant": "q5_1",
+   "beam": 1,
+   "model": "ggml-small-q5_1.bin",
+   "flags": [
+    "-bs",
+    "1",
+    "-bo",
+    "1"
+   ]
+  },
+  "Z": {
+   "variant": "q8_0",
+   "beam": 1,
+   "model": "ggml-small-q8_0.bin",
+   "flags": [
+    "-bs",
+    "1",
+    "-bo",
+    "1"
+   ]
+  },
+  "ZB": {
+   "variant": "q8_0",
+   "beam": 5,
+   "model": "ggml-small-q8_0.bin",
+   "flags": []
+  }
+ },
+ "datasets": {
+  "en": "FLEURS en_us test split, the first 150 utterances in file order",
+  "en_gs": "GigaSpeech test split (open ASR leaderboard copy), 160 utterances from rows near 1500, 5500, 9500 and 14500",
+  "other": "FLEURS test split of the language, the first 40 utterances in file order"
+ },
+ "rows": [
+  {
+   "set": "en",
+   "language": "en",
+   "unit": "wer",
+   "utterances": 150,
+   "baseline_error_pct": 6.02,
+   "results": {
+    "G": {
+     "error_pct": 6.56,
+     "diff_points": 0.54,
+     "ci_low": 0.06,
+     "ci_high": 1.03,
+     "verdict": "pass"
+    },
+    "Q": {
+     "error_pct": 6.69,
+     "diff_points": 0.67,
+     "ci_low": 0.16,
+     "ci_high": 1.16,
+     "verdict": "pass"
+    },
+    "Z": {
+     "error_pct": 6.47,
+     "diff_points": 0.45,
+     "ci_low": -0.06,
+     "ci_high": 0.97,
+     "verdict": "pass"
+    },
+    "ZB": {
+     "error_pct": 6.18,
+     "diff_points": 0.16,
+     "ci_low": -0.35,
+     "ci_high": 0.67,
+     "verdict": "pass"
+    }
+   }
+  },
+  {
+   "set": "es",
+   "language": "es",
+   "unit": "wer",
+   "utterances": 40,
+   "baseline_error_pct": 4.62,
+   "results": {
+    "G": {
+     "error_pct": 5.32,
+     "diff_points": 0.7,
+     "ci_low": 0.0,
+     "ci_high": 1.64,
+     "verdict": "pass"
+    },
+    "Q": {
+     "error_pct": 5.52,
+     "diff_points": 0.9,
+     "ci_low": 0.11,
+     "ci_high": 1.81,
+     "verdict": "pass"
+    },
+    "Z": {
+     "error_pct": 5.32,
+     "diff_points": 0.7,
+     "ci_low": -0.09,
+     "ci_high": 1.61,
+     "verdict": "pass"
+    }
+   }
+  },
+  {
+   "set": "ru",
+   "language": "ru",
+   "unit": "wer",
+   "utterances": 40,
+   "baseline_error_pct": 11.58,
+   "results": {
+    "G": {
+     "error_pct": 11.7,
+     "diff_points": 0.12,
+     "ci_low": -1.42,
+     "ci_high": 1.59,
+     "verdict": "pass"
+    },
+    "Q": {
+     "error_pct": 11.46,
+     "diff_points": -0.12,
+     "ci_low": -1.64,
+     "ci_high": 1.35,
+     "verdict": "pass"
+    },
+    "Z": {
+     "error_pct": 12.06,
+     "diff_points": 0.48,
+     "ci_low": -0.82,
+     "ci_high": 1.95,
+     "verdict": "pass"
+    }
+   }
+  },
+  {
+   "set": "ko",
+   "language": "ko",
+   "unit": "cer",
+   "utterances": 40,
+   "baseline_error_pct": 5.76,
+   "results": {
+    "G": {
+     "error_pct": 8.16,
+     "diff_points": 2.4,
+     "ci_low": 0.38,
+     "ci_high": 5.73,
+     "verdict": "fail"
+    },
+    "Q": {
+     "error_pct": 6.37,
+     "diff_points": 0.61,
+     "ci_low": 0.0,
+     "ci_high": 1.28,
+     "verdict": "pass"
+    },
+    "Z": {
+     "error_pct": 8.16,
+     "diff_points": 2.4,
+     "ci_low": 0.41,
+     "ci_high": 5.75,
+     "verdict": "fail"
+    },
+    "ZB": {
+     "error_pct": 5.2,
+     "diff_points": -0.56,
+     "ci_low": -1.26,
+     "ci_high": 0.06,
+     "verdict": "pass"
+    }
+   }
+  },
+  {
+   "set": "pt",
+   "language": "pt",
+   "unit": "wer",
+   "utterances": 40,
+   "baseline_error_pct": 6.67,
+   "results": {
+    "G": {
+     "error_pct": 6.96,
+     "diff_points": 0.29,
+     "ci_low": -0.9,
+     "ci_high": 1.46,
+     "verdict": "pass"
+    },
+    "Q": {
+     "error_pct": 7.63,
+     "diff_points": 0.97,
+     "ci_low": -0.27,
+     "ci_high": 2.08,
+     "verdict": "weak"
+    },
+    "Z": {
+     "error_pct": 7.25,
+     "diff_points": 0.58,
+     "ci_low": -0.49,
+     "ci_high": 1.56,
+     "verdict": "pass"
+    }
+   }
+  },
+  {
+   "set": "hi",
+   "language": "hi",
+   "unit": "wer",
+   "utterances": 40,
+   "baseline_error_pct": 54.85,
+   "results": {
+    "G": {
+     "error_pct": 59.13,
+     "diff_points": 4.28,
+     "ci_low": 0.0,
+     "ci_high": 9.44,
+     "verdict": "fail"
+    },
+    "Q": {
+     "error_pct": 62.93,
+     "diff_points": 8.08,
+     "ci_low": 2.52,
+     "ci_high": 14.47,
+     "verdict": "fail"
+    },
+    "Z": {
+     "error_pct": 63.69,
+     "diff_points": 8.84,
+     "ci_low": 2.69,
+     "ci_high": 16.67,
+     "verdict": "fail"
+    },
+    "ZB": {
+     "error_pct": 53.9,
+     "diff_points": -0.95,
+     "ci_low": -3.45,
+     "ci_high": 1.18,
+     "verdict": "pass"
+    }
+   }
+  },
+  {
+   "set": "id",
+   "language": "id",
+   "unit": "wer",
+   "utterances": 40,
+   "baseline_error_pct": 33.98,
+   "results": {
+    "G": {
+     "error_pct": 34.47,
+     "diff_points": 0.49,
+     "ci_low": -0.87,
+     "ci_high": 1.98,
+     "verdict": "pass"
+    },
+    "Q": {
+     "error_pct": 34.56,
+     "diff_points": 0.58,
+     "ci_low": -0.95,
+     "ci_high": 2.66,
+     "verdict": "weak"
+    },
+    "Z": {
+     "error_pct": 34.37,
+     "diff_points": 0.39,
+     "ci_low": -1.06,
+     "ci_high": 1.99,
+     "verdict": "pass"
+    }
+   }
+  },
+  {
+   "set": "it",
+   "language": "it",
+   "unit": "wer",
+   "utterances": 40,
+   "baseline_error_pct": 9.53,
+   "results": {
+    "G": {
+     "error_pct": 8.35,
+     "diff_points": -1.18,
+     "ci_low": -2.45,
+     "ci_high": 0.0,
+     "verdict": "pass"
+    },
+    "Q": {
+     "error_pct": 8.64,
+     "diff_points": -0.88,
+     "ci_low": -2.6,
+     "ci_high": 1.01,
+     "verdict": "pass"
+    },
+    "Z": {
+     "error_pct": 8.45,
+     "diff_points": -1.08,
+     "ci_low": -2.43,
+     "ci_high": 0.2,
+     "verdict": "pass"
+    }
+   }
+  },
+  {
+   "set": "tr",
+   "language": "tr",
+   "unit": "wer",
+   "utterances": 40,
+   "baseline_error_pct": 15.01,
+   "results": {
+    "G": {
+     "error_pct": 16.74,
+     "diff_points": 1.73,
+     "ci_low": -0.14,
+     "ci_high": 3.78,
+     "verdict": "fail"
+    },
+    "Q": {
+     "error_pct": 17.46,
+     "diff_points": 2.45,
+     "ci_low": 0.85,
+     "ci_high": 4.35,
+     "verdict": "fail"
+    },
+    "Z": {
+     "error_pct": 17.03,
+     "diff_points": 2.02,
+     "ci_low": 0.0,
+     "ci_high": 4.23,
+     "verdict": "fail"
+    },
+    "ZB": {
+     "error_pct": 15.3,
+     "diff_points": 0.29,
+     "ci_low": -1.71,
+     "ci_high": 2.29,
+     "verdict": "weak"
+    }
+   }
+  },
+  {
+   "set": "nl",
+   "language": "nl",
+   "unit": "wer",
+   "utterances": 40,
+   "baseline_error_pct": 17.69,
+   "results": {
+    "G": {
+     "error_pct": 19.43,
+     "diff_points": 1.75,
+     "ci_low": 0.11,
+     "ci_high": 3.35,
+     "verdict": "fail"
+    },
+    "Q": {
+     "error_pct": 20.41,
+     "diff_points": 2.73,
+     "ci_low": 0.56,
+     "ci_high": 4.98,
+     "verdict": "fail"
+    },
+    "Z": {
+     "error_pct": 19.65,
+     "diff_points": 1.97,
+     "ci_low": 0.31,
+     "ci_high": 3.69,
+     "verdict": "fail"
+    },
+    "ZB": {
+     "error_pct": 18.45,
+     "diff_points": 0.76,
+     "ci_low": -0.9,
+     "ci_high": 2.5,
+     "verdict": "weak"
+    }
+   }
+  },
+  {
+   "set": "pl",
+   "language": "pl",
+   "unit": "wer",
+   "utterances": 40,
+   "baseline_error_pct": 18.37,
+   "results": {
+    "G": {
+     "error_pct": 20.12,
+     "diff_points": 1.75,
+     "ci_low": -0.6,
+     "ci_high": 4.55,
+     "verdict": "fail"
+    },
+    "Q": {
+     "error_pct": 18.66,
+     "diff_points": 0.29,
+     "ci_low": -2.33,
+     "ci_high": 2.85,
+     "verdict": "weak"
+    },
+    "Z": {
+     "error_pct": 20.26,
+     "diff_points": 1.9,
+     "ci_low": -0.42,
+     "ci_high": 4.7,
+     "verdict": "fail"
+    },
+    "ZB": {
+     "error_pct": 17.93,
+     "diff_points": -0.44,
+     "ci_low": -1.27,
+     "ci_high": 0.46,
+     "verdict": "pass"
+    }
+   }
+  },
+  {
+   "set": "ar",
+   "language": "ar",
+   "unit": "wer",
+   "utterances": 40,
+   "baseline_error_pct": 20.63,
+   "results": {
+    "G": {
+     "error_pct": 23.09,
+     "diff_points": 2.46,
+     "ci_low": 1.29,
+     "ci_high": 3.7,
+     "verdict": "fail"
+    },
+    "Q": {
+     "error_pct": 23.63,
+     "diff_points": 3.01,
+     "ci_low": 1.66,
+     "ci_high": 4.51,
+     "verdict": "fail"
+    },
+    "Z": {
+     "error_pct": 23.09,
+     "diff_points": 2.46,
+     "ci_low": 1.29,
+     "ci_high": 3.69,
+     "verdict": "fail"
+    },
+    "ZB": {
+     "error_pct": 22.27,
+     "diff_points": 1.64,
+     "ci_low": 0.44,
+     "ci_high": 2.91,
+     "verdict": "fail"
+    }
+   }
+  },
+  {
+   "set": "fa",
+   "language": "fa",
+   "unit": "wer",
+   "utterances": 40,
+   "baseline_error_pct": 54.58,
+   "results": {
+    "G": {
+     "error_pct": 56.97,
+     "diff_points": 2.39,
+     "ci_low": 0.31,
+     "ci_high": 4.34,
+     "verdict": "fail"
+    },
+    "Q": {
+     "error_pct": 58.96,
+     "diff_points": 4.38,
+     "ci_low": 1.72,
+     "ci_high": 7.05,
+     "verdict": "fail"
+    },
+    "Z": {
+     "error_pct": 57.37,
+     "diff_points": 2.79,
+     "ci_low": 0.79,
+     "ci_high": 4.85,
+     "verdict": "fail"
+    },
+    "ZB": {
+     "error_pct": 55.68,
+     "diff_points": 1.1,
+     "ci_low": -0.99,
+     "ci_high": 3.12,
+     "verdict": "fail"
+    }
+   }
+  },
+  {
+   "set": "ja",
+   "language": "ja",
+   "unit": "cer",
+   "utterances": 40,
+   "baseline_error_pct": 14.03,
+   "results": {
+    "G": {
+     "error_pct": 13.98,
+     "diff_points": -0.05,
+     "ci_low": -1.48,
+     "ci_high": 1.38,
+     "verdict": "pass"
+    },
+    "Q": {
+     "error_pct": 14.03,
+     "diff_points": 0.0,
+     "ci_low": -1.94,
+     "ci_high": 1.73,
+     "verdict": "pass"
+    },
+    "Z": {
+     "error_pct": 13.98,
+     "diff_points": -0.05,
+     "ci_low": -1.52,
+     "ci_high": 1.47,
+     "verdict": "pass"
+    }
+   }
+  },
+  {
+   "set": "de",
+   "language": "de",
+   "unit": "wer",
+   "utterances": 40,
+   "baseline_error_pct": 8.47,
+   "results": {
+    "G": {
+     "error_pct": 9.41,
+     "diff_points": 0.94,
+     "ci_low": -0.11,
+     "ci_high": 1.98,
+     "verdict": "pass"
+    },
+    "Q": {
+     "error_pct": 8.16,
+     "diff_points": -0.31,
+     "ci_low": -1.71,
+     "ci_high": 0.98,
+     "verdict": "pass"
+    },
+    "Z": {
+     "error_pct": 9.73,
+     "diff_points": 1.26,
+     "ci_low": 0.2,
+     "ci_high": 2.39,
+     "verdict": "fail"
+    }
+   }
+  },
+  {
+   "set": "fr",
+   "language": "fr",
+   "unit": "wer",
+   "utterances": 40,
+   "baseline_error_pct": 15.43,
+   "results": {
+    "G": {
+     "error_pct": 15.34,
+     "diff_points": -0.09,
+     "ci_low": -1.37,
+     "ci_high": 1.07,
+     "verdict": "pass"
+    },
+    "Q": {
+     "error_pct": 16.08,
+     "diff_points": 0.65,
+     "ci_low": -1.33,
+     "ci_high": 2.88,
+     "verdict": "weak"
+    },
+    "Z": {
+     "error_pct": 15.06,
+     "diff_points": -0.37,
+     "ci_low": -1.57,
+     "ci_high": 0.76,
+     "verdict": "pass"
+    }
+   }
+  },
+  {
+   "set": "zh",
+   "language": "zh",
+   "unit": "cer",
+   "utterances": 40,
+   "baseline_error_pct": 20.04,
+   "results": {
+    "G": {
+     "error_pct": 21.85,
+     "diff_points": 1.8,
+     "ci_low": -1.53,
+     "ci_high": 5.81,
+     "verdict": "fail"
+    },
+    "Q": {
+     "error_pct": 22.93,
+     "diff_points": 2.88,
+     "ci_low": -0.79,
+     "ci_high": 7.01,
+     "verdict": "fail"
+    },
+    "Z": {
+     "error_pct": 21.85,
+     "diff_points": 1.8,
+     "ci_low": -1.38,
+     "ci_high": 5.74,
+     "verdict": "fail"
+    },
+    "ZB": {
+     "error_pct": 19.61,
+     "diff_points": -0.43,
+     "ci_low": -3.61,
+     "ci_high": 2.79,
+     "verdict": "weak"
+    }
+   }
+  },
+  {
+   "set": "vi",
+   "language": "vi",
+   "unit": "wer",
+   "utterances": 40,
+   "baseline_error_pct": 19.61,
+   "results": {
+    "G": {
+     "error_pct": 21.57,
+     "diff_points": 1.96,
+     "ci_low": 0.43,
+     "ci_high": 3.61,
+     "verdict": "fail"
+    },
+    "Q": {
+     "error_pct": 23.53,
+     "diff_points": 3.92,
+     "ci_low": 1.88,
+     "ci_high": 6.23,
+     "verdict": "fail"
+    },
+    "Z": {
+     "error_pct": 21.74,
+     "diff_points": 2.13,
+     "ci_low": 0.75,
+     "ci_high": 3.64,
+     "verdict": "fail"
+    },
+    "ZB": {
+     "error_pct": 20.63,
+     "diff_points": 1.02,
+     "ci_low": -0.53,
+     "ci_high": 2.68,
+     "verdict": "fail"
+    }
+   }
+  },
+  {
+   "set": "uk",
+   "language": "uk",
+   "unit": "wer",
+   "utterances": 40,
+   "baseline_error_pct": 17.43,
+   "results": {
+    "G": {
+     "error_pct": 18.53,
+     "diff_points": 1.11,
+     "ci_low": -0.97,
+     "ci_high": 3.8,
+     "verdict": "fail"
+    },
+    "Q": {
+     "error_pct": 18.53,
+     "diff_points": 1.11,
+     "ci_low": -1.29,
+     "ci_high": 3.83,
+     "verdict": "fail"
+    },
+    "Z": {
+     "error_pct": 18.4,
+     "diff_points": 0.97,
+     "ci_low": -1.1,
+     "ci_high": 3.34,
+     "verdict": "weak"
+    },
+    "ZB": {
+     "error_pct": 17.15,
+     "diff_points": -0.28,
+     "ci_low": -2.22,
+     "ci_high": 1.77,
+     "verdict": "pass"
+    }
+   }
+  },
+  {
+   "set": "sv",
+   "language": "sv",
+   "unit": "wer",
+   "utterances": 40,
+   "baseline_error_pct": 22.72,
+   "results": {
+    "G": {
+     "error_pct": 25.67,
+     "diff_points": 2.95,
+     "ci_low": 1.09,
+     "ci_high": 4.92,
+     "verdict": "fail"
+    },
+    "Q": {
+     "error_pct": 26.06,
+     "diff_points": 3.34,
+     "ci_low": 1.22,
+     "ci_high": 5.7,
+     "verdict": "fail"
+    },
+    "Z": {
+     "error_pct": 25.67,
+     "diff_points": 2.95,
+     "ci_low": 1.07,
+     "ci_high": 5.01,
+     "verdict": "fail"
+    },
+    "ZB": {
+     "error_pct": 22.98,
+     "diff_points": 0.26,
+     "ci_low": -1.76,
+     "ci_high": 2.51,
+     "verdict": "weak"
+    }
+   }
+  },
+  {
+   "set": "en_gs",
+   "language": "en",
+   "unit": "wer",
+   "utterances": 160,
+   "baseline_error_pct": 9.42,
+   "results": {
+    "G": {
+     "error_pct": 9.36,
+     "diff_points": -0.05,
+     "ci_low": -0.47,
+     "ci_high": 0.39,
+     "verdict": "pass"
+    },
+    "Q": {
+     "error_pct": 9.47,
+     "diff_points": 0.05,
+     "ci_low": -0.44,
+     "ci_high": 0.62,
+     "verdict": "pass"
+    },
+    "Z": {
+     "error_pct": 9.34,
+     "diff_points": -0.08,
+     "ci_low": -0.52,
+     "ci_high": 0.36,
+     "verdict": "pass"
+    },
+    "ZB": {
+     "error_pct": 9.2,
+     "diff_points": -0.21,
+     "ci_low": -0.75,
+     "ci_high": 0.27,
+     "verdict": "pass"
+    }
+   }
+  }
+ ]
+}

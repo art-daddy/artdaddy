@@ -15,6 +15,17 @@ import { shortHash } from "./media";
 import type { ClientToolRegistry } from "./registry";
 import { MediaOfflineError } from "./refState";
 import { cpuOnlyNow, holdCpuOnly, isGpuCrash, WINDOWS_LOAD_FAILURES } from "./speechBackend";
+import {
+  acceptableBeam,
+  beamFor,
+  decodeArgs,
+  DEFAULT_BEAM,
+  lastSpeechLanguage,
+  planDecode,
+  rememberSpeechLanguage,
+  WeakDecodeError,
+  type ModelVariant,
+} from "./speechDecoding";
 import { failureText, TranscriptionFailure } from "./speechFailure";
 import { recordSpeechRun } from "./speechPace";
 import { joinPath } from "./store";
@@ -1070,12 +1081,41 @@ export async function peekTranscript(
   return null;
 }
 
+/** A transcription, kept for the file and language it was asked for. Whisper's decoding setting
+ *  follows speechDecoding.ts: a language the accuracy gate cleared is decoded with the faster
+ *  setting, and a transcript made with a setting narrower than its detected language needs is never
+ *  kept (finishWhisper refuses it, and this runs once more at the width that language needs). */
 export async function runWhisper(
   ctx: ClientToolContext,
   src: string,
   size: string = DEFAULT_MODEL,
   language?: string,
   window?: TranscribeWindow | null,
+): Promise<ParsedTranscript> {
+  let widen: number | undefined;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await runWhisperOnce(ctx, src, size, language, window, widen);
+    } catch (e) {
+      if (!(e instanceof WeakDecodeError) || attempt >= 2) throw e;
+      // The language turned out to need a wider beam than the prediction gave it. If a second run
+      // finds yet another language, the engine's own default settles it: it is acceptable for all.
+      widen = attempt === 0 ? beamFor(MODEL_VARIANT, e.detected) : DEFAULT_BEAM;
+    }
+  }
+}
+
+/** The model file the gate measured, for the one model there is. A model size that was not
+ *  measured is never given a narrower beam. */
+const MODEL_VARIANT: ModelVariant = "f16";
+
+async function runWhisperOnce(
+  ctx: ClientToolContext,
+  src: string,
+  size: string,
+  language: string | undefined,
+  window: TranscribeWindow | null | undefined,
+  widen: number | undefined,
 ): Promise<ParsedTranscript> {
   const { lang, identity, full, out, win } = await transcriptKeys(ctx, src, size, language, window);
   // A full transcript already answers every window, so a windowed ask must never re-run
@@ -1129,6 +1169,15 @@ export async function runWhisper(
               start,
               end,
             });
+      // The decoding setting. A named language is known now; "auto" is predicted from what this
+      // machine last detected and CHECKED once the engine has said (finishWhisper). A model size
+      // the gate did not measure is never narrowed, and a re-run is given the width it was sent for.
+      const plan =
+        widen !== undefined
+          ? { beam: widen }
+          : size === DEFAULT_MODEL
+            ? planDecode(MODEL_VARIANT, lang, lastSpeechLanguage())
+            : { beam: DEFAULT_BEAM };
       // whisper writes under a scratch name; the transcript reaches the cache in ONE atomic write,
       // already on the file's timeline. Shifting it in place after whisper had written it would
       // leave a window cached on its own clock if anything stopped between the two writes.
@@ -1140,6 +1189,10 @@ export async function runWhisper(
         // A window's own audio starts where the window does (only the whole file starts at 0).
         shiftMs: Math.floor(start * 1000),
         wavs,
+        beam: plan.beam,
+        variant: MODEL_VARIANT,
+        requested: lang,
+        ...(widen !== undefined ? { rerun: true } : {}),
       };
       // -mc 0: no text carried from one 30 s window into the next. With it, six minutes of
       // silence left whisper repeating "[BLANK_AUDIO]" straight through the speech after it
@@ -1159,6 +1212,7 @@ export async function runWhisper(
         lang,
         "-mc",
         "0",
+        ...decodeArgs(plan.beam),
       ];
       // In the app, whisper is a job of the app process: a crash of the page neither stops it nor
       // loses its words, and the next page finishes it ({@link adoptTranscriptions}).
@@ -1237,6 +1291,14 @@ interface TranscriptJobMeta {
   shiftMs: number;
   /** The 16 kHz extracts it reads. */
   wavs: string[];
+  /** The beam the engine was run with, and the model file it ran on. Absent on a job a page of an
+   *  earlier version started: that ran at the engine's default, which is acceptable for everything. */
+  beam?: number;
+  variant?: ModelVariant;
+  /** The language the caller asked for ("auto" when it named none). */
+  requested?: string;
+  /** True for the run that replaced one refused for being narrower than its language needs. */
+  rerun?: boolean;
 }
 
 /** A run of whisper made into its transcript and kept: the one finish, for the page that ran it
@@ -1268,17 +1330,35 @@ async function finishWhisper(
       );
     }
     const data = JSON.parse(await io.readText(json)) as WhisperCppJson;
+    // The commit point, before anything reaches the cache and once the language is known: a run
+    // narrower than its language needs (speechDecoding.ts) is refused here, whoever finishes it,
+    // the page that ran it or a page that adopted it. It is never kept.
+    const detected = detectedLanguage(data, meta.requested);
+    // What this machine hears next is predicted from what it was last told it heard, so the
+    // language is remembered even when this transcript is refused: it is still what was heard.
+    if (meta.requested === "auto" && detected) rememberSpeechLanguage(detected);
+    if (
+      meta.beam !== undefined &&
+      !acceptableBeam(meta.beam, meta.variant ?? MODEL_VARIANT, detected)
+    )
+      throw new WeakDecodeError(detected, meta.beam);
     shiftWhisperJson(data, meta.shiftMs);
     const parsed = parseWhisperCpp(data);
     // Kept outside the project, so it is kept even when the project closed while whisper ran.
     if (meta.key) await (await io.appCache())?.put(TRANSCRIPTS, meta.key, data);
     const facts = whisperRunFacts(run.stderr);
-    reportTranscription(facts);
+    reportTranscription(facts, undefined, { beam: meta.beam, rerun: meta.rerun });
     recordSpeechRun(facts.audioSeconds, facts.wallSeconds);
     return parsed;
   } finally {
     await io.remove(json).catch(() => undefined);
   }
+}
+
+/** The language whisper says it transcribed: the one it detected, or the one it was told. */
+function detectedLanguage(data: WhisperCppJson, requested: string | undefined): string {
+  const said = whisperCode(data.result?.language);
+  return said || (requested && requested !== "auto" ? whisperCode(requested) : "");
 }
 
 /** The transcription a job of the app process is running, or null for any other job. Its meta is

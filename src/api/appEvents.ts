@@ -260,7 +260,13 @@ const TRANSCRIPTION_MIN_AUDIO_S = 30;
 const TRANSCRIPTION_EVERY_MS = 60_000;
 let lastTranscriptionReport = -Infinity;
 
-export function reportTranscription(facts: WhisperRunFacts, now = Date.now()): void {
+export function reportTranscription(
+  facts: WhisperRunFacts,
+  now = Date.now(),
+  /** How it was decoded: the beam (1 is the faster setting) and whether it replaced a run refused
+   *  for being narrower than its language needs. Numbers and a flag, never what was said. */
+  decoding?: { beam?: number; rerun?: boolean },
+): void {
   const audio = facts.audioSeconds;
   if (audio === null || audio < TRANSCRIPTION_MIN_AUDIO_S) return;
   if (now - lastTranscriptionReport < TRANSCRIPTION_EVERY_MS) return;
@@ -271,6 +277,8 @@ export function reportTranscription(facts: WhisperRunFacts, now = Date.now()): v
     wall ? `wall_s=${wall.toFixed(1)} x=${(audio / wall).toFixed(2)}` : "",
     facts.model ? `model=${facts.model}` : "",
     facts.threads ? `threads=${facts.threads}` : "",
+    decoding?.beam !== undefined ? `beam=${decoding.beam}` : "",
+    decoding?.rerun ? "rerun=1" : "",
   ];
   void reportAppEvent("transcription", {
     via: facts.backend ?? "unknown",
