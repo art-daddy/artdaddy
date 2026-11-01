@@ -31,6 +31,9 @@ const KNOWN_TOP_LEVEL_TIME_PARAMS: string[] = [
   "inspect_media.end_seconds",
   "inspect_media.max_frames",
   "inspect_media.start_seconds",
+  // SECONDS: how long a look waits for work that is not ready, a real-world wait and not a
+  // position in the media or on the timeline.
+  "inspect_media.wait_seconds",
   "inspect_timeline.end_frame",
   "inspect_timeline.max_frames",
   "inspect_timeline.start_frame",

@@ -142,19 +142,31 @@ export type LookedLoudness =
 /** The loudness a look answers with, over [start, end) of a span `seconds` long (null: unknown).
  *  Kept figures come back at once, however long the span. Otherwise a span of up to
  *  {@link INLINE_LOUDNESS_MAX_S} is measured now; a longer one goes to the front of the project's
- *  background queue and answers "in progress" once: a later look waits up to
- *  {@link LOUDNESS_WAIT_MS} for that measurement. */
+ *  background queue and answers "in progress" once: a later look waits for that measurement.
+ *  Nothing is waited on for more than `waitMs`: past it the answer is "in progress", and the
+ *  measurement goes on and is kept for the next look. */
 export async function lookLoudness(
   ctx: ClientToolContext,
   path: string,
   start: number | null,
   end: number | null,
   seconds: number | null,
+  waitMs: number = LOUDNESS_WAIT_MS,
 ): Promise<LookedLoudness> {
   const known = await peekLoudness(ctx, path, start, end);
   if (known) return known;
-  if (seconds !== null && seconds <= INLINE_LOUDNESS_MAX_S)
-    return measureLoudness(ctx, path, start, end);
+  if (seconds !== null && seconds <= INLINE_LOUDNESS_MAX_S) {
+    // A failure is a value here: settledWithin would read a rejection as the wait running out.
+    const measured = measureLoudness(ctx, path, start, end).catch((e: unknown) => ({
+      error: `loudness could not be measured: ${String(e)}`,
+    }));
+    const got = await settledWithin(measured, waitMs, ctx.signal);
+    if (got) return got;
+    return {
+      status: "in_progress",
+      note: "Not measured yet: this span's loudness is still being measured. Call inspect_media again: it answers at once when it is done, or pass wait_seconds (up to 60) to wait for it.",
+    };
+  }
   const long =
     seconds !== null
       ? `${Math.ceil(seconds / 60)} minutes of audio is`
@@ -167,7 +179,7 @@ export async function lookLoudness(
       note: `Not measured: ${long} too long to wait for, and nothing measures in the background for this project. ${zoom}`,
     };
   if (!bg.first) {
-    const got = await settledWithin(bg.result, LOUDNESS_WAIT_MS, ctx.signal);
+    const got = await settledWithin(bg.result, waitMs, ctx.signal);
     if (got) return got;
   }
   return {

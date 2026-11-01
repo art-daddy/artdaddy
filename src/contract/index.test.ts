@@ -148,7 +148,10 @@ describe("generated trusted catalog artifacts", () => {
         source,
       );
       const changed = JSON.parse(source);
-      changed.version = "3.0.1";
+      // Any other valid version is a change: derived from the current one, so a release that
+      // bumps the catalog does not turn this into "no change" and fail for the wrong reason.
+      const [major, minor, patch] = String(changed.version).split(".").map(Number);
+      changed.version = `${major}.${minor}.${patch + 1}`;
       writeFileSync(environment.source, JSON.stringify(changed, null, 2) + "\n");
       expect(environment.run(true).status).toBe(1);
       expect(environment.run().status).toBe(0);

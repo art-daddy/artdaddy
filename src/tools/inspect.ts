@@ -16,8 +16,12 @@ import { encodeImageForGemini, encodeVideoForGemini } from "./geminiEncode";
 import type { ClientToolRegistry } from "./registry";
 import { unresolvedRefError, unresolvedRefMessage } from "./refState";
 import { normLanguage, peekTranscript, runWhisper } from "./transcribe";
+import { languageProblem } from "./whisperLanguages";
+import type { TranscriptFailureReason } from "./speechFailure";
+import { failedTranscript, waitBoundMs, waitForRun } from "./transcriptWait";
 import { prioritizeTranscript } from "./transcriptQueue";
 import { lookLoudness, type Loudness } from "./loudness";
+import { reportAppError } from "../api/appEvents";
 import { displaySize, mediaFrameDims, sampleFrames, stillWithGrid } from "./mediaFrames";
 import { makeStoryboard } from "./storyboard";
 import { loadTimeline } from "../timeline/engine";
@@ -228,10 +232,13 @@ function coversWholeFile(from: number, to: number | null, duration: number | nul
  *  outside its visible span are dropped.
  *
  *  A cached transcript (the whole file's, or this window's) is used whatever its length. With
- *  none, a span up to {@link INLINE_TRANSCRIPT_MAX_S} is transcribed now; a longer one goes to the
- *  FRONT of the project's background queue and comes back as `status: "in_progress"`. On failure
- *  returns `{ error }` so inspect_media still succeeds with frames/metadata. */
-async function buildTranscript(
+ *  none, a span longer than {@link INLINE_TRANSCRIPT_MAX_S} goes to the FRONT of the project's
+ *  background queue and comes back as `status: "in_progress"`. A shorter one is transcribed now,
+ *  but a look waits for at most `waitMs` for it, the speech model's download included: past that
+ *  it comes back as `status: "in_progress"` with an estimate while the run goes on, and the next
+ *  look finds the words. A failure is `status: "failed"` with its reason, so a look still succeeds
+ *  with its frames and metadata. */
+async function lookTranscript(
   ctx: ClientToolContext,
   path: string,
   opts: {
@@ -241,6 +248,8 @@ async function buildTranscript(
     duration: number | null;
     wordTimestamps: boolean;
     language: string;
+    /** The most this call waits for the words, in ms. */
+    waitMs: number;
     clip?: Clip | null;
     fps?: number;
   },
@@ -266,7 +275,24 @@ async function buildTranscript(
             note: `Not transcribed: ${clock(to - from)} of audio is too long to wait for, and nothing is transcribing in the background for this project. ${zoom}`,
           };
     }
-    t ??= await runWhisper(ctx, path, undefined, opts.language, window);
+    if (!t) {
+      const audio = to === null ? null : Math.max(0, to - from);
+      const outcome = await waitForRun({
+        key: `${path}\u0000${normLanguage(opts.language)}\u0000${whole ? "whole" : `${from}-${to}`}`,
+        audioSeconds: audio,
+        audioLabel: clock(audio ?? 0),
+        run: runWhisper(ctx, path, undefined, opts.language, window),
+        boundMs: opts.waitMs,
+        signal: ctx.signal,
+      });
+      if (outcome.kind === "cancelled") return { error: "cancelled" };
+      if (outcome.kind === "pending") return { ...outcome.status };
+      if (outcome.kind === "failed") {
+        reportTranscriptFailure(path, outcome.status.reason);
+        return { ...outcome.status };
+      }
+      t = outcome.value;
+    }
     const { start, end } = opts;
     const inWin = (a: number, b: number): boolean =>
       !((end !== null && a > end) || (start !== null && b < start));
@@ -316,8 +342,32 @@ async function buildTranscript(
     }
     return out;
   } catch (e) {
-    return { error: `transcription failed: ${String(e)}` };
+    const failed = failedTranscript(e);
+    reportTranscriptFailure(path, failed.reason);
+    return { ...failed, error: `transcription failed: ${failed.error}` };
   }
+}
+
+/** The transcript of a look, with a note when the language it named is not one the engine knows
+ *  (it was detected from the audio instead). Exported for the tests that drive the real path. */
+export async function buildTranscript(
+  ctx: ClientToolContext,
+  path: string,
+  opts: Parameters<typeof lookTranscript>[2],
+): Promise<Result> {
+  const result = await lookTranscript(ctx, path, opts);
+  const note = languageProblem(opts.language);
+  return note && result.error !== "cancelled" ? { ...result, language_note: note } : result;
+}
+
+/** One app_error per file and reason per session: a model that retries a file that cannot be
+ *  transcribed would otherwise report it again every time. Only the reason leaves the machine. */
+const reportedTranscriptFailures = new Set<string>();
+function reportTranscriptFailure(path: string, reason: TranscriptFailureReason): void {
+  const key = `${path}\u0000${reason}`;
+  if (reportedTranscriptFailures.has(key)) return;
+  reportedTranscriptFailures.add(key);
+  reportAppError(`transcript_failed: ${reason}`);
 }
 
 export async function inspectMediaTool(
@@ -325,6 +375,10 @@ export async function inspectMediaTool(
   ctx: ClientToolContext | null,
 ): Promise<Result> {
   if (!ctx) return NOT_READY;
+  // Counted from the start of the call, so the probe and the resolving before the work begins
+  // come out of the wait, not on top of it.
+  const began = Date.now();
+  const waitBudgetMs = waitBoundMs(args.wait_seconds);
   const argMediaRef = String(args.media_ref ?? "").trim();
   const clipId = String(args.clip_id ?? "").trim();
   let mediaRef = argMediaRef;
@@ -454,9 +508,11 @@ export async function inspectMediaTool(
   if (end !== null && end <= start) end = dur > start ? dur : null;
 
   // Sound and transcript come from other subsystems than the frames, so they start FIRST and run
-  // while the frames are read, instead of one after the other. A look waits for at most 10 minutes
-  // of audio to be measured (owner decision 2026-10-04); the indexer measures every file whole.
+  // while the frames are read, instead of one after the other. A look waits for at most
+  // `wait_seconds` (default 15) for either, whatever is slow underneath; the work goes on and is
+  // kept for the next look. The indexer measures and transcribes every file whole.
   const whole = coversWholeFile(start, end, dur > 0 ? dur : null);
+  const waitLeftMs = (): number => Math.max(0, waitBudgetMs - (Date.now() - began));
   const loudnessTask: Promise<Result | null> = hasAudio
     ? lookLoudness(
         ctx,
@@ -464,6 +520,7 @@ export async function inspectMediaTool(
         whole ? null : start,
         whole ? null : end,
         end !== null ? end - start : null,
+        waitLeftMs(),
       ).then((l) => ("integrated_lufs" in l ? withClipGain(l, clipTimeline, timelineClip) : l))
     : Promise.resolve(null);
   const transcriptTask: Promise<Result | null> = hasAudio
@@ -473,6 +530,7 @@ export async function inspectMediaTool(
         duration: dur || null,
         wordTimestamps: wordTs,
         language,
+        waitMs: waitLeftMs(),
         clip: timelineClip,
         fps: clipFps,
       })
