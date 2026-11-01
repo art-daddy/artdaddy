@@ -14,7 +14,7 @@
 // multi-minute transcription. The transcription and loudness passes also take turns app-wide
 // (workGate.ts): one of each at a time across every project, none starting while an export is
 // queued or running or a look's whisper runs.
-// Desktop-only: no runner (web build) => no-op. Lifecycle-scoped, as Palmier's indexer is (owner
+// Desktop-only: no runner (web build) => no-op. Lifecycle-scoped (owner
 // decision 2026-10-04): dispose() on project close drops every queue and stops the proxy and poster
 // in progress, which write into the project. The transcription and the loudness measurement in
 // progress run to their end: they write only to the app-wide cache (and whisper's scratch to the

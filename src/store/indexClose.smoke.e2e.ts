@@ -1,5 +1,5 @@
 // 4i, on the shipped ffmpeg and whisper: closing a project while its indexer transcribes a file lets
-// that transcription finish (Palmier's close, owner decision 2026-10-04). The transcript is kept in
+// that transcription finish (owner decision 2026-10-04). The transcript is kept in
 // the app cache, where another project finds it; nothing is written into the closed project from the
 // moment it closed; and whisper's scratch is gone from the work folder when it is done.
 // Run: npx vitest run --config vitest.smoke.config.ts src/store/indexClose.smoke.e2e.ts

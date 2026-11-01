@@ -4,7 +4,7 @@
 // is transcribed once, a duplicated or moved project keeps its transcripts, and a job can store its
 // result after the project that asked for it has closed.
 //
-// Palmier's rule for a cache, which this follows: an explicit key, capacity, invalidation rule,
+// The rule for a cache, which this follows: an explicit key, capacity, invalidation rule,
 // replacement rule, lifecycle behaviour and stale-result policy.
 //  - Key: the caller's. It names the file by its identity (`ProjectStoreAccess.fileIdentity`) plus
 //    whatever else the value depends on (model, language, window, span). The key is stored in the

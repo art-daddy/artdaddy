@@ -1002,7 +1002,7 @@ describe("export queue", () => {
     expect(peak).toBe(1);
   });
 
-  // 4i: the indexer yields to exports, as Palmier's does, including between two queued ones.
+  // 4i: the indexer yields to exports, including between two queued ones.
   it("keeps the indexer's next job waiting while any export is queued or running", async () => {
     const { store } = make();
     const releases: (() => void)[] = [];

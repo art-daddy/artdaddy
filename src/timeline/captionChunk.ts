@@ -47,7 +47,7 @@ const SENTENCE_END = /[.!?…。！？।॥؟۔]["')\]」』]?$/;
 /** Where a clause ends: the next best place to cut a line that does not fit. */
 const CLAUSE_END = /[,;:，、；：،؛]["')\]」』]?$/;
 
-/** Group spoken words into captions the way an NLE does (Palmier Pro's rule): a caption is everything
+/** Group spoken words into captions the way an NLE does: a caption is everything
  *  up to a sentence end, within one transcript segment, if it fits on one line; one that does not is
  *  cut at the clause mark nearest its middle, else at the word nearest its middle, and each half is
  *  judged again. A single word too wide for the line keeps a caption of its own. */

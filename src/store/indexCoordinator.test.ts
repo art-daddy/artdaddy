@@ -955,7 +955,7 @@ describe("IndexCoordinator", () => {
     await new Promise((r) => setTimeout(r, 0)); // let the drain unwind
   });
 
-  // 4i, Palmier's close (owner decision 2026-10-04): the file in progress finishes, into the app
+  // 4i, closing the project (owner decision 2026-10-04): the file in progress finishes, into the app
   // cache; the queue behind it is dropped. Only the proxy, which writes into the project, is stopped.
   describe("closing the project (4i)", () => {
     const stopped = (signals: Array<AbortSignal | undefined>): boolean[] =>

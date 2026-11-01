@@ -1065,7 +1065,7 @@ describe("inspectMediaTool looks at what it returns (UJ-012)", () => {
 });
 
 describe("midpointFrames", () => {
-  it("samples the midpoints of n equal parts of [start, end), as Palmier does", () => {
+  it("samples the midpoints of n equal parts of [start, end)", () => {
     expect(midpointFrames(0, 60, 3)).toEqual([10, 30, 50]);
     expect(midpointFrames(0, 600, 6)).toEqual([50, 150, 250, 350, 450, 550]);
     expect(midpointFrames(100, 101, 4)).toEqual([100]); // one frame in the span

@@ -206,7 +206,7 @@ describe("inspect_timeline frames carry the grid and say what failed", () => {
     runner: nodeRunner,
   };
 
-  it("draws Palmier's grid where its labels say, and the frame number top-left", async () => {
+  it("draws the inspect grid where its labels say, and the frame number top-left", async () => {
     await fsp.mkdir(dir, { recursive: true });
     const grey = path.join(dir, "grey.png");
     await ff([
@@ -257,7 +257,7 @@ describe("inspect_timeline frames carry the grid and say what failed", () => {
       for (let x = Math.round(w * 0.3); x < Math.round(w * 0.7); x++) s += px[y * w + x];
       return s / (Math.round(w * 0.7) - Math.round(w * 0.3));
     };
-    // Every line is a light core over a dark stroke (Palmier's look): brighter than the picture at
+    // Every line is a light core over a dark stroke: brighter than the picture at
     // its centre, darker beside it. Measured on grey 128: major core 181 / edges 110, minor core 160
     // / edges 113, and between lines exactly the picture.
     const line = (at: (i: number) => number, c: number): { core: number; edge: number } => ({

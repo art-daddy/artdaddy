@@ -9,7 +9,7 @@ import { laplacianVariance, noiseSigma } from "./frameMeasures";
 import { fitDims, gridAss, gridFilter, OVERLAY_FONT_FILE, OVERLAY_REV } from "./inspectOverlay";
 import { quarterTurn, shortHash } from "./media";
 
-/** Longest edge of a frame inspect_media attaches (Palmier sends 512). */
+/** Longest edge of a frame inspect_media attaches. */
 export const MEDIA_FRAME_EDGE = 512;
 /** ffmpeg's mjpeg quantizer (2 = best, 31 = worst) for frames the agent sees. */
 const FRAME_JPEG_Q = "4";

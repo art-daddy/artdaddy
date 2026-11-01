@@ -1,11 +1,10 @@
 // The coordinate grid an inspect frame carries, so the agent can name a position ("the title sits
-// at y 0.82") instead of guessing one. It is Palmier's grid exactly (InspectFrameOverlay.swift, owner
-// decision 2026-10-03): lines every 0.05, stronger at 0 / 0.5 / 1, each a dark stroke under a light
-// one, and labels every 0.1 along the bottom and right edges on dark chips. Drawn by libass, the
-// renderer every caption already depends on, so a platform that can export captions can draw this.
-// The one deliberate difference is the face: Poppins (bundled) where Palmier uses Helvetica Bold.
+// at y 0.82") instead of guessing one (owner decision 2026-10-03): lines every 0.05, stronger at
+// 0 / 0.5 / 1, each a dark stroke under a light one, and labels every 0.1 along the bottom and
+// right edges on dark chips. Drawn by libass, the renderer every caption already depends on, so a
+// platform that can export captions can draw this. The face is Poppins (bundled).
 
-/** What the result says about the grid, in Palmier's words. */
+/** What the result says about the grid. */
 export const GRID_NOTE = "0-1, origin top-left";
 
 /** Bump when the overlay's look changes, so a cached frame drawn with the old one is not reused. */
@@ -47,7 +46,7 @@ function strokes(w: number, h: number, ticks: number[], width: number, colour: s
   return `{\\an7\\pos(0,0)\\bord0\\shad0${colour}\\p3}${rects.join(" ")}{\\p0}`;
 }
 
-/** Palmier's label text: "0" and "1" bare, the rest to one decimal (i / 10 prints that way). */
+/** The label text: "0" and "1" bare, the rest to one decimal (i / 10 prints that way). */
 const tickLabel = (t: number): string => String(t);
 
 /** A whole .ass file that draws the grid (and an optional top-left caption chip, e.g. "f120")
@@ -66,7 +65,7 @@ export function gridAss(w: number, h: number, caption?: string): string {
     ev(3, "Line", strokes(w, h, major, 1.5, ink(1, 0.95))),
   ];
   // Labels every 0.1: along the bottom (all but 1, whose corner the right edge already names) and
-  // down the right edge. Edge labels are anchored so they stay inside the frame, as Palmier clamps.
+  // down the right edge. Edge labels are anchored so they stay inside the frame.
   for (let i = 0; i <= 10; i++) {
     const t = i / 10;
     const label = tickLabel(t);
@@ -91,7 +90,7 @@ export function gridAss(w: number, h: number, caption?: string): string {
     "[V4+ Styles]",
     "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
     `Style: Line,${FACE},${fs.toFixed(1)},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1`,
-    // BorderStyle 3 = an opaque box behind the text: Palmier's chip, black at 65%.
+    // BorderStyle 3 = an opaque box behind the text: the chip, black at 65%.
     `Style: Chip,${FACE},${fs.toFixed(1)},&H00FFFFFF,&H00FFFFFF,&H59000000,&H59000000,-1,0,0,0,100,100,0,0,3,2,0,5,0,0,0,1`,
     `Style: Caption,${FACE},12,&H00FFFFFF,&H00FFFFFF,&H59000000,&H59000000,-1,0,0,0,100,100,0,0,3,3,0,7,0,0,0,1`,
     "",

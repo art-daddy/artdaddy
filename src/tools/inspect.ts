@@ -50,10 +50,10 @@ import {
 
 type Result = Record<string, unknown>;
 const NOT_READY: Result = { ok: false, error: "client tool runtime not ready" };
-/** Frames inspect_media samples from a video when max_frames is not given (Palmier's). */
+/** Frames inspect_media samples from a video when max_frames is not given. */
 const DEFAULT_FRAMES = 6;
 const MAX_FRAMES = 12;
-/** Frames inspect_timeline samples from a range when max_frames is not given (Palmier's). */
+/** Frames inspect_timeline samples from a range when max_frames is not given. */
 const TIMELINE_DEFAULT_FRAMES = 6;
 /** Frame renders at once: each is its own ffmpeg, and a low-core machine must not be thrashed. */
 const FRAME_LANES = 4;
@@ -63,7 +63,7 @@ const FRAME_LANES = 4;
  *  Frames are now re-sent every round while they stay in the conversation (the app owns the
  *  history), so their size is paid many times: a 1024 px PNG is ~1 MB, and ~30 of them a round
  *  approach the 64 MB request cap. `inspect_media` asks "what is in this clip", which 512 px
- *  answers (Palmier sends 512; see mediaFrames.MEDIA_FRAME_EDGE). `inspect_timeline` must also let
+ *  answers (512 px; see mediaFrames.MEDIA_FRAME_EDGE). `inspect_timeline` must also let
  *  the agent judge caption text: 512 px was tried before and a caption at 2-3% of a 9:16 frame's
  *  height came out 10-15 px tall, unjudgeable; at 768 px it is ~15-23 px. `inspect_color` keeps
  *  1024 px PNG because its measurement reads the same file and compression would move the
@@ -129,7 +129,7 @@ export function timelineLookFrames(args: Record<string, unknown>): number[] {
   return endFrame === null ? [startFrame] : midpointFrames(startFrame, endFrame, n);
 }
 
-/** Palmier's sampling of a frame range: the midpoints of n equal parts of [start, end), distinct
+/** The sampling of a frame range: the midpoints of n equal parts of [start, end), distinct
  *  and ascending. A span shorter than n gives each of its frames once; an empty one, the start. */
 export function midpointFrames(start: number, end: number, n: number): number[] {
   const s = Math.trunc(start);
@@ -788,7 +788,7 @@ export function planTimelineLook(
  *  window): only the clips on canvas near that frame are opened, each seeked close to it, so a look
  *  costs a few frames of work wherever it lands. It used to render the timeline from frame 0 up to
  *  the deepest frame asked for, which made a look at minute 14 cost 14 minutes of encode (UJ-012).
- *  The frame is the export's frame at that instant, then fitted to 768 px with Palmier's grid and
+ *  The frame is the export's frame at that instant, then fitted to 768 px with the inspect grid and
  *  an \"f<frame>\" label drawn on. */
 export async function inspectTimelineTool(
   args: Record<string, unknown>,

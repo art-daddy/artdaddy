@@ -1,8 +1,8 @@
-// inspect_media's `overview`: one storyboard image of a video's visual flow, Palmier's
-// OverviewRenderer in our terms (owner decision 2026-10-02): ~120 candidate times across the span,
+// inspect_media's `overview`: one storyboard image of a video's visual flow (owner decision
+// 2026-10-02): ~120 candidate times across the span,
 // each snapped to a keyframe (cheap to decode), a candidate kept only when its 8x8 brightness grid
 // differs from the last kept one by more than 12, at most 36 tiles in 6 columns, each labelled
-// with its time. Tiles keep the source's shape (long edge 160) where Palmier stretches to 160x90.
+// with its time. Tiles keep the source's shape (long edge 160).
 //
 // Candidates are seeked, not decoded in one pass: on an 80-minute 1080p60 OBS recording a
 // keyframe-only pass took 33.8 s, while 120 keyframe seeks batched 30 to a process took ~3-4 s.
@@ -23,7 +23,7 @@ export const OVERVIEW = {
   batch: 30,
 } as const;
 
-/** Palmier's candidate times: one per interval of max(1 s, span/120), at each interval's middle. */
+/** The candidate times: one per interval of max(1 s, span/120), at each interval's middle. */
 export function candidateTimes(start: number, end: number): number[] {
   const span = Math.max(end - start, 0.001);
   const interval = Math.max(1, span / OVERVIEW.candidates);
@@ -62,7 +62,7 @@ export function keepTiles(cands: readonly Candidate[]): number[] {
   return Array.from({ length: OVERVIEW.maxTiles }, (_, i) => kept[Math.floor(i * step)]);
 }
 
-/** "m:ss", or "h:mm:ss" past an hour, rounded to the second (Palmier's label). */
+/** "m:ss", or "h:mm:ss" past an hour, rounded to the second. */
 export function timeLabel(t: number): string {
   const s = Math.max(0, Math.round(t));
   const pad = (n: number): string => String(n).padStart(2, "0");
