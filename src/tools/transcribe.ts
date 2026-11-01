@@ -14,6 +14,7 @@ import { jobResult, jobSupervisor, runAsJob, whenJobEnds, type JobView } from ".
 import { shortHash } from "./media";
 import type { ClientToolRegistry } from "./registry";
 import { MediaOfflineError } from "./refState";
+import { cpuOnlyNow, holdCpuOnly, isGpuCrash, WINDOWS_LOAD_FAILURES } from "./speechBackend";
 import { failureText, TranscriptionFailure } from "./speechFailure";
 import { recordSpeechRun } from "./speechPace";
 import { joinPath } from "./store";
@@ -21,7 +22,7 @@ import { prioritizeTranscript } from "./transcriptQueue";
 import { whisperCode } from "./whisperLanguages";
 import { whisperRunFacts } from "./whisperFacts";
 import { adoptTurn, lookWhisper } from "./workGate";
-import { reportTranscription } from "../api/appEvents";
+import { reportAppError, reportTranscription } from "../api/appEvents";
 import { beginSessionActivity } from "../observability/crashWatch";
 import { settledWithin } from "../lib/settledWithin";
 import {
@@ -29,6 +30,7 @@ import {
   megabytes,
   percent,
   reportModelDownload,
+  setModelDownloadCancel,
 } from "../store/modelDownload";
 import { loadTimeline } from "../timeline/engine";
 import { clipSourceSpanSeconds, findClip } from "../timeline/helpers";
@@ -48,6 +50,9 @@ export interface WhisperModelSpec {
   revision: string;
   bytes: number;
   sha256: string;
+  /** Other places the same bytes can be fetched from, tried when the first fails or refuses. The
+   *  checksum above is what makes a copy trustworthy, wherever it comes from. */
+  mirrors?: readonly string[];
 }
 
 export const WHISPER_MODELS: Readonly<Record<string, WhisperModelSpec>> = {
@@ -465,13 +470,21 @@ export async function ensureWhisperModel(
   const existing = modelDownloads.get(key);
   if (existing) return joinDownload(existing, ctx.signal);
 
+  const policy = downloadPolicy;
   const install = new ModelInstall(
     spec.bytes,
-    (self) => downloadModel(ctx, path, size, spec, fetchImpl, self),
+    (self) => downloadModel(ctx, path, size, spec, fetchImpl, self, policy),
     () => modelDownloads.delete(key),
   );
   modelDownloads.set(key, install);
   return joinDownload(install, ctx.signal);
+}
+
+/** Stop the speech model's download now, whoever is waiting for it: the person pressed Cancel.
+ *  What has been downloaded stays, and the next request resumes from it. Whoever was waiting is
+ *  told the download was cancelled, in the words {@link modelCancelledMessage} uses. */
+export function cancelModelDownload(): void {
+  for (const install of modelDownloads.values()) install.ac.abort();
 }
 
 async function downloadModel(
@@ -481,6 +494,7 @@ async function downloadModel(
   spec: WhisperModelSpec,
   fetchImpl: typeof fetch,
   self: ModelInstall,
+  policy: DownloadPolicy,
 ): Promise<InstalledModel> {
   // Keyed by the CONTENT, not just the model name: `ggml-small.bin` keeps its path across
   // revisions, so a part left by the previous pinned build would otherwise be resumed into the
@@ -488,45 +502,225 @@ async function downloadModel(
   const tmp = `${path}.${spec.sha256.slice(0, 12)}.part`;
   const marker = `${path}.verified.json`;
   const signal = self.ac.signal;
-  // Only bytes we can PROVE are wrong. A cancellation or a dropped connection leaves a
-  // perfectly good prefix, and discarding it is what made the user restart from zero.
-  let discardPart = false;
+  const origins = [`${HF_BASE}/${spec.revision}/ggml-${size}.bin`, ...(spec.mirrors ?? [])];
   const finishActivity = beginSessionActivity("whisper-model-download");
+  // The pill's Cancel stops this install, whoever is waiting for it.
+  setModelDownloadCancel(cancelModelDownload);
   try {
-    const url = `${HF_BASE}/${spec.revision}/ggml-${size}.bin`;
+    // Only bytes we can PROVE are wrong are thrown away (see transferModel). A cancellation or a
+    // dropped connection leaves a perfectly good prefix, and discarding it is what made the user
+    // restart from zero.
+    const attempts = policy.backoffMs.length + 1;
+    let last: AttemptFailure | null = null;
+    let made = 0;
+    /** Origins that sent something they should not have: asked again, they would only do it again. */
+    const refused = new Set<string>();
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      // A refusal moves on to the next origin at once; anything else waits its turn first.
+      if (attempt > 0 && last?.fate !== "next-origin")
+        await pause(policy.backoffMs[attempt - 1], signal, () =>
+          modelCancelledMessage(self.received, spec.bytes),
+        );
+      const open = origins.filter((o) => !refused.has(o));
+      const origin = open[attempt % open.length];
+      made++;
+      try {
+        await transferModel(ctx, tmp, spec, origin, fetchImpl, self, policy);
+        last = null;
+        break;
+      } catch (e) {
+        if (signal.aborted || !(e instanceof AttemptFailure) || e.fate === "fatal") throw e;
+        last = e;
+        if (e.fate === "next-origin") refused.add(origin);
+        if (refused.size === origins.length) break; // every origin has refused
+      }
+    }
+    if (last) {
+      reportModelDownloadFailure(last.message);
+      throw made === 1 ? last : new Error(`${last.message} (after ${made} attempts)`);
+    }
+    if (signal.aborted) throw new Error(modelCancelledMessage(self.received, spec.bytes));
+    if (await ctx.store.exists(path)) await ctx.store.remove(path);
+    await ctx.store.remove(marker).catch(() => undefined);
+    await ctx.store.rename(tmp, path);
+    await ctx.store
+      .writeText(marker, JSON.stringify({ bytes: spec.bytes, sha256: spec.sha256 }))
+      .catch(() => undefined);
+    return { path, downloaded: true };
+  } finally {
+    clearModelDownload();
+    finishActivity();
+  }
+}
+
+/** How patient a download is with an origin that fails or goes quiet. */
+export interface DownloadPolicy {
+  /** An attempt that receives nothing for this long (ms) is ended and counted as failed. */
+  stallMs: number;
+  /** The waits (ms) between attempts: there is one more attempt than there are waits. */
+  backoffMs: readonly number[];
+}
+
+/** What the app does: quiet for 30 s is a stall, and a download that fails is tried again after 2,
+ *  10 and 30 s, from where it stopped, on the next origin when there is one. */
+export const PATIENT_DOWNLOAD: DownloadPolicy = {
+  stallMs: 30_000,
+  backoffMs: [2_000, 10_000, 30_000],
+};
+
+/** One attempt and no clock: a download as it was before it was patient. */
+export const SINGLE_ATTEMPT: DownloadPolicy = { stallMs: Infinity, backoffMs: [] };
+
+let downloadPolicy: DownloadPolicy = PATIENT_DOWNLOAD;
+
+/** Tests only: how patient the next downloads are. */
+export function __setDownloadPolicy(policy: DownloadPolicy): void {
+  downloadPolicy = policy;
+}
+
+/** What to do about an attempt that did not finish. `retry`: the origin or the connection let us
+ *  down, so wait and try again. `next-origin`: this origin sent something it should not have, so
+ *  try another without waiting. `fatal`: nothing another attempt could do changes it. */
+class AttemptFailure extends Error {
+  constructor(
+    message: string,
+    readonly fate: "retry" | "next-origin" | "fatal",
+  ) {
+    super(message);
+    this.name = "AttemptFailure";
+  }
+}
+
+/** One app_error per kind of failure per session; only the reason leaves the machine. */
+const reportedDownloadFailures = new Set<string>();
+function reportModelDownloadFailure(reason: string): void {
+  const kind = reason.replace(/\d+/g, "N").slice(0, 100);
+  if (reportedDownloadFailures.has(kind)) return;
+  reportedDownloadFailures.add(kind);
+  reportAppError(`speech_model_download_failed: ${reason.slice(0, 160)}`);
+}
+
+/** Wait `ms`, or end at once with `message()` when the install is cancelled. */
+async function pause(ms: number, signal: AbortSignal, message: () => string): Promise<void> {
+  if (signal.aborted) throw new Error(message());
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(done, ms);
+    signal.addEventListener("abort", done, { once: true });
+    function done(): void {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    }
+  });
+  if (signal.aborted) throw new Error(message());
+}
+
+/** One attempt to bring the part file up to the whole model from `url`, continuing from what is on
+ *  disk. Returns when the part holds the pinned bytes, checksum verified. Proven-wrong bytes
+ *  (a server that ignored Range, a wrong length, a bad checksum) are removed so the next attempt
+ *  starts clean; everything else is a good prefix and is kept. */
+async function transferModel(
+  ctx: ClientToolContext,
+  tmp: string,
+  spec: WhisperModelSpec,
+  url: string,
+  fetchImpl: typeof fetch,
+  self: ModelInstall,
+  policy: DownloadPolicy,
+): Promise<void> {
+  const signal = self.ac.signal;
+  // This attempt's own cancellation: the install's, and the stall clock's.
+  const attemptAc = new AbortController();
+  const stop = (): void => attemptAc.abort();
+  signal.addEventListener("abort", stop, { once: true });
+  const discard = async (): Promise<void> => {
+    await ctx.store.remove(tmp).catch(() => undefined);
+  };
+  /** `p`, unless the install is cancelled (at once, whatever the origin does with its connection) or
+   *  nothing happens for the policy's stall time: then this attempt is ended. */
+  const unlessStalled = <T>(p: Promise<T>, what: string): Promise<T> =>
+    new Promise<T>((resolve, reject) => {
+      const timer = Number.isFinite(policy.stallMs)
+        ? setTimeout(() => {
+            attemptAc.abort();
+            reject(
+              new AttemptFailure(
+                `whisper model download stalled: ${what} for ${policy.stallMs / 1000} s`,
+                "retry",
+              ),
+            );
+          }, policy.stallMs)
+        : undefined;
+      const onCancel = (): void => {
+        clearTimeout(timer);
+        reject(new Error(modelCancelledMessage(self.received, spec.bytes)));
+      };
+      if (signal.aborted) return onCancel();
+      signal.addEventListener("abort", onCancel, { once: true });
+      const settled = (): void => {
+        clearTimeout(timer);
+        signal.removeEventListener("abort", onCancel);
+      };
+      p.then(
+        (v) => (settled(), resolve(v)),
+        (e: unknown) => (settled(), reject(e)),
+      );
+    });
+  try {
     let have = (await ctx.store.byteSize(tmp)) ?? 0;
     if (have < 0 || have >= spec.bytes) {
-      await ctx.store.remove(tmp).catch(() => undefined);
+      await discard();
       have = 0;
     }
     // Shown from the moment the download is asked for, not from the first byte: an origin that
     // never answers is a download stuck at 0%, and nothing on screen said it had started.
     reportModelDownload(have, spec.bytes);
-    const resp = await fetchImpl(url, {
-      signal,
-      headers: have > 0 ? { Range: `bytes=${have}-` } : undefined,
-    });
+    self.received = have;
+    let resp: Response;
+    try {
+      resp = await unlessStalled(
+        fetchImpl(url, {
+          signal: attemptAc.signal,
+          headers: have > 0 ? { Range: `bytes=${have}-` } : undefined,
+        }),
+        "no answer",
+      );
+    } catch (e) {
+      if (signal.aborted) throw new Error(modelCancelledMessage(have, spec.bytes));
+      if (e instanceof AttemptFailure) throw e;
+      throw new AttemptFailure(`whisper model download failed: ${String(e)}`, "retry");
+    }
     if (resp.status === 416) {
       // Our part is at or past the end of the file the server holds, so it is not this model.
-      discardPart = true;
-      throw new Error("whisper model download could not resume from the partial file");
+      await discard();
+      throw new AttemptFailure(
+        "whisper model download could not resume from the partial file",
+        "retry",
+      );
     }
-    if (!resp.ok) throw new Error(`whisper model download failed: HTTP ${resp.status}`);
-    if (!resp.body) throw new Error("whisper model download cannot be streamed");
+    if (!resp.ok) {
+      const transient = resp.status >= 500 || resp.status === 408 || resp.status === 429;
+      throw new AttemptFailure(
+        `whisper model download failed: HTTP ${resp.status}`,
+        transient ? "retry" : "next-origin",
+      );
+    }
+    if (!resp.body) throw new AttemptFailure("whisper model download cannot be streamed", "fatal");
     // A server that ignores Range answers 200 with the WHOLE file. Appending that to what we
     // already had would concatenate two copies and leave the checksum as the only thing between
     // the user and a doubled file — start the part over rather than trust the length check.
     if (have > 0 && resp.status !== 206) {
-      await ctx.store.remove(tmp).catch(() => undefined);
+      await discard();
       have = 0;
     }
     const declaredHeader = resp.headers.get("content-length");
     const declared = declaredHeader === null ? null : Number(declaredHeader);
     const remaining = spec.bytes - have;
     if (declared !== null && Number.isFinite(declared) && declared !== remaining) {
-      discardPart = true;
-      throw new Error(
+      await discard();
+      throw new AttemptFailure(
         `whisper model size mismatch: expected ${remaining}, server sent ${declared}`,
+        "next-origin",
       );
     }
 
@@ -543,20 +737,35 @@ async function downloadModel(
     let completed = false;
     try {
       for (;;) {
-        const { done, value } = await reader.read();
+        let chunk: ReadableStreamReadResult<Uint8Array>;
+        try {
+          chunk = await unlessStalled(reader.read(), "no data");
+        } catch (e) {
+          if (signal.aborted) throw new Error(modelCancelledMessage(received, spec.bytes));
+          if (e instanceof AttemptFailure) throw e;
+          throw new AttemptFailure(`whisper model download failed: ${String(e)}`, "retry");
+        }
+        const { done, value } = chunk;
         if (done) break;
         if (signal.aborted) throw new Error(modelCancelledMessage(received, spec.bytes));
         if (received + value.length > spec.bytes) {
-          discardPart = true;
-          throw new Error(`whisper model exceeded expected size ${spec.bytes}`);
+          await discard();
+          throw new AttemptFailure(
+            `whisper model exceeded expected size ${spec.bytes}`,
+            "next-origin",
+          );
         }
         // `received` tracks what is ON DISK, so a failed append cannot inflate it: the next
         // attempt re-reads the file's real size anyway, which keeps resume self-correcting.
         if (!(await ctx.store.appendBytes(tmp, value))) {
           if (signal.aborted) throw new Error(modelCancelledMessage(received, spec.bytes));
-          throw new Error("whisper model download stopped before it could be written");
+          throw new AttemptFailure(
+            "whisper model download stopped before it could be written",
+            "fatal",
+          );
         }
         received += value.length;
+        self.received = received;
         if (received - published >= PROGRESS_STEP || received === spec.bytes) publish();
       }
       completed = true;
@@ -567,25 +776,18 @@ async function downloadModel(
     if (signal.aborted) throw new Error(modelCancelledMessage(received, spec.bytes));
     if (received !== spec.bytes) {
       // Truncated, not wrong: keep the prefix so the next attempt picks up where this stopped.
-      throw new Error(`whisper model was incomplete: expected ${spec.bytes}, received ${received}`);
+      throw new AttemptFailure(
+        `whisper model was incomplete: expected ${spec.bytes}, received ${received}`,
+        "retry",
+      );
     }
     const probe = await ctx.store.probeMedia(tmp, 0);
     if (!probe || probe.size !== spec.bytes || probe.sha256 !== spec.sha256) {
-      discardPart = true; // proven wrong; resuming these bytes would never converge
-      throw new Error("whisper model failed checksum validation");
+      await discard(); // proven wrong; resuming these bytes would never converge
+      throw new AttemptFailure("whisper model failed checksum validation", "next-origin");
     }
-    if (signal.aborted) throw new Error(modelCancelledMessage(received, spec.bytes));
-    if (await ctx.store.exists(path)) await ctx.store.remove(path);
-    await ctx.store.remove(marker).catch(() => undefined);
-    await ctx.store.rename(tmp, path);
-    await ctx.store
-      .writeText(marker, JSON.stringify({ bytes: spec.bytes, sha256: spec.sha256 }))
-      .catch(() => undefined);
-    return { path, downloaded: true };
   } finally {
-    if (discardPart) await ctx.store.remove(tmp).catch(() => undefined);
-    clearModelDownload();
-    finishActivity();
+    signal.removeEventListener("abort", stop);
   }
 }
 
@@ -765,16 +967,6 @@ function shiftWhisperJson(data: WhisperCppJson, shiftMs: number): void {
     for (const tok of seg.tokens ?? []) move(tok.offsets);
   }
 }
-
-/** Windows kills a process that cannot resolve its imports BEFORE a line of its code runs, so
- *  there is no stderr to read and no exit status from whisper itself — only an NTSTATUS. One
- *  user's machine lacked the Visual C++ runtime whisper-cli imports and produced 56 of these in
- *  a single session: identical, empty, and indistinguishable from a broken media file. */
-const WINDOWS_LOAD_FAILURES: ReadonlySet<number> = new Set([
-  -1073741515, // 0xC0000135 STATUS_DLL_NOT_FOUND
-  -1073741511, // 0xC0000139 STATUS_ENTRYPOINT_NOT_FOUND
-  -1073741701, // 0xC000007B STATUS_INVALID_IMAGE_FORMAT
-]);
 
 /** The speech engine cannot run on this machine AT ALL. Distinct from "this file failed":
  *  retrying it per asset just repeats the same load failure, so the caller must stop asking. */
@@ -971,23 +1163,40 @@ export async function runWhisper(
       // In the app, whisper is a job of the app process: a crash of the page neither stops it nor
       // loses its words, and the next page finishes it ({@link adoptTranscriptions}).
       const sup = await jobSupervisor();
-      const id = `whisper-${scratchToken()}`;
-      const whisper = (): Promise<CommandResult> =>
-        sup
+      const jobs: string[] = [];
+      const launch = (cpuOnly: boolean): Promise<CommandResult> => {
+        const id = `whisper-${scratchToken()}`;
+        jobs.push(id);
+        const run = cpuOnly ? [...args, "-ng"] : args;
+        return sup
           ? runAsJob(
               sup,
-              { id, lane: id, program: "whisper-cli", args, meta: { ...meta } },
+              { id, lane: id, program: "whisper-cli", args: run, meta: { ...meta } },
               ctx.signal,
             )
-          : ctx.runner.run("whisper-cli", args, ctx.signal);
+          : ctx.runner.run("whisper-cli", run, ctx.signal);
+      };
+      /** The engine on the GPU, or off it where the GPU is known to crash. A GPU that crashes is
+       *  retried ONCE with it off (-ng): when that works, this machine stays off it for a while,
+       *  and when it crashes too the GPU was not the cause and nothing is remembered. */
+      const engine = async (): Promise<CommandResult> => {
+        const cpuOnly = cpuOnlyNow();
+        const first = await launch(cpuOnly);
+        if (cpuOnly || ctx.signal?.aborted || !isGpuCrash(first)) return first;
+        const second = await launch(true);
+        const worked = second.code === 0;
+        if (worked) holdCpuOnly(first.code);
+        reportGpuCrash(first.code, worked);
+        return second;
+      };
       try {
         // A look's whisper runs at once, one look at a time; the indexer's took its turn already.
-        const run = ctx.background ? await whisper() : await lookWhisper(whisper, ctx.signal);
+        const run = ctx.background ? await engine() : await lookWhisper(engine, ctx.signal);
         if (!run) throw new Error("transcription cancelled"); // stopped before its turn came
         return await finishWhisper(ctx.store, meta, run, ctx.signal);
       } finally {
         // Its words are kept, or it failed: nothing is left for another page to finish.
-        await sup?.forget(id).catch(() => undefined);
+        for (const id of jobs) await sup?.forget(id).catch(() => undefined);
       }
     });
   });
@@ -1000,6 +1209,19 @@ interface ScratchIO {
   readText(path: string): Promise<string>;
   remove(path: string): Promise<void>;
   appCache(): Promise<AppCache | null>;
+}
+
+/** One app_error per outcome per session: a GPU that crashes does so on every file, and the telling
+ *  is the same each time. Only the exit status and whether the CPU run worked leave the machine. */
+const reportedGpuCrashes = new Set<string>();
+function reportGpuCrash(code: number | null, cpuWorked: boolean): void {
+  const key = `${code}|${cpuWorked}`;
+  if (reportedGpuCrashes.has(key)) return;
+  reportedGpuCrashes.add(key);
+  reportAppError(
+    `speech_gpu_crash: exit ${code}, ` +
+      (cpuWorked ? "the CPU run worked and the GPU is off for a week" : "the CPU run failed too"),
+  );
 }
 
 /** A run of whisper, as whoever finishes it needs it: the page that started it, or the next one. */

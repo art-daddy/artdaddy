@@ -19,7 +19,10 @@ interface ModelDownloadState {
 }
 
 interface ModelDownloadStore extends ModelDownloadState {
+  /** Stops the download, whoever is waiting for it; set while one is under way. */
+  cancel: (() => void) | null;
   report: (received: number, total: number) => void;
+  setCancel: (cancel: (() => void) | null) => void;
   clear: () => void;
 }
 
@@ -28,17 +31,24 @@ export const useModelDownload = create<ModelDownloadStore>((set) => ({
   total: 0,
   startedAt: 0,
   startReceived: 0,
+  cancel: null,
   report: (received, total) =>
     set((s) =>
       s.total > 0
         ? { received, total }
         : { received, total, startedAt: Date.now(), startReceived: received },
     ),
-  clear: () => set({ received: 0, total: 0, startedAt: 0, startReceived: 0 }),
+  setCancel: (cancel) => set({ cancel }),
+  clear: () => set({ received: 0, total: 0, startedAt: 0, startReceived: 0, cancel: null }),
 }));
 
 export function reportModelDownload(received: number, total: number): void {
   useModelDownload.getState().report(received, total);
+}
+
+/** Say how the download under way is stopped (the person pressed Cancel). Cleared with it. */
+export function setModelDownloadCancel(cancel: (() => void) | null): void {
+  useModelDownload.getState().setCancel(cancel);
 }
 
 export function clearModelDownload(): void {
@@ -65,11 +75,30 @@ export function downloadEtaSeconds(s: ModelDownloadState, now = Date.now()): num
   return Math.max(0, Math.ceil((s.total - s.received) / (fetched / elapsed)));
 }
 
-/** The one user-facing sentence for this download. Shared by the progress line and by the
- *  cancellation error, so what the tool says afterwards matches what the user was reading. */
-export function modelDownloadMessage(received: number, total: number): string {
+/** "about 40 s", "about 12 min", "about 2 h": how long is left, in the unit a person would say it
+ *  in. Rounds up, so the figure is never shorter than the wait. */
+export function formatEta(seconds: number): string {
+  const s = Math.max(1, Math.ceil(seconds));
+  if (s < 90) return `about ${s} s`;
+  const min = Math.ceil(s / 60);
+  if (min < 90) return `about ${min} min`;
+  return `about ${Math.ceil(min / 60)} h`;
+}
+
+/** What the person is told about this download, in the words the owner chose (2026-11-01). The
+ *  second sentence is part of the message: a 465 MB download that appears on its own needs it. */
+export const MODEL_DOWNLOAD_NOTE = "This only happens when you start the app for the first time.";
+
+/** The one user-facing line for this download: what it is, how big, how far, and how long is
+ *  left once that can be told. */
+export function modelDownloadMessage(
+  received: number,
+  total: number,
+  etaSeconds: number | null = null,
+): string {
+  const left = etaSeconds === null ? "" : `, ${formatEta(etaSeconds)} left`;
   return (
-    `downloading speech model - this only happens the first time post install, ` +
-    `${megabytes(total)} MB, ${percent(received, total)}%`
+    `Downloading the speech model (one time, about ${megabytes(total)} MB) - ` +
+    `${percent(received, total)}%${left}`
   );
 }
