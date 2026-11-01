@@ -22,4 +22,8 @@ export interface ClientToolContext {
    *  (`workGate.ts`). Its whisper does not queue among the looks'. Absent: someone is waiting. */
   background?: boolean;
   exportMode?: ExportMode;
+  /** Who is calling: the in-app agent ("app", the default) or an outside agent over MCP. The two
+   *  differ in what the app can promise them: the in-app agent is told when background work lands,
+   *  an MCP agent never is (`mcp/instructions.ts`). */
+  surface?: "app" | "mcp";
 }

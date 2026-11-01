@@ -9,7 +9,7 @@ import { missingClipMessage } from "../contract/params";
 import { encodeVideoForGemini } from "./geminiEncode";
 import { probePath } from "./media";
 import { stillPicture } from "../media/stillPicture";
-import { unresolvedRefMessage } from "./refState";
+import { unresolvedRef, type PendingStatus } from "./refState";
 import type { ClientToolRegistry } from "./registry";
 import { MAX_HEAP_READ_BYTES } from "./store";
 import { videoEdgeFor } from "./videoEdge";
@@ -66,7 +66,15 @@ async function resolveVideoSource(
   mediaRef: string,
   clipId: string,
   tool: string,
-): Promise<{ path?: string; ref?: string; clip?: Clip; fps?: number; error?: string }> {
+): Promise<{
+  path?: string;
+  ref?: string;
+  clip?: Clip;
+  fps?: number;
+  error?: string;
+  /** Set only for an MCP caller whose ref is still being generated. */
+  pending?: Partial<PendingStatus>;
+}> {
   if (mediaRef && isUrl(mediaRef)) {
     return {
       error: `${tool} requires a library media_ref or a placed clip_id, not a URL. Call download_video first, then pass its returned media_ref.`,
@@ -115,13 +123,12 @@ async function resolveVideoSource(
     ? await ctx.store.resolveRef(ref)
     : await ctx.store.resolveMediaRef(ref);
   if (!resolved) {
-    return {
-      error: await unresolvedRefMessage(
-        ctx.store,
-        ref,
-        `local file not found: ${ref}. Pass a library asset id (media_...), a library filename, or a project-relative path. To probe a URL, call \`download_video\` first, then pass the local path it returns.`,
-      ),
-    };
+    const { error, ...pending } = await unresolvedRef(
+      ctx,
+      ref,
+      `local file not found: ${ref}. Pass a library asset id (media_...), a library filename, or a project-relative path. To probe a URL, call \`download_video\` first, then pass the local path it returns.`,
+    );
+    return { error, pending };
   }
   // A HEIF-family still is read as its decoded picture, as every other tool reads it.
   const picture = await stillPicture(ctx.store, ctx.runner, resolved, ctx.signal);
@@ -169,7 +176,8 @@ async function videoAsk(
   const reasoningMode = String(args.reasoning_mode ?? "off");
 
   const resolved = await resolveVideoSource(ctx, mediaRefArg, clipId, "video_ask");
-  if (resolved.error || !resolved.path) return { ok: false, error: resolved.error ?? "unresolved" };
+  if (resolved.error || !resolved.path)
+    return { ok: false, error: resolved.error ?? "unresolved", ...resolved.pending };
   const localPath = resolved.path;
 
   let duration: number | null = null;
@@ -434,7 +442,8 @@ async function videoFindMoment(
   const reasoningMode = String(args.reasoning_mode ?? "off");
 
   const resolved = await resolveVideoSource(ctx, mediaRefArg, clipId, "video_find_moment");
-  if (resolved.error || !resolved.path) return { ok: false, error: resolved.error ?? "unresolved" };
+  if (resolved.error || !resolved.path)
+    return { ok: false, error: resolved.error ?? "unresolved", ...resolved.pending };
   const localPath = resolved.path;
 
   let duration: number | null = null;

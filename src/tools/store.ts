@@ -434,9 +434,15 @@ export class ProjectStoreAccess {
    *  one, which reads as "your ref is wrong" — so this exists to let a caller tell the two apart.
    *  Lives here because {@link resolveRef} is the one door refs come through; a copy in one tool is
    *  how 21 `inspect_media` calls in a single session were told "media not found". */
-  async pendingMedia(
-    ref: string,
-  ): Promise<{ id: string; path: string; kind: string; status: string; error?: string } | null> {
+  async pendingMedia(ref: string): Promise<{
+    id: string;
+    path: string;
+    kind: string;
+    status: string;
+    error?: string;
+    /** When the job was registered, in epoch seconds, if the row says. */
+    added_at?: number;
+  } | null> {
     const s = (ref ?? "").trim();
     if (!s) return null;
     let clips: LibraryClip[];
@@ -448,12 +454,14 @@ export class ProjectStoreAccess {
     const row = clips.find((c) => c.id === s || c.filename === s || (c.aliases ?? []).includes(s));
     const status = row ? String(row.status ?? "") : "";
     if (!row || (status !== "generating" && status !== "failed")) return null;
+    const addedAt = Number(row.added_at);
     return {
       id: String(row.id),
       path: String(row.path ?? ""),
       kind: String(row.kind ?? "video"),
       status,
       ...(row.error != null ? { error: String(row.error) } : {}),
+      ...(Number.isFinite(addedAt) && addedAt > 0 ? { added_at: addedAt } : {}),
     };
   }
 

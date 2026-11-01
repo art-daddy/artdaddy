@@ -74,6 +74,7 @@ class ProjectToolHost implements ToolHost {
   // The current turn's agent origin (chat execution), set for the duration of one run() call.
   private currentOrigin: MutationOrigin | undefined;
   private currentExportMode: ClientToolContext["exportMode"];
+  private currentSurface: ToolRunOptions["surface"] | undefined;
   constructor(readonly projectId: string) {
     this.registry = createToolRegistry(() => this.viewCtx());
     this.ready = buildContext(projectId, this.holder);
@@ -85,7 +86,7 @@ class ProjectToolHost implements ToolHost {
     const base = this.holder.ctx;
     if (!base) return null;
     return agentToolContext(
-      { ...base, exportMode: this.currentExportMode },
+      { ...base, exportMode: this.currentExportMode, surface: this.currentSurface },
       this.currentSignal,
       this.currentOrigin,
     );
@@ -126,7 +127,7 @@ class ProjectToolHost implements ToolHost {
     options: ToolRunOptions,
     trace: ToolTrace,
   ): Promise<unknown> {
-    const { signal, origin, exportMode } = options;
+    const { signal, origin, exportMode, surface } = options;
     await this.ready;
     if (!this.has(name)) return { ok: false, error: `unknown agent tool: ${name}` };
     this.currentOrigin = origin;
@@ -141,10 +142,10 @@ class ProjectToolHost implements ToolHost {
         effect && isJobEffect(effect) ? openDocumentById(this.projectId)?.jobs : undefined;
       if (jobs) {
         return await jobs.run({ kind: `tool.${name}` }, (jobSignal) =>
-          this.runTool(name, args, trace, combineSignals(signal, jobSignal), exportMode),
+          this.runTool(name, args, trace, combineSignals(signal, jobSignal), exportMode, surface),
         );
       }
-      return await this.runTool(name, args, trace, signal, exportMode);
+      return await this.runTool(name, args, trace, signal, exportMode, surface);
     } catch (e) {
       // The job scope refused admission because the project began closing — report a clean tool
       // failure rather than reject the turn (the registry path already returns { ok:false } too).
@@ -163,14 +164,17 @@ class ProjectToolHost implements ToolHost {
     trace: ToolTrace,
     signal?: AbortSignal,
     exportMode?: ClientToolContext["exportMode"],
+    surface?: ToolRunOptions["surface"],
   ): Promise<unknown> {
     this.currentSignal = signal;
     this.currentExportMode = exportMode;
+    this.currentSurface = surface;
     try {
       return await this.registry.run(name, args, trace.context, trace);
     } finally {
       this.currentSignal = undefined;
       this.currentExportMode = undefined;
+      this.currentSurface = undefined;
     }
   }
   store(): ProjectStoreAccess | null {

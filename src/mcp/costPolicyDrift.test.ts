@@ -5,6 +5,7 @@
 // Anchor the prose to the catalog instead of re-checking it by hand.
 import { describe, expect, it } from "vitest";
 
+import { toolDefinition } from "../contract";
 import { paramsByTool, toolNames } from "../contract/views";
 import { COST_POLICY, ASYNC_JOBS, PROJECT_NAVIGATION } from "./instructions";
 
@@ -19,10 +20,21 @@ const offered = new Set(toolNames());
 // manage_project exists only for MCP (an external session has no window to click in), so it is
 // callable without appearing in the server catalog.
 const MCP_ONLY = ["manage_project"];
+// Fields a tool's REPLY carries, which are not parameters. The prose names them so an agent reads
+// the reply the way it was meant. Each one counts only while some tool's description in the catalog
+// documents it, so a field that stops being real is a ghost here like any withdrawn tool.
+const REPLY_FIELDS = ["eta_s", "retry_after_s"];
+const described = toolNames()
+  .flatMap((name) => {
+    const tool = toolDefinition(name);
+    return [tool?.description ?? "", tool?.text_variant?.description ?? ""];
+  })
+  .join("\n");
 const vocabulary = new Set([
   ...offered,
   ...MCP_ONLY,
   ...Object.values(paramsByTool()).flatMap((t) => t.params),
+  ...REPLY_FIELDS.filter((field) => described.includes(`\`${field}\``)),
 ]);
 
 describe("MCP instruction prose vs the tool catalog", () => {

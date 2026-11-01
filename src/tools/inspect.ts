@@ -440,7 +440,7 @@ export async function inspectMediaTool(
     : await ctx.store.resolveMediaRef(mediaRef);
   if (!resolved) {
     return unresolvedRefError(
-      ctx.store,
+      ctx,
       mediaRef,
       `media not found: ${mediaRef}. Pass a library id/filename or a clip_id.`,
     );
@@ -1228,7 +1228,7 @@ export async function inspectColorTool(
   }
   if (!frame)
     return unresolvedRefError(
-      ctx.store,
+      ctx,
       mediaRef,
       `could not sample a frame from '${mediaRef}'. Pass a library id/filename (import_media a local file first) or a clip_id.`,
     );
@@ -1252,7 +1252,7 @@ export async function inspectColorTool(
       res.reference_error = rf
         ? `could not measure the reference '${reference}' (frame decode failed)`
         : await unresolvedRefMessage(
-            ctx.store,
+            ctx,
             reference,
             `reference '${reference}' is not a library asset — import_media it first and pass its media_ref`,
           );

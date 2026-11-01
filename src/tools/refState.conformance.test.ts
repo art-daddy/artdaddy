@@ -23,6 +23,7 @@ import { joinPath, ProjectStoreAccess, type DirEntry, type FsLike } from "./stor
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
+type Surface = NonNullable<ClientToolContext["surface"]>;
 
 vi.mock("../api/ai", () => ({
   callAiProxy: vi.fn(async () => ({ result: {}, media: [] })),
@@ -35,6 +36,9 @@ const DIR = "C:/proj";
 const PENDING = "media_gen_pending01";
 const FAILED = "media_gen_failed01";
 const OFFLINE = "media_offline01";
+/** What the in-app agent was told before MCP had its own wording. Frozen: that agent IS told when
+ *  the media lands, so this is true for it, and changing it changes what the model does. */
+const APP_PENDING = `'${PENDING}' is still being generated, so there is nothing to read yet. The ref is correct; you will be told when it lands. Don't re-generate it and don't guess a file path.`;
 
 class Fs implements FsLike {
   files = new Map<string, string>();
@@ -60,14 +64,21 @@ class Fs implements FsLike {
 }
 
 /** A catalog holding one generating row and one failed row, and NO files on disk — exactly the
- *  state a generation tool leaves behind between submit and settle. */
-function ctx(): ClientToolContext {
+ *  state a generation tool leaves behind between submit and settle. `surface` is who is calling:
+ *  left out it is the in-app agent, which is what every context was before MCP had its own wording. */
+function ctx(surface?: Surface): ClientToolContext {
   const fs = new Fs();
   fs.files.set(
     joinPath(DIR, "internals/library.json"),
     JSON.stringify({
       clips: [
-        { id: PENDING, path: `library/${PENDING}.mp4`, kind: "video", status: "generating" },
+        {
+          id: PENDING,
+          path: `library/${PENDING}.mp4`,
+          kind: "video",
+          status: "generating",
+          added_at: Date.now() / 1000 - 30,
+        },
         {
           id: FAILED,
           path: `library/${FAILED}.mp4`,
@@ -89,23 +100,27 @@ function ctx(): ClientToolContext {
   return {
     store: new ProjectStoreAccess(DIR, fs),
     runner: { run: async () => ({ code: 0, stdout: "", stderr: "" }) },
+    ...(surface ? { surface } : {}),
   };
 }
 
 /** Every contract tool that accepts a `media_ref`, and how to call it with one. */
-const CALLS: Record<string, (ref: string) => Promise<unknown>> = {
-  probe_media: (ref) => probeMediaTool({ media_ref: ref }, ctx()),
-  inspect_media: (ref) => inspectMediaTool({ media_ref: ref }, ctx()),
-  inspect_color: (ref) => inspectColorTool({ media_ref: ref }, ctx()),
-  crop_image: (ref) => cropImageTool({ media_ref: ref, bbox: { x: 0, y: 0, w: 10, h: 10 } }, ctx()),
-  clip_video: (ref) =>
-    clipVideoTool({ media_ref: ref, start_s: 0, end_s: 1, output_name: "out.mp4" }, ctx()),
-  vision_describe: (ref) => viaRegistry(registerVisionTools, "vision_describe", { media_ref: ref }),
-  find_content: (ref) =>
-    viaRegistry(registerVisionTools, "find_content", { media_ref: ref, prompt: "x" }),
-  video_ask: (ref) => viaRegistry(registerVideoTools, "video_ask", { media_ref: ref, prompt: "x" }),
-  video_find_moment: (ref) =>
-    viaRegistry(registerVideoTools, "video_find_moment", { media_ref: ref, query: "x" }),
+const CALLS: Record<string, (ref: string, surface?: Surface) => Promise<unknown>> = {
+  probe_media: (ref, s) => probeMediaTool({ media_ref: ref }, ctx(s)),
+  inspect_media: (ref, s) => inspectMediaTool({ media_ref: ref }, ctx(s)),
+  inspect_color: (ref, s) => inspectColorTool({ media_ref: ref }, ctx(s)),
+  crop_image: (ref, s) =>
+    cropImageTool({ media_ref: ref, bbox: { x: 0, y: 0, w: 10, h: 10 } }, ctx(s)),
+  clip_video: (ref, s) =>
+    clipVideoTool({ media_ref: ref, start_s: 0, end_s: 1, output_name: "out.mp4" }, ctx(s)),
+  vision_describe: (ref, s) =>
+    viaRegistry(registerVisionTools, "vision_describe", { media_ref: ref }, s),
+  find_content: (ref, s) =>
+    viaRegistry(registerVisionTools, "find_content", { media_ref: ref, prompt: "x" }, s),
+  video_ask: (ref, s) =>
+    viaRegistry(registerVideoTools, "video_ask", { media_ref: ref, prompt: "x" }, s),
+  video_find_moment: (ref, s) =>
+    viaRegistry(registerVideoTools, "video_find_moment", { media_ref: ref, query: "x" }, s),
 };
 
 type Register = (r: ClientToolRegistry, getCtx: () => ClientToolContext | null) => void;
@@ -114,9 +129,10 @@ async function viaRegistry(
   register: Register,
   name: string,
   args: Record<string, unknown>,
+  surface?: Surface,
 ): Promise<unknown> {
   const reg = new ClientToolRegistry();
-  register(reg, () => ctx());
+  register(reg, () => ctx(surface));
   return reg.run(name, args);
 }
 
@@ -180,6 +196,44 @@ describe("every tool that takes a media_ref knows 'pending' from 'unknown'", () 
       const msg = String(r?.error ?? "");
       expect(msg).not.toMatch(/still being generated/i);
       expect(msg).toMatch(/not found|could not sample/i);
+    });
+
+    // The in-app agent is told when background media lands, and what it reads here must not change:
+    // this is the sentence as it was before MCP had its own wording.
+    it(`${name}: for the in-app agent the pending answer is the frozen sentence, with no structured status`, async () => {
+      const r = (await CALLS[name](PENDING, "app")) as Any;
+      expect(r.error).toBe(APP_PENDING);
+      expect(r).not.toHaveProperty("pending");
+      expect(r).not.toHaveProperty("retry_after_s");
+    });
+
+    // An MCP agent is never told. "You will be told when it lands" there is the sentence that made
+    // one session poll 243 times, so it must be GONE and replaced by what a caller can act on.
+    it(`${name}: over MCP a generating ref is a typed pending status, and says nothing will tell the caller`, async () => {
+      const r = (await CALLS[name](PENDING, "mcp")) as Any;
+      expect(r).toMatchObject({ pending: true, status: "generating" });
+      expect(Number.isInteger(r.eta_s)).toBe(true);
+      expect(r.eta_s).toBeGreaterThanOrEqual(10);
+      expect(r.retry_after_s).toBeGreaterThanOrEqual(10);
+      expect(r.retry_after_s).toBeLessThanOrEqual(60);
+      const msg = String(r.error);
+      expect(msg).toMatch(/still being generated/i);
+      expect(msg).toMatch(/nothing will tell you/i);
+      expect(msg).toContain(`${r.retry_after_s} s`);
+      expect(msg).not.toMatch(/you will be told/i);
+      expect(msg).not.toMatch(/not found/i);
+      expect(msg).toMatch(/don't guess a file path/i);
+    });
+
+    // Only the wording of "still generating" differs by surface: a failed generation, an offline
+    // file and a typo read the same to both, and carry no pending status.
+    it(`${name}: over MCP a failed, offline or unknown ref is reported exactly as in the app`, async () => {
+      for (const ref of [FAILED, OFFLINE, "media_typo"]) {
+        const app = (await CALLS[name](ref, "app")) as Any;
+        const mcp = (await CALLS[name](ref, "mcp")) as Any;
+        expect(mcp.error, ref).toBe(app.error);
+        expect(mcp, ref).not.toHaveProperty("pending");
+      }
     });
   }
 });

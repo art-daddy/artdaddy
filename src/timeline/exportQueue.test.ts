@@ -1,16 +1,19 @@
 // The queue's job is to protect the DESTINATION FILE. Every test here is about what is sitting
 // on disk at the path the user chose, not about what the tool returned.
 import { afterEach, describe, expect, it, vi } from "vitest";
+import fc from "fast-check";
 import { createHash } from "node:crypto";
 
 import {
   __resetExportQueue,
   cancelExport,
+  exportWaitMs,
   isDestinationReserved,
   localDeliveryPort,
   listExportRecords,
   listExports,
   manageExportsTool,
+  MAX_EXPORT_WAIT_S,
   submitExport as submitWithDependencies,
   submitExports,
   whenExportEnds,
@@ -25,6 +28,7 @@ import { joinPath, ProjectStoreAccess, type DirEntry, type FsLike } from "../too
 import { backgroundTurn } from "../tools/workGate";
 import { resetTestDocuments } from "../test/timelineKit";
 import { __setExportConfirmationForTests, type ExportConfirmation } from "../lib/confirm";
+import { toolDefinition } from "../contract";
 import { endProjectSession } from "../tools/coordinator";
 import { useExportJob } from "../store/exportJob";
 import { useAuth } from "../store/auth";
@@ -1303,7 +1307,12 @@ describe("manage_exports", () => {
     const listed = (await manageExportsTool({})) as Any;
     expect(listed.ok).toBe(true);
     expect(listed.exports).toEqual([
-      { job_id: sub.job_id, filename: "final.mp4", state: "running" },
+      {
+        job_id: sub.job_id,
+        filename: "final.mp4",
+        state: "running",
+        elapsed_s: expect.any(Number),
+      },
     ]);
 
     release();
@@ -1587,5 +1596,195 @@ describe("whose export it is reported as", () => {
     await whenExportTelemetrySettles();
     expect(stamped).toBeUndefined();
     expect(exportBeacon.mock.calls[0][0]).not.toHaveProperty("owner", expect.anything());
+  });
+});
+
+// An agent that polled `list` every few seconds asked 237 times in one session. `wait_seconds`
+// turns that loop into one call that answers when the export ends. These tests check what comes
+// back and what is left behind (a timer, a listener), not how the wait is built.
+describe("manage_exports: one call that waits, instead of a polling loop", () => {
+  const SECOND = "C:/out/second.mp4";
+
+  /** An export held open until released, so a test decides when it ends. */
+  async function held(store: ProjectStoreAccess, dest: string, filename: string) {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const sub = await submitExport({
+      store,
+      destPath: dest,
+      stagePath: `${dest}.part`,
+      filename,
+      run: async () => {
+        await gate;
+        return {};
+      },
+    });
+    return { job_id: sub.job_id, release };
+  }
+
+  /** The wait's own timer is the only one faked: the queue's real work must still run. */
+  const fakeWaitTimers = () => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+
+  it("answers the moment the export ends, not at the bound, and leaves no timer behind", async () => {
+    const { store } = make();
+    const a = await held(store, DEST, "final.mp4");
+    fakeWaitTimers();
+    try {
+      const answer = manageExportsTool({ wait_seconds: 30 });
+      let over = false;
+      void answer.then(() => (over = true));
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(over).toBe(false); // the export is still running: the call is still waiting
+
+      a.release();
+      await vi.advanceTimersByTimeAsync(2_000); // far short of the 30 s bound
+      const r = (await answer) as Any;
+      expect(r.exports).toHaveLength(1);
+      expect(["done", "failed"]).toContain(r.exports[0].state);
+      expect(r).not.toHaveProperty("note");
+      expect(r).not.toHaveProperty("retry_after_s");
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("at the bound it names what is still unfinished and says not to loop", async () => {
+    const { store } = make();
+    const a = await held(store, DEST, "final.mp4");
+    fakeWaitTimers();
+    try {
+      const answer = manageExportsTool({ wait_seconds: 60 });
+      await vi.advanceTimersByTimeAsync(60_000);
+      const r = (await answer) as Any;
+      expect(r.exports).toMatchObject([{ job_id: a.job_id, state: "running" }]);
+      expect(r.retry_after_s).toBe(MAX_EXPORT_WAIT_S);
+      expect(String(r.note)).toMatch(/wait_seconds/);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+    a.release();
+  });
+
+  it("ends the wait at once when the turn is stopped, with the export still reported as running", async () => {
+    const { store } = make();
+    await held(store, DEST, "final.mp4");
+    fakeWaitTimers();
+    try {
+      const stop = new AbortController();
+      const answer = manageExportsTool({ wait_seconds: 60 }, stop.signal);
+      stop.abort();
+      const r = (await answer) as Any; // no timer was advanced: Stop alone ended it
+      expect(r.exports[0].state).toBe("running");
+      expect(vi.getTimerCount()).toBe(0);
+
+      const already = new AbortController();
+      already.abort();
+      const again = (await manageExportsTool({ wait_seconds: 60 }, already.signal)) as Any;
+      expect(again.exports[0].state).toBe("running");
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("waits only for the export it is asked about, while another sits queued behind it", async () => {
+    const { store } = make();
+    const a = await held(store, DEST, "final.mp4");
+    const b = await held(store, SECOND, "second.mp4");
+    fakeWaitTimers();
+    try {
+      const answer = manageExportsTool({ job_id: a.job_id, wait_seconds: 30 });
+      a.release();
+      await vi.advanceTimersByTimeAsync(2_000);
+      const r = (await answer) as Any;
+      expect(r.exports.map((e: Any) => e.job_id)).toEqual([a.job_id]);
+      // The one asked about is over: the other's state is not this answer's business.
+      expect(r).not.toHaveProperty("note");
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+    b.release();
+  });
+
+  it("refuses a job_id this session never started, without waiting", async () => {
+    const { store } = make();
+    await held(store, DEST, "final.mp4");
+    fakeWaitTimers();
+    try {
+      const r = (await manageExportsTool({ job_id: "nope", wait_seconds: 60 })) as Any;
+      expect(r.ok).toBe(false);
+      expect(String(r.error)).toContain("nope");
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("without a wait it answers at once, still telling the caller not to loop", async () => {
+    const { store } = make();
+    const a = await held(store, DEST, "final.mp4");
+    const r = (await manageExportsTool({ action: "list" })) as Any;
+    expect(r.exports[0].elapsed_s).toBeGreaterThanOrEqual(0);
+    expect(r.retry_after_s).toBe(15);
+    expect(String(r.note)).toMatch(/wait_seconds/);
+
+    a.release();
+    await whenExportsSettle();
+    const done = (await manageExportsTool({ action: "list" })) as Any;
+    expect(done).not.toHaveProperty("note");
+    expect(done).not.toHaveProperty("retry_after_s");
+    expect(done.exports[0]).not.toHaveProperty("elapsed_s");
+  });
+
+  it.each([[-3], [0], ["soon"], ["30"], [null], [{}], [Number.NaN]])(
+    "wait_seconds %j is no wait: the answer is immediate and nothing is scheduled",
+    async (bad) => {
+      const { store } = make();
+      await held(store, DEST, "final.mp4");
+      fakeWaitTimers();
+      try {
+        const r = (await manageExportsTool({ wait_seconds: bad })) as Any;
+        expect(r.exports[0].state).toBe("running");
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("reads wait_seconds as a whole number of ms in [0, the limit] for ANYTHING, never shrinking as the ask grows", () => {
+    fc.assert(
+      fc.property(fc.anything(), (raw) => {
+        const ms = exportWaitMs(raw);
+        expect(Number.isInteger(ms)).toBe(true);
+        expect(ms).toBeGreaterThanOrEqual(0);
+        expect(ms).toBeLessThanOrEqual(MAX_EXPORT_WAIT_S * 1000);
+      }),
+    );
+    fc.assert(
+      fc.property(
+        fc.double({ min: 0, max: 1e6, noNaN: true }),
+        fc.double({ min: 0, max: 1e6, noNaN: true }),
+        (x, y) => {
+          const [lo, hi] = x <= y ? [x, y] : [y, x];
+          expect(exportWaitMs(lo)).toBeLessThanOrEqual(exportWaitMs(hi));
+        },
+      ),
+    );
+    expect(exportWaitMs(1e9)).toBe(MAX_EXPORT_WAIT_S * 1000);
+  });
+
+  it("the contract tells the model the limit the code enforces, and what the reply carries", () => {
+    type Props = Record<string, { type?: string; description?: string }>;
+    const tool = toolDefinition("manage_exports")!;
+    const props = tool.parameters!.properties as Props;
+    expect(props.wait_seconds?.type).toBe("number");
+    expect(props.wait_seconds?.description).toContain(`0 to ${MAX_EXPORT_WAIT_S}`);
+    expect(tool.description).toContain(`0 to ${MAX_EXPORT_WAIT_S}`);
+    expect(tool.description).toMatch(/`retry_after_s`/);
+    expect(tool.description).toMatch(/`elapsed_s`/);
   });
 });

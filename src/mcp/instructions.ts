@@ -35,6 +35,12 @@ background — anywhere from seconds to 15 minutes.
   never arrives. Say what you started, say roughly how long it takes, and END your turn.
 - Place the handle now: add_clips accepts a still-generating media_ref and the clip fills
   in by itself. Fire independent generations together rather than one at a time.
+- A tool that needs the file itself (inspect_media, video_ask and the like) answers
+  pending:true with eta_s (about how long is left) and retry_after_s (the soonest a second
+  look is worth it). Do other work or end your turn; asking again sooner only repeats the
+  answer.
+- manage_exports takes wait_seconds (up to 60): it answers the moment the export ends, so
+  one call replaces a polling loop.
 - When the user writes again, CHECK before claiming anything is done: library_op
   action='list' reports status:'generating' on media still running (the field is absent
   once an asset is ready), and manage_exports action='list' reports a running export.`.trim();
