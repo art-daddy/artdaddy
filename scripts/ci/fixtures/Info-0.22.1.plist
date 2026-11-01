@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>English</string>
+	<key>CFBundleDisplayName</key>
+	<string>artdaddy</string>
+	<key>CFBundleExecutable</key>
+	<string>artdaddy</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.artdaddy.app</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>artdaddy</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.22.1</string>
+	<key>CFBundleVersion</key>
+	<string>0.22.1</string>
+	<key>CSResourcesFileMapped</key>
+	<true/>
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<key>CFBundleIconFile</key>
+	<string>icon.icns</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>artdaddy</string>
+			</array>
+			<key>CFBundleURLName</key>
+			<string>com.artdaddy.app artdaddy</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+		</dict>
+	</array>
+	<key>LSRequiresCarbon</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>ArtDaddy uses your camera to record video into your project when you choose Record.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>ArtDaddy uses your microphone to record audio with your video when you choose Record.</string>
+</dict>
+</plist>

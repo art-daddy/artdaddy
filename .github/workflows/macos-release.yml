@@ -58,10 +58,12 @@ permissions:
 
 jobs:
   build:
-    # GitHub-hosted Apple Silicon. This was a self-hosted Mac while the repo was private and
-    # macOS minutes were billed at 10x; a public repo gets them free and unmetered, and no
-    # self-hosted runner is registered any more — leaving the old label would queue forever.
-    runs-on: macos-14
+    # GitHub-hosted Apple Silicon, on ONE pinned image: the release is always built by the same
+    # toolchain, and scripts/ci/macosMinOs.mjs (called below) proves that toolchain did not raise the
+    # macOS a user needs. macos-14 retired on 2026-11-02. This was a self-hosted Mac while the repo was
+    # private and macOS minutes were billed at 10x; a public repo gets them free and unmetered, and no
+    # self-hosted runner is registered any more, so an old label would queue forever.
+    runs-on: macos-15
     env:
       TRIPLE: aarch64-apple-darwin
       # .env is gitignored, and VITE_API_BASE_URL is FROZEN INTO THE BUNDLE at build time with a
@@ -96,13 +98,14 @@ jobs:
           # in the build needs full Xcode; the dmg builds fine against the CLT.
           xcodebuild -version 2>/dev/null | head -n1 || xcode-select -p
 
-      # Keyed on the whisper ref, so a rebuild only happens when the pinned version moves.
+      # Keyed on the whisper ref AND the build image, so a rebuild happens when the pinned version moves or
+      # the image does (a binary built by another image's toolchain is not what this release is built by).
       - name: Cache the whisper binary
         id: whisper-cache
         uses: actions/cache@v4
         with:
           path: whisper-out
-          key: whisper-${{ env.TRIPLE }}-${{ inputs.whisper_ref }}
+          key: whisper-${{ env.TRIPLE }}-macos-15-${{ inputs.whisper_ref }}
 
       # STATIC with the Metal shader embedded: the mac sidecar is ONE self-contained file.
       # The Windows build is dynamic, which is why that one ships 14 sibling DLLs.
@@ -182,6 +185,19 @@ jobs:
             fi
           done
           exit $FAIL
+
+      # What a user's Mac accepts is decided by the minimum macOS written into each binary's own header,
+      # and it can rise without anything else failing: a toolchain that defaults a deployment target to
+      # the runner's own OS, or a sidecar download that moved. Read every staged sidecar now, so the
+      # break shows up here and not after the whole app has been built. The baseline holds the known gap
+      # (ffmpeg and ffprobe need 12, the browser engine 13, against the 11 the app advertises): it is a
+      # ceiling per file, so nothing can get worse unnoticed. scripts/ci/macosMinOs.mjs says why.
+      - name: Every sidecar must run on the macOS we advertise
+        run: |
+          node scripts/ci/macosMinOs.mjs src-tauri/binaries \
+            --config src-tauri/tauri.conf.json \
+            --baseline scripts/ci/macosMinOs.baseline.json \
+            --expect-config src-tauri/tauri.conf.json --expect-suffix "-${TRIPLE}"
 
       # resources/artdaddy-browser.mjs is a BUILD ARTIFACT (esbuild), not a copy of the source, and
       # nothing in `tauri build` regenerates it. Skipping this ships the OLD browser behaviour.
@@ -359,6 +375,14 @@ jobs:
               ls -la "$RES/ms-playwright" || true
               FAIL=1
             fi
+            # The same read over what the user receives: the app, every sidecar, and the browser engine
+            # and its libraries inside Resources (an earlier look at Contents/MacOS alone missed the
+            # engine, which needs macOS 13). It also insists that the sidecars tauri.conf.json names and
+            # the app's own executable were among the files it read.
+            node scripts/ci/macosMinOs.mjs "$APP" \
+              --config src-tauri/tauri.conf.json \
+              --baseline scripts/ci/macosMinOs.baseline.json \
+              --expect-config src-tauri/tauri.conf.json || FAIL=1
           fi
           hdiutil detach "$MNT" -quiet || true
           echo "path=$DMG" >> "$GITHUB_OUTPUT"
