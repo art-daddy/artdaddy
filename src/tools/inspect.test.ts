@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import fc from "fast-check";
 
 import type { CommandRunner } from "./command";
@@ -21,12 +21,17 @@ import { registerLibraryClip } from "./import";
 import { registerTestDocument, resetTestDocuments } from "../test/timelineKit";
 import { emptyTimeline } from "../timeline/model";
 import { makeStoryboard } from "./storyboard";
+import { TranscriptionFailure } from "./speechFailure";
 import { peekTranscript, runWhisper } from "./transcribe";
 import { backgroundLoudness, prioritizeTranscript } from "./transcriptQueue";
 
 // inspect_media now transcribes audio/video-with-audio via runWhisper; mock it so
 // tests don't shell out to whisper-cli / download a model.
 vi.mock("@tauri-apps/api/path", () => ({ resolveResource: async () => "C:/res/fonts" }));
+vi.mock("../api/appEvents", async (orig) => ({
+  ...(await orig<object>()),
+  reportAppError: vi.fn(),
+}));
 vi.mock("./transcriptQueue", () => ({
   prioritizeTranscript: vi.fn(() => true),
   backgroundLoudness: vi.fn(() => null),
@@ -983,6 +988,78 @@ describe("inspectMediaTool looks at what it returns (UJ-012)", () => {
       )) as Any;
       expect(r.transcript.status).toBe("unavailable");
       expect(vi.mocked(runWhisper)).not.toHaveBeenCalled();
+    });
+
+    describe("a transcript that does not land", () => {
+      afterEach(() => vi.useRealTimers());
+
+      /** A look on a short video whose transcript never arrives: what it answered, and when. */
+      const timedLook = (args: Record<string, unknown>, signal?: AbortSignal) => {
+        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+        vi.mocked(runWhisper).mockImplementation(() => new Promise<never>(() => undefined));
+        const { fs } = setup();
+        const t0 = Date.now();
+        const seen: { at: number | null; r: Any } = { at: null, r: undefined };
+        const ctx = { ...ctxWith(mediaRunner(fs, { probe: VIDEO_PROBE }), fs), signal };
+        void inspectMediaTool({ media_ref: "vid.mp4", max_frames: 1, ...args }, ctx).then((r) => {
+          seen.at = Date.now() - t0;
+          seen.r = r;
+        });
+        return seen;
+      };
+
+      it.each([
+        ["by default", {}, 15_000],
+        ["at wait_seconds", { wait_seconds: 5 }, 5_000],
+        ["at no more than a minute, however long is asked for", { wait_seconds: 900 }, 60_000],
+        ["at the default when wait_seconds is not a number", { wait_seconds: "soon" }, 15_000],
+        ["at once when wait_seconds is 0", { wait_seconds: 0 }, 0],
+      ])(
+        "answers %s, with the frames it had and the transcript still to come",
+        async (_how, args, ms) => {
+          const seen = timedLook(args);
+          if (ms > 0) {
+            await vi.advanceTimersByTimeAsync(ms - 1);
+            expect(seen.at, "answered before its bound").toBeNull();
+          }
+          await vi.advanceTimersByTimeAsync(1);
+          expect(seen.at).toBeGreaterThanOrEqual(ms);
+          expect(seen.at).toBeLessThanOrEqual(ms + 1);
+          expect(seen.r.ok).toBe(true);
+          expect(seen.r.frames_attached, "the look itself still succeeded").toBe(1);
+          expect(seen.r.transcript).toMatchObject({ status: "in_progress", stage: "transcribing" });
+        },
+      );
+
+      it("is ended by Stop within a second, whatever it was waiting for", async () => {
+        const stop = new AbortController();
+        const seen = timedLook({ wait_seconds: 60 }, stop.signal);
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(seen.at).toBeNull();
+        stop.abort();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(seen.r).toEqual({ ok: false, error: "cancelled" });
+        expect(seen.at!).toBeLessThanOrEqual(1_000);
+      });
+    });
+
+    it("reports a transcription that failed as failed, with its reason, beside the frames that were fine", async () => {
+      const { fs } = setup();
+      vi.mocked(runWhisper).mockRejectedValueOnce(
+        new TranscriptionFailure("model_unavailable", "whisper model download failed: HTTP 503"),
+      );
+      const r = (await inspectMediaTool(
+        { media_ref: "vid.mp4", max_frames: 1 },
+        ctxWith(mediaRunner(fs, { probe: VIDEO_PROBE }), fs),
+      )) as Any;
+      expect(r.ok).toBe(true);
+      expect(r.frames_attached).toBe(1);
+      expect(r.transcript).toMatchObject({
+        status: "failed",
+        reason: "model_unavailable",
+        error: expect.stringMatching(/HTTP 503/),
+      });
+      expect(r.transcript.segments, "a failure is never an empty transcript").toBeUndefined();
     });
   });
 });

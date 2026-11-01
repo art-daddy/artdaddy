@@ -7,6 +7,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CachingMemFs, makeRunner } from "../test/timelineKit";
+import type { CommandRunner } from "./command";
 import type { ClientToolContext } from "./context";
 import {
   INLINE_LOUDNESS_MAX_S,
@@ -337,14 +338,25 @@ describe("lookLoudness", () => {
   });
   const never = new Promise<never>(() => undefined);
 
-  /** A project holding one file; `bg` answers its background measurer, when it has one. */
-  async function project(bg?: () => BackgroundLoudness | null) {
+  /** A project holding one file; `bg` answers its background measurer, when it has one. `ffmpeg`
+   *  runs the measurement: by default at once, with the figures of TONE. */
+  async function project(
+    bg?: () => BackgroundLoudness | null,
+    ffmpegRuns?: () => Promise<{ code: number; stdout: string; stderr: string }>,
+  ) {
     const fs = new CachingMemFs();
     let ffmpeg = 0;
-    const runner = makeRunner((program) => {
-      if (program === "ffmpeg") ffmpeg++;
-      return { code: 0, stdout: "", stderr: TONE };
-    });
+    const runner: CommandRunner = ffmpegRuns
+      ? {
+          run: async (program) => {
+            if (program === "ffmpeg") ffmpeg++;
+            return ffmpegRuns();
+          },
+        }
+      : makeRunner((program) => {
+          if (program === "ffmpeg") ffmpeg++;
+          return { code: 0, stdout: "", stderr: TONE };
+        });
     const ctx: ClientToolContext = { store: new ProjectStoreAccess(DIR, fs), runner };
     await fs.writeTextFile(
       joinPath(DIR, "internals/library.json"),
@@ -429,6 +441,75 @@ describe("lookLoudness", () => {
     expect(got).toBeUndefined();
     await vi.advanceTimersByTimeAsync(1);
     expect(got).toHaveProperty("status", "in_progress");
+  });
+
+  it("waits only as long as the look's own bound, for a measurement already under way", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { ctx, abs, asked } = await project(() => ({ first: false, result: never }));
+    let got: unknown = undefined;
+    void lookLoudness(ctx, abs, null, null, 1800, 3_000).then((r) => (got = r));
+    while (asked.length === 0) await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(2_999);
+    expect(got).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(got).toHaveProperty("status", "in_progress");
+  });
+
+  describe("a measurement the look starts itself", () => {
+    const TONE_OK = { code: 0, stdout: "", stderr: TONE };
+
+    it("is waited for at most the bound, then answered 'in progress', and its figures are there for the next look", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      const { ctx, abs, measured } = await project(undefined, async () => (await gate, TONE_OK));
+      let got: { status?: string; note?: string } | undefined;
+      void lookLoudness(ctx, abs, null, null, 60, 5_000).then((r) => (got = r as typeof got));
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(got).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(got?.status).toBe("in_progress");
+      expect(got?.note).toMatch(/wait_seconds/);
+      release(); // the measurement ends after the look has gone
+      await vi.advanceTimersByTimeAsync(0);
+      expect(await lookLoudness(ctx, abs, null, null, 60, 5_000)).toEqual(TONE_FIGURES);
+      expect(measured(), "the next look read what the first one started").toBe(1);
+    });
+
+    it("is started and not waited for when the bound is 0", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      const { ctx, abs, measured } = await project(undefined, async () => (await gate, TONE_OK));
+      let got: { status?: string } | undefined;
+      void lookLoudness(ctx, abs, null, null, 60, 0).then((r) => (got = r as typeof got));
+      while (measured() === 0) await Promise.resolve(); // it has started...
+      await vi.advanceTimersByTimeAsync(0);
+      expect(got?.status).toBe("in_progress"); // ...and the look has not waited for it
+      release();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(await lookLoudness(ctx, abs, null, null, 60, 0)).toEqual(TONE_FIGURES);
+      expect(measured()).toBe(1);
+    });
+
+    it("answers a failure as the failure it is, not as a measurement still going", async () => {
+      const failing = await project(undefined, async () => ({
+        code: 1,
+        stdout: "",
+        stderr: "boom",
+      }));
+      expect(await lookLoudness(failing.ctx, failing.abs, null, null, 60, 5_000)).toHaveProperty(
+        "error",
+        expect.stringMatching(/could not be measured/),
+      );
+      const throwing = await project(undefined, async () => {
+        throw new Error("spawn failed");
+      });
+      expect(await lookLoudness(throwing.ctx, throwing.abs, null, null, 60, 5_000)).toHaveProperty(
+        "error",
+        expect.stringMatching(/spawn failed/),
+      );
+    });
   });
 
   it("stops waiting the moment the call is stopped", async () => {

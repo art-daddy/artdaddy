@@ -14,13 +14,15 @@ import { jobResult, jobSupervisor, runAsJob, whenJobEnds, type JobView } from ".
 import { shortHash } from "./media";
 import type { ClientToolRegistry } from "./registry";
 import { MediaOfflineError } from "./refState";
+import { failureText, TranscriptionFailure } from "./speechFailure";
+import { recordSpeechRun } from "./speechPace";
 import { joinPath } from "./store";
 import { prioritizeTranscript } from "./transcriptQueue";
+import { whisperCode } from "./whisperLanguages";
 import { whisperRunFacts } from "./whisperFacts";
 import { adoptTurn, lookWhisper } from "./workGate";
 import { reportTranscription } from "../api/appEvents";
 import { beginSessionActivity } from "../observability/crashWatch";
-import { ArtDaddyError } from "../lib/errors";
 import { settledWithin } from "../lib/settledWithin";
 import {
   clearModelDownload,
@@ -497,6 +499,9 @@ async function downloadModel(
       await ctx.store.remove(tmp).catch(() => undefined);
       have = 0;
     }
+    // Shown from the moment the download is asked for, not from the first byte: an origin that
+    // never answers is a download stuck at 0%, and nothing on screen said it had started.
+    reportModelDownload(have, spec.bytes);
     const resp = await fetchImpl(url, {
       signal,
       headers: have > 0 ? { Range: `bytes=${have}-` } : undefined,
@@ -730,7 +735,8 @@ async function extractWav(
     if (conv.code !== 0 || !(await ctx.store.exists(out))) {
       await ctx.store.remove(out).catch(() => undefined);
       if (ctx.signal?.aborted) throw new Error("transcription cancelled");
-      throw new Error(
+      throw new TranscriptionFailure(
+        "audio_extraction_failed",
         `audio extraction failed (code=${conv.code}): ${stderrExcerpt(conv.stderr, 200)}`,
       );
     }
@@ -772,11 +778,13 @@ const WINDOWS_LOAD_FAILURES: ReadonlySet<number> = new Set([
 
 /** The speech engine cannot run on this machine AT ALL. Distinct from "this file failed":
  *  retrying it per asset just repeats the same load failure, so the caller must stop asking. */
-export class SpeechEngineUnavailableError extends ArtDaddyError {
-  readonly code = "speech_engine_unavailable";
-  readonly expected = true;
+export class SpeechEngineUnavailableError extends TranscriptionFailure {
   constructor(readonly exitCode: number) {
-    super("The speech engine could not start on this machine, so audio cannot be transcribed.");
+    super(
+      "engine_unavailable",
+      "The speech engine could not start on this machine, so audio cannot be transcribed.",
+      { expected: true },
+    );
     this.name = "SpeechEngineUnavailableError";
   }
 }
@@ -790,7 +798,7 @@ export function isSpeechEngineUnavailable(e: unknown): boolean {
 /** A failed transcription as the model reads it: our own errors whole, since they lead with what
  *  happened, and the TAIL of anything else, where a subprocess puts its reason. */
 export function transcriptionFailureText(e: unknown): string {
-  return e instanceof ArtDaddyError ? e.message : String(e).slice(-200);
+  return failureText(e);
 }
 
 /** The cache keys a transcription request reads: the full transcript's (which answers every
@@ -902,7 +910,12 @@ export async function runWhisper(
       // INSTALLING the model, before a single second of audio was read, and the download's own
       // message is the only one that says so — replacing it is how a 465 MiB download in
       // progress came out the other side looking like a failed transcription.
-      throw e instanceof Error ? e : new Error(`whisper model '${size}' unavailable: ${String(e)}`);
+      if (e instanceof TranscriptionFailure) throw e;
+      throw new TranscriptionFailure(
+        "model_unavailable",
+        e instanceof Error ? e.message : `whisper model '${size}' unavailable: ${String(e)}`,
+        { cause: e },
+      );
     }
     // A window is transcribed from its OWN audio only. Extracting a 2-hour file to transcribe 30
     // seconds of it was most of the wait (UJ-012); and whisper loads the whole file it is handed, so
@@ -1022,14 +1035,24 @@ async function finishWhisper(
       if (signal?.aborted || run.stderr === "cancelled") throw new Error("transcription cancelled");
       if (run.code !== null && WINDOWS_LOAD_FAILURES.has(run.code))
         throw new SpeechEngineUnavailableError(run.code);
-      throw new Error(`whisper-cli failed (code=${run.code}): ${stderrExcerpt(run.stderr, 200)}`);
+      // whisper-cli prints its usage and exits 0 for a language it does not know, so the cause is
+      // in the output, not in the exit status.
+      const rejected = /error: unknown language '([^'\r\n]*)'/.exec(run.stderr);
+      throw new TranscriptionFailure(
+        rejected ? "language_rejected" : "engine_failed",
+        rejected
+          ? `the speech engine did not accept the language "${rejected[1].slice(0, 40)}"`
+          : `whisper-cli failed (code=${run.code}): ${stderrExcerpt(run.stderr, 200)}`,
+      );
     }
     const data = JSON.parse(await io.readText(json)) as WhisperCppJson;
     shiftWhisperJson(data, meta.shiftMs);
     const parsed = parseWhisperCpp(data);
     // Kept outside the project, so it is kept even when the project closed while whisper ran.
     if (meta.key) await (await io.appCache())?.put(TRANSCRIPTS, meta.key, data);
-    reportTranscription(whisperRunFacts(run.stderr));
+    const facts = whisperRunFacts(run.stderr);
+    reportTranscription(facts);
+    recordSpeechRun(facts.audioSeconds, facts.wallSeconds);
     return parsed;
   } finally {
     await io.remove(json).catch(() => undefined);
@@ -1110,15 +1133,13 @@ export interface EnsuredTranscript {
   existed: boolean;
 }
 
-/** The language as the caller means it: a short code ("es"), or "" to detect it. A regional tag
- *  names the same language to whisper ("en-US", "pt_BR" -> "en", "pt"); whisper refuses the tag
- *  itself. 'auto' is the no-language path. */
+/** The language as the caller means it, as the engine takes it: its own short code ("es"), or ""
+ *  to detect it. A regional tag names the same language to whisper ("en-US", "pt_BR" -> "en",
+ *  "pt"), and so do the other names a caller uses ("jpn", "fil", "mandarin": whisperLanguages.ts).
+ *  A language the engine does not know is detected too: whisper-cli answers an unknown code with
+ *  its usage text and no transcript, so it is never handed one. 'auto' is the no-language path. */
 export function normLanguage(language: unknown): string {
-  const s = String(language ?? "")
-    .trim()
-    .toLowerCase()
-    .split(/[-_]/)[0];
-  return !s || s === "auto" ? "" : s;
+  return whisperCode(language);
 }
 
 /** What whisper is told AND what keys its cache: a language code, or "auto". whisper-cli's own
