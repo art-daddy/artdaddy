@@ -29,6 +29,11 @@ const served: Step = () =>
     status: 200,
     headers: { "Content-Type": "text/event-stream" },
   });
+const servedWithWord: Step = () =>
+  new Response(enc.encode(event("delta", { kind: "text", text: "hi" }) + event("result", DTO)), {
+    status: 200,
+    headers: { "Content-Type": "text/event-stream" },
+  });
 const drop: Step = () => {
   throw new TypeError("Failed to fetch");
 };
@@ -62,16 +67,25 @@ function script(...steps: Step[]) {
 function run(signal?: AbortSignal) {
   const waits: Array<RoundWait | null> = [];
   const deltas: RoundDelta[] = [];
+  const order: string[] = [];
+  const sizes: number[] = [];
   const settled = inferRoundStreaming(
     body,
-    (d) => deltas.push(d),
+    (d) => {
+      order.push("delta");
+      deltas.push(d);
+    },
     signal,
-    (w) => waits.push(w),
+    {
+      wait: (w) => waits.push(w),
+      sent: (bytes) => sizes.push(bytes),
+      head: () => order.push("head"),
+    },
   ).then(
     (value) => ({ value }) as const,
     (error: unknown) => ({ error }) as const,
   );
-  return { waits, deltas, settled };
+  return { waits, deltas, order, sizes, settled };
 }
 
 beforeEach(() => {
@@ -169,6 +183,49 @@ describe("once the answer has started", () => {
       error: { message: expect.stringMatching(/without a result/) },
     });
     expect(fn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("what the round tells the turn's timing", () => {
+  it("reports the request's size in BYTES, as sent, once per round (not once per attempt)", async () => {
+    const fn = script(drop, served);
+    const { sizes, settled } = run();
+    await vi.advanceTimersByTimeAsync(RECONNECT_DELAY_MS);
+    await settled;
+    const sentBody = (fn.mock.calls[0] as unknown as [string, RequestInit])[1].body as string;
+    expect(sizes).toEqual([new TextEncoder().encode(sentBody).length]);
+  });
+
+  it("counts a multi-byte message by its bytes, not its characters", async () => {
+    const fn = script(served);
+    const wide: InferBody = { round_input: { user_text: "héllo wörld 🎬 日本語" } };
+    const sizes: number[] = [];
+    await inferRoundStreaming(wide, () => undefined, undefined, { sent: (b) => sizes.push(b) });
+    const sentBody = (fn.mock.calls[0] as unknown as [string, RequestInit])[1].body as string;
+    expect(sizes[0]).toBe(new TextEncoder().encode(sentBody).length);
+    expect(sizes[0]).toBeGreaterThan(sentBody.length);
+  });
+
+  it("hears the server's answer begin before the first word, and not at all when none came", async () => {
+    script(servedWithWord);
+    const answered = run();
+    await vi.advanceTimersByTimeAsync(0);
+    await answered.settled;
+    expect(answered.order).toEqual(["head", "delta"]);
+
+    script(drop);
+    const never = run();
+    await vi.advanceTimersByTimeAsync(60_000);
+    await never.settled;
+    expect(never.order).toEqual([]);
+  });
+
+  it("hears it for a round the server then refused: the answer began, and said no", async () => {
+    script(status(500));
+    const refused = run();
+    await vi.advanceTimersByTimeAsync(60_000);
+    await refused.settled;
+    expect(refused.order).toEqual(["head"]);
   });
 });
 

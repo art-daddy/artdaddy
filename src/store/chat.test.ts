@@ -23,7 +23,14 @@ import {
 import { inferRoundStreaming } from "../agent/api";
 import { TIMELINE_CHANGED_NOTE } from "../agent/compose";
 import { ABORT_GRACE_MS, READ_BOUND_MS, timedOutResult } from "../agent/toolBound";
-import { agentEventContext, createToolTrace, setAgentContext } from "../api/agentEvents";
+import {
+  __bufferedAgentEvents,
+  __resetAgentEvents,
+  agentEventContext,
+  createToolTrace,
+  setAgentContext,
+} from "../api/agentEvents";
+import { useAuth } from "./auth";
 import { clearRecentFailures, noteFailure } from "../observability/recentFailures";
 import { setOpenDocumentResolver } from "../project/openDocuments";
 import { emptyTimeline, type Timeline } from "../timeline/model";
@@ -1996,13 +2003,13 @@ describe("useChat tells the status line what the turn is waiting on", () => {
         _body: Any,
         _onDelta: unknown,
         _signal: unknown,
-        onWait: (wait: string | null) => void,
+        observer: { wait: (wait: string | null) => void },
       ) => {
-        onWait("reconnecting");
+        observer.wait("reconnecting");
         seen.push(live().round?.note);
-        onWait("busy");
+        observer.wait("busy");
         seen.push(live().round?.note);
-        onWait(null);
+        observer.wait(null);
         seen.push(live().round?.note);
         return ANSWER;
       },
@@ -2017,8 +2024,13 @@ describe("useChat tells the status line what the turn is waiting on", () => {
     let wait!: (note: string | null) => void;
     let finishFirst!: (v: unknown) => void;
     (inferRoundStreaming as Any).mockImplementationOnce(
-      (_body: Any, _onDelta: unknown, _signal: unknown, onWait: (note: string | null) => void) => {
-        wait = onWait;
+      (
+        _body: Any,
+        _onDelta: unknown,
+        _signal: unknown,
+        observer: { wait: (note: string | null) => void },
+      ) => {
+        wait = observer.wait;
         return new Promise((resolve) => (finishFirst = resolve));
       },
     );
@@ -2110,4 +2122,270 @@ describe("useChat tells the status line what the turn is waiting on", () => {
       expect(nothing()).toEqual(NOTHING);
     },
   );
+});
+
+// Each turn reports when it started and ended, how, where its time went, and the person's answers. The
+// parts of a turn's time add up to its wall time; nothing the person typed is in any event.
+describe("useChat records each turn (T-11, T-12)", () => {
+  const events = () => __bufferedAgentEvents();
+  const kinds = () => events().map((e) => e.kind);
+  const ofKind = (kind: string) => events().filter((e) => e.kind === kind);
+  const ANSWER = {
+    kind: "text",
+    final_text: "ok",
+    usage: {},
+    provider_snapshot: {},
+    history_mode: "client",
+  };
+  const T0 = 20_000_000;
+  const at = (ms: number) => vi.setSystemTime(T0 + ms);
+
+  beforeEach(() => {
+    __resetAgentEvents();
+    resetLiveWait();
+    resetHistoryModeSupport();
+    useAuth.setState({ status: "unlocked", profile: null, hasStoredSession: true });
+    vi.useFakeTimers({ toFake: ["Date"] });
+    at(0);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    __resetAgentEvents();
+    resetLiveWait();
+  });
+
+  async function startTurn(text = "hi", opts?: { system?: boolean }): Promise<void> {
+    setDesktop("p1");
+    useChat.setState({
+      projectId: "p1",
+      transcriptId: "tx1",
+      model: "gpt-5.6-luna",
+      effort: "high",
+    });
+    await useChat.getState().send(text, [], opts);
+  }
+
+  it("a turn whose waits were injected (3 s admission, 5 s on its way, 10 s thinking, 2 s writing, a 20 s tool) is stored with parts that add up to its wall time", async () => {
+    await startTurn();
+    (inferRoundStreaming as Any).mockImplementationOnce(
+      async (
+        _body: Any,
+        onDelta: (d: Any) => void,
+        _signal: unknown,
+        observer: { wait: (w: string | null) => void; sent: (n: number) => void; head: () => void },
+      ) => {
+        observer.sent(1_900_000);
+        observer.wait("busy");
+        at(3_000);
+        observer.wait(null);
+        at(8_000);
+        observer.head();
+        at(18_000);
+        onDelta({ kind: "text", text: "hi" });
+        at(20_000);
+        return ANSWER;
+      },
+    );
+    await lastDeps.infer({ user_text: "hi" }, []);
+    emit("tool_call", { call_id: "c1", name: "video_ask", args: {} });
+    at(40_000);
+    emit("tool_result", { call_id: "c1", name: "video_ask", ok: true });
+    emit("turn_done", snap());
+
+    expect(kinds()).toEqual(["turn_start", "turn_end"]);
+    const [start, end] = events();
+    expect(start).toMatchObject({
+      turn_id: useChat.getState().turns.at(-1)?.id,
+      trigger: "user",
+      mode: "default",
+      effort: "high",
+      attachments: 0,
+    });
+    expect(end).toMatchObject({
+      turn_id: start.turn_id,
+      outcome: "done",
+      wall_ms: 40_000,
+      wait_ms: 3_000,
+      request_ms: 5_000,
+      think_ms: 10_000,
+      stream_ms: 2_000,
+      tool_ms: 20_000,
+      prep_ms: 0,
+      approval_ms: 0,
+      other_ms: 0,
+      rounds: 1,
+      tools: 1,
+      busy_waits: 1,
+      reconnects: 0,
+      frames: 1,
+      bytes_up: 1_900_000,
+    });
+    const parts = [
+      "prep_ms",
+      "request_ms",
+      "think_ms",
+      "stream_ms",
+      "tool_ms",
+      "wait_ms",
+      "approval_ms",
+      "other_ms",
+    ] as const;
+    expect(parts.reduce((sum, key) => sum + (end[key] ?? 0), 0)).toBe(end.wall_ms);
+  });
+
+  it("every event of a turn names the same turn", async () => {
+    await startTurn();
+    emit("awaiting_approval", { calls: [{ call_id: "c1", name: "export", arguments: {} }] });
+    emit("turn_paused", snap());
+    await useChat.getState().approve("c1");
+    emit("turn_done", snap());
+    expect(kinds()).toEqual(["turn_start", "approval_requested", "approval_decided", "turn_end"]);
+    const ids = new Set(events().map((e) => e.turn_id));
+    expect(ids.size).toBe(1);
+    expect([...ids][0]).toBe(useChat.getState().turns.at(-1)?.id);
+  });
+
+  it("nothing the person typed is in any event", async () => {
+    await startTurn("my secret brief about the wedding");
+    emit("awaiting_approval", {
+      calls: [{ call_id: "c1", name: "export", arguments: { path: "C:/Users/me/secret.mp4" } }],
+    });
+    emit("turn_paused", snap());
+    await useChat.getState().approve("c1");
+    emit("turn_done", snap());
+    const text = JSON.stringify(events());
+    expect(text).not.toMatch(/secret|wedding|brief|C:\/Users/);
+  });
+
+  it("a Stop ends the turn as stopped, once, however many paths report it", async () => {
+    await startTurn();
+    at(7_000);
+    await useChat.getState().stop();
+    await useChat.getState().stop();
+    emit("turn_done", snap()); // a late event from the stopped runner
+    const ends = ofKind("turn_end");
+    expect(ends).toHaveLength(1);
+    expect(ends[0]).toMatchObject({ outcome: "stopped", wall_ms: 7_000 });
+  });
+
+  it("an error ends the turn as error with the server's code", async () => {
+    await startTurn();
+    emit("error", { error: "boom", error_code: "provider_timeout" });
+    expect(ofKind("turn_end")[0]).toMatchObject({ outcome: "error", code: "provider_timeout" });
+  });
+
+  it("a runner that throws ends the turn as error with its own code", async () => {
+    runnerStart.mockRejectedValueOnce(new Error("kaboom"));
+    await startTurn();
+    const [end] = ofKind("turn_end");
+    expect(end).toMatchObject({ outcome: "error" });
+    expect(typeof end.code).toBe("string");
+  });
+
+  it("a tool host that cannot start ends the turn as error host_unavailable, with its start recorded", async () => {
+    vi.mocked(openToolHost).mockImplementationOnce(
+      () =>
+        ({
+          projectId: "p1",
+          ready: Promise.reject(new Error("no fs")),
+          has: () => false,
+          run: vi.fn(),
+          store: () => null,
+        }) as never,
+    );
+    await startTurn();
+    expect(kinds()).toEqual(["turn_start", "turn_end"]);
+    expect(ofKind("turn_end")[0]).toMatchObject({ outcome: "error", code: "host_unavailable" });
+  });
+
+  it("a wake from a finished background job is a system turn", async () => {
+    await startTurn("a job finished", { system: true });
+    expect(ofKind("turn_start")[0]).toMatchObject({ trigger: "system" });
+  });
+
+  it("the person's answers are recorded one by one with how long they took, and their wait is the turn's approval time", async () => {
+    await startTurn();
+    emit("awaiting_approval", {
+      calls: [
+        { call_id: "c1", name: "export", arguments: {} },
+        { call_id: "c2", name: "add_clips", arguments: {} },
+      ],
+    });
+    emit("turn_paused", snap());
+    at(12_000);
+    await useChat.getState().approve("c1");
+    at(20_000);
+    await useChat.getState().deny("no thanks", "c2");
+    emit("turn_done", snap());
+
+    expect(ofKind("approval_requested")[0]).toMatchObject({ name: "export,add_clips", tools: 2 });
+    expect(ofKind("approval_decided").map((e) => [e.call_id, e.decision, e.approval_ms])).toEqual([
+      ["c1", "approved", 12_000],
+      ["c2", "declined", 20_000],
+    ]);
+    expect(ofKind("turn_end")[0]).toMatchObject({
+      outcome: "done",
+      approval_ms: 20_000,
+      approvals: 2,
+      wall_ms: 20_000,
+    });
+  });
+
+  it("a Stop while the person has not answered answers for them: stopped", async () => {
+    await startTurn();
+    emit("awaiting_approval", { calls: [{ call_id: "c1", name: "export", arguments: {} }] });
+    emit("turn_paused", snap());
+    at(9_000);
+    await useChat.getState().stop();
+    expect(ofKind("approval_decided").map((e) => [e.call_id, e.decision, e.approval_ms])).toEqual([
+      ["c1", "stopped", 9_000],
+    ]);
+    expect(ofKind("turn_end")[0]).toMatchObject({ outcome: "stopped", approval_ms: 9_000 });
+  });
+
+  it("a new message while the person has not answered leaves the turn behind: abandoned, and the question with it", async () => {
+    await startTurn("first");
+    emit("awaiting_approval", { calls: [{ call_id: "c1", name: "export", arguments: {} }] });
+    emit("turn_paused", snap());
+    at(30_000);
+    await useChat.getState().send("second");
+    expect(ofKind("approval_decided")[0]).toMatchObject({
+      decision: "abandoned",
+      approval_ms: 30_000,
+    });
+    expect(ofKind("turn_end")[0]).toMatchObject({ outcome: "abandoned", approval_ms: 30_000 });
+    // The new turn starts its own record.
+    expect(ofKind("turn_start")).toHaveLength(2);
+    expect(ofKind("turn_start")[1].turn_id).not.toBe(ofKind("turn_start")[0].turn_id);
+  });
+
+  it("switching project leaves the turn behind the same way, once", async () => {
+    await startTurn();
+    loadSess.mockResolvedValue({ requests: [], providerSnapshot: null, session: snap() });
+    await useChat.getState().load("p2");
+    expect(ofKind("turn_end")).toHaveLength(1);
+    expect(ofKind("turn_end")[0]).toMatchObject({ outcome: "abandoned" });
+  });
+
+  it("a turn paused at its cap is waiting for the person too, until they press Continue", async () => {
+    await startTurn();
+    emit("turn_paused", snap({ can_continue: true }));
+    at(15_000);
+    await useChat.getState().continueRun();
+    at(16_000);
+    emit("turn_done", snap());
+    expect(ofKind("approval_requested")).toHaveLength(0);
+    expect(ofKind("turn_end")[0]).toMatchObject({
+      approval_ms: 15_000,
+      approvals: 0,
+      wall_ms: 16_000,
+    });
+  });
+
+  it("is silent when signed out: no event of the turn is kept", async () => {
+    useAuth.setState({ status: "locked", profile: null, hasStoredSession: false });
+    await startTurn();
+    emit("turn_done", snap());
+    expect(events()).toEqual([]);
+  });
 });

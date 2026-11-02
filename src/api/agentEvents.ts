@@ -14,12 +14,59 @@
 import { apiBase } from "./config";
 import { reportExport } from "./exportEvents";
 import { authedFetch, hasSession } from "./auth";
+import type { TurnSummary } from "../agent/turnTiming";
+import { legalText } from "../observability/recentFailures";
 import { hostInfo } from "../platform/host";
 import { useAuth } from "../store/auth";
 
-export type AgentEventKind = "tool_call" | "tool_denied" | "agent_output";
+// The words and bounds of the turn and approval events. They are written down again on the server
+// (analytics.py), and tests/unit/test_turn_telemetry.py there compares the two from THIS file, so a word added
+// to one side and not the other fails a test instead of dropping rows.
+export const AGENT_EVENT_KINDS = [
+  "tool_call",
+  "tool_denied",
+  "agent_output",
+  "turn_start",
+  "turn_end",
+  "approval_requested",
+  "approval_decided",
+] as const;
+export const TURN_OUTCOMES = ["done", "stopped", "error", "abandoned"] as const;
+export const TURN_TRIGGERS = ["user", "system", "retry"] as const;
+export const APPROVAL_DECISIONS = ["approved", "declined", "stopped", "abandoned"] as const;
+export const TURN_MS_FIELDS = [
+  "wall_ms",
+  "prep_ms",
+  "request_ms",
+  "think_ms",
+  "stream_ms",
+  "tool_ms",
+  "wait_ms",
+  "approval_ms",
+  "other_ms",
+] as const;
+export const TURN_COUNT_FIELDS = [
+  "rounds",
+  "tools",
+  "approvals",
+  "reconnects",
+  "busy_waits",
+  "frames",
+] as const;
+/** The most the server accepts: a number past these refuses the whole flush, so every number is clamped to them
+ *  here first. A person may leave an approval open for days, hence a week for times. */
+export const MAX_TURN_MS = 604_800_000;
+export const MAX_TURN_COUNT = 100_000;
+export const MAX_BYTES_UP = 10_000_000_000;
 
-export interface AgentEvent {
+export type AgentEventKind = (typeof AGENT_EVENT_KINDS)[number];
+export type TurnOutcome = (typeof TURN_OUTCOMES)[number];
+export type TurnTrigger = (typeof TURN_TRIGGERS)[number];
+export type ApprovalDecision = (typeof APPROVAL_DECISIONS)[number];
+
+export interface AgentEvent extends Partial<
+  Record<(typeof TURN_MS_FIELDS)[number] | (typeof TURN_COUNT_FIELDS)[number], number>
+> {
   kind: AgentEventKind;
   at: number;
   name?: string;
@@ -30,6 +77,16 @@ export interface AgentEvent {
   result?: string;
   error?: string;
   text?: string;
+  /** Turn and approval events: identifiers, words and numbers only, never what was asked or answered. */
+  turn_id?: string;
+  trigger?: TurnTrigger;
+  mode?: string;
+  effort?: string;
+  outcome?: TurnOutcome;
+  code?: string;
+  decision?: ApprovalDecision;
+  attachments?: number;
+  bytes_up?: number;
 }
 
 /** Matches AgentEventItem on the server. Truncating HERE as well keeps a pathological
@@ -270,6 +327,110 @@ export function recordAgentOutput(
 ): void {
   if (!text) return;
   push({ kind: "agent_output", at: Date.now() / 1000, text: text.slice(0, MAX_TEXT) }, labels);
+}
+
+const clampMs = (n: number): number =>
+  Number.isFinite(n) ? Math.max(0, Math.min(MAX_TURN_MS, Math.round(n))) : 0;
+const clampCount = (n: number): number =>
+  Number.isFinite(n) ? Math.max(0, Math.min(MAX_TURN_COUNT, Math.round(n))) : 0;
+
+/** A turn began: who started it and how it is set up. Nothing of what was typed. */
+export function recordTurnStart(
+  ev: {
+    turn_id: string;
+    trigger: TurnTrigger;
+    mode: string;
+    effort: string;
+    attachments: number;
+  },
+  labels: AgentEventContext = agentEventContext(),
+): void {
+  push(
+    {
+      kind: "turn_start",
+      at: Date.now() / 1000,
+      turn_id: legalText(ev.turn_id, 64),
+      trigger: ev.trigger,
+      mode: legalText(ev.mode, 20),
+      effort: legalText(ev.effort, 20),
+      attachments: clampCount(ev.attachments),
+    },
+    labels,
+  );
+}
+
+/** A turn ended: how, and where its wall time went (the parts add up to `wall_ms`). */
+export function recordTurnEnd(
+  ev: { turn_id: string; outcome: TurnOutcome; code?: string; summary: TurnSummary },
+  labels: AgentEventContext = agentEventContext(),
+): void {
+  const s = ev.summary;
+  const times = Object.fromEntries(TURN_MS_FIELDS.map((key) => [key, clampMs(s[key])]));
+  const counts = Object.fromEntries(TURN_COUNT_FIELDS.map((key) => [key, clampCount(s[key])]));
+  push(
+    {
+      kind: "turn_end",
+      at: Date.now() / 1000,
+      turn_id: legalText(ev.turn_id, 64),
+      outcome: ev.outcome,
+      code: legalText(ev.code, 40),
+      ...times,
+      ...counts,
+      bytes_up: Number.isFinite(s.bytes_up)
+        ? Math.max(0, Math.min(MAX_BYTES_UP, Math.round(s.bytes_up)))
+        : 0,
+    },
+    labels,
+  );
+}
+
+const toolList = (names: readonly string[]): string =>
+  names
+    .map((name) => legalText(name, 40))
+    .filter(Boolean)
+    .join(",")
+    .slice(0, 100);
+
+/** The turn stopped to ask the person about these tools (their names only, never their arguments). */
+export function recordApprovalRequested(
+  ev: { turn_id: string; names: readonly string[] },
+  labels: AgentEventContext = agentEventContext(),
+): void {
+  push(
+    {
+      kind: "approval_requested",
+      at: Date.now() / 1000,
+      turn_id: legalText(ev.turn_id, 64),
+      name: toolList(ev.names),
+      tools: ev.names.length,
+    },
+    labels,
+  );
+}
+
+/** The person's answer to one tool call, and how long they took. */
+export function recordApprovalDecided(
+  ev: {
+    turn_id: string;
+    call_id: string;
+    name: string;
+    decision: ApprovalDecision;
+    waited_ms: number;
+  },
+  labels: AgentEventContext = agentEventContext(),
+): void {
+  push(
+    {
+      kind: "approval_decided",
+      at: Date.now() / 1000,
+      turn_id: legalText(ev.turn_id, 64),
+      call_id: legalText(ev.call_id, 100),
+      name: toolList([ev.name]),
+      decision: ev.decision,
+      approval_ms: clampMs(ev.waited_ms),
+    },
+    labels,
+  );
 }
 
 /** Send whatever is buffered. Never throws and never blocks a turn. */

@@ -17,7 +17,8 @@ import { describeTurnFailure } from "../agent/failureCopy";
 import { noteTurnError, requestIdOf, turnErrorCode } from "../agent/turnError";
 import { buildReportContext } from "../observability/reportContext";
 import { submitFeedback, type FeedbackKind } from "../api/feedback";
-import { agentEventContext, setAgentContext } from "../api/agentEvents";
+import { agentEventContext, setAgentContext, type TurnOutcome } from "../api/agentEvents";
+import { TurnTelemetry } from "./turnTelemetry";
 import type { SSEMessage } from "../api/sse";
 import type { ApprovalMode, Attachment, PendingApproval, SessionState } from "../api/types";
 import { useEditor } from "./editor";
@@ -196,6 +197,9 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
     stopped: boolean;
     /** Actions of this turn still running (the start, each approval answer, Continue). */
     inflight: number;
+    /** What is reported about this turn: its start and end, where its time went, the person's answers. A
+     *  second go at a failed turn (Try again) gets a new one. */
+    telemetry: TurnTelemetry;
   }
   let currentRunner: ClientTurnRunner | null = null;
   let currentExec: TurnExecution | null = null;
@@ -211,14 +215,26 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
   // its stale session. A bare projectId check can't tell two same-id loads apart (R6-3).
   let loadSeq = 0;
 
+  /** The labels every event of a turn carries (taken when it begins: a sign-out mid-turn drops them). */
+  function turnLabels(projectId: string) {
+    return {
+      ...agentEventContext(),
+      surface: "app",
+      project_id: projectId,
+      model: get().model,
+      transcript_id: get().transcriptId ?? "",
+    };
+  }
+
   /** Begin a fresh execution for a NEW turn (a new user message). */
-  function newExec(host: ToolHost): TurnExecution {
+  function newExec(host: ToolHost, telemetry: TurnTelemetry): TurnExecution {
     currentExec = {
       token: ++execSeq,
       controller: new AbortController(),
       host,
       stopped: false,
       inflight: 0,
+      telemetry,
     };
     set({ execToken: currentExec.token }); // surface the live execution for the origin fence
     return currentExec;
@@ -235,6 +251,8 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
    *  now see `exec !== currentExec` and halt. */
   function supersede(): void {
     if (currentExec) {
+      // A turn left behind (a new message, another project, the window closing) ends here, if it has not already.
+      currentExec.telemetry.end("abandoned");
       currentExec.stopped = true;
       currentExec.controller.abort();
     }
@@ -306,16 +324,34 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
       : new Promise((resolve) => opsIdleWaiters.push(resolve));
   }
 
-  /** What the running turn is waiting on, for the status line: a tool call is running from its
-   *  `tool_call` to its `tool_result`, and a turn that stops to ask the person is waiting on them.
+  /** What the running turn is waiting on, for the status line and for the turn's timing: a tool call is running
+   *  from its `tool_call` to its `tool_result`, and a turn that stops to ask the person is waiting on them.
    *  Model rounds are tracked where they are made; a turn's end clears it all (finishTurn). */
   function trackWait(event: string, data: Record<string, unknown> | undefined): void {
     const wait = useLiveWait.getState();
-    if (event === "tool_call")
+    const telemetry = currentExec?.telemetry;
+    if (event === "tool_call") {
       wait.callStarted(String(data?.call_id ?? ""), String(data?.name ?? ""));
-    else if (event === "tool_result") wait.callEnded(String(data?.call_id ?? ""));
-    else if (event === "awaiting_approval") wait.approvalAsked();
-    else if (event === "turn_paused") wait.pausedForInput();
+      telemetry?.timer.toolStarted(String(data?.call_id ?? ""));
+    } else if (event === "tool_result") {
+      wait.callEnded(String(data?.call_id ?? ""));
+      telemetry?.timer.toolEnded(String(data?.call_id ?? ""));
+    } else if (event === "awaiting_approval") {
+      wait.approvalAsked();
+      const calls = (data as { calls?: PendingApproval[] } | undefined)?.calls ?? [
+        data as unknown as PendingApproval,
+      ];
+      telemetry?.approvalRequested(
+        calls.map((call) => ({
+          call_id: String(call?.call_id ?? ""),
+          name: String(call?.name ?? ""),
+        })),
+      );
+    } else if (event === "turn_paused") {
+      wait.pausedForInput();
+      if ((data as { can_continue?: unknown } | undefined)?.can_continue)
+        telemetry?.pausedForContinue();
+    }
   }
 
   function apply(msg: SSEMessage) {
@@ -432,37 +468,45 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
         const providerSnapshot =
           ((data as Record<string, unknown>)?.provider_snapshot as
             Record<string, unknown> | undefined) ?? get().providerSnapshot;
-        finishTurn((s) => ({
-          session: data as SessionState,
-          pending: null,
-          streaming: false,
-          canContinue: false,
-          providerSnapshot,
-          turns: withLast(s.turns, (t) => ({ ...t, status: "done" })),
-        }));
+        finishTurn(
+          (s) => ({
+            session: data as SessionState,
+            pending: null,
+            streaming: false,
+            canContinue: false,
+            providerSnapshot,
+            turns: withLast(s.turns, (t) => ({ ...t, status: "done" })),
+          }),
+          { outcome: "done" },
+        );
         // The agent edits timeline.json (server- or client-side); reload the
         // editor so its edits/renders show without a manual refresh.
         void useEditor.getState().reload();
         break;
       }
-      case "error":
+      case "error": {
         // The turn ended in an error the person is shown. A typed round carries its code and the failed call's id.
+        const errorCode = typeof data?.error_code === "string" ? data.error_code : "unknown";
         noteTurnError(
-          typeof data?.error_code === "string" ? data.error_code : "unknown",
+          errorCode,
           typeof data?.request_id === "string" ? data.request_id : undefined,
         );
-        finishTurn((s) => ({
-          error: String(data?.error ?? "error"),
-          // An error round is worth sending again: the provider may have recovered, and a picture it
-          // refused is already marked, so the round no longer carries it.
-          canRetry: Boolean(currentRunner?.canRetry),
-          turns: withLast(s.turns, (t) => ({
-            ...t,
-            status: "error",
-            parts: [...t.parts, { kind: "error", ...data }],
-          })),
-        }));
+        finishTurn(
+          (s) => ({
+            error: String(data?.error ?? "error"),
+            // An error round is worth sending again: the provider may have recovered, and a picture it
+            // refused is already marked, so the round no longer carries it.
+            canRetry: Boolean(currentRunner?.canRetry),
+            turns: withLast(s.turns, (t) => ({
+              ...t,
+              status: "error",
+              parts: [...t.parts, { kind: "error", ...data }],
+            })),
+          }),
+          { outcome: "error", code: errorCode },
+        );
         break;
+      }
       default:
         break; // turn_start — no-op
     }
@@ -518,10 +562,12 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
     // turn's round.
     const inLiveRound = async <T>(body: () => Promise<T>): Promise<T> => {
       if (!superseded()) useLiveWait.getState().roundStarted();
+      exec.telemetry.timer.roundStarted();
       try {
         return await body();
       } finally {
         if (!superseded()) useLiveWait.getState().roundEnded();
+        exec.telemetry.timer.roundEnded();
       }
     };
     return {
@@ -554,6 +600,12 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
           const history = support !== false;
           const historyFrames = history ? await historyAttachments(turns, exec.host.store()) : [];
           if (!superseded()) useLiveWait.getState().roundSent();
+          // The pictures this request carries: this round's own (until the server has said it rebuilds the model's
+          // input from the transcript) and the history's.
+          exec.telemetry.timer.roundSent(
+            (support === true ? 0 : (attachments?.length ?? 0)) +
+              (history ? historyFrames.length : 0),
+          );
           const dto = await inferRoundStreaming(
             {
               round_input: roundInput,
@@ -574,14 +626,20 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
             // Deltas are live presentation only. They go through the SAME supersede
             // guard as every other event, so a stale turn cannot paint into the new one.
             (d) => {
+              exec.telemetry.timer.roundDelta();
               if (superseded()) return;
               useLiveWait.getState().roundWriting();
               apply({ event: `delta_${d.kind}`, data: { text: d.text } });
             },
             exec.controller.signal,
-            // The request waiting rather than the model: reconnecting, or the last request still finishing.
-            (wait) => {
-              if (!superseded()) useLiveWait.getState().roundNoted(wait);
+            {
+              // The request waiting rather than the model: reconnecting, or the last request still finishing.
+              wait: (wait) => {
+                if (!superseded()) useLiveWait.getState().roundNoted(wait);
+                exec.telemetry.timer.noteWait(wait);
+              },
+              sent: (bytes) => exec.telemetry.timer.bytesSent(bytes),
+              head: () => exec.telemetry.timer.roundHead(),
             },
           );
           // Learn the mode from a real answer only: an error round may come from a path that
@@ -668,32 +726,39 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
       const aborted =
         exec.controller.signal.aborted || (e instanceof Error && e.name === "AbortError");
       if (aborted) {
-        finishTurn((s) => ({
-          streaming: false,
-          pending: null,
-          canContinue: false,
-          turns: withLast(s.turns, (t) =>
-            t.status === "streaming" || t.status === "awaiting" ? { ...t, status: "done" } : t,
-          ),
-        }));
+        finishTurn(
+          (s) => ({
+            streaming: false,
+            pending: null,
+            canContinue: false,
+            turns: withLast(s.turns, (t) =>
+              t.status === "streaming" || t.status === "awaiting" ? { ...t, status: "done" } : t,
+            ),
+          }),
+          { outcome: "stopped" },
+        );
       } else {
         if (!isExpected(e)) captureError(e, { phase: "turn" });
-        noteTurnError(turnErrorCode(e), requestIdOf(e));
+        const code = turnErrorCode(e);
+        noteTurnError(code, requestIdOf(e));
         const failure = describeTurnFailure(e);
         const message = failure.message;
-        finishTurn((s) => ({
-          streaming: false,
-          error: message,
-          canRetry: failure.retryable && Boolean(currentRunner?.canRetry),
-          turns: withLast(s.turns, (t) => ({
-            ...t,
-            status: "error",
-            parts: [
-              ...t.parts,
-              { kind: "error", error: message, ...(isExpected(e) ? { code: e.code } : {}) },
-            ],
-          })),
-        }));
+        finishTurn(
+          (s) => ({
+            streaming: false,
+            error: message,
+            canRetry: failure.retryable && Boolean(currentRunner?.canRetry),
+            turns: withLast(s.turns, (t) => ({
+              ...t,
+              status: "error",
+              parts: [
+                ...t.parts,
+                { kind: "error", error: message, ...(isExpected(e) ? { code: e.code } : {}) },
+              ],
+            })),
+          }),
+          { outcome: "error", code },
+        );
       }
       return;
     } finally {
@@ -744,8 +809,14 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
    *  no transcript entry and no checkpoint to revert — which is exactly what a
    *  Stop, then a project switch, did: `load()` clears `turns` and refills from
    *  disk, so the unpersisted turn is gone while its 25 clips remain. */
-  function finishTurn(updater: (s: ChatState) => Partial<ChatState>): void {
+  function finishTurn(
+    updater: (s: ChatState) => Partial<ChatState>,
+    end?: { outcome: TurnOutcome; code?: string },
+  ): void {
     useLiveWait.getState().clear();
+    // The turn's own record of how it ended; said once however many paths report it (Stop does, and so does the
+    // action it aborts).
+    if (end) currentExec?.telemetry.end(end.outcome, end.code);
     // Only a turn that was actually in flight is ending; a stray Stop after one
     // finished must not re-stamp its redo target with the user's later edits.
     const last = get().turns.at(-1);
@@ -917,7 +988,15 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
       // switch or a new message during the wait supersedes IT (retiring exec). If the
       // exec were created AFTER the await, a switch mid-warm-up would go unnoticed and
       // the turn would run against the abandoned project's still-bound host.
-      const exec = newExec(host);
+      const telemetry = new TurnTelemetry(turn.id, turnLabels(projectId));
+      const exec = newExec(host, telemetry);
+      // The turn's clock starts here, at the person's Send, so the warm-up below is part of what they waited.
+      telemetry.start({
+        trigger: opts?.system ? "system" : "user",
+        mode: get().mode,
+        effort: get().effort,
+        attachments: attachments.length,
+      });
       try {
         await host.ready;
       } catch (e) {
@@ -929,15 +1008,18 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
           captureError(e, { phase: "host" });
           noteTurnError("host_unavailable");
           const msg = describeTurnFailure(e).message;
-          finishTurn((s) => ({
-            streaming: false,
-            error: msg,
-            turns: withLast(s.turns, (t) =>
-              t.status === "streaming"
-                ? { ...t, status: "error", parts: [...t.parts, { kind: "error", error: msg }] }
-                : t,
-            ),
-          }));
+          finishTurn(
+            (s) => ({
+              streaming: false,
+              error: msg,
+              turns: withLast(s.turns, (t) =>
+                t.status === "streaming"
+                  ? { ...t, status: "error", parts: [...t.parts, { kind: "error", error: msg }] }
+                  : t,
+              ),
+            }),
+            { outcome: "error", code: "host_unavailable" },
+          );
         }
         return;
       }
@@ -984,6 +1066,7 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
       const id = callId ?? pending[0].call_id;
       // Only THIS call leaves the bar; the rest stay up until they are answered too.
       const rest = pending.filter((p) => p.call_id !== id);
+      currentExec.telemetry.approvalDecided(id, "approved");
       set((s) => ({
         pending: rest,
         turns: rest.length ? s.turns : withLast(s.turns, (t) => ({ ...t, status: "streaming" })),
@@ -997,6 +1080,7 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
       if (!projectId || !pending?.length || closing || !currentRunner || !currentExec) return;
       const id = callId ?? pending[0].call_id;
       const rest = pending.filter((p) => p.call_id !== id);
+      currentExec.telemetry.approvalDecided(id, "declined");
       set((s) => ({
         pending: rest,
         turns: rest.length ? s.turns : withLast(s.turns, (t) => ({ ...t, status: "streaming" })),
@@ -1117,21 +1201,25 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
       // (Azure previous_response_id) expecting tool outputs, so the NEXT message
       // must rebuild context from the transcript instead of resuming a broken
       // chain (otherwise the model restarts and loses the conversation).
-      finishTurn((s) => ({
-        streaming: false,
-        pending: null,
-        canContinue: false,
-        canRetry: false,
-        providerSnapshot: null,
-        turns: withLast(s.turns, (t) =>
-          t.status === "streaming" || t.status === "awaiting" ? { ...t, status: "done" } : t,
-        ),
-      }));
+      finishTurn(
+        (s) => ({
+          streaming: false,
+          pending: null,
+          canContinue: false,
+          canRetry: false,
+          providerSnapshot: null,
+          turns: withLast(s.turns, (t) =>
+            t.status === "streaming" || t.status === "awaiting" ? { ...t, status: "done" } : t,
+          ),
+        }),
+        { outcome: "stopped" },
+      );
     },
 
     continueRun: async () => {
       const { projectId, streaming, closing } = get();
       if (!projectId || streaming || closing || !currentRunner || !currentExec) return;
+      currentExec.telemetry.resumed();
       set((s) => ({
         canContinue: false,
         turns: withLast(s.turns, (t) => ({ ...t, status: "streaming" })),
@@ -1144,6 +1232,15 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
       const { projectId, streaming, closing, canRetry } = get();
       if (!projectId || streaming || closing || !canRetry || !currentRunner || !currentExec) return;
       if (!currentRunner.canRetry) return;
+      // A second go at the same turn is its own record: the first ended in its failure.
+      const telemetry = new TurnTelemetry(currentExec.telemetry.turnId, turnLabels(projectId));
+      currentExec.telemetry = telemetry;
+      telemetry.start({
+        trigger: "retry",
+        mode: get().mode,
+        effort: get().effort,
+        attachments: 0,
+      });
       // The failed attempt is replaced by the new one: its sentence is gone from the turn (the failure itself
       // stays in the report context), so a success does not leave an error above it.
       set((s) => ({
