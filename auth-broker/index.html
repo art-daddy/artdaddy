@@ -31,12 +31,36 @@
       #message.error {
         color: #f87171;
       }
+      #handoff {
+        margin-top: 16px;
+        text-align: center;
+      }
+      #open {
+        display: inline-block;
+        padding: 10px 18px;
+        border-radius: 8px;
+        background: #e5e5e5;
+        color: #0a0a0a;
+        font-weight: 600;
+        text-decoration: none;
+      }
+      #handoff .note {
+        margin: 14px 0 0;
+        color: #a3a3a3;
+        font-size: 13px;
+      }
     </style>
   </head>
   <body>
     <div id="app">
       <p id="message">Loading…</p>
       <div id="sign-in"></div>
+      <div id="handoff" hidden>
+        <a id="open" href="#">Open ArtDaddy</a>
+        <p class="note">
+          This link works for about two minutes. After that, go back to ArtDaddy and choose “Log in or sign up” again.
+        </p>
+      </div>
     </div>
 
     <script>
@@ -49,9 +73,56 @@
       const CLERK_PUBLISHABLE_KEY = "pk_live_Y2xlcmsuYXJ0ZGFkZHkuYXBwJA";
       const API_BASE = "https://akaru-server.ambitioustree-4d826744.centralindia.azurecontainerapps.io";
       const DEEP_LINK_PREFIX = "artdaddy://auth/callback";
+      // The one-time code in the link is good for 120 seconds from the moment the server issues it (the
+      // server's AUTH_CODE_TTL_SECONDS). A button that offers a spent code is worse than none, so it is offered
+      // for a little less than that.
+      const CODE_WINDOW_MS = 110000;
+      // The browser has by now either handed the link to the app or not, and the page cannot tell which.
+      const HANDOFF_HELP_AFTER_MS = 1500;
+
+      // The steps of getting signed in that this page reports (T-20), anonymously and through the public beacon:
+      // an id of the try (the app names it in the address), a step, ok, and one reason from that step's own list.
+      // Never a code, a state, a challenge or a token. Written down again on the server (analytics.py
+      // AUTH_PAGE_STEPS) and held equal by a test that reads this file; the app reports the other steps.
+      const PAGE_STEPS = {
+        page: ["bad_link"],
+        clerk: ["load_failed"],
+        authorize: ["token", "network", "unavailable", "rejected"],
+        handoff: [],
+        reopen: [],
+      };
+      // Only an id of exactly this shape is used or passed on: anything else in the address is not echoed anywhere.
+      const ATTEMPT = (() => {
+        const value = new URLSearchParams(window.location.search).get("attempt") || "";
+        return /^[A-Za-z0-9_-]{12}$/.test(value) ? value : "";
+      })();
+
+      // A report is a hint, never a dependency: it never throws, is never waited for, and respects the browser's
+      // own Do Not Track signal, as the rest of the site does.
+      function report(step, detail) {
+        try {
+          if (navigator.doNotTrack === "1" || window.doNotTrack === "1") return;
+          if (!Object.prototype.hasOwnProperty.call(PAGE_STEPS, step)) return;
+          const body = { event: "auth", source: "page", step: step };
+          if (ATTEMPT) body.attempt = ATTEMPT;
+          if (detail && typeof detail.ok === "boolean") body.ok = detail.ok;
+          if (detail && PAGE_STEPS[step].indexOf(detail.reason) !== -1) body.reason = detail.reason;
+          if (detail && (detail.mode === "sign_in" || detail.mode === "sign_up")) body.mode = detail.mode;
+          const payload = JSON.stringify(body);
+          // A plain-text body makes this a "simple" request: no preflight, and it survives the page closing.
+          const sent =
+            navigator.sendBeacon &&
+            navigator.sendBeacon(`${API_BASE}/e`, new Blob([payload], { type: "text/plain;charset=UTF-8" }));
+          if (!sent) fetch(`${API_BASE}/e`, { method: "POST", body: payload, mode: "no-cors", keepalive: true });
+        } catch {
+          /* a report that cannot be made is not worth a failed sign-in */
+        }
+      }
 
       const messageEl = document.getElementById("message");
       const signInEl = document.getElementById("sign-in");
+      const handoffEl = document.getElementById("handoff");
+      const openEl = document.getElementById("open");
       let authorizationInFlight = false;
 
       function showMessage(text, isError) {
@@ -65,6 +136,34 @@
         signInEl.hidden = false;
       }
 
+      // Hand the one-time code to the app. The page cannot tell whether the browser passed the link on (a browser
+      // may ask first, may refuse a link that no click led to, and the app may not be registered), so it never
+      // claims it did: it says what to do if the app did not open, and offers a button, which is also a click the
+      // browser accepts where it refused the script's own navigation. The code is only worth offering for as long
+      // as the server honours it.
+      function handOff(code, state) {
+        // The SAME state the app generated, never a new one — the app checks this matches
+        // exactly before it will trust the code. The attempt's name goes back too, so the app reports the try
+        // that actually finished even if the person pressed "Log in" a second time.
+        const link =
+          `${DEEP_LINK_PREFIX}?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}` +
+          (ATTEMPT ? `&attempt=${ATTEMPT}` : "");
+        showMessage("Signed in — returning you to ArtDaddy…");
+        report("handoff");
+        window.location.href = link;
+        setTimeout(() => {
+          showMessage("Signed in. ArtDaddy should open by itself. If it didn't, press the button below.");
+          openEl.href = link;
+          handoffEl.hidden = false;
+        }, HANDOFF_HELP_AFTER_MS);
+        setTimeout(() => {
+          handoffEl.hidden = true;
+          openEl.removeAttribute("href");
+          showMessage("This sign-in link has expired. Go back to ArtDaddy and choose “Log in or sign up” again.", true);
+        }, CODE_WINDOW_MS);
+      }
+      openEl.addEventListener("click", () => report("reopen"));
+
       async function completeAuthorization(clerk, codeChallenge, state) {
         if (authorizationInFlight) return;
         authorizationInFlight = true;
@@ -75,6 +174,7 @@
           token = await clerk.session.getToken();
         } catch {
           authorizationInFlight = false;
+          report("authorize", { ok: false, reason: "token" });
           showMessage("Sign-in could not be completed. Please return to the ArtDaddy app and try again.", true);
           return;
         }
@@ -91,25 +191,25 @@
           });
         } catch {
           authorizationInFlight = false;
+          report("authorize", { ok: false, reason: "network" });
           showMessage("Couldn't reach the server. Check your connection and try again.", true);
           return;
         }
         if (res.status === 503) {
           authorizationInFlight = false;
+          report("authorize", { ok: false, reason: "unavailable" });
           showMessage("The server is temporarily unavailable. Please try again in a moment.", true);
           return;
         }
         if (!res.ok) {
           authorizationInFlight = false;
+          report("authorize", { ok: false, reason: "rejected" });
           showMessage("Sign-in could not be completed. Please return to the ArtDaddy app and try again.", true);
           return;
         }
         const body = await res.json();
-        showMessage("Signed in — returning you to ArtDaddy…");
-        // The SAME state the app generated, never a new one — the app checks this matches
-        // exactly before it will trust the code.
-        window.location.href = `${DEEP_LINK_PREFIX}?code=${encodeURIComponent(body.code)}&state=${encodeURIComponent(state)}`;
-        setTimeout(() => showMessage("You can close this window and return to ArtDaddy."), 1500);
+        report("authorize", { ok: true });
+        handOff(body.code, state);
       }
 
       async function main() {
@@ -119,12 +219,14 @@
         const state = params.get("state");
         const mode = params.get("mode") === "sign-up" ? "sign-up" : "sign-in";
         if (!codeChallenge || !state || codeChallengeMethod !== "S256") {
+          report("page", { ok: false, reason: "bad_link" });
           showMessage(
             "This sign-in link is missing required information. Please return to the ArtDaddy app and try again.",
             true,
           );
           return;
         }
+        report("page", { ok: true, mode: mode === "sign-up" ? "sign_up" : "sign_in" });
 
         // Derive Clerk's Frontend API domain from the publishable key (the documented no-build
         // pattern) and load its UI bundle from there — no bundler, no build step.
@@ -194,6 +296,9 @@
       }
 
       main().catch(() => {
+        // Everything that can fail inside main() on its own is already answered where it happens; what reaches
+        // here is the page itself not loading (Clerk's scripts, or Clerk starting).
+        report("clerk", { ok: false, reason: "load_failed" });
         showMessage("Something went wrong loading sign-in. Please return to the ArtDaddy app and try again.", true);
       });
     </script>
