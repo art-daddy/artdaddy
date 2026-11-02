@@ -368,6 +368,57 @@ describe("verifyAccess", () => {
   });
 });
 
+// The server tags its error reports with the app's version (server/observability.py), so a failure there reads per
+// release of the app. Every request goes through authedFetch, so this is the one place that has to say it.
+describe("the app's version on every request", () => {
+  const versionSent = (f: ReturnType<typeof vi.fn>) =>
+    f.mock.calls.map(
+      (c) =>
+        (((c as unknown[])[1] as RequestInit).headers as Record<string, string | undefined>)[
+          "X-Client-Version"
+        ],
+    );
+
+  it("is sent with a session and without one", async () => {
+    const f = vi.fn(async () => resp(200));
+    vi.stubGlobal("fetch", f);
+
+    await authedFetch("https://api.example.com/x");
+    setClerkTokenProvider(async () => "t1");
+    await authedFetch("https://api.example.com/x");
+
+    expect(versionSent(f)).toEqual([__ARTDADDY_RELEASE__, __ARTDADDY_RELEASE__]);
+  });
+
+  it("rides on the request sent again after the session is renewed", async () => {
+    setClerkTokenProvider(async () => "t1");
+    setSessionRenewer(async () => true);
+    const f = vi.fn().mockResolvedValueOnce(resp(401)).mockResolvedValueOnce(resp(200));
+    vi.stubGlobal("fetch", f);
+
+    await authedFetch("https://api.example.com/x");
+
+    expect(f).toHaveBeenCalledTimes(2);
+    expect(versionSent(f)).toEqual([__ARTDADDY_RELEASE__, __ARTDADDY_RELEASE__]);
+  });
+
+  it("keeps the caller's own headers, and a caller cannot change which version is reported", async () => {
+    const f = vi.fn(async () => resp(200));
+    vi.stubGlobal("fetch", f);
+
+    await authedFetch("https://api.example.com/x", {
+      headers: { "Content-Type": "application/json", "X-Client-Version": "artdaddy@9.9.9" },
+    });
+
+    const headers = ((f.mock.calls[0] as unknown[])[1] as RequestInit).headers as Record<
+      string,
+      string
+    >;
+    expect(headers["Content-Type"]).toBe("application/json");
+    expect(headers["X-Client-Version"]).toBe(__ARTDADDY_RELEASE__);
+  });
+});
+
 // One door: a request that carries a token anywhere else skips the renewal and the second try.
 describe("the authenticated door", () => {
   it("is the only place a request gets an Authorization header", async () => {
@@ -387,6 +438,25 @@ describe("the authenticated door", () => {
       .map((f) => f.slice(src.length + 1).replace(/\\/g, "/"))
       .filter((rel) => rel !== "api/auth.ts")
       .filter((rel) => carriesToken.test(readFileSync(join(src, rel), "utf8")));
+    expect(offenders).toEqual([]);
+  }, 30_000);
+
+  it("is also the only place the app's version is added", async () => {
+    const { readFileSync, readdirSync, statSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const src = join(__dirname, "..");
+    const walk = (dir: string, out: string[] = []): string[] => {
+      for (const name of readdirSync(dir)) {
+        const p = join(dir, name);
+        if (statSync(p).isDirectory()) walk(p, out);
+        else if (/\.(ts|tsx)$/.test(name) && !/\.test\.tsx?$|\.e2e\.ts$/.test(name)) out.push(p);
+      }
+      return out;
+    };
+    const offenders = walk(src)
+      .map((f) => f.slice(src.length + 1).replace(/\\/g, "/"))
+      .filter((rel) => rel !== "api/auth.ts")
+      .filter((rel) => /x-client-version/i.test(readFileSync(join(src, rel), "utf8")));
     expect(offenders).toEqual([]);
   }, 30_000);
 });

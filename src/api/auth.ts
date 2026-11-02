@@ -73,6 +73,8 @@ async function sendRenewing(url: string, init: RequestInit, send: Send): Promise
     const token = await getAccessToken();
     const headers = {
       ...(init.headers as Record<string, string> | undefined),
+      // The server tags its error reports with this, so a failure there can be read per release of the app.
+      "X-Client-Version": __ARTDADDY_RELEASE__,
       ...(token ? { Authorization: ["Bearer", token].join(" ") } : {}),
     };
     return { token, res: await send(url, { ...init, headers }) };
