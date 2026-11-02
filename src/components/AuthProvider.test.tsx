@@ -33,6 +33,8 @@ const mocks = vi.hoisted(() => {
     setStoredSession: vi.fn(),
     hasStoredSession: false,
     startDesktopSignIn: vi.fn(async () => ({ ok: true }) as { ok: boolean }),
+    reportAuthStep: vi.fn(),
+    signedInBefore: false,
     onOpenUrlCb: null as ((urls: string[]) => void) | null,
     offOpenUrl: vi.fn(),
     startUrls: null as string[] | null,
@@ -106,6 +108,11 @@ vi.mock("@tauri-apps/plugin-deep-link", () => ({
 
 vi.mock("../observability/sentry", () => ({ identifyUser: mocks.identifyUser }));
 vi.mock("../api/appEvents", () => ({ reportLaunchOnce: mocks.reportLaunchOnce }));
+// The sign-in screen reports that it was shown. A spy here, so these tests make no network call of their own.
+vi.mock("../api/authEvents", () => ({
+  reportAuthStep: mocks.reportAuthStep,
+  hasSignedInBefore: () => mocks.signedInBefore,
+}));
 
 import AuthProvider from "./AuthProvider";
 
@@ -119,6 +126,7 @@ afterEach(() => {
   mocks.startUrls = null;
   mocks.platformName = "tauri";
   mocks.hostOs = "windows";
+  mocks.signedInBefore = false;
   mocks.refreshDesktopSession.mockReset().mockResolvedValue({
     status: "refreshed",
     hasStoredSession: true,
@@ -339,6 +347,84 @@ describe("AuthProvider", () => {
     );
     expect(screen.queryByText("editor")).not.toBeInTheDocument();
     expect(screen.getByText(/can't reach the server/i)).toBeInTheDocument();
+  });
+
+  // The top of the sign-in funnel (T-20): the only place someone who installed the app and never signed in
+  // can be seen at all.
+  describe("reports that the sign-in screen was shown, and why", () => {
+    const shown = () => mocks.reportAuthStep.mock.calls.filter(([step]) => step === "screen");
+
+    it("as new when this machine has never had a session", () => {
+      mocks.authStatus = "locked";
+      mocks.signedInBefore = false;
+      render(
+        <AuthProvider>
+          <span>editor</span>
+        </AuthProvider>,
+      );
+      expect(shown()).toEqual([["screen", { reason: "new" }]]);
+    });
+
+    it("as returning when it has had one and lost it", () => {
+      mocks.authStatus = "locked";
+      mocks.signedInBefore = true;
+      render(
+        <AuthProvider>
+          <span>editor</span>
+        </AuthProvider>,
+      );
+      expect(shown()).toEqual([["screen", { reason: "returning" }]]);
+    });
+
+    it("as offline when the server could not be reached and nothing is saved", () => {
+      mocks.authStatus = "offline";
+      mocks.hasStoredSession = false;
+      mocks.signedInBefore = true;
+      render(
+        <AuthProvider>
+          <span>editor</span>
+        </AuthProvider>,
+      );
+      expect(shown()).toEqual([["screen", { reason: "offline" }]]);
+    });
+
+    it("once for one screen, however often the provider draws it again", () => {
+      mocks.authStatus = "locked";
+      const view = render(
+        <AuthProvider>
+          <span>editor</span>
+        </AuthProvider>,
+      );
+      view.rerender(
+        <AuthProvider>
+          <span>editor</span>
+        </AuthProvider>,
+      );
+      expect(shown()).toHaveLength(1);
+    });
+
+    it("never when the app is open, when the session is being restored, or off the desktop shell's gate", () => {
+      mocks.authStatus = "unlocked";
+      render(
+        <AuthProvider>
+          <span>editor</span>
+        </AuthProvider>,
+      ).unmount();
+      mocks.authStatus = "checking";
+      render(
+        <AuthProvider>
+          <span>editor</span>
+        </AuthProvider>,
+      ).unmount();
+      mocks.authStatus = "offline";
+      mocks.hasStoredSession = true; // offline with a saved session: the editor opens, there is no screen
+      render(
+        <AuthProvider>
+          <span>editor</span>
+        </AuthProvider>,
+      );
+      expect(shown()).toEqual([]);
+    });
   });
 
   it("identifies the Sentry user once a stored desktop-auth session restores", async () => {

@@ -17,6 +17,14 @@ vi.mock("./config", async (importOriginal) => ({
 }));
 
 const fetchMock = vi.hoisted(() => vi.fn());
+// The reporter is replaced by a spy here: its real sender posts through the same mocked fetch, and these tests
+// count fetch calls to prove what the sign-in itself sends. The ids stay real. What is reported, and that it
+// really leaves the app as intended, is tested below and in authEvents.test.ts.
+const reportAuthStep = vi.hoisted(() => vi.fn());
+vi.mock("./authEvents", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./authEvents")>()),
+  reportAuthStep,
+}));
 
 function jsonResponse(status: number, body: unknown) {
   return {
@@ -35,6 +43,7 @@ beforeEach(() => {
   globalThis.fetch = fetchMock as unknown as typeof fetch;
   invoke.mockReset();
   fetchMock.mockReset();
+  reportAuthStep.mockReset();
   platformMock.name = "tauri";
   // The pending attempt OUTLIVES the module now, so resetModules alone no longer isolates a
   // test from the one before it.
