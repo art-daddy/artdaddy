@@ -190,6 +190,16 @@ function withDeadline(signal: AbortSignal | undefined, ms: number) {
 // a server that predates it costs ONE extra request, not one per round.
 const noStreamRoute = new Set<string>();
 
+/** What the app can learn about a round's request on its way, for the chat's status line and the turn's timing:
+ *  the request waits on something other than the model, how big the body was, and when the server answered. */
+export interface RoundObserver {
+  wait?: (wait: RoundWait | null) => void;
+  /** The request body is this many bytes (known only where it is serialised). */
+  sent?: (bytes: number) => void;
+  /** The server's answer began (its head arrived). */
+  head?: () => void;
+}
+
 /** Run ONE model round, streamed. Deltas are presentation; the returned DTO is the
  *  record and is byte-identical to what {@link inferRound} would have returned.
  *
@@ -200,14 +210,14 @@ export async function inferRoundStreaming(
   body: InferBody,
   onDelta: (d: RoundDelta) => void,
   signal?: AbortSignal,
-  onWait?: (wait: RoundWait | null) => void,
+  observer?: RoundObserver,
 ): Promise<RoundResultDTO> {
   const base = api.base;
   if (noStreamRoute.has(base)) return inferRound(body, signal);
 
   const deadline = withDeadline(signal, ROUND_TIMEOUT_MS);
   try {
-    return await streamRound(base, body, onDelta, deadline.signal, signal, onWait);
+    return await streamRound(base, body, onDelta, deadline.signal, signal, observer);
   } catch (e) {
     return deadline.rethrow(e);
   } finally {
@@ -221,8 +231,10 @@ async function streamRound(
   onDelta: (d: RoundDelta) => void,
   signal: AbortSignal,
   userSignal: AbortSignal | undefined,
-  onWait: ((wait: RoundWait | null) => void) | undefined,
+  observer: RoundObserver | undefined,
 ): Promise<RoundResultDTO> {
+  const payload = JSON.stringify(withClientInfo(body));
+  observer?.sent?.(new TextEncoder().encode(payload).length);
   const res = await authedFetch(
     api.inferenceStreamUrl(),
     {
@@ -231,13 +243,14 @@ async function streamRound(
         "Content-Type": "application/json",
         Accept: "text/event-stream",
       },
-      body: JSON.stringify(withClientInfo(body)),
+      body: payload,
       signal,
     },
     // The server's typed busy answers (account_busy, server_busy) mean nothing ran: wait them out, bounded. A connection
     // that never answered, or a 502/503/504, is tried once more (http.ts fetchRound); nothing after the first byte is.
-    (u, init) => fetchRound(u, init, signal, onWait),
+    (u, init) => fetchRound(u, init, signal, observer?.wait),
   );
+  observer?.head?.();
 
   if (res.status === 404 || res.status === 405) {
     // An older server. Nothing ran, so re-issuing the round is free and correct -- and it

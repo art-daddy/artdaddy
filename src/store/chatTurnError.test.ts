@@ -58,6 +58,8 @@ import { CreditLimitError } from "../api/usage";
 import { RoundHttpError } from "../agent/failureCopy";
 import { ClientUpdateRequiredError } from "../update/updater";
 import { clearRecentFailures, recentFailures } from "../observability/recentFailures";
+import { __bufferedAgentEvents, __resetAgentEvents } from "../api/agentEvents";
+import { useAuth } from "./auth";
 import { useChat } from "./chat";
 import { useEditor } from "./editor";
 
@@ -286,6 +288,31 @@ describe("trying a failed turn again", () => {
     expect(errors).toHaveLength(1);
     expect(errors[0].error).toMatch(/credit balance/);
     expect(s.canRetry).toBe(true);
+  });
+
+  it("is reported as its own go at the same turn: the first ended in its failure, the second says it is a retry", async () => {
+    __resetAgentEvents();
+    useAuth.setState({ status: "unlocked", profile: null, hasStoredSession: true });
+    try {
+      runnerStart.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+      await startTurn();
+      runnerRetry.mockImplementationOnce(async () => {
+        emit("text", { text: "ok" });
+        emit("turn_done", { cost_usd: 0 });
+      });
+      await useChat.getState().retry();
+
+      const events = __bufferedAgentEvents();
+      expect(events.map((e) => [e.kind, e.trigger ?? e.outcome])).toEqual([
+        ["turn_start", "user"],
+        ["turn_end", "error"],
+        ["turn_start", "retry"],
+        ["turn_end", "done"],
+      ]);
+      expect(new Set(events.map((e) => e.turn_id)).size).toBe(1);
+    } finally {
+      __resetAgentEvents();
+    }
   });
 
   it("does nothing when it is not offered, while a run is in progress, or once the project is closing", async () => {
