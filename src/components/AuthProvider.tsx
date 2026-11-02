@@ -22,6 +22,7 @@ import { identifyUser } from "../observability/sentry";
 import { platform } from "../platform";
 import { hostInfo } from "../platform/host";
 import { useAuth, isSignedOutGate, authBypassed } from "../store/auth";
+import { useSignInNotice } from "../store/signInNotice";
 import SignInScreen from "./SignInScreen";
 
 /** How long launch waits on the session before opening (offline) for one that is stored. */
@@ -100,10 +101,18 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
         for (const url of urls) {
           const result = await handleDeepLinkCallback(url);
           if (result.ok) {
+            useSignInNotice.getState().clear();
             useAuth.getState().setStoredSession(true);
             void useAuth.getState().verify();
             identifyUser(getDesktopUserId(), getDesktopUserEmail());
             if (getDesktopUserId()) reportLaunchOnce();
+          } else {
+            // A failed callback used to be thrown away, which left the screen unchanged and the person with
+            // nothing to do. It is counted (api/authEvents.ts) and now also said, in plain words. Not when the
+            // app already has a session, where there is no sign-in screen for it to belong to; a callback that
+            // cold-started the app arrives while the session is still being restored, and that one is kept.
+            if (useAuth.getState().status !== "unlocked")
+              useSignInNotice.getState().failed(result.reason);
           }
         }
       };
@@ -189,6 +198,11 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
     const timer = setTimeout(() => setRestoreUnavailable(true), 10_000);
     return () => clearTimeout(timer);
   }, [status, restoreAttempt]);
+
+  // Signed in, by any route: whatever was said about a sign-in that did not finish is no longer true.
+  useEffect(() => {
+    if (status === "unlocked") useSignInNotice.getState().clear();
+  }, [status]);
 
   // macOS keeps the saved-session read behind a permission dialog that the restore stops waiting
   // for, and the dialog stays open. Its answer must not depend on finding a button: ask again

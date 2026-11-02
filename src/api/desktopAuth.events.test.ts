@@ -269,6 +269,111 @@ describe("a callback reports how it ended", () => {
   });
 });
 
+// The screen is told why in the same closed word the callback reports, never in the developer's message, and never
+// differently from the report: one source for the two, for every way a callback can fail.
+describe("a failed callback gives the screen the word it reports", () => {
+  type Run = (desktop: Desktop, state: string) => Promise<{ ok: boolean; reason?: string }>;
+  const cases: ReadonlyArray<readonly [string, Run]> = [
+    [
+      "no_attempt",
+      (d) => {
+        // Every case starts a try to have a state to use; this one is about a callback with none pending.
+        localStorage.removeItem("artdaddy.desktop_auth_pending");
+        return d.handleDeepLinkCallback(callbackUrl("any"));
+      },
+    ],
+    ["unrecognized", (d) => d.handleDeepLinkCallback("https://evil.example/cb?code=x&state=y")],
+    ["missing_params", (d) => d.handleDeepLinkCallback("artdaddy://auth/callback")],
+    ["state_mismatch", (d) => d.handleDeepLinkCallback(callbackUrl("not-the-state"))],
+    [
+      "exchange_network",
+      (d, state) => {
+        fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
+        return d.handleDeepLinkCallback(callbackUrl(state));
+      },
+    ],
+    [
+      "exchange_rejected",
+      (d, state) => {
+        fetchMock.mockResolvedValue(reply(400));
+        return d.handleDeepLinkCallback(callbackUrl(state));
+      },
+    ],
+    [
+      "exchange_server",
+      (d, state) => {
+        fetchMock.mockResolvedValue(reply(503));
+        return d.handleDeepLinkCallback(callbackUrl(state));
+      },
+    ],
+    [
+      "exchange_unreadable",
+      (d, state) => {
+        fetchMock.mockResolvedValue({
+          ok: true,
+          status: 200,
+          json: async () => Promise.reject(new SyntaxError("x")),
+        });
+        return d.handleDeepLinkCallback(callbackUrl(state));
+      },
+    ],
+    [
+      "not_saved",
+      (d, state) => {
+        invoke.mockImplementation(async (command: string) => {
+          if (command === "store_refresh_token") throw new Error("keychain write failed");
+          return undefined;
+        });
+        fetchMock.mockResolvedValue(reply(200, TOKENS));
+        return d.handleDeepLinkCallback(callbackUrl(state));
+      },
+    ],
+    [
+      "error",
+      (d, state) => {
+        invoke.mockImplementation((command: string) => {
+          if (command === "store_refresh_token") throw new Error("boom");
+          return Promise.resolve(undefined);
+        });
+        fetchMock.mockResolvedValue(reply(200, TOKENS));
+        return d.handleDeepLinkCallback(callbackUrl(state));
+      },
+    ],
+    [
+      "cancelled",
+      async (d, state) => {
+        let release!: (value: unknown) => void;
+        const gate = new Promise((resolve) => {
+          release = resolve;
+        });
+        fetchMock.mockImplementation((url: string) =>
+          url.endsWith("/auth/desktop/token") ? gate : Promise.resolve(reply(200)),
+        );
+        const running = d.handleDeepLinkCallback(callbackUrl(state));
+        await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled());
+        await d.signOutDesktop();
+        release(reply(200, TOKENS));
+        return running;
+      },
+    ],
+  ];
+
+  it("covers every reason a callback can fail with", async () => {
+    const { AUTH_APP_STEPS } = await import("./authEvents");
+    expect(cases.map(([reason]) => reason).sort()).toEqual([...AUTH_APP_STEPS.callback].sort());
+  });
+
+  it.each(cases)("%s: the outcome carries the same word the report does", async (reason, run) => {
+    const desktop = await importFresh();
+    const { state } = await startAttempt(desktop);
+    const result = await run(desktop, state);
+    expect(result).toMatchObject({ ok: false, reason });
+    expect(reportsFor("callback").at(-1)).toMatchObject({ ok: false, reason });
+    // The developer's message is still there for logs, and is not what the screen is built from.
+    expect(typeof (result as { message?: unknown }).message).toBe("string");
+  });
+});
+
 describe("a saved session that cannot be renewed reports why", () => {
   const stored = (token: string | null = "stored-rt") =>
     invoke.mockImplementation(async (command: string) =>
