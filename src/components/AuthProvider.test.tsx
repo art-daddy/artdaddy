@@ -2,6 +2,8 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { DesktopSessionRefresh } from "../api/desktopAuth";
+import { SIGN_IN_PROBLEMS } from "../api/signInProblems";
+import { useSignInNotice } from "../store/signInNotice";
 
 const mocks = vi.hoisted(() => {
   const removeTokenProvider = vi.fn();
@@ -799,5 +801,158 @@ describe("AuthProvider, a keychain waiting for a person", () => {
     expect(screen.getByText(/couldn't read your saved session/i)).toBeInTheDocument();
     if (told) expect(screen.getByText(/click Always Allow/i)).toBeInTheDocument();
     else expect(screen.queryByText(/Always Allow/i)).not.toBeInTheDocument();
+  });
+});
+
+// The browser step finished and the app could not complete sign-in. The failure was thrown away, so the screen
+// stayed as it was and the person had nothing to do. Now it is said in plain words, once, where they are looking.
+describe("AuthProvider, a sign-in callback that did not finish", () => {
+  const LINK = "artdaddy://auth/callback?code=one-time-code&state=the-state";
+  const failure = (reason: string, message = "developer message (status 401)") =>
+    ({ ok: false, message, reason }) as unknown as { ok: boolean };
+  const mount = () =>
+    render(
+      <AuthProvider>
+        <span>editor</span>
+      </AuthProvider>,
+    );
+  /** Deliver a callback the way the operating system does. */
+  const deliver = async (outcome: { ok: boolean }) => {
+    await waitFor(() => expect(mocks.onOpenUrlCb).not.toBeNull());
+    mocks.handleDeepLinkCallback.mockResolvedValue(outcome);
+    await act(async () => {
+      await mocks.onOpenUrlCb!([LINK]);
+    });
+  };
+
+  afterEach(() => {
+    useSignInNotice.getState().clear();
+  });
+
+  it("says so on the sign-in screen, in plain words", async () => {
+    mocks.authStatus = "locked";
+    mount();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    await deliver(failure("state_mismatch"));
+    expect(screen.getByRole("status")).toHaveTextContent(SIGN_IN_PROBLEMS.state_mismatch!);
+  });
+
+  it("says something different for each thing that can go wrong", async () => {
+    mocks.authStatus = "locked";
+    mount();
+    await deliver(failure("exchange_network"));
+    expect(screen.getByRole("status")).toHaveTextContent(/couldn't reach the server/);
+    await deliver(failure("exchange_rejected"));
+    expect(screen.getByRole("status")).toHaveTextContent(/expired or was already used/);
+  });
+
+  it("never shows the developer's message, an address or a status number", async () => {
+    mocks.authStatus = "locked";
+    mount();
+    await deliver(
+      failure(
+        "exchange_rejected",
+        "the server rejected the sign-in code (401) at https://api.example.com",
+      ),
+    );
+    expect(document.body.textContent).not.toMatch(
+      /401|rejected the sign-in code|api\.example|https?:/,
+    );
+  });
+
+  it.each(["unrecognized", "cancelled"])("says nothing for %s", async (reason) => {
+    mocks.authStatus = "locked";
+    mount();
+    await deliver(failure(reason));
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("says nothing when the failure came with no reason, and leaves an earlier sentence alone", async () => {
+    mocks.authStatus = "locked";
+    mount();
+    await deliver({ ok: false });
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    await deliver(failure("exchange_server"));
+    await deliver({ ok: false });
+    await deliver(failure("cancelled"));
+    expect(screen.getByRole("status")).toHaveTextContent(SIGN_IN_PROBLEMS.exchange_server!);
+  });
+
+  it("is replaced when the person presses the button to try again", async () => {
+    mocks.authStatus = "locked";
+    mount();
+    await deliver(failure("state_mismatch"));
+    expect(screen.getByRole("status")).toBeInTheDocument();
+    await act(async () => {
+      screen.getByRole("button", { name: /log in or sign up/i }).click();
+    });
+    expect(mocks.startDesktopSignIn).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("is forgotten when a sign-in then succeeds", async () => {
+    mocks.authStatus = "locked";
+    mount();
+    await deliver(failure("state_mismatch"));
+    expect(useSignInNotice.getState().text).not.toBeNull();
+    await deliver({ ok: true });
+    expect(useSignInNotice.getState().text).toBeNull();
+  });
+
+  it("is not shown once it is about an attempt the person left long ago", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-02T10:00:00Z"));
+    mocks.authStatus = "locked";
+    const view = mount();
+    await deliver(failure("exchange_rejected"));
+    expect(screen.getByRole("status")).toBeInTheDocument();
+    vi.setSystemTime(new Date("2026-11-02T10:10:01Z"));
+    view.rerender(
+      <AuthProvider>
+        <span>editor</span>
+      </AuthProvider>,
+    );
+    // Drawn again by something else (the screen's own state changes), the stale sentence is not shown.
+    await act(async () => {
+      useSignInNotice.setState({ at: useSignInNotice.getState().at });
+    });
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("is kept when the callback that failed is the one that started the app, before the session was restored", async () => {
+    // On Windows the link launches the app, so the callback arrives while the saved session is still being
+    // looked for. The screen appears a moment later and must still say it.
+    mocks.authStatus = "checking";
+    const view = mount();
+    await deliver(failure("exchange_network"));
+    mocks.authStatus = "locked";
+    view.rerender(
+      <AuthProvider>
+        <span>editor</span>
+      </AuthProvider>,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent(SIGN_IN_PROBLEMS.exchange_network!);
+  });
+
+  it("is not kept when the app already has a session, where there is no sign-in screen for it to belong to", async () => {
+    mocks.authStatus = "unlocked";
+    mount();
+    await deliver(failure("no_attempt"));
+    expect(useSignInNotice.getState().text).toBeNull();
+    expect(screen.getByText("editor")).toBeInTheDocument();
+  });
+
+  it("is forgotten the moment the session is restored, however it came about", async () => {
+    mocks.authStatus = "checking";
+    const view = mount();
+    await deliver(failure("exchange_network"));
+    expect(useSignInNotice.getState().text).not.toBeNull();
+    mocks.authStatus = "unlocked";
+    view.rerender(
+      <AuthProvider>
+        <span>editor</span>
+      </AuthProvider>,
+    );
+    expect(useSignInNotice.getState().text).toBeNull();
   });
 });

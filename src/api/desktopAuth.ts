@@ -24,7 +24,9 @@ const KEYCHAIN_TIMEOUT_MS = 8_000;
 // one-time, and re-sending one the server already rotated revokes the whole session.
 const REFRESH_TIMEOUT_MS = 90_000;
 
-type Outcome = { ok: true } | { ok: false; message: string };
+/** A failed callback also says why, as the same closed word that is reported (api/authEvents.ts), so the screen can
+ *  tell the person in plain words without ever reading the message, which is for developers. */
+type Outcome = { ok: true } | { ok: false; message: string; reason?: AuthReason<"callback"> };
 export type DesktopSessionRefresh =
   | { status: "refreshed"; hasStoredSession: true }
   | { status: "missing" | "invalid"; hasStoredSession: false }
@@ -366,7 +368,7 @@ export async function handleDeepLinkCallback(url: string): Promise<Outcome> {
   } catch (e) {
     const why = e instanceof Error ? e.message : String(e);
     reportAuthStep("callback", { ok: false, reason: "error" });
-    return { ok: false, message: `sign-in failed: ${why}` };
+    return { ok: false, message: `sign-in failed: ${why}`, reason: "error" };
   }
 }
 
@@ -396,7 +398,7 @@ async function completeDeepLinkCallback(url: string): Promise<Outcome> {
       attempt: linkedAttempt ?? attempt?.attempt,
       ms: elapsed(),
     });
-    return { ok: false, message };
+    return { ok: false, message, reason };
   };
   if (!attempt) return fail("no_attempt", "no sign-in attempt in progress");
   if (!url.startsWith(DEEP_LINK_PREFIX)) return fail("unrecognized", "unrecognized callback");

@@ -8,6 +8,7 @@ import { BRAND } from "../brand";
 import { openDiscord } from "../lib/community";
 import { platform } from "../platform";
 import { useAuth } from "../store/auth";
+import { freshSignInNotice, useSignInNotice } from "../store/signInNotice";
 import { DiscordIcon } from "./DiscordIcon";
 import { Button } from "./ui";
 
@@ -17,6 +18,7 @@ export default function SignInScreen({ offline = false }: { offline?: boolean })
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const verify = useAuth((s) => s.verify);
+  const notice = useSignInNotice(freshSignInNotice);
   const canSignIn = platform.name === "tauri";
 
   // This screen being shown is the top of the sign-in funnel, and the one place a person who installed the app
@@ -30,6 +32,8 @@ export default function SignInScreen({ offline = false }: { offline?: boolean })
   const signIn = async () => {
     setBusy(true);
     setError(null);
+    // A new try replaces the last one's sentence.
+    useSignInNotice.getState().clear();
     const result = await startDesktopSignIn();
     // The browser stays open on success; this screen is replaced when the callback lands.
     if (!result.ok) setError("message" in result ? result.message : "Sign-in failed.");
@@ -104,6 +108,11 @@ export default function SignInScreen({ offline = false }: { offline?: boolean })
             </>
           )}
           {error && <p className="mt-3 text-xs text-red-400">{error}</p>}
+          {notice && (
+            <p role="status" className="mt-3 text-xs text-red-400">
+              {notice}
+            </p>
+          )}
         </section>
 
         {/* Under the card on purpose: someone stuck at a sign-in gate is exactly the person
