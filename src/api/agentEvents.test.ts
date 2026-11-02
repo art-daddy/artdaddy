@@ -27,6 +27,7 @@ import {
   __bufferedAgentEvents,
   __resetAgentEvents,
   agentEventContext,
+  createToolTrace,
   flushAgentEvents,
   flushAgentEventsForExit,
   preview,
@@ -452,6 +453,70 @@ describe("batching", () => {
   it("sends nothing when there is nothing to send", async () => {
     await flushAgentEvents();
     expect(posted).toHaveLength(0);
+  });
+});
+
+// The program that drives the editor over MCP is only worth knowing if it reaches the server. These read the
+// bodies that were actually POSTed (what the server receives), not the labels the bridge hands over: a field
+// the sender drops leaves the bridge's own test green and every row on the server without a program.
+describe("which outside program drove the editor, as the server receives it", () => {
+  const program = (client: string, name: string, version: string) => ({
+    ...agentEventContext(),
+    surface: "mcp",
+    project_id: "external_project",
+    mcp_client: client,
+    mcp_client_name: name,
+    mcp_client_version: version,
+  });
+  const call = (tool: string, labels: ReturnType<typeof program>) =>
+    createToolTrace(tool, {}, labels, `${tool}-1`).result({ ok: true });
+
+  it("says which program made the calls: its label, the name it announced and its version", async () => {
+    call("undo", program("claude_code", "claude-code", "2.1.4"));
+    await flushAgentEvents();
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).toMatchObject({
+      surface: "mcp",
+      mcp_client: "claude_code",
+      mcp_client_name: "claude-code",
+      mcp_client_version: "2.1.4",
+      events: [{ name: "undo" }],
+    });
+  });
+
+  it("keeps two programs' calls apart, each flushed under the program that made it", async () => {
+    call("undo", program("claude_code", "claude-code", "2.1.4"));
+    call("redo", program("cursor", "cursor-vscode", "0.9"));
+    await flushAgentEvents();
+    const seen = (posted as { mcp_client: string; events: { name: string }[] }[]).map((body) => [
+      body.mcp_client,
+      body.events.map((event) => event.name),
+    ]);
+    expect(seen).toEqual([
+      ["claude_code", ["undo"]],
+      ["cursor", ["redo"]],
+    ]);
+  });
+
+  it("says nothing of a program for the app's own agent, and none carries over from an MCP call", async () => {
+    call("undo", program("claude_code", "claude-code", "2.1.4"));
+    recordAgentOutput("the app's own answer");
+    await flushAgentEvents();
+    expect(posted).toHaveLength(2);
+    const [mcp, app] = posted as Record<string, unknown>[];
+    expect(mcp.mcp_client).toBe("claude_code");
+    expect(app.surface).toBe("app");
+    expect(Object.keys(app).filter((key) => key.startsWith("mcp_"))).toEqual([]);
+  });
+
+  it("says a program announced nothing, rather than saying nothing", async () => {
+    call("undo", program("unknown", "", ""));
+    await flushAgentEvents();
+    expect(posted[0]).toMatchObject({
+      mcp_client: "unknown",
+      mcp_client_name: "",
+      mcp_client_version: "",
+    });
   });
 });
 

@@ -31,13 +31,48 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(600);
 /// One in-flight request to the webview.
 type Pending = Arc<Mutex<HashMap<u64, std::sync::mpsc::Sender<Value>>>>;
 
+/// Longest a name or version is kept, in characters. A client names itself in one line; anything longer
+/// is not a name.
+const CLIENT_TEXT_MAX: usize = 64;
+
+/// What a connecting program says about itself in `initialize` (`params.clientInfo`): the name and
+/// version of a PROGRAM (Claude Code, Visual Studio Code, ...), never anything about the person. Kept
+/// per session and carried with every request to the webview, so the app can say which program is
+/// driving the editor.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ClientInfo {
+  name: String,
+  version: String,
+}
+
+impl ClientInfo {
+  /// Read it out of an `initialize` request's params. Anything that is not a string is absent, and a
+  /// long string is cut: a hostile client must not be able to push a megabyte through this.
+  fn from_params(params: &Value) -> Self {
+    let info = params.get("clientInfo");
+    let text = |key: &str| -> String {
+      info
+        .and_then(|i| i.get(key))
+        .and_then(Value::as_str)
+        .map(|s| s.trim().chars().take(CLIENT_TEXT_MAX).collect())
+        .unwrap_or_default()
+    };
+    Self { name: text("name"), version: text("version") }
+  }
+
+  fn to_json(&self) -> Value {
+    json!({ "name": self.name, "version": self.version })
+  }
+}
+
 #[derive(Clone)]
 pub struct McpState {
   pending: Pending,
   /// JSON-RPC request id (as text) -> the bridge id running it, so `notifications/cancelled`
   /// can reach the actual work. Keyed by session too: two clients may both use id 1.
   in_flight: Arc<Mutex<HashMap<String, u64>>>,
-  sessions: Arc<Mutex<HashMap<String, ()>>>,
+  /// Each session and what its client said about itself when it connected.
+  sessions: Arc<Mutex<HashMap<String, ClientInfo>>>,
   next_id: Arc<AtomicU64>,
   running: Arc<AtomicBool>,
   port: Arc<AtomicU64>,
@@ -79,13 +114,15 @@ impl McpState {
 
 /// Ask the webview to answer an MCP method. Blocks the connection thread until the webview
 /// replies via `mcp_reply`, or the call times out. `cancel_key` (session + JSON-RPC id) lets a
-/// later `notifications/cancelled` find and abort this exact call.
+/// later `notifications/cancelled` find and abort this exact call. `client` is who is asking, so
+/// the app can tell which program is driving it.
 fn ask_webview(
   app: &AppHandle,
   state: &McpState,
   method: &str,
   params: Value,
   cancel_key: Option<String>,
+  client: &ClientInfo,
 ) -> Result<Value, String> {
   let id = state.next_id.fetch_add(1, Ordering::SeqCst);
   let (tx, rx) = std::sync::mpsc::channel::<Value>();
@@ -95,7 +132,10 @@ fn ask_webview(
   }
 
   app
-    .emit("artdaddy://mcp-request", json!({ "id": id, "method": method, "params": params }))
+    .emit(
+      "artdaddy://mcp-request",
+      json!({ "id": id, "method": method, "params": params, "client": client.to_json() }),
+    )
     .map_err(|e| format!("emit failed: {e}"))?;
 
   let out = rx.recv_timeout(CALL_TIMEOUT);
@@ -224,6 +264,26 @@ fn cancel_request(app: &AppHandle, state: &McpState, session: &str, request_id: 
   }
 }
 
+/// Remember what a session's client said about itself. Re-sent on a repeat `initialize` (a client may
+/// connect again on the same session), and the newest wins.
+fn remember_client(state: &McpState, session: &str, params: &Value) -> ClientInfo {
+  let info = ClientInfo::from_params(params);
+  if let Ok(mut sessions) = state.sessions.lock() {
+    sessions.insert(session.to_string(), info.clone());
+  }
+  info
+}
+
+/// Who a session's client said it was; empty for a session that never said (or never initialised).
+fn client_of(state: &McpState, session: &str) -> ClientInfo {
+  state
+    .sessions
+    .lock()
+    .ok()
+    .and_then(|sessions| sessions.get(session).cloned())
+    .unwrap_or_default()
+}
+
 /// Dispatch one JSON-RPC request. `initialize`/`ping` are answered here; anything about tools is
 /// the webview's business. Returns None for notifications, which must never be answered.
 fn handle_rpc(app: &AppHandle, state: &McpState, req: &Value, session: &str) -> Option<Value> {
@@ -244,9 +304,21 @@ fn handle_rpc(app: &AppHandle, state: &McpState, req: &Value, session: &str) -> 
 
   let cancel_key = id.as_ref().map(|i| cancel_key_for(session, i));
   let result = match method {
-    "initialize" => Ok(server_info(state)),
+    "initialize" => {
+      // A program has connected: say which, so the app can record it (and which one is behind the
+      // calls that follow).
+      let client = remember_client(state, session, &params);
+      let _ = app.emit(
+        "artdaddy://mcp-session",
+        json!({ "session": session, "client": client.to_json() }),
+      );
+      Ok(server_info(state))
+    }
     "ping" => Ok(json!({})),
-    "tools/list" | "tools/call" => ask_webview(app, state, method, params, cancel_key),
+    "tools/list" | "tools/call" => {
+      let client = client_of(state, session);
+      ask_webview(app, state, method, params, cancel_key, &client)
+    }
     "resources/list" => Ok(json!({ "resources": [] })),
     "prompts/list" => Ok(json!({ "prompts": [] })),
     _ => Err(format!("method not found: {method}")),
@@ -362,7 +434,7 @@ fn serve(mut stream: TcpStream, app: AppHandle, state: McpState) {
     _ if is_init => {
       let fresh = format!("artdaddy-{}", state.next_id.fetch_add(1, Ordering::SeqCst));
       if let Ok(mut m) = state.sessions.lock() {
-        m.insert(fresh.clone(), ());
+        m.insert(fresh.clone(), ClientInfo::default());
       }
       fresh
     }
@@ -606,5 +678,64 @@ mod tests {
     let state = McpState::default();
     let key = cancel_key_for("nobody", &json!(99));
     assert!(state.in_flight.lock().unwrap().get(&key).is_none());
+  }
+
+  #[test]
+  fn a_client_is_remembered_by_what_it_said_when_it_connected() {
+    let state = McpState::default();
+    let said = json!({
+      "protocolVersion": "2025-06-18",
+      "clientInfo": { "name": "claude-code", "version": "2.1.0" }
+    });
+    let info = remember_client(&state, "artdaddy-1", &said);
+    assert_eq!(info, ClientInfo { name: "claude-code".into(), version: "2.1.0".into() });
+    assert_eq!(client_of(&state, "artdaddy-1"), info);
+    // Another session is its own client: two programs connected at once are never confused.
+    remember_client(&state, "artdaddy-2", &json!({ "clientInfo": { "name": "codex" } }));
+    assert_eq!(client_of(&state, "artdaddy-1").name, "claude-code");
+    assert_eq!(client_of(&state, "artdaddy-2").name, "codex");
+    assert_eq!(client_of(&state, "artdaddy-2").version, "");
+    // A session that never said anything is empty, not an error.
+    assert_eq!(client_of(&state, "artdaddy-9"), ClientInfo::default());
+  }
+
+  #[test]
+  fn a_client_that_says_nothing_usable_is_empty_not_an_error() {
+    for params in [
+      json!({}),
+      json!(null),
+      json!({ "clientInfo": null }),
+      json!({ "clientInfo": "claude" }),
+      json!({ "clientInfo": { "name": 7, "version": ["x"] } }),
+    ] {
+      assert_eq!(ClientInfo::from_params(&params), ClientInfo::default(), "{params}");
+    }
+  }
+
+  #[test]
+  fn a_long_name_is_cut_on_characters_never_stored_whole() {
+    let long = "x".repeat(10_000);
+    let info = ClientInfo::from_params(&json!({ "clientInfo": { "name": long, "version": long } }));
+    assert_eq!(info.name.chars().count(), CLIENT_TEXT_MAX);
+    assert_eq!(info.version.chars().count(), CLIENT_TEXT_MAX);
+    // A multi-byte name is cut between characters; cutting between bytes would panic.
+    let wide = "é".repeat(200);
+    let info = ClientInfo::from_params(&json!({ "clientInfo": { "name": wide } }));
+    assert_eq!(info.name.chars().count(), CLIENT_TEXT_MAX);
+  }
+
+  #[test]
+  fn a_second_initialize_on_a_session_replaces_what_the_first_said() {
+    let state = McpState::default();
+    remember_client(&state, "artdaddy-1", &json!({ "clientInfo": { "name": "old", "version": "1" } }));
+    remember_client(&state, "artdaddy-1", &json!({ "clientInfo": { "name": "new", "version": "2" } }));
+    assert_eq!(client_of(&state, "artdaddy-1"), ClientInfo { name: "new".into(), version: "2".into() });
+  }
+
+  #[test]
+  fn the_client_reaches_the_webview_as_a_name_and_a_version_and_nothing_else() {
+    let info = ClientInfo { name: "claude-code".into(), version: "2.1.0".into() };
+    assert_eq!(info.to_json(), json!({ "name": "claude-code", "version": "2.1.0" }));
+    assert_eq!(ClientInfo::default().to_json(), json!({ "name": "", "version": "" }));
   }
 }

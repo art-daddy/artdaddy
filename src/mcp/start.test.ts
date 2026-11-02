@@ -10,6 +10,8 @@ type ListenBehaviour = "ok" | "throw" | "hang";
 let listenBehaviour: ListenBehaviour = "ok";
 let listens = 0;
 const commands: string[] = [];
+const handlers = new Map<string, (event: { payload: unknown }) => void>();
+const reported: Array<[string, unknown]> = [];
 
 vi.mock("../platform", () => ({
   platform: { name: "tauri", capabilities: { localTools: true, fileSystem: true }, apiBaseUrl: "" },
@@ -17,13 +19,18 @@ vi.mock("../platform", () => ({
 
 vi.mock("../observability/sentry", () => ({ captureError: () => undefined }));
 
+vi.mock("../api/appEvents", () => ({
+  reportMcpEvent: (event: string, detail: unknown) => void reported.push([event, detail]),
+}));
+
 vi.mock("./instructions", () => ({ mcpInstructions: async () => "instructions" }));
 
 vi.mock("@tauri-apps/api/event", () => ({
-  listen: async () => {
+  listen: async (name: string, handler: (event: { payload: unknown }) => void) => {
     listens += 1;
     if (listenBehaviour === "throw") throw new Error("event system unavailable");
     if (listenBehaviour === "hang") return new Promise<never>(() => {});
+    handlers.set(name, handler);
     return () => undefined;
   },
 }));
@@ -54,6 +61,8 @@ beforeEach(() => {
   listenBehaviour = "ok";
   listens = 0;
   commands.length = 0;
+  handlers.clear();
+  reported.length = 0;
 });
 
 describe("startMcpServer — the socket follows the bridge, never leads it", () => {
@@ -117,5 +126,65 @@ describe("initMcp — a boot failure is recorded, not swallowed", () => {
     const { initMcp, mcpLastError } = await import("./service");
     await initMcp();
     expect(mcpLastError()).toBeNull();
+    expect(reported).toEqual([]);
+  });
+
+  it("says a taken port is a taken port, and anything else is 'other', without the raw message", async () => {
+    const { mcpBindFailureReason } = await import("./service");
+    expect(mcpBindFailureReason(new Error("could not bind: os error 10048"), "boot")).toBe(
+      "port_in_use:boot",
+    );
+    expect(mcpBindFailureReason("Address already in use (EADDRINUSE)", "toggle")).toBe(
+      "port_in_use:toggle",
+    );
+    expect(mcpBindFailureReason(new Error("access denied for C:\\Users\\ada"), "boot")).toBe(
+      "other:boot",
+    );
+    expect(mcpBindFailureReason(undefined, "toggle")).toBe("other:toggle");
+  });
+
+  it("tells the telemetry once when the boot could not start the server, with a closed reason", async () => {
+    listenBehaviour = "throw";
+    const { initMcp } = await import("./service");
+    await initMcp();
+    expect(reported).toEqual([["mcp_bind_failed", { reason: "other:boot" }]]);
+    expect(JSON.stringify(reported)).not.toMatch(/event system unavailable/);
+  });
+});
+
+describe("a program connecting is recorded by what it announced", () => {
+  async function connect(payload: unknown) {
+    const { startMcpServer } = await import("./service");
+    await startMcpServer();
+    const handler = handlers.get("artdaddy://mcp-session");
+    expect(handler, "the bridge listens for connecting programs").toBeDefined();
+    handler!({ payload });
+  }
+
+  it("reports its label, its own name and its version", async () => {
+    await connect({ session: "artdaddy-1", client: { name: "claude-code", version: "2.1.0" } });
+    expect(reported).toEqual([
+      ["mcp_connected", { client: "claude_code", reason: "claude-code 2.1.0" }],
+    ]);
+  });
+
+  it("reports a program it does not know as 'other', under its own name, so it can be found", async () => {
+    await connect({ session: "s", client: { name: "Brand New Agent", version: "0.1" } });
+    expect(reported).toEqual([
+      ["mcp_connected", { client: "other", reason: "Brand_New_Agent 0.1" }],
+    ]);
+  });
+
+  it("reports a program that said nothing as unknown, and a payload that is not an object without failing", async () => {
+    await connect({ session: "s" });
+    await connect(undefined);
+    await connect("garbage");
+    expect(
+      reported.map(([event, detail]) => [event, (detail as { client: string }).client]),
+    ).toEqual([
+      ["mcp_connected", "unknown"],
+      ["mcp_connected", "unknown"],
+      ["mcp_connected", "unknown"],
+    ]);
   });
 });

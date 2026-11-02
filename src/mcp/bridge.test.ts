@@ -329,4 +329,54 @@ describe("MCP trace delivery", () => {
     },
     15_000,
   );
+
+  it("labels each call with the program that made it, and keeps two programs' calls apart", async () => {
+    const { seededCtx, videoRunner } = await import("../test/timelineKit");
+    const { ctx } = await seededCtx(videoRunner, "/p");
+    vi.doMock("../tools/tauri", () => ({ makeTauriContext: async () => ctx }));
+    vi.doMock("../tools/dataRoot", async (original) => ({
+      ...(await original<typeof import("../tools/dataRoot")>()),
+      projectDirFor: async () => ctx.store.projectDir,
+    }));
+    vi.doMock("../store/projects", () => ({
+      useProjects: { getState: () => ({ activeId: "p", active: { id: "p", name: "QA" } }) },
+    }));
+    const { useAuth } = await import("../store/auth");
+    useAuth.setState({ status: "unlocked", hasStoredSession: true });
+    (await import("../api/auth")).setClerkTokenProvider(async () => "mcp-trace-test-token");
+    const traces: Array<Record<string, unknown>> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url, init) => {
+        if (String(url).endsWith("/telemetry/agent")) {
+          traces.push(JSON.parse(init!.body as string));
+          return new Response("", { status: 200 });
+        }
+        return new Response("offline", { status: 503 });
+      }),
+    );
+    vi.useFakeTimers();
+    const { dispatch } = await import("./bridge");
+    const call = (id: number, client?: unknown) =>
+      dispatch({
+        id,
+        method: "tools/call",
+        params: { name: "get_timeline", arguments: {} },
+        ...(client === undefined ? {} : { client }),
+      });
+    await call(1, { name: "claude-code", version: "2.1.0" });
+    await call(2, { name: "Visual Studio Code", version: "1.102.3" });
+    await call(3, { name: "Some New Agent", version: "9" });
+    await call(4); // a build of the app that did not carry who is asking
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(
+      traces.map((t) => [t.mcp_client, t.mcp_client_name, t.mcp_client_version, t.surface]),
+    ).toEqual([
+      ["claude_code", "claude-code", "2.1.0", "mcp"],
+      ["vscode", "Visual_Studio_Code", "1.102.3", "mcp"],
+      ["other", "Some_New_Agent", "9", "mcp"],
+      ["unknown", "", "", "mcp"],
+    ]);
+  }, 15_000);
 });

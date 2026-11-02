@@ -102,6 +102,11 @@ export interface AgentEventContext {
   model: string;
   project_id: string;
   transcript_id: string;
+  /** Which program is driving the editor, when it is an external agent (surface "mcp"): a label from the
+   *  closed list (mcp/clientName.ts), the name it announced and its version. Programs, never people. */
+  mcp_client?: string;
+  mcp_client_name?: string;
+  mcp_client_version?: string;
   readonly generation: number;
 }
 
@@ -486,6 +491,13 @@ async function deliverAgentEvents(
             model: group.context.model,
             project_id: group.context.project_id,
             transcript_id: group.context.transcript_id,
+            ...(group.context.mcp_client
+              ? {
+                  mcp_client: group.context.mcp_client,
+                  mcp_client_name: group.context.mcp_client_name ?? "",
+                  mcp_client_version: group.context.mcp_client_version ?? "",
+                }
+              : {}),
             os,
             arch,
             app_version: __ARTDADDY_RELEASE__,

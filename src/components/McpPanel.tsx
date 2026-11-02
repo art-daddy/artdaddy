@@ -6,6 +6,7 @@
 import { useEffect, useState } from "react";
 
 import { BRAND } from "../brand";
+import { reportMcpEvent } from "../api/appEvents";
 import {
   claudeCodeCommand,
   cursorConfigJson,
@@ -15,9 +16,11 @@ import {
   openInstallLink,
   vscodeInstallUrl,
 } from "../mcp/install";
+import type { McpClient } from "../mcp/clientName";
 import {
   MCP_PORT,
   clearMcpLastError,
+  mcpBindFailureReason,
   mcpLastError,
   recordMcpError,
   setMcpEnabledPreference,
@@ -33,6 +36,8 @@ const server = BRAND.mcpServerName;
 
 type Client = {
   label: string;
+  /** The label this program is counted under (the same list a connecting program is normalised to). */
+  client: McpClient;
   code: string;
   note?: string;
   /** Editors that can register a server from a URL. The config below stays as the fallback:
@@ -46,12 +51,14 @@ type Client = {
 const CLIENTS: Client[] = [
   {
     label: "Cursor",
+    client: "cursor",
     install: cursorInstallUrl,
     note: "or add to ~/.cursor/mcp.json",
     code: cursorConfigJson(),
   },
   {
     label: "VS Code / Copilot",
+    client: "vscode",
     install: () => vscodeInstallUrl(),
     note: "or add to .vscode/mcp.json",
     code: `{
@@ -62,6 +69,7 @@ const CLIENTS: Client[] = [
   },
   {
     label: "Claude Desktop",
+    client: "claude_desktop",
     installer: installClaudeConnector,
     note: "Windows/macOS. Install saves the connector and shows you where it is.",
     // NOT a config snippet: claude_desktop_config.json is stdio-only and silently ignores the
@@ -77,13 +85,14 @@ ArtDaddy must be running for Claude to reach it.`,
   // binary, which this app is not allowed to do.
   {
     label: "Claude Code",
+    client: "claude_code",
     note: "installs for every project on Linux, macOS and Windows while ArtDaddy is running",
     code: claudeCodeCommand(),
   },
-  { label: "Codex", code: `codex mcp add ${server} --url ${endpoint}` },
+  { label: "Codex", client: "codex", code: `codex mcp add ${server} --url ${endpoint}` },
 ];
 
-function Snippet({ label, code, note, install, installer }: Client) {
+function Snippet({ label, client, code, note, install, installer }: Client) {
   const [copied, setCopied] = useState(false);
   const [failure, setFailure] = useState("");
   const [hint, setHint] = useState("");
@@ -107,6 +116,7 @@ function Snippet({ label, code, note, install, installer }: Client) {
                 void run().then((r) => {
                   if (r.ok) {
                     setDone(true);
+                    reportMcpEvent("mcp_config_written", { client, reason: "install" });
                     // An instruction must not vanish on a timer the way a tick can: this is the
                     // step the user still has to perform, not a confirmation that it is done.
                     if (r.message) setHint(r.message);
@@ -122,6 +132,7 @@ function Snippet({ label, code, note, install, installer }: Client) {
             onClick={() => {
               void navigator.clipboard?.writeText(code).then(() => {
                 setCopied(true);
+                reportMcpEvent("mcp_config_written", { client, reason: "copy" });
                 setTimeout(() => setCopied(false), 1200);
               });
             }}
@@ -164,9 +175,12 @@ export default function McpPanel() {
       setRunning(s.running);
       setError(null);
       clearMcpLastError();
+      // The switch, as the person used it: only when the server really is in the state they asked for.
+      if (s.running === next) reportMcpEvent(next ? "mcp_enabled" : "mcp_disabled");
     } catch (e) {
       setRunning(false);
       setError(recordMcpError(e));
+      if (next) reportMcpEvent("mcp_bind_failed", { reason: mcpBindFailureReason(e, "toggle") });
     } finally {
       setBusy(false);
     }

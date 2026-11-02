@@ -10,6 +10,8 @@ import { scrubAbsolutePaths } from "../agent/scrubPaths";
 import { capToolResult } from "../agent/truncate";
 import { mcpInstructions } from "./instructions";
 import { mcpTools } from "./tools";
+import { mcpClientFacts } from "./clientName";
+import { reportMcpEvent } from "../api/appEvents";
 import type { ToolTrace } from "../api/agentEvents";
 import { compatibilityAllowsWork } from "../update/compatibility";
 
@@ -17,6 +19,8 @@ import { compatibilityAllowsWork } from "../update/compatibility";
 // silently drops every request.
 const REQUEST_EVENT = "artdaddy://mcp-request";
 const CANCEL_EVENT = "artdaddy://mcp-cancel";
+/** A program connected (`initialize`): Rust says which, from what it announced about itself. */
+const SESSION_EVENT = "artdaddy://mcp-session";
 
 // A client's Stop button arrives as `notifications/cancelled`; Rust maps it back to the bridge id
 // and emits CANCEL_EVENT. Without this the tool runs to completion after the user gave up â€” a
@@ -66,6 +70,9 @@ interface BridgeRequest {
   id: number;
   method: string;
   params: Record<string, unknown>;
+  /** The program that asked: what it announced about itself when it connected (absent from a build that
+   *  did not carry it). */
+  client?: unknown;
 }
 
 /** MCP's result envelope. Tool payloads are JSON, so they travel as a text block; rendered frames
@@ -357,6 +364,7 @@ export async function dispatch(
       const { agentEventContext, createToolTrace } = await import("../api/agentEvents");
       const { activeId } = (await projects()).getState();
       const params = req.params ?? {};
+      const who = mcpClientFacts(req.client);
       const trace = createToolTrace(
         String(params.name ?? ""),
         params.arguments ?? {},
@@ -366,6 +374,9 @@ export async function dispatch(
           project_id: activeId ?? "",
           model: "",
           transcript_id: "",
+          mcp_client: who.client,
+          mcp_client_name: who.name,
+          mcp_client_version: who.version,
         },
         String(req.id),
       );
@@ -409,6 +420,15 @@ async function wire(): Promise<void> {
 
   await listen<{ id: number }>(CANCEL_EVENT, (event) => {
     inFlight.get(event.payload.id)?.abort();
+  });
+
+  // A program connected: record which (a label, its own name, its version). Nothing about the person.
+  await listen<{ client?: unknown }>(SESSION_EVENT, (event) => {
+    const who = mcpClientFacts(event.payload?.client);
+    reportMcpEvent("mcp_connected", {
+      client: who.client,
+      reason: [who.name, who.version].filter(Boolean).join(" "),
+    });
   });
 
   await listen<BridgeRequest>(REQUEST_EVENT, (event) => {

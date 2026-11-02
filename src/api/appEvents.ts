@@ -21,7 +21,19 @@ export type AppEvent =
   | "app_error"
   | "credits_exhausted"
   | "transcription"
-  | "turn_error";
+  | "turn_error"
+  | McpAppEvent;
+
+/** How an external agent's connection to the editor goes: the switch, a program connecting, the person copying or
+ *  installing its setup, and the port being taken. Written down again on the server (analytics.py MCP_APP_EVENTS). */
+export const MCP_APP_EVENTS = [
+  "mcp_enabled",
+  "mcp_disabled",
+  "mcp_connected",
+  "mcp_config_written",
+  "mcp_bind_failed",
+] as const;
+export type McpAppEvent = (typeof MCP_APP_EVENTS)[number];
 
 interface AppEventDetail {
   projectId?: string;
@@ -217,6 +229,20 @@ export function reportMediaImport(ok: boolean, projectId = "", reason = "", via 
 export function reportAppError(reason: string, projectId = ""): void {
   if (!reason) return;
   void reportAppEvent("app_error", { projectId, ok: false, reason });
+}
+
+/** One step of an external agent's connection (see MCP_APP_EVENTS). `client` is a label from the closed list in
+ *  mcp/clientName.ts or a setup target; `reason` a short word or the program's own name and version: never a path,
+ *  an address, or anything the person wrote. */
+export function reportMcpEvent(
+  event: McpAppEvent,
+  detail: { client?: string; reason?: string } = {},
+): void {
+  void reportAppEvent(event, {
+    via: legalText(detail.client, 30),
+    reason: legalText(detail.reason, 120),
+    ...(event === "mcp_bind_failed" ? { ok: false } : {}),
+  });
 }
 
 // Reported once per over-limit transition, not per refusal: a shot list produces a run of

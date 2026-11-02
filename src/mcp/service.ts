@@ -4,6 +4,7 @@
 // external agent can connect without the user first hunting for a setting. It binds to loopback
 // only, so "on by default" does not expose anything to the network.
 import { platform } from "../platform";
+import { reportMcpEvent } from "../api/appEvents";
 import { captureError } from "../observability/sentry";
 import { startMcpBridge } from "./bridge";
 
@@ -73,6 +74,8 @@ export function clearMcpLastError(): void {
   lastError = null;
 }
 
+const PORT_IN_USE = /(10048|address (already )?in use|EADDRINUSE|only one usage of each socket)/i;
+
 /** Turn a boot failure into something the person reading it can act on. Both the boot hook and
  *  the panel toggle go through here, so neither can show a rawer message than the other.
  *
@@ -80,13 +83,20 @@ export function clearMcpLastError(): void {
  *  running and holding the port, and "os error 10048" told nobody that. */
 export function explainMcpError(e: unknown): string {
   const raw = (e as Error)?.message ?? String(e);
-  if (/(10048|address (already )?in use|EADDRINUSE|only one usage of each socket)/i.test(raw)) {
+  if (PORT_IN_USE.test(raw)) {
     return (
       `Port ${MCP_PORT} is already taken — another copy of this app is probably still running. ` +
       `Close it (check the system tray) and switch this back on.`
     );
   }
   return raw;
+}
+
+/** Why the server did not start, as a closed word plus where it happened: what is worth counting is whether a
+ *  second copy of the app holds the port. The raw message (which names addresses and paths) is never reported. */
+export function mcpBindFailureReason(e: unknown, where: "boot" | "toggle"): string {
+  const raw = (e as Error)?.message ?? String(e);
+  return `${PORT_IN_USE.test(raw) ? "port_in_use" : "other"}:${where}`;
 }
 
 export function recordMcpError(e: unknown): string {
@@ -103,6 +113,7 @@ export async function initMcp(): Promise<void> {
     clearMcpLastError();
   } catch (e) {
     captureError(e, { where: "initMcp" });
+    reportMcpEvent("mcp_bind_failed", { reason: mcpBindFailureReason(e, "boot") });
     console.warn("[mcp] server did not start; external agents cannot connect", recordMcpError(e));
   }
 }
