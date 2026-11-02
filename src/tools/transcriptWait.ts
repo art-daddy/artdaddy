@@ -7,6 +7,7 @@
 // call finds the words in the cache.
 import { settledWithin } from "../lib/settledWithin";
 import { hostInfo, type HostOs } from "../platform/host";
+import { trackSpeechWait } from "../store/liveWait";
 import { downloadEtaSeconds, percent, useModelDownload } from "../store/modelDownload";
 import {
   classifyTranscriptFailure,
@@ -76,6 +77,8 @@ export function modelDownloadNow(): DownloadProgress | null {
 export interface WaitRequest<T> {
   /** One per transcript wanted: two calls with the same key are one piece of work. */
   key: string;
+  /** The tool that is waiting. The chat says it is transcribing, not what the tool usually does. */
+  tool: string;
   /** The speech to be transcribed, in seconds; null when it is not known. */
   audioSeconds: number | null;
   /** That length as a person reads it ("2:30"), for the note. */
@@ -160,7 +163,7 @@ export async function waitForRun<T>(req: WaitRequest<T>): Promise<WaitOutcome<T>
       if (looks.get(req.key) === look) looks.delete(req.key);
     });
   }
-  const got = await settledWithin(settled, req.boundMs, req.signal);
+  const got = await trackSpeechWait(req.tool, settledWithin(settled, req.boundMs, req.signal));
   if (req.signal?.aborted) return { kind: "cancelled" };
   if (got?.ok) return { kind: "done", value: got.value };
   if (got) return { kind: "failed", status: failedTranscript(got.error) };

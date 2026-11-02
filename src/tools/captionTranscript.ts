@@ -30,6 +30,7 @@ export async function captionWords(
 ): Promise<CaptionWords> {
   const outcome = await waitForRun({
     key: `${ref}\u0000${language ?? ""}\u0000captions`,
+    tool: "add_captions",
     audioSeconds: null,
     audioLabel: "",
     run: ensureTranscript(ctx, ref, undefined, language),

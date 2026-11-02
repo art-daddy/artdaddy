@@ -5,12 +5,17 @@
 // shows how long it has lasted once that is worth showing, and after half a minute says the one thing
 // that matters then: it is still going, and Stop is there.
 import type { LiveCall, LiveRound } from "../store/liveWait";
+import { MODEL_DOWNLOAD_NOTE } from "../store/modelDownload";
 import { runningPhrase } from "./toolSummary";
 
 /** A wait shorter than this needs no clock: it would only flicker. */
 export const SHOW_ELAPSED_AFTER_S = 3;
 /** From here on the line says it is still going and that Stop is available. */
 export const SLOW_AFTER_S = 30;
+
+/** What a tool that is waiting for speech says it is doing, whatever it is usually called. */
+export const TRANSCRIBING_LABEL = "Transcribing the audio";
+export const DOWNLOADING_MODEL_LABEL = "Downloading the speech model (one time)";
 
 export type WaitKind = "approval" | "tool" | "model";
 
@@ -24,7 +29,9 @@ export interface WaitStatus {
   showElapsed: boolean;
   slow: boolean;
   /** One sentence for a slow wait; null while it is not slow, and always for an approval (the
-   *  turn is waiting on the person, not the other way round). */
+   *  turn is waiting on the person, not the other way round). A wait that needs explaining from
+   *  the first second (the speech model's one-time download, a request waiting for the last
+   *  one to finish) says so at once. */
   hint: string | null;
 }
 
@@ -33,12 +40,31 @@ export interface WaitInput {
   calls: readonly LiveCall[];
   approvalSince: number | null;
   now: number;
+  /** Names of the tools waiting for speech to be transcribed right now. */
+  speechTools?: readonly string[];
+  /** The speech model is downloading, which is what any speech wait is then waiting for. */
+  downloadingModel?: boolean;
 }
 
 const ROUND_LABEL = {
   preparing: "Getting ready",
   waiting: "Thinking",
   writing: "Writing",
+} as const;
+
+/** What a round says while its request, not the model, is what is waiting. A reconnect lasts about a second, so it
+ *  explains itself only if it drags on; the busy wait starts at 15 s, so it says why straight away. */
+const ROUND_NOTE = {
+  reconnecting: {
+    label: "Reconnecting",
+    hint: "Still trying to reach the server. You can press Stop at any time.",
+    explainAtOnce: false,
+  },
+  busy: {
+    label: "Waiting for your last request",
+    hint: "Your last request is still finishing, so this one starts when it ends. You can press Stop at any time.",
+    explainAtOnce: true,
+  },
 } as const;
 
 const finite = (n: number, fallback: number): number => (Number.isFinite(n) ? n : fallback);
@@ -48,7 +74,13 @@ const finite = (n: number, fallback: number): number => (Number.isFinite(n) ? n 
  *  the model. */
 export function waitStatus(input: WaitInput): WaitStatus | null {
   const now = finite(input.now, 0);
-  const make = (kind: WaitKind, label: string, since: number, hint: string | null): WaitStatus => {
+  const make = (
+    kind: WaitKind,
+    label: string,
+    since: number,
+    hint: string | null,
+    hintFromStart = false,
+  ): WaitStatus => {
     const started = finite(since, now);
     const elapsedS = Math.max(0, Math.floor((now - started) / 1000));
     const slow = kind !== "approval" && elapsedS >= SLOW_AFTER_S;
@@ -59,7 +91,7 @@ export function waitStatus(input: WaitInput): WaitStatus | null {
       elapsedS,
       showElapsed: elapsedS >= SHOW_ELAPSED_AFTER_S,
       slow,
-      hint: slow ? hint : null,
+      hint: slow || hintFromStart ? hint : null,
     };
   };
 
@@ -70,21 +102,34 @@ export function waitStatus(input: WaitInput): WaitStatus | null {
     let oldest = input.calls[0];
     for (const call of input.calls) if (call.startedAt < oldest.startedAt) oldest = call;
     const more = input.calls.length - 1;
+    const onSpeech = input.speechTools?.includes(oldest.name) === true;
+    const downloading = onSpeech && input.downloadingModel === true;
+    const phrase = downloading
+      ? DOWNLOADING_MODEL_LABEL
+      : onSpeech
+        ? TRANSCRIBING_LABEL
+        : runningPhrase(oldest.name);
     return make(
       "tool",
-      more > 0 ? `${runningPhrase(oldest.name)} (+${more} more)` : runningPhrase(oldest.name),
+      more > 0 ? `${phrase} (+${more} more)` : phrase,
       oldest.startedAt,
-      "Still working on this. You can press Stop at any time.",
+      downloading
+        ? `${MODEL_DOWNLOAD_NOTE} You can press Stop at any time.`
+        : "Still working on this. You can press Stop at any time.",
+      downloading,
     );
   }
 
-  if (input.round)
+  if (input.round) {
+    const note = input.round.note ? ROUND_NOTE[input.round.note] : null;
     return make(
       "model",
-      ROUND_LABEL[input.round.phase],
+      note?.label ?? ROUND_LABEL[input.round.phase],
       input.round.startedAt,
-      "The AI is taking longer than usual. You can press Stop at any time.",
+      note?.hint ?? "The AI is taking longer than usual. You can press Stop at any time.",
+      note?.explainAtOnce ?? false,
     );
+  }
 
   return null;
 }

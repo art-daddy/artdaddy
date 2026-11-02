@@ -19,6 +19,7 @@ vi.mock("@tauri-apps/api/path", () => ({ resolveResource: async () => "C:/res/fo
 import type { ClientToolContext } from "./context";
 import { buildTranscript } from "./inspect";
 import { clearModelDownload } from "../store/modelDownload";
+import { resetLiveWait, useLiveWait } from "../store/liveWait";
 import { cpuOnlyNow, CPU_ONLY_HOLD_MS } from "./speechBackend";
 import { TRANSCRIPT_FAILURE_REASONS, type TranscriptFailureReason } from "./speechFailure";
 import { readPace } from "./speechPace";
@@ -224,6 +225,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   localStorage.clear();
   __resetWaiting();
+  resetLiveWait();
   reportAppError.mockClear();
 });
 
@@ -237,6 +239,18 @@ afterEach(async () => {
 });
 
 describe("a look that has to wait for a transcript", () => {
+  it("tells the chat it is waiting for speech while it waits, so the line says so, and not after", async () => {
+    const { ctx } = rig({ engineMs: 40_000 });
+    const waiting = (): string[] => useLiveWait.getState().speechWaits.map((w) => w.tool);
+    const seen = startLook(ctx, freshSrc(), look(30));
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(seen.at).toBeNull();
+    expect(waiting()).toEqual(["inspect_media"]);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(seen.at).toBe(15_000);
+    expect(waiting()).toEqual([]);
+  });
+
   it("answers at the bound with an estimate while a 40 s engine goes on, and the next look has the words", async () => {
     const { ctx, engineRuns } = rig({ engineMs: 40_000 });
     const src = freshSrc();

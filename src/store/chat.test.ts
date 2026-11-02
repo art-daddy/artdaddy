@@ -1988,6 +1988,50 @@ describe("useChat tells the status line what the turn is waiting on", () => {
     expect(live().round).toBeNull();
   });
 
+  it("says what the round's request is waiting on while it is, and stops saying so", async () => {
+    await startTurn();
+    const seen: Array<string | undefined> = [];
+    (inferRoundStreaming as Any).mockImplementationOnce(
+      async (
+        _body: Any,
+        _onDelta: unknown,
+        _signal: unknown,
+        onWait: (wait: string | null) => void,
+      ) => {
+        onWait("reconnecting");
+        seen.push(live().round?.note);
+        onWait("busy");
+        seen.push(live().round?.note);
+        onWait(null);
+        seen.push(live().round?.note);
+        return ANSWER;
+      },
+    );
+    await lastDeps.infer({ user_text: "hi" }, []);
+    expect(seen).toEqual(["reconnecting", "busy", undefined]);
+  });
+
+  it("does not let a retired turn's reconnect paint the round of the turn that replaced it", async () => {
+    await startTurn();
+    const first = lastDeps;
+    let wait!: (note: string | null) => void;
+    let finishFirst!: (v: unknown) => void;
+    (inferRoundStreaming as Any).mockImplementationOnce(
+      (_body: Any, _onDelta: unknown, _signal: unknown, onWait: (note: string | null) => void) => {
+        wait = onWait;
+        return new Promise((resolve) => (finishFirst = resolve));
+      },
+    );
+    const firstRound = first.infer({ user_text: "hi" }, []);
+    await useChat.getState().send("second message"); // retires the first turn
+    (inferRoundStreaming as Any).mockImplementationOnce(() => new Promise(() => undefined));
+    void lastDeps.infer({ user_text: "second" }, []);
+    wait("reconnecting");
+    expect(live().round?.note).toBeUndefined();
+    finishFirst(ANSWER);
+    await firstRound;
+  });
+
   it("does not let a retired turn's round ending wipe the round of the turn that replaced it", async () => {
     await startTurn();
     const first = lastDeps;

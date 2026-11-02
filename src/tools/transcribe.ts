@@ -36,6 +36,7 @@ import { adoptTurn, lookWhisper } from "./workGate";
 import { reportAppError, reportTranscription } from "../api/appEvents";
 import { beginSessionActivity } from "../observability/crashWatch";
 import { settledWithin } from "../lib/settledWithin";
+import { trackSpeechWait } from "../store/liveWait";
 import {
   clearModelDownload,
   megabytes,
@@ -1666,7 +1667,10 @@ export async function getTranscriptTool(
       (t) => ({ words: t.words }),
       (e: unknown) => ({ error: transcriptionFailureText(e) }),
     );
-    const got = await settledWithin(run, Math.max(0, until - Date.now()), ctx.signal);
+    const got = await trackSpeechWait(
+      "get_transcript",
+      settledWithin(run, Math.max(0, until - Date.now()), ctx.signal),
+    );
     if (got) Object.assign(job, got);
     else overdue = job;
   }

@@ -3,10 +3,11 @@
 import { authedFetch, notifyAuthFailure } from "../api/auth";
 import { api } from "../api/client";
 import {
-  fetchRetryingBusy,
+  fetchRound,
   fetchWithRetry,
   RateLimitError,
   SessionExpiredError,
+  type RoundWait,
 } from "../api/http";
 import { readSSE } from "../api/sse";
 import { CreditLimitError, markOverLimit } from "../api/usage";
@@ -199,13 +200,14 @@ export async function inferRoundStreaming(
   body: InferBody,
   onDelta: (d: RoundDelta) => void,
   signal?: AbortSignal,
+  onWait?: (wait: RoundWait | null) => void,
 ): Promise<RoundResultDTO> {
   const base = api.base;
   if (noStreamRoute.has(base)) return inferRound(body, signal);
 
   const deadline = withDeadline(signal, ROUND_TIMEOUT_MS);
   try {
-    return await streamRound(base, body, onDelta, deadline.signal, signal);
+    return await streamRound(base, body, onDelta, deadline.signal, signal, onWait);
   } catch (e) {
     return deadline.rethrow(e);
   } finally {
@@ -219,6 +221,7 @@ async function streamRound(
   onDelta: (d: RoundDelta) => void,
   signal: AbortSignal,
   userSignal: AbortSignal | undefined,
+  onWait: ((wait: RoundWait | null) => void) | undefined,
 ): Promise<RoundResultDTO> {
   const res = await authedFetch(
     api.inferenceStreamUrl(),
@@ -231,8 +234,9 @@ async function streamRound(
       body: JSON.stringify(withClientInfo(body)),
       signal,
     },
-    // The server's typed busy answers (account_busy, server_busy) mean nothing ran: wait them out, bounded.
-    (u, init) => fetchRetryingBusy(u, init, signal),
+    // The server's typed busy answers (account_busy, server_busy) mean nothing ran: wait them out, bounded. A connection
+    // that never answered, or a 502/503/504, is tried once more (http.ts fetchRound); nothing after the first byte is.
+    (u, init) => fetchRound(u, init, signal, onWait),
   );
 
   if (res.status === 404 || res.status === 405) {

@@ -2,6 +2,7 @@ import fc from "fast-check";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { toolDefinition } from "../contract";
+import { resetLiveWait, useLiveWait } from "../store/liveWait";
 import { TranscriptionFailure } from "./speechFailure";
 import {
   __resetWaiting,
@@ -15,6 +16,7 @@ import {
 beforeEach(() => {
   vi.useFakeTimers();
   __resetWaiting();
+  resetLiveWait();
 });
 afterEach(() => vi.useRealTimers());
 
@@ -62,6 +64,7 @@ const NEVER = (): Promise<never> => new Promise<never>(() => undefined);
 function request<T>(run: Promise<T>, extra: Partial<WaitRequest<T>> = {}): WaitRequest<T> {
   return {
     key: `k${++seq}`,
+    tool: "inspect_media",
     audioSeconds: 30,
     audioLabel: "0:30",
     run,
@@ -138,6 +141,67 @@ describe("waitForRun", () => {
     const seen = start(request(NEVER(), { signal: stop.signal }));
     await vi.advanceTimersByTimeAsync(0);
     expect(seen).toEqual({ at: 0, outcome: { kind: "cancelled" } });
+  });
+
+  // The chat says "Transcribing the audio" for exactly as long as a tool is waiting here, so the
+  // record must be there while the wait lasts and gone by every way it can end.
+  describe("the chat's record of who is waiting on speech", () => {
+    const waiting = (): string[] => useLiveWait.getState().speechWaits.map((w) => w.tool);
+
+    it("names the tool for as long as it waits, and not a moment after it answers", async () => {
+      const seen = start(request(NEVER(), { tool: "add_captions", boundMs: 7_000 }));
+      await vi.advanceTimersByTimeAsync(6_999);
+      expect(waiting()).toEqual(["add_captions"]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(seen.outcome?.kind).toBe("pending");
+      expect(waiting()).toEqual([]);
+    });
+
+    it("is empty after every way a wait can end, and the run it waited for is not touched", async () => {
+      const stop = new AbortController();
+      const ends: Array<[string, Partial<WaitRequest<string>>, () => void]> = [
+        ["done", {}, () => undefined],
+        ["failed", {}, () => undefined],
+        ["pending", { boundMs: 3_000 }, () => undefined],
+        ["stopped", { signal: stop.signal, boundMs: 60_000 }, () => stop.abort()],
+      ];
+      for (const [name, extra, cause] of ends) {
+        let finish!: (v: string) => void;
+        let fail!: (e: unknown) => void;
+        const run = new Promise<string>((res, rej) => ((finish = res), (fail = rej)));
+        const seen = start(request(run, extra));
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(waiting(), `${name}: while waiting`).toEqual(["inspect_media"]);
+        if (name === "done") finish("words");
+        if (name === "failed") fail(new Error("boom"));
+        cause();
+        await vi.advanceTimersByTimeAsync(3_000);
+        expect(seen.outcome, name).not.toBeNull();
+        expect(waiting(), `${name}: after`).toEqual([]);
+        finish("late"); // whatever the run does afterwards changes nothing in the record
+        await vi.advanceTimersByTimeAsync(0);
+        expect(waiting(), `${name}: after the run ended`).toEqual([]);
+      }
+    });
+
+    it("is empty for a call that was stopped before it began", async () => {
+      const stop = new AbortController();
+      stop.abort();
+      start(request(NEVER(), { signal: stop.signal }));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(waiting()).toEqual([]);
+    });
+
+    it("lists each waiting tool, and one ending does not end another", async () => {
+      start(request(NEVER(), { tool: "add_captions", boundMs: 5_000 }));
+      start(request(NEVER(), { tool: "inspect_media", boundMs: 9_000 }));
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(waiting().sort()).toEqual(["add_captions", "inspect_media"]);
+      await vi.advanceTimersByTimeAsync(4_000);
+      expect(waiting()).toEqual(["inspect_media"]);
+      await vi.advanceTimersByTimeAsync(4_000);
+      expect(waiting()).toEqual([]);
+    });
   });
 
   describe("when the run fails", () => {

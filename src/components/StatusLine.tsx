@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { useLiveWait } from "../store/liveWait";
+import { useModelDownload } from "../store/modelDownload";
 import { Spinner } from "./ui";
 import { clockText, waitStatus } from "./waitStatus";
 
@@ -22,8 +23,11 @@ export default function StatusLine() {
   const round = useLiveWait((s) => s.round);
   const calls = useLiveWait((s) => s.calls);
   const approvalSince = useLiveWait((s) => s.approvalSince);
+  const speechWaits = useLiveWait((s) => s.speechWaits);
+  const downloadingModel = useModelDownload((s) => s.total > 0);
+  const speechTools = useMemo(() => speechWaits.map((w) => w.tool), [speechWaits]);
   const now = useNow();
-  const status = waitStatus({ round, calls, approvalSince, now });
+  const status = waitStatus({ round, calls, approvalSince, now, speechTools, downloadingModel });
 
   return (
     <div className="flex flex-col gap-0.5 text-xs" data-testid="status-line">
