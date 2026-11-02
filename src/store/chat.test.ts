@@ -21,6 +21,7 @@ import {
   persistSessionSoon,
 } from "./transcriptFile";
 import { inferRoundStreaming } from "../agent/api";
+import { askForAttention } from "../lib/attention";
 import { TIMELINE_CHANGED_NOTE } from "../agent/compose";
 import { ABORT_GRACE_MS, READ_BOUND_MS, timedOutResult } from "../agent/toolBound";
 import {
@@ -81,6 +82,7 @@ vi.mock("../tools/host", () => ({
   })),
 }));
 vi.mock("../agent/api", () => ({ inferRound: vi.fn(), inferRoundStreaming: vi.fn() }));
+vi.mock("../lib/attention", () => ({ askForAttention: vi.fn(async () => undefined) }));
 vi.mock("../agent/attachments", () => ({ collectInferenceAttachments: vi.fn() }));
 // The history's own frames (read from the project by historyFrames.ts, tested there).
 const { HISTORY_FRAMES } = vi.hoisted(() => ({
@@ -2387,5 +2389,25 @@ describe("useChat records each turn (T-11, T-12)", () => {
     await startTurn();
     emit("turn_done", snap());
     expect(events()).toEqual([]);
+  });
+
+  it("draws the person's eye when the turn stops to ask them, or to wait for Continue, and for nothing else", async () => {
+    await startTurn();
+    emit("tool_call", { call_id: "c0", name: "inspect_media", args: {} });
+    emit("tool_result", { call_id: "c0", name: "inspect_media", ok: true });
+    emit("text", { text: "working" });
+    expect(askForAttention).not.toHaveBeenCalled();
+
+    emit("awaiting_approval", { calls: [{ call_id: "c1", name: "export", arguments: {} }] });
+    emit("turn_paused", snap()); // the same stop: one hint, not two
+    expect(askForAttention).toHaveBeenCalledTimes(1);
+
+    await useChat.getState().approve("c1");
+    emit("turn_paused", snap({ can_continue: true }));
+    expect(askForAttention).toHaveBeenCalledTimes(2);
+
+    await useChat.getState().continueRun();
+    emit("turn_done", snap());
+    expect(askForAttention).toHaveBeenCalledTimes(2);
   });
 });

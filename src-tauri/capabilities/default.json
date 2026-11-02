@@ -7,6 +7,7 @@
     "core:default",
     "core:window:allow-close",
     "core:window:allow-destroy",
+    "core:window:allow-request-user-attention",
     "fs:allow-read-text-file",
     "fs:allow-write-text-file",
     "fs:allow-read-file",
