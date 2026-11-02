@@ -1,13 +1,28 @@
 // The setup pane is the only way a user learns the endpoint exists, so its snippets have to be
 // correct. A wrong port here is invisible in every other test and fails as "the agent can't
 // connect" — with nothing to point at.
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import McpPanel from "./McpPanel";
 import { BRAND } from "../brand";
-import { MCP_PORT } from "../mcp/service";
+import { openInstallLink } from "../mcp/install";
+import { MCP_PORT, mcpStatus, startMcpServer, stopMcpServer } from "../mcp/service";
 import { useMcpPanel } from "../store/mcpPanel";
+
+const reported = vi.hoisted(() => [] as Array<[string, unknown]>);
+vi.mock("../api/appEvents", () => ({
+  reportMcpEvent: (event: string, detail?: unknown) => void reported.push([event, detail]),
+}));
+
+vi.mock("../mcp/install", async () => {
+  const actual = await vi.importActual<typeof import("../mcp/install")>("../mcp/install");
+  return {
+    ...actual,
+    openInstallLink: vi.fn(async () => ({ ok: true as const })),
+    installClaudeConnector: vi.fn(async () => ({ ok: true as const })),
+  };
+});
 
 vi.mock("../mcp/service", async () => {
   const actual = await vi.importActual<typeof import("../mcp/service")>("../mcp/service");
@@ -24,7 +39,10 @@ const codeBlocks = () =>
 
 // The pane reads `running` from a module-level store now, so one test's refresh would otherwise
 // leave the next one thinking the server is up.
-beforeEach(() => useMcpPanel.setState({ open: false, running: false }));
+beforeEach(() => {
+  useMcpPanel.setState({ open: false, running: false });
+  reported.length = 0;
+});
 
 describe("MCP setup pane", () => {
   it("advertises the port the server actually binds", () => {
@@ -92,5 +110,80 @@ describe("MCP setup pane", () => {
   it("warns while it is stopped, so a failed connection is explained up front", () => {
     render(<McpPanel />);
     expect(screen.getByText(/Turn this on before adding the server/i)).toBeInTheDocument();
+  });
+});
+
+// What the person does here is recorded as which switch they used and which agent they set up: the program's
+// label and a word, nothing they typed.
+describe("MCP setup pane: what the person does is reported", () => {
+  const stopped = () => vi.mocked(mcpStatus).mockResolvedValue({ running: false, port: MCP_PORT });
+
+  it("says the switch was turned on, only once the server really is on", async () => {
+    stopped();
+    render(<McpPanel />);
+    fireEvent.click(await screen.findByText("Off"));
+    await waitFor(() => expect(reported).toEqual([["mcp_enabled", undefined]]));
+  });
+
+  it("says the switch was turned off", async () => {
+    vi.mocked(mcpStatus).mockResolvedValue({ running: true, port: MCP_PORT });
+    render(<McpPanel />);
+    fireEvent.click(await screen.findByText("On"));
+    await waitFor(() => expect(reported).toEqual([["mcp_disabled", undefined]]));
+  });
+
+  it("says nothing was switched on when the port is taken, and why, without the raw message", async () => {
+    stopped();
+    vi.mocked(startMcpServer).mockRejectedValueOnce(
+      new Error("could not bind 127.0.0.1:19787: Only one usage of each socket address"),
+    );
+    render(<McpPanel />);
+    fireEvent.click(await screen.findByText("Off"));
+    await waitFor(() =>
+      expect(reported).toEqual([["mcp_bind_failed", { reason: "port_in_use:toggle" }]]),
+    );
+    expect(JSON.stringify(reported)).not.toMatch(/127\.0\.0\.1|socket address/);
+  });
+
+  it("does not claim a switch the server did not follow", async () => {
+    stopped();
+    vi.mocked(startMcpServer).mockResolvedValueOnce({ running: false, port: MCP_PORT });
+    render(<McpPanel />);
+    fireEvent.click(await screen.findByText("Off"));
+    await waitFor(() => expect(vi.mocked(startMcpServer)).toHaveBeenCalled());
+    await Promise.resolve();
+    expect(reported).toEqual([]);
+    expect(vi.mocked(stopMcpServer)).not.toHaveBeenCalled();
+  });
+
+  it("says which agent's setup was copied, for every agent the pane lists", async () => {
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    render(<McpPanel />);
+    const buttons = screen.getAllByText("Copy");
+    expect(buttons).toHaveLength(5);
+    for (const button of buttons) fireEvent.click(button);
+    await waitFor(() => expect(reported).toHaveLength(5));
+    expect(reported.map(([event, detail]) => [event, detail])).toEqual([
+      ["mcp_config_written", { client: "cursor", reason: "copy" }],
+      ["mcp_config_written", { client: "vscode", reason: "copy" }],
+      ["mcp_config_written", { client: "claude_desktop", reason: "copy" }],
+      ["mcp_config_written", { client: "claude_code", reason: "copy" }],
+      ["mcp_config_written", { client: "codex", reason: "copy" }],
+    ]);
+  });
+
+  it("says which agent was installed, and nothing when the install did not go through", async () => {
+    render(<McpPanel />);
+    const [cursor, vscode] = screen.getAllByText("Install");
+    fireEvent.click(cursor);
+    await waitFor(() => expect(reported).toHaveLength(1));
+    expect(reported[0]).toEqual(["mcp_config_written", { client: "cursor", reason: "install" }]);
+
+    vi.mocked(openInstallLink).mockResolvedValueOnce({ ok: false, message: "no handler" });
+    fireEvent.click(vscode);
+    await waitFor(() => expect(vi.mocked(openInstallLink)).toHaveBeenCalledTimes(2));
+    await Promise.resolve();
+    expect(reported).toHaveLength(1);
   });
 });
