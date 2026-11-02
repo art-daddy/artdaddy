@@ -18,6 +18,7 @@ import { noteTurnError, requestIdOf, turnErrorCode } from "../agent/turnError";
 import { buildReportContext } from "../observability/reportContext";
 import { submitFeedback, type FeedbackKind } from "../api/feedback";
 import { agentEventContext, setAgentContext, type TurnOutcome } from "../api/agentEvents";
+import { askForAttention } from "../lib/attention";
 import { TurnTelemetry } from "./turnTelemetry";
 import type { SSEMessage } from "../api/sse";
 import type { ApprovalMode, Attachment, PendingApproval, SessionState } from "../api/types";
@@ -347,10 +348,14 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
           name: String(call?.name ?? ""),
         })),
       );
+      // The person may be in another window while the turn waits for them.
+      void askForAttention();
     } else if (event === "turn_paused") {
       wait.pausedForInput();
-      if ((data as { can_continue?: unknown } | undefined)?.can_continue)
+      if ((data as { can_continue?: unknown } | undefined)?.can_continue) {
         telemetry?.pausedForContinue();
+        void askForAttention();
+      }
     }
   }
 
