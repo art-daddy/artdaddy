@@ -81,6 +81,113 @@ describe("what the turn is waiting on", () => {
   });
 });
 
+// A tool that is waiting for the transcript is not captioning or looking at anything yet: the line
+// says what is being waited on. The wording is the owner's (2026-11-02).
+describe("a tool that is waiting for speech", () => {
+  const SPEECH_TOOLS = ["add_captions", "inspect_media", "get_transcript"];
+  const waiting = (tool = "add_captions") => ({ calls: [call(tool)], speechTools: [tool] });
+
+  it("says it is transcribing the audio, whatever the tool is usually called", () => {
+    for (const tool of SPEECH_TOOLS)
+      expect(status(waiting(tool), 1)?.label, tool).toBe("Transcribing the audio");
+    // The same call, not waiting for speech any more, goes back to its own words.
+    expect(status({ calls: [call("add_captions")], speechTools: [] }, 1)?.label).toBe(
+      "Captioning the audio",
+    );
+  });
+
+  it("does not put the words on a tool that is not the one waiting", () => {
+    const other = status({ calls: [call("video_ask")], speechTools: ["add_captions"] }, 1);
+    expect(other?.label).toBe(runningPhrase("video_ask"));
+    const plain = status({ calls: [call("video_ask")], downloadingModel: true }, 1);
+    expect(plain?.label).toBe(runningPhrase("video_ask"));
+  });
+
+  it("says the speech model is downloading, and explains it from the first second", () => {
+    const s = status({ ...waiting(), downloadingModel: true }, 1);
+    expect(s?.label).toBe("Downloading the speech model (one time)");
+    expect(s?.hint).toMatch(/This only happens when you start the app for the first time/);
+    expect(s?.hint).toMatch(/Stop/);
+  });
+
+  it("keeps the usual slow hint for a plain transcription: none before half a minute, one after", () => {
+    expect(status(waiting(), SLOW_AFTER_S - 1)?.hint).toBeNull();
+    expect(status(waiting(), SLOW_AFTER_S)?.hint).toMatch(/Still working/);
+  });
+
+  it("still counts the other calls running beside it", () => {
+    const s = status(
+      { calls: [call("add_captions", 0), call("inspect_color", 2)], speechTools: ["add_captions"] },
+      5,
+    );
+    expect(s?.label).toBe("Transcribing the audio (+1 more)");
+  });
+
+  it("changes only the words: the kind and the clock are the same as without it", () => {
+    fc.assert(
+      fc.property(fc.integer({ min: 0, max: 7200 }), fc.boolean(), (nowS, downloading) => {
+        const plain = status({ calls: [call("add_captions")] }, nowS);
+        const speech = status({ ...waiting(), downloadingModel: downloading }, nowS);
+        expect({ ...speech, label: "", hint: null }).toEqual({ ...plain, label: "", hint: null });
+      }),
+    );
+  });
+});
+
+// While the request itself is waiting (the connection is being re-made, or the server is finishing
+// the person's last request) the line says that, not "Thinking".
+describe("a round whose request is waiting", () => {
+  const noted = (
+    note: "reconnecting" | "busy",
+    phase: LiveRound["phase"] = "waiting",
+  ): LiveRound => ({
+    ...round(phase),
+    note,
+  });
+
+  it("says it is reconnecting, or waiting for the last request, instead of thinking", () => {
+    expect(status({ round: noted("reconnecting") }, 1)).toMatchObject({
+      kind: "model",
+      label: "Reconnecting",
+    });
+    expect(status({ round: noted("busy") }, 1)).toMatchObject({
+      kind: "model",
+      label: "Waiting for your last request",
+    });
+    expect(status({ round: round("waiting") }, 1)?.label).toBe("Thinking");
+  });
+
+  it("explains a wait for the last request at once, and a reconnect only when it drags on", () => {
+    const busyHint = status({ round: noted("busy") }, 1)?.hint;
+    expect(busyHint).toMatch(/last request is still finishing/);
+    expect(busyHint).toMatch(/Stop/);
+    expect(status({ round: noted("reconnecting") }, SLOW_AFTER_S - 1)?.hint).toBeNull();
+    const slow = status({ round: noted("reconnecting") }, SLOW_AFTER_S)?.hint;
+    expect(slow).toMatch(/trying to reach the server/);
+    expect(slow).toMatch(/Stop/);
+  });
+
+  it("changes only the words: the kind and the clock are those of the same round without it", () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 0, max: 7200 }),
+        fc.constantFrom("reconnecting", "busy"),
+        fc.constantFrom("preparing", "waiting", "writing"),
+        (nowS, note, phase) => {
+          const plain = status({ round: round(phase) }, nowS);
+          const said = status({ round: noted(note, phase) }, nowS);
+          expect({ ...said, label: "", hint: null }).toEqual({ ...plain, label: "", hint: null });
+        },
+      ),
+    );
+  });
+
+  it("is only the model's wait: the person's answer and a running tool still come first", () => {
+    expect(status({ round: noted("busy"), approvalSince: at(0) }, 1)?.kind).toBe("approval");
+    expect(status({ round: noted("busy"), calls: [call("video_ask")] }, 1)?.kind).toBe("tool");
+  });
+});
+
 describe("a phrase for every tool the model can call (the registry walk)", () => {
   const tools = toolNames();
 

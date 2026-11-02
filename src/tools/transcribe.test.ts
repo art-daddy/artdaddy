@@ -22,6 +22,7 @@ import {
   type FsLike,
 } from "./store";
 import { useModelDownload } from "../store/modelDownload";
+import { resetLiveWait, useLiveWait } from "../store/liveWait";
 import { isExpected } from "../lib/errors";
 import { lastSpeechLanguage, rememberSpeechLanguage } from "./speechDecoding";
 import {
@@ -2880,6 +2881,20 @@ describe("get_transcript transcribes what the clips play (4h)", () => {
     // The run still going keeps going; the one never started is the background's now.
     expect(runs).toHaveLength(2);
     expect(asked).toEqual([[src, "", { start: 1199, end: 1211 }]]);
+  });
+
+  it("tells the chat it is waiting for speech while it waits, so the line says so, and not after", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    resetLiveWait();
+    const waiting = (): string[] => useLiveWait.getState().speechWaits.map((w) => w.tool);
+    const { fs, runner, runs } = await slow();
+    let got: Any;
+    void getTranscriptTool({}, ctxWith(runner, fs)).then((r) => (got = r));
+    await until(() => runs.length === 2);
+    expect(waiting()).toEqual(["get_transcript"]);
+    await vi.advanceTimersByTimeAsync(TRANSCRIPT_WAIT_MS);
+    await until(() => got !== undefined);
+    expect(waiting()).toEqual([]);
   });
 
   it("says the rest takes longer than a call waits when nothing transcribes in the background", async () => {

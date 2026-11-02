@@ -149,6 +149,10 @@ export async function fetchWithRetry(
 // is free; any other 429 (an upstream rate limit, say) is not waited out here.
 const BUSY_ERRORS = new Set(["account_busy", "server_busy"]);
 
+/** What a model round is waiting on before it starts, for the chat to say: the connection is being re-made, or the
+ *  server is still finishing the person's previous request. */
+export type RoundWait = "reconnecting" | "busy";
+
 /** Whether a 429 is the server's own busy answer, and how long it asked to wait (from the body: the header may not be
  *  readable by every host). Reads a COPY of the body so the caller can still read the original. */
 async function busyAnswer(res: Response): Promise<{ delayMs: number | null } | null> {
@@ -167,21 +171,67 @@ async function busyAnswer(res: Response): Promise<{ delayMs: number | null } | n
 
 /** `fetch` for the streaming chat route: waits out the server's typed busy answers (bounded by the same retry budget and
  *  ceiling as {@link fetchWithRetry}, honouring `Retry-After`) and hands every other answer back at once. A user Stop
- *  ends the wait immediately. Safe to repeat: a busy answer means nothing ran. */
+ *  ends the wait immediately. Safe to repeat: a busy answer means nothing ran. `onWait` hears "busy" from the first busy
+ *  answer until the call settles, whichever way. */
 export async function fetchRetryingBusy(
   url: string,
   init: RequestInit,
   signal?: AbortSignal,
+  onWait?: (wait: RoundWait | null) => void,
 ): Promise<Response> {
-  for (let attempt = 0; ; attempt += 1) {
-    const res = await fetchCompatibleClient(url, { ...init, signal });
-    if (res.status !== 429 || attempt >= rateLimitConfig.retries) return res;
-    const busy = await busyAnswer(res);
-    if (!busy) return res;
+  let waiting = false;
+  try {
+    for (let attempt = 0; ; attempt += 1) {
+      const res = await fetchCompatibleClient(url, { ...init, signal });
+      if (res.status !== 429 || attempt >= rateLimitConfig.retries) return res;
+      const busy = await busyAnswer(res);
+      if (!busy) return res;
+      await res.body?.cancel().catch(() => undefined);
+      if (!waiting) {
+        waiting = true;
+        onWait?.("busy");
+      }
+      await sleep(
+        backoffMs(attempt, retryAfterMs(res.headers.get("Retry-After")) ?? busy.delayMs),
+        signal,
+      );
+    }
+  } finally {
+    if (waiting) onWait?.(null);
+  }
+}
+
+/** How long a round waits before the one retry of a connection that never answered. */
+export const RECONNECT_DELAY_MS = 1000;
+/** Answers that come from the network in front of the server (a restart, an overloaded or timed-out upstream), not from
+ *  the route: nothing of the round came back. */
+const GATEWAY_FAILURES = new Set([502, 503, 504]);
+
+/** `fetch` for a model round: {@link fetchRetryingBusy}, plus ONE more try, 1 s later, when the connection dropped before
+ *  the server answered at all (`fetch` rejected) or the answer was a 502, 503 or 504. Both happen before the first byte of
+ *  the round's answer, so nothing has been shown to the person; after it, nothing here ever repeats a request. The retry
+ *  sends the same request: a round that had in fact started on the server is asked for again, which is the exposure the
+ *  owner accepted for not making the person retype. A Stop is never retried. The second answer is handed back whatever
+ *  it is. `onWait` hears "reconnecting" from the pause until that answer arrives. */
+export async function fetchRound(
+  url: string,
+  init: RequestInit,
+  signal?: AbortSignal,
+  onWait?: (wait: RoundWait | null) => void,
+): Promise<Response> {
+  try {
+    const res = await fetchRetryingBusy(url, init, signal, onWait);
+    if (!GATEWAY_FAILURES.has(res.status) || signal?.aborted) return res;
     await res.body?.cancel().catch(() => undefined);
-    await sleep(
-      backoffMs(attempt, retryAfterMs(res.headers.get("Retry-After")) ?? busy.delayMs),
-      signal,
-    );
+  } catch (e) {
+    // `fetch` reports every network failure as a TypeError; an abort is a DOMException, and is not one.
+    if (signal?.aborted || !(e instanceof TypeError)) throw e;
+  }
+  onWait?.("reconnecting");
+  try {
+    await sleep(RECONNECT_DELAY_MS, signal);
+    return await fetchRetryingBusy(url, init, signal, onWait);
+  } finally {
+    onWait?.(null);
   }
 }

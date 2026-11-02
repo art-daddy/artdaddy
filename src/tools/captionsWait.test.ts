@@ -5,6 +5,7 @@ import { CACHE_READ_FLOOR_MS, pendingCaptionsResult } from "./captionTranscript"
 import type { ClientToolContext } from "./context";
 import { joinPath } from "./store";
 import { ensureTranscript, TRANSCRIPT_WAIT_MS } from "./transcribe";
+import { resetLiveWait, useLiveWait } from "../store/liveWait";
 import { applyOp, loadTimeline } from "../timeline/engine";
 import type { Clip } from "../timeline/model";
 import { CachingMemFs, DIR, resetTestDocuments, seededCtx as kitCtx } from "../test/timelineKit";
@@ -89,11 +90,29 @@ const neverFinishes = (): Promise<never> => new Promise<never>(() => undefined);
 describe("add_captions waits for words only as long as get_transcript does", () => {
   beforeEach(async () => {
     await resetTestDocuments();
+    resetLiveWait();
     vi.useFakeTimers();
   });
   afterEach(() => {
     vi.clearAllTimers();
     vi.useRealTimers();
+  });
+
+  it("tells the chat it is waiting for speech while it waits, so the line says so, and not after", async () => {
+    const { ctx } = await seededCtx();
+    await withAudio(ctx, "library/talk.m4a", "a1");
+    vi.mocked(ensureTranscript).mockImplementationOnce(neverFinishes);
+    const waiting = (): string[] => useLiveWait.getState().speechWaits.map((w) => w.tool);
+
+    let answer: Any | undefined;
+    void addCaptionsTool({}, ctx).then((r) => (answer = r as Any));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(answer).toBeUndefined();
+    expect(waiting()).toEqual(["add_captions"]);
+
+    await vi.advanceTimersByTimeAsync(TRANSCRIPT_WAIT_MS);
+    expect(answer).toMatchObject({ pending: true });
+    expect(waiting()).toEqual([]);
   });
 
   it("answers within the limit with what is pending, adds nothing, and the next call finishes the job", async () => {

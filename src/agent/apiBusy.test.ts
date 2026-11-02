@@ -145,8 +145,9 @@ describe("what the streaming route still does at once", () => {
   });
 
   it("throws a server failure as before, once", async () => {
-    const fn = script(new Response("upstream down", { status: 503 }), served());
-    await expect(inferRoundStreaming(body, () => undefined)).rejects.toThrow(/503: upstream down/);
+    // 502, 503 and 504 are the ones tried again (apiReconnect.test.ts); every other server failure is not.
+    const fn = script(new Response("upstream down", { status: 500 }), served());
+    await expect(inferRoundStreaming(body, () => undefined)).rejects.toThrow(/500: upstream down/);
     expect(fn).toHaveBeenCalledTimes(1);
   });
 

@@ -1,7 +1,8 @@
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { resetLiveWait, useLiveWait } from "../store/liveWait";
+import { resetLiveWait, trackSpeechWait, useLiveWait } from "../store/liveWait";
+import { clearModelDownload, reportModelDownload } from "../store/modelDownload";
 import StatusLine from "./StatusLine";
 
 const live = () => useLiveWait.getState();
@@ -13,12 +14,14 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date("2026-11-02T10:00:00Z"));
   resetLiveWait();
+  clearModelDownload();
 });
 afterEach(() => {
   cleanup();
   vi.clearAllTimers();
   vi.useRealTimers();
   resetLiveWait();
+  clearModelDownload();
 });
 
 describe("StatusLine: what the person sees while a turn runs", () => {
@@ -109,5 +112,80 @@ describe("StatusLine: what the person sees while a turn runs", () => {
     expect(vi.getTimerCount()).toBeGreaterThan(0);
     unmount();
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  describe("while the request itself is waiting", () => {
+    it("says it is reconnecting, then goes back to thinking when the connection is back", () => {
+      act(() => {
+        live().roundStarted(Date.now());
+        live().roundSent();
+        live().roundNoted("reconnecting");
+      });
+      render(<StatusLine />);
+      expect(screen.getByRole("status").textContent).toBe("Reconnecting…");
+      act(() => live().roundNoted(null));
+      expect(screen.getByRole("status").textContent).toBe("Thinking…");
+    });
+
+    it("says it is waiting for the last request, and why, from the first second", () => {
+      act(() => {
+        live().roundStarted(Date.now());
+        live().roundSent();
+        live().roundNoted("busy");
+      });
+      const { container } = render(<StatusLine />);
+      expect(screen.getByRole("status").textContent).toBe("Waiting for your last request…");
+      expect(container.textContent).toMatch(/last request is still finishing/);
+    });
+  });
+
+  describe("while a tool waits for speech to be transcribed", () => {
+    const MIB = 1024 * 1024;
+
+    it("says it is transcribing the audio, not captioning, and goes back to its own words after", async () => {
+      act(() => live().callStarted("a", "add_captions", Date.now()));
+      render(<StatusLine />);
+      expect(screen.getByRole("status").textContent).toBe("Captioning the audio…");
+
+      let done!: () => void;
+      act(() => {
+        void trackSpeechWait("add_captions", new Promise<void>((r) => (done = r)));
+      });
+      expect(screen.getByRole("status").textContent).toBe("Transcribing the audio…");
+
+      await act(async () => {
+        done();
+        await Promise.resolve();
+      });
+      expect(screen.getByRole("status").textContent).toBe("Captioning the audio…");
+    });
+
+    it("says the speech model is downloading, once, and why: it only happens the first time", () => {
+      act(() => {
+        live().callStarted("a", "add_captions", Date.now());
+        live().speechWaitStarted(1, "add_captions");
+        reportModelDownload(10 * MIB, 465 * MIB);
+      });
+      const { container } = render(<StatusLine />);
+      expect(screen.getByRole("status").textContent).toBe(
+        "Downloading the speech model (one time)…",
+      );
+      expect(container.textContent).toMatch(
+        /This only happens when you start the app for the first time/,
+      );
+      act(() => clearModelDownload());
+      expect(screen.getByRole("status").textContent).toBe("Transcribing the audio…");
+      expect(container.textContent).not.toMatch(/first time/);
+    });
+
+    it("does not say a tool is transcribing when it is not the one waiting for speech", () => {
+      act(() => {
+        live().callStarted("a", "video_ask", Date.now());
+        live().speechWaitStarted(1, "add_captions");
+        reportModelDownload(10 * MIB, 465 * MIB);
+      });
+      render(<StatusLine />);
+      expect(screen.getByRole("status").textContent).toBe("Watching a video…");
+    });
   });
 });

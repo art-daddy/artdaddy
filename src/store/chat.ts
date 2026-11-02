@@ -579,6 +579,10 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
               apply({ event: `delta_${d.kind}`, data: { text: d.text } });
             },
             exec.controller.signal,
+            // The request waiting rather than the model: reconnecting, or the last request still finishing.
+            (wait) => {
+              if (!superseded()) useLiveWait.getState().roundNoted(wait);
+            },
           );
           // Learn the mode from a real answer only: an error round may come from a path that
           // never got as far as choosing one, and must not demote this model to the chain.

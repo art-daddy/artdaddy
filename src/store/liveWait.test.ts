@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { resetLiveWait, useLiveWait } from "./liveWait";
+import { resetLiveWait, trackSpeechWait, useLiveWait } from "./liveWait";
 
 const live = () => useLiveWait.getState();
 
@@ -105,5 +105,112 @@ describe("the live record of what a turn is waiting on", () => {
     live().clear();
     expect(live().calls).toEqual([]);
     expect(first).toEqual([]);
+  });
+});
+
+describe("the tools waiting for speech", () => {
+  const tools = (): string[] => live().speechWaits.map((w) => w.tool);
+
+  it("lists a wait from its start to its end, once each, and ignores an end it never saw", () => {
+    live().speechWaitStarted(1, "add_captions");
+    live().speechWaitStarted(1, "add_captions"); // the same wait announced again
+    expect(tools()).toEqual(["add_captions"]);
+    const before = live().speechWaits;
+    live().speechWaitEnded(99);
+    expect(live().speechWaits).toBe(before);
+    live().speechWaitEnded(1);
+    expect(tools()).toEqual([]);
+  });
+
+  it("holds the waits of one tool apart: two waits of one tool are two entries", () => {
+    live().speechWaitStarted(1, "inspect_media");
+    live().speechWaitStarted(2, "inspect_media");
+    live().speechWaitEnded(1);
+    expect(live().speechWaits).toEqual([{ id: 2, tool: "inspect_media" }]);
+  });
+
+  it("trackSpeechWait marks the tool until the wait is over, whatever the wait's result", async () => {
+    let finish!: (v: string) => void;
+    let fail!: (e: unknown) => void;
+    const ok = trackSpeechWait("get_transcript", new Promise<string>((r) => (finish = r)));
+    const bad = trackSpeechWait(
+      "add_captions",
+      new Promise<string>((_, reject) => (fail = reject)),
+    );
+    expect(tools().sort()).toEqual(["add_captions", "get_transcript"]);
+    finish("words");
+    await expect(ok).resolves.toBe("words"); // handed back as it came
+    expect(tools()).toEqual(["add_captions"]);
+    fail(new Error("boom"));
+    await expect(bad).rejects.toThrow("boom"); // a failure still reaches the caller
+    expect(tools()).toEqual([]);
+  });
+
+  it("a wait cleared with its turn cannot end a later one", async () => {
+    let finishOld!: () => void;
+    void trackSpeechWait("add_captions", new Promise<void>((r) => (finishOld = r)));
+    live().clear();
+    expect(tools()).toEqual([]);
+    let finishNew!: () => void;
+    void trackSpeechWait("inspect_media", new Promise<void>((r) => (finishNew = r)));
+    finishOld();
+    await Promise.resolve();
+    expect(tools()).toEqual(["inspect_media"]);
+    finishNew();
+    await Promise.resolve();
+    expect(tools()).toEqual([]);
+  });
+
+  it("clear forgets every wait, and the turn pausing for the person does not touch them", () => {
+    live().speechWaitStarted(1, "add_captions");
+    live().pausedForInput();
+    expect(tools()).toEqual(["add_captions"]);
+    live().clear();
+    expect(tools()).toEqual([]);
+  });
+});
+
+describe("a round whose request is waiting", () => {
+  it("carries the note while the request waits, and not a trace of it after", () => {
+    live().roundStarted(100);
+    live().roundSent();
+    live().roundNoted("reconnecting");
+    expect(live().round).toEqual({ phase: "waiting", startedAt: 100, note: "reconnecting" });
+    live().roundNoted("busy");
+    expect(live().round?.note).toBe("busy");
+    live().roundNoted(null);
+    expect(live().round).toEqual({ phase: "waiting", startedAt: 100 });
+    expect("note" in (live().round ?? {})).toBe(false);
+  });
+
+  it("is nothing without a round, and announces no change that is none", () => {
+    live().roundNoted("busy");
+    expect(live().round).toBeNull();
+    live().roundStarted(1);
+    live().roundNoted("busy");
+    const noted = live().round;
+    live().roundNoted("busy");
+    expect(live().round).toBe(noted);
+    live().roundNoted(null);
+    const cleared = live().round;
+    live().roundNoted(null);
+    expect(live().round).toBe(cleared);
+  });
+
+  it("is gone once words arrive, when the round ends, and when another begins", () => {
+    live().roundStarted(1);
+    live().roundSent();
+    live().roundNoted("reconnecting");
+    live().roundWriting();
+    expect(live().round).toEqual({ phase: "writing", startedAt: 1 });
+
+    live().roundNoted("busy");
+    live().roundEnded();
+    expect(live().round).toBeNull();
+
+    live().roundStarted(2);
+    live().roundNoted("busy");
+    live().roundStarted(3);
+    expect(live().round).toEqual({ phase: "preparing", startedAt: 3 });
   });
 });

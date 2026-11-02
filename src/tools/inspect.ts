@@ -279,6 +279,7 @@ async function lookTranscript(
       const audio = to === null ? null : Math.max(0, to - from);
       const outcome = await waitForRun({
         key: `${path}\u0000${normLanguage(opts.language)}\u0000${whole ? "whole" : `${from}-${to}`}`,
+        tool: "inspect_media",
         audioSeconds: audio,
         audioLabel: clock(audio ?? 0),
         run: runWhisper(ctx, path, undefined, opts.language, window),
