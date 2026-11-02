@@ -1,7 +1,8 @@
 // Full-screen sign-in gate. Unlike the old non-blocking banner this REPLACES the app, so it is
 // the only thing a signed-out user can reach.
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
+import { hasSignedInBefore, reportAuthStep } from "../api/authEvents";
 import { startDesktopSignIn } from "../api/desktopAuth";
 import { BRAND } from "../brand";
 import { openDiscord } from "../lib/community";
@@ -18,6 +19,14 @@ export default function SignInScreen({ offline = false }: { offline?: boolean })
   const verify = useAuth((s) => s.verify);
   const canSignIn = platform.name === "tauri";
 
+  // This screen being shown is the top of the sign-in funnel, and the one place a person who installed the app
+  // and never signed in is visible at all. Told apart: someone who never signed in here, someone who did and has
+  // lost the session, and a screen that could not reach the server.
+  useEffect(() => {
+    reportAuthStep("screen", {
+      reason: offline ? "offline" : hasSignedInBefore() ? "returning" : "new",
+    });
+  }, [offline]);
   const signIn = async () => {
     setBusy(true);
     setError(null);

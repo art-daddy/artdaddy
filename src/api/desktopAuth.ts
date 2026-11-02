@@ -6,6 +6,14 @@
 // one-time code is handed back to this app via a deep link and traded (with PKCE) for this
 // app's OWN access/refresh tokens. This module never talks to Clerk directly.
 import { platform } from "../platform";
+import {
+  type AuthReason,
+  isAuthId,
+  markSignedInBefore,
+  newAuthId,
+  reportAuthStep,
+  resetInstallId,
+} from "./authEvents";
 import { apiBase } from "./config";
 import { SessionRenewalUnavailableError } from "./http";
 
@@ -76,7 +84,9 @@ export function generateState(): string {
 const PENDING_KEY = "artdaddy.desktop_auth_pending";
 const PENDING_TTL_MS = 10 * 60 * 1000;
 
-type Pending = { verifier: string; state: string; at: number };
+/** `attempt` names this try in what is reported about it (api/authEvents.ts). It is random, not derived from the
+ *  state or the verifier, and a record saved by an app that predates it has none. */
+type Pending = { verifier: string; state: string; at: number; attempt?: string };
 
 function readPending(): Pending | null {
   try {
@@ -221,24 +231,35 @@ export async function startDesktopSignIn(): Promise<Outcome> {
   sessionGeneration += 1;
   const { verifier, challenge } = await generatePkcePair();
   const state = generateState();
+  // Names this try for what is reported about it. The sign-in page reads it back from the address so that the
+  // page's steps and the app's steps of one try can be followed together. It is random and secret-free.
+  const attempt = newAuthId();
   const url = new URL(DESKTOP_AUTH_URL);
   url.searchParams.set("code_challenge", challenge);
   url.searchParams.set("code_challenge_method", "S256");
   url.searchParams.set("state", state);
+  url.searchParams.set("attempt", attempt);
   try {
     const { invoke } = await import("@tauri-apps/api/core");
     await invoke("open_desktop_auth", { url: url.toString() });
     refreshBlocked = false;
-    writePending({ verifier, state, at: Date.now() });
+    writePending({ verifier, state, at: Date.now(), attempt });
+    reportAuthStep("start", { ok: true, attempt });
     return { ok: true };
   } catch (e) {
     // Nothing was actually opened — a later callback must not be attributed to this attempt.
     writePending(null);
+    reportAuthStep("start", { ok: false, reason: "open_failed", attempt });
     return { ok: false, message: e instanceof Error ? e.message : "couldn't open the browser" };
   }
 }
 
-type ExchangeResult = { ok: true; tokens: TokenReply } | { ok: false; message: string };
+type ExchangeFailure = Extract<
+  AuthReason<"callback">,
+  "exchange_network" | "exchange_rejected" | "exchange_server" | "exchange_unreadable"
+>;
+type ExchangeResult =
+  { ok: true; tokens: TokenReply } | { ok: false; message: string; reason: ExchangeFailure };
 
 type TokenReply = { access_token: string; refresh_token: string; expires_in?: number };
 
@@ -254,10 +275,18 @@ async function exchangeCode(code: string, verifier: string): Promise<ExchangeRes
     // Unreachable backend. This threw straight out of the callback before, where nothing was
     // catching it, so sign-in failed with no message and no state change at all.
     const why = e instanceof Error ? e.message : String(e);
-    return { ok: false, message: `couldn't reach the server at ${apiBase()} (${why})` };
+    return {
+      ok: false,
+      message: `couldn't reach the server at ${apiBase()} (${why})`,
+      reason: "exchange_network",
+    };
   }
   if (!res.ok) {
-    return { ok: false, message: `the server rejected the sign-in code (${res.status})` };
+    return {
+      ok: false,
+      message: `the server rejected the sign-in code (${res.status})`,
+      reason: res.status >= 500 ? "exchange_server" : "exchange_rejected",
+    };
   }
   try {
     return {
@@ -265,7 +294,11 @@ async function exchangeCode(code: string, verifier: string): Promise<ExchangeRes
       tokens: (await res.json()) as TokenReply,
     };
   } catch {
-    return { ok: false, message: "the server's reply could not be read" };
+    return {
+      ok: false,
+      message: "the server's reply could not be read",
+      reason: "exchange_unreadable",
+    };
   }
 }
 
@@ -332,6 +365,7 @@ export async function handleDeepLinkCallback(url: string): Promise<Outcome> {
     return await completeDeepLinkCallback(url);
   } catch (e) {
     const why = e instanceof Error ? e.message : String(e);
+    reportAuthStep("callback", { ok: false, reason: "error" });
     return { ok: false, message: `sign-in failed: ${why}` };
   }
 }
@@ -342,24 +376,52 @@ async function completeDeepLinkCallback(url: string): Promise<Outcome> {
   // Consume the attempt up front: whatever happens next, THIS callback gets exactly one try —
   // a retry (accidental or malicious replay) must find nothing pending.
   writePending(null);
-  if (!attempt) return { ok: false, message: "no sign-in attempt in progress" };
-  if (!url.startsWith(DEEP_LINK_PREFIX)) return { ok: false, message: "unrecognized callback" };
+  // How long the try had been going, and its id, for the one report every way out of here makes. Only the
+  // reason is reported, never the message: a message can carry an address or a reply from the server.
+  // The sign-in page passes its own attempt id back in the link, so a tab that finishes AFTER the person pressed
+  // "Log in" a second time is reported as the attempt it belongs to and not as the newer one.
+  const linkedAttempt = ((): string | undefined => {
+    try {
+      const linked = new URL(url).searchParams.get("attempt");
+      return isAuthId(linked) ? linked : undefined;
+    } catch {
+      return undefined;
+    }
+  })();
+  const elapsed = (): number | undefined => (attempt ? Date.now() - attempt.at : undefined);
+  const fail = (reason: AuthReason<"callback">, message: string): Outcome => {
+    reportAuthStep("callback", {
+      ok: false,
+      reason,
+      attempt: linkedAttempt ?? attempt?.attempt,
+      ms: elapsed(),
+    });
+    return { ok: false, message };
+  };
+  if (!attempt) return fail("no_attempt", "no sign-in attempt in progress");
+  if (!url.startsWith(DEEP_LINK_PREFIX)) return fail("unrecognized", "unrecognized callback");
   const params = new URL(url).searchParams;
   const code = params.get("code");
   const state = params.get("state");
-  if (!code || !state) return { ok: false, message: "callback missing code or state" };
-  if (state !== attempt.state) return { ok: false, message: "state mismatch" };
+  if (!code || !state) return fail("missing_params", "callback missing code or state");
+  if (state !== attempt.state) return fail("state_mismatch", "state mismatch");
   const exchanged = await exchangeCode(code, attempt.verifier);
-  if (!exchanged.ok) return { ok: false, message: exchanged.message };
+  if (!exchanged.ok) return fail(exchanged.reason, exchanged.message);
   if (sessionGeneration !== expectedGeneration || refreshBlocked) {
-    return { ok: false, message: "sign-in was cancelled" };
+    return fail("cancelled", "sign-in was cancelled");
   }
   // A deliberate sign-in is a new session authority. It supersedes any stale boot refresh
   // before that refresh can clear or commit against the newly authenticated identity.
   const signInGeneration = ++sessionGeneration;
   if (!(await commitTokens(exchanged.tokens, signInGeneration))) {
-    return { ok: false, message: "signed in, but the session could not be saved" };
+    return fail("not_saved", "signed in, but the session could not be saved");
   }
+  markSignedInBefore();
+  reportAuthStep("callback", {
+    ok: true,
+    attempt: linkedAttempt ?? attempt.attempt,
+    ms: elapsed(),
+  });
   return { ok: true };
 }
 
@@ -461,6 +523,13 @@ async function refreshDesktopSessionOnce(
     status: "superseded",
     hasStoredSession: null,
   });
+  // A saved session that could not be renewed just now. The cause is reported as a word (never a message), and
+  // only when this is still the current session's own refresh: one overtaken by a newer sign-in failed nothing.
+  const unavailable = (cause: AuthReason<"refresh">): DesktopSessionRefresh => {
+    if (sessionGeneration !== expectedGeneration) return superseded();
+    reportAuthStep("refresh", { ok: false, reason: cause });
+    return { status: "unavailable", hasStoredSession };
+  };
   try {
     const { invoke } = await import("@tauri-apps/api/core");
     const stored = await waitForStoredToken(invoke, expectedGeneration);
@@ -483,10 +552,9 @@ async function refreshDesktopSessionOnce(
         },
         REFRESH_TIMEOUT_MS,
       );
-    } catch {
-      return sessionGeneration === expectedGeneration
-        ? { status: "unavailable", hasStoredSession }
-        : superseded();
+    } catch (e) {
+      // The 90 s allowance ran out (an abort), or the connection never held.
+      return unavailable(e instanceof Error && e.name === "AbortError" ? "timeout" : "network");
     }
     if (sessionGeneration !== expectedGeneration) return superseded();
     if (res.status === 401) {
@@ -504,25 +572,26 @@ async function refreshDesktopSessionOnce(
         storedSession = false;
         return true;
       });
-      return cleared
-        ? { status: "invalid", hasStoredSession: false }
-        : sessionGeneration === expectedGeneration
-          ? { status: "unavailable", hasStoredSession }
-          : superseded();
+      if (cleared) {
+        reportAuthStep("refresh", { ok: false, reason: "rejected" });
+        return { status: "invalid", hasStoredSession: false };
+      }
+      return unavailable("keychain");
     }
-    if (!res.ok) return { status: "unavailable", hasStoredSession };
+    if (!res.ok) return unavailable("server_error");
     const tokens = (await res.json()) as TokenReply;
     if (sessionGeneration !== expectedGeneration) return superseded();
     if (await commitTokens(tokens, expectedGeneration)) {
+      // Whoever's session this is has signed in on this machine before, which an app that predates the flag
+      // never recorded.
+      markSignedInBefore();
       return { status: "refreshed", hasStoredSession: true };
     }
-    return sessionGeneration === expectedGeneration
-      ? { status: "unavailable", hasStoredSession }
-      : superseded();
+    return unavailable("not_saved");
   } catch {
-    return sessionGeneration === expectedGeneration
-      ? { status: "unavailable", hasStoredSession }
-      : superseded();
+    // Before a saved token was read, this is the keychain (it did not answer, or refused); after, it is a reply
+    // that could not be read or something the code did not expect.
+    return unavailable(hasStoredSession === null ? "keychain" : "error");
   }
 }
 
@@ -539,6 +608,8 @@ export async function signOutDesktop(): Promise<void> {
   lateAnswer = null;
   storedSession = false;
   writePending(null);
+  // A new person at this machine must not inherit the previous one's install id.
+  resetInstallId();
   const stored = await mutateKeychain(async () => {
     const { invoke } = await import("@tauri-apps/api/core");
     let stored: string | null = null;
