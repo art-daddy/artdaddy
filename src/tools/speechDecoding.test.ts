@@ -28,17 +28,23 @@ const GATE = evidence as GateEvidence;
 const VARIANTS: ModelVariant[] = ["f16", "q8_0", "q5_1"];
 const CODES = Object.keys(WHISPER_LANGUAGES);
 
-const pass: GateResult = { diff_points: 0.2, ci_high: 1.1 };
-const fail: GateResult = { diff_points: 1.4, ci_high: 2.6 };
+const pass: GateResult = { diff_points: MAX_POINT_LOSS / 10, ci_high: MAX_LOSS_UPPER / 2 };
+const fail: GateResult = { diff_points: MAX_POINT_LOSS * 1.2, ci_high: MAX_LOSS_UPPER * 1.2 };
 const row = (language: string, ...results: GateResult[]): GateRow => ({
   set: language,
   language,
   results: Object.fromEntries(results.map((r, i) => [`S${i}`, r])),
 });
 
-// The rule is the owner's tolerance in code: at most a point worse, and an interval that rules out
-// a loss of more than two. A result that is not a clear pass is not one.
+// The rule is the owner's tolerance in code: at most two points worse, and an interval that rules
+// out a loss of more than four. A result that is not a clear pass is not one.
 describe("clears", () => {
+  it("is the owner's two points, written as plain numbers so a drift in the constants shows", () => {
+    expect(clears({ diff_points: 1.9, ci_high: 3.9 })).toBe(true); // over the old 1-point tolerance
+    expect(clears({ diff_points: 2.01, ci_high: 0 })).toBe(false);
+    expect(clears({ diff_points: 0, ci_high: 4.01 })).toBe(false);
+  });
+
   it("passes at the tolerance and fails just past it, in either figure", () => {
     expect(clears({ diff_points: MAX_POINT_LOSS, ci_high: MAX_LOSS_UPPER })).toBe(true);
     expect(clears({ diff_points: MAX_POINT_LOSS + 0.01, ci_high: 0 })).toBe(false);
@@ -152,6 +158,16 @@ describe("the shipped evidence", () => {
     // and quietly give nobody the speed-up.
     expect(beamFor("f16", "en")).toBe(GREEDY_BEAM);
     expect(greedyTable(GATE).get("f16")!.size).toBeGreaterThan(3);
+  });
+
+  it("applies the two-point tolerance to measured languages at both of its edges", () => {
+    // Cleared only since the tolerance went from one point to two: each costs between 1 and 2
+    // points with an interval that stays under 4.
+    for (const code of ["nl", "tr", "uk", "vi"])
+      expect(beamFor("f16", code), code).toBe(GREEDY_BEAM);
+    // Past the point edge (ko), past the interval edge (pl: about +1.8 but possibly +4.5) and far
+    // past both (hi).
+    for (const code of ["ko", "pl", "hi"]) expect(beamFor("f16", code), code).toBe(DEFAULT_BEAM);
   });
 
   it("never narrows a language it has no measurement for", () => {
