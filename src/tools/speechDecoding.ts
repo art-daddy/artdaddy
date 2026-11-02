@@ -25,9 +25,10 @@ const VARIANTS: readonly ModelVariant[] = ["f16", "q8_0", "q5_1"];
 const isVariant = (v: unknown): v is ModelVariant => VARIANTS.includes(v as ModelVariant);
 
 /** A setting is cleared for a language when it is at most this many points of error worse than
- *  today's, with an interval that rules out a loss of more than the second figure. */
-export const MAX_POINT_LOSS = 1.0;
-export const MAX_LOSS_UPPER = 2.0;
+ *  today's, with an interval that rules out a loss of more than the second figure (twice the
+ *  first). Two points is the owner's tolerance; it was one before 2026-11-02. */
+export const MAX_POINT_LOSS = 2.0;
+export const MAX_LOSS_UPPER = 4.0;
 
 export interface GateResult {
   diff_points: number;

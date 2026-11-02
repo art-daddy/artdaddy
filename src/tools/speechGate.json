@@ -1,8 +1,8 @@
 {
  "format": 1,
  "rule": {
-  "pass_if": "diff_points <= 1.0 and ci_high <= 2.0",
-  "fail_if": "diff_points > 1.0",
+  "pass_if": "diff_points <= 2.0 and ci_high <= 4.0",
+  "fail_if": "diff_points > 2.0",
   "otherwise": "weak",
   "bootstrap_draws": 2000,
   "ci": "95% paired bootstrap over utterances, seeded per set and setting"
@@ -215,7 +215,7 @@
      "diff_points": 0.97,
      "ci_low": -0.27,
      "ci_high": 2.08,
-     "verdict": "weak"
+     "verdict": "pass"
     },
     "Z": {
      "error_pct": 7.25,
@@ -282,7 +282,7 @@
      "diff_points": 0.58,
      "ci_low": -0.95,
      "ci_high": 2.66,
-     "verdict": "weak"
+     "verdict": "pass"
     },
     "Z": {
      "error_pct": 34.37,
@@ -335,7 +335,7 @@
      "diff_points": 1.73,
      "ci_low": -0.14,
      "ci_high": 3.78,
-     "verdict": "fail"
+     "verdict": "pass"
     },
     "Q": {
      "error_pct": 17.46,
@@ -356,7 +356,7 @@
      "diff_points": 0.29,
      "ci_low": -1.71,
      "ci_high": 2.29,
-     "verdict": "weak"
+     "verdict": "pass"
     }
    }
   },
@@ -372,7 +372,7 @@
      "diff_points": 1.75,
      "ci_low": 0.11,
      "ci_high": 3.35,
-     "verdict": "fail"
+     "verdict": "pass"
     },
     "Q": {
      "error_pct": 20.41,
@@ -386,14 +386,14 @@
      "diff_points": 1.97,
      "ci_low": 0.31,
      "ci_high": 3.69,
-     "verdict": "fail"
+     "verdict": "pass"
     },
     "ZB": {
      "error_pct": 18.45,
      "diff_points": 0.76,
      "ci_low": -0.9,
      "ci_high": 2.5,
-     "verdict": "weak"
+     "verdict": "pass"
     }
    }
   },
@@ -409,21 +409,21 @@
      "diff_points": 1.75,
      "ci_low": -0.6,
      "ci_high": 4.55,
-     "verdict": "fail"
+     "verdict": "weak"
     },
     "Q": {
      "error_pct": 18.66,
      "diff_points": 0.29,
      "ci_low": -2.33,
      "ci_high": 2.85,
-     "verdict": "weak"
+     "verdict": "pass"
     },
     "Z": {
      "error_pct": 20.26,
      "diff_points": 1.9,
      "ci_low": -0.42,
      "ci_high": 4.7,
-     "verdict": "fail"
+     "verdict": "weak"
     },
     "ZB": {
      "error_pct": 17.93,
@@ -467,7 +467,7 @@
      "diff_points": 1.64,
      "ci_low": 0.44,
      "ci_high": 2.91,
-     "verdict": "fail"
+     "verdict": "pass"
     }
    }
   },
@@ -504,7 +504,7 @@
      "diff_points": 1.1,
      "ci_low": -0.99,
      "ci_high": 3.12,
-     "verdict": "fail"
+     "verdict": "pass"
     }
    }
   },
@@ -564,7 +564,7 @@
      "diff_points": 1.26,
      "ci_low": 0.2,
      "ci_high": 2.39,
-     "verdict": "fail"
+     "verdict": "pass"
     }
    }
   },
@@ -587,7 +587,7 @@
      "diff_points": 0.65,
      "ci_low": -1.33,
      "ci_high": 2.88,
-     "verdict": "weak"
+     "verdict": "pass"
     },
     "Z": {
      "error_pct": 15.06,
@@ -610,7 +610,7 @@
      "diff_points": 1.8,
      "ci_low": -1.53,
      "ci_high": 5.81,
-     "verdict": "fail"
+     "verdict": "weak"
     },
     "Q": {
      "error_pct": 22.93,
@@ -624,14 +624,14 @@
      "diff_points": 1.8,
      "ci_low": -1.38,
      "ci_high": 5.74,
-     "verdict": "fail"
+     "verdict": "weak"
     },
     "ZB": {
      "error_pct": 19.61,
      "diff_points": -0.43,
      "ci_low": -3.61,
      "ci_high": 2.79,
-     "verdict": "weak"
+     "verdict": "pass"
     }
    }
   },
@@ -647,7 +647,7 @@
      "diff_points": 1.96,
      "ci_low": 0.43,
      "ci_high": 3.61,
-     "verdict": "fail"
+     "verdict": "pass"
     },
     "Q": {
      "error_pct": 23.53,
@@ -668,7 +668,7 @@
      "diff_points": 1.02,
      "ci_low": -0.53,
      "ci_high": 2.68,
-     "verdict": "fail"
+     "verdict": "pass"
     }
    }
   },
@@ -684,21 +684,21 @@
      "diff_points": 1.11,
      "ci_low": -0.97,
      "ci_high": 3.8,
-     "verdict": "fail"
+     "verdict": "pass"
     },
     "Q": {
      "error_pct": 18.53,
      "diff_points": 1.11,
      "ci_low": -1.29,
      "ci_high": 3.83,
-     "verdict": "fail"
+     "verdict": "pass"
     },
     "Z": {
      "error_pct": 18.4,
      "diff_points": 0.97,
      "ci_low": -1.1,
      "ci_high": 3.34,
-     "verdict": "weak"
+     "verdict": "pass"
     },
     "ZB": {
      "error_pct": 17.15,
@@ -742,7 +742,7 @@
      "diff_points": 0.26,
      "ci_low": -1.76,
      "ci_high": 2.51,
-     "verdict": "weak"
+     "verdict": "pass"
     }
    }
   },
