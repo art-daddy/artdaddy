@@ -6,6 +6,7 @@ import { stderrExcerpt, type CommandResult, type CommandRunner } from "../tools/
 import type { ClientToolContext } from "../tools/context";
 import { isUnsafeAgentRef } from "../tools/store";
 import { offlineRefMessage } from "../tools/refState";
+import { prepareCanvas } from "./canvasAuto";
 import { ctxApplyOp, loadTimeline } from "./engine";
 import { OpError } from "./errors";
 import { canvasFps, toFrames } from "./frames";
@@ -508,22 +509,36 @@ async function resolveAddEntry(
   };
 }
 
+/** The refs of an entries[] array, for settling the canvas before anything is placed. */
+const refsOf = (entries: unknown[]): string[] =>
+  entries.map((e) => String((e as Args | null)?.media_ref ?? ""));
+
+/** What happened to the canvas, told to the agent next to the result (the person is never told: for them it
+ *  is either silent or a question asked before this ran). */
+const withCanvasNote = (result: Result, note: string | undefined): Result =>
+  note ? { ...result, canvas_note: note } : result;
+
 export async function addClipsTool(args: Args, ctx: ClientToolContext | null): Promise<Result> {
   if (!ctx) return NOT_READY;
   const entries = args.entries;
   if (!Array.isArray(entries) || entries.length === 0)
     return { ok: false, error: "entries[] must be non-empty" };
+  // First, because everything below counts frames at the canvas's frame rate.
+  const prep = await prepareCanvas(ctx, refsOf(entries));
   let specs: Array<MediaSpec & { note?: string }>;
   try {
     specs = await resolveAddSpecs(ctx, entries as Args[]);
   } catch (e) {
-    if (e instanceof OpError) return { ok: false, error: e.message };
+    if (e instanceof OpError) return withCanvasNote({ ok: false, error: e.message }, prep.note);
     throw e;
   }
   // If the project was closed/superseded while the async preflight (resolve + ffprobe) ran, the
   // session-liveness guard in saveTimeline abandons the write — the clip never lands in a project
   // the user already left. No per-tool guard needed: it's enforced centrally at the commit.
-  return ctxApplyOp(ctx, "add_clips", (timeline) => placeClips(timeline, specs));
+  return withCanvasNote(
+    await ctxApplyOp(ctx, "add_clips", (timeline) => placeClips(timeline, specs)),
+    prep.note,
+  );
 }
 
 /** Resolve entries to placeable specs — every probe and path lookup, and NO mutation.
@@ -681,29 +696,37 @@ export async function insertClipsTool(args: Args, ctx: ClientToolContext | null)
   const entries = args.entries;
   if (!Array.isArray(entries) || entries.length === 0)
     return { ok: false, error: "entries[] must be non-empty" };
+  // First, because everything below counts frames at the canvas's frame rate.
+  const prep = await prepareCanvas(ctx, refsOf(entries));
   let fps: number;
   try {
     fps = canvasFps(await loadTimeline(ctx.store));
   } catch (e) {
-    return { ok: false, error: `could not read timeline.json: ${String(e)}` };
+    return withCanvasNote(
+      { ok: false, error: `could not read timeline.json: ${String(e)}` },
+      prep.note,
+    );
   }
   let atF: number;
   try {
     atF = toFrames(args.at, fps);
   } catch (e) {
-    if (e instanceof OpError) return { ok: false, error: e.message };
+    if (e instanceof OpError) return withCanvasNote({ ok: false, error: e.message }, prep.note);
     throw e;
   }
-  if (atF < 0) return { ok: false, error: "'at' must be >= 0 frames" };
+  if (atF < 0) return withCanvasNote({ ok: false, error: "'at' must be >= 0 frames" }, prep.note);
   let specs: InsertSpec[];
   try {
     specs = await Promise.all(entries.map((e) => resolveInsertEntry(ctx, e as Args, fps)));
   } catch (e) {
-    if (e instanceof OpError) return { ok: false, error: e.message };
+    if (e instanceof OpError) return withCanvasNote({ ok: false, error: e.message }, prep.note);
     throw e;
   }
-  return ctxApplyOp(ctx, "insert_clips", (timeline) =>
-    insertClips(timeline, specs, args.track_id as string | undefined, atF),
+  return withCanvasNote(
+    await ctxApplyOp(ctx, "insert_clips", (timeline) =>
+      insertClips(timeline, specs, args.track_id as string | undefined, atF),
+    ),
+    prep.note,
   );
 }
 export function addTextClipsTool(args: Args, ctx: ClientToolContext | null): Promise<Result> {

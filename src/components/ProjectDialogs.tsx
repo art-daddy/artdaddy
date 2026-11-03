@@ -11,6 +11,7 @@ import { BRAND } from "../brand";
 import { confirmDestructive } from "../lib/confirm";
 import { platform } from "../platform";
 import { projectThumbnailUrl } from "../preview/resolve";
+import { ASPECT_CHOICES, AUTO_ASPECT } from "../store/aspect";
 import { useProjects } from "../store/projects";
 import { Button, cn, Overlay } from "./ui";
 
@@ -23,7 +24,7 @@ export function NewProjectDialog({
 }) {
   const create = useProjects((s) => s.create);
   const [name, setName] = useState("");
-  const [aspect, setAspect] = useState("9:16");
+  const [aspect, setAspect] = useState(AUTO_ASPECT);
   const [where, setWhere] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState("");
@@ -76,13 +77,16 @@ export function NewProjectDialog({
       <div className="flex items-center gap-2">
         <label className="text-xs text-neutral-400">Aspect</label>
         <select
+          aria-label="Aspect"
           value={aspect}
           onChange={(e) => setAspect(e.target.value)}
           className="rounded-md border border-edge bg-neutral-900 px-2 py-1.5 text-sm"
         >
-          <option value="9:16">9:16</option>
-          <option value="16:9">16:9</option>
-          <option value="1:1">1:1</option>
+          {ASPECT_CHOICES.map((c) => (
+            <option key={c.value} value={c.value}>
+              {c.label}
+            </option>
+          ))}
         </select>
         <div className="ml-auto flex gap-2">
           <Button onClick={onClose}>Cancel</Button>

@@ -125,17 +125,32 @@ describe("MenuBar", () => {
     expect(screen.queryByText("Unsaved")).not.toBeInTheDocument();
   });
 
-  it("creates a project via File → New", async () => {
+  it("creates a project via File → New, with the canvas left to the first clip (Auto)", async () => {
     renderBar("/");
     fireEvent.click(screen.getByRole("button", { name: "File" }));
     fireEvent.click(screen.getByText("New Project…"));
     fireEvent.change(screen.getByPlaceholderText(/Project name/), { target: { value: "Reel" } });
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
     await waitFor(() =>
-      expect(proj.create).toHaveBeenCalledWith("Reel", "9:16", undefined, undefined),
+      expect(proj.create).toHaveBeenCalledWith("Reel", "auto", undefined, undefined),
     );
     await waitFor(() => expect(screen.getByTestId("loc").textContent).toBe("/p/pNew"));
   });
+
+  it.each(["9:16", "16:9", "1:1"])(
+    "File → New keeps an aspect that was chosen: %s",
+    async (shape) => {
+      renderBar("/");
+      fireEvent.click(screen.getByRole("button", { name: "File" }));
+      fireEvent.click(screen.getByText("New Project…"));
+      fireEvent.change(screen.getByPlaceholderText(/Project name/), { target: { value: "Reel" } });
+      fireEvent.change(screen.getByLabelText("Aspect"), { target: { value: shape } });
+      fireEvent.click(screen.getByRole("button", { name: "Create" }));
+      await waitFor(() =>
+        expect(proj.create).toHaveBeenCalledWith("Reel", shape, undefined, undefined),
+      );
+    },
+  );
 
   it("cancels the New dialog", () => {
     renderBar("/");

@@ -14,11 +14,14 @@ import {
   unlinkClipsTool,
 } from "../timeline/edit";
 import { findClip } from "../timeline/helpers";
+import { prepareCanvas } from "../timeline/canvasAuto";
+import { confirmCanvasChange } from "../lib/confirm";
+import { canvasFps } from "../timeline/frames";
 import { useProjectNotice } from "./projectNotice";
 import { readAnim, writeAnim } from "../timeline/animProps";
 import { upsertKeyframe } from "../timeline/keyframe";
 import { gapAt } from "../timeline/gaps";
-import type { Clip } from "../timeline/model";
+import type { Clip, Timeline } from "../timeline/model";
 import {
   addTrackTool,
   removeTracksTool,
@@ -39,7 +42,7 @@ import {
   slipClip,
   trimToPlayhead,
 } from "../timeline/operations";
-import { runGesture } from "../timeline/engine";
+import { runGesture, loadTimeline } from "../timeline/engine";
 import { setClipPropertiesTool } from "../timeline/props";
 import { sourceLengths } from "../timeline/sourceLength";
 import type { CommandRunner } from "../tools/command";
@@ -77,6 +80,13 @@ async function probeDurationFrames(
     /* image / probe failure -> default */
   }
   return Math.round(5 * fps); // stills / unprobeable default to 5s
+}
+
+/** Where a clip goes, in frames of the canvas as it is NOW. `atFrame` was counted by the caller in the frames of
+ *  the canvas the person was looking at; if placing the clip changed the frame rate (the first video clip's, see
+ *  timeline/canvasAuto.ts) the same moment in time is a different frame number. */
+function placedFrame(atFrame: number, seen: Timeline, fpsNow: number): number {
+  return Math.max(0, Math.round((atFrame * fpsNow) / canvasFps(seen)));
 }
 
 type EditorCommandKey =
@@ -364,10 +374,13 @@ export function makeEditorCommands(
       const { store, timeline } = get();
       if (!store || !timeline) return;
       const runner = await getRunner();
-      const fps = Number(timeline.canvas?.fps) || 30;
+      // Before anything is counted in frames: the first video clip may change the frame rate, and a clip that
+      // does not fit a canvas somebody chose puts a question to the person.
+      await prepareCanvas({ store, runner }, [source], confirmCanvasChange);
+      const fps = canvasFps(await loadTimeline(store).catch(() => timeline));
       const abs = (await store.resolveRef(source)) ?? source;
       const dur = await probeDurationFrames(runner, abs, fps);
-      const at = Math.max(0, Math.round(atFrame));
+      const at = placedFrame(atFrame, timeline, fps);
       await addClipsTool(
         {
           entries: [
@@ -384,9 +397,11 @@ export function makeEditorCommands(
       const { store, timeline } = get();
       if (!store || !timeline || !sources.length) return;
       const runner = await getRunner();
-      const fps = Number(timeline.canvas?.fps) || 30;
-      const at = Math.max(0, Math.round(atFrame));
       const ctx = { store, runner };
+      // Before anything is counted in frames (see addClip).
+      await prepareCanvas(ctx, sources, confirmCanvasChange);
+      const fps = canvasFps(await loadTimeline(store).catch(() => timeline));
+      const at = placedFrame(atFrame, timeline, fps);
       // Probe every file BEFORE taking the lease: `runGesture` holds it for the whole intent, and
       // holding it across N ffprobes would stall every other edit in the app.
       let cursor = at;
