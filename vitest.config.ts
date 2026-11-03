@@ -21,6 +21,13 @@ export default defineConfig({
     // vi.unstubAllEnvs() would restore the real value).
     env: { VITE_SENTRY_DSN: "" },
     setupFiles: ["./src/test/setup.ts"],
+    // A wall-clock budget is not a property of a test. The pre-push run puts every test file on
+    // every core at once, where a test takes two to three times as long as it does alone: the 5 s
+    // default failed two sound tests on two pushes (a property test over a real filesystem, and a
+    // property that re-imports a module 80 times), each of which takes a fraction of that alone. A
+    // test that hangs still fails, only later; one that needs longer says so with its own timeout.
+    testTimeout: 30_000,
+    hookTimeout: 30_000,
     unstubGlobals: true,
     restoreMocks: true,
     coverage: {
