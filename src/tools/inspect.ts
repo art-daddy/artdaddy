@@ -22,6 +22,7 @@ import { failedTranscript, waitBoundMs, waitForRun } from "./transcriptWait";
 import { prioritizeTranscript } from "./transcriptQueue";
 import { lookLoudness, type Loudness } from "./loudness";
 import { reportAppError } from "../api/appEvents";
+import { STOPPED_ERROR, stoppedAnswer } from "../lib/stopped";
 import { displaySize, mediaFrameDims, sampleFrames, stillWithGrid } from "./mediaFrames";
 import { makeStoryboard } from "./storyboard";
 import { loadTimeline } from "../timeline/engine";
@@ -286,7 +287,7 @@ async function lookTranscript(
         boundMs: opts.waitMs,
         signal: ctx.signal,
       });
-      if (outcome.kind === "cancelled") return { error: "cancelled" };
+      if (outcome.kind === "cancelled") return { error: STOPPED_ERROR };
       if (outcome.kind === "pending") return { ...outcome.status };
       if (outcome.kind === "failed") {
         reportTranscriptFailure(path, outcome.status.reason);
@@ -538,7 +539,7 @@ export async function inspectMediaTool(
     : Promise.resolve(null);
   const finish = async (body: Result): Promise<Result> => {
     const [loudness, transcript] = await Promise.all([loudnessTask, transcriptTask]);
-    if (ctx.signal?.aborted) return { ok: false, error: "cancelled" };
+    if (ctx.signal?.aborted) return stoppedAnswer();
     return { ...body, loudness, transcript };
   };
   /** A source time in the caller's units: project frames for a clip_id, seconds otherwise. */
@@ -826,7 +827,7 @@ export async function inspectTimelineTool(
     );
     if (key && (await ctx.store.exists(final))) return { frame, path: final };
     // Stop starts nothing new; a frame already rendering is killed through the runner's signal.
-    if (ctx.signal?.aborted) return { frame, error: "cancelled" };
+    if (ctx.signal?.aborted) return { frame, error: STOPPED_ERROR };
     // Rendered under a temporary name and renamed into place, so a parallel look at the same frame
     // never reads half a JPEG, and a frame a round has shown is never rewritten under it.
     const out = ctx.store.canRename
@@ -869,7 +870,7 @@ export async function inspectTimelineTool(
       for (let i = next++; i < nums.length; i = next++) shots[i] = await renderFrame(nums[i]);
     }),
   );
-  if (ctx.signal?.aborted) return { ok: false, error: "cancelled" };
+  if (ctx.signal?.aborted) return stoppedAnswer();
 
   // Rebuilt in frame order: the lanes finish out of order, and the model reads these as a sequence.
   const attachments: Attachment[] = [];

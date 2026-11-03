@@ -319,6 +319,107 @@ describe("batching", () => {
     expect(posted[0]).toMatchObject({ events: [{ name: "undo", ok: true }] });
   });
 
+  // What the real tools do when Stop aborts them. They go through the registry, the one dispatch boundary every
+  // call passes through, so that is what these tests use: a mocked dispatch would never see the answers the registry
+  // makes. Vision and video tools catch the abort and answer with its words, a handler that throws is answered for
+  // by the registry ("tool: message"), and the look and caption tools answer the marker.
+  describe("a call that Stop ended", () => {
+    const WAYS: [string, () => Promise<unknown>, string][] = [
+      [
+        "answers with the abort's words",
+        async () => ({ ok: false, error: "signal is aborted without reason" }),
+        "signal is aborted without reason",
+      ],
+      [
+        "throws an AbortError",
+        async () => {
+          throw Object.assign(new Error("The operation was aborted."), { name: "AbortError" });
+        },
+        "video_ask: The operation was aborted.",
+      ],
+      [
+        "throws an Error that says aborted",
+        async () => {
+          throw new Error("The user aborted a request.");
+        },
+        "video_ask: The user aborted a request.",
+      ],
+      [
+        "answers a host failure that says cancelled",
+        async () => ({ ok: false, error: "encode for gemini failed: cancelled" }),
+        "encode for gemini failed: cancelled",
+      ],
+      ["answers the marker", async () => ({ ok: false, error: "cancelled" }), "cancelled"],
+    ];
+    async function recorded(handler: () => Promise<unknown>, pressedStop: boolean) {
+      const registry = new ClientToolRegistry();
+      let stopped = false;
+      registry.register("video_ask", async () => {
+        stopped = pressedStop;
+        return (await handler()) as never;
+      });
+      const submitted = agentEventContext();
+      let rounds = 0;
+      const runner = new ClientTurnRunner({
+        eventContext: () => submitted,
+        infer: async () => {
+          const first = ++rounds === 1;
+          return {
+            kind: first ? "tool_calls" : "text",
+            pending_calls: first ? [{ name: "video_ask", call_id: "call_1", arguments: {} }] : [],
+            final_text: "",
+            error: "",
+            finish_reason: "",
+            usage: {},
+            provider_snapshot: {},
+          };
+        },
+        runTool: (name, args, trace) => registry.run(name, args, trace.context, trace),
+        emit: () => undefined,
+        mode: () => "autopilot",
+        stopped: () => stopped,
+        onUsage: () => undefined,
+        session: () => ({}),
+      });
+      await runner.start("go");
+      await vi.waitFor(() => expect(posted).toHaveLength(1));
+      return (posted[0] as { events: Record<string, unknown>[] }).events;
+    }
+
+    it.each(WAYS)(
+      "is recorded as cancelled, the word the tool-failure analysis filters on, when it %s",
+      async (_name, handler) => {
+        const events = await recorded(handler, true);
+        expect(events).toHaveLength(1);
+        expect(events[0]).toMatchObject({
+          kind: "tool_call",
+          name: "video_ask",
+          call_id: "call_1",
+          ok: false,
+          error: "cancelled",
+        });
+      },
+    );
+
+    it.each(WAYS)(
+      "is recorded as what it said when nobody pressed Stop, when it %s",
+      async (_name, handler, said) => {
+        const events = await recorded(handler, false);
+        expect(events[0]).toMatchObject({ ok: false, error: said });
+      },
+    );
+
+    it("keeps a real failure that comes after Stop", async () => {
+      const events = await recorded(async () => ({ ok: false, error: "disk full" }), true);
+      expect(events[0]).toMatchObject({ ok: false, error: "disk full" });
+    });
+
+    it("keeps a call that finished anyway as the success it was", async () => {
+      const events = await recorded(async () => ({ ok: true, answer: "a red apple" }), true);
+      expect(events[0]).toMatchObject({ ok: true, error: "" });
+    });
+  });
+
   it("keeps an app answer under its original turn after another project becomes active", async () => {
     setAgentContext({
       surface: "app",

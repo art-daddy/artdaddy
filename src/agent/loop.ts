@@ -27,6 +27,7 @@ import {
   type ToolTrace,
 } from "../api/agentEvents";
 import type { ApprovalMode } from "../api/types";
+import { isAbortFailure, looksLikeAbort, stoppedAnswer } from "../lib/stopped";
 
 // Re-exported so callers of the loop don't need to reach into the API types.
 export type { ApprovalMode };
@@ -446,16 +447,33 @@ export class ClientTurnRunner {
 
   private async runCall(call: PendingCall): Promise<void> {
     this.emitCall(call);
-    const trace = createToolTrace(call.name, call.arguments, this.d.eventContext(), call.call_id);
+    const trace = createToolTrace(
+      call.name,
+      call.arguments,
+      this.d.eventContext(),
+      call.call_id,
+      () => this.d.stopped(),
+    );
     let result: Record<string, unknown>;
     try {
       result = asResult(await this.d.runTool(call.name, call.arguments, trace));
       trace.result(result);
     } catch (e) {
-      trace.error(e);
-      this.d.onToolError?.(call.name, call.arguments, e);
-      result = { ok: false, error: String(e) };
+      if (this.d.stopped() && looksLikeAbort(e)) {
+        // The person pressed Stop and this is the call ending with it: an answer, not a fault, so it is
+        // neither counted as a tool failure nor reported as an error.
+        result = stoppedAnswer();
+        trace.result(result);
+      } else {
+        trace.error(e);
+        this.d.onToolError?.(call.name, call.arguments, e);
+        result = { ok: false, error: String(e) };
+      }
     }
+    // Whichever way the tool said it (it answered, the registry answered for it, or it threw), a call
+    // that Stop ended is recorded as the one word: the card, the transcript and the next turn's
+    // context all say the same thing, and the telemetry already did when it was recorded.
+    if (this.d.stopped() && isAbortFailure(result)) result = stoppedAnswer();
     // Drain any media the tool exposed for the model to SEE into the next round
     // (other NLEs attach-transport), and strip it before the model sees the result.
     const rawAtts = result._attachments;

@@ -25,6 +25,7 @@ import type { ClientToolRegistry } from "./registry";
 import { captionWords, pendingCaptionsResult } from "./captionTranscript";
 import { TRANSCRIPT_WAIT_MS } from "./transcribe";
 import type { InProgressTranscript } from "./transcriptWait";
+import { stoppedAnswer } from "../lib/stopped";
 
 type Args = Record<string, unknown>;
 type Result = Record<string, unknown>;
@@ -192,7 +193,7 @@ export async function addCaptionsTool(args: Args, ctx: ClientToolContext | null)
     const cues: Cue[] = [];
     for (const clip of byTrack.get(trackId) ?? []) {
       const got = await captionWords(ctx, String(clip.media_ref), language, until);
-      if (got.kind === "cancelled") return { ok: false, error: "cancelled" };
+      if (got.kind === "cancelled") return stoppedAnswer();
       if (got.kind === "pending") {
         waiting.push({ clip_id: String(clip.id), track_id: trackId });
         waitingStatus ??= got.status;

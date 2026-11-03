@@ -8,7 +8,7 @@ import {
   type LoopDeps,
 } from "./loop";
 import type { InferenceAttachment, RoundInput, RoundResultDTO } from "./types";
-import { agentEventContext } from "../api/agentEvents";
+import { agentEventContext, type ToolTrace } from "../api/agentEvents";
 
 function rr(over: Partial<RoundResultDTO>): RoundResultDTO {
   return {
@@ -42,13 +42,20 @@ function harness(
     async (_ri: RoundInput, _atts?: InferenceAttachment[]) =>
       rounds.shift() ?? rr({ kind: "text", final_text: "done" }),
   );
-  const runTool = vi.fn(async (name: string): Promise<Record<string, unknown>> => ({
-    ok: true,
-    ran: name,
-  }));
+  const runTool = vi.fn(
+    async (
+      name: string,
+      _args?: Record<string, unknown>,
+      _trace?: ToolTrace,
+    ): Promise<Record<string, unknown>> => ({
+      ok: true,
+      ran: name,
+    }),
+  );
   const collectAttachments = vi.fn(
     async () => [{ kind: "image", b64: "AA==" }] as InferenceAttachment[],
   );
+  const onToolError = vi.fn();
   const deps: LoopDeps = {
     eventContext: agentEventContext,
     infer,
@@ -60,12 +67,14 @@ function harness(
     onUsage: vi.fn(),
     session: () => ({ cost_usd: 0.01 }),
     noteForRound: opts.noteForRound,
+    onToolError,
   };
   return {
     runner: new ClientTurnRunner(deps),
     events,
     infer,
     runTool,
+    onToolError,
     names: () => events.map((e) => e.event),
     setMode: (m: ApprovalMode) => (mode = m),
     setStopped: (s: boolean) => (stopped = s),
@@ -535,5 +544,191 @@ describe("ClientTurnRunner round notes", () => {
     await h.runner.continueRun();
     const resumed = h.infer.mock.calls[before][0].tool_results ?? [];
     expect(resumed.at(-1)?.result).toMatchObject(NOTE);
+  });
+});
+
+// A call that Stop ended is the person's own action. It must be answered exactly once, as cancelled, and
+// nobody may be told it went wrong; a failure that is not Stop's must still be seen.
+describe("a call that the person's Stop ends", () => {
+  const abortError = (): Error =>
+    Object.assign(new Error("signal is aborted without reason"), { name: "AbortError" });
+  // What an aborted call actually looked like in the field, one per way a tool can say it.
+  const ABORTS: [string, () => unknown][] = [
+    ["an AbortError", abortError],
+    ["an Error that says the request was aborted", () => new Error("The user aborted a request.")],
+    ["a host failure that says cancelled", () => new Error("encode for gemini failed: cancelled")],
+    ["a bare string", () => "cancelled"],
+  ];
+  const answers = (h: ReturnType<typeof harness>) =>
+    h.events.filter((e) => e.event === "tool_result");
+
+  it.each(ABORTS)(
+    "answers cancelled, and tells nobody it failed, when a tool throws %s",
+    async (_name, make) => {
+      const h = harness([toolCall("video_ask")], { mode: "autopilot" });
+      h.runTool.mockImplementationOnce(async () => {
+        h.setStopped(true);
+        throw make();
+      });
+      await h.runner.start("go");
+      const [answer] = answers(h);
+      expect(answers(h)).toHaveLength(1);
+      expect(answer.data).toMatchObject({ ok: false, error: "cancelled", call_id: "c1" });
+      expect(answer.data.model_result).toEqual({ ok: false, error: "cancelled" });
+      expect(h.onToolError).not.toHaveBeenCalled();
+      expect(h.infer).toHaveBeenCalledTimes(1); // no further round
+      expect(h.names().at(-1)).toBe("turn_done");
+    },
+  );
+
+  it.each(ABORTS.slice(0, 3))(
+    "still reports %s when nobody pressed Stop: a timeout or a dropped request is a failure",
+    async (_name, make) => {
+      const thrown = make();
+      const h = harness([toolCall("video_ask")], { mode: "autopilot" });
+      h.runTool.mockImplementationOnce(async () => {
+        throw thrown;
+      });
+      await h.runner.start("go");
+      const [answer] = answers(h);
+      expect(answer.data.error).toBe(String(thrown));
+      expect(answer.data.error).not.toBe("cancelled");
+      expect(h.onToolError).toHaveBeenCalledTimes(1);
+      expect(h.onToolError).toHaveBeenCalledWith("video_ask", {}, thrown);
+    },
+  );
+
+  it("keeps a real failure that happens to come after Stop", async () => {
+    const h = harness([toolCall("add_clips")], { mode: "autopilot" });
+    const bug = new TypeError("Cannot read properties of undefined (reading 'clips')");
+    h.runTool.mockImplementationOnce(async () => {
+      h.setStopped(true);
+      throw bug;
+    });
+    await h.runner.start("go");
+    const [answer] = answers(h);
+    expect(answer.data.error).toBe(String(bug));
+    expect(h.onToolError).toHaveBeenCalledWith("add_clips", {}, bug);
+  });
+
+  it("leaves a call that finished anyway as the success it was", async () => {
+    const h = harness([toolCall("add_clips")], { mode: "autopilot" });
+    h.runTool.mockImplementationOnce(async () => {
+      h.setStopped(true);
+      return { ok: true, created: 2 };
+    });
+    await h.runner.start("go");
+    const [answer] = answers(h);
+    expect(answer.data).toMatchObject({ ok: true, created: 2 });
+    expect(answer.data).not.toHaveProperty("error");
+    expect(h.infer).toHaveBeenCalledTimes(1); // Stop still ends the turn at the gate
+  });
+
+  it("records the one canonical answer when a tool notices Stop itself, and nobody is told it failed", async () => {
+    const h = harness([toolCall("inspect_media")], { mode: "autopilot" });
+    h.runTool.mockImplementationOnce(async () => {
+      h.setStopped(true);
+      return { error: "cancelled" };
+    });
+    await h.runner.start("go");
+    const [answer] = answers(h);
+    expect(answer.data.model_result).toEqual({ ok: false, error: "cancelled" });
+    expect(h.onToolError).not.toHaveBeenCalled();
+  });
+
+  // The usual way a tool answers when Stop aborts it: it catches the abort and answers with its words (the vision and
+  // video tools), or the registry answers for a throw ("tool: message"). Neither is a throw by the time the loop sees it.
+  const RETURNED: [string, string][] = [
+    ["the field's words", "signal is aborted without reason"],
+    ["the registry's answer for a throw", "video_ask: The user aborted a request."],
+    ["a host failure that says cancelled", "encode for gemini failed: cancelled"],
+    ["the chat refusing to start the call", "turn cancelled"],
+  ];
+
+  it.each(RETURNED)(
+    "records cancelled when a tool answers %s after Stop, and nobody is told it failed",
+    async (_name, error) => {
+      const h = harness([toolCall("video_ask")], { mode: "autopilot" });
+      h.runTool.mockImplementationOnce(async () => {
+        h.setStopped(true);
+        return { ok: false, error };
+      });
+      await h.runner.start("go");
+      const [answer] = answers(h);
+      expect(answers(h)).toHaveLength(1);
+      expect(answer.data).toMatchObject({ ok: false, error: "cancelled", call_id: "c1" });
+      expect(answer.data.model_result).toEqual({ ok: false, error: "cancelled" });
+      expect(h.onToolError).not.toHaveBeenCalled();
+      expect(h.infer).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(RETURNED)(
+    "keeps what a tool answered, %s, when nobody pressed Stop: it is a failure then",
+    async (_name, error) => {
+      const h = harness([toolCall("video_ask")], { mode: "autopilot" });
+      h.runTool.mockImplementationOnce(async () => ({ ok: false, error }));
+      await h.runner.start("go");
+      const [answer] = answers(h);
+      expect(answer.data).toMatchObject({ ok: false, error });
+    },
+  );
+
+  it("keeps a real failure that a tool answers after Stop", async () => {
+    const h = harness([toolCall("add_clips")], { mode: "autopilot" });
+    h.runTool.mockImplementationOnce(async () => {
+      h.setStopped(true);
+      return { ok: false, error: "track v1 is locked" };
+    });
+    await h.runner.start("go");
+    const [answer] = answers(h);
+    expect(answer.data).toMatchObject({ ok: false, error: "track v1 is locked" });
+  });
+
+  it("answers every call of a parallel batch exactly once, each as cancelled", async () => {
+    const h = harness(
+      [
+        rr({
+          kind: "tool_calls",
+          pending_calls: [
+            { call_id: "a", name: "get_timeline", arguments: {} },
+            { call_id: "b", name: "get_project_state", arguments: {} },
+            { call_id: "c", name: "inspect_media", arguments: {} },
+          ],
+        }),
+      ],
+      { mode: "autopilot" },
+    );
+    h.runTool.mockImplementation(async () => {
+      h.setStopped(true);
+      throw abortError();
+    });
+    await h.runner.start("go");
+    const answered = answers(h)
+      .map((e) => [e.data.call_id, e.data.error])
+      .sort();
+    expect(answered).toEqual([
+      ["a", "cancelled"],
+      ["b", "cancelled"],
+      ["c", "cancelled"],
+    ]);
+    expect(h.onToolError).not.toHaveBeenCalled();
+    expect(h.infer).toHaveBeenCalledTimes(1);
+  });
+
+  it("hands the trace the cancelled answer, not the thrown failure", async () => {
+    const h = harness([toolCall("video_ask")], { mode: "autopilot" });
+    const seen: { result: unknown[]; error: unknown[] } = { result: [], error: [] };
+    h.runTool.mockImplementationOnce(async (_name, _args, trace) => {
+      const t = trace as { result: (v: unknown) => void; error: (e: unknown) => void };
+      const { result, error } = t;
+      t.result = (v) => (seen.result.push(v), result.call(t, v));
+      t.error = (e) => (seen.error.push(e), error.call(t, e));
+      h.setStopped(true);
+      throw abortError();
+    });
+    await h.runner.start("go");
+    expect(seen.result).toEqual([{ ok: false, error: "cancelled" }]);
+    expect(seen.error).toEqual([]);
   });
 });
