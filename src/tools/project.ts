@@ -486,12 +486,14 @@ export class ProjectRegistry {
 
   /** Scaffold a new project dir (subdirs + project.json + seed timeline.json +
    *  a minimal TurnConfig so the server can open it). Ports EphemeralSession.create.
-   *  `at` places it in a folder the user chose; omitted, it lands in the app folder. */
+   *  `at` places it in a folder the user chose; omitted, it lands in the app folder.
+   *  `canvasAuto`: nobody has chosen the canvas, so the first video clip may (timeline/canvasAuto.ts). */
   async createProject(
     name: string,
     canvas: { width: number; height: number; fps: number },
     modelId = "",
     at?: string,
+    canvasAuto = false,
   ): Promise<{ id: string; dir: string }> {
     const pid = newProjectId(name);
     const dir = at ? stripTrail(at) : this.projectDir(pid);
@@ -526,7 +528,11 @@ export class ProjectRegistry {
     );
     await this.fs.writeTextFile(
       joinPath(dir, INTERNAL_DIR, "timeline.json"),
-      JSON.stringify(emptyTimeline(width, height, fps), null, 2),
+      JSON.stringify(
+        { ...emptyTimeline(width, height, fps), ...(canvasAuto ? { canvas_auto: true } : {}) },
+        null,
+        2,
+      ),
     );
     return { id: pid, dir };
   }

@@ -7,6 +7,7 @@ import { reportProjectOpened, startHeartbeat } from "../api/appEvents";
 import { setAgentContext } from "../api/agentEvents";
 import { projectsRoot, registryPath } from "../tools/dataRoot";
 import { ProjectRegistry } from "../tools/project";
+import { AUTO_ASPECT } from "./aspect";
 import { useEditor } from "./editor";
 
 const ASPECT: Record<string, [number, number]> = {
@@ -91,10 +92,12 @@ export const useProjects = create<ProjectsState>((set, get) => ({
     }
   },
 
-  create: async (name, aspect = "9:16", fps = 30, at) => {
+  create: async (name, aspect = AUTO_ASPECT, fps = 30, at) => {
     const reg = await localRegistry();
-    const [w, h] = ASPECT[aspect] ?? ASPECT["9:16"];
-    const { id, dir } = await reg.createProject(name, { width: w, height: h, fps }, "", at);
+    // "Auto": the default canvas until the first video clip says otherwise (timeline/canvasAuto.ts).
+    const auto = aspect === AUTO_ASPECT;
+    const [w, h] = ASPECT[auto ? "9:16" : aspect] ?? ASPECT["9:16"];
+    const { id, dir } = await reg.createProject(name, { width: w, height: h, fps }, "", at, auto);
     await reg.register({ id, name, path: dir, lastOpenedAt: new Date().toISOString() }, true);
     const summary = await summaryOf(reg, id);
     await get().refresh();

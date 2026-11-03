@@ -61,3 +61,40 @@ export async function confirmDestructive(
   }
   return w.confirm(message);
 }
+
+let canvasChangeForTests: ((message: string) => Promise<boolean>) | null = null;
+
+export function __setCanvasChangeConfirmationForTests(handler: typeof canvasChangeForTests): void {
+  canvasChangeForTests = handler;
+}
+
+/** The question a clip that does not fit the project's canvas puts to the person (timeline/canvasAuto.ts).
+ *  True: change the project to match the clip. False: keep it as it is, which is also the answer when no
+ *  dialog could be shown: a question that cannot be asked never changes the canvas. */
+export async function confirmCanvasChange(message: string): Promise<boolean> {
+  if (canvasChangeForTests) {
+    try {
+      return (await canvasChangeForTests(message)) === true;
+    } catch {
+      return false;
+    }
+  }
+  const w = typeof window !== "undefined" ? window : undefined;
+  if (!w) return false;
+  try {
+    if (w.__TAURI_INTERNALS__ ?? w.__TAURI__) {
+      const { confirm } = await import("@tauri-apps/plugin-dialog");
+      return (
+        (await confirm(message, {
+          title: "Clip and project differ",
+          kind: "info",
+          okLabel: "Change to Match",
+          cancelLabel: "Keep Current",
+        })) === true
+      );
+    }
+    return w.confirm(message) === true;
+  } catch {
+    return false;
+  }
+}

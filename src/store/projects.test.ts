@@ -110,9 +110,37 @@ describe("useProjects", () => {
       { width: 1920, height: 1080, fps: 30 },
       "",
       undefined,
+      false, // a canvas somebody chose: never handed over to the first clip
     );
     expect(reg.register).toHaveBeenCalled();
     expect(reg.read).toHaveBeenCalled(); // refresh ran
+  });
+
+  it("create with Auto starts at the default canvas and leaves it to the first video clip", async () => {
+    reg.createProject.mockResolvedValue({ id: "p3", dir: "/root/projects/p3" });
+    reg.readProject.mockResolvedValue({ name: "C", settings: {} });
+    await useProjects.getState().create("C", "auto");
+    expect(reg.createProject).toHaveBeenCalledWith(
+      "C",
+      { width: 1080, height: 1920, fps: 30 },
+      "",
+      undefined,
+      true,
+    );
+  });
+
+  it("create with no aspect at all is Auto too (File > New Project and the start screen share the default)", async () => {
+    reg.createProject.mockResolvedValue({ id: "p4", dir: "/root/projects/p4" });
+    reg.readProject.mockResolvedValue({ name: "D", settings: {} });
+    await useProjects.getState().create("D");
+    expect(reg.createProject.mock.calls[0][4]).toBe(true);
+  });
+
+  it.each(["9:16", "16:9", "1:1"])("create with %s is a choice, kept", async (aspect) => {
+    reg.createProject.mockResolvedValue({ id: "p5", dir: "/root/projects/p5" });
+    reg.readProject.mockResolvedValue({ name: "E", settings: {} });
+    await useProjects.getState().create("E", aspect);
+    expect(reg.createProject.mock.calls[0][4]).toBe(false);
   });
 
   it("open sets the active project", async () => {

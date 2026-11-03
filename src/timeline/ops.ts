@@ -127,6 +127,8 @@ export async function getTimelineTool(args: Args, ctx: ClientToolContext | null)
     ...timeline,
     tracks: (timeline.tracks ?? []).map((t) => compactTrack(t, win, captionDetail)),
   };
+  // An internal marker (timeline/canvasAuto.ts): nothing the agent reads or sets.
+  delete (compact as Record<string, unknown>).canvas_auto;
   const result: Result = { ok: true, timeline: compact };
   if (win) result.window = [win.start, win.end];
   // Ambient editor context: WHERE the user is looking right now (playhead +
@@ -176,6 +178,9 @@ export function setCanvasTool(
     };
     const next = resolveCanvas(typeof args === "function" ? args(before) : args, before);
     if ("error" in next) throw new OpError(next.error);
+    // Whoever calls this has chosen the canvas (the person, the agent, or the first clip taking its own
+    // size): a project made with "Auto" is no longer waiting for one (canvasAuto.ts).
+    delete (timeline as Record<string, unknown>).canvas_auto;
     if (next.fps !== before.fps) {
       // fps is project-wide: every frame coordinate is measured at canvas.fps, so
       // changing it rescales every clip span, source cursor, keyframe time, fade

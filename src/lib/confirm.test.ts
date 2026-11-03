@@ -12,7 +12,7 @@ import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { __setExportConfirmationForTests } from "./confirm";
+import { __setCanvasChangeConfirmationForTests, __setExportConfirmationForTests } from "./confirm";
 
 const dialogConfirm = vi.fn();
 vi.mock("@tauri-apps/plugin-dialog", () => ({ confirm: (...a: unknown[]) => dialogConfirm(...a) }));
@@ -23,7 +23,10 @@ const asTauri = (on: boolean) => {
 };
 
 const load = async () => (await import("./confirm")).confirmDestructive;
-beforeEach(() => __setExportConfirmationForTests(null));
+beforeEach(() => {
+  __setExportConfirmationForTests(null);
+  __setCanvasChangeConfirmationForTests(null);
+});
 
 afterEach(() => {
   asTauri(false);
@@ -101,6 +104,63 @@ describe("export confirmation", () => {
     vi.spyOn(window, "confirm").mockReturnValueOnce(true).mockReturnValueOnce(false);
     expect(await confirmExport("Check export", true)).toBe("continue");
     expect(await confirmExport("Check export", true)).toBe("cancel");
+  });
+});
+
+// A clip that does not fit the project's canvas asks the PERSON whether to change the project to match it
+// (timeline/canvasAuto.ts). The rule: only an explicit yes changes it. A dialog that cannot be shown, a dialog
+// that fails, and any answer that is not the boolean true all mean "keep the project as it is".
+describe("canvas-change confirmation", () => {
+  const ask = async (message = "This clip is 3840x2160 at 24 fps. Change the project to match?") =>
+    (await import("./confirm")).confirmCanvasChange(message);
+
+  it("asks under Tauri with the two choices named for what they do, and returns the real answer both ways", async () => {
+    asTauri(true);
+    dialogConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    expect(await ask("Match?")).toBe(true);
+    expect(dialogConfirm).toHaveBeenLastCalledWith("Match?", {
+      title: "Clip and project differ",
+      kind: "info",
+      okLabel: "Change to Match",
+      cancelLabel: "Keep Current",
+    });
+    expect(await ask("Match?")).toBe(false);
+  });
+
+  it("keeps the project when the dialog cannot be shown or answers with anything but true", async () => {
+    asTauri(true);
+    dialogConfirm.mockRejectedValueOnce(
+      new Error("Command plugin:dialog|confirm not allowed by ACL"),
+    );
+    expect(await ask()).toBe(false);
+    for (const invalid of ["true", {}, 1, null, undefined]) {
+      dialogConfirm.mockResolvedValueOnce(invalid);
+      expect(await ask()).toBe(false);
+    }
+  });
+
+  it("uses the browser's own confirm on the web, and a Promise is never consent", async () => {
+    asTauri(false);
+    const spy = vi.spyOn(window, "confirm").mockReturnValueOnce(true).mockReturnValueOnce(false);
+    expect(await ask("Match?")).toBe(true);
+    expect(spy).toHaveBeenCalledWith("Match?");
+    expect(await ask("Match?")).toBe(false);
+    spy.mockReturnValueOnce(Promise.resolve(true) as unknown as boolean);
+    expect(await ask("Match?")).toBe(false);
+  });
+
+  it("goes through the test hook when one is set, and a hook that throws changes nothing", async () => {
+    const hook = vi.fn(async () => true);
+    __setCanvasChangeConfirmationForTests(hook);
+    expect(await ask("Match?")).toBe(true);
+    expect(hook).toHaveBeenCalledWith("Match?");
+    expect(dialogConfirm).not.toHaveBeenCalled();
+    __setCanvasChangeConfirmationForTests(async () => {
+      throw new Error("no dialog");
+    });
+    expect(await ask()).toBe(false);
+    __setCanvasChangeConfirmationForTests(async () => "yes" as unknown as boolean);
+    expect(await ask()).toBe(false);
   });
 });
 
