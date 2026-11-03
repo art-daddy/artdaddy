@@ -36,6 +36,7 @@ import { adoptTurn, lookWhisper } from "./workGate";
 import { reportAppError, reportTranscription } from "../api/appEvents";
 import { beginSessionActivity } from "../observability/crashWatch";
 import { settledWithin } from "../lib/settledWithin";
+import { stoppedAnswer } from "../lib/stopped";
 import { trackSpeechWait } from "../store/liveWait";
 import {
   clearModelDownload,
@@ -2011,7 +2012,7 @@ export async function getTranscriptTool(
     if (got) Object.assign(job, got);
     else overdue = job;
   }
-  if (ctx.signal?.aborted) return { ok: false, error: "cancelled" };
+  if (ctx.signal?.aborted) return stoppedAnswer();
   const handed = queued
     .map((job) => prioritizeTranscript(ctx.store.projectDir, job.src, "", job.window))
     .every(Boolean);

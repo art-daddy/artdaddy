@@ -1,9 +1,12 @@
-import { describe, expect, it } from "vitest";
+import fc from "fast-check";
+import { beforeEach, describe, expect, it } from "vitest";
 
 import { ClientTurnRunner } from "../agent/loop";
 import type { RoundResultDTO } from "../agent/types";
 import type { TranscriptPart } from "../api/types";
 import { toolNames } from "../contract/views";
+import { ClientToolRegistry } from "../tools/registry";
+import { useCompatibility } from "../update/compatibility";
 import { trackLabels } from "./timeline/labels";
 import {
   buildRows,
@@ -126,7 +129,213 @@ describe("every tool the model can call has a sentence", () => {
   });
 });
 
-// ── tense ────────────────────────────────────────────────────────────────────
+// ── Stop ─────────────────────────────────────────────────────────────────────
+
+// Stop is the person's own action. A call it ended is not a call that went wrong, so the chat must not
+// say "Couldn't ...", for any tool, whichever way the tool told us.
+describe("a call that Stop ended is never shown as a failure", () => {
+  const STOP_ANSWERS: Record<string, unknown>[] = [
+    { error: "cancelled" },
+    { ok: false, error: "cancelled" },
+    { frame: "f_1", error: "cancelled" },
+  ];
+
+  it("reads as stopped for ANY tool, whether or not the turn is over", () => {
+    for (const name of TOOLS) {
+      for (const answer of STOP_ANSWERS) {
+        for (const live of [true, false]) {
+          const v = summarizeCall(name, {}, answer, ctx, live);
+          const at = `${name} ${JSON.stringify(answer)} live=${live} -> ${v.text}`;
+          expect(v.interrupted, at).toBe(true);
+          expect(v.ok, at).toBe(true);
+          expect(v.running, at).toBe(false);
+          expect(v.error, at).toBeUndefined();
+          expect(v.text, at).toMatch(/ — stopped$/);
+          expect(v.text, at).not.toMatch(/^Couldn't|cancelled|_/);
+        }
+      }
+    }
+  });
+
+  it("says what a call that never got its answer says, for ANY tool", () => {
+    for (const name of TOOLS) {
+      const unanswered = summarizeCall(name, {}, undefined, ctx, false);
+      const stopped = summarizeCall(name, {}, { ok: false, error: "cancelled" }, ctx, true);
+      expect(stopped.text, name).toBe(unanswered.text);
+    }
+  });
+
+  it("does not hide a real failure behind the word, for ANY tool", () => {
+    // Near misses: the exact word is the only thing Stop answers.
+    const NEAR = [
+      "boom",
+      "Cancelled",
+      " cancelled",
+      "cancelled.",
+      "export cancelled before submission",
+      "The operation was aborted",
+    ];
+    for (const name of TOOLS) {
+      for (const error of NEAR) {
+        const v = summarizeCall(name, {}, { ok: false, error }, ctx, false);
+        const at = `${name} ${JSON.stringify(error)} -> ${v.text}`;
+        expect(v.ok, at).toBe(false);
+        expect(v.interrupted, at).toBeUndefined();
+        expect(v.text, at).toMatch(/^Couldn't /);
+        expect(v.error, at).toBe(error);
+      }
+    }
+  });
+
+  it("turns only the exact word into a stop, whatever else a failure says", () => {
+    fc.assert(
+      fc.property(
+        fc.string().filter((error) => error !== "cancelled"),
+        fc.boolean(),
+        (error, live) => {
+          const v = summarizeCall("inspect_media", {}, { ok: false, error }, ctx, live);
+          expect(v.ok).toBe(false);
+          expect(v.interrupted).toBeUndefined();
+          expect(v.text).toMatch(/^Couldn't /);
+        },
+      ),
+    );
+  });
+
+  it("reads the same when the project is reopened and the history is rebuilt", () => {
+    const parts = [
+      { kind: "tool_call", call_id: "c1", name: "inspect_media", args: {} },
+      { kind: "tool_result", call_id: "c1", result: { ok: false, error: "cancelled" } },
+    ] as TranscriptPart[];
+    for (const live of [true, false]) {
+      const [row] = buildRows(parts, ctx, live) as Any[];
+      expect(row.calls[0].interrupted, `live=${live}`).toBe(true);
+      expect(rowSummary(row.calls, ctx)).toBe("Looking at media — stopped");
+    }
+  });
+
+  it("is not counted among a row's failures", () => {
+    const parts = [
+      { kind: "tool_call", call_id: "a", name: "inspect_media", args: {} },
+      { kind: "tool_result", call_id: "a", result: { error: "cancelled" } },
+      { kind: "tool_call", call_id: "b", name: "inspect_media", args: {} },
+      { kind: "tool_result", call_id: "b", result: { ok: true } },
+    ] as TranscriptPart[];
+    const rows = buildRows(parts, ctx, false) as Any[];
+    expect(rows).toHaveLength(1); // one row: a stopped call is not a failure, which would stand alone
+    expect(rowSummary(rows[0].calls, ctx)).not.toMatch(/failed|Couldn't/);
+  });
+
+  // What the person sees when Stop ends a call, through the real dispatch boundary (the registry, which answers for a
+  // tool that throws) and the real loop that records the answer, then the history rebuilt as it is on reopening.
+  describe("end to end, through the registry and the loop that record the answer", () => {
+    beforeEach(() => useCompatibility.setState({ status: "allowed" }));
+
+    async function seen(
+      tool: string,
+      handler: () => Promise<Record<string, unknown>>,
+      pressedStop: boolean,
+    ) {
+      const registry = new ClientToolRegistry();
+      let stopped = false;
+      registry.register(tool, async () => {
+        stopped = pressedStop;
+        return (await handler()) as never;
+      });
+      const parts: Record<string, unknown>[] = [];
+      let rounds = 0;
+      const runner = new ClientTurnRunner({
+        eventContext: () => ({
+          surface: "app",
+          project_id: "",
+          model: "",
+          transcript_id: "",
+          generation: 0,
+        }),
+        infer: async () =>
+          rounds++ === 0
+            ? ({
+                kind: "tool_calls",
+                pending_calls: [{ call_id: "c1", name: tool, arguments: {} }],
+                final_text: "",
+                error: "",
+                finish_reason: "",
+                usage: {},
+                provider_snapshot: {},
+              } as RoundResultDTO)
+            : ({ kind: "text", final_text: "done", usage: {} } as RoundResultDTO),
+        runTool: (name, args, trace) => registry.run(name, args, trace.context, trace),
+        emit: (event, data) => {
+          if (event === "tool_call" || event === "tool_result")
+            parts.push({ ...data, kind: event });
+        },
+        mode: () => "autopilot",
+        stopped: () => stopped,
+        onUsage: () => {},
+        session: () => ({}),
+      });
+      await runner.start("go");
+      return (buildRows(parts as TranscriptPart[], ctx, false)[0] as Any).calls[0] as ToolCallView;
+    }
+
+    // The ways a tool answers an abort, as the real tools do: the vision and video tools catch it and answer with its
+    // words, a handler that throws is answered for by the registry, and the look and caption tools answer the marker.
+    const WAYS: [string, () => Promise<Record<string, unknown>>][] = [
+      ["answers with the abort's words", async () => ({ ok: false, error: "signal is aborted" })],
+      [
+        "throws an AbortError",
+        async () => {
+          throw Object.assign(new Error("The operation was aborted."), { name: "AbortError" });
+        },
+      ],
+      ["answers the marker", async () => ({ ok: false, error: "cancelled" })],
+    ];
+    // The least representative members: a paid generation, a server-backed look, a client look, captions.
+    const TOOLS_SAMPLE = ["generate_image", "video_ask", "inspect_media", "add_captions"];
+    const CASES = TOOLS_SAMPLE.flatMap((tool) =>
+      WAYS.map(([way, handler]) => [tool, way, handler] as const),
+    );
+
+    it.each(CASES)(
+      "%s: when it %s after Stop, it reads as stopped",
+      async (tool, _way, handler) => {
+        const c = await seen(tool, handler, true);
+        expect(c.interrupted).toBe(true);
+        expect(c.ok).toBe(true);
+        expect(c.error).toBeUndefined();
+        expect(c.text).toMatch(/ — stopped$/);
+        expect(c.text).not.toMatch(/Couldn't|abort|cancel/);
+      },
+    );
+
+    it.each(CASES)(
+      "%s: when it %s and nobody pressed Stop, it is a failure",
+      async (tool, way, handler) => {
+        // The marker is the tool's own word for what Stop did, so it reads as stopped whoever said it.
+        if (way === "answers the marker") return;
+        const c = await seen(tool, handler, false);
+        expect(c.ok).toBe(false);
+        expect(c.text).toMatch(/^Couldn't /);
+        expect(c.error).toMatch(/abort/i);
+      },
+    );
+
+    it.each(TOOLS_SAMPLE)("%s: a real failure after Stop is still a failure", async (tool) => {
+      const c = await seen(
+        tool,
+        async () => {
+          throw new TypeError("Cannot read properties of undefined");
+        },
+        true,
+      );
+      expect(c.ok).toBe(false);
+      expect(c.text).toMatch(/^Couldn't /);
+      expect(c.error).toContain("Cannot read properties of undefined");
+    });
+  });
+});
+
+// ── tense  ────────────────────────────────────────────────────────────────────
 
 describe("tense", () => {
   it("reads as in-progress while the call has no result yet", () => {

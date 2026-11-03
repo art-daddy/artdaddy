@@ -16,6 +16,7 @@ import { reportExport } from "./exportEvents";
 import { authedFetch, hasSession } from "./auth";
 import type { TurnSummary } from "../agent/turnTiming";
 import { legalText } from "../observability/recentFailures";
+import { isAbortFailure, stoppedAnswer } from "../lib/stopped";
 import { hostInfo } from "../platform/host";
 import { useAuth } from "../store/auth";
 
@@ -176,14 +177,18 @@ export function createToolTrace(
   args: unknown,
   labels: AgentEventContext,
   callId = "",
+  stopped: () => boolean = () => false,
 ): ToolTrace {
   const captured = Object.freeze({ ...labels });
   const submittedArgs = preview(args, MAX_ARGS);
   const started = Date.now();
   let recorded = false;
-  const result = (value: unknown): void => {
+  const result = (answered: unknown): void => {
     if (recorded) return;
     recorded = true;
+    // A call the person's Stop ended is not a call that failed: it is recorded as the one word the
+    // tool-failure numbers filter on, next to the turn's own `stopped` outcome.
+    const value = stopped() && isAbortFailure(answered) ? stoppedAnswer() : answered;
     const object =
       value !== null && typeof value === "object" ? (value as Record<string, unknown>) : null;
     const failed = object?.ok === false || object?.isError === true;

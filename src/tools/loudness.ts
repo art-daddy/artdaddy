@@ -8,6 +8,7 @@ import { stderrExcerpt } from "./command";
 import type { ClientToolContext } from "./context";
 import { backgroundLoudness } from "./transcriptQueue";
 import { settledWithin } from "../lib/settledWithin";
+import { STOPPED_ERROR } from "../lib/stopped";
 
 export interface Loudness {
   /** EBU R128 integrated loudness, LUFS. -70 is ffmpeg's floor for silence. */
@@ -119,7 +120,7 @@ export async function measureLoudness(
   );
   const r = await ctx.runner.run("ffmpeg", args, ctx.signal);
   if (r.code !== 0) {
-    if (ctx.signal?.aborted) return { error: "cancelled" };
+    if (ctx.signal?.aborted) return { error: STOPPED_ERROR };
     return { error: `loudness could not be measured: ${stderrExcerpt(r.stderr, 300)}` };
   }
   const got = parseLoudness(r.stderr);

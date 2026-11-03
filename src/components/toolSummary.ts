@@ -7,6 +7,7 @@
 // what was asked for and the result says what happened, and those differ whenever the
 // tool clamped, coerced or partially applied.
 import type { TranscriptPart } from "../api/types";
+import { isStoppedAnswer } from "../lib/stopped";
 
 type Args = Record<string, unknown>;
 type Result = Record<string, unknown>;
@@ -481,6 +482,20 @@ export interface ToolCallView {
   error?: string;
 }
 
+function stoppedCall(phrase: Phrase): {
+  text: string;
+  running: false;
+  ok: true;
+  interrupted: true;
+} {
+  return {
+    text: `${phrase.ing.replace(/…$/, "")} — stopped`,
+    running: false,
+    ok: true,
+    interrupted: true,
+  };
+}
+
 /** One line describing a single call, in whichever tense applies.
  *
  *  `live` is whether the TURN is still going. Without it a call with no result reads as
@@ -503,13 +518,11 @@ export function summarizeCall(
   const phrase = phraseOf(name);
   if (!result) {
     if (live) return { text: phrase.ing, running: true, ok: true };
-    return {
-      text: `${phrase.ing.replace(/…$/, "")} — stopped`,
-      running: false,
-      ok: true,
-      interrupted: true,
-    };
+    return stoppedCall(phrase);
   }
+  // Stop ended this call: the person's own action, not a failure, and it reads like a stopped call that
+  // never answered, whether the turn is over yet or not.
+  if (isStoppedAnswer(result)) return stoppedCall(phrase);
   // Not a failure and not done: the work is going on in the background and the call can be
   // repeated (captions waiting for words). Reading it as "Couldn't ..." would say the wrong thing.
   if (result.pending === true) {

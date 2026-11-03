@@ -60,6 +60,39 @@ describe("a call the turn never answered", () => {
   });
 });
 
+describe("a call that Stop ended", () => {
+  const stoppedByThePerson = { ok: false, error: "cancelled" };
+
+  it("shows the neutral stopped mark: not the cross that means failed, not the tick that means done", () => {
+    render(<ToolCalls calls={[answered("inspect_media", stoppedByThePerson)]} ctx={ctx} />);
+    expect(screen.getByTitle("stopped before it finished")).toBeInTheDocument();
+    expect(screen.queryByText("✗")).toBeNull();
+    expect(screen.queryByText("✓")).toBeNull();
+    expect(screen.getByText("Looking at media — stopped")).toBeInTheDocument();
+  });
+
+  it("does not print an error line under it, or the word the tools answer with", () => {
+    const { container } = render(
+      <ToolCalls calls={[answered("inspect_media", stoppedByThePerson)]} ctx={ctx} />,
+    );
+    expect(container.querySelector(".text-red-300\\/80")).toBeNull();
+    expect(screen.queryByText("cancelled")).toBeNull();
+    expect(screen.queryByText(/Couldn't/)).toBeNull();
+  });
+
+  it("does not change how a real failure looks", () => {
+    render(
+      <ToolCalls
+        calls={[answered("inspect_media", { ok: false, error: "disk full" })]}
+        ctx={ctx}
+      />,
+    );
+    expect(screen.getByText("✗")).toBeInTheDocument();
+    expect(screen.getByText("Couldn't look at media")).toBeInTheDocument();
+    expect(screen.getByText("disk full")).toBeInTheDocument();
+  });
+});
+
 describe("a call that is still going in the background", () => {
   const waiting = {
     ok: false,

@@ -8,6 +8,7 @@ import { withAssScratch } from "./assScratch";
 import { laplacianVariance, noiseSigma } from "./frameMeasures";
 import { fitDims, gridAss, gridFilter, OVERLAY_FONT_FILE, OVERLAY_REV } from "./inspectOverlay";
 import { quarterTurn, shortHash } from "./media";
+import { STOPPED_ERROR } from "../lib/stopped";
 
 /** Longest edge of a frame inspect_media attaches. */
 export const MEDIA_FRAME_EDGE = 512;
@@ -76,7 +77,7 @@ export async function sampleFrames(
     const jpg = await ctx.store.prepareArtifact(`inspect/mf_${key}.jpg`);
     const grey = jpg.replace(/\.jpg$/, ".gray");
     if (!((await ctx.store.exists(jpg)) && (await ctx.store.exists(grey)))) {
-      if (ctx.signal?.aborted) return { t, error: "cancelled" };
+      if (ctx.signal?.aborted) return { t, error: STOPPED_ERROR };
       // Written under temporary names and renamed into place: a parallel look at the same frame
       // never reads half a file, and a frame a round has shown is never rewritten under it.
       const tmp = ctx.store.canRename ? `.${token()}.tmp` : "";
