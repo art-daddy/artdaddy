@@ -516,6 +516,17 @@ describe("transcript: never waited on when long", () => {
     return { file: out, speech: speech !== null };
   }
 
+  /** A look waits at most its bound for the words and says "in_progress" when it gives up (a busy
+   *  machine: here the whole smoke lane at once), so it is asked again, as the model is told to.
+   *  These tests pin WHAT the words are and WHEN they were said, not how fast they came. */
+  async function lookForWords(args: Record<string, unknown>, c: ClientToolContext): Promise<Any> {
+    const look = async (): Promise<Any> =>
+      (await inspectMediaTool({ ...args, wait_seconds: 60 }, c)) as Any;
+    let r = await look();
+    for (let i = 0; i < 3 && r.transcript?.status === "in_progress"; i++) r = await look();
+    return r;
+  }
+
   it("a whole 12-minute file returns at once with the transcript queued in the background", async () => {
     const { file } = await longTalk();
     const ref = await libRef(ctx, file, "audio");
@@ -581,10 +592,10 @@ describe("transcript: never waited on when long", () => {
           return nodeRunner.run(program, args, signal, cwd, onStdout);
         },
       };
-      const r = (await inspectMediaTool(
+      const r = await lookForWords(
         { media_ref: ref, start_seconds: 355, end_seconds: 380, word_timestamps: true },
         { ...ctx, runner: watching },
-      )) as Any;
+      );
       expect(r.ok, JSON.stringify(r).slice(0, 400)).toBe(true);
       expect(wavSeconds).toHaveLength(1);
       expect(wavSeconds[0]).toBeGreaterThan(24);
@@ -592,7 +603,7 @@ describe("transcript: never waited on when long", () => {
       if (speech) {
         const words = (r.transcript.words as Array<[string, number, number]>) ?? [];
         console.log("[inspect_media] window words:", words.slice(0, 8)); // eslint-disable-line no-console
-        expect(words.length).toBeGreaterThan(3);
+        expect(words.length, JSON.stringify(r.transcript).slice(0, 300)).toBeGreaterThan(3);
         // Spoken at 6:00 of the FILE: the times are on the file's timeline, not the window's.
         for (const [, s] of words) expect(s).toBeGreaterThanOrEqual(355);
         expect(words.map((w) => w[0].toLowerCase()).join(" ")).toMatch(/fox|dog|quick/);
@@ -738,10 +749,10 @@ describe("transcript: never waited on when long", () => {
       const extract = whisperInputs[0];
       expect(existsSync(extract)).toBe(true);
       ffInputs.length = 0;
-      const r = (await inspectMediaTool(
+      const r = await lookForWords(
         { media_ref: ref, start_seconds: 350, end_seconds: 375, word_timestamps: true },
         { ...ctx, runner },
-      )) as Any;
+      );
       expect(r.ok, JSON.stringify(r).slice(0, 400)).toBe(true);
       // The window's audio came out of the extract, not the source, and whisper read only that.
       expect(
@@ -751,7 +762,7 @@ describe("transcript: never waited on when long", () => {
       expect(whisperInputs.at(-1)).not.toBe(extract);
       if (speech) {
         const words = (r.transcript.words as Array<[string, number, number]>) ?? [];
-        expect(words.length).toBeGreaterThan(3);
+        expect(words.length, JSON.stringify(r.transcript).slice(0, 300)).toBeGreaterThan(3);
         for (const [, s] of words) expect(s).toBeGreaterThanOrEqual(350);
         expect(words[0][1]).toBeGreaterThan(359.5); // spoken at 6:00 of the FILE
         expect(words.map((w) => w[0].toLowerCase()).join(" ")).toMatch(/fox|dog|quick/);
