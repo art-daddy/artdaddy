@@ -58,8 +58,9 @@ describe("generationWait", () => {
     fc.assert(
       fc.property(
         fc.constantFrom("image", "audio", "video", "other"),
-        fc.double({ min: 0, max: 3_600 }),
-        fc.double({ min: 0, max: 3_600 }),
+        // Real ages only: a start that cannot be read is "just begun" (tested below), not an age.
+        fc.double({ min: 0, max: 3_600, noNaN: true }),
+        fc.double({ min: 0, max: 3_600, noNaN: true }),
         (k, x, y) => {
           const [young, old] = x <= y ? [x, y] : [y, x];
           const a = generationWait({ kind: k, added_at: secondsAgo(young) }, NOW);
