@@ -405,21 +405,16 @@ describe("AuthProvider", () => {
       expect(shown()).toHaveLength(1);
     });
 
-    it("never when the app is open, when the session is being restored, or off the desktop shell's gate", () => {
-      mocks.authStatus = "unlocked";
-      render(
-        <AuthProvider>
-          <span>editor</span>
-        </AuthProvider>,
-      ).unmount();
-      mocks.authStatus = "checking";
-      render(
-        <AuthProvider>
-          <span>editor</span>
-        </AuthProvider>,
-      ).unmount();
-      mocks.authStatus = "offline";
-      mocks.hasStoredSession = true; // offline with a saved session: the editor opens, there is no screen
+    // One provider per case: three mounted back to back start three dynamic imports of the mocked deep-link
+    // module at once, and the test runner hands two of them the real module (two unhandled rejections that
+    // fail the whole run).
+    it.each([
+      ["the app is open", "unlocked", false],
+      ["the session is being restored", "checking", false],
+      ["the editor opens offline on a saved session", "offline", true],
+    ] as const)("never when %s", (_case, status, stored) => {
+      mocks.authStatus = status;
+      mocks.hasStoredSession = stored;
       render(
         <AuthProvider>
           <span>editor</span>
