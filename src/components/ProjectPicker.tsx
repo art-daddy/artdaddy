@@ -2,8 +2,11 @@ import { useEffect, useRef, useState } from "react";
 
 import type { ProjectListEntry } from "../api/types";
 import { BRAND } from "../brand";
+import { onOsDragOver, onOsDrop, webOwnsFileDrops } from "../lib/osDrop";
+import { MEDIA_EXTS, MEDIA_RE, pickMediaPaths } from "../lib/upload";
+import { ASPECT_CHOICES, AUTO_ASPECT } from "../store/aspect";
 import { useProjectSwitch } from "../store/closeCoordinator";
-import { discardFirstPrompt, setFirstPrompt } from "../store/firstPrompt";
+import { discardFirstPrompt, setFirstPrompt, type Footage } from "../store/firstPrompt";
 import { useMcpPanel } from "../store/mcpPanel";
 import { useProjects } from "../store/projects";
 import { NewProjectDialog, ProjectThumb } from "./ProjectDialogs";
@@ -36,6 +39,18 @@ function nameFrom(prompt: string): string {
   return (first.length > 48 ? `${first.slice(0, 45)}…` : first) || "Untitled";
 }
 
+/** The same file chosen twice is one file. */
+const sameFootage = (a: Footage, b: Footage): boolean =>
+  "path" in a && "path" in b
+    ? a.path === b.path
+    : "file" in a &&
+      "file" in b &&
+      a.file.name === b.file.name &&
+      a.file.size === b.file.size &&
+      a.file.lastModified === b.file.lastModified;
+
+const baseNameOf = (p: string): string => p.replace(/\\/g, "/").split("/").pop() || p;
+
 /** What the window shows with no project open.
  *
  *  It used to be the full editor with every pane empty — a LIBRARY with nothing to list, a
@@ -52,10 +67,13 @@ export default function ProjectPicker() {
   const [dialog, setDialog] = useState(false);
   const [showAll, setShowAll] = useState(false);
   const [text, setText] = useState("");
-  const [aspect, setAspect] = useState("9:16");
+  const [aspect, setAspect] = useState(AUTO_ASPECT);
+  const [footage, setFootage] = useState<Footage[]>([]);
+  const [dragOver, setDragOver] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const requestSeq = useRef(0);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     void refresh();
@@ -63,6 +81,40 @@ export default function ProjectPicker() {
       requestSeq.current += 1;
     };
   }, [refresh]);
+
+  const addFootage = (more: Footage[]) =>
+    setFootage((have) => [
+      ...have,
+      ...more.filter((m, i) => ![...have, ...more.slice(0, i)].some((h) => sameFootage(h, m))),
+    ]);
+
+  // Footage dropped on the prompt box. On desktop the drop arrives from Tauri as PATHS, which are linked in
+  // place exactly like File > Import; the files themselves are only seen on the web build.
+  useEffect(() => {
+    const off = onOsDrop("picker", (d) => {
+      setDragOver(false);
+      addFootage(
+        d.paths.filter((p) => MEDIA_RE.test(p)).map((path) => ({ name: baseNameOf(path), path })),
+      );
+    });
+    const offOver = onOsDragOver((d) => setDragOver(d?.target === "picker"));
+    return () => {
+      off();
+      offOver();
+    };
+  }, []);
+
+  /** Desktop opens the OS dialog; the hidden input is the WEB fallback only (a file input never opens on
+   *  macOS while the window keeps native drag-drop). */
+  const onAddFootage = async () => {
+    try {
+      const picked = await pickMediaPaths("Add footage");
+      if (picked === null) fileInputRef.current?.click();
+      else addFootage(picked.map((path) => ({ name: baseNameOf(path), path })));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not open the file picker.");
+    }
+  };
 
   const start = async () => {
     const prompt = text.trim();
@@ -75,7 +127,8 @@ export default function ProjectPicker() {
       const p = await create(nameFrom(prompt), aspect);
       if (request !== requestSeq.current) return;
       createdId = p.id;
-      setFirstPrompt(p.id, prompt);
+      // The footage comes in once the project is open, and the prompt goes out after it (ChatView).
+      setFirstPrompt(p.id, prompt, footage);
       await switchTo(p.id);
     } catch (e) {
       if (createdId) discardFirstPrompt(createdId);
@@ -104,7 +157,23 @@ export default function ProjectPicker() {
           </div>
         </header>
 
-        <section className="rounded-lg border border-edge bg-surface p-4">
+        <section
+          // The prompt box takes dropped footage: on desktop the router finds this by the attribute below.
+          data-artdaddy-drop="picker"
+          onDragOver={(e) => {
+            if (webOwnsFileDrops()) e.preventDefault();
+          }}
+          onDrop={(e) => {
+            if (!webOwnsFileDrops()) return;
+            e.preventDefault();
+            addFootage(
+              Array.from(e.dataTransfer.files)
+                .filter((f) => MEDIA_RE.test(f.name))
+                .map((file) => ({ name: file.name, file })),
+            );
+          }}
+          className={`rounded-lg border bg-surface p-4 ${dragOver ? "border-accent" : "border-edge"}`}
+        >
           <label htmlFor="picker-prompt" className="text-xs font-medium text-ink-dim">
             Describe what you want to make
           </label>
@@ -123,6 +192,47 @@ export default function ProjectPicker() {
             placeholder="A 30-second vertical cut of my podcast with captions…"
             className="mt-2 w-full resize-none rounded-md border border-edge bg-neutral-900 px-3 py-2 text-sm outline-none focus:border-accent disabled:opacity-60"
           />
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <Button disabled={busy} onClick={() => void onAddFootage()}>
+              Add footage…
+            </Button>
+            <span className="text-xs text-neutral-500">
+              {footage.length ? "" : "Optional. Or drop files here."}
+            </span>
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              hidden
+              accept={MEDIA_EXTS.map((x) => `.${x}`).join(",")}
+              onChange={(e) => {
+                const files = Array.from(e.target.files ?? []);
+                e.target.value = ""; // allow re-picking the same file
+                addFootage(files.map((file) => ({ name: file.name, file })));
+              }}
+            />
+          </div>
+          {footage.length > 0 && (
+            <ul className="mt-2 flex flex-wrap gap-1.5" aria-label="Footage">
+              {footage.map((f, i) => (
+                <li
+                  key={`${f.name}-${i}`}
+                  className="flex items-center gap-1 rounded bg-neutral-800 px-2 py-0.5 text-[11px] text-neutral-300"
+                >
+                  <span className="max-w-[16rem] truncate">{f.name}</span>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    aria-label={`Remove ${f.name}`}
+                    onClick={() => setFootage((have) => have.filter((_, at) => at !== i))}
+                    className="text-neutral-500 hover:text-neutral-200 disabled:opacity-40"
+                  >
+                    ×
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
           <div className="mt-2 flex items-center gap-2">
             <label htmlFor="picker-aspect" className="text-xs text-ink-dim">
               Aspect
@@ -134,9 +244,11 @@ export default function ProjectPicker() {
               disabled={busy}
               className="rounded-md border border-edge bg-neutral-900 px-2 py-1.5 text-sm"
             >
-              <option value="9:16">9:16</option>
-              <option value="16:9">16:9</option>
-              <option value="1:1">1:1</option>
+              {ASPECT_CHOICES.map((c) => (
+                <option key={c.value} value={c.value}>
+                  {c.label}
+                </option>
+              ))}
             </select>
             <div className="ml-auto flex gap-2">
               <Button onClick={() => setDialog(true)}>New project…</Button>

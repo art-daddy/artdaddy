@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import fc from "fast-check";
 
 import type { ProjectStoreAccess } from "../tools/store";
 
@@ -20,9 +21,11 @@ import {
   filesFromItems,
   importFile,
   importFileByReference,
+  importFootage,
   importViaDialog,
   MEDIA_RE,
   MIME_EXT,
+  pickMediaPaths,
   uploadFiles,
 } from "./upload";
 import { AUDIO_EXTS, IMAGE_EXTS, VIDEO_EXTS, kindOf } from "../media/formats";
@@ -172,6 +175,132 @@ describe("importViaDialog", () => {
     const out = await importViaDialog("proj", "Attach media");
     expect(out).toEqual([]);
     expect(useProjectNotice.getState().message).toMatch(/couldn't import a\.mp4/i);
+  });
+});
+
+// The start screen picks footage before any project exists, so it must get PATHS and import nothing: an import
+// needs the open project's store (T-30).
+describe("pickMediaPaths", () => {
+  it("returns null on web so the caller falls back to the file input, and opens no dialog", async () => {
+    platformName = "web";
+    expect(await pickMediaPaths("Add footage")).toBeNull();
+    expect(openDialog).not.toHaveBeenCalled();
+  });
+
+  it("returns exactly what was picked, in order, and imports nothing", async () => {
+    platformName = "tauri";
+    currentStore = null; // an import attempt would throw and notify
+    openDialog.mockResolvedValue(["D:/shoot/b.mov", "D:/shoot/a.mp4"]);
+    expect(await pickMediaPaths("Add footage")).toEqual(["D:/shoot/b.mov", "D:/shoot/a.mp4"]);
+    expect(useProjectNotice.getState().message).toBeNull();
+  });
+
+  it("wraps a single pick, and treats a cancel as an empty pick rather than a failure", async () => {
+    platformName = "tauri";
+    openDialog.mockResolvedValueOnce("D:/shoot/a.mp4");
+    expect(await pickMediaPaths("Add footage")).toEqual(["D:/shoot/a.mp4"]);
+    openDialog.mockResolvedValueOnce(null);
+    expect(await pickMediaPaths("Add footage")).toEqual([]);
+    expect(useProjectNotice.getState().message).toBeNull();
+  });
+
+  it("titles the dialog, allows several files, and offers every media kind", async () => {
+    platformName = "tauri";
+    openDialog.mockResolvedValue([]);
+    await pickMediaPaths("Add footage");
+    const opts = openDialog.mock.calls[0][0] as {
+      title: string;
+      multiple: boolean;
+      filters: { extensions: string[] }[];
+    };
+    expect(opts.title).toBe("Add footage");
+    expect(opts.multiple).toBe(true);
+    for (const ext of [...VIDEO_EXTS, ...IMAGE_EXTS, ...AUDIO_EXTS])
+      expect(opts.filters[0].extensions).toContain(ext);
+  });
+});
+
+// What the person chose on the start screen comes in once the project is open: desktop paths are linked where
+// they are, the web build's files are uploaded, and a failure is named without costing the rest.
+describe("importFootage", () => {
+  it("links desktop paths in place, in the order chosen", async () => {
+    currentStore = fakeStore();
+    const out = await importFootage("proj", [
+      { name: "b.mov", path: "D:/shoot/b.mov" },
+      { name: "a.mp4", path: "D:/shoot/a.mp4" },
+    ]);
+    expect(out.map((u) => u.name)).toEqual(["b.mov", "a.mp4"]);
+    // the media stays where it is: its ref is its own path, nothing was copied into the project
+    expect(out.map((u) => u.rel)).toEqual(["D:/shoot/b.mov", "D:/shoot/a.mp4"]);
+    expect(useProjectNotice.getState().message).toBeNull();
+  });
+
+  it("uploads the web build's files into the library", async () => {
+    currentStore = fakeStore();
+    const out = await importFootage("proj", [
+      { name: "a.mp4", file: fakeFile("a.mp4", [1]) },
+      { name: "b.mp4", file: fakeFile("b.mp4", [2]) },
+    ]);
+    expect(out.map((u) => u.name)).toEqual(["a.mp4", "b.mp4"]);
+    for (const u of out) expect(u.rel).toMatch(/^library\/media_[0-9a-f]{12}\.mp4$/);
+  });
+
+  it("is empty for no footage, and says nothing", async () => {
+    currentStore = null;
+    expect(await importFootage("proj", [])).toEqual([]);
+    expect(useProjectNotice.getState().message).toBeNull();
+  });
+
+  it("names the file that could not be imported and still brings in the rest", async () => {
+    currentStore = fakeStore();
+    const bad = {
+      name: "bad.mp4",
+      arrayBuffer: async () => {
+        throw new Error("disk read error");
+      },
+    } as unknown as File;
+    const out = await importFootage("proj", [
+      { name: "bad.mp4", file: bad },
+      { name: "ok.mp4", file: fakeFile("ok.mp4", [3]) },
+    ]);
+    expect(out.map((u) => u.name)).toEqual(["ok.mp4"]);
+    expect(useProjectNotice.getState().message).toMatch(/couldn't import bad\.mp4/i);
+  });
+
+  it("says why when the project has no store, and brings in nothing (so the chat holds the message)", async () => {
+    currentStore = null;
+    const out = await importFootage("proj", [{ name: "a.mp4", path: "D:/shoot/a.mp4" }]);
+    expect(out).toEqual([]);
+    expect(useProjectNotice.getState().message).toMatch(/couldn't import a\.mp4/i);
+  });
+
+  it("property: what lands is exactly the files that can be read, in the order chosen", async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.array(fc.boolean(), { minLength: 1, maxLength: 6 }), async (readable) => {
+        currentStore = fakeStore();
+        useProjectNotice.setState({ message: null });
+        const footage = readable.map((ok, i) => ({
+          name: `clip${i}.mp4`,
+          file: ok
+            ? fakeFile(`clip${i}.mp4`, [i + 1])
+            : ({
+                name: `clip${i}.mp4`,
+                arrayBuffer: async () => {
+                  throw new Error("unreadable");
+                },
+              } as unknown as File),
+        }));
+        const out = await importFootage("proj", footage);
+        expect(out.map((u) => u.name)).toEqual(
+          footage.filter((_, i) => readable[i]).map((f) => f.name),
+        );
+        if (readable.every(Boolean)) expect(useProjectNotice.getState().message).toBeNull();
+        else
+          for (const [i, ok] of readable.entries())
+            if (!ok) expect(String(useProjectNotice.getState().message)).toContain(`clip${i}.mp4`);
+      }),
+      { numRuns: 30 },
+    );
   });
 });
 

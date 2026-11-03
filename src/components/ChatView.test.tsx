@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
 import { StrictMode } from "react";
 import fc from "fast-check";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -18,6 +18,7 @@ vi.mock("../lib/upload", () => ({
   uploadFiles: vi.fn(),
   importViaDialog: vi.fn(async () => null), // web by default: callers fall back to the input
   importPaths: vi.fn(async () => []),
+  importFootage: vi.fn(async () => []),
   filesFromItems: vi.fn(() => []),
   MEDIA_RE: /\.(mp4|mov|webm|mkv|m4v|png|jpe?g|gif|webp|bmp|avif|mp3|wav|m4a|aac|flac|ogg)$/i,
 }));
@@ -45,11 +46,23 @@ vi.mock("../api/usage", async (importOriginal) => ({
 const startDesktopSignIn = vi.hoisted(() => vi.fn());
 vi.mock("../api/desktopAuth", () => ({ startDesktopSignIn }));
 
-import { uploadFiles, importViaDialog, importPaths, filesFromItems } from "../lib/upload";
+import {
+  uploadFiles,
+  importViaDialog,
+  importPaths,
+  importFootage,
+  filesFromItems,
+} from "../lib/upload";
 import { refusedNotice } from "../agent/refusedFrames";
 import { DISCORD_URL } from "../lib/community";
 import { toUserMessage } from "../lib/errors";
-import { peekFirstPrompt, setFirstPrompt, takeFirstPrompt } from "../store/firstPrompt";
+import {
+  peekFirstFootage,
+  peekFirstPrompt,
+  setFirstPrompt,
+  takeFirstPrompt,
+} from "../store/firstPrompt";
+import { useEditor } from "../store/editor";
 import ChatView from "./ChatView";
 import { resetLiveWait, useLiveWait } from "../store/liveWait";
 import { STARTER_PROMPTS } from "./starterPrompts";
@@ -101,7 +114,9 @@ beforeEach(() => {
   usageMock.limit = 100;
   usageMock.held = undefined;
   vi.mocked(importPaths).mockResolvedValue([]);
+  vi.mocked(importFootage).mockResolvedValue([]);
   vi.mocked(filesFromItems).mockReturnValue([]);
+  useEditor.setState({ projectId: null, store: null });
 });
 
 describe("ChatView", () => {
@@ -993,5 +1008,212 @@ describe("sign-in routing", () => {
     render(<ChatView />);
     fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
     expect(startDesktopSignIn).toHaveBeenCalledOnce();
+  });
+});
+
+// T-30. Footage chosen on the start screen cannot be imported there (an import needs the open project), so the
+// chat brings it in once the project is open and sends the first message only after it has landed, carrying it.
+// The rule: the first message never goes to the agent without the footage the person chose.
+describe("ChatView first prompt with start-screen footage", () => {
+  const footage = [
+    { name: "a.mp4", path: "C:/v/a.mp4" },
+    { name: "b.mov", path: "C:/v/b.mov" },
+  ];
+  const pool = [
+    { path: "C:/v/a.mp4", name: "a.mp4", rel: "library/a.mp4", id: "media_a" },
+    { path: "C:/v/b.mov", name: "b.mov", rel: "library/b.mov", id: "media_b" },
+    { path: "C:/v/c.mp3", name: "c.mp3", rel: "library/c.mp3", id: "media_c" },
+  ];
+  const kinds: Record<string, string> = { "a.mp4": "video", "b.mov": "video", "c.mp3": "audio" };
+  const attachedFor = (landed: typeof pool) =>
+    landed.map((u) => ({ path: u.rel, kind: kinds[u.name], caption: u.name }));
+  const openProject = (id = "p1") =>
+    act(() => {
+      useEditor.setState({ projectId: id, store: {} as never });
+    });
+  // Long enough for every promise and effect in flight to run, for the checks that something did NOT happen.
+  const settle = () =>
+    act(async () => {
+      await new Promise((r) => setTimeout(r, 25));
+    });
+  const composer = () => screen.getByPlaceholderText(/Message the editor/);
+
+  it("imports first, then sends the prompt with what landed attached, once", async () => {
+    const order: string[] = [];
+    vi.mocked(importFootage).mockImplementation(async () => {
+      order.push("import");
+      return pool.slice(0, 2);
+    });
+    state.send.mockImplementation(() => {
+      order.push("send");
+    });
+    setFirstPrompt("p1", "Make my reel", footage);
+    openProject();
+    const view = render(<ChatView />);
+    await waitFor(() =>
+      expect(state.send).toHaveBeenCalledWith("Make my reel", attachedFor(pool.slice(0, 2))),
+    );
+    expect(order).toEqual(["import", "send"]);
+    expect(importFootage).toHaveBeenCalledWith("p1", footage);
+    expect(composer()).toHaveValue("");
+    // a second mount inherits nothing: no second import, no second message
+    view.unmount();
+    render(<ChatView />);
+    await settle();
+    expect(importFootage).toHaveBeenCalledTimes(1);
+    expect(state.send).toHaveBeenCalledTimes(1);
+    expect(peekFirstFootage("p1")).toEqual([]);
+    expect(peekFirstPrompt("p1")).toBeNull();
+  });
+
+  it("does not send while the footage is still coming in; the text waits in the composer", async () => {
+    let finish!: (u: typeof pool) => void;
+    vi.mocked(importFootage).mockReturnValue(new Promise((r) => (finish = r)));
+    setFirstPrompt("p1", "Make my reel", footage);
+    openProject();
+    render(<ChatView />);
+    await waitFor(() => expect(importFootage).toHaveBeenCalled());
+    await settle();
+    expect(state.send).not.toHaveBeenCalled();
+    expect(composer()).toHaveValue("Make my reel");
+    await act(async () => finish(pool.slice(0, 2)));
+    await waitFor(() =>
+      expect(state.send).toHaveBeenCalledWith("Make my reel", attachedFor(pool.slice(0, 2))),
+    );
+  });
+
+  it("does not import into a project that is not open, and does not send without the footage meanwhile", async () => {
+    setFirstPrompt("p1", "Make my reel", footage);
+    render(<ChatView />);
+    await settle();
+    expect(importFootage).not.toHaveBeenCalled();
+    expect(state.send).not.toHaveBeenCalled();
+    openProject("p2"); // another project's editor is open: still not this one
+    await settle();
+    expect(importFootage).not.toHaveBeenCalled();
+    vi.mocked(importFootage).mockResolvedValue(pool.slice(0, 2));
+    openProject("p1");
+    await waitFor(() =>
+      expect(state.send).toHaveBeenCalledWith("Make my reel", attachedFor(pool.slice(0, 2))),
+    );
+  });
+
+  it("imports as soon as the project is open, and sends once they are signed in", async () => {
+    vi.mocked(importFootage).mockResolvedValue(pool.slice(0, 2));
+    authState.status = "checking";
+    setFirstPrompt("p1", "Make my reel", footage);
+    openProject();
+    const view = render(<ChatView />);
+    expect(await screen.findByText("a.mp4")).toBeInTheDocument();
+    await settle();
+    expect(state.send).not.toHaveBeenCalled();
+    authState.status = "unlocked";
+    view.rerender(<ChatView />);
+    await waitFor(() =>
+      expect(state.send).toHaveBeenCalledWith("Make my reel", attachedFor(pool.slice(0, 2))),
+    );
+    expect(importFootage).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [
+      "none of it came in (the importer already said why)",
+      () => vi.mocked(importFootage).mockResolvedValue([]),
+    ],
+    [
+      "the import itself failed",
+      () => vi.mocked(importFootage).mockRejectedValue(new Error("boom")),
+    ],
+  ])("holds the message back and keeps their text when %s", async (_name, arrange) => {
+    arrange();
+    setFirstPrompt("p1", "Make my reel", footage);
+    openProject();
+    render(<ChatView />);
+    await waitFor(() => expect(importFootage).toHaveBeenCalled());
+    await settle();
+    expect(state.send).not.toHaveBeenCalled();
+    expect(composer()).toHaveValue("Make my reel");
+    expect(peekFirstPrompt("p1")).toBeNull(); // not sent later, behind their back, either
+    // and what they send themselves is theirs to send
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(state.send).toHaveBeenCalledWith("Make my reel", []);
+  });
+
+  it("imports once however often the effects replay", async () => {
+    vi.mocked(importFootage).mockResolvedValue(pool.slice(0, 2));
+    setFirstPrompt("p1", "Make my reel", footage);
+    openProject();
+    render(
+      <StrictMode>
+        <ChatView />
+      </StrictMode>,
+    );
+    await waitFor(() => expect(state.send).toHaveBeenCalled());
+    await settle();
+    expect(importFootage).toHaveBeenCalledTimes(1);
+    expect(state.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaving the project mid-import attaches nothing elsewhere, and never sends on a later return", async () => {
+    let finish!: (u: typeof pool) => void;
+    vi.mocked(importFootage).mockReturnValue(new Promise((r) => (finish = r)));
+    setFirstPrompt("p1", "Make my reel", footage);
+    openProject();
+    const view = render(<ChatView />);
+    await waitFor(() => expect(importFootage).toHaveBeenCalled());
+    state.projectId = "p2";
+    state.transcriptId = "chat-p2";
+    view.rerender(<ChatView />);
+    await act(async () => finish(pool.slice(0, 2)));
+    await settle();
+    expect(screen.queryByText("a.mp4")).not.toBeInTheDocument();
+    state.projectId = "p1";
+    state.transcriptId = "chat-p1";
+    view.rerender(<ChatView />);
+    await settle();
+    expect(state.send).not.toHaveBeenCalled();
+  });
+
+  it("goes with the first message only: the composer is empty after, and the next message is theirs", async () => {
+    vi.mocked(importFootage).mockResolvedValue(pool.slice(0, 1));
+    setFirstPrompt("p1", "Make my reel", footage);
+    openProject();
+    render(<ChatView />);
+    await waitFor(() => expect(state.send).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText("a.mp4")).not.toBeInTheDocument();
+    fireEvent.change(composer(), { target: { value: "and a title" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(state.send).toHaveBeenLastCalledWith("and a title", []);
+  });
+
+  // Whatever lands, the first message carries exactly that and nothing more, and a landing of nothing means no
+  // message. (Subsets keep the order the importer returned them in.)
+  it("property: the message carries exactly what landed; an empty landing sends nothing", async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.subarray(pool), fc.boolean(), async (landed, throws) => {
+        Object.assign(state, baseState());
+        vi.mocked(importFootage).mockReset();
+        if (throws) vi.mocked(importFootage).mockRejectedValue(new Error("boom"));
+        else vi.mocked(importFootage).mockResolvedValue(landed);
+        setFirstPrompt("p1", "Make my reel", footage);
+        openProject();
+        const view = render(<ChatView />);
+        try {
+          await waitFor(() => expect(importFootage).toHaveBeenCalled());
+          await settle();
+          if (throws || landed.length === 0) {
+            expect(state.send).not.toHaveBeenCalled();
+            expect(composer()).toHaveValue("Make my reel");
+            return;
+          }
+          expect(state.send).toHaveBeenCalledTimes(1);
+          expect(state.send).toHaveBeenCalledWith("Make my reel", attachedFor(landed));
+        } finally {
+          view.unmount();
+          useEditor.setState({ projectId: null, store: null });
+        }
+      }),
+      { numRuns: 25 },
+    );
   });
 });

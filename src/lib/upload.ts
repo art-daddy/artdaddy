@@ -3,6 +3,7 @@ import { platform } from "../platform";
 import { registerLibraryClip, stageByPath, type StagedFile } from "../tools/import";
 import { joinPath, type ProjectStoreAccess } from "../tools/store";
 import { useProjectNotice } from "../store/projectNotice";
+import type { Footage } from "../store/firstPrompt";
 import { withImportJob } from "../store/importJobs";
 import {
   AUDIO_EXTS,
@@ -174,21 +175,17 @@ async function stagedFromPath(
 export const MEDIA_EXTS = [...VIDEO_EXTS, ...IMAGE_EXTS, ...AUDIO_EXTS];
 
 /**
- * Pick media with the OS dialog and import it. Returns null on WEB, where the caller must fall
- * back to its hidden `<input type=file>`.
+ * Pick media with the OS dialog, returning only the paths: nothing is imported. Returns null on WEB, where the
+ * caller must fall back to its hidden `<input type=file>`. The start screen picks before a project exists, so
+ * it cannot import yet.
  *
  * Desktop must NOT use that input. The window runs with `dragDropEnabled: true` (the OS-drop
  * feature depends on it), and on macOS Tauri's native drag-drop handler stops a file input from
  * ever opening its dialog — the button does nothing at all, silently, while Windows is fine.
  * The menu's Import Media already went through the dialog; the chat attach button and the
  * library's + did not, which is exactly the pair that was reported dead.
- *
- * Files are LINKED in place, matching the menu: a desktop import is never copied.
  */
-export async function importViaDialog(
-  projectId: string,
-  title: string,
-): Promise<Uploaded[] | null> {
+export async function pickMediaPaths(title: string): Promise<string[] | null> {
   if (platform.name !== "tauri") return null;
   const { open } = await import("@tauri-apps/plugin-dialog");
   const picked = await open({
@@ -197,7 +194,23 @@ export async function importViaDialog(
     filters: [{ name: "Media", extensions: MEDIA_EXTS }],
   });
   if (!picked) return []; // cancelled — not a failure, and nothing to report
-  return importPaths(projectId, Array.isArray(picked) ? picked : [picked]);
+  return Array.isArray(picked) ? picked : [picked];
+}
+
+/**
+ * Pick media with the OS dialog and import it. Returns null on WEB, where the caller must fall
+ * back to its hidden `<input type=file>` (see pickMediaPaths).
+ *
+ * Files are LINKED in place, matching the menu: a desktop import is never copied.
+ */
+export async function importViaDialog(
+  projectId: string,
+  title: string,
+): Promise<Uploaded[] | null> {
+  const paths = await pickMediaPaths(title);
+  if (paths === null) return null;
+  if (paths.length === 0) return [];
+  return importPaths(projectId, paths);
 }
 
 /** Import several files BY REFERENCE, reporting whatever failed. The OS picker, the library
@@ -217,6 +230,20 @@ export async function importPaths(projectId: string, paths: string[]): Promise<U
   }
   if (failed.length) notifyImportFailure(failed, reason);
   return out;
+}
+
+/** Import the footage chosen on the start screen into the (now open) project, reporting whatever failed. The
+ *  desktop's paths are linked in place; the web build's files are uploaded. Returns what landed. */
+export async function importFootage(
+  projectId: string,
+  footage: readonly Footage[],
+): Promise<Uploaded[]> {
+  const paths = footage.flatMap((f) => ("path" in f ? [f.path] : []));
+  const files = footage.flatMap((f) => ("file" in f ? [f.file] : []));
+  return [
+    ...(paths.length ? await importPaths(projectId, paths) : []),
+    ...(files.length ? await uploadFiles(projectId, files) : []),
+  ];
 }
 
 /** Import a file BY REFERENCE (desktop only): the media stays where it is on
