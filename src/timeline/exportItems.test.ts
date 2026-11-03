@@ -30,6 +30,12 @@ import { __setExportConfirmationForTests } from "../lib/confirm";
 import { useExportJob } from "../store/exportJob";
 import * as host from "../platform/host";
 import { ClientToolRegistry } from "../tools/registry";
+import {
+  __bufferedAgentEvents,
+  __resetAgentEvents,
+  agentEventContext,
+  createToolTrace,
+} from "../api/agentEvents";
 import { FakeJobs } from "../test/fakeJobs";
 import { __resetJobSupervisor, __setJobSupervisor } from "../tools/jobSupervisor";
 
@@ -50,6 +56,7 @@ afterEach(async () => {
   await whenExportsSettle();
   await whenExportTelemetrySettles();
   exportBeacon.mockClear();
+  __resetAgentEvents();
   __resetExportQueue();
   __resetJobNotes();
   await resetTestDocuments();
@@ -654,6 +661,28 @@ describe("export delivers separate files into a folder", () => {
       });
     },
   );
+
+  // Stop refuses an export before it is submitted. The refusal's own status lives on the answer, where only the
+  // export report reads it: the Stop classification of the call's EVENT must not take it away, or every export
+  // a person stopped would be counted as "blocked".
+  it("reports an export that Stop refused as cancelled, and records the call as cancelled", async () => {
+    const p = await project();
+    const stop = new AbortController();
+    stop.abort();
+    const ctx = Object.assign(p.ctx, { signal: stop.signal }) as Parameters<typeof exportTool>[1];
+    const registry = new ClientToolRegistry();
+    registry.register("export", (input) => exportTool(input, ctx));
+    const args = { media_refs: ["media_aaa"] };
+    const trace = createToolTrace("export", args, agentEventContext(), "call_stop", () => true);
+    const result = (await registry.run("export", args, trace.context, trace)) as Any;
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("cancelled before submission");
+    await whenExportTelemetrySettles();
+    expect(exportBeacon).toHaveBeenCalledTimes(1);
+    expect(exportBeacon.mock.calls[0][0]).toMatchObject({ status: "cancelled" });
+    const recorded = __bufferedAgentEvents().find((e) => e.kind === "tool_call");
+    expect(recorded).toMatchObject({ name: "export", ok: false, error: "cancelled" });
+  });
 
   it.each([null, { unexpected_export_param: true }])(
     "counts protocol-refused export arguments before any handler runs: %s",

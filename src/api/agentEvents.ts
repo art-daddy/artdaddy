@@ -16,7 +16,7 @@ import { reportExport } from "./exportEvents";
 import { authedFetch, hasSession } from "./auth";
 import type { TurnSummary } from "../agent/turnTiming";
 import { legalText } from "../observability/recentFailures";
-import { isAbortFailure, stoppedAnswer } from "../lib/stopped";
+import { isAbortFailure, STOPPED_ERROR, stoppedAnswer } from "../lib/stopped";
 import { hostInfo } from "../platform/host";
 import { useAuth } from "../store/auth";
 
@@ -183,12 +183,9 @@ export function createToolTrace(
   const submittedArgs = preview(args, MAX_ARGS);
   const started = Date.now();
   let recorded = false;
-  const result = (answered: unknown): void => {
+  const result = (value: unknown): void => {
     if (recorded) return;
     recorded = true;
-    // A call the person's Stop ended is not a call that failed: it is recorded as the one word the
-    // tool-failure numbers filter on, next to the turn's own `stopped` outcome.
-    const value = stopped() && isAbortFailure(answered) ? stoppedAnswer() : answered;
     const object =
       value !== null && typeof value === "object" ? (value as Record<string, unknown>) : null;
     const failed = object?.ok === false || object?.isError === true;
@@ -237,15 +234,20 @@ export function createToolTrace(
         } catch {}
       }
     }
+    // A call the person's Stop ended is not a call that failed: the event records it as the one word the
+    // tool-failure numbers filter on, next to the turn's own `stopped` outcome. Only the event: the export
+    // report above reads the answer as the tool gave it, because its facts (a refusal's status and size)
+    // live on that answer and not on the one word.
+    const byStop = stopped() && isAbortFailure(value);
     recordToolCall(
       {
         name,
         call_id: callId,
-        ok: !failed,
+        ok: byStop ? false : !failed,
         ms: Date.now() - started,
         args: submittedArgs,
-        result: value,
-        error: failed ? preview(object?.error ?? value, 500) : "",
+        result: byStop ? stoppedAnswer() : value,
+        error: byStop ? STOPPED_ERROR : failed ? preview(object?.error ?? value, 500) : "",
       },
       captured,
     );
