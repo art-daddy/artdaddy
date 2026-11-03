@@ -12,6 +12,8 @@ import { runningPhrase } from "./toolSummary";
 export const SHOW_ELAPSED_AFTER_S = 3;
 /** From here on the line says it is still going and that Stop is available. */
 export const SLOW_AFTER_S = 30;
+/** The clock stops here, at 99:59:59: a wait past it is a wrong clock, not a time. */
+export const CLOCK_MAX_S = 359_999;
 
 /** What a tool that is waiting for speech says it is doing, whatever it is usually called. */
 export const TRANSCRIBING_LABEL = "Transcribing the audio";
@@ -82,7 +84,8 @@ export function waitStatus(input: WaitInput): WaitStatus | null {
     hintFromStart = false,
   ): WaitStatus => {
     const started = finite(since, now);
-    const elapsedS = Math.max(0, Math.floor((now - started) / 1000));
+    // Two finite times at opposite extremes still subtract to Infinity, so the result is capped.
+    const elapsedS = Math.min(CLOCK_MAX_S, Math.max(0, Math.floor((now - started) / 1000)));
     const slow = kind !== "approval" && elapsedS >= SLOW_AFTER_S;
     return {
       kind,
@@ -136,7 +139,7 @@ export function waitStatus(input: WaitInput): WaitStatus | null {
 
 /** "0:07", "12:03", "1:02:03". Stops counting at 99:59:59: a wait past that is a wrong clock, not a time. */
 export function clockText(totalSeconds: number): string {
-  const s = Math.min(359_999, Math.max(0, Math.floor(finite(totalSeconds, 0))));
+  const s = Math.min(CLOCK_MAX_S, Math.max(0, Math.floor(finite(totalSeconds, 0))));
   const h = Math.floor(s / 3600);
   const m = Math.floor((s % 3600) / 60);
   const sec = String(s % 60).padStart(2, "0");

@@ -4,7 +4,13 @@ import { describe, expect, it } from "vitest";
 import { toolNames } from "../contract/views";
 import type { LiveCall, LiveRound } from "../store/liveWait";
 import { PHRASED_TOOLS, runningPhrase, summarizeCall } from "./toolSummary";
-import { clockText, SHOW_ELAPSED_AFTER_S, SLOW_AFTER_S, waitStatus } from "./waitStatus";
+import {
+  CLOCK_MAX_S,
+  clockText,
+  SHOW_ELAPSED_AFTER_S,
+  SLOW_AFTER_S,
+  waitStatus,
+} from "./waitStatus";
 
 const T0 = 1_000_000;
 const at = (s: number): number => T0 + s * 1000;
@@ -251,6 +257,7 @@ describe("whatever the live record holds, the line stays sane", () => {
           if (!s) return;
           expect(Number.isInteger(s.elapsedS)).toBe(true);
           expect(s.elapsedS).toBeGreaterThanOrEqual(0);
+          expect(s.elapsedS).toBeLessThanOrEqual(CLOCK_MAX_S);
           expect(Number.isFinite(s.since)).toBe(true);
           expect(s.label.trim().length).toBeGreaterThan(0);
           expect(s.showElapsed).toBe(s.elapsedS >= SHOW_ELAPSED_AFTER_S);
@@ -259,6 +266,29 @@ describe("whatever the live record holds, the line stays sane", () => {
         },
       ),
     );
+  });
+
+  // Found by the property above on one run in many (the pre-push run, 2026-11-03): two finite times
+  // at opposite extremes subtract to Infinity, which is not a whole number of seconds.
+  it("stops the elapsed time where the clock stops, even when the two times overflow when subtracted", () => {
+    const wait = (startedAt: number, now: number) =>
+      waitStatus({
+        round: null,
+        calls: [{ id: "", name: "", startedAt }],
+        approvalSince: null,
+        now,
+      });
+    for (const [startedAt, now] of [
+      [-3.293136510732288e293, Number.MAX_VALUE], // the found counterexample: the difference is Infinity
+      [-Number.MAX_VALUE, Number.MAX_VALUE],
+      [0, 1e300], // finite, but far past any clock
+    ]) {
+      const s = wait(startedAt, now);
+      expect(s?.elapsedS, `${startedAt} -> ${now}`).toBe(CLOCK_MAX_S);
+      expect(s?.slow).toBe(true);
+    }
+    // The other way round, a start in the future is no wait at all.
+    expect(wait(Number.MAX_VALUE, -Number.MAX_VALUE)?.elapsedS).toBe(0);
   });
 
   it("measures from the call that has run longest, whatever order they arrive in", () => {
