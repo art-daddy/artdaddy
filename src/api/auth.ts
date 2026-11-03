@@ -5,6 +5,7 @@
 import { apiBase, onApiBaseChange } from "./config";
 import { settledWithin } from "../lib/settledWithin";
 import { noteFailedRequest, noteFailedResponse } from "../observability/paidCallFailures";
+import { platform } from "../platform";
 
 type TokenProvider = () => Promise<string | null>;
 let clerkTokenProvider: TokenProvider | null = null;
@@ -73,8 +74,11 @@ async function sendRenewing(url: string, init: RequestInit, send: Send): Promise
     const token = await getAccessToken();
     const headers = {
       ...(init.headers as Record<string, string> | undefined),
-      // The server tags its error reports with this, so a failure there can be read per release of the app.
-      "X-Client-Version": __ARTDADDY_RELEASE__,
+      // The server tags its error reports with this, so a failure there can be read per release of the app. Only the
+      // desktop app sends it. The web build is served for development and the browser test lane, and any custom
+      // header makes a browser ask the server's permission first (a preflight): with no server running, WebKit
+      // reports that failure as an uncaught error and the boot test fails. A plain signed-out request has none.
+      ...(platform.name === "tauri" ? { "X-Client-Version": __ARTDADDY_RELEASE__ } : {}),
       ...(token ? { Authorization: ["Bearer", token].join(" ") } : {}),
     };
     return { token, res: await send(url, { ...init, headers }) };
