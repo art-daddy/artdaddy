@@ -3,6 +3,7 @@
 // once for the thing they name — a launch beacon that repeats on every auth refresh, or a
 // project marker that fires on a failed open, answers the question wrongly rather than not
 // at all.
+import fc from "fast-check";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("./auth", async (io) => {
@@ -926,6 +927,83 @@ describe("the transcription sample", () => {
     reportTranscription(run, T0, {});
     await vi.waitFor(() => expect(calls).toHaveLength(1));
     expect(calls[0].reason).toBe("audio_s=612.3 wall_s=66.1 x=9.26 model=small threads=8");
+  });
+
+  // A batch is clips that were waiting together, each a few seconds: its whole audio is under the floor that
+  // keeps single short runs out. Found on the real app, where a four-clip batch reported nothing at all.
+  describe("a batch of short clips", () => {
+    const batch = { ...run, audioSeconds: 11.6, wallSeconds: 5.2 };
+
+    it("is reported, with how many clips it carried", async () => {
+      const calls = captureFetch();
+      reportTranscription(batch, T0, { beam: 1, files: 4 });
+      await vi.waitFor(() => expect(calls).toHaveLength(1));
+      expect(calls[0].reason).toBe(
+        "audio_s=11.6 wall_s=5.2 x=2.23 model=small threads=8 beam=1 files=4",
+      );
+    });
+
+    it("is not what lets a single short clip through", async () => {
+      const calls = captureFetch();
+      reportTranscription(batch, T0);
+      reportTranscription(batch, T0 + 60_000, { files: 1 });
+      reportTranscription(batch, T0 + 120_000, { beam: 1 });
+      await new Promise((r) => setTimeout(r, 30));
+      expect(calls).toHaveLength(0);
+    });
+
+    it("is still one a minute at most, whichever kind came first", async () => {
+      const calls = captureFetch();
+      reportTranscription({ ...batch, audioSeconds: 11.1 }, T0, { files: 3 });
+      reportTranscription({ ...batch, audioSeconds: 12.2 }, T0 + 30_000, { files: 4 });
+      reportTranscription(run, T0 + 59_999); // a long single run inside the same minute
+      reportTranscription({ ...batch, audioSeconds: 13.3 }, T0 + 60_000, { files: 5 });
+      await vi.waitFor(() => expect(calls).toHaveLength(2));
+      await new Promise((r) => setTimeout(r, 20));
+      expect(calls.map((c) => String(c.reason).split(" ")[0])).toEqual([
+        "audio_s=11.1",
+        "audio_s=13.3",
+      ]);
+    });
+
+    it("says nothing when the length of its audio is not known (the run's output was cut)", async () => {
+      const calls = captureFetch();
+      reportTranscription({ ...batch, audioSeconds: null }, T0, { files: 4 });
+      await new Promise((r) => setTimeout(r, 30));
+      expect(calls).toHaveLength(0);
+    });
+  });
+
+  // The rule, whatever the numbers: a run is reported exactly when its audio is known and it is either long or a
+  // batch. Each call is a minute after the last, so only the rule can keep one out.
+  it("property: reported exactly when the audio is known and the run is long or a batch", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(
+          fc.record({
+            audio: fc.option(fc.double({ min: 0.1, max: 200, noNaN: true }), { nil: null }),
+            files: fc.option(fc.integer({ min: 1, max: 9 }), { nil: undefined }),
+          }),
+          { minLength: 1, maxLength: 12 },
+        ),
+        async (runs) => {
+          __resetAppEvents();
+          const calls = captureFetch();
+          runs.forEach((r, i) =>
+            reportTranscription({ ...run, audioSeconds: r.audio }, T0 + i * 60_000, {
+              files: r.files,
+            }),
+          );
+          const expected = runs.filter(
+            (r) => r.audio !== null && (r.audio >= 30 || (r.files ?? 1) > 1),
+          );
+          await vi.waitFor(() => expect(calls).toHaveLength(expected.length));
+          await new Promise((r) => setTimeout(r, 5));
+          expect(calls).toHaveLength(expected.length);
+        },
+      ),
+      { numRuns: 25 },
+    );
   });
 
   it("sends the first sample of a launch", async () => {
