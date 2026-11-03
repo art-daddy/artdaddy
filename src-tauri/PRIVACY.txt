@@ -1,6 +1,6 @@
 ARTDADDY PRIVACY POLICY
 
-Last reviewed 1 November 2026. The current version is always at https://artdaddy.app/privacy
+Last reviewed 2 November 2026. The current version is always at https://artdaddy.app/privacy
 
 ArtDaddy is a desktop application. Your footage, your projects and your edits stay on your computer. The only things that leave are the AI requests you explicitly make, plus the usage data described in full below.
 
@@ -48,9 +48,16 @@ We record the following so we can tell a product that is working from one that i
 - credits consumed, and the AI model each request used;
 - the text of prompts you send to the agent, stored against your account;
 - which editing tools the agent called, the arguments it passed them, whether each succeeded, and the text of the agent's replies;
-- application events (launch, project opened, media imported, export finished or failed, and a sample of how fast speech transcription ran and on which kind of processor, never what was said) and error messages, which can include file paths on your machine;
+- application events (launch, project opened, media imported, export finished or failed, and a sample of how fast speech transcription ran, on which kind of processor and over how many clips, never what was said) and error messages, which can include file paths on your machine;
 - when an AI request fails and ends your turn: a short error code (for example "content_policy" or "provider_timeout") and the request's ID, never your prompt or the message you were shown;
-- crash and error reports, via Sentry.
+- for each turn you give the agent: how it started (you typed it, the app started it, or a retry), the mode and reasoning setting in use, how it ended, how long it took and where that time went (preparing, the AI provider, the agent's tools, waiting for you), and how many steps, tool calls, approvals, reconnections, waits and pictures it had, with how much picture data was sent. Words and numbers only, never the content;
+- when the agent asks you to approve something: that it asked, whether you approved, declined or stopped it, and how long the question waited;
+- when another program drives ArtDaddy over MCP (Claude Code, Claude Desktop, Cursor, VS Code, Codex and others): which program it is, by the name and version it announces, that MCP was switched on or off, and that a connection or a settings file for it was made. Never what that program asks for;
+- the steps of signing in: that the sign-in screen was shown, that the browser was opened, how the return to the app ended and, when a sign-in or a renewal fails, why, from a fixed list of words. These are recorded before we know who you are, under a random install ID kept on your computer and discarded when you sign out. They carry the app version and your operating system, and no email address, no account and no sign-in token;
+- the version of the app that made each request to our service;
+- crash and error reports, via Sentry. When an error happens during a request you made while signed in, the report names your account ID and email address, so that we can tell whether it hit one person or many.
+
+Records made while you are signed in are stored with your account ID and email address, apart from the steps of signing in described above.
 
 We keep prompt text indefinitely rather than expiring it, because it is the record of what people actually ask the product to do. Agent activity is kept for 400 days. None of it is sold, shared with advertisers, or used to train any model.
 
@@ -80,7 +87,7 @@ AI providers process the content of requests you make under their own terms. We 
 
 WHAT WE HAVE NOT DONE YET
 
-- There is no switch to turn off usage reporting yet. Usage events are only sent while you are signed in; crash reports are sent whenever the app hits an error, signed in or not.
+- There is no switch to turn off usage reporting yet. Usage events are only sent while you are signed in, apart from the anonymous steps of signing in described above; crash reports are sent whenever the app hits an error, signed in or not.
 - There is no self-service data export or deletion. Email us and we will do it by hand.
 
 
