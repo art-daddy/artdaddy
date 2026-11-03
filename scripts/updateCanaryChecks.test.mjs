@@ -230,7 +230,9 @@ describe("comparing the installed bundle with the published one", () => {
       ),
       { numRuns: 20 },
     );
-  });
+    // Twenty rounds of real directory trees: more than vitest's 5 s when the whole suite runs at once, and a timeout
+    // here also leaves the run writing into a folder the cleanup is already removing.
+  }, 60_000);
 });
 
 describe("reading what the Rust half printed", () => {
