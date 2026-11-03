@@ -603,9 +603,11 @@ pub fn run() {
   // MUST be the first plugin registered, and must come before deep-link: it is what makes a
   // second launch hand its argv to the running app instead of starting a rival instance.
   //
-  // The forwarding is NOT free with the `deep-link` feature: it lives in the plugin's DEFAULT
-  // callback, and init() replaces that callback wholesale. Focus the window and forget this
-  // line and the app raises on a callback while the URL is silently dropped.
+  // Who forwards the link depends on the plugin version. In the locked 2.4.4, `init()` wraps this closure
+  // and, with the `deep-link` feature, forwards the URL BEFORE calling it, so the call below sends it a
+  // second time and a running app gets every link twice. It stays because an older plugin forwarded only
+  // from its default callback, which this closure replaces (the app raised and the URL was dropped). The
+  // page ignores a link it has already handled (AuthProvider), so either behaviour is correct.
   #[cfg(desktop)]
   let builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
     use tauri::Manager;
