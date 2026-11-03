@@ -111,6 +111,20 @@ function judge(label: string, bytes: Uint8Array[], expected: number): string[] {
   return problems;
 }
 
+/** The fixtures are built in the same minutes as the rest of the lane's ffmpegs. A 24-megapixel
+ *  encode that meets a moment with no free memory (ENOMEM, -12) is asked again: what this test
+ *  judges is what the model is shown, not whether the machine had memory to spare. */
+async function ffRetryingNoMemory(args: string[]): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await ff(args);
+    } catch (e) {
+      if (attempt >= 3 || !/4294967284|Cannot allocate memory/i.test(String(e))) throw e;
+      await new Promise((r) => setTimeout(r, 2000 * attempt));
+    }
+  }
+}
+
 describe("every picture the model is shown is small (UJ-019)", () => {
   it("inspect_color on 10-bit 4:2:2 camera footage, a big still, and a placed clip", async () => {
     const dir = joinPath(root, "p");
@@ -120,7 +134,7 @@ describe("every picture the model is shown is small (UJ-019)", () => {
     await ensureTimeline(ctx.store);
     const clip = await libRef(ctx, await sonyLike(path.join(root, "C0001.MP4")), "video");
     const still = path.join(root, "DSC0001.jpg");
-    await ff([
+    await ffRetryingNoMemory([
       "-y",
       "-v",
       "error",
