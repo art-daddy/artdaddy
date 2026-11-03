@@ -811,12 +811,14 @@ describe("AuthProvider, a sign-in callback that did not finish", () => {
         <span>editor</span>
       </AuthProvider>,
     );
-  /** Deliver a callback the way the operating system does. */
+  /** Deliver a callback the way the operating system does. Each delivery is its own link (a repeat of one link is
+   *  dropped, see "a link that arrives more than once"). */
+  let delivered = 0;
   const deliver = async (outcome: { ok: boolean }) => {
     await waitFor(() => expect(mocks.onOpenUrlCb).not.toBeNull());
     mocks.handleDeepLinkCallback.mockResolvedValue(outcome);
     await act(async () => {
-      await mocks.onOpenUrlCb!([LINK]);
+      await mocks.onOpenUrlCb!([`${LINK}&n=${++delivered}`]);
     });
   };
 
@@ -949,5 +951,103 @@ describe("AuthProvider, a sign-in callback that did not finish", () => {
       </AuthProvider>,
     );
     expect(useSignInNotice.getState().text).toBeNull();
+  });
+});
+
+// On Windows and Linux the link arrives at a RUNNING app as a second launch, and the same link is then delivered
+// more than once: the single-instance plugin forwards it, so does the shell's own callback (observed live: two
+// events a millisecond apart for one link), and the plugin hands the last link again to anything that asks for
+// the current ones. The link's code is single-use, so the second try can only fail: it was counted as a failed
+// sign-in and said on the screen right beside the one that worked.
+describe("AuthProvider, a link that arrives more than once", () => {
+  const LINK = "artdaddy://auth/callback?code=once-only&state=the-state";
+  const mount = () =>
+    render(
+      <AuthProvider>
+        <span>editor</span>
+      </AuthProvider>,
+    );
+  const ready = () => waitFor(() => expect(mocks.onOpenUrlCb).not.toBeNull());
+
+  afterEach(() => {
+    useSignInNotice.getState().clear();
+  });
+
+  it("is handled once however many times it is delivered, even at the same moment", async () => {
+    mocks.authStatus = "locked";
+    mount();
+    await ready();
+    await act(async () => {
+      mocks.onOpenUrlCb!([LINK]);
+      mocks.onOpenUrlCb!([LINK]);
+      mocks.onOpenUrlCb!([LINK, LINK]);
+    });
+    expect(mocks.handleDeepLinkCallback).toHaveBeenCalledTimes(1);
+    expect(mocks.handleDeepLinkCallback).toHaveBeenCalledWith(LINK);
+  });
+
+  it("never reports its own repeat as a failed sign-in beside the one that worked", async () => {
+    mocks.authStatus = "locked";
+    // What the real handler does: the first delivery has the attempt and works, the repeat finds none.
+    mocks.handleDeepLinkCallback
+      .mockResolvedValueOnce({ ok: true })
+      .mockResolvedValue({ ok: false, reason: "no_attempt" } as unknown as { ok: boolean });
+    mount();
+    await ready();
+    // (the restore on mount calls these too: count only what the delivery adds)
+    const [stored, verified] = [
+      mocks.setStoredSession.mock.calls.length,
+      mocks.verify.mock.calls.length,
+    ];
+    await act(async () => {
+      mocks.onOpenUrlCb!([LINK]);
+      mocks.onOpenUrlCb!([LINK]);
+    });
+    expect(mocks.handleDeepLinkCallback).toHaveBeenCalledTimes(1);
+    expect(mocks.setStoredSession.mock.calls.length - stored).toBe(1);
+    expect(mocks.verify.mock.calls.length - verified).toBe(1);
+    expect(useSignInNotice.getState().text).toBeNull();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("is not tried again when it started the app and is then delivered to the listener too", async () => {
+    mocks.authStatus = "checking";
+    mocks.startUrls = [LINK];
+    mount();
+    await ready();
+    await act(async () => {
+      mocks.onOpenUrlCb!([LINK]); // the plugin replays the current link to a new listener
+    });
+    expect(mocks.handleDeepLinkCallback).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not count a repeat of a link that failed a second time", async () => {
+    mocks.authStatus = "locked";
+    mocks.handleDeepLinkCallback.mockResolvedValue({
+      ok: false,
+      reason: "state_mismatch",
+    } as unknown as { ok: boolean });
+    mount();
+    await ready();
+    await act(async () => {
+      mocks.onOpenUrlCb!([LINK]);
+      mocks.onOpenUrlCb!([LINK]);
+    });
+    expect(mocks.handleDeepLinkCallback).toHaveBeenCalledTimes(1);
+  });
+
+  // The other direction: a person who presses the button again gets a NEW link (a new state and code), and it
+  // must still be handled. Dropping everything after the first would break sign-in on a retry.
+  it("handles a different link, in order, every time", async () => {
+    mocks.authStatus = "locked";
+    mount();
+    await ready();
+    const links = [1, 2, 3].map((n) => `${LINK}&try=${n}`);
+    await act(async () => {
+      for (const link of links) mocks.onOpenUrlCb!([link]);
+    });
+    expect(
+      (mocks.handleDeepLinkCallback.mock.calls as unknown as [string][]).map(([url]) => url),
+    ).toEqual(links);
   });
 });

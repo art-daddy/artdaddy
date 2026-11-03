@@ -97,8 +97,16 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
     let offDeepLink: (() => void) | undefined;
     void (async () => {
       const { getCurrent, onOpenUrl } = await import("@tauri-apps/plugin-deep-link");
+      // A link can reach this page more than once: with the `deep-link` feature the single-instance plugin
+      // forwards it itself and so does the shell's own callback, and the plugin hands the last link again to
+      // anything that asks for the current ones. Its code is single-use, so a second try could only fail, and
+      // would be counted and said as a failed sign-in right beside the one that worked. The repeat is dropped
+      // here, before anything is consumed (the one place every delivery passes through).
+      const handled = new Set<string>();
       const onUrls = async (urls: string[]) => {
         for (const url of urls) {
+          if (handled.has(url)) continue;
+          handled.add(url);
           const result = await handleDeepLinkCallback(url);
           if (result.ok) {
             useSignInNotice.getState().clear();
