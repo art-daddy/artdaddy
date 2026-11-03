@@ -17,9 +17,14 @@ vi.mock("../store/projects", () => ({
   useProjects: (sel: any) => sel({ projects: listed, refresh, create }),
 }));
 vi.mock("@tauri-apps/api/core", () => ({ convertFileSrc: (p: string) => p }));
+const { pickMediaPaths } = vi.hoisted(() => ({
+  pickMediaPaths: vi.fn(async (): Promise<string[] | null> => []),
+}));
+vi.mock("../lib/upload", async (orig) => ({ ...(await orig<object>()), pickMediaPaths }));
 
 import ProjectPicker from "./ProjectPicker";
-import { peekFirstPrompt, setFirstPrompt } from "../store/firstPrompt";
+import { OS_DROP_EVENT } from "../lib/osDrop";
+import { peekFirstFootage, peekFirstPrompt, setFirstPrompt } from "../store/firstPrompt";
 
 afterEach(() => {
   setFirstPrompt("", "");
@@ -94,7 +99,8 @@ describe("ProjectPicker", () => {
     render(<ProjectPicker />);
     await userEvent.type(screen.getByLabelText(/Describe what you want/), "a punchy travel reel");
     await userEvent.click(screen.getByRole("button", { name: "Start" }));
-    await waitFor(() => expect(create).toHaveBeenCalledWith("a punchy travel reel", "9:16"));
+    // Auto: the first video clip sets the canvas (T-31), so nothing is chosen here.
+    await waitFor(() => expect(create).toHaveBeenCalledWith("a punchy travel reel", "auto"));
     // The failure that matters is creating a project and then leaving the user on the picker.
     await waitFor(() => expect(switchTo).toHaveBeenCalledWith("id-a punchy travel reel"));
     expect(peekFirstPrompt("id-a punchy travel reel")).toBe("a punchy travel reel");
@@ -178,5 +184,160 @@ describe("ProjectPicker", () => {
     expect(screen.getByRole("button", { name: /Connect Claude/ })).toBeInTheDocument();
     // Nothing above the list may be in a scrolling container — that is what buried it.
     expect(container.querySelector(".overflow-y-auto")?.tagName).toBe("UL");
+  });
+});
+
+// T-31: the canvas follows the first video clip unless the person chose one.
+describe("the aspect a new project starts with", () => {
+  it("is Auto, offered first, and says what it means", () => {
+    render(<ProjectPicker />);
+    const aspect = screen.getByLabelText("Aspect") as HTMLSelectElement;
+    expect(aspect.value).toBe("auto");
+    expect([...aspect.options].map((o) => o.textContent)).toEqual([
+      "Auto (from your first clip)",
+      "9:16",
+      "16:9",
+      "1:1",
+    ]);
+  });
+
+  it.each(["9:16", "16:9", "1:1"])(
+    "a chosen %s is kept: it is what the project is made with",
+    async (shape) => {
+      render(<ProjectPicker />);
+      await userEvent.selectOptions(screen.getByLabelText("Aspect"), shape);
+      await userEvent.type(screen.getByLabelText(/Describe what you want/), "my reel");
+      await userEvent.click(screen.getByRole("button", { name: "Start" }));
+      await waitFor(() => expect(create).toHaveBeenCalledWith("my reel", shape));
+    },
+  );
+});
+
+// T-30: footage can be chosen on the start screen. It cannot be imported here (an import needs the open
+// project), so what the person chose travels with the first prompt, and the chat brings it in before sending.
+describe("footage chosen on the start screen", () => {
+  const prompt = async (text = "Make my reel") =>
+    userEvent.type(screen.getByLabelText(/Describe what you want/), text);
+  const dropOnPicker = (paths: string[], target = "picker") =>
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(OS_DROP_EVENT, { detail: { paths, target, element: null, x: 0, y: 0 } }),
+      );
+    });
+
+  it("is optional: with none chosen the start is exactly what it was", async () => {
+    render(<ProjectPicker />);
+    expect(screen.getByRole("button", { name: /Add footage/ })).toBeInTheDocument();
+    expect(screen.getByText(/Optional/)).toBeInTheDocument();
+    await prompt();
+    await userEvent.click(screen.getByRole("button", { name: "Start" }));
+    await waitFor(() => expect(switchTo).toHaveBeenCalledWith("id-Make my reel"));
+    expect(peekFirstPrompt("id-Make my reel")).toBe("Make my reel");
+    expect(peekFirstFootage("id-Make my reel")).toEqual([]);
+  });
+
+  it("goes with the first prompt, in the order it was chosen, once the project exists", async () => {
+    pickMediaPaths.mockResolvedValueOnce(["C:/v/a.mp4", "C:/v/sub/b.mov"]);
+    render(<ProjectPicker />);
+    await userEvent.click(screen.getByRole("button", { name: /Add footage/ }));
+    expect(await screen.findByText("a.mp4")).toBeInTheDocument();
+    expect(screen.getByText("b.mov")).toBeInTheDocument();
+    await prompt();
+    await userEvent.click(screen.getByRole("button", { name: "Start" }));
+    await waitFor(() => expect(switchTo).toHaveBeenCalledWith("id-Make my reel"));
+    expect(peekFirstFootage("id-Make my reel")).toEqual([
+      { name: "a.mp4", path: "C:/v/a.mp4" },
+      { name: "b.mov", path: "C:/v/sub/b.mov" },
+    ]);
+    // for the project that was made, not for another
+    expect(peekFirstFootage("another-project")).toEqual([]);
+  });
+
+  it("one file chosen twice is one file, and a cancelled dialog adds none", async () => {
+    pickMediaPaths.mockResolvedValueOnce(["C:/v/a.mp4"]);
+    pickMediaPaths.mockResolvedValueOnce(["C:/v/a.mp4"]);
+    pickMediaPaths.mockResolvedValueOnce([]);
+    render(<ProjectPicker />);
+    for (let i = 0; i < 3; i++)
+      await userEvent.click(screen.getByRole("button", { name: /Add footage/ }));
+    await waitFor(() => expect(pickMediaPaths).toHaveBeenCalledTimes(3));
+    expect(screen.getAllByText("a.mp4")).toHaveLength(1);
+  });
+
+  it("the same file twice in ONE pick is one file too", async () => {
+    pickMediaPaths.mockResolvedValueOnce(["C:/v/a.mp4", "C:/v/b.mp4", "C:/v/a.mp4"]);
+    render(<ProjectPicker />);
+    await userEvent.click(screen.getByRole("button", { name: /Add footage/ }));
+    await screen.findByText("b.mp4");
+    expect(screen.getAllByText("a.mp4")).toHaveLength(1);
+  });
+
+  it("on the web, one file is the same file by name, size and date, and another date is another file", async () => {
+    pickMediaPaths.mockResolvedValue(null);
+    const { container } = render(<ProjectPicker />);
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    const take = (...files: File[]) => fireEvent.change(input, { target: { files } });
+    const made = (name: string, lastModified: number) =>
+      new File(["x"], name, { type: "video/mp4", lastModified });
+    take(made("a.mp4", 1000));
+    await screen.findByText("a.mp4");
+    take(made("a.mp4", 1000)); // the same file chosen again
+    take(made("a.mp4", 2000)); // a different file that happens to share a name
+    await waitFor(() => expect(screen.getAllByText("a.mp4")).toHaveLength(2));
+  });
+
+  it("can be taken out again before starting", async () => {
+    pickMediaPaths.mockResolvedValueOnce(["C:/v/a.mp4", "C:/v/b.mp4"]);
+    render(<ProjectPicker />);
+    await userEvent.click(screen.getByRole("button", { name: /Add footage/ }));
+    await userEvent.click(await screen.findByRole("button", { name: "Remove a.mp4" }));
+    expect(screen.queryByText("a.mp4")).not.toBeInTheDocument();
+    await prompt();
+    await userEvent.click(screen.getByRole("button", { name: "Start" }));
+    await waitFor(() => expect(switchTo).toHaveBeenCalled());
+    expect(peekFirstFootage("id-Make my reel")).toEqual([{ name: "b.mp4", path: "C:/v/b.mp4" }]);
+  });
+
+  it("takes files dropped on the prompt box, keeps media only, and ignores a drop meant for another zone", async () => {
+    render(<ProjectPicker />);
+    dropOnPicker(["C:/x/clip.mp4", "C:/x/notes.txt", "D:/y/song.mp3"]);
+    expect(await screen.findByText("clip.mp4")).toBeInTheDocument();
+    expect(screen.getByText("song.mp3")).toBeInTheDocument();
+    expect(screen.queryByText("notes.txt")).not.toBeInTheDocument();
+    dropOnPicker(["C:/x/other.mp4"], "chat");
+    expect(screen.queryByText("other.mp4")).not.toBeInTheDocument();
+  });
+
+  it("on the web, where there is no dialog, a chosen File is carried as the file itself", async () => {
+    pickMediaPaths.mockResolvedValueOnce(null);
+    const { container } = render(<ProjectPicker />);
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    const file = new File(["x"], "web.mp4", { type: "video/mp4" });
+    fireEvent.change(input, { target: { files: [file] } });
+    expect(await screen.findByText("web.mp4")).toBeInTheDocument();
+    await prompt();
+    await userEvent.click(screen.getByRole("button", { name: "Start" }));
+    await waitFor(() => expect(switchTo).toHaveBeenCalled());
+    expect(peekFirstFootage("id-Make my reel")).toEqual([{ name: "web.mp4", file }]);
+  });
+
+  it("is still there to try again when the project could not be made", async () => {
+    pickMediaPaths.mockResolvedValueOnce(["C:/v/a.mp4"]);
+    create.mockRejectedValueOnce(new Error("disk full"));
+    render(<ProjectPicker />);
+    await userEvent.click(screen.getByRole("button", { name: /Add footage/ }));
+    await screen.findByText("a.mp4");
+    await prompt();
+    await userEvent.click(screen.getByRole("button", { name: "Start" }));
+    expect(await screen.findByText("disk full")).toBeInTheDocument();
+    expect(screen.getByText("a.mp4")).toBeInTheDocument();
+    expect(peekFirstFootage("id-Make my reel")).toEqual([]); // nothing queued for a project that was never made
+  });
+
+  it("says why when the file dialog cannot open", async () => {
+    pickMediaPaths.mockRejectedValueOnce(new Error("dialog unavailable"));
+    render(<ProjectPicker />);
+    await userEvent.click(screen.getByRole("button", { name: /Add footage/ }));
+    expect(await screen.findByText("dialog unavailable")).toBeInTheDocument();
   });
 });

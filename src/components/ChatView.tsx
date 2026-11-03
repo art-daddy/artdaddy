@@ -21,6 +21,7 @@ import { onOsDragOver, onOsDrop, webOwnsFileDrops } from "../lib/osDrop";
 import {
   filesFromItems,
   uploadFiles as importFiles,
+  importFootage,
   importPaths,
   importViaDialog,
   MEDIA_RE,
@@ -28,7 +29,13 @@ import {
 import { useChat } from "../store/chat";
 import { useAuth } from "../store/auth";
 import { useEditor } from "../store/editor";
-import { discardFirstPrompt, peekFirstPrompt, takeFirstPrompt } from "../store/firstPrompt";
+import {
+  discardFirstPrompt,
+  peekFirstFootage,
+  peekFirstPrompt,
+  takeFirstFootage,
+  takeFirstPrompt,
+} from "../store/firstPrompt";
 import { mentionKey, mentionLabel } from "../timeline/mentions";
 import {
   buildMentionOptions,
@@ -49,7 +56,7 @@ import { jobNoteSummary } from "./jobNoteSummary";
 import { Button, cn } from "./ui";
 import { useMcpPanel } from "../store/mcpPanel";
 import { useProjectNotice } from "../store/projectNotice";
-import { attachmentKindFromName, mediaKindFromName } from "./chatMedia";
+import { attachmentsFromUploads, mediaKindFromName } from "./chatMedia";
 
 // Gemini ids route to the Gemini provider server-side by prefix (attachments.is_gemini_model),
 // so adding them here is all that is needed to offer them. The gemini-3.x family is withdrawn for
@@ -222,16 +229,20 @@ export default function ChatView({ onHide }: { onHide?: () => void } = {}) {
   }, [projectId]);
 
   useEffect(() => {
-    if (!projectId || !transcriptId || !aiReady || closing || streaming) return;
+    if (!projectId || !transcriptId || !aiReady || closing || streaming || uploading) return;
     if (turns.some((turn) => !turn.system)) {
       discardFirstPrompt(projectId);
       return;
     }
+    // The footage they chose on the start screen is still to come in: the first message goes out with it.
+    if (peekFirstFootage(projectId).length) return;
     const first = takeFirstPrompt(projectId);
     if (!first) return;
+    const withFootage = attachments;
     setText("");
-    void send(first, []);
-  }, [projectId, transcriptId, aiReady, closing, streaming, turns, send]);
+    setAttachments([]);
+    void send(first, withFootage);
+  }, [projectId, transcriptId, aiReady, closing, streaming, uploading, turns, send, attachments]);
 
   // Media list for the @ / Add-context picker; refetched on import (like FileTree).
   useEffect(() => {
@@ -282,18 +293,37 @@ export default function ChatView({ onHide }: { onHide?: () => void } = {}) {
 
   const addAttachments = useCallback(
     (uploaded: { rel: string; name: string }[]) =>
-      setAttachments((prev) => [
-        ...prev,
-        // Send the PORTABLE library ref (project-relative), never an absolute
-        // system path - the model only ever sees the asset id (other NLEs model).
-        // Subtitles are imported but not attached: there is nothing to look at or listen to.
-        ...uploaded.flatMap((u): Attachment[] => {
-          const kind = attachmentKindFromName(u.name);
-          return kind ? [{ path: u.rel, kind, caption: u.name }] : [];
-        }),
-      ]),
+      setAttachments((prev) => [...prev, ...attachmentsFromUploads(uploaded)]),
     [],
   );
+
+  // The footage they chose on the start screen comes in as soon as the project is open, before anything is
+  // sent: an import needs the open project's store, so it could not happen on the start screen, and the first
+  // message waits for it (above) so that it goes out with the footage attached (T-30).
+  const liveProject = useRef(projectId);
+  liveProject.current = projectId;
+  const storeReady = useEditor((s) => !!projectId && s.projectId === projectId && !!s.store);
+  useEffect(() => {
+    if (!projectId || !storeReady) return;
+    const footage = takeFirstFootage(projectId);
+    if (!footage.length) return;
+    setUploading(true);
+    void importFootage(projectId, footage)
+      .then((landed) => {
+        // They left this project while it came in. Its footage is in its library, but the first message must
+        // not go out later, on their return, without it.
+        if (liveProject.current !== projectId) {
+          discardFirstPrompt(projectId);
+          return;
+        }
+        addAttachments(landed);
+        // None of it came in (the importer said why): their text waits in the composer, and nothing goes to
+        // the agent without the footage they chose.
+        if (landed.length === 0) discardFirstPrompt(projectId);
+      })
+      .catch(() => discardFirstPrompt(projectId))
+      .finally(() => setUploading(false));
+  }, [projectId, storeReady, addAttachments]);
 
   const uploadFiles = async (files: File[]) => {
     if (!projectId || files.length === 0) return;

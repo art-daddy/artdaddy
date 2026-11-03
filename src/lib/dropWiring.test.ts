@@ -94,7 +94,7 @@ describe("drop zones and their subscribers agree", () => {
 
   it("finds the zones this app actually declares (the guard is not vacuous)", () => {
     // Without this, regexes that matched nothing would pass both checks above.
-    expect([...zones].sort()).toEqual(["chat", "library", "track"]);
-    expect([...subscribed].sort()).toEqual(["chat", "library", "track"]);
+    expect([...zones].sort()).toEqual(["chat", "library", "picker", "track"]);
+    expect([...subscribed].sort()).toEqual(["chat", "library", "picker", "track"]);
   });
 });
