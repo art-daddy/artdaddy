@@ -1,7 +1,10 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import fc from "fast-check";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { IndexCoordinator } from "./indexCoordinator";
 import type { Timeline } from "../timeline/model";
+import { SPEECH_PACE_KEY } from "../tools/speechPace";
+import { BATCH_LOOKAHEAD, BATCH_MAX_FILES } from "../tools/transcribeBatch";
 import { backgroundLoudness, prioritizeTranscript } from "../tools/transcriptQueue";
 import { setExportsBusy } from "../tools/workGate";
 
@@ -14,15 +17,23 @@ const {
   processImportedMedia,
   clearSourceUrlCache,
   ensureTranscript,
+  ensureTranscripts,
   runWhisper,
   adoptTranscriptions,
   measureLoudness,
   reportAppError,
   sourceHasAudio,
+  sourceDurationSeconds,
 } = vi.hoisted(() => ({
   processImportedMedia: vi.fn(async () => false),
   clearSourceUrlCache: vi.fn(),
   ensureTranscript: vi.fn(async () => ({ path: "t.json", parsed: {}, existed: false })),
+  ensureTranscripts: vi.fn(
+    async (_ctx: unknown, refs: readonly string[], ..._rest: unknown[]) =>
+      refs.map(() => ({ ok: true as const, existed: false })) as Array<
+        { ok: true; existed: boolean } | { ok: false; error: unknown }
+      >,
+  ),
   runWhisper: vi.fn(async (..._a: unknown[]) => ({})),
   adoptTranscriptions: vi.fn(async () => 0),
   measureLoudness: vi.fn(async (..._a: unknown[]): Promise<object> => ({
@@ -32,6 +43,8 @@ const {
   })),
   reportAppError: vi.fn(),
   sourceHasAudio: vi.fn(async () => true),
+  // A length nobody could tell runs alone, as every clip did before clips could share a run.
+  sourceDurationSeconds: vi.fn(async (..._a: unknown[]) => 0),
 }));
 
 /** A speech engine that cannot start. Shape-compatible with the real typed error. */
@@ -44,12 +57,13 @@ vi.mock("../preview/mediaProxy", () => ({ processImportedMedia }));
 vi.mock("../preview/resolve", () => ({ clearSourceUrlCache }));
 vi.mock("../tools/transcribe", () => ({
   ensureTranscript,
+  ensureTranscripts,
   runWhisper,
   isSpeechEngineUnavailable,
   adoptTranscriptions,
 }));
 vi.mock("../tools/loudness", () => ({ measureLoudness }));
-vi.mock("../timeline/placement", () => ({ sourceHasAudio }));
+vi.mock("../timeline/placement", () => ({ sourceHasAudio, sourceDurationSeconds }));
 vi.mock("../api/appEvents", () => ({ reportAppError }));
 
 /** The sources handed to the transcript pass, in order. */
@@ -95,6 +109,12 @@ beforeEach(() => {
   clearSourceUrlCache.mockReset();
   ensureTranscript.mockReset();
   ensureTranscript.mockResolvedValue({ path: "t.json", parsed: {}, existed: false });
+  ensureTranscripts.mockReset();
+  ensureTranscripts.mockImplementation(async (_ctx, refs) =>
+    refs.map(() => ({ ok: true as const, existed: false })),
+  );
+  sourceDurationSeconds.mockReset();
+  sourceDurationSeconds.mockResolvedValue(0);
   runWhisper.mockReset();
   runWhisper.mockResolvedValue({});
   adoptTranscriptions.mockReset();
@@ -1151,6 +1171,294 @@ describe("IndexCoordinator", () => {
       gates.shift()!();
       a.dispose();
       b.dispose();
+    });
+  });
+
+  // T-34 step 3. Every run of the speech engine costs a start-up that no clip shortens, so short clips that
+  // are waiting share one. What is checked is the OUTCOME: which clips each run of the engine was handed.
+  describe("clips that share one run of the engine", () => {
+    /** This machine's measured pace: 0.5 s of work per second of audio, so a run may hold 18 s of audio. */
+    const CAP_S = 18;
+    beforeEach(() => localStorage.setItem(SPEECH_PACE_KEY, JSON.stringify([[100, 53]])));
+    afterEach(() => {
+      localStorage.removeItem(SPEECH_PACE_KEY);
+      setExportsBusy(false);
+    });
+
+    /** How long each clip is, in seconds (keyed by its library name or path); any other is of unknown length. */
+    const lengths = (secondsOf: Record<string, number>): void => {
+      sourceDurationSeconds.mockImplementation(
+        async (_runner: unknown, abs: unknown) => secondsOf[String(abs).replace("C:/p/", "")] ?? 0,
+      );
+    };
+    const names = (n: number): string[] =>
+      Array.from({ length: n }, (_, i) => `library/c${i + 1}.mp3`);
+    const allTake = (clips: readonly string[], seconds: number): Record<string, number> =>
+      Object.fromEntries(clips.map((n) => [n, seconds]));
+    const okFor = (refs: readonly string[]) =>
+      refs.map(() => ({ ok: true as const, existed: false }));
+
+    /** Every run of the engine so far, in the order they started, as the clips each was handed. */
+    const runs = (): string[][] =>
+      [
+        ...ensureTranscript.mock.calls.map((call, i) => ({
+          at: ensureTranscript.mock.invocationCallOrder[i],
+          clips: [(call as Any[])[1] as string],
+        })),
+        ...ensureTranscripts.mock.calls.map((call, i) => ({
+          at: ensureTranscripts.mock.invocationCallOrder[i],
+          clips: [...((call as Any[])[1] as string[])],
+        })),
+        ...runWhisper.mock.calls.map((call, i) => ({
+          at: runWhisper.mock.invocationCallOrder[i],
+          clips: [(call as Any[])[1] as string],
+        })),
+      ]
+        .sort((a, b) => a.at - b.at)
+        .map((r) => r.clips);
+    const clipsRun = (): number => runs().flat().length;
+
+    it("hands short clips that are waiting to ONE run, in the order they were queued", async () => {
+      const clips = names(6);
+      lengths(allTake(clips, 2));
+      const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+      for (const n of clips) c.indexSource(n);
+      await settle(() => clipsRun() >= 6);
+      expect(runs()).toEqual([clips]);
+      expect(ensureTranscript).not.toHaveBeenCalled();
+      // as background work, for the default model and the default language
+      const call = ensureTranscripts.mock.calls[0] as Any[];
+      expect([call[0].background, call[2], call[3]]).toEqual([true, undefined, undefined]);
+      c.dispose();
+    });
+
+    it("fills a run only up to the audio this machine does in a few seconds, and starts the next with the rest", async () => {
+      const clips = names(7);
+      lengths(allTake(clips, 6)); // three of them are exactly CAP_S
+      const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+      for (const n of clips) c.indexSource(n);
+      await settle(() => clipsRun() >= 7);
+      expect(runs()).toEqual([clips.slice(0, 3), clips.slice(3, 6), clips.slice(6)]);
+      c.dispose();
+    });
+
+    it("never takes more than the engine's own limit of files into one run", async () => {
+      const clips = names(20);
+      lengths(allTake(clips, 0.5)); // all twenty fit in the audio, but not in one run
+      const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+      for (const n of clips) c.indexSource(n);
+      await settle(() => clipsRun() >= 20);
+      expect(runs().flat()).toEqual(clips);
+      expect(Math.max(...runs().map((r) => r.length))).toBe(BATCH_MAX_FILES);
+      c.dispose();
+    });
+
+    it("does not measure the whole queue to choose one run", async () => {
+      const clips = names(40);
+      lengths(allTake(clips, 1));
+      let open!: () => void;
+      ensureTranscripts.mockImplementation(async (_ctx, refs) => {
+        await new Promise<void>((r) => (open = r));
+        return okFor(refs);
+      });
+      const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+      for (const n of clips) c.indexSource(n);
+      await settle(() => ensureTranscripts.mock.calls.length > 0);
+      expect(sourceDurationSeconds.mock.calls.length).toBeLessThanOrEqual(BATCH_LOOKAHEAD);
+      open();
+      c.dispose();
+    });
+
+    it("runs a clip somebody asked for while it waited FIRST and ALONE, then the rest together", async () => {
+      setExportsBusy(true);
+      const clips = names(4);
+      // the asked-for clip is short enough to share a run, so only being asked for keeps it out of one
+      lengths({ ...allTake(clips, 2), "C:/media/talk.mp4": 2 });
+      const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+      for (const n of clips) c.indexSource(n);
+      await new Promise((r) => setTimeout(r, 20)); // all four are waiting for their turn
+      expect(prioritizeTranscript("C:/p", "C:/media/talk.mp4", "")).toBe(true);
+      setExportsBusy(false);
+      await settle(() => clipsRun() >= 5);
+      expect(runs()).toEqual([["C:/media/talk.mp4"], clips]);
+      c.dispose();
+    });
+
+    it("puts a clip somebody asks for while the lengths are still being read ahead of the run being chosen", async () => {
+      const clips = names(3);
+      let reading!: () => void;
+      const gate = new Promise<void>((r) => (reading = r));
+      sourceDurationSeconds.mockImplementation(async () => {
+        await gate;
+        return 2;
+      });
+      const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+      for (const n of clips) c.indexSource(n);
+      await settle(() => sourceDurationSeconds.mock.calls.length >= 3); // the run is being chosen
+      prioritizeTranscript("C:/p", "C:/media/talk.mp4", "");
+      reading();
+      await settle(() => clipsRun() >= 4);
+      expect(runs()).toEqual([["C:/media/talk.mp4"], clips]);
+      c.dispose();
+    });
+
+    it("runs a clip whose length cannot be told on its own, and the others still share a run", async () => {
+      const clips = names(4);
+      lengths({ ...allTake(clips, 2), [clips[1]]: 0 });
+      const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+      for (const n of clips) c.indexSource(n);
+      await settle(() => clipsRun() >= 4);
+      expect(runs()).toEqual([[clips[0], clips[2], clips[3]], [clips[1]]]);
+      c.dispose();
+    });
+
+    it("leaves a clip with no sound out of the run without reporting it, and the rest still share it", async () => {
+      const clips = names(4);
+      lengths(allTake(clips, 2));
+      (sourceHasAudio as Any).mockImplementation(
+        async (_ctx: unknown, abs: unknown) => !String(abs).endsWith("c2.mp3"),
+      );
+      const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+      for (const n of clips) c.indexSource(n);
+      await settle(() => clipsRun() >= 3);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(runs()).toEqual([[clips[0], clips[2], clips[3]]]);
+      expect(reportAppError).not.toHaveBeenCalled();
+      c.dispose();
+    });
+
+    it("reports a clip the run failed on by itself, and tries only that one again", async () => {
+      const clips = names(4);
+      lengths(allTake(clips, 2));
+      ensureTranscripts.mockImplementationOnce(async (_ctx, refs) =>
+        refs.map((r) =>
+          r === clips[1]
+            ? { ok: false as const, error: new Error("whisper boom") }
+            : { ok: true as const, existed: false },
+        ),
+      );
+      const rows = clips.map((path, i) => ({ id: `m${i}`, path }));
+      const c = new IndexCoordinator(fakeStore(rows), makeRunner, vi.fn(), vi.fn());
+      await c.sweep(tl([]));
+      await settle(() => reportAppError.mock.calls.length > 0);
+      expect(reportAppError).toHaveBeenCalledTimes(1);
+      expect(String(reportAppError.mock.calls[0][0])).toMatch(
+        /index transcript failed \(attempt 1\).*whisper boom/,
+      );
+      // the next sweep asks again for that clip and for no other
+      await c.sweep(tl([]));
+      await settle(() => clipsRun() >= 5);
+      expect(runs()).toEqual([clips, [clips[1]]]);
+      c.dispose();
+    });
+
+    it("gives up on a clip that fails every time after the same few tries a clip alone gets", async () => {
+      const clips = names(3);
+      lengths(allTake(clips, 2));
+      ensureTranscripts.mockImplementation(async (_ctx, refs) =>
+        refs.map((r) =>
+          r === clips[0]
+            ? { ok: false as const, error: new Error("corrupt audio") }
+            : { ok: true as const, existed: false },
+        ),
+      );
+      ensureTranscript.mockRejectedValue(new Error("corrupt audio"));
+      const rows = clips.map((path, i) => ({ id: `m${i}`, path }));
+      const c = new IndexCoordinator(fakeStore(rows), makeRunner, vi.fn(), vi.fn());
+      for (let sweep = 0; sweep < 6; sweep++) {
+        await c.sweep(tl([]));
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      expect(reportAppError).toHaveBeenCalledTimes(3); // MAX_ATTEMPTS
+      expect(runs().filter((r) => r.includes(clips[0]))).toHaveLength(3);
+      c.dispose();
+    });
+
+    it("counts a failure to START the engine once per run, however many clips were in it", async () => {
+      const clips = names(18);
+      lengths(allTake(clips, 3)); // six to a run
+      ensureTranscripts.mockImplementation(async (_ctx, refs) =>
+        refs.map(() => ({ ok: false as const, error: new FakeEngineDown("0xC0000135") })),
+      );
+      const rows = clips.map((path, i) => ({ id: `m${i}`, path }));
+      const c = new IndexCoordinator(fakeStore(rows), makeRunner, vi.fn(), vi.fn());
+      await c.sweep(tl([]));
+      await settle(() => reportAppError.mock.calls.length > 0);
+      await new Promise((r) => setTimeout(r, 30));
+      // three runs were tried before the machine was given up on: not one run that gave up on it
+      expect(runs().map((r) => r.length)).toEqual([6, 6, 6]);
+      expect(reportAppError).toHaveBeenCalledTimes(1);
+      expect(String(reportAppError.mock.calls[0][0])).toMatch(/speech engine unavailable/i);
+      c.dispose();
+    });
+
+    it("treats every clip of the run in progress as running, so asking for one of them queues nothing again", async () => {
+      const clips = names(4);
+      lengths(allTake(clips, 2));
+      let open!: () => void;
+      ensureTranscripts.mockImplementation(async (_ctx, refs) => {
+        await new Promise<void>((r) => (open = r));
+        return okFor(refs);
+      });
+      const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+      for (const n of clips) c.indexSource(n);
+      await settle(() => ensureTranscripts.mock.calls.length > 0);
+      expect(prioritizeTranscript("C:/p", clips[2], "")).toBe(true);
+      open();
+      await new Promise((r) => setTimeout(r, 30));
+      expect(runs()).toEqual([clips]);
+      c.dispose();
+    });
+
+    it("lets the run in progress finish when the project closes, and starts none of the next", async () => {
+      const clips = names(6);
+      lengths(allTake(clips, 6)); // three to a run
+      let open!: () => void;
+      ensureTranscripts.mockImplementation(async (_ctx, refs) => {
+        await new Promise<void>((r) => (open = r));
+        return okFor(refs);
+      });
+      const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+      for (const n of clips) c.indexSource(n);
+      await settle(() => ensureTranscripts.mock.calls.length > 0);
+      c.dispose();
+      open();
+      await new Promise((r) => setTimeout(r, 30));
+      expect(runs()).toEqual([clips.slice(0, 3)]);
+      expect(reportAppError).not.toHaveBeenCalled();
+    });
+
+    // The rule that survives any rewrite of how a run is chosen: whatever is queued, every clip is run
+    // exactly once, a run of several fits the engine's limits, and the first clip queued is in the first run.
+    it("property: every queued clip runs exactly once, in a run that fits", async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          fc.array(fc.constantFrom(0, 1, 2, 3, 5, 8, 13, 21, 40), { minLength: 1, maxLength: 12 }),
+          async (seconds) => {
+            ensureTranscript.mockClear();
+            ensureTranscripts.mockClear();
+            const clips = seconds.map((_, i) => `library/p${i + 1}.mp3`);
+            lengths(Object.fromEntries(clips.map((n, i) => [n, seconds[i]])));
+            const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+            for (const n of clips) c.indexSource(n);
+            await settle(() => clipsRun() >= clips.length, 3000);
+            c.dispose();
+            const got = runs();
+            expect([...got.flat()].sort()).toEqual([...clips].sort());
+            const secondsOf = (n: string): number => seconds[clips.indexOf(n)];
+            for (const run of got) {
+              if (run.length === 1) continue;
+              expect(run.length).toBeLessThanOrEqual(BATCH_MAX_FILES);
+              expect(run.every((n) => secondsOf(n) > 0)).toBe(true);
+              expect(run.reduce((t, n) => t + secondsOf(n), 0)).toBeLessThanOrEqual(CAP_S);
+              const places = run.map((n) => clips.indexOf(n));
+              expect(places).toEqual([...places].sort((a, b) => a - b));
+            }
+            expect(got[0]).toContain(clips[0]);
+          },
+        ),
+        { numRuns: 25 },
+      );
     });
   });
 });

@@ -289,9 +289,10 @@ let lastTranscriptionReport = -Infinity;
 export function reportTranscription(
   facts: WhisperRunFacts,
   now = Date.now(),
-  /** How it was decoded: the beam (1 is the faster setting) and whether it replaced a run refused
-   *  for being narrower than its language needs. Numbers and a flag, never what was said. */
-  decoding?: { beam?: number; rerun?: boolean },
+  /** How it was decoded: the beam (1 is the faster setting), whether it replaced a run refused for being
+   *  narrower than its language needs, and how many files one run covered (more than one is a batch,
+   *  whose wall time includes ONE start-up for them all). Numbers and a flag, never what was said. */
+  decoding?: { beam?: number; rerun?: boolean; files?: number },
 ): void {
   const audio = facts.audioSeconds;
   if (audio === null || audio < TRANSCRIPTION_MIN_AUDIO_S) return;
@@ -305,6 +306,7 @@ export function reportTranscription(
     facts.threads ? `threads=${facts.threads}` : "",
     decoding?.beam !== undefined ? `beam=${decoding.beam}` : "",
     decoding?.rerun ? "rerun=1" : "",
+    decoding?.files !== undefined && decoding.files > 1 ? `files=${decoding.files}` : "",
   ];
   void reportAppEvent("transcription", {
     via: facts.backend ?? "unknown",

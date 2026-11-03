@@ -109,3 +109,71 @@ describe("what a run of whisper says about itself", () => {
     );
   });
 });
+
+// One run over several files (T-34 step 3). The capture is the shipped engine reading three short clips
+// in a single process: a line for each file, one total for all of them.
+describe("a batch: one run over several files", () => {
+  const SAMPLES = [70061, 76779, 68541];
+
+  it("reads the audio of every file against the run's own time", () => {
+    for (const s of both(fixture("batch3")))
+      expect(whisperRunFacts(s, { batch: true })).toEqual({
+        backend: "vulkan",
+        audioSeconds: (SAMPLES[0] + SAMPLES[1] + SAMPLES[2]) / 16000,
+        wallSeconds: 2.41897,
+        model: "small",
+        threads: 6,
+      });
+  });
+
+  it("a batch of one is read like a single file", () => {
+    const one = lf(fixture("vulkan"));
+    expect(whisperRunFacts(one, { batch: true })).toEqual(whisperRunFacts(one));
+  });
+
+  it("a file the engine could not read prints no line and adds nothing", () => {
+    const run = lf(fixture("batch3"));
+    const without = run.replace(/main: processing 'W:\\b\.wav'[^\n]*\n/, "");
+    expect(without).not.toBe(run);
+    expect(whisperRunFacts(without, { batch: true }).audioSeconds).toBe(
+      (SAMPLES[0] + SAMPLES[2]) / 16000,
+    );
+  });
+
+  it("is unknown, never short, when the middle of the output was elided", () => {
+    const run = lf(fixture("batch3"));
+    const elided = run.replace(
+      /main: processing 'W:\\b\.wav'[^\n]*\n/,
+      "\n…[1234 bytes elided]…\n",
+    );
+    expect(elided).not.toBe(run);
+    expect(whisperRunFacts(elided, { batch: true }).audioSeconds).toBeNull();
+    // the rest of what it said is still true of the run
+    expect(whisperRunFacts(elided, { batch: true })).toMatchObject({
+      backend: "vulkan",
+      wallSeconds: 2.41897,
+    });
+  });
+
+  it("property: the audio is the sum of the files, whatever number there are", () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.integer({ min: 1, max: 5_000_000 }), { minLength: 1, maxLength: 8 }),
+        (samples) => {
+          const lines = samples.map(
+            (n, i) =>
+              `main: processing 'W:\\f${i}.wav' (${n} samples, ${(n / 16000).toFixed(1)} sec), 6 threads, 1 processors, 1 beams + best of 1, lang = en, task = transcribe, timestamps = 1 ...`,
+          );
+          const run = [
+            "whisper_backend_init_gpu: using Vulkan0 backend",
+            ...lines,
+            "whisper_print_timings:    total time =  1000.00 ms",
+          ].join("\n");
+          expect(whisperRunFacts(run, { batch: true }).audioSeconds).toBe(
+            samples.reduce((a, b) => a + b, 0) / 16000,
+          );
+        },
+      ),
+    );
+  });
+});
