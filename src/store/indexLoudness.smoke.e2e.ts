@@ -90,8 +90,13 @@ describe("loudness of a long file, through the project's indexer (4g)", () => {
     expect(first.ok, JSON.stringify(first).slice(0, 400)).toBe(true);
     expect(first.loudness.status).toBe("in_progress");
 
-    const second = (await inspectMediaTool({ media_ref: ref }, at)) as Any;
-    expect(second.loudness.integrated_lufs).toBeCloseTo(-23, 0);
+    // A look waits at most its bound (15 s by default) for a measurement that is not ready and says
+    // in_progress when it gives up, so it is asked again, as the model is told to. This pins what the
+    // measurement IS, not how soon it landed.
+    let second = (await inspectMediaTool({ media_ref: ref, wait_seconds: 60 }, at)) as Any;
+    for (let i = 0; i < 3 && second.loudness?.status === "in_progress"; i++)
+      second = (await inspectMediaTool({ media_ref: ref, wait_seconds: 60 }, at)) as Any;
+    expect(second.loudness.integrated_lufs, JSON.stringify(second.loudness)).toBeCloseTo(-23, 0);
     expect(second.loudness.true_peak_dbtp).toBeCloseTo(-23, 0);
     expect(second.loudness.rms_dbfs).toBeCloseTo(-26, 0);
 
