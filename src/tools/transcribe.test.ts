@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
@@ -180,12 +181,10 @@ class MockFs implements FsLike {
 }
 
 async function sha256Of(bytes: Uint8Array): Promise<string> {
-  const copy = new Uint8Array(bytes.length);
-  copy.set(bytes);
-  const digest = await crypto.subtle.digest("SHA-256", copy.buffer);
-  return Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+  // Synchronous on purpose: the download tests run on a fake clock, and a digest that finishes on a real
+  // thread can still be running when the loop that drives the clock gives up, which is how this test
+  // once failed under the load of the full suite.
+  return createHash("sha256").update(bytes).digest("hex");
 }
 
 async function specFor(bytes: Uint8Array): Promise<WhisperModelSpec> {
