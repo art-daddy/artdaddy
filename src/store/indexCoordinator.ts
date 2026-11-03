@@ -13,7 +13,8 @@
 // Each pass drains INDEPENDENTLY, so a poster the user is waiting on never queues behind a
 // multi-minute transcription. The transcription and loudness passes also take turns app-wide
 // (workGate.ts): one of each at a time across every project, none starting while an export is
-// queued or running or a look's whisper runs.
+// queued or running or a look's whisper runs. A run of the speech engine takes several short clips
+// at once (transcribeBatch.ts), because each run costs a start-up no clip shortens.
 // Desktop-only: no runner (web build) => no-op. Lifecycle-scoped (owner
 // decision 2026-10-04): dispose() on project close drops every queue and stops the proxy and poster
 // in progress, which write into the project. The transcription and the loudness measurement in
@@ -28,8 +29,16 @@
 import type { CommandRunner } from "../tools/command";
 import type { ClientToolContext } from "../tools/context";
 import type { Loudness } from "../tools/loudness";
+import { readPace } from "../tools/speechPace";
 import type { ProjectStoreAccess } from "../tools/store";
-import type { TranscribeWindow } from "../tools/transcribe";
+import type { BatchOutcome, TranscribeWindow } from "../tools/transcribe";
+import {
+  batchAudioCapSeconds,
+  BATCH_LOOKAHEAD,
+  couldShare,
+  pickBatch,
+  type BatchFlags,
+} from "../tools/transcribeBatch";
 import { registerBackgroundTranscriber, type BackgroundLoudness } from "../tools/transcriptQueue";
 import { backgroundTurn } from "../tools/workGate";
 import type { Timeline } from "../timeline/model";
@@ -55,6 +64,8 @@ interface TxJob {
   source: string;
   language: string;
   window?: TranscribeWindow | null;
+  /** A caller asked for it (prioritizeTranscript): it runs next and alone, never as part of a batch. */
+  urgent?: boolean;
 }
 /** A transcript job's identity. A language other than the default is its own job: a Spanish
  *  transcript is not the default one. So is a window: it is not the whole file. */
@@ -64,6 +75,12 @@ const txKey = (j: TxJob): string => {
     : `transcript\u0000${j.source}`;
   return j.window ? `${base}\u0000w${j.window.start ?? 0}-${j.window.end ?? "end"}` : base;
 };
+/** What decides, before its length is known, whether a queued job may share a run of the engine. */
+const flagsOf = (j: TxJob): BatchFlags => ({
+  language: j.language,
+  windowed: !!j.window,
+  urgent: !!j.urgent,
+});
 
 /** One loudness measurement: a source over [start, end) seconds, the whole file when both are null. */
 interface LoudJob {
@@ -83,11 +100,13 @@ type Measured = Loudness | { error: string };
 interface IndexModules {
   processImportedMedia: typeof import("../preview/mediaProxy").processImportedMedia;
   ensureTranscript: typeof import("../tools/transcribe").ensureTranscript;
+  ensureTranscripts: typeof import("../tools/transcribe").ensureTranscripts;
   runWhisper: typeof import("../tools/transcribe").runWhisper;
   isSpeechEngineUnavailable: typeof import("../tools/transcribe").isSpeechEngineUnavailable;
   adoptTranscriptions: typeof import("../tools/transcribe").adoptTranscriptions;
   measureLoudness: typeof import("../tools/loudness").measureLoudness;
   sourceHasAudio: typeof import("../timeline/placement").sourceHasAudio;
+  sourceDurationSeconds: typeof import("../timeline/placement").sourceDurationSeconds;
   clearSourceUrlCache: typeof import("../preview/resolve").clearSourceUrlCache;
 }
 
@@ -109,8 +128,8 @@ const MAX_ENGINE_ATTEMPTS = 3;
 export class IndexCoordinator {
   private readonly proxyQ: string[] = [];
   private readonly txQ: TxJob[] = [];
-  /** The transcript job running now, by {@link txKey}. */
-  private txCurrent: string | null = null;
+  /** The transcript jobs running now, by {@link txKey}: one, or the several that share a run of the engine. */
+  private readonly txCurrent = new Set<string>();
   private readonly loudQ: LoudJob[] = [];
   /** The loudness job running now, by {@link loudKey}. */
   private loudCurrent: string | null = null;
@@ -245,9 +264,9 @@ export class IndexCoordinator {
     window?: TranscribeWindow | null,
   ): boolean {
     if (this.disposed || this.engineDown) return false;
-    const job: TxJob = { source, language, window: window ?? null };
+    const job: TxJob = { source, language, window: window ?? null, urgent: true };
     const key = txKey(job);
-    if (this.txCurrent === key) return true;
+    if (this.txCurrent.has(key)) return true;
     const at = this.txQ.findIndex((j) => txKey(j) === key);
     if (at >= 0) this.txQ.splice(at, 1);
     this.seen.add(key);
@@ -353,11 +372,13 @@ export class IndexCoordinator {
         mods: {
           processImportedMedia: proxy.processImportedMedia,
           ensureTranscript: transcribe.ensureTranscript,
+          ensureTranscripts: transcribe.ensureTranscripts,
           runWhisper: transcribe.runWhisper,
           isSpeechEngineUnavailable: transcribe.isSpeechEngineUnavailable,
           adoptTranscriptions: transcribe.adoptTranscriptions,
           measureLoudness: loudness.measureLoudness,
           sourceHasAudio: placement.sourceHasAudio,
+          sourceDurationSeconds: placement.sourceDurationSeconds,
           clearSourceUrlCache: resolve.clearSourceUrlCache,
         },
       };
@@ -424,12 +445,15 @@ export class IndexCoordinator {
     if (!this.disposed && this.proxyQ.length > 0) void this.drainProxies();
   }
 
-  /** ONE at a time, and on its OWN drain rather than sharing the proxy pool.
+  /** ONE run of the engine at a time, and on its OWN drain rather than sharing the proxy pool.
    *
    *  whisper maps the whole ~465 MiB model per process, so two concurrent runs double that on a
    *  machine already running the editor. Separating the drains is what makes one worker safe:
    *  sharing the pool would have parked a poster behind a multi-minute transcription, and a
-   *  preview the user is waiting on must never queue behind an index they did not ask for. */
+   *  preview the user is waiting on must never queue behind an index they did not ask for.
+   *
+   *  A run is one clip, or several short ones that share it (transcribeBatch.ts): every run of the
+   *  engine costs a start-up that no clip shortens. */
   private async drainTranscripts(): Promise<void> {
     this.txRunning = true;
     const ready = await this.ready();
@@ -438,7 +462,7 @@ export class IndexCoordinator {
       return;
     }
     // No signal: closing the project does not stop the transcription in progress (see the top).
-    // Background: each job takes its turn before it starts (workGate.ts).
+    // Background: each run takes its turn before it starts (workGate.ts).
     const ctx = {
       store: this.store,
       runner: ready.runner,
@@ -448,44 +472,127 @@ export class IndexCoordinator {
       // A crashed page's transcription still at work holds the whisper turn, but only once this page
       // has taken it over: before that, no turn here would wait for it (4i).
       await ready.mods.adoptTranscriptions();
-      for (let job = this.txQ.shift(); job !== undefined && !this.disposed && !this.engineDown;) {
-        this.txCurrent = txKey(job);
+      while (this.txQ.length > 0 && !this.disposed && !this.engineDown) {
         // One background whisper in the app at a time, and none starts while an export is queued
         // or running or a look's whisper runs. Closed while it waits: dropped with the queue.
         const release = await backgroundTurn("whisper", this.ac.signal);
         if (!release) break;
         try {
-          // A video with no audio track is not a failure to report — there is simply nothing to
-          // transcribe. Asking ffmpeg for an audio-only output of one fails with "Output file
-          // does not contain any stream", which read as a broken transcriber.
-          if (
-            !(await this.parkedOffline(txKey(job), job.source)) &&
-            (await this.hasAudio(ctx, ready.mods, job.source))
-          ) {
-            const language = job.language || undefined;
-            if (job.window) {
-              const abs = (await this.store.resolveRef(job.source)) ?? job.source;
-              await ready.mods.runWhisper(ctx, abs, undefined, language, job.window);
-            } else {
-              await ready.mods.ensureTranscript(ctx, job.source, undefined, language);
-            }
-          }
-        } catch (e) {
-          if (ready.mods.isSpeechEngineUnavailable(e)) this.onEngineUnavailable(e);
-          // Gone between the check and the run: the same fact, found later.
-          else if (!(await this.parkedOffline(txKey(job), job.source)))
-            this.onJobFailed("transcript", txKey(job), e);
+          // Chosen once the turn is held, so a transcript somebody asked for while this waited goes first.
+          const batch = await this.takeBatch(ctx, ready.mods);
+          for (const job of batch) this.txCurrent.add(txKey(job));
+          await this.runJobs(ctx, ready.mods, batch);
         } finally {
+          this.txCurrent.clear();
           release();
         }
-        this.txCurrent = null;
-        job = this.txQ.shift();
       }
     } finally {
-      this.txCurrent = null;
+      this.txCurrent.clear();
       this.txRunning = false;
     }
     if (!this.disposed && !this.engineDown && this.txQ.length > 0) void this.drainTranscripts();
+  }
+
+  /** The jobs of the next run: the one first in the queue, and the clips behind it that share its run of
+   *  the engine (transcribeBatch.ts). They leave the queue as they are taken. Never throws. */
+  private async takeBatch(ctx: ClientToolContext, mods: IndexModules): Promise<TxJob[]> {
+    for (;;) {
+      const head = this.txQ[0];
+      if (!head || this.disposed || this.engineDown) return [];
+      const ahead = this.txQ.slice(0, BATCH_LOOKAHEAD);
+      const flags = ahead.map(flagsOf);
+      // Only what could share the head's run is worth measuring; the rest stay where they are.
+      const seconds = await Promise.all(
+        ahead.map((job, i) =>
+          couldShare(flags[0], flags[i]) ? this.lengthOf(ctx, mods, job) : null,
+        ),
+      );
+      if (this.disposed || this.engineDown) return [];
+      // A clip somebody asked for while the lengths were being read goes first, and alone.
+      if (this.txQ[0] !== head) continue;
+      const picks = pickBatch(
+        flags.map((f, i) => ({ ...f, seconds: seconds[i] })),
+        batchAudioCapSeconds(readPace()),
+      );
+      const taken: TxJob[] = [];
+      for (const i of picks) {
+        const at = this.txQ.indexOf(ahead[i]);
+        if (at < 0) continue;
+        this.txQ.splice(at, 1);
+        taken.push(ahead[i]);
+      }
+      return taken;
+    }
+  }
+
+  /** A queued clip's length in seconds, or null when it cannot be told (it then runs alone). */
+  private async lengthOf(
+    ctx: ClientToolContext,
+    mods: IndexModules,
+    job: TxJob,
+  ): Promise<number | null> {
+    try {
+      const abs = (await this.store.resolveRef(job.source)) ?? job.source;
+      const seconds = await mods.sourceDurationSeconds(ctx.runner, abs);
+      return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Transcribe `batch`: one job as it always was, or several that share one run of the engine. What fails
+   *  is reported against its own file; failing to START the engine counts once for the run, however many
+   *  files were in it. */
+  private async runJobs(
+    ctx: ClientToolContext,
+    mods: IndexModules,
+    batch: readonly TxJob[],
+  ): Promise<void> {
+    // A video with no audio track is not a failure to report — there is simply nothing to
+    // transcribe. Asking ffmpeg for an audio-only output of one fails with "Output file
+    // does not contain any stream", which read as a broken transcriber.
+    const live: TxJob[] = [];
+    for (const job of batch)
+      if (
+        !(await this.parkedOffline(txKey(job), job.source)) &&
+        (await this.hasAudio(ctx, mods, job.source))
+      )
+        live.push(job);
+    if (live.length === 0) return;
+    const language = live[0].language || undefined;
+    let outcomes: BatchOutcome[];
+    try {
+      if (live.length === 1) {
+        const [job] = live;
+        if (job.window) {
+          const abs = (await this.store.resolveRef(job.source)) ?? job.source;
+          await mods.runWhisper(ctx, abs, undefined, language, job.window);
+        } else {
+          await mods.ensureTranscript(ctx, job.source, undefined, language);
+        }
+        outcomes = [{ ok: true, existed: false }];
+      } else {
+        outcomes = await mods.ensureTranscripts(
+          ctx,
+          live.map((job) => job.source),
+          undefined,
+          language,
+        );
+      }
+    } catch (error) {
+      outcomes = live.map(() => ({ ok: false, error }));
+    }
+    let engineError: { error: unknown } | null = null;
+    for (const [i, job] of live.entries()) {
+      const outcome = outcomes[i] ?? { ok: false, error: new Error("transcription did not run") };
+      if (outcome.ok) continue;
+      if (mods.isSpeechEngineUnavailable(outcome.error)) engineError ??= { error: outcome.error };
+      // Gone between the check and the run: the same fact, found later.
+      else if (!(await this.parkedOffline(txKey(job), job.source)))
+        this.onJobFailed("transcript", txKey(job), outcome.error);
+    }
+    if (engineError) this.onEngineUnavailable(engineError.error);
   }
 
   /** ONE at a time, on its own drain: a whole file's decode, which a poster must not queue behind,

@@ -1092,11 +1092,17 @@ export async function runWhisper(
   size: string = DEFAULT_MODEL,
   language?: string,
   window?: TranscribeWindow | null,
+  /** The caller already holds this transcript's place in the one-run-per-file join (a batch that falls
+   *  back to running one of its files alone), so it must not wait on itself. */
+  joined = false,
+  /** The width a run over several files refused this file at, for being narrower than its language
+   *  needs: it is run at that width at once instead of being predicted again. */
+  widenTo?: number,
 ): Promise<ParsedTranscript> {
-  let widen: number | undefined;
+  let widen = widenTo;
   for (let attempt = 0; ; attempt++) {
     try {
-      return await runWhisperOnce(ctx, src, size, language, window, widen);
+      return await runWhisperOnce(ctx, src, size, language, window, widen, joined);
     } catch (e) {
       if (!(e instanceof WeakDecodeError) || attempt >= 2) throw e;
       // The language turned out to need a wider beam than the prediction gave it. If a second run
@@ -1117,6 +1123,7 @@ async function runWhisperOnce(
   language: string | undefined,
   window: TranscribeWindow | null | undefined,
   widen: number | undefined,
+  joined = false,
 ): Promise<ParsedTranscript> {
   const { lang, identity, full, out, win } = await transcriptKeys(ctx, src, size, language, window);
   // A full transcript already answers every window, so a windowed ask must never re-run
@@ -1131,25 +1138,9 @@ async function runWhisperOnce(
 
   // whisper's own output is scratch, written in the app's work folder like the audio it reads, so
   // a run still going when its project closes finishes without writing into the project (4i).
-  const scratchBase = await ctx.store.prepareWork(
-    `transcribe/${shortHash(`${src}|${size}|${lang}${win.key}`)}`,
-  );
-  return once(out ?? scratchBase, async () => {
-    let model: string;
-    try {
-      model = (await ensureWhisperModel(ctx, size)).path;
-    } catch (e) {
-      // Do NOT flatten this into "transcription cancelled". Whatever went wrong happened while
-      // INSTALLING the model, before a single second of audio was read, and the download's own
-      // message is the only one that says so — replacing it is how a 465 MiB download in
-      // progress came out the other side looking like a failed transcription.
-      if (e instanceof TranscriptionFailure) throw e;
-      throw new TranscriptionFailure(
-        "model_unavailable",
-        e instanceof Error ? e.message : `whisper model '${size}' unavailable: ${String(e)}`,
-        { cause: e },
-      );
-    }
+  const scratchBase = await scratchBaseFor(ctx, src, size, lang, win.key);
+  const run = async (): Promise<ParsedTranscript> => {
+    const model = await modelFor(ctx, size);
     // A window is transcribed from its OWN audio only. Extracting a 2-hour file to transcribe 30
     // seconds of it was most of the wait (UJ-012); and whisper loads the whole file it is handed, so
     // `-ot/-d` on an 80-minute extract took 11.9 s for a 60 s window where the window's own WAV took
@@ -1215,35 +1206,7 @@ async function runWhisperOnce(
         "0",
         ...decodeArgs(plan.beam),
       ];
-      // In the app, whisper is a job of the app process: a crash of the page neither stops it nor
-      // loses its words, and the next page finishes it ({@link adoptTranscriptions}).
-      const sup = await jobSupervisor();
-      const jobs: string[] = [];
-      const launch = (cpuOnly: boolean): Promise<CommandResult> => {
-        const id = `whisper-${scratchToken()}`;
-        jobs.push(id);
-        const run = cpuOnly ? [...args, "-ng"] : args;
-        return sup
-          ? runAsJob(
-              sup,
-              { id, lane: id, program: "whisper-cli", args: run, meta: { ...meta } },
-              ctx.signal,
-            )
-          : ctx.runner.run("whisper-cli", run, ctx.signal);
-      };
-      /** The engine on the GPU, or off it where the GPU is known to crash. A GPU that crashes is
-       *  retried ONCE with it off (-ng): when that works, this machine stays off it for a while,
-       *  and when it crashes too the GPU was not the cause and nothing is remembered. */
-      const engine = async (): Promise<CommandResult> => {
-        const cpuOnly = cpuOnlyNow();
-        const first = await launch(cpuOnly);
-        if (cpuOnly || ctx.signal?.aborted || !isGpuCrash(first)) return first;
-        const second = await launch(true);
-        const worked = second.code === 0;
-        if (worked) holdCpuOnly(first.code);
-        reportGpuCrash(first.code, worked);
-        return second;
-      };
+      const { engine, release } = await engineFor(ctx, args, meta);
       try {
         // A look's whisper runs at once, one look at a time; the indexer's took its turn already.
         const run = ctx.background ? await engine() : await lookWhisper(engine, ctx.signal);
@@ -1251,10 +1214,92 @@ async function runWhisperOnce(
         return await finishWhisper(ctx.store, meta, run, ctx.signal);
       } finally {
         // Its words are kept, or it failed: nothing is left for another page to finish.
-        for (const id of jobs) await sup?.forget(id).catch(() => undefined);
+        await release();
       }
     });
-  });
+  };
+  return joined ? run() : once(out ?? scratchBase, run);
+}
+
+/** Where whisper's scratch output for one request lives: the same place for a run alone and for a run
+ *  over several files, so the one-run-per-file join (keyed by this when the file has no identity) is the
+ *  same key whichever of them asks. */
+function scratchBaseFor(
+  ctx: ClientToolContext,
+  src: string,
+  size: string,
+  lang: string,
+  windowKey: string,
+): Promise<string> {
+  return ctx.store.prepareWork(`transcribe/${shortHash(`${src}|${size}|${lang}${windowKey}`)}`);
+}
+
+/** The model file for `size`, installing it if need be. */
+async function modelFor(ctx: ClientToolContext, size: string): Promise<string> {
+  try {
+    return (await ensureWhisperModel(ctx, size)).path;
+  } catch (e) {
+    // Do NOT flatten this into "transcription cancelled". Whatever went wrong happened while
+    // INSTALLING the model, before a single second of audio was read, and the download's own
+    // message is the only one that says so — replacing it is how a 465 MiB download in
+    // progress came out the other side looking like a failed transcription.
+    if (e instanceof TranscriptionFailure) throw e;
+    throw new TranscriptionFailure(
+      "model_unavailable",
+      e instanceof Error ? e.message : `whisper model '${size}' unavailable: ${String(e)}`,
+      { cause: e },
+    );
+  }
+}
+
+/** The engine for one run of whisper-cli with `args`, and the way to let go of it afterwards.
+ *
+ *  In the app, whisper is a job of the app process: a crash of the page neither stops it nor loses its
+ *  words, and the next page finishes it ({@link adoptTranscriptions}) from `meta`, which the job carries.
+ *  The jobs are let go of only by `release`, which the caller calls once the words are kept, or it failed.
+ *
+ *  `engine` runs it on the GPU, or off it where the GPU is known to crash. A GPU that crashes is retried
+ *  ONCE with it off (-ng): when that works, this machine stays off it for a while, and when it crashes too
+ *  the GPU was not the cause and nothing is remembered. */
+async function engineFor(
+  ctx: ClientToolContext,
+  args: string[],
+  meta: object,
+): Promise<{ engine: () => Promise<CommandResult>; release: () => Promise<void> }> {
+  const sup = await jobSupervisor();
+  const jobs: string[] = [];
+  const launch = (cpuOnly: boolean): Promise<CommandResult> => {
+    const id = `whisper-${scratchToken()}`;
+    jobs.push(id);
+    const run = cpuOnly ? [...args, "-ng"] : args;
+    return sup
+      ? runAsJob(
+          sup,
+          {
+            id,
+            lane: id,
+            program: "whisper-cli",
+            args: run,
+            meta: { ...meta } as Record<string, unknown>,
+          },
+          ctx.signal,
+        )
+      : ctx.runner.run("whisper-cli", run, ctx.signal);
+  };
+  const engine = async (): Promise<CommandResult> => {
+    const cpuOnly = cpuOnlyNow();
+    const first = await launch(cpuOnly);
+    if (cpuOnly || ctx.signal?.aborted || !isGpuCrash(first)) return first;
+    const second = await launch(true);
+    const worked = second.code === 0;
+    if (worked) holdCpuOnly(first.code);
+    reportGpuCrash(first.code, worked);
+    return second;
+  };
+  const release = async (): Promise<void> => {
+    for (const id of jobs) await sup?.forget(id).catch(() => undefined);
+  };
+  return { engine, release };
 }
 
 /** Where a run of whisper is read and its transcript kept: a project's store, or for a run adopted
@@ -1310,10 +1355,13 @@ async function finishWhisper(
   meta: TranscriptJobMeta,
   run: CommandResult,
   signal?: AbortSignal,
+  /** One file of a run over several: its words are kept if ITS output is there and whole, whatever the
+   *  run's exit status says about the files after it, and the run is reported once by whoever ran it. */
+  batch = false,
 ): Promise<ParsedTranscript> {
   const json = `${meta.scratch}.json`;
   try {
-    if (run.code !== 0 || !(await io.exists(json))) {
+    if (batch ? !(await io.exists(json)) : run.code !== 0 || !(await io.exists(json))) {
       // Stop kills the sidecar, so the exit code describes the KILL, not the transcription:
       // it surfaced as `whisper-cli failed (code=-1): cancelled`, which reads as a broken
       // install rather than as the thing the user just asked for.
@@ -1327,10 +1375,23 @@ async function finishWhisper(
         rejected ? "language_rejected" : "engine_failed",
         rejected
           ? `the speech engine did not accept the language "${rejected[1].slice(0, 40)}"`
-          : `whisper-cli failed (code=${run.code}): ${stderrExcerpt(run.stderr, 200)}`,
+          : batch && run.code === 0
+            ? `the speech engine made no transcript of this file: ${stderrExcerpt(run.stderr, 200)}`
+            : `whisper-cli failed (code=${run.code}): ${stderrExcerpt(run.stderr, 200)}`,
       );
     }
-    const data = JSON.parse(await io.readText(json)) as WhisperCppJson;
+    let data: WhisperCppJson;
+    try {
+      data = JSON.parse(await io.readText(json)) as WhisperCppJson;
+    } catch (e) {
+      // A run that died while writing this file's output leaves it cut short. Only a batch can have a file
+      // whose turn had not come and one it was in the middle of, so only there is it said and retried alone.
+      if (!batch) throw e;
+      throw new TranscriptionFailure(
+        "engine_failed",
+        `the speech engine's output for this file was cut short (code=${run.code})`,
+      );
+    }
     // The commit point, before anything reaches the cache and once the language is known: a run
     // narrower than its language needs (speechDecoding.ts) is refused here, whoever finishes it,
     // the page that ran it or a page that adopted it. It is never kept.
@@ -1347,9 +1408,11 @@ async function finishWhisper(
     const parsed = parseWhisperCpp(data);
     // Kept outside the project, so it is kept even when the project closed while whisper ran.
     if (meta.key) await (await io.appCache())?.put(TRANSCRIPTS, meta.key, data);
-    const facts = whisperRunFacts(run.stderr);
-    reportTranscription(facts, undefined, { beam: meta.beam, rerun: meta.rerun });
-    recordSpeechRun(facts.audioSeconds, facts.wallSeconds);
+    if (!batch) {
+      const facts = whisperRunFacts(run.stderr);
+      reportTranscription(facts, undefined, { beam: meta.beam, rerun: meta.rerun });
+      recordSpeechRun(facts.audioSeconds, facts.wallSeconds);
+    }
     return parsed;
   } finally {
     await io.remove(json).catch(() => undefined);
@@ -1367,6 +1430,16 @@ function detectedLanguage(data: WhisperCppJson, requested: string | undefined): 
  *  version of the app. */
 function transcriptMeta(v: JobView): TranscriptJobMeta | null {
   return v.meta.kind === "transcript" ? (v.meta as unknown as TranscriptJobMeta) : null;
+}
+
+/** The transcriptions of a run over several files ({@link ensureTranscripts}): each file's own
+ *  meta, as the page that started the run wrote them. */
+function transcriptsMeta(v: JobView): TranscriptJobMeta[] | null {
+  const items = v.meta.items;
+  if (v.meta.kind !== "transcripts" || !Array.isArray(items)) return null;
+  return items.filter(
+    (i): i is TranscriptJobMeta => !!i && (i as { kind?: unknown }).kind === "transcript",
+  );
 }
 
 async function desktopScratchIO(): Promise<ScratchIO | null> {
@@ -1410,6 +1483,43 @@ async function adoptOrphans(io?: ScratchIO): Promise<number> {
   if (!scratchIo) return 0;
   let adopted = 0;
   for (const v of await sup.list()) {
+    const together = transcriptsMeta(v);
+    if (together) {
+      adopted++;
+      // One run over several files: held until every file's words are kept, finished one by one from the
+      // output each was given, and let go of once.
+      const turn = adoptTurn("whisper");
+      const ended = whenJobEnds(sup, v.id);
+      const finishing = together.map((m) => {
+        const finished = holdingWavs(scratchIo, m.wavs, async () => {
+          const job = await ended;
+          if (!job) throw new Error("the app process no longer has this transcription");
+          return finishWhisper(scratchIo, m, jobResult(job), undefined, true);
+        });
+        // A failure reaches whoever joins it; nobody else is waiting on it.
+        finished.catch(() => undefined);
+        joinable(m.once, finished);
+        return finished;
+      });
+      void Promise.allSettled(finishing)
+        .then(async (outcomes) => {
+          // The run is reported once, by the page that finished it, for the files it kept.
+          const kept = outcomes.filter((o) => o.status === "fulfilled").length;
+          const job = await ended;
+          if (kept > 0 && job)
+            reportTranscription(
+              whisperRunFacts(jobResult(job).stderr, { batch: true }),
+              undefined,
+              { beam: together[0]?.beam, files: kept },
+            );
+        })
+        .catch(() => undefined)
+        .finally(async () => {
+          turn();
+          await sup.forget(v.id).catch(() => undefined);
+        });
+      continue;
+    }
     const m = transcriptMeta(v);
     if (!m) continue;
     adopted++;
@@ -1475,6 +1585,233 @@ export async function ensureTranscript(
   const made = await peekTranscript(ctx, src, size, language);
   if (made) return { parsed: made, existed: true };
   return { parsed: await runWhisper(ctx, src, size, language), existed: false };
+}
+
+/** What one file of {@link ensureTranscripts} came to. */
+export type BatchOutcome = { ok: true; existed: boolean } | { ok: false; error: unknown };
+
+/** A file waiting for the engine: its place in the caller's list and where it is. */
+interface Wanted {
+  at: number;
+  src: string;
+}
+
+/** A {@link Wanted} with what a run needs to know about it. */
+interface Keyed extends Wanted {
+  keys: Awaited<ReturnType<typeof transcriptKeys>>;
+  scratchBase: string;
+  /** What anybody else who wants this transcript joins while it runs. */
+  onceKey: string;
+}
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (v: T) => void;
+  reject: (e: unknown) => void;
+} {
+  let resolve!: (v: T) => void;
+  let reject!: (e: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+/** The whole-file transcripts of `refs`, each as {@link ensureTranscript} would make it, but with ONE run
+ *  of the engine for everything that needs one (T-34 step 3): a run costs a start-up no clip shortens, and
+ *  six short clips took 13.6 s as six runs and 4.1 s as one, with the same words.
+ *
+ *  Every file comes to its own outcome. One that already has its transcript costs nothing, one that someone
+ *  else is transcribing is joined, and what remains runs together when there are two or more of them. A
+ *  file the run made no transcript of is then run alone, exactly as it always was, so a bad clip costs its
+ *  neighbours nothing and an engine that died half way loses only the files it had not reached. Only a
+ *  failure of the whole run (no model, an engine that cannot start) is thrown, and for every file at once. */
+export async function ensureTranscripts(
+  ctx: ClientToolContext,
+  refs: readonly string[],
+  size: string = DEFAULT_MODEL,
+  language?: string,
+): Promise<BatchOutcome[]> {
+  const outcomes: Array<BatchOutcome | undefined> = refs.map(() => undefined);
+  const wanted: Wanted[] = [];
+  for (const [at, ref] of refs.entries()) {
+    try {
+      const src = await sourcePath(ctx, ref);
+      if (await peekTranscript(ctx, src, size, language))
+        outcomes[at] = { ok: true, existed: true };
+      else wanted.push({ at, src });
+    } catch (error) {
+      outcomes[at] = { ok: false, error };
+    }
+  }
+  await transcribeTogether(ctx, wanted, size, language, outcomes);
+  return outcomes.map((o) => o ?? { ok: false, error: new Error("transcription did not run") });
+}
+
+async function transcribeTogether(
+  ctx: ClientToolContext,
+  wanted: Wanted[],
+  size: string,
+  language: string | undefined,
+  outcomes: Array<BatchOutcome | undefined>,
+): Promise<void> {
+  const keyed: Keyed[] = await Promise.all(
+    wanted.map(async (w) => {
+      const keys = await transcriptKeys(ctx, w.src, size, language, null);
+      const scratchBase = await scratchBaseFor(ctx, w.src, size, keys.lang, keys.win.key);
+      return { ...w, keys, scratchBase, onceKey: keys.out ?? scratchBase };
+    }),
+  );
+  // One synchronous pass: who is already being transcribed (joined, not started again), and who is ours.
+  const joining = keyed.filter((k) => inflight.has(k.onceKey));
+  const ours = keyed.filter((k) => !inflight.has(k.onceKey));
+  const waiting = joining.map(async (k) => {
+    const running = inflight.get(k.onceKey);
+    try {
+      await running;
+      outcomes[k.at] = { ok: true, existed: false };
+    } catch (error) {
+      outcomes[k.at] = { ok: false, error };
+    }
+  });
+  if (ours.length < 2) {
+    for (const k of ours) {
+      try {
+        await runWhisper(ctx, k.src, size, language);
+        outcomes[k.at] = { ok: true, existed: false };
+      } catch (error) {
+        outcomes[k.at] = { ok: false, error };
+      }
+    }
+  } else {
+    await runTogether(ctx, ours, size, language, outcomes);
+  }
+  await Promise.all(waiting);
+}
+
+/** One run of the engine over `ours` (two or more files that nobody else is transcribing). */
+async function runTogether(
+  ctx: ClientToolContext,
+  ours: Keyed[],
+  size: string,
+  language: string | undefined,
+  outcomes: Array<BatchOutcome | undefined>,
+): Promise<void> {
+  const lang = ours[0].keys.lang;
+  const held = ours.map(() => deferred<ParsedTranscript>());
+  // Whoever asks for one of these from now on waits for this run instead of starting another.
+  ours.forEach((k, n) => joinable(k.onceKey, held[n].promise));
+  const settled = ours.map(() => false);
+  const settle = (n: number, result: { parsed: ParsedTranscript } | { error: unknown }): void => {
+    if (settled[n]) return;
+    settled[n] = true;
+    if ("error" in result) {
+      outcomes[ours[n].at] = { ok: false, error: result.error };
+      held[n].reject(result.error);
+    } else {
+      outcomes[ours[n].at] = { ok: true, existed: false };
+      held[n].resolve(result.parsed);
+    }
+  };
+  /** The width each file the run refused as too narrow needs, by place in `ours`. */
+  const widenTo = new Map<number, number>();
+  /** A file the run did not make a transcript of, run alone as it always was. */
+  const alone = async (n: number): Promise<void> => {
+    try {
+      settle(n, {
+        parsed: await runWhisper(ctx, ours[n].src, size, language, null, true, widenTo.get(n)),
+      });
+    } catch (error) {
+      settle(n, { error });
+    }
+  };
+  try {
+    await adoptTranscriptions(ctx.store);
+    const model = await modelFor(ctx, size);
+    const wavs = await Promise.all(ours.map((k) => wavPathFor(ctx, k.keys.identity ?? k.src)));
+    await holdingWavs(ctx.store, wavs, async () => {
+      // The audio of each file, held until its words are kept. One that cannot be read fails alone.
+      const ready: number[] = [];
+      for (const [n, k] of ours.entries()) {
+        try {
+          await extractWav(ctx, k.src, wavs[n]);
+          ready.push(n);
+        } catch (error) {
+          settle(n, { error });
+        }
+      }
+      if (ready.length < 2) {
+        for (const n of ready) await alone(n);
+        return;
+      }
+      const plan =
+        size === DEFAULT_MODEL
+          ? planDecode(MODEL_VARIANT, lang, lastSpeechLanguage())
+          : { beam: DEFAULT_BEAM };
+      const metas: TranscriptJobMeta[] = ready.map((n) => ({
+        kind: "transcript",
+        key: ours[n].keys.out,
+        once: ours[n].onceKey,
+        scratch: `${ours[n].scratchBase}.${scratchToken()}.tmp`,
+        shiftMs: 0,
+        wavs: [wavs[n]],
+        beam: plan.beam,
+        variant: MODEL_VARIANT,
+        requested: lang,
+      }));
+      // One process, every file in it, each output under its own name: the nth `-of` is the nth `-f`'s.
+      const args = [
+        "-m",
+        model,
+        ...ready.flatMap((n) => ["-f", wavs[n]]),
+        "-ojf",
+        ...metas.flatMap((m) => ["-of", m.scratch]),
+        "-t",
+        whisperThreads(),
+        "-l",
+        lang,
+        "-mc",
+        "0",
+        ...decodeArgs(plan.beam),
+      ];
+      const { engine, release } = await engineFor(ctx, args, { kind: "transcripts", items: metas });
+      const missed: number[] = [];
+      try {
+        const run = ctx.background ? await engine() : await lookWhisper(engine, ctx.signal);
+        if (!run) throw new Error("transcription cancelled"); // stopped before its turn came
+        let kept = 0;
+        let unavailable: unknown;
+        for (const [i, n] of ready.entries()) {
+          try {
+            settle(n, { parsed: await finishWhisper(ctx.store, metas[i], run, ctx.signal, true) });
+            kept++;
+          } catch (error) {
+            if (error instanceof SpeechEngineUnavailableError) unavailable = error;
+            if (error instanceof WeakDecodeError)
+              widenTo.set(n, beamFor(MODEL_VARIANT, error.detected));
+            missed.push(n);
+          }
+        }
+        // The run is reported once, for all the files it read.
+        if (kept > 0)
+          reportTranscription(whisperRunFacts(run.stderr, { batch: true }), undefined, {
+            beam: plan.beam,
+            files: kept,
+          });
+        if (unavailable) throw unavailable;
+      } finally {
+        // Their words are kept, or they failed: nothing is left for another page to finish.
+        await release();
+      }
+      for (const n of missed) await alone(n);
+    });
+  } catch (error) {
+    ours.forEach((_, n) => settle(n, { error }));
+  } finally {
+    // Whoever joined one of these must never be left waiting on a run that is over.
+    ours.forEach((_, n) => settle(n, { error: new Error("transcription did not finish") }));
+  }
 }
 
 const TRANSCRIPT_WORD_CAP = 10_000;
