@@ -12,6 +12,9 @@ import {
   verifyAccess,
 } from "./auth";
 
+const platformMock = vi.hoisted(() => ({ name: "tauri" as "tauri" | "web" }));
+vi.mock("../platform", () => ({ platform: platformMock }));
+
 function resp(status: number, data: unknown = {}): Response {
   return new Response(JSON.stringify(data), {
     status,
@@ -20,6 +23,7 @@ function resp(status: number, data: unknown = {}): Response {
 }
 
 afterEach(() => {
+  platformMock.name = "tauri";
   setClerkTokenProvider(null);
   setSessionRenewer(null);
   vi.unstubAllGlobals();
@@ -379,6 +383,9 @@ describe("the app's version on every request", () => {
         ],
     );
 
+  const headersOf = (f: ReturnType<typeof vi.fn>, call = 0) =>
+    ((f.mock.calls[call] as unknown[])[1] as RequestInit).headers as Record<string, string>;
+
   it("is sent with a session and without one", async () => {
     const f = vi.fn(async () => resp(200));
     vi.stubGlobal("fetch", f);
@@ -388,6 +395,29 @@ describe("the app's version on every request", () => {
     await authedFetch("https://api.example.com/x");
 
     expect(versionSent(f)).toEqual([__ARTDADDY_RELEASE__, __ARTDADDY_RELEASE__]);
+  });
+
+  // WebKit, with nothing listening, reports a failed preflight as an uncaught error, which failed the browser boot
+  // test in that engine on all four CI platforms. What the web build sends is what the browser acts on.
+  it("is not sent from the web build: a signed-out request there has no header that makes a browser ask first", async () => {
+    platformMock.name = "web";
+    const f = vi.fn(async () => resp(200));
+    vi.stubGlobal("fetch", f);
+
+    await authedFetch("https://api.example.com/x");
+
+    expect(Object.keys(headersOf(f))).toEqual([]);
+  });
+
+  it("is not sent from the web build with a session either: the token is the only header it adds", async () => {
+    platformMock.name = "web";
+    setClerkTokenProvider(async () => "t1");
+    const f = vi.fn(async () => resp(200));
+    vi.stubGlobal("fetch", f);
+
+    await authedFetch("https://api.example.com/x");
+
+    expect(Object.keys(headersOf(f))).toEqual(["Authorization"]);
   });
 
   it("rides on the request sent again after the session is renewed", async () => {
