@@ -6524,16 +6524,18 @@ mod export_delivery_tests {
       assert!(jobs.delivery_list().iter().find(|entry| entry.id == queued.id).unwrap().execution_queued_at_ms.is_some());
       assert!(jobs.delivery_list().iter().find(|entry| entry.id == queued.id).unwrap().render_scratch.is_none());
       assert_eq!(std::fs::read(&queued.dest_path).unwrap(), b"previous complete file");
+      // These waits only guard against a hang: the queued worker's journaled writes take seconds when
+      // the disk is busy (the pre-push run), and a slow worker is still a correct one.
       if cancelled {
         jobs.cancel_delivery(&queued.id).unwrap();
-        assert!(receiver.recv_timeout(std::time::Duration::from_secs(2)).unwrap().is_err());
+        assert!(receiver.recv_timeout(std::time::Duration::from_secs(30)).unwrap().is_err());
         assert_eq!(jobs.workspace.available_bytes(), 0);
       }
       jobs.cancel_delivery(&active.id).unwrap();
       jobs.complete_delivery(&active.id).unwrap();
       assert!(!Path::new(&active.stage_path).exists());
       if !cancelled {
-        let result = receiver.recv_timeout(std::time::Duration::from_secs(2)).unwrap().unwrap();
+        let result = receiver.recv_timeout(std::time::Duration::from_secs(30)).unwrap().unwrap();
         if copying {
           assert_eq!(std::fs::read(&queued.stage_path).unwrap(), vec![71u8; 16]);
           assert_eq!(jobs.workspace.available_bytes(), 48);
