@@ -295,7 +295,11 @@ export function reportTranscription(
   decoding?: { beam?: number; rerun?: boolean; files?: number },
 ): void {
   const audio = facts.audioSeconds;
-  if (audio === null || audio < TRANSCRIPTION_MIN_AUDIO_S) return;
+  // A batch (one run over several clips) is short by design: clips waiting together are a few seconds each, so
+  // the floor that keeps single runs out (mostly model load) would hide every batch on a machine that
+  // transcribes at its usual pace. It still counts toward the one a minute.
+  const batch = (decoding?.files ?? 1) > 1;
+  if (audio === null || (audio < TRANSCRIPTION_MIN_AUDIO_S && !batch)) return;
   if (now - lastTranscriptionReport < TRANSCRIPTION_EVERY_MS) return;
   lastTranscriptionReport = now;
   const wall = facts.wallSeconds;
