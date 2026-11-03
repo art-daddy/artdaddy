@@ -50,7 +50,9 @@ describe("whisper as the app runs it", () => {
       expect(facts.audioSeconds).toBeCloseTo(35, 1);
       expect(facts.wallSeconds).toBeGreaterThan(0);
       expect([facts.model, facts.threads! > 0]).toEqual(["small", true]);
-      expect(reportTranscription.mock.calls).toEqual([[facts]]);
+      // The run is reported once with what it said about itself, and how it was decoded: a machine with
+      // no history decodes at the engine's default beam of 5.
+      expect(reportTranscription.mock.calls).toEqual([[facts, undefined, { beam: 5 }]]);
     },
     300_000,
   );
