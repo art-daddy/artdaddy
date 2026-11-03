@@ -43,6 +43,15 @@ describe("the reasons a transcription fails", () => {
     );
   });
 
+  it("copes with a thrown value that cannot be made into text, every time", () => {
+    // Found by the property above on one seed in many: String() itself throws for these.
+    for (const thrown of [{ toString: {} }, Object.create(null), { toString: () => ({}) }]) {
+      const got = classifyTranscriptFailure(thrown);
+      expect(got.reason).toBe("engine_failed");
+      expect(got.message).toBe("the error could not be read");
+    }
+  });
+
   it("tells a person our own errors whole and a subprocess's only by the tail, where its reason is", () => {
     const ours = new TranscriptionFailure("engine_failed", "x".repeat(500));
     expect(failureText(ours)).toHaveLength(500);

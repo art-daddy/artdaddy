@@ -39,7 +39,13 @@ export class TranscriptionFailure extends ArtDaddyError {
 /** A failed transcription as the model reads it: our own errors whole, since they lead with what
  *  happened, and the TAIL of anything else, where a subprocess puts its reason. */
 export function failureText(e: unknown): string {
-  return e instanceof ArtDaddyError ? e.message : String(e).slice(-200);
+  if (e instanceof ArtDaddyError) return e.message;
+  try {
+    return String(e).slice(-200);
+  } catch {
+    // An object with no usable toString (a null-prototype object, `{ toString: {} }`) cannot be made into text.
+    return "the error could not be read";
+  }
 }
 
 export interface ClassifiedFailure {
