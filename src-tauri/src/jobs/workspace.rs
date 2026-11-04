@@ -44,6 +44,10 @@ pub struct Workspace {
   allocation_limit: u64,
   metadata_limit: u64,
   entry_limit: u64,
+  /// What an output claim leaves unclaimed while plenty remains, so that queueing another export (one
+  /// empty staging entry each) is never refused because an export is running. Zero in the fixtures that
+  /// pin tiny allowances; the production workspace sets it (`with_admission_headroom`).
+  admission_headroom: u64,
   state: Mutex<State>,
   changed: Condvar,
 }
@@ -51,7 +55,21 @@ pub struct Workspace {
 impl Workspace {
   pub fn new(limit: u64) -> Arc<Self> { Arc::new(Self { limit, allocation_limit: super::EXPORT_WORKSPACE_PAYLOAD_BYTES,
     metadata_limit: super::EXPORT_SCRATCH_LIMIT_BYTES - super::EXPORT_WORKSPACE_PAYLOAD_BYTES,
-    entry_limit: 16384, state: Mutex::new(State::default()), changed: Condvar::new() }) }
+    entry_limit: 16384, admission_headroom: 0, state: Mutex::new(State::default()), changed: Condvar::new() }) }
+
+  pub fn with_admission_headroom(limit: u64, admission_headroom: u64) -> Arc<Self> {
+    let mut owner = Self::new(limit);
+    Arc::get_mut(&mut owner).expect("a new workspace has one owner").admission_headroom = admission_headroom;
+    owner
+  }
+
+  pub(super) fn admission_headroom(&self) -> u64 { self.admission_headroom }
+
+  /// What an output may claim out of `remaining`: all of it, less the admission headroom while more than
+  /// twice that remains. Near the end of the allowance the output keeps everything, as it always did.
+  fn output_share(&self, remaining: u64) -> u64 {
+    if remaining > self.admission_headroom.saturating_mul(2) { remaining - self.admission_headroom } else { remaining }
+  }
 
   pub(super) fn temporary_space(&self) -> super::ExportTemporarySpace {
     let payload_bytes = self.limit.min(self.allocation_limit);
@@ -233,6 +251,8 @@ impl Workspace {
     if output.reserved { return Err("pending output already has a native writer".into()); }
     let remaining = self.limit.checked_sub(state.used).ok_or("export workspace already exceeds its temporary budget")?
       .min(self.allocation_limit.checked_sub(state.allocated).ok_or("export workspace already exceeds its allocation budget")?);
+    // Not all of it: another export queued behind this one still needs room for its staging entry.
+    let remaining = self.output_share(remaining);
     let previous = state.roots.get(root).copied().ok_or("pending output has no admitted allocation volume")?;
     if previous.allocation_unit == 0 { return Err("pending output has no admitted allocation unit".into()); }
     let limit = previous.bytes.checked_add(remaining).filter(|bytes| *bytes > 0)
@@ -951,6 +971,69 @@ mod tests {
     assert_eq!(threads.into_iter().map(|thread| thread.join().unwrap()).filter(|written| *written).count(), 1);
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
     assert_eq!(owner.used(), 0);
+  }
+
+  // Field journey (0.22.x): a person clicks Export while an export runs. The running export's output
+  // claim took every remaining byte, so admitting the next one (one empty staging entry) was refused with
+  // "export workspace allocation budget exceeded before write". The rules that must hold, over every
+  // allowance and cluster size: the running export keeps nearly all of the allowance, every export a person
+  // can queue is admitted, the allowance is never over-booked, and past the headroom the refusal is the
+  // old fail-closed one.
+  #[test]
+  fn an_output_claim_leaves_room_to_admit_queued_exports_and_never_overbooks() {
+    const MIB: u64 = 1024 * 1024;
+    const HEADROOM: u64 = 64 * MIB;
+    for allowance in [512 * MIB, 4096 * MIB, 18_000_000_000] {
+      for unit in [4096u64, 64 * 1024, MIB] {
+        let volume = AllocationUnit::from_admitted(unit);
+        let mut owner = Workspace::allocation_fixture(allowance, allowance);
+        Arc::get_mut(&mut owner).unwrap().admission_headroom = HEADROOM;
+        owner.reserve_in("active", 0, 1, volume).unwrap().retain();
+        let claim = owner.claim_output("active", &|| Ok(())).unwrap();
+        let (limit, charge) = owner.reserve_output("active").unwrap();
+        assert!(limit + HEADROOM + unit >= allowance, "the running export lost more than the headroom at {allowance}/{unit}: {limit}");
+        let admissible = (HEADROOM / unit).min(4096);
+        let queued = (0..admissible).map(|index| owner.reserve_in(&format!("queued-{index}"), 0, 1, volume)
+          .unwrap_or_else(|error| panic!("queued export {index} refused at {allowance}/{unit}: {error}"))).collect::<Vec<_>>();
+        {
+          let state = owner.state.lock().unwrap();
+          assert!(state.allocated <= allowance, "over-booked at {allowance}/{unit}");
+          assert!(state.used <= allowance, "over-booked temporary bytes at {allowance}/{unit}");
+        }
+        if admissible < 4096 {
+          let refused = owner.reserve_in("one-too-many", 0, 1, volume).err().expect("headroom is finite");
+          assert!(refused.contains("allocation budget"), "{refused}");
+        }
+        drop(queued);
+        drop(charge);
+        drop(claim);
+        owner.release_root("active");
+        assert_eq!(owner.available_bytes(), allowance);
+      }
+    }
+  }
+
+  #[test]
+  fn an_output_keeps_everything_when_little_of_the_allowance_remains() {
+    const MIB: u64 = 1024 * 1024;
+    let volume = AllocationUnit::from_admitted(4096);
+    for (allowance, expected) in [(100 * MIB, 100 * MIB), (128 * MIB, 128 * MIB), (129 * MIB, 65 * MIB), (300 * MIB, 236 * MIB)] {
+      let owner = Workspace::with_admission_headroom(allowance, 64 * MIB);
+      owner.reserve_in("active", 0, 0, volume).unwrap().retain();
+      let _claim = owner.claim_output("active", &|| Ok(())).unwrap();
+      let (limit, _charge) = owner.reserve_output("active").unwrap();
+      assert_eq!(limit, expected, "allowance {allowance}");
+    }
+  }
+
+  #[test]
+  fn a_workspace_built_without_a_headroom_claims_everything_as_it_always_did() {
+    let owner = Workspace::new(64);
+    owner.reserve_in("active", 0, 0, AllocationUnit::logical_fixture()).unwrap().retain();
+    let _claim = owner.claim_output("active", &|| Ok(())).unwrap();
+    let (limit, _charge) = owner.reserve_output("active").unwrap();
+    assert_eq!(limit, 64);
+    assert_eq!(owner.available_bytes(), 0);
   }
 }
 

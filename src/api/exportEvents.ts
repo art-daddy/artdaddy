@@ -27,6 +27,24 @@ import { platform } from "../platform";
 import { hostInfo } from "../platform/host";
 import { useAuth } from "../store/auth";
 import { signedInUser } from "./exportOwner";
+import {
+  EXPORT_ENGINES,
+  EXPORT_FACT_LIMITS,
+  EXPORT_LIMITS,
+  EXPORT_STARTERS,
+  cleanTrace,
+  decodeTrace,
+  encodeTrace,
+  type ExportEngine,
+  type ExportFact,
+  type ExportLimit,
+  type ExportStarter,
+  type TraceEvent,
+} from "./exportVocabulary";
+
+// What happened to an export (the trace, the run facts) is vocabulary shared with the recorder that
+// builds it; it lives in exportVocabulary.ts and is re-exported so a report's callers have one door.
+export * from "./exportVocabulary";
 
 export const EXPORT_REASON_CODES = [
   "none",
@@ -47,7 +65,7 @@ export const EXPORT_OPERATIONS = ["render", "copy", "unknown"] as const;
 export type ExportReasonCode = (typeof EXPORT_REASON_CODES)[number];
 export type ExportSizeBand = (typeof EXPORT_SIZE_BANDS)[number];
 
-export interface ExportEvent {
+export interface ExportEvent extends Partial<Record<ExportFact, number>> {
   /** Terminal state only — a running export has nothing to report yet. */
   status: "done" | "failed" | "cancelled" | "blocked" | "declined";
   /** Length of the delivered video, seconds. */
@@ -80,6 +98,14 @@ export interface ExportEvent {
    *  what the report is filed under, even when the export ends after a different account has signed
    *  in. Absent for a refusal, and for an export an older build admitted: then whoever is signed in. */
   owner?: string;
+  /** Every state the export went through, in order (see {@link TraceEvent}). */
+  trace?: readonly TraceEvent[];
+  /** Which export path ran it: the one-pass encoder or the streamed one. */
+  engine?: ExportEngine;
+  /** Which limit stopped it, when one did. */
+  limit?: ExportLimit;
+  /** Who asked: the in-app chat, or somewhere else (the menu, an outside assistant). */
+  started_by?: ExportStarter;
 }
 
 /** The server's bound on `error` (ExportEventBody, pinned by the server's tests). Over it, a
@@ -157,7 +183,7 @@ export function composeBody(input: Record<string, unknown>): ReportBody | null {
   const status = input.status;
   if (typeof status !== "string" || !(REPORT_STATUSES as readonly string[]).includes(status))
     return null;
-  return {
+  const body: ReportBody = {
     status,
     duration_s: bounded(input.duration_s, 86_400),
     size_bytes: Math.round(bounded(input.size_bytes, 1e13)),
@@ -180,6 +206,34 @@ export function composeBody(input: Record<string, unknown>): ReportBody | null {
     arch: String(input.arch ?? "").slice(0, 20),
     shell: String(input.shell ?? "").slice(0, 20),
   };
+  // What happened to the export. Only what the app actually measured is sent, so a report without a
+  // decoration is the report it always was.
+  const trace =
+    typeof input.trace === "string" ? decodeTrace(input.trace) : cleanTrace(input.trace);
+  if (trace.length) body.trace = encodeTrace(trace);
+  for (const [key, allowed] of [
+    ["engine", EXPORT_ENGINES],
+    ["limit", EXPORT_LIMITS],
+    ["started_by", EXPORT_STARTERS],
+  ] as const) {
+    const value = input[key];
+    if (typeof value === "string" && (allowed as readonly string[]).includes(value))
+      body[key] = value;
+  }
+  for (const [fact, max] of Object.entries(EXPORT_FACT_LIMITS)) {
+    const value = input[fact];
+    if (typeof value === "number" && Number.isFinite(value))
+      body[fact] = Math.round(bounded(value, max));
+  }
+  return body;
+}
+
+/** The body as the server reads it: the trace, kept as compact text while a report waits in the
+ *  outbox (which stores flat bodies only), is a list again. */
+export function wireBody(body: ReportBody): Record<string, unknown> {
+  const { trace, ...rest } = body;
+  const events = decodeTrace(trace);
+  return events.length ? { ...rest, trace: events } : rest;
 }
 
 /** The body for one finished export. Named fields, never `...ev`: an export or job object spread
@@ -210,6 +264,13 @@ function buildBody(ev: ExportEvent): ReportBody {
     platform: hostInfo().os,
     arch: hostInfo().arch,
     shell: platform.name,
+    trace: ev.trace,
+    engine: ev.engine,
+    limit: ev.limit,
+    started_by: ev.started_by,
+    ...Object.fromEntries(
+      Object.keys(EXPORT_FACT_LIMITS).map((key) => [key, ev[key as ExportFact]]),
+    ),
   });
   if (!body) throw new Error("an export report always has a status");
   return body;
@@ -273,7 +334,7 @@ async function deliver(report: PendingReport): Promise<Outcome> {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          ...body,
+          ...wireBody(body),
           event_id: report.id,
           occurred_at: report.at,
           ...(report.owner ? { owner_id: report.owner } : {}),

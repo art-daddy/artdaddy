@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import ExportDialog from "./ExportDialog";
 import { exportRunning, useExportJob } from "../store/exportJob";
+import { EXPORT_SPEED_REVISION } from "../timeline/exportOptions";
 import { resolveLocalFastEncoder } from "../platform/host";
 
 vi.mock("../platform/host", async (importOriginal) => ({
@@ -17,6 +18,7 @@ beforeEach(() => {
   useExportJob.getState().reset();
   useExportJob.getState().setEngine("auto");
   useExportJob.getState().setMode("quality");
+  useExportJob.setState({ calibrations: [] });
   vi.mocked(resolveLocalFastEncoder).mockResolvedValue(false);
 });
 
@@ -57,6 +59,103 @@ describe("export job", () => {
     expect(s.fraction).toBeNull();
     expect(s.savedTo).toBeNull();
     expect(s.frame).toBe(0);
+  });
+});
+
+// The line under the settings: roughly how long this will take and how big the file will be, for the
+// settings chosen. Information only: it never blocks, delays or alters the export.
+describe("ExportDialog estimate", () => {
+  const project = {
+    width: 1920,
+    height: 1080,
+    fps: 30,
+    durationSeconds: 120,
+    visualClips: 6,
+    captionClips: 1,
+    audioClips: 1,
+    peakVisualLayers: 2,
+    peakMediaLayers: 2,
+  };
+  const measured = (over: Record<string, unknown> = {}) => ({
+    workload: project,
+    output: { width: 1920, height: 1080, fps: 30 },
+    quality: "medium",
+    engine: "file-sequence-v1" as const,
+    encoder: "x264-crf" as const,
+    revision: EXPORT_SPEED_REVISION,
+    elapsedSeconds: 150,
+    finalBytes: 48_000_000,
+    memoryBytes: null,
+    temporaryBytes: null,
+    ...over,
+  });
+  const show = (workload: typeof project | null, onStart = vi.fn()) =>
+    render(<ExportDialog open onCancel={() => {}} onStart={onStart} workload={workload} />);
+
+  it("says nothing when it has no project to go on", () => {
+    show(null);
+    expect(screen.queryByLabelText("export estimate")).not.toBeInTheDocument();
+    show({ ...project, durationSeconds: 0 });
+    expect(screen.queryByLabelText("export estimate")).not.toBeInTheDocument();
+  });
+
+  it("says how long and how big, from what this PC has measured", () => {
+    useExportJob.setState({ calibrations: [measured()] });
+    show(project);
+    expect(screen.getByLabelText("export estimate")).toHaveTextContent(
+      "Expected: about 3 min, a file of about 48 MB, from earlier exports on this PC.",
+    );
+  });
+
+  it("is honest that it is a guess when nothing like this has been exported here", () => {
+    useExportJob.setState({ calibrations: [] });
+    show(project);
+    const line = screen.getByLabelText("export estimate");
+    expect(line).toHaveTextContent(/^Expected: (under a minute|about \d+ min)\. A rough guess/);
+    expect(line).not.toHaveTextContent("a file of");
+  });
+
+  it("follows the settings the person changes", () => {
+    useExportJob.setState({
+      calibrations: [
+        measured(),
+        measured({
+          output: { width: 1280, height: 720, fps: 30 },
+          elapsedSeconds: 70,
+          finalBytes: 20_000_000,
+        }),
+      ],
+    });
+    show(project);
+    expect(screen.getByLabelText("export estimate")).toHaveTextContent("about 3 min");
+    fireEvent.change(screen.getByLabelText("resolution"), { target: { value: "720p" } });
+    expect(screen.getByLabelText("export estimate")).toHaveTextContent(
+      "Expected: about 1 min, a file of about 20 MB",
+    );
+    // A setting nothing was measured for falls back to the guess instead of a wrong measurement.
+    fireEvent.change(screen.getByLabelText("quality"), { target: { value: "high" } });
+    expect(screen.getByLabelText("export estimate")).toHaveTextContent("A rough guess");
+  });
+
+  it("never gets in the way of the export it describes", () => {
+    const start = vi.fn();
+    useExportJob.setState({ calibrations: [measured({ elapsedSeconds: 90_000 })] });
+    show(project, start);
+    expect(screen.getByLabelText("export estimate")).toHaveTextContent("about 25 h");
+    fireEvent.click(screen.getByRole("button", { name: "Export" }));
+    expect(start).toHaveBeenCalledWith({
+      resolution: "source",
+      quality: "medium",
+      fps: null,
+      mode: "quality",
+    });
+  });
+
+  it("leaves the dialog working when the project cannot be read", () => {
+    const start = vi.fn();
+    show({ ...project, width: Number.NaN, height: 0, fps: Number.NaN }, start);
+    fireEvent.click(screen.getByRole("button", { name: "Export" }));
+    expect(start).toHaveBeenCalledTimes(1);
   });
 });
 

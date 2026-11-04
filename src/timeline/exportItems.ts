@@ -12,12 +12,15 @@ import type { LibraryClip } from "../tools/store";
 import { loadTimeline } from "./engine";
 import {
   ExportRequestError,
+  exportVia,
   isDestinationReserved,
   sealExportBatch,
   submitExports,
   type ExportSpec,
 } from "./exportQueue";
 import type { ExportRefusalFacts } from "../api/agentEvents";
+import type { ExportStory } from "./exportTrace";
+import { limitThatFired } from "./nativeDiagnostics";
 import type { ExportOptions } from "./exportOptions";
 import { canvasFps } from "./frames";
 import type { Timeline } from "./model";
@@ -46,6 +49,7 @@ export async function exportTool(args: Args, ctx: ClientToolContext | null): Pro
   let result: Result;
   let status: "blocked" | "declined" | "cancelled" = "blocked";
   let workload: import("./renderPlan").RenderWorkload | undefined;
+  let story: ExportStory | undefined;
   try {
     result = await (args.media_refs !== undefined || args.clip_ids !== undefined
       ? exportItemsTool(args, ctx)
@@ -54,6 +58,7 @@ export async function exportTool(args: Args, ctx: ClientToolContext | null): Pro
     if (error instanceof ExportRequestError) {
       status = error.status;
       workload = error.workload;
+      story = error.story;
     }
     result =
       error instanceof ExportRequestError && error.result
@@ -62,12 +67,23 @@ export async function exportTool(args: Args, ctx: ClientToolContext | null): Pro
   }
   if (result.ok === false) {
     if (ctx?.signal?.aborted || (ctx && !ctx.store.sessionLive())) status = "cancelled";
+    // Which limit refused it (the temporary-space allowance, say), and how the story ended.
+    const limit = status === "blocked" ? limitThatFired(String(result.error ?? ""), {}) : undefined;
+    if (story) {
+      if (limit && limit !== "other")
+        story.trace.record("guard_tripped", limit === "os" ? "os_refusal" : limit);
+      story.trace.record("outcome", status);
+    }
     const facts: ExportRefusalFacts = {
       status,
       width: workload?.width,
       height: workload?.height,
       visual_layers: workload?.peakVisualLayers,
-    };
+      ...(story
+        ? { trace: story.trace.snapshot(), started_by: ctx?.origin ? "chat" : "elsewhere" }
+        : {}),
+      ...(limit ? { limit } : {}),
+    } as ExportRefusalFacts;
     result = { ...result };
     Object.defineProperty(result, "export_refusal", { value: facts });
   }
@@ -263,6 +279,7 @@ async function exportItemsTool(args: Args, ctx: ClientToolContext | null): Promi
               stagePath: p.stage,
               filename: p.filename,
               origin: ctx.origin,
+              via: exportVia(ctx),
               submissionSignal: ctx.signal,
               copyOf: p.ref,
               batch,

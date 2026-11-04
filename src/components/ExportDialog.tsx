@@ -3,10 +3,18 @@
 // Non-blocking by design (Premiere's Media Encoder, not a modal): dismissing it leaves the render
 // running and the menu bar keeps a live percentage, so a long export does not hold the editor
 // hostage. Re-opening rejoins the job already in progress rather than starting a second one.
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { formatEta } from "../timeline/ffmpegProgress";
-import type { ExportMode, ExportQuality, ExportResolution } from "../timeline/exportOptions";
+import {
+  describeExportSize,
+  describeExportTime,
+  estimateForDialog,
+  type ExportMode,
+  type ExportQuality,
+  type ExportResolution,
+} from "../timeline/exportOptions";
+import type { RenderWorkload } from "../timeline/renderPlan";
 import { useExportJob } from "../store/exportJob";
 import { resolveLocalFastEncoder } from "../platform/host";
 import ExportQueuePane from "./ExportQueuePane";
@@ -40,10 +48,14 @@ export default function ExportDialog({
   open,
   onCancel,
   onStart,
+  workload = null,
 }: {
   open: boolean;
   onCancel: () => void;
   onStart: (s: ExportSettings) => void;
+  /** The open project's size and layers, to say roughly how long the export will take and how big
+   *  the file will be before the person clicks. Absent: the dialog says nothing about either. */
+  workload?: RenderWorkload | null;
 }): JSX.Element | null {
   const [resolution, setResolution] = useState<ExportResolution>("source");
   const [quality, setQuality] = useState<ExportQuality>("medium");
@@ -51,6 +63,19 @@ export default function ExportDialog({
   const [fastAvailable, setFastAvailable] = useState(false);
   const mode = useExportJob((s) => s.mode);
   const setMode = useExportJob((s) => s.setMode);
+  const calibrations = useExportJob((s) => s.calibrations);
+
+  // Read-only information: what this PC has measured for settings like these, else a rough guess.
+  const expected = useMemo(() => {
+    if (!workload) return "";
+    const estimate = estimateForDialog(workload, { resolution, quality, fps, mode }, calibrations);
+    const time = describeExportTime(estimate.seconds);
+    if (!time) return "";
+    if (estimate.guessed)
+      return `Expected: ${time}. A rough guess: nothing like this has been exported on this PC yet.`;
+    const size = describeExportSize(estimate.finalBytes);
+    return `Expected: ${time}${size ? `, a file of ${size}` : ""}, from earlier exports on this PC.`;
+  }, [workload, resolution, quality, fps, mode, calibrations]);
 
   const phase = useExportJob((s) => s.phase);
   const fraction = useExportJob((s) => s.fraction);
@@ -212,6 +237,11 @@ export default function ExportDialog({
             {mode === "fast" && (
               <p className="text-xs leading-snug text-amber-300">
                 Files can be much larger. The picture can differ from Full quality.
+              </p>
+            )}
+            {expected && (
+              <p aria-label="export estimate" className="text-xs leading-snug text-neutral-300">
+                {expected}
               </p>
             )}
             <p className="text-[11px] leading-snug text-neutral-500">

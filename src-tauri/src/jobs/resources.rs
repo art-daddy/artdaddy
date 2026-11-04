@@ -141,6 +141,23 @@ pub(super) fn memory_figures() -> (Option<u64>, Option<u64>) {
   (Some(total), Some(available))
 }
 
+impl LinuxMemoryCgroup {
+  pub(super) fn memory_max(&self) -> Option<u64> { self.memory_max_bytes }
+}
+
+/// The memory an export can count on: what a new process can get, and no more than a Linux cgroup lets this process have.
+pub(super) fn usable_memory(available: Option<u64>, cgroup_max: Option<u64>) -> Option<u64> {
+  match (available, cgroup_max) {
+    (Some(free), Some(cap)) => Some(free.min(cap)),
+    (free, _) => free,
+  }
+}
+
+/// `usable_memory` as it is right now: the figure a starting export derives its limits from.
+pub(super) fn export_memory() -> Option<u64> {
+  usable_memory(memory_figures().1, memory_cgroup().and_then(|group| group.memory_max()))
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -171,6 +188,15 @@ mod tests {
     for value in ["", "-1", "+1", "NaN", "Infinity", "1.5", "1 2", "9007199254740992", "18446744073709551616"] {
       assert!(memory_limit(value).is_err(), "{value}");
     }
+  }
+
+  #[test]
+  fn usable_memory_is_what_is_free_and_never_more_than_a_cgroup_allows() {
+    assert_eq!(usable_memory(None, None), None);
+    assert_eq!(usable_memory(None, Some(5)), None);
+    assert_eq!(usable_memory(Some(9), None), Some(9));
+    assert_eq!(usable_memory(Some(9), Some(5)), Some(5));
+    assert_eq!(usable_memory(Some(5), Some(9)), Some(5));
   }
 
   #[test]

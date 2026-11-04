@@ -4,6 +4,31 @@ use std::sync::Arc;
 
 pub(super) const RENDER_COMMIT_LIMIT: usize = 4 * 1024 * 1024 * 1024;
 pub(super) const RENDER_RESIDENT_LIMIT: u64 = 7 * 1024 * 1024 * 1024 / 2;
+/// The most an export's resident limit is raised to while the exporter plan's own ceilings do not exist yet.
+pub(super) const RENDER_RESIDENT_CEILING: u64 = 8 * 1024 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct RenderLimits {
+  /// Where the watcher stops an export: the working set of the export's own processes.
+  pub resident: u64,
+  /// What Windows enforces: the committed (promised) memory of the export's processes.
+  pub commit: usize,
+}
+
+/// The memory limits of one export, from the memory a new process can get right now (`None`: unknown).
+///
+/// Never below the fixed limits every earlier release had (`RENDER_RESIDENT_LIMIT`, `RENDER_COMMIT_LIMIT`), so
+/// nothing that passed before can fail because of this. On a PC with room they rise to three quarters of the free
+/// memory, up to `RENDER_RESIDENT_CEILING`, so an export is no longer stopped at numbers chosen for the smallest
+/// PC. Commit keeps the old ratio to resident (4 GiB to 3.5 GiB): decoders and encoders promise more memory than
+/// they touch, and a refused promise ("Cannot allocate memory") ended exports that never reached the working-set
+/// limit.
+pub(super) fn render_limits(available_memory: Option<u64>) -> RenderLimits {
+  let share = available_memory.map_or(0, |bytes| bytes / 4 * 3);
+  let resident = share.clamp(RENDER_RESIDENT_LIMIT, RENDER_RESIDENT_CEILING);
+  let commit = usize::try_from(resident / 7 * 8).unwrap_or(usize::MAX).max(RENDER_COMMIT_LIMIT);
+  RenderLimits { resident, commit }
+}
 
 #[derive(Debug)]
 enum ResidentObservation {
@@ -195,6 +220,87 @@ mod platform {
 }
 
 pub(super) use platform::Budget;
+
+// The limits are a pure function of the free memory, so the rules that make a raise safe are properties
+// of that function, checked over the edges and a deterministic spread of every magnitude.
+#[cfg(test)]
+mod limit_tests {
+  use super::*;
+  const GIB: u64 = 1024 * 1024 * 1024;
+
+  fn inputs() -> Vec<Option<u64>> {
+    let mut all = vec![None, Some(0), Some(1), Some(GIB), Some(4 * GIB), Some(u64::MAX), Some(u64::MAX - 1)];
+    for edge in [RENDER_RESIDENT_LIMIT, RENDER_RESIDENT_LIMIT / 3 * 4, RENDER_RESIDENT_CEILING, RENDER_RESIDENT_CEILING / 3 * 4] {
+      all.extend([edge - 1, edge, edge + 1].map(Some));
+    }
+    let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+    for _ in 0..4000 {
+      seed ^= seed << 13;
+      seed ^= seed >> 7;
+      seed ^= seed << 17;
+      all.push(Some(seed >> (seed % 40)));
+    }
+    all
+  }
+
+  #[test]
+  fn a_limit_is_never_below_the_fixed_limits_every_earlier_release_had() {
+    for free in inputs() {
+      let limits = render_limits(free);
+      assert!(limits.resident >= RENDER_RESIDENT_LIMIT, "{free:?}: {limits:?}");
+      assert!(limits.commit >= RENDER_COMMIT_LIMIT, "{free:?}: {limits:?}");
+    }
+  }
+
+  #[test]
+  fn an_unknown_or_small_amount_of_free_memory_gives_exactly_the_old_limits() {
+    for free in [None, Some(0), Some(GIB), Some(RENDER_RESIDENT_LIMIT / 3 * 4)] {
+      assert_eq!(render_limits(free), RenderLimits { resident: RENDER_RESIDENT_LIMIT, commit: RENDER_COMMIT_LIMIT }, "{free:?}");
+    }
+  }
+
+  #[test]
+  fn limits_never_fall_as_free_memory_rises() {
+    let mut sorted = inputs().into_iter().flatten().collect::<Vec<_>>();
+    sorted.sort_unstable();
+    let mut last = render_limits(None);
+    for free in sorted {
+      let limits = render_limits(Some(free));
+      assert!(limits.resident >= last.resident && limits.commit >= last.commit, "{free}: {limits:?} after {last:?}");
+      last = limits;
+    }
+  }
+
+  #[test]
+  fn a_raised_limit_leaves_a_quarter_of_the_free_memory_and_stays_under_the_ceiling() {
+    for free in inputs().into_iter().flatten() {
+      let limits = render_limits(Some(free));
+      assert!(limits.resident <= RENDER_RESIDENT_CEILING, "{free}: {limits:?}");
+      if limits.resident > RENDER_RESIDENT_LIMIT {
+        assert!(u128::from(limits.resident) * 4 <= u128::from(free) * 3, "{free}: {limits:?}");
+      }
+    }
+  }
+
+  #[test]
+  fn commit_never_falls_below_resident_and_keeps_the_old_ratio() {
+    for free in inputs().into_iter().flatten() {
+      let limits = render_limits(Some(free));
+      assert!(limits.commit as u64 >= limits.resident, "{free}: {limits:?}");
+      assert!(limits.commit as u64 <= limits.resident / 7 * 8 + RENDER_COMMIT_LIMIT as u64, "{free}: {limits:?}");
+    }
+    assert_eq!(render_limits(None).commit as u64, RENDER_RESIDENT_LIMIT / 7 * 8);
+  }
+
+  #[test]
+  fn known_machines() {
+    assert_eq!(render_limits(Some(60 * GIB)).resident, 8 * GIB);
+    assert_eq!(render_limits(Some(40 * GIB)).commit as u64, 8 * GIB / 7 * 8);
+    assert_eq!(render_limits(Some(6 * GIB)).resident, 4 * GIB + GIB / 2);
+    assert_eq!(render_limits(Some(6 * GIB)).commit as u64, (4 * GIB + GIB / 2) / 7 * 8);
+    assert_eq!(render_limits(Some(4 * GIB)).resident, RENDER_RESIDENT_LIMIT);
+  }
+}
 
 #[cfg(test)]
 mod resident_tests {

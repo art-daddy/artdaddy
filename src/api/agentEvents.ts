@@ -13,6 +13,7 @@
 // Carries NO identity: the server takes that from the authenticated request.
 import { apiBase } from "./config";
 import { reportExport } from "./exportEvents";
+import type { ExportLimit, ExportStarter, TraceEvent } from "./exportVocabulary";
 import { authedFetch, hasSession } from "./auth";
 import type { TurnSummary } from "../agent/turnTiming";
 import { legalText } from "../observability/recentFailures";
@@ -164,6 +165,11 @@ export interface ExportRefusalFacts {
   readonly width?: number;
   readonly height?: number;
   readonly visual_layers?: number;
+  /** What happened before the refusal (the screen the person met and what they chose), and which limit
+   *  refused it, when one did. */
+  readonly trace?: readonly TraceEvent[];
+  readonly limit?: ExportLimit;
+  readonly started_by?: ExportStarter;
 }
 
 export interface ToolTrace {
@@ -230,6 +236,9 @@ export function createToolTrace(
             width: facts?.width,
             height: facts?.height,
             visual_layers: facts?.visual_layers,
+            ...(facts?.trace ? { trace: facts.trace } : {}),
+            ...(facts?.limit ? { limit: facts.limit } : {}),
+            ...(facts?.started_by ? { started_by: facts.started_by } : {}),
           }).catch(() => undefined);
         } catch {}
       }
