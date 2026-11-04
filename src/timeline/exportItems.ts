@@ -84,7 +84,7 @@ export async function exportTool(args: Args, ctx: ClientToolContext | null): Pro
         : {}),
       ...(limit ? { limit } : {}),
     } as ExportRefusalFacts;
-    result = { ...result };
+    result = { ...result, ...(status === "declined" ? { declined: true } : {}) };
     Object.defineProperty(result, "export_refusal", { value: facts });
   }
   return result;

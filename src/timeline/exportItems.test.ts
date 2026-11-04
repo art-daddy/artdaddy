@@ -592,24 +592,22 @@ describe("export delivers separate files into a folder", () => {
     exportBeacon.mockClear();
   }
 
-  it.each(["whole", "clip", "copy"] as const)(
+  it.each(["whole", "clip"] as const)(
     "does not create a destination folder after Cancel for %s export",
     async (kind) => {
       const p = await project();
       const args = {
         output_dir: "not-created-without-consent",
-        ...(kind === "clip"
-          ? { clip_ids: [p.clips.a] }
-          : kind === "copy"
-            ? { media_refs: ["media_aaa"] }
-            : {}),
+        ...(kind === "clip" ? { clip_ids: [p.clips.a] } : {}),
       };
-      // A copy has no workload, so it is asked about regardless; the other two only for a known problem.
-      if (kind !== "copy") await recordAnOverrun(p, args);
+      // Asked only because a past run of it is on record as having overrun the time limit.
+      await recordAnOverrun(p, args);
       __setExportConfirmationForTests(async () => "cancel");
       const result = (await requestedExport(args, p.ctx)) as Any;
       expect(result.ok).toBe(false);
       expect(result.error).toContain("cancelled before submission");
+      // The assistant can tell that the PERSON said no, and so must not ask again.
+      expect(result.declined).toBe(true);
       expect(p.disk.dirs.has(`${DL}/not-created-without-consent`)).toBe(false);
       expect(p.disk.under(`${DL}/not-created-without-consent`)).toEqual({});
       expect(p.ffmpeg).toHaveLength(0);
@@ -622,6 +620,26 @@ describe("export delivers separate files into a folder", () => {
       });
     },
   );
+
+  // A copy of a library file renders nothing, so it has no size, frame rate or length to be "larger than
+  // usual" or "too long": it used to be asked about anyway, because it has no workload, and the question
+  // (now worded) told the person their project was too big. It asks about nothing, and copies.
+  it("never asks about a library-file copy, and delivers it", async () => {
+    const p = await project();
+    const asked: string[] = [];
+    __setExportConfirmationForTests(async (message) => {
+      asked.push(message);
+      return "cancel";
+    });
+    const result = (await requestedExport(
+      { output_dir: "copies", media_refs: ["media_aaa"] },
+      p.ctx,
+    )) as Any;
+    expect(asked).toEqual([]);
+    expect(result.ok, String(result.error)).toBe(true);
+    await whenExportsSettle();
+    expect(Object.keys(p.disk.under(`${DL}/copies`))).toHaveLength(1);
+  });
 
   // The refusal's report says how the request went: the screen the person met and what they chose.
   it("tells the story of an export the person declined, and a blocked one's limit", async () => {
@@ -672,6 +690,7 @@ describe("export delivers separate files into a folder", () => {
       } else if (kind === "copy") args = { media_refs: ["not-in-the-library"] };
       const result = (await requestedExport(args, kind === "no-context" ? null : p.ctx)) as Any;
       expect(result.ok).toBe(false);
+      expect(result.declined).toBeUndefined();
       expect(listExportOutcomes()).toHaveLength(0);
       await whenExportTelemetrySettles();
       expect(exportBeacon).toHaveBeenCalledTimes(1);
@@ -697,6 +716,8 @@ describe("export delivers separate files into a folder", () => {
     const result = (await registry.run("export", args, trace.context, trace)) as Any;
     expect(result.ok).toBe(false);
     expect(result.error).toContain("cancelled before submission");
+    // Stop is not the person saying no to a question: nothing to tell the assistant about declining.
+    expect(result.declined).toBeUndefined();
     await whenExportTelemetrySettles();
     expect(exportBeacon).toHaveBeenCalledTimes(1);
     expect(exportBeacon.mock.calls[0][0]).toMatchObject({ status: "cancelled" });

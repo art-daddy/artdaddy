@@ -6,6 +6,7 @@
 // One job at a time, matching the one ffmpeg process.
 import { create } from "zustand";
 import type { ExportCalibration, ExportEngine, ExportMode } from "../timeline/exportOptions";
+import type { LiveFacts, LiveStageName } from "../timeline/exportWords";
 
 const ENGINE_KEY = "artdaddy-export-routing-v2";
 // Not per release: a measurement stays usable until EXPORT_SPEED_REVISION says the pipeline changed.
@@ -127,7 +128,21 @@ const IDLE: ExportJob = {
   startedAt: 0,
 };
 
+/** The export that is running right now, whoever asked for it: what the chat card shows. Unlike the job
+ *  above (begun by the Export menu only, so an export an assistant started never moved it) this is begun
+ *  by the queue when an export's turn comes, and ended when it settles. */
+export interface ExportLive extends LiveFacts {
+  readonly jobId: string;
+  readonly speed: number;
+  readonly frame: number;
+}
+
 interface ExportState extends ExportJob {
+  /** The export that is rendering right now: progress reports are about this one. */
+  live: ExportLive | null;
+  /** Exports whose render has ended but which have not settled (the file is being checked or saved) when
+   *  the next export's turn begins: each keeps its own stage, so the card can still say where it is. */
+  finishing: Readonly<Record<string, ExportLive>>;
   calibrations: readonly ExportCalibration[];
   rememberCalibration: (sample: ExportCalibration) => void;
   engine: ExportEngine;
@@ -137,13 +152,20 @@ interface ExportState extends ExportJob {
   /** Set while a render is in flight, so the dialog can offer Cancel. */
   abort: (() => void) | null;
   begin: (abort: (() => void) | null) => void;
-  update: (patch: Partial<ExportJob>) => void;
+  /** A progress report. Moves the dialog's job while that job is running, and the live feed whenever
+   *  an export is live. `step` and `steps` say which part of a streamed render this is. */
+  update: (patch: Partial<ExportJob> & { step?: number | null; steps?: number | null }) => void;
   finish: (patch: Partial<ExportJob>) => void;
   reset: () => void;
+  beginLive: (jobId: string) => void;
+  setLiveStage: (jobId: string, stage: LiveStageName) => void;
+  endLive: (jobId: string) => void;
 }
 
 export const useExportJob = create<ExportState>((set, get) => ({
   ...IDLE,
+  live: null,
+  finishing: {},
   calibrations: savedCalibrations(),
   rememberCalibration: (value) => {
     const sample = calibration(value);
@@ -170,10 +192,98 @@ export const useExportJob = create<ExportState>((set, get) => ({
   // Progress must never resurrect a job that already finished: ffmpeg's last blocks can arrive
   // after the process exits, and a bar that jumps back to 90% after saying "done" reads as a bug.
   update: (patch) =>
-    set((s) => (s.phase === "preparing" || s.phase === "rendering" ? { ...s, ...patch } : s)),
+    set((s) => {
+      const { step, steps, ...job } = patch;
+      const moved = s.phase === "preparing" || s.phase === "rendering" ? { ...s, ...job } : s;
+      return s.live ? { ...moved, live: advanced(s.live, patch, Date.now()) } : moved;
+    }),
   finish: (patch) => set((s) => ({ ...s, ...patch, abort: null })),
   reset: () => set({ ...IDLE, abort: null }),
+  beginLive: (jobId) => {
+    const now = Date.now();
+    set((s) => ({
+      live: {
+        jobId,
+        stage: "preparing",
+        startedAt: now,
+        fraction: null,
+        etaSec: null,
+        speed: 0,
+        frame: 0,
+        step: null,
+        steps: null,
+        lastMoveAt: now,
+      },
+      // The one that was rendering is not any more, but it has not settled: it may still be checking the
+      // file or saving it, and it keeps saying so. The next turn only comes once its render process is
+      // over (even one that failed or was stopped, which never said "checking"), so it is never left
+      // looking like a render that stands still.
+      finishing:
+        s.live && s.live.jobId !== jobId
+          ? {
+              ...s.finishing,
+              [s.live.jobId]: {
+                ...s.live,
+                stage:
+                  s.live.stage === "preparing" || s.live.stage === "rendering"
+                    ? "checking"
+                    : s.live.stage,
+              },
+            }
+          : s.finishing,
+    }));
+  },
+  // A word about an export is about that export, whether it is the one rendering or one finishing; a word
+  // about one that already settled is about nothing.
+  setLiveStage: (jobId, stage) =>
+    set((s) => {
+      const now = Date.now();
+      if (s.live && s.live.jobId === jobId) return { live: { ...s.live, stage, lastMoveAt: now } };
+      const other = s.finishing[jobId];
+      return other
+        ? { finishing: { ...s.finishing, [jobId]: { ...other, stage, lastMoveAt: now } } }
+        : s;
+    }),
+  endLive: (jobId) =>
+    set((s) => {
+      const ending = s.live !== null && s.live.jobId === jobId;
+      if (!ending && !(jobId in s.finishing)) return s;
+      const rest = { ...s.finishing };
+      delete rest[jobId];
+      return { live: ending ? null : s.live, finishing: rest };
+    }),
 }));
+
+/** What is known about an export's run: the feed of the one rendering, or of one that is finishing. */
+export function liveFeedOf(
+  state: Pick<ExportState, "live" | "finishing">,
+  jobId: string,
+): ExportLive | null {
+  if (state.live && state.live.jobId === jobId) return state.live;
+  return state.finishing[jobId] ?? null;
+}
+
+/** The live feed after a progress report. Movement is a change in the frame count, the output position
+ *  or the part being made: ffmpeg prints a block every half second even when it is stuck, and a stuck
+ *  one repeats the same numbers, so a block arriving is not a sign of life, a block that differs is. */
+function advanced(
+  live: ExportLive,
+  patch: Partial<ExportJob> & { step?: number | null; steps?: number | null },
+  now: number,
+): ExportLive {
+  const next: ExportLive = {
+    ...live,
+    fraction: patch.fraction !== undefined ? patch.fraction : live.fraction,
+    etaSec: patch.etaSec !== undefined ? patch.etaSec : live.etaSec,
+    speed: patch.speed !== undefined ? patch.speed : live.speed,
+    frame: patch.frame !== undefined ? patch.frame : live.frame,
+    step: patch.step !== undefined ? patch.step : live.step,
+    steps: patch.steps !== undefined ? patch.steps : live.steps,
+  };
+  const moved =
+    next.frame !== live.frame || next.fraction !== live.fraction || next.step !== live.step;
+  return moved ? { ...next, lastMoveAt: now } : next;
+}
 
 /** True while a render is running — the menu uses this to refuse a second one. */
 export function exportRunning(): boolean {

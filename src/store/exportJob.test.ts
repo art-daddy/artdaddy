@@ -1,8 +1,9 @@
 import fc from "fast-check";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { useExportJob } from "./exportJob";
+import { liveFeedOf, useExportJob } from "./exportJob";
 import { EXPORT_SPEED_REVISION, type ExportCalibration } from "../timeline/exportOptions";
+import { quietSeconds } from "../timeline/exportWords";
 
 const sample: ExportCalibration = {
   workload: {
@@ -117,5 +118,164 @@ describe("local export calibration records", () => {
     expect(reopened.getState().calibrations).toEqual([
       expect.objectContaining({ elapsedSeconds: 33, revision: EXPORT_SPEED_REVISION }),
     ]);
+  });
+});
+
+// The feed of the export that is running, for the chat card. The job above belongs to the Export
+// dialog: only the menu begins it, so an export an assistant started never moved it. This feed belongs
+// to the queue instead, begun when an export's turn comes, for ANY export.
+describe("the live feed of the running export", () => {
+  beforeEach(() => {
+    useExportJob.getState().reset();
+    useExportJob.setState({ live: null, finishing: {} });
+    vi.useFakeTimers({ now: 1_000_000 });
+  });
+  afterEach(() => vi.useRealTimers());
+  const live = () => useExportJob.getState().live;
+  const at = (ms: number) => vi.setSystemTime(1_000_000 + ms);
+
+  it("takes progress from an export the menu did not start, and leaves the dialog's own job alone", () => {
+    const store = useExportJob.getState();
+    store.beginLive("j1");
+    store.update({ phase: "rendering", fraction: 0.3, etaSec: 90, speed: 1.2, frame: 300 });
+    expect(live()).toMatchObject({
+      jobId: "j1",
+      stage: "preparing",
+      fraction: 0.3,
+      etaSec: 90,
+      speed: 1.2,
+      frame: 300,
+    });
+    // No job was begun by the menu: the dialog's own state does not move (it never did for these).
+    expect(useExportJob.getState().phase).toBe("idle");
+    expect(useExportJob.getState().fraction).toBeNull();
+  });
+
+  it("still moves the dialog's job as before when the menu started it", () => {
+    const store = useExportJob.getState();
+    store.begin(null);
+    store.beginLive("j1");
+    store.update({ phase: "rendering", fraction: 0.5, etaSec: 10, speed: 2, frame: 50 });
+    expect(useExportJob.getState()).toMatchObject({ phase: "rendering", fraction: 0.5 });
+    expect(live()).toMatchObject({ fraction: 0.5 });
+  });
+
+  it("does nothing for progress that arrives when no export is live", () => {
+    useExportJob.getState().update({ fraction: 0.9, frame: 9 });
+    expect(live()).toBeNull();
+  });
+
+  it("counts a change in the frame, the position or the part as movement, and a repeated block as none", () => {
+    const store = useExportJob.getState();
+    store.beginLive("j1");
+    at(2_000);
+    store.update({ fraction: 0.1, frame: 100 });
+    expect(live()?.lastMoveAt).toBe(1_002_000);
+    at(5_000);
+    store.update({ fraction: 0.1, frame: 100 }); // ffmpeg prints the same block while it is stuck
+    expect(live()?.lastMoveAt).toBe(1_002_000);
+    at(6_000);
+    store.update({ fraction: 0.1, frame: 101 });
+    expect(live()?.lastMoveAt).toBe(1_006_000);
+    at(7_000);
+    store.update({ fraction: 0.1, frame: 101, step: 2, steps: 5 }); // the next part of a streamed render
+    expect(live()).toMatchObject({ lastMoveAt: 1_007_000, step: 2, steps: 5 });
+  });
+
+  it("keeps the stage it was told, and a new stage ends the silence", () => {
+    const store = useExportJob.getState();
+    store.beginLive("j1");
+    expect(live()?.stage).toBe("preparing");
+    at(30_000);
+    store.setLiveStage("j1", "rendering");
+    expect(live()).toMatchObject({ stage: "rendering", lastMoveAt: 1_030_000 });
+    store.setLiveStage("j1", "checking");
+    expect(live()?.stage).toBe("checking");
+  });
+
+  it("belongs to one export: a late word about an older one changes nothing", () => {
+    const store = useExportJob.getState();
+    store.beginLive("old");
+    store.beginLive("new"); // the next export's turn came
+    store.setLiveStage("old", "saving");
+    store.endLive("old");
+    expect(live()).toMatchObject({ jobId: "new", stage: "preparing" });
+    store.endLive("new");
+    expect(live()).toBeNull();
+  });
+
+  it("is not ended by the dialog's own reset", () => {
+    const store = useExportJob.getState();
+    store.beginLive("j1");
+    store.reset();
+    expect(live()?.jobId).toBe("j1");
+  });
+
+  it("keeps the stage of an export that is still checking or saving when the next export's turn begins", () => {
+    const store = useExportJob.getState();
+    store.beginLive("a");
+    store.setLiveStage("a", "rendering");
+    store.update({ fraction: 0.99, frame: 990 });
+    store.setLiveStage("a", "checking"); // the render process has exited; the file is being checked
+    store.beginLive("b"); // the supervisor started the next export
+    const state = () => useExportJob.getState();
+    expect(liveFeedOf(state(), "a")).toMatchObject({ stage: "checking", fraction: 0.99 });
+    expect(liveFeedOf(state(), "b")).toMatchObject({ stage: "preparing", fraction: null });
+    // Progress is the current render's; a stage is its own export's.
+    store.update({ fraction: 0.2, frame: 20 });
+    store.setLiveStage("a", "saving");
+    expect(liveFeedOf(state(), "a")).toMatchObject({ stage: "saving", fraction: 0.99 });
+    expect(liveFeedOf(state(), "b")).toMatchObject({ stage: "preparing", fraction: 0.2 });
+    store.endLive("a");
+    expect(liveFeedOf(state(), "a")).toBeNull();
+    expect(liveFeedOf(state(), "b")).toMatchObject({ stage: "preparing" });
+    store.endLive("b");
+    expect(liveFeedOf(state(), "b")).toBeNull();
+    expect(state().live).toBeNull();
+    expect(state().finishing).toEqual({});
+  });
+
+  it("knows nothing about an export that never began", () => {
+    expect(liveFeedOf(useExportJob.getState(), "nope")).toBeNull();
+  });
+
+  it("does not leave an export that failed or was stopped looking like a render that stands still", () => {
+    vi.useFakeTimers({ now: 1_000_000, toFake: ["Date"] });
+    try {
+      const store = useExportJob.getState();
+      store.beginLive("a");
+      store.setLiveStage("a", "rendering");
+      // It failed or was killed: nothing ever said "checking", but the next export's turn came, which
+      // only happens once its render process is over. Its cleanup then takes a minute and a half.
+      store.beginLive("b");
+      vi.setSystemTime(1_000_000 + 90_000);
+      const feed = liveFeedOf(useExportJob.getState(), "a")!;
+      expect(feed.stage).not.toBe("rendering");
+      expect(feed.stage).not.toBe("preparing");
+      expect(quietSeconds(feed, Date.now())).toBe(0); // not "no progress for 90 s"
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("starts clean for every export: nothing of the last one carries over", () => {
+    const store = useExportJob.getState();
+    store.beginLive("a");
+    store.update({ fraction: 0.9, etaSec: 5, speed: 3, frame: 900, step: 4, steps: 5 });
+    store.setLiveStage("a", "saving");
+    store.endLive("a");
+    store.beginLive("b");
+    expect(live()).toEqual({
+      jobId: "b",
+      stage: "preparing",
+      startedAt: Date.now(),
+      fraction: null,
+      etaSec: null,
+      speed: 0,
+      frame: 0,
+      step: null,
+      steps: null,
+      lastMoveAt: Date.now(),
+    });
   });
 });

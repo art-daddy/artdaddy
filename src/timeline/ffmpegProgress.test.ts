@@ -194,6 +194,33 @@ describe("createSequenceProgressReader", () => {
     feed(block({ out_time_us: 1_000_000 }));
     expect(seen).toEqual([6000]);
   });
+
+  it("says which part of the sequence each record belongs to, and how many parts there are", () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.integer({ min: 1, max: 30 }), { minLength: 2, maxLength: 8 }),
+        (durations) => {
+          const records: Array<{ step?: number; steps?: number }> = [];
+          const feed = createSequenceProgressReader(durations, (record) => records.push(record));
+          for (let index = 0; index < durations.length; index++) {
+            feed(`artdaddy_step=${index}\n`);
+            feed(block({ out_time_us: 500_000 }));
+          }
+          expect(records.map((record) => record.step)).toEqual(durations.map((_, index) => index));
+          expect(records.every((record) => record.steps === durations.length)).toBe(true);
+        },
+      ),
+      { numRuns: 60 },
+    );
+  });
+
+  it("leaves the parts out of a plain (not sequenced) reader", () => {
+    const seen: Array<{ step?: number; steps?: number }> = [];
+    const feed = createProgressReader((record) => seen.push(record));
+    feed(block({ out_time_us: 1_000_000 }));
+    expect(seen[0].step).toBeUndefined();
+    expect(seen[0].steps).toBeUndefined();
+  });
 });
 
 describe("hhmmssToMs", () => {

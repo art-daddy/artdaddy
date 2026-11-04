@@ -227,12 +227,14 @@ export default function MenuBar() {
         saved_to?: string;
         job_id?: string;
         warnings?: string[];
+        declined?: boolean;
       } | null;
       if (res?.job_id) {
         jobId = res.job_id;
         if (controller.signal.aborted) cancelQueued(res.job_id); // cancelled while it was queuing
       }
-      if (controller.signal.aborted) {
+      if (controller.signal.aborted || res?.declined === true) {
+        // Their own choice (Cancel in the dialog, or on a question the export asked): not a failure.
         useExportJob.getState().finish({ phase: "cancelled" });
       } else if (!res?.ok) {
         useExportJob.getState().finish({ phase: "failed", error: res?.error ?? "unknown error" });

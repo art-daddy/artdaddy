@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, act, within } from "@testing-library/react";
 import { StrictMode } from "react";
 import fc from "fast-check";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -1215,5 +1215,62 @@ describe("ChatView first prompt with start-screen footage", () => {
       }),
       { numRuns: 25 },
     );
+  });
+});
+
+// The question an export asks must reach a person who is in the chat: a long export started by their
+// assistant waits for an answer, and the dialog alone can sit behind another window. The dialog is modal,
+// so the chat carries the question once the person puts the dialog away ("Answer in chat").
+describe("ChatView: the export card", () => {
+  it("carries the question an export of this project asks once the dialog is put away, and answering it there answers it", async () => {
+    const { askQuestion, mountQuestionHost, setQuestionHidden, __resetExportQuestions } =
+      await import("../store/exportQuestionHost");
+    const { useExportQuestions } = await import("../store/exportQuestionHost");
+    const { planQuestions } = await import("../timeline/exportQuestions");
+    __resetExportQuestions();
+    const unmount = mountQuestionHost();
+    try {
+      act(() => {
+        useEditor.setState({ projectId: "p1", store: { projectDir: "/proj" } as never });
+      });
+      render(<ChatView />);
+      const [question] = planQuestions({
+        via: "chat",
+        count: 1,
+        reasons: new Set(["memory_shortage"]),
+        memoryNeededBytes: 3.2e9,
+        memoryUsableBytes: 1.9e9,
+        spaceNeededBytes: null,
+        destinationFreeBytes: null,
+        scratchFreeBytes: null,
+        destinationShort: false,
+        scratchShort: false,
+        drive: null,
+        seconds: null,
+        secondsGuessed: false,
+        executionLimitSeconds: null,
+      });
+      let outcome!: ReturnType<typeof askQuestion>;
+      act(() => {
+        outcome = askQuestion(question, { projectDir: "/proj" });
+      });
+      // The chat is open, so the dialog may be put away: until then the dialog is the one asking.
+      await waitFor(() => expect(useExportQuestions.getState().open?.canHide).toBe(true));
+      expect(screen.queryByRole("group", { name: "export question" })).toBeNull();
+      act(() => void setQuestionHidden(useExportQuestions.getState().open!.id, true));
+      const box = await screen.findByRole("group", { name: "export question" });
+      expect(within(box).getByText("Not enough free memory")).toBeVisible();
+      // It sits with the message box, above it.
+      expect(
+        box.compareDocumentPosition(screen.getByPlaceholderText(/Message the editor/)) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+      fireEvent.click(within(box).getByRole("button", { name: "Cancel" }));
+      expect(await outcome).toMatchObject({ answer: "cancel", by: "card" });
+      expect(screen.queryByRole("group", { name: "export question" })).toBeNull();
+    } finally {
+      unmount();
+      __resetExportQuestions();
+    }
   });
 });
