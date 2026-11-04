@@ -593,14 +593,18 @@ fn resource_free_bytes(path: &Path, disks: &sysinfo::Disks) -> Option<u64> {
 
 fn export_resources(destination: &Path, scratch: Option<&Path>, workspace: &Workspace) -> ExportResources {
   let (total_memory_bytes, available_memory_bytes) = resources::memory_figures();
+  let memory_cgroup = resources::memory_cgroup();
+  // The same function an export's own limits come from (`Control::new`), over the figure measured here.
+  let memory_budget = budget::render_limits(resources::usable_memory(
+    available_memory_bytes, memory_cgroup.as_ref().and_then(|group| group.memory_max()))).resident;
   let disks = sysinfo::Disks::new_with_refreshed_list();
   ExportResources { total_memory_bytes, available_memory_bytes,
     scratch_free_bytes: scratch.and_then(|path| resource_free_bytes(path, &disks)),
     destination_free_bytes: resource_free_bytes(destination, &disks),
-    budgets: ExportResourceBudgets { memory_bytes: budget::RENDER_RESIDENT_LIMIT,
+    budgets: ExportResourceBudgets { memory_bytes: memory_budget,
       temporary_bytes: workspace.available_bytes(), execution_seconds: EXPORT_EXECUTION_LIMIT_MS / 1000 },
     temporary_space: workspace.temporary_space(),
-    local_fast_candidate: local_fast_candidate(), memory_cgroup: resources::memory_cgroup() }
+    local_fast_candidate: local_fast_candidate(), memory_cgroup }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -1010,6 +1014,10 @@ fn remove_delivery_receipt(journal: ExportJournal<'_>, id: &str) -> Result<(), S
 
 const EXPORT_SCRATCH_LIMIT_BYTES: u64 = 20_000_000_000;
 const EXPORT_WORKSPACE_PAYLOAD_BYTES: u64 = EXPORT_SCRATCH_LIMIT_BYTES - 2_000_000_000;
+/// Left unclaimed by a running export's output so that queueing another export (one empty staging entry,
+/// a few KiB each) is never refused while it runs: 64 MiB admits far more queued exports than a person
+/// can ask for, on a volume of any ordinary cluster size.
+const EXPORT_ADMISSION_HEADROOM_BYTES: u64 = 64 * 1024 * 1024;
 const EXPORT_EXECUTION_LIMIT_MS: u64 = 8 * 60 * 60 * 1000;
 
 // A persisted plan may have created its entry even when confirmation failed.
@@ -1253,7 +1261,7 @@ impl Supervisor {
       export_root: None,
       export_work_root: None,
       export_font_root: None,
-      workspace: Workspace::new(EXPORT_WORKSPACE_PAYLOAD_BYTES),
+      workspace: Workspace::with_admission_headroom(EXPORT_WORKSPACE_PAYLOAD_BYTES, EXPORT_ADMISSION_HEADROOM_BYTES),
       copying: Arc::default(),
       copy_settled: Arc::default(),
       awake: None,
@@ -6553,6 +6561,58 @@ mod export_delivery_tests {
       if cancelled { assert_eq!(std::fs::read(&queued.dest_path).unwrap(), b"previous complete file"); }
     }
   }
+  // Field journey (0.22.x): the person clicks Export again while an export is running. The running export
+  // reserves every remaining byte of the temporary allowance for its output, so admitting another one
+  // (one empty staging entry, zero bytes) was refused with "export workspace allocation budget exceeded
+  // before write", a message nobody can act on. Queueing must never fail because an export is running; the
+  // queued work then waits for the output claim exactly as before.
+  #[test]
+  fn an_export_can_be_queued_while_another_holds_its_output_and_then_runs() {
+    let directory = tempfile::tempdir().unwrap();
+    let jobs = owner_with_work(&directory.path().join("journal"), directory.path().join("work"));
+    let active = intent(&jobs, directory.path(), "active-output");
+    jobs.account_workspace(&jobs.deliveries.lock().unwrap()).unwrap();
+    jobs.claim_export_output(&active.id).unwrap().retain();
+    let key = Supervisor::workspace_key(Path::new(&active.stage_path));
+    let (limit, charge) = jobs.workspace.reserve_output(&key).unwrap();
+    std::fs::write(&active.stage_path, [37u8; 32]).unwrap();
+    charge.retain();
+    // The running export keeps nearly the whole allowance for its output.
+    assert!(limit >= EXPORT_WORKSPACE_PAYLOAD_BYTES / 100 * 99, "the running export lost its allowance: {limit}");
+    // A storm of clicks, far more than a person makes, is all admitted.
+    let queued: Vec<ExportDelivery> = (0..64).map(|index| intent(&jobs, directory.path(), &format!("queued-{index}"))).collect();
+    assert_eq!(jobs.delivery_list().len(), 65);
+    // The person cancels the running export and clicks Export again at once, before its writer has
+    // settled and released: the new export is admitted too.
+    jobs.cancel_delivery(&active.id).unwrap();
+    let again = intent(&jobs, directory.path(), "again-after-cancel");
+    jobs.complete_delivery(&active.id).unwrap();
+    assert!(!Path::new(&active.stage_path).exists());
+    // With the first export gone the allowance is whole again, and a queued export can take it.
+    assert!(jobs.workspace.available_bytes() >= EXPORT_WORKSPACE_PAYLOAD_BYTES / 100 * 99);
+    for next in [&queued[0], &again] {
+      let claim = jobs.claim_export_output(&next.id).unwrap();
+      let key = Supervisor::workspace_key(Path::new(&next.stage_path));
+      let (next_limit, next_charge) = jobs.workspace.reserve_output(&key).unwrap();
+      assert!(next_limit >= EXPORT_WORKSPACE_PAYLOAD_BYTES / 100 * 99, "a queued export did not get the allowance: {next_limit}");
+      drop(next_charge);
+      jobs.workspace.settle_output_writer(&key);
+      drop(claim);
+      jobs.cancel_delivery(&next.id).unwrap();
+      jobs.complete_delivery(&next.id).unwrap();
+    }
+  }
+
+  // The production workspace must keep the headroom: a Supervisor built the way the app builds it, never
+  // a fixture, or the field refusal comes back without a single test noticing.
+  #[test]
+  fn the_production_workspace_keeps_a_small_admission_headroom() {
+    let jobs = Supervisor::new(Arc::new(NoSpawn), Arc::new(|_| {}));
+    assert_eq!(jobs.workspace.admission_headroom(), EXPORT_ADMISSION_HEADROOM_BYTES);
+    assert!(EXPORT_ADMISSION_HEADROOM_BYTES >= 64 * 1024 * 1024);
+    assert!(EXPORT_ADMISSION_HEADROOM_BYTES * 100 <= EXPORT_WORKSPACE_PAYLOAD_BYTES, "the headroom must stay a small share of the allowance");
+  }
+
   #[test]
   fn copy_staging_restart_restores_private_payload_charge_and_cleans_after_cancellation() {
     let directory = tempfile::tempdir().unwrap();
@@ -7404,7 +7464,11 @@ mod tests {
     workspace.account_existing("retained", 123, 1).unwrap();
     let measured = export_resources(&destination, Some(root.path()), &workspace);
     assert_eq!(measured.budgets.temporary_bytes, 9877);
-    assert_eq!(measured.budgets.memory_bytes, budget::RENDER_RESIDENT_LIMIT);
+    // The budget reported is the one an export would install: derived from the free memory measured in
+    // the same call, never below the fixed limit of every earlier release.
+    assert!(measured.budgets.memory_bytes >= budget::RENDER_RESIDENT_LIMIT);
+    assert_eq!(measured.budgets.memory_bytes, budget::render_limits(resources::usable_memory(
+      measured.available_memory_bytes, measured.memory_cgroup.as_ref().and_then(|group| group.memory_max()))).resident);
     assert_eq!(measured.budgets.execution_seconds * 1000, EXPORT_EXECUTION_LIMIT_MS);
     assert_eq!(measured.temporary_space.payload_bytes, 10_000);
     assert_eq!(measured.temporary_space.total_bytes, 10_000 + measured.temporary_space.infrastructure_bytes);

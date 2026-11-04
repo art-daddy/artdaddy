@@ -34,7 +34,7 @@ import {
   EXPORT_SPEED_REVISION,
   crfFor,
   decoderThreads,
-  exceedsFileSequencePicture,
+  exceedsOnePass,
   finalEncoderPolicy,
   outputFps,
   outputSize,
@@ -74,6 +74,7 @@ import { jobOwnsScratch, jobSupervisor, supervisedRunner } from "../tools/jobSup
 import { projectIdOfDir } from "../tools/dataRoot";
 import {
   ExportRunError,
+  exportVia,
   isDestinationReserved,
   submitExport,
   type ExportSubmission,
@@ -992,10 +993,7 @@ export function buildRenderCommand(
     commandLength(graphFromFile(plan.args, plan.assFiles).args) > COMMAND_BUDGET;
   // The size the render composites at (the authored canvas made even), not the authored one: 2561 x 1439 composites at 2562 x 1440.
   const composite = canvasPx(raw);
-  const resourcePressure =
-    workload.peakVisualLayers > 4 ||
-    (workload.width * workload.height > 1920 * 1080 && workload.peakMediaLayers > 1) ||
-    exceedsFileSequencePicture({ width: composite.w, height: composite.h });
+  const resourcePressure = exceedsOnePass(workload, { width: composite.w, height: composite.h });
   const stream =
     !window &&
     (policy === "partition-pipes-v1" ||
@@ -3734,6 +3732,7 @@ export async function prepareRenderSubmission(
     filename: request.filename,
     // Present only when the AGENT called this tool; the Export menu runs it with no origin.
     origin: ctx.origin,
+    via: exportVia(ctx),
     submissionSignal: ctx.signal,
     workload: renderPlan.workload,
     ...(request.outputDirectory ? { outputDirectory: request.outputDirectory } : {}),

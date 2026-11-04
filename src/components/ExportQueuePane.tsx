@@ -109,7 +109,7 @@ export default function ExportQueuePane(): JSX.Element | null {
             {r.state === "running" || r.state === "queued" ? (
               <button
                 aria-label={`cancel ${r.filename}`}
-                onClick={() => cancelExport(r.job_id)}
+                onClick={() => cancelExport(r.job_id, "person_queue")}
                 className="shrink-0 rounded px-1 text-neutral-400 hover:bg-neutral-800 hover:text-red-400"
               >
                 ✕

@@ -8,13 +8,25 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { onAuthFailure, setClerkTokenProvider, setSessionRenewer } from "./auth";
 import { apiBase } from "./config";
 import {
+  EXPORT_FACT_LIMITS,
   EXPORT_OPERATIONS,
   EXPORT_REASON_CODES,
   EXPORT_SIZE_BANDS,
+  EXPORT_TRACE_EVENTS,
+  EXPORT_TRACE_MAX_EVENTS,
+  EXPORT_TRACE_VALUES,
   MAX_EXPORT_ERROR,
+  MAX_TRACE_TEXT,
+  cleanTrace,
+  composeBody,
+  decodeTrace,
+  encodeTrace,
   reportExport,
+  wireBody,
   type ExportEvent,
+  type TraceEvent,
 } from "./exportEvents";
+import { pendingReports, queueReport } from "./exportOutbox";
 
 afterEach(() => {
   setClerkTokenProvider(null);
@@ -304,5 +316,211 @@ describe("the export beacon", () => {
     });
     vi.stubGlobal("fetch", vi.fn());
     await expect(reportExport({ status: "done" })).resolves.toBeUndefined();
+  });
+});
+
+// What HAPPENED to the export (Phase 3, S1): the ordered trace and the run facts. Optional and additive:
+// a report without them is the report it always was (pinned by REPORT_KEYS above), one with them sends
+// the trace as a list and every number inside the server's range.
+const STORY: TraceEvent[] = [
+  { e: "requested", t: 0, v: "chat", n: 0, m: 0 },
+  { e: "dialog_shown", t: 1200, v: "confirm", n: 0, m: 0 },
+  { e: "dialog_choice", t: 4100, v: "continue", n: 0, m: 0 },
+  { e: "stage", t: 4300, v: "rendering", n: 0, m: 0 },
+  { e: "stall_detected", t: 70_000, v: "", n: 61, m: 38 },
+  { e: "outcome", t: 71_200, v: "failed", n: 71, m: 0 },
+];
+
+describe("the export report's decoration", () => {
+  it("sends the trace as a list and the run facts as numbers, only when the app measured them", async () => {
+    const body = await sent({
+      status: "failed",
+      trace: STORY,
+      engine: "streamed",
+      limit: "resident",
+      started_by: "chat",
+      peak_resident_mib: 3712,
+      resident_limit_mib: 3584,
+      ram_free_gib: 6,
+      longest_gap_s: 61,
+    });
+    expect(body.trace).toEqual(STORY);
+    expect(body).toMatchObject({
+      engine: "streamed",
+      limit: "resident",
+      started_by: "chat",
+      peak_resident_mib: 3712,
+      resident_limit_mib: 3584,
+      ram_free_gib: 6,
+      longest_gap_s: 61,
+    });
+    // What was not measured is absent, never a zero that reads as a measurement.
+    expect(body).not.toHaveProperty("peak_commit_mib");
+    expect(body).not.toHaveProperty("ram_total_gib");
+  });
+
+  it("is absent altogether when nothing happened worth saying", async () => {
+    const body = await sent({ status: "done", trace: [] });
+    expect(Object.keys(body).sort()).toEqual(REPORT_KEYS);
+  });
+
+  it("keeps a trace through the outbox as flat text and sends it as a list again", () => {
+    const flat = composeBody({ status: "failed", trace: STORY }) as Record<string, unknown>;
+    expect(typeof flat.trace).toBe("string");
+    expect(wireBody(flat as never).trace).toEqual(STORY);
+    // The flat body is what the outbox stores, and the outbox accepts it.
+    const again = composeBody(flat) as Record<string, unknown>;
+    expect(again.trace).toBe(flat.trace);
+  });
+
+  it("composes a body with every field set that the outbox still accepts, trace included", () => {
+    const biggest: TraceEvent[] = Array.from({ length: EXPORT_TRACE_MAX_EVENTS }, () => ({
+      e: "interrupted_found",
+      t: 604_800_000,
+      v: "person_dialog",
+      n: 2_147_483_647,
+      m: 2_147_483_647,
+    }));
+    const body = composeBody({
+      status: "failed",
+      trace: biggest,
+      engine: "streamed",
+      limit: "commit",
+      started_by: "chat",
+      ...Object.fromEntries(Object.entries(EXPORT_FACT_LIMITS)),
+      error: "e".repeat(400),
+      project_id: "p".repeat(400),
+    })!;
+    // Under the outbox's field count, and the report is queued (and read back) whole.
+    expect(Object.keys(body).length).toBeLessThanOrEqual(40);
+    const kept = queueReport(
+      {
+        id: "r-big",
+        owner: "user_a",
+        at: Math.floor(Date.now() / 1000),
+        failedAt: 0,
+        disposable: false,
+        body,
+      },
+      Date.now(),
+    );
+    expect(kept).toBe(true);
+    const [back] = pendingReports(Date.now());
+    expect(decodeTrace(back.body.trace)).toEqual(biggest);
+  });
+
+  it("encodes the largest legitimate trace within the outbox's bound and loses nothing", () => {
+    const biggest: TraceEvent[] = Array.from({ length: EXPORT_TRACE_MAX_EVENTS }, () => ({
+      e: "interrupted_found",
+      t: 604_800_000,
+      v: "person_dialog",
+      n: 2_147_483_647,
+      m: 2_147_483_647,
+    }));
+    const text = encodeTrace(biggest);
+    expect(text.length).toBeLessThanOrEqual(MAX_TRACE_TEXT);
+    expect(decodeTrace(text)).toEqual(biggest);
+  });
+
+  it("turns anything that is not a trace into no trace, and never throws", () => {
+    for (const junk of [
+      null,
+      undefined,
+      5,
+      "x",
+      "a:b:c",
+      "stage:1:rendering:2",
+      ";;;;",
+      {},
+      [1, 2],
+      "\u0000",
+    ]) {
+      expect(() => decodeTrace(junk)).not.toThrow();
+      expect(() => cleanTrace(junk)).not.toThrow();
+    }
+    expect(decodeTrace("no_such_event:1::0:0")).toEqual([]);
+    expect(decodeTrace("x".repeat(MAX_TRACE_TEXT + 1))).toEqual([]);
+  });
+
+  it("keeps only the closed vocabulary and numbers inside the server's range, whatever it is given", () => {
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.record({
+            e: fc.oneof(fc.constantFrom(...EXPORT_TRACE_EVENTS), fc.string()),
+            t: fc.oneof(fc.double(), fc.integer()),
+            v: fc.oneof(fc.constantFrom(...EXPORT_TRACE_VALUES), fc.string()),
+            n: fc.oneof(fc.double(), fc.integer()),
+            m: fc.oneof(fc.double(), fc.integer()),
+          }),
+          { maxLength: 80 },
+        ),
+        (events) => {
+          const cleaned = cleanTrace(events);
+          expect(cleaned.length).toBeLessThanOrEqual(EXPORT_TRACE_MAX_EVENTS);
+          for (const event of cleaned) {
+            expect(EXPORT_TRACE_EVENTS).toContain(event.e);
+            expect(
+              event.v === "" || (EXPORT_TRACE_VALUES as readonly string[]).includes(event.v),
+            ).toBe(true);
+            for (const key of ["t", "n", "m"] as const) {
+              expect(Number.isInteger(event[key])).toBe(true);
+              expect(event[key]).toBeGreaterThanOrEqual(0);
+            }
+          }
+          // The text form is lossless for whatever survived.
+          expect(decodeTrace(encodeTrace(cleaned))).toEqual(cleaned);
+        },
+      ),
+      { numRuns: 200 },
+    );
+  });
+
+  it("keeps a legitimate trace whole and in order", () => {
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.record({
+            e: fc.constantFrom(...EXPORT_TRACE_EVENTS),
+            t: fc.integer({ min: 0, max: 604_800_000 }),
+            v: fc.constantFrom("" as const, ...EXPORT_TRACE_VALUES),
+            n: fc.integer({ min: 0, max: 2_147_483_647 }),
+            m: fc.integer({ min: 0, max: 2_147_483_647 }),
+          }),
+          { maxLength: EXPORT_TRACE_MAX_EVENTS },
+        ),
+        (events) => {
+          expect(cleanTrace(events)).toEqual(events);
+          expect(decodeTrace(encodeTrace(events))).toEqual(events);
+        },
+      ),
+      { numRuns: 200 },
+    );
+  });
+
+  it("clamps every run fact into the range the server keeps, and drops what is not a number", async () => {
+    const body = await sent({
+      status: "failed",
+      peak_resident_mib: 1e30,
+      peak_commit_mib: -4,
+      ram_total_gib: Number.NaN,
+      ram_free_gib: 8,
+      longest_gap_s: Infinity,
+    });
+    expect(body.peak_resident_mib).toBe(EXPORT_FACT_LIMITS.peak_resident_mib);
+    expect(body.peak_commit_mib).toBe(0);
+    expect(body).not.toHaveProperty("ram_total_gib");
+    expect(body.ram_free_gib).toBe(8);
+    expect(body).not.toHaveProperty("longest_gap_s");
+  });
+
+  it("drops a value outside the closed lists instead of sending it", async () => {
+    const body = await sent({
+      status: "failed",
+      ...({ engine: "quantum", limit: "everything", started_by: "someone" } as object),
+    });
+    expect(body).not.toHaveProperty("engine");
+    expect(body).not.toHaveProperty("limit");
+    expect(body).not.toHaveProperty("started_by");
   });
 });

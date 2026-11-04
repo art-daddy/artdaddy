@@ -623,6 +623,26 @@ describe("export delivers separate files into a folder", () => {
     },
   );
 
+  // The refusal's report says how the request went: the screen the person met and what they chose.
+  it("tells the story of an export the person declined, and a blocked one's limit", async () => {
+    const p = await project();
+    const args = { output_dir: "not-created-without-consent" };
+    await recordAnOverrun(p, args);
+    __setExportConfirmationForTests(async () => "cancel");
+    const result = (await requestedExport(args, p.ctx)) as Any;
+    expect(result.ok).toBe(false);
+    await whenExportTelemetrySettles();
+    const report = exportBeacon.mock.calls.at(-1)![0] as Any;
+    expect(report).toMatchObject({ status: "declined", started_by: "elsewhere" });
+    expect(report.trace.map((e: Any) => (e.v ? `${e.e}:${e.v}` : e.e))).toEqual([
+      "requested:menu",
+      "dialog_shown:confirm",
+      "dialog_choice:cancel",
+      "outcome:declined",
+    ]);
+    expect(report).not.toHaveProperty("limit");
+  });
+
   it.each(["whole", "clip", "copy", "no-context"] as const)(
     "counts an early %s refusal once without admitting a job",
     async (kind) => {

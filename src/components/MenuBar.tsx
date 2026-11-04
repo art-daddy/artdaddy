@@ -24,6 +24,7 @@ import { usePanes, type PaneId } from "../store/panes";
 import { useProjectNotice } from "../store/projectNotice";
 import { withImportJob } from "../store/importJobs";
 import { useProjects } from "../store/projects";
+import { summarizeRenderWorkload, type RenderWorkload } from "../timeline/renderPlan";
 import ExportDialog, { type ExportSettings } from "./ExportDialog";
 import { DiscordIcon } from "./DiscordIcon";
 import RecordDialog from "./RecordDialog";
@@ -48,6 +49,21 @@ export default function MenuBar() {
   const closeMcp = useMcpPanel((s) => s.closePanel);
   const [reportOpen, setReportOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  // The open project's size and layers, taken when the export dialog opens, so that it can say roughly
+  // how long an export will take and how big the file will be. Taken once here rather than subscribed
+  // to: the menu bar must not re-render on every timeline edit for a figure nobody is looking at.
+  const [exportWorkload, setExportWorkload] = useState<RenderWorkload | null>(null);
+  const openExport = () => {
+    let workload: RenderWorkload | null = null;
+    try {
+      const timeline = useEditor.getState().timeline;
+      workload = timeline ? summarizeRenderWorkload(timeline) : null;
+    } catch {
+      workload = null; // a courtesy figure: a project it cannot read just gets none
+    }
+    setExportWorkload(workload);
+    setExportOpen(true);
+  };
   const [toast, setToast] = useState<string | null>(null);
   const notice = useProjectNotice((s) => s.message);
   const clearNotice = useProjectNotice((s) => s.clear);
@@ -183,7 +199,7 @@ export default function MenuBar() {
     const controller = new AbortController();
     let jobId: string | null = null;
     const cancelQueued = (id: string) =>
-      void import("../timeline/exportQueue").then((q) => q.cancelExport(id));
+      void import("../timeline/exportQueue").then((q) => q.cancelExport(id, "person_dialog"));
     job.begin(() => {
       controller.abort();
       if (jobId) cancelQueued(jobId);
@@ -390,7 +406,7 @@ export default function MenuBar() {
       "sep",
       {
         label: "Export Video (.mp4)…",
-        onClick: () => setExportOpen(true),
+        onClick: () => openExport(),
         disabled: !hasProject,
       },
       {
@@ -572,7 +588,7 @@ export default function MenuBar() {
           Discord
         </button>
         <div className="ml-auto flex items-center gap-1">
-          <ExportBadge onClick={() => setExportOpen(true)} />
+          <ExportBadge onClick={() => openExport()} />
           {hasProject && (
             <button
               onClick={openRecorder}
@@ -586,7 +602,7 @@ export default function MenuBar() {
           )}
           {hasProject && (
             <button
-              onClick={() => setExportOpen(true)}
+              onClick={() => openExport()}
               aria-label="Export video"
               title="Export video"
               className="rounded px-2 py-0.5 text-[11px] text-neutral-300 hover:bg-neutral-800"
@@ -647,6 +663,7 @@ export default function MenuBar() {
         open={exportOpen}
         onCancel={() => setExportOpen(false)}
         onStart={(s) => void exportVideo(s)}
+        workload={exportWorkload}
       />
       <RecordDialog
         open={recordOpen}

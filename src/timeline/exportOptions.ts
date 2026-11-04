@@ -207,6 +207,82 @@ export function estimateExport(
   return guess === null ? measured : { ...measured, seconds: guess, secondsGuessed: true };
 }
 
+/** Whether a project's picture or layers are too much for the one-pass encoder, so that the Automatic
+ *  policy uses the streamed one. The ONE rule: the render's planner (`buildRenderCommand`) and the
+ *  export dialog's estimate both read it here, so the engine the estimate assumes is the one the
+ *  export will choose. `composite` is the size the render composites at (the authored canvas made even). */
+export function exceedsOnePass(
+  workload: Pick<RenderWorkload, "width" | "height" | "peakVisualLayers" | "peakMediaLayers">,
+  composite: { width: number; height: number },
+): boolean {
+  return (
+    workload.peakVisualLayers > 4 ||
+    (workload.width * workload.height > 1920 * 1080 && workload.peakMediaLayers > 1) ||
+    exceedsFileSequencePicture(composite)
+  );
+}
+
+export interface DialogEstimate {
+  readonly seconds: number | null;
+  /** `seconds` is a guess from the size of the export: nothing like it has run on this PC yet. */
+  readonly guessed: boolean;
+  readonly finalBytes: number | null;
+}
+
+/** What the export dialog tells the person before they click Export: roughly how long it will take and
+ *  how big the file will be, for the settings they have chosen. Read-only information: it starts and
+ *  decides nothing. It is built from the same history and the same `estimateExport` the pre-start check
+ *  uses, with the engine and encoder the planner would choose for these settings, so the line and the
+ *  later check cannot disagree about what a measurement matches. The engine is the Automatic policy's
+ *  choice from the project's size and layers (`exceedsOnePass`); the two triggers only the built plan
+ *  knows (more than 32 sources, a very long command) are not visible here and are left out. */
+export function estimateForDialog(
+  workload: RenderWorkload,
+  settings: {
+    resolution: ExportResolution;
+    quality: ExportQuality;
+    fps: number | null;
+    mode: ExportMode;
+  },
+  history: readonly ExportCalibration[],
+): DialogEstimate {
+  const resized = outputSize(workload.width, workload.height, settings.resolution);
+  const output = {
+    width: resized?.w ?? workload.width,
+    height: resized?.h ?? workload.height,
+    fps: outputFps(workload.fps, settings.fps ?? undefined),
+  };
+  const engine: ExportEngine = exceedsOnePass(workload, workload)
+    ? "partition-pipes-v1"
+    : "file-sequence-v1";
+  const { encoder } = finalEncoderPolicy(output, engine, settings.mode);
+  const estimate = estimateExport(workload, output, settings.quality, engine, history, encoder);
+  return {
+    seconds: estimate.seconds,
+    guessed: estimate.secondsGuessed === true,
+    finalBytes: estimate.finalBytes,
+  };
+}
+
+/** "under a minute", "about 4 min", "about 1 h 20 min": a time to plan around, not a promise. */
+export function describeExportTime(seconds: number | null): string {
+  if (seconds === null || !Number.isFinite(seconds) || seconds < 0) return "";
+  if (seconds < 45) return "under a minute";
+  const minutes = Math.max(1, Math.round(seconds / 60));
+  if (minutes < 60) return `about ${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest ? `about ${hours} h ${rest} min` : `about ${hours} h`;
+}
+
+/** "about 120 MB", "about 1.4 GB": the size of a file, to one or two figures. */
+export function describeExportSize(bytes: number | null): string {
+  if (bytes === null || !Number.isFinite(bytes) || bytes <= 0) return "";
+  if (bytes < 1e9) return `about ${Math.max(1, Math.round(bytes / 1e6))} MB`;
+  const gigabytes = bytes / 1e9;
+  return `about ${gigabytes < 10 ? gigabytes.toFixed(1) : Math.round(gigabytes)} GB`;
+}
+
 export type ExportPreflightReason =
   | "outside_promise"
   | "memory_unknown"

@@ -38,6 +38,9 @@ const LAST_USER_REFRESH_MS = 24 * 60 * 60 * 1000;
 
 const MAX_BODY_KEYS = 40;
 const MAX_BODY_TEXT = 400;
+/** The one value that may be longer than an ordinary field: the state trace as compact text (see
+ *  `encodeTrace`); 30 events of the largest values are under 2,000 characters. */
+const MAX_TRACE_BODY_TEXT = 2_400;
 const REPORT_ID = /^[A-Za-z0-9_.:-]{1,128}$/;
 
 export type ReportBody = Record<string, string | number | boolean>;
@@ -87,7 +90,7 @@ function flatBody(value: unknown): ReportBody | null {
   for (const [key, field] of Object.entries(value)) {
     if (++keys > MAX_BODY_KEYS || key === "__proto__") return null;
     if (typeof field === "string") {
-      if (field.length > MAX_BODY_TEXT) return null;
+      if (field.length > (key === "trace" ? MAX_TRACE_BODY_TEXT : MAX_BODY_TEXT)) return null;
       out[key] = field;
     } else if (
       typeof field === "boolean" ||

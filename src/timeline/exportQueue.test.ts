@@ -35,6 +35,7 @@ import { useAuth } from "../store/auth";
 import { EXPORT_SPEED_REVISION, type ExportCalibration } from "./exportOptions";
 import { FakeJobs } from "../test/fakeJobs";
 import * as host from "../platform/host";
+import { limitThatFired } from "./nativeDiagnostics";
 
 const exportBeacon = vi.hoisted(() => vi.fn(async (_event: unknown) => undefined));
 vi.mock("../api/exportEvents", () => ({ reportExport: exportBeacon }));
@@ -1596,6 +1597,474 @@ describe("whose export it is reported as", () => {
     await whenExportTelemetrySettles();
     expect(stamped).toBeUndefined();
     expect(exportBeacon.mock.calls[0][0]).not.toHaveProperty("owner", expect.anything());
+  });
+});
+
+// What an export's report says HAPPENED to it (Phase 3, S1): the screen it met, the stage it reached,
+// who stopped it and where, which limit ended it and how much memory it had used. Each test plays the
+// real journeys: an export that hit the working-set limit, one that ran into the commit cap, one that
+// stood still, one cancelled while it waited, and one that simply worked.
+describe("what happened to an export, as its report tells it", () => {
+  const GIB = 1024 ** 3;
+  const meta = {
+    duration_s: 60,
+    width: 1080,
+    height: 1920,
+    fps: 30,
+    quality: "medium",
+    project_id: "",
+  };
+  const calibrationFor = (engine: "partition-pipes-v1" | "file-sequence-v1") => ({
+    workload: {
+      width: 1080,
+      height: 1920,
+      fps: 30,
+      durationSeconds: 60,
+      visualClips: 6,
+      captionClips: 1,
+      audioClips: 1,
+      peakVisualLayers: 5,
+      peakMediaLayers: 3,
+    },
+    output: { width: 1080, height: 1920, fps: 30 },
+    quality: "medium",
+    engine,
+    revision: EXPORT_SPEED_REVISION,
+  });
+  // What the app process prints at the end of a run, formatted as src-tauri/src/jobs/stream.rs does.
+  const resident = (peak: number, limit: number) =>
+    `native render resident: ${JSON.stringify({ limit, sampled_peak: peak, workers_at_peak: [] })}\n`;
+  const budget = (limit: number, peak: number) =>
+    `native render budget: configured_commit=${limit}, reported_peak=${peak}; peak is accounting, not an exact physical ceiling\n`;
+  const block = (frame: number, outMs: number) =>
+    `frame=${frame}\nfps=30\nout_time_us=${outMs * 1000}\nspeed=1.0x\nprogress=continue\n`;
+  const lastReport = (): Any => exportBeacon.mock.calls.at(-1)![0];
+  const story = (report: Any): string[] =>
+    report.trace.map((e: Any) => (e.v ? `${e.e}:${e.v}` : e.e));
+
+  async function fresh() {
+    const made = make();
+    await whenExportTelemetrySettles();
+    exportBeacon.mockClear();
+    __setExportConfirmationForTests(async () => "continue");
+    vi.spyOn(host, "resolveExportResources").mockResolvedValue({
+      total_memory_bytes: 16 * GIB,
+      available_memory_bytes: 6 * GIB + 1,
+      scratch_free_bytes: 100e9,
+      destination_free_bytes: 100e9,
+      local_fast_candidate: false,
+      budgets: { memoryBytes: 3.5 * GIB, temporaryBytes: 18e9, executionSeconds: 28800 },
+    });
+    useExportJob.setState({ calibrations: [] });
+    return { ...made, jobs: new FakeJobs() };
+  }
+
+  it("tells a failed export's whole story: who asked, the screen it met, how far it got, the limit that stopped it", async () => {
+    const { store, jobs } = await fresh();
+    const calibration = calibrationFor("partition-pipes-v1");
+    // A comparable export took twice as long as the video: the pre-start screen warns ("slow").
+    useExportJob.setState({
+      calibrations: [
+        {
+          ...calibration,
+          elapsedSeconds: 130,
+          finalBytes: 100,
+          memoryBytes: 100,
+          temporaryBytes: 10,
+        },
+      ],
+    });
+    const stderr =
+      "native render failed: render resident memory budget exceeded: sampled=3800350720, limit=3758096384\n" +
+      resident(3_800_350_720, 3.5 * GIB) +
+      budget(4 * GIB, 3_900_000_000);
+    const submitted = await submitExport({
+      store,
+      supervisor: jobs,
+      via: "mcp",
+      destPath: DEST,
+      stagePath: STAGE,
+      filename: "final.mp4",
+      workload: calibration.workload,
+      meta: { ...meta, calibration },
+      run: async (_, id) => {
+        await jobs.submit({ id, lane: "measurement", program: "ffmpeg", args: [], meta: {} });
+        jobs.stdout(id, block(100, 3300));
+        jobs.exit(id, -1, stderr);
+        throw new ExportRunError("ffmpeg render failed (code=-1)", stderr);
+      },
+    });
+    await whenExportsSettle();
+    await whenExportTelemetrySettles();
+    expect((await whenExportEnds(submitted.job_id))?.state).toBe("failed");
+    const report = lastReport();
+    expect(story(report)).toEqual([
+      "requested:mcp",
+      "dialog_shown:confirm",
+      "dialog_choice:continue",
+      "stage:preparing",
+      "stage:rendering",
+      "guard_tripped:resident",
+      "outcome:failed",
+    ]);
+    // The screen: one reason (bit 256 is "slow"). The guard: peak and limit in MiB. The outcome: seconds.
+    expect(report.trace[1]).toMatchObject({ n: 1, m: 256 });
+    expect(report.trace[5]).toMatchObject({ n: 3584, m: 3584 });
+    expect(report).toMatchObject({
+      status: "failed",
+      limit: "resident",
+      engine: "streamed",
+      started_by: "elsewhere",
+      peak_resident_mib: 3584,
+      resident_limit_mib: 3584,
+      peak_commit_mib: 3712,
+      commit_limit_mib: 4096,
+      ram_total_gib: 16,
+      ram_free_gib: 6,
+    });
+  });
+
+  it("names the commit cap when an export ran into it (the 1.7-second 'Cannot allocate memory' failures)", async () => {
+    const { store, jobs } = await fresh();
+    const calibration = calibrationFor("file-sequence-v1");
+    const stderr =
+      "[fc#0 @ 000002052b65d140] Error while filtering: Cannot allocate memory\n" +
+      resident(1_300_000_000, 3.5 * GIB) +
+      budget(4 * GIB, 4 * GIB - 1000);
+    await submitExport({
+      store,
+      supervisor: jobs,
+      destPath: DEST,
+      stagePath: STAGE,
+      filename: "final.mp4",
+      workload: calibration.workload,
+      meta: { ...meta, calibration },
+      run: async (_, id) => {
+        await jobs.submit({ id, lane: "measurement", program: "ffmpeg", args: [], meta: {} });
+        jobs.exit(id, -1, stderr);
+        throw new ExportRunError("ffmpeg render failed (code=-1): Cannot allocate memory", stderr);
+      },
+    });
+    await whenExportsSettle();
+    await whenExportTelemetrySettles();
+    const report = lastReport();
+    expect(report).toMatchObject({ status: "failed", limit: "commit", engine: "one_pass" });
+    expect(story(report)).toEqual(
+      expect.arrayContaining(["guard_tripped:commit", "outcome:failed"]),
+    );
+    expect(report.peak_commit_mib).toBe(4096);
+  });
+
+  it("does not blame a limit for a failure that had nothing to do with one", async () => {
+    const { store, jobs } = await fresh();
+    const stderr =
+      "ffmpeg: No such file or directory\n" +
+      resident(900_000_000, 3.5 * GIB) +
+      budget(4 * GIB, 1 * GIB);
+    await submitExport({
+      store,
+      supervisor: jobs,
+      destPath: DEST,
+      stagePath: STAGE,
+      filename: "final.mp4",
+      meta,
+      run: async (_, id) => {
+        await jobs.submit({ id, lane: "measurement", program: "ffmpeg", args: [], meta: {} });
+        jobs.exit(id, -2, stderr);
+        throw new ExportRunError(
+          "ffmpeg render failed (code=-2): No such file or directory",
+          stderr,
+        );
+      },
+    });
+    await whenExportsSettle();
+    await whenExportTelemetrySettles();
+    const report = lastReport();
+    expect(report).not.toHaveProperty("limit");
+    expect(story(report)).not.toContain("guard_tripped:resident");
+    expect(story(report).some((s) => s.startsWith("guard_tripped"))).toBe(false);
+  });
+
+  it("logs a run that stood still, and how long, without stopping it", async () => {
+    const { fs, store, jobs } = await fresh();
+    vi.useFakeTimers({ now: 1_000_000 });
+    try {
+      const submitted = await submitExport({
+        store,
+        supervisor: jobs,
+        destPath: DEST,
+        stagePath: STAGE,
+        filename: "final.mp4",
+        meta,
+        run: async (_, id) => {
+          await jobs.submit({ id, lane: "measurement", program: "ffmpeg", args: [], meta: {} });
+          jobs.stdout(id, block(100, 3300));
+          // ffmpeg prints the same block every half second while it is stuck: that is not movement.
+          for (let second = 0; second < 75; second++) {
+            await vi.advanceTimersByTimeAsync(1000);
+            jobs.stdout(id, block(100, 3300));
+          }
+          jobs.stdout(id, block(200, 6600)); // it moved again
+          jobs.exit(id, 0, resident(2 * GIB, 3.5 * GIB));
+          await fs.writeBytes(STAGE, new Uint8Array([1, 2, 3]));
+          return {};
+        },
+      });
+      await whenExportsSettle();
+      await whenExportTelemetrySettles();
+      // Nothing was stopped: the export finished.
+      expect((await whenExportEnds(submitted.job_id))?.state).toBe("done");
+      const report = lastReport();
+      const stalls = report.trace.filter((e: Any) => e.e === "stall_detected");
+      expect(stalls).toHaveLength(1);
+      expect(stalls[0]).toMatchObject({ v: "", n: 60, m: 6 });
+      expect(report.longest_gap_s).toBe(75);
+      expect(story(report)).toEqual(expect.arrayContaining(["heartbeat_gap", "outcome:done"]));
+      expect(report.trace.find((e: Any) => e.e === "heartbeat_gap")).toMatchObject({ n: 75 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not count the file check that follows the render as the render standing still", async () => {
+    const { fs, store, jobs } = await fresh();
+    vi.useFakeTimers({ now: 1_000_000 });
+    try {
+      const submitted = await submitExport({
+        store,
+        supervisor: jobs,
+        destPath: DEST,
+        stagePath: STAGE,
+        filename: "final.mp4",
+        meta,
+        run: async (_, id) => {
+          await jobs.submit({ id, lane: "measurement", program: "ffmpeg", args: [], meta: {} });
+          for (let second = 1; second <= 20; second++) {
+            await vi.advanceTimersByTimeAsync(1000);
+            jobs.stdout(id, block(second * 30, second * 3000));
+          }
+          jobs.exit(id, 0, resident(2 * GIB, 3.5 * GIB)); // ffmpeg is over
+          // The file check decodes every frame in a process the supervisor does not follow, so it
+          // prints no progress: ninety quiet seconds on a long 4K export, and nothing is wrong.
+          await vi.advanceTimersByTimeAsync(90_000);
+          await fs.writeBytes(STAGE, new Uint8Array([1, 2, 3]));
+          return {};
+        },
+      });
+      await whenExportsSettle();
+      await whenExportTelemetrySettles();
+      expect((await whenExportEnds(submitted.job_id))?.state).toBe("done");
+      const report = lastReport();
+      expect(story(report)).toEqual([
+        "requested:other",
+        "stage:preparing",
+        "stage:rendering",
+        "stage:checking",
+        "stage:saving",
+        "outcome:done",
+      ]);
+      expect(report.longest_gap_s ?? 0).toBeLessThan(10);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("says a cancel during the file check happened while checking, not while rendering", async () => {
+    const { store, jobs } = await fresh();
+    const submitted = await submitExport({
+      store,
+      supervisor: jobs,
+      destPath: DEST,
+      stagePath: STAGE,
+      filename: "final.mp4",
+      meta,
+      run: async (signal, id) => {
+        await jobs.submit({ id, lane: "measurement", program: "ffmpeg", args: [], meta: {} });
+        jobs.stdout(id, block(1800, 60_000));
+        jobs.exit(id, 0, resident(2 * GIB, 3.5 * GIB));
+        return new Promise<never>((_, reject) =>
+          signal.addEventListener("abort", () => reject(new Error("export cancelled"))),
+        );
+      },
+    });
+    await vi.waitFor(() => expect(jobs.started.length).toBeGreaterThan(0));
+    expect(cancelExport(submitted.job_id, "person_card")).toBe(true);
+    await whenExportsSettle();
+    await whenExportTelemetrySettles();
+    const report = lastReport();
+    expect(story(report)).toEqual([
+      "requested:other",
+      "stage:preparing",
+      "stage:rendering",
+      "stage:checking",
+      "cancelled:person_card",
+      "outcome:cancelled",
+    ]);
+    expect(report.trace[4]).toMatchObject({ n: 3, m: 100 }); // where: checking, the render was whole
+  });
+
+  it("does not call a failed render's end a check", async () => {
+    const { store, jobs } = await fresh();
+    await submitExport({
+      store,
+      supervisor: jobs,
+      destPath: DEST,
+      stagePath: STAGE,
+      filename: "final.mp4",
+      meta,
+      run: async (_, id) => {
+        await jobs.submit({ id, lane: "measurement", program: "ffmpeg", args: [], meta: {} });
+        jobs.stdout(id, block(300, 10_000));
+        jobs.exit(id, -2, "ffmpeg: No such file or directory\n");
+        throw new ExportRunError("ffmpeg render failed (code=-2)", "No such file or directory");
+      },
+    });
+    await whenExportsSettle();
+    await whenExportTelemetrySettles();
+    expect(story(lastReport())).toEqual([
+      "requested:other",
+      "stage:preparing",
+      "stage:rendering",
+      "outcome:failed",
+    ]);
+  });
+
+  it("says who cancelled a queued export and that it never started", async () => {
+    const { fs, store } = await fresh();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    await submitExport({
+      store,
+      destPath: DEST,
+      stagePath: STAGE,
+      filename: "first.mp4",
+      meta,
+      run: async () => {
+        await gate;
+        await fs.writeBytes(STAGE, new Uint8Array([1]));
+        return {};
+      },
+    });
+    const SECOND = "C:/out/second.mp4";
+    const second = await submitExport({
+      store,
+      destPath: SECOND,
+      stagePath: `${SECOND}.part`,
+      filename: "second.mp4",
+      meta,
+      run: async () => {
+        throw new Error("a cancelled export must never start");
+      },
+    });
+    expect(second.queue_position).toBe(1);
+    expect(cancelExport(second.job_id, "person_queue")).toBe(true);
+    expect(cancelExport(second.job_id, "person_queue")).toBe(true); // a second press adds nothing
+    release();
+    await whenExportsSettle();
+    await whenExportTelemetrySettles();
+    const cancelled = exportBeacon.mock.calls
+      .map((c) => c[0] as Any)
+      .find((r) => r.status === "cancelled");
+    expect(story(cancelled)).toEqual([
+      "requested:other",
+      "queued",
+      "cancelled:person_queue",
+      "outcome:cancelled",
+    ]);
+    expect(cancelled.trace[1]).toMatchObject({ n: 1 }); // queue position
+    expect(cancelled.trace[2]).toMatchObject({ n: 0, m: 0 }); // where: queued, nothing done
+    expect(await fs.exists(SECOND)).toBe(false);
+  });
+
+  it("says where a running export was, and how far, when the assistant stopped it", async () => {
+    const { store, jobs } = await fresh();
+    const submitted = await submitExport({
+      store,
+      supervisor: jobs,
+      via: "chat",
+      origin: AGENT,
+      destPath: DEST,
+      stagePath: STAGE,
+      filename: "final.mp4",
+      meta,
+      run: async (signal, id) => {
+        await jobs.submit({ id, lane: "measurement", program: "ffmpeg", args: [], meta: {} });
+        jobs.stdout(id, block(900, 30_000)); // halfway through 60 s
+        return new Promise<never>((_, reject) =>
+          signal.addEventListener("abort", () => reject(new Error("export cancelled"))),
+        );
+      },
+    });
+    await vi.waitFor(() => expect(jobs.started.length).toBeGreaterThan(0));
+    expect(cancelExport(submitted.job_id, "assistant")).toBe(true);
+    await whenExportsSettle();
+    await whenExportTelemetrySettles();
+    const report = lastReport();
+    expect(report).toMatchObject({ status: "cancelled", started_by: "chat" });
+    expect(story(report)).toEqual([
+      "requested:chat",
+      "stage:preparing",
+      "stage:rendering",
+      "cancelled:assistant",
+      "outcome:cancelled",
+    ]);
+    expect(report.trace[3]).toMatchObject({ n: 2, m: 50 }); // where: rendering, at 50%
+  });
+
+  it("carries its story into the refusal when native admission says no (the field's 'allocation budget' block)", async () => {
+    const { store } = await fresh();
+    const jobs = new FakeJobs();
+    jobs.delivery = {
+      ...localDeliveryPort(store),
+      prepare: async () => {
+        throw new Error("export workspace allocation budget exceeded before write");
+      },
+    };
+    const error = await submitExport({
+      store,
+      supervisor: jobs,
+      destPath: DEST,
+      stagePath: STAGE,
+      filename: "final.mp4",
+      meta,
+      run: async () => ({}),
+    }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(ExportRequestError);
+    const refusal = error as ExportRequestError;
+    expect(refusal.status).toBe("blocked");
+    expect(refusal.story?.trace.snapshot().map((e) => e.e)).toEqual(["requested"]);
+    // The words the person was shown name the limit that refused it.
+    expect(limitThatFired(refusal.message, {})).toBe("scratch");
+    expect(isDestinationReserved(DEST)).toBe(false); // nothing is left reserved by the refusal
+  });
+
+  it("tells a clean export's story too: each stage once, in order", async () => {
+    const { fs, store } = await fresh();
+    await submitExport({
+      store,
+      destPath: DEST,
+      stagePath: STAGE,
+      filename: "final.mp4",
+      meta,
+      run: async () => {
+        await fs.writeBytes(STAGE, new Uint8Array([1, 2, 3]));
+        return {};
+      },
+    });
+    await whenExportsSettle();
+    await whenExportTelemetrySettles();
+    const report = lastReport();
+    expect(story(report)).toEqual([
+      "requested:other",
+      "stage:preparing",
+      "stage:checking",
+      "stage:saving",
+      "outcome:done",
+    ]);
+    expect(
+      report.trace.every((e: Any, i: number, all: Any[]) => i === 0 || e.t >= all[i - 1].t),
+    ).toBe(true);
+    expect(report).not.toHaveProperty("limit");
   });
 });
 

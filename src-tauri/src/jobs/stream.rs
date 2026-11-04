@@ -203,11 +203,17 @@ fn admitted_deadline(deadline_ms: u64) -> Result<Instant, String> {
 }
 
 impl Control {
+  /// The limits come from the memory the PC can give right now (`budget::render_limits`): never below the fixed
+  /// ones, higher on a PC with room.
   fn new(deadline_ms: u64, final_output: Option<FinalOutput>) -> Result<Self, String> {
+    Self::with_limits(deadline_ms, final_output, super::budget::render_limits(super::resources::export_memory()))
+  }
+
+  fn with_limits(deadline_ms: u64, final_output: Option<FinalOutput>, limits: super::budget::RenderLimits) -> Result<Self, String> {
     let deadline = admitted_deadline(deadline_ms)?;
     Ok(Self { state: Mutex::new(State { final_output, ..State::default() }), wake: pipe::Wake::new().map_err(|error| error.to_string())?,
-      budget: super::budget::Budget::new(super::budget::RENDER_COMMIT_LIMIT)?, deadline, settled: Condvar::new(),
-      resident_limit: super::budget::RENDER_RESIDENT_LIMIT })
+      budget: super::budget::Budget::new(limits.commit)?, deadline, settled: Condvar::new(),
+      resident_limit: limits.resident })
   }
 
   fn spawn(self: &Arc<Self>, executable: &Path, args: &[String], cwd: Option<&str>,
@@ -1343,6 +1349,70 @@ mod tests {
         assert_eq!(parsed["workers_at_peak"][0]["bytes"], parsed["sampled_peak"]);
       }
     }
+  }
+
+  // The limits an export runs under are the ones it was given, read back from the operating system where
+  // there is a commit cap, and the diagnostics every run prints name that same limit.
+  #[test]
+  fn a_control_installs_exactly_the_limits_it_is_given() {
+    let limits = super::super::budget::RenderLimits { resident: 6 * 1024 * 1024 * 1024, commit: 7 * 1024 * 1024 * 1024 };
+    let control = Control::with_limits(super::super::now_ms() + 10_000, None, limits).unwrap();
+    assert_eq!(control.resident_limit, limits.resident);
+    if let Ok((configured, _)) = control.budget.commit_accounting() { assert_eq!(configured, limits.commit); }
+    assert!(control.memory_diagnostics().contains(&format!("\"limit\":{}", limits.resident)), "{}", control.memory_diagnostics());
+  }
+
+  #[test]
+  fn a_control_built_the_way_the_app_builds_it_never_runs_under_less_than_the_fixed_limits() {
+    let control = Control::new(super::super::now_ms() + 10_000, None).unwrap();
+    assert!(control.resident_limit >= super::super::budget::RENDER_RESIDENT_LIMIT);
+    assert!(control.resident_limit <= super::super::budget::RENDER_RESIDENT_CEILING);
+    if let Ok((configured, _)) = control.budget.commit_accounting() { assert!(configured >= super::super::budget::RENDER_COMMIT_LIMIT); }
+  }
+
+  // JOURNEY REPLAY (field, 0.22.x). One 8K vertical HEVC clip exported to 1080x1920 needs about 3.5 GiB of
+  // working set at ffmpeg's default decoder threads, which is where the fixed 3.5 GiB limit every release
+  // had stopped it. Set ARTDADDY_REPLAY_8K to such a clip (it is only read) and ARTDADDY_REPLAY_FFMPEG to
+  // the bundled ffmpeg: the same export then runs under the old fixed limits and under the limits this
+  // PC's free memory gives, through the real watcher and the real job object, and prints what each did.
+  #[test]
+  #[ignore = "journey replay: needs ARTDADDY_REPLAY_8K and ARTDADDY_REPLAY_FFMPEG"]
+  fn replay_an_8k_export_under_the_old_and_the_derived_limits() {
+    use std::io::Read;
+    let (Some(clip), Some(ffmpeg)) = (std::env::var_os("ARTDADDY_REPLAY_8K"), std::env::var_os("ARTDADDY_REPLAY_FFMPEG")) else { return };
+    let old = super::super::budget::RenderLimits { resident: super::super::budget::RENDER_RESIDENT_LIMIT, commit: super::super::budget::RENDER_COMMIT_LIMIT };
+    let derived = super::super::budget::render_limits(super::super::resources::export_memory());
+    let mut outcomes = Vec::new();
+    for (name, limits) in [("old", old), ("derived", derived)] {
+      let dir = tempfile::tempdir().unwrap();
+      let output = dir.path().join("out.mp4");
+      let control = Arc::new(Control::with_limits(super::super::now_ms() + 600_000, None, limits).unwrap());
+      let args = strings(&["-hide_banner", "-nostdin", "-y", "-ss", "3", "-t", "6", "-i", &clip.to_string_lossy(), "-an",
+        "-vf", "scale=1080:1920:flags=bicubic,fps=30", "-pix_fmt", "yuv420p", "-c:v", "libx264", "-preset", "medium", "-crf", "23",
+        &output.to_string_lossy()]);
+      let guard: StartGuard = Arc::new(|| Ok(()));
+      let worker = control.spawn(Path::new(&ffmpeg), &args, dir.path().to_str(), false, WorkerRole::Single, &guard).unwrap();
+      let mut stdout = worker.child().take_stdout().unwrap();
+      let mut stderr = worker.child().take_stderr().unwrap();
+      let drain_out = std::thread::spawn(move || { let mut sink = Vec::new(); let _ = stdout.read_to_end(&mut sink); });
+      let drain_err = std::thread::spawn(move || { let mut text = String::new(); let _ = stderr.read_to_string(&mut text); text });
+      control.watch();
+      let started = std::time::Instant::now();
+      let waited = worker.wait();
+      let settled = control.settle();
+      let _ = drain_out.join();
+      let log = drain_err.join().unwrap_or_default();
+      let peak = control.state.lock().unwrap().resident_peak;
+      let commit = control.budget.commit_accounting().ok();
+      let size = std::fs::metadata(&output).map(|meta| meta.len()).unwrap_or(0);
+      let finished = waited.is_ok() && settled.is_ok() && size > 0;
+      println!("REPLAY {name}: finished={finished} after {:.1}s | resident limit {} MiB, sampled peak {} MiB | commit limit {:?} MiB, commit peak {:?} MiB | output {} bytes | settle={:?} | ffmpeg says: {}",
+        started.elapsed().as_secs_f64(), limits.resident >> 20, peak >> 20, commit.map(|c| c.0 >> 20), commit.map(|c| c.1 >> 20), size, settled,
+        log.lines().rev().find(|line| line.contains("rror") || line.contains("annot allocate")).unwrap_or("(no error line)"));
+      outcomes.push((name, finished));
+    }
+    // The point of the raise: what the old limits stopped, the derived limits let through.
+    assert!(outcomes[1].1, "the export did not finish under the derived limits");
   }
 
   #[cfg(target_os = "macos")]

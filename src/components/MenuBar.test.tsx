@@ -160,6 +160,60 @@ describe("MenuBar", () => {
     expect(screen.queryByPlaceholderText(/Project name/)).not.toBeInTheDocument();
   });
 
+  it("File → Export Video tells the person roughly how long it will take, from the open project", async () => {
+    const { emptyTimeline } = await import("../timeline/model");
+    const { summarizeRenderWorkload } = await import("../timeline/renderPlan");
+    const { EXPORT_SPEED_REVISION } = await import("../timeline/exportOptions");
+    const timeline = emptyTimeline(1920, 1080, 30);
+    timeline.tracks = [
+      {
+        id: "video",
+        kind: "video",
+        z: 0,
+        clips: [
+          {
+            id: "a",
+            kind: "video",
+            media_ref: "media_a",
+            source_in: 0,
+            source_out: 3600,
+            timeline_in: 0,
+            timeline_out: 3600,
+          },
+        ],
+      },
+    ];
+    const before = ed.timeline;
+    ed.timeline = timeline as never;
+    try {
+      useExportJob.setState({
+        calibrations: [
+          {
+            workload: summarizeRenderWorkload(timeline),
+            output: { width: 1920, height: 1080, fps: 30 },
+            quality: "medium",
+            engine: "file-sequence-v1",
+            encoder: "x264-crf",
+            revision: EXPORT_SPEED_REVISION,
+            elapsedSeconds: 240,
+            finalBytes: 90_000_000,
+            memoryBytes: null,
+            temporaryBytes: null,
+          },
+        ],
+      });
+      renderBar("/p/test");
+      fireEvent.click(screen.getByRole("button", { name: "File" }));
+      fireEvent.click(screen.getByText("Export Video (.mp4)…"));
+      expect(screen.getByLabelText("export estimate")).toHaveTextContent(
+        "Expected: about 4 min, a file of about 90 MB, from earlier exports on this PC.",
+      );
+    } finally {
+      ed.timeline = before;
+      useExportJob.setState({ calibrations: [] });
+    }
+  });
+
   it("File → Export Video renders through the SAME `export` tool the agent uses", async () => {
     // The point of the assertion is the delegation: a second, menu-only renderer
     // would drift from the agent's. Asserting the menu item exists would not catch that.

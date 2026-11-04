@@ -11,9 +11,13 @@ import {
   crfFor,
   DECODER_FRAME_THREAD_BUDGET,
   decoderThreads,
+  describeExportSize,
+  describeExportTime,
   estimateExport,
   estimateExportFromHistory,
+  estimateForDialog,
   exceedsFileSequencePicture,
+  exceedsOnePass,
   FILE_SEQUENCE_MAX_PIXELS,
   FRAME_THREADED_INPUTS_MAX,
   guessExportSeconds,
@@ -672,6 +676,220 @@ describe("the estimate an export gets: measured when there is history, a guess w
       temporaryBytes: null,
       finalBytes: null,
     });
+  });
+});
+
+// The engine rule moved into one function (the planner and the export dialog both read it). The planner's
+// old inline rule is frozen here, word for word, so the move is proven to change nothing.
+describe("one rule for what leaves the one-pass encoder", () => {
+  const legacy = (
+    w: { width: number; height: number; peakVisualLayers: number; peakMediaLayers: number },
+    c: { width: number; height: number },
+  ) =>
+    w.peakVisualLayers > 4 ||
+    (w.width * w.height > 1920 * 1080 && w.peakMediaLayers > 1) ||
+    exceedsFileSequencePicture(c);
+
+  it("answers exactly as the planner's own rule did, for every project shape", () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 2, max: 8192 }),
+        fc.integer({ min: 2, max: 8192 }),
+        fc.integer({ min: 0, max: 12 }),
+        fc.integer({ min: 0, max: 12 }),
+        fc.integer({ min: -1, max: 1 }),
+        (width, height, visual, media, nudge) => {
+          const workload = { width, height, peakVisualLayers: visual, peakMediaLayers: media };
+          const composite = { width: width + nudge, height };
+          expect(exceedsOnePass(workload, composite)).toBe(legacy(workload, composite));
+        },
+      ),
+      { numRuns: 500 },
+    );
+  });
+
+  it("pins the edges: five layers, more than one layer above 1080p, and a picture over 2560x1440", () => {
+    const plain = { width: 1920, height: 1080, peakVisualLayers: 4, peakMediaLayers: 4 };
+    expect(exceedsOnePass(plain, plain)).toBe(false);
+    expect(exceedsOnePass({ ...plain, peakVisualLayers: 5 }, plain)).toBe(true);
+    // 1080x1920 has the pixels of 1920x1080 (not above them): a vertical canvas is no heavier.
+    expect(exceedsOnePass({ ...plain, width: 1080, height: 1920, peakMediaLayers: 3 }, plain)).toBe(
+      false,
+    );
+    expect(exceedsOnePass({ ...plain, width: 2560, height: 1440, peakMediaLayers: 1 }, plain)).toBe(
+      false,
+    );
+    expect(exceedsOnePass({ ...plain, width: 2560, height: 1440, peakMediaLayers: 2 }, plain)).toBe(
+      true,
+    );
+    expect(exceedsOnePass(plain, { width: 3840, height: 2160 })).toBe(true);
+  });
+});
+
+describe("what the export dialog says before the click", () => {
+  const project: RenderWorkload = {
+    width: 1920,
+    height: 1080,
+    fps: 30,
+    durationSeconds: 120,
+    visualClips: 6,
+    captionClips: 1,
+    audioClips: 1,
+    peakVisualLayers: 2,
+    peakMediaLayers: 2,
+  };
+  const settings = { resolution: "source", quality: "medium", fps: null, mode: "quality" } as const;
+  const measuredSample = (over: Partial<ExportCalibration> = {}): ExportCalibration => ({
+    workload: project,
+    output: { width: 1920, height: 1080, fps: 30 },
+    quality: "medium",
+    engine: "file-sequence-v1",
+    encoder: "x264-crf",
+    revision: EXPORT_SPEED_REVISION,
+    elapsedSeconds: 150,
+    finalBytes: 48_000_000,
+    memoryBytes: 1_000_000_000,
+    temporaryBytes: null,
+    ...over,
+  });
+
+  it("gives the measured time and file size of an earlier export like this one, and says so by not calling it a guess", () => {
+    expect(estimateForDialog(project, settings, [measuredSample()])).toEqual({
+      seconds: 150,
+      guessed: false,
+      finalBytes: 48_000_000,
+    });
+  });
+
+  it("guesses the time (and only the time) when nothing like it has run here", () => {
+    const shown = estimateForDialog(project, settings, []);
+    expect(shown.guessed).toBe(true);
+    expect(shown.seconds).toBeGreaterThan(0);
+    expect(shown.finalBytes).toBeNull();
+  });
+
+  it("follows the settings: a smaller picture, quality or frame rate matches a different measurement", () => {
+    const small = measuredSample({
+      output: { width: 1280, height: 720, fps: 30 },
+      elapsedSeconds: 70,
+    });
+    expect(estimateForDialog(project, { ...settings, resolution: "720p" }, [small]).seconds).toBe(
+      70,
+    );
+    // The same history says nothing about the full-size export: that one is guessed.
+    expect(estimateForDialog(project, settings, [small]).guessed).toBe(true);
+    const high = measuredSample({ quality: "high", elapsedSeconds: 210 });
+    expect(estimateForDialog(project, { ...settings, quality: "high" }, [high]).seconds).toBe(210);
+    expect(estimateForDialog(project, settings, [high]).guessed).toBe(true);
+    const slow = measuredSample({
+      output: { width: 1920, height: 1080, fps: 60 },
+      elapsedSeconds: 300,
+    });
+    expect(estimateForDialog(project, { ...settings, fps: 60 }, [slow]).seconds).toBe(300);
+  });
+
+  it("looks for the measurement of the engine and encoder the planner would choose", () => {
+    // Five layers: the streamed engine, whose final encoder is the two-thread one above 1080p only.
+    const heavy: RenderWorkload = { ...project, peakVisualLayers: 5 };
+    const streamed = measuredSample({
+      workload: heavy,
+      engine: "partition-pipes-v1",
+      encoder: "x264-crf",
+      elapsedSeconds: 400,
+    });
+    expect(estimateForDialog(heavy, settings, [streamed]).seconds).toBe(400);
+    // A measurement from the other engine is not this export's measurement.
+    expect(
+      estimateForDialog(heavy, settings, [{ ...streamed, engine: "file-sequence-v1" }]).guessed,
+    ).toBe(true);
+    // Above 1080p the streamed engine's encoder is the two-thread one.
+    const big: RenderWorkload = { ...heavy, width: 3840, height: 2160 };
+    const bigSample = measuredSample({
+      workload: big,
+      output: { width: 3840, height: 2160, fps: 30 },
+      engine: "partition-pipes-v1",
+      encoder: "x264-crf-threads2",
+      elapsedSeconds: 900,
+    });
+    expect(estimateForDialog(big, settings, [bigSample]).seconds).toBe(900);
+    expect(estimateForDialog(big, settings, [{ ...bigSample, encoder: "x264-crf" }]).guessed).toBe(
+      true,
+    );
+  });
+
+  it("says nothing for Fast, which has no measurement and no guess yet", () => {
+    expect(estimateForDialog(project, { ...settings, mode: "fast" }, [])).toEqual({
+      seconds: null,
+      guessed: false,
+      finalBytes: null,
+    });
+  });
+
+  it("never throws and never returns a negative or non-finite figure, whatever the project is", () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 0, max: 20_000 }),
+        fc.integer({ min: 0, max: 20_000 }),
+        fc.double({ min: -1, max: 1e6, noNaN: false }),
+        fc.double({ min: -1, max: 400, noNaN: false }),
+        fc.constantFrom("source", "2160p", "1440p", "1080p", "720p", "480p"),
+        fc.constantFrom("high", "medium", "low"),
+        fc.constantFrom(null, 24, 30, 60, 500),
+        fc.constantFrom("quality", "fast"),
+        (width, height, seconds, fps, resolution, quality, rate, mode) => {
+          const odd: RenderWorkload = { ...project, width, height, fps, durationSeconds: seconds };
+          const shown = estimateForDialog(
+            odd,
+            { resolution, quality, fps: rate, mode } as never,
+            [],
+          );
+          for (const figure of [shown.seconds, shown.finalBytes])
+            if (figure !== null) expect(Number.isFinite(figure) && figure >= 0).toBe(true);
+        },
+      ),
+      { numRuns: 300 },
+    );
+  });
+});
+
+describe("how a time and a size are put to the person", () => {
+  it("rounds to what a person plans around, never claims more than it knows", () => {
+    expect(describeExportTime(0)).toBe("under a minute");
+    expect(describeExportTime(44)).toBe("under a minute");
+    expect(describeExportTime(45)).toBe("about 1 min");
+    expect(describeExportTime(150)).toBe("about 3 min");
+    expect(describeExportTime(59 * 60)).toBe("about 59 min");
+    expect(describeExportTime(60 * 60)).toBe("about 1 h");
+    expect(describeExportTime(80 * 60)).toBe("about 1 h 20 min");
+    expect(describeExportTime(null)).toBe("");
+    expect(describeExportTime(Number.NaN)).toBe("");
+    expect(describeExportTime(-3)).toBe("");
+    expect(describeExportSize(48_000_000)).toBe("about 48 MB");
+    expect(describeExportSize(1_400_000_000)).toBe("about 1.4 GB");
+    expect(describeExportSize(25_000_000_000)).toBe("about 25 GB");
+    expect(describeExportSize(10)).toBe("about 1 MB");
+    expect(describeExportSize(0)).toBe("");
+    expect(describeExportSize(null)).toBe("");
+  });
+
+  it("is monotone: a longer export is never described as shorter", () => {
+    const rank = (seconds: number) => {
+      const text = describeExportTime(seconds);
+      if (text === "under a minute") return 0;
+      const hours = /(\d+) h/.exec(text);
+      const minutes = /(\d+) min/.exec(text);
+      return (hours ? Number(hours[1]) * 60 : 0) + (minutes ? Number(minutes[1]) : 0);
+    };
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 0, max: 400_000 }),
+        fc.integer({ min: 0, max: 5_000 }),
+        (a, extra) => {
+          expect(rank(a + extra)).toBeGreaterThanOrEqual(rank(a));
+        },
+      ),
+      { numRuns: 400 },
+    );
   });
 });
 

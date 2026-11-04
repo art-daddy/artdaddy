@@ -49,9 +49,26 @@ import {
 } from "./exportOptions";
 import type { RenderWorkload } from "./renderPlan";
 import { runProjectMutation } from "../tools/coordinator";
+import type {
+  ExportEngine,
+  ExportLimit,
+  ExportStarter,
+  ExportTraceValue,
+} from "../api/exportVocabulary";
+import { CONFIRM_REASON_BITS, ExportStory, RunWatch, STAGE_CODES } from "./exportTrace";
+import { limitThatFired, mibBand, parseNativeDiagnostics } from "./nativeDiagnostics";
+
+/** Who stopped an export (a value of the report's trace vocabulary). */
+export type ExportCanceller = Extract<
+  ExportTraceValue,
+  "person_dialog" | "person_card" | "person_queue" | "assistant" | "app"
+>;
 
 /** Destinations with an export queued or running, so a second one is refused rather than raced. */
 const reserved = new Set<string>();
+
+/** The story of each export in flight, by job id: what happened to it so far (see exportTrace.ts). */
+const stories = new Map<string, ExportStory>();
 
 /** Serializes encodes across every project in the process. */
 let queueTail: Promise<unknown> = Promise.resolve();
@@ -244,6 +261,8 @@ export interface ExportRecord {
 
 /** Bounded like the persisted ledger's terminal set: this is a session view, not an archive. */
 const KEEP_TERMINAL = 50;
+/** How often a running export is checked for standing still (log only, see RunWatch). */
+const WATCH_TICK_MS = 5_000;
 const records: ExportRecord[] = [];
 const listeners = new Set<() => void>();
 // A snapshot rebuilt on every change, because `records` is mutated in place: a subscriber that
@@ -350,10 +369,37 @@ export function listExportOutcomes(): Array<Record<string, unknown>> {
   }));
 }
 
-/** Stop an export. Returns false when it already finished — a settled job cannot be recalled. */
-export function cancelExport(jobId: string): boolean {
+/** Where a tool-run export request came from, for its story: the in-app chat (the turn that asked is
+ *  known), an outside assistant over MCP, or the Export menu (which runs the same tool with neither). */
+export function exportVia(
+  ctx: Pick<ClientToolContext, "origin" | "surface"> | null | undefined,
+): "menu" | "chat" | "mcp" {
+  if (ctx?.origin) return "chat";
+  return ctx?.surface === "mcp" ? "mcp" : "menu";
+}
+
+/** Say in the export's story who stopped it and where it was (queued, or which stage and how far),
+ *  once, however many times the button is pressed. */
+function noteCancelled(jobId: string, by: ExportCanceller): void {
+  const story = stories.get(jobId);
+  if (!story || story.cancelNoted) return;
+  story.cancelNoted = true;
+  const queued = records.find((r) => r.job_id === jobId)?.state === "queued";
+  story.trace.record(
+    "cancelled",
+    by,
+    STAGE_CODES[queued ? "queued" : story.stage],
+    story.watch?.percentReached() ?? 0,
+  );
+}
+
+/** Stop an export. Returns false when it already finished — a settled job cannot be recalled.
+ *  `by` says who stopped it, for the report's story: the person (in the export dialog, on the card,
+ *  in the queue), the assistant, or the app itself (quitting). */
+export function cancelExport(jobId: string, by: ExportCanceller = "app"): boolean {
   const c = controllers.get(jobId);
   if (!c) return false;
+  noteCancelled(jobId, by);
   const port = deliveryPorts.get(jobId);
   if (port)
     void port
@@ -454,7 +500,10 @@ export async function manageExportsTool(
   if (port && controllers.has(jobId)) {
     try {
       const cancelled = await port.cancel(jobId);
-      if (cancelled) controllers.get(jobId)?.abort();
+      if (cancelled) {
+        noteCancelled(jobId, "assistant");
+        controllers.get(jobId)?.abort();
+      }
       return {
         ok: true,
         cancelled,
@@ -464,7 +513,7 @@ export async function manageExportsTool(
       return { ok: false, error: `export cancellation could not be committed: ${String(error)}` };
     }
   }
-  if (cancelExport(jobId)) return { ok: true, cancelled: true };
+  if (cancelExport(jobId, "assistant")) return { ok: true, cancelled: true };
   const record = records.find((r) => r.job_id === jobId);
   if (!record)
     return {
@@ -491,6 +540,8 @@ export class ExportRequestError extends Error {
     readonly submitted: readonly ExportSubmission[],
     readonly status: "blocked" | "declined" | "cancelled" = "blocked",
     readonly workload?: RenderWorkload,
+    /** What happened to the request before it was refused, for the refusal's report. */
+    readonly story?: ExportStory,
   ) {
     super(message);
     this.name = "ExportRequestError";
@@ -548,6 +599,12 @@ export interface ExportSpec {
   owner?: string;
   /** The export call this job is one file of (see {@link sealExportBatch}). */
   batch?: string;
+  /** Where the request came from, for the report's story: the Export menu, the in-app chat or an
+   *  outside assistant over MCP. */
+  via?: "menu" | "chat" | "mcp";
+  /** What happened to this export so far (see exportTrace.ts). Set by the queue when the request
+   *  arrives; a caller leaves it out. */
+  story?: ExportStory;
   /** Runs the encode. Rejects with a message on failure. `jobId` names the job everywhere: the
    *  ledger, this queue and the supervisor. */
   run: (
@@ -625,6 +682,9 @@ export async function whenExportTelemetrySettles(): Promise<void> {
 async function reportSettledExport(
   spec: Pick<ExportSpec, "store" | "destPath" | "meta" | "supervisor" | "copyOf" | "owner"> & {
     jobId?: string;
+    /** What happened to this export (see exportTrace.ts). Absent for one a later launch finished. */
+    story?: ExportStory;
+    startedBy?: ExportStarter;
   },
   outcome: {
     status: "done" | "failed" | "cancelled";
@@ -647,6 +707,10 @@ async function reportSettledExport(
       native && native.started_at !== null && native.ended_at !== null
         ? Math.max(0, native.ended_at - native.started_at)
         : 0;
+    // What the app process printed at the end of the run: the memory it used and the limits it ran
+    // under. One reading serves the estimate below and the report.
+    const stderr = native ? jobStderr(native) : "";
+    const facts = parseNativeDiagnostics(stderr);
     // Only a delivered file has a size; a failed encode leaves nothing to measure.
     const size =
       outcome.status === "done"
@@ -662,42 +726,32 @@ async function reportSettledExport(
       spec.meta?.calibration &&
       size > 0
     ) {
-      let memoryBytes: number | null = null;
-      let temporaryBytes: number | null = null;
-      const diagnostics = native ? jobStderr(native).split(/\r?\n/).reverse() : [];
-      const summary = diagnostics.find((line) => line.startsWith("native render resident: "));
-      if (summary) {
-        try {
-          const parsed: unknown = JSON.parse(summary.slice("native render resident: ".length));
-          const peak =
-            parsed && typeof parsed === "object"
-              ? (parsed as Record<string, unknown>).sampled_peak
-              : null;
-          if (typeof peak === "number" && Number.isSafeInteger(peak) && peak > 0)
-            memoryBytes = peak;
-        } catch {}
-      }
-      const temporary = diagnostics.find((line) => line.startsWith("native render temporary: "));
-      if (temporary) {
-        try {
-          const parsed: unknown = JSON.parse(temporary.slice("native render temporary: ".length));
-          const peak =
-            parsed && typeof parsed === "object"
-              ? (parsed as Record<string, unknown>).accounted_peak_payload_bytes
-              : null;
-          if (typeof peak === "number" && Number.isSafeInteger(peak) && peak >= 0)
-            temporaryBytes = peak;
-        } catch {}
-      }
       const queuedMs = native?.started_at ? Math.max(0, native.started_at - native.queued_at) : 0;
       useExportJob.getState().rememberCalibration({
         ...spec.meta.calibration,
         elapsedSeconds: Math.max(0, outcome.elapsedMs - queuedMs) / 1000,
         finalBytes: size,
-        memoryBytes,
-        temporaryBytes,
+        memoryBytes: facts.residentPeakBytes ?? null,
+        temporaryBytes: facts.temporaryPeakBytes ?? null,
       });
     }
+    // Which limit ended a failed export, and how it ended: the last lines of the story.
+    const limit: ExportLimit | undefined =
+      outcome.status === "failed"
+        ? limitThatFired(`${outcome.error}\n${stderr}`, facts)
+        : undefined;
+    const story = spec.story;
+    if (story) {
+      if (limit && limit !== "other")
+        story.trace.record(
+          "guard_tripped",
+          limit === "os" ? "os_refusal" : limit,
+          mibBand(facts.residentPeakBytes) ?? 0,
+          mibBand(facts.residentLimitBytes) ?? 0,
+        );
+      story.trace.record("outcome", outcome.status, Math.round(outcome.elapsedMs / 1000), 0);
+    }
+    const engine = spec.meta?.calibration?.engine;
     const { reportExport } = await import("../api/exportEvents");
     await reportExport({
       status: outcome.status,
@@ -717,6 +771,19 @@ async function reportSettledExport(
       project_id: spec.meta?.project_id ?? "",
       visual_layers: spec.meta?.visual_layers,
       owner: spec.owner ?? spec.meta?.owner,
+      ...(story ? { trace: story.trace.snapshot() } : {}),
+      ...(engine
+        ? { engine: (engine === "partition-pipes-v1" ? "streamed" : "one_pass") as ExportEngine }
+        : {}),
+      ...(limit ? { limit } : {}),
+      ...(spec.startedBy ? { started_by: spec.startedBy } : {}),
+      peak_resident_mib: mibBand(facts.residentPeakBytes),
+      peak_commit_mib: mibBand(facts.commitPeakBytes),
+      resident_limit_mib: mibBand(facts.residentLimitBytes),
+      commit_limit_mib: mibBand(facts.commitLimitBytes),
+      ram_total_gib: story?.ramTotalGib,
+      ram_free_gib: story?.ramFreeGib,
+      longest_gap_s: story?.longestGapS,
     });
   } catch {
     /* telemetry is never worth disturbing a finished export over */
@@ -725,6 +792,7 @@ async function reportSettledExport(
 
 /** Tests only. */
 export function __resetExportQueue(): void {
+  stories.clear();
   reserved.clear();
   inflight.clear();
   beacons.clear();
@@ -753,6 +821,7 @@ async function confirmExportRequest(specs: readonly ExportSpec[]): Promise<boole
       [],
       status,
       specs[0].workload,
+      specs[0].story,
     );
   };
   const checks: ExportAssessment[] = [];
@@ -761,6 +830,7 @@ async function confirmExportRequest(specs: readonly ExportSpec[]): Promise<boole
     if (spec.submissionSignal?.aborted || !spec.store.sessionLive()) return refuse("cancelled");
     const resources = await resolveExportResources(spec.destPath, spec.submissionSignal);
     snapshots.push(resources);
+    spec.story?.noteMachine(resources);
     const workload = spec.workload ?? {
       width: spec.meta?.project_width ?? spec.meta?.width ?? 0,
       height: spec.meta?.project_height ?? spec.meta?.height ?? 0,
@@ -872,7 +942,17 @@ async function confirmExportRequest(specs: readonly ExportSpec[]): Promise<boole
     "You can lower the export resolution or export a smaller section. Cancel to change settings.",
     warning ? "Continue anyway?" : "Continue?",
   ].join("\n\n");
+  // The screen the person is about to see, and what they did with it, are part of the story: how many
+  // reasons it listed (`n`) and which (`m`, one bit each).
+  const shown = [...reasons].reduce((bits, reason) => bits | (CONFIRM_REASON_BITS[reason] ?? 0), 0);
+  for (const spec of specs)
+    spec.story?.trace.record("dialog_shown", "confirm", reasons.size, shown);
   const decision = await confirmExport(message, warning);
+  for (const spec of specs)
+    spec.story?.trace.record(
+      "dialog_choice",
+      decision === "continue" ? "continue" : decision === "cancel" ? "cancel" : "dismiss",
+    );
   if (specs.some((spec) => spec.submissionSignal?.aborted || !spec.store.sessionLive()))
     return refuse("cancelled");
   if (decision === "continue") return storageReady;
@@ -891,7 +971,11 @@ export async function submitExports(request: readonly ExportSpec[]): Promise<Exp
     dependencies: [...spec.dependencies],
     ...(spec.meta ? { meta: structuredClone(spec.meta) } : {}),
     ...(spec.workload ? { workload: structuredClone(spec.workload) } : {}),
+    story: spec.story ?? new ExportStory(),
   }));
+  // The story starts with who asked.
+  for (const spec of specs)
+    spec.story.trace.record("requested", spec.via ?? (spec.origin ? "chat" : "other"));
   const destinations = new Set<string>();
   const projectDir = specs[0].store.projectDir;
   for (const spec of specs) {
@@ -917,6 +1001,7 @@ export async function submitExports(request: readonly ExportSpec[]): Promise<Exp
       [...submitted],
       failed.submissionSignal?.aborted || !failed.store.sessionLive() ? "cancelled" : "blocked",
       failed.workload,
+      failed.story,
     );
   }
   return submitted;
@@ -1035,6 +1120,10 @@ async function admitExport(spec: ExportSpec, storageReady: boolean): Promise<Exp
   controllers.set(jobId, new AbortController());
   if (spec.batch) batchOf(spec.batch).open++;
   const queuePosition = Math.max(0, reserved.size - 1);
+  if (spec.story) {
+    stories.set(jobId, spec.story);
+    if (queuePosition > 0) spec.story.trace.record("queued", "", queuePosition);
+  }
   records.push({
     job_id: jobId,
     filename: spec.filename,
@@ -1090,18 +1179,65 @@ async function encode(spec: ExportSpec, ledger: Ledger, jobId: string, key: stri
   const startedAt = Date.now();
   const staged = spec.stagePath !== spec.destPath;
   const signal = controllers.get(jobId)?.signal ?? new AbortController().signal;
+  const story = spec.story;
 
   const run: RunOutcome = { error: null, cancelled: false, warnings: [] };
   let finishActivity: (() => void) | null = null;
   let unfollow: (() => void) | undefined;
+  let watchTimer: ReturnType<typeof setInterval> | undefined;
+  let begun = false;
+  // The export's turn has come (the supervisor started it, or it runs in the page): the story says
+  // how long it waited, and a watch on its run starts. Once.
+  const begin = (): void => {
+    if (begun || !story) return;
+    begun = true;
+    const waited = Math.round(
+      (Date.now() - (records.find((r) => r.job_id === jobId)?.startedAt ?? startedAt)) / 1000,
+    );
+    if (waited >= 1 && !spec.copyOf) story.trace.record("dequeued", "", waited);
+    story.enter("preparing");
+    if (spec.copyOf) return;
+    story.watch = new RunWatch(
+      story.trace,
+      Math.max(0, (spec.meta?.duration_s ?? 0) * 1000),
+      Date.now,
+      () => story.enter("rendering"),
+    );
+    watchTimer = setInterval(() => story.watch?.tick(), WATCH_TICK_MS);
+  };
+  // The render ended, however it ended: the watch's last word, before the checks that follow it
+  // (which take their own time and are not the render standing still).
+  const endWatch = (): void => {
+    if (watchTimer !== undefined) clearInterval(watchTimer);
+    watchTimer = undefined;
+    if (story?.watch && story.longestGapS === undefined) story.longestGapS = story.watch.finish();
+  };
   try {
     // Cancelled while still queued: never start an encode nobody is waiting for.
     if (signal.aborted) throw new Error("export cancelled");
     if (spec.supervisor)
-      unfollow = spec.supervisor.subscribe((v) => {
-        if (v.id === jobId && v.state === "running") patch(jobId, { state: "running" });
-      });
-    else patch(jobId, { state: "running" });
+      unfollow = spec.supervisor.subscribe(
+        (v) => {
+          if (v.id !== jobId) return;
+          if (v.state === "running") {
+            patch(jobId, { state: "running" });
+            begin();
+          } else if (v.state === "exited") {
+            // The render process is over. What follows (the check that decodes the whole file, run
+            // outside the supervisor and so silent, then the save) is not the render standing still,
+            // and a cancel from here on happens while checking.
+            endWatch();
+            if (!v.killed && v.code === 0) story?.enter("checking");
+          }
+        },
+        (id, chunk) => {
+          if (id === jobId) story?.watch?.chunk(chunk);
+        },
+      );
+    else {
+      patch(jobId, { state: "running" });
+      begin();
+    }
     // An encode is the heaviest thing the app does and the likeliest moment to be killed for
     // memory; if the process dies here the crash marker will say so.
     finishActivity = beginSessionActivity("export");
@@ -1114,11 +1250,16 @@ async function encode(spec: ExportSpec, ledger: Ledger, jobId: string, key: stri
       if (!port) throw new Error("copy delivery owner is missing");
       await port.copy(jobId);
     } else {
-      run.warnings = (await spec.run(signal, jobId, spec.meta)).warnings ?? [];
+      try {
+        run.warnings = (await spec.run(signal, jobId, spec.meta)).warnings ?? [];
+      } finally {
+        endWatch();
+      }
     }
     if (signal.aborted) throw new Error("export cancelled");
     const port = deliveryPorts.get(jobId);
     if (!port) throw new Error("export delivery owner is missing");
+    story?.enter("checking");
     await port.verify(jobId);
     if (signal.aborted) throw new Error("export cancelled");
   } catch (e) {
@@ -1128,6 +1269,7 @@ async function encode(spec: ExportSpec, ledger: Ledger, jobId: string, key: stri
     if (!run.cancelled && e instanceof ExportRunError) run.stderrTail = e.stderrTail;
   } finally {
     unfollow?.();
+    endWatch();
     finishActivity?.();
   }
   await settle({
@@ -1146,6 +1288,7 @@ async function encode(spec: ExportSpec, ledger: Ledger, jobId: string, key: stri
     copyOf: spec.copyOf,
     batch: spec.batch,
     run,
+    story,
   });
 }
 
@@ -1166,6 +1309,8 @@ interface Settle {
   copyOf?: string;
   batch?: string;
   run: RunOutcome;
+  /** What happened to this export so far, to be finished and reported (absent for an adopted one). */
+  story?: ExportStory;
   /** A later launch of the app is finishing this export; see `finishAdopted`. */
   recovered?: boolean;
 }
@@ -1185,6 +1330,7 @@ async function settle(x: Settle): Promise<void> {
     try {
       const port = deliveryPorts.get(x.jobId);
       if (!port) throw new Error("export delivery owner is missing");
+      x.story?.enter("saving");
       publicationPending = true;
       let published: ExportDelivery;
       try {
@@ -1224,6 +1370,7 @@ async function settle(x: Settle): Promise<void> {
   if (!publicationPending) await x.supervisor?.commit(x.jobId).catch(() => false);
   controllers.delete(x.jobId);
   deliveryPorts.delete(x.jobId);
+  stories.delete(x.jobId);
   patch(x.jobId, {
     state: error ? (cancelled ? "cancelled" : "failed") : "done",
     endedAt: Date.now(),
