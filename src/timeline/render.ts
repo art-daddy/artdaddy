@@ -2740,6 +2740,8 @@ function sequenceProgressReporter(durations: readonly number[]): (chunk: string)
       etaSec: etaSeconds(report.outMs, totalMs, report.speed),
       speed: report.speed,
       frame: report.frame,
+      step: report.step ?? null,
+      steps: report.steps ?? null,
     });
   });
 }

@@ -18,6 +18,7 @@ import {
   buildRenderCommand,
   canvasDuration,
   exportDestination,
+  exportProgressReporter,
   exportStem,
   exportTimelineTool,
   renderTimelineTool,
@@ -442,6 +443,42 @@ describe("buildRenderCommand — one frame (UJ-012)", () => {
     await runRenderPlan(ctx, buildRenderCommand(tl(clip), "/o.mp4"));
     expect(useExportJob.getState().fraction).not.toBe(0.5);
     job.reset();
+  });
+});
+
+// What a running export publishes for the chat card, which belongs to the queue and not to the Export
+// dialog: the numbers must arrive even when nobody began the dialog's job (an assistant's export).
+describe("the progress an export publishes", () => {
+  it("reaches the live feed of an export the menu did not start, with the part it is on", () => {
+    const store = useExportJob.getState();
+    store.reset();
+    store.beginLive("j1");
+    try {
+      const read = exportProgressReporter({ duration: 10, stepDurations: [2, 3, 5] });
+      read("artdaddy_step=1\n");
+      read("frame=45\nfps=30\nout_time_us=1500000\nspeed=1.5x\nprogress=continue\n");
+      const live = useExportJob.getState().live!;
+      expect(live).toMatchObject({ step: 1, steps: 3, frame: 45, speed: 1.5 });
+      // Part 1 starts where part 0 ended (2 s): cumulative 3.5 s of 10 s.
+      expect(live.fraction).toBeCloseTo(0.35);
+      expect(useExportJob.getState().phase).toBe("idle");
+    } finally {
+      store.endLive("j1");
+    }
+  });
+
+  it("leaves the part out for a render made in one process", () => {
+    const store = useExportJob.getState();
+    store.reset();
+    store.beginLive("j2");
+    try {
+      exportProgressReporter({ duration: 10 })(
+        "frame=30\nfps=30\nout_time_us=1000000\nspeed=1.0x\nprogress=continue\n",
+      );
+      expect(useExportJob.getState().live).toMatchObject({ step: null, steps: null, frame: 30 });
+    } finally {
+      store.endLive("j2");
+    }
   });
 });
 

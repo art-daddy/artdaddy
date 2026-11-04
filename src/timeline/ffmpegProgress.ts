@@ -20,6 +20,10 @@ export interface RenderProgress {
   speed: number;
   /** True for the final block. */
   done: boolean;
+  /** For a render made in parts: which part this block belongs to (0-based) and how many parts there
+   *  are, the last being the final encode. Absent for a render made in one process. */
+  step?: number;
+  steps?: number;
 }
 
 const num = (v: string | undefined): number => {
@@ -101,6 +105,8 @@ export function createSequenceProgressReader(
           durations.slice(0, index).reduce((total, duration) => total + duration * 1000, 0) +
           Math.min(report.outMs, (durations[index] ?? 0) * 1000),
         done: report.done && index === durations.length - 1,
+        step: index,
+        steps: durations.length,
       }),
     );
   let reader = readerFor(step);

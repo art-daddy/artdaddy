@@ -65,7 +65,13 @@ import { BRAND } from "../brand";
 import { useExportJob } from "../store/exportJob";
 import { unknownParams } from "../contract/params";
 
-type ToolReply = { ok: boolean; error?: string; saved_to?: string; job_id?: string };
+type ToolReply = {
+  ok: boolean;
+  error?: string;
+  saved_to?: string;
+  job_id?: string;
+  declined?: boolean;
+};
 const runTool = vi.fn(async (name: string, args: Record<string, unknown>): Promise<ToolReply> => {
   const unknown = unknownParams(name, args);
   return unknown.length
@@ -335,6 +341,23 @@ describe("MenuBar", () => {
     fireEvent.click(screen.getByText("Export Video (.mp4)…"));
     fireEvent.click(screen.getByRole("button", { name: "Export" }));
     await waitFor(() => expect(screen.getByText(/no clips to render/)).toBeInTheDocument());
+  });
+
+  // Pressing Cancel on a question (not enough memory, say) is the person's own choice: the export
+  // dialog says Cancelled, not Failed with an error nobody caused.
+  it("says Cancelled, not Failed, when the person declined the question the export asked", async () => {
+    runTool.mockResolvedValueOnce({
+      ok: false,
+      error: "export cancelled before submission",
+      declined: true,
+    } as never);
+    renderBar("/p/test");
+    fireEvent.click(screen.getByRole("button", { name: "File" }));
+    fireEvent.click(screen.getByText("Export Video (.mp4)…"));
+    fireEvent.click(screen.getByRole("button", { name: "Export" }));
+    await waitFor(() => expect(useExportJob.getState().phase).toBe("cancelled"));
+    expect(useExportJob.getState().error).toBeNull();
+    expect(screen.queryByText(/cancelled before submission/)).not.toBeInTheDocument();
   });
 
   it("export is disabled with no project open", () => {

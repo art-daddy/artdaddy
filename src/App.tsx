@@ -4,6 +4,7 @@ import { Route, Routes, useLocation, useParams } from "react-router-dom";
 import AuthProvider from "./components/AuthProvider";
 import ProfilePage from "./components/ProfilePage";
 import CloseFailedDialog from "./components/CloseFailedDialog";
+import ExportQuestionDialog from "./components/ExportQuestionDialog";
 import MenuBar from "./components/MenuBar";
 import Shell from "./components/Shell";
 import CompatibilityGate from "./components/CompatibilityGate";
@@ -204,6 +205,7 @@ export default function App() {
         </div>
       </CompatibilityGate>
       <CloseFailedDialog />
+      <ExportQuestionDialog />
     </AuthProvider>
   );
 }

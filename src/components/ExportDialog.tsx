@@ -17,6 +17,7 @@ import {
 import type { RenderWorkload } from "../timeline/renderPlan";
 import { useExportJob } from "../store/exportJob";
 import { resolveLocalFastEncoder } from "../platform/host";
+import ExportProgressBar from "./ExportProgressBar";
 import ExportQueuePane from "./ExportQueuePane";
 import { cn } from "./ui";
 
@@ -319,25 +320,10 @@ function Progress({
   const eta = formatEta(etaSec);
   return (
     <div className="mt-3">
-      <div
-        role="progressbar"
-        aria-label="export progress"
-        aria-valuemin={0}
-        aria-valuemax={100}
-        // Indeterminate until ffmpeg reports a position: an aria value of 0 would claim
-        // "nothing has happened", which is a different statement from "not known yet".
-        aria-valuenow={fraction === null && !done ? undefined : Math.round(pct * 100)}
-        className="h-1.5 w-full overflow-hidden rounded bg-neutral-800"
-      >
-        <div
-          className={cn(
-            "h-full transition-[width] duration-200",
-            phase === "failed" ? "bg-red-500" : done ? "bg-emerald-500" : "bg-accent",
-            fraction === null && !done && "animate-pulse",
-          )}
-          style={{ width: `${Math.round((fraction === null && !done ? 0.06 : pct) * 100)}%` }}
-        />
-      </div>
+      <ExportProgressBar
+        fraction={fraction}
+        state={phase === "failed" ? "failed" : done ? "done" : "running"}
+      />
       <div className="mt-2 flex items-baseline justify-between text-[11px] text-neutral-400">
         <span data-testid="export-status">
           {phase === "preparing" && "Preparing…"}

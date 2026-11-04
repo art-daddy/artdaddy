@@ -50,6 +50,7 @@ import ReportProblemDialog from "./ReportProblemDialog";
 import { trackLabelById } from "./timeline/labels";
 import StatusLine from "./StatusLine";
 import ToolCalls from "./ToolCalls";
+import ExportCard from "./ExportCard";
 import { buildRows, type SummaryContext } from "./toolSummary";
 import { STARTER_PROMPTS } from "./starterPrompts";
 import { jobNoteSummary } from "./jobNoteSummary";
@@ -648,6 +649,7 @@ export default function ChatView({ onHide }: { onHide?: () => void } = {}) {
           void uploadFiles(files);
         }}
       >
+        <ExportCard />
         {attachments.length > 0 && (
           <div className="mb-2 flex flex-wrap gap-1.5">
             {attachments.map((a, i) => (

@@ -1211,9 +1211,27 @@ describe("an export outlives a crash of the page", () => {
     pageCrashes(t.jobs);
     await adoptExports({ contextFor: t.nextPage });
     expect(listExportRecords().map((r) => [r.job_id, r.state])).toEqual([[a.job_id, "running"]]);
+    // The new page's card follows it too: its feed is begun for the export it took over.
+    expect(useExportJob.getState().live).toMatchObject({ jobId: a.job_id, stage: "rendering" });
+    // While the file is checked and then saved the card says so, not that the render made no progress.
+    const stages: Array<string | undefined> = [];
+    const port = t.jobs.delivery!;
+    const verify = port.verify.bind(port);
+    vi.spyOn(port, "verify").mockImplementation(async (id) => {
+      stages.push(useExportJob.getState().live?.stage);
+      return verify(id);
+    });
+    const publish = port.publish.bind(port);
+    vi.spyOn(port, "publish").mockImplementation(async (id) => {
+      stages.push(useExportJob.getState().live?.stage);
+      return publish(id);
+    });
     t.jobs.exit(a.job_id, 0);
     expect((await whenExportEnds(a.job_id))?.state).toBe("done");
     expect(await t.fs.exists(DEST)).toBe(true);
+    await whenExportsSettle();
+    expect(stages).toEqual(["checking", "saving"]);
+    expect(useExportJob.getState().live).toBeNull();
   });
 
   it("one that failed while no page was there reads failed, and its partial goes", async () => {

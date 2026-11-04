@@ -32,7 +32,7 @@ import {
 } from "../tools/jobSupervisor";
 import type { MutationOrigin } from "../project/MutationGate";
 import { notifyJobSettled, type SettledJob } from "../store/jobNotes";
-import { useExportJob } from "../store/exportJob";
+import { useExportJob, liveFeedOf } from "../store/exportJob";
 import { beginSessionActivity } from "../observability/crashWatch";
 import { recordStaging, releaseStaging } from "./exportStaging";
 import { exportOwnerNow } from "../api/exportOwner";
@@ -40,13 +40,21 @@ import { setExportsBusy } from "../tools/workGate";
 import { projectKeyOfDir } from "../tools/dataRoot";
 import { resolveExportResources, type ExportResources } from "../platform/host";
 import { confirmExport } from "../lib/confirm";
+import { askQuestion, hostMounted, type QuestionOutcome } from "../store/exportQuestionHost";
 import {
   assessExport,
   estimateExport,
-  isKnownProblem,
   type ExportAssessment,
   type ExportCalibration,
 } from "./exportOptions";
+import {
+  driveOf,
+  planQuestions,
+  questionAsText,
+  type ExportQuestion,
+  type ExportQuestionKind,
+  type PreflightPicture,
+} from "./exportQuestions";
 import type { RenderWorkload } from "./renderPlan";
 import { runProjectMutation } from "../tools/coordinator";
 import type {
@@ -55,7 +63,8 @@ import type {
   ExportStarter,
   ExportTraceValue,
 } from "../api/exportVocabulary";
-import { CONFIRM_REASON_BITS, ExportStory, RunWatch, STAGE_CODES } from "./exportTrace";
+import { ExportStory, RunWatch, STAGE_CODES } from "./exportTrace";
+import { QUIET_SECONDS, failureOf, quietSeconds, timeLeftSeconds } from "./exportWords";
 import { limitThatFired, mibBand, parseNativeDiagnostics } from "./nativeDiagnostics";
 
 /** Who stopped an export (a value of the report's trace vocabulary). */
@@ -248,6 +257,8 @@ export interface ExportRecord {
   filename: string;
   /** Final destination, so a finished row can be revealed on disk. */
   destPath: string;
+  /** The project the export belongs to, so a card shows only its own project's exports. */
+  projectDir: string;
   state: ExportState;
   error?: string;
   /** Process diagnostics kept separate from the user-facing summary. */
@@ -255,7 +266,12 @@ export interface ExportRecord {
   warnings?: string[];
   /** Library ref for the delivered file, so it can be inspected like any other asset. */
   mediaRef?: string;
+  /** A cancel has been asked and the export has not stopped yet (it may still be waiting its turn to
+   *  notice). Said at once, so nobody is left looking at a row that ignored the button. */
+  cancelling?: boolean;
   startedAt: number;
+  /** When the export's turn came (it began running), so "took" does not count the wait in line. */
+  ranAt?: number;
   endedAt?: number;
 }
 
@@ -356,17 +372,46 @@ export function listExports(): QueuedExport[] {
  *  for the same reason `export` answers with `saved_to: <filename>`: it is the user's private
  *  directory, and media is never addressed by path here. */
 export function listExportOutcomes(): Array<Record<string, unknown>> {
-  return records.map((r) => ({
-    job_id: r.job_id,
-    filename: r.filename,
-    state: r.state,
-    ...(r.mediaRef ? { media_ref: r.mediaRef } : {}),
-    ...(r.error ? { error: r.error } : {}),
-    ...(r.warnings?.length ? { warnings: r.warnings } : {}),
-    ...(r.endedAt ? { duration_s: Math.round((r.endedAt - r.startedAt) / 100) / 10 } : {}),
-    // How long an unfinished export has been at it (or waiting), so an agent can judge it.
-    ...(isOpen(r) ? { elapsed_s: Math.max(0, Math.round((Date.now() - r.startedAt) / 1000)) } : {}),
-  }));
+  const now = Date.now();
+  const feeds = useExportJob.getState();
+  const waiting = records.filter((r) => r.state === "queued" && !r.cancelling);
+  return records.map((r) => {
+    // Each running export has its own feed: one that is still being checked or saved keeps saying so
+    // while the next one renders.
+    const running = r.state === "running" ? liveFeedOf(feeds, r.job_id) : null;
+    const rendering = running !== null && running.stage === "rendering";
+    const quiet = running ? quietSeconds(running, now) : 0;
+    const left = running ? timeLeftSeconds(running, now) : null;
+    const failure = r.state === "failed" ? failureOf(r.error) : null;
+    return {
+      job_id: r.job_id,
+      filename: r.filename,
+      state: r.state,
+      ...(r.mediaRef ? { media_ref: r.mediaRef } : {}),
+      ...(r.error ? { error: r.error } : {}),
+      ...(r.warnings?.length ? { warnings: r.warnings } : {}),
+      // How long the export itself took: from when its turn came, not from when it was asked for.
+      ...(r.endedAt
+        ? { duration_s: Math.round((r.endedAt - (r.ranAt ?? r.startedAt)) / 100) / 10 }
+        : {}),
+      // How long an unfinished export has been at it (or waiting), so an agent can judge it.
+      ...(isOpen(r) ? { elapsed_s: Math.max(0, Math.round((now - r.startedAt) / 1000)) } : {}),
+      // A cancel was asked and the export has not stopped yet.
+      ...(r.cancelling && isOpen(r) ? { cancelling: true } : {}),
+      // Where the run is, for an export that is running: the stage, how far a render is and how long it
+      // thinks is left, and for how long it has made no progress. The same facts the chat card shows.
+      ...(running ? { stage: running.stage } : {}),
+      ...(rendering && running.fraction !== null && Number.isFinite(running.fraction)
+        ? { progress_percent: Math.round(Math.min(1, Math.max(0, running.fraction)) * 100) }
+        : {}),
+      ...(left !== null ? { time_left_s: Math.round(left) } : {}),
+      ...(quiet >= QUIET_SECONDS ? { stalled_for_s: quiet } : {}),
+      // A waiting export: its place in line (1 is next).
+      ...(r.state === "queued" && !r.cancelling ? { queue_position: waiting.indexOf(r) + 1 } : {}),
+      // A failed export: the reason as a code, and in plain words the person can act on.
+      ...(failure ? { failure_code: failure.code, failure: failure.plain } : {}),
+    };
+  });
 }
 
 /** Where a tool-run export request came from, for its story: the in-app chat (the turn that asked is
@@ -378,19 +423,31 @@ export function exportVia(
   return ctx?.surface === "mcp" ? "mcp" : "menu";
 }
 
-/** Say in the export's story who stopped it and where it was (queued, or which stage and how far),
- *  once, however many times the button is pressed. */
-function noteCancelled(jobId: string, by: ExportCanceller): void {
+/** Say at once that a cancel was asked for this export, whether or not it has stopped yet. */
+function markCancelling(jobId: string): void {
+  const record = records.find((r) => r.job_id === jobId);
+  if (record && isOpen(record) && !record.cancelling) patch(jobId, { cancelling: true });
+}
+
+/** What a cancel will say in the export's story: who, and where the export was at the moment it was asked
+ *  (queued, or which stage and how far). Taken now, said later: the story must only tell a cancel that
+ *  was accepted, and once, however many times the button is pressed. */
+function captureCancel(jobId: string, by: ExportCanceller): (() => void) | null {
   const story = stories.get(jobId);
-  if (!story || story.cancelNoted) return;
-  story.cancelNoted = true;
+  if (!story || story.cancelNoted) return null;
   const queued = records.find((r) => r.job_id === jobId)?.state === "queued";
-  story.trace.record(
-    "cancelled",
-    by,
-    STAGE_CODES[queued ? "queued" : story.stage],
-    story.watch?.percentReached() ?? 0,
-  );
+  const stage = STAGE_CODES[queued ? "queued" : story.stage];
+  const percent = story.watch?.percentReached() ?? 0;
+  return () => {
+    if (story.cancelNoted) return;
+    story.cancelNoted = true;
+    story.trace.record("cancelled", by, stage, percent);
+  };
+}
+
+/** Say in the export's story who stopped it and where it was, for a cancel already accepted. */
+function noteCancelled(jobId: string, by: ExportCanceller): void {
+  captureCancel(jobId, by)?.();
 }
 
 /** Stop an export. Returns false when it already finished — a settled job cannot be recalled.
@@ -399,16 +456,26 @@ function noteCancelled(jobId: string, by: ExportCanceller): void {
 export function cancelExport(jobId: string, by: ExportCanceller = "app"): boolean {
   const c = controllers.get(jobId);
   if (!c) return false;
-  noteCancelled(jobId, by);
+  const note = captureCancel(jobId, by);
   const port = deliveryPorts.get(jobId);
   if (port)
+    // The cancel is said (in the row and in the story) once it was accepted: a refused one (the file was
+    // already being saved) or one that never arrived must not leave a row that claims it is stopping while
+    // it carries on, nor a story that says it was cancelled and then that it finished.
     void port
       .cancel(jobId)
       .then((cancelled) => {
-        if (cancelled) c.abort();
+        if (!cancelled) return;
+        note?.();
+        markCancelling(jobId);
+        c.abort();
       })
       .catch(() => undefined);
-  else c.abort();
+  else {
+    note?.();
+    markCancelling(jobId);
+    c.abort();
+  }
   return true;
 }
 
@@ -502,6 +569,7 @@ export async function manageExportsTool(
       const cancelled = await port.cancel(jobId);
       if (cancelled) {
         noteCancelled(jobId, "assistant");
+        markCancelling(jobId);
         controllers.get(jobId)?.abort();
       }
       return {
@@ -812,18 +880,25 @@ export async function submitExport(spec: ExportSpec): Promise<ExportSubmission> 
   return (await submitExports([spec]))[0];
 }
 
-async function confirmExportRequest(specs: readonly ExportSpec[]): Promise<boolean> {
-  const refuse = async (status: "cancelled" | "declined" | "blocked"): Promise<never> => {
-    throw new ExportRequestError(
-      status === "blocked"
-        ? "export could not be confirmed; no job was submitted"
-        : "export cancelled before submission",
-      [],
-      status,
-      specs[0].workload,
-      specs[0].story,
-    );
-  };
+/** What the pre-start check found, measured now. */
+interface Preflight {
+  picture: PreflightPicture;
+  /** Whether the room for the files is established (the readiness the export records). */
+  storageReady: boolean;
+}
+
+/** The smallest of the numbers that are known, or null when none is. */
+function least(values: ReadonlyArray<number | null>): number | null {
+  const known = values.filter((value): value is number => value !== null);
+  return known.length > 0 ? Math.min(...known) : null;
+}
+
+/** Measure the PC and the requested exports and say what the check found. Everything is read afresh,
+ *  so closing programs or freeing space between two calls really counts. */
+async function measurePreflight(
+  specs: readonly ExportSpec[],
+  refuse: (status: "cancelled" | "declined" | "blocked") => Promise<never>,
+): Promise<Preflight> {
   const checks: ExportAssessment[] = [];
   const snapshots: ExportResources[] = [];
   for (const spec of specs) {
@@ -857,7 +932,18 @@ async function confirmExportRequest(specs: readonly ExportSpec[]): Promise<boole
   }
   if (specs.some((spec) => spec.submissionSignal?.aborted || !spec.store.sessionLive()))
     return refuse("cancelled");
-  const reasons = new Set(checks.flatMap((check) => check.reasons));
+  const reasons = new Set(
+    // A copy renders nothing: it has no size, rate or length to be outside what ArtDaddy was tested with
+    // (its zero workload is "unknown", not "huge"), so that finding is not raised for it.
+    checks.flatMap((check, index) =>
+      specs[index].copyOf
+        ? check.reasons.filter((reason) => reason !== "outside_promise")
+        : check.reasons,
+    ),
+  );
+  let spaceNeeded: number | null = null;
+  let destinationShort = false;
+  let scratchShort = false;
   if (
     checks.every(
       (check) => check.estimates.temporaryBytes !== null && check.estimates.finalBytes !== null,
@@ -865,98 +951,201 @@ async function confirmExportRequest(specs: readonly ExportSpec[]): Promise<boole
   ) {
     const temporary = checks.reduce((total, check) => total + check.estimates.temporaryBytes!, 0);
     const final = checks.reduce((total, check) => total + check.estimates.finalBytes!, 0);
-    if (
-      snapshots.some(
-        (snapshot) =>
-          (snapshot.scratch_free_bytes !== null &&
-            temporary + final > snapshot.scratch_free_bytes) ||
-          (snapshot.destination_free_bytes !== null &&
-            temporary + final > snapshot.destination_free_bytes),
-      )
-    )
-      reasons.add("disk_shortage");
+    spaceNeeded = temporary + final;
+    destinationShort = snapshots.some(
+      (snapshot) =>
+        snapshot.destination_free_bytes !== null && spaceNeeded! > snapshot.destination_free_bytes,
+    );
+    scratchShort = snapshots.some(
+      (snapshot) =>
+        snapshot.scratch_free_bytes !== null && spaceNeeded! > snapshot.scratch_free_bytes,
+    );
+    if (destinationShort || scratchShort) reasons.add("disk_shortage");
     if (
       snapshots.some(
         (snapshot) =>
           snapshot.budgets.temporaryBytes !== null &&
-          temporary + final > snapshot.budgets.temporaryBytes,
+          spaceNeeded! > snapshot.budgets.temporaryBytes,
       )
     )
       reasons.add("temporary_limit");
   }
-  const warning = [...reasons].some(isKnownProblem);
   const storageReady = !["disk_unknown", "disk_shortage", "temporary_limit"].some((reason) =>
     reasons.has(reason as (typeof checks)[number]["reasons"][number]),
   );
-  if (!warning && checks.every((check) => check.severity === "none")) return storageReady;
-  const outside = checks.some((check) => check.promiseLine === "outside");
-  const explanations = {
-    outside_promise:
-      "The project exceeds an individual promised size, frame-rate, clip-count or on-screen limit, or those details are unavailable.",
-    memory_unknown:
-      "Memory fit cannot be estimated yet because a comparable observation or native measurement is missing.",
-    memory_shortage:
-      "The estimated worker memory exceeds currently available memory or the existing worker cutoff.",
-    disk_unknown: "Temporary-file or final-file space cannot be estimated yet.",
-    disk_shortage:
-      "There may not be enough free space for the temporary files and all finished outputs together.",
-    temporary_limit: "Estimated temporary files exceed the remaining export workspace allowance.",
-    time_unknown: "A comparable successful local run is not available to estimate time.",
-    execution_limit: "The estimated active time exceeds the existing export execution limit.",
-    slow: "This export is estimated to take more than twice the video length.",
-    long: "This export is expected to take a long time.",
+  // The export that is furthest over what it may use now: what it needs and what there is.
+  let memoryNeeded: number | null = null;
+  let memoryUsable: number | null = null;
+  checks.forEach((check, index) => {
+    const needed = check.estimates.memoryBytes;
+    const free = snapshots[index].available_memory_bytes;
+    const limit = snapshots[index].budgets.memoryBytes;
+    if (needed === null || free === null || limit === null) return;
+    const usable = Math.min(free, limit);
+    if (
+      needed > usable &&
+      (memoryNeeded === null || needed - usable > memoryNeeded - memoryUsable!)
+    ) {
+      memoryNeeded = needed;
+      memoryUsable = usable;
+    }
+  });
+  const shortDestination = snapshots.findIndex(
+    (snapshot) =>
+      spaceNeeded !== null &&
+      snapshot.destination_free_bytes !== null &&
+      spaceNeeded > snapshot.destination_free_bytes,
+  );
+  const seconds = checks.every((check) => check.estimates.seconds !== null)
+    ? checks.reduce((total, check) => total + check.estimates.seconds!, 0)
+    : null;
+  return {
+    storageReady,
+    picture: {
+      via: specs[0].via ?? (specs[0].origin ? "chat" : "other"),
+      count: specs.length,
+      reasons,
+      memoryNeededBytes: memoryNeeded,
+      memoryUsableBytes: memoryUsable,
+      spaceNeededBytes: spaceNeeded,
+      destinationFreeBytes: least(snapshots.map((snapshot) => snapshot.destination_free_bytes)),
+      scratchFreeBytes: least(snapshots.map((snapshot) => snapshot.scratch_free_bytes)),
+      destinationShort,
+      scratchShort,
+      drive: driveOf(specs[Math.max(0, shortDestination)].destPath),
+      seconds,
+      secondsGuessed: checks.some((check) => check.estimates.secondsGuessed === true),
+      executionLimitSeconds: least(snapshots.map((snapshot) => snapshot.budgets.executionSeconds)),
+    },
   };
-  const totalMinutes = () =>
-    Math.max(
-      1,
-      Math.ceil(checks.reduce((total, check) => total + check.estimates.seconds!, 0) / 60),
-    );
-  const time = !checks.every((check) => check.estimates.seconds !== null)
-    ? "Estimated time: unknown (no comparable local measurement yet)."
-    : checks.some((check) => check.estimates.secondsGuessed)
-      ? `Estimated time: about ${totalMinutes()} minute(s), a rough guess from the size of the video: no comparable export has been measured on this device yet. Preparation and queue wait are extra.`
-      : `Estimated encoding and saving time: about ${totalMinutes()} minute(s), based on comparable successful exports on this device. This is a rough estimate; different media and effects can take longer. Preparation and queue wait are extra.`;
-  const message = [
-    `Check ${specs.length === 1 ? "this export" : `these ${specs.length} exports`} before starting.`,
-    outside
-      ? "This request is outside the measured project promise, or its project details are unavailable."
-      : warning
-        ? "This project is within the declared size limits; resource fit has not yet been established."
-        : "This project is within the declared size limits.",
-    [...reasons].map((reason) => explanations[reason]).join("\n"),
-    ...(specs.some((spec) => spec.meta?.calibration?.encoder === "amf-cqp18")
-      ? [
-          "Fast uses the locally measured AMD profile. Files can be much larger, and the picture can differ from Full quality.",
-        ]
-      : []),
-    time,
-    checks.every((check) => check.estimates.memoryBytes !== null)
-      ? `Estimated worker memory: about ${(Math.max(...checks.map((check) => check.estimates.memoryBytes!)) / 1024 ** 3).toFixed(1)} GiB, from observed worker samples; this is not a guaranteed peak.`
-      : "Estimated memory: unknown. Native resource limits still apply.",
-    checks.every(
-      (check) => check.estimates.temporaryBytes !== null && check.estimates.finalBytes !== null,
-    )
-      ? `Estimated temporary payload: about ${(checks.reduce((total, check) => total + check.estimates.temporaryBytes! + check.estimates.finalBytes!, 0) / 1e9).toFixed(1)} GB, including pending output files and accounted scratch observations. Filesystem metadata and allocation overhead are extra within the existing headroom; this is not an exact disk peak.`
-      : "Estimated temporary disk: unknown. Safe-file and temporary-space limits still apply.",
-    "The workspace allowance covers app-managed temporary allocation, not total disk use. Other apps and OS-retained data can consume additional space, and free space can change during export. Published outputs remain on disk.",
-    "You can lower the export resolution or export a smaller section. Cancel to change settings.",
-    warning ? "Continue anyway?" : "Continue?",
-  ].join("\n\n");
-  // The screen the person is about to see, and what they did with it, are part of the story: how many
-  // reasons it listed (`n`) and which (`m`, one bit each).
-  const shown = [...reasons].reduce((bits, reason) => bits | (CONFIRM_REASON_BITS[reason] ?? 0), 0);
+}
+/** How many times one request may be asked before it is refused. A person can press Continue as often
+ *  as they like; a program answering for them must not loop for ever. */
+const MAX_QUESTION_ROUNDS = 100;
+
+/** Who answered, as the number a trace event carries. */
+const ANSWERER_CODE = { dialog: 1, card: 2, assistant: 3, app: 4 } as const;
+
+/** One signal for a request of several exports: it aborts when any of theirs does. */
+function requestSignal(specs: readonly ExportSpec[]): AbortSignal | undefined {
+  const signals = specs
+    .map((spec) => spec.submissionSignal)
+    .filter((signal): signal is AbortSignal => signal !== undefined);
+  if (signals.length <= 1) return signals[0];
+  const joined = new AbortController();
+  for (const signal of signals) {
+    if (signal.aborted) joined.abort();
+    else signal.addEventListener("abort", () => joined.abort(), { once: true });
+  }
+  return joined.signal;
+}
+
+/** Put a question to the person in the dialog and wait. The story of every export in the request
+ *  says which screen it was, how big the problem was, who answered and how long it took. */
+async function askInDialog(
+  specs: readonly ExportSpec[],
+  question: ExportQuestion,
+): Promise<QuestionOutcome> {
   for (const spec of specs)
-    spec.story?.trace.record("dialog_shown", "confirm", reasons.size, shown);
+    spec.story?.trace.record("dialog_shown", question.code, question.bands.n, question.bands.m);
+  const outcome = await askQuestion(question, {
+    projectDir: specs[0].store.projectDir,
+    signal: requestSignal(specs),
+    onIgnored: (answer, by, winner) => {
+      for (const spec of specs)
+        spec.story?.trace.record(
+          "answer_ignored",
+          answer,
+          ANSWERER_CODE[by],
+          ANSWERER_CODE[winner],
+        );
+    },
+  });
+  for (const spec of specs)
+    spec.story?.trace.record(
+      "dialog_choice",
+      outcome.answer === "aborted" || outcome.answer === "unavailable" ? "dismiss" : outcome.answer,
+      Math.round(outcome.waitedMs / 1000),
+      ANSWERER_CODE[outcome.by],
+    );
+  return outcome;
+}
+
+/** The same question as a native message box, for when no dialog is mounted to ask it. A native box
+ *  has two buttons and cannot be closed from code, so it is asked once and never repeats. */
+async function askNatively(
+  specs: readonly ExportSpec[],
+  question: ExportQuestion,
+): Promise<"continue" | "cancel" | "unavailable"> {
+  for (const spec of specs)
+    spec.story?.trace.record("dialog_shown", question.code, question.bands.n, question.bands.m);
+  const started = Date.now();
+  const { message, warning } = questionAsText(question);
   const decision = await confirmExport(message, warning);
   for (const spec of specs)
     spec.story?.trace.record(
       "dialog_choice",
       decision === "continue" ? "continue" : decision === "cancel" ? "cancel" : "dismiss",
+      Math.round((Date.now() - started) / 1000),
+      ANSWERER_CODE.dialog,
     );
-  if (specs.some((spec) => spec.submissionSignal?.aborted || !spec.store.sessionLive()))
-    return refuse("cancelled");
-  if (decision === "continue") return storageReady;
-  return refuse(decision === "cancel" ? "declined" : "blocked");
+  return decision;
+}
+
+/** Check the request before anything is admitted, and ask the person about what they can fix: not
+ *  enough free memory, not enough room on a drive, a heads-up. One question at a time, and after
+ *  *Continue* on a memory or space question the PC is measured again, so closing programs or freeing
+ *  space really counts and a repeat is the same question with the new numbers. Resolves with whether the
+ *  room for the files is established; throws {@link ExportRequestError} when nothing may start. */
+async function confirmExportRequest(specs: readonly ExportSpec[]): Promise<boolean> {
+  const refuse = async (status: "cancelled" | "declined" | "blocked"): Promise<never> => {
+    throw new ExportRequestError(
+      status === "blocked"
+        ? "export could not be confirmed; no job was submitted"
+        : "export cancelled before submission",
+      [],
+      status,
+      specs[0].workload,
+      specs[0].story,
+    );
+  };
+  const stopped = () =>
+    specs.some((spec) => spec.submissionSignal?.aborted || !spec.store.sessionLive());
+  // What the person already waived with *Start anyway*: not asked again in this request.
+  const waived = new Set<ExportQuestionKind>();
+  for (let round = 0; round < MAX_QUESTION_ROUNDS; round++) {
+    const { picture, storageReady } = await measurePreflight(specs, refuse);
+    const questions = planQuestions(picture, waived);
+    if (questions.length === 0) return storageReady;
+    if (!hostMounted()) {
+      for (const question of questions) {
+        const decision = await askNatively(specs, question);
+        if (stopped()) return refuse("cancelled");
+        if (decision === "cancel") return refuse("declined");
+        if (decision === "unavailable") return refuse("blocked");
+      }
+      return storageReady;
+    }
+    const question = questions[0];
+    const outcome = await askInDialog(specs, question);
+    if (stopped()) return refuse("cancelled");
+    switch (outcome.answer) {
+      case "cancel":
+        return refuse("declined");
+      case "aborted":
+        return refuse("cancelled");
+      case "unavailable":
+        return refuse("blocked");
+      case "start_anyway":
+        waived.add(question.kind);
+        break;
+      case "continue":
+        // A notice is a heads-up, not a shortage: nothing to measure again.
+        if (question.kind === "notice") return storageReady;
+        break;
+    }
+  }
+  return refuse("blocked");
 }
 
 export async function submitExports(request: readonly ExportSpec[]): Promise<ExportSubmission[]> {
@@ -1128,6 +1317,7 @@ async function admitExport(spec: ExportSpec, storageReady: boolean): Promise<Exp
     job_id: jobId,
     filename: spec.filename,
     destPath: spec.destPath,
+    projectDir: spec.store.projectDir,
     state: queuePosition === 0 ? "running" : "queued",
     startedAt: Date.now(),
   });
@@ -1189,14 +1379,20 @@ async function encode(spec: ExportSpec, ledger: Ledger, jobId: string, key: stri
   // The export's turn has come (the supervisor started it, or it runs in the page): the story says
   // how long it waited, and a watch on its run starts. Once.
   const begin = (): void => {
-    if (begun || !story) return;
+    if (begun) return;
     begun = true;
+    patch(jobId, { ranAt: Date.now() });
+    if (!story) return;
     const waited = Math.round(
       (Date.now() - (records.find((r) => r.job_id === jobId)?.startedAt ?? startedAt)) / 1000,
     );
     if (waited >= 1 && !spec.copyOf) story.trace.record("dequeued", "", waited);
     story.enter("preparing");
     if (spec.copyOf) return;
+    // The card follows this export from now on: its stage as the story moves through it, its progress
+    // as the reporters publish it. Ended when the export settles.
+    useExportJob.getState().beginLive(jobId);
+    story.onEnter = (stage) => useExportJob.getState().setLiveStage(jobId, stage);
     story.watch = new RunWatch(
       story.trace,
       Math.max(0, (spec.meta?.duration_s ?? 0) * 1000),
@@ -1331,6 +1527,8 @@ async function settle(x: Settle): Promise<void> {
       const port = deliveryPorts.get(x.jobId);
       if (!port) throw new Error("export delivery owner is missing");
       x.story?.enter("saving");
+      // An adopted export has no story to move the card along.
+      if (!x.story) useExportJob.getState().setLiveStage(x.jobId, "saving");
       publicationPending = true;
       let published: ExportDelivery;
       try {
@@ -1371,6 +1569,8 @@ async function settle(x: Settle): Promise<void> {
   controllers.delete(x.jobId);
   deliveryPorts.delete(x.jobId);
   stories.delete(x.jobId);
+  // The run is over (after the stages of checking and saving): the card has no live export any more.
+  useExportJob.getState().endLive(x.jobId);
   patch(x.jobId, {
     state: error ? (cancelled ? "cancelled" : "failed") : "done",
     endedAt: Date.now(),
@@ -1535,8 +1735,10 @@ export async function adoptExports(
         job_id: v.id,
         filename: m.filename,
         destPath: m.destPath,
+        projectDir: m.projectDir,
         state: v.state === "queued" ? "queued" : "running",
         startedAt: m.submittedAt || v.queued_at,
+        ...(v.state !== "queued" && v.started_at ? { ranAt: v.started_at } : {}),
       });
     } else {
       Object.assign(current, {
@@ -1564,10 +1766,14 @@ async function finishAdopted(
   let copyError: string | null = null;
   if (!ended) {
     unfollowState = sup.subscribe((c) => {
-      if (c.id === v.id && c.state === "running") patch(v.id, { state: "running" });
+      if (c.id === v.id && c.state === "running")
+        patch(v.id, { state: "running", ranAt: c.started_at ?? Date.now() });
     });
     if (v.state === "running" && m.plan) {
       useExportJob.getState().begin(() => cancelExport(v.id));
+      // The card follows it too: this page took the export over, so it is running now.
+      useExportJob.getState().beginLive(v.id);
+      useExportJob.getState().setLiveStage(v.id, "rendering");
       unfollowProgress = await followProgress(sup, v, m.plan);
     }
     if (m.copyOf && v.state === "queued") {
@@ -1584,6 +1790,9 @@ async function finishAdopted(
       : await whenJobEnds(sup, v.id);
     unfollowState?.();
     unfollowProgress?.();
+    // The process is over; the file is checked next. Without this the card would go on saying the render
+    // has made no progress for as long as the check takes.
+    useExportJob.getState().setLiveStage(v.id, "checking");
   }
   const ctx = contextFor(m.projectDir);
   const ledger = await openProjectJobs(ctx.store);

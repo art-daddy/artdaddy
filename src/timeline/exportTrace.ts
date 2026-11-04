@@ -122,6 +122,8 @@ export class ExportStory {
   longestGapS: number | undefined;
   /** A cancel is told once, however many times the button was pressed. */
   cancelNoted = false;
+  /** Told of every stage entered (the chat card follows the run through it). */
+  onEnter: ((stage: ExportStage) => void) | undefined;
 
   constructor(clock: () => number = Date.now) {
     this.trace = new ExportTrace(clock);
@@ -132,6 +134,11 @@ export class ExportStory {
     this.stage = stage;
     if (stage === "queued") return;
     if (!this.trace.lastIs("stage", stage)) this.trace.record("stage", stage);
+    try {
+      this.onEnter?.(stage);
+    } catch {
+      /* a listener must never disturb an export */
+    }
   }
 
   /** The memory the PC had when the export was checked, in whole GiB. */
