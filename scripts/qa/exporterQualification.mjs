@@ -101,34 +101,44 @@ export function temporarySpaceFailures(declared, evidence) {
   return failures;
 }
 
-const ESTIMATE = /Estimated encoding and saving time: about (\d+) minute\(s\)/;
+// The estimate the product states is one fact of a question, "Estimated time", in the words people read: the time ("under a minute",
+// "about 4 min", "about 1 h 20 min") and then where it came from, in brackets: "(from earlier exports on this PC)" for a measurement,
+// "(a rough guess from the size of the video: ...)" when nothing like it has run on this PC yet (src/timeline/exportQuestions.ts).
+const MEASURED_ESTIMATE = /Estimated time: (under a minute|about (?:(\d+) min|(\d+) h(?: (\d+) min)?)) \(from earlier exports on this PC\)/;
+const GUESSED_ESTIMATE = /Estimated time: [^\n]*\(a rough guess from the size of the video/;
 
 // A confirmation is the only place the product prints a time estimate. When it prints one it must be the measured
-// estimate or an honest "unknown"; "unknown" is never a qualifying outcome for a repeated export.
+// estimate or an honest "rough guess"; a guess is never a qualifying outcome for a repeated export.
 export function estimateFacts(preflight) {
   const messages = Array.isArray(preflight) ? preflight.map((entry) => (typeof entry?.message === "string" ? entry.message : "")) : [];
   const single = messages.length === 1 ? messages[0] : "";
-  const match = ESTIMATE.exec(single);
-  const minutes = match ? Number(match[1]) : null;
-  return { provided: minutes !== null && minutes >= 1, minutes, unknownStated: single.includes("Estimated time: unknown") };
+  const match = MEASURED_ESTIMATE.exec(single);
+  const underAMinute = match?.[1] === "under a minute";
+  const minutes = !match ? null : underAMinute ? 0 : match[2] !== undefined ? Number(match[2]) : Number(match[3]) * 60 + Number(match[4] ?? 0);
+  return { provided: match !== null && (underAMinute || minutes >= 1), minutes, guessStated: GUESSED_ESTIMATE.test(single) };
 }
 
 const isPositive = (value) => typeof value === "number" && Number.isFinite(value) && value > 0;
 
 // The product asks nothing when every estimate is known and fits, so a repeated export cannot be required to show
 // an estimate sentence. What it must do is have a measured estimate from its own history and then either say it in
-// the confirmation it chose to raise or proceed silently with storage ready. A cold export must say "unknown".
+// the confirmation it chose to raise or proceed silently with storage ready. A cold export has no history to measure
+// from, so what it may say is a guess, labelled as one.
 export function estimateFailures(evidence) {
   if (!evidence || evidence.version !== 1 || !evidence.cold || !evidence.estimate) return ["no recorded estimate evidence"];
   const failures = [];
   const { cold, estimate } = evidence;
   const notCold = coldStartFailure(cold);
   if (notCold) failures.push(`cold: ${notCold}`);
-  if (!Array.isArray(cold.preflight) || cold.preflight.length !== 1) failures.push("cold: the user was not shown exactly one confirmation");
-  else {
+  // A cold export is not asked about for being cold: the product guesses its time from the size of the video and asks only
+  // when something is in the way or the guess is long. It asks at most once, and what it says about time must not claim a
+  // measurement it does not have: it says "a rough guess".
+  if (!Array.isArray(cold.preflight)) failures.push("cold: there is no record of the confirmations the user was shown");
+  else if (cold.preflight.length > 1) failures.push("cold: the user was shown more than one confirmation");
+  else if (cold.preflight.length === 1) {
     const facts = estimateFacts(cold.preflight);
     if (facts.provided) failures.push("cold: a measured estimate was claimed without comparable local history");
-    if (!facts.unknownStated) failures.push("cold: the confirmation did not state that the time is unknown");
+    if (!facts.guessStated) failures.push("cold: the confirmation did not say its time is a rough guess");
   }
   if (!Number.isSafeInteger(estimate.historySamples) || estimate.historySamples < 1) failures.push("estimate: no comparable local history existed");
   if (!isPositive(estimate.estimateSeconds)) failures.push("estimate: the product produced no measured estimate from its history");

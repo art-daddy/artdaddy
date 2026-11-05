@@ -247,9 +247,9 @@ async function exercise(): Promise<void> {
     // The product's own estimator over the real history, asked exactly as the export request asks it.
     const estimateSeconds = estimateExportFromHistory(plan.workload, plan.output, "medium", plan.selection.backend,
       useExportJob.getState().calibrations, calibrationEncoder).seconds;
-    // A cold export is one the product has nothing to estimate from, so it must ask. That only holds if no earlier run's history reached
-    // this page (a web view whose storage outlives the app can carry it over). Say so now, before minutes of encoding, instead of
-    // letting the missing confirmation fail a later check with a misleading message.
+    // A cold export is one the product has nothing to measure from. It does not ask for that (it guesses from the size and asks only when the
+    // guess is long), but it must really be cold: that only holds if no earlier run's history reached this page (a web view whose storage
+    // outlives the app can carry it over). Say so now, before minutes of encoding, instead of letting a later check fail with a misleading message.
     const historyAtStart = useExportJob.getState().calibrations.map(describeSample);
     const notCold = label === "cold" ? coldStartFailure({ historySamples, estimateSeconds }) : null;
     check(!notCold, `The ${definition.id} cold pass is not cold (${notCold}). An earlier run's history reached this run, so the run is void: ` +

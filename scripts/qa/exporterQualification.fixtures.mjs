@@ -1,10 +1,25 @@
 // Raw evidence a qualified promise attempt records, for the consumer tests. Verdict logic lives in
 // exporterQualification.mjs; a fixture here supplies measurements and never a verdict.
 
-// The confirmation a real cold export showed on Windows (2026-10-20): nothing comparable existed yet.
-export const REAL_COLD_MESSAGE = "Check this export before starting. This project is within the declared size limits; resource fit has not yet been established. " +
-  "Memory fit cannot be estimated yet because a comparable observation or native measurement is missing. Temporary-file or final-file space cannot be estimated yet. " +
-  "A comparable successful local run is not available to estimate time. Estimated time: unknown (no comparable local measurement yet).";
+// What the product shows, as one native message, when it expects an export to take a long time and nothing like it has been exported on
+// this PC yet (a cold export): its time is a rough guess from the size of the video. Built by src/timeline/exportQuestions.ts and
+// pinned to its output by exportQuestions.test.ts, so a change of those words fails there instead of being found at push time.
+export const REAL_COLD_MESSAGE = [
+  "This export will take a long time",
+  "This export is expected to take a long time.",
+  "Estimated time: about 25 min (a rough guess from the size of the video: nothing like it has been exported on this PC yet)",
+  "Lowering the resolution or exporting a smaller section makes it faster. Cancel to change the settings.",
+  "Continue?",
+].join("\n\n");
+
+// The same question once earlier exports on this PC have been measured: the time is a measurement, not a guess.
+export const REAL_MEASURED_MESSAGE = [
+  "This export will take a long time",
+  "This export is expected to take a long time.",
+  "Estimated time: about 25 min (from earlier exports on this PC)",
+  "Lowering the resolution or exporting a smaller section makes it faster. Cancel to change the settings.",
+  "Continue?",
+].join("\n\n");
 
 // The payload allowance the native Workspace reported before a real Windows promise export (payload less held entries).
 export const REAL_ALLOWANCE_BYTES = 17_998_794_382;
@@ -30,7 +45,7 @@ export function qualifiedEvidence(declared) {
   return {
     temporarySpaceEvidence: { version: 1, passes: [pass("cold"), pass("estimate")] },
     estimateEvidence: { version: 1,
-      cold: { historySamples: 0, estimateSeconds: null, preflight: [{ message: REAL_COLD_MESSAGE, warning: true }] },
+      cold: { historySamples: 0, estimateSeconds: null, preflight: [{ message: REAL_COLD_MESSAGE, warning: false }] },
       estimate: { historySamples: 1, estimateSeconds: 9, actualSeconds: 8.1, preflight: [], readiness: "ready" } },
     // Caption pixel counts measured on a real Windows export of a 10 s phone clip with fading captions.
     captionSamples: REAL_CAPTION_SAMPLES,

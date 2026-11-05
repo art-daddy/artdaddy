@@ -16,7 +16,7 @@ import {
 import { coldStartFailure } from "./exporterColdStart.mjs";
 import { freeLoopbackPort, qaServerOptionsForRun } from "./exporterVite.mjs";
 import { startRecovery } from "./exporterRecovery.mjs";
-import { REAL_ALLOWANCE_BYTES, REAL_CAPTION_SAMPLES, REAL_COLD_MESSAGE, REAL_PHONE_PICTURES, REAL_WEB_PICTURES } from "./exporterQualification.fixtures.mjs";
+import { REAL_ALLOWANCE_BYTES, REAL_CAPTION_SAMPLES, REAL_COLD_MESSAGE, REAL_MEASURED_MESSAGE, REAL_PHONE_PICTURES, REAL_WEB_PICTURES } from "./exporterQualification.fixtures.mjs";
 
 const library = JSON.parse(await readFile(new URL("./exporterPromiseCases.json", import.meta.url), "utf8"));
 const declared = library.temporarySpace;
@@ -239,47 +239,50 @@ test("verdicts never mutate their inputs", () => {
   assert.equal(estimateFacts(deepFreeze([{ message: "Estimated time: unknown" }])).provided, false);
 });
 
-// The product's own text is the authority: extract its template from the shipped source and render it.
-const queueSource = await readFile(new URL("../../src/timeline/exportQueue.ts", import.meta.url), "utf8");
-const template = /`(Estimated encoding and saving time: about )\$\{[^}]*\}( minute\(s\)[^`]*)`/.exec(queueSource);
-const unknown = /"(Estimated time: unknown[^"]*)"/.exec(queueSource);
-const measured = (minutes, before = "Check this export before starting.\n", after = "\nEstimated worker memory: about 1.0 GiB") =>
-  `${before}${template[1]}${minutes}${template[2]}${after}`;
+// The product's own words are the authority. The two recorded confirmations are pinned to what the product prints by
+// src/timeline/exportQuestions.test.ts, which also walks every time it can print; the variants below are cut from them, never retyped.
+const RECORDED_TIME = "about 25 min";
+const timeWords = (minutes) => (minutes < 60 ? `about ${minutes} min` : `about ${Math.floor(minutes / 60)} h${minutes % 60 ? ` ${minutes % 60} min` : ""}`);
+const measured = (time, before = "", after = "") => `${before}${REAL_MEASURED_MESSAGE.replace(RECORDED_TIME, time)}${after}`;
 
 test("the estimate parser follows the text the product prints", () => {
-  assert.ok(template, "the product no longer prints a measured estimate sentence this parser knows");
-  assert.ok(unknown, "the product no longer prints an explicit unknown-time sentence");
-  assert.deepEqual(estimateFacts([{ message: measured(7) }]), { provided: true, minutes: 7, unknownStated: false });
-  const real = "Check this export before starting. This project is within the declared size limits; resource fit has not yet been established. " +
-    "Memory fit cannot be estimated yet because a comparable observation or native measurement is missing. Temporary-file or final-file space cannot be estimated yet. " +
-    "A comparable successful local run is not available to estimate time. Estimated time: unknown (no comparable local measurement yet).";
-  assert.deepEqual(estimateFacts([{ message: real }]), { provided: false, minutes: null, unknownStated: true });
-  assert.deepEqual(estimateFacts([{ message: `x ${unknown[1]}` }]), { provided: false, minutes: null, unknownStated: true });
+  assert.ok(REAL_MEASURED_MESSAGE.includes(`Estimated time: ${RECORDED_TIME} (from earlier exports on this PC)`), "the recorded measured confirmation no longer states its time this way");
+  assert.ok(REAL_COLD_MESSAGE.includes(`Estimated time: ${RECORDED_TIME} (a rough guess from the size of the video`), "the recorded cold confirmation no longer states its time this way");
+  assert.deepEqual(estimateFacts([{ message: REAL_MEASURED_MESSAGE }]), { provided: true, minutes: 25, guessStated: false });
+  assert.deepEqual(estimateFacts([{ message: REAL_COLD_MESSAGE }]), { provided: false, minutes: null, guessStated: true });
+  assert.deepEqual(estimateFacts([{ message: measured("under a minute") }]), { provided: true, minutes: 0, guessStated: false });
+  assert.deepEqual(estimateFacts([{ message: measured("about 1 h 20 min") }]), { provided: true, minutes: 80, guessStated: false });
+  assert.deepEqual(estimateFacts([{ message: measured("about 2 h") }]), { provided: true, minutes: 120, guessStated: false });
 });
 
-test("an estimate counts only when the one confirmation the user saw states a positive measured time", () => {
-  for (const preflight of [undefined, null, [], "text", [{}], [{ message: 5 }], [{ message: measured(0) }], [{ message: measured(-3) }],
-    [{ message: measured(7) }, { message: measured(7) }], [{ message: measured("many") }], [{ message: measured(7).replace("Estimated", "Estimate") }]])
+test("an estimate counts only when the one confirmation the user saw states a positive time measured on this PC", () => {
+  for (const preflight of [undefined, null, [], "text", [{}], [{ message: 5 }], [{ message: measured("about 0 min") }], [{ message: measured("about 0 h") }],
+    [{ message: measured("about -3 min") }], [{ message: measured("about many min") }], [{ message: measured("about 7 minutes") }],
+    [{ message: measured("about 7 min") }, { message: measured("about 7 min") }], [{ message: measured("about 7 min").replace("Estimated", "Estimate") }],
+    [{ message: measured("about 7 min").replace("from earlier exports on this PC", "from somewhere") }], [{ message: REAL_COLD_MESSAGE }]])
     assert.equal(estimateFacts(preflight).provided, false, JSON.stringify(preflight));
   fc.assert(fc.property(fc.integer({ min: 1, max: 100_000 }), fc.string({ maxLength: 40 }), fc.string({ maxLength: 40 }), (minutes, before, after) => {
-    assert.deepEqual(estimateFacts([{ message: measured(minutes, before, after) }]).minutes, minutes);
+    assert.deepEqual(estimateFacts([{ message: measured(timeWords(minutes), before, after) }]).minutes, minutes);
   }), { numRuns: 100 });
 });
 
-const cold = () => ({ historySamples: 0, estimateSeconds: null, preflight: [{ message: REAL_COLD_MESSAGE, warning: true }] });
+const cold = () => ({ historySamples: 0, estimateSeconds: null, preflight: [{ message: REAL_COLD_MESSAGE, warning: false }] });
+const coldSilent = () => ({ ...cold(), preflight: [] });
 const silent = () => ({ historySamples: 1, estimateSeconds: 9, actualSeconds: 8.1, preflight: [], readiness: "ready" });
-const prompted = () => ({ historySamples: 1, estimateSeconds: 9, actualSeconds: 8.1, preflight: [{ message: measured(1), warning: false }], readiness: "ready" });
+const prompted = () => ({ historySamples: 1, estimateSeconds: 9, actualSeconds: 8.1, preflight: [{ message: REAL_MEASURED_MESSAGE, warning: false }], readiness: "ready" });
 const estimates = (estimate = silent(), first = cold()) => ({ version: 1, cold: first, estimate });
 
 test("an honest cold export followed by a repeated export with a measured estimate qualifies, silent or prompted", () => {
-  assert.deepEqual(estimateFailures(estimates(silent())), []);
-  assert.deepEqual(estimateFailures(estimates(prompted())), []);
+  for (const first of [cold(), coldSilent()])
+    for (const second of [silent(), prompted()]) assert.deepEqual(estimateFailures(estimates(second, first)), []);
 });
 
 test("a repeated export that raised a confirmation must have said the estimate it had", () => {
-  const hidden = prompted();
-  hidden.preflight = [{ message: REAL_COLD_MESSAGE, warning: true }];
-  assert.deepEqual(estimateFailures(estimates(hidden)), ["estimate: the confirmation hid the measured estimate the product had"]);
+  for (const message of [REAL_COLD_MESSAGE, "This export needs more memory than your PC can give it right now.\n\nContinue anyway?"]) {
+    const hidden = prompted();
+    hidden.preflight = [{ message, warning: true }];
+    assert.deepEqual(estimateFailures(estimates(hidden)), ["estimate: the confirmation hid the measured estimate the product had"], message.slice(0, 40));
+  }
 });
 
 test("silence is only acceptable with established readiness, and one request shows at most one confirmation", () => {
@@ -291,16 +294,20 @@ test("silence is only acceptable with established readiness, and one request sho
   assert.ok(estimateFailures(estimates({ ...silent(), preflight: undefined })).length > 0);
 });
 
-test("a cold export must really be cold, show one confirmation and say the time is unknown", () => {
+test("a cold export must really be cold; when it asks, it asks once and calls its time a rough guess", () => {
   assert.ok(estimateFailures(estimates(silent(), { ...cold(), historySamples: 1 })).some((message) => message.startsWith("cold: the export was not cold")));
   assert.ok(estimateFailures(estimates(silent(), { ...cold(), estimateSeconds: 5 })).some((message) => message.startsWith("cold: the export was not cold")));
-  assert.ok(estimateFailures(estimates(silent(), { ...cold(), preflight: [] })).some((message) => message.startsWith("cold: the user was not shown exactly one")));
-  const claimed = { ...cold(), preflight: [{ message: measured(3), warning: true }] };
+  // The product does not ask about a missing measurement, so a cold export that stayed silent is as honest as one that asked.
+  assert.deepEqual(estimateFailures(estimates(silent(), coldSilent())), []);
+  const twice = { ...cold(), preflight: [cold().preflight[0], cold().preflight[0]] };
+  assert.deepEqual(estimateFailures(estimates(silent(), twice)), ["cold: the user was shown more than one confirmation"]);
+  assert.deepEqual(estimateFailures(estimates(silent(), { ...cold(), preflight: undefined })), ["cold: there is no record of the confirmations the user was shown"]);
+  const claimed = { ...cold(), preflight: [{ message: REAL_MEASURED_MESSAGE, warning: false }] };
   const failures = estimateFailures(estimates(silent(), claimed));
   assert.ok(failures.includes("cold: a measured estimate was claimed without comparable local history"));
-  assert.ok(failures.includes("cold: the confirmation did not state that the time is unknown"));
+  assert.ok(failures.includes("cold: the confirmation did not say its time is a rough guess"));
   const mute = { ...cold(), preflight: [{ message: "Check this export before starting.", warning: true }] };
-  assert.deepEqual(estimateFailures(estimates(silent(), mute)), ["cold: the confirmation did not state that the time is unknown"]);
+  assert.deepEqual(estimateFailures(estimates(silent(), mute)), ["cold: the confirmation did not say its time is a rough guess"]);
 });
 
 test("a repeated export with no history, no produced estimate or no measured time cannot qualify", () => {
@@ -322,7 +329,7 @@ test("property: valid evidence qualifies for any measured numbers, and each sing
   const corruptions = [
     (evidence) => { evidence.cold.historySamples = 1; },
     (evidence) => { evidence.cold.estimateSeconds = 4; },
-    (evidence) => { evidence.cold.preflight = []; },
+    (evidence) => { evidence.cold.preflight = [{ message: REAL_MEASURED_MESSAGE, warning: false }]; },
     (evidence) => { evidence.estimate.historySamples = 0; },
     (evidence) => { evidence.estimate.estimateSeconds = null; },
     (evidence) => { evidence.estimate.actualSeconds = 0; },
@@ -333,7 +340,7 @@ test("property: valid evidence qualifies for any measured numbers, and each sing
   fc.assert(fc.property(fc.integer({ min: 1, max: 50 }), fc.double({ min: 0.001, max: 1e6, noNaN: true }), fc.double({ min: 0.001, max: 1e6, noNaN: true }),
     fc.boolean(), fc.integer({ min: 1, max: 100_000 }), (samples, estimateSeconds, actualSeconds, silentRun, minutes) => {
       const estimate = { historySamples: samples, estimateSeconds, actualSeconds,
-        preflight: silentRun ? [] : [{ message: measured(minutes), warning: false }], readiness: "ready" };
+        preflight: silentRun ? [] : [{ message: measured(timeWords(minutes)), warning: false }], readiness: "ready" };
       assert.deepEqual(estimateFailures(estimates(estimate)), []);
       for (const [index, corrupt] of corruptions.entries()) {
         const copy = structuredClone(estimates(estimate));
