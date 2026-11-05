@@ -28,6 +28,29 @@ describe("the exporter's remote switches", () => {
       expect(exportFlag(name)).toBe(COMPILED_FLAG_DEFAULTS[name]);
   });
 
+  // Phase 3, S4: a switch for each maker's graphics chip, one for choosing Fast for the person, one for the
+  // faster processor setting. Each is its own: the server can take one back without touching another.
+  it("have a switch per chip maker, for the default and for the faster setting, each on its own", async () => {
+    const chip = ["chip_amd", "chip_nvidia", "chip_intel", "chip_default", "faster_x264"] as const;
+    for (const name of chip) {
+      expect(EXPORT_FLAG_NAMES).toContain(name);
+      expect(COMPILED_FLAG_DEFAULTS[name]).toBe(true);
+    }
+    for (const off of chip) {
+      await refreshExportFlags({
+        fetcher: async () =>
+          reply({
+            v: 1,
+            flags: Object.fromEntries(EXPORT_FLAG_NAMES.map((name) => [name, name !== off])),
+          }),
+        signedIn,
+        force: true,
+      });
+      for (const name of EXPORT_FLAG_NAMES)
+        expect(exportFlag(name), `${off} off: ${name}`).toBe(name !== off);
+    }
+  });
+
   it("switch a behaviour off when the server says so, and on again when it says so", async () => {
     await refreshExportFlags({
       fetcher: async () => reply(flags({ stall_stop: false })),

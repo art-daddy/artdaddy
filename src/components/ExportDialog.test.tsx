@@ -6,20 +6,42 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import ExportDialog from "./ExportDialog";
 import { exportRunning, useExportJob } from "../store/exportJob";
+import { decideExportEncoder, type ExportEncoderDecision } from "../timeline/exportChoice";
 import { EXPORT_SPEED_REVISION } from "../timeline/exportOptions";
-import { resolveLocalFastEncoder } from "../platform/host";
 
-vi.mock("../platform/host", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../platform/host")>()),
-  resolveLocalFastEncoder: vi.fn().mockResolvedValue(false),
+vi.mock("../timeline/exportChoice", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../timeline/exportChoice")>()),
+  decideExportEncoder: vi.fn(),
 }));
+
+/** What the app decided about the encoder, as the dialog is told: no chip, so no Mode row, unless a test says otherwise. */
+const decision = (over: Partial<ExportEncoderDecision> = {}): ExportEncoderDecision => ({
+  mode: "quality",
+  reason: "none",
+  showRow: false,
+  defaultMode: "quality",
+  fullSeconds: 40,
+  fastSeconds: null,
+  fullGuessed: true,
+  tests: [],
+  facts: { encoder: "x264", reason: "none", tests: [] },
+  ...over,
+});
+/** A chip that has proven itself, so the Mode row is shown. */
+const withRow = (over: Partial<ExportEncoderDecision> = {}): ExportEncoderDecision =>
+  decision({
+    showRow: true,
+    fastSeconds: 15,
+    facts: { encoder: "x264", chip: "amd", reason: "none", tests: [] },
+    ...over,
+  });
 
 beforeEach(() => {
   useExportJob.getState().reset();
   useExportJob.getState().setEngine("auto");
-  useExportJob.getState().setMode("quality");
   useExportJob.setState({ calibrations: [] });
-  vi.mocked(resolveLocalFastEncoder).mockResolvedValue(false);
+  vi.mocked(decideExportEncoder).mockReset();
+  vi.mocked(decideExportEncoder).mockResolvedValue(decision());
 });
 
 describe("export job", () => {
@@ -62,20 +84,36 @@ describe("export job", () => {
   });
 });
 
+// The project the dialog is opened on: its size and layers, for the estimate and for the encoder choice.
+const PROJECT = {
+  width: 1920,
+  height: 1080,
+  fps: 30,
+  durationSeconds: 120,
+  visualClips: 6,
+  captionClips: 1,
+  audioClips: 1,
+  peakVisualLayers: 2,
+  peakMediaLayers: 2,
+};
+
+/** One run this PC has measured for the project above: what the history holds after a background export. */
+const CALIBRATION = {
+  workload: PROJECT,
+  output: { width: 1920, height: 1080, fps: 30 },
+  quality: "medium",
+  engine: "file-sequence-v1" as const,
+  encoder: "x264-crf" as const,
+  revision: EXPORT_SPEED_REVISION,
+  elapsedSeconds: 150,
+  finalBytes: 48_000_000,
+  memoryBytes: null,
+  temporaryBytes: null,
+};
 // The line under the settings: roughly how long this will take and how big the file will be, for the
 // settings chosen. Information only: it never blocks, delays or alters the export.
 describe("ExportDialog estimate", () => {
-  const project = {
-    width: 1920,
-    height: 1080,
-    fps: 30,
-    durationSeconds: 120,
-    visualClips: 6,
-    captionClips: 1,
-    audioClips: 1,
-    peakVisualLayers: 2,
-    peakMediaLayers: 2,
-  };
+  const project = PROJECT;
   const measured = (over: Record<string, unknown> = {}) => ({
     workload: project,
     output: { width: 1920, height: 1080, fps: 30 },
@@ -137,17 +175,19 @@ describe("ExportDialog estimate", () => {
     expect(screen.getByLabelText("export estimate")).toHaveTextContent("A rough guess");
   });
 
-  it("never gets in the way of the export it describes", () => {
+  it("never gets in the way of the export it describes", async () => {
     const start = vi.fn();
     useExportJob.setState({ calibrations: [measured({ elapsedSeconds: 90_000 })] });
     show(project, start);
     expect(screen.getByLabelText("export estimate")).toHaveTextContent("about 25 h");
+    await waitFor(() => expect(decideExportEncoder).toHaveBeenCalled());
+    await act(async () => undefined); // the app's answer for these settings is in
     fireEvent.click(screen.getByRole("button", { name: "Export" }));
     expect(start).toHaveBeenCalledWith({
       resolution: "source",
       quality: "medium",
       fps: null,
-      mode: "quality",
+      mode: null,
     });
   });
 
@@ -168,18 +208,238 @@ describe("ExportDialog", () => {
     expect(screen.getByRole("button", { name: "Export" })).toBeInTheDocument();
   });
 
-  it("defaults to full quality and does not enable unmeasured Fast mode", () => {
-    const dialog = open();
-    expect(screen.getByRole("radio", { name: "Full quality" })).toBeChecked();
-    expect(screen.getByRole("radio", { name: "Fast" })).toBeDisabled();
+  it("shows no Mode row, and lets the app decide, when no chip has proven itself", async () => {
+    const start = vi.fn();
+    render(<ExportDialog open onCancel={() => {}} onStart={start} workload={PROJECT} />);
+    await waitFor(() => expect(decideExportEncoder).toHaveBeenCalled());
+    await act(async () => undefined); // the app's answer for these settings is in
+    expect(screen.queryByRole("radio", { name: "Fast" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("radio", { name: "Full quality" })).not.toBeInTheDocument();
     expect(screen.queryByLabelText("export engine")).not.toBeInTheDocument();
-    act(() => useExportJob.getState().reset());
-    dialog.unmount();
-    open();
-    expect(screen.getByRole("radio", { name: "Full quality" })).toBeChecked();
+    fireEvent.click(screen.getByRole("button", { name: "Export" }));
+    expect(start).toHaveBeenCalledWith({
+      resolution: "source",
+      quality: "medium",
+      fps: null,
+      mode: null,
+    });
   });
 
-  it("keeps automatic routing separate from requested full-quality delivery settings", () => {
+  it("asks the app as it opens and as the settings change, as a look that takes nothing for a report", async () => {
+    render(<ExportDialog open onCancel={() => {}} onStart={() => {}} workload={PROJECT} />);
+    await waitFor(() => expect(decideExportEncoder).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(decideExportEncoder).mock.calls[0][0]).toMatchObject({
+      request: "auto",
+      preview: true,
+      workload: PROJECT,
+      settings: { resolution: "source", quality: "medium", fps: null },
+    });
+    fireEvent.change(screen.getByLabelText("resolution"), { target: { value: "720p" } });
+    await waitFor(() => expect(decideExportEncoder).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(decideExportEncoder).mock.calls[1][0].settings).toMatchObject({
+      resolution: "720p",
+    });
+  });
+
+  it("shows the Mode row once a chip has proven itself: Full quality for a short export, what Fast would save, and Fast when picked", async () => {
+    vi.mocked(decideExportEncoder).mockResolvedValue(withRow());
+    const start = vi.fn();
+    render(<ExportDialog open onCancel={() => {}} onStart={start} workload={PROJECT} />);
+    const fast = await screen.findByRole("radio", { name: "Fast" });
+    expect(fast).toBeEnabled();
+    expect(screen.getByRole("radio", { name: "Full quality" })).toBeChecked();
+    expect(
+      screen.getByText(
+        "Fast uses your graphics chip: usually quicker, and the file is usually larger.",
+      ),
+    ).toBeVisible();
+    expect(screen.getByText("Fast would take under a minute.")).toBeVisible();
+    expect(screen.queryByText(/is selected because/)).toBeNull();
+    // Untouched, the app decides: nothing is sent as the person's choice.
+    fireEvent.click(screen.getByRole("button", { name: "Export" }));
+    expect(start).toHaveBeenLastCalledWith(expect.objectContaining({ mode: null }));
+    fireEvent.click(fast);
+    expect(fast).toBeChecked();
+    expect(
+      screen.getByText(/The file will be larger and the picture can differ slightly/),
+    ).toBeVisible();
+    expect(screen.getByText("Full quality would take under a minute.")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Export" }));
+    expect(start).toHaveBeenLastCalledWith({
+      resolution: "source",
+      quality: "medium",
+      fps: null,
+      mode: "fast",
+    });
+  });
+
+  it("selects Fast for the person when the export is over a minute and says why; picking Full quality is sent as their choice", async () => {
+    vi.mocked(decideExportEncoder).mockResolvedValue(
+      withRow({ defaultMode: "fast", reason: "over_minute", fullSeconds: 720, fastSeconds: 240 }),
+    );
+    const start = vi.fn();
+    render(<ExportDialog open onCancel={() => {}} onStart={start} workload={PROJECT} />);
+    expect(await screen.findByRole("radio", { name: "Fast" })).toBeChecked();
+    expect(
+      screen.getByText(
+        "Fast is selected because this export would take over a minute on this PC (about 12 min). The file will be larger and the picture can differ slightly. Choose Full quality for the smallest file.",
+      ),
+    ).toBeVisible();
+    expect(screen.getByText("Full quality would take about 12 min.")).toBeVisible();
+    // The quality is still the person's to choose: Fast runs at the same High, Medium or Low.
+    expect(screen.getByLabelText("quality")).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Export" }));
+    expect(start).toHaveBeenLastCalledWith(expect.objectContaining({ mode: null })); // left as the app chose
+    fireEvent.click(screen.getByRole("radio", { name: "Full quality" }));
+    expect(screen.queryByText(/is selected because/)).toBeNull();
+    expect(screen.getByText("Fast would take about 4 min.")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Export" }));
+    expect(start).toHaveBeenLastCalledWith(expect.objectContaining({ mode: "quality" }));
+  });
+
+  it("says where the faster setting will be used when there is no Mode row", async () => {
+    vi.mocked(decideExportEncoder).mockResolvedValue(
+      decision({ faster: true, reason: "promise_line", fullSeconds: 900 }),
+    );
+    render(<ExportDialog open onCancel={() => {}} onStart={() => {}} workload={PROJECT} />);
+    expect(
+      await screen.findByText(
+        "To save time, ArtDaddy will use a faster setting; the picture may be slightly softer.",
+      ),
+    ).toBeVisible();
+    expect(screen.queryByRole("radio", { name: "Fast" })).not.toBeInTheDocument();
+  });
+
+  it("estimates the way that is selected: Fast from what this PC measured of its chip", async () => {
+    vi.mocked(decideExportEncoder).mockResolvedValue(
+      withRow({ defaultMode: "fast", reason: "over_minute", fullSeconds: 150, fastSeconds: 60 }),
+    );
+    useExportJob.setState({
+      calibrations: [
+        {
+          workload: PROJECT,
+          output: { width: 1920, height: 1080, fps: 30 },
+          quality: "medium",
+          engine: "file-sequence-v1",
+          encoder: "chip-amd",
+          revision: EXPORT_SPEED_REVISION,
+          elapsedSeconds: 60,
+          finalBytes: 70_000_000,
+          memoryBytes: null,
+          temporaryBytes: null,
+        },
+      ],
+    });
+    render(<ExportDialog open onCancel={() => {}} onStart={() => {}} workload={PROJECT} />);
+    await screen.findByRole("radio", { name: "Fast" });
+    expect(screen.getByLabelText("export estimate")).toHaveTextContent(
+      "Expected: about 1 min, a file of about 70 MB, from earlier exports on this PC.",
+    );
+    fireEvent.click(screen.getByRole("radio", { name: "Full quality" }));
+    expect(screen.getByLabelText("export estimate")).toHaveTextContent("A rough guess");
+  });
+
+  it("ignores an answer to a question the person has already changed", async () => {
+    let answerFirst: (d: ExportEncoderDecision) => void = () => undefined;
+    vi.mocked(decideExportEncoder)
+      .mockImplementationOnce(() => new Promise((resolve) => (answerFirst = resolve)))
+      .mockResolvedValue(decision());
+    render(<ExportDialog open onCancel={() => {}} onStart={() => {}} workload={PROJECT} />);
+    await waitFor(() => expect(decideExportEncoder).toHaveBeenCalledTimes(1));
+    fireEvent.change(screen.getByLabelText("resolution"), { target: { value: "720p" } });
+    await waitFor(() => expect(decideExportEncoder).toHaveBeenCalledTimes(2));
+    await act(async () => answerFirst(withRow())); // the old question's answer arrives late
+    expect(screen.queryByRole("radio", { name: "Fast" })).not.toBeInTheDocument();
+  });
+
+  // Found by the second review: the dialog never showed a Mode row for a preview that failed, yet sent "no choice", and the
+  // export then chose Fast for the person. What the person did not see offered is never chosen for them.
+  it("goes on working when the app cannot say: no row, and Export still starts, as Full quality", async () => {
+    vi.mocked(decideExportEncoder).mockRejectedValue(new Error("the supervisor is gone"));
+    const start = vi.fn();
+    render(<ExportDialog open onCancel={() => {}} onStart={start} workload={PROJECT} />);
+    await waitFor(() => expect(decideExportEncoder).toHaveBeenCalled());
+    await act(async () => undefined); // the failure has been seen
+    expect(screen.queryByRole("radio", { name: "Fast" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Export" }));
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({ mode: "quality" }));
+  });
+
+  it("sends Full quality, not the app's choice, when the history the answer was made from has changed and the new answer has not come", async () => {
+    vi.mocked(decideExportEncoder)
+      .mockResolvedValueOnce(
+        withRow({ defaultMode: "fast", reason: "over_minute", fullSeconds: 720, fastSeconds: 240 }),
+      )
+      .mockReturnValue(new Promise(() => undefined)); // the next look has not come back
+    const start = vi.fn();
+    render(<ExportDialog open onCancel={() => {}} onStart={start} workload={PROJECT} />);
+    expect(await screen.findByRole("radio", { name: "Fast" })).toBeChecked();
+    // A background export finishes and the PC's history changes: the answer on screen was made from the old one.
+    await act(async () => {
+      useExportJob.setState({ calibrations: [{ ...CALIBRATION, elapsedSeconds: 30 }] });
+    });
+    await waitFor(() => expect(decideExportEncoder).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByRole("button", { name: "Export" }));
+    expect(start).toHaveBeenLastCalledWith(expect.objectContaining({ mode: "quality" }));
+    // A pick the person made is still theirs.
+    fireEvent.click(screen.getByRole("radio", { name: "Full quality" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Fast" }));
+    fireEvent.click(screen.getByRole("button", { name: "Export" }));
+    expect(start).toHaveBeenLastCalledWith(expect.objectContaining({ mode: "fast" }));
+  });
+
+  // Found by review: an Export pressed before the app had answered for the settings on screen was sent as "no choice", and the
+  // app then chose for the person; so was a Full the person had picked, once the settings changed under it.
+  it("sends Full quality, not the app's choice, when Export is pressed before the app has answered", async () => {
+    vi.mocked(decideExportEncoder).mockReturnValue(new Promise(() => undefined)); // the chip's test is still running
+    const start = vi.fn();
+    render(<ExportDialog open onCancel={() => {}} onStart={start} workload={PROJECT} />);
+    await waitFor(() => expect(decideExportEncoder).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Export" }));
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({ mode: "quality" }));
+  });
+
+  it("keeps a Full the person picked when the settings change away and back and the app has not answered for the last ones", async () => {
+    vi.mocked(decideExportEncoder)
+      .mockResolvedValueOnce(
+        withRow({ defaultMode: "fast", reason: "over_minute", fullSeconds: 720, fastSeconds: 240 }),
+      )
+      .mockResolvedValueOnce(decision()) // at 720p no chip would save a quarter: no row
+      .mockReturnValue(new Promise(() => undefined));
+    const start = vi.fn();
+    render(<ExportDialog open onCancel={() => {}} onStart={start} workload={PROJECT} />);
+    fireEvent.click(await screen.findByRole("radio", { name: "Full quality" }));
+    fireEvent.change(screen.getByLabelText("resolution"), { target: { value: "720p" } });
+    await waitFor(() => expect(screen.queryByRole("radio", { name: "Fast" })).toBeNull());
+    fireEvent.change(screen.getByLabelText("resolution"), { target: { value: "source" } });
+    await waitFor(() => expect(decideExportEncoder).toHaveBeenCalledTimes(3));
+    fireEvent.click(screen.getByRole("button", { name: "Export" }));
+    expect(start).toHaveBeenLastCalledWith(expect.objectContaining({ mode: "quality" }));
+  });
+
+  it("sends nothing as the person's choice once the app has answered for the settings on screen, and no row was shown", async () => {
+    const start = vi.fn();
+    render(<ExportDialog open onCancel={() => {}} onStart={start} workload={PROJECT} />);
+    await waitFor(() => expect(decideExportEncoder).toHaveBeenCalled());
+    await act(async () => undefined); // the answer has landed
+    fireEvent.click(screen.getByRole("button", { name: "Export" }));
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({ mode: null }));
+  });
+
+  it("forgets the person's pick when it is opened again", async () => {
+    vi.mocked(decideExportEncoder).mockResolvedValue(withRow());
+    const first = render(
+      <ExportDialog open onCancel={() => {}} onStart={() => {}} workload={PROJECT} />,
+    );
+    fireEvent.click(await screen.findByRole("radio", { name: "Fast" }));
+    first.unmount();
+    render(<ExportDialog open onCancel={() => {}} onStart={() => {}} workload={PROJECT} />);
+    expect(await screen.findByRole("radio", { name: "Full quality" })).toBeChecked();
+  });
+
+  // Found by the second review: with no workload the dialog cannot ask the app anything, shows no Mode row and no estimate,
+  // and sent "no choice", so the export chose for the person once the project could be read after all.
+  it("keeps automatic routing separate from the person's delivery settings, and gives Full quality where it could not ask", () => {
     const start = vi.fn();
     render(<ExportDialog open onCancel={() => {}} onStart={start} />);
     fireEvent.click(screen.getByRole("button", { name: "Export" }));
@@ -190,26 +450,6 @@ describe("ExportDialog", () => {
       fps: null,
       mode: "quality",
     });
-  });
-
-  it("offers Fast only after eligibility succeeds and makes the larger-file tradeoff visible", async () => {
-    vi.mocked(resolveLocalFastEncoder).mockResolvedValue(true);
-    const start = vi.fn();
-    const dialog = render(<ExportDialog open onCancel={() => {}} onStart={start} />);
-    await waitFor(() => expect(screen.getByRole("radio", { name: "Fast" })).toBeEnabled());
-    expect(screen.getByRole("radio", { name: "Full quality" })).toBeChecked();
-    fireEvent.click(screen.getByRole("radio", { name: "Fast" }));
-    expect(screen.getByText(/Files can be much larger\. The picture/)).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "Export" }));
-    expect(start).toHaveBeenCalledWith({
-      resolution: "source",
-      quality: "medium",
-      fps: null,
-      mode: "fast",
-    });
-    dialog.unmount();
-    open();
-    expect(screen.getByRole("radio", { name: "Full quality" })).toBeChecked();
   });
 
   it("reports an UNKNOWN position as unknown, not as zero", () => {

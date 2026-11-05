@@ -9,9 +9,18 @@ export type ExportResolution = "source" | "2160p" | "1440p" | "1080p" | "720p" |
 export type ExportQuality = "high" | "medium" | "low";
 export type ExportEngine = "file-sequence-v1" | "partition-pipes-v1" | "auto";
 export type ExportMode = "quality" | "fast";
-export type ExportEncoder = "x264-crf" | "x264-crf-threads2" | "amf-cqp18";
+export type { ExportEncoder } from "./exportEncoder";
 
 import type { Branding } from "./branding";
+import type { ChoiceFacts } from "./exportChoice";
+import {
+  CHIP_CAUTIOUS_GAIN,
+  FASTER_X264_GAIN,
+  encoderIdFor,
+  type ChipMaker,
+  type EncoderKind,
+  type ExportEncoder,
+} from "./exportEncoder";
 import { rungOf, type PeakSample, type Plan, type Rung } from "./exportPlan";
 import type { RenderWorkload } from "./renderPlan";
 import type { ExportResources } from "../platform/host";
@@ -19,17 +28,21 @@ import type { ExportResources } from "../platform/host";
 /** Bump when exports get faster, slower or hungrier; measurements from before then stop estimating. */
 export const EXPORT_SPEED_REVISION = 1;
 
+/** The encoder an export runs and is remembered under. The chip is used only when Fast was chosen AND a chip is named
+ *  (exportEncoder.ts `chooseEncoder` decides that); the faster setting only for Full quality's processor path. Anything
+ *  else is today's encoder, id for id. */
 export function finalEncoderPolicy(
   output: { width: number; height: number },
   engine: ExportEngine,
   mode: ExportMode = "quality",
+  route: { chip?: ChipMaker | null; faster?: boolean } = {},
 ): { encoder: ExportEncoder; threads: 1 | 2 | null } {
+  const chip = mode === "fast" ? (route.chip ?? null) : null;
   const twoThreads =
-    engine === "partition-pipes-v1" &&
-    mode === "quality" &&
-    output.width * output.height > 1920 * 1080;
+    engine === "partition-pipes-v1" && chip === null && output.width * output.height > 1920 * 1080;
+  const kind: EncoderKind = chip ?? (route.faster ? "x264_fast" : "x264");
   return {
-    encoder: mode === "fast" ? "amf-cqp18" : twoThreads ? "x264-crf-threads2" : "x264-crf",
+    encoder: encoderIdFor({ kind, twoThreads }),
     threads: engine === "partition-pipes-v1" ? (twoThreads ? 2 : 1) : null,
   };
 }
@@ -195,13 +208,36 @@ export const LONG_EXPORT_SECONDS = 20 * 60;
 
 const HD30_PIXELS_PER_SECOND = 1920 * 1080 * 30;
 
+/** What an encoder does to the processor's time before it has run on this PC: the gain the lab saw, taken cautiously
+ *  (exportEncoder.ts). 1 for the processor's normal setting. */
+function encoderGain(encoder: ExportEncoder): number {
+  if (encoder.startsWith("chip-")) return CHIP_CAUTIOUS_GAIN;
+  if (encoder.startsWith("x264-fast")) return FASTER_X264_GAIN;
+  return 1;
+}
+
+/** The processor's normal setting that an encoder is measured against: the same threading, so a streamed 4K export is
+ *  compared with the two-thread processor run it would have been. */
+function processorEquivalent(
+  encoder: ExportEncoder,
+  engine: ExportEngine,
+  output: { width: number; height: number },
+): ExportEncoder {
+  if (encoder === "x264-fast") return "x264-crf";
+  if (encoder === "x264-fast-threads2") return "x264-crf-threads2";
+  if (encoder.startsWith("chip-"))
+    return engine === "partition-pipes-v1" && output.width * output.height > 1920 * 1080
+      ? "x264-crf-threads2"
+      : "x264-crf";
+  return encoder;
+}
+
 /** A rough time for an export no measurement on this device matches, from its size alone. */
 export function guessExportSeconds(
   workload: RenderWorkload,
   output: ExportCalibration["output"],
   encoder: ExportEncoder = "x264-crf",
 ): number | null {
-  if (encoder === "amf-cqp18") return null;
   const sizes = [
     workload.width,
     workload.height,
@@ -222,10 +258,19 @@ export function guessExportSeconds(
     ? Math.max(1, workload.peakVisualLayers)
     : 1;
   // Measured on one fast laptop: 1080p30 took 0.6-1.2x the video's length (one x264 thread caps it at 2x), 4K about 4x.
-  return Math.ceil(10 + workload.durationSeconds * picture * (1 + 0.1 * (layers - 1)));
+  const processorSeconds = Math.ceil(
+    10 + workload.durationSeconds * picture * (1 + 0.1 * (layers - 1)),
+  );
+  // The chip and the faster setting have no measurement of their own until they have run on this PC: the processor's
+  // figure divided by a cautious gain (exportEncoder.ts), so a guess never promises more than the lab saw.
+  const gain = encoderGain(encoder);
+  return gain === 1 ? processorSeconds : Math.ceil(processorSeconds / gain);
 }
 
-/** What the history says, and a guess at the time where it says nothing. */
+/** What the history says, and a guess at the time where it says nothing. An encoder nothing was measured for yet (the
+ *  graphics chip, the faster setting) is estimated from the processor's measurement of the same export when this PC has
+ *  one, divided by the cautious gain: a ten-minute export is never "eight seconds" on a chip that has not run here. Only
+ *  the time is inferred; sizes and memory are not claimed for an encoder that has not run on this PC. */
 export function estimateExport(
   workload: RenderWorkload,
   output: ExportCalibration["output"],
@@ -236,6 +281,19 @@ export function estimateExport(
 ): ExportEstimates {
   const measured = estimateExportFromHistory(workload, output, quality, engine, history, encoder);
   if (measured.seconds !== null) return measured;
+  const gain = encoderGain(encoder);
+  if (gain > 1) {
+    const processor = estimateExportFromHistory(
+      workload,
+      output,
+      quality,
+      engine,
+      history,
+      processorEquivalent(encoder, engine, output),
+    );
+    if (processor.seconds !== null)
+      return { ...measured, seconds: Math.ceil(processor.seconds / gain), secondsGuessed: true };
+  }
   const guess = guessExportSeconds(workload, output, encoder);
   return guess === null ? measured : { ...measured, seconds: guess, secondsGuessed: true };
 }
@@ -262,6 +320,20 @@ export interface DialogEstimate {
   readonly finalBytes: number | null;
 }
 
+/** The picture an export delivers: the project's size and rate after the person's resolution and frame-rate choices. The
+ *  ONE definition, so the estimate and the encoder choice (the chip is tested at this size) cannot disagree. */
+export function deliveredPicture(
+  workload: Pick<RenderWorkload, "width" | "height" | "fps">,
+  settings: { resolution?: ExportResolution; fps?: number | null },
+): ExportCalibration["output"] {
+  const resized = outputSize(workload.width, workload.height, settings.resolution);
+  return {
+    width: resized?.w ?? workload.width,
+    height: resized?.h ?? workload.height,
+    fps: outputFps(workload.fps, settings.fps ?? undefined),
+  };
+}
+
 /** What the export dialog tells the person before they click Export: roughly how long it will take and
  *  how big the file will be, for the settings they have chosen. Read-only information: it starts and
  *  decides nothing. It is built from the same history and the same `estimateExport` the pre-start check
@@ -278,17 +350,14 @@ export function estimateForDialog(
     mode: ExportMode;
   },
   history: readonly ExportCalibration[],
+  /** The chip Fast would run on, and whether the faster processor setting is meant: which encoder is estimated. */
+  route: { chip?: ChipMaker | null; faster?: boolean } = {},
 ): DialogEstimate {
-  const resized = outputSize(workload.width, workload.height, settings.resolution);
-  const output = {
-    width: resized?.w ?? workload.width,
-    height: resized?.h ?? workload.height,
-    fps: outputFps(workload.fps, settings.fps ?? undefined),
-  };
+  const output = deliveredPicture(workload, settings);
   const engine: ExportEngine = exceedsOnePass(workload, workload)
     ? "partition-pipes-v1"
     : "file-sequence-v1";
-  const { encoder } = finalEncoderPolicy(output, engine, settings.mode);
+  const { encoder } = finalEncoderPolicy(output, engine, settings.mode, route);
   const estimate = estimateExport(workload, output, settings.quality, engine, history, encoder);
   return {
     seconds: estimate.seconds,
@@ -345,31 +414,22 @@ const KNOWN_PROBLEM: Record<ExportPreflightReason, boolean> = {
 export const isKnownProblem = (reason: ExportPreflightReason): boolean => KNOWN_PROBLEM[reason];
 
 export interface ExportAssessment {
-  readonly promiseLine: "hd" | "heavy_hd" | "4k" | "outside";
+  readonly promiseLine: PromiseLine;
   readonly severity: "none" | "notice" | "warning";
   readonly reasons: readonly ExportPreflightReason[];
   readonly estimates: ExportEstimates;
 }
 
-export function assessExport(
-  workload: RenderWorkload,
-  resources: ExportResources,
-  measured: ExportEstimates,
-  budgets: ExportBudgets,
-  /** The memory verdict when the exporter plans a rung (exportPlan.ts): memory is short only when even the
-   *  gentlest rung does not fit. Without it, today's rule: the measured peak against what the PC and the
-   *  app allow. */
-  memoryPlan?: Plan,
-): ExportAssessment {
-  const valid = (value: number | null): value is number =>
-    value !== null && Number.isFinite(value) && value >= 0;
-  const estimates: ExportEstimates = {
-    memoryBytes: valid(measured.memoryBytes) ? measured.memoryBytes : null,
-    temporaryBytes: valid(measured.temporaryBytes) ? measured.temporaryBytes : null,
-    finalBytes: valid(measured.finalBytes) ? measured.finalBytes : null,
-    seconds: valid(measured.seconds) ? measured.seconds : null,
-    ...(valid(measured.seconds) && measured.secondsGuessed ? { secondsGuessed: true } : {}),
-  };
+export type PromiseLine = "hd" | "heavy_hd" | "4k" | "outside";
+
+/** Which of the product's promises a project falls under: ordinary HD, heavy HD, 4K, or none. The ONE rule: the
+ *  assessment and the encoder choice (the faster setting is used when an export would run past its line) both read it. */
+export function promiseLineOf(
+  workload: Pick<
+    RenderWorkload,
+    "width" | "height" | "fps" | "durationSeconds" | "visualClips" | "peakVisualLayers"
+  >,
+): PromiseLine {
   const short = Math.min(workload.width, workload.height);
   const long = Math.max(workload.width, workload.height);
   const usable =
@@ -392,7 +452,34 @@ export function assessExport(
     workload.fps <= 30;
   const normalHd = withinHd && workload.peakVisualLayers <= 4 && workload.fps <= 60;
   const heavyHd = withinHd && workload.peakVisualLayers <= 8 && workload.fps <= 30;
-  const promiseLine = normalHd ? "hd" : heavyHd ? "heavy_hd" : within4k ? "4k" : "outside";
+  return normalHd ? "hd" : heavyHd ? "heavy_hd" : within4k ? "4k" : "outside";
+}
+
+/** How many times the video's length an export is promised to stay within: two for ordinary HD, four for the rest. */
+export function promiseMultipleOf(line: PromiseLine): 2 | 4 {
+  return line === "hd" ? 2 : 4;
+}
+
+export function assessExport(
+  workload: RenderWorkload,
+  resources: ExportResources,
+  measured: ExportEstimates,
+  budgets: ExportBudgets,
+  /** The memory verdict when the exporter plans a rung (exportPlan.ts): memory is short only when even the
+   *  gentlest rung does not fit. Without it, today's rule: the measured peak against what the PC and the
+   *  app allow. */
+  memoryPlan?: Plan,
+): ExportAssessment {
+  const valid = (value: number | null): value is number =>
+    value !== null && Number.isFinite(value) && value >= 0;
+  const estimates: ExportEstimates = {
+    memoryBytes: valid(measured.memoryBytes) ? measured.memoryBytes : null,
+    temporaryBytes: valid(measured.temporaryBytes) ? measured.temporaryBytes : null,
+    finalBytes: valid(measured.finalBytes) ? measured.finalBytes : null,
+    seconds: valid(measured.seconds) ? measured.seconds : null,
+    ...(valid(measured.seconds) && measured.secondsGuessed ? { secondsGuessed: true } : {}),
+  };
+  const promiseLine = promiseLineOf(workload);
   const reasons: ExportPreflightReason[] = [];
   if (promiseLine === "outside") reasons.push("outside_promise");
   const memory = estimates.memoryBytes;
@@ -448,6 +535,13 @@ export interface ExportOptions {
   __qaPieceSpanSeconds?: 180;
   engine?: ExportEngine;
   mode?: ExportMode;
+  /** The graphics chip a Fast export runs on (exportEncoder.ts). Used only with `mode: "fast"`; without a chip Fast
+   *  is the processor's encoder, as Full is. */
+  chip?: ChipMaker;
+  /** The processor's faster setting (x264 `veryfast`), chosen for a slow export on a PC with no usable chip. */
+  faster?: boolean;
+  /** How the encoder was chosen (exportChoice.ts): carried onto the plan, and onto every rebuild of it. */
+  choice?: ChoiceFacts;
   /** How gentle the export runs (exportPlan.ts): 0, the default, is today's command; 1 and 2 use fewer decoder
    *  and encoder threads, so less memory, and change nothing else about what is made. */
   rung?: Rung;

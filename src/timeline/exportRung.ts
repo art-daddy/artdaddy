@@ -8,7 +8,14 @@ import {
   type ExportEncoder,
   type ExportEngine,
 } from "./exportOptions";
-import { planRung, rungOf, type Plan, type Rung } from "./exportPlan";
+import {
+  planRung,
+  cleanLadder,
+  denseLadder,
+  type Ladder,
+  type Plan,
+  type Rung,
+} from "./exportPlan";
 import type { RenderWorkload } from "./renderPlan";
 
 export interface RungDecision {
@@ -16,9 +23,11 @@ export interface RungDecision {
   readonly plan: Plan;
   /** The free memory the decision was made on, or null when the PC could not be measured. */
   readonly freeBytes: number | null;
-  /** The gentlest rung this export has: what the plan counted on, and what Try again may ask for. The same with
-   *  the switch off (the export then runs the normal rung): the switch is read again when Try again is offered
-   *  (`gentlestRungOf`), so what the command has must be kept. */
+  /** The rungs this export really has (exportPlan.ts `Ladder`): what the plan counted on, and what Try again may ask
+   *  for. The same with the switch off (the export then runs the normal rung): the switch is read again when Try again
+   *  is offered (`gentlestRungOf`), so what the command has must be kept. */
+  readonly ladder: Ladder;
+  /** The gentlest of them: the last on the ladder. */
   readonly maxRung: Rung;
 }
 
@@ -43,15 +52,21 @@ export async function decideRung(input: {
   signal?: AbortSignal;
   /** The gentlest-so-far a second try starts from. */
   minRung?: number;
-  /** The gentlest rung this export's command really has (render.ts `gentlestRung`): a rung that is the same
-   *  command as the one before it is not counted on. Absent: what the engine has. */
+  /** The rungs this export's command really has (render.ts `ladderOf`): a rung that is the same command as the one
+   *  before it is not counted on. Absent: the rungs with no gaps up to `maxRung`. */
+  ladder?: Ladder;
+  /** The gentlest rung, for a caller that has no ladder. Absent: what the engine has. */
   maxRung?: number;
   /** The remote switch (`plan_rung`): off is today's behaviour. */
   enabled: boolean;
   resolve?: Resolve;
 }): Promise<RungDecision> {
-  const maxRung = Math.min(lastRungOf(input.engine), rungOf(input.maxRung ?? 2)) as Rung;
-  const minRung = Math.min(rungOf(input.minRung), maxRung);
+  const engineLast = lastRungOf(input.engine);
+  const bounded = input.ladder
+    ? cleanLadder(input.ladder).filter((rung) => rung <= engineLast)
+    : denseLadder(Math.min(engineLast, input.maxRung ?? 2));
+  const ladder: Ladder = bounded.length ? bounded : [0];
+  const maxRung = ladder[ladder.length - 1];
   const samples = peakSamples(
     input.workload,
     input.output,
@@ -63,8 +78,9 @@ export async function decideRung(input: {
   if (!input.enabled)
     return {
       rung: 0,
-      plan: planRung({ samples, freeBytes: null, minRung: 0, maxRung }),
+      plan: planRung({ samples, freeBytes: null, minRung: 0, ladder }),
       freeBytes: null,
+      ladder,
       maxRung,
     };
   let resources: ExportResources | null = null;
@@ -75,6 +91,6 @@ export async function decideRung(input: {
   }
   const raw = resources?.available_memory_bytes;
   const freeBytes = typeof raw === "number" && Number.isFinite(raw) && raw >= 0 ? raw : null;
-  const plan = planRung({ samples, freeBytes, minRung, maxRung });
-  return { rung: plan.rung, plan, freeBytes, maxRung };
+  const plan = planRung({ samples, freeBytes, minRung: input.minRung, ladder });
+  return { rung: plan.rung, plan, freeBytes, ladder, maxRung };
 }

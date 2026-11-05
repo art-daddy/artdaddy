@@ -3323,6 +3323,7 @@ describe("what happened to an export, as its report tells it", () => {
       over: {
         rung?: 1 | 2;
         maxRung?: 0 | 1 | 2;
+        ladder?: (0 | 1 | 2)[];
         answer?: () => Promise<{ ok: boolean; error?: string; declined?: boolean }>;
       } = {},
     ) {
@@ -3335,11 +3336,12 @@ describe("what happened to an export, as its report tells it", () => {
         filename: "final.mp4",
         meta: {
           ...meta,
-          ...(over.rung || over.maxRung !== undefined
+          ...(over.rung || over.maxRung !== undefined || over.ladder
             ? {
                 plan: {
                   rung: over.rung ?? 0,
                   ...(over.maxRung !== undefined ? { max_rung: over.maxRung } : {}),
+                  ...(over.ladder ? { ladder: over.ladder } : {}),
                 },
               }
             : {}),
@@ -3414,6 +3416,29 @@ describe("what happened to an export, as its report tells it", () => {
         const off = await failedExport("Cannot allocate memory", { rung: 1 });
         await retryExport(off.jobId);
         expect(off.asked).toEqual([0]); // as before rungs existed
+      } finally {
+        __setExportFlag("plan_rung", true);
+      }
+    });
+
+    // The second pass of S3's review, built in S4: the ladder is not always a run from the first rung. A graphics
+    // encoder with nine to twelve clips has rung 0 and rung 2 only; Try again goes to the one that exists.
+    it("steps to the next rung on the export's ladder, and says nothing is gentler only when nothing is", async () => {
+      const chip = await failedExport("Cannot allocate memory", { ladder: [0, 2], maxRung: 2 });
+      await retryExport(chip.jobId);
+      expect(chip.asked).toEqual([2]); // rung 1 is the same command as rung 0 here
+      const again = await failedExport("Cannot allocate memory", {
+        rung: 2,
+        ladder: [0, 2],
+        maxRung: 2,
+      });
+      await retryExport(again.jobId);
+      expect(again.asked).toEqual([2]); // already at the gentlest it has
+      __setExportFlag("plan_rung", false);
+      try {
+        const off = await failedExport("Cannot allocate memory", { ladder: [0, 2], maxRung: 2 });
+        await retryExport(off.jobId);
+        expect(off.asked).toEqual([0]); // the switch is read when Try again is offered, not when the export was captured
       } finally {
         __setExportFlag("plan_rung", true);
       }

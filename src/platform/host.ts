@@ -5,6 +5,7 @@
 // the web build and for the moment before the first IPC round-trip completes.
 import { platform } from "./index";
 import { settledWithin } from "../lib/settledWithin";
+import { CHIP_MAKERS, type ChipMaker } from "../timeline/exportEncoder";
 import type { ExportBudgets } from "../timeline/exportOptions";
 
 export type HostOs = "windows" | "macos" | "linux" | "unknown";
@@ -32,15 +33,48 @@ export interface ExportTemporarySpace {
   readonly entryLimit: number;
 }
 
+/** A graphics chip the PC has, as the app process reports it (Windows only): the maker the exporter has an encoder for,
+ *  the PCI device number and the installed driver. They key the chip test's local cache; only the maker is ever reported. */
+export interface GraphicsAdapter {
+  readonly maker: ChipMaker;
+  readonly device: string;
+  readonly driver: string;
+}
+
 export interface ExportResources {
   readonly total_memory_bytes: number | null;
   readonly available_memory_bytes: number | null;
   readonly scratch_free_bytes: number | null;
   readonly destination_free_bytes: number | null;
   readonly budgets: ExportBudgets;
-  readonly local_fast_candidate: boolean;
+  /** The graphics chips of the makers the exporter knows; absent when the PC could not be asked (none then). */
+  readonly adapters?: readonly GraphicsAdapter[];
+  /** Retired: the developer-only AMD check of earlier builds. Nothing reads it; the app process no longer sends it. */
+  readonly local_fast_candidate?: boolean;
   readonly temporary_space?: ExportTemporarySpace;
   readonly memory_cgroup?: LinuxMemoryCgroup;
+}
+
+/** The adapters a response lists, each only if it is the shape the app process sends: a known maker, a hex device
+ *  number and a driver made of digits and dots. Anything else is dropped (and the PC is simply taken to have no such chip). */
+export function cleanAdapters(raw: unknown): GraphicsAdapter[] {
+  if (!Array.isArray(raw)) return [];
+  const out: GraphicsAdapter[] = [];
+  for (const item of raw.slice(0, 8)) {
+    if (!item || typeof item !== "object") continue;
+    const { maker, device, driver } = item as Record<string, unknown>;
+    if (
+      !(CHIP_MAKERS as readonly unknown[]).includes(maker) ||
+      typeof device !== "string" ||
+      !/^[0-9a-f]{1,8}$/.test(device) ||
+      typeof driver !== "string" ||
+      !/^[0-9.]{0,40}$/.test(driver)
+    )
+      continue;
+    if (out.some((seen) => seen.maker === maker && seen.device === device)) continue;
+    out.push({ maker: maker as ChipMaker, device, driver });
+  }
+  return out;
 }
 
 export async function resolveExportResources(
@@ -53,7 +87,7 @@ export async function resolveExportResources(
     scratch_free_bytes: null,
     destination_free_bytes: null,
     budgets: { memoryBytes: null, temporaryBytes: null, executionSeconds: null },
-    local_fast_candidate: false,
+    adapters: [],
   };
   if (platform.name !== "tauri" || signal?.aborted) return unknown;
   const pending = (async (): Promise<ExportResources> => {
@@ -162,7 +196,7 @@ export async function resolveExportResources(
         temporaryBytes: limit("temporaryBytes"),
         executionSeconds: limit("executionSeconds"),
       },
-      local_fast_candidate: raw.local_fast_candidate === true,
+      adapters: cleanAdapters(raw.adapters),
       ...(temporarySpace ? { temporary_space: temporarySpace } : {}),
       ...(memoryCgroup ? { memory_cgroup: memoryCgroup } : {}),
     };
@@ -170,66 +204,71 @@ export async function resolveExportResources(
   return (await settledWithin(pending, 2000, signal)) ?? unknown;
 }
 
-export async function resolveLocalFastEncoder(signal?: AbortSignal): Promise<boolean> {
-  if (signal?.aborted || !(await resolveExportResources("", signal)).local_fast_candidate)
-    return false;
-  const { jobSupervisor, whenJobEnds } = await import("../tools/jobSupervisor");
+/** How a probe came out. `ran` says what the command did (its exit code, its output, how long it took); the rest say
+ *  why it did not run to the end: `busy` (an export is running, or there was no supervisor to ask: try again later),
+ *  `timeout` (it did not finish in time and was ended) or `stopped` (the caller's signal ended it). */
+export type ProbeOutcome =
+  | {
+      readonly kind: "ran";
+      readonly code: number;
+      readonly stdout: string;
+      readonly stderr: string;
+      readonly ms: number;
+    }
+  | { readonly kind: "busy" }
+  | { readonly kind: "timeout" }
+  | { readonly kind: "stopped" };
+
+/** Run one short ffmpeg command as a job on the capability lane and say how it ended. Never throws, and the job is
+ *  always ended and forgotten. It is the one place the exporter's graphics-chip test runs ffmpeg. */
+export async function runCapabilityProbe(
+  args: readonly string[],
+  options: { signal?: AbortSignal; timeoutMs: number; kind: string },
+): Promise<ProbeOutcome> {
+  const { signal } = options;
+  if (signal?.aborted) return { kind: "stopped" };
+  const { jobSupervisor, whenJobEnds, jobResult } = await import("../tools/jobSupervisor");
   const jobs = await settledWithin(
     jobSupervisor().catch(() => null),
     2000,
     signal,
   );
-  if (!jobs || signal?.aborted) return false;
+  if (signal?.aborted) return { kind: "stopped" };
+  if (!jobs) return { kind: "busy" };
   const active = await settledWithin(
     jobs.list().catch(() => null),
     2000,
     signal,
   );
-  if (!active || signal?.aborted) return false;
-  if (active.some((job) => job.lane === "export" && job.state !== "exited")) return false;
-  const id = `fast_probe_${crypto.randomUUID().replaceAll("-", "")}`;
+  if (signal?.aborted) return { kind: "stopped" };
+  if (!active) return { kind: "busy" };
+  // A test never competes with an export for the processor or the chip.
+  if (active.some((job) => job.lane === "export" && job.state !== "exited"))
+    return { kind: "busy" };
+  const id = `chip_probe_${crypto.randomUUID().replaceAll("-", "")}`;
+  const started = Date.now();
   try {
     await jobs.submit({
       id,
       lane: "fast-capability",
       program: "ffmpeg",
-      args: [
-        "-hide_banner",
-        "-nostdin",
-        "-v",
-        "error",
-        "-f",
-        "lavfi",
-        "-i",
-        "color=c=black:s=1920x1080:r=30:d=0.1",
-        "-frames:v",
-        "1",
-        "-an",
-        "-c:v",
-        "h264_amf",
-        "-usage",
-        "transcoding",
-        "-quality",
-        "quality",
-        "-rc",
-        "cqp",
-        "-qp_i",
-        "18",
-        "-qp_p",
-        "18",
-        "-qp_b",
-        "18",
-        "-f",
-        "null",
-        "-",
-      ],
-      meta: { kind: "local-fast-capability" },
+      args: [...args],
+      meta: { kind: options.kind },
     });
-    const ended = await settledWithin(whenJobEnds(jobs, id), 10000, signal);
-    if (!ended || signal?.aborted) return false;
-    return ended.code === 0 && !ended.killed;
+    const ended = await settledWithin(whenJobEnds(jobs, id), options.timeoutMs, signal);
+    if (signal?.aborted) return { kind: "stopped" };
+    if (!ended) return { kind: "timeout" };
+    if (ended.killed) return { kind: "stopped" };
+    const result = jobResult(ended);
+    return {
+      kind: "ran",
+      code: result.code ?? -1,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      ms: Date.now() - started,
+    };
   } catch {
-    return false;
+    return { kind: "busy" };
   } finally {
     let ended = (
       await settledWithin(

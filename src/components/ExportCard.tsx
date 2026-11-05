@@ -33,6 +33,8 @@ import {
 } from "../timeline/exportQueue";
 import { answerButtons } from "../timeline/exportQuestions";
 import {
+  describeChipFailure,
+  describeEncoder,
   describeLiveStatus,
   describeResult,
   describeRung,
@@ -169,6 +171,11 @@ export default function ExportCard(): JSX.Element | null {
             {r.rung && (
               <div className="mt-0.5 text-[11px] text-neutral-500">{describeRung(r.rung)}</div>
             )}
+            {describeEncoder(r.encoder, r.reason) && (
+              <div className="mt-0.5 text-[11px] text-neutral-500">
+                {describeEncoder(r.encoder, r.reason)}
+              </div>
+            )}
           </div>
         );
       })}
@@ -202,8 +209,12 @@ export default function ExportCard(): JSX.Element | null {
         });
         const tryAgain =
           r.state === "failed" && r.canRetry
-            ? describeTryAgain(failureOf(r.error).code, r.rung, gentlestRungOf(r))
-            : "";
+            ? r.chipFailed
+              ? describeChipFailure("card")
+              : describeTryAgain(failureOf(r.error).code, r.rung, gentlestRungOf(r))
+            : r.state === "failed" && r.chipFailed
+              ? describeChipFailure("again")
+              : "";
         return (
           <div key={r.job_id} className="flex items-start justify-between gap-2">
             <div className="min-w-0">

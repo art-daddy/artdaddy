@@ -56,7 +56,14 @@ const AGENT = { chatSessionId: "t1", branchId: 0, executionId: 1 };
 function start(
   filename: string,
   run: (signal: AbortSignal) => Promise<unknown>,
-  over: { store?: ProjectStoreAccess; fs?: ExportMemFs; rung?: 1 | 2 } = {},
+  over: {
+    store?: ProjectStoreAccess;
+    fs?: ExportMemFs;
+    rung?: 1 | 2;
+    /** How the encoder was chosen (exportChoice.ts); the normal setting when left out. */
+    encoder?: "x264" | "x264_fast" | "amd" | "nvidia" | "intel";
+    reason?: "over_minute" | "person" | "promise_line" | "none";
+  } = {},
 ) {
   const useStore = over.store ?? store;
   const useFs = over.fs ?? fs;
@@ -67,7 +74,7 @@ function start(
     stagePath: `/out/${filename}.partial`,
     filename,
     origin: AGENT, // the chat asked: the Export dialog's own job is not begun
-    ...(over.rung
+    ...(over.rung || over.encoder
       ? {
           meta: {
             duration_s: 10,
@@ -76,7 +83,17 @@ function start(
             fps: 30,
             quality: "medium",
             project_id: "",
-            plan: { rung: over.rung },
+            ...(over.rung ? { plan: { rung: over.rung } } : {}),
+            ...(over.encoder
+              ? {
+                  choice: {
+                    encoder: over.encoder,
+                    reason: over.reason ?? "over_minute",
+                    tests: [],
+                    adapter: { maker: "amd" as const, device: "15bf", driver: "32.0.1" },
+                  },
+                }
+              : {}),
           },
         }
       : {}),
@@ -160,6 +177,45 @@ describe("ExportCard", () => {
     await start("one.mp4", g.wait);
     render(<ExportCard />);
     expect(screen.queryByText(/gentler setting|gentlest setting/)).toBeNull();
+    expect(screen.queryByText(/graphics chip|faster setting/)).toBeNull();
+    g.open();
+  });
+
+  it.each([
+    [
+      "the graphics chip, chosen by the app",
+      "amd",
+      "over_minute",
+      "Using your graphics chip to save time · the file is larger and the picture can differ slightly",
+    ],
+    [
+      "the graphics chip, picked by the person",
+      "nvidia",
+      "person",
+      "Using your graphics chip · the file is larger and the picture can differ slightly",
+    ],
+    [
+      "the faster setting",
+      "x264_fast",
+      "promise_line",
+      "Using a faster setting to save time · the picture may be slightly softer",
+    ],
+  ] as const)(
+    "says, under the status line, what an export runs on, and why: %s",
+    async (_name, encoder, reason, line) => {
+      const g = gated();
+      await start("one.mp4", g.wait, { encoder, reason });
+      render(<ExportCard />);
+      expect(screen.getByText(line)).toBeVisible();
+      g.open();
+    },
+  );
+
+  it("says nothing about the encoder for an export on the processor's normal setting, even when the app recorded that", async () => {
+    const g = gated();
+    await start("one.mp4", g.wait, { encoder: "x264", reason: "none" });
+    render(<ExportCard />);
+    expect(screen.queryByText(/graphics chip|faster setting/)).toBeNull();
     g.open();
   });
 
@@ -374,6 +430,66 @@ describe("ExportCard", () => {
       render(<ExportCard />);
       expect(screen.getByRole("button", { name: "try again one.mp4" })).toBeVisible();
       expect(screen.queryByText(/gentler setting|gentlest setting/)).toBeNull();
+    });
+
+    describe("after the graphics chip stopped the export", () => {
+      const onChip = (error: string) =>
+        start(
+          "one.mp4",
+          async () => {
+            throw new Error(error);
+          },
+          { encoder: "amd", reason: "over_minute" },
+        );
+      const DRIVER =
+        "native render failed: [h264_amf @ 0000028f] Error submitting video frame to the encoder";
+
+      it("says so, promises the processor, and Try again asks for it from its normal setting", async () => {
+        const sub = await onChip(DRIVER);
+        const asked: Array<[number, boolean | undefined]> = [];
+        offerExportRetry(sub.job_id, async (rung, _failed, options) => {
+          asked.push([rung, options.processor]);
+          return { ok: true };
+        });
+        await whenExportsSettle();
+        render(<ExportCard />);
+        expect(
+          screen.getByText(
+            "The graphics chip stopped this export. Try again uses the processor instead, which takes longer.",
+          ),
+        ).toBeVisible();
+        expect(screen.queryByText(/gentler setting/)).toBeNull();
+        fireEvent.click(screen.getByRole("button", { name: "try again one.mp4" }));
+        await waitFor(() => expect(screen.queryByText("Export stopped")).toBeNull());
+        expect(asked).toEqual([[0, true]]);
+      });
+
+      it("tells an export that has no Try again (a clip on its own, or one a restarted app finished) what to do instead", async () => {
+        await onChip(DRIVER); // no way to start it again was offered
+        await whenExportsSettle();
+        render(<ExportCard />);
+        expect(
+          screen.getByText(
+            "The graphics chip stopped this export. Export it again and the processor will be used, which takes longer.",
+          ),
+        ).toBeVisible();
+        expect(screen.queryByRole("button", { name: "try again one.mp4" })).toBeNull();
+      });
+
+      it("does not blame the chip for a failure that is the PC's memory: that one still asks for a gentler setting on the same chip", async () => {
+        const sub = await onChip(MEMORY);
+        const asked: Array<[number, boolean | undefined]> = [];
+        offerExportRetry(sub.job_id, async (rung, _failed, options) => {
+          asked.push([rung, options.processor]);
+          return { ok: true };
+        });
+        await whenExportsSettle();
+        render(<ExportCard />);
+        expect(screen.queryByText(/graphics chip stopped/)).toBeNull();
+        fireEvent.click(screen.getByRole("button", { name: "try again one.mp4" }));
+        await waitFor(() => expect(screen.queryByText("Export stopped")).toBeNull());
+        expect(asked).toEqual([[1, undefined]]);
+      });
     });
 
     it("is not offered when there is no way to start that export again", async () => {

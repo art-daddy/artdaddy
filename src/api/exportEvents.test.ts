@@ -212,6 +212,61 @@ describe("the export beacon", () => {
       expect(sentError.endsWith("Z"), `length ${n}`).toBe(true);
     }
   });
+
+  // Found by review: a graphics chip's failure can put the device or the driver into the encoder's own words. They stay on the
+  // PC: the report says which maker and which encoder, never which device, which driver or which slot.
+  describe("never says which device or driver a failure came from", () => {
+    const leaks: Array<[string, string, RegExp]> = [
+      [
+        "a device's PCI id",
+        "[h264_amf] device PCI\\VEN_1002&DEV_15BF&SUBSYS_88121043&REV_C1 failed",
+        /VEN_|DEV_|SUBSYS_|REV_C1/,
+      ],
+      [
+        "a driver's version",
+        "AMF runtime 32.0.22024.4008 cannot open the encoder",
+        /32\.0\.22024\.4008/,
+      ],
+      [
+        "an AMD device's name",
+        "[h264_amf @ 1] Using AMD Radeon(TM) 780M Graphics: error",
+        /Radeon|780M/,
+      ],
+      [
+        "an NVIDIA device's name",
+        "[h264_nvenc @ 1] NVIDIA GeForce RTX 3060 Laptop GPU does not support",
+        /GeForce|RTX|3060/,
+      ],
+      [
+        "an Intel device's name",
+        "[h264_qsv @ 1] Intel(R) Iris(R) Xe Graphics failed to open a session",
+        /Iris|Xe Graphics/,
+      ],
+      [
+        "an Intel UHD device's name",
+        "Intel(R) UHD Graphics 770 refused the surface",
+        /UHD Graphics|770/,
+      ],
+      ["a bare model", "encoder RX 6800 XT stalled", /6800/],
+    ];
+    it.each(leaks)("%s", async (_name, error, gone) => {
+      const sentError = String((await sentBody(error)).error);
+      expect(sentError).not.toMatch(gone);
+      expect(sentError.length).toBeGreaterThan(0);
+    });
+
+    it("leaves what explains a failure untouched: the encoder's own words, versions that are not a driver's, and ordinary text", async () => {
+      for (const keep of [
+        "[h264_amf @ 0000028f] Error submitting video frame to the encoder",
+        "[h264_nvenc @ 1] Driver does not support the required nvenc API version. Required: 12.2 Found: 12.0",
+        "[h264_qsv @ 1] Error creating a MFX session: -9",
+        "ffmpeg version 7.1.1 Copyright (c) 2000-2025 the FFmpeg developers",
+        "ffmpeg render failed (code=-22): Conversion failed!",
+        "x264 malloc of size 134217728 failed",
+      ])
+        expect((await sentBody(keep)).error, keep).toBe(keep);
+    });
+  });
   it("classifies reasons without inventing readiness from failure prose", async () => {
     expect(await sentBody("No such file C:/private/source.mp4")).toMatchObject({
       reason_code: "source_unavailable",

@@ -219,7 +219,8 @@ export default function MenuBar() {
           signal: controller.signal,
           model: "",
           transcriptId: "",
-          exportMode: settings.mode,
+          // What the person picked in the Mode row; nothing picked is the app's own choice (exportChoice.ts).
+          exportMode: settings.mode ?? undefined,
         },
       )) as {
         ok?: boolean;

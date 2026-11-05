@@ -11,7 +11,7 @@ vi.mock("../tools/jobSupervisor", async (importOriginal) => ({
   jobSupervisor: () => supervisor(),
 }));
 
-import { resolveExportResources, resolveLocalFastEncoder } from "./host";
+import { resolveExportResources, cleanAdapters, runCapabilityProbe } from "./host";
 import { FakeJobs } from "../test/fakeJobs";
 import promiseLibrary from "../../scripts/qa/exporterPromiseCases.json";
 
@@ -21,7 +21,7 @@ const UNKNOWN = {
   scratch_free_bytes: null,
   destination_free_bytes: null,
   budgets: { memoryBytes: null, temporaryBytes: null, executionSeconds: null },
-  local_fast_candidate: false,
+  adapters: [],
 };
 
 beforeEach(() => {
@@ -158,7 +158,7 @@ describe("local export resource snapshots", () => {
       available_memory_bytes: 4 * 1024 ** 3,
       scratch_free_bytes: 0,
       destination_free_bytes: 100 * 1024 ** 3,
-      local_fast_candidate: false,
+      adapters: [],
       budgets: { memoryBytes: 3 * 1024 ** 3, temporaryBytes: 0, executionSeconds: 28800 },
     };
     invoke.mockResolvedValue(snapshot);
@@ -223,49 +223,140 @@ describe("local export resource snapshots", () => {
   });
 });
 
-describe("local measured-device Fast capability", () => {
-  it("never starts a probe from an absent or untrusted eligibility flag", async () => {
-    for (const local_fast_candidate of [undefined, false, "true", 1]) {
-      invoke.mockResolvedValue({ local_fast_candidate });
-      expect(await resolveLocalFastEncoder()).toBe(false);
-    }
-    expect(supervisor).not.toHaveBeenCalled();
+describe("the graphics chips a PC reports", () => {
+  const amd = { maker: "amd", device: "15bf", driver: "32.0.22024.4008" };
+
+  it("passes on the chips of the makers the exporter knows, in the order they came", () => {
+    const nvidia = { maker: "nvidia", device: "2504", driver: "551.23" };
+    const intel = { maker: "intel", device: "9a49", driver: "31.0.101.4502" };
+    expect(cleanAdapters([nvidia, amd, intel])).toEqual([nvidia, amd, intel]);
+    invoke.mockResolvedValue({ ...UNKNOWN, adapters: [amd] });
+    return resolveExportResources("").then((resources) =>
+      expect(resources.adapters).toEqual([amd]),
+    );
   });
 
-  it.each([0, 1])(
-    "uses the existing supervised worker and accepts only successful encode code=%s",
-    async (code) => {
-      invoke.mockResolvedValue({ local_fast_candidate: true });
-      const jobs = new FakeJobs();
-      supervisor.mockResolvedValue(jobs);
-      jobs.onStart = (request) => {
-        queueMicrotask(() => jobs.exit(request.id, code));
-      };
-      expect(await resolveLocalFastEncoder()).toBe(code === 0);
-      expect(jobs.submitted).toHaveLength(1);
-      expect(jobs.submitted[0]).toMatchObject({ lane: "fast-capability", program: "ffmpeg" });
-      expect(jobs.submitted[0].args).toContain("h264_amf");
-      expect(jobs.submitted[0].args.slice(-3)).toEqual(["-f", "null", "-"]);
-      expect(jobs.committed).toContain(jobs.submitted[0].id);
-      expect(jobs.forgotten).toContain(jobs.submitted[0].id);
-    },
-  );
+  it("drops anything that is not the shape the app process sends, and a chip listed twice", () => {
+    expect(
+      cleanAdapters([
+        amd,
+        amd,
+        { ...amd, maker: "matrox" },
+        { ...amd, device: "ZZZZ" },
+        { ...amd, device: "" },
+        { ...amd, driver: "v1; rm -rf /" },
+        { ...amd, driver: 5 },
+        { maker: "amd" },
+        null,
+        "amd",
+        7,
+        [],
+      ]),
+    ).toEqual([amd]);
+    for (const notAList of [undefined, null, "amd", 3, {}, { maker: "amd" }])
+      expect(cleanAdapters(notAList)).toEqual([]);
+  });
 
-  it("kills and retires its owned probe if the request aborts", async () => {
-    invoke.mockResolvedValue({ local_fast_candidate: true });
+  it("never returns more than a handful, however many a response lists", () => {
+    const many = Array.from({ length: 50 }, (_, i) => ({ ...amd, device: i.toString(16) }));
+    expect(cleanAdapters(many).length).toBeLessThanOrEqual(8);
+  });
+
+  it("is an empty list, not an error, when the app process says nothing about chips", async () => {
+    invoke.mockResolvedValue({ ...UNKNOWN, total_memory_bytes: 100 });
+    const resources = await resolveExportResources("");
+    expect(resources.adapters).toEqual([]);
+  });
+});
+
+describe("the capability probe the graphics chip's test runs on", () => {
+  it("runs the command as the supervisor's own job on the capability lane, and retires it", async () => {
+    const jobs = new FakeJobs();
+    supervisor.mockResolvedValue(jobs);
+    jobs.onStart = (request) => {
+      queueMicrotask(() => jobs.exit(request.id, 0, "SSIM All:0.93"));
+    };
+    const outcome = await runCapabilityProbe(["-version"], { timeoutMs: 5000, kind: "chip-test" });
+    expect(outcome).toMatchObject({ kind: "ran", code: 0 });
+    if (outcome.kind === "ran") expect(outcome.stderr).toContain("SSIM All:0.93");
+    expect(jobs.submitted).toHaveLength(1);
+    expect(jobs.submitted[0]).toMatchObject({
+      lane: "fast-capability",
+      program: "ffmpeg",
+      args: ["-version"],
+    });
+    expect(jobs.committed).toContain(jobs.submitted[0].id);
+    expect(jobs.forgotten).toContain(jobs.submitted[0].id);
+  });
+
+  it("reports a command that failed as a command that ran, with the code it ended on", async () => {
+    const jobs = new FakeJobs();
+    supervisor.mockResolvedValue(jobs);
+    jobs.onStart = (request) => {
+      queueMicrotask(() => jobs.exit(request.id, 1, "No capable devices found"));
+    };
+    const outcome = await runCapabilityProbe(["x"], { timeoutMs: 5000, kind: "chip-test" });
+    expect(outcome).toMatchObject({ kind: "ran", code: 1 });
+  });
+
+  it("does not start while an export is running, and says it was busy", async () => {
+    const jobs = new FakeJobs();
+    supervisor.mockResolvedValue(jobs);
+    await jobs.submit({ id: "export_1", lane: "export", program: "ffmpeg", args: [], meta: {} });
+    jobs.submitted.length = 0;
+    expect(await runCapabilityProbe(["x"], { timeoutMs: 5000, kind: "chip-test" })).toEqual({
+      kind: "busy",
+    });
+    expect(jobs.submitted).toHaveLength(0);
+  });
+
+  it("says it was busy when there is no supervisor to ask", async () => {
+    supervisor.mockResolvedValue(null);
+    expect(await runCapabilityProbe(["x"], { timeoutMs: 5000, kind: "chip-test" })).toEqual({
+      kind: "busy",
+    });
+    supervisor.mockRejectedValue(new Error("no bridge"));
+    expect(await runCapabilityProbe(["x"], { timeoutMs: 5000, kind: "chip-test" })).toEqual({
+      kind: "busy",
+    });
+  });
+
+  it("kills and retires its job, and says it timed out, when the command does not finish in time", async () => {
+    vi.useFakeTimers();
+    const jobs = new FakeJobs();
+    supervisor.mockResolvedValue(jobs);
+    const pending = runCapabilityProbe(["x"], { timeoutMs: 3000, kind: "chip-test" });
+    await vi.advanceTimersByTimeAsync(2500);
+    await vi.advanceTimersByTimeAsync(3500);
+    expect(await pending).toEqual({ kind: "timeout" });
+    expect(jobs.killed).toContain(jobs.submitted[0].id);
+    expect(jobs.forgotten).toContain(jobs.submitted[0].id);
+  });
+
+  it("kills and retires its job, and says it was stopped, if the caller aborts", async () => {
     const jobs = new FakeJobs();
     const controller = new AbortController();
     supervisor.mockResolvedValue(jobs);
     jobs.onStart = () => {
       controller.abort();
     };
-    expect(await resolveLocalFastEncoder(controller.signal)).toBe(false);
+    expect(
+      await runCapabilityProbe(["x"], {
+        timeoutMs: 5000,
+        kind: "chip-test",
+        signal: controller.signal,
+      }),
+    ).toEqual({ kind: "stopped" });
     expect(jobs.killed).toContain(jobs.submitted[0].id);
     expect(jobs.forgotten).toContain(jobs.submitted[0].id);
+    const gone = new AbortController();
+    gone.abort();
+    expect(
+      await runCapabilityProbe(["x"], { timeoutMs: 5000, kind: "chip-test", signal: gone.signal }),
+    ).toEqual({ kind: "stopped" });
   });
 
-  it("retires a probe accepted before a late submit reply fails", async () => {
-    invoke.mockResolvedValue({ local_fast_candidate: true });
+  it("retires a job the supervisor accepted before a late submit reply failed", async () => {
     const jobs = new FakeJobs();
     supervisor.mockResolvedValue(jobs);
     const submit = jobs.submit.bind(jobs);
@@ -273,7 +364,9 @@ describe("local measured-device Fast capability", () => {
       await submit(request);
       throw new Error("reply failed after native acceptance");
     });
-    expect(await resolveLocalFastEncoder()).toBe(false);
+    expect(await runCapabilityProbe(["x"], { timeoutMs: 5000, kind: "chip-test" })).toEqual({
+      kind: "busy",
+    });
     expect(jobs.killed).toContain(jobs.submitted[0].id);
     expect(jobs.forgotten).toContain(jobs.submitted[0].id);
   });

@@ -4,7 +4,10 @@ import { describe, expect, it } from "vitest";
 import { EXPORT_REASON_CODES } from "../api/exportReason";
 import { STALL_LOG_SECONDS } from "./exportTrace";
 import {
+  describeChipFailure,
+  describeEncoder,
   describeLiveStatus,
+  describeModeLines,
   describeResult,
   describeRung,
   describeStage,
@@ -18,6 +21,7 @@ import {
   quietSeconds,
   timeLeftSeconds,
   type LiveFacts,
+  type ModeView,
 } from "./exportWords";
 
 const T0 = 1_000_000;
@@ -244,6 +248,148 @@ describe("what Try again will do, in words", () => {
       for (const rung of [undefined, 0, 1, 2] as const)
         expect(describeTryAgain(reason, rung)).toBe("");
     }
+  });
+});
+
+describe("the encoder an export runs on, in words", () => {
+  it("says nothing about the processor's normal setting, and what the graphics chip and the faster setting cost about the others", () => {
+    expect(describeEncoder("x264", "none")).toBe("");
+    for (const chip of ["amd", "nvidia", "intel"] as const) {
+      expect(describeEncoder(chip, "over_minute")).toBe(
+        "Using your graphics chip to save time · the file is larger and the picture can differ slightly",
+      );
+      // Picked by the person: no need to say why it is used.
+      expect(describeEncoder(chip, "person")).toBe(
+        "Using your graphics chip · the file is larger and the picture can differ slightly",
+      );
+    }
+    expect(describeEncoder("x264_fast", "promise_line")).toBe(
+      "Using a faster setting to save time · the picture may be slightly softer",
+    );
+  });
+
+  it("never says anything half-made for a value it does not know", () => {
+    for (const odd of [undefined, null, 7, Number.NaN, "x", "gpu", {}])
+      expect(describeEncoder(odd as never, "over_minute")).toBe("");
+    expect(describeEncoder("amd", undefined as never)).toMatch(/graphics chip/);
+  });
+
+  it("says what happened and what Try again will do when the graphics chip stopped an export, for the card and for the assistant", () => {
+    expect(describeChipFailure("card")).toBe(
+      "The graphics chip stopped this export. Try again uses the processor instead, which takes longer.",
+    );
+    expect(describeChipFailure("assistant")).toBe(
+      "The graphics chip stopped this export before it finished. It is set aside for a day: export again and the processor is used, which takes longer.",
+    );
+    // An export with no Try again (a clip on its own, or one a restarted app finished): the person is told what to do.
+    expect(describeChipFailure("again")).toBe(
+      "The graphics chip stopped this export. Export it again and the processor will be used, which takes longer.",
+    );
+  });
+});
+
+describe("what the Export dialog says about the mode, in words", () => {
+  const row = (over: Partial<ModeView> = {}): ModeView => ({
+    showRow: true,
+    defaultMode: "quality",
+    reason: "none",
+    faster: false,
+    fullSeconds: 40,
+    fastSeconds: 15,
+    ...over,
+  });
+
+  it("says nothing, and selects Full quality, until the app has looked", () => {
+    expect(describeModeLines(null, null)).toEqual({
+      selected: "quality",
+      hint: null,
+      note: null,
+      alternative: null,
+      faster: null,
+    });
+    expect(describeModeLines(null, "fast").selected).toBe("quality"); // a pick with no row is no pick
+  });
+
+  it("offers Fast beside Full for a short export, with what Fast would save and no note", () => {
+    const lines = describeModeLines(row(), null);
+    expect(lines.selected).toBe("quality");
+    // Measured with the real chip on real footage (exporter document 19.9): 1.0 to 1.9 times quicker, so "usually", not "much".
+    expect(lines.hint).toBe(
+      "Fast uses your graphics chip: usually quicker, and the file is usually larger.",
+    );
+    expect(lines.alternative).toBe("Fast would take under a minute.");
+    expect(lines.note).toBeNull();
+    expect(lines.faster).toBeNull();
+  });
+
+  it("selects Fast for the person for an export over a minute, says why, and says what Full would take", () => {
+    const lines = describeModeLines(
+      row({ defaultMode: "fast", reason: "over_minute", fullSeconds: 720, fastSeconds: 240 }),
+      null,
+    );
+    expect(lines.selected).toBe("fast");
+    expect(lines.note).toBe(
+      "Fast is selected because this export would take over a minute on this PC (about 12 min). The file will be larger and the picture can differ slightly. Choose Full quality for the smallest file.",
+    );
+    expect(lines.alternative).toBe("Full quality would take about 12 min.");
+  });
+
+  it("follows what the person picked over what the app selected, either way", () => {
+    const long = row({
+      defaultMode: "fast",
+      reason: "over_minute",
+      fullSeconds: 720,
+      fastSeconds: 240,
+    });
+    const full = describeModeLines(long, "quality");
+    expect(full.selected).toBe("quality");
+    expect(full.note).toBeNull();
+    expect(full.alternative).toBe("Fast would take about 4 min.");
+    const fast = describeModeLines(row({ fullSeconds: 720, fastSeconds: 240 }), "fast");
+    expect(fast.selected).toBe("fast");
+    expect(fast.note).toBe(
+      "The file will be larger and the picture can differ slightly from Full quality.",
+    );
+    expect(fast.note).not.toMatch(/is selected because/); // the person picked it: nothing to explain
+  });
+
+  it("says the faster setting will be used only where there is no row and the app will use it", () => {
+    expect(describeModeLines(row({ showRow: false, faster: true }), null).faster).toBe(
+      "To save time, ArtDaddy will use a faster setting; the picture may be slightly softer.",
+    );
+    expect(describeModeLines(row({ showRow: false, faster: false }), null).faster).toBeNull();
+    expect(describeModeLines(row({ showRow: true, faster: true }), null).faster).toBeNull();
+  });
+
+  it("selects Fast only where the row is shown, and never says half of a sentence", () => {
+    const seconds = fc.option(fc.double({ min: -5, max: 100_000, noNaN: false }), { nil: null });
+    fc.assert(
+      fc.property(
+        fc.boolean(),
+        fc.constantFrom<"quality" | "fast">("quality", "fast"),
+        fc.constantFrom("over_minute", "person", "promise_line", "none" as const),
+        fc.boolean(),
+        seconds,
+        seconds,
+        fc.option(fc.constantFrom<"quality" | "fast">("quality", "fast"), { nil: null }),
+        (showRow, defaultMode, reason, faster, fullSeconds, fastSeconds, picked) => {
+          const lines = describeModeLines(
+            { showRow, defaultMode, reason, faster, fullSeconds, fastSeconds },
+            picked,
+          );
+          if (lines.selected === "fast") expect(showRow).toBe(true);
+          for (const line of [lines.hint, lines.note, lines.alternative, lines.faster])
+            if (line !== null) expect(line).not.toMatch(/NaN|undefined|Infinity|null|\(\)/);
+          // Nothing about Fast is said where the row is not shown.
+          if (!showRow) {
+            expect(lines.hint).toBeNull();
+            expect(lines.note).toBeNull();
+            expect(lines.alternative).toBeNull();
+          }
+        },
+      ),
+      { numRuns: 500 },
+    );
   });
 });
 

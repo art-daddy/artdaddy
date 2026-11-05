@@ -19,17 +19,21 @@ import {
   exceedsFileSequencePicture,
   exceedsOnePass,
   FILE_SEQUENCE_MAX_PIXELS,
+  finalEncoderPolicy,
   FRAME_THREADED_INPUTS_MAX,
   guessExportSeconds,
   isKnownProblem,
   outputFps,
   outputSize,
   peakSamples,
+  promiseLineOf,
+  promiseMultipleOf,
   type ExportCalibration,
   type ExportEncoder,
   type ExportEstimates,
   type ExportPreflightReason,
 } from "./exportOptions";
+import { CHIP_CAUTIOUS_GAIN, FASTER_X264_GAIN } from "./exportEncoder";
 import { UNMEASURED_RESERVE_BYTES, planRung } from "./exportPlan";
 import type { RenderWorkload } from "./renderPlan";
 
@@ -181,6 +185,37 @@ describe("export preflight assessment", () => {
       expect(reasons(planFor(8 * GIB), { memoryBytes: null })).toEqual(["memory_unknown"]);
       expect(reasons(planFor(null), { memoryBytes: null })).toEqual(["memory_unknown"]);
     });
+  });
+
+  // The promise line moved into one function (the faster setting reads it too). Both readers must agree for every shape.
+  it("says one thing about a project's promise line, to the assessment and to the encoder rule", () => {
+    fc.assert(
+      fc.property(
+        fc.record({
+          width: fc.constantFrom(720, 1080, 1280, 1920, 2160, 3840, 7680),
+          height: fc.constantFrom(720, 1080, 1280, 1920, 2160, 3840, 7680),
+          fps: fc.constantFrom(24, 30, 50, 60),
+          durationSeconds: fc.constantFrom(1, 60, 1800, 1801, 7200, 7201),
+          visualClips: fc.constantFrom(1, 10, 1000, 1001),
+          captionClips: fc.constant(0),
+          audioClips: fc.constant(0),
+          peakVisualLayers: fc.integer({ min: 1, max: 10 }),
+          peakMediaLayers: fc.integer({ min: 1, max: 10 }),
+        }),
+        (shape) => {
+          expect(promiseLineOf(shape)).toBe(
+            assessExport(shape, resources, estimates, budgets).promiseLine,
+          );
+        },
+      ),
+      { numRuns: 400 },
+    );
+  });
+
+  it("promises two times the video's length for ordinary HD and four for everything heavier", () => {
+    expect(promiseMultipleOf("hd")).toBe(2);
+    for (const line of ["heavy_hd", "4k", "outside"] as const)
+      expect(promiseMultipleOf(line), line).toBe(4);
   });
 
   it("uses the independent HD,4Kandheavy limits and counts captions as things", () => {
@@ -500,7 +535,7 @@ describe("local measured export estimates", () => {
   });
 
   it("cannot use old or late encoder-policy measurements for a different policy", () => {
-    const profiles = (["x264-crf", "x264-crf-threads2", "amf-cqp18"] as const).map(
+    const profiles = (["x264-crf", "x264-crf-threads2", "chip-amd"] as const).map(
       (encoder, index) => ({ ...sample, encoder, elapsedSeconds: (index + 1) * 10 }),
     );
     for (const profile of profiles) {
@@ -535,7 +570,7 @@ describe("local measured export estimates", () => {
   it("never estimates Fast from software history or software from Fast history", () => {
     const fast = {
       ...sample,
-      encoder: "amf-cqp18" as const,
+      encoder: "chip-amd" as const,
       elapsedSeconds: 9,
       finalBytes: 10_000_000,
     };
@@ -546,7 +581,7 @@ describe("local measured export estimates", () => {
         "medium",
         "partition-pipes-v1",
         [sample],
-        "amf-cqp18",
+        "chip-amd",
       ).seconds,
     ).toBeNull();
     expect(estimate(workload, [fast]).seconds).toBeNull();
@@ -557,7 +592,7 @@ describe("local measured export estimates", () => {
         "medium",
         "partition-pipes-v1",
         [sample, fast],
-        "amf-cqp18",
+        "chip-amd",
       ),
     ).toMatchObject({ seconds: 9, finalBytes: 10_000_000 });
     expect(estimate(workload, [sample, fast])).toMatchObject({
@@ -674,8 +709,7 @@ describe("a rough time for an export nobody has measured", () => {
     expect(guessExportSeconds(hd, fourKOut)!).toBeGreaterThan(small);
   });
 
-  it("makes no guess for the fast hardware encoder, or for sizes that are not sizes", () => {
-    expect(guessExportSeconds(hd, hdOut, "amf-cqp18")).toBeNull();
+  it("makes no guess for sizes that are not sizes", () => {
     for (const patch of [
       { width: 0 },
       { height: -1 },
@@ -684,8 +718,29 @@ describe("a rough time for an export nobody has measured", () => {
       { durationSeconds: Infinity },
     ])
       expect(guessExportSeconds({ ...hd, ...patch }, hdOut), JSON.stringify(patch)).toBeNull();
+    for (const encoder of ["chip-amd", "chip-nvidia", "chip-intel", "x264-fast"] as const)
+      expect(guessExportSeconds({ ...hd, width: 0 }, hdOut, encoder), encoder).toBeNull();
     expect(guessExportSeconds(hd, { ...hdOut, width: 0 })).toBeNull();
     expect(guessExportSeconds({ ...hd, peakVisualLayers: NaN }, hdOut)).not.toBeNull();
+  });
+
+  // Phase 3, S4: a chip, or the faster setting, has no measurement on this PC until it has run once, so its estimate is the
+  // processor's divided by a cautious gain (the lab saw 1.5 on a source that is hard to decode and 3.7 on an ordinary one).
+  it("guesses the chip and the faster setting from the processor's guess, cautiously and never slower", () => {
+    const normal = guessExportSeconds(hd, hdOut, "x264-crf")!;
+    for (const chip of ["chip-amd", "chip-nvidia", "chip-intel"] as const) {
+      const guess = guessExportSeconds(hd, hdOut, chip)!;
+      expect(guess, chip).toBeLessThan(normal);
+      expect(guess, chip).toBe(Math.ceil(normal / CHIP_CAUTIOUS_GAIN));
+    }
+    expect(guessExportSeconds(hd, hdOut, "x264-fast")).toBe(Math.ceil(normal / FASTER_X264_GAIN));
+    expect(guessExportSeconds(hd, hdOut, "x264-fast-threads2")).toBe(
+      Math.ceil(guessExportSeconds(hd, hdOut, "x264-crf-threads2")! / FASTER_X264_GAIN),
+    );
+    // The same floor as every guess: starting and finishing an export takes time whatever encodes it.
+    expect(
+      guessExportSeconds({ ...hd, durationSeconds: 0.01 }, hdOut, "chip-amd")!,
+    ).toBeGreaterThanOrEqual(Math.ceil(10 / CHIP_CAUTIOUS_GAIN));
   });
 });
 
@@ -744,11 +799,103 @@ describe("the estimate an export gets: measured when there is history, a guess w
   });
 
   it("stays unknown where it cannot guess", () => {
-    expect(estimate([], "amf-cqp18")).toEqual({
+    expect(
+      estimateExport(
+        { ...workload, durationSeconds: 0 },
+        output,
+        "medium",
+        "partition-pipes-v1",
+        [],
+        "chip-amd",
+      ),
+    ).toEqual({
       seconds: null,
       memoryBytes: null,
       temporaryBytes: null,
       finalBytes: null,
+    });
+  });
+
+  // Phase 3, S4 (found by a journey): an encoder nothing was measured for yet used to be estimated from a fresh guess, which
+  // ignored what this PC measured for the processor, so a ten-minute export read as "8 seconds" on the chip.
+  describe("for an encoder nothing was measured for yet (the graphics chip, the faster setting)", () => {
+    const measured = {
+      ...sample,
+      workload,
+      elapsedSeconds: 600,
+      engine: "file-sequence-v1" as const,
+    };
+    const one = (encoder: ExportEncoder, history: readonly ExportCalibration[]) =>
+      estimateExport(workload, output, "medium", "file-sequence-v1", history, encoder);
+
+    it("is what the processor measured, divided by the cautious gain, and says it is not a measurement of its own", () => {
+      for (const chip of ["chip-amd", "chip-nvidia", "chip-intel"] as const) {
+        const e = one(chip, [measured]);
+        expect(e.seconds, chip).toBe(Math.ceil(600 / CHIP_CAUTIOUS_GAIN));
+        expect(e.secondsGuessed, chip).toBe(true);
+        // Nothing but the time is inferred: sizes and memory are not claimed for an encoder that has not run here.
+        expect([e.memoryBytes, e.temporaryBytes, e.finalBytes]).toEqual([null, null, null]);
+      }
+      expect(one("x264-fast", [measured]).seconds).toBe(Math.ceil(600 / FASTER_X264_GAIN));
+    });
+
+    it("prefers the encoder's own measurement, and never the processor's when it has one", () => {
+      const own = { ...measured, encoder: "chip-amd" as const, elapsedSeconds: 200 };
+      const e = one("chip-amd", [measured, own]);
+      expect(e.seconds).toBe(200);
+      expect(e.secondsGuessed).toBeUndefined();
+    });
+
+    it("follows the processor's measurement of the same threading: the streamed 4K engine keeps its own", () => {
+      const big = { ...workload, width: 3840, height: 2160 };
+      const bigOut = { width: 3840, height: 2160, fps: 30 };
+      const twoThreads = {
+        ...measured,
+        workload: big,
+        output: bigOut,
+        engine: "partition-pipes-v1" as const,
+        encoder: "x264-crf-threads2" as const,
+        elapsedSeconds: 900,
+      };
+      const e = estimateExport(
+        big,
+        bigOut,
+        "medium",
+        "partition-pipes-v1",
+        [twoThreads],
+        "chip-amd",
+      );
+      expect(e.seconds).toBe(Math.ceil(900 / CHIP_CAUTIOUS_GAIN));
+      expect(
+        estimateExport(
+          big,
+          bigOut,
+          "medium",
+          "partition-pipes-v1",
+          [twoThreads],
+          "x264-fast-threads2",
+        ).seconds,
+      ).toBe(Math.ceil(900 / FASTER_X264_GAIN));
+    });
+
+    it("is the processor's guess divided by the gain, as before, when the processor has no measurement either", () => {
+      expect(one("chip-amd", []).seconds).toBe(guessExportSeconds(workload, output, "chip-amd"));
+      expect(one("chip-amd", []).secondsGuessed).toBe(true);
+    });
+
+    it("never reads slower than the processor it was inferred from, whatever was measured", () => {
+      fc.assert(
+        fc.property(
+          fc.integer({ min: 1, max: 1_000_000 }),
+          fc.constantFrom("chip-amd", "chip-nvidia", "chip-intel", "x264-fast" as const),
+          (elapsedSeconds, encoder) => {
+            const processor = one("x264-crf", [{ ...measured, elapsedSeconds }]).seconds!;
+            const inferred = one(encoder, [{ ...measured, elapsedSeconds }]).seconds!;
+            expect(inferred).toBeLessThanOrEqual(processor);
+            expect(inferred).toBeGreaterThan(0);
+          },
+        ),
+      );
     });
   });
 });
@@ -891,12 +1038,26 @@ describe("what the export dialog says before the click", () => {
     );
   });
 
-  it("says nothing for Fast, which has no measurement and no guess yet", () => {
-    expect(estimateForDialog(project, { ...settings, mode: "fast" }, [])).toEqual({
-      seconds: null,
-      guessed: false,
-      finalBytes: null,
+  it("tells Fast from Full only where there is a chip to run Fast on, and then guesses it cautiously", () => {
+    const full = estimateForDialog(project, settings, []);
+    // No chip named: Fast is the processor's, exactly as Full is.
+    expect(estimateForDialog(project, { ...settings, mode: "fast" }, [])).toEqual(full);
+    const fast = estimateForDialog(project, { ...settings, mode: "fast" }, [], { chip: "amd" });
+    expect(fast.guessed).toBe(true);
+    expect(fast.seconds!).toBeLessThan(full.seconds!);
+    // Its own measurement, once there is one, is what it says; the processor's history says nothing about it.
+    const measured = measuredSample({
+      encoder: "chip-amd",
+      elapsedSeconds: 33,
+      finalBytes: 9_000_000,
     });
+    expect(
+      estimateForDialog(project, { ...settings, mode: "fast" }, [measured], { chip: "amd" }),
+    ).toMatchObject({ seconds: 33, guessed: false, finalBytes: 9_000_000 });
+    expect(estimateForDialog(project, settings, [measured]).guessed).toBe(true);
+    // The faster setting is estimated under its own history too.
+    const faster = estimateForDialog(project, settings, [], { faster: true });
+    expect(faster.seconds!).toBeLessThan(full.seconds!);
   });
 
   it("never throws and never returns a negative or non-finite figure, whatever the project is", () => {
@@ -1079,5 +1240,66 @@ describe("outputFps", () => {
       ),
       { numRuns: 300 },
     );
+  });
+});
+
+// Phase 3, S4: which encoder an export is estimated and recorded under. Today's exports keep today's ids.
+describe("the encoder an export runs and is remembered under", () => {
+  const phone = { width: 1080, height: 1920 };
+  const fourK = { width: 3840, height: 2160 };
+
+  it("is today's, id for id, for every export that uses neither the chip nor the faster setting", () => {
+    expect(finalEncoderPolicy(phone, "file-sequence-v1")).toEqual({
+      encoder: "x264-crf",
+      threads: null,
+    });
+    expect(finalEncoderPolicy(phone, "partition-pipes-v1")).toEqual({
+      encoder: "x264-crf",
+      threads: 1,
+    });
+    expect(finalEncoderPolicy(fourK, "partition-pipes-v1")).toEqual({
+      encoder: "x264-crf-threads2",
+      threads: 2,
+    });
+    expect(finalEncoderPolicy(fourK, "file-sequence-v1", "quality")).toEqual({
+      encoder: "x264-crf",
+      threads: null,
+    });
+  });
+
+  it("is the maker's chip when Fast runs on that chip, and the processor when there is no chip to run on", () => {
+    expect(finalEncoderPolicy(phone, "file-sequence-v1", "fast", { chip: "amd" })).toEqual({
+      encoder: "chip-amd",
+      threads: null,
+    });
+    expect(finalEncoderPolicy(fourK, "partition-pipes-v1", "fast", { chip: "nvidia" })).toEqual({
+      encoder: "chip-nvidia",
+      threads: 1,
+    });
+    expect(finalEncoderPolicy(phone, "file-sequence-v1", "fast", { chip: "intel" }).encoder).toBe(
+      "chip-intel",
+    );
+    // Fast with no chip cannot be a chip: it is the processor's, exactly as Full would be.
+    expect(finalEncoderPolicy(phone, "file-sequence-v1", "fast")).toEqual(
+      finalEncoderPolicy(phone, "file-sequence-v1", "quality"),
+    );
+    // And a chip that is named while Full is asked for is not used.
+    expect(finalEncoderPolicy(phone, "file-sequence-v1", "quality", { chip: "amd" }).encoder).toBe(
+      "x264-crf",
+    );
+  });
+
+  it("is the faster setting's own id, with the two-thread variant where the streamed engine has one", () => {
+    expect(finalEncoderPolicy(phone, "file-sequence-v1", "quality", { faster: true }).encoder).toBe(
+      "x264-fast",
+    );
+    expect(finalEncoderPolicy(fourK, "partition-pipes-v1", "quality", { faster: true })).toEqual({
+      encoder: "x264-fast-threads2",
+      threads: 2,
+    });
+    // The chip wins over the faster setting: they are never combined.
+    expect(
+      finalEncoderPolicy(phone, "file-sequence-v1", "fast", { chip: "amd", faster: true }).encoder,
+    ).toBe("chip-amd");
   });
 });

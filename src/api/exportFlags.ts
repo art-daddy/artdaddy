@@ -1,8 +1,12 @@
-// The exporter's remote switches (Phase 3). Three safety behaviours could not be fully proven in the lab, so
-// each can be switched off from the server without a release:
+// The exporter's remote switches (Phase 3). Behaviours that could not be fully proven in the lab can each be switched
+// off from the server without a release:
 //   stall_stop  stop an export that has made no progress (off: it is only logged, as before)
 //   plan_rung   start an export that would not fit with fewer threads (off: it starts as before)
 //   pc_floor    stop an export when the PC itself runs short of memory (off: the job's own limits only)
+//   chip_amd, chip_nvidia, chip_intel
+//               that maker's graphics chip may be tested, offered and chosen (off: never; the processor encodes)
+//   chip_default  Fast is chosen for the person when the export would take over a minute (off: still offered)
+//   faster_x264 the processor's faster setting may be chosen for a slow export when no chip is usable (off: never)
 //
 // The client carries compiled defaults, and the server only ever tells it to switch something off (or back
 // on). So every way this can fail lands on what the client already does: no session, no network, a slow or
@@ -11,7 +15,16 @@
 import { apiBase } from "./config";
 import { authedFetch, hasSession } from "./auth";
 
-export const EXPORT_FLAG_NAMES = ["stall_stop", "plan_rung", "pc_floor"] as const;
+export const EXPORT_FLAG_NAMES = [
+  "stall_stop",
+  "plan_rung",
+  "pc_floor",
+  "chip_amd",
+  "chip_nvidia",
+  "chip_intel",
+  "chip_default",
+  "faster_x264",
+] as const;
 export type ExportFlagName = (typeof EXPORT_FLAG_NAMES)[number];
 
 /** What runs before the server has said anything. The gate decided these from the lab and the soak: on,
@@ -20,6 +33,11 @@ export const COMPILED_FLAG_DEFAULTS: Readonly<Record<ExportFlagName, boolean>> =
   stall_stop: true,
   plan_rung: true,
   pc_floor: true,
+  chip_amd: true,
+  chip_nvidia: true,
+  chip_intel: true,
+  chip_default: true,
+  faster_x264: true,
 };
 
 const STORAGE_KEY = "artdaddy.exportFlags.v1";

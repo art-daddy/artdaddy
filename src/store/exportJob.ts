@@ -5,7 +5,8 @@
 // callback down through the tool context, a render announces itself here and the UI subscribes.
 // One job at a time, matching the one ffmpeg process.
 import { create } from "zustand";
-import type { ExportCalibration, ExportEngine, ExportMode } from "../timeline/exportOptions";
+import { ENCODER_IDS, type ExportEncoder } from "../timeline/exportEncoder";
+import type { ExportCalibration, ExportEngine } from "../timeline/exportOptions";
 import type { LiveFacts, LiveStageName } from "../timeline/exportWords";
 
 const ENGINE_KEY = "artdaddy-export-routing-v2";
@@ -51,8 +52,7 @@ function calibration(value: unknown): ExportCalibration | null {
     !number(raw.finalBytes) ||
     !["high", "medium", "low"].includes(String(raw.quality)) ||
     !["file-sequence-v1", "partition-pipes-v1"].includes(String(raw.engine)) ||
-    (raw.encoder !== undefined &&
-      !["x264-crf", "x264-crf-threads2", "amf-cqp18"].includes(String(raw.encoder)))
+    (raw.encoder !== undefined && !(ENCODER_IDS as readonly string[]).includes(String(raw.encoder)))
   )
     return null;
   const revision = number(raw.revision);
@@ -66,12 +66,10 @@ function calibration(value: unknown): ExportCalibration | null {
     output: { width: Number(output.width), height: Number(output.height), fps: Number(output.fps) },
     quality: String(raw.quality),
     engine: raw.engine as ExportEngine,
-    encoder:
-      raw.encoder === "amf-cqp18"
-        ? "amf-cqp18"
-        : raw.encoder === "x264-crf-threads2"
-          ? "x264-crf-threads2"
-          : "x264-crf",
+    // An encoder that is not named is the processor's normal one (every measurement made before S4 says nothing).
+    encoder: (ENCODER_IDS as readonly string[]).includes(String(raw.encoder))
+      ? (raw.encoder as ExportEncoder)
+      : "x264-crf",
     ...(revision === null ? {} : { revision }),
     ...(rung === null ? {} : { rung }),
     elapsedSeconds: Number(raw.elapsedSeconds),
@@ -151,8 +149,6 @@ interface ExportState extends ExportJob {
   rememberCalibration: (sample: ExportCalibration) => void;
   engine: ExportEngine;
   setEngine: (engine: ExportEngine) => void;
-  mode: ExportMode;
-  setMode: (mode: ExportMode) => void;
   /** Set while a render is in flight, so the dialog can offer Cancel. */
   abort: (() => void) | null;
   begin: (abort: (() => void) | null) => void;
@@ -181,8 +177,6 @@ export const useExportJob = create<ExportState>((set, get) => ({
     set({ calibrations });
   },
   engine: savedEngine(),
-  mode: "quality",
-  setMode: (mode) => set({ mode: mode === "fast" ? "fast" : "quality" }),
   setEngine: (engine) => {
     const selected =
       engine === "partition-pipes-v1" || engine === "auto" ? engine : "file-sequence-v1";
