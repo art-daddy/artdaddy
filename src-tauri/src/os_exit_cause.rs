@@ -1,0 +1,550 @@
+//! What the operating system says ended the app's last session, for the report of an exit nobody marked.
+//!
+//! A session that ends without an exit mark is recorded as an unexpected exit, and the record on its own cannot say whether
+//! the PC lost power, Windows restarted to update, the app crashed or a person ended it. Windows keeps those facts in its
+//! event log. After such an exit the app reads the few entries that fall in the minutes around it and boils them down to ONE
+//! short word (`power_loss`, `os_update`, `app_crash:c0000005`, ...). Only that word leaves the PC: the log entries carry
+//! user names, machine names and paths, and none of it is kept or sent.
+//!
+//! Windows only. Everywhere else there is nothing to read and no word.
+#![cfg_attr(not(windows), allow(dead_code))]
+
+/// A line of the event log, as far as this module reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogEvent {
+  pub id: u32,
+  pub provider: String,
+  /// When it was written, in milliseconds since 1970 (UTC).
+  pub at_ms: u64,
+  /// Its fields in the order the log gives them: the name when it has one, and the text.
+  pub data: Vec<(String, String)>,
+}
+
+/// The words this module can answer with, besides `app_crash:<code>` and `webview_crash:<code>`. The tests walk them.
+#[cfg(test)]
+pub const WORDS: [&str; 8] = [
+  "power_loss",
+  "bugcheck",
+  "app_hang",
+  "os_update",
+  "os_shutdown",
+  "os_restart",
+  "unexpected_shutdown",
+  "unknown",
+];
+
+// What is read ------------------------------------------------------------------------------------------------------
+
+/// Days since 1970-01-01 of a civil date (proleptic Gregorian); the standard days-from-civil count.
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+  let year = if month <= 2 { year - 1 } else { year };
+  let era = if year >= 0 { year } else { year - 399 } / 400;
+  let year_of_era = year - era * 400;
+  let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+  let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+  era * 146_097 + day_of_era - 719_468
+}
+
+/// The civil date of a count of days since 1970-01-01.
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+  let days = days + 719_468;
+  let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+  let day_of_era = days - era * 146_097;
+  let year_of_era = (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+  let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+  let shifted_month = (5 * day_of_year + 2) / 153;
+  let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
+  let month = if shifted_month < 10 { shifted_month + 3 } else { shifted_month - 9 };
+  (year_of_era + era * 400 + if month <= 2 { 1 } else { 0 }, month, day)
+}
+
+/// `2026-10-26T06:00:18.4625836Z` as milliseconds since 1970. Only a UTC time of that shape is believed.
+pub fn iso_to_ms(text: &str) -> Option<u64> {
+  let text = text.trim();
+  let text = text.strip_suffix('Z')?;
+  let (date, time) = text.split_once('T')?;
+  let mut date = date.split('-');
+  let (year, month, day) = (date.next()?, date.next()?, date.next()?);
+  if date.next().is_some() {
+    return None;
+  }
+  let (clock, fraction) = match time.split_once('.') {
+    Some((clock, fraction)) => (clock, fraction),
+    None => (time, ""),
+  };
+  let mut clock = clock.split(':');
+  let (hour, minute, second) = (clock.next()?, clock.next()?, clock.next()?);
+  if clock.next().is_some() || !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
+    return None;
+  }
+  let number = |text: &str, digits: usize| -> Option<i64> {
+    (text.len() == digits && text.bytes().all(|byte| byte.is_ascii_digit())).then(|| text.parse().ok())?
+  };
+  let (year, month, day) = (number(year, 4)?, number(month, 2)?, number(day, 2)?);
+  let (hour, minute, second) = (number(hour, 2)?, number(minute, 2)?, number(second, 2)?);
+  if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || minute > 59 || second > 60 {
+    return None;
+  }
+  let millis: i64 = format!("{:0<3}", &fraction[..fraction.len().min(3)]).parse().ok()?;
+  let seconds = days_from_civil(year, month, day) * 86_400 + hour * 3_600 + minute * 60 + second;
+  u64::try_from(seconds * 1_000 + millis).ok()
+}
+
+/// Milliseconds since 1970 as the log's own query time, `2026-10-26T06:00:18.000Z` (whole seconds, rounded down).
+pub fn ms_to_iso(ms: u64) -> String {
+  let seconds = (ms / 1_000) as i64;
+  let (year, month, day) = civil_from_days(seconds.div_euclid(86_400));
+  let rest = seconds.rem_euclid(86_400);
+  format!(
+    "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.000Z",
+    rest / 3_600,
+    rest % 3_600 / 60,
+    rest % 60
+  )
+}
+
+fn unescape(text: &str) -> String {
+  text
+    .replace("&lt;", "<")
+    .replace("&gt;", ">")
+    .replace("&quot;", "\"")
+    .replace("&apos;", "'")
+    .replace("&amp;", "&")
+}
+
+/// The value of `name='...'` (or `name="..."`) inside one tag's text.
+fn attribute(tag: &str, name: &str) -> Option<String> {
+  for quote in ['\'', '"'] {
+    let key = format!("{name}={quote}");
+    if let Some(start) = tag.find(&key) {
+      let rest = &tag[start + key.len()..];
+      if let Some(end) = rest.find(quote) {
+        return Some(unescape(&rest[..end]));
+      }
+    }
+  }
+  None
+}
+
+/// The text of the first `<tag ...>text</tag>` in `xml`.
+fn element<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
+  let open = xml.find(&format!("<{tag}"))?;
+  let after = &xml[open..];
+  let start = after.find('>')? + 1;
+  if after[..start].ends_with("/>") {
+    return Some("");
+  }
+  let end = after[start..].find(&format!("</{tag}>"))?;
+  Some(&after[start..start + end])
+}
+
+/// The opening tag of the first `<tag ...>` in `xml`, brackets included.
+fn opening<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
+  let open = xml.find(&format!("<{tag}"))?;
+  let after = &xml[open..];
+  Some(&after[..after.find('>')? + 1])
+}
+
+/// The events in what `wevtutil qe <log> /f:xml` prints: one `<Event>` after another. Anything it does not understand is
+/// skipped rather than guessed at; it never fails.
+pub fn parse_events(xml: &str) -> Vec<LogEvent> {
+  let mut events = Vec::new();
+  for piece in xml.split("<Event ").skip(1) {
+    let piece = piece.split("</Event>").next().unwrap_or(piece);
+    let Some(id) = element(piece, "EventID").and_then(|text| text.trim().parse::<u32>().ok()) else {
+      continue;
+    };
+    let provider = opening(piece, "Provider").and_then(|tag| attribute(tag, "Name")).unwrap_or_default();
+    let Some(at_ms) = opening(piece, "TimeCreated")
+      .and_then(|tag| attribute(tag, "SystemTime"))
+      .and_then(|text| iso_to_ms(&text))
+    else {
+      continue;
+    };
+    let mut data = Vec::new();
+    if let Some(body) = element(piece, "EventData") {
+      let mut rest = body;
+      while let Some(open) = rest.find("<Data") {
+        let after = &rest[open..];
+        let Some(end_of_tag) = after.find('>') else { break };
+        let tag = &after[..=end_of_tag];
+        let name = attribute(tag, "Name").unwrap_or_default();
+        if tag.ends_with("/>") {
+          data.push((name, String::new()));
+          rest = &after[end_of_tag + 1..];
+        } else {
+          let value_start = end_of_tag + 1;
+          let Some(value_end) = after[value_start..].find("</Data>") else { break };
+          data.push((name, unescape(&after[value_start..value_start + value_end])));
+          rest = &after[value_start + value_end + "</Data>".len()..];
+        }
+      }
+    }
+    events.push(LogEvent { id, provider, at_ms, data });
+  }
+  events
+}
+
+// What it means -----------------------------------------------------------------------------------------------------
+
+/// How long after the session's last sign of life a request to shut down may have been made and still be what ended it.
+const SHUTDOWN_GRACE_MS: u64 = 5 * 60_000;
+
+fn field<'a>(event: &'a LogEvent, name: &str, position: usize) -> Option<&'a str> {
+  // An entry's fields have names or only places; an empty name asks for the place.
+  let named = (!name.is_empty()).then(|| event.data.iter().find(|(key, _)| key == name)).flatten();
+  named.or_else(|| event.data.get(position)).map(|(_, value)| value.as_str())
+}
+
+/// A hexadecimal exception code, as the log writes it, or None for anything else (so no free text from the log can pass).
+fn exception_code(text: &str) -> Option<String> {
+  let text = text.trim().trim_start_matches("0x").to_ascii_lowercase();
+  (!text.is_empty() && text.len() <= 8 && text.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(text)
+}
+
+fn names(event: &LogEvent, exe: &str) -> bool {
+  field(event, "AppName", 0).is_some_and(|name| name.trim().eq_ignore_ascii_case(exe))
+}
+
+/// The one short word that says what ended the session, from the entries the log holds for the minutes around it. `ended_ms`
+/// is when the session was last seen alive and `app_exe` this app's own file name. The order is the order of trust: a PC that
+/// died, then a crash of this app or its web view, then something the operating system asked for, then a hang, then
+/// "unexpected" with nothing more to say. A shutdown that was asked for long after the session had stopped is not what ended it
+/// (a PC restarted by hand an hour after the app was killed): the apps are closed within moments of the request.
+pub fn classify(events: &[LogEvent], ended_ms: u64, app_exe: &str) -> String {
+  let kernel_power = events.iter().find(|event| event.id == 41 && event.provider.contains("Kernel-Power"));
+  if let Some(event) = kernel_power {
+    let bugcheck = field(event, "BugcheckCode", usize::MAX).map(str::trim).unwrap_or("0");
+    let blue_screen = bugcheck != "0" && bugcheck != "0x0" && !bugcheck.is_empty();
+    return if blue_screen { "bugcheck" } else { "power_loss" }.to_string();
+  }
+  for event in events.iter().filter(|event| event.id == 1000 && event.provider == "Application Error") {
+    let code = field(event, "ExceptionCode", 6).and_then(exception_code);
+    if names(event, app_exe) {
+      return code.map_or_else(|| "app_crash".to_string(), |code| format!("app_crash:{code}"));
+    }
+    if names(event, "msedgewebview2.exe") {
+      return code.map_or_else(|| "webview_crash".to_string(), |code| format!("webview_crash:{code}"));
+    }
+  }
+  let asked = events
+    .iter()
+    .find(|event| event.id == 1074 && event.provider == "User32" && event.at_ms <= ended_ms.saturating_add(SHUTDOWN_GRACE_MS));
+  if let Some(event) = asked {
+    let reason = field(event, "param3", 2).unwrap_or("");
+    let action = field(event, "param5", 4).unwrap_or("").to_ascii_lowercase();
+    let update = reason.contains("Operating System") && (reason.contains("Upgrade") || reason.contains("Update"));
+    return if update {
+      "os_update"
+    } else if action.contains("restart") || action.contains("reboot") {
+      "os_restart"
+    } else {
+      "os_shutdown"
+    }
+    .to_string();
+  }
+  if events
+    .iter()
+    .any(|event| event.id == 1002 && event.provider == "Application Hang" && names(event, app_exe))
+  {
+    return "app_hang".to_string();
+  }
+  if events.iter().any(|event| event.id == 6008) {
+    return "unexpected_shutdown".to_string();
+  }
+  "unknown".to_string()
+}
+
+// The log itself ----------------------------------------------------------------------------------------------------
+
+/// How long the log may be asked: the app does not wait for it longer than this, so a slow or stuck log costs a word, never a start.
+#[cfg(windows)]
+const QUERY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// The entries of one log from `since_ms` on that can explain an end, as text.
+#[cfg(windows)]
+fn read_log(channel: &str, ids: &[u32], since_ms: u64) -> String {
+  use std::io::Read;
+  use std::os::windows::process::CommandExt;
+  use std::process::{Command, Stdio};
+  const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+  let any = ids.iter().map(|id| format!("EventID={id}")).collect::<Vec<_>>().join(" or ");
+  let query = format!("*[System[({any}) and TimeCreated[@SystemTime>='{}']]]", ms_to_iso(since_ms));
+  let Ok(mut child) = Command::new("wevtutil.exe")
+    .args(["qe", channel, &format!("/q:{query}"), "/c:20", "/rd:true", "/f:xml"])
+    .creation_flags(CREATE_NO_WINDOW)
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null())
+    .spawn()
+  else {
+    return String::new();
+  };
+  let Some(mut stdout) = child.stdout.take() else { return String::new() };
+  // The output is read on its own thread so a full pipe cannot stall the wait; the wait ends at the deadline whatever the log does.
+  let reader = std::thread::spawn(move || {
+    let mut bytes = Vec::new();
+    let _ = stdout.read_to_end(&mut bytes);
+    String::from_utf8_lossy(&bytes).into_owned()
+  });
+  let deadline = std::time::Instant::now() + QUERY_DEADLINE;
+  loop {
+    match child.try_wait() {
+      Ok(Some(_)) => break,
+      Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(15)),
+      _ => {
+        let _ = child.kill();
+        let _ = child.wait();
+        break;
+      }
+    }
+  }
+  reader.join().unwrap_or_default()
+}
+
+/// What the Windows event log says ended a session whose last sign of life was at `alive_ms`. Blocks for up to a few seconds.
+#[cfg(windows)]
+pub fn lookup(alive_ms: u64, app_exe: &str) -> String {
+  // The entry that explains an end can come before the last sign of life (a shutdown is announced first) or after it (the next
+  // start writes down that the last one was unexpected), so the window opens two minutes before it and stays open until now.
+  let since = alive_ms.saturating_sub(120_000);
+  let mut events = parse_events(&read_log("System", &[41, 6008, 1074], since));
+  events.extend(parse_events(&read_log("Application", &[1000, 1002], since)));
+  classify(&events, alive_ms, app_exe)
+}
+
+#[cfg(not(windows))]
+pub fn lookup(_alive_ms: u64, _app_exe: &str) -> String {
+  "unknown".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  // A real entry from a Windows 11 PC (names and paths as they were written: none of it may reach a report).
+  const SHUTDOWN: &str = "<Event xmlns='http://schemas.microsoft.com/win/2004/08/events/event'><System><Provider Name='User32' Guid='{b0aa8734-56f7-41cc-b2f4-de228e98b946}' EventSourceName='User32'/><EventID Qualifiers='32768'>1074</EventID><Version>0</Version><Level>4</Level><Task>0</Task><Opcode>0</Opcode><Keywords>0x8080000000000000</Keywords><TimeCreated SystemTime='2026-10-26T06:00:18.4625836Z'/><EventRecordID>122217</EventRecordID><Correlation/><Execution ProcessID='1552' ThreadID='2376'/><Channel>System</Channel><Computer>AKSHAY_MS_NEW</Computer><Security UserID='S-1-12-1-4108874888-1185848233-3288970143-1712493729'/></System><EventData><Data Name='param1'>C:\\Windows\\SystemApps\\Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy\\StartMenuExperienceHost.exe (AKSHAY_MS_NEW)</Data><Data Name='param2'>AKSHAY_MS_NEW</Data><Data Name='param3'>Other (Unplanned)</Data><Data Name='param4'>0x0</Data><Data Name='param5'>power off</Data><Data Name='param6'></Data><Data Name='param7'>FAREAST\\akshaydagar</Data></EventData></Event>";
+
+  fn event(id: u32, provider: &str, data: &[(&str, &str)]) -> LogEvent {
+    LogEvent {
+      id,
+      provider: provider.to_string(),
+      at_ms: 1_000,
+      data: data.iter().map(|(name, value)| (name.to_string(), value.to_string())).collect(),
+    }
+  }
+  fn crash(app: &str, code: &str) -> LogEvent {
+    event(
+      1000,
+      "Application Error",
+      &[("", app), ("", "0.23.0.0"), ("", "6720a1b2"), ("", "KERNELBASE.dll"), ("", "10.0.26100.1"), ("", "8f3c2b11"), ("", code)],
+    )
+  }
+
+  #[test]
+  fn times_are_read_and_written_to_the_millisecond_and_second() {
+    assert_eq!(iso_to_ms("1970-01-01T00:00:00Z"), Some(0));
+    assert_eq!(iso_to_ms("2026-10-26T06:00:18.4625836Z"), Some(1_792_994_418_462));
+    assert_eq!(iso_to_ms("2000-02-29T23:59:59Z"), Some(951_868_799_000));
+    assert_eq!(iso_to_ms("2038-01-19T03:14:08.000Z"), Some(2_147_483_648_000));
+    assert_eq!(ms_to_iso(1_794_054_896_000), "2026-11-07T12:34:56.000Z");
+    assert_eq!(ms_to_iso(1_792_994_418_462), "2026-10-26T06:00:18.000Z");
+  }
+
+  #[test]
+  fn a_time_that_is_not_a_utc_time_of_that_shape_is_not_believed() {
+    for bad in ["", "yesterday", "2026-10-26", "2026-10-26T06:00:18", "2026-13-26T06:00:18Z", "2026-10-32T06:00:18Z",
+      "2026-10-26T25:00:18Z", "2026-10-26T06:00:18+01:00", "2026-1-26T06:00:18Z", "2026-10-26T06:00:18.12x4Z"] {
+      assert_eq!(iso_to_ms(bad), None, "{bad}");
+    }
+  }
+
+  #[test]
+  fn writing_a_time_and_reading_it_back_loses_nothing_but_the_sub_second() {
+    for ms in [0u64, 1, 999, 86_399_999, 951_868_799_000, 1_792_994_418_462, 4_102_444_799_999] {
+      assert_eq!(iso_to_ms(&ms_to_iso(ms)), Some(ms - ms % 1_000), "{ms}");
+    }
+  }
+
+  #[test]
+  fn a_real_entry_is_read_with_its_id_provider_time_and_fields() {
+    let events = parse_events(SHUTDOWN);
+    assert_eq!(events.len(), 1);
+    assert_eq!((events[0].id, events[0].provider.as_str(), events[0].at_ms), (1074, "User32", 1_792_994_418_462));
+    assert_eq!(field(&events[0], "param3", 2), Some("Other (Unplanned)"));
+    assert_eq!(field(&events[0], "param5", 4), Some("power off"));
+    assert_eq!(events[0].data.len(), 7);
+  }
+
+  #[test]
+  fn several_entries_are_read_in_order_and_an_unreadable_one_is_skipped() {
+    let xml = format!("{SHUTDOWN}<Event garbage</Event>{SHUTDOWN}<Event ><System><EventID>x</EventID></System></Event>");
+    assert_eq!(parse_events(&xml).len(), 2);
+    assert!(parse_events("").is_empty() && parse_events("not xml at all").is_empty());
+  }
+
+  #[test]
+  fn a_real_shutdown_entry_says_the_pc_was_shut_down_and_not_who_by() {
+    let word = classify(&parse_events(SHUTDOWN), 1_792_994_418_462, "artdaddy.exe");
+    assert_eq!(word, "os_shutdown");
+    for private in ["AKSHAY", "akshaydagar", "StartMenu", "FAREAST", "C:\\"] {
+      assert!(!word.contains(private));
+    }
+  }
+
+  #[test]
+  fn a_real_crash_entry_with_named_fields_gives_the_programs_name_and_its_exception_code() {
+    // From a Windows 11 PC: a system program that crashed, as the log wrote it.
+    let xml = "<Event xmlns='http://schemas.microsoft.com/win/2004/08/events/event'><System><Provider Name='Application Error'/><EventID Qualifiers='0'>1000</EventID><TimeCreated SystemTime='2026-11-01T10:00:00.1Z'/></System><EventData><Data Name='AppName'>wmiprvse.exe</Data><Data Name='AppVersion'>10.0.26100.9711</Data><Data Name='AppTimeStamp'>1de116a5</Data><Data Name='ModuleName'>ntdll.dll</Data><Data Name='ModuleVersion'>10.0.26100.9711</Data><Data Name='ModuleTimeStamp'>5fd39a05</Data><Data Name='ExceptionCode'>c0000374</Data><Data Name='FaultingOffset'>0000000000118095</Data><Data Name='ProcessId'>0x119c</Data><Data Name='AppPath'>C:\\WINDOWS\\system32\\wbem\\wmiprvse.exe</Data></EventData></Event>";
+    let events = parse_events(xml);
+    assert_eq!(events.len(), 1);
+    assert_eq!(classify(&events, events[0].at_ms, "wmiprvse.exe"), "app_crash:c0000374");
+    // The same entry is somebody else's crash to an app of another name, and its path never reaches the answer.
+    assert_eq!(classify(&events, events[0].at_ms, "artdaddy.exe"), "unknown");
+    assert!(!classify(&events, events[0].at_ms, "wmiprvse.exe").contains("WINDOWS"));
+  }
+
+  #[test]
+  fn each_thing_the_log_can_say_has_its_word() {
+    let exe = "artdaddy.exe";
+    let restart = event(1074, "User32", &[("param3", "Other (Unplanned)"), ("param5", "restart")]);
+    let update = event(1074, "User32", &[("param3", "Operating System: Upgrade (Planned)"), ("param5", "restart")]);
+    let power = event(41, "Microsoft-Windows-Kernel-Power", &[("BugcheckCode", "0")]);
+    let blue = event(41, "Microsoft-Windows-Kernel-Power", &[("BugcheckCode", "159")]);
+    let hang = event(1002, "Application Hang", &[("", exe)]);
+    let unexpected = event(6008, "EventLog", &[]);
+    let table: [(&[LogEvent], &str); 9] = [
+      (&[restart], "os_restart"),
+      (&[update], "os_update"),
+      (&[power], "power_loss"),
+      (&[blue], "bugcheck"),
+      (&[crash(exe, "c0000005")], "app_crash:c0000005"),
+      (&[crash("msedgewebview2.exe", "80000003")], "webview_crash:80000003"),
+      (&[hang], "app_hang"),
+      (&[unexpected], "unexpected_shutdown"),
+      (&[], "unknown"),
+    ];
+    for (events, word) in table {
+      assert_eq!(classify(events, 1_000, exe), word);
+    }
+  }
+
+  #[test]
+  fn another_program_crashing_is_not_this_apps_crash() {
+    assert_eq!(classify(&[crash("notepad.exe", "c0000005")], 1_000, "artdaddy.exe"), "unknown");
+    assert_eq!(classify(&[event(1002, "Application Hang", &[("", "notepad.exe")])], 1_000, "artdaddy.exe"), "unknown");
+  }
+
+  #[test]
+  fn the_pc_dying_outranks_everything_that_followed_from_it() {
+    let events = [
+      crash("artdaddy.exe", "c0000005"),
+      event(1074, "User32", &[("param5", "restart")]),
+      event(41, "Microsoft-Windows-Kernel-Power", &[("BugcheckCode", "0")]),
+    ];
+    assert_eq!(classify(&events, 1_000, "artdaddy.exe"), "power_loss");
+    // ...and this app's own crash outranks an operating-system shutdown that was announced at the same time.
+    assert_eq!(classify(&events[..2], 1_000, "artdaddy.exe"), "app_crash:c0000005");
+  }
+
+  // A PC restarted by hand an hour after the app was killed did not end the app: apps are closed within moments of the request.
+  #[test]
+  fn a_shutdown_asked_for_long_after_the_session_stopped_is_not_what_ended_it() {
+    let late = LogEvent { at_ms: 1_000 + SHUTDOWN_GRACE_MS + 1, ..event(1074, "User32", &[("param5", "restart")]) };
+    let prompt = LogEvent { at_ms: 1_000 + SHUTDOWN_GRACE_MS, ..event(1074, "User32", &[("param5", "restart")]) };
+    assert_eq!(classify(&[late], 1_000, "artdaddy.exe"), "unknown");
+    assert_eq!(classify(&[prompt], 1_000, "artdaddy.exe"), "os_restart");
+    // The PC dying is written down at the next start, however long after: that one stays.
+    let boot = LogEvent { at_ms: 10 * 3_600_000, ..event(41, "Microsoft-Windows-Kernel-Power", &[("BugcheckCode", "0")]) };
+    assert_eq!(classify(&[boot], 1_000, "artdaddy.exe"), "power_loss");
+  }
+
+  #[test]
+  fn a_code_that_is_not_hexadecimal_is_left_out_so_no_text_of_the_logs_gets_through() {
+    for bad in ["", "NotACode", "c0000005 and a user name", "123456789", "0xzz", "c0000005\n"] {
+      let word = classify(&[crash("artdaddy.exe", bad)], 1_000, "artdaddy.exe");
+      let trimmed = bad.trim();
+      if trimmed.len() == 8 && trimmed.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        continue; // "c0000005\n" is a code once trimmed
+      }
+      assert_eq!(word, "app_crash", "{bad:?}");
+    }
+  }
+
+  fn allowed(word: &str) -> bool {
+    WORDS.contains(&word)
+      || ["app_crash:", "webview_crash:"].iter().any(|prefix| {
+        word.strip_prefix(prefix).is_some_and(|code| {
+          (1..=8).contains(&code.len()) && code.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+      })
+      || word == "app_crash"
+      || word == "webview_crash"
+  }
+
+  #[test]
+  fn whatever_the_log_holds_the_answer_is_one_of_the_words_and_never_the_logs_own_text() {
+    // Nothing injectable survives, and nothing is thrown at a malformed log: arbitrary text in every field.
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    let mut next = move || {
+      seed ^= seed << 13;
+      seed ^= seed >> 7;
+      seed ^= seed << 17;
+      seed
+    };
+    let texts = ["", "0", "159", "c0000005", "artdaddy.exe", "msedgewebview2.exe", "restart", "power off", "Operating System: Update",
+      "<Data>", "&amp;", "FAREAST\\someone", "C:\\Users\\someone\\x", "\u{1F4A5}"];
+    let providers = ["User32", "Application Error", "Application Hang", "Microsoft-Windows-Kernel-Power", "EventLog", "Other"];
+    let ids = [41u32, 1000, 1002, 1074, 6008, 7, 0, u32::MAX];
+    for _ in 0..2_000 {
+      let count = (next() % 5) as usize;
+      let events: Vec<LogEvent> = (0..count)
+        .map(|_| LogEvent {
+          id: ids[(next() % ids.len() as u64) as usize],
+          provider: providers[(next() % providers.len() as u64) as usize].to_string(),
+          at_ms: next() % 10_000,
+          data: (0..(next() % 9))
+            .map(|_| {
+              let name = if next() % 2 == 0 { "" } else { ["param3", "param5", "BugcheckCode"][(next() % 3) as usize] };
+              (name.to_string(), texts[(next() % texts.len() as u64) as usize].to_string())
+            })
+            .collect(),
+        })
+        .collect();
+      let word = classify(&events, 5_000, "artdaddy.exe");
+      assert!(allowed(&word), "{word:?} from {events:?}");
+      for private in ["FAREAST", "someone", "C:\\"] {
+        assert!(!word.contains(private), "{word:?}");
+      }
+    }
+  }
+
+  #[test]
+  fn whatever_text_the_log_tool_prints_is_read_without_failing() {
+    let mut seed = 0x1234_5678_9abc_def1u64;
+    for round in 0..300 {
+      let mut text = String::new();
+      for _ in 0..(round % 40) {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        text.push_str(["<Event ", "</Event>", "<EventID>41</EventID>", "<Provider Name='", "<Data Name='x'>", "</Data>", "'/>", "<TimeCreated SystemTime='2026-10-26T06:00:18Z'/>", "é", "\u{0}"][(seed >> 33) as usize % 10]);
+      }
+      let _ = classify(&parse_events(&text), 0, "artdaddy.exe");
+    }
+  }
+
+  // The real log of this PC, through the real tool: it answers within the deadline with one of the words, whatever it holds.
+  #[cfg(windows)]
+  #[test]
+  fn the_real_event_log_answers_in_time_with_one_of_the_words() {
+    let started = std::time::Instant::now();
+    let now_ms = std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .map(|elapsed| elapsed.as_millis() as u64)
+      .unwrap();
+    // The last thirty days: whatever this machine has had in them.
+    let word = lookup(now_ms - 30 * 86_400_000, "artdaddy.exe");
+    eprintln!("the real log, last thirty days: {word} in {:?}", started.elapsed());
+    assert!(allowed(&word), "{word:?}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(12), "{:?}", started.elapsed());
+  }
+}

@@ -4,11 +4,15 @@ mod jobs;
 mod mcp;
 #[cfg(target_os = "macos")]
 mod macos_quit;
+#[cfg(desktop)]
+mod os_exit_cause;
 mod reload_guard;
 #[cfg(desktop)]
 mod runtime_health;
 #[cfg(desktop)]
 mod sidecar_run;
+#[cfg(desktop)]
+mod startup;
 #[cfg(desktop)]
 mod token_store;
 
@@ -501,11 +505,31 @@ where
   }
 }
 
+/// What the updater runs just before it starts the installer. On Windows the plugin ends the process with
+/// `std::process::exit(0)` inside `Update::install`, so nothing written after `install` ever runs and no exit event
+/// fires: the mark that says "this exit is an update restart" has to be written here, or the next launch records the
+/// update as a crash (UJ-001).
+#[cfg(desktop)]
+fn update_exit_hook(
+  health: Option<std::sync::Arc<runtime_health::RuntimeHealth>>,
+) -> impl Fn() + Send + Sync + 'static {
+  move || {
+    if let Some(health) = &health {
+      health.mark_exit(runtime_health::CleanExit::UpdateRestart);
+    }
+  }
+}
+
 #[cfg(desktop)]
 async fn available_update(app: &tauri::AppHandle) -> Result<Option<tauri_plugin_updater::Update>, String> {
+  use tauri::Manager;
   use tauri_plugin_updater::UpdaterExt;
+  let health = app
+    .try_state::<std::sync::Arc<runtime_health::RuntimeHealth>>()
+    .map(|state| state.inner().clone());
   let updater = app
     .updater_builder()
+    .on_before_exit(update_exit_hook(health))
     .configure_client(|client| {
       client
         .connect_timeout(std::time::Duration::from_secs(15))
@@ -596,6 +620,9 @@ fn install_update(app: tauri::AppHandle, staged: tauri::State<'_, StagedUpdate>)
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+  // The very first thing: the clock the launch marker's start-up timing is measured on.
+  #[cfg(desktop)]
+  startup::mark_process_start();
   // Before anything can spawn: every sidecar inherits this limit (UJ-020).
   let open_files = fdlimit::raise();
   let builder = tauri::Builder::default();
@@ -689,6 +716,8 @@ pub fn run() {
       runtime_health::runtime_health_status,
       runtime_health::runtime_health_update,
       runtime_health::runtime_health_ack,
+      runtime_health::runtime_health_cause,
+      startup::process_age_ms,
       reload_guard::qa_renderer_process,
       sidecar_run::sidecar_run,
       sidecar_run::sidecar_kill,
@@ -1364,6 +1393,46 @@ mod tests {
         }));
         assert!(result.is_err());
       }
+    }
+
+    /// UJ-001: the person updates, the app restarts, and the next launch recorded a crash. On Windows the updater plugin
+    /// starts the installer and ends the process with `std::process::exit(0)` INSIDE `Update::install` (nothing after it
+    /// runs and no exit event fires), so a mark written after `install` never existed: the mark has to be written by the
+    /// hook the plugin runs just before it. This is that hook, and what the next launch makes of what it left behind.
+    #[test]
+    fn the_hook_before_the_installer_leaves_an_update_restart_that_the_next_launch_reads() {
+      use crate::runtime_health::{CleanExit, RuntimeHealth};
+      let directory = tempfile::tempdir().unwrap();
+      let path = directory.path().join("health.json");
+      let health = std::sync::Arc::new(RuntimeHealth::open(path.clone(), "old".into(), "test".into()));
+      let before_exit = super::super::update_exit_hook(Some(health.clone()));
+      before_exit();
+      // The process ends here: no `drop`, no exit event, nothing after the installer starts.
+      std::mem::forget(health);
+      // The same release on both sides: only a mark written by the old app, before its end, can explain it.
+      let next = RuntimeHealth::open(path, "next".into(), "test".into());
+      assert_eq!(next.status().previous_exit, Some(CleanExit::UpdateRestart));
+      assert!(next.status().failures.is_empty(), "the update was recorded as {:?}", next.status().failures);
+    }
+
+    #[test]
+    fn a_hook_with_no_health_record_to_write_to_is_harmless() {
+      super::super::update_exit_hook(None)();
+    }
+
+    /// The hook only helps if the updater is built with it: read the one place the app builds its updater.
+    #[test]
+    fn the_updater_the_app_builds_runs_that_hook_before_the_installer() {
+      let source = include_str!("lib.rs");
+      let body = source
+        .split("async fn available_update(")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}\n").next())
+        .expect("the function that builds the updater is still called available_update");
+      assert!(
+        body.contains(".on_before_exit(update_exit_hook("),
+        "available_update must pass update_exit_hook to the updater builder"
+      );
     }
   }
 

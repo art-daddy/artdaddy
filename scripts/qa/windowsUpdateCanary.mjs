@@ -22,7 +22,7 @@ import { createHash } from "node:crypto";
 import { closeSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
-import { normalizeProductVersion } from "../updateCanaryChecks.mjs";
+import { normalizeProductVersion, updateSeenAsARestart } from "../updateCanaryChecks.mjs";
 
 if (process.platform !== "win32" || process.env.GITHUB_ACTIONS !== "true") {
   throw new Error("The update canary runs only on a disposable GitHub-hosted Windows runner");
@@ -429,6 +429,11 @@ try {
       text: document.body.innerText.slice(0, 300),
       version: await window.__TAURI_INTERNALS__.invoke("plugin:app|version").catch(() => null),
       offeredNext: await window.__TAURI_INTERNALS__.invoke("check_for_update").catch((error) => `error: ${error}`),
+      // What the app's native health record says its predecessor's end was (UJ-001): a command no page state can change.
+      health: await window.__TAURI_INTERNALS__
+        .invoke("runtime_health_begin")
+        .then((status) => ({ previous_exit: status?.previous_exit ?? null, failures: (status?.failures ?? []).map((f) => f.kind) }))
+        .catch((error) => ({ error: String(error) })),
     }));
     note("relaunched app answers", seen);
     await reconnected.close().catch(() => undefined);
@@ -437,6 +442,9 @@ try {
     }
     if (seen.offeredNext !== null && !String(seen.offeredNext).startsWith("error:")) {
       throw new Error(`the relaunched app is still offered ${seen.offeredNext?.version}`);
+    }
+    if (!updateSeenAsARestart(seen.health)) {
+      throw new Error(`the relaunched app does not know its predecessor ended in an update, so the update was recorded as a crash: ${JSON.stringify(seen.health)}`);
     }
   } else if (outcome.relaunched) {
     let titled = [];

@@ -171,7 +171,7 @@ fn latest_record(path: &Path) -> Option<Record> {
 impl RuntimeHealth {
   pub fn open(path: PathBuf, launch_id: String, release: String) -> Self {
     let previous = latest_record(&path);
-    let previous_exit = previous.as_ref().and_then(|record| record.current.exit);
+    let mut previous_exit = previous.as_ref().and_then(|record| record.current.exit);
     let now = now_ms();
     let current = Session {
       launch_id: launch_id.clone(),
@@ -187,7 +187,14 @@ impl RuntimeHealth {
       Some(mut old) => {
         if old.current.launch_id != launch_id {
           if old.current.exit.is_none() {
-            append_failure(&mut old, FailureKind::UncleanExit);
+            // An update ends the process without a mark when the app that ran it had no before-exit hook (every app built
+            // before it) or the installer did not wait for it: only an update changes the release between two launches, so
+            // the first start of another release after an unmarked end is that update, not a crash (UJ-001).
+            if old.current.release != current.release {
+              previous_exit = Some(CleanExit::UpdateRestart);
+            } else {
+              append_failure(&mut old, FailureKind::UncleanExit);
+            }
           }
           old.current = current;
         }
@@ -387,6 +394,22 @@ impl RuntimeHealth {
     Self::matches(&state, token).then(|| Self::snapshot(&state))
   }
 
+  /// When the session that ended in one unexpected exit was last seen alive: what the operating system's log is asked
+  /// about. Answered only to the page that holds the current token, and only for a recorded `UncleanExit` that has not been
+  /// acknowledged yet: no other failure, id or page gets an answer.
+  pub fn unexpected_exit_alive_at(&self, token: &RendererToken, id: &str) -> Option<u64> {
+    let state = self.lock();
+    if !Self::matches(&state, token) {
+      return None;
+    }
+    state
+      .record
+      .failures
+      .iter()
+      .find(|failure| failure.id == id && failure.kind == FailureKind::UncleanExit)
+      .map(|failure| failure.session.alive_at)
+  }
+
   pub fn acknowledge(&self, token: &RendererToken, ids: &[String]) -> bool {
     let mut state = self.lock();
     if !Self::matches(&state, token) {
@@ -490,6 +513,29 @@ pub fn runtime_health_ack(
   ids: Vec<String>,
 ) -> bool {
   health.acknowledge(&token, &ids)
+}
+
+/// What the operating system's own log says ended the session that an unexpected exit belongs to: one short word
+/// (`os_exit_cause.rs`), or nothing where there is no log to read. Reads the log off the page's thread, and the page
+/// does not wait for it for long.
+#[tauri::command]
+pub async fn runtime_health_cause(
+  health: tauri::State<'_, Arc<RuntimeHealth>>,
+  token: RendererToken,
+  id: String,
+) -> Result<Option<String>, String> {
+  let Some(alive_at) = health.unexpected_exit_alive_at(&token, &id) else {
+    return Ok(None);
+  };
+  let exe = std::env::current_exe()
+    .ok()
+    .and_then(|path| path.file_name().map(|name| name.to_string_lossy().into_owned()))
+    .unwrap_or_else(|| "artdaddy.exe".to_string());
+  Ok(
+    tauri::async_runtime::spawn_blocking(move || crate::os_exit_cause::lookup(alive_at, &exe))
+      .await
+      .ok(),
+  )
 }
 
 #[cfg(test)]
@@ -872,6 +918,88 @@ mod tests {
       next.record_failure(FailureKind::RendererExited);
     }
     assert_eq!(next.status().failures.len(), MAX_FAILURES);
+  }
+
+  // UJ-001. An update that ends the process without a mark (every app built before the updater's before-exit hook, and
+  // any installer that does not wait for the app) leaves a session with no exit. The first start of ANOTHER release after
+  // such an end is the update, not a crash: only an update changes the release between two launches.
+  #[test]
+  fn an_unmarked_end_followed_by_another_release_is_an_update_restart_not_a_crash() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("health.json");
+    let first = RuntimeHealth::open(path.clone(), "first".into(), "artdaddy@0.23.0".into());
+    drop(first); // the installer ended the process: no exit was marked
+    let next = RuntimeHealth::open(path, "next".into(), "artdaddy@0.24.0".into());
+    assert_eq!(next.status().previous_exit, Some(CleanExit::UpdateRestart));
+    assert!(next.status().failures.is_empty(), "recorded as {:?}", next.status().failures);
+  }
+
+  #[test]
+  fn an_unmarked_end_followed_by_the_same_release_is_still_a_crash() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("health.json");
+    let first = RuntimeHealth::open(path.clone(), "first".into(), "artdaddy@0.23.0".into());
+    drop(first);
+    let next = RuntimeHealth::open(path, "next".into(), "artdaddy@0.23.0".into());
+    assert_eq!(next.status().previous_exit, None);
+    assert_eq!(next.status().failures.len(), 1);
+    assert_eq!(next.status().failures[0].kind, FailureKind::UncleanExit);
+  }
+
+  #[test]
+  fn an_update_restart_keeps_a_failure_seen_before_it_and_adds_none() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("health.json");
+    let first = RuntimeHealth::open(path.clone(), "first".into(), "artdaddy@0.23.0".into());
+    first.record_failure(FailureKind::RendererExited);
+    drop(first);
+    let next = RuntimeHealth::open(path, "next".into(), "artdaddy@0.24.0".into());
+    let kinds: Vec<_> = next.status().failures.iter().map(|failure| failure.kind).collect();
+    assert_eq!(kinds, vec![FailureKind::RendererExited]);
+  }
+
+  #[test]
+  fn a_crash_after_an_update_is_still_recorded() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("health.json");
+    drop(RuntimeHealth::open(path.clone(), "old".into(), "artdaddy@0.23.0".into()));
+    let updated = RuntimeHealth::open(path.clone(), "new".into(), "artdaddy@0.24.0".into());
+    assert!(updated.status().failures.is_empty());
+    drop(updated); // the new release then dies without a mark: that one is a crash
+    let after = RuntimeHealth::open(path, "later".into(), "artdaddy@0.24.0".into());
+    assert_eq!(after.status().failures.len(), 1);
+    assert_eq!(after.status().failures[0].kind, FailureKind::UncleanExit);
+  }
+
+  #[test]
+  fn an_unexpected_exit_gives_up_when_it_was_last_alive_to_the_page_that_holds_the_token_and_to_nobody_else() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("health.json");
+    let first = RuntimeHealth::open(path.clone(), "first".into(), "artdaddy@0.23.0".into());
+    let token = first.bind_renderer().token;
+    assert!(first.heartbeat(&token, 1, RuntimeContext { activity: "idle".into(), ..Default::default() }));
+    let last_alive = first.status().failures.len() as u64; // none yet: the failure is recorded by the next launch
+    assert_eq!(last_alive, 0);
+    drop(first); // no mark: an unexpected exit
+    let next = RuntimeHealth::open(path, "next".into(), "artdaddy@0.23.0".into());
+    let current = next.bind_renderer().token;
+    let failure = next.status().failures[0].clone();
+    assert_eq!(failure.kind, FailureKind::UncleanExit);
+    let alive = next.unexpected_exit_alive_at(&current, &failure.id);
+    assert!(alive.is_some_and(|at| at > 0), "{alive:?}");
+    // Nobody else may ask: a page that was replaced, or a token that was never issued.
+    let stale = RendererToken { launch_id: current.launch_id.clone(), renderer_epoch: current.renderer_epoch + 1 };
+    assert_eq!(next.unexpected_exit_alive_at(&stale, &failure.id), None);
+    let foreign = RendererToken { launch_id: "other".into(), renderer_epoch: current.renderer_epoch };
+    assert_eq!(next.unexpected_exit_alive_at(&foreign, &failure.id), None);
+    // Nothing else is asked about: not an id nobody recorded, and not a failure that is not an unexpected exit.
+    assert_eq!(next.unexpected_exit_alive_at(&current, "no-such-failure"), None);
+    next.record_failure(FailureKind::RendererExited);
+    let other = next.status().failures.iter().find(|f| f.kind == FailureKind::RendererExited).unwrap().id.clone();
+    assert_eq!(next.unexpected_exit_alive_at(&current, &other), None);
+    // Once it was reported and acknowledged there is nothing left to ask about.
+    assert!(next.acknowledge(&current, &[failure.id.clone()]));
+    assert_eq!(next.unexpected_exit_alive_at(&current, &failure.id), None);
   }
 
   #[test]

@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import fc from "fast-check";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { describeTree, diffTrees, manifestOffer, newer, normalizeProductVersion, parseCanaryOutput } from "./updateCanaryChecks.mjs";
+import { describeTree, diffTrees, manifestOffer, newer, normalizeProductVersion, parseCanaryOutput, updateSeenAsARestart } from "./updateCanaryChecks.mjs";
 
 const REPO = "art-daddy/artdaddy";
 // The shape the live manifest really has: one entry per platform, each with a signature and an asset URL.
@@ -262,5 +262,22 @@ describe("reading what the Rust half printed", () => {
   it("does not mistake a malformed line for data", () => {
     expect(parseCanaryOutput("CANARY-OFFERED {not json\nCANARY-INSTALLED \nCANARY-DOWNLOADED lots").offered).toBeNull();
     expect(parseCanaryOutput("CANARY-DOWNLOADED lots").downloadedBytes).toBeNaN();
+  });
+});
+
+describe("what the relaunched app knows about the update that just ran", () => {
+  // UJ-001: on Windows an update restart used to be recorded as a crash at the next launch.
+  it("knows its predecessor ended in an update, and nothing else counts as that", () => {
+    expect(updateSeenAsARestart({ previous_exit: "update_restart", failures: [] })).toBe(true);
+    for (const status of [
+      { previous_exit: null, failures: ["unclean_exit"] },
+      { previous_exit: "quit", failures: [] },
+      { previous_exit: undefined },
+      { error: "unknown command" },
+      null,
+      undefined,
+      "update_restart",
+    ])
+      expect(updateSeenAsARestart(status), JSON.stringify(status)).toBe(false);
   });
 });

@@ -24,11 +24,25 @@ import { hostInfo } from "../platform/host";
 import { useAuth, isSignedOutGate, authBypassed } from "../store/auth";
 import { useSignInNotice } from "../store/signInNotice";
 import SignInScreen from "./SignInScreen";
+import { UpdateBanner } from "./UpdateBanner";
 
 /** How long launch waits on the session before opening (offline) for one that is stored. */
 const BOOT_PATIENCE_MS = 15_000;
 /** How long after the keychain did not answer before the restore asks it again. */
 const KEYCHAIN_RETRY_MS = 3_000;
+
+/** A view shown before there is a session, with the update bar above it. An update can be the very fix for what stops
+ *  someone signing in, so an old build must be offered it here too: the bar used to be part of the signed-in app only. A
+ *  view that is only a moment long (the session is still being restored) asks for no bar, so a normal start never flashes
+ *  one and never asks twice. */
+function BeforeSignIn({ update, children }: { update: boolean; children: React.ReactNode }) {
+  return (
+    <div className="flex h-full w-full flex-col">
+      {update ? <UpdateBanner /> : null}
+      <div className="min-h-0 flex-1">{children}</div>
+    </div>
+  );
+}
 
 export default function AuthProvider({ children }: { children: React.ReactNode }) {
   const status = useAuth((s) => s.status);
@@ -233,42 +247,48 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
   if (authBypassed()) return <>{children}</>;
   if (status === "checking")
     return (
-      <div className="flex h-full w-full items-center justify-center bg-bg p-6 text-center">
-        <div>
-          <div className="text-lg font-semibold text-neutral-100">Starting ArtDaddy…</div>
-          <div className="mt-2 text-sm text-neutral-400">
-            {restoreUnavailable
-              ? "ArtDaddy couldn't read your saved session."
-              : "Restoring your saved session."}
-          </div>
-          {restoreUnavailable && hostInfo().os === "macos" ? (
+      <BeforeSignIn update={restoreUnavailable}>
+        <div className="flex h-full w-full items-center justify-center bg-bg p-6 text-center">
+          <div>
+            <div className="text-lg font-semibold text-neutral-100">Starting ArtDaddy…</div>
             <div className="mt-2 text-sm text-neutral-400">
-              If macOS asks to use your saved sign-in, enter your Mac password and click Always
-              Allow. ArtDaddy then continues by itself.
+              {restoreUnavailable
+                ? "ArtDaddy couldn't read your saved session."
+                : "Restoring your saved session."}
             </div>
-          ) : null}
-          {restoreUnavailable ? (
-            <div className="mt-5 flex justify-center gap-3">
-              <button
-                type="button"
-                className="rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-black"
-                onClick={() => setRestoreAttempt((attempt) => attempt + 1)}
-              >
-                Retry
-              </button>
-              <button
-                type="button"
-                className="rounded-lg border border-neutral-700 px-4 py-2 text-sm text-neutral-200"
-                onClick={() => useAuth.getState().markLocked()}
-              >
-                Sign in again
-              </button>
-            </div>
-          ) : null}
+            {restoreUnavailable && hostInfo().os === "macos" ? (
+              <div className="mt-2 text-sm text-neutral-400">
+                If macOS asks to use your saved sign-in, enter your Mac password and click Always
+                Allow. ArtDaddy then continues by itself.
+              </div>
+            ) : null}
+            {restoreUnavailable ? (
+              <div className="mt-5 flex justify-center gap-3">
+                <button
+                  type="button"
+                  className="rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-black"
+                  onClick={() => setRestoreAttempt((attempt) => attempt + 1)}
+                >
+                  Retry
+                </button>
+                <button
+                  type="button"
+                  className="rounded-lg border border-neutral-700 px-4 py-2 text-sm text-neutral-200"
+                  onClick={() => useAuth.getState().markLocked()}
+                >
+                  Sign in again
+                </button>
+              </div>
+            ) : null}
+          </div>
         </div>
-      </div>
+      </BeforeSignIn>
     );
   if (isSignedOutGate({ status, hasStoredSession }))
-    return <SignInScreen offline={status === "offline"} />;
+    return (
+      <BeforeSignIn update>
+        <SignInScreen offline={status === "offline"} />
+      </BeforeSignIn>
+    );
   return <>{children}</>;
 }
