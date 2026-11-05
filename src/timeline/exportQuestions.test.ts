@@ -1,6 +1,11 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
+import { estimateFacts } from "../../scripts/qa/exporterQualification.mjs";
+import {
+  REAL_COLD_MESSAGE,
+  REAL_MEASURED_MESSAGE,
+} from "../../scripts/qa/exporterQualification.fixtures.mjs";
 import { isKnownProblem, type ExportPreflightReason as Reason } from "./exportOptions";
 import {
   answerButtons,
@@ -431,6 +436,53 @@ describe("the Save to box", () => {
     expect(boxed.code).toBe(plain.code);
     expect(boxed.bands).toEqual(plain.bands);
     expect(boxed.startAnywayNote).toBe(plain.startAnywayNote);
+  });
+});
+
+describe("the Node qualification controls read what the product prints", () => {
+  // scripts/qa/exporterQualification.mjs judges a pilot export by the words of the confirmation the person was shown, and it
+  // runs only in the pre-push lane. These walk the product's real output, so changing its words fails here, not at push time.
+  const noticeText = (over: Partial<PreflightPicture>): string =>
+    questionAsText(planQuestions(picture(["long"], over))[0]).message;
+
+  it("keeps the recorded cold and measured confirmations equal to what the product prints for them", () => {
+    expect(noticeText({ secondsGuessed: true, seconds: 1500 })).toBe(REAL_COLD_MESSAGE);
+    expect(noticeText({ secondsGuessed: false, seconds: 1500 })).toBe(REAL_MEASURED_MESSAGE);
+  });
+
+  it("reads every time the product can print: a measurement as measured, a guess as a guess, to the rounding it prints", () => {
+    fc.assert(
+      fc.property(fc.double({ min: 0, max: 5e6, noNaN: true }), (seconds) => {
+        const measured = estimateFacts([
+          { message: noticeText({ secondsGuessed: false, seconds }) },
+        ]);
+        expect(measured.provided).toBe(true);
+        expect(measured.guessStated).toBe(false);
+        // "under a minute" reads as 0; every other time is whole minutes. Neither is further from the time than its rounding.
+        expect(Math.abs((measured.minutes ?? Number.NaN) * 60 - seconds)).toBeLessThanOrEqual(45);
+        const guessed = estimateFacts([{ message: noticeText({ secondsGuessed: true, seconds }) }]);
+        expect(guessed).toEqual({ provided: false, minutes: null, guessStated: true });
+      }),
+    );
+    const silent = estimateFacts([{ message: noticeText({ seconds: null }) }]);
+    expect(silent).toEqual({ provided: false, minutes: null, guessStated: false });
+  });
+
+  it("reads a time in every question that prints one, and in none that does not", () => {
+    let printed = 0;
+    for (const secondsGuessed of [false, true])
+      for (const reasons of everySubset())
+        for (const via of VIAS)
+          for (const q of planQuestions(picture(reasons, { via, secondsGuessed }))) {
+            const facts = estimateFacts([questionAsText(q)]);
+            const prints = q.facts.some((fact) => fact.label === "Estimated time");
+            const where = `${via}: ${[...reasons].join(",")}`;
+            expect(facts.provided || facts.guessStated, where).toBe(prints);
+            if (prints) expect(facts.guessStated, where).toBe(secondsGuessed);
+            printed += prints ? 1 : 0;
+          }
+    // The walk must have met both kinds of time, or it proved nothing.
+    expect(printed).toBeGreaterThan(1000);
   });
 });
 

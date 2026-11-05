@@ -528,8 +528,7 @@ try {
     // sees no confirmation, and one that IS asked still has to say what it knows about the time.
     assert.ok((native.preflight?.length ?? 0) <= 1, "Promise pilot must not need more than one request-level preflight confirmation");
     for (const asked of native.preflight ?? [])
-      assert.ok(asked.message.includes("Estimated time:") || asked.message.includes("Estimated encoding and saving time:"),
-        "Preflight must show a measured estimate or explicitly unknown time");
+      assert.ok(asked.message.includes("Estimated time:"), "Preflight must state its time: a measured estimate, or a rough guess when nothing like it has been exported on this PC yet");
     // The command's thread count and the history identity are two views of one product decision: assert that they agree instead of
     // carrying a second copy of the thread policy here (the product's own tests walk the policy for every preset).
     if (native.selection.backend === "partition-pipes-v1")
