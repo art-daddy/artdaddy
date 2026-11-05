@@ -172,6 +172,27 @@ export interface ExportRefusalFacts {
   readonly started_by?: ExportStarter;
 }
 
+/** What an export that was refused before it began is reported as: the same whether a tool call or the chat
+ *  card's Try again asked for it, so the two can never describe a refusal differently. */
+export function refusalReport(
+  facts: ExportRefusalFacts | undefined,
+  base: { elapsed_ms: number; operation: "render" | "copy" | "unknown"; error: string },
+): Parameters<typeof reportExport>[0] {
+  return {
+    status: facts?.status ?? "blocked",
+    elapsed_ms: base.elapsed_ms,
+    operation: base.operation,
+    error: base.error,
+    readiness: "unknown",
+    width: facts?.width,
+    height: facts?.height,
+    visual_layers: facts?.visual_layers,
+    ...(facts?.trace ? { trace: facts.trace } : {}),
+    ...(facts?.limit ? { limit: facts.limit } : {}),
+    ...(facts?.started_by ? { started_by: facts.started_by } : {}),
+  };
+}
+
 export interface ToolTrace {
   readonly context: Readonly<AgentEventContext>;
   result: (value: unknown) => void;
@@ -227,19 +248,13 @@ export function createToolTrace(
       const facts = object?.export_refusal as ExportRefusalFacts | undefined;
       for (let index = admitted; index < requested; index++) {
         try {
-          void reportExport({
-            status: facts?.status ?? "blocked",
-            elapsed_ms: Date.now() - started,
-            operation: operations[index],
-            error: String(object?.error ?? ""),
-            readiness: "unknown",
-            width: facts?.width,
-            height: facts?.height,
-            visual_layers: facts?.visual_layers,
-            ...(facts?.trace ? { trace: facts.trace } : {}),
-            ...(facts?.limit ? { limit: facts.limit } : {}),
-            ...(facts?.started_by ? { started_by: facts.started_by } : {}),
-          }).catch(() => undefined);
+          void reportExport(
+            refusalReport(facts, {
+              elapsed_ms: Date.now() - started,
+              operation: operations[index],
+              error: String(object?.error ?? ""),
+            }),
+          ).catch(() => undefined);
         } catch {}
       }
     }

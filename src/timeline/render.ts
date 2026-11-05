@@ -43,6 +43,10 @@ import {
   type ExportMode,
   type ExportOptions,
 } from "./exportOptions";
+import { RUNG_THREAD_CAPS, capThreads, rungOf, type Rung } from "./exportPlan";
+import { refusalReport, type ExportRefusalFacts } from "../api/agentEvents";
+import { decideRung, type RungDecision } from "./exportRung";
+import { exportFlag } from "../api/exportFlags";
 import { clipKind, rendersAsStill } from "./helpers";
 import { extOf, kindOf, REPLAYED_STILL_EXTS } from "../media/formats";
 import { isHeifStill, stillPicture } from "../media/stillPicture";
@@ -76,7 +80,9 @@ import {
   ExportRunError,
   exportVia,
   isDestinationReserved,
+  offerExportRetry,
   submitExport,
+  type ExportRetry,
   type ExportSubmission,
 } from "./exportQueue";
 import { sourceHasAudio } from "./placement";
@@ -739,6 +745,8 @@ export interface BackendSelection {
 export interface RenderPlan {
   contractVersion: number;
   encoder?: ExportEncoder;
+  /** The rung the command was built at (exportPlan.ts); absent is the normal rung. */
+  rung?: Rung;
   workload: RenderWorkload;
   selection?: BackendSelection;
   transport?: "partition-pipes-v1";
@@ -966,6 +974,36 @@ function atempoChain(tempo: number): number[] {
   return out;
 }
 
+/** How to build the same command at another rung, for a plan `buildRenderCommand` made. Kept beside the plan,
+ *  not in it: a function does not survive the structured clone a request goes through, and the plan stays a
+ *  plain record. */
+const rebuilders = new WeakMap<RenderPlan, (rung: Rung) => RenderPlan>();
+
+/** The same export built at another rung (exportPlan.ts), or null for a plan not made by
+ *  `buildRenderCommand`. Only thread counts differ. */
+export function rebuildAtRung(plan: RenderPlan, rung: Rung): RenderPlan | null {
+  return rebuilders.get(plan)?.(rung) ?? null;
+}
+
+/** The gentlest rung that really is a different command for this export (exportPlan.ts): the streamed engine has
+ *  only the normal one, and a rung whose arguments are those of the rung before it saves nothing (thirteen or more
+ *  video clips already decode on one thread each, so the two gentler rungs are one command). The plan must not count
+ *  on a saving that is not there, and Try again must not promise one. 0 for a plan nothing here made. */
+export function gentlestRung(plan: RenderPlan): Rung {
+  if (plan.transport) return 0;
+  const same = (a: RenderPlan, b: RenderPlan) =>
+    JSON.stringify([a.args, a.steps]) === JSON.stringify([b.args, b.steps]);
+  let last: Rung = 0;
+  let before = plan;
+  for (const rung of [1, 2] as const) {
+    const next = rebuildAtRung(plan, rung);
+    if (!next || same(next, before)) break;
+    last = rung;
+    before = next;
+  }
+  return last;
+}
+
 /** Build the ffmpeg args + filter_complex from a timeline.
  *
  *  The whole body works in SECONDS, so a frames-view timeline is normalised here rather than at
@@ -975,6 +1013,27 @@ function atempoChain(tempo: number): number[] {
  *  produce. `toSecondsView` is a no-op for a timeline that is already seconds, so this is safe for
  *  the callers that convert first. */
 export function buildRenderCommand(
+  raw: Timeline,
+  outPath: string,
+  options: ExportOptions = {},
+  window?: FrameWindow,
+): RenderPlan {
+  const built = planRenderCommand(raw, outPath, options, window);
+  const rung = rungOf(options.rung);
+  // A normal rung leaves the plan exactly as it always was; only a gentler one says which it is.
+  const plan: RenderPlan = rung > 0 ? { ...built, rung } : built;
+  rebuilders.set(plan, (next) => {
+    const again = buildRenderCommand(raw, outPath, { ...options, rung: next }, window);
+    // What the person is told about an export (a clip that could not be used, branding left out) is added to the plan
+    // after it is built; it belongs to the export, not to the rung it runs at.
+    for (const warning of plan.warnings)
+      if (!again.warnings.includes(warning)) again.warnings.push(warning);
+    return again;
+  });
+  return plan;
+}
+
+function planRenderCommand(
   raw: Timeline,
   outPath: string,
   options: ExportOptions = {},
@@ -1428,7 +1487,10 @@ function buildSingleRenderCommand(
   const videoThreads =
     pass === "audio"
       ? null
-      : decoderThreads(options.engine ?? "file-sequence-v1", videoInputIndices.size);
+      : capThreads(
+          decoderThreads(options.engine ?? "file-sequence-v1", videoInputIndices.size),
+          RUNG_THREAD_CAPS[rungOf(options.rung)].decoder,
+        );
   const videoDecoder = videoThreads === null ? [] : ["-threads:v", String(videoThreads)];
   if (composed) {
     cmd.push(...decoder, "-f", "concat", "-safe", "1", "-i", "segments.ffconcat");
@@ -2149,11 +2211,18 @@ function buildSingleRenderCommand(
     cmd.push(
       "-threads:v",
       String(
-        composed
-          ? finalEncoderPolicy({ width: ow, height: oh }, options.engine, options.mode).threads
-          : 1,
+        capThreads(
+          composed
+            ? finalEncoderPolicy({ width: ow, height: oh }, options.engine, options.mode).threads
+            : 1,
+          RUNG_THREAD_CAPS[rungOf(options.rung)].encoder,
+        ),
       ),
     );
+  else if (rungOf(options.rung) > 0 && options.mode !== "fast")
+    // x264's own thread count follows the processor count; a gentler rung gives it two. The graphics
+    // encoder has no such count to give.
+    cmd.push("-threads:v", String(RUNG_THREAD_CAPS[rungOf(options.rung)].encoder));
   if (options.mode === "fast") {
     cmd.push(
       "-usage",
@@ -3506,10 +3575,13 @@ function referencedBy(clip: LibraryClip, used: Set<string>): boolean {
 
 /** Returns as soon as the export is QUEUED. Everything that can refuse it — validation,
  *  unresolved media, offline sources, a busy destination — still happens in this turn; only the
- *  encode is deferred, and the chat is told when it lands. */
+ *  encode is deferred, and the chat is told when it lands. `retrying` is set only by the chat card's
+ *  Try again (see {@link retryOf}), never by the tool call: the rung that failed and the rung this one
+ *  starts at. */
 export async function exportTimelineTool(
   args: Args,
   ctx: ClientToolContext | null,
+  retrying?: { from: Rung; minRung: Rung },
 ): Promise<Result> {
   if (!ctx) return NOT_READY;
   const fmt = String(args.format ?? "mp4")
@@ -3587,7 +3659,12 @@ export async function exportTimelineTool(
     filename: dest.filename,
     quality: String(args.quality ?? ""),
     ...(folder ? { outputDirectory: folder.dir } : {}),
+    ...(retrying
+      ? { minRung: retrying.minRung, retry: { from: retrying.from, to: retrying.minRung } }
+      : {}),
   });
+  // If it fails, one click on the chat card starts it again.
+  offerExportRetry(sub.job_id, retryOf(args, ctx));
 
   // Don't leak the OS Downloads path to the model — return only the filename. When the caller
   // NAMED the destination it already knows the path, so there is nothing to disclose either way.
@@ -3627,6 +3704,44 @@ export async function exportTimelineTool(
   };
 }
 
+/** How the chat card starts this export again: the same request, on a context that is no longer bound to the
+ *  turn that asked (the work outlives it, like the export itself), in the project as it is open now when its
+ *  session has changed, with the plan told the rung to start at. It runs through the `export` tool, so the
+ *  questions an export asks and the way a refusal is reported are the first attempt's own. */
+function retryOf(args: Args, ctx: ClientToolContext): ExportRetry {
+  const request = { ...args };
+  const later = ctx.detach?.() ?? ctx;
+  return async (minRung, from, options) => {
+    const started = Date.now();
+    const open = options.store;
+    // The session this export was asked in may have ended since (the project was closed and opened again):
+    // the project is the same, the store is the one open now.
+    const where: ClientToolContext =
+      open && open.projectDir === later.store.projectDir && !later.store.sessionLive()
+        ? { ...later, store: open }
+        : later;
+    const { exportTool } = await import("./exportItems");
+    const result = await exportTool(request, where, { from, minRung });
+    if (result.ok !== false) return { ok: true };
+    const facts = (result as { export_refusal?: ExportRefusalFacts }).export_refusal;
+    // A refusal is reported as any other is, so a Try again that came to nothing is not invisible.
+    void import("../api/exportEvents")
+      .then(({ reportExport }) =>
+        reportExport(
+          refusalReport(facts, {
+            elapsed_ms: Date.now() - started,
+            operation: "render",
+            error: String(result.error ?? ""),
+          }),
+        ),
+      )
+      .catch(() => undefined);
+    return facts?.status === "declined"
+      ? { ok: false, declined: true }
+      : { ok: false, error: String(result.error ?? "the export was refused") };
+  };
+}
+
 /** Queue one rendered deliverable: the whole timeline, or a clip on its own. In the app, ffmpeg
  *  runs under the app process rather than the page, so the export outlives a crash of the page;
  *  the job carries what another page needs to finish it (3h part 7). */
@@ -3641,15 +3756,45 @@ export async function queueRenderJob(
     quality: string;
     outputDirectory?: string;
     batch?: string;
+    /** The gentlest rung already tried, so a second try starts there or gentler (exportPlan.ts). */
+    minRung?: Rung;
+    /** Set by Try again: the rung that failed and the one asked for, for the export's story. */
+    retry?: { from: Rung; to: Rung };
   },
 ): Promise<ExportSubmission> {
   return submitExport(await prepareRenderSubmission(ctx, job));
 }
 
-export async function prepareRenderSubmission(
+/** The command of an export at the rung the plan chooses for this PC right now (exportPlan.ts): the gentlest
+ *  rung only when this PC's own history says the normal one will not fit its free memory. Decided here, once,
+ *  because the command is captured and fingerprinted from this point on. */
+async function planned(
   ctx: ClientToolContext,
   job: Parameters<typeof queueRenderJob>[1],
+): Promise<{ job: Parameters<typeof queueRenderJob>[1]; decision: RungDecision }> {
+  const built = job.plan;
+  const decision = await decideRung({
+    workload: built.workload,
+    output: built.output,
+    quality: job.quality || "medium",
+    engine: built.selection?.backend ?? "file-sequence-v1",
+    encoder: built.encoder ?? "x264-crf",
+    history: useExportJob.getState().calibrations,
+    destPath: job.destPath,
+    signal: ctx.signal,
+    minRung: Math.max(rungOf(job.minRung), rungOf(built.rung)),
+    maxRung: gentlestRung(built),
+    enabled: exportFlag("plan_rung"),
+  });
+  const rebuilt = decision.rung > rungOf(built.rung) ? rebuildAtRung(built, decision.rung) : null;
+  return { job: rebuilt ? { ...job, plan: rebuilt } : job, decision };
+}
+
+export async function prepareRenderSubmission(
+  ctx: ClientToolContext,
+  original: Parameters<typeof queueRenderJob>[1],
 ): Promise<Parameters<typeof submitExport>[0]> {
+  const { job, decision } = await planned(ctx, original);
   const request = structuredClone(job);
   const renderPlan = request.plan;
   if (
@@ -3706,6 +3851,18 @@ export async function prepareRenderSubmission(
       engine: renderPlan.selection.backend,
       encoder: renderPlan.encoder ?? (fast ? ("amf-cqp18" as const) : ("x264-crf" as const)),
       revision: EXPORT_SPEED_REVISION,
+      // Left out at the normal rung, so every measurement made before rungs existed reads the same.
+      ...(rungOf(renderPlan.rung) > 0 ? { rung: rungOf(renderPlan.rung) } : {}),
+    },
+    // What the plan decided and on what: the rung, the peak it predicted and the free memory it saw.
+    plan: {
+      rung: rungOf(renderPlan.rung),
+      max_rung: decision.maxRung,
+      basis: decision.plan.basis,
+      predicted_bytes: decision.plan.predictedBytes,
+      free_bytes: decision.freeBytes,
+      fits: decision.plan.fits,
+      needed_free_bytes: decision.plan.neededFreeBytes,
     },
   };
   const plan: ExportJobPlan = {
@@ -3735,6 +3892,7 @@ export async function prepareRenderSubmission(
     // Present only when the AGENT called this tool; the Export menu runs it with no origin.
     origin: ctx.origin,
     via: exportVia(ctx),
+    ...(request.retry ? { retry: request.retry } : {}),
     submissionSignal: ctx.signal,
     workload: renderPlan.workload,
     ...(request.outputDirectory ? { outputDirectory: request.outputDirectory } : {}),
@@ -3754,6 +3912,9 @@ export async function prepareRenderSubmission(
             meta: {
               kind: "export",
               ...(renderPlan.transport ? { renderTransport: renderPlan.transport } : {}),
+              // Whether the app process stops this job when the PC itself runs short of memory: the server's
+              // switch (api/exportFlags.ts), read as the job is handed over. The process treats silence as on.
+              pcFloor: exportFlag("pc_floor"),
               projectDir: ctx.store.projectDir,
               destPath: request.destPath,
               stagePath: request.stagePath,

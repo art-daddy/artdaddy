@@ -76,13 +76,20 @@ export function hhmmssToMs(t: string | undefined): number {
   return (Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3])) * 1000;
 }
 
+/** What the app process prints on the job's output while it checks the job's sources (`artdaddy_verify=N`, see
+ *  src-tauri/src/jobs.rs `VERIFY_BEAT`): a line of its own, which arrives between two reads of ffmpeg's stream and
+ *  so can land in the middle of one of ffmpeg's lines. It carries nothing a progress reader wants, and glued into a
+ *  line it would turn `out_time_us` into noise: it is taken out of a chunk before the chunk is joined to anything. */
+const PROCESS_BEAT = /artdaddy_verify=\d+\r?\n/g;
+const withoutBeats = (chunk: string): string => chunk.replace(PROCESS_BEAT, "");
+
 /** A stateful feeder over the pure parser, for a stream of chunks. */
 export function createProgressReader(
   onRecord: (p: RenderProgress) => void,
 ): (chunk: string) => void {
   let buffer = "";
   return (chunk: string) => {
-    buffer += chunk;
+    buffer += withoutBeats(chunk);
     const { records, rest } = parseProgressBlocks(buffer);
     buffer = rest;
     // A pathological producer (no newlines at all) must not grow this without bound.
@@ -111,7 +118,7 @@ export function createSequenceProgressReader(
     );
   let reader = readerFor(step);
   return (chunk) => {
-    buffer += chunk;
+    buffer += withoutBeats(chunk);
     const lines = buffer.split("\n");
     buffer = lines.pop() ?? "";
     if (buffer.length > 64_000) buffer = buffer.slice(-8_000);

@@ -44,10 +44,14 @@ import { askQuestion, hostMounted, type QuestionOutcome } from "../store/exportQ
 import {
   assessExport,
   estimateExport,
+  peakSamples,
   type ExportAssessment,
   type ExportCalibration,
 } from "./exportOptions";
+import { RUNG_NAMES, planRung, retryRung, rungOf, type Plan, type Rung } from "./exportPlan";
+import { exportFlag, refreshExportFlags } from "../api/exportFlags";
 import {
+  bandOf,
   driveOf,
   planQuestions,
   questionAsText,
@@ -269,6 +273,18 @@ export interface ExportRecord {
   /** A cancel has been asked and the export has not stopped yet (it may still be waiting its turn to
    *  notice). Said at once, so nobody is left looking at a row that ignored the button. */
   cancelling?: boolean;
+  /** The setting the export runs at when it is below the normal one (exportPlan.ts), so the card can say so. */
+  rung?: 1 | 2;
+  /** The gentlest rung this export's command really has, when the plan said (render.ts `gentlestRung`): what Try
+   *  again may ask for. Absent: what the engine has. */
+  maxRung?: Rung;
+  /** A way to start this export again is offered (see {@link offerExportRetry}): the card shows Try again on it
+   *  once it has failed. */
+  canRetry?: true;
+  /** Try again was pressed and the new export is being started. */
+  retrying?: true;
+  /** What the card says when starting again did not work (the new export was refused). */
+  note?: string;
   startedAt: number;
   /** When the export's turn came (it began running), so "took" does not count the wait in line. */
   ranAt?: number;
@@ -286,6 +302,8 @@ const listeners = new Set<() => void>();
 let snapshot: readonly ExportRecord[] = [];
 
 function changed(): void {
+  // A way to start an export again goes with its row, however the row went.
+  for (const id of retries.keys()) if (!records.some((r) => r.job_id === id)) retries.delete(id);
   snapshot = records.map((r) => ({ ...r }));
   // The indexer starts nothing while an export is queued or running (workGate.ts).
   setExportsBusy(records.some((r) => r.state === "running" || r.state === "queued"));
@@ -340,6 +358,61 @@ export function dismissExport(jobId: string): boolean {
   records.splice(i, 1);
   changed();
   return true;
+}
+
+/** How to start an export again, given by whoever started it: told the gentlest rung to start at, it queues a
+ *  new export of the same project with the same settings. */
+export type ExportRetry = (
+  minRung: Rung,
+  failedRung: Rung,
+  options: { store?: ProjectStoreAccess },
+) => Promise<{ ok: boolean; error?: string; declined?: boolean }>;
+const retries = new Map<string, ExportRetry>();
+
+/** Offer a way to start this export again if it fails (the card's Try again). Only an export started in this
+ *  session has one: a page that adopts an export has none of its settings to start again from. */
+export function offerExportRetry(jobId: string, retry: ExportRetry): void {
+  if (!records.some((r) => r.job_id === jobId)) return;
+  retries.set(jobId, retry);
+  patch(jobId, { canRetry: true });
+}
+
+/** The gentlest rung Try again may ask for on this export: the one its command really has, and none at all while
+ *  the switch for rungs is off (nothing gentler is then offered, and nothing is promised). */
+export function gentlestRungOf(record: Pick<ExportRecord, "maxRung">): Rung {
+  return exportFlag("plan_rung") ? (record.maxRung ?? 2) : 0;
+}
+
+/** Start a failed export again, one click: a new export (new job, same settings), one rung gentler after a
+ *  failure for lack of memory or time, decided afresh by the plan after any other. The failed row goes once the
+ *  new export is queued; when it is refused the row stays and says why, and the button may be pressed again.
+ *  `store` is the project as it is open now: it replaces the one the export was asked on when that session has
+ *  since ended (the project was closed and opened again). Nothing here retries by itself: the person asked. */
+export async function retryExport(jobId: string, store?: ProjectStoreAccess): Promise<void> {
+  const record = records.find((r) => r.job_id === jobId);
+  const retry = retries.get(jobId);
+  if (!record || !retry || record.state !== "failed" || record.retrying) return;
+  patch(jobId, { retrying: true, note: undefined });
+  const failedRung = rungOf(record.rung);
+  let result: Awaited<ReturnType<ExportRetry>>;
+  try {
+    result = await retry(
+      retryRung(failedRung, failureOf(record.error).code, gentlestRungOf(record)),
+      failedRung,
+      { store },
+    );
+  } catch (error) {
+    result = { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+  if (result.ok) {
+    dismissExport(jobId);
+    return;
+  }
+  // A question the person turned down is their own choice, not something that went wrong.
+  patch(jobId, {
+    retrying: undefined,
+    note: result.declined ? undefined : `Could not start again: ${result.error ?? "unknown error"}`,
+  });
 }
 
 /** Drop every settled row. */
@@ -398,6 +471,8 @@ export function listExportOutcomes(): Array<Record<string, unknown>> {
       ...(isOpen(r) ? { elapsed_s: Math.max(0, Math.round((now - r.startedAt) / 1000)) } : {}),
       // A cancel was asked and the export has not stopped yet.
       ...(r.cancelling && isOpen(r) ? { cancelling: true } : {}),
+      // The setting it runs at, when it is below the normal one: why it may be slower.
+      ...(r.rung ? { setting: RUNG_NAMES[r.rung] } : {}),
       // Where the run is, for an export that is running: the stage, how far a render is and how long it
       // thinks is left, and for how long it has made no progress. The same facts the chat card shows.
       ...(running ? { stage: running.stage } : {}),
@@ -434,12 +509,12 @@ function markCancelling(jobId: string): void {
  *  was accepted, and once, however many times the button is pressed. */
 function captureCancel(jobId: string, by: ExportCanceller): (() => void) | null {
   const story = stories.get(jobId);
-  if (!story || story.cancelNoted) return null;
+  if (!story || story.cancelNoted || story.stalledOut) return null;
   const queued = records.find((r) => r.job_id === jobId)?.state === "queued";
   const stage = STAGE_CODES[queued ? "queued" : story.stage];
   const percent = story.watch?.percentReached() ?? 0;
   return () => {
-    if (story.cancelNoted) return;
+    if (story.cancelNoted || story.stalledOut) return;
     story.cancelNoted = true;
     story.trace.record("cancelled", by, stage, percent);
   };
@@ -477,6 +552,37 @@ export function cancelExport(jobId: string, by: ExportCanceller = "app"): boolea
     c.abort();
   }
   return true;
+}
+
+/** Stop an export whose render has stood still, through the delivery owner like every cancel: it ends the
+ *  process and discards the staged file. A stop it refuses (the file is already being saved) leaves the export
+ *  alone. One that cannot be asked at all still ends the export: nobody is helped by waiting on it. The stop
+ *  that is accepted first tells the story: a person's cancel accepted earlier keeps it a cancel. */
+function stopStalledExport(
+  jobId: string,
+  story: ExportStory,
+  stall: NonNullable<ExportStory["stalledOut"]>,
+): void {
+  const c = controllers.get(jobId);
+  if (!c) return;
+  const stop = () => {
+    if (!story.cancelNoted) story.stalledOut = stall;
+    c.abort();
+  };
+  const port = deliveryPorts.get(jobId);
+  if (!port) return stop();
+  void port.cancel(jobId).then((cancelled) => {
+    if (cancelled) stop();
+  }, stop);
+}
+
+/** What the app says about an export it stopped for standing still (the words the failure is read from, see
+ *  exportReason.ts: a time limit). */
+function stalledMessage(kind: "frozen" | "slow_start", seconds: number): string {
+  const minutes = Math.max(1, Math.round(seconds / 60));
+  return kind === "frozen"
+    ? `export stopped: it made no progress for ${minutes} min (stalled)`
+    : `export stopped: it had not started making progress after ${minutes} min (stalled)`;
 }
 
 /** Why a cancel found nothing to stop, by how the export had already ended. */
@@ -651,8 +757,20 @@ export interface ExportSpec {
     owner?: string;
     calibration?: Pick<
       ExportCalibration,
-      "workload" | "output" | "quality" | "engine" | "encoder" | "revision"
+      "workload" | "output" | "quality" | "engine" | "encoder" | "revision" | "rung"
     >;
+    /** What the plan decided when the command was captured (exportPlan.ts): the rung the export runs at and the
+     *  numbers it was decided on. Absent for an export nothing planned (a copy, an adopted one). */
+    plan?: {
+      rung: 0 | 1 | 2;
+      /** The gentlest rung this export's command really has, for Try again (render.ts `gentlestRung`). */
+      max_rung?: 0 | 1 | 2;
+      basis?: Plan["basis"];
+      predicted_bytes?: number | null;
+      free_bytes?: number | null;
+      fits?: boolean;
+      needed_free_bytes?: number | null;
+    };
   };
   /** The app process's job supervisor, when the encode runs as one of its jobs (3h part 7). It
    *  keeps the order then, so this queue does not hold a job back, and a job's state comes from it. */
@@ -670,6 +788,9 @@ export interface ExportSpec {
   /** Where the request came from, for the report's story: the Export menu, the in-app chat or an
    *  outside assistant over MCP. */
   via?: "menu" | "chat" | "mcp";
+  /** Set when this export is a Try again of one that failed: the rung that one ran at and the rung this one was
+   *  asked to start at, so the story says so (the `retry` event). */
+  retry?: { from: number; to: number };
   /** What happened to this export so far (see exportTrace.ts). Set by the queue when the request
    *  arrives; a caller leaves it out. */
   story?: ExportStory;
@@ -861,6 +982,7 @@ async function reportSettledExport(
 /** Tests only. */
 export function __resetExportQueue(): void {
   stories.clear();
+  retries.clear();
   reserved.clear();
   inflight.clear();
   beacons.clear();
@@ -900,6 +1022,7 @@ async function measurePreflight(
   refuse: (status: "cancelled" | "declined" | "blocked") => Promise<never>,
 ): Promise<Preflight> {
   const checks: ExportAssessment[] = [];
+  const plans: Array<Plan | undefined> = [];
   const snapshots: ExportResources[] = [];
   for (const spec of specs) {
     if (spec.submissionSignal?.aborted || !spec.store.sessionLive()) return refuse("cancelled");
@@ -928,7 +1051,29 @@ async function measurePreflight(
           descriptor.encoder,
         )
       : { memoryBytes: null, temporaryBytes: null, finalBytes: null, seconds: null };
-    checks.push(assessExport(workload, resources, estimates, resources.budgets));
+    // The memory verdict is about the rung the command was CAPTURED at (it cannot change now): does that rung
+    // fit what the PC has free right now? An export nothing planned keeps today's rule.
+    const memoryPlan =
+      descriptor && exportFlag("plan_rung")
+        ? (() => {
+            const captured = rungOf(spec.meta?.plan?.rung);
+            return planRung({
+              samples: peakSamples(
+                workload,
+                descriptor.output,
+                descriptor.quality,
+                descriptor.engine,
+                useExportJob.getState().calibrations,
+                descriptor.encoder,
+              ),
+              freeBytes: resources.available_memory_bytes,
+              minRung: captured,
+              maxRung: captured,
+            });
+          })()
+        : undefined;
+    plans.push(memoryPlan);
+    checks.push(assessExport(workload, resources, estimates, resources.budgets, memoryPlan));
   }
   if (specs.some((spec) => spec.submissionSignal?.aborted || !spec.store.sessionLive()))
     return refuse("cancelled");
@@ -977,6 +1122,18 @@ async function measurePreflight(
   let memoryNeeded: number | null = null;
   let memoryUsable: number | null = null;
   checks.forEach((check, index) => {
+    const plan = plans[index];
+    if (plan) {
+      // Under a plan the need is the free memory the captured rung asks for (its peak over the share of
+      // free memory an export may use), so "needed" is above "available" exactly when the verdict is short.
+      const free = snapshots[index].available_memory_bytes;
+      if (plan.fits || plan.neededFreeBytes === null || free === null) return;
+      if (memoryNeeded === null || plan.neededFreeBytes - free > memoryNeeded - memoryUsable!) {
+        memoryNeeded = plan.neededFreeBytes;
+        memoryUsable = free;
+      }
+      return;
+    }
     const needed = check.estimates.memoryBytes;
     const free = snapshots[index].available_memory_bytes;
     const limit = snapshots[index].budgets.memoryBytes;
@@ -1111,6 +1268,17 @@ async function confirmExportRequest(specs: readonly ExportSpec[]): Promise<boole
   };
   const stopped = () =>
     specs.some((spec) => spec.submissionSignal?.aborted || !spec.store.sessionLive());
+  // The plan's choice is part of every export's story, once, before anything is asked.
+  for (const spec of specs) {
+    const plan = spec.meta?.plan;
+    if (plan && spec.story)
+      spec.story.trace.record(
+        "plan_chosen",
+        RUNG_NAMES[rungOf(plan.rung)],
+        bandOf(plan.predicted_bytes ?? null),
+        bandOf(plan.free_bytes ?? null),
+      );
+  }
   // What the person already waived with *Start anyway*: not asked again in this request.
   const waived = new Set<ExportQuestionKind>();
   for (let round = 0; round < MAX_QUESTION_ROUNDS; round++) {
@@ -1151,6 +1319,9 @@ async function confirmExportRequest(specs: readonly ExportSpec[]): Promise<boole
 export async function submitExports(request: readonly ExportSpec[]): Promise<ExportSubmission[]> {
   if (!request.length || request.length > 50)
     throw new Error("one export request must contain between 1 and 50 files");
+  // Which of the exporter's safety behaviours the server has switched off: asked beside the export, never
+  // waited for. What it says applies from the next decision (a stall stop reads it at every tick).
+  void refreshExportFlags();
   // Decided now, before the first await: the confirmation, the native admission and the render all
   // take time, and the signed-in account can change in any of them.
   const owner = exportOwnerNow();
@@ -1162,9 +1333,11 @@ export async function submitExports(request: readonly ExportSpec[]): Promise<Exp
     ...(spec.workload ? { workload: structuredClone(spec.workload) } : {}),
     story: spec.story ?? new ExportStory(),
   }));
-  // The story starts with who asked.
-  for (const spec of specs)
+  // The story starts with who asked, and whether this is a second try of one that failed.
+  for (const spec of specs) {
     spec.story.trace.record("requested", spec.via ?? (spec.origin ? "chat" : "other"));
+    if (spec.retry) spec.story.trace.record("retry", "try_again", spec.retry.from, spec.retry.to);
+  }
   const destinations = new Set<string>();
   const projectDir = specs[0].store.projectDir;
   for (const spec of specs) {
@@ -1319,6 +1492,10 @@ async function admitExport(spec: ExportSpec, storageReady: boolean): Promise<Exp
     destPath: spec.destPath,
     projectDir: spec.store.projectDir,
     state: queuePosition === 0 ? "running" : "queued",
+    ...(rungOf(spec.meta?.plan?.rung) > 0 ? { rung: rungOf(spec.meta?.plan?.rung) as 1 | 2 } : {}),
+    ...(spec.meta?.plan?.max_rung !== undefined
+      ? { maxRung: rungOf(spec.meta.plan.max_rung) }
+      : {}),
     startedAt: Date.now(),
   });
   // Terminal rows are trimmed on ADMISSION rather than on settle, so a long session cannot grow
@@ -1393,11 +1570,21 @@ async function encode(spec: ExportSpec, ledger: Ledger, jobId: string, key: stri
     // as the reporters publish it. Ended when the export settles.
     useExportJob.getState().beginLive(jobId);
     story.onEnter = (stage) => useExportJob.getState().setLiveStage(jobId, stage);
+    // Only a run the supervisor follows has progress to watch; one that runs in the page alone is never
+    // stopped for silence, because its silence is the page's not reporting, not the render standing still.
+    const stallPolicy = spec.supervisor
+      ? {
+          enforce: () => exportFlag("stall_stop"),
+          onStall: (kind: "frozen" | "slow_start", seconds: number) =>
+            stopStalledExport(jobId, story, { kind, seconds }),
+        }
+      : undefined;
     story.watch = new RunWatch(
       story.trace,
       Math.max(0, (spec.meta?.duration_s ?? 0) * 1000),
       Date.now,
       () => story.enter("rendering"),
+      stallPolicy,
     );
     watchTimer = setInterval(() => story.watch?.tick(), WATCH_TICK_MS);
   };
@@ -1459,9 +1646,18 @@ async function encode(spec: ExportSpec, ledger: Ledger, jobId: string, key: stri
     await port.verify(jobId);
     if (signal.aborted) throw new Error("export cancelled");
   } catch (e) {
-    // A killed ffmpeg reports its own confusing error; the reason the user needs is the cancel.
+    // A killed ffmpeg reports its own confusing error; the reason the user needs is the cancel. Unless the
+    // app stopped it for standing still before anyone cancelled: that is a failure, and says so.
     run.cancelled = signal.aborted;
-    run.error = run.cancelled ? "export cancelled" : e instanceof Error ? e.message : String(e);
+    const stalledOut = run.cancelled ? story?.stalledOut : undefined;
+    if (stalledOut) run.cancelled = false;
+    run.error = run.cancelled
+      ? "export cancelled"
+      : stalledOut
+        ? stalledMessage(stalledOut.kind, stalledOut.seconds)
+        : e instanceof Error
+          ? e.message
+          : String(e);
     if (!run.cancelled && e instanceof ExportRunError) run.stderrTail = e.stderrTail;
   } finally {
     unfollow?.();

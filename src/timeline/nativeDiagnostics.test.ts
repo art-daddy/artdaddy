@@ -107,6 +107,21 @@ describe("limitThatFired", () => {
     expect(limitThatFired("Cannot allocate memory", none)).toBe("os");
   });
 
+  it("reads every way ffmpeg says a memory request was refused, the field's own line first", () => {
+    for (const refused of [
+      "x264 [error]: malloc of size 12030144 failed",
+      "[libx264 @ 0000020a] Failed to allocate 12030144 bytes",
+      "Could not allocate memory for the frame buffer",
+      "not enough memory",
+    ]) {
+      const below = `${refused}\n${budget(4 * GIB, 1 * GIB)}`;
+      expect(limitThatFired(below, parseNativeDiagnostics(below)), refused).toBe("os");
+      const at = `${refused}\n${budget(4 * GIB, 4 * GIB - 1000)}`;
+      expect(limitThatFired(at, parseNativeDiagnostics(at)), refused).toBe("commit");
+      expect(limitThatFired(refused, none), refused).toBe("os");
+    }
+  });
+
   it("names the temporary-space allowance and the clock", () => {
     expect(limitThatFired("export workspace allocation budget exceeded before write", none)).toBe(
       "scratch",
@@ -131,6 +146,15 @@ describe("limitThatFired", () => {
     expect(limitThatFired(error, parseNativeDiagnostics(error))).toBeUndefined();
     expect(limitThatFired("", none)).toBeUndefined();
     expect(limitThatFired("no such file or directory", none)).toBeUndefined();
+  });
+
+  it("names the PC's own floor when the app stopped an export to keep the PC usable", () => {
+    const error =
+      "native render failed: render memory floor crossed: the PC has 410 MiB left and keeps 768 MiB for itself\n" +
+      resident(1_300_000_000, 3.5 * GIB);
+    expect(limitThatFired(error, parseNativeDiagnostics(error))).toBe("pc_floor");
+    // Explicit words win over a consequence printed beside them.
+    expect(limitThatFired(`${error}\nCannot allocate memory`, none)).toBe("pc_floor");
   });
 
   it("prefers the watcher's verdict when several words appear", () => {

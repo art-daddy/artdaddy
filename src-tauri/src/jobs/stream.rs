@@ -194,12 +194,44 @@ pub(super) struct Control {
   deadline: Instant,
   settled: Condvar,
   resident_limit: u64,
+  /// The memory the PC keeps for itself, looked at beside the export's own limits. Absent: not watched.
+  floor: Option<Mutex<PcFloor>>,
+}
+
+/// One export's watch over the PC's own memory.
+struct PcFloor {
+  watch: super::budget::FloorWatch,
+  sample: Box<dyn Fn() -> Option<u64> + Send>,
+  every: Duration,
+  next: Instant,
+}
+
+impl PcFloor {
+  /// One look when one is due: the words to stop the export with, once the PC has stayed under its floor.
+  fn look(&mut self) -> Option<String> {
+    let now = Instant::now();
+    if now < self.next { return None; }
+    self.next = now + self.every;
+    match (self.sample)() {
+      Some(available) => self.watch.look(available),
+      None => { self.watch.unknown(); None }
+    }
+  }
+
+  #[cfg(test)]
+  fn floor(&self) -> u64 { self.watch.floor() }
 }
 
 fn admitted_deadline(deadline_ms: u64) -> Result<Instant, String> {
   let remaining = deadline_ms.checked_sub(super::now_ms()).filter(|remaining| *remaining > 0)
     .ok_or("render execution deadline has already expired")?;
   Instant::now().checked_add(Duration::from_millis(remaining)).ok_or_else(|| "render execution deadline overflow".into())
+}
+
+/// Whether the page asked for the PC floor (`pcFloor`, a remote switch the page reads): silence means on, as the
+/// page's own default is, and only a real `false` turns it off.
+fn pc_floor_enabled(spec: &JobSpec) -> bool {
+  spec.meta.get("pcFloor").and_then(|value| value.as_bool()).unwrap_or(true)
 }
 
 impl Control {
@@ -213,7 +245,21 @@ impl Control {
     let deadline = admitted_deadline(deadline_ms)?;
     Ok(Self { state: Mutex::new(State { final_output, ..State::default() }), wake: pipe::Wake::new().map_err(|error| error.to_string())?,
       budget: super::budget::Budget::new(limits.commit)?, deadline, settled: Condvar::new(),
-      resident_limit: limits.resident })
+      resident_limit: limits.resident, floor: None })
+  }
+
+  /// Hold the export to a floor of `floor` bytes of available memory, looked at every `every` through `sample`.
+  fn with_floor_every(mut self, floor: u64, every: Duration, sample: impl Fn() -> Option<u64> + Send + 'static) -> Self {
+    self.floor = Some(Mutex::new(PcFloor { watch: super::budget::FloorWatch::new(floor), sample: Box::new(sample), every, next: Instant::now() + every }));
+    self
+  }
+
+  /// Hold the export to the PC's own floor, read from the PC as it is now (`budget::pc_floor`). Not when the page
+  /// switched it off, and not for a PC that does not say how much memory it has: nothing is invented.
+  fn with_pc_floor(self, enabled: bool) -> Self {
+    if !enabled { return self; }
+    let (Some(total), Some(free)) = super::resources::memory_figures() else { return self };
+    self.with_floor_every(super::budget::pc_floor(total, free), Duration::from_secs(1), || super::resources::memory_figures().1)
   }
 
   fn spawn(self: &Arc<Self>, executable: &Path, args: &[String], cwd: Option<&str>,
@@ -274,6 +320,8 @@ impl Control {
         let children = workers.iter().map(|worker| worker.child.clone()).collect::<Vec<_>>();
         drop(state);
         let resident = super::budget::resident_samples(&children);
+        // The PC's own memory, looked at on its own schedule and, like the samples above, with no lock held.
+        let squeezed = control.floor.as_ref().and_then(|floor| floor.lock().unwrap_or_else(|error| error.into_inner()).look());
         state = control.state.lock().unwrap_or_else(|error| error.into_inner());
         if state.settled { return; }
         match resident {
@@ -291,6 +339,8 @@ impl Control {
           }
           Err(error) => { state.resource_failure = Some(format!("render resident memory accounting failed: {error}")); }
         }
+        // The export's own limits speak first; the PC's floor stops an export that kept to them.
+        if let Some(message) = squeezed { if state.resource_failure.is_none() { state.resource_failure = Some(message); } }
         if state.resource_failure.is_some() {
           drop(state);
           control.stop();
@@ -480,7 +530,7 @@ pub(super) fn spawn_single(executable: &Path, spec: &JobSpec, observer: Observer
   let captured = capture.is_some();
   let started = (|| -> Result<_, String> {
     let final_output = FinalOutput::open(spec, &mut args, workspace.clone())?;
-    let control = Arc::new(Control::new(deadline, final_output)?);
+    let control = Arc::new(Control::new(deadline, final_output)?.with_pc_floor(pc_floor_enabled(spec)));
     let guard: StartGuard = Arc::new(|| Ok(()));
     let worker = control.spawn(executable, &args, spec.cwd.as_deref(), false, WorkerRole::Single, &guard)?;
     let output = worker.child().take_stdout().ok_or("native worker has no output stream")?;
@@ -589,7 +639,7 @@ pub(super) fn spawn(executable: &Path, spec: &JobSpec, observer: Observer,
     scratch_guard.admit_manifest(manifest_content.len() as u64)?;
     std::fs::write(&manifest, manifest_content).map_err(|error| error.to_string())?;
     let final_budget = FinalOutput::open(spec, &mut final_args, workspace.clone())?;
-    let control = Arc::new(Control::new(deadline, final_budget)?);
+    let control = Arc::new(Control::new(deadline, final_budget)?.with_pc_floor(pc_floor_enabled(spec)));
     let consumer = control.spawn(executable, &final_args, spec.cwd.as_deref(), false, WorkerRole::FinalEncoder, &guard)?;
     let output = consumer.child().take_stdout().ok_or("streaming consumer has no progress stream")?;
     let errors = consumer.child().take_stderr().ok_or("streaming consumer has no error stream")?;
@@ -1286,6 +1336,127 @@ mod tests {
       assert!(diagnostics.contains("execution deadline expired"), "{diagnostics}");
       assert!(registry.lock().unwrap().is_empty());
       assert_eq!(std::fs::read(previous).unwrap(), b"previous complete output");
+    }
+  }
+
+  // The PC's own floor, watched beside the export's limits. The sampler stands in for the PC's memory, so a test
+  // can squeeze it without freezing the machine it runs on; the worker is a real process held by a real watcher.
+  fn hold_a_worker_while_the_pc_reports(sample: impl Fn() -> Option<u64> + Send + 'static) -> (bool, Result<(), String>, bool) {
+    use std::io::{BufRead, Write};
+    let dir = tempfile::Builder::new().prefix("artdaddy-memory-qa-").tempdir().unwrap();
+    let control = Control::new(super::super::now_ms() + 30_000, None).unwrap()
+      .with_floor_every(1024 * 1024 * 1024, Duration::from_millis(10), sample);
+    let control = Arc::new(control);
+    let args = strings(&["--exact", "jobs::stream::tests::resident_allocator_child", "--ignored", "--nocapture"]);
+    let guard: StartGuard = Arc::new(|| Ok(()));
+    let worker = control.spawn(&std::env::current_exe().unwrap(), &args, dir.path().to_str(), true, WorkerRole::Single, &guard).unwrap();
+    let mut input = worker.child().take_stdin().unwrap();
+    let output = worker.child().take_stdout().unwrap();
+    let _errors = worker.child().take_stderr().unwrap();
+    control.watch();
+    let mut output = std::io::BufReader::new(output);
+    let mut line = String::new();
+    loop {
+      line.clear();
+      if output.read_line(&mut line).unwrap_or(0) == 0 || line.contains("resident-child-ready") { break; }
+    }
+    // Long enough for the looks to be taken, then the worker is let finish if it is still there to.
+    std::thread::sleep(Duration::from_millis(700));
+    let _ = input.write_all(&[1]);
+    let finished = worker.wait().is_ok();
+    let settled = control.settle();
+    (finished, settled, dir.path().join("completed.bin").exists())
+  }
+
+  #[test]
+  fn a_pc_squeezed_under_its_floor_stops_the_export_and_leaves_no_final_side_effect() {
+    let (finished, settled, completed) = hold_a_worker_while_the_pc_reports(|| Some(100 * 1024 * 1024));
+    assert!(!finished, "the worker was left running on a PC with 100 MiB left");
+    let error = settled.unwrap_err();
+    assert!(error.contains("memory floor crossed"), "{error}");
+    assert!(error.contains("100 MiB"), "the words say what the PC had: {error}");
+    assert!(!completed, "a stopped export must not complete its work");
+  }
+
+  #[test]
+  fn a_pc_that_keeps_its_floor_lets_the_export_finish() {
+    let (finished, settled, completed) = hold_a_worker_while_the_pc_reports(|| Some(8 * 1024 * 1024 * 1024));
+    assert!(finished && settled.is_ok() && completed, "{settled:?}");
+  }
+
+  #[test]
+  fn a_squeeze_shorter_than_the_looks_it_takes_is_not_a_stop() {
+    let looks = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let counted = looks.clone();
+    let (finished, settled, completed) = hold_a_worker_while_the_pc_reports(move || {
+      // Under the floor on the first two looks only: a browser tab that opened and closed.
+      Some(if counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < super::super::budget::PC_FLOOR_LOOKS - 1 { 100 * 1024 * 1024 } else { 8 * 1024 * 1024 * 1024 })
+    });
+    assert!(finished && settled.is_ok() && completed, "{settled:?}");
+    assert!(looks.load(std::sync::atomic::Ordering::SeqCst) > super::super::budget::PC_FLOOR_LOOKS, "the watch kept looking after the blip");
+  }
+
+  #[test]
+  fn a_pc_that_does_not_say_how_much_memory_it_has_is_never_stopped_for_it() {
+    let (finished, settled, completed) = hold_a_worker_while_the_pc_reports(|| None);
+    assert!(finished && settled.is_ok() && completed, "{settled:?}");
+  }
+
+  #[test]
+  fn the_pages_switch_turns_the_floor_off_and_its_silence_leaves_it_on() {
+    let root = tempfile::tempdir().unwrap();
+    let with = |meta: Option<serde_json::Value>| {
+      let mut spec = spec(root.path());
+      if let Some(value) = meta { spec.meta["pcFloor"] = value; }
+      pc_floor_enabled(&spec)
+    };
+    assert!(with(None));
+    assert!(with(Some(serde_json::json!(true))));
+    assert!(!with(Some(serde_json::json!(false))));
+    assert!(with(Some(serde_json::json!("no"))), "only a real false switches it off");
+    assert!(with(Some(serde_json::json!(0))), "only a real false switches it off");
+  }
+
+  #[test]
+  fn an_export_started_the_way_the_app_starts_one_is_held_to_the_floor_the_pc_gives_it() {
+    let control = Control::new(super::super::now_ms() + 10_000, None).unwrap().with_pc_floor(true);
+    let (total, free) = super::super::resources::memory_figures();
+    match (total, free) {
+      (Some(total), Some(_)) => {
+        let floor = control.floor.as_ref().expect("a PC that reports its memory gets a floor").lock().unwrap();
+        assert!(floor.floor() <= total / 2, "a floor is a share of the PC, never most of it");
+        assert!(floor.floor() <= (total / 100 * 6).max(3 * 1024 * 1024 * 1024 / 4), "and never more than the PC asked to keep");
+      }
+      _ => assert!(control.floor.is_none(), "nothing is invented for a PC that does not say"),
+    }
+    assert!(Control::new(super::super::now_ms() + 10_000, None).unwrap().with_pc_floor(false).floor.is_none());
+  }
+
+  fn registered_control(spec: &JobSpec, single: bool) -> Arc<Control> {
+    let registry: Registry = Arc::default();
+    let observer: Observer = Arc::new(|_| {});
+    let workspace = super::super::Workspace::new(20_000_000_000);
+    let guard: StartGuard = Arc::new(|| Ok(()));
+    let pid = if single { spawn_single(&ffmpeg(), spec, observer, registry.clone(), workspace) }
+      else { spawn(&ffmpeg(), spec, observer, guard, registry.clone(), workspace) }.unwrap();
+    let control = registry.lock().unwrap().get(&(spec.id.clone(), pid)).cloned().expect("a started export is registered");
+    control.stop();
+    control
+  }
+
+  #[test]
+  fn both_engines_hold_an_export_to_the_floor_unless_the_page_switched_it_off() {
+    let (total, free) = super::super::resources::memory_figures();
+    if total.is_none() || free.is_none() { return; }
+    for single in [true, false] {
+      for (meta, held) in [(None, true), (Some(serde_json::json!(true)), true), (Some(serde_json::json!(false)), false)] {
+        let root = tempfile::tempdir().unwrap();
+        let mut admitted = spec(root.path());
+        if single { admitted.steps.clear(); }
+        if let Some(value) = meta.clone() { admitted.meta["pcFloor"] = value; }
+        let control = registered_control(&admitted, single);
+        assert_eq!(control.floor.is_some(), held, "single={single}, meta={meta:?}");
+      }
     }
   }
 

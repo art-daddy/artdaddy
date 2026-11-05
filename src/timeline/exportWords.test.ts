@@ -6,8 +6,10 @@ import { STALL_LOG_SECONDS } from "./exportTrace";
 import {
   describeLiveStatus,
   describeResult,
+  describeRung,
   describeStage,
   describeTook,
+  describeTryAgain,
   describeWaiting,
   failureOf,
   ordinal,
@@ -185,6 +187,63 @@ describe("how long is left, as a number", () => {
       ),
       { numRuns: 400 },
     );
+  });
+});
+
+describe("the setting an export runs at, in words", () => {
+  it("says nothing about the normal setting, and why and what it costs about the others", () => {
+    expect(describeRung(0)).toBe("");
+    expect(describeRung(1)).toBe(
+      "Using a gentler setting to fit this PC's memory · it may take a little longer",
+    );
+    expect(describeRung(2)).toBe(
+      "Using the gentlest setting to fit this PC's memory · it will take longer",
+    );
+  });
+
+  it("never says anything half-made for a value it does not know", () => {
+    for (const odd of [undefined, null, -1, 7, Number.NaN, "x"])
+      expect(describeRung(odd as never)).toBe("");
+  });
+});
+
+describe("what Try again will do, in words", () => {
+  it("says a gentler setting is coming, and what it costs, after a failure for lack of memory or time", () => {
+    for (const reason of ["memory_limit", "time_limit"] as const) {
+      for (const rung of [undefined, 0, 1] as const) {
+        const line = describeTryAgain(reason, rung);
+        expect(line).toMatch(/gentler setting/);
+        expect(line).toMatch(/less memory/);
+        expect(line).toMatch(/longer/);
+      }
+    }
+  });
+
+  it("says plainly when the lightest setting this export has was already the one that failed, rather than promising a lighter run", () => {
+    for (const reason of ["memory_limit", "time_limit"] as const) {
+      // The gentlest rung, an export with only one gentler rung that failed at it, and one with none at all
+      // (the streamed engine, or the switch for rungs off).
+      for (const [failed, last] of [
+        [2, 2],
+        [1, 1],
+        [0, 0],
+      ] as const) {
+        const line = describeTryAgain(reason, failed, last);
+        expect(line).toMatch(/already running at its lightest setting/);
+        expect(line).not.toMatch(/less memory/);
+      }
+      // One rung short of the lightest, it is still a gentler one.
+      expect(describeTryAgain(reason, 0, 1)).toMatch(/gentler setting/);
+      expect(describeTryAgain(reason, 1, 2)).toMatch(/gentler setting/);
+    }
+  });
+
+  it("says nothing for a failure a gentler setting does not touch", () => {
+    for (const reason of EXPORT_REASON_CODES) {
+      if (reason === "memory_limit" || reason === "time_limit") continue;
+      for (const rung of [undefined, 0, 1, 2] as const)
+        expect(describeTryAgain(reason, rung)).toBe("");
+    }
   });
 });
 

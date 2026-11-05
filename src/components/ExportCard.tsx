@@ -26,11 +26,20 @@ import { liveFeedOf, useExportJob } from "../store/exportJob";
 import {
   cancelExport,
   dismissExport,
+  gentlestRungOf,
   listExportRecords,
+  retryExport,
   subscribeExports,
 } from "../timeline/exportQueue";
 import { answerButtons } from "../timeline/exportQuestions";
-import { describeLiveStatus, describeResult, describeWaiting } from "../timeline/exportWords";
+import {
+  describeLiveStatus,
+  describeResult,
+  describeRung,
+  describeTryAgain,
+  describeWaiting,
+  failureOf,
+} from "../timeline/exportWords";
 import ExportProgressBar from "./ExportProgressBar";
 import { cn } from "./ui";
 
@@ -157,6 +166,9 @@ export default function ExportCard(): JSX.Element | null {
             <div data-testid="export-card-status" className="mt-1 text-[11px] text-neutral-400">
               {r.cancelling ? "Cancelling…" : feed ? describeLiveStatus(feed, now) : "Working…"}
             </div>
+            {r.rung && (
+              <div className="mt-0.5 text-[11px] text-neutral-500">{describeRung(r.rung)}</div>
+            )}
           </div>
         );
       })}
@@ -188,6 +200,10 @@ export default function ExportCard(): JSX.Element | null {
           elapsedMs: (r.endedAt ?? now) - (r.ranAt ?? r.startedAt),
           error: r.error,
         });
+        const tryAgain =
+          r.state === "failed" && r.canRetry
+            ? describeTryAgain(failureOf(r.error).code, r.rung, gentlestRungOf(r))
+            : "";
         return (
           <div key={r.job_id} className="flex items-start justify-between gap-2">
             <div className="min-w-0">
@@ -203,6 +219,21 @@ export default function ExportCard(): JSX.Element | null {
                 <div className="truncate text-[11px] text-neutral-500">{r.filename}</div>
               )}
               {result.detail && <div className="text-[11px] text-neutral-400">{result.detail}</div>}
+              {tryAgain && <div className="text-[11px] text-neutral-400">{tryAgain}</div>}
+              {r.note && <div className="text-[11px] text-amber-300">{r.note}</div>}
+              {r.state === "failed" && r.canRetry && (
+                <button
+                  type="button"
+                  aria-label={`try again ${r.filename}`}
+                  disabled={r.retrying === true}
+                  onClick={() =>
+                    void retryExport(r.job_id, useEditor.getState().store ?? undefined)
+                  }
+                  className="mt-1.5 rounded-md bg-neutral-100 px-2.5 py-1 text-xs font-medium text-neutral-900 hover:bg-white disabled:cursor-default disabled:opacity-60"
+                >
+                  {r.retrying ? "Starting…" : "Try again"}
+                </button>
+              )}
             </div>
             <button
               type="button"

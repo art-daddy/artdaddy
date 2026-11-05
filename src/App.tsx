@@ -19,6 +19,7 @@ import { useCloseCoordinator } from "./store/closeCoordinator";
 import { useEditor } from "./store/editor";
 import { installUpdate } from "./update/updater";
 import { flushAgentEventsForExit } from "./api/agentEvents";
+import { refreshExportFlags } from "./api/exportFlags";
 import { useCompatibility } from "./update/compatibility";
 
 function ShellRoute() {
@@ -49,6 +50,11 @@ export default function App() {
             3_000,
           )
         : undefined;
+    // Which of the exporter's safety behaviours the server has switched off, heard by a PC that already has
+    // the app open (and again beside each export). Never blocks anything: a server that does not answer
+    // leaves the last good answer.
+    const exportFlags =
+      platform.name === "tauri" ? setTimeout(() => void refreshExportFlags(), 4_000) : undefined;
     const prevent = (e: DragEvent) => {
       if (e.dataTransfer?.types.includes("Files")) e.preventDefault();
     };
@@ -66,6 +72,7 @@ export default function App() {
     return () => {
       cancelled = true;
       clearTimeout(prefetch);
+      clearTimeout(exportFlags);
       stop?.();
       window.removeEventListener("dragover", prevent);
       window.removeEventListener("drop", prevent);

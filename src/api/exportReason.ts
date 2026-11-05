@@ -19,6 +19,13 @@ export const EXPORT_REASON_CODES = [
 ] as const;
 export type ExportReasonCode = (typeof EXPORT_REASON_CODES)[number];
 
+/** The ways ffmpeg and its encoders say that a request for memory was refused (lower case; read from the failure's
+ *  text, never from a process's own words about a limit it enforces). One list, because the report's reason and the
+ *  limit that fired are read from the same words (timeline/nativeDiagnostics.ts uses it too). x264's own line, from
+ *  an 8K export run inside a memory wall, is `malloc of size N failed`. */
+export const MEMORY_REFUSED =
+  /cannot allocate memory|out of memory|not enough memory|\bmalloc of size \d+ failed|failed to allocate|could not allocate|\benomem\b/;
+
 /** The reason a failure's text points at. Only the first 32 KiB is read, so a runaway log cannot make
  *  the rule slow; the order is the order of confidence (a full disk is named before a render failed). */
 export function reasonOfError(text: string): ExportReasonCode {
@@ -34,9 +41,9 @@ export function reasonOfError(text: string): ExportReasonCode {
     return "source_unavailable";
   if (/permission denied|access is denied|eacces|read.only|destination.*unavailable/.test(error))
     return "storage_unavailable";
-  if (/memory.*(?:budget|limit|exceeded)|cannot allocate memory|out of memory/.test(error))
+  if (/memory.*(?:budget|limit|exceeded|floor)/.test(error) || MEMORY_REFUSED.test(error))
     return "memory_limit";
-  if (/deadline|execution.*expired|timed out/.test(error)) return "time_limit";
+  if (/deadline|execution.*expired|timed out|\bstalled\b/.test(error)) return "time_limit";
   if (/artifact|verification|frame.*count|duration.*mismatch/.test(error))
     return "verification_failed";
   if (/interrupted|restart|crash/.test(error)) return "interrupted";

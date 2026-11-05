@@ -89,7 +89,15 @@ export const EXPORT_TRACE_VALUES = [
   "refused",
 ] as const;
 export const EXPORT_ENGINES = ["one_pass", "streamed"] as const;
-export const EXPORT_LIMITS = ["resident", "commit", "scratch", "clock", "os", "other"] as const;
+export const EXPORT_LIMITS = [
+  "resident",
+  "commit",
+  "scratch",
+  "clock",
+  "os",
+  "pc_floor",
+  "other",
+] as const;
 export const EXPORT_STARTERS = ["chat", "elsewhere"] as const;
 /** The run facts and the largest value the server keeps of each (memory in MiB or GiB, time in s). */
 export const EXPORT_FACT_LIMITS = {

@@ -22,6 +22,7 @@ import type { ExportRefusalFacts } from "../api/agentEvents";
 import type { ExportStory } from "./exportTrace";
 import { limitThatFired } from "./nativeDiagnostics";
 import type { ExportOptions } from "./exportOptions";
+import type { Rung } from "./exportPlan";
 import { canvasFps } from "./frames";
 import type { Timeline } from "./model";
 import { missingClip } from "./operations";
@@ -44,8 +45,13 @@ type Args = Record<string, unknown>;
 /** Files one call may deliver. The real request was 19; this bounds a runaway list. */
 export const MAX_EXPORT_ITEMS = 50;
 
-/** The `export` tool: separate files when the call names any, else the whole timeline. */
-export async function exportTool(args: Args, ctx: ClientToolContext | null): Promise<Result> {
+/** The `export` tool: separate files when the call names any, else the whole timeline. `retrying` is the chat
+ *  card's Try again (render.ts retryOf), never a tool argument. */
+export async function exportTool(
+  args: Args,
+  ctx: ClientToolContext | null,
+  retrying?: { from: Rung; minRung: Rung },
+): Promise<Result> {
   let result: Result;
   let status: "blocked" | "declined" | "cancelled" = "blocked";
   let workload: import("./renderPlan").RenderWorkload | undefined;
@@ -53,7 +59,7 @@ export async function exportTool(args: Args, ctx: ClientToolContext | null): Pro
   try {
     result = await (args.media_refs !== undefined || args.clip_ids !== undefined
       ? exportItemsTool(args, ctx)
-      : exportTimelineTool(args, ctx));
+      : exportTimelineTool(args, ctx, retrying));
   } catch (error) {
     if (error instanceof ExportRequestError) {
       status = error.status;
