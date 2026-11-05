@@ -108,3 +108,12 @@ export function parseCanaryOutput(text) {
     installed: installed === null ? null : json(installed),
   };
 }
+
+/**
+ * Whether the relaunched app knows that its predecessor ended in an update (its native health record's `previous_exit`).
+ * On Windows the installer ends the old app inside the updater, so the old app could not say so itself and the update
+ * was recorded as a crash at the next launch (UJ-001). Only `update_restart` counts: a missing answer, or a crash, does not.
+ */
+export function updateSeenAsARestart(status) {
+  return status !== null && typeof status === "object" && status.previous_exit === "update_restart";
+}

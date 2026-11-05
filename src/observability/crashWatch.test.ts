@@ -429,3 +429,140 @@ describe("native crash watch", () => {
     expect(captureMock).not.toHaveBeenCalled();
   });
 });
+
+// An exit nobody marked is reported with the one short word the operating system's own log gives for it (power loss, a
+// restart to update, this app's crash and its exception code, ...). Only that word: the log's entries carry user names and paths.
+describe("native crash watch, what ended an unexpected exit", () => {
+  const unexpected = (kind = "unclean_exit") => ({
+    id: "native-9",
+    kind,
+    at: 1_800_000_000_000,
+    eligible: true,
+    session: {
+      launch_id: "previous",
+      release: "test",
+      started_at: 1_799_999_950_000,
+      alive_at: 1_799_999_990_000,
+      context: { project_id: "p1", user_id: "qa_account", activity: "idle" },
+    },
+  });
+  /** The native side answers the status calls with one failure, and the cause lookup as the test says. */
+  function app(kind: string, cause: (args: unknown) => Promise<unknown>) {
+    native.shell = "tauri";
+    native.invoke.mockImplementation(async (command, args) => {
+      if (command === "runtime_health_begin")
+        return {
+          launch_id: "next",
+          renderer_epoch: 1,
+          previous_exit: null,
+          storage_ok: true,
+          failures: [unexpected(kind)],
+        };
+      if (command === "runtime_health_cause") return cause(args);
+      return true;
+    });
+    const stored: Array<Record<string, unknown>> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url, init) => {
+        if (String(url).endsWith("/me"))
+          return new Response(JSON.stringify({ user_id: "qa_account" }), { status: 200 });
+        stored.push(JSON.parse(init!.body as string));
+        return new Response(JSON.stringify({ ok: true, status: "ok" }), { status: 200 });
+      }),
+    );
+    return stored;
+  }
+
+  it("says what ended it, in the report and in the error the developers read, and nothing else about the log", async () => {
+    vi.useFakeTimers();
+    const stored = app("unclean_exit", async () => "power_loss");
+    const stop = installCrashWatch();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(native.invoke).toHaveBeenCalledWith("runtime_health_cause", {
+      token: { launch_id: "next", renderer_epoch: 1 },
+      id: "native-9",
+    });
+    expect(stored).toHaveLength(1);
+    expect(stored[0].reason).toBe("unclean_exit after 40s during idle (power_loss)");
+    expect(captureMock.mock.calls[0][1]).toMatchObject({ cause: "power_loss" });
+    // Asked before the report goes, and the report is acknowledged only after it was stored.
+    const order = native.invoke.mock.calls.map(([command]) => command);
+    expect(order.indexOf("runtime_health_cause")).toBeLessThan(order.indexOf("runtime_health_ack"));
+    stop();
+  });
+
+  it("asks about an unexpected exit only: a renderer that died has its own cause", async () => {
+    vi.useFakeTimers();
+    const stored = app("renderer_exited", async () => "power_loss");
+    const stop = installCrashWatch();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(native.invoke.mock.calls.map(([command]) => command)).not.toContain(
+      "runtime_health_cause",
+    );
+    expect(stored[0].reason).toBe("renderer_exited after 40s during idle");
+    stop();
+  });
+
+  it("still reports the exit, without a cause, when the log cannot be read or has nothing to say", async () => {
+    vi.useFakeTimers();
+    for (const answer of [
+      async () => {
+        throw new Error("the command is not there");
+      },
+      async () => null,
+      async () => undefined,
+    ]) {
+      native.invoke.mockReset();
+      captureMock.mockReset();
+      const stored = app("unclean_exit", answer);
+      const stop = installCrashWatch();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(stored).toHaveLength(1);
+      expect(stored[0].reason).toBe("unclean_exit after 40s during idle");
+      expect(captureMock.mock.calls[0][1]).not.toHaveProperty("cause");
+      stop();
+    }
+  });
+
+  it("does not wait on a log that never answers: the exit is reported after a few seconds without it", async () => {
+    vi.useFakeTimers();
+    const stored = app("unclean_exit", () => new Promise(() => undefined));
+    const stop = installCrashWatch();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(stored).toEqual([]);
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(stored).toHaveLength(1);
+    expect(stored[0].reason).toBe("unclean_exit after 40s during idle");
+    stop();
+  });
+
+  it("takes only a word of the right shape: nothing the log wrote (a name, a path, a sentence) gets into a report", async () => {
+    vi.useFakeTimers();
+    const good = ["power_loss", "app_crash:c0000005", "webview_crash:80000003", "unknown"];
+    const bad = [
+      "C:\\Users\\someone\\AppData",
+      "someone's PC restarted",
+      "app_crash:zzzz",
+      "power loss",
+      "POWER_LOSS",
+      "x".repeat(60),
+      "",
+      42,
+      { cause: "power_loss" },
+    ];
+    for (const word of [...good, ...bad]) {
+      native.invoke.mockReset();
+      captureMock.mockReset();
+      const stored = app("unclean_exit", async () => word);
+      const stop = installCrashWatch();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(stored).toHaveLength(1);
+      const wanted = good.includes(word as string)
+        ? `unclean_exit after 40s during idle (${String(word)})`
+        : "unclean_exit after 40s during idle";
+      expect(stored[0].reason, String(word)).toBe(wanted);
+      stop();
+    }
+  });
+});

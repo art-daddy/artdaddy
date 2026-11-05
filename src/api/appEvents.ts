@@ -11,7 +11,24 @@ import { platform } from "../platform";
 import { hostInfo, resolveHostInfo } from "../platform/host";
 import { useAuth } from "../store/auth";
 import { legalText } from "../observability/recentFailures";
+import {
+  MAX_STARTUP_MS,
+  startupTimings,
+  type StartupTimings,
+} from "../observability/startupTiming";
 import type { WhisperRunFacts } from "../tools/whisperFacts";
+
+/** The start-up readings as the launch marker carries them, each a whole number inside what the server accepts (a number
+ *  outside its range refuses the whole report, so the launch itself would be lost). */
+function startupFields(startup: StartupTimings): StartupTimings {
+  const whole = (value: number) =>
+    Number.isFinite(value) ? Math.max(0, Math.min(Math.round(value), MAX_STARTUP_MS)) : 0;
+  return {
+    boot_ms: whole(startup.boot_ms),
+    load_ms: whole(startup.load_ms),
+    auth_ms: whole(startup.auth_ms),
+  };
+}
 
 export type AppEvent =
   | "launch"
@@ -43,6 +60,8 @@ interface AppEventDetail {
   /** turn_error: the code the person was shown, and the id of the failed request. Codes and ids only. */
   errorCode?: string;
   requestId?: string;
+  /** launch: how long the app took to start (observability/startupTiming.ts). Numbers only. */
+  startup?: StartupTimings;
   eventId?: string;
   occurredAt?: number;
   ownerId?: string;
@@ -149,6 +168,7 @@ export async function reportAppEvent(
           ...(snapshot.via ? { via: snapshot.via.slice(0, 30) } : {}),
           ...(snapshot.errorCode ? { error_code: snapshot.errorCode } : {}),
           ...(snapshot.requestId ? { request_id: snapshot.requestId } : {}),
+          ...(snapshot.startup ? startupFields(snapshot.startup) : {}),
           ...(snapshot.eventId ? { event_id: snapshot.eventId } : {}),
           ...(snapshot.occurredAt === undefined ? {} : { occurred_at: snapshot.occurredAt }),
         }),
@@ -196,7 +216,10 @@ const openedProjects = new Set<string>();
 export function reportLaunchOnce(): void {
   if (launched) return;
   launched = true;
-  void reportAppEvent("launch");
+  // The readings are taken now, at the moment the session has settled; a reading that cannot be made never costs the launch.
+  void startupTimings()
+    .catch(() => null)
+    .then((startup) => reportAppEvent("launch", startup ? { startup } : {}));
 }
 
 export function reportProjectOpened(projectId: string): void {

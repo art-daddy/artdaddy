@@ -9,6 +9,34 @@ import { reportAppEvent } from "../api/appEvents";
 const KEY = "artdaddy.session";
 /** Ignore short incomplete web markers; native observations do not use this heuristic. */
 const MIN_PLAUSIBLE_MS = 1_500;
+/** How long the report of an unexpected exit waits for the operating system's log to say what ended it. */
+const CAUSE_WAIT_MS = 6_000;
+/** The only shape a cause may have: one short word, and for a crash the program's exception code. Anything else the
+ *  log might have said (a name, a path, a sentence) is not a cause and is not reported. */
+const CAUSE_WORD = /^[a-z_]{1,30}(:[0-9a-f]{1,8})?$/;
+
+/** What the operating system's log says ended a session that was never marked as ended: one short word, or null. Never
+ *  throws and never waits longer than {@link CAUSE_WAIT_MS}: the exit is reported either way. */
+async function exitCause(
+  invoke: typeof import("@tauri-apps/api/core").invoke,
+  token: NativeToken,
+  id: string,
+): Promise<string | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const answer = await Promise.race([
+      invoke<unknown>("runtime_health_cause", { token, id }),
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), CAUSE_WAIT_MS);
+      }),
+    ]);
+    return typeof answer === "string" && CAUSE_WORD.test(answer) ? answer : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 interface NativeToken {
   launch_id: string;
@@ -175,6 +203,10 @@ function installNativeCrashWatch(): () => void {
           failure.eligible = false;
         } else {
           if (!current.profile?.user_id) break;
+          // An exit nobody marked says nothing about itself: ask the operating system's log what ended it.
+          const cause =
+            failure.kind === "unclean_exit" ? await exitCause(invoke, token, failure.id) : null;
+          if (stopped) break;
           const context = {
             project_id: previous.project_id,
             previous_release: failure.session.release,
@@ -183,13 +215,14 @@ function installNativeCrashWatch(): () => void {
             heap_mb: previous.heap_mb,
             heap_limit_mb: previous.heap_limit_mb,
             native_failure: failure.kind,
+            ...(cause ? { cause } : {}),
           };
           const ownerId = previous.user_id || current.profile.user_id;
           const outcome = await reportAppEvent("app_error", {
             projectId: previous.project_id,
             ownerId,
             ok: false,
-            reason: `${failure.kind} after ${Math.round(context.ran_for_ms / 1000)}s during ${context.activity}`,
+            reason: `${failure.kind} after ${Math.round(context.ran_for_ms / 1000)}s during ${context.activity}${cause ? ` (${cause})` : ""}`,
             via: failure.kind,
             eventId: failure.id,
             occurredAt: failure.at / 1000,

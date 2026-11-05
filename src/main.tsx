@@ -6,8 +6,12 @@ import App from "./App";
 import { initSentry, Sentry } from "./observability/sentry";
 import { installCrashWatch } from "./observability/crashWatch";
 import { installGlobalErrorHandlers } from "./observability/globalErrors";
+import { beginStartupTiming } from "./observability/startupTiming";
 import { loadBundledFonts } from "./preview/fonts";
 import "./index.css";
+
+// The first thing the app's own code does: the launch marker says how long the start took from here (startupTiming.ts).
+beginStartupTiming();
 
 // The caption families are bundled, not installed: any canvas that draws text on
 // THIS thread (thumbnails, the non-worker rasterize path) needs them registered

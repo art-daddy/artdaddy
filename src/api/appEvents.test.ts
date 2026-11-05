@@ -18,6 +18,10 @@ vi.mock("../platform/host", async (io) => {
     hostInfo: () => ({ os: "windows", arch: "x86_64" }),
   };
 });
+vi.mock("../observability/startupTiming", async (io) => {
+  const actual = await io<typeof import("../observability/startupTiming")>();
+  return { ...actual, startupTimings: vi.fn(async () => null) };
+});
 
 import {
   __resetAppEvents,
@@ -28,6 +32,7 @@ import {
 } from "./appEvents";
 import { hasSession, setClerkTokenProvider } from "./auth";
 import { apiBase } from "./config";
+import { startupTimings } from "../observability/startupTiming";
 import { useAuth } from "../store/auth";
 import { resolveHostInfo } from "../platform/host";
 
@@ -810,6 +815,40 @@ describe("the launch marker", () => {
     reportLaunchOnce();
     reportLaunchOnce();
     await vi.waitFor(() => expect(calls.length).toBe(1));
+  });
+
+  // Starting up is one of the things people leave over: the launch says how long each part of the wait took.
+  it("carries how long the app took to start, when it is known", async () => {
+    vi.mocked(startupTimings).mockResolvedValueOnce({ boot_ms: 900, load_ms: 400, auth_ms: 1_500 });
+    const calls = captureFetch();
+    reportLaunchOnce();
+    await vi.waitFor(() => expect(calls.length).toBe(1));
+    expect(calls[0]).toMatchObject({ event: "launch", boot_ms: 900, load_ms: 400, auth_ms: 1_500 });
+  });
+
+  it("is the same launch as before when the readings are not known", async () => {
+    vi.mocked(startupTimings).mockResolvedValueOnce(null);
+    const calls = captureFetch();
+    reportLaunchOnce();
+    await vi.waitFor(() => expect(calls.length).toBe(1));
+    for (const name of ["boot_ms", "load_ms", "auth_ms"]) expect(calls[0]).not.toHaveProperty(name);
+  });
+
+  it("is not held up, or lost, by a reading that cannot be made", async () => {
+    vi.mocked(startupTimings).mockRejectedValueOnce(new Error("no such command"));
+    const calls = captureFetch();
+    reportLaunchOnce();
+    await vi.waitFor(() => expect(calls.length).toBe(1));
+    expect(calls[0]).toMatchObject({ event: "launch" });
+  });
+
+  it("keeps every number inside what the server accepts, however many a caller hands over", async () => {
+    // A number outside its range refuses the whole report, so the launch itself would be lost.
+    const calls = captureFetch();
+    await reportAppEvent("launch", {
+      startup: { boot_ms: -5, load_ms: 99_999_999_999, auth_ms: 12.7 },
+    });
+    expect(calls[0]).toMatchObject({ boot_ms: 0, load_ms: 3_600_000, auth_ms: 13 });
   });
 });
 

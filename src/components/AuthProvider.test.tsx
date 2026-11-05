@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DesktopSessionRefresh } from "../api/desktopAuth";
 import { SIGN_IN_PROBLEMS } from "../api/signInProblems";
 import { useSignInNotice } from "../store/signInNotice";
+import type { UpdateInfo } from "../update/updater";
 
 const mocks = vi.hoisted(() => {
   const removeTokenProvider = vi.fn();
@@ -42,6 +43,7 @@ const mocks = vi.hoisted(() => {
     startUrls: null as string[] | null,
     platformName: "tauri" as "tauri" | "web",
     hostOs: "windows" as "windows" | "macos" | "linux",
+    checkForUpdate: vi.fn(async () => null as UpdateInfo | null),
   };
 });
 
@@ -110,6 +112,11 @@ vi.mock("@tauri-apps/plugin-deep-link", () => ({
 
 vi.mock("../observability/sentry", () => ({ identifyUser: mocks.identifyUser }));
 vi.mock("../api/appEvents", () => ({ reportLaunchOnce: mocks.reportLaunchOnce }));
+// The update bar asks the native updater; a spy, so these tests make no network call of their own.
+vi.mock("../update/updater", () => ({
+  checkForUpdate: mocks.checkForUpdate,
+  downloadUpdate: vi.fn(),
+}));
 // The sign-in screen reports that it was shown. A spy here, so these tests make no network call of their own.
 vi.mock("../api/authEvents", () => ({
   reportAuthStep: mocks.reportAuthStep,
@@ -1049,5 +1056,78 @@ describe("AuthProvider, a link that arrives more than once", () => {
     expect(
       (mocks.handleDeepLinkCallback.mock.calls as unknown as [string][]).map(([url]) => url),
     ).toEqual(links);
+  });
+});
+
+// UJ-001 family: an old build whose sign-in is what is broken could never be offered the update that fixes it, because the
+// update bar was part of the signed-in app only.
+describe("AuthProvider, an update offered before anyone is signed in", () => {
+  const AVAILABLE: UpdateInfo = {
+    version: "9.9.9",
+    current_version: "0.0.1",
+    notes: "",
+    date: "",
+  };
+  const mount = () =>
+    render(
+      <AuthProvider>
+        <span>editor</span>
+      </AuthProvider>,
+    );
+
+  it("is offered on the sign-in screen, which is still there to be used", async () => {
+    mocks.authStatus = "locked";
+    mocks.checkForUpdate.mockResolvedValue(AVAILABLE);
+    mount();
+    expect(await screen.findByText(/version 9\.9\.9 is available/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /restart & update/i })).toBeInTheDocument();
+    expect(screen.getByText(/sign in to continue/i)).toBeInTheDocument();
+    expect(screen.queryByText("editor")).not.toBeInTheDocument();
+  });
+
+  it("is offered when this device is offline with no saved session, the sign-in screen's other form", async () => {
+    mocks.authStatus = "offline";
+    mocks.hasStoredSession = false;
+    mocks.checkForUpdate.mockResolvedValue(AVAILABLE);
+    mount();
+    expect(await screen.findByText(/version 9\.9\.9 is available/i)).toBeInTheDocument();
+  });
+
+  it("is offered when the saved session cannot be read, beside the Retry that may not work", async () => {
+    mocks.refreshDesktopSession.mockResolvedValue({
+      status: "unavailable",
+      hasStoredSession: null,
+    });
+    mocks.checkForUpdate.mockResolvedValue(AVAILABLE);
+    mount();
+    expect(await screen.findByText(/couldn't read your saved session/i)).toBeInTheDocument();
+    expect(await screen.findByText(/version 9\.9\.9 is available/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+  });
+
+  it("is not asked about while the saved session is still being restored, so a normal start never flashes it", () => {
+    mocks.authStatus = "checking";
+    mocks.checkForUpdate.mockResolvedValue(AVAILABLE);
+    mount();
+    expect(screen.getByText(/restoring your saved session/i)).toBeInTheDocument();
+    expect(mocks.checkForUpdate).not.toHaveBeenCalled();
+    expect(screen.queryByText(/is available/i)).not.toBeInTheDocument();
+  });
+
+  it("leaves the signed-in app's own update bar alone: nothing here, nothing doubled", () => {
+    mocks.authStatus = "unlocked";
+    mocks.checkForUpdate.mockResolvedValue(AVAILABLE);
+    mount();
+    expect(screen.getByText("editor")).toBeInTheDocument();
+    expect(mocks.checkForUpdate).not.toHaveBeenCalled();
+  });
+
+  it("says nothing when there is no update, or the check could not be made (which answers null, never throws)", async () => {
+    mocks.authStatus = "locked";
+    mocks.checkForUpdate.mockResolvedValue(null);
+    mount();
+    await waitFor(() => expect(mocks.checkForUpdate).toHaveBeenCalledOnce());
+    expect(screen.getByText(/sign in to continue/i)).toBeInTheDocument();
+    expect(screen.queryByText(/is available/i)).not.toBeInTheDocument();
   });
 });
