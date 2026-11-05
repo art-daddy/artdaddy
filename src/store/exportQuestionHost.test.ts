@@ -6,9 +6,11 @@ import {
   __resetExportQuestions,
   answerQuestion,
   askQuestion,
+  chooseQuestionFolder,
   hostMounted,
   mountQuestionCard,
   mountQuestionHost,
+  movesTheFile,
   setQuestionHidden,
   useExportQuestions,
   type QuestionOutcome,
@@ -29,6 +31,7 @@ const base = planQuestions({
   destinationShort: false,
   scratchShort: false,
   drive: null,
+  movable: false,
   seconds: null,
   secondsGuessed: false,
   executionLimitSeconds: null,
@@ -360,6 +363,193 @@ describe("whatever happens, every question ends exactly once and the screen show
         expect(useExportQuestions.getState().open).toBeNull();
       }),
       { numRuns: 200 },
+    );
+  });
+});
+
+// The folder a question may be answered with (Phase 3, S3b). The question itself carries no path (a flag
+// says it has a Save to box); the folder it is about and the one the person picked live here, so the dialog
+// and the card above the chat box show the same pick and either one's Continue carries it.
+describe("whether a pick moves the file", () => {
+  it("is true only for a pick of another folder: nothing picked, or the same folder spelled another way, moves nothing", () => {
+    expect(movesTheFile(null)).toBe(false);
+    expect(movesTheFile({ now: "D:/Videos", picked: null })).toBe(false);
+    expect(movesTheFile({ now: "D:/Videos", picked: "E:\\Else" })).toBe(true);
+    for (const same of ["D:/Videos", "d:\\videos\\", "D:\\Videos\\\\"])
+      expect(movesTheFile({ now: "D:/Videos", picked: same }), same).toBe(false);
+  });
+
+  it("agrees with what Continue carries: a folder comes with the answer exactly when the pick moves the file", async () => {
+    for (const picked of ["E:\\Else", "d:\\videos\\", "D:/Videos 2"]) {
+      const outcome = askQuestion(
+        { ...base, kind: "output_space", code: "b2", folderBox: "save_to" },
+        { projectDir: "p", folderNow: "D:/Videos" },
+      );
+      chooseQuestionFolder(openId(), picked);
+      const moves = movesTheFile(useExportQuestions.getState().open!.folder);
+      answerQuestion(openId(), "continue", "dialog");
+      expect(((await outcome) as { folder?: string }).folder !== undefined, picked).toBe(moves);
+    }
+  });
+});
+
+describe("the folder a question may be answered with", () => {
+  type Done = Extract<QuestionOutcome, { answer: ExportAnswer }>;
+  const boxed = (title = "B2"): ExportQuestion => ({
+    ...base,
+    title,
+    kind: "output_space",
+    code: "b2",
+    folderBox: "save_to",
+  });
+  const ask = (q: ExportQuestion = boxed(), folderNow: string | undefined = "D:/Videos") =>
+    askQuestion(q, { projectDir: "p", folderNow });
+  const folderOnScreen = () => useExportQuestions.getState().open?.folder;
+
+  it("shows where the file goes now, and no pick yet", () => {
+    void ask();
+    expect(folderOnScreen()).toEqual({ now: "D:/Videos", picked: null });
+  });
+
+  it("has no folder on a question without the box, whatever it is given, and refuses a pick for it", () => {
+    void askQuestion(question("A"), { projectDir: "p", folderNow: "D:/Videos" });
+    expect(folderOnScreen()).toBeNull();
+    expect(chooseQuestionFolder(openId(), "E:/Other")).toBe(false);
+  });
+
+  it("has no folder when the asker did not say where the file goes", () => {
+    void askQuestion(boxed(), { projectDir: "p" });
+    expect(folderOnScreen()).toBeNull();
+    expect(chooseQuestionFolder(openId(), "E:/Other")).toBe(false);
+  });
+
+  it("carries the pick to Continue, whichever surface presses it", async () => {
+    for (const by of ["dialog", "card"] as const) {
+      const outcome = ask();
+      expect(chooseQuestionFolder(openId(), "E:/Elsewhere")).toBe(true);
+      expect(folderOnScreen()).toEqual({ now: "D:/Videos", picked: "E:/Elsewhere" });
+      answerQuestion(openId(), "continue", by);
+      expect(await outcome).toMatchObject({ answer: "continue", by, folder: "E:/Elsewhere" });
+    }
+  });
+
+  it("does not let a pick travel with Cancel or Start anyway: only Continue moves the file", async () => {
+    for (const answer of ["cancel", "start_anyway"] as const) {
+      const outcome = ask();
+      chooseQuestionFolder(openId(), "E:/Elsewhere");
+      answerQuestion(openId(), answer, "dialog");
+      expect(await outcome).not.toHaveProperty("folder");
+    }
+  });
+
+  it("answers Continue with no folder when nothing was picked", async () => {
+    const outcome = ask();
+    answerQuestion(openId(), "continue", "dialog");
+    expect(await outcome).not.toHaveProperty("folder");
+  });
+
+  it("reads a pick of the folder it already has as no pick, however the path is written", async () => {
+    for (const same of ["D:/Videos", "D:\\Videos", "d:/videos", "D:/Videos/", "D:\\Videos\\\\"]) {
+      const outcome = ask();
+      expect(chooseQuestionFolder(openId(), same)).toBe(true);
+      answerQuestion(openId(), "continue", "dialog");
+      expect(await outcome).not.toHaveProperty("folder");
+    }
+  });
+
+  it("does not read a different folder as the same one", async () => {
+    for (const other of ["D:/Videos 2", "D:/Video", "E:/Videos", "D:/Videos/Cuts", "/Videos"]) {
+      const outcome = ask();
+      chooseQuestionFolder(openId(), other);
+      answerQuestion(openId(), "continue", "dialog");
+      expect(((await outcome) as Done).folder, other).toBe(other);
+    }
+  });
+
+  it("compares a drive path without regard to case, as Windows does, and any other path with it", async () => {
+    const outcome = ask(boxed(), "/Users/me/Videos");
+    chooseQuestionFolder(openId(), "/Users/me/videos");
+    answerQuestion(openId(), "continue", "dialog");
+    expect(((await outcome) as Done).folder).toBe("/Users/me/videos");
+  });
+
+  it("clears a pick when told to, refuses a blank one and leaves the old pick in that case", () => {
+    void ask();
+    const id = openId();
+    chooseQuestionFolder(id, "E:/Elsewhere");
+    expect(chooseQuestionFolder(id, "   ")).toBe(false);
+    expect(chooseQuestionFolder(id, "")).toBe(false);
+    expect(folderOnScreen()?.picked).toBe("E:/Elsewhere");
+    expect(chooseQuestionFolder(id, null)).toBe(true);
+    expect(folderOnScreen()?.picked).toBeNull();
+  });
+
+  it("keeps the pick while the question is put away and when it comes back", () => {
+    const card = mountQuestionCard("p");
+    void ask();
+    const id = openId();
+    chooseQuestionFolder(id, "E:/Elsewhere");
+    expect(setQuestionHidden(id, true)).toBe(true);
+    expect(folderOnScreen()?.picked).toBe("E:/Elsewhere");
+    expect(setQuestionHidden(id, false)).toBe(true);
+    expect(folderOnScreen()?.picked).toBe("E:/Elsewhere");
+    card();
+  });
+
+  it("does not carry a pick over to the next question", async () => {
+    const first = ask(boxed("first"));
+    const second = ask(boxed("second"), "F:/Other");
+    chooseQuestionFolder(openId(), "E:/Elsewhere");
+    answerQuestion(openId(), "continue", "dialog");
+    expect(await first).toMatchObject({ folder: "E:/Elsewhere" });
+    expect(openTitle()).toBe("second");
+    expect(folderOnScreen()).toEqual({ now: "F:/Other", picked: null });
+    answerQuestion(openId(), "continue", "dialog");
+    expect(await second).not.toHaveProperty("folder");
+  });
+
+  it("refuses a pick for a question that is waiting, or that has already ended", async () => {
+    const first = ask(boxed("first"));
+    void ask(boxed("second"));
+    const shown = openId();
+    expect(chooseQuestionFolder(shown + 1, "E:/Elsewhere")).toBe(false);
+    answerQuestion(shown, "cancel", "dialog");
+    await first;
+    expect(chooseQuestionFolder(shown, "E:/Late")).toBe(false);
+    expect(folderOnScreen()).toEqual({ now: "D:/Videos", picked: null });
+  });
+
+  it("lets the first answer win with ITS pick: a late Continue changes nothing", async () => {
+    const outcome = ask();
+    const id = openId();
+    chooseQuestionFolder(id, "E:/First");
+    expect(answerQuestion(id, "continue", "dialog")).toBe("accepted");
+    expect(chooseQuestionFolder(id, "E:/Second")).toBe(false);
+    expect(answerQuestion(id, "continue", "card")).toBe("ignored");
+    expect(await outcome).toMatchObject({ by: "dialog", folder: "E:/First" });
+  });
+
+  it("holds for any pick: a folder only comes with Continue, is never blank or padded, and is never the folder it already has", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.string({ maxLength: 40 }),
+        fc.constantFrom<ExportAnswer>("continue", "start_anyway", "cancel"),
+        async (raw, answer) => {
+          __resetExportQuestions();
+          const stop = mountQuestionHost();
+          const outcome = ask();
+          chooseQuestionFolder(openId(), raw);
+          answerQuestion(openId(), answer, "dialog");
+          const folder = ((await outcome) as Done).folder;
+          stop();
+          if (folder === undefined) return;
+          expect(answer).toBe("continue");
+          expect(folder).toBe(folder.trim());
+          expect(folder.length).toBeGreaterThan(0);
+          expect(folder.replace(/[\\/]+$/, "").toLowerCase()).not.toBe("d:/videos");
+        },
+      ),
+      { numRuns: 100 },
     );
   });
 });

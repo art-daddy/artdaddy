@@ -86,7 +86,10 @@ import {
   submitExport,
   type ExportRetry,
   type ExportSubmission,
+  type MovedTo,
 } from "./exportQueue";
+import type { ExportStory } from "./exportTrace";
+import type { ExportQuestionKind } from "./exportQuestions";
 import { sourceHasAudio } from "./placement";
 import { clipPlays, outputGate, suppressClip } from "./visibility";
 import { assertNever } from "./transition";
@@ -3487,7 +3490,9 @@ export async function exportFolder(
   const root = (await store.downloadDir()) ?? store.artifactPath("exports");
   if (!s) return { ok: true, dir: root, label: "your Downloads folder" };
   if (isAbsolutePath(s)) {
-    const dir = s.replace(/\\/g, "/").replace(/(.)\/+$/, "$1");
+    const trimmed = s.replace(/\\/g, "/").replace(/(.)\/+$/, "$1");
+    // The root of a drive stays a root: "E:" alone means the folder the process happens to be in on drive E.
+    const dir = /^[A-Za-z]:$/.test(trimmed) ? `${trimmed}/` : trimmed;
     if ((await store.exists(dir).catch(() => false)) && !(await store.isDirectory(dir)))
       return { ok: false, error: `output_dir '${s}' is a file, not a folder.` };
     return { ok: true, dir, label: dir };
@@ -3647,17 +3652,41 @@ function referencedBy(clip: LibraryClip, used: Set<string>): boolean {
   return names.some((n) => typeof n === "string" && n && used.has(n.replace(/\\/g, "/")));
 }
 
+/** The call as it reads once the person has chosen the folder for the video (the Save to box, or the card's Save
+ *  somewhere else): that folder replaces whatever destination the call named, as a folder rather than a file.
+ *  Nothing else about the call changes. Pure. */
+export function movedArgs(args: Args, dir: string): Args {
+  const { output_path: _path, ...rest } = args;
+  return { ...rest, output_dir: dir };
+}
+
+/** The name a person gave a file in Save As, without its `.mp4`: exactly as typed. Null when the call named no
+ *  file. A name typed in Save As is theirs (a version number has dots in it, a title can be long), so it is not
+ *  tidied the way a default name is. */
+function verbatimStem(path: unknown): string | null {
+  const named = typeof path === "string" ? path.trim() : "";
+  const stem = named
+    .slice(Math.max(named.lastIndexOf("/"), named.lastIndexOf("\\")) + 1)
+    .replace(/\.mp4$/i, "");
+  return stem === "" ? null : stem;
+}
+
 /** Returns as soon as the export is QUEUED. Everything that can refuse it — validation,
  *  unresolved media, offline sources, a busy destination — still happens in this turn; only the
  *  encode is deferred, and the chat is told when it lands. `retrying` is set only by the chat card's
  *  Try again (see {@link retryOf}), never by the tool call: the rung that failed and the rung this one
- *  starts at. */
+ *  starts at. `moved` is the folder the person chose for it instead of the one the call named (the Save
+ *  to box of the question about its room, or the card's Save somewhere else), likewise never a tool
+ *  argument: it replaces the call's destination, and every Try again after it keeps the folder. */
 export async function exportTimelineTool(
-  args: Args,
+  callArgs: Args,
   ctx: ClientToolContext | null,
   retrying?: { from: Rung; minRung: Rung; processor?: true },
+  moved?: MovedTo,
 ): Promise<Result> {
   if (!ctx) return NOT_READY;
+  const args = moved ? movedArgs(callArgs, moved.dir) : callArgs;
+  const kept = moved ? verbatimStem(callArgs.output_path) : null;
   const fmt = String(args.format ?? "mp4")
     .trim()
     .toLowerCase();
@@ -3684,10 +3713,14 @@ export async function exportTimelineTool(
     const f = await exportFolder(ctx.store, dirArg);
     if (!f.ok) return f;
     folder = f;
-    const stem = exportStem(
-      String(args.name ?? args.filename ?? "").trim(),
-      defaultExportStem(ctx.store.projectDir),
-    );
+    // Once moved, the file the person named keeps exactly its name (see verbatimStem); any other file takes the
+    // default name rule.
+    const stem =
+      kept ??
+      exportStem(
+        String(args.name ?? args.filename ?? "").trim(),
+        defaultExportStem(ctx.store.projectDir),
+      );
     const free = await freeName(ctx.store, f.dir, stem, ".mp4", new Set());
     Object.assign(dest, { path: free.path, filename: free.filename, defaulted: false });
   }
@@ -3727,20 +3760,30 @@ export async function exportTimelineTool(
   });
   if (!prepared.ok) return prepared.result;
 
-  const sub = await queueRenderJob(ctx, {
-    plan: prepared.plan,
-    admission: prepared.admission,
-    destPath: dest.path,
-    stagePath: target,
-    filename: dest.filename,
-    quality: String(args.quality ?? ""),
-    ...(folder ? { outputDirectory: folder.dir } : {}),
-    ...(retrying
-      ? { minRung: retrying.minRung, retry: { from: retrying.from, to: retrying.minRung } }
-      : {}),
-  });
+  const sub = await queueRenderJob(
+    ctx,
+    {
+      plan: prepared.plan,
+      admission: prepared.admission,
+      destPath: dest.path,
+      stagePath: target,
+      filename: dest.filename,
+      quality: String(args.quality ?? ""),
+      ...(folder ? { outputDirectory: folder.dir } : {}),
+      ...(retrying
+        ? { minRung: retrying.minRung, retry: { from: retrying.from, to: retrying.minRung } }
+        : {}),
+    },
+    {
+      // This request owns where its file goes, so the question about its room can offer another folder.
+      movable: true,
+      ...(moved?.story ? { story: moved.story } : {}),
+      ...(moved?.waived?.length ? { waived: moved.waived } : {}),
+      ...(moved && retrying ? { moved: true as const } : {}),
+    },
+  );
   // If it fails, one click on the chat card starts it again.
-  offerExportRetry(sub.job_id, retryOf(args, ctx));
+  offerExportRetry(sub.job_id, retryOf(callArgs, ctx, moved));
 
   // Don't leak the OS Downloads path to the model — return only the filename. When the caller
   // NAMED the destination it already knows the path, so there is nothing to disclose either way.
@@ -3752,11 +3795,15 @@ export async function exportTimelineTool(
     ? `${prepared.branding.watermark ? "The ArtDaddy watermark and end card are added" : "The ArtDaddy end card is added; the corner watermark is disabled for this account"}: this file runs ` +
       `${total.toFixed(1)} s, ${(total - card).toFixed(1)} s of timeline plus a ${card.toFixed(1)} s end card.`
     : "";
-  const where = dest.defaulted
-    ? "Saving to your Downloads folder."
-    : folder
-      ? `Saving to ${folder.label}.`
-      : "";
+  // When the caller NAMED the destination it already knows the path, so there is nothing to disclose either way;
+  // a folder the person chose in the app is theirs, not the assistant's, and so is its name.
+  const where = moved
+    ? "The person chose a different folder to save it in."
+    : dest.defaulted
+      ? "Saving to your Downloads folder."
+      : folder
+        ? `Saving to ${folder.label}.`
+        : "";
   const note = [where, brandNote].filter(Boolean).join(" ");
   return {
     ok: true,
@@ -3783,8 +3830,10 @@ export async function exportTimelineTool(
 /** How the chat card starts this export again: the same request, on a context that is no longer bound to the
  *  turn that asked (the work outlives it, like the export itself), in the project as it is open now when its
  *  session has changed, with the plan told the rung to start at. It runs through the `export` tool, so the
- *  questions an export asks and the way a refusal is reported are the first attempt's own. */
-function retryOf(args: Args, ctx: ClientToolContext): ExportRetry {
+ *  questions an export asks and the way a refusal is reported are the first attempt's own. `args` is the call as it
+ *  was made, and `placed` the folder the person had chosen for it, if any: a Try again starts in that folder, and the
+ *  card's Save somewhere else replaces it for this and every later try. */
+function retryOf(args: Args, ctx: ClientToolContext, placed?: MovedTo): ExportRetry {
   const request = { ...args };
   const later = ctx.detach?.() ?? ctx;
   return async (minRung, from, options) => {
@@ -3797,11 +3846,17 @@ function retryOf(args: Args, ctx: ClientToolContext): ExportRetry {
         ? { ...later, store: open }
         : later;
     const { exportTool } = await import("./exportItems");
-    const result = await exportTool(request, where, {
-      from,
-      minRung,
-      ...(options.processor ? { processor: true as const } : {}),
-    });
+    const folder = options.saveTo ?? placed?.dir;
+    const result = await exportTool(
+      request,
+      where,
+      {
+        from,
+        minRung,
+        ...(options.processor ? { processor: true as const } : {}),
+      },
+      folder ? { dir: folder } : undefined,
+    );
     if (result.ok !== false) return { ok: true };
     const facts = (result as { export_refusal?: ExportRefusalFacts }).export_refusal;
     // A refusal is reported as any other is, so a Try again that came to nothing is not invisible.
@@ -3841,8 +3896,21 @@ export async function queueRenderJob(
     /** Set by Try again: the rung that failed and the one asked for, for the export's story. */
     retry?: { from: Rung; to: Rung };
   },
+  carry?: Carried,
 ): Promise<ExportSubmission> {
-  return submitExport(await prepareRenderSubmission(ctx, job));
+  return submitExport(await prepareRenderSubmission(ctx, job, carry));
+}
+
+/** What a request carries to the queue beside the command: not part of the render and not fingerprinted with it. */
+export interface Carried {
+  /** The request owns where its file goes (see {@link ExportSpec.movable}). */
+  movable?: true;
+  /** What happened to the request before it started again at another folder (the one story of both). */
+  story?: ExportStory;
+  /** What the person already said Start anyway to before the move: not asked again. */
+  waived?: readonly ExportQuestionKind[];
+  /** The person chose the folder as they started it again: the story's retry says so. */
+  moved?: true;
 }
 
 /** The command of an export at the rung the plan chooses for this PC right now (exportPlan.ts): the gentlest
@@ -3896,6 +3964,7 @@ async function onProvenEncoder(
 export async function prepareRenderSubmission(
   ctx: ClientToolContext,
   original: Parameters<typeof queueRenderJob>[1],
+  carry?: Carried,
 ): Promise<Parameters<typeof submitExport>[0]> {
   const { job, decision } = await planned(ctx, await onProvenEncoder(ctx, original));
   const request = structuredClone(job);
@@ -3993,7 +4062,12 @@ export async function prepareRenderSubmission(
     // Present only when the AGENT called this tool; the Export menu runs it with no origin.
     origin: ctx.origin,
     via: exportVia(ctx),
-    ...(request.retry ? { retry: request.retry } : {}),
+    ...(request.retry
+      ? { retry: { ...request.retry, ...(carry?.moved ? { moved: true as const } : {}) } }
+      : {}),
+    ...(carry?.movable ? { movable: true as const } : {}),
+    ...(carry?.story ? { story: carry.story } : {}),
+    ...(carry?.waived?.length ? { waived: carry.waived } : {}),
     submissionSignal: ctx.signal,
     workload: renderPlan.workload,
     ...(request.outputDirectory ? { outputDirectory: request.outputDirectory } : {}),

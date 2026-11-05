@@ -6,9 +6,12 @@ import {
   answerButtons,
   asksAboutIt,
   bandOf,
+  displayFolder,
   driveOf,
+  folderOf,
   planQuestions,
   questionAsText,
+  sameFolder,
   type ExportQuestion,
   type ExportQuestionKind,
   type ExportVia,
@@ -54,6 +57,7 @@ function picture(
     destinationShort: spaceShort,
     scratchShort: false,
     drive: "D:",
+    movable: false,
     seconds: 1500,
     secondsGuessed: false,
     executionLimitSeconds: 28_800,
@@ -257,7 +261,15 @@ describe("the words", () => {
 
   it("every question has a title, a sentence, advice, a way out and no leftovers of a bug", () => {
     for (const q of every()) {
-      const text = JSON.stringify(q);
+      // The words a person reads (the record also carries structure, such as a flag that is null).
+      const text = JSON.stringify([
+        q.title,
+        q.lines,
+        q.facts,
+        q.advice,
+        q.nativeAdvice,
+        q.startAnywayNote,
+      ]);
       expect(q.title.length).toBeGreaterThan(0);
       expect(q.lines.length).toBeGreaterThan(0);
       expect(q.lines.every((line) => line.length > 0)).toBe(true);
@@ -357,7 +369,118 @@ describe("the buttons", () => {
   });
 });
 
+// The Save to box (Phase 3, S3b): a request that owns its destination can be sent to another folder from
+// the question about the exported file's room. The question stays a record without a path (the box is a
+// flag; the folder itself is the host's, see exportQuestionHost.ts), so a folder still cannot reach a
+// report from here.
+describe("the Save to box", () => {
+  const withBox = (over: Partial<PreflightPicture> = {}): ExportQuestion[] =>
+    planQuestions(picture(["disk_shortage"], { movable: true, ...over }));
+
+  it("is on the question about the exported file's room, when the request can move", () => {
+    const [q] = withBox();
+    expect(q.kind).toBe("output_space");
+    expect(q.folderBox).toBe("save_to");
+  });
+
+  it("is not there when the request cannot move (a batch of files, a copy), and the words stay what they were", () => {
+    const [q] = planQuestions(picture(["disk_shortage"], { movable: false }));
+    expect(q.folderBox).toBeNull();
+    expect(q.advice).toBe("Free up some space on D:, then press Continue. We'll check again.");
+  });
+
+  it("says the video can be saved somewhere else, and still says to free up room", () => {
+    const [q] = withBox();
+    expect(q.advice).toMatch(/free up some space/i);
+    expect(q.advice).toMatch(/save the video somewhere else/i);
+    expect(q.advice).toMatch(/press Continue/);
+    const [unnamed] = withBox({ drive: null });
+    expect(unnamed.advice).toMatch(/save the video somewhere else/i);
+  });
+
+  it("is on no other question, whatever the picture says: the working files cannot be moved yet", () => {
+    for (const reasons of everySubset())
+      for (const scratchShort of [false, true])
+        for (const q of planQuestions(
+          picture(reasons, { movable: true, scratchShort, destinationShort: false }),
+        ))
+          expect(q.folderBox).toBe(q.kind === "output_space" ? "save_to" : null);
+    const working = planQuestions(
+      picture(["disk_shortage"], { movable: true, scratchShort: true, destinationShort: false }),
+    );
+    expect(working.map((q) => q.kind)).toEqual(["working_space"]);
+    expect(working[0].folderBox).toBeNull();
+  });
+
+  it("keeps a native message free of it: a native box has no folder box to offer", () => {
+    const [q] = withBox();
+    const { message } = questionAsText(q);
+    expect(message).not.toMatch(/save the video somewhere else|Browse/i);
+    expect(q.nativeAdvice).toMatch(/Cancel[\s\S]*export again/);
+  });
+
+  it("carries no path: the question is the same record for the screen and the report", () => {
+    for (const q of withBox({ drive: null })) expect(JSON.stringify(q)).not.toMatch(/[\\/]/);
+  });
+
+  it("leaves the question's numbers, buttons and trace code as they are", () => {
+    const [plain] = planQuestions(picture(["disk_shortage"], { movable: false }));
+    const [boxed] = withBox();
+    expect(boxed.facts).toEqual(plain.facts);
+    expect(boxed.answers).toEqual(plain.answers);
+    expect(boxed.code).toBe(plain.code);
+    expect(boxed.bands).toEqual(plain.bands);
+    expect(boxed.startAnywayNote).toBe(plain.startAnywayNote);
+  });
+});
+
 describe("small helpers", () => {
+  it("says which folder a file is in, spelled the way it was given", () => {
+    expect(folderOf("C:/out/movie.mp4")).toBe("C:/out");
+    expect(folderOf("C:\\out\\movie.mp4")).toBe("C:\\out");
+    expect(folderOf("C:/movie.mp4")).toBe("C:/");
+    expect(folderOf("/movie.mp4")).toBe("/");
+    expect(folderOf("/Users/me/movie.mp4")).toBe("/Users/me");
+    expect(folderOf("movie.mp4")).toBe("");
+    expect(folderOf("")).toBe("");
+  });
+
+  it("writes a path on a drive with backslashes, as the person's own system does, and any other path as it is", () => {
+    expect(displayFolder("D:/Videos/Cuts")).toBe("D:\\Videos\\Cuts");
+    expect(displayFolder("D:\\Videos")).toBe("D:\\Videos");
+    expect(displayFolder("/Users/me/Movies")).toBe("/Users/me/Movies");
+    expect(displayFolder("\\\\nas\\share")).toBe("\\\\nas\\share");
+    // a share as the app keeps it (forward slashes) is shown the way the person's system writes it
+    expect(displayFolder("//nas/share/Videos")).toBe("\\\\nas\\share\\Videos");
+    expect(displayFolder("")).toBe("");
+  });
+
+  it("reads two spellings of one folder as the same, and a different folder never as the same", () => {
+    const segment = fc
+      .stringMatching(/^[A-Za-z0-9 ._-]{1,8}$/)
+      .filter((s) => s === s.trim() && !/^\.+$/.test(s));
+    fc.assert(
+      fc.property(
+        fc.array(segment, { minLength: 1, maxLength: 4 }),
+        fc.constantFrom("/", "\\"),
+        fc.integer({ min: 0, max: 3 }),
+        (parts, slash, trailing) => {
+          const canonical = `D:/${parts.join("/")}`;
+          const spelled = `d:${slash}${parts.join(slash)}${slash.repeat(trailing)}`;
+          expect(sameFolder(canonical, spelled)).toBe(true);
+          expect(sameFolder(spelled, canonical)).toBe(true);
+          expect(sameFolder(canonical, `${canonical}/${parts[0]}`)).toBe(false);
+          expect(sameFolder(canonical, `E:/${parts.join("/")}`)).toBe(false);
+        },
+      ),
+    );
+    expect(sameFolder("D:", "D:/")).toBe(true);
+    expect(sameFolder("D:/", "E:/")).toBe(false);
+    expect(sameFolder("/", "/")).toBe(true);
+    expect(sameFolder("//nas/share/", "\\\\NAS\\share")).toBe(true);
+    expect(sameFolder("/Users/me/Videos", "/Users/me/videos")).toBe(false);
+  });
+
   it("reads a drive off a Windows path and nothing else", () => {
     expect(driveOf("D:/Videos/a.mp4")).toBe("D:");
     expect(driveOf("c:\\Users\\me\\a.mp4")).toBe("C:");

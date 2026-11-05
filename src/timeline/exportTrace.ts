@@ -71,6 +71,11 @@ export class ExportTrace {
     return last !== undefined && last.e === e && last.v === v;
   }
 
+  /** Whether an event of this kind is already in the story. */
+  has(e: ExportTraceEvent): boolean {
+    return this.events.some((event) => event.e === e);
+  }
+
   /** The events so far, in order, as copies. */
   snapshot(): TraceEvent[] {
     return this.events.map((event) => ({ ...event }));

@@ -10,13 +10,32 @@
 import { create } from "zustand";
 
 import { askForAttention } from "../lib/attention";
-import type { ExportAnswer, ExportQuestion } from "../timeline/exportQuestions";
+import { sameFolder, type ExportAnswer, type ExportQuestion } from "../timeline/exportQuestions";
 
 export type AnsweredBy = "dialog" | "card" | "assistant";
 
 export type QuestionOutcome =
-  | { answer: ExportAnswer; by: AnsweredBy; waitedMs: number }
+  | {
+      answer: ExportAnswer;
+      by: AnsweredBy;
+      waitedMs: number;
+      /** The folder the person chose to save the video in, present only on a Continue whose pick is not the
+       *  folder the file was already going to. */
+      folder?: string;
+    }
   | { answer: "aborted" | "unavailable"; by: "app"; waitedMs: number };
+
+/** The folder a question is about: where the file goes now, and the one the person has picked instead. */
+export interface QuestionFolder {
+  readonly now: string;
+  readonly picked: string | null;
+}
+
+/** Whether the pick would move the file: another folder than the one it is going to, however either is spelled.
+ *  The one rule the dialog, the card and the answer share. */
+export function movesTheFile(folder: QuestionFolder | null | undefined): boolean {
+  return folder?.picked != null && !sameFolder(folder.picked, folder.now);
+}
 
 export interface OpenQuestion {
   readonly id: number;
@@ -30,12 +49,18 @@ export interface OpenQuestion {
   readonly hidden: boolean;
   /** A card for its project is there to carry it, so it may be put away. */
   readonly canHide: boolean;
+  /** Where the file goes and what the person picked instead, for a question with a Save to box; null for any
+   *  other. Held here, not in the question, which carries no path. */
+  readonly folder: QuestionFolder | null;
 }
 
 interface Entry {
   readonly id: number;
   readonly question: ExportQuestion;
   readonly projectDir: string;
+  /** Where the file goes now, when the question has a Save to box and the asker said. */
+  readonly folderNow: string | null;
+  picked: string | null;
   shownAt: number;
   hidden: boolean;
   /** Who ended it, once it has ended ("app" for a stop or for no dialog being left). */
@@ -75,6 +100,8 @@ function publish(): void {
           shownAt: current.shownAt,
           hidden: current.hidden,
           canHide: hasCard(current.projectDir),
+          folder:
+            current.folderNow === null ? null : { now: current.folderNow, picked: current.picked },
         }
       : null,
   });
@@ -161,6 +188,9 @@ export function askQuestion(
     signal?: AbortSignal;
     /** Told of every answer that arrived after the question had ended, and who had ended it. */
     onIgnored?: (answer: ExportAnswer, by: AnsweredBy, winner: AnsweredBy | "app") => void;
+    /** Where the file goes now. Only a question with a Save to box uses it: without one the question has no
+     *  folder, whatever is passed. */
+    folderNow?: string;
   },
 ): Promise<QuestionOutcome> {
   if (options.signal?.aborted)
@@ -168,10 +198,14 @@ export function askQuestion(
   if (!hostMounted()) return Promise.resolve({ answer: "unavailable", by: "app", waitedMs: 0 });
   return new Promise<QuestionOutcome>((resolve) => {
     let ended = false;
+    const folderNow =
+      question.folderBox !== null && options.folderNow?.trim() ? options.folderNow.trim() : null;
     const entry: Entry = {
       id: nextId++,
       question,
       projectDir: options.projectDir,
+      folderNow,
+      picked: null,
       shownAt: 0,
       hidden: false,
       onIgnored: options.onIgnored,
@@ -201,6 +235,18 @@ export function askQuestion(
   });
 }
 
+/** Pick the folder the video is saved in instead, for the question on screen: the dialog and the card both
+ *  show the pick, and whichever presses Continue carries it. A null `folder` takes the pick back. False when
+ *  nothing changed: it is not the question on screen, it has no Save to box, or the folder is blank. */
+export function chooseQuestionFolder(id: number, folder: string | null): boolean {
+  if (!current || current.id !== id || current.folderNow === null) return false;
+  const clean = folder === null ? null : folder.trim();
+  if (clean === "") return false;
+  current.picked = clean;
+  publish();
+  return true;
+}
+
 /** Answer the question on screen. "accepted" when this answer ended it; "ignored" when it did not (it
  *  had already ended, or it is not the one on screen), in which case the question's own asker is told. */
 export function answerQuestion(
@@ -211,12 +257,19 @@ export function answerQuestion(
   if (current && current.id === id) {
     const entry = current;
     const waitedMs = Math.max(0, Date.now() - entry.shownAt);
+    // Only Continue moves the file: a pick made and then not followed is not an answer.
+    const folder =
+      answer === "continue" &&
+      entry.folderNow !== null &&
+      movesTheFile({ now: entry.folderNow, picked: entry.picked })
+        ? entry.picked!
+        : undefined;
     current = null;
     entry.winner = by;
     remember(entry);
     promote();
     publish();
-    entry.finish({ answer, by, waitedMs });
+    entry.finish({ answer, by, waitedMs, ...(folder === undefined ? {} : { folder }) });
     return "accepted";
   }
   const late = recent.get(id);

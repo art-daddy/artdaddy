@@ -1,6 +1,67 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import fc from "fast-check";
 
-import { lastExportDir, rememberExportDir } from "./exportDir";
+import { displayFolder } from "../timeline/exportQuestions";
+import { lastExportDir, rememberExportDir, savedToPath } from "./exportDir";
+
+describe("savedToPath", () => {
+  it("keeps the path the person chose, in the way their system wrote it, when the export went there", () => {
+    const chosen = "D:\\Client Work\\hero cut.mp4";
+    expect(savedToPath(chosen, "D:/Client Work/hero cut.mp4")).toBe(chosen);
+    // Windows does not tell two spellings of a name apart.
+    expect(savedToPath("d:\\client work\\HERO cut.MP4", "D:/Client Work/hero cut.mp4")).toBe(
+      "d:\\client work\\HERO cut.MP4",
+    );
+    expect(savedToPath("/Users/me/Movies/a.mp4", "/Users/me/Movies/a.mp4")).toBe(
+      "/Users/me/Movies/a.mp4",
+    );
+  });
+
+  it("says where the export really went when that is not where they chose: another folder, or another name", () => {
+    expect(savedToPath("D:\\Client Work\\hero cut.mp4", "E:/Elsewhere/hero cut.mp4")).toBe(
+      "E:\\Elsewhere\\hero cut.mp4",
+    );
+    // numbered past a file that was already in the folder they moved it to
+    expect(savedToPath("D:\\Videos\\a.mp4", "D:/Videos/a 2.mp4")).toBe("D:\\Videos\\a 2.mp4");
+    // a path is not the same path on a system that tells names apart
+    expect(savedToPath("/Users/me/Movies/a.mp4", "/Users/me/movies/a.mp4")).toBe(
+      "/Users/me/movies/a.mp4",
+    );
+  });
+
+  it("falls back to whichever it has: nothing known is not a made-up place", () => {
+    expect(savedToPath("D:\\a.mp4", null)).toBe("D:\\a.mp4");
+    expect(savedToPath("D:\\a.mp4", undefined)).toBe("D:\\a.mp4");
+    expect(savedToPath("D:\\a.mp4", "  ")).toBe("D:\\a.mp4");
+    // Nothing chosen (the web build has no Save As): the real place as it was given, unchanged.
+    expect(savedToPath(null, "C:/Users/test/Downloads/a.mp4")).toBe(
+      "C:/Users/test/Downloads/a.mp4",
+    );
+    expect(savedToPath(null, null)).toBeNull();
+    expect(savedToPath("", undefined)).toBeNull();
+  });
+
+  it("is always one of the two it was given, written for the system it names, and never a third place", () => {
+    const segment = fc
+      .stringMatching(/^[A-Za-z0-9 ._-]{1,8}$/)
+      .filter((s) => s === s.trim() && !/^\.+$/.test(s));
+    const path = fc
+      .tuple(
+        fc.constantFrom("C", "D", "E"),
+        fc.array(segment, { minLength: 1, maxLength: 3 }),
+        segment,
+      )
+      .map(([drive, folders, leaf]) => `${drive}:/${folders.join("/")}/${leaf}.mp4`);
+    fc.assert(
+      fc.property(path, path, fc.boolean(), (a, b, backslashes) => {
+        const chosen = backslashes ? displayFolder(a) : a;
+        const got = savedToPath(chosen, b);
+        const same = a.toLowerCase() === b.toLowerCase();
+        expect(got).toBe(same ? chosen : displayFolder(b));
+      }),
+    );
+  });
+});
 
 describe("lastExportDir", () => {
   beforeEach(() => localStorage.clear());

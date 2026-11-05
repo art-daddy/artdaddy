@@ -18,9 +18,11 @@ import {
   buildRenderCommand,
   canvasDuration,
   exportDestination,
+  exportFolder,
   exportProgressReporter,
   exportStem,
   exportTimelineTool,
+  movedArgs,
   rebuildAtRung,
   gentlestRung,
   ladderOf,
@@ -30,7 +32,12 @@ import {
 } from "./render";
 import { joinPath, ProjectStoreAccess, type FsLike } from "../tools/store";
 import { buildScene } from "../preview/scene";
-import { __resetExportQueue, whenExportsSettle } from "./exportQueue";
+import {
+  __resetExportQueue,
+  listExportRecords,
+  retryExport,
+  whenExportsSettle,
+} from "./exportQueue";
 import { __resetJobNotes, pendingJobNotes } from "../store/jobNotes";
 import { useExportJob } from "../store/exportJob";
 import { EXPORT_SPEED_REVISION } from "./exportOptions";
@@ -3693,6 +3700,302 @@ describe("exportTimelineTool", () => {
     // nor `readDir`, so ProjectStoreAccess.isDirectory is hard-false against it ΓÇö this
     // fixture cannot represent a directory, and a passing assertion would only be proving
     // that. It is exercised below against a store that can actually answer the question.
+  });
+
+  // Save to (Phase 3, S3b). The person chose another folder in the question about the room for the file,
+  // and the request starts again AT that folder: the render command, the staging file and the reservation
+  // all derive from the destination, so what is checked is where ffmpeg was told to write and where the
+  // finished file is, not what the call said.
+  describe("saved to the folder the person chose instead", () => {
+    const addOne = (ctx: ClientToolContext) =>
+      addClipsTool({ entries: [{ media_ref: "a.mp4", timeline_in: 0, timeline_out: 60 }] }, ctx);
+    const elsewhere = { dir: "E:/Elsewhere" };
+
+    it("hands ffmpeg a staging file in that folder and delivers the file there, under the name the person had chosen", async () => {
+      let outPath = "";
+      const { ctx, fs } = await renderCtx((p) => {
+        outPath = p;
+        return { code: 0, stderr: "" };
+      });
+      await fs.writeTextFile("E:/Elsewhere/keep.txt", "x"); // make E:/Elsewhere a real folder
+      await addOne(ctx);
+      const r = (await exportTimelineTool(
+        { output_path: "D:/Videos/final cut.mp4" },
+        ctx,
+        undefined,
+        elsewhere,
+      )) as Any;
+      expect(r.ok, JSON.stringify(r)).toBe(true);
+      await whenExportsSettle();
+      expect(outPath).toMatch(/^E:\/Elsewhere\/.*\.partial$/);
+      expect(await fs.exists("E:/Elsewhere/final cut.mp4")).toBe(true);
+      expect(await fs.exists("D:/Videos/final cut.mp4")).toBe(false);
+      expect(r.saved_to).toBe("final cut.mp4");
+    });
+
+    it("uses the project's own name when none was chosen, and never overwrites a file that is already there", async () => {
+      const { ctx, fs } = await renderCtx(() => ({ code: 0, stderr: "" }));
+      await fs.writeTextFile("E:/Elsewhere/proj.mp4", "OLD");
+      await addOne(ctx);
+      const r = (await exportTimelineTool({}, ctx, undefined, elsewhere)) as Any;
+      expect(r.ok, JSON.stringify(r)).toBe(true);
+      await whenExportsSettle();
+      expect(r.saved_to).toBe("proj 2.mp4");
+      expect(await fs.readTextFile("E:/Elsewhere/proj.mp4")).toBe("OLD");
+      expect(await fs.readTextFile("E:/Elsewhere/proj 2.mp4")).toBe("video");
+    });
+
+    it("keeps the settings the call asked for", async () => {
+      let command: string[] = [];
+      const { ctx, fs } = await renderCtx(() => ({ code: 0, stderr: "" }));
+      const run = ctx.runner.run.bind(ctx.runner);
+      ctx.runner.run = async (program: string, args: string[], ...rest: unknown[]) => {
+        if (program === "ffmpeg") command = args;
+        return (run as Any)(program, args, ...rest);
+      };
+      await fs.writeTextFile("E:/Elsewhere/keep.txt", "x");
+      await addOne(ctx);
+      const direct = (await exportTimelineTool({ resolution: "720p", name: "a" }, ctx)) as Any;
+      await whenExportsSettle();
+      const directCommand = command.join(" ").replace(/\S*\.partial/g, "OUT");
+      const moved = (await exportTimelineTool(
+        { resolution: "720p", name: "a" },
+        ctx,
+        undefined,
+        elsewhere,
+      )) as Any;
+      await whenExportsSettle();
+      expect(direct.ok && moved.ok).toBe(true);
+      // The same video: only the file it is written to differs.
+      expect(command.join(" ").replace(/\S*\.partial/g, "OUT")).toBe(directCommand);
+    });
+
+    it("puts the file at the root of a drive, and in a network share, when that is the folder the person chose", async () => {
+      for (const [dir, expected] of [
+        ["E:\\", /^E:\/\.[^/]+\.partial$/],
+        ["E:/", /^E:\/\.[^/]+\.partial$/],
+        ["\\\\nas\\share\\Videos\\", /^\/\/nas\/share\/Videos\/\.[^/]+\.partial$/],
+      ] as const) {
+        __resetExportQueue();
+        let outPath = "";
+        const { ctx, fs } = await renderCtx((p) => {
+          outPath = p;
+          return { code: 0, stderr: "" };
+        });
+        await addOne(ctx);
+        const r = (await exportTimelineTool({}, ctx, undefined, { dir })) as Any;
+        expect(r.ok, `${dir}: ${JSON.stringify(r)}`).toBe(true);
+        await whenExportsSettle();
+        expect(outPath, dir).toMatch(expected);
+        const landed = outPath.replace(/\/\.[^/]+\.partial$/, "/proj.mp4");
+        // The file is in the folder that was chosen, not in a place that merely looks like it.
+        expect(await fs.exists(landed), dir).toBe(true);
+      }
+    });
+
+    it("keeps the file name the person chose exactly: dots, a long name and a leading dot survive the move", async () => {
+      const long = "A very long working title for the broadcast master ".repeat(2).trim();
+      expect(long.length).toBeGreaterThan(80);
+      for (const stem of [
+        "Interview 2024.10.05",
+        "v1.2 final",
+        ".draft cut",
+        long,
+        "Café déjà vu",
+      ]) {
+        __resetExportQueue();
+        const { ctx, fs } = await renderCtx(() => ({ code: 0, stderr: "" }));
+        await addOne(ctx);
+        const r = (await exportTimelineTool(
+          { output_path: `D:/Videos/${stem}.mp4` },
+          ctx,
+          undefined,
+          elsewhere,
+        )) as Any;
+        expect(r.ok, `${stem}: ${JSON.stringify(r)}`).toBe(true);
+        await whenExportsSettle();
+        expect(r.saved_to, stem).toBe(`${stem}.mp4`);
+        expect(await fs.exists(`E:/Elsewhere/${stem}.mp4`), stem).toBe(true);
+        expect(await fs.exists(`D:/Videos/${stem}.mp4`), stem).toBe(false);
+      }
+    });
+
+    it("numbers a file the person named past one that is already in the folder they chose, and never overwrites it", async () => {
+      const { ctx, fs } = await renderCtx(() => ({ code: 0, stderr: "" }));
+      await fs.writeTextFile("E:/Elsewhere/reel v1.2.mp4", "OLD");
+      await addOne(ctx);
+      const r = (await exportTimelineTool(
+        { output_path: "D:/Videos/reel v1.2.mp4" },
+        ctx,
+        undefined,
+        elsewhere,
+      )) as Any;
+      expect(r.ok, JSON.stringify(r)).toBe(true);
+      await whenExportsSettle();
+      expect(r.saved_to).toBe("reel v1.2 2.mp4");
+      expect(await fs.readTextFile("E:/Elsewhere/reel v1.2.mp4")).toBe("OLD");
+      expect(await fs.readTextFile("E:/Elsewhere/reel v1.2 2.mp4")).toBe("video");
+    });
+
+    it("keeps the folder AND the exact name through every Try again after a move", async () => {
+      let runs = 0;
+      const outputs: string[] = [];
+      const { ctx, fs } = await renderCtx((p) => {
+        outputs.push(p);
+        return ++runs < 3 ? { code: 1, stderr: "Permission denied" } : { code: 0, stderr: "" };
+      });
+      await addOne(ctx);
+      const r = (await exportTimelineTool(
+        { output_path: "D:/Videos/Interview 2024.10.05.mp4" },
+        ctx,
+        undefined,
+        elsewhere,
+      )) as Any;
+      expect(r.ok, JSON.stringify(r)).toBe(true);
+      await whenExportsSettle();
+      for (let again = 0; again < 2; again++) {
+        const failed = listExportRecords().find((row) => row.state === "failed");
+        expect(failed?.canRetry, `try again #${again + 1}`).toBe(true);
+        await retryExport(failed!.job_id, ctx.store);
+        await whenExportsSettle();
+      }
+      expect(outputs).toHaveLength(3);
+      for (const output of outputs) expect(output).toMatch(/^E:\/Elsewhere\//);
+      expect(await fs.exists("E:/Elsewhere/Interview 2024.10.05.mp4")).toBe(true);
+      expect(await fs.exists("D:/Videos/Interview 2024.10.05.mp4")).toBe(false);
+      expect(listExportRecords().some((row) => row.state === "failed")).toBe(false);
+    });
+
+    it("does not tell the assistant which folder the person chose, only that the person chose one", async () => {
+      const { ctx, fs } = await renderCtx(() => ({ code: 0, stderr: "" }));
+      await fs.writeTextFile("E:/Elsewhere/keep.txt", "x");
+      await addOne(ctx);
+      const r = (await exportTimelineTool({}, ctx, undefined, elsewhere)) as Any;
+      await whenExportsSettle();
+      expect(JSON.stringify(r)).not.toMatch(/Elsewhere|E:|Downloads/);
+      expect(String(r.note)).toMatch(/person chose/i);
+    });
+
+    it("is the last word over a destination the call itself named, and over a call that named two", async () => {
+      const { ctx, fs } = await renderCtx(() => ({ code: 0, stderr: "" }));
+      await fs.writeTextFile("D:/Videos/keep.txt", "x");
+      await addOne(ctx);
+      for (const args of [
+        { output_dir: "D:/Videos" },
+        { output_path: "D:/Videos/mine.mp4" },
+        { output_path: "D:/Videos/mine.mp4", output_dir: "D:/Videos" },
+      ]) {
+        __resetExportQueue();
+        const r = (await exportTimelineTool(args, ctx, undefined, elsewhere)) as Any;
+        expect(r.ok, JSON.stringify(args)).toBe(true);
+        await whenExportsSettle();
+        expect(await fs.exists(`D:/Videos/${r.saved_to}`), JSON.stringify(args)).toBe(false);
+        expect(await fs.exists(`E:/Elsewhere/${r.saved_to}`), JSON.stringify(args)).toBe(true);
+      }
+    });
+
+    it("leaves a call that names no folder to the old rules, every time", async () => {
+      const { ctx } = await renderCtx(() => ({ code: 0, stderr: "" }));
+      await addOne(ctx);
+      const both = (await exportTimelineTool(
+        { output_path: "D:/Videos/mine.mp4", output_dir: "D:/Videos" },
+        ctx,
+      )) as Any;
+      expect(both.ok).toBe(false);
+      expect(String(both.error)).toMatch(/not both/);
+    });
+
+    it("starts the Try again of such an export in the same folder, not where the call first pointed", async () => {
+      let runs = 0;
+      const outputs: string[] = [];
+      const { ctx, fs } = await renderCtx((p) => {
+        outputs.push(p);
+        return ++runs === 1 ? { code: 1, stderr: "Permission denied" } : { code: 0, stderr: "" };
+      });
+      await fs.writeTextFile("E:/Elsewhere/keep.txt", "x");
+      await addOne(ctx);
+      const r = (await exportTimelineTool({}, ctx, undefined, elsewhere)) as Any;
+      expect(r.ok, JSON.stringify(r)).toBe(true);
+      await whenExportsSettle();
+      const failed = listExportRecords().find((row) => row.state === "failed");
+      expect(failed?.canRetry).toBe(true);
+      await retryExport(failed!.job_id, ctx.store);
+      await whenExportsSettle();
+      expect(outputs).toHaveLength(2);
+      for (const output of outputs) expect(output).toMatch(/^E:\/Elsewhere\//);
+      expect(await fs.exists("E:/Elsewhere/proj.mp4")).toBe(true);
+      expect(await fs.exists("C:/Users/test/Downloads/proj.mp4")).toBe(false);
+    });
+    it("starts a failed export again in the folder the person chose on the card (Save somewhere else), and keeps it for the next Try again", async () => {
+      let runs = 0;
+      const outputs: string[] = [];
+      const { ctx, fs } = await renderCtx((p) => {
+        outputs.push(p);
+        return ++runs <= 2 ? { code: 1, stderr: "Permission denied" } : { code: 0, stderr: "" };
+      });
+      await fs.writeTextFile("E:/Elsewhere/keep.txt", "x");
+      await addOne(ctx);
+      const r = (await exportTimelineTool({ name: "reel" }, ctx)) as Any;
+      expect(r.ok, JSON.stringify(r)).toBe(true);
+      await whenExportsSettle();
+      let failed = listExportRecords().find((row) => row.state === "failed");
+      expect(failed?.canRetry).toBe(true);
+      await retryExport(failed!.job_id, ctx.store, { saveTo: "E:/Elsewhere" });
+      await whenExportsSettle();
+      // The second run failed too: this Try again names no folder, and must stay where the person sent it.
+      failed = listExportRecords().find((row) => row.state === "failed");
+      expect(failed?.canRetry).toBe(true);
+      await retryExport(failed!.job_id, ctx.store);
+      await whenExportsSettle();
+      expect(outputs).toHaveLength(3);
+      expect(outputs[0]).toMatch(/^C:\/Users\/test\/Downloads\//);
+      expect(outputs[1]).toMatch(/^E:\/Elsewhere\//);
+      expect(outputs[2]).toMatch(/^E:\/Elsewhere\//);
+      expect(await fs.exists("E:/Elsewhere/reel.mp4")).toBe(true);
+      expect(await fs.exists("C:/Users/test/Downloads/reel.mp4")).toBe(false);
+      expect(listExportRecords().some((row) => row.state === "failed")).toBe(false);
+    });
+  });
+
+  describe("movedArgs", () => {
+    it("replaces the destination the call named with the folder, and touches nothing else", () => {
+      const call = {
+        resolution: "720p",
+        quality: "high",
+        fps: 30,
+        name: "a",
+        output_path: "D:/V/a.mp4",
+      };
+      expect(movedArgs(call, "E:/Elsewhere")).toEqual({
+        resolution: "720p",
+        quality: "high",
+        fps: 30,
+        name: "a",
+        output_dir: "E:/Elsewhere",
+      });
+      expect(call.output_path).toBe("D:/V/a.mp4"); // the call itself is not changed
+      expect(movedArgs({ output_dir: "scenes" }, "E:/Elsewhere")).toEqual({
+        output_dir: "E:/Elsewhere",
+      });
+      expect(movedArgs({}, "E:/Elsewhere")).toEqual({ output_dir: "E:/Elsewhere" });
+    });
+  });
+
+  describe("exportFolder", () => {
+    it("keeps the root of a drive a root, however the person's system wrote it", async () => {
+      const store = new ProjectStoreAccess("C:/proj", new MemFs());
+      for (const [raw, dir] of [
+        ["E:\\", "E:/"],
+        ["E:/", "E:/"],
+        ["e:\\\\", "e:/"],
+        ["E:\\Videos\\", "E:/Videos"],
+        ["/", "/"],
+        ["\\\\nas\\share\\", "//nas/share"],
+      ] as const) {
+        const f = await exportFolder(store, raw);
+        expect(f.ok && f.dir, raw).toBe(dir);
+      }
+    });
   });
 
   it("refuses a folder as the destination, and accepts a file inside that same folder", async () => {

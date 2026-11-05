@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { EXPORT_REASON_CODES } from "../api/exportReason";
 import { STALL_LOG_SECONDS } from "./exportTrace";
 import {
+  canSaveElsewhere,
   describeChipFailure,
   describeEncoder,
   describeLiveStatus,
@@ -19,6 +20,7 @@ import {
   plainFailure,
   QUIET_SECONDS,
   quietSeconds,
+  SAVE_ELSEWHERE_LINE,
   timeLeftSeconds,
   type LiveFacts,
   type ModeView,
@@ -445,6 +447,33 @@ describe("the reason an export stopped, in plain words", () => {
   it("tells the person what to do about the ones they can fix", () => {
     expect(plainFailure("memory_limit")).toMatch(/close other programs/i);
     expect(plainFailure("storage_full")).toMatch(/free up/i);
+  });
+});
+
+describe("Save somewhere else", () => {
+  it("is offered after exactly the failures about the place the file was going, and no other", () => {
+    const offered = EXPORT_REASON_CODES.filter((code) => canSaveElsewhere(code));
+    expect(offered).toEqual(["storage_unavailable", "storage_full"]);
+  });
+
+  it("is said in plain words, with no code in them", () => {
+    expect(SAVE_ELSEWHERE_LINE).toMatch(/somewhere else/i);
+    expect(SAVE_ELSEWHERE_LINE).not.toMatch(
+      /ffmpeg|_limit|_failed|_unavailable|_full|undefined|null/i,
+    );
+    expect(SAVE_ELSEWHERE_LINE.endsWith(".")).toBe(true);
+  });
+
+  it("is offered for a failure read off the text of a real one", () => {
+    for (const text of ["ENOSPC: no space left on device", "Permission denied", "access is denied"])
+      expect(canSaveElsewhere(failureOf(text).code), text).toBe(true);
+    for (const text of [
+      "Cannot allocate memory",
+      "render failed",
+      "no such file",
+      "execution deadline expired",
+    ])
+      expect(canSaveElsewhere(failureOf(text).code), text).toBe(false);
   });
 });
 

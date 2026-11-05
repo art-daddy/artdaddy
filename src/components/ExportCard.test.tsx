@@ -11,6 +11,7 @@ import {
   __resetExportQuestions,
   answerQuestion,
   askQuestion,
+  chooseQuestionFolder,
   mountQuestionHost,
   setQuestionHidden,
   useExportQuestions,
@@ -38,6 +39,10 @@ vi.mock("../tools/genJobs", () => ({
 }));
 vi.mock("../store/jobNotes", () => ({ notifyJobSettled: () => undefined }));
 vi.mock("../lib/attention", () => ({ askForAttention: vi.fn(async () => undefined) }));
+const picker = vi.hoisted(() => ({
+  pickFolder: vi.fn(async (_title: string, _from?: string): Promise<string | null> => null),
+}));
+vi.mock("../lib/pickFolder", () => picker);
 
 let fs: ExportMemFs;
 let store: ProjectStoreAccess;
@@ -432,6 +437,97 @@ describe("ExportCard", () => {
       expect(screen.queryByText(/gentler setting|gentlest setting/)).toBeNull();
     });
 
+    // Save somewhere else (S3b): after a failure that is about the place the file was going (a drive that
+    // filled up, a folder that would not take it), the person can choose another folder and the export
+    // starts again there.
+    describe("Save somewhere else", () => {
+      const SAVE = { name: "save one.mp4 somewhere else" };
+      beforeEach(() => picker.pickFolder.mockReset());
+
+      it("is offered after a failure about the place the file was going, with a line that says what it does", async () => {
+        for (const error of ["ENOSPC: no space left on device", "Permission denied"]) {
+          __resetExportQueue();
+          const sub = await failing(error);
+          offerExportRetry(sub.job_id, async () => ({ ok: true }));
+          await whenExportsSettle();
+          const view = render(<ExportCard />);
+          expect(screen.getByRole("button", SAVE), error).toBeVisible();
+          expect(screen.getByText(/save it somewhere else/i), error).toBeVisible();
+          expect(screen.getByRole("button", { name: "try again one.mp4" }), error).toBeVisible();
+          view.unmount();
+        }
+      });
+
+      it("is not offered after any other failure, or when nothing can start the export again", async () => {
+        for (const error of [
+          MEMORY,
+          "Error: render failed",
+          "execution deadline expired",
+          "the finished video failed verification",
+        ]) {
+          __resetExportQueue();
+          const sub = await failing(error);
+          offerExportRetry(sub.job_id, async () => ({ ok: true }));
+          await whenExportsSettle();
+          const view = render(<ExportCard />);
+          expect(screen.queryByRole("button", SAVE), error).toBeNull();
+          view.unmount();
+        }
+        __resetExportQueue();
+        await failing("ENOSPC: no space left on device"); // no way to start it again was offered
+        await whenExportsSettle();
+        render(<ExportCard />);
+        expect(screen.queryByRole("button", SAVE)).toBeNull();
+      });
+
+      it("asks for a folder, and starts the export again with it; the failed row goes once the new one is started", async () => {
+        picker.pickFolder.mockResolvedValueOnce("E:\\Elsewhere");
+        const sub = await failing("ENOSPC: no space left on device");
+        const seen: Array<{ saveTo?: string; rung: number }> = [];
+        offerExportRetry(sub.job_id, async (rung, _failed, options) => {
+          seen.push({ saveTo: options.saveTo, rung });
+          return { ok: true };
+        });
+        await whenExportsSettle();
+        render(<ExportCard />);
+        fireEvent.click(screen.getByRole("button", SAVE));
+        await waitFor(() => expect(screen.queryByText("Export stopped")).toBeNull());
+        expect(picker.pickFolder).toHaveBeenCalledTimes(1);
+        expect(seen).toEqual([{ saveTo: "E:\\Elsewhere", rung: 0 }]);
+      });
+
+      it("does nothing when the picker is closed without a choice, or cannot open", async () => {
+        const sub = await failing("Permission denied");
+        const restarted = vi.fn(async () => ({ ok: true }));
+        offerExportRetry(sub.job_id, restarted);
+        await whenExportsSettle();
+        render(<ExportCard />);
+        picker.pickFolder.mockResolvedValueOnce(null);
+        fireEvent.click(screen.getByRole("button", SAVE));
+        await act(async () => undefined);
+        picker.pickFolder.mockRejectedValueOnce(new Error("no dialog"));
+        fireEvent.click(screen.getByRole("button", SAVE));
+        await act(async () => undefined);
+        expect(restarted).not.toHaveBeenCalled();
+        expect(screen.getByText("Export stopped")).toBeVisible();
+        expect(screen.getByRole("button", SAVE)).toBeEnabled();
+      });
+
+      it("shows why it did not work when the new export was refused, and can be pressed again", async () => {
+        picker.pickFolder.mockResolvedValue("E:\\Elsewhere");
+        const sub = await failing("Permission denied");
+        offerExportRetry(sub.job_id, async () => ({
+          ok: false,
+          error: "could not make the folder E:/Elsewhere",
+        }));
+        await whenExportsSettle();
+        render(<ExportCard />);
+        fireEvent.click(screen.getByRole("button", SAVE));
+        await screen.findByText(/Could not start again: could not make the folder/);
+        expect(screen.getByRole("button", SAVE)).toBeEnabled();
+      });
+    });
+
     describe("after the graphics chip stopped the export", () => {
       const onChip = (error: string) =>
         start(
@@ -555,7 +651,7 @@ describe("ExportCard", () => {
   });
 
   describe("a question that needs the person", () => {
-    const questionOf = (reasons: string[]) =>
+    const questionOf = (reasons: string[], over: { movable?: boolean } = {}) =>
       planQuestions({
         via: "chat",
         count: 1,
@@ -568,6 +664,7 @@ describe("ExportCard", () => {
         destinationShort: true,
         scratchShort: false,
         drive: "D:",
+        movable: over.movable ?? false,
         seconds: 1500,
         secondsGuessed: false,
         executionLimitSeconds: 28_800,
@@ -661,6 +758,92 @@ describe("ExportCard", () => {
       await act(async () => undefined);
       expect(container).toBeEmptyDOMElement();
       expect(useExportQuestions.getState().open?.canHide).toBe(false);
+    });
+
+    // The Save to box (S3b): the same row as the dialog's, from the same record, so a pick made in either
+    // is the one either Continue carries.
+    describe("with the Save to box", () => {
+      const boxed = () => questionOf(["disk_shortage"], { movable: true });
+      const askBoxed = (folderNow: string | undefined = "D:/Videos") =>
+        askQuestion(boxed(), { projectDir: "/proj", folderNow });
+      beforeEach(() => picker.pickFolder.mockReset());
+
+      it("shows where the video goes now with a Browse button, and no such row on a question without the box", async () => {
+        render(<ExportCard />);
+        const outcome = askBoxed();
+        await act(async () => undefined);
+        putAway();
+        let box = await screen.findByRole("group", { name: "export question" });
+        const row = within(box).getByRole("group", { name: "Save to" });
+        expect(within(row).getByText("D:\\Videos")).toBeVisible();
+        expect(within(row).getByRole("button", { name: /Browse/ })).toBeVisible();
+        act(() => void answerQuestion(useExportQuestions.getState().open!.id, "cancel", "card"));
+        await outcome;
+        void askQuestion(questionOf(["disk_shortage"]), {
+          projectDir: "/proj",
+          folderNow: "D:/Videos",
+        });
+        await act(async () => undefined);
+        putAway();
+        box = await screen.findByRole("group", { name: "export question" });
+        expect(within(box).queryByRole("group", { name: "Save to" })).toBeNull();
+      });
+
+      it("shows the pick the dialog already had, and Continue here carries it", async () => {
+        render(<ExportCard />);
+        const outcome = askBoxed();
+        await act(async () => undefined);
+        act(() => void chooseQuestionFolder(useExportQuestions.getState().open!.id, "E:\\Else"));
+        putAway();
+        const box = await screen.findByRole("group", { name: "export question" });
+        expect(within(box).getByText("E:\\Else")).toBeVisible();
+        expect(within(box).queryByText("D:\\Videos")).toBeNull();
+        fireEvent.click(within(box).getByRole("button", { name: "Continue" }));
+        expect(await outcome).toMatchObject({ answer: "continue", by: "card", folder: "E:\\Else" });
+      });
+
+      it("has a Browse that works here too, and a pick made here is the one the dialog would show", async () => {
+        picker.pickFolder.mockResolvedValueOnce("E:\\Picked");
+        render(<ExportCard />);
+        void askBoxed();
+        await act(async () => undefined);
+        putAway();
+        const box = await screen.findByRole("group", { name: "export question" });
+        fireEvent.click(within(box).getByRole("button", { name: /Browse/ }));
+        expect(await within(box).findByText("E:\\Picked")).toBeVisible();
+        expect(picker.pickFolder).toHaveBeenCalledWith(expect.any(String), "D:/Videos");
+        expect(useExportQuestions.getState().open?.folder).toEqual({
+          now: "D:/Videos",
+          picked: "E:\\Picked",
+        });
+      });
+
+      it("does not offer Start anyway once another folder is picked", async () => {
+        render(<ExportCard />);
+        void askBoxed();
+        await act(async () => undefined);
+        putAway();
+        let box = await screen.findByRole("group", { name: "export question" });
+        expect(within(box).getByRole("button", { name: "Start anyway" })).toBeVisible();
+        act(() => void chooseQuestionFolder(useExportQuestions.getState().open!.id, "E:\\Else"));
+        box = await screen.findByRole("group", { name: "export question" });
+        expect(within(box).queryByRole("button", { name: "Start anyway" })).toBeNull();
+      });
+
+      it("lets the person take a pick back on the card too: Undo, and Start anyway returns", async () => {
+        render(<ExportCard />);
+        const outcome = askBoxed();
+        await act(async () => undefined);
+        act(() => void chooseQuestionFolder(useExportQuestions.getState().open!.id, "E:\\Else"));
+        putAway();
+        const box = await screen.findByRole("group", { name: "export question" });
+        fireEvent.click(within(box).getByRole("button", { name: "Undo" }));
+        expect(await within(box).findByText("D:\\Videos")).toBeVisible();
+        expect(within(box).queryByRole("button", { name: "Undo" })).toBeNull();
+        expect(within(box).getByRole("button", { name: "Start anyway" })).toBeVisible();
+        fireEvent.click(within(box).getByRole("button", { name: "Continue" }));
+        expect((await outcome) as object).not.toHaveProperty("folder");
+      });
     });
   });
 

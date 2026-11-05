@@ -19,8 +19,11 @@ import {
   whenExportsSettle,
   whenExportTelemetrySettles,
   localDeliveryPort,
+  ExportMoveRequest,
+  ExportRequestError,
 } from "./exportQueue";
-import { exportTool } from "./exportItems";
+import { ExportStory } from "./exportTrace";
+import { exportTool, MAX_EXPORT_MOVES, runWithMoves } from "./exportItems";
 import { addClipsTool, addTextClipsTool } from "./placement";
 import { ProjectStoreAccess, joinPath } from "../tools/store";
 import { __resetJobNotes, pendingJobNotes } from "../store/jobNotes";
@@ -979,5 +982,146 @@ describe("one export call wakes the agent once", () => {
       "03 narration.wav",
     ]);
     expect(pendingJobNotes(DIR).map((n) => n.status)).toEqual(["done", "done"]);
+  });
+});
+
+// Save to (Phase 3, S3b): when the person answers the question about the room for the file by choosing
+// another folder, the request ends as a move and the tool starts it again at that folder. The loop is the
+// one place that does it, for the Export menu, the chat, an outside assistant and a Try again alike.
+describe("starting again where the person chose (Save to)", () => {
+  const move = (folder: string, story?: ExportStory) => new ExportMoveRequest(folder, story);
+
+  it("runs the attempt once, and returns its result, when nothing moves", async () => {
+    const attempt = vi.fn(async () => ({ ok: true, saved_to: "a.mp4" }));
+    expect(await runWithMoves(attempt)).toEqual({ ok: true, saved_to: "a.mp4" });
+    expect(attempt).toHaveBeenCalledTimes(1);
+    expect(attempt).toHaveBeenCalledWith(undefined);
+  });
+
+  it("runs it again at the folder the person chose, then again at the next one they choose", async () => {
+    const seen: Array<string | undefined> = [];
+    const result = await runWithMoves(async (placed) => {
+      seen.push(placed?.dir);
+      if (seen.length === 1) throw move("E:/One");
+      if (seen.length === 2) throw move("F:/Two");
+      return { ok: true };
+    });
+    expect(result).toEqual({ ok: true });
+    expect(seen).toEqual([undefined, "E:/One", "F:/Two"]);
+  });
+
+  it("starts at a folder it was given, as a Try again from the card does", async () => {
+    const seen: Array<string | undefined> = [];
+    await runWithMoves(
+      async (placed) => {
+        seen.push(placed?.dir);
+        return { ok: true };
+      },
+      { dir: "G:/Chosen" },
+    );
+    expect(seen).toEqual(["G:/Chosen"]);
+  });
+
+  it("hands the story of the request that moved to the next one, so the report tells the whole of it", async () => {
+    const story = new ExportStory();
+    story.trace.record("requested", "chat");
+    const stories: Array<ExportStory | undefined> = [];
+    await runWithMoves(async (placed) => {
+      stories.push(placed?.story);
+      if (stories.length === 1) throw move("E:/One", story);
+      return { ok: true };
+    });
+    expect(stories).toEqual([undefined, story]);
+  });
+
+  it("stops after too many moves with a plain refusal, and does not loop", async () => {
+    const attempt = vi.fn(async (): Promise<Record<string, unknown>> => {
+      throw move("E:/Again");
+    });
+    const refusal = await runWithMoves(attempt).catch((error: unknown) => error);
+    expect(refusal).toBeInstanceOf(ExportRequestError);
+    expect((refusal as ExportRequestError).status).toBe("blocked");
+    expect(String((refusal as Error).message)).toMatch(/folder/i);
+    expect(attempt.mock.calls.length).toBe(MAX_EXPORT_MOVES + 1);
+  });
+
+  it("lets every other error through untouched, whichever attempt it comes from", async () => {
+    const boom = new Error("boom");
+    await expect(
+      runWithMoves(async () => {
+        throw boom;
+      }),
+    ).rejects.toBe(boom);
+    const declined = new ExportRequestError("no", [], "declined");
+    let calls = 0;
+    await expect(
+      runWithMoves(async () => {
+        if (calls++ === 0) throw move("E:/One");
+        throw declined;
+      }),
+    ).rejects.toBe(declined);
+  });
+
+  it("hands what the person already said Start anyway to on to the attempt that starts at the folder", async () => {
+    const seen: Array<readonly string[] | undefined> = [];
+    await runWithMoves(async (placed) => {
+      seen.push(placed?.waived);
+      if (seen.length === 1)
+        throw new ExportMoveRequest("E:/One", undefined, undefined, ["memory"]);
+      return { ok: true };
+    });
+    expect(seen).toEqual([undefined, ["memory"]]);
+  });
+
+  it("carries the story of the request that moved into the report of the export that starts at the folder", async () => {
+    const p = await project({ origin: true });
+    const story = new ExportStory();
+    story.trace.record("requested", "chat");
+    story.trace.record("dialog_shown", "b2", 26, 9);
+    story.trace.record("dialog_choice", "browse", 4, 1);
+    exportBeacon.mockClear();
+    const r = (await exportTool({}, p.ctx, undefined, { dir: "E:/Elsewhere", story })) as Any;
+    expect(r.ok, r.error).toBe(true);
+    await whenExportsSettle();
+    await whenExportTelemetrySettles();
+    const report = exportBeacon.mock.calls.at(-1)![0] as Any;
+    const words = report.trace.map((e: Any) => (e.v ? `${e.e}:${e.v}` : e.e));
+    expect(words.slice(0, 3)).toEqual([
+      "requested:chat",
+      "dialog_shown:b2",
+      "dialog_choice:browse",
+    ]);
+    expect(words.at(-1)).toBe("outcome:done");
+    // One request, told once: starting again at the folder is not a second request.
+    expect(words.filter((word: string) => word.startsWith("requested"))).toEqual([
+      "requested:chat",
+    ]);
+    // the person's folder is theirs: it is in no report
+    expect(JSON.stringify(report)).not.toMatch(/Elsewhere|E:/);
+  });
+
+  it("tells a second try that was also moved once: one request, one retry, however many folders it was sent to", async () => {
+    const p = await project({ origin: true });
+    const story = new ExportStory();
+    story.trace.record("requested", "chat");
+    story.trace.record("retry", "browse", 0, 0);
+    story.trace.record("dialog_shown", "b2", 26, 9);
+    story.trace.record("dialog_choice", "browse", 4, 1);
+    exportBeacon.mockClear();
+    const r = (await exportTool(
+      {},
+      p.ctx,
+      { from: 0, minRung: 0 },
+      { dir: "E:/Elsewhere", story },
+    )) as Any;
+    expect(r.ok, r.error).toBe(true);
+    await whenExportsSettle();
+    await whenExportTelemetrySettles();
+    const report = exportBeacon.mock.calls.at(-1)![0] as Any;
+    const words = report.trace.map((e: Any) => (e.v ? `${e.e}:${e.v}` : e.e));
+    expect(words.filter((word: string) => word.startsWith("requested"))).toEqual([
+      "requested:chat",
+    ]);
+    expect(words.filter((word: string) => word.startsWith("retry"))).toEqual(["retry:browse"]);
   });
 });
