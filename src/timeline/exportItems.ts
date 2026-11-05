@@ -11,12 +11,14 @@ import type { ClientToolContext } from "../tools/context";
 import type { LibraryClip } from "../tools/store";
 import { loadTimeline } from "./engine";
 import {
+  ExportMoveRequest,
   ExportRequestError,
   exportVia,
   isDestinationReserved,
   sealExportBatch,
   submitExports,
   type ExportSpec,
+  type MovedTo,
 } from "./exportQueue";
 import type { ExportRefusalFacts } from "../api/agentEvents";
 import type { ExportStory } from "./exportTrace";
@@ -46,21 +48,63 @@ type Args = Record<string, unknown>;
 /** Files one call may deliver. The real request was 19; this bounds a runaway list. */
 export const MAX_EXPORT_ITEMS = 50;
 
+/** How many times one call may be sent to another folder. Each move is a person's own choice in the Save to
+ *  box, so this only stops a loop. */
+export const MAX_EXPORT_MOVES = 10;
+
+/** Run an export attempt, and run it again at the folder the person chose whenever it ends as a move
+ *  ({@link ExportMoveRequest}). The one place that does it, for the Export menu, the chat, an outside assistant
+ *  and the card's Try again alike. Every other error goes through untouched, and each new attempt carries the
+ *  story of the one that moved, so the report tells all of it. `first` starts the first attempt at a folder
+ *  already chosen (the card's Save somewhere else). */
+export async function runWithMoves(
+  attempt: (moved: MovedTo | undefined) => Promise<Result>,
+  first?: MovedTo,
+): Promise<Result> {
+  let moved = first;
+  for (let moves = 0; ; moves++) {
+    try {
+      return await attempt(moved);
+    } catch (error) {
+      if (!(error instanceof ExportMoveRequest)) throw error;
+      if (moves >= MAX_EXPORT_MOVES)
+        throw new ExportRequestError(
+          "the export was moved to another folder too many times; choose a folder and export again",
+          [],
+          "blocked",
+          error.workload,
+          error.story,
+        );
+      moved = {
+        dir: error.folder,
+        ...(error.story ? { story: error.story } : {}),
+        ...(error.waived.length ? { waived: error.waived } : {}),
+      };
+    }
+  }
+}
+
 /** The `export` tool: separate files when the call names any, else the whole timeline. `retrying` is the chat
- *  card's Try again (render.ts retryOf), never a tool argument. */
+ *  card's Try again (render.ts retryOf), never a tool argument; so is `placed`, the folder the person chose for it
+ *  instead of the one the call named. */
 export async function exportTool(
   args: Args,
   ctx: ClientToolContext | null,
   retrying?: { from: Rung; minRung: Rung; processor?: true },
+  placed?: MovedTo,
 ): Promise<Result> {
   let result: Result;
   let status: "blocked" | "declined" | "cancelled" = "blocked";
   let workload: import("./renderPlan").RenderWorkload | undefined;
   let story: ExportStory | undefined;
   try {
-    result = await (args.media_refs !== undefined || args.clip_ids !== undefined
-      ? exportItemsTool(args, ctx)
-      : exportTimelineTool(args, ctx, retrying));
+    result = await runWithMoves(
+      (moved) =>
+        args.media_refs !== undefined || args.clip_ids !== undefined
+          ? exportItemsTool(args, ctx)
+          : exportTimelineTool(args, ctx, retrying, moved),
+      placed,
+    );
   } catch (error) {
     if (error instanceof ExportRequestError) {
       status = error.status;

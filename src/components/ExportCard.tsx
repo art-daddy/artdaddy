@@ -15,10 +15,12 @@
 // is woken. Every number it shows comes from the same feed as the dialog's.
 import { useEffect, useReducer, useSyncExternalStore } from "react";
 
+import { pickFolder } from "../lib/pickFolder";
 import { useEditor } from "../store/editor";
 import {
   answerQuestion,
   mountQuestionCard,
+  movesTheFile,
   setQuestionHidden,
   useExportQuestions,
 } from "../store/exportQuestionHost";
@@ -33,6 +35,7 @@ import {
 } from "../timeline/exportQueue";
 import { answerButtons } from "../timeline/exportQuestions";
 import {
+  canSaveElsewhere,
   describeChipFailure,
   describeEncoder,
   describeLiveStatus,
@@ -41,8 +44,10 @@ import {
   describeTryAgain,
   describeWaiting,
   failureOf,
+  SAVE_ELSEWHERE_LINE,
 } from "../timeline/exportWords";
 import ExportProgressBar from "./ExportProgressBar";
+import SaveToRow from "./SaveToRow";
 import { cn } from "./ui";
 
 /** How often the line is redrawn while something is running: well inside the minute it promises. */
@@ -51,6 +56,17 @@ const TICK_MS = 10_000;
 const GOOD_NEWS_MS = 60_000;
 
 const quiet = "rounded px-1.5 py-0.5 text-[11px] text-neutral-400 hover:bg-neutral-800";
+
+/** Ask for a folder and start the failed export again there. A picker closed without a choice, or one that cannot
+ *  open, changes nothing. */
+async function saveSomewhereElse(jobId: string): Promise<void> {
+  try {
+    const dir = await pickFolder("Save the video to");
+    if (dir) await retryExport(jobId, useEditor.getState().store ?? undefined, { saveTo: dir });
+  } catch {
+    /* nothing chosen */
+  }
+}
 
 export default function ExportCard(): JSX.Element | null {
   const projectDir = useEditor((s) => s.store?.projectDir ?? null);
@@ -117,21 +133,24 @@ export default function ExportCard(): JSX.Element | null {
               {asked.question.facts.map((fact) => `${fact.label} ${fact.value}`).join(" · ")}
             </div>
           )}
+          {asked.folder && <SaveToRow id={asked.id} folder={asked.folder} compact />}
           <div className="mt-2 flex flex-wrap items-center gap-2">
-            {answerButtons(asked.question).map((b) => (
-              <button
-                key={b.answer}
-                type="button"
-                onClick={() => answerQuestion(asked.id, b.answer, "card")}
-                className={
-                  b.answer === "continue"
-                    ? "rounded-md bg-neutral-100 px-2.5 py-1 text-xs font-medium text-neutral-900 hover:bg-white"
-                    : cn(quiet, b.answer === "start_anyway" && "underline underline-offset-2")
-                }
-              >
-                {b.label}
-              </button>
-            ))}
+            {answerButtons(asked.question)
+              .filter((b) => b.answer !== "start_anyway" || !movesTheFile(asked.folder))
+              .map((b) => (
+                <button
+                  key={b.answer}
+                  type="button"
+                  onClick={() => answerQuestion(asked.id, b.answer, "card")}
+                  className={
+                    b.answer === "continue"
+                      ? "rounded-md bg-neutral-100 px-2.5 py-1 text-xs font-medium text-neutral-900 hover:bg-white"
+                      : cn(quiet, b.answer === "start_anyway" && "underline underline-offset-2")
+                  }
+                >
+                  {b.label}
+                </button>
+              ))}
             <button
               type="button"
               onClick={() => void setQuestionHidden(asked.id, false)}
@@ -215,6 +234,8 @@ export default function ExportCard(): JSX.Element | null {
             : r.state === "failed" && r.chipFailed
               ? describeChipFailure("again")
               : "";
+        const elsewhere =
+          r.state === "failed" && r.canRetry === true && canSaveElsewhere(failureOf(r.error).code);
         return (
           <div key={r.job_id} className="flex items-start justify-between gap-2">
             <div className="min-w-0">
@@ -231,19 +252,35 @@ export default function ExportCard(): JSX.Element | null {
               )}
               {result.detail && <div className="text-[11px] text-neutral-400">{result.detail}</div>}
               {tryAgain && <div className="text-[11px] text-neutral-400">{tryAgain}</div>}
+              {elsewhere && (
+                <div className="text-[11px] text-neutral-400">{SAVE_ELSEWHERE_LINE}</div>
+              )}
               {r.note && <div className="text-[11px] text-amber-300">{r.note}</div>}
               {r.state === "failed" && r.canRetry && (
-                <button
-                  type="button"
-                  aria-label={`try again ${r.filename}`}
-                  disabled={r.retrying === true}
-                  onClick={() =>
-                    void retryExport(r.job_id, useEditor.getState().store ?? undefined)
-                  }
-                  className="mt-1.5 rounded-md bg-neutral-100 px-2.5 py-1 text-xs font-medium text-neutral-900 hover:bg-white disabled:cursor-default disabled:opacity-60"
-                >
-                  {r.retrying ? "Starting…" : "Try again"}
-                </button>
+                <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    aria-label={`try again ${r.filename}`}
+                    disabled={r.retrying === true}
+                    onClick={() =>
+                      void retryExport(r.job_id, useEditor.getState().store ?? undefined)
+                    }
+                    className="rounded-md bg-neutral-100 px-2.5 py-1 text-xs font-medium text-neutral-900 hover:bg-white disabled:cursor-default disabled:opacity-60"
+                  >
+                    {r.retrying ? "Starting…" : "Try again"}
+                  </button>
+                  {elsewhere && (
+                    <button
+                      type="button"
+                      aria-label={`save ${r.filename} somewhere else`}
+                      disabled={r.retrying === true}
+                      onClick={() => void saveSomewhereElse(r.job_id)}
+                      className={cn(quiet, "underline underline-offset-2 disabled:opacity-60")}
+                    >
+                      Save somewhere else…
+                    </button>
+                  )}
+                </div>
               )}
             </div>
             <button

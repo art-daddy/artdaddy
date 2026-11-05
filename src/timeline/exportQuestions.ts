@@ -54,6 +54,11 @@ export interface ExportQuestion {
   /** What the trace records when it is shown: for a memory or space question the need and what the PC has,
    *  in 128 MiB steps; for a notice how many reasons it lists and which (one bit each). */
   readonly bands: { readonly n: number; readonly m: number };
+  /** The question takes a folder as part of its answer: the exported file's room can be had by saving the
+   *  video somewhere else. A flag, not a path: the folder the file is going to and the one the person
+   *  picks live with the question on screen (store/exportQuestionHost.ts), so this record, which is also
+   *  what the report is told from, never carries one. */
+  readonly folderBox: "save_to" | null;
 }
 
 /** What the pre-start check found. Built by the queue from its measurements; carries no names or paths. */
@@ -73,6 +78,9 @@ export interface PreflightPicture {
   readonly scratchShort: boolean;
   /** The destination's drive ("D:") when the path names one. */
   readonly drive: string | null;
+  /** The request owns where its file goes (one export whose tool chose the destination), so it can be started
+   *  again at another folder. False for a batch of files, which each have a name in one chosen folder. */
+  readonly movable: boolean;
   readonly seconds: number | null;
   readonly secondsGuessed: boolean;
   readonly executionLimitSeconds: number | null;
@@ -111,6 +119,39 @@ export function driveOf(path: string): string | null {
   return match ? `${match[1].toUpperCase()}:` : null;
 }
 
+/** A folder spelled one way, so two spellings of the same place compare equal: one kind of slash, no doubled or
+ *  trailing ones (a drive's root keeps its own, and a share keeps its two leading slashes). */
+function folderKey(path: string): string {
+  const slashed = path.trim().replace(/\\/g, "/");
+  const share = /^\/\/[^/]/.test(slashed);
+  const joined = slashed.replace(/\/{2,}/g, "/");
+  const key = (share ? `/${joined}` : joined).replace(/(.)\/+$/, "$1");
+  return /^[A-Za-z]:$/.test(key) ? `${key}/` : key;
+}
+
+/** Whether two spellings name the same folder. A Windows path (a drive or a share) is compared without regard to
+ *  case, as Windows does; any other path as it is written. */
+export function sameFolder(a: string, b: string): boolean {
+  const left = folderKey(a);
+  const right = folderKey(b);
+  const windows = /^([A-Za-z]:|\/\/[^/])/.test(left) || /^([A-Za-z]:|\/\/[^/])/.test(right);
+  return windows ? left.toLowerCase() === right.toLowerCase() : left === right;
+}
+
+/** The folder a file path is in ("C:/out/movie.mp4" is "C:/out"), or "" for a bare name. */
+export function folderOf(path: string): string {
+  const cut = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  if (cut < 0) return "";
+  const head = path.slice(0, cut);
+  if (head === "") return "/";
+  return /^[A-Za-z]:$/.test(head) ? `${head}/` : head;
+}
+
+/** A folder as the person's own system writes it: backslashes for a path on a drive or on a share. */
+export function displayFolder(path: string): string {
+  return /^([A-Za-z]:|\/\/[^/])/.test(path) ? path.replace(/\//g, "\\") : path;
+}
+
 const ADVICE_FIT =
   "Close other programs (web browsers, games, other editors), then press Continue. We'll check again.";
 const NATIVE_ADVICE_FIT =
@@ -134,6 +175,7 @@ function memoryQuestion(p: PreflightPicture): ExportQuestion {
     answers: ["cancel", "continue", "start_anyway"],
     warning: true,
     bands: { n: bandOf(p.memoryNeededBytes), m: bandOf(p.memoryUsableBytes) },
+    folderBox: null,
   };
 }
 
@@ -143,6 +185,8 @@ function spaceQuestion(
 ): ExportQuestion {
   const output = kind === "output_space";
   const drive = output ? p.drive : null;
+  // Only the exported file can go somewhere else: ArtDaddy's own working files stay where it keeps them.
+  const folderBox = output && p.movable ? ("save_to" as const) : null;
   const what =
     p.count > 1
       ? "the exported videos and their temporary files together"
@@ -167,7 +211,7 @@ function spaceQuestion(
       },
     ],
     advice: output
-      ? `Free up some space${drive ? ` on ${drive}` : ""}, then press Continue. We'll check again.`
+      ? `Free up some space${drive ? ` on ${drive}` : ""}${folderBox ? ", or save the video somewhere else" : ""}, then press Continue. We'll check again.`
       : "Free up some space on the drive where ArtDaddy keeps its working files (usually the one Windows is on), then press Continue. We'll check again.",
     nativeAdvice: output
       ? `To make room, choose Cancel, free up some space${drive ? ` on ${drive}` : ""} and export again. ${NATIVE_RISK}`
@@ -180,6 +224,7 @@ function spaceQuestion(
       n: bandOf(p.spaceNeededBytes),
       m: bandOf(output ? p.destinationFreeBytes : p.scratchFreeBytes),
     },
+    folderBox,
   };
 }
 
@@ -246,6 +291,7 @@ function noticeQuestion(p: PreflightPicture, shown: readonly NoticeReason[]): Ex
       n: shown.length,
       m: shown.reduce((bits, reason) => bits | (CONFIRM_REASON_BITS[reason] ?? 0), 0),
     },
+    folderBox: null,
   };
 }
 

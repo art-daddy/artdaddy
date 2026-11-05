@@ -11,11 +11,13 @@ import { useEffect, useRef } from "react";
 import {
   answerQuestion,
   mountQuestionHost,
+  movesTheFile,
   setQuestionHidden,
   useExportQuestions,
 } from "../store/exportQuestionHost";
 import { answerButtons } from "../timeline/exportQuestions";
 import { useAnswerShield } from "./answerShield";
+import SaveToRow from "./SaveToRow";
 import { cn } from "./ui";
 
 /** Another full-screen layer (the Export dialog, a settings box) sits on top of the chat and would hide the
@@ -56,7 +58,11 @@ export default function ExportQuestionDialog(): JSX.Element | null {
   const answer = (choice: "continue" | "start_anyway" | "cancel") =>
     guard(() => void answerQuestion(open.id, choice, "dialog"));
   const buttons = answerButtons(q);
-  const quietButton = buttons.find((b) => b.answer === "start_anyway");
+  // The quiet link is about the folder the file was going to: once another one is picked, that folder has not
+  // been looked at yet, so there is nothing to start anyway.
+  const quietButton = movesTheFile(open.folder)
+    ? undefined
+    : buttons.find((b) => b.answer === "start_anyway");
 
   return (
     <div
@@ -88,6 +94,7 @@ export default function ExportQuestionDialog(): JSX.Element | null {
           </dl>
         )}
         <p className="mt-3 text-sm text-neutral-300">{q.advice}</p>
+        {open.folder && <SaveToRow id={open.id} folder={open.folder} />}
         <div className="mt-5 flex flex-wrap items-center justify-end gap-2">
           {open.canHide && !otherLayerOpen() && (
             <button

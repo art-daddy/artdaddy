@@ -16,6 +16,8 @@ import { useEditor } from "../store/editor";
 import { useExportJob } from "../store/exportJob";
 import {
   __resetExportQueue,
+  ExportMoveRequest,
+  isDestinationReserved,
   listExportRecords,
   manageExportsTool,
   submitExports,
@@ -31,6 +33,10 @@ const exportBeacon = vi.hoisted(() => vi.fn(async (_event: unknown) => undefined
 vi.mock("../api/exportEvents", () => ({ reportExport: exportBeacon }));
 const attention = vi.hoisted(() => ({ askForAttention: vi.fn(async () => undefined) }));
 vi.mock("../lib/attention", () => attention);
+const picker = vi.hoisted(() => ({
+  pickFolder: vi.fn(async (_title: string, _from?: string): Promise<string | null> => null),
+}));
+vi.mock("../lib/pickFolder", () => picker);
 vi.mock("../tools/genJobs", () => ({
   openProjectJobs: async () => ({
     begin: async () => `job-${Math.random().toString(36).slice(2, 8)}`,
@@ -273,5 +279,108 @@ describe("an assistant's export on a PC that is short of memory", () => {
     ]);
     expect(report.trace[3]).toMatchObject({ m: 2 }); // answered on the card
     expect(report).toMatchObject({ started_by: "chat", limit: "os" });
+  });
+});
+
+// The journey S3b exists for. A person exports to a drive that is nearly full. What used to happen: a question
+// that could only say "free up some space" (the drive is the one thing the person could not change, short of
+// freeing space they did not have). What must happen now: the same question with a Save to row; the person
+// picks another folder in the dialog, looks at the chat, presses Continue on the card, and the request ends as a
+// move to that folder: nothing was admitted, reserved or written at the first one.
+describe("an export to a drive that is nearly full", () => {
+  it("offers another folder, shows the pick on both surfaces, and ends the request as a move to it", async () => {
+    pc = { ...pc, available_memory_bytes: 12 * GB, destination_free_bytes: 1.2 * GB };
+    useExportJob.setState({
+      calibrations: [
+        {
+          ...calibration,
+          elapsedSeconds: 50,
+          finalBytes: 3.4 * GB,
+          memoryBytes: 1 * GB,
+          temporaryBytes: 0,
+        },
+      ],
+    });
+    picker.pickFolder.mockResolvedValueOnce("E:\\Elsewhere");
+    render(
+      <>
+        <ExportQuestionDialog />
+        <ExportCard />
+      </>,
+    );
+    let ran = 0;
+    const destPath = "D:/Videos/reel.mp4";
+    const request = submitExports([
+      {
+        store,
+        dependencies: [],
+        destPath,
+        stagePath: `${destPath}.partial`,
+        filename: "reel.mp4",
+        workload: calibration.workload,
+        via: "chat" as const,
+        origin: AGENT,
+        movable: true as const,
+        meta: {
+          duration_s: 60,
+          width: 1920,
+          height: 1080,
+          fps: 30,
+          quality: "medium",
+          project_id: "",
+          calibration,
+        },
+        run: async () => {
+          ran++;
+          return {};
+        },
+      },
+    ]).then(
+      () => "started" as const,
+      (error: unknown) => error,
+    );
+
+    // 1. The question names the drive and offers a folder: where the video goes now, and Browse.
+    const dialog = await screen.findByRole("dialog", {
+      name: "Not enough space for the exported file",
+    });
+    expect(within(dialog).getByText("Free on D:")).toBeVisible();
+    expect(within(dialog).getByText(/or save the video somewhere else/)).toBeVisible();
+    const row = within(dialog).getByRole("group", { name: "Save to" });
+    expect(within(row).getByText("D:\\Videos")).toBeVisible();
+    expect(ran).toBe(0);
+    expect(listExportRecords()).toHaveLength(0);
+
+    // 2. The person picks another drive. Nothing happens to the export yet.
+    fireEvent.click(within(row).getByRole("button", { name: /Browse/ }));
+    expect(await within(dialog).findByText("E:\\Elsewhere")).toBeVisible();
+    expect(listExportRecords()).toHaveLength(0);
+    expect(isDestinationReserved(destPath)).toBe(false);
+
+    // 3. They put the dialog away to look at the chat: the card shows the same pick, and Continue there
+    //    carries it.
+    fireEvent.click(within(dialog).getByRole("button", { name: "Answer in chat" }));
+    const onCard = await screen.findByRole("group", { name: "export question" });
+    expect(within(onCard).getByText("E:\\Elsewhere")).toBeVisible();
+    expect(within(onCard).queryByRole("button", { name: "Start anyway" })).toBeNull();
+    fireEvent.click(within(onCard).getByRole("button", { name: "Continue" }));
+
+    // 4. The request ends as a move to the picked folder. Nothing ran, nothing was left behind, and the
+    //    drive that was too small is free to be asked for again.
+    const moved = await request;
+    expect(moved).toBeInstanceOf(ExportMoveRequest);
+    expect((moved as ExportMoveRequest).folder).toBe("E:\\Elsewhere");
+    expect(ran).toBe(0);
+    expect(listExportRecords()).toHaveLength(0);
+    expect(isDestinationReserved(destPath)).toBe(false);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByRole("group", { name: "export question" })).toBeNull();
+    const trace = (moved as ExportMoveRequest).story!.trace.snapshot();
+    expect(trace.map((e: Any) => (e.v ? `${e.e}:${e.v}` : e.e))).toEqual([
+      "requested:chat",
+      "dialog_shown:b2",
+      "dialog_choice:browse",
+    ]);
+    expect(trace[2]).toMatchObject({ m: 2 }); // answered on the card
   });
 });

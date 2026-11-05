@@ -21,6 +21,7 @@ import {
   whenExportEnds,
   whenExportsSettle,
   whenExportTelemetrySettles,
+  ExportMoveRequest,
   ExportRunError,
   ExportRequestError,
 } from "./exportQueue";
@@ -35,6 +36,7 @@ import { endProjectSession } from "../tools/coordinator";
 import { useExportJob } from "../store/exportJob";
 import { useAuth } from "../store/auth";
 import { EXPORT_SPEED_REVISION, type ExportCalibration } from "./exportOptions";
+import type { ExportQuestionKind } from "./exportQuestions";
 import { FakeJobs } from "../test/fakeJobs";
 import * as exportFlags from "../api/exportFlags";
 import { __setExportFlag } from "../api/exportFlags";
@@ -43,6 +45,7 @@ import { limitThatFired } from "./nativeDiagnostics";
 import {
   __resetExportQuestions,
   answerQuestion,
+  chooseQuestionFolder,
   hostMounted,
   mountQuestionHost,
   useExportQuestions,
@@ -1676,6 +1679,10 @@ describe("the questions an export asks before it starts", () => {
     duration?: number;
     signal?: AbortSignal;
     count?: number;
+    /** The request owns its destination, so the person may send it to another folder. */
+    movable?: boolean;
+    /** Kinds of question the person already said Start anyway to, in a request this one is the restart of. */
+    waived?: ExportQuestionKind[];
   }) {
     const { fs, store } = make();
     await whenExportTelemetrySettles();
@@ -1712,6 +1719,8 @@ describe("the questions an export asks before it starts", () => {
         filename: "movie.mp4",
         workload,
         via: opts.via ?? ("chat" as const),
+        ...(opts.movable ? { movable: true as const } : {}),
+        ...(opts.waived ? { waived: opts.waived } : {}),
         ...(opts.signal ? { submissionSignal: opts.signal } : {}),
         meta: {
           duration_s: workload.durationSeconds,
@@ -1732,7 +1741,7 @@ describe("the questions an export asks before it starts", () => {
     });
     const pending = submitExports(specs).then(
       () => "started" as const,
-      (error: unknown) => error as ExportRequestError,
+      (error: unknown) => error as ExportRequestError | ExportMoveRequest,
     );
     return { fs, store, pending, ran: () => ran };
   }
@@ -1977,6 +1986,270 @@ describe("the questions an export asks before it starts", () => {
     expect(await run.pending).toBe("started");
     await whenExportsSettle();
     expect(run.ran()).toBe(1);
+  });
+
+  // The Save to box (S3b). A request that owns its destination (the whole-timeline export) may be sent to
+  // another folder from the question about the exported file's room. The question ends the request with a
+  // move; the caller starts it again at the folder, because the render command, the staging file and the
+  // reservation all derive from the destination. Nothing may be left behind by the request that moved.
+  describe("the Save to box", () => {
+    const short = {
+      pc: { destination_free_bytes: 1.2 * GB },
+      history: { finalBytes: 3.4 * GB, temporaryBytes: 0 },
+    };
+    const openFolder = () => useExportQuestions.getState().open?.folder;
+    const pick = (folder: string | null) =>
+      chooseQuestionFolder(useExportQuestions.getState().open!.id, folder);
+
+    it("offers the box on the question about the exported file's room, naming the folder the file goes to", async () => {
+      const run = await scene({ ...short, movable: true });
+      await vi.waitFor(() => expect(shown()?.kind).toBe("output_space"));
+      expect(shown()?.folderBox).toBe("save_to");
+      expect(openFolder()).toEqual({ now: "C:/out", picked: null });
+      answer("cancel");
+      await run.pending;
+    });
+
+    it("does not offer it when the request cannot move, nor for several files, nor for the working space", async () => {
+      const fixed = await scene(short);
+      await vi.waitFor(() => expect(shown()?.kind).toBe("output_space"));
+      expect(shown()?.folderBox).toBeNull();
+      expect(openFolder()).toBeNull();
+      answer("cancel");
+      await fixed.pending;
+      __resetExportQueue();
+      const batch = await scene({ ...short, movable: true, count: 2 });
+      await vi.waitFor(() => expect(shown()?.kind).toBe("output_space"));
+      expect(shown()?.folderBox).toBeNull();
+      answer("cancel");
+      await batch.pending;
+      __resetExportQueue();
+      const working = await scene({
+        movable: true,
+        pc: { scratch_free_bytes: 2 * GB },
+        history: { finalBytes: 1 * GB, temporaryBytes: 5 * GB },
+      });
+      await vi.waitFor(() => expect(shown()?.kind).toBe("working_space"));
+      expect(shown()?.folderBox).toBeNull();
+      answer("cancel");
+      await working.pending;
+    });
+
+    it("sends the request to the folder the person picked: it starts nothing and leaves nothing behind", async () => {
+      const run = await scene({ ...short, movable: true });
+      await vi.waitFor(() => expect(shown()?.kind).toBe("output_space"));
+      expect(pick("E:/Elsewhere")).toBe(true);
+      answer("continue");
+      const moved = await run.pending;
+      expect(moved).toBeInstanceOf(ExportMoveRequest);
+      expect((moved as ExportMoveRequest).folder).toBe("E:/Elsewhere");
+      expect(run.ran()).toBe(0);
+      expect(measured).toBe(1); // the new folder is measured by the request that starts there, not here
+      leftNothing();
+      // the destination it was going to is free again, and so is the room it would have held
+      expect(await run.fs.exists(`${DEST}.part`)).toBe(false);
+    });
+
+    it("tells the report the person browsed to another folder, and never which", async () => {
+      const run = await scene({ ...short, movable: true });
+      await vi.waitFor(() => expect(shown()?.kind).toBe("output_space"));
+      pick("E:/Elsewhere");
+      answer("continue", "card");
+      const moved = (await run.pending) as ExportMoveRequest;
+      const trace = moved.story!.trace.snapshot();
+      expect(trace.map((e: Any) => (e.v ? `${e.e}:${e.v}` : e.e))).toEqual([
+        "requested:chat",
+        "dialog_shown:b2",
+        "dialog_choice:browse",
+      ]);
+      expect(JSON.stringify(trace)).not.toMatch(/Elsewhere|E:|[\\/]/);
+    });
+
+    it("remembers what the person already said Start anyway to: the restart does not ask it again", async () => {
+      // Short of memory AND of room: Start anyway on the memory question, then another folder for the file.
+      const both = {
+        ...short,
+        pc: { available_memory_bytes: 1.9 * GB, destination_free_bytes: 1.2 * GB },
+        history: { memoryBytes: 3.2 * GB, finalBytes: 3.4 * GB, temporaryBytes: 0 },
+      };
+      const first = await scene({ ...both, movable: true });
+      await vi.waitFor(() => expect(shown()?.kind).toBe("memory"));
+      answer("start_anyway");
+      await vi.waitFor(() => expect(shown()?.kind).toBe("output_space"));
+      pick("E:/Elsewhere");
+      answer("continue");
+      const moved = (await first.pending) as ExportMoveRequest;
+      expect(moved).toBeInstanceOf(ExportMoveRequest);
+      expect(moved.waived).toEqual(["memory"]);
+      __resetExportQueue();
+      // The restart, as the tool makes it: the same request with what was waived. The room is there now.
+      const again = await scene({
+        movable: true,
+        waived: [...moved.waived],
+        pc: { available_memory_bytes: 1.9 * GB },
+        history: both.history,
+      });
+      expect(await again.pending).toBe("started");
+      await whenExportsSettle();
+      expect(shown()).toBeUndefined(); // the memory question was not asked a second time
+      expect(again.ran()).toBe(1);
+    });
+
+    it("carries nothing that was not waived: a Continue on memory, then a move, asks memory again if it is still short", async () => {
+      const both = {
+        pc: { available_memory_bytes: 1.9 * GB, destination_free_bytes: 1.2 * GB },
+        history: { memoryBytes: 3.2 * GB, finalBytes: 3.4 * GB, temporaryBytes: 0 },
+      };
+      const first = await scene({ ...both, movable: true });
+      await vi.waitFor(() => expect(shown()?.kind).toBe("memory"));
+      pc = { ...pc, available_memory_bytes: 6 * GB }; // the person closed their browser
+      answer("continue");
+      await vi.waitFor(() => expect(shown()?.kind).toBe("output_space"));
+      pick("E:/Elsewhere");
+      answer("continue");
+      const moved = (await first.pending) as ExportMoveRequest;
+      expect(moved.waived).toEqual([]);
+      __resetExportQueue();
+      const again = await scene({
+        movable: true,
+        waived: [...moved.waived],
+        pc: { available_memory_bytes: 1.9 * GB },
+        history: both.history,
+      });
+      await vi.waitFor(() => expect(shown()?.kind).toBe("memory"));
+      answer("cancel");
+      await again.pending;
+    });
+
+    it("measures again and starts when Continue was pressed with no pick, as it always did", async () => {
+      const run = await scene({ ...short, movable: true });
+      await vi.waitFor(() => expect(shown()?.kind).toBe("output_space"));
+      pc = { ...pc, destination_free_bytes: 50 * GB }; // the person freed some space
+      answer("continue");
+      expect(await run.pending).toBe("started");
+      await whenExportsSettle();
+      expect(run.ran()).toBe(1);
+      expect(measured).toBe(2);
+    });
+
+    it("reads a pick of the folder the file already goes to as Continue", async () => {
+      const run = await scene({ ...short, movable: true });
+      await vi.waitFor(() => expect(shown()?.kind).toBe("output_space"));
+      pick("c:\\out\\");
+      pc = { ...pc, destination_free_bytes: 50 * GB };
+      answer("continue");
+      expect(await run.pending).toBe("started");
+      await whenExportsSettle();
+      expect(run.ran()).toBe(1);
+    });
+
+    it("keeps the file where it was when the person presses Start anyway after picking another folder", async () => {
+      const run = await scene({ ...short, movable: true });
+      await vi.waitFor(() => expect(shown()?.kind).toBe("output_space"));
+      pick("E:/Elsewhere");
+      answer("start_anyway");
+      expect(await run.pending).toBe("started");
+      await whenExportsSettle();
+      expect(run.ran()).toBe(1);
+      expect(await run.fs.exists(DEST)).toBe(true);
+    });
+
+    it("declines, and does not move, when the person cancels after picking a folder", async () => {
+      const run = await scene({ ...short, movable: true });
+      await vi.waitFor(() => expect(shown()?.kind).toBe("output_space"));
+      pick("E:/Elsewhere");
+      answer("cancel");
+      const refusal = (await run.pending) as ExportRequestError;
+      expect(refusal).toBeInstanceOf(ExportRequestError);
+      expect(refusal.status).toBe("declined");
+      leftNothing();
+    });
+
+    it("does not move a request that was stopped while the question was open, whatever was picked", async () => {
+      const stop = new AbortController();
+      const run = await scene({ ...short, movable: true, signal: stop.signal });
+      await vi.waitFor(() => expect(shown()?.kind).toBe("output_space"));
+      pick("E:/Elsewhere");
+      stop.abort();
+      const refusal = await run.pending;
+      expect(refusal).toBeInstanceOf(ExportRequestError);
+      expect((refusal as ExportRequestError).status).toBe("cancelled");
+      leftNothing();
+    });
+
+    it("moves only a request that is still the one the person answered: a request stopped as the answer arrives is cancelled", async () => {
+      const stop = new AbortController();
+      const run = await scene({ ...short, movable: true, signal: stop.signal });
+      await vi.waitFor(() => expect(shown()?.kind).toBe("output_space"));
+      pick("E:/Elsewhere");
+      answer("continue");
+      stop.abort(); // the same tick: the answer was accepted, then the request was stopped
+      const result = await run.pending;
+      expect(result).toBeInstanceOf(ExportRequestError);
+      expect((result as ExportRequestError).status).toBe("cancelled");
+      leftNothing();
+    });
+
+    it("never moves a native question: with no dialog mounted the box does not exist", async () => {
+      const first = await scene({ ...short, movable: true });
+      await vi.waitFor(() => expect(shown()?.kind).toBe("output_space"));
+      answer("cancel");
+      await first.pending;
+      __resetExportQueue();
+      __resetExportQuestions(); // no dialog mounted from here on
+      let message = "";
+      __setExportConfirmationForTests(async (text) => {
+        message = text;
+        return "continue";
+      });
+      pc = { ...roomy, ...short.pc };
+      const { fs, store } = make();
+      useExportJob.setState({
+        calibrations: [
+          {
+            ...calibration,
+            elapsedSeconds: 10,
+            finalBytes: 3.4 * GB,
+            memoryBytes: 1 * GB,
+            temporaryBytes: 0,
+          },
+        ],
+      });
+      let ran = 0;
+      const result = await submitExports([
+        {
+          store,
+          dependencies: [],
+          destPath: DEST,
+          stagePath: `${DEST}.part`,
+          filename: "movie.mp4",
+          movable: true,
+          workload: calibration.workload,
+          meta: {
+            duration_s: 10,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            quality: "medium",
+            project_id: "",
+            calibration,
+          },
+          run: async () => {
+            ran++;
+            await fs.writeBytes(`${DEST}.part`, new Uint8Array([1]));
+            return {};
+          },
+        },
+      ]).then(
+        () => "started",
+        (error: Error) => error,
+      );
+      await whenExportsSettle();
+      expect(result).toBe("started");
+      expect(ran).toBe(1);
+      expect(message).toContain("Not enough space for the exported file");
+      expect(message).not.toMatch(/Browse|somewhere else/i);
+    });
   });
 
   it("asks an assistant's long export about the time, and the same export from the Export menu not at all", async () => {

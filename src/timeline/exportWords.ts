@@ -220,6 +220,17 @@ export function describeWaiting(position: number): string {
     : "Waiting";
 }
 
+/** After a failure about the place the file was going (a drive that filled up, a folder that would not take it) the
+ *  person can choose another folder and the export starts again there (the card's Save somewhere else). A failure
+ *  anywhere else is not helped by a different folder, so none is offered. */
+export function canSaveElsewhere(reason: ExportReasonCode): boolean {
+  return reason === "storage_unavailable" || reason === "storage_full";
+}
+
+/** What the card says about Save somewhere else, beside Try again. */
+export const SAVE_ELSEWHERE_LINE =
+  "Or save it somewhere else: choose a folder and the export starts again there.";
+
 const PLAIN: Record<ExportReasonCode, string> = {
   none: "The export finished.",
   source_unavailable:

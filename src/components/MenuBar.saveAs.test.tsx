@@ -6,7 +6,7 @@
 // feature break. Mocking the platform here is the whole point of the separation.
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const ed = {
   selection: null as string | null,
@@ -54,12 +54,30 @@ vi.mock("../platform", () => ({
 const save = vi.fn(async () => "D:/Client Work/hero cut.mp4" as string | null);
 vi.mock("@tauri-apps/plugin-dialog", () => ({ save }));
 
-const runTool = vi.fn(async () => ({ ok: true, saved_to: "hero cut.mp4" }));
+const runTool = vi.fn(
+  async () => ({ ok: true, saved_to: "hero cut.mp4" }) as Record<string, unknown>,
+);
 vi.mock("../tools/host", () => ({ openToolHost: () => ({ run: runTool }) }));
+
+// The queue is the real one. The tool host is a fake, so a test that needs a job to exist puts a real export in the
+// queue itself (`startedExport`) and has the fake tool answer with its id.
+vi.mock("../tools/genJobs", () => ({
+  openProjectJobs: async () => ({
+    begin: async () => `job-${Math.random().toString(36).slice(2, 8)}`,
+    settle: async () => undefined,
+  }),
+}));
+vi.mock("../store/jobNotes", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../store/jobNotes")>()),
+  notifyJobSettled: () => undefined,
+}));
 
 // Unrelated to Save As — just satisfies MenuBar's Clerk imports so it can mount.
 import MenuBar from "./MenuBar";
 import { useExportJob } from "../store/exportJob";
+import { __resetExportQueue, submitExport, whenExportsSettle } from "../timeline/exportQueue";
+import { ExportMemFs } from "../test/timelineKit";
+import { ProjectStoreAccess } from "../tools/store";
 
 function renderBar() {
   return render(
@@ -92,8 +110,13 @@ beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
   useExportJob.getState().reset();
+  __resetExportQueue();
   save.mockResolvedValue("D:/Client Work/hero cut.mp4");
   runTool.mockResolvedValue({ ok: true, saved_to: "hero cut.mp4" });
+});
+afterEach(async () => {
+  await whenExportsSettle();
+  __resetExportQueue();
 });
 
 describe("Export Video → Save As", () => {
@@ -172,5 +195,88 @@ describe("Export Video → Save As", () => {
     startExport();
     await waitFor(() => expect(screen.getByText(/dialog unavailable/)).toBeInTheDocument());
     expect(runTool).not.toHaveBeenCalled();
+  });
+});
+
+// The export asked where to save, and the person, answering the question about the room for the file, chose
+// another folder (the Save to box). The tool starts the export again there, so what Save As said is no longer
+// where the file is: the dialog must say where it really went, and the next Save As must open there.
+describe("Export Video → Save As: an export moved to another folder", () => {
+  const movedTo = "E:/Elsewhere/hero cut.mp4";
+  /** A REAL export in the real queue, that the fake tool then answers with: the menu follows it to its end, and reads
+   *  from the queue's own record where it went. It finishes once the test lets it. */
+  const startedExport = async (destPath: string, ends: "done" | "failed" = "done") => {
+    const fs = new ExportMemFs();
+    const store = new ProjectStoreAccess("/proj", fs);
+    const stage = destPath.replace(/([^/]+)$/, ".$1.partial");
+    const sub = await submitExport({
+      store,
+      dependencies: [],
+      destPath,
+      stagePath: stage,
+      filename: destPath.split("/").pop()!,
+      run: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        if (ends === "failed") throw new Error("Permission denied");
+        await fs.writeTextFile(stage, "video");
+        return {};
+      },
+    });
+    runTool.mockResolvedValue({ ok: true, job_id: sub.job_id, saved_to: "hero cut.mp4" });
+    return sub;
+  };
+
+  it("says it was saved where it really went, not where Save As first pointed", async () => {
+    await startedExport(movedTo);
+    startExport();
+    await waitFor(() =>
+      expect(screen.getByText("Saved to E:\\Elsewhere\\hero cut.mp4")).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/Client Work/)).not.toBeInTheDocument();
+  });
+
+  it("opens the next Save As in the folder it really went to, not in the one that had no room", async () => {
+    await startedExport(movedTo);
+    startExport();
+    await waitFor(() => expect(screen.getByText(/Saved to E:/)).toBeInTheDocument());
+    save.mockClear();
+    restartExport();
+    await waitFor(() =>
+      expect(save).toHaveBeenCalledWith(
+        expect.objectContaining({ defaultPath: "E:/Elsewhere/Alpha Cut.mp4" }),
+      ),
+    );
+  });
+
+  it("says it was numbered past a file that was already in that folder", async () => {
+    await startedExport("E:/Elsewhere/hero cut 2.mp4");
+    startExport();
+    await waitFor(() =>
+      expect(screen.getByText("Saved to E:\\Elsewhere\\hero cut 2.mp4")).toBeInTheDocument(),
+    );
+  });
+
+  it("still says what the person chose, the way their system wrote it, when the export went there", async () => {
+    save.mockResolvedValue("D:\\Client Work\\hero cut.mp4");
+    await startedExport("D:/Client Work/hero cut.mp4");
+    startExport();
+    await waitFor(() =>
+      expect(screen.getByText("Saved to D:\\Client Work\\hero cut.mp4")).toBeInTheDocument(),
+    );
+  });
+
+  it("does not say it was saved anywhere when the export failed, wherever it was going", async () => {
+    await startedExport(movedTo, "failed");
+    startExport();
+    await waitFor(() => expect(screen.getByText(/Permission denied/)).toBeInTheDocument());
+    expect(screen.queryByText(/Saved to/)).not.toBeInTheDocument();
+  });
+
+  it("falls back to what the person chose when the queue has no record of the job", async () => {
+    runTool.mockResolvedValue({ ok: true, job_id: "job-gone", saved_to: "hero cut.mp4" });
+    startExport();
+    await waitFor(() =>
+      expect(screen.getByText(/Saved to D:\/Client Work\/hero cut\.mp4/)).toBeInTheDocument(),
+    );
   });
 });

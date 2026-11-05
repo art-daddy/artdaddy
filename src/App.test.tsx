@@ -55,6 +55,7 @@ describe("App routing", () => {
       destinationShort: false,
       scratchShort: false,
       drive: null,
+      movable: false,
       seconds: null,
       secondsGuessed: false,
       executionLimitSeconds: null,

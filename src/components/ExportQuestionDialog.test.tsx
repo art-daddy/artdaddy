@@ -19,6 +19,10 @@ import {
 import ExportQuestionDialog from "./ExportQuestionDialog";
 
 vi.mock("../lib/attention", () => ({ askForAttention: vi.fn(async () => undefined) }));
+const picker = vi.hoisted(() => ({
+  pickFolder: vi.fn(async (_title: string, _from?: string): Promise<string | null> => null),
+}));
+vi.mock("../lib/pickFolder", () => picker);
 
 const picture = (over: Partial<PreflightPicture>): PreflightPicture => ({
   via: "chat",
@@ -32,6 +36,7 @@ const picture = (over: Partial<PreflightPicture>): PreflightPicture => ({
   destinationShort: true,
   scratchShort: false,
   drive: "D:",
+  movable: false,
   seconds: 1500,
   secondsGuessed: false,
   executionLimitSeconds: 28_800,
@@ -334,5 +339,132 @@ describe("ExportQuestionDialog", () => {
         act(() => void answerQuestion(useExportQuestions.getState().open!.id, "cancel", "card"));
       }
     });
+  });
+});
+
+// The Save to box (Phase 3, S3b): the question about the room for the exported file lets the person pick
+// another folder. The pick is the host's (the card shows the same one); Continue carries it.
+describe("ExportQuestionDialog: the Save to box", () => {
+  const BOXED = () => first({ reasons: new Set(["disk_shortage"]), movable: true });
+  const ask = (q: ExportQuestion = BOXED(), folderNow: string | undefined = "D:/Videos") =>
+    askQuestion(q, { projectDir: "p", folderNow });
+
+  beforeEach(() => picker.pickFolder.mockReset());
+
+  it("shows where the video goes now and a Browse button, on the question that has the box, and no free-text field", async () => {
+    render(<ExportQuestionDialog />);
+    void ask();
+    const dialog = await screen.findByRole("dialog", {
+      name: "Not enough space for the exported file",
+    });
+    const row = within(dialog).getByRole("group", { name: "Save to" });
+    expect(within(row).getByText("D:\\Videos")).toBeVisible();
+    expect(within(row).getByRole("button", { name: /Browse/ })).toBeVisible();
+    expect(within(dialog).queryByRole("textbox")).toBeNull();
+    expect(within(dialog).getByText(/save the video somewhere else/i)).toBeVisible();
+  });
+
+  it("shows no such row on a question without the box, or when the asker did not say where the file goes", async () => {
+    render(<ExportQuestionDialog />);
+    void askQuestion(SPACE(), { projectDir: "p", folderNow: "D:/Videos" });
+    let dialog = await screen.findByRole("dialog");
+    expect(within(dialog).queryByRole("group", { name: "Save to" })).toBeNull();
+    act(() => void answerQuestion(useExportQuestions.getState().open!.id, "cancel", "card"));
+    void askQuestion(BOXED(), { projectDir: "p" });
+    dialog = await screen.findByRole("dialog");
+    expect(within(dialog).queryByRole("group", { name: "Save to" })).toBeNull();
+  });
+
+  it("shows the folder the person picks, starts the picker where the file was going, and answers Continue with it", async () => {
+    picker.pickFolder.mockResolvedValueOnce("E:\\Elsewhere");
+    render(<ExportQuestionDialog />);
+    const outcome = ask();
+    fireEvent.click(await screen.findByRole("button", { name: /Browse/ }));
+    expect(await screen.findByText("E:\\Elsewhere")).toBeVisible();
+    expect(picker.pickFolder).toHaveBeenCalledWith(expect.any(String), "D:/Videos");
+    expect(screen.queryByText("D:\\Videos")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect(await outcome).toMatchObject({
+      answer: "continue",
+      by: "dialog",
+      folder: "E:\\Elsewhere",
+    });
+  });
+
+  it("changes nothing when the picker is closed without a choice, or cannot open", async () => {
+    render(<ExportQuestionDialog />);
+    const outcome = ask();
+    picker.pickFolder.mockResolvedValueOnce(null);
+    fireEvent.click(await screen.findByRole("button", { name: /Browse/ }));
+    await act(async () => undefined);
+    expect(screen.getByText("D:\\Videos")).toBeVisible();
+    picker.pickFolder.mockRejectedValueOnce(new Error("no dialog"));
+    fireEvent.click(screen.getByRole("button", { name: /Browse/ }));
+    await act(async () => undefined);
+    expect(screen.getByText("D:\\Videos")).toBeVisible();
+    // and the question is still there to be answered
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect((await outcome) as object).not.toHaveProperty("folder");
+  });
+
+  it("does not offer Start anyway once another folder is picked: that link was about the folder it was going to", async () => {
+    picker.pickFolder.mockResolvedValueOnce("E:\\Elsewhere");
+    render(<ExportQuestionDialog />);
+    void ask();
+    expect(await screen.findByRole("button", { name: "Start anyway" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: /Browse/ }));
+    await screen.findByText("E:\\Elsewhere");
+    expect(screen.queryByRole("button", { name: "Start anyway" })).toBeNull();
+  });
+
+  it("lets the person take a pick back: Undo shows the folder it was going to again, and Start anyway comes back with it", async () => {
+    picker.pickFolder.mockResolvedValueOnce("E:\\Elsewhere");
+    render(<ExportQuestionDialog />);
+    const outcome = ask();
+    expect(screen.queryByRole("button", { name: "Undo" })).toBeNull(); // nothing to take back yet
+    fireEvent.click(await screen.findByRole("button", { name: /Browse/ }));
+    await screen.findByText("E:\\Elsewhere");
+    fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+    expect(await screen.findByText("D:\\Videos")).toBeVisible();
+    expect(screen.queryByText("E:\\Elsewhere")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Undo" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Start anyway" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect((await outcome) as object).not.toHaveProperty("folder"); // nothing moves
+  });
+
+  it("does not treat a pick of the folder it was already going to as moving the file: Start anyway stays, and there is nothing to undo", async () => {
+    picker.pickFolder.mockResolvedValueOnce("d:\\videos\\");
+    render(<ExportQuestionDialog />);
+    void ask();
+    fireEvent.click(await screen.findByRole("button", { name: /Browse/ }));
+    await screen.findByText("d:\\videos\\");
+    expect(screen.getByRole("button", { name: "Start anyway" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Undo" })).toBeNull();
+  });
+
+  it("answers Cancel with no folder, whatever was picked", async () => {
+    picker.pickFolder.mockResolvedValueOnce("E:\\Elsewhere");
+    render(<ExportQuestionDialog />);
+    const outcome = ask();
+    fireEvent.click(await screen.findByRole("button", { name: /Browse/ }));
+    await screen.findByText("E:\\Elsewhere");
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    const done = await outcome;
+    expect(done).toMatchObject({ answer: "cancel" });
+    expect(done).not.toHaveProperty("folder");
+  });
+
+  it("starts the next question from its own folder, not from the pick made for the one before", async () => {
+    picker.pickFolder.mockResolvedValueOnce("E:\\Elsewhere");
+    render(<ExportQuestionDialog />);
+    const firstAnswer = ask(BOXED(), "D:/Videos");
+    void ask(BOXED(), "F:/Other");
+    fireEvent.click(await screen.findByRole("button", { name: /Browse/ }));
+    await screen.findByText("E:\\Elsewhere");
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    await firstAnswer;
+    expect(await screen.findByText("F:\\Other")).toBeVisible();
+    expect(screen.queryByText("E:\\Elsewhere")).toBeNull();
   });
 });

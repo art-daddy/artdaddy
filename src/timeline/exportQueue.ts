@@ -66,6 +66,7 @@ import { exportFlag, refreshExportFlags } from "../api/exportFlags";
 import {
   bandOf,
   driveOf,
+  folderOf,
   planQuestions,
   questionAsText,
   type ExportQuestion,
@@ -391,11 +392,12 @@ export function dismissExport(jobId: string): boolean {
 
 /** How to start an export again, given by whoever started it: told the gentlest rung to start at, it queues a
  *  new export of the same project with the same settings. `processor` says the graphics chip failed it: the new export
- *  runs on the processor's own encoder, whatever the app would have chosen. */
+ *  runs on the processor's own encoder, whatever the app would have chosen. `saveTo` is a folder the person chose
+ *  for it instead (the card's Save somewhere else): the new export starts there, and so does every Try again after it. */
 export type ExportRetry = (
   minRung: Rung,
   failedRung: Rung,
-  options: { store?: ProjectStoreAccess; processor?: true },
+  options: { store?: ProjectStoreAccess; processor?: true; saveTo?: string },
 ) => Promise<{ ok: boolean; error?: string; declined?: boolean }>;
 const retries = new Map<string, ExportRetry>();
 
@@ -424,8 +426,13 @@ export function gentlestRungOf(record: Pick<ExportRecord, "maxRung" | "ladder">)
  *  failure for lack of memory or time, decided afresh by the plan after any other. The failed row goes once the
  *  new export is queued; when it is refused the row stays and says why, and the button may be pressed again.
  *  `store` is the project as it is open now: it replaces the one the export was asked on when that session has
- *  since ended (the project was closed and opened again). Nothing here retries by itself: the person asked. */
-export async function retryExport(jobId: string, store?: ProjectStoreAccess): Promise<void> {
+ *  since ended (the project was closed and opened again). `options.saveTo` starts it in the folder the person
+ *  chose instead. Nothing here retries by itself: the person asked. */
+export async function retryExport(
+  jobId: string,
+  store?: ProjectStoreAccess,
+  options: { saveTo?: string } = {},
+): Promise<void> {
   const record = records.find((r) => r.job_id === jobId);
   const retry = retries.get(jobId);
   if (!record || !retry || record.state !== "failed" || record.retrying) return;
@@ -439,7 +446,11 @@ export async function retryExport(jobId: string, store?: ProjectStoreAccess): Pr
     result = await retry(
       processor ? 0 : retryRung(failedRung, failureOf(record.error).code, ladderOfRecord(record)),
       failedRung,
-      { store, ...(processor ? { processor: true as const } : {}) },
+      {
+        store,
+        ...(processor ? { processor: true as const } : {}),
+        ...(options.saveTo ? { saveTo: options.saveTo } : {}),
+      },
     );
   } catch (error) {
     result = { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -820,6 +831,33 @@ export class ExportRequestError extends Error {
   }
 }
 
+/** Where the person chose to save the video instead (the Save to box of the question about its room, or the
+ *  failed export's card), and the story of the request that was moved, so the one report tells all of it. */
+export interface MovedTo {
+  readonly dir: string;
+  readonly story?: ExportStory;
+  /** What the person already said Start anyway to in the request that moved, so the restart does not ask it again. */
+  readonly waived?: readonly ExportQuestionKind[];
+}
+
+/** The person answered the question about the exported file's room by choosing another folder. Not a
+ *  failure and not a refusal: nothing was admitted, reserved or written, and the caller starts the request
+ *  again at the folder, because the render command, the staging file and the reservation all derive from the
+ *  destination and a request cannot be pointed somewhere else after the fact. */
+export class ExportMoveRequest extends Error {
+  constructor(
+    readonly folder: string,
+    /** What happened to the request so far, carried to the one that starts at the folder. */
+    readonly story?: ExportStory,
+    readonly workload?: RenderWorkload,
+    /** The kinds of question the person already said Start anyway to: the restart does not ask them again. */
+    readonly waived: readonly ExportQuestionKind[] = [],
+  ) {
+    super("the export was moved to another folder");
+    this.name = "ExportMoveRequest";
+  }
+}
+
 export interface ExportSpec {
   store: ProjectStoreAccess;
   dependencies: readonly string[];
@@ -892,8 +930,16 @@ export interface ExportSpec {
    *  outside assistant over MCP. */
   via?: "menu" | "chat" | "mcp";
   /** Set when this export is a Try again of one that failed: the rung that one ran at and the rung this one was
-   *  asked to start at, so the story says so (the `retry` event). */
-  retry?: { from: number; to: number };
+   *  asked to start at, so the story says so (the `retry` event). `moved` says the person also chose another
+   *  folder for it (the card's Save somewhere else). */
+  retry?: { from: number; to: number; moved?: true };
+  /** The request can be started again at another folder (a whole-timeline export, whose tool chose the
+   *  destination), so the question about the exported file's room offers a Save to box. A batch of files, which
+   *  have their names in one chosen folder, is not. */
+  movable?: true;
+  /** Kinds of question the person already said Start anyway to, in the request this one starts again at a folder they
+   *  chose: they are not asked a second time (the PC and the project are the same). */
+  waived?: readonly ExportQuestionKind[];
   /** What happened to this export so far (see exportTrace.ts). Set by the queue when the request
    *  arrives; a caller leaves it out. */
   story?: ExportStory;
@@ -1281,6 +1327,7 @@ async function measurePreflight(
       destinationShort,
       scratchShort,
       drive: driveOf(specs[Math.max(0, shortDestination)].destPath),
+      movable: specs.length === 1 && specs[0].movable === true,
       seconds,
       secondsGuessed: checks.some((check) => check.estimates.secondsGuessed === true),
       executionLimitSeconds: least(snapshots.map((snapshot) => snapshot.budgets.executionSeconds)),
@@ -1319,6 +1366,8 @@ async function askInDialog(
   const outcome = await askQuestion(question, {
     projectDir: specs[0].store.projectDir,
     signal: requestSignal(specs),
+    // The box is only ever on a question about a request of one export, whose folder it is.
+    ...(question.folderBox ? { folderNow: folderOf(specs[0].destPath) } : {}),
     onIgnored: (answer, by, winner) => {
       for (const spec of specs)
         spec.story?.trace.record(
@@ -1332,7 +1381,11 @@ async function askInDialog(
   for (const spec of specs)
     spec.story?.trace.record(
       "dialog_choice",
-      outcome.answer === "aborted" || outcome.answer === "unavailable" ? "dismiss" : outcome.answer,
+      outcome.answer === "aborted" || outcome.answer === "unavailable"
+        ? "dismiss"
+        : "folder" in outcome && outcome.folder !== undefined
+          ? "browse"
+          : outcome.answer,
       Math.round(outcome.waitedMs / 1000),
       ANSWERER_CODE[outcome.by],
     );
@@ -1391,8 +1444,9 @@ async function confirmExportRequest(specs: readonly ExportSpec[]): Promise<boole
       );
     if (spec.meta?.choice && spec.story) recordChoice(spec.story, spec.meta.choice);
   }
-  // What the person already waived with *Start anyway*: not asked again in this request.
-  const waived = new Set<ExportQuestionKind>();
+  // What the person already waived with *Start anyway*: not asked again in this request, nor in the one that
+  // starts again at a folder they chose (a restart carries what was waived before the move).
+  const waived = new Set<ExportQuestionKind>(specs[0].waived ?? []);
   for (let round = 0; round < MAX_QUESTION_ROUNDS; round++) {
     const { picture, storageReady } = await measurePreflight(specs, refuse);
     const questions = planQuestions(picture, waived);
@@ -1422,6 +1476,17 @@ async function confirmExportRequest(specs: readonly ExportSpec[]): Promise<boole
       case "continue":
         // A notice is a heads-up, not a shortage: nothing to measure again.
         if (question.kind === "notice") return storageReady;
+        // The person chose another folder for the video: this request ends here and the caller starts it
+        // again there. Checked after the request's own stop, above, so a request that was stopped as the
+        // answer arrived is cancelled, not moved.
+        if (question.folderBox && "folder" in outcome && outcome.folder !== undefined)
+          throw new ExportMoveRequest(
+            outcome.folder,
+            specs[0].story,
+            specs[0].workload,
+            // The room for the file is a new question at the new folder; what else was waived stays waived.
+            [...waived].filter((kind) => kind !== "output_space"),
+          );
         break;
     }
   }
@@ -1445,10 +1510,19 @@ export async function submitExports(request: readonly ExportSpec[]): Promise<Exp
     ...(spec.workload ? { workload: structuredClone(spec.workload) } : {}),
     story: spec.story ?? new ExportStory(),
   }));
-  // The story starts with who asked, and whether this is a second try of one that failed.
+  // The story starts with who asked, and whether this is a second try of one that failed. A request that
+  // starts again at a folder the person chose arrives with the story it already has: it is the same request,
+  // told once.
   for (const spec of specs) {
+    if (spec.story.trace.has("requested")) continue;
     spec.story.trace.record("requested", spec.via ?? (spec.origin ? "chat" : "other"));
-    if (spec.retry) spec.story.trace.record("retry", "try_again", spec.retry.from, spec.retry.to);
+    if (spec.retry)
+      spec.story.trace.record(
+        "retry",
+        spec.retry.moved ? "browse" : "try_again",
+        spec.retry.from,
+        spec.retry.to,
+      );
   }
   const destinations = new Set<string>();
   const projectDir = specs[0].store.projectDir;

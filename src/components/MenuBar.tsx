@@ -11,7 +11,7 @@ import { useContractVersion } from "../contract/useContractVersion";
 import { requestExit } from "../lib/appExit";
 import { openDiscord } from "../lib/community";
 import { desktopStore } from "../lib/desktop";
-import { lastExportDir, rememberExportDir } from "../lib/exportDir";
+import { lastExportDir, rememberExportDir, savedToPath } from "../lib/exportDir";
 import { copyIntoProject } from "../lib/mediaLink";
 import { importFileByReference, MEDIA_EXTS, uploadFiles } from "../lib/upload";
 import { platform } from "../platform";
@@ -198,6 +198,8 @@ export default function MenuBar() {
     // to the export queue (UJ-022) and only the queue's cancel stops it.
     const controller = new AbortController();
     let jobId: string | null = null;
+    // Where the queue says the export really goes, once it is queued (see below).
+    let landedAt: string | null = null;
     const cancelQueued = (id: string) =>
       void import("../timeline/exportQueue").then((q) => q.cancelExport(id, "person_dialog"));
     job.begin(() => {
@@ -233,6 +235,14 @@ export default function MenuBar() {
       if (res?.job_id) {
         jobId = res.job_id;
         if (controller.signal.aborted) cancelQueued(res.job_id); // cancelled while it was queuing
+        // The person may have chosen another folder for it (the Save to box of the question about the room for the
+        // file): that is where it goes, and where the next Save As should open, not the folder that had no room.
+        landedAt =
+          (await import("../timeline/exportQueue"))
+            .listExportRecords()
+            .find((row) => row.job_id === res.job_id)?.destPath ?? null;
+        if (landedAt && outputPath && savedToPath(outputPath, landedAt) !== outputPath)
+          rememberExportDir(landedAt);
       }
       if (controller.signal.aborted || res?.declined === true) {
         // Their own choice (Cancel in the dialog, or on a question the export asked): not a failure.
@@ -257,9 +267,10 @@ export default function MenuBar() {
             phase: "done",
             fraction: 1,
             etaSec: 0,
-            // The tool returns a bare filename (it must not leak paths to the model). The menu
-            // already knows the folder the user picked, so report the real destination.
-            savedTo: outputPath ?? settled?.destPath ?? res.saved_to ?? null,
+            // The tool returns a bare filename (it must not leak paths to the model). The menu knows the folder
+            // the user picked, so it reports the real destination: that folder, unless the export was moved to
+            // another one (or numbered past a file already there), when it is the queue's own record of it.
+            savedTo: savedToPath(outputPath, settled?.destPath ?? landedAt) ?? res.saved_to ?? null,
           });
         }
       }
