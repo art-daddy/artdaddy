@@ -5,6 +5,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { useExportJob } from "../store/exportJob";
+import { __setExportFlag } from "../api/exportFlags";
 import { useAuth } from "../store/auth";
 
 import { JobLedger } from "../project/jobLedger";
@@ -17,6 +18,7 @@ import { __resetProjectJobs, openProjectJobs } from "../tools/genJobs";
 import { registerLibraryClip } from "../tools/import";
 import { __resetJobSupervisor, __setJobSupervisor, supervisedRunner } from "../tools/jobSupervisor";
 import { joinPath, ProjectStoreAccess } from "../tools/store";
+import { endProjectSession } from "../tools/coordinator";
 import { ensureTimeline } from "./engine";
 import {
   __resetExportQueue,
@@ -26,6 +28,7 @@ import {
   listExportRecords,
   localDeliveryPort,
   manageExportsTool,
+  retryExport,
   submitExport,
   whenExportEnds,
   whenExportTelemetrySettles,
@@ -332,6 +335,26 @@ describe("in the app, an export runs as a job of the app process", () => {
     expect(t.jobs.forgotten).toEqual([a.job_id, b.job_id]);
   });
 
+  it("tells the app process whether to hold each export to the PC's floor, as the server's switch says at that moment", async () => {
+    const t = await setup();
+    const held = await t.exportNow();
+    __setExportFlag("pc_floor", false);
+    try {
+      const free = await t.exportNow("b");
+      await flush();
+      expect(t.jobs.submitted.map((s) => s.id)).toEqual([held.job_id, free.job_id]);
+      expect(t.jobs.submitted[0].meta.pcFloor).toBe(true);
+      expect(t.jobs.submitted[1].meta.pcFloor).toBe(false);
+      t.jobs.exit(held.job_id, 0);
+      await whenExportEnds(held.job_id);
+      await flush();
+      t.jobs.exit(free.job_id, 0);
+      await whenExportsSettle();
+    } finally {
+      __setExportFlag("pc_floor", true);
+    }
+  });
+
   it("is stopped by Cancel through the app process, leaving nothing behind", async () => {
     const t = await setup();
     const a = await t.exportNow();
@@ -345,6 +368,165 @@ describe("in the app, an export runs as a job of the app process", () => {
     expect(t.jobs.started).toEqual([a.job_id]); // the queued one never started
     expect([...t.fs.files.keys()].some((k) => k.endsWith(".partial"))).toBe(false);
     expect(await t.fs.exists(DEST)).toBe(false);
+  });
+});
+
+describe("Try again, from the card, after an export the PC could not fit", () => {
+  const FLOOR =
+    "native render failed: render memory floor crossed: the PC has 410 MiB left and keeps 768 MiB for itself\n";
+  const story = (report: Any): string[] =>
+    (report.trace as Any[]).map((e) => (e.v ? `${e.e}:${e.v}` : e.e));
+  const threads = (spec: { args: string[] }) => spec.args.filter((a) => a === "-threads:v").length;
+
+  it("replays the journey: the PC ran short of memory, one click starts the same export one rung gentler, and it finishes", async () => {
+    const t = await setup();
+    const first = await t.exportNow();
+    await flush();
+    t.jobs.exit(first.job_id, -1, FLOOR);
+    expect(await whenExportEnds(first.job_id)).toMatchObject({ state: "failed", canRetry: true });
+    await whenExportsSettle();
+    await whenExportTelemetrySettles();
+    expect(reported.at(-1)).toMatchObject({ status: "failed", limit: "pc_floor" });
+
+    await retryExport(first.job_id);
+    await flush();
+
+    // The failed row went, and a new export (new job, same project and file name) is running one rung gentler.
+    expect(listExportRecords().some((r) => r.job_id === first.job_id)).toBe(false);
+    expect(t.jobs.submitted).toHaveLength(2);
+    const [before, after] = t.jobs.submitted;
+    expect(after.id).not.toBe(before.id);
+    expect(after.meta.filename).toBe(before.meta.filename);
+    expect((before.meta.telemetry as Any).plan.rung).toBe(0);
+    expect((after.meta.telemetry as Any).plan.rung).toBe(1);
+    expect(threads(after)).toBeGreaterThan(threads(before)); // what a gentler rung is: fewer threads
+    const second = listExportRecords().at(-1)!;
+    expect(second).toMatchObject({ state: "running", rung: 1, canRetry: true });
+
+    t.jobs.exit(second.job_id, 0);
+    expect((await whenExportEnds(second.job_id))?.state).toBe("done");
+    await whenExportsSettle();
+    await whenExportTelemetrySettles();
+    const report = reported.at(-1)!;
+    expect(report).toMatchObject({ status: "done" });
+    expect(story(report)).toEqual(expect.arrayContaining(["requested:menu", "retry:try_again"]));
+    expect((report.trace as Any[]).find((e) => e.e === "retry")).toMatchObject({ n: 0, m: 1 });
+    expect(await t.fs.exists(DEST)).toBe(true);
+  });
+
+  it("goes on to the gentlest rung when the gentler one fails the same way, and no further", async () => {
+    const t = await setup();
+    let current = await t.exportNow();
+    const rungs: number[] = [];
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await flush();
+      const spec = t.jobs.submitted.at(-1)!;
+      rungs.push((spec.meta.telemetry as Any).plan.rung);
+      t.jobs.exit(current.job_id, -1, FLOOR);
+      await whenExportEnds(current.job_id);
+      await retryExport(current.job_id);
+      await flush();
+      current = { job_id: listExportRecords().at(-1)!.job_id };
+    }
+    expect(rungs).toEqual([0, 1, 2]);
+    const last = t.jobs.submitted.at(-1)!;
+    expect((last.meta.telemetry as Any).plan.rung).toBe(2); // the gentlest stays the gentlest
+    expect((last.meta.telemetry as Any).plan.max_rung).toBe(2);
+    t.jobs.exit(current.job_id, 0);
+    await whenExportsSettle();
+  });
+
+  // Found by review: with thirteen or more video clips every decoder is already on one thread, so the two gentler
+  // rungs are the same command. Try again must not go through a rung that changes nothing, and must say so.
+  it("does not go past the rungs an export really has: with thirteen clips the gentlest is the first", async () => {
+    const t = await setup();
+    await addClipsTool(
+      {
+        entries: Array.from({ length: 12 }, (_, i) => ({
+          media_ref: "a.mp4",
+          timeline_in: 60 + i * 60,
+          timeline_out: 120 + i * 60,
+        })),
+      },
+      t.nextPage(),
+    );
+    let current = await t.exportNow();
+    const rungs: number[] = [];
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await flush();
+      const spec = t.jobs.submitted.at(-1)!;
+      rungs.push((spec.meta.telemetry as Any).plan.rung);
+      expect((spec.meta.telemetry as Any).plan.max_rung).toBe(1);
+      t.jobs.exit(current.job_id, -1, FLOOR);
+      await whenExportEnds(current.job_id);
+      expect(listExportRecords().find((r) => r.job_id === current.job_id)?.maxRung).toBe(1);
+      await retryExport(current.job_id);
+      await flush();
+      current = { job_id: listExportRecords().at(-1)!.job_id };
+    }
+    expect(rungs).toEqual([0, 1, 1]); // the second try is gentler; the third has nothing gentler to go to
+    t.jobs.exit(current.job_id, 0);
+    await whenExportsSettle();
+  });
+
+  it("keeps the failed row and says why when another export already holds the file name", async () => {
+    const t = await setup();
+    const first = await t.exportNow();
+    await flush();
+    t.jobs.exit(first.job_id, -1, FLOOR);
+    await whenExportEnds(first.job_id);
+    const holder = await t.exportNow(); // the same default file name, running now
+    await flush();
+    await retryExport(first.job_id);
+    const row = listExportRecords().find((r) => r.job_id === first.job_id)!;
+    expect(row).toMatchObject({ state: "failed", canRetry: true });
+    expect(row.note).toMatch(/Could not start again/);
+    expect(row.note).toMatch(/already queued or running/);
+    expect(t.jobs.submitted).toHaveLength(2); // only the holder was ever submitted after the first
+    t.jobs.exit(holder.job_id, 0);
+    await whenExportsSettle();
+  });
+
+  it("starts in the project that is open now when it was closed and opened again since the export failed", async () => {
+    const t = await setup();
+    const first = await t.exportNow();
+    await flush();
+    t.jobs.exit(first.job_id, -1, FLOOR);
+    await whenExportEnds(first.job_id);
+    endProjectSession(DIR); // the person closed the project...
+    const reopened = t.nextPage().store; // ...and opened it again: a new session, a new store
+    expect(t.store.sessionLive()).toBe(false);
+    expect(reopened.sessionLive()).toBe(true);
+
+    await retryExport(first.job_id, reopened);
+    await flush();
+
+    expect(listExportRecords().some((r) => r.job_id === first.job_id)).toBe(false);
+    expect(t.jobs.submitted).toHaveLength(2);
+    t.jobs.exit(listExportRecords().at(-1)!.job_id, 0);
+    await whenExportsSettle();
+  });
+
+  it("reports an attempt that was turned down before it began, as any refused export is", async () => {
+    const t = await setup();
+    const first = await t.exportNow();
+    await flush();
+    t.jobs.exit(first.job_id, -1, FLOOR);
+    await whenExportEnds(first.job_id);
+    await whenExportsSettle();
+    await whenExportTelemetrySettles();
+    const holder = await t.exportNow();
+    await flush();
+    reported.length = 0;
+    try {
+      await retryExport(first.job_id);
+      await vi.waitFor(() => expect(reported).toHaveLength(1));
+      expect(reported[0]).toMatchObject({ status: "blocked", operation: "render" });
+      expect(String(reported[0].error)).toMatch(/already queued or running/);
+    } finally {
+      t.jobs.exit(holder.job_id, 0);
+      await whenExportsSettle();
+    }
   });
 });
 

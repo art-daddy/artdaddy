@@ -24,11 +24,13 @@ import {
   isKnownProblem,
   outputFps,
   outputSize,
+  peakSamples,
   type ExportCalibration,
   type ExportEncoder,
   type ExportEstimates,
   type ExportPreflightReason,
 } from "./exportOptions";
+import { UNMEASURED_RESERVE_BYTES, planRung } from "./exportPlan";
 import type { RenderWorkload } from "./renderPlan";
 
 describe("one-pass picture ceiling", () => {
@@ -140,6 +142,46 @@ describe("export preflight assessment", () => {
     seconds: 60,
   };
   const budgets = { memoryBytes: 4e9, temporaryBytes: 18e9, executionSeconds: 28800 };
+
+  describe("with a plan, the memory verdict is the plan's", () => {
+    const GIB = 1024 ** 3;
+    const planFor = (free: number | null, peaks: Array<[0 | 1 | 2, number]> = []) =>
+      planRung({
+        samples: peaks.map(([rung, bytes]) => ({ rung, bytes })),
+        freeBytes: free,
+      });
+    const reasons = (
+      plan: ReturnType<typeof planFor> | undefined,
+      over: Partial<ExportEstimates> = {},
+    ) =>
+      assessExport(workload, resources, { ...estimates, ...over }, budgets, plan).reasons.filter(
+        (reason) => reason.startsWith("memory"),
+      );
+
+    it("is exactly today's verdict when there is no plan", () => {
+      expect(reasons(undefined)).toEqual([]);
+      expect(reasons(undefined, { memoryBytes: 5e9 })).toEqual(["memory_shortage"]);
+      expect(reasons(undefined, { memoryBytes: null })).toEqual(["memory_unknown"]);
+    });
+
+    it("asks nothing when a rung fits, even though the normal rung would not (the plan chose the gentle one)", () => {
+      const plan = planFor(4 * GIB, [[0, 3.52 * GIB]]); // the normal rung exceeds the ceiling; gentle fits
+      expect(plan).toMatchObject({ rung: 1, fits: true });
+      expect(reasons(plan, { memoryBytes: 3.52 * GIB })).toEqual([]);
+    });
+
+    it("asks when even the gentlest rung does not fit, and when a first export has less than the reserve", () => {
+      expect(reasons(planFor(0.5 * GIB, [[0, 3.52 * GIB]]))).toEqual(["memory_shortage"]);
+      expect(reasons(planFor(UNMEASURED_RESERVE_BYTES - 1), { memoryBytes: null })).toEqual([
+        "memory_shortage",
+      ]);
+    });
+
+    it("still says the memory was unknown (for the report) when nothing was measured and it fits", () => {
+      expect(reasons(planFor(8 * GIB), { memoryBytes: null })).toEqual(["memory_unknown"]);
+      expect(reasons(planFor(null), { memoryBytes: null })).toEqual(["memory_unknown"]);
+    });
+  });
 
   it("uses the independent HD,4Kandheavy limits and counts captions as things", () => {
     expect(assessExport(workload, resources, estimates, budgets)).toMatchObject({
@@ -386,6 +428,38 @@ describe("local measured export estimates", () => {
   };
   const estimate = (target = workload, history: readonly ExportCalibration[] = [sample]) =>
     estimateExportFromHistory(target, output, "medium", "partition-pipes-v1", history);
+
+  it("reads the peak memory of earlier exports of the same shape, with the rung each ran at", () => {
+    const samples = (history: readonly ExportCalibration[]) =>
+      peakSamples(workload, output, "medium", "partition-pipes-v1", history);
+    expect(samples([sample])).toEqual([{ rung: 0, bytes: 1_000_000_000 }]); // no rung recorded: the normal one
+    expect(
+      samples([
+        { ...sample, rung: 1, memoryBytes: 600_000_000 },
+        { ...sample, rung: 2, memoryBytes: null },
+        sample,
+      ]),
+    ).toEqual([
+      { rung: 1, bytes: 600_000_000 },
+      { rung: 2, bytes: null },
+      { rung: 0, bytes: 1_000_000_000 },
+    ]);
+  });
+
+  it("takes only the history that estimates already take: another shape, picture or speed revision says nothing", () => {
+    const samples = (history: readonly ExportCalibration[], quality = "medium") =>
+      peakSamples(workload, output, quality, "partition-pipes-v1", history);
+    expect(samples([{ ...sample, revision: EXPORT_SPEED_REVISION - 1 }])).toEqual([]);
+    expect(samples([{ ...sample, workload: { ...workload, peakMediaLayers: 1 } }])).toEqual([]);
+    expect(samples([{ ...sample, output: { ...output, fps: 60 } }])).toEqual([]);
+    expect(samples([sample], "high")).toEqual([]);
+    // The same filter, so the two can never disagree about what a measurement matches.
+    for (const history of [[sample], [{ ...sample, quality: "low" }], [] as ExportCalibration[]])
+      expect(samples(history).length > 0).toBe(
+        estimateExportFromHistory(workload, output, "medium", "partition-pipes-v1", history)
+          .seconds !== null,
+      );
+  });
 
   it("estimates only from measurements made under the current speed revision", () => {
     const unknown = { seconds: null, memoryBytes: null, temporaryBytes: null, finalBytes: null };

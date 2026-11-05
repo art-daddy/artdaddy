@@ -17,7 +17,14 @@ import {
 } from "../store/exportQuestionHost";
 import { useEditor } from "../store/editor";
 import { useExportJob } from "../store/exportJob";
-import { __resetExportQueue, submitExport, whenExportsSettle } from "../timeline/exportQueue";
+import { __setExportFlag } from "../api/exportFlags";
+import {
+  __resetExportQueue,
+  listExportRecords,
+  offerExportRetry,
+  submitExport,
+  whenExportsSettle,
+} from "../timeline/exportQueue";
 import { answerButtons, planQuestions } from "../timeline/exportQuestions";
 import { ExportMemFs } from "../test/timelineKit";
 import { FakeJobs } from "../test/fakeJobs";
@@ -49,7 +56,7 @@ const AGENT = { chatSessionId: "t1", branchId: 0, executionId: 1 };
 function start(
   filename: string,
   run: (signal: AbortSignal) => Promise<unknown>,
-  over: { store?: ProjectStoreAccess; fs?: ExportMemFs } = {},
+  over: { store?: ProjectStoreAccess; fs?: ExportMemFs; rung?: 1 | 2 } = {},
 ) {
   const useStore = over.store ?? store;
   const useFs = over.fs ?? fs;
@@ -60,6 +67,19 @@ function start(
     stagePath: `/out/${filename}.partial`,
     filename,
     origin: AGENT, // the chat asked: the Export dialog's own job is not begun
+    ...(over.rung
+      ? {
+          meta: {
+            duration_s: 10,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            quality: "medium",
+            project_id: "",
+            plan: { rung: over.rung },
+          },
+        }
+      : {}),
     run: async (signal) => {
       await run(signal);
       await useFs.writeTextFile(`/out/${filename}.partial`, `encoded ${filename}`);
@@ -118,6 +138,28 @@ describe("ExportCard", () => {
     expect(status()).toBe("Rendering and encoding · 40% · about 2 min left");
     const bar = screen.getByRole("progressbar");
     expect(bar).toHaveAttribute("aria-valuenow", "40");
+    g.open();
+  });
+
+  it("says, under the status line, when an export runs below the normal setting, and why", async () => {
+    const g = gated();
+    await start("one.mp4", g.wait, { rung: 1 });
+    await start("two.mp4", g.wait, { rung: 2 });
+    render(<ExportCard />);
+    expect(
+      screen.getByText(
+        "Using a gentler setting to fit this PC's memory · it may take a little longer",
+      ),
+    ).toBeVisible();
+    g.open();
+    await whenExportsSettle();
+  });
+
+  it("says nothing of the sort for an export at the normal setting", async () => {
+    const g = gated();
+    await start("one.mp4", g.wait);
+    render(<ExportCard />);
+    expect(screen.queryByText(/gentler setting|gentlest setting/)).toBeNull();
     g.open();
   });
 
@@ -265,6 +307,120 @@ describe("ExportCard", () => {
       await whenExportsSettle();
       expect(first.job_id).toBeTruthy();
       expect(screen.getByText("Export cancelled")).toBeVisible();
+    });
+  });
+
+  describe("Try again on a failed export", () => {
+    const failing = (error: string, rung?: 1 | 2) =>
+      start(
+        "one.mp4",
+        async () => {
+          throw new Error(error);
+        },
+        rung ? { rung } : {},
+      );
+    const MEMORY = "Error while filtering: Cannot allocate memory";
+
+    it("offers one click, says what it will do, and the failed row goes once the new export is started", async () => {
+      const sub = await failing(MEMORY);
+      const asked: number[] = [];
+      offerExportRetry(sub.job_id, async (rung) => {
+        asked.push(rung);
+        return { ok: true };
+      });
+      await whenExportsSettle();
+      render(<ExportCard />);
+      expect(
+        screen.getByText(
+          "Try again uses a gentler setting: it needs less memory and may take longer.",
+        ),
+      ).toBeVisible();
+      fireEvent.click(screen.getByRole("button", { name: "try again one.mp4" }));
+      await waitFor(() => expect(screen.queryByText("Export stopped")).toBeNull());
+      expect(asked).toEqual([1]);
+    });
+
+    it("says the lightest setting was already the one that failed, instead of promising a lighter run", async () => {
+      const sub = await failing(MEMORY, 2);
+      offerExportRetry(sub.job_id, async () => ({ ok: true }));
+      await whenExportsSettle();
+      render(<ExportCard />);
+      expect(screen.getByText(/already running at its lightest setting/)).toBeVisible();
+      expect(screen.queryByText(/needs less memory/)).toBeNull();
+    });
+
+    it("promises nothing gentler for an export that has no gentler rung, nor while the switch for rungs is off", async () => {
+      const sub = await failing(MEMORY);
+      offerExportRetry(sub.job_id, async () => ({ ok: true }));
+      await whenExportsSettle();
+      // The plan said this export has only its normal rung (the streamed engine, say): it is already the lightest.
+      const row = listExportRecords().find((r) => r.job_id === sub.job_id)!;
+      expect(row.maxRung).toBeUndefined();
+      cleanup();
+      __setExportFlag("plan_rung", false);
+      try {
+        render(<ExportCard />);
+        expect(screen.getByText(/already running at its lightest setting/)).toBeVisible();
+        expect(screen.queryByText(/gentler setting/)).toBeNull();
+      } finally {
+        __setExportFlag("plan_rung", true);
+      }
+    });
+
+    it("says nothing about a gentler setting after a failure that one would not touch", async () => {
+      const sub = await failing("ENOSPC: no space left on device");
+      offerExportRetry(sub.job_id, async () => ({ ok: true }));
+      await whenExportsSettle();
+      render(<ExportCard />);
+      expect(screen.getByRole("button", { name: "try again one.mp4" })).toBeVisible();
+      expect(screen.queryByText(/gentler setting|gentlest setting/)).toBeNull();
+    });
+
+    it("is not offered when there is no way to start that export again", async () => {
+      await failing(MEMORY);
+      await whenExportsSettle();
+      render(<ExportCard />);
+      expect(screen.getByText("Export stopped")).toBeVisible();
+      expect(screen.queryByRole("button", { name: "try again one.mp4" })).toBeNull();
+      expect(screen.queryByText(/Try again uses/)).toBeNull();
+    });
+
+    it("says it is starting and cannot be pressed twice while the new export is being started", async () => {
+      const sub = await failing(MEMORY);
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => (release = resolve));
+      const asked: number[] = [];
+      offerExportRetry(sub.job_id, async (rung) => {
+        asked.push(rung);
+        await held;
+        return { ok: true };
+      });
+      await whenExportsSettle();
+      render(<ExportCard />);
+      const button = screen.getByRole("button", { name: "try again one.mp4" });
+      fireEvent.click(button);
+      await waitFor(() => expect(button).toBeDisabled());
+      expect(button).toHaveTextContent("Starting…");
+      fireEvent.click(button);
+      release();
+      await waitFor(() => expect(screen.queryByText("Export stopped")).toBeNull());
+      expect(asked).toEqual([1]);
+    });
+
+    it("keeps the failed row and says why when the new export was refused, and the button works again", async () => {
+      const sub = await failing(MEMORY);
+      offerExportRetry(sub.job_id, async () => ({
+        ok: false,
+        error: "an export to one.mp4 is already queued or running",
+      }));
+      await whenExportsSettle();
+      render(<ExportCard />);
+      fireEvent.click(screen.getByRole("button", { name: "try again one.mp4" }));
+      expect(
+        await screen.findByText(/Could not start again: an export to one.mp4 is already queued/),
+      ).toBeVisible();
+      expect(screen.getByRole("button", { name: "try again one.mp4" })).toBeEnabled();
+      expect(screen.getByText("Export stopped")).toBeVisible();
     });
   });
 

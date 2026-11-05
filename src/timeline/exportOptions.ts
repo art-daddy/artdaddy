@@ -12,6 +12,7 @@ export type ExportMode = "quality" | "fast";
 export type ExportEncoder = "x264-crf" | "x264-crf-threads2" | "amf-cqp18";
 
 import type { Branding } from "./branding";
+import { rungOf, type PeakSample, type Plan, type Rung } from "./exportPlan";
 import type { RenderWorkload } from "./renderPlan";
 import type { ExportResources } from "../platform/host";
 
@@ -90,17 +91,23 @@ export interface ExportCalibration {
   readonly finalBytes: number;
   readonly memoryBytes: number | null;
   readonly temporaryBytes: number | null;
+  /** The rung the export ran at (exportPlan.ts); absent is the normal one, which is what every measurement
+   *  made before rungs existed ran at. */
+  readonly rung?: Rung;
 }
 
-export function estimateExportFromHistory(
+/** The earlier exports a measurement may speak for: the same picture, layers, rate, quality, engine and
+ *  encoder, under the current speed revision. The ONE filter, so the estimate and the plan's peak
+ *  prediction can never disagree about what matches. */
+function matchingCalibrations(
   workload: RenderWorkload,
   output: ExportCalibration["output"],
   quality: string,
   engine: ExportEngine,
   history: readonly ExportCalibration[],
-  encoder: ExportEncoder = "x264-crf",
-): ExportEstimates {
-  const samples = history.filter(
+  encoder: ExportEncoder,
+): ExportCalibration[] {
+  return history.filter(
     (sample) =>
       (sample.encoder ?? "x264-crf") === encoder &&
       sample.revision === EXPORT_SPEED_REVISION &&
@@ -120,6 +127,32 @@ export function estimateExportFromHistory(
       sample.finalBytes > 0 &&
       Number.isFinite(sample.finalBytes),
   );
+}
+
+/** The peak memory earlier exports of this shape reached on this PC, each with the rung it ran at: what the
+ *  plan predicts from. */
+export function peakSamples(
+  workload: RenderWorkload,
+  output: ExportCalibration["output"],
+  quality: string,
+  engine: ExportEngine,
+  history: readonly ExportCalibration[],
+  encoder: ExportEncoder = "x264-crf",
+): PeakSample[] {
+  return matchingCalibrations(workload, output, quality, engine, history, encoder).map(
+    (sample) => ({ rung: rungOf(sample.rung), bytes: sample.memoryBytes }),
+  );
+}
+
+export function estimateExportFromHistory(
+  workload: RenderWorkload,
+  output: ExportCalibration["output"],
+  quality: string,
+  engine: ExportEngine,
+  history: readonly ExportCalibration[],
+  encoder: ExportEncoder = "x264-crf",
+): ExportEstimates {
+  const samples = matchingCalibrations(workload, output, quality, engine, history, encoder);
   const maximum = (values: (number | null)[]) => {
     const valid = values.filter(
       (value): value is number => value !== null && Number.isFinite(value) && value >= 0,
@@ -323,6 +356,10 @@ export function assessExport(
   resources: ExportResources,
   measured: ExportEstimates,
   budgets: ExportBudgets,
+  /** The memory verdict when the exporter plans a rung (exportPlan.ts): memory is short only when even the
+   *  gentlest rung does not fit. Without it, today's rule: the measured peak against what the PC and the
+   *  app allow. */
+  memoryPlan?: Plan,
 ): ExportAssessment {
   const valid = (value: number | null): value is number =>
     value !== null && Number.isFinite(value) && value >= 0;
@@ -359,7 +396,16 @@ export function assessExport(
   const reasons: ExportPreflightReason[] = [];
   if (promiseLine === "outside") reasons.push("outside_promise");
   const memory = estimates.memoryBytes;
-  if (memory === null || !valid(resources.available_memory_bytes) || !valid(budgets.memoryBytes))
+  if (memoryPlan) {
+    if (!memoryPlan.fits) reasons.push("memory_shortage");
+    // Nothing measured is still said (the report counts it), though it only asks below the reserve.
+    else if (memoryPlan.basis === "unmeasured" || memoryPlan.basis === "unknown_pc")
+      reasons.push("memory_unknown");
+  } else if (
+    memory === null ||
+    !valid(resources.available_memory_bytes) ||
+    !valid(budgets.memoryBytes)
+  )
     reasons.push("memory_unknown");
   else if (memory > Math.min(resources.available_memory_bytes, budgets.memoryBytes))
     reasons.push("memory_shortage");
@@ -402,6 +448,9 @@ export interface ExportOptions {
   __qaPieceSpanSeconds?: 180;
   engine?: ExportEngine;
   mode?: ExportMode;
+  /** How gentle the export runs (exportPlan.ts): 0, the default, is today's command; 1 and 2 use fewer decoder
+   *  and encoder threads, so less memory, and change nothing else about what is made. */
+  rung?: Rung;
   resolution?: ExportResolution;
   quality?: ExportQuality;
   fps?: number;

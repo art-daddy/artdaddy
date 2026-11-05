@@ -56,6 +56,9 @@ function calibration(value: unknown): ExportCalibration | null {
   )
     return null;
   const revision = number(raw.revision);
+  // The setting the export ran at, when it was below the normal one (exportPlan.ts): what its peak means
+  // depends on it, so a measurement that loses it is worse than none.
+  const rung = raw.rung === 1 || raw.rung === 2 ? raw.rung : null;
   return {
     workload: Object.fromEntries(
       keys.map((key) => [key, workload[key]]),
@@ -70,6 +73,7 @@ function calibration(value: unknown): ExportCalibration | null {
           ? "x264-crf-threads2"
           : "x264-crf",
     ...(revision === null ? {} : { revision }),
+    ...(rung === null ? {} : { rung }),
     elapsedSeconds: Number(raw.elapsedSeconds),
     finalBytes: Number(raw.finalBytes),
     memoryBytes: number(raw.memoryBytes),

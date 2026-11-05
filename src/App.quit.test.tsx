@@ -13,6 +13,8 @@ import { useCloseCoordinator } from "./store/closeCoordinator";
 import { useEditor } from "./store/editor";
 import { useAuth } from "./store/auth";
 import { setClerkTokenProvider } from "./api/auth";
+import { __resetExportFlags } from "./api/exportFlags";
+import { useCompatibility } from "./update/compatibility";
 import { catalogIdentity } from "./contract";
 import {
   __bufferedAgentEvents,
@@ -28,6 +30,7 @@ vi.mock("./components/AuthProvider", () => ({
 vi.mock("./components/MenuBar", () => ({ default: () => <div>menu</div> }));
 vi.mock("./platform", () => ({ platform: { name: "tauri" } }));
 vi.mock("./mcp/service", () => ({ initMcp: async () => undefined }));
+vi.mock("./tools/modelPrefetch", () => ({ startSpeechModelPrefetch: async () => undefined }));
 vi.mock("./lib/osDrop", () => ({
   webOwnsFileDrops: () => false,
   startOsDropRouter: async () => () => undefined,
@@ -469,5 +472,32 @@ describe("Restart & update", () => {
     expect(order).toEqual(["project closed", "update installed"]);
     expect(update.download).toHaveBeenCalledTimes(2);
     expect(update.install).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Each of the exporter's safety behaviours can be switched off from the server (api/exportFlags.ts). A PC that
+// already has the app open must hear it without anyone starting an export.
+describe("opening the app", () => {
+  it("asks the server which of the exporter's safety behaviours are on, a few seconds in", async () => {
+    __resetExportFlags();
+    useCompatibility.setState({ status: "allowed" });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      render(
+        <MemoryRouter initialEntries={["/"]}>
+          <App />
+        </MemoryRouter>,
+      );
+      const asks = () =>
+        vi.mocked(fetch).mock.calls.filter(([url]) => String(url).endsWith("/client/export-flags"))
+          .length;
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(asks()).toBe(0); // not in the first moments, while the window paints and signing in settles
+      await vi.advanceTimersByTimeAsync(6_000);
+      expect(asks()).toBe(1);
+    } finally {
+      vi.useRealTimers();
+      __resetExportFlags();
+    }
   });
 });

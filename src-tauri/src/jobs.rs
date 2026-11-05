@@ -221,6 +221,8 @@ pub struct Supervisor {
   copying: Arc<Mutex<HashSet<String>>>,
   copy_settled: Arc<Condvar>,
   awake: Option<Arc<awake::ExportAwake>>,
+  /// How often a slow check of an export's sources says it is still going (`VERIFY_BEAT`).
+  verify_beat: std::time::Duration,
   #[cfg(test)]
   initial_entry_hook: Option<InitialEntryHook>,
 }
@@ -1019,6 +1021,10 @@ const EXPORT_WORKSPACE_PAYLOAD_BYTES: u64 = EXPORT_SCRATCH_LIMIT_BYTES - 2_000_0
 /// can ask for, on a volume of any ordinary cluster size.
 const EXPORT_ADMISSION_HEADROOM_BYTES: u64 = 64 * 1024 * 1024;
 const EXPORT_EXECUTION_LIMIT_MS: u64 = 8 * 60 * 60 * 1000;
+/// While a job's sources are checked (hashed) before it starts, and again at every step, nothing is printed. A project on
+/// a slow drive can take minutes. The app process says it is still checking this often, so the page's watch for an export
+/// that stood still does not take the quiet for a stall (`artdaddy_verify=N` on the job's output, N always growing).
+const VERIFY_BEAT: std::time::Duration = std::time::Duration::from_secs(5);
 
 // A persisted plan may have created its entry even when confirmation failed.
 struct InitialEntryCharge(Option<workspace::Charge>);
@@ -1265,6 +1271,7 @@ impl Supervisor {
       copying: Arc::default(),
       copy_settled: Arc::default(),
       awake: None,
+      verify_beat: VERIFY_BEAT,
       #[cfg(test)]
       initial_entry_hook: None,
     }
@@ -1318,6 +1325,10 @@ impl Supervisor {
   }
 
   pub fn with_export_font_root(mut self, root: PathBuf) -> Self { self.export_font_root = Some(root); self }
+
+  /// A shorter (or longer) beat for the check of an export's sources, for a test that cannot wait seconds.
+  #[cfg(test)]
+  fn with_verify_beat(mut self, beat: std::time::Duration) -> Self { self.verify_beat = beat; self }
 
   /// Joins this supervisor's export work to the keep-awake tracker. Production reaches it only through `supervisor_with_awake`.
   fn with_awake(mut self, awake: Arc<awake::ExportAwake>) -> Self { self.awake = Some(awake); self }
@@ -1971,7 +1982,16 @@ impl Supervisor {
     drop(entries);
     self.validate_render_scratch(&delivery, spec.cwd.as_deref())?;
     let before = serde_json::to_vec(&delivery).map_err(|error| error.to_string())?;
+    // `check` runs once per megabyte read. When the checking is slow it also says, once per beat, that it is still going:
+    // the count only grows, so the page can tell one beat from the last.
+    let checks = std::cell::Cell::new(0u64);
+    let last_beat = std::cell::Cell::new(std::time::Instant::now());
     let check = || -> Result<(), String> {
+      checks.set(checks.get() + 1);
+      if last_beat.get().elapsed() >= self.verify_beat {
+        last_beat.set(std::time::Instant::now());
+        (self.notify)(Notice::Stdout { id: spec.id.clone(), chunk: format!("artdaddy_verify={}\n", checks.get()) });
+      }
       let entries = self.deliveries.lock().map_err(|error| error.to_string())?;
       let current = entries.get(&spec.id).ok_or("export intent disappeared during dependency checks")?;
       if current.state != "prepared" || current.producer_complete {
@@ -6810,6 +6830,52 @@ mod export_delivery_tests {
     assert!(owner(&root).recover_exports().is_empty());
     assert_eq!(owner(&root).list().len(), 0);
   }
+  // Found by review: hashing every source before a job starts (and again at every step) prints nothing, so a page watching for
+  // movement saw a job that had stood still for as long as the hashing took. A big project on a slow drive can take minutes.
+  // The app process now says it is still checking, at most once per beat, and only when the checking is slow.
+  #[test]
+  fn hashing_a_big_source_says_it_is_still_being_checked_so_the_page_does_not_take_it_for_a_stall() {
+    use std::time::{Duration, Instant};
+    struct SlowHash(u64);
+    impl Spawner for SlowHash {
+      fn identity(&self, program: &str) -> Result<ArtifactIdentity, String> { NoSpawn.identity(program) }
+      fn dependency_identity(&self, path: &Path, check: &dyn Fn() -> Result<(), String>) -> Result<ArtifactIdentity, String> {
+        // A source that takes this long to read, a "megabyte" at a time.
+        let until = Instant::now() + Duration::from_millis(self.0);
+        while Instant::now() < until { check()?; std::thread::sleep(Duration::from_millis(2)); }
+        artifact_identity(path)
+      }
+      fn spawn(&self, _: &JobSpec, _: Arc<dyn Fn(ProcEvent) + Send + Sync>, _: Arc<Workspace>) -> Result<u32, String> { Err("not started here".into()) }
+      fn kill(&self, _: &str, _: u32) {}
+    }
+    let run = |reading_ms: u64, beat: Option<Duration>| {
+      let seen = Arc::new(Mutex::new(Vec::<(Instant, String)>::new()));
+      let notes = seen.clone();
+      let dir = tempfile::tempdir().unwrap();
+      let mut jobs = Supervisor::new(Arc::new(SlowHash(reading_ms)), Arc::new(move |notice| {
+        if let Notice::Stdout { chunk, .. } = notice { notes.lock().unwrap().push((Instant::now(), chunk)); }
+      })).with_export_root(dir.path().join("journal")).unwrap();
+      if let Some(beat) = beat { jobs = jobs.with_verify_beat(beat); }
+      let delivery = intent(&jobs, dir.path(), "slow-hash");
+      let source = dir.path().join("source.mp4");
+      std::fs::write(&source, b"source bytes").unwrap();
+      let spec = JobSpec { id: delivery.id.clone(), lane: "export".into(), program: "ffmpeg".into(),
+        args: vec!["-i".into(), source.to_string_lossy().into(), delivery.stage_path.clone()], steps: vec![], cwd: None,
+        meta: serde_json::json!({ "kind": "export", "plan": { "sources": [{ "path": source }] } }) };
+      jobs.retain_render_job(&spec).unwrap();
+      let lines = seen.lock().unwrap().iter().filter(|(_, chunk)| chunk.starts_with("artdaddy_verify=")).cloned().collect::<Vec<_>>();
+      lines
+    };
+    // A slow read says so, over and over, with a count that only grows, and never faster than the beat.
+    let beats = run(400, Some(Duration::from_millis(50)));
+    assert!(beats.len() >= 3, "a read that took a long time said nothing: {} beats", beats.len());
+    let counts = beats.iter().map(|(_, chunk)| chunk.trim().trim_start_matches("artdaddy_verify=").parse::<u64>().unwrap()).collect::<Vec<_>>();
+    assert!(counts.windows(2).all(|pair| pair[1] > pair[0]), "a heartbeat must differ from the last one: {counts:?}");
+    for pair in beats.windows(2) { assert!(pair[1].0 - pair[0].0 >= Duration::from_millis(45), "beats are not a flood"); }
+    // An ordinary export, whose sources are read in a moment, prints nothing extra at the real beat.
+    assert!(run(120, None).is_empty(), "a quick read must not add lines to every export");
+  }
+
   #[test]
   fn cancellation_during_dependency_reads_persists_before_the_reader_returns() {
     use std::sync::atomic::{AtomicUsize, Ordering};

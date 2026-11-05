@@ -5,7 +5,9 @@ import {
   ExportTrace,
   MAX_STALLS_LOGGED,
   RunWatch,
+  SLOW_START_SECONDS,
   STALL_LOG_SECONDS,
+  STALL_STOP_SECONDS,
 } from "./exportTrace";
 
 function clockAt(start = 1_000_000) {
@@ -83,6 +85,184 @@ describe("ExportTrace", () => {
     trace.record("stage", "rendering");
     expect(trace.lastIs("stage", "rendering")).toBe(true);
     expect(trace.lastIs("stage", "saving")).toBe(false);
+  });
+});
+
+describe("RunWatch stopping a stalled export", () => {
+  function enforced(over: { enforce?: () => boolean; totalMs?: number } = {}) {
+    const t = clockAt();
+    const trace = new ExportTrace(t.clock);
+    const stops: Array<[string, number, number]> = [];
+    const w = new RunWatch(trace, over.totalMs ?? 60_000, t.clock, undefined, {
+      enforce: over.enforce ?? (() => true),
+      onStall: (kind, seconds, percent) => stops.push([kind, seconds, percent]),
+    });
+    /** Time passes in the 5 s steps the queue's timer takes. */
+    const pass = (seconds: number) => {
+      for (let s = 0; s < seconds; s += 5) {
+        t.advance(5000);
+        w.tick();
+      }
+    };
+    return { t, trace, w, stops, pass };
+  }
+
+  it("stops a run that has made no progress for as long as the tier allows, and not before", () => {
+    const { w, stops, pass } = enforced();
+    w.chunk(block(100, 3300));
+    pass(STALL_STOP_SECONDS - 5);
+    expect(stops).toEqual([]);
+    pass(5);
+    expect(stops).toEqual([["frozen", STALL_STOP_SECONDS, 6]]); // 3300 ms of 60 s: where it got to
+  });
+
+  it("stops an export that never started moving after the longer allowance for a slow start", () => {
+    const { stops, pass } = enforced();
+    pass(SLOW_START_SECONDS - 5);
+    expect(stops).toEqual([]);
+    pass(5);
+    expect(stops).toEqual([["slow_start", SLOW_START_SECONDS, 0]]);
+    expect(SLOW_START_SECONDS).toBeGreaterThan(STALL_STOP_SECONDS);
+  });
+
+  it("never stops an export that keeps moving, however slowly: a block that differs is life", () => {
+    const { w, stops, pass } = enforced({ totalMs: 3_600_000 });
+    for (let i = 1; i <= 400; i++) {
+      pass(STALL_STOP_SECONDS - 10); // nearly as long as the allowance, every time
+      w.chunk(block(i, i * 33));
+    }
+    expect(stops).toEqual([]);
+  });
+
+  it("does not take a repeated block for life, and does stop on it", () => {
+    const { w, stops, pass } = enforced();
+    w.chunk(block(100, 3300));
+    for (let s = 0; s < STALL_STOP_SECONDS + 10; s += 5) {
+      w.chunk(block(100, 3300)); // ffmpeg prints the same block again while it is stuck
+      pass(5);
+    }
+    expect(stops).toHaveLength(1);
+  });
+
+  it("stops once, however long the process takes to die", () => {
+    const { w, stops, pass } = enforced();
+    w.chunk(block(1, 100));
+    pass(STALL_STOP_SECONDS * 5);
+    expect(stops).toHaveLength(1);
+  });
+
+  it("does not count the time the PC was asleep as the export standing still", () => {
+    const { t, w, stops, pass } = enforced();
+    w.chunk(block(100, 3300));
+    pass(30);
+    t.advance(2 * 3600_000); // the lid was closed for two hours: no tick ran
+    w.tick();
+    expect(stops).toEqual([]);
+    pass(STALL_STOP_SECONDS - 60); // awake again, and still not long enough
+    expect(stops).toEqual([]);
+    pass(70);
+    expect(stops).toHaveLength(1); // it only counts the time it was watched
+  });
+
+  it("only logs, as before, when the switch is off, and starts stopping the moment it is switched on", () => {
+    let on = false;
+    const { w, trace, stops, pass } = enforced({ enforce: () => on });
+    w.chunk(block(100, 3300));
+    pass(STALL_STOP_SECONDS + 20);
+    expect(stops).toEqual([]);
+    expect(trace.snapshot().filter((e) => e.e === "stall_detected")).toHaveLength(1); // the 60 s log
+    on = true;
+    pass(5);
+    expect(stops).toHaveLength(1);
+  });
+
+  it("tells the story of the stop, in the slots kept back for endings, even after many logged stalls", () => {
+    const { w, trace, pass } = enforced({ enforce: () => false });
+    for (let i = 1; i <= MAX_STALLS_LOGGED + 4; i++) {
+      w.chunk(block(i, i * 100));
+      pass(STALL_LOG_SECONDS + 5);
+    }
+    const before = trace.snapshot().filter((e) => e.e === "stall_detected").length;
+    expect(before).toBe(MAX_STALLS_LOGGED);
+    const again = enforced();
+    again.w.chunk(block(1, 100));
+    again.pass(STALL_STOP_SECONDS);
+    expect(again.trace.snapshot().at(-1)).toMatchObject({
+      e: "stall_detected",
+      v: "frozen",
+      n: STALL_STOP_SECONDS,
+    });
+  });
+
+  it("is told nothing by a watch with no policy (an adopted export has none): it logs and never stops", () => {
+    const t = clockAt();
+    const trace = new ExportTrace(t.clock);
+    const w = new RunWatch(trace, 60_000, t.clock);
+    w.chunk(block(1, 100));
+    for (let s = 0; s < 1000; s += 5) {
+      t.advance(5000);
+      w.tick();
+    }
+    const stalls = trace.snapshot().filter((e) => e.e === "stall_detected");
+    expect(stalls).toHaveLength(1); // the log line, once
+    expect(stalls[0].v ?? "").toBe(""); // and no stop: that event names its kind
+  });
+
+  it("does not take the end of the run for a stall: finishing a render that was just under the limit stops nothing", () => {
+    const { t, w, trace, stops, pass } = enforced();
+    w.chunk(block(100, 3300));
+    pass(STALL_STOP_SECONDS - 5);
+    t.advance(8_000); // the process exits on its own, between two ticks, past the limit
+    const longest = w.finish();
+    expect(stops).toEqual([]);
+    expect(trace.snapshot().some((e) => e.e === "stall_detected" && e.v)).toBe(false);
+    expect(longest).toBeGreaterThanOrEqual(STALL_STOP_SECONDS); // but the silence is still reported
+  });
+
+  // Found by review: before ffmpeg starts, and at every step, the app process hashes every source, which prints no
+  // progress. On a big project on a slow drive that is minutes of silence from a job that is working.
+  it("takes the app process's word that it is still checking the sources as life, before the first frame and between steps", () => {
+    const { w, stops, pass } = enforced();
+    for (let i = 1; i <= 120; i++) {
+      w.chunk(`artdaddy_verify=${i * 40}\n`); // ten minutes of checking, a beat every five seconds
+      pass(5);
+    }
+    expect(stops).toEqual([]);
+    // Then ffmpeg starts and moves: still nothing to stop, and the slow-start clock was measured from the last beat.
+    w.chunk(block(10, 400));
+    pass(STALL_STOP_SECONDS - 5);
+    expect(stops).toEqual([]);
+  });
+
+  it("still stops a job whose checking says nothing for as long as the tier allows, and one whose beats stop", () => {
+    const first = enforced();
+    first.pass(SLOW_START_SECONDS); // no beat at all
+    expect(first.stops).toEqual([["slow_start", SLOW_START_SECONDS, 0]]);
+    const second = enforced();
+    for (let i = 1; i <= 10; i++) {
+      second.w.chunk(`artdaddy_verify=${i}\n`);
+      second.pass(5);
+    }
+    second.pass(SLOW_START_SECONDS); // the beats end, and the silence that follows counts from the last one
+    expect(second.stops).toHaveLength(1);
+  });
+
+  it("takes the marker of a new step as life, and a repeat of the same beat as none", () => {
+    const { w, stops, pass } = enforced();
+    w.chunk(block(100, 3300));
+    for (let step = 1; step <= 5; step++) {
+      pass(STALL_STOP_SECONDS - 20); // the last step's work
+      w.chunk(`artdaddy_step=${step}\n`); // the next step starts: the clock starts again
+    }
+    expect(stops).toEqual([]);
+    // The same count again and again is not a heartbeat: it says nothing happened.
+    const repeated = enforced();
+    repeated.w.chunk(block(100, 3300));
+    for (let s = 0; s < STALL_STOP_SECONDS + 10; s += 5) {
+      repeated.w.chunk("artdaddy_verify=7\n");
+      repeated.pass(5);
+    }
+    expect(repeated.stops).toHaveLength(1);
   });
 });
 

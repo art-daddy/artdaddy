@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { readFileSync } from "node:fs";
@@ -21,6 +21,8 @@ import {
   exportProgressReporter,
   exportStem,
   exportTimelineTool,
+  rebuildAtRung,
+  gentlestRung,
   renderTimelineTool,
   resolveClipSources,
   runRenderPlan,
@@ -30,6 +32,9 @@ import { buildScene } from "../preview/scene";
 import { __resetExportQueue, whenExportsSettle } from "./exportQueue";
 import { __resetJobNotes, pendingJobNotes } from "../store/jobNotes";
 import { useExportJob } from "../store/exportJob";
+import { EXPORT_SPEED_REVISION } from "./exportOptions";
+import { __setExportFlag } from "../api/exportFlags";
+import * as host from "../platform/host";
 import type { ClientToolContext } from "../tools/context";
 import { BUNDLED_FACES } from "./fontMetrics.data";
 
@@ -3986,5 +3991,229 @@ describe("assertSourcesResolved ΓÇö a plan cannot be built from library refs"
     // The other direction: the guard must not fire on the resolved form every working path uses.
     const plan = buildRenderCommand(oneClip("D:/shoot/a.mp4") as Any, "/o.mp4");
     expect(plan.args.join(" ")).toContain("D:/shoot/a.mp4");
+  });
+});
+
+// The plan (exportPlan.ts): an export is built at the gentlest rung its PC's free memory and its own history
+// say it needs, once, when its command is captured. Same project, same file; only thread counts differ.
+describe("the rung an export is built at", () => {
+  const GIB = 1024 ** 3;
+  const pc = (freeGiB: number) =>
+    vi.spyOn(host, "resolveExportResources").mockResolvedValue({
+      total_memory_bytes: 16 * GIB,
+      available_memory_bytes: freeGiB * GIB,
+      scratch_free_bytes: 500 * GIB,
+      destination_free_bytes: 500 * GIB,
+      local_fast_candidate: false,
+      budgets: { memoryBytes: 8 * GIB, temporaryBytes: 18 * GIB, executionSeconds: 28_800 },
+    });
+  /** An export of one clip whose history says this shape once peaked at `peakGiB` at the normal rung. */
+  async function exported(peakGiB: number | null, over: Record<string, unknown> = {}) {
+    let argv: string[] = [];
+    const { ctx } = await renderCtx(() => ({ code: 0, stderr: "" }));
+    const run = ctx.runner.run.bind(ctx.runner);
+    ctx.runner = {
+      run: async (program, args, ...options) => {
+        if (program === "ffmpeg") argv = args;
+        return run(program, args, ...options);
+      },
+    };
+    await addClipsTool(
+      { entries: [{ media_ref: "a.mp4", timeline_in: 0, timeline_out: 60 }] },
+      ctx,
+    );
+    const shape = buildRenderCommand(await loadTimeline(ctx.store), "/x.mp4");
+    useExportJob.setState({
+      calibrations:
+        peakGiB === null
+          ? []
+          : [
+              {
+                workload: shape.workload,
+                output: shape.output,
+                quality: "medium",
+                engine: shape.selection!.backend,
+                encoder: shape.encoder,
+                revision: EXPORT_SPEED_REVISION,
+                elapsedSeconds: 10,
+                finalBytes: 1e6,
+                memoryBytes: peakGiB * GIB,
+                temporaryBytes: 0,
+              },
+            ],
+    });
+    const result = (await exportTimelineTool({ name: "deliverable", ...over }, ctx)) as Any;
+    await whenExportsSettle();
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    return argv;
+  }
+  const threads = (argv: string[]) =>
+    argv.flatMap((arg, index) => (arg === "-threads:v" ? [Number(argv[index + 1])] : []));
+  afterEach(() => {
+    vi.restoreAllMocks();
+    __setExportFlag("plan_rung", true);
+    useExportJob.setState({ calibrations: [] });
+  });
+
+  it("gives an export the gentle rung when its history says the normal one will not fit the free memory", async () => {
+    pc(4); // a 3 GiB ceiling; this shape once peaked at 3.52 GiB
+    expect(threads(await exported(3.52))).toEqual([2, 2]); // the decoder, then the encoder
+  });
+
+  it("leaves an export alone when it fits, when nothing is known about it, and when the PC cannot be measured", async () => {
+    pc(40);
+    expect(threads(await exported(3.52))).toEqual([]);
+    pc(4);
+    expect(threads(await exported(null))).toEqual([]); // a first export is never slowed down on a guess
+    vi.restoreAllMocks();
+    expect(threads(await exported(3.52))).toEqual([]); // no measurement of the PC: today's command
+  });
+
+  it("is today's command whenever the switch is off", async () => {
+    pc(4);
+    __setExportFlag("plan_rung", false);
+    expect(threads(await exported(3.52))).toEqual([]);
+  });
+
+  // XR-28: with nothing known about the shape and less than the reserve free, the person is asked first, and
+  // whichever way they go on (Continue, or Start anyway) the command that runs is the gentlest: the PC that has
+  // no room is the one that must not get the thread counts that need most.
+  it("runs the gentlest rung when nothing is known about the shape and the PC has less than the reserve free", async () => {
+    pc(1);
+    expect(threads(await exported(null))).toEqual([1, 2]); // the decoder on one thread, the encoder on two
+    pc(4);
+    expect(threads(await exported(null))).toEqual([]); // room enough: the fast rung, as before
+  });
+
+  it("leaves the tight-PC export as it was when the switch is off", async () => {
+    pc(1);
+    __setExportFlag("plan_rung", false);
+    expect(threads(await exported(null))).toEqual([]);
+  });
+
+  it("rebuilds the same export at another rung, with thread counts the only difference", () => {
+    const plan = buildRenderCommand(
+      {
+        units: "seconds",
+        canvas: { width: 200, height: 100, fps: 30 },
+        tracks: [
+          {
+            id: "v1",
+            kind: "video",
+            z: 0,
+            clips: [
+              {
+                id: "c1",
+                kind: "video",
+                media_ref: "/a.mp4",
+                source_in: 0,
+                source_out: 2,
+                timeline_in: 0,
+                timeline_out: 2,
+              },
+            ],
+          },
+        ],
+      } as Any,
+      "/o.mp4",
+    );
+    expect(plan).not.toHaveProperty("rung"); // the normal rung leaves the plan as it always was
+    const gentle = rebuildAtRung(plan, 1)!;
+    expect(gentle.rung).toBe(1);
+    expect(gentle.filterComplex).toBe(plan.filterComplex);
+    expect(gentle.args.filter((arg) => arg !== "-threads:v" && arg !== "2")).toEqual(
+      plan.args.filter((arg) => arg !== "-threads:v" && arg !== "2"),
+    );
+    expect(rebuildAtRung(gentle, 0)!.args).toEqual(plan.args); // and back again, byte for byte
+    expect(rebuildAtRung({ ...plan }, 1)).toBeNull(); // a plan nothing here made cannot be rebuilt
+  });
+
+  // Found by review: what the person is told about an export (a clip that could not be used, branding left out) is
+  // added to the plan after the command is built, and a rung rebuilds the plan from the timeline, so a gentler export
+  // lost it. A rung changes how the work is done, never what the person is told.
+  it("keeps what the plan was told after it was built, at every rung and through a chain of rebuilds", () => {
+    const timeline = {
+      units: "seconds",
+      canvas: { width: 200, height: 100, fps: 30 },
+      tracks: [
+        {
+          id: "v1",
+          kind: "video",
+          z: 0,
+          clips: [
+            {
+              id: "c1",
+              kind: "video",
+              media_ref: "/a.mp4",
+              source_in: 0,
+              source_out: 2,
+              timeline_in: 0,
+              timeline_out: 2,
+            },
+          ],
+        },
+      ],
+    } as Any;
+    const plan = buildRenderCommand(timeline, "/o.mp4");
+    plan.warnings.push("brand asset unavailable: exported unbranded");
+    for (const rung of [0, 1, 2] as const) {
+      const rebuilt = rebuildAtRung(plan, rung)!;
+      expect(rebuilt.warnings, `rung ${rung}`).toContain(
+        "brand asset unavailable: exported unbranded",
+      );
+      expect(rebuilt.warnings.filter((w) => w.startsWith("brand asset"))).toHaveLength(1);
+    }
+    const gentle = rebuildAtRung(plan, 1)!;
+    expect(rebuildAtRung(gentle, 2)!.warnings).toContain(
+      "brand asset unavailable: exported unbranded",
+    );
+    expect(plan.warnings).toEqual(["brand asset unavailable: exported unbranded"]); // the original is left as it was
+  });
+
+  // Found by review: the plan counted on a saving from a rung that is the same command as the one before it.
+  it("knows how many rungs an export really has: the streamed engine one, thirteen or more video clips two", () => {
+    const timeline = (count: number) =>
+      ({
+        units: "seconds",
+        canvas: { width: 200, height: 100, fps: 30 },
+        tracks: [
+          {
+            id: "v1",
+            kind: "video",
+            z: 0,
+            clips: Array.from({ length: count }, (_, i) => ({
+              id: `c${i}`,
+              kind: "video",
+              media_ref: `/a${i}.mp4`,
+              source_in: 0,
+              source_out: 2,
+              timeline_in: i * 2,
+              timeline_out: i * 2 + 2,
+            })),
+          },
+        ],
+      }) as Any;
+    const key = (plan: ReturnType<typeof buildRenderCommand>) =>
+      JSON.stringify([plan.args, plan.steps]);
+    for (const [clips, last] of [
+      [1, 2],
+      [2, 2],
+      [5, 2],
+      [12, 2],
+      [13, 1],
+      [30, 1],
+    ] as const) {
+      const plan = buildRenderCommand(timeline(clips), "/o.mp4");
+      expect(gentlestRung(plan), `${clips} clips`).toBe(last);
+      // The rule behind the numbers: every rung up to the last is a different command from the one before it.
+      for (let rung = 1; rung <= last; rung++)
+        expect(key(rebuildAtRung(plan, rung as 1 | 2)!)).not.toBe(
+          key(rebuildAtRung(plan, (rung - 1) as 0 | 1)!),
+        );
+    }
+    const streamed = buildRenderCommand(timeline(3), "/o.mp4", { engine: "partition-pipes-v1" });
+    expect(streamed.transport).toBe("partition-pipes-v1");
+    expect(gentlestRung(streamed)).toBe(0);
+    expect(gentlestRung({ ...buildRenderCommand(timeline(1), "/o.mp4") })).toBe(0); // a plan nothing here made
   });
 });

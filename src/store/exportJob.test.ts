@@ -119,6 +119,52 @@ describe("local export calibration records", () => {
       expect.objectContaining({ elapsedSeconds: 33, revision: EXPORT_SPEED_REVISION }),
     ]);
   });
+
+  // The field of a journey replay: a gentle export's peak was remembered as a NORMAL export's, so the next
+  // export of the same shape on the same tight PC was planned at the normal rung and failed again.
+  it("keeps the rung a measurement was made at, in this session and in the next", async () => {
+    localStorage.clear();
+    useExportJob.getState().rememberCalibration({ ...sample, memoryBytes: 9e8, rung: 1 });
+    useExportJob.getState().rememberCalibration({ ...sample, memoryBytes: 8e8, rung: 2 });
+    useExportJob.getState().rememberCalibration({ ...sample, memoryBytes: 3.5e9 });
+    expect(useExportJob.getState().calibrations.map((entry) => entry.rung)).toEqual([
+      1,
+      2,
+      undefined,
+    ]);
+    vi.resetModules();
+    const reopened = (await import("./exportJob")).useExportJob;
+    expect(
+      reopened.getState().calibrations.map((entry) => [entry.rung, entry.memoryBytes]),
+    ).toEqual([
+      [1, 9e8],
+      [2, 8e8],
+      [undefined, 3.5e9],
+    ]);
+  });
+
+  it("reads a rung that is not 1 or 2 as the normal rung, so a damaged copy never claims a gentler setting", () => {
+    for (const rung of [0, 3, -1, 1.5, NaN, "1", null, {}])
+      useExportJob.getState().rememberCalibration(JSON.parse(JSON.stringify({ ...sample, rung })));
+    const kept = useExportJob.getState().calibrations;
+    expect(kept).toHaveLength(8);
+    for (const entry of kept) expect(entry.rung).toBeUndefined();
+  });
+
+  it("remembers every field a measurement carries: one that is added to the type and not here is caught", () => {
+    // Built from the type itself, so a field added to ExportCalibration stops this from compiling until it
+    // is given a value, and then fails here until the store keeps it.
+    const everything: Required<ExportCalibration> = {
+      ...sample,
+      encoder: "x264-crf",
+      rung: 2,
+      revision: 3,
+    };
+    useExportJob.getState().rememberCalibration(everything);
+    const stored = useExportJob.getState().calibrations.at(-1)!;
+    expect(Object.keys(stored).sort()).toEqual(Object.keys(everything).sort());
+    expect(stored).toEqual(everything);
+  });
 });
 
 // The feed of the export that is running, for the chat card. The job above belongs to the Export

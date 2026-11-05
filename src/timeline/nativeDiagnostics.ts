@@ -11,6 +11,7 @@
 //   native render budget: configured_commit=N, reported_peak=N; peak is accounting, not ...
 //   native render failed: <why>
 import type { ExportLimit } from "../api/exportVocabulary";
+import { MEMORY_REFUSED } from "../api/exportReason";
 
 export interface NativeRunFacts {
   residentPeakBytes?: number;
@@ -80,6 +81,8 @@ export function mibBand(bytes: number | undefined): number | undefined {
 export function limitThatFired(error: string, facts: NativeRunFacts): ExportLimit | undefined {
   const text = error.toLowerCase();
   if (!text) return undefined;
+  // The app's own stop for keeping the PC usable names itself; nothing else in the text outranks it.
+  if (/memory floor crossed/.test(text)) return "pc_floor";
   if (/resident memory (?:budget exceeded|accounting failed)/.test(text)) return "resident";
   if (
     /workspace (?:allocation |entry )?budget exceeded|scratch budget|temporary budget exceeded/.test(
@@ -88,9 +91,9 @@ export function limitThatFired(error: string, facts: NativeRunFacts): ExportLimi
   )
     return "scratch";
   if (/execution deadline|deadline expired/.test(text)) return "clock";
-  // ffmpeg's own word for a memory request the system refused. When the job stayed under its commit cap
+  // ffmpeg's own words for a memory request the system refused. When the job stayed under its commit cap
   // that is the machine itself; when it had reached the cap, it is the cap.
-  if (/cannot allocate memory|out of memory|not enough memory/.test(text)) {
+  if (MEMORY_REFUSED.test(text)) {
     const { commitLimitBytes: cap, commitPeakBytes: peak } = facts;
     if (!cap) return "os";
     return peak !== undefined && peak < cap * 0.8 ? "os" : "commit";

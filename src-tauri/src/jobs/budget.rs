@@ -30,6 +30,48 @@ pub(super) fn render_limits(available_memory: Option<u64>) -> RenderLimits {
   RenderLimits { resident, commit }
 }
 
+/// The least memory the PC keeps for itself while an export runs.
+const PC_FLOOR_MIN: u64 = 3 * 1024 * 1024 * 1024 / 4;
+/// How many looks in a row the PC must be under its floor before the export is stopped: a browser tab that opens
+/// and closes is not a squeeze.
+pub(super) const PC_FLOOR_LOOKS: u32 = 3;
+
+/// What the PC keeps free for itself and the person's other work while an export runs: 0.75 GiB or 6% of the PC's
+/// memory, whichever is more, and never more than a quarter of what was free when the export started (the exporter
+/// plan's "PC floor"). The quarter is what keeps the floor and the plan agreeing: the plan lets an export use three
+/// quarters of the free memory (`render_limits` takes the same share), so an export that stays inside its share leaves
+/// at least the floor; a larger floor would stop an export the plan had accepted. It also means a PC that began tight
+/// can still export at all. The memory the export's own processes may use is a separate limit (`render_limits`); this
+/// one protects the PC whatever took the memory.
+pub(super) fn pc_floor(total: u64, free_at_start: u64) -> u64 {
+  (total / 100 * 6).max(PC_FLOOR_MIN).min(free_at_start / 4)
+}
+
+/// A watch over the memory the PC has available, one look at a time.
+pub(super) struct FloorWatch {
+  floor: u64,
+  under: u32,
+}
+
+impl FloorWatch {
+  pub(super) fn new(floor: u64) -> Self { Self { floor, under: 0 } }
+
+  #[cfg(test)]
+  pub(super) fn floor(&self) -> u64 { self.floor }
+
+  /// A PC that does not say how much memory it has is not stopped for it: the run of looks starts again.
+  pub(super) fn unknown(&mut self) { self.under = 0; }
+
+  /// One look at the memory the PC has available. Once it has been under the floor on `PC_FLOOR_LOOKS` looks in a
+  /// row, the words to stop the export with. The page reads them as a memory limit (src/api/exportReason.ts).
+  pub(super) fn look(&mut self, available: u64) -> Option<String> {
+    if available >= self.floor { self.under = 0; return None; }
+    self.under = self.under.saturating_add(1);
+    (self.under >= PC_FLOOR_LOOKS).then(|| format!(
+      "render memory floor crossed: the PC has {} MiB left and keeps {} MiB for itself", available >> 20, self.floor >> 20))
+  }
+}
+
 #[derive(Debug)]
 enum ResidentObservation {
   Live(u64),
@@ -220,6 +262,129 @@ mod platform {
 }
 
 pub(super) use platform::Budget;
+
+// The floor is a pure function of the PC's memory and the watch over it is a small state machine, so the rules
+// that keep it from locking a tight PC out, or stopping an export for a blip, are properties of those two.
+#[cfg(test)]
+mod floor_tests {
+  use super::*;
+  const GIB: u64 = 1024 * 1024 * 1024;
+  const MIB: u64 = 1024 * 1024;
+
+  fn machines() -> Vec<(u64, u64)> {
+    let mut all = vec![(0, 0), (1, 0), (GIB, GIB), (8 * GIB, 0), (8 * GIB, GIB), (u64::MAX, u64::MAX)];
+    for total in [2 * GIB, 4 * GIB, 8 * GIB, 16 * GIB, 24 * GIB, 64 * GIB, 128 * GIB, 1024 * GIB] {
+      for free in [total / 20, total / 8, total / 4, total / 2, total * 3 / 4, total] {
+        all.push((total, free));
+      }
+    }
+    let mut seed = 0xD1B5_4A32_D192_ED03u64;
+    for _ in 0..3000 {
+      seed ^= seed << 13;
+      seed ^= seed >> 7;
+      seed ^= seed << 17;
+      let total = seed >> (seed % 36);
+      seed ^= seed << 13;
+      seed ^= seed >> 7;
+      seed ^= seed << 17;
+      all.push((total, if total == 0 { 0 } else { seed % total }));
+    }
+    all
+  }
+
+  #[test]
+  fn the_floor_never_locks_out_a_pc_that_began_tight() {
+    for (total, free) in machines() {
+      assert!(pc_floor(total, free) <= free / 4, "{total} total, {free} free");
+    }
+  }
+
+  // The plan lets an export use three quarters of the free memory (`exportPlan.ts`, the same share `render_limits` takes).
+  // An export that keeps to that must never be stopped by the floor for keeping to it: the share and the floor fit in
+  // what was free, on every PC. Found by review: with a floor of half the free memory, an 8 GiB PC with 2 GiB free planned
+  // an export up to 1.5 GiB and then stopped it at 1.25.
+  #[test]
+  fn an_export_that_keeps_to_the_plans_share_never_trips_the_floor_by_doing_so() {
+    for (total, free) in machines() {
+      assert!(free / 4 * 3 + pc_floor(total, free) <= free, "{total} total, {free} free");
+    }
+    // The review's own cases: the plan accepts up to 75% of free, so the PC must still have the floor left over.
+    for (total, free) in [(8 * GIB, 2 * GIB), (16 * GIB, 3 * GIB), (32 * GIB, 4 * GIB), (8 * GIB, 19 * GIB / 10)] {
+      let allowed = free / 4 * 3;
+      assert!(free - allowed >= pc_floor(total, free), "{total} total, {free} free: {allowed} allowed");
+    }
+  }
+
+  #[test]
+  fn the_floor_is_what_the_pc_keeps_for_itself_and_no_more() {
+    for (total, free) in machines() {
+      let floor = pc_floor(total, free);
+      let wanted = (total / 100 * 6).max(3 * GIB / 4);
+      assert!(floor <= wanted, "{total} total, {free} free: {floor}");
+      // Unless a tight start capped it, it is at least the smallest floor there is.
+      if free / 4 >= 3 * GIB / 4 { assert!(floor >= 3 * GIB / 4, "{total} total, {free} free: {floor}"); }
+    }
+  }
+
+  #[test]
+  fn the_floor_never_falls_as_the_pc_has_more_memory_or_more_of_it_free() {
+    let mut last_by_total = 0;
+    for total in (1..=2000u64).map(|step| step * 512 * MIB) {
+      let floor = pc_floor(total, total);
+      assert!(floor >= last_by_total, "{total}");
+      last_by_total = floor;
+    }
+    let mut last_by_free = 0;
+    for free in (0..=2000u64).map(|step| step * 16 * MIB) {
+      let floor = pc_floor(32 * GIB, free);
+      assert!(floor >= last_by_free, "{free}");
+      last_by_free = floor;
+    }
+  }
+
+  #[test]
+  fn known_machines() {
+    let near = |a: u64, b: u64| a.abs_diff(b) <= 8;
+    assert!(near(pc_floor(64 * GIB, 50 * GIB), 64 * GIB / 100 * 6)); // 3.84 GiB
+    assert!(near(pc_floor(16 * GIB, 8 * GIB), 16 * GIB / 100 * 6)); // 0.96 GiB
+    assert_eq!(pc_floor(8 * GIB, 3 * GIB), 3 * GIB / 4); // 6% would be 0.48 GiB: the smallest floor holds
+    assert_eq!(pc_floor(8 * GIB, 5 * GIB / 4), 5 * GIB / 16); // began with 1.25 GiB free: a quarter of it, not 0.75 GiB
+    assert_eq!(pc_floor(8 * GIB, 0), 0);
+  }
+
+  #[test]
+  fn the_pc_must_stay_under_its_floor_for_every_one_of_the_looks_in_a_row() {
+    let floor = GIB;
+    for pattern in 0u32..(1 << 12) {
+      let mut watch = FloorWatch::new(floor);
+      let under = |index: usize| pattern >> index & 1 == 1;
+      let first_run = (0..12 - (PC_FLOOR_LOOKS as usize - 1))
+        .find(|start| (*start..*start + PC_FLOOR_LOOKS as usize).all(under));
+      let mut tripped_at = None;
+      for index in 0..12 {
+        let available = if under(index) { floor - 1 } else { floor };
+        if watch.look(available).is_some() { tripped_at = Some(index); break; }
+      }
+      assert_eq!(tripped_at, first_run.map(|start| start + PC_FLOOR_LOOKS as usize - 1), "pattern {pattern:012b}");
+    }
+  }
+
+  #[test]
+  fn exactly_the_floor_is_not_under_it() {
+    let mut watch = FloorWatch::new(GIB);
+    for _ in 0..50 { assert!(watch.look(GIB).is_none()); }
+  }
+
+  #[test]
+  fn the_message_says_what_the_pc_has_and_what_it_keeps_in_words_the_page_reads_as_a_memory_limit() {
+    let mut watch = FloorWatch::new(768 * MIB);
+    let message = (0..PC_FLOOR_LOOKS).filter_map(|_| watch.look(410 * MIB)).last().unwrap();
+    assert_eq!(message, "render memory floor crossed: the PC has 410 MiB left and keeps 768 MiB for itself");
+    let lowered = message.to_lowercase();
+    assert!(lowered.contains("memory floor crossed"), "the page names this stop by these words");
+    assert!(!lowered.contains("resident memory budget"), "and never mistakes it for the job's own limit");
+  }
+}
 
 // The limits are a pure function of the free memory, so the rules that make a raise safe are properties
 // of that function, checked over the edges and a deterministic spread of every magnitude.

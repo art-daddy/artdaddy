@@ -145,6 +145,8 @@ describe("an assistant's export on a PC that is short of memory", () => {
           quality: "medium",
           project_id: "",
           calibration,
+          // Captured at the gentlest rung, as the plan does when nothing fits 1.9 GB free.
+          plan: { rung: 2 as const },
         },
         run: async () => {
           ran++;
@@ -159,7 +161,7 @@ describe("an assistant's export on a PC that is short of memory", () => {
     //    dialog is modal and covers the chat, so the card does not repeat the question underneath it.
     const firstRequest = submitExports([spec("reel.mp4", () => failing)]);
     const dialog = await screen.findByRole("dialog", { name: "Not enough free memory" });
-    expect(within(dialog).getByText("about 3.2 GB")).toBeVisible();
+    expect(within(dialog).getByText("about 2.2 GB")).toBeVisible();
     expect(within(dialog).getByText("about 1.9 GB")).toBeVisible();
     expect(screen.queryByRole("group", { name: "export question" })).toBeNull();
     expect(attention.askForAttention).toHaveBeenCalled(); // the window may be behind another
@@ -172,7 +174,7 @@ describe("an assistant's export on a PC that is short of memory", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "Answer in chat" }));
     const onCard = await screen.findByRole("group", { name: "export question" });
     expect(screen.queryByRole("dialog")).toBeNull();
-    expect(within(onCard).getByText(/Needed about 3\.2 GB/)).toBeVisible();
+    expect(within(onCard).getByText(/Needed about 2\.2 GB/)).toBeVisible();
     pc = { ...pc, available_memory_bytes: 6 * GB };
     fireEvent.click(within(onCard).getByRole("button", { name: "Continue" }));
     await firstRequest;
@@ -260,6 +262,7 @@ describe("an assistant's export on a PC that is short of memory", () => {
     // supervised stage trace is pinned in the queue's own tests.)
     expect(story).toEqual([
       "requested:chat",
+      "plan_chosen:gentlest",
       "dialog_shown:b1",
       "dialog_choice:continue",
       "stage:preparing",
@@ -268,7 +271,7 @@ describe("an assistant's export on a PC that is short of memory", () => {
       "guard_tripped:os_refusal",
       "outcome:failed",
     ]);
-    expect(report.trace[2]).toMatchObject({ m: 2 }); // answered on the card
+    expect(report.trace[3]).toMatchObject({ m: 2 }); // answered on the card
     expect(report).toMatchObject({ started_by: "chat", limit: "os" });
   });
 });

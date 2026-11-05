@@ -654,6 +654,7 @@ describe("export delivers separate files into a folder", () => {
     expect(report).toMatchObject({ status: "declined", started_by: "elsewhere" });
     expect(report.trace.map((e: Any) => (e.v ? `${e.e}:${e.v}` : e.e))).toEqual([
       "requested:menu",
+      "plan_chosen:normal",
       "dialog_shown:confirm",
       "dialog_choice:cancel",
       "outcome:declined",

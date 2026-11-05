@@ -148,6 +148,39 @@ describe("createProgressReader", () => {
     feed2(block({ frame: 11 }));
     expect(seen2).toEqual([11]);
   });
+
+  // Found by review: the app process says "still checking the sources" on the job's output while it hashes them,
+  // and a streamed render hashes at every worker start while the final encoder is already printing. The beat is a
+  // line of its own, but it arrives between two reads of ffmpeg's stream, which can end in the middle of a line:
+  // glued in, it would turn `out_time_us` into noise and lose that block's position.
+  it("is not damaged by the app process's heartbeat landing anywhere in ffmpeg's stream", () => {
+    const stream = block({ frame: 30 }) + block({ frame: 60 }) + block({ frame: 90 }, true);
+    const beat = "artdaddy_verify=12345\n";
+    const expected = [
+      { frame: 30, outMs: 4000 },
+      { frame: 60, outMs: 4000 },
+      { frame: 90, outMs: 4000 },
+    ];
+    for (let at = 0; at <= stream.length; at++) {
+      const plain: { frame: number; outMs: number }[] = [];
+      const feed = createProgressReader((r) => plain.push({ frame: r.frame, outMs: r.outMs }));
+      feed(stream.slice(0, at));
+      feed(beat);
+      feed(stream.slice(at));
+      expect(plain, `a beat after byte ${at}`).toEqual(expected);
+      const sequenced: { frame: number; outMs: number }[] = [];
+      const sequence = createSequenceProgressReader([4, 4, 4], (r) =>
+        sequenced.push({ frame: r.frame, outMs: r.outMs }),
+      );
+      sequence(stream.slice(0, at));
+      sequence(beat);
+      sequence(stream.slice(at));
+      expect(
+        sequenced.map((r) => r.frame),
+        `a beat after byte ${at} (sequence)`,
+      ).toEqual([30, 60, 90]);
+    }
+  });
 });
 
 describe("createSequenceProgressReader", () => {

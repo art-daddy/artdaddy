@@ -94,6 +94,32 @@ export function describeLiveStatus(live: LiveFacts, now: number): string {
   return parts.join(" · ");
 }
 
+/** One line for an export that runs below the normal setting: it says why and what it costs. Nothing for the
+ *  normal setting, which needs no explaining. */
+export function describeRung(rung: unknown): string {
+  if (rung === 1)
+    return "Using a gentler setting to fit this PC's memory · it may take a little longer";
+  if (rung === 2) return "Using the gentlest setting to fit this PC's memory · it will take longer";
+  return "";
+}
+
+/** What Try again will do after a failure, when it does anything beyond starting again: after running short of
+ *  memory or time it uses a gentler setting, and when the setting that failed was already the lightest this export
+ *  has it says so rather than promise a lighter run. Nothing for a failure a gentler setting does not touch.
+ *  `lastRung` is the gentlest this export has (`gentlestRungOf`): the streamed engine has none, and with the switch
+ *  for rungs off nothing gentler is offered. */
+export function describeTryAgain(
+  reason: ExportReasonCode,
+  failedRung: unknown,
+  lastRung: number = 2,
+): string {
+  if (reason !== "memory_limit" && reason !== "time_limit") return "";
+  const ran = failedRung === 1 || failedRung === 2 ? failedRung : 0;
+  if (ran >= lastRung)
+    return "It was already running at its lightest setting, so trying again will not make it lighter.";
+  return "Try again uses a gentler setting: it needs less memory and may take longer.";
+}
+
 export function ordinal(n: number): string {
   const k = Math.floor(Math.abs(n));
   const teen = k % 100 >= 11 && k % 100 <= 13;

@@ -14,6 +14,8 @@ import {
   listExports,
   manageExportsTool,
   MAX_EXPORT_WAIT_S,
+  offerExportRetry,
+  retryExport,
   submitExport as submitWithDependencies,
   submitExports,
   whenExportEnds,
@@ -34,6 +36,8 @@ import { useExportJob } from "../store/exportJob";
 import { useAuth } from "../store/auth";
 import { EXPORT_SPEED_REVISION, type ExportCalibration } from "./exportOptions";
 import { FakeJobs } from "../test/fakeJobs";
+import * as exportFlags from "../api/exportFlags";
+import { __setExportFlag } from "../api/exportFlags";
 import * as host from "../platform/host";
 import { limitThatFired } from "./nativeDiagnostics";
 import {
@@ -227,13 +231,15 @@ describe("required export preflight", () => {
     },
   );
 
+  // A PC with 4 GB free. The memory numbers are real sizes because a first export with nothing measured needs
+  // the 2 GB reserve free (XR-21), which a few hundred bytes would never meet.
   const roomy = {
-    total_memory_bytes: 1000,
-    available_memory_bytes: 500,
+    total_memory_bytes: 8e9,
+    available_memory_bytes: 4e9,
     local_fast_candidate: false,
     scratch_free_bytes: 1000,
     destination_free_bytes: 1000,
-    budgets: { memoryBytes: 500, temporaryBytes: 500, executionSeconds: 28800 },
+    budgets: { memoryBytes: 4e9, temporaryBytes: 500, executionSeconds: 28800 },
   };
 
   /** Submit one in-scope export and report what the user was asked, and whether it then started. */
@@ -321,7 +327,7 @@ describe("required export preflight", () => {
 
   it.each([
     ["outside the promise", { fps: 120 }],
-    ["memory", { history: { memoryBytes: 600 } }],
+    ["memory", { history: { memoryBytes: 6e9 } }],
     ["storage", { history: { temporaryBytes: 400 }, scratch: 300 }],
     ["time limit", { history: { elapsedSeconds: 40_000 } }],
   ] as const)(
@@ -1662,6 +1668,10 @@ describe("the questions an export asks before it starts", () => {
   async function scene(opts: {
     pc?: Partial<host.ExportResources>;
     history?: Partial<ExportCalibration>;
+    /** Replace the history entirely (a PC that has never exported this shape). */
+    calibrations?: ExportCalibration[];
+    /** What the command was captured at: the rung the plan chose when the export was prepared. */
+    plan?: { rung: 0 | 1 | 2 };
     via?: "menu" | "chat" | "mcp";
     duration?: number;
     signal?: AbortSignal;
@@ -1677,7 +1687,7 @@ describe("the questions an export asks before it starts", () => {
       return pc;
     });
     useExportJob.setState({
-      calibrations: [
+      calibrations: opts.calibrations ?? [
         {
           ...calibration,
           elapsedSeconds: 10,
@@ -1711,6 +1721,7 @@ describe("the questions an export asks before it starts", () => {
           quality: "medium",
           project_id: "",
           calibration,
+          ...(opts.plan ? { plan: opts.plan } : {}),
         },
         run: async () => {
           ran++;
@@ -1733,13 +1744,16 @@ describe("the questions an export asks before it starts", () => {
   };
 
   it("asks about memory in the dialog, with what is needed and what is there, and starts nothing while it waits", async () => {
+    // Captured at the gentlest rung (nothing fitted 1.9 GB free): the need is that rung's peak, 3.2 GB
+    // measured at the normal rung times 0.5, over the 75% of free memory an export may use.
     const run = await scene({
       pc: { available_memory_bytes: 1.9 * GB },
       history: { memoryBytes: 3.2 * GB },
+      plan: { rung: 2 },
     });
     await vi.waitFor(() => expect(shown()?.kind).toBe("memory"));
     expect(shown()?.facts).toEqual([
-      { label: "Needed", value: "about 3.2 GB" },
+      { label: "Needed", value: "about 2.2 GB" },
       { label: "Available now", value: "about 1.9 GB" },
     ]);
     expect(run.ran()).toBe(0);
@@ -1783,6 +1797,102 @@ describe("the questions an export asks before it starts", () => {
     answer("cancel");
     expect(((await run.pending) as ExportRequestError).status).toBe("declined");
     leftNothing();
+  });
+
+  describe("the memory question follows the plan (the rung the command was captured at)", () => {
+    // History: this shape peaked at 3.2 GB at the normal rung.
+    const normalPeak = { memoryBytes: 3.2 * GB };
+
+    it("is not asked when the rung the export was captured at fits, though the normal rung would not", async () => {
+      // 2.5 GB free is a 1.875 GB ceiling: the normal rung (3.2) does not fit, the gentlest (about 1.6) does.
+      const run = await scene({
+        pc: { available_memory_bytes: 2.5 * GB },
+        history: normalPeak,
+        plan: { rung: 2 },
+      });
+      expect(await run.pending).toBe("started");
+      await whenExportsSettle();
+      expect(shown()).toBeUndefined();
+      expect(run.ran()).toBe(1);
+    });
+
+    it("is asked when the rung it was captured at does not fit now, with a 'Needed' above what is free", async () => {
+      const run = await scene({
+        pc: { available_memory_bytes: 2.5 * GB },
+        history: normalPeak,
+        plan: { rung: 0 }, // captured at the normal rung: that is what will run
+      });
+      await vi.waitFor(() => expect(shown()?.kind).toBe("memory"));
+      expect(shown()?.facts).toEqual([
+        { label: "Needed", value: "about 4.3 GB" }, // 3.2 GB peak, 75% of free memory may be used
+        { label: "Available now", value: "about 2.5 GB" },
+      ]);
+      answer("cancel");
+      expect(((await run.pending) as ExportRequestError).status).toBe("declined");
+      leftNothing();
+    });
+
+    it("asks a first export on a PC that has never made this shape only when less than the reserve is free", async () => {
+      const first = await scene({ pc: { available_memory_bytes: 1.5 * GB }, calibrations: [] });
+      await vi.waitFor(() => expect(shown()?.kind).toBe("memory"));
+      expect(shown()?.facts).toEqual([
+        { label: "Needed", value: "about 2.0 GB" },
+        { label: "Available now", value: "about 1.5 GB" },
+      ]);
+      answer("cancel");
+      await first.pending;
+      leftNothing();
+      const second = await scene({ pc: { available_memory_bytes: 2.5 * GB }, calibrations: [] });
+      expect(await second.pending).toBe("started");
+      await whenExportsSettle();
+      expect(shown()).toBeUndefined();
+    });
+
+    it("never contradicts itself: whenever it is asked, what is needed is more than what is available", async () => {
+      for (const free of [0.3, 1, 1.9, 2.4]) {
+        const run = await scene({
+          pc: { available_memory_bytes: free * GB },
+          history: { memoryBytes: 6 * GB },
+          plan: { rung: 2 },
+        });
+        await vi.waitFor(() => expect(shown()?.kind).toBe("memory"));
+        const [needed, available] = shown()!.facts.map((fact) => {
+          const [, amount, unit] = /([\d.]+) (MB|GB)/.exec(fact.value)!;
+          return Number(amount) * (unit === "GB" ? 1e9 : 1e6);
+        });
+        expect(needed).toBeGreaterThan(available);
+        answer("cancel");
+        await run.pending;
+      }
+    });
+
+    it("is today's question exactly when the switch is off", async () => {
+      __setExportFlag("plan_rung", false);
+      try {
+        // Today: asked only when the measured peak (3.2) is above the free memory (2.5), whatever the rung.
+        const run = await scene({
+          pc: { available_memory_bytes: 2.5 * GB },
+          history: normalPeak,
+          plan: { rung: 2 },
+        });
+        await vi.waitFor(() => expect(shown()?.kind).toBe("memory"));
+        expect(shown()?.facts[0].value).toBe("about 3.2 GB");
+        answer("cancel");
+        await run.pending;
+      } finally {
+        __setExportFlag("plan_rung", true);
+      }
+    });
+
+    it("tells the story which rung it ran at, and on what", async () => {
+      const run = await scene({ pc: { available_memory_bytes: 12 * GB }, plan: { rung: 1 } });
+      expect(await run.pending).toBe("started");
+      await whenExportsSettle();
+      await whenExportTelemetrySettles();
+      const events = (lastReport().trace as Any[]).filter((e) => e.e === "plan_chosen");
+      expect(events).toHaveLength(1);
+      expect(events[0].v).toBe("gentle");
+    });
   });
 
   it("gives up, instead of looping for ever, on a program that answers Continue to a shortage that never clears", async () => {
@@ -1984,7 +2094,7 @@ describe("the questions an export asks before it starts", () => {
     expect(result).toBe("started");
     expect(ran).toBe(1);
     expect(message).toContain("Not enough free memory");
-    expect(message).toContain("Needed: about 3.2 GB");
+    expect(message).toContain("Needed: about 4.3 GB"); // no rung was captured: the normal rung's 3.2 GB over 75%
     expect(message.endsWith("Continue anyway?")).toBe(true);
   });
 
@@ -2021,9 +2131,11 @@ describe("the questions an export asks before it starts", () => {
       "outcome:done",
     ]);
     const bands = (gib: number) => Math.floor((gib * GB) / (128 * 1024 ** 2));
-    expect(report.trace[1]).toMatchObject({ n: bands(3.2), m: bands(1.9) });
+    // No rung was captured, so the question is about the normal rung: its 3.2 GB peak over the 75% of free
+    // memory an export may use is what has to be free.
+    expect(report.trace[1]).toMatchObject({ n: bands(3.2 / 0.75), m: bands(1.9) });
     expect(report.trace[2]).toMatchObject({ n: 4, m: 1 }); // 4 s on screen, answered in the dialog
-    expect(report.trace[3]).toMatchObject({ n: bands(3.2), m: bands(2.4) });
+    expect(report.trace[3]).toMatchObject({ n: bands(3.2 / 0.75), m: bands(2.4) });
     expect(report.trace[4]).toMatchObject({ n: 7, m: 2 }); // 7 s on screen, answered on the card
   });
 
@@ -2453,6 +2565,31 @@ describe("what a running export publishes for the chat card", () => {
       });
       expect(rows[0]).not.toHaveProperty("queue_position");
       expect(rows[0]).not.toHaveProperty("stalled_for_s");
+      expect(rows[0]).not.toHaveProperty("setting"); // the normal setting needs no mention
+    });
+
+    it("says which setting an export runs at when it is not the normal one, so an assistant can explain a slower export", async () => {
+      const { fs, store } = await fresh();
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const spec = (destPath: string, rung: 1 | 2) => ({
+        store,
+        destPath,
+        stagePath: `${destPath}.part`,
+        filename: destPath.split("/").pop()!,
+        meta: { ...meta, plan: { rung } },
+        run: async () => {
+          await gate;
+          await fs.writeBytes(`${destPath}.part`, new Uint8Array([1]));
+          return {};
+        },
+      });
+      await submitExport(spec(DEST, 1));
+      await submitExport(spec("C:/out/second.mp4", 2));
+      const rows = await list();
+      expect(rows.map((r) => r.setting)).toEqual(["gentle", "gentlest"]);
+      release();
+      await whenExportsSettle();
     });
 
     it("says where a waiting export is in line, and nothing about progress it has not made", async () => {
@@ -2800,6 +2937,37 @@ describe("what happened to an export, as its report tells it", () => {
     expect(report.peak_commit_mib).toBe(4096);
   });
 
+  it("names the PC's floor when the app stopped an export to keep the PC usable, as a memory limit in plain words", async () => {
+    const { store, jobs } = await fresh();
+    const stderr =
+      "native render failed: render memory floor crossed: the PC has 410 MiB left and keeps 768 MiB for itself\n" +
+      resident(2_900_000_000, 3.5 * GIB);
+    await submitExport({
+      store,
+      supervisor: jobs,
+      via: "chat",
+      origin: AGENT,
+      destPath: DEST,
+      stagePath: STAGE,
+      filename: "final.mp4",
+      meta,
+      run: async (_, id) => {
+        await jobs.submit({ id, lane: "measurement", program: "ffmpeg", args: [], meta: {} });
+        jobs.exit(id, -1, stderr);
+        throw new ExportRunError(`ffmpeg render failed (code=-1): ${stderr}`, stderr);
+      },
+    });
+    await whenExportsSettle();
+    await whenExportTelemetrySettles();
+    const report = lastReport();
+    expect(report).toMatchObject({ status: "failed", limit: "pc_floor" });
+    expect(story(report)).toEqual(
+      expect.arrayContaining(["guard_tripped:pc_floor", "outcome:failed"]),
+    );
+    const row = ((await manageExportsTool({ action: "list" })) as Any).exports[0];
+    expect(row).toMatchObject({ state: "failed", failure_code: "memory_limit" });
+  });
+
   it("does not blame a limit for a failure that had nothing to do with one", async () => {
     const { store, jobs } = await fresh();
     const stderr =
@@ -2869,6 +3037,474 @@ describe("what happened to an export, as its report tells it", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  describe("an export that makes no progress (the stall stop)", () => {
+    /** A supervised export whose process prints some progress and then goes quiet: it only ends when it is
+     *  aborted, as a killed ffmpeg would. `cancel` wraps the delivery owner's cancel, to hold, refuse or
+     *  break the app's own stop. */
+    async function frozenExport(
+      over: {
+        progress?: boolean;
+        cancel?: (
+          real: (id: string) => Promise<boolean>,
+          calls: string[],
+        ) => (id: string) => Promise<boolean>;
+      } = {},
+    ) {
+      const { fs, store, jobs } = await fresh();
+      const delivery = localDeliveryPort(store);
+      const cancelCalls: string[] = [];
+      const real = delivery.cancel.bind(delivery);
+      const wrapped = over.cancel ? over.cancel(real, cancelCalls) : real;
+      delivery.cancel = async (id) => {
+        cancelCalls.push(id);
+        return wrapped(id);
+      };
+      jobs.delivery = delivery;
+      const submitted = await submitExport({
+        store,
+        supervisor: jobs,
+        via: "chat",
+        origin: AGENT,
+        destPath: DEST,
+        stagePath: STAGE,
+        filename: "final.mp4",
+        meta,
+        run: async (signal, id) => {
+          await jobs.submit({ id, lane: "measurement", program: "ffmpeg", args: [], meta: {} });
+          if (over.progress !== false) jobs.stdout(id, block(900, 30_000));
+          await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve()));
+          jobs.exit(id, 255, "");
+          await fs.remove(STAGE).catch(() => undefined);
+          throw new Error("ffmpeg render failed (code=255)");
+        },
+      });
+      return { submitted, jobs, fs, cancelCalls, real };
+    }
+
+    it("stops it after three minutes without progress, and says so as a time limit in plain words", async () => {
+      vi.useFakeTimers({ now: 1_000_000 });
+      try {
+        const { fs } = await frozenExport();
+        await vi.advanceTimersByTimeAsync(170_000);
+        expect(listExportRecords()[0].state).toBe("running"); // not yet
+        await vi.advanceTimersByTimeAsync(15_000);
+        await whenExportsSettle();
+        await whenExportTelemetrySettles();
+        const record = listExportRecords()[0];
+        expect(record.state).toBe("failed");
+        expect(record.error).toMatch(/no progress for 3 min \(stalled\)/);
+        expect(await fs.exists(DEST)).toBe(false); // nothing was delivered
+        expect(await fs.exists(STAGE)).toBe(false); // and nothing half-made is left
+        const row = ((await manageExportsTool({ action: "list" })) as Any).exports[0];
+        expect(row).toMatchObject({
+          state: "failed",
+          failure_code: "time_limit",
+          failure: "The export took longer than ArtDaddy allows, or stopped making progress.",
+        });
+        const report = lastReport();
+        expect(report).toMatchObject({ status: "failed", started_by: "chat" });
+        expect(story(report)).toEqual(
+          expect.arrayContaining(["stall_detected", "stall_detected:frozen", "outcome:failed"]),
+        );
+        expect(story(report)).not.toContain("cancelled:app"); // it is a failure, not someone's cancel
+        const stop = report.trace.find((e: Any) => e.v === "frozen");
+        expect(stop).toMatchObject({ n: 180, m: 50 }); // three minutes, halfway through the render
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("stops an export that never made its first progress, after the longer allowance", async () => {
+      vi.useFakeTimers({ now: 1_000_000 });
+      try {
+        await frozenExport({ progress: false });
+        await vi.advanceTimersByTimeAsync(290_000);
+        expect(listExportRecords()[0].state).toBe("running");
+        await vi.advanceTimersByTimeAsync(15_000);
+        await whenExportsSettle();
+        expect(listExportRecords()[0]).toMatchObject({ state: "failed" });
+        expect(listExportRecords()[0].error).toMatch(
+          /not started making progress after 5 min \(stalled\)/,
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not stop an export whose sources are still being checked: the app process's beats are life, and the stop comes after they end", async () => {
+      vi.useFakeTimers({ now: 1_000_000 });
+      try {
+        const { submitted, jobs } = await frozenExport({ progress: false });
+        // Eleven minutes of checking a big project on a slow drive: no frame yet, a beat every five seconds.
+        for (let i = 1; i <= 132; i++) {
+          jobs.stdout(submitted.job_id, `artdaddy_verify=${i}\n`);
+          await vi.advanceTimersByTimeAsync(5_000);
+        }
+        expect(listExportRecords()[0].state).toBe("running");
+        // The beats end and nothing follows: the longer allowance counts from the last one.
+        await vi.advanceTimersByTimeAsync(290_000);
+        expect(listExportRecords()[0].state).toBe("running");
+        await vi.advanceTimersByTimeAsync(15_000);
+        await whenExportsSettle();
+        expect(listExportRecords()[0]).toMatchObject({ state: "failed" });
+        expect(listExportRecords()[0].error).toMatch(/\(stalled\)/);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("only logs it, as before, when the switch is off", async () => {
+      vi.useFakeTimers({ now: 1_000_000 });
+      __setExportFlag("stall_stop", false);
+      try {
+        const { submitted, jobs } = await frozenExport();
+        await vi.advanceTimersByTimeAsync(600_000);
+        expect(listExportRecords()[0].state).toBe("running"); // ten minutes of silence, and it is left alone
+        expect(jobs.killed).toEqual([]);
+        expect(cancelExport(submitted.job_id, "person_card")).toBe(true); // the person ends it
+        await whenExportsSettle();
+        await whenExportTelemetrySettles();
+        const report = lastReport();
+        expect(story(report)).toContain("stall_detected"); // logged
+        expect(story(report)).not.toContain("stall_detected:frozen"); // never stopped
+        expect(report.status).toBe("cancelled");
+      } finally {
+        __setExportFlag("stall_stop", true);
+        vi.useRealTimers();
+      }
+    });
+
+    it("tells the story of whichever stop is accepted first: the person's cancel, when it gets there before the app's", async () => {
+      vi.useFakeTimers({ now: 1_000_000 });
+      try {
+        let release!: () => void;
+        const held = new Promise<void>((resolve) => (release = resolve));
+        const { submitted, cancelCalls } = await frozenExport({
+          cancel: (real, calls) => async (id) => {
+            if (calls.length > 1) return real(id); // the person's cancel is answered at once
+            await held; // the app's own stop is answered a moment later, and says yes as well
+            await real(id);
+            return true;
+          },
+        });
+        await vi.advanceTimersByTimeAsync(185_000);
+        expect(cancelCalls).toHaveLength(1);
+        expect(cancelExport(submitted.job_id, "person_card")).toBe(true);
+        release();
+        await whenExportsSettle();
+        await whenExportTelemetrySettles();
+        expect(listExportRecords()[0].state).toBe("cancelled");
+        expect(lastReport().status).toBe("cancelled");
+        expect(story(lastReport())).toContain("cancelled:person_card");
+        expect(story(lastReport())).not.toContain("outcome:failed");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("tells the story of whichever stop is accepted first: the app's, when the person's cancel gets there after", async () => {
+      vi.useFakeTimers({ now: 1_000_000 });
+      try {
+        let release!: () => void;
+        const held = new Promise<void>((resolve) => (release = resolve));
+        const { submitted } = await frozenExport({
+          cancel: (real) => async (id) => {
+            await held; // both stops are on their way, the app's first, and both are told yes
+            await real(id);
+            return true;
+          },
+        });
+        await vi.advanceTimersByTimeAsync(185_000);
+        expect(cancelExport(submitted.job_id, "person_card")).toBe(true);
+        release();
+        await whenExportsSettle();
+        await whenExportTelemetrySettles();
+        expect(listExportRecords()[0].state).toBe("failed");
+        const report = lastReport();
+        expect(report.status).toBe("failed");
+        expect(story(report)).toContain("stall_detected:frozen");
+        expect(story(report)).not.toContain("cancelled:person_card"); // one ending, told once
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("leaves the export alone when its owner refuses the stop (the file is already being saved), and asks once", async () => {
+      vi.useFakeTimers({ now: 1_000_000 });
+      try {
+        const { submitted, jobs, cancelCalls, real } = await frozenExport({
+          cancel: () => async () => false,
+        });
+        await vi.advanceTimersByTimeAsync(600_000);
+        expect(cancelCalls).toHaveLength(1); // not once every few seconds
+        expect(listExportRecords()[0].state).toBe("running");
+        jobs.delivery!.cancel = real; // now let the person end it, so the test ends
+        expect(cancelExport(submitted.job_id, "person_card")).toBe(true);
+        await whenExportsSettle();
+        expect(listExportRecords()[0].state).toBe("cancelled");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("still ends a stalled export when the stop itself cannot be asked for", async () => {
+      vi.useFakeTimers({ now: 1_000_000 });
+      try {
+        await frozenExport({
+          cancel: () => async () => {
+            throw new Error("the app process did not answer");
+          },
+        });
+        await vi.advanceTimersByTimeAsync(185_000);
+        await whenExportsSettle();
+        expect(listExportRecords()[0]).toMatchObject({ state: "failed" });
+        expect(listExportRecords()[0].error).toMatch(/\(stalled\)/);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+    it("never stops an export it gets no progress feed for: one that runs in the page alone is only watched", async () => {
+      vi.useFakeTimers({ now: 1_000_000 });
+      try {
+        const { fs, store } = await fresh();
+        await submitExport({
+          store,
+          destPath: DEST,
+          stagePath: STAGE,
+          filename: "final.mp4",
+          meta,
+          run: async () => {
+            await new Promise<void>((resolve) => setTimeout(resolve, 20 * 60_000)); // twenty silent minutes
+            await fs.writeBytes(STAGE, new Uint8Array([1, 2, 3]));
+            return {};
+          },
+        });
+        await vi.advanceTimersByTimeAsync(20 * 60_000 + 1000);
+        await whenExportsSettle();
+        expect(listExportRecords()[0].state).toBe("done");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  it("asks the server which safety behaviours are on beside each export request, and never waits for the answer", async () => {
+    const { fs, store } = await fresh();
+    const ask = vi
+      .spyOn(exportFlags, "refreshExportFlags")
+      .mockImplementation(() => new Promise<void>(() => undefined)); // a server that never answers
+    try {
+      await submitExport({
+        store,
+        destPath: DEST,
+        stagePath: STAGE,
+        filename: "final.mp4",
+        meta,
+        run: async () => {
+          await fs.writeBytes(STAGE, new Uint8Array([1, 2, 3]));
+          return {};
+        },
+      });
+      await whenExportsSettle();
+      expect(ask).toHaveBeenCalledTimes(1);
+      expect(listExportRecords()[0].state).toBe("done");
+    } finally {
+      ask.mockRestore();
+    }
+  });
+
+  describe("Try again, one click on a failed export", () => {
+    const DEST_B = "C:/out/other.mp4";
+    /** An export that fails with `error`, with a retry offered that records the rung it is asked for. */
+    async function failedExport(
+      error: string,
+      over: {
+        rung?: 1 | 2;
+        maxRung?: 0 | 1 | 2;
+        answer?: () => Promise<{ ok: boolean; error?: string; declined?: boolean }>;
+      } = {},
+    ) {
+      const { store } = await fresh();
+      const asked: number[] = [];
+      const submitted = await submitExport({
+        store,
+        destPath: DEST,
+        stagePath: STAGE,
+        filename: "final.mp4",
+        meta: {
+          ...meta,
+          ...(over.rung || over.maxRung !== undefined
+            ? {
+                plan: {
+                  rung: over.rung ?? 0,
+                  ...(over.maxRung !== undefined ? { max_rung: over.maxRung } : {}),
+                },
+              }
+            : {}),
+        },
+        run: async () => {
+          throw new Error(error);
+        },
+      });
+      await whenExportsSettle();
+      offerExportRetry(submitted.job_id, async (rung) => {
+        asked.push(rung);
+        return over.answer ? over.answer() : { ok: true };
+      });
+      return { jobId: submitted.job_id, asked };
+    }
+
+    it("is offered on a failed export, and not on one that was never given a way to start again", async () => {
+      const { jobId } = await failedExport("render failed");
+      expect(listExportRecords().find((r) => r.job_id === jobId)).toMatchObject({
+        state: "failed",
+        canRetry: true,
+      });
+      const { store } = await fresh();
+      const adopted = await submitExport({
+        store,
+        destPath: DEST_B,
+        stagePath: `${DEST_B}.part`,
+        filename: "other.mp4",
+        meta,
+        run: async () => {
+          throw new Error("render failed");
+        },
+      });
+      await whenExportsSettle();
+      expect(
+        listExportRecords().find((r) => r.job_id === adopted.job_id)?.canRetry,
+      ).toBeUndefined();
+      await retryExport(adopted.job_id); // nothing to start: asks nothing, changes nothing
+      expect(listExportRecords().some((r) => r.job_id === adopted.job_id)).toBe(true);
+    });
+
+    it("asks one rung gentler after running short of memory, and the failed row goes once the new export is queued", async () => {
+      const { jobId, asked } = await failedExport(
+        "native render failed: render resident memory budget exceeded: sampled=1, limit=0",
+        { rung: 1 },
+      );
+      await retryExport(jobId);
+      expect(asked).toEqual([2]);
+      expect(listExportRecords().some((r) => r.job_id === jobId)).toBe(false);
+    });
+
+    it("asks the plan to decide afresh after a failure that is not about memory or time", async () => {
+      const { jobId, asked } = await failedExport("ENOSPC: no space left on device", { rung: 2 });
+      await retryExport(jobId);
+      expect(asked).toEqual([0]);
+    });
+
+    // Found by review: an export with no gentler rung (the streamed engine, thirteen or more video clips where the
+    // two gentler rungs are one command, or the switch for rungs off) must not be promised one, and must not be
+    // asked at a rung it does not have.
+    it("asks for no rung the export does not have, and none at all while the switch for rungs is off", async () => {
+      const bounded = await failedExport("Cannot allocate memory", { rung: 1, maxRung: 1 });
+      await retryExport(bounded.jobId);
+      expect(bounded.asked).toEqual([1]); // the same rung: there is nothing gentler
+
+      const streamed = await failedExport("Cannot allocate memory", { maxRung: 0 });
+      await retryExport(streamed.jobId);
+      expect(streamed.asked).toEqual([0]);
+
+      __setExportFlag("plan_rung", false);
+      try {
+        const off = await failedExport("Cannot allocate memory", { rung: 1 });
+        await retryExport(off.jobId);
+        expect(off.asked).toEqual([0]); // as before rungs existed
+      } finally {
+        __setExportFlag("plan_rung", true);
+      }
+    });
+
+    it("keeps the failed row, with the reason, when the new export is refused", async () => {
+      const { jobId, asked } = await failedExport("Cannot allocate memory", {
+        answer: async () => ({
+          ok: false,
+          error: "an export to proj.mp4 is already queued or running",
+        }),
+      });
+      await retryExport(jobId);
+      expect(asked).toEqual([1]);
+      const row = listExportRecords().find((r) => r.job_id === jobId)!;
+      expect(row).toMatchObject({ state: "failed", canRetry: true });
+      expect(row.retrying).toBeUndefined();
+      expect(row.note).toMatch(/Could not start again/);
+      expect(row.note).toMatch(/already queued or running/);
+    });
+
+    it("keeps the failed row quietly when the person turned the new export down at one of its questions", async () => {
+      const { jobId, asked } = await failedExport("Cannot allocate memory", {
+        answer: async () => ({ ok: false, declined: true }),
+      });
+      await retryExport(jobId);
+      expect(asked).toEqual([1]);
+      const row = listExportRecords().find((r) => r.job_id === jobId)!;
+      expect(row).toMatchObject({ state: "failed", canRetry: true });
+      expect(row.retrying).toBeUndefined();
+      expect(row.note).toBeUndefined(); // their own choice is not something that went wrong
+    });
+
+    it("keeps the failed row when starting again throws, and lets the person press the button again", async () => {
+      let attempt = 0;
+      const { jobId, asked } = await failedExport("Cannot allocate memory", {
+        answer: async () => {
+          if (++attempt === 1) throw new Error("the project was closed");
+          return { ok: true };
+        },
+      });
+      await retryExport(jobId);
+      const row = listExportRecords().find((r) => r.job_id === jobId)!;
+      expect(row.note).toMatch(/the project was closed/);
+      expect(row.retrying).toBeUndefined();
+      await retryExport(jobId);
+      expect(asked).toEqual([1, 1]);
+      expect(listExportRecords().some((r) => r.job_id === jobId)).toBe(false);
+    });
+
+    it("starts one new export however many times the button is pressed", async () => {
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => (release = resolve));
+      const { jobId, asked } = await failedExport("Cannot allocate memory", {
+        answer: async () => {
+          await held;
+          return { ok: true };
+        },
+      });
+      const first = retryExport(jobId);
+      expect(listExportRecords().find((r) => r.job_id === jobId)?.retrying).toBe(true);
+      const second = retryExport(jobId);
+      release();
+      await Promise.all([first, second]);
+      expect(asked).toHaveLength(1);
+    });
+
+    it("does nothing for an export that did not fail", async () => {
+      const { store, fs } = await fresh();
+      const asked: number[] = [];
+      const submitted = await submitExport({
+        store,
+        destPath: DEST,
+        stagePath: STAGE,
+        filename: "final.mp4",
+        meta,
+        run: async () => {
+          await fs.writeBytes(STAGE, new Uint8Array([1, 2, 3]));
+          return {};
+        },
+      });
+      offerExportRetry(submitted.job_id, async (rung) => {
+        asked.push(rung);
+        return { ok: true };
+      });
+      await retryExport(submitted.job_id); // still running: never a retry of a good export
+      await whenExportsSettle();
+      expect(listExportRecords().find((r) => r.job_id === submitted.job_id)?.state).toBe("done");
+      await retryExport(submitted.job_id);
+      expect(asked).toEqual([]);
+    });
   });
 
   it("does not count the file check that follows the render as the render standing still", async () => {
