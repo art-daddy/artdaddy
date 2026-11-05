@@ -23,6 +23,7 @@ import {
   exportTimelineTool,
   rebuildAtRung,
   gentlestRung,
+  ladderOf,
   renderTimelineTool,
   resolveClipSources,
   runRenderPlan,
@@ -4215,5 +4216,65 @@ describe("the rung an export is built at", () => {
     expect(streamed.transport).toBe("partition-pipes-v1");
     expect(gentlestRung(streamed)).toBe(0);
     expect(gentlestRung({ ...buildRenderCommand(timeline(1), "/o.mp4") })).toBe(0); // a plan nothing here made
+  });
+
+  // Found by the second pass of S3's review, and built in S4 where the chip arrives: the gentler rungs are not always a
+  // run from the first. A graphics encoder takes no thread cap, so with nine to twelve video clips (the decoders already
+  // share a budget of two each) rung 1 is the same command as rung 0 while rung 2 (one decoder thread) is a real one.
+  // The plan must not count on rung 1, and Try again must not promise it or deny rung 2.
+  it("lists the rungs that really differ, stepping over one that does not", () => {
+    const timeline = (count: number) =>
+      ({
+        units: "seconds",
+        canvas: { width: 200, height: 100, fps: 30 },
+        tracks: [
+          {
+            id: "v1",
+            kind: "video",
+            z: 0,
+            clips: Array.from({ length: count }, (_, i) => ({
+              id: `c${i}`,
+              kind: "video",
+              media_ref: `/a${i}.mp4`,
+              source_in: 0,
+              source_out: 2,
+              timeline_in: i * 2,
+              timeline_out: i * 2 + 2,
+            })),
+          },
+        ],
+      }) as Any;
+    const chip = { mode: "fast", chip: "amd" } as const;
+    for (const clips of [9, 10, 11, 12]) {
+      expect(
+        ladderOf(buildRenderCommand(timeline(clips), "/o.mp4", chip)),
+        `${clips} on a chip`,
+      ).toEqual([0, 2]);
+      expect(ladderOf(buildRenderCommand(timeline(clips), "/o.mp4")), `${clips} on x264`).toEqual([
+        0, 1, 2,
+      ]);
+    }
+    expect(ladderOf(buildRenderCommand(timeline(1), "/o.mp4", chip))).toEqual([0, 1, 2]);
+    expect(ladderOf(buildRenderCommand(timeline(5), "/o.mp4", chip))).toEqual([0, 1, 2]);
+    expect(ladderOf(buildRenderCommand(timeline(13), "/o.mp4", chip))).toEqual([0]); // nothing is gentler
+    expect(ladderOf(buildRenderCommand(timeline(13), "/o.mp4"))).toEqual([0, 1]);
+    const streamed = buildRenderCommand(timeline(3), "/o.mp4", { engine: "partition-pipes-v1" });
+    expect(ladderOf(streamed)).toEqual([0]);
+    expect(ladderOf({ ...buildRenderCommand(timeline(1), "/o.mp4") })).toEqual([0]); // a plan nothing here made
+    // The rule behind the lists: each rung in one is a different command from the one before it in the list, and the
+    // gentlest is the last (what `gentlestRung` has always said).
+    const key = (plan: ReturnType<typeof buildRenderCommand>) =>
+      JSON.stringify([plan.args, plan.steps]);
+    for (const clips of [1, 3, 9, 12, 13, 30])
+      for (const options of [{}, chip]) {
+        const plan = buildRenderCommand(timeline(clips), "/o.mp4", options);
+        const ladder = ladderOf(plan);
+        expect(ladder[0]).toBe(0);
+        for (let i = 1; i < ladder.length; i++)
+          expect(key(rebuildAtRung(plan, ladder[i])!), `${clips} clips`).not.toBe(
+            key(rebuildAtRung(plan, ladder[i - 1])!),
+          );
+        expect(gentlestRung(plan)).toBe(ladder[ladder.length - 1]);
+      }
   });
 });

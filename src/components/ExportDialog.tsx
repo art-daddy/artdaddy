@@ -6,6 +6,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { formatEta } from "../timeline/ffmpegProgress";
+import { decideExportEncoder, type ExportEncoderDecision } from "../timeline/exportChoice";
 import {
   describeExportSize,
   describeExportTime,
@@ -14,18 +15,19 @@ import {
   type ExportQuality,
   type ExportResolution,
 } from "../timeline/exportOptions";
+import { describeModeLines, type ModeView } from "../timeline/exportWords";
 import type { RenderWorkload } from "../timeline/renderPlan";
 import { useExportJob } from "../store/exportJob";
-import { resolveLocalFastEncoder } from "../platform/host";
 import ExportProgressBar from "./ExportProgressBar";
 import ExportQueuePane from "./ExportQueuePane";
-import { cn } from "./ui";
 
 export interface ExportSettings {
   resolution: ExportResolution;
   quality: ExportQuality;
   fps: number | null;
-  mode: ExportMode;
+  /** What the person picked in the Mode row, or null when they did not: the app then decides, as it does for every
+   *  other way an export starts (exportChoice.ts). */
+  mode: ExportMode | null;
 }
 
 const RESOLUTIONS: { value: ExportResolution; label: string }[] = [
@@ -61,22 +63,55 @@ export default function ExportDialog({
   const [resolution, setResolution] = useState<ExportResolution>("source");
   const [quality, setQuality] = useState<ExportQuality>("medium");
   const [fps, setFps] = useState<number | null>(null);
-  const [fastAvailable, setFastAvailable] = useState(false);
-  const mode = useExportJob((s) => s.mode);
-  const setMode = useExportJob((s) => s.setMode);
+  // What the person picked in the Mode row; null until they touch it (the app's own choice shows then).
+  const [picked, setPicked] = useState<ExportMode | null>(null);
+  // What the app decided about the encoder (exportChoice.ts): whether the Mode row is shown and what it starts on. Kept with
+  // what it was decided for (the settings, and the history of this PC's exports, which the estimates and so the choice are made
+  // from), so the dialog knows whether the answer it has is for what is on screen: an answer to a question the settings or
+  // the history have since changed is not to be sent on, and one that has not come yet, or never will (the look failed), is
+  // not mistaken for "no row".
+  const askedFor = `${resolution}|${quality}|${fps ?? ""}|${workload ? JSON.stringify(workload) : ""}`;
   const calibrations = useExportJob((s) => s.calibrations);
+  const [answer, setAnswer] = useState<{
+    readonly for: string;
+    readonly history: typeof calibrations;
+    readonly decision: ExportEncoderDecision | null;
+  } | null>(null);
+  const decision = answer?.decision ?? null;
+  const answered = answer !== null && answer.for === askedFor && answer.history === calibrations;
 
-  // Read-only information: what this PC has measured for settings like these, else a rough guess.
+  const view: ModeView | null = decision
+    ? {
+        showRow: decision.showRow,
+        defaultMode: decision.defaultMode,
+        reason: decision.reason,
+        faster: decision.faster === true,
+        fullSeconds: decision.fullSeconds,
+        fastSeconds: decision.fastSeconds,
+      }
+    : null;
+  const lines = describeModeLines(view, picked);
+  const mode = lines.selected;
+
+  // Read-only information: what this PC has measured for settings like these, else a rough guess. For the way that is
+  // selected: Fast is the chip's estimate, Full the processor's (with its faster setting where the app will use it).
   const expected = useMemo(() => {
     if (!workload) return "";
-    const estimate = estimateForDialog(workload, { resolution, quality, fps, mode }, calibrations);
+    const route =
+      mode === "fast" ? { chip: decision?.facts.chip } : { faster: decision?.faster === true };
+    const estimate = estimateForDialog(
+      workload,
+      { resolution, quality, fps, mode },
+      calibrations,
+      route,
+    );
     const time = describeExportTime(estimate.seconds);
     if (!time) return "";
     if (estimate.guessed)
       return `Expected: ${time}. A rough guess: nothing like this has been exported on this PC yet.`;
     const size = describeExportSize(estimate.finalBytes);
     return `Expected: ${time}${size ? `, a file of ${size}` : ""}, from earlier exports on this PC.`;
-  }, [workload, resolution, quality, fps, mode, calibrations]);
+  }, [workload, resolution, quality, fps, mode, calibrations, decision]);
 
   const phase = useExportJob((s) => s.phase);
   const fraction = useExportJob((s) => s.fraction);
@@ -95,18 +130,37 @@ export default function ExportDialog({
     if (p === "done" || p === "failed" || p === "cancelled") reset();
   }, [open, reset]);
 
+  // The app is asked as the dialog opens and whenever the settings change (a chip's test, if it has not been done on this
+  // PC yet, runs now, in the seconds the person spends choosing). A look: the test's results are left for the export.
   useEffect(() => {
-    if (!open || phase !== "idle") return;
-    const controller = new AbortController();
-    setFastAvailable(false);
-    setMode("quality");
-    void resolveLocalFastEncoder(controller.signal)
-      .then((available) => {
-        if (!controller.signal.aborted) setFastAvailable(available);
+    if (!open || phase !== "idle" || !workload) {
+      setAnswer(null);
+      return;
+    }
+    let stale = false;
+    void decideExportEncoder({
+      request: "auto",
+      workload,
+      settings: { resolution, quality, fps },
+      history: calibrations,
+      preview: true,
+      waitMs: Infinity,
+    })
+      .then((decided) => {
+        if (!stale) setAnswer({ for: askedFor, history: calibrations, decision: decided });
       })
-      .catch(() => undefined);
-    return () => controller.abort();
-  }, [open, phase, setMode]);
+      .catch(() => {
+        if (!stale) setAnswer({ for: askedFor, history: calibrations, decision: null });
+      });
+    return () => {
+      stale = true;
+    };
+  }, [open, phase, workload, resolution, quality, fps, calibrations, askedFor]);
+
+  // A pick is for one opening of the dialog.
+  useEffect(() => {
+    if (open && phase === "idle") setPicked(null);
+  }, [open, phase]);
 
   // Escape dismisses, and only dismisses. It maps to the same door as Hide/Cancel/Close, so a
   // stray keypress during a render hides the dialog instead of killing the render.
@@ -165,12 +219,8 @@ export default function ExportDialog({
               <select
                 aria-label="quality"
                 value={quality}
-                disabled={mode === "fast"}
-                title={
-                  mode === "fast" ? "Fast uses its measured fixed quality profile." : undefined
-                }
                 onChange={(e) => setQuality(e.target.value as ExportQuality)}
-                className={cn(selectCls, "disabled:opacity-50")}
+                className={selectCls}
               >
                 {QUALITIES.map((q) => (
                   <option key={q.value} value={q.value}>
@@ -193,57 +243,53 @@ export default function ExportDialog({
                 ))}
               </select>
             </Field>
-            <div className="flex items-center gap-3 text-xs text-neutral-400">
-              <span className="w-20 shrink-0">Mode</span>
-              <div
-                role="radiogroup"
-                aria-label="export mode"
-                className="flex min-h-9 min-w-0 flex-1 flex-wrap items-center gap-x-4 gap-y-1 text-sm"
-              >
-                <label className="inline-flex items-center gap-2">
-                  <input
-                    type="radio"
-                    name="export-mode"
-                    value="quality"
-                    checked={mode === "quality"}
-                    onChange={() => setMode("quality")}
-                    className="accent-accent"
-                  />
-                  Full quality
-                </label>
-                <label
-                  className={cn(
-                    "inline-flex items-center gap-2",
-                    !fastAvailable && "text-neutral-500",
-                  )}
-                  title={
-                    fastAvailable
-                      ? "Locally measured AMD profile; files can be much larger and the picture can differ."
-                      : "Fast is unavailable on this device or its encoder check has not passed."
-                  }
-                >
-                  <input
-                    type="radio"
-                    name="export-mode"
-                    value="fast"
-                    checked={mode === "fast"}
-                    disabled={!fastAvailable}
-                    onChange={() => setMode("fast")}
-                    className="accent-accent"
-                  />
-                  Fast
-                </label>
+            {decision?.showRow && (
+              <div className="text-xs text-neutral-400">
+                <div className="flex items-center gap-3">
+                  <span className="w-20 shrink-0">Mode</span>
+                  <div
+                    role="radiogroup"
+                    aria-label="export mode"
+                    className="flex min-h-9 min-w-0 flex-1 flex-wrap items-center gap-x-4 gap-y-1 text-sm"
+                  >
+                    <label className="inline-flex items-center gap-2">
+                      <input
+                        type="radio"
+                        name="export-mode"
+                        value="quality"
+                        checked={mode === "quality"}
+                        onChange={() => setPicked("quality")}
+                        className="accent-accent"
+                      />
+                      Full quality
+                    </label>
+                    <label className="inline-flex items-center gap-2">
+                      <input
+                        type="radio"
+                        name="export-mode"
+                        value="fast"
+                        checked={mode === "fast"}
+                        onChange={() => setPicked("fast")}
+                        className="accent-accent"
+                      />
+                      Fast
+                    </label>
+                  </div>
+                </div>
+                {lines.hint && <p className="mt-0.5 pl-[5.75rem] leading-snug">{lines.hint}</p>}
               </div>
-            </div>
-            {mode === "fast" && (
-              <p className="text-xs leading-snug text-amber-300">
-                Files can be much larger. The picture can differ from Full quality.
-              </p>
             )}
+            {lines.note && <p className="text-xs leading-snug text-amber-300">{lines.note}</p>}
             {expected && (
               <p aria-label="export estimate" className="text-xs leading-snug text-neutral-300">
                 {expected}
               </p>
+            )}
+            {lines.alternative && (
+              <p className="text-xs leading-snug text-neutral-400">{lines.alternative}</p>
+            )}
+            {lines.faster && (
+              <p className="text-xs leading-snug text-neutral-400">{lines.faster}</p>
             )}
             <p className="text-[11px] leading-snug text-neutral-500">
               Never upscales: a preset larger than the project is left at the project&apos;s own
@@ -287,7 +333,24 @@ export default function ExportDialog({
               </button>
               <button
                 type="button"
-                onClick={() => onStart({ resolution, quality, fps, mode })}
+                onClick={() =>
+                  onStart({
+                    resolution,
+                    quality,
+                    fps,
+                    // What the person chose, never more. Only an answer that is in, for exactly what is on screen, is
+                    // one the person has seen: then the row's pick if the row is shown, else nothing (the app decides,
+                    // and said so under the settings). Without one (no project to ask about, the look failed, it has
+                    // not come back, or the history changed under it) the person has been offered nothing, so the app
+                    // does not choose for them: Full quality, or what they had picked.
+                    mode:
+                      workload && answered && decision
+                        ? decision.showRow
+                          ? picked
+                          : null
+                        : (picked ?? "quality"),
+                  })
+                }
                 className={primaryCls}
               >
                 Export

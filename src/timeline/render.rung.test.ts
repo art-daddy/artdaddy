@@ -45,7 +45,7 @@ const sound: Any = {
 };
 
 /** The projects whose commands are frozen: one-pass with few, several and many video inputs, with sound,
- *  the streamed engine on a 4K canvas, and Fast. */
+ *  the streamed engine on a 4K canvas, and the presets. The Fast mode is below. */
 const PROJECTS: Record<string, { timeline: () => Timeline; options: Any }> = {
   one: { timeline: () => tl([video(0)]), options: {} },
   one_with_sound: { timeline: () => tl([video(0), sound]), options: {} },
@@ -62,8 +62,38 @@ const PROJECTS: Record<string, { timeline: () => Timeline; options: Any }> = {
     timeline: () => tl([video(0), video(1)]),
     options: { engine: "partition-pipes-v1" },
   },
-  fast_one: { timeline: () => tl([video(0)]), options: { mode: "fast" } },
+  // RETIRED GOLDEN (Phase 3, S4). This case used to be `{ mode: "fast" }` with the hash 7e102996…fa14: the
+  // developer-only Fast (h264_amf at a fixed qp 18) that only a debug build on one AMD chip could reach. That code path
+  // is gone: Fast now names the chip it runs on, so `mode: "fast"` with no chip is the processor's own command, exactly
+  // as Full is. The case stays so that this stays true, and its frozen value is the one of `one` below, not a new number.
+  fast_without_a_chip: { timeline: () => tl([video(0)]), options: { mode: "fast" } },
   presets: { timeline: () => tl([video(0)]), options: { resolution: "720p", quality: "low" } },
+  // The chip's and the faster setting's commands: new in S4, so there is no earlier command to freeze. They are pinned
+  // by hand-written expectations below (the arguments themselves), and these hashes only keep them from drifting after.
+  chip_amd_medium: {
+    timeline: () => tl([video(0)]),
+    options: { mode: "fast", chip: "amd", quality: "medium" },
+  },
+  chip_amd_high: {
+    timeline: () => tl([video(0)]),
+    options: { mode: "fast", chip: "amd", quality: "high" },
+  },
+  chip_amd_low: {
+    timeline: () => tl([video(0)]),
+    options: { mode: "fast", chip: "amd", quality: "low" },
+  },
+  chip_nvidia_medium: {
+    timeline: () => tl([video(0)]),
+    options: { mode: "fast", chip: "nvidia", quality: "medium" },
+  },
+  chip_intel_medium: {
+    timeline: () => tl([video(0)]),
+    options: { mode: "fast", chip: "intel", quality: "medium" },
+  },
+  faster_x264: {
+    timeline: () => tl([video(0)]),
+    options: { faster: true, quality: "medium" },
+  },
 };
 
 const sha = (args: string[]): string =>
@@ -76,12 +106,14 @@ const FROZEN: Record<string, string> = {
   thirteen: "23bb9c47cd9031b2d73c6138e66b1855426c5d090e51887f6740d1b012a5baaf",
   streamed_4k: "dc06c44f369ccec20c734639cddbc4faea50bb669301b384750bb4d7e30ef17c",
   streamed_1080: "fc12ef575a26b5f26037dbfa909e9023edf536fad57af475470c9eba9f957449",
-  fast_one: "7e10299643afd067043ade84e32d917dc903663c99b6f066ef247c875788fa14",
+  // The same literal as `one`: Fast with no chip IS the processor's command.
+  fast_without_a_chip: "93fb5e32c2232778598288575a18b31d2bc70f1ab0c8ceb581f9140569e76365",
   presets: "09afe6cf424a82066cb7861744be4bd70c2329509578c71a1e871974c3e6ea8f",
 };
 
 describe("the normal rung is today's command, byte for byte", () => {
   for (const [name, project] of Object.entries(PROJECTS)) {
+    if (!(name in FROZEN)) continue; // the chip's and the faster setting's commands are pinned below
     it(`${name}: with no rung, and with rung 0 spelled out`, () => {
       const plain = buildRenderCommand(project.timeline(), "/out.mp4", project.options);
       const spelled = buildRenderCommand(project.timeline(), "/out.mp4", {
@@ -92,6 +124,165 @@ describe("the normal rung is today's command, byte for byte", () => {
       expect(spelled.args).toEqual(plain.args);
     });
   }
+});
+
+/** Everything from the encoder's name to the audio choice: what the encoder is asked to do. */
+function encoderSection(args: string[]): string[] {
+  const from = args.lastIndexOf("-c:v");
+  const to = args.findIndex((arg, index) => index > from && (arg === "-an" || arg === "-c:a"));
+  return args.slice(from, to);
+}
+
+// Phase 3, S4. The commands of the graphics chip and of the faster setting are NEW, so there is no earlier command to
+// freeze: each is written out by hand here, from the lab (AMD qp 18, 24, 30 for High, Medium, Low) and the vendors'
+// documented constant-quality modes, and the test proves the encoder is the ONLY thing that moved.
+describe("the commands of the graphics chip and the faster setting", () => {
+  const SECTIONS: Record<string, string[]> = {
+    chip_amd_medium: [
+      "-c:v",
+      "h264_amf",
+      "-pix_fmt",
+      "yuv420p",
+      "-r",
+      "30",
+      "-usage",
+      "transcoding",
+      "-quality",
+      "quality",
+      "-rc",
+      "cqp",
+      "-qp_i",
+      "24",
+      "-qp_p",
+      "24",
+      "-qp_b",
+      "24",
+    ],
+    chip_amd_high: [
+      "-c:v",
+      "h264_amf",
+      "-pix_fmt",
+      "yuv420p",
+      "-r",
+      "30",
+      "-usage",
+      "transcoding",
+      "-quality",
+      "quality",
+      "-rc",
+      "cqp",
+      "-qp_i",
+      "18",
+      "-qp_p",
+      "18",
+      "-qp_b",
+      "18",
+    ],
+    chip_amd_low: [
+      "-c:v",
+      "h264_amf",
+      "-pix_fmt",
+      "yuv420p",
+      "-r",
+      "30",
+      "-usage",
+      "transcoding",
+      "-quality",
+      "quality",
+      "-rc",
+      "cqp",
+      "-qp_i",
+      "30",
+      "-qp_p",
+      "30",
+      "-qp_b",
+      "30",
+    ],
+    chip_nvidia_medium: [
+      "-c:v",
+      "h264_nvenc",
+      "-pix_fmt",
+      "yuv420p",
+      "-r",
+      "30",
+      "-preset",
+      "p5",
+      "-tune",
+      "hq",
+      "-rc",
+      "vbr",
+      "-cq",
+      "21",
+      "-b:v",
+      "0",
+    ],
+    chip_intel_medium: [
+      "-c:v",
+      "h264_qsv",
+      "-pix_fmt",
+      "nv12",
+      "-r",
+      "30",
+      "-global_quality",
+      "21",
+    ],
+    faster_x264: [
+      "-c:v",
+      "libx264",
+      "-pix_fmt",
+      "yuv420p",
+      "-r",
+      "30",
+      "-preset",
+      "veryfast",
+      "-crf",
+      "23",
+    ],
+  };
+
+  for (const [name, section] of Object.entries(SECTIONS)) {
+    it(`${name}: asks the encoder for exactly this, and nothing else about the picture moves`, () => {
+      const plan = buildRenderCommand(
+        PROJECTS[name].timeline(),
+        "/out.mp4",
+        PROJECTS[name].options,
+      );
+      expect(encoderSection(plan.args)).toEqual(section);
+      const normal = buildRenderCommand(PROJECTS.one.timeline(), "/out.mp4", {});
+      const outside = (args: string[]) => {
+        const from = args.lastIndexOf("-c:v");
+        const to = args.findIndex(
+          (arg, index) => index > from && (arg === "-an" || arg === "-c:a"),
+        );
+        return [...args.slice(0, from), ...args.slice(to)];
+      };
+      expect(outside(plan.args)).toEqual(outside(normal.args));
+      expect(plan.filterComplex).toEqual(normal.filterComplex);
+    });
+  }
+
+  it("records the encoder each export used under its own id, so a measurement is never mistaken for another's", () => {
+    const encoderOf = (name: string) =>
+      buildRenderCommand(PROJECTS[name].timeline(), "/out.mp4", PROJECTS[name].options).encoder;
+    expect(encoderOf("one")).toBe("x264-crf");
+    expect(encoderOf("chip_amd_medium")).toBe("chip-amd");
+    expect(encoderOf("chip_nvidia_medium")).toBe("chip-nvidia");
+    expect(encoderOf("chip_intel_medium")).toBe("chip-intel");
+    expect(encoderOf("faster_x264")).toBe("x264-fast");
+    expect(encoderOf("fast_without_a_chip")).toBe("x264-crf");
+  });
+
+  it("is never reached by a chip that was not named, whatever else is asked", () => {
+    for (const options of [
+      { chip: "amd" }, // Full quality asked for: a named chip is not used
+      { mode: "quality", chip: "nvidia" },
+      { mode: "fast" },
+      {},
+    ] as Any[]) {
+      const plan = buildRenderCommand(PROJECTS.one.timeline(), "/out.mp4", options);
+      expect(encoderSection(plan.args)[1], JSON.stringify(options)).toBe("libx264");
+    }
+  });
 });
 
 /** The decoder thread count each video input carries (null: ffmpeg's default), in input order. */
@@ -164,8 +355,9 @@ describe("what a gentler rung changes in a command", () => {
   });
 
   it("does not hand the graphics encoder a thread count, which it does not use", () => {
-    expect(encoderThreads(at("fast_one", 1).args)).toBeNull();
-    expect(decoderCounts(at("fast_one", 1).args)).toEqual([2]); // the decoder still follows the rung
+    expect(encoderThreads(at("chip_amd_medium", 1).args)).toBeNull();
+    expect(encoderThreads(at("chip_amd_medium", 2).args)).toBeNull();
+    expect(decoderCounts(at("chip_amd_medium", 1).args)).toEqual([2]); // the decoder still follows the rung
   });
 
   it("never makes a gentler rung hungrier: no input gets more threads than at the rung before", () => {

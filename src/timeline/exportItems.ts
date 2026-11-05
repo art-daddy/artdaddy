@@ -28,6 +28,7 @@ import type { Timeline } from "./model";
 import { missingClip } from "./operations";
 import {
   buildRenderCommand,
+  encoderOptions,
   exportFolder,
   exportTimelineTool,
   freeName,
@@ -50,7 +51,7 @@ export const MAX_EXPORT_ITEMS = 50;
 export async function exportTool(
   args: Args,
   ctx: ClientToolContext | null,
-  retrying?: { from: Rung; minRung: Rung },
+  retrying?: { from: Rung; minRung: Rung; processor?: true },
 ): Promise<Result> {
   let result: Result;
   let status: "blocked" | "declined" | "cancelled" = "blocked";
@@ -183,7 +184,7 @@ async function exportItemsTool(args: Args, ctx: ClientToolContext | null): Promi
     warnings: string[];
     admission: import("./render").RenderAdmission;
     engine: import("./exportOptions").ExportEngine;
-    mode: import("./exportOptions").ExportMode;
+    request: import("./exportEncoder").ModeRequest;
   } | null = null;
   let fps = 30;
   if (clipIds.length) {
@@ -250,14 +251,22 @@ async function exportItemsTool(args: Args, ctx: ClientToolContext | null): Promi
     const branding = loaded!.branding
       ? { ...loaded!.branding, endcard: null, endcardDuration: 0 }
       : undefined;
-    const plan = buildRenderCommand(loaded!.seconds, stage, {
+    const clipOptions: ExportOptions = {
       engine: loaded!.engine,
-      mode: loaded!.mode,
       resolution: args.resolution as ExportOptions["resolution"],
       quality: args.quality as ExportOptions["quality"],
       fps: typeof args.fps === "number" ? args.fps : undefined,
       branding,
       range: { from: c.from, to: c.to },
+    };
+    // The same rule as the whole timeline's, decided for this clip's own length and picture.
+    const plan = buildRenderCommand(loaded!.seconds, stage, {
+      ...clipOptions,
+      ...(await encoderOptions(
+        ctx,
+        { seconds: loaded!.seconds, request: loaded!.request },
+        clipOptions,
+      )),
     });
     plan.warnings.push(...loaded!.warnings);
     planned.push({

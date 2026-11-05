@@ -17,6 +17,26 @@
 export type Rung = 0 | 1 | 2;
 export const RUNG_NAMES = ["normal", "gentle", "gentlest"] as const;
 
+/** The rungs an export really has: each is a different command from the one before it in the list, and the list always
+ *  begins with the normal rung. A graphics encoder takes no thread cap, so with nine to twelve clips rung 1 is the same
+ *  command as rung 0 and the ladder is [0, 2]; the streamed engine has only [0]. The plan never counts on, and Try
+ *  again never promises, a rung that is not on it. */
+export type Ladder = readonly Rung[];
+
+const isLadderRung = (value: unknown): value is Rung => value === 0 || value === 1 || value === 2;
+
+/** A ladder as the plan reads it: only real rungs, each once, gentlest last, and never empty. */
+export function cleanLadder(ladder: Ladder): Ladder {
+  const rungs = [...new Set(ladder.filter(isLadderRung))].sort((a, b) => a - b);
+  return rungs.length ? rungs : [0];
+}
+
+/** The ladder with no gaps up to `last`: what every export had before gaps existed. */
+export function denseLadder(last: number | undefined): Ladder {
+  const top = last === undefined ? 2 : rungOf(last);
+  return ([0, 1, 2] as const).filter((rung) => rung <= top);
+}
+
 export const GIB = 1024 ** 3;
 
 /** The share of the PC's free memory an export may use together (the owner chose 75%). */
@@ -55,14 +75,14 @@ export function rungOf(value: unknown): Rung {
   return value === 1 || value === 2 ? value : 0;
 }
 
-/** The rung "Try again" asks for. A failure for lack of memory or time asks for one rung gentler than the one
- *  that failed, up to `lastRung`, the gentlest this export has (the streamed engine has only the normal one, and
- *  an export whose gentler rungs are the same command has fewer); any other failure (a full disk, a missing file)
- *  says nothing about how the work was done, so the plan decides afresh: the person may have freed memory since. */
-export function retryRung(failedRung: Rung, reason: string, lastRung: Rung = 2): Rung {
-  return reason === "memory_limit" || reason === "time_limit"
-    ? (Math.min(lastRung, failedRung + 1) as Rung)
-    : 0;
+/** The rung "Try again" asks for. A failure for lack of memory or time asks for the next rung on the export's ladder
+ *  above the one that failed, or the gentlest it has when there is none (the streamed engine has only the normal one);
+ *  any other failure (a full disk, a missing file) says nothing about how the work was done, so the plan decides afresh:
+ *  the person may have freed memory since. A number as the third argument is a ladder with no gaps up to it. */
+export function retryRung(failedRung: Rung, reason: string, ladder: Ladder | number = 2): Rung {
+  if (reason !== "memory_limit" && reason !== "time_limit") return 0;
+  const rungs = typeof ladder === "number" ? denseLadder(ladder) : cleanLadder(ladder);
+  return rungs.find((rung) => rung > failedRung) ?? rungs[rungs.length - 1];
 }
 
 /** What a peak measured at one rung (the row) predicts at another (the column). Every entry errs HIGH on
@@ -130,17 +150,21 @@ export interface Plan {
 
 const clampRung = rungOf;
 
-/** The first rung, from `minRung` to `maxRung`, whose predicted peak fits under the ceiling of the free
- *  memory now. `maxRung` is the gentlest rung the engine has (the streamed engine has only the normal
- *  one); a `minRung` above it is the engine's own last rung. */
+/** The first rung on the export's ladder, from `minRung` on, whose predicted peak fits under the ceiling of the free
+ *  memory now. The ladder is the rungs that really are different commands (`ladder`; absent, the rungs with no gaps up
+ *  to `maxRung`, the gentlest the engine has: the streamed engine has only the normal one). A `minRung` above them
+ *  all is the export's own last rung. */
 export function planRung(input: {
   samples: readonly PeakSample[];
   freeBytes: number | null;
   minRung?: number;
   maxRung?: number;
+  ladder?: Ladder;
 }): Plan {
-  const last = input.maxRung === undefined ? 2 : clampRung(input.maxRung);
-  const min = Math.min(clampRung(input.minRung), last) as Rung;
+  const rungs = input.ladder ? cleanLadder(input.ladder) : denseLadder(input.maxRung);
+  const last = rungs[rungs.length - 1];
+  const asked = clampRung(input.minRung);
+  const min = rungs.find((rung) => rung >= asked) ?? last;
   const free =
     input.freeBytes !== null && Number.isFinite(input.freeBytes) && input.freeBytes >= 0
       ? input.freeBytes
@@ -172,7 +196,8 @@ export function planRung(input: {
     input.samples.some((sample) => sample.rung === rung && isPeak(sample.bytes))
       ? "measured"
       : "derived";
-  for (let rung: Rung = min; rung <= last; rung = (rung + 1) as Rung) {
+  for (const rung of rungs) {
+    if (rung < min) continue;
     const predicted = predictPeak(input.samples, rung)!;
     if (free === null || predicted <= ceilingBytes(free))
       return {

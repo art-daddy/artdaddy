@@ -28,6 +28,9 @@ export const EXPORT_TRACE_EVENTS = [
   "outcome",
   "interrupted_found",
 ] as const;
+// The values the graphics chip's step adds (Phase 3, S4): "passed" to "skipped_busy" are the result of the chip's own
+// test, "full" and "fast" are the mode that was shown or chosen. They stand after "refused" in the list below, which
+// must stay a plain list of strings: the server's conformance test reads this file with a literal parser.
 export const EXPORT_TRACE_VALUES = [
   "menu",
   "chat",
@@ -87,6 +90,18 @@ export const EXPORT_TRACE_VALUES = [
   "chip",
   "ok",
   "refused",
+  "passed",
+  "no_device",
+  "encode_failed",
+  "garbled",
+  "below_x264",
+  "wrong_frames",
+  "timed_out",
+  "cached_pass",
+  "cached_fail",
+  "skipped_busy",
+  "full",
+  "fast",
 ] as const;
 export const EXPORT_ENGINES = ["one_pass", "streamed"] as const;
 export const EXPORT_LIMITS = [
@@ -99,6 +114,11 @@ export const EXPORT_LIMITS = [
   "other",
 ] as const;
 export const EXPORT_STARTERS = ["chat", "elsewhere"] as const;
+/** Which encoder ran (the processor's normal or faster setting, or the graphics chip of this maker), which maker's
+ *  chip the PC has (the maker only: never a device name or a driver), and why the mode was what it was. */
+export const EXPORT_ENCODERS = ["x264", "x264_fast", "amd", "nvidia", "intel"] as const;
+export const EXPORT_CHIPS = ["amd", "nvidia", "intel"] as const;
+export const EXPORT_MODE_REASONS = ["over_minute", "person", "promise_line", "none"] as const;
 /** The run facts and the largest value the server keeps of each (memory in MiB or GiB, time in s). */
 export const EXPORT_FACT_LIMITS = {
   peak_resident_mib: 1_048_576,
@@ -116,6 +136,9 @@ export type ExportTraceValue = (typeof EXPORT_TRACE_VALUES)[number];
 export type ExportEngine = (typeof EXPORT_ENGINES)[number];
 export type ExportLimit = (typeof EXPORT_LIMITS)[number];
 export type ExportStarter = (typeof EXPORT_STARTERS)[number];
+export type ExportEncoderKind = (typeof EXPORT_ENCODERS)[number];
+export type ExportChip = (typeof EXPORT_CHIPS)[number];
+export type ExportModeReason = (typeof EXPORT_MODE_REASONS)[number];
 export type ExportFact = keyof typeof EXPORT_FACT_LIMITS;
 
 /** One state an export went through: what (`e`), when in ms since the request (`t`), and at most one

@@ -252,6 +252,52 @@ describe("choosing the rung", () => {
   it("names every rung", () => {
     expect(RUNG_NAMES).toEqual(["normal", "gentle", "gentlest"]);
   });
+
+  // The ladder is the rungs that really are different commands (exporter document 19.7, I-S4-10). With a graphics encoder
+  // and nine to twelve clips rung 1 is the same command as rung 0: a plan that counted on its saving would promise memory
+  // that is not there, and one that stopped at the first duplicate would hide rung 2, which is real.
+  it("only ever picks a rung on the export's ladder, and steps over one that is not on it", () => {
+    const history = [{ rung: 0 as Rung, bytes: 4 * GIB }]; // 4 GiB free: a 3 GiB ceiling; rungs 1 (2.4) and 2 (2.0) would fit
+    expect(planRung({ samples: history, freeBytes: 4 * GIB })).toMatchObject({
+      rung: 1,
+      fits: true,
+    });
+    expect(planRung({ samples: history, freeBytes: 4 * GIB, ladder: [0, 2] })).toMatchObject({
+      rung: 2,
+      fits: true,
+    });
+    // A second try's minimum lands on the ladder too, and the gentlest the export has is where it ends when nothing fits.
+    expect(planRung({ samples: [], freeBytes: 40 * GIB, minRung: 1, ladder: [0, 2] }).rung).toBe(2);
+    expect(planRung({ samples: [], freeBytes: 1e9, ladder: [0, 2] })).toMatchObject({
+      rung: 2,
+      fits: false,
+    });
+    expect(planRung({ samples: history, freeBytes: 1 * GIB, ladder: [0] })).toMatchObject({
+      rung: 0,
+      fits: false,
+    });
+  });
+
+  it("holds for every ladder: the rung is on it, at least the one asked for, and the first that fits", () => {
+    fc.assert(
+      fc.property(
+        samples,
+        fc.option(free, { nil: null }),
+        rung,
+        fc.constantFrom<readonly Rung[]>([0], [0, 1], [0, 2], [0, 1, 2]),
+        (s, f, min, ladder) => {
+          const p = planRung({ samples: s, freeBytes: f, minRung: min, ladder });
+          expect(ladder).toContain(p.rung);
+          const first = ladder.find((r) => r >= min) ?? ladder[ladder.length - 1];
+          expect(p.rung).toBeGreaterThanOrEqual(first);
+          if (p.fits && p.predictedBytes !== null && f !== null)
+            for (const r of ladder.filter((x) => x >= first && x < p.rung))
+              expect(predictPeak(s, r)!).toBeGreaterThan(ceilingBytes(f)); // a gentler rung was only taken when needed
+        },
+      ),
+      { numRuns: 500 },
+    );
+  });
 });
 
 describe("trying again", () => {
@@ -307,5 +353,27 @@ describe("trying again", () => {
     expect(retryRung(0, "memory_limit", 1)).toBe(1);
     expect(retryRung(1, "memory_limit", 1)).toBe(1);
     expect(retryRung(2, "time_limit", 1)).toBe(1);
+  });
+
+  it("goes to the next rung that exists on the export's ladder, and to no other", () => {
+    expect(retryRung(0, "memory_limit", [0, 2])).toBe(2); // rung 1 is the same command as rung 0 here
+    expect(retryRung(2, "memory_limit", [0, 2])).toBe(2);
+    expect(retryRung(0, "memory_limit", [0])).toBe(0);
+    expect(retryRung(0, "time_limit", [0, 1, 2])).toBe(1);
+    expect(retryRung(1, "time_limit", [0, 1, 2])).toBe(2);
+    expect(retryRung(0, "render_failed", [0, 2])).toBe(0); // not a failure a gentler rung could cure
+    fc.assert(
+      fc.property(
+        rung,
+        fc.constantFrom(...forLack, ...otherwise),
+        fc.constantFrom<readonly Rung[]>([0], [0, 1], [0, 2], [0, 1, 2]),
+        (failed, reason, ladder) => {
+          const next = retryRung(failed, reason, ladder);
+          expect(ladder).toContain(next);
+          if (forLack.includes(reason))
+            expect(next).toBeGreaterThanOrEqual(Math.min(failed, ladder[ladder.length - 1]));
+        },
+      ),
+    );
   });
 });

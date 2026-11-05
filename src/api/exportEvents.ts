@@ -28,16 +28,22 @@ import { hostInfo } from "../platform/host";
 import { useAuth } from "../store/auth";
 import { signedInUser } from "./exportOwner";
 import {
+  EXPORT_CHIPS,
+  EXPORT_ENCODERS,
   EXPORT_ENGINES,
   EXPORT_FACT_LIMITS,
   EXPORT_LIMITS,
+  EXPORT_MODE_REASONS,
   EXPORT_STARTERS,
   cleanTrace,
   decodeTrace,
   encodeTrace,
+  type ExportChip,
+  type ExportEncoderKind,
   type ExportEngine,
   type ExportFact,
   type ExportLimit,
+  type ExportModeReason,
   type ExportStarter,
   type TraceEvent,
 } from "./exportVocabulary";
@@ -96,11 +102,42 @@ export interface ExportEvent extends Partial<Record<ExportFact, number>> {
   limit?: ExportLimit;
   /** Who asked: the in-app chat, or somewhere else (the menu, an outside assistant). */
   started_by?: ExportStarter;
+  /** Which encoder ran: the processor's normal or faster setting, or the graphics chip of this maker. */
+  encoder?: ExportEncoderKind;
+  /** Which maker's graphics chip the PC has, when it has one the app knows (the maker only). */
+  chip?: ExportChip;
+  /** Why the mode was what it was: the person chose, the estimate was over a minute, or the product's promise. */
+  mode_reason?: ExportModeReason;
 }
 
 /** The server's bound on `error` (ExportEventBody, pinned by the server's tests). Over it, a
  *  server that refuses long text dropped the whole row: every failed export went unreported. */
 export const MAX_EXPORT_ERROR = 300;
+
+/** What names a graphics device or its driver. A failure of the graphics chip can carry them in the encoder's own words,
+ *  and they stay on the PC: a report says which maker and which encoder, never which device, which driver or which slot.
+ *  Only these shapes are taken out (a PCI id, a four-part driver version, a product name), so the words that explain a
+ *  failure (the encoder's name, its API versions, ffmpeg's own version) are sent as they were. */
+const HARDWARE_IDENTITY: ReadonlyArray<readonly [RegExp, string]> = [
+  [/(?:\bPCI\\)?\bVEN_[0-9A-F]{4}(?:&(?:DEV|SUBSYS|REV|CC)_[0-9A-F]+)*/gi, "[pci]"],
+  [/\b\d{1,3}\.\d{1,3}\.\d{2,6}\.\d{2,6}\b/g, "[driver]"],
+  [
+    /\b(?:AMD|ATI|NVIDIA|Intel)(?:\((?:R|TM)\))?\s+(?:Radeon|GeForce|Quadro|Tesla|Iris|Arc|UHD|HD)\b[^\n\r,;:\][]{0,48}/gi,
+    "[gpu]",
+  ],
+  [
+    /\b(?:Radeon|GeForce|Quadro|Tesla|Iris|UHD Graphics|HD Graphics)\b[^\n\r,;:\][]{0,48}/gi,
+    "[gpu]",
+  ],
+  [/\b(?:RTX|GTX|RX)\s?\d{3,4}[A-Za-z]{0,3}(?: Ti| SUPER| XT)?\b/g, "[gpu]"],
+];
+
+/** `text` without anything that names a graphics device or its driver (see {@link HARDWARE_IDENTITY}). */
+export function scrubHardwareIdentity(text: string): string {
+  let out = text;
+  for (const [pattern, replacement] of HARDWARE_IDENTITY) out = out.replace(pattern, replacement);
+  return out;
+}
 
 /** A failure's text within the bound, keeping both ends: the exit code and cause come first, and
  *  ffmpeg's verdict ("Conversion failed!") last. */
@@ -166,7 +203,7 @@ export function composeBody(input: Record<string, unknown>): ReportBody | null {
     fps: bounded(input.fps, 1_000),
     quality: String(input.quality ?? "").slice(0, 20),
     warnings: Math.round(bounded(input.warnings, 10_000)),
-    error: boundedError(String(input.error ?? "")),
+    error: boundedError(scrubHardwareIdentity(String(input.error ?? ""))),
     project_id: String(input.project_id ?? "").slice(0, 200),
     reason_code: oneOf(EXPORT_REASON_CODES, input.reason_code, "unknown"),
     operation: oneOf(EXPORT_OPERATIONS, input.operation, "unknown"),
@@ -186,6 +223,9 @@ export function composeBody(input: Record<string, unknown>): ReportBody | null {
     ["engine", EXPORT_ENGINES],
     ["limit", EXPORT_LIMITS],
     ["started_by", EXPORT_STARTERS],
+    ["encoder", EXPORT_ENCODERS],
+    ["chip", EXPORT_CHIPS],
+    ["mode_reason", EXPORT_MODE_REASONS],
   ] as const) {
     const value = input[key];
     if (typeof value === "string" && (allowed as readonly string[]).includes(value))
@@ -239,6 +279,9 @@ function buildBody(ev: ExportEvent): ReportBody {
     engine: ev.engine,
     limit: ev.limit,
     started_by: ev.started_by,
+    encoder: ev.encoder,
+    chip: ev.chip,
+    mode_reason: ev.mode_reason,
     ...Object.fromEntries(
       Object.keys(EXPORT_FACT_LIMITS).map((key) => [key, ev[key as ExportFact]]),
     ),

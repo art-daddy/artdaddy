@@ -16,7 +16,6 @@ import {
 import { undecodableImageReason } from "../tools/imageDims";
 import { runProjectMutation } from "../tools/coordinator";
 import { useExportJob } from "../store/exportJob";
-import { resolveLocalFastEncoder } from "../platform/host";
 import { fetchExportPolicy } from "../api/auth";
 import { isSignedOutGate, useAuth } from "../store/auth";
 import { compileAnim, sampleAnim } from "./anim";
@@ -43,7 +42,10 @@ import {
   type ExportMode,
   type ExportOptions,
 } from "./exportOptions";
-import { RUNG_THREAD_CAPS, capThreads, rungOf, type Rung } from "./exportPlan";
+import { RUNG_THREAD_CAPS, capThreads, rungOf, type Ladder, type Rung } from "./exportPlan";
+import { chipVideoArgs, sizeClassOf, type ChipMaker, type ModeRequest } from "./exportEncoder";
+import { decideExportEncoder, type ChoiceFacts } from "./exportChoice";
+import { findChip } from "./chipTest";
 import { refusalReport, type ExportRefusalFacts } from "../api/agentEvents";
 import { decideRung, type RungDecision } from "./exportRung";
 import { exportFlag } from "../api/exportFlags";
@@ -747,6 +749,9 @@ export interface RenderPlan {
   encoder?: ExportEncoder;
   /** The rung the command was built at (exportPlan.ts); absent is the normal rung. */
   rung?: Rung;
+  /** How the encoder was chosen (exportChoice.ts), for the export's story and report; absent for a render nobody chose
+   *  an encoder for (a working render). Plain data: it travels with the job. */
+  choice?: ChoiceFacts;
   workload: RenderWorkload;
   selection?: BackendSelection;
   transport?: "partition-pipes-v1";
@@ -977,31 +982,52 @@ function atempoChain(tempo: number): number[] {
 /** How to build the same command at another rung, for a plan `buildRenderCommand` made. Kept beside the plan,
  *  not in it: a function does not survive the structured clone a request goes through, and the plan stays a
  *  plain record. */
-const rebuilders = new WeakMap<RenderPlan, (rung: Rung) => RenderPlan>();
+const rebuilders = new WeakMap<RenderPlan, (patch: Partial<ExportOptions>) => RenderPlan>();
 
 /** The same export built at another rung (exportPlan.ts), or null for a plan not made by
  *  `buildRenderCommand`. Only thread counts differ. */
 export function rebuildAtRung(plan: RenderPlan, rung: Rung): RenderPlan | null {
-  return rebuilders.get(plan)?.(rung) ?? null;
+  return rebuilders.get(plan)?.({ rung }) ?? null;
 }
 
-/** The gentlest rung that really is a different command for this export (exportPlan.ts): the streamed engine has
- *  only the normal one, and a rung whose arguments are those of the rung before it saves nothing (thirteen or more
- *  video clips already decode on one thread each, so the two gentler rungs are one command). The plan must not count
- *  on a saving that is not there, and Try again must not promise one. 0 for a plan nothing here made. */
-export function gentlestRung(plan: RenderPlan): Rung {
-  if (plan.transport) return 0;
+/** The same export on the processor's own encoder, whatever the plan had chosen (the graphics chip, or the faster
+ *  setting), or null for a plan not made by `buildRenderCommand`. The rung and everything else stay as they were; the
+ *  record of how the encoder was chosen now says the processor. */
+export function rebuildOnProcessor(plan: RenderPlan): RenderPlan | null {
+  const choice: ChoiceFacts | undefined = plan.choice
+    ? { ...plan.choice, encoder: "x264", reason: "none", adapter: undefined }
+    : undefined;
+  return (
+    rebuilders.get(plan)?.({ mode: "quality", chip: undefined, faster: undefined, choice }) ?? null
+  );
+}
+
+/** The rungs that really are different commands for this export, gentlest last (exportPlan.ts `Ladder`): the streamed
+ *  engine has only the normal one, and a rung whose arguments are those of the rung before it saves nothing: with
+ *  thirteen or more video clips the decoders already run on one thread each, so the two gentler rungs are one command,
+ *  and with a graphics encoder and nine to twelve clips rung 1 is the same command as rung 0 while rung 2 is a real one.
+ *  The plan must not count on a saving that is not there, and Try again must not promise one. [0] for a plan nothing
+ *  here made. */
+export function ladderOf(plan: RenderPlan): Ladder {
+  if (plan.transport) return [0];
   const same = (a: RenderPlan, b: RenderPlan) =>
     JSON.stringify([a.args, a.steps]) === JSON.stringify([b.args, b.steps]);
-  let last: Rung = 0;
+  const ladder: Rung[] = [0];
   let before = plan;
   for (const rung of [1, 2] as const) {
     const next = rebuildAtRung(plan, rung);
-    if (!next || same(next, before)) break;
-    last = rung;
+    if (!next) break;
+    if (same(next, before)) continue;
+    ladder.push(rung);
     before = next;
   }
-  return last;
+  return ladder;
+}
+
+/** The gentlest rung that really is a different command for this export: the last of its ladder. */
+export function gentlestRung(plan: RenderPlan): Rung {
+  const ladder = ladderOf(plan);
+  return ladder[ladder.length - 1];
 }
 
 /** Build the ffmpeg args + filter_complex from a timeline.
@@ -1021,9 +1047,16 @@ export function buildRenderCommand(
   const built = planRenderCommand(raw, outPath, options, window);
   const rung = rungOf(options.rung);
   // A normal rung leaves the plan exactly as it always was; only a gentler one says which it is.
-  const plan: RenderPlan = rung > 0 ? { ...built, rung } : built;
-  rebuilders.set(plan, (next) => {
-    const again = buildRenderCommand(raw, outPath, { ...options, rung: next }, window);
+  const plan: RenderPlan =
+    rung > 0 || options.choice
+      ? {
+          ...built,
+          ...(rung > 0 ? { rung } : {}),
+          ...(options.choice ? { choice: options.choice } : {}),
+        }
+      : built;
+  rebuilders.set(plan, (patch) => {
+    const again = buildRenderCommand(raw, outPath, { ...options, ...patch }, window);
     // What the person is told about an export (a clip that could not be used, branding left out) is added to the plan
     // after it is built; it belongs to the export, not to the rung it runs at.
     for (const warning of plan.warnings)
@@ -1076,7 +1109,10 @@ function planRenderCommand(
                 ? "input-pressure"
                 : "bounded-single-pass",
   };
-  const encoder = finalEncoderPolicy(plan.output, selection.backend, options.mode).encoder;
+  const encoder = finalEncoderPolicy(plan.output, selection.backend, options.mode, {
+    chip: options.chip,
+    faster: options.faster,
+  }).encoder;
   if (window) return { ...plan, selection, workload };
   if (stream)
     return {
@@ -2199,47 +2235,45 @@ function buildSingleRenderCommand(
     };
   }
   if (aout) cmd.push("-map", `[${aout}]`);
+  // The graphics chip is the FINAL ENCODER only, and only when the choice (exportEncoder.ts) named one; its arguments
+  // come from the one table the chip's own test also reads. Anything else is the processor's x264, exactly as before.
+  const chip =
+    options.mode === "fast" && options.chip
+      ? chipVideoArgs(options.chip, options.quality ?? "medium")
+      : null;
   cmd.push(
     "-c:v",
-    options.mode === "fast" ? "h264_amf" : "libx264",
+    chip ? chip.codec : "libx264",
     "-pix_fmt",
-    "yuv420p",
+    chip ? chip.pixFmt : "yuv420p",
     "-r",
     String(outFps),
   );
-  if (options.engine === "partition-pipes-v1")
-    cmd.push(
-      "-threads:v",
-      String(
-        capThreads(
-          composed
-            ? finalEncoderPolicy({ width: ow, height: oh }, options.engine, options.mode).threads
-            : 1,
-          RUNG_THREAD_CAPS[rungOf(options.rung)].encoder,
+  if (options.engine === "partition-pipes-v1") {
+    if (!chip)
+      cmd.push(
+        "-threads:v",
+        String(
+          capThreads(
+            composed
+              ? finalEncoderPolicy({ width: ow, height: oh }, options.engine, options.mode, {
+                  faster: options.faster,
+                }).threads
+              : 1,
+            RUNG_THREAD_CAPS[rungOf(options.rung)].encoder,
+          ),
         ),
-      ),
-    );
-  else if (rungOf(options.rung) > 0 && options.mode !== "fast")
+      );
+  } else if (rungOf(options.rung) > 0 && !chip)
     // x264's own thread count follows the processor count; a gentler rung gives it two. The graphics
     // encoder has no such count to give.
     cmd.push("-threads:v", String(RUNG_THREAD_CAPS[rungOf(options.rung)].encoder));
-  if (options.mode === "fast") {
-    cmd.push(
-      "-usage",
-      "transcoding",
-      "-quality",
-      "quality",
-      "-rc",
-      "cqp",
-      "-qp_i",
-      "18",
-      "-qp_p",
-      "18",
-      "-qp_b",
-      "18",
-    );
-  } else {
-    if (options.preset) cmd.push("-preset", options.preset);
+  if (chip) cmd.push(...chip.rate);
+  else {
+    // The faster processor setting (exportEncoder.ts) is x264's own `veryfast`; an explicit preset (a frame source
+    // nobody watches) is that caller's.
+    const preset = options.faster ? "veryfast" : options.preset;
+    if (preset) cmd.push("-preset", preset);
     const crf = crfFor(options.quality);
     if (crf !== null) cmd.push("-crf", String(crf));
   }
@@ -2865,10 +2899,11 @@ async function prepareRender(
 > {
   const r = await loadForRender(ctx, kind, options.mode);
   if (!r.ok) return r;
+  const picked = await encoderOptions(ctx, r, options, kind);
   const plan = buildRenderCommand(r.seconds, outPath, {
     ...options,
     engine: r.engine,
-    mode: r.mode,
+    ...picked,
     branding: r.branding,
   });
   if (r.warnings.length) plan.warnings.push(...r.warnings);
@@ -2877,6 +2912,44 @@ async function prepareRender(
     plan,
     admission: r.admission,
     ...(r.branding ? { branding: r.branding } : {}),
+  };
+}
+
+/** What the person picked in the Export dialog, as a request: nothing picked is the app's own rule. */
+function requestOf(mode: ExportMode | undefined): ModeRequest {
+  return mode === "fast" ? "fast" : mode === "quality" ? "full" : "auto";
+}
+
+/** The encoder part of an export's options (exportChoice.ts), decided now that the project is loaded: what the person
+ *  picked in the Export dialog if they picked, else the app's own rule, the same one for the menu, the chat and MCP. A
+ *  working render is a frame source nobody watches and stays on the processor. Never refuses an export: a chip that
+ *  cannot be used is the processor. */
+export async function encoderOptions(
+  ctx: ClientToolContext,
+  loaded: { seconds: Timeline; request: ModeRequest },
+  options: ExportOptions,
+  kind: "deliverable" | "working" = "deliverable",
+): Promise<Pick<ExportOptions, "mode" | "chip" | "faster" | "choice">> {
+  if (kind === "working") return { mode: "quality" };
+  const decision = await decideExportEncoder({
+    request: loaded.request,
+    workload: summarizeRenderWorkload(loaded.seconds, options.range, options.maxDurationSec),
+    settings: { resolution: options.resolution, quality: options.quality, fps: options.fps },
+    history: useExportJob.getState().calibrations,
+    signal: ctx.signal,
+  });
+  // The row is shown only in the Export dialog: an export from the chat or MCP never saw it.
+  const shown =
+    exportVia(ctx) === "menu" && decision.showRow
+      ? decision.defaultMode === "fast"
+        ? ("fast" as const)
+        : ("full" as const)
+      : undefined;
+  return {
+    mode: decision.mode,
+    ...(decision.chip ? { chip: decision.chip } : {}),
+    ...(decision.faster ? { faster: true } : {}),
+    choice: { ...decision.facts, ...(shown ? { shown } : {}) },
   };
 }
 
@@ -2895,13 +2968,14 @@ export async function loadForRender(
       warnings: string[];
       admission: RenderAdmission;
       engine: ExportEngine;
-      mode: ExportMode;
+      /** What the person asked for in the Export dialog: `auto` for every other way an export starts. */
+      request: ModeRequest;
     }
 > {
   const engine: ExportEngine =
     kind === "deliverable" ? useExportJob.getState().engine : "file-sequence-v1";
-  const mode: ExportMode =
-    kind === "deliverable" ? (requestedMode ?? ctx.exportMode ?? "quality") : "quality";
+  const request: ModeRequest =
+    kind === "deliverable" ? requestOf(requestedMode ?? ctx.exportMode) : "full";
   if (engine === "partition-pipes-v1") {
     try {
       if (!(await jobSupervisor())?.delivery)
@@ -3000,7 +3074,7 @@ export async function loadForRender(
     warnings: extraWarnings,
     admission,
     engine,
-    mode,
+    request,
     ...(branding ? { branding } : {}),
   };
 }
@@ -3581,7 +3655,7 @@ function referencedBy(clip: LibraryClip, used: Set<string>): boolean {
 export async function exportTimelineTool(
   args: Args,
   ctx: ClientToolContext | null,
-  retrying?: { from: Rung; minRung: Rung },
+  retrying?: { from: Rung; minRung: Rung; processor?: true },
 ): Promise<Result> {
   if (!ctx) return NOT_READY;
   const fmt = String(args.format ?? "mp4")
@@ -3648,6 +3722,8 @@ export async function exportTimelineTool(
     resolution: args.resolution as ExportOptions["resolution"],
     quality: args.quality as ExportOptions["quality"],
     fps: typeof args.fps === "number" ? args.fps : undefined,
+    // A Try again after the graphics chip failed asks for the processor, whatever the app would have chosen.
+    ...(retrying?.processor ? { mode: "quality" as const } : {}),
   });
   if (!prepared.ok) return prepared.result;
 
@@ -3721,7 +3797,11 @@ function retryOf(args: Args, ctx: ClientToolContext): ExportRetry {
         ? { ...later, store: open }
         : later;
     const { exportTool } = await import("./exportItems");
-    const result = await exportTool(request, where, { from, minRung });
+    const result = await exportTool(request, where, {
+      from,
+      minRung,
+      ...(options.processor ? { processor: true as const } : {}),
+    });
     if (result.ok !== false) return { ok: true };
     const facts = (result as { export_refusal?: ExportRefusalFacts }).export_refusal;
     // A refusal is reported as any other is, so a Try again that came to nothing is not invisible.
@@ -3783,18 +3863,41 @@ async function planned(
     destPath: job.destPath,
     signal: ctx.signal,
     minRung: Math.max(rungOf(job.minRung), rungOf(built.rung)),
-    maxRung: gentlestRung(built),
+    ladder: ladderOf(built),
     enabled: exportFlag("plan_rung"),
   });
   const rebuilt = decision.rung > rungOf(built.rung) ? rebuildAtRung(built, decision.rung) : null;
   return { job: rebuilt ? { ...job, plan: rebuilt } : job, decision };
 }
 
+/** A chip's plan is checked once more as it is handed over (exportChoice.ts, I-S4-1): the choice was made a moment ago,
+ *  but a chip may have been set aside since (it failed an export, or the server switched its maker off). It must still
+ *  be one that has proven itself on this PC; otherwise this is the same export on the processor. */
+async function onProvenEncoder(
+  ctx: ClientToolContext,
+  job: Parameters<typeof queueRenderJob>[1],
+): Promise<Parameters<typeof queueRenderJob>[1]> {
+  const encoder = job.plan.encoder ?? "x264-crf";
+  if (!encoder.startsWith("chip-")) return job;
+  const maker = encoder.slice("chip-".length) as ChipMaker;
+  const sizeClass = sizeClassOf(job.plan.output.width, job.plan.output.height, job.plan.output.fps);
+  const found = sizeClass
+    ? await findChip(sizeClass, { allowRun: false, signal: ctx.signal })
+    : null;
+  if (found?.chip?.maker === maker) return job;
+  const back = rebuildOnProcessor(job.plan);
+  if (!back)
+    throw new Error(
+      "the graphics chip is not available for this export any more. Choose Full quality and export again.",
+    );
+  return { ...job, plan: back };
+}
+
 export async function prepareRenderSubmission(
   ctx: ClientToolContext,
   original: Parameters<typeof queueRenderJob>[1],
 ): Promise<Parameters<typeof submitExport>[0]> {
-  const { job, decision } = await planned(ctx, original);
+  const { job, decision } = await planned(ctx, await onProvenEncoder(ctx, original));
   const request = structuredClone(job);
   const renderPlan = request.plan;
   if (
@@ -3829,11 +3932,6 @@ export async function prepareRenderSubmission(
     throw new Error(
       "streaming export requires the matching native job supervisor; select Standard to switch back",
     );
-  const fast = renderPlan.args[renderPlan.args.indexOf("-c:v") + 1] === "h264_amf";
-  if (fast && !(await resolveLocalFastEncoder(ctx.signal)))
-    throw new Error(
-      "Fast is unavailable on this device or the encoder check failed. Choose Full quality and export again.",
-    );
   const telemetry = {
     duration_s: renderPlan.duration,
     width: renderPlan.output.width,
@@ -3849,7 +3947,7 @@ export async function prepareRenderSubmission(
       output: renderPlan.output,
       quality: request.quality || "medium",
       engine: renderPlan.selection.backend,
-      encoder: renderPlan.encoder ?? (fast ? ("amf-cqp18" as const) : ("x264-crf" as const)),
+      encoder: renderPlan.encoder ?? ("x264-crf" as const),
       revision: EXPORT_SPEED_REVISION,
       // Left out at the normal rung, so every measurement made before rungs existed reads the same.
       ...(rungOf(renderPlan.rung) > 0 ? { rung: rungOf(renderPlan.rung) } : {}),
@@ -3858,12 +3956,15 @@ export async function prepareRenderSubmission(
     plan: {
       rung: rungOf(renderPlan.rung),
       max_rung: decision.maxRung,
+      ladder: [...decision.ladder],
       basis: decision.plan.basis,
       predicted_bytes: decision.plan.predictedBytes,
       free_bytes: decision.freeBytes,
       fits: decision.plan.fits,
       needed_free_bytes: decision.plan.neededFreeBytes,
     },
+    // How the encoder was chosen: the story's chip test and mode events and the report's encoder, chip and reason.
+    ...(renderPlan.choice ? { choice: renderPlan.choice } : {}),
   };
   const plan: ExportJobPlan = {
     contractVersion: renderPlan.contractVersion,

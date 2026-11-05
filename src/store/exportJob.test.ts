@@ -2,6 +2,7 @@ import fc from "fast-check";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { liveFeedOf, useExportJob } from "./exportJob";
+import { ENCODER_IDS } from "../timeline/exportEncoder";
 import { EXPORT_SPEED_REVISION, type ExportCalibration } from "../timeline/exportOptions";
 import { quietSeconds } from "../timeline/exportWords";
 
@@ -28,7 +29,7 @@ const sample: ExportCalibration = {
 };
 
 beforeEach(() => {
-  useExportJob.setState({ calibrations: [], mode: "quality" });
+  useExportJob.setState({ calibrations: [] });
 });
 
 describe("local export calibration records", () => {
@@ -57,15 +58,36 @@ describe("local export calibration records", () => {
     expect(useExportJob.getState().calibrations).toEqual([]);
   });
 
-  it("keeps explicit encoder observations separate and starts in Full quality", () => {
-    expect(useExportJob.getState().mode).toBe("quality");
-    useExportJob.getState().setMode("fast");
-    expect(useExportJob.getState().mode).toBe("fast");
+  it("keeps explicit encoder observations separate", () => {
     useExportJob.getState().rememberCalibration(sample);
-    useExportJob.getState().rememberCalibration({ ...sample, encoder: "amf-cqp18" });
+    useExportJob.getState().rememberCalibration({ ...sample, encoder: "chip-amd" });
     expect(useExportJob.getState().calibrations.map((entry) => entry.encoder)).toEqual([
       "x264-crf",
-      "amf-cqp18",
+      "chip-amd",
+    ]);
+  });
+
+  // The fault that lost a gentle run's rung (S3): a field the store did not know about was dropped without a word, and
+  // nothing failed. Every way an export can be encoded must survive the store, or a chip's measurements would be
+  // remembered as the processor's and the estimates of both would be wrong.
+  it("remembers a measurement under the encoder it was made with, for every encoder there is", () => {
+    for (const encoder of ENCODER_IDS) {
+      useExportJob.setState({ calibrations: [] });
+      useExportJob.getState().rememberCalibration({ ...sample, encoder });
+      expect(useExportJob.getState().calibrations, encoder).toEqual([
+        expect.objectContaining({ encoder }),
+      ]);
+    }
+  });
+
+  it("reads back what it saved, encoder included, in the next session", async () => {
+    localStorage.clear();
+    for (const encoder of ENCODER_IDS)
+      useExportJob.getState().rememberCalibration({ ...sample, encoder, elapsedSeconds: 7 });
+    vi.resetModules();
+    const reopened = (await import("./exportJob")).useExportJob;
+    expect(reopened.getState().calibrations.map((entry) => entry.encoder)).toEqual([
+      ...ENCODER_IDS,
     ]);
   });
 

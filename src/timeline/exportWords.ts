@@ -2,7 +2,8 @@
 // card, the assistant's export list and the tests all say the same thing, and a number that is not a
 // number never reaches a sentence.
 import { reasonOfError, type ExportReasonCode } from "../api/exportReason";
-import { describeExportTime } from "./exportOptions";
+import type { ModeReason } from "./exportEncoder";
+import { describeExportTime, type ExportMode } from "./exportOptions";
 
 export type LiveStageName = "queued" | "preparing" | "rendering" | "checking" | "saving";
 
@@ -101,6 +102,91 @@ export function describeRung(rung: unknown): string {
     return "Using a gentler setting to fit this PC's memory · it may take a little longer";
   if (rung === 2) return "Using the gentlest setting to fit this PC's memory · it will take longer";
   return "";
+}
+
+/** What the Export dialog knows about the mode: what the app decided (exportChoice.ts) and what each way is estimated to
+ *  take. */
+export interface ModeView {
+  /** The Mode row is shown (a graphics chip has proven itself and would save a quarter of the time). */
+  readonly showRow: boolean;
+  /** What the row starts on. */
+  readonly defaultMode: ExportMode;
+  readonly reason: ModeReason;
+  /** The processor's faster setting will be used (no row, no chip). */
+  readonly faster: boolean;
+  readonly fullSeconds: number | null;
+  readonly fastSeconds: number | null;
+}
+
+export interface ModeLines {
+  /** The mode the dialog shows as chosen: Fast only where the row is shown. */
+  readonly selected: ExportMode;
+  /** Under the Mode row. */
+  readonly hint: string | null;
+  /** The amber note: why Fast is selected, or what it costs. */
+  readonly note: string | null;
+  /** What the other mode would take. */
+  readonly alternative: string | null;
+  /** The note for the faster processor setting, where there is no row. */
+  readonly faster: string | null;
+}
+
+export const FAST_HINT =
+  "Fast uses your graphics chip: usually quicker, and the file is usually larger.";
+export const FASTER_SETTING_LINE =
+  "To save time, ArtDaddy will use a faster setting; the picture may be slightly softer.";
+
+/** The words of the Export dialog's Mode row (exporter document, Appendix A): the row, what it starts on and why, what
+ *  each way takes, and the faster setting where there is no row. `picked` is what the person chose in the row, or null
+ *  while they have not touched it. */
+export function describeModeLines(view: ModeView | null, picked: ExportMode | null): ModeLines {
+  const none = {
+    selected: "quality" as const,
+    hint: null,
+    note: null,
+    alternative: null,
+    faster: null,
+  };
+  if (!view) return none;
+  const selected: ExportMode = view.showRow ? (picked ?? view.defaultMode) : "quality";
+  const full = describeExportTime(view.fullSeconds);
+  const fast = describeExportTime(view.fastSeconds);
+  if (!view.showRow) return { ...none, faster: view.faster ? FASTER_SETTING_LINE : null };
+  const alternative =
+    selected === "fast"
+      ? full
+        ? `Full quality would take ${full}.`
+        : null
+      : fast
+        ? `Fast would take ${fast}.`
+        : null;
+  const note =
+    selected !== "fast"
+      ? null
+      : picked === null && view.reason === "over_minute"
+        ? `Fast is selected because this export would take over a minute on this PC${full ? ` (${full})` : ""}. The file will be larger and the picture can differ slightly. Choose Full quality for the smallest file.`
+        : "The file will be larger and the picture can differ slightly from Full quality.";
+  return { selected, hint: FAST_HINT, note, alternative, faster: null };
+}
+
+/** One line for an export that runs on something other than the processor's normal setting: what it is and what it costs.
+ *  Nothing for the normal setting, which needs no explaining. */
+export function describeEncoder(encoder: unknown, reason: unknown): string {
+  if (encoder === "amd" || encoder === "nvidia" || encoder === "intel")
+    return `Using your graphics chip${reason === "over_minute" ? " to save time" : ""} · the file is larger and the picture can differ slightly`;
+  if (encoder === "x264_fast")
+    return "Using a faster setting to save time · the picture may be slightly softer";
+  return "";
+}
+
+/** What to say when the graphics chip stopped an export: to the person (the card's Try again, or where there is none), and
+ *  to the assistant (which has no Try again: it exports again, and the app then keeps off the chip). */
+export function describeChipFailure(audience: "card" | "again" | "assistant"): string {
+  if (audience === "card")
+    return "The graphics chip stopped this export. Try again uses the processor instead, which takes longer.";
+  if (audience === "again")
+    return "The graphics chip stopped this export. Export it again and the processor will be used, which takes longer.";
+  return "The graphics chip stopped this export before it finished. It is set aside for a day: export again and the processor is used, which takes longer.";
 }
 
 /** What Try again will do after a failure, when it does anything beyond starting again: after running short of

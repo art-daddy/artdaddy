@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import { useExportJob } from "../store/exportJob";
 import { __setExportFlag } from "../api/exportFlags";
 import { useAuth } from "../store/auth";
+import { __setExportConfirmationForTests } from "../lib/confirm";
 
 import { JobLedger } from "../project/jobLedger";
 import { FakeJobs } from "../test/fakeJobs";
@@ -36,6 +37,7 @@ import {
 } from "./exportQueue";
 import { addClipsTool } from "./placement";
 import { exportTimelineTool, RENDER_CONTRACT_VERSION } from "./render";
+import { findChip, markChipSuspect, type ChipVerdict } from "./chipTest";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -48,9 +50,22 @@ vi.mock("../api/exportEvents", () => ({
     reported.push(event);
   },
 }));
+// The graphics chip's lookup is the test's to answer (the chip's own test has its own suites); no chip by default, so
+// every other journey here runs on the processor exactly as before.
+vi.mock("./chipTest", async (importOriginal) => {
+  const real = await importOriginal<typeof import("./chipTest")>();
+  return {
+    ...real,
+    findChip: vi.fn(async () => ({ chip: null, events: [] })),
+    markChipSuspect: vi.fn(),
+  };
+});
 beforeEach(() => {
   reported.length = 0;
   useAuth.setState({ profile: null });
+  vi.mocked(findChip).mockReset();
+  vi.mocked(findChip).mockResolvedValue({ chip: null, events: [] });
+  vi.mocked(markChipSuspect).mockReset();
 });
 
 class Fs extends MemFs {
@@ -163,11 +178,11 @@ async function setup(streaming = false) {
   jobs.onStart = (spec) => fs.writeTextFile(spec.args[spec.args.length - 1], "a whole video");
   __setJobSupervisor(jobs);
   const base: ClientToolContext = { store, runner };
-  const exportNow = async (name?: string) =>
-    (await exportTimelineTool(
-      name ? { name } : {},
-      agentToolContext(base, new AbortController().signal),
-    )) as Any;
+  const exportNow = async (name?: string, extra: Partial<ClientToolContext> = {}) =>
+    (await exportTimelineTool(name ? { name } : {}, {
+      ...agentToolContext(base, new AbortController().signal),
+      ...extra,
+    })) as Any;
   // A new page: its own store over the same disk, and no memory of the last page.
   const nextPage = () => ({ store: new ProjectStoreAccess(DIR, fs), runner });
   return { fs, store, ran, jobs, exportNow, nextPage };
@@ -527,6 +542,266 @@ describe("Try again, from the card, after an export the PC could not fit", () =>
       t.jobs.exit(holder.job_id, 0);
       await whenExportsSettle();
     }
+  });
+});
+
+describe("the graphics chip, from the export tool to the card", () => {
+  // What this PC has measured is global state: each journey starts from none, and leaves none behind.
+  beforeEach(() => {
+    __setExportConfirmationForTests(async () => "continue");
+    useExportJob.setState({ calibrations: [] });
+  });
+  afterEach(() => {
+    __setExportConfirmationForTests(null);
+    useExportJob.setState({ calibrations: [] });
+  });
+  const amdChip = (): ChipVerdict => ({
+    maker: "amd",
+    adapter: { maker: "amd", device: "15bf", driver: "32.0.1" },
+    sizeClass: "hd",
+    ok: true,
+    result: "passed",
+    ssimMilli: 870,
+    ms: 1800,
+  });
+  const story = (report: Any): string[] =>
+    (report.trace as Any[]).map((e) => (e.v ? `${e.e}:${e.v}` : e.e));
+  const codec = (spec: { args: string[] }) => spec.args[spec.args.lastIndexOf("-c:v") + 1];
+  const DRIVER_ERROR =
+    "native render failed: [h264_amf @ 0000028f] Error submitting video frame to the encoder\n";
+  const FLOOR =
+    "native render failed: render memory floor crossed: the PC has 410 MiB left and keeps 768 MiB for itself\n";
+
+  /** A project this PC has measured to take ten minutes on the processor: long enough for the app to choose the chip. */
+  async function longProject() {
+    const t = await setup();
+    const first = await t.exportNow("first");
+    await flush();
+    const calibration = (t.jobs.submitted[0].meta.telemetry as Any).calibration;
+    t.jobs.exit(first.job_id, 0);
+    await whenExportEnds(first.job_id);
+    await whenExportsSettle();
+    useExportJob.getState().rememberCalibration({
+      ...calibration,
+      elapsedSeconds: 600,
+      finalBytes: 50_000_000,
+      memoryBytes: 1_000_000_000,
+      temporaryBytes: 0,
+    });
+    reported.length = 0;
+    vi.mocked(findChip).mockClear();
+    return t;
+  }
+
+  it("runs a long export on the chip when the PC has one that proved itself, and tells how it was chosen", async () => {
+    const t = await longProject();
+    vi.mocked(findChip).mockResolvedValue({
+      chip: amdChip(),
+      events: [{ maker: "amd", sizeClass: "hd", result: "passed", ms: 1800, ssimMilli: 870 }],
+    });
+    const started = await t.exportNow("long");
+    await flush();
+    const spec = t.jobs.submitted.at(-1)!;
+    expect(started.ok, JSON.stringify(started)).toBe(true);
+    expect(codec(spec)).toBe("h264_amf");
+    expect(spec.args).not.toContain("libx264");
+    expect((spec.meta.telemetry as Any).calibration.encoder).toBe("chip-amd");
+    expect((spec.meta.telemetry as Any).choice).toMatchObject({
+      encoder: "amd",
+      chip: "amd",
+      reason: "over_minute",
+      shown: "fast",
+    });
+    t.jobs.exit(started.job_id, 0);
+    expect((await whenExportEnds(started.job_id))?.state).toBe("done");
+    await whenExportsSettle();
+    await whenExportTelemetrySettles();
+    const report = reported.at(-1)!;
+    expect(report).toMatchObject({
+      status: "done",
+      encoder: "amd",
+      chip: "amd",
+      mode_reason: "over_minute",
+    });
+    expect(story(report)).toEqual(
+      expect.arrayContaining(["chip_test:passed", "mode_shown:fast", "mode_selected:fast"]),
+    );
+    // The chip's test is told with the maker (1: AMD, +10 for the 4K class) and how long it took.
+    expect((report.trace as Any[]).find((e) => e.e === "chip_test")).toMatchObject({
+      v: "passed",
+      n: 1,
+      m: 1800,
+    });
+  });
+
+  it("keeps what the person picked: Full quality from the menu stays on the processor for a long export, and no chip is even looked up", async () => {
+    const t = await longProject();
+    vi.mocked(findChip).mockResolvedValue({ chip: amdChip(), events: [] });
+    const started = await t.exportNow("long", { exportMode: "quality" });
+    await flush();
+    const spec = t.jobs.submitted.at(-1)!;
+    expect(codec(spec)).toBe("libx264");
+    expect(findChip).not.toHaveBeenCalled();
+    t.jobs.exit(started.job_id, 0);
+    await whenExportEnds(started.job_id);
+    await whenExportsSettle();
+    await whenExportTelemetrySettles();
+    expect(reported.at(-1)).toMatchObject({ encoder: "x264", mode_reason: "person" });
+    expect(story(reported.at(-1)!)).not.toContain("chip_test:passed");
+  });
+
+  it("runs on the chip for a person who picked Fast, even for an export short enough that the app would not have", async () => {
+    const t = await setup(); // two seconds: well under a minute
+    vi.mocked(findChip).mockResolvedValue({ chip: amdChip(), events: [] });
+    const started = await t.exportNow("short", { exportMode: "fast" });
+    await flush();
+    expect(codec(t.jobs.submitted.at(-1)!)).toBe("h264_amf");
+    t.jobs.exit(started.job_id, 0);
+    await whenExportsSettle();
+    await whenExportTelemetrySettles();
+    expect(reported.at(-1)).toMatchObject({ encoder: "amd", mode_reason: "person" });
+  });
+
+  it("stays on the processor for a short export the person did not choose a mode for", async () => {
+    const t = await setup();
+    vi.mocked(findChip).mockResolvedValue({ chip: amdChip(), events: [] });
+    const started = await t.exportNow("short");
+    await flush();
+    expect(codec(t.jobs.submitted.at(-1)!)).toBe("libx264");
+    t.jobs.exit(started.job_id, 0);
+    await whenExportsSettle();
+    await whenExportTelemetrySettles();
+    // The chip was offered (the row would have been shown) but not chosen: said so.
+    expect(reported.at(-1)).toMatchObject({ encoder: "x264", chip: "amd", mode_reason: "none" });
+    expect(story(reported.at(-1)!)).toEqual(
+      expect.arrayContaining(["mode_shown:full", "mode_selected:full"]),
+    );
+  });
+
+  it("replays the journey: the chip fails in the middle, the card says so, one click runs the same export on the processor, and the chip is set aside", async () => {
+    const t = await longProject();
+    const chip = amdChip();
+    vi.mocked(findChip).mockResolvedValue({ chip, events: [] });
+    const started = await t.exportNow("long");
+    await flush();
+    expect(codec(t.jobs.submitted.at(-1)!)).toBe("h264_amf");
+    t.jobs.exit(started.job_id, -1, DRIVER_ERROR);
+    expect(await whenExportEnds(started.job_id)).toMatchObject({
+      state: "failed",
+      canRetry: true,
+      chipFailed: true,
+    });
+    await whenExportsSettle();
+    await whenExportTelemetrySettles();
+    expect(markChipSuspect).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(markChipSuspect).mock.calls[0][0]).toEqual(chip.adapter);
+    expect(reported.at(-1)).toMatchObject({ status: "failed", encoder: "amd", chip: "amd" });
+    expect(story(reported.at(-1)!)).toEqual(expect.arrayContaining(["chip_failed:chip"]));
+    expect((reported.at(-1)!.trace as Any[]).find((e) => e.e === "chip_failed")).toMatchObject({
+      n: 1,
+    });
+
+    // The lookup still says the chip is fine: Try again must not depend on it.
+    await retryExport(started.job_id);
+    await flush();
+    const retried = t.jobs.submitted.at(-1)!;
+    expect(codec(retried)).toBe("libx264");
+    expect((retried.meta.telemetry as Any).choice).toMatchObject({ encoder: "x264" });
+    expect((retried.meta.telemetry as Any).plan.rung).toBe(0);
+    const second = listExportRecords().at(-1)!;
+    expect(second).toMatchObject({ state: "running", canRetry: true });
+    t.jobs.exit(second.job_id, 0);
+    expect((await whenExportEnds(second.job_id))?.state).toBe("done");
+    await whenExportsSettle();
+    await whenExportTelemetrySettles();
+    expect(reported.at(-1)).toMatchObject({ status: "done", encoder: "x264" });
+    expect(story(reported.at(-1)!)).toEqual(expect.arrayContaining(["retry:try_again"]));
+    expect(await t.fs.exists("C:/Users/test/Downloads/long.mp4")).toBe(true);
+  });
+
+  // Found by review: any "the render failed" used to be the chip's fault. A broken source file fails an export the same way on
+  // any encoder, and the person is better served by the real reason than by a chip set aside for a day for nothing.
+  it.each([
+    [
+      "a broken source file",
+      "native render failed: ffmpeg: Invalid data found when processing input\n",
+    ],
+    [
+      "a filter graph that cannot be made",
+      "native render failed: ffmpeg: Error initializing filters\n",
+    ],
+  ])(
+    "does not blame the chip for %s: an error that never names the chip's encoder",
+    async (_name, error) => {
+      const t = await longProject();
+      vi.mocked(findChip).mockResolvedValue({ chip: amdChip(), events: [] });
+      const started = await t.exportNow("long");
+      await flush();
+      t.jobs.exit(started.job_id, -1, error);
+      const failed = await whenExportEnds(started.job_id);
+      expect(failed?.state).toBe("failed");
+      expect(failed?.chipFailed).toBeUndefined();
+      await whenExportsSettle();
+      await whenExportTelemetrySettles();
+      expect(markChipSuspect).not.toHaveBeenCalled();
+      expect(story(reported.at(-1)!)).not.toContain("chip_failed:chip");
+    },
+  );
+
+  it.each([
+    [
+      "the encoder's own words",
+      "native render failed: [h264_nvenc @ 000001] OpenEncodeSessionEx failed: unsupported device (2)\n",
+    ],
+    ["a chip's driver", "native render failed: Error creating a MFX session: -9 (qsv)\n"],
+  ])("blames the chip when the failure names it: %s", async (_name, error) => {
+    const t = await longProject();
+    vi.mocked(findChip).mockResolvedValue({ chip: amdChip(), events: [] });
+    const started = await t.exportNow("long");
+    await flush();
+    t.jobs.exit(started.job_id, -1, error);
+    expect((await whenExportEnds(started.job_id))?.chipFailed).toBe(true);
+    await whenExportsSettle();
+    expect(markChipSuspect).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not blame the chip for a failure that is not its own: a full disk or a PC short of memory", async () => {
+    const t = await longProject();
+    vi.mocked(findChip).mockResolvedValue({ chip: amdChip(), events: [] });
+    const started = await t.exportNow("long");
+    await flush();
+    t.jobs.exit(started.job_id, -1, FLOOR);
+    const failed = await whenExportEnds(started.job_id);
+    expect(failed?.state).toBe("failed");
+    expect(failed?.chipFailed).toBeUndefined();
+    await whenExportsSettle();
+    await whenExportTelemetrySettles();
+    expect(markChipSuspect).not.toHaveBeenCalled();
+    expect(story(reported.at(-1)!)).not.toContain("chip_failed:chip");
+    // Try again is the memory kind: the same chip, one rung gentler.
+    await retryExport(started.job_id);
+    await flush();
+    expect(codec(t.jobs.submitted.at(-1)!)).toBe("h264_amf");
+    expect((t.jobs.submitted.at(-1)!.meta.telemetry as Any).plan.rung).toBeGreaterThan(0);
+    t.jobs.exit(listExportRecords().at(-1)!.job_id, 0);
+    await whenExportsSettle();
+  });
+
+  it("never lets the chip run an export it is not proven for any more when the command is captured", async () => {
+    const t = await longProject();
+    // Proven when the choice is made; set aside by the time the command is handed over.
+    vi.mocked(findChip).mockImplementation(async (_sizeClass, options) =>
+      options.allowRun ? { chip: amdChip(), events: [] } : { chip: null, events: [] },
+    );
+    const started = await t.exportNow("long");
+    await flush();
+    const spec = t.jobs.submitted.at(-1)!;
+    expect(codec(spec)).toBe("libx264");
+    expect(spec.args).not.toContain("h264_amf");
+    expect((spec.meta.telemetry as Any).choice).toMatchObject({ encoder: "x264", chip: "amd" });
+    expect((spec.meta.telemetry as Any).calibration.encoder).toBe("x264-crf");
+    t.jobs.exit(started.job_id, 0);
+    await whenExportsSettle();
   });
 });
 

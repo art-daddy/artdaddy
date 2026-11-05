@@ -584,8 +584,10 @@ describe("export delivers separate files into a folder", () => {
     await whenExportTelemetrySettles();
     const measured = useExportJob.getState().calibrations;
     expect(measured.length, "the warm-up export recorded no measurement").toBeGreaterThan(0);
+    // Long enough that even the processor's faster setting (what the app picks for an export this far over the promise,
+    // about twice as fast) would overrun the limit: the question is asked whichever way it would run.
     useExportJob.setState({
-      calibrations: measured.map((entry) => ({ ...entry, elapsedSeconds: 40_000 })),
+      calibrations: measured.map((entry) => ({ ...entry, elapsedSeconds: 100_000 })),
     });
     p.ffmpeg.length = 0;
     __resetExportQueue();
@@ -655,6 +657,8 @@ describe("export delivers separate files into a folder", () => {
     expect(report.trace.map((e: Any) => (e.v ? `${e.e}:${e.v}` : e.e))).toEqual([
       "requested:menu",
       "plan_chosen:normal",
+      // This far over the promise, the app chose the processor's faster setting, and says so.
+      "mode_selected:full",
       "dialog_shown:confirm",
       "dialog_choice:cancel",
       "outcome:declined",

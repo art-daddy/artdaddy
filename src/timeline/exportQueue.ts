@@ -40,6 +40,9 @@ import { setExportsBusy } from "../tools/workGate";
 import { projectKeyOfDir } from "../tools/dataRoot";
 import { resolveExportResources, type ExportResources } from "../platform/host";
 import { confirmExport } from "../lib/confirm";
+import { markChipSuspect } from "./chipTest";
+import type { ChoiceFacts } from "./exportChoice";
+import { CHIP_MAKERS, type ChipMaker, type ModeReason, type SizeClass } from "./exportEncoder";
 import { askQuestion, hostMounted, type QuestionOutcome } from "../store/exportQuestionHost";
 import {
   assessExport,
@@ -48,7 +51,17 @@ import {
   type ExportAssessment,
   type ExportCalibration,
 } from "./exportOptions";
-import { RUNG_NAMES, planRung, retryRung, rungOf, type Plan, type Rung } from "./exportPlan";
+import {
+  RUNG_NAMES,
+  cleanLadder,
+  denseLadder,
+  planRung,
+  retryRung,
+  rungOf,
+  type Ladder,
+  type Plan,
+  type Rung,
+} from "./exportPlan";
 import { exportFlag, refreshExportFlags } from "../api/exportFlags";
 import {
   bandOf,
@@ -62,13 +75,20 @@ import {
 import type { RenderWorkload } from "./renderPlan";
 import { runProjectMutation } from "../tools/coordinator";
 import type {
+  ExportEncoderKind,
   ExportEngine,
   ExportLimit,
   ExportStarter,
   ExportTraceValue,
 } from "../api/exportVocabulary";
 import { ExportStory, RunWatch, STAGE_CODES } from "./exportTrace";
-import { QUIET_SECONDS, failureOf, quietSeconds, timeLeftSeconds } from "./exportWords";
+import {
+  QUIET_SECONDS,
+  describeChipFailure,
+  failureOf,
+  quietSeconds,
+  timeLeftSeconds,
+} from "./exportWords";
 import { limitThatFired, mibBand, parseNativeDiagnostics } from "./nativeDiagnostics";
 
 /** Who stopped an export (a value of the report's trace vocabulary). */
@@ -278,6 +298,15 @@ export interface ExportRecord {
   /** The gentlest rung this export's command really has, when the plan said (render.ts `gentlestRung`): what Try
    *  again may ask for. Absent: what the engine has. */
   maxRung?: Rung;
+  /** The rungs this export really has (exportPlan.ts `Ladder`): Try again steps to the next one on it. Absent: the
+   *  rungs with no gaps up to `maxRung`. */
+  ladder?: readonly Rung[];
+  /** How the encoder was chosen (exportChoice.ts), kept when it is not the processor's normal setting so the card can
+   *  say what the export runs on. */
+  encoder?: ExportEncoderKind;
+  reason?: ModeReason;
+  /** The export failed in a way a chip can cause, and it ran on one: Try again runs it on the processor. */
+  chipFailed?: true;
   /** A way to start this export again is offered (see {@link offerExportRetry}): the card shows Try again on it
    *  once it has failed. */
   canRetry?: true;
@@ -361,11 +390,12 @@ export function dismissExport(jobId: string): boolean {
 }
 
 /** How to start an export again, given by whoever started it: told the gentlest rung to start at, it queues a
- *  new export of the same project with the same settings. */
+ *  new export of the same project with the same settings. `processor` says the graphics chip failed it: the new export
+ *  runs on the processor's own encoder, whatever the app would have chosen. */
 export type ExportRetry = (
   minRung: Rung,
   failedRung: Rung,
-  options: { store?: ProjectStoreAccess },
+  options: { store?: ProjectStoreAccess; processor?: true },
 ) => Promise<{ ok: boolean; error?: string; declined?: boolean }>;
 const retries = new Map<string, ExportRetry>();
 
@@ -377,10 +407,17 @@ export function offerExportRetry(jobId: string, retry: ExportRetry): void {
   patch(jobId, { canRetry: true });
 }
 
-/** The gentlest rung Try again may ask for on this export: the one its command really has, and none at all while
- *  the switch for rungs is off (nothing gentler is then offered, and nothing is promised). */
-export function gentlestRungOf(record: Pick<ExportRecord, "maxRung">): Rung {
-  return exportFlag("plan_rung") ? (record.maxRung ?? 2) : 0;
+/** The rungs Try again may step through on this export: the ones its command really has, and only the normal one
+ *  while the switch for rungs is off (nothing gentler is then offered, and nothing is promised). */
+export function ladderOfRecord(record: Pick<ExportRecord, "maxRung" | "ladder">): Ladder {
+  if (!exportFlag("plan_rung")) return [0];
+  return record.ladder ? cleanLadder(record.ladder) : denseLadder(record.maxRung);
+}
+
+/** The gentlest rung Try again may ask for on this export: the last of its ladder. */
+export function gentlestRungOf(record: Pick<ExportRecord, "maxRung" | "ladder">): Rung {
+  const ladder = ladderOfRecord(record);
+  return ladder[ladder.length - 1];
 }
 
 /** Start a failed export again, one click: a new export (new job, same settings), one rung gentler after a
@@ -394,12 +431,15 @@ export async function retryExport(jobId: string, store?: ProjectStoreAccess): Pr
   if (!record || !retry || record.state !== "failed" || record.retrying) return;
   patch(jobId, { retrying: true, note: undefined });
   const failedRung = rungOf(record.rung);
+  // A failure only the chip can explain is tried again on the processor, from its normal rung: the processor has rungs
+  // of its own. Any other failure steps down the rungs, as before.
+  const processor = record.chipFailed === true;
   let result: Awaited<ReturnType<ExportRetry>>;
   try {
     result = await retry(
-      retryRung(failedRung, failureOf(record.error).code, gentlestRungOf(record)),
+      processor ? 0 : retryRung(failedRung, failureOf(record.error).code, ladderOfRecord(record)),
       failedRung,
-      { store },
+      { store, ...(processor ? { processor: true as const } : {}) },
     );
   } catch (error) {
     result = { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -473,6 +513,10 @@ export function listExportOutcomes(): Array<Record<string, unknown>> {
       ...(r.cancelling && isOpen(r) ? { cancelling: true } : {}),
       // The setting it runs at, when it is below the normal one: why it may be slower.
       ...(r.rung ? { setting: RUNG_NAMES[r.rung] } : {}),
+      // What it runs on, when that is not the processor's normal setting.
+      ...(r.encoder && r.encoder !== "x264"
+        ? { encoder: r.encoder === "x264_fast" ? "faster_setting" : "graphics_chip" }
+        : {}),
       // Where the run is, for an export that is running: the stage, how far a render is and how long it
       // thinks is left, and for how long it has made no progress. The same facts the chat card shows.
       ...(running ? { stage: running.stage } : {}),
@@ -484,7 +528,13 @@ export function listExportOutcomes(): Array<Record<string, unknown>> {
       // A waiting export: its place in line (1 is next).
       ...(r.state === "queued" && !r.cancelling ? { queue_position: waiting.indexOf(r) + 1 } : {}),
       // A failed export: the reason as a code, and in plain words the person can act on.
-      ...(failure ? { failure_code: failure.code, failure: failure.plain } : {}),
+      ...(failure
+        ? {
+            failure_code: failure.code,
+            failure: r.chipFailed ? describeChipFailure("assistant") : failure.plain,
+            ...(r.chipFailed ? { chip_failed: true } : {}),
+          }
+        : {}),
     };
   });
 }
@@ -496,6 +546,54 @@ export function exportVia(
 ): "menu" | "chat" | "mcp" {
   if (ctx?.origin) return "chat";
   return ctx?.surface === "mcp" ? "mcp" : "menu";
+}
+
+/** A chip's maker as the trace says it: 1 AMD, 2 NVIDIA, 3 Intel, and 10 more for the 4K size class. */
+const MAKER_CODES: Record<ChipMaker, number> = { amd: 1, nvidia: 2, intel: 3 };
+export function makerCode(maker: ChipMaker, sizeClass?: SizeClass): number {
+  return MAKER_CODES[maker] + (sizeClass === "uhd" ? 10 : 0);
+}
+
+const isChipEncoder = (encoder: string): encoder is ChipMaker =>
+  (CHIP_MAKERS as readonly string[]).includes(encoder);
+
+/** The graphics chip's part of an export's story (exportChoice.ts): its tests, the Mode row the person was shown, and the
+ *  mode the export ran in. A PC with no chip has nothing to tell. */
+function recordChoice(story: ExportStory, choice: ChoiceFacts): void {
+  for (const test of choice.tests)
+    story.trace.record("chip_test", test.result, makerCode(test.maker, test.sizeClass), test.ms);
+  if (choice.shown)
+    story.trace.record(
+      "mode_shown",
+      choice.shown,
+      Math.round(choice.fullSeconds ?? 0),
+      Math.round(choice.fastSeconds ?? 0),
+    );
+  if (choice.chip || choice.shown || choice.reason !== "none") {
+    const onChip = isChipEncoder(choice.encoder);
+    story.trace.record(
+      "mode_selected",
+      onChip ? "fast" : "full",
+      Math.round((onChip ? choice.fastSeconds : choice.fullSeconds) ?? 0),
+    );
+  }
+}
+
+/** The words a hardware encoder's own errors use: its ffmpeg encoder name, its API, or the library it loads. */
+const HARDWARE_ENCODER_WORDS = /\bh264_(?:amf|nvenc|qsv)\b|\b(?:amf|nvenc|qsv|mfx|nvcuda|cuda)\b/i;
+
+/** The maker of the chip an export ran on, when how it failed is something a chip can cause and not the disk's, the
+ *  sources', the PC's memory or the person's. A failure that is only "the render failed" is the chip's only when it names
+ *  the chip's encoder: a broken source file or a filter that cannot be made fails the same way on any encoder. A file that
+ *  did not pass its check, or a hang, cannot be told apart from the chip's fault and is taken as one: the processor is the
+ *  encode that is known to work. */
+export function chipFailureOf(choice: ChoiceFacts | undefined, error: string): ChipMaker | null {
+  if (!choice || !isChipEncoder(choice.encoder)) return null;
+  const code = failureOf(error).code;
+  if (code === "verification_failed" || code === "time_limit") return choice.encoder;
+  if ((code === "render_failed" || code === "unknown") && HARDWARE_ENCODER_WORDS.test(error))
+    return choice.encoder;
+  return null;
 }
 
 /** Say at once that a cancel was asked for this export, whether or not it has stopped yet. */
@@ -765,12 +863,17 @@ export interface ExportSpec {
       rung: 0 | 1 | 2;
       /** The gentlest rung this export's command really has, for Try again (render.ts `gentlestRung`). */
       max_rung?: 0 | 1 | 2;
+      /** The rungs it really has (render.ts `ladderOf`), gentlest last: Try again steps to the next one on it. */
+      ladder?: readonly (0 | 1 | 2)[];
       basis?: Plan["basis"];
       predicted_bytes?: number | null;
       free_bytes?: number | null;
       fits?: boolean;
       needed_free_bytes?: number | null;
     };
+    /** How the encoder was chosen (exportChoice.ts): the story's chip test and mode events, the report's encoder, chip and
+     *  reason, and the chip's device to set aside if it fails the export. */
+    choice?: ChoiceFacts;
   };
   /** The app process's job supervisor, when the encode runs as one of its jobs (3h part 7). It
    *  keeps the order then, so this queue does not hold a job back, and a job's state comes from it. */
@@ -941,6 +1044,7 @@ async function reportSettledExport(
       story.trace.record("outcome", outcome.status, Math.round(outcome.elapsedMs / 1000), 0);
     }
     const engine = spec.meta?.calibration?.engine;
+    const choice = spec.meta?.choice;
     const { reportExport } = await import("../api/exportEvents");
     await reportExport({
       status: outcome.status,
@@ -965,6 +1069,13 @@ async function reportSettledExport(
         ? { engine: (engine === "partition-pipes-v1" ? "streamed" : "one_pass") as ExportEngine }
         : {}),
       ...(limit ? { limit } : {}),
+      ...(choice
+        ? {
+            encoder: choice.encoder,
+            ...(choice.chip ? { chip: choice.chip } : {}),
+            mode_reason: choice.reason,
+          }
+        : {}),
       ...(spec.startedBy ? { started_by: spec.startedBy } : {}),
       peak_resident_mib: mibBand(facts.residentPeakBytes),
       peak_commit_mib: mibBand(facts.commitPeakBytes),
@@ -1278,6 +1389,7 @@ async function confirmExportRequest(specs: readonly ExportSpec[]): Promise<boole
         bandOf(plan.predicted_bytes ?? null),
         bandOf(plan.free_bytes ?? null),
       );
+    if (spec.meta?.choice && spec.story) recordChoice(spec.story, spec.meta.choice);
   }
   // What the person already waived with *Start anyway*: not asked again in this request.
   const waived = new Set<ExportQuestionKind>();
@@ -1495,6 +1607,10 @@ async function admitExport(spec: ExportSpec, storageReady: boolean): Promise<Exp
     ...(rungOf(spec.meta?.plan?.rung) > 0 ? { rung: rungOf(spec.meta?.plan?.rung) as 1 | 2 } : {}),
     ...(spec.meta?.plan?.max_rung !== undefined
       ? { maxRung: rungOf(spec.meta.plan.max_rung) }
+      : {}),
+    ...(spec.meta?.plan?.ladder ? { ladder: cleanLadder(spec.meta.plan.ladder) } : {}),
+    ...(spec.meta?.choice && spec.meta.choice.encoder !== "x264"
+      ? { encoder: spec.meta.choice.encoder, reason: spec.meta.choice.reason }
       : {}),
     startedAt: Date.now(),
   });
@@ -1767,10 +1883,22 @@ async function settle(x: Settle): Promise<void> {
   stories.delete(x.jobId);
   // The run is over (after the stages of checking and saving): the card has no live export any more.
   useExportJob.getState().endLive(x.jobId);
+  // A failure only a chip can explain sets that chip aside for a day and is told once, in the story, before its end.
+  const chipFailure = error && !cancelled ? chipFailureOf(x.meta?.choice, error) : null;
+  if (chipFailure) {
+    if (x.meta?.choice?.adapter) markChipSuspect(x.meta.choice.adapter);
+    x.story?.trace.record(
+      "chip_failed",
+      "chip",
+      makerCode(chipFailure),
+      Math.round((Date.now() - x.startedAt) / 1000),
+    );
+  }
   patch(x.jobId, {
     state: error ? (cancelled ? "cancelled" : "failed") : "done",
     endedAt: Date.now(),
     error: error && !cancelled ? error : undefined,
+    ...(chipFailure ? { chipFailed: true as const } : {}),
     ...(stderrTail ? { stderrTail } : {}),
     ...(warnings.length ? { warnings } : {}),
   });
