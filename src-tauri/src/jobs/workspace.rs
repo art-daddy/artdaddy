@@ -63,6 +63,7 @@ impl Workspace {
     owner
   }
 
+  #[cfg(test)]
   pub(super) fn admission_headroom(&self) -> u64 { self.admission_headroom }
 
   /// What an output may claim out of `remaining`: all of it, less the admission headroom while more than
