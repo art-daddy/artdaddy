@@ -155,7 +155,6 @@ let dropped = 0;
 let budgetStart = 0;
 let budgetUsed = 0;
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
-let generation = 0;
 let offAuth: (() => void) | null = null;
 const deliveries = new Set<AbortController>();
 const inFlight = new Set<Promise<void>>();
@@ -165,8 +164,9 @@ function signedOut(): boolean {
   return session.status === "locked" || (session.status === "offline" && !session.hasStoredSession);
 }
 
+/** Everything held under the account that just went away is dropped, and every request still on its way is aborted: nothing
+ *  recorded under one account can be sent under the next. */
 function discardSessionEvents(): void {
-  generation += 1;
   windows = new Map();
   queue = [];
   dropped = 0;
@@ -357,7 +357,7 @@ export async function flushEditorEvents(now = Date.now()): Promise<void> {
   // A burst that outran the minute says so even when nothing else was held to carry the number.
   if (requests.length === 0) requests.push({ projectId: "", events: [], dropped: lost });
   else requests[0].dropped = lost;
-  const delivery = deliver(requests, generation);
+  const delivery = deliver(requests);
   inFlight.add(delivery);
   try {
     await delivery;
@@ -368,7 +368,6 @@ export async function flushEditorEvents(now = Date.now()): Promise<void> {
 
 async function deliver(
   requests: { projectId: string; events: EditorItem[]; dropped: number }[],
-  sentUnder: number,
 ): Promise<void> {
   const controller = new AbortController();
   deliveries.add(controller);
@@ -396,9 +395,9 @@ async function deliver(
           signal: controller.signal,
         },
         (url, init) => {
-          // Checked after the last await, at the moment it would leave: a different account may have signed in since.
-          if (controller.signal.aborted || sentUnder !== generation)
-            throw new Error("editor session ended before delivery");
+          // Checked after the last await, at the moment it would leave: a different account may have signed in since,
+          // and that aborts every request on its way (discardSessionEvents).
+          if (controller.signal.aborted) throw new Error("editor session ended before delivery");
           const body = JSON.parse(init.body as string) as Record<string, unknown>;
           return fetch(url, { ...init, body: JSON.stringify({ ...body, sent_at: Date.now() / 1000 }) });
         },
