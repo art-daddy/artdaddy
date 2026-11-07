@@ -1097,13 +1097,14 @@ mod unix_end_tests {
       put_report(dir.path(), name, "Exception Type: EXC_GUARD", 1_500_000);
     }
     assert_eq!(first_report_word(dir.path(), "artdaddy", from, until), None, "only artdaddy-<time>.ips or .crash count");
+    // A report from before the session started is an earlier run's crash; one from after it ended is a later run's: with only
+    // those about, there is no report of this session.
+    put_report(dir.path(), "artdaddy-2026-11-07-100000.ips", "Exception Type: EXC_RESOURCE", from - 1);
+    put_report(dir.path(), "artdaddy-2026-11-07-130000.ips", "Exception Type: EXC_ARITHMETIC", until + 1);
+    assert_eq!(first_report_word(dir.path(), "artdaddy", from, until), None);
     put_report(dir.path(), "artdaddy-2026-11-07-120000.crash", "Exception Type: EXC_BAD_INSTRUCTION", 1_500_000);
     assert_eq!(first_report_word(dir.path(), "artdaddy", from, until), Some("crash_bad_instruction"));
     assert_eq!(first_report_word(dir.path(), "artdaddy.exe", from, until), Some("crash_bad_instruction"));
-    // A report from before the session started is an earlier run's crash; one from after it ended is a later run's.
-    put_report(dir.path(), "artdaddy-2026-11-07-100000.ips", "Exception Type: EXC_RESOURCE", from - 1);
-    put_report(dir.path(), "artdaddy-2026-11-07-130000.ips", "Exception Type: EXC_ARITHMETIC", until + 1);
-    assert_eq!(first_report_word(dir.path(), "artdaddy", from, until), Some("crash_bad_instruction"));
     // Both ends of the span are inside it.
     put_report(dir.path(), "artdaddy-2026-11-07-110000.ips", "Exception Type: EXC_BREAKPOINT", until);
     assert_eq!(first_report_word(dir.path(), "artdaddy", from, until), Some("crash_bad_instruction"));
