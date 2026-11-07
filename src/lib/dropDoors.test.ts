@@ -115,10 +115,25 @@ describe("no door turns files away by itself", () => {
   const ALL = sources(SRC).map((full) => ({ file: rel(full), text: readFileSync(full, "utf8") }));
 
   it("only lib/upload.ts filters by the media pattern; a door that did would drop files unseen", () => {
+    // From `.filter(` to the end of the statement: the arrow's own parentheses must not end the scan early.
     const offenders = ALL.filter(
-      (s) => s.file !== "lib/upload.ts" && /\.filter\([^)]*\b(MEDIA_RE|isMediaFile)\b/.test(s.text),
+      (s) => s.file !== "lib/upload.ts" && /\.filter\([^;{}]*\b(MEDIA_RE|isMediaFile)\b/.test(s.text),
     ).map((s) => s.file);
     expect(offenders, "these files filter dropped files by MEDIA_RE/isMediaFile themselves: use acceptDroppedPaths/acceptDroppedFiles (lib/upload.ts)").toEqual([]);
+  });
+
+  it("the scan itself sees the idioms a door used (so it cannot pass by never matching)", () => {
+    const idiom = /\.filter\([^;{}]*\b(MEDIA_RE|isMediaFile)\b/;
+    for (const door of [
+      "const media = d.paths.filter((p) => MEDIA_RE.test(p));",
+      "const files = [...(e.dataTransfer.files ?? [])].filter((f) => MEDIA_RE.test(f.name));",
+      "const media = files.filter((f) => isMediaFile(f.name));",
+      "Array.from(e.dataTransfer.files)\n  .filter((f) => MEDIA_RE.test(f.name))\n  .map(x)",
+    ])
+      expect(door).toMatch(idiom);
+    // ...and does not flag the uses that are not a door: a name being classified for an icon.
+    for (const notADoor of ["else if (MEDIA_RE.test(n.name)) out.push(n);", "const media = MEDIA_RE.test(node.name);"])
+      expect(notADoor).not.toMatch(idiom);
   });
 
   it("every file that receives a drop uses the helper for it", () => {
