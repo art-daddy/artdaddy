@@ -29,8 +29,10 @@ import {
   startMcpServer,
   stopMcpServer,
 } from "../mcp/service";
+import { agoLabel, isActive, programTitle, useMcpConnections } from "../mcp/connections";
 import { useMcpPanel } from "../store/mcpPanel";
 import { Button, cn } from "./ui";
+import { useNow } from "./useNow";
 
 const endpoint = `http://127.0.0.1:${MCP_PORT}/mcp`;
 // Must match the name mcp.rs advertises, since this is what the user pastes.
@@ -154,6 +156,43 @@ function Snippet({ label, client, code, note, install, installer }: Client) {
   );
 }
 
+/** Who has asked for something since the server came up, so a person who just added it to an agent can see that it worked.
+ *  Over HTTP there is no connection to show, only requests, so each line says when its program last made one. */
+function ConnectedPrograms() {
+  const programs = useMcpConnections((s) => s.programs);
+  const now = useNow(5_000, programs.length > 0);
+
+  if (programs.length === 0) {
+    return (
+      <p className="mt-2 text-[11px] text-neutral-500">
+        Waiting for an agent to connect. Add the server to one of the apps below.
+      </p>
+    );
+  }
+  return (
+    <ul className="mt-2 space-y-1" aria-label="Agents that have connected">
+      {programs.map((p) => (
+        <li key={p.key} className="flex items-center gap-1.5 text-[11px] text-neutral-300">
+          <span
+            className={cn(
+              "h-1.5 w-1.5 shrink-0 rounded-full",
+              isActive(p, now) ? "bg-emerald-400" : "bg-neutral-600",
+            )}
+          />
+          <span className="min-w-0 truncate">
+            {programTitle(p)}
+            {p.version ? ` ${p.version}` : ""}
+          </span>
+          <span className="shrink-0 text-neutral-500">
+            · last active {agoLabel(now - p.lastActiveAt)} · {p.requests}{" "}
+            {p.requests === 1 ? "request" : "requests"}
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 export default function McpPanel() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(mcpLastError());
@@ -245,6 +284,7 @@ export default function McpPanel() {
           It last failed with: {error}
         </p>
       ) : null}
+      {running ? <ConnectedPrograms /> : null}
 
       {CLIENTS.map((c) => (
         <Snippet key={c.label} {...c} />

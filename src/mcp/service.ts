@@ -7,6 +7,7 @@ import { platform } from "../platform";
 import { reportMcpEvent } from "../api/appEvents";
 import { captureError } from "../observability/sentry";
 import { startMcpBridge } from "./bridge";
+import { useMcpConnections } from "./connections";
 
 export const MCP_PORT = 19787;
 /** How long a start keeps asking for the port while something else holds it. The usual holder is the copy of the app
@@ -246,6 +247,9 @@ export async function stopMcpServer(): Promise<McpStatus> {
   })();
   stopping = stop.catch(() => undefined);
   const status = await stop;
+  // Nobody is connected to a server that is off; whoever is still asking will be refused, and will be listed again if it
+  // gets through after the next start.
+  useMcpConnections.getState().clear();
   changed();
   return status;
 }

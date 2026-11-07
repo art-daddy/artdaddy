@@ -24,6 +24,23 @@ export const MCP_CLIENTS = [
 ] as const;
 export type McpClient = (typeof MCP_CLIENTS)[number];
 
+/** What a person calls each program, for the panel. Every label has one (a test walks the whole list); `other` has no name
+ *  of its own, so the panel shows what that program announced instead. */
+export const MCP_CLIENT_TITLES: Record<McpClient, string> = {
+  claude_code: "Claude Code",
+  claude_desktop: "Claude Desktop",
+  vscode: "VS Code / Copilot",
+  cursor: "Cursor",
+  codex: "Codex",
+  antigravity: "Antigravity",
+  windsurf: "Windsurf",
+  gemini_cli: "Gemini CLI",
+  zed: "Zed",
+  inspector: "MCP Inspector",
+  other: "Another program",
+  unknown: "An agent",
+};
+
 /** The most characters of a program's announced name and version that are kept. Written down again on the
  *  server (schemas.py AgentBatchBody), which cuts rather than refuses. */
 export const MCP_CLIENT_NAME_MAX = 40;

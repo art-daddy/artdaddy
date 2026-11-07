@@ -55,7 +55,7 @@ import { buildRows, type SummaryContext } from "./toolSummary";
 import { STARTER_PROMPTS } from "./starterPrompts";
 import { jobNoteSummary } from "./jobNoteSummary";
 import { Button, cn } from "./ui";
-import { useMcpPanel } from "../store/mcpPanel";
+import McpChip from "./McpChip";
 import { useProjectNotice } from "../store/projectNotice";
 import { attachmentsFromUploads, mediaKindFromName } from "./chatMedia";
 
@@ -855,41 +855,6 @@ export default function ChatView({ onHide }: { onHide?: () => void } = {}) {
         onSubmit={submitReport}
       />
     </Pane>
-  );
-}
-
-/** MCP is the app's most-missed feature because it lived only in the Help menu. Sat next to the
- *  model controls, where someone wondering whether another agent can drive this is already
- *  looking, and named for what it DOES — "MCP" alone means nothing to most people. The dot also
- *  gives the server's state a permanent home — previously the only way to tell it was running
- *  was to reopen the dialog. */
-function McpChip() {
-  const running = useMcpPanel((s) => s.running);
-  const openPanel = useMcpPanel((s) => s.openPanel);
-  const refresh = useMcpPanel((s) => s.refresh);
-
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
-
-  return (
-    <button
-      onClick={openPanel}
-      title={
-        running
-          ? "MCP server is running — Claude, Cursor or Codex can edit this project"
-          : "Let Claude, Cursor or Codex edit this project"
-      }
-      className={cn(
-        "flex min-w-0 max-w-full items-center gap-1 rounded px-1.5 py-1 hover:bg-neutral-800",
-        running ? "text-brand" : "text-neutral-400",
-      )}
-    >
-      <span
-        className={cn("h-1.5 w-1.5 shrink-0 rounded-full", running ? "bg-brand" : "bg-neutral-600")}
-      />
-      <span className="min-w-0 truncate">Connect your own agent/MCP</span>
-    </button>
   );
 }
 

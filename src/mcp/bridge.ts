@@ -11,6 +11,7 @@ import { capToolResult } from "../agent/truncate";
 import { mcpInstructions } from "./instructions";
 import { mcpTools } from "./tools";
 import { mcpClientFacts } from "./clientName";
+import { useMcpConnections } from "./connections";
 import { reportMcpEvent } from "../api/appEvents";
 import type { ToolTrace } from "../api/agentEvents";
 import { compatibilityAllowsWork } from "../update/compatibility";
@@ -425,6 +426,7 @@ async function wire(): Promise<void> {
   // A program connected: record which (a label, its own name, its version). Nothing about the person.
   await listen<{ client?: unknown }>(SESSION_EVENT, (event) => {
     const who = mcpClientFacts(event.payload?.client);
+    useMcpConnections.getState().connected(event.payload?.client);
     reportMcpEvent("mcp_connected", {
       client: who.client,
       reason: [who.name, who.version].filter(Boolean).join(" "),
@@ -433,6 +435,8 @@ async function wire(): Promise<void> {
 
   await listen<BridgeRequest>(REQUEST_EVENT, (event) => {
     const req = event.payload;
+    // Heard from, whatever becomes of the request: the panel says who is asking, not who got an answer.
+    useMcpConnections.getState().asked(req.client);
     const controller = new AbortController();
     inFlight.set(req.id, controller);
     // Never let a rejection escape: Rust is blocking a connection thread on this id, and a

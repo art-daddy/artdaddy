@@ -1,12 +1,13 @@
 // The setup pane is the only way a user learns the endpoint exists, so its snippets have to be
 // correct. A wrong port here is invisible in every other test and fails as "the agent can't
 // connect" — with nothing to point at.
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import McpPanel from "./McpPanel";
 import { BRAND } from "../brand";
 import { openInstallLink } from "../mcp/install";
+import { ACTIVE_WINDOW_MS, useMcpConnections } from "../mcp/connections";
 import {
   MCP_PORT,
   McpPortTakenError,
@@ -50,6 +51,7 @@ const codeBlocks = () =>
 // leave the next one thinking the server is up.
 beforeEach(() => {
   useMcpPanel.setState({ open: false, running: false, starting: false });
+  useMcpConnections.getState().clear();
   clearMcpLastError();
   reported.length = 0;
 });
@@ -264,5 +266,71 @@ describe("MCP setup pane: while the app waits for the port", () => {
 
     expect(reported).toEqual([]);
     expect(screen.queryByText(/It last failed with/)).toBeNull();
+  });
+});
+
+// Someone who has just pasted the setup into an agent needs to see that it worked. The pane lists the programs that have
+// asked for something, says when each last did, and says plainly when nobody has.
+describe("MCP setup pane: who has connected", () => {
+  const running = () => vi.mocked(mcpStatus).mockResolvedValue({ running: true, port: MCP_PORT });
+  const claude = { name: "claude-code", version: "2.1.4" };
+  const rows = () =>
+    within(screen.getByLabelText("Agents that have connected")).getAllByRole("listitem");
+
+  it("says nobody has connected yet, and where to add the server", async () => {
+    running();
+    render(<McpPanel />);
+    expect(await screen.findByText(/Waiting for an agent to connect/)).toBeInTheDocument();
+    expect(screen.queryByLabelText("Agents that have connected")).toBeNull();
+  });
+
+  it("names the program, its version, when it last asked and how many times", async () => {
+    running();
+    act(() => useMcpConnections.getState().asked(claude, Date.now() - 42_000));
+    render(<McpPanel />);
+
+    await screen.findByLabelText("Agents that have connected");
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0]).toHaveTextContent("Claude Code 2.1.4");
+    expect(rows()[0]).toHaveTextContent("last active 42 s ago");
+    expect(rows()[0]).toHaveTextContent("1 request");
+    expect(screen.queryByText(/Waiting for an agent/)).toBeNull();
+  });
+
+  it("shows a new connection as it happens, without reopening the pane", async () => {
+    running();
+    render(<McpPanel />);
+    expect(await screen.findByText(/Waiting for an agent to connect/)).toBeInTheDocument();
+
+    act(() => useMcpConnections.getState().connected(claude));
+    act(() => useMcpConnections.getState().asked(claude));
+    act(() => useMcpConnections.getState().asked(claude));
+
+    expect(await screen.findByText(/last active just now/)).toBeInTheDocument();
+    expect(rows()[0]).toHaveTextContent("2 requests");
+  });
+
+  it("shows a program that went quiet as seen earlier, not as connected", async () => {
+    running();
+    act(() => useMcpConnections.getState().asked(claude, Date.now() - ACTIVE_WINDOW_MS - 60_000));
+    act(() => useMcpConnections.getState().asked({ name: "codex", version: "0.5" }, Date.now()));
+    render(<McpPanel />);
+
+    await screen.findByLabelText("Agents that have connected");
+    const [recent, quiet] = rows();
+    expect(recent).toHaveTextContent("Codex");
+    expect(recent.querySelector("span")).toHaveClass("bg-emerald-400");
+    expect(quiet).toHaveTextContent("Claude Code");
+    expect(quiet.querySelector("span")).toHaveClass("bg-neutral-600");
+  });
+
+  it("claims nothing while the server is off", async () => {
+    vi.mocked(mcpStatus).mockResolvedValue({ running: false, port: MCP_PORT });
+    act(() => useMcpConnections.getState().asked(claude));
+    render(<McpPanel />);
+
+    expect(await screen.findByText(/Turn this on before adding/)).toBeInTheDocument();
+    expect(screen.queryByLabelText("Agents that have connected")).toBeNull();
+    expect(screen.queryByText(/Waiting for an agent/)).toBeNull();
   });
 });

@@ -188,3 +188,61 @@ describe("a program connecting is recorded by what it announced", () => {
     ]);
   });
 });
+
+// A person who has just pasted the setup into an agent should be able to SEE that it worked: the panel and the chat chip
+// read this list, which is fed from the same two events the telemetry above is.
+describe("the list of connected programs follows what connects", () => {
+  const SESSION = "artdaddy://mcp-session";
+  const REQUEST = "artdaddy://mcp-request";
+  const claude = { name: "claude-code", version: "2.1.0" };
+
+  async function wired() {
+    const service = await import("./service");
+    const { useMcpConnections } = await import("./connections");
+    await service.startMcpServer();
+    return { ...service, useMcpConnections };
+  }
+
+  it("lists a program the moment it connects, and counts what it then asks for, whatever becomes of the request", async () => {
+    const { useMcpConnections } = await wired();
+
+    handlers.get(SESSION)!({ payload: { session: "s1", client: claude } });
+    expect(useMcpConnections.getState().programs).toMatchObject([
+      { client: "claude_code", version: "2.1.0", requests: 0 },
+    ]);
+
+    // The request is counted as it arrives, before anything decides whether it can be answered.
+    handlers.get(REQUEST)!({
+      payload: { id: 1, method: "tools/list", params: {}, client: claude },
+    });
+    handlers.get(REQUEST)!({
+      payload: { id: 2, method: "tools/call", params: { name: "no_such_tool" }, client: claude },
+    });
+    expect(useMcpConnections.getState().programs).toMatchObject([
+      { client: "claude_code", requests: 2 },
+    ]);
+  });
+
+  it("lists a program that asks through a restarted app, which never saw it connect", async () => {
+    const { useMcpConnections } = await wired();
+    handlers.get(REQUEST)!({ payload: { id: 7, method: "tools/list", params: {} } });
+    expect(useMcpConnections.getState().programs).toMatchObject([
+      { client: "unknown", requests: 1 },
+    ]);
+  });
+
+  it("empties the list when the server is switched off, so nobody is shown as connected to a server that is down", async () => {
+    const { stopMcpServer, useMcpConnections } = await wired();
+    handlers.get(SESSION)!({ payload: { session: "s1", client: claude } });
+    expect(useMcpConnections.getState().programs).toHaveLength(1);
+
+    await stopMcpServer();
+
+    expect(useMcpConnections.getState().programs).toEqual([]);
+  });
+
+  it("does not list anything when the server was never reached by a program", async () => {
+    const { useMcpConnections } = await wired();
+    expect(useMcpConnections.getState().programs).toEqual([]);
+  });
+});
