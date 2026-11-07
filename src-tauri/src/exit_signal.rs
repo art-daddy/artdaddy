@@ -12,9 +12,12 @@
 //! It never changes what a signal does. Two kinds are taken differently:
 //!  * the crash signals (SIGSEGV, SIGBUS, SIGILL, SIGFPE) and the abort a panic or a stack overflow ends in (SIGABRT) end the
 //!    process anyway. The runtime has its own handler for the first two (it recognises a stack overflow), so the app's handler
-//!    takes the signal under the same mask and flags as what was there, runs first, and passes the signal on to what was there,
-//!    called as it would have been; with nothing there it restores the default and sends the signal again, so the process dies of
-//!    the same signal and the system makes its own record of it (a core file, a crash report, the status its parent sees);
+//!    takes the signal under the same mask and flags as what was there (the alternate stack is added only where nothing was
+//!    there: a handler that did not ask for one is not given one), runs first, and passes the signal on to what was there, called
+//!    as it would have been; with nothing there it restores the default and sends the signal again, so the process dies of the
+//!    same signal and the system makes its own record of it (a core file, a crash report, the status its parent sees). What it
+//!    passes on to is recorded BEFORE the kernel is told to call the app's handler, so there is no instant at which a signal
+//!    finds nothing recorded;
 //!  * the requests to end (SIGTERM, SIGHUP, SIGINT, SIGQUIT) are taken ONLY when nobody handles them: a handler somebody else
 //!    installed carries a signal mask and flags (restart a system call, reset after one use) that cannot be copied faithfully
 //!    from here, so it is left alone and that signal leaves no mark. A signal that is ignored stays ignored.
@@ -24,7 +27,7 @@ use std::os::raw::c_int;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::IntoRawFd;
 use std::path::Path;
-use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
 use std::sync::Mutex;
 
 use crate::os_exit_cause::unix_end::marker_file_name;
@@ -51,34 +54,43 @@ pub(crate) const SIGNALS: [(c_int, &[u8], bool); 9] = [
 /// install that then failed. The handler itself never touches it: it reads only the atomics below.
 static INSTALLED: Mutex<bool> = Mutex::new(false);
 static MARK_FD: AtomicI32 = AtomicI32::new(-1);
-// What each signal did before the handler took it: the address (0 is the default action, 1 is "ignore") and its flags.
-static PREVIOUS_HANDLER: [AtomicUsize; 9] = [
-  AtomicUsize::new(0),
-  AtomicUsize::new(0),
-  AtomicUsize::new(0),
-  AtomicUsize::new(0),
-  AtomicUsize::new(0),
-  AtomicUsize::new(0),
-  AtomicUsize::new(0),
-  AtomicUsize::new(0),
-  AtomicUsize::new(0),
-];
-static PREVIOUS_FLAGS: [AtomicI32; 9] = [
-  AtomicI32::new(0),
-  AtomicI32::new(0),
-  AtomicI32::new(0),
-  AtomicI32::new(0),
-  AtomicI32::new(0),
-  AtomicI32::new(0),
-  AtomicI32::new(0),
-  AtomicI32::new(0),
-  AtomicI32::new(0),
-];
+
+/// What a signal did before the app took it: the address of its handler (0 is the default action, 1 is "ignore") and its flags.
+struct Previous {
+  handler: libc::sighandler_t,
+  flags: c_int,
+}
+
+#[allow(clippy::declare_interior_mutable_const)] // only ever used to fill the array below
+const NOT_TAKEN: AtomicPtr<Previous> = AtomicPtr::new(std::ptr::null_mut());
+/// One slot per signal of `SIGNALS`, null until that signal is taken. A record is never changed and never freed (a correction is a
+/// new record), so a handler may read it, and its two fields are published by ONE store: a handler never sees half of a change.
+static PREVIOUS: [AtomicPtr<Previous>; SIGNALS.len()] = [NOT_TAKEN; SIGNALS.len()];
+
+fn record(slot: usize, handler: libc::sighandler_t, flags: c_int) {
+  PREVIOUS[slot].store(Box::into_raw(Box::new(Previous { handler, flags })), Ordering::Release);
+}
+
+/// The flags the app's handler takes a signal with. Those of what it replaces, so the kernel treats the app's handler as it
+/// treated that one (restart a system call, reset after one use, run on the alternate stack), plus the extra information the
+/// handler passes on. The alternate stack is added only where nothing handled the signal: a handler that did not ask for one is
+/// not given one. (The runtime's handler for a stack overflow did ask, so it keeps it.)
+fn flags_for(replaced_handler: libc::sighandler_t, replaced_flags: c_int) -> c_int {
+  replaced_flags | libc::SA_SIGINFO | if replaced_handler == libc::SIG_DFL { libc::SA_ONSTACK } else { 0 }
+}
 
 extern "C" fn on_signal(signal: c_int, info: *mut libc::siginfo_t, context: *mut c_void) {
   let Some(slot) = SIGNALS.iter().position(|(number, _, _)| *number == signal) else {
     return;
   };
+  // SAFETY: null, or a record `record` leaked: it is never changed or freed, so reading it here is sound.
+  let previous = unsafe { PREVIOUS[slot].load(Ordering::Acquire).as_ref() };
+  let (address, flags) = previous.map_or((libc::SIG_DFL, 0), |previous| (previous.handler, previous.flags));
+  // Ignored by whoever had it before: ignored it stays (the process does not end, so there is nothing to mark). Only reachable if
+  // somebody changed the signal between the app choosing to take it and taking it.
+  if address == libc::SIG_IGN {
+    return;
+  }
   let fd = MARK_FD.load(Ordering::Relaxed);
   if fd >= 0 {
     let word = SIGNALS[slot].1;
@@ -86,17 +98,15 @@ extern "C" fn on_signal(signal: c_int, info: *mut libc::siginfo_t, context: *mut
     // used: a mark that could not be written must not change what the signal does.
     unsafe { libc::write(fd, word.as_ptr().cast(), word.len()) };
   }
-  let previous = PREVIOUS_HANDLER[slot].load(Ordering::Relaxed);
-  if previous != libc::SIG_DFL && previous != libc::SIG_IGN {
+  if address != libc::SIG_DFL {
     // Somebody handled this signal before the app did, and still does, exactly as they would have.
-    let flags = PREVIOUS_FLAGS[slot].load(Ordering::Relaxed);
     // SAFETY: the address is the handler `sigaction` reported for this signal, called with the signature its flags say it has.
     unsafe {
       if flags & libc::SA_SIGINFO != 0 {
-        let handler: extern "C" fn(c_int, *mut libc::siginfo_t, *mut c_void) = std::mem::transmute(previous);
+        let handler: extern "C" fn(c_int, *mut libc::siginfo_t, *mut c_void) = std::mem::transmute(address);
         handler(signal, info, context);
       } else {
-        let handler: extern "C" fn(c_int) = std::mem::transmute(previous);
+        let handler: extern "C" fn(c_int) = std::mem::transmute(address);
         handler(signal);
       }
     }
@@ -142,20 +152,26 @@ pub fn install(dir: &Path, launch_id: &str) -> std::io::Result<()> {
       if before.sa_sigaction == libc::SIG_IGN || (!*crash && before.sa_sigaction != libc::SIG_DFL) {
         continue;
       }
-      // Ours behaves for the kernel as what it replaces did: the same mask of signals held while it runs, the same flags (restart
-      // a system call, reset after one use, run on the alternate stack), so passing the signal on is as faithful as a call can be.
-      // It always takes the extra information and the alternate stack (a stack that ran out is one the handler cannot use).
+      // Ours behaves for the kernel as what it replaces did (see `flags_for`): the same mask of signals held while it runs and the
+      // same flags, so passing the signal on is as faithful as a call can be.
       let mut ours: libc::sigaction = std::mem::zeroed();
       ours.sa_sigaction = on_signal as extern "C" fn(c_int, *mut libc::siginfo_t, *mut c_void) as libc::sighandler_t;
       ours.sa_mask = before.sa_mask;
-      ours.sa_flags = before.sa_flags | libc::SA_SIGINFO | libc::SA_ONSTACK;
-      // What it replaced is what it passes on to, taken from this one call and so never out of date. The signal is not held
-      // meanwhile: a signal in the instants between the call and the line after it finds nothing recorded and ends the process as
-      // the default action would, and nothing is ever put back over somebody else's later handler.
+      ours.sa_flags = flags_for(before.sa_sigaction, before.sa_flags);
+      // What the signal is passed on to is recorded BEFORE ours is taken. Until the call below the kernel does not call ours, so
+      // nothing reads the record yet, and from the instant it does the record is already there: no instant at which a signal finds
+      // nothing recorded and ends the process as the default action would, past a handler that should have seen it first.
+      record(slot, before.sa_sigaction, before.sa_flags);
       let mut replaced: libc::sigaction = std::mem::zeroed();
-      if libc::sigaction(*signal, &ours, &mut replaced) == 0 {
-        PREVIOUS_HANDLER[slot].store(replaced.sa_sigaction, Ordering::SeqCst);
-        PREVIOUS_FLAGS[slot].store(replaced.sa_flags, Ordering::SeqCst);
+      if libc::sigaction(*signal, &ours, &mut replaced) != 0 {
+        continue;
+      }
+      // The one call that takes the signal also reports what it took it from. If that is not what was read above, somebody
+      // changed it in between (not a thing that happens while the app starts, but the record must not stay wrong if it does): what
+      // is passed on to becomes what was really replaced. In that case only, a signal in the instants before this line goes to what
+      // was read first, never to nothing; and nothing is ever put back over somebody else's later handler.
+      if replaced.sa_sigaction != before.sa_sigaction || replaced.sa_flags != before.sa_flags {
+        record(slot, replaced.sa_sigaction, replaced.sa_flags);
       }
     }
   }
@@ -232,6 +248,18 @@ mod tests {
         "theirs_abrt" => {
           libc::signal(libc::SIGABRT, theirs as extern "C" fn(c_int) as libc::sighandler_t);
         }
+        // The same, having asked for a restart of a system call and for a mask, and not for the alternate stack.
+        "flags_theirs" => {
+          let mut action: libc::sigaction = std::mem::zeroed();
+          action.sa_sigaction = theirs as extern "C" fn(c_int) as libc::sighandler_t;
+          libc::sigemptyset(&mut action.sa_mask);
+          libc::sigaddset(&mut action.sa_mask, libc::SIGUSR1);
+          action.sa_flags = libc::SA_RESTART;
+          assert_eq!(libc::sigaction(libc::SIGABRT, &action, std::ptr::null_mut()), 0);
+        }
+        "flags_default" => {
+          libc::signal(libc::SIGABRT, libc::SIG_DFL);
+        }
         // A test runner started in the background of a shell inherits "ignore" for the interrupt: every other scenario starts
         // from the default action, which is the disposition a desktop app is launched with.
         _ => {
@@ -278,6 +306,23 @@ mod tests {
         "cloexec" => {
           let flags = libc::fcntl(MARK_FD.load(Ordering::SeqCst), libc::F_GETFD);
           std::process::exit(if flags >= 0 && flags & libc::FD_CLOEXEC != 0 { 0 } else { 1 });
+        }
+        // What the kernel holds for the signal after the app took it, read back: exit 0 when it is what `flags_for` promises.
+        "flags_theirs" | "flags_default" => {
+          let mut now: libc::sigaction = std::mem::zeroed();
+          assert_eq!(libc::sigaction(libc::SIGABRT, std::ptr::null(), &mut now), 0);
+          let kept = if scenario == "flags_theirs" {
+            now.sa_flags & libc::SA_ONSTACK == 0 && now.sa_flags & libc::SA_RESTART != 0 && libc::sigismember(&now.sa_mask, libc::SIGUSR1) == 1
+          } else {
+            now.sa_flags & libc::SA_ONSTACK != 0
+          };
+          std::process::exit(if kept && now.sa_flags & libc::SA_SIGINFO != 0 { 0 } else { 1 });
+        }
+        // The state a race would leave: the record says "ignore" while the app's handler is the one the kernel calls.
+        "ignored_late" => {
+          let slot = SIGNALS.iter().position(|(number, _, _)| *number == libc::SIGHUP).unwrap();
+          record(slot, libc::SIG_IGN, 0);
+          libc::raise(libc::SIGHUP);
         }
         "wait" => {
           println!("READY");
@@ -353,6 +398,39 @@ mod tests {
     let status = run_child("ignored", dir.path());
     assert_eq!(status.code(), Some(99), "{status:?}");
     assert_eq!(word_of(dir.path()), None);
+  }
+
+  #[test]
+  fn a_signal_made_ignored_after_the_app_chose_to_take_it_is_still_ignored_and_leaves_no_word() {
+    let dir = tempfile::tempdir().unwrap();
+    let status = run_child("ignored_late", dir.path());
+    assert_eq!(status.code(), Some(99), "the process must carry on, not end of the signal: {status:?}");
+    assert_eq!(word_of(dir.path()), None, "nothing ended, so nothing is marked");
+  }
+
+  #[test]
+  fn the_kernel_holds_the_mask_and_flags_of_what_the_app_replaced() {
+    // Read back from the kernel after the app took the signal, in a process of its own: a handler that did not ask for the
+    // alternate stack is not given one and keeps its mask and restart; with nothing there the app's handler asks for the stack.
+    for scenario in ["flags_theirs", "flags_default"] {
+      let dir = tempfile::tempdir().unwrap();
+      assert_eq!(run_child(scenario, dir.path()).code(), Some(0), "{scenario}");
+    }
+  }
+
+  #[test]
+  fn the_flags_taken_always_keep_what_was_asked_for_and_add_the_stack_only_where_nothing_handled_the_signal() {
+    let asked = [libc::SA_RESTART, libc::SA_NODEFER, libc::SA_ONSTACK, libc::SA_SIGINFO];
+    for subset in 0..(1 << asked.len()) {
+      let replaced_flags = asked.iter().enumerate().filter(|(bit, _)| subset & (1 << bit) != 0).fold(0, |all, (_, flag)| all | flag);
+      for handler in [libc::SIG_DFL, 0x1000] {
+        let taken = flags_for(handler, replaced_flags);
+        assert_eq!(taken & replaced_flags, replaced_flags, "nothing that was asked for is dropped ({replaced_flags:#x})");
+        assert_ne!(taken & libc::SA_SIGINFO, 0, "the handler always reads the extra information");
+        let stack = replaced_flags & libc::SA_ONSTACK != 0 || handler == libc::SIG_DFL;
+        assert_eq!(taken & libc::SA_ONSTACK != 0, stack, "handler {handler:#x}, flags {replaced_flags:#x}");
+      }
+    }
   }
 
   #[test]
