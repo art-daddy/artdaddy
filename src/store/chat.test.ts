@@ -23,6 +23,7 @@ import {
 import { inferRoundStreaming } from "../agent/api";
 import { askForAttention } from "../lib/attention";
 import { TIMELINE_CHANGED_NOTE } from "../agent/compose";
+import { STATE_BLOCK_MARK } from "../agent/stateBlock";
 import { ABORT_GRACE_MS, READ_BOUND_MS, timedOutResult } from "../agent/toolBound";
 import {
   __bufferedAgentEvents,
@@ -1064,7 +1065,7 @@ describe("useChat loop deps + remaining actions", () => {
         ({
           projectId: id,
           ready: Promise.resolve(),
-          has: () => true,
+          has: (n: string) => n === "get_timeline",
           run,
           store: () => null,
         }) as Any,
@@ -1093,7 +1094,7 @@ describe("useChat loop deps + remaining actions", () => {
         ({
           projectId: id,
           ready: Promise.resolve(),
-          has: () => true,
+          has: (n: string) => n === "video_find_moment",
           run,
           store: () => null,
         }) as Any,
@@ -1130,7 +1131,7 @@ describe("useChat loop deps + remaining actions", () => {
         ({
           projectId: id,
           ready: Promise.resolve(),
-          has: () => true,
+          has: (n: string) => n === "import_media",
           run,
           store: () => null,
         }) as Any,
@@ -1921,6 +1922,229 @@ describe("useChat tells the model when the timeline changed outside the chat (UJ
     expect(useChat.getState().turns.at(-1)?.undone).toBe(true);
     await useChat.getState().send("third");
     expect(lastStart()).not.toContain(TIMELINE_CHANGED_NOTE);
+  });
+});
+
+// The model's first round used to be a read of the project (21 of 22 first turns in the field, a median 9-14 s).
+// The app reads it now and sends it with the message. What the model is shown must be what the project holds,
+// given once per look, and shown again byte for byte on every later round of the turn and after a reload.
+describe("useChat hands the model the project state with its message (S1f)", () => {
+  let outside = 0;
+  let live: Timeline;
+  let reads: string[];
+  let readOptions: ToolRunOptions[];
+  let readOutcome: (name: string) => unknown;
+  const trackWithClips = (n: number): Timeline => {
+    const t = emptyTimeline();
+    t.tracks.push({
+      id: "v1",
+      kind: "video",
+      z: 0,
+      clips: Array.from({ length: n }, (_, i) => ({
+        id: `c${i}`,
+        media_ref: "media_a",
+        timeline_in: i * 90,
+        timeline_out: (i + 1) * 90,
+      })),
+    });
+    return t;
+  };
+  const answers = (name: string): unknown =>
+    name === "get_timeline"
+      ? { ok: true, timeline: JSON.parse(JSON.stringify(live)) }
+      : {
+          ok: true,
+          project_id: "p1",
+          name: "Reel",
+          library: [{ media_ref: "media_a", filename: "a.mp4", kind: "video", folder: null }],
+          library_count: 1,
+        };
+  const lastStart = () => String(runnerStart.mock.calls.at(-1)?.[0] ?? "");
+  const finish = () => emit("turn_done", snap());
+  const ECHO = {
+    kind: "text",
+    final_text: "ok",
+    usage: {},
+    provider_snapshot: {},
+    history_mode: "client",
+  };
+  const savedRequest = () => (persistSessionSoon as Any).mock.calls.at(-1)[1].requests.at(-1);
+
+  beforeEach(() => {
+    resetHistoryModeSupport();
+    outside = 0;
+    live = trackWithClips(2);
+    reads = [];
+    readOptions = [];
+    readOutcome = answers;
+    (openToolHost as Any).mockImplementation((id: string) => ({
+      projectId: id,
+      ready: Promise.resolve(),
+      has: (n: string) => n === "get_timeline" || n === "get_project_state",
+      run: vi.fn(async (name: string, _args: unknown, options: ToolRunOptions) => {
+        reads.push(name);
+        readOptions.push(options);
+        return readOutcome(name);
+      }),
+      store: () => null,
+    }));
+    setOpenDocumentResolver((id) =>
+      id === "p1"
+        ? ({
+            sessionId: "s1",
+            externalTimelineEdits: () => outside,
+            timeline: { current: () => live },
+          } as Any)
+        : undefined,
+    );
+    useEditor.setState({
+      projectId: "p1",
+      store: { projectDir: "C:/p1", writeProjectText: vi.fn() } as Any,
+      timeline: live,
+    });
+    useChat.setState({ projectId: "p1", turns: [], model: "gpt-5.4" });
+  });
+  afterEach(() => {
+    setOpenDocumentResolver(() => undefined);
+    (openToolHost as Any).mockImplementation((id: string) => ({
+      projectId: id,
+      ready: Promise.resolve(),
+      has: () => false,
+      run: vi.fn(async () => ({})),
+      store: () => null,
+    }));
+  });
+
+  it("reads the project before the first round, silently, and sends what it found with the message", async () => {
+    await useChat.getState().send("make it punchy");
+    expect(reads).toEqual(["get_project_state", "get_timeline"]);
+    expect(readOptions.every((o) => o.surface === "app" && o.trace !== undefined)).toBe(true);
+    const host = (openToolHost as Any).mock.results.at(-1).value;
+    expect(Math.max(...host.run.mock.invocationCallOrder)).toBeLessThan(
+      runnerStart.mock.invocationCallOrder[0],
+    );
+    const text = lastStart();
+    expect(text.startsWith("make it punchy")).toBe(true);
+    expect(text).toContain(STATE_BLOCK_MARK);
+    expect(text).toContain('"id":"c1"'); // a clip the model would otherwise have had to ask for
+    const turn = useChat.getState().turns.at(-1)!;
+    expect(turn.stateBlock).toBeTruthy();
+    expect(text.endsWith(turn.stateBlock!)).toBe(true);
+    expect(savedRequest().message.state_block).toBe(turn.stateBlock);
+  });
+
+  it("shows the model the same words on every later round, even after the project moved on", async () => {
+    await useChat.getState().send("make it punchy");
+    const first = lastStart();
+    (inferRoundStreaming as Any).mockResolvedValue(ECHO);
+    live = trackWithClips(5);
+    outside++; // the project changes while the turn runs
+    await lastDeps.infer({ tool_results: [] }, []);
+    const body = (inferRoundStreaming as Any).mock.calls.at(-1)[0];
+    expect(body.history_mode).toBe("client");
+    expect(body.transcript.requests.at(-1).message.text).toBe(first);
+  });
+
+  it("does not read again for the next message when nothing changed outside the chat", async () => {
+    await useChat.getState().send("first");
+    finish();
+    reads.length = 0;
+    await useChat.getState().send("second");
+    expect(reads).toEqual([]);
+    expect(lastStart()).toBe("second");
+    expect(useChat.getState().turns.at(-1)?.stateBlock).toBeUndefined();
+  });
+
+  it("reads again after something else changed the timeline, and that read replaces the changed-note", async () => {
+    await useChat.getState().send("first");
+    finish();
+    reads.length = 0;
+    live = trackWithClips(4); // two clips placed by hand
+    outside++;
+    await useChat.getState().send("how long is it now?");
+    expect(reads).toEqual(["get_project_state", "get_timeline"]);
+    expect(lastStart()).toContain('"id":"c3"');
+    expect(lastStart()).not.toContain(TIMELINE_CHANGED_NOTE);
+    const turn = useChat.getState().turns.at(-1)!;
+    expect(turn.timelineChanged).toBe(true);
+    expect(savedRequest().message.timeline_changed).toBe(true);
+    expect(savedRequest().message.state_block).toBe(turn.stateBlock);
+  });
+
+  it("reads again for a conversation whose only turn was undone: the model no longer remembers it", async () => {
+    useChat.setState({
+      turns: [
+        {
+          id: "old",
+          userText: "hi",
+          attachments: [],
+          parts: [],
+          status: "done",
+          undone: true,
+        } as Any,
+      ],
+    });
+    await useChat.getState().send("again");
+    expect(reads).toEqual(["get_project_state", "get_timeline"]);
+    expect(lastStart()).toContain(STATE_BLOCK_MARK);
+  });
+
+  it("does not read for the app's own turns (a finished job waking the chat)", async () => {
+    await useChat
+      .getState()
+      .send("Background work you started earlier has finished:\n- Voiceover is ready", [], {
+        system: true,
+      });
+    expect(reads).toEqual([]);
+    expect(useChat.getState().turns.at(-1)?.stateBlock).toBeUndefined();
+  });
+
+  it("goes on without a block when a read fails, and a failed read does not lose the changed-note", async () => {
+    readOutcome = (name) =>
+      name === "get_timeline" ? { ok: false, error: "timeline.json not found" } : answers(name);
+    await useChat.getState().send("make it punchy");
+    expect(lastStart()).toBe("make it punchy");
+    expect(useChat.getState().turns.at(-1)?.stateBlock).toBeUndefined();
+    expect(runnerStart).toHaveBeenCalledTimes(1);
+    finish();
+    outside++;
+    await useChat.getState().send("again");
+    expect(lastStart()).toContain(TIMELINE_CHANGED_NOTE);
+    expect(lastStart()).not.toContain(STATE_BLOCK_MARK);
+  });
+
+  it("keeps telling the model about an edit made after the read, once", async () => {
+    await useChat.getState().send("build it");
+    expect(lastDeps.noteForRound()).toBeNull(); // the read already showed everything so far
+    outside++;
+    expect(lastDeps.noteForRound()).toEqual({ timeline_note: TIMELINE_CHANGED_NOTE });
+    expect(lastDeps.noteForRound()).toBeNull();
+  });
+
+  it("still reports an edit that landed while the project was being read: the block may not show it", async () => {
+    readOutcome = (name) => {
+      if (name === "get_timeline") outside++;
+      return answers(name);
+    };
+    await useChat.getState().send("build it");
+    expect(lastDeps.noteForRound()).toEqual({ timeline_note: TIMELINE_CHANGED_NOTE });
+  });
+
+  it("does not report as news an edit made before the read began: the block already shows it", async () => {
+    let looks = 0;
+    // The turn's start sees no outside edit; the very next look at the document (the read's start) sees one.
+    setOpenDocumentResolver((id) =>
+      id === "p1"
+        ? ({
+            sessionId: "s1",
+            externalTimelineEdits: () => (++looks >= 2 ? 1 : 0),
+            timeline: { current: () => live },
+          } as Any)
+        : undefined,
+    );
+    await useChat.getState().send("build it");
+    expect(lastStart()).toContain(STATE_BLOCK_MARK);
+    expect(lastDeps.noteForRound()).toBeNull();
   });
 });
 

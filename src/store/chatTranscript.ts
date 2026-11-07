@@ -27,6 +27,8 @@ export interface Turn {
   undone?: boolean;
   /** The turn's message told the model the timeline changed outside the chat (UJ-028). */
   timelineChanged?: boolean;
+  /** What the app read of the project for the model before its first round (agent/stateBlock.ts). */
+  stateBlock?: string;
 }
 
 /** Persisted transcript requests -> UI turns. */
@@ -41,6 +43,7 @@ export function mapRequests(reqs: TranscriptRequest[]): Turn[] {
     })),
     ...(r.message?.mentions?.length ? { mentions: r.message.mentions } : {}),
     ...(r.message?.timeline_changed ? { timelineChanged: true } : {}),
+    ...(r.message?.state_block ? { stateBlock: r.message.state_block } : {}),
     parts: r.response ?? [],
     // Written while the turn had not ended, and never rewritten: a reload or a crash cut it short.
     status: (r.unfinished
@@ -75,6 +78,7 @@ export function buildRequests(turns: Turn[]): TranscriptRequest[] {
       // a reload; a turn that lost them would show the model different words than it got.
       ...(t.mentions?.length ? { mentions: t.mentions } : {}),
       ...(t.timelineChanged ? { timeline_changed: true } : {}),
+      ...(t.stateBlock ? { state_block: t.stateBlock } : {}),
     },
     response: t.parts.filter((p) => !p.partial),
     checkpoint: {
@@ -100,6 +104,7 @@ export function requestsForHistory(turns: Turn[]): TranscriptRequest[] {
       message: {
         text: composeModelText(turns[i].userText, turns[i].attachments, turns[i].mentions ?? [], {
           timelineChanged: turns[i].timelineChanged,
+          stateBlock: turns[i].stateBlock,
         }),
         attachments: rest.message?.attachments,
       },

@@ -4,6 +4,7 @@ import { createStore, type StoreApi } from "zustand/vanilla";
 import { inferRoundStreaming } from "../agent/api";
 import { ClientTurnRunner, type LoopDeps } from "../agent/loop";
 import { composeModelText, TIMELINE_CHANGED_NOTE } from "../agent/compose";
+import { canReadState, readStateBlock } from "../agent/stateBlock";
 import { sameTimeline, TimelineAwareness, type DocReading } from "../agent/timelineAwareness";
 import { collectInferenceAttachments } from "../agent/attachments";
 import { historyAttachments } from "../agent/historyFrames";
@@ -1036,9 +1037,34 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
         changedSinceLastTurn(turns, clientOwned ? ed.store : null),
       );
       if (exec !== currentExec) return;
-      if (timelineChanged) {
+      // The model's first round used to be a read of the project (21 of 22 first turns in the field). The app
+      // reads it now, with its own code and no model, and sends it with the message: once per look, so for the
+      // first message of a conversation (or one whose history no longer holds a look) and for a message after
+      // something else changed the timeline, where it replaces the changed-note. The app's own turns (a
+      // finished job) go on without one. A failed read changes nothing: the model reads for itself, as before.
+      let stateBlock: string | null = null;
+      if (
+        !opts?.system &&
+        canReadState(host) &&
+        (timelineChanged || !turns.some((t) => !t.undone))
+      ) {
+        const before = docReading(projectId);
+        stateBlock = await readStateBlock(host, exec.controller.signal);
+        if (exec !== currentExec) return;
+        // The read began at `before`: it shows every outside edit made until then, and none after.
+        if (stateBlock && before) awareness.sawWholeTimeline(before);
+      }
+      if (timelineChanged || stateBlock) {
         set((s) => ({
-          turns: s.turns.map((t) => (t.id === turn.id ? { ...t, timelineChanged: true } : t)),
+          turns: s.turns.map((t) =>
+            t.id === turn.id
+              ? {
+                  ...t,
+                  ...(timelineChanged ? { timelineChanged: true } : {}),
+                  ...(stateBlock ? { stateBlock } : {}),
+                }
+              : t,
+          ),
         }));
         persistCurrentSession();
       }
@@ -1053,7 +1079,10 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
       currentRunner = new ClientTurnRunner(buildLoopDeps(base, exec));
       await runTurn(exec, () =>
         currentRunner!.start(
-          composeModelText(text, attachments, mentions, { timelineChanged }),
+          composeModelText(text, attachments, mentions, {
+            timelineChanged,
+            stateBlock: stateBlock ?? undefined,
+          }),
           carried,
         ),
       );

@@ -67,4 +67,37 @@ describe("composeModelText", () => {
     expect(out).toContain("media asset library/a.mp4");
     expect(out).toContain("video");
   });
+
+  describe("the project state the app read for the model", () => {
+    const BLOCK = '[Project state - read for you by the app just now]\n{"get_timeline":{}}';
+
+    it("goes last, after the person's words and everything they attached", () => {
+      const out = composeModelText(
+        "cut here",
+        [{ path: "library/a.mp4", kind: "video", caption: null }],
+        [{ kind: "playhead", frame: 120, fps: 30, timecode: "00:00:04:00" }],
+        { stateBlock: BLOCK },
+      );
+      expect(out.startsWith("cut here")).toBe(true);
+      expect(out.endsWith(BLOCK)).toBe(true);
+      expect(out.indexOf("playhead: frame 120")).toBeLessThan(out.indexOf(BLOCK));
+      expect(out.indexOf("library/a.mp4")).toBeLessThan(out.indexOf(BLOCK));
+    });
+
+    it("is the fresh look, so it replaces the timeline-changed note; without one the note stays", () => {
+      const both = composeModelText("how long?", [], [], {
+        timelineChanged: true,
+        stateBlock: BLOCK,
+      });
+      expect(both).toContain(BLOCK);
+      expect(both).not.toContain(TIMELINE_CHANGED_NOTE);
+      const noteOnly = composeModelText("how long?", [], [], { timelineChanged: true });
+      expect(noteOnly).toContain(TIMELINE_CHANGED_NOTE);
+      expect(noteOnly).not.toContain("[Project state");
+    });
+
+    it("an empty block adds nothing: the text is exactly what it was", () => {
+      expect(composeModelText("hello", [], [], { stateBlock: "" })).toBe("hello");
+    });
+  });
 });

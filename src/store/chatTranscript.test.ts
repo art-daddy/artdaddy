@@ -135,7 +135,35 @@ describe("the model's message survives a save and a reload", () => {
   it("an older transcript without the fields loads as before", () => {
     const [t] = mapRequests([{ id: "x", message: { text: "hi" } }] as Any);
     expect(t.timelineChanged).toBeFalsy();
+    expect(t.stateBlock).toBeUndefined();
     expect(requestsForHistory([t])[0].message?.text).toBe("hi");
+  });
+
+  describe("the project state the app read for the model", () => {
+    const withState = turn({
+      userText: "make it punchy",
+      stateBlock: '[Project state - read for you by the app just now]\n{"get_timeline":{}}',
+    });
+
+    it("stays on the saved turn: every later round, and a reload, show the model the same words", () => {
+      const saved = JSON.parse(JSON.stringify(buildRequests([withState]))) as Any[];
+      expect(saved[0].message.state_block).toBe(withState.stateBlock);
+      const before = requestsForHistory([withState]) as Any[];
+      const after = requestsForHistory(mapRequests(saved)) as Any[];
+      expect(after[0].message.text).toBe(before[0].message.text);
+      expect(before[0].message.text).toContain(withState.stateBlock!);
+    });
+
+    it("is sent inside the message text only, never as a field of its own", () => {
+      const [req] = requestsForHistory([withState]) as Any[];
+      expect(req.message).not.toHaveProperty("state_block");
+      expect(req.message).not.toHaveProperty("stateBlock");
+    });
+
+    it("a turn without one saves and rebuilds with no trace of one", () => {
+      const [req] = buildRequests([turn()]) as Any[];
+      expect(req.message).not.toHaveProperty("state_block");
+    });
   });
 });
 

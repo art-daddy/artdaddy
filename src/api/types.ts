@@ -94,6 +94,9 @@ export interface TranscriptMessage {
   mentions?: Mention[];
   /** The message told the model the timeline changed outside the chat (UJ-028). */
   timeline_changed?: boolean;
+  /** The project state the app read for the model with this message (agent/stateBlock.ts): kept verbatim,
+   *  because every later round rebuilds the message and must show the model the same words. */
+  state_block?: string;
 }
 
 export interface TranscriptRequest {

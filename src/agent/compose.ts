@@ -46,12 +46,13 @@ export const TIMELINE_CHANGED_NOTE =
   "an undo, or another app). What you remember of it may be out of date: call get_timeline before " +
   "relying on clip ids, positions or durations.";
 
-/** Build the model-facing text: user text + editor context + attachment manifest. */
+/** Build the model-facing text: user text + editor context + attachment manifest + what the app read of
+ *  the project for it. A state block IS a fresh look at the timeline, so it replaces the changed-note. */
 export function composeModelText(
   text: string,
   attachments: Attachment[],
   mentions: Mention[],
-  opts: { timelineChanged?: boolean } = {},
+  opts: { timelineChanged?: boolean; stateBlock?: string } = {},
 ): string {
   const blocks: string[] = [];
   const ctx = formatEditorContext(mentions);
@@ -70,7 +71,8 @@ export function composeModelText(
     }
     blocks.push(lines.join("\n"));
   }
-  if (opts.timelineChanged) blocks.push(TIMELINE_CHANGED_NOTE);
+  if (opts.stateBlock) blocks.push(opts.stateBlock);
+  else if (opts.timelineChanged) blocks.push(TIMELINE_CHANGED_NOTE);
   if (!blocks.length) return text;
   const tail = blocks.join("\n\n");
   return text ? `${text}\n\n${tail}` : tail;

@@ -32,7 +32,9 @@ vi.mock("../tools/host", () => ({
   openToolHost: vi.fn((id: string) => ({
     projectId: id,
     ready: Promise.resolve(),
-    has: () => true,
+    // Without get_project_state the app's own read of the project (agent/stateBlock.ts) is skipped, so the
+    // scenarios below stay about tool-call debt and what they count as "a run" is only the model's calls.
+    has: (name: string) => canReadState || name !== "get_project_state",
     run: vi.fn((name: string) => hostRun(name)),
     store: () => null,
   })),
@@ -48,6 +50,8 @@ vi.mock("./transcriptFile", () => ({
 
 /** How the next tool run behaves; a never-settling promise models the process dying mid-tool. */
 let hostRun: (name: string) => Promise<unknown> = async () => ({ ok: true });
+/** Whether the host can make the app's own read of the project for a conversation's first message. */
+let canReadState = false;
 
 interface Server {
   /** response id -> calls that response issued and that are still awaiting output */
@@ -131,6 +135,7 @@ async function send(msg: string): Promise<void> {
 beforeEach(async () => {
   vi.clearAllMocks();
   ids = 0;
+  canReadState = false;
   hostRun = async () => ({ ok: true });
   installServer();
   useEditor.setState({ projectId: null, store: null, timeline: null });
@@ -151,6 +156,28 @@ describe("tool-call debt across the real store + runner, judged by a provider-sh
     await send("look at my timeline");
     await send("thanks");
     expect(server.resets).toEqual([]);
+  });
+
+  // The app's own read of the project for a conversation's first message is not a tool call the model made:
+  // it has no call id, so it can owe the provider nothing, and the first input must still carry it.
+  it("the app's own read of the project owes the provider nothing, and rides the first input", async () => {
+    canReadState = true;
+    const runs: string[] = [];
+    hostRun = async (name) => {
+      runs.push(name);
+      return name === "get_timeline"
+        ? { ok: true, timeline: { units: "frames", tracks: [] } }
+        : { ok: true, project_id: PID, name: "Debt", library: [], library_count: 0 };
+    };
+    server.script.push(toolCalls("get_timeline"), text("done"));
+    await send("look at my timeline");
+    await send("thanks");
+    expect(server.resets).toEqual([]);
+    // Read twice for the first message (the project, then the timeline), then once for the model's own call.
+    expect(runs).toEqual(["get_project_state", "get_timeline", "get_timeline"]);
+    expect(server.requests[0].user_text).toContain("[Project state");
+    expect(server.requests[0].user_text).toContain('"get_timeline"');
+    expect((server.requests[1].tool_results ?? []).map((t) => t.call_id)).toEqual(["call_1"]);
   });
 
   // The reported strand (3ba29aa): the app dies while a tool runs. The call is on disk, its
