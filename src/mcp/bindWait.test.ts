@@ -341,6 +341,33 @@ describe("the boot hook, on the real clock", () => {
     await initMcp();
     expect(calls).toEqual([]);
   });
+
+  it("a second boot call while the first still waits is the same start: one wait and one report", async () => {
+    // The app's boot effect runs again when it is allowed to work, a few seconds into every launch.
+    const { initMcp } = await loadWithFakeTime();
+    script = portHeldUntil(Number.POSITIVE_INFINITY);
+    await runUntilSettled(initMcp());
+    const alone = startsMade();
+    expect(reported).toEqual([["mcp_bind_failed", { reason: "port_in_use_artdaddy:boot" }]]);
+
+    calls.length = 0;
+    reported.length = 0;
+    const first = initMcp();
+    const second = initMcp();
+    await runUntilSettled(first);
+    await runUntilSettled(second);
+
+    expect(startsMade()).toBe(alone);
+    expect(reported.filter(([event]) => event === "mcp_bind_failed")).toHaveLength(1);
+  });
+
+  it("a boot call after the first gave up starts again, and reports its own failure", async () => {
+    const { initMcp } = await loadWithFakeTime();
+    script = portHeldUntil(Number.POSITIVE_INFINITY);
+    await runUntilSettled(initMcp());
+    await runUntilSettled(initMcp());
+    expect(reported.filter(([event]) => event === "mcp_bind_failed")).toHaveLength(2);
+  });
 });
 
 describe("the screen follows a start nobody on screen asked for", () => {

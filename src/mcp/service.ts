@@ -329,6 +329,9 @@ export function recordMcpError(e: unknown): string {
  *  perfectly well with no external agent attached — but it must not be silent either. */
 export async function initMcp(): Promise<void> {
   if (platform.name !== "tauri" || !mcpEnabledPreference()) return;
+  // The effect that calls this runs again when the app is allowed to work, a few seconds into every launch. A start that is
+  // already waiting for the port is that same start, and it reports for itself: once.
+  if (mcpStarting()) return;
   try {
     await startMcpServer({ where: "boot" });
     clearMcpLastError();
