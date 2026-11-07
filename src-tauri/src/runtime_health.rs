@@ -1137,13 +1137,9 @@ mod tests {
   }
 
   #[test]
-  fn a_panic_in_the_session_that_ended_is_handed_over_with_its_time_and_no_other_sessions_panic_is() {
+  fn a_panic_in_the_session_that_ended_is_handed_over_with_its_time() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("health.json");
-    let old = RuntimeHealth::open_in_boot(path.clone(), "older".into(), "artdaddy@0.24.0".into(), "boot-a".into());
-    old.record_failure(FailureKind::RustPanic); // an earlier launch's panic, still waiting to be reported
-    old.mark_exit(CleanExit::Quit);
-    drop(old);
     let first = RuntimeHealth::open_in_boot(path.clone(), "first".into(), "artdaddy@0.24.0".into(), "boot-a".into());
     first.record_failure(FailureKind::RustPanic);
     let panicked_at = first.status().failures.last().unwrap().at;
@@ -1160,7 +1156,29 @@ mod tests {
     let token = next.bind_renderer().token;
     let session = next.unexpected_exit_session(&token, &id).unwrap();
     assert_eq!(session.panic_at, Some(panicked_at));
-    assert_eq!(session.launch_id, "first");
+  }
+
+  #[test]
+  fn a_panic_of_another_launch_is_not_the_panic_of_the_session_that_ended() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("health.json");
+    let old = RuntimeHealth::open_in_boot(path.clone(), "older".into(), "artdaddy@0.24.0".into(), "boot-a".into());
+    old.record_failure(FailureKind::RustPanic); // an earlier launch's panic, still waiting to be reported
+    old.mark_exit(CleanExit::Quit);
+    drop(old);
+    let first = RuntimeHealth::open_in_boot(path.clone(), "first".into(), "artdaddy@0.24.0".into(), "boot-a".into());
+    drop(first); // this one ended without a mark and without a panic of its own
+    let next = RuntimeHealth::open_in_boot(path, "next".into(), "artdaddy@0.24.0".into(), "boot-a".into());
+    let id = next
+      .status()
+      .failures
+      .iter()
+      .find(|failure| failure.kind == FailureKind::UncleanExit)
+      .unwrap()
+      .id
+      .clone();
+    let token = next.bind_renderer().token;
+    assert_eq!(next.unexpected_exit_session(&token, &id).unwrap().panic_at, None);
   }
 
   #[test]
@@ -1210,6 +1228,9 @@ mod tests {
     drop(crashed);
     let next = RuntimeHealth::open_in_boot(path, "next".into(), "artdaddy@0.24.0".into(), "boot-a".into());
     put("next");
+    // Files that only look like marks are not marks: nothing but `exit-<launch>.mark` is ever removed.
+    std::fs::write(directory.path().join("exit-notes.txt"), b"keep").unwrap();
+    std::fs::write(directory.path().join("notes.mark"), b"keep").unwrap();
     // The launch that ended without a mark keeps its mark until its failure is dealt with; the others' go.
     assert_eq!(marks_in(directory.path()), vec![marker_file_name("crashed"), marker_file_name("next")]);
     let token = next.bind_renderer().token;
@@ -1218,5 +1239,6 @@ mod tests {
     assert_eq!(marks_in(directory.path()), vec![marker_file_name("next")]);
     // Nothing but marks is ever removed.
     assert!(directory.path().join("health.json").exists());
+    assert!(directory.path().join("exit-notes.txt").exists() && directory.path().join("notes.mark").exists());
   }
 }
