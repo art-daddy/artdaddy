@@ -2,6 +2,8 @@
 // webview is alive to report them. A 1.84 GB media read aborted the Rust side with
 // 0xE0000008 and Sentry showed a quiet week while the editor crashed repeatedly.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 const captureMock = vi.hoisted(() => vi.fn());
 const native = vi.hoisted(() => ({ shell: "web", invoke: vi.fn() }));
@@ -562,6 +564,25 @@ describe("native crash watch, what ended an unexpected exit", () => {
         ? `unclean_exit after 40s during idle (${String(word)})`
         : "unclean_exit after 40s during idle";
       expect(stored[0].reason, String(word)).toBe(wanted);
+      stop();
+    }
+  });
+
+  it("accepts every word the native side can answer with, read from its source so a word added there cannot be one the page drops", async () => {
+    vi.useFakeTimers();
+    const source = readFileSync(join(__dirname, "..", "..", "src-tauri", "src", "os_exit_cause.rs"), "utf8");
+    const lists = [...source.matchAll(/pub const WORDS: \[&str; \d+\] = \[([\s\S]*?)\];/g)];
+    expect(lists, "the Windows words and the macOS and Linux words").toHaveLength(2);
+    const words = lists.flatMap((list) => [...list[1].matchAll(/"([^"]+)"/g)].map((word) => word[1]));
+    expect(words).toEqual(expect.arrayContaining(["power_loss", "signal_segv", "os_shutdown", "no_trace", "crash_bad_access"]));
+    for (const word of words) {
+      native.invoke.mockReset();
+      captureMock.mockReset();
+      const stored = app("unclean_exit", async () => word);
+      const stop = installCrashWatch();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(stored, word).toHaveLength(1);
+      expect(stored[0].reason, word).toBe(`unclean_exit after 40s during idle (${word})`);
       stop();
     }
   });

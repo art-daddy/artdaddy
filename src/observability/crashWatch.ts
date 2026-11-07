@@ -9,14 +9,16 @@ import { reportAppEvent } from "../api/appEvents";
 const KEY = "artdaddy.session";
 /** Ignore short incomplete web markers; native observations do not use this heuristic. */
 const MIN_PLAUSIBLE_MS = 1_500;
-/** How long the report of an unexpected exit waits for the operating system's log to say what ended it. */
+/** How long the report of an unexpected exit waits for the native side to say what ended it. */
 const CAUSE_WAIT_MS = 6_000;
-/** The only shape a cause may have: one short word, and for a crash the program's exception code. Anything else the
- *  log might have said (a name, a path, a sentence) is not a cause and is not reported. */
+/** The only shape a cause may have: one short word, and for a Windows crash the program's exception code. Anything else a log or
+ *  a mark might hold (a name, a path, a sentence) is not a cause and is not reported. */
 const CAUSE_WORD = /^[a-z_]{1,30}(:[0-9a-f]{1,8})?$/;
 
-/** What the operating system's log says ended a session that was never marked as ended: one short word, or null. Never
- *  throws and never waits longer than {@link CAUSE_WAIT_MS}: the exit is reported either way. */
+/** What the native side says ended a session that was never marked as ended: one short word, or null. On Windows the operating
+ *  system's event log says it; on macOS and Linux the app's own mark of the signal that ended it, a panic, whether the PC has
+ *  restarted since and, on macOS, the kind of crash in the system's report. Never throws and never waits longer than
+ *  {@link CAUSE_WAIT_MS}: the exit is reported either way. */
 async function exitCause(
   invoke: typeof import("@tauri-apps/api/core").invoke,
   token: NativeToken,
@@ -203,7 +205,7 @@ function installNativeCrashWatch(): () => void {
           failure.eligible = false;
         } else {
           if (!current.profile?.user_id) break;
-          // An exit nobody marked says nothing about itself: ask the operating system's log what ended it.
+          // An exit nobody marked says nothing about itself: ask the native side what ended it.
           const cause =
             failure.kind === "unclean_exit" ? await exitCause(invoke, token, failure.id) : null;
           if (stopped) break;
