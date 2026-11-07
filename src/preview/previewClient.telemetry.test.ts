@@ -251,15 +251,66 @@ describe("a video it could not show", () => {
     ]);
   });
 
-  it("a source that could not be found is `unresolved`", async () => {
+  it("a source whose file is not there is `unresolved`, once however often it is asked again", async () => {
     const said: PreviewFacts[] = [];
     const { client } = setup({ report: (f) => said.push(f), resolve: async () => null });
-    client.setStore(storeOf("C:/data/projects/p1"));
+    const store = storeOf("C:/data/projects/p1");
+    (store as unknown as { resolveRef: (s: string) => Promise<string | null> }).resolveRef = async () => null; // the drive is gone
+    client.setStore(store);
     client.render(timelineOf({ media_ref: "gone", kind: "video" }), 0);
     await flush();
     client.render(timelineOf({ media_ref: "gone", kind: "video" }), 1); // a second timeline object: asked again
     await flush();
     expect(said).toEqual([{ what: "failure", reason: "unresolved", codec: "" }]);
+  });
+
+  it("a source that is only waiting for its preview copy is not a failure: the file is there, and the wait is the first picture's own time", async () => {
+    const said: PreviewFacts[] = [];
+    let copyMade = false;
+    const { worker, client } = setup({
+      report: (f) => said.push(f),
+      resolve: async (_s, src) => (copyMade ? `url:${src}` : null), // no URL until the smaller copy exists
+    });
+    client.setStore(storeOf("C:/data/projects/p1")); // its file resolves
+    client.render(timelineOf({ media_ref: "phone", kind: "video" }), 0);
+    await flush();
+    clockMs += 4_000;
+    copyMade = true;
+    client.render(timelineOf({ media_ref: "phone", kind: "video" }), 0); // the copy landed and the timeline is drawn again
+    await flush();
+    clockMs += 300;
+    worker.emit({ type: "firstFrame", source: "phone" });
+    expect(said).toEqual([{ what: "first_frame", ms: 4_300 }]);
+  });
+
+  it("a file that cannot be looked for is not called gone", async () => {
+    const said: PreviewFacts[] = [];
+    const { client } = setup({ report: (f) => said.push(f), resolve: async () => null });
+    const store = storeOf("C:/data/projects/p1");
+    (store as unknown as { resolveRef: () => Promise<string | null> }).resolveRef = async () => {
+      throw new Error("the filesystem did not answer");
+    };
+    client.setStore(store);
+    client.render(timelineOf({ media_ref: "maybe", kind: "video" }), 0);
+    await flush();
+    expect(said).toEqual([]);
+  });
+
+  it("a project opened meanwhile is not told about another project's missing file", async () => {
+    // No `report` here: this goes through the real attribution, which names the project that is open WHEN it is said.
+    const { client } = setup({ resolve: async () => null });
+    const waiting: Array<(path: string | null) => void> = [];
+    const slow = storeOf("C:/data/projects/p1");
+    (slow as unknown as { resolveRef: () => Promise<string | null> }).resolveRef = () => new Promise((r) => waiting.push(r));
+    client.setStore(slow);
+    client.render(timelineOf({ media_ref: "gone", kind: "video" }), 0);
+    await flush();
+    client.setStore(storeOf("C:/data/projects/p2")); // the person moved on before the filesystem answered
+    for (let round = 0; round < 3; round++) {
+      for (const answer of waiting.splice(0)) answer(null);
+      await flush();
+    }
+    expect(recorded.calls).toEqual([]);
   });
 
   it("a worker that fails is `worker_failed`, once, and the person is still told", async () => {

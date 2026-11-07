@@ -279,6 +279,20 @@ export function createPreviewClient(
 
   let captureSeq = 0;
   let store: ProjectStoreAccess | null = null;
+  /** A source with no URL is a failure only when its FILE is not there. Otherwise the preview is waiting for the smaller copy it
+   *  needs (made right after an import, and the timeline is drawn again when it lands), and that wait is already part of the
+   *  first picture's time. A copy that cannot be made is told by the media fact (`proxy: failed`), apart from a missing file.
+   *  Dropped when it cannot be told (the filesystem did not answer) or the project changed while it was asked. */
+  const sayIfGone = async (s: ProjectStoreAccess, src: string): Promise<void> => {
+    if (failuresSaid.has(`${src}\u0000unresolved`)) return;
+    let gone = false;
+    try {
+      gone = (await s.resolveRef(src)) === null;
+    } catch {
+      gone = false;
+    }
+    if (gone && !disposed && !failed && store === s) failureOnce(src, "unresolved");
+  };
   let lastTimeline: Timeline | null = null;
   let token = 0; // guards against a slow resolve clobbering a newer timeline
   // What kind of FILE each ref names (a ref's file never changes kind), so a clip stored as "video"
@@ -322,7 +336,7 @@ export function createPreviewClient(
           if (u) urls[src] = u;
           else {
             console.warn(`[preview] timeline source did not resolve to a file: ${src}`);
-            failureOnce(src, "unresolved");
+            void sayIfGone(s, src);
           }
           if (p) posters[src] = p;
           if (a) animations[src] = a;
