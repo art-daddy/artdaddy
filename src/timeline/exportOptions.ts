@@ -366,6 +366,50 @@ export function estimateForDialog(
   };
 }
 
+/** What an export is expected to take, as a fact the chat card and an assistant's answer can say: a time that is a number,
+ *  whether it is a guess, and the size when this PC has measured one. */
+export interface Expectation {
+  readonly seconds: number;
+  /** `seconds` is a guess from the size of the export: nothing like it has run on this PC yet. */
+  readonly guessed: boolean;
+  readonly finalBytes: number | null;
+}
+
+/** The expectation an estimate gives, or null when it has no time worth saying: a copy, an export nothing describes, a
+ *  number that is not a time. The ONE reading of an estimate that the card and the answer share with the dialog, which
+ *  shows the same fields before the click ({@link estimateForDialog}). */
+export function expectationOf(
+  estimates: Pick<ExportEstimates, "seconds" | "secondsGuessed" | "finalBytes">,
+): Expectation | null {
+  const { seconds, finalBytes } = estimates;
+  if (seconds === null || !Number.isFinite(seconds) || seconds < 0) return null;
+  return {
+    seconds,
+    guessed: estimates.secondsGuessed === true,
+    finalBytes:
+      finalBytes !== null && Number.isFinite(finalBytes) && finalBytes >= 0 ? finalBytes : null,
+  };
+}
+
+/** The expectation of several exports that run one after another, or null when any of them has none: a total that
+ *  leaves one out would promise less than the files will take. It is a guess when any part is, and has a size only when
+ *  every part has one. */
+export function totalExpectation(
+  parts: ReadonlyArray<Expectation | null | undefined>,
+): Expectation | null {
+  if (parts.length === 0) return null;
+  let seconds = 0;
+  let guessed = false;
+  let bytes: number | null = 0;
+  for (const part of parts) {
+    if (!part) return null;
+    seconds += part.seconds;
+    guessed = guessed || part.guessed;
+    bytes = bytes !== null && part.finalBytes !== null ? bytes + part.finalBytes : null;
+  }
+  return { seconds, guessed, finalBytes: bytes };
+}
+
 /** "under a minute", "about 4 min", "about 1 h 20 min": a time to plan around, not a promise. */
 export function describeExportTime(seconds: number | null): string {
   if (seconds === null || !Number.isFinite(seconds) || seconds < 0) return "";

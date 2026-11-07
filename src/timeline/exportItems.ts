@@ -23,7 +23,8 @@ import {
 import type { ExportRefusalFacts } from "../api/agentEvents";
 import type { ExportStory } from "./exportTrace";
 import { limitThatFired } from "./nativeDiagnostics";
-import type { ExportOptions } from "./exportOptions";
+import { totalExpectation, type Expectation, type ExportOptions } from "./exportOptions";
+import { describeExpected } from "./exportWords";
 import type { Rung } from "./exportPlan";
 import { canvasFps } from "./frames";
 import type { Timeline } from "./model";
@@ -326,6 +327,8 @@ async function exportItemsTool(args: Args, ctx: ClientToolContext | null): Promi
 
   const batch = `exports_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
   const delivered: Result[] = [];
+  // What each rendered clip is expected to take (a copy renders nothing), in the order they run.
+  const expectations: Array<Expectation | undefined> = [];
   try {
     const requests: ExportSpec[] = [];
     for (const p of planned) {
@@ -367,6 +370,7 @@ async function exportItemsTool(args: Args, ctx: ClientToolContext | null): Promi
     for (let index = 0; index < planned.length; index++) {
       const p = planned[index];
       const sub = submitted[index];
+      if (p.kind === "clip") expectations.push(sub.expected);
       delivered.push({
         job_id: sub.job_id,
         saved_to: p.filename,
@@ -412,6 +416,8 @@ async function exportItemsTool(args: Args, ctx: ClientToolContext | null): Promi
     rendered.length && loaded?.branding?.watermark
       ? "Each clip from the timeline carries the ArtDaddy watermark (no end card)."
       : "",
+    // The clips run one after another: how long all of them are expected to take, or nothing when any has no estimate.
+    rendered.length ? describeExpected(totalExpectation(expectations), "all") : "",
   ]
     .filter(Boolean)
     .join(" ");

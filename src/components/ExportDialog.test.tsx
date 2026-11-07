@@ -82,6 +82,32 @@ describe("export job", () => {
     expect(s.savedTo).toBeNull();
     expect(s.frame).toBe(0);
   });
+
+  // The dialog says where ITS export is from that export's own feed: it needs to know which one that is, and the
+  // queue only gives the export an id once it has been admitted, a little after the job began.
+  it("is told which export it follows once that export has an id, and forgets it when the next render begins", () => {
+    useExportJob.getState().begin(null);
+    expect(useExportJob.getState().jobId).toBeNull();
+    useExportJob.getState().attach("job-1");
+    expect(useExportJob.getState().jobId).toBe("job-1");
+    useExportJob.getState().finish({ phase: "done" });
+    expect(useExportJob.getState().jobId).toBe("job-1"); // what it was, for the result it shows
+    useExportJob.getState().begin(null);
+    expect(useExportJob.getState().jobId).toBeNull();
+    useExportJob.getState().attach("job-2");
+    useExportJob.getState().reset();
+    expect(useExportJob.getState().jobId).toBeNull();
+  });
+
+  it("is not told about an export once its job has ended: an answer that arrives late follows nothing", () => {
+    useExportJob.getState().begin(null);
+    useExportJob.getState().finish({ phase: "failed", error: "no clips to render" });
+    useExportJob.getState().attach("job-1");
+    expect(useExportJob.getState().jobId).toBeNull();
+    useExportJob.getState().reset();
+    useExportJob.getState().attach("job-2"); // no job at all
+    expect(useExportJob.getState().jobId).toBeNull();
+  });
 });
 
 // The project the dialog is opened on: its size and layers, for the estimate and for the encoder choice.

@@ -3636,8 +3636,9 @@ describe("exportTimelineTool", () => {
     expect(await fs.exists("D:/Videos/final cut.mp4")).toBe(true);
     expect(r.saved_to).toBe("final cut.mp4");
     // The "Saved to your Downloads folder" note is a LIE once a path was chosen, so it is
-    // absent. Without this the dialog cheerfully misreports every custom destination.
-    expect(r.note).toBeUndefined();
+    // absent. Without this the dialog cheerfully misreports every custom destination. (The
+    // reply may still say how long the export is expected to take.)
+    expect(String(r.note ?? "")).not.toContain("Downloads");
   });
 
   it("still defaults to Downloads when no destination is chosen", async () => {

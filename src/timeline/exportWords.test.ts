@@ -6,12 +6,15 @@ import { STALL_LOG_SECONDS } from "./exportTrace";
 import {
   canSaveElsewhere,
   describeChipFailure,
+  describeDialogProgress,
   describeEncoder,
+  describeExpected,
   describeLiveStatus,
   describeModeLines,
   describeResult,
   describeRung,
   describeStage,
+  describeStageLine,
   describeTook,
   describeTryAgain,
   describeWaiting,
@@ -510,5 +513,212 @@ describe("the result line", () => {
     expect(describeTook(3_600_000)).toBe("1 h");
     expect(describeTook(3_780_000)).toBe("1 h 3 min");
     for (const bad of garbage) expect(describeTook(bad)).not.toMatch(/NaN|Infinity|undefined|-/);
+  });
+});
+
+describe("the stage line", () => {
+  it("is the status line without the time left, so a panel that shows the time left on its own side says the stage once", () => {
+    expect(describeStageLine(live(), T0 + 20_000)).toBe("Rendering and encoding · 52%");
+    expect(describeStageLine(live({ stage: "checking" }), T0 + 185_000)).toBe(
+      "Still working · 3 min in · Checking the file",
+    );
+    expect(describeStageLine(live({ lastMoveAt: T0 }), T0 + 75_000)).toBe(
+      "No progress for 75 s · Rendering and encoding · 52%",
+    );
+    expect(describeStageLine(live({ stage: "queued" }), T0)).toBe("Waiting");
+  });
+
+  // The card says the whole line and the dialog says this front part: they can only disagree about an export
+  // if this front part is not the front of the line.
+  it("is always the front of the status line, whatever the export is doing", () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom("queued", "preparing", "rendering", "checking", "saving" as const),
+        fc.oneof(fc.constant(null), fc.constantFrom(...garbage), fc.double({ min: 0, max: 1 })),
+        fc.oneof(
+          fc.constant(null),
+          fc.constantFrom(...garbage),
+          fc.integer({ min: 0, max: 9_999 }),
+        ),
+        fc.integer({ min: 0, max: 400 }),
+        fc.integer({ min: 0, max: 5_000 }),
+        (stage, fraction, etaSec, quiet, minutes) => {
+          const now = T0 + minutes * 1000;
+          const facts = live({ stage, fraction, etaSec, lastMoveAt: now - quiet * 1000 });
+          const front = describeStageLine(facts, now);
+          const whole = describeLiveStatus(facts, now);
+          expect(whole.startsWith(front)).toBe(true);
+          // What follows the front is only ever the time left.
+          expect(whole.slice(front.length)).toMatch(/^( · .+ left)?$/);
+        },
+      ),
+      { numRuns: 400 },
+    );
+  });
+});
+
+describe("what an export is expected to take, in words", () => {
+  const known = { seconds: 252, guessed: false, finalBytes: 120_000_000 };
+
+  it("says how long and how big, from what this PC has measured", () => {
+    expect(describeExpected(known)).toBe(
+      "Expected: about 4 min, a file of about 120 MB, from earlier exports on this PC.",
+    );
+    expect(describeExpected({ ...known, finalBytes: null })).toBe(
+      "Expected: about 4 min, from earlier exports on this PC.",
+    );
+  });
+
+  it("is honest that it is a guess, and claims no size for one", () => {
+    expect(describeExpected({ seconds: 30, guessed: true, finalBytes: null })).toBe(
+      "Expected: under a minute. A rough guess: nothing like this has been exported on this PC yet.",
+    );
+    expect(describeExpected({ ...known, guessed: true })).toBe(
+      "Expected: about 4 min. A rough guess: nothing like this has been exported on this PC yet.",
+    );
+  });
+
+  it("says 'in all' for several files and claims no size for one file", () => {
+    expect(describeExpected({ ...known, seconds: 360 }, "all")).toBe(
+      "Expected: about 6 min in all, from earlier exports on this PC.",
+    );
+    expect(describeExpected({ ...known, seconds: 360, guessed: true }, "all")).toBe(
+      "Expected: about 6 min in all. A rough guess: nothing like this has been exported on this PC yet.",
+    );
+  });
+
+  it("says nothing when there is no time to say", () => {
+    expect(describeExpected(null)).toBe("");
+    expect(describeExpected(undefined)).toBe("");
+    for (const seconds of [null, Number.NaN, Number.POSITIVE_INFINITY, -1])
+      expect(describeExpected({ ...known, seconds })).toBe("");
+  });
+
+  it("is a whole sentence or nothing, whatever the numbers are", () => {
+    fc.assert(
+      fc.property(
+        fc.oneof(fc.constant(null), fc.constantFrom(...garbage), fc.double({ min: 0, max: 1e7 })),
+        fc.boolean(),
+        fc.oneof(fc.constant(null), fc.constantFrom(...garbage), fc.double({ min: 0, max: 1e12 })),
+        fc.constantFrom("file", "all" as const),
+        (seconds, guessed, finalBytes, scope) => {
+          const line = describeExpected({ seconds, guessed, finalBytes }, scope);
+          const hasTime = seconds !== null && Number.isFinite(seconds) && seconds >= 0;
+          expect(line === "").toBe(!hasTime);
+          if (line) {
+            expect(line).toMatch(/^Expected: (under a minute|about [^.]+?)( in all)?[,.]/);
+            expect(line.endsWith(".")).toBe(true);
+            expect(line).not.toMatch(/NaN|undefined|null|Infinity|\[object|-\d/);
+            // A guess never names a size, and neither does a total.
+            if (guessed || scope === "all") expect(line).not.toMatch(/a file of/);
+            expect(line.includes("rough guess")).toBe(guessed);
+          }
+        },
+      ),
+      { numRuns: 400 },
+    );
+  });
+});
+
+describe("what the Export dialog says about its own export", () => {
+  const own = (over: Partial<LiveFacts> = {}, speed = 2.1) => ({ ...live(over), speed });
+  // The dialog's own job, which is all it has before its export has an id, and which any export's progress can move.
+  const job = { phase: "rendering" as const, fraction: 0.8, etaSec: 5, speed: 3 };
+
+  it("names the stage of the export's own feed with how far it is, and gives the speed and time left", () => {
+    expect(describeDialogProgress({ own: own(), place: null, ...job }, T0 + 20_000)).toEqual({
+      status: "Rendering and encoding · 52%",
+      fraction: 0.52,
+      speed: 2.1,
+      left: 240,
+    });
+  });
+
+  it("names every stage an export goes through, never a bare percentage", () => {
+    const said = (facts: Partial<LiveFacts>) =>
+      describeDialogProgress({ own: own(facts), place: null, ...job }, T0 + 20_000).status;
+    expect(said({ stage: "preparing", fraction: null })).toBe("Preparing · checking your clips");
+    expect(said({ step: 1, steps: 4 })).toBe("Rendering part 2 of 3 · 52%");
+    expect(said({ step: 3, steps: 4 })).toBe("Encoding · 52%");
+    expect(said({ stage: "checking" })).toBe("Checking the file");
+    expect(said({ stage: "saving" })).toBe("Saving");
+  });
+
+  it("says it is working, with the minutes in, as the card does, and when the render stops moving", () => {
+    const at = (now: number, facts: Partial<LiveFacts> = {}) =>
+      describeDialogProgress({ own: own(facts), place: null, ...job }, now);
+    expect(at(T0 + 185_000, { lastMoveAt: T0 + 170_000 }).status).toBe(
+      "Still working · 3 min in · Rendering and encoding · 52%",
+    );
+    const stuck = at(T0 + 90_000);
+    expect(stuck.status).toBe("No progress for 90 s · Rendering and encoding · 52%");
+    expect(stuck.left).toBeNull(); // no time left is promised for a render that is not moving
+  });
+
+  it("gives no speed or time left outside the render", () => {
+    for (const stage of ["preparing", "checking", "saving"] as const)
+      expect(
+        describeDialogProgress({ own: own({ stage }), place: null, ...job }, T0 + 20_000),
+      ).toMatchObject({
+        speed: null,
+        left: null,
+      });
+  });
+
+  // The failure direction: a menu export waiting behind another export is moved by THAT export's progress
+  // (the dialog's job is moved by whichever render is running), and must not say it is 80% done.
+  it("says it is waiting, and where, for an export that has not had its turn, never another export's percent", () => {
+    expect(describeDialogProgress({ own: null, place: 2, ...job }, T0)).toEqual({
+      status: "Waiting · 2nd in line",
+      fraction: null, // the bar is not 80% either
+      speed: null,
+      left: null,
+    });
+  });
+
+  it("keeps the old words for a job that has no id yet (the moment before its export is admitted)", () => {
+    const none = { own: null, place: null } as const;
+    const said = (
+      phase: "preparing" | "rendering",
+      fraction: number | null,
+      etaSec: number | null,
+      speed: number,
+    ) => describeDialogProgress({ ...none, phase, fraction, etaSec, speed }, T0);
+    expect(said("preparing", null, null, 0)).toEqual({
+      status: "Preparing…",
+      fraction: null,
+      speed: null,
+      left: null,
+    });
+    expect(said("rendering", null, null, 0).status).toBe("Starting…");
+    expect(said("rendering", 0.42, 90, 2)).toEqual({
+      status: "42%",
+      fraction: 0.42,
+      speed: 2,
+      left: 90,
+    });
+  });
+
+  it("is never a half-made sentence, whatever the numbers are", () => {
+    for (const fraction of [...garbage, null, 0.5])
+      for (const etaSec of [...garbage, null, 90])
+        for (const speed of [...garbage, 2])
+          for (const stage of ["queued", "preparing", "rendering", "checking", "saving"] as const)
+            for (const [feed, place] of [
+              [own({ stage, fraction, etaSec, lastMoveAt: T0 + 399_000 }, speed), null],
+              [null, 3],
+              [null, null],
+            ] as const) {
+              const said = describeDialogProgress(
+                { own: feed, place, phase: "rendering", fraction, etaSec, speed },
+                T0 + 400_000,
+              );
+              expect(said.status).not.toMatch(/NaN|undefined|null|Infinity|-\d|\[object/);
+              expect(said.status.length).toBeGreaterThan(0);
+              for (const n of [said.speed, said.left])
+                if (n !== null) expect(Number.isFinite(n) && n >= 0).toBe(true);
+              if (said.fraction !== null)
+                expect(said.fraction >= 0 && said.fraction <= 1).toBe(true);
+            }
   });
 });

@@ -47,9 +47,12 @@ import { askQuestion, hostMounted, type QuestionOutcome } from "../store/exportQ
 import {
   assessExport,
   estimateExport,
+  expectationOf,
   peakSamples,
   type ExportAssessment,
   type ExportCalibration,
+  type ExportEstimates,
+  type Expectation,
 } from "./exportOptions";
 import {
   RUNG_NAMES,
@@ -296,6 +299,10 @@ export interface ExportRecord {
   cancelling?: boolean;
   /** The setting the export runs at when it is below the normal one (exportPlan.ts), so the card can say so. */
   rung?: 1 | 2;
+  /** What the export is expected to take, worked out once as it was admitted ({@link estimateOf}): what the card says
+   *  under the status line for the whole run. Absent for an export nothing describes (a copy, one adopted after a
+   *  restart), which is then said nothing about. */
+  expected?: Expectation;
   /** The gentlest rung this export's command really has, when the plan said (render.ts `gentlestRung`): what Try
    *  again may ask for. Absent: what the engine has. */
   maxRung?: Rung;
@@ -520,6 +527,14 @@ export function listExportOutcomes(): Array<Record<string, unknown>> {
         : {}),
       // How long an unfinished export has been at it (or waiting), so an agent can judge it.
       ...(isOpen(r) ? { elapsed_s: Math.max(0, Math.round((now - r.startedAt) / 1000)) } : {}),
+      // What it was expected to take when it was admitted (the estimate the card and the `export` answer give), so an
+      // agent can say how long to wait for one it did not start in this call. Said as a guess when it is one.
+      ...(r.expected && isOpen(r)
+        ? {
+            expected_s: Math.round(r.expected.seconds),
+            ...(r.expected.guessed ? { expected_guessed: true } : {}),
+          }
+        : {}),
       // A cancel was asked and the export has not stopped yet.
       ...(r.cancelling && isOpen(r) ? { cancelling: true } : {}),
       // The setting it runs at, when it is below the normal one: why it may be slower.
@@ -814,6 +829,8 @@ export interface ExportSubmission {
   job_id: string;
   /** How many exports are ahead of this one. 0 means it starts immediately. */
   queue_position: number;
+  /** What it is expected to take (the record's own), for the answer to whoever asked; absent when nothing describes it. */
+  expected?: Expectation;
 }
 
 export class ExportRequestError extends Error {
@@ -1172,6 +1189,42 @@ function least(values: ReadonlyArray<number | null>): number | null {
   return known.length > 0 ? Math.min(...known) : null;
 }
 
+/** The size and layers of what an export renders: the project's own numbers when the plan captured them, else what its
+ *  telemetry describes. */
+function workloadOf(spec: ExportSpec): RenderWorkload {
+  return (
+    spec.workload ?? {
+      width: spec.meta?.project_width ?? spec.meta?.width ?? 0,
+      height: spec.meta?.project_height ?? spec.meta?.height ?? 0,
+      fps: spec.meta?.fps ?? 0,
+      durationSeconds: spec.meta?.duration_s ?? 0,
+      visualClips: 0,
+      captionClips: 0,
+      audioClips: 0,
+      peakVisualLayers: spec.meta?.visual_layers ?? 0,
+      peakMediaLayers: 0,
+    }
+  );
+}
+
+/** What an export is estimated to take and to use, from this PC's own history where it has some and a guess where it has
+ *  not. The ONE reading of the estimate: the pre-start check and the expectation the export is admitted with both come
+ *  from here, so what a person was told before it started and what the card says while it runs cannot disagree. Nothing
+ *  for an export no plan describes (a copy). */
+function estimateOf(spec: ExportSpec): ExportEstimates {
+  const descriptor = spec.meta?.calibration;
+  return descriptor
+    ? estimateExport(
+        workloadOf(spec),
+        descriptor.output,
+        descriptor.quality,
+        descriptor.engine,
+        useExportJob.getState().calibrations,
+        descriptor.encoder,
+      )
+    : { memoryBytes: null, temporaryBytes: null, finalBytes: null, seconds: null };
+}
+
 /** Measure the PC and the requested exports and say what the check found. Everything is read afresh,
  *  so closing programs or freeing space between two calls really counts. */
 async function measurePreflight(
@@ -1186,28 +1239,9 @@ async function measurePreflight(
     const resources = await resolveExportResources(spec.destPath, spec.submissionSignal);
     snapshots.push(resources);
     spec.story?.noteMachine(resources);
-    const workload = spec.workload ?? {
-      width: spec.meta?.project_width ?? spec.meta?.width ?? 0,
-      height: spec.meta?.project_height ?? spec.meta?.height ?? 0,
-      fps: spec.meta?.fps ?? 0,
-      durationSeconds: spec.meta?.duration_s ?? 0,
-      visualClips: 0,
-      captionClips: 0,
-      audioClips: 0,
-      peakVisualLayers: spec.meta?.visual_layers ?? 0,
-      peakMediaLayers: 0,
-    };
+    const workload = workloadOf(spec);
     const descriptor = spec.meta?.calibration;
-    const estimates = descriptor
-      ? estimateExport(
-          workload,
-          descriptor.output,
-          descriptor.quality,
-          descriptor.engine,
-          useExportJob.getState().calibrations,
-          descriptor.encoder,
-        )
-      : { memoryBytes: null, temporaryBytes: null, finalBytes: null, seconds: null };
+    const estimates = estimateOf(spec);
     // The memory verdict is about the rung the command was CAPTURED at (it cannot change now): does that rung
     // fit what the PC has free right now? An export nothing planned keeps today's rule.
     const memoryPlan =
@@ -1672,6 +1706,15 @@ async function admitExport(spec: ExportSpec, storageReady: boolean): Promise<Exp
     stories.set(jobId, spec.story);
     if (queuePosition > 0) spec.story.trace.record("queued", "", queuePosition);
   }
+  // What it is expected to take, for whoever is told about it: worked out once, here, and kept with the record.
+  // It is information, so working it out can fail without stopping an export that has already been checked and
+  // admitted.
+  let expected: Expectation | undefined;
+  try {
+    expected = expectationOf(estimateOf(spec)) ?? undefined;
+  } catch {
+    expected = undefined;
+  }
   records.push({
     job_id: jobId,
     filename: spec.filename,
@@ -1686,6 +1729,7 @@ async function admitExport(spec: ExportSpec, storageReady: boolean): Promise<Exp
     ...(spec.meta?.choice && spec.meta.choice.encoder !== "x264"
       ? { encoder: spec.meta.choice.encoder, reason: spec.meta.choice.reason }
       : {}),
+    ...(expected ? { expected } : {}),
     startedAt: Date.now(),
   });
   // Terminal rows are trimmed on ADMISSION rather than on settle, so a long session cannot grow
@@ -1708,7 +1752,7 @@ async function admitExport(spec: ExportSpec, storageReady: boolean): Promise<Exp
       ? encode(spec, ledger, jobId, key)
       : (queueTail = queueTail.then(() => encode(spec, ledger, jobId, key)));
   track(jobId, task);
-  return { job_id: jobId, queue_position: queuePosition };
+  return { job_id: jobId, queue_position: queuePosition, ...(expected ? { expected } : {}) };
 }
 
 function track(jobId: string, task: Promise<unknown>): void {
@@ -2169,6 +2213,8 @@ async function finishAdopted(
     });
     if (v.state === "running" && m.plan) {
       useExportJob.getState().begin(() => cancelExport(v.id));
+      // The dialog follows this export's own feed, as it does one it started.
+      useExportJob.getState().attach(v.id);
       // The card follows it too: this page took the export over, so it is running now.
       useExportJob.getState().beginLive(v.id);
       useExportJob.getState().setLiveStage(v.id, "rendering");

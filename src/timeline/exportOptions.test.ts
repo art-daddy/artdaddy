@@ -18,6 +18,7 @@ import {
   estimateForDialog,
   exceedsFileSequencePicture,
   exceedsOnePass,
+  expectationOf,
   FILE_SEQUENCE_MAX_PIXELS,
   finalEncoderPolicy,
   FRAME_THREADED_INPUTS_MAX,
@@ -28,6 +29,7 @@ import {
   peakSamples,
   promiseLineOf,
   promiseMultipleOf,
+  totalExpectation,
   type ExportCalibration,
   type ExportEncoder,
   type ExportEstimates,
@@ -1125,6 +1127,111 @@ describe("how a time and a size are put to the person", () => {
       ),
       { numRuns: 400 },
     );
+  });
+});
+
+describe("what an export is expected to take, as a fact", () => {
+  const project: RenderWorkload = {
+    width: 1920,
+    height: 1080,
+    fps: 30,
+    durationSeconds: 120,
+    visualClips: 6,
+    captionClips: 1,
+    audioClips: 1,
+    peakVisualLayers: 2,
+    peakMediaLayers: 2,
+  };
+  const output = { width: 1920, height: 1080, fps: 30 };
+
+  it("is the time, whether it is a guess, and the size; and nothing when there is no time to say", () => {
+    expect(expectationOf({ seconds: 252, secondsGuessed: false, finalBytes: 48_000_000 })).toEqual({
+      seconds: 252,
+      guessed: false,
+      finalBytes: 48_000_000,
+    });
+    expect(expectationOf({ seconds: 40, secondsGuessed: true, finalBytes: null })).toEqual({
+      seconds: 40,
+      guessed: true,
+      finalBytes: null,
+    });
+    expect(expectationOf({ seconds: 40, finalBytes: null })?.guessed).toBe(false);
+    for (const seconds of [null, Number.NaN, Number.POSITIVE_INFINITY, -1])
+      expect(expectationOf({ seconds, finalBytes: 10 })).toBeNull();
+  });
+
+  it("never carries a size that cannot be one", () => {
+    for (const finalBytes of [Number.NaN, -5, Number.POSITIVE_INFINITY])
+      expect(expectationOf({ seconds: 10, finalBytes })?.finalBytes).toBeNull();
+  });
+
+  // The one number: what the dialog says before the click and what the export is later said to expect
+  // must be the same estimate of the same export, or the card contradicts the dialog it was started from.
+  it("is the same estimate the dialog gave for the same export, measured or guessed", () => {
+    const settings = {
+      resolution: "source",
+      quality: "medium",
+      fps: null,
+      mode: "quality",
+    } as const;
+    const measured: ExportCalibration = {
+      workload: project,
+      output,
+      quality: "medium",
+      engine: "file-sequence-v1",
+      encoder: "x264-crf",
+      revision: EXPORT_SPEED_REVISION,
+      elapsedSeconds: 150,
+      finalBytes: 48_000_000,
+      memoryBytes: null,
+      temporaryBytes: null,
+    };
+    for (const history of [[measured], []]) {
+      const dialog = estimateForDialog(project, settings, history);
+      const admitted = expectationOf(
+        estimateExport(project, output, "medium", "file-sequence-v1", history, "x264-crf"),
+      );
+      expect(admitted).toEqual(dialog);
+    }
+  });
+
+  describe("of several exports that run one after another", () => {
+    const one = (seconds: number, guessed = false, finalBytes: number | null = null) => ({
+      seconds,
+      guessed,
+      finalBytes,
+    });
+
+    it("adds up, is a guess if any part is, and has a size only when every part has one", () => {
+      expect(totalExpectation([one(60, false, 10), one(90, false, 20)])).toEqual(
+        one(150, false, 30),
+      );
+      expect(totalExpectation([one(60, false, 10), one(90, true, 20)])?.guessed).toBe(true);
+      expect(totalExpectation([one(60, false, 10), one(90, false, null)])?.finalBytes).toBeNull();
+    });
+
+    it("says nothing when any part has nothing to say, or there are no parts: no total it cannot stand behind", () => {
+      expect(totalExpectation([])).toBeNull();
+      expect(totalExpectation([one(60), null])).toBeNull();
+      expect(totalExpectation([undefined, one(60)])).toBeNull();
+    });
+
+    it("is never less than its longest part, whatever the parts are", () => {
+      fc.assert(
+        fc.property(
+          fc.array(fc.integer({ min: 0, max: 100_000 }), { minLength: 1, maxLength: 8 }),
+          fc.array(fc.boolean(), { minLength: 8, maxLength: 8 }),
+          (seconds, guesses) => {
+            const parts = seconds.map((s, i) => one(s, guesses[i]));
+            const total = totalExpectation(parts)!;
+            expect(total.seconds).toBe(seconds.reduce((a, b) => a + b, 0));
+            expect(total.seconds).toBeGreaterThanOrEqual(Math.max(...seconds));
+            expect(total.guessed).toBe(parts.some((p) => p.guessed));
+          },
+        ),
+        { numRuns: 200 },
+      );
+    });
   });
 });
 

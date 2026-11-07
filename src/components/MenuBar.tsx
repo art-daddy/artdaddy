@@ -234,6 +234,8 @@ export default function MenuBar() {
       } | null;
       if (res?.job_id) {
         jobId = res.job_id;
+        // The dialog now follows this export's own feed (its stage, its place in line), not whichever export is rendering.
+        useExportJob.getState().attach(res.job_id);
         if (controller.signal.aborted) cancelQueued(res.job_id); // cancelled while it was queuing
         // The person may have chosen another folder for it (the Save to box of the question about the room for the
         // file): that is where it goes, and where the next Save As should open, not the folder that had no room.

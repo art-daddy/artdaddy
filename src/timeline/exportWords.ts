@@ -3,7 +3,12 @@
 // number never reaches a sentence.
 import { reasonOfError, type ExportReasonCode } from "../api/exportReason";
 import type { ModeReason } from "./exportEncoder";
-import { describeExportTime, type ExportMode } from "./exportOptions";
+import {
+  describeExportSize,
+  describeExportTime,
+  type DialogEstimate,
+  type ExportMode,
+} from "./exportOptions";
 
 export type LiveStageName = "queued" | "preparing" | "rendering" | "checking" | "saving";
 
@@ -24,6 +29,10 @@ export interface LiveFacts {
 /** A render that has not moved for this long is said to have made no progress (the same silence the
  *  report logs as a stall; a test pins the two together). */
 export const QUIET_SECONDS = 60;
+
+/** How often a line that counts minutes is redrawn while an export runs: well inside the minute it promises. The chat
+ *  card and the Export dialog share it. */
+export const STATUS_REFRESH_MS = 10_000;
 
 const whole = (value: number): number =>
   Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
@@ -62,19 +71,24 @@ export function describeStage(live: LiveFacts): string {
   }
 }
 
+/** A render's own guess at the time left, or null when it cannot be one: not a number, negative, or more than two days. */
+function plausibleEta(eta: number | null): number | null {
+  return eta === null || !Number.isFinite(eta) || eta < 0 || eta > 48 * 3600 ? null : eta;
+}
+
 /** How long a render thinks is left, in seconds, or null when that is not worth saying: the render is not
  *  under way, it has stopped moving, or the number cannot be a time left. The one rule the status line and
  *  the assistant's export list share. */
 export function timeLeftSeconds(live: LiveFacts, now: number): number | null {
   if (live.stage !== "rendering" || quietSeconds(live, now) >= QUIET_SECONDS) return null;
-  const eta = live.etaSec;
-  if (eta === null || !Number.isFinite(eta) || eta < 0 || eta > 48 * 3600) return null;
-  return eta;
+  return plausibleEta(live.etaSec);
 }
 
-/** The one line under the bar. Refreshed by a clock (at least every minute), not by the progress feed,
- *  which goes quiet exactly when the line matters most. */
-export function describeLiveStatus(live: LiveFacts, now: number): string {
+/** The front of the one line under the bar: how long it has been going or that it has made no progress, the stage by
+ *  name, and how far a render is. Everything but the time left, which the Export dialog shows on its own side of the
+ *  panel. Refreshed by a clock (at least every minute), not by the progress feed, which goes quiet exactly when the line
+ *  matters most. */
+export function describeStageLine(live: LiveFacts, now: number): string {
   if (live.stage === "queued") return describeStage(live);
   const quiet = quietSeconds(live, now);
   const parts: string[] = [];
@@ -89,10 +103,90 @@ export function describeLiveStatus(live: LiveFacts, now: number): string {
   parts.push(describeStage(live));
   if (live.stage === "rendering" && live.fraction !== null && Number.isFinite(live.fraction))
     parts.push(`${Math.round(Math.min(1, Math.max(0, live.fraction)) * 100)}%`);
+  return parts.join(" · ");
+}
+
+/** The one line under the bar: the front ({@link describeStageLine}) and how long the render thinks is left. */
+export function describeLiveStatus(live: LiveFacts, now: number): string {
+  const front = describeStageLine(live, now);
+  if (live.stage === "queued") return front;
   const left = timeLeftSeconds(live, now);
   const leftText = left === null ? "" : describeExportTime(left);
-  if (leftText) parts.push(`${leftText} left`);
-  return parts.join(" · ");
+  return leftText ? `${front} · ${leftText} left` : front;
+}
+
+/** What an export is expected to take: one sentence for the Export dialog before the click, the chat card while it runs,
+ *  and an assistant's answer when it starts one, so all three say the same thing. Nothing when there is no time to say.
+ *  `all` is for several files run one after another: it names the time in all and no size, which is one file's. */
+export function describeExpected(
+  estimate: DialogEstimate | null | undefined,
+  scope: "file" | "all" = "file",
+): string {
+  if (!estimate) return "";
+  const time = describeExportTime(estimate.seconds);
+  if (!time) return "";
+  const span = scope === "all" ? `${time} in all` : time;
+  if (estimate.guessed)
+    return `Expected: ${span}. A rough guess: nothing like this has been exported on this PC yet.`;
+  const size = scope === "all" ? "" : describeExportSize(estimate.finalBytes);
+  return `Expected: ${span}${size ? `, a file of ${size}` : ""}, from earlier exports on this PC.`;
+}
+
+/** What the Export dialog's panel says while its own export goes. */
+export interface DialogProgress {
+  /** Left of the panel: the stage by name, and how far a render is. */
+  readonly status: string;
+  /** The bar: how far, or null when that is not known. */
+  readonly fraction: number | null;
+  /** Right of the panel: how fast the render goes (a multiple of the video's length), or null when not worth saying. */
+  readonly speed: number | null;
+  /** Right of the panel: how long the render thinks is left, in seconds, or null when not worth saying. */
+  readonly left: number | null;
+}
+
+const unitOrNull = (value: number | null): number | null =>
+  value !== null && Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : null;
+const rateOrNull = (value: number): number | null =>
+  Number.isFinite(value) && value > 0 ? value : null;
+
+/** What the Export dialog's panel says about the export it follows. `own` is that export's own feed (it has none until
+ *  its turn comes, and none once it has settled), `place` its place in line while it waits. The dialog's own job, the
+ *  last four fields, is moved by WHICHEVER export is rendering, so it is trusted only before the export has an id: once it
+ *  has one, a panel that read the job would say another export's percent. */
+export function describeDialogProgress(
+  view: {
+    readonly own: (LiveFacts & { readonly speed: number }) | null;
+    readonly place: number | null;
+    readonly phase: "preparing" | "rendering";
+    readonly fraction: number | null;
+    readonly etaSec: number | null;
+    readonly speed: number;
+  },
+  now: number,
+): DialogProgress {
+  const { own } = view;
+  if (own)
+    return {
+      status: describeStageLine(own, now),
+      fraction: unitOrNull(own.fraction),
+      speed: own.stage === "rendering" ? rateOrNull(own.speed) : null,
+      left: timeLeftSeconds(own, now),
+    };
+  if (view.place !== null)
+    return { status: describeWaiting(view.place), fraction: null, speed: null, left: null };
+  const rendering = view.phase === "rendering";
+  const fraction = unitOrNull(view.fraction);
+  return {
+    status: !rendering
+      ? "Preparing…"
+      : fraction === null
+        ? "Starting…"
+        : `${Math.round(fraction * 100)}%`,
+    fraction,
+    speed: rendering ? rateOrNull(view.speed) : null,
+    // The same rule as the feed's: a number that cannot be a time left is not said.
+    left: rendering ? plausibleEta(view.etaSec) : null,
+  };
 }
 
 /** One line for an export that runs below the normal setting: it says why and what it costs. Nothing for the

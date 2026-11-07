@@ -36,6 +36,7 @@ import { endProjectSession } from "../tools/coordinator";
 import { useExportJob } from "../store/exportJob";
 import { useAuth } from "../store/auth";
 import { EXPORT_SPEED_REVISION, type ExportCalibration } from "./exportOptions";
+import * as options from "./exportOptions";
 import type { ExportQuestionKind } from "./exportQuestions";
 import { FakeJobs } from "../test/fakeJobs";
 import * as exportFlags from "../api/exportFlags";
@@ -3059,6 +3060,196 @@ describe("what a running export publishes for the chat card", () => {
 // who stopped it and where, which limit ended it and how much memory it had used. Each test plays the
 // real journeys: an export that hit the working-set limit, one that ran into the commit cap, one that
 // stood still, one cancelled while it waited, and one that simply worked.
+// What an export is expected to take, worked out once when it is admitted and kept with its record, so the chat
+// card, the assistant's answer and the export list all say the same thing about it (and say nothing when there is
+// nothing to say).
+describe("what an export is expected to take", () => {
+  const GB = 1e9;
+  const WORKLOAD = {
+    width: 1920,
+    height: 1080,
+    fps: 30,
+    durationSeconds: 120,
+    visualClips: 6,
+    captionClips: 1,
+    audioClips: 1,
+    peakVisualLayers: 2,
+    peakMediaLayers: 2,
+  };
+  const DESCRIPTOR = {
+    workload: WORKLOAD,
+    output: { width: 1920, height: 1080, fps: 30 },
+    quality: "medium",
+    engine: "file-sequence-v1" as const,
+    encoder: "x264-crf" as const,
+    revision: EXPORT_SPEED_REVISION,
+  };
+  const measuredRun: ExportCalibration = {
+    ...DESCRIPTOR,
+    elapsedSeconds: 150,
+    finalBytes: 48_000_000,
+    memoryBytes: 1 * GB,
+    temporaryBytes: 100_000_000,
+  };
+  const meta = {
+    duration_s: 120,
+    width: 1920,
+    height: 1080,
+    fps: 30,
+    quality: "medium",
+    project_id: "",
+    calibration: DESCRIPTOR,
+  };
+
+  async function fresh() {
+    const made = make();
+    await whenExportTelemetrySettles();
+    __setExportConfirmationForTests(async () => "continue");
+    vi.spyOn(host, "resolveExportResources").mockResolvedValue({
+      total_memory_bytes: 16 * GB,
+      available_memory_bytes: 12 * GB,
+      scratch_free_bytes: 500 * GB,
+      destination_free_bytes: 500 * GB,
+      local_fast_candidate: false,
+      budgets: { memoryBytes: 8 * GB, temporaryBytes: 18 * GB, executionSeconds: 28_800 },
+    });
+    useExportJob.setState({ calibrations: [], live: null, finishing: {} });
+    return made;
+  }
+
+  const described = (store: ProjectStoreAccess, over: Record<string, unknown> = {}) => ({
+    store,
+    dependencies: [],
+    destPath: DEST,
+    stagePath: STAGE,
+    filename: "film.mp4",
+    workload: WORKLOAD,
+    meta,
+    run: async () => ({}),
+    ...over,
+  });
+
+  it("is what this PC measured for an export like it, on the submission and on its record", async () => {
+    const { fs, store } = await fresh();
+    useExportJob.setState({ calibrations: [measuredRun] });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const sub = await submitWithDependencies(
+      described(store, {
+        run: async () => {
+          await gate;
+          await fs.writeBytes(STAGE, new Uint8Array([1]));
+          return {};
+        },
+      }) as Any,
+    );
+    const expected = { seconds: 150, guessed: false, finalBytes: 48_000_000 };
+    expect(sub.expected).toEqual(expected);
+    expect(listExportRecords().find((r) => r.job_id === sub.job_id)?.expected).toEqual(expected);
+    release();
+    await whenExportsSettle();
+  });
+
+  it("is a guess, and claims no size, when nothing like it has run on this PC", async () => {
+    const { store } = await fresh();
+    const sub = await submitWithDependencies(described(store) as Any);
+    expect(sub.expected?.guessed).toBe(true);
+    expect(sub.expected?.seconds).toBeGreaterThan(0);
+    expect(sub.expected?.finalBytes).toBeNull();
+    await whenExportsSettle();
+  });
+
+  it("is nothing for an export no estimate describes (a copy, or one with no size to go on)", async () => {
+    const { store } = await fresh();
+    const sub = await submitWithDependencies({
+      store,
+      dependencies: [],
+      destPath: DEST,
+      stagePath: STAGE,
+      filename: "copy.mp4",
+      run: async () => ({}),
+    });
+    expect(sub).not.toHaveProperty("expected");
+    expect(listExportRecords()[0]).not.toHaveProperty("expected");
+    await whenExportsSettle();
+  });
+
+  // The failure direction: the line is information. Whatever goes wrong in working it out must not stop the export
+  // it is about, which has already been checked and is being admitted.
+  it("never stops the export it describes, even when working it out fails at admission", async () => {
+    const { fs, store } = await fresh();
+    const real = options.estimateExport;
+    let calls = 0;
+    vi.spyOn(options, "estimateExport").mockImplementation((...args) => {
+      // The pre-start check reads it first; the admission is the second reader.
+      if (++calls >= 2) throw new Error("the estimate broke");
+      return real(...args);
+    });
+    const sub = await submitWithDependencies(
+      described(store, {
+        run: async () => {
+          await fs.writeBytes(STAGE, new Uint8Array([1]));
+          return {};
+        },
+      }) as Any,
+    );
+    expect(calls).toBeGreaterThanOrEqual(2);
+    expect(sub).not.toHaveProperty("expected");
+    await whenExportsSettle();
+    expect(listExportRecords().find((r) => r.job_id === sub.job_id)?.state).toBe("done");
+  });
+
+  it("is in the export list for an export that is still going, said as a guess when it is one, and not for one that ended", async () => {
+    const { fs, store } = await fresh();
+    useExportJob.setState({ calibrations: [measuredRun] });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const measured = await submitWithDependencies(
+      described(store, {
+        run: async () => {
+          await gate;
+          await fs.writeBytes(STAGE, new Uint8Array([1]));
+          return {};
+        },
+      }) as Any,
+    );
+    const second = `${DEST}.second.mp4`;
+    const guessed = await submitWithDependencies(
+      described(store, {
+        destPath: second,
+        stagePath: `${second}.part`,
+        filename: "second.mp4",
+        // A different picture: this PC has measured nothing like it.
+        workload: { ...WORKLOAD, width: 1280, height: 720 },
+        meta: {
+          ...meta,
+          width: 1280,
+          height: 720,
+          calibration: { ...DESCRIPTOR, output: { width: 1280, height: 720, fps: 30 } },
+        },
+        run: async () => {
+          await gate;
+          await fs.writeBytes(`${second}.part`, new Uint8Array([2]));
+          return {};
+        },
+      }) as Any,
+    );
+    const rows = (((await manageExportsTool({ action: "list" })) as Any).exports ?? []) as Any[];
+    const row = (id: string) => rows.find((r) => r.job_id === id);
+    expect(row(measured.job_id)).toMatchObject({ expected_s: 150 });
+    expect(row(measured.job_id)).not.toHaveProperty("expected_guessed");
+    expect(row(guessed.job_id)).toMatchObject({ expected_guessed: true });
+    expect(row(guessed.job_id).expected_s).toBeGreaterThan(0);
+    release();
+    await whenExportsSettle();
+    const after = (((await manageExportsTool({ action: "list" })) as Any).exports ?? []) as Any[];
+    for (const r of after) {
+      expect(r.state).toBe("done");
+      expect(r).not.toHaveProperty("expected_s"); // it is over: what it took is `duration_s`
+    }
+  });
+});
+
 describe("what happened to an export, as its report tells it", () => {
   const GIB = 1024 ** 3;
   const meta = {

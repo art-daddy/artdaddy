@@ -27,6 +27,10 @@ import {
   whenExportsSettle,
 } from "../timeline/exportQueue";
 import { answerButtons, planQuestions } from "../timeline/exportQuestions";
+import { describeExpected } from "../timeline/exportWords";
+import { EXPORT_SPEED_REVISION, estimateForDialog } from "../timeline/exportOptions";
+import { __setExportConfirmationForTests } from "../lib/confirm";
+import * as host from "../platform/host";
 import { ExportMemFs } from "../test/timelineKit";
 import { FakeJobs } from "../test/fakeJobs";
 import { ProjectStoreAccess } from "../tools/store";
@@ -48,6 +52,35 @@ let fs: ExportMemFs;
 let store: ProjectStoreAccess;
 const gates: Array<() => void> = [];
 
+// An export as the tool plans a real one: the project's size and layers, and the settings it was planned at.
+const WORKLOAD = {
+  width: 1920,
+  height: 1080,
+  fps: 30,
+  durationSeconds: 120,
+  visualClips: 6,
+  captionClips: 1,
+  audioClips: 1,
+  peakVisualLayers: 2,
+  peakMediaLayers: 2,
+};
+const DESCRIPTOR = {
+  workload: WORKLOAD,
+  output: { width: 1920, height: 1080, fps: 30 },
+  quality: "medium",
+  engine: "file-sequence-v1" as const,
+  encoder: "x264-crf" as const,
+  revision: EXPORT_SPEED_REVISION,
+};
+/** What this PC has measured of that export: 150 s and 48 MB. */
+const MEASURED = {
+  ...DESCRIPTOR,
+  elapsedSeconds: 150,
+  finalBytes: 48_000_000,
+  memoryBytes: null,
+  temporaryBytes: null,
+};
+
 /** An encode that only finishes when we say so, so a running and a waiting export can be looked at. */
 function gated() {
   let release!: () => void;
@@ -68,6 +101,9 @@ function start(
     /** How the encoder was chosen (exportChoice.ts); the normal setting when left out. */
     encoder?: "x264" | "x264_fast" | "amd" | "nvidia" | "intel";
     reason?: "over_minute" | "person" | "promise_line" | "none";
+    /** The export is described the way a real one is (its size and the settings it was planned at), so the queue can say
+     *  what it is expected to take. Left out, nothing describes it and nothing is expected. */
+    described?: boolean;
   } = {},
 ) {
   const useStore = over.store ?? store;
@@ -79,7 +115,8 @@ function start(
     stagePath: `/out/${filename}.partial`,
     filename,
     origin: AGENT, // the chat asked: the Export dialog's own job is not begun
-    ...(over.rung || over.encoder
+    ...(over.described ? { workload: WORKLOAD } : {}),
+    ...(over.rung || over.encoder || over.described
       ? {
           meta: {
             duration_s: 10,
@@ -88,6 +125,7 @@ function start(
             fps: 30,
             quality: "medium",
             project_id: "",
+            ...(over.described ? { calibration: DESCRIPTOR } : {}),
             ...(over.rung ? { plan: { rung: over.rung } } : {}),
             ...(over.encoder
               ? {
@@ -230,6 +268,89 @@ describe("ExportCard", () => {
     render(<ExportCard />);
     expect(screen.getByRole("progressbar")).not.toHaveAttribute("aria-valuenow");
     g.open();
+  });
+
+  // A person who asked their assistant to export saw no estimate at all: the Export dialog says it only for an export
+  // started from the menu. The card says it for every export, whoever asked, in the same words.
+  describe("what the export is expected to take", () => {
+    const GB = 1e9;
+    const expectedLine = () => screen.queryByTestId("export-card-expected")?.textContent ?? null;
+    beforeEach(() => {
+      // Every export that ends adds to what this PC has measured: start each of these knowing nothing.
+      useExportJob.setState({ calibrations: [] });
+      __setExportConfirmationForTests(async () => "continue");
+      vi.spyOn(host, "resolveExportResources").mockResolvedValue({
+        total_memory_bytes: 16 * GB,
+        available_memory_bytes: 12 * GB,
+        scratch_free_bytes: 500 * GB,
+        destination_free_bytes: 500 * GB,
+        local_fast_candidate: false,
+        budgets: { memoryBytes: 8 * GB, temporaryBytes: 18 * GB, executionSeconds: 28_800 },
+      });
+    });
+    afterEach(() => {
+      __setExportConfirmationForTests(null);
+      vi.restoreAllMocks();
+      useExportJob.setState({ calibrations: [] });
+    });
+
+    it("says, under the status line, what it is expected to take, in the words the Export dialog used, and keeps saying it the whole run", async () => {
+      useExportJob.setState({ calibrations: [MEASURED] });
+      const g = gated();
+      await start("one.mp4", g.wait, { described: true });
+      render(<ExportCard />);
+      const dialogSaid = describeExpected(
+        estimateForDialog(
+          WORKLOAD,
+          { resolution: "source", quality: "medium", fps: null, mode: "quality" },
+          [MEASURED],
+        ),
+      );
+      expect(dialogSaid).toBe(
+        "Expected: about 3 min, a file of about 48 MB, from earlier exports on this PC.",
+      );
+      expect(expectedLine()).toBe(dialogSaid);
+      // The render then reports a time left of its own. The line stays: it is what was expected at the start.
+      report({ fraction: 0.4, etaSec: 90, speed: 1, frame: 120 });
+      act(() =>
+        useExportJob.getState().setLiveStage(useExportJob.getState().live!.jobId, "rendering"),
+      );
+      expect(status()).toBe("Rendering and encoding · 40% · about 2 min left");
+      expect(expectedLine()).toBe(dialogSaid);
+      g.open();
+    });
+
+    it("says it is a guess when nothing like this has been exported on this PC", async () => {
+      const g = gated();
+      await start("one.mp4", g.wait, { described: true });
+      render(<ExportCard />);
+      expect(expectedLine()).toMatch(
+        /^Expected: (under a minute|about [\w ]+)\. A rough guess: nothing like this has been exported on this PC yet\.$/,
+      );
+      g.open();
+    });
+
+    it("says nothing for an export nothing describes, rather than an estimate of zero", async () => {
+      const g = gated();
+      await start("one.mp4", g.wait);
+      render(<ExportCard />);
+      expect(expectedLine()).toBeNull();
+      g.open();
+    });
+
+    it("is said for the export that is running, not repeated on those waiting behind it or on how one ended", async () => {
+      useExportJob.setState({ calibrations: [MEASURED] });
+      const g = gated();
+      await start("one.mp4", g.wait, { described: true });
+      await start("two.mp4", g.wait, { described: true });
+      render(<ExportCard />);
+      expect(screen.getAllByTestId("export-card-expected")).toHaveLength(1);
+      expect(screen.getByText("Waiting · 1st in line · two.mp4")).toBeVisible();
+      g.open();
+      await whenExportsSettle();
+      expect(screen.queryAllByTestId("export-card-expected")).toHaveLength(0);
+      expect(screen.getByText("Exported “two.mp4”")).toBeVisible();
+    });
   });
 
   describe("a line that is refreshed by a clock", () => {

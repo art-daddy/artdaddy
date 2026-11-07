@@ -7,7 +7,8 @@
 //     record the dialog shows, so answering in either closes both. While the dialog is on screen it is
 //     modal and covers this card, so the card says nothing about the question then.
 //   - every running export: its name, a bar, one line saying where it is (refreshed by a clock, so it
-//     never goes stale), and Cancel. More than one can be running when the next export's turn has begun
+//     never goes stale), what it was expected to take (in the words the Export dialog used before the
+//     click), and Cancel. More than one can be running when the next export's turn has begun
 //     while the last one's file is still being checked or saved; each has its own feed.
 //   - the exports waiting behind it, with their place in line
 //   - how the last ones ended, in plain words
@@ -38,6 +39,7 @@ import {
   canSaveElsewhere,
   describeChipFailure,
   describeEncoder,
+  describeExpected,
   describeLiveStatus,
   describeResult,
   describeRung,
@@ -45,13 +47,12 @@ import {
   describeWaiting,
   failureOf,
   SAVE_ELSEWHERE_LINE,
+  STATUS_REFRESH_MS,
 } from "../timeline/exportWords";
 import ExportProgressBar from "./ExportProgressBar";
 import SaveToRow from "./SaveToRow";
 import { cn } from "./ui";
 
-/** How often the line is redrawn while something is running: well inside the minute it promises. */
-const TICK_MS = 10_000;
 /** How long good news stays: a finished export is a moment, a failed one stays until dismissed. */
 const GOOD_NEWS_MS = 60_000;
 
@@ -105,7 +106,7 @@ export default function ExportCard(): JSX.Element | null {
   const ticking = running.length > 0 || goodNews !== undefined;
   useEffect(() => {
     if (!ticking) return;
-    const id = setInterval(redraw, TICK_MS);
+    const id = setInterval(redraw, STATUS_REFRESH_MS);
     return () => clearInterval(id);
   }, [ticking]);
 
@@ -164,6 +165,7 @@ export default function ExportCard(): JSX.Element | null {
 
       {running.map((r) => {
         const feed = liveFeedOf({ live, finishing }, r.job_id);
+        const expected = describeExpected(r.expected);
         return (
           <div key={r.job_id}>
             <div className="flex items-center justify-between gap-2">
@@ -187,6 +189,16 @@ export default function ExportCard(): JSX.Element | null {
             <div data-testid="export-card-status" className="mt-1 text-[11px] text-neutral-400">
               {r.cancelling ? "Cancelling…" : feed ? describeLiveStatus(feed, now) : "Working…"}
             </div>
+            {/* What it was expected to take when it began, for the whole run: the time left above is the render's own
+                guess and only appears once it is moving. */}
+            {expected && !r.cancelling && (
+              <div
+                data-testid="export-card-expected"
+                className="mt-0.5 text-[11px] text-neutral-500"
+              >
+                {expected}
+              </div>
+            )}
             {r.rung && (
               <div className="mt-0.5 text-[11px] text-neutral-500">{describeRung(r.rung)}</div>
             )}

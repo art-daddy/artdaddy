@@ -1,18 +1,20 @@
 // What the export tool tells the agent about the file it will deliver. The watermark and the end
 // card are added to every export, so the file runs longer than the timeline; an agent that is not
 // told reads that as a broken export (QA 2026-10-06: "11 s for a 9 s timeline ... a discrepancy").
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@tauri-apps/api/path", () => ({ resolveResource: async (r: string) => `C:/res/${r}` }));
 
 import { ExportMemFs, registerTestDocument, resetTestDocuments } from "../test/timelineKit";
 import { ensureTimeline } from "./engine";
-import { __resetExportQueue, whenExportsSettle } from "./exportQueue";
+import { __resetExportQueue, listExportRecords, whenExportsSettle } from "./exportQueue";
+import { describeExpected } from "./exportWords";
 import { addClipsTool } from "./placement";
 import { exportTimelineTool } from "./render";
 import { ProjectStoreAccess } from "../tools/store";
 import { setClerkTokenProvider } from "../api/auth";
 import { useAuth } from "../store/auth";
+import { useExportJob } from "../store/exportJob";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -151,5 +153,34 @@ describe("the export reply", () => {
     expect(String(r.note ?? "")).not.toMatch(/end card|watermark/i);
     expect((r.warnings as string[]).join(" ")).toMatch(/unbranded/);
     expect(r.duration_s).toBeCloseTo(9, 3);
+  });
+
+  // An assistant that started an export used to be told nothing about how long it would take, so it could not tell
+  // the person: the estimate was shown only to someone using the Export menu.
+  describe("how long it is expected to take", () => {
+    // Every export that ends adds to what this PC has measured: start each of these knowing nothing, so the
+    // estimate is the guess whose words are asserted.
+    beforeEach(() => useExportJob.setState({ calibrations: [] }));
+
+    it("is said in the reply, in the words the card shows, next to what else the reply says", async () => {
+      const r = await exportNineSeconds({ brandAssets: true });
+      expect(r.ok, JSON.stringify(r)).toBe(true);
+      const record = listExportRecords().find((row) => row.job_id === r.job_id);
+      expect(record?.expected).toBeDefined();
+      expect(String(r.note)).toContain(describeExpected(record!.expected));
+      expect(String(r.note)).toMatch(
+        /Expected: .+ A rough guess: nothing like this has been exported/,
+      );
+      // Nothing it said before was lost to make room for it.
+      expect(String(r.note)).toContain("Downloads");
+      expect(String(r.note)).toMatch(/watermark and end card are added/i);
+    });
+
+    it("is said for an export to a path the caller chose, which has no destination note to put it after", async () => {
+      const r = await exportNineSeconds({ brandAssets: false, outputPath: "D:/Videos/cut.mp4" });
+      expect(r.ok, JSON.stringify(r)).toBe(true);
+      expect(String(r.note)).toMatch(/^Expected: /);
+      expect(String(r.note)).not.toContain("Downloads");
+    });
   });
 });

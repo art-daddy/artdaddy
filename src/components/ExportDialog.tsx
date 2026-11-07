@@ -3,21 +3,26 @@
 // Non-blocking by design (Premiere's Media Encoder, not a modal): dismissing it leaves the render
 // running and the menu bar keeps a live percentage, so a long export does not hold the editor
 // hostage. Re-opening rejoins the job already in progress rather than starting a second one.
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useReducer, useState, useSyncExternalStore } from "react";
 
 import { formatEta } from "../timeline/ffmpegProgress";
 import { decideExportEncoder, type ExportEncoderDecision } from "../timeline/exportChoice";
 import {
-  describeExportSize,
-  describeExportTime,
   estimateForDialog,
   type ExportMode,
   type ExportQuality,
   type ExportResolution,
 } from "../timeline/exportOptions";
-import { describeModeLines, type ModeView } from "../timeline/exportWords";
+import { listExportRecords, subscribeExports } from "../timeline/exportQueue";
+import {
+  describeDialogProgress,
+  describeExpected,
+  describeModeLines,
+  STATUS_REFRESH_MS,
+  type ModeView,
+} from "../timeline/exportWords";
 import type { RenderWorkload } from "../timeline/renderPlan";
-import { useExportJob } from "../store/exportJob";
+import { liveFeedOf, useExportJob, type ExportPhase } from "../store/exportJob";
 import ExportProgressBar from "./ExportProgressBar";
 import ExportQueuePane from "./ExportQueuePane";
 
@@ -99,21 +104,13 @@ export default function ExportDialog({
     if (!workload) return "";
     const route =
       mode === "fast" ? { chip: decision?.facts.chip } : { faster: decision?.faster === true };
-    const estimate = estimateForDialog(
-      workload,
-      { resolution, quality, fps, mode },
-      calibrations,
-      route,
+    return describeExpected(
+      estimateForDialog(workload, { resolution, quality, fps, mode }, calibrations, route),
     );
-    const time = describeExportTime(estimate.seconds);
-    if (!time) return "";
-    if (estimate.guessed)
-      return `Expected: ${time}. A rough guess: nothing like this has been exported on this PC yet.`;
-    const size = describeExportSize(estimate.finalBytes);
-    return `Expected: ${time}${size ? `, a file of ${size}` : ""}, from earlier exports on this PC.`;
   }, [workload, resolution, quality, fps, mode, calibrations, decision]);
 
   const phase = useExportJob((s) => s.phase);
+  const jobId = useExportJob((s) => s.jobId);
   const fraction = useExportJob((s) => s.fraction);
   const etaSec = useExportJob((s) => s.etaSec);
   const speed = useExportJob((s) => s.speed);
@@ -193,6 +190,7 @@ export default function ExportDialog({
         {running || phase === "done" || phase === "failed" || phase === "cancelled" ? (
           <Progress
             phase={phase}
+            jobId={jobId}
             fraction={fraction}
             etaSec={etaSec}
             speed={speed}
@@ -365,13 +363,16 @@ export default function ExportDialog({
 
 function Progress({
   phase,
+  jobId,
   fraction,
   etaSec,
   speed,
   savedTo,
   error,
 }: {
-  phase: string;
+  phase: ExportPhase;
+  /** The export this job follows, once the queue has given it an id. */
+  jobId: string | null;
   fraction: number | null;
   etaSec: number | null;
   speed: number;
@@ -379,25 +380,65 @@ function Progress({
   error: string | null;
 }): JSX.Element {
   const done = phase === "done";
-  const pct = done ? 1 : (fraction ?? 0);
-  const eta = formatEta(etaSec);
+  // Where the export is comes from ITS OWN feed, as the chat card reads it: the job above is moved by whichever
+  // export is rendering, so an export waiting behind another would say that one's percent. Before the export has an
+  // id the job is all there is.
+  const live = useExportJob((s) => s.live);
+  const finishing = useExportJob((s) => s.finishing);
+  const rows = useSyncExternalStore(subscribeExports, listExportRecords, listExportRecords);
+  const running = phase === "preparing" || phase === "rendering";
+  // A clock, not the progress feed: a stage that drags on (checking a long file) reports nothing at all, and that is
+  // exactly when the line has to keep changing.
+  const [, redraw] = useReducer((n: number) => n + 1, 0);
+  useEffect(() => {
+    if (!running) return;
+    const id = setInterval(redraw, STATUS_REFRESH_MS);
+    return () => clearInterval(id);
+  }, [running]);
+
+  const own = running && jobId ? liveFeedOf({ live, finishing }, jobId) : null;
+  // Its place in line, while it waits for its turn (the same line the chat card counts).
+  const place =
+    running && jobId && own === null
+      ? rows
+          .filter((r) => r.state === "queued" && !r.cancelling)
+          .findIndex((r) => r.job_id === jobId) + 1
+      : 0;
+  const shown =
+    phase === "preparing" || phase === "rendering"
+      ? describeDialogProgress(
+          { own, place: place > 0 ? place : null, phase, fraction, etaSec, speed },
+          Date.now(),
+        )
+      : null;
+  const pace = shown
+    ? [
+        shown.speed === null ? "" : `${shown.speed.toFixed(1)}×`,
+        shown.left === null ? "" : `${formatEta(shown.left)} left`,
+      ]
+        .filter(Boolean)
+        .join(" · ")
+    : "";
   return (
     <div className="mt-3">
       <ExportProgressBar
-        fraction={fraction}
+        fraction={shown ? shown.fraction : fraction}
         state={phase === "failed" ? "failed" : done ? "done" : "running"}
       />
-      <div className="mt-2 flex items-baseline justify-between text-[11px] text-neutral-400">
-        <span data-testid="export-status">
-          {phase === "preparing" && "Preparing…"}
-          {phase === "rendering" && (fraction === null ? "Starting…" : `${Math.round(pct * 100)}%`)}
-          {done && "Done"}
-          {phase === "failed" && "Failed"}
-          {phase === "cancelled" && "Cancelled"}
+      <div className="mt-2 flex items-baseline justify-between gap-3 text-[11px] text-neutral-400">
+        <span data-testid="export-status" className="min-w-0">
+          {shown
+            ? shown.status
+            : done
+              ? "Done"
+              : phase === "failed"
+                ? "Failed"
+                : phase === "cancelled"
+                  ? "Cancelled"
+                  : ""}
         </span>
-        <span className="tabular-nums">
-          {phase === "rendering" && speed > 0 && `${speed.toFixed(1)}× · `}
-          {phase === "rendering" && eta && `${eta} left`}
+        <span data-testid="export-pace" className="shrink-0 tabular-nums">
+          {pace}
         </span>
       </div>
       {savedTo && (

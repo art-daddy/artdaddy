@@ -15,6 +15,7 @@ import { ensureTimeline } from "./engine";
 import {
   cancelExport,
   listExportOutcomes,
+  listExportRecords,
   __resetExportQueue,
   whenExportsSettle,
   whenExportTelemetrySettles,
@@ -22,6 +23,8 @@ import {
   ExportMoveRequest,
   ExportRequestError,
 } from "./exportQueue";
+import { describeExpected } from "./exportWords";
+import { totalExpectation } from "./exportOptions";
 import { ExportStory } from "./exportTrace";
 import { exportTool, MAX_EXPORT_MOVES, runWithMoves } from "./exportItems";
 import { addClipsTool, addTextClipsTool } from "./placement";
@@ -325,6 +328,8 @@ describe("export delivers separate files into a folder", () => {
     ]);
     expect(String(r.note)).toMatch(/VHS clips/);
     expect(String(r.note)).not.toMatch(/end card/i);
+    // A copy renders nothing, so there is nothing to say about how long it takes.
+    expect(String(r.note)).not.toMatch(/Expected/);
     expect(r.note).toBe(
       "Saving 2 files to 'VHS clips' in your Downloads folder. Library files are copied as they are.",
     );
@@ -500,6 +505,8 @@ describe("export delivers separate files into a folder", () => {
   });
 
   it("renders each timeline clip over its own span, with the watermark and no end card", async () => {
+    // Every export that ends adds to what this PC has measured: start knowing nothing, so the total is a guess.
+    useExportJob.setState({ calibrations: [] });
     const p = await project();
     const r = (await exportTool(
       { clip_ids: [p.clips.b, p.clips.a], output_dir: "scenes" },
@@ -521,10 +528,33 @@ describe("export delivers separate files into a folder", () => {
     }
     expect(String(r.note)).toMatch(/watermark/i);
     expect(String(r.note)).toMatch(/no end card/i);
+    // The files run one after another: the answer says how long all of them are expected to take, in the card's own
+    // words, from the same estimates the queue holds for each (a guess, as nothing has been exported here yet).
+    const total = totalExpectation(listExportRecords().map((record) => record.expected));
+    expect(total).not.toBeNull();
     expect(r.note).toBe(
-      "Saving 2 files to 'scenes' in your Downloads folder. Each clip from the timeline carries the ArtDaddy watermark (no end card).",
+      "Saving 2 files to 'scenes' in your Downloads folder. Each clip from the timeline carries the ArtDaddy watermark (no end card). " +
+        describeExpected(total, "all"),
     );
+    expect(String(r.note)).toMatch(/Expected: .+ in all\. A rough guess: /);
     expect(listExportOutcomes().every((x) => x.state === "done")).toBe(true);
+  });
+
+  it("says how long the clips are expected to take even when library files are delivered with them, counting only the clips", async () => {
+    const p = await project();
+    const r = (await exportTool(
+      { media_refs: ["media_aaa"], clip_ids: [p.clips.a], output_dir: "mixed" },
+      p.ctx,
+    )) as Any;
+    expect(r.ok, r.error).toBe(true);
+    const records = listExportRecords();
+    expect(records).toHaveLength(2);
+    // The copy has nothing to estimate; the clip's own estimate is the total.
+    expect(records[0].expected).toBeUndefined();
+    expect(records[1].expected).toBeDefined();
+    expect(String(r.note)).toContain(describeExpected(records[1].expected, "all"));
+    expect(String(r.note)).toContain("Library files are copied as they are.");
+    await whenExportsSettle();
   });
 
   it("never overwrites a file already in the folder", async () => {

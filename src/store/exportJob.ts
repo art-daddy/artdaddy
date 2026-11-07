@@ -106,6 +106,9 @@ export type ExportPhase = "idle" | "preparing" | "rendering" | "done" | "failed"
 
 export interface ExportJob {
   phase: ExportPhase;
+  /** The queue's id for the export this job follows, once the export has been admitted (a little after the job
+   *  begins), so the dialog can read that export's own feed and no other's. Null before that. */
+  jobId: string | null;
   /** 0..1, or null while ffmpeg has not reported a position yet. */
   fraction: number | null;
   /** Seconds remaining, or null when there is not enough information to say. */
@@ -121,6 +124,7 @@ export interface ExportJob {
 
 const IDLE: ExportJob = {
   phase: "idle",
+  jobId: null,
   fraction: null,
   etaSec: null,
   speed: 0,
@@ -152,6 +156,9 @@ interface ExportState extends ExportJob {
   /** Set while a render is in flight, so the dialog can offer Cancel. */
   abort: (() => void) | null;
   begin: (abort: (() => void) | null) => void;
+  /** Says which export the job follows, once the queue has given it an id. Ignored once the job has ended: an answer
+   *  that arrives late follows nothing. */
+  attach: (jobId: string) => void;
   /** A progress report. Moves the dialog's job while that job is running, and the live feed whenever
    *  an export is live. `step` and `steps` say which part of a streamed render this is. */
   update: (patch: Partial<ExportJob> & { step?: number | null; steps?: number | null }) => void;
@@ -187,6 +194,8 @@ export const useExportJob = create<ExportState>((set, get) => ({
   },
   abort: null,
   begin: (abort) => set({ ...IDLE, phase: "preparing", startedAt: Date.now(), abort }),
+  attach: (jobId) =>
+    set((s) => (s.phase === "preparing" || s.phase === "rendering" ? { jobId } : s)),
   // Progress must never resurrect a job that already finished: ffmpeg's last blocks can arrive
   // after the process exits, and a bar that jumps back to 90% after saying "done" reads as a bug.
   update: (patch) =>
