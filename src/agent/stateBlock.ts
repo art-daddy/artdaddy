@@ -27,8 +27,9 @@ const MAX_KINDS = 8;
 const FULL_HEAD =
   `${STATE_BLOCK_MARK} - read for you by the app just now: these are the results get_project_state and ` +
   `get_timeline return, so do not call either again before your first edit.]`;
+const SUMMARY_MARK = `${STATE_BLOCK_MARK} (summary)`;
 const SUMMARY_HEAD =
-  `${STATE_BLOCK_MARK} (summary) - read for you by the app just now, but too large to list in full. For ` +
+  `${SUMMARY_MARK} - read for you by the app just now, but too large to list in full. For ` +
   `clip-level detail call get_timeline (window it with start_frame and end_frame); for every asset call ` +
   `library_op with action list.]`;
 
@@ -157,6 +158,12 @@ export function formatStateBlock(
   } catch {
     return null;
   }
+}
+
+/** Which of the two blocks this is, from its own first line: a project's words are on the second, so they cannot say. */
+export function stateBlockForm(block: string): "full" | "summary" {
+  const end = block.indexOf("\n");
+  return (end === -1 ? block : block.slice(0, end)).startsWith(SUMMARY_MARK) ? "summary" : "full";
 }
 
 /** A trace that records nothing: the app's own look is not a tool call the model made, and the analytics

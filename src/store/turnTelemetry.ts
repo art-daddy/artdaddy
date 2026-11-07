@@ -11,6 +11,7 @@ import {
   type AgentEventContext,
   type ApprovalDecision,
   type TurnOutcome,
+  type TurnStateRead,
   type TurnTrigger,
 } from "../api/agentEvents";
 import { TurnTimer } from "../agent/turnTiming";
@@ -41,6 +42,8 @@ export class TurnTelemetry {
   readonly timer: TurnTimer;
   private ended = false;
   private started = false;
+  /** How the project reached the model on this turn's first message; said with the turn's end. */
+  private stateRead: TurnStateRead | undefined;
   /** Tool calls the person has been asked about and has not answered, by call id. */
   private readonly asked = new Map<string, string>();
 
@@ -62,6 +65,12 @@ export class TurnTelemetry {
     if (this.started || this.ended) return;
     this.started = true;
     this.sink.turnStart({ turn_id: this.turnId, ...info }, this.labels);
+  }
+
+  /** How the project reached the model on this turn's first message: the whole listing, an outline, or a read that
+   *  did not finish. Reported once, with the turn's end; a turn that asked for no read never calls this. */
+  noteStateRead(word: TurnStateRead): void {
+    if (!this.ended) this.stateRead = word;
   }
 
   /** The turn stopped to ask the person about these calls. */
@@ -117,7 +126,13 @@ export class TurnTelemetry {
     this.asked.clear();
     this.ended = true;
     this.sink.turnEnd(
-      { turn_id: this.turnId, outcome, ...(code ? { code } : {}), summary: this.timer.finish() },
+      {
+        turn_id: this.turnId,
+        outcome,
+        ...(code ? { code } : {}),
+        ...(this.stateRead ? { state: this.stateRead } : {}),
+        summary: this.timer.finish(),
+      },
       this.labels,
     );
   }

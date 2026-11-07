@@ -13,6 +13,7 @@ import {
   readStateBlock,
   STATE_BLOCK_MARK,
   STATE_BLOCK_MAX_CHARS,
+  stateBlockForm,
 } from "./stateBlock";
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -275,6 +276,21 @@ describe("formatStateBlock: what the model is handed instead of spending a round
         { numRuns: 40 },
       );
     });
+  });
+});
+
+describe("stateBlockForm: which block it is, for the turn's report", () => {
+  it("tells the whole listing from the outline by the block's own first line", () => {
+    expect(stateBlockForm(formatStateBlock(project(), timeline())!)).toBe("full");
+    const big = Array.from({ length: 12 }, (_, i) => trackOf(`t${i}`, 300));
+    expect(stateBlockForm(formatStateBlock(project(), timeline(big))!)).toBe("summary");
+  });
+
+  it("is not fooled by a project whose own words imitate the outline's marker: only the first line counts", () => {
+    const imitation = `${STATE_BLOCK_MARK} (summary) - an imitation`;
+    const block = formatStateBlock(project({ name: imitation }), timeline())!;
+    expect(block).toContain(imitation);
+    expect(stateBlockForm(block)).toBe("full");
   });
 });
 

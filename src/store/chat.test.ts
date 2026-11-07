@@ -2391,6 +2391,82 @@ describe("useChat records each turn (T-11, T-12)", () => {
     await useChat.getState().send(text, [], opts);
   }
 
+  // The report says how the project reached the model, so a read that quietly fails is visible in the field.
+  describe("how the project reached the model", () => {
+    const track = (id: string, clips: number) => ({
+      id,
+      kind: "video",
+      z: 0,
+      clips: Array.from({ length: clips }, (_, i) => ({
+        id: `${id}_${i}`,
+        media_ref: "media_a",
+        timeline_in: i * 90,
+        timeline_out: (i + 1) * 90,
+      })),
+    });
+    const readingHost = (reply: (name: string) => unknown) =>
+      (openToolHost as Any).mockImplementation((id: string) => ({
+        projectId: id,
+        ready: Promise.resolve(),
+        has: (n: string) => n === "get_timeline" || n === "get_project_state",
+        run: vi.fn(async (name: string) => reply(name)),
+        store: () => null,
+      }));
+    const project = { ok: true, project_id: "p1", name: "Reel", library: [], library_count: 0 };
+    const listing = (tracks: unknown[]) => (name: string) =>
+      name === "get_timeline" ? { ok: true, timeline: { units: "frames", tracks } } : project;
+    afterEach(() => {
+      (openToolHost as Any).mockImplementation((id: string) => ({
+        projectId: id,
+        ready: Promise.resolve(),
+        has: () => false,
+        run: vi.fn(async () => ({})),
+        store: () => null,
+      }));
+    });
+
+    it("reports a whole listing on the turn that was given one, and nothing on a later turn that was not", async () => {
+      readingHost(listing([track("v1", 2)]));
+      await startTurn("make it punchy");
+      emit("turn_done", snap());
+      await useChat.getState().send("and again");
+      emit("turn_done", snap());
+      const [first, second] = ofKind("turn_end");
+      expect(first).toMatchObject({ outcome: "done", state: "full" });
+      expect(second).toMatchObject({ outcome: "done" });
+      expect(second).not.toHaveProperty("state");
+    });
+
+    it("reports an outline when the project was too big to list", async () => {
+      readingHost(listing(Array.from({ length: 12 }, (_, i) => track(`t${i}`, 300))));
+      await startTurn("make it punchy");
+      emit("turn_done", snap());
+      expect(ofKind("turn_end")[0]).toMatchObject({ state: "summary" });
+    });
+
+    it("reports a read that failed, so it cannot go unnoticed", async () => {
+      readingHost((name) =>
+        name === "get_timeline" ? { ok: false, error: "timeline.json not found" } : project,
+      );
+      await startTurn("make it punchy");
+      emit("turn_done", snap());
+      expect(ofKind("turn_end")[0]).toMatchObject({ outcome: "done", state: "failed" });
+    });
+
+    it("says nothing for the app's own turns, which never ask for a read", async () => {
+      readingHost(listing([track("v1", 2)]));
+      await startTurn("Background work you started earlier has finished:", { system: true });
+      emit("turn_done", snap());
+      expect(ofKind("turn_end")[0]).not.toHaveProperty("state");
+    });
+
+    it("says nothing when the host cannot make the reads (nothing was attempted, so nothing failed)", async () => {
+      await startTurn("make it punchy"); // the default host here claims to run no tool
+      emit("turn_done", snap());
+      expect(ofKind("turn_end")[0]).not.toHaveProperty("state");
+    });
+  });
+
   it("a turn whose waits were injected (3 s admission, 5 s on its way, 10 s thinking, 2 s writing, a 20 s tool) is stored with parts that add up to its wall time", async () => {
     await startTurn();
     (inferRoundStreaming as Any).mockImplementationOnce(

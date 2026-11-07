@@ -4,7 +4,7 @@ import { createStore, type StoreApi } from "zustand/vanilla";
 import { inferRoundStreaming } from "../agent/api";
 import { ClientTurnRunner, type LoopDeps } from "../agent/loop";
 import { composeModelText, TIMELINE_CHANGED_NOTE } from "../agent/compose";
-import { canReadState, readStateBlock } from "../agent/stateBlock";
+import { canReadState, readStateBlock, stateBlockForm } from "../agent/stateBlock";
 import { sameTimeline, TimelineAwareness, type DocReading } from "../agent/timelineAwareness";
 import { collectInferenceAttachments } from "../agent/attachments";
 import { historyAttachments } from "../agent/historyFrames";
@@ -1051,6 +1051,8 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
         const before = docReading(projectId);
         stateBlock = await readStateBlock(host, exec.controller.signal);
         if (exec !== currentExec) return;
+        // Said with the turn's end, so a read that quietly failed shows in the field, not only a block that was sent.
+        exec.telemetry.noteStateRead(stateBlock ? stateBlockForm(stateBlock) : "failed");
         // The read began at `before`: it shows every outside edit made until then, and none after.
         if (stateBlock && before) awareness.sawWholeTimeline(before);
       }

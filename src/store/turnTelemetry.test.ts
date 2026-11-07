@@ -81,6 +81,44 @@ describe("a turn is said to start once, and to end once", () => {
     expect(sink.approvalDecided).not.toHaveBeenCalled();
     expect(telemetry.finished).toBe(true);
   });
+
+  describe("how the project reached the model", () => {
+    it.each(["full", "summary", "failed"] as const)(
+      "reports %s on the turn's end, and only there",
+      (word) => {
+        const { telemetry, sink } = rig();
+        telemetry.start({ trigger: "user", mode: "default", effort: "high", attachments: 0 });
+        telemetry.noteStateRead(word);
+        expect(sink.turnStart.mock.calls[0][0]).not.toHaveProperty("state");
+        telemetry.end("done");
+        expect(sink.turnEnd.mock.calls[0][0]).toMatchObject({ outcome: "done", state: word });
+      },
+    );
+
+    it("says nothing when no read was made: most turns are like that", () => {
+      const { telemetry, sink } = rig();
+      telemetry.end("done");
+      expect(sink.turnEnd.mock.calls[0][0]).not.toHaveProperty("state");
+    });
+
+    it("is reported whatever way the turn ends: Stop, an error, or being left behind", () => {
+      for (const outcome of ["stopped", "error", "abandoned"] as const) {
+        const { telemetry, sink } = rig();
+        telemetry.noteStateRead("failed");
+        telemetry.end(outcome);
+        expect(sink.turnEnd.mock.calls[0][0]).toMatchObject({ outcome, state: "failed" });
+      }
+    });
+
+    it("cannot change a turn that has already ended", () => {
+      const { telemetry, sink } = rig();
+      telemetry.end("done");
+      telemetry.noteStateRead("full");
+      telemetry.end("done");
+      expect(sink.turnEnd).toHaveBeenCalledTimes(1);
+      expect(sink.turnEnd.mock.calls[0][0]).not.toHaveProperty("state");
+    });
+  });
 });
 
 describe("the person's answers", () => {

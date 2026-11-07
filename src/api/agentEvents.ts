@@ -35,6 +35,10 @@ export const AGENT_EVENT_KINDS = [
 ] as const;
 export const TURN_OUTCOMES = ["done", "stopped", "error", "abandoned"] as const;
 export const TURN_TRIGGERS = ["user", "system", "retry"] as const;
+/** How the project reached the model on a turn's first message (agent/stateBlock.ts), said on the turn's end: the
+ *  whole listing, an outline of a project too big to list, or a read that did not finish. A turn that asked for no read
+ *  says nothing. */
+export const TURN_STATE_READS = ["full", "summary", "failed"] as const;
 export const APPROVAL_DECISIONS = ["approved", "declined", "stopped", "abandoned"] as const;
 export const TURN_MS_FIELDS = [
   "wall_ms",
@@ -64,6 +68,7 @@ export const MAX_BYTES_UP = 10_000_000_000;
 export type AgentEventKind = (typeof AGENT_EVENT_KINDS)[number];
 export type TurnOutcome = (typeof TURN_OUTCOMES)[number];
 export type TurnTrigger = (typeof TURN_TRIGGERS)[number];
+export type TurnStateRead = (typeof TURN_STATE_READS)[number];
 export type ApprovalDecision = (typeof APPROVAL_DECISIONS)[number];
 
 export interface AgentEvent extends Partial<
@@ -86,6 +91,7 @@ export interface AgentEvent extends Partial<
   effort?: string;
   outcome?: TurnOutcome;
   code?: string;
+  state?: TurnStateRead;
   decision?: ApprovalDecision;
   attachments?: number;
   bytes_up?: number;
@@ -397,7 +403,13 @@ export function recordTurnStart(
 
 /** A turn ended: how, and where its wall time went (the parts add up to `wall_ms`). */
 export function recordTurnEnd(
-  ev: { turn_id: string; outcome: TurnOutcome; code?: string; summary: TurnSummary },
+  ev: {
+    turn_id: string;
+    outcome: TurnOutcome;
+    code?: string;
+    state?: TurnStateRead;
+    summary: TurnSummary;
+  },
   labels: AgentEventContext = agentEventContext(),
 ): void {
   const s = ev.summary;
@@ -410,6 +422,7 @@ export function recordTurnEnd(
       turn_id: legalText(ev.turn_id, 64),
       outcome: ev.outcome,
       code: legalText(ev.code, 40),
+      ...(ev.state ? { state: ev.state } : {}),
       ...times,
       ...counts,
       bytes_up: Number.isFinite(s.bytes_up)
