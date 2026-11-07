@@ -9,7 +9,10 @@
 //! that was opened for the life of the process, and calls `signal`, `raise` or the previous handler. No allocation, no lock, no
 //! logging.
 //!
-//! It never changes what a signal does. Two kinds are taken differently:
+//! It does not change what a signal does, with one exception it cannot close: if another thread sets the handler of the same
+//! signal in the few instructions between the app reading it and taking it (nothing does that while the app starts), the app's
+//! handler is taken with the mask and flags of what it read, and an ignore set in that instant is passed on as "do nothing" rather
+//! than as an ignore. Two kinds of signal are taken differently:
 //!  * the crash signals (SIGSEGV, SIGBUS, SIGILL, SIGFPE) and the abort a panic or a stack overflow ends in (SIGABRT) end the
 //!    process anyway. The runtime has its own handler for the first two (it recognises a stack overflow), so the app's handler
 //!    takes the signal under the same mask and flags as what was there (the alternate stack is added only where nothing was
