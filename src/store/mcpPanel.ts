@@ -6,11 +6,13 @@
 // someone switched the server off.
 import { create } from "zustand";
 
-import { mcpStatus } from "../mcp/service";
+import { mcpStarting, mcpStatus, onMcpChange } from "../mcp/service";
 
 interface McpPanelState {
   open: boolean;
   running: boolean;
+  /** A start is waiting for the port (the boot hook, or the switch), so "Stopped" would be half the truth. */
+  starting: boolean;
   openPanel: () => void;
   closePanel: () => void;
   setRunning: (running: boolean) => void;
@@ -20,6 +22,7 @@ interface McpPanelState {
 export const useMcpPanel = create<McpPanelState>((set) => ({
   open: false,
   running: false,
+  starting: mcpStarting(),
   openPanel: () => set({ open: true }),
   closePanel: () => set({ open: false }),
   setRunning: (running) => set({ running }),
@@ -32,3 +35,10 @@ export const useMcpPanel = create<McpPanelState>((set) => ({
     }
   },
 }));
+
+// The server changes state without anyone on screen asking: the boot hook starts it, and now waits for a port that is
+// still being let go instead of failing at once. What the panel and the chip show has to follow that.
+onMcpChange(() => {
+  useMcpPanel.setState({ starting: mcpStarting() });
+  void useMcpPanel.getState().refresh();
+});

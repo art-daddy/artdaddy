@@ -18,7 +18,9 @@ import {
 } from "../mcp/install";
 import type { McpClient } from "../mcp/clientName";
 import {
+  MCP_BIND_WAIT_MS,
   MCP_PORT,
+  McpStartCancelled,
   clearMcpLastError,
   mcpBindFailureReason,
   mcpLastError,
@@ -156,12 +158,18 @@ export default function McpPanel() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(mcpLastError());
   const running = useMcpPanel((s) => s.running);
+  const starting = useMcpPanel((s) => s.starting);
   const setRunning = useMcpPanel((s) => s.setRunning);
   const refresh = useMcpPanel((s) => s.refresh);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  // A start that nobody here asked for (the app's own boot) can end while this is open: say how it ended.
+  useEffect(() => {
+    if (!starting) setError(mcpLastError());
+  }, [starting]);
 
   // Driven by whether the server IS running, never by the stored preference. Those disagree
   // exactly when the user needs this panel — a boot failure left the button reading "On" above
@@ -171,13 +179,14 @@ export default function McpPanel() {
     setBusy(true);
     setMcpEnabledPreference(next);
     try {
-      const s = next ? await startMcpServer() : await stopMcpServer();
+      const s = next ? await startMcpServer({ where: "toggle" }) : await stopMcpServer();
       setRunning(s.running);
       setError(null);
       clearMcpLastError();
       // The switch, as the person used it: only when the server really is in the state they asked for.
       if (s.running === next) reportMcpEvent(next ? "mcp_enabled" : "mcp_disabled");
     } catch (e) {
+      if (e instanceof McpStartCancelled) return; // switched off again while it waited: nothing failed
       setRunning(false);
       setError(recordMcpError(e));
       if (next) reportMcpEvent("mcp_bind_failed", { reason: mcpBindFailureReason(e, "toggle") });
@@ -185,6 +194,8 @@ export default function McpPanel() {
       setBusy(false);
     }
   };
+
+  const waiting = busy || starting;
 
   return (
     <div>
@@ -201,6 +212,8 @@ export default function McpPanel() {
               <>
                 Running on <span className="font-mono">127.0.0.1:{MCP_PORT}</span>
               </>
+            ) : waiting ? (
+              "Starting…"
             ) : (
               "Stopped"
             )}
@@ -209,18 +222,25 @@ export default function McpPanel() {
         <Button
           variant={running ? "primary" : "ghost"}
           onClick={() => void toggle()}
-          disabled={busy}
+          disabled={waiting}
         >
           {running ? "On" : "Off"}
         </Button>
       </div>
 
-      <p className={cn("mt-2 text-[11px]", running ? "text-neutral-500" : "text-amber-400")}>
+      <p
+        className={cn(
+          "mt-2 text-[11px]",
+          running || waiting ? "text-neutral-500" : "text-amber-400",
+        )}
+      >
         {running
           ? "Reachable only from this machine — it is not exposed to your network."
-          : "Turn this on before adding the server to an agent, or the connection will be refused."}
+          : waiting
+            ? `If the app was just restarted, the old copy can take a few seconds to let go of port ${MCP_PORT}. This waits up to ${MCP_BIND_WAIT_MS / 1000} seconds.`
+            : "Turn this on before adding the server to an agent, or the connection will be refused."}
       </p>
-      {!running && error ? (
+      {!running && !waiting && error ? (
         <p className="mt-1 break-words text-[11px] text-amber-400/80">
           It last failed with: {error}
         </p>

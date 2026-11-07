@@ -1,13 +1,22 @@
 // The setup pane is the only way a user learns the endpoint exists, so its snippets have to be
 // correct. A wrong port here is invisible in every other test and fails as "the agent can't
 // connect" — with nothing to point at.
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import McpPanel from "./McpPanel";
 import { BRAND } from "../brand";
 import { openInstallLink } from "../mcp/install";
-import { MCP_PORT, mcpStatus, startMcpServer, stopMcpServer } from "../mcp/service";
+import {
+  MCP_PORT,
+  McpPortTakenError,
+  McpStartCancelled,
+  clearMcpLastError,
+  mcpStatus,
+  recordMcpError,
+  startMcpServer,
+  stopMcpServer,
+} from "../mcp/service";
 import { useMcpPanel } from "../store/mcpPanel";
 
 const reported = vi.hoisted(() => [] as Array<[string, unknown]>);
@@ -40,7 +49,8 @@ const codeBlocks = () =>
 // The pane reads `running` from a module-level store now, so one test's refresh would otherwise
 // leave the next one thinking the server is up.
 beforeEach(() => {
-  useMcpPanel.setState({ open: false, running: false });
+  useMcpPanel.setState({ open: false, running: false, starting: false });
+  clearMcpLastError();
   reported.length = 0;
 });
 
@@ -185,5 +195,74 @@ describe("MCP setup pane: what the person does is reported", () => {
     await waitFor(() => expect(vi.mocked(openInstallLink)).toHaveBeenCalledTimes(2));
     await Promise.resolve();
     expect(reported).toHaveLength(1);
+  });
+});
+
+// A relaunch can leave the old copy holding the port for a few seconds, so the app now waits for it instead of failing
+// at once. Whoever opens this pane in that moment must see "starting", not "stopped" with advice to switch it on.
+describe("MCP setup pane: while the app waits for the port", () => {
+  const stopped = () => vi.mocked(mcpStatus).mockResolvedValue({ running: false, port: MCP_PORT });
+
+  it("says it is starting, not stopped, and does not ask to be switched on", async () => {
+    stopped();
+    act(() => useMcpPanel.setState({ starting: true }));
+    render(<McpPanel />);
+
+    expect(screen.getByText("Starting…")).toBeInTheDocument();
+    expect(screen.getByText(/waits up to 10 seconds/)).toBeInTheDocument();
+    expect(screen.queryByText("Stopped")).toBeNull();
+    expect(screen.queryByText(/Turn this on before adding/)).toBeNull();
+    // Clicking now would start a second series of attempts on the same port.
+    expect(screen.getByText("Off").closest("button")).toBeDisabled();
+  });
+
+  it("says how a start nobody here asked for ended, in words that name who held the port", async () => {
+    stopped();
+    act(() => useMcpPanel.setState({ starting: true }));
+    render(<McpPanel />);
+    expect(screen.queryByText(/It last failed with/)).toBeNull(); // not yet: it is still waiting
+
+    recordMcpError(
+      new McpPortTakenError("os error 10048", { holder: "other", process: "node.exe" }),
+    );
+    act(() => useMcpPanel.setState({ starting: false }));
+
+    expect(await screen.findByText(/another program \(node\.exe\)/)).toBeInTheDocument();
+    expect(screen.getByText("Stopped")).toBeInTheDocument();
+  });
+
+  it("clears an old failure when the start that was waiting succeeds", async () => {
+    stopped();
+    recordMcpError(new Error("could not bind 127.0.0.1:19787: os error 10048"));
+    act(() => useMcpPanel.setState({ starting: true }));
+    render(<McpPanel />);
+
+    clearMcpLastError();
+    act(() => useMcpPanel.setState({ starting: false, running: true }));
+
+    expect(screen.queryByText(/It last failed with/)).toBeNull();
+    expect(await screen.findByText(/Running on/)).toBeInTheDocument();
+  });
+
+  it("asks for the start as the switch, so a wait is counted under the right door", async () => {
+    stopped();
+    render(<McpPanel />);
+    fireEvent.click(await screen.findByText("Off"));
+    await waitFor(() =>
+      expect(vi.mocked(startMcpServer)).toHaveBeenCalledWith({ where: "toggle" }),
+    );
+  });
+
+  it("treats a start cancelled by a switch-off as no failure: nothing is shown or reported", async () => {
+    stopped();
+    clearMcpLastError();
+    vi.mocked(startMcpServer).mockRejectedValueOnce(new McpStartCancelled());
+    render(<McpPanel />);
+    fireEvent.click(await screen.findByText("Off"));
+    await waitFor(() => expect(vi.mocked(startMcpServer)).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByText("Off").closest("button")).toBeEnabled());
+
+    expect(reported).toEqual([]);
+    expect(screen.queryByText(/It last failed with/)).toBeNull();
   });
 });

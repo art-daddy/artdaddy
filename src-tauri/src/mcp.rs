@@ -13,7 +13,7 @@
 //! defence for what an individual tool permits belongs inside that tool.
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -368,16 +368,31 @@ fn read_request(stream: &mut TcpStream) -> Option<Request> {
   Some(Request { method, path, headers, body: String::from_utf8_lossy(&body).to_string() })
 }
 
-fn respond(stream: &mut TcpStream, status: u16, reason: &str, extra: &[(&str, &str)], body: &str) {
-  let mut head = format!("HTTP/1.1 {status} {reason}\r\n");
-  head.push_str("Content-Type: application/json\r\n");
+/// The bytes of one HTTP reply. One builder, so what the probe in `probe_holder` recognises is exactly what `serve` writes.
+fn http_reply(status: u16, reason: &str, extra: &[(&str, &str)], body: &str) -> String {
+  let mut reply = format!("HTTP/1.1 {status} {reason}\r\n");
+  reply.push_str("Content-Type: application/json\r\n");
   for (k, v) in extra {
-    head.push_str(&format!("{k}: {v}\r\n"));
+    reply.push_str(&format!("{k}: {v}\r\n"));
   }
-  head.push_str(&format!("Content-Length: {}\r\nConnection: close\r\n\r\n", body.len()));
-  let _ = stream.write_all(head.as_bytes());
-  let _ = stream.write_all(body.as_bytes());
+  reply.push_str(&format!("Content-Length: {}\r\nConnection: close\r\n\r\n", body.len()));
+  reply.push_str(body);
+  reply
+}
+
+fn send(stream: &mut TcpStream, reply: &str) {
+  let _ = stream.write_all(reply.as_bytes());
   let _ = stream.flush();
+}
+
+fn respond(stream: &mut TcpStream, status: u16, reason: &str, extra: &[(&str, &str)], body: &str) {
+  send(stream, &http_reply(status, reason, extra, body));
+}
+
+/// The reply to a GET, which this server declines because it pushes nothing. `probe_holder` recognises another copy of the
+/// app by exactly this, so `serve` and the probe's test both take it from here.
+fn event_stream_declined() -> String {
+  http_reply(405, "Method Not Allowed", &[], NO_EVENT_STREAM_BODY)
 }
 
 fn serve(mut stream: TcpStream, app: AppHandle, state: McpState) {
@@ -397,7 +412,7 @@ fn serve(mut stream: TcpStream, app: AppHandle, state: McpState) {
   // The optional server->client stream. Nothing is pushed today, so decline rather than hold
   // the socket open: clients treat this as "no server-initiated messages" and carry on.
   if req.method == "GET" {
-    respond(&mut stream, 405, "Method Not Allowed", &[], r#"{"error":"no event stream"}"#);
+    send(&mut stream, &event_stream_declined());
     return;
   }
   if req.method == "DELETE" {
@@ -495,6 +510,125 @@ where
       }
     }
   }
+}
+
+/// What a GET on `/mcp` is answered with: this server pushes nothing, so it declines. It is also how ANOTHER copy of
+/// ArtDaddy is recognised when the port is taken (`probe_holder`), so there is exactly one spelling of it.
+const NO_EVENT_STREAM_BODY: &str = r#"{"error":"no event stream"}"#;
+
+/// How long to wait on whatever holds the port: a person is reading the message this is for.
+const PROBE_TIMEOUT: Duration = Duration::from_millis(800);
+
+/// Who is answering on the port ArtDaddy could not bind.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum Holder {
+  /// Another copy of this app: a second window, or another Windows user's session (loopback ports are machine-wide).
+  ArtDaddy,
+  /// Some other program.
+  Other,
+  /// Nothing answers: it was let go a moment ago.
+  Nobody,
+}
+
+impl Holder {
+  fn word(self) -> &'static str {
+    match self {
+      Holder::ArtDaddy => "artdaddy",
+      Holder::Other => "other",
+      Holder::Nobody => "none",
+    }
+  }
+}
+
+/// Is this reply the one our own server writes to a GET? Compared with the whole reply it is built from (`http_reply`),
+/// so a rewording of that reply cannot quietly turn every other ArtDaddy into "another program".
+fn holder_from_response(text: &str) -> Holder {
+  if text.starts_with("HTTP/1.1 405") && text.contains(NO_EVENT_STREAM_BODY) {
+    Holder::ArtDaddy
+  } else {
+    Holder::Other
+  }
+}
+
+/// Ask whatever is on 127.0.0.1:`port` who it is, with a request that changes nothing anywhere (a GET, which this server
+/// declines; an `initialize` would register a client in the other copy and be recorded there as one).
+fn probe_holder(port: u16) -> Holder {
+  let addr = SocketAddr::from(([127, 0, 0, 1], port));
+  let Ok(mut stream) = TcpStream::connect_timeout(&addr, PROBE_TIMEOUT) else { return Holder::Nobody };
+  let _ = stream.set_read_timeout(Some(PROBE_TIMEOUT));
+  let _ = stream.set_write_timeout(Some(PROBE_TIMEOUT));
+  let request = format!("GET /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+  if stream.write_all(request.as_bytes()).is_err() {
+    return Holder::Other;
+  }
+  let mut reply = Vec::new();
+  // A timeout after some bytes keeps those bytes; a holder that never answers leaves nothing, which is "another program".
+  let _ = (&mut stream).take(2048).read_to_end(&mut reply);
+  holder_from_response(&String::from_utf8_lossy(&reply))
+}
+
+/// The process id of whatever LISTENS on `port`, from `netstat -ano -p tcp`. A listener is the row whose foreign address
+/// ends in `:0`: the state column is translated into the user's language, that one is not.
+fn pid_listening_on(netstat: &str, port: u16) -> Option<u32> {
+  let suffix = format!(":{port}");
+  netstat.lines().find_map(|line| {
+    let cols: Vec<&str> = line.split_whitespace().collect();
+    if cols.len() < 5 || !cols[0].eq_ignore_ascii_case("TCP") {
+      return None;
+    }
+    if !cols[1].ends_with(&suffix) || !cols[2].ends_with(":0") {
+      return None;
+    }
+    cols[4].parse().ok()
+  })
+}
+
+/// The program's file name (never its folder) from `tasklist /FO CSV /NH`, whose rows start with a quote. The message
+/// "No tasks are running" does not, and is translated.
+fn image_name(tasklist_csv: &str) -> Option<String> {
+  let line = tasklist_csv.lines().find(|l| l.starts_with('"'))?;
+  let name = line.trim_start_matches('"').split('"').next()?;
+  let clean: String = name.chars().filter(|c| c.is_ascii_alphanumeric() || " ._-()".contains(*c)).take(64).collect();
+  (!clean.is_empty()).then_some(clean)
+}
+
+/// The name of the program that listens on `port`, where the system will say. Best effort: the answer is only read by the
+/// person looking at a message, so no answer costs nothing.
+#[cfg(windows)]
+fn listener_process(port: u16) -> Option<String> {
+  use std::os::windows::process::CommandExt;
+  use std::process::Command;
+  const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+  // From System32 by full path, so nothing earlier on PATH can stand in for either tool.
+  let system32 = std::path::PathBuf::from(std::env::var_os("SystemRoot")?).join("System32");
+  let run = |exe: &str, args: &[&str]| -> Option<String> {
+    let out = Command::new(system32.join(exe)).args(args).creation_flags(CREATE_NO_WINDOW).output().ok()?;
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+  };
+  let pid = pid_listening_on(&run("netstat.exe", &["-ano", "-p", "tcp"])?, port)?;
+  image_name(&run("tasklist.exe", &["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])?)
+}
+
+#[cfg(not(windows))]
+fn listener_process(_port: u16) -> Option<String> {
+  None
+}
+
+fn holder_report(port: u16) -> Value {
+  let holder = probe_holder(port);
+  let process = if holder == Holder::Nobody { None } else { listener_process(port) };
+  match process {
+    Some(name) => json!({ "holder": holder.word(), "process": name }),
+    None => json!({ "holder": holder.word() }),
+  }
+}
+
+/// Who holds `port` (default: ours), for the message shown when the server could not start. Off the main thread: it waits
+/// on a socket and, on Windows, on two system tools.
+#[tauri::command]
+pub async fn mcp_port_holder(port: Option<u16>) -> Result<Value, String> {
+  let port = port.unwrap_or(DEFAULT_PORT);
+  tauri::async_runtime::spawn_blocking(move || holder_report(port)).await.map_err(|error| error.to_string())
 }
 
 /// Start the listener. Idempotent: a second call while running is a no-op.
@@ -737,5 +871,108 @@ mod tests {
     let info = ClientInfo { name: "claude-code".into(), version: "2.1.0".into() };
     assert_eq!(info.to_json(), json!({ "name": "claude-code", "version": "2.1.0" }));
     assert_eq!(ClientInfo::default().to_json(), json!({ "name": "", "version": "" }));
+  }
+
+  // Who holds a port ArtDaddy could not bind. The probe has to tell another copy of this app from anything else by what this
+  // server really writes, on a real socket, because a wrong answer sends a person to close the wrong thing.
+
+  fn answer_once(reply: &'static str, hold_open: bool) -> u16 {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+      if let Ok((mut stream, _)) = listener.accept() {
+        let mut seen = [0u8; 512];
+        let _ = stream.read(&mut seen);
+        let _ = stream.write_all(reply.as_bytes());
+        if hold_open {
+          std::thread::sleep(Duration::from_secs(3));
+        }
+      }
+    });
+    port
+  }
+
+  #[test]
+  fn another_copy_of_this_app_is_recognised_by_the_reply_this_server_really_writes() {
+    // The reply `serve` writes to a GET, from the one function both use.
+    assert_eq!(holder_from_response(&event_stream_declined()), Holder::ArtDaddy);
+    // The reply it writes to anything that is not a GET is not the signature, and neither is anyone else's.
+    assert_eq!(holder_from_response(&http_reply(200, "OK", &[], "{}")), Holder::Other);
+    assert_eq!(holder_from_response(&http_reply(405, "Method Not Allowed", &[], "{}")), Holder::Other);
+    assert_eq!(holder_from_response("HTTP/1.1 404 Not Found\r\n\r\nnope"), Holder::Other);
+    assert_eq!(holder_from_response(""), Holder::Other);
+  }
+
+  #[test]
+  fn the_probe_finds_a_copy_of_this_app_another_program_nobody_and_a_holder_that_never_answers() {
+    let ours: &'static str = Box::leak(event_stream_declined().into_boxed_str());
+    assert_eq!(probe_holder(answer_once(ours, false)), Holder::ArtDaddy);
+    assert_eq!(probe_holder(answer_once("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi", false)), Holder::Other);
+    // Accepted but silent: a program that holds the port and says nothing is still another program, and the probe gives up.
+    let started = std::time::Instant::now();
+    assert_eq!(probe_holder(answer_once("", true)), Holder::Other);
+    assert!(started.elapsed() < Duration::from_secs(3), "the probe must not wait on a silent holder");
+    // Nothing listening: a port that was bound a moment ago and let go.
+    let free = TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port();
+    assert_eq!(probe_holder(free), Holder::Nobody);
+  }
+
+  const NETSTAT: &str = "
+Active Connections
+
+  Proto  Local Address          Foreign Address        State           PID
+  TCP    0.0.0.0:135            0.0.0.0:0              LISTENING       1180
+  TCP    127.0.0.1:19787        0.0.0.0:0              ABHÖREN         4321
+  TCP    127.0.0.1:19787        127.0.0.1:50321        ESTABLISHED     4321
+  TCP    127.0.0.1:50321        127.0.0.1:19787        ESTABLISHED     9876
+  TCP    127.0.0.1:119787       0.0.0.0:0              LISTENING       5555
+  TCP    [::]:8080              [::]:0                 LISTENING       7777
+  UDP    0.0.0.0:19787          *:*                                    6666
+";
+
+  #[test]
+  fn the_listener_is_the_row_with_no_peer_whatever_language_the_state_is_in() {
+    assert_eq!(pid_listening_on(NETSTAT, 19787), Some(4321));
+    // IPv6, and a longer port that merely ends in the same digits.
+    assert_eq!(pid_listening_on(NETSTAT, 8080), Some(7777));
+    assert_eq!(pid_listening_on(NETSTAT, 9787), None);
+    // A connection TO the port, or a UDP socket on it, is not what holds it. The first row is a connection the listener
+    // accepted (local side is the port): only its peer address, not a port, tells it from the listener itself.
+    assert_eq!(pid_listening_on("  TCP  127.0.0.1:19787  127.0.0.1:50321  ESTABLISHED  4321", 19787), None);
+    assert_eq!(pid_listening_on("  TCP  127.0.0.1:50321  127.0.0.1:19787  ESTABLISHED  9876", 19787), None);
+    assert_eq!(pid_listening_on("  UDP    0.0.0.0:19787          *:*                                    6666", 19787), None);
+    assert_eq!(pid_listening_on("", 19787), None);
+    assert_eq!(pid_listening_on("garbage\nTCP only three", 19787), None);
+  }
+
+  // The system's own tools, on this machine, not text a person imagined: a parser that only agrees with its author's fixture
+  // finds nothing here. This process listens on a port and nobody accepts, so the probe hears silence.
+  #[cfg(windows)]
+  #[test]
+  fn the_real_system_tools_name_this_very_program_as_the_holder_of_a_port_it_listens_on() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let me = std::env::current_exe().unwrap().file_name().unwrap().to_string_lossy().into_owned();
+    assert_eq!(listener_process(port).as_deref(), Some(me.as_str()));
+    let report = holder_report(port);
+    assert_eq!(report["holder"], "other");
+    assert_eq!(report["process"], me.as_str());
+    drop(listener);
+    // Let go, nothing is named and nobody answers.
+    let report = holder_report(port);
+    assert_eq!(report["holder"], "none");
+    assert!(report.get("process").is_none());
+  }
+
+  #[test]
+  fn the_program_is_named_by_its_file_and_never_by_where_it_lives() {
+    assert_eq!(image_name("\"node.exe\",\"4321\",\"Console\",\"1\",\"52,344 K\"\r\n").as_deref(), Some("node.exe"));
+    assert_eq!(image_name("INFO: No tasks are running which match the specified criteria.").as_deref(), None);
+    assert_eq!(image_name("").as_deref(), None);
+    // Only the characters a file name is made of survive, cut short: nothing else can ride into a message.
+    let odd = format!("\"{}<script>.exe\",\"1\"", "a".repeat(100));
+    let name = image_name(&odd).unwrap();
+    assert!(name.chars().count() <= 64);
+    assert!(!name.contains('<') && !name.contains('>'));
   }
 }

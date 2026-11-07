@@ -724,6 +724,7 @@ pub fn run() {
       mcp::mcp_start,
       mcp::mcp_stop,
       mcp::mcp_status,
+      mcp::mcp_port_holder,
       mcp::mcp_reply,
       mcp::mcp_set_instructions
     ]);

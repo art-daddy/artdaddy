@@ -42,13 +42,15 @@ export type AppEvent =
   | McpAppEvent;
 
 /** How an external agent's connection to the editor goes: the switch, a program connecting, the person copying or
- *  installing its setup, and the port being taken. Written down again on the server (analytics.py MCP_APP_EVENTS). */
+ *  installing its setup, and the port being taken (or taken for a moment first: `mcp_bind_waited`, the app waited for it
+ *  and got it). Written down again on the server (analytics.py MCP_APP_EVENTS). */
 export const MCP_APP_EVENTS = [
   "mcp_enabled",
   "mcp_disabled",
   "mcp_connected",
   "mcp_config_written",
   "mcp_bind_failed",
+  "mcp_bind_waited",
 ] as const;
 export type McpAppEvent = (typeof MCP_APP_EVENTS)[number];
 
