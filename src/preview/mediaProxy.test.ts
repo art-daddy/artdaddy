@@ -7,6 +7,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { processImportedMedia } from "./mediaProxy";
+import { recordMedia } from "../api/editorEvents";
 import { highH264DecodesCorrectly } from "./h264Support";
 import { onMediaDerived } from "./mediaDerived";
 import { posterName, proxyKey, proxyRel, webOkName } from "./proxyPaths";
@@ -14,12 +15,19 @@ import { MemFs } from "../test/timelineKit";
 import { ProjectStoreAccess } from "../tools/store";
 
 vi.mock("./h264Support", () => ({ highH264DecodesCorrectly: vi.fn() }));
-beforeEach(() => vi.mocked(highH264DecodesCorrectly).mockResolvedValue(true));
+vi.mock("../api/editorEvents", async (orig) => ({
+  ...(await orig<typeof import("../api/editorEvents")>()),
+  recordMedia: vi.fn(),
+}));
+beforeEach(() => {
+  vi.mocked(highH264DecodesCorrectly).mockResolvedValue(true);
+  vi.mocked(recordMedia).mockClear();
+});
 
 type Probe = { codec: string; format: string; audioOnly?: boolean };
 
 /** Records the ffmpeg invocations a probe of `p` provokes. */
-async function run(p: Probe, source = "library/a.mp4", legacyWebOk = false) {
+async function run(p: Probe, source = "library/a.mp4", legacyWebOk = false, failProxy = false) {
   const fs = new MemFs();
   await fs.writeTextFile(`C:/proj/${source}`, "media");
   const store = new ProjectStoreAccess("C:/proj", fs);
@@ -33,7 +41,7 @@ async function run(p: Probe, source = "library/a.mp4", legacyWebOk = false) {
         return {
           code: 0,
           stdout: JSON.stringify({
-            format: { format_name: p.format, duration: "5" },
+            format: { format_name: p.format, duration: "5", size: "52428800" },
             streams: [
               p.audioOnly
                 ? { codec_type: "audio", codec_name: p.codec, sample_rate: "48000", channels: 1 }
@@ -44,6 +52,7 @@ async function run(p: Probe, source = "library/a.mp4", legacyWebOk = false) {
         };
       }
       ffmpeg.push(args);
+      if (failProxy && args.includes("libx264")) return { code: 1, stdout: "", stderr: "boom" };
       // Whatever ffmpeg was told to write, pretend it wrote it.
       await fs.writeTextFile(args[args.length - 1], "out");
       return { code: 0, stdout: "", stderr: "" };
@@ -55,6 +64,78 @@ async function run(p: Probe, source = "library/a.mp4", legacyWebOk = false) {
 
 /** ffmpeg calls that build the H.264 proxy (the poster pass also runs, and is not one). */
 const proxyRuns = (calls: string[][]) => calls.filter((a) => a.includes("libx264"));
+
+describe("what a first look at a video says about it (the editor stream)", () => {
+  it("a file that needed a preview copy says what it is, that one was made, and how long it took", async () => {
+    await run({ codec: "h264", format: "matroska,webm" });
+    expect(recordMedia).toHaveBeenCalledTimes(1);
+    const [facts, project] = vi.mocked(recordMedia).mock.calls[0];
+    expect(project).toBe("proj");
+    expect(facts).toMatchObject({
+      media: "video",
+      codec: "h264",
+      width: 1920,
+      height: 1080,
+      seconds: 5,
+      bytes: 52_428_800,
+      proxy: "built",
+    });
+    expect(facts.ms).toBeGreaterThanOrEqual(0);
+  });
+
+  it("a file the preview plays as it is says that no copy was needed", async () => {
+    await run({ codec: "h264", format: "mov,mp4,m4a,3gp,3g2,mj2" });
+    expect(vi.mocked(recordMedia).mock.calls[0][0]).toMatchObject({ codec: "h264", proxy: "none", ms: 0 });
+  });
+
+  it("a copy that could not be made says so, and still says what the file is", async () => {
+    await run({ codec: "hevc", format: "matroska,webm" }, "library/a.mp4", false, true);
+    expect(vi.mocked(recordMedia).mock.calls[0][0]).toMatchObject({ codec: "hevc", proxy: "failed", width: 1920 });
+  });
+
+  it("is said once for a file: looking at it again finds the copy and says nothing", async () => {
+    const fs = new MemFs();
+    await fs.writeTextFile("C:/proj/library/a.mp4", "media");
+    const store = new ProjectStoreAccess("C:/proj", fs);
+    const runner = {
+      run: async (program: string, args: string[]) => {
+        if (program === "ffprobe")
+          return {
+            code: 0,
+            stdout: JSON.stringify({
+              format: { format_name: "matroska,webm", duration: "5" },
+              streams: [{ codec_type: "video", codec_name: "h264", width: 640, height: 360 }],
+            }),
+            stderr: "",
+          };
+        await fs.writeTextFile(args[args.length - 1], "out");
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    };
+    await processImportedMedia(store, runner, "library/a.mp4");
+    await processImportedMedia(store, runner, "library/a.mp4");
+    expect(recordMedia).toHaveBeenCalledTimes(1);
+  });
+
+  it("carries no file name and no folder", async () => {
+    await run({ codec: "h264", format: "matroska,webm" }, "library/My Private Holiday.mp4");
+    expect(JSON.stringify(vi.mocked(recordMedia).mock.calls)).not.toMatch(/Private|Holiday|library|\.mp4/);
+  });
+
+  it("an audio-only file named like a video says nothing about a preview copy", async () => {
+    await run({ codec: "aac", format: "mov,mp4,m4a,3gp,3g2,mj2", audioOnly: true });
+    expect(recordMedia).not.toHaveBeenCalled();
+  });
+
+  it("a recorder that throws costs the preview copy nothing", async () => {
+    vi.mocked(recordMedia).mockImplementation(() => {
+      throw new Error("the recorder is broken");
+    });
+    const { store } = await run({ codec: "h264", format: "matroska,webm" });
+    expect(await store.exists(`C:/proj/${proxyRel("library/a.mp4")}`)).toBe(true);
+    vi.mocked(recordMedia).mockReset();
+  });
+});
 
 describe("preview proxy — what the WebView can actually decode", () => {
   it("builds a proxy for h264 in a NON-ISOBMFF container, whatever the file is named", async () => {

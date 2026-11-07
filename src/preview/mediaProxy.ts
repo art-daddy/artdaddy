@@ -7,6 +7,8 @@
 // unit coverage. Unverified originals are withheld on failing decoder runtimes.
 import type { CommandRunner } from "../tools/command";
 import { probePath } from "../tools/media";
+import { projectIdOfDir } from "../tools/dataRoot";
+import { recordMedia, type ProxyState } from "../api/editorEvents";
 import type { ProjectStoreAccess } from "../tools/store";
 import { imageProxyName, posterName, proxyKey, proxyName, webOkName } from "./proxyPaths";
 import { highH264DecodesCorrectly } from "./h264Support";
@@ -18,6 +20,36 @@ import { isHeifStill, stillPicture, stillPicturePath } from "../media/stillPictu
 import { transcode } from "../media/transcode";
 
 const VID_RE = new RegExp(`\\.(${extAlternation("video")})$`, "i");
+
+/** What the app found out about a video it looked at for the first time, and what became of its preview copy: its codec, its
+ *  size in pixels, its length and size (rounded to bands before they leave) and, when a copy had to be made, how long that took.
+ *  Said once for a file, because this path only runs for one that has neither a copy nor the marker that says none is needed.
+ *  Words and numbers only; never the file's name or where it is. */
+function reportMedia(
+  store: ProjectStoreAccess,
+  probe: Record<string, unknown>,
+  proxy: ProxyState,
+  ms: number,
+): void {
+  try {
+    const video = (probe.video ?? null) as Record<string, unknown> | null;
+    recordMedia(
+      {
+        media: "video",
+        codec: String(video?.codec ?? ""),
+        width: Number(video?.width) || 0,
+        height: Number(video?.height) || 0,
+        seconds: Number(probe.duration_s) || 0,
+        bytes: Number(probe.size_bytes) || 0,
+        proxy,
+        ms,
+      },
+      projectIdOfDir(store.projectDir),
+    );
+  } catch {
+    /* a record is a beacon, not a feature: it must never fail the preview copy it describes */
+  }
+}
 // Video codecs the in-app WebCodecs preview can decode in the WebView.
 const WEB_VIDEO_OK = new Set(["h264", "vp8", "vp9", "av1"]);
 // ...and the containers our demuxer reads. mp4box parses ISOBMFF ONLY, so h264-in-Matroska
@@ -110,6 +142,7 @@ async function deriveArtifacts(
     );
     if (codec && !playable) {
       onTranscode?.();
+      const began = performance.now();
       const made = await transcode(
         store,
         runner,
@@ -141,7 +174,10 @@ async function deriveArtifacts(
         signal,
       );
       if (made) changed = true;
+      if (!signal?.aborted)
+        reportMedia(store, probe, made ? "built" : "failed", performance.now() - began);
     } else if (codec || (!video && probe.audio && WEB_CONTAINER_OK.test(container))) {
+      if (codec) reportMedia(store, probe, "none", 0);
       try {
         await store.writeText(webOk, "");
         changed = true;

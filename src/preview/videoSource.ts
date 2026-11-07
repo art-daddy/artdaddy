@@ -15,6 +15,8 @@
 // simple + correct; a persistent forward-decoding decoder is a later optimisation.
 import MP4Box, { type MP4ArrayBuffer, type MP4Info } from "mp4box";
 
+import type { PreviewFailure } from "../api/editorEvents";
+import { codecFamily, PreviewFailureError } from "./previewFailure";
 import { type Orientation, UPRIGHT, displaySize, mp4Orientation } from "./orientation";
 
 interface Sample {
@@ -98,6 +100,9 @@ export class VideoSource {
    *  uploaded with it (PreviewRenderer.setTexture) or they draw on their side (UJ-015). */
   orientation: Orientation = UPRIGHT;
   duration = 0;
+  /** The codec family of the stream (`avc1`, `hev1`...), known once the index has been read: what a failure report says
+   *  about WHICH video it could not show, without anything of the file. */
+  codecFamily = "";
   /** Where the picture ENDS, in the same source seconds as frameAt/pump: the end of the last frame
    *  shown. Past it the export draws nothing of this clip (its overlay passes the picture beneath
    *  once the stream ends), so the preview must not either (UJ-033). */
@@ -118,7 +123,12 @@ export class VideoSource {
   private maxOutputTs = -1; // highest presentation timestamp output in this run
   private keepTs = -1; // ts currently wanted on screen; protected from lookahead eviction
 
-  constructor(private readonly url: string) {
+  /** `onFailure` hears a decoder that stopped with an error (the decoder reports it on its own, long after any call that
+   *  could have been given it). A failure to read the file is the rejection of `whenReady()`, with a typed reason. */
+  constructor(
+    private readonly url: string,
+    private readonly onFailure?: (reason: PreviewFailure) => void,
+  ) {
     this.ready = this.load();
   }
 
@@ -129,14 +139,15 @@ export class VideoSource {
   private load(): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       const file = MP4Box.createFile();
-      file.onError = (e) => reject(new Error(`mp4box(${this.url}): ${e}`));
+      file.onError = (e) => reject(new PreviewFailureError("unsupported", `mp4box(${this.url}): ${e}`));
       file.onReady = (info: MP4Info) => {
         const track = info.videoTracks[0];
         if (!track) {
-          reject(new Error("no video track in file"));
+          reject(new PreviewFailureError("no_track", "no video track in file"));
           return;
         }
         this.timescale = track.timescale;
+        this.codecFamily = codecFamily(track.codec);
         this.orientation = mp4Orientation(file, track);
         this.dims = displaySize({ w: track.video.width, h: track.video.height }, this.orientation);
         this.duration = track.duration / track.timescale;
@@ -172,7 +183,7 @@ export class VideoSource {
           }
           file.flush();
           if (!this.samples.length) {
-            reject(new Error("no sample index found (no moov)"));
+            reject(new PreviewFailureError("no_index", "no sample index found (no moov)"));
             return;
           }
           this.startCts = this.samples.reduce((m, s) => Math.min(m, s.cts), Infinity);
@@ -185,7 +196,8 @@ export class VideoSource {
           this.end = (endCts - this.startCts) / this.timescale;
           resolve();
         } catch (e) {
-          reject(e as Error);
+          // Anything that went wrong reading the file (a refused range, a dropped connection) is a failure to read it.
+          reject(e instanceof PreviewFailureError ? e : new PreviewFailureError("read_failed", String(e)));
         }
       })();
     });
@@ -203,7 +215,8 @@ export class VideoSource {
     let total = Number.POSITIVE_INFINITY;
     while (at <= end) {
       const resp = await fetch(this.url, { headers: { Range: `bytes=${at}-${end}` } });
-      if (!resp.ok && resp.status !== 206) throw new Error(`range read failed: ${resp.status}`);
+      if (!resp.ok && resp.status !== 206)
+        throw new PreviewFailureError("read_failed", `range read failed: ${resp.status}`);
       const cr = resp.headers.get("content-range");
       const slash = cr?.lastIndexOf("/") ?? -1;
       if (slash >= 0) total = Number(cr!.slice(slash + 1)) || total;
@@ -387,6 +400,7 @@ export class VideoSource {
     this.decoder = new VideoDecoder({
       output: (frame) => this.onOutput(frame),
       error: () => {
+        this.onFailure?.("decoder_error");
         if (this.pending) this.settle(this.pending, null, false);
         this.disposeDecoder();
       },

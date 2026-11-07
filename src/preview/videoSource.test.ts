@@ -1,8 +1,9 @@
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import MP4Box, { type MP4ArrayBuffer } from "mp4box";
+import { PreviewFailureError } from "./previewFailure";
 import { VideoSource, indexedVideoSamples } from "./videoSource";
 
 afterEach(() => vi.unstubAllGlobals());
@@ -232,3 +233,108 @@ it.each([2, 4, 8])(
     expect(live.size).toBe(0);
   },
 );
+
+// A file the preview cannot open used to be a console.warn nobody reads. Each way it can fail is now one word (typed where
+// it is known), and a decoder that stops with an error says so. Driven through the real mp4box reader with real bytes.
+describe("a file the preview cannot open says why, in a word", () => {
+  const whole = readFileSync(path.resolve("e2e/ui/fixtures/mac-recording-preview.mp4"));
+  const serve = (data: Uint8Array) =>
+    vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+      const range = new Headers(init.headers).get("Range")!.match(/bytes=(\d+)-(\d+)/)!;
+      const start = Number(range[1]);
+      const end = Math.min(Number(range[2]) + 1, data.length);
+      return new Response(new Uint8Array(data.subarray(start, end)), {
+        status: 206,
+        headers: { "Content-Range": `bytes ${start}-${end - 1}/${data.length}` },
+      });
+    });
+  const outcome = async (onFailure?: (reason: string) => void) => {
+    const source = new VideoSource("C:/Users/me/My Holiday.mp4", onFailure as never);
+    try {
+      await source.whenReady();
+      return { ok: true as const, source };
+    } catch (error) {
+      return { ok: false as const, error };
+    }
+  };
+
+  it("opens a good file and knows its codec family", async () => {
+    serve(whole);
+    const result = await outcome();
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.source.codecFamily).toMatch(/^[a-z0-9]{1,12}$/);
+      expect(result.source.codecFamily).toBe("avc1");
+    }
+  });
+
+  it("a file cut off before its index is `no_index`, and the message may say where it was but the word does not", async () => {
+    serve(whole.subarray(0, 1200));
+    const result = await outcome();
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBeInstanceOf(PreviewFailureError);
+      expect((result.error as PreviewFailureError).reason).toBe("no_index");
+    }
+  });
+
+  it("bytes that are not a video at all are `no_index`", async () => {
+    serve(new Uint8Array(5000).map((_, i) => (i * 31) & 0xff));
+    const result = await outcome();
+    expect(!result.ok && (result.error as PreviewFailureError).reason).toBe("no_index");
+  });
+
+  it("a read the server refuses is `read_failed`", async () => {
+    vi.stubGlobal("fetch", async () => new Response("", { status: 404 }));
+    const result = await outcome();
+    expect(!result.ok && (result.error as PreviewFailureError).reason).toBe("read_failed");
+  });
+
+  it("a connection that drops is `read_failed`, whatever the network said", async () => {
+    vi.stubGlobal("fetch", async () => {
+      throw new TypeError("Failed to fetch C:/Users/me/My Holiday.mp4");
+    });
+    const result = await outcome();
+    expect(!result.ok && (result.error as PreviewFailureError).reason).toBe("read_failed");
+  });
+
+  it("a decoder that stops with an error tells the owner once per death, and the source carries on", async () => {
+    serve(whole);
+    let onDecoderError: (() => void) | undefined;
+    vi.stubGlobal(
+      "VideoDecoder",
+      class {
+        state = "configured";
+        constructor(options: { error: () => void }) {
+          onDecoderError = options.error;
+        }
+        configure() {}
+        decode() {}
+        flush() {
+          return Promise.resolve();
+        }
+        close() {
+          this.state = "closed";
+        }
+      },
+    );
+    vi.stubGlobal(
+      "EncodedVideoChunk",
+      class {
+        constructor(public input: { timestamp: number }) {}
+      },
+    );
+    const told: string[] = [];
+    const result = await outcome((reason) => told.push(reason));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    result.source.pump(0.1);
+    expect(onDecoderError).toBeDefined();
+    onDecoderError?.();
+    expect(told).toEqual(["decoder_error"]);
+    result.source.pump(0.2); // a new decoder is built; the source did not die with the old one
+    onDecoderError?.();
+    expect(told).toEqual(["decoder_error", "decoder_error"]);
+    result.source.close();
+  });
+});

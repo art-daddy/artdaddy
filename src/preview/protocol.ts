@@ -6,6 +6,7 @@
 import { clipKind } from "../timeline/helpers";
 import type { Timeline } from "../timeline/model";
 import type { StillTiming } from "../media/stillFrames";
+import type { PreviewFailure } from "../api/editorEvents";
 import type { TextLayer } from "./scene";
 
 /** An animated still's frames: one fetch of PNGs written back to back, and when each shows. */
@@ -116,6 +117,15 @@ export interface PreviewFirstFrame {
   type: "firstFrame";
   source: string;
 }
+/** A source the preview could not show: why, as a word of PREVIEW_FAILURES, and the codec family of what it was (`avc1`, `hev1`;
+ *  empty when the file could not even be read far enough to say). `source` is the library id, used only to tell one source's
+ *  failure from another's here; nothing of it is reported. */
+export interface PreviewFailureMsg {
+  type: "failure";
+  source: string;
+  reason: PreviewFailure;
+  codec: string;
+}
 export type PreviewOutbound =
   | PreviewCapabilities
   | PreviewRendered
@@ -124,7 +134,8 @@ export type PreviewOutbound =
   | PreviewNeedText
   | PreviewDims
   | PreviewStalled
-  | PreviewFirstFrame;
+  | PreviewFirstFrame
+  | PreviewFailureMsg;
 
 export interface PreviewEndpoint {
   postMessage(message: PreviewInbound, transfer?: Transferable[]): void;

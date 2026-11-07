@@ -1,5 +1,7 @@
 import { loadImage } from "./loader";
 import type { PreviewEndpoint, PreviewInbound, PreviewOutbound, StillAnimation } from "./protocol";
+import { previewFailureOf } from "./previewFailure";
+import type { PreviewFailure } from "../api/editorEvents";
 import { PreviewRenderer } from "./renderer";
 import { type AssetDims, buildScene, type Layer, textLayerToImageLayer } from "./scene";
 import { AnimatedStill } from "./stillAnimation";
@@ -66,6 +68,14 @@ export function startPreviewRuntime(scope: PreviewScope): () => void {
   let timer: ReturnType<typeof setTimeout> | null = null;
   const post = (message: PreviewOutbound, transfer: Transferable[] = []): void => {
     if (!disposed) scope.postMessage(message, transfer);
+  };
+  // Said once for a source and a reason: a decoder that dies again on every seek is one failure, not a hundred.
+  const failureSaid = new Set<string>();
+  const reportFailure = (source: string, reason: PreviewFailure, codec = ""): void => {
+    const key = `${source}\u0000${reason}`;
+    if (failureSaid.has(key)) return;
+    failureSaid.add(key);
+    post({ type: "failure", source, reason, codec });
   };
   const current = (source: string, url: string): boolean =>
     !disposed && prepared.get(source) === url;
@@ -185,6 +195,7 @@ export function startPreviewRuntime(scope: PreviewScope): () => void {
             .catch((error) => {
               if (!current(source, url)) return;
               console.warn(`[preview] image load failed: ${source}`, error);
+              reportFailure(source, "image_failed");
               prepared.delete(source);
             });
         } else if (kind === "video") {
@@ -202,7 +213,9 @@ export function startPreviewRuntime(scope: PreviewScope): () => void {
               })
               .catch(() => undefined);
           }
-          const video = new VideoSource(url);
+          const video: VideoSource = new VideoSource(url, (reason) =>
+            reportFailure(source, reason, video.codecFamily),
+          );
           videos.set(source, video);
           void video
             .whenReady()
@@ -219,6 +232,7 @@ export function startPreviewRuntime(scope: PreviewScope): () => void {
                 error,
               );
               failed.add(source);
+              reportFailure(source, previewFailureOf(error), video.codecFamily);
             });
         }
       }

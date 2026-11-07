@@ -11,9 +11,11 @@ import { timelineSources } from "./protocol";
 import { resolvePosterUrl, resolvePreviewUrl, resolveStillAnimation } from "./resolve";
 import type { TextLayer } from "./scene";
 import { rasterizeText } from "./text";
+import { recordPreview, type PreviewFacts } from "../api/editorEvents";
 import { kindOf } from "../media/formats";
-import { withStillKinds } from "../timeline/helpers";
+import { clipKind, withStillKinds } from "../timeline/helpers";
 import type { Timeline } from "../timeline/model";
+import { projectIdOfDir } from "../tools/dataRoot";
 import type { ProjectStoreAccess } from "../tools/store";
 
 export interface PreviewClient {
@@ -41,7 +43,15 @@ export interface PreviewClientDeps {
   /** Called when a visible video layer runs out of decoded frames, and again when it
    *  recovers. Drives the playhead hold; see stallGate.ts. */
   onStalled?: (stalled: boolean) => void;
+  /** Where what the preview learns about itself goes: how long the first picture took, a stretch where the picture stood still,
+   *  a video it could not show. Words and numbers only (api/editorEvents.ts). Tests inject a fake. */
+  report?: (facts: PreviewFacts) => void;
+  /** The clock, in milliseconds, behind those times. Tests inject a fake. */
+  now?: () => number;
 }
+
+/** A stretch where the picture stood still shorter than this is the ordinary catching up after a seek, not worth a record. */
+const MIN_STALL_MS = 1_000;
 
 /** Cold-start timing, as standard performance entries so a driver session (or DevTools) can read
  *  them without the app carrying its own log. Each phase is marked ONCE: what matters is the first
@@ -58,6 +68,19 @@ function mark(phase: string): void {
   } catch {
     /* the origin mark is missing (a seek before any render): timing is best-effort */
   }
+}
+
+/** Whether a timeline has a video clip on it (a still stored as video has already been turned into an image by the caller). */
+function hasVideo(timeline: Timeline): boolean {
+  return (timeline.tracks ?? []).some((track) =>
+    (track.clips ?? []).some(
+      (clip) =>
+        clip.kind !== "audio" &&
+        clip.kind !== "text" &&
+        typeof clip.media_ref === "string" &&
+        clipKind(clip) === "video",
+    ),
+  );
 }
 
 export function createPreviewClient(
@@ -79,6 +102,44 @@ export function createPreviewClient(
   let startingFallback = false;
   let endpoint: PreviewEndpoint | null = worker;
   let probeTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // What the preview learns about itself, said once each and never able to disturb the picture.
+  const clock = deps.now ?? (() => (typeof performance === "undefined" ? Date.now() : performance.now()));
+  const say =
+    deps.report ??
+    ((facts: PreviewFacts) => recordPreview(facts, projectIdOfDir(store?.projectDir ?? "")));
+  const tell = (facts: PreviewFacts): void => {
+    try {
+      say(facts);
+    } catch {
+      /* a record is a beacon, not a feature */
+    }
+  };
+  // From the moment a timeline that has video was first asked for to the first decoded picture of it: the wait a person
+  // feels at the start of a project. Counted once for each project (the store), and only for one that has video in it.
+  let videoAskedAt: number | null = null;
+  let firstPictureSaid = false;
+  // A stretch where a visible video layer had no picture to show, after the first one had come. The playhead holds meanwhile.
+  let stoodStillSince: number | null = null;
+  const failuresSaid = new Set<string>();
+  const failureOnce = (source: string, reason: PreviewFacts["reason"], codec = ""): void => {
+    const key = `${source}\u0000${reason}`;
+    if (failuresSaid.has(key)) return;
+    failuresSaid.add(key);
+    tell({ what: "failure", reason, codec });
+  };
+  const endStandStill = (): void => {
+    if (stoodStillSince === null) return;
+    const ms = clock() - stoodStillSince;
+    stoodStillSince = null;
+    if (ms >= MIN_STALL_MS) tell({ what: "stall", ms });
+  };
+  const resetForProject = (): void => {
+    endStandStill();
+    videoAskedAt = null;
+    firstPictureSaid = false;
+    failuresSaid.clear();
+  };
   const queued: Array<{ message: PreviewInbound; transfer: Transferable[] }> = [];
   const post = (message: PreviewInbound, transfer: Transferable[] = []): void => {
     if (disposed || failed) {
@@ -114,6 +175,7 @@ export function createPreviewClient(
     retireQueued();
     settleCaptures();
     endpoint?.terminate();
+    failureOnce("", "worker_failed");
     deps.onError?.(message);
   };
   const receive = (e: MessageEvent<PreviewOutbound>): void => {
@@ -136,8 +198,19 @@ export function createPreviewClient(
         fail(String(error));
       }
     } else if (e.data.type === "error") fail(e.data.message);
-    else if (e.data.type === "stalled") deps.onStalled?.(e.data.stalled);
-    else if (e.data.type === "firstFrame") mark("first-frame");
+    else if (e.data.type === "stalled") {
+      deps.onStalled?.(e.data.stalled);
+      // Only after the first picture: the wait before it is the first picture's own time.
+      if (e.data.stalled) {
+        if (firstPictureSaid && stoodStillSince === null) stoodStillSince = clock();
+      } else endStandStill();
+    } else if (e.data.type === "firstFrame") {
+      mark("first-frame");
+      if (videoAskedAt !== null && !firstPictureSaid) {
+        firstPictureSaid = true;
+        tell({ what: "first_frame", ms: clock() - videoAskedAt });
+      }
+    } else if (e.data.type === "failure") failureOnce(e.data.source, e.data.reason, e.data.codec);
     else if (e.data.type === "needText") void answerText(e.data.key, e.data.layer);
     else if (e.data.type === "dims") setAssetDims(e.data.source, { w: e.data.w, h: e.data.h });
     else if (e.data.type === "captured") {
@@ -227,6 +300,7 @@ export function createPreviewClient(
 
   async function resolveAndRender(timeline: Timeline, time: number): Promise<void> {
     const mine = ++token;
+    const asked = clock();
     mark("render-requested");
     const urls: Record<string, string> = {};
     const posters: Record<string, string> = {};
@@ -246,7 +320,10 @@ export function createPreviewClient(
             resolveAnimation(s, src).catch(() => null), // best-effort: the still draws unmoving
           ]);
           if (u) urls[src] = u;
-          else console.warn(`[preview] timeline source did not resolve to a file: ${src}`);
+          else {
+            console.warn(`[preview] timeline source did not resolve to a file: ${src}`);
+            failureOnce(src, "unresolved");
+          }
           if (p) posters[src] = p;
           if (a) animations[src] = a;
           kinds.set(src, k);
@@ -256,6 +333,8 @@ export function createPreviewClient(
     mark("urls-resolved");
     if (mine !== token) return; // a newer timeline superseded this resolve
     const drawn = withStillKinds(timeline, (ref) => kinds.get(ref) ?? null);
+    // The clock for the first picture starts when video was first asked for, which is the render that carries it.
+    if (videoAskedAt === null && hasVideo(drawn)) videoAskedAt = asked;
     post({
       type: "render",
       timeline: drawn,
@@ -296,6 +375,8 @@ export function createPreviewClient(
       if (store !== next) {
         token++;
         lastTimeline = null;
+        // What was said about this project stays with it; the next one starts its own first-picture clock.
+        resetForProject();
       }
       store = next;
     },
@@ -312,6 +393,7 @@ export function createPreviewClient(
       });
     },
     dispose() {
+      endStandStill();
       disposed = true;
       token++; // strand any in-flight resolve
       if (probeTimer !== null) clearTimeout(probeTimer);
