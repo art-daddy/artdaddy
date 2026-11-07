@@ -22,6 +22,7 @@ import {
   flushAgentEvents,
   recordToolCall,
 } from "./api/agentEvents";
+import { __resetEditorEvents, recordEdit, recordImport } from "./api/editorEvents";
 
 vi.mock("./components/Shell", () => ({ default: () => <div>shell</div> }));
 vi.mock("./components/AuthProvider", () => ({
@@ -68,6 +69,7 @@ vi.mock("@tauri-apps/api/window", () => ({
 
 const order: string[] = [];
 const deliveredTraces: Array<Record<string, unknown>> = [];
+const deliveredEditor: Array<Record<string, unknown>> = [];
 const update = vi.hoisted(() => ({
   check: vi.fn(),
   download: vi.fn(),
@@ -119,9 +121,11 @@ const mount = async () => {
 
 beforeEach(() => {
   __resetAgentEvents();
+  __resetEditorEvents();
   useAuth.setState({ status: "unlocked", profile: null, hasStoredSession: true });
   setClerkTokenProvider(async () => "quit-trace-test-token");
   deliveredTraces.length = 0;
+  deliveredEditor.length = 0;
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url, init) => {
@@ -136,6 +140,10 @@ beforeEach(() => {
       }
       if (String(url).endsWith("/telemetry/agent")) {
         deliveredTraces.push(JSON.parse(init!.body as string));
+        return new Response("", { status: 200 });
+      }
+      if (String(url).endsWith("/telemetry/editor")) {
+        deliveredEditor.push(JSON.parse(init!.body as string));
         return new Response("", { status: 200 });
       }
       return new Response("offline", { status: 503 });
@@ -170,11 +178,29 @@ beforeEach(() => {
 });
 afterEach(() => {
   __resetAgentEvents();
+  __resetEditorEvents();
   setClerkTokenProvider(null);
   useCloseCoordinator.setState({ pending: null, exitHandler: null });
 });
 
 describe("quitting the app", () => {
+  it("delivers what a person did in the editor before closing the window, not a minute later", async () => {
+    await mount();
+    recordEdit("move", "p1");
+    recordEdit("move", "p1");
+    recordImport({ ok: false, reason: "unsupported_type", media: "unknown", via: "copy" }, "p1");
+    await requestClose();
+    expect(windowClosed).toBe(true);
+    expect(deliveredEditor).toHaveLength(1);
+    expect(deliveredEditor[0]).toMatchObject({
+      project_id: "p1",
+      events: [
+        { kind: "import", ok: false, reason: "unsupported_type" },
+        { kind: "edits", counts: { move: 2 } },
+      ],
+    });
+  });
+
   it("delivers the pending trace before closing the window", async () => {
     await mount();
     recordToolCall({ name: "undo", ok: true, ms: 1 });

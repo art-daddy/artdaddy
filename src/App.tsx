@@ -19,6 +19,7 @@ import { useCloseCoordinator } from "./store/closeCoordinator";
 import { useEditor } from "./store/editor";
 import { installUpdate } from "./update/updater";
 import { flushAgentEventsForExit } from "./api/agentEvents";
+import { flushEditorEventsForExit } from "./api/editorEvents";
 import { refreshExportFlags } from "./api/exportFlags";
 import { useCompatibility } from "./update/compatibility";
 
@@ -109,7 +110,7 @@ export default function App() {
         const coord = useCloseCoordinator.getState();
         const intent = coord.exitIntent;
         coord.setExitIntent("quit");
-        await flushAgentEventsForExit();
+        await Promise.all([flushAgentEventsForExit(), flushEditorEventsForExit()]);
         if (intent !== "update") return forceClose();
         try {
           await installUpdate();
