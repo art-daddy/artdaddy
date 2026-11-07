@@ -33,7 +33,7 @@ import { onOsDragOver, onOsDrop, webOwnsFileDrops } from "../lib/osDrop";
 import { useProjectNotice } from "../store/projectNotice";
 import { withImportJob } from "../store/importJobs";
 import { onDragPoint } from "../lib/dragSource";
-import { importFileByReference, MEDIA_RE, uploadFiles } from "../lib/upload";
+import { acceptDroppedFiles, acceptDroppedPaths, importFileByReference, uploadFiles } from "../lib/upload";
 import { ClipThumbnail } from "./ClipThumbnail";
 import { ClipWaveform } from "./ClipWaveform";
 import { AudioMeter } from "./AudioMeter";
@@ -1009,11 +1009,11 @@ export default function TimelineEditor() {
   );
 
   // Import OS files dropped onto a lane (upload -> inputs/uploads), then add each
-  // as a clip at the drop frame. Non-media files are ignored.
+  // as a clip at the drop frame. Non-media files are ignored (and reported, by acceptDroppedFiles).
   const importFiles = useCallback(
     async (files: File[], trackId: string, frame: number) => {
       const pid = useEditor.getState().projectId;
-      const media = files.filter((f) => MEDIA_RE.test(f.name));
+      const media = acceptDroppedFiles(files, pid ?? "");
       if (!pid || !media.length) return;
       const uploaded = await uploadFiles(pid, media);
       // Use the PROJECT-RELATIVE source so it resolves against the client's
@@ -1040,7 +1040,7 @@ export default function TimelineEditor() {
   const linkPaths = useCallback(
     async (paths: string[], trackId: string, frame: number) => {
       const pid = useEditor.getState().projectId;
-      const media = paths.filter((p) => MEDIA_RE.test(p));
+      const media = acceptDroppedPaths(paths, pid ?? "");
       if (!pid || !media.length) return;
       const linked: string[] = [];
       for (const p of media) {

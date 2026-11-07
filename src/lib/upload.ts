@@ -1,6 +1,8 @@
 import { desktopStore } from "./desktop";
 import { platform } from "../platform";
 import { registerLibraryClip, stageByPath, type StagedFile } from "../tools/import";
+import { recordImport, type ImportDoor } from "../api/editorEvents";
+import { reportMediaImport } from "../api/appEvents";
 import { joinPath, type ProjectStoreAccess } from "../tools/store";
 import { useProjectNotice } from "../store/projectNotice";
 import type { Footage } from "../store/firstPrompt";
@@ -84,6 +86,30 @@ function kindOf(name: string): MediaKind {
  *  (the tree listens for this on `window`). Re-exported: `registerLibraryClip` owns the announcing
  *  now, so nothing here has to remember to call it. */
 export { notifyLibraryChanged as notifyFilesChanged } from "../tools/import";
+
+/** The ONE place a drop is told apart: the files that are media, which the caller goes on to import, and a record of each that
+ *  is not. A file the app does not open used to be dropped without a word, indistinguishable from a dead window; it is now
+ *  reported (one item per file, and one marker for the whole drop) as `unsupported_type`, with no name and no path. Every door
+ *  a person can drop files on goes through one of these two (a test fails on one that filters by itself), so a new door cannot
+ *  forget to say what it turned away. `projectId` is the project the drop was for, "" on the start screen. */
+export function acceptDroppedPaths(paths: readonly string[], projectId: string): string[] {
+  const media = paths.filter((p) => MEDIA_RE.test(p));
+  refuseUnsupported(paths.length - media.length, projectId, "reference");
+  return media;
+}
+export function acceptDroppedFiles(files: readonly File[], projectId: string): File[] {
+  const media = files.filter((f) => MEDIA_RE.test(f.name));
+  refuseUnsupported(files.length - media.length, projectId, "copy");
+  return media;
+}
+
+/** `via` is how the file WOULD have come in: linked in place for a dropped path, copied for a file the browser handed over. */
+function refuseUnsupported(count: number, projectId: string, via: ImportDoor): void {
+  if (count <= 0) return;
+  for (let i = 0; i < count; i++)
+    recordImport({ ok: false, reason: "unsupported_type", media: "unknown", via }, projectId);
+  reportMediaImport(false, projectId, "unsupported_type", via);
+}
 
 export interface Uploaded {
   /** Absolute path on disk (used for server-side chat attachments). */

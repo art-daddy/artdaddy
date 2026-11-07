@@ -128,6 +128,7 @@ const isWord = (value: unknown, words: readonly string[]): boolean =>
 function word<T extends string>(value: unknown, words: readonly T[], fallback: T): T {
   return isWord(value, words) ? (value as T) : fallback;
 }
+export const closedWord = word;
 
 /** A size or a length, rounded UP to the next step of a fixed ladder: a number as precise as a file's own would identify it,
  *  and a band says what analysis needs (a phone clip, a feature, a 4K master) and no more. Above the last step it is the last. */

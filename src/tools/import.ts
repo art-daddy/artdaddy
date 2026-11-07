@@ -15,7 +15,9 @@ import { ProjectClosingError, type MutationOrigin } from "../project/MutationGat
 import { encodeVideoForGemini } from "./geminiEncode";
 import { undecodableImageReason } from "./imageDims";
 import { missingIndexReason } from "../media/mp4Index";
+import { ImportRefusal, importDoor, importReasonOf } from "../media/importReasons";
 import { reportMediaImport } from "../api/appEvents";
+import { recordImport } from "../api/editorEvents";
 import { projectIdOfDir } from "./dataRoot";
 import { writeLibraryCatalog } from "./libraryCatalog";
 import {
@@ -247,13 +249,16 @@ export async function registerLibraryClip(
   // cannot forget to say whether its import worked.
   //
   // `via` is derived HERE from arguments this boundary already holds, so a new producer cannot
-  // forget it either. REFERENCE wins over the provenance kind: a referenced import is the one
-  // whose bytes can vanish underneath the library later, so it is the fact worth keeping.
-  const via = externalPath?.trim()
-    ? "reference"
-    : typeof source?.kind === "string" && source.kind
-      ? source.kind.slice(0, 30)
-      : "copy";
+  // forget it either, and it is one word of a closed list (media/importReasons.ts): a label a
+  // caller supplied is never sent as it came. REFERENCE wins over the provenance kind: a referenced
+  // import is the one whose bytes can vanish underneath the library later, so it is the fact worth keeping.
+  // A refusal is reported as a WORD for why, never as the error's text, which names the file.
+  const via = importDoor(externalPath, source);
+  const project = projectIdOfDir(store.projectDir);
+  const bytesIn = isStaged(bytes) ? bytes.size : bytes.length;
+  const started = typeof performance === "undefined" ? Date.now() : performance.now();
+  const took = (): number =>
+    Math.max(0, (typeof performance === "undefined" ? Date.now() : performance.now()) - started);
   try {
     const entry = await registerLibraryClipInner(
       store,
@@ -264,17 +269,15 @@ export async function registerLibraryClip(
       externalPath,
       opts,
     );
-    reportMediaImport(true, projectIdOfDir(store.projectDir), "", via);
+    reportMediaImport(true, project, "", via);
+    recordImport({ ok: true, media: kind, via, bytes: bytesIn, ms: took() }, project);
     return entry;
   } catch (e) {
     // A project closing mid-import is a lifecycle event, not a rejection worth counting as one.
     if (!(e instanceof ProjectClosingError) && !isMutationRejected(e)) {
-      reportMediaImport(
-        false,
-        projectIdOfDir(store.projectDir),
-        (e as Error)?.message ?? String(e),
-        via,
-      );
+      const reason = importReasonOf(e);
+      reportMediaImport(false, project, reason, via);
+      recordImport({ ok: false, reason, media: kind, via, bytes: bytesIn, ms: took() }, project);
     }
     throw e;
   }
@@ -301,14 +304,15 @@ async function registerLibraryClipInner(
     const reason = undecodableImageReason(head);
     if (reason) {
       await staged?.discard();
-      throw new Error(`'${filename || "image"}' can't be used as media: ${reason}.`);
+      throw new ImportRefusal("image_too_large", `'${filename || "image"}' can't be used as media: ${reason}.`);
     }
   }
   if (kind === "video" || kind === "audio") {
     const reason = missingIndexReason(head, size);
     if (reason) {
       await staged?.discard();
-      throw new Error(
+      throw new ImportRefusal(
+        "no_index",
         `'${filename || kind}' can't be used as media: ${reason}, like a recording that stopped before it was saved ` +
           `or a copy that did not finish. Use a complete copy, or repair it in the app that made it first.`,
       );

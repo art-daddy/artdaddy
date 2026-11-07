@@ -19,6 +19,8 @@ import DiscordCreditsCta from "./DiscordCreditsCta";
 import { listProjectFiles } from "../lib/files";
 import { onOsDragOver, onOsDrop, webOwnsFileDrops } from "../lib/osDrop";
 import {
+  acceptDroppedFiles,
+  acceptDroppedPaths,
   filesFromItems,
   uploadFiles as importFiles,
   importFootage,
@@ -351,7 +353,7 @@ export default function ChatView({ onHide }: { onHide?: () => void } = {}) {
     if (!projectId) return;
     const off = onOsDrop("chat", (d) => {
       setDragOver(false);
-      const media = d.paths.filter((p) => MEDIA_RE.test(p));
+      const media = acceptDroppedPaths(d.paths, projectId);
       if (!media.length) return;
       setUploading(true);
       void importPaths(projectId, media)
@@ -643,7 +645,7 @@ export default function ChatView({ onHide }: { onHide?: () => void } = {}) {
           // Web only: on desktop the drop arrives through osDrop, carrying real paths.
           if (!webOwnsFileDrops()) return;
           setDragOver(false);
-          const files = [...(e.dataTransfer.files ?? [])].filter((f) => MEDIA_RE.test(f.name));
+          const files = acceptDroppedFiles([...(e.dataTransfer.files ?? [])], projectId);
           if (!files.length) return;
           e.preventDefault();
           void uploadFiles(files);

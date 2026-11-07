@@ -6,8 +6,7 @@
 // largest empty area in the app.
 import { useRef, useState } from "react";
 
-import { importViaDialog, uploadFiles } from "../lib/upload";
-import { isMediaFile } from "../media/formats";
+import { acceptDroppedFiles, importViaDialog, uploadFiles } from "../lib/upload";
 import { notifyLibraryChanged } from "../tools/import";
 import { useProjectNotice } from "../store/projectNotice";
 import { useRecordPanel } from "../store/recordPanel";
@@ -25,7 +24,7 @@ export default function StageEmpty({ projectId }: { projectId: string }): JSX.El
       .notify(`Couldn't import: ${e instanceof Error ? e.message : String(e)}`);
 
   const take = async (files: File[]): Promise<void> => {
-    const media = files.filter((f) => isMediaFile(f.name));
+    const media = acceptDroppedFiles(files, projectId);
     if (!media.length) return;
     setBusy(true);
     try {

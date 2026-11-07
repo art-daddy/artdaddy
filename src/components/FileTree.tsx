@@ -5,7 +5,15 @@ import { listProjectFiles } from "../lib/files";
 import { copyIntoProject, relinkMedia } from "../lib/mediaLink";
 import { beginDrag } from "../lib/dragSource";
 import { onOsDragOver, onOsDrop, webOwnsFileDrops } from "../lib/osDrop";
-import { filesFromItems, importPaths, importViaDialog, MEDIA_RE, uploadFiles } from "../lib/upload";
+import {
+  acceptDroppedFiles,
+  acceptDroppedPaths,
+  filesFromItems,
+  importPaths,
+  importViaDialog,
+  MEDIA_RE,
+  uploadFiles,
+} from "../lib/upload";
 import { kindOf } from "../media/formats";
 import { useProjectNotice } from "../store/projectNotice";
 import { useRecordPanel } from "../store/recordPanel";
@@ -140,7 +148,7 @@ export default function FileTree({
   // Desktop file drops arrive as PATHS, so they are LINKED in place rather than copied in.
   useEffect(() => {
     const offDrop = onOsDrop("library", (d) => {
-      const media = d.paths.filter((p) => MEDIA_RE.test(p));
+      const media = acceptDroppedPaths(d.paths, projectId);
       if (!media.length) return;
       setDragOver(false);
       setLoading(true);
@@ -230,7 +238,7 @@ export default function FileTree({
         // Web only: on desktop Tauri owns file drops and they arrive through osDrop with paths.
         if (!webOwnsFileDrops()) return;
         setDragOver(false);
-        const files = [...(e.dataTransfer.files ?? [])].filter((f) => MEDIA_RE.test(f.name));
+        const files = acceptDroppedFiles([...(e.dataTransfer.files ?? [])], projectId);
         if (!files.length) return;
         e.preventDefault();
         void importPicked(files).then(() => setNonce((n) => n + 1));

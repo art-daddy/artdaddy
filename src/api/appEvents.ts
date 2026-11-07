@@ -17,6 +17,7 @@ import {
   type StartupTimings,
 } from "../observability/startupTiming";
 import type { WhisperRunFacts } from "../tools/whisperFacts";
+import { closedWord, IMPORT_DOORS, IMPORT_REASONS } from "./editorEvents";
 
 /** The start-up readings as the launch marker carries them, each a whole number inside what the server accepts (a number
  *  outside its range refuses the whole report, so the launch itself would be lost). */
@@ -241,13 +242,18 @@ export function reportProjectOpened(projectId: string): void {
 // beacon while each distinct door reports once.
 const importedProjects = new Set<string>();
 
+/** `reason` and `via` are words of the closed lists in editorEvents.ts, whatever a caller passed: a reason that is an error's own
+ *  text names the file ("'Holiday final.mp4' can't be used ..."), and a `via` a caller or a model supplied is only a label. A
+ *  success has no reason. */
 export function reportMediaImport(ok: boolean, projectId = "", reason = "", via = ""): void {
+  const why = ok ? "" : closedWord(reason, IMPORT_REASONS, "other");
+  const door = via ? closedWord(via, IMPORT_DOORS, "other") : "";
   if (ok) {
-    const key = `${projectId}|${via}`;
+    const key = `${projectId}|${door}`;
     if (importedProjects.has(key)) return;
     importedProjects.add(key);
   }
-  void reportAppEvent("media_import", { projectId, ok, reason, via });
+  void reportAppEvent("media_import", { projectId, ok, reason: why, via: door });
 }
 
 /** A crash leaves no event by definition, which is what makes it the likeliest silent exit. */

@@ -52,17 +52,37 @@ const sent = async () => {
 };
 
 describe("media_import", () => {
-  it("reports a refusal with the reason the guard gave", async () => {
-    reportMediaImport(false, "p1", "'shot.png' can't be used as media: 6864x41754 is too large");
+  it("reports a refusal with the word for why, never the text the guard gave", async () => {
+    reportMediaImport(false, "p1", "image_too_large", "copy");
     const [ev] = await sent();
     expect(ev.event).toBe("media_import");
     expect(ev.ok).toBe(false);
-    expect(String(ev.reason)).toContain("41754");
+    expect(ev.reason).toBe("image_too_large");
+  });
+
+  it("cannot carry a file name whatever the caller passes: a reason that is not a word is `other`", async () => {
+    // The guard's own message names the file, and this used to be sent as it came.
+    reportMediaImport(false, "p1", "'Holiday 2026 final.png' can't be used as media: 6864x41754 is too large", "copy");
+    const [ev] = await sent();
+    expect(ev.reason).toBe("other");
+    expect(JSON.stringify(posted)).not.toMatch(/Holiday|41754|png/);
+  });
+
+  it("cannot carry a label a caller or a model supplied as the way in", async () => {
+    reportMediaImport(true, "p1", "", "C:/Users/me/Videos/holiday.mp4");
+    const [ev] = await sent();
+    expect(ev.via).toBe("other");
+  });
+
+  it("a success carries no reason even when one was passed", async () => {
+    reportMediaImport(true, "p1", "disk_full", "copy");
+    const [ev] = await sent();
+    expect(ev).not.toHaveProperty("reason");
   });
 
   it("reports EVERY refusal, because each one is a different lost session", async () => {
-    reportMediaImport(false, "p1", "first");
-    reportMediaImport(false, "p1", "second");
+    reportMediaImport(false, "p1", "no_index");
+    reportMediaImport(false, "p1", "disk_full");
     await vi.waitFor(() => expect(posted.length).toBe(2));
   });
 

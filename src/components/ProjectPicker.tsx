@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ProjectListEntry } from "../api/types";
 import { BRAND } from "../brand";
 import { onOsDragOver, onOsDrop, webOwnsFileDrops } from "../lib/osDrop";
-import { MEDIA_EXTS, MEDIA_RE, pickMediaPaths } from "../lib/upload";
+import { acceptDroppedFiles, acceptDroppedPaths, MEDIA_EXTS, pickMediaPaths } from "../lib/upload";
 import { ASPECT_CHOICES, AUTO_ASPECT } from "../store/aspect";
 import { useProjectSwitch } from "../store/closeCoordinator";
 import { discardFirstPrompt, setFirstPrompt, type Footage } from "../store/firstPrompt";
@@ -94,7 +94,7 @@ export default function ProjectPicker() {
     const off = onOsDrop("picker", (d) => {
       setDragOver(false);
       addFootage(
-        d.paths.filter((p) => MEDIA_RE.test(p)).map((path) => ({ name: baseNameOf(path), path })),
+        acceptDroppedPaths(d.paths, "").map((path) => ({ name: baseNameOf(path), path })),
       );
     });
     const offOver = onOsDragOver((d) => setDragOver(d?.target === "picker"));
@@ -167,9 +167,10 @@ export default function ProjectPicker() {
             if (!webOwnsFileDrops()) return;
             e.preventDefault();
             addFootage(
-              Array.from(e.dataTransfer.files)
-                .filter((f) => MEDIA_RE.test(f.name))
-                .map((file) => ({ name: file.name, file })),
+              acceptDroppedFiles(Array.from(e.dataTransfer.files), "").map((file) => ({
+                name: file.name,
+                file,
+              })),
             );
           }}
           className={`rounded-lg border bg-surface p-4 ${dragOver ? "border-accent" : "border-edge"}`}

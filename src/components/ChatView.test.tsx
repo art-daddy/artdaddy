@@ -14,15 +14,30 @@ vi.mock("../platform", () => ({
     return { name: platformName, capabilities: { localTools: true, fileSystem: true } };
   },
 }));
-vi.mock("../lib/upload", () => ({
-  uploadFiles: vi.fn(),
-  importViaDialog: vi.fn(async () => null), // web by default: callers fall back to the input
-  importPaths: vi.fn(async () => []),
-  importFootage: vi.fn(async () => []),
-  filesFromItems: vi.fn(() => []),
-  MEDIA_RE: /\.(mp4|mov|webm|mkv|m4v|png|jpe?g|gif|webp|bmp|avif|mp3|wav|m4a|aac|flac|ogg)$/i,
-}));
+vi.mock("../lib/upload", async (importOriginal) => {
+  // The doors' own helpers are the real ones: what a drop turns away is part of what these tests are about.
+  const real = await importOriginal<typeof import("../lib/upload")>();
+  return {
+    uploadFiles: vi.fn(),
+    importViaDialog: vi.fn(async () => null), // web by default: callers fall back to the input
+    importPaths: vi.fn(async () => []),
+    importFootage: vi.fn(async () => []),
+    filesFromItems: vi.fn(() => []),
+    MEDIA_RE: real.MEDIA_RE,
+    acceptDroppedPaths: real.acceptDroppedPaths,
+    acceptDroppedFiles: real.acceptDroppedFiles,
+  };
+});
 vi.mock("../lib/files", () => ({ listProjectFiles: () => Promise.resolve([]) }));
+// What a drop turns away is reported (the editor stream and the funnel marker): captured here, not sent.
+vi.mock("../api/editorEvents", async (orig) => ({
+  ...(await orig<typeof import("../api/editorEvents")>()),
+  recordImport: vi.fn(),
+}));
+vi.mock("../api/appEvents", async (orig) => ({
+  ...(await orig<typeof import("../api/appEvents")>()),
+  reportMediaImport: vi.fn(),
+}));
 // The approval bar asks the server what a generation may cost; these tests must not reach for the network.
 vi.mock("../api/quote", () => ({ quoteHold: vi.fn(async () => null) }));
 // Stable snapshot (same reference each call) so useSyncExternalStore doesn't loop — which is
@@ -53,6 +68,7 @@ import {
   importFootage,
   filesFromItems,
 } from "../lib/upload";
+import { recordImport } from "../api/editorEvents";
 import { refusedNotice } from "../agent/refusedFrames";
 import { DISCORD_URL } from "../lib/community";
 import { toUserMessage } from "../lib/errors";
@@ -103,6 +119,7 @@ function baseState() {
 
 beforeEach(() => {
   setFirstPrompt("", "");
+  vi.mocked(recordImport).mockClear();
   Object.assign(state, baseState());
   authState.status = "unlocked";
   platformName = "web";
@@ -980,11 +997,17 @@ describe("ChatView drop", () => {
     await waitFor(() => expect(importPaths).not.toHaveBeenCalled());
   });
 
-  it("ignores a dropped path that is not media", async () => {
+  it("ignores a dropped path that is not media, and says it turned it away", async () => {
     platformName = "tauri";
     render(<ChatView />);
     osDrop({ paths: ["/Users/me/notes.pdf"], target: "chat" });
     await waitFor(() => expect(importPaths).not.toHaveBeenCalled());
+    // Not a dead window: one word, no name and no folder.
+    expect(recordImport).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(recordImport).mock.calls[0]).toEqual([
+      { ok: false, reason: "unsupported_type", media: "unknown", via: "reference" },
+      "p1",
+    ]);
   });
 
   it("attaches what the clipboard actually carried, by the shared reader", async () => {

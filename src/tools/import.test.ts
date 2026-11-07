@@ -32,12 +32,19 @@ type Any = any;
 const tele = vi.hoisted(() => ({
   calls: [] as { ok: boolean; via: string }[],
   full: [] as { ok: boolean; projectId: string; reason: string; via: string }[],
+  items: [] as { facts: Record<string, unknown>; projectId: string }[],
 }));
 vi.mock("../api/appEvents", async (orig) => ({
   ...(await orig<typeof import("../api/appEvents")>()),
   reportMediaImport: (ok: boolean, projectId = "", reason = "", via = "") => {
     tele.calls.push({ ok, via });
     tele.full.push({ ok, projectId, reason, via });
+  },
+}));
+vi.mock("../api/editorEvents", async (orig) => ({
+  ...(await orig<typeof import("../api/editorEvents")>()),
+  recordImport: (facts: Record<string, unknown>, projectId = "") => {
+    tele.items.push({ facts, projectId });
   },
 }));
 
@@ -100,6 +107,7 @@ beforeEach(() => vi.clearAllMocks());
 beforeEach(() => {
   tele.calls = [];
   tele.full = [];
+  tele.items = [];
 });
 
 describe("how the media got in (media_import.via)", () => {
@@ -139,7 +147,7 @@ describe("how the media got in (media_import.via)", () => {
     expect(tele.full).toEqual([{ ok: true, projectId: "p1", reason: "", via: "copy" }]);
   });
 
-  it("still says how a REFUSED import was entering", async () => {
+  it("still says how a REFUSED import was entering, and why, in a word", async () => {
     // A PNG header the dimension guard refuses: 6864x41754, the real full-page screenshot that
     // hung a render. Built here rather than borrowed, so this block owns its fixture.
     const huge = new Uint8Array(33);
@@ -151,9 +159,87 @@ describe("how the media got in (media_import.via)", () => {
     const store = new ProjectStoreAccess(DIR, fs);
     const err = await registerLibraryClip(store, huge, "shot.png", "image").catch((e) => e);
     expect(err).toBeInstanceOf(Error);
+    // The person still reads the refusal in full, file name and all...
+    expect((err as Error).message).toContain("shot.png");
     expect(tele.calls).toEqual([{ ok: false, via: "copy" }]);
-    // The refusal's own words, as the user saw them: not "Error: ..." and not something else.
-    expect(tele.full[0].reason).toBe((err as Error).message);
+    // ...and what leaves the computer is the word for why. It used to be that message, which names the file.
+    expect(tele.full[0].reason).toBe("image_too_large");
+    expect(JSON.stringify([tele.full, tele.items])).not.toContain("shot.png");
+  });
+});
+
+describe("what a refused or finished import says about itself (the editor stream)", () => {
+  const png = (): Uint8Array => {
+    const bytes = new Uint8Array(33);
+    bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+    bytes.set([0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52], 8);
+    new DataView(bytes.buffer).setUint32(16, 64);
+    new DataView(bytes.buffer).setUint32(20, 64);
+    return bytes;
+  };
+
+  it("a file that came in is reported with its kind, size and the door, and no name", async () => {
+    const store = new ProjectStoreAccess(DIR, new MockFs());
+    await registerLibraryClip(store, png(), "My Private Holiday.png", "image");
+    expect(tele.items).toHaveLength(1);
+    const { facts, projectId } = tele.items[0];
+    expect(projectId).toBe("p1");
+    expect(facts).toMatchObject({ ok: true, media: "image", via: "copy", bytes: 33 });
+    expect(typeof facts.ms).toBe("number");
+    expect(JSON.stringify(tele.items)).not.toMatch(/Private|Holiday/);
+  });
+
+  it("a recording that is missing its index is `no_index`, a screenshot past the render limit is `image_too_large`", async () => {
+    const store = new ProjectStoreAccess(DIR, new MockFs());
+    // An MP4 that begins with a `mdat` box and no `moov` anywhere: a recording that stopped before it was saved.
+    const noIndex = new Uint8Array(4096);
+    new DataView(noIndex.buffer).setUint32(0, 4096);
+    noIndex.set([0x6d, 0x64, 0x61, 0x74], 4);
+    const first = await registerLibraryClip(store, noIndex, "take.mp4", "video").catch((e) => e);
+    expect(first).toBeInstanceOf(Error);
+    const huge = png();
+    new DataView(huge.buffer).setUint32(16, 6864);
+    new DataView(huge.buffer).setUint32(20, 41754);
+    await registerLibraryClip(store, huge, "shot.png", "image").catch(() => undefined);
+    expect(tele.items.map((i) => [i.facts.ok, i.facts.reason])).toEqual([
+      [false, "no_index"],
+      [false, "image_too_large"],
+    ]);
+  });
+
+  it.each([
+    ["Access is denied. (os error 5)", "permission"],
+    ["There is not enough space on the disk. (os error 112)", "disk_full"],
+    ["No space left on device (os error 28)", "disk_full"],
+    ["The system cannot find the file specified. (os error 2)", "file_missing"],
+    ["The process cannot access the file because it is being used by another process. (os error 32)", "file_in_use"],
+    ["something nobody has seen before, with the file name hero.mp4 in it", "other"],
+  ])("the operating system's own words (%s) become the word %s and nothing of them is kept", async (message, word) => {
+    class Failing extends MockFs {
+      async writeBytes(): Promise<void> {
+        throw new Error(message);
+      }
+    }
+    const store = new ProjectStoreAccess(DIR, new Failing());
+    await registerLibraryClip(store, new Uint8Array([1, 2, 3, 4]), "hero.mp4", "video").catch(() => undefined);
+    expect(tele.items.at(-1)?.facts).toMatchObject({ ok: false, reason: word });
+    expect(JSON.stringify(tele.items)).not.toContain("hero");
+  });
+
+  it("the door is one word of the list: a provenance a model supplied is `other`, a recording is a recording", async () => {
+    const store = new ProjectStoreAccess(DIR, new MockFs());
+    await registerLibraryClip(store, new Uint8Array([1, 1, 1]), "a.mp4", "video", { kind: "youtube" });
+    await registerLibraryClip(store, new Uint8Array([2, 2, 2]), "b.mp4", "video", { kind: "recording" });
+    await registerLibraryClip(store, new Uint8Array([3, 3, 3]), "c.mp4", "video", { kind: "C:/Users/me/holiday" });
+    await registerLibraryClip(store, new Uint8Array([4, 4, 4]), "d.mp4", "video", undefined, "D:/footage/d.mp4");
+    expect(tele.items.map((i) => i.facts.via)).toEqual(["other", "recording", "other", "reference"]);
+  });
+
+  it("a project that closes under an import is not a failed import", async () => {
+    const store = new ProjectStoreAccess(DIR, new MockFs());
+    endProjectSession(DIR);
+    await registerLibraryClip(store, new Uint8Array([1, 2, 3, 4]), "clip.mp4", "video").catch(() => undefined);
+    expect(tele.items).toEqual([]);
   });
 });
 
