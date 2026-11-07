@@ -8,7 +8,7 @@ const MAX_RECORD_BYTES: u64 = 64 * 1024;
 const MAX_RECOVERY_RECORDS: usize = 3;
 const RECOVERY_PREFIX: &str = "health-recovery-";
 /// A mark of a launch this record knows nothing about is left alone for this long: it may belong to another copy that is running.
-const STALE_MARK: std::time::Duration = std::time::Duration::from_secs(30 * 86_400);
+const STALE_MARK: std::time::Duration = std::time::Duration::from_secs(365 * 86_400);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -252,8 +252,8 @@ impl RuntimeHealth {
     }
   }
 
-  /// Removes marks nobody has touched for a month and nothing refers to (a launch whose record was lost): the only case a mark of an
-  /// unknown launch is removed, so what another running copy holds is safe.
+  /// Removes marks nobody has touched for a year and nothing refers to (a launch whose record was lost): the only case a mark of an
+  /// unknown launch is removed, so what another running copy holds is safe for as long as a copy runs.
   fn sweep_old_marks(&self, record: &Record) {
     let Some(parent) = self.path.parent() else { return };
     let keep: Vec<String> = std::iter::once(&record.current.launch_id)
@@ -1286,7 +1286,7 @@ mod tests {
   }
 
   #[test]
-  fn a_mark_nobody_has_touched_for_a_month_and_nothing_refers_to_is_swept_and_a_recent_one_is_not() {
+  fn a_mark_nobody_has_touched_for_a_year_and_nothing_refers_to_is_swept_and_a_newer_one_is_not() {
     use crate::os_exit_cause::unix_end::marker_file_name;
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("health.json");
@@ -1296,11 +1296,11 @@ mod tests {
       let at = std::time::SystemTime::now() - std::time::Duration::from_secs(days * 86_400);
       std::fs::File::options().write(true).open(file).unwrap().set_modified(at).unwrap();
     };
-    age("ancient", 31);
-    age("last-week", 7);
+    age("ancient", 400);
+    age("last-spring", 300);
     let health = RuntimeHealth::open_in_boot(path, "now".into(), "artdaddy@0.24.0".into(), "boot-a".into());
     drop(health);
-    assert_eq!(marks_in(directory.path()), vec![marker_file_name("last-week")]);
+    assert_eq!(marks_in(directory.path()), vec![marker_file_name("last-spring")]);
   }
 
   #[test]

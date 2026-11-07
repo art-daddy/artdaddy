@@ -12,9 +12,9 @@
 //! It never changes what a signal does. Two kinds are taken differently:
 //!  * the crash signals (SIGSEGV, SIGBUS, SIGILL, SIGFPE) and the abort a panic or a stack overflow ends in (SIGABRT) end the
 //!    process anyway. The runtime has its own handler for the first two (it recognises a stack overflow), so the app's handler
-//!    runs first and passes the signal on to whatever was there, as it was called; with nothing there it restores the default and
-//!    sends the signal again, so the process dies of the same signal and the system makes its own record of it (a core file, a
-//!    crash report, the status its parent sees);
+//!    takes the signal under the same mask and flags as what was there, runs first, and passes the signal on to what was there,
+//!    called as it would have been; with nothing there it restores the default and sends the signal again, so the process dies of
+//!    the same signal and the system makes its own record of it (a core file, a crash report, the status its parent sees);
 //!  * the requests to end (SIGTERM, SIGHUP, SIGINT, SIGQUIT) are taken ONLY when nobody handles them: a handler somebody else
 //!    installed carries a signal mask and flags (restart a system call, reset after one use) that cannot be copied faithfully
 //!    from here, so it is left alone and that signal leaves no mark. A signal that is ignored stays ignored.
@@ -24,7 +24,8 @@ use std::os::raw::c_int;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::IntoRawFd;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 use crate::os_exit_cause::unix_end::marker_file_name;
 
@@ -46,7 +47,9 @@ pub(crate) const SIGNALS: [(c_int, &[u8], bool); 9] = [
   (libc::SIGQUIT, b"signal_quit\n", false),
 ];
 
-static INSTALLED: AtomicBool = AtomicBool::new(false);
+/// Whether the handlers have been installed. A lock, not a flag, so a second caller waits for the first and never sees "done" for an
+/// install that then failed. The handler itself never touches it: it reads only the atomics below.
+static INSTALLED: Mutex<bool> = Mutex::new(false);
 static MARK_FD: AtomicI32 = AtomicI32::new(-1);
 // What each signal did before the handler took it: the address (0 is the default action, 1 is "ignore") and its flags.
 static PREVIOUS_HANDLER: [AtomicUsize; 9] = [
@@ -108,29 +111,24 @@ extern "C" fn on_signal(signal: c_int, info: *mut libc::siginfo_t, context: *mut
   }
 }
 
-/// Opens the mark for this launch and takes the signals. Safe to call twice (the second call does nothing, not even open a file). On
-/// an error nothing was taken and every signal does what it always did. Does nothing when `ARTDADDY_NO_EXIT_MARKS` is set.
+/// Opens the mark for this launch and takes the signals. Safe to call twice, from any thread: the second call waits for the first
+/// and then does nothing, not even open a file. On an error nothing was taken and every signal does what it always did. Does
+/// nothing when `ARTDADDY_NO_EXIT_MARKS` is set.
 pub fn install(dir: &Path, launch_id: &str) -> std::io::Result<()> {
   if std::env::var_os(OFF).is_some() {
     return Ok(());
   }
-  if INSTALLED.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+  let mut done = INSTALLED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+  if *done {
     return Ok(());
   }
   // Opened here, so the handler only ever writes: `open` is not something a handler may do. Close-on-exec by default, so no child
   // process the app starts keeps it.
-  let file = match std::fs::OpenOptions::new()
+  let file = std::fs::OpenOptions::new()
     .create(true)
     .append(true)
     .mode(0o600)
-    .open(dir.join(marker_file_name(launch_id)))
-  {
-    Ok(file) => file,
-    Err(error) => {
-      INSTALLED.store(false, Ordering::SeqCst);
-      return Err(error);
-    }
-  };
+    .open(dir.join(marker_file_name(launch_id)))?;
   MARK_FD.store(file.into_raw_fd(), Ordering::SeqCst);
   for (slot, (signal, _, crash)) in SIGNALS.iter().enumerate() {
     // SAFETY: both are plain C structs filled in before use; `sigaction` reports what the signal did and then takes it.
@@ -144,20 +142,24 @@ pub fn install(dir: &Path, launch_id: &str) -> std::io::Result<()> {
       if before.sa_sigaction == libc::SIG_IGN || (!*crash && before.sa_sigaction != libc::SIG_DFL) {
         continue;
       }
-      PREVIOUS_HANDLER[slot].store(before.sa_sigaction, Ordering::SeqCst);
-      PREVIOUS_FLAGS[slot].store(before.sa_flags, Ordering::SeqCst);
+      // Ours behaves for the kernel as what it replaces did: the same mask of signals held while it runs, the same flags (restart
+      // a system call, reset after one use, run on the alternate stack), so passing the signal on is as faithful as a call can be.
+      // It always takes the extra information and the alternate stack (a stack that ran out is one the handler cannot use).
       let mut ours: libc::sigaction = std::mem::zeroed();
       ours.sa_sigaction = on_signal as extern "C" fn(c_int, *mut libc::siginfo_t, *mut c_void) as libc::sighandler_t;
-      // On the alternate stack where there is one: a stack that ran out is a stack the handler cannot use.
-      ours.sa_flags = libc::SA_SIGINFO | libc::SA_ONSTACK;
-      libc::sigemptyset(&mut ours.sa_mask);
+      ours.sa_mask = before.sa_mask;
+      ours.sa_flags = before.sa_flags | libc::SA_SIGINFO | libc::SA_ONSTACK;
+      // What it replaced is what it passes on to, taken from this one call and so never out of date. The signal is not held
+      // meanwhile: a signal in the instants between the call and the line after it finds nothing recorded and ends the process as
+      // the default action would, and nothing is ever put back over somebody else's later handler.
       let mut replaced: libc::sigaction = std::mem::zeroed();
-      if libc::sigaction(*signal, &ours, &mut replaced) == 0 && replaced.sa_sigaction != before.sa_sigaction {
-        // Another thread took the signal between the two calls: give it back, theirs stays what it is.
-        libc::sigaction(*signal, &replaced, std::ptr::null_mut());
+      if libc::sigaction(*signal, &ours, &mut replaced) == 0 {
+        PREVIOUS_HANDLER[slot].store(replaced.sa_sigaction, Ordering::SeqCst);
+        PREVIOUS_FLAGS[slot].store(replaced.sa_flags, Ordering::SeqCst);
       }
     }
   }
+  *done = true;
   Ok(())
 }
 
@@ -169,6 +171,7 @@ mod tests {
   use std::os::unix::process::ExitStatusExt;
   use std::path::PathBuf;
   use std::process::{Command, ExitStatus, Stdio};
+  use std::sync::atomic::AtomicBool;
 
   const SCENARIO: &str = "ARTDADDY_EXIT_SIGNAL_SCENARIO";
   const FOLDER: &str = "ARTDADDY_EXIT_SIGNAL_FOLDER";
@@ -204,9 +207,10 @@ mod tests {
   /// # Safety
   /// Ends in a fault by design: only for a process that exists to be ended by it.
   unsafe fn fault() {
-    let page = libc::mmap(std::ptr::null_mut(), 4096, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_PRIVATE | libc::MAP_ANON, -1, 0);
+    let size = libc::sysconf(libc::_SC_PAGESIZE) as usize;
+    let page = libc::mmap(std::ptr::null_mut(), size, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_PRIVATE | libc::MAP_ANON, -1, 0);
     assert_ne!(page, libc::MAP_FAILED);
-    assert_eq!(libc::munmap(page, 4096), 0);
+    assert_eq!(libc::munmap(page, size), 0);
     std::ptr::write_volatile(page.cast::<u8>(), 1);
   }
 

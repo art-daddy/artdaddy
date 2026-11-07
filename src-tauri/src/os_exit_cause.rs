@@ -407,9 +407,9 @@ pub mod unix_end {
   /// checks in about every five seconds, so a panic the app lived through is followed by a later sign of life within a beat or
   /// two, while one that ended it is not.
   pub const PANIC_NEAR_MS: u64 = 6_000;
-  /// How long after the next start noticed the end a crash report of it may still be written (the system writes one a few seconds
-  /// after the crash, and a person may have opened the app again at once).
-  pub const REPORT_GRACE_MS: u64 = 60_000;
+  /// How long after the next start noticed the end a crash report of it may still be written. The system writes one within a few
+  /// seconds of the crash; the longer this is, the likelier that a crash of the next run is taken for this one's.
+  pub const REPORT_GRACE_MS: u64 = 15_000;
   const MARKER_BYTES: u64 = 512;
   const REPORT_BYTES: u64 = 64 * 1024;
 
@@ -452,11 +452,10 @@ pub mod unix_end {
     let words: Vec<&'static str> = text.lines().filter_map(marker_word).collect();
     let last = *words.last()?;
     // A crash the runtime turns into an abort is the crash: a stack that ran out is a fault on a guard page, and the runtime's own
-    // handler then calls `abort`, so the mark ends in the abort the fault led to.
-    let word = if last == "signal_abrt" {
-      words.iter().rev().find(|word| matches!(**word, "signal_segv" | "signal_bus" | "signal_ill" | "signal_fpe")).copied().unwrap_or(last)
-    } else {
-      last
+    // handler then calls `abort`, so the mark ends in the abort the fault led to, and the fault is the word just before it.
+    let word = match (last, words.len().checked_sub(2).map(|before| words[before])) {
+      ("signal_abrt", Some(crash @ ("signal_segv" | "signal_bus" | "signal_ill" | "signal_fpe"))) => crash,
+      _ => last,
     };
     Some(Marker { word, at_ms })
   }
@@ -1013,6 +1012,8 @@ mod unix_end_tests {
       (&b"signal_segv\nsignal_abrt\n"[..], "signal_segv"),
       (b"signal_bus\nsignal_abrt\n", "signal_bus"),
       (b"signal_term\nsignal_segv\nsignal_abrt\n", "signal_segv"),
+      // Only the fault right before the abort led to it: one with something between is not what ended the process.
+      (b"signal_segv\nsignal_term\nsignal_abrt\n", "signal_abrt"),
       // An abort that follows nothing, or only a request to end, is an abort; a crash that came after one is the later word.
       (b"signal_abrt\n", "signal_abrt"),
       (b"signal_term\nsignal_abrt\n", "signal_abrt"),
