@@ -439,7 +439,16 @@ pub mod unix_end {
     }
     let mut bytes = Vec::new();
     file.take(MARKER_BYTES).read_to_end(&mut bytes).ok()?;
-    let word = String::from_utf8_lossy(&bytes).lines().rev().find_map(marker_word)?;
+    let text = String::from_utf8_lossy(&bytes);
+    let words: Vec<&'static str> = text.lines().filter_map(marker_word).collect();
+    let last = *words.last()?;
+    // A crash the runtime turns into an abort is the crash: a stack that ran out is a fault on a guard page, and the runtime's own
+    // handler then calls `abort`, so the mark ends in the abort the fault led to.
+    let word = if last == "signal_abrt" {
+      words.iter().rev().find(|word| matches!(**word, "signal_segv" | "signal_bus" | "signal_ill" | "signal_fpe")).copied().unwrap_or(last)
+    } else {
+      last
+    };
     Some(Marker { word, at_ms })
   }
 
@@ -978,6 +987,24 @@ mod unix_end_tests {
     assert_eq!(read_marker(dir.path(), "junk").map(|m| m.word), Some("signal_int"));
     write_mark(dir.path(), "binary", &[0xff, 0xfe, 0x00, b's', b'i']);
     assert_eq!(read_marker(dir.path(), "binary"), None);
+  }
+
+  #[test]
+  fn a_crash_the_runtime_turns_into_an_abort_is_the_crash() {
+    let dir = tempfile::tempdir().unwrap();
+    // A stack that ran out is a fault on a guard page; the runtime's own handler then aborts. The abort is its consequence.
+    for (content, word) in [
+      (&b"signal_segv\nsignal_abrt\n"[..], "signal_segv"),
+      (b"signal_bus\nsignal_abrt\n", "signal_bus"),
+      (b"signal_term\nsignal_segv\nsignal_abrt\n", "signal_segv"),
+      // An abort that follows nothing, or only a request to end, is an abort; a crash that came after one is the later word.
+      (b"signal_abrt\n", "signal_abrt"),
+      (b"signal_term\nsignal_abrt\n", "signal_abrt"),
+      (b"signal_abrt\nsignal_segv\n", "signal_segv"),
+    ] {
+      write_mark(dir.path(), "chain", content);
+      assert_eq!(read_marker(dir.path(), "chain").map(|m| m.word), Some(word), "{:?}", String::from_utf8_lossy(content));
+    }
   }
 
   #[test]
