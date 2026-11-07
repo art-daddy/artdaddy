@@ -17,6 +17,7 @@ import type { CommandRunner } from "./command";
 import type { ClientToolContext } from "./context";
 import { inspectMediaTool, inspectTimelineTool } from "./inspect";
 import { createLookDecoder, type LookDecoder } from "./lookDecode";
+import type { LookReport } from "./lookReport";
 import { probePath } from "./media";
 import { ProjectStoreAccess, joinPath } from "./store";
 import { ensureTimeline } from "../timeline/engine";
@@ -131,27 +132,27 @@ describe("a look on the GPU is the same picture", () => {
   });
 });
 
-describe("a GPU that fails costs time, never the look", () => {
-  /** A PC whose proof passes and whose look runs then fail the way a driver can: the proof is run in
-   *  software both ways, and every look frame that asks for the GPU is given a decoder ffmpeg does not have. */
-  function failingGpuRunner(seen: string[][]): CommandRunner {
-    return {
-      run(program, args, signal, cwd, onStdout) {
-        let a = args;
-        if (program === "ffmpeg" && args.includes("framemd5")) {
-          const at = args.indexOf("-hwaccel");
-          if (at >= 0) a = args.filter((_, i) => i !== at && i !== at + 1);
-        } else if (program === "ffmpeg" && args.includes("-hwaccel")) {
-          seen.push(args);
-          a = args.map((x) => (x === "d3d11va" || x === "videotoolbox" ? "not_a_real_accel" : x));
-        } else if (program === "ffmpeg" && args.includes("-frames:v")) seen.push(args);
-        return nodeRunner.run(program, a, signal, cwd, onStdout);
-      },
-    };
-  }
-  const pretendWindows = (): LookDecoder =>
-    createLookDecoder({ os: () => "windows", storage: null, now: () => Date.now() });
+/** A PC whose proof passes and whose look runs then fail the way a driver can: the proof is run in
+ *  software both ways, and every look frame that asks for the GPU is given a decoder ffmpeg does not have. */
+function failingGpuRunner(seen: string[][]): CommandRunner {
+  return {
+    run(program, args, signal, cwd, onStdout) {
+      let a = args;
+      if (program === "ffmpeg" && args.includes("framemd5")) {
+        const at = args.indexOf("-hwaccel");
+        if (at >= 0) a = args.filter((_, i) => i !== at && i !== at + 1);
+      } else if (program === "ffmpeg" && args.includes("-hwaccel")) {
+        seen.push(args);
+        a = args.map((x) => (x === "d3d11va" || x === "videotoolbox" ? "not_a_real_accel" : x));
+      } else if (program === "ffmpeg" && args.includes("-frames:v")) seen.push(args);
+      return nodeRunner.run(program, a, signal, cwd, onStdout);
+    },
+  };
+}
+const pretendWindows = (): LookDecoder =>
+  createLookDecoder({ os: () => "windows", storage: null, now: () => Date.now() });
 
+describe("a GPU that fails costs time, never the look", () => {
   it("inspect_timeline redoes the frame in software, returns the same bytes, and stops asking the GPU", async () => {
     const baseline = await timelineLook(software());
     const seen: string[][] = [];
@@ -168,5 +169,102 @@ describe("a GPU that fails costs time, never the look", () => {
     const seen: string[][] = [];
     expect(await mediaLook(pretendWindows(), failingGpuRunner(seen))).toEqual(baseline);
     expect(seen.some((a) => a.includes("-hwaccel"))).toBe(true);
+  });
+});
+
+// What a look says it did (tools/lookReport.ts), on a real file with the real ffmpeg: the report is read against ffprobe's
+// own answer about the file and against how the decoder was really driven, not against what the tool meant to do.
+describe("a look reports what it did, on real footage", () => {
+  const watched = (base: ClientToolContext): { ctx: ClientToolContext; reports: LookReport[] } => {
+    const reports: LookReport[] = [];
+    return { ctx: { ...base, look: (r) => reports.push(r) }, reports };
+  };
+  const mediaArgs = {
+    media_ref: "",
+    start_seconds: 40,
+    end_seconds: SECONDS - 1,
+    max_frames: 3,
+  };
+
+  it("inspect_media: the file's own facts, every frame made, and a real decode costs real time", async () => {
+    await clearCache();
+    const { ctx: watchedCtx, reports } = watched({ ...ctx, lookDecode: thisPc() });
+    const r = (await inspectMediaTool({ ...mediaArgs, media_ref: ref }, watchedCtx)) as Any;
+    expect(r.frames_attached).toBe(3);
+    expect(reports).toHaveLength(1);
+    const probe = (await probePath(nodeRunner, fixture)) as Any;
+    expect(reports[0]).toMatchObject({
+      tool: "inspect_media",
+      outcome: "done",
+      frames: 3,
+      cached: 0,
+      failed: 0,
+      layers: 1,
+      source: { codec: probe.video.codec, width: probe.video.width, height: probe.video.height },
+    });
+    expect(reports[0].source?.dur_s).toBe(Math.round(probe.duration_s));
+    expect(reports[0].source?.kbps).toBeGreaterThan(0);
+    expect(reports[0].slowest_ms).toBeGreaterThan(0);
+    expect(reports[0].gpu + reports[0].retried).toBeLessThanOrEqual(3);
+    console.log(`[look] inspect_media ${JSON.stringify(reports[0])}`); // eslint-disable-line no-console
+    if (process.env.ARTDADDY_EXPECT_GPU === "1") expect(reports[0].gpu).toBe(3);
+  });
+
+  it("inspect_media: a repeat look reuses the files and says so", async () => {
+    await clearCache();
+    const decoder = thisPc();
+    const first = watched({ ...ctx, lookDecode: decoder });
+    await inspectMediaTool({ ...mediaArgs, media_ref: ref }, first.ctx);
+    const second = watched({ ...ctx, lookDecode: decoder });
+    await inspectMediaTool({ ...mediaArgs, media_ref: ref }, second.ctx);
+    expect(first.reports[0].cached).toBe(0);
+    expect(second.reports[0]).toMatchObject({
+      outcome: "done",
+      frames: 3,
+      cached: 3,
+      slowest_ms: 0,
+    });
+  });
+
+  it("inspect_media: a GPU that fails is reported as redone, and the look is still done", async () => {
+    await clearCache();
+    const seen: string[][] = [];
+    const { ctx: watchedCtx, reports } = watched({
+      ...ctx,
+      runner: failingGpuRunner(seen),
+      lookDecode: pretendWindows(),
+    });
+    const r = (await inspectMediaTool({ ...mediaArgs, media_ref: ref }, watchedCtx)) as Any;
+    expect(r.frames_attached).toBe(3);
+    expect(seen.some((a) => a.includes("-hwaccel"))).toBe(true);
+    expect(reports[0]).toMatchObject({ outcome: "done", frames: 3, gpu: 0, failed: 0 });
+    expect(reports[0].retried).toBeGreaterThanOrEqual(1);
+  });
+
+  it("inspect_timeline: the same facts for the frame 85 s into a one-keyframe file", async () => {
+    await clearCache();
+    const { ctx: watchedCtx, reports } = watched({ ...ctx, lookDecode: thisPc() });
+    const r = (await inspectTimelineTool({ start_frame: (SECONDS - 5) * FPS }, watchedCtx)) as Any;
+    expect(r.frames_attached).toBe(1);
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toMatchObject({
+      tool: "inspect_timeline",
+      outcome: "done",
+      frames: 1,
+      cached: 0,
+      failed: 0,
+      layers: 1,
+    });
+    expect(reports[0].slowest_ms).toBeGreaterThan(0);
+    console.log(`[look] inspect_timeline ${JSON.stringify(reports[0])}`); // eslint-disable-line no-console
+    // Where this PC has a hardware decoder the sources were probed, so the file's facts ride along.
+    if (realOs() !== "linux") {
+      const probe = (await probePath(nodeRunner, fixture)) as Any;
+      expect(reports[0].source).toMatchObject({
+        codec: probe.video.codec,
+        width: probe.video.width,
+        height: probe.video.height,
+      });
+    }
   });
 });
