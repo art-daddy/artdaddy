@@ -78,7 +78,8 @@ pub struct McpState {
   port: Arc<AtomicU64>,
   /// The instruction text the webview composes (shared system prompt + MCP-only sections).
   instructions: Arc<Mutex<Option<String>>>,
-  listener: Arc<Mutex<Option<TcpListener>>>,
+  /// Told when the accept thread has closed the listening socket (see `listen`). Present only while the server runs.
+  accepting: Arc<Mutex<Option<std::sync::mpsc::Receiver<()>>>>,
 }
 
 impl Default for McpState {
@@ -91,13 +92,13 @@ impl Default for McpState {
       running: Arc::new(AtomicBool::new(false)),
       port: Arc::new(AtomicU64::new(DEFAULT_PORT as u64)),
       instructions: Arc::new(Mutex::new(None)),
-      listener: Arc::new(Mutex::new(None)),
+      accepting: Arc::new(Mutex::new(None)),
     }
   }
 }
 
 impl McpState {
-  /// Everything the accept loop needs, minus the listener handle it must not own.
+  /// Everything a connection thread needs, minus the way to stop the listener, which only `mcp_stop` uses.
   fn inner_clone(&self) -> Self {
     Self {
       pending: self.pending.clone(),
@@ -107,7 +108,7 @@ impl McpState {
       running: self.running.clone(),
       port: self.port.clone(),
       instructions: self.instructions.clone(),
-      listener: Arc::new(Mutex::new(None)),
+      accepting: Arc::new(Mutex::new(None)),
     }
   }
 }
@@ -338,7 +339,8 @@ struct Request {
 }
 
 fn read_request(stream: &mut TcpStream) -> Option<Request> {
-  let mut reader = BufReader::new(stream.try_clone().ok()?);
+  // Read through a borrow: a `try_clone` here would be one more duplicate of the connection that a child process could inherit.
+  let mut reader = BufReader::new(&*stream);
   let mut line = String::new();
   reader.read_line(&mut line).ok()?;
   let mut parts = line.split_whitespace();
@@ -516,6 +518,46 @@ where
 /// ArtDaddy is recognised when the port is taken (`probe_holder`), so there is exactly one spelling of it.
 const NO_EVENT_STREAM_BODY: &str = r#"{"error":"no event stream"}"#;
 
+/// Bind the loopback port and accept on a thread that is the socket's ONLY owner. Returns the channel that says the socket has
+/// been closed.
+///
+/// There is deliberately no second handle kept somewhere else to close it with. `try_clone` hands back a handle that a child
+/// process inherits (measured: a listener cloned this way stays open after every handle in this process is closed, for as long as
+/// a child started in between lives), and the old design cloned it for the accept thread. A transcription child lives for minutes,
+/// so switching the server off and on again, and relaunching the app, found the port "in use" until it finished. The listener that
+/// `bind` creates, and a connection it accepts, are not inherited; the clone is. Stopping is simply this thread ending.
+fn listen(
+  port: u16,
+  running: &Arc<AtomicBool>,
+  mut on_stream: impl FnMut(TcpStream) + Send + 'static,
+) -> std::io::Result<std::sync::mpsc::Receiver<()>> {
+  let listener = TcpListener::bind(("127.0.0.1", port))?;
+  // Before the thread exists: its first look at the flag must already say "running".
+  running.store(true, Ordering::SeqCst);
+  let (closed_tx, closed_rx) = std::sync::mpsc::channel();
+  let running = running.clone();
+  std::thread::spawn(move || {
+    accept_loop(listener.incoming(), &running, |stream| on_stream(stream));
+    // The socket is closed HERE, and only then is anyone told: `stop_listening` returns after this, so a start that follows it
+    // finds the port free.
+    drop(listener);
+    let _ = closed_tx.send(());
+  });
+  Ok(closed_rx)
+}
+
+/// Switch the listener off: clear the flag, wake the accept loop with one connection to itself (it is blocked in `accept`), and
+/// wait until the socket is really closed. Nothing is woken when nothing was listening, so a port held by someone else is never
+/// poked.
+fn stop_listening(running: &AtomicBool, port: u16, closed: Option<std::sync::mpsc::Receiver<()>>) {
+  running.store(false, Ordering::SeqCst);
+  let Some(closed) = closed else { return };
+  let _ = TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), Duration::from_millis(500));
+  if closed.recv_timeout(Duration::from_secs(2)).is_err() {
+    log::warn!("[mcp] the listening socket was not closed within 2 s of the stop");
+  }
+}
+
 /// How long to wait on whatever holds the port: a person is reading the message this is for.
 const PROBE_TIMEOUT: Duration = Duration::from_millis(800);
 
@@ -638,46 +680,29 @@ pub fn mcp_start(app: AppHandle, state: tauri::State<'_, McpState>, port: Option
     return Ok(mcp_status(state));
   }
   let port = port.unwrap_or(DEFAULT_PORT);
-  // 127.0.0.1 (not 0.0.0.0) so the editor is never drivable from the network.
-  let listener = TcpListener::bind(("127.0.0.1", port))
-    .map_err(|e| {
-      log::error!("[mcp] could not bind 127.0.0.1:{port}: {e}");
-      format!("could not bind 127.0.0.1:{port}: {e}")
-    })?;
-  log::info!("[mcp] listening on 127.0.0.1:{port}");
-
-  state.running.store(true, Ordering::SeqCst);
-  state.port.store(port as u64, Ordering::SeqCst);
-
-  // Keep a handle so stopping can drop the socket. Without this the port stays bound until the
-  // process exits, and turning the server off then on again fails with "address in use".
-  let accept = listener.try_clone().map_err(|e| format!("could not clone listener: {e}"))?;
-  if let Ok(mut slot) = state.listener.lock() {
-    *slot = Some(listener);
-  }
-
-  let owned = state.inner_clone();
   let handler = state.inner_clone();
-  std::thread::spawn(move || {
-    accept_loop(accept.incoming(), &owned.running, move |s| {
-      let (a, st) = (app.clone(), handler.clone());
-      std::thread::spawn(move || serve(s, a, st));
-    });
-  });
-
+  // 127.0.0.1 (not 0.0.0.0) so the editor is never drivable from the network.
+  let closed = listen(port, &state.running, move |stream| {
+    let (a, st) = (app.clone(), handler.clone());
+    std::thread::spawn(move || serve(stream, a, st));
+  })
+  .map_err(|e| {
+    log::error!("[mcp] could not bind 127.0.0.1:{port}: {e}");
+    format!("could not bind 127.0.0.1:{port}: {e}")
+  })?;
+  log::info!("[mcp] listening on 127.0.0.1:{port}");
+  state.port.store(port as u64, Ordering::SeqCst);
+  if let Ok(mut slot) = state.accepting.lock() {
+    *slot = Some(closed);
+  }
   Ok(json!({ "running": true, "port": port }))
 }
 
 #[tauri::command]
 pub fn mcp_stop(state: tauri::State<'_, McpState>) -> Value {
-  state.running.store(false, Ordering::SeqCst);
   let port = state.port.load(Ordering::SeqCst) as u16;
-  // Drop the bound socket, then unblock the accept loop so the thread exits now rather than on
-  // the next request.
-  if let Ok(mut slot) = state.listener.lock() {
-    slot.take();
-  }
-  let _ = std::net::TcpStream::connect(("127.0.0.1", port));
+  let closed = state.accepting.lock().ok().and_then(|mut slot| slot.take());
+  stop_listening(&state.running, port, closed);
   if let Ok(mut m) = state.sessions.lock() {
     m.clear();
   }
@@ -974,5 +999,138 @@ Active Connections
     let name = image_name(&odd).unwrap();
     assert!(name.chars().count() <= 64);
     assert!(!name.contains('<') && !name.contains('>'));
+  }
+
+  // A sidecar (speech recognition, ffmpeg, ...) is started while the server runs and lives on for minutes. It must never be what keeps
+  // the port bound: with a cloned listener it did, and switching the server off and on again, or relaunching the app, then found the
+  // port "in use" until the sidecar finished. These start a real child process the way a sidecar is started.
+
+  fn accepting(port: u16) -> bool {
+    TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), Duration::from_millis(300)).is_ok()
+  }
+
+  fn scratch_port() -> u16 {
+    TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port()
+  }
+
+  fn long_lived_child() -> std::process::Child {
+    #[cfg(windows)]
+    let mut command = {
+      let mut c = std::process::Command::new("powershell");
+      c.args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"]);
+      c
+    };
+    #[cfg(not(windows))]
+    let mut command = {
+      let mut c = std::process::Command::new("sleep");
+      c.arg("30");
+      c
+    };
+    command
+      .stdin(std::process::Stdio::null())
+      .stdout(std::process::Stdio::null())
+      .stderr(std::process::Stdio::null())
+      .spawn()
+      .expect("a child process to start")
+  }
+
+  #[test]
+  fn a_stop_frees_the_port_while_a_child_started_beside_the_server_is_still_running() {
+    let port = scratch_port();
+    let running = Arc::new(AtomicBool::new(false));
+    let closed = listen(port, &running, drop).expect("listen");
+    assert!(accepting(port), "the server is up");
+
+    let mut child = long_lived_child();
+    std::thread::sleep(Duration::from_millis(300));
+    stop_listening(&running, port, Some(closed));
+
+    // The rule, from both sides: once a stop has returned nothing accepts on the port and a new bind gets it.
+    let still_accepting = accepting(port);
+    let rebound = TcpListener::bind(("127.0.0.1", port)).is_ok();
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(!still_accepting, "the port still accepts connections after the stop: a child process holds the listening socket");
+    assert!(rebound, "a new bind on the port failed after the stop");
+  }
+
+  #[test]
+  fn a_connection_that_was_open_when_a_child_started_is_not_kept_open_by_it() {
+    let port = scratch_port();
+    let running = Arc::new(AtomicBool::new(false));
+    let (accepted_tx, accepted_rx) = std::sync::mpsc::channel::<()>();
+    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+    let closed = listen(port, &running, move |mut stream| {
+      let _ = accepted_tx.send(());
+      // Held open until the child exists, then answered and closed: the shape of a request that is in flight when a sidecar starts.
+      let _ = go_rx.recv();
+      let _ = stream.write_all(b"done");
+    })
+    .expect("listen");
+    let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    accepted_rx.recv_timeout(Duration::from_secs(5)).expect("the server accepted the connection");
+
+    let mut child = long_lived_child();
+    std::thread::sleep(Duration::from_millis(300));
+    go_tx.send(()).unwrap();
+
+    // The client reads to the end. If the child inherited the connection, the end does not come while the child lives.
+    client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    let mut seen = Vec::new();
+    let ended = client.read_to_end(&mut seen);
+    let _ = child.kill();
+    let _ = child.wait();
+    stop_listening(&running, port, Some(closed));
+    assert!(ended.is_ok(), "the connection was not closed: the child process kept it open ({ended:?})");
+    assert_eq!(seen, b"done");
+  }
+
+  #[test]
+  fn switching_off_and_on_again_never_finds_the_port_taken() {
+    let port = scratch_port();
+    let running = Arc::new(AtomicBool::new(false));
+    let mut child = None;
+    for round in 0..15 {
+      let closed = listen(port, &running, drop).unwrap_or_else(|e| panic!("round {round}: the port was taken: {e}"));
+      if round == 3 {
+        // A sidecar starts partway through and lives on across every later round.
+        child = Some(long_lived_child());
+      }
+      stop_listening(&running, port, Some(closed));
+    }
+    if let Some(mut child) = child {
+      let _ = child.kill();
+      let _ = child.wait();
+    }
+  }
+
+  #[test]
+  fn a_stop_when_the_server_was_not_listening_never_touches_whoever_holds_the_port() {
+    // Someone else holds the port (the situation the person is told about). A stop must not so much as connect to it.
+    let other = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    other.set_nonblocking(true).unwrap();
+    let port = other.local_addr().unwrap().port();
+
+    stop_listening(&AtomicBool::new(true), port, None);
+    std::thread::sleep(Duration::from_millis(200));
+
+    assert!(other.accept().is_err(), "the stop connected to a listener that is not ours");
+  }
+
+  #[test]
+  fn the_server_is_up_for_the_first_connection_the_moment_it_starts() {
+    // The flag the accept loop reads is already set when its first connection arrives, so that connection is served, not skipped.
+    for _ in 0..20 {
+      let port = scratch_port();
+      let running = Arc::new(AtomicBool::new(false));
+      let (seen_tx, seen_rx) = std::sync::mpsc::channel::<()>();
+      let closed = listen(port, &running, move |_| {
+        let _ = seen_tx.send(());
+      })
+      .expect("listen");
+      let _client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+      assert!(seen_rx.recv_timeout(Duration::from_secs(3)).is_ok(), "the first connection was not served");
+      stop_listening(&running, port, Some(closed));
+    }
   }
 }
