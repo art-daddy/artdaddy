@@ -15,6 +15,13 @@ import { joinPath, ProjectStoreAccess, type DirEntry, type FsLike } from "./stor
 import { ClientToolRegistry } from "./registry";
 import { endProjectSession } from "./coordinator";
 import { MutationAbortedError, ProjectClosingError } from "../project/MutationGate";
+import {
+  acceptedMediaSummary,
+  AUDIO_EXTS,
+  IMAGE_EXTS,
+  SUBTITLE_EXTS,
+  VIDEO_EXTS,
+} from "../media/formats";
 import { registerTestDocument, resetTestDocuments } from "../test/timelineKit";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -360,6 +367,101 @@ describe("import_media", () => {
   it("requires url, bytes, or path", async () => {
     expect(((await importMediaTool({}, ctxWith())) as Any).ok).toBe(false);
     expect(((await importMediaTool({ source: {} }, ctxWith())) as Any).ok).toBe(false);
+  });
+
+  // What an agent that asked for something the app cannot import is told (24 of 98 MCP calls in four weeks: a colour LUT,
+  // an SVG, a markdown file, names with no extension, two links). It must say WHY and what IS accepted, and what it
+  // says must be true.
+  describe("when it cannot import what it was given", () => {
+    const fileAt = (name: string, fs = new MockFs()) => {
+      const abs = `D:/stuff/${name}`;
+      fs.bytes.set(joinPath(abs), new Uint8Array([1, 2, 3]));
+      return { fs, abs };
+    };
+
+    it.each([
+      ["grade.cube", /\.cube file.*colour lookup table/],
+      ["logo.svg", /\.svg file.*convert it to PNG/],
+      ["README.md", /\.md file.*text document/],
+    ])("refuses a linked %s and says why", async (name, why) => {
+      const { fs, abs } = fileAt(name);
+      const r = (await importMediaTool({ source: { path: abs } }, ctxWith(fs))) as Any;
+      expect(r.ok).toBe(false);
+      expect(r.error).toMatch(why);
+      expect(r.error).toContain(acceptedMediaSummary());
+      expect(r.error).not.toContain("couldn't infer");
+    });
+
+    it("says a name with no extension has none, for a linked file and for inline bytes alike", async () => {
+      const { fs, abs } = fileAt("footage");
+      const linked = (await importMediaTool({ source: { path: abs } }, ctxWith(fs))) as Any;
+      expect(linked.error).toContain("has no file extension");
+      const inline = (await importMediaTool(
+        { source: { bytes: btoa("x") }, name: "footage" },
+        ctxWith(),
+      )) as Any;
+      expect(inline.error).toContain("has no file extension");
+    });
+
+    it("takes a name the caller gave for inline bytes, and refuses it by its own extension", async () => {
+      const r = (await importMediaTool(
+        { source: { bytes: btoa("# notes") }, name: "notes.md" },
+        ctxWith(),
+      )) as Any;
+      expect(r.ok).toBe(false);
+      expect(r.error).toMatch(/notes\.md.*\.md file/);
+    });
+
+    it("names what a folder with nothing importable was looked at for, and that subfolders are not", async () => {
+      const fs = new MockFs();
+      fs.bytes.set(joinPath("D:/luts/look.cube"), new Uint8Array([1]));
+      fs.bytes.set(joinPath("D:/luts/sub/clip.mp4"), new Uint8Array([1]));
+      const r = (await importMediaTool({ source: { path: "D:/luts" } }, ctxWith(fs))) as Any;
+      expect(r.ok).toBe(false);
+      expect(r.error).toContain("not its subfolders");
+      expect(r.error).toContain(acceptedMediaSummary());
+    });
+
+    it("never refuses, as an unsupported type, a name whose extension the app accepts", async () => {
+      // The rule that survives a rewrite, over the same lists the message is built from: what the message says is
+      // accepted must not be what the importer refuses.
+      for (const ext of [...VIDEO_EXTS, ...IMAGE_EXTS, ...AUDIO_EXTS, ...SUBTITLE_EXTS]) {
+        const r = (await importMediaTool(
+          { source: { bytes: btoa("x") }, name: `a.${ext}` },
+          ctxWith(),
+        )) as Any;
+        expect(String(r.error ?? ""), ext).not.toContain("ArtDaddy imports");
+      }
+    });
+
+    it("tells a link that did not answer to use download_video or download it, not 'Failed to fetch'", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => {
+          throw new TypeError("Failed to fetch");
+        }),
+      );
+      const r = (await importMediaTool(
+        { source: { url: "https://example.com/clip.mp4" } },
+        ctxWith(),
+      )) as Any;
+      expect(r.ok).toBe(false);
+      expect(r.error).toContain("Failed to fetch");
+      expect(r.error).toContain("download_video");
+      expect(r.error).toContain("source.path");
+    });
+
+    it("keeps the plain HTTP status for a server that did answer", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response("no", { status: 403 })),
+      );
+      const r = (await importMediaTool(
+        { source: { url: "https://example.com/clip.mp4" } },
+        ctxWith(),
+      )) as Any;
+      expect(r.error).toBe("download failed: HTTP 403");
+    });
   });
 
   it("coerces multiple sources to the most concrete (url > bytes) + notes it", async () => {

@@ -12,8 +12,19 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
+import fc from "fast-check";
 
-import { AUDIO_EXTS, IMAGE_EXTS, VIDEO_EXTS, extOf, kindOf, needsPreviewProxy } from "./formats";
+import {
+  acceptedMediaSummary,
+  AUDIO_EXTS,
+  IMAGE_EXTS,
+  SUBTITLE_EXTS,
+  unsupportedMediaMessage,
+  VIDEO_EXTS,
+  extOf,
+  kindOf,
+  needsPreviewProxy,
+} from "./formats";
 
 const SRC = join(__dirname, "..");
 /** Only the registry may enumerate extensions; everything else asks it. */
@@ -152,4 +163,66 @@ describe("supported media formats", () => {
     ).toEqual([]);
     // Reads every source file: ~0.1 s alone, over vitest's 5 s default under a full parallel run.
   }, 30_000);
+});
+
+// What import_media tells a caller it cannot import. Agents asked for a colour LUT, an SVG, a markdown file and names
+// with no extension (24 of 98 calls in four weeks failed that way) and were told only "couldn't infer a supported media
+// type". The message must say why, and what IS accepted, and what it says must be what the importer accepts.
+describe("what import_media says about a file it cannot import", () => {
+  const parsed = (): Record<string, string[]> =>
+    Object.fromEntries(
+      acceptedMediaSummary()
+        .split("; ")
+        .map((part) => {
+          const [kind, list] = part.split(": ");
+          return [kind, list.split(", ")];
+        }),
+    );
+
+  it("lists exactly what the importer accepts, taken from the one list", () => {
+    expect(parsed()).toEqual({
+      video: [...VIDEO_EXTS],
+      images: [...IMAGE_EXTS],
+      audio: [...AUDIO_EXTS],
+      subtitles: [...SUBTITLE_EXTS],
+    });
+    // ...and every one of them is a thing kindOf accepts: the message cannot offer a type the importer refuses.
+    for (const list of Object.values(parsed()))
+      for (const e of list) expect(kindOf(`file.${e}`), e).not.toBeNull();
+  });
+
+  it("says why a colour LUT, an SVG, a document and a Lottie animation are not accepted", () => {
+    expect(unsupportedMediaMessage("grade.cube")).toMatch(
+      /\.cube file.*colour lookup table.*cannot be imported yet/,
+    );
+    expect(unsupportedMediaMessage("logo.svg")).toMatch(/\.svg file.*convert it to PNG/);
+    expect(unsupportedMediaMessage("README.md")).toMatch(/\.md file.*text document/);
+    expect(unsupportedMediaMessage("spin.lottie")).toMatch(
+      /\.lottie file.*Lottie animations are not supported/,
+    );
+  });
+
+  it("says a name with no extension has none, and how to fix it", () => {
+    for (const name of ["footage", ".hidden", "clip.", ""]) {
+      const text = unsupportedMediaMessage(name);
+      expect(text, name).toContain("has no file extension");
+      expect(text).toContain("source.mimeType");
+    }
+  });
+
+  it("names a file of a type it has never heard of by its own extension, case and path irrelevant", () => {
+    expect(unsupportedMediaMessage("C:\\Users\\me\\Downloads\\Archive.ZIP")).toContain(".zip file");
+    expect(unsupportedMediaMessage("a.tar.gz")).toContain(".gz file");
+  });
+
+  it("always names the file and always lists what is accepted, whatever it is given", () => {
+    fc.assert(
+      fc.property(fc.string({ maxLength: 80 }), (name) => {
+        const text = unsupportedMediaMessage(name);
+        expect(text).toContain(`'${name}'`);
+        expect(text).toContain(acceptedMediaSummary());
+      }),
+      { numRuns: 200 },
+    );
+  });
 });

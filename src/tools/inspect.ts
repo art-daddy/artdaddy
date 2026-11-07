@@ -37,7 +37,7 @@ import { makeStoryboard } from "./storyboard";
 import { loadTimeline } from "../timeline/engine";
 import { clipSourceSpanSeconds, clipSpanToFrames, findClip } from "../timeline/helpers";
 import { canvasFps, toSecondsView } from "../timeline/frames";
-import { IMAGE_EXTS } from "../media/formats";
+import { IMAGE_EXTS, kindOf } from "../media/formats";
 import { stillPicture } from "../media/stillPicture";
 import type { Clip, Timeline } from "../timeline/model";
 import {
@@ -829,12 +829,10 @@ export function planTimelineLook(
   return { ok: true, seconds, fps, total, nums, outOfRange };
 }
 
-/** Pictures ffmpeg opens as stills: nothing there for a GPU to decode, so nothing to probe. */
-const STILL_NAME = /\.(png|jpe?g|webp|gif|bmp|tiff?|heic|heif|avif|svg)$/i;
-
 /** What a timeline look needs to know about each source it opens: may the GPU decode it? A source's stream
  *  shape is probed once per look, and the decoder answers from this PC's verdicts (proving a new shape once).
- *  Where the OS has no hardware decoder nothing is probed at all. The probe's rounded facts ride along for the
+ *  Where the OS has no hardware decoder nothing is probed at all, and a picture (which ffmpeg opens as a still:
+ *  nothing there for a GPU to decode) is not probed either. The probe's rounded facts ride along for the
  *  look's own report. */
 type SourceShape = {
   flags: string[];
@@ -851,7 +849,7 @@ function lookDecodeFor(ctx: ClientToolContext): {
     let known = shapes.get(path);
     if (!known) {
       known = (async () => {
-        if (!decoder.enabled() || STILL_NAME.test(path)) return { flags: [], video: null };
+        if (!decoder.enabled() || kindOf(path) === "image") return { flags: [], video: null };
         const probe = await probePath(ctx.runner, path);
         const video = (probe.ok && probe.video ? probe.video : null) as Record<
           string,

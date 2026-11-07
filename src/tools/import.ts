@@ -19,9 +19,11 @@ import { reportMediaImport } from "../api/appEvents";
 import { projectIdOfDir } from "./dataRoot";
 import { writeLibraryCatalog } from "./libraryCatalog";
 import {
+  acceptedMediaSummary,
   AUDIO_EXTS,
   IMAGE_EXTS,
   SUBTITLE_EXTS,
+  unsupportedMediaMessage,
   VIDEO_EXTS,
   type MediaKind,
 } from "../media/formats";
@@ -701,10 +703,7 @@ async function importFromPath(
       args.kind === "video" || args.kind === "image" || args.kind === "audio" ? args.kind : null;
     const kind = explicitKind ?? kindOf(extOf(filename)) ?? kindOf(extOf(path));
     if (!kind) {
-      return {
-        ok: false,
-        error: `couldn't infer a supported media type for '${filename}'. Set source.mimeType or a name with an extension.`,
-      };
+      return { ok: false, error: unsupportedMediaMessage(filename) };
     }
     // Referenced in place, so the bytes are never copied — they only need hashing for a stable
     // media_ref, which the native probe does by streaming. `readBytes` is the fallback for
@@ -749,7 +748,7 @@ async function importFromPath(
   if (!mediaFiles.length) {
     return {
       ok: false,
-      error: `no supported media files in directory '${path}' (looked for video/image/audio by extension).`,
+      error: `no supported media files in directory '${path}' (only the files directly inside it are looked at, not its subfolders). ArtDaddy imports ${acceptedMediaSummary()}.`,
     };
   }
   const imported: Result[] = [];
@@ -871,7 +870,20 @@ export async function importMediaTool(args: Args, ctx: ClientToolContext | null)
           ok: false,
           error: `source.url must be an http(s) link, not ${url.slice(0, 120)}. A local file comes in with source.path.`,
         };
-      const resp = await fetch(url);
+      let resp: Response;
+      try {
+        resp = await fetch(url);
+      } catch (e) {
+        // The app asks from inside its own window, so a server that does not allow that (or a link that does not
+        // answer) fails here with no status at all: "Failed to fetch" told the caller nothing.
+        return {
+          ok: false,
+          error:
+            `couldn't download that link (${(e as Error)?.message ?? String(e)}): the address may be wrong, or the ` +
+            `server does not allow downloads from the app. For a video page (YouTube and similar) use download_video; ` +
+            `otherwise download the file yourself and import it with source.path.`,
+        };
+      }
       if (!resp.ok) return { ok: false, error: `download failed: HTTP ${resp.status}` };
       const declared = Number(resp.headers.get("content-length") ?? 0);
       if (declared > MAX_DOWNLOAD_BYTES)
@@ -915,10 +927,7 @@ export async function importMediaTool(args: Args, ctx: ClientToolContext | null)
     args.kind === "video" || args.kind === "image" || args.kind === "audio" ? args.kind : null;
   const kind = explicitKind ?? kindOf(extOf(filename));
   if (!kind) {
-    return {
-      ok: false,
-      error: `couldn't infer a supported media type for '${filename}'. Set source.mimeType or a name with an extension.`,
-    };
+    return { ok: false, error: unsupportedMediaMessage(filename) };
   }
   const provenance =
     args.provenance && typeof args.provenance === "object"

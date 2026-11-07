@@ -121,3 +121,38 @@ export function extAlternation(kind: MediaKind): string {
   const exts = kind === "video" ? VIDEO_EXTS : kind === "image" ? IMAGE_EXTS : AUDIO_EXTS;
   return exts.join("|");
 }
+
+/** What the importer accepts, as one line for a person or a model to read. Built from the lists above, so what a
+ *  message says is accepted can never drift from what is. */
+export function acceptedMediaSummary(): string {
+  return (
+    `video: ${VIDEO_EXTS.join(", ")}; images: ${IMAGE_EXTS.join(", ")}; ` +
+    `audio: ${AUDIO_EXTS.join(", ")}; subtitles: ${SUBTITLE_EXTS.join(", ")}`
+  );
+}
+
+/** Files that were asked for by name often enough to deserve one sentence on why they are not accepted. */
+const KNOWN_NOT_IMPORTABLE: Readonly<Record<string, string>> = {
+  cube: "It is a colour lookup table (LUT), not footage, and LUTs cannot be imported yet.",
+  svg: "SVG vector images are not supported; convert it to PNG first.",
+  lottie: "Lottie animations are not supported.",
+  md: "It is a text document, not media.",
+  txt: "It is a text document, not media.",
+  pdf: "It is a document, not media; export the pages you need as images.",
+};
+
+/** What import_media says when it cannot tell what a file is: why, and what IS accepted, from the same lists the
+ *  importer checks. "couldn't infer a supported media type" left an agent to guess both. */
+export function unsupportedMediaMessage(filename: string): string {
+  const ext = extOf(filename);
+  if (!ext)
+    return (
+      `'${filename}' has no file extension, so its type can't be told. Give it one (for example clip.mp4) ` +
+      `or set source.mimeType. ArtDaddy imports ${acceptedMediaSummary()}.`
+    );
+  const why = KNOWN_NOT_IMPORTABLE[ext];
+  return (
+    `'${filename}' is a .${ext} file, which ArtDaddy can't import${why ? `. ${why}` : ""}` +
+    `${why ? " " : ". "}ArtDaddy imports ${acceptedMediaSummary()}.`
+  );
+}
