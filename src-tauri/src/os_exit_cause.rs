@@ -318,6 +318,266 @@ pub fn lookup(_alive_ms: u64, _app_exe: &str) -> String {
   "unknown".to_string()
 }
 
+/// What the cause lookup is told about the session that ended without a mark.
+#[derive(Debug, Clone)]
+pub struct EndSession {
+  /// When it was last seen alive, in milliseconds since 1970.
+  pub alive_at: u64,
+  /// Its launch: the name of the mark a signal may have left for it.
+  pub launch_id: String,
+  /// Which start of the PC it ran in (`unix_end::current_boot_id`); empty when that could not be read.
+  pub boot_id: String,
+  /// When a Rust panic was recorded in it, if one was.
+  pub panic_at: Option<u64>,
+  /// The folder the app keeps its health record and its marks in.
+  pub dir: std::path::PathBuf,
+}
+
+/// The one short word for what ended `session`, from what the operating system and the app itself left behind. Blocks for up to a
+/// few seconds on Windows (the event log); on macOS and Linux it only reads a few small files.
+pub fn lookup_session(session: &EndSession, app_exe: &str) -> String {
+  #[cfg(windows)]
+  {
+    lookup(session.alive_at, app_exe)
+  }
+  #[cfg(not(windows))]
+  {
+    unix_end::lookup(session, app_exe)
+  }
+}
+
+// macOS and Linux ---------------------------------------------------------------------------------------------------
+
+/// There is no event log to ask on macOS or Linux. The app leaves a mark of its own when a signal ends it (`exit_signal.rs`), and
+/// the rest is read off its own record (a panic, a restart of the PC) and, on macOS, the system's crash report. Only a word of
+/// {@link unix_end::WORDS} leaves the PC: a mark or a report is never copied, only matched against a fixed list.
+#[cfg_attr(windows, allow(dead_code))]
+pub mod unix_end {
+  use super::EndSession;
+  use std::io::{Read, Seek, SeekFrom};
+  use std::path::{Path, PathBuf};
+  use std::time::UNIX_EPOCH;
+
+  /// The words this side answers with. The tests walk them, and each has the shape the page accepts (`[a-z_]{1,30}`).
+  pub const WORDS: [&str; 21] = [
+    "panic",
+    "signal_segv",
+    "signal_bus",
+    "signal_ill",
+    "signal_fpe",
+    "signal_abrt",
+    "signal_term",
+    "signal_hup",
+    "signal_int",
+    "signal_quit",
+    "os_shutdown",
+    "crash_bad_access",
+    "crash_bad_instruction",
+    "crash_arithmetic",
+    "crash_breakpoint",
+    "crash_abort",
+    "crash_resource",
+    "crash_guard",
+    "crash_other",
+    "pc_restarted",
+    "no_trace",
+  ];
+
+  /// The signals the app leaves a mark for, as the words it writes. The handler writes one of these and nothing else.
+  pub const SIGNAL_WORDS: [&str; 9] = [
+    "signal_segv",
+    "signal_bus",
+    "signal_ill",
+    "signal_fpe",
+    "signal_abrt",
+    "signal_term",
+    "signal_hup",
+    "signal_int",
+    "signal_quit",
+  ];
+
+  /// A mark older than this before the session's last sign of life is from a signal the process lived through (handled, or ignored
+  /// by whoever handled it), not the one that ended it.
+  pub const MARKER_STALE_MS: u64 = 15_000;
+  /// A panic this long before the last sign of life, or any time after it, is taken as what ended the session.
+  pub const PANIC_NEAR_MS: u64 = 15_000;
+  const MARKER_BYTES: u64 = 512;
+  const REPORT_BYTES: u64 = 64 * 1024;
+
+  /// A word a signal handler wrote, and when.
+  #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+  pub struct Marker {
+    pub word: &'static str,
+    pub at_ms: u64,
+  }
+
+  /// The name of the mark for a launch: only letters, digits, `-` and `_` of it are used, so no id can name another folder.
+  pub fn marker_file_name(launch_id: &str) -> String {
+    let id: String = launch_id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').take(64).collect();
+    format!("exit-{id}.mark")
+  }
+
+  /// `Some(word)` when `line` is exactly one of the words a handler writes.
+  pub fn marker_word(line: &str) -> Option<&'static str> {
+    let line = line.trim();
+    SIGNAL_WORDS.iter().copied().find(|word| *word == line)
+  }
+
+  fn modified_ms(metadata: &std::fs::Metadata) -> Option<u64> {
+    let elapsed = metadata.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
+    Some(elapsed.as_millis() as u64)
+  }
+
+  /// The last word the launch's mark holds, and when it was written. Reads at most the last few hundred bytes.
+  pub fn read_marker(dir: &Path, launch_id: &str) -> Option<Marker> {
+    let mut file = std::fs::File::open(dir.join(marker_file_name(launch_id))).ok()?;
+    let metadata = file.metadata().ok()?;
+    // A time that cannot be read counts as recent: a word with no date is more use than none.
+    let at_ms = modified_ms(&metadata).unwrap_or(u64::MAX);
+    if metadata.len() > MARKER_BYTES {
+      file.seek(SeekFrom::Start(metadata.len() - MARKER_BYTES)).ok()?;
+    }
+    let mut bytes = Vec::new();
+    file.take(MARKER_BYTES).read_to_end(&mut bytes).ok()?;
+    let word = String::from_utf8_lossy(&bytes).lines().rev().find_map(marker_word)?;
+    Some(Marker { word, at_ms })
+  }
+
+  /// The kind of crash a macOS crash report names, as a word; never any other text of it.
+  pub fn crash_report_word(text: &str) -> Option<&'static str> {
+    let head = &text.as_bytes()[..text.len().min(REPORT_BYTES as usize)];
+    let start = head.windows(4).position(|window| window == b"EXC_")?;
+    let kind: Vec<u8> = head[start..].iter().copied().take_while(|b| b.is_ascii_uppercase() || *b == b'_').take(32).collect();
+    Some(match kind.as_slice() {
+      b"EXC_BAD_ACCESS" => "crash_bad_access",
+      b"EXC_BAD_INSTRUCTION" => "crash_bad_instruction",
+      b"EXC_ARITHMETIC" => "crash_arithmetic",
+      b"EXC_BREAKPOINT" => "crash_breakpoint",
+      b"EXC_CRASH" => "crash_abort",
+      b"EXC_RESOURCE" => "crash_resource",
+      b"EXC_GUARD" => "crash_guard",
+      _ => "crash_other",
+    })
+  }
+
+  /// The word of the newest crash report of `exe` written at or after `since_ms` in `dir`. A report is `<program>-<time>.ips` (or
+  /// the older `.crash`): another program's, another kind of file and one of a helper with a longer name are not this app's.
+  pub fn newest_report_word(dir: &Path, exe: &str, since_ms: u64) -> Option<&'static str> {
+    let stem = Path::new(exe).file_stem()?.to_str()?;
+    let prefix = format!("{stem}-");
+    let mut newest: Option<(u64, PathBuf)> = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+      let name = entry.file_name();
+      let Some(name) = name.to_str() else { continue };
+      let rest = name.strip_prefix(&prefix).unwrap_or("");
+      // `<time>` has no `-` after its date and time of day: the helper `artdaddy-helper-<time>` would leave a letter first.
+      let is_report = (name.ends_with(".ips") || name.ends_with(".crash")) && rest.starts_with(|c: char| c.is_ascii_digit());
+      if !is_report {
+        continue;
+      }
+      let Some(at) = entry.metadata().ok().as_ref().and_then(modified_ms) else { continue };
+      if at >= since_ms && newest.as_ref().map_or(true, |(best, _)| at > *best) {
+        newest = Some((at, entry.path()));
+      }
+    }
+    let (_, path) = newest?;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path).ok()?.take(REPORT_BYTES).read_to_end(&mut bytes).ok()?;
+    crash_report_word(&String::from_utf8_lossy(&bytes))
+  }
+
+  /// `Some(true)` when the PC has started again since, `None` when either start could not be identified.
+  pub fn boot_changed(was: &str, now: &str) -> Option<bool> {
+    (!was.is_empty() && !now.is_empty()).then(|| was != now)
+  }
+
+  /// Which start of the PC this is: not a secret and not sent anywhere, only compared with the one a session stored.
+  #[cfg(target_os = "linux")]
+  pub fn current_boot_id() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+      .map(|id| id.trim().chars().take(64).collect())
+      .unwrap_or_default()
+  }
+
+  /// Which start of the PC this is: the time it started (`kern.boottime`), to the second.
+  #[cfg(target_os = "macos")]
+  pub fn current_boot_id() -> String {
+    let mut boot = libc::timeval { tv_sec: 0, tv_usec: 0 };
+    let mut size = std::mem::size_of::<libc::timeval>();
+    // SAFETY: the name is a C string, `boot` is a timeval of the size given, and nothing is written to the system.
+    let ok = unsafe {
+      libc::sysctlbyname(
+        c"kern.boottime".as_ptr(),
+        (&mut boot as *mut libc::timeval).cast(),
+        &mut size,
+        std::ptr::null_mut(),
+        0,
+      )
+    } == 0;
+    if ok {
+      boot.tv_sec.to_string()
+    } else {
+      String::new()
+    }
+  }
+
+  /// Not identified on other systems: the end then says only what its mark or its panic say.
+  #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+  pub fn current_boot_id() -> String {
+    String::new()
+  }
+
+  /// What is known about the end.
+  #[derive(Debug, Clone, Copy)]
+  pub struct EndFacts {
+    pub marker: Option<Marker>,
+    pub alive_at: u64,
+    pub panic_at: Option<u64>,
+    pub boot_changed: Option<bool>,
+    pub report: Option<&'static str>,
+  }
+
+  /// The word for an end, from what is known about it. The order is the order of trust: what the process itself wrote when a
+  /// signal ended it, then a panic near the end, then the system's crash report, then what can be said of the PC.
+  pub fn classify(facts: &EndFacts) -> &'static str {
+    let panic_near = facts.panic_at.is_some_and(|at| at.saturating_add(PANIC_NEAR_MS) >= facts.alive_at);
+    if let Some(marker) = facts.marker.filter(|marker| marker.at_ms.saturating_add(MARKER_STALE_MS) >= facts.alive_at) {
+      return match marker.word {
+        // A panic that ends in an abort is the panic.
+        "signal_abrt" if panic_near => "panic",
+        // A request to end, with the PC started again since, is the PC being shut down (a person who ended the app and restarted
+        // the PC much later is rare, and the word says no more than that it was asked to end).
+        "signal_term" | "signal_hup" if facts.boot_changed == Some(true) => "os_shutdown",
+        word => word,
+      };
+    }
+    if panic_near {
+      return "panic";
+    }
+    if let Some(word) = facts.report {
+      return word;
+    }
+    match facts.boot_changed {
+      Some(true) => "pc_restarted",
+      Some(false) => "no_trace",
+      None => "unknown",
+    }
+  }
+
+  pub fn lookup(session: &EndSession, app_exe: &str) -> String {
+    let marker = read_marker(&session.dir, &session.launch_id);
+    let boot = boot_changed(&session.boot_id, &current_boot_id());
+    let report = if cfg!(target_os = "macos") {
+      std::env::var_os("HOME").map(PathBuf::from).and_then(|home| {
+        newest_report_word(&home.join("Library/Logs/DiagnosticReports"), app_exe, session.alive_at.saturating_sub(120_000))
+      })
+    } else {
+      None
+    };
+    classify(&EndFacts { marker, alive_at: session.alive_at, panic_at: session.panic_at, boot_changed: boot, report }).to_string()
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -546,5 +806,285 @@ mod tests {
     eprintln!("the real log, last thirty days: {word} in {:?}", started.elapsed());
     assert!(allowed(&word), "{word:?}");
     assert!(started.elapsed() < std::time::Duration::from_secs(12), "{:?}", started.elapsed());
+  }
+}
+
+// What ended a session on macOS or Linux: the same questions as above, answered from the app's own marks instead of a log.
+#[cfg(test)]
+mod unix_end_tests {
+  use super::unix_end::*;
+  use super::EndSession;
+  use std::path::Path;
+
+  const ALIVE: u64 = 1_000_000;
+
+  fn facts(marker: Option<(&'static str, u64)>) -> EndFacts {
+    EndFacts {
+      marker: marker.map(|(word, at_ms)| Marker { word, at_ms }),
+      alive_at: ALIVE,
+      panic_at: None,
+      boot_changed: Some(false),
+      report: None,
+    }
+  }
+
+  #[test]
+  fn a_signal_that_ended_the_process_is_its_word() {
+    for word in SIGNAL_WORDS {
+      let said = classify(&facts(Some((word, ALIVE + 3_000))));
+      // A request to end is a request to end; every other signal is itself.
+      assert_eq!(said, word, "{word}");
+    }
+  }
+
+  #[test]
+  fn a_signal_the_process_lived_through_did_not_end_it() {
+    // Written well before the last sign of life: whoever handled it let the process carry on, and something else ended it.
+    let early = ALIVE - MARKER_STALE_MS - 1;
+    assert_eq!(classify(&facts(Some(("signal_hup", early)))), "no_trace");
+    // ...but right at the edge it still counts: heartbeats are seconds apart.
+    assert_eq!(classify(&facts(Some(("signal_hup", ALIVE - MARKER_STALE_MS)))), "signal_hup");
+  }
+
+  #[test]
+  fn a_panic_is_what_ended_it_with_or_without_the_abort_it_ends_in() {
+    let mut f = facts(None);
+    f.panic_at = Some(ALIVE + 2_000);
+    assert_eq!(classify(&f), "panic");
+    f.marker = Some(Marker { word: "signal_abrt", at_ms: ALIVE + 2_100 });
+    assert_eq!(classify(&f), "panic");
+    // Another crash after a panic is the crash.
+    f.marker = Some(Marker { word: "signal_segv", at_ms: ALIVE + 2_100 });
+    assert_eq!(classify(&f), "signal_segv");
+    // A panic long before the end did not end it; an abort with no panic is an abort.
+    f.panic_at = Some(ALIVE - PANIC_NEAR_MS - 1);
+    f.marker = None;
+    assert_eq!(classify(&f), "no_trace");
+    assert_eq!(classify(&facts(Some(("signal_abrt", ALIVE + 1)))), "signal_abrt");
+  }
+
+  #[test]
+  fn a_request_to_end_while_the_pc_restarted_is_a_shutdown() {
+    for word in ["signal_term", "signal_hup"] {
+      let mut f = facts(Some((word, ALIVE + 1_000)));
+      f.boot_changed = Some(true);
+      assert_eq!(classify(&f), "os_shutdown", "{word}");
+      f.boot_changed = None;
+      assert_eq!(classify(&f), word, "{word} with no boot to compare");
+    }
+    // Interrupt and quit come from a person at a terminal; a crash is a crash whatever happened to the PC after it.
+    for word in ["signal_int", "signal_quit", "signal_segv", "signal_abrt"] {
+      let mut f = facts(Some((word, ALIVE + 1_000)));
+      f.boot_changed = Some(true);
+      assert_eq!(classify(&f), word, "{word}");
+    }
+  }
+
+  #[test]
+  fn nothing_left_behind_says_only_what_the_data_can_tell_apart() {
+    let mut f = facts(None);
+    f.boot_changed = Some(true);
+    assert_eq!(classify(&f), "pc_restarted");
+    f.boot_changed = Some(false);
+    assert_eq!(classify(&f), "no_trace");
+    f.boot_changed = None;
+    assert_eq!(classify(&f), "unknown");
+  }
+
+  #[test]
+  fn a_crash_report_speaks_only_when_nothing_of_ours_does() {
+    let mut f = facts(None);
+    f.report = Some("crash_bad_access");
+    f.boot_changed = Some(true);
+    assert_eq!(classify(&f), "crash_bad_access");
+    f.marker = Some(Marker { word: "signal_segv", at_ms: ALIVE + 1 });
+    assert_eq!(classify(&f), "signal_segv");
+    // A panic is the more exact word than the report of the abort it ended in.
+    f.marker = None;
+    f.panic_at = Some(ALIVE + 1);
+    assert_eq!(classify(&f), "panic");
+  }
+
+  #[test]
+  fn whatever_is_known_the_answer_is_one_of_the_words_and_has_the_shape_the_page_accepts() {
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    let mut next = move || {
+      seed ^= seed << 13;
+      seed ^= seed >> 7;
+      seed ^= seed << 17;
+      seed
+    };
+    let reports: [Option<&'static str>; 4] = [None, Some("crash_other"), Some("crash_resource"), Some("crash_abort")];
+    for _ in 0..5_000 {
+      let marker = match next() % 3 {
+        0 => None,
+        _ => Some(Marker { word: SIGNAL_WORDS[(next() % 9) as usize], at_ms: next() % (2 * ALIVE) }),
+      };
+      let f = EndFacts {
+        marker,
+        alive_at: next() % (2 * ALIVE),
+        panic_at: if next() % 2 == 0 { None } else { Some(next() % (2 * ALIVE)) },
+        boot_changed: [None, Some(true), Some(false)][(next() % 3) as usize],
+        report: reports[(next() % 4) as usize],
+      };
+      let word = classify(&f);
+      assert!(WORDS.contains(&word) || word == "unknown", "{word:?}");
+      assert!((1..=30).contains(&word.len()) && word.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'), "{word:?}");
+    }
+    for word in WORDS {
+      assert!((1..=30).contains(&word.len()) && word.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'), "{word:?}");
+    }
+  }
+
+  #[test]
+  fn a_mark_holds_only_words_the_handler_writes_and_nothing_else_is_believed() {
+    for word in SIGNAL_WORDS {
+      assert_eq!(marker_word(word), Some(word));
+      assert_eq!(marker_word(&format!("{word}\n")), Some(word));
+      assert_eq!(marker_word(&format!("  {word}  ")), Some(word));
+    }
+    for bad in ["", "signal_", "SIGNAL_SEGV", "signal_segv extra", "signal_kill", "panic", "/home/someone/x", "signal_se"] {
+      assert_eq!(marker_word(bad), None, "{bad:?}");
+    }
+  }
+
+  #[test]
+  fn the_name_of_a_mark_cannot_name_another_place() {
+    assert_eq!(marker_file_name("launch-1a2b-3c"), "exit-launch-1a2b-3c.mark");
+    for hostile in ["../../etc/passwd", "a/b", "a\\b", "..", "a.b", "con:", "x\0y", "\u{1F4A5}"] {
+      let name = marker_file_name(hostile);
+      assert!(name.starts_with("exit-") && name.ends_with(".mark"), "{name}");
+      assert!(!name.contains('/') && !name.contains('\\') && !name.contains(".."), "{name}");
+      assert!(name.len() <= "exit-".len() + 64 + ".mark".len(), "{name}");
+    }
+  }
+
+  fn write_mark(dir: &Path, launch: &str, content: &[u8]) {
+    std::fs::write(dir.join(marker_file_name(launch)), content).unwrap();
+  }
+
+  #[test]
+  fn the_last_word_of_the_launchs_mark_is_the_one_that_counts() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(read_marker(dir.path(), "none"), None);
+    write_mark(dir.path(), "empty", b"");
+    assert_eq!(read_marker(dir.path(), "empty"), None);
+    write_mark(dir.path(), "one", b"signal_term\n");
+    assert_eq!(read_marker(dir.path(), "one").map(|m| m.word), Some("signal_term"));
+    write_mark(dir.path(), "two", b"signal_hup\nsignal_segv\n");
+    assert_eq!(read_marker(dir.path(), "two").map(|m| m.word), Some("signal_segv"));
+    // Lines it does not know are skipped, not believed; a word cut off by the end of the file is not a word.
+    write_mark(dir.path(), "junk", b"signal_int\nC:\\Users\\someone\\x\nsignal_se");
+    assert_eq!(read_marker(dir.path(), "junk").map(|m| m.word), Some("signal_int"));
+    write_mark(dir.path(), "binary", &[0xff, 0xfe, 0x00, b's', b'i']);
+    assert_eq!(read_marker(dir.path(), "binary"), None);
+  }
+
+  #[test]
+  fn a_mark_is_dated_by_when_it_was_written() {
+    let dir = tempfile::tempdir().unwrap();
+    write_mark(dir.path(), "dated", b"signal_term\n");
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    let at = read_marker(dir.path(), "dated").unwrap().at_ms;
+    assert!(at <= now + 2_000 && at + 120_000 >= now, "{at} vs {now}");
+  }
+
+  #[test]
+  fn only_the_end_of_a_long_mark_is_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut long = "signal_hup\n".repeat(5_000).into_bytes();
+    long.extend_from_slice(b"signal_quit\n");
+    write_mark(dir.path(), "long", &long);
+    assert_eq!(read_marker(dir.path(), "long").map(|m| m.word), Some("signal_quit"));
+  }
+
+  const IPS: &str = "{\"app_name\":\"artdaddy\",\"timestamp\":\"2026-11-07 12:34:56.00 +0000\",\"bug_type\":\"309\",\"os_version\":\"macOS 15.1 (24B83)\"}\n{\"uptime\":1200,\"procName\":\"artdaddy\",\"procPath\":\"/Users/someone/Applications/ArtDaddy.app/Contents/MacOS/artdaddy\",\"exception\":{\"codes\":\"0x0000000000000001, 0x0000000000000000\",\"rawCodes\":[1,0],\"type\":\"EXC_BAD_ACCESS\",\"signal\":\"SIGSEGV\",\"subtype\":\"KERN_INVALID_ADDRESS at 0x0000000000000000\"},\"termination\":{\"flags\":0,\"code\":11,\"namespace\":\"SIGNAL\",\"indicator\":\"Segmentation fault: 11\"}}";
+  const LEGACY: &str = "Process:               artdaddy [4242]\nPath:                  /Users/someone/Applications/ArtDaddy.app/Contents/MacOS/artdaddy\nIdentifier:            com.artdaddy.app\nException Type:        EXC_CRASH (SIGABRT)\nException Codes:       0x0000000000000000, 0x0000000000000000\n";
+
+  #[test]
+  fn a_crash_report_gives_the_kind_of_crash_and_nothing_else_of_itself() {
+    assert_eq!(crash_report_word(IPS), Some("crash_bad_access"));
+    assert_eq!(crash_report_word(LEGACY), Some("crash_abort"));
+    for (kind, word) in [
+      ("EXC_BAD_INSTRUCTION", "crash_bad_instruction"),
+      ("EXC_ARITHMETIC", "crash_arithmetic"),
+      ("EXC_BREAKPOINT", "crash_breakpoint"),
+      ("EXC_RESOURCE", "crash_resource"),
+      ("EXC_GUARD", "crash_guard"),
+      ("EXC_SOMETHING_NEW", "crash_other"),
+    ] {
+      assert_eq!(crash_report_word(&format!("Exception Type: {kind} (SIGTRAP)")), Some(word), "{kind}");
+    }
+    assert_eq!(crash_report_word(""), None);
+    assert_eq!(crash_report_word("nothing about exceptions here /Users/someone"), None);
+    for text in [IPS, LEGACY] {
+      let word = crash_report_word(text).unwrap();
+      for private in ["someone", "artdaddy", "ArtDaddy", "/Users", "4242", "0x"] {
+        assert!(!word.contains(private), "{word}");
+      }
+    }
+  }
+
+  #[test]
+  fn a_crash_report_is_read_from_the_start_only() {
+    let mut text = "x".repeat(70_000);
+    text.push_str("Exception Type: EXC_BAD_ACCESS");
+    assert_eq!(crash_report_word(&text), None);
+  }
+
+  #[test]
+  fn the_newest_report_of_this_app_in_the_window_is_the_one_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let put = |name: &str, text: &str| std::fs::write(dir.path().join(name), text).unwrap();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    let since = now - 60_000;
+    assert_eq!(newest_report_word(dir.path(), "artdaddy", since), None);
+    // Other programs' reports, other kinds of file and a report of another app with a longer name are not this app's.
+    put("Safari-2026-11-07-120000.ips", "Exception Type: EXC_GUARD");
+    put("artdaddy-helper-2026-11-07-120000.ips", "Exception Type: EXC_GUARD");
+    put("artdaddy-2026-11-07-120000.diag", "Exception Type: EXC_GUARD");
+    put("artdaddy.ips", "Exception Type: EXC_GUARD");
+    assert_eq!(newest_report_word(dir.path(), "artdaddy", since), None, "only artdaddy-<time>.ips or .crash count");
+    put("artdaddy-2026-11-07-120000.crash", "Exception Type: EXC_BAD_INSTRUCTION");
+    assert_eq!(newest_report_word(dir.path(), "artdaddy", since), Some("crash_bad_instruction"));
+    assert_eq!(newest_report_word(dir.path(), "artdaddy.exe", since), Some("crash_bad_instruction"));
+    // A report written before the window belongs to some earlier crash.
+    assert_eq!(newest_report_word(dir.path(), "artdaddy", now + 3_600_000), None);
+    assert_eq!(newest_report_word(Path::new("/no/such/folder"), "artdaddy", since), None);
+  }
+
+  #[test]
+  fn two_starts_of_the_pc_are_compared_only_when_both_are_known() {
+    assert_eq!(boot_changed("a", "a"), Some(false));
+    assert_eq!(boot_changed("a", "b"), Some(true));
+    assert_eq!(boot_changed("", "b"), None);
+    assert_eq!(boot_changed("a", ""), None);
+    assert_eq!(boot_changed("", ""), None);
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn this_pc_knows_which_start_it_is_and_says_the_same_twice() {
+    let first = current_boot_id();
+    assert!(!first.is_empty() && first.len() <= 64);
+    assert_eq!(first, current_boot_id());
+  }
+
+  #[test]
+  fn the_whole_lookup_reads_the_mark_and_the_panic_of_the_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = |launch: &str, panic_at: Option<u64>| EndSession {
+      alive_at: 1,
+      launch_id: launch.to_string(),
+      boot_id: String::new(),
+      panic_at,
+      dir: dir.path().to_path_buf(),
+    };
+    write_mark(dir.path(), "crashed", b"signal_segv\n");
+    // The mark was just written, so it is not older than the session's last sign of life (alive_at is long ago).
+    assert_eq!(lookup(&session("crashed", None), "artdaddy"), "signal_segv");
+    assert_eq!(lookup(&session("vanished", Some(2)), "artdaddy"), "panic");
+    // No mark, no panic, and no start of the PC to compare: it says it does not know rather than guess.
+    assert_eq!(lookup(&session("vanished", None), "artdaddy"), "unknown");
   }
 }

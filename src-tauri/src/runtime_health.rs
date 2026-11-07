@@ -58,6 +58,10 @@ struct Session {
   renderer_epoch: u64,
   #[serde(default)]
   heartbeat_revision: u64,
+  /// Which start of the PC it ran in, to tell "the PC restarted since" from "something ended it" on macOS and Linux. Kept on this
+  /// disk only: compared with the next start's, never sent.
+  #[serde(default)]
+  boot_id: String,
   context: RuntimeContext,
 }
 
@@ -170,6 +174,11 @@ fn latest_record(path: &Path) -> Option<Record> {
 
 impl RuntimeHealth {
   pub fn open(path: PathBuf, launch_id: String, release: String) -> Self {
+    Self::open_in_boot(path, launch_id, release, crate::os_exit_cause::unix_end::current_boot_id())
+  }
+
+  /// Like `open`, for a session that ran in the given start of the PC (tests give it; the app asks the system).
+  pub fn open_in_boot(path: PathBuf, launch_id: String, release: String, boot_id: String) -> Self {
     let previous = latest_record(&path);
     let mut previous_exit = previous.as_ref().and_then(|record| record.current.exit);
     let now = now_ms();
@@ -181,6 +190,7 @@ impl RuntimeHealth {
       exit: None,
       renderer_epoch: 0,
       heartbeat_revision: 0,
+      boot_id,
       context: RuntimeContext::default(),
     };
     let mut record = match previous {
@@ -220,8 +230,27 @@ impl RuntimeHealth {
         storage_ok: false,
       }),
     };
+    health.prune_marks(&health.lock().record);
     health.persist(&mut health.lock());
     health
+  }
+
+  /// Removes the marks of launches nothing is waiting on: a mark is kept for the running launch and for a failure still pending
+  /// (its cause is asked for later), and nothing else.
+  fn prune_marks(&self, record: &Record) {
+    let Some(parent) = self.path.parent() else { return };
+    let keep: Vec<String> = std::iter::once(&record.current.launch_id)
+      .chain(record.failures.iter().map(|failure| &failure.session.launch_id))
+      .map(|launch_id| crate::os_exit_cause::unix_end::marker_file_name(launch_id))
+      .collect();
+    let Ok(entries) = std::fs::read_dir(parent) else { return };
+    for entry in entries.flatten() {
+      let name = entry.file_name();
+      let Some(name) = name.to_str() else { continue };
+      if name.starts_with("exit-") && name.ends_with(".mark") && !keep.iter().any(|kept| kept == name) {
+        let _ = std::fs::remove_file(entry.path());
+      }
+    }
   }
 
   fn lock(&self) -> MutexGuard<'_, HealthState> {
@@ -394,20 +423,41 @@ impl RuntimeHealth {
     Self::matches(&state, token).then(|| Self::snapshot(&state))
   }
 
-  /// When the session that ended in one unexpected exit was last seen alive: what the operating system's log is asked
-  /// about. Answered only to the page that holds the current token, and only for a recorded `UncleanExit` that has not been
+  /// What the cause lookup is told about the session that ended in one unexpected exit: when it was last seen alive, which launch
+  /// it was (the name of the mark a signal may have left), which start of the PC it ran in and when a panic was recorded in it.
+  /// Answered only to the page that holds the current token, and only for a recorded `UncleanExit` that has not been
   /// acknowledged yet: no other failure, id or page gets an answer.
-  pub fn unexpected_exit_alive_at(&self, token: &RendererToken, id: &str) -> Option<u64> {
+  pub fn unexpected_exit_session(
+    &self,
+    token: &RendererToken,
+    id: &str,
+  ) -> Option<crate::os_exit_cause::EndSession> {
     let state = self.lock();
     if !Self::matches(&state, token) {
       return None;
     }
-    state
-      .record
-      .failures
+    let failures = &state.record.failures;
+    let ended = failures
       .iter()
-      .find(|failure| failure.id == id && failure.kind == FailureKind::UncleanExit)
-      .map(|failure| failure.session.alive_at)
+      .find(|failure| failure.id == id && failure.kind == FailureKind::UncleanExit)?;
+    let launch_id = ended.session.launch_id.clone();
+    let panic_at = failures
+      .iter()
+      .filter(|failure| failure.kind == FailureKind::RustPanic && failure.session.launch_id == launch_id)
+      .map(|failure| failure.at)
+      .max();
+    Some(crate::os_exit_cause::EndSession {
+      alive_at: ended.session.alive_at,
+      launch_id,
+      boot_id: ended.session.boot_id.clone(),
+      panic_at,
+      dir: self.path.parent().map(Path::to_path_buf).unwrap_or_default(),
+    })
+  }
+
+  #[cfg(test)]
+  pub fn unexpected_exit_alive_at(&self, token: &RendererToken, id: &str) -> Option<u64> {
+    self.unexpected_exit_session(token, id).map(|session| session.alive_at)
   }
 
   pub fn acknowledge(&self, token: &RendererToken, ids: &[String]) -> bool {
@@ -426,6 +476,7 @@ impl RuntimeHealth {
     }
     state.record = next;
     state.storage_ok = true;
+    self.prune_marks(&state.record);
     true
   }
 }
@@ -454,6 +505,12 @@ pub fn initialize<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     format!("artdaddy@{}", app.package_info().version),
   ));
   install_panic_hook(health.clone());
+  // The mark a signal leaves when it ends the app (macOS and Linux; Windows has an event log to ask). Without it the next start
+  // still reports the end, with less to say about it.
+  #[cfg(unix)]
+  if let Err(error) = crate::exit_signal::install(&root.join("observability"), &jobs.launch_id()) {
+    log::warn!("runtime-health: could not open the exit mark (kind {:?}, os {:?})", error.kind(), error.raw_os_error());
+  }
   app.manage(health);
 }
 
@@ -515,16 +572,16 @@ pub fn runtime_health_ack(
   health.acknowledge(&token, &ids)
 }
 
-/// What the operating system's own log says ended the session that an unexpected exit belongs to: one short word
-/// (`os_exit_cause.rs`), or nothing where there is no log to read. Reads the log off the page's thread, and the page
-/// does not wait for it for long.
+/// What ended the session that an unexpected exit belongs to, as one short word (`os_exit_cause.rs`): from the operating system's
+/// own log where it keeps one (Windows), and from the mark a signal left, a panic, the PC's start and the system's crash report
+/// where it does not. Reads off the page's thread, and the page does not wait for it for long.
 #[tauri::command]
 pub async fn runtime_health_cause(
   health: tauri::State<'_, Arc<RuntimeHealth>>,
   token: RendererToken,
   id: String,
 ) -> Result<Option<String>, String> {
-  let Some(alive_at) = health.unexpected_exit_alive_at(&token, &id) else {
+  let Some(session) = health.unexpected_exit_session(&token, &id) else {
     return Ok(None);
   };
   let exe = std::env::current_exe()
@@ -532,7 +589,7 @@ pub async fn runtime_health_cause(
     .and_then(|path| path.file_name().map(|name| name.to_string_lossy().into_owned()))
     .unwrap_or_else(|| "artdaddy.exe".to_string());
   Ok(
-    tauri::async_runtime::spawn_blocking(move || crate::os_exit_cause::lookup(alive_at, &exe))
+    tauri::async_runtime::spawn_blocking(move || crate::os_exit_cause::lookup_session(&session, &exe))
       .await
       .ok(),
   )
@@ -1034,5 +1091,132 @@ mod tests {
       .failures
       .iter()
       .any(|failure| failure.kind == FailureKind::RustPanic));
+  }
+
+  // What the cause lookup is told about a session that ended without a mark (macOS and Linux have no log to ask).
+
+  fn ended_without_a_mark(
+    directory: &Path,
+    boot: &str,
+  ) -> (PathBuf, RuntimeHealth, RendererToken, String) {
+    let path = directory.join("health.json");
+    let first = RuntimeHealth::open_in_boot(path.clone(), "first".into(), "artdaddy@0.24.0".into(), boot.into());
+    let token = first.bind_renderer().token;
+    assert!(first.heartbeat(&token, 1, RuntimeContext { activity: "export".into(), ..Default::default() }));
+    drop(first); // no exit mark
+    let next = RuntimeHealth::open_in_boot(path.clone(), "next".into(), "artdaddy@0.24.0".into(), "boot-b".into());
+    let id = next.status().failures[0].id.clone();
+    let token = next.bind_renderer().token;
+    (path, next, token, id)
+  }
+
+  #[test]
+  fn an_unmarked_end_hands_over_the_launch_the_start_of_the_pc_and_when_it_was_last_alive() {
+    let directory = tempfile::tempdir().unwrap();
+    let (_, next, token, id) = ended_without_a_mark(directory.path(), "boot-a");
+    let session = next.unexpected_exit_session(&token, &id).unwrap();
+    assert_eq!(session.launch_id, "first");
+    assert_eq!(session.boot_id, "boot-a");
+    assert_eq!(session.panic_at, None);
+    assert_eq!(session.dir, directory.path());
+    assert!(session.alive_at > 0);
+  }
+
+  #[test]
+  fn only_the_page_that_holds_the_token_is_told_and_only_of_an_unexpected_exit() {
+    let directory = tempfile::tempdir().unwrap();
+    let (_, next, token, id) = ended_without_a_mark(directory.path(), "boot-a");
+    let stale = RendererToken { launch_id: token.launch_id.clone(), renderer_epoch: token.renderer_epoch + 1 };
+    assert!(next.unexpected_exit_session(&stale, &id).is_none());
+    assert!(next.unexpected_exit_session(&token, "no-such-failure").is_none());
+    next.record_failure(FailureKind::RendererExited);
+    let other = next.status().failures.iter().find(|f| f.kind == FailureKind::RendererExited).unwrap().id.clone();
+    assert!(next.unexpected_exit_session(&token, &other).is_none());
+    assert!(next.acknowledge(&token, &[id.clone()]));
+    assert!(next.unexpected_exit_session(&token, &id).is_none());
+  }
+
+  #[test]
+  fn a_panic_in_the_session_that_ended_is_handed_over_with_its_time_and_no_other_sessions_panic_is() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("health.json");
+    let old = RuntimeHealth::open_in_boot(path.clone(), "older".into(), "artdaddy@0.24.0".into(), "boot-a".into());
+    old.record_failure(FailureKind::RustPanic); // an earlier launch's panic, still waiting to be reported
+    old.mark_exit(CleanExit::Quit);
+    drop(old);
+    let first = RuntimeHealth::open_in_boot(path.clone(), "first".into(), "artdaddy@0.24.0".into(), "boot-a".into());
+    first.record_failure(FailureKind::RustPanic);
+    let panicked_at = first.status().failures.last().unwrap().at;
+    drop(first); // then it ended without a mark
+    let next = RuntimeHealth::open_in_boot(path, "next".into(), "artdaddy@0.24.0".into(), "boot-a".into());
+    let id = next
+      .status()
+      .failures
+      .iter()
+      .find(|failure| failure.kind == FailureKind::UncleanExit)
+      .unwrap()
+      .id
+      .clone();
+    let token = next.bind_renderer().token;
+    let session = next.unexpected_exit_session(&token, &id).unwrap();
+    assert_eq!(session.panic_at, Some(panicked_at));
+    assert_eq!(session.launch_id, "first");
+  }
+
+  #[test]
+  fn a_record_written_before_the_start_of_the_pc_was_kept_still_reads() {
+    let directory = tempfile::tempdir().unwrap();
+    let (path, next, _, _) = ended_without_a_mark(directory.path(), "boot-a");
+    drop(next);
+    let mut record: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    record["current"].as_object_mut().unwrap().remove("boot_id");
+    for failure in record["failures"].as_array_mut().unwrap() {
+      failure["session"].as_object_mut().unwrap().remove("boot_id");
+    }
+    std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+    let again = RuntimeHealth::open_in_boot(path, "again".into(), "artdaddy@0.24.0".into(), "boot-c".into());
+    let kinds: Vec<_> = again.status().failures.iter().map(|failure| failure.kind).collect();
+    assert!(kinds.contains(&FailureKind::UncleanExit), "{kinds:?}");
+    let token = again.bind_renderer().token;
+    let id = again.status().failures[0].id.clone();
+    assert_eq!(again.unexpected_exit_session(&token, &id).unwrap().boot_id, "");
+  }
+
+  fn marks_in(directory: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(directory)
+      .unwrap()
+      .flatten()
+      .map(|entry| entry.file_name().to_string_lossy().into_owned())
+      .filter(|name| name.starts_with("exit-") && name.ends_with(".mark"))
+      .collect();
+    names.sort();
+    names
+  }
+
+  #[test]
+  fn a_mark_is_kept_only_while_something_is_waiting_on_it() {
+    use crate::os_exit_cause::unix_end::marker_file_name;
+    let directory = tempfile::tempdir().unwrap();
+    let put = |launch: &str| std::fs::write(directory.path().join(marker_file_name(launch)), b"signal_term\n").unwrap();
+    let path = directory.path().join("health.json");
+    // A mark is made by a launch after it has started, so each is put down after its own `open`.
+    put("forgotten"); // from long ago: nothing refers to it
+    let clean = RuntimeHealth::open_in_boot(path.clone(), "clean".into(), "artdaddy@0.24.0".into(), "boot-a".into());
+    put("clean");
+    clean.mark_exit(CleanExit::Quit);
+    drop(clean);
+    let crashed = RuntimeHealth::open_in_boot(path.clone(), "crashed".into(), "artdaddy@0.24.0".into(), "boot-a".into());
+    put("crashed");
+    drop(crashed);
+    let next = RuntimeHealth::open_in_boot(path, "next".into(), "artdaddy@0.24.0".into(), "boot-a".into());
+    put("next");
+    // The launch that ended without a mark keeps its mark until its failure is dealt with; the others' go.
+    assert_eq!(marks_in(directory.path()), vec![marker_file_name("crashed"), marker_file_name("next")]);
+    let token = next.bind_renderer().token;
+    let id = next.status().failures[0].id.clone();
+    assert!(next.acknowledge(&token, &[id]));
+    assert_eq!(marks_in(directory.path()), vec![marker_file_name("next")]);
+    // Nothing but marks is ever removed.
+    assert!(directory.path().join("health.json").exists());
   }
 }
