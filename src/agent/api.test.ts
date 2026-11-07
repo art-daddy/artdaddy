@@ -240,6 +240,65 @@ describe("inferRoundStreaming", () => {
     expect(chunks.join("")).toBe(out.final_text);
   });
 
+  describe("the server's timing frame", () => {
+    const timing = { intake_ms: 250, line_ms: 0, admit_ms: 500, vendor_ms: 11_000, settle_ms: 400 };
+
+    it("is handed to the observer, in order, and is neither a delta nor part of the result", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () =>
+          sse([
+            frame("delta", { kind: "text", text: "hi" }),
+            frame("timing", timing),
+            frame("result", dto),
+          ]),
+        ),
+      );
+      const deltas: unknown[] = [];
+      const timings: unknown[] = [];
+
+      const out = await inferRoundStreaming(body, (d) => deltas.push(d), undefined, {
+        timing: (t) => timings.push(t),
+      });
+
+      expect(timings).toEqual([timing]);
+      expect(deltas).toEqual([{ kind: "text", text: "hi" }]);
+      // The terminal frame stays the record, exactly as the plain route returns it.
+      expect(out).toEqual(dto);
+      expect(out).not.toHaveProperty("timing");
+    });
+
+    it("does not make a round without an observer, or against a server that never sends one, any different", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => sse([frame("timing", timing), frame("result", dto)])),
+      );
+      expect(await inferRoundStreaming(body, () => {})).toEqual(dto);
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => sse([frame("result", dto)])),
+      );
+      const timings: unknown[] = [];
+      expect(
+        await inferRoundStreaming(body, () => {}, undefined, { timing: (t) => timings.push(t) }),
+      ).toEqual(dto);
+      expect(timings).toEqual([]);
+    });
+
+    it("never costs a round its answer, even when the one watching the stopwatch throws", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => sse([frame("timing", timing), frame("result", dto)])),
+      );
+      const out = await inferRoundStreaming(body, () => {}, undefined, {
+        timing: () => {
+          throw new Error("observer exploded");
+        },
+      });
+      expect(out).toEqual(dto);
+    });
+  });
+
   it("posts to /inference/stream, asking for SSE, with auth and the abort signal", async () => {
     setClerkTokenProvider(async () => "tok");
     const f = vi.fn(async () => sse([frame("result", dto)]));

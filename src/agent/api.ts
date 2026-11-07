@@ -198,6 +198,9 @@ export interface RoundObserver {
   sent?: (bytes: number) => void;
   /** The server's answer began (its head arrived). */
   head?: () => void;
+  /** The server's `timing` frame for this round: where its own time went. Outside data (a server that has not heard of
+   *  the frame never sends it); the observer reads it with `parseServerTiming`. */
+  timing?: (timing: unknown) => void;
 }
 
 /** Run ONE model round, streamed. Deltas are presentation; the returned DTO is the
@@ -286,7 +289,13 @@ async function streamRound(
     res.body,
     ({ event, data }) => {
       if (event === "delta") onDelta(data as RoundDelta);
-      else if (event === "result") result = data as RoundResultDTO;
+      else if (event === "timing") {
+        try {
+          observer?.timing?.(data);
+        } catch {
+          /* a stopwatch must never cost a round its answer */
+        }
+      } else if (event === "result") result = data as RoundResultDTO;
     },
     { idleMs: STREAM_IDLE_MS },
   );

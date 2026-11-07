@@ -119,6 +119,103 @@ describe("a turn is said to start once, and to end once", () => {
       expect(sink.turnEnd.mock.calls[0][0]).not.toHaveProperty("state");
     });
   });
+
+  describe("where the server's time went", () => {
+    const part = (n: number) => ({
+      intake_ms: n,
+      line_ms: n + 1,
+      admit_ms: n + 2,
+      vendor_ms: n + 3,
+      settle_ms: n + 4,
+    });
+
+    it("is the sum of the rounds that reported it, said once with the turn's end", () => {
+      const { telemetry, sink } = rig();
+      telemetry.noteServerTiming(part(10));
+      telemetry.noteServerTiming(part(20));
+      expect(sink.turnEnd).not.toHaveBeenCalled();
+      telemetry.end("done");
+      expect(sink.turnEnd.mock.calls[0][0].server).toEqual({
+        rounds: 2,
+        intake_ms: 30,
+        line_ms: 32,
+        admit_ms: 34,
+        vendor_ms: 36,
+        settle_ms: 38,
+      });
+    });
+
+    it("is absent when no round reported it: not a zero, which would read as 'the server took no time'", () => {
+      const { telemetry, sink } = rig();
+      telemetry.end("done");
+      expect(sink.turnEnd.mock.calls[0][0]).not.toHaveProperty("server");
+    });
+
+    it("ignores a frame that is not five whole, finite, non-negative numbers", () => {
+      const { telemetry, sink } = rig();
+      for (const bad of [
+        null,
+        undefined,
+        "fast",
+        7,
+        [],
+        {},
+        { ...part(1), settle_ms: undefined },
+        { ...part(1), vendor_ms: -1 },
+        { ...part(1), vendor_ms: Number.NaN },
+        { ...part(1), admit_ms: Number.POSITIVE_INFINITY },
+        { ...part(1), line_ms: "3" },
+      ])
+        telemetry.noteServerTiming(bad);
+      telemetry.end("done");
+      expect(sink.turnEnd.mock.calls[0][0]).not.toHaveProperty("server");
+    });
+
+    it("is said whatever way the turn ends, and a late frame changes nothing", () => {
+      for (const outcome of ["stopped", "error", "abandoned"] as const) {
+        const { telemetry, sink } = rig();
+        telemetry.noteServerTiming(part(1));
+        telemetry.end(outcome);
+        telemetry.noteServerTiming(part(500));
+        telemetry.end(outcome);
+        expect(sink.turnEnd).toHaveBeenCalledTimes(1);
+        expect(sink.turnEnd.mock.calls[0][0].server.rounds).toBe(1);
+        expect(sink.turnEnd.mock.calls[0][0].server.vendor_ms).toBe(4);
+      }
+    });
+
+    it("property: the sums are exactly the sums of the valid frames, however many and in whatever order", () => {
+      const frame = fc.record({
+        intake_ms: fc.nat(100_000),
+        line_ms: fc.nat(100_000),
+        admit_ms: fc.nat(100_000),
+        vendor_ms: fc.nat(100_000),
+        settle_ms: fc.nat(100_000),
+      });
+      fc.assert(
+        fc.property(
+          fc.array(fc.oneof(frame, fc.constant(null), fc.constant("x")), { maxLength: 30 }),
+          (frames) => {
+            const { telemetry, sink } = rig();
+            for (const f of frames) telemetry.noteServerTiming(f);
+            telemetry.end("done");
+            const valid = frames.filter((f) => f !== null && typeof f === "object") as Array<
+              Record<string, number>
+            >;
+            const sent = sink.turnEnd.mock.calls[0][0];
+            if (!valid.length) {
+              expect(sent).not.toHaveProperty("server");
+              return;
+            }
+            expect(sent.server.rounds).toBe(valid.length);
+            for (const key of ["intake_ms", "line_ms", "admit_ms", "vendor_ms", "settle_ms"])
+              expect(sent.server[key]).toBe(valid.reduce((n, f) => n + f[key], 0));
+          },
+        ),
+        { numRuns: 100 },
+      );
+    });
+  });
 });
 
 describe("the person's answers", () => {

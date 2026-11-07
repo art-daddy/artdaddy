@@ -79,15 +79,21 @@ export interface LookDecoder {
   /** Remember that a hardware look of this shape failed where software then worked. */
   demote(video: LookVideo): void;
   /** Make a look with the flags; if hardware was used and the look did not succeed, make it again in
-   *  software, and remember the shape as bad only when software then worked (otherwise it was the file). */
+   *  software, and remember the shape as bad only when software then worked (otherwise it was the file).
+   *  `onMode` is told how the look was made (`software`, `gpu`, or `retried`: hardware failed and software redid it),
+   *  for the look's own report; it changes nothing about the look. */
   run<T>(
     runner: CommandRunner,
     src: string,
     video: LookVideo,
     signal: AbortSignal | undefined,
     attempt: (flags: string[]) => Promise<LookAttempt<T>>,
+    onMode?: (mode: LookDecodeMode) => void,
   ): Promise<T>;
 }
+
+/** How a look's frame was decoded. */
+export type LookDecodeMode = "software" | "gpu" | "retried";
 
 export function createLookDecoder(deps: LookDecoderDeps): LookDecoder {
   const verdicts = new Map<string, Verdict>();
@@ -240,11 +246,16 @@ export function createLookDecoder(deps: LookDecoderDeps): LookDecoder {
       video: LookVideo,
       signal: AbortSignal | undefined,
       attempt: (flags: string[]) => Promise<LookAttempt<T>>,
+      onMode?: (mode: LookDecodeMode) => void,
     ): Promise<T> {
       const used = await flags(runner, src, video, signal);
       const first = await attempt(used);
-      if (first.ok || used.length === 0 || signal?.aborted) return first.value;
+      if (first.ok || used.length === 0 || signal?.aborted) {
+        onMode?.(used.length === 0 ? "software" : "gpu");
+        return first.value;
+      }
       const second = await attempt([]);
+      onMode?.("retried");
       if (second.ok) this.demote(video);
       return second.value;
     },

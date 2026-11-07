@@ -16,6 +16,7 @@ import { reportExport } from "./exportEvents";
 import type { ExportLimit, ExportStarter, TraceEvent } from "./exportVocabulary";
 import { authedFetch, hasSession } from "./auth";
 import type { TurnSummary } from "../agent/turnTiming";
+import type { LookReport } from "../tools/lookReport";
 import { legalText } from "../observability/recentFailures";
 import { isAbortFailure, STOPPED_ERROR, stoppedAnswer } from "../lib/stopped";
 import { hostInfo } from "../platform/host";
@@ -32,6 +33,7 @@ export const AGENT_EVENT_KINDS = [
   "turn_end",
   "approval_requested",
   "approval_decided",
+  "look",
 ] as const;
 export const TURN_OUTCOMES = ["done", "stopped", "error", "abandoned"] as const;
 export const TURN_TRIGGERS = ["user", "system", "retry"] as const;
@@ -59,20 +61,61 @@ export const TURN_COUNT_FIELDS = [
   "busy_waits",
   "frames",
 ] as const;
+/** Where the SERVER's time went across a turn's rounds, summed from the `timing` frame each streamed round sends (the
+ *  server's round_timing.py). They sit inside `request_ms`, `think_ms` and `stream_ms`, so they are not parts of the wall
+ *  time. `srv_rounds` is how many rounds reported; a turn where none did says nothing at all (not zeros). */
+export const TURN_SERVER_FIELDS = [
+  "srv_rounds",
+  "srv_intake_ms",
+  "srv_line_ms",
+  "srv_admit_ms",
+  "srv_vendor_ms",
+  "srv_settle_ms",
+] as const;
+/** How one look at footage ended (tools/lookReport.ts): every frame made, some made, none made, or Stop. */
+export const LOOK_OUTCOMES = ["done", "partial", "failed", "stopped"] as const;
+/** A look's frame counts: wanted, reused from an earlier look's files, decoded by the graphics chip, decoded by it and
+ *  failed there so software redid them, and not made at all; and the most sources any one frame opened. */
+export const LOOK_COUNT_FIELDS = [
+  "frames",
+  "cached",
+  "gpu",
+  "retried",
+  "failed",
+  "layers",
+] as const;
+/** The time making a look's frames took, and its slowest single frame. (The look's own total is `ms`, as on a tool call.) */
+export const LOOK_MS_FIELDS = ["frames_ms", "slowest_ms"] as const;
+/** Rounded facts about the source of a look's slowest frame: pixels, seconds, and kilobits a second. (Its codec is one label.) */
+export const LOOK_FACT_FIELDS = ["width", "height", "dur_s", "kbps"] as const;
 /** The most the server accepts: a number past these refuses the whole flush, so every number is clamped to them
  *  here first. A person may leave an approval open for days, hence a week for times. */
 export const MAX_TURN_MS = 604_800_000;
 export const MAX_TURN_COUNT = 100_000;
 export const MAX_BYTES_UP = 10_000_000_000;
+/** A tool call or a look cannot have taken more than a day; the server refuses the whole flush over one that did. */
+export const MAX_CALL_MS = 86_400_000;
+export const MAX_LOOK_DIM = 100_000;
+export const MAX_LOOK_SECONDS = 31_536_000;
+export const MAX_LOOK_KBPS = 10_000_000;
 
 export type AgentEventKind = (typeof AGENT_EVENT_KINDS)[number];
 export type TurnOutcome = (typeof TURN_OUTCOMES)[number];
 export type TurnTrigger = (typeof TURN_TRIGGERS)[number];
 export type TurnStateRead = (typeof TURN_STATE_READS)[number];
 export type ApprovalDecision = (typeof APPROVAL_DECISIONS)[number];
+export type LookOutcome = (typeof LOOK_OUTCOMES)[number];
 
 export interface AgentEvent extends Partial<
-  Record<(typeof TURN_MS_FIELDS)[number] | (typeof TURN_COUNT_FIELDS)[number], number>
+  Record<
+    | (typeof TURN_MS_FIELDS)[number]
+    | (typeof TURN_COUNT_FIELDS)[number]
+    | (typeof TURN_SERVER_FIELDS)[number]
+    | (typeof LOOK_COUNT_FIELDS)[number]
+    | (typeof LOOK_MS_FIELDS)[number]
+    | (typeof LOOK_FACT_FIELDS)[number],
+    number
+  >
 > {
   kind: AgentEventKind;
   at: number;
@@ -89,12 +132,14 @@ export interface AgentEvent extends Partial<
   trigger?: TurnTrigger;
   mode?: string;
   effort?: string;
-  outcome?: TurnOutcome;
+  outcome?: TurnOutcome | LookOutcome;
   code?: string;
   state?: TurnStateRead;
   decision?: ApprovalDecision;
   attachments?: number;
   bytes_up?: number;
+  /** A look: its source's codec, one short label (tools/lookReport.ts `codecLabel`). */
+  codec?: string;
 }
 
 /** Matches AgentEventItem on the server. Truncating HERE as well keeps a pathological
@@ -201,6 +246,9 @@ export function refusalReport(
 
 export interface ToolTrace {
   readonly context: Readonly<AgentEventContext>;
+  /** The id of the call this trace follows (the model's call id, or an outside agent's request id), when there is one:
+   *  what a look's own event joins to its tool call by. */
+  readonly callId?: string;
   result: (value: unknown) => void;
   error: (error: unknown) => void;
 }
@@ -284,6 +332,7 @@ export function createToolTrace(
   };
   return {
     context: captured,
+    callId,
     result,
     error: (error) =>
       result({ ok: false, error: error instanceof Error ? error.message : String(error) }),
@@ -375,6 +424,66 @@ const clampMs = (n: number): number =>
   Number.isFinite(n) ? Math.max(0, Math.min(MAX_TURN_MS, Math.round(n))) : 0;
 const clampCount = (n: number): number =>
   Number.isFinite(n) ? Math.max(0, Math.min(MAX_TURN_COUNT, Math.round(n))) : 0;
+const clampTo = (n: unknown, max: number): number =>
+  typeof n === "number" && Number.isFinite(n) ? Math.max(0, Math.min(max, Math.round(n))) : 0;
+
+/** Where the server's time went on one streamed round: the five whole-millisecond parts of the server's `timing` frame
+ *  (its round_timing.py). Outside data until `parseServerTiming` has read it. */
+export interface ServerTiming {
+  intake_ms: number;
+  line_ms: number;
+  admit_ms: number;
+  vendor_ms: number;
+  settle_ms: number;
+}
+const SERVER_TIMING_KEYS = ["intake_ms", "line_ms", "admit_ms", "vendor_ms", "settle_ms"] as const;
+
+/** The server's timing frame, if it is one: an object whose five parts are all finite, non-negative numbers. Anything
+ *  else (a server that has not sent one, a frame in some other shape) is ignored rather than guessed at. */
+export function parseServerTiming(value: unknown): ServerTiming | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  const out: Partial<ServerTiming> = {};
+  for (const key of SERVER_TIMING_KEYS) {
+    const n = raw[key];
+    if (typeof n !== "number" || !Number.isFinite(n) || n < 0) return null;
+    out[key] = Math.round(n);
+  }
+  return out as ServerTiming;
+}
+
+/** A turn's rounds' server times added together, and how many rounds there were. */
+export interface ServerTimingSums extends ServerTiming {
+  rounds: number;
+}
+
+/** A look at footage ended: how, how its frames came to exist, and where the time went. Words and numbers only: the
+ *  source's codec is one short label, never a name or a path. The call itself is the `tool_call` this joins by `call_id`. */
+export function recordLook(
+  report: LookReport,
+  callId = "",
+  labels: AgentEventContext = agentEventContext(),
+): void {
+  const source = report.source;
+  push(
+    {
+      kind: "look",
+      at: Date.now() / 1000,
+      name: legalText(report.tool, 40),
+      call_id: legalText(callId, 100),
+      outcome: report.outcome,
+      ms: clampTo(report.ms, MAX_CALL_MS),
+      ...Object.fromEntries(LOOK_COUNT_FIELDS.map((key) => [key, clampCount(report[key])])),
+      ...Object.fromEntries(LOOK_MS_FIELDS.map((key) => [key, clampMs(report[key])])),
+      codec: legalText(source?.codec, 20),
+      width: clampTo(source?.width, MAX_LOOK_DIM),
+      height: clampTo(source?.height, MAX_LOOK_DIM),
+      dur_s: clampTo(source?.dur_s, MAX_LOOK_SECONDS),
+      kbps: clampTo(source?.kbps, MAX_LOOK_KBPS),
+    },
+    labels,
+  );
+}
 
 /** A turn began: who started it and how it is set up. Nothing of what was typed. */
 export function recordTurnStart(
@@ -408,6 +517,8 @@ export function recordTurnEnd(
     outcome: TurnOutcome;
     code?: string;
     state?: TurnStateRead;
+    /** The server's time across the turn's rounds, when any round reported it. */
+    server?: ServerTimingSums;
     summary: TurnSummary;
   },
   labels: AgentEventContext = agentEventContext(),
@@ -415,6 +526,17 @@ export function recordTurnEnd(
   const s = ev.summary;
   const times = Object.fromEntries(TURN_MS_FIELDS.map((key) => [key, clampMs(s[key])]));
   const counts = Object.fromEntries(TURN_COUNT_FIELDS.map((key) => [key, clampCount(s[key])]));
+  const server =
+    ev.server && ev.server.rounds > 0
+      ? {
+          srv_rounds: clampCount(ev.server.rounds),
+          srv_intake_ms: clampMs(ev.server.intake_ms),
+          srv_line_ms: clampMs(ev.server.line_ms),
+          srv_admit_ms: clampMs(ev.server.admit_ms),
+          srv_vendor_ms: clampMs(ev.server.vendor_ms),
+          srv_settle_ms: clampMs(ev.server.settle_ms),
+        }
+      : {};
   push(
     {
       kind: "turn_end",
@@ -425,6 +547,7 @@ export function recordTurnEnd(
       ...(ev.state ? { state: ev.state } : {}),
       ...times,
       ...counts,
+      ...server,
       bytes_up: Number.isFinite(s.bytes_up)
         ? Math.max(0, Math.min(MAX_BYTES_UP, Math.round(s.bytes_up)))
         : 0,

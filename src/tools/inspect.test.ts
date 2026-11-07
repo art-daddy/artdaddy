@@ -18,6 +18,7 @@ import {
 } from "./inspect";
 import { ProjectStoreAccess, joinPath, type FsLike } from "./store";
 import { createLookDecoder } from "./lookDecode";
+import type { LookReport } from "./lookReport";
 import { registerLibraryClip } from "./import";
 import { registerTestDocument, resetTestDocuments } from "../test/timelineKit";
 import { emptyTimeline } from "../timeline/model";
@@ -2250,5 +2251,350 @@ describe("inspect_timeline frames on the GPU", () => {
     expect(r.frames_attached).toBe(3);
     expect(runner.proofs).toBe(0);
     expect(runner.renders.every((a) => !a.includes("-hwaccel"))).toBe(true);
+  });
+});
+
+// A look tells the telemetry what it did (tools/lookReport.ts): how each frame came to exist, where the time went and what the
+// source was. These run the real tools against fake ffmpeg, so what is asserted is the report a look makes, never how the
+// collector is called.
+describe("a look reports what it did", () => {
+  const watched = (base: ClientToolContext): { ctx: ClientToolContext; reports: LookReport[] } => {
+    const reports: LookReport[] = [];
+    return { ctx: { ...base, look: (r) => reports.push(r) }, reports };
+  };
+  /** Every frame the runner is asked for takes `ms`, so a time in a report is one that was really spent. */
+  const slow = (inner: CommandRunner, ms: number): CommandRunner => ({
+    run: async (program, args, signal, cwd, onStdout) => {
+      if (program === "ffmpeg" && args.includes("-frames:v"))
+        await new Promise((r) => setTimeout(r, ms));
+      return inner.run(program, args, signal, cwd, onStdout);
+    },
+  });
+  const project = (): MockFs => {
+    const fs = new MockFs();
+    fs.touch(joinPath(DIR, "vid.mp4"));
+    fs.putBytes("C:/res/fonts/Poppins-Regular.ttf", new Uint8Array([1]));
+    return fs;
+  };
+
+  describe("inspect_media", () => {
+    it("says every frame was decoded on the GPU, what the source was, and that the time was real", async () => {
+      const fs = project();
+      const { ctx, reports } = watched({
+        ...ctxWith(slow(gpu(mediaRunner(fs, { probe: HW_PROBE })), 30), fs),
+        lookDecode: windows(),
+      });
+      await inspectMediaTool({ media_ref: "vid.mp4" }, ctx);
+      expect(reports).toHaveLength(1);
+      expect(reports[0]).toMatchObject({
+        tool: "inspect_media",
+        outcome: "done",
+        frames: 6,
+        gpu: 6,
+        retried: 0,
+        cached: 0,
+        failed: 0,
+        layers: 1,
+        // 1 MiB over 12.5 s is about 671 kilobits a second
+        source: { codec: "h264", width: 1080, height: 1920, dur_s: 13, kbps: 671 },
+      });
+      expect(reports[0].slowest_ms).toBeGreaterThanOrEqual(25);
+      expect(reports[0].frames_ms).toBeGreaterThanOrEqual(reports[0].slowest_ms);
+      expect(reports[0].ms).toBeGreaterThanOrEqual(reports[0].frames_ms);
+    });
+
+    it("says a frame the GPU failed and software redid was retried, and the look still done", async () => {
+      const fs = project();
+      const runner = gpu(mediaRunner(fs, { probe: HW_PROBE }), { hardwareFrames: "fail" });
+      const { ctx, reports } = watched({ ...ctxWith(runner, fs), lookDecode: windows() });
+      const r = (await inspectMediaTool({ media_ref: "vid.mp4" }, ctx)) as Any;
+      expect(r.frames_attached).toBe(6);
+      // The frames already under way when the first failure was seen are redone; once software has worked, the PC stops
+      // asking the GPU, so the rest are made in software straight away. So: at least one, at most one per lane.
+      expect(reports[0]).toMatchObject({ outcome: "done", frames: 6, gpu: 0, failed: 0 });
+      expect(reports[0].retried).toBeGreaterThanOrEqual(1);
+      expect(reports[0].retried).toBeLessThanOrEqual(4);
+    });
+
+    it("says frames were made in software where there is no GPU to ask (Linux)", async () => {
+      const fs = project();
+      const linux = createLookDecoder({ os: () => "linux", storage: null, now: () => 1 });
+      const { ctx, reports } = watched({
+        ...ctxWith(mediaRunner(fs, { probe: HW_PROBE }), fs),
+        lookDecode: linux,
+      });
+      await inspectMediaTool({ media_ref: "vid.mp4" }, ctx);
+      expect(reports[0]).toMatchObject({
+        outcome: "done",
+        frames: 6,
+        gpu: 0,
+        retried: 0,
+        cached: 0,
+        failed: 0,
+      });
+    });
+
+    it("says a repeat look reused the files the first one left, and that reusing costs no decode time", async () => {
+      const fs = project();
+      const runner = gpu(mediaRunner(fs, { probe: HW_PROBE }));
+      const decoder = windows();
+      const first = watched({ ...ctxWith(runner, fs), lookDecode: decoder });
+      await inspectMediaTool({ media_ref: "vid.mp4" }, first.ctx);
+      const second = watched({ ...ctxWith(runner, fs), lookDecode: decoder });
+      await inspectMediaTool({ media_ref: "vid.mp4" }, second.ctx);
+      expect(first.reports[0]).toMatchObject({ cached: 0, gpu: 6 });
+      expect(second.reports[0]).toMatchObject({
+        outcome: "done",
+        frames: 6,
+        cached: 6,
+        gpu: 0,
+        slowest_ms: 0,
+      });
+    });
+
+    it("says a look whose frames cannot be read failed, and one with some of them partial", async () => {
+      const all = project();
+      const failing = watched(
+        ctxWith(mediaRunner(all, { probe: VIDEO_PROBE, failFrame: () => true }), all),
+      );
+      const r = (await inspectMediaTool({ media_ref: "vid.mp4" }, failing.ctx)) as Any;
+      expect(r.frames.every((f: Any) => f.error)).toBe(true);
+      expect(failing.reports[0]).toMatchObject({ outcome: "failed", frames: 6, failed: 6 });
+      const some = project();
+      const partial = watched(
+        ctxWith(mediaRunner(some, { probe: VIDEO_PROBE, failFrame: (t) => t > 6 }), some),
+      );
+      await inspectMediaTool({ media_ref: "vid.mp4" }, partial.ctx);
+      expect(partial.reports[0].outcome).toBe("partial");
+      expect(partial.reports[0].failed).toBeGreaterThan(0);
+      expect(partial.reports[0].failed).toBeLessThan(6);
+    });
+
+    it("says stopped when the person pressed Stop", async () => {
+      const fs = project();
+      const stop = new AbortController();
+      stop.abort();
+      const { ctx, reports } = watched({
+        ...ctxWith(mediaRunner(fs, { probe: VIDEO_PROBE }), fs),
+        signal: stop.signal,
+      });
+      await inspectMediaTool({ media_ref: "vid.mp4" }, ctx);
+      expect(reports).toHaveLength(1);
+      expect(reports[0].outcome).toBe("stopped");
+    });
+
+    it("counts an overview as the one frame it is, made or failed", async () => {
+      const fs = project();
+      const made = watched(ctxWith(mediaRunner(fs, { probe: VIDEO_PROBE }), fs));
+      await inspectMediaTool({ media_ref: "vid.mp4", overview: true }, made.ctx);
+      expect(made.reports[0]).toMatchObject({ outcome: "done", frames: 1, failed: 0 });
+      vi.mocked(makeStoryboard).mockRejectedValueOnce(new Error("could not seek"));
+      const broken = watched(ctxWith(mediaRunner(fs, { probe: VIDEO_PROBE }), fs));
+      const r = (await inspectMediaTool(
+        { media_ref: "vid.mp4", overview: true },
+        broken.ctx,
+      )) as Any;
+      expect(r.overview.error).toContain("could not seek");
+      expect(broken.reports).toHaveLength(1);
+      expect(broken.reports[0]).toMatchObject({ outcome: "failed", frames: 1, failed: 1 });
+    });
+
+    it("counts a still picture as one frame, with its codec and size", async () => {
+      const fs = new MockFs();
+      fs.touch(joinPath(DIR, "pic.png"));
+      const runner: CommandRunner = {
+        run: vi.fn(async (program: string, args: string[]) => {
+          if (program === "ffmpeg") {
+            fs.touch(args[args.length - 1]);
+            return { code: 0, stdout: "", stderr: "" };
+          }
+          return { code: 0, stdout: IMAGE_PROBE, stderr: "" };
+        }),
+      };
+      const { ctx, reports } = watched(ctxWith(runner, fs));
+      await inspectMediaTool({ media_ref: "pic.png" }, ctx);
+      expect(reports).toHaveLength(1);
+      expect(reports[0]).toMatchObject({
+        outcome: "done",
+        frames: 1,
+        source: { codec: "png", width: 800, height: 600 },
+      });
+    });
+
+    it("says nothing about a call that is not a look: audio, a missing file", async () => {
+      const fs = new MockFs();
+      fs.touch(joinPath(DIR, "song.mp3"));
+      const audio: CommandRunner = {
+        run: vi.fn(async () => ({ code: 0, stdout: AUDIO_PROBE, stderr: "" })),
+      };
+      const heard = watched(ctxWith(audio, fs));
+      await inspectMediaTool({ media_ref: "song.mp3" }, heard.ctx);
+      const missing = watched(ctxWith(audio, fs));
+      const r = (await inspectMediaTool({ media_ref: "nothing.mp4" }, missing.ctx)) as Any;
+      expect(r.ok).toBe(false);
+      expect([...heard.reports, ...missing.reports]).toEqual([]);
+    });
+
+    it("works the same, and reports nothing, when nobody is listening", async () => {
+      const fs = project();
+      const r = (await inspectMediaTool(
+        { media_ref: "vid.mp4" },
+        ctxWith(mediaRunner(fs, { probe: VIDEO_PROBE }), fs),
+      )) as Any;
+      expect(r.frames_attached).toBe(6);
+    });
+
+    it("never lets a listener that throws change the look's answer", async () => {
+      const fs = project();
+      const r = (await inspectMediaTool(
+        { media_ref: "vid.mp4" },
+        {
+          ...ctxWith(mediaRunner(fs, { probe: VIDEO_PROBE }), fs),
+          look: () => {
+            throw new Error("listener exploded");
+          },
+        },
+      )) as Any;
+      expect(r.ok).toBe(true);
+      expect(r.frames_attached).toBe(6);
+    });
+  });
+
+  describe("inspect_timeline", () => {
+    const setup = <T extends StatFs>(fs: T, tl: unknown = SEED_TIMELINE): T => {
+      seedTimeline(fs, tl);
+      fs.touch("/a.mp4");
+      fs.touch("/b.mp4");
+      fs.sizes.set(joinPath("/a.mp4"), 1000);
+      fs.sizes.set(joinPath("/b.mp4"), 1000);
+      return fs;
+    };
+    const args = { start_frame: 0, end_frame: 60, max_frames: 3 };
+
+    it("says each frame was decoded on the GPU, with the source's facts, and that the time was real", async () => {
+      const fs = setup(new StatFs());
+      const { ctx, reports } = watched({
+        ...ctxWith(slow(gpu(frameRunner(fs)), 30), fs),
+        lookDecode: windows(),
+      });
+      await inspectTimelineTool(args, ctx);
+      expect(reports).toHaveLength(1);
+      expect(reports[0]).toMatchObject({
+        tool: "inspect_timeline",
+        outcome: "done",
+        frames: 3,
+        gpu: 3,
+        retried: 0,
+        failed: 0,
+        layers: 1,
+        source: { codec: "h264", width: 1080, height: 1920 },
+      });
+      expect(reports[0].slowest_ms).toBeGreaterThanOrEqual(25);
+    });
+
+    it("says a frame the GPU failed and software redid was retried", async () => {
+      const fs = setup(new StatFs());
+      const runner = gpu(frameRunner(fs), { hardwareFrames: "fail" });
+      const { ctx, reports } = watched({ ...ctxWith(runner, fs), lookDecode: windows() });
+      const r = (await inspectTimelineTool(args, ctx)) as Any;
+      expect(r.frames_attached).toBe(3);
+      expect(reports[0]).toMatchObject({
+        outcome: "done",
+        frames: 3,
+        retried: 3,
+        gpu: 0,
+        failed: 0,
+      });
+    });
+
+    it("says software where no GPU is asked, and nothing of the source it never probed", async () => {
+      const fs = setup(new StatFs());
+      const linux = createLookDecoder({ os: () => "linux", storage: null, now: () => 1 });
+      const { ctx, reports } = watched({ ...ctxWith(frameRunner(fs), fs), lookDecode: linux });
+      await inspectTimelineTool(args, ctx);
+      expect(reports[0]).toMatchObject({
+        outcome: "done",
+        frames: 3,
+        gpu: 0,
+        retried: 0,
+        cached: 0,
+      });
+      expect(reports[0].source).toBeUndefined();
+    });
+
+    it("says a repeat look reused the frames the first one rendered", async () => {
+      const fs = setup(new StatFs());
+      const runner = frameRunner(fs);
+      const first = watched(ctxWith(runner, fs));
+      await inspectTimelineTool(args, first.ctx);
+      const second = watched(ctxWith(runner, fs));
+      await inspectTimelineTool(args, second.ctx);
+      expect(first.reports[0]).toMatchObject({ cached: 0, frames: 3 });
+      expect(second.reports[0]).toMatchObject({
+        outcome: "done",
+        frames: 3,
+        cached: 3,
+        slowest_ms: 0,
+      });
+      expect(runner.calls).toHaveLength(3);
+    });
+
+    it("says the most sources a frame opened, and takes the facts of the heaviest", async () => {
+      const two = {
+        ...SEED_TIMELINE,
+        tracks: [
+          SEED_TIMELINE.tracks[0],
+          {
+            ...SEED_TIMELINE.tracks[0],
+            id: "v2",
+            z: 1,
+            clips: [{ ...SEED_TIMELINE.tracks[0].clips[0], id: "c2", media_ref: "/b.mp4" }],
+          },
+        ],
+      };
+      const fs = setup(new StatFs(), two);
+      const { ctx, reports } = watched({
+        ...ctxWith(gpu(frameRunner(fs)), fs),
+        lookDecode: windows(),
+      });
+      await inspectTimelineTool(args, ctx);
+      expect(reports[0].layers).toBe(2);
+      expect(reports[0].source).toMatchObject({ codec: "h264" });
+    });
+
+    it("says a look whose frames could not be rendered failed, and one with some of them partial", async () => {
+      const fs = setup(new StatFs());
+      const failing = watched(ctxWith(frameRunner(fs, { fail: () => "Invalid data found" }), fs));
+      const r = (await inspectTimelineTool(args, failing.ctx)) as Any;
+      expect(r.ok).toBe(false);
+      expect(failing.reports[0]).toMatchObject({ outcome: "failed", frames: 3, failed: 3 });
+      const some = setup(new StatFs());
+      const partial = watched(
+        ctxWith(
+          frameRunner(some, { fail: (frame) => (frame < 20 ? "Invalid data found" : null) }),
+          some,
+        ),
+      );
+      await inspectTimelineTool(args, partial.ctx);
+      expect(partial.reports[0]).toMatchObject({ outcome: "partial", frames: 3, failed: 1 });
+    });
+
+    it("says stopped when the person pressed Stop", async () => {
+      const fs = setup(new StatFs());
+      const stop = new AbortController();
+      stop.abort();
+      const { ctx, reports } = watched({ ...ctxWith(frameRunner(fs), fs), signal: stop.signal });
+      await inspectTimelineTool(args, ctx);
+      expect(reports).toHaveLength(1);
+      expect(reports[0].outcome).toBe("stopped");
+    });
+
+    it("says nothing when the call was refused before any frame was asked for", async () => {
+      const fs = new StatFs(); // no timeline at all
+      const { ctx, reports } = watched(ctxWith(NOOP_RUNNER, fs));
+      const r = (await inspectTimelineTool({}, ctx)) as Any;
+      expect(r.ok).toBe(false);
+      expect(reports).toEqual([]);
+    });
   });
 });

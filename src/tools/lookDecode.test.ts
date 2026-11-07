@@ -305,3 +305,56 @@ describe("run: a hardware look that does not succeed is redone in software", () 
     expect(attempts).toBe(1);
   });
 });
+
+// The look's own report says how each frame was decoded: it must say what actually happened, never what was asked.
+describe("run: how the look was made", () => {
+  const modes = async (
+    os: "windows" | "linux",
+    attempt: (flags: string[]) => Promise<{ ok: boolean; value: string }>,
+    signal?: AbortSignal,
+  ): Promise<string[]> => {
+    const dec = createLookDecoder({ os: () => os, storage: memoryStorage(), now: () => 1 });
+    const told: string[] = [];
+    await dec.run(fakeRunner({}), "/v/a.mp4", H264, signal, attempt, (mode) => told.push(mode));
+    return told;
+  };
+
+  it("says gpu when the hardware attempt worked", async () => {
+    expect(await modes("windows", async () => ({ ok: true, value: "frame" }))).toEqual(["gpu"]);
+  });
+
+  it("says retried when the hardware attempt failed and software redid it, whether or not software worked", async () => {
+    const worked = async (flags: string[]) => ({ ok: flags.length === 0, value: "x" });
+    expect(await modes("windows", worked)).toEqual(["retried"]);
+    expect(await modes("windows", async () => ({ ok: false, value: "x" }))).toEqual(["retried"]);
+  });
+
+  it("says software where there is no hardware to ask, or it was not proved", async () => {
+    expect(await modes("linux", async () => ({ ok: true, value: "frame" }))).toEqual(["software"]);
+    expect(await modes("linux", async () => ({ ok: false, value: "nope" }))).toEqual(["software"]);
+  });
+
+  it("says it once per look, and says gpu (not retried) when Stop ended the hardware attempt: nothing was redone", async () => {
+    const stop = new AbortController();
+    const told = await modes(
+      "windows",
+      async () => {
+        stop.abort();
+        return { ok: false, value: "stopped" };
+      },
+      stop.signal,
+    );
+    expect(told).toEqual(["gpu"]);
+  });
+
+  it("changes nothing when nobody is told: the same answer, the same attempts", async () => {
+    const dec = createLookDecoder({ os: () => "windows", storage: memoryStorage(), now: () => 1 });
+    const seen: string[][] = [];
+    const out = await dec.run(fakeRunner({}), "/v/a.mp4", H264, undefined, async (flags) => {
+      seen.push(flags);
+      return flags.length ? { ok: false, value: "hw" } : { ok: true, value: "sw" };
+    });
+    expect(out).toBe("sw");
+    expect(seen).toEqual([["-hwaccel", "d3d11va"], []]);
+  });
+});

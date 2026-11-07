@@ -646,6 +646,7 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
               },
               sent: (bytes) => exec.telemetry.timer.bytesSent(bytes),
               head: () => exec.telemetry.timer.roundHead(),
+              timing: (timing) => exec.telemetry.noteServerTiming(timing),
             },
           );
           // Learn the mode from a real answer only: an error round may come from a path that

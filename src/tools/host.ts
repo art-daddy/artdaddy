@@ -16,6 +16,7 @@ import { toolByName } from "../contract";
 import {
   agentEventContext,
   createToolTrace,
+  recordLook,
   type AgentEventContext,
   type ToolTrace,
 } from "../api/agentEvents";
@@ -75,6 +76,8 @@ class ProjectToolHost implements ToolHost {
   private currentOrigin: MutationOrigin | undefined;
   private currentExportMode: ClientToolContext["exportMode"];
   private currentSurface: ToolRunOptions["surface"] | undefined;
+  // Where the running tool's look reports go: tied to this call and to who made it (tools/lookReport.ts).
+  private currentLook: ClientToolContext["look"];
   constructor(readonly projectId: string) {
     this.registry = createToolRegistry(() => this.viewCtx());
     this.ready = buildContext(projectId, this.holder);
@@ -86,7 +89,12 @@ class ProjectToolHost implements ToolHost {
     const base = this.holder.ctx;
     if (!base) return null;
     return agentToolContext(
-      { ...base, exportMode: this.currentExportMode, surface: this.currentSurface },
+      {
+        ...base,
+        exportMode: this.currentExportMode,
+        surface: this.currentSurface,
+        look: this.currentLook,
+      },
       this.currentSignal,
       this.currentOrigin,
     );
@@ -169,12 +177,14 @@ class ProjectToolHost implements ToolHost {
     this.currentSignal = signal;
     this.currentExportMode = exportMode;
     this.currentSurface = surface;
+    this.currentLook = (report) => recordLook(report, trace.callId ?? "", trace.context);
     try {
       return await this.registry.run(name, args, trace.context, trace);
     } finally {
       this.currentSignal = undefined;
       this.currentExportMode = undefined;
       this.currentSurface = undefined;
+      this.currentLook = undefined;
     }
   }
   store(): ProjectStoreAccess | null {

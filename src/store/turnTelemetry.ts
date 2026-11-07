@@ -4,12 +4,14 @@
 // answered. The chat store keeps one of these per turn and tells it what happens; this decides what is reported,
 // exactly once, however the turn ends (done, Stop, an error, or left behind for a new message).
 import {
+  parseServerTiming,
   recordApprovalDecided,
   recordApprovalRequested,
   recordTurnEnd,
   recordTurnStart,
   type AgentEventContext,
   type ApprovalDecision,
+  type ServerTimingSums,
   type TurnOutcome,
   type TurnStateRead,
   type TurnTrigger,
@@ -44,6 +46,8 @@ export class TurnTelemetry {
   private started = false;
   /** How the project reached the model on this turn's first message; said with the turn's end. */
   private stateRead: TurnStateRead | undefined;
+  /** Where the server's time went, summed over the rounds that reported it (their `timing` frames); said with the turn's end. */
+  private server: ServerTimingSums | undefined;
   /** Tool calls the person has been asked about and has not answered, by call id. */
   private readonly asked = new Map<string, string>();
 
@@ -71,6 +75,28 @@ export class TurnTelemetry {
    *  did not finish. Reported once, with the turn's end; a turn that asked for no read never calls this. */
   noteStateRead(word: TurnStateRead): void {
     if (!this.ended) this.stateRead = word;
+  }
+
+  /** A round's `timing` frame arrived: where the server's time went on it. Outside data, so anything that is not the five
+   *  whole, finite, non-negative numbers is ignored. Added to the turn's sums, reported once with the turn's end. */
+  noteServerTiming(timing: unknown): void {
+    if (this.ended) return;
+    const t = parseServerTiming(timing);
+    if (!t) return;
+    const sums = (this.server ??= {
+      rounds: 0,
+      intake_ms: 0,
+      line_ms: 0,
+      admit_ms: 0,
+      vendor_ms: 0,
+      settle_ms: 0,
+    });
+    sums.rounds += 1;
+    sums.intake_ms += t.intake_ms;
+    sums.line_ms += t.line_ms;
+    sums.admit_ms += t.admit_ms;
+    sums.vendor_ms += t.vendor_ms;
+    sums.settle_ms += t.settle_ms;
   }
 
   /** The turn stopped to ask the person about these calls. */
@@ -131,6 +157,7 @@ export class TurnTelemetry {
         outcome,
         ...(code ? { code } : {}),
         ...(this.stateRead ? { state: this.stateRead } : {}),
+        ...(this.server ? { server: this.server } : {}),
         summary: this.timer.finish(),
       },
       this.labels,

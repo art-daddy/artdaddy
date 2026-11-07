@@ -1,5 +1,6 @@
 import type { CommandRunner } from "./command";
 import type { LookDecoder } from "./lookDecode";
+import type { LookReport } from "./lookReport";
 import type { ProjectStoreAccess } from "./store";
 import type { MutationOrigin } from "../project/MutationGate";
 import type { ExportMode } from "../timeline/exportOptions";
@@ -30,4 +31,7 @@ export interface ClientToolContext {
   /** Decides whether a look may decode on the GPU (`lookDecode.ts`). Absent: the app's own decoder, which
    *  keeps this PC's proofs. Tests inject one so a look runs the same on every OS. */
   lookDecode?: LookDecoder;
+  /** Where a look says what it did (tools/lookReport.ts): the host sets it for a tool call, so the report is tied to that
+   *  call and to who made it. Absent: nobody is listening (a test, the eval lane), and the look works the same. */
+  look?: (report: LookReport) => void;
 }

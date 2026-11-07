@@ -5,7 +5,14 @@ import { setOpenDocumentResolver } from "../project/openDocuments";
 import { asProjectId } from "../project/types";
 import { ProjectStoreAccess, type FsLike } from "./store";
 import { ClientToolRegistry } from "./registry";
-import { __resetAgentEvents, flushAgentEvents, setAgentContext } from "../api/agentEvents";
+import {
+  __resetAgentEvents,
+  agentEventContext,
+  createToolTrace,
+  flushAgentEvents,
+  setAgentContext,
+} from "../api/agentEvents";
+import type { LookReport } from "./lookReport";
 import { useAuth } from "../store/auth";
 import { WITHDRAWN_TOOLS } from "../contract/withdrawn";
 
@@ -390,5 +397,114 @@ describe("the store every agent tool call sees", () => {
     await host.run("library_op", {}, { surface: "app", signal: new AbortController().signal });
     expect(await toolCtx.store.resolveRef(secret)).toBeNull();
     expect(toolCtx.store.projectDir).toBe("C:/root/p9");
+  });
+});
+
+// A look reports through the context its call ran with, so the report belongs to THAT call (its id) and to whoever made it
+// (the app's agent or an outside program), however many calls overlap on the one host.
+describe("a look's report is tied to the call that made it", () => {
+  const report = (): LookReport => ({
+    tool: "inspect_media",
+    outcome: "done",
+    ms: 5,
+    frames_ms: 4,
+    slowest_ms: 3,
+    frames: 1,
+    cached: 0,
+    gpu: 0,
+    retried: 0,
+    failed: 0,
+    layers: 1,
+  });
+  const posted = async (): Promise<Array<Record<string, Any>>> => {
+    await flushAgentEvents();
+    return vi.mocked(fetch).mock.calls.map((c) => JSON.parse((c[1] as { body: string }).body));
+  };
+  const looks = (bodies: Array<Record<string, Any>>) =>
+    bodies.flatMap((b) =>
+      (b.events as Array<Record<string, Any>>)
+        .filter((e) => e.kind === "look")
+        .map((e) => ({ ...e, surface: b.surface, mcp_client: b.mcp_client })),
+    );
+
+  it("carries the call's id and the labels of whoever made it, for an outside agent", async () => {
+    const host = openToolHost("p1");
+    await host.ready;
+    const trace = createToolTrace(
+      "get_timeline",
+      {},
+      {
+        ...agentEventContext(),
+        surface: "mcp",
+        project_id: "p1",
+        mcp_client: "codex",
+        mcp_client_name: "codex",
+        mcp_client_version: "1",
+      },
+      "rpc-7",
+    );
+    await host.run("get_timeline", {}, { surface: "mcp", trace });
+    toolCtx.look(report());
+    expect(looks(await posted())).toMatchObject([
+      {
+        call_id: "rpc-7",
+        surface: "mcp",
+        mcp_client: "codex",
+        name: "inspect_media",
+        outcome: "done",
+      },
+    ]);
+  });
+
+  it("is the in-app turn's own, under its own call id", async () => {
+    const host = openToolHost("p1");
+    await host.ready;
+    const trace = createToolTrace(
+      "get_timeline",
+      {},
+      { ...agentEventContext(), surface: "app", project_id: "p1" },
+      "call_abc",
+    );
+    await host.run(
+      "get_timeline",
+      {},
+      { surface: "app", signal: new AbortController().signal, trace },
+    );
+    toolCtx.look(report());
+    expect(looks(await posted())).toMatchObject([{ call_id: "call_abc", surface: "app" }]);
+  });
+
+  it("keeps overlapping calls apart: each look lands on its own call, and a finished call's sink is gone", async () => {
+    const host = openToolHost("p1");
+    await host.ready;
+    let release!: (value: unknown) => void;
+    toolGate = new Promise((resolve) => {
+      release = resolve;
+    });
+    const traceOf = (id: string) =>
+      createToolTrace(
+        "get_timeline",
+        {},
+        { ...agentEventContext(), surface: "app", project_id: "p1" },
+        id,
+      );
+    const first = host.run("get_timeline", {}, { surface: "app", trace: traceOf("first") });
+    await vi.waitFor(() => expect(toolCtx).not.toBeNull());
+    const firstCtx = toolCtx;
+    toolCtx = null;
+    const second = host.run("get_timeline", {}, { surface: "app", trace: traceOf("second") });
+    await vi.waitFor(() => expect(toolCtx).not.toBeNull());
+    const secondCtx = toolCtx;
+    release({ ok: true });
+    await Promise.all([first, second]);
+    firstCtx.look(report());
+    secondCtx.look(report());
+    expect(looks(await posted()).map((e) => e.call_id)).toEqual(["first", "second"]);
+    // A call that starts after both finished gets its own sink, not a leftover of either.
+    toolGate = Promise.resolve({ ok: true });
+    toolCtx = null;
+    await host.run("get_timeline", {}, { surface: "app", trace: traceOf("third") });
+    toolCtx.look(report());
+    expect(looks(await posted()).map((e) => e.call_id)).toEqual(["first", "second", "third"]);
   });
 });

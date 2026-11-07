@@ -30,12 +30,29 @@ import {
   createToolTrace,
   flushAgentEvents,
   flushAgentEventsForExit,
+  LOOK_COUNT_FIELDS,
+  LOOK_FACT_FIELDS,
+  LOOK_MS_FIELDS,
+  LOOK_OUTCOMES,
+  MAX_CALL_MS,
+  MAX_LOOK_DIM,
+  MAX_LOOK_KBPS,
+  MAX_LOOK_SECONDS,
+  MAX_TURN_COUNT,
+  MAX_TURN_MS,
+  parseServerTiming,
   preview,
   recordAgentOutput,
+  recordLook,
   recordToolCall,
   recordToolDenied,
+  recordTurnEnd,
   setAgentContext,
+  TURN_COUNT_FIELDS,
+  TURN_MS_FIELDS,
+  TURN_SERVER_FIELDS,
 } from "./agentEvents";
+import type { LookReport } from "../tools/lookReport";
 import { startHeartbeat, stopHeartbeat } from "./appEvents";
 import { ClientToolRegistry } from "../tools/registry";
 import { useAuth } from "../store/auth";
@@ -640,6 +657,250 @@ describe("what gets recorded", () => {
 
   it("truncates rather than shipping an unbounded payload", () => {
     expect(preview("x".repeat(5_000), 2_000)).toHaveLength(2_000);
+  });
+});
+
+// A look at footage (tools/lookReport.ts) is said with its own event. These read the body that was POSTed, because the
+// server drops a field it does not know and refuses the whole flush over a number outside its range.
+describe("a look, as the server receives it", () => {
+  const report = (over: Partial<LookReport> = {}): LookReport => ({
+    tool: "inspect_timeline",
+    outcome: "partial",
+    ms: 41_000,
+    frames_ms: 40_000,
+    slowest_ms: 31_000,
+    frames: 6,
+    cached: 1,
+    gpu: 2,
+    retried: 1,
+    failed: 1,
+    layers: 3,
+    source: { codec: "hevc", width: 3840, height: 2160, dur_s: 612, kbps: 48_000 },
+    ...over,
+  });
+  const sentEvent = async (): Promise<Record<string, unknown>> => {
+    await flushAgentEvents();
+    return (posted[0] as { events: Record<string, unknown>[] }).events[0];
+  };
+
+  it("carries every fact of the report, joined to its tool call by the call's id", async () => {
+    recordLook(report(), "call_9");
+    expect(await sentEvent()).toMatchObject({
+      kind: "look",
+      name: "inspect_timeline",
+      call_id: "call_9",
+      outcome: "partial",
+      ms: 41_000,
+      frames: 6,
+      cached: 1,
+      gpu: 2,
+      retried: 1,
+      failed: 1,
+      layers: 3,
+      frames_ms: 40_000,
+      slowest_ms: 31_000,
+      codec: "hevc",
+      width: 3840,
+      height: 2160,
+      dur_s: 612,
+      kbps: 48_000,
+    });
+  });
+
+  it("is under the labels of the call it belongs to, not the next one's", async () => {
+    setAgentContext({ surface: "app", project_id: "later" });
+    recordLook(report(), "c", { ...agentEventContext(), surface: "mcp", project_id: "original" });
+    await flushAgentEvents();
+    expect(posted[0]).toMatchObject({ surface: "mcp", project_id: "original" });
+  });
+
+  it("says zero for what it does not know of its source, and carries nothing a person wrote", async () => {
+    recordLook(report({ source: undefined }), "c");
+    const event = await sentEvent();
+    expect(event).toMatchObject({ codec: "", width: 0, height: 0, dur_s: 0, kbps: 0 });
+    for (const key of ["args", "result", "error", "text", "ok", "path"])
+      expect(event).not.toHaveProperty(key);
+  });
+
+  it("clamps every number to what the server accepts, so one absurd look cannot refuse the flush with it", async () => {
+    recordLook(
+      report({
+        ms: 1e15,
+        frames_ms: 1e15,
+        slowest_ms: -5,
+        frames: 1e9,
+        failed: Number.NaN,
+        source: { codec: "hevc", width: 1e9, height: 1e9, dur_s: 1e12, kbps: 1e12 },
+      }),
+      "c",
+    );
+    const event = await sentEvent();
+    expect(event).toMatchObject({
+      ms: MAX_CALL_MS,
+      frames_ms: MAX_TURN_MS,
+      slowest_ms: 0,
+      frames: MAX_TURN_COUNT,
+      failed: 0,
+      width: MAX_LOOK_DIM,
+      height: MAX_LOOK_DIM,
+      dur_s: MAX_LOOK_SECONDS,
+      kbps: MAX_LOOK_KBPS,
+    });
+  });
+
+  it("puts a call id and a codec in the alphabet the server keeps, never a path", async () => {
+    recordLook(
+      report({ source: { codec: "C:\\Users\\me\\v.mp4" } }),
+      "id with spaces/and\\slashes",
+    );
+    const event = await sentEvent();
+    expect(event.call_id).toBe("id_with_spaces_and_slashes");
+    expect(event.codec).toMatch(/^[A-Za-z0-9_.:-]*$/);
+  });
+
+  it("is not a tool call: it adds no failure, and a tool call is still its own event", async () => {
+    recordLook(report(), "c");
+    recordToolCall({ name: "inspect_timeline", call_id: "c", ok: true, ms: 41_000 });
+    await flushAgentEvents();
+    expect((posted[0] as { events: { kind: string }[] }).events.map((e) => e.kind)).toEqual([
+      "look",
+      "tool_call",
+    ]);
+  });
+
+  it("has a word and a bound for every field the server reads (the lists the conformance test compares)", () => {
+    const event = (() => {
+      recordLook(report(), "c");
+      return __bufferedAgentEvents()[0] as unknown as Record<string, unknown>;
+    })();
+    for (const key of [
+      ...LOOK_COUNT_FIELDS,
+      ...LOOK_MS_FIELDS,
+      ...LOOK_FACT_FIELDS,
+      "ms",
+      "codec",
+      "outcome",
+    ])
+      expect(event, key).toHaveProperty(key);
+    expect(LOOK_OUTCOMES).toContain(event.outcome);
+  });
+});
+
+describe("the server's timing, as a turn's end says it", () => {
+  const summary = {
+    wall_ms: 1,
+    prep_ms: 0,
+    request_ms: 0,
+    think_ms: 0,
+    stream_ms: 0,
+    tool_ms: 0,
+    wait_ms: 0,
+    approval_ms: 0,
+    other_ms: 1,
+    rounds: 1,
+    tools: 0,
+    approvals: 0,
+    reconnects: 0,
+    busy_waits: 0,
+    frames: 0,
+    bytes_up: 0,
+  };
+  const timing = {
+    rounds: 3,
+    intake_ms: 900,
+    line_ms: 0,
+    admit_ms: 3_300,
+    vendor_ms: 33_000,
+    settle_ms: 1_200,
+  };
+
+  it("names how many rounds reported and sums their parts", async () => {
+    recordTurnEnd({ turn_id: "t1", outcome: "done", server: timing, summary });
+    await flushAgentEvents();
+    const [event] = (posted[0] as { events: Record<string, unknown>[] }).events;
+    expect(event).toMatchObject({
+      srv_rounds: 3,
+      srv_intake_ms: 900,
+      srv_line_ms: 0,
+      srv_admit_ms: 3_300,
+      srv_vendor_ms: 33_000,
+      srv_settle_ms: 1_200,
+    });
+  });
+
+  it("says nothing of it when no round reported, rather than zeros", () => {
+    recordTurnEnd({ turn_id: "t1", outcome: "done", summary });
+    recordTurnEnd({ turn_id: "t2", outcome: "done", server: { ...timing, rounds: 0 }, summary });
+    for (const event of __bufferedAgentEvents())
+      for (const key of TURN_SERVER_FIELDS) expect(event).not.toHaveProperty(key);
+  });
+
+  it("clamps to what the server accepts", () => {
+    recordTurnEnd({
+      turn_id: "t1",
+      outcome: "done",
+      server: {
+        rounds: 1e9,
+        intake_ms: 1e15,
+        line_ms: -1,
+        admit_ms: Number.NaN,
+        vendor_ms: 1e15,
+        settle_ms: 5,
+      },
+      summary,
+    });
+    expect(__bufferedAgentEvents()[0]).toMatchObject({
+      srv_rounds: MAX_TURN_COUNT,
+      srv_intake_ms: MAX_TURN_MS,
+      srv_line_ms: 0,
+      srv_admit_ms: 0,
+      srv_vendor_ms: MAX_TURN_MS,
+      srv_settle_ms: 5,
+    });
+  });
+
+  it("is not a part of the wall time, which keeps adding up without it", () => {
+    for (const key of TURN_SERVER_FIELDS) {
+      expect(TURN_MS_FIELDS as readonly string[]).not.toContain(key);
+      expect(TURN_COUNT_FIELDS as readonly string[]).not.toContain(key);
+    }
+  });
+});
+
+describe("reading the server's timing frame", () => {
+  const frame = {
+    intake_ms: 250.4,
+    line_ms: 0,
+    admit_ms: 500,
+    vendor_ms: 11_000,
+    settle_ms: 399.6,
+  };
+
+  it("takes the five parts as whole milliseconds and ignores anything else the frame carries", () => {
+    expect(parseServerTiming({ ...frame, a_future_part_ms: 7, note: "x" })).toEqual({
+      intake_ms: 250,
+      line_ms: 0,
+      admit_ms: 500,
+      vendor_ms: 11_000,
+      settle_ms: 400,
+    });
+  });
+
+  it("refuses a frame that is not whole: a missing part, a negative, a non-number, not an object", () => {
+    for (const bad of [
+      null,
+      undefined,
+      "x",
+      3,
+      [],
+      {},
+      { ...frame, settle_ms: undefined },
+      { ...frame, vendor_ms: -1 },
+      { ...frame, vendor_ms: Number.NaN },
+      { ...frame, admit_ms: Number.POSITIVE_INFINITY },
+      { ...frame, line_ms: "0" },
+    ])
+      expect(parseServerTiming(bad)).toBeNull();
   });
 });
 

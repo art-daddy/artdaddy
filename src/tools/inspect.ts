@@ -25,6 +25,14 @@ import { reportAppError } from "../api/appEvents";
 import { STOPPED_ERROR, stoppedAnswer } from "../lib/stopped";
 import { displaySize, mediaFrameDims, sampleFrames, stillWithGrid } from "./mediaFrames";
 import { lookDecoder, type LookDecoder } from "./lookDecode";
+import {
+  heavierSource,
+  LookStats,
+  reportLook,
+  sourceFacts,
+  type FrameMode,
+  type SourceFacts,
+} from "./lookReport";
 import { makeStoryboard } from "./storyboard";
 import { loadTimeline } from "../timeline/engine";
 import { clipSourceSpanSeconds, clipSpanToFrames, findClip } from "../timeline/helpers";
@@ -378,6 +386,20 @@ export async function inspectMediaTool(
   ctx: ClientToolContext | null,
 ): Promise<Result> {
   if (!ctx) return NOT_READY;
+  // One report for the look, whichever way it ends (answer, error, Stop): the host tells the telemetry what it did.
+  const look = new LookStats("inspect_media");
+  try {
+    return await inspectMedia(args, ctx, look);
+  } finally {
+    reportLook(ctx, look, ctx.signal);
+  }
+}
+
+async function inspectMedia(
+  args: Record<string, unknown>,
+  ctx: ClientToolContext,
+  look: LookStats,
+): Promise<Result> {
   // Counted from the start of the call, so the probe and the resolving before the work begins
   // come out of the wait, not on top of it.
   const began = Date.now();
@@ -477,9 +499,19 @@ export async function inspectMediaTool(
   const sizeKey = String(probe.size_bytes ?? "");
 
   if (kind === "image") {
+    look.plan(1);
+    look.source(sourceFacts(probe));
+    look.framesBegin();
+    const stillStarted = Date.now();
     const gridded = display
       ? await stillWithGrid(ctx, path, mediaFrameDims(display), sizeKey)
       : null;
+    const stillAttachment = imageAttachment(
+      gridded ?? (await encodeImageForGemini(ctx, path)),
+      `inspect_media image ${baseName(resolved)}`,
+    );
+    look.frame({ mode: "software", ms: Date.now() - stillStarted });
+    look.framesEnd();
     return {
       ok: true,
       kind: "image",
@@ -489,12 +521,7 @@ export async function inspectMediaTool(
       frames_attached: 1,
       ...(gridded ? { coordinate_grid: GRID_NOTE } : {}),
       metadata: probe,
-      _attachments: [
-        imageAttachment(
-          gridded ?? (await encodeImageForGemini(ctx, path)),
-          `inspect_media image ${baseName(resolved)}`,
-        ),
-      ],
+      _attachments: [stillAttachment],
     };
   }
 
@@ -606,8 +633,16 @@ export async function inspectMediaTool(
     };
     // Coarse first: ONE storyboard of the span's visual flow, instead of frames.
     if (args.overview === true) {
+      look.plan(1);
+      look.source(sourceFacts(probe));
+      look.framesBegin();
+      const sheetStarted = Date.now();
+      let sheetCounted = false;
       try {
         const sb = await makeStoryboard(ctx, path, span[0], span[1], display);
+        look.frame({ mode: "software", ms: Date.now() - sheetStarted });
+        sheetCounted = true;
+        look.framesEnd();
         const tiles = sb.tile_times.map(at);
         return finish({
           ...base,
@@ -624,6 +659,8 @@ export async function inspectMediaTool(
           ],
         });
       } catch (e) {
+        if (!sheetCounted) look.frame({ mode: "failed", ms: Date.now() - sheetStarted });
+        look.framesEnd();
         return finish({
           ...base,
           overview: { error: String(e) },
@@ -633,14 +670,20 @@ export async function inspectMediaTool(
       }
     }
 
+    const times = mediaLookTimes(span[0], span[1], args.max_frames);
+    look.plan(times.length);
+    look.source(sourceFacts(probe));
+    look.framesBegin();
     const shots = await sampleFrames(
       ctx,
       path,
-      mediaLookTimes(span[0], span[1], args.max_frames),
+      times,
       mediaFrameDims(display),
       sizeKey,
       video,
+      look,
     );
+    look.framesEnd();
     // Rebuilt in request order: the lanes finish out of order and the model reads a sequence.
     const attachments: Attachment[] = [];
     const measured = shots.filter((s) => s.sharpness !== undefined);
@@ -791,16 +834,19 @@ const STILL_NAME = /\.(png|jpe?g|webp|gif|bmp|tiff?|heic|heif|avif|svg)$/i;
 
 /** What a timeline look needs to know about each source it opens: may the GPU decode it? A source's stream
  *  shape is probed once per look, and the decoder answers from this PC's verdicts (proving a new shape once).
- *  Where the OS has no hardware decoder nothing is probed at all. */
+ *  Where the OS has no hardware decoder nothing is probed at all. The probe's rounded facts ride along for the
+ *  look's own report. */
+type SourceShape = {
+  flags: string[];
+  video: Record<string, unknown> | null;
+  facts?: SourceFacts;
+};
 function lookDecodeFor(ctx: ClientToolContext): {
   decoder: LookDecoder;
-  shapeOf: (path: string) => Promise<{ flags: string[]; video: Record<string, unknown> | null }>;
+  shapeOf: (path: string) => Promise<SourceShape>;
 } {
   const decoder = ctx.lookDecode ?? lookDecoder();
-  const shapes = new Map<
-    string,
-    Promise<{ flags: string[]; video: Record<string, unknown> | null }>
-  >();
+  const shapes = new Map<string, Promise<SourceShape>>();
   const shapeOf = (path: string) => {
     let known = shapes.get(path);
     if (!known) {
@@ -811,7 +857,12 @@ function lookDecodeFor(ctx: ClientToolContext): {
           string,
           unknown
         > | null;
-        return { flags: await decoder.flags(ctx.runner, path, video, ctx.signal), video };
+        const facts = sourceFacts(probe);
+        return {
+          flags: await decoder.flags(ctx.runner, path, video, ctx.signal),
+          video,
+          ...(facts ? { facts } : {}),
+        };
       })();
       shapes.set(path, known);
     }
@@ -833,6 +884,20 @@ export async function inspectTimelineTool(
   ctx: ClientToolContext | null,
 ): Promise<Result> {
   if (!ctx) return NOT_READY;
+  // One report for the look, whichever way it ends (answer, error, Stop): the host tells the telemetry what it did.
+  const look = new LookStats("inspect_timeline");
+  try {
+    return await inspectTimeline(args, ctx, look);
+  } finally {
+    reportLook(ctx, look, ctx.signal);
+  }
+}
+
+async function inspectTimeline(
+  args: Record<string, unknown>,
+  ctx: ClientToolContext,
+  look: LookStats,
+): Promise<Result> {
   let raw;
   try {
     raw = await loadTimeline(ctx.store);
@@ -842,11 +907,12 @@ export async function inspectTimelineTool(
   const planned = planTimelineLook(raw, args);
   if (!planned.ok) return planned.result;
   const { seconds, fps, total, nums, outOfRange } = planned;
+  look.plan(nums.length);
 
   // Resolve portable "library/<id>" sources to absolute paths, as the export does: ffmpeg can only
   // open a path.
   const warnings = new Set(await resolveClipSources(ctx, seconds, { stillTiming: true }));
-  const look = resolveRenderPlan(seconds);
+  const renderPlan = resolveRenderPlan(seconds);
   // Each file is named for the timeline STATE it shows (plus the size and overlay it was drawn
   // with), never just its frame number: the conversation keeps re-sending the frames an earlier
   // round saw, so a later look at the same frame number must not overwrite one. No key (the
@@ -859,10 +925,14 @@ export async function inspectTimelineTool(
   const gpu = lookDecodeFor(ctx);
 
   const renderFrame = async (frame: number): Promise<FrameShot> => {
+    const began = Date.now();
     const final = await ctx.store.prepareArtifact(
       `inspect/tl_${state}_${frame}_${TIMELINE_FRAME_EDGE}g${OVERLAY_REV}.jpg`,
     );
-    if (key && (await ctx.store.exists(final))) return { frame, path: final };
+    if (key && (await ctx.store.exists(final))) {
+      look.frame({ mode: "cached", ms: Date.now() - began });
+      return { frame, path: final };
+    }
     // Stop starts nothing new; a frame already rendering is killed through the runner's signal.
     if (ctx.signal?.aborted) return { frame, error: STOPPED_ERROR };
     // Rendered under a temporary name and renamed into place, so a parallel look at the same frame
@@ -882,10 +952,12 @@ export async function inspectTimelineTool(
     const software = buildRenderCommand(seconds, out, {}, windowOf());
     for (const w of software.warnings) warnings.add(w);
     // The GPU may decode a source whose stream shape this PC has proved identical (lookDecode.ts).
-    const onGpu = new Map<string, { flags: string[]; video: Record<string, unknown> | null }>();
+    const onGpu = new Map<string, SourceShape>();
+    let heaviest: SourceFacts | undefined;
     for (const source of software.sources) {
       const shape = await gpu.shapeOf(source.path);
       if (shape.flags.length) onGpu.set(source.path, shape);
+      heaviest = heavierSource(heaviest, shape.facts);
     }
     const plan = onGpu.size
       ? buildRenderCommand(
@@ -897,16 +969,24 @@ export async function inspectTimelineTool(
       : software;
     let rr = await runRenderPlan(ctx, plan);
     let rendered = rr.code === 0 && (await ctx.store.exists(out));
+    let how: FrameMode = onGpu.size ? "gpu" : "software";
     if (!rendered && onGpu.size && !ctx.signal?.aborted) {
       // A GPU run that did not succeed is redone in software; the shapes are remembered as bad only when
       // software then worked (if it failed too, the file was the problem).
       rr = await runRenderPlan(ctx, software);
       rendered = rr.code === 0 && (await ctx.store.exists(out));
+      how = "retried";
       if (rendered) for (const shape of onGpu.values()) gpu.decoder.demote(shape.video);
     }
+    const stat = {
+      ms: Date.now() - began,
+      layers: software.sources.length,
+      ...(heaviest ? { source: heaviest } : {}),
+    };
     if (!rendered) {
       // Whatever a failed run left is not a frame: never let the name of one point at it.
       if (out !== final) await ctx.store.remove(out).catch(() => undefined);
+      look.frame({ mode: "failed", ...stat });
       return {
         frame,
         error: `frame ${frame} could not be rendered${ffmpegReason(rr.stderr) || " — ffmpeg wrote no image"}`,
@@ -916,16 +996,19 @@ export async function inspectTimelineTool(
       if (await ctx.store.exists(final)) await ctx.store.remove(out).catch(() => undefined);
       else await ctx.store.rename(out, final);
     }
+    look.frame({ mode: how, ...stat, ms: Date.now() - began });
     return { frame, path: final };
   };
 
   const shots: FrameShot[] = [];
   let next = 0;
+  look.framesBegin();
   await Promise.all(
     Array.from({ length: Math.min(FRAME_LANES, nums.length) }, async () => {
       for (let i = next++; i < nums.length; i = next++) shots[i] = await renderFrame(nums[i]);
     }),
   );
+  look.framesEnd();
   if (ctx.signal?.aborted) return stoppedAnswer();
 
   // Rebuilt in frame order: the lanes finish out of order, and the model reads these as a sequence.
@@ -938,7 +1021,7 @@ export async function inspectTimelineTool(
       frame: s.frame,
       time_s: round3(time),
       ok: !s.error,
-      visible_clips: visibleClips(look, s.frame, fps),
+      visible_clips: visibleClips(renderPlan, s.frame, fps),
       ...(s.error ? { error: s.error } : {}),
     };
   });

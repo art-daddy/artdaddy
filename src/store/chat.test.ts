@@ -2467,6 +2467,76 @@ describe("useChat records each turn (T-11, T-12)", () => {
     });
   });
 
+  // The server says, round by round, where ITS time went; the turn adds those up (the server's timing frame, round_timing.py).
+  describe("where the server's time went", () => {
+    const round = (n: number) => ({
+      intake_ms: 100 * n,
+      line_ms: 0,
+      admit_ms: 1_000 + n,
+      vendor_ms: 10_000 + n,
+      settle_ms: 400 + n,
+    });
+    const reportingRound = (timing: unknown) =>
+      (inferRoundStreaming as Any).mockImplementationOnce(
+        async (
+          _body: Any,
+          _delta: unknown,
+          _signal: unknown,
+          observer: { timing: (t: unknown) => void },
+        ) => {
+          observer.timing(timing);
+          return ANSWER;
+        },
+      );
+
+    it("adds up the rounds that reported it and stores the sums with the turn's end, naming how many reported", async () => {
+      await startTurn();
+      reportingRound(round(1));
+      await lastDeps.infer({ user_text: "hi" }, []);
+      reportingRound(round(2));
+      await lastDeps.infer({ user_text: "again" }, []);
+      emit("turn_done", snap());
+      expect(ofKind("turn_end")[0]).toMatchObject({
+        srv_rounds: 2,
+        srv_intake_ms: 300,
+        srv_line_ms: 0,
+        srv_admit_ms: 2_003,
+        srv_vendor_ms: 20_003,
+        srv_settle_ms: 803,
+      });
+    });
+
+    it("says nothing at all when no round reported (a server that has not sent one): not zeros", async () => {
+      await startTurn();
+      (inferRoundStreaming as Any).mockResolvedValueOnce(ANSWER);
+      await lastDeps.infer({ user_text: "hi" }, []);
+      emit("turn_done", snap());
+      const [end] = ofKind("turn_end");
+      for (const key of [
+        "srv_rounds",
+        "srv_intake_ms",
+        "srv_admit_ms",
+        "srv_vendor_ms",
+        "srv_settle_ms",
+      ])
+        expect(end).not.toHaveProperty(key);
+    });
+
+    it("counts only the frames that are what they say: parts missing, negative or not an object are not rounds", async () => {
+      await startTurn();
+      reportingRound({ intake_ms: 5, vendor_ms: 5 }); // parts missing
+      await lastDeps.infer({ user_text: "a" }, []);
+      reportingRound({ ...round(1), vendor_ms: -1 });
+      await lastDeps.infer({ user_text: "b" }, []);
+      reportingRound("fast");
+      await lastDeps.infer({ user_text: "c" }, []);
+      reportingRound(round(3));
+      await lastDeps.infer({ user_text: "d" }, []);
+      emit("turn_done", snap());
+      expect(ofKind("turn_end")[0]).toMatchObject({ srv_rounds: 1, srv_vendor_ms: 10_003 });
+    });
+  });
+
   it("a turn whose waits were injected (3 s admission, 5 s on its way, 10 s thinking, 2 s writing, a 20 s tool) is stored with parts that add up to its wall time", async () => {
     await startTurn();
     (inferRoundStreaming as Any).mockImplementationOnce(

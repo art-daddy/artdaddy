@@ -8,6 +8,7 @@ import { withAssScratch } from "./assScratch";
 import { laplacianVariance, noiseSigma } from "./frameMeasures";
 import { fitDims, gridAss, gridFilter, OVERLAY_FONT_FILE, OVERLAY_REV } from "./inspectOverlay";
 import { lookDecoder } from "./lookDecode";
+import type { FrameMode, LookStats } from "./lookReport";
 import { quarterTurn, shortHash } from "./media";
 import { STOPPED_ERROR } from "../lib/stopped";
 
@@ -72,11 +73,15 @@ export async function sampleFrames(
   dims: { w: number; h: number },
   sizeKey: string,
   video: Record<string, unknown> | null = null,
+  look?: LookStats,
 ): Promise<MediaFrame[]> {
   const grid = { name: `grid_${dims.w}x${dims.h}.ass`, content: gridAss(dims.w, dims.h) };
   const decoder = ctx.lookDecode ?? lookDecoder();
   const shots: MediaFrame[] = [];
   const one = async (t: number, cwd: string | undefined): Promise<MediaFrame> => {
+    const began = Date.now();
+    // How this frame came to exist, for the look's own report: reused unless the run below says otherwise.
+    let mode: FrameMode = "cached";
     const key = shortHash(`${src}|${sizeKey}|${t.toFixed(3)}|${dims.w}x${dims.h}|g${OVERLAY_REV}`);
     const jpg = await ctx.store.prepareArtifact(`inspect/mf_${key}.jpg`);
     const grey = jpg.replace(/\.jpg$/, ".gray");
@@ -89,48 +94,58 @@ export async function sampleFrames(
       const tmpGrey = `${grey}${tmp}`;
       // The GPU may decode this frame when this PC has proved it identical; a run that does not succeed is
       // redone in software, so a driver can cost time and never a failed look.
-      const r = await decoder.run(ctx.runner, src, video, ctx.signal, async (flags) => {
-        const res = await ctx.runner.run(
-          "ffmpeg",
-          [
-            "-y",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-ss",
-            Math.max(0, t).toFixed(3),
-            ...flags,
-            "-i",
-            src,
-            "-filter_complex",
-            `[0:v]scale=${dims.w}:${dims.h},setsar=1,split=2[s][m];[s]${gridFilter(grid.name)}[g];[m]format=gray[k]`,
-            "-map",
-            "[g]",
-            "-frames:v",
-            "1",
-            "-q:v",
-            FRAME_JPEG_Q,
-            tmpJpg,
-            "-map",
-            "[k]",
-            "-frames:v",
-            "1",
-            "-f",
-            "rawvideo",
-            tmpGrey,
-          ],
-          ctx.signal,
-          cwd,
-        );
-        const made =
-          res.code === 0 && (await ctx.store.exists(tmpJpg)) && (await ctx.store.exists(tmpGrey));
-        return { ok: made, value: res };
-      });
+      const r = await decoder.run(
+        ctx.runner,
+        src,
+        video,
+        ctx.signal,
+        async (flags) => {
+          const res = await ctx.runner.run(
+            "ffmpeg",
+            [
+              "-y",
+              "-hide_banner",
+              "-loglevel",
+              "error",
+              "-ss",
+              Math.max(0, t).toFixed(3),
+              ...flags,
+              "-i",
+              src,
+              "-filter_complex",
+              `[0:v]scale=${dims.w}:${dims.h},setsar=1,split=2[s][m];[s]${gridFilter(grid.name)}[g];[m]format=gray[k]`,
+              "-map",
+              "[g]",
+              "-frames:v",
+              "1",
+              "-q:v",
+              FRAME_JPEG_Q,
+              tmpJpg,
+              "-map",
+              "[k]",
+              "-frames:v",
+              "1",
+              "-f",
+              "rawvideo",
+              tmpGrey,
+            ],
+            ctx.signal,
+            cwd,
+          );
+          const made =
+            res.code === 0 && (await ctx.store.exists(tmpJpg)) && (await ctx.store.exists(tmpGrey));
+          return { ok: made, value: res };
+        },
+        (how) => {
+          mode = how;
+        },
+      );
       if (r.code !== 0 || !(await ctx.store.exists(tmpJpg)) || !(await ctx.store.exists(tmpGrey))) {
         if (tmp) {
           await ctx.store.remove(tmpJpg).catch(() => undefined);
           await ctx.store.remove(tmpGrey).catch(() => undefined);
         }
+        look?.frame({ mode: "failed", ms: Date.now() - began });
         const why = stderrExcerpt(r.stderr, 200).split(/\r?\n/).filter(Boolean).pop();
         return {
           t,
@@ -146,6 +161,7 @@ export async function sampleFrames(
       shot.sharpness = laplacianVariance(px, dims.w, dims.h);
       shot.noise = noiseSigma(px, dims.w, dims.h);
     }
+    look?.frame({ mode, ms: Date.now() - began });
     return shot;
   };
   await withAssScratch(ctx, [grid], [OVERLAY_FONT_FILE], async (cwd) => {
