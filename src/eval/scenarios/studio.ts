@@ -585,7 +585,16 @@ export const STUDIO_SCENARIOS: Scenario[] = [
     expect: untouched(oneClip),
     expectTrace: (t) => {
       const read = called(t, "get_project_state").length + called(t, "get_timeline").length;
-      if (read === 0) throw new Error("answered without reading the project");
+      if (read === 0) {
+        // The app can hand the model the project with its message. Then the model has read it without a call,
+        // and the answer itself must show it: the project's real canvas and frame rate, not a guess.
+        if (!t.stateBlock) throw new Error("answered without reading the project");
+        const { width, height, fps } = oneClip().canvas;
+        for (const value of [width, height, fps]) {
+          if (!t.finalText.includes(String(value)))
+            throw new Error(`answered without the project's real canvas and frame rate (${value})`);
+        }
+      }
       // A settings QUESTION must never become a settings CHANGE.
       mustNotCall(t, "set_project_settings");
     },

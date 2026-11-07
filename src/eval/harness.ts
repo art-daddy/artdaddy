@@ -11,9 +11,12 @@ import os from "node:os";
 import path from "node:path";
 
 import { ClientTurnRunner, type LoopDeps } from "../agent/loop";
+import { composeModelText } from "../agent/compose";
+import { readStateBlock } from "../agent/stateBlock";
 import { agentEventContext } from "../api/agentEvents";
 import type { RoundInput, RoundResultDTO, Usage } from "../agent/types";
 import { authedFetch } from "../api/auth";
+import { catalogIdentity } from "../contract";
 import { ensureTimeline, loadTimeline } from "../timeline/engine";
 import { registerTimelineTools } from "../timeline/ops";
 import { setProjectSettingsTool } from "../tools/project";
@@ -207,6 +210,20 @@ export async function driveScenario(
     // mirrors the result into project.json), so the timeline-only surface has to opt
     // it in explicitly or every canvas scenario silently loses its only tool.
     registry.register("set_project_settings", (args) => setProjectSettingsTool(args, ctx));
+    // The app answers get_project_state; a timeline-only harness did not, so a model that asked for it spent a
+    // round on "not available". Both arms of an eval get the same answer the app gives: the project's name and
+    // canvas, and an empty library unless a stub surface below says otherwise.
+    registry.register("get_project_state", async () => {
+      const tl = await loadTimeline(store);
+      return {
+        ok: true,
+        project_id: String(projectId),
+        name: scenario.title,
+        canvas: tl.canvas ?? null,
+        library: [],
+        library_count: 0,
+      };
+    });
     // A workflow scenario also needs import / transcript / export. Those are
     // deterministic stand-ins (see journey.ts) so the run still costs nothing
     // beyond the model itself and cannot touch the network. The "studio" surface
@@ -250,6 +267,9 @@ export async function driveScenario(
           model,
           effort: opts.effort ?? "high",
           mode: opts.mode ?? "autopilot",
+          // The server refuses a call that does not name the tool catalog it was built against (426), as the app does.
+          catalog_id: catalogIdentity(),
+          app_version: process.env.ARTDADDY_EVAL_APP_VERSION ?? "0.24.0",
         }),
       });
       if (!res.ok) throw new Error(`/inference ${res.status}: ${await res.text().catch(() => "")}`);
@@ -315,7 +335,22 @@ export async function driveScenario(
     };
 
     const runner = new ClientTurnRunner(deps);
-    await runner.start(scenario.prompt);
+    // The app reads the project for the model before its first round (store/chat.ts, agent/stateBlock.ts). The
+    // flag lets an eval measure that: the same scenarios, with and without it.
+    let firstMessage = scenario.prompt;
+    let stateBlock = false;
+    if (process.env.ARTDADDY_EVAL_PRELOAD === "1" && !recovery) {
+      const block = await readStateBlock({
+        has: (n: string) => registry.has(n),
+        run: async (n, a, o) =>
+          registry.run(n, a, o.trace?.context ?? agentEventContext(), o.trace),
+      });
+      if (block) {
+        firstMessage = composeModelText(scenario.prompt, [], [], { stateBlock: block });
+        stateBlock = true;
+      }
+    }
+    await runner.start(firstMessage);
     turnTexts.push(finalText);
     await recovery?.recordClaim(finalText);
     if (providerError && !roundLimitReached) throw new Error(`provider error: ${providerError}`);
@@ -347,6 +382,7 @@ export async function driveScenario(
       finalText,
       turnTexts,
       usage,
+      ...(stateBlock ? { stateBlock: true } : {}),
       payload: payloadOf(toolCalls),
       ...(recovery
         ? {

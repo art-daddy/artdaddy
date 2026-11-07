@@ -64,6 +64,8 @@ export interface Trace {
   finalText: string;
   turnTexts?: string[];
   usage: { inputTokens: number; outputTokens: number; reasoningTokens: number; costUsd: number };
+  /** The first message carried the project state the app read for the model (agent/stateBlock.ts). */
+  stateBlock?: boolean;
   /** What the tools put back into the context across the whole scenario: total serialized
    *  characters, and the single fattest reply. Sizes payload shaping directly. */
   payload?: { resultChars: number; maxResultChars: number; maxResultTool: string };
