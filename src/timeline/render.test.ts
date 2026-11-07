@@ -411,6 +411,44 @@ describe("buildRenderCommand — one frame (UJ-012)", () => {
     expect(seekOf(buildRenderCommand(tenMinutes, "/o.mp4").args, "/long.mp4")).toBe(0);
   });
 
+  it("gives each VIDEO input the decoder options a look asks for, before its own -i, and nothing else changes", () => {
+    const hw = ["-hwaccel", "d3d11va"];
+    const timeline = tl([
+      { media_ref: "/clip.mp4", source_in: 0, source_out: 10, timeline_in: 0, timeline_out: 10 },
+      { media_ref: "/pic.png", timeline_in: 0, timeline_out: 10 },
+    ]);
+    const asked: string[] = [];
+    const plain = buildRenderCommand(timeline, "/f.png", {}, { frame: 30 });
+    const withHw = buildRenderCommand(
+      timeline,
+      "/f.png",
+      {},
+      {
+        frame: 30,
+        decode: (path) => {
+          asked.push(path);
+          return hw;
+        },
+      },
+    );
+    const byInput = (args: string[]) =>
+      Object.fromEntries(optionsBeforeEachInput(args).map((e) => [e.input, e.options]));
+    const got = byInput(withHw.args);
+    expect(got["/clip.mp4"]).toEqual(expect.arrayContaining(hw));
+    // a picture has nothing to decode in hardware, and is not even asked about
+    expect(got["/pic.png"]).not.toContain("-hwaccel");
+    expect(asked).toEqual(["/clip.mp4"]);
+    // taking the options out gives back exactly the command the window always made
+    expect(
+      withHw.args.filter((a, i, all) => !(a === "-hwaccel" || all[i - 1] === "-hwaccel")),
+    ).toEqual(plain.args);
+    // asking for nothing changes nothing, and an export has no window to ask in
+    expect(
+      buildRenderCommand(timeline, "/f.png", {}, { frame: 30, decode: () => [] }).args,
+    ).toEqual(plain.args);
+    expect(buildRenderCommand(timeline, "/o.mp4").args).not.toContain("-hwaccel");
+  });
+
   it("writes one frame and no sound, and a still's loop is cut to the window", () => {
     const plan = buildRenderCommand(
       tl([

@@ -1,4 +1,5 @@
 import type { CommandRunner } from "./command";
+import type { LookDecoder } from "./lookDecode";
 import type { ProjectStoreAccess } from "./store";
 import type { MutationOrigin } from "../project/MutationGate";
 import type { ExportMode } from "../timeline/exportOptions";
@@ -26,4 +27,7 @@ export interface ClientToolContext {
    *  differ in what the app can promise them: the in-app agent is told when background work lands,
    *  an MCP agent never is (`mcp/instructions.ts`). */
   surface?: "app" | "mcp";
+  /** Decides whether a look may decode on the GPU (`lookDecode.ts`). Absent: the app's own decoder, which
+   *  keeps this PC's proofs. Tests inject one so a look runs the same on every OS. */
+  lookDecode?: LookDecoder;
 }

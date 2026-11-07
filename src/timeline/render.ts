@@ -823,6 +823,10 @@ export interface FrameWindow {
   postFonts?: string[];
   /** Encoder/muxer args for the one output frame, before the output path. */
   outputArgs?: string[];
+  /** Input options for each VIDEO input's decoder, placed before its own `-i` (a look's hardware decode,
+   *  tools/lookDecode.ts). Only a frame window can ask: an export's command never carries them, so exports
+   *  stay byte-identical. A still is never asked about. */
+  decode?: (inputPath: string) => readonly string[];
 }
 
 interface Input {
@@ -1178,6 +1182,7 @@ function buildSingleRenderCommand(
     ? {
         frame: Math.max(0, Math.trunc(window.frame)),
         t: Math.max(0, Math.trunc(window.frame)) / fps,
+        decode: window.decode,
       }
     : null;
   // A span (a clip exported on its own): the whole graph with the canvas running only over the
@@ -1558,6 +1563,7 @@ function buildSingleRenderCommand(
         "-to",
         inp.so.toFixed(6),
         ...(videoInputIndices.has(index) ? videoDecoder : decoder),
+        ...(win?.decode?.(inp.path) ?? []),
         "-i",
         inp.path,
       );

@@ -17,6 +17,7 @@ import {
   midpointFrames,
 } from "./inspect";
 import { ProjectStoreAccess, joinPath, type FsLike } from "./store";
+import { createLookDecoder } from "./lookDecode";
 import { registerLibraryClip } from "./import";
 import { registerTestDocument, resetTestDocuments } from "../test/timelineKit";
 import { emptyTimeline } from "../timeline/model";
@@ -2078,5 +2079,176 @@ describe("inspectColorTool", () => {
     expect(r.ok, JSON.stringify(r)).toBe(true);
     expect(r.reference_scopes).toBeDefined();
     expect(r._attachments).toHaveLength(2);
+  });
+});
+
+// Looks decode on the GPU only where this PC has proved it, and never at the price of a failed look or a different
+// picture (tools/lookDecode.ts). The decoder is injected, so these run the same on every OS.
+const HW_PROBE = JSON.stringify({
+  format: { format_name: "mov,mp4", duration: "12.5", size: "1048576" },
+  streams: [
+    {
+      codec_type: "video",
+      width: 1080,
+      height: 1920,
+      r_frame_rate: "30/1",
+      codec_name: "h264",
+      pix_fmt: "yuv420p",
+    },
+    { codec_type: "audio", codec_name: "aac", sample_rate: "48000", channels: 2 },
+  ],
+});
+
+/** Wraps a look runner so this PC can PROVE its GPU (both framemd5 runs print the same bytes), records every frame
+ *  run, and, with `hardwareFrames: "fail"`, fails every look frame that asks for the GPU, the way a driver can. */
+function gpu(
+  inner: CommandRunner,
+  o: { hardwareFrames?: "fail" } = {},
+): CommandRunner & { proofs: number; renders: string[][] } {
+  const state = { proofs: 0, renders: [] as string[][] };
+  const run = vi.fn(
+    async (
+      program: string,
+      args: string[],
+      signal?: AbortSignal,
+      cwd?: string,
+      onStdout?: (chunk: string) => void,
+    ) => {
+      if (program === "ffprobe" && args.includes("-show_streams"))
+        return { code: 0, stdout: HW_PROBE, stderr: "" };
+      if (program === "ffmpeg" && args.includes("framemd5")) {
+        state.proofs++;
+        return { code: 0, stdout: "0, 0, 0, 1, 1, aa\n0, 1, 1, 1, 1, bb", stderr: "" };
+      }
+      if (program === "ffmpeg" && args.includes("-frames:v")) state.renders.push(args);
+      if (program === "ffmpeg" && o.hardwareFrames === "fail" && args.includes("-hwaccel"))
+        return { code: 1, stdout: "", stderr: "d3d11va: device lost" };
+      return inner.run(program, args, signal, cwd, onStdout);
+    },
+  );
+  return Object.assign(state, { run });
+}
+
+const windows = () => createLookDecoder({ os: () => "windows", storage: null, now: () => 1 });
+const hardwareOf = (args: string[]): string[] =>
+  args.indexOf("-hwaccel") < 0
+    ? []
+    : args.slice(args.indexOf("-hwaccel"), args.indexOf("-hwaccel") + 2);
+
+describe("inspect_media frames on the GPU", () => {
+  const project = (): MockFs => {
+    const fs = new MockFs();
+    fs.touch(joinPath(DIR, "vid.mp4"));
+    fs.putBytes("C:/res/fonts/Poppins-Regular.ttf", new Uint8Array([1]));
+    return fs;
+  };
+  const frameArgs = (r: { renders: string[][] }): string[][] =>
+    r.renders.filter((a) => a.includes("rawvideo"));
+
+  it("decodes each frame on the GPU once this PC has proved it, with the option before the file, proving once", async () => {
+    const fs = project();
+    const runner = gpu(mediaRunner(fs, { probe: HW_PROBE }));
+    const r = (await inspectMediaTool(
+      { media_ref: "vid.mp4" },
+      { ...ctxWith(runner, fs), lookDecode: windows() },
+    )) as Any;
+    expect(r.ok).toBe(true);
+    expect(r.frames_attached).toBe(6);
+    expect(frameArgs(runner)).toHaveLength(6);
+    for (const a of frameArgs(runner)) {
+      expect(hardwareOf(a)).toEqual(["-hwaccel", "d3d11va"]);
+      expect(a.indexOf("-hwaccel")).toBeLessThan(a.indexOf("-i"));
+    }
+    expect(runner.proofs).toBe(2); // one software and one hardware run, however many frames
+  });
+
+  it("redoes a frame in software when the GPU run fails, returns every frame, and stops asking the GPU", async () => {
+    const fs = project();
+    const runner = gpu(mediaRunner(fs, { probe: HW_PROBE }), { hardwareFrames: "fail" });
+    const decoder = windows();
+    const first = (await inspectMediaTool(
+      { media_ref: "vid.mp4" },
+      { ...ctxWith(runner, fs), lookDecode: decoder },
+    )) as Any;
+    expect(first.ok).toBe(true);
+    expect(first.frames_attached).toBe(6);
+    expect(first.frames.every((f: Any) => !f.error)).toBe(true);
+    const seen = runner.renders.length;
+    const next = (await inspectMediaTool(
+      { media_ref: "vid.mp4", start_seconds: 1, end_seconds: 5, max_frames: 2 },
+      { ...ctxWith(runner, fs), lookDecode: decoder },
+    )) as Any;
+    expect(next.frames_attached).toBe(2);
+    expect(
+      frameArgs({ renders: runner.renders.slice(seen) }).every((a) => !a.includes("-hwaccel")),
+    ).toBe(true);
+  });
+
+  it("asks nothing of the GPU on Linux: no proof, no option", async () => {
+    const fs = project();
+    const runner = gpu(mediaRunner(fs, { probe: HW_PROBE }));
+    const linux = createLookDecoder({ os: () => "linux", storage: null, now: () => 1 });
+    const r = (await inspectMediaTool(
+      { media_ref: "vid.mp4" },
+      { ...ctxWith(runner, fs), lookDecode: linux },
+    )) as Any;
+    expect(r.frames_attached).toBe(6);
+    expect(runner.proofs).toBe(0);
+    expect(frameArgs(runner).every((a) => !a.includes("-hwaccel"))).toBe(true);
+  });
+});
+
+describe("inspect_timeline frames on the GPU", () => {
+  it("puts the GPU option before the clip's own -i in every frame's window, proving once", async () => {
+    const fs = new MockFs();
+    seedTimeline(fs);
+    const runner = gpu(frameRunner(fs));
+    const r = (await inspectTimelineTool(
+      { start_frame: 0, end_frame: 60, max_frames: 3 },
+      { ...ctxWith(runner, fs), lookDecode: windows() },
+    )) as Any;
+    expect(r.ok).toBe(true);
+    expect(r.frames_attached).toBe(3);
+    expect(runner.renders).toHaveLength(3);
+    for (const a of runner.renders) {
+      expect(hardwareOf(a)).toEqual(["-hwaccel", "d3d11va"]);
+      expect(a.indexOf("-hwaccel")).toBeLessThan(a.indexOf("-i"));
+    }
+    expect(runner.proofs).toBe(2);
+  });
+
+  it("redoes a frame in software when the GPU run fails, and the next look does not ask the GPU again", async () => {
+    const fs = new MockFs();
+    seedTimeline(fs, longTimeline(900));
+    const runner = gpu(frameRunner(fs), { hardwareFrames: "fail" });
+    const decoder = windows();
+    const first = (await inspectTimelineTool(
+      { start_frame: 0, end_frame: 300, max_frames: 3 },
+      { ...ctxWith(runner, fs), lookDecode: decoder },
+    )) as Any;
+    expect(first.ok).toBe(true);
+    expect(first.frames_attached).toBe(3);
+    expect(first.frames.every((f: Any) => f.ok)).toBe(true);
+    const seen = runner.renders.length;
+    const next = (await inspectTimelineTool(
+      { start_frame: 400, end_frame: 700, max_frames: 2 },
+      { ...ctxWith(runner, fs), lookDecode: decoder },
+    )) as Any;
+    expect(next.frames_attached).toBe(2);
+    expect(runner.renders.slice(seen).every((a) => !a.includes("-hwaccel"))).toBe(true);
+  });
+
+  it("asks nothing of the GPU on Linux: no proof, no option, the same frames", async () => {
+    const fs = new MockFs();
+    seedTimeline(fs);
+    const runner = gpu(frameRunner(fs));
+    const linux = createLookDecoder({ os: () => "linux", storage: null, now: () => 1 });
+    const r = (await inspectTimelineTool(
+      { start_frame: 0, end_frame: 60, max_frames: 3 },
+      { ...ctxWith(runner, fs), lookDecode: linux },
+    )) as Any;
+    expect(r.frames_attached).toBe(3);
+    expect(runner.proofs).toBe(0);
+    expect(runner.renders.every((a) => !a.includes("-hwaccel"))).toBe(true);
   });
 });

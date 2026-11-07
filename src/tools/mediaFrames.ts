@@ -7,6 +7,7 @@ import type { ClientToolContext } from "./context";
 import { withAssScratch } from "./assScratch";
 import { laplacianVariance, noiseSigma } from "./frameMeasures";
 import { fitDims, gridAss, gridFilter, OVERLAY_FONT_FILE, OVERLAY_REV } from "./inspectOverlay";
+import { lookDecoder } from "./lookDecode";
 import { quarterTurn, shortHash } from "./media";
 import { STOPPED_ERROR } from "../lib/stopped";
 
@@ -62,15 +63,18 @@ async function settle(ctx: ClientToolContext, tmp: string, final: string): Promi
 
 /** Frames of `src` at `times` (source seconds), each a grid JPEG fitted into `dims` plus its
  *  measures. Cached by file, size, time and look, so a repeat costs a file read. A frame that
- *  cannot be read is reported, and the rest still return. */
+ *  cannot be read is reported, and the rest still return. `video` is the probe's picture stream:
+ *  it is what lets a frame decode on the GPU when this PC has proved it identical (lookDecode.ts). */
 export async function sampleFrames(
   ctx: ClientToolContext,
   src: string,
   times: readonly number[],
   dims: { w: number; h: number },
   sizeKey: string,
+  video: Record<string, unknown> | null = null,
 ): Promise<MediaFrame[]> {
   const grid = { name: `grid_${dims.w}x${dims.h}.ass`, content: gridAss(dims.w, dims.h) };
+  const decoder = ctx.lookDecode ?? lookDecoder();
   const shots: MediaFrame[] = [];
   const one = async (t: number, cwd: string | undefined): Promise<MediaFrame> => {
     const key = shortHash(`${src}|${sizeKey}|${t.toFixed(3)}|${dims.w}x${dims.h}|g${OVERLAY_REV}`);
@@ -83,37 +87,45 @@ export async function sampleFrames(
       const tmp = ctx.store.canRename ? `.${token()}.tmp` : "";
       const tmpJpg = jpg.replace(/\.jpg$/, `${tmp}.jpg`);
       const tmpGrey = `${grey}${tmp}`;
-      const r = await ctx.runner.run(
-        "ffmpeg",
-        [
-          "-y",
-          "-hide_banner",
-          "-loglevel",
-          "error",
-          "-ss",
-          Math.max(0, t).toFixed(3),
-          "-i",
-          src,
-          "-filter_complex",
-          `[0:v]scale=${dims.w}:${dims.h},setsar=1,split=2[s][m];[s]${gridFilter(grid.name)}[g];[m]format=gray[k]`,
-          "-map",
-          "[g]",
-          "-frames:v",
-          "1",
-          "-q:v",
-          FRAME_JPEG_Q,
-          tmpJpg,
-          "-map",
-          "[k]",
-          "-frames:v",
-          "1",
-          "-f",
-          "rawvideo",
-          tmpGrey,
-        ],
-        ctx.signal,
-        cwd,
-      );
+      // The GPU may decode this frame when this PC has proved it identical; a run that does not succeed is
+      // redone in software, so a driver can cost time and never a failed look.
+      const r = await decoder.run(ctx.runner, src, video, ctx.signal, async (flags) => {
+        const res = await ctx.runner.run(
+          "ffmpeg",
+          [
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-ss",
+            Math.max(0, t).toFixed(3),
+            ...flags,
+            "-i",
+            src,
+            "-filter_complex",
+            `[0:v]scale=${dims.w}:${dims.h},setsar=1,split=2[s][m];[s]${gridFilter(grid.name)}[g];[m]format=gray[k]`,
+            "-map",
+            "[g]",
+            "-frames:v",
+            "1",
+            "-q:v",
+            FRAME_JPEG_Q,
+            tmpJpg,
+            "-map",
+            "[k]",
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            tmpGrey,
+          ],
+          ctx.signal,
+          cwd,
+        );
+        const made =
+          res.code === 0 && (await ctx.store.exists(tmpJpg)) && (await ctx.store.exists(tmpGrey));
+        return { ok: made, value: res };
+      });
       if (r.code !== 0 || !(await ctx.store.exists(tmpJpg)) || !(await ctx.store.exists(tmpGrey))) {
         if (tmp) {
           await ctx.store.remove(tmpJpg).catch(() => undefined);

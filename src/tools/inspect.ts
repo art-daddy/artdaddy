@@ -24,6 +24,7 @@ import { lookLoudness, type Loudness } from "./loudness";
 import { reportAppError } from "../api/appEvents";
 import { STOPPED_ERROR, stoppedAnswer } from "../lib/stopped";
 import { displaySize, mediaFrameDims, sampleFrames, stillWithGrid } from "./mediaFrames";
+import { lookDecoder, type LookDecoder } from "./lookDecode";
 import { makeStoryboard } from "./storyboard";
 import { loadTimeline } from "../timeline/engine";
 import { clipSourceSpanSeconds, clipSpanToFrames, findClip } from "../timeline/helpers";
@@ -638,6 +639,7 @@ export async function inspectMediaTool(
       mediaLookTimes(span[0], span[1], args.max_frames),
       mediaFrameDims(display),
       sizeKey,
+      video,
     );
     // Rebuilt in request order: the lanes finish out of order and the model reads a sequence.
     const attachments: Attachment[] = [];
@@ -784,6 +786,40 @@ export function planTimelineLook(
   return { ok: true, seconds, fps, total, nums, outOfRange };
 }
 
+/** Pictures ffmpeg opens as stills: nothing there for a GPU to decode, so nothing to probe. */
+const STILL_NAME = /\.(png|jpe?g|webp|gif|bmp|tiff?|heic|heif|avif|svg)$/i;
+
+/** What a timeline look needs to know about each source it opens: may the GPU decode it? A source's stream
+ *  shape is probed once per look, and the decoder answers from this PC's verdicts (proving a new shape once).
+ *  Where the OS has no hardware decoder nothing is probed at all. */
+function lookDecodeFor(ctx: ClientToolContext): {
+  decoder: LookDecoder;
+  shapeOf: (path: string) => Promise<{ flags: string[]; video: Record<string, unknown> | null }>;
+} {
+  const decoder = ctx.lookDecode ?? lookDecoder();
+  const shapes = new Map<
+    string,
+    Promise<{ flags: string[]; video: Record<string, unknown> | null }>
+  >();
+  const shapeOf = (path: string) => {
+    let known = shapes.get(path);
+    if (!known) {
+      known = (async () => {
+        if (!decoder.enabled() || STILL_NAME.test(path)) return { flags: [], video: null };
+        const probe = await probePath(ctx.runner, path);
+        const video = (probe.ok && probe.video ? probe.video : null) as Record<
+          string,
+          unknown
+        > | null;
+        return { flags: await decoder.flags(ctx.runner, path, video, ctx.signal), video };
+      })();
+      shapes.set(path, known);
+    }
+    return known;
+  };
+  return { decoder, shapeOf };
+}
+
 /** inspect_timeline (client): show the model the composited timeline at the frames it asks for.
  *
  *  Each frame is its OWN one-frame render of the export's graph (buildRenderCommand's frame
@@ -820,6 +856,7 @@ export async function inspectTimelineTool(
   const state = key ?? nextCallToken();
   const canvas = canvasPx(seconds);
   const dims = fitDims(canvas.w, canvas.h, TIMELINE_FRAME_EDGE);
+  const gpu = lookDecodeFor(ctx);
 
   const renderFrame = async (frame: number): Promise<FrameShot> => {
     const final = await ctx.store.prepareArtifact(
@@ -834,21 +871,40 @@ export async function inspectTimelineTool(
       ? final.replace(/\.jpg$/, `.${nextCallToken()}.tmp.jpg`)
       : final;
     const assName = `grid_f${frame}.ass`;
-    const plan = buildRenderCommand(
-      seconds,
-      out,
-      {},
-      {
-        frame,
-        post: `${scaleTo(TIMELINE_FRAME_EDGE)},${gridFilter(assName)}`,
-        postAss: [{ name: assName, content: gridAss(dims.w, dims.h, `f${frame}`) }],
-        postFonts: [OVERLAY_FONT_FILE],
-        outputArgs: ["-q:v", FRAME_JPEG_Q],
-      },
-    );
-    for (const w of plan.warnings) warnings.add(w);
-    const rr = await runRenderPlan(ctx, plan);
-    if (rr.code !== 0 || !(await ctx.store.exists(out))) {
+    const windowOf = (decode?: (path: string) => readonly string[]) => ({
+      frame,
+      post: `${scaleTo(TIMELINE_FRAME_EDGE)},${gridFilter(assName)}`,
+      postAss: [{ name: assName, content: gridAss(dims.w, dims.h, `f${frame}`) }],
+      postFonts: [OVERLAY_FONT_FILE],
+      outputArgs: ["-q:v", FRAME_JPEG_Q],
+      ...(decode ? { decode } : {}),
+    });
+    const software = buildRenderCommand(seconds, out, {}, windowOf());
+    for (const w of software.warnings) warnings.add(w);
+    // The GPU may decode a source whose stream shape this PC has proved identical (lookDecode.ts).
+    const onGpu = new Map<string, { flags: string[]; video: Record<string, unknown> | null }>();
+    for (const source of software.sources) {
+      const shape = await gpu.shapeOf(source.path);
+      if (shape.flags.length) onGpu.set(source.path, shape);
+    }
+    const plan = onGpu.size
+      ? buildRenderCommand(
+          seconds,
+          out,
+          {},
+          windowOf((p) => onGpu.get(p)?.flags ?? []),
+        )
+      : software;
+    let rr = await runRenderPlan(ctx, plan);
+    let rendered = rr.code === 0 && (await ctx.store.exists(out));
+    if (!rendered && onGpu.size && !ctx.signal?.aborted) {
+      // A GPU run that did not succeed is redone in software; the shapes are remembered as bad only when
+      // software then worked (if it failed too, the file was the problem).
+      rr = await runRenderPlan(ctx, software);
+      rendered = rr.code === 0 && (await ctx.store.exists(out));
+      if (rendered) for (const shape of onGpu.values()) gpu.decoder.demote(shape.video);
+    }
+    if (!rendered) {
       // Whatever a failed run left is not a frame: never let the name of one point at it.
       if (out !== final) await ctx.store.remove(out).catch(() => undefined);
       return {
