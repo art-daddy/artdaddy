@@ -7,6 +7,8 @@ const MAX_FAILURES: usize = 8;
 const MAX_RECORD_BYTES: u64 = 64 * 1024;
 const MAX_RECOVERY_RECORDS: usize = 3;
 const RECOVERY_PREFIX: &str = "health-recovery-";
+/// A mark of a launch this record knows nothing about is left alone for this long: it may belong to another copy that is running.
+const STALE_MARK: std::time::Duration = std::time::Duration::from_secs(30 * 86_400);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -193,6 +195,7 @@ impl RuntimeHealth {
       boot_id,
       context: RuntimeContext::default(),
     };
+    let mut finished: Vec<String> = Vec::new();
     let mut record = match previous {
       Some(mut old) => {
         if old.current.launch_id != launch_id {
@@ -202,9 +205,12 @@ impl RuntimeHealth {
             // the first start of another release after an unmarked end is that update, not a crash (UJ-001).
             if old.current.release != current.release {
               previous_exit = Some(CleanExit::UpdateRestart);
+              finished.push(old.current.launch_id.clone());
             } else {
               append_failure(&mut old, FailureKind::UncleanExit);
             }
+          } else {
+            finished.push(old.current.launch_id.clone());
           }
           old.current = current;
         }
@@ -230,14 +236,25 @@ impl RuntimeHealth {
         storage_ok: false,
       }),
     };
-    health.prune_marks(&health.lock().record);
+    health.forget_marks(&finished);
+    health.sweep_old_marks(&health.lock().record);
     health.persist(&mut health.lock());
     health
   }
 
-  /// Removes the marks of launches nothing is waiting on: a mark is kept for the running launch and for a failure still pending
-  /// (its cause is asked for later), and nothing else.
-  fn prune_marks(&self, record: &Record) {
+  /// Removes the marks of launches that are known to be over and have nothing waiting on them: one that ended with a mark of its
+  /// own, one an update ended, one whose unexpected exit has been dealt with. A mark of a launch this record does not know is not
+  /// removed here: another copy of the app may be running, and it is that copy's.
+  fn forget_marks(&self, launch_ids: &[String]) {
+    let Some(parent) = self.path.parent() else { return };
+    for launch_id in launch_ids {
+      let _ = std::fs::remove_file(parent.join(crate::os_exit_cause::unix_end::marker_file_name(launch_id)));
+    }
+  }
+
+  /// Removes marks nobody has touched for a month and nothing refers to (a launch whose record was lost): the only case a mark of an
+  /// unknown launch is removed, so what another running copy holds is safe.
+  fn sweep_old_marks(&self, record: &Record) {
     let Some(parent) = self.path.parent() else { return };
     let keep: Vec<String> = std::iter::once(&record.current.launch_id)
       .chain(record.failures.iter().map(|failure| &failure.session.launch_id))
@@ -247,7 +264,11 @@ impl RuntimeHealth {
     for entry in entries.flatten() {
       let name = entry.file_name();
       let Some(name) = name.to_str() else { continue };
-      if name.starts_with("exit-") && name.ends_with(".mark") && !keep.iter().any(|kept| kept == name) {
+      if !(name.starts_with("exit-") && name.ends_with(".mark")) || keep.iter().any(|kept| kept == name) {
+        continue;
+      }
+      let age = entry.metadata().and_then(|meta| meta.modified()).ok().and_then(|at| SystemTime::now().duration_since(at).ok());
+      if age.is_some_and(|age| age > STALE_MARK) {
         let _ = std::fs::remove_file(entry.path());
       }
     }
@@ -447,7 +468,9 @@ impl RuntimeHealth {
       .map(|failure| failure.at)
       .max();
     Some(crate::os_exit_cause::EndSession {
+      started_at: ended.session.started_at,
       alive_at: ended.session.alive_at,
+      detected_at: ended.at,
       launch_id,
       boot_id: ended.session.boot_id.clone(),
       panic_at,
@@ -474,9 +497,20 @@ impl RuntimeHealth {
       state.storage_ok = false;
       return false;
     }
+    // The launches whose last waiting failure this was: nothing will ask for their mark again.
+    let settled: Vec<String> = state
+      .record
+      .failures
+      .iter()
+      .filter(|failure| ids.contains(&failure.id))
+      .map(|failure| failure.session.launch_id.clone())
+      .filter(|launch_id| {
+        *launch_id != next.current.launch_id && !next.failures.iter().any(|failure| failure.session.launch_id == *launch_id)
+      })
+      .collect();
     state.record = next;
     state.storage_ok = true;
-    self.prune_marks(&state.record);
+    self.forget_marks(&settled);
     true
   }
 }
@@ -1119,7 +1153,11 @@ mod tests {
     assert_eq!(session.boot_id, "boot-a");
     assert_eq!(session.panic_at, None);
     assert_eq!(session.dir, directory.path());
-    assert!(session.alive_at > 0);
+    // The span the session lived in, which is all a crash report of it can be looked for inside.
+    assert!(session.started_at > 0 && session.started_at <= session.alive_at, "{session:?}");
+    let noticed = next.status().failures.iter().find(|failure| failure.id == id).unwrap().at;
+    assert_eq!(session.detected_at, noticed);
+    assert!(session.detected_at >= session.alive_at, "{session:?}");
   }
 
   #[test]
@@ -1212,33 +1250,69 @@ mod tests {
   }
 
   #[test]
-  fn a_mark_is_kept_only_while_something_is_waiting_on_it() {
+  fn a_mark_is_removed_only_when_its_launch_is_known_to_be_over_and_nothing_waits_on_it() {
     use crate::os_exit_cause::unix_end::marker_file_name;
     let directory = tempfile::tempdir().unwrap();
     let put = |launch: &str| std::fs::write(directory.path().join(marker_file_name(launch)), b"signal_term\n").unwrap();
+    let open = |path: &Path, launch: &str, release: &str| {
+      RuntimeHealth::open_in_boot(path.to_path_buf(), launch.into(), release.into(), "boot-a".into())
+    };
     let path = directory.path().join("health.json");
+    // Another copy of the app may be running beside this one: a mark of a launch this record does not know is not ours to remove.
+    put("stranger");
     // A mark is made by a launch after it has started, so each is put down after its own `open`.
-    put("forgotten"); // from long ago: nothing refers to it
-    let clean = RuntimeHealth::open_in_boot(path.clone(), "clean".into(), "artdaddy@0.24.0".into(), "boot-a".into());
+    let clean = open(&path, "clean", "artdaddy@0.24.0");
     put("clean");
     clean.mark_exit(CleanExit::Quit);
     drop(clean);
-    let crashed = RuntimeHealth::open_in_boot(path.clone(), "crashed".into(), "artdaddy@0.24.0".into(), "boot-a".into());
+    let crashed = open(&path, "crashed", "artdaddy@0.24.0");
     put("crashed");
     drop(crashed);
-    let next = RuntimeHealth::open_in_boot(path, "next".into(), "artdaddy@0.24.0".into(), "boot-a".into());
+    let next = open(&path, "next", "artdaddy@0.24.0");
     put("next");
     // Files that only look like marks are not marks: nothing but `exit-<launch>.mark` is ever removed.
     std::fs::write(directory.path().join("exit-notes.txt"), b"keep").unwrap();
     std::fs::write(directory.path().join("notes.mark"), b"keep").unwrap();
-    // The launch that ended without a mark keeps its mark until its failure is dealt with; the others' go.
-    assert_eq!(marks_in(directory.path()), vec![marker_file_name("crashed"), marker_file_name("next")]);
+    // The launch that ended with a mark of its own is over, and its mark goes; the one that ended without one keeps its mark until
+    // its unexpected exit is dealt with.
+    assert_eq!(marks_in(directory.path()), vec![marker_file_name("crashed"), marker_file_name("next"), marker_file_name("stranger")]);
     let token = next.bind_renderer().token;
     let id = next.status().failures[0].id.clone();
     assert!(next.acknowledge(&token, &[id]));
-    assert_eq!(marks_in(directory.path()), vec![marker_file_name("next")]);
+    assert_eq!(marks_in(directory.path()), vec![marker_file_name("next"), marker_file_name("stranger")]);
     // Nothing but marks is ever removed.
     assert!(directory.path().join("health.json").exists());
     assert!(directory.path().join("exit-notes.txt").exists() && directory.path().join("notes.mark").exists());
+  }
+
+  #[test]
+  fn a_mark_nobody_has_touched_for_a_month_and_nothing_refers_to_is_swept_and_a_recent_one_is_not() {
+    use crate::os_exit_cause::unix_end::marker_file_name;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("health.json");
+    let age = |launch: &str, days: u64| {
+      let file = directory.path().join(marker_file_name(launch));
+      std::fs::write(&file, b"").unwrap();
+      let at = std::time::SystemTime::now() - std::time::Duration::from_secs(days * 86_400);
+      std::fs::File::options().write(true).open(file).unwrap().set_modified(at).unwrap();
+    };
+    age("ancient", 31);
+    age("last-week", 7);
+    let health = RuntimeHealth::open_in_boot(path, "now".into(), "artdaddy@0.24.0".into(), "boot-a".into());
+    drop(health);
+    assert_eq!(marks_in(directory.path()), vec![marker_file_name("last-week")]);
+  }
+
+  #[test]
+  fn the_mark_of_a_launch_an_update_ended_is_removed_too() {
+    use crate::os_exit_cause::unix_end::marker_file_name;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("health.json");
+    let old = RuntimeHealth::open_in_boot(path.clone(), "old".into(), "artdaddy@0.23.0".into(), "boot-a".into());
+    std::fs::write(directory.path().join(marker_file_name("old")), b"signal_term\n").unwrap();
+    drop(old); // the installer ended it: no exit mark, and a different release starts next
+    let updated = RuntimeHealth::open_in_boot(path, "new".into(), "artdaddy@0.24.0".into(), "boot-a".into());
+    assert!(updated.status().failures.is_empty());
+    assert!(marks_in(directory.path()).is_empty());
   }
 }

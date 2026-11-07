@@ -321,8 +321,12 @@ pub fn lookup(_alive_ms: u64, _app_exe: &str) -> String {
 /// What the cause lookup is told about the session that ended without a mark.
 #[derive(Debug, Clone)]
 pub struct EndSession {
+  /// When it started, in milliseconds since 1970: nothing it left behind is older than this.
+  pub started_at: u64,
   /// When it was last seen alive, in milliseconds since 1970.
   pub alive_at: u64,
+  /// When the next start noticed it had ended without a mark: it ended no later than this.
+  pub detected_at: u64,
   /// Its launch: the name of the mark a signal may have left for it.
   pub launch_id: String,
   /// Which start of the PC it ran in (`unix_end::current_boot_id`); empty when that could not be read.
@@ -399,8 +403,13 @@ pub mod unix_end {
   /// A mark older than this before the session's last sign of life is from a signal the process lived through (handled, or ignored
   /// by whoever handled it), not the one that ended it.
   pub const MARKER_STALE_MS: u64 = 15_000;
-  /// A panic this long before the last sign of life, or any time after it, is taken as what ended the session.
-  pub const PANIC_NEAR_MS: u64 = 15_000;
+  /// A panic is taken as what ended the session when the session's last sign of life is no more than this after it. The page
+  /// checks in about every five seconds, so a panic the app lived through is followed by a later sign of life within a beat or
+  /// two, while one that ended it is not.
+  pub const PANIC_NEAR_MS: u64 = 6_000;
+  /// How long after the next start noticed the end a crash report of it may still be written (the system writes one a few seconds
+  /// after the crash, and a person may have opened the app again at once).
+  pub const REPORT_GRACE_MS: u64 = 60_000;
   const MARKER_BYTES: u64 = 512;
   const REPORT_BYTES: u64 = 64 * 1024;
 
@@ -469,12 +478,13 @@ pub mod unix_end {
     })
   }
 
-  /// The word of the newest crash report of `exe` written at or after `since_ms` in `dir`. A report is `<program>-<time>.ips` (or
-  /// the older `.crash`): another program's, another kind of file and one of a helper with a longer name are not this app's.
-  pub fn newest_report_word(dir: &Path, exe: &str, since_ms: u64) -> Option<&'static str> {
+  /// The word of the first crash report of `exe` written from `from_ms` to `until_ms` in `dir`: the first, because a report of a
+  /// later crash (of the next run) is not this session's. A report is `<program>-<time>.ips` (or the older `.crash`): another
+  /// program's, another kind of file and one of a helper with a longer name are not this app's.
+  pub fn first_report_word(dir: &Path, exe: &str, from_ms: u64, until_ms: u64) -> Option<&'static str> {
     let stem = Path::new(exe).file_stem()?.to_str()?;
     let prefix = format!("{stem}-");
-    let mut newest: Option<(u64, PathBuf)> = None;
+    let mut first: Option<(u64, PathBuf)> = None;
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
       let name = entry.file_name();
       let Some(name) = name.to_str() else { continue };
@@ -485,11 +495,11 @@ pub mod unix_end {
         continue;
       }
       let Some(at) = entry.metadata().ok().as_ref().and_then(modified_ms) else { continue };
-      if at >= since_ms && newest.as_ref().map_or(true, |(best, _)| at > *best) {
-        newest = Some((at, entry.path()));
+      if (from_ms..=until_ms).contains(&at) && first.as_ref().map_or(true, |(best, _)| at < *best) {
+        first = Some((at, entry.path()));
       }
     }
-    let (_, path) = newest?;
+    let (_, path) = first?;
     let mut bytes = Vec::new();
     std::fs::File::open(path).ok()?.take(REPORT_BYTES).read_to_end(&mut bytes).ok()?;
     crash_report_word(&String::from_utf8_lossy(&bytes))
@@ -576,9 +586,15 @@ pub mod unix_end {
   pub fn lookup(session: &EndSession, app_exe: &str) -> String {
     let marker = read_marker(&session.dir, &session.launch_id);
     let boot = boot_changed(&session.boot_id, &current_boot_id());
+    // Only a report written while the session ran, or just after it ended, can be about it.
     let report = if cfg!(target_os = "macos") {
       std::env::var_os("HOME").map(PathBuf::from).and_then(|home| {
-        newest_report_word(&home.join("Library/Logs/DiagnosticReports"), app_exe, session.alive_at.saturating_sub(120_000))
+        first_report_word(
+          &home.join("Library/Logs/DiagnosticReports"),
+          app_exe,
+          session.started_at,
+          session.detected_at.saturating_add(REPORT_GRACE_MS),
+        )
       })
     } else {
       None
@@ -1059,25 +1075,42 @@ mod unix_end_tests {
     assert_eq!(crash_report_word(&text), None);
   }
 
+  /// Writes a report of `text` that looks as if it was written `at_ms` after 1970.
+  fn put_report(dir: &Path, name: &str, text: &str, at_ms: u64) {
+    let path = dir.join(name);
+    std::fs::write(&path, text).unwrap();
+    std::fs::File::options()
+      .write(true)
+      .open(&path)
+      .unwrap()
+      .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_millis(at_ms))
+      .unwrap();
+  }
+
   #[test]
-  fn the_newest_report_of_this_app_in_the_window_is_the_one_read() {
+  fn the_first_report_of_this_app_inside_the_sessions_span_is_the_one_read() {
     let dir = tempfile::tempdir().unwrap();
-    let put = |name: &str, text: &str| std::fs::write(dir.path().join(name), text).unwrap();
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
-    let since = now - 60_000;
-    assert_eq!(newest_report_word(dir.path(), "artdaddy", since), None);
-    // Other programs' reports, other kinds of file and a report of another app with a longer name are not this app's.
-    put("Safari-2026-11-07-120000.ips", "Exception Type: EXC_GUARD");
-    put("artdaddy-helper-2026-11-07-120000.ips", "Exception Type: EXC_GUARD");
-    put("artdaddy-2026-11-07-120000.diag", "Exception Type: EXC_GUARD");
-    put("artdaddy.ips", "Exception Type: EXC_GUARD");
-    assert_eq!(newest_report_word(dir.path(), "artdaddy", since), None, "only artdaddy-<time>.ips or .crash count");
-    put("artdaddy-2026-11-07-120000.crash", "Exception Type: EXC_BAD_INSTRUCTION");
-    assert_eq!(newest_report_word(dir.path(), "artdaddy", since), Some("crash_bad_instruction"));
-    assert_eq!(newest_report_word(dir.path(), "artdaddy.exe", since), Some("crash_bad_instruction"));
-    // A report written before the window belongs to some earlier crash.
-    assert_eq!(newest_report_word(dir.path(), "artdaddy", now + 3_600_000), None);
-    assert_eq!(newest_report_word(Path::new("/no/such/folder"), "artdaddy", since), None);
+    let (from, until) = (1_000_000u64, 2_000_000u64);
+    assert_eq!(first_report_word(dir.path(), "artdaddy", from, until), None);
+    // Other programs' reports, other kinds of file and a report of a helper with a longer name are not this app's.
+    for name in ["Safari-2026-11-07-120000.ips", "artdaddy-helper-2026-11-07-120000.ips", "artdaddy-2026-11-07-120000.diag", "artdaddy.ips"] {
+      put_report(dir.path(), name, "Exception Type: EXC_GUARD", 1_500_000);
+    }
+    assert_eq!(first_report_word(dir.path(), "artdaddy", from, until), None, "only artdaddy-<time>.ips or .crash count");
+    put_report(dir.path(), "artdaddy-2026-11-07-120000.crash", "Exception Type: EXC_BAD_INSTRUCTION", 1_500_000);
+    assert_eq!(first_report_word(dir.path(), "artdaddy", from, until), Some("crash_bad_instruction"));
+    assert_eq!(first_report_word(dir.path(), "artdaddy.exe", from, until), Some("crash_bad_instruction"));
+    // A report from before the session started is an earlier run's crash; one from after it ended is a later run's.
+    put_report(dir.path(), "artdaddy-2026-11-07-100000.ips", "Exception Type: EXC_RESOURCE", from - 1);
+    put_report(dir.path(), "artdaddy-2026-11-07-130000.ips", "Exception Type: EXC_ARITHMETIC", until + 1);
+    assert_eq!(first_report_word(dir.path(), "artdaddy", from, until), Some("crash_bad_instruction"));
+    // Both ends of the span are inside it.
+    put_report(dir.path(), "artdaddy-2026-11-07-110000.ips", "Exception Type: EXC_BREAKPOINT", until);
+    assert_eq!(first_report_word(dir.path(), "artdaddy", from, until), Some("crash_bad_instruction"));
+    put_report(dir.path(), "artdaddy-2026-11-07-110500.ips", "Exception Type: EXC_GUARD", from);
+    // With several inside the span, the first: the later ones are of runs after this one.
+    assert_eq!(first_report_word(dir.path(), "artdaddy", from, until), Some("crash_guard"));
+    assert_eq!(first_report_word(Path::new("/no/such/folder"), "artdaddy", from, until), None);
   }
 
   #[test]
@@ -1101,7 +1134,9 @@ mod unix_end_tests {
   fn the_whole_lookup_reads_the_mark_and_the_panic_of_the_session() {
     let dir = tempfile::tempdir().unwrap();
     let session = |launch: &str, panic_at: Option<u64>| EndSession {
+      started_at: 0,
       alive_at: 1,
+      detected_at: 2,
       launch_id: launch.to_string(),
       boot_id: String::new(),
       panic_at,

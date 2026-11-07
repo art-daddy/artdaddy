@@ -6,7 +6,7 @@ mod mcp;
 mod macos_quit;
 #[cfg(desktop)]
 mod os_exit_cause;
-#[cfg(unix)]
+#[cfg(all(unix, desktop))]
 mod exit_signal;
 mod reload_guard;
 #[cfg(desktop)]

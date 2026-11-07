@@ -7,9 +7,17 @@
 //!
 //! What a handler may do is small, and this one stays inside it: it reads atomics, writes a static byte string to a descriptor
 //! that was opened for the life of the process, and calls `signal`, `raise` or the previous handler. No allocation, no lock, no
-//! logging. It never swallows a signal: if somebody handled the signal before, that handler runs as it would have; if nobody did,
-//! the default action is restored and the signal sent again, so the process dies of the same signal, and the system still makes
-//! its own record of it (a core file, a crash report, the status its parent sees). A signal that was ignored stays ignored.
+//! logging.
+//!
+//! It never changes what a signal does. Two kinds are taken differently:
+//!  * the crash signals (SIGSEGV, SIGBUS, SIGILL, SIGFPE) and the abort a panic or a stack overflow ends in (SIGABRT) end the
+//!    process anyway. The runtime has its own handler for the first two (it recognises a stack overflow), so the app's handler
+//!    runs first and passes the signal on to whatever was there, as it was called; with nothing there it restores the default and
+//!    sends the signal again, so the process dies of the same signal and the system makes its own record of it (a core file, a
+//!    crash report, the status its parent sees);
+//!  * the requests to end (SIGTERM, SIGHUP, SIGINT, SIGQUIT) are taken ONLY when nobody handles them: a handler somebody else
+//!    installed carries a signal mask and flags (restart a system call, reset after one use) that cannot be copied faithfully
+//!    from here, so it is left alone and that signal leaves no mark. A signal that is ignored stays ignored.
 
 use std::ffi::c_void;
 use std::os::raw::c_int;
@@ -23,18 +31,19 @@ use crate::os_exit_cause::unix_end::marker_file_name;
 /// Set it to anything to start without the marks (a way out if a handler ever disagrees with something on a PC).
 const OFF: &str = "ARTDADDY_NO_EXIT_MARKS";
 
-/// The signals that end a process, each with the word written for it and its newline: the crash signals, the abort a panic ends in,
-/// and the requests to end (the system shutting down, a closed terminal, a person at a terminal).
-pub(crate) const SIGNALS: [(c_int, &[u8]); 9] = [
-  (libc::SIGSEGV, b"signal_segv\n"),
-  (libc::SIGBUS, b"signal_bus\n"),
-  (libc::SIGILL, b"signal_ill\n"),
-  (libc::SIGFPE, b"signal_fpe\n"),
-  (libc::SIGABRT, b"signal_abrt\n"),
-  (libc::SIGTERM, b"signal_term\n"),
-  (libc::SIGHUP, b"signal_hup\n"),
-  (libc::SIGINT, b"signal_int\n"),
-  (libc::SIGQUIT, b"signal_quit\n"),
+/// The signals that end a process: the word written for each (with its newline) and whether it is a crash, which the app's handler
+/// passes on to what was there before it. The requests to end (the system shutting down, a closed terminal, a person at a
+/// terminal) are taken only from the default action.
+pub(crate) const SIGNALS: [(c_int, &[u8], bool); 9] = [
+  (libc::SIGSEGV, b"signal_segv\n", true),
+  (libc::SIGBUS, b"signal_bus\n", true),
+  (libc::SIGILL, b"signal_ill\n", true),
+  (libc::SIGFPE, b"signal_fpe\n", true),
+  (libc::SIGABRT, b"signal_abrt\n", true),
+  (libc::SIGTERM, b"signal_term\n", false),
+  (libc::SIGHUP, b"signal_hup\n", false),
+  (libc::SIGINT, b"signal_int\n", false),
+  (libc::SIGQUIT, b"signal_quit\n", false),
 ];
 
 static INSTALLED: AtomicBool = AtomicBool::new(false);
@@ -64,7 +73,7 @@ static PREVIOUS_FLAGS: [AtomicI32; 9] = [
 ];
 
 extern "C" fn on_signal(signal: c_int, info: *mut libc::siginfo_t, context: *mut c_void) {
-  let Some(slot) = SIGNALS.iter().position(|(number, _)| *number == signal) else {
+  let Some(slot) = SIGNALS.iter().position(|(number, _, _)| *number == signal) else {
     return;
   };
   let fd = MARK_FD.load(Ordering::Relaxed);
@@ -99,42 +108,54 @@ extern "C" fn on_signal(signal: c_int, info: *mut libc::siginfo_t, context: *mut
   }
 }
 
-/// Opens the mark for this launch and takes the signals. Safe to call twice (the second call does nothing). On an error nothing was
-/// taken and every signal does what it always did. Does nothing when `ARTDADDY_NO_EXIT_MARKS` is set.
+/// Opens the mark for this launch and takes the signals. Safe to call twice (the second call does nothing, not even open a file). On
+/// an error nothing was taken and every signal does what it always did. Does nothing when `ARTDADDY_NO_EXIT_MARKS` is set.
 pub fn install(dir: &Path, launch_id: &str) -> std::io::Result<()> {
   if std::env::var_os(OFF).is_some() {
     return Ok(());
   }
+  if INSTALLED.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+    return Ok(());
+  }
   // Opened here, so the handler only ever writes: `open` is not something a handler may do. Close-on-exec by default, so no child
   // process the app starts keeps it.
-  let file = std::fs::OpenOptions::new()
+  let file = match std::fs::OpenOptions::new()
     .create(true)
     .append(true)
     .mode(0o600)
-    .open(dir.join(marker_file_name(launch_id)))?;
-  if INSTALLED.swap(true, Ordering::SeqCst) {
-    return Ok(());
-  }
+    .open(dir.join(marker_file_name(launch_id)))
+  {
+    Ok(file) => file,
+    Err(error) => {
+      INSTALLED.store(false, Ordering::SeqCst);
+      return Err(error);
+    }
+  };
   MARK_FD.store(file.into_raw_fd(), Ordering::SeqCst);
-  for (slot, (signal, _)) in SIGNALS.iter().enumerate() {
+  for (slot, (signal, _, crash)) in SIGNALS.iter().enumerate() {
     // SAFETY: both are plain C structs filled in before use; `sigaction` reports what the signal did and then takes it.
     unsafe {
-      let mut previous: libc::sigaction = std::mem::zeroed();
-      if libc::sigaction(*signal, std::ptr::null(), &mut previous) != 0 {
+      let mut before: libc::sigaction = std::mem::zeroed();
+      if libc::sigaction(*signal, std::ptr::null(), &mut before) != 0 {
         continue;
       }
-      // Someone chose to ignore this signal (a program started with `nohup` ignores the hang-up): so does the app.
-      if previous.sa_sigaction == libc::SIG_IGN {
+      // Someone chose to ignore this signal (a program started with `nohup` ignores the hang-up): so does the app. A request to
+      // end that somebody handles is theirs (see the top of this file): it is left as it is.
+      if before.sa_sigaction == libc::SIG_IGN || (!*crash && before.sa_sigaction != libc::SIG_DFL) {
         continue;
       }
-      PREVIOUS_HANDLER[slot].store(previous.sa_sigaction, Ordering::SeqCst);
-      PREVIOUS_FLAGS[slot].store(previous.sa_flags, Ordering::SeqCst);
+      PREVIOUS_HANDLER[slot].store(before.sa_sigaction, Ordering::SeqCst);
+      PREVIOUS_FLAGS[slot].store(before.sa_flags, Ordering::SeqCst);
       let mut ours: libc::sigaction = std::mem::zeroed();
       ours.sa_sigaction = on_signal as extern "C" fn(c_int, *mut libc::siginfo_t, *mut c_void) as libc::sighandler_t;
       // On the alternate stack where there is one: a stack that ran out is a stack the handler cannot use.
       ours.sa_flags = libc::SA_SIGINFO | libc::SA_ONSTACK;
       libc::sigemptyset(&mut ours.sa_mask);
-      libc::sigaction(*signal, &ours, std::ptr::null_mut());
+      let mut replaced: libc::sigaction = std::mem::zeroed();
+      if libc::sigaction(*signal, &ours, &mut replaced) == 0 && replaced.sa_sigaction != before.sa_sigaction {
+        // Another thread took the signal between the two calls: give it back, theirs stays what it is.
+        libc::sigaction(*signal, &replaced, std::ptr::null_mut());
+      }
     }
   }
   Ok(())
@@ -172,6 +193,23 @@ mod tests {
     read_marker(dir, LAUNCH).map(|marker| marker.word)
   }
 
+  /// Set by the handler a scenario installs as "somebody else's" before the app's, so it can be seen to have run.
+  static THEIRS_RAN: AtomicBool = AtomicBool::new(false);
+  extern "C" fn theirs(_: c_int) {
+    THEIRS_RAN.store(true, Ordering::SeqCst);
+  }
+
+  /// A fault the hardware raises, not a signal sent by hand: a page that was mapped and then given back.
+  ///
+  /// # Safety
+  /// Ends in a fault by design: only for a process that exists to be ended by it.
+  unsafe fn fault() {
+    let page = libc::mmap(std::ptr::null_mut(), 4096, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_PRIVATE | libc::MAP_ANON, -1, 0);
+    assert_ne!(page, libc::MAP_FAILED);
+    assert_eq!(libc::munmap(page, 4096), 0);
+    std::ptr::write_volatile(page.cast::<u8>(), 1);
+  }
+
   /// The child's side. Does nothing unless this binary was started as a child.
   #[test]
   fn child() {
@@ -183,13 +221,12 @@ mod tests {
         "ignored" => {
           libc::signal(libc::SIGHUP, libc::SIG_IGN);
         }
-        "chained" => {
-          extern "C" fn theirs(_: c_int) {
-            // Their handler, installed before the app's: it leaves a file so the test can see it ran.
-            let dir = std::env::var(FOLDER).unwrap();
-            std::fs::write(Path::new(&dir).join("theirs-ran"), b"1").unwrap();
-          }
+        // Somebody else's handler, installed before the app's.
+        "theirs_term" => {
           libc::signal(libc::SIGTERM, theirs as extern "C" fn(c_int) as libc::sighandler_t);
+        }
+        "theirs_abrt" => {
+          libc::signal(libc::SIGABRT, theirs as extern "C" fn(c_int) as libc::sighandler_t);
         }
         // A test runner started in the background of a shell inherits "ignore" for the interrupt: every other scenario starts
         // from the default action, which is the disposition a desktop app is launched with.
@@ -204,15 +241,17 @@ mod tests {
     // SAFETY: as above.
     unsafe {
       match scenario.as_str() {
-        "segv" => std::ptr::write_volatile(std::ptr::null_mut::<u8>(), 1),
+        "segv" => fault(),
         "ill" => {
           libc::raise(libc::SIGILL);
         }
         "fpe" => {
           libc::raise(libc::SIGFPE);
         }
-        "abrt" => libc::abort(),
-        "term" | "chained" | "twice" | "off" | "unwritable" => {
+        "abrt" | "theirs_abrt" => {
+          libc::raise(libc::SIGABRT);
+        }
+        "term" | "theirs_term" | "twice" | "off" | "unwritable" => {
           if scenario == "twice" {
             let other = dir.join("second");
             std::fs::create_dir_all(&other).unwrap();
@@ -243,19 +282,22 @@ mod tests {
         other => panic!("no scenario {other}"),
       }
     }
-    // Reached only when the signal did not end the process: handled by somebody else, or ignored.
-    std::process::exit(if scenario == "chained" && !dir.join("theirs-ran").exists() { 2 } else { 99 });
+    // Reached only when the signal did not end the process: handled by somebody else, or ignored. 98 says their handler ran.
+    std::process::exit(if THEIRS_RAN.load(Ordering::SeqCst) { 98 } else { 99 });
   }
 
   #[test]
   fn the_words_a_handler_writes_are_exactly_the_words_the_reader_believes() {
     let written: Vec<String> =
-      SIGNALS.iter().map(|(_, word)| String::from_utf8(word.to_vec()).unwrap().trim_end().to_string()).collect();
+      SIGNALS.iter().map(|(_, word, _)| String::from_utf8(word.to_vec()).unwrap().trim_end().to_string()).collect();
     assert_eq!(written, SIGNAL_WORDS.iter().map(|word| word.to_string()).collect::<Vec<_>>());
-    let mut numbers: Vec<c_int> = SIGNALS.iter().map(|(number, _)| *number).collect();
+    let mut numbers: Vec<c_int> = SIGNALS.iter().map(|(number, _, _)| *number).collect();
     numbers.sort_unstable();
     numbers.dedup();
     assert_eq!(numbers.len(), SIGNALS.len());
+    // The crashes are passed on to what was there; the requests to end are taken only from the default action.
+    let crashes: Vec<&str> = SIGNALS.iter().filter(|(_, _, crash)| *crash).map(|(_, word, _)| std::str::from_utf8(word).unwrap().trim_end()).collect();
+    assert_eq!(crashes, ["signal_segv", "signal_bus", "signal_ill", "signal_fpe", "signal_abrt"]);
   }
 
   #[test]
@@ -286,12 +328,19 @@ mod tests {
   }
 
   #[test]
-  fn a_signal_somebody_else_handles_still_reaches_them_and_the_process_carries_on() {
+  fn a_request_to_end_that_somebody_else_handles_is_left_to_them_and_leaves_no_word() {
     let dir = tempfile::tempdir().unwrap();
-    let status = run_child("chained", dir.path());
-    assert_eq!(status.code(), Some(99), "{status:?}");
-    assert!(dir.path().join("theirs-ran").exists(), "their handler must still run");
-    assert_eq!(word_of(dir.path()), Some("signal_term"));
+    let status = run_child("theirs_term", dir.path());
+    assert_eq!(status.code(), Some(98), "their handler must run, and the process carry on: {status:?}");
+    assert_eq!(word_of(dir.path()), None);
+  }
+
+  #[test]
+  fn a_crash_signal_somebody_else_handles_still_reaches_them_after_the_word_is_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let status = run_child("theirs_abrt", dir.path());
+    assert_eq!(status.code(), Some(98), "their handler must run, and the process carry on: {status:?}");
+    assert_eq!(word_of(dir.path()), Some("signal_abrt"));
   }
 
   #[test]
@@ -326,12 +375,12 @@ mod tests {
   }
 
   #[test]
-  fn installing_twice_changes_nothing_and_the_first_mark_keeps_the_word() {
+  fn installing_twice_changes_nothing_and_does_not_even_open_another_mark() {
     let dir = tempfile::tempdir().unwrap();
     let status = run_child("twice", dir.path());
     assert_eq!(status.signal(), Some(libc::SIGTERM), "{status:?}");
     assert_eq!(word_of(dir.path()), Some("signal_term"));
-    assert_eq!(read_marker(&dir.path().join("second"), LAUNCH).map(|marker| marker.word), None);
+    assert!(!dir.path().join("second").join(marker_file_name(LAUNCH)).exists());
   }
 
   #[test]
