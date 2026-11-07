@@ -48,6 +48,7 @@ import { sourceLengths } from "../timeline/sourceLength";
 import type { CommandRunner } from "../tools/command";
 import type { ClientToolContext } from "../tools/context";
 import type { ProjectStoreAccess } from "../tools/store";
+import { recordEdit, type EditKind } from "../api/editorEvents";
 import type { EditorState } from "./editor";
 
 // Timeline edit tools only ever read ctx.store; this runner guards against an op
@@ -122,6 +123,97 @@ type EditorCommandKey =
   | "setTrack"
   | "setTracks";
 
+/** Every action a person can take on the project by hand: the editor's commands, and Undo and Redo, which live in the store. */
+export type HandActionKey = EditorCommandKey | "undo" | "redo";
+
+type ArgsOf<K extends HandActionKey> = EditorState[K] extends (...args: infer A) => unknown
+  ? A
+  : never;
+/** What taking an action counts as: one kind of action, a kind worked out from what it was given, or nothing (it does not
+ *  change the project). Only the SHAPE of what was given is read (which property names), never what it holds. */
+type CountsAs<K extends HandActionKey> = EditKind | null | ((...args: ArgsOf<K>) => EditKind);
+
+const EFFECT_PROPERTIES = new Set(["color", "effects"]);
+const TEXT_PROPERTIES = new Set(["text", "style"]);
+/** What a change of a clip's properties is, from the property NAMES alone: its colour or look, its text or the style of it, or
+ *  a plain setting. The values (what was typed, which colour) are never read. */
+export function propertyEditKind(properties: Record<string, unknown> | null | undefined): EditKind {
+  const names = Object.keys(properties ?? {});
+  if (names.some((name) => EFFECT_PROPERTIES.has(name))) return "effect";
+  if (names.some((name) => TEXT_PROPERTIES.has(name))) return "text";
+  return "property";
+}
+
+/** THE list of the editor's actions and what each counts as (editorEvents.ts EDIT_KINDS). A test walks the real store and fails
+ *  on any action that is neither here nor named as not an edit, so a new action cannot go uncounted without someone deciding
+ *  that it should. `null` is a command that changes nothing in the project. */
+export const HAND_EDIT_KIND: { [K in HandActionKey]: CountsAs<K> } = {
+  moveClip: (_clipId, opts) => (opts?.duplicate ? "add" : "move"),
+  trimClip: "trim",
+  nudgeClips: "move",
+  moveSelectionBy: "move",
+  setClipEnabled: "property",
+  trimToPlayhead: "trim",
+  rippleTrim: "trim",
+  rollEdit: "trim",
+  slipClip: "trim",
+  slideClip: "move",
+  clipSourceFrames: null, // a read: how long a source is
+  splitClip: "split",
+  deleteClips: "delete",
+  rippleDeleteClip: "delete",
+  rippleDeleteGap: "delete",
+  duplicateClip: "add",
+  linkClips: "link",
+  unlinkClips: "link",
+  copyClip: null, // fills the clipboard, changes nothing in the project
+  pasteClip: "add",
+  setClipProperties: (_clipId, properties) => propertyEditKind(properties),
+  setKeyframe: "keyframe",
+  setTransition: "transition",
+  setCanvas: "canvas",
+  addClip: "add",
+  addClips: "add",
+  processImport: null, // indexing of a file that is already in the library, not an edit
+  addTrack: "track",
+  removeTrack: "track",
+  setTrack: "track",
+  setTracks: "track",
+  undo: "undo",
+  redo: "redo",
+};
+
+/** The actions, each counted as what it is when a person takes it. The count is made first and can never fail or slow the
+ *  action: it only adds one to an in-memory window (api/editorEvents.ts), and an error in it is swallowed. What the action is
+ *  given and what it returns pass through untouched. Counted when TAKEN, not when it lands: the UI calls these only on a real
+ *  gesture (a drag that moved, a key pressed), so a refused edit still counts as one the person tried. */
+export function countHandEdits<T extends object>(
+  actions: T,
+  projectId: () => string,
+  record: (kind: EditKind, projectId: string) => void = recordEdit,
+): T {
+  const counted: Record<string, unknown> = { ...actions };
+  for (const [key, action] of Object.entries(actions)) {
+    const rule = (HAND_EDIT_KIND as Record<string, CountsAs<HandActionKey> | undefined>)[key];
+    if (typeof action !== "function" || rule === null || rule === undefined) continue;
+    counted[key] = (...args: unknown[]) => {
+      try {
+        // No project open means no edit was made: the UI can fire a gesture before a project finishes loading.
+        const project = projectId();
+        if (project)
+          record(
+            typeof rule === "function" ? (rule as (...given: unknown[]) => EditKind)(...args) : rule,
+            project,
+          );
+      } catch {
+        // Counting is a beacon, not a feature: it must never stop the edit it describes.
+      }
+      return (action as (...given: unknown[]) => unknown)(...args);
+    };
+  }
+  return counted as T;
+}
+
 /** Build the editor's timeline-mutation commands bound to the store's get/set +
  *  the (lazy, injectable) command runner. */
 export function makeEditorCommands(
@@ -139,7 +231,7 @@ export function makeEditorCommands(
       return editCtx(store); // no Tauri (web) -> unbounded, same as an unprobeable file
     }
   };
-  return {
+  const commands: Pick<EditorState, EditorCommandKey> = {
     moveClip: async (clipId, opts) => {
       const { store } = get();
       if (!store) return;
@@ -464,4 +556,5 @@ export function makeEditorCommands(
       );
     },
   };
+  return countHandEdits(commands, () => get().projectId ?? "");
 }

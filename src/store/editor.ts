@@ -28,7 +28,7 @@ import { projectDirFor } from "../tools/dataRoot";
 import { ProjectStoreAccess } from "../tools/store";
 import { useProjectNotice } from "./projectNotice";
 import { IndexCoordinator } from "./indexCoordinator";
-import { makeEditorCommands } from "./editorCommands";
+import { countHandEdits, makeEditorCommands } from "./editorCommands";
 
 export type ProjectStoreFactory = (
   projectDir: string,
@@ -634,14 +634,20 @@ const editorCreator: StateCreator<EditorState> = (set, get) => {
 
     // Undo/redo route through the shared engine; the resulting write emits on the
     // bus, so the subscriber above refreshes `timeline` — no manual reload needed.
-    undo: async () => {
-      const { store } = get();
-      if (store) await doUndo(store);
-    },
-    redo: async () => {
-      const { store } = get();
-      if (store) await doRedo(store);
-    },
+    // Counted like every other action a person takes by hand (editorCommands.ts HAND_EDIT_KIND).
+    ...countHandEdits(
+      {
+        undo: async () => {
+          const { store } = get();
+          if (store) await doUndo(store);
+        },
+        redo: async () => {
+          const { store } = get();
+          if (store) await doRedo(store);
+        },
+      },
+      () => get().projectId ?? "",
+    ),
 
     ...makeEditorCommands(get, set, () => makeRunner()),
 
