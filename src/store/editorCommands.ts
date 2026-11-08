@@ -192,7 +192,7 @@ export function countHandEdits<T extends object>(
   projectId: () => string,
   record: (kind: EditKind, projectId: string) => void = recordEdit,
 ): T {
-  const counted: Record<string, unknown> = { ...actions };
+  const counted: Record<string, unknown> = { ...(actions as Record<string, unknown>) };
   for (const [key, action] of Object.entries(actions)) {
     const rule = (HAND_EDIT_KIND as Record<string, CountsAs<HandActionKey> | undefined>)[key];
     if (typeof action !== "function" || rule === null || rule === undefined) continue;
@@ -202,7 +202,9 @@ export function countHandEdits<T extends object>(
         const project = projectId();
         if (project)
           record(
-            typeof rule === "function" ? (rule as (...given: unknown[]) => EditKind)(...args) : rule,
+            typeof rule === "function"
+              ? (rule as (...given: unknown[]) => EditKind)(...args)
+              : rule,
             project,
           );
       } catch {

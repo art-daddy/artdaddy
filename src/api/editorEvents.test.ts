@@ -205,7 +205,8 @@ describe("a window of hand edits", () => {
               got.set(key, (got.get(key) ?? 0) + n);
             }
           expect(Object.fromEntries(got)).toEqual(Object.fromEntries(expected));
-          for (const p of posted) expect(p.body.events.length).toBeLessThanOrEqual(MAX_EDITOR_ITEMS);
+          for (const p of posted)
+            expect(p.body.events.length).toBeLessThanOrEqual(MAX_EDITOR_ITEMS);
         },
       ),
       { numRuns: 40 },
@@ -260,7 +261,11 @@ describe("what is held when the account goes away", () => {
   });
 
   it("is never sent under a different account that signs in afterwards", async () => {
-    useAuth.setState({ status: "unlocked", profile: { user_id: "alice" } as never, hasStoredSession: true });
+    useAuth.setState({
+      status: "unlocked",
+      profile: { user_id: "alice" } as never,
+      hasStoredSession: true,
+    });
     recordEdit("move", "p1");
     recordPreview({ what: "first_frame", ms: 900 }, "p1");
     useAuth.setState({ profile: { user_id: "bob" } as never });
@@ -272,7 +277,11 @@ describe("what is held when the account goes away", () => {
   });
 
   it("a request already on its way when the account changes is stopped before it leaves", async () => {
-    useAuth.setState({ status: "unlocked", profile: { user_id: "alice" } as never, hasStoredSession: true });
+    useAuth.setState({
+      status: "unlocked",
+      profile: { user_id: "alice" } as never,
+      hasStoredSession: true,
+    });
     let release: () => void = () => undefined;
     hoisted.gate = new Promise<void>((resolve) => {
       release = resolve;
@@ -348,16 +357,28 @@ describe("a file brought in", () => {
     expect(posted[0].body.events[0]).not.toHaveProperty("reason");
   });
 
-  it.each(IMPORT_REASONS)("every reason the app names (%s) reaches the wire as itself", async (reason) => {
-    recordImport({ ok: false, reason, media: "video" }, "p1");
-    await flushEditorEvents();
-    await settle();
-    expect(posted[0].body.events[0].reason).toBe(reason);
-  });
+  it.each(IMPORT_REASONS)(
+    "every reason the app names (%s) reaches the wire as itself",
+    async (reason) => {
+      recordImport({ ok: false, reason, media: "video" }, "p1");
+      await flushEditorEvents();
+      await settle();
+      expect(posted[0].body.events[0].reason).toBe(reason);
+    },
+  );
 
   it("a size and a length are bands, never the figure", async () => {
     recordMedia(
-      { media: "video", codec: "hevc", width: 3840, height: 2160, seconds: 613.4, bytes: 1_234_567_890, proxy: "built", ms: 41_234 },
+      {
+        media: "video",
+        codec: "hevc",
+        width: 3840,
+        height: 2160,
+        seconds: 613.4,
+        bytes: 1_234_567_890,
+        proxy: "built",
+        ms: 41_234,
+      },
       "p1",
     );
     await flushEditorEvents();
@@ -409,7 +430,10 @@ describe("how the preview behaved", () => {
   });
 
   it("a failure whose reason is not one of the words is `other`, and its codec is cut to a label", async () => {
-    recordPreview({ what: "failure", reason: "my private reason", codec: "hev1.1.6.L93.B0.EXTRA/long" }, "p1");
+    recordPreview(
+      { what: "failure", reason: "my private reason", codec: "hev1.1.6.L93.B0.EXTRA/long" },
+      "p1",
+    );
     await flushEditorEvents();
     await settle();
     expect(posted[0].body.events[0]).toMatchObject({ reason: "other" });
@@ -467,7 +491,8 @@ describe("nothing a person named, typed or showed can reach the wire", () => {
 
   it("and every legitimate word survives, as sent", async () => {
     for (const reason of IMPORT_REASONS) recordImport({ ok: false, reason, media: "video" }, "p1");
-    for (const failure of PREVIEW_FAILURES) recordPreview({ what: "failure", reason: failure }, "p2");
+    for (const failure of PREVIEW_FAILURES)
+      recordPreview({ what: "failure", reason: failure }, "p2");
     await flushEditorEvents();
     await settle();
     const reasons = posted.flatMap((p) => p.body.events.map((e) => e.reason));
@@ -490,7 +515,8 @@ describe("nothing a person named, typed or showed can reach the wire", () => {
 
 describe("a burst", () => {
   it("is sent in flushes of at most fifty items", async () => {
-    for (let i = 0; i < 120; i++) recordImport({ ok: true, media: "video", via: "reference", ms: i }, "p1");
+    for (let i = 0; i < 120; i++)
+      recordImport({ ok: true, media: "video", via: "reference", ms: i }, "p1");
     await flushEditorEvents();
     await settle();
     expect(posted.length).toBeGreaterThanOrEqual(3);
@@ -499,7 +525,8 @@ describe("a burst", () => {
   });
 
   it("past what a minute may carry is counted and said, never silently lost", async () => {
-    for (let i = 0; i < 620; i++) recordImport({ ok: true, media: "video", via: "reference" }, "p1");
+    for (let i = 0; i < 620; i++)
+      recordImport({ ok: true, media: "video", via: "reference" }, "p1");
     await vi.advanceTimersByTimeAsync(60_000);
     await settle();
     const sent = posted.reduce((n, p) => n + p.body.events.length, 0);
@@ -544,13 +571,18 @@ describe("the bands", () => {
 
   it("are monotone, never below the figure (up to the top step), and never more than a step above it", () => {
     fc.assert(
-      fc.property(fc.double({ min: 0, max: 5 * 10 ** 5, noNaN: true }), fc.double({ min: 0, max: 5 * 10 ** 5, noNaN: true }), (a, b) => {
-        const [low, high] = a <= b ? [a, b] : [b, a];
-        expect(bandSeconds(low)).toBeLessThanOrEqual(bandSeconds(high));
-        expect(bandMegabytes(low * MB)).toBeLessThanOrEqual(bandMegabytes(high * MB));
-        if (low > 0 && low <= 86_400) expect(bandSeconds(low)).toBeGreaterThanOrEqual(low);
-        if (low > 0 && low <= 262_144) expect(bandMegabytes(low * MB)).toBeGreaterThanOrEqual(low);
-      }),
+      fc.property(
+        fc.double({ min: 0, max: 5 * 10 ** 5, noNaN: true }),
+        fc.double({ min: 0, max: 5 * 10 ** 5, noNaN: true }),
+        (a, b) => {
+          const [low, high] = a <= b ? [a, b] : [b, a];
+          expect(bandSeconds(low)).toBeLessThanOrEqual(bandSeconds(high));
+          expect(bandMegabytes(low * MB)).toBeLessThanOrEqual(bandMegabytes(high * MB));
+          if (low > 0 && low <= 86_400) expect(bandSeconds(low)).toBeGreaterThanOrEqual(low);
+          if (low > 0 && low <= 262_144)
+            expect(bandMegabytes(low * MB)).toBeGreaterThanOrEqual(low);
+        },
+      ),
       { numRuns: 300 },
     );
   });
@@ -565,7 +597,16 @@ describe("the bands", () => {
 
 describe("the vocabulary", () => {
   it("has no word twice and nothing empty, in any list", () => {
-    for (const list of [EDIT_KINDS, IMPORT_REASONS, IMPORT_DOORS, MEDIA_KINDS, PROXY_STATES, PREVIEW_WHATS, PREVIEW_FAILURES, EDITOR_EVENT_KINDS]) {
+    for (const list of [
+      EDIT_KINDS,
+      IMPORT_REASONS,
+      IMPORT_DOORS,
+      MEDIA_KINDS,
+      PROXY_STATES,
+      PREVIEW_WHATS,
+      PREVIEW_FAILURES,
+      EDITOR_EVENT_KINDS,
+    ]) {
       expect(new Set(list).size).toBe(list.length);
       for (const word of list) expect(word).toMatch(/^[a-z_]+$/);
     }

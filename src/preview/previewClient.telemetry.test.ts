@@ -59,7 +59,12 @@ const flush = async (): Promise<void> => {
 };
 
 let clockMs = 0;
-function setup(options: { report?: (facts: PreviewFacts) => void; resolve?: (s: ProjectStoreAccess, src: string) => Promise<string | null> } = {}) {
+function setup(
+  options: {
+    report?: (facts: PreviewFacts) => void;
+    resolve?: (s: ProjectStoreAccess, src: string) => Promise<string | null>;
+  } = {},
+) {
   const worker = new FakeWorker();
   const canvas = { transferControlToOffscreen: () => ({}) } as unknown as HTMLCanvasElement;
   const onError = vi.fn();
@@ -115,7 +120,8 @@ describe("the first picture", () => {
       resolve: async (_s, src) => `url:${src}`,
     });
     const store = storeOf("C:/data/projects/p1");
-    (store as unknown as { resolveRef: (s: string) => Promise<string> }).resolveRef = async (src) => `C:/media/${src}.png`;
+    (store as unknown as { resolveRef: (s: string) => Promise<string> }).resolveRef = async (src) =>
+      `C:/media/${src}.png`;
     client.setStore(store);
     client.render(timelineOf({ media_ref: "shot", kind: "video" }), 0);
     await flush();
@@ -224,12 +230,15 @@ describe("a stretch where the picture stood still", () => {
   it("the playhead hold is unchanged: the owner of the stall signal still hears every edge", async () => {
     const worker = new FakeWorker();
     const onStalled = vi.fn();
-    createPreviewClient({ transferControlToOffscreen: () => ({}) } as unknown as HTMLCanvasElement, {
-      createWorker: () => worker as unknown as Worker,
-      onStalled,
-      report: () => undefined,
-      now: () => clockMs,
-    });
+    createPreviewClient(
+      { transferControlToOffscreen: () => ({}) } as unknown as HTMLCanvasElement,
+      {
+        createWorker: () => worker as unknown as Worker,
+        onStalled,
+        report: () => undefined,
+        now: () => clockMs,
+      },
+    );
     worker.emit({ type: "stalled", stalled: true });
     worker.emit({ type: "stalled", stalled: false });
     expect(onStalled.mock.calls).toEqual([[true], [false]]);
@@ -255,7 +264,8 @@ describe("a video it could not show", () => {
     const said: PreviewFacts[] = [];
     const { client } = setup({ report: (f) => said.push(f), resolve: async () => null });
     const store = storeOf("C:/data/projects/p1");
-    (store as unknown as { resolveRef: (s: string) => Promise<string | null> }).resolveRef = async () => null; // the drive is gone
+    (store as unknown as { resolveRef: (s: string) => Promise<string | null> }).resolveRef =
+      async () => null; // the drive is gone
     client.setStore(store);
     client.render(timelineOf({ media_ref: "gone", kind: "video" }), 0);
     await flush();
@@ -301,7 +311,8 @@ describe("a video it could not show", () => {
     const { client } = setup({ resolve: async () => null });
     const waiting: Array<(path: string | null) => void> = [];
     const slow = storeOf("C:/data/projects/p1");
-    (slow as unknown as { resolveRef: () => Promise<string | null> }).resolveRef = () => new Promise((r) => waiting.push(r));
+    (slow as unknown as { resolveRef: () => Promise<string | null> }).resolveRef = () =>
+      new Promise((r) => waiting.push(r));
     client.setStore(slow);
     client.render(timelineOf({ media_ref: "gone", kind: "video" }), 0);
     await flush();

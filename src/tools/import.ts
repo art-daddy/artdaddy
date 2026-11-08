@@ -304,7 +304,10 @@ async function registerLibraryClipInner(
     const reason = undecodableImageReason(head);
     if (reason) {
       await staged?.discard();
-      throw new ImportRefusal("image_too_large", `'${filename || "image"}' can't be used as media: ${reason}.`);
+      throw new ImportRefusal(
+        "image_too_large",
+        `'${filename || "image"}' can't be used as media: ${reason}.`,
+      );
     }
   }
   if (kind === "video" || kind === "audio") {

@@ -9,7 +9,14 @@ import { ImportRefusal, importDoor, importReasonOf } from "./importReasons";
 describe("importReasonOf", () => {
   it("takes the word from what refused the file, whatever the message says", () => {
     for (const reason of IMPORT_REASONS)
-      expect(importReasonOf(new ImportRefusal(reason, "'Holiday final.mp4' can't be used: Access is denied (os error 5)"))).toBe(reason);
+      expect(
+        importReasonOf(
+          new ImportRefusal(
+            reason,
+            "'Holiday final.mp4' can't be used: Access is denied (os error 5)",
+          ),
+        ),
+      ).toBe(reason);
   });
 
   it.each([
@@ -31,7 +38,10 @@ describe("importReasonOf", () => {
     ["(os error 112)", "disk_full"],
     ["(os error 32)", "file_in_use"],
     ["(os error 33)", "file_in_use"],
-    ["The process cannot access the file because it is being used by another process. (os error 32)", "file_in_use"],
+    [
+      "The process cannot access the file because it is being used by another process. (os error 32)",
+      "file_in_use",
+    ],
     ["EBUSY: resource busy or locked", "file_in_use"],
     ["something nobody has seen before", "other"],
     ["", "other"],
@@ -63,7 +73,9 @@ describe("importReasonOf", () => {
   });
 
   it("nothing of the message survives: the answer is the same word whatever name is in the text", () => {
-    const named = importReasonOf(new Error("'My Private Holiday.mp4': Access is denied. (os error 5)"));
+    const named = importReasonOf(
+      new Error("'My Private Holiday.mp4': Access is denied. (os error 5)"),
+    );
     const other = importReasonOf(new Error("'x.mov': Access is denied. (os error 5)"));
     expect(named).toBe(other);
     expect(IMPORT_REASONS).toContain(named);
@@ -93,9 +105,13 @@ describe("importDoor", () => {
 
   it("is always a word of the list, whatever provenance arrives", () => {
     fc.assert(
-      fc.property(fc.option(fc.string()), fc.option(fc.dictionary(fc.string(), fc.anything())), (path, source) => {
-        expect(IMPORT_DOORS).toContain(importDoor(path ?? undefined, source ?? undefined));
-      }),
+      fc.property(
+        fc.option(fc.string()),
+        fc.option(fc.dictionary(fc.string(), fc.anything())),
+        (path, source) => {
+          expect(IMPORT_DOORS).toContain(importDoor(path ?? undefined, source ?? undefined));
+        },
+      ),
       { numRuns: 300 },
     );
   });

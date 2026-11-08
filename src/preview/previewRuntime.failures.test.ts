@@ -63,7 +63,15 @@ function timeline(kind: "image" | "video"): Timeline {
         kind: "video",
         z: 0,
         clips: [
-          { id: "clip", kind, media_ref: "asset", source_in: 0, source_out: 93, timeline_in: 0, timeline_out: 93 },
+          {
+            id: "clip",
+            kind,
+            media_ref: "asset",
+            source_in: 0,
+            source_out: 93,
+            timeline_in: 0,
+            timeline_out: 93,
+          },
         ],
       },
     ],
@@ -74,7 +82,8 @@ function runtime() {
   const scope: PreviewScope = { onmessage: null, postMessage: (message) => messages.push(message) };
   const dispose = startPreviewRuntime(scope);
   disposals.push(dispose);
-  const send = (message: PreviewInbound) => scope.onmessage?.({ data: message } as MessageEvent<PreviewInbound>);
+  const send = (message: PreviewInbound) =>
+    scope.onmessage?.({ data: message } as MessageEvent<PreviewInbound>);
   send({ type: "init", canvas: {} as OffscreenCanvas });
   const failures = () => messages.filter((m) => m.type === "failure");
   return { messages, dispose, send, failures };
@@ -93,9 +102,15 @@ afterEach(() => {
 
 describe("a video the preview could not read", () => {
   it.each(PREVIEW_FAILURES)("says %s when that is what the file failed with", async (reason) => {
-    state.ready = () => Promise.reject(new PreviewFailureError(reason, "the message may name 'My Holiday.mp4'"));
+    state.ready = () =>
+      Promise.reject(new PreviewFailureError(reason, "the message may name 'My Holiday.mp4'"));
     const { send, failures } = runtime();
-    send({ type: "render", timeline: timeline("video"), time: 0, urls: { asset: "asset://My%20Holiday.mp4" } });
+    send({
+      type: "render",
+      timeline: timeline("video"),
+      time: 0,
+      urls: { asset: "asset://My%20Holiday.mp4" },
+    });
     await settle();
     expect(failures()).toEqual([{ type: "failure", source: "asset", reason, codec: "" }]);
   });
@@ -117,7 +132,8 @@ describe("a video the preview could not read", () => {
 
   it("says which codec family it was when the index had been read far enough to know", async () => {
     state.family = "hev1";
-    state.ready = () => Promise.reject(new PreviewFailureError("read_failed", "range read failed: 500"));
+    state.ready = () =>
+      Promise.reject(new PreviewFailureError("read_failed", "range read failed: 500"));
     const { send, failures } = runtime();
     send({ type: "render", timeline: timeline("video"), time: 0, urls: { asset: "u" } });
     await settle();
@@ -125,9 +141,15 @@ describe("a video the preview could not read", () => {
   });
 
   it("carries nothing of the message or the url", async () => {
-    state.ready = () => Promise.reject(new PreviewFailureError("no_index", "C:/Users/me/My Holiday.mp4 has no moov"));
+    state.ready = () =>
+      Promise.reject(new PreviewFailureError("no_index", "C:/Users/me/My Holiday.mp4 has no moov"));
     const { send, messages } = runtime();
-    send({ type: "render", timeline: timeline("video"), time: 0, urls: { asset: "asset://localhost/C%3A/Users/me/My%20Holiday.mp4" } });
+    send({
+      type: "render",
+      timeline: timeline("video"),
+      time: 0,
+      urls: { asset: "asset://localhost/C%3A/Users/me/My%20Holiday.mp4" },
+    });
     await settle();
     expect(JSON.stringify(messages)).not.toMatch(/Holiday|Users|localhost|moov/);
   });
@@ -150,7 +172,9 @@ describe("a decoder that stops with an error", () => {
     video.onFailure?.("decoder_error");
     video.onFailure?.("decoder_error");
     video.onFailure?.("decoder_error");
-    expect(failures()).toEqual([{ type: "failure", source: "asset", reason: "decoder_error", codec: "avc1" }]);
+    expect(failures()).toEqual([
+      { type: "failure", source: "asset", reason: "decoder_error", codec: "avc1" },
+    ]);
   });
 
   it("a second kind of failure for the same source is a second thing to say", async () => {
@@ -159,7 +183,10 @@ describe("a decoder that stops with an error", () => {
     await settle();
     state.videos[0].onFailure?.("decoder_error");
     state.videos[0].onFailure?.("unsupported");
-    expect(failures().map((f) => (f as { reason: string }).reason)).toEqual(["decoder_error", "unsupported"]);
+    expect(failures().map((f) => (f as { reason: string }).reason)).toEqual([
+      "decoder_error",
+      "unsupported",
+    ]);
   });
 
   it("says nothing after the preview has been closed", async () => {
@@ -178,7 +205,9 @@ describe("a picture that would not load", () => {
     const { send, failures, messages } = runtime();
     send({ type: "render", timeline: timeline("image"), time: 0, urls: { asset: "u" } });
     await settle();
-    expect(failures()).toEqual([{ type: "failure", source: "asset", reason: "image_failed", codec: "" }]);
+    expect(failures()).toEqual([
+      { type: "failure", source: "asset", reason: "image_failed", codec: "" },
+    ]);
     expect(JSON.stringify(messages)).not.toMatch(/Users|photo/);
   });
 });

@@ -424,7 +424,7 @@ describe("a look's report is tied to the call that made it", () => {
     bodies.flatMap((b) =>
       (b.events as Array<Record<string, Any>>)
         .filter((e) => e.kind === "look")
-        .map((e) => ({ ...e, surface: b.surface, mcp_client: b.mcp_client })),
+        .map((e): Record<string, Any> => ({ ...e, surface: b.surface, mcp_client: b.mcp_client })),
     );
 
   it("carries the call's id and the labels of whoever made it, for an outside agent", async () => {

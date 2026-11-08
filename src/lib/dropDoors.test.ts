@@ -32,13 +32,33 @@ afterEach(() => __resetEditorEvents());
 describe("a drop of paths (desktop)", () => {
   it("returns the media in the order dropped, and reports each other file once, as unsupported", () => {
     const media = acceptDroppedPaths(
-      ["C:\\v\\a.mp4", "C:\\v\\notes.txt", "/home/me/b.JPG", "/home/me/archive.zip", "C:\\v\\c.wav"],
+      [
+        "C:\\v\\a.mp4",
+        "C:\\v\\notes.txt",
+        "/home/me/b.JPG",
+        "/home/me/archive.zip",
+        "C:\\v\\c.wav",
+      ],
       "p1",
     );
     expect(media).toEqual(["C:\\v\\a.mp4", "/home/me/b.JPG", "C:\\v\\c.wav"]);
     expect(held()).toMatchObject([
-      { kind: "import", ok: false, reason: "unsupported_type", media: "unknown", via: "reference", project: "p1" },
-      { kind: "import", ok: false, reason: "unsupported_type", media: "unknown", via: "reference", project: "p1" },
+      {
+        kind: "import",
+        ok: false,
+        reason: "unsupported_type",
+        media: "unknown",
+        via: "reference",
+        project: "p1",
+      },
+      {
+        kind: "import",
+        ok: false,
+        reason: "unsupported_type",
+        media: "unknown",
+        via: "reference",
+        project: "p1",
+      },
     ]);
   });
 
@@ -54,13 +74,19 @@ describe("a drop of paths (desktop)", () => {
   });
 
   it("puts one marker on the whole drop, not one per file, so a folder of junk costs one beacon", () => {
-    acceptDroppedPaths(Array.from({ length: 40 }, (_, i) => `/x/file${i}.xyz`), "p1");
+    acceptDroppedPaths(
+      Array.from({ length: 40 }, (_, i) => `/x/file${i}.xyz`),
+      "p1",
+    );
     expect(held()).toHaveLength(40);
     expect(marker.calls).toEqual([[false, "p1", "unsupported_type", "reference"]]);
   });
 
   it("carries no file name and no folder, only the word", () => {
-    acceptDroppedPaths(["C:\\Users\\me\\Documents\\Tax return 2026.pdf", "/home/me/secret project/notes.txt"], "p1");
+    acceptDroppedPaths(
+      ["C:\\Users\\me\\Documents\\Tax return 2026.pdf", "/home/me/secret project/notes.txt"],
+      "p1",
+    );
     const text = JSON.stringify([held(), marker.calls]);
     expect(text).not.toMatch(/Users|Documents|Tax|secret|notes|pdf|txt|home/);
   });
@@ -109,7 +135,11 @@ describe("no door turns files away by itself", () => {
     readdirSync(dir).flatMap((name) => {
       const full = join(dir, name);
       if (statSync(full).isDirectory()) return name === "node_modules" ? [] : sources(full);
-      return /\.(ts|tsx)$/.test(name) && !/\.(test|e2e|smoke)\./.test(name) && !name.startsWith("__") ? [full] : [];
+      return /\.(ts|tsx)$/.test(name) &&
+        !/\.(test|e2e|smoke)\./.test(name) &&
+        !name.startsWith("__")
+        ? [full]
+        : [];
     });
   const rel = (full: string): string => relative(SRC, full).split(sep).join("/");
   const ALL = sources(SRC).map((full) => ({ file: rel(full), text: readFileSync(full, "utf8") }));
@@ -117,9 +147,13 @@ describe("no door turns files away by itself", () => {
   it("only lib/upload.ts filters by the media pattern; a door that did would drop files unseen", () => {
     // From `.filter(` to the end of the statement: the arrow's own parentheses must not end the scan early.
     const offenders = ALL.filter(
-      (s) => s.file !== "lib/upload.ts" && /\.filter\([^;{}]*\b(MEDIA_RE|isMediaFile)\b/.test(s.text),
+      (s) =>
+        s.file !== "lib/upload.ts" && /\.filter\([^;{}]*\b(MEDIA_RE|isMediaFile)\b/.test(s.text),
     ).map((s) => s.file);
-    expect(offenders, "these files filter dropped files by MEDIA_RE/isMediaFile themselves: use acceptDroppedPaths/acceptDroppedFiles (lib/upload.ts)").toEqual([]);
+    expect(
+      offenders,
+      "these files filter dropped files by MEDIA_RE/isMediaFile themselves: use acceptDroppedPaths/acceptDroppedFiles (lib/upload.ts)",
+    ).toEqual([]);
   });
 
   it("the scan itself sees the idioms a door used (so it cannot pass by never matching)", () => {
@@ -132,7 +166,10 @@ describe("no door turns files away by itself", () => {
     ])
       expect(door).toMatch(idiom);
     // ...and does not flag the uses that are not a door: a name being classified for an icon.
-    for (const notADoor of ["else if (MEDIA_RE.test(n.name)) out.push(n);", "const media = MEDIA_RE.test(node.name);"])
+    for (const notADoor of [
+      "else if (MEDIA_RE.test(n.name)) out.push(n);",
+      "const media = MEDIA_RE.test(node.name);",
+    ])
       expect(notADoor).not.toMatch(idiom);
   });
 
@@ -154,8 +191,10 @@ describe("no door turns files away by itself", () => {
       const wantsPaths = /\bonOsDrop\(/.test(s.text);
       const wantsFiles = /dataTransfer\??\.files/.test(s.text);
       // TimelineEditor passes a lane drop's files to its own importFiles, which is where the helper is.
-      if (wantsPaths) expect(s.text, `${s.file} receives dropped paths`).toMatch(/acceptDroppedPaths\(/);
-      if (wantsFiles) expect(s.text, `${s.file} receives dropped files`).toMatch(/acceptDroppedFiles\(/);
+      if (wantsPaths)
+        expect(s.text, `${s.file} receives dropped paths`).toMatch(/acceptDroppedPaths\(/);
+      if (wantsFiles)
+        expect(s.text, `${s.file} receives dropped files`).toMatch(/acceptDroppedFiles\(/);
     }
   });
 });

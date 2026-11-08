@@ -62,7 +62,12 @@ describe("media_import", () => {
 
   it("cannot carry a file name whatever the caller passes: a reason that is not a word is `other`", async () => {
     // The guard's own message names the file, and this used to be sent as it came.
-    reportMediaImport(false, "p1", "'Holiday 2026 final.png' can't be used as media: 6864x41754 is too large", "copy");
+    reportMediaImport(
+      false,
+      "p1",
+      "'Holiday 2026 final.png' can't be used as media: 6864x41754 is too large",
+      "copy",
+    );
     const [ev] = await sent();
     expect(ev.reason).toBe("other");
     expect(JSON.stringify(posted)).not.toMatch(/Holiday|41754|png/);

@@ -570,11 +570,24 @@ describe("native crash watch, what ended an unexpected exit", () => {
 
   it("accepts every word the native side can answer with, read from its source so a word added there cannot be one the page drops", async () => {
     vi.useFakeTimers();
-    const source = readFileSync(join(__dirname, "..", "..", "src-tauri", "src", "os_exit_cause.rs"), "utf8");
+    const source = readFileSync(
+      join(__dirname, "..", "..", "src-tauri", "src", "os_exit_cause.rs"),
+      "utf8",
+    );
     const lists = [...source.matchAll(/pub const WORDS: \[&str; \d+\] = \[([\s\S]*?)\];/g)];
     expect(lists, "the Windows words and the macOS and Linux words").toHaveLength(2);
-    const words = lists.flatMap((list) => [...list[1].matchAll(/"([^"]+)"/g)].map((word) => word[1]));
-    expect(words).toEqual(expect.arrayContaining(["power_loss", "signal_segv", "os_shutdown", "no_trace", "crash_bad_access"]));
+    const words = lists.flatMap((list) =>
+      [...list[1].matchAll(/"([^"]+)"/g)].map((word) => word[1]),
+    );
+    expect(words).toEqual(
+      expect.arrayContaining([
+        "power_loss",
+        "signal_segv",
+        "os_shutdown",
+        "no_trace",
+        "crash_bad_access",
+      ]),
+    );
     for (const word of words) {
       native.invoke.mockReset();
       captureMock.mockReset();

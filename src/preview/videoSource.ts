@@ -139,7 +139,8 @@ export class VideoSource {
   private load(): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       const file = MP4Box.createFile();
-      file.onError = (e) => reject(new PreviewFailureError("unsupported", `mp4box(${this.url}): ${e}`));
+      file.onError = (e) =>
+        reject(new PreviewFailureError("unsupported", `mp4box(${this.url}): ${e}`));
       file.onReady = (info: MP4Info) => {
         const track = info.videoTracks[0];
         if (!track) {
@@ -197,7 +198,11 @@ export class VideoSource {
           resolve();
         } catch (e) {
           // Anything that went wrong reading the file (a refused range, a dropped connection) is a failure to read it.
-          reject(e instanceof PreviewFailureError ? e : new PreviewFailureError("read_failed", String(e)));
+          reject(
+            e instanceof PreviewFailureError
+              ? e
+              : new PreviewFailureError("read_failed", String(e)),
+          );
         }
       })();
     });

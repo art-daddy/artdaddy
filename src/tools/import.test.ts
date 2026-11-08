@@ -212,33 +212,61 @@ describe("what a refused or finished import says about itself (the editor stream
     ["There is not enough space on the disk. (os error 112)", "disk_full"],
     ["No space left on device (os error 28)", "disk_full"],
     ["The system cannot find the file specified. (os error 2)", "file_missing"],
-    ["The process cannot access the file because it is being used by another process. (os error 32)", "file_in_use"],
+    [
+      "The process cannot access the file because it is being used by another process. (os error 32)",
+      "file_in_use",
+    ],
     ["something nobody has seen before, with the file name hero.mp4 in it", "other"],
-  ])("the operating system's own words (%s) become the word %s and nothing of them is kept", async (message, word) => {
-    class Failing extends MockFs {
-      async writeBytes(): Promise<void> {
-        throw new Error(message);
+  ])(
+    "the operating system's own words (%s) become the word %s and nothing of them is kept",
+    async (message, word) => {
+      class Failing extends MockFs {
+        async writeBytes(): Promise<void> {
+          throw new Error(message);
+        }
       }
-    }
-    const store = new ProjectStoreAccess(DIR, new Failing());
-    await registerLibraryClip(store, new Uint8Array([1, 2, 3, 4]), "hero.mp4", "video").catch(() => undefined);
-    expect(tele.items.at(-1)?.facts).toMatchObject({ ok: false, reason: word });
-    expect(JSON.stringify(tele.items)).not.toContain("hero");
-  });
+      const store = new ProjectStoreAccess(DIR, new Failing());
+      await registerLibraryClip(store, new Uint8Array([1, 2, 3, 4]), "hero.mp4", "video").catch(
+        () => undefined,
+      );
+      expect(tele.items.at(-1)?.facts).toMatchObject({ ok: false, reason: word });
+      expect(JSON.stringify(tele.items)).not.toContain("hero");
+    },
+  );
 
   it("the door is one word of the list: a provenance a model supplied is `other`, a recording is a recording", async () => {
     const store = new ProjectStoreAccess(DIR, new MockFs());
-    await registerLibraryClip(store, new Uint8Array([1, 1, 1]), "a.mp4", "video", { kind: "youtube" });
-    await registerLibraryClip(store, new Uint8Array([2, 2, 2]), "b.mp4", "video", { kind: "recording" });
-    await registerLibraryClip(store, new Uint8Array([3, 3, 3]), "c.mp4", "video", { kind: "C:/Users/me/holiday" });
-    await registerLibraryClip(store, new Uint8Array([4, 4, 4]), "d.mp4", "video", undefined, "D:/footage/d.mp4");
-    expect(tele.items.map((i) => i.facts.via)).toEqual(["other", "recording", "other", "reference"]);
+    await registerLibraryClip(store, new Uint8Array([1, 1, 1]), "a.mp4", "video", {
+      kind: "youtube",
+    });
+    await registerLibraryClip(store, new Uint8Array([2, 2, 2]), "b.mp4", "video", {
+      kind: "recording",
+    });
+    await registerLibraryClip(store, new Uint8Array([3, 3, 3]), "c.mp4", "video", {
+      kind: "C:/Users/me/holiday",
+    });
+    await registerLibraryClip(
+      store,
+      new Uint8Array([4, 4, 4]),
+      "d.mp4",
+      "video",
+      undefined,
+      "D:/footage/d.mp4",
+    );
+    expect(tele.items.map((i) => i.facts.via)).toEqual([
+      "other",
+      "recording",
+      "other",
+      "reference",
+    ]);
   });
 
   it("a project that closes under an import is not a failed import", async () => {
     const store = new ProjectStoreAccess(DIR, new MockFs());
     endProjectSession(DIR);
-    await registerLibraryClip(store, new Uint8Array([1, 2, 3, 4]), "clip.mp4", "video").catch(() => undefined);
+    await registerLibraryClip(store, new Uint8Array([1, 2, 3, 4]), "clip.mp4", "video").catch(
+      () => undefined,
+    );
     expect(tele.items).toEqual([]);
   });
 });

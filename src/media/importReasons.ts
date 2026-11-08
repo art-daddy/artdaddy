@@ -22,7 +22,10 @@ export class ImportRefusal extends Error {
 const OS_REFUSALS: readonly [RegExp, ImportReason][] = [
   [/os error (2|3)\b|no such file|cannot find the (file|path)|ENOENT/i, "file_missing"],
   [/os error (5|13)\b|access is denied|permission denied|EACCES|EPERM/i, "permission"],
-  [/os error (28|112)\b|not enough (space|room)|no space left|ENOSPC|disk (is )?full/i, "disk_full"],
+  [
+    /os error (28|112)\b|not enough (space|room)|no space left|ENOSPC|disk (is )?full/i,
+    "disk_full",
+  ],
   [/os error (32|33)\b|being used by another process|EBUSY|resource busy/i, "file_in_use"],
 ];
 

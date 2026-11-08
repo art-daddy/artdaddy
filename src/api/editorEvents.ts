@@ -47,7 +47,14 @@ export const IMPORT_REASONS = [
   "file_in_use",
   "other",
 ] as const;
-export const IMPORT_DOORS = ["reference", "copy", "recording", "export", "generation", "other"] as const;
+export const IMPORT_DOORS = [
+  "reference",
+  "copy",
+  "recording",
+  "export",
+  "generation",
+  "other",
+] as const;
 export const MEDIA_KINDS = ["video", "image", "audio", "subtitle", "unknown"] as const;
 export const PROXY_STATES = ["none", "built", "failed"] as const;
 export const PREVIEW_WHATS = ["first_frame", "stall", "failure"] as const;
@@ -111,7 +118,9 @@ const WINDOW_MS = 60_000;
 const MAX_ITEMS_PER_MINUTE = 500;
 
 const whole = (value: unknown, max: number): number =>
-  typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.min(Math.round(value), max)) : 0;
+  typeof value === "number" && Number.isFinite(value)
+    ? Math.max(0, Math.min(Math.round(value), max))
+    : 0;
 
 /** A codec name as ffmpeg's own table spells it (`hevc`, `h264`, `prores`, `pcm_s16le`) or a codec family of a stream header
  *  (`avc1`, `hev1`): never text from a file, so a short name of that alphabet is all there is to keep. Anything that is not one
@@ -315,7 +324,10 @@ export function recordPreview(facts: PreviewFacts, projectId = "", now = Date.no
       what: facts.what,
       ms: whole(facts.ms, MAX_EDITOR_MS),
       ...(facts.what === "failure"
-        ? { reason: word(facts.reason, PREVIEW_FAILURES, "other"), codec: codecName(facts.codec, 12) }
+        ? {
+            reason: word(facts.reason, PREVIEW_FAILURES, "other"),
+            codec: codecName(facts.codec, 12),
+          }
         : {}),
     },
     projectId,
@@ -341,7 +353,8 @@ function windowItem(window: Window, now: number): EditorItem {
 export async function flushEditorEvents(now = Date.now()): Promise<void> {
   if (flushTimer) clearTimeout(flushTimer);
   flushTimer = null;
-  for (const [projectId, window] of windows) queue.push({ item: windowItem(window, now), projectId });
+  for (const [projectId, window] of windows)
+    queue.push({ item: windowItem(window, now), projectId });
   windows = new Map();
   if (queue.length === 0 && dropped === 0) return;
   // Taken BEFORE the await so what is recorded during the request joins the next flush instead of being lost to this one.
@@ -350,7 +363,8 @@ export async function flushEditorEvents(now = Date.now()): Promise<void> {
   const lost = dropped;
   dropped = 0;
   const groups = new Map<string, EditorItem[]>();
-  for (const { item, projectId } of pending) groups.set(projectId, [...(groups.get(projectId) ?? []), item]);
+  for (const { item, projectId } of pending)
+    groups.set(projectId, [...(groups.get(projectId) ?? []), item]);
   const requests: { projectId: string; events: EditorItem[]; dropped: number }[] = [];
   for (const [projectId, items] of groups)
     for (let at = 0; at < items.length; at += MAX_EDITOR_ITEMS)
@@ -400,7 +414,10 @@ async function deliver(
           // and that aborts every request on its way (discardSessionEvents).
           if (controller.signal.aborted) throw new Error("editor session ended before delivery");
           const body = JSON.parse(init.body as string) as Record<string, unknown>;
-          return fetch(url, { ...init, body: JSON.stringify({ ...body, sent_at: Date.now() / 1000 }) });
+          return fetch(url, {
+            ...init,
+            body: JSON.stringify({ ...body, sent_at: Date.now() / 1000 }),
+          });
         },
       );
   } catch {

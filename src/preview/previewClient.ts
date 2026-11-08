@@ -104,7 +104,8 @@ export function createPreviewClient(
   let probeTimer: ReturnType<typeof setTimeout> | null = null;
 
   // What the preview learns about itself, said once each and never able to disturb the picture.
-  const clock = deps.now ?? (() => (typeof performance === "undefined" ? Date.now() : performance.now()));
+  const clock =
+    deps.now ?? (() => (typeof performance === "undefined" ? Date.now() : performance.now()));
   const say =
     deps.report ??
     ((facts: PreviewFacts) => recordPreview(facts, projectIdOfDir(store?.projectDir ?? "")));

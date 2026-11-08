@@ -73,7 +73,9 @@ describe("the walk: every action of the editor is counted or named as not an edi
   };
 
   it("fails on an action that is neither counted nor named as not an edit", () => {
-    const unclassified = functions().filter((key) => !(key in HAND_EDIT_KIND) && !NOT_EDITS.has(key));
+    const unclassified = functions().filter(
+      (key) => !(key in HAND_EDIT_KIND) && !NOT_EDITS.has(key),
+    );
     expect(
       unclassified,
       `these editor actions are in neither HAND_EDIT_KIND (editorCommands.ts) nor NOT_EDITS: decide whether a person taking them changes the project`,
@@ -94,8 +96,13 @@ describe("the walk: every action of the editor is counted or named as not an edi
 describe("what each action counts as", () => {
   it("every word the server knows is produced by something a person can do", () => {
     const produced = new Set<EditKind>();
-    for (const rule of Object.values(HAND_EDIT_KIND)) if (typeof rule === "string") produced.add(rule);
-    produced.add((HAND_EDIT_KIND.moveClip as (id: string, o: { duplicate?: boolean }) => EditKind)("c", { duplicate: true }));
+    for (const rule of Object.values(HAND_EDIT_KIND))
+      if (typeof rule === "string") produced.add(rule);
+    produced.add(
+      (HAND_EDIT_KIND.moveClip as (id: string, o: { duplicate?: boolean }) => EditKind)("c", {
+        duplicate: true,
+      }),
+    );
     for (const props of [{ color: {} }, { text: "x" }, { opacity: 1 }])
       produced.add(propertyEditKind(props));
     expect([...produced].sort()).toEqual([...EDIT_KINDS].sort());
@@ -119,11 +126,15 @@ describe("what each action counts as", () => {
     expect(propertyEditKind(null)).toBe("property");
     expect(propertyEditKind(undefined)).toBe("property");
     // The value of a property decides nothing: the same name with another value is the same kind.
-    expect(propertyEditKind({ text: "" })).toBe(propertyEditKind({ text: "something else entirely" }));
+    expect(propertyEditKind({ text: "" })).toBe(
+      propertyEditKind({ text: "something else entirely" }),
+    );
   });
 
   it("the commands that change nothing are counted as nothing", () => {
-    const nothing = Object.entries(HAND_EDIT_KIND).filter(([, rule]) => rule === null).map(([key]) => key);
+    const nothing = Object.entries(HAND_EDIT_KIND)
+      .filter(([, rule]) => rule === null)
+      .map(([key]) => key);
     expect(nothing.sort()).toEqual(["clipSourceFrames", "copyClip", "processImport"]);
   });
 
@@ -209,7 +220,11 @@ describe("the wrapper", () => {
   it("counts an action that then fails, and lets the failure through", async () => {
     const record = vi.fn();
     const boom = new Error("refused");
-    const wrapped = countHandEdits({ splitClip: async () => Promise.reject(boom) }, () => "p1", record);
+    const wrapped = countHandEdits(
+      { splitClip: async () => Promise.reject(boom) },
+      () => "p1",
+      record,
+    );
     await expect(wrapped.splitClip()).rejects.toBe(boom);
     expect(record).toHaveBeenCalledTimes(1);
   });
@@ -286,15 +301,21 @@ describe("a real action through the real store", () => {
       undo: [],
       redo: [],
     };
-    const counted = Object.entries(HAND_EDIT_KIND).filter(([, rule]) => rule !== null).map(([key]) => key);
+    const counted = Object.entries(HAND_EDIT_KIND)
+      .filter(([, rule]) => rule !== null)
+      .map(([key]) => key);
     expect(Object.keys(SAMPLE).sort()).toEqual(counted.sort());
-    const state = useEditor.getState() as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
+    const state = useEditor.getState() as unknown as Record<
+      string,
+      (...args: unknown[]) => Promise<unknown>
+    >;
     for (const key of counted) {
       vi.mocked(recordEdit).mockClear();
       await Promise.resolve(state[key](...SAMPLE[key])).catch(() => undefined);
       const calls = recorded();
       expect(calls.length, `${key} was counted ${calls.length} times`).toBe(1);
-      const rule = HAND_EDIT_KIND[key as HandActionKey] as EditKind | ((...given: unknown[]) => EditKind);
+      const rule = HAND_EDIT_KIND[key as HandActionKey] as
+        EditKind | ((...given: unknown[]) => EditKind);
       const expected = typeof rule === "function" ? rule(...SAMPLE[key]) : rule;
       expect(calls[0], key).toEqual([expected, "p1"]);
     }

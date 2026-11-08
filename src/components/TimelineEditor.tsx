@@ -33,7 +33,12 @@ import { onOsDragOver, onOsDrop, webOwnsFileDrops } from "../lib/osDrop";
 import { useProjectNotice } from "../store/projectNotice";
 import { withImportJob } from "../store/importJobs";
 import { onDragPoint } from "../lib/dragSource";
-import { acceptDroppedFiles, acceptDroppedPaths, importFileByReference, uploadFiles } from "../lib/upload";
+import {
+  acceptDroppedFiles,
+  acceptDroppedPaths,
+  importFileByReference,
+  uploadFiles,
+} from "../lib/upload";
 import { ClipThumbnail } from "./ClipThumbnail";
 import { ClipWaveform } from "./ClipWaveform";
 import { AudioMeter } from "./AudioMeter";

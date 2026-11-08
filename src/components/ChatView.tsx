@@ -645,7 +645,7 @@ export default function ChatView({ onHide }: { onHide?: () => void } = {}) {
           // Web only: on desktop the drop arrives through osDrop, carrying real paths.
           if (!webOwnsFileDrops()) return;
           setDragOver(false);
-          const files = acceptDroppedFiles([...(e.dataTransfer.files ?? [])], projectId);
+          const files = acceptDroppedFiles([...(e.dataTransfer.files ?? [])], projectId ?? "");
           if (!files.length) return;
           e.preventDefault();
           void uploadFiles(files);

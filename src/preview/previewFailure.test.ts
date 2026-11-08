@@ -7,16 +7,29 @@ import { codecFamily, PreviewFailureError, previewFailureOf } from "./previewFai
 describe("previewFailureOf", () => {
   it("takes the word from the typed error, whatever its message says", () => {
     for (const reason of PREVIEW_FAILURES)
-      expect(previewFailureOf(new PreviewFailureError(reason, "C:/Users/me/My Holiday.mp4"))).toBe(reason);
+      expect(previewFailureOf(new PreviewFailureError(reason, "C:/Users/me/My Holiday.mp4"))).toBe(
+        reason,
+      );
   });
 
   it("the decoder's own 'not supported' answer is `unsupported`", () => {
-    expect(previewFailureOf(Object.assign(new Error("x"), { name: "NotSupportedError" }))).toBe("unsupported");
+    expect(previewFailureOf(Object.assign(new Error("x"), { name: "NotSupportedError" }))).toBe(
+      "unsupported",
+    );
     expect(previewFailureOf({ name: "NotSupportedError" })).toBe("unsupported");
   });
 
   it("anything else is `other`, and it never throws", () => {
-    for (const value of [new Error("boom"), "text", 42, null, undefined, {}, [], new DOMException("x", "AbortError")])
+    for (const value of [
+      new Error("boom"),
+      "text",
+      42,
+      null,
+      undefined,
+      {},
+      [],
+      new DOMException("x", "AbortError"),
+    ])
       expect(previewFailureOf(value)).toBe("other");
   });
 
@@ -44,7 +57,16 @@ describe("codecFamily", () => {
   });
 
   it("is nothing for what is not a short name", () => {
-    for (const value of ["", "C:/Users/me/holiday.mp4", "a b", "x".repeat(20), 42, null, undefined, "/avc1"])
+    for (const value of [
+      "",
+      "C:/Users/me/holiday.mp4",
+      "a b",
+      "x".repeat(20),
+      42,
+      null,
+      undefined,
+      "/avc1",
+    ])
       expect(codecFamily(value)).toBe("");
   });
 

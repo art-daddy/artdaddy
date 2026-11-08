@@ -85,12 +85,20 @@ describe("what a first look at a video says about it (the editor stream)", () =>
 
   it("a file the preview plays as it is says that no copy was needed", async () => {
     await run({ codec: "h264", format: "mov,mp4,m4a,3gp,3g2,mj2" });
-    expect(vi.mocked(recordMedia).mock.calls[0][0]).toMatchObject({ codec: "h264", proxy: "none", ms: 0 });
+    expect(vi.mocked(recordMedia).mock.calls[0][0]).toMatchObject({
+      codec: "h264",
+      proxy: "none",
+      ms: 0,
+    });
   });
 
   it("a copy that could not be made says so, and still says what the file is", async () => {
     await run({ codec: "hevc", format: "matroska,webm" }, "library/a.mp4", false, true);
-    expect(vi.mocked(recordMedia).mock.calls[0][0]).toMatchObject({ codec: "hevc", proxy: "failed", width: 1920 });
+    expect(vi.mocked(recordMedia).mock.calls[0][0]).toMatchObject({
+      codec: "hevc",
+      proxy: "failed",
+      width: 1920,
+    });
   });
 
   it("is said once for a file: looking at it again finds the copy and says nothing", async () => {
@@ -119,7 +127,9 @@ describe("what a first look at a video says about it (the editor stream)", () =>
 
   it("carries no file name and no folder", async () => {
     await run({ codec: "h264", format: "matroska,webm" }, "library/My Private Holiday.mp4");
-    expect(JSON.stringify(vi.mocked(recordMedia).mock.calls)).not.toMatch(/Private|Holiday|library|\.mp4/);
+    expect(JSON.stringify(vi.mocked(recordMedia).mock.calls)).not.toMatch(
+      /Private|Holiday|library|\.mp4/,
+    );
   });
 
   it("an audio-only file named like a video says nothing about a preview copy", async () => {

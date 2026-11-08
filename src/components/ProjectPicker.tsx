@@ -93,9 +93,7 @@ export default function ProjectPicker() {
   useEffect(() => {
     const off = onOsDrop("picker", (d) => {
       setDragOver(false);
-      addFootage(
-        acceptDroppedPaths(d.paths, "").map((path) => ({ name: baseNameOf(path), path })),
-      );
+      addFootage(acceptDroppedPaths(d.paths, "").map((path) => ({ name: baseNameOf(path), path })));
     });
     const offOver = onOsDragOver((d) => setDragOver(d?.target === "picker"));
     return () => {
