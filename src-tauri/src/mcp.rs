@@ -1009,8 +1009,37 @@ Active Connections
     TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), Duration::from_millis(300)).is_ok()
   }
 
+  // A port for a test to listen on. NOT one the system picks (`bind` on port 0): the moment a test frees it, another test that binds
+  // port 0 can be handed the same number, and "nothing answers on it any more" was then read off that other test's listener (seen
+  // once on macOS, where these tests share the last second of the run with four others that churn ports). These come from a range
+  // the system never hands out for port 0, one per call, so no two tests share one and no connection's own source port is one.
   fn scratch_port() -> u16 {
-    TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port()
+    use std::sync::atomic::AtomicU16;
+    const FIRST: u16 = 21_000;
+    const SPAN: u16 = 8_000;
+    static NEXT: AtomicU16 = AtomicU16::new(0);
+    let start = (std::process::id() % u32::from(SPAN)) as u16;
+    for _ in 0..SPAN {
+      let port = FIRST + (start + NEXT.fetch_add(1, Ordering::SeqCst)) % SPAN;
+      if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+        return port;
+      }
+    }
+    panic!("no free port from {FIRST} for a test to listen on");
+  }
+
+  // For a failure message only: who listens on the port (where the system has `lsof`) and what a fresh connection to it turns out to be.
+  fn who_answers(port: u16) -> String {
+    let listed = std::process::Command::new("lsof")
+      .args(["-nP", &format!("-iTCP:{port}")])
+      .output()
+      .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+      .unwrap_or_default();
+    let connection = match TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), Duration::from_millis(300)) {
+      Ok(stream) => format!("a connection succeeded: local {:?}, peer {:?}", stream.local_addr(), stream.peer_addr()),
+      Err(error) => format!("a connection failed: {error}"),
+    };
+    format!("lsof:\n{listed}\n{connection}")
   }
 
   fn long_lived_child() -> std::process::Child {
@@ -1043,15 +1072,21 @@ Active Connections
 
     let mut child = long_lived_child();
     std::thread::sleep(Duration::from_millis(300));
+    let stopping = std::time::Instant::now();
     stop_listening(&running, port, Some(closed));
+    let waited = stopping.elapsed();
 
     // The rule, from both sides: once a stop has returned nothing accepts on the port and a new bind gets it.
     let still_accepting = accepting(port);
     let rebound = TcpListener::bind(("127.0.0.1", port)).is_ok();
+    let who = if still_accepting || !rebound { who_answers(port) } else { String::new() };
     let _ = child.kill();
     let _ = child.wait();
-    assert!(!still_accepting, "the port still accepts connections after the stop: a child process holds the listening socket");
-    assert!(rebound, "a new bind on the port failed after the stop");
+    assert!(
+      !still_accepting,
+      "the port still accepts connections after the stop (it waited {waited:?} for the socket to close; 2 s means it never did): {who}"
+    );
+    assert!(rebound, "a new bind on the port failed after the stop (waited {waited:?}): {who}");
   }
 
   #[test]
