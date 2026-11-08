@@ -25,3 +25,18 @@ export function isTempName(name: string): boolean {
 export function isScratchDirName(name: string): boolean {
   return /^caps-[a-z0-9]+-[a-z0-9]+$/i.test(name) || /^ov_[0-9a-f]+_work$/i.test(name);
 }
+
+/** Whether the entry `name` directly inside a project's `internals` or `library` folder is the app's
+ *  own scratch rather than part of the project. The one rule for it: the sweep that clears what a
+ *  dead writer left (projectTemps.ts) and a copy of the project (Duplicate, Save As) both ask here, so
+ *  a file the sweep would remove is never one a copy carries. `internals` holds only the app's own
+ *  files; `library` holds the user's too, so only the app's own names (`media_…`) are judged there:
+ *  dropping one of theirs from a copy would lose their footage. */
+export function isProjectScratch(
+  folder: "internals" | "library",
+  name: string,
+  isDirectory: boolean,
+): boolean {
+  if (isDirectory || !isTempName(name)) return false;
+  return folder === "internals" || name.startsWith("media_");
+}

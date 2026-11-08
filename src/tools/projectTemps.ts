@@ -16,7 +16,7 @@
 import { jobSupervisor } from "./jobSupervisor";
 import { foreignProjectLock } from "./projectLock";
 import { INTERNAL_DIR, joinPath, type ProjectStoreAccess } from "./store";
-import { isScratchDirName, isStale, isTempName } from "./tempNames";
+import { isProjectScratch, isScratchDirName, isStale, isTempName } from "./tempNames";
 
 /** Every path a job of the app process names (its scratch folder, its partial file), or null when
  *  the jobs cannot be listed. No supervisor (tests, the web build) means no jobs. */
@@ -58,12 +58,12 @@ export async function sweepProjectTemps(
 
   const internals = joinPath(root, INTERNAL_DIR);
   for (const e of await list(internals))
-    if (!e.isDirectory && isTempName(e.name)) await drop(joinPath(internals, e.name));
+    if (isProjectScratch("internals", e.name, e.isDirectory))
+      await drop(joinPath(internals, e.name));
   // Only the app's own names: a file the user put in the library is never ours to judge.
   const library = joinPath(root, "library");
   for (const e of await list(library))
-    if (!e.isDirectory && e.name.startsWith("media_") && isTempName(e.name))
-      await drop(joinPath(library, e.name));
+    if (isProjectScratch("library", e.name, e.isDirectory)) await drop(joinPath(library, e.name));
   const cache = joinPath(internals, "cache");
   for (const sub of await list(cache)) {
     // `exports` holds the user's deliverables when there is no Downloads folder.

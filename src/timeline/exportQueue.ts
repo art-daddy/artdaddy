@@ -833,6 +833,11 @@ export interface ExportSubmission {
   expected?: Expectation;
 }
 
+/** How the refusal for a folder that could not be made begins. A request that asked for a folder the
+ *  computer would not make is refused whole, before anything is queued; the one place that tells the
+ *  assistant what to do about it (exportItems.ts) recognises it by this. */
+export const FOLDER_REFUSAL = "could not make the folder ";
+
 export class ExportRequestError extends Error {
   result?: Record<string, unknown>;
   constructor(
@@ -1649,7 +1654,9 @@ async function admitExport(spec: ExportSpec, storageReady: boolean): Promise<Exp
           try {
             await spec.store.ensureDir(spec.outputDirectory);
           } catch (error) {
-            throw new Error(`could not make the folder ${spec.outputDirectory}: ${String(error)}`);
+            throw new Error(
+              `${FOLDER_REFUSAL}${spec.outputDirectory}: ${error instanceof Error ? error.message : String(error)}`,
+            );
           }
           lease?.assertCanCommit();
         }

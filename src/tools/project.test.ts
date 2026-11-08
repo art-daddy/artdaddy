@@ -781,6 +781,233 @@ describe("ProjectRegistry.saveProjectAs", () => {
   });
 });
 
+describe("a project is never copied into its own folder, or over the folder that holds it", () => {
+  // Save As offers the project's own name. Open the project's folder in the dialog, press Save, and
+  // the copy lists the folder it is filling, copies that into itself, and goes on until Windows
+  // refuses the path: one real project ended 41 folders deep (its own name at every level), and
+  // every later copy of it failed too.
+  const SRC = `${PROJECTS}/hero_a1b2c3`;
+  const DEST = "D:/Client Work/Hero Cut";
+
+  async function seeded(): Promise<MemFs> {
+    const fs = new MemFs();
+    await fs.writeTextFile(
+      `${SRC}/internals/project.json`,
+      JSON.stringify({ id: "hero_a1b2c3", name: "Hero" }),
+    );
+    await fs.writeTextFile(`${SRC}/internals/timeline.json`, JSON.stringify({ tracks: [] }));
+    await fs.writeTextFile(`${SRC}/library/media_abc.mp4`, "OWNED-BYTES");
+    await fs.writeTextFile(
+      REGISTRY,
+      JSON.stringify({
+        version: 1,
+        activeProjectId: "hero_a1b2c3",
+        projects: [{ id: "hero_a1b2c3", name: "Hero", path: SRC }],
+      }),
+    );
+    return fs;
+  }
+
+  /** The disk, with the limit Windows puts on a path: it is what ended the real copy. */
+  function withPathLimit(fs: MemFs): MemFs {
+    const mkdir = fs.mkdir.bind(fs);
+    fs.mkdir = async (p: string) => {
+      if (norm(p).length > 260)
+        throw new Error("The filename or extension is too long. (os error 206)");
+      return mkdir(p);
+    };
+    return fs;
+  }
+
+  /** Every file (with its bytes) and folder, so "wrote nothing" is a comparison, not a hope. */
+  const everything = (fs: MemFs): string =>
+    JSON.stringify([[...fs.files.entries()].sort(), [...fs.dirs].sort()]);
+
+  const INSIDE: [string, string][] = [
+    ["a new folder in it", `${SRC}/Hero`],
+    ["a folder in its internals", `${SRC}/internals/Hero`],
+    ["a folder deep in its library", `${SRC}/library/a/b/c`],
+    ["it written with a trailing slash", `${SRC}/Hero/`],
+    ["it written with backslashes", `${SRC}/Hero`.replace(/\//g, "\\")],
+    ["it written in other letters (a drive does not tell them apart)", `${SRC.toUpperCase()}/Hero`],
+  ];
+  const HOLDING: [string, string][] = [
+    ["the folder it is in", PROJECTS],
+    ["the folder above that", DATA],
+    ["that, written with backslashes and other letters", DATA.toUpperCase().replace(/\//g, "\\")],
+  ];
+
+  it.each(INSIDE)("Save As into %s is refused, and writes nothing", async (_why, dest) => {
+    const fs = withPathLimit(await seeded());
+    const before = everything(fs);
+    const reg = ProjectRegistry.fromProjectDir(ACTIVE, fs);
+    await expect(reg.saveProjectAs("hero_a1b2c3", dest)).rejects.toThrow(/inside its own folder/);
+    expect(everything(fs), "the refusal left something on the disk").toBe(before);
+    expect(await reg.dirFor("hero_a1b2c3")).toBe(SRC);
+  });
+
+  it.each(HOLDING)("Save As onto %s is refused, and writes nothing", async (_why, dest) => {
+    const fs = await seeded();
+    const before = everything(fs);
+    const reg = ProjectRegistry.fromProjectDir(ACTIVE, fs);
+    await expect(reg.saveProjectAs("hero_a1b2c3", dest)).rejects.toThrow(/holds it/);
+    expect(everything(fs), "the refusal left something on the disk").toBe(before);
+    expect(await reg.dirFor("hero_a1b2c3")).toBe(SRC);
+  });
+
+  // The other direction: a guard that refuses a folder that merely looks like the project's is a
+  // regression too, and the easy way to write this one (a prefix match) does exactly that.
+  it.each([
+    ["a sibling whose name starts with the project's", `${SRC}_copy`],
+    ["a folder with the project's name inside another folder", "D:/Client Work/hero_a1b2c3"],
+    ["a folder beside it with a longer name", `${PROJECTS}/hero_a1b2c3x`],
+    ["another drive", DEST],
+  ])("Save As to %s still works", async (_why, dest) => {
+    const fs = await seeded();
+    const reg = ProjectRegistry.fromProjectDir(ACTIVE, fs);
+    await reg.saveProjectAs("hero_a1b2c3", dest);
+    expect(await fs.readTextFile(`${dest}/library/media_abc.mp4`)).toBe("OWNED-BYTES");
+    expect(await reg.dirFor("hero_a1b2c3")).toBe(dest);
+  });
+
+  it("refuses before anything is touched, not even the record that a folder was deleted", async () => {
+    const fs = withPathLimit(await seeded());
+    const dest = `${SRC}/Hero`;
+    markProjectDirDead(dest);
+    try {
+      const reg = ProjectRegistry.fromProjectDir(ACTIVE, fs);
+      await expect(reg.saveProjectAs("hero_a1b2c3", dest)).rejects.toThrow(/own folder/);
+      expect(isProjectDirDead(dest)).toBe(true);
+    } finally {
+      reviveProjectDir(dest);
+    }
+  });
+
+  // Every copy goes through one function, so the rule is kept there and not only in the one caller
+  // that happened to be seen: a Duplicate whose projects folder lies inside the project it copies.
+  it("Duplicate cannot be made to write inside the folder it copies either", async () => {
+    const fs = withPathLimit(await seeded());
+    const before = everything(fs);
+    const reg = new ProjectRegistry(`${SRC}/copies`, REGISTRY, fs);
+    await expect(reg.duplicateProject("hero_a1b2c3", "Hero copy")).rejects.toThrow(
+      /inside its own folder/,
+    );
+    expect(everything(fs), "the refusal left something on the disk").toBe(before);
+  });
+});
+
+describe("a copy of a project leaves behind only what is the project's", () => {
+  // A duplicate failed with "failed to copy file ... internals/transcript.tmp-f3bi3l.json ... (os error
+  // 2)": the file was listed, then the write that owned it renamed it into place before the copy got
+  // there (2026-10-25, while the project was being transcribed). Nothing that is mid-write belongs in
+  // a copy, and a file that vanished since it was listed is not a reason to lose the whole copy.
+  const SRC = `${PROJECTS}/hero_a1b2c3`;
+  const DEST = "D:/Client Work/Hero Cut";
+
+  async function seeded(): Promise<MemFs> {
+    const fs = new MemFs();
+    await fs.writeTextFile(
+      `${SRC}/internals/project.json`,
+      JSON.stringify({ id: "hero_a1b2c3", name: "Hero" }),
+    );
+    await fs.writeTextFile(`${SRC}/internals/timeline.json`, JSON.stringify({ tracks: [] }));
+    await fs.writeTextFile(`${SRC}/internals/transcript.json`, "TRANSCRIPT");
+    await fs.writeTextFile(`${SRC}/internals/transcript.tmp-f3bi3l.json`, "HALF-WRITTEN");
+    await fs.writeTextFile(`${SRC}/library/media_abc.mp4`, "OWNED-BYTES");
+    await fs.writeTextFile(`${SRC}/library/media_abc.mp4.tmp-77aa01`, "HALF-BYTES");
+    // Theirs, not the app's: whatever it is called, it is footage the project needs.
+    await fs.writeTextFile(`${SRC}/library/holiday.tmp.mp4`, "THEIR-FOOTAGE");
+    await fs.writeTextFile(
+      REGISTRY,
+      JSON.stringify({
+        version: 1,
+        activeProjectId: "hero_a1b2c3",
+        projects: [{ id: "hero_a1b2c3", name: "Hero", path: SRC }],
+      }),
+    );
+    return fs;
+  }
+
+  const copies: [string, (fs: MemFs) => Promise<string>][] = [
+    [
+      "Duplicate",
+      async (fs) =>
+        (
+          await ProjectRegistry.fromProjectDir(ACTIVE, fs).duplicateProject(
+            "hero_a1b2c3",
+            "Hero copy",
+          )
+        ).path,
+    ],
+    [
+      "Save As",
+      async (fs) =>
+        (await ProjectRegistry.fromProjectDir(ACTIVE, fs).saveProjectAs("hero_a1b2c3", DEST)).path,
+    ],
+  ];
+
+  it.each(copies)(
+    "%s: a file still being written is left out, and the finished files are all there",
+    async (_name, copy) => {
+      const fs = await seeded();
+      const dir = await copy(fs);
+      expect(await fs.exists(`${dir}/internals/transcript.tmp-f3bi3l.json`)).toBe(false);
+      expect(await fs.exists(`${dir}/library/media_abc.mp4.tmp-77aa01`)).toBe(false);
+      expect(await fs.readTextFile(`${dir}/internals/transcript.json`)).toBe("TRANSCRIPT");
+      expect(await fs.readTextFile(`${dir}/library/media_abc.mp4`)).toBe("OWNED-BYTES");
+      expect(await fs.readTextFile(`${dir}/library/holiday.tmp.mp4`)).toBe("THEIR-FOOTAGE");
+      // The original is not the copy's to tidy: its writer may still be about to finish it.
+      expect(await fs.exists(`${SRC}/internals/transcript.tmp-f3bi3l.json`)).toBe(true);
+    },
+  );
+
+  it.each(copies)(
+    "%s: the real failure: the temp file is renamed away between the listing and the copy",
+    async (_name, copy) => {
+      const fs = await seeded();
+      const realCopy = fs.copyFile.bind(fs);
+      fs.copyFile = async (s: string, d: string) => {
+        if (s.includes(".tmp-")) {
+          await fs.remove(s); // the write that owned it committed, as it does in milliseconds
+          throw new Error(`failed to copy file from path: ${s} (os error 2)`);
+        }
+        return realCopy(s, d);
+      };
+      const dir = await copy(fs);
+      expect(await fs.readTextFile(`${dir}/internals/transcript.json`)).toBe("TRANSCRIPT");
+    },
+  );
+
+  it.each(copies)(
+    "%s: any file that disappears while the copy runs is left out, and is not a failure",
+    async (_name, copy) => {
+      const fs = await seeded();
+      await fs.writeTextFile(`${SRC}/library/media_gone.mp4`, "ABOUT-TO-GO");
+      const realCopy = fs.copyFile.bind(fs);
+      fs.copyFile = async (s: string, d: string) => {
+        if (s.endsWith("media_gone.mp4")) await fs.remove(s); // deleted just now; the copy then fails as the OS does
+        return realCopy(s, d);
+      };
+      const dir = await copy(fs);
+      expect(await fs.exists(`${dir}/library/media_gone.mp4`)).toBe(false);
+      expect(await fs.readTextFile(`${dir}/library/media_abc.mp4`)).toBe("OWNED-BYTES");
+    },
+  );
+
+  it.each(copies)(
+    "%s: a file that is there and cannot be copied still fails the copy",
+    async (_name, copy) => {
+      const fs = await seeded();
+      const realCopy = fs.copyFile.bind(fs);
+      fs.copyFile = async (s: string, d: string) => {
+        if (s.endsWith("media_abc.mp4")) throw new Error("disk full");
+        return realCopy(s, d);
+      };
+      await expect(copy(fs)).rejects.toThrow(/disk full/);
+    },
+  );
+});
+
 describe("ProjectRegistry.writeProject tombstone (Q7)", () => {
   afterEach(() => reviveProjectDir(`${PROJECTS}/gone`));
 

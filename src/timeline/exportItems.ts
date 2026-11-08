@@ -15,6 +15,7 @@ import {
   ExportMoveRequest,
   ExportRequestError,
   exportVia,
+  FOLDER_REFUSAL,
   isDestinationReserved,
   sealExportBatch,
   submitExports,
@@ -393,7 +394,7 @@ async function exportItemsTool(args: Args, ctx: ClientToolContext | null): Promi
     }
     const result = {
       ok: false,
-      error: error instanceof Error ? error.message : String(error),
+      error: refusalMessage(error),
       ...(delivered.length ? { exports: delivered } : {}),
     };
     if (error instanceof ExportRequestError) {
@@ -425,6 +426,14 @@ async function exportItemsTool(args: Args, ctx: ClientToolContext | null): Promi
     warnings: [...new Set(rendered.flatMap((p) => p.plan.warnings))],
     note,
   };
+}
+
+/** What the assistant is told about a refused request: the reason and, for a folder the computer would not
+ *  make, what to do about it. The person looking at the Export card is told the reason alone. */
+function refusalMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (!message.startsWith(FOLDER_REFUSAL)) return message;
+  return `${message.replace(/[.\s]+$/, "")}. Nothing was exported. Don't retry that folder: tell the user, and offer to put the files in their Downloads folder instead (leave output_dir out).`;
 }
 
 function busy(filename: string): Result {

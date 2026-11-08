@@ -461,7 +461,23 @@ describe("export delivers separate files into a folder", () => {
     )) as Any;
     expect(r.ok).toBe(false);
     expect(String(r.error)).toMatch(/could not make the folder Z:\/locked: .*Access is denied/);
+    // What the assistant does next is the whole point: it retried the folder, or went looking for another way.
+    expect(String(r.error)).toMatch(/Nothing was exported\. Don't retry that folder/);
+    expect(String(r.error)).toMatch(/Downloads folder instead \(leave output_dir out\)/);
     expect(listExportOutcomes()).toEqual([]);
+  });
+
+  it("adds nothing about the folder when the request was refused for another reason", async () => {
+    const p = await project();
+    const stop = new AbortController();
+    stop.abort();
+    const ctx = Object.assign(p.ctx, { signal: stop.signal }) as Parameters<typeof exportTool>[1];
+    const r = (await exportTool({ media_refs: ["media_aaa"], output_dir: "scenes" }, ctx)) as Any;
+    expect(r.ok).toBe(false);
+    expect(String(r.error), "the refusal did not come from the queue").toContain(
+      "cancelled before submission",
+    );
+    expect(String(r.error)).not.toMatch(/Downloads|output_dir|Don't retry/);
   });
 
   it("refuses timeline clips while media on the timeline is offline or still generating", async () => {

@@ -28,6 +28,7 @@ import { runProjectMutation, withProjectLock } from "./coordinator";
 import type { MutationOrigin } from "../project/MutationGate";
 import { releaseCopiedWork } from "../project/copiedWork";
 import { isSafeProjectId } from "./dataRoot";
+import { isProjectScratch } from "./tempNames";
 
 type Result = Record<string, unknown>;
 type Args = Record<string, unknown>;
@@ -117,34 +118,77 @@ function intOr(v: unknown, fallback: unknown): number {
   return Number.isNaN(n) ? 0 : Math.trunc(n);
 }
 
+/** Whether `inner` is `outer` itself or lies under it. Compared without regard to letter case or to
+ *  how the separators are written, because the drives a project lives on do not tell them apart: a
+ *  copy that missed that would write into itself all the same. */
+function isWithin(inner: string, outer: string): boolean {
+  const a = stripTrail(inner).toLowerCase();
+  const b = stripTrail(outer).toLowerCase();
+  return a === b || a.startsWith(`${b}/`);
+}
+
+/** A copy of a folder is never written inside the folder it reads (it would list what it is writing
+ *  and copy that again, down to the depth the disk allows: 41 folders, for the real one), and never
+ *  over a folder that holds it (the project would be written among whatever else is there). Said
+ *  before anything is written. */
+function refuseOverlap(src: string, dst: string): void {
+  if (isWithin(dst, src))
+    throw new Error("a project can't be saved inside its own folder: choose a folder outside it");
+  if (isWithin(src, dst))
+    throw new Error(
+      "a project can't be saved into a folder that holds it: choose a folder that does not contain it",
+    );
+}
+
 /** Recursive directory copy (handles binary media) via readDir + copyFile. `skip`
- *  (matched on the absolute source path) excludes a subtree — used to leave the
- *  regeneratable derived cache out of a duplicate. */
+ *  (matched on the absolute source path) excludes an entry or a subtree — used to leave the
+ *  regeneratable derived cache, and what is only scratch, out of a copy.
+ *
+ *  A file that was listed and is gone by the time it is copied was deleted or renamed into place
+ *  meanwhile: there is nothing left to copy, and losing the whole copy for it is the wrong answer
+ *  (a duplicate failed on a transcript that was being rewritten). A file that is still there and
+ *  cannot be copied is a real failure. */
 async function copyDir(
   fs: FsLike,
   src: string,
   dst: string,
-  skip?: (path: string) => boolean,
+  skip?: (path: string, isDirectory: boolean) => boolean,
 ): Promise<void> {
   if (!fs.readDir || !fs.copyFile) throw new Error("filesystem does not support directory copy");
+  refuseOverlap(src, dst);
   await fs.mkdir(dst);
   for (const e of await fs.readDir(src)) {
     const s = joinPath(src, e.name);
-    if (skip?.(s)) continue; // e.g. internals/cache — derived + regeneratable, never copied
+    if (skip?.(s, e.isDirectory)) continue; // e.g. internals/cache — derived + regeneratable, never copied
     const d = joinPath(dst, e.name);
     if (e.isDirectory) await copyDir(fs, s, d, skip);
-    else await fs.copyFile(s, d);
+    else {
+      try {
+        await fs.copyFile(s, d);
+      } catch (error) {
+        if (await fs.exists(s)) throw error;
+      }
+    }
   }
 }
 
 /** What a copy of a project folder leaves behind, for every copy (Duplicate and Save As):
  *  - `internals/cache`: derived and regeneratable (invariant 29); it rebuilds on demand.
  *  - `internals/.lock`: a claim by the editor that has THIS folder open, not part of the
- *    project. A copied one made the copy look open somewhere else. */
-function notCopied(src: string): (path: string) => boolean {
-  const cache = joinPath(src, INTERNAL_DIR, "cache");
-  const lock = joinPath(src, INTERNAL_DIR, ".lock");
-  return (p) => p === cache || p === lock;
+ *    project. A copied one made the copy look open somewhere else.
+ *  - the app's own scratch (`isProjectScratch`): a file some write is part-way through. */
+function notCopied(src: string): (path: string, isDirectory: boolean) => boolean {
+  const internals = joinPath(src, INTERNAL_DIR);
+  const library = joinPath(src, "library");
+  const cache = joinPath(internals, "cache");
+  const lock = joinPath(internals, ".lock");
+  return (p, isDirectory) => {
+    if (p === cache || p === lock) return true;
+    const folder = parentOf(p);
+    if (folder === internals) return isProjectScratch("internals", baseName(p), isDirectory);
+    if (folder === library) return isProjectScratch("library", baseName(p), isDirectory);
+    return false;
+  };
 }
 
 /** projects.json registry + project-dir lifecycle on the shared app-data fs.
@@ -596,6 +640,9 @@ export class ProjectRegistry {
     if (!isAbsolutePath(dst)) throw new Error("choose a folder for the project");
     const src = await this.dirFor(id);
     if (stripTrail(src) === dst) return { id, path: dst };
+    // Before anything is written or marked: a folder inside the project (the dialog offers the project's own
+    // name, so one picked there lands inside it) or one that holds it.
+    refuseOverlap(src, dst);
     // Refuse to write into a folder that already holds something: Save As must never
     // merge into an unrelated directory, and a half-merge is unrecoverable by hand.
     if (await this.fs.exists(joinPath(dst, INTERNAL_DIR, "project.json")))
