@@ -81,7 +81,7 @@ async function generateVoiceover(
     style: style || null,
     language: language || null,
     media_ref: sub.media_refs[0],
-    note: "Voiceover is being generated; you can place it now. Word timings become available from get_transcript once it lands.",
+    note: "Voiceover is being generated. A voice lasts as long as the speech does, so place it once it has landed (add_clips with no length fits it exactly). Word timings are available from get_transcript then.",
   };
 }
 

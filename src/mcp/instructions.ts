@@ -33,8 +33,10 @@ background — anywhere from seconds to 15 minutes.
 - NOTHING will tell you when one lands. This connection cannot resume a turn that has
   ended, so "I'll check back and let you know" leaves the user waiting on a message that
   never arrives. Say what you started, say roughly how long it takes, and END your turn.
-- Place the handle now: add_clips accepts a still-generating media_ref and the clip fills
-  in by itself. Fire independent generations together rather than one at a time.
+- Place the handle now where you can: add_clips accepts a still-generating image or video
+  (the clip fills in by itself). Generated audio has no length until it lands, so place it
+  after it has landed, or give it a length. Fire independent generations together rather
+  than one at a time.
 - A tool that needs the file itself (inspect_media, video_ask and the like) answers
   pending:true with eta_s (about how long is left) and retry_after_s (the soonest a second
   look is worth it). Do other work or end your turn; asking again sooner only repeats the
