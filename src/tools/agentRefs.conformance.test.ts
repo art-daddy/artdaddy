@@ -462,3 +462,230 @@ describe("a HEIF still's pixels are read only through its decoded picture", () =
     });
   }
 });
+
+// A ref to media the project is MAKING (or that failed, or whose linked file is gone) is a ref that
+// is RIGHT and has no file to read. Every tool that took one said its own thing about the missing
+// file ("media not found", "frame not found", "couldn't probe ... No such file or directory"), and
+// the model believed it: 28 of one session's 51 tool errors, and 20 failed placements in a month
+// (T-15, T-32). The tools were fixed one at a time and each fix missed another, so this walks EVERY
+// library-ref parameter the served contract has, nested ones included (the list above is derived,
+// so a parameter added later is held to it too), in every state and from both callers.
+describe("a ref to media being made, failed or offline is never reported as unknown", () => {
+  const WAIT = "media_gen_wait1";
+  const BAD = "media_gen_bad1";
+  const GONE = "media_gone1";
+  const TYPO = "media_typo1";
+
+  /** Parameters for which a state is a legitimate target, not a refusal. An entry is a decision. */
+  const ALLOWED: Record<string, { states: string[]; why: string }> = {
+    "set_clip_properties media_ref": {
+      states: ["generating"],
+      why: "a swap onto a generating ref is legitimate: the clip keeps its slot and the picture fills in when it lands (T-15); it is walked below with a probe that fails like the real one",
+    },
+    "add_captions subtitle_media_ref": {
+      states: ["generating", "failed"],
+      why: "a subtitle is imported, never generated, so no such ref can be in flight or fail",
+    },
+  };
+
+  /** What kind of file the parameter takes, for the one state that needs a file of the right kind. */
+  const OFFLINE_KIND: Record<string, { kind: string; file: string }> = {
+    "add_captions subtitle_media_ref": { kind: "subtitle", file: "Interview.srt" },
+  };
+
+  /** A call that gives the entry no length, so a refusal has something to refuse (the template
+   *  the attack tests use names one, and a length makes a generating ref placeable). */
+  const STATE_CALL: Record<string, Call> = {
+    "add_clips entries[].media_ref": (x) => [
+      "add_clips",
+      { entries: [{ media_ref: x, track_id: "v1", timeline_in: 60 }] },
+    ],
+  };
+
+  /** What none of the four answers may say about a ref that is right (or, for a typo, about a state). */
+  const SAYS_UNKNOWN =
+    /not found|couldn't probe|no such file|could not sample|nothing in this project matches|unknown library id|not in the library/i;
+
+  async function runAs(
+    surface: "app" | "mcp",
+    name: string,
+    args: Record<string, unknown>,
+    offline: { kind: string; file: string } = { kind: "video", file: "Interview.mp4" },
+  ): Promise<Any> {
+    const store = seed();
+    const lib = joinPath(DIR, "internals/library.json");
+    const cat = JSON.parse(await fs.readTextFile(lib));
+    cat.clips.push(
+      {
+        id: WAIT,
+        path: `library/${WAIT}.mp4`,
+        filename: `${WAIT}.mp4`,
+        kind: "video",
+        status: "generating",
+        added_at: Date.now() / 1000 - 30,
+      },
+      {
+        id: BAD,
+        path: `library/${BAD}.mp4`,
+        filename: `${BAD}.mp4`,
+        kind: "video",
+        status: "failed",
+        error: "content filter",
+      },
+      {
+        id: GONE,
+        path: `D:/Moved/${offline.file}`,
+        filename: offline.file,
+        kind: offline.kind,
+        external: true,
+      },
+    );
+    await fs.writeTextFile(lib, JSON.stringify(cat));
+    registerTestDocument(DIR);
+    const registry = createToolRegistry(() =>
+      agentToolContext({ store, runner: probeLikeTheRealOne, surface }),
+    );
+    try {
+      return await registry.run(name, args);
+    } catch (e) {
+      return { ok: false, error: String(e) };
+    }
+  }
+
+  /** The harness runner answers every probe with a picture, which is why a tool that probes a file
+   *  that is not there looks fine. The real ffprobe does not: it exits 1 with "No such file or
+   *  directory", and that is the sentence the model was handed. This one does the same for the
+   *  three state files, and still records every call so {@link probedStateFile} can see the attempt. */
+  const probeLikeTheRealOne: CommandRunner = {
+    run: async (program, args, ...rest) => {
+      if (
+        program === "ffprobe" &&
+        args.some((a) => /media_gen_wait1|media_gen_bad1|Moved/.test(a))
+      ) {
+        calls.push([program, ...args]);
+        return {
+          code: 1,
+          stdout: "",
+          stderr: `${args[args.length - 1]}: No such file or directory`,
+        };
+      }
+      return runner.run(program, args, ...rest);
+    },
+  };
+
+  /** The files of the three state rows: none of them may ever be handed to ffprobe or ffmpeg. They
+   *  are not there (or not there yet), so the probe's "No such file or directory" is all it could
+   *  say, and that is the answer that sent a model after a path. */
+  const probedStateFile = (): string[] =>
+    calls.flat().filter((a) => /media_gen_wait1|media_gen_bad1|Moved/.test(a));
+
+  /** What the tool said about the ref: its error, or (inspect_color's reference) the said refusal. */
+  const said = (r: Any): string => String(r?.error ?? r?.reference_error ?? "");
+
+  const walked = Object.entries(PARAMS).filter(
+    (e): e is [string, (typeof PARAMS)[string] & { call: Call }] =>
+      e[1].kind === "library-ref" && !!e[1].call,
+  );
+
+  it("walks every library-ref parameter the contract has", () => {
+    expect(walked.length).toBeGreaterThanOrEqual(17);
+    expect(walked.map(([p]) => p)).toEqual(
+      expect.arrayContaining([
+        "add_clips entries[].media_ref",
+        "insert_clips entries[].media_ref",
+        "generate_video start_frame",
+        "generate_video end_frame",
+        "generate_video reference_images[]",
+        "generate_image reference_images[]",
+        "export media_refs[]",
+        "run_ffmpeg inputs[]",
+        "inspect_color reference",
+        "library_op id_or_path",
+      ]),
+    );
+    for (const p of Object.keys(ALLOWED)) expect(PARAMS[p], p).toBeDefined();
+  });
+
+  for (const [param, spec] of walked) {
+    const call = STATE_CALL[param] ?? spec.call;
+    const row = OFFLINE_KIND[param];
+    const allowed = (state: string): boolean => ALLOWED[param]?.states.includes(state) ?? false;
+
+    // The id, and the path the library stores for it: both name the same asset, and a model that
+    // is told "not found" about the first writes the second.
+    for (const [form, ref] of [
+      ["id", WAIT],
+      ["path", `library/${WAIT}.mp4`],
+    ] as const) {
+      if (allowed("generating")) continue;
+      it(`${param}: a generating ref (${form}) is said to be generating, to the app and over MCP`, async () => {
+        const app = await runAs("app", ...call(ref));
+        const mcp = await runAs("mcp", ...call(ref));
+        for (const r of [app, mcp]) {
+          expect(said(r), JSON.stringify(r).slice(0, 240)).toMatch(/still being generated/i);
+          expect(said(r)).not.toMatch(SAYS_UNKNOWN);
+        }
+        // The in-app agent is told when it lands; an outside one never is, and is told so.
+        expect(said(app)).toMatch(/you will be told when it lands/i);
+        expect(said(mcp)).toMatch(/nothing will tell you/i);
+        expect(said(mcp)).not.toMatch(/you will be told/i);
+        expect(app).not.toHaveProperty("pending");
+        // A refusal carries the typed status an outside caller can act on.
+        if (mcp.ok === false) {
+          expect(mcp).toMatchObject({ pending: true, status: "generating" });
+          expect(mcp.retry_after_s).toBeGreaterThanOrEqual(10);
+        }
+        expect(probedStateFile()).toEqual([]);
+      });
+    }
+
+    if (!allowed("failed"))
+      it(`${param}: a FAILED generation says so, with its reason, and does not invite a retry`, async () => {
+        for (const surface of ["app", "mcp"] as const) {
+          const r = await runAs(surface, ...call(BAD));
+          expect(said(r), `${surface} ${JSON.stringify(r).slice(0, 240)}`).toMatch(
+            /failed to generate/i,
+          );
+          expect(said(r)).toContain("content filter");
+          expect(said(r)).toMatch(/do not retry/i);
+          expect(said(r)).not.toMatch(/still being generated/i);
+        }
+        expect(probedStateFile()).toEqual([]);
+      });
+
+    if (!allowed("offline"))
+      it(`${param}: an OFFLINE linked file is offline, and the user is asked to relink it`, async () => {
+        for (const surface of ["app", "mcp"] as const) {
+          const r = await runAs(surface, ...call(GONE), row);
+          expect(said(r), `${surface} ${JSON.stringify(r).slice(0, 240)}`).toMatch(/offline/i);
+          expect(said(r)).toMatch(/relink/i);
+          expect(said(r)).not.toMatch(SAYS_UNKNOWN);
+          expect(said(r)).not.toContain("Moved"); // the library's name for it, never the user's folders
+        }
+        expect(probedStateFile()).toEqual([]);
+      });
+
+    // The direction that keeps the rule honest: a typo is not a generation, a failure or an
+    // offline file, whatever the tool says about it.
+    it(`${param}: a ref the library has never heard of is not reported as a state`, async () => {
+      const r = await runAs("mcp", ...call(TYPO));
+      expect(said(r)).not.toMatch(/still being generated|failed to generate|offline/i);
+      expect(r).not.toHaveProperty("pending");
+    });
+  }
+
+  // The one parameter for which a generating ref is a legitimate target, and the exemption above
+  // only says so: it was never true. The swap fell through to ffprobe like every other door, so on a
+  // real machine it answered "couldn't probe ... No such file or directory" (the harness probe that
+  // says yes to everything hid it). With a probe that fails like the real one, it must succeed.
+  it("set_clip_properties media_ref: a swap onto a generating ref keeps the slot and probes nothing", async () => {
+    for (const surface of ["app", "mcp"] as const) {
+      const r = await runAs(surface, "set_clip_properties", { clip_ids: ["c0"], media_ref: WAIT });
+      expect(r.ok, JSON.stringify(r).slice(0, 300)).toBe(true);
+      const clip = (r.clips as Any[]).find((c) => c.id === "c0");
+      expect(clip).toMatchObject({ media_ref: WAIT, kind: "video" });
+      expect([clip.timeline_in, clip.timeline_out]).toEqual([0, 30]); // the slot is kept
+    }
+    expect(probedStateFile()).toEqual([]);
+  });
+});

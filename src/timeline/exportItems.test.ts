@@ -903,6 +903,33 @@ describe("export delivers separate files into a folder", () => {
     expect(String(r.error)).toMatch(/media_ccc is offline/);
   });
 
+  // Media still being made, or that failed, is said the way every tool says it: for what the caller
+  // wanted to do with it (deliver it), with when to come back, and with who will or will not tell it.
+  it("says media being made cannot be delivered yet, and why a failed one never can", async () => {
+    const p = await project();
+    const app = (await exportTool({ media_refs: ["media_gen"] }, p.ctx)) as Any;
+    expect(app).toEqual({
+      ok: false,
+      error:
+        "'media_gen' is still being generated, so there is nothing to deliver yet. The ref is correct; you will be told when it lands. Don't re-generate it and don't guess a file path.",
+    });
+    const mcp = (await exportTool(
+      { media_refs: ["media_gen"] },
+      { ...p.ctx, surface: "mcp" },
+    )) as Any;
+    expect(mcp).toMatchObject({ ok: false, pending: true, status: "generating" });
+    expect(String(mcp.error)).toMatch(
+      /nothing to deliver yet.*nothing will tell you when it lands/s,
+    );
+    expect(mcp.retry_after_s).toBeGreaterThanOrEqual(10);
+    const bad = (await exportTool({ media_refs: ["media_bad"] }, p.ctx)) as Any;
+    expect(bad).toEqual({
+      ok: false,
+      error:
+        "'media_bad' failed to generate, so there is no file to deliver. Generate it again or use different media — do not retry this ref.",
+    });
+  });
+
   it("delivers a project file the library never catalogued, under its own name", async () => {
     const p = await project();
     await p.disk.writeTextFile(`${DIR}/library/loose.mp4`, "loose bytes");

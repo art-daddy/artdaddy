@@ -873,6 +873,357 @@ describe("placing media that is still being generated", () => {
   });
 });
 
+// T-32 (Phase 5). The generation tools tell the model to pass the ref straight to add_clips, and the
+// placement then demanded a length that nothing could give (12 failed calls), or probed the
+// placeholder's file when loop, stretch or source_span was given (8 more: the model had done exactly
+// what generate_music advises). 20 failed calls from 14 people in a month, 3 of them since 3 Nov.
+describe("placing media that is still being generated: the length it can have", () => {
+  const FPS = 30;
+
+  /** ffprobe cannot open a placeholder (there is no file yet); the runner remembers what it was asked to open. */
+  function probing(): { runner: ReturnType<typeof makeRunner>; opened: string[] } {
+    const opened: string[] = [];
+    const runner = makeRunner((p, a) => {
+      if (p !== "ffprobe") return { code: 0, stdout: "", stderr: "" };
+      const target = String(a[a.length - 1]);
+      opened.push(target);
+      return { code: 1, stdout: "", stderr: `${target}: No such file or directory` };
+    });
+    return { runner, opened };
+  }
+  const placeholdersProbed = (opened: string[]): string[] =>
+    opened.filter((x) => /media_gen/.test(x));
+
+  type Row = { id: string; kind: "image" | "video" | "audio" } & Record<string, unknown>;
+  const EXT = { image: "png", video: "mp4", audio: "wav" } as const;
+
+  /** Catalog rows exactly as submitGeneration leaves them: no file, a future path, status generating. */
+  async function catalog(store: ProjectStoreAccess, rows: Row[]): Promise<void> {
+    await store.writeText(
+      joinPath(store.projectDir, INTERNAL_DIR, "library.json"),
+      JSON.stringify({
+        clips: rows.map((r) => ({
+          path: `library/${r.id}.${EXT[r.kind]}`,
+          filename: `${r.id}.${EXT[r.kind]}`,
+          status: "generating",
+          added_by: "generation",
+          added_at: Date.now() / 1000 - 5,
+          ...r,
+        })),
+      }),
+    );
+  }
+  const placed = async (store: ProjectStoreAccess, id: string): Promise<Any> =>
+    (await loadTimeline(store)).tracks
+      .flatMap((t) => (t.clips ?? []) as Any[])
+      .find((c) => c.media_ref === id);
+  const nothingPlaced = async (store: ProjectStoreAccess): Promise<void> =>
+    expect((await loadTimeline(store)).tracks.flatMap((t) => t.clips ?? [])).toHaveLength(0);
+
+  it("a generating IMAGE needs no length: it is a still of 5 s, as when ready, and nothing is probed", async () => {
+    const { runner, opened } = probing();
+    const { ctx, store } = await seededCtx(runner);
+    await catalog(store, [{ id: "media_gen_img", kind: "image" }]);
+    const r = (await addClipsTool(
+      { entries: [{ media_ref: "media_gen_img", timeline_in: 30 }] },
+      ctx,
+    )) as Any;
+    expect(r.ok, r.error).toBe(true);
+    const c = await placed(store, "media_gen_img");
+    expect([c.timeline_in, c.timeline_out]).toEqual([30, 30 + 5 * FPS]);
+    expect(placeholdersProbed(opened)).toEqual([]);
+  });
+
+  it("a generating VIDEO is placed at the length it was asked for, and says so", async () => {
+    const { runner, opened } = probing();
+    const { ctx, store } = await seededCtx(runner);
+    await catalog(store, [{ id: "media_gen_vid", kind: "video", duration_s: 8 }]);
+    const r = (await addClipsTool(
+      { entries: [{ media_ref: "media_gen_vid", timeline_in: 0 }] },
+      ctx,
+    )) as Any;
+    expect(r.ok, r.error).toBe(true);
+    const c = await placed(store, "media_gen_vid");
+    expect(c.timeline_out - c.timeline_in).toBe(8 * FPS);
+    expect(String((r.notes ?? []).join(" "))).toMatch(/8 s/);
+    expect(placeholdersProbed(opened)).toEqual([]);
+  });
+
+  it("a length the caller gives is still the length, for every kind", async () => {
+    for (const kind of ["image", "video", "audio"] as const) {
+      const { runner } = probing();
+      const { ctx, store } = await seededCtx(runner);
+      await catalog(store, [{ id: "media_gen_k", kind, duration_s: 8 }]);
+      const r = (await addClipsTool(
+        { entries: [{ media_ref: "media_gen_k", timeline_in: 10, duration: 45 }] },
+        ctx,
+      )) as Any;
+      expect(r.ok, `${kind}: ${r.error}`).toBe(true);
+      const c = await placed(store, "media_gen_k");
+      expect([c.timeline_in, c.timeline_out], kind).toEqual([10, 55]);
+    }
+  });
+
+  it("a generating VIDEO whose length was not recorded waits, and says what to do", async () => {
+    const { runner, opened } = probing();
+    const { ctx, store } = await seededCtx(runner);
+    await catalog(store, [{ id: "media_gen_old", kind: "video" }]);
+    const r = (await addClipsTool(
+      { entries: [{ media_ref: "media_gen_old", timeline_in: 0 }] },
+      ctx,
+    )) as Any;
+    expect(r.ok).toBe(false);
+    expect(String(r.error)).toMatch(/still being generated/);
+    expect(String(r.error)).toMatch(/you will be told when it lands/);
+    expect(String(r.error)).toMatch(/timeline_out or duration/);
+    expect(String(r.error)).not.toMatch(/couldn't probe|No such file/);
+    expect(placeholdersProbed(opened)).toEqual([]);
+    await nothingPlaced(store);
+  });
+
+  it("AUDIO has no length until it lands: the refusal says so, when it will land, and how to place it now", async () => {
+    const { runner, opened } = probing();
+    const { ctx, store } = await seededCtx(runner);
+    await catalog(store, [{ id: "media_gen_vo", kind: "audio" }]);
+    const r = (await addClipsTool(
+      { entries: [{ media_ref: "media_gen_vo", timeline_in: 0 }] },
+      ctx,
+    )) as Any;
+    expect(r.ok).toBe(false);
+    expect(String(r.error)).toMatch(/media_gen_vo' is still being generated/);
+    expect(String(r.error)).toMatch(/you will be told when it lands/);
+    expect(String(r.error)).toMatch(/timeline_out or duration/);
+    expect(String(r.error)).not.toMatch(/couldn't probe|No such file/);
+    expect(r.pending).toBeUndefined(); // the in-app agent is told; only an outside caller is given a status
+    expect(placeholdersProbed(opened)).toEqual([]);
+    await nothingPlaced(store);
+  });
+
+  // The 8: the model passed the right id and asked for loop or stretch, which is what generate_music
+  // itself says to do ("rely on loop/stretch"). Both work from the source's real length, which does
+  // not exist yet, so the answer is a wait, never an ffprobe error about a file that is not there.
+  it.each([
+    ["loop", { loop: true, timeline_out: 120 }, /loop and stretch work from/, "audio"],
+    ["stretch", { stretch: true, timeline_out: 120 }, /loop and stretch work from/, "audio"],
+    ["source_span", { source_span: [0, 2] }, /source_span is cut from/, "audio"],
+    [
+      "source_span on a video of known length",
+      { source_span: [0, 2] },
+      /source_span is cut from/,
+      "video",
+    ],
+  ] as const)(
+    "%s on a generating clip is a wait, not an ffprobe error",
+    async (_name, fields, need, kind) => {
+      const { runner, opened } = probing();
+      const { ctx, store } = await seededCtx(runner);
+      await catalog(store, [{ id: "media_gen_bed", kind, duration_s: 8 }]);
+      const r = (await addClipsTool(
+        { entries: [{ media_ref: "media_gen_bed", timeline_in: 0, ...fields }] },
+        ctx,
+      )) as Any;
+      expect(r.ok).toBe(false);
+      expect(String(r.error)).toMatch(/media_gen_bed' is still being generated/);
+      expect(String(r.error)).toMatch(need);
+      expect(String(r.error)).toMatch(/you will be told when it lands/);
+      expect(String(r.error)).not.toMatch(/couldn't probe|No such file/);
+      expect(placeholdersProbed(opened)).toEqual([]);
+      await nothingPlaced(store);
+    },
+  );
+
+  it("a FAILED generation says so, places nothing, and does not invite a retry of the same ref", async () => {
+    for (const door of ["add_clips", "insert_clips"] as const) {
+      const { runner } = probing();
+      const { ctx, store } = await seededCtx(runner);
+      await catalog(store, [
+        { id: "media_gen_bad", kind: "video", status: "failed", error: "content filter" },
+      ]);
+      const r = (await (door === "add_clips"
+        ? addClipsTool(
+            { entries: [{ media_ref: "media_gen_bad", timeline_in: 0, duration: 60 }] },
+            ctx,
+          )
+        : insertClipsTool(
+            { entries: [{ media_ref: "media_gen_bad", duration: 60 }], at: 0 },
+            ctx,
+          ))) as Any;
+      expect(r.ok, door).toBe(false);
+      expect(String(r.error), door).toMatch(/failed to generate/);
+      expect(String(r.error), door).toContain("content filter");
+      expect(String(r.error), door).toMatch(/do not retry this ref/);
+      await nothingPlaced(store);
+    }
+  });
+
+  it("a ref in path form (library/<id>.<ext>) is the same generating asset, and the clip stores the id", async () => {
+    const { runner, opened } = probing();
+    const { ctx, store } = await seededCtx(runner);
+    await catalog(store, [{ id: "media_gen_pf", kind: "audio" }]);
+    const r = (await addClipsTool(
+      { entries: [{ media_ref: "library/media_gen_pf.wav", timeline_in: 0, timeline_out: 90 }] },
+      ctx,
+    )) as Any;
+    expect(r.ok, r.error).toBe(true);
+    expect((await placed(store, "media_gen_pf")).timeline_out).toBe(90);
+    expect(placeholdersProbed(opened)).toEqual([]);
+  });
+
+  it("insert_clips: a still is 5 s, a video is its requested length, audio waits", async () => {
+    const { runner } = probing();
+    const { ctx, store } = await seededCtx(runner);
+    await catalog(store, [
+      { id: "media_gen_i", kind: "image" },
+      { id: "media_gen_v", kind: "video", duration_s: 6 },
+      { id: "media_gen_a", kind: "audio" },
+    ]);
+    const ok = (await insertClipsTool(
+      { entries: [{ media_ref: "media_gen_i" }, { media_ref: "media_gen_v" }], at: 0 },
+      ctx,
+    )) as Any;
+    expect(ok.ok, ok.error).toBe(true);
+    expect(ok.pushed_by).toBe((5 + 6) * FPS);
+    const refused = (await insertClipsTool(
+      { entries: [{ media_ref: "media_gen_a" }], at: 0 },
+      ctx,
+    )) as Any;
+    expect(refused.ok).toBe(false);
+    expect(String(refused.error)).toMatch(/still being generated/);
+    expect(String(refused.error)).not.toMatch(/couldn't probe|No such file/);
+  });
+
+  // The insert door has the same three rules as add_clips, and the matrix below accepts either a
+  // placement or a refusal, so only a test that names the rule can pin it. Each row names WHY the
+  // finished file is wanted (a refusal for some other reason would pass without it) and the last
+  // one is a video whose length IS known, which is placed the moment the guard goes.
+  it.each([
+    ["loop", { loop: true, duration: 120 }, /loop and stretch work from/, "audio"],
+    ["stretch", { stretch: true, duration: 120 }, /loop and stretch work from/, "audio"],
+    ["source_span", { source_span: [0, 2] }, /source_span is cut from/, "audio"],
+    [
+      "source_span on a video of known length",
+      { source_span: [0, 2] },
+      /source_span is cut from/,
+      "video",
+    ],
+  ] as const)(
+    "insert_clips: %s on a generating clip is a wait, not a placement and not an ffprobe error",
+    async (_name, fields, need, kind) => {
+      for (const surface of ["app", "mcp"] as const) {
+        const { runner, opened } = probing();
+        const { ctx, store } = await seededCtx(runner);
+        await catalog(store, [{ id: "media_gen_bed", kind, duration_s: 8 }]);
+        const r = (await insertClipsTool(
+          { entries: [{ media_ref: "media_gen_bed", ...fields }], at: 0 },
+          { ...ctx, surface },
+        )) as Any;
+        expect(r.ok, surface).toBe(false);
+        expect(String(r.error), surface).toMatch(/media_gen_bed' is still being generated/);
+        expect(String(r.error), surface).toMatch(need);
+        expect(String(r.error), surface).not.toMatch(/couldn't probe|No such file/);
+        expect(String(r.error), surface).toMatch(/give this entry a duration \(in frames\)/);
+        if (surface === "mcp") expect(r).toMatchObject({ pending: true, status: "generating" });
+        else expect(r).not.toHaveProperty("pending");
+        expect(placeholdersProbed(opened)).toEqual([]);
+        await nothingPlaced(store);
+      }
+    },
+  );
+
+  it("insert_clips: audio given a plain duration is placed now, at that length", async () => {
+    const { runner, opened } = probing();
+    const { ctx, store } = await seededCtx(runner);
+    await catalog(store, [{ id: "media_gen_vo", kind: "audio" }]);
+    const r = (await insertClipsTool(
+      { entries: [{ media_ref: "media_gen_vo", duration: 75 }], at: 0 },
+      ctx,
+    )) as Any;
+    expect(r.ok, r.error).toBe(true);
+    expect(r.pushed_by).toBe(75);
+    expect(placeholdersProbed(opened)).toEqual([]);
+  });
+
+  it("loop and stretch still apply to audio only, for a generating clip too", async () => {
+    const { runner } = probing();
+    const { ctx, store } = await seededCtx(runner);
+    await catalog(store, [{ id: "media_gen_pic", kind: "image" }]);
+    for (const door of ["add_clips", "insert_clips"] as const) {
+      const r = (await (door === "add_clips"
+        ? addClipsTool(
+            {
+              entries: [
+                { media_ref: "media_gen_pic", timeline_in: 0, loop: true, timeline_out: 90 },
+              ],
+            },
+            ctx,
+          )
+        : insertClipsTool(
+            { entries: [{ media_ref: "media_gen_pic", loop: true, duration: 90 }], at: 0 },
+            ctx,
+          ))) as Any;
+      expect(r.ok, door).toBe(false);
+      expect(String(r.error), door).toMatch(/apply to audio clips only/);
+    }
+  });
+
+  // An outside agent cannot be woken, so it is told when to ask again and gets the same facts as a
+  // typed status (T-15); the in-app agent is told when the media lands and is promised that.
+  it("over MCP the refusal carries pending / eta_s / retry_after_s and says nothing will wake the caller", async () => {
+    const { runner } = probing();
+    const { ctx, store } = await seededCtx(runner);
+    await catalog(store, [{ id: "media_gen_vo", kind: "audio" }]);
+    const r = (await addClipsTool(
+      { entries: [{ media_ref: "media_gen_vo", timeline_in: 0 }] },
+      { ...ctx, surface: "mcp" },
+    )) as Any;
+    expect(r.ok).toBe(false);
+    expect(r).toMatchObject({ pending: true, status: "generating" });
+    expect(r.eta_s).toBeGreaterThan(0);
+    expect(r.retry_after_s).toBeGreaterThan(0);
+    expect(String(r.error)).toMatch(/nothing will tell you when it lands/);
+    expect(String(r.error)).not.toMatch(/you will be told when it lands/);
+  });
+
+  // The rule that survives a rewrite: whatever the kind, the length fields, the form of the ref, the
+  // caller or the door, a generating asset is never handed to ffprobe, and the answer is either a
+  // placement or words the model can act on. Never "couldn't probe 'library/media_gen_…'".
+  const KINDS = ["image", "video", "audio"] as const;
+  const FIELDS: Array<[string, Record<string, unknown>]> = [
+    ["no length", {}],
+    ["timeline_out", { timeline_out: 120 }],
+    ["duration", { duration: 90 }],
+    ["source_span", { source_span: [0, 2] }],
+    ["loop + length", { loop: true, timeline_out: 120 }],
+    ["stretch + length", { stretch: true, timeline_out: 120 }],
+  ];
+  for (const kind of KINDS)
+    for (const [label, fields] of FIELDS)
+      for (const form of ["id", "path"] as const)
+        for (const surface of ["app", "mcp"] as const)
+          for (const door of ["add_clips", "insert_clips"] as const)
+            it(`never probes a placeholder: ${kind} · ${label} · ${form} ref · ${surface} · ${door}`, async () => {
+              const { runner, opened } = probing();
+              const { ctx, store } = await seededCtx(runner);
+              await catalog(store, [{ id: "media_gen_m", kind, duration_s: 8 }]);
+              const ref = form === "id" ? "media_gen_m" : `library/media_gen_m.${EXT[kind]}`;
+              const who = { ...ctx, surface };
+              const args = { ...fields } as Record<string, unknown>;
+              if (door === "insert_clips" && "timeline_out" in args) {
+                args.duration = 90;
+                delete args.timeline_out;
+              }
+              const r = (await (door === "add_clips"
+                ? addClipsTool({ entries: [{ media_ref: ref, timeline_in: 0, ...args }] }, who)
+                : insertClipsTool({ entries: [{ media_ref: ref, ...args }], at: 0 }, who))) as Any;
+              expect(placeholdersProbed(opened)).toEqual([]);
+              if (!r.ok)
+                expect(String(r.error)).toMatch(
+                  /still being generated|apply to audio clips only|failed to generate/,
+                );
+              expect(String(r.error ?? "")).not.toMatch(/couldn't probe|No such file/);
+            });
+});
+
 // UJ-014: a linked file the user moved or deleted. Probing the path ffprobe cannot open answered
 // "couldn't probe 'media_…' (No such file or directory)": a ref that reads as wrong, about a file
 // only the user can bring back.

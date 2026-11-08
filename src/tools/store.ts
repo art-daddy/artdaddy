@@ -433,7 +433,12 @@ export class ProjectStoreAccess {
    *  and unresolvable AT THE SAME TIME for as long as the job runs. Every resolver answers null for
    *  one, which reads as "your ref is wrong" — so this exists to let a caller tell the two apart.
    *  Lives here because {@link resolveRef} is the one door refs come through; a copy in one tool is
-   *  how 21 `inspect_media` calls in a single session were told "media not found". */
+   *  how 21 `inspect_media` calls in a single session were told "media not found".
+   *
+   *  It finds the row with the SAME lookup `resolveRef` uses ({@link rowFor}), so every form of a ref
+   *  the resolver accepts for ready media (id, filename, alias, stored path, its basename or stem)
+   *  names a generation in flight too. It used to match only id, filename and alias, and a model
+   *  that wrote `library/<id>.<ext>` had its ref probed as a file that "does not exist". */
   async pendingMedia(ref: string): Promise<{
     id: string;
     path: string;
@@ -442,19 +447,23 @@ export class ProjectStoreAccess {
     error?: string;
     /** When the job was registered, in epoch seconds, if the row says. */
     added_at?: number;
+    /** The length the generation was asked for, in seconds, when the row records a usable one. It is
+     *  the only length a video that is still being made has. */
+    duration_s?: number;
   } | null> {
     const s = (ref ?? "").trim();
-    if (!s) return null;
+    if (!s || isAbsolute(s)) return null;
     let clips: LibraryClip[];
     try {
       clips = await this.listClips();
     } catch {
       return null;
     }
-    const row = clips.find((c) => c.id === s || c.filename === s || (c.aliases ?? []).includes(s));
+    const row = rowFor(clips, s);
     const status = row ? String(row.status ?? "") : "";
     if (!row || (status !== "generating" && status !== "failed")) return null;
     const addedAt = Number(row.added_at);
+    const asked = Number(row.duration_s);
     return {
       id: String(row.id),
       path: String(row.path ?? ""),
@@ -462,6 +471,7 @@ export class ProjectStoreAccess {
       status,
       ...(row.error != null ? { error: String(row.error) } : {}),
       ...(Number.isFinite(addedAt) && addedAt > 0 ? { added_at: addedAt } : {}),
+      ...(Number.isFinite(asked) && asked > 0 ? { duration_s: asked } : {}),
     };
   }
 

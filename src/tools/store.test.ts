@@ -337,6 +337,122 @@ describe("ProjectStoreAccess offline media (UJ-014)", () => {
   });
 });
 
+// One door. A ref the resolver accepts for READY media must also be recognised as a generation in
+// flight when the same row is still being made. `pendingMedia` matched only the id, the filename and
+// an alias while `resolveRef` also takes the stored path, its basename and its stem, so a
+// `library/<id>.<ext>` ref to a generating asset (the form a model invents after being told "not
+// found") was not pending: it fell through to ffprobe and came back as "No such file or directory".
+describe("ProjectStoreAccess.pendingMedia answers for every form resolveRef accepts", () => {
+  const ROW = {
+    id: "media_gen_a1b2c3",
+    path: "library/media_gen_a1b2c3.wav",
+    filename: "voiceover.wav",
+    aliases: ["vo"],
+    kind: "audio",
+  };
+  const FORMS = [
+    "media_gen_a1b2c3",
+    "voiceover.wav",
+    "vo",
+    "library/media_gen_a1b2c3.wav",
+    "library\\media_gen_a1b2c3.wav",
+    "media_gen_a1b2c3.wav",
+    " media_gen_a1b2c3\n",
+  ];
+
+  it.each(FORMS)(
+    "%j names the same row whether its file exists (resolveRef) or is still being made",
+    async (form) => {
+      const ready = new MockFs();
+      withLibrary(ready, [ROW]);
+      ready.touch(joinPath(DIR, ROW.path));
+      // The precondition: the resolver itself accepts this form.
+      expect(await new ProjectStoreAccess(DIR, ready).resolveRef(form)).toBe(
+        joinPath(DIR, ROW.path),
+      );
+
+      const making = new MockFs();
+      withLibrary(making, [{ ...ROW, status: "generating", added_at: 1_790_000_000 }]);
+      const row = await new ProjectStoreAccess(DIR, making).pendingMedia(form);
+      expect(row?.id).toBe(ROW.id);
+    },
+  );
+
+  it("is null for ready media, a stranger, an empty ref and a raw system path", async () => {
+    const fs = new MockFs();
+    withLibrary(fs, [
+      { ...ROW, status: "generating" },
+      { id: "media_ready", path: "library/media_ready.mp4", filename: "ready.mp4", kind: "video" },
+    ]);
+    const store = new ProjectStoreAccess(DIR, fs);
+    for (const ref of [
+      "media_ready",
+      "library/media_ready.mp4",
+      "media_gen_zzzzzz",
+      "library/media_gen_zzzzzz.wav",
+      "",
+      "  ",
+      "C:/elsewhere/media_gen_a1b2c3.wav",
+    ])
+      expect(await store.pendingMedia(ref), JSON.stringify(ref)).toBeNull();
+  });
+
+  it("still answers for a FAILED generation, with the reason, so a tool can say it failed", async () => {
+    const fs = new MockFs();
+    withLibrary(fs, [{ ...ROW, status: "failed", error: "content filter" }]);
+    expect(
+      await new ProjectStoreAccess(DIR, fs).pendingMedia("library/media_gen_a1b2c3.wav"),
+    ).toMatchObject({
+      id: ROW.id,
+      status: "failed",
+      error: "content filter",
+    });
+  });
+
+  // What was asked for is the only length a still-generating asset has: a video says how many
+  // seconds it was requested at. A value that cannot be a length is never passed on.
+  it("carries the length the generation was asked for, when the row records a usable one", async () => {
+    const fs = new MockFs();
+    withLibrary(fs, [
+      {
+        ...ROW,
+        id: "media_gen_v8",
+        path: "library/media_gen_v8.mp4",
+        kind: "video",
+        status: "generating",
+        duration_s: 8,
+      },
+      {
+        ...ROW,
+        id: "media_gen_v0",
+        path: "library/media_gen_v0.mp4",
+        kind: "video",
+        status: "generating",
+        duration_s: 0,
+      },
+      {
+        ...ROW,
+        id: "media_gen_vx",
+        path: "library/media_gen_vx.mp4",
+        kind: "video",
+        status: "generating",
+        duration_s: "soon",
+      },
+      {
+        ...ROW,
+        id: "media_gen_vn",
+        path: "library/media_gen_vn.mp4",
+        kind: "video",
+        status: "generating",
+      },
+    ]);
+    const store = new ProjectStoreAccess(DIR, fs);
+    expect((await store.pendingMedia("media_gen_v8"))?.duration_s).toBe(8);
+    for (const id of ["media_gen_v0", "media_gen_vx", "media_gen_vn"])
+      expect((await store.pendingMedia(id))?.duration_s, id).toBeUndefined();
+  });
+});
+
 // 4f: what a transcript or loudness figure in the app cache is kept under. The rule is WHICH
 // bytes: the same for a copy in another project and for a linked file moved and relinked, and
 // different the moment a linked file is written again.

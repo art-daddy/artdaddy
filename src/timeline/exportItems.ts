@@ -8,6 +8,7 @@
 // own job in the export queue (progress, Cancel), and the call wakes the agent once, after its last
 // file settles.
 import type { ClientToolContext } from "../tools/context";
+import { unresolvedRefError } from "../tools/refState";
 import type { LibraryClip } from "../tools/store";
 import { loadTimeline } from "./engine";
 import {
@@ -192,15 +193,10 @@ async function exportItemsTool(args: Args, ctx: ClientToolContext | null): Promi
   // Library files: each one the library knows, and on disk now.
   const media: { ref: string; src: string; stem: string; ext: string }[] = [];
   for (const ref of refs) {
-    const pending = await ctx.store.pendingMedia(ref);
-    if (pending)
-      return {
-        ok: false,
-        error:
-          pending.status === "generating"
-            ? `${ref} is still being generated; export it once it lands.`
-            : `${ref} failed to generate, so there is nothing to deliver.`,
-      };
+    // Still being made, or failed: said the way every tool says it (with when to come back, and
+    // who will or will not tell the caller), and with the provider's reason when it failed.
+    if (await ctx.store.pendingMedia(ref))
+      return unresolvedRefError(ctx, ref, "", undefined, "deliver");
     const src = await ctx.store.resolveMediaRef(ref);
     if (!src) {
       const known = rows.some((c) => c.id === ref || c.filename === ref);

@@ -22,6 +22,7 @@ import type { Clip, Timeline } from "../timeline/model";
 import { lineWidthIn, planCanvas, textBox } from "../timeline/renderPlan";
 import type { ClientToolContext } from "./context";
 import type { ClientToolRegistry } from "./registry";
+import { unresolvedRefError } from "./refState";
 import { captionWords, pendingCaptionsResult } from "./captionTranscript";
 import { TRANSCRIPT_WAIT_MS } from "./transcribe";
 import type { InProgressTranscript } from "./transcriptWait";
@@ -335,7 +336,8 @@ async function placeSubtitleCues(
   fps: number,
 ): Promise<Result> {
   const abs = await ctx.store.resolveMediaRef(ref);
-  if (!abs) return { ok: false, error: `subtitle asset not found: ${ref}` };
+  // A linked subtitle file the user moved is offline, not missing: the ref is right (UJ-014).
+  if (!abs) return unresolvedRefError(ctx, ref, `subtitle asset not found: ${ref}`);
   const format = subtitleFormat(abs);
   if (!format) {
     return {

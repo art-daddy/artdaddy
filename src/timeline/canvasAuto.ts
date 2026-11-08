@@ -143,6 +143,8 @@ async function firstVideo(
     const raw = String(ref ?? "").trim();
     if (!raw || isUnsafeAgentRef(raw)) continue;
     try {
+      // Media still being made has no file to read a picture size from, so there is nothing to probe.
+      if (await ctx.store.pendingMedia(raw)) continue;
       const abs = (await ctx.store.resolveMediaRef(raw)) ?? raw;
       if (placeableKind(abs) !== "video") continue;
       const shape = await probeClipShape(ctx, abs);

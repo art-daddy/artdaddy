@@ -23,6 +23,7 @@ import { encodeImageForGemini } from "./geminiEncode";
 import { submitGeneration } from "./genJobs";
 import { decodeImages, decodeVideo } from "./generationResults";
 import type { ClientToolRegistry } from "./registry";
+import { unresolvedRefError } from "./refState";
 
 type Result = Record<string, unknown>;
 const NOT_READY: Result = { ok: false, error: "client tool runtime not ready" };
@@ -135,13 +136,24 @@ async function generateImage(
       error: `${m.id} aspect_ratio must be one of ${JSON.stringify(m.aspect_ratios)}`,
     };
 
+  // Every reference is found BEFORE any is encoded: an ffmpeg run is wasted on a list that cannot be
+  // used, and the first one that is not there is what the caller is told about. A ref still being
+  // generated, failed or offline is said as such: "reference image not found" read as a wrong ref.
+  const refPaths: string[] = [];
+  for (const ref of refRefs) {
+    const abs = await ctx.store.resolveMediaRef(ref);
+    if (!abs) return unresolvedRefError(ctx, ref, `reference image not found: ${ref}`);
+    refPaths.push(abs);
+  }
   const media: Record<string, { b64: string; ext?: string }> = {};
   const refKeys: string[] = [];
-  for (let i = 0; i < refRefs.length; i += 1) {
-    const abs = await ctx.store.resolveMediaRef(refRefs[i]);
-    if (!abs) return { ok: false, error: `reference image not found: ${refRefs[i]}` };
+  for (let i = 0; i < refPaths.length; i += 1) {
     const key = `ref${i}`;
-    const enc = await encodeImageForGemini(ctx, abs, { maxDim: 2048, quality: 90, tag: "genref" });
+    const enc = await encodeImageForGemini(ctx, refPaths[i], {
+      maxDim: 2048,
+      quality: 90,
+      tag: "genref",
+    });
     media[key] = { b64: toB64(await ctx.store.readBytes(enc)), ext: ".jpg" };
     refKeys.push(key);
   }
@@ -256,14 +268,21 @@ async function generateVideo(
     };
   const dur = videoSeconds(args.duration, refRefs.length > 0); // reference-image mode is 8s only
 
-  const media: Record<string, { b64: string; ext?: string }> = {};
-  const addFrame = async (ref: string, key: string): Promise<string> => {
+  // Every frame is found BEFORE any is encoded, and the first one that is not there is what the
+  // caller is told about. A frame still being generated cannot be animated yet (and stays refused),
+  // but "frame not found" told the model its ref was wrong when the ref was right: it is said as it
+  // is, with when to come back (14 failed calls, 11 of them from one parallel batch).
+  const wanted: Array<[key: string, ref: string]> = [];
+  if (startFrame) wanted.push(["start_frame", startFrame]);
+  if (endFrame) wanted.push(["end_frame", endFrame]);
+  refRefs.forEach((ref, i) => wanted.push([`vref${i}`, ref]));
+  const frames: Array<{ key: string; abs: string }> = [];
+  for (const [key, ref] of wanted) {
     const abs = await ctx.store.resolveMediaRef(ref);
-    if (!abs) throw new Error(`frame not found: ${ref}`);
-    const enc = await encodeImageForGemini(ctx, abs, { maxDim: 2048, quality: 90, tag: "genref" });
-    media[key] = { b64: toB64(await ctx.store.readBytes(enc)), ext: ".jpg" };
-    return key;
-  };
+    if (!abs) return unresolvedRefError(ctx, ref, `frame not found: ${ref}`);
+    frames.push({ key, abs });
+  }
+  const media: Record<string, { b64: string; ext?: string }> = {};
   const provArgs: Record<string, unknown> = {
     provider: m.provider,
     backend_id: m.backend_id,
@@ -276,14 +295,21 @@ async function generateVideo(
   if (args.seed != null) provArgs.seed = args.seed;
   if (args.negative_prompt != null) provArgs.negative_prompt = String(args.negative_prompt);
   try {
-    if (startFrame) provArgs.start_frame = await addFrame(startFrame, "start_frame");
-    if (endFrame) provArgs.end_frame = await addFrame(endFrame, "end_frame");
-    const vkeys: string[] = [];
-    for (let i = 0; i < refRefs.length; i += 1) vkeys.push(await addFrame(refRefs[i], `vref${i}`));
-    if (vkeys.length) provArgs.reference_images = vkeys;
+    for (const { key, abs } of frames) {
+      const enc = await encodeImageForGemini(ctx, abs, {
+        maxDim: 2048,
+        quality: 90,
+        tag: "genref",
+      });
+      media[key] = { b64: toB64(await ctx.store.readBytes(enc)), ext: ".jpg" };
+    }
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
+  if (startFrame) provArgs.start_frame = "start_frame";
+  if (endFrame) provArgs.end_frame = "end_frame";
+  const vkeys = refRefs.map((_, i) => `vref${i}`);
+  if (vkeys.length) provArgs.reference_images = vkeys;
 
   const name = args.name != null ? String(args.name) : undefined;
   const sub = await submitGeneration({

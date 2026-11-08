@@ -14,7 +14,7 @@
 // The same holds for a linked file the user moved (UJ-014): the ref is right and the file is offline.
 import { ArtDaddyError } from "../lib/errors";
 import type { ClientToolContext } from "./context";
-import { generationWait } from "./generationWait";
+import { generationWait, type GenerationWait } from "./generationWait";
 import type { LibraryClip } from "./store";
 
 /** What to say about a linked file that is no longer on disk: only the user can bring it back. Named
@@ -52,12 +52,17 @@ export type RefReportContext = Pick<ClientToolContext, "store" | "surface">;
 
 /** The message for a ref that did not resolve, plus a structured status when the caller is an MCP
  *  agent and the ref is still being generated. Pending/failed/offline if the catalog knows it,
- *  otherwise the caller's own "unknown ref" text (which is still the right answer for a typo). */
+ *  otherwise the caller's own "unknown ref" text (which is still the right answer for a typo).
+ *
+ *  `use` is what the caller wanted the file for ("read" unless it says otherwise: an export
+ *  "deliver"s it). It only changes that one word; the rest of the sentence, and what the in-app
+ *  agent is promised, is the same for every tool. */
 export async function unresolvedRef(
   ctx: RefReportContext,
   ref: string,
   whenUnknown: string,
   nowMs: number = Date.now(),
+  use: string = "read",
 ): Promise<{ error: string } & Partial<PendingStatus>> {
   const pending = await ctx.store.pendingMedia(ref).catch(() => null);
   if (!pending) {
@@ -65,36 +70,83 @@ export async function unresolvedRef(
     return { error: offline ? offlineRefMessage(offline) : whenUnknown };
   }
   if (pending.status === "failed") {
-    const why = pending.error ? `: ${pending.error}` : "";
     return {
-      error: `'${ref}' failed to generate${why}, so there is no file to read. Generate it again or use different media — do not retry this ref.`,
+      error: `'${ref}' failed to generate${failureReason(pending.error)}, so there is no file to ${use}. Generate it again or use different media — do not retry this ref.`,
     };
   }
   if (ctx.surface !== "mcp") {
     return {
-      error: `'${ref}' is still being generated, so there is nothing to read yet. The ref is correct; you will be told when it lands. Don't re-generate it and don't guess a file path.`,
+      error: `'${ref}' is still being generated, so there is nothing to ${use} yet. The ref is correct; you will be told when it lands. Don't re-generate it and don't guess a file path.`,
     };
   }
   const wait = generationWait(pending, nowMs);
-  const left = wait.slow
-    ? `it is taking longer than usual; allow about ${wait.eta_s} s more`
-    : `about ${wait.eta_s} s left`;
   return {
-    error: `'${ref}' is still being generated (${left}), so there is nothing to read yet. The ref is correct, but nothing will tell you when it lands: this connection cannot wake you. Do other work or end your turn, and ask again no sooner than ${wait.retry_after_s} s (library_op action='list' shows status:'generating' until it is ready). Don't poll, don't re-generate it and don't guess a file path.`,
-    pending: true,
-    status: "generating",
-    eta_s: wait.eta_s,
-    retry_after_s: wait.retry_after_s,
+    error: `'${ref}' is still being generated (${timeLeft(wait)}), so there is nothing to ${use} yet. The ref is correct, but nothing will tell you when it lands: this connection cannot wake you. Do other work or end your turn, and ask again no sooner than ${wait.retry_after_s} s (library_op action='list' shows status:'generating' until it is ready). Don't poll, don't re-generate it and don't guess a file path.`,
+    ...pendingStatus(wait),
   };
 }
+
+/** `: <reason>` when the provider gave one. */
+const failureReason = (why?: string): string => (why ? `: ${why}` : "");
+
+/** How long is left, in words an outside caller can plan around. */
+const timeLeft = (wait: GenerationWait): string =>
+  wait.slow
+    ? `it is taking longer than usual; allow about ${wait.eta_s} s more`
+    : `about ${wait.eta_s} s left`;
+
+/** The typed half of the same answer. */
+const pendingStatus = (wait: GenerationWait): PendingStatus => ({
+  pending: true,
+  status: "generating",
+  eta_s: wait.eta_s,
+  retry_after_s: wait.retry_after_s,
+});
 
 export async function unresolvedRefMessage(
   ctx: RefReportContext,
   ref: string,
   whenUnknown: string,
   nowMs?: number,
+  use?: string,
 ): Promise<string> {
-  return (await unresolvedRef(ctx, ref, whenUnknown, nowMs)).error;
+  return (await unresolvedRef(ctx, ref, whenUnknown, nowMs, use)).error;
+}
+
+/** What a placement needs to say about media that is still being made when the entry asks for
+ *  something only the finished file can answer: a length nothing gave it, or a loop, a stretch or a
+ *  source span, which all work from the source's real length. It used to say "give a length" or, for
+ *  loop and stretch, probe the placeholder's file and report ffprobe's "No such file or directory"
+ *  (8 of 20 failed calls in a month). The same promise as {@link unresolvedRef}: the in-app agent is
+ *  told when the media lands; an outside caller is not, so it gets the time and a typed status.
+ *
+ *  `need` says why the finished file is wanted; `placeNow` says what to give instead to place it
+ *  without waiting. A length given that way is kept as it is: it is never refitted when the media
+ *  lands, and the wording says so. */
+export async function pendingPlacementRefusal(
+  ctx: RefReportContext,
+  ref: string,
+  pending: { kind?: string; added_at?: number },
+  need: string,
+  placeNow: string,
+  nowMs: number = Date.now(),
+): Promise<{ error: string } & Partial<PendingStatus>> {
+  const how = `${placeNow}; that length is kept as given and is not refitted when the media lands`;
+  if (ctx.surface !== "mcp") {
+    return {
+      error: `'${ref}' is still being generated, and ${need}. The ref is correct; you will be told when it lands, then place it. To place it now instead, give this entry ${how}. Don't re-generate it and don't guess a file path.`,
+    };
+  }
+  const wait = generationWait(pending, nowMs);
+  return {
+    error: `'${ref}' is still being generated (${timeLeft(wait)}), and ${need}. The ref is correct, but nothing will tell you when it lands: this connection cannot wake you. Do other work or end your turn and place it no sooner than ${wait.retry_after_s} s from now (library_op action='list' shows status:'generating' until it is ready), or give this entry ${how}. Don't poll, don't re-generate it and don't guess a file path.`,
+    ...pendingStatus(wait),
+  };
+}
+
+/** The same for a generation that failed: there is nothing to wait for and the ref cannot be placed. */
+export function failedPlacementMessage(ref: string, why?: string): string {
+  return `'${ref}' failed to generate${failureReason(why)}, so it cannot be placed. Generate it again or use different media — do not retry this ref.`;
 }
 
 /** `{ok:false}` shape for the same, for the tools that return rather than throw. */
@@ -103,6 +155,7 @@ export async function unresolvedRefError(
   ref: string,
   whenUnknown: string,
   nowMs?: number,
+  use?: string,
 ): Promise<{ ok: false; error: string } & Partial<PendingStatus>> {
-  return { ok: false, ...(await unresolvedRef(ctx, ref, whenUnknown, nowMs)) };
+  return { ok: false, ...(await unresolvedRef(ctx, ref, whenUnknown, nowMs, use)) };
 }

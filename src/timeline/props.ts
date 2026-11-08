@@ -2,6 +2,7 @@
 // apply_color, set_transition). Ports timeline_edit_tools.py part 2. These set
 // look/sound AFTER placement; deep field validation is left to validateTimeline.
 import type { ClientToolContext } from "../tools/context";
+import { failedPlacementMessage, offlineRefMessage } from "../tools/refState";
 import { isUnsafeAgentRef } from "../tools/store";
 import { transitionMutation } from "./edit";
 import { colorKnobs, kindForClip, resolveEffect, resolveGrade } from "./effectRegistry";
@@ -12,7 +13,7 @@ import { findClip } from "./helpers";
 import { normalizeKeyframes } from "./keyframe";
 import type { Clip, Timeline, Track } from "./model";
 import { clampMagnification, missingClip, setClipProperties, type SwapMedia } from "./operations";
-import { placeableKind } from "./helpers";
+import { placeableKind, type MediaKind } from "./helpers";
 import { sourceDurationSeconds, sourceHasAudio, sourceHasVideo } from "./placement";
 import { sourceDims } from "./sourceDims";
 import { sourceLengths } from "./sourceLength";
@@ -182,10 +183,27 @@ async function resolveSwapMedia(
         error: `media_ref must be a library asset (media id / filename), not a system path: ${ref}`,
       },
     };
-  // Same containment as add_clips, and the same tolerance: a raw system path is refused, but a
-  // ref that simply does not resolve YET (media still generating) falls through — the slot already
-  // decides the length, so a swap does not need the file to exist.
+  // Media still being made has no file to probe, and the swap does not need one: the slot already
+  // decides the length and the picture fills in when the media lands. It used to fall through to
+  // ffprobe all the same and answer "couldn't probe ... No such file or directory". A generation
+  // that failed will never exist, so the clip is not pointed at it.
+  const making = await ctx.store.pendingMedia(ref).catch(() => null);
+  if (making) {
+    if (making.status === "failed")
+      return { error: { ok: false, error: failedPlacementMessage(ref, making.error) } };
+    const kind: MediaKind =
+      making.kind === "audio" || making.kind === "image" ? making.kind : "video";
+    // Sound is unknowable until it lands and models split both ways; optimistic, as placement is
+    // (resolveClipSources disables an audio clip whose source turns out to have none).
+    return { media: { ref: making.id, kind, totalFrames: null, hasAudio: kind === "video" } };
+  }
   const abs = (await ctx.store.resolveMediaRef(ref)) ?? ref;
+  // A linked file the user moved or deleted: the ref is right and only the user can bring the file
+  // back, where a probe of it could only say "No such file" (UJ-014, as add_clips says it).
+  if (abs === ref) {
+    const gone = await ctx.store.offlineMedia(ref).catch(() => null);
+    if (gone) return { error: { ok: false, error: offlineRefMessage(gone) } };
+  }
   let kind = placeableKind(abs);
   if (kind === "video" && !(await sourceHasVideo(ctx, abs))) kind = "audio";
   const hasAudio =

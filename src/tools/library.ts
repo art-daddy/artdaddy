@@ -8,6 +8,7 @@
 import type { ClientToolContext } from "./context";
 import { isMutationRejected, runProjectMutation } from "./coordinator";
 import type { ClientToolRegistry } from "./registry";
+import { unresolvedRef } from "./refState";
 import {
   INTERNAL_DIR,
   clipAbs,
@@ -254,7 +255,7 @@ async function libraryOp(args: Args, ctx: ClientToolContext | null): Promise<Res
   // Read-only actions never write the catalog, so keep them lock-free (an agent
   // `list` shouldn't wait behind a background write).
   const readOnly = action === "list" || action === "get" || action === "resolve";
-  if (readOnly) return runLibraryOp(store, args, action);
+  if (readOnly) return runLibraryOp(store, args, action, null, ctx.surface);
   // Every catalog WRITE commits through the shared project-mutation executor (runProjectMutation) —
   // the open document's MutationGate, the SAME boundary as timeline edits, so a library change
   // serializes in ONE domain, is rejected when the project is closing / the agent origin was
@@ -283,6 +284,7 @@ async function runLibraryOp(
   args: Args,
   action: string,
   doc: ProjectDocument | null = null,
+  surface?: ClientToolContext["surface"],
 ): Promise<Result> {
   const cat = await readCatalog(store);
   const findRow = (id: string) => cat.clips.find((c) => c.id === id);
@@ -491,6 +493,14 @@ async function runLibraryOp(
     case "resolve": {
       const ref = String(args.id ?? args.id_or_path ?? args.path ?? "").trim();
       if (!ref) return { ok: false, error: "resolve: an id or path is required" };
+      // A library row can exist without a file to read: media still being made, a generation that
+      // failed, a linked file the user moved. Handing back its path as "resolved" is a path nothing
+      // can open; say what is true, the way every tool that takes a ref says it.
+      if ((await store.pendingMedia(ref)) || (await store.offlineMedia(ref)))
+        return {
+          ok: false,
+          ...(await unresolvedRef({ store, surface }, ref, `resolve: unknown library id ${ref}`)),
+        };
       if (ref.startsWith("media_")) {
         const row = findRow(ref);
         return row

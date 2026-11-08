@@ -5,7 +5,12 @@
 import { stderrExcerpt, type CommandResult, type CommandRunner } from "../tools/command";
 import type { ClientToolContext } from "../tools/context";
 import { isUnsafeAgentRef } from "../tools/store";
-import { offlineRefMessage } from "../tools/refState";
+import {
+  failedPlacementMessage,
+  offlineRefMessage,
+  pendingPlacementRefusal,
+  type PendingStatus,
+} from "../tools/refState";
 import { prepareCanvas } from "./canvasAuto";
 import { ctxApplyOp, loadTimeline } from "./engine";
 import { OpError } from "./errors";
@@ -289,21 +294,95 @@ async function overrunsMedia(
 const fillHint = (kind: MediaKind): string =>
   kind === "audio" ? " To fill the longer span, pass loop or stretch." : "";
 
+/** A library row whose file is still being made (the part of it placement reads). */
+interface PendingRow {
+  id: string;
+  path: string;
+  kind: MediaKind;
+  status: string;
+  error?: string;
+  added_at?: number;
+  /** The length the generation was asked for, in seconds. */
+  duration_s?: number;
+}
+
+/** A generating ref and the name the caller used for it, standing in for media that has no bytes. */
+interface PendingTarget {
+  row: PendingRow;
+  ref: string;
+}
+
+/** A refusal to place media that is still being made. Carries the typed status an outside caller
+ *  is given with it (`pending`, `eta_s`, `retry_after_s`), so the tool can return it. */
+class PendingPlacementError extends OpError {
+  constructor(
+    message: string,
+    readonly pendingStatus: Partial<PendingStatus> = {},
+  ) {
+    super(message);
+  }
+}
+
+/** The refusal, built with the words the caller is promised ({@link pendingPlacementRefusal}). */
+async function pendingRefusal(
+  ctx: ClientToolContext,
+  target: PendingTarget,
+  need: string,
+  placeNow: string,
+): Promise<PendingPlacementError> {
+  const { error, ...status } = await pendingPlacementRefusal(
+    ctx,
+    target.ref,
+    target.row,
+    need,
+    placeNow,
+  );
+  return new PendingPlacementError(error, status);
+}
+
+const PLACE_NOW_ADD =
+  "a timeline_out or duration (in frames), without loop, stretch or source_span";
+const PLACE_NOW_INSERT = "a duration (in frames), without loop, stretch or source_span";
+const NEEDS_REAL_FILL =
+  "loop and stretch work from the media's real length, which is not known until it lands";
+const NEEDS_REAL_SPAN =
+  "a source_span is cut from the media's real length, which is not known until it lands";
+const NEEDS_LENGTH = "its length is not known until it lands";
+
+/** The seconds a generating asset will last, as far as the request knows. A still has no length of
+ *  its own, so it is the default 5 s every still gets; a video is the length it was asked for; audio
+ *  (a voice-over lasts as long as the speech does) is not known until it lands. */
+function knownSeconds(row: PendingRow): number | null {
+  if (row.kind === "image") return 5;
+  if (row.kind === "video" && Number.isFinite(row.duration_s) && (row.duration_s ?? 0) > 0)
+    return row.duration_s ?? null;
+  return null;
+}
+
+/** Said next to a length that came from the request rather than the file. */
+const askedLengthNote = (ref: string, seconds: number, frames: number): string =>
+  `'${ref}' is still being generated, so it was placed at the ${seconds} s it was asked for (${frames} frames).`;
+
 /** Resolve an add_clips entry's length: ONE of source_span (seconds) or
  *  timeline_out/duration (frames); loop/stretch (audio) fill a longer span.
  *  Fence + report: the model often sets more than one — keep the canonical one
  *  (source_span > length; loop > stretch) and return a `note` rather than reject.
  *
- *  `mediaKnown`: the media's bytes exist, so a length in frames can be held to it. False for a
- *  ref still being generated, whose length nothing can read yet. */
+ *  `source`: `true` when the media's bytes exist, so a length in frames can be held to it and the
+ *  file can be probed. A {@link PendingTarget} for a ref still being generated: nothing can read its
+ *  length yet, so only what a request already knows can stand in for it and the file is NEVER
+ *  probed (it is not there; the probe's "No such file or directory" is not something a model can
+ *  act on). */
 async function resolvePlace(
   ctx: ClientToolContext,
   entry: Args,
   fps: number,
   abs: string,
   kind: MediaKind,
-  mediaKnown: boolean,
+  source: true | PendingTarget,
 ): Promise<Placement> {
+  const mediaKnown = source === true;
+  const pending = source === true ? null : source;
   if (!present(entry.timeline_in)) throw new OpError("each entry needs 'timeline_in'");
   const tin = toFrames(entry.timeline_in, fps);
   let loop = Boolean(entry.loop);
@@ -339,12 +418,15 @@ async function resolvePlace(
   if (loop || stretch) {
     if (!toutValid && !durValid)
       throw new OpError("loop/stretch need a timeline_out or duration to fill");
+    // Both work from the source's real length, and a generating asset has none yet: a wait, not a probe.
+    if (pending) throw await pendingRefusal(ctx, pending, NEEDS_REAL_FILL, PLACE_NOW_ADD);
     const sOut = Math.round((await sourceDurationSeconds(ctx.runner, abs)) * fps);
     if (sOut <= 0)
       throw new OpError(`could not determine source duration for loop/stretch fill: ${abs}`);
     return { tin, tout: toutOf(), sIn: 0, sOut, loop, stretch, note: noteOf() };
   }
   if (spanValid) {
+    if (pending) throw await pendingRefusal(ctx, pending, NEEDS_REAL_SPAN, PLACE_NOW_ADD);
     // Class-A cross-check: source_span and timeline_out/duration both set the length.
     // source_span (a real slice of the asset) WINS; if the length the model also set
     // disagrees, coerce to the span and say so (LOUD note) rather than rejecting — a hard
@@ -401,6 +483,22 @@ async function resolvePlace(
       note: noteOf(),
     };
   }
+  if (pending) {
+    // No length given and no file to ask: the request's own length, or a wait.
+    const seconds = knownSeconds(pending.row);
+    if (seconds === null) throw await pendingRefusal(ctx, pending, NEEDS_LENGTH, PLACE_NOW_ADD);
+    const frames = Math.round(seconds * fps);
+    if (pending.row.kind === "video") notes.push(askedLengthNote(pending.ref, seconds, frames));
+    return {
+      tin,
+      tout: tin + frames,
+      sIn: null,
+      sOut: null,
+      loop: false,
+      stretch: false,
+      note: noteOf(),
+    };
+  }
   // No length given -> place the WHOLE source at 1x (omit = whole asset, other NLEs);
   // stills / unprobeable default to 5s.
   let durF = Math.round((await sourceDurationSeconds(ctx.runner, abs)) * fps);
@@ -418,15 +516,13 @@ async function resolvePlace(
 
 /** Media that is still being GENERATED: a catalog row and a path, but no file yet.
  *  `resolveMediaRef` returns null for it (it checks existence), so without this the ref falls
- *  through to ffprobe and the contract's promise — place it now, it fills in later — is false. */
-async function pendingMediaRow(
-  ctx: ClientToolContext,
-  ref: string,
-): Promise<{ id: string; path: string; kind: MediaKind } | null> {
+ *  through to ffprobe and the contract's promise — place it now, it fills in later — is false.
+ *  A generation that FAILED is returned too, with its reason, so the placement can say so. */
+async function pendingMediaRow(ctx: ClientToolContext, ref: string): Promise<PendingRow | null> {
   const row = await ctx.store.pendingMedia(ref).catch(() => null);
   if (!row) return null;
   const kind = (row.kind === "audio" || row.kind === "image" ? row.kind : "video") as MediaKind;
-  return { id: row.id, path: row.path, kind };
+  return { ...row, kind };
 }
 
 /** A linked file the user moved or deleted (UJ-014): the ref is right and only the user can bring
@@ -458,11 +554,11 @@ async function resolveAddEntry(
   // Still generating: trust the catalog row instead of probing bytes that do not exist yet.
   const pending = await pendingMediaRow(ctx, raw);
   if (pending) {
-    if (!present(entry.timeline_out) && !present(entry.duration))
-      throw new OpError(
-        `'${raw}' is still being generated, so its length is not known yet — give this entry a timeline_out or duration.`,
-      );
-    const place = await resolvePlace(ctx, entry, fps, pending.path, pending.kind, false);
+    if (pending.status === "failed") throw new OpError(failedPlacementMessage(raw, pending.error));
+    const place = await resolvePlace(ctx, entry, fps, pending.path, pending.kind, {
+      row: pending,
+      ref: raw,
+    });
     return {
       source: pending.id,
       kind: pending.kind,
@@ -513,6 +609,10 @@ async function resolveAddEntry(
 const refsOf = (entries: unknown[]): string[] =>
   entries.map((e) => String((e as Args | null)?.media_ref ?? ""));
 
+/** The typed status that goes with a refusal to place media that is still being made. */
+const pendingFields = (e: OpError): Partial<PendingStatus> =>
+  e instanceof PendingPlacementError ? e.pendingStatus : {};
+
 /** What happened to the canvas, told to the agent next to the result (the person is never told: for them it
  *  is either silent or a question asked before this ran). */
 const withCanvasNote = (result: Result, note: string | undefined): Result =>
@@ -529,7 +629,8 @@ export async function addClipsTool(args: Args, ctx: ClientToolContext | null): P
   try {
     specs = await resolveAddSpecs(ctx, entries as Args[]);
   } catch (e) {
-    if (e instanceof OpError) return withCanvasNote({ ok: false, error: e.message }, prep.note);
+    if (e instanceof OpError)
+      return withCanvasNote({ ok: false, error: e.message, ...pendingFields(e) }, prep.note);
     throw e;
   }
   // If the project was closed/superseded while the async preflight (resolve + ffprobe) ran, the
@@ -572,12 +673,36 @@ async function resolveInsertEntry(
   // other door onto the timeline — a guard on only one of them is the gap, not the fix.
   const pendingIns = await pendingMediaRow(ctx, raw);
   if (pendingIns) {
-    if (!present(entry.duration))
-      throw new OpError(
-        `'${raw}' is still being generated, so its length is not known yet — give this entry a duration.`,
-      );
-    const dur = toFrames(entry.duration, fps);
-    if (dur <= 0) throw new OpError(`insert entry duration must be > 0 (got ${dur} frames)`);
+    if (pendingIns.status === "failed")
+      throw new OpError(failedPlacementMessage(raw, pendingIns.error));
+    const target: PendingTarget = { row: pendingIns, ref: raw };
+    const asksFill = Boolean(entry.loop) || Boolean(entry.stretch);
+    if (asksFill && pendingIns.kind !== "audio")
+      throw new OpError("loop/stretch apply to audio clips only");
+    // Loop, stretch and a source span all work from the media's real length, which a generating
+    // asset does not have: a wait, not a probe of a file that is not there.
+    if (asksFill) throw await pendingRefusal(ctx, target, NEEDS_REAL_FILL, PLACE_NOW_INSERT);
+    const insSpan = entry.source_span;
+    if (
+      Array.isArray(insSpan) &&
+      insSpan.length === 2 &&
+      Number.isFinite(Number(insSpan[0])) &&
+      Number.isFinite(Number(insSpan[1])) &&
+      Number(insSpan[0]) >= 0 &&
+      Number(insSpan[1]) > Number(insSpan[0])
+    )
+      throw await pendingRefusal(ctx, target, NEEDS_REAL_SPAN, PLACE_NOW_INSERT);
+    let dur: number;
+    let note: string | undefined;
+    if (present(entry.duration) && toFrames(entry.duration, fps) > 0) {
+      dur = toFrames(entry.duration, fps);
+    } else {
+      // No length given and no file to ask: the request's own length, or a wait.
+      const seconds = knownSeconds(pendingIns);
+      if (seconds === null) throw await pendingRefusal(ctx, target, NEEDS_LENGTH, PLACE_NOW_INSERT);
+      dur = Math.round(seconds * fps);
+      if (pendingIns.kind === "video") note = askedLengthNote(raw, seconds, dur);
+    }
     return {
       source: pendingIns.id,
       kind: pendingIns.kind,
@@ -589,7 +714,7 @@ async function resolveInsertEntry(
       withAudio: entry.with_audio === false ? false : undefined,
       loop: false,
       stretch: false,
-      note: undefined,
+      note,
     };
   }
   await refuseOffline(ctx, raw, abs);
@@ -719,7 +844,8 @@ export async function insertClipsTool(args: Args, ctx: ClientToolContext | null)
   try {
     specs = await Promise.all(entries.map((e) => resolveInsertEntry(ctx, e as Args, fps)));
   } catch (e) {
-    if (e instanceof OpError) return withCanvasNote({ ok: false, error: e.message }, prep.note);
+    if (e instanceof OpError)
+      return withCanvasNote({ ok: false, error: e.message, ...pendingFields(e) }, prep.note);
     throw e;
   }
   return withCanvasNote(
