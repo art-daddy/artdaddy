@@ -7,11 +7,13 @@ import type { Timeline } from "./model";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
 
-// add_text_clips against the placement rules the owner set (2026-09-27), over random timelines
-// and batches. The oracle is the RULE, not the code:
-//   - entries sharing a track (the same track_id, or all the auto-placed ones) must not overlap
-//     each other -> refuse;
+// add_text_clips against the placement rules the owner set (2026-09-27; the free lane for titles
+// that name no track was added 2026-11-08), over random timelines and batches. The oracle is the
+// RULE, not the code:
+//   - entries sharing a NAMED track (the same track_id) must not overlap each other -> refuse;
 //   - a NAMED track with existing text where an entry goes -> refuse;
+//   - entries that name no track are NEVER refused: those that overlap each get a lane of their
+//     own, so they spread over exactly as many text tracks as the deepest overlap forces;
 //   - otherwise it must succeed. A guard that refuses legitimate input is a regression too.
 // On success no track may hold overlapping clips, which is the property the renderer depends
 // on and the one the old code broke.
@@ -67,10 +69,11 @@ const overlap = (a: [number, number], b: [number, number]) => a[0] < b[1] && b[0
 
 /** What the rules say should happen — computed from the rules, independently of the code. */
 function expectedRefusal(tl: Timeline, entries: Any[]): boolean {
+  // Only a NAMED track can contradict itself; the entries that name none are never refused.
   const groups = new Map<string, Array<[number, number]>>();
   for (const e of entries) {
-    const key = e.track_id ?? "\u0000auto";
-    groups.set(key, [...(groups.get(key) ?? []), [e.timeline_in, e.timeline_out]]);
+    if (!e.track_id) continue;
+    groups.set(e.track_id, [...(groups.get(e.track_id) ?? []), [e.timeline_in, e.timeline_out]]);
   }
   for (const spans of groups.values()) {
     for (let i = 0; i < spans.length; i++) {
@@ -86,6 +89,19 @@ function expectedRefusal(tl: Timeline, entries: Any[]): boolean {
     }
   }
   return false;
+}
+
+/** The most entries that cover one frame: how many tracks overlapping text cannot avoid needing. */
+function deepestOverlap(entries: Any[]): number {
+  let deepest = 0;
+  for (const probe of entries) {
+    const at = probe.timeline_in as number;
+    deepest = Math.max(
+      deepest,
+      entries.filter((e: Any) => e.timeline_in <= at && at < e.timeline_out).length,
+    );
+  }
+  return deepest;
 }
 
 function noTrackOverlaps(tl: Timeline): boolean {
@@ -134,7 +150,7 @@ describe("add_text_clips: placement rules over random timelines and batches", ()
     );
   });
 
-  it("lands every entry once, named ones on their track, the rest together on one other track", () => {
+  it("lands every entry once: named ones on their track, the rest on exactly as many others as overlap forces", () => {
     fc.assert(
       fc.property(
         timelineArb,
@@ -155,9 +171,13 @@ describe("add_text_clips: placement rules over random timelines and batches", ()
             if (e.track_id) expect(landed).toBe(e.track_id);
             else autoTracks.add(landed!);
           });
-          expect(autoTracks.size).toBeLessThanOrEqual(1);
+          const auto = entries.filter((e: Any) => !e.track_id);
+          // The fewest tracks the titles allow: never more lanes than the deepest overlap.
+          expect(autoTracks.size).toBe(deepestOverlap(auto));
           const named = new Set(entries.map((e: Any) => e.track_id).filter(Boolean));
           for (const id of autoTracks) expect(named.has(id)).toBe(false);
+          // Said, only when it was needed.
+          expect(Array.isArray(r.notes)).toBe(autoTracks.size > 1);
         },
       ),
       { numRuns: 600 },
@@ -183,34 +203,43 @@ describe("add_text_clips: placement rules over random timelines and batches", ()
     );
   });
 
-  // Creating a track while an existing one had room would multiply tracks over a session.
-  it("only creates a track for auto-placed text when no existing text track had room", () => {
+  // Creating a track while an existing one had room would multiply tracks over a session. With
+  // lanes, "had room" is per track a lane was given: an existing track that no lane of this call
+  // used, that is not one the call named, and that has room for everything the new track holds.
+  it("only creates a track for auto-placed text when no unused existing text track had room for what it holds", () => {
     fc.assert(
       fc.property(
         timelineArb,
         fc.array(entryArb, { minLength: 1, maxLength: 6 }),
         (tl, entries) => {
           fc.pre(!expectedRefusal(tl, entries));
-          const auto = entries.filter((e: Any) => !e.track_id);
-          fc.pre(auto.length > 0);
+          fc.pre(entries.some((e: Any) => !e.track_id));
           const work = structuredClone(tl);
           const r = addTextClips(work, entries) as Any;
-          const autoTrack = r.created[entries.indexOf(auto[0])].track_id;
-          if (tl.tracks.some((t) => t.id === autoTrack)) return;
           const named = new Set(entries.map((e: Any) => e.track_id).filter(Boolean));
-          const couldFit = tl.tracks.filter(
-            (t) =>
-              !named.has(t.id) &&
-              !auto.some((e: Any) =>
-                (t.clips ?? []).some((c) =>
-                  overlap(
-                    [e.timeline_in, e.timeline_out],
-                    [c.timeline_in as number, c.timeline_out as number],
+          const held = new Map<string, Any[]>();
+          entries.forEach((e: Any, i: number) => {
+            if (e.track_id) return;
+            const id = r.created[i].track_id as string;
+            held.set(id, [...(held.get(id) ?? []), e]);
+          });
+          for (const [trackId, mine] of held) {
+            if (tl.tracks.some((t) => t.id === trackId)) continue; // it existed: nothing was created
+            const couldFit = tl.tracks.filter(
+              (t) =>
+                !named.has(t.id) &&
+                !held.has(t.id) &&
+                !mine.some((e: Any) =>
+                  (t.clips ?? []).some((c) =>
+                    overlap(
+                      [e.timeline_in, e.timeline_out],
+                      [c.timeline_in as number, c.timeline_out as number],
+                    ),
                   ),
                 ),
-              ),
-          );
-          expect(couldFit.map((t) => t.id)).toEqual([]);
+            );
+            expect(couldFit.map((t) => t.id)).toEqual([]);
+          }
         },
       ),
       { numRuns: 600 },

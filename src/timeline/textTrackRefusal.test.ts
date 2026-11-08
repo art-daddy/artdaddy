@@ -30,12 +30,12 @@ async function setup() {
 
 const REFUSALS: Array<[string, Any[], RegExp]> = [
   [
-    "entries in one batch overlap each other",
+    "entries the call put on one NAMED track overlap each other",
     [
-      { content: "a", timeline_in: 100, timeline_out: 160 },
-      { content: "b", timeline_in: 130, timeline_out: 190 },
+      { content: "a", timeline_in: 100, timeline_out: 160, track_id: "lower" },
+      { content: "b", timeline_in: 130, timeline_out: 190, track_id: "lower" },
     ],
-    /entries\[1\] .*overlaps entries\[0\]/,
+    /entries\[1\] .*overlaps entries\[0\].* on track 'lower'/,
   ],
   [
     "a named track is occupied where the entry goes",
@@ -86,6 +86,46 @@ describe("add_text_clips refusals, through the registry, against the saved docum
     });
     expect(r.ok).toBe(true);
     expect(await saved()).not.toBe(before);
+  });
+
+  // The 12 of 13: two titles that overlap, no track named. Through the registry and into the saved
+  // document, the way the agent reaches it: both land, on tracks that each show one text at a time,
+  // and the reply says where, so the next call can edit them by the ids it was given.
+  it("overlapping titles that name no track are placed on separate tracks and saved", async () => {
+    const { call, saved } = await setup();
+    const before = JSON.parse(await saved());
+    const r = await call({
+      entries: [
+        { content: "a", timeline_in: 100, timeline_out: 160 },
+        { content: "b", timeline_in: 130, timeline_out: 190 },
+        { content: "c", timeline_in: 150, timeline_out: 200 },
+      ],
+    });
+    expect(r.ok, JSON.stringify(r).slice(0, 300)).toBe(true);
+    expect(r.count).toBe(3);
+    expect(new Set(r.created.map((c: Any) => c.track_id)).size).toBe(3);
+    expect(String((r.notes ?? []).join(" "))).toMatch(/3 text tracks/);
+
+    const after = JSON.parse(await saved());
+    const textTracks = after.tracks.filter((t: Any) => t.kind === "text");
+    for (const t of textTracks) {
+      const spans = (t.clips ?? [])
+        .map((c: Any) => [c.timeline_in, c.timeline_out] as [number, number])
+        .sort((x: number[], y: number[]) => x[0] - y[0]);
+      for (let i = 1; i < spans.length; i++)
+        expect(spans[i][0]).toBeGreaterThanOrEqual(spans[i - 1][1]);
+    }
+    // What was already there is untouched (the new text may share a track that had room).
+    const titlesBefore = before.tracks.find((t: Any) => t.id === "titles").clips;
+    for (const c of titlesBefore)
+      expect(after.tracks.find((t: Any) => t.id === "titles").clips).toContainEqual(c);
+    // Every created id is on the track the reply said.
+    for (const c of r.created)
+      expect(
+        after.tracks
+          .find((t: Any) => t.id === c.track_id)
+          .clips.some((x: Any) => x.id === c.clip_id),
+      ).toBe(true);
   });
 
   // The suggestion must be one the caller can actually use: a TEXT track, not the busy one, with

@@ -199,20 +199,31 @@ export function insertClips(
   };
 }
 
-/** Add text clips — no media, so nothing to probe and no source window. */
-/** Entries that will land on ONE track, in the order the caller wrote them. */
-interface TextBatch {
-  readonly trackId: string | null; // null = auto-place
-  readonly items: Array<{ index: number; tin: number; tout: number }>;
+/** One entry of an add_text_clips call, by the position the caller wrote it in. */
+interface TextItem {
+  readonly index: number;
+  readonly tin: number;
+  readonly tout: number;
 }
 
-/** Refuse a batch whose own entries collide, naming both sides.
+/** The entries the caller put on ONE named track, in the order they were written. */
+interface TextBatch {
+  readonly trackId: string;
+  readonly items: TextItem[];
+}
+
+const spanOf = (it: TextItem): { in: number; out: number } => ({ in: it.tin, out: it.tout });
+
+/** Refuse a named track that the call itself overlaps on, naming both sides.
  *
  *  A track shows one text at a time, so two overlapping entries cannot both render. The
  *  validator downstream does catch it, but only after normalizeTimeline has SORTED the track,
  *  so it reports an index into an array the caller never saw ("clips[7] overlaps previous
  *  clip") and there is no way to tell which entry was wrong or whether the collision was with
- *  pre-existing content. Name the caller's own indices instead. */
+ *  pre-existing content. Name the caller's own indices instead.
+ *
+ *  Only a NAMED track can contradict itself: the caller chose it for both. Entries that named
+ *  no track are given lanes of their own ({@link textLanes}) and are never refused for this. */
 function refuseSelfOverlap(batch: TextBatch): void {
   const ordered = [...batch.items].sort((a, b) => a.tin - b.tin);
   for (let i = 1; i < ordered.length; i++) {
@@ -221,11 +232,46 @@ function refuseSelfOverlap(batch: TextBatch): void {
     if (!rangesOverlap(prev.tin, prev.tout, cur.tin, cur.tout)) continue;
     throw new OpError(
       `entries[${cur.index}] (frames ${cur.tin}-${cur.tout}) overlaps entries[${prev.index}] ` +
-        `(frames ${prev.tin}-${prev.tout}); one track shows one text at a time. Change the ` +
-        "timing so they don't overlap, or give one of them its own track_id.",
+        `(frames ${prev.tin}-${prev.tout}) on track '${batch.trackId}'; one track shows one ` +
+        "text at a time. Omit track_id on one of them and it is placed on a free track, or " +
+        "change the timing so they don't overlap.",
     );
   }
 }
+
+/** Split entries that named no track into the fewest lanes in which no two overlap.
+ *
+ *  Taken in order of start, each entry joins the first lane that is free at its start: titles that
+ *  follow one another stay together on the first lane, and one that overlaps an earlier one opens
+ *  the next. That is the optimal split (as many lanes as the deepest overlap, no more), so a call
+ *  never spreads over more text tracks than the titles force. Touching ranges do not overlap.
+ *  The caller's order inside a lane is by start, and a lane is named by the first entry in it. */
+export function textLanes(items: readonly TextItem[]): TextItem[][] {
+  const lanes: TextItem[][] = [];
+  const ends: number[] = [];
+  for (const it of [...items].sort(
+    (a, b) => a.tin - b.tin || a.tout - b.tout || a.index - b.index,
+  )) {
+    let lane = ends.findIndex((end) => end <= it.tin);
+    if (lane === -1) {
+      lane = lanes.length;
+      lanes.push([]);
+      ends.push(0);
+    }
+    lanes[lane].push(it);
+    ends[lane] = it.tout;
+  }
+  return lanes;
+}
+
+/** Add text clips — no media, so nothing to probe and no source window.
+ *
+ *  Where each entry lands:
+ *  - an entry that names a track goes there, if it has room (an occupied one is refused, naming a
+ *    free one), and two entries that overlap on the same named track are refused;
+ *  - entries that name none are placed on a text track with room for them, opening a new one when
+ *    none has: titles that overlap each other each get a lane of their own, so a call never fails
+ *    for want of a `track_id` the caller was told to leave out (12 of 13 failed calls in a month). */
 
 export function addTextClips(timeline: Timeline, entries: Args[]): OperationResult {
   const fps = canvasFps(timeline);
@@ -246,33 +292,52 @@ export function addTextClips(timeline: Timeline, entries: Args[]): OperationResu
     }
   });
 
-  const batches = new Map<string | null, TextBatch>();
+  // Entries that named a track are grouped by it; the rest are one group of their own. The order the
+  // groups appear in is the order tracks are resolved (and so created) in.
+  const units: Array<TextBatch | "auto"> = [];
+  const byName = new Map<string, TextBatch>();
+  const auto: TextItem[] = [];
   entries.forEach((e, index) => {
+    const item: TextItem = { index, tin: spans[index][0], tout: spans[index][1] };
     const trackId = (e.track_id as string | undefined) || null;
-    let batch = batches.get(trackId);
-    if (!batch) batches.set(trackId, (batch = { trackId, items: [] }));
-    (batch.items as TextBatch["items"]).push({
-      index,
-      tin: spans[index][0],
-      tout: spans[index][1],
-    });
+    if (trackId === null) {
+      if (!auto.length) units.push("auto");
+      auto.push(item);
+      return;
+    }
+    let batch = byName.get(trackId);
+    if (!batch) {
+      batch = { trackId, items: [] };
+      byName.set(trackId, batch);
+      units.push(batch);
+    }
+    batch.items.push(item);
   });
-  for (const batch of batches.values()) refuseSelfOverlap(batch);
+  for (const batch of byName.values()) refuseSelfOverlap(batch);
 
-  const named = new Set([...batches.keys()].filter((id): id is string => id !== null));
-  const trackFor = new Map<string | null, Track>();
-  for (const batch of batches.values()) {
-    trackFor.set(
-      batch.trackId,
-      resolveTextTrack(
-        timeline,
-        batch.trackId,
-        batch.items.map((it) => ({ in: it.tin, out: it.tout })),
-        // Auto-placed entries stay off tracks another entry named: those clips are not
-        // written yet, so a fit check against the timeline cannot see them coming.
-        { param: "track_id", exclude: batch.trackId === null ? named : undefined },
-      ),
-    );
+  const trackFor = new Map<number, Track>(); // by the caller's entry index
+  // Tracks the fit check cannot see filling up: clips are not written until every entry has
+  // resolved, so an auto-placed entry is kept off a track another entry named, and off the one an
+  // earlier lane of this same call just took.
+  const taken = new Set(byName.keys());
+  const lanes: Array<{ track: Track; items: TextItem[] }> = [];
+  for (const unit of units) {
+    if (unit !== "auto") {
+      const track = resolveTextTrack(timeline, unit.trackId, unit.items.map(spanOf), {
+        param: "track_id",
+      });
+      for (const it of unit.items) trackFor.set(it.index, track);
+      continue;
+    }
+    for (const items of textLanes(auto)) {
+      const track = resolveTextTrack(timeline, null, items.map(spanOf), {
+        param: "track_id",
+        exclude: taken,
+      });
+      taken.add(track.id);
+      lanes.push({ track, items });
+      for (const it of items) trackFor.set(it.index, track);
+    }
   }
 
   const created: Array<Record<string, unknown>> = [];
@@ -285,11 +350,25 @@ export function addTextClips(timeline: Timeline, entries: Args[]): OperationResu
     for (const key of ["style", "transform", "animation", "raw_ass", "rotate"] as const) {
       if (present(e[key])) (clip as Record<string, unknown>)[key] = e[key];
     }
-    const track = trackFor.get((e.track_id as string | undefined) || null)!;
+    const track = trackFor.get(i)!;
     (track.clips ??= []).push(clip);
     created.push({ clip_id: clip.id, track_id: track.id });
   });
-  return { created, count: created.length };
+  // Said, not left to be found: titles the caller wrote with no track landed on several.
+  const notes: string[] = [];
+  if (lanes.length > 1) {
+    const where = lanes
+      .map(({ track, items }) => {
+        const at = items.map((it) => it.index).sort((a, b) => a - b);
+        return `'${track.id}' (${at.length > 1 ? "entries" : "entry"} ${at.join(", ")})`;
+      })
+      .join("; ");
+    notes.push(
+      `entries that named no track overlap each other, and a track shows one text at a time, so ` +
+        `they were placed on ${lanes.length} text tracks: ${where}. Pass track_id to choose the tracks yourself.`,
+    );
+  }
+  return { created, count: created.length, ...(notes.length ? { notes } : {}) };
 }
 
 /** Restyle / reword existing text clips. Timing is deliberately NOT here: set_clip_properties
