@@ -16,6 +16,7 @@ import {
 } from "../timeline/captionChunk";
 import { parseSubtitles, subtitleFormat, type SubtitleCue } from "../timeline/subtitleParse";
 import { ctxApplyOp, loadTimeline } from "../timeline/engine";
+import { timelineUnreadable } from "../timeline/errors";
 import { canvasFps, newId } from "../timeline/frames";
 import { clipSpanToFrames, resolveTextTrack } from "../timeline/helpers";
 import type { Clip, Timeline } from "../timeline/model";
@@ -122,7 +123,7 @@ export async function addCaptionsTool(args: Args, ctx: ClientToolContext | null)
   try {
     timeline = await loadTimeline(ctx.store);
   } catch (e) {
-    return { ok: false, error: `could not read timeline.json: ${String(e)}` };
+    return { ok: false, error: timelineUnreadable(String(e)) };
   }
   const fps = canvasFps(timeline);
 

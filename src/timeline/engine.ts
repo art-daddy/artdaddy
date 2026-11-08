@@ -27,7 +27,7 @@ import { useProjectNotice } from "../store/projectNotice";
 import type { ProjectDocument } from "../project/ProjectDocument";
 import { emitTimelineChange } from "./bus";
 import { clampTimelineValues } from "./clamp";
-import { OpError } from "./errors";
+import { OpError, timelineUnreadable } from "./errors";
 import { normalizeLinks } from "./helpers";
 import { emptyTimeline, starterTracks, type Timeline } from "./model";
 import { diffTimeline } from "./shape";
@@ -221,9 +221,9 @@ export async function ensureTimeline(store: ProjectStoreAccess): Promise<void> {
   await runTimelineCommit(store, "ensure_timeline", async (_doc, ctx) => {
     if (await store.exists(timelinePath(store))) return; // already exists -> a no-op, no revision bump
     if (!(await saveTimeline(store, emptyTimeline()))) {
-      throw new Error("could not create timeline.json — the project was closed");
+      throw new Error("could not create the project's timeline — the project was closed");
     }
-    ctx?.markCommitted(); // seeded a fresh timeline.json -> a real state change
+    ctx?.markCommitted(); // seeded a fresh timeline -> a real state change
   });
 }
 
@@ -301,16 +301,14 @@ export async function ensureStarterTimeline(
     // back to seeding, which would overwrite the user's real timeline.
     const tl = await loadTimeline(store);
     if (tl === null || typeof tl !== "object" || Array.isArray(tl)) {
-      throw new Error("timeline.json is not a timeline object; refusing to overwrite it");
+      throw new Error(timelineUnreadable("it is not a timeline"));
     }
     // `z` + `units` are optional in the model + schema but REQUIRED by validateTimeline;
     // loadTimeline already canonicalized them at the load boundary (R10-4). Truly-malformed
     // shapes (bad canvas, null/dup track) still fail.
     const errors = validateTimeline(tl);
     if (errors.length) {
-      throw new Error(
-        `timeline.json is malformed; refusing to overwrite it — ${errors.slice(0, 3).join("; ")}`,
-      );
+      throw new Error(timelineUnreadable(`it is malformed: ${errors.slice(0, 3).join("; ")}`));
     }
     // Valid but empty (0 tracks): safe to seed starters onto it (re-checked under the lock).
     if (tl.tracks.length === 0) {
@@ -472,12 +470,12 @@ export function applyTimelineTransition(
   label: string,
   mutate: Mutate,
 ): TimelineTransitionResult {
-  // A corrupted timeline.json can parse to a non-object (a bare number/string/array); reject
+  // A corrupted timeline can parse to a non-object (a bare number/string/array); reject
   // rather than crash on the first property write below.
   if (current === null || typeof current !== "object" || Array.isArray(current)) {
     return {
       ok: false,
-      error: "timeline.json is not a timeline object; bootstrap the timeline first.",
+      error: timelineUnreadable("it is not a timeline"),
     };
   }
   const before = clone(current);
@@ -595,7 +593,7 @@ export async function runGesture<T>(
         } catch (e) {
           return {
             ok: false as const,
-            error: `${label}: could not read timeline.json: ${String(e)}`,
+            error: `${label}: ${timelineUnreadable(String(e))}`,
           };
         }
         ctx?.assertCanCommit(); // re-checked after the awaited lazy load, like applyOpLocked
@@ -668,8 +666,8 @@ async function applyOpLocked(
   try {
     session = await doc.timelineSession(() => loadTimeline(store));
   } catch (e) {
-    // A corrupt/unreadable timeline.json at the first edit — surface a clean failure, never crash.
-    return { ok: false, error: `${label}: could not read timeline.json: ${String(e)}` };
+    // A corrupt/unreadable timeline at the first edit — surface a clean failure, never crash.
+    return { ok: false, error: `${label}: ${timelineUnreadable(String(e))}` };
   }
   ctx?.assertCanCommit(); // re-check origin/session AFTER any awaited lazy load — reject a supersede that landed mid-lease (the fence's second gate, past preflight)
   const r = session.apply(label, mutate);

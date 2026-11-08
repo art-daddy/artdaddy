@@ -1212,10 +1212,11 @@ describe("inspectTimelineTool", () => {
     expect(r.error).toBe("client tool runtime not ready");
   });
 
-  it("errors when timeline.json is missing", async () => {
+  it("errors when the timeline is missing, in words that name no file", async () => {
     const r = (await inspectTimelineTool({}, ctxWith(NOOP_RUNNER))) as Any;
     expect(r.ok).toBe(false);
-    expect(String(r.error)).toContain("timeline.json not found");
+    expect(String(r.error)).toMatch(/the project's timeline could not be read/);
+    expect(String(r.error)).not.toMatch(/\.json|author it first|bootstrap/);
   });
 
   it("errors on an empty timeline", async () => {

@@ -13,7 +13,7 @@ import {
 } from "../tools/refState";
 import { prepareCanvas } from "./canvasAuto";
 import { ctxApplyOp, loadTimeline } from "./engine";
-import { OpError } from "./errors";
+import { OpError, timelineUnreadable } from "./errors";
 import { canvasFps, toFrames } from "./frames";
 import { placeableKind, type MediaKind, type MediaSpec } from "./helpers";
 import {
@@ -828,7 +828,7 @@ export async function insertClipsTool(args: Args, ctx: ClientToolContext | null)
     fps = canvasFps(await loadTimeline(ctx.store));
   } catch (e) {
     return withCanvasNote(
-      { ok: false, error: `could not read timeline.json: ${String(e)}` },
+      { ok: false, error: timelineUnreadable(String(e)) },
       prep.note,
     );
   }

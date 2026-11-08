@@ -22,6 +22,7 @@ import { compileAnim, sampleAnim } from "./anim";
 import { brandRatio, endcardFile, watermarkFile, type Branding } from "./branding";
 import { recoverBrandAsset } from "./brandRecovery";
 import { loadTimeline } from "./engine";
+import { timelineUnreadable } from "./errors";
 import {
   createProgressReader,
   createSequenceProgressReader,
@@ -3030,7 +3031,7 @@ export async function loadForRender(
   } catch (e) {
     return {
       ok: false,
-      result: { ok: false, error: `timeline.json not found — author it first (${String(e)})` },
+      result: { ok: false, error: timelineUnreadable(String(e)) },
     };
   }
   const errors = validateTimeline(raw);

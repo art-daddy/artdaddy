@@ -14,7 +14,7 @@ import {
 } from "./edit";
 import { aspectLabel, resolveCanvas } from "./canvas";
 import { ctxApplyOp, doRedo, doUndo, loadTimeline } from "./engine";
-import { OpError } from "./errors";
+import { OpError, timelineUnreadable } from "./errors";
 import { canvasFps, newId } from "./frames";
 import { gapAt } from "./gaps";
 import { findTrack, nextZ } from "./helpers";
@@ -84,7 +84,7 @@ export async function getTimelineTool(args: Args, ctx: ClientToolContext | null)
   } catch (e) {
     return {
       ok: false,
-      error: `timeline.json not found — bootstrap the timeline first (${String(e)})`,
+      error: timelineUnreadable(String(e)),
     };
   }
   // Migration: older projects baked a now-dropped "do NOT place image files" rule

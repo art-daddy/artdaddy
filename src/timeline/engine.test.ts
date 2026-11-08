@@ -20,7 +20,7 @@ import { ProjectDocument } from "../project/ProjectDocument";
 import { asProjectId } from "../project/types";
 import type { ClientToolContext } from "../tools/context";
 import { onTimelineChange } from "./bus";
-import { OpError } from "./errors";
+import { OpError, timelineUnreadable } from "./errors";
 import { DEFAULT_VISUAL_TRACK } from "./helpers";
 import { emptyTimeline, type Timeline, type Track } from "./model";
 
@@ -111,12 +111,13 @@ describe("applyTimelineTransition (pure)", () => {
     expect(r.validation_errors?.length).toBeGreaterThan(0);
   });
 
-  it("rejects a non-object timeline", () => {
+  it("rejects a non-object timeline, in words that name no file", () => {
     const r = applyTimelineTransition(42 as unknown as Timeline, "x", () => {});
-    expect(r).toEqual({
-      ok: false,
-      error: "timeline.json is not a timeline object; bootstrap the timeline first.",
-    });
+    expect(r).toEqual({ ok: false, error: timelineUnreadable("it is not a timeline") });
+    if (r.ok) return;
+    expect(r.error).toMatch(/timeline could not be read \(it is not a timeline\)/);
+    expect(r.error).toMatch(/tell the user/);
+    expect(r.error).not.toMatch(/\.json|bootstrap/);
   });
 });
 

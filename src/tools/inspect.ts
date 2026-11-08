@@ -35,6 +35,7 @@ import {
 } from "./lookReport";
 import { makeStoryboard } from "./storyboard";
 import { loadTimeline } from "../timeline/engine";
+import { timelineUnreadable } from "../timeline/errors";
 import { clipSourceSpanSeconds, clipSpanToFrames, findClip } from "../timeline/helpers";
 import { canvasFps, toSecondsView } from "../timeline/frames";
 import { IMAGE_EXTS, kindOf } from "../media/formats";
@@ -900,7 +901,7 @@ async function inspectTimeline(
   try {
     raw = await loadTimeline(ctx.store);
   } catch (e) {
-    return { ok: false, error: `timeline.json not found — author it first (${String(e)})` };
+    return { ok: false, error: timelineUnreadable(String(e)) };
   }
   const planned = planTimelineLook(raw, args);
   if (!planned.ok) return planned.result;

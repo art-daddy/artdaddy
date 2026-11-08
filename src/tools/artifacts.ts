@@ -43,16 +43,48 @@ function validateContent(rel: string, content: string): string[] {
   return [];
 }
 
+/** Where to go instead, said in every refusal below: the project's own data has a tool each, and
+ *  what a person kept elsewhere cannot be fetched by a name. The model reads a bare "file not found"
+ *  as "wrong name" and tries the next one (19 of 27 calls in a month: a timeline, a transcript, a
+ *  script, a brief). */
+const READ_FILE_INSTEAD =
+  "For the timeline use get_timeline; for what is said, get_transcript (the timeline) or " +
+  "inspect_media (one asset); for the assets, get_project_state or library_op list. A file on the " +
+  "user's computer cannot be read: ask the user to paste the text.";
+
+/** What this reads, said when the request did not say. */
+const READ_FILE_WHAT =
+  "read_file reads only a file a tool wrote into this project, by the output_ref that tool " +
+  "returned (run_ffmpeg gives one for any output that is not media).";
+
+const refused = (why: string): Result => ({ ok: false, error: `${why} ${READ_FILE_INSTEAD}` });
+
+/** The editor's own records: `internals/` apart from its cache. The timeline, the library, the
+ *  project's settings and the chat. They are not read by path: the document in memory can be ahead
+ *  of the file, the library holds the paths of the user's own files, and each has a tool that
+ *  answers from the live project. What a tool wrote for the model to read is in `internals/cache/`. */
+function isEditorRecord(rel: string): boolean {
+  const p = rel.replace(/\\/g, "/");
+  return /(^|\/)internals(\/|$)/i.test(p) && !/(^|\/)internals\/cache(\/|$)/i.test(p);
+}
+
 export async function readFileTool(
   args: Record<string, unknown>,
   ctx: ClientToolContext | null,
 ): Promise<Result> {
   if (!ctx) return NOT_READY;
   const ref = String(args.path_or_key ?? "").trim();
-  if (!ref) return { ok: false, error: "path_or_key is required" };
+  if (!ref) return { ok: false, error: `path_or_key is required. ${READ_FILE_WHAT}` };
   const full = ctx.store.resolveWritable(ref);
-  if (!full) return { ok: false, error: `path escapes the project or is invalid: ${ref}` };
-  if (!(await ctx.store.exists(full))) return { ok: false, error: `file not found: ${ref}` };
+  if (!full) return refused(`${ref} is not inside this project. ${READ_FILE_WHAT}`);
+  if (isEditorRecord(ctx.store.toRef(full)))
+    return refused(
+      `${ref} is one of the editor's own records: it can be out of date, so it is not readable.`,
+    );
+  if (!(await ctx.store.exists(full)))
+    return refused(
+      `file not found: ${ref}. ${READ_FILE_WHAT} It cannot look a file up by a guessed name.`,
+    );
   const raw = await ctx.store.readText(full);
   const total = raw.length;
   const truncated = total > READ_CAP;
