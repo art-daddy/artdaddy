@@ -827,10 +827,7 @@ export async function insertClipsTool(args: Args, ctx: ClientToolContext | null)
   try {
     fps = canvasFps(await loadTimeline(ctx.store));
   } catch (e) {
-    return withCanvasNote(
-      { ok: false, error: timelineUnreadable(String(e)) },
-      prep.note,
-    );
+    return withCanvasNote({ ok: false, error: timelineUnreadable(String(e)) }, prep.note);
   }
   let atF: number;
   try {
