@@ -59,7 +59,7 @@ describe("tool descriptions name no internal file", () => {
     expect(found).toEqual([]);
   });
 
-  // The control: the same walk finds a name when one is there.
+  // The control: the same walk finds a name when one is there, whichever of the names it is.
   it("would find one", () => {
     const planted = ["export", "Author + register `timeline_json` first."] as const;
     expect(INTERNAL_NAME.exec(planted[1])?.[0]).toBe("timeline_json");
@@ -68,6 +68,21 @@ describe("tool descriptions name no internal file", () => {
     );
     expect(INTERNAL_NAME.exec("a file under internals/cache/ffmpeg")?.[0]).toBe("internals/");
     expect(INTERNAL_NAME.exec("get_timeline, get_transcript, library_op")).toBeNull();
+  });
+
+  it("knows every file the model has been shown or has guessed at", () => {
+    for (const name of [
+      "timeline.json",
+      "timeline_json",
+      "library.json",
+      "project.json",
+      "transcript.json",
+      "history.json",
+      "internals/",
+    ])
+      expect(INTERNAL_NAME.exec(`read ${name.toUpperCase()} for it`)?.[0], name).toBe(
+        name.toUpperCase(),
+      );
   });
 });
 
