@@ -90,6 +90,9 @@ function baseState() {
     projectId: "p1",
     transcriptId: "chat-p1",
     closing: false,
+    switching: false,
+    rewind: null,
+    restored: null,
     streaming: false,
     pending: null,
     session: null,
@@ -112,6 +115,13 @@ function baseState() {
     undo: vi.fn(),
     redo: vi.fn(),
     restoreTo: vi.fn(),
+    newChat: vi.fn(async () => true),
+    listChats: vi.fn(async () => []),
+    openChat: vi.fn(async () => true),
+    deleteChat: vi.fn(async () => true),
+    undoRestore: vi.fn(async () => true),
+    confirmRewind: vi.fn(async () => null),
+    cancelRewind: vi.fn(),
     stop: vi.fn(),
     sendFeedback: vi.fn(async () => true),
   };
@@ -1296,5 +1306,484 @@ describe("ChatView: the export card", () => {
       unmount();
       __resetExportQuestions();
     }
+  });
+});
+
+// ── Chats of a project: New chat, Chat history, going back over outside changes, Undo restore ──────
+describe("ChatView: chats of a project", () => {
+  const turn = (id: string, text: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    userText: text,
+    attachments: [],
+    parts: [{ kind: "text", text: `answer to ${text}` }],
+    status: "done",
+    undone: false,
+    checkpoint: null,
+    timelineAfter: null,
+    ...extra,
+  });
+  const assistant = () => within(screen.getByRole("region", { name: "Assistant" }));
+  const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+  const HOUR = 3_600_000;
+
+  describe("New chat", () => {
+    it("is a + button in the Assistant header, and says what it does", () => {
+      state.turns = [turn("t1", "hello")];
+      render(<ChatView />);
+      const button = assistant().getByRole("button", { name: "New chat" });
+      expect(button).toBeEnabled();
+      expect(button).toHaveAttribute("title", "New chat");
+      // It is in the header, with the other panel controls, not in the message area.
+      expect(button.closest("header")).not.toBeNull();
+    });
+
+    it("starts a new chat when pressed, and leaves what was typed where it is", () => {
+      state.turns = [turn("t1", "hello")];
+      render(<ChatView />);
+      const composer = screen.getByPlaceholderText(/Message the editor/);
+      fireEvent.change(composer, { target: { value: "half a thought" } });
+      fireEvent.click(assistant().getByRole("button", { name: "New chat" }));
+      expect(state.newChat).toHaveBeenCalledTimes(1);
+      expect(composer).toHaveValue("half a thought");
+    });
+
+    it("has nothing to do in a chat that is already empty", () => {
+      state.turns = [];
+      render(<ChatView />);
+      expect(assistant().getByRole("button", { name: "New chat" })).toBeDisabled();
+    });
+
+    it("has nothing to do without a project", () => {
+      state.turns = [turn("t1", "hello")];
+      state.projectId = null;
+      render(<ChatView />);
+      expect(assistant().getByRole("button", { name: "New chat" })).toBeDisabled();
+      expect(assistant().getByRole("button", { name: "Chat history" })).toBeDisabled();
+    });
+
+    it.each([
+      ["while the assistant is working", { streaming: true }],
+      [
+        "with a tool call waiting for approval",
+        { pending: [{ call_id: "c", name: "x", arguments: {} }] },
+      ],
+      ["while the project is closing", { closing: true }],
+      ["while a chat is being swapped in", { switching: true }],
+    ])("is unavailable %s", (_name, patch) => {
+      state.turns = [turn("t1", "hello")];
+      Object.assign(state, patch);
+      render(<ChatView />);
+      const button = assistant().getByRole("button", { name: "New chat" });
+      expect(button).toBeDisabled();
+      fireEvent.click(button);
+      expect(state.newChat).not.toHaveBeenCalled();
+    });
+
+    it("a chat that looks empty but holds undone turns can still be put away", () => {
+      state.turns = [turn("t1", "hello", { undone: true })];
+      render(<ChatView />);
+      expect(assistant().getByRole("button", { name: "New chat" })).toBeEnabled();
+    });
+  });
+
+  describe("Chat history", () => {
+    const earlier = [
+      { id: "c-new", title: "trim the intro", updatedAt: ago(3 * HOUR) },
+      { id: "c-old", title: "colour grade the beach shots", updatedAt: ago(50 * HOUR) },
+    ];
+    const open = async () => {
+      fireEvent.click(assistant().getByRole("button", { name: "Chat history" }));
+      return screen.findByRole("group", { name: "Chats in this project" });
+    };
+
+    it("lists this chat first, then the earlier ones with how long ago they were put away", async () => {
+      state.turns = [turn("t1", "add captions to the interview")];
+      state.listChats = vi.fn(async () => earlier);
+      render(<ChatView />);
+      const list = await open();
+      expect(within(list).getByText("add captions to the interview")).toBeVisible();
+      expect(within(list).getByText("This chat")).toBeVisible();
+      await within(list).findByText("trim the intro");
+      expect(within(list).getByText("3 h ago")).toBeVisible();
+      expect(within(list).getByText("2 d ago")).toBeVisible();
+      const titles = within(list)
+        .getAllByText(/add captions|trim the intro|colour grade/)
+        .map((n) => n.textContent);
+      expect(titles).toEqual([
+        "add captions to the interview",
+        "trim the intro",
+        "colour grade the beach shots",
+      ]);
+    });
+
+    it("calls an empty chat New chat, and says when there is nothing earlier", async () => {
+      state.turns = [];
+      state.listChats = vi.fn(async () => []);
+      render(<ChatView />);
+      const list = await open();
+      expect(within(list).getByText("New chat")).toBeVisible();
+      expect(await within(list).findByText("No earlier chats yet")).toBeVisible();
+    });
+
+    it("opens an earlier chat when it is clicked, and closes the list", async () => {
+      state.turns = [turn("t1", "hello")];
+      state.listChats = vi.fn(async () => earlier);
+      render(<ChatView />);
+      const list = await open();
+      fireEvent.click(await within(list).findByText("trim the intro"));
+      expect(state.openChat).toHaveBeenCalledWith("c-new");
+      await waitFor(() =>
+        expect(screen.queryByRole("group", { name: "Chats in this project" })).toBeNull(),
+      );
+    });
+
+    it("tells the person when a chat could not be opened, and keeps the list open", async () => {
+      state.turns = [turn("t1", "hello")];
+      state.listChats = vi.fn(async () => earlier);
+      state.openChat = vi.fn(async () => false);
+      render(<ChatView />);
+      const list = await open();
+      fireEvent.click(await within(list).findByText("trim the intro"));
+      expect(await within(list).findByRole("alert")).toHaveTextContent("couldn't be opened");
+      expect(screen.getByRole("group", { name: "Chats in this project" })).toBeVisible();
+    });
+
+    it("says so when the list cannot be read, instead of claiming there are no chats", async () => {
+      state.turns = [turn("t1", "hello")];
+      state.listChats = vi.fn(async () => {
+        throw new Error("EACCES");
+      });
+      render(<ChatView />);
+      const list = await open();
+      expect(await within(list).findByRole("alert")).toHaveTextContent(
+        "Couldn't read your earlier chats",
+      );
+      expect(within(list).queryByText("No earlier chats yet")).toBeNull();
+    });
+
+    it("cannot open or delete a chat while the assistant is working", async () => {
+      state.turns = [turn("t1", "hello")];
+      state.streaming = true;
+      state.listChats = vi.fn(async () => earlier);
+      render(<ChatView />);
+      const list = await open();
+      const row = (await within(list).findByText("trim the intro")).closest("button")!;
+      expect(row).toBeDisabled();
+      expect(
+        within(list).getByRole("button", { name: /Delete chat: trim the intro/ }),
+      ).toBeDisabled();
+    });
+
+    it("asks before deleting a chat, names it, and deletes only when told to", async () => {
+      state.turns = [turn("t1", "hello")];
+      state.listChats = vi.fn(async () => earlier);
+      render(<ChatView />);
+      const list = await open();
+      await within(list).findByText("trim the intro");
+
+      fireEvent.click(within(list).getByRole("button", { name: /Delete chat: trim the intro/ }));
+      const dialog = screen.getByRole("dialog", { name: "Delete this chat?" });
+      expect(within(dialog).getByText(/“trim the intro” will be deleted for good/)).toBeVisible();
+      expect(within(dialog).getByText(/timeline and media are not changed/)).toBeVisible();
+      expect(within(dialog).getByRole("button", { name: "Cancel" })).toHaveFocus(); // a stray Enter keeps it
+
+      fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+      expect(state.deleteChat).not.toHaveBeenCalled();
+      expect(screen.queryByRole("dialog")).toBeNull();
+
+      fireEvent.click(within(list).getByRole("button", { name: /Delete chat: trim the intro/ }));
+      fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Delete" }));
+      await waitFor(() => expect(state.deleteChat).toHaveBeenCalledWith("c-new"));
+      await waitFor(() => expect(state.listChats).toHaveBeenCalledTimes(2)); // the list is read again
+    });
+
+    it("the open chat cannot be deleted from the list", async () => {
+      state.turns = [turn("t1", "hello")];
+      state.listChats = vi.fn(async () => earlier);
+      render(<ChatView />);
+      const list = await open();
+      await within(list).findByText("trim the intro");
+      expect(within(list).getAllByRole("button", { name: /Delete chat/ })).toHaveLength(2); // only the earlier two
+    });
+
+    it("closes on Escape and on a click outside, not on a click inside", async () => {
+      state.turns = [turn("t1", "hello")];
+      state.listChats = vi.fn(async () => earlier);
+      render(<ChatView />);
+      const list = await open();
+      fireEvent.mouseDown(list);
+      expect(screen.getByRole("group", { name: "Chats in this project" })).toBeVisible();
+      fireEvent.keyDown(document.body, { key: "Escape" });
+      await waitFor(() =>
+        expect(screen.queryByRole("group", { name: "Chats in this project" })).toBeNull(),
+      );
+      await open();
+      fireEvent.mouseDown(document.body);
+      await waitFor(() =>
+        expect(screen.queryByRole("group", { name: "Chats in this project" })).toBeNull(),
+      );
+    });
+
+    it("a slow list from an earlier open never overwrites the newest one", async () => {
+      state.turns = [turn("t1", "hello")];
+      const deferred = () => {
+        let resolve!: (v: typeof earlier) => void;
+        const promise = new Promise<typeof earlier>((r) => (resolve = r));
+        return { promise, resolve };
+      };
+      const first = deferred();
+      const second = deferred();
+      state.listChats = vi
+        .fn()
+        .mockReturnValueOnce(first.promise)
+        .mockReturnValueOnce(second.promise);
+      render(<ChatView />);
+      const toggle = assistant().getByRole("button", { name: "Chat history" });
+      fireEvent.click(toggle); // first read starts
+      fireEvent.click(toggle); // closed
+      fireEvent.click(toggle); // second read starts
+      await act(async () => {
+        second.resolve([{ id: "new", title: "the newest list", updatedAt: ago(HOUR) }]);
+      });
+      await act(async () => {
+        first.resolve([{ id: "old", title: "a stale list", updatedAt: ago(HOUR) }]);
+      });
+      expect(await screen.findByText("the newest list")).toBeVisible();
+      expect(screen.queryByText("a stale list")).toBeNull();
+    });
+  });
+
+  describe("Going back over work made outside the chat", () => {
+    const ask = (action: string, extra: Record<string, unknown> = {}) => {
+      state.turns = [turn("t1", "trim the intro", { checkpoint: { fps: 30, tracks: [] } })];
+      state.rewind = { action, ...extra };
+    };
+
+    it("asks first, in plain words, and offers to go back anyway or to keep the work", () => {
+      ask("restore", { turnId: "t1" });
+      render(<ChatView />);
+      const dialog = screen.getByRole("dialog", { name: "Go back?" });
+      expect(dialog).toHaveTextContent(
+        "changed since this chat last edited it, by hand or in another chat",
+      );
+      expect(dialog).toHaveTextContent(
+        "Going back replaces the timeline, and those changes will be lost",
+      );
+      expect(within(dialog).getByRole("button", { name: "Cancel" })).toHaveFocus();
+      fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+      expect(state.cancelRewind).toHaveBeenCalledTimes(1);
+      expect(state.confirmRewind).not.toHaveBeenCalled();
+    });
+
+    it("hands the prompt back to the composer once the person agrees to a restore", async () => {
+      ask("restore", { turnId: "t1" });
+      state.confirmRewind = vi.fn(async () => ({ text: "trim the intro", attachments: [] }));
+      render(<ChatView />);
+      fireEvent.click(
+        within(screen.getByRole("dialog")).getByRole("button", { name: "Go back anyway" }),
+      );
+      await waitFor(() => expect(state.confirmRewind).toHaveBeenCalledTimes(1));
+      await waitFor(() =>
+        expect(screen.getByPlaceholderText(/Message the editor/)).toHaveValue("trim the intro"),
+      );
+    });
+
+    it("says forward for a redo, and does not touch the composer", async () => {
+      ask("redo");
+      render(<ChatView />);
+      const dialog = screen.getByRole("dialog", { name: "Go forward?" });
+      expect(dialog).toHaveTextContent("Going forward replaces the timeline");
+      fireEvent.click(within(dialog).getByRole("button", { name: "Go forward anyway" }));
+      await waitFor(() => expect(state.confirmRewind).toHaveBeenCalledTimes(1));
+      expect(screen.getByPlaceholderText(/Message the editor/)).toHaveValue("");
+    });
+
+    it("is not shown when nothing is waiting", () => {
+      state.turns = [turn("t1", "hi")];
+      render(<ChatView />);
+      expect(screen.queryByRole("dialog")).toBeNull();
+    });
+
+    it("Escape keeps the work", () => {
+      ask("undo");
+      render(<ChatView />);
+      fireEvent.keyDown(
+        within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }),
+        { key: "Escape" },
+      );
+      expect(state.cancelRewind).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("Undo restore", () => {
+    const restoredState = () => {
+      state.turns = [
+        turn("t1", "add a title"),
+        turn("t2", "make the intro much shorter and punchier please", { undone: true }),
+      ];
+      state.restored = { turnId: "t2", before: null, hid: ["t2"] };
+    };
+
+    it("is one click away after a restore, and says which message it went back before", () => {
+      restoredState();
+      render(<ChatView />);
+      const bar = screen.getByRole("status");
+      expect(bar).toHaveTextContent(
+        "Went back to before “make the intro much shorter and punchier…”",
+      );
+      fireEvent.click(within(bar).getByRole("button", { name: "Undo restore" }));
+      expect(state.undoRestore).toHaveBeenCalledTimes(1);
+    });
+
+    it("is not there when nothing was restored, or when the turn it names is gone", () => {
+      state.turns = [turn("t1", "hi")];
+      render(<ChatView />);
+      expect(screen.queryByRole("button", { name: "Undo restore" })).toBeNull();
+      restoredState();
+      state.restored = { turnId: "no-such-turn", before: null, hid: [] };
+      render(<ChatView />);
+      expect(screen.queryByRole("button", { name: "Undo restore" })).toBeNull();
+    });
+
+    it("waits while the assistant works or a chat is being swapped", () => {
+      restoredState();
+      state.streaming = true;
+      render(<ChatView />);
+      expect(screen.getByRole("button", { name: "Undo restore" })).toBeDisabled();
+    });
+
+    /** Press Restore Checkpoint (the composer gets the prompt back), then show the chat as restored. */
+    async function restoreThen(
+      view: ReturnType<typeof render>,
+      then?: (composer: HTMLElement) => void,
+    ) {
+      state.turns = [turn("t1", "make it shorter", { checkpoint: { fps: 30, tracks: [] } })];
+      state.restoreTo = vi.fn(async () => ({ text: "make it shorter", attachments: [] }));
+      view.rerender(<ChatView />);
+      const composer = screen.getByPlaceholderText(/Message the editor/);
+      fireEvent.click(screen.getByRole("button", { name: /Restore Checkpoint/ }));
+      await waitFor(() => expect(composer).toHaveValue("make it shorter"));
+      then?.(composer);
+      state.turns = [turn("t1", "make it shorter", { undone: true })];
+      state.restored = { turnId: "t1", before: null, hid: ["t1"] };
+      view.rerender(<ChatView />);
+      return composer;
+    }
+
+    it("takes the prompt the restore put in the composer out again: it is back in the chat, and sent twice otherwise", async () => {
+      const composer = await restoreThen(render(<ChatView />));
+      fireEvent.click(screen.getByRole("button", { name: "Undo restore" }));
+      await waitFor(() => expect(state.undoRestore).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(composer).toHaveValue(""));
+    });
+
+    it("keeps what the person wrote in the composer instead, once they changed the prompt", async () => {
+      const composer = await restoreThen(render(<ChatView />), (box) =>
+        fireEvent.change(box, { target: { value: "make it shorter, and add a title" } }),
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Undo restore" }));
+      await waitFor(() => expect(state.undoRestore).toHaveBeenCalledTimes(1));
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0)); // long enough for a wrong clear to have happened
+      });
+      expect(composer).toHaveValue("make it shorter, and add a title");
+    });
+
+    it("also takes the prompt out of the composer when the person agrees to undo the restore over outside changes", async () => {
+      const view = render(<ChatView />);
+      const composer = await restoreThen(view); // the composer holds the prompt the restore handed back
+      state.rewind = { action: "undo_restore" }; // the project changed meanwhile: the store asked first
+      view.rerender(<ChatView />);
+      fireEvent.click(
+        within(screen.getByRole("dialog", { name: "Go back?" })).getByRole("button", {
+          name: "Go back anyway",
+        }),
+      );
+      await waitFor(() => expect(state.undoRestore).toHaveBeenCalledWith({ confirmed: true }));
+      expect(state.cancelRewind).toHaveBeenCalledTimes(1);
+      // The prompt is back in the chat: a composer still holding it would send it twice.
+      await waitFor(() => expect(composer).toHaveValue(""));
+    });
+
+    it("does not take words out of the composer on the strength of a restore made in another chat", async () => {
+      const view = render(<ChatView />);
+      const composer = await restoreThen(view); // this chat's restore put "make it shorter" there
+      state.transcriptId = "another-chat"; // a different chat opens, with a restore record of its own
+      state.turns = [turn("t9", "make it shorter", { undone: true })];
+      state.restored = { turnId: "t9", before: null, hid: ["t9"] };
+      view.rerender(<ChatView />);
+      fireEvent.click(screen.getByRole("button", { name: "Undo restore" }));
+      await waitFor(() => expect(state.undoRestore).toHaveBeenCalledTimes(1));
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+      expect(composer).toHaveValue("make it shorter");
+    });
+
+    it("leaves the composer alone when the undo did not happen", async () => {
+      restoredState();
+      state.undoRestore = vi.fn(async () => false);
+      render(<ChatView />);
+      const composer = screen.getByPlaceholderText(/Message the editor/);
+      fireEvent.change(composer, { target: { value: "keep this" } });
+      fireEvent.click(screen.getByRole("button", { name: "Undo restore" }));
+      await waitFor(() => expect(state.undoRestore).toHaveBeenCalled());
+      expect(composer).toHaveValue("keep this");
+    });
+  });
+
+  describe("a long chat", () => {
+    const withContext = (tokens: number) => {
+      state.turns = [turn("t1", "hello")];
+      state.session = { context_tokens: tokens, cost_usd: 0 };
+    };
+
+    it("offers a new chat once the conversation is long, and explains why", () => {
+      withContext(100_000);
+      render(<ChatView />);
+      const link = screen.getByRole("button", { name: "Start a new chat" });
+      expect(link).toHaveAttribute(
+        "title",
+        expect.stringContaining("slower and uses more credits"),
+      );
+      fireEvent.click(link);
+      expect(state.newChat).toHaveBeenCalledTimes(1);
+    });
+
+    it("says nothing about it in a chat that is not long yet", () => {
+      withContext(99_999);
+      render(<ChatView />);
+      expect(screen.queryByRole("button", { name: "Start a new chat" })).toBeNull();
+    });
+
+    it.each([
+      ["while the assistant is working", { streaming: true }],
+      ["while the project is closing", { closing: true }],
+      ["while a chat is being swapped in", { switching: true }],
+    ])("does not interrupt %s", (_name, patch) => {
+      withContext(250_000);
+      Object.assign(state, patch);
+      render(<ChatView />);
+      expect(screen.queryByRole("button", { name: "Start a new chat" })).toBeNull();
+    });
+  });
+
+  it("does not send a message while a chat is being swapped, and keeps the words typed", () => {
+    state.turns = [turn("t1", "hello")];
+    state.switching = true;
+    render(<ChatView />);
+    const composer = screen.getByPlaceholderText(/Message the editor/);
+    fireEvent.change(composer, { target: { value: "do the thing" } });
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    fireEvent.keyDown(composer, { key: "Enter" });
+    expect(state.send).not.toHaveBeenCalled();
+    expect(composer).toHaveValue("do the thing"); // not cleared into a send that was refused
+  });
+
+  it("a Restore Checkpoint waits while a chat is being swapped", () => {
+    state.turns = [turn("t1", "hello", { checkpoint: { fps: 30, tracks: [] } })];
+    state.switching = true;
+    render(<ChatView />);
+    expect(screen.getByRole("button", { name: /Restore Checkpoint/ })).toBeDisabled();
   });
 });

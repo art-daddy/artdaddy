@@ -320,7 +320,48 @@ do not raise a floor while its replacement build is unavailable. No release is p
 - **`projects.ts`** / **`projectConfig.ts`** — open project + settings.
 - **`chat.ts`** / **`chatSession.ts`** / **`chatTranscript.ts`** — chat state and
   persisted transcript. **`indexCoordinator.ts`** — media/search indexing.
-  **`transcriptFile.ts`**, **`feedbackBundle.ts`**.
+  **`transcriptFile.ts`**, **`chatFiles.ts`**, **`feedbackBundle.ts`**.
+
+### Chats of a project (0.27.0)
+
+A project has **one open chat** and any number **put away**. The open chat is
+`internals/transcript.json`, exactly the format older apps read, so an older build
+opens a project on the chat that was open. A put-away chat is one file,
+`internals/chat/sessions/<id>.json` (the same format plus a title and a time), with a
+tiny `<id>.meta.json` beside it that the list reads instead of every chat (a chat with
+checkpoints runs to megabytes). The summary is a cache: the chat file is the record,
+and a missing or stale summary is rebuilt from it. An id is a file name (`isChatId`):
+nothing that could be a path is ever read, written or deleted.
+
+**The order is what keeps a conversation from being lost.** `newChat` and `openChat`
+write the chat on screen to disk (open file first, then its put-away file) *before*
+anything replaces it, and take a put-away copy off disk only *after* the open file holds
+that chat. A failed write leaves everything as it was (the chat is not cleared); a crash
+between two steps leaves the same chat in both places, never in neither, and the open
+chat wins (the list hides the stale copy). `switching` holds sends, rewinds, Continue and
+Try again off for the moment it takes, so nothing lands in a chat that is on its way out;
+and a swap is itself refused while an undo, redo, restore or delete is mid-way (`inflightOps`),
+because those capture the chat's turns when they begin and write them back when they end.
+A project close or reload that lands meanwhile abandons the swap (`loadSeq`, `closing`).
+
+**Going back asks first.** A Restore Checkpoint, Undo or Redo replaces the timeline with a
+snapshot this chat took. It compares the timeline on screen with the one the chat expects
+(`lastKeptTimeline`; for redo, the checkpoint of the first undone turn). If they differ,
+something outside the chat (a hand edit, another chat, a finished generation) changed it,
+so the store sets `rewind` and does nothing until `confirmRewind`. The check is in the
+store, not the component, so every member of the class (restore, undo, redo, undo restore)
+goes through it; `chatSessions.test.ts` runs one table over all four.
+
+**Undo restore.** A restore keeps what was on screen and the turns it hid as the chat's
+`restore` record (`RestoreRecord`, saved with the chat, never sent to the server) until the
+next message is sent; one click brings both back. An undo, a redo or a send clears it.
+
+The media cleanup (`tools/mediaGc.ts`) treats every put-away chat, and the `before` snapshot
+of an Undo restore, as a reference source, and fails closed like it does for the open chat:
+a chat file that exists but does not read, or a folder that exists but cannot be listed,
+stops the sweep. Known limits: a background job that finishes after the chat that started
+it was put away wakes the chat that is open then (`jobNotes.ts` has no chat identity); the
+list orders chats by when they were put away, not by their last message.
 
 ---
 

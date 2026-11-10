@@ -6,6 +6,7 @@ import { composeModelText } from "../agent/compose";
 import type { RoundInput, ToolResultItem } from "../agent/types";
 import type { Mention } from "../timeline/mentions";
 import type { Timeline } from "../timeline/model";
+import { JOB_WAKE_LEAD } from "./jobNotes";
 
 export type TurnStatus = "streaming" | "awaiting" | "done" | "error" | "interrupted";
 
@@ -29,6 +30,53 @@ export interface Turn {
   timelineChanged?: boolean;
   /** What the app read of the project for the model before its first round (agent/stateBlock.ts). */
   stateBlock?: string;
+}
+
+/** A chat's last Restore Checkpoint, kept until its next message so one click can undo it. It is the
+ *  chat's own record (saved beside the transcript, never sent to the server): the timeline that was on
+ *  screen, which a restore replaces and cannot otherwise bring back, and the turns the restore hid. */
+export interface RestoreRecord {
+  /** The turn the chat went back to before. */
+  turnId: string;
+  before: Timeline | null;
+  hid: string[];
+}
+
+/** A record read from disk is trusted only in this shape; anything else is no record. */
+export function isRestoreRecord(v: unknown): v is RestoreRecord {
+  if (!v || typeof v !== "object") return false;
+  const r = v as Partial<RestoreRecord>;
+  return (
+    typeof r.turnId === "string" &&
+    Array.isArray(r.hid) &&
+    r.hid.every((id) => typeof id === "string") &&
+    (r.before === null || (typeof r.before === "object" && r.before !== undefined))
+  );
+}
+
+/** The most characters of its first message a chat is called by. */
+export const CHAT_TITLE_MAX = 40;
+
+/** What to call a chat: its first message, on one line and cut short. The app's own wake prompts are
+ *  not the person's words, so they never name a chat. */
+export function chatTitle(messages: Iterable<string>): string {
+  for (const raw of messages) {
+    const text = raw.replace(/\s+/g, " ").trim();
+    if (!text || text.startsWith(JOB_WAKE_LEAD)) continue;
+    // By code point: cutting a UTF-16 pair in half would leave a broken character in the list.
+    const chars = Array.from(text);
+    return chars.length > CHAT_TITLE_MAX
+      ? `${chars.slice(0, CHAT_TITLE_MAX).join("").trimEnd()}…`
+      : text;
+  }
+  return "New chat";
+}
+
+/** The timeline the chat last left the project at: where its last kept turn ended, or began if it
+ *  never recorded an end. Null when no kept turn holds one. */
+export function lastKeptTimeline(turns: readonly Turn[]): Timeline | null {
+  const last = [...turns].reverse().find((t) => !t.undone);
+  return last?.timelineAfter ?? last?.checkpoint ?? null;
 }
 
 /** Persisted transcript requests -> UI turns. */

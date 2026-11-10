@@ -42,6 +42,10 @@ export interface JobSink {
 /** How long to gather completions before waking the agent once for all of them. */
 export const SETTLE_WINDOW_MS = 1500;
 
+/** The first line of the prompt a wake sends the model (chat.ts `jobWakePrompt`). It is the app's
+ *  words, not the person's, so nothing that names or summarizes a chat by its messages may use it. */
+export const JOB_WAKE_LEAD = "Background work you started earlier has finished:";
+
 const queued = new Map<string, SettledJob[]>();
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
 const sinks = new Map<string, JobSink>();

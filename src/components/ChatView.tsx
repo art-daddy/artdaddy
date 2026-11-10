@@ -29,6 +29,7 @@ import {
   MEDIA_RE,
 } from "../lib/upload";
 import { useChat } from "../store/chat";
+import { chatTitle } from "../store/chatTranscript";
 import { useAuth } from "../store/auth";
 import { useEditor } from "../store/editor";
 import {
@@ -46,6 +47,8 @@ import {
   type MentionOption,
 } from "../timeline/mentionOptions";
 import ApprovalBar from "./ApprovalBar";
+import ChatHistoryMenu, { ICON_BUTTON, PlusIcon } from "./ChatHistoryMenu";
+import ConfirmDialog from "./ConfirmDialog";
 import MessagePart from "./MessagePart";
 import { Pane } from "./Pane";
 import ReportProblemDialog from "./ReportProblemDialog";
@@ -147,6 +150,16 @@ export default function ChatView({ onHide }: { onHide?: () => void } = {}) {
     addMention,
     removeMention,
     sendFeedback,
+    switching,
+    rewind,
+    restored: restoreRecord,
+    newChat,
+    listChats,
+    openChat,
+    deleteChat,
+    undoRestore,
+    confirmRewind,
+    cancelRewind,
   } = useChat();
   const aiStatus = useAuth((s) => s.status);
   const openSignIn = () => void startDesktopSignIn();
@@ -409,7 +422,7 @@ export default function ChatView({ onHide }: { onHide?: () => void } = {}) {
       openSignIn();
       return;
     }
-    if (!text.trim() || streaming || uploading) return;
+    if (!text.trim() || streaming || switching || uploading) return;
     const t = text;
     const atts = attachments;
     setText("");
@@ -420,19 +433,74 @@ export default function ChatView({ onHide }: { onHide?: () => void } = {}) {
   const canUndo = session?.can_undo ?? false;
   const canRedo = session?.can_redo ?? false;
 
+  // The assistant is working, the project is closing, or a chat is being swapped: chats cannot be
+  // put away or opened for the moment.
+  const busy = streaming || Boolean(pending?.length) || closing || switching;
+  const canNewChat = Boolean(projectId) && turns.length > 0 && !busy;
+  // The prompt a Restore Checkpoint handed back, so Undo restore can take it out of the composer again.
+  const restoredPrompt = useRef<string | null>(null);
+  // It belongs to the chat it came from: another chat or project must not inherit it.
+  useEffect(() => {
+    restoredPrompt.current = null;
+  }, [transcriptId]);
+
+  const putBack = (prompt: { text: string; attachments: Attachment[] }) => {
+    restoredPrompt.current = prompt.text;
+    setText(prompt.text);
+    setAttachments(prompt.attachments);
+  };
+
   // Restoring a checkpoint takes the conversation back to before that prompt, so the prompt
   // and everything after it leave the transcript and the text returns to the composer, ready
-  // to edit and resend. Redo is still reachable from the toolbar above.
+  // to edit and resend. Redo is still reachable from the toolbar above. When the project has changed
+  // since this chat last touched it, the store asks first (`rewind`) and nothing happens yet.
   const onRestore = async (turnId: string) => {
-    const restored = await restoreTo(turnId);
-    if (!restored) return;
-    setText(restored.text);
-    setAttachments(restored.attachments);
+    const prompt = await restoreTo(turnId);
+    if (prompt) putBack(prompt);
   };
+
+  // The prompt is back in the chat, so a composer still holding exactly it would send it twice.
+  const onUndoRestore = async (opts?: { confirmed?: boolean }) => {
+    if (!(await undoRestore(opts))) return;
+    if (restoredPrompt.current !== null && text === restoredPrompt.current) {
+      setText("");
+      setAttachments([]);
+    }
+    restoredPrompt.current = null;
+  };
+
+  const restoredTurn = restoreRecord ? turns.find((t) => t.id === restoreRecord.turnId) : undefined;
   const visibleTurns = turns.filter((t) => !t.undone);
 
   return (
-    <Pane title="Assistant" onHide={onHide} bodyClassName="flex min-h-0 flex-col overflow-hidden">
+    <Pane
+      title="Assistant"
+      onHide={onHide}
+      className="relative"
+      bodyClassName="flex min-h-0 flex-col overflow-hidden"
+      actions={
+        <>
+          <button
+            type="button"
+            onClick={() => void newChat()}
+            disabled={!canNewChat}
+            aria-label="New chat"
+            title={busy ? "New chat — available when the assistant is done" : "New chat"}
+            className={ICON_BUTTON}
+          >
+            <PlusIcon />
+          </button>
+          <ChatHistoryMenu
+            currentTitle={chatTitle(turns.map((t) => t.userText))}
+            busy={busy}
+            disabled={!projectId}
+            listChats={listChats}
+            openChat={openChat}
+            deleteChat={deleteChat}
+          />
+        </>
+      }
+    >
       <div ref={scrollRef} className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4">
         {visibleTurns.length === 0 && (
           <div className="pt-2">
@@ -469,7 +537,7 @@ export default function ChatView({ onHide }: { onHide?: () => void } = {}) {
               <div className="flex justify-center opacity-60 transition-opacity group-hover:opacity-100">
                 <button
                   type="button"
-                  disabled={streaming}
+                  disabled={streaming || switching}
                   onClick={() => void onRestore(turn.id)}
                   title="Undo back to before this message and put it back in the composer"
                   className="flex items-center gap-1 rounded-full border border-neutral-600 px-2 py-0.5 text-[11px] text-neutral-300 hover:border-neutral-500 hover:bg-neutral-800 hover:text-neutral-100 disabled:opacity-40"
@@ -621,6 +689,26 @@ export default function ChatView({ onHide }: { onHide?: () => void } = {}) {
         <div className="border-t border-red-500/30 bg-red-500/10 px-5 py-2 text-xs text-red-300">
           {error}
           {isOutOfCredits(error) && <DiscordCreditsCta className="mt-1 block" />}
+        </div>
+      )}
+
+      {/* A Restore Checkpoint is one click from being undone until the next message is sent. */}
+      {restoreRecord && restoredTurn && (
+        <div
+          role="status"
+          className="flex shrink-0 items-center justify-between gap-2 border-t border-edge bg-neutral-900/60 px-5 py-2 text-xs text-neutral-300"
+        >
+          <span className="min-w-0 truncate">
+            Went back to before &ldquo;{chatTitle([restoredTurn.userText])}&rdquo;.
+          </span>
+          <button
+            type="button"
+            onClick={() => void onUndoRestore()}
+            disabled={streaming || switching}
+            className="shrink-0 rounded px-2 py-0.5 font-medium text-accent hover:bg-neutral-800 disabled:opacity-40"
+          >
+            Undo restore
+          </button>
         </div>
       )}
 
@@ -796,7 +884,7 @@ export default function ChatView({ onHide }: { onHide?: () => void } = {}) {
               <Button
                 className="ml-auto shrink-0"
                 variant="primary"
-                disabled={uploading || !text.trim() || !aiReady}
+                disabled={uploading || switching || !text.trim() || !aiReady}
                 onClick={onSend}
               >
                 Send
@@ -847,7 +935,11 @@ export default function ChatView({ onHide }: { onHide?: () => void } = {}) {
           </button>
           <McpChip />
           <div className="ml-auto min-w-0 max-w-full">
-            <ContextMeter session={session} model={model} />
+            <ContextMeter
+              session={session}
+              model={model}
+              onNewChat={canNewChat ? () => void newChat() : undefined}
+            />
           </div>
         </div>
       </div>
@@ -856,11 +948,47 @@ export default function ChatView({ onHide }: { onHide?: () => void } = {}) {
         onCancel={() => setReportingTurn(null)}
         onSubmit={submitReport}
       />
+      {/* Going back replaces the timeline. When something outside this chat changed it since (by
+          hand, or in another chat), that work would go with it, so the person agrees first. */}
+      <ConfirmDialog
+        open={rewind !== null}
+        title={rewind?.action === "redo" ? "Go forward?" : "Go back?"}
+        destructive
+        confirmLabel={rewind?.action === "redo" ? "Go forward anyway" : "Go back anyway"}
+        onCancel={cancelRewind}
+        onConfirm={async () => {
+          // Undoing a restore over outside changes also takes the prompt it handed back out of the
+          // composer, the same as when it needed no question.
+          if (rewind?.action === "undo_restore") {
+            cancelRewind();
+            await onUndoRestore({ confirmed: true });
+            return;
+          }
+          const prompt = await confirmRewind();
+          if (prompt) putBack(prompt);
+        }}
+      >
+        The project has changed since this chat last edited it, by hand or in another chat. Going{" "}
+        {rewind?.action === "redo" ? "forward" : "back"} replaces the timeline, and those changes
+        will be lost.
+      </ConfirmDialog>
     </Pane>
   );
 }
 
-function ContextMeter({ session, model }: { session: SessionState | null; model: string }) {
+/** A chat this long makes every step slower and dearer: each step re-reads the whole conversation. */
+const LONG_CHAT_TOKENS = 100_000;
+
+function ContextMeter({
+  session,
+  model,
+  onNewChat,
+}: {
+  session: SessionState | null;
+  model: string;
+  /** Offered once the chat is long; absent while a new chat cannot be started. */
+  onNewChat?: () => void;
+}) {
   const used = session?.context_tokens ?? 0;
   const max = contextWindow(model);
   const pct = max > 0 ? Math.min(100, Math.round((used / max) * 100)) : 0;
@@ -886,6 +1014,16 @@ function ContextMeter({ session, model }: { session: SessionState | null; model:
       <span className="tabular-nums">
         {fmtTok(used)}/{fmtTok(max)} · {pct}%
       </span>
+      {onNewChat && used >= LONG_CHAT_TOKENS && (
+        <button
+          type="button"
+          onClick={onNewChat}
+          title="Every step re-reads the whole chat, so a long one is slower and uses more credits. Your timeline and media are not changed."
+          className="whitespace-nowrap font-medium text-accent underline underline-offset-2 hover:text-indigo-300"
+        >
+          Start a new chat
+        </button>
+      )}
       {usage.metered &&
         (usage.globalPaused ? (
           <span className="tabular-nums text-amber-400" title={CREDITS_PAUSED}>

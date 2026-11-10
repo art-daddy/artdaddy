@@ -7,6 +7,8 @@ import { storeForProject } from "../lib/desktop";
 import type { SessionState, TranscriptRequest } from "../api/types";
 import { withProjectLock } from "../tools/coordinator";
 import { INTERNAL_DIR, joinPath, type ProjectStoreAccess } from "../tools/store";
+import { chatFilePath, chatFileId, chatMetaPath, isChatId, readChatDir } from "./chatFiles";
+import { chatTitle, isRestoreRecord, type RestoreRecord } from "./chatTranscript";
 
 /** Co-located session transcript, relative to the project dir. */
 export const TRANSCRIPT_REL = `${INTERNAL_DIR}/chat/transcript.json`;
@@ -45,6 +47,8 @@ export interface ClientSession {
   transcriptId?: string;
   /** Last session state (cost/tokens) so the running total survives a reopen. */
   session?: SessionState | null;
+  /** The chat's last Restore Checkpoint, kept until its next message so it can be undone. */
+  restore?: RestoreRecord | null;
 }
 
 /** Client-owned session file (hidden from the user, inside `internals/`). */
@@ -63,6 +67,7 @@ export async function loadSession(store: ProjectStoreAccess): Promise<ClientSess
       provider_snapshot?: Record<string, unknown> | null;
       session?: SessionState | null;
       id?: string;
+      restore?: unknown;
     } | null>(p, null);
     if (data && Array.isArray(data.requests)) {
       return {
@@ -70,10 +75,29 @@ export async function loadSession(store: ProjectStoreAccess): Promise<ClientSess
         providerSnapshot: data.provider_snapshot ?? null,
         transcriptId: data.id,
         session: data.session ?? null,
+        ...(isRestoreRecord(data.restore) ? { restore: data.restore } : {}),
       };
     }
   }
   return { requests: [], providerSnapshot: null };
+}
+
+/** The JSON a chat file holds. The open chat and a put-away one share it, so a chat moves between
+ *  them without being translated; `extra` is the put-away chat's title and time, written after the id. */
+function sessionJson(session: ClientSession, extra: Record<string, unknown> = {}): string {
+  return JSON.stringify(
+    {
+      version: 1,
+      id: session.transcriptId,
+      ...extra,
+      requests: session.requests,
+      provider_snapshot: session.providerSnapshot ?? null,
+      session: session.session ?? null,
+      ...(session.restore ? { restore: session.restore } : {}),
+    },
+    null,
+    2,
+  );
 }
 
 /** Persist the client-owned session atomically into `internals/transcript.json`. */
@@ -82,17 +106,7 @@ export async function persistSession(
   session: ClientSession,
 ): Promise<boolean> {
   const full = joinPath(store.projectDir, SESSION_REL);
-  const body = JSON.stringify(
-    {
-      version: 1,
-      id: session.transcriptId,
-      requests: session.requests,
-      provider_snapshot: session.providerSnapshot ?? null,
-      session: session.session ?? null,
-    },
-    null,
-    2,
-  );
+  const body = sessionJson(session);
   // Guard the transcript write with the SAME session-liveness the timeline uses, so a persist
   // that races a project close is ABANDONED (returns false) instead of landing in the folder of
   // the project the user already left (the audit's unguarded-transcript gap).
@@ -199,4 +213,159 @@ export async function loadClientSession(projectId: string): Promise<ClientSessio
   const store = await storeForProject(projectId);
   if (store) return loadSession(store);
   return { requests: [], providerSnapshot: null };
+}
+
+// ── Put-away chats ─────────────────────────────────────────────────────────
+// A project has ONE open chat (`internals/transcript.json`, above) and any number put away, one file
+// each (chatFiles.ts). The order that keeps a conversation from being lost is the callers': put a chat
+// away BEFORE anything replaces it on screen or in the open file, and take the put-away copy off disk
+// only AFTER the open file holds that chat. A crash between two steps leaves the same chat in both
+// places, never in neither; the open chat wins and the stale copy is hidden from the list.
+
+/** One line of the chat list. */
+export interface ChatSummary {
+  id: string;
+  title: string;
+  /** ISO time the chat was put away; what the list is ordered by. */
+  updatedAt: string;
+}
+
+/** Put `session` away under `id`. True once the chat file is on disk; the summary beside it is a cache,
+ *  so its failing costs nothing. False when the write was abandoned (the project session closed). */
+export async function archiveSession(
+  store: ProjectStoreAccess,
+  id: string,
+  session: ClientSession,
+  updatedAt: string,
+): Promise<boolean> {
+  if (!isChatId(id)) return false;
+  const title = chatTitle(session.requests.map((r) => r.message?.text ?? ""));
+  const body = sessionJson({ ...session, transcriptId: id }, { title, updated_at: updatedAt });
+  const summary = JSON.stringify({ version: 1, id, title, updated_at: updatedAt });
+  const live = () => store.sessionLive();
+  // Under the project lock, like every other writer of the project folder, so it cannot interleave
+  // with the open chat's own queued write.
+  return withProjectLock(store.projectDir, async () => {
+    if (!(await store.writeProjectText(chatFilePath(store.projectDir, id), body, live)))
+      return false;
+    try {
+      await store.writeProjectText(chatMetaPath(store.projectDir, id), summary, live);
+    } catch {
+      /* a cache: it is rebuilt from the chat file when it is missing */
+    }
+    return true;
+  });
+}
+
+function summaryFrom(raw: unknown, id: string): ChatSummary | null {
+  const m = raw as { title?: unknown; updated_at?: unknown } | null;
+  if (!m || typeof m.title !== "string" || typeof m.updated_at !== "string") return null;
+  return { id, title: m.title, updatedAt: m.updated_at };
+}
+
+/** The summary a chat's `.meta.json` holds, or null when it is missing or does not read. Read without
+ *  the corrupt-file recovery: a cache is rebuilt, not preserved. */
+async function readSummary(store: ProjectStoreAccess, id: string): Promise<ChatSummary | null> {
+  try {
+    return summaryFrom(JSON.parse(await store.readText(chatMetaPath(store.projectDir, id))), id);
+  } catch {
+    return null;
+  }
+}
+
+/** Rebuild a chat's summary from the chat file itself (a crash fell between the two writes, or an
+ *  older build left none), and put the cache back. Null when the chat file does not read. */
+async function rebuildSummary(store: ProjectStoreAccess, id: string): Promise<ChatSummary | null> {
+  const data = await store.readJson<{
+    title?: unknown;
+    updated_at?: unknown;
+    requests?: TranscriptRequest[];
+  } | null>(chatFilePath(store.projectDir, id), null);
+  if (!data || !Array.isArray(data.requests)) return null;
+  const summary: ChatSummary = {
+    id,
+    title:
+      typeof data.title === "string"
+        ? data.title
+        : chatTitle(data.requests.map((r) => r.message?.text ?? "")),
+    updatedAt: typeof data.updated_at === "string" ? data.updated_at : "",
+  };
+  const cache = JSON.stringify({
+    version: 1,
+    id,
+    title: summary.title,
+    updated_at: summary.updatedAt,
+  });
+  await withProjectLock(store.projectDir, () =>
+    store.writeProjectText(chatMetaPath(store.projectDir, id), cache, () => store.sessionLive()),
+  ).catch(() => false);
+  return summary;
+}
+
+/** The put-away chats, newest first. `exceptId` is the open chat: while a crash left its copy here as
+ *  well, the open chat wins and the copy is not listed. A chat file that does not read is left out. */
+export async function listArchivedSessions(
+  store: ProjectStoreAccess,
+  exceptId?: string | null,
+): Promise<ChatSummary[]> {
+  const entries = await readChatDir(store);
+  if (!entries) return [];
+  const names = new Set(entries.filter((e) => !e.isDirectory).map((e) => e.name));
+  const found = await Promise.all(
+    [...names].map(async (name) => {
+      const id = chatFileId(name);
+      if (!id || id === exceptId) return null;
+      const cached = names.has(`${id}.meta.json`) ? await readSummary(store, id) : null;
+      return cached ?? (await rebuildSummary(store, id));
+    }),
+  );
+  return found
+    .filter((c): c is ChatSummary => c !== null)
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id));
+}
+
+/** A put-away chat, whole. Null when there is no such chat or its file does not read (a corrupt file
+ *  is kept aside by the read, as for the open chat). */
+export async function readArchivedSession(
+  store: ProjectStoreAccess,
+  id: string,
+): Promise<ClientSession | null> {
+  if (!isChatId(id)) return null;
+  const data = await store.readJson<{
+    requests?: TranscriptRequest[];
+    provider_snapshot?: Record<string, unknown> | null;
+    session?: SessionState | null;
+    restore?: unknown;
+  } | null>(chatFilePath(store.projectDir, id), null);
+  if (!data || !Array.isArray(data.requests)) return null;
+  return {
+    requests: data.requests,
+    providerSnapshot: data.provider_snapshot ?? null,
+    transcriptId: id,
+    session: data.session ?? null,
+    ...(isRestoreRecord(data.restore) ? { restore: data.restore } : {}),
+  };
+}
+
+/** Take a put-away chat off disk. The chat file goes first: it is what makes the chat exist, so a crash
+ *  after it leaves at most a stray summary, never a chat that half-exists. True once it is gone. */
+export async function deleteArchivedSession(
+  store: ProjectStoreAccess,
+  id: string,
+): Promise<boolean> {
+  if (!isChatId(id)) return false;
+  const chat = chatFilePath(store.projectDir, id);
+  return withProjectLock(store.projectDir, async () => {
+    try {
+      await store.remove(chat);
+    } catch {
+      /* already gone, or it refused: the check below decides */
+    }
+    try {
+      await store.remove(chatMetaPath(store.projectDir, id));
+    } catch {
+      /* a stray summary without its chat is never listed */
+    }
+    return !(await store.exists(chat));
+  });
 }

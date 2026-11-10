@@ -2,11 +2,13 @@
 // an in-session Undo can restore it. Those bytes become collectable only once NO reference can bring
 // them back. This runs at project CLOSE, when the in-memory undo/redo stacks are discarded — so the
 // ONLY things that can still restore a reference are PERSISTED: the catalog, the current timeline, and
-// any chat checkpoint. A file is kept if its content-hash id appears in ANY of those; everything else
+// any chat checkpoint (the open chat's, and every chat put away beside it, which opens again). A
+// file is kept if its content-hash id appears in ANY of those; everything else
 // under `library/` is a safe orphan. Purely disk-based + conservative (it never removes a file whose id
 // is referenced anywhere). EXTERNAL (referenced-in-place) media lives outside `library/` and is never
 // touched here — ArtDaddy never deletes a user's own file (invariant 28/31).
 import { INTERNAL_DIR, joinPath, type LibraryClip, type ProjectStoreAccess } from "./store";
+import { chatFileId, chatSessionsDir, readChatDir } from "../store/chatFiles";
 import { proxyKey } from "../preview/proxyPaths";
 import { captureError } from "../observability/sentry";
 import { isTempName } from "./tempNames";
@@ -26,8 +28,27 @@ function collectRefs(tl: unknown, into: Set<string>): void {
   }
 }
 
-/** Collect every media_ref from the THREE authoritative reference sources — the catalog, the current
- *  on-disk timeline, and every chat checkpoint (before/after). Distinguishes a genuinely-ABSENT source
+/** Add what a saved chat (the open one or a put-away one) can still bring back: every turn's
+ *  checkpoints and frames, and the timeline its Undo restore returns to. */
+function collectSessionRefs(session: unknown, into: Set<string>): void {
+  const chat = session as {
+    requests?: Array<{
+      checkpoint?: { timeline?: unknown; timeline_after?: unknown };
+      response?: unknown;
+    }>;
+    restore?: { before?: unknown } | null;
+  };
+  for (const req of chat.requests ?? []) {
+    collectRefs(req.checkpoint?.timeline, into);
+    collectRefs(req.checkpoint?.timeline_after, into);
+    collectFrameRefs(req.response, into);
+  }
+  collectRefs(chat.restore?.before, into);
+}
+
+/** Collect every media_ref from the authoritative reference sources — the catalog, the current
+ *  on-disk timeline, and every chat's checkpoints (before/after): the open chat and each chat put
+ *  away beside it. Distinguishes a genuinely-ABSENT source
  *  (a fresh project has no timeline/transcript — proceed, it pins nothing) from a source that EXISTS
  *  but is corrupt/unreadable (THROW — the caller fails the sweep closed). This is the exact distinction
  *  the earlier `readJson`-with-fallback lost: it parsed corrupt to empty, so a torn catalog looked like
@@ -53,18 +74,14 @@ async function collectAuthoritativeRefs(
     store,
     joinPath(store.projectDir, INTERNAL_DIR, "transcript.json"),
   );
-  if (trText !== null) {
-    const session = JSON.parse(trText) as {
-      requests?: Array<{
-        checkpoint?: { timeline?: unknown; timeline_after?: unknown };
-        response?: unknown;
-      }>;
-    };
-    for (const req of session.requests ?? []) {
-      collectRefs(req.checkpoint?.timeline, refs);
-      collectRefs(req.checkpoint?.timeline_after, refs);
-      collectFrameRefs(req.response, refs);
-    }
+  if (trText !== null) collectSessionRefs(JSON.parse(trText), refs);
+  // A chat put away is still restorable once it is opened again, so what it can bring back stays
+  // referenced. A folder that is there but cannot be listed throws: the sweep then removes nothing.
+  const chatDir = chatSessionsDir(store.projectDir);
+  for (const entry of (await readChatDir(store)) ?? []) {
+    if (entry.isDirectory || !chatFileId(entry.name)) continue;
+    const text = await readIfPresent(store, joinPath(chatDir, entry.name));
+    if (text !== null) collectSessionRefs(JSON.parse(text), refs);
   }
 }
 

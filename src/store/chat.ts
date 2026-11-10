@@ -30,26 +30,36 @@ import { withProjectLock } from "../tools/coordinator";
 import type { ProjectStoreAccess } from "../tools/store";
 import { openDocumentById } from "../project/openDocuments";
 import { mentionKey, type Mention } from "../timeline/mentions";
+import type { Timeline } from "../timeline/model";
 import {
+  archiveSession,
+  deleteArchivedSession,
+  listArchivedSessions,
   loadClientSession,
   persistSession,
   persistSessionNow,
   persistSessionSoon,
+  readArchivedSession,
+  type ChatSummary,
+  type ClientSession,
 } from "./transcriptFile";
 import { buildFeedbackBundle } from "./feedbackBundle";
 import { openToolHost, type ToolHost } from "../tools/host";
 import type { MutationOrigin } from "../project/MutationGate";
 import {
   type Turn,
+  type RestoreRecord,
   mapRequests,
   buildRequests,
+  lastKeptTimeline,
   requestsForHistory,
   transcriptForRound,
   unansweredCalls,
 } from "./chatTranscript";
+import { isChatId } from "./chatFiles";
 import { undoFlags, localSession } from "./chatSession";
 import { projectConfig } from "./projectConfig";
-import { registerJobSink, unregisterJobSink, type SettledJob } from "./jobNotes";
+import { JOB_WAKE_LEAD, registerJobSink, unregisterJobSink, type SettledJob } from "./jobNotes";
 
 /** Per model, whether the server has said it rebuilds that model's input from the transcript
  *  (client-owned history). Absent = not known yet: the request then also carries what the
@@ -62,9 +72,26 @@ export function resetHistoryModeSupport(): void {
   historyModeSupport.clear();
 }
 
+/** Shown when a chat could not be written to disk before it was replaced: the chat is left as it was. */
+const PUT_AWAY_FAILED = "This chat could not be saved, so it was left as it is.";
+const OPEN_CHAT_FAILED = "That chat could not be opened.";
+
 export interface RestoredPrompt {
   text: string;
   attachments: Attachment[];
+}
+
+/** A step back or forward that waits for the person's yes: the timeline on screen is not the one this
+ *  chat last left, so the step would throw away work made outside it (by hand, or in another chat). */
+export interface RewindPrompt {
+  action: "restore" | "undo" | "redo" | "undo_restore";
+  /** The turn a Restore Checkpoint was asked for. */
+  turnId?: string;
+}
+
+/** Said once the person has agreed to what a rewind would throw away. */
+export interface RewindOpts {
+  confirmed?: boolean;
 }
 
 interface ChatState {
@@ -92,6 +119,13 @@ interface ChatState {
    *  action (send/approve/deny/continue/undo/redo/restore) refuses while set, so no NEW turn or
    *  transcript write can race the close's final snapshot. Cleared by resume() on "Keep editing". */
   closing: boolean;
+  /** True for the moment a chat is being put away or another opened. A send or a rewind refuses
+   *  meanwhile, so nothing lands in a chat that is on its way out. */
+  switching: boolean;
+  /** A rewind waiting for the person's yes (the project changed outside this chat). */
+  rewind: RewindPrompt | null;
+  /** This chat's last Restore Checkpoint, until its next message: what Undo restore brings back. */
+  restored: RestoreRecord | null;
   error: string | null;
   model: string;
   effort: string;
@@ -122,10 +156,25 @@ interface ChatState {
   resumeForJobs: (jobs: SettledJob[]) => Promise<void>;
   approve: (callId?: string) => Promise<void>;
   deny: (reason?: string, callId?: string) => Promise<void>;
-  undo: () => Promise<void>;
-  redo: () => Promise<void>;
-  /** Resolves the prompt that was rolled back, so the composer can offer it again. */
-  restoreTo: (turnId: string) => Promise<RestoredPrompt | null>;
+  undo: (opts?: RewindOpts) => Promise<void>;
+  redo: (opts?: RewindOpts) => Promise<void>;
+  /** Resolves the prompt that was rolled back, so the composer can offer it again. Null when there was
+   *  nothing to restore, or the person has first to agree (see `rewind`). */
+  restoreTo: (turnId: string, opts?: RewindOpts) => Promise<RestoredPrompt | null>;
+  /** Undo the last Restore Checkpoint: the timeline it replaced and the turns it hid come back. */
+  undoRestore: (opts?: RewindOpts) => Promise<boolean>;
+  /** The person agreed to the waiting rewind: do it. Resolves the prompt a restore hands back. */
+  confirmRewind: () => Promise<RestoredPrompt | null>;
+  cancelRewind: () => void;
+  /** Put this chat away and start a fresh one in the same project. Nothing is cleared unless the old chat
+   *  reached disk first. False when it did not happen. */
+  newChat: () => Promise<boolean>;
+  /** The project's put-away chats, newest first. */
+  listChats: () => Promise<ChatSummary[]>;
+  /** Put this chat away and open a put-away one. False when it did not happen. */
+  openChat: (id: string) => Promise<boolean>;
+  /** Delete a put-away chat for good (never the open one). */
+  deleteChat: (id: string) => Promise<boolean>;
   stop: () => Promise<void>;
   continueRun: () => Promise<void>;
   /** Send the round that failed again, exactly as it was, without retyping anything. */
@@ -145,6 +194,14 @@ function withLast(turns: Turn[], fn: (t: Turn) => Turn): Turn[] {
   return next;
 }
 
+/** A saved Restore Checkpoint means something only while the turn it names is still hidden. */
+function liveRestore(
+  record: RestoreRecord | null | undefined,
+  turns: Turn[],
+): RestoreRecord | null {
+  return record && turns.some((t) => t.id === record.turnId && t.undone) ? record : null;
+}
+
 /** The open document's count of outside timeline edits (UJ-028), or null with none open. */
 function docReading(projectId: string): DocReading | null {
   const doc = openDocumentById(projectId);
@@ -157,8 +214,7 @@ async function changedSinceLastTurn(
   prior: Turn[],
   store: ProjectStoreAccess | null,
 ): Promise<boolean> {
-  const last = [...prior].reverse().find((t) => !t.undone);
-  const seen = last?.timelineAfter ?? last?.checkpoint ?? null;
+  const seen = lastKeptTimeline(prior);
   if (!seen || !store) return false;
   try {
     return !sameTimeline(seen, await loadTimeline(store));
@@ -178,7 +234,7 @@ export function jobWakePrompt(jobs: readonly SettledJob[]): string {
     return `- ${j.label} is ready${suffix}`;
   });
   return [
-    "Background work you started earlier has finished:",
+    JOB_WAKE_LEAD,
     ...lines,
     "",
     "Continue what you were doing if there is more to do. If a job failed, say so and offer a",
@@ -294,7 +350,7 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
     registerJobSink(dir, {
       isIdle: () => {
         const s = get();
-        return !s.streaming && !s.closing && !s.pending?.length;
+        return !s.streaming && !s.closing && !s.pending?.length && !s.switching;
       },
       deliver: (jobs) => {
         // The catalog changed under the editor (a placeholder filled in, or failed), so the
@@ -778,6 +834,19 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
     if (get().streaming && exec === currentExec && exec.inflight === 0) set({ streaming: false });
   }
 
+  /** The open chat as its file holds it: the turns, the provider chain, the id and the running totals,
+   *  and its last Restore Checkpoint while Undo restore is still on offer. */
+  function chatSnapshot(): ClientSession {
+    const s = get();
+    return {
+      requests: buildRequests(s.turns),
+      providerSnapshot: s.providerSnapshot,
+      transcriptId: s.transcriptId ?? undefined,
+      session: s.session,
+      ...(s.restored ? { restore: s.restored } : {}),
+    };
+  }
+
   /** Persist the client-owned session (transcript + provider snapshot) to
    *  `internals/` after a turn completes. Best-effort; skipped if the project
    *  switched underneath us. */
@@ -788,12 +857,51 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
     // Non-blocking, coalesced, serialized (R10): the latest snapshot wins and a
     // burst of turn-completions can't land out of order. Failures are swallowed
     // inside the scheduler, so this never breaks the chat.
-    persistSessionSoon(ed.store, {
-      requests: buildRequests(get().turns),
-      providerSnapshot: get().providerSnapshot,
-      transcriptId: get().transcriptId ?? undefined,
-      session: get().session,
-    });
+    persistSessionSoon(ed.store, chatSnapshot());
+  }
+
+  /** Put the open chat away, whole, in a file of its own. True once it is on disk. The open chat's own
+   *  file is brought up to date first, so a crash between the two writes leaves the same, newest chat
+   *  in both places rather than an older one in the open file. */
+  async function putAway(store: ProjectStoreAccess): Promise<boolean> {
+    const snap = chatSnapshot();
+    // An id that cannot be a file name (an older build's) gets a fresh one: only the file needs it.
+    const id = isChatId(snap.transcriptId) ? snap.transcriptId : crypto.randomUUID();
+    try {
+      if (!(await persistSessionNow(store, snap))) return false;
+      return await archiveSession(store, id, snap, new Date().toISOString());
+    } catch (e) {
+      captureError(e, { phase: "chat.put_away" });
+      return false;
+    }
+  }
+
+  /** The timeline a rewind expects to find on screen when nothing outside the chat has touched it. */
+  function expectedTimeline(turns: Turn[], action: RewindPrompt["action"]): Timeline | null {
+    if (action === "redo") {
+      // The first of the trailing undone turns: what is on screen should be the timeline before it.
+      let i = -1;
+      for (let k = turns.length - 1; k >= 0; k--) {
+        if (turns[k].undone) i = k;
+        else break;
+      }
+      return i >= 0 ? (turns[i].checkpoint ?? null) : null;
+    }
+    if (action === "undo_restore") {
+      const turn = turns.find((t) => t.id === get().restored?.turnId);
+      return turn?.checkpoint ?? null;
+    }
+    return lastKeptTimeline(turns); // undo and restore: where the last kept turn left it
+  }
+
+  /** True when the timeline on screen is not the one this chat expects: something outside it (a hand
+   *  edit, another chat, a finished generation) changed it since. A rewind then replaces that work, so
+   *  the person is asked first. Compared with the same snapshots the checkpoints are made from; false
+   *  when either side is unknown, so a chat with no snapshots never asks. */
+  function changedOutsideChat(turns: Turn[], action: RewindPrompt["action"]): boolean {
+    const live = useEditor.getState().timeline;
+    const expected = live ? expectedTimeline(turns, action) : null;
+    return live !== null && expected !== null && !sameTimeline(live, expected);
   }
 
   /** The timeline as it stands at the turn's terminal moment — the redo target.
@@ -852,6 +960,9 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
     pending: null,
     canContinue: false,
     closing: false,
+    switching: false,
+    rewind: null,
+    restored: null,
     error: null,
     canRetry: false,
     // Luna at high effort costs a fraction of a cent a round; the picker offers gpt-6.1-sol.
@@ -888,6 +999,9 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
         canContinue: false,
         streaming: false,
         closing: false,
+        switching: false,
+        rewind: null,
+        restored: null,
         error: null,
         providerSnapshot: null,
         pendingMentions: [],
@@ -934,6 +1048,9 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
         canContinue: false,
         streaming: false,
         closing: false,
+        switching: false,
+        rewind: null,
+        restored: null,
         error: null,
         providerSnapshot: null,
         pendingMentions: [],
@@ -946,6 +1063,7 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
         transcriptId: sess.transcriptId ?? crypto.randomUUID(),
         session: localSession(turns, get().mode, sess.session),
         providerSnapshot: sess.providerSnapshot,
+        restored: liveRestore(sess.restore, turns),
       });
       // Deferred a tick: attaching delivers anything that finished while this project was
       // closed, and that starts a turn — which must not run inside load().
@@ -953,8 +1071,9 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
     },
 
     send: async (text, attachments = [], opts) => {
-      const { projectId, streaming, closing, turns, pendingMentions } = get();
-      if (!projectId || streaming || closing || !text.trim()) return; // closing = admission fence (finding #2)
+      const { projectId, streaming, closing, switching, turns, pendingMentions } = get();
+      // closing = admission fence (finding #2); switching = a chat is being put away or opened
+      if (!projectId || streaming || closing || switching || !text.trim()) return;
       const ed = useEditor.getState();
       const clientOwned = Boolean(ed.store) && ed.projectId === projectId;
       const mentions = pendingMentions;
@@ -975,6 +1094,9 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
         pendingMentions: [],
         streaming: true,
         error: null,
+        // The chat moves on: what a Restore Checkpoint hid is gone for good, and so is the way back.
+        restored: null,
+        rewind: null,
       }));
       // Persist BEFORE any tool can run. `checkpoint` is the timeline as it stands
       // right now, and it is the only way to revert what this turn is about to do —
@@ -1126,8 +1248,8 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
       await runTurn(currentExec, () => currentRunner!.deny(reason, id));
     },
 
-    undo: async () => {
-      if (get().closing) return; // admission fence: no new op once close begins
+    undo: async (opts) => {
+      if (get().closing || get().switching) return; // admission fence: no new op once close begins
       return trackOp(async () => {
         const { projectId, turns } = get();
         if (!projectId) return;
@@ -1140,6 +1262,10 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
             break;
           }
         if (i < 0) return;
+        if (!opts?.confirmed && changedOutsideChat(turns, "undo")) {
+          set({ rewind: { action: "undo" } });
+          return;
+        }
         const next = turns.map((t, k) => (k === i ? { ...t, undone: true } : t));
         const cp = next[i].checkpoint;
         if (cp) {
@@ -1151,18 +1277,18 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
         set((s) => ({
           turns: next,
           providerSnapshot: null,
+          restored: null, // the turns a Restore Checkpoint hid no longer line up with this chat
+          rewind: null,
           session: s.session ? { ...s.session, ...undoFlags(next) } : s.session,
         }));
         awareness.reset(); // the model's history changed with the timeline: compare, don't count
         const store = ed.store;
-        await withProjectLock(store.projectDir, () =>
-          persistSession(store, { requests: buildRequests(next), providerSnapshot: null }),
-        );
+        await withProjectLock(store.projectDir, () => persistSession(store, chatSnapshot()));
       });
     },
 
-    redo: async () => {
-      if (get().closing) return; // admission fence
+    redo: async (opts) => {
+      if (get().closing || get().switching) return; // admission fence
       return trackOp(async () => {
         const { projectId, turns } = get();
         if (!projectId) return;
@@ -1174,6 +1300,10 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
           else break;
         }
         if (i < 0) return;
+        if (!opts?.confirmed && changedOutsideChat(turns, "redo")) {
+          set({ rewind: { action: "redo" } });
+          return;
+        }
         const next = turns.map((t, k) => (k === i ? { ...t, undone: false } : t));
         const ta = next[i].timelineAfter;
         if (ta) {
@@ -1182,16 +1312,13 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
         }
         set((s) => ({
           turns: next,
+          restored: null,
+          rewind: null,
           session: s.session ? { ...s.session, ...undoFlags(next) } : s.session,
         }));
         awareness.reset();
         const store = ed.store;
-        await withProjectLock(store.projectDir, () =>
-          persistSession(store, {
-            requests: buildRequests(next),
-            providerSnapshot: get().providerSnapshot,
-          }),
-        );
+        await withProjectLock(store.projectDir, () => persistSession(store, chatSnapshot()));
       });
     },
 
@@ -1200,8 +1327,13 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
     // model) so the view drops them, and hand the prompt back to the composer.
     // Resets provider continuity so the next message rebuilds from the shortened
     // transcript instead of a stale response chain.
-    restoreTo: async (turnId) => {
-      if (get().streaming || get().closing) return null; // admission fence + no restore mid-stream
+    //
+    // The chat may be an older one, or the project may have been edited since this chat last
+    // touched it: a restore replaces the timeline, so it asks first (`rewind`) rather than
+    // throwing that work away. What was on screen is kept with the chat until its next message,
+    // so Undo restore can bring it back.
+    restoreTo: async (turnId, opts) => {
+      if (get().streaming || get().closing || get().switching) return null; // admission fence + no restore mid-stream
       return trackOp(async () => {
         const { projectId, turns } = get();
         if (!projectId) return null;
@@ -1209,8 +1341,14 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
         if (!ed.store || ed.projectId !== projectId) return null; // no client store -> nothing to restore
         const i = turns.findIndex((t) => t.id === turnId);
         if (i < 0) return null;
+        if (!opts?.confirmed && changedOutsideChat(turns, "restore")) {
+          set({ rewind: { action: "restore", turnId } });
+          return null;
+        }
         const next = turns.map((t, k) => (k >= i ? { ...t, undone: true } : t));
         const cp = turns[i].checkpoint;
+        const before = cp ? (ed.timeline ?? null) : null; // what the restore replaces
+        const hid = turns.filter((t, k) => k >= i && !t.undone).map((t) => t.id);
         if (cp) {
           if (!(await replaceTimeline(ed.store, cp))) return null; // project closed mid-restore: leave chat state untouched
           await ed.reload();
@@ -1218,14 +1356,200 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
         set((s) => ({
           turns: next,
           providerSnapshot: null,
+          // Offered only when it can be undone whole: a timeline to bring back, if one was replaced.
+          restored: hid.length && (!cp || before) ? { turnId, before, hid } : null,
+          rewind: null,
           session: s.session ? { ...s.session, ...undoFlags(next) } : s.session,
         }));
         awareness.reset();
         const store = ed.store;
-        await withProjectLock(store.projectDir, () =>
-          persistSession(store, { requests: buildRequests(next), providerSnapshot: null }),
-        );
+        await withProjectLock(store.projectDir, () => persistSession(store, chatSnapshot()));
         return { text: turns[i].userText, attachments: turns[i].attachments };
+      });
+    },
+
+    undoRestore: async (opts) => {
+      if (get().streaming || get().closing || get().switching) return false;
+      return trackOp(async () => {
+        const { projectId, turns, restored } = get();
+        if (!projectId || !restored) return false;
+        const ed = useEditor.getState();
+        if (!ed.store || ed.projectId !== projectId) return false;
+        if (!opts?.confirmed && changedOutsideChat(turns, "undo_restore")) {
+          set({ rewind: { action: "undo_restore" } });
+          return false;
+        }
+        const hid = new Set(restored.hid);
+        const next = turns.map((t) => (hid.has(t.id) ? { ...t, undone: false } : t));
+        if (restored.before) {
+          if (!(await replaceTimeline(ed.store, restored.before))) return false; // project closed mid-restore
+          await ed.reload();
+        }
+        set((s) => ({
+          turns: next,
+          providerSnapshot: null,
+          restored: null,
+          rewind: null,
+          session: s.session ? { ...s.session, ...undoFlags(next) } : s.session,
+        }));
+        awareness.reset();
+        const store = ed.store;
+        await withProjectLock(store.projectDir, () => persistSession(store, chatSnapshot()));
+        return true;
+      });
+    },
+
+    cancelRewind: () => set({ rewind: null }),
+
+    confirmRewind: async () => {
+      const prompt = get().rewind;
+      if (!prompt) return null;
+      set({ rewind: null });
+      switch (prompt.action) {
+        case "restore":
+          return prompt.turnId ? get().restoreTo(prompt.turnId, { confirmed: true }) : null;
+        case "undo":
+          await get().undo({ confirmed: true });
+          return null;
+        case "redo":
+          await get().redo({ confirmed: true });
+          return null;
+        case "undo_restore":
+          await get().undoRestore({ confirmed: true });
+          return null;
+        default:
+          return null;
+      }
+    },
+
+    // ── Chats of a project ──────────────────────────────────────────────────
+    // One chat is open (internals/transcript.json); the rest are put away, a file each
+    // (transcriptFile.ts). The order is what keeps a conversation from being lost: the chat on
+    // screen reaches disk BEFORE anything replaces it, and a put-away copy goes only AFTER the open
+    // file holds that chat. `switching` holds sends and rewinds off for the moment it takes.
+    newChat: async () => {
+      const { projectId, streaming, pending, closing, switching, turns } = get();
+      if (!projectId || streaming || pending?.length || closing || switching) return false;
+      // An undo, redo, restore or delete is mid-way: it captured this chat's turns when it began and
+      // would write them back after the swap, into the chat that replaced it.
+      if (inflightOps > 0) return false;
+      if (turns.length === 0) return false; // an empty chat is already a new one
+      const ed = useEditor.getState();
+      if (!ed.store || ed.projectId !== projectId) return false;
+      const store = ed.store;
+      const seq = loadSeq;
+      set({ switching: true });
+      return trackOp(async () => {
+        try {
+          if (!(await putAway(store))) {
+            set({ error: PUT_AWAY_FAILED }); // nothing was cleared
+            return false;
+          }
+          // The project moved on (a load) or is closing while it was written: the chat stays as it is.
+          if (loadSeq !== seq || get().closing) return false;
+          supersede();
+          carriedDebt = []; // owed to the provider chain of the chat that was put away
+          awareness.reset();
+          set({
+            transcriptId: crypto.randomUUID(),
+            turns: [],
+            session: localSession([], get().mode),
+            providerSnapshot: null,
+            pending: null,
+            canContinue: false,
+            canRetry: false,
+            error: null,
+            restored: null,
+            rewind: null,
+          });
+          // If this write fails the open file still holds the put-away chat, so nothing is lost.
+          await persistSessionNow(store, chatSnapshot());
+          return true;
+        } catch (e) {
+          captureError(e, { phase: "chat.new" });
+          return false;
+        } finally {
+          set({ switching: false });
+          queueMicrotask(syncJobSink); // a job that landed meanwhile can be delivered now
+        }
+      });
+    },
+
+    listChats: async () => {
+      const { projectId, transcriptId } = get();
+      const ed = useEditor.getState();
+      if (!projectId || !ed.store || ed.projectId !== projectId) return [];
+      return listArchivedSessions(ed.store, transcriptId);
+    },
+
+    openChat: async (id) => {
+      const { projectId, streaming, pending, closing, switching, transcriptId } = get();
+      if (!projectId || streaming || pending?.length || closing || switching) return false;
+      if (inflightOps > 0) return false; // see newChat: an admitted rewind or delete must finish first
+      if (!isChatId(id) || id === transcriptId) return false;
+      const ed = useEditor.getState();
+      if (!ed.store || ed.projectId !== projectId) return false;
+      const store = ed.store;
+      const seq = loadSeq;
+      set({ switching: true });
+      return trackOp(async () => {
+        try {
+          // Read the chat to open FIRST: if it does not read, nothing is touched.
+          const target = await readArchivedSession(store, id);
+          if (!target) {
+            set({ error: OPEN_CHAT_FAILED });
+            return false;
+          }
+          // ...then put the chat on screen away. An empty one is simply dropped.
+          if (get().turns.length > 0 && !(await putAway(store))) {
+            set({ error: PUT_AWAY_FAILED });
+            return false;
+          }
+          if (loadSeq !== seq || get().closing) return false;
+          const turns = mapRequests(target.requests);
+          supersede();
+          carriedDebt = [];
+          awareness.reset();
+          set({
+            transcriptId: id,
+            turns,
+            session: localSession(turns, get().mode, target.session),
+            providerSnapshot: null, // rebuilt from the transcript, like after any restore
+            pending: null,
+            canContinue: false,
+            canRetry: false,
+            error: null,
+            restored: liveRestore(target.restore, turns),
+            rewind: null,
+          });
+          // The put-away copy goes only once the open file holds the chat: a crash between the two
+          // leaves it in both places, never in neither.
+          if (await persistSessionNow(store, chatSnapshot()))
+            await deleteArchivedSession(store, id);
+          return true;
+        } catch (e) {
+          captureError(e, { phase: "chat.open" });
+          return false;
+        } finally {
+          set({ switching: false });
+          queueMicrotask(syncJobSink);
+        }
+      });
+    },
+
+    deleteChat: async (id) => {
+      const { projectId, transcriptId, closing, switching } = get();
+      if (!projectId || closing || switching || !isChatId(id) || id === transcriptId) return false;
+      const ed = useEditor.getState();
+      if (!ed.store || ed.projectId !== projectId) return false;
+      const store = ed.store;
+      return trackOp(async () => {
+        try {
+          return await deleteArchivedSession(store, id);
+        } catch (e) {
+          captureError(e, { phase: "chat.delete" });
+          return false;
+        }
       });
     },
 
@@ -1254,8 +1578,8 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
     },
 
     continueRun: async () => {
-      const { projectId, streaming, closing } = get();
-      if (!projectId || streaming || closing || !currentRunner || !currentExec) return;
+      const { projectId, streaming, closing, switching } = get();
+      if (!projectId || streaming || closing || switching || !currentRunner || !currentExec) return;
       currentExec.telemetry.resumed();
       set((s) => ({
         canContinue: false,
@@ -1266,8 +1590,9 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
     },
 
     retry: async () => {
-      const { projectId, streaming, closing, canRetry } = get();
-      if (!projectId || streaming || closing || !canRetry || !currentRunner || !currentExec) return;
+      const { projectId, streaming, closing, switching, canRetry } = get();
+      if (!projectId || streaming || closing || switching || !canRetry) return;
+      if (!currentRunner || !currentExec) return;
       if (!currentRunner.canRetry) return;
       // A second go at the same turn is its own record: the first ended in its failure.
       const telemetry = new TurnTelemetry(currentExec.telemetry.turnId, turnLabels(projectId));
@@ -1452,6 +1777,7 @@ export async function saveProjectSessionNow(projectId: string): Promise<boolean>
     providerSnapshot: s.providerSnapshot,
     transcriptId: s.transcriptId ?? undefined,
     session: s.session,
+    ...(s.restored ? { restore: s.restored } : {}),
   };
   // Route through the SAME ordered queue as fire-and-forget writes (latest-wins), so a still-pending
   // older snapshot can't clobber this final one; the returned boolean reports real disk durability.

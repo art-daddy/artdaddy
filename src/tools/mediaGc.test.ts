@@ -380,4 +380,168 @@ describe("sweepArtifactCache (close-time derived-artifact GC)", () => {
     expect((await sweep(fs)).removed).toEqual([]);
     expect(await hasCache(fs, "gemini/x.mp4")).toBe(true);
   });
+
+  it("keeps an artifact only a put-away chat's checkpoint references, and drops the rest", async () => {
+    const fs = new MockFs();
+    seed(fs, { catalog: { clips: [] }, timeline: { tracks: [] } });
+    putAway(fs, CHAT_A, {
+      requests: [
+        { checkpoint: { timeline: { tracks: [{ clips: [{ media_ref: "cuts/keepme.mp4" }] }] } } },
+      ],
+    });
+    cache(fs, "cuts/keepme.mp4");
+    cache(fs, "cuts/other.mp4");
+    const { removed } = await sweep(fs);
+    expect(removed).toEqual(["cuts/other.mp4"]);
+    expect(await hasCache(fs, "cuts/keepme.mp4")).toBe(true);
+  });
+});
+
+// Chats a project has put away (store/chatFiles.ts) are opened again later, and then every
+// checkpoint in them is restorable. The cleanup that runs at close has to see them, or a project
+// reopened a week later has chats whose Restore Checkpoint points at media that was deleted.
+const CHAT_A = "11111111-1111-4111-8111-111111111111";
+const CHAT_B = "22222222-2222-4222-8222-222222222222";
+const SESSIONS = "internals/chat/sessions";
+
+function putAway(fs: MockFs, id: string, session: unknown): void {
+  fs.files.set(joinPath(DIR, `${SESSIONS}/${id}.json`), JSON.stringify(session));
+}
+const checkpointOn = (ref: string) => ({
+  requests: [{ id: "t1", checkpoint: { timeline: { tracks: [{ clips: [{ media_ref: ref }] }] } } }],
+});
+
+describe("sweepOwnedMedia with chats put away", () => {
+  const sweep = (fs: MockFs) => sweepOwnedMedia(new ProjectStoreAccess(DIR, fs));
+  const base = (fs: MockFs, libFiles: string[]) =>
+    seed(fs, { catalog: { clips: [] }, timeline: { tracks: [] }, libFiles });
+
+  it("keeps media only a put-away chat's checkpoint can bring back", async () => {
+    const fs = new MockFs();
+    base(fs, ["media_before001.mp4", "media_after0002.mp4", "media_orphan003.mp4"]);
+    putAway(fs, CHAT_A, {
+      requests: [
+        {
+          checkpoint: {
+            timeline: { tracks: [{ clips: [{ media_ref: "library/media_before001.mp4" }] }] },
+            timeline_after: { tracks: [{ clips: [{ media_ref: "library/media_after0002.mp4" }] }] },
+          },
+        },
+      ],
+    });
+    const { removed } = await sweep(fs);
+    expect(removed).toEqual(["media_orphan003.mp4"]); // the checkpoints' media stay, the orphan goes
+    expect(await has(fs, "media_before001.mp4")).toBe(true);
+    expect(await has(fs, "media_after0002.mp4")).toBe(true);
+  });
+
+  it("keeps the frames a put-away chat's history shows", async () => {
+    const fs = new MockFs();
+    base(fs, ["media_orphan004.mp4"]);
+    putAway(fs, CHAT_A, {
+      requests: [
+        { response: [{ kind: "tool_result", frame_refs: [{ path: "media_orphan004" }] }] },
+      ],
+    });
+    expect((await sweep(fs)).removed).toEqual([]);
+  });
+
+  it("keeps media only an Undo restore snapshot can bring back: in a put-away chat and in the open one", async () => {
+    const fs = new MockFs();
+    base(fs, ["media_snapput001.mp4", "media_snapopen02.mp4", "media_orphan005.mp4"]);
+    putAway(fs, CHAT_A, {
+      requests: [],
+      restore: {
+        turnId: "t",
+        hid: ["t"],
+        before: { tracks: [{ clips: [{ media_ref: "media_snapput001" }] }] },
+      },
+    });
+    fs.files.set(
+      joinPath(DIR, "internals/transcript.json"),
+      JSON.stringify({
+        requests: [],
+        restore: {
+          turnId: "t",
+          hid: ["t"],
+          before: { tracks: [{ clips: [{ media_ref: "media_snapopen02" }] }] },
+        },
+      }),
+    );
+    const { removed } = await sweep(fs);
+    expect(removed).toEqual(["media_orphan005.mp4"]);
+  });
+
+  it("still removes a true orphan: chats put away do not make everything immortal", async () => {
+    const fs = new MockFs();
+    base(fs, ["media_pinned0006.mp4", "media_orphan007.mp4"]);
+    putAway(fs, CHAT_A, checkpointOn("media_pinned0006"));
+    putAway(fs, CHAT_B, checkpointOn("media_pinned0006"));
+    expect((await sweep(fs)).removed).toEqual(["media_orphan007.mp4"]);
+  });
+
+  it("a chat's words never pin media: only the clips its checkpoints hold do", async () => {
+    const fs = new MockFs();
+    base(fs, ["media_orphan008.mp4"]);
+    putAway(fs, CHAT_A, {
+      requests: [
+        {
+          id: "t",
+          message: { text: "please keep media_orphan008 safe" },
+          response: [{ kind: "text", text: "media_orphan008" }],
+        },
+      ],
+    });
+    fs.files.set(
+      joinPath(DIR, `${SESSIONS}/${CHAT_A}.meta.json`),
+      JSON.stringify({ title: "media_orphan008", updated_at: "2026-11-10T10:00:00.000Z" }),
+    );
+    expect((await sweep(fs)).removed).toEqual(["media_orphan008.mp4"]);
+  });
+
+  it("FAILS CLOSED on a corrupt put-away chat — keeps all media", async () => {
+    const fs = new MockFs();
+    base(fs, ["media_recover004.mp4"]);
+    fs.files.set(joinPath(DIR, `${SESSIONS}/${CHAT_A}.json`), "{torn");
+    expect((await sweep(fs)).removed).toEqual([]);
+    expect(await has(fs, "media_recover004.mp4")).toBe(true);
+  });
+
+  it("FAILS CLOSED when the chats folder is there but cannot be listed — not 'no chats'", async () => {
+    const fs = new MockFs();
+    base(fs, ["media_recover005.mp4"]);
+    putAway(fs, CHAT_A, checkpointOn("media_recover005"));
+    const list = fs.readDir.bind(fs);
+    fs.readDir = async (p: string) => {
+      if (joinPath(p).endsWith(SESSIONS)) throw new Error("EACCES: permission denied");
+      return list(p);
+    };
+    const exists = fs.exists.bind(fs);
+    fs.exists = async (p: string) => joinPath(p).endsWith(SESSIONS) || exists(p); // a folder exists
+    expect((await sweep(fs)).removed).toEqual([]);
+    expect(await has(fs, "media_recover005.mp4")).toBe(true);
+  });
+
+  it("proceeds when there is no chats folder at all, even if listing it throws (absent is not unreadable)", async () => {
+    const fs = new MockFs();
+    base(fs, ["media_orphan009.mp4"]);
+    const list = fs.readDir.bind(fs);
+    fs.readDir = async (p: string) => {
+      if (joinPath(p).endsWith(SESSIONS)) throw new Error("ENOENT");
+      return list(p);
+    };
+    expect((await sweep(fs)).removed).toEqual(["media_orphan009.mp4"]);
+  });
+
+  it("is not stopped by what is only kept aside: a corrupt copy, a temp, a summary", async () => {
+    const fs = new MockFs();
+    base(fs, ["media_orphan010.mp4"]);
+    for (const stray of [
+      `${CHAT_A}.json.corrupt-1700000000000`,
+      `${CHAT_A}.tmp-ab12cd.json`,
+      `${CHAT_A}.meta.json`,
+    ])
+      fs.files.set(joinPath(DIR, `${SESSIONS}/${stray}`), "{not json at all");
+    expect((await sweep(fs)).removed).toEqual(["media_orphan010.mp4"]);
+  });
 });
