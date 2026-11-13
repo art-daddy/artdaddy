@@ -62,19 +62,26 @@ export async function confirmDestructive(
   return w.confirm(message);
 }
 
-let canvasChangeForTests: ((message: string) => Promise<boolean>) | null = null;
+let canvasChangeForTests: ((message: string, title: string) => Promise<boolean>) | null = null;
 
 export function __setCanvasChangeConfirmationForTests(handler: typeof canvasChangeForTests): void {
   canvasChangeForTests = handler;
 }
 
-/** The question a clip that does not fit the project's canvas puts to the person (timeline/canvasAuto.ts).
- *  True: change the project to match the clip. False: keep it as it is, which is also the answer when no
+/** The dialog's title: a question about a video clip, or about pictures (timeline/canvasAuto.ts). */
+const CANVAS_TITLES = { clip: "Clip and project differ", pictures: "Pictures and project differ" };
+
+/** The question a clip, or a batch of pictures, that does not fit the project's canvas puts to the person (timeline/canvasAuto.ts).
+ *  True: change the project to match. False: keep it as it is, which is also the answer when no
  *  dialog could be shown: a question that cannot be asked never changes the canvas. */
-export async function confirmCanvasChange(message: string): Promise<boolean> {
+export async function confirmCanvasChange(
+  message: string,
+  about?: { subject?: "pictures" },
+): Promise<boolean> {
+  const title = about?.subject === "pictures" ? CANVAS_TITLES.pictures : CANVAS_TITLES.clip;
   if (canvasChangeForTests) {
     try {
-      return (await canvasChangeForTests(message)) === true;
+      return (await canvasChangeForTests(message, title)) === true;
     } catch {
       return false;
     }
@@ -86,7 +93,7 @@ export async function confirmCanvasChange(message: string): Promise<boolean> {
       const { confirm } = await import("@tauri-apps/plugin-dialog");
       return (
         (await confirm(message, {
-          title: "Clip and project differ",
+          title,
           kind: "info",
           okLabel: "Change to Match",
           cancelLabel: "Keep Current",

@@ -149,11 +149,31 @@ describe("canvas-change confirmation", () => {
     expect(await ask("Match?")).toBe(false);
   });
 
+  it("asks about pictures under their own title, with the same two buttons (UJ-087)", async () => {
+    asTauri(true);
+    dialogConfirm.mockResolvedValueOnce(true);
+    const { confirmCanvasChange } = await import("./confirm");
+    expect(await confirmCanvasChange("Match them?", { subject: "pictures" })).toBe(true);
+    expect(dialogConfirm).toHaveBeenLastCalledWith("Match them?", {
+      title: "Pictures and project differ",
+      kind: "info",
+      okLabel: "Change to Match",
+      cancelLabel: "Keep Current",
+    });
+    // a video clip's question keeps its own title, also when the second argument is the canvas difference prepareCanvas hands every caller
+    dialogConfirm.mockResolvedValueOnce(false);
+    await confirmCanvasChange("Match?", { width: 1920, height: 1080 } as { subject?: "pictures" });
+    expect(dialogConfirm).toHaveBeenLastCalledWith(
+      "Match?",
+      expect.objectContaining({ title: "Clip and project differ" }),
+    );
+  });
+
   it("goes through the test hook when one is set, and a hook that throws changes nothing", async () => {
     const hook = vi.fn(async () => true);
     __setCanvasChangeConfirmationForTests(hook);
     expect(await ask("Match?")).toBe(true);
-    expect(hook).toHaveBeenCalledWith("Match?");
+    expect(hook).toHaveBeenCalledWith("Match?", "Clip and project differ");
     expect(dialogConfirm).not.toHaveBeenCalled();
     __setCanvasChangeConfirmationForTests(async () => {
       throw new Error("no dialog");
