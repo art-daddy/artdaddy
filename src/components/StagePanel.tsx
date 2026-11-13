@@ -15,6 +15,7 @@ import { useProjects } from "../store/projects";
 import { totalFrames } from "../timeline/geometry";
 import type { Timeline as SceneTimeline } from "../timeline/model";
 import { AudioMeter } from "./AudioMeter";
+import PreparingPill from "./PreparingPill";
 import PreviewCanvas from "./PreviewCanvas";
 import PreviewTabs from "./PreviewTabs";
 import SourceMonitor from "./SourceMonitor";
@@ -291,11 +292,11 @@ export default function StagePanel({ projectId }: { projectId: string }) {
 
       {/* Preview: the rendered video (scrubbed by the timeline) or the WebGL composite. */}
       <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-black p-2">
-        {importing && (
-          <div className="pointer-events-none absolute right-3 top-3 z-10 rounded-md bg-black/70 px-3 py-1.5 text-xs text-neutral-200 ring-1 ring-white/10">
-            Processing imported media…
-          </div>
-        )}
+        <PreparingPill
+          importing={importing}
+          timeline={timeline}
+          frame={Math.floor(playhead * fps)}
+        />
         {showRendered ? (
           <video
             key={String(finalMp4)}

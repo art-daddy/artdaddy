@@ -82,20 +82,21 @@ export const useProxyJobs = create<ProxyJobsState>((set) => ({
     }),
 }));
 
-/** The row for a library path (a tile knows its own path, never the key). */
-export function jobFor(jobs: readonly ProxyJob[], source: string): ProxyJob | null {
-  const key = proxyKey(source);
-  return jobs.find((j) => j.key === key) ?? null;
+/** The row for what a library tile is called: its path (a file under library/) or its media id (a file referenced in place has no path of its own in the tree). */
+export function jobFor(jobs: readonly ProxyJob[], pathOrId: string): ProxyJob | null {
+  const key = proxyKey(pathOrId);
+  return jobs.find((j) => j.key === key || j.refs.includes(pathOrId)) ?? null;
 }
 
-/** The copy the stage's pill names, and how many are being made: the one that belongs to a clip under the playhead, else the one that began first. */
+/** The copy the stage's pill names, where it stands among those being made, and how many there are: the one that belongs to a clip under the playhead, else the one that began first. */
 export function pillJob(
   jobs: readonly ProxyJob[],
   refsUnderPlayhead: readonly string[],
-): { job: ProxyJob; count: number } | null {
+): { job: ProxyJob; count: number; index: number } | null {
   if (jobs.length === 0) return null;
   const mine = jobs.find((j) => j.refs.some((r) => refsUnderPlayhead.includes(r)));
-  return { job: mine ?? jobs[0], count: jobs.length };
+  const job = mine ?? jobs[0];
+  return { job, count: jobs.length, index: jobs.indexOf(job) + 1 };
 }
 
 /** "42%", or "" before the first report. */

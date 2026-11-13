@@ -19,6 +19,7 @@ import { useProjectNotice } from "../store/projectNotice";
 import { useRecordPanel } from "../store/recordPanel";
 import { useChat } from "../store/chat";
 import { useEditor } from "../store/editor";
+import { jobFor, percentWords, useProxyJobs } from "../store/proxyJobs";
 import { buildMediaMention } from "../timeline/mentions";
 import type { Clip } from "../timeline/model";
 import type { ProjectStoreAccess } from "../tools/store";
@@ -472,6 +473,8 @@ function LibraryTile({
   const selected = useEditor((s) => s.activeMediaTab);
   const isSel = selected === node.path;
   const kind = tileKind(node.name);
+  // A copy being built for this file (UJ-091): the same percent the stage shows. A tile that is offline has nothing to prepare.
+  const preparing = useProxyJobs((s) => jobFor(s.jobs, node.path));
   return (
     <button
       onPointerDown={(e) => dragToTimeline(e, node)}
@@ -497,6 +500,31 @@ function LibraryTile({
           <span className="absolute inset-x-0 bottom-0 bg-red-900/80 px-1 py-0.5 text-center text-[9px] font-medium text-red-100">
             Media Offline
           </span>
+        )}
+        {preparing && !node.offline && (
+          <div
+            data-testid="tile-preparing"
+            className="pointer-events-none absolute inset-x-0 bottom-0 bg-black/75 px-1 py-0.5 text-[9px] font-medium leading-tight text-neutral-100"
+          >
+            <div className="truncate">
+              Preparing preview
+              {preparing.fraction !== null ? ` · ${percentWords(preparing.fraction)}` : ""}
+            </div>
+            <div className="mt-0.5 h-0.5 overflow-hidden rounded bg-neutral-700">
+              <div
+                className={
+                  preparing.fraction === null
+                    ? "h-full w-1/3 animate-pulse rounded bg-accent"
+                    : "h-full rounded bg-accent"
+                }
+                style={
+                  preparing.fraction === null
+                    ? undefined
+                    : { width: percentWords(preparing.fraction) }
+                }
+              />
+            </div>
+          </div>
         )}
       </div>
       <span

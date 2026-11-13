@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { mockAddMention } = vi.hoisted(() => ({ mockAddMention: vi.fn() }));
@@ -28,6 +28,7 @@ import { listProjectFiles } from "../lib/files";
 import { relinkMedia } from "../lib/mediaLink";
 import { importPaths, uploadFiles } from "../lib/upload";
 import { useEditor } from "../store/editor";
+import { useProxyJobs } from "../store/proxyJobs";
 import { useCompatibility } from "../update/compatibility";
 import { open } from "@tauri-apps/plugin-dialog";
 import FileTree from "./FileTree";
@@ -71,6 +72,70 @@ describe("FileTree", () => {
     expect(await screen.findByText("clip.mp4")).toBeInTheDocument();
     expect(screen.queryByText("library")).not.toBeInTheDocument(); // folders hidden in the grid
     expect(screen.queryByText("timeline.json")).not.toBeInTheDocument();
+  });
+
+  // UJ-091: the library tile says what is being made for it, with the same percent the stage shows.
+  describe("a preview copy being built shows on the tile of its file (UJ-091)", () => {
+    beforeEach(() => useProxyJobs.setState({ jobs: [] }));
+
+    it("shows 'Preparing preview' and the percent on that tile only, and clears it when the copy is done", async () => {
+      getFiles.mockResolvedValue([
+        {
+          name: "library",
+          path: "library",
+          type: "dir",
+          children: [
+            { name: "clip.mp4", path: "library/clip.mp4", type: "file" },
+            { name: "other.mp4", path: "library/other.mp4", type: "file" },
+          ],
+        },
+      ]);
+      render(<FileTree projectId="p1" />);
+      await screen.findByText("clip.mp4");
+      expect(screen.queryByTestId("tile-preparing")).not.toBeInTheDocument();
+      act(() => {
+        useProxyJobs.getState().begin("library/clip.mp4", "clip.mp4", [], 0);
+        useProxyJobs
+          .getState()
+          .progress("library/clip.mp4", { outMs: 42_000, totalMs: 100_000, speed: 2 }, 1_000);
+      });
+      const tiles = screen.getAllByTestId("tile-preparing");
+      expect(tiles).toHaveLength(1);
+      expect(tiles[0]).toHaveTextContent("Preparing preview · 42%");
+      expect(within(screen.getByTitle("clip.mp4")).getByTestId("tile-preparing")).toBe(tiles[0]);
+      expect(within(screen.getByTitle("other.mp4")).queryByTestId("tile-preparing")).toBeNull();
+      act(() => useProxyJobs.getState().finish("library/clip.mp4"));
+      expect(screen.queryByTestId("tile-preparing")).not.toBeInTheDocument();
+    });
+
+    it("finds the tile of a file referenced in place, which the tree names by its media id", async () => {
+      getFiles.mockResolvedValue([
+        { name: "holiday.mp4", path: "media_abc", type: "file", offline: false },
+      ]);
+      render(<FileTree projectId="p1" />);
+      await screen.findByText("holiday.mp4");
+      // the copy is keyed by the file's own (external) path and knows the id that names it
+      act(() =>
+        useProxyJobs.getState().begin("D:/footage/holiday.mp4", "holiday.mp4", ["media_abc"], 0),
+      );
+      expect(screen.getByTestId("tile-preparing")).toHaveTextContent("Preparing preview");
+    });
+
+    it("says no percent before the copy has reported, and nothing at all on an offline tile", async () => {
+      getFiles.mockResolvedValue([
+        { name: "gone.mp4", path: "media_gone", type: "file", offline: true },
+        { name: "here.mp4", path: "media_here", type: "file", offline: false },
+      ]);
+      render(<FileTree projectId="p1" />);
+      await screen.findByText("here.mp4");
+      act(() => {
+        useProxyJobs.getState().begin("D:/x/gone.mp4", "gone.mp4", ["media_gone"], 0);
+        useProxyJobs.getState().begin("D:/x/here.mp4", "here.mp4", ["media_here"], 0);
+      });
+      const tiles = screen.getAllByTestId("tile-preparing");
+      expect(tiles).toHaveLength(1);
+      expect(tiles[0].textContent).toBe("Preparing preview");
+    });
   });
 
   // A failed read used to render as an EMPTY library, which is indistinguishable from a project
