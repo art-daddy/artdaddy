@@ -29,7 +29,15 @@ import {
   startMcpServer,
   stopMcpServer,
 } from "../mcp/service";
-import { agoLabel, isActive, programTitle, useMcpConnections } from "../mcp/connections";
+import {
+  agoLabel,
+  isActive,
+  programState,
+  programTitle,
+  useMcpConnections,
+  type ConnectedProgram,
+} from "../mcp/connections";
+import { setupHint, useMcpSetups } from "../mcp/setups";
 import { useMcpPanel } from "../store/mcpPanel";
 import { Button, cn } from "./ui";
 import { useNow } from "./useNow";
@@ -94,6 +102,18 @@ ArtDaddy must be running for Claude to reach it.`,
     code: claudeCodeCommand(),
   },
   { label: "Codex", client: "codex", code: `codex mcp add ${server} --url ${endpoint}` },
+  // Copy only: Antigravity has no URL handler to install from. The file, the key (`url`; `serverUrl` is the old spelling) and the transport (Streamable HTTP, which is
+  // what this server speaks) are what its own installed documentation says; not yet seen running.
+  {
+    label: "Antigravity",
+    client: "antigravity",
+    note: "or add to ~/.gemini/config/mcp_config.json, then restart Antigravity",
+    code: `{
+  "mcpServers": {
+    "${server}": { "url": "${endpoint}" }
+  }
+}`,
+  },
 ];
 
 function Snippet({ label, client, code, note, install, installer }: Client) {
@@ -101,6 +121,13 @@ function Snippet({ label, client, code, note, install, installer }: Client) {
   const [failure, setFailure] = useState("");
   const [hint, setHint] = useState("");
   const [done, setDone] = useState(false);
+  const writtenAt = useMcpSetups((s) => s.written[client]);
+  const wrote = useMcpSetups((s) => s.wrote);
+  const programs = useMcpConnections((s) => s.programs);
+  const running = useMcpPanel((s) => s.running);
+  const now = useNow(10_000, running && writtenAt !== undefined);
+  // A setup that was written and has produced nothing: said under that app's entry only, never on the chip.
+  const nudge = setupHint(client, writtenAt, programs, now, running);
 
   const run = async (): Promise<InstallOutcome> =>
     installer ? await installer() : await openInstallLink(install!());
@@ -120,6 +147,7 @@ function Snippet({ label, client, code, note, install, installer }: Client) {
                 void run().then((r) => {
                   if (r.ok) {
                     setDone(true);
+                    wrote(client);
                     reportMcpEvent("mcp_config_written", { client, reason: "install" });
                     // An instruction must not vanish on a timer the way a tick can: this is the
                     // step the user still has to perform, not a confirmation that it is done.
@@ -136,6 +164,7 @@ function Snippet({ label, client, code, note, install, installer }: Client) {
             onClick={() => {
               void navigator.clipboard?.writeText(code).then(() => {
                 setCopied(true);
+                wrote(client);
                 reportMcpEvent("mcp_config_written", { client, reason: "copy" });
                 setTimeout(() => setCopied(false), 1200);
               });
@@ -148,6 +177,11 @@ function Snippet({ label, client, code, note, install, installer }: Client) {
       </div>
       {failure && <p className="text-[11px] text-amber-400">{failure}</p>}
       {hint && <p className="text-[11px] text-emerald-400">{hint}</p>}
+      {nudge && (
+        <p className="text-[11px] text-amber-400">
+          Set up {nudge.ago}, and nothing from {label} has connected yet. Next: {nudge.next}
+        </p>
+      )}
       {note && <p className="text-[11px] text-neutral-500">{note}</p>}
       <pre className="mt-1 overflow-x-auto rounded border border-edge bg-black/40 p-2 text-[11px] leading-relaxed text-neutral-300">
         {code}
@@ -156,8 +190,25 @@ function Snippet({ label, client, code, note, install, installer }: Client) {
   );
 }
 
-/** Who has asked for something since the server came up, so a person who just added it to an agent can see that it worked.
- *  Over HTTP there is no connection to show, only requests, so each line says when its program last made one. */
+/** How long a program may hold the tool list without using a tool before the panel says so. */
+const LISTED_WARNING_AFTER_MS = 3 * 60_000;
+
+/** What a program has been SEEN to do, in words: it said hello, it was given the tool list, it used a tool. */
+function programDetail(p: ConnectedProgram, now: number): string {
+  switch (programState(p)) {
+    case "used":
+      return `last tool call ${agoLabel(now - (p.lastCallAt ?? p.lastActiveAt))} · ${p.calls} ${p.calls === 1 ? "call" : "calls"}`;
+    case "listed":
+      return "has the tool list · no tool used yet";
+    default:
+      return p.requests > 0
+        ? `connected ${agoLabel(now - p.connectedAt)} · asked for tools, but has not been given the tool list`
+        : `connected ${agoLabel(now - p.connectedAt)} · has not asked for tools yet`;
+  }
+}
+
+/** Who has connected since the server came up, and how far each got, so a person who just added it to an agent can see whether it worked.
+ *  Over HTTP there is no connection to show, only requests: a line says what the program was seen to do, never more. */
 function ConnectedPrograms() {
   const programs = useMcpConnections((s) => s.programs);
   const now = useNow(5_000, programs.length > 0);
@@ -171,24 +222,40 @@ function ConnectedPrograms() {
   }
   return (
     <ul className="mt-2 space-y-1" aria-label="Agents that have connected">
-      {programs.map((p) => (
-        <li key={p.key} className="flex items-center gap-1.5 text-[11px] text-neutral-300">
-          <span
-            className={cn(
-              "h-1.5 w-1.5 shrink-0 rounded-full",
-              isActive(p, now) ? "bg-emerald-400" : "bg-neutral-600",
+      {programs.map((p) => {
+        const state = programState(p);
+        const stuck =
+          state === "listed" && p.listedAt !== null && now - p.listedAt >= LISTED_WARNING_AFTER_MS;
+        return (
+          <li key={p.key} className="text-[11px] text-neutral-300">
+            <div className="flex items-center gap-1.5">
+              <span
+                className={cn(
+                  "h-1.5 w-1.5 shrink-0 rounded-full",
+                  !isActive(p, now)
+                    ? "bg-neutral-600"
+                    : state === "used"
+                      ? "bg-emerald-400"
+                      : state === "listed"
+                        ? "bg-amber-400"
+                        : "border border-neutral-500",
+                )}
+              />
+              <span className="min-w-0 truncate">
+                {programTitle(p)}
+                {p.version ? ` ${p.version}` : ""}
+              </span>
+              <span className="shrink-0 text-neutral-500">· {programDetail(p, now)}</span>
+            </div>
+            {stuck && (
+              <p className="mt-0.5 pl-3 text-amber-400">
+                {programTitle(p)} has had the tool list for 3 minutes and has not used a tool. If it
+                shows an error or no tools, check its MCP log, then restart it.
+              </p>
             )}
-          />
-          <span className="min-w-0 truncate">
-            {programTitle(p)}
-            {p.version ? ` ${p.version}` : ""}
-          </span>
-          <span className="shrink-0 text-neutral-500">
-            · last active {agoLabel(now - p.lastActiveAt)} · {p.requests}{" "}
-            {p.requests === 1 ? "request" : "requests"}
-          </span>
-        </li>
-      ))}
+          </li>
+        );
+      })}
     </ul>
   );
 }
@@ -245,7 +312,13 @@ export default function McpPanel() {
 
       <div className="mt-3 flex items-center justify-between rounded border border-edge px-3 py-2">
         <div>
-          <div className="text-xs font-medium text-neutral-200">MCP server</div>
+          <div className="text-xs font-medium text-neutral-200">
+            {running
+              ? "MCP server is on"
+              : waiting
+                ? "MCP server is starting"
+                : "MCP server is off"}
+          </div>
           <div className="text-[11px] text-neutral-500">
             {running ? (
               <>
@@ -254,17 +327,35 @@ export default function McpPanel() {
             ) : waiting ? (
               "Starting…"
             ) : (
-              "Stopped"
+              "Agents cannot connect until you turn it on."
             )}
           </div>
         </div>
-        <Button
-          variant={running ? "primary" : "ghost"}
+        {/* The state is in the words above and the action is named here: a button that only said "On" turned the server OFF on the first press (the server starts on). */}
+        <button
+          type="button"
+          role="switch"
+          aria-checked={running}
+          aria-label="MCP server"
           onClick={() => void toggle()}
           disabled={waiting}
+          className="flex shrink-0 items-center gap-2 text-[11px] text-neutral-300 hover:text-neutral-100 disabled:opacity-50"
         >
-          {running ? "On" : "Off"}
-        </Button>
+          <span
+            className={cn(
+              "relative h-4 w-7 rounded-full transition-colors",
+              running ? "bg-brand" : "bg-neutral-700",
+            )}
+          >
+            <span
+              className={cn(
+                "absolute top-0.5 h-3 w-3 rounded-full bg-white transition-all",
+                running ? "left-3.5" : "left-0.5",
+              )}
+            />
+          </span>
+          <span>{running ? "Turn off" : "Turn on"}</span>
+        </button>
       </div>
 
       <p

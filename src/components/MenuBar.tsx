@@ -659,7 +659,10 @@ export default function MenuBar() {
       {dialog === "about" && <AboutDialog onClose={() => setDialog(null)} />}
       {mcpOpen && (
         <Overlay title="Connect an AI agent" onClose={closeMcp}>
-          <McpPanel />
+          {/* Taller than the window once a program is listed: the body scrolls, so the title, the switch's row and Close stay reachable. */}
+          <div className="max-h-[calc(100vh-11rem)] overflow-y-auto pr-1">
+            <McpPanel />
+          </div>
           <div className="mt-4 flex justify-end">
             <Button variant="primary" onClick={() => setDialog(null)}>
               Close

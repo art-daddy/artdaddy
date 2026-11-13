@@ -13,8 +13,12 @@ import {
   MAX_CONNECTED_PROGRAMS,
   agoLabel,
   isActive,
+  leadProgram,
+  programState,
   programTitle,
   useMcpConnections,
+  type ConnectedProgram,
+  type ProgramState,
 } from "./connections";
 
 const claude = { name: "claude-code", version: "2.1.4" };
@@ -45,6 +49,10 @@ describe("who is listed", () => {
         connectedAt: 1_000,
         lastActiveAt: 5_000,
         requests: 2, // connecting is not a request
+        lists: 0, // asking is not being answered
+        listedAt: null,
+        calls: 0,
+        lastCallAt: null,
       },
     ]);
   });
@@ -152,6 +160,134 @@ describe("who is listed", () => {
     expect(p.name).toMatch(/^[A-Za-z0-9_.:-]+$/);
     expect(p.name.length).toBeLessThanOrEqual(MCP_CLIENT_NAME_MAX);
     expect(p.version).toMatch(/^[A-Za-z0-9_.:-]*$/);
+  });
+});
+
+// UJ-085: "connected" is not "working". Antigravity connected eleven times, was handed the tool list and never called a tool, and the
+// app said "Connected" and "can edit this project" throughout. A state word comes from what the program was ANSWERED with, and from
+// nothing else, in one place.
+describe("what a program has been seen to do (UJ-085)", () => {
+  const state = (): ProgramState => programState(listed()[0]);
+
+  it("is 'connected' while it has only said hello or asked, and 'listed' once it was given a tool list that carried tools", () => {
+    const { connected, asked, answered } = useMcpConnections.getState();
+    connected(claude, 1_000);
+    expect(state()).toBe("connected");
+    asked(claude, 2_000);
+    expect(state()).toBe("connected"); // asking, even many times, is not being answered
+    answered(claude, "list", 3_000);
+    expect(state()).toBe("listed");
+    expect(listed()[0]).toMatchObject({ lists: 1, listedAt: 3_000, calls: 0, lastCallAt: null });
+  });
+
+  it("is 'used' after a tool call, remembers the first list and the LAST call, and does not go back", () => {
+    const { asked, answered } = useMcpConnections.getState();
+    asked(claude, 1_000);
+    answered(claude, "list", 1_500);
+    answered(claude, "list", 1_800);
+    answered(claude, "call", 2_000);
+    answered(claude, "call", 9_000);
+    answered(claude, "list", 9_500);
+    expect(state()).toBe("used");
+    expect(listed()[0]).toMatchObject({ lists: 3, listedAt: 1_500, calls: 2, lastCallAt: 9_000 });
+  });
+
+  it("can be used without ever having been listed (a program that remembers the tool names)", () => {
+    const { asked, answered } = useMcpConnections.getState();
+    asked(claude, 1_000);
+    answered(claude, "call", 2_000);
+    expect(state()).toBe("used");
+    expect(listed()[0].lists).toBe(0);
+  });
+
+  it("keeps two programs apart: one that listed and one that used", () => {
+    const { asked, answered } = useMcpConnections.getState();
+    asked(cursor, 1_000);
+    asked(claude, 2_000);
+    answered(cursor, "list", 3_000);
+    answered(claude, "call", 4_000);
+    const byName = Object.fromEntries(listed().map((p) => [p.name, programState(p)]));
+    expect(byName).toEqual({ "cursor-vscode": "listed", "claude-code": "used" });
+  });
+
+  it("does not list a program because it was answered: an answer for a program that is not listed is dropped", () => {
+    useMcpConnections.getState().answered(claude, "call", 1_000);
+    useMcpConnections.getState().answered(undefined, "list", 1_000);
+    expect(listed()).toEqual([]);
+  });
+
+  const rank: Record<ProgramState, number> = { connected: 0, listed: 1, used: 2 };
+  const events = fc.array(
+    fc.record({
+      name: fc.constantFrom("a", "b", "c"),
+      kind: fc.constantFrom("connect", "ask", "list", "call"),
+    }),
+    { maxLength: 70 },
+  );
+  const replay = (list: Array<{ name: string; kind: string }>) => {
+    useMcpConnections.getState().clear();
+    list.forEach((e, i) => {
+      const info = { name: e.name, version: "1" };
+      const s = useMcpConnections.getState();
+      if (e.kind === "connect") s.connected(info, 100 + i);
+      else if (e.kind === "ask") s.asked(info, 100 + i);
+      else s.answered(info, e.kind as "list" | "call", 100 + i);
+    });
+  };
+
+  it("property: a program's state never goes back, and the counts are exactly what it was answered with", () => {
+    fc.assert(
+      fc.property(events, (list) => {
+        useMcpConnections.getState().clear();
+        const seen = new Map<string, number>();
+        const listedAnswers = new Map<string, number>();
+        const calledAnswers = new Map<string, number>();
+        list.forEach((e, i) => {
+          const info = { name: e.name, version: "1" };
+          const s = useMcpConnections.getState();
+          const present = listed().some((p) => p.name === e.name);
+          if (e.kind === "connect") s.connected(info, 100 + i);
+          else if (e.kind === "ask") s.asked(info, 100 + i);
+          else {
+            s.answered(info, e.kind as "list" | "call", 100 + i);
+            const book = e.kind === "list" ? listedAnswers : calledAnswers;
+            if (present) book.set(e.name, (book.get(e.name) ?? 0) + 1);
+          }
+          for (const p of listed()) {
+            const r = rank[programState(p)];
+            expect(r).toBeGreaterThanOrEqual(seen.get(p.name) ?? 0);
+            seen.set(p.name, r);
+          }
+        });
+        for (const p of listed()) {
+          expect(p.lists).toBe(listedAnswers.get(p.name) ?? 0);
+          expect(p.calls).toBe(calledAnswers.get(p.name) ?? 0);
+          expect(programState(p)).toBe(p.calls > 0 ? "used" : p.lists > 0 ? "listed" : "connected");
+        }
+      }),
+    );
+  });
+
+  it("property: the lead is a listed program that got as far as any, and among those the one heard from last", () => {
+    expect(leadProgram([])).toBeUndefined();
+    fc.assert(
+      fc.property(events, (list) => {
+        replay(list);
+        const programs = listed();
+        const lead = leadProgram(programs);
+        if (programs.length === 0) {
+          expect(lead).toBeUndefined();
+          return;
+        }
+        expect(programs).toContain(lead);
+        const best = Math.max(...programs.map((p) => rank[programState(p)]));
+        expect(rank[programState(lead as ConnectedProgram)]).toBe(best);
+        const among = programs.filter((p) => rank[programState(p)] === best);
+        expect((lead as ConnectedProgram).lastActiveAt).toBe(
+          Math.max(...among.map((p) => p.lastActiveAt)),
+        );
+      }),
+    );
   });
 });
 

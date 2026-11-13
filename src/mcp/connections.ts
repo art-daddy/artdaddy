@@ -31,8 +31,15 @@ export interface ConnectedProgram {
   version: string;
   connectedAt: number;
   lastActiveAt: number;
-  /** The tool lists and tool calls it has asked for. */
+  /** Everything it has asked for, answered or refused. */
   requests: number;
+  /** The replies to its `tools/list` that really carried tools (a refusal is a text error with none). */
+  lists: number;
+  /** When the first such reply went out. */
+  listedAt: number | null;
+  /** The tool calls that got past the door and reached a tool (the tool itself may still have failed). */
+  calls: number;
+  lastCallAt: number | null;
 }
 
 const keyOf = (facts: McpClientFacts): string =>
@@ -58,8 +65,32 @@ function heardFrom(
         connectedAt: now,
         lastActiveAt: now,
         requests: asked ? 1 : 0,
+        lists: 0,
+        listedAt: null,
+        calls: 0,
+        lastCallAt: null,
       };
   return [program, ...programs.filter((p) => p.key !== key)].slice(0, MAX_CONNECTED_PROGRAMS);
+}
+
+/** What a program was ANSWERED with: a tool list that carried tools, or a tool call that got past the door. */
+export type McpAnswer = "list" | "call";
+
+/** The list after a program was answered. A program that is not listed (it fell off the cap meanwhile) is not brought back by an answer. */
+function answeredTo(
+  programs: readonly ConnectedProgram[],
+  info: unknown,
+  answer: McpAnswer,
+  now: number,
+): ConnectedProgram[] {
+  const key = keyOf(mcpClientFacts(info));
+  return programs.map((p) =>
+    p.key !== key
+      ? p
+      : answer === "list"
+        ? { ...p, lists: p.lists + 1, listedAt: p.listedAt ?? now }
+        : { ...p, calls: p.calls + 1, lastCallAt: now },
+  );
 }
 
 interface ConnectionsState {
@@ -68,6 +99,8 @@ interface ConnectionsState {
   connected: (info: unknown, now?: number) => void;
   /** A program asked for something; the announcement rides along on each request. */
   asked: (info: unknown, now?: number) => void;
+  /** A program was answered: it got a tool list with tools in it, or a tool call reached a tool. */
+  answered: (info: unknown, answer: McpAnswer, now?: number) => void;
   /** The server was switched off: nobody is connected to it any more. */
   clear: () => void;
 }
@@ -78,8 +111,31 @@ export const useMcpConnections = create<ConnectionsState>((set) => ({
     set((s) => ({ programs: heardFrom(s.programs, info, now, false) })),
   asked: (info, now = Date.now()) =>
     set((s) => ({ programs: heardFrom(s.programs, info, now, true) })),
+  answered: (info, answer, now = Date.now()) =>
+    set((s) => ({ programs: answeredTo(s.programs, info, answer, now) })),
   clear: () => set({ programs: [] }),
 }));
+
+/** What a program has been seen to do, and nothing more: it said hello, it was given the tool list, it used a tool. The one place a state word comes from. */
+export type ProgramState = "connected" | "listed" | "used";
+
+export const programState = (p: Pick<ConnectedProgram, "lists" | "calls">): ProgramState =>
+  p.calls > 0 ? "used" : p.lists > 0 ? "listed" : "connected";
+
+const STATE_RANK: Record<ProgramState, number> = { connected: 0, listed: 1, used: 2 };
+
+/** The program a one-line summary speaks about: the one that got furthest, and among equals the one heard from last. */
+export function leadProgram<P extends ConnectedProgram>(programs: readonly P[]): P | undefined {
+  let lead: P | undefined;
+  for (const p of programs) {
+    if (!lead) lead = p;
+    else {
+      const [a, b] = [STATE_RANK[programState(p)], STATE_RANK[programState(lead)]];
+      if (a > b || (a === b && p.lastActiveAt > lead.lastActiveAt)) lead = p;
+    }
+  }
+  return lead;
+}
 
 /** What the panel calls a program: its own name when it has no label of its own. */
 export function programTitle(program: Pick<ConnectedProgram, "client" | "name">): string {

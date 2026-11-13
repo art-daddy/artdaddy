@@ -1,7 +1,14 @@
 // The chat's way into the MCP panel, and the one place that shows at a glance whether an outside agent is working here.
 import { useEffect } from "react";
 
-import { agoLabel, isActive, programTitle, useMcpConnections } from "../mcp/connections";
+import {
+  agoLabel,
+  isActive,
+  leadProgram,
+  programState,
+  programTitle,
+  useMcpConnections,
+} from "../mcp/connections";
 import { useMcpPanel } from "../store/mcpPanel";
 import { cn } from "./ui";
 import { useNow } from "./useNow";
@@ -10,8 +17,10 @@ import { useNow } from "./useNow";
  *  model controls, where someone wondering whether another agent can drive this is already
  *  looking, and named for what it DOES — "MCP" alone means nothing to most people. The dot also
  *  gives the server's state a permanent home — previously the only way to tell it was running
- *  was to reopen the dialog. Once a program has asked for something lately it says which one, so
- *  a person who just pasted the setup into Claude Code sees that it worked. */
+ *  was to reopen the dialog. It says what the program has been SEEN to do and no more: "Connected" and
+ *  "can edit this project" only after a tool call, because an agent can connect eleven times, be handed
+ *  the tool list and never call a tool, and a chip that said "Connected" then sent the person to look for
+ *  the fault in the wrong place. */
 export default function McpChip() {
   const running = useMcpPanel((s) => s.running);
   const openPanel = useMcpPanel((s) => s.openPanel);
@@ -24,15 +33,26 @@ export default function McpChip() {
   }, [refresh]);
 
   const lately = running ? programs.filter((p) => isActive(p, now)) : [];
-  const lead = lately[0];
-  const label = lead
-    ? `Connected: ${programTitle(lead)}${lately.length > 1 ? ` +${lately.length - 1}` : ""}`
-    : "Connect your own agent/MCP";
+  const lead = leadProgram(lately);
+  const state = lead ? programState(lead) : null;
+  const name = lead ? programTitle(lead) : "";
+  const more = lately.length > 1 ? ` +${lately.length - 1}` : "";
+  const label = !lead
+    ? "Connect your own agent/MCP"
+    : state === "used"
+      ? `Connected: ${name}${more}`
+      : `${name}: ${state === "listed" ? "no tool used yet" : "connected"}${more}`;
   const title = !running
     ? "Let Claude, Cursor or Codex edit this project"
-    : lead
-      ? `${programTitle(lead)} is connected and can edit this project — last active ${agoLabel(now - lead.lastActiveAt)}`
-      : "MCP server is running — waiting for Claude, Cursor or Codex to connect";
+    : !lead
+      ? "MCP server is running — waiting for Claude, Cursor or Codex to connect"
+      : state === "used"
+        ? `${name} used a tool ${agoLabel(now - (lead.lastCallAt ?? lead.lastActiveAt))} and can edit this project`
+        : state === "listed"
+          ? `${name} has the tool list but has not used a tool yet`
+          : lead.requests > 0
+            ? `${name} connected and asked for tools, but has not been given the tool list`
+            : `${name} connected but has not asked for any tools yet`;
 
   return (
     <button

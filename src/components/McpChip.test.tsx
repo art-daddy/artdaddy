@@ -39,23 +39,78 @@ describe("the chat chip", () => {
     expect(chip()).toHaveTextContent("Connect your own agent/MCP");
   });
 
-  it("names the program that is asking, and when it last did", async () => {
+  it("names the program that used a tool, and when it last did", async () => {
     running(true);
-    act(() => useMcpConnections.getState().asked(claude, Date.now() - 90_000));
+    act(() => {
+      useMcpConnections.getState().asked(claude, Date.now() - 100_000);
+      useMcpConnections.getState().answered(claude, "call", Date.now() - 90_000);
+    });
     render(<McpChip />);
 
     await vi.waitFor(() => expect(chip()).toHaveTextContent("Connected: Claude Code"));
-    expect(chip().title).toMatch(/Claude Code is connected .* last active 1 min ago/);
+    expect(chip().title).toMatch(/Claude Code used a tool 1 min ago and can edit this project/);
   });
 
   it("says how many more are connected", async () => {
     running(true);
     act(() => {
-      useMcpConnections.getState().asked(claude, Date.now() - 2_000);
-      useMcpConnections.getState().asked(codex, Date.now());
+      const s = useMcpConnections.getState();
+      s.asked(claude, Date.now() - 2_000);
+      s.answered(claude, "call", Date.now() - 2_000);
+      s.asked(codex, Date.now());
+      s.answered(codex, "call", Date.now());
     });
     render(<McpChip />);
     await vi.waitFor(() => expect(chip()).toHaveTextContent("Connected: Codex +1"));
+  });
+
+  // UJ-085: the chip says what the program has been SEEN to do. An agent that connects, is handed the tool list and never calls a tool
+  // was "Connected: Antigravity ... can edit this project" for eleven connections.
+  it("does not say 'Connected' or 'can edit this project' for a program that has only said hello", async () => {
+    running(true);
+    act(() => useMcpConnections.getState().connected(claude));
+    render(<McpChip />);
+    await vi.waitFor(() => expect(chip()).toHaveTextContent("Claude Code: connected"));
+    expect(chip()).not.toHaveTextContent("Connected:");
+    expect(chip().title).toBe("Claude Code connected but has not asked for any tools yet");
+  });
+
+  it("says no tool has been used once the program was handed the tool list", async () => {
+    running(true);
+    act(() => {
+      useMcpConnections.getState().asked(claude);
+      useMcpConnections.getState().answered(claude, "list");
+    });
+    render(<McpChip />);
+    await vi.waitFor(() => expect(chip()).toHaveTextContent("Claude Code: no tool used yet"));
+    expect(chip()).not.toHaveTextContent("Connected:");
+    expect(chip().title).toBe("Claude Code has the tool list but has not used a tool yet");
+    expect(chip().title).not.toMatch(/can edit/);
+  });
+
+  it("does not claim the tool list for a program whose requests were all refused", async () => {
+    running(true);
+    act(() => {
+      useMcpConnections.getState().asked(claude);
+      useMcpConnections.getState().asked(claude);
+    });
+    render(<McpChip />);
+    await vi.waitFor(() => expect(chip()).toHaveTextContent("Claude Code: connected"));
+    expect(chip().title).toBe(
+      "Claude Code connected and asked for tools, but has not been given the tool list",
+    );
+  });
+
+  it("speaks about the program that got furthest, not the one heard from last", async () => {
+    running(true);
+    act(() => {
+      const s = useMcpConnections.getState();
+      s.asked(claude, Date.now() - 20_000);
+      s.answered(claude, "call", Date.now() - 20_000);
+      s.connected(codex, Date.now());
+    });
+    render(<McpChip />);
+    await vi.waitFor(() => expect(chip()).toHaveTextContent("Connected: Claude Code +1"));
   });
 
   it("goes back to the invitation when the only program has gone quiet", async () => {

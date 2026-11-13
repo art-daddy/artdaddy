@@ -87,19 +87,26 @@ function textResult(
   return { content: [{ type: "text", text }, ...extra], isError };
 }
 
+/** The replies that say "nothing ran, the app is gated" (the build is not verified, the app is signed out). They are text errors like any tool failure, so the panel
+ *  cannot tell them apart by their shape; they are remembered BY IDENTITY here, which leaves the bytes the program receives exactly as they were. */
+const gateRefusals = new WeakSet<object>();
+
+function gateRefusal(value: unknown): Record<string, unknown> {
+  const refusal = textResult(value, true);
+  gateRefusals.add(refusal);
+  return refusal;
+}
+
 function compatibilityRefusal(): Record<string, unknown> | null {
   return compatibilityAllowsWork()
     ? null
-    : textResult(
-        {
-          ran: false,
-          reason:
-            "ArtDaddy must verify this build or install a required update before any tool can run.",
-          remedy:
-            "ask the user to finish the update/check in the app, then reconnect; do not retry tools now",
-        },
-        true,
-      );
+    : gateRefusal({
+        ran: false,
+        reason:
+          "ArtDaddy must verify this build or install a required update before any tool can run.",
+        remedy:
+          "ask the user to finish the update/check in the app, then reconnect; do not retry tools now",
+      });
 }
 
 async function listTools(): Promise<Record<string, unknown>> {
@@ -236,16 +243,13 @@ async function callTool(
   // store for a local edit, an HTTP 401 for a hosted one -- and an agent has no way to read
   // either as "the human needs to sign in".
   if (ready === "signed-out") {
-    return textResult(
-      {
-        tool: name,
-        ran: false,
-        reason:
-          "the app is showing its sign-in screen, so it has no project open and no tool can run",
-        remedy: "ask the user to sign in in the ArtDaddy window, then call this again",
-      },
-      true,
-    );
+    return gateRefusal({
+      tool: name,
+      ran: false,
+      reason:
+        "the app is showing its sign-in screen, so it has no project open and no tool can run",
+      remedy: "ask the user to sign in in the ArtDaddy window, then call this again",
+    });
   }
   // The catalog, not the tool host, decides what is callable. A withdrawn tool keeps its
   // implementation (so it can be brought back), so `host.has` still answers yes for one — and an
@@ -348,14 +352,11 @@ export async function dispatch(
   // surface the user cannot reach, and the next method added would start out ungated.
   const { isSignedOutGate } = await import("../store/auth");
   if (isSignedOutGate()) {
-    return textResult(
-      {
-        ran: false,
-        reason: `${BRAND.displayName} is signed out, so nothing can be listed or run`,
-        remedy: `ask the user to sign in to ${BRAND.displayName}, then try again`,
-      },
-      true,
-    );
+    return gateRefusal({
+      ran: false,
+      reason: `${BRAND.displayName} is signed out, so nothing can be listed or run`,
+      remedy: `ask the user to sign in to ${BRAND.displayName}, then try again`,
+    });
   }
 
   switch (req.method) {
@@ -396,6 +397,27 @@ export async function dispatch(
 }
 
 let wiring: Promise<void> | null = null;
+
+/** Note what the program was answered with, for the panel and the chip: a `tools/list` reply that really carried tools, or a `tools/call` that got past the door to a tool
+ *  (whether or not the tool then succeeded). A refusal at the gate (the build is not verified, the app is signed out) is neither: the program stays at "connected". Never throws,
+ *  and never touches the payload: a failure here must not stall the reply the connection thread is waiting for. */
+export function recordAnswer(
+  req: Pick<BridgeRequest, "method" | "client">,
+  payload: unknown,
+): void {
+  try {
+    if (!payload || typeof payload !== "object" || gateRefusals.has(payload)) return;
+    if (req.method === "tools/list") {
+      const tools = (payload as { tools?: unknown }).tools;
+      if (Array.isArray(tools) && tools.length > 0)
+        useMcpConnections.getState().answered(req.client, "list");
+    } else if (req.method === "tools/call") {
+      useMcpConnections.getState().answered(req.client, "call");
+    }
+  } catch {
+    // the record is an aid for the person, never a reason to fail a reply
+  }
+}
 
 /** Subscribe to Rust's bridge events. Idempotent, and retryable after a failure.
  *
@@ -442,6 +464,11 @@ async function wire(): Promise<void> {
     // Never let a rejection escape: Rust is blocking a connection thread on this id, and a
     // missing reply stalls it until the call timeout rather than returning an error.
     void dispatch(req, controller.signal)
+      .then((payload) => {
+        // What the program was ANSWERED with, as opposed to what it asked for (above).
+        recordAnswer(req, payload);
+        return payload;
+      })
       .catch((e: unknown) => textResult(`${(e as Error)?.message ?? e}`, true))
       .then((payload) => {
         inFlight.delete(req.id);

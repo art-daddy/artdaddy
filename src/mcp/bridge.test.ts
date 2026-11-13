@@ -248,6 +248,147 @@ describe("the MCP door when signed out", () => {
   });
 });
 
+// UJ-085: the panel and the chip say what a program was ANSWERED with. The record is made where the reply is known, from the payload `dispatch`
+// built, and the replies that say "nothing ran, the app is gated" are told from a tool's own failure by identity, so no byte the program receives changes.
+describe("what a program was answered with, for the panel (UJ-085)", () => {
+  const who = { name: "antigravity-client", version: "1.0.0" };
+
+  beforeEach(() => {
+    vi.resetModules();
+    vi.doUnmock("../contract");
+    vi.doUnmock("../store/auth");
+    vi.doUnmock("../store/projects");
+    vi.doUnmock("../tools/host");
+    vi.doUnmock("../project/openDocuments");
+  });
+
+  const door = (signedOut: boolean) =>
+    vi.doMock("../store/auth", () => ({
+      isSignedOutGate: () => signedOut,
+      useAuth: {
+        getState: () => ({
+          status: signedOut ? "locked" : "unlocked",
+          hasStoredSession: !signedOut,
+        }),
+        subscribe: () => () => undefined,
+      },
+    }));
+
+  /** One request through the REAL `dispatch`, recorded the way the bridge does it; the program is the one the app heard from. */
+  async function ask(method: string, params?: Record<string, unknown>) {
+    const { dispatch, recordAnswer } = await import("./bridge");
+    const { useMcpConnections, programState } = await import("./connections");
+    useMcpConnections.getState().clear();
+    useMcpConnections.getState().connected(who);
+    useMcpConnections.getState().asked(who);
+    const req = { id: 1, method, params: params ?? {}, client: who };
+    const payload = await dispatch(req as never);
+    const before = JSON.stringify(payload);
+    recordAnswer(req, payload);
+    const [program] = useMcpConnections.getState().programs;
+    return {
+      payload,
+      bytesUnchanged: JSON.stringify(payload) === before,
+      program,
+      state: programState(program),
+    };
+  }
+
+  it.each(["tools/list", "tools/call"])(
+    "a %s refused because the app is signed out leaves the program at 'connected', and recording it changes no byte of the reply",
+    async (method) => {
+      door(true);
+      const r = await ask(
+        method,
+        method === "tools/call" ? { name: "add_clips", arguments: {} } : undefined,
+      );
+      expect(r.payload.isError).toBe(true);
+      expect(r.state).toBe("connected");
+      expect(r.program).toMatchObject({ lists: 0, calls: 0, requests: 1 });
+      expect(r.bytesUnchanged).toBe(true);
+      // nothing was added to what the program receives: still exactly a text error
+      expect(Object.keys(r.payload).sort()).toEqual(["content", "isError"]);
+    },
+  );
+
+  it("a tools/list that carried the tools moves the program to 'listed', and no further", async () => {
+    door(false);
+    const r = await ask("tools/list");
+    expect((r.payload.tools as unknown[]).length).toBeGreaterThan(20);
+    expect(r.state).toBe("listed");
+    expect(r.program).toMatchObject({ lists: 1, calls: 0 });
+    expect(r.program.listedAt).not.toBeNull();
+  });
+
+  it("two refused lists then a real one: only the real one counts", async () => {
+    door(true);
+    const { dispatch, recordAnswer } = await import("./bridge");
+    const { useMcpConnections } = await import("./connections");
+    useMcpConnections.getState().clear();
+    const req = { id: 1, method: "tools/list", params: {}, client: who };
+    for (let i = 0; i < 2; i++) {
+      useMcpConnections.getState().asked(who);
+      recordAnswer(req, await dispatch(req as never));
+    }
+    expect(useMcpConnections.getState().programs[0]).toMatchObject({ requests: 2, lists: 0 });
+    vi.resetModules();
+    door(false);
+    const again = await import("./bridge");
+    const fresh = await import("./connections");
+    fresh.useMcpConnections.getState().clear();
+    fresh.useMcpConnections.getState().asked(who);
+    again.recordAnswer(req, await again.dispatch(req as never));
+    expect(fresh.useMcpConnections.getState().programs[0]).toMatchObject({ requests: 1, lists: 1 });
+  });
+
+  // A call that reaches a tool is "used" whether or not the tool then succeeds: the program is calling tools. The host here is a stand-in for the part
+  // below the door; the door (signed in, build verified, tool offered by the real catalog) is real.
+  it.each([
+    ["succeeds", { ok: true }],
+    ["fails", { ok: false, error: "no such clip" }],
+  ])(
+    "a tool call that reaches a tool which %s makes the program 'used'",
+    async (_name, outcome) => {
+      door(false);
+      vi.doMock("../store/projects", () => ({
+        useProjects: {
+          getState: () => ({
+            activeId: "p1",
+            active: { id: "p1", name: "QA" },
+            refresh: async () => {},
+          }),
+        },
+      }));
+      vi.doMock("../project/openDocuments", () => ({ openDocumentById: () => ({}) }));
+      vi.doMock("../tools/host", () => ({
+        openToolHost: () => ({
+          ready: Promise.resolve(),
+          has: () => true,
+          run: async () => outcome,
+          store: () => null,
+        }),
+      }));
+      const r = await ask("tools/call", { name: "get_timeline", arguments: {} });
+      expect(r.state).toBe("used");
+      expect(r.program).toMatchObject({ calls: 1, lists: 0 });
+      expect(r.program.lastCallAt).not.toBeNull();
+    },
+  );
+
+  it("recordAnswer never throws and never records on a payload that is not a reply, an empty tool list, or an unknown method", async () => {
+    const { recordAnswer } = await import("./bridge");
+    const { useMcpConnections } = await import("./connections");
+    useMcpConnections.getState().clear();
+    useMcpConnections.getState().asked(who);
+    for (const payload of [undefined, null, 7, "text", [], {}, { tools: "no" }, { tools: [] }])
+      expect(() => recordAnswer({ method: "tools/list", client: who }, payload)).not.toThrow();
+    expect(() =>
+      recordAnswer({ method: "something/new", client: who }, { tools: [{}] }),
+    ).not.toThrow();
+    expect(useMcpConnections.getState().programs[0]).toMatchObject({ lists: 0, calls: 0 });
+  });
+});
+
 describe("MCP trace delivery", () => {
   beforeEach(() => {
     vi.resetModules();
