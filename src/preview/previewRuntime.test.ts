@@ -191,3 +191,147 @@ describe("shared preview runtime ownership", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 });
+
+// UJ-091: the poster of a long clip is on disk seconds after the drop, its preview copy minutes later. The poster used to be looked at only when a source was first
+// prepared with a URL, so one that arrived later, or for a source with no URL yet, never reached the screen: black for the whole wait.
+describe("a video's poster stands in for black until its first real frame (UJ-091)", () => {
+  const bitmapOf = () => ({ close: vi.fn() });
+  /** The decoder starts delivering real frames. */
+  const deliverFirstFrame = () => {
+    (state.videos[0] as unknown as { nearestFrame: () => unknown }).nearestFrame = vi.fn(() => ({
+      timestamp: 1,
+    }));
+  };
+
+  it("stands in a poster that arrives AFTER the source was prepared", async () => {
+    const poster = bitmapOf();
+    state.load.mockResolvedValueOnce({ bitmap: poster, dims: { w: 160, h: 96 } });
+    const { send, renderer } = runtime();
+    send({ type: "render", timeline: timeline("video"), time: 0, urls: { asset: "video" } });
+    await settle();
+    expect(renderer.setTexture).not.toHaveBeenCalled(); // no poster yet: black, as before
+    // the poster lands; the URL has not changed (the copy is still being built)
+    send({
+      type: "render",
+      timeline: timeline("video"),
+      time: 0,
+      urls: { asset: "video" },
+      posters: { asset: "poster-url" },
+    });
+    await settle();
+    expect(renderer.setTexture.mock.calls).toEqual([["asset", poster]]);
+    expect(poster.close).toHaveBeenCalledOnce();
+  });
+
+  it("stands in a poster for a source with NO url yet (its codec cannot be decoded until the copy exists)", async () => {
+    const poster = bitmapOf();
+    state.load.mockResolvedValueOnce({ bitmap: poster, dims: { w: 160, h: 96 } });
+    const { send, renderer } = runtime();
+    send({
+      type: "render",
+      timeline: timeline("video"),
+      time: 0,
+      urls: {},
+      posters: { asset: "poster-url" },
+    });
+    await settle();
+    expect(renderer.setTexture.mock.calls).toEqual([["asset", poster]]);
+  });
+
+  it("loads one poster once, however many render messages repeat it", async () => {
+    state.load.mockResolvedValue({ bitmap: bitmapOf(), dims: { w: 160, h: 96 } });
+    const { send } = runtime();
+    for (let i = 0; i < 4; i++) {
+      send({
+        type: "render",
+        timeline: timeline("video"),
+        time: i,
+        urls: { asset: "video" },
+        posters: { asset: "poster-url" },
+      });
+      await settle();
+    }
+    expect(state.load.mock.calls.filter(([u]) => u === "poster-url")).toHaveLength(1);
+  });
+
+  it("never lets a poster replace a real frame, even one that finishes loading after it", async () => {
+    let finish!: (value: unknown) => void;
+    const late = bitmapOf();
+    state.load.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const { send, renderer, messages } = runtime();
+    send({
+      type: "render",
+      timeline: timeline("video"),
+      time: 0,
+      urls: { asset: "video" },
+      posters: { asset: "poster-url" },
+    });
+    await settle();
+    // the decoder delivers the first real frame while the poster is still loading
+    deliverFirstFrame();
+    await vi.advanceTimersByTimeAsync(40);
+    expect(messages.some((m) => m.type === "firstFrame")).toBe(true);
+    const realUploads = renderer.setTexture.mock.calls.length;
+    finish({ bitmap: late, dims: { w: 160, h: 96 } });
+    await settle();
+    expect(renderer.setTexture.mock.calls).toHaveLength(realUploads); // nothing more drawn
+    expect(renderer.setTexture.mock.calls.some(([, picture]) => picture === late)).toBe(false);
+    expect(late.close).toHaveBeenCalledOnce();
+  });
+
+  it("does not ask for a poster once a real frame is on the stage", async () => {
+    const { send } = runtime();
+    send({ type: "render", timeline: timeline("video"), time: 0, urls: { asset: "video" } });
+    await settle();
+    deliverFirstFrame();
+    await vi.advanceTimersByTimeAsync(40);
+    send({
+      type: "render",
+      timeline: timeline("video"),
+      time: 0,
+      urls: { asset: "video" },
+      posters: { asset: "poster-url" },
+    });
+    await settle();
+    expect(state.load).not.toHaveBeenCalled();
+  });
+
+  it("is for video clips only: a still's poster entry is ignored", async () => {
+    const { send, renderer } = runtime();
+    send({
+      type: "render",
+      timeline: timeline("image"),
+      time: 0,
+      urls: {},
+      posters: { asset: "poster-url" },
+    });
+    await settle();
+    expect(state.load).not.toHaveBeenCalled();
+    expect(renderer.setTexture).not.toHaveBeenCalled();
+  });
+
+  it("a poster that fails to load is tried again by a later render, and a closed runtime draws nothing", async () => {
+    state.load.mockRejectedValueOnce(new Error("decode"));
+    const poster = bitmapOf();
+    state.load.mockResolvedValueOnce({ bitmap: poster, dims: { w: 160, h: 96 } });
+    const { send, renderer, dispose } = runtime();
+    const render = {
+      type: "render" as const,
+      timeline: timeline("video"),
+      time: 0,
+      urls: { asset: "video" },
+      posters: { asset: "poster-url" },
+    };
+    send(render);
+    await settle();
+    expect(renderer.setTexture).not.toHaveBeenCalled();
+    send({ ...render, time: 1 });
+    await settle();
+    expect(renderer.setTexture.mock.calls).toEqual([["asset", poster]]);
+    dispose();
+  });
+});

@@ -51,6 +51,8 @@ export function startPreviewRuntime(scope: PreviewScope): () => void {
   const videos = new Map<string, VideoSource>();
   const prepared = new Map<string, string>();
   const uploaded = new Map<string, number>();
+  /** Which poster was last stood in for a source, so one poster is loaded once however many render messages repeat it. */
+  const posterShown = new Map<string, string>();
   const failed = new Set<string>();
   const stills = new Map<string, AnimatedStill>();
   const textPending = new Set<string>();
@@ -199,20 +201,6 @@ export function startPreviewRuntime(scope: PreviewScope): () => void {
               prepared.delete(source);
             });
         } else if (kind === "video") {
-          const poster = posters[source];
-          if (poster && !uploaded.has(source)) {
-            void loadImage(poster)
-              .then(({ bitmap }) => {
-                try {
-                  if (!current(source, url) || uploaded.has(source)) return;
-                  renderer?.setTexture(source, bitmap);
-                  dirty = true;
-                } finally {
-                  bitmap.close();
-                }
-              })
-              .catch(() => undefined);
-          }
           const video: VideoSource = new VideoSource(url, (reason) =>
             reportFailure(source, reason, video.codecFamily),
           );
@@ -235,6 +223,42 @@ export function startPreviewRuntime(scope: PreviewScope): () => void {
               reportFailure(source, previewFailureOf(error), video.codecFamily);
             });
         }
+      }
+    }
+    standInPosters();
+  }
+
+  /** A video's poster stands in for its picture until its first real frame is uploaded. It is tried on EVERY render message, not only when the source is first prepared:
+   *  the poster of a long clip is made in seconds but its preview copy takes minutes, so the poster arrives AFTER the source was prepared, or for a source that has no URL
+   *  at all yet because its codec cannot be decoded here. Both used to be ignored, which left the stage black for the whole wait (UJ-091). A real frame is never replaced
+   *  by a poster, however late the poster finishes loading, and one poster is loaded once. */
+  function standInPosters(): void {
+    for (const track of timeline?.tracks ?? []) {
+      for (const clip of track.clips ?? []) {
+        if (clip.kind === "audio" || clip.kind === "text" || typeof clip.media_ref !== "string")
+          continue;
+        const source = clip.media_ref;
+        const poster = posters[source];
+        if (!poster || clipKind(clip) !== "video") continue;
+        if (uploaded.has(source) || posterShown.get(source) === poster) continue;
+        posterShown.set(source, poster);
+        void loadImage(poster)
+          .then(({ bitmap }) => {
+            try {
+              if (disposed || uploaded.has(source) || posters[source] !== poster) return;
+              if (!renderer) {
+                if (posterShown.get(source) === poster) posterShown.delete(source); // nothing to draw on yet: a later render tries again
+                return;
+              }
+              renderer.setTexture(source, bitmap);
+              dirty = true;
+            } finally {
+              bitmap.close();
+            }
+          })
+          .catch(() => {
+            if (posterShown.get(source) === poster) posterShown.delete(source); // a later render may try again
+          });
       }
     }
   }
