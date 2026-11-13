@@ -7,9 +7,11 @@
 // or URL fails "classifies every..." until it is put in a class here. Each attack is paired with a
 // control that must reach the same code with a library ref, so a template that fails validation
 // early cannot pass by never getting to the resolver.
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { __resetExportFlags, __setExportFlag } from "../api/exportFlags";
 import { allTools, paramSchema, type ParamSchema } from "../contract";
+import { resetImportBatches, withImportBatch } from "../store/importJobs";
 import { registerTestDocument, resetTestDocuments } from "../test/timelineKit";
 import { createToolRegistry } from ".";
 import { agentToolContext } from "./agentStore";
@@ -470,11 +472,29 @@ describe("a HEIF still's pixels are read only through its decoded picture", () =
 // (T-15, T-32). The tools were fixed one at a time and each fix missed another, so this walks EVERY
 // library-ref parameter the served contract has, nested ones included (the list above is derived,
 // so a parameter added later is held to it too), in every state and from both callers.
-describe("a ref to media being made, failed or offline is never reported as unknown", () => {
+describe("a ref to media being made, failed, offline or still importing is never reported as unknown", () => {
   const WAIT = "media_gen_wait1";
   const BAD = "media_gen_bad1";
   const GONE = "media_gone1";
   const TYPO = "media_typo1";
+  /** A file the person is importing right now (UJ-088): no library id yet, so the agent only has the name the note gave it. */
+  const IMPORTING = "Import_in_flight1.mp4";
+
+  let releaseImport!: () => void;
+  let importBatch: Promise<unknown>;
+  beforeAll(() => {
+    importBatch = withImportBatch(
+      DIR,
+      [`D:/shoot/${IMPORTING}`],
+      () => new Promise<void>((res) => (releaseImport = res)),
+    );
+  });
+  afterAll(async () => {
+    releaseImport();
+    await importBatch;
+    resetImportBatches();
+  });
+  afterEach(() => __resetExportFlags());
 
   /** Parameters for which a state is a legitimate target, not a refusal. An entry is a decision. */
   const ALLOWED: Record<string, { states: string[]; why: string }> = {
@@ -560,7 +580,7 @@ describe("a ref to media being made, failed or offline is never reported as unkn
     run: async (program, args, ...rest) => {
       if (
         program === "ffprobe" &&
-        args.some((a) => /media_gen_wait1|media_gen_bad1|Moved/.test(a))
+        args.some((a) => /media_gen_wait1|media_gen_bad1|Moved|Import_in_flight1/.test(a))
       ) {
         calls.push([program, ...args]);
         return {
@@ -577,7 +597,7 @@ describe("a ref to media being made, failed or offline is never reported as unkn
    *  are not there (or not there yet), so the probe's "No such file or directory" is all it could
    *  say, and that is the answer that sent a model after a path. */
   const probedStateFile = (): string[] =>
-    calls.flat().filter((a) => /media_gen_wait1|media_gen_bad1|Moved/.test(a));
+    calls.flat().filter((a) => /media_gen_wait1|media_gen_bad1|Moved|Import_in_flight1/.test(a));
 
   /** What the tool said about the ref: its error, or (inspect_color's reference) the said refusal. */
   const said = (r: Any): string => String(r?.error ?? r?.reference_error ?? "");
@@ -665,11 +685,34 @@ describe("a ref to media being made, failed or offline is never reported as unkn
         expect(probedStateFile()).toEqual([]);
       });
 
-    // The direction that keeps the rule honest: a typo is not a generation, a failure or an
-    // offline file, whatever the tool says about it.
+    // UJ-088: the person's drop has not landed; the agent was told the name in the import note and asks by it. Every parameter that takes a library ref says the file is on its
+    // way in, and none probes a file that is not there yet (the probe's "No such file or directory" is the sentence that sends a model after a path).
+    it(`${param}: a file the person is still importing is on its way in, not unknown, and nothing probes it`, async () => {
+      for (const surface of ["app", "mcp"] as const) {
+        const r = await runAs(surface, ...call(IMPORTING));
+        expect(said(r), `${surface} ${JSON.stringify(r).slice(0, 240)}`).toMatch(
+          /still being imported/i,
+        );
+        expect(said(r)).not.toMatch(SAYS_UNKNOWN);
+        expect(said(r)).not.toMatch(/you will be told/i); // nothing tells the agent when an import lands
+        expect(r).not.toHaveProperty("pending");
+      }
+      expect(probedStateFile()).toEqual([]);
+    });
+
+    it(`${param}: with the server's note switched off a still-importing name is 0.27.0 again`, async () => {
+      __setExportFlag("import_note", false);
+      const r = await runAs("mcp", ...call(IMPORTING));
+      expect(said(r)).not.toMatch(/still being imported/i);
+    });
+
+    // The direction that keeps the rule honest: a typo is not a generation, a failure, an
+    // offline file or an import, whatever the tool says about it.
     it(`${param}: a ref the library has never heard of is not reported as a state`, async () => {
       const r = await runAs("mcp", ...call(TYPO));
-      expect(said(r)).not.toMatch(/still being generated|failed to generate|offline/i);
+      expect(said(r)).not.toMatch(
+        /still being generated|failed to generate|offline|still being imported/i,
+      );
       expect(r).not.toHaveProperty("pending");
     });
   }

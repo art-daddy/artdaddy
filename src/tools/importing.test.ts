@@ -4,7 +4,13 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { __resetExportFlags, __setExportFlag } from "../api/exportFlags";
 import { resetImportBatches, useImportJobs, withImportBatch } from "../store/importJobs";
-import { importingField, importingFor, importingMatch, readWithImporting } from "./importing";
+import {
+  importingField,
+  importingFor,
+  importingMatch,
+  MAX_LISTED_IMPORTING,
+  readWithImporting,
+} from "./importing";
 
 const store = { projectDir: "C:/proj" };
 
@@ -131,6 +137,24 @@ describe("importingField", () => {
         { path: "D:/b.mp4", name: "b.mp4", fraction: null },
       ]),
     ).toEqual({ importing: [{ name: "a.mp4", percent: 46 }, { name: "b.mp4" }] });
+  });
+
+  // A drop of hundreds of photos: the project block has a size bound, and an unbounded list would push an otherwise small project over it (the block falls back to
+  // its summary and the agent loses the timeline detail), so the result lists the first names and says how many there are in all.
+  it("lists at most MAX_LISTED_IMPORTING files, says how many there are, and stays small whatever the drop", () => {
+    const many = Array.from({ length: 400 }, (_, i) => ({
+      path: `D:/photos/IMG_${String(i).padStart(4, "0")}.jpg`,
+      name: `IMG_${String(i).padStart(4, "0")}.jpg`,
+      fraction: null,
+    }));
+    const field = importingField(many) as { importing: unknown[]; importing_count?: number };
+    expect(field.importing).toHaveLength(MAX_LISTED_IMPORTING);
+    expect(field.importing_count).toBe(400);
+    expect(JSON.stringify(field).length).toBeLessThan(1_200);
+    // exactly at the limit nothing is hidden, so no count is added
+    expect(importingField(many.slice(0, MAX_LISTED_IMPORTING))).not.toHaveProperty(
+      "importing_count",
+    );
   });
 });
 

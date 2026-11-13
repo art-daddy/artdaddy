@@ -8,7 +8,8 @@
 // own job in the export queue (progress, Cancel), and the call wakes the agent once, after its last
 // file settles.
 import type { ClientToolContext } from "../tools/context";
-import { unresolvedRefError } from "../tools/refState";
+import { importingRefError, unresolvedRefError } from "../tools/refState";
+import { importingMatch } from "../tools/importing";
 import type { LibraryClip } from "../tools/store";
 import { loadTimeline } from "./engine";
 import {
@@ -205,8 +206,12 @@ async function exportItemsTool(args: Args, ctx: ClientToolContext | null): Promi
     // who will or will not tell the caller), and with the provider's reason when it failed.
     if (await ctx.store.pendingMedia(ref))
       return unresolvedRefError(ctx, ref, "", undefined, "deliver");
+    const importingEarly = importingMatch(ctx.store, ref);
     const src = await ctx.store.resolveMediaRef(ref);
     if (!src) {
+      // A file the person is still importing is on its way in: the name is right (UJ-088).
+      const importing = importingRefError(ctx, ref, "deliver", importingEarly);
+      if (importing) return { ok: false, error: importing };
       const known = rows.some((c) => c.id === ref || c.filename === ref);
       return {
         ok: false,

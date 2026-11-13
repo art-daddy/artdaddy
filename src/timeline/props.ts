@@ -2,7 +2,8 @@
 // apply_color, set_transition). Ports timeline_edit_tools.py part 2. These set
 // look/sound AFTER placement; deep field validation is left to validateTimeline.
 import type { ClientToolContext } from "../tools/context";
-import { failedPlacementMessage, offlineRefMessage } from "../tools/refState";
+import { failedPlacementMessage, importingRefError, offlineRefMessage } from "../tools/refState";
+import { importingMatch } from "../tools/importing";
 import { isUnsafeAgentRef } from "../tools/store";
 import { transitionMutation } from "./edit";
 import { colorKnobs, kindForClip, resolveEffect, resolveGrade } from "./effectRegistry";
@@ -197,12 +198,16 @@ async function resolveSwapMedia(
     // (resolveClipSources disables an audio clip whose source turns out to have none).
     return { media: { ref: making.id, kind, totalFrames: null, hasAudio: kind === "video" } };
   }
+  const importingEarly = importingMatch(ctx.store, ref);
   const abs = (await ctx.store.resolveMediaRef(ref)) ?? ref;
   // A linked file the user moved or deleted: the ref is right and only the user can bring the file
   // back, where a probe of it could only say "No such file" (UJ-014, as add_clips says it).
   if (abs === ref) {
     const gone = await ctx.store.offlineMedia(ref).catch(() => null);
     if (gone) return { error: { ok: false, error: offlineRefMessage(gone) } };
+    // A file the person is still importing is on its way in: the name is right (UJ-088).
+    const importing = importingRefError(ctx, ref, "use", importingEarly);
+    if (importing) return { error: { ok: false, error: importing } };
   }
   let kind = placeableKind(abs);
   if (kind === "video" && !(await sourceHasVideo(ctx, abs))) kind = "audio";

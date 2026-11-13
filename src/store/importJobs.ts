@@ -73,9 +73,10 @@ export async function withImportJob<T>(path: string, work: () => Promise<T>): Pr
 // is checked: tools/importing.ts.
 //
 // Keyed by the project's DIRECTORY, the one identity the doors (which hold a project id and its store) and the readers (tools, which hold a store) both
-// have. Memory only. A row older than IMPORT_ROW_MAX_MS is no longer shown, so an import that hangs cannot leave a note up for good.
+// have. Memory only. A batch that has made no progress for IMPORT_ROW_MAX_MS (it started, or a file of it settled, that long ago) is no longer shown, so an
+// import that hangs cannot leave a note up for good, while a long batch that keeps landing files is never cut off in the middle.
 
-/** The longest a row is shown. An import that has not settled by then is not reported to the agent any more (the import itself is untouched). */
+/** The longest a batch is shown without making progress. An import that has not moved by then is not reported to the agent any more (the import itself is untouched). */
 export const IMPORT_ROW_MAX_MS = 30 * 60_000;
 
 interface BatchRow {
@@ -83,7 +84,6 @@ interface BatchRow {
   projectDir: string;
   path: string;
   name: string;
-  addedAt: number;
 }
 
 export interface ImportingRow {
@@ -100,40 +100,47 @@ const passThrough: ImportFile = (_path, job) => job();
 
 let rows: BatchRow[] = [];
 let lastBatch = 0;
+/** When each batch last made progress: it started, or one of its files settled. A batch is shown while it has made progress within IMPORT_ROW_MAX_MS, so a long
+ *  batch that keeps landing files is never cut off in the middle, and one that has stopped moving is. */
+const progressAt = new Map<number, number>();
 const dirKey = (dir: string): string => norm(dir).replace(/\/+$/, "").toLowerCase();
+const shown = (r: BatchRow, now: number): boolean =>
+  now - (progressAt.get(r.batch) ?? Number.NEGATIVE_INFINITY) <= IMPORT_ROW_MAX_MS;
 
 /** Register every path of a batch, run `work`, and take exactly those rows out again when it ends. The registration is SYNCHRONOUS: it has happened when this
- *  returns its promise, before the caller's first await. No project directory (the web build, a project that is not open) or no paths: nothing to register. */
+ *  returns its promise, before the caller's first await. No project directory (the web build, a project that is not open) or no paths: nothing to register.
+ *  `now` is the clock (a fixed time or a function; tests only). */
 export async function withImportBatch<R>(
   projectDir: string | null | undefined,
   paths: readonly string[],
   work: (file: ImportFile) => Promise<R>,
-  now: number = Date.now(),
+  now: number | (() => number) = Date.now,
 ): Promise<R> {
   if (!projectDir || paths.length === 0) return work(passThrough);
+  const clock = typeof now === "function" ? now : () => now;
   const batch = ++lastBatch;
   const key = dirKey(projectDir);
-  rows = rows.filter((r) => now - r.addedAt <= IMPORT_ROW_MAX_MS); // a row that long ago can only be a leak
+  const started = clock();
+  rows = rows.filter((r) => shown(r, started)); // a row that long ago can only be a leak
+  for (const id of [...progressAt.keys()])
+    if (!rows.some((r) => r.batch === id)) progressAt.delete(id);
+  progressAt.set(batch, started);
   for (const p of paths)
-    rows.push({
-      batch,
-      projectDir: key,
-      path: norm(p),
-      name: p.split(/[\\/]/).pop() || p,
-      addedAt: now,
-    });
+    rows.push({ batch, projectDir: key, path: norm(p), name: p.split(/[\\/]/).pop() || p });
   const file: ImportFile = async (path, job) => {
     try {
       return await job();
     } finally {
       const at = rows.findIndex((r) => r.batch === batch && r.path === norm(path));
       if (at >= 0) rows.splice(at, 1); // one row per call: a path given twice is settled twice
+      if (progressAt.has(batch)) progressAt.set(batch, clock());
     }
   };
   try {
     return await work(file);
   } finally {
     rows = rows.filter((r) => r.batch !== batch);
+    progressAt.delete(batch);
   }
 }
 
@@ -147,7 +154,7 @@ export function importingRows(
   const seen = new Set<string>();
   const out: ImportingRow[] = [];
   for (const r of rows) {
-    if (r.projectDir !== key || now - r.addedAt > IMPORT_ROW_MAX_MS || seen.has(r.path)) continue;
+    if (r.projectDir !== key || !shown(r, now) || seen.has(r.path)) continue;
     seen.add(r.path);
     const job = useImportJobs.getState().jobs.find((j) => j.path === r.path);
     out.push({ path: r.path, name: r.name, fraction: job?.fraction ?? null });
@@ -158,4 +165,5 @@ export function importingRows(
 /** Tests only: forget every batch. */
 export function resetImportBatches(): void {
   rows = [];
+  progressAt.clear();
 }

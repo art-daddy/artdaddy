@@ -94,9 +94,22 @@ export async function unresolvedRef(
 }
 
 /** What to say about a file the person is still importing: the name is right and it is on its way in. Nothing tells the agent when it lands, so it is not promised. */
-function importingRefMessage(row: ImportingRow, use: string): string {
+export function importingRefMessage(row: ImportingRow, use: string): string {
   const done = row.fraction !== null ? ` (${Math.round(row.fraction * 100)}% done)` : "";
   return `'${row.name}' is still being imported${done}, so there is nothing to ${use} yet. The file is not missing: it appears in the library when the import finishes (library_op action='list' shows what is still importing). Nothing will tell you when that happens: work with what is already in the library, or end your turn and tell the person it can be done once the file is in. Don't import it again, don't poll and don't guess a file path.`;
+}
+
+/** The words for a name that did not resolve but is a file the person is still importing, or null when it is not. `early` is the caller's own reading, taken BEFORE it
+ *  tried to resolve the name: a file that lands in between is still reported as on its way in (told once more than needed, harmless), never as unknown. For a caller that
+ *  has its own error type and cannot go through {@link unresolvedRef} (a placement, an export item, a swap). */
+export function importingRefError(
+  ctx: RefReportContext,
+  ref: string,
+  use: string,
+  early: ImportingRow | null = null,
+): string | null {
+  const row = early ?? importingMatch(ctx.store, ref);
+  return row ? importingRefMessage(row, use) : null;
 }
 
 /** `: <reason>` when the provider gave one. */

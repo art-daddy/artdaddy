@@ -40,16 +40,23 @@ export async function readWithImporting<T>(
   return { value, importing: mergeImporting(before, importingFor(store)) };
 }
 
+/** The most files a tool result lists by name; the rest are counted. A drop of hundreds of photos must not push the project block over its size bound
+ *  (it would fall back to its summary and lose timeline detail) or fill the model's context with names. */
+export const MAX_LISTED_IMPORTING = 20;
+
 /** The shape every reader puts in its result, or nothing at all when nothing is importing (a result is byte-identical to what it always was then). */
 export function importingField(
   rows: readonly ImportingRow[],
-): { importing: Array<{ name: string; percent?: number }> } | Record<string, never> {
+):
+  | { importing: Array<{ name: string; percent?: number }>; importing_count?: number }
+  | Record<string, never> {
   if (rows.length === 0) return {};
   return {
-    importing: rows.map((r) => ({
+    importing: rows.slice(0, MAX_LISTED_IMPORTING).map((r) => ({
       name: r.name,
       ...(r.fraction !== null ? { percent: Math.round(r.fraction * 100) } : {}),
     })),
+    ...(rows.length > MAX_LISTED_IMPORTING ? { importing_count: rows.length } : {}),
   };
 }
 

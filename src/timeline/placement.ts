@@ -2,11 +2,13 @@
 // the async PREFLIGHT a rule may not do (resolve the path, ffprobe duration / has-audio), then a
 // call into timeline/operations.ts. The probes run BEFORE the mutation lease is taken, so a rule
 // stays sync and the lease is never held across I/O.
+import { importingMatch, type ImportingRow } from "../tools/importing";
 import { stderrExcerpt, type CommandResult, type CommandRunner } from "../tools/command";
 import type { ClientToolContext } from "../tools/context";
 import { isUnsafeAgentRef } from "../tools/store";
 import {
   failedPlacementMessage,
+  importingRefError,
   offlineRefMessage,
   pendingPlacementRefusal,
   type PendingStatus,
@@ -534,6 +536,19 @@ async function refuseOffline(ctx: ClientToolContext, raw: string, abs: string): 
   if (row) throw new OpError(offlineRefMessage(row));
 }
 
+/** A name the person is still importing (UJ-088): it has no library id and no file yet, so it did not resolve (`abs === raw`), and a probe of it could only say "No such file".
+ *  The ref is right and the file is on its way in. `early` is the reading the caller took before it tried to resolve the name. */
+function refuseImporting(
+  ctx: ClientToolContext,
+  raw: string,
+  abs: string,
+  early: ImportingRow | null,
+): void {
+  if (abs !== raw) return;
+  const said = importingRefError(ctx, raw, "place", early);
+  if (said) throw new OpError(said);
+}
+
 async function resolveAddEntry(
   ctx: ClientToolContext,
   entry: Args,
@@ -550,6 +565,7 @@ async function resolveAddEntry(
     throw new OpError(
       `media_ref must be a library asset (media id / filename), not a system path: ${raw}`,
     );
+  const importingEarly = importingMatch(ctx.store, raw);
   const abs = (await ctx.store.resolveMediaRef(raw)) ?? raw;
   // Still generating: trust the catalog row instead of probing bytes that do not exist yet.
   const pending = await pendingMediaRow(ctx, raw);
@@ -579,6 +595,7 @@ async function resolveAddEntry(
     };
   }
   await refuseOffline(ctx, raw, abs);
+  refuseImporting(ctx, raw, abs, importingEarly);
   let kind = placeableKind(abs);
   // A container ext (.mp4/.mov/...) can be AUDIO-ONLY. Treat a "video" source with
   // no video stream as audio, so it places ONE audio clip (not a video shell + a
@@ -668,6 +685,7 @@ async function resolveInsertEntry(
     throw new OpError(
       `media_ref must be a library asset (media id / filename), not a system path: ${raw}`,
     );
+  const importingEarly = importingMatch(ctx.store, raw);
   const abs = (await ctx.store.resolveMediaRef(raw)) ?? raw;
   // Same as resolveAddEntry: generating media has no bytes to probe, and insert_clips is the
   // other door onto the timeline — a guard on only one of them is the gap, not the fix.
@@ -718,6 +736,7 @@ async function resolveInsertEntry(
     };
   }
   await refuseOffline(ctx, raw, abs);
+  refuseImporting(ctx, raw, abs, importingEarly);
   let kind = placeableKind(abs);
   if (kind === "video" && !(await sourceHasVideo(ctx, abs))) kind = "audio";
   const span = entry.source_span;

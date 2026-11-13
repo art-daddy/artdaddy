@@ -178,6 +178,31 @@ describe("withImportBatch", () => {
     await batch;
   });
 
+  it("cuts a batch off after 30 minutes WITHOUT progress, not 30 minutes after it began: a long batch that keeps landing files is shown to its last file", async () => {
+    let clock = 1_000_000;
+    const paths = ["D:/a.mp4", "D:/b.mp4", "D:/c.mp4"];
+    const holds = paths.map(() => deferred());
+    const batch = withImportBatch(
+      DIR,
+      paths,
+      async (file) => {
+        for (let i = 0; i < paths.length; i++) await file(paths[i], () => holds[i].promise); // the doors import one file after another
+      },
+      () => clock,
+    );
+    clock += 25 * 60_000;
+    holds[0].resolve(); // a lands at 25 minutes
+    await tick();
+    clock += 25 * 60_000; // 50 minutes after the drop, 25 after the last file landed
+    expect(names(DIR, clock)).toEqual(["b.mp4", "c.mp4"]);
+    clock += 6 * 60_000; // 31 minutes with nothing landing: it has stopped moving
+    expect(names(DIR, clock)).toEqual([]);
+    holds[1].resolve();
+    holds[2].resolve();
+    await batch;
+    expect(names(DIR, clock)).toEqual([]);
+  });
+
   it("carries the percent of the file the progress list is reading, and none before the first report", async () => {
     const hold = deferred();
     const batch = withImportBatch(DIR, ["D:/shoot/big.mp4"], async (file) => {
