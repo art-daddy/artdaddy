@@ -350,7 +350,7 @@ const editorCreator: StateCreator<EditorState> = (set, get) => {
       void refreshMediaNames(store, () => get().projectId === pid, set);
       // Media that just landed was skipped by every earlier sweep (it had no file), so this is
       // its first chance at a proxy.
-      void get()._index?.sweep(get().timeline);
+      void get()._index?.sweep(get().timeline, get().playhead);
     },
     _unsub: null,
     _pending: null,
@@ -422,7 +422,7 @@ const editorCreator: StateCreator<EditorState> = (set, get) => {
             set({ dirty: change.dirty ?? false });
             return;
           }
-          void index.sweep(tl); // agent/manual added or moved media -> preview proxy
+          void index.sweep(tl, get().playhead); // agent/manual added or moved media -> preview proxy
           const dirty = change.dirty ?? false;
           // A source-monitor tab covers the stage. An empty project has nothing to composite, so
           // people park on a library clip to see anything at all — and then the first edit lands
@@ -446,7 +446,7 @@ const editorCreator: StateCreator<EditorState> = (set, get) => {
           // by ref (UJ-014): forget them, then hand it a new timeline object to resolve again.
           clearSourceUrlCache();
           previewAudio()?.forgetUnresolved();
-          void index.sweep(get().timeline);
+          void index.sweep(get().timeline, get().playhead);
           void refreshMediaNames(store, () => get().projectId === projectId, set).then((n) => {
             // The open-time notice must stay true after a relink; one that replaced it is not ours.
             const notice = useProjectNotice.getState();
@@ -487,7 +487,7 @@ const editorCreator: StateCreator<EditorState> = (set, get) => {
           return "superseded";
         }
         set({ store, timeline, loading: false, _unsub: unsubAll, _index: index });
-        if (timeline) void index.sweep(timeline);
+        if (timeline) void index.sweep(timeline, get().playhead);
         // Say it ONCE, on open. Referenced media can walk away between sessions with nothing
         // to notice: the library panel does show it, but only to someone who thinks to look
         // there, and a user who does not hits a clip that plays as black and reads it as the
@@ -516,7 +516,7 @@ const editorCreator: StateCreator<EditorState> = (set, get) => {
         const timeline = await loadTimeline(store);
         if (loadSeq !== seq) return; // a newer load()/dispose() took over -> don't install onto its store (R7-2)
         set({ timeline });
-        void get()._index?.sweep(timeline);
+        void get()._index?.sweep(timeline, get().playhead);
       } catch (e) {
         if (loadSeq !== seq) return;
         set({ error: String(e) });
@@ -582,7 +582,11 @@ const editorCreator: StateCreator<EditorState> = (set, get) => {
         if (!g) return clipSel({ selection: null, selectedIds: [] });
         return { selectedGap: { trackId, atFrame: frame }, selection: null, selectedIds: [] };
       }),
-    setPlayhead: (seconds) => set({ playhead: Math.max(0, seconds) }),
+    setPlayhead: (seconds) => {
+      set({ playhead: Math.max(0, seconds) });
+      // The copy of the clip the person has moved to is built before the ones still waiting (UJ-091); nothing happens when no copy waits.
+      get()._index?.focus(get().timeline, seconds);
+    },
     openMediaTab: (ref, opts) =>
       set((s) => {
         const pin = opts?.pin ?? false;

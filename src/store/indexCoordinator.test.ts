@@ -2,6 +2,7 @@ import fc from "fast-check";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { IndexCoordinator } from "./indexCoordinator";
+import { useProxyJobs } from "./proxyJobs";
 import type { Timeline } from "../timeline/model";
 import { SPEECH_PACE_KEY } from "../tools/speechPace";
 import { BATCH_LOOKAHEAD, BATCH_MAX_FILES } from "../tools/transcribeBatch";
@@ -1460,5 +1461,234 @@ describe("IndexCoordinator", () => {
         { numRuns: 25 },
       );
     });
+  });
+});
+
+// UJ-091: the person is waiting for the copy of ONE clip (the one under the playhead, else the first on the timeline), and the queue used to be plain first-in
+// first-out, so a clip dropped last waited behind every earlier import. Only this queue is reordered (speech, loudness and exports are other queues).
+describe("the copy of the clip the person is looking at is built first (UJ-091)", () => {
+  const PATHS = [
+    "library/a.mp4",
+    "library/b.mp4",
+    "library/c.mp4",
+    "library/d.mp4",
+    "library/e.mp4",
+  ];
+  /** A timeline whose clips sit at `starts` (frames, 30 fps, 60 frames long), in the track order given. */
+  function spans(starts: Record<string, number>): Timeline {
+    return {
+      canvas: { width: 1, height: 1, fps: 30 },
+      tracks: [
+        {
+          id: "v",
+          clips: Object.entries(starts).map(([ref, at], i) => ({
+            id: `c${i}`,
+            media_ref: ref,
+            timeline_in: at,
+            timeline_out: at + 60,
+          })),
+        },
+      ],
+    } as Any;
+  }
+  /** Every copy waits at its own gate; `started` is the order the workers took them in. */
+  function gated() {
+    const started: string[] = [];
+    const open = new Map<string, () => void>();
+    (processImportedMedia as Any).mockImplementation(async (_s: Any, _r: Any, src: string) => {
+      started.push(src);
+      await new Promise<void>((res) => open.set(src, res));
+      return false;
+    });
+    return { started, open, release: (src: string) => open.get(src)?.() };
+  }
+
+  it("a sweep puts the clip under the playhead ahead of the copies that were queued first", async () => {
+    const g = gated();
+    const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+    // a..e in that order; e is under the playhead (frame 300 = 10 s)
+    await c.sweep(
+      spans({
+        "library/a.mp4": 0,
+        "library/b.mp4": 60,
+        "library/c.mp4": 120,
+        "library/d.mp4": 180,
+        "library/e.mp4": 290,
+      }),
+      10,
+    );
+    await settle(() => g.started.length >= 2);
+    expect(g.started[0]).toBe("library/e.mp4");
+    c.dispose();
+  });
+
+  it("with the playhead past every clip, the first clip ON THE TIMELINE goes first, not the first in track order", async () => {
+    const g = gated();
+    const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+    // track order a, b, c, d, e but c starts first on the timeline
+    await c.sweep(
+      spans({
+        "library/a.mp4": 500,
+        "library/b.mp4": 400,
+        "library/c.mp4": 10,
+        "library/d.mp4": 300,
+        "library/e.mp4": 200,
+      }),
+      1000,
+    );
+    await settle(() => g.started.length >= 2);
+    expect(g.started[0]).toBe("library/c.mp4");
+    c.dispose();
+  });
+
+  it("moving the playhead to another clip puts that clip's copy next among those still waiting, and never interrupts one that is running", async () => {
+    const g = gated();
+    const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+    const timeline = spans({
+      "library/a.mp4": 0,
+      "library/b.mp4": 100,
+      "library/c.mp4": 200,
+      "library/d.mp4": 300,
+      "library/e.mp4": 400,
+    });
+    await c.sweep(timeline, 0);
+    await settle(() => g.started.length >= 2); // a and b are being built, c d e wait
+    expect(g.started).toEqual(["library/a.mp4", "library/b.mp4"]);
+    c.focus(timeline, 14); // frame 420: clip e
+    c.focus(timeline, 0); // back on a, which is already running: nothing happens
+    g.release("library/a.mp4");
+    await settle(() => g.started.length >= 3);
+    expect(g.started[2]).toBe("library/e.mp4"); // not c, which was queued first
+    expect(g.started.filter((s) => s === "library/a.mp4")).toHaveLength(1); // a, running, was not restarted
+    c.dispose();
+  });
+
+  it("prioritizeProxy says whether the copy was waiting, and leaves everything else in its order", async () => {
+    const g = gated();
+    const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+    await c.sweep(tl(PATHS.map((media_ref) => ({ media_ref }))));
+    await settle(() => g.started.length >= 2);
+    expect(c.prioritizeProxy("library/a.mp4")).toBe(false); // running
+    expect(c.prioritizeProxy("library/never-seen.mp4")).toBe(false);
+    expect(c.prioritizeProxy("library/d.mp4")).toBe(true);
+    g.release("library/a.mp4");
+    g.release("library/b.mp4");
+    await settle(() => g.started.length >= 4);
+    // d jumped; c and e kept their order
+    expect(g.started.slice(2)).toEqual(["library/d.mp4", "library/c.mp4"]);
+    c.dispose();
+  });
+
+  it("a timeline with nothing to build, or a disposed coordinator, changes nothing", async () => {
+    const g = gated();
+    const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+    c.focus(null, 0);
+    c.focus(spans({}), 0);
+    c.dispose();
+    c.focus(spans({ "library/a.mp4": 0 }), 0);
+    expect(g.started).toEqual([]);
+  });
+});
+
+// UJ-091: what is being prepared, how far, and for how long, is a row the stage and the library tile read.
+describe("the copies being built are listed while they are built (UJ-091)", () => {
+  const jobs = () => useProxyJobs.getState().jobs;
+  beforeEach(() => useProxyJobs.setState({ jobs: [] }));
+
+  it("a copy that is really being made has a row with the file's name, its ids and its progress, and the row is gone when it is done", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    (processImportedMedia as Any).mockImplementation(
+      async (_s: Any, _r: Any, _src: Any, mark?: () => void, _sig?: Any, hooks?: Any) => {
+        mark?.();
+        hooks?.onProgress?.({ outMs: 2500, totalMs: 5000, speed: 2, done: false });
+        await gate;
+        return true;
+      },
+    );
+    const c = new IndexCoordinator(
+      fakeStore([{ path: "library/a.mp4", id: "media_a", filename: "drone_0412.mov" } as Any]),
+      makeRunner,
+      vi.fn(),
+      vi.fn(),
+    );
+    await c.sweep(tl([{ media_ref: "media_a" }]));
+    await settle(() => jobs().length > 0 && jobs()[0].fraction !== null);
+    expect(jobs()).toHaveLength(1);
+    expect(jobs()[0]).toMatchObject({ name: "drone_0412.mov", refs: ["media_a"], fraction: 0.5 });
+    release();
+    await settle(() => jobs().length === 0);
+    expect(jobs()).toEqual([]);
+    c.dispose();
+  });
+
+  it("a source that needs no copy never has a row", async () => {
+    (processImportedMedia as Any).mockImplementation(async () => true); // never calls mark()
+    const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+    const seen: number[] = [];
+    const off = useProxyJobs.subscribe((s) => seen.push(s.jobs.length));
+    await c.sweep(tl([{ media_ref: "library/a.mp4" }]));
+    await settle(() => processImportedMedia.mock.calls.length > 0);
+    await new Promise((r) => setTimeout(r, 20));
+    off();
+    expect(seen).toEqual([]);
+    c.dispose();
+  });
+
+  it("a copy that fails leaves no row behind", async () => {
+    (processImportedMedia as Any).mockImplementation(
+      async (_s: Any, _r: Any, _src: Any, mark?: () => void) => {
+        mark?.();
+        throw new Error("ffmpeg died");
+      },
+    );
+    const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+    await c.sweep(tl([{ media_ref: "library/a.mp4" }]));
+    await settle(() => reportAppError.mock.calls.length > 0);
+    expect(jobs()).toEqual([]);
+    c.dispose();
+  });
+
+  it("closing the project takes its rows away at once, not when the stopped job finally returns", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    (processImportedMedia as Any).mockImplementation(
+      async (_s: Any, _r: Any, _src: Any, mark?: () => void) => {
+        mark?.();
+        await gate;
+        return false;
+      },
+    );
+    const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+    await c.sweep(tl([{ media_ref: "library/a.mp4" }]));
+    await settle(() => jobs().length > 0);
+    expect(jobs()).toHaveLength(1);
+    c.dispose();
+    expect(jobs()).toEqual([]);
+    release();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(jobs()).toEqual([]);
+  });
+
+  it("the poster announced before the copy refreshes the stage then, not at the end", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    (processImportedMedia as Any).mockImplementation(
+      async (_s: Any, _r: Any, _src: Any, _mark: Any, _sig: Any, hooks?: Any) => {
+        hooks?.onArtifacts?.();
+        await gate; // the copy is still being built
+        return true;
+      },
+    );
+    const onProxy = vi.fn();
+    const c = new IndexCoordinator(fakeStore(), makeRunner, onProxy, vi.fn());
+    await c.sweep(tl([{ media_ref: "library/a.mp4" }]));
+    await settle(() => onProxy.mock.calls.length > 0);
+    expect(onProxy).toHaveBeenCalledTimes(1);
+    expect(clearSourceUrlCache).toHaveBeenCalledTimes(1);
+    release();
+    await settle(() => onProxy.mock.calls.length > 1);
+    expect(onProxy).toHaveBeenCalledTimes(2); // and again when the copy lands
+    c.dispose();
   });
 });

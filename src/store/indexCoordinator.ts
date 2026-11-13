@@ -57,6 +57,8 @@ import type { Timeline } from "../timeline/model";
 import { kindOf } from "../media/formats";
 import { reportAppError } from "../api/appEvents";
 import { useSpeechJobs } from "./speechJobs";
+import { useProxyJobs } from "./proxyJobs";
+import { focusRef, frameAt } from "./proxyOrder";
 
 /** Names the entries this indexer shows the chip while an export holds its turn back. */
 let queuedSeq = 0;
@@ -143,6 +145,11 @@ const MAX_ENGINE_ATTEMPTS = 3;
 
 export class IndexCoordinator {
   private readonly proxyQ: string[] = [];
+  /** What the last sweep learned about the library: which path each id names, and what the person calls each file (the rows of the copies being built need both). */
+  private pathById = new Map<string, string>();
+  private nameByPath = new Map<string, string>();
+  /** The sources this coordinator has a row for in the copies-in-progress store, so a closing project takes exactly its own away. */
+  private readonly rows = new Set<string>();
   private readonly txQ: TxJob[] = [];
   /** Whole files this PC would take longer than the cap to transcribe, left for the parts a request uses
    *  (S2-02): out of the queue, so they never block what is behind them and never spin it. They come back
@@ -191,8 +198,10 @@ export class IndexCoordinator {
   }
 
   /** Scan the timeline + library catalog and enqueue any not-yet-seen work. Cheap
-   *  to call on every edit — the seen-set means only NEW media enqueues anything. */
-  async sweep(timeline: Timeline | null): Promise<void> {
+   *  to call on every edit — the seen-set means only NEW media enqueues anything.
+   *  `playheadSeconds` is where the person is looking: the copy of the clip there (else the first on
+   *  the timeline) is built before the others that are still waiting (UJ-091). */
+  async sweep(timeline: Timeline | null, playheadSeconds = 0): Promise<void> {
     if (this.disposed) return;
     // A clip's media_ref is a bare library id, which carries no extension — and both
     // passes are gated on one. Map ids to their catalog path FIRST so placed clips
@@ -208,6 +217,14 @@ export class IndexCoordinator {
       clips = await this.store.listClips();
       byId = new Map(
         clips.map((c) => [String(c.id ?? ""), typeof c.path === "string" ? c.path : ""]),
+      );
+      this.pathById = byId;
+      this.nameByPath = new Map(
+        clips.flatMap((c) =>
+          typeof c.path === "string" && c.path && typeof c.filename === "string" && c.filename
+            ? ([[c.path, c.filename]] as const)
+            : [],
+        ),
       );
       pending = new Set(
         clips
@@ -251,6 +268,27 @@ export class IndexCoordinator {
         this.enqueue("loudness", p);
       }
     }
+    this.focus(timeline, playheadSeconds);
+  }
+
+  /** The copy of the clip the person is looking at (under the playhead, else the first on the timeline) is built NEXT, if it is still waiting. The queue is the
+   *  app's own proxy queue only: speech, loudness and exports are other queues and are not touched (UJ-091). Cheap when nothing waits, so the editor may call
+   *  it as the playhead moves. */
+  focus(timeline: Timeline | null | undefined, playheadSeconds: number): void {
+    if (this.disposed || this.proxyQ.length === 0 || !timeline) return;
+    const ref = focusRef(timeline, frameAt(timeline, playheadSeconds));
+    if (ref) this.prioritizeProxy(this.pathById.get(ref) || ref);
+  }
+
+  /** Build `source`'s copy NEXT when it is still waiting. One that is already being built, or is done, is left alone: nothing is interrupted. False when it is not waiting. */
+  prioritizeProxy(source: string): boolean {
+    const at = this.proxyQ.indexOf(source);
+    if (at < 0) return false;
+    if (at > 0) {
+      this.proxyQ.splice(at, 1);
+      this.proxyQ.unshift(source);
+    }
+    return true;
   }
 
   /** Index one specific just-imported source (e.g. a manual drop before it's on
@@ -274,6 +312,9 @@ export class IndexCoordinator {
     this.settleLooks({ error: "the project was closed before its loudness was measured" });
     this.unregister();
     this.ac.abort();
+    // A closing project leaves no "preparing" row behind on the next project's screen.
+    for (const s of this.rows) useProxyJobs.getState().finish(s);
+    this.rows.clear();
   }
 
   /** Transcribe `source` (in `language`, "" = the default), the whole file or only `window`, NEXT:
@@ -418,16 +459,41 @@ export class IndexCoordinator {
     mods: IndexModules,
     markImporting: () => void,
   ): Promise<void> {
-    const changed = await mods.processImportedMedia(
-      this.store,
-      runner,
-      source,
-      markImporting,
-      this.ac.signal,
-    );
-    if (changed && !this.disposed) {
-      mods.clearSourceUrlCache();
-      this.onProxyReady();
+    // A copy that is really being made gets a row (what, how far, how long is left) the moment the job decides it needs one: a
+    // poster-only video, or one the preview plays as it is, never shows a "preparing" line.
+    const begin = (): void => {
+      markImporting();
+      if (this.disposed || this.rows.has(source)) return;
+      this.rows.add(source);
+      const refs = [...this.pathById].filter(([, p]) => p === source).map(([id]) => id);
+      const name = this.nameByPath.get(source) || source.split(/[\\/]/).pop() || source;
+      useProxyJobs.getState().begin(source, name, refs);
+    };
+    try {
+      const changed = await mods.processImportedMedia(
+        this.store,
+        runner,
+        source,
+        begin,
+        this.ac.signal,
+        {
+          // The poster is on disk and the copy is minutes away: show the picture now.
+          onArtifacts: () => {
+            if (this.disposed) return;
+            mods.clearSourceUrlCache();
+            this.onProxyReady();
+          },
+          onProgress: (p) => {
+            if (!this.disposed) useProxyJobs.getState().progress(source, p);
+          },
+        },
+      );
+      if (changed && !this.disposed) {
+        mods.clearSourceUrlCache();
+        this.onProxyReady();
+      }
+    } finally {
+      if (this.rows.delete(source)) useProxyJobs.getState().finish(source);
     }
   }
 
