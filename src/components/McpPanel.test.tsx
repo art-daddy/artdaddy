@@ -54,8 +54,8 @@ const codeBlocks = () =>
 // The pane reads `running` from a module-level store now, so one test's refresh would otherwise
 // leave the next one thinking the server is up.
 beforeEach(() => {
-  useMcpPanel.setState({ open: false, running: false, starting: false });
-  useMcpConnections.getState().clear();
+  useMcpPanel.setState({ open: false, running: false, runningSince: null, starting: false });
+  useMcpConnections.getState().reset();
   clearMcpLastError();
   reported.length = 0;
 });
@@ -217,7 +217,7 @@ describe("MCP setup pane: while the app waits for the port", () => {
 
     expect(screen.getByText("Starting…")).toBeInTheDocument();
     expect(screen.getByText(/waits up to 10 seconds/)).toBeInTheDocument();
-    expect(screen.queryByText("Stopped")).toBeNull();
+    expect(screen.queryByText("MCP server is off")).toBeNull();
     expect(screen.queryByText(/Turn this on before adding/)).toBeNull();
     // Clicking now would start a second series of attempts on the same port.
     expect(screen.getByText("Turn on").closest("button")).toBeDisabled();
@@ -303,7 +303,7 @@ describe("MCP setup pane: who has connected", () => {
     await screen.findByLabelText("Agents that have connected");
     expect(rows()).toHaveLength(1);
     expect(rows()[0]).toHaveTextContent("Claude Code 2.1.4");
-    expect(rows()[0]).toHaveTextContent("last tool call 42 s ago");
+    expect(rows()[0]).toHaveTextContent(/last tool call (42|43) s ago/); // the clock moves a little between the two readings
     expect(rows()[0]).toHaveTextContent("1 call");
     expect(screen.queryByText(/Waiting for an agent/)).toBeNull();
   });
@@ -434,11 +434,17 @@ describe("MCP setup pane: a setup that has produced nothing", () => {
     act(() => useMcpSetups.getState().wrote(client, Date.now() - minutesAgo * 60_000));
   const hintFor = (label: string) =>
     screen.queryByText(new RegExp(`nothing from ${label} has connected yet`));
+  // the server has been up for a while (the three minutes are counted from the later of the setup and the server coming up)
+  const serverUp = (minutesAgo = 30) =>
+    act(() =>
+      useMcpPanel.setState({ running: true, runningSince: Date.now() - minutesAgo * 60_000 }),
+    );
 
   beforeEach(() => useMcpSetups.getState().clear());
 
   it("says, under that app's entry, how long ago it was set up and what to do next", async () => {
     running();
+    serverUp();
     written("claude_desktop", 4);
     render(<McpPanel />);
     expect(
@@ -461,6 +467,7 @@ describe("MCP setup pane: a setup that has produced nothing", () => {
 
   it("goes the moment a program of that kind connects (setup first, connection later)", async () => {
     running();
+    serverUp();
     written("cursor", 5);
     render(<McpPanel />);
     expect(await screen.findByText(/nothing from Cursor has connected yet/)).toBeInTheDocument();
@@ -468,8 +475,31 @@ describe("MCP setup pane: a setup that has produced nothing", () => {
     await waitFor(() => expect(hintFor("Cursor")).toBeNull());
   });
 
+  // The witness flipped the switch four times: the list of connected programs is emptied each time the server goes down, but an app that DID
+  // connect in this run must never be reported as one that never did, and a server that has only just come back has not had three minutes.
+  it("never says an app that connected earlier in this run never connected, after the switch was turned off and on", async () => {
+    running();
+    serverUp();
+    written("cursor", 12);
+    act(() => useMcpConnections.getState().connected({ name: "cursor-vscode", version: "1.0.0" }));
+    act(() => useMcpConnections.getState().clear()); // what stopping the server does
+    render(<McpPanel />);
+    await screen.findByText(/Waiting for an agent to connect/);
+    expect(hintFor("Cursor")).toBeNull();
+  });
+
+  it("does not say a setup has produced nothing while the server has only just come back up", async () => {
+    running();
+    serverUp(1); // up for one minute: the setup is old, the server is not
+    written("codex", 20);
+    render(<McpPanel />);
+    await screen.findByText(/Waiting for an agent to connect/);
+    expect(hintFor("Codex")).toBeNull();
+  });
+
   it("never shows for an app that connected before the setup was written, and not for one of another kind", async () => {
     running();
+    serverUp();
     act(() => useMcpConnections.getState().connected({ name: "codex", version: "0.5" }));
     written("codex", 10);
     written("vscode", 10);
@@ -520,7 +550,7 @@ describe("MCP setup pane: a setup that has produced nothing", () => {
 // UJ-085: the server starts ON, so the first press on a button that only said "On" turned it OFF (4 of the 5 people with switch confusion). The
 // state is in words and the action is named, in both states and while it starts.
 describe("MCP setup pane: the switch says its state and its action", () => {
-  const sw = () => screen.getByRole("switch", { name: "MCP server" });
+  const sw = () => screen.getByRole("switch", { name: /MCP server/ });
 
   it("on: 'MCP server is on' with Turn off, checked", async () => {
     vi.mocked(mcpStatus).mockResolvedValue({ running: true, port: MCP_PORT });
@@ -564,8 +594,13 @@ describe("MCP setup pane: the switch says its state and its action", () => {
 describe("the dialog that holds the pane", () => {
   it("keeps the pane inside a scroll container with a viewport-relative height cap, so its title and Close stay on screen", () => {
     const source = readFileSync(path.resolve(process.cwd(), "src/components/MenuBar.tsx"), "utf8");
-    expect(source).toMatch(
-      /<Overlay title="Connect an AI agent"[^>]*>\s*(\{\/\*[\s\S]*?\*\/\}\s*)?<div className="max-h-\[calc\(100vh-[0-9.]+rem\)\] overflow-y-auto[^"]*">\s*<McpPanel \/>\s*<\/div>/,
+    const from = source.indexOf('title="Connect an AI agent"');
+    const to = source.indexOf("</Overlay>", from);
+    expect(from, "the dialog moved: the check needs updating").toBeGreaterThan(0);
+    expect(to).toBeGreaterThan(from);
+    // a cap of at least 9rem leaves room for the title, the padding and the Close row inside an 820 px-high window
+    expect(source.slice(from, to)).toMatch(
+      /<div className="[^"]*max-h-\[calc\(100vh-(9|[12][0-9])(\.[0-9]+)?rem\)\][^"]*overflow-y-auto[^"]*">\s*<McpPanel \/>\s*<\/div>/,
     );
   });
 });

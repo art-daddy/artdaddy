@@ -274,13 +274,14 @@ describe("what a program was answered with, for the panel (UJ-085)", () => {
       },
     }));
 
-  /** One request through the REAL `dispatch`, recorded the way the bridge does it; the program is the one the app heard from. */
-  async function ask(method: string, params?: Record<string, unknown>) {
+  /** One request through the REAL `dispatch`, recorded the way the bridge does it; the program is the one the app heard from (optionally already handed the tool list). */
+  async function ask(method: string, params?: Record<string, unknown>, listedFirst = false) {
     const { dispatch, recordAnswer } = await import("./bridge");
     const { useMcpConnections, programState } = await import("./connections");
     useMcpConnections.getState().clear();
     useMcpConnections.getState().connected(who);
     useMcpConnections.getState().asked(who);
+    if (listedFirst) useMcpConnections.getState().answered(who, "list");
     const req = { id: 1, method, params: params ?? {}, client: who };
     const payload = await dispatch(req as never);
     const before = JSON.stringify(payload);
@@ -372,6 +373,45 @@ describe("what a program was answered with, for the panel (UJ-085)", () => {
       expect(r.state).toBe("used");
       expect(r.program).toMatchObject({ calls: 1, lists: 0 });
       expect(r.program.lastCallAt).not.toBeNull();
+    },
+  );
+
+  // A reply that says nothing ran is not a tool used, whatever its shape: an agent with a wrong or prefixed tool name (or no project open) must not be told "can edit this project".
+  it.each([
+    ["no project is open", { name: "get_timeline", arguments: {} }, ""],
+    ["the tool is not one that is offered", { name: "not_an_offered_tool", arguments: {} }, "p1"],
+    [
+      "manage_project is asked for an action it does not have",
+      { name: "manage_project", arguments: { action: "no_such_action" } },
+      "p1",
+    ],
+  ])(
+    "a call where %s ran nothing and leaves the program at 'listed', not 'used'",
+    async (_name, params, activeId) => {
+      door(false);
+      vi.doMock("../store/projects", () => ({
+        useProjects: {
+          getState: () => ({
+            activeId,
+            active: activeId ? { id: activeId, name: "QA" } : null,
+            refresh: async () => {},
+          }),
+        },
+      }));
+      vi.doMock("../project/openDocuments", () => ({ openDocumentById: () => ({}) }));
+      vi.doMock("../tools/host", () => ({
+        openToolHost: () => ({
+          ready: Promise.resolve(),
+          has: () => true,
+          run: async () => ({ ok: true }),
+          store: () => null,
+        }),
+      }));
+      const r = await ask("tools/call", params, true);
+      expect(r.payload.isError).toBe(true);
+      expect(r.state).toBe("listed");
+      expect(r.program).toMatchObject({ lists: 1, calls: 0 });
+      expect(r.bytesUnchanged).toBe(true);
     },
   );
 

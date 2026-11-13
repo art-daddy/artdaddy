@@ -13,6 +13,8 @@ import {
   MAX_CONNECTED_PROGRAMS,
   agoLabel,
   isActive,
+  holdsToolListTooLong,
+  LISTED_WARNING_AFTER_MS,
   leadProgram,
   programState,
   programTitle,
@@ -25,7 +27,7 @@ const claude = { name: "claude-code", version: "2.1.4" };
 const cursor = { name: "cursor-vscode", version: "1.0.0" };
 const listed = () => useMcpConnections.getState().programs;
 
-beforeEach(() => useMcpConnections.getState().clear());
+beforeEach(() => useMcpConnections.getState().reset());
 
 describe("who is listed", () => {
   it("lists nobody until a program announces itself or asks for something", () => {
@@ -80,10 +82,13 @@ describe("who is listed", () => {
     },
   );
 
-  it("empties the list when the server is switched off", () => {
+  it("empties the list when the server is switched off, but remembers which kinds of program connected in this run", () => {
     useMcpConnections.getState().connected(claude, 1_000);
     useMcpConnections.getState().clear();
     expect(listed()).toEqual([]);
+    expect(useMcpConnections.getState().seen).toEqual({ claude_code: true });
+    useMcpConnections.getState().reset();
+    expect(useMcpConnections.getState().seen).toEqual({});
   });
 
   it("lists, whatever happens, no more than the cap, each program once, the most recent first", () => {
@@ -198,6 +203,18 @@ describe("what a program has been seen to do (UJ-085)", () => {
     answered(claude, "call", 2_000);
     expect(state()).toBe("used");
     expect(listed()[0].lists).toBe(0);
+  });
+
+  it("holds the tool list too long at exactly three minutes, only while it is still heard from, and never once it used a tool", () => {
+    const { asked, answered } = useMcpConnections.getState();
+    asked(claude, 1_000);
+    answered(claude, "list", 1_000);
+    const [p] = listed();
+    expect(holdsToolListTooLong(p, 1_000 + LISTED_WARNING_AFTER_MS - 1)).toBe(false);
+    expect(holdsToolListTooLong(p, 1_000 + LISTED_WARNING_AFTER_MS)).toBe(true);
+    expect(holdsToolListTooLong(p, 1_000 + ACTIVE_WINDOW_MS + 1)).toBe(false); // gone quiet: not worth a warning
+    answered(claude, "call", 1_000 + LISTED_WARNING_AFTER_MS);
+    expect(holdsToolListTooLong(listed()[0], 1_000 + LISTED_WARNING_AFTER_MS)).toBe(false);
   });
 
   it("keeps two programs apart: one that listed and one that used", () => {

@@ -36,12 +36,16 @@ export default function McpChip() {
   const lead = leadProgram(lately);
   const state = lead ? programState(lead) : null;
   const name = lead ? programTitle(lead) : "";
-  const more = lately.length > 1 ? ` +${lately.length - 1}` : "";
+  // "+N" is how many other programs are heard from lately; after "Connected:" it counts only those that used a tool too, so it never reads as two connected when one only listed.
+  const others = lately.filter((p) => p !== lead);
+  const more = (state === "used" ? others.filter((p) => programState(p) === "used") : others)
+    .length;
+  const plus = more > 0 ? ` +${more}` : "";
   const label = !lead
     ? "Connect your own agent/MCP"
     : state === "used"
-      ? `Connected: ${name}${more}`
-      : `${name}: ${state === "listed" ? "no tool used yet" : "connected"}${more}`;
+      ? `Connected: ${name}${plus}`
+      : `${name}: ${state === "listed" ? "no tool used yet" : "connected"}${plus}`;
   const title = !running
     ? "Let Claude, Cursor or Codex edit this project"
     : !lead

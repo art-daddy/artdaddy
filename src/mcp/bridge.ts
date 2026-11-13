@@ -87,20 +87,21 @@ function textResult(
   return { content: [{ type: "text", text }, ...extra], isError };
 }
 
-/** The replies that say "nothing ran, the app is gated" (the build is not verified, the app is signed out). They are text errors like any tool failure, so the panel
- *  cannot tell them apart by their shape; they are remembered BY IDENTITY here, which leaves the bytes the program receives exactly as they were. */
-const gateRefusals = new WeakSet<object>();
+/** The replies that mean "nothing ran": the app is gated (the build is not verified, it is signed out), no project is open, the tool is not offered, or manage_project was asked
+ *  something it cannot do. They are text errors like any tool failure, so the panel cannot tell them apart by their shape; they are remembered BY IDENTITY here, which leaves the bytes
+ *  the program receives exactly as they were. A tool that RAN and failed is not one of them. */
+const nothingRanReplies = new WeakSet<object>();
 
-function gateRefusal(value: unknown): Record<string, unknown> {
-  const refusal = textResult(value, true);
-  gateRefusals.add(refusal);
-  return refusal;
+function nothingRan(value: unknown): Record<string, unknown> {
+  const reply = textResult(value, true);
+  nothingRanReplies.add(reply);
+  return reply;
 }
 
 function compatibilityRefusal(): Record<string, unknown> | null {
   return compatibilityAllowsWork()
     ? null
-    : gateRefusal({
+    : nothingRan({
         ran: false,
         reason:
           "ArtDaddy must verify this build or install a required update before any tool can run.",
@@ -149,7 +150,7 @@ async function manageProject(args: Record<string, unknown>): Promise<Record<stri
     }
     case "open": {
       const id = String(args.id ?? "");
-      if (!id) return textResult("open requires 'id' (from action='list')", true);
+      if (!id) return nothingRan("open requires 'id' (from action='list')");
       const ready = await activateProject(id);
       const refused = compatibilityRefusal();
       if (refused) return refused;
@@ -183,7 +184,7 @@ async function manageProject(args: Record<string, unknown>): Promise<Record<stri
     }
     case "create": {
       const name = String(args.name ?? "").trim();
-      if (!name) return textResult("create requires 'name'", true);
+      if (!name) return nothingRan("create requires 'name'");
       const summary = await store.create(
         name,
         args.aspect ? String(args.aspect) : undefined,
@@ -206,7 +207,7 @@ async function manageProject(args: Record<string, unknown>): Promise<Record<stri
       return textResult({ created: summary.id, name: summary.name, ready });
     }
     default:
-      return textResult(`unknown action '${action}' â€” use list, current, open, or create`, true);
+      return nothingRan(`unknown action '${action}' â€” use list, current, open, or create`);
   }
 }
 
@@ -222,9 +223,8 @@ async function callTool(
 
   const activeId = trace.context.project_id;
   if (!activeId) {
-    return textResult(
+    return nothingRan(
       "No project is open. Call manage_project with action='list' then action='open' first.",
-      true,
     );
   }
 
@@ -243,7 +243,7 @@ async function callTool(
   // store for a local edit, an HTTP 401 for a hosted one -- and an agent has no way to read
   // either as "the human needs to sign in".
   if (ready === "signed-out") {
-    return gateRefusal({
+    return nothingRan({
       tool: name,
       ran: false,
       reason:
@@ -257,8 +257,8 @@ async function callTool(
   // would otherwise still reach it.
   const { allTools } = await contract();
   const offered = new Set(allTools().map((t) => t.name));
-  if (!offered.has(name)) return textResult(`unknown tool: ${name}`, true);
-  if (!host.has(name)) return textResult(`unknown tool: ${name}`, true);
+  if (!offered.has(name)) return nothingRan(`unknown tool: ${name}`);
+  if (!host.has(name)) return nothingRan(`unknown tool: ${name}`);
 
   // No `origin` is passed: an MCP call is not part of a chat execution, so the mutation gate's
   // supersede check does not apply to it. It still runs under the project lock like any edit.
@@ -352,7 +352,7 @@ export async function dispatch(
   // surface the user cannot reach, and the next method added would start out ungated.
   const { isSignedOutGate } = await import("../store/auth");
   if (isSignedOutGate()) {
-    return gateRefusal({
+    return nothingRan({
       ran: false,
       reason: `${BRAND.displayName} is signed out, so nothing can be listed or run`,
       remedy: `ask the user to sign in to ${BRAND.displayName}, then try again`,
@@ -399,14 +399,14 @@ export async function dispatch(
 let wiring: Promise<void> | null = null;
 
 /** Note what the program was answered with, for the panel and the chip: a `tools/list` reply that really carried tools, or a `tools/call` that got past the door to a tool
- *  (whether or not the tool then succeeded). A refusal at the gate (the build is not verified, the app is signed out) is neither: the program stays at "connected". Never throws,
+ *  (whether or not the tool then succeeded). A reply that means nothing ran (gated, no project open, an unknown tool: see `nothingRan`) is neither: the program stays where it was. Never throws,
  *  and never touches the payload: a failure here must not stall the reply the connection thread is waiting for. */
 export function recordAnswer(
   req: Pick<BridgeRequest, "method" | "client">,
   payload: unknown,
 ): void {
   try {
-    if (!payload || typeof payload !== "object" || gateRefusals.has(payload)) return;
+    if (!payload || typeof payload !== "object" || nothingRanReplies.has(payload)) return;
     if (req.method === "tools/list") {
       const tools = (payload as { tools?: unknown }).tools;
       if (Array.isArray(tools) && tools.length > 0)

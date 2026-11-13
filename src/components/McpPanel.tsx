@@ -31,6 +31,7 @@ import {
 } from "../mcp/service";
 import {
   agoLabel,
+  holdsToolListTooLong,
   isActive,
   programState,
   programTitle,
@@ -123,11 +124,12 @@ function Snippet({ label, client, code, note, install, installer }: Client) {
   const [done, setDone] = useState(false);
   const writtenAt = useMcpSetups((s) => s.written[client]);
   const wrote = useMcpSetups((s) => s.wrote);
-  const programs = useMcpConnections((s) => s.programs);
+  const seen = useMcpConnections((s) => s.seen);
   const running = useMcpPanel((s) => s.running);
+  const serverOnSince = useMcpPanel((s) => s.runningSince);
   const now = useNow(10_000, running && writtenAt !== undefined);
   // A setup that was written and has produced nothing: said under that app's entry only, never on the chip.
-  const nudge = setupHint(client, writtenAt, programs, now, running);
+  const nudge = setupHint(client, writtenAt, serverOnSince, seen, now, running);
 
   const run = async (): Promise<InstallOutcome> =>
     installer ? await installer() : await openInstallLink(install!());
@@ -190,9 +192,6 @@ function Snippet({ label, client, code, note, install, installer }: Client) {
   );
 }
 
-/** How long a program may hold the tool list without using a tool before the panel says so. */
-const LISTED_WARNING_AFTER_MS = 3 * 60_000;
-
 /** What a program has been SEEN to do, in words: it said hello, it was given the tool list, it used a tool. */
 function programDetail(p: ConnectedProgram, now: number): string {
   switch (programState(p)) {
@@ -224,11 +223,10 @@ function ConnectedPrograms() {
     <ul className="mt-2 space-y-1" aria-label="Agents that have connected">
       {programs.map((p) => {
         const state = programState(p);
-        const stuck =
-          state === "listed" && p.listedAt !== null && now - p.listedAt >= LISTED_WARNING_AFTER_MS;
+        const stuck = holdsToolListTooLong(p, now);
         return (
           <li key={p.key} className="text-[11px] text-neutral-300">
-            <div className="flex items-center gap-1.5">
+            <div className="flex flex-wrap items-center gap-x-1.5">
               <span
                 className={cn(
                   "h-1.5 w-1.5 shrink-0 rounded-full",
@@ -245,7 +243,7 @@ function ConnectedPrograms() {
                 {programTitle(p)}
                 {p.version ? ` ${p.version}` : ""}
               </span>
-              <span className="shrink-0 text-neutral-500">· {programDetail(p, now)}</span>
+              <span className="min-w-0 text-neutral-500">· {programDetail(p, now)}</span>
             </div>
             {stuck && (
               <p className="mt-0.5 pl-3 text-amber-400">
@@ -336,7 +334,7 @@ export default function McpPanel() {
           type="button"
           role="switch"
           aria-checked={running}
-          aria-label="MCP server"
+          aria-label={running ? "Turn off MCP server" : "Turn on MCP server"}
           onClick={() => void toggle()}
           disabled={waiting}
           className="flex shrink-0 items-center gap-2 text-[11px] text-neutral-300 hover:text-neutral-100 disabled:opacity-50"

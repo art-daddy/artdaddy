@@ -5,7 +5,7 @@
 // the person.
 import { create } from "zustand";
 
-import { agoLabel, type ConnectedProgram } from "./connections";
+import { agoLabel } from "./connections";
 import type { McpClient } from "./clientName";
 
 /** How long a setup may produce nothing before the panel says so. */
@@ -35,18 +35,20 @@ export const NEXT_STEP: Partial<Record<McpClient, string>> = {
   antigravity: "Add the snippet to ~/.gemini/config/mcp_config.json, then restart Antigravity.",
 };
 
-/** What to tell the person about a setup that has produced nothing: null while it is too young, once any program of that kind has connected in this run, while the server is
- *  off (the panel already says to turn it on), and for an app that has no setup written. */
+/** What to tell the person about a setup that has produced nothing: null while it is too young, while the server is off (the panel already says to turn it on), for an app with no
+ *  setup written, and once any program of that kind has connected at any time in this run (`seen` survives a switch-off). The three minutes are counted from the later of the
+ *  setup and the server coming up: an app cannot connect to a server that is down. */
 export function setupHint(
   client: McpClient,
   writtenAt: number | undefined,
-  programs: readonly Pick<ConnectedProgram, "client">[],
+  serverOnSince: number | null,
+  seen: Partial<Record<McpClient, true>>,
   now: number,
   running: boolean,
 ): { ago: string; next: string } | null {
   if (!running || writtenAt === undefined) return null;
-  if (now - writtenAt < SETUP_HINT_AFTER_MS) return null;
-  if (programs.some((p) => p.client === client)) return null;
+  if (now - Math.max(writtenAt, serverOnSince ?? writtenAt) < SETUP_HINT_AFTER_MS) return null;
+  if (seen[client]) return null;
   const next = NEXT_STEP[client];
   return next ? { ago: agoLabel(now - writtenAt), next } : null;
 }

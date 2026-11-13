@@ -35,9 +35,12 @@ vi.mock("@tauri-apps/api/event", () => ({
   },
 }));
 
+const replies: Array<{ id: number; payload: unknown }> = [];
+
 vi.mock("@tauri-apps/api/core", () => ({
-  invoke: async (cmd: string) => {
+  invoke: async (cmd: string, args?: { id?: number; payload?: unknown }) => {
     commands.push(cmd);
+    if (cmd === "mcp_reply") replies.push({ id: Number(args?.id), payload: args?.payload });
     return { running: true, port: 19787 };
   },
 }));
@@ -58,9 +61,12 @@ async function settledWithin(
 
 beforeEach(() => {
   vi.resetModules(); // the bridge memoises its wiring for the life of the module
+  vi.doUnmock("../store/auth");
+  vi.doUnmock("../update/compatibility");
   listenBehaviour = "ok";
   listens = 0;
   commands.length = 0;
+  replies.length = 0;
   handlers.clear();
   reported.length = 0;
 });
@@ -244,5 +250,66 @@ describe("the list of connected programs follows what connects", () => {
   it("does not list anything when the server was never reached by a program", async () => {
     const { useMcpConnections } = await wired();
     expect(useMcpConnections.getState().programs).toEqual([]);
+  });
+
+  // UJ-085: what a program was ANSWERED with is read from the payload the bridge hands back to Rust, in the real request handler, so deleting the
+  // recording there fails these (the pure functions are tested elsewhere).
+  // The tauri platform this file fakes has its own gates; open them (or close the sign-in one) on purpose, so a refusal is the one a test asked for.
+  const gates = (signedOut: boolean) => {
+    vi.doMock("../store/auth", () => ({
+      isSignedOutGate: () => signedOut,
+      useAuth: {
+        getState: () => ({
+          status: signedOut ? "locked" : "unlocked",
+          hasStoredSession: !signedOut,
+        }),
+        subscribe: () => () => undefined,
+      },
+    }));
+    vi.doMock("../update/compatibility", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("../update/compatibility")>()),
+      compatibilityAllowsWork: () => true,
+    }));
+  };
+
+  it("records a tool list that carried tools from the very payload it sends back, and sends it unchanged", async () => {
+    gates(false);
+    const { useMcpConnections } = await wired();
+    handlers.get(REQUEST)!({
+      payload: { id: 41, method: "tools/list", params: {}, client: claude },
+    });
+    await vi.waitFor(() => expect(replies.map((r) => r.id)).toEqual([41]));
+    expect(Object.keys(replies[0].payload as object)).toEqual(["tools"]);
+    expect(useMcpConnections.getState().programs[0]).toMatchObject({
+      requests: 1,
+      lists: 1,
+      calls: 0,
+    });
+  });
+
+  it("does not count a reply that says nothing ran: a tool list refused because the app is signed out stays an asked-for request", async () => {
+    gates(true);
+    const { useMcpConnections } = await wired();
+    handlers.get(REQUEST)!({
+      payload: { id: 42, method: "tools/list", params: {}, client: claude },
+    });
+    await vi.waitFor(() => expect(replies).toHaveLength(1));
+    expect(Object.keys(replies[0].payload as object).sort()).toEqual(["content", "isError"]);
+    expect(useMcpConnections.getState().programs[0]).toMatchObject({ requests: 1, lists: 0 });
+  });
+
+  it("a recorder that throws can never stall or alter the reply the program is waiting for", async () => {
+    gates(false);
+    const { useMcpConnections } = await wired();
+    useMcpConnections.setState({
+      answered: () => {
+        throw new Error("boom");
+      },
+    });
+    handlers.get(REQUEST)!({
+      payload: { id: 43, method: "tools/list", params: {}, client: claude },
+    });
+    await vi.waitFor(() => expect(replies.map((r) => r.id)).toEqual([43]));
+    expect(Object.keys(replies[0].payload as object)).toEqual(["tools"]);
   });
 });

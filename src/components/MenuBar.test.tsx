@@ -64,6 +64,7 @@ import { usePanes } from "../store/panes";
 import { BRAND } from "../brand";
 import { useExportJob } from "../store/exportJob";
 import { __resetSpeechJobs, useSpeechJobs } from "../store/speechJobs";
+import { useMcpPanel } from "../store/mcpPanel";
 import { unknownParams } from "../contract/params";
 
 type ToolReply = {
@@ -496,6 +497,16 @@ describe("MenuBar", () => {
     expect(screen.getByText(/AI video editor/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
     expect(screen.queryByText(/AI video editor/)).not.toBeInTheDocument();
+  });
+
+  // The MCP panel's own Close used to clear another dialog's flag and do nothing: only Esc or a click outside closed it.
+  it("the Connect an AI agent dialog's Close button closes it", async () => {
+    useMcpPanel.setState({ open: true });
+    renderBar();
+    expect(await screen.findByText("Connect an AI agent")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(screen.queryByText("Connect an AI agent")).not.toBeInTheDocument());
+    expect(useMcpPanel.getState().open).toBe(false);
   });
 
   // The server-override control used to live in the (now-deleted) legacy SignInDialog;

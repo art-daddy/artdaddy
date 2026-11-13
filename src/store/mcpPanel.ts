@@ -11,6 +11,8 @@ import { mcpStarting, mcpStatus, onMcpChange } from "../mcp/service";
 interface McpPanelState {
   open: boolean;
   running: boolean;
+  /** When the server last came up (null while it is off): a program cannot connect to a server that is down, so a setup's three minutes are counted from here. */
+  runningSince: number | null;
   /** A start is waiting for the port (the boot hook, or the switch), so "Stopped" would be half the truth. */
   starting: boolean;
   openPanel: () => void;
@@ -19,19 +21,30 @@ interface McpPanelState {
   refresh: () => Promise<void>;
 }
 
+const withRunning = (s: McpPanelState, running: boolean): Partial<McpPanelState> => ({
+  running,
+  runningSince: running
+    ? s.running && s.runningSince !== null
+      ? s.runningSince
+      : Date.now()
+    : null,
+});
+
 export const useMcpPanel = create<McpPanelState>((set) => ({
   open: false,
   running: false,
+  runningSince: null,
   starting: mcpStarting(),
   openPanel: () => set({ open: true }),
   closePanel: () => set({ open: false }),
-  setRunning: (running) => set({ running }),
+  setRunning: (running) => set((s) => withRunning(s, running)),
   refresh: async () => {
     // No desktop host, or the server never started: both mean "not running" to the UI.
     try {
-      set({ running: (await mcpStatus()).running });
+      const { running } = await mcpStatus();
+      set((s) => withRunning(s, running));
     } catch {
-      set({ running: false });
+      set((s) => withRunning(s, false));
     }
   },
 }));

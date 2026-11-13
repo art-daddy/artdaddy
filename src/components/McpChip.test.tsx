@@ -101,6 +101,20 @@ describe("the chat chip", () => {
     );
   });
 
+  it("counts after 'Connected:' only the other programs that used a tool too, so it never reads as two connected when one only has the tool list", async () => {
+    running(true);
+    act(() => {
+      const s = useMcpConnections.getState();
+      s.asked(claude, Date.now() - 5_000);
+      s.answered(claude, "call", Date.now() - 5_000);
+      s.asked(codex, Date.now() - 1_000);
+      s.answered(codex, "list", Date.now() - 1_000);
+    });
+    render(<McpChip />);
+    await vi.waitFor(() => expect(chip()).toHaveTextContent("Connected: Claude Code"));
+    expect(chip()).not.toHaveTextContent("+1");
+  });
+
   it("speaks about the program that got furthest, not the one heard from last", async () => {
     running(true);
     act(() => {
@@ -110,7 +124,8 @@ describe("the chat chip", () => {
       s.connected(codex, Date.now());
     });
     render(<McpChip />);
-    await vi.waitFor(() => expect(chip()).toHaveTextContent("Connected: Claude Code +1"));
+    await vi.waitFor(() => expect(chip()).toHaveTextContent("Connected: Claude Code"));
+    expect(chip()).not.toHaveTextContent("+1"); // the other one only said hello: it is not counted as connected
   });
 
   it("goes back to the invitation when the only program has gone quiet", async () => {

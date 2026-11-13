@@ -664,7 +664,7 @@ export default function MenuBar() {
             <McpPanel />
           </div>
           <div className="mt-4 flex justify-end">
-            <Button variant="primary" onClick={() => setDialog(null)}>
+            <Button variant="primary" onClick={closeMcp}>
               Close
             </Button>
           </div>

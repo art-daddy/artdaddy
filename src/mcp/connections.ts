@@ -95,26 +95,53 @@ function answeredTo(
 
 interface ConnectionsState {
   programs: ConnectedProgram[];
+  /** The kinds of program heard from at any time in this run. Unlike `programs` it survives a switch-off, so "nothing from X has connected" is never said of an app that did. */
+  seen: Partial<Record<McpClient, true>>;
   /** A program announced itself (`initialize`). */
   connected: (info: unknown, now?: number) => void;
   /** A program asked for something; the announcement rides along on each request. */
   asked: (info: unknown, now?: number) => void;
   /** A program was answered: it got a tool list with tools in it, or a tool call reached a tool. */
   answered: (info: unknown, answer: McpAnswer, now?: number) => void;
-  /** The server was switched off: nobody is connected to it any more. */
+  /** The server was switched off: nobody is connected to it any more (the kinds seen in this run are kept). */
   clear: () => void;
+  /** Forget everything, the kinds seen included (tests: a new run starts empty anyway). */
+  reset: () => void;
 }
+
+const seenWith = (seen: ConnectionsState["seen"], info: unknown): ConnectionsState["seen"] => {
+  const { client } = mcpClientFacts(info);
+  return seen[client] ? seen : { ...seen, [client]: true };
+};
 
 export const useMcpConnections = create<ConnectionsState>((set) => ({
   programs: [],
+  seen: {},
   connected: (info, now = Date.now()) =>
-    set((s) => ({ programs: heardFrom(s.programs, info, now, false) })),
+    set((s) => ({
+      programs: heardFrom(s.programs, info, now, false),
+      seen: seenWith(s.seen, info),
+    })),
   asked: (info, now = Date.now()) =>
-    set((s) => ({ programs: heardFrom(s.programs, info, now, true) })),
+    set((s) => ({
+      programs: heardFrom(s.programs, info, now, true),
+      seen: seenWith(s.seen, info),
+    })),
   answered: (info, answer, now = Date.now()) =>
     set((s) => ({ programs: answeredTo(s.programs, info, answer, now) })),
   clear: () => set({ programs: [] }),
+  reset: () => set({ programs: [], seen: {} }),
 }));
+
+/** How long a program may hold the tool list without a completed tool call before the panel says so. */
+export const LISTED_WARNING_AFTER_MS = 3 * 60_000;
+
+/** A program that was given the tool list at least three minutes ago, is still being heard from, and has used no tool. */
+export const holdsToolListTooLong = (p: ConnectedProgram, now: number): boolean =>
+  programState(p) === "listed" &&
+  p.listedAt !== null &&
+  now - p.listedAt >= LISTED_WARNING_AFTER_MS &&
+  isActive(p, now);
 
 /** What a program has been seen to do, and nothing more: it said hello, it was given the tool list, it used a tool. The one place a state word comes from. */
 export type ProgramState = "connected" | "listed" | "used";
