@@ -57,6 +57,7 @@ import type { Timeline } from "../timeline/model";
 import { kindOf } from "../media/formats";
 import { reportAppError } from "../api/appEvents";
 import { useSpeechJobs } from "./speechJobs";
+import { exportFlag } from "../api/exportFlags";
 import { useProxyJobs } from "./proxyJobs";
 import { focusRef, frameAt } from "./proxyOrder";
 
@@ -280,8 +281,10 @@ export class IndexCoordinator {
     if (ref) this.prioritizeProxy(this.pathById.get(ref) || ref);
   }
 
-  /** Build `source`'s copy NEXT when it is still waiting. One that is already being built, or is done, is left alone: nothing is interrupted. False when it is not waiting. */
+  /** Build `source`'s copy NEXT when it is still waiting. One that is already being built, or is done, is left alone: nothing is interrupted. False when it is not waiting,
+   *  and when the server has switched the order off (`proxy_first_needed`: first in, first out, as in 0.27.0). */
   prioritizeProxy(source: string): boolean {
+    if (!exportFlag("proxy_first_needed")) return false;
     const at = this.proxyQ.indexOf(source);
     if (at < 0) return false;
     if (at > 0) {

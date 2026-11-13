@@ -2,6 +2,7 @@ import fc from "fast-check";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { IndexCoordinator } from "./indexCoordinator";
+import { __resetExportFlags, __setExportFlag } from "../api/exportFlags";
 import { useProxyJobs } from "./proxyJobs";
 import type { Timeline } from "../timeline/model";
 import { SPEECH_PACE_KEY } from "../tools/speechPace";
@@ -1617,6 +1618,32 @@ describe("the copy of the clip the person is looking at is built first (UJ-091)"
     await settle(() => g.started.length >= 4);
     expect(g.started.slice(2)).toEqual(["library/c.mp4", "library/d.mp4"]);
     c.dispose();
+  });
+
+  it("with the server's switch off (proxy_first_needed) the queue is first in, first out, as in 0.27.0", async () => {
+    __setExportFlag("proxy_first_needed", false);
+    try {
+      const g = gated();
+      const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+      const timeline = spans({
+        "library/a.mp4": 0,
+        "library/b.mp4": 100,
+        "library/c.mp4": 200,
+        "library/d.mp4": 300,
+        "library/e.mp4": 400,
+      });
+      await c.sweep(timeline, 14); // the playhead is on e
+      await settle(() => g.started.length >= 2);
+      expect(g.started).toEqual(["library/a.mp4", "library/b.mp4"]); // e did not jump
+      expect(c.prioritizeProxy("library/e.mp4")).toBe(false);
+      c.focus(timeline, 14);
+      g.release("library/a.mp4");
+      await settle(() => g.started.length >= 3);
+      expect(g.started[2]).toBe("library/c.mp4");
+      c.dispose();
+    } finally {
+      __resetExportFlags();
+    }
   });
 
   it("a disposed coordinator starts nothing more and reorders nothing", async () => {
