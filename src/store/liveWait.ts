@@ -10,13 +10,21 @@ import { create } from "zustand";
 export type RoundPhase = "preparing" | "waiting" | "writing";
 
 /** Why a sent round has not started answering when the model is not what it waits on: the connection is being re-made,
- *  or the server is still finishing the person's last request. */
+ *  or the server is still finishing the person's last request. (A server that is waking is not a note: the status line
+ *  draws that conclusion itself, from the request's age and the server's silence, components/waitStatus.ts.) */
 export type RoundNote = "reconnecting" | "busy";
 
 export interface LiveRound {
   phase: RoundPhase;
   startedAt: number;
   note?: RoundNote;
+}
+
+/** The live round's request, apart from the round itself: when it went out and whether the server has begun to answer it.
+ *  A model that is thinking and a server that has not answered look the same from the round's phase; this tells them apart. */
+export interface LiveRequest {
+  sentAt: number;
+  answered: boolean;
 }
 
 export interface LiveCall {
@@ -33,6 +41,8 @@ export interface SpeechWait {
 
 interface LiveWaitState {
   round: LiveRound | null;
+  /** The live round's request while it is out, else null. */
+  request: LiveRequest | null;
   /** Tool calls running now, in the order they began (an array: call ids are not ours to trust as keys). */
   calls: LiveCall[];
   /** Tools waiting on speech right now; a tool in here is waiting on transcription, not working. */
@@ -40,7 +50,9 @@ interface LiveWaitState {
   /** When the turn began waiting for the person's answer to an approval, else null. */
   approvalSince: number | null;
   roundStarted: (now?: number) => void;
-  roundSent: () => void;
+  roundSent: (now?: number) => void;
+  /** The server's answer to the live request began (its head arrived). */
+  roundAnswered: () => void;
   roundWriting: () => void;
   /** The request itself is waiting (or has stopped waiting: null). Ignored when no round is live. */
   roundNoted: (note: RoundNote | null) => void;
@@ -56,8 +68,12 @@ interface LiveWaitState {
   clear: () => void;
 }
 
-const empty = (): Pick<LiveWaitState, "round" | "calls" | "speechWaits" | "approvalSince"> => ({
+const empty = (): Pick<
+  LiveWaitState,
+  "round" | "request" | "calls" | "speechWaits" | "approvalSince"
+> => ({
   round: null,
+  request: null,
   calls: [],
   speechWaits: [],
   approvalSince: null,
@@ -66,9 +82,17 @@ const empty = (): Pick<LiveWaitState, "round" | "calls" | "speechWaits" | "appro
 export const useLiveWait = create<LiveWaitState>((set) => ({
   ...empty(),
   roundStarted: (now = Date.now()) =>
-    set({ round: { phase: "preparing", startedAt: now }, approvalSince: null }),
-  roundSent: () =>
-    set((s) => (s.round?.phase === "preparing" ? { round: { ...s.round, phase: "waiting" } } : s)),
+    set({ round: { phase: "preparing", startedAt: now }, request: null, approvalSince: null }),
+  roundSent: (now = Date.now()) =>
+    set((s) =>
+      s.round?.phase === "preparing"
+        ? { round: { ...s.round, phase: "waiting" }, request: { sentAt: now, answered: false } }
+        : s,
+    ),
+  roundAnswered: () =>
+    set((s) =>
+      s.request && !s.request.answered ? { request: { ...s.request, answered: true } } : s,
+    ),
   roundWriting: () =>
     set((s) =>
       s.round && s.round.phase !== "writing"
@@ -82,7 +106,7 @@ export const useLiveWait = create<LiveWaitState>((set) => ({
       if (note) round.note = note;
       return { round };
     }),
-  roundEnded: () => set((s) => (s.round ? { round: null } : s)),
+  roundEnded: () => set((s) => (s.round ? { round: null, request: null } : s)),
   callStarted: (id, name, now = Date.now()) =>
     set((s) => ({
       calls: [...s.calls.filter((c) => c.id !== id), { id, name, startedAt: now }],
@@ -101,7 +125,7 @@ export const useLiveWait = create<LiveWaitState>((set) => ({
         : s,
     ),
   approvalAsked: (now = Date.now()) => set({ approvalSince: now }),
-  pausedForInput: () => set({ round: null, calls: [] }),
+  pausedForInput: () => set({ round: null, request: null, calls: [] }),
   clear: () => set(empty()),
 }));
 

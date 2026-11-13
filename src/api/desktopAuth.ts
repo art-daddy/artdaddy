@@ -16,6 +16,7 @@ import {
 } from "./authEvents";
 import { apiBase } from "./config";
 import { SessionRenewalUnavailableError } from "./http";
+import { noteServerAnswered } from "./serverContact";
 
 const DESKTOP_AUTH_URL = "https://artdaddy.app/auth";
 const DEEP_LINK_PREFIX = "artdaddy://auth/callback";
@@ -559,6 +560,8 @@ async function refreshDesktopSessionOnce(
       return unavailable(e instanceof Error && e.name === "AbortError" ? "timeout" : "network");
     }
     if (sessionGeneration !== expectedGeneration) return superseded();
+    // Whatever it said, a replica answered: the server is awake (the chat's "waking" line reads this, api/serverContact.ts).
+    noteServerAnswered();
     if (res.status === 401) {
       const cleared = await mutateKeychain(async () => {
         if (sessionGeneration !== expectedGeneration) return false;

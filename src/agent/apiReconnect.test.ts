@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setClerkTokenProvider, setSessionRenewer } from "../api/auth";
 import { setApiBase } from "../api/config";
 import { rateLimitConfig, RECONNECT_DELAY_MS, type RoundWait } from "../api/http";
+import { resetServerContact, serverQuietMs } from "../api/serverContact";
 import { clearRecentFailures, recentFailures } from "../observability/recentFailures";
 import { inferRoundStreaming, type InferBody, type RoundDelta } from "./api";
 import { RoundHttpError } from "./failureCopy";
@@ -226,6 +227,33 @@ describe("what the round tells the turn's timing", () => {
     await vi.advanceTimersByTimeAsync(60_000);
     await refused.settled;
     expect(refused.order).toEqual(["head"]);
+  });
+});
+
+// UJ-082: the chat says "the server was asleep" only of a server that has been quiet; any answer, even a refusal, shows it is awake.
+describe("the server's last answer, as the chat's waking line reads it", () => {
+  beforeEach(() => resetServerContact());
+  afterEach(() => resetServerContact());
+
+  it("is recorded when an answer begins, even for a round the server then refused", async () => {
+    script(served);
+    await run().settled;
+    expect(serverQuietMs()).toBeLessThan(5_000);
+
+    resetServerContact();
+    script(status(500));
+    const refused = run();
+    await vi.advanceTimersByTimeAsync(60_000);
+    await refused.settled;
+    expect(serverQuietMs(), "a replica that says 500 is awake").not.toBeNull();
+  });
+
+  it("is not recorded for a connection that never answered", async () => {
+    script(drop);
+    const never = run();
+    await vi.advanceTimersByTimeAsync(60_000);
+    await never.settled;
+    expect(serverQuietMs()).toBeNull();
   });
 });
 

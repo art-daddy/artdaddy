@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { authedFetch } from "../api/auth";
+import { noteServerAnswered } from "../api/serverContact";
 import { apiBase, onApiBaseChange } from "../api/config";
 import { catalogIdentity } from "../contract";
 import { ArtDaddyError } from "../lib/errors";
@@ -120,6 +121,7 @@ export const useCompatibility = create<CompatibilityState>((set) => ({
           signal: controller.signal,
           body: JSON.stringify({ catalog_id: catalogIdentity() }),
         });
+        noteServerAnswered();
         if (!response.ok)
           throw new Error("Couldn't verify this build. Check your connection and retry.");
         return response.json();

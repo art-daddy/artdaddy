@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import fc from "fast-check";
 import { catalogIdentity } from "../contract";
 import { apiBase, setApiBase } from "../api/config";
+import { resetServerContact, serverQuietMs } from "../api/serverContact";
 import { useCompatibility, markUpdateRequired } from "./compatibility";
 import { inferRound, inferRoundStreaming } from "../agent/api";
 import { callAiProxy } from "../api/ai";
@@ -36,6 +37,37 @@ const result = (supported: boolean): Response =>
       required_update: !supported,
     }),
   );
+
+// UJ-082: the chat's "waking" line reads when the server last answered. The build check is one of the two requests every launch makes.
+it("records that the server answered when the build check was answered, whatever the answer", async () => {
+  resetServerContact();
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => result(true)),
+  );
+  await useCompatibility.getState().check();
+  expect(serverQuietMs()).not.toBeNull();
+
+  resetServerContact();
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => new Response("down", { status: 503 })),
+  );
+  await useCompatibility.getState().check();
+  expect(serverQuietMs(), "a replica that says 503 is awake").not.toBeNull();
+});
+
+it("records nothing when the build check could not reach the server at all", async () => {
+  resetServerContact();
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => {
+      throw new TypeError("Failed to fetch");
+    }),
+  );
+  await useCompatibility.getState().check();
+  expect(serverQuietMs()).toBeNull();
+});
 
 it("only a verified supported build stays usable when the service later becomes unreachable", async () => {
   vi.stubGlobal(

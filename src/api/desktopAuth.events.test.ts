@@ -412,6 +412,31 @@ describe("a saved session that cannot be renewed reports why", () => {
     expect(reportsFor("refresh")).toEqual([{ ok: false, reason: "network" }]);
   });
 
+  // UJ-082: the chat's "waking" line reads when the server last answered; a renewal that was answered, even with a refusal, shows it is awake.
+  it.each([
+    [200, "refreshed"],
+    [401, "invalid"],
+    [503, "unavailable"],
+  ])("records that the server answered, whatever it said (%i)", async (status, outcome) => {
+    stored();
+    fetchMock.mockResolvedValue(reply(status, status === 200 ? TOKENS : undefined));
+    const desktop = await importFresh();
+    const contact = await import("./serverContact"); // the instance the module under test just loaded
+    contact.resetServerContact();
+    expect((await desktop.refreshDesktopSession()).status).toBe(outcome);
+    expect(contact.serverQuietMs()).not.toBeNull();
+  });
+
+  it("records nothing when the connection never held", async () => {
+    stored();
+    fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
+    const desktop = await importFresh();
+    const contact = await import("./serverContact");
+    contact.resetServerContact();
+    await desktop.refreshDesktopSession();
+    expect(contact.serverQuietMs()).toBeNull();
+  });
+
   it("says the allowance ran out, which is a different thing from the connection failing", async () => {
     stored();
     fetchMock.mockRejectedValue(Object.assign(new Error("aborted"), { name: "AbortError" }));

@@ -4,7 +4,7 @@
 // thinking from a transcription that had stalled from a turn that wanted their OK. This names the wait,
 // shows how long it has lasted once that is worth showing, and after half a minute says the one thing
 // that matters then: it is still going, and Stop is there.
-import type { LiveCall, LiveRound } from "../store/liveWait";
+import type { LiveCall, LiveRequest, LiveRound } from "../store/liveWait";
 import { MODEL_DOWNLOAD_NOTE } from "../store/modelDownload";
 import { runningPhrase } from "./toolSummary";
 
@@ -39,6 +39,10 @@ export interface WaitStatus {
 
 export interface WaitInput {
   round: LiveRound | null;
+  /** The live round's request: when it went out and whether the server has begun to answer it. */
+  request?: LiveRequest | null;
+  /** How long the server has been quiet toward this app (api/serverContact.ts), null when it has not answered in this run. */
+  serverQuietMs?: number | null;
   calls: readonly LiveCall[];
   approvalSince: number | null;
   now: number;
@@ -68,6 +72,17 @@ const ROUND_NOTE = {
     explainAtOnce: true,
   },
 } as const;
+
+/** A server that is waking takes up to 30 s, the longest of the request waits, so it says why at once. */
+const WAKING_NOTE = {
+  label: "Waking the server",
+  hint: "The server was asleep after a pause, so this first request takes up to 30 seconds. You can press Stop at any time.",
+  explainAtOnce: true,
+} as const;
+/** A request the server has not begun to answer after this long, once the server has been quiet toward the app for WAKING_QUIET_MS, is a server waking. */
+export const WAKING_AFTER_REQUEST_S = 3;
+/** A replica with no traffic is taken down after about five minutes. */
+export const WAKING_QUIET_MS = 5 * 60_000;
 
 const finite = (n: number, fallback: number): number => (Number.isFinite(n) ? n : fallback);
 
@@ -124,7 +139,17 @@ export function waitStatus(input: WaitInput): WaitStatus | null {
   }
 
   if (input.round) {
-    const note = input.round.note ? ROUND_NOTE[input.round.note] : null;
+    // The request's own note wins; failing that, a request the server has not begun to answer for 3 s, after a long silence from it, is a server waking.
+    const request = input.request;
+    const waking =
+      !input.round.note &&
+      input.round.phase === "waiting" &&
+      request != null &&
+      !request.answered &&
+      now - finite(request.sentAt, now) >= WAKING_AFTER_REQUEST_S * 1000 &&
+      input.serverQuietMs != null &&
+      input.serverQuietMs >= WAKING_QUIET_MS;
+    const note = input.round.note ? ROUND_NOTE[input.round.note] : waking ? WAKING_NOTE : null;
     return make(
       "model",
       note?.label ?? ROUND_LABEL[input.round.phase],

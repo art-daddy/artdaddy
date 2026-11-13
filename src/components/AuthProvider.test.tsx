@@ -1,5 +1,5 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { DesktopSessionRefresh } from "../api/desktopAuth";
 import { SIGN_IN_PROBLEMS } from "../api/signInProblems";
@@ -124,6 +124,9 @@ vi.mock("../api/authEvents", () => ({
 }));
 
 import AuthProvider from "./AuthProvider";
+import { __testing as launchClock } from "./waking";
+
+const setLaunchedAt = launchClock.setLaunchedAt;
 
 afterEach(() => {
   vi.useRealTimers();
@@ -1129,5 +1132,91 @@ describe("AuthProvider, an update offered before anyone is signed in", () => {
     await waitFor(() => expect(mocks.checkForUpdate).toHaveBeenCalledOnce());
     expect(screen.getByText(/sign in to continue/i)).toBeInTheDocument();
     expect(screen.queryByText(/is available/i)).not.toBeInTheDocument();
+  });
+});
+
+// UJ-082. The keychain answered and a session is stored, so what the launch screen waits on is a server that is slow to start (up to 30 s after a quiet spell).
+// It used to say nothing about that and, from 10 s in, said the saved session could not be read and offered "Sign in again".
+describe("AuthProvider, a server that is slow to start", () => {
+  const mount = () =>
+    render(
+      <AuthProvider>
+        <span>editor</span>
+      </AuthProvider>,
+    );
+  const pass = (ms: number) =>
+    act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  const waking = () => screen.queryByText(/waking the server/i);
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    setLaunchedAt(Date.now());
+    mocks.storedSessionKnown.mockReturnValue(true); // the keychain has answered: a session is stored
+    mocks.refreshDesktopSession.mockReturnValue(new Promise<never>(() => undefined)); // the server has not
+  });
+
+  it("says the server is waking from 3 s on, with the launch clock and the reason, and says nothing before", async () => {
+    mount();
+    await pass(2_900);
+    expect(waking()).not.toBeInTheDocument();
+    await pass(200);
+    expect(screen.getByRole("status").textContent).toBe("Waking the server…");
+    expect(screen.getByText("0:03")).toBeInTheDocument();
+    expect(screen.getByText(/nothing is wrong/i)).toBeInTheDocument();
+    expect(screen.getByText(/restoring your saved session/i)).toBeInTheDocument();
+  });
+
+  it("never says the saved session could not be read, nor offers to sign in again, while the server is the slow part", async () => {
+    mount();
+    await pass(10_500);
+    expect(screen.queryByText(/couldn't read your saved session/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /sign in again/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+    expect(screen.getByRole("status").textContent).toBe("Waking the server…");
+    expect(screen.getByText("0:10")).toBeInTheDocument();
+  });
+
+  it("is gone the moment the screen leaves, and a warm start never shows it at all", async () => {
+    const view = mount();
+    await pass(200); // a warm server answered
+    mocks.authStatus = "unlocked";
+    view.rerender(
+      <AuthProvider>
+        <span>editor</span>
+      </AuthProvider>,
+    );
+    await pass(10_000);
+    expect(waking()).not.toBeInTheDocument();
+    expect(screen.getByText("editor")).toBeInTheDocument();
+
+    // The other order: the line was up, then the answer landed.
+    mocks.authStatus = "checking";
+    setLaunchedAt(Date.now() - 20_000);
+    view.rerender(
+      <AuthProvider>
+        <span>editor</span>
+      </AuthProvider>,
+    );
+    await pass(1_000);
+    expect(waking()).toBeInTheDocument();
+    mocks.authStatus = "unlocked";
+    view.rerender(
+      <AuthProvider>
+        <span>editor</span>
+      </AuthProvider>,
+    );
+    expect(waking()).not.toBeInTheDocument();
+  });
+
+  it("keeps the keychain's own explanation, buttons and all, when the keychain has NOT answered, and then claims nothing about the server", async () => {
+    mocks.storedSessionKnown.mockReturnValue(null);
+    mount();
+    await pass(10_500);
+    expect(screen.getByText(/couldn't read your saved session/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /sign in again/i })).toBeInTheDocument();
+    expect(waking()).not.toBeInTheDocument();
   });
 });

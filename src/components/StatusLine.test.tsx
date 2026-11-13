@@ -1,6 +1,7 @@
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { noteServerAnswered, resetServerContact } from "../api/serverContact";
 import { resetLiveWait, trackSpeechWait, useLiveWait } from "../store/liveWait";
 import { clearModelDownload, reportModelDownload } from "../store/modelDownload";
 import StatusLine from "./StatusLine";
@@ -14,6 +15,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date("2026-11-02T10:00:00Z"));
   resetLiveWait();
+  resetServerContact();
   clearModelDownload();
 });
 afterEach(() => {
@@ -21,6 +23,7 @@ afterEach(() => {
   vi.clearAllTimers();
   vi.useRealTimers();
   resetLiveWait();
+  resetServerContact();
   clearModelDownload();
 });
 
@@ -187,5 +190,51 @@ describe("StatusLine: what the person sees while a turn runs", () => {
       render(<StatusLine />);
       expect(screen.getByRole("status").textContent).toBe("Watching a video…");
     });
+  });
+});
+
+// UJ-082: the first request after a pause, the line the owner chose: "Waking the server", from 3 s, with the reason.
+describe("StatusLine: a server that is waking", () => {
+  const sendRound = () => {
+    act(() => live().roundStarted(Date.now()));
+    act(() => live().roundSent());
+  };
+  const label = () => screen.getByRole("status").textContent;
+
+  it("says so after 3 s when the server has been quiet for minutes, shows why at once, and stops the moment it answers", () => {
+    noteServerAnswered(Date.now() - 6 * 60_000);
+    sendRound();
+    const { container } = render(<StatusLine />);
+    expect(label()).toBe("Thinking…");
+
+    tick(3_000);
+    expect(label()).toBe("Waking the server…");
+    expect(container.textContent).toContain("0:03");
+    expect(container.textContent).toMatch(/The server was asleep after a pause/);
+    expect(container.textContent).toMatch(/press Stop at any time/);
+
+    act(() => live().roundAnswered());
+    expect(label()).toBe("Thinking…");
+    expect(container.textContent).not.toMatch(/asleep/);
+  });
+
+  it("says nothing of it when the server answered a minute ago: a slow reply from an awake server is the model's wait", () => {
+    noteServerAnswered(Date.now() - 60_000);
+    sendRound();
+    const { container } = render(<StatusLine />);
+    tick(12_000);
+    expect(label()).toBe("Thinking…");
+    expect(container.textContent).not.toMatch(/asleep|Waking/);
+  });
+
+  it("stops the moment something else shows the server is awake", () => {
+    noteServerAnswered(Date.now() - 6 * 60_000);
+    sendRound();
+    render(<StatusLine />);
+    tick(4_000);
+    expect(label()).toBe("Waking the server…");
+    act(() => noteServerAnswered(Date.now())); // the build check, say, answered
+    tick(1_000);
+    expect(label()).toBe("Thinking…");
   });
 });

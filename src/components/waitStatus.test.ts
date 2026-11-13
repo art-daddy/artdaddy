@@ -194,6 +194,78 @@ describe("a round whose request is waiting", () => {
   });
 });
 
+describe("a request the server has not begun to answer (UJ-082)", () => {
+  const SENT_S = 2;
+  const sent = { sentAt: at(SENT_S), answered: false };
+  const quiet = (minutes: number): number => minutes * 60_000;
+  const waitingOn = (over: Partial<Parameters<typeof waitStatus>[0]> = {}, nowS = SENT_S + 3) =>
+    status({ round: round("waiting"), request: sent, serverQuietMs: quiet(6), ...over }, nowS);
+
+  it("says the server is waking once the request is 3 s old, with the clock and the reason at once", () => {
+    expect(waitingOn({}, SENT_S + 2.9)?.label).toBe("Thinking");
+    const s = waitingOn({}, SENT_S + 3);
+    expect(s).toMatchObject({ kind: "model", label: "Waking the server", showElapsed: true });
+    expect(s?.hint).toMatch(/asleep after a pause/);
+    expect(s?.hint).toMatch(/up to 30 seconds/);
+    expect(s?.hint).toMatch(/Stop/);
+  });
+
+  it("is the model's wait again the moment the server's answer begins", () => {
+    expect(waitingOn({ request: { ...sent, answered: true } })?.label).toBe("Thinking");
+    expect(waitingOn({ round: round("writing") })?.label).toBe("Writing");
+  });
+
+  it("never says it of a server that answered recently, or of a run in which it has not answered yet", () => {
+    for (const minutes of [0, 1, 4.9])
+      expect(waitingOn({ serverQuietMs: quiet(minutes) })?.label).toBe("Thinking");
+    expect(waitingOn({ serverQuietMs: quiet(5) })?.label).toBe("Waking the server");
+    expect(waitingOn({ serverQuietMs: null })?.label).toBe("Thinking");
+    expect(waitingOn({ serverQuietMs: undefined })?.label).toBe("Thinking");
+  });
+
+  it("leaves the request's own notes alone, and the person's answer and a running tool first", () => {
+    expect(waitingOn({ round: { ...round("waiting"), note: "busy" } })?.label).toBe(
+      "Waiting for your last request",
+    );
+    expect(waitingOn({ round: { ...round("waiting"), note: "reconnecting" } })?.label).toBe(
+      "Reconnecting",
+    );
+    expect(waitingOn({ approvalSince: at(0) })?.kind).toBe("approval");
+    expect(waitingOn({ calls: [call("video_ask")] })?.kind).toBe("tool");
+  });
+
+  it("changes only the words: the kind and the clock are those of the same round without it", () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 0, max: 7200 }),
+        fc.constantFrom("preparing", "waiting", "writing"),
+        fc.boolean(),
+        fc.option(fc.integer({ min: 0, max: 20 * 60_000 }), { nil: null }),
+        (nowS, phase, answered, quietMs) => {
+          const plain = status({ round: round(phase) }, nowS);
+          const said = status(
+            {
+              round: round(phase),
+              request: { sentAt: at(SENT_S), answered },
+              serverQuietMs: quietMs,
+            },
+            nowS,
+          );
+          expect({ ...said, label: "", hint: null, slow: false }).toEqual({
+            ...plain,
+            label: "",
+            hint: null,
+            slow: false,
+          });
+          // The rule that survives a rewrite: a server that answered, or was heard from lately, is never called asleep.
+          if (answered || (quietMs ?? 0) < quiet(5) || phase !== "waiting")
+            expect(said?.label).not.toBe("Waking the server");
+        },
+      ),
+    );
+  });
+});
+
 describe("a phrase for every tool the model can call (the registry walk)", () => {
   const tools = toolNames();
 

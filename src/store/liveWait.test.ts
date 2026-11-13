@@ -214,3 +214,56 @@ describe("a round whose request is waiting", () => {
     expect(live().round).toEqual({ phase: "preparing", startedAt: 3 });
   });
 });
+
+// UJ-082: a model that is thinking and a server that has not answered look the same from the round's phase; the request tells them apart.
+describe("the request of the live round", () => {
+  it("goes out with the round and is answered once, and a late answer to a round that ended is nothing", () => {
+    live().roundStarted(100);
+    expect(live().request).toBeNull();
+    live().roundSent(250);
+    expect(live().request).toEqual({ sentAt: 250, answered: false });
+    live().roundAnswered();
+    expect(live().request).toEqual({ sentAt: 250, answered: true });
+    const answered = live().request;
+    live().roundAnswered();
+    expect(live().request).toBe(answered); // announced no change
+
+    live().roundEnded();
+    live().roundAnswered();
+    expect(live().request).toBeNull();
+  });
+
+  it("is only sent from 'preparing', so a repeat cannot move its time", () => {
+    live().roundStarted(1);
+    live().roundSent(10);
+    live().roundSent(20);
+    expect(live().request?.sentAt).toBe(10);
+  });
+
+  it("is gone when the round ends, when the turn pauses for the person, when another round begins, and on clear", () => {
+    const sendOne = () => {
+      live().roundStarted(1);
+      live().roundSent(2);
+    };
+    sendOne();
+    live().roundEnded();
+    expect(live().request).toBeNull();
+    sendOne();
+    live().pausedForInput();
+    expect(live().request).toBeNull();
+    sendOne();
+    live().roundStarted(3);
+    expect(live().request).toBeNull();
+    sendOne();
+    live().clear();
+    expect(live().request).toBeNull();
+  });
+
+  it("does not disturb the round itself: its phase, start and note are what they were without it", () => {
+    live().roundStarted(100);
+    live().roundSent(250);
+    live().roundNoted("busy");
+    live().roundAnswered();
+    expect(live().round).toEqual({ phase: "waiting", startedAt: 100, note: "busy" });
+  });
+});

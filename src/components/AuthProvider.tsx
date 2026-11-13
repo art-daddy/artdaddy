@@ -25,6 +25,9 @@ import { useAuth, isSignedOutGate, authBypassed } from "../store/auth";
 import { useSignInNotice } from "../store/signInNotice";
 import SignInScreen from "./SignInScreen";
 import { UpdateBanner } from "./UpdateBanner";
+import { useNow } from "./useNow";
+import { wakingLine } from "./waking";
+import WakingLine from "./WakingLine";
 
 /** How long launch waits on the session before opening (offline) for one that is stored. */
 const BOOT_PATIENCE_MS = 15_000;
@@ -217,9 +220,18 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
 
   useEffect(() => {
     if (status !== "checking") return;
-    const timer = setTimeout(() => setRestoreUnavailable(true), 10_000);
+    // "Couldn't read your saved session" is written for a keychain that did not answer (macOS asks the person first). When the
+    // keychain HAS answered and a session is stored, the renewal is out to a server that is slow to start: that is not an unreadable
+    // session, and offering "Sign in again" for it was false. The waking line below says what is true.
+    const timer = setTimeout(() => {
+      if (storedSessionKnown() === true) return;
+      setRestoreUnavailable(true);
+    }, 10_000);
     return () => clearTimeout(timer);
   }, [status, restoreAttempt]);
+
+  // Re-reads the clock each second while this screen waits, so the line below appears and counts by itself.
+  const now = useNow(1000, status === "checking");
 
   // Signed in, by any route: whatever was said about a sign-in that did not finish is no longer true.
   useEffect(() => {
@@ -245,7 +257,11 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
   }, [keychainUnanswered, status]);
 
   if (authBypassed()) return <>{children}</>;
-  if (status === "checking")
+  if (status === "checking") {
+    // The keychain has answered and a session is stored: what this screen waits on is the server.
+    const waking = restoreUnavailable
+      ? null
+      : wakingLine({ now, waitingOnServer: storedSessionKnown() === true });
     return (
       <BeforeSignIn update={restoreUnavailable}>
         <div className="flex h-full w-full items-center justify-center bg-bg p-6 text-center">
@@ -256,6 +272,7 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
                 ? "ArtDaddy couldn't read your saved session."
                 : "Restoring your saved session."}
             </div>
+            {waking ? <WakingLine line={waking} /> : null}
             {restoreUnavailable && hostInfo().os === "macos" ? (
               <div className="mt-2 text-sm text-neutral-400">
                 If macOS asks to use your saved sign-in, enter your Mac password and click Always
@@ -284,6 +301,7 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
         </div>
       </BeforeSignIn>
     );
+  }
   if (isSignedOutGate({ status, hasStoredSession }))
     return (
       <BeforeSignIn update>

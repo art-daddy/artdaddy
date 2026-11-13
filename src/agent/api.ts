@@ -2,6 +2,7 @@
 // thin proxy. Plain request/response, plus an opt-in SSE variant of the same round.
 import { authedFetch, notifyAuthFailure } from "../api/auth";
 import { api } from "../api/client";
+import { noteServerAnswered } from "../api/serverContact";
 import {
   fetchRound,
   fetchWithRetry,
@@ -254,7 +255,7 @@ async function streamRound(
     (u, init) => fetchRound(u, init, signal, observer?.wait),
   );
   observer?.head?.();
-
+  noteServerAnswered();
   if (res.status === 404 || res.status === 405) {
     // An older server. Nothing ran, so re-issuing the round is free and correct -- and it
     // goes through inferRound rather than a second copy of the non-streaming request.

@@ -2244,6 +2244,45 @@ describe("useChat tells the status line what the turn is waiting on", () => {
     expect(seen).toEqual(["reconnecting", "busy", undefined]);
   });
 
+  // UJ-082: a model that is thinking and a server that has not answered look the same from the round's phase.
+  it("knows the server has begun to answer once the head arrives, and not before", async () => {
+    await startTurn();
+    const seen: Array<boolean | undefined> = [];
+    (inferRoundStreaming as Any).mockImplementationOnce(
+      async (_body: Any, _onDelta: unknown, _signal: unknown, observer: { head: () => void }) => {
+        seen.push(live().request?.answered);
+        observer.head();
+        seen.push(live().request?.answered);
+        return ANSWER;
+      },
+    );
+    await lastDeps.infer({ user_text: "hi" }, []);
+    expect(seen).toEqual([false, true]);
+    expect(live().request).toBeNull();
+  });
+
+  it("does not let a retired turn's answer say that the request of the turn that replaced it was answered", async () => {
+    await startTurn();
+    const first = lastDeps;
+    let head!: () => void;
+    let finishFirst!: (v: unknown) => void;
+    (inferRoundStreaming as Any).mockImplementationOnce(
+      (_body: Any, _onDelta: unknown, _signal: unknown, observer: { head: () => void }) => {
+        head = observer.head;
+        return new Promise((resolve) => (finishFirst = resolve));
+      },
+    );
+    const firstRound = first.infer({ user_text: "hi" }, []);
+    await useChat.getState().send("second message"); // retires the first turn
+    (inferRoundStreaming as Any).mockImplementationOnce(() => new Promise(() => undefined));
+    void lastDeps.infer({ user_text: "second" }, []);
+    await vi.waitFor(() => expect(live().request).not.toBeNull());
+    head();
+    expect(live().request?.answered).toBe(false);
+    finishFirst(ANSWER);
+    await firstRound;
+  });
+
   it("does not let a retired turn's reconnect paint the round of the turn that replaced it", async () => {
     await startTurn();
     const first = lastDeps;

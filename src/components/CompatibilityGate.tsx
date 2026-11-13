@@ -4,6 +4,9 @@ import { useAuth } from "../store/auth";
 import { useCloseCoordinator } from "../store/closeCoordinator";
 import { downloadUpdate } from "../update/updater";
 import { compatibilityAllowsWork, useCompatibility } from "../update/compatibility";
+import { useNow } from "./useNow";
+import { wakingLine } from "./waking";
+import WakingLine from "./WakingLine";
 
 export default function CompatibilityGate({ children }: { children: ReactNode }) {
   const status = useCompatibility((state) => state.status);
@@ -17,6 +20,10 @@ export default function CompatibilityGate({ children }: { children: ReactNode })
   const activated = useRef(false);
   const allowed = platform.name !== "tauri" || status === "allowed";
   if (allowed) activated.current = true;
+  // The build check is a request to the server; while it is out and the app has been up for 3 s, say what is slow (waking.ts).
+  const checking = !allowed && status === "checking";
+  const now = useNow(1000, checking);
+  const waking = wakingLine({ now, waitingOnServer: checking });
   useEffect(() => {
     if (platform.name === "tauri" && auth !== "checking" && auth !== "locked") void check();
   }, [auth, check]);
@@ -79,6 +86,7 @@ export default function CompatibilityGate({ children }: { children: ReactNode })
               {failure || exitError || error}
             </p>
           )}
+          {waking ? <WakingLine line={waking} className="-mt-2" /> : null}
           <div className="flex flex-wrap justify-center gap-3">
             {required && (
               <button

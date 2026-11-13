@@ -4,6 +4,7 @@ import { useEffect } from "react";
 import CompatibilityGate from "./CompatibilityGate";
 import { useCompatibility } from "../update/compatibility";
 import { useAuth } from "../store/auth";
+import { __testing as launchClock } from "./waking";
 
 vi.mock("../platform", () => ({ platform: { name: "tauri" } }));
 
@@ -68,3 +69,64 @@ it("permits a previously verified build and immediately blocks it when an update
   expect(screen.getByText("Editing surface")).toBeVisible();
   expect(dispose).not.toHaveBeenCalled();
 });
+
+// UJ-082, launch screen 2: the build check is a request to the server. While it is out and the app has been up for 3 s, the screen says what is slow;
+// it says it of nothing else (not of an update that is required, nor of a check that failed).
+it("says the server is waking once the build check has made the person wait 3 s, and carries on from the launch clock", () => {
+  vi.useFakeTimers();
+  try {
+    launchClock.setLaunchedAt(Date.now() - 14_000); // screen 1 already took 14 s: this screen does not start its own 3 s
+    render(
+      <CompatibilityGate>
+        <button>Editing surface</button>
+      </CompatibilityGate>,
+    );
+    expect(screen.getByRole("status").textContent).toBe("Waking the server…");
+    expect(screen.getByText("0:14")).toBeInTheDocument();
+    expect(screen.getByText(/nothing is wrong/i)).toBeInTheDocument();
+    expect(screen.getByText("Checking this build with the service.")).toBeInTheDocument();
+    act(() => void vi.advanceTimersByTime(3_000));
+    expect(screen.getByText("0:17")).toBeInTheDocument();
+    act(() => useCompatibility.setState({ status: "allowed" }));
+    expect(screen.queryByText(/waking the server/i)).not.toBeInTheDocument();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("says nothing of it on a warm start, where the check answers within a second or two", () => {
+  vi.useFakeTimers();
+  try {
+    launchClock.setLaunchedAt(Date.now() - 1_500);
+    render(
+      <CompatibilityGate>
+        <button>Editing surface</button>
+      </CompatibilityGate>,
+    );
+    expect(screen.queryByText(/waking the server/i)).not.toBeInTheDocument();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it.each(["required", "unverified"] as const)(
+  "never says the server is waking when the check has already ended as %s",
+  (status) => {
+    vi.useFakeTimers();
+    try {
+      launchClock.setLaunchedAt(Date.now() - 60_000);
+      useCompatibility.setState({
+        status,
+        error: status === "unverified" ? "Couldn't verify this build." : null,
+      });
+      render(
+        <CompatibilityGate>
+          <button>Editing surface</button>
+        </CompatibilityGate>,
+      );
+      expect(screen.queryByText(/waking the server/i)).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  },
+);
