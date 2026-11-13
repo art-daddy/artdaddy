@@ -46,7 +46,7 @@ export default function PreparingPill({
     .join(" · ");
   return (
     <div
-      role="status"
+      role="group"
       aria-label="preparing preview"
       className="pointer-events-none absolute right-3 top-3 z-10 w-72 rounded-md bg-black/70 px-3 py-2 text-xs text-neutral-200 ring-1 ring-white/10"
     >
@@ -64,7 +64,17 @@ export default function PreparingPill({
           {detail}
         </div>
       )}
-      <div className="mt-1.5 h-1 overflow-hidden rounded bg-neutral-800">
+      {/* a progress bar, not a live region: the text changes twice a second and a screen reader should not read each change out */}
+      <div
+        role="progressbar"
+        aria-label={`Preparing preview of ${job.name}`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={
+          job.fraction === null ? undefined : Math.min(100, Math.round(job.fraction * 100))
+        }
+        className="mt-1.5 h-1 overflow-hidden rounded bg-neutral-800"
+      >
         <div
           data-testid="preparing-bar"
           className={

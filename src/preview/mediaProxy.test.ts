@@ -11,7 +11,7 @@ import { recordMedia } from "../api/editorEvents";
 import { highH264DecodesCorrectly } from "./h264Support";
 import { onMediaDerived } from "./mediaDerived";
 import { posterName, proxyKey, proxyRel, webOkName } from "./proxyPaths";
-import { MemFs } from "../test/timelineKit";
+import { ExportMemFs, MemFs } from "../test/timelineKit";
 import { ProjectStoreAccess } from "../tools/store";
 
 vi.mock("./h264Support", () => ({ highH264DecodesCorrectly: vi.fn() }));
@@ -313,6 +313,30 @@ describe("preview proxy — stills the browser cannot decode", () => {
     expect(written.some((p) => /posters\/.*\.jpg$/.test(p))).toBe(true);
   });
 
+  // A still's stand-in takes a moment: it raises the overlay flag (`onTranscode`) but it is not a copy of a video, so it must not ask for a "Preparing preview" row
+  // (`onCopy`): a batch of 40 HEICs would flash 40 cards (found in review of UJ-091).
+  it("a still's stand-in raises the overlay but is not a video copy", async () => {
+    const calls: string[] = [];
+    const fs = new MemFs();
+    await fs.writeTextFile("C:/proj/library/scan.tiff", "media");
+    const store = new ProjectStoreAccess("C:/proj", fs);
+    const runner = {
+      run: async (_program: string, args: string[]) => {
+        await fs.writeTextFile(args[args.length - 1], "out");
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    };
+    await processImportedMedia(
+      store,
+      runner,
+      "library/scan.tiff",
+      () => calls.push("overlay"),
+      undefined,
+      { onCopy: () => calls.push("row") },
+    );
+    expect(calls).toEqual(["overlay"]);
+  });
+
   it("...and for a HEIC", async () => {
     const written = await image("library/photo.heic");
     expect(written.some((p) => /proxies\/.*\.png$/.test(p))).toBe(true);
@@ -403,19 +427,100 @@ describe("the preview copy says how far it is", () => {
     expect(poster.streamed).toBe(false);
   });
 
-  it("without a listener the command is exactly what it always was", async () => {
+  it("without a listener the command is exactly what it always was, and with one it only gains the three words, right after -loglevel error", async () => {
     const watched = (await copyRun({ onProgress: () => undefined })).find((c) =>
       c.args.includes("libx264"),
     )!;
     const plain = (await copyRun()).find((c) => c.args.includes("libx264"))!;
     expect(plain.streamed).toBe(false);
-    expect(plain.args).not.toContain("-progress");
-    // the same command apart from the three words that ask for the report (the temp file's name differs by run)
-    const strip = (a: string[]) =>
-      a.filter(
-        (x, i, all) => !["-nostats", "-progress", "pipe:1"].includes(x) && i < all.length - 1,
+    // The literal command (the last word is the temp file, whose name differs by run).
+    const COPY = [
+      "-i",
+      "C:/proj/library/a.mp4",
+      "-vf",
+      "scale=-2:'max(2,trunc(min(720,ih)/2)*2)'",
+      "-c:v",
+      "libx264",
+      "-profile:v",
+      "baseline",
+      "-preset",
+      "veryfast",
+      "-crf",
+      "24",
+      "-pix_fmt",
+      "yuv420p",
+      "-g",
+      "15",
+      "-c:a",
+      "aac",
+      "-b:a",
+      "128k",
+      "-movflags",
+      "+faststart",
+    ];
+    expect(plain.args.slice(0, -1)).toEqual(["-y", "-hide_banner", "-loglevel", "error", ...COPY]);
+    expect(watched.args.slice(0, -1)).toEqual([
+      "-y",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-nostats",
+      "-progress",
+      "pipe:1",
+      ...COPY,
+    ]);
+  });
+
+  // Attaching a listener must not change how a build ends: a copy that fails still fails (and says so), leaves no partial file, and never throws.
+  it("a copy that fails with a listener attached fails exactly as without one", async () => {
+    for (const listener of [true, false]) {
+      const fs = new ExportMemFs(); // can rename and remove, so the copy is written to a temp file first, as on disk
+      await fs.writeTextFile("C:/proj/library/a.mp4", "media");
+      const store = new ProjectStoreAccess("C:/proj", fs);
+      const seen: unknown[] = [];
+      const runner = {
+        run: async (
+          program: string,
+          args: string[],
+          _signal?: AbortSignal,
+          _cwd?: string,
+          onStdout?: (chunk: string) => void,
+        ) => {
+          if (program === "ffprobe")
+            return {
+              code: 0,
+              stdout: JSON.stringify({
+                format: { format_name: "matroska,webm", duration: "5" },
+                streams: [{ codec_type: "video", codec_name: "hevc", width: 3840, height: 2160 }],
+              }),
+              stderr: "",
+            };
+          if (args.includes("libx264")) {
+            await fs.writeTextFile(args[args.length - 1], "half a file"); // the temp output ffmpeg had started
+            onStdout?.("frame=60\nfps=30\nout_time_us=2000000\nspeed=2x\nprogress=continue\n");
+            return { code: 1, stdout: "", stderr: "boom" };
+          }
+          await fs.writeTextFile(args[args.length - 1], "out");
+          return { code: 0, stdout: "", stderr: "" };
+        },
+      };
+      vi.mocked(recordMedia).mockClear();
+      const changed = await processImportedMedia(
+        store,
+        runner,
+        "library/a.mp4",
+        undefined,
+        undefined,
+        listener ? { onProgress: (p) => seen.push(p) } : undefined,
       );
-    expect(strip(watched.args)).toEqual(strip(plain.args));
+      expect(changed, "the poster was still made").toBe(true);
+      expect(
+        [...fs.files.keys()].filter((p) => /\/proxies\//.test(p)),
+        "no copy, and no half-written one, is left behind",
+      ).toEqual([]);
+      expect(vi.mocked(recordMedia).mock.calls.at(-1)![0]).toMatchObject({ proxy: "failed" });
+      expect(seen).toHaveLength(listener ? 1 : 0);
+    }
   });
 });
 
@@ -485,9 +590,10 @@ describe("telling the UI that derived media arrived", () => {
       undefined,
       {
         onArtifacts: () => log.push("artifacts"),
+        onCopy: () => log.push("row"),
       },
     );
-    expect(log).toEqual(["poster", "artifacts", "overlay", "copy"]);
+    expect(log).toEqual(["poster", "artifacts", "overlay", "row", "copy"]);
   });
 
   it("a video that needs no copy keeps its single announcement at the end", async () => {

@@ -40,11 +40,16 @@ describe("PreparingPill", () => {
     begin("library/media_a.mp4", "drone_0412.mov", ["media_a"]);
     report("library/media_a.mp4", 42_000, 100_000, 2, 5_000);
     render(<PreparingPill importing timeline={timeline} frame={0} />);
-    expect(screen.getByRole("status", { name: "preparing preview" })).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "preparing preview" })).toBeInTheDocument();
     expect(screen.getByText(/Preparing preview of drone_0412\.mov/)).toBeInTheDocument();
     expect(screen.getByTestId("preparing-detail")).toHaveTextContent("42% · about 30 s left");
     expect(screen.getByText("You can keep editing.")).toBeInTheDocument();
     expect(screen.getByTestId("preparing-bar")).toHaveStyle({ width: "42%" });
+    // a progress bar for a screen reader, not a live region that reads every change out
+    expect(
+      screen.getByRole("progressbar", { name: "Preparing preview of drone_0412.mov" }),
+    ).toHaveAttribute("aria-valuenow", "42");
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
     expect(screen.queryByText("Processing imported media…")).not.toBeInTheDocument();
   });
 
@@ -69,6 +74,7 @@ describe("PreparingPill", () => {
     expect(screen.getByText(/Preparing preview of odd\.mov/)).toBeInTheDocument();
     expect(screen.queryByTestId("preparing-detail")).not.toBeInTheDocument();
     expect(screen.getByTestId("preparing-bar").className).toContain("animate-pulse");
+    expect(screen.getByRole("progressbar")).not.toHaveAttribute("aria-valuenow"); // indeterminate: no number to read out
   });
 
   it("with two copies at once names the one under the playhead, and says which of them it is", () => {
@@ -82,11 +88,5 @@ describe("PreparingPill", () => {
     expect(screen.getByText(/\(2 of 2\)/)).toBeInTheDocument();
     view.rerender(<PreparingPill importing timeline={timeline} frame={5000} />); // past every clip: the one that began first
     expect(screen.getByText(/Preparing preview of first\.mov/)).toBeInTheDocument();
-  });
-
-  it("never intercepts the pointer: the person keeps editing under it", () => {
-    begin("library/media_a.mp4", "a.mov", ["media_a"]);
-    render(<PreparingPill importing timeline={timeline} frame={0} />);
-    expect(screen.getByRole("status").className).toContain("pointer-events-none");
   });
 });

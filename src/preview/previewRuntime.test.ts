@@ -238,6 +238,29 @@ describe("a video's poster stands in for black until its first real frame (UJ-09
     expect(renderer.setTexture.mock.calls).toEqual([["asset", poster]]);
   });
 
+  // The scene stretches a picture over the whole clip box when it does not know the source's shape; a file the container parser cannot read (an mkv, a webm) never
+  // gets one from the decoder, so the poster stands in with its OWN shape (reported by review of UJ-091).
+  it("draws the poster in its own shape, not stretched over the clip box", async () => {
+    state.load.mockResolvedValueOnce({ bitmap: bitmapOf(), dims: { w: 90, h: 160 } }); // a portrait poster on a 160x96 canvas
+    const { send, renderer } = runtime();
+    send({
+      type: "render",
+      timeline: timeline("video"),
+      time: 0,
+      urls: {},
+      posters: { asset: "poster-url" },
+    });
+    await settle();
+    await vi.advanceTimersByTimeAsync(40);
+    const scene = renderer.render.mock.calls.at(-1)![0] as {
+      layers: Array<{ source: string; dst: { x: number; y: number; w: number; h: number } }>;
+    };
+    const dst = scene.layers.find((l) => l.source === "asset")!.dst;
+    expect(dst.h).toBeCloseTo(96); // fitted inside the canvas, not filling it
+    expect(dst.w).toBeCloseTo(54);
+    expect(dst.x).toBeCloseTo(53);
+  });
+
   it("loads one poster once, however many render messages repeat it", async () => {
     state.load.mockResolvedValue({ bitmap: bitmapOf(), dims: { w: 160, h: 96 } });
     const { send } = runtime();

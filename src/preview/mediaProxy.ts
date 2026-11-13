@@ -62,6 +62,8 @@ const WEB_CONTAINER_OK = /(?:^|,)(?:mov|mp4|m4a|3gp|3g2|mj2)(?:,|$)/i;
 export interface DeriveHooks {
   /** Finished artifacts (the poster) are on disk and a long preview copy follows: refresh what is on screen NOW, not when the copy is done. */
   onArtifacts?: () => void;
+  /** A preview copy of a VIDEO is about to be made (minutes), as opposed to a still's stand-in (a moment, which also calls `onTranscode`). */
+  onCopy?: () => void;
   /** The preview copy's progress, from ffmpeg's own report. `totalMs` is the source's length (0 when it could not be read). */
   onProgress?: (p: { outMs: number; totalMs: number; speed: number; done: boolean }) => void;
 }
@@ -160,6 +162,7 @@ async function deriveArtifacts(
         hooks?.onArtifacts?.();
       }
       onTranscode?.();
+      hooks?.onCopy?.();
       const began = performance.now();
       const totalMs = (Number(probe.duration_s) || 0) * 1000;
       const onProgress = hooks?.onProgress;

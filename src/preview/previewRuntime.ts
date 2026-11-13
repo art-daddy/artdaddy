@@ -53,6 +53,8 @@ export function startPreviewRuntime(scope: PreviewScope): () => void {
   const uploaded = new Map<string, number>();
   /** Which poster was last stood in for a source, so one poster is loaded once however many render messages repeat it. */
   const posterShown = new Map<string, string>();
+  /** The shape (pixels) of the poster standing in for a source, used as the source's shape until the decoder gives the real one. */
+  const posterSize = new Map<string, { w: number; h: number }>();
   const failed = new Set<string>();
   const stills = new Map<string, AnimatedStill>();
   const textPending = new Set<string>();
@@ -240,10 +242,13 @@ export function startPreviewRuntime(scope: PreviewScope): () => void {
         const source = clip.media_ref;
         const poster = posters[source];
         if (!poster || clipKind(clip) !== "video") continue;
+        // A reload of the source's URL forgot the shape the poster was drawn with, and it is still what is on screen.
+        const shape = posterSize.get(source);
+        if (shape && !uploaded.has(source) && !dims.has(source)) dims.set(source, shape);
         if (uploaded.has(source) || posterShown.get(source) === poster) continue;
         posterShown.set(source, poster);
         void loadImage(poster)
-          .then(({ bitmap }) => {
+          .then(({ bitmap, dims: size }) => {
             try {
               if (disposed || uploaded.has(source) || posters[source] !== poster) return;
               if (!renderer) {
@@ -251,6 +256,10 @@ export function startPreviewRuntime(scope: PreviewScope): () => void {
                 return;
               }
               renderer.setTexture(source, bitmap);
+              // The picture's own shape stands for the source's until the decoder's index gives the real one (never posted to the page): without any,
+              // the scene stretches the poster over the whole clip box, whatever its aspect.
+              posterSize.set(source, { w: size.w, h: size.h });
+              if (!dims.has(source)) dims.set(source, { w: size.w, h: size.h });
               dirty = true;
             } finally {
               bitmap.close();

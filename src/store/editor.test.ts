@@ -235,6 +235,31 @@ describe("editor store", () => {
     expect(useEditor.getState().zoom).toBe(400);
   });
 
+  // UJ-091: where the person is looking decides which preview copy is built first, so the editor must tell the project's index, and every sweep must carry it.
+  it("tells the project's index where the playhead is, and hands it to every sweep", async () => {
+    const focus = vi.fn();
+    const timeline = emptyTimeline();
+    useEditor.setState({
+      _index: { focus, dispose: vi.fn() } as unknown as NonNullable<
+        ReturnType<typeof useEditor.getState>["_index"]
+      >,
+      timeline,
+    });
+    useEditor.getState().setPlayhead(4);
+    expect(focus).toHaveBeenCalledWith(timeline, 4);
+    useEditor.getState().setPlayhead(-5); // clamped in the store; the index clamps the same way
+    expect(useEditor.getState().playhead).toBe(0);
+    expect(focus).toHaveBeenCalledTimes(2);
+    // Every place the editor sweeps the library for new work passes the playhead (read from the source: a sweep without it
+    // silently falls back to "the first clip on the timeline", which is wrong whenever the person is looking elsewhere).
+    const { readFileSync } = await import("node:fs");
+    const sweeps = readFileSync("src/store/editor.ts", "utf8")
+      .split("\n")
+      .filter((line) => line.includes(".sweep("));
+    expect(sweeps.length).toBeGreaterThanOrEqual(5);
+    expect(sweeps.filter((line) => !line.includes("get().playhead"))).toEqual([]);
+  });
+
   it("ignores writes to a different project's timeline", async () => {
     const { store: s1 } = seedStore(P1);
     const { store: s2 } = seedStore(P2);

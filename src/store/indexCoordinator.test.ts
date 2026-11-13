@@ -1579,14 +1579,64 @@ describe("the copy of the clip the person is looking at is built first (UJ-091)"
     c.dispose();
   });
 
-  it("a timeline with nothing to build, or a disposed coordinator, changes nothing", async () => {
+  it("nothing to focus on changes nothing: no timeline, no clips, only sound", async () => {
     const g = gated();
     const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+    const timeline = spans({
+      "library/a.mp4": 0,
+      "library/b.mp4": 100,
+      "library/c.mp4": 200,
+      "library/d.mp4": 300,
+    });
+    await c.sweep(timeline, 0);
+    await settle(() => g.started.length >= 2); // a and b run; c and d wait, in that order
     c.focus(null, 0);
     c.focus(spans({}), 0);
+    c.focus(
+      {
+        ...timeline,
+        tracks: [
+          {
+            id: "a",
+            clips: [
+              {
+                id: "s",
+                kind: "audio",
+                media_ref: "library/d.mp4",
+                timeline_in: 0,
+                timeline_out: 999,
+              },
+            ],
+          },
+        ],
+      } as Any,
+      5,
+    );
+    g.release("library/a.mp4");
+    g.release("library/b.mp4");
+    await settle(() => g.started.length >= 4);
+    expect(g.started.slice(2)).toEqual(["library/c.mp4", "library/d.mp4"]);
     c.dispose();
-    c.focus(spans({ "library/a.mp4": 0 }), 0);
-    expect(g.started).toEqual([]);
+  });
+
+  it("a disposed coordinator starts nothing more and reorders nothing", async () => {
+    const g = gated();
+    const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
+    const timeline = spans({
+      "library/a.mp4": 0,
+      "library/b.mp4": 100,
+      "library/c.mp4": 200,
+      "library/d.mp4": 300,
+    });
+    await c.sweep(timeline, 0);
+    await settle(() => g.started.length >= 2);
+    c.dispose();
+    expect(c.prioritizeProxy("library/c.mp4")).toBe(false); // the queue was dropped
+    c.focus(timeline, 10);
+    g.release("library/a.mp4");
+    g.release("library/b.mp4");
+    await new Promise((r) => setTimeout(r, 30));
+    expect(g.started).toEqual(["library/a.mp4", "library/b.mp4"]);
   });
 });
 
@@ -1601,6 +1651,7 @@ describe("the copies being built are listed while they are built (UJ-091)", () =
     (processImportedMedia as Any).mockImplementation(
       async (_s: Any, _r: Any, _src: Any, mark?: () => void, _sig?: Any, hooks?: Any) => {
         mark?.();
+        hooks?.onCopy?.();
         hooks?.onProgress?.({ outMs: 2500, totalMs: 5000, speed: 2, done: false });
         await gate;
         return true;
@@ -1623,7 +1674,7 @@ describe("the copies being built are listed while they are built (UJ-091)", () =
   });
 
   it("a source that needs no copy never has a row", async () => {
-    (processImportedMedia as Any).mockImplementation(async () => true); // never calls mark()
+    (processImportedMedia as Any).mockImplementation(async () => true); // never calls onCopy
     const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), vi.fn());
     const seen: number[] = [];
     const off = useProxyJobs.subscribe((s) => seen.push(s.jobs.length));
@@ -1635,10 +1686,31 @@ describe("the copies being built are listed while they are built (UJ-091)", () =
     c.dispose();
   });
 
-  it("a copy that fails leaves no row behind", async () => {
+  // A TIFF or HEIC still's stand-in takes a moment and also raises the overlay flag (`mark`), but it is not a copy of a video: a batch of 40 of them must not
+  // flash 40 "Preparing preview" cards on the stage and the tiles (found in review).
+  it("a still's quick stand-in raises the overlay flag and never has a row", async () => {
+    const setImporting = vi.fn();
     (processImportedMedia as Any).mockImplementation(
       async (_s: Any, _r: Any, _src: Any, mark?: () => void) => {
-        mark?.();
+        mark?.(); // what processImage does; it never calls onCopy
+        return true;
+      },
+    );
+    const c = new IndexCoordinator(fakeStore(), makeRunner, vi.fn(), setImporting);
+    const seen: number[] = [];
+    const off = useProxyJobs.subscribe((s) => seen.push(s.jobs.length));
+    await c.sweep(tl([{ media_ref: "library/photo.tiff" }]));
+    await settle(() => setImporting.mock.calls.length >= 2);
+    off();
+    expect(setImporting).toHaveBeenNthCalledWith(1, true);
+    expect(seen).toEqual([]);
+    c.dispose();
+  });
+
+  it("a copy that fails leaves no row behind", async () => {
+    (processImportedMedia as Any).mockImplementation(
+      async (_s: Any, _r: Any, _src: Any, _mark?: () => void, _sig?: Any, hooks?: Any) => {
+        hooks?.onCopy?.();
         throw new Error("ffmpeg died");
       },
     );
@@ -1653,8 +1725,8 @@ describe("the copies being built are listed while they are built (UJ-091)", () =
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
     (processImportedMedia as Any).mockImplementation(
-      async (_s: Any, _r: Any, _src: Any, mark?: () => void) => {
-        mark?.();
+      async (_s: Any, _r: Any, _src: Any, _mark?: () => void, _sig?: Any, hooks?: Any) => {
+        hooks?.onCopy?.();
         await gate;
         return false;
       },

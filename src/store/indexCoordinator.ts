@@ -459,10 +459,9 @@ export class IndexCoordinator {
     mods: IndexModules,
     markImporting: () => void,
   ): Promise<void> {
-    // A copy that is really being made gets a row (what, how far, how long is left) the moment the job decides it needs one: a
-    // poster-only video, or one the preview plays as it is, never shows a "preparing" line.
+    // A copy of a VIDEO that is really being made gets a row (what, how far, how long is left) the moment the job decides it needs one: a
+    // poster-only video, one the preview plays as it is, and a still's quick stand-in (which only raises the overlay flag) never show a "preparing" line.
     const begin = (): void => {
-      markImporting();
       if (this.disposed || this.rows.has(source)) return;
       this.rows.add(source);
       const refs = [...this.pathById].filter(([, p]) => p === source).map(([id]) => id);
@@ -474,9 +473,10 @@ export class IndexCoordinator {
         this.store,
         runner,
         source,
-        begin,
+        markImporting,
         this.ac.signal,
         {
+          onCopy: begin,
           // The poster is on disk and the copy is minutes away: show the picture now.
           onArtifacts: () => {
             if (this.disposed) return;
