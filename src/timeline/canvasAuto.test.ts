@@ -206,13 +206,13 @@ describe("the shape of a picture, and of a batch of them (UJ-087)", () => {
 
   it("words the question for one picture, all of them and most of them, as the owner's sheet does", () => {
     const cur = { width: 1080, height: 1920, fps: 30 };
-    expect(picturesQuestion(cur, "16:9", [1920, 1080], 41, 41)).toBe(
+    expect(picturesQuestion(cur, "16:9", [1920, 1080], "all")).toBe(
       "The pictures you are adding are landscape, and this project is 1080x1920 at 30 fps (the default).\n\nChange the project to 1920x1080 to match them?",
     );
-    expect(picturesQuestion(cur, "16:9", [1920, 1080], 1, 1)).toBe(
+    expect(picturesQuestion(cur, "16:9", [1920, 1080], "one")).toBe(
       "The picture you are adding is landscape, and this project is 1080x1920 at 30 fps (the default).\n\nChange the project to 1920x1080 to match it?",
     );
-    expect(picturesQuestion(cur, "1:1", [1080, 1080], 12, 7)).toMatch(
+    expect(picturesQuestion(cur, "1:1", [1080, 1080], "most")).toMatch(
       /^Most of the pictures you are adding are square, and this project is 1080x1920/,
     );
     expect(PICTURE_SAMPLE).toBe(12);
@@ -299,6 +299,8 @@ interface Probe {
   rate?: string;
   /** A display turn on the stream: a portrait phone video is a landscape frame plus this. */
   rotation?: number;
+  /** A display turn on the first FRAME only, which is where ffprobe puts a picture's own EXIF orientation. */
+  frameRotation?: number;
   seconds?: number;
   /** ffprobe cannot read it. */
   unreadable?: boolean;
@@ -334,6 +336,10 @@ function probeRunner(files: Record<string, Probe>): CommandRunner {
         }),
       );
     }
+    if (args.some((a) => a.includes("frame_side_data"))) {
+      const side = f?.frameRotation !== undefined ? [{ rotation: f.frameRotation }] : [];
+      return ok(JSON.stringify({ frames: [{ side_data_list: side }] }));
+    }
     if (args.includes("-select_streams")) {
       const want = args[args.indexOf("-select_streams") + 1];
       return ok(f && (want === "v" ? f.kind !== "audio" : f.kind === "audio") ? "1" : "");
@@ -363,6 +369,9 @@ const CLIPS: Record<string, Probe> = {
   // a portrait phone JPEG: a landscape frame plus a quarter turn, shown upright
   "turned1.jpg": { kind: "image", w: 1920, h: 1080, rotation: -90 },
   "turned2.jpg": { kind: "image", w: 1920, h: 1080, rotation: 90 },
+  // the same, as a real phone JPEG reports it: the stream keeps the stored size and the EXIF turn arrives on the first frame
+  "exif1.jpg": { kind: "image", w: 1920, h: 1080, frameRotation: -90 },
+  "exif2.jpg": { kind: "image", w: 1920, h: 1080, frameRotation: 90 },
   "broken.jpg": { kind: "image", unreadable: true },
   // an iPhone photo: the raw HEIC is ONE 512 px tile (square) to ffprobe; its decoded picture (registered per test with `decoded`) is the real one
   "IMG_0001.HEIC": { kind: "image", w: 512, h: 512 },
@@ -723,7 +732,7 @@ describe("the agent is told when pictures land on a canvas nobody chose (UJ-087)
     expect(note).toContain("black bars");
     expect(note).toContain("(1920x1080)");
     expect(note).toMatch(
-      /ask them first, then call set_project_settings with width and height and re-read get_timeline\.$/,
+      /ask them first, then call set_project_settings with size width 1920 and height 1080 and fps null, and re-read get_timeline\.$/,
     );
     expect(note).not.toMatch(/crop/i); // they are fitted, not cropped: the export of the replay shows bars
   });
@@ -738,7 +747,9 @@ describe("the agent is told when pictures land on a canvas nobody chose (UJ-087)
     expect(String(ins.canvas_note)).toMatch(
       /^The picture is landscape, but the project canvas is still the default/,
     );
-    expect(String(ins.canvas_note)).toContain("it sits small inside it with black bars");
+    expect(String(ins.canvas_note)).toContain(
+      "a picture of that shape is fitted inside it with black bars",
+    );
     const b = await project({ auto: true });
     const mcp = (await addClipsTool(
       place(LAND),
@@ -797,12 +808,65 @@ describe("the agent is told when pictures land on a canvas nobody chose (UJ-087)
     expect(r.canvas_note).toBeUndefined();
   });
 
-  it("a picture that cannot be read does not decide, and does not stop the placement", async () => {
+  it("a picture that cannot be read does not decide: the note is about the readable one, and says 'most' because the other could not be read", async () => {
     const { ctx } = await project({ auto: true });
     const r = (await addClipsTool(place(["broken.jpg", "land1.jpg"]), ctx(AGENT))) as Any;
-    // the broken one is refused by the placement itself; the readable picture alone is what the note is about
-    expect(typeof r.ok).toBe("boolean");
-    expect(String(r.canvas_note)).toMatch(/^The picture is landscape/);
+    expect(String(r.canvas_note)).toMatch(/^Most of the pictures are landscape/);
+  });
+
+  it("nobody is told anything on a direct call (no agent, no question): no note, nothing changed, the project still waits", async () => {
+    const { store, ctx } = await project({ auto: true });
+    const r = (await addClipsTool(place(LAND), ctx())) as Any;
+    expect(r.ok, JSON.stringify(r)).toBe(true);
+    expect(r.canvas_note).toBeUndefined();
+    expect(await canvasOf(store)).toEqual({ width: 1080, height: 1920, fps: 30 });
+    expect((await loadTimeline(store)).canvas_auto).toBe(true);
+  });
+
+  it("a path the agent may not name is never measured, and a picture still being made counts as one that was not measured", async () => {
+    const { fs, ctx } = await project({ auto: true });
+    const absolute = (await addClipsTool(place(["C:/photos/land1.jpg"]), ctx(AGENT))) as Any;
+    expect(absolute.canvas_note).toBeUndefined();
+    await fs.writeTextFile(
+      `${ACTIVE}/internals/library.json`,
+      JSON.stringify({
+        clips: [
+          {
+            id: "media_gen_still",
+            path: "library/g.png",
+            filename: "g",
+            kind: "image",
+            status: "generating",
+          },
+        ],
+      }),
+    );
+    const r = (await addClipsTool(place(["media_gen_still", "land1.jpg"]), ctx(AGENT))) as Any;
+    expect(String(r.canvas_note)).toMatch(/^Most of the pictures are landscape/);
+  });
+
+  it("a video still being made is a video in the batch: D18's business, so the pictures say nothing", async () => {
+    const { fs, store, ctx } = await project({ auto: true });
+    await fs.writeTextFile(
+      `${ACTIVE}/internals/library.json`,
+      JSON.stringify({
+        clips: [
+          {
+            id: "media_gen_clip",
+            path: "library/g.mp4",
+            filename: "g",
+            kind: "video",
+            status: "generating",
+          },
+        ],
+      }),
+    );
+    const r = (await addClipsTool(
+      place(["media_gen_clip", "land1.jpg", "land2.jpg"]),
+      ctx(AGENT),
+    )) as Any;
+    expect(r.canvas_note).toBeUndefined();
+    expect(await canvasOf(store)).toEqual({ width: 1080, height: 1920, fps: 30 });
   });
 });
 
@@ -1069,7 +1133,7 @@ describe("the person's editor commands", () => {
       const refs = [...Array(12).fill("land1.jpg"), ...Array(20).fill("port1.jpg")];
       await cmds.addClips(refs, "v1", 0);
       expect(asked).toHaveLength(1);
-      expect(asked[0].message).toMatch(/^The pictures you are adding are landscape,/); // counted over all 32 it would be portrait, the canvas shape: no question
+      expect(asked[0].message).toMatch(/^Most of the pictures you are adding are landscape,/); // counted over all 32 it would be portrait, the canvas shape: no question, and the sentence claims only "most" because 20 pictures were not looked at
     });
 
     it("audio in the batch is ignored, and an unreadable picture shrinks the sample without deciding it", async () => {
@@ -1077,7 +1141,7 @@ describe("the person's editor commands", () => {
       const { cmds } = await commands({ auto: true });
       await cmds.addClips(["song.mp3", "broken.jpg", "land1.jpg", "song.mp3"], "v1", 0);
       expect(asked).toHaveLength(1);
-      expect(asked[0].message).toMatch(/^The picture you are adding is landscape,/);
+      expect(asked[0].message).toMatch(/^Most of the pictures you are adding are landscape,/); // two pictures, one unreadable: the sentence does not say "the picture"
     });
 
     it("a video in the batch is D18, as before: the canvas follows it silently and the pictures never decide or ask", async () => {
@@ -1178,6 +1242,106 @@ describe("the person's editor commands", () => {
       });
       await cmds.addClips(LAND, "v1", 0);
       expect(await canvasOf(store)).toEqual({ width: 1080, height: 1080, fps: 30 }); // the agent's, not the person's answer to an older question
+    });
+
+    // Each guard of the re-check alone: these two leave the others satisfied, so deleting its guard turns exactly one of them red.
+    it("a project the agent settled at the very same size is no longer Auto: the older question is not applied (pictures)", async () => {
+      const { store, ctx, cmds } = await commands({ auto: true });
+      __setCanvasChangeConfirmationForTests(async () => {
+        await setProjectSettingsTool({ width: 1080, height: 1920 }, ctx(AGENT));
+        return true;
+      });
+      await cmds.addClips(LAND, "v1", 0);
+      expect(await canvasOf(store)).toEqual({ width: 1080, height: 1920, fps: 30 });
+      expect((await loadTimeline(store)).canvas_auto).toBeUndefined(); // it was settled by the agent, and the answer did not undo that
+    });
+
+    it("a canvas the agent reshaped while the video question was open is not reshaped again by the person's answer (no clip on the timeline)", async () => {
+      const { store, ctx, cmds } = await commands({});
+      __setCanvasChangeConfirmationForTests(async () => {
+        await setProjectSettingsTool({ width: 1080, height: 1080 }, ctx(AGENT));
+        return true;
+      });
+      await cmds.addClips(["wide.mp4"], "v1", 0);
+      expect(await canvasOf(store)).toEqual({ width: 1080, height: 1080, fps: 30 });
+    });
+
+    it("a clip placed while the pictures were still being measured stops the question from being asked at all", async () => {
+      const asked = answeringTitled(true);
+      const { store, ctx } = await project({ auto: true });
+      const runner = probeRunner(CLIPS);
+      let measured = 0;
+      const slow: CommandRunner = {
+        run: async (program, args, signal, cwd, onStdout) => {
+          if (program === "ffprobe" && ++measured === 1)
+            await addClipsTool(
+              { entries: [{ media_ref: "tall.mp4", timeline_in: 0, timeline_out: 30 }] },
+              ctx(AGENT),
+            );
+          return runner.run(program, args, signal, cwd, onStdout);
+        },
+      };
+      const timeline = await loadTimeline(store);
+      const racing = makeEditorCommands(
+        () => ({ store, timeline }) as Any,
+        vi.fn(),
+        () => slow,
+      );
+      await racing.addClips(LAND, "v1", 0);
+      expect(asked).toEqual([]);
+      expect(await canvasOf(store)).toEqual({ width: 1080, height: 1920, fps: 30 });
+    });
+
+    it("the cap is exactly 12: a 13th picture that would have broken a tie decides nothing", async () => {
+      const asked = answeringTitled(true);
+      const { store, cmds } = await commands({ auto: true });
+      const refs = [...Array(6).fill("land1.jpg"), ...Array(6).fill("port1.jpg"), "land1.jpg"];
+      await cmds.addClips(refs, "v1", 0);
+      expect(asked).toEqual([]); // the first 12 are 6 and 6: a tie
+      expect(await canvasOf(store)).toEqual({ width: 1080, height: 1920, fps: 30 });
+    });
+
+    it("a drop bigger than the sample is said as 'most', never as 'the pictures you are adding'", async () => {
+      const asked = answeringTitled(false);
+      const { cmds } = await commands({ auto: true });
+      await cmds.addClips(Array(30).fill("land1.jpg"), "v1", 0); // all 30 are landscape, but only 12 were looked at
+      expect(asked).toHaveLength(1);
+      expect(asked[0].message).toMatch(/^Most of the pictures you are adding are landscape,/);
+    });
+
+    it("a portrait phone JPEG whose turn exists only in the picture's own EXIF (ffprobe says it on the frame) is portrait", async () => {
+      const asked = answeringTitled(false);
+      const { cmds } = await commands({
+        auto: true,
+        canvas: { width: 1920, height: 1080, fps: 30 },
+      });
+      await cmds.addClips(["exif1.jpg", "exif2.jpg"], "v1", 0);
+      expect(asked).toHaveLength(1);
+      expect(asked[0].message).toMatch(/^The pictures you are adding are portrait,/);
+      expect(asked[0].message).toContain("Change the project to 1080x1920");
+    });
+
+    it("what was measured is not remembered: a picture replaced at the same path is measured again, and a probe that failed once is tried again", async () => {
+      const { ctx } = await project({ auto: true });
+      const asked: string[] = [];
+      const keep = async (message: string) => {
+        asked.push(message);
+        return false;
+      };
+      CLIPS["swap1.jpg"] = { kind: "image", w: 1920, h: 1080 };
+      CLIPS["swap2.jpg"] = { kind: "image", unreadable: true };
+      try {
+        await prepareCanvas(ctx(), ["swap1.jpg", "swap2.jpg"], keep);
+        expect(asked.at(-1)).toMatch(/^Most of the pictures you are adding are landscape,/);
+        CLIPS["swap1.jpg"] = { kind: "image", w: 1000, h: 1000 }; // the file at that path is another picture now
+        CLIPS["swap2.jpg"] = { kind: "image", w: 1000, h: 1000 }; // and the other one reads this time
+        await prepareCanvas(ctx(), ["swap1.jpg", "swap2.jpg"], keep);
+        expect(asked).toHaveLength(2);
+        expect(asked.at(-1)).toMatch(/^The pictures you are adding are square,/);
+      } finally {
+        delete CLIPS["swap1.jpg"];
+        delete CLIPS["swap2.jpg"];
+      }
     });
   });
 });

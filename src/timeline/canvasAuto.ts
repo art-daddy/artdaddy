@@ -149,15 +149,13 @@ const SHAPE_WORD: Record<PictureShape, string> = {
   "1:1": "square",
 };
 
-/** Who the sentence is about: one picture, all of them, or most of them. */
-function pictureSubject(
-  sample: number,
-  count: number,
-  singular: string,
-  all: string,
-  most: string,
-): string {
-  return sample === 1 ? singular : count === sample ? all : most;
+/** What the shape speaks for: the batch's only picture, every picture of it, or most of them. "most" is also what a drop bigger than the sample, a picture that could not be
+ *  read and a picture still being made are said as, so a sentence never claims more than was looked at. */
+export type PictureCoverage = "one" | "all" | "most";
+
+/** Who the sentence is about. */
+function pictureSubject(how: PictureCoverage, one: string, all: string, most: string): string {
+  return how === "one" ? one : how === "all" ? all : most;
 }
 
 /** The person's question about pictures, in plain words (the owner's sheet). */
@@ -165,43 +163,39 @@ export function picturesQuestion(
   cur: Canvas,
   shape: PictureShape,
   target: readonly [number, number],
-  sample: number,
-  count: number,
+  how: PictureCoverage,
 ): string {
   const subject = pictureSubject(
-    sample,
-    count,
+    how,
     `The picture you are adding is ${SHAPE_WORD[shape]}`,
     `The pictures you are adding are ${SHAPE_WORD[shape]}`,
     `Most of the pictures you are adding are ${SHAPE_WORD[shape]}`,
   );
   return (
     `${subject}, and this project is ${cur.width}x${cur.height} at ${cur.fps} fps (the default).\n\n` +
-    `Change the project to ${target[0]}x${target[1]} to match ${sample === 1 ? "it" : "them"}?`
+    `Change the project to ${target[0]}x${target[1]} to match ${how === "one" ? "it" : "them"}?`
   );
 }
 
 /** What the agent is told when it places pictures on a canvas nobody chose: the facts, that nothing was changed, and what to do about it. The pictures are FITTED
- *  (not cropped), so what the person sees is bars; saying "cropped" would be false. */
+ *  (not cropped), so what the person sees is bars; saying "cropped" would be false. The tool takes the new size inside `size` and leaves the frame rate alone with `fps` null. */
 function agentPicturesNote(
   cur: Canvas,
   shape: PictureShape,
   target: readonly [number, number],
-  sample: number,
-  count: number,
+  how: PictureCoverage,
 ): string {
   const subject = pictureSubject(
-    sample,
-    count,
+    how,
     "The picture is",
     "The pictures are",
     "Most of the pictures are",
   );
-  const they = sample === 1 ? "it sits" : "they sit";
+  const fitted = how === "one" ? "a picture of that shape is" : "pictures of that shape are";
   return (
-    `${subject} ${SHAPE_WORD[shape]}, but the project canvas is still the default ${cur.width}x${cur.height} at ${cur.fps} fps that nobody chose, and it was NOT changed: ` +
-    `${they} small inside it with black bars. If the person wants the canvas to match (${target[0]}x${target[1]}), ask them first, then call set_project_settings with width and height ` +
-    `and re-read get_timeline.`
+    `${subject} ${SHAPE_WORD[shape]}, but the project canvas is still the default ${cur.width}x${cur.height} at ${cur.fps} fps that nobody chose, and it was NOT changed, ` +
+    `so ${fitted} fitted inside it with black bars. If the person wants the canvas to match (${target[0]}x${target[1]}), ask them first, then call set_project_settings with ` +
+    `size width ${target[0]} and height ${target[1]} and fps null, and re-read get_timeline.`
   );
 }
 
@@ -219,10 +213,15 @@ export function clearClipShapeCache(): void {
   probedShape.clear();
 }
 
-/** The picture size and frame rate of a video file, or null for anything that is not one. */
-async function probeClipShape(ctx: ClientToolContext, abs: string): Promise<ClipShape | null> {
-  const hit = probedShape.get(abs);
-  if (hit !== undefined) return hit;
+/** The picture size and frame rate of a video file, or null for anything that is not one. A shape is remembered; a failure never is (a transient one would
+ *  silence the rule for the session), and a picture is never looked up in it: the file at a path can be replaced by another. */
+async function probeClipShape(
+  ctx: ClientToolContext,
+  abs: string,
+  remember = true,
+): Promise<ClipShape | null> {
+  const hit = remember ? probedShape.get(abs) : undefined;
+  if (hit) return hit;
   let shape: ClipShape | null = null;
   try {
     const r = await probePath(ctx.runner, abs);
@@ -236,7 +235,7 @@ async function probeClipShape(ctx: ClientToolContext, abs: string): Promise<Clip
   } catch {
     shape = null;
   }
-  probedShape.set(abs, shape);
+  if (shape && remember) probedShape.set(abs, shape);
   return shape;
 }
 
@@ -268,41 +267,67 @@ export interface CanvasPrep {
   note?: string;
 }
 
+/** What `pictureShapes` found in a batch. */
+interface PictureSample {
+  /** The shapes that could be measured, from at most PICTURE_SAMPLE pictures. */
+  shapes: PictureShape[];
+  /** How many pictures were looked at, readable or not and including those still being made. */
+  pictures: number;
+  /** The whole batch was looked at: nothing was left unread behind the cap. */
+  complete: boolean;
+  /** A video that is still being made is in the batch: that is D18's business, not the pictures'. */
+  videoPending: boolean;
+}
+
 /** The shapes of the first PICTURE_SAMPLE pictures of `refs`, as they are seen. A ref that is not a picture, cannot be read, is still being made or is a path the agent may not
  *  name is passed over (placing it will say what is wrong with it), so an unreadable picture shrinks the sample and never decides it. At most four are measured at once. */
 async function pictureShapes(
   ctx: ClientToolContext,
   refs: readonly string[],
-): Promise<PictureShape[]> {
+): Promise<PictureSample> {
   const files: string[] = [];
+  let looked = 0;
+  let unmeasured = 0;
+  let videoPending = false;
   for (const ref of refs) {
     if (files.length >= PICTURE_SAMPLE) break;
+    looked++;
     const raw = String(ref ?? "").trim();
     if (!raw || isUnsafeAgentRef(raw)) continue;
     try {
-      if (await ctx.store.pendingMedia(raw)) continue;
+      const pending = await ctx.store.pendingMedia(raw);
+      if (pending) {
+        if (pending.kind === "video") videoPending = true;
+        else if (pending.kind === "image") unmeasured++;
+        continue;
+      }
       const abs = (await ctx.store.resolveMediaRef(raw)) ?? raw;
       if (placeableKind(abs) === "image") files.push(abs);
     } catch {
       continue;
     }
   }
-  const shapes: Array<PictureShape | null> = new Array(files.length).fill(null);
+  const measured: Array<PictureShape | null> = new Array(files.length).fill(null);
   let next = 0;
   const worker = async (): Promise<void> => {
     for (let i = next++; i < files.length; i = next++) {
       try {
         // A HEIF-family still is measured as its decoded picture: probed directly, a tiled iPhone photo reports one 512 px tile.
         const picture = await stillPicture(ctx.store, ctx.runner, files[i], ctx.signal);
-        const size = "path" in picture ? await probeClipShape(ctx, picture.path) : null;
-        shapes[i] = size ? pictureShape(size.width, size.height) : null;
+        const size = "path" in picture ? await probeClipShape(ctx, picture.path, false) : null;
+        measured[i] = size ? pictureShape(size.width, size.height) : null;
       } catch {
-        shapes[i] = null;
+        measured[i] = null;
       }
     }
   };
   await Promise.all(Array.from({ length: Math.min(4, files.length) }, worker));
-  return shapes.filter((s): s is PictureShape => s !== null);
+  return {
+    shapes: measured.filter((s): s is PictureShape => s !== null),
+    pictures: files.length + unmeasured,
+    complete: looked === refs.length,
+    videoPending,
+  };
 }
 
 /** The pictures-first rule (see the top of the file). The person is asked; the agent is told; nothing else ever happens to the canvas here. */
@@ -318,14 +343,19 @@ async function picturesFirst(
   // The person is never told anything, only asked; with no way to ask (a direct call, the second pass of a drag that already asked) there is nothing to measure.
   if (!agent && !ask) return {};
   const sample = await pictureShapes(ctx, refs);
-  const winner = majorityShape(sample);
+  if (sample.videoPending) return {};
+  const winner = majorityShape(sample.shapes);
   if (!winner) return {};
   const target = ASPECT[winner.shape];
   if (!target || (target[0] === tl.canvas.width && target[1] === tl.canvas.height)) return {}; // they already fit
-  if (agent)
-    return {
-      note: agentPicturesNote(tl.canvas, winner.shape, target, sample.length, winner.count),
-    };
+  const how: PictureCoverage = !sample.complete
+    ? "most"
+    : sample.pictures === 1
+      ? "one"
+      : sample.shapes.length === sample.pictures && winner.count === sample.pictures
+        ? "all"
+        : "most";
+  if (agent) return { note: agentPicturesNote(tl.canvas, winner.shape, target, how) };
   if (ask) {
     const difference: CanvasDifference = {
       width: target[0],
@@ -338,7 +368,7 @@ async function picturesFirst(
     await askThenApply(
       ctx,
       ask,
-      picturesQuestion(tl.canvas, winner.shape, target, sample.length, winner.count),
+      picturesQuestion(tl.canvas, winner.shape, target, how),
       difference,
       tl,
       { width: target[0], height: target[1] }, // a picture has no frame rate: it stays
@@ -348,10 +378,11 @@ async function picturesFirst(
   return {};
 }
 
-/** Put the person's question and, when they say "Change to Match", change the canvas, ONLY if the project is still as it was when it was asked.
- *  The dialog is modal for the person but not for the agent, which can place clips, or change the canvas itself, while it is open; applying the answer to a
- *  project that moved on would reshape clips the person never saw the question about. So the timeline is read again after the answer and immediately before
- *  the one write: any clip now on it, a different canvas, or (`needsAuto`) a project that is no longer Auto, and nothing changes. */
+/** Put the person's question and, when they say "Change to Match", change the canvas if the project is still as it was when the clips were measured.
+ *  The dialog is modal for the person but not for the agent, which can place clips, or change the canvas itself, while it is open (and while the pictures are being measured
+ *  before it opens); applying an answer to a project that moved on would reshape clips the person never saw the question about. So the timeline is read again before the
+ *  question and again after the answer: any clip now on it, a different canvas, or (`needsAuto`) a project that is no longer Auto, and nothing is asked or changed. The write is
+ *  a separate step after the second read: a change that lands in the instant between them is not caught. */
 async function askThenApply(
   ctx: ClientToolContext,
   ask: (message: string, difference: CanvasDifference) => Promise<boolean>,
@@ -361,16 +392,19 @@ async function askThenApply(
   args: { width: number; height: number; fps?: number },
   needsAuto: boolean,
 ): Promise<void> {
+  const unchanged = async (): Promise<boolean> => {
+    const now = await loadTimeline(ctx.store);
+    return (
+      !hasClips(now) &&
+      (!needsAuto || now.canvas_auto === true) &&
+      now.canvas.width === asked.canvas.width &&
+      now.canvas.height === asked.canvas.height &&
+      now.canvas.fps === asked.canvas.fps
+    );
+  };
+  if (!(await unchanged())) return;
   if (!(await ask(message, difference))) return;
-  const now = await loadTimeline(ctx.store);
-  if (hasClips(now)) return;
-  if (needsAuto && now.canvas_auto !== true) return;
-  if (
-    now.canvas.width !== asked.canvas.width ||
-    now.canvas.height !== asked.canvas.height ||
-    now.canvas.fps !== asked.canvas.fps
-  )
-    return;
+  if (!(await unchanged())) return;
   await applyCanvas(ctx, args);
 }
 
