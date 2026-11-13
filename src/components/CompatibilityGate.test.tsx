@@ -94,6 +94,27 @@ it("says the server is waking once the build check has made the person wait 3 s,
   }
 });
 
+// A check that comes later in a running session (the app was already open once) is its own wait: it counts from its own start, not from a launch hours ago.
+it("counts a later re-check from its own start, not from the launch", () => {
+  vi.useFakeTimers();
+  try {
+    launchClock.setLaunchedAt(Date.now() - 2 * 3600_000);
+    useCompatibility.setState({ status: "allowed" });
+    render(
+      <CompatibilityGate>
+        <button>Editing surface</button>
+      </CompatibilityGate>,
+    );
+    act(() => useCompatibility.setState({ status: "checking" })); // checked again, hours into the session
+    expect(screen.queryByText(/waking the server/i)).not.toBeInTheDocument();
+    act(() => void vi.advanceTimersByTime(3_000));
+    expect(screen.getByRole("status").textContent).toBe("Waking the server…");
+    expect(screen.getByText("0:03")).toBeInTheDocument();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 it("says nothing of it on a warm start, where the check answers within a second or two", () => {
   vi.useFakeTimers();
   try {

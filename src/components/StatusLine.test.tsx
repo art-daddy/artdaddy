@@ -198,6 +198,7 @@ describe("StatusLine: a server that is waking", () => {
   const sendRound = () => {
     act(() => live().roundStarted(Date.now()));
     act(() => live().roundSent());
+    act(() => live().requestSent());
   };
   const label = () => screen.getByRole("status").textContent;
 
@@ -236,5 +237,15 @@ describe("StatusLine: a server that is waking", () => {
     act(() => noteServerAnswered(Date.now())); // the build check, say, answered
     tick(1_000);
     expect(label()).toBe("Thinking…");
+  });
+
+  it("never says it of a round on the old non-streaming route, which cannot tell a server that has not answered from a model that is thinking", () => {
+    noteServerAnswered(Date.now() - 6 * 60_000);
+    act(() => live().roundStarted(Date.now()));
+    act(() => live().roundSent()); // no request was reported: that route never does
+    const { container } = render(<StatusLine />);
+    tick(20_000);
+    expect(label()).toBe("Thinking…");
+    expect(container.textContent).not.toMatch(/asleep|Waking/);
   });
 });

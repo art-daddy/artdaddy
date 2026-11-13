@@ -701,7 +701,10 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
                 if (!superseded()) useLiveWait.getState().roundNoted(wait);
                 exec.telemetry.timer.noteWait(wait);
               },
-              sent: (bytes) => exec.telemetry.timer.bytesSent(bytes),
+              sent: (bytes) => {
+                if (!superseded()) useLiveWait.getState().requestSent();
+                exec.telemetry.timer.bytesSent(bytes);
+              },
               head: () => {
                 // The server's answer began: from here a slow round is the model's, not a server that is waking.
                 if (!superseded()) useLiveWait.getState().roundAnswered();

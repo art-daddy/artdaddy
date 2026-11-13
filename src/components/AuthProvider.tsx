@@ -31,6 +31,8 @@ import WakingLine from "./WakingLine";
 
 /** How long launch waits on the session before opening (offline) for one that is stored. */
 const BOOT_PATIENCE_MS = 15_000;
+/** The longest a server has been seen to take to wake (UJ-010). Past it, a launch screen still waiting offers the controls again. */
+const STUCK_AFTER_MS = 45_000;
 /** How long after the keychain did not answer before the restore asks it again. */
 const KEYCHAIN_RETRY_MS = 3_000;
 
@@ -57,6 +59,12 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
   // Set by an automatic retry, so the screen keeps explaining instead of flashing back to
   // "Restoring" every few seconds.
   const automaticRetry = useRef(false);
+  // A restore attempt is out right now (from the start of its effect to its last line). With the keychain answered, that is a renewal
+  // waiting on the server; without one (a dead end after two superseded attempts) nothing is coming and the person needs the controls.
+  const attemptInFlight = useRef(false);
+  // Nothing bounds a renewal that was answered and then never completes (the verify after it, a second renewal after a superseded one):
+  // after this long the controls come back whatever the cause.
+  const [stuck, setStuck] = useState(false);
   useEffect(() => {
     const restoreDesktopSession = async (): Promise<void> => {
       const result = await refreshDesktopSession();
@@ -163,9 +171,13 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
   useEffect(() => {
     if (platform.name !== "tauri") return;
     let cancelled = false;
-    if (!automaticRetry.current) setRestoreUnavailable(false);
+    if (!automaticRetry.current) {
+      setRestoreUnavailable(false);
+      setStuck(false);
+    }
     automaticRetry.current = false;
     setKeychainUnanswered(false);
+    attemptInFlight.current = true;
     void (async () => {
       const restoring = refreshDesktopSession();
       let patience: ReturnType<typeof setTimeout> | undefined;
@@ -212,7 +224,9 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
       // attribute the launch to, and an unattributed launch answers none of the questions
       // this marker exists for.
       if (getDesktopUserId()) reportLaunchOnce();
-    })();
+    })().finally(() => {
+      if (!cancelled) attemptInFlight.current = false;
+    });
     return () => {
       cancelled = true;
     };
@@ -223,11 +237,14 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
     // "Couldn't read your saved session" is written for a keychain that did not answer (macOS asks the person first). When the
     // keychain HAS answered and a session is stored, the renewal is out to a server that is slow to start: that is not an unreadable
     // session, and offering "Sign in again" for it was false. The waking line below says what is true.
-    const timer = setTimeout(() => {
-      if (storedSessionKnown() === true) return;
-      setRestoreUnavailable(true);
+    const early = setTimeout(() => {
+      if (storedSessionKnown() !== true) setRestoreUnavailable(true);
     }, 10_000);
-    return () => clearTimeout(timer);
+    const last = setTimeout(() => setStuck(true), STUCK_AFTER_MS);
+    return () => {
+      clearTimeout(early);
+      clearTimeout(last);
+    };
   }, [status, restoreAttempt]);
 
   // Re-reads the clock each second while this screen waits, so the line below appears and counts by itself.
@@ -258,28 +275,29 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
 
   if (authBypassed()) return <>{children}</>;
   if (status === "checking") {
-    // The keychain has answered and a session is stored: what this screen waits on is the server.
-    const waking = restoreUnavailable
-      ? null
-      : wakingLine({ now, waitingOnServer: storedSessionKnown() === true });
+    // The keychain has answered and a session is stored while an attempt is out: what this screen waits on is the server, and it says so
+    // (not that the session could not be read). Without an attempt in flight, or after STUCK_AFTER_MS, the person gets the controls.
+    const serverIsSlow = storedSessionKnown() === true;
+    const explain = stuck || (restoreUnavailable && !(attemptInFlight.current && serverIsSlow));
+    const waking = explain ? null : wakingLine({ now, waitingOnServer: serverIsSlow });
     return (
-      <BeforeSignIn update={restoreUnavailable}>
+      <BeforeSignIn update={explain}>
         <div className="flex h-full w-full items-center justify-center bg-bg p-6 text-center">
           <div>
             <div className="text-lg font-semibold text-neutral-100">Starting ArtDaddy…</div>
             <div className="mt-2 text-sm text-neutral-400">
-              {restoreUnavailable
+              {explain
                 ? "ArtDaddy couldn't read your saved session."
                 : "Restoring your saved session."}
             </div>
             {waking ? <WakingLine line={waking} /> : null}
-            {restoreUnavailable && hostInfo().os === "macos" ? (
+            {explain && hostInfo().os === "macos" ? (
               <div className="mt-2 text-sm text-neutral-400">
                 If macOS asks to use your saved sign-in, enter your Mac password and click Always
                 Allow. ArtDaddy then continues by itself.
               </div>
             ) : null}
-            {restoreUnavailable ? (
+            {explain ? (
               <div className="mt-5 flex justify-center gap-3">
                 <button
                   type="button"

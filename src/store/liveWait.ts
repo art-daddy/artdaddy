@@ -50,7 +50,9 @@ interface LiveWaitState {
   /** When the turn began waiting for the person's answer to an approval, else null. */
   approvalSince: number | null;
   roundStarted: (now?: number) => void;
-  roundSent: (now?: number) => void;
+  roundSent: () => void;
+  /** The request's body is going out on the streaming route, the one route that can tell a server that has not answered from a model that is thinking. */
+  requestSent: (now?: number) => void;
   /** The server's answer to the live request began (its head arrived). */
   roundAnswered: () => void;
   roundWriting: () => void;
@@ -83,12 +85,11 @@ export const useLiveWait = create<LiveWaitState>((set) => ({
   ...empty(),
   roundStarted: (now = Date.now()) =>
     set({ round: { phase: "preparing", startedAt: now }, request: null, approvalSince: null }),
-  roundSent: (now = Date.now()) =>
-    set((s) =>
-      s.round?.phase === "preparing"
-        ? { round: { ...s.round, phase: "waiting" }, request: { sentAt: now, answered: false } }
-        : s,
-    ),
+  roundSent: () =>
+    set((s) => (s.round?.phase === "preparing" ? { round: { ...s.round, phase: "waiting" } } : s)),
+  /** The request's body is going out on the streaming route (the only route that can tell a waking server from a thinking model). */
+  requestSent: (now = Date.now()) =>
+    set((s) => (s.round && !s.request ? { request: { sentAt: now, answered: false } } : s)),
   roundAnswered: () =>
     set((s) =>
       s.request && !s.request.answered ? { request: { ...s.request, answered: true } } : s,

@@ -2245,11 +2245,18 @@ describe("useChat tells the status line what the turn is waiting on", () => {
   });
 
   // UJ-082: a model that is thinking and a server that has not answered look the same from the round's phase.
-  it("knows the server has begun to answer once the head arrives, and not before", async () => {
+  it("knows the request is out on the streaming route, and that the server has begun to answer once the head arrives, and not before", async () => {
     await startTurn();
     const seen: Array<boolean | undefined> = [];
     (inferRoundStreaming as Any).mockImplementationOnce(
-      async (_body: Any, _onDelta: unknown, _signal: unknown, observer: { head: () => void }) => {
+      async (
+        _body: Any,
+        _onDelta: unknown,
+        _signal: unknown,
+        observer: { sent: (n: number) => void; head: () => void },
+      ) => {
+        seen.push(live().request?.answered); // not out yet
+        observer.sent(10);
         seen.push(live().request?.answered);
         observer.head();
         seen.push(live().request?.answered);
@@ -2257,18 +2264,23 @@ describe("useChat tells the status line what the turn is waiting on", () => {
       },
     );
     await lastDeps.infer({ user_text: "hi" }, []);
-    expect(seen).toEqual([false, true]);
+    expect(seen).toEqual([undefined, false, true]);
     expect(live().request).toBeNull();
   });
 
-  it("does not let a retired turn's answer say that the request of the turn that replaced it was answered", async () => {
+  it("does not let a retired turn's request or answer touch the live request of the turn that replaced it", async () => {
     await startTurn();
     const first = lastDeps;
-    let head!: () => void;
+    let observed!: { sent: (n: number) => void; head: () => void };
     let finishFirst!: (v: unknown) => void;
     (inferRoundStreaming as Any).mockImplementationOnce(
-      (_body: Any, _onDelta: unknown, _signal: unknown, observer: { head: () => void }) => {
-        head = observer.head;
+      (
+        _body: Any,
+        _onDelta: unknown,
+        _signal: unknown,
+        observer: { sent: (n: number) => void; head: () => void },
+      ) => {
+        observed = observer;
         return new Promise((resolve) => (finishFirst = resolve));
       },
     );
@@ -2276,9 +2288,11 @@ describe("useChat tells the status line what the turn is waiting on", () => {
     await useChat.getState().send("second message"); // retires the first turn
     (inferRoundStreaming as Any).mockImplementationOnce(() => new Promise(() => undefined));
     void lastDeps.infer({ user_text: "second" }, []);
-    await vi.waitFor(() => expect(live().request).not.toBeNull());
-    head();
-    expect(live().request?.answered).toBe(false);
+    await vi.waitFor(() => expect(live().round?.phase).toBe("waiting"));
+    observed.sent(10);
+    expect(live().request, "the retired turn's request is not the live one").toBeNull();
+    observed.head();
+    expect(live().request).toBeNull();
     finishFirst(ANSWER);
     await firstRound;
   });

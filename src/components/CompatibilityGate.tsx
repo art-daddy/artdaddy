@@ -20,10 +20,18 @@ export default function CompatibilityGate({ children }: { children: ReactNode })
   const activated = useRef(false);
   const allowed = platform.name !== "tauri" || status === "allowed";
   if (allowed) activated.current = true;
-  // The build check is a request to the server; while it is out and the app has been up for 3 s, say what is slow (waking.ts).
+  // The build check is a request to the server; while it is out and the app has been up for 3 s, say what is slow (waking.ts). During the launch the
+  // clock is the launch's; a check that comes later in a running session (the app was already open once) counts its own wait from its own start.
   const checking = !allowed && status === "checking";
+  const waitStarted = useRef<number | undefined>(undefined);
+  if (!checking) waitStarted.current = undefined;
+  else if (waitStarted.current === undefined && activated.current) waitStarted.current = Date.now();
   const now = useNow(1000, checking);
-  const waking = wakingLine({ now, waitingOnServer: checking });
+  const waking = wakingLine({
+    now,
+    waitingOnServer: checking,
+    launchedAtMs: activated.current ? waitStarted.current : undefined,
+  });
   useEffect(() => {
     if (platform.name === "tauri" && auth !== "checking" && auth !== "locked") void check();
   }, [auth, check]);

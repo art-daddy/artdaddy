@@ -1219,4 +1219,55 @@ describe("AuthProvider, a server that is slow to start", () => {
     expect(screen.getByRole("button", { name: /sign in again/i })).toBeInTheDocument();
     expect(waking()).not.toBeInTheDocument();
   });
+
+  it("claims nothing about the server in the first seconds while the keychain has not answered, which is the macOS dialog's window", async () => {
+    mocks.storedSessionKnown.mockReturnValue(null);
+    mount();
+    await pass(5_000);
+    expect(waking()).not.toBeInTheDocument();
+    expect(screen.getByText(/restoring your saved session/i)).toBeInTheDocument();
+  });
+
+  it("goes back to the plain restoring screen, with the line, once a late keychain answer lets the renewal go out", async () => {
+    // The keychain timed out first (the macOS dialog was open), so the screen explained that.
+    mocks.storedSessionKnown.mockReturnValue(null);
+    mocks.refreshDesktopSession
+      .mockResolvedValueOnce({ status: "unavailable", hasStoredSession: null })
+      .mockReturnValue(new Promise<never>(() => undefined));
+    mount();
+    await pass(0);
+    expect(screen.getByText(/couldn't read your saved session/i)).toBeInTheDocument();
+    // The person answered it: the retry (by itself, 3 s later) finds the session, and the renewal is out to a server that is slow.
+    mocks.storedSessionKnown.mockReturnValue(true);
+    await pass(4_000);
+    expect(screen.queryByText(/couldn't read your saved session/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /sign in again/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("status").textContent).toBe("Waking the server…");
+  });
+
+  it("keeps the controls when no attempt is left to wait on, even though the keychain once answered (a restore overtaken twice)", async () => {
+    mocks.refreshDesktopSession.mockResolvedValue({ status: "superseded", hasStoredSession: null });
+    mount();
+    await pass(4_000);
+    expect(screen.getByText(/couldn't read your saved session/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /sign in again/i })).toBeInTheDocument();
+    expect(waking()).not.toBeInTheDocument();
+  });
+
+  it("brings the controls back after 45 s of waiting whatever the cause, so nothing can hold the screen for good, and Retry starts a new wait", async () => {
+    mount();
+    await pass(44_000);
+    expect(screen.queryByRole("button", { name: /sign in again/i })).not.toBeInTheDocument();
+    await pass(1_500);
+    expect(screen.getByText(/couldn't read your saved session/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /sign in again/i })).toBeInTheDocument();
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Retry" }).click();
+    });
+    await pass(1_000);
+    expect(screen.queryByRole("button", { name: /sign in again/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("status").textContent).toBe("Waking the server…");
+  });
 });
