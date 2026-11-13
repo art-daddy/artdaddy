@@ -23,7 +23,11 @@ import {
 import { inferRoundStreaming } from "../agent/api";
 import { askForAttention } from "../lib/attention";
 import { TIMELINE_CHANGED_NOTE } from "../agent/compose";
+import { IMPORT_NOTE_MARK } from "../agent/importNote";
 import { STATE_BLOCK_MARK } from "../agent/stateBlock";
+import { __resetExportFlags, __setExportFlag } from "../api/exportFlags";
+import { importingRows, resetImportBatches, withImportBatch } from "./importJobs";
+import { buildRequests, mapRequests, requestsForHistory } from "./chatTranscript";
 import { ABORT_GRACE_MS, READ_BOUND_MS, timedOutResult } from "../agent/toolBound";
 import {
   __bufferedAgentEvents,
@@ -2145,6 +2149,226 @@ describe("useChat hands the model the project state with its message (S1f)", () 
     await useChat.getState().send("build it");
     expect(lastStart()).toContain(STATE_BLOCK_MARK);
     expect(lastDeps.noteForRound()).toBeNull();
+  });
+});
+
+// UJ-088 (witness 3LuwWwH6RRVj): files dropped, Enter 43 ms later, and the model was told "library: []". The owner chose never to hold the message: it goes at once, and
+// the model is told which files are still coming in. The words are given once, kept on the turn, and shown again byte for byte on every later round and after a reload.
+describe("useChat tells the model which files the person is still importing", () => {
+  const DIR = "C:/p1";
+  let live: Timeline;
+  let reads: string[];
+  let readOutcome: (name: string) => unknown;
+  const answers = (name: string): unknown =>
+    name === "get_timeline"
+      ? { ok: true, timeline: JSON.parse(JSON.stringify(live)) }
+      : { ok: true, project_id: "p1", name: "Reel", library: [], library_count: 0 };
+  const lastStart = () => String(runnerStart.mock.calls.at(-1)?.[0] ?? "");
+  const finish = () => emit("turn_done", snap());
+  const ECHO = {
+    kind: "text",
+    final_text: "ok",
+    usage: {},
+    provider_snapshot: {},
+    history_mode: "client",
+  };
+  const savedRequest = () => (persistSessionSoon as Any).mock.calls.at(-1)[1].requests.at(-1);
+  const gate = () => {
+    let open!: () => void;
+    const promise = new Promise<void>((res) => (open = res));
+    return { promise, open };
+  };
+  const tick = async () => {
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+  };
+  /** A drop that is still importing `names`, until the returned `end` is called; `landed(name)` settles one file the way the door does. */
+  function importing(names: string[]) {
+    const end = gate();
+    const jobs = new Map(names.map((n) => [n, gate()]));
+    const landing: Promise<unknown>[] = [];
+    const batch = withImportBatch(
+      DIR,
+      names.map((n) => `D:/shoot/${n}`),
+      async (file) => {
+        for (const n of names) landing.push(file(`D:/shoot/${n}`, () => jobs.get(n)!.promise));
+        await end.promise;
+      },
+    );
+    return {
+      landed: async (n: string) => {
+        jobs.get(n)!.open();
+        await tick();
+      },
+      end: async () => {
+        for (const j of jobs.values()) j.open();
+        end.open();
+        await batch;
+        await Promise.all(landing);
+      },
+    };
+  }
+
+  beforeEach(() => {
+    resetHistoryModeSupport();
+    resetImportBatches();
+    __resetExportFlags();
+    reads = [];
+    live = emptyTimeline();
+    readOutcome = answers;
+    (openToolHost as Any).mockImplementation((id: string) => ({
+      projectId: id,
+      ready: Promise.resolve(),
+      has: (n: string) => n === "get_timeline" || n === "get_project_state",
+      run: vi.fn(async (name: string) => {
+        reads.push(name);
+        return readOutcome(name);
+      }),
+      store: () => ({ projectDir: DIR }) as Any,
+    }));
+    setOpenDocumentResolver((id) =>
+      id === "p1"
+        ? ({
+            sessionId: "s1",
+            externalTimelineEdits: () => 0,
+            timeline: { current: () => live },
+          } as Any)
+        : undefined,
+    );
+    useEditor.setState({
+      projectId: "p1",
+      store: { projectDir: DIR, writeProjectText: vi.fn() } as Any,
+      timeline: live,
+    });
+    useChat.setState({ projectId: "p1", turns: [], model: "gpt-5.4" });
+  });
+  afterEach(() => {
+    resetImportBatches();
+    __resetExportFlags();
+    setOpenDocumentResolver(() => undefined);
+    (openToolHost as Any).mockImplementation((id: string) => ({
+      projectId: id,
+      ready: Promise.resolve(),
+      has: () => false,
+      run: vi.fn(async () => ({})),
+      store: () => null,
+    }));
+  });
+
+  it("sends the message at once, with the files named after the project state, and keeps those words on the turn and in the saved transcript", async () => {
+    const drop = importing(["big_1.mp4", "big_2.mp4", "big_3.mp4"]);
+    await useChat.getState().send("use the clips I just dropped");
+    const text = lastStart();
+    expect(text.startsWith("use the clips I just dropped")).toBe(true);
+    expect(text).toContain(IMPORT_NOTE_MARK);
+    for (const n of ["big_1.mp4", "big_2.mp4", "big_3.mp4"]) expect(text).toContain(n);
+    expect(text.indexOf(STATE_BLOCK_MARK)).toBeLessThan(text.indexOf(IMPORT_NOTE_MARK));
+    expect(text).toContain('"library_count":0'); // the library really is empty: the note is what says why
+    const turn = useChat.getState().turns.at(-1)!;
+    expect(text.endsWith(turn.importNote!)).toBe(true);
+    expect(savedRequest().message.import_note).toBe(turn.importNote);
+    await drop.end();
+  });
+
+  it("shows the model the same words on every later round, even after the imports have landed", async () => {
+    const drop = importing(["big_1.mp4"]);
+    await useChat.getState().send("use the clips I just dropped");
+    const first = lastStart();
+    await drop.end(); // nothing is importing any more
+    (inferRoundStreaming as Any).mockResolvedValue(ECHO);
+    await lastDeps.infer({ tool_results: [] }, []);
+    const body = (inferRoundStreaming as Any).mock.calls.at(-1)[0];
+    expect(body.transcript.requests.at(-1).message.text).toBe(first);
+    expect(first).toContain("big_1.mp4");
+    // and after a reload: the turn is rebuilt from what was saved
+    const reloaded = mapRequests(
+      JSON.parse(JSON.stringify(buildRequests(useChat.getState().turns))),
+    );
+    expect(requestsForHistory(reloaded).at(-1)!.message!.text).toBe(first);
+  });
+
+  it("opposite order: files that landed before the message leave no trace, and the text is exactly what it always was", async () => {
+    const drop = importing(["big_1.mp4"]);
+    await drop.end();
+    await useChat.getState().send("make it punchy");
+    expect(lastStart()).not.toContain(IMPORT_NOTE_MARK);
+    const turn = useChat.getState().turns.at(-1)!;
+    expect(turn.importNote).toBeUndefined();
+    expect(savedRequest().message).not.toHaveProperty("import_note");
+    expect(lastStart().endsWith(turn.stateBlock!)).toBe(true);
+  });
+
+  it("names a file only while it is coming in: the one that landed first is not told, and the next message after all landed carries nothing", async () => {
+    const drop = importing(["big_1.mp4", "big_2.mp4"]);
+    await drop.landed("big_1.mp4");
+    await useChat.getState().send("first");
+    expect(lastStart()).toContain("1 file is not in the library yet: big_2.mp4");
+    expect(lastStart()).not.toContain("big_1.mp4");
+    finish();
+    await drop.end();
+    await useChat.getState().send("second");
+    expect(lastStart()).toBe("second"); // no state read, no note: byte-identical to a chat that never imported
+  });
+
+  it("a second message while the import still runs carries the note again, though no state block is read for it", async () => {
+    const drop = importing(["big_1.mp4"]);
+    await useChat.getState().send("first");
+    finish();
+    reads.length = 0;
+    await useChat.getState().send("what is in the library?");
+    expect(reads).toEqual([]); // nothing changed outside the chat, so no new state read
+    expect(lastStart().startsWith("what is in the library?")).toBe(true);
+    expect(lastStart()).toContain(IMPORT_NOTE_MARK);
+    expect(lastStart()).toContain("big_1.mp4");
+    await drop.end();
+  });
+
+  it("a file that lands, or one that starts, while the state is being read is named: never in neither the block nor the note", async () => {
+    const drop = importing(["lands.mp4"]);
+    const laters: ReturnType<typeof importing>[] = [];
+    readOutcome = async (name) => {
+      if (name === "get_project_state") {
+        const out = answers(name); // the library as it was: without the file that lands next
+        await drop.landed("lands.mp4");
+        laters.push(importing(["starts.mp4"]));
+        await tick();
+        return out;
+      }
+      return answers(name);
+    };
+    await useChat.getState().send("go");
+    expect(lastStart()).toContain("lands.mp4");
+    expect(lastStart()).toContain("starts.mp4");
+    await drop.end();
+    for (const l of laters) await l.end();
+  });
+
+  it("the app's own turn (a finished job waking the chat) is not the person's message and carries no note", async () => {
+    const drop = importing(["big_1.mp4"]);
+    await useChat
+      .getState()
+      .send("Background work you started earlier has finished:\n- Voiceover is ready", [], {
+        system: true,
+      });
+    expect(lastStart()).not.toContain(IMPORT_NOTE_MARK);
+    expect(useChat.getState().turns.at(-1)?.importNote).toBeUndefined();
+    await drop.end();
+  });
+
+  it("is the same as 0.27.0 when the server has switched the note off", async () => {
+    const drop = importing(["big_1.mp4"]);
+    __setExportFlag("import_note", false);
+    await useChat.getState().send("use the clips I just dropped");
+    expect(lastStart()).not.toContain(IMPORT_NOTE_MARK);
+    expect(useChat.getState().turns.at(-1)?.importNote).toBeUndefined();
+    await drop.end();
+  });
+
+  it("never holds the message: it is sent while the import is still running", async () => {
+    const drop = importing(["big_1.mp4"]);
+    await useChat.getState().send("go");
+    expect(runnerStart).toHaveBeenCalledTimes(1); // started with the import still in flight
+    expect(importingRows(DIR).map((r) => r.name)).toEqual(["big_1.mp4"]);
+    await drop.end();
   });
 });
 

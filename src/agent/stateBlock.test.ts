@@ -126,6 +126,26 @@ describe("formatStateBlock: what the model is handed instead of spending a round
     expect(body.get_project_state.library_kinds).toEqual({ video: 266, audio: 134 });
   });
 
+  // UJ-088: the one fact that stops an empty-looking library reading as an empty project must survive the summary as well as the full form.
+  it("keeps the files still being imported, in the full form as the tool gave them and in a summary, bounded", () => {
+    const importing = [{ name: "a.mp4", percent: 12 }, { name: "b.mp4" }];
+    const full = bodyOf(
+      formatStateBlock(project({ library: [], library_count: 0, importing }), timeline())!,
+    );
+    expect(full.get_project_state.importing).toEqual(importing);
+    const many = Array.from({ length: 30 }, (_, i) => ({ name: `shot_${i}.jpg` }));
+    const tracks = Array.from({ length: 12 }, (_, i) => trackOf(`t${i}`, 300));
+    const block = formatStateBlock(project({ importing: many }), timeline(tracks))!;
+    expect(headOf(block)).toMatch(/summary/i);
+    const summary = bodyOf(block).get_project_state;
+    expect(summary.importing_count).toBe(30);
+    expect(summary.importing).toHaveLength(8);
+    expect(summary.importing[0]).toEqual({ name: "shot_0.jpg" });
+    const none = bodyOf(formatStateBlock(project(), timeline(tracks))!).get_project_state;
+    expect(none).not.toHaveProperty("importing");
+    expect(none).not.toHaveProperty("importing_count");
+  });
+
   it("lists at most 40 tracks in a summary and says how many there really are", () => {
     const tracks = Array.from({ length: 60 }, (_, i) => trackOf(`t${i}`, 200));
     const block = formatStateBlock(project(), timeline(tracks))!;

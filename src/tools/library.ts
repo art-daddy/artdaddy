@@ -9,7 +9,7 @@ import type { ClientToolContext } from "./context";
 import { isMutationRejected, runProjectMutation } from "./coordinator";
 import type { ClientToolRegistry } from "./registry";
 import { unresolvedRef } from "./refState";
-import { importingField, importingFor, mergeImporting } from "./importing";
+import { importingField, importingFor, importingMatch, mergeImporting } from "./importing";
 import {
   INTERNAL_DIR,
   clipAbs,
@@ -516,11 +516,18 @@ async function runLibraryOp(
           : { ok: false, error: `resolve: unknown library id ${ref}` };
       }
       const abs = await store.resolveRef(ref);
-      if (!abs)
+      if (!abs) {
+        // A name the person's import has not finished with is on its way in, not a wrong guess (UJ-088).
+        if (importingMatch(store, ref))
+          return {
+            ok: false,
+            ...(await unresolvedRef({ store, surface }, ref, `resolve: unknown library id ${ref}`)),
+          };
         return {
           ok: false,
           error: `resolve: nothing in this project matches ${ref} (library ids, filenames and project-relative paths only)`,
         };
+      }
       return { ok: true, path: store.toRef(abs) };
     }
 

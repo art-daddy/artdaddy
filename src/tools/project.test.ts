@@ -24,6 +24,7 @@ import { registerTestDocument, resetTestDocuments, flushTestDocuments } from "..
 import { BRAND } from "../brand";
 import { ProjectClosingError } from "../project/MutationGate";
 import { foreignProjectLock } from "./projectLock";
+import { resetImportBatches, withImportBatch } from "../store/importJobs";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -1845,6 +1846,49 @@ describe("get_project_state", () => {
     expect(r.library).toEqual([]);
     expect(r.library_count).toBe(0);
     expect(r.library_truncated).toBeUndefined();
+    expect(Object.keys(r)).not.toContain("importing"); // nothing importing: the result is what it always was
+  });
+
+  // UJ-088: the state block the app reads for the model's first message is this result; an empty library read as "no media" while the person's files came in.
+  it("names the files still being imported beside an empty-looking library, and drops them when they settle", async () => {
+    const { ctx } = await mkCtx();
+    let open!: () => void;
+    const hold = new Promise<void>((res) => (open = res));
+    const batch = withImportBatch(ACTIVE, [`D:/shoot/a.mp4`, `D:/shoot/b.mp4`], () => hold);
+    try {
+      const during = (await getProjectStateTool({}, ctx)) as Any;
+      expect(during.library).toEqual([]);
+      expect(during.library_count).toBe(0);
+      expect(during.importing).toEqual([{ name: "a.mp4" }, { name: "b.mp4" }]);
+    } finally {
+      open();
+      await batch;
+      resetImportBatches();
+    }
+    expect(Object.keys((await getProjectStateTool({}, ctx)) as Any)).not.toContain("importing");
+  });
+
+  it("names a file whose drop begins in the middle of the library read: it is in neither the list nor the registry's first look otherwise", async () => {
+    const { ctx } = await mkCtx();
+    const store = ctx.store as Any;
+    const real = store.listClips.bind(store);
+    let open!: () => void;
+    const hold = new Promise<void>((res) => (open = res));
+    let batch: Promise<unknown> = Promise.resolve();
+    store.listClips = async () => {
+      const clips = await real(); // the library as it was a moment ago
+      batch = withImportBatch(ACTIVE, ["D:/shoot/just-dropped.mp4"], () => hold);
+      return clips;
+    };
+    try {
+      const r = (await getProjectStateTool({}, ctx)) as Any;
+      expect(r.library).toEqual([]);
+      expect(r.importing).toEqual([{ name: "just-dropped.mp4" }]);
+    } finally {
+      open();
+      await batch;
+      resetImportBatches();
+    }
   });
 
   it("errors without a context", async () => {

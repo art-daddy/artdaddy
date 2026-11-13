@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import fc from "fast-check";
 
 import type { ProjectStoreAccess } from "../tools/store";
@@ -29,6 +29,7 @@ import {
   uploadFiles,
 } from "./upload";
 import { AUDIO_EXTS, IMAGE_EXTS, VIDEO_EXTS, kindOf } from "../media/formats";
+import { importingRows, resetImportBatches } from "../store/importJobs";
 import { useProjectNotice } from "../store/projectNotice";
 
 const fakeFile = (name: string, bytes: number[] = [1]) =>
@@ -514,5 +515,97 @@ describe("a large file is never materialised in the webview", () => {
     const out = await importFile("proj", fakeFile("small.mp4", [1, 2, 3]), fakeStore(write));
     expect(write).toHaveBeenCalled();
     expect(out.rel).toMatch(/^library\/media_[0-9a-f]{12}\.mp4$/);
+  });
+});
+
+// UJ-088 (witness 3LuwWwH6RRVj): the agent was told "library: []" while the person's files were being imported, because the app knew a batch one file at a time. Every door
+// that imports a batch (the start screen's footage, the library and chat drops, the picker, an upload of File objects) goes through these two boundaries, so this walks them.
+describe("a batch is known to the agent the instant it starts, and each file leaves when it lands", () => {
+  const DIR = "C:/proj";
+  const names = () => importingRows(DIR).map((r) => r.name);
+  const gate = () => {
+    let open!: () => void;
+    let fail!: () => void;
+    const promise = new Promise<void>((res, rej) => {
+      open = res;
+      fail = () => rej(new Error("disk read error"));
+    });
+    promise.catch(() => undefined);
+    return { promise, open, fail };
+  };
+  const tick = async () => {
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+  };
+  afterEach(() => resetImportBatches());
+
+  it("importFootage by path: all three are listed before anything is awaited; a landed file leaves while the others still come in; a failed one leaves too", async () => {
+    const paths = ["a.mp4", "b.mp4", "c.mp4"].map((n) => `D:/shoot/${n}`);
+    const gates = new Map(paths.map((p) => [p, gate()]));
+    currentStore = {
+      ...fakeStore(),
+      readBytes: async (p: string) => {
+        await gates.get(p)!.promise;
+        return new Uint8Array([paths.indexOf(p) + 1]);
+      },
+    } as unknown as ProjectStoreAccess;
+    const done = importFootage(
+      "proj",
+      paths.map((p) => ({ name: p.split("/").pop()!, path: p })),
+    );
+    expect(names()).toEqual(["a.mp4", "b.mp4", "c.mp4"]); // not one file at a time as the loop reaches each
+    gates.get(paths[0])!.open();
+    await vi.waitFor(() => expect(names()).toEqual(["b.mp4", "c.mp4"])); // hashing is real work, so this waits on it, not on a count of ticks
+    gates.get(paths[1])!.fail(); // a file that cannot be read is not coming in either
+    await vi.waitFor(() => expect(names()).toEqual(["c.mp4"]));
+    gates.get(paths[2])!.open();
+    const out = await done;
+    expect(out.map((u) => u.name)).toEqual(["a.mp4", "c.mp4"]);
+    expect(names()).toEqual([]);
+    expect(useProjectNotice.getState().message).toMatch(/couldn't import b\.mp4/i);
+  });
+
+  it("uploadFiles (File objects) lists them by name at once and clears them when it ends, even when every file fails", async () => {
+    currentStore = fakeStore();
+    const open = gate();
+    const slow = (name: string) =>
+      ({
+        name,
+        arrayBuffer: async () => {
+          await open.promise;
+          return new Uint8Array([name.length]).buffer;
+        },
+      }) as unknown as File;
+    const done = uploadFiles("proj", [slow("one.mp4"), slow("two.mp4")]);
+    expect(names()).toEqual(["one.mp4", "two.mp4"]);
+    open.fail(); // both reads fail
+    await done;
+    expect(names()).toEqual([]);
+    expect(useProjectNotice.getState().message).toMatch(/couldn't import 2 files/i);
+  });
+
+  it("the picker's path (importViaDialog) registers its whole pick once the dialog answers", async () => {
+    platformName = "tauri";
+    openDialog.mockResolvedValue(["D:/shoot/x.mp4", "D:/shoot/y.mp4"]);
+    const open = gate();
+    currentStore = {
+      ...fakeStore(),
+      readBytes: async () => {
+        await open.promise;
+        return new Uint8Array([9]);
+      },
+    } as unknown as ProjectStoreAccess;
+    const done = importViaDialog("proj", "Import media");
+    await tick();
+    expect(names()).toEqual(["x.mp4", "y.mp4"]);
+    open.open();
+    await done;
+    expect(names()).toEqual([]);
+  });
+
+  it("a project with no store (the web build) registers nothing and still reports the failure", async () => {
+    currentStore = null;
+    await importFootage("proj", [{ name: "a.mp4", path: "D:/shoot/a.mp4" }]);
+    expect(names()).toEqual([]);
+    expect(useProjectNotice.getState().message).toMatch(/couldn't import a\.mp4/i);
   });
 });

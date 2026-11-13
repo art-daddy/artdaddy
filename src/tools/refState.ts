@@ -11,7 +11,8 @@
 // So the wording is not a per-tool decision. `pendingMedia` on the store answers the question and
 // this answers what to say about it; `refState.conformance.test.ts` walks every contract tool that
 // takes a `media_ref` and fails if one of them still says "not found" about media we are making.
-// The same holds for a linked file the user moved (UJ-014): the ref is right and the file is offline.
+// The same holds for a linked file the user moved (UJ-014): the ref is right and the file is offline. And for a file the person is still
+// importing (UJ-088): the name is right and the file is on its way in; the conformance test walks that case too.
 import { ArtDaddyError } from "../lib/errors";
 import type { ClientToolContext } from "./context";
 import { generationWait, type GenerationWait } from "./generationWait";

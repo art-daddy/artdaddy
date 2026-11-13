@@ -10,9 +10,11 @@
 // that takes a `media_ref` fails here until it is either wired up or explicitly exempted. That is
 // the whole point: the previous shape of this rule was "each caller remembers", which is how the
 // gap existed in the first place.
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, beforeAll, afterAll, afterEach } from "vitest";
 
+import { __resetExportFlags, __setExportFlag } from "../api/exportFlags";
 import { paramsByTool } from "../contract/views";
+import { resetImportBatches, withImportBatch } from "../store/importJobs";
 import { clipVideoTool, cropImageTool, probeMediaTool } from "./media";
 import { inspectColorTool, inspectMediaTool } from "./inspect";
 import { registerVisionTools } from "./vision";
@@ -36,6 +38,23 @@ const DIR = "C:/proj";
 const PENDING = "media_gen_pending01";
 const FAILED = "media_gen_failed01";
 const OFFLINE = "media_offline01";
+/** A file the person is importing right now (UJ-088): it has no library id yet, so the agent can only say the name it was given. */
+const IMPORTING = "big_1.mp4";
+let releaseImport!: () => void;
+let importBatch: Promise<unknown>;
+beforeAll(() => {
+  importBatch = withImportBatch(
+    DIR,
+    [`D:/shoot/${IMPORTING}`],
+    () => new Promise<void>((res) => (releaseImport = res)),
+  );
+});
+afterAll(async () => {
+  releaseImport();
+  await importBatch;
+  resetImportBatches();
+});
+afterEach(() => __resetExportFlags());
 /** What the in-app agent was told before MCP had its own wording. Frozen: that agent IS told when
  *  the media lands, so this is true for it, and changing it changes what the model does. */
 const APP_PENDING = `'${PENDING}' is still being generated, so there is nothing to read yet. The ref is correct; you will be told when it lands. Don't re-generate it and don't guess a file path.`;
@@ -189,12 +208,33 @@ describe("every tool that takes a media_ref knows 'pending' from 'unknown'", () 
       expect(msg).not.toContain("iCloud Fotos");
     });
 
+    // UJ-088: the person's drop has not landed, and the agent names the file it was told about. "Not found" there sends it off to re-import or guess a path.
+    it(`${name}: a file the person is still importing is on its way in, not an unknown name`, async () => {
+      for (const surface of ["app", "mcp"] as const) {
+        const r = (await CALLS[name](IMPORTING, surface)) as Any;
+        const msg = String(r?.error ?? "");
+        expect(msg, surface).toMatch(/still being imported/i);
+        expect(msg, surface).not.toMatch(/not found|could not sample|unknown/i);
+        expect(msg, surface).toMatch(/don't import it again/i);
+        expect(msg, surface).toMatch(/don't guess a file path/i);
+        expect(msg, surface).not.toMatch(/you will be told/i); // nothing tells the agent when an import lands
+        expect(r, surface).not.toHaveProperty("pending");
+      }
+    });
+
+    it(`${name}: with the server's note switched off it is 0.27.0 again: an unknown name`, async () => {
+      __setExportFlag("import_note", false);
+      const r = (await CALLS[name](IMPORTING)) as Any;
+      expect(String(r?.error ?? "")).not.toMatch(/still being imported/i);
+      expect(String(r?.error ?? "")).toMatch(/not found|could not sample/i);
+    });
+
     // The direction that keeps the rule honest: a genuine typo must still read as a typo, or the
     // fix would just have swapped one misleading message for another.
     it(`${name}: an unknown ref still says it is unknown`, async () => {
       const r = (await CALLS[name]("media_typo")) as Any;
       const msg = String(r?.error ?? "");
-      expect(msg).not.toMatch(/still being generated/i);
+      expect(msg).not.toMatch(/still being generated|still being imported/i);
       expect(msg).toMatch(/not found|could not sample/i);
     });
 

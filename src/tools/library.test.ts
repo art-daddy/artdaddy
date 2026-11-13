@@ -4,6 +4,8 @@ import type { ClientToolContext } from "./context";
 import { registerLibraryTools } from "./library";
 import { ClientToolRegistry } from "./registry";
 import { ProjectStoreAccess, joinPath, type FsLike } from "./store";
+import { __resetExportFlags, __setExportFlag } from "../api/exportFlags";
+import { resetImportBatches, withImportBatch } from "../store/importJobs";
 import { registerTestDocument, resetTestDocuments } from "../test/timelineKit";
 import { doRedo, doUndo, loadTimeline, replaceTimeline } from "../timeline/engine";
 import { emptyTimeline } from "../timeline/model";
@@ -864,5 +866,111 @@ describe("resolve", () => {
     const r = await runLib(ctxWith(new MockFs()), { action: "resolve", id_or_path: "nope.mp4" });
     expect(r.ok).toBe(false);
     expect(String(r.error)).toContain("nothing in this project matches");
+  });
+});
+
+// UJ-088: the person dropped files and the agent asked what the library holds before they were in. `{"clips":[]}` read as "the library is empty".
+describe("list and resolve while the person's files are still importing", () => {
+  class HookFs extends MockFs {
+    hook: (() => Promise<void>) | null = null;
+    // Hands back the catalog as it is NOW, then lets the test change the world before the caller sees it.
+    async readTextFile(p: string): Promise<string> {
+      const text = await super.readTextFile(p);
+      const run = this.hook;
+      if (run && p.endsWith("library.json")) {
+        this.hook = null;
+        await run();
+      }
+      return text;
+    }
+  }
+  const gate = () => {
+    let open!: () => void;
+    const promise = new Promise<void>((res) => (open = res));
+    return { promise, open };
+  };
+  const tick = async () => {
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+  };
+  afterEach(() => {
+    resetImportBatches();
+    __resetExportFlags();
+  });
+
+  it("an empty list says what is coming in, and the same call with nothing importing is exactly what it always was", async () => {
+    const fs = new MockFs();
+    seed(fs, { clips: [] });
+    const hold = gate();
+    const batch = withImportBatch(
+      DIR,
+      ["D:/shoot/big_1.mp4", "D:/shoot/big_2.mp4"],
+      () => hold.promise,
+    );
+    const during = await runLib(ctxWith(fs), { action: "list" });
+    expect(during.clips).toEqual([]);
+    expect(during.importing).toEqual([{ name: "big_1.mp4" }, { name: "big_2.mp4" }]);
+    hold.open();
+    await batch;
+    const after = await runLib(ctxWith(fs), { action: "list" });
+    expect(after).toEqual({ ok: true, clips: [] });
+    expect(JSON.stringify(after)).toBe('{"ok":true,"clips":[]}');
+  });
+
+  it("a file that lands during the read is still named, and one that starts during it is named too", async () => {
+    const fs = new HookFs();
+    seed(fs, { clips: [] });
+    const job = gate();
+    const end = gate();
+    let landed: Promise<unknown> = Promise.resolve();
+    const first = withImportBatch(DIR, ["D:/shoot/lands.mp4"], async (file) => {
+      landed = file("D:/shoot/lands.mp4", () => job.promise);
+      await end.promise;
+    });
+    let second: Promise<unknown> = Promise.resolve();
+    const later = gate();
+    fs.hook = async () => {
+      job.open(); // lands right after the catalog was read, so the clips below do not hold it
+      await landed;
+      second = withImportBatch(DIR, ["D:/shoot/starts.mp4"], () => later.promise);
+      await tick();
+    };
+    const r = await runLib(ctxWith(fs), { action: "list" });
+    expect(r.clips).toEqual([]);
+    expect(r.importing.map((x: Any) => x.name).sort()).toEqual(["lands.mp4", "starts.mp4"]);
+    end.open();
+    later.open();
+    await Promise.all([first, second]);
+  });
+
+  it("does not report another project's files, and reports nothing when the server has switched the note off", async () => {
+    const fs = new MockFs();
+    seed(fs, { clips: [] });
+    const hold = gate();
+    const elsewhere = withImportBatch("C:/other-project", ["D:/x.mp4"], () => hold.promise);
+    expect((await runLib(ctxWith(fs), { action: "list" })).importing).toBeUndefined();
+    const here = withImportBatch(DIR, ["D:/y.mp4"], () => hold.promise);
+    __setExportFlag("import_note", false);
+    expect((await runLib(ctxWith(fs), { action: "list" })).importing).toBeUndefined();
+    __setExportFlag("import_note", true);
+    expect((await runLib(ctxWith(fs), { action: "list" })).importing).toEqual([{ name: "y.mp4" }]);
+    hold.open();
+    await Promise.all([elsewhere, here]);
+  });
+
+  it("resolve says a file that is on its way in is on its way in, and an unknown name is still unknown", async () => {
+    const fs = new MockFs();
+    seed(fs, { clips: [] });
+    const hold = gate();
+    const batch = withImportBatch(DIR, ["D:/shoot/big_1.mp4"], () => hold.promise);
+    const coming = await runLib(ctxWith(fs), { action: "resolve", id_or_path: "big_1.mp4" });
+    expect(coming.ok).toBe(false);
+    expect(String(coming.error)).toMatch(/still being imported/);
+    expect(String(coming.error)).not.toMatch(/nothing in this project matches|not found/i);
+    const typo = await runLib(ctxWith(fs), { action: "resolve", id_or_path: "big_9.mp4" });
+    expect(String(typo.error)).toContain("nothing in this project matches");
+    hold.open();
+    await batch;
+    const gone = await runLib(ctxWith(fs), { action: "resolve", id_or_path: "big_1.mp4" });
+    expect(String(gone.error)).toContain("nothing in this project matches");
   });
 });

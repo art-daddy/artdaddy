@@ -165,6 +165,35 @@ describe("the model's message survives a save and a reload", () => {
       expect(req.message).not.toHaveProperty("state_block");
     });
   });
+
+  // UJ-088: what the model was told about files still importing is part of the message it got, so it is saved and rebuilt like the state block.
+  describe("the note about files still importing", () => {
+    const NOTE =
+      "[Imports in progress - read for you by the app just now: 1 file is not in the library yet: big_1.mp4.]";
+    const withNote = turn({ userText: "use the clips I just dropped", importNote: NOTE });
+
+    it("stays on the saved turn: every later round, and a reload, show the model the same words", () => {
+      const saved = JSON.parse(JSON.stringify(buildRequests([withNote]))) as Any[];
+      expect(saved[0].message.import_note).toBe(NOTE);
+      const before = requestsForHistory([withNote]) as Any[];
+      const after = requestsForHistory(mapRequests(saved)) as Any[];
+      expect(after[0].message.text).toBe(before[0].message.text);
+      expect(before[0].message.text).toBe(`use the clips I just dropped\n\n${NOTE}`);
+    });
+
+    it("is sent inside the message text only, never as a field of its own", () => {
+      const [req] = requestsForHistory([withNote]) as Any[];
+      expect(req.message).not.toHaveProperty("import_note");
+      expect(req.message).not.toHaveProperty("importNote");
+    });
+
+    it("a turn without one saves and rebuilds with no trace of one, and an older transcript loads as before", () => {
+      const [req] = buildRequests([turn()]) as Any[];
+      expect(req.message).not.toHaveProperty("import_note");
+      const [t] = mapRequests([{ id: "x", message: { text: "hi" } }] as Any);
+      expect(t.importNote).toBeUndefined();
+    });
+  });
 });
 
 // A reload or a crash mid-turn used to leave a turn that read as finished with no answer: the
