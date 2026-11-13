@@ -15,6 +15,7 @@
 import { ArtDaddyError } from "../lib/errors";
 import type { ClientToolContext } from "./context";
 import { generationWait, type GenerationWait } from "./generationWait";
+import { importingMatch, type ImportingRow } from "./importing";
 import type { LibraryClip } from "./store";
 
 /** What to say about a linked file that is no longer on disk: only the user can bring it back. Named
@@ -64,10 +65,15 @@ export async function unresolvedRef(
   nowMs: number = Date.now(),
   use: string = "read",
 ): Promise<{ error: string } & Partial<PendingStatus>> {
+  // The importing list is read before the catalog and again after it: a file that lands between the two is then still reported as on its way in (the ref
+  // is right, a retry finds it), never as unknown. The agent has no id for a file that is not in yet, so it asks by the name it was given.
+  const importingEarly = importingMatch(ctx.store, ref, nowMs);
   const pending = await ctx.store.pendingMedia(ref).catch(() => null);
   if (!pending) {
     const offline = await ctx.store.offlineMedia(ref).catch(() => null);
-    return { error: offline ? offlineRefMessage(offline) : whenUnknown };
+    if (offline) return { error: offlineRefMessage(offline) };
+    const importing = importingEarly ?? importingMatch(ctx.store, ref, nowMs);
+    return { error: importing ? importingRefMessage(importing, use) : whenUnknown };
   }
   if (pending.status === "failed") {
     return {
@@ -84,6 +90,12 @@ export async function unresolvedRef(
     error: `'${ref}' is still being generated (${timeLeft(wait)}), so there is nothing to ${use} yet. The ref is correct, but nothing will tell you when it lands: this connection cannot wake you. Do other work or end your turn, and ask again no sooner than ${wait.retry_after_s} s (library_op action='list' shows status:'generating' until it is ready). Don't poll, don't re-generate it and don't guess a file path.`,
     ...pendingStatus(wait),
   };
+}
+
+/** What to say about a file the person is still importing: the name is right and it is on its way in. Nothing tells the agent when it lands, so it is not promised. */
+function importingRefMessage(row: ImportingRow, use: string): string {
+  const done = row.fraction !== null ? ` (${Math.round(row.fraction * 100)}% done)` : "";
+  return `'${row.name}' is still being imported${done}, so there is nothing to ${use} yet. The file is not missing: it appears in the library when the import finishes (library_op action='list' shows what is still importing). Nothing will tell you when that happens: work with what is already in the library, or end your turn and tell the person it can be done once the file is in. Don't import it again, don't poll and don't guess a file path.`;
 }
 
 /** `: <reason>` when the provider gave one. */

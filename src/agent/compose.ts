@@ -47,12 +47,13 @@ export const TIMELINE_CHANGED_NOTE =
   "relying on clip ids, positions or durations.";
 
 /** Build the model-facing text: user text + editor context + attachment manifest + what the app read of
- *  the project for it. A state block IS a fresh look at the timeline, so it replaces the changed-note. */
+ *  the project for it + what it knows is still being imported. A state block IS a fresh look at the timeline, so it replaces the
+ *  changed-note; the import note is a different fact (files not in the library yet) and rides beside either. */
 export function composeModelText(
   text: string,
   attachments: Attachment[],
   mentions: Mention[],
-  opts: { timelineChanged?: boolean; stateBlock?: string } = {},
+  opts: { timelineChanged?: boolean; stateBlock?: string; importNote?: string } = {},
 ): string {
   const blocks: string[] = [];
   const ctx = formatEditorContext(mentions);
@@ -73,6 +74,7 @@ export function composeModelText(
   }
   if (opts.stateBlock) blocks.push(opts.stateBlock);
   else if (opts.timelineChanged) blocks.push(TIMELINE_CHANGED_NOTE);
+  if (opts.importNote) blocks.push(opts.importNote);
   if (!blocks.length) return text;
   const tail = blocks.join("\n\n");
   return text ? `${text}\n\n${tail}` : tail;

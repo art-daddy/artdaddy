@@ -31,7 +31,7 @@ import { zoomPan, zoomResize, zoomThumb } from "../timeline/zoombar";
 import { confirmDestructive } from "../lib/confirm";
 import { onOsDragOver, onOsDrop, webOwnsFileDrops } from "../lib/osDrop";
 import { useProjectNotice } from "../store/projectNotice";
-import { withImportJob } from "../store/importJobs";
+import { withImportBatch, withImportJob } from "../store/importJobs";
 import { onDragPoint } from "../lib/dragSource";
 import {
   acceptDroppedFiles,
@@ -1048,22 +1048,25 @@ export default function TimelineEditor() {
       const media = acceptDroppedPaths(paths, pid ?? "");
       if (!pid || !media.length) return;
       const linked: string[] = [];
-      for (const p of media) {
-        try {
-          const u = await withImportJob(p, () => importFileByReference(pid, p));
-          // Index by PATH (indexSource matches on the extension, so an id indexes nothing)
-          // but place by ID — the two want different things from the same import.
-          await useEditor.getState().processImport(u.rel);
-          linked.push(u.id);
-        } catch (e) {
-          // Keep the rest of the drop, but do not let a file vanish without a word.
-          useProjectNotice
-            .getState()
-            .notify(
-              `Couldn't import ${p.split(/[\\/]/).pop()}: ${e instanceof Error ? e.message : String(e)}`,
-            );
+      // The whole drop is known to the agent from this instant (store/importJobs.ts), not one file at a time as the loop reaches each (UJ-088).
+      await withImportBatch(useEditor.getState().store?.projectDir, media, async (file) => {
+        for (const p of media) {
+          try {
+            const u = await file(p, () => withImportJob(p, () => importFileByReference(pid, p)));
+            // Index by PATH (indexSource matches on the extension, so an id indexes nothing)
+            // but place by ID — the two want different things from the same import.
+            await useEditor.getState().processImport(u.rel);
+            linked.push(u.id);
+          } catch (e) {
+            // Keep the rest of the drop, but do not let a file vanish without a word.
+            useProjectNotice
+              .getState()
+              .notify(
+                `Couldn't import ${p.split(/[\\/]/).pop()}: ${e instanceof Error ? e.message : String(e)}`,
+              );
+          }
         }
-      }
+      });
       if (linked.length) await addClips(linked, trackId, frame);
     },
     [addClips],

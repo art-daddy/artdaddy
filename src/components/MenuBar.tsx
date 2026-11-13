@@ -22,7 +22,7 @@ import { exportRunning, useExportJob } from "../store/exportJob";
 import { useMcpPanel } from "../store/mcpPanel";
 import { usePanes, type PaneId } from "../store/panes";
 import { useProjectNotice } from "../store/projectNotice";
-import { withImportJob } from "../store/importJobs";
+import { withImportBatch, withImportJob } from "../store/importJobs";
 import { useProjects } from "../store/projects";
 import { summarizeRenderWorkload, type RenderWorkload } from "../timeline/renderPlan";
 import ExportDialog, { type ExportSettings } from "./ExportDialog";
@@ -327,13 +327,18 @@ export default function MenuBar() {
       const paths = Array.isArray(picked) ? picked : [picked];
       setToast(`Importing ${paths.length} file(s)…`);
       const ids: string[] = [];
-      for (const p of paths) {
-        try {
-          ids.push((await withImportJob(p, () => importFileByReference(projectId, p))).id);
-        } catch {
-          /* skip a file we cannot read, keep the rest */
+      // The whole pick is known to the agent from this instant (store/importJobs.ts), not one file at a time as the loop reaches each.
+      await withImportBatch(desktopStore(projectId)?.projectDir, paths, async (file) => {
+        for (const p of paths) {
+          try {
+            ids.push(
+              (await file(p, () => withImportJob(p, () => importFileByReference(projectId, p)))).id,
+            );
+          } catch {
+            /* skip a file we cannot read, keep the rest */
+          }
         }
-      }
+      });
       return ids;
     } catch (e) {
       setToast(`Import failed: ${e instanceof Error ? e.message : String(e)}`);

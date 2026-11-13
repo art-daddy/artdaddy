@@ -62,3 +62,100 @@ export async function withImportJob<T>(path: string, work: () => Promise<T>): Pr
     useImportJobs.getState().finish(path);
   }
 }
+
+// --- The batch registry (UJ-088) -----------------------------------------------------------------------------------------------------------
+//
+// `withImportJob` shows ONE file at a time: a batch of three is known to the app one file at a time, as the loop reaches each. The AGENT needs the whole
+// batch from the first instant: a message sent while files are still coming in used to be told the library was empty (witness 3LuwWwH6RRVj: three 3.2 GB
+// files dropped, Enter 43 ms later, "library: []"). So every door that imports a batch registers ALL its paths here before its first await. A file's row
+// leaves the moment ITS import settles (it is in the library then, or it failed), so the agent is never told a file that is already there is still coming;
+// whatever the doors forgot to settle one by one leaves when the batch ends, however it ends. Who reads the rows, and the one place the `import_note` flag
+// is checked: tools/importing.ts.
+//
+// Keyed by the project's DIRECTORY, the one identity the doors (which hold a project id and its store) and the readers (tools, which hold a store) both
+// have. Memory only. A row older than IMPORT_ROW_MAX_MS is no longer shown, so an import that hangs cannot leave a note up for good.
+
+/** The longest a row is shown. An import that has not settled by then is not reported to the agent any more (the import itself is untouched). */
+export const IMPORT_ROW_MAX_MS = 30 * 60_000;
+
+interface BatchRow {
+  batch: number;
+  projectDir: string;
+  path: string;
+  name: string;
+  addedAt: number;
+}
+
+export interface ImportingRow {
+  path: string;
+  name: string;
+  /** 0..1 once bytes are being read; null before the first report. */
+  fraction: number | null;
+}
+
+/** What a batch hands its door: run ONE file's import through it and that file's row leaves as soon as it settles (landed or failed). */
+export type ImportFile = <T>(path: string, job: () => Promise<T>) => Promise<T>;
+
+const passThrough: ImportFile = (_path, job) => job();
+
+let rows: BatchRow[] = [];
+let lastBatch = 0;
+const dirKey = (dir: string): string => norm(dir).replace(/\/+$/, "").toLowerCase();
+
+/** Register every path of a batch, run `work`, and take exactly those rows out again when it ends. The registration is SYNCHRONOUS: it has happened when this
+ *  returns its promise, before the caller's first await. No project directory (the web build, a project that is not open) or no paths: nothing to register. */
+export async function withImportBatch<R>(
+  projectDir: string | null | undefined,
+  paths: readonly string[],
+  work: (file: ImportFile) => Promise<R>,
+  now: number = Date.now(),
+): Promise<R> {
+  if (!projectDir || paths.length === 0) return work(passThrough);
+  const batch = ++lastBatch;
+  const key = dirKey(projectDir);
+  rows = rows.filter((r) => now - r.addedAt <= IMPORT_ROW_MAX_MS); // a row that long ago can only be a leak
+  for (const p of paths)
+    rows.push({
+      batch,
+      projectDir: key,
+      path: norm(p),
+      name: p.split(/[\\/]/).pop() || p,
+      addedAt: now,
+    });
+  const file: ImportFile = async (path, job) => {
+    try {
+      return await job();
+    } finally {
+      const at = rows.findIndex((r) => r.batch === batch && r.path === norm(path));
+      if (at >= 0) rows.splice(at, 1); // one row per call: a path given twice is settled twice
+    }
+  };
+  try {
+    return await work(file);
+  } finally {
+    rows = rows.filter((r) => r.batch !== batch);
+  }
+}
+
+/** What this project's person is importing right now: one entry per path, the percent when bytes are being read. */
+export function importingRows(
+  projectDir: string | null | undefined,
+  now: number = Date.now(),
+): ImportingRow[] {
+  if (!projectDir) return [];
+  const key = dirKey(projectDir);
+  const seen = new Set<string>();
+  const out: ImportingRow[] = [];
+  for (const r of rows) {
+    if (r.projectDir !== key || now - r.addedAt > IMPORT_ROW_MAX_MS || seen.has(r.path)) continue;
+    seen.add(r.path);
+    const job = useImportJobs.getState().jobs.find((j) => j.path === r.path);
+    out.push({ path: r.path, name: r.name, fraction: job?.fraction ?? null });
+  }
+  return out;
+}
+
+/** Tests only: forget every batch. */
+export function resetImportBatches(): void {
+  rows = [];
+}

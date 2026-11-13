@@ -97,6 +97,8 @@ export interface TranscriptMessage {
   /** The project state the app read for the model with this message (agent/stateBlock.ts): kept verbatim,
    *  because every later round rebuilds the message and must show the model the same words. */
   state_block?: string;
+  /** What the app told the model about files the person was still importing when it sent this message (agent/importNote.ts): kept verbatim for the same reason. */
+  import_note?: string;
 }
 
 export interface TranscriptRequest {

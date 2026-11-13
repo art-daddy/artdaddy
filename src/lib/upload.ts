@@ -6,7 +6,7 @@ import { reportMediaImport } from "../api/appEvents";
 import { joinPath, type ProjectStoreAccess } from "../tools/store";
 import { useProjectNotice } from "../store/projectNotice";
 import type { Footage } from "../store/firstPrompt";
-import { withImportJob } from "../store/importJobs";
+import { withImportBatch, withImportJob } from "../store/importJobs";
 import {
   AUDIO_EXTS,
   IMAGE_EXTS,
@@ -246,14 +246,17 @@ export async function importPaths(projectId: string, paths: string[]): Promise<U
   const out: Uploaded[] = [];
   const failed: string[] = [];
   let reason = "";
-  for (const p of paths) {
-    try {
-      out.push(await withImportJob(p, () => importFileByReference(projectId, p)));
-    } catch (e) {
-      failed.push(baseName(p));
-      reason = e instanceof Error ? e.message : String(e);
+  // The whole batch is known to the agent from this instant (store/importJobs.ts), not one file at a time as the loop reaches each (UJ-088).
+  await withImportBatch(desktopStore(projectId)?.projectDir, paths, async (file) => {
+    for (const p of paths) {
+      try {
+        out.push(await file(p, () => withImportJob(p, () => importFileByReference(projectId, p))));
+      } catch (e) {
+        failed.push(baseName(p));
+        reason = e instanceof Error ? e.message : String(e);
+      }
     }
-  }
+  });
   if (failed.length) notifyImportFailure(failed, reason);
   return out;
 }
@@ -317,14 +320,21 @@ export async function uploadFiles(projectId: string, files: File[]): Promise<Upl
   const out: Uploaded[] = [];
   const failed: string[] = [];
   let reason = "";
-  for (const f of files) {
-    try {
-      out.push(await importFile(projectId, f));
-    } catch (e) {
-      failed.push(baseName(f.name));
-      reason = e instanceof Error ? e.message : String(e);
-    }
-  }
+  // Known to the agent from this instant, by name (a File has no path): see importPaths.
+  await withImportBatch(
+    desktopStore(projectId)?.projectDir,
+    files.map((f) => f.name),
+    async (file) => {
+      for (const f of files) {
+        try {
+          out.push(await file(f.name, () => importFile(projectId, f)));
+        } catch (e) {
+          failed.push(baseName(f.name));
+          reason = e instanceof Error ? e.message : String(e);
+        }
+      }
+    },
+  );
   if (failed.length) notifyImportFailure(failed, reason);
   return out;
 }

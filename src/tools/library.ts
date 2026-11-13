@@ -9,6 +9,7 @@ import type { ClientToolContext } from "./context";
 import { isMutationRejected, runProjectMutation } from "./coordinator";
 import type { ClientToolRegistry } from "./registry";
 import { unresolvedRef } from "./refState";
+import { importingField, importingFor, mergeImporting } from "./importing";
 import {
   INTERNAL_DIR,
   clipAbs,
@@ -286,6 +287,8 @@ async function runLibraryOp(
   doc: ProjectDocument | null = null,
   surface?: ClientToolContext["surface"],
 ): Promise<Result> {
+  // What is importing is read on both sides of the catalog read (tools/importing.ts), so a file landing or starting during it is never in neither.
+  const importingBefore = action === "list" ? importingFor(store) : [];
   const cat = await readCatalog(store);
   const findRow = (id: string) => cat.clips.find((c) => c.id === id);
   const addFolders = (folder: string) => {
@@ -304,7 +307,12 @@ async function runLibraryOp(
       // silent failure. Copied clips live in the project and are never offline.
       const offline = new Set(await store.libraryOffline());
       const annotated = clips.map((c) => (c.external ? { ...c, offline: offline.has(c.id) } : c));
-      return { ok: true, clips: annotated };
+      // Files the person is still importing are not clips yet; without this an empty list reads as an empty library (UJ-088).
+      return {
+        ok: true,
+        clips: annotated,
+        ...importingField(mergeImporting(importingBefore, importingFor(store))),
+      };
     }
 
     case "get": {

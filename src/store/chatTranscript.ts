@@ -30,6 +30,8 @@ export interface Turn {
   timelineChanged?: boolean;
   /** What the app read of the project for the model before its first round (agent/stateBlock.ts). */
   stateBlock?: string;
+  /** What the app told the model about files still importing when this message was sent (agent/importNote.ts, UJ-088). */
+  importNote?: string;
 }
 
 /** A chat's last Restore Checkpoint, kept until its next message so one click can undo it. It is the
@@ -92,6 +94,7 @@ export function mapRequests(reqs: TranscriptRequest[]): Turn[] {
     ...(r.message?.mentions?.length ? { mentions: r.message.mentions } : {}),
     ...(r.message?.timeline_changed ? { timelineChanged: true } : {}),
     ...(r.message?.state_block ? { stateBlock: r.message.state_block } : {}),
+    ...(r.message?.import_note ? { importNote: r.message.import_note } : {}),
     parts: r.response ?? [],
     // Written while the turn had not ended, and never rewritten: a reload or a crash cut it short.
     status: (r.unfinished
@@ -127,6 +130,7 @@ export function buildRequests(turns: Turn[]): TranscriptRequest[] {
       ...(t.mentions?.length ? { mentions: t.mentions } : {}),
       ...(t.timelineChanged ? { timeline_changed: true } : {}),
       ...(t.stateBlock ? { state_block: t.stateBlock } : {}),
+      ...(t.importNote ? { import_note: t.importNote } : {}),
     },
     response: t.parts.filter((p) => !p.partial),
     checkpoint: {
@@ -153,6 +157,7 @@ export function requestsForHistory(turns: Turn[]): TranscriptRequest[] {
         text: composeModelText(turns[i].userText, turns[i].attachments, turns[i].mentions ?? [], {
           timelineChanged: turns[i].timelineChanged,
           stateBlock: turns[i].stateBlock,
+          importNote: turns[i].importNote,
         }),
         attachments: rest.message?.attachments,
       },

@@ -23,6 +23,7 @@ const STATE_READ_GRACE_MS = 500;
 const MAX_TRACK_ROWS = 40;
 const MAX_SELECTED_IDS = 20;
 const MAX_KINDS = 8;
+const MAX_IMPORTING = 8;
 
 const FULL_HEAD =
   `${STATE_BLOCK_MARK} - read for you by the app just now: these are the results get_project_state and ` +
@@ -89,10 +90,21 @@ function librarySummary(project: Json): Json {
     const s = cut(a.status, 20);
     if (s === "generating" || s === "failed") status[s] = (status[s] ?? 0) + 1;
   }
+  // Files the person is still importing (tools/importing.ts): the one fact in a summary that stops an empty-looking library reading as an empty project (UJ-088).
+  const importing = Array.isArray(project.importing) ? project.importing.filter(isObject) : [];
   return {
     library_count: finite(project.library_count) ?? library.length,
     library_kinds: kinds,
     ...(Object.keys(status).length ? { library_status: status } : {}),
+    ...(importing.length
+      ? {
+          importing_count: importing.length,
+          importing: importing.slice(0, MAX_IMPORTING).map((a) => {
+            const percent = finite(a.percent);
+            return { name: cut(a.name, 80), ...(percent !== null ? { percent } : {}) };
+          }),
+        }
+      : {}),
   };
 }
 

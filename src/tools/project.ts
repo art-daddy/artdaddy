@@ -29,6 +29,7 @@ import type { MutationOrigin } from "../project/MutationGate";
 import { releaseCopiedWork } from "../project/copiedWork";
 import { isSafeProjectId } from "./dataRoot";
 import { isProjectScratch } from "./tempNames";
+import { importingField, readWithImporting } from "./importing";
 
 type Result = Record<string, unknown>;
 type Args = Record<string, unknown>;
@@ -1072,7 +1073,11 @@ export async function getProjectStateTool(
   // cache paths handed the model addresses for a directory `duplicate_project` deliberately
   // does not copy, and — because they were the only inventory this tool returned — an empty
   // pair read as an empty project while the user's attached reference video sat in the library.
-  const clips = await ctx.store.listClips();
+  // Files the person is still importing are not in this list yet, and an empty list reads as an empty project (UJ-088): they are told beside it. The registry is
+  // read on both sides of the catalog read so a file that lands or starts during it is never in neither.
+  const { value: clips, importing } = await readWithImporting(ctx.store, () =>
+    ctx.store.listClips(),
+  );
   const library = clips.slice(0, LIBRARY_PREVIEW).map((c) => {
     // `status` is carried ONLY when the asset is not usable yet. This projection used to drop it
     // entirely while `library_op action='list'` kept it, so two views of one catalog disagreed:
@@ -1105,6 +1110,7 @@ export async function getProjectStateTool(
     active_workflow: typeof settings.active_workflow === "string" ? settings.active_workflow : "",
     library,
     library_count: clips.length,
+    ...importingField(importing),
     // Say so explicitly rather than letting a truncated list read as the whole inventory —
     // that misreading is the bug this field exists to prevent.
     ...(clips.length > library.length

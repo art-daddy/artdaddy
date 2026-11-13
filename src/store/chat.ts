@@ -4,6 +4,8 @@ import { createStore, type StoreApi } from "zustand/vanilla";
 import { inferRoundStreaming } from "../agent/api";
 import { ClientTurnRunner, type LoopDeps } from "../agent/loop";
 import { composeModelText, TIMELINE_CHANGED_NOTE } from "../agent/compose";
+import { importNote } from "../agent/importNote";
+import { importingFor, mergeImporting } from "../tools/importing";
 import { canReadState, readStateBlock, stateBlockForm } from "../agent/stateBlock";
 import { sameTimeline, TimelineAwareness, type DocReading } from "../agent/timelineAwareness";
 import { collectInferenceAttachments } from "../agent/attachments";
@@ -1174,6 +1176,9 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
       // first message of a conversation (or one whose history no longer holds a look) and for a message after
       // something else changed the timeline, where it replaces the changed-note. The app's own turns (a
       // finished job) go on without one. A failed read changes nothing: the model reads for itself, as before.
+      // Files the person is still importing (UJ-088) are read on BOTH sides of the state read: the state block shows the library as of its own moment, and a file that
+      // lands or starts around that moment must be in the block or in the note, never in neither.
+      const importingBefore = opts?.system ? [] : importingFor(host.store());
       let stateBlock: string | null = null;
       if (
         !opts?.system &&
@@ -1188,7 +1193,13 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
         // The read began at `before`: it shows every outside edit made until then, and none after.
         if (stateBlock && before) awareness.sawWholeTimeline(before);
       }
-      if (timelineChanged || stateBlock) {
+      // The model is told which of them are still coming in, so it never says the library is empty while they do. Read ONCE more here, after the last await before
+      // the first round is composed, and kept on the turn like the state block: every later round and every reload rebuilds this message from the turn and must show the same words.
+      // The app's own turns (a finished job) are not the person's message and go without one.
+      const importingNote = opts?.system
+        ? null
+        : importNote(mergeImporting(importingBefore, importingFor(host.store())));
+      if (timelineChanged || stateBlock || importingNote) {
         set((s) => ({
           turns: s.turns.map((t) =>
             t.id === turn.id
@@ -1196,6 +1207,7 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
                   ...t,
                   ...(timelineChanged ? { timelineChanged: true } : {}),
                   ...(stateBlock ? { stateBlock } : {}),
+                  ...(importingNote ? { importNote: importingNote } : {}),
                 }
               : t,
           ),
@@ -1216,6 +1228,7 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
           composeModelText(text, attachments, mentions, {
             timelineChanged,
             stateBlock: stateBlock ?? undefined,
+            importNote: importingNote ?? undefined,
           }),
           carried,
         ),
