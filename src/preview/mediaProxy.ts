@@ -58,6 +58,14 @@ const WEB_VIDEO_OK = new Set(["h264", "vp8", "vp9", "av1"]);
 // lied about its container and a name-based check would have cleared it.
 const WEB_CONTAINER_OK = /(?:^|,)(?:mov|mp4|m4a|3gp|3g2|mj2)(?:,|$)/i;
 
+/** What a caller can watch while one source's artifacts are made. */
+export interface DeriveHooks {
+  /** Finished artifacts (the poster) are on disk and a long preview copy follows: refresh what is on screen NOW, not when the copy is done. */
+  onArtifacts?: () => void;
+  /** The preview copy's progress, from ffmpeg's own report. `totalMs` is the source's length (0 when it could not be read). */
+  onProgress?: (p: { outMs: number; totalMs: number; speed: number; done: boolean }) => void;
+}
+
 /** True once a preview proxy exists for this source (or none is needed). */
 export async function processImportedMedia(
   store: ProjectStoreAccess,
@@ -65,8 +73,9 @@ export async function processImportedMedia(
   source: string,
   onTranscode?: () => void,
   signal?: AbortSignal,
+  hooks?: DeriveHooks,
 ): Promise<boolean> {
-  const changed = await deriveArtifacts(store, runner, source, onTranscode, signal);
+  const changed = await deriveArtifacts(store, runner, source, onTranscode, signal, hooks);
   // Anything already on screen looked for these BEFORE they existed. Nothing else tells it
   // they arrived, and it will not look again on its own.
   if (changed) announceMediaDerived(source);
@@ -79,6 +88,7 @@ async function deriveArtifacts(
   source: string,
   onTranscode?: () => void,
   signal?: AbortSignal,
+  hooks?: DeriveHooks,
 ): Promise<boolean> {
   if (kindOf(source) === "image") return processImage(store, runner, source, onTranscode, signal);
   if (!VID_RE.test(source)) return false;
@@ -141,8 +151,18 @@ async function deriveArtifacts(
       `[mediaProxy] proxy check key=${key} codec=${codec || "?"} container=${container || "?"} needsProxy=${!!codec && !playable}`,
     );
     if (codec && !playable) {
+      // The poster made a moment ago is on disk now and the copy is minutes away: the stage and the
+      // library tile can show it NOW. Announcing only at the end of the job (as this once did) kept a
+      // finished picture off the screen for as long as the slowest artifact of the same job took:
+      // 162 of 168 seconds in the 12-minute 4K HEVC replay.
+      if (changed) {
+        announceMediaDerived(source);
+        hooks?.onArtifacts?.();
+      }
       onTranscode?.();
       const began = performance.now();
+      const totalMs = (Number(probe.duration_s) || 0) * 1000;
+      const onProgress = hooks?.onProgress;
       const made = await transcode(
         store,
         runner,
@@ -172,6 +192,9 @@ async function deriveArtifacts(
           "+faststart",
         ],
         signal,
+        onProgress
+          ? (p) => onProgress({ outMs: p.outMs, totalMs, speed: p.speed, done: p.done })
+          : undefined,
       );
       if (made) changed = true;
       if (!signal?.aborted)

@@ -345,16 +345,156 @@ it("the probe fixture matches what probePath actually returns", async () => {
   expect((probe.video as { codec: string }).codec).toBe("h264");
 });
 
+/** One source that needs a preview copy; ffmpeg's `-progress` blocks are fed to whoever listens. */
+async function copyRun(hooks?: Parameters<typeof processImportedMedia>[5]) {
+  const fs = new MemFs();
+  await fs.writeTextFile("C:/proj/library/a.mp4", "media");
+  const store = new ProjectStoreAccess("C:/proj", fs);
+  const calls: { args: string[]; streamed: boolean }[] = [];
+  const runner = {
+    run: async (
+      program: string,
+      args: string[],
+      _signal?: AbortSignal,
+      _cwd?: string,
+      onStdout?: (chunk: string) => void,
+    ) => {
+      if (program === "ffprobe")
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            format: { format_name: "matroska,webm", duration: "5" },
+            streams: [{ codec_type: "video", codec_name: "hevc", width: 3840, height: 2160 }],
+          }),
+          stderr: "",
+        };
+      calls.push({ args, streamed: onStdout !== undefined });
+      if (args.includes("libx264")) {
+        // A block split in the middle of a line, as the app's stream delivers them.
+        onStdout?.("frame=60\nfps=30\nout_time_us=250");
+        onStdout?.("0000\nspeed=2.5x\nprogress=continue\n");
+        onStdout?.("frame=120\nfps=30\nout_time_us=5000000\nspeed=2.4x\nprogress=end\n");
+      }
+      await fs.writeTextFile(args[args.length - 1], "out");
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  };
+  await processImportedMedia(store, runner, "library/a.mp4", undefined, undefined, hooks);
+  return calls;
+}
+
+describe("the preview copy says how far it is", () => {
+  it("hands over each block ffmpeg reports, with the source's own length, even split mid-line", async () => {
+    const seen: unknown[] = [];
+    await copyRun({ onProgress: (p) => seen.push(p) });
+    expect(seen).toEqual([
+      { outMs: 2500, totalMs: 5000, speed: 2.5, done: false },
+      { outMs: 5000, totalMs: 5000, speed: 2.4, done: true },
+    ]);
+  });
+
+  it("asks ffmpeg for its progress report on the copy only, never on the poster", async () => {
+    const calls = await copyRun({ onProgress: () => undefined });
+    const copy = calls.find((c) => c.args.includes("libx264"))!;
+    const poster = calls.find((c) => !c.args.includes("libx264"))!;
+    expect(copy.args.join(" ")).toContain("-nostats -progress pipe:1");
+    expect(copy.streamed).toBe(true);
+    expect(poster.args).not.toContain("-progress");
+    expect(poster.streamed).toBe(false);
+  });
+
+  it("without a listener the command is exactly what it always was", async () => {
+    const watched = (await copyRun({ onProgress: () => undefined })).find((c) =>
+      c.args.includes("libx264"),
+    )!;
+    const plain = (await copyRun()).find((c) => c.args.includes("libx264"))!;
+    expect(plain.streamed).toBe(false);
+    expect(plain.args).not.toContain("-progress");
+    // the same command apart from the three words that ask for the report (the temp file's name differs by run)
+    const strip = (a: string[]) =>
+      a.filter(
+        (x, i, all) => !["-nostats", "-progress", "pipe:1"].includes(x) && i < all.length - 1,
+      );
+    expect(strip(watched.args)).toEqual(strip(plain.args));
+  });
+});
+
 // Posters are produced in the background, after the clip or library tile is already drawn.
 // Without an announcement the thumbnail resolves once, finds nothing, and keeps its
 // placeholder for the whole session — observed on a real project with the poster sitting on
 // disk beside it, 2m32s after the asset appeared.
 describe("telling the UI that derived media arrived", () => {
-  it("announces when it actually produced something", async () => {
+  it("announces the poster BEFORE a long preview copy starts, and the copy when it lands", async () => {
+    // Once, at the end of the job, kept a finished picture off the screen for as long as the copy took
+    // (the poster was on disk 6 s after the drop and was shown 162 s later). Two announcements, in this order.
+    const log: string[] = [];
+    const off = onMediaDerived(() => log.push("announce"));
+    try {
+      const fs = new MemFs();
+      await fs.writeTextFile("C:/proj/library/a.mp4", "media");
+      const store = new ProjectStoreAccess("C:/proj", fs);
+      const runner = {
+        run: async (program: string, args: string[]) => {
+          if (program === "ffprobe")
+            return {
+              code: 0,
+              stdout: JSON.stringify({
+                format: { format_name: "matroska,webm", duration: "5" },
+                streams: [{ codec_type: "video", codec_name: "hevc", width: 3840, height: 2160 }],
+              }),
+              stderr: "",
+            };
+          log.push(args.includes("libx264") ? "copy" : "poster");
+          await fs.writeTextFile(args[args.length - 1], "out");
+          return { code: 0, stdout: "", stderr: "" };
+        },
+      };
+      await processImportedMedia(store, runner, "library/a.mp4");
+    } finally {
+      off();
+    }
+    expect(log).toEqual(["poster", "announce", "copy", "announce"]);
+  });
+
+  it("calls the caller's hook at the same moment, so what is on screen refreshes before the copy", async () => {
+    const log: string[] = [];
+    const fs = new MemFs();
+    await fs.writeTextFile("C:/proj/library/a.mp4", "media");
+    const store = new ProjectStoreAccess("C:/proj", fs);
+    const runner = {
+      run: async (program: string, args: string[]) => {
+        if (program === "ffprobe")
+          return {
+            code: 0,
+            stdout: JSON.stringify({
+              format: { format_name: "matroska,webm", duration: "5" },
+              streams: [{ codec_type: "video", codec_name: "hevc", width: 3840, height: 2160 }],
+            }),
+            stderr: "",
+          };
+        log.push(args.includes("libx264") ? "copy" : "poster");
+        await fs.writeTextFile(args[args.length - 1], "out");
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    };
+    await processImportedMedia(
+      store,
+      runner,
+      "library/a.mp4",
+      () => log.push("overlay"),
+      undefined,
+      {
+        onArtifacts: () => log.push("artifacts"),
+      },
+    );
+    expect(log).toEqual(["poster", "artifacts", "overlay", "copy"]);
+  });
+
+  it("a video that needs no copy keeps its single announcement at the end", async () => {
     let fired = 0;
     const off = onMediaDerived(() => (fired += 1));
     try {
-      await run({ codec: "h264", format: "matroska,webm" });
+      await run({ codec: "h264", format: "mov,mp4,m4a,3gp,3g2,mj2" });
     } finally {
       off();
     }
