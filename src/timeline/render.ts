@@ -66,6 +66,13 @@ import type { Animatable, Clip, Timeline } from "./model";
 import { validateTimeline } from "./validate";
 import { LeanTally, mergeLeanRecords, type LeanRecord } from "./leanRecord";
 import { leanZoomMask, preAlphaIsLeanSafe, type LeanMaskBudget } from "./leanZoom";
+import {
+  dipLayerPlan,
+  fadeEnable,
+  opacityEnable,
+  transitionEnable,
+  type DipLayerPlan,
+} from "./leanFades";
 import { readLeanFlags, type LeanOptions, type LeanProbeRequest } from "./leanOptions";
 import { probeLean } from "./leanProbe";
 import {
@@ -1795,6 +1802,8 @@ function buildSingleRenderCommand(
     // Fade in/out ramps the clip's ALPHA (visual fade) — the video twin of `afade`,
     // the same `fade` field for both media; mirrors the preview's fadeMul.
     const fadeExpr = fadeAlphaExpr(r.tin, r.tout, r.fadeIn, r.fadeOut);
+    // The frames this clip is drawn on (whole clip, never the partition's slice): the lean windows of fix 2 are the same text in every partition.
+    const drawn = framesOf(r.span, fps);
     const alpha: string[] = [];
     let rotationFilter: string | null = null;
     const coverAperture = sizeAnim !== null && fit === "cover";
@@ -1823,10 +1832,13 @@ function buildSingleRenderCommand(
     }
     if (isNum(r.opacity) && r.opacity < 1)
       alpha.push(`colorchannelmixer=aa=${r.opacity.toFixed(4)}`);
-    else if (opaAnim !== null)
+    else if (opaAnim !== null) {
+      const curve = compileAnim(opaAnim, "T", r.tin);
       alpha.push(
-        `geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*clip((${compileAnim(opaAnim, "T", r.tin)}),0,1)'`,
+        `geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*clip((${curve}),0,1)'` +
+          (lean ? opacityEnable(lean, leanTally, curve, drawn.first, drawn.end, fps) : ""),
       );
+    }
     if (cross) {
       // The incoming clip's alpha over the CENTERED window [tin-leadIn, tin+leadIn]. `p` is the
       // shared progress 0->1 (clip((T-start)/dur,0,1), start=tin-leadIn) — the SAME curve the preview
@@ -1861,11 +1873,41 @@ function buildSingleRenderCommand(
         default:
           a = assertNever(cross.kind); // a new TransitionKind must add a branch above (won't compile otherwise)
       }
-      alpha.push(`geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='${a}'`);
+      // Fix 2 (Phase 3a): this geq only changes the alpha until the transition has finished, so it is windowed (leanWindows.ts). The owner's wipe-right exception (the thin see-through
+      // column that 0.27.0 leaves for the rest of the clip becomes the picture) is taken only for a clip whose left edge sits at one fixed canvas column, the shapes of the proof matrix.
+      const wipeRightEligible =
+        cross.kind !== "wipe-r" ||
+        (sizeAnim === null &&
+          isNum(r.posX) &&
+          isNum(r.posY) &&
+          !r.posCenter &&
+          !hasRotate &&
+          !parseBlend(r.blend) &&
+          r.cropExpr === null &&
+          !r.flipH &&
+          !r.flipV &&
+          parseGlow(r.glow) === null);
+      alpha.push(
+        `geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='${a}'` +
+          (lean
+            ? transitionEnable(
+                lean,
+                leanTally,
+                cross.kind,
+                r.tin - leadIn,
+                cross.durSec,
+                fps,
+                wipeRightEligible,
+              )
+            : ""),
+      );
     }
     if (fadeExpr !== null)
       // Visual fade: multiply the alpha plane by the fade envelope over [tin, tout].
-      alpha.push(`geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*(${fadeExpr})'`);
+      alpha.push(
+        `geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*(${fadeExpr})'` +
+          (lean ? fadeEnable(lean, leanTally, r.tin, r.tout, r.fadeIn, r.fadeOut, fps) : ""),
+      );
     let leanMask: { text: string } | null = null;
     if (coverAperture) {
       const boxWidth = r.sizeW !== undefined ? compileAnim(r.sizeW, "T", r.tin) : String(w);
@@ -1984,21 +2026,36 @@ function buildSingleRenderCommand(
     if (cross && (cross.kind === "dip-to-black" || cross.kind === "dip-to-white")) {
       const dipRGB = cross.kind === "dip-to-white" ? "255" : "0";
       const dipStart = (r.tin - leadIn).toFixed(6);
-      chains.push(
-        `${colorSrc("c=black")},format=rgba,` +
-          `geq=r='${dipRGB}':g='${dipRGB}':b='${dipRGB}':a='255*clip(2*(T-${dipStart})/${cross.durSec.toFixed(6)},0,1)'[dip${i}]`,
-      );
       // The preview draws the colour on both ends of its window, tin-leadIn and tin+leadIn, and
       // only while this clip is on canvas (it is one of the clip's layers there).
-      const dipGate = frameGate(
-        Math.max(first, Math.ceil((r.tin - leadIn) * fps - 1e-6)),
-        Math.min(end, Math.floor((r.tin + leadIn) * fps + 1e-6) + 1),
-        fps,
-      );
-      chains.push(
-        `[${last}][dip${i}]overlay=x=0:y=0:enable='${dipGate}':eof_action=pass[dipov${i}]`,
-      );
-      last = `dipov${i}`;
+      const gateFirst = Math.max(first, Math.ceil((r.tin - leadIn) * fps - 1e-6));
+      const gateEnd = Math.min(end, Math.floor((r.tin + leadIn) * fps + 1e-6) + 1);
+      // Fix 2 (Phase 3a): the colour layer only has to exist for the frames the overlay's gate opens (plus one on each side), not for the whole timeline.
+      const dip: DipLayerPlan = lean
+        ? dipLayerPlan(
+            lean,
+            leanTally,
+            gateFirst,
+            gateEnd,
+            rng ? { from: rng.from, to: rng.to } : null,
+            Math.ceil(duration * fps),
+          )
+        : { kind: "keep" };
+      if (dip.kind !== "skip") {
+        const source =
+          dip.kind === "layer"
+            ? `color=c=black:s=${cw}x${ch}:r=${fps}:d=${((dip.to - dip.from - 0.5) / fps).toFixed(6)},setpts=PTS+${dip.from}`
+            : colorSrc("c=black");
+        chains.push(
+          `${source},format=rgba,` +
+            `geq=r='${dipRGB}':g='${dipRGB}':b='${dipRGB}':a='255*clip(2*(T-${dipStart})/${cross.durSec.toFixed(6)},0,1)'[dip${i}]`,
+        );
+        const dipGate = frameGate(gateFirst, gateEnd, fps);
+        chains.push(
+          `[${last}][dip${i}]overlay=x=0:y=0:enable='${dipGate}':eof_action=pass[dipov${i}]`,
+        );
+        last = `dipov${i}`;
+      }
     }
     const blendMode = parseBlend(r.blend);
     if (blendMode) {

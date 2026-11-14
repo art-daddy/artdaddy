@@ -594,7 +594,9 @@ describe("EVIDENCE (question 6): the streamed engine builds every part with the 
       masked += verdict.leanClips;
     }
     expect(masked).toBeGreaterThanOrEqual(3);
-    expect(lp.lean).toEqual({ ran: ["zoom"], kept: [] });
+    // the zoom-only options of these tests leave the fades switch off, so a project with transitions also says flag_off for those constructs
+    expect(lp.lean?.ran).toEqual(["zoom"]);
+    expect(lp.lean?.kept.filter((word) => word !== "flag_off")).toEqual([]);
   }, 120_000);
 });
 
@@ -1179,7 +1181,8 @@ describe("EVIDENCE (question 3): a clip that keeps its aperture geq keeps the wh
     const { lean } = answered(t, [96, 130], "rgba");
     const plan = buildRenderCommand(t, OUT, { lean });
     expect(plan.filterComplex).toBe(buildRenderCommand(t, OUT).filterComplex);
-    expect(plan.lean).toEqual({ ran: [], kept: ["see_through"] });
+    expect(plan.lean?.ran).toEqual([]);
+    expect(plan.lean?.kept.filter((word) => word !== "flag_off")).toEqual(["see_through"]);
   });
 });
 
