@@ -41,6 +41,18 @@ import { projectKeyOfDir } from "../tools/dataRoot";
 import { resolveExportResources, type ExportResources } from "../platform/host";
 import { confirmExport } from "../lib/confirm";
 import { markChipSuspect } from "./chipTest";
+import {
+  NOT_ADMITTED_3C,
+  __resetAdmission3c,
+  admitted3c,
+  forgetAdmission3c,
+  learnFromRun3c,
+  noteWatchTick3c,
+  withHonestTime,
+  type Admission3c,
+} from "./estimateAdmission";
+import { beginExportAsk } from "./exportAsk";
+import type { HonestEstimate, PcClass } from "./exportTypes3c";
 import type { ChoiceFacts } from "./exportChoice";
 import type { LeanRecord } from "./leanRecord";
 import { CHIP_MAKERS, type ChipMaker, type ModeReason, type SizeClass } from "./exportEncoder";
@@ -369,6 +381,11 @@ export interface ExportRecord {
    *  under the status line for the whole run. Absent for an export nothing describes (a copy, one adopted after a
    *  restart), which is then said nothing about. */
   expected?: Expectation;
+  /** The honest estimate the export was admitted with: its range and where the number came from. `expected` carries its central value for the
+   *  readers that only need a number. Absent when the new estimate is off or could not be made. */
+  estimate?: HonestEstimate;
+  /** The PC's speed class when the export was admitted, so a guess made because the speed check could not finish is said as that. */
+  estimateClass?: PcClass;
   /** The gentlest rung this export's command really has, when the plan said (render.ts `gentlestRung`): what Try
    *  again may ask for. Absent: what the engine has. */
   maxRung?: Rung;
@@ -483,8 +500,12 @@ export function dismissExport(jobId: string): boolean {
 
 /** A chain whose last row is gone is forgotten: its ids resolve to themselves again. */
 function forgetChainWithoutRows(id: string): void {
-  if (!attempts.chainOf(id).some((attempt) => records.some((r) => r.job_id === attempt)))
+  forgetAdmission3c(id);
+  const chain = attempts.chainOf(id);
+  if (!chain.some((attempt) => records.some((r) => r.job_id === attempt))) {
+    for (const attempt of chain) forgetAdmission3c(attempt);
     attempts.forget(id);
+  }
 }
 
 /** How to start an export again, given by whoever started it: told the gentlest rung to start at, it queues a
@@ -1363,6 +1384,7 @@ export function __resetExportQueue(): void {
   cancelAsked.clear();
   restartLog.length = 0;
   attempts.reset();
+  __resetAdmission3c();
   records.length = 0;
   snapshot = [];
   setExportsBusy(false);
@@ -1411,19 +1433,36 @@ function workloadOf(spec: ExportSpec): RenderWorkload {
 /** What an export is estimated to take and to use, from this PC's own history where it has some and a guess where it has
  *  not. The ONE reading of the estimate: the pre-start check and the expectation the export is admitted with both come
  *  from here, so what a person was told before it started and what the card says while it runs cannot disagree. Nothing
- *  for an export no plan describes (a copy). */
-function estimateOf(spec: ExportSpec): ExportEstimates {
+ *  for an export no plan describes (a copy). With the new estimate on, the time is the honest one (see estimateAdmission.ts):
+ *  the sizes and the memory are still 0.27.0's. */
+function estimateRead(spec: ExportSpec): { estimates: ExportEstimates; read: Admission3c } {
   const descriptor = spec.meta?.calibration;
-  return descriptor
-    ? estimateExport(
-        workloadOf(spec),
-        descriptor.output,
-        descriptor.quality,
-        descriptor.engine,
-        useExportJob.getState().calibrations,
-        descriptor.encoder,
-      )
-    : { memoryBytes: null, temporaryBytes: null, finalBytes: null, seconds: null };
+  if (!descriptor)
+    return {
+      estimates: { memoryBytes: null, temporaryBytes: null, finalBytes: null, seconds: null },
+      read: NOT_ADMITTED_3C,
+    };
+  const workload = workloadOf(spec);
+  const legacy = estimateExport(
+    workload,
+    descriptor.output,
+    descriptor.quality,
+    descriptor.engine,
+    useExportJob.getState().calibrations,
+    descriptor.encoder,
+  );
+  return withHonestTime(legacy, {
+    workload,
+    output: descriptor.output,
+    quality: descriptor.quality,
+    engine: descriptor.engine,
+    encoder: descriptor.encoder,
+    rung: descriptor.rung,
+  });
+}
+
+function estimateOf(spec: ExportSpec): ExportEstimates {
+  return estimateRead(spec).estimates;
 }
 
 /** Measure the PC and the requested exports and say what the check found. Everything is read afresh,
@@ -1804,7 +1843,9 @@ export async function submitExports(request: readonly ExportSpec[]): Promise<Exp
       throw new Error("export destination is already reserved");
     destinations.add(key);
   }
-  const storageReady = await confirmExportRequest(specs);
+  // The request is being asked its questions: the PC's speed check stops, and does not start, until it is admitted or refused.
+  const asking = beginExportAsk();
+  const storageReady = await confirmExportRequest(specs).finally(asking);
   const submitted: ExportSubmission[] = [];
   try {
     for (const spec of specs) submitted.push(await admitExport(spec, storageReady));
@@ -1964,10 +2005,14 @@ async function admitExport(spec: ExportSpec, storageReady: boolean): Promise<Exp
   // It is information, so working it out can fail without stopping an export that has already been checked and
   // admitted.
   let expected: Expectation | undefined;
+  let admission: Admission3c = NOT_ADMITTED_3C;
   try {
-    expected = expectationOf(estimateOf(spec)) ?? undefined;
+    const read = estimateRead(spec);
+    expected = expectationOf(read.estimates) ?? undefined;
+    admission = read.read;
   } catch {
     expected = undefined;
+    admission = NOT_ADMITTED_3C;
   }
   records.push({
     job_id: jobId,
@@ -1985,6 +2030,9 @@ async function admitExport(spec: ExportSpec, storageReady: boolean): Promise<Exp
       ? { encoder: spec.meta.choice.encoder, reason: spec.meta.choice.reason }
       : {}),
     ...(expected ? { expected } : {}),
+    ...(expected && admission.honest
+      ? { estimate: admission.honest.estimate, estimateClass: admission.honest.pcClass }
+      : {}),
     ...(spec.restart
       ? {
           attempt: attempts.attemptNumber(jobId),
@@ -2012,6 +2060,8 @@ async function admitExport(spec: ExportSpec, storageReady: boolean): Promise<Exp
       terminal--;
     }
   }
+  // What was said about its time, noted locally, and what the pace log will be taught against when it ends.
+  admitted3c(jobId, admission);
   changed();
 
   // The supervisor runs one export at a time itself, and keeps doing so with no page attached; in
@@ -2091,8 +2141,11 @@ async function encode(spec: ExportSpec, ledger: Ledger, jobId: string, key: stri
       () => story.enter("rendering"),
       stallPolicy,
     );
+    // A sleep is a gap between two marks of the same clock, so the first mark is the run's start.
+    noteWatchTick3c(jobId);
     watchTimer = setInterval(() => {
       story.watch?.tick();
+      noteWatchTick3c(jobId);
       // What the processors are doing, for the card's line.
       useExportJob.getState().setLiveBusy(jobId, story.watch?.busy() ?? null);
     }, WATCH_TICK_MS);
@@ -2295,6 +2348,16 @@ async function settle(x: Settle): Promise<void> {
   useExportJob.getState().endLive(x.jobId);
   // A failure only a chip can explain sets that chip aside for a day and is told once, in the story, before its end.
   const chipFailure = error && !cancelled ? chipFailureOf(x.meta?.choice, error) : null;
+  // What the estimate learns from this run, whatever its end: done, failed or cancelled. A run stopped for standing still while idle is a hang and teaches nothing.
+  learnFromRun3c({
+    jobId: x.jobId,
+    ended: error ? (cancelled ? "cancelled" : "failed") : "done",
+    hung: x.story?.stalledOut !== undefined && !isCeilingStop(error ?? undefined),
+    produced: error ? (live ? producedFraction(live) : 0) : 1,
+    runSeconds:
+      (Date.now() - (records.find((r) => r.job_id === x.jobId)?.ranAt ?? x.startedAt)) / 1000,
+    beforeFirstPicture: !!error && cancelled && !(live && live.frame >= 1),
+  });
   if (chipFailure) {
     if (x.meta?.choice?.adapter) markChipSuspect(x.meta.choice.adapter);
     x.story?.trace.record(

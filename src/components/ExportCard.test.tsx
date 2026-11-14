@@ -18,7 +18,7 @@ import {
 } from "../store/exportQuestionHost";
 import { useEditor } from "../store/editor";
 import { useExportJob } from "../store/exportJob";
-import { __setExportFlag } from "../api/exportFlags";
+import { __resetExportFlags, __setExportFlag } from "../api/exportFlags";
 import {
   __resetExportQueue,
   listExportRecords,
@@ -27,6 +27,7 @@ import {
   whenExportsSettle,
 } from "../timeline/exportQueue";
 import { answerButtons, planQuestions } from "../timeline/exportQuestions";
+import { describeEstimateLine } from "../timeline/estimateWords";
 import { describeExpected } from "../timeline/exportWords";
 import { EXPORT_SPEED_REVISION, estimateForDialog } from "../timeline/exportOptions";
 import { __setExportConfirmationForTests } from "../lib/confirm";
@@ -271,11 +272,13 @@ describe("ExportCard", () => {
   });
 
   // A person who asked their assistant to export saw no estimate at all: the Export dialog says it only for an export
-  // started from the menu. The card says it for every export, whoever asked, in the same words.
+  // started from the menu. The card says it for every export, whoever asked, in the same words. These are 0.27.0's own
+  // words, held with the new estimate switched off; the next block holds the new ones.
   describe("what the export is expected to take", () => {
     const GB = 1e9;
     const expectedLine = () => screen.queryByTestId("export-card-expected")?.textContent ?? null;
     beforeEach(() => {
+      __setExportFlag("estimate_v2", false);
       // Every export that ends adds to what this PC has measured: start each of these knowing nothing.
       useExportJob.setState({ calibrations: [] });
       __setExportConfirmationForTests(async () => "continue");
@@ -291,6 +294,7 @@ describe("ExportCard", () => {
     afterEach(() => {
       __setExportConfirmationForTests(null);
       vi.restoreAllMocks();
+      __resetExportFlags();
       useExportJob.setState({ calibrations: [] });
     });
 
@@ -350,6 +354,68 @@ describe("ExportCard", () => {
       await whenExportsSettle();
       expect(screen.queryAllByTestId("export-card-expected")).toHaveLength(0);
       expect(screen.getByText("Exported “two.mp4”")).toBeVisible();
+    });
+  });
+
+  // With the new estimate on, the card says what the export was admitted with: the range, and where the number came from.
+  describe("what the export is expected to take, with the new estimate", () => {
+    const GB = 1e9;
+    const expectedLine = () => screen.queryByTestId("export-card-expected")?.textContent ?? null;
+    beforeEach(() => {
+      __resetExportFlags();
+      useExportJob.setState({ calibrations: [] });
+      __setExportConfirmationForTests(async () => "continue");
+      vi.spyOn(host, "resolveExportResources").mockResolvedValue({
+        total_memory_bytes: 16 * GB,
+        available_memory_bytes: 12 * GB,
+        scratch_free_bytes: 500 * GB,
+        destination_free_bytes: 500 * GB,
+        local_fast_candidate: false,
+        budgets: { memoryBytes: 8 * GB, temporaryBytes: 18 * GB, executionSeconds: 28_800 },
+      });
+    });
+    afterEach(() => {
+      __setExportConfirmationForTests(null);
+      vi.restoreAllMocks();
+      __resetExportFlags();
+      useExportJob.setState({ calibrations: [] });
+    });
+
+    it("says a rough guess is one, in the new words, and keeps saying it the whole run", async () => {
+      const g = gated();
+      await start("one.mp4", g.wait, { described: true });
+      render(<ExportCard />);
+      const record = listExportRecords().find((r) => r.filename === "one.mp4")!;
+      expect(record.estimate?.basis).toBe("guess");
+      expect(expectedLine()).toBe(describeEstimateLine(record.estimate, record.estimateClass));
+      expect(expectedLine()).toMatch(
+        /^Expected: .+\. A rough guess: this PC's speed has not been checked yet\.$/,
+      );
+      expect(expectedLine()).not.toContain("nothing like this has been exported");
+      report({ fraction: 0.4, etaSec: 90, speed: 1, frame: 120 });
+      expect(expectedLine()).toMatch(/A rough guess/);
+      g.open();
+    });
+
+    it("says what earlier exports of this shape measured as measured, with the file's size", async () => {
+      useExportJob.setState({ calibrations: [MEASURED] });
+      const g = gated();
+      await start("one.mp4", g.wait, { described: true });
+      render(<ExportCard />);
+      const record = listExportRecords().find((r) => r.filename === "one.mp4")!;
+      expect(record.estimate?.basis).toBe("history");
+      expect(expectedLine()).toBe(
+        "Expected: about 3 min, a file of about 48 MB, from earlier exports on this PC.",
+      );
+      g.open();
+    });
+
+    it("says nothing for an export nothing describes, as before", async () => {
+      const g = gated();
+      await start("one.mp4", g.wait);
+      render(<ExportCard />);
+      expect(expectedLine()).toBeNull();
+      g.open();
     });
   });
 

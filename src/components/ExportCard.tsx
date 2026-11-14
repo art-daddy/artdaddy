@@ -37,6 +37,7 @@ import {
   subscribeExports,
 } from "../timeline/exportQueue";
 import { answerButtons } from "../timeline/exportQuestions";
+import { describeEstimateLine } from "../timeline/estimateWords";
 import {
   canSaveElsewhere,
   describeChipFailure,
@@ -168,7 +169,10 @@ export default function ExportCard(): JSX.Element | null {
 
       {running.map((r) => {
         const feed = liveFeedOf({ live, finishing }, r.job_id);
-        const expected = describeExpected(r.expected);
+        // The honest estimate's own words (its range, where the number came from) when the export was admitted with one.
+        const expected =
+          (r.estimate ? describeEstimateLine(r.estimate, r.estimateClass) : "") ||
+          describeExpected(r.expected);
         const again =
           r.attempt && r.attempt > 1 ? (restartWords(r.restartReason)?.after ?? null) : null;
         const quietNote = feed ? describeQuietNote(feed, now) : null;

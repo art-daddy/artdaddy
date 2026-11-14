@@ -115,7 +115,6 @@ export default function ExportDialog({
         openTimeline: () => useEditor.getState().timeline,
       }),
     // `check.key` changes when the check's answer does, which is what the estimate is priced on.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [workload, resolution, quality, fps, mode, calibrations, decision, check.key],
   );
   const expected = workload && check.running ? CHECKING_LINE : estimated.line;

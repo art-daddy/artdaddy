@@ -84,6 +84,10 @@ export interface ExportEstimates {
   readonly temporaryBytes: number | null;
   readonly finalBytes: number | null;
   readonly seconds: number | null;
+  /** The low end of the range `seconds` stands behind, when it has one. The warning that an export cannot finish inside the PC's execution limit
+   *  reads this and not `seconds`, so a pessimistic estimate never blocks an export 0.27.0 let through. Absent (or not a time at or under `seconds`):
+   *  `seconds` itself. */
+  readonly secondsLow?: number | null;
   /** `seconds` is a guess from the size of the export, not a measurement made on this device. */
   readonly secondsGuessed?: boolean;
 }
@@ -467,6 +471,13 @@ export interface ExportAssessment {
 
 export type PromiseLine = "hd" | "heavy_hd" | "4k" | "outside";
 
+/** The time the hard warning is judged on: the low end of the estimate's range when it is a time at or under the central one, else the central time itself. */
+function lowEndOf(seconds: number, low: number | null | undefined): number {
+  return typeof low === "number" && Number.isFinite(low) && low >= 0
+    ? Math.min(low, seconds)
+    : seconds;
+}
+
 /** Which of the product's promises a project falls under: ordinary HD, heavy HD, 4K, or none. The ONE rule: the
  *  assessment and the encoder choice (the faster setting is used when an export would run past its line) both read it. */
 export function promiseLineOf(
@@ -560,7 +571,8 @@ export function assessExport(
       reasons.push("disk_shortage");
   }
   if (estimates.seconds === null || !valid(budgets.executionSeconds)) reasons.push("time_unknown");
-  else if (estimates.seconds > budgets.executionSeconds) reasons.push("execution_limit");
+  else if (lowEndOf(estimates.seconds, measured.secondsLow) > budgets.executionSeconds)
+    reasons.push("execution_limit");
   else if (estimates.seconds >= LONG_EXPORT_SECONDS) reasons.push("long");
   else if (!estimates.secondsGuessed && estimates.seconds > workload.durationSeconds * 2)
     reasons.push("slow");

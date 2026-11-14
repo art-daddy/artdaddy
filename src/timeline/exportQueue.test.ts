@@ -1,6 +1,6 @@
 // The queue's job is to protect the DESTINATION FILE. Every test here is about what is sitting
 // on disk at the path the user chose, not about what the tool returned.
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fc from "fast-check";
 import { createHash } from "node:crypto";
 
@@ -346,6 +346,9 @@ describe("required export preflight", () => {
   );
 
   describe("with no history to go by, the size of the export decides", () => {
+    // 0.27.0's guess and its words; the new estimate's guess for the same project is held in exportQueue.estimate3c.test.ts.
+    beforeEach(() => __setExportFlag("estimate_v2", false));
+    afterEach(() => __setExportFlag("estimate_v2", true));
     it("asks a plain Continue, and says it is a guess, when the export looks long", async () => {
       const { shown, result } = await submitAsked({ duration: 3600 }); // an hour of HD, 8 layers
       expect(result).toContain("cancelled before submission");
