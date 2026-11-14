@@ -3,7 +3,7 @@
 // and does not need. This reduces it to the one line a person wants: what finished.
 import { isOutOfCredits } from "../lib/outOfCredits";
 
-const READY = /^- (.+?) is ready/;
+const READY = /^- (.+?) (?:is|are) ready/;
 const FAILED = /^- (.+?) FAILED: (.+)$/;
 
 export function jobNoteSummary(prompt: string): string {

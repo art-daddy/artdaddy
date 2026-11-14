@@ -25,6 +25,7 @@ import { useEditor } from "../store/editor";
 import { __resetJobNotes, JOB_WAKE_LEAD, notifyJobSettled } from "../store/jobNotes";
 import { resetLiveWait } from "../store/liveWait";
 import { clearModelDownload } from "../store/modelDownload";
+import { __resetWakeHost } from "../store/speechWakeHost";
 import { applyOp, ensureTimeline, loadTimeline } from "../timeline/engine";
 import type { Clip } from "../timeline/model";
 import { closeToolHost } from "../tools/host";
@@ -197,6 +198,7 @@ class Harness implements WakeHarness, ModelRecorder {
     clearModelDownload();
     __resetExportFlags();
     __resetJobNotes();
+    __resetWakeHost();
     resetHistoryModeSupport();
     closeToolHost();
     vi.useFakeTimers();
@@ -298,6 +300,7 @@ class Harness implements WakeHarness, ModelRecorder {
     this.lifetime.abort();
     closeToolHost(PROJECT_ID);
     __resetJobNotes();
+    __resetWakeHost();
     useEditor.setState({ projectId: null, store: null, timeline: null });
     wiring.context = null;
     wiring.model = null;

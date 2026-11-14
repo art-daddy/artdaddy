@@ -65,4 +65,31 @@ describe("job note summary", () => {
   it("degrades to a plain line rather than showing nothing", () => {
     expect(jobNoteSummary("something unparseable")).toBe("Background work finished");
   });
+
+  // The words of files the assistant was told were not ready, in the prompt the wake really sends.
+  it("reduces the words of files to one human line, without the file ids", () => {
+    const words = job({
+      id: "w1",
+      tool: "inspect_media",
+      kind: "words",
+      label: "the words of 3 files",
+      media_refs: ["m_12", "m_13", "m_14"],
+    });
+    const out = jobNoteSummary(jobWakePrompt([words]));
+    expect(out).toBe("the words of 3 files ready");
+    expect(out).not.toContain("m_12");
+    expect(out).not.toMatch(/Continue what you were doing/i);
+  });
+
+  it("shows the words of files beside an export that finished with them", () => {
+    const words = job({
+      id: "w1",
+      tool: "inspect_media",
+      kind: "words",
+      label: "the words of 2 files",
+      media_refs: ["m_1", "m_2"],
+    });
+    const out = jobNoteSummary(jobWakePrompt([job(), words]));
+    expect(out).toBe("an image and the words of 2 files ready");
+  });
 });

@@ -63,6 +63,8 @@ import { DEFAULT_EFFORT, DEFAULT_MODEL } from "./chatControls";
 import { undoFlags, localSession } from "./chatSession";
 import { projectConfig } from "./projectConfig";
 import { JOB_WAKE_LEAD, registerJobSink, unregisterJobSink, type SettledJob } from "./jobNotes";
+import type { ChatKey } from "./speechWake";
+import { admitWordsWake, wakeBeginTurn, wakeDropChat, wakeEndTurn } from "./speechWakeHost";
 
 /** Per model, whether the server has said it rebuilds that model's input from the transcript
  *  (client-owned history). Absent = not known yet: the request then also carries what the
@@ -228,14 +230,23 @@ async function changedSinceLastTurn(
 
 /** What the model is told when background work lands. It names the ids so the next round can
  *  use them without a lookup, and reports failures plainly so the agent corrects its own earlier
- *  "generating it now" rather than leaving that as the last word. */
+ *  "generating it now" rather than leaving that as the last word. The words of files it was told were
+ *  not ready are the one kind that needs less: they cost nothing and nothing about them can go wrong, so
+ *  a wake that holds only those says only that they are ready and to carry on. */
 export function jobWakePrompt(jobs: readonly SettledJob[]): string {
   const lines = jobs.map((j) => {
     if (j.status === "failed") return `- ${j.label} FAILED: ${j.error ?? "unknown error"}`;
     const refs = (j.media_refs ?? []).join(", ");
     const suffix = refs ? ` (${refs})` : j.detail ? ` — ${j.detail}` : "";
-    return `- ${j.label} is ready${suffix}`;
+    return `- ${j.label} ${j.kind === "words" ? "are" : "is"} ready${suffix}`;
   });
+  if (jobs.every((j) => j.kind === "words" && j.status === "done"))
+    return [
+      JOB_WAKE_LEAD,
+      ...lines,
+      "",
+      "Continue what you were doing if there is more to do.",
+    ].join("\n");
   return [
     JOB_WAKE_LEAD,
     ...lines,
@@ -261,6 +272,8 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
     /** What is reported about this turn: its start and end, where its time went, the person's answers. A
      *  second go at a failed turn (Try again) gets a new one. */
     telemetry: TurnTelemetry;
+    /** The chat this turn belongs to, as the wake for words knows it; null where there is no open project. */
+    readonly wake: ChatKey | null;
   }
   let currentRunner: ClientTurnRunner | null = null;
   let currentExec: TurnExecution | null = null;
@@ -287,6 +300,15 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
     };
   }
 
+  /** The chat as the wake for words keys it: this project's folder and this transcript. Null unless this chat is
+   *  the open project's (a background project's chat is never woken: its sink is detached, see syncJobSink). */
+  function wakeChatKey(): ChatKey | null {
+    const ed = useEditor.getState();
+    const dir = ed.store?.projectDir ?? null;
+    const session = get().transcriptId;
+    return dir && session && ed.projectId === get().projectId ? { dir, session } : null;
+  }
+
   /** Begin a fresh execution for a NEW turn (a new user message). */
   function newExec(host: ToolHost, telemetry: TurnTelemetry): TurnExecution {
     currentExec = {
@@ -296,6 +318,7 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
       stopped: false,
       inflight: 0,
       telemetry,
+      wake: wakeChatKey(),
     };
     set({ execToken: currentExec.token }); // surface the live execution for the origin fence
     return currentExec;
@@ -314,6 +337,9 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
     if (currentExec) {
       // A turn left behind (a new message, another project, the window closing) ends here, if it has not already.
       currentExec.telemetry.end("abandoned");
+      // Whatever it was told was not ready is dropped with it: the person took over. A turn that had ended
+      // normally already sealed its batch, and that stays.
+      wakeEndTurn(currentExec.wake, currentExec.token, "abandoned");
       currentExec.stopped = true;
       currentExec.controller.abort();
     }
@@ -361,6 +387,9 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
         useEditor.getState().refreshMedia();
         void get().resumeForJobs(jobs);
       },
+      // The words of files the assistant was told were not ready are asked, at this moment, whether they may
+      // start a turn now (speechWakeHost.ts); an export or a generation is never asked.
+      admit: (job) => admitWordsWake(dir, get().transcriptId, job),
     });
   }
 
@@ -941,7 +970,11 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
     useLiveWait.getState().clear();
     // The turn's own record of how it ended; said once however many paths report it (Stop does, and so does the
     // action it aborts).
-    if (end) currentExec?.telemetry.end(end.outcome, end.code);
+    if (end) {
+      currentExec?.telemetry.end(end.outcome, end.code);
+      // A normal end seals what the assistant was told was not ready; any other drops it (the wake for words).
+      if (currentExec) wakeEndTurn(currentExec.wake, currentExec.token, end.outcome);
+    }
     // Only a turn that was actually in flight is ending; a stray Stop after one
     // finished must not re-stamp its redo target with the user's later edits.
     const last = get().turns.at(-1);
@@ -1130,6 +1163,8 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
       // the turn would run against the abandoned project's still-bound host.
       const telemetry = new TurnTelemetry(turn.id, turnLabels(projectId));
       const exec = newExec(host, telemetry);
+      // The wake for words learns which turn is live now: only its answers can be waited for.
+      wakeBeginTurn(exec.wake, exec.token, opts?.system === true);
       // The turn's clock starts here, at the person's Send, so the warm-up below is part of what they waited.
       telemetry.start({
         trigger: opts?.system ? "system" : "user",
@@ -1469,6 +1504,8 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
           }
           // The project moved on (a load) or is closing while it was written: the chat stays as it is.
           if (loadSeq !== seq || get().closing) return false;
+          // The chat that was put away is not woken for what it was waiting for.
+          wakeDropChat(store.projectDir, get().transcriptId ?? undefined);
           supersede();
           carriedDebt = []; // owed to the provider chain of the chat that was put away
           awareness.reset();
@@ -1529,6 +1566,7 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
           }
           if (loadSeq !== seq || get().closing) return false;
           const turns = mapRequests(target.requests);
+          wakeDropChat(store.projectDir, get().transcriptId ?? undefined);
           supersede();
           carriedDebt = [];
           awareness.reset();
