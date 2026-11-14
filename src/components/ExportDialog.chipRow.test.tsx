@@ -122,6 +122,14 @@ describe("the Export dialog and the Graphics chip row", () => {
     ]);
   });
 
+  it("says nothing of the chip, and tests nothing, when the dialog has no project to export", async () => {
+    pcWith([amd]);
+    render(<ExportDialog open onCancel={() => undefined} onStart={() => undefined} />);
+    await act(async () => void (await new Promise((resolve) => setTimeout(resolve, 20))));
+    expect(screen.queryByTestId("chip-row")).toBeNull();
+    expect(runCapabilityProbe).not.toHaveBeenCalled();
+  });
+
   it("asks the app about the encoder again when the person switches the chip Off, and the chip is then not offered", async () => {
     pcWith([amd]);
     open();

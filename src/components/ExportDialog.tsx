@@ -254,7 +254,9 @@ export default function ExportDialog({
                 ))}
               </select>
             </Field>
-            <ChipRow workload={workload} resolution={resolution} fps={fps} onChange={bumpChip} />
+            {workload && (
+              <ChipRow workload={workload} resolution={resolution} fps={fps} onChange={bumpChip} />
+            )}
             {decision?.showRow && (
               <div className="text-xs text-neutral-400">
                 <div className="flex items-center gap-3">

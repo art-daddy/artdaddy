@@ -24,6 +24,7 @@ interface Over {
   failure?: Partial<RestartFacts["failure"]>;
   attempt?: Partial<RestartFacts["attempt"]>;
   progress?: Partial<RestartFacts["progress"]>;
+  machine?: Partial<RestartFacts["machine"]>;
   request?: Partial<Omit<RestartFacts["request"], "flags">>;
   flags?: Record<string, boolean>;
 }
@@ -55,7 +56,7 @@ function facts(over: Over = {}): RestartFacts {
       expectedSeconds: 600,
       ...over.progress,
     },
-    machine: { freeBytes: 8 * GIB, failedPeakBytes: null, limitBytes: null },
+    machine: { freeBytes: 8 * GIB, failedPeakBytes: null, limitBytes: null, ...over.machine },
     request: {
       retryClosureExists: true,
       snapshotUnchanged: true,
