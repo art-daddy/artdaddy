@@ -576,6 +576,133 @@ describe("Cancel", () => {
   });
 });
 
+describe("two runs at once (F3)", () => {
+  // The indexer's whole file has been going for two minutes; the person's own request started later.
+  const idx = (over: Over = {}) =>
+    job("idx", { purpose: "index", label: "Long.mp4", startedAt: T0 - 120_000, ...FAST, ...over });
+  const cap = (over: Over = {}) =>
+    job("cap", {
+      purpose: "captions",
+      label: "Short.mp4",
+      startedAt: T0 - 40_000,
+      ...SPAN,
+      ...over,
+    });
+
+  it("shows the run the person asked for, not the indexer's older one, and says the other is running", () => {
+    seed(idx(), cap());
+    render(<SpeechChip />);
+    const p = openPopover();
+    expect(p.getByText("Captions: 3 min of Short.mp4")).toBeInTheDocument();
+    expect(p.getByText("1 more running")).toBeInTheDocument();
+    expect(p.queryByText("Transcribing Long.mp4")).toBeNull();
+  });
+
+  it("shows the earliest request when several are going, and the earliest indexer run when none is", () => {
+    seed(
+      idx({ id: "idx2", label: "Later.mp4", startedAt: T0 - 90_000 }),
+      idx(),
+      cap({ id: "look", purpose: "look", label: "Look.mp4", startedAt: T0 - 30_000 }),
+      cap(),
+    );
+    render(<SpeechChip />);
+    const p = openPopover();
+    expect(p.getByText("Captions: 3 min of Short.mp4")).toBeInTheDocument();
+    expect(p.getByText("3 more running")).toBeInTheDocument();
+    act(() => {
+      state().dismiss("cap");
+      state().dismiss("look");
+    });
+    expect(p.getByText("Transcribing Long.mp4")).toBeInTheDocument();
+    expect(p.getByText("1 more running")).toBeInTheDocument();
+  });
+
+  it("says how many more are running next to how many are waiting, each in its own line, and nothing for none", () => {
+    seed(cap());
+    render(<SpeechChip />);
+    const p = openPopover();
+    expect(p.queryByText(/more running/)).toBeNull();
+    seed(idx(), job("w", { phase: "waiting", startedAt: null }));
+    expect(p.getByText("1 more running")).toBeInTheDocument();
+    expect(p.getByText("1 more waiting")).toBeInTheDocument();
+    act(() => state().patch("idx", { phase: "waiting" }));
+    expect(p.queryByText(/more running/)).toBeNull();
+    expect(p.getByText("2 more waiting")).toBeInTheDocument();
+  });
+
+  it("Cancel reaches the run that is shown and not the other one", () => {
+    const first = vi.fn();
+    const second = vi.fn();
+    registerCanceller("idx", first);
+    registerCanceller("cap", second);
+    seed(idx(), cap());
+    render(<SpeechChip />);
+    fireEvent.click(openPopover().getByRole("button", { name: "Cancel" }));
+    expect(second).toHaveBeenCalledTimes(1);
+    expect(first).not.toHaveBeenCalled();
+  });
+
+  it("shows what the click did before anything else: 'Transcription stopped' for 3 s with the other run still going, then the other run", () => {
+    registerCanceller("cap", () => state().end("cap", "cancelled", Date.now()));
+    registerCanceller("idx", vi.fn());
+    seed(idx(), cap());
+    render(<SpeechChip />);
+    fireEvent.click(openPopover().getByRole("button", { name: "Cancel" }));
+    expect(chip().textContent).toBe("Transcription stopped");
+    const stopped = within(screen.getByRole("dialog", { name: "transcription stopped" }));
+    expect(stopped.getByText("Stopped transcribing Short.mp4.")).toBeInTheDocument();
+    expect(stopped.getByText("1 more running")).toBeInTheDocument();
+    expect(
+      stopped.queryByRole("button", { name: "Cancel" }),
+      "no Cancel to hit by mistake",
+    ).toBeNull();
+    advance(2_900);
+    expect(chip().textContent).toBe("Transcription stopped");
+    advance(200);
+    expect(chip().textContent).toMatch(/^Transcribing/);
+    expect(
+      within(screen.getByRole("dialog", { name: "transcription" })).getByText(
+        "Transcribing Long.mp4",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("is not cancelled twice by a double click: Cancel is disabled from the click for 3 s, and can be pressed again after", () => {
+    const cancel = vi.fn();
+    registerCanceller("cap", cancel); // the stop takes a moment: the run is still listed
+    seed(idx(), cap());
+    render(<SpeechChip />);
+    const button = openPopover().getByRole("button", { name: "Cancel" });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(button).toBeDisabled();
+    advance(2_900);
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+    advance(200);
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(cancel).toHaveBeenCalledTimes(2);
+  });
+
+  it("a second click never reaches the next run: the run that was cancelled ends at once and the other takes its place, with its Cancel disabled", () => {
+    const other = vi.fn();
+    registerCanceller("cap", () => state().dismiss("cap")); // ended by itself at that very moment: not stopped
+    registerCanceller("idx", other);
+    seed(idx(), cap());
+    render(<SpeechChip />);
+    fireEvent.click(openPopover().getByRole("button", { name: "Cancel" }));
+    // the indexer's run is what is shown now, in the same place
+    const next = screen.getByRole("button", { name: "Cancel" });
+    expect(within(popover()).getByText("Transcribing Long.mp4")).toBeInTheDocument();
+    fireEvent.click(next);
+    expect(other, "the second click of a double click").not.toHaveBeenCalled();
+    advance(3_100);
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(other, "a click that means it, 3 s later").toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("the clock", () => {
   it("runs one tick while there is any job, even one that is too young to show, and none otherwise", () => {
     const view = render(<SpeechChip />);

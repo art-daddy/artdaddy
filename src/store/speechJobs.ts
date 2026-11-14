@@ -141,16 +141,33 @@ export function cancelSpeechJob(id: string): boolean {
   return true;
 }
 
-/** The job the chip shows: a run that is going (the one started first), else the job that just stopped
- *  (the latest), else the first one waiting. Null when there is nothing to show. */
-export function chipJob(jobs: readonly SpeechJob[]): SpeechJob | null {
-  const going = jobs
-    .filter((j) => j.phase === "starting" || j.phase === "running")
-    .sort((a, b) => (a.startedAt ?? a.enqueuedAt) - (b.startedAt ?? b.enqueuedAt));
-  if (going[0]) return going[0];
+/** How long a job that has just stopped is shown before a run that is going (see {@link chipJob}): long enough
+ *  for the person to read what their click did, and for a double click to be over before the next run's Cancel
+ *  takes the place of the one that was pressed. */
+export const JUST_STOPPED_MS = 3_000;
+
+const goingOnly = (jobs: readonly SpeechJob[]): SpeechJob[] =>
+  jobs.filter((j) => j.phase === "starting" || j.phase === "running");
+
+/** The job the chip shows. In this order:
+ *  1. a job that stopped less than {@link JUST_STOPPED_MS} ago (the latest), when `now` is given: the person
+ *     sees what their click did, and no other run's Cancel is under their pointer in its place;
+ *  2. a run that is going: one a request made (captions, a look, a transcript) before the indexer's own, the
+ *     one started first of each, so the person's own request is never out of reach behind a long run of the
+ *     indexer;
+ *  3. the job that stopped (the latest); 4. the first one waiting.
+ *  Null when there is nothing to show. */
+export function chipJob(jobs: readonly SpeechJob[], now?: number): SpeechJob | null {
   const stopped = jobs
     .filter((j) => j.phase === "stopped")
     .sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0));
+  if (now !== undefined && stopped[0] && now - (stopped[0].endedAt ?? 0) < JUST_STOPPED_MS)
+    return stopped[0];
+  const going = goingOnly(jobs).sort(
+    (a, b) => (a.startedAt ?? a.enqueuedAt) - (b.startedAt ?? b.enqueuedAt),
+  );
+  const first = going.find((j) => j.purpose !== "index") ?? going[0];
+  if (first) return first;
   if (stopped[0]) return stopped[0];
   return (
     [...jobs].filter((j) => j.phase === "waiting").sort((a, b) => a.enqueuedAt - b.enqueuedAt)[0] ??
@@ -161,6 +178,12 @@ export function chipJob(jobs: readonly SpeechJob[]): SpeechJob | null {
 /** How many jobs are waiting besides the one shown ("N more waiting"). */
 export function waitingBesides(jobs: readonly SpeechJob[], shown: SpeechJob | null): number {
   return jobs.filter((j) => j.phase === "waiting" && j.id !== shown?.id).length;
+}
+
+/** How many runs are going besides the one shown ("N more running"): Cancel in the popover reaches the one it
+ *  shows, and the person is told that others are going. */
+export function goingBesides(jobs: readonly SpeechJob[], shown: SpeechJob | null): number {
+  return goingOnly(jobs).filter((j) => j.id !== shown?.id).length;
 }
 
 /** Tests only. */

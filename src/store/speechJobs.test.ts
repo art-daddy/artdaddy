@@ -8,6 +8,8 @@ import {
   __resetSpeechJobs,
   cancelSpeechJob,
   chipJob,
+  JUST_STOPPED_MS,
+  goingBesides,
   registerCanceller,
   STOPPED_SHOWN_MS,
   useSpeechJobs,
@@ -151,5 +153,68 @@ describe("what the chip shows", () => {
     expect(waitingBesides(jobs, jobs[0])).toBe(2);
     expect(waitingBesides(jobs, jobs[1])).toBe(1);
     expect(waitingBesides([], null)).toBe(0);
+  });
+});
+
+describe("what the chip shows when more than one run is going (F3)", () => {
+  it.each<SpeechJob["purpose"]>(["captions", "look", "transcript"])(
+    "a %s run is shown before the indexer's, however much older the indexer's is",
+    (purpose) => {
+      const index = job("i", { phase: "running", startedAt: 10 });
+      const asked = job("a", { phase: "starting", startedAt: 900, purpose });
+      expect(chipJob([index, asked])?.id).toBe("a");
+      expect(chipJob([asked, index])?.id).toBe("a");
+    },
+  );
+
+  it("shows the one started first of the requests, and the one started first of the indexer's when no request is going", () => {
+    const early = job("early", { phase: "running", startedAt: 5, purpose: "look" });
+    const late = job("late", { phase: "running", startedAt: 50, purpose: "captions" });
+    const idxA = job("ia", { phase: "running", startedAt: 1 });
+    const idxB = job("ib", { phase: "starting", startedAt: 2 });
+    expect(chipJob([idxA, idxB, late, early])?.id).toBe("early");
+    expect(chipJob([idxB, idxA])?.id).toBe("ia");
+    // a request that is only waiting is not a run that is going
+    expect(chipJob([idxA, job("w", { purpose: "captions" })])?.id).toBe("ia");
+  });
+
+  it("shows a job that stopped less than 3 s ago before a run that is going, and the run again after", () => {
+    const running = job("r", { phase: "running", startedAt: 1 });
+    const stopped = job("s", {
+      phase: "stopped",
+      stop: "cancelled",
+      endedAt: 10_000,
+      purpose: "captions",
+    });
+    expect(chipJob([running, stopped], 10_000)?.id).toBe("s");
+    expect(chipJob([running, stopped], 10_000 + JUST_STOPPED_MS - 1)?.id).toBe("s");
+    expect(chipJob([running, stopped], 10_000 + JUST_STOPPED_MS)?.id).toBe("r");
+    expect(chipJob([stopped], 10_000 + 7_000)?.id, "alone, it stays until it is cleared").toBe("s");
+  });
+
+  it("shows the latest of two jobs that have just stopped, and keeps the old order when no clock is given", () => {
+    const running = job("r", { phase: "running", startedAt: 1 });
+    const first = job("s1", { phase: "stopped", stop: "cancelled", endedAt: 9_000 });
+    const second = job("s2", { phase: "stopped", stop: "too_slow", endedAt: 9_500 });
+    expect(chipJob([running, first, second], 10_000)?.id).toBe("s2");
+    expect(chipJob([running, first, second])?.id, "no clock, no rule").toBe("r");
+  });
+
+  it("is 3 seconds: long enough to read what the click did, short enough that the next run's Cancel is not lost", () => {
+    expect(JUST_STOPPED_MS).toBe(3_000);
+    expect(JUST_STOPPED_MS).toBeLessThan(STOPPED_SHOWN_MS);
+  });
+
+  it("counts the runs that are going besides the one shown, and not the waiting or the stopped", () => {
+    const jobs = [
+      job("a", { phase: "running" }),
+      job("b", { phase: "starting" }),
+      job("c", { phase: "running", purpose: "look" }),
+      job("d"),
+      job("e", { phase: "stopped" }),
+    ];
+    expect(goingBesides(jobs, jobs[0])).toBe(2);
+    expect(goingBesides(jobs, jobs[3])).toBe(3);
+    expect(goingBesides([], null)).toBe(0);
   });
 });

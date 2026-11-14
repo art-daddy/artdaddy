@@ -7,6 +7,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   cancelSpeechJob,
   chipJob,
+  goingBesides,
   useSpeechJobs,
   waitingBesides,
   type SpeechJob,
@@ -20,6 +21,10 @@ import { cn } from "./ui";
  *  1-second tick reads exactly 15.0 s. */
 export const CHIP_AFTER_MS = 15_000;
 const TICK_MS = 1_000;
+/** After a click on Cancel, no Cancel in the chip takes a click for this long (or until the chip's tick, which
+ *  is once a second, says it has passed). A double click, or a second click as the run that was stopped is
+ *  replaced in the same place by another run, would otherwise stop two runs for one decision. */
+export const CANCEL_LOCK_MS = 3_000;
 
 const STOPPED_NOTE =
   "It will be transcribed when needed: the assistant and captions read only the parts they use, at that moment.";
@@ -134,9 +139,24 @@ export default function SpeechChip(): JSX.Element | null {
   const now = useNow(jobs.length > 0);
   const [open, setOpen] = useState(false);
   const chipRef = useRef<HTMLButtonElement>(null);
+  /** When Cancel was last pressed (epoch ms): the state draws the buttons disabled, the ref is what the
+   *  handler reads, so two clicks before the next draw are still one. */
+  const [lockedAt, setLockedAt] = useState<number | null>(null);
+  const lockRef = useRef(0);
 
-  const job = chipJob(jobs.filter((j) => isShown(j, now)));
+  const job = chipJob(
+    jobs.filter((j) => isShown(j, now)),
+    now,
+  );
   const shown = job !== null;
+  const locked = lockedAt !== null && now - lockedAt < CANCEL_LOCK_MS;
+  const cancel = (id: string): void => {
+    const t = Date.now();
+    if (t - lockRef.current < CANCEL_LOCK_MS) return;
+    lockRef.current = t;
+    setLockedAt(t);
+    cancelSpeechJob(id);
+  };
 
   // The popover goes with its job, and does not open by itself for the next one.
   useEffect(() => {
@@ -156,7 +176,8 @@ export default function SpeechChip(): JSX.Element | null {
 
   if (!job) return null;
   const words = wordsOf(job);
-  const more = waitingBesides(jobs, job);
+  const waiting = waitingBesides(jobs, job);
+  const running = goingBesides(jobs, job);
 
   return (
     // The one flexible item of the right cluster (which keeps every other item at its own width): in a
@@ -199,9 +220,16 @@ export default function SpeechChip(): JSX.Element | null {
             className="absolute right-0 z-[91] mt-1 w-80 rounded-md border border-edge bg-panel py-1 shadow-2xl"
           >
             {job.phase === "stopped" ? (
-              <StoppedBody job={job} more={more} />
+              <StoppedBody job={job} waiting={waiting} running={running} />
             ) : (
-              <LiveBody job={job} words={words} more={more} />
+              <LiveBody
+                job={job}
+                words={words}
+                waiting={waiting}
+                running={running}
+                locked={locked}
+                onCancel={cancel}
+              />
             )}
           </div>
         </>
@@ -210,11 +238,28 @@ export default function SpeechChip(): JSX.Element | null {
   );
 }
 
-function MoreWaiting({ more }: { more: number }): JSX.Element | null {
-  return more > 0 ? <div className="mt-2 text-neutral-500">{`${more} more waiting`}</div> : null;
+function MoreJobs({ running, waiting }: { running: number; waiting: number }): JSX.Element | null {
+  return (
+    <>
+      {running > 0 && <div className="mt-2 text-neutral-500">{`${running} more running`}</div>}
+      {waiting > 0 && (
+        <div className={cn("text-neutral-500", running > 0 ? "mt-0.5" : "mt-2")}>
+          {`${waiting} more waiting`}
+        </div>
+      )}
+    </>
+  );
 }
 
-function StoppedBody({ job, more }: { job: SpeechJob; more: number }): JSX.Element {
+function StoppedBody({
+  job,
+  waiting,
+  running,
+}: {
+  job: SpeechJob;
+  waiting: number;
+  running: number;
+}): JSX.Element {
   const head =
     job.stop === "too_slow"
       ? `Stopped transcribing ${job.label}: it would have taken too long on this PC.`
@@ -223,7 +268,7 @@ function StoppedBody({ job, more }: { job: SpeechJob; more: number }): JSX.Eleme
     <div className="px-3 pb-1 pt-1 text-[11px]">
       <div className="text-xs font-medium text-ink">{head}</div>
       <div className="mt-0.5 leading-snug text-ink-dim">{STOPPED_NOTE}</div>
-      <MoreWaiting more={more} />
+      <MoreJobs running={running} waiting={waiting} />
     </div>
   );
 }
@@ -231,11 +276,17 @@ function StoppedBody({ job, more }: { job: SpeechJob; more: number }): JSX.Eleme
 function LiveBody({
   job,
   words,
-  more,
+  waiting,
+  running: otherRuns,
+  locked,
+  onCancel,
 }: {
   job: SpeechJob;
   words: Words;
-  more: number;
+  waiting: number;
+  running: number;
+  locked: boolean;
+  onCancel: (id: string) => void;
 }): JSX.Element {
   const running = job.phase === "running";
   const going = running || job.phase === "starting";
@@ -244,7 +295,13 @@ function LiveBody({
   const speed = running ? speedLine(job.rate) : null;
   const where = going ? runningOn(job.facts) : null;
   const note = isSlow(job) ? slowNote(job.facts) : null;
-  const hasBody = pct !== null || speed !== null || where !== null || note !== null || more > 0;
+  const hasBody =
+    pct !== null ||
+    speed !== null ||
+    where !== null ||
+    note !== null ||
+    waiting > 0 ||
+    otherRuns > 0;
 
   return (
     <>
@@ -256,8 +313,9 @@ function LiveBody({
           {going && (
             <button
               type="button"
-              onClick={() => cancelSpeechJob(job.id)}
-              className={`${QUIET} hover:text-red-400`}
+              disabled={locked}
+              onClick={() => onCancel(job.id)}
+              className={`${QUIET} hover:text-red-400 disabled:pointer-events-none disabled:opacity-50`}
             >
               Cancel
             </button>
@@ -304,7 +362,7 @@ function LiveBody({
               <div className="mt-1.5 leading-snug text-neutral-400">{note.cancelNote}</div>
             </>
           )}
-          <MoreWaiting more={more} />
+          <MoreJobs running={otherRuns} waiting={waiting} />
         </div>
       )}
     </>
