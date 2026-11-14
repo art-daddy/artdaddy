@@ -2,10 +2,14 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import ImportProgress from "./ImportProgress";
+import { useImportJobs } from "../store/importJobs";
 import {
   clearModelDownload,
   reportModelDownload,
   setModelDownloadCancel,
+  setModelDownloadFailure,
+  setModelNextAttemptAt,
+  useModelDownload,
 } from "../store/modelDownload";
 import { WHISPER_MODELS } from "../tools/transcribe";
 
@@ -14,6 +18,8 @@ const TOTAL = WHISPER_MODELS.small.bytes;
 afterEach(() => {
   vi.useRealTimers();
   clearModelDownload();
+  setModelDownloadFailure(null);
+  setModelNextAttemptAt(null);
 });
 
 describe("ImportProgress — speech model", () => {
@@ -82,5 +88,58 @@ describe("ImportProgress — speech model", () => {
     reportModelDownload(Math.round(TOTAL * 0.4), TOTAL);
     render(<ImportProgress />);
     expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
+  });
+});
+
+describe("ImportProgress — a speech model download that failed", () => {
+  it("says what happened and that speech waits for the model, with a Retry, when nothing is scheduled", () => {
+    setModelDownloadFailure("server_busy");
+    render(<ImportProgress />);
+    const card = screen.getByTestId("model-failure");
+    expect(card.textContent).toContain("Could not download the speech model.");
+    expect(card.textContent).toContain("The download site is busy.");
+    expect(card.textContent).toContain("Speech features wait until the model is downloaded.");
+    expect(card.textContent).not.toContain("try again by itself");
+    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+  });
+
+  it("says the app tries again by itself while a round is waiting for its turn", () => {
+    setModelDownloadFailure("network");
+    setModelNextAttemptAt(Date.now() + 60_000);
+    render(<ImportProgress />);
+    const card = screen.getByTestId("model-failure");
+    expect(card.textContent).toContain("The app will try again by itself.");
+    expect(card.textContent).not.toContain("Speech features wait");
+  });
+
+  it("goes when the person dismisses it, and comes back for the next failure", () => {
+    setModelDownloadFailure("network");
+    const view = render(<ImportProgress />);
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    view.rerender(<ImportProgress />);
+    expect(screen.queryByTestId("model-failure")).toBeNull();
+    expect(view.container.textContent).toBe(""); // nothing left on screen
+    setModelDownloadFailure("disk_write");
+    view.rerender(<ImportProgress />);
+    expect(screen.getByTestId("model-failure").textContent).toContain("free space");
+  });
+
+  it("is never shown together with the download it is about, whatever the store holds", () => {
+    useModelDownload.setState({ failure: "network", received: 100, total: TOTAL });
+    render(<ImportProgress />);
+    expect(screen.getByTestId("model-download")).toBeTruthy();
+    expect(screen.queryByTestId("model-failure")).toBeNull();
+  });
+
+  it("sits beside the import progress without replacing it", () => {
+    useImportJobs.getState().begin("C:/clips/a.mp4", "a.mp4");
+    try {
+      setModelDownloadFailure("incomplete");
+      render(<ImportProgress />);
+      expect(screen.getByTestId("model-failure")).toBeTruthy();
+      expect(screen.getByTestId("import-pct")).toBeTruthy();
+    } finally {
+      useImportJobs.getState().finish("C:/clips/a.mp4");
+    }
   });
 });

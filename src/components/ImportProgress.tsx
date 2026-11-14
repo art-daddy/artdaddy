@@ -13,8 +13,16 @@ import {
   MODEL_DOWNLOAD_NOTE,
   modelDownloadMessage,
   percent,
+  setModelDownloadFailure,
   useModelDownload,
 } from "../store/modelDownload";
+import { MODEL_FAILURE_WORDS } from "../tools/modelFailure";
+
+/** The prefetch is loaded on first use, as the app's start loads it: the card only exists after a download
+ *  has failed, by when it is long loaded. */
+function retryDownload(): void {
+  void import("../tools/modelPrefetch").then((m) => m.retrySpeechModelDownload());
+}
 
 export default function ImportProgress(): JSX.Element | null {
   const jobs = useImportJobs((s) => s.jobs);
@@ -23,15 +31,57 @@ export default function ImportProgress(): JSX.Element | null {
   const startedAt = useModelDownload((s) => s.startedAt);
   const startReceived = useModelDownload((s) => s.startReceived);
   const cancel = useModelDownload((s) => s.cancel);
+  const failure = useModelDownload((s) => s.failure);
+  const retryScheduled = useModelDownload((s) => s.nextAttemptAt !== null);
   const modelPct = total > 0 ? percent(received, total) : null;
-  if (!jobs.length && modelPct === null) return null;
+  // "Downloading" and "failed" are never shown together, whatever the store holds.
+  const failed = modelPct === null ? failure : null;
+  if (!jobs.length && modelPct === null && failed === null) return null;
   const eta = downloadEtaSeconds({ received, total, startedAt, startReceived });
   return (
     <div
       role="status"
-      aria-label={jobs.length ? "importing media" : "downloading speech model"}
+      aria-label={
+        jobs.length
+          ? "importing media"
+          : failed !== null
+            ? "speech model download failed"
+            : "downloading speech model"
+      }
       className="pointer-events-none fixed bottom-4 left-4 z-[70] w-72 space-y-2"
     >
+      {failed !== null && (
+        <div
+          data-testid="model-failure"
+          data-reason={failed}
+          className="rounded-md border border-edge bg-panel/95 px-3 py-2 text-xs text-neutral-200 shadow-xl"
+        >
+          <div className="leading-snug">Could not download the speech model.</div>
+          <div className="mt-0.5 leading-snug text-neutral-400">{MODEL_FAILURE_WORDS[failed]}</div>
+          <div className="mt-0.5 leading-snug text-neutral-400">
+            {retryScheduled
+              ? "The app will try again by itself."
+              : "Speech features wait until the model is downloaded."}
+          </div>
+          <div className="pointer-events-auto mt-1.5 flex items-baseline gap-3">
+            <button
+              type="button"
+              onClick={retryDownload}
+              className="text-neutral-200 underline hover:text-white"
+            >
+              Retry
+            </button>
+            <button
+              type="button"
+              aria-label="Dismiss"
+              onClick={() => setModelDownloadFailure(null)}
+              className="text-neutral-400 hover:text-neutral-200"
+            >
+              ×
+            </button>
+          </div>
+        </div>
+      )}
       {modelPct !== null && (
         <div
           data-testid="model-download"
