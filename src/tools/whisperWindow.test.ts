@@ -68,7 +68,11 @@ function harness(
         renames.push([from, to]);
       },
       remove: async (p: string) => void files.delete(p),
-      byteSize: async () => WHISPER_MODELS.small.bytes,
+      // The model's size for the model; a minute of audio for every extract (16 kHz mono 16-bit): the plan is read
+      // again from the extract's own length before the engine is launched (S2-02), and an extract that were as big
+      // as the model would be four hours of audio.
+      byteSize: async (p: string) =>
+        p.endsWith(".wav") ? 44 + 32_000 * 60 : WHISPER_MODELS.small.bytes,
       probeMedia: async () => ({
         id12: WHISPER_MODELS.small.sha256.slice(0, 12),
         sha256: WHISPER_MODELS.small.sha256,
