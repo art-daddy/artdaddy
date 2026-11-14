@@ -26,9 +26,24 @@ import {
   WeakDecodeError,
   type ModelVariant,
 } from "./speechDecoding";
-import { failureText, TranscriptionFailure } from "./speechFailure";
+import {
+  classifyTranscriptFailure,
+  failureText,
+  isSpeechCancelled,
+  SpeechCancelledError,
+  TranscriptionFailure,
+  type TranscriptFailureReason,
+} from "./speechFailure";
+import {
+  admitWholeFile,
+  isSpeechDeferred,
+  knownAudioLength,
+  SpeechDeferredError,
+} from "./speechAdmission";
 import { backendOfRun, recordSpeechRun } from "./speechPace";
 import { padded, playedSpan, spanWindows } from "./speechSpans";
+import { CAP_S } from "./speechPlan";
+import { watchSpeechRun, type RunInfo, type StopReason } from "./speechRun";
 import { exportFlag } from "../api/exportFlags";
 import { joinPath } from "./store";
 import { prioritizeTranscript } from "./transcriptQueue";
@@ -1158,6 +1173,20 @@ async function runWhisperOnce(
   // a run still going when its project closes finishes without writing into the project (4i).
   const scratchBase = await scratchBaseFor(ctx, src, size, lang, win.key);
   const run = async (): Promise<ParsedTranscript> => {
+    // The one place every whole-file start passes (S2-02): the background's own runs, and the ones a
+    // batch runs alone after missing them, before any audio is read or any engine is started. A file this
+    // PC would take longer than the cap for is not started by itself; a request (a look, captions,
+    // get_transcript) is never planned away here: it asks for the stretch it needs, and what it asks for runs.
+    // The length is what the indexer measured (`noteAudioLength`); a run never probes a file to plan it,
+    // and a length nobody measured is a run.
+    if (ctx.background && win.key === "") {
+      const admission = admitWholeFile({
+        file: fileLabel(src),
+        where: "boundary",
+        audioS: knownAudioLength(src),
+      });
+      if (admission?.plan === "ondemand") throw new SpeechDeferredError(admission);
+    }
     const model = await modelFor(ctx, size);
     // A window is transcribed from its OWN audio only. Extracting a 2-hour file to transcribe 30
     // seconds of it was most of the wait (UJ-012); and whisper loads the whole file it is handed, so
@@ -1224,7 +1253,16 @@ async function runWhisperOnce(
         "0",
         ...decodeArgs(plan.beam),
       ];
-      const { engine, release } = await engineFor(ctx, args, meta);
+      const { engine, release } = await engineFor(ctx, args, meta, {
+        purpose: ctx.background ? "index" : (ctx.speechPurpose ?? "look"),
+        label: fileLabel(src),
+        spanS: await wavSeconds(ctx, wav),
+        threads: Number(whisperThreads()) || null,
+        // Only a whole file that the background started by itself can be stopped for being too slow:
+        // what a request asked for (a look, captions, get_transcript) runs until it is done or Cancelled.
+        liveStop: ctx.background === true && win.key === "",
+        several: false,
+      });
       try {
         // A look's whisper runs at once, one look at a time; the indexer's took its turn already.
         const run = ctx.background ? await engine() : await lookWhisper(engine, ctx.signal);
@@ -1236,7 +1274,32 @@ async function runWhisperOnce(
       }
     });
   };
-  return joined ? run() : once(out ?? scratchBase, run);
+  if (joined) return run();
+  try {
+    return await once(out ?? scratchBase, run);
+  } catch (e) {
+    // The run this request joined was the background's, and it was left undone for the cap before it
+    // began. A request is never planned away: it makes its own run.
+    if (!ctx.background && isSpeechDeferred(e)) return once(out ?? scratchBase, run);
+    throw e;
+  }
+}
+
+/** What the person calls the file: its name, for the plan log and the chip. */
+function fileLabel(src: string): string {
+  return normSep(src).split("/").pop() || src;
+}
+
+/** How many seconds of audio the extract `wav` holds: whisper's input is 16 kHz mono 16-bit, so it is the
+ *  file's size less the 44-byte header over 32,000 bytes a second. Null when the size cannot be read. The
+ *  run's own length, exactly: no probe of the source is needed. */
+async function wavSeconds(ctx: ClientToolContext, wav: string): Promise<number | null> {
+  try {
+    const seconds = ((await ctx.store.byteSize(wav)) - 44) / 32_000;
+    return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Where whisper's scratch output for one request lives: the same place for a run alone and for a run
@@ -1270,6 +1333,35 @@ async function modelFor(ctx: ClientToolContext, size: string): Promise<string> {
   }
 }
 
+/** An engine run as its caller reads it: what the process reported, and how the run ended when the person
+ *  (Cancel) or the live check stopped it, so a stopped run is never taken for a crash of the graphics
+ *  chip, and what the monitor measured, so the pace this PC keeps learns the start-up too. */
+export type EngineRun = CommandResult & {
+  stoppedBy?: StopReason;
+  startupS?: number;
+  liveProjectedS?: number;
+};
+
+/** A signal that aborts when either `a` or `b` does, and the way to let go of both. */
+function eitherSignal(
+  a: AbortSignal | undefined,
+  b: AbortSignal,
+): { signal: AbortSignal; off: () => void } {
+  if (!a) return { signal: b, off: () => undefined };
+  const both = new AbortController();
+  const stop = (): void => both.abort();
+  if (a.aborted || b.aborted) both.abort();
+  a.addEventListener("abort", stop, { once: true });
+  b.addEventListener("abort", stop, { once: true });
+  return {
+    signal: both.signal,
+    off: () => {
+      a.removeEventListener("abort", stop);
+      b.removeEventListener("abort", stop);
+    },
+  };
+}
+
 /** The engine for one run of whisper-cli with `args`, and the way to let go of it afterwards.
  *
  *  In the app, whisper is a job of the app process: a crash of the page neither stops it nor loses its
@@ -1278,37 +1370,76 @@ async function modelFor(ctx: ClientToolContext, size: string): Promise<string> {
  *
  *  `engine` runs it on the GPU, or off it where the GPU is known to crash. A GPU that crashes is retried
  *  ONCE with it off (-ng): when that works, this machine stays off it for a while, and when it crashes too
- *  the GPU was not the cause and nothing is remembered. */
+ *  the GPU was not the cause and nothing is remembered.
+ *
+ *  Each launch is its own job with its own abort, registered with the top-bar chip's store (S2-05): Cancel
+ *  stops THAT run and no other, whoever else is running. The caller's own signal (Stop) ends it too. A run
+ *  stopped either way exits non-zero, and that is not a crash of the chip: it is not retried, and it is
+ *  answered as what it was. `info` says what the run is for, so the chip can title it. */
 async function engineFor(
   ctx: ClientToolContext,
   args: string[],
   meta: object,
-): Promise<{ engine: () => Promise<CommandResult>; release: () => Promise<void> }> {
+  info: RunInfo,
+): Promise<{ engine: () => Promise<EngineRun>; release: () => Promise<void> }> {
   const sup = await jobSupervisor();
   const jobs: string[] = [];
-  const launch = (cpuOnly: boolean): Promise<CommandResult> => {
+  /** How the run was stopped, if it was: shared by the launches of one run, so a stop never leads to a retry. */
+  const stopped: { by: StopReason | null } = { by: null };
+  const launch = async (cpuOnly: boolean, afterCrash: boolean): Promise<EngineRun> => {
     const id = `whisper-${scratchToken()}`;
     jobs.push(id);
     const run = cpuOnly ? [...args, "-ng"] : args;
-    return sup
-      ? runAsJob(
-          sup,
-          {
-            id,
-            lane: id,
-            program: "whisper-cli",
-            args: run,
-            meta: { ...meta } as Record<string, unknown>,
-          },
-          ctx.signal,
-        )
-      : ctx.runner.run("whisper-cli", run, ctx.signal);
+    const own = new AbortController();
+    const both = eitherSignal(ctx.signal, own.signal);
+    const watch = watchSpeechRun({
+      ...info,
+      id,
+      cpuOnly,
+      afterCrash,
+      stop: (how) => {
+        stopped.by ??= how;
+        own.abort();
+      },
+      readLog: sup
+        ? async () => (await sup.list()).find((v) => v.id === id)?.stderr_head ?? null
+        : undefined,
+    });
+    try {
+      const result = sup
+        ? await runAsJob(
+            sup,
+            {
+              id,
+              lane: id,
+              program: "whisper-cli",
+              args: run,
+              meta: { ...meta } as Record<string, unknown>,
+            },
+            both.signal,
+            watch.onStdout,
+          )
+        : await ctx.runner.run("whisper-cli", run, both.signal, undefined, watch.onStdout);
+      const end = watch.finish(result.code, stopped.by);
+      return {
+        ...result,
+        ...(end.startupS === null ? {} : { startupS: end.startupS }),
+        ...(stopped.by ? { stoppedBy: stopped.by } : {}),
+        ...(end.liveProjectedS === null ? {} : { liveProjectedS: end.liveProjectedS }),
+      };
+    } catch (e) {
+      watch.finish(null, stopped.by);
+      throw e;
+    } finally {
+      both.off();
+    }
   };
-  const engine = async (): Promise<CommandResult> => {
+  const engine = async (): Promise<EngineRun> => {
     const cpuOnly = cpuOnlyNow();
-    const first = await launch(cpuOnly);
-    if (cpuOnly || ctx.signal?.aborted || !isGpuCrash(first)) return first;
-    const second = await launch(true);
+    const first = await launch(cpuOnly, false);
+    if (stopped.by || cpuOnly || ctx.signal?.aborted || !isGpuCrash(first)) return first;
+    const second = await launch(true, true);
+    if (stopped.by) return second;
     const worked = second.code === 0;
     if (worked) holdCpuOnly(first.code);
     reportGpuCrash(first.code, worked);
@@ -1373,7 +1504,7 @@ interface TranscriptJobMeta {
 async function finishWhisper(
   io: ScratchIO,
   meta: TranscriptJobMeta,
-  run: CommandResult,
+  run: EngineRun,
   signal?: AbortSignal,
   /** One file of a run over several: its words are kept if ITS output is there and whole, whatever the
    *  run's exit status says about the files after it, and the run is reported once by whoever ran it. */
@@ -1385,7 +1516,16 @@ async function finishWhisper(
       // Stop kills the sidecar, so the exit code describes the KILL, not the transcription:
       // it surfaced as `whisper-cli failed (code=-1): cancelled`, which reads as a broken
       // install rather than as the thing the user just asked for.
-      if (signal?.aborted || run.stderr === "cancelled") throw new Error("transcription cancelled");
+      if (signal?.aborted) throw new Error("transcription cancelled");
+      // The person pressed Cancel on this run, or the live check stopped it for being too slow: each is
+      // answered as what it was, never as a failure of the engine (S2-05, S2-02).
+      if (run.stoppedBy === "person") throw new SpeechCancelledError();
+      if (run.stoppedBy === "too_slow")
+        throw new SpeechDeferredError(
+          { why: "cap", projectedS: run.liveProjectedS ?? null, capS: CAP_S },
+          { stopped: true },
+        );
+      if (run.stderr === "cancelled") throw new Error("transcription cancelled");
       if (run.code !== null && WINDOWS_LOAD_FAILURES.has(run.code))
         throw new SpeechEngineUnavailableError(run.code);
       // whisper-cli prints its usage and exits 0 for a language it does not know, so the cause is
@@ -1431,7 +1571,13 @@ async function finishWhisper(
     if (!batch) {
       const facts = whisperRunFacts(run.stderr);
       reportTranscription(facts, undefined, { beam: meta.beam, rerun: meta.rerun });
-      recordSpeechRun(facts.audioSeconds, facts.wallSeconds, backendOfRun(facts.backend));
+      recordSpeechRun(
+        facts.audioSeconds,
+        facts.wallSeconds,
+        backendOfRun(facts.backend),
+        undefined,
+        run.startupS,
+      );
     }
     return parsed;
   } finally {
@@ -1705,9 +1851,27 @@ async function transcribeTogether(
       return { ...w, keys, scratchBase, onceKey: keys.out ?? scratchBase };
     }),
   );
+  // A whole file this PC would take longer than the cap for is not started by itself (S2-02): it is left
+  // out, answered as a deferral, and the others run. One already being transcribed is joined below,
+  // never planned away. Done before the synchronous pass below, so that pass stays one pass.
+  const left = new Set<Keyed>();
+  if (ctx.background) {
+    for (const k of keyed) {
+      if (inflight.has(k.onceKey)) continue;
+      const admission = admitWholeFile({
+        file: fileLabel(k.src),
+        where: "boundary",
+        audioS: knownAudioLength(k.src),
+      });
+      if (admission?.plan !== "ondemand") continue;
+      left.add(k);
+      outcomes[k.at] = { ok: false, error: new SpeechDeferredError(admission) };
+    }
+  }
+  const admitted = keyed.filter((k) => !left.has(k));
   // One synchronous pass: who is already being transcribed (joined, not started again), and who is ours.
-  const joining = keyed.filter((k) => inflight.has(k.onceKey));
-  const ours = keyed.filter((k) => !inflight.has(k.onceKey));
+  const joining = admitted.filter((k) => inflight.has(k.onceKey));
+  const ours = admitted.filter((k) => !inflight.has(k.onceKey));
   const waiting = joining.map(async (k) => {
     const running = inflight.get(k.onceKey);
     try {
@@ -1817,7 +1981,20 @@ async function runTogether(
         "0",
         ...decodeArgs(plan.beam),
       ];
-      const { engine, release } = await engineFor(ctx, args, { kind: "transcripts", items: metas });
+      const { engine, release } = await engineFor(
+        ctx,
+        args,
+        { kind: "transcripts", items: metas },
+        {
+          purpose: ctx.background ? "index" : (ctx.speechPurpose ?? "look"),
+          label: fileLabel(ours[ready[0]].src),
+          spanS: null,
+          threads: Number(whisperThreads()) || null,
+          liveStop: false,
+          // Each file's segments restart at 0: the run has no one position to read a speed from.
+          several: true,
+        },
+      );
       const missed: number[] = [];
       try {
         const run = ctx.background ? await engine() : await lookWhisper(engine, ctx.signal);
@@ -1832,7 +2009,9 @@ async function runTogether(
             if (error instanceof SpeechEngineUnavailableError) unavailable = error;
             if (error instanceof WeakDecodeError)
               widenTo.set(n, beamFor(MODEL_VARIANT, error.detected));
-            missed.push(n);
+            // The person stopped the run: what it did not reach is not started again behind their back.
+            if (isSpeechCancelled(error)) settle(n, { error });
+            else missed.push(n);
           }
         }
         // The run is reported once, for all the files it read.
@@ -1905,6 +2084,8 @@ interface SpanJob {
   window: { start: number; end: number };
   words?: WordPayload[];
   error?: string;
+  /** Why it failed, when it did: a stop by the person is answered as that, not as a failure. */
+  reason?: TranscriptFailureReason;
 }
 
 /** The windows to transcribe: each clip's padded span, merged where two of one file overlap, so
@@ -1973,6 +2154,8 @@ export async function getTranscriptTool(
   audio.sort((a, b) => (Number(a[1].timeline_in) || 0) - (Number(b[1].timeline_in) || 0));
 
   const failures: Array<{ clip_id: string; error: string }> = [];
+  /** How many of those the person stopped in the app (Cancel on the chip), not failed. */
+  let stoppedByPerson = 0;
   const uses: ClipUse[] = [];
   for (const [track, clip] of audio) {
     const span = playedSpan(clip, fps, startFrame, endFrame);
@@ -2014,9 +2197,18 @@ export async function getTranscriptTool(
       queued.push(job);
       continue;
     }
-    const run = runWhisper(ctx, job.src, DEFAULT_MODEL, undefined, job.window).then(
+    const run = runWhisper(
+      { ...ctx, speechPurpose: "transcript" },
+      job.src,
+      DEFAULT_MODEL,
+      undefined,
+      job.window,
+    ).then(
       (t) => ({ words: t.words }),
-      (e: unknown) => ({ error: transcriptionFailureText(e) }),
+      (e: unknown) => ({
+        error: transcriptionFailureText(e),
+        reason: classifyTranscriptFailure(e).reason,
+      }),
     );
     const got = await trackSpeechWait(
       "get_transcript",
@@ -2039,6 +2231,7 @@ export async function getTranscriptTool(
     const job = jobOf.get(use)!;
     if (job.error !== undefined) {
       failures.push({ clip_id: String(clip.id), error: job.error });
+      if (job.reason === "cancelled") stoppedByPerson++;
       continue;
     }
     if (!job.words) {
@@ -2062,6 +2255,9 @@ export async function getTranscriptTool(
     .join(" ");
   // Every audio source failed -> an empty transcript would be a lie, not a result.
   if (failures.length && !clipsOut.length && !pending.length) {
+    // The person stopped it in the app: nothing failed, and the assistant is told not to start it again.
+    if (stoppedByPerson === failures.length)
+      return { ok: false, reason: "cancelled", error: failures[0].error, failed: failures };
     return {
       ok: false,
       error:

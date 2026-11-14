@@ -188,6 +188,8 @@ export async function addCaptionsTool(args: Args, ctx: ClientToolContext | null)
   const candidates = wantTrack ? [wantTrack] : [...byTrack.keys()];
   const cuesByTrack = new Map<string, Cue[]>();
   const failures: Array<{ clip_id: string; error: string }> = [];
+  /** How many of those were stopped by the person (Cancel on the chip), not failed. */
+  let stoppedByPerson = 0;
   // Only what a clip plays is transcribed, plus a second either side (S2-10): the words of a clip come
   // from the window of its file that holds that stretch, the same rule get_transcript uses, so no
   // caption request can start a whole file.
@@ -227,6 +229,7 @@ export async function addCaptionsTool(args: Args, ctx: ClientToolContext | null)
       if (got.kind === "failed") {
         // One unreadable source must not sink the rest, but it must not read as silence either.
         failures.push({ clip_id: String(clip.id), error: got.error });
+        if (got.reason === "cancelled") stoppedByPerson++;
         continue;
       }
       const words = got.transcript.words;
@@ -275,6 +278,15 @@ export async function addCaptionsTool(args: Args, ctx: ClientToolContext | null)
 
   if (!cuesByTrack.size) {
     if (failures.length) {
+      // The person stopped the transcription in the app: nothing failed, and the assistant is told not to
+      // start it again by itself (its text is the advice).
+      if (stoppedByPerson === failures.length)
+        return {
+          ok: false,
+          reason: "cancelled",
+          error: `Captions were NOT added. ${failures[0].error}`,
+          failed: failures,
+        };
       return {
         ok: false,
         error: `transcription failed for all ${failures.length} audio clip(s) â€” a tool failure, NOT an absence of speech: ${failures[0].error}`,

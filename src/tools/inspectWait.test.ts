@@ -21,6 +21,7 @@ import { __resetExportFlags, __setExportFlag } from "../api/exportFlags";
 import { buildTranscript } from "./inspect";
 import { clearModelDownload } from "../store/modelDownload";
 import { resetLiveWait, useLiveWait } from "../store/liveWait";
+import { cancelSpeechJob, useSpeechJobs } from "../store/speechJobs";
 import { cpuOnlyNow, CPU_ONLY_HOLD_MS } from "./speechBackend";
 import { TRANSCRIPT_FAILURE_REASONS, type TranscriptFailureReason } from "./speechFailure";
 import { readPace } from "./speechPace";
@@ -68,6 +69,8 @@ interface RigOptions {
   gpuCrash?: number;
   /** The engine crashes with the GPU off too (the GPU was not the cause). */
   cpuCrashes?: boolean;
+  /** Called when the engine starts, so a test can press Cancel on it, as the person does. */
+  onEngine?: () => void;
   signal?: AbortSignal;
 }
 
@@ -142,6 +145,7 @@ function rig(opts: RigOptions = {}) {
         return { code: 0, stdout: "", stderr: "" };
       }
       engineStarts++;
+      opts.onEngine?.();
       const cpuOnly = args.includes("-ng");
       if (opts.gpuCrash !== undefined && (!cpuOnly || opts.cpuCrashes)) {
         if (opts.engineMs) await sleep(opts.engineMs, s); // a crash comes when it comes, Stop or not
@@ -645,6 +649,15 @@ describe("a look whose transcription fails", () => {
       }),
     audio_extraction_failed: () => rig({ ffmpegExit: 1 }),
     engine_failed: () => rig({ engineExit: 3, engineStderr: "ggml_vulkan: device lost" }),
+    // The person pressed Cancel on the run, the way the top-bar chip does, once the engine is under way.
+    cancelled: () =>
+      rig({
+        engineMs: 5_000,
+        onEngine: () =>
+          queueMicrotask(() => {
+            for (const job of useSpeechJobs.getState().jobs) cancelSpeechJob(job.id);
+          }),
+      }),
   };
 
   it("has a scenario for every reason there is, so a new reason cannot go untested", () => {

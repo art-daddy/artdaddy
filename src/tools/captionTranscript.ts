@@ -8,6 +8,7 @@
 import type { ClientToolContext } from "./context";
 import { exportFlag } from "../api/exportFlags";
 import { ensureTranscript, transcribeSpan, type ParsedTranscript } from "./transcribe";
+import type { TranscriptFailureReason } from "./speechFailure";
 import { waitForRun, type InProgressTranscript } from "./transcriptWait";
 import { formatDuration } from "./transcriptWords";
 
@@ -19,7 +20,7 @@ export const CACHE_READ_FLOOR_MS = 750;
 export type CaptionWords =
   | { kind: "ready"; transcript: ParsedTranscript }
   | { kind: "pending"; status: InProgressTranscript }
-  | { kind: "failed"; error: string }
+  | { kind: "failed"; error: string; reason: TranscriptFailureReason }
   | { kind: "cancelled" };
 
 /** The words of the stretch `window` of `ref` (source seconds: what a clip plays and a second either
@@ -41,7 +42,7 @@ export async function captionWords(
     tool: "add_captions",
     audioSeconds: bySpan ? seconds : null,
     run: bySpan
-      ? transcribeSpan(ctx, ref, window, language)
+      ? transcribeSpan({ ...ctx, speechPurpose: "captions" }, ref, window, language)
       : ensureTranscript(ctx, ref, undefined, language),
     boundMs: Math.max(CACHE_READ_FLOOR_MS, deadline - Date.now()),
     signal: ctx.signal,
@@ -52,7 +53,7 @@ export async function captionWords(
     case "pending":
       return { kind: "pending", status: outcome.status };
     case "failed":
-      return { kind: "failed", error: outcome.status.error };
+      return { kind: "failed", error: outcome.status.error, reason: outcome.status.reason };
     case "cancelled":
       return { kind: "cancelled" };
   }

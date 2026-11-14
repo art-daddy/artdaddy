@@ -29,6 +29,17 @@
 import type { CommandRunner } from "../tools/command";
 import type { ClientToolContext } from "../tools/context";
 import type { Loudness } from "../tools/loudness";
+import {
+  admissionSignature,
+  admitWholeFile,
+  isOnDemandThisSession,
+  isSpeechDeferred,
+  markCancelledByPerson,
+  markOnDemandThisSession,
+  noteAudioLength,
+  wasCancelledByPerson,
+} from "../tools/speechAdmission";
+import { isSpeechCancelled } from "../tools/speechFailure";
 import { readPace } from "../tools/speechPace";
 import type { ProjectStoreAccess } from "../tools/store";
 import type { BatchOutcome, TranscribeWindow } from "../tools/transcribe";
@@ -128,6 +139,11 @@ const MAX_ENGINE_ATTEMPTS = 3;
 export class IndexCoordinator {
   private readonly proxyQ: string[] = [];
   private readonly txQ: TxJob[] = [];
+  /** Whole files this PC would take longer than the cap to transcribe, left for the parts a request uses
+   *  (S2-02): out of the queue, so they never block what is behind them and never spin it. They come back
+   *  when what the planner reads has changed ({@link replanDeferred}), and not before. */
+  private readonly deferredQ: TxJob[] = [];
+  private deferredSignature = "";
   /** The transcript jobs running now, by {@link txKey}: one, or the several that share a run of the engine. */
   private readonly txCurrent = new Set<string>();
   private readonly loudQ: LoudJob[] = [];
@@ -248,6 +264,7 @@ export class IndexCoordinator {
     this.disposed = true;
     this.proxyQ.length = 0;
     this.txQ.length = 0;
+    this.deferredQ.length = 0;
     this.loudQ.length = 0;
     this.settleLooks({ error: "the project was closed before its loudness was measured" });
     this.unregister();
@@ -269,6 +286,9 @@ export class IndexCoordinator {
     if (this.txCurrent.has(key)) return true;
     const at = this.txQ.findIndex((j) => txKey(j) === key);
     if (at >= 0) this.txQ.splice(at, 1);
+    // A request for it, whole, is the person's or the assistant's own ask: it is no longer left for later.
+    const held = this.deferredQ.findIndex((j) => txKey(j) === key);
+    if (held >= 0) this.deferredQ.splice(held, 1);
     this.seen.add(key);
     this.txQ.unshift(job);
     if (!this.txRunning) void this.drainTranscripts();
@@ -472,7 +492,11 @@ export class IndexCoordinator {
       // A crashed page's transcription still at work holds the whisper turn, but only once this page
       // has taken it over: before that, no turn here would wait for it (4i).
       await ready.mods.adoptTranscriptions();
-      while (this.txQ.length > 0 && !this.disposed && !this.engineDown) {
+      while (!this.disposed && !this.engineDown) {
+        // What the planner reads may have changed since a file was left for the parts a request uses (a
+        // hold on the chip that lapsed, a pace this PC measured): only then does it get another look.
+        this.replanDeferred();
+        if (this.txQ.length === 0) break;
         // One background whisper in the app at a time, and none starts while an export is queued
         // or running or a look's whisper runs. Closed while it waits: dropped with the queue.
         const release = await backgroundTurn("whisper", this.ac.signal);
@@ -511,6 +535,9 @@ export class IndexCoordinator {
       if (this.disposed || this.engineDown) return [];
       // A clip somebody asked for while the lengths were being read goes first, and alone.
       if (this.txQ[0] !== head) continue;
+      // A whole file that this PC would take longer than the cap for is not started by itself: it leaves the
+      // queue (the next file is the head now) and is neither a failure nor a reason to wait.
+      if (this.heldBack(head, seconds[0])) continue;
       const picks = pickBatch(
         flags.map((f, i) => ({ ...f, seconds: seconds[i] })),
         batchAudioCapSeconds(readPace()),
@@ -526,7 +553,54 @@ export class IndexCoordinator {
     }
   }
 
-  /** A queued clip's length in seconds, or null when it cannot be told (it then runs alone). */
+  /** Should the head of the queue be left for the parts a request uses? A whole file that nobody is
+   *  waiting on (a request's own run, a window, is never held back here) is not started by itself when:
+   *  the person cancelled it, or the live check stopped it, this session; or this PC projects it past the
+   *  cap on the processor (`admitWholeFile`, the same planner and facts the boundary of `runWhisper`
+   *  asks). It leaves the queue: a cancelled or stopped one for good, a planned one into `deferredQ`,
+   *  where it waits for what the planner reads to change. Synchronous and never throws, so choosing a
+   *  run takes no longer than it did. */
+  private heldBack(head: TxJob, seconds: number | null): boolean {
+    if (head.window || head.urgent) return false;
+    const key = txKey(head);
+    const leave = (): void => {
+      const at = this.txQ.indexOf(head);
+      if (at >= 0) this.txQ.splice(at, 1);
+    };
+    if (wasCancelledByPerson(key) || isOnDemandThisSession(key)) {
+      leave();
+      return true;
+    }
+    const admission = admitWholeFile({
+      file: head.source.replace(/\\/g, "/").split("/").pop() || head.source,
+      where: "indexer",
+      audioS: seconds,
+    });
+    if (admission?.plan !== "ondemand") return false;
+    leave();
+    this.deferJob(head);
+    return true;
+  }
+
+  /** Leave `job` for the parts a request uses, until what the planner reads changes. */
+  private deferJob(job: TxJob): void {
+    if (this.disposed) return;
+    if (this.deferredQ.length === 0) this.deferredSignature = admissionSignature();
+    if (!this.deferredQ.includes(job)) this.deferredQ.push(job);
+  }
+
+  /** Give the files left for the cap another look, but only when what the planner reads is not what it
+   *  read when they were left: asking again with the same answers could only defer them again, and a
+   *  queue that did that on every drain would spin. */
+  private replanDeferred(): void {
+    if (this.deferredQ.length === 0 || this.disposed) return;
+    const now = admissionSignature();
+    if (now === this.deferredSignature) return;
+    this.txQ.unshift(...this.deferredQ.splice(0));
+  }
+
+  /** A queued clip's length in seconds, or null when it cannot be told (it then runs alone). What is
+   *  measured is kept for the boundary of `runWhisper`, which plans a whole file by it and never probes. */
   private async lengthOf(
     ctx: ClientToolContext,
     mods: IndexModules,
@@ -535,7 +609,9 @@ export class IndexCoordinator {
     try {
       const abs = (await this.store.resolveRef(job.source)) ?? job.source;
       const seconds = await mods.sourceDurationSeconds(ctx.runner, abs);
-      return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
+      const known = Number.isFinite(seconds) && seconds > 0 ? seconds : null;
+      noteAudioLength(abs, known);
+      return known;
     } catch {
       return null;
     }
@@ -587,6 +663,17 @@ export class IndexCoordinator {
     for (const [i, job] of live.entries()) {
       const outcome = outcomes[i] ?? { ok: false, error: new Error("transcription did not run") };
       if (outcome.ok) continue;
+      // Not a failure of the file or of the engine, and nothing to report: a file left for the parts a
+      // request uses (the cap, at the boundary or by the live check), or one the person stopped.
+      if (isSpeechDeferred(outcome.error)) {
+        if (outcome.error.stopped) markOnDemandThisSession(txKey(job));
+        else this.deferJob(job);
+        continue;
+      }
+      if (isSpeechCancelled(outcome.error)) {
+        markCancelledByPerson(txKey(job));
+        continue;
+      }
       if (mods.isSpeechEngineUnavailable(outcome.error)) engineError ??= { error: outcome.error };
       // Gone between the check and the run: the same fact, found later.
       else if (!(await this.parkedOffline(txKey(job), job.source)))

@@ -332,7 +332,10 @@ async function lookTranscript(
       if (outcome.kind === "cancelled") return { error: STOPPED_ERROR };
       if (outcome.kind === "pending") return { ...outcome.status };
       if (outcome.kind === "failed") {
-        reportTranscriptFailure(path, outcome.status.reason);
+        // The person stopping a run is not a failure: it is answered with its reason and advice, and
+        // nothing about it is reported.
+        if (outcome.status.reason !== "cancelled")
+          reportTranscriptFailure(path, outcome.status.reason);
         return { ...outcome.status };
       }
       t = outcome.value;
@@ -387,6 +390,7 @@ async function lookTranscript(
     return out;
   } catch (e) {
     const failed = failedTranscript(e);
+    if (failed.reason === "cancelled") return { ...failed };
     reportTranscriptFailure(path, failed.reason);
     return { ...failed, error: `transcription failed: ${failed.error}` };
   }

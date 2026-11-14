@@ -23,6 +23,9 @@ export interface ClientToolContext {
   /** Work nobody is waiting on: the project's indexer, which took its turn before it started
    *  (`workGate.ts`). Its whisper does not queue among the looks'. Absent: someone is waiting. */
   background?: boolean;
+  /** What a foreground speech run is for, so the top-bar chip can title it ("captions", "look",
+   *  "transcript"). Absent: a look. The background's own runs are titled by `background`. */
+  speechPurpose?: "captions" | "look" | "transcript";
   exportMode?: ExportMode;
   /** Who is calling: the in-app agent ("app", the default) or an outside agent over MCP. The two
    *  differ in what the app can promise them: the in-app agent is told when background work lands,

@@ -17,6 +17,9 @@ export const TRANSCRIPT_FAILURE_REASONS = [
   "audio_extraction_failed",
   /** The engine ran and did not produce a transcript. */
   "engine_failed",
+  /** The person pressed Cancel on this transcription in the app. Nothing failed, and nothing is
+   *  reported; the assistant is told not to start it again by itself. */
+  "cancelled",
 ] as const;
 
 export type TranscriptFailureReason = (typeof TRANSCRIPT_FAILURE_REASONS)[number];
@@ -48,6 +51,28 @@ export function failureText(e: unknown): string {
   }
 }
 
+/** What the person stopped, and what the assistant does about it: the one sentence both the error and the
+ *  advice carry, so every tool that passes on the error's text passes on the instruction with it. */
+const CANCELLED_TEXT =
+  "The person stopped this transcription in the app. Do not start it again unless they ask for it.";
+
+/** The person pressed Cancel and the run ended for it (S2-05). A typed outcome, not a failure: a caller
+ *  that sees it must not retry, count it against the file or report it. */
+export class SpeechCancelledError extends TranscriptionFailure {
+  constructor() {
+    super("cancelled", CANCELLED_TEXT, { expected: true });
+    this.name = "SpeechCancelledError";
+  }
+}
+
+/** Duck-typed on purpose, as `isSpeechEngineUnavailable` is: the background indexer reaches this through
+ *  a module record, and a module loaded twice must still be recognised. */
+export function isSpeechCancelled(e: unknown): boolean {
+  return (
+    typeof e === "object" && e !== null && (e as { code?: unknown }).code === "speech_cancelled"
+  );
+}
+
 export interface ClassifiedFailure {
   reason: TranscriptFailureReason;
   message: string;
@@ -75,4 +100,5 @@ export const FAILURE_ADVICE: Readonly<Record<TranscriptFailureReason, string>> =
     "The sound of this file could not be read: it may be damaged or have no usable audio. Do not retry the same file; tell the user.",
   engine_failed:
     "The speech engine failed on this file. Calling again once may work; if it fails again, say that transcription is unavailable for it.",
+  cancelled: CANCELLED_TEXT,
 };

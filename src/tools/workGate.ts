@@ -25,11 +25,32 @@ function wake(): void {
   for (const w of now) w();
 }
 
+/** Who wants to hear an export begin or end (a speech run names it as a reason it is slow). */
+const busyListeners = new Set<(busy: boolean) => void>();
+
 /** The export queue's state: true while any export is queued or running. */
 export function setExportsBusy(busy: boolean): void {
   if (exportsBusy === busy) return;
   exportsBusy = busy;
   if (!busy) wake();
+  for (const listener of [...busyListeners]) {
+    try {
+      listener(busy);
+    } catch {
+      /* a listener is an observer: it can never change what the gate does */
+    }
+  }
+}
+
+/** Is an export queued or running right now? Read-only; the gate's behaviour is unchanged. */
+export function exportsBusyNow(): boolean {
+  return exportsBusy;
+}
+
+/** Hear when an export starts or ends. Returns the way to stop listening. */
+export function onExportsBusy(listener: (busy: boolean) => void): () => void {
+  busyListeners.add(listener);
+  return () => busyListeners.delete(listener);
 }
 
 /** Run a look's whisper: at once, or after the look's whisper before it. Null, without running, when
@@ -112,5 +133,6 @@ export function __resetWorkGate(): void {
   lookTail = Promise.resolve();
   running.whisper = 0;
   running.loudness = 0;
+  busyListeners.clear();
   wake();
 }
