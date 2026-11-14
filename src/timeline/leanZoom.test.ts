@@ -6,7 +6,8 @@ import type { Timeline } from "./model";
 import { buildLeanRenderCommand, buildRenderCommand } from "./render";
 import { LEAN_FIXES, LEAN_KEPT_REASONS, LeanTally, mergeLeanRecords } from "./leanRecord";
 import { LEAN_MAX_MASK_BOXES, leanZoomMask, preAlphaIsLeanSafe } from "./leanZoom";
-import type { LeanOptions, LeanProbed } from "./leanOptions";
+import { COMPILED_FLAG_DEFAULTS, EXPORT_FLAG_NAMES } from "../api/exportFlags";
+import { LEAN_FLAG_NAMES, type LeanOptions, type LeanProbed } from "./leanOptions";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -50,6 +51,21 @@ const withProbe = (fmt?: string, zoom = true): LeanOptions => ({
 });
 
 describe("leanRecord", () => {
+  it("the six lean switches are the names lane L2 released, in the agreed order, each one a real flag that is compiled ON (disable-only)", () => {
+    expect(LEAN_FIXES.map((fix) => LEAN_FLAG_NAMES[fix])).toEqual([
+      "lean_zoom",
+      "lean_fades",
+      "lean_dip",
+      "lean_stills",
+      "lean_grade",
+      "lean_decoders",
+    ]);
+    for (const fix of LEAN_FIXES) {
+      expect(EXPORT_FLAG_NAMES).toContain(LEAN_FLAG_NAMES[fix]);
+      expect(COMPILED_FLAG_DEFAULTS[LEAN_FLAG_NAMES[fix]]).toBe(true);
+    }
+  });
+
   it("lists are distinct, in list order, and only closed words", () => {
     const tally = new LeanTally();
     tally.kept("error");

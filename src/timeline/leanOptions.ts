@@ -4,8 +4,8 @@
 import { exportFlag, type ExportFlagName } from "../api/exportFlags";
 import type { LeanFix } from "./leanRecord";
 
-/** The six remote switches, by the name lane L2 adds on both sides (`FLAGS-AND-FACTS.md` Table A, rows 14 to 19, in this order). */
-export const LEAN_FLAG_NAMES: Readonly<Record<LeanFix, string>> = {
+/** The six remote switches, by the name lane L2 added on both sides (`FLAGS-AND-FACTS.md` Table A, rows 14 to 19, in this order); the type makes a name that is not in `EXPORT_FLAG_NAMES` a compile error. */
+export const LEAN_FLAG_NAMES: Readonly<Record<LeanFix, ExportFlagName>> = {
   zoom: "lean_zoom",
   fades: "lean_fades",
   dip: "lean_dip",
@@ -54,10 +54,9 @@ export interface LeanOptions {
   budget?: LeanMaskBudget;
 }
 
-/** The six switches as they stand now. A name this client does not know is never on (exportFlags.ts), so until lane L2 adds the names every fix stays
- *  off: the safe direction. */
+/** The six switches as they stand now: the compiled default is ON (every flag gives a way back) and the server can only switch one off (exportFlags.ts). */
 export function readLeanFlags(): Pick<LeanOptions, LeanFix> {
-  const on = (fix: LeanFix): boolean => exportFlag(LEAN_FLAG_NAMES[fix] as ExportFlagName);
+  const on = (fix: LeanFix): boolean => exportFlag(LEAN_FLAG_NAMES[fix]);
   return {
     zoom: on("zoom"),
     fades: on("fades"),

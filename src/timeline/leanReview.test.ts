@@ -805,7 +805,9 @@ describe("EVIDENCE (questions 5, 6, 8): the async boundary", () => {
   const countOf = (text: string, needle: string): number => text.split(needle).length - 1;
   afterEach(() => __resetExportFlags());
 
-  it("with the lean names unknown to the client (as built today) nothing is asked and the graph is 0.27.0's", async () => {
+  it("with every lean switch off (the server's way back) nothing is asked and the graph is 0.27.0's", async () => {
+    for (const name of ["zoom", "fades", "dip", "stills", "grade", "decoders"])
+      __setExportFlag(`lean_${name}` as Any, false);
     const { runner, asked } = fakeRunner(() => ({ code: 0, stderr: log("yuv420p", "96x130") }));
     const plan = await buildLeanRenderCommand({ runner, signal: undefined }, two(), OUT, {});
     expect(asked).toHaveLength(0);
