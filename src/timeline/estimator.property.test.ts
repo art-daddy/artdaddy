@@ -40,7 +40,7 @@ const clipArb: fc.Arbitrary<CostClip> = fc
     known: fc.boolean(),
     loads: loadsArb,
   })
-  .map((entry) => ({ ...entry, sourceMp: entry.mp, tenBit: false }));
+  .map((entry) => ({ ...entry, sourceMp: entry.mp, tenBit: false, bytesPerPixel: 1.5 }));
 
 const shapeArb: fc.Arbitrary<CostShape> = fc
   .record({
@@ -150,6 +150,7 @@ const heavyClip = (times: number): CostClip => ({
   mp: 2.5,
   sourceMp: 2.5,
   tenBit: false,
+  bytesPerPixel: 1.5,
   known: true,
   loads: { cover_zoom: { frames: 900 * times, windowFrames: 900 * times, mp: 2.5 } },
 });

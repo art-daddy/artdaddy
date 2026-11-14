@@ -33,6 +33,7 @@ const clip = (over: Partial<CostClip> = {}): CostClip => ({
   mp: 2.07,
   sourceMp: 2.07,
   tenBit: false,
+  bytesPerPixel: 1.5,
   known: false,
   loads: {
     cover_zoom: { frames: 900, windowFrames: 900, mp: 2.5 },

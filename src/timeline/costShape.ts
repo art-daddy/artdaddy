@@ -92,6 +92,8 @@ export interface CostClip {
   sourceMp: number | null;
   /** Whether the source has more than 8 bits per sample (null: unknown). */
   tenBit: boolean | null;
+  /** Bytes one pixel of the source's decoded frame takes (null: unknown, or a pixel format this does not know). */
+  bytesPerPixel: number | null;
   /** Whether the source's facts were known when the shape was made. */
   known: boolean;
   loads: FeatureLoads;
@@ -164,6 +166,28 @@ function usableFacts(value: unknown): CostSourceFacts | null {
 function overEightBit(pixFmt: string | null): boolean | null {
   if (pixFmt === null) return null;
   return /(?:10|12|14|16)(?:le|be)$|^p01[026]|^(?:rgb|bgr)a?(?:48|64)/i.test(pixFmt);
+}
+
+/** Bytes one pixel of a decoded frame takes in an ffmpeg pixel format, or null for a name this does not know. */
+function bytesPerPixelOf(pixFmt: string | null): number | null {
+  if (pixFmt === null) return null;
+  const name = pixFmt.toLowerCase();
+  const deep = /(?:10|12|14|16)(?:le|be)$/.test(name) ? 2 : 1;
+  if (/^(?:rgb|bgr)a64/.test(name)) return 8;
+  if (/^(?:rgb|bgr)48/.test(name)) return 6;
+  if (/^(?:rgba|bgra|argb|abgr|0rgb|rgb0|0bgr|bgr0)/.test(name)) return 4;
+  if (/^(?:rgb|bgr)24/.test(name)) return 3;
+  if (/^gbrap/.test(name)) return 4 * deep;
+  if (/^gbrp/.test(name)) return 3 * deep;
+  if (/^yuva420p/.test(name)) return 2.5 * deep;
+  if (/^yuva422p/.test(name)) return 3 * deep;
+  if (/^yuva444p/.test(name)) return 4 * deep;
+  if (/^yuvj?420p|^nv12|^nv21/.test(name)) return 1.5 * deep;
+  if (/^p01[026]/.test(name)) return 3;
+  if (/^yuvj?422p/.test(name)) return 2 * deep;
+  if (/^yuvj?444p/.test(name)) return 3 * deep;
+  if (/^(?:gray|pal8|monob)/.test(name)) return /16/.test(name) ? 2 : 1;
+  return null;
 }
 
 function addLoad(
@@ -481,6 +505,7 @@ function summarize(
       mp: boxMp,
       sourceMp: facts ? (facts.width * facts.height) / 1e6 : null,
       tenBit: facts ? overEightBit(facts.pixFmt) : null,
+      bytesPerPixel: facts ? bytesPerPixelOf(facts.pixFmt) : null,
       known: facts !== null,
       loads,
     });

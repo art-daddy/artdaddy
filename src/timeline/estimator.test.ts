@@ -41,6 +41,7 @@ const clip = (over: Partial<CostClip> = {}): CostClip => ({
   mp: MP,
   sourceMp: MP,
   tenBit: false,
+  bytesPerPixel: 1.5,
   known: true,
   loads: {},
   ...over,

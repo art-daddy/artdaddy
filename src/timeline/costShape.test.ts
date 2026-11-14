@@ -336,6 +336,28 @@ describe("summarizeCostShape: what the shape counts", () => {
     });
     expect(known.unknownSources).toBe(0);
     expect(known.clips.map((clip) => clip.tenBit)).toEqual([false, false, false, true]);
+    expect(known.clips.map((clip) => clip.bytesPerPixel)).toEqual([1.5, 1.5, 1.5, 3]);
+    expect(shapeOf(raw).clips.map((clip) => clip.bytesPerPixel)).toEqual([null, null, null, null]);
+  });
+
+  it("reads the bytes a decoded pixel takes from the pixel format's name, and nothing from a name it does not know", () => {
+    const bytes = (pixFmt: string) =>
+      shapeOf(timeline([track([picture("p", "p.png", 0, 30)])]), {
+        facts: knowing({ "p.png": facts(100, 100, { pixFmt }) }),
+      }).clips[0].bytesPerPixel;
+    expect(bytes("yuv420p")).toBe(1.5);
+    expect(bytes("yuvj420p")).toBe(1.5);
+    expect(bytes("yuv422p")).toBe(2);
+    expect(bytes("yuv444p")).toBe(3);
+    expect(bytes("yuv420p10le")).toBe(3);
+    expect(bytes("rgb24")).toBe(3);
+    expect(bytes("rgba")).toBe(4);
+    expect(bytes("rgb48be")).toBe(6);
+    expect(bytes("rgba64le")).toBe(8);
+    expect(bytes("gbrp")).toBe(3);
+    expect(bytes("gray")).toBe(1);
+    expect(bytes("pal8")).toBe(1);
+    expect(bytes("no_such_format")).toBeNull();
   });
 
   it("reads a range of frames: clips outside it are gone, the rest are cut to it", () => {
