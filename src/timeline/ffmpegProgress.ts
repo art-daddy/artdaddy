@@ -8,6 +8,7 @@
 // One trap worth naming: ffmpeg's `out_time_ms` is MICROseconds, not milliseconds. It has been
 // wrong for years and is kept for compatibility. `out_time_us` is the honest spelling of the same
 // number, and `out_time` is the HH:MM:SS.ffffff form; we read the microsecond fields and convert.
+import { stripActivityMarks } from "./exportActivity";
 
 export interface RenderProgress {
   /** Output frames written so far. */
@@ -79,9 +80,10 @@ export function hhmmssToMs(t: string | undefined): number {
 /** What the app process prints on the job's output while it checks the job's sources (`artdaddy_verify=N`, see
  *  src-tauri/src/jobs.rs `VERIFY_BEAT`): a line of its own, which arrives between two reads of ffmpeg's stream and
  *  so can land in the middle of one of ffmpeg's lines. It carries nothing a progress reader wants, and glued into a
- *  line it would turn `out_time_us` into noise: it is taken out of a chunk before the chunk is joined to anything. */
+ *  line it would turn `out_time_us` into noise: it is taken out of a chunk before the chunk is joined to anything.
+ *  The activity mark (`artdaddy_cpu=`, exportActivity.ts) is printed the same way and taken out the same way. */
 const PROCESS_BEAT = /artdaddy_verify=\d+\r?\n/g;
-const withoutBeats = (chunk: string): string => chunk.replace(PROCESS_BEAT, "");
+const withoutBeats = (chunk: string): string => stripActivityMarks(chunk.replace(PROCESS_BEAT, ""));
 
 /** A stateful feeder over the pure parser, for a stream of chunks. */
 export function createProgressReader(

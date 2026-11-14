@@ -4,6 +4,7 @@
 import fc from "fast-check";
 import { describe, expect, it, vi } from "vitest";
 
+import { formatActivityMark } from "./exportActivity";
 import {
   createProgressReader,
   createSequenceProgressReader,
@@ -12,6 +13,7 @@ import {
   hhmmssToMs,
   parseProgressBlocks,
   progressFraction,
+  type RenderProgress,
 } from "./ffmpegProgress";
 
 /** A real block, as ffmpeg writes it. */
@@ -253,6 +255,120 @@ describe("createSequenceProgressReader", () => {
     feed(block({ out_time_us: 1_000_000 }));
     expect(seen[0].step).toBeUndefined();
     expect(seen[0].steps).toBeUndefined();
+  });
+});
+
+// The app process also prints the export's processor and disk use on the job's output, one `artdaddy_cpu=` line every few
+// seconds (exportActivity.ts). Like the verification beat it is a chunk of its own on the wire and lands between two
+// reads of ffmpeg's stream, so a reader must give the very same records with it anywhere as without it. The streams are
+// built from the real text shape above; the expected records are what the reader says WITHOUT any mark.
+describe("an activity mark in the job's output", () => {
+  const mark = formatActivityMark({ cpuMs: 123_456, readBytes: 7_890_123 });
+  const lf = block({ frame: 30 }) + block({ frame: 60 }) + block({ frame: 90 }, true);
+  const crlf = lf.replace(/\n/g, "\r\n"); // what ffmpeg writes on Windows
+  const steps = [0, 1, 2]
+    .map((step) => `artdaddy_step=${step}\r\n${block({ frame: 30 * (step + 1) }, true)}`)
+    .join("");
+  const stepsLf = steps.replace(/\r\n/g, "\n"); // as the app process prints the step line itself
+
+  const readPlain = (chunks: readonly string[]): RenderProgress[] => {
+    const records: RenderProgress[] = [];
+    const feed = createProgressReader((record) => records.push(record));
+    for (const chunk of chunks) feed(chunk);
+    return records;
+  };
+  const readSequence = (chunks: readonly string[]): RenderProgress[] => {
+    const records: RenderProgress[] = [];
+    const feed = createSequenceProgressReader([4, 4, 4], (record) => records.push(record));
+    for (const chunk of chunks) feed(chunk);
+    return records;
+  };
+  const cases = [
+    { name: "progress blocks", text: lf, read: readPlain },
+    { name: "progress blocks, CRLF", text: crlf, read: readPlain },
+    { name: "a three-step sequence", text: steps, read: readSequence },
+    { name: "a three-step sequence, LF", text: stepsLf, read: readSequence },
+    { name: "a three-step sequence read as plain progress", text: steps, read: readPlain },
+  ];
+
+  it("gives the same records with the mark between two chunks or glued into one, at EVERY byte offset", () => {
+    for (const { name, text, read } of cases) {
+      const reference = read([text]);
+      expect(reference, `${name}: the reference reads the stream`).toHaveLength(3);
+      for (let at = 0; at <= text.length; at++) {
+        expect(
+          read([text.slice(0, at), mark, text.slice(at)]),
+          `${name}, a mark after byte ${at}`,
+        ).toEqual(reference);
+        expect(
+          read([text.slice(0, at) + mark + text.slice(at)]),
+          `${name}, a mark in byte ${at}`,
+        ).toEqual(reference);
+      }
+    }
+  });
+
+  it("gives the same records with marks at any places in a stream cut into chunks anywhere (property)", () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom(...cases),
+        fc.array(fc.integer({ min: 1, max: 60 }), { minLength: 1, maxLength: 30 }),
+        fc.array(fc.record({ at: fc.nat(1_000), alone: fc.boolean() }), {
+          minLength: 1,
+          maxLength: 6,
+        }),
+        ({ text, read }, sizes, marks) => {
+          // Where the stream is cut, and where each mark goes in it: at a position of the original text (so never inside
+          // another mark), glued into the chunk being built or as a chunk of its own.
+          const cuts = new Set<number>();
+          for (let at = 0, i = 0; at < text.length; i++) {
+            at += sizes[i % sizes.length];
+            cuts.add(at);
+          }
+          const chunks: string[] = [];
+          let current = "";
+          for (let position = 0; position <= text.length; position++) {
+            for (const { at, alone } of marks) {
+              if (at % (text.length + 1) !== position) continue;
+              if (alone) {
+                if (current) chunks.push(current);
+                current = "";
+                chunks.push(mark);
+              } else current += mark;
+            }
+            if (position === text.length) break;
+            current += text[position];
+            if (cuts.has(position + 1)) {
+              chunks.push(current);
+              current = "";
+            }
+          }
+          if (current) chunks.push(current);
+          expect(read(chunks)).toEqual(read([text]));
+        },
+      ),
+      { numRuns: 400 },
+    );
+  });
+
+  it("gives the same records for a tail that was cut anywhere through a mark, as an adopted export reads one", () => {
+    for (const { name, text, read } of cases) {
+      const reference = read([text]);
+      for (let cut = 0; cut <= mark.length; cut++)
+        expect(read([(mark + text).slice(cut)]), `${name}, a tail cut ${cut} bytes in`).toEqual(
+          reference,
+        );
+    }
+  });
+
+  it("says nothing for a chunk that is only a mark, and keeps what it had", () => {
+    const records: RenderProgress[] = [];
+    const feed = createProgressReader((record) => records.push(record));
+    feed(lf.slice(0, 100));
+    feed(mark);
+    expect(records).toEqual([]);
+    feed(lf.slice(100));
+    expect(records.map((record) => record.frame)).toEqual([30, 60, 90]);
   });
 });
 
