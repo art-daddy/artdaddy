@@ -37,6 +37,9 @@ export interface SpeechRigOptions {
   /** What the engine does for a launch that the runner path starts (no job supervisor): by default it
    *  writes the output of every file it is given and exits 0. */
   engine?: (launch: number, args: string[], signal?: AbortSignal) => Promise<EngineAnswer>;
+  /** How many seconds of audio each extract holds (its size is 44 bytes of header and 32,000 a second).
+   *  Absent: the extracts are empty files, whose length cannot be told. */
+  audioSeconds?: number;
 }
 
 let seq = 0;
@@ -48,6 +51,7 @@ export function speechRig(options: SpeechRigOptions = {}) {
   const texts = new Map<string, string>();
   const kept = new Map<string, unknown>();
   const wavSource = new Map<string, string>();
+  const sizes = new Map<string, number>();
   /** Every program the page's own runner was asked to run, in order. */
   const programs: string[] = [];
   /** The arguments of every whisper-cli launch the runner path made. */
@@ -72,9 +76,11 @@ export function speechRig(options: SpeechRigOptions = {}) {
       files.add(to);
       const src = wavSource.get(from);
       if (src) wavSource.set(to, src);
+      const size = sizes.get(from);
+      if (size !== undefined) sizes.set(to, size);
     },
     remove: async (p: string) => void files.delete(p),
-    byteSize: async (p: string) => (p === MODEL ? WHISPER_MODELS.small.bytes : 0),
+    byteSize: async (p: string) => sizes.get(p) ?? (p === MODEL ? WHISPER_MODELS.small.bytes : 0),
     probeMedia: async () => ({
       id12: WHISPER_MODELS.small.sha256.slice(0, 12),
       sha256: WHISPER_MODELS.small.sha256,
@@ -107,6 +113,7 @@ export function speechRig(options: SpeechRigOptions = {}) {
         const out = args[args.length - 1];
         files.add(out);
         wavSource.set(out, args[args.indexOf("-i") + 1]);
+        if (options.audioSeconds !== undefined) sizes.set(out, 44 + 32_000 * options.audioSeconds);
         return { code: 0, stdout: "", stderr: "" };
       }
       if (program === "whisper-cli") {

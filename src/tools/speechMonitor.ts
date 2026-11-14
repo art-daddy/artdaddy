@@ -154,7 +154,9 @@ export function createSpeechMonitor(options: MonitorOptions): SpeechMonitor {
           const lead = (base.at - options.launchedAt) / 1000 - base.audioS * rate;
           if (Number.isFinite(lead) && lead > 0) startupS = lead;
         }
-        const backend: SpeechBackend | null = gpuFailed || noGpu ? "cpu" : gpuUsing ? "gpu" : null;
+        // Exactly as whisperFacts.ts reads the same lines, so the live reading and the final one cannot differ.
+        const backend: SpeechBackend | null =
+          gpuUsing && !gpuFailed ? "gpu" : gpuUsing || noGpu ? "cpu" : null;
         return {
           doneS: position,
           firstWordsAt: first?.at ?? null,
@@ -162,7 +164,7 @@ export function createSpeechMonitor(options: MonitorOptions): SpeechMonitor {
           etaS,
           startupS,
           backend,
-          noGpu: noGpu || gpuFailed,
+          noGpu: backend === "cpu",
         };
       } catch {
         return {
