@@ -4,12 +4,14 @@
 // Everything it touches is injected (the clock and timers, the storage, the signals of the world, the probe's commands and files).
 import type { Flags3c, PcClass } from "../timeline/exportTypes3c";
 import {
+  acceptCutoffs,
   checkedRecord,
   classOfRecord,
   readPcCheck,
   recordIsCurrent,
   unfinishedRecord,
   writePcCheck,
+  type Cutoffs,
   type PcCheckNow,
   type PcCheckRecord,
   type StorageLike,
@@ -53,6 +55,9 @@ export interface PcCheckDeps {
   cores: number;
   /** The server's switches, read when a decision is made; `pc_check` off removes the class altogether. */
   flags?: () => Pick<Flags3c, "pc_check">;
+  /** The class cut-offs in force now (lane L2's pair, held in memory only): read at every class decision, never kept here, so a pair the server moves applies
+   *  at once. Absent, or a pair outside the band: the compiled cut-offs. */
+  cutoffs?: () => unknown;
   /** True while a battery reports discharging; null or absent when the page cannot tell. */
   batteryDischarging?: () => boolean | null;
   setTimer(fn: () => void, ms: number): unknown;
@@ -188,6 +193,13 @@ export function createPcCheckService(deps: PcCheckDeps): PcCheckService {
       return deps.batteryDischarging?.() === true;
     } catch {
       return false;
+    }
+  };
+  const cutoffsNow = (): Cutoffs | undefined => {
+    try {
+      return acceptCutoffs(deps.cutoffs?.()) ?? undefined;
+    } catch {
+      return undefined;
     }
   };
   const arm = (ms: number, fn: () => void): Timer | null => {
@@ -624,7 +636,7 @@ export function createPcCheckService(deps: PcCheckDeps): PcCheckService {
       try {
         if (!enabled()) return "unknown";
         const def = classProbe();
-        return def ? classOfRecord(recordOf(def), deps.storage) : "unknown";
+        return def ? classOfRecord(recordOf(def), cutoffsNow()) : "unknown";
       } catch {
         return "unknown";
       }

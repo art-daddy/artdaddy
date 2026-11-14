@@ -5,17 +5,14 @@ import {
   PC_CHECK_KEY,
   PC_CHECK_TTL_MS,
   PC_CLASS_COMPILED,
-  PC_CLASS_KEY,
   R_HAT_FIT,
   acceptCutoffs,
   checkedRecord,
   classOf,
   classOfRecord,
-  readCutoffs,
   readPcCheck,
   rHatOf,
   unfinishedRecord,
-  writeCutoffs,
   writePcCheck,
   type PcCheckNow,
   type PcCheckRecord,
@@ -215,69 +212,11 @@ describe("acceptCutoffs: lane L2's band, both numbers or neither", () => {
   });
 });
 
-describe("the cut-offs store (artdaddy.pcClass.v1)", () => {
-  it("is the compiled pair until the server tells another, and keeps the accepted one", () => {
-    const { store, map } = memoryStore();
-    expect(readCutoffs(store)).toEqual(PC_CLASS_COMPILED);
-    writeCutoffs(store, { ok_over: 0.75, weak_over: 3 });
-    expect(readCutoffs(store)).toEqual({ okOver: 0.75, weakOver: 3 });
-    expect([...map.keys()]).toEqual([PC_CLASS_KEY]);
-  });
-
-  it("keeps the last good pair, byte for byte, when told a bad one", () => {
-    const { store, calls, bytes } = memoryStore();
-    writeCutoffs(store, { ok_over: 0.75, weak_over: 3 });
-    const before = bytes();
-    const writes = calls.set;
-    for (const bad of [
-      { ok_over: 0.1, weak_over: 3 },
-      { ok_over: 1 },
-      { ok_over: "1", weak_over: "4" },
-      null,
-      undefined,
-      "x",
-      { ok_over: Number.NaN, weak_over: 4 },
-    ])
-      writeCutoffs(store, bad);
-    expect(bytes()).toBe(before);
-    expect(calls.set).toBe(writes);
-    expect(readCutoffs(store)).toEqual({ okOver: 0.75, weakOver: 3 });
-  });
-
-  it("reads a damaged stored value as the compiled pair", () => {
-    const damaged = [
-      "not json",
-      "null",
-      "[]",
-      "{}",
-      '{"okOver":0.75}',
-      '{"okOver":9,"weakOver":99}',
-      '{"okOver":"0.75","weakOver":"3"}',
-      `{"okOver":0.75,"weakOver":3,"pad":"${"x".repeat(2000)}"}`,
-    ];
-    expect(
-      readCutoffs(memoryStore({ [PC_CLASS_KEY]: '{"okOver":0.75,"weakOver":3}' }).store),
-    ).toEqual({
-      okOver: 0.75,
-      weakOver: 3,
-    });
-    for (const raw of damaged) {
-      const { store } = memoryStore({ [PC_CLASS_KEY]: raw });
-      expect(readCutoffs(store), raw.slice(0, 40)).toEqual(PC_CLASS_COMPILED);
-    }
-  });
-
-  it("works with no storage, and with storage that throws", () => {
-    expect(readCutoffs(null)).toEqual(PC_CLASS_COMPILED);
-    expect(() => writeCutoffs(null, { ok_over: 1, weak_over: 4 })).not.toThrow();
-    expect(readCutoffs(brokenStore("both"))).toEqual(PC_CLASS_COMPILED);
-    expect(() => writeCutoffs(brokenStore("both"), { ok_over: 1, weak_over: 4 })).not.toThrow();
-  });
-
-  it("returns a copy of the compiled pair, so a caller cannot change what the next one gets", () => {
-    const first = readCutoffs(null);
-    first.okOver = 99;
-    expect(readCutoffs(null)).toEqual(PC_CLASS_COMPILED);
+describe("the cut-offs have no copy of their own here", () => {
+  it("exports no reader or writer of a stored pair and no storage key for one: they are lane L2's, held in memory, and handed in", async () => {
+    const module = await import("./pcClass");
+    for (const name of ["readCutoffs", "writeCutoffs", "PC_CLASS_KEY"])
+      expect(module, name).not.toHaveProperty(name);
   });
 });
 
@@ -532,23 +471,19 @@ describe("checkedRecord and classOfRecord", () => {
   });
 
   it("is unknown without a record, unfinished for a check that did not finish, and the class otherwise", () => {
-    const { store } = memoryStore();
-    expect(classOfRecord(null, store)).toBe("unknown");
-    expect(classOfRecord(unfinishedRecord(NOW), store)).toBe("unfinished");
-    expect(classOfRecord(done({ rHat: 0.6, cls: "fast" }), store)).toBe("fast");
-    expect(classOfRecord(done({ rHat: 2.5, cls: "ok" }), store)).toBe("ok");
-    expect(classOfRecord(done({ rHat: 7, cls: "weak" }), store)).toBe("weak");
+    expect(classOfRecord(null)).toBe("unknown");
+    expect(classOfRecord(unfinishedRecord(NOW))).toBe("unfinished");
+    expect(classOfRecord(done({ rHat: 0.6, cls: "fast" }))).toBe("fast");
+    expect(classOfRecord(done({ rHat: 2.5, cls: "ok" }))).toBe("ok");
+    expect(classOfRecord(done({ rHat: 7, cls: "weak" }))).toBe("weak");
   });
 
-  it("applies a pair the server moves to a PC that was measured earlier, without measuring again", () => {
-    const { store } = memoryStore();
+  it("applies the pair it is handed to a PC that was measured earlier, without measuring again; a pair outside the band is the compiled one", () => {
     const measured = done({ rHat: 2.5, cls: "ok" });
-    expect(classOfRecord(measured, store)).toBe("ok");
-    writeCutoffs(store, { ok_over: 0.5, weak_over: 2 });
-    expect(classOfRecord(measured, store)).toBe("weak");
-    writeCutoffs(store, { ok_over: 0.1, weak_over: 99 });
-    expect(classOfRecord(measured, store)).toBe("weak");
-    writeCutoffs(store, { ok_over: 1, weak_over: 4 });
-    expect(classOfRecord(measured, store)).toBe("ok");
+    expect(classOfRecord(measured)).toBe("ok");
+    expect(classOfRecord(measured, null)).toBe("ok");
+    expect(classOfRecord(measured, { okOver: 0.5, weakOver: 2 })).toBe("weak");
+    expect(classOfRecord(measured, { okOver: 0.1, weakOver: 99 })).toBe("ok");
+    expect(classOfRecord(measured, { okOver: 1, weakOver: 4 })).toBe("ok");
   });
 });

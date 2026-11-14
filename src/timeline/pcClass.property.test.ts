@@ -6,15 +6,11 @@ import { describe, expect, it } from "vitest";
 import {
   PC_CHECK_KEY,
   PC_CHECK_TTL_MS,
-  PC_CLASS_COMPILED,
-  PC_CLASS_KEY,
   acceptCutoffs,
   checkedRecord,
   classOf,
-  readCutoffs,
   readPcCheck,
   rHatOf,
-  writeCutoffs,
   writePcCheck,
   type PcCheckNow,
   type PcCheckRecord,
@@ -291,38 +287,6 @@ describe("the check's store (property)", () => {
         },
       ),
       { numRuns: 500 },
-    );
-  });
-});
-
-describe("the cut-offs store (property)", () => {
-  it("reads either the compiled pair or a pair inside the band, whatever is stored", () => {
-    fc.assert(
-      fc.property(fc.oneof(fc.string(), fc.json()), (raw) => {
-        const got = readCutoffs(store({ [PC_CLASS_KEY]: raw }).handle);
-        const compiled =
-          got.okOver === PC_CLASS_COMPILED.okOver && got.weakOver === PC_CLASS_COMPILED.weakOver;
-        expect(compiled || inBand(got.okOver, got.weakOver)).toBe(true);
-      }),
-      { numRuns: 500 },
-    );
-  });
-
-  it("keeps the pair it accepts and leaves the stored value byte for byte alone when it refuses", () => {
-    fc.assert(
-      fc.property(fc.anything(), bandNumber, bandNumber, spelling, (junk, ok, weak, how) => {
-        const { handle, bytes } = store();
-        writeCutoffs(handle, { ok_over: 0.75, weak_over: 3 });
-        const before = bytes();
-        for (const told of [junk, spelled(how, ok, weak)]) {
-          const accepted = acceptCutoffs(told);
-          writeCutoffs(handle, told);
-          if (accepted) expect(readCutoffs(handle)).toEqual(accepted);
-          else expect(bytes()).toBe(before);
-          writeCutoffs(handle, { ok_over: 0.75, weak_over: 3 });
-        }
-      }),
-      { numRuns: 300 },
     );
   });
 });

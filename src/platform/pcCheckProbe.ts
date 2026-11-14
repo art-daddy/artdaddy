@@ -5,7 +5,13 @@
 // Every number the protocol rests on is in `SPEED_PROBE` and is a PLACEHOLDER until the rig has fitted it (design 2.1, I-1), as are
 // the commands' details: they have only been checked against canned text, never against the pinned ffmpeg.
 import { createProgressReader, type RenderProgress } from "../timeline/ffmpegProgress";
-import { classOf, readCutoffs, rHatOf, type PcCheckRecord } from "../timeline/pcClass";
+import {
+  acceptCutoffs,
+  classOf,
+  rHatOf,
+  type Cutoffs,
+  type PcCheckRecord,
+} from "../timeline/pcClass";
 import type { PcCheckDeps, ProbeDefinition } from "./pcCheck";
 
 export const EXPORT_SPEED_PROBE_ID = "export-speed";
@@ -232,10 +238,20 @@ export function speedFromProgress(text: string): { fps: number | null; frames: n
 
 export type SpeedProbeDeps = Pick<
   PcCheckDeps,
-  "now" | "storage" | "build" | "cores" | "probe" | "files"
+  "now" | "storage" | "build" | "cores" | "probe" | "files" | "cutoffs"
 >;
 
 const STOPPED = Symbol("stopped");
+
+/** The cut-offs in force now, if the service was given a way to ask: the class a record carries is the one it had when it was measured, and the service
+ *  derives it again at every read. */
+function cutoffsOf(deps: SpeedProbeDeps): Cutoffs | undefined {
+  try {
+    return acceptCutoffs(deps.cutoffs?.()) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 function discard(files: SpeedProbeDeps["files"], path: string): void {
   try {
@@ -353,7 +369,7 @@ export async function measureSpeed(
       bFps,
       cFps: c?.fps ?? null,
       rHat,
-      cls: classOf(rHat, readCutoffs(deps.storage)),
+      cls: classOf(rHat, cutoffsOf(deps)),
     };
   } catch {
     return null;

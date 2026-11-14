@@ -530,6 +530,7 @@ function rig(script: Script = {}, over: { now?: () => number } = {}) {
     } as StorageLike,
     build: "artdaddy@1.0.0",
     cores: 8,
+    cutoffs: undefined as (() => unknown) | undefined,
     probe: async (
       args: readonly string[],
       options: { timeoutMs: number; kind: string; signal?: AbortSignal },
@@ -626,12 +627,15 @@ describe("measureSpeed", () => {
     expect(got!.atMs).toBe(pc.now());
   });
 
-  it("gives the class the store's cut-offs say: a pair the server moved applies to what is measured now", async () => {
+  it("gives the class the cut-offs in force say: a pair the server moved applies to what is measured now", async () => {
     const slow = rig({ speed: (kind) => (kind === "b" ? 12 : 40) });
     expect((await measureSpeed(slow.deps, new AbortController().signal))!.cls).toBe("ok");
     const moved = rig({ speed: (kind) => (kind === "b" ? 12 : 40) });
-    moved.deps.storage.setItem("artdaddy.pcClass.v1", JSON.stringify({ okOver: 0.5, weakOver: 2 }));
+    moved.deps.cutoffs = () => ({ okOver: 0.5, weakOver: 2 });
     expect((await measureSpeed(moved.deps, new AbortController().signal))!.cls).toBe("weak");
+    const outside = rig({ speed: (kind) => (kind === "b" ? 12 : 40) });
+    outside.deps.cutoffs = () => ({ okOver: 0.1, weakOver: 99 });
+    expect((await measureSpeed(outside.deps, new AbortController().signal))!.cls).toBe("ok");
   });
 
   it("makes the reference clip first when there is none, into a part file that gets the clip's name only when it is whole", async () => {

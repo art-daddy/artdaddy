@@ -4,13 +4,7 @@ import { resolve } from "node:path";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
-import {
-  classOf,
-  readPcCheck,
-  writeCutoffs,
-  writePcCheck,
-  type PcCheckRecord,
-} from "../timeline/pcClass";
+import { classOf, readPcCheck, writePcCheck, type PcCheckRecord } from "../timeline/pcClass";
 import type { StorageLike } from "../timeline/pcClass";
 import {
   IDLE_BEFORE_RUN_MS,
@@ -1086,15 +1080,19 @@ describe("pcClass: at once, from what is stored", () => {
   });
 
   it("says unfinished for a check that did not finish, and applies a cut-off the server moved without measuring again", () => {
-    const w = world();
+    let pair: unknown;
+    const w = world({ cutoffs: () => pair });
     const service = createPcCheckService(w.deps);
     service.registerProbe(probeOf(w, "speed").def);
     writePcCheck(w.deps.storage, "speed", record(12));
     expect(service.pcClass()).toBe("ok");
-    writeCutoffs(w.deps.storage, { ok_over: 0.5, weak_over: 2 });
+    pair = { okOver: 0.5, weakOver: 2 };
     expect(service.pcClass()).toBe("weak");
-    writeCutoffs(w.deps.storage, { ok_over: 0.1, weak_over: 99 });
-    expect(service.pcClass()).toBe("weak");
+    // a pair outside the band is not a pair: the compiled one stands
+    pair = { okOver: 0.1, weakOver: 99 };
+    expect(service.pcClass()).toBe("ok");
+    pair = { okOver: 1, weakOver: 4 };
+    expect(service.pcClass()).toBe("ok");
     writePcCheck(w.deps.storage, "speed", {
       ...record(),
       outcome: "unfinished",
@@ -1105,6 +1103,27 @@ describe("pcClass: at once, from what is stored", () => {
       cls: "unfinished",
     });
     expect(service.pcClass()).toBe("unfinished");
+  });
+
+  it("keeps no copy of the cut-offs: the pair in force comes from its one dependency, and no storage key for it is read or written", () => {
+    const touched: string[] = [];
+    let pair: unknown = { okOver: 0.5, weakOver: 2 };
+    const w = world({ cutoffs: () => pair });
+    const inner = w.deps.storage!;
+    const spy: StorageLike = {
+      getItem: (key) => (touched.push(`get ${key}`), inner.getItem(key)),
+      setItem: (key, value) => (touched.push(`set ${key}`), inner.setItem(key, value)),
+      removeItem: (key) => (touched.push(`remove ${key}`), inner.removeItem(key)),
+    };
+    // a copy left in the storage by an earlier build must not be believed either
+    inner.setItem("artdaddy.pcClass.v1", JSON.stringify({ okOver: 2, weakOver: 8 }));
+    const service = createPcCheckService({ ...w.deps, storage: spy });
+    service.registerProbe(probeOf(w, "speed").def);
+    writePcCheck(inner, "speed", record(12));
+    expect(service.pcClass()).toBe("weak");
+    pair = undefined;
+    expect(service.pcClass()).toBe("ok");
+    expect(touched.filter((entry) => entry.includes("artdaddy.pcClass"))).toEqual([]);
   });
 
   it("is removed altogether by the pc_check switch: no class, no run, and the class is read again when it comes back", async () => {

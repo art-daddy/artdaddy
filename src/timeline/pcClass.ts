@@ -1,5 +1,5 @@
-// The PC's class from the hidden speed test: the pure rules (the class from a ratio, the server's bounded cut-offs) and the two
-// local stores (the check's own answer for each probe, the accepted cut-offs). Nothing here reads the PC, builds a command or
+// The PC's class from the hidden speed test: the pure rules (the class from a ratio, the cut-offs' band) and the local store of the check's own answer for each probe.
+// The cut-offs themselves are lane L2's (`pcClass()` of the flags reader, in memory only); this module keeps no copy of them. Nothing here reads the PC, builds a command or
 // returns a speed, a thread count, a preset or an encoder: the class only decides who is warned and who has Quick preselected.
 // Every read fails soft (a damaged, foreign or stale value is no value) and a write that fails is not a failure.
 import type { PcClass } from "./exportTypes3c";
@@ -28,7 +28,6 @@ const REFERENCE_FPS = 30;
 const R_HAT_MAX = 1_000_000;
 
 export const PC_CHECK_KEY = "artdaddy.pcCheck.v1";
-export const PC_CLASS_KEY = "artdaddy.pcClass.v1";
 export const PC_CHECK_TTL_MS = 30 * 86_400_000;
 
 /** A time ahead of the clock by more than this was written while the clock was ahead (put back, or wrong) and is not believed. */
@@ -86,30 +85,6 @@ export function rHatOf(bFps: number | null): number | null {
   if (typeof bFps !== "number" || !Number.isFinite(bFps) || bFps <= 0) return null;
   const ratio = (R_HAT_FIT.k * REFERENCE_FPS) / bFps + R_HAT_FIT.c0;
   return Number.isNaN(ratio) ? null : Math.min(R_HAT_MAX, Math.max(0, ratio));
-}
-
-/** The accepted pair from the cut-offs store, else the compiled one. Never throws. */
-export function readCutoffs(store: StorageLike | null): Cutoffs {
-  try {
-    const raw = store ? store.getItem(PC_CLASS_KEY) : null;
-    if (typeof raw === "string" && raw.length <= 1024) {
-      const accepted = acceptCutoffs(JSON.parse(raw));
-      if (accepted) return accepted;
-    }
-  } catch {
-    /* a damaged pair is no pair */
-  }
-  return { okOver: PC_CLASS_COMPILED.okOver, weakOver: PC_CLASS_COMPILED.weakOver };
-}
-
-/** Keeps the server's pair, only if it is accepted; a bad pair leaves the stored one exactly as it was. Never throws. */
-export function writeCutoffs(store: StorageLike | null, told: unknown): void {
-  try {
-    const accepted = acceptCutoffs(told);
-    if (store && accepted) store.setItem(PC_CLASS_KEY, JSON.stringify(accepted));
-  } catch {
-    /* the pair is simply told again with the next flags */
-  }
 }
 
 // The record ----------------------------------------------------------------------------------------------------------------
@@ -191,12 +166,12 @@ export function unfinishedRecord(now: PcCheckNow): PcCheckRecord {
   };
 }
 
-/** The class a record stands for under the cut-offs the store holds NOW (so a pair the server moves applies to a PC that was
- *  measured earlier, without measuring again): `unfinished` for a check that did not finish, `unknown` for no record. */
-export function classOfRecord(record: PcCheckRecord | null, store: StorageLike | null): PcClass {
+/** The class a record stands for under the cut-offs in force NOW, which are lane L2's pair (`pcClass()` of the flags reader), handed in by the caller: a pair the
+ *  server moves applies to a PC that was measured earlier, without measuring again. `unfinished` for a check that did not finish, `unknown` for no record. */
+export function classOfRecord(record: PcCheckRecord | null, cutoffs?: Cutoffs | null): PcClass {
   if (!record) return "unknown";
   if (record.outcome === "unfinished") return "unfinished";
-  return classOf(record.rHat, readCutoffs(store));
+  return classOf(record.rHat, cutoffs ?? undefined);
 }
 
 // The check's own store: one entry for each probe id -----------------------------------------------------------------------
