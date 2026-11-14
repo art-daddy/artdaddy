@@ -106,6 +106,33 @@ pub(super) fn graphics_adapters() -> Vec<GraphicsAdapter> {
 #[cfg(not(windows))]
 pub(super) fn graphics_adapters() -> Vec<GraphicsAdapter> { Vec::new() }
 
+/// The processor's model name as Windows keeps it ("12th Gen Intel(R) Core(TM) i5-12400F"), for the one hint the Export dialog gives about Intel
+/// graphics that may be switched off in the BIOS. LOCAL ONLY: it reaches the page through the `processor_name` command and nowhere else (it is not
+/// part of `ExportResources`, and never in a report, an event or a log). Tidied into one line of printable ASCII, or nothing.
+#[cfg(any(windows, test))]
+fn tidy_processor_name(raw: &str) -> Option<String> {
+  let name = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+  let printable = name.bytes().all(|byte| (0x20..0x7f).contains(&byte));
+  (!name.is_empty() && name.len() <= 128 && printable).then_some(name)
+}
+
+#[cfg(windows)]
+pub(super) fn processor_name() -> Option<String> {
+  use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
+  let wide = |text: &str| -> Vec<u16> { text.encode_utf16().chain(std::iter::once(0)).collect() };
+  let (path, value) = (wide("HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0"), wide("ProcessorNameString"));
+  let mut buffer = [0u16; 128];
+  let mut size = (buffer.len() * 2) as u32;
+  let status = unsafe {
+    RegGetValueW(HKEY_LOCAL_MACHINE, path.as_ptr(), value.as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), buffer.as_mut_ptr().cast(), &mut size)
+  };
+  if status != 0 { return None; }
+  tidy_processor_name(&wide_to_string(&buffer))
+}
+
+#[cfg(not(windows))]
+pub(super) fn processor_name() -> Option<String> { None }
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -190,6 +217,30 @@ mod tests {
     let adapter = GraphicsAdapter { maker: "amd", device: "15bf".into(), driver: "32.0.22024.4008".into() };
     let json = serde_json::to_value(&adapter).unwrap();
     assert_eq!(json, serde_json::json!({ "maker": "amd", "device": "15bf", "driver": "32.0.22024.4008" }));
+  }
+
+  #[test]
+  fn a_processor_name_is_one_tidy_line_of_printable_text_or_nothing() {
+    assert_eq!(tidy_processor_name("12th Gen Intel(R) Core(TM) i5-12400F"), Some("12th Gen Intel(R) Core(TM) i5-12400F".to_string()));
+    assert_eq!(
+      tidy_processor_name("  Intel(R)  Core(TM)\ti7-6700 \r\n CPU @ 3.40GHz  "),
+      Some("Intel(R) Core(TM) i7-6700 CPU @ 3.40GHz".to_string())
+    );
+    let too_long = "x".repeat(129);
+    for raw in ["", "   ", "\u{0}", "Intel\u{7f}", "Intel\u{e9}", too_long.as_str()] {
+      assert_eq!(tidy_processor_name(raw), None, "{raw:?}");
+    }
+    assert!(tidy_processor_name(&"x".repeat(128)).is_some());
+  }
+
+  #[test]
+  fn the_name_is_asked_only_through_its_own_command_and_is_never_part_of_the_resource_snapshot() {
+    let lib = include_str!("../lib.rs");
+    assert!(lib.contains("jobs::processor_name,"), "the page can ask for the name, beside the other export commands");
+    let jobs = include_str!("../jobs.rs");
+    let snapshot = jobs.split("pub struct ExportResources {").nth(1).expect("the snapshot exists");
+    let snapshot = snapshot.split("\n}").next().expect("the snapshot ends");
+    assert!(!snapshot.contains("processor_name"), "the name is not part of what the page reads for every export");
   }
 
   /// This PC has a graphics chip of a maker the exporter knows, each listed once; the same call is what the app makes.

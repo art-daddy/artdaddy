@@ -204,6 +204,36 @@ export async function resolveExportResources(
   return (await settledWithin(pending, 2000, signal)) ?? unknown;
 }
 
+/** The processor's model name as the app process reads it (`processor_name`, its own native command), for the one hint that needs it (chipAdvice.ts:
+ *  Intel graphics that may be switched off in the BIOS). It stays on this PC: it is in no report, event, log or request, and is never read through
+ *  the command that gives the sendable hardware bands. Asked once per run of the app and kept; null when it cannot be read (not the app, not
+ *  Windows, a command that fails or hangs): no name is no hint. Never throws. */
+let processorNameAsked: Promise<string | null> | null = null;
+export function processorName(): Promise<string | null> {
+  processorNameAsked ??= (async (): Promise<string | null> => {
+    try {
+      if (platform.name !== "tauri") return null;
+      const { invoke } = await import("@tauri-apps/api/core");
+      const answer = await settledWithin(invoke<unknown>("processor_name"), 2000);
+      if (typeof answer !== "string") return null;
+      // eslint-disable-next-line no-control-regex
+      const name = answer
+        .replace(/[\u0000-\u001f\u007f]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+      return name.length > 0 && name.length <= 128 ? name : null;
+    } catch {
+      return null;
+    }
+  })();
+  return processorNameAsked;
+}
+
+/** Tests only. */
+export function __resetProcessorName(): void {
+  processorNameAsked = null;
+}
+
 /** How a probe came out. `ran` says what the command did (its exit code, its output, how long it took); the rest say
  *  why it did not run to the end: `busy` (an export is running, or there was no supervisor to ask: try again later),
  *  `timeout` (it did not finish in time and was ended) or `stopped` (the caller's signal ended it). */

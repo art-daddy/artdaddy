@@ -3009,6 +3009,13 @@ pub fn jobs_launch_id(jobs: tauri::State<'_, Supervisor>) -> String {
 #[tauri::command]
 pub fn jobs_export_protocol() -> u32 { 20 }
 
+/// The processor's model name, for the one hint the Export dialog gives about Intel graphics that may be switched off in the BIOS. LOCAL ONLY:
+/// the page shows it to the person and nothing sends it. It is not part of `ExportResources`, and the sendable hardware bands are another command.
+#[tauri::command]
+pub fn processor_name() -> Result<String, String> {
+  adapters::processor_name().ok_or_else(|| "the processor's name is not available".to_string())
+}
+
 #[tauri::command]
 pub async fn jobs_export_resources(jobs: tauri::State<'_, Supervisor>, destination: String) -> Result<ExportResources, String> {
   supervisor_work(jobs.inner().clone(), move |supervisor|

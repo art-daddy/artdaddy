@@ -705,6 +705,7 @@ pub fn run() {
       jobs::jobs_launch_id,
       jobs::jobs_export_protocol,
       jobs::jobs_export_resources,
+      jobs::processor_name,
       jobs::jobs_prepare_export,
       jobs::jobs_stage_render_scratch,
       jobs::jobs_verify_export,
