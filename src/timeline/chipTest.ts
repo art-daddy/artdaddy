@@ -439,6 +439,35 @@ async function runTest(
 
 const inflight = new Map<string, Promise<ChipVerdict | null>>();
 
+/** The turn a test takes before it runs ffmpeg: the PC check's one slot (`PcCheckService.withSlot`), so the check and the chip test never run side by side. */
+export type ChipTestGate = <T>(
+  fn: () => Promise<T>,
+) => Promise<{ ran: true; value: T } | { ran: false }>;
+let gate: ChipTestGate | null = null;
+
+/** The app registers the slot at start-up (`null` removes it). With none registered a test runs as it always did. */
+export function setChipTestGate(next: ChipTestGate | null): void {
+  gate = next;
+}
+
+/** `test`, inside the slot's turn when there is a slot. A slot that cannot be had (the service is gone) leaves the test to run as it did before there was one;
+ *  the test's own failure is the test's, with or without a turn. */
+async function inTurn<T>(test: () => Promise<T>): Promise<T> {
+  const turn = gate;
+  if (!turn) return test();
+  let started = false;
+  try {
+    const given = await turn(() => {
+      started = true;
+      return test();
+    });
+    if (given.ran) return given.value;
+  } catch (error) {
+    if (started) throw error;
+  }
+  return test();
+}
+
 /** The results of the tests that really ran, until someone takes them. The test usually runs when the Export dialog
  *  opens, long before the export it serves, so the export's report is where they are told. */
 const unreported: ChipTestEvent[] = [];
@@ -510,7 +539,7 @@ async function verdictFor(
   const pending = inflight.get(key);
   if (pending) return untilAborted(pending, options.signal, null);
   const task = (async (): Promise<ChipVerdict | null> => {
-    const run = await runTest(adapter, sizeClass, deps);
+    const run = await inTurn(() => runTest(adapter, sizeClass, deps));
     if (!run) return null;
     event(run.result, run.ms, run.ssimMilli);
     unreported.push({
@@ -615,4 +644,5 @@ export function __resetChipTests(): void {
   inflight.clear();
   unreported.length = 0;
   setAside.clear();
+  gate = null;
 }

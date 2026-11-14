@@ -16,6 +16,7 @@ import {
   markChipSuspect,
   readSsim,
   referenceEncodeArgs,
+  setChipTestGate,
   ssimArgs,
   takeChipTestEvents,
   type ChipDeps,
@@ -772,5 +773,134 @@ describe("finding a graphics chip that can be trusted", () => {
     vi.restoreAllMocks();
     const _maker: ChipMaker = "amd";
     expect(_maker).toBe("amd");
+  });
+});
+
+// The PC check and the chip test each run ffmpeg on the processor: one at a time. The app registers the check's one slot, and a test that must really run takes a
+// turn in it; everything the test decides, remembers and reports is unchanged, and with no slot registered it runs as it always did.
+describe("the chip test takes its turn", () => {
+  type Turn = { ran: true; value: never } | { ran: false };
+  /** A slot that is held by someone until `open()`: the test asked for its turn waits behind it. */
+  function slot(mode: "granted" | "never" | "broken" = "granted") {
+    const asked: string[] = [];
+    let open!: () => void;
+    const held = new Promise<void>((resolve) => (open = resolve));
+    const gate = async (fn: () => Promise<unknown>): Promise<Turn> => {
+      asked.push("asked");
+      if (mode === "broken") throw new Error("the slot is gone");
+      await held;
+      if (mode === "never") return { ran: false };
+      return { ran: true, value: (await fn()) as never };
+    };
+    return { gate, asked, open: () => open() };
+  }
+
+  it("runs nothing until its turn is given, and then runs exactly as it would have", async () => {
+    const h = harness([amd]);
+    const turn = slot();
+    setChipTestGate(turn.gate);
+    const lookup = findChip("hd", { allowRun: true }, h.deps);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(turn.asked).toEqual(["asked"]);
+    expect(h.calls).toEqual([]);
+    turn.open();
+    const found = await lookup;
+    expect(found.chip).toMatchObject({ maker: "amd", sizeClass: "hd", ok: true, result: "passed" });
+    expect(h.calls.map((call) => call.kind)).toEqual([
+      "chip-test-encode",
+      "chip-test-compare",
+      "chip-test-encode-ref",
+      "chip-test-compare-ref",
+    ]);
+  });
+
+  it("asks for one turn however many ask for the same test, and none for an answer it remembers or when it may not run", async () => {
+    const h = harness([amd]);
+    const turn = slot();
+    turn.open();
+    setChipTestGate(turn.gate);
+    await findChip("hd", { allowRun: false }, h.deps);
+    expect(turn.asked).toEqual([]);
+    await Promise.all([
+      findChip("hd", { allowRun: true }, h.deps),
+      findChip("hd", { allowRun: true }, h.deps),
+    ]);
+    expect(turn.asked).toEqual(["asked"]);
+    await findChip("hd", { allowRun: true }, h.deps); // remembered now
+    expect(turn.asked).toEqual(["asked"]);
+  });
+
+  it("lets a caller stop waiting for the turn without cancelling the shared test: it runs when its turn comes and its answer is kept", async () => {
+    const h = harness([amd]);
+    const turn = slot();
+    setChipTestGate(turn.gate);
+    const stop = new AbortController();
+    const lookup = findChip("hd", { allowRun: true, signal: stop.signal }, h.deps);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    stop.abort();
+    expect((await lookup).chip).toBeNull();
+    // the test is shared and goes on once the turn comes, and its answer is kept for the next caller
+    turn.open();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect((await findChip("hd", { allowRun: false }, h.deps)).chip).toMatchObject({
+      maker: "amd",
+    });
+  });
+
+  it.each(["never", "broken"] as const)(
+    "runs as it would have without a slot when the slot cannot be had (%s)",
+    async (mode) => {
+      const h = harness([amd]);
+      const turn = slot(mode);
+      turn.open();
+      setChipTestGate(turn.gate);
+      const found = await findChip("hd", { allowRun: true }, h.deps);
+      expect(found.chip).toMatchObject({ maker: "amd", ok: true });
+      expect(h.calls.length).toBeGreaterThan(0);
+    },
+  );
+
+  it("lets the test's own failure through as it did, and gives no chip", async () => {
+    const h = harness([amd]);
+    const gate = async (fn: () => Promise<unknown>): Promise<Turn> => ({
+      ran: true,
+      value: (await fn()) as never,
+    });
+    setChipTestGate(gate);
+    const explode: ChipDeps = {
+      ...h.deps,
+      files: {
+        ...h.deps.files,
+        dir: async () => {
+          throw new Error("no cache folder");
+        },
+      },
+    };
+    expect((await findChip("hd", { allowRun: true }, explode)).chip).toBeNull();
+  });
+
+  it("is not changed by a slot being registered: the same verdicts for every scripted behaviour (property)", async () => {
+    const modes = ["ok", "fail", "no_device", "slow", "busy"] as const;
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom(...modes),
+        fc.constantFrom<SizeClass>("hd", "uhd"),
+        async (chip, sizeClass) => {
+          __resetChipTests();
+          const plain = harness([amd], { chip });
+          const without = await findChip(sizeClass, { allowRun: true }, plain.deps);
+          __resetChipTests();
+          setChipTestGate(async (fn) => ({ ran: true, value: (await fn()) as never }));
+          const gated = harness([amd], { chip });
+          const through = await findChip(sizeClass, { allowRun: true }, gated.deps);
+          setChipTestGate(null);
+          expect(through).toEqual(without);
+          expect(gated.calls.map((call) => call.kind)).toEqual(
+            plain.calls.map((call) => call.kind),
+          );
+        },
+      ),
+      { numRuns: 20 },
+    );
   });
 });
