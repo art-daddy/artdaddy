@@ -11,6 +11,7 @@ use shared_child::SharedChild;
 
 mod pipe;
 mod output;
+mod activity;
 
 pub(super) type StartGuard = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
 pub(super) type Registry = Arc<Mutex<HashMap<(String, u32), Arc<Control>>>>;
@@ -545,6 +546,7 @@ pub(super) fn spawn_single(executable: &Path, spec: &JobSpec, observer: Observer
   let key = (spec.id.clone(), pid);
   registry.lock().unwrap_or_else(|error| error.into_inner()).insert(key.clone(), control.clone());
   control.watch();
+  if activity::wanted(spec) { activity::start(&control, observer.clone()); }
   std::thread::spawn(move || {
     let stderr = reader(errors, observer.clone(), control.clone(),
       captured.then(|| (None, Arc::new(AtomicBool::new(true)))), true);
@@ -653,6 +655,7 @@ pub(super) fn spawn(executable: &Path, spec: &JobSpec, observer: Observer,
   let child_key = (spec.id.clone(), pid);
   registry.lock().unwrap_or_else(|error| error.into_inner()).insert(child_key.clone(), control.clone());
   control.watch();
+  if activity::wanted(spec) { activity::start(&control, observer.clone()); }
   let executable = executable.to_path_buf();
   let cwd = spec.cwd.clone();
   std::thread::spawn(move || {

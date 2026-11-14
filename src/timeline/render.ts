@@ -4336,6 +4336,9 @@ export async function prepareRenderSubmission(
               // Whether the app process stops this job when the PC itself runs short of memory: the server's
               // switch (api/exportFlags.ts), read as the job is handed over. The process treats silence as on.
               pcFloor: exportFlag("pc_floor"),
+              // Whether the app process prints what the export's processes have used on the job's output, which the
+              // "no progress" stop reads (the `idle_rule` switch, read as the job is handed over). Silence means on.
+              activityMarks: exportFlag("idle_rule"),
               projectDir: ctx.store.projectDir,
               destPath: request.destPath,
               stagePath: request.stagePath,

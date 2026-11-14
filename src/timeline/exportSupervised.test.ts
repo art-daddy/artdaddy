@@ -370,6 +370,26 @@ describe("in the app, an export runs as a job of the app process", () => {
     }
   });
 
+  it("tells the app process whether to print the activity marks, as the server's idle_rule switch says at that moment", async () => {
+    const t = await setup();
+    const marked = await t.exportNow();
+    __setExportFlag("idle_rule", false);
+    try {
+      const plain = await t.exportNow("b");
+      await flush();
+      expect(t.jobs.submitted.map((s) => s.id)).toEqual([marked.job_id, plain.job_id]);
+      expect(t.jobs.submitted[0].meta.activityMarks).toBe(true);
+      expect(t.jobs.submitted[1].meta.activityMarks).toBe(false);
+      t.jobs.exit(marked.job_id, 0);
+      await whenExportEnds(marked.job_id);
+      await flush();
+      t.jobs.exit(plain.job_id, 0);
+      await whenExportsSettle();
+    } finally {
+      __setExportFlag("idle_rule", true);
+    }
+  });
+
   it("is stopped by Cancel through the app process, leaving nothing behind", async () => {
     const t = await setup();
     const a = await t.exportNow();

@@ -171,8 +171,9 @@ mod platform {
   use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
   use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Thread32First, Thread32Next, THREADENTRY32, TH32CS_SNAPTHREAD};
   use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW,
-    QueryInformationJobObject, SetInformationJobObject, JobObjectExtendedLimitInformation,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE};
+    QueryInformationJobObject, SetInformationJobObject, JobObjectBasicAndIoAccountingInformation, JobObjectExtendedLimitInformation,
+    JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
+    JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE};
   use windows_sys::Win32::System::Threading::{OpenProcess, OpenThread, ResumeThread, CREATE_NO_WINDOW, CREATE_SUSPENDED,
     PROCESS_SET_QUOTA, PROCESS_TERMINATE, THREAD_SUSPEND_RESUME};
 
@@ -238,6 +239,19 @@ mod platform {
       }
       Ok((limits.JobMemoryLimit, limits.PeakJobMemoryUsed))
     }
+
+    /// What every process that has run in the job has used so far, the ones that have exited included: processor time
+    /// (user plus kernel, in milliseconds) and bytes read. The operating system keeps the totals, so they never go down.
+    pub fn accounting(&self) -> Result<(u64, u64), String> {
+      let mut used = JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION::default();
+      if unsafe { QueryInformationJobObject(self.job.as_raw_handle(), JobObjectBasicAndIoAccountingInformation,
+        (&mut used as *mut JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION).cast(), std::mem::size_of_val(&used) as u32, std::ptr::null_mut()) } == 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+      }
+      // Times come in 100-nanosecond ticks.
+      let ticks = (used.BasicInfo.TotalUserTime.max(0) as u64).saturating_add(used.BasicInfo.TotalKernelTime.max(0) as u64);
+      Ok((ticks / 10_000, used.IoInfo.ReadTransferCount))
+    }
   }
 }
 
@@ -257,6 +271,9 @@ mod platform {
     }
     pub fn commit_accounting(&self) -> Result<(usize, usize), String> {
       Err("aggregate commit accounting is not available on this platform".into())
+    }
+    pub fn accounting(&self) -> Result<(u64, u64), String> {
+      Err("aggregate processor accounting is not available on this platform".into())
     }
   }
 }
