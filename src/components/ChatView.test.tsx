@@ -1879,6 +1879,12 @@ describe("the speech card in the chat pane", () => {
     ).toBe(false);
   });
 
+  it("counts a chip waiting in the box as a draft: the person has begun a message even without a word", () => {
+    state.pendingMentions = [{ kind: "playhead", frame: 10, timecode: "00:00:00:10" }];
+    render(<ChatView />);
+    expect(useComposer.getState().hasDraft).toBe(true);
+  });
+
   it("never lets a wake through while the person types: changing the text does not clear the draft for a moment", () => {
     render(<ChatView />);
     const composer = screen.getByPlaceholderText(/Message the editor/);

@@ -58,8 +58,7 @@ import { trackLabelById } from "./timeline/labels";
 import StatusLine from "./StatusLine";
 import ToolCalls from "./ToolCalls";
 import ExportCard from "./ExportCard";
-import SpeechCard from "./SpeechCard";
-import { useSpeechCard } from "./useSpeechCard";
+import SpeechCardPane from "./SpeechCardPane";
 import { buildRows, type SummaryContext } from "./toolSummary";
 import { STARTER_PROMPTS } from "./starterPrompts";
 import { jobNoteSummary } from "./jobNoteSummary";
@@ -178,16 +177,14 @@ export default function ChatView({ onHide }: { onHide?: () => void } = {}) {
   const [rated, setRated] = useState<Record<string, FeedbackKind>>({});
   const [reportingTurn, setReportingTurn] = useState<string | null>(null);
 
-  // The wake for words the assistant was told were not ready must not start a turn while a draft sits in the box, so
-  // the box says here whether it holds one. Cleared when the pane goes: nothing is left to protect.
+  // The wake for words the assistant was told were not ready must not start a turn while a draft sits in the box (text,
+  // a file attached, or a chip added), so the box says here whether it holds one. Cleared when the pane goes: nothing is
+  // left to protect.
   useEffect(() => {
-    useComposer.getState().setDraft(isDraft(text, attachments.length));
-  }, [text, attachments.length]);
+    useComposer.getState().setDraft(isDraft(text, attachments.length + pendingMentions.length));
+  }, [text, attachments.length, pendingMentions.length]);
   useEffect(() => () => useComposer.getState().setDraft(false), []);
   const projectDir = useEditor((s) => s.store?.projectDir ?? null);
-  const speechCard = useSpeechCard(
-    projectDir && transcriptId ? { dir: projectDir, session: transcriptId } : null,
-  );
 
   useLayoutEffect(() => {
     const composer = composerRef.current;
@@ -748,7 +745,9 @@ export default function ChatView({ onHide }: { onHide?: () => void } = {}) {
         }}
       >
         <ExportCard />
-        <SpeechCard view={speechCard.view} onDismiss={speechCard.dismiss} />
+        <SpeechCardPane
+          chat={projectDir && transcriptId ? { dir: projectDir, session: transcriptId } : null}
+        />
         {attachments.length > 0 && (
           <div className="mb-2 flex flex-wrap gap-1.5">
             {attachments.map((a, i) => (
