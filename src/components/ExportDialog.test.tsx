@@ -2,9 +2,10 @@
 // late progress cannot resurrect a finished render, and a job that never reported a position must
 // say so rather than claiming 0%.
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import ExportDialog from "./ExportDialog";
+import { __resetExportFlags, __setExportFlag } from "../api/exportFlags";
 import { exportRunning, useExportJob } from "../store/exportJob";
 import { decideExportEncoder, type ExportEncoderDecision } from "../timeline/exportChoice";
 import { EXPORT_SPEED_REVISION } from "../timeline/exportOptions";
@@ -137,8 +138,11 @@ const CALIBRATION = {
   temporaryBytes: null,
 };
 // The line under the settings: roughly how long this will take and how big the file will be, for the
-// settings chosen. Information only: it never blocks, delays or alters the export.
+// settings chosen. Information only: it never blocks, delays or alters the export. These are 0.27.0's own words,
+// so they are held with the new estimate switched off (`ExportDialog.estimate3c.test.tsx` holds the new ones).
 describe("ExportDialog estimate", () => {
+  beforeEach(() => __setExportFlag("estimate_v2", false));
+  afterEach(() => __resetExportFlags());
   const project = PROJECT;
   const measured = (over: Record<string, unknown> = {}) => ({
     workload: project,

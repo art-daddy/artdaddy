@@ -7,25 +7,25 @@ import { useEffect, useMemo, useReducer, useState, useSyncExternalStore } from "
 
 import { formatEta } from "../timeline/ffmpegProgress";
 import { decideExportEncoder, type ExportEncoderDecision } from "../timeline/exportChoice";
-import {
-  estimateForDialog,
-  type ExportMode,
-  type ExportQuality,
-  type ExportResolution,
-} from "../timeline/exportOptions";
+import { dialogEstimate } from "../timeline/dialogEstimate";
+import { CHECKING_LINE } from "../timeline/estimateWords";
+import { holdExportAsk } from "../timeline/exportAsk";
+import type { ExportMode, ExportQuality, ExportResolution } from "../timeline/exportOptions";
 import { listExportRecords, subscribeExports } from "../timeline/exportQueue";
 import { attempts } from "../timeline/exportAttempts";
 import {
   describeDialogProgress,
-  describeExpected,
   describeModeLines,
   STATUS_REFRESH_MS,
   type ModeView,
 } from "../timeline/exportWords";
 import type { RenderWorkload } from "../timeline/renderPlan";
+import { useEditor } from "../store/editor";
 import { liveFeedOf, useExportJob, type ExportPhase } from "../store/exportJob";
 import ExportProgressBar from "./ExportProgressBar";
 import ExportQueuePane from "./ExportQueuePane";
+import SpeedCheckLine from "./SpeedCheckLine";
+import { useSpeedCheck } from "./useSpeedCheck";
 
 export interface ExportSettings {
   resolution: ExportResolution;
@@ -99,16 +99,26 @@ export default function ExportDialog({
   const lines = describeModeLines(view, picked);
   const mode = lines.selected;
 
-  // Read-only information: what this PC has measured for settings like these, else a rough guess. For the way that is
-  // selected: Fast is the chip's estimate, Full the processor's (with its faster setting where the app will use it).
-  const expected = useMemo(() => {
-    if (!workload) return "";
-    const route =
-      mode === "fast" ? { chip: decision?.facts.chip } : { faster: decision?.faster === true };
-    return describeExpected(
-      estimateForDialog(workload, { resolution, quality, fps, mode }, calibrations, route),
-    );
-  }, [workload, resolution, quality, fps, mode, calibrations, decision]);
+  // Read-only information: what this PC has measured for settings like these, else the honest estimate or a rough guess. For the way that is
+  // selected: Fast is the chip's estimate, Full the processor's (with its faster setting where the app will use it). While the PC's speed check runs
+  // the line says so; the Export button never waits for it.
+  const check = useSpeedCheck();
+  const estimated = useMemo(
+    () =>
+      dialogEstimate({
+        workload,
+        settings: { resolution, quality, fps },
+        mode,
+        chip: decision?.facts.chip,
+        faster: decision?.faster === true,
+        history: calibrations,
+        openTimeline: () => useEditor.getState().timeline,
+      }),
+    // `check.key` changes when the check's answer does, which is what the estimate is priced on.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [workload, resolution, quality, fps, mode, calibrations, decision, check.key],
+  );
+  const expected = workload && check.running ? CHECKING_LINE : estimated.line;
 
   const phase = useExportJob((s) => s.phase);
   const jobId = useExportJob((s) => s.jobId);
@@ -284,6 +294,12 @@ export default function ExportDialog({
                 {expected}
               </p>
             )}
+            {!check.running && estimated.muchLonger && (
+              <p data-testid="estimate-much-longer" className="text-xs leading-snug text-amber-300">
+                {estimated.muchLonger}
+              </p>
+            )}
+            <SpeedCheckLine check={check} />
             {lines.alternative && (
               <p className="text-xs leading-snug text-neutral-400">{lines.alternative}</p>
             )}
@@ -332,7 +348,9 @@ export default function ExportDialog({
               </button>
               <button
                 type="button"
-                onClick={() =>
+                onClick={() => {
+                  // The request is on its way: a speed check in progress stops now and the export starts on a labelled rough guess.
+                  holdExportAsk();
                   onStart({
                     resolution,
                     quality,
@@ -348,8 +366,8 @@ export default function ExportDialog({
                           ? picked
                           : null
                         : (picked ?? "quality"),
-                  })
-                }
+                  });
+                }}
                 className={primaryCls}
               >
                 Export
