@@ -1186,7 +1186,10 @@ async function runWhisperOnce(
     if (ctx.background && win.key === "") {
       // The person stopped this file's run (a look, captions, the indexer's own): the background never
       // starts it by itself afterwards, however its queue names the file (F7). A request still runs it.
-      if (wasRunCancelledByPerson(out)) throw new SpeechCancelledError();
+      // With the switch off nothing here decides anything: it is 0.27.0, where a whole file asked for by a
+      // request on the background's queue (a long look) must run.
+      if (exportFlag("speech_cpu_cap") && wasRunCancelledByPerson(out))
+        throw new SpeechCancelledError();
       const admission = admitWholeFile({
         file: fileLabel(src),
         where: "boundary",

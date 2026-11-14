@@ -16,7 +16,7 @@ vi.mock("../api/appEvents", async (orig) => ({
 }));
 vi.mock("@tauri-apps/api/path", () => ({ resolveResource: async () => "C:/res/fonts" }));
 
-import { __resetExportFlags } from "../api/exportFlags";
+import { __resetExportFlags, __setExportFlag } from "../api/exportFlags";
 import { __resetSpeechJobs, cancelSpeechJob, useSpeechJobs } from "../store/speechJobs";
 import { FakeJobs } from "../test/fakeJobs";
 import { DIR, flagValues, freshSource, speechRig, transcriptJson } from "../test/speechRig";
@@ -265,6 +265,18 @@ describe("Cancel on one run", () => {
     }).catch(() => undefined);
     void runWhisper(rig.ctx({ background: true }), src, "small", "es").catch(() => undefined);
     await until(() => whisperJobs().length === 4);
+  });
+
+  it("is 0.27.0 with the switch off: the background starts the file as it always did, and the person's own request is no different", async () => {
+    __setExportFlag("speech_cpu_cap", false);
+    const rig = speechRig();
+    const src = freshSource();
+    const look = runWhisper(rig.ctx(), src).catch((e: unknown) => e);
+    await until(() => whisperJobs().length === 1);
+    cancelSpeechJob(whisperJobs()[0].id);
+    expect(isSpeechCancelled(await look)).toBe(true);
+    void runWhisper(rig.ctx({ background: true }), src).catch(() => undefined);
+    await until(() => whisperJobs().length === 2);
   });
 });
 
