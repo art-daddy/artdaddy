@@ -2,6 +2,7 @@ import fc from "fast-check";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { liveFeedOf, useExportJob } from "./exportJob";
+import { COST_FEATURES } from "../timeline/costShape";
 import { ENCODER_IDS } from "../timeline/exportEncoder";
 import { EXPORT_SPEED_REVISION, type ExportCalibration } from "../timeline/exportOptions";
 import { quietSeconds } from "../timeline/exportWords";
@@ -181,11 +182,155 @@ describe("local export calibration records", () => {
       encoder: "x264-crf",
       rung: 2,
       revision: 3,
+      cost: { crossfade: { frames: 90, windowFrames: 30, mp: 2.07 } },
     };
     useExportJob.getState().rememberCalibration(everything);
     const stored = useExportJob.getState().calibrations.at(-1)!;
     expect(Object.keys(stored).sort()).toEqual(Object.keys(everything).sort());
     expect(stored).toEqual(everything);
+  });
+});
+
+// A history record may carry a compact summary of the project it measured: its features by the frames they ran on. Nothing reads it yet, so
+// what matters is that it is never believed when it is damaged, never makes a record vanish, and never changes a record that has none.
+describe("the cost summary a history record may carry", () => {
+  const cost = {
+    crossfade: { frames: 90, windowFrames: 30, mp: 2.07 },
+    grain: { frames: 300, windowFrames: 300, mp: 2.07 },
+  };
+  const savedKey = () =>
+    Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index)!).find(
+      (key) => key.includes("calibration"),
+    )!;
+  const load = (frames: number, windowFrames: number, mp: number) => ({ frames, windowFrames, mp });
+  // Every way a summary can be damaged: not an object, a feature nobody prices, a number that is not one, a window longer than its frames.
+  const damaged: Array<[string, unknown]> = [
+    ["null", null],
+    ["a string", "crossfade"],
+    ["a number", 5],
+    ["a list", [load(1, 1, 1)]],
+    ["a feature nobody prices", { ...cost, hologram: load(1, 1, 1) }],
+    ["a feature that is not an object", { crossfade: 5 }],
+    ["a feature that is null", { crossfade: null }],
+    ["negative frames", { crossfade: load(-1, 0, 1) }],
+    ["frames that are not a number", { crossfade: load(Number.NaN, 0, 1) }],
+    ["a window longer than its frames", { crossfade: load(10, 20, 1) }],
+    ["a missing window", { crossfade: { frames: 10, mp: 1 } }],
+    ["a size that is not a number", { crossfade: { frames: 10, windowFrames: 5, mp: "big" } }],
+    ["a size that is absurd", { crossfade: load(10, 5, 1e300) }],
+    ["one good feature beside a damaged one", { ...cost, fade: load(5, 9, 1) }],
+  ];
+
+  it("keeps a summary in this session and in the next, and gives a record without one none", async () => {
+    localStorage.clear();
+    useExportJob.getState().rememberCalibration({ ...sample, cost });
+    useExportJob.getState().rememberCalibration(sample);
+    expect(useExportJob.getState().calibrations.map((entry) => entry.cost)).toEqual([
+      cost,
+      undefined,
+    ]);
+    const saved = JSON.parse(localStorage.getItem(savedKey())!);
+    expect(saved[0].cost).toEqual(cost);
+    expect("cost" in saved[1]).toBe(false);
+    vi.resetModules();
+    const reopened = (await import("./exportJob")).useExportJob;
+    expect(reopened.getState().calibrations.map((entry) => entry.cost)).toEqual([cost, undefined]);
+  });
+
+  it("reads a record saved before there were summaries exactly as it was read, with none", async () => {
+    localStorage.clear();
+    const old = {
+      workload: sample.workload,
+      output: sample.output,
+      quality: "medium",
+      engine: "partition-pipes-v1",
+      encoder: "x264-crf",
+      revision: EXPORT_SPEED_REVISION,
+      rung: 1,
+      elapsedSeconds: 16,
+      finalBytes: 2_400_000,
+      memoryBytes: 9e8,
+      temporaryBytes: null,
+    };
+    localStorage.setItem("artdaddy-export-calibration-v4", JSON.stringify([old]));
+    vi.resetModules();
+    const reopened = (await import("./exportJob")).useExportJob;
+    expect(reopened.getState().calibrations).toEqual([old]);
+    expect("cost" in reopened.getState().calibrations[0]).toBe(false);
+  });
+
+  it.each(damaged)(
+    "drops a damaged summary (%s) and keeps the measurement, when it is remembered and when it is read back",
+    async (_name, junk) => {
+      localStorage.clear();
+      // an encoder that is not named is the processor's normal one: what the store has always made of such a record
+      const measured = { ...sample, encoder: "x264-crf" };
+      expect(() =>
+        useExportJob
+          .getState()
+          .rememberCalibration(JSON.parse(JSON.stringify({ ...sample, cost: junk ?? null }))),
+      ).not.toThrow();
+      expect(useExportJob.getState().calibrations).toEqual([measured]);
+      // the same record, damaged in the saved copy: read at the next start
+      localStorage.setItem(
+        "artdaddy-export-calibration-v4",
+        JSON.stringify([JSON.parse(JSON.stringify({ ...sample, cost: junk ?? null }))]),
+      );
+      vi.resetModules();
+      const reopened = (await import("./exportJob")).useExportJob;
+      expect(reopened.getState().calibrations).toEqual([measured]);
+    },
+  );
+
+  it("keeps every summary that is whole and drops every one that is not, whatever it holds (property)", () => {
+    const loadArb = fc
+      .tuple(
+        fc.integer({ min: 0, max: 5_000_000 }),
+        fc.integer({ min: 0, max: 5_000_000 }),
+        fc.double({ min: 0, max: 200, noNaN: true }),
+      )
+      .map(([a, b, mp]) => load(Math.max(a, b), Math.min(a, b), mp));
+    fc.assert(
+      fc.property(fc.dictionary(fc.constantFrom(...COST_FEATURES), loadArb), (whole) => {
+        useExportJob.setState({ calibrations: [] });
+        useExportJob.getState().rememberCalibration({ ...sample, cost: whole });
+        expect(useExportJob.getState().calibrations.at(-1)?.cost).toEqual(whole);
+      }),
+      { numRuns: 80 },
+    );
+    fc.assert(
+      fc.property(fc.jsonValue(), (junk) => {
+        useExportJob.setState({ calibrations: [] });
+        useExportJob.getState().rememberCalibration({ ...sample, cost: junk } as never);
+        const kept = useExportJob.getState().calibrations.at(-1)!;
+        expect(kept.elapsedSeconds).toBe(16);
+        for (const [feature, entry] of Object.entries(kept.cost ?? {})) {
+          expect(COST_FEATURES as readonly string[]).toContain(feature);
+          expect(entry.windowFrames).toBeLessThanOrEqual(entry.frames);
+          for (const value of Object.values(entry)) expect(value).toBeGreaterThanOrEqual(0);
+        }
+      }),
+      { numRuns: 200 },
+    );
+  });
+
+  it("lets nothing a summary says in words into what is saved", () => {
+    fc.assert(
+      fc.property(fc.string({ minLength: 1 }), (text) => {
+        const secret = `private:${text}`;
+        useExportJob.setState({ calibrations: [] });
+        useExportJob.getState().rememberCalibration({
+          ...sample,
+          cost: {
+            ...cost,
+            crossfade: { ...cost.crossfade, ...{ note: secret } },
+            ...{ [secret]: load(1, 1, 1) },
+          },
+        } as never);
+        expect(JSON.stringify(useExportJob.getState().calibrations)).not.toContain(secret);
+      }),
+      { numRuns: 40 },
+    );
   });
 });
 

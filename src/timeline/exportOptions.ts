@@ -12,6 +12,7 @@ export type ExportMode = "quality" | "fast";
 export type { ExportEncoder } from "./exportEncoder";
 
 import type { Branding } from "./branding";
+import type { FeatureLoads } from "./costShape";
 import type { ChoiceFacts } from "./exportChoice";
 import {
   CHIP_CAUTIOUS_GAIN,
@@ -112,6 +113,9 @@ export interface ExportCalibration {
   /** The rung the export ran at (exportPlan.ts); absent is the normal one, which is what every measurement
    *  made before rungs existed ran at. */
   readonly rung?: Rung;
+  /** A compact summary of the project it measured: its features by the frames they ran on. Absent on every measurement made before there were
+   *  summaries, which are valid as they are. Nothing reads it yet. */
+  readonly cost?: FeatureLoads;
 }
 
 /** The earlier exports a measurement may speak for: the same picture, layers, rate, quality, engine and

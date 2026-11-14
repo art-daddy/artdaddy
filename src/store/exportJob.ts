@@ -5,6 +5,7 @@
 // callback down through the tool context, a render announces itself here and the UI subscribes.
 // One job at a time, matching the one ffmpeg process.
 import { create } from "zustand";
+import { COST_FEATURES, type FeatureLoads } from "../timeline/costShape";
 import { attempts } from "../timeline/exportAttempts";
 import { ENCODER_IDS, type ExportEncoder } from "../timeline/exportEncoder";
 import type { ExportCalibration, ExportEngine } from "../timeline/exportOptions";
@@ -13,6 +14,33 @@ import type { LiveFacts, LiveStageName } from "../timeline/exportWords";
 const ENGINE_KEY = "artdaddy-export-routing-v2";
 // Not per release: a measurement stays usable until EXPORT_SPEED_REVISION says the pipeline changed.
 const CALIBRATION_KEY = "artdaddy-export-calibration-v4";
+
+/** A guard against garbage, not a limit of the product (the cost shape's own). */
+const MAX_COST_LOAD = 1e9;
+
+/** The compact cost summary a record may carry: each feature by the frames it ran on. Whole or nothing: one entry that is not believable and the summary is not
+ *  believed at all, because a feature left out would read as free. Never throws. */
+function costOf(value: unknown): FeatureLoads | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  const known: readonly string[] = COST_FEATURES;
+  if (Object.keys(raw).some((key) => !known.includes(key))) return null;
+  const amount = (n: unknown): number | null =>
+    typeof n === "number" && Number.isFinite(n) && n >= 0 && n <= MAX_COST_LOAD ? n : null;
+  const loads: FeatureLoads = {};
+  for (const feature of COST_FEATURES) {
+    if (!Object.prototype.hasOwnProperty.call(raw, feature)) continue;
+    const entry = raw[feature];
+    if (!entry || typeof entry !== "object") return null;
+    const frames = amount((entry as Record<string, unknown>).frames);
+    const windowFrames = amount((entry as Record<string, unknown>).windowFrames);
+    const mp = amount((entry as Record<string, unknown>).mp);
+    if (frames === null || windowFrames === null || mp === null || windowFrames > frames)
+      return null;
+    loads[feature] = { frames, windowFrames, mp };
+  }
+  return loads;
+}
 
 function calibration(value: unknown): ExportCalibration | null {
   if (!value || typeof value !== "object") return null;
@@ -60,6 +88,8 @@ function calibration(value: unknown): ExportCalibration | null {
   // The setting the export ran at, when it was below the normal one (exportPlan.ts): what its peak means
   // depends on it, so a measurement that loses it is worse than none.
   const rung = raw.rung === 1 || raw.rung === 2 ? raw.rung : null;
+  // A summary that is damaged is dropped and the measurement stays: it is worth more without it than not at all.
+  const cost = Object.prototype.hasOwnProperty.call(raw, "cost") ? costOf(raw.cost) : null;
   return {
     workload: Object.fromEntries(
       keys.map((key) => [key, workload[key]]),
@@ -73,6 +103,7 @@ function calibration(value: unknown): ExportCalibration | null {
       : "x264-crf",
     ...(revision === null ? {} : { revision }),
     ...(rung === null ? {} : { rung }),
+    ...(cost === null ? {} : { cost }),
     elapsedSeconds: Number(raw.elapsedSeconds),
     finalBytes: Number(raw.finalBytes),
     memoryBytes: number(raw.memoryBytes),
