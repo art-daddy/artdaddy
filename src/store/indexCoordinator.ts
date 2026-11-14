@@ -588,7 +588,12 @@ export class IndexCoordinator {
     for (;;) {
       const head = this.txQ[0];
       if (!head || this.disposed || this.engineDown) return [];
-      const ahead = this.txQ.slice(0, BATCH_LOOKAHEAD);
+      // A file the person stopped, or the live check did, rides along in nobody's run: the head is checked
+      // below (and leaves the queue), and the clips behind it that are kept out are left where they are, to
+      // be checked as the head when their turn comes. A batch would otherwise start them again (F2).
+      const ahead = this.txQ
+        .slice(0, BATCH_LOOKAHEAD)
+        .filter((job, i) => i === 0 || !this.keptOutThisSession(job));
       const flags = ahead.map(flagsOf);
       // Only what could share the head's run is worth measuring; the rest stay where they are.
       const seconds = await Promise.all(
@@ -617,6 +622,14 @@ export class IndexCoordinator {
     }
   }
 
+  /** Is `job` a whole file that the session keeps the indexer from starting by itself: the person stopped
+   *  it, or the live check did? A request's own job (a window, or one somebody is waiting on) never is. */
+  private keptOutThisSession(job: TxJob): boolean {
+    if (job.window || job.urgent) return false;
+    const key = txKey(job);
+    return wasCancelledByPerson(key) || isOnDemandThisSession(key);
+  }
+
   /** Should the head of the queue be left for the parts a request uses? A whole file that nobody is
    *  waiting on (a request's own run, a window, is never held back here) is not started by itself when:
    *  the person cancelled it, or the live check stopped it, this session; or this PC projects it past the
@@ -626,12 +639,11 @@ export class IndexCoordinator {
    *  run takes no longer than it did. */
   private heldBack(head: TxJob, seconds: number | null): boolean {
     if (head.window || head.urgent) return false;
-    const key = txKey(head);
     const leave = (): void => {
       const at = this.txQ.indexOf(head);
       if (at >= 0) this.txQ.splice(at, 1);
     };
-    if (wasCancelledByPerson(key) || isOnDemandThisSession(key)) {
+    if (this.keptOutThisSession(head)) {
       leave();
       return true;
     }

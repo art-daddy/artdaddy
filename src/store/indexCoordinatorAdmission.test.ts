@@ -8,6 +8,8 @@ import { IndexCoordinator } from "./indexCoordinator";
 import { __resetExportFlags, __setExportFlag } from "../api/exportFlags";
 import {
   __resetSpeechSession,
+  markCancelledByPerson,
+  markOnDemandThisSession,
   SpeechDeferredError,
   wasCancelledByPerson,
 } from "../tools/speechAdmission";
@@ -351,6 +353,81 @@ describe("a file the person stopped", () => {
     expect(reportAppError).not.toHaveBeenCalled();
     expect(wasCancelledByPerson("transcript\u0000library/a.mp3")).toBe(true);
     expect(wasCancelledByPerson("transcript\u0000library/b.mp3")).toBe(true);
+    c.dispose();
+  });
+
+  it("is not started again as the FOLLOWER of a batch either: the project is reopened and a file that is not held comes first (F2)", async () => {
+    lengths({ "library/a.mp3": 1, "library/b.mp3": 1, "library/c.mp3": 1 });
+    recordSpeechRun(100, 53, "gpu", undefined, 3);
+    // Two tiny files share one run and the person stops it: both are marked, for the session.
+    ensureTranscripts.mockImplementationOnce(async (_ctx, refs) =>
+      refs.map(() => ({ ok: false as const, error: new SpeechCancelledError() })),
+    );
+    const before = coordinator();
+    before.indexSource("library/a.mp3");
+    before.indexSource("library/b.mp3");
+    await settle(() => ensureTranscripts.mock.calls.length === 1);
+    await quiet();
+    expect(wasCancelledByPerson("transcript\u0000library/a.mp3")).toBe(true);
+    before.dispose();
+    ensureTranscripts.mockClear();
+    ensureTranscript.mockClear();
+    // The project is opened again: its indexer has seen nothing, and the marks are the session's. C is first
+    // and is nobody's to hold back; A and B are short enough to ride along in C's run.
+    const reopened = coordinator();
+    reopened.indexSource("library/c.mp3");
+    reopened.indexSource("library/a.mp3");
+    reopened.indexSource("library/b.mp3");
+    await settle(() => started().includes("library/c.mp3"));
+    await quiet();
+    expect(started(), "C alone: neither of the stopped files rode along").toEqual([
+      "library/c.mp3",
+    ]);
+    expect(ensureTranscripts, "no run over several files was made").not.toHaveBeenCalled();
+    expect(reportAppError).not.toHaveBeenCalled();
+    reopened.dispose();
+  });
+
+  it.each<[string, (key: string) => void]>([
+    ["the person stopped", markCancelledByPerson],
+    ["the live check stopped", markOnDemandThisSession],
+  ])(
+    "is not taken along in a batch when %s it, but its neighbours still share the run (F2)",
+    async (_who, mark) => {
+      lengths({
+        "library/c.mp3": 1,
+        "library/a.mp3": 1,
+        "library/x.mp3": 1,
+        "library/y.mp3": 1,
+      });
+      recordSpeechRun(100, 53, "gpu", undefined, 3);
+      mark("transcript\u0000library/a.mp3");
+      const c = coordinator();
+      for (const name of ["c", "a", "x", "y"]) c.indexSource(`library/${name}.mp3`);
+      await settle(() => ensureTranscripts.mock.calls.length >= 1);
+      await quiet();
+      const together = ensureTranscripts.mock.calls.flatMap((call) => call[1] as string[]);
+      expect(together.sort(), "C, X and Y share one run; A is not in it").toEqual([
+        "library/c.mp3",
+        "library/x.mp3",
+        "library/y.mp3",
+      ]);
+      expect(started(), "and A is not run alone either").toEqual([]);
+      c.dispose();
+    },
+  );
+
+  it("a stopped file that is not in the batch still leaves the queue when its turn as the head comes: nothing is left waiting behind it", async () => {
+    // E has no length that can be told, so it runs alone, after C; A is between them in the queue.
+    lengths({ "library/c.mp3": 1, "library/a.mp3": 1 });
+    markCancelledByPerson("transcript\u0000library/a.mp3");
+    const c = coordinator();
+    c.indexSource("library/c.mp3");
+    c.indexSource("library/a.mp3");
+    c.indexSource("library/e.mp3");
+    await settle(() => started().includes("library/e.mp3"));
+    await quiet();
+    expect(started(), "C, then E; A never").toEqual(["library/c.mp3", "library/e.mp3"]);
     c.dispose();
   });
 });
