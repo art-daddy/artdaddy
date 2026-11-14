@@ -15,7 +15,7 @@ const SRC = dirname(dirname(fileURLToPath(import.meta.url)));
 
 // The code that sends things: every call to the server, and what is reported about crashes and
 // errors. Each is held to the same rule.
-const GUARDED = ["api", "observability"] as const;
+const GUARDED = ["api", "observability", "agent", "update"] as const;
 
 /** The files of a source tree, so the whole scan can run on a tree made up in memory as well as on
  *  the real one. Paths are relative to src and use "/". */

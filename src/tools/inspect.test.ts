@@ -28,6 +28,13 @@ import { makeStoryboard } from "./storyboard";
 import { TranscriptionFailure } from "./speechFailure";
 import { peekTranscript, runWhisper, transcriptRunning } from "./transcribe";
 import { backgroundLoudness, prioritizeTranscript } from "./transcriptQueue";
+import {
+  __resetWakeHost,
+  registerPendingWords,
+  wakeBeginTurn,
+  wakeEndTurn,
+  wakeViewOf,
+} from "../store/speechWakeHost";
 
 // inspect_media now transcribes audio/video-with-audio via runWhisper; mock it so
 // tests don't shell out to whisper-cli / download a model.
@@ -2768,5 +2775,68 @@ describe("a look reports what it did", () => {
       expect(r.ok).toBe(false);
       expect(reports).toEqual([]);
     });
+  });
+});
+
+// The assistant is brought back for words it was told were not ready, unless it has read them since. Reading only part of
+// them (a cap cut the answer) is not having read them.
+describe("a look that read the words the assistant was waiting for", () => {
+  const CHAT = { dir: DIR, session: "chat-1" };
+  // A file of 180 seconds: a look cuts rows at its end, so the lines have to fit in it to be more than a look returns.
+  const segment = (i: number) => ({
+    segment_id: i,
+    start_seconds: i * 0.4,
+    end_seconds: i * 0.4 + 0.4,
+    start_timestamp: "",
+    end_timestamp: "",
+    text: `line ${i}`,
+    words: [],
+  });
+  const lines = (n: number): Any => ({
+    language: "en",
+    duration_seconds: n * 0.4,
+    segments: Array.from({ length: n }, (_, i) => segment(i)),
+    words: [],
+  });
+
+  /** A turn of the chat was told the words of song.mp3 were not ready, and they have landed since. */
+  async function wordsLandedUnread(): Promise<void> {
+    __resetWakeHost();
+    wakeBeginTurn(CHAT, 1, false);
+    registerPendingWords(
+      { ...CHAT, exec: 1, source: "song.mp3", ref: "song.mp3", window: null, path: null },
+      "song",
+      30,
+      Promise.resolve({ ok: true }),
+    );
+    wakeEndTurn(CHAT, 1, "done");
+    await vi.waitFor(() => expect(wakeViewOf(CHAT).ready?.files).toBe(1));
+  }
+  const lookAtSong = async (): Promise<void> => {
+    asFastPc();
+    const fs = new MockFs();
+    fs.touch(joinPath(DIR, "song.mp3"));
+    const runner: CommandRunner = {
+      run: vi.fn(async () => ({ code: 0, stdout: AUDIO_PROBE, stderr: "" })),
+    };
+    const ctx = {
+      ...ctxWith(runner, fs),
+      origin: { chatSessionId: CHAT.session, branchId: 0, executionId: 2 },
+    } as ClientToolContext;
+    await inspectMediaTool({ media_ref: "song.mp3" }, ctx);
+  };
+  afterEach(() => __resetWakeHost());
+
+  it("is the words read: nothing is left to bring the assistant back for", async () => {
+    await wordsLandedUnread();
+    await lookAtSong();
+    expect(wakeViewOf(CHAT).ready).toBeNull();
+  });
+
+  it("is not the words read when only the first of them came back: the rest is still to be told", async () => {
+    await wordsLandedUnread();
+    vi.mocked(runWhisper).mockResolvedValueOnce(lines(401));
+    await lookAtSong();
+    expect(wakeViewOf(CHAT).ready).toMatchObject({ files: 1 });
   });
 });

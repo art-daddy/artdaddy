@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { setModelDownloadFailure, useModelDownload } from "../store/modelDownload";
 import type { ClientToolContext } from "./context";
+import { declineModel } from "./modelDecline";
 import {
   __resetPrefetch,
   isCancelledDownload,
@@ -98,6 +99,16 @@ describe("the speech model fetched at launch", () => {
       await startSpeechModelPrefetch(environment);
       expect(ensure).toHaveBeenCalledOnce();
       expect(sleeps).toEqual([]);
+    });
+
+    it("stands when it was said while a round waited for the next: no round is made after it", async () => {
+      const { environment, ensure } = env(async () => {
+        throw new Error("network error");
+      });
+      // The Cancel is of a download a look had begun in the meantime: it lands while this session sleeps.
+      environment.sleep = async () => declineModel();
+      await startSpeechModelPrefetch(environment);
+      expect(ensure).toHaveBeenCalledOnce();
     });
 
     it("is recognised by the words the download itself uses for it", () => {

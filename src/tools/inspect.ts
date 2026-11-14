@@ -399,8 +399,10 @@ async function lookTranscript(
       out.words = wordRows.slice(0, TRANSCRIPT_WORD_CAP);
       out.words_truncated = wordRows.length > TRANSCRIPT_WORD_CAP;
     }
-    // The assistant has the words of this file now: a wake that was going to tell it so has nothing to say.
-    noteWordsFetched(ctx, opts.mediaRef ?? path, spanOf(window));
+    // The assistant has the words of this stretch now (all of them, unless a cap cut them): a wake that was going to
+    // tell it so has nothing to say.
+    if (!segTrunc && out.words_truncated !== true)
+      noteWordsFetched(ctx, opts.mediaRef ?? path, spanOf(window));
     return out;
   } catch (e) {
     const failed = failedTranscript(e);

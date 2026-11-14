@@ -77,7 +77,10 @@ class MockFs implements FsLike {
     this.bytes.set(joinPath(p), data.slice());
   }
   async appendBytes(p: string, data: Uint8Array): Promise<void> {
-    if (this.failAppend) throw new Error("ENOSPC: no space left on device");
+    if (this.failAppend)
+      throw new Error(
+        "ENOSPC: no space left on device, write 'C:/Users/maria/AppData/models/x.part'",
+      );
     const n = joinPath(p);
     const previous = this.bytes.get(n) ?? new Uint8Array();
     const next = new Uint8Array(previous.length + data.length);
@@ -244,6 +247,23 @@ describe("what the app keeps about each download, on this PC, in closed words", 
       ensureWhisperModel(ctxOf(fs), "small", (async () => served(BYTES)) as Any, SPEC),
     ).rejects.toThrow();
     expect(modelFacts().at(-1)).toMatchObject({ event: "download_failed", reason: "disk_write" });
+  });
+
+  it("says nothing of the person's folders when the disk refuses: the sentence reaches the assistant", async () => {
+    const fs = new MockFs();
+    fs.failAppend = true;
+    const message = await ensureWhisperModel(
+      ctxOf(fs),
+      "small",
+      (async () => served(BYTES)) as Any,
+      SPEC,
+    ).then(
+      () => "installed",
+      (e: Error) => e.message,
+    );
+    expect(message).toMatch(/stopped before it could be written/);
+    expect(message).not.toMatch(/maria|C:|ENOSPC|AppData/);
+    expect(JSON.stringify(modelFacts())).not.toMatch(/maria|C:|ENOSPC|AppData/);
   });
 
   it("records a cancel as a cancel, not as a failure, and shows no failure card for it", async () => {

@@ -961,18 +961,17 @@ async function transferModel(
         // `received` tracks what is ON DISK, so a failed append cannot inflate it: the next
         // attempt re-reads the file's real size anyway, which keeps resume self-correcting.
         let written: boolean;
-        let writeError = "";
         try {
           written = await ctx.store.appendBytes(tmp, value);
-        } catch (e) {
-          // A disk that is full or refuses the write throws; the words say it and the kind types it.
+        } catch {
+          // A disk that is full or refuses the write throws. What it says may name a folder of this PC, and
+          // this text reaches the assistant: the kind says what happened.
           written = false;
-          writeError = `: ${String(e)}`;
         }
         if (!written) {
           if (signal.aborted) throw new Error(modelCancelledMessage(received, spec.bytes));
           throw new AttemptFailure(
-            `whisper model download stopped before it could be written${writeError}`,
+            "whisper model download stopped before it could be written",
             "fatal",
             "disk_write",
           );

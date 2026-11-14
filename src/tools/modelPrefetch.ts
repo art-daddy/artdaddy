@@ -82,6 +82,8 @@ async function run(env: PrefetchEnv, waits: readonly number[]): Promise<void> {
         }
         if (round >= waits.length) return;
         await waitForNextRound(env, waits[round]);
+        // The person may have said no while the round waited (a Cancel of a download a look had begun): that stands.
+        if (modelDeclined()) return;
       }
     }
   } catch {
