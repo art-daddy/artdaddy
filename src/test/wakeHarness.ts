@@ -399,10 +399,10 @@ class Harness implements WakeHarness, ModelRecorder {
 
   async say(text: string): Promise<void> {
     this.event("person_said", { text: text.slice(0, 80) });
+    const before = this.chat().getState();
     let sent = false;
     let failure: unknown = null;
-    const sending = this.chat()
-      .getState()
+    const sending = before
       .send(text)
       .catch((error: unknown) => {
         failure = error ?? new Error("the send failed");
@@ -413,6 +413,9 @@ class Harness implements WakeHarness, ModelRecorder {
     await this.runUntil(() => sent, `the turn for "${text.slice(0, 40)}"`);
     await sending;
     if (failure) throw failure;
+    // The chat does not take a message while it is busy, as in the app: say so, or a missing turn is a mystery.
+    if (this.chat().getState().turns.length === before.turns.length)
+      this.event("message_not_taken", { text: text.slice(0, 80), busy: before.streaming });
     await this.settle();
   }
 
