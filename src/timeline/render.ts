@@ -4123,6 +4123,10 @@ export async function prepareRenderSubmission(
       free_bytes: decision.freeBytes,
       fits: decision.plan.fits,
       needed_free_bytes: decision.plan.neededFreeBytes,
+      // Which of the lean render paths ran for this export and why a clip kept 0.27.0's recipe (leanRecord.ts: two closed lists of words, no counts).
+      ...(renderPlan.lean
+        ? { lean: { ran: [...renderPlan.lean.ran], kept: [...renderPlan.lean.kept] } }
+        : {}),
     },
     // How the encoder was chosen: the story's chip test and mode events and the report's encoder, chip and reason.
     ...(renderPlan.choice ? { choice: renderPlan.choice } : {}),

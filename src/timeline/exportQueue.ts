@@ -42,6 +42,7 @@ import { resolveExportResources, type ExportResources } from "../platform/host";
 import { confirmExport } from "../lib/confirm";
 import { markChipSuspect } from "./chipTest";
 import type { ChoiceFacts } from "./exportChoice";
+import type { LeanRecord } from "./leanRecord";
 import { CHIP_MAKERS, type ChipMaker, type ModeReason, type SizeClass } from "./exportEncoder";
 import { askQuestion, hostMounted, type QuestionOutcome } from "../store/exportQuestionHost";
 import {
@@ -930,6 +931,9 @@ export interface ExportSpec {
       free_bytes?: number | null;
       fits?: boolean;
       needed_free_bytes?: number | null;
+      /** Which lean render paths ran for this export and the distinct reasons a clip kept 0.27.0's recipe (leanRecord.ts, Phase 3a): the typed
+       *  local record the report's `lean_ran` and `lean_kept` facts are read from. Absent when the export was built without any lean path. */
+      lean?: LeanRecord;
     };
     /** How the encoder was chosen (exportChoice.ts): the story's chip test and mode events, the report's encoder, chip and
      *  reason, and the chip's device to set aside if it fails the export. */

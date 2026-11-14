@@ -9,28 +9,48 @@ const PROBE_TIMEOUT_MS = 20_000;
 const PROBE_CONCURRENCY = 3;
 
 interface ShowInfo {
+  /** The filter instance (`Parsed_showinfo_<n>`) and the frame's own number in that instance. */
+  instance: number;
+  frame: number;
   fmt: string;
   width: number;
   height: number;
 }
 
-/** Every `showinfo` line of ffmpeg's log, in graph order. */
+/** Every `showinfo` frame line of ffmpeg's log, in log order. */
 export function parseShowinfo(log: string): ShowInfo[] {
   const out: ShowInfo[] = [];
   for (const line of log.split(/\r?\n/)) {
-    if (!/Parsed_showinfo_\d+/.test(line)) continue;
+    const instance = /Parsed_showinfo_(\d+)/.exec(line)?.[1];
+    if (instance === undefined) continue;
+    const frame = /\bn:\s*(\d+)\b/.exec(line)?.[1];
     const fmt = /\bfmt:(\S+)/.exec(line)?.[1];
     const size = /\bs:(\d+)x(\d+)\b/.exec(line);
-    if (fmt && size) out.push({ fmt, width: Number(size[1]), height: Number(size[2]) });
+    if (frame !== undefined && fmt && size)
+      out.push({
+        instance: Number(instance),
+        frame: Number(frame),
+        fmt,
+        width: Number(size[1]),
+        height: Number(size[2]),
+      });
   }
   return out;
 }
 
-/** What the probe's two `showinfo` lines say, or null when the answer is not the two sizes of one frame. */
+/**
+ * What the probe's two `showinfo` filters say about the FIRST frame, or null when the answer is not the two sizes of one frame. A video input lets a second
+ * frame through both filters before ffmpeg stops at `-frames:v 1` (seen on a screen recording), so each filter's frame number 0 is the one that counts.
+ */
 export function probedFromLog(log: string): LeanProbed | null {
-  const lines = parseShowinfo(log);
-  if (lines.length !== 2) return null;
-  const [before, after] = lines;
+  const first = new Map<number, ShowInfo>();
+  for (const line of parseShowinfo(log)) {
+    const seen = first.get(line.instance);
+    if (!seen || line.frame < seen.frame) first.set(line.instance, line);
+  }
+  if (first.size !== 2) return null;
+  const [before, after] = [...first.values()].sort((a, b) => a.instance - b.instance);
+  if (before.frame !== 0 || after.frame !== 0) return null;
   const ok = (n: number): boolean => Number.isInteger(n) && n > 0 && n <= 32768;
   if (![before.width, before.height, after.width, after.height].every(ok)) return null;
   return {
