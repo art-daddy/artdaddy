@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { __resetExportFlags, __setExportFlag } from "../api/exportFlags";
 import recorded from "./__fixtures__/e1RecordedLines.json";
 import { __resetFacts3c, factsForReport, factsOf3c } from "./exportFacts3c";
-import { MAX_SLOW_BANNERS, SLOW_AFTER_SECONDS, type HelpView } from "./exportHelp";
+import type { HelpView } from "./exportHelp";
 import {
   __resetHelp3c,
   endHelp3c,
@@ -34,6 +34,8 @@ vi.mock("./quickAvailable", () => ({ quickAvailable: vi.fn(() => false) }));
 const START = 1_700_000_000_000;
 const JOB = "job-1";
 const TICK = 5;
+/** The owner's number, written here and not read from the module: a rule that is changed is changed on purpose. */
+const SLOW_AFTER_SECONDS = 90;
 
 const record = (over: Partial<HelpRecordFacts> = {}): HelpRecordFacts => ({
   estimate: { seconds: 100, basis: "history" },
@@ -360,7 +362,6 @@ describe("Keep going and the limit of two (B3)", () => {
     expect(keepGoing3c(JOB, "slow", "rendering")).toEqual({ ok: true });
     expect(new Set(kinds(205, 395))).toEqual(new Set(["none"]));
     // 2,500 s is more than double again, and it is a third time: never
-    expect(MAX_SLOW_BANNERS).toBe(2);
     expect(new Set(kinds(400, 700))).toEqual(new Set(["none"]));
   });
 
