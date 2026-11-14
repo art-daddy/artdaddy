@@ -24,11 +24,18 @@ export interface LiveFacts {
   readonly step: number | null;
   readonly steps: number | null;
   readonly lastMoveAt: number;
+  /** Whether the export's processors or disk were busy over the last three minutes, as the watch reads them: true, false
+   *  (idle), or null when that cannot be told (no reading yet, or the app cannot read it). Absent where nothing reads it. */
+  readonly busy?: boolean | null;
 }
 
 /** A render that has not moved for this long is said to have made no progress (the same silence the
  *  report logs as a stall; a test pins the two together). */
 export const QUIET_SECONDS = 60;
+
+/** A render that has made no new picture for this long, while its processors are busy, is told it may be left to work:
+ *  one grey line more under the bar. */
+export const QUIET_BUSY_NOTE_SECONDS = 300;
 
 /** How often a line that counts minutes is redrawn while an export runs: well inside the minute it promises. The chat
  *  card and the Export dialog share it. */
@@ -92,9 +99,12 @@ export function describeStageLine(live: LiveFacts, now: number): string {
   if (live.stage === "queued") return describeStage(live);
   const quiet = quietSeconds(live, now);
   const parts: string[] = [];
-  if (quiet >= QUIET_SECONDS)
-    parts.push(`No progress for ${quiet < 120 ? `${quiet} s` : `${Math.floor(quiet / 60)} min`}`);
-  else {
+  if (quiet >= QUIET_SECONDS) {
+    const length = quiet < 120 ? `${quiet} s` : `${Math.floor(quiet / 60)} min`;
+    // A quiet render whose processors are busy is working on something heavy, and is not said to have made no progress.
+    if (live.busy === true) parts.push("Still working", `no new picture for ${length}`);
+    else parts.push(`No progress for ${length}`);
+  } else {
     // Checking the file and saving go on for minutes on a long export, and a line that never changed
     // would look as stuck as one that is.
     const minutes = Math.floor(whole(now - live.startedAt) / 60_000);
@@ -113,6 +123,14 @@ export function describeLiveStatus(live: LiveFacts, now: number): string {
   const left = timeLeftSeconds(live, now);
   const leftText = left === null ? "" : describeExportTime(left);
   return leftText ? `${front} · ${leftText} left` : front;
+}
+
+/** The grey line that follows the status once a busy render has made no new picture for five minutes, or null. It says
+ *  what the person can do, and the app stops such an export only at its ceilings. */
+export function describeQuietNote(live: LiveFacts, now: number): string | null {
+  return live.busy === true && quietSeconds(live, now) >= QUIET_BUSY_NOTE_SECONDS
+    ? "The processor is busy on a heavy part. You can cancel at any time."
+    : null;
 }
 
 /** What an export is expected to take: one sentence for the Export dialog before the click, the chat card while it runs,

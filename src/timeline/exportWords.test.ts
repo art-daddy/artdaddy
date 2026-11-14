@@ -11,6 +11,7 @@ import {
   describeExpected,
   describeLiveStatus,
   describeModeLines,
+  describeQuietNote,
   describeResult,
   describeRung,
   describeStage,
@@ -21,6 +22,7 @@ import {
   failureOf,
   ordinal,
   plainFailure,
+  QUIET_BUSY_NOTE_SECONDS,
   QUIET_SECONDS,
   quietSeconds,
   SAVE_ELSEWHERE_LINE,
@@ -119,6 +121,37 @@ describe("the status line", () => {
 
   it("does not give a time left while the render is not moving", () => {
     expect(describeLiveStatus(live({ lastMoveAt: T0 }), T0 + 90_000)).not.toContain("left");
+  });
+
+  it("calls a quiet render whose processors are busy 'still working', never 'no progress'; idle or unknown keep today's words", () => {
+    const quiet = (busy: boolean | null | undefined) =>
+      describeLiveStatus(
+        live({ step: 2, steps: 13, fraction: 0.12, lastMoveAt: T0, busy }),
+        T0 + 7 * 60_000,
+      );
+    expect(quiet(true)).toBe(
+      "Still working · no new picture for 7 min · Rendering part 3 of 12 · 12%",
+    );
+    for (const idle of [false, null, undefined])
+      expect(quiet(idle)).toBe("No progress for 7 min · Rendering part 3 of 12 · 12%");
+    // Under a minute of quiet nothing is said either way, and busy changes nothing there.
+    expect(describeLiveStatus(live({ busy: true }), T0 + 20_000)).toBe(
+      describeLiveStatus(live({ busy: false }), T0 + 20_000),
+    );
+  });
+
+  it("adds the grey line only for a render that is busy and has been quiet for five minutes, and promises nothing about the outcome", () => {
+    const note = (busy: boolean | null | undefined, quietSeconds: number) =>
+      describeQuietNote(live({ lastMoveAt: T0, busy }), T0 + quietSeconds * 1000);
+    expect(note(true, QUIET_BUSY_NOTE_SECONDS - 1)).toBeNull();
+    expect(note(true, QUIET_BUSY_NOTE_SECONDS)).toBe(
+      "The processor is busy on a heavy part. You can cancel at any time.",
+    );
+    for (const idle of [false, null, undefined]) expect(note(idle, 3600)).toBeNull();
+    expect(
+      describeQuietNote(live({ stage: "checking", lastMoveAt: T0, busy: true }), T0 + 3600_000),
+    ).toBeNull(); // checking the file and saving are not the render standing still
+    expect(note(true, 3600)).not.toMatch(/pixel|picture|same|identical|faster/i);
   });
 
   it("gives no percentage outside the render", () => {
