@@ -265,6 +265,11 @@ export class WakeRegistry {
     return dropped;
   }
 
+  /** Is the file behind `key` still waited for in this chat: asked of a watcher, which stops when it is not. */
+  isPending(chat: ChatKey, key: string): boolean {
+    return this.entries.get(`${chatId(chat)}${SEP}${key}`)?.state === "pending";
+  }
+
   /** The host is done with a released batch (woke, or decided not to): forget it. */
   resolve(batchId: string): void {
     const batch = this.batches.get(batchId);

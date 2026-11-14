@@ -120,6 +120,27 @@ describe("a batch of files the assistant was told were not ready", () => {
     expect(out[0].size).toBe(4);
   });
 
+  it("says whether a file is still waited for: until it settles, is read, or its turn is dropped", () => {
+    const r = new WakeRegistry();
+    begin(r, A, 1);
+    for (const k of ["a", "b", "c"]) ask(r, A, 1, k);
+    expect([r.isPending(A, "a"), r.isPending(A, "b"), r.isPending(B, "a")]).toEqual([
+      true,
+      true,
+      false, // another chat of the project is not waiting for it
+    ]);
+    land(r, A, "a", 1);
+    r.fetched(A, "src-b", 2);
+    expect([r.isPending(A, "a"), r.isPending(A, "b"), r.isPending(A, "c")]).toEqual([
+      false,
+      false,
+      true,
+    ]);
+    r.endTurn(A, 1, "stopped", 3);
+    expect(r.isPending(A, "c")).toBe(false);
+    expect(r.isPending(A, "never-asked")).toBe(false);
+  });
+
   it("settles a person's Cancel as cancelled whichever way it arrives: it is no failure and gets no note", () => {
     const r = new WakeRegistry();
     begin(r, A, 1);

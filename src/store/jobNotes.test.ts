@@ -6,6 +6,7 @@ import {
   pendingJobNotes,
   registerJobSink,
   SETTLE_WINDOW_MS,
+  subscribeJobSettled,
   unregisterJobSink,
   type SettledJob,
 } from "./jobNotes";
@@ -323,6 +324,20 @@ describe("a job with its own delivery rules is asked at the moment of delivery",
     notifyJobSettled(A, words("w1"));
     vi.advanceTimersByTime(SETTLE_WINDOW_MS);
     expect(s.deliveries).toEqual([[words("w1")]]);
+  });
+
+  // The one listener recovers generated media for a job that produced some; the words of files already in the
+  // library are not that, though the job names them.
+  it("tells the listeners about an export or a generation, and not about the words of files", () => {
+    const heard: string[] = [];
+    const stop = subscribeJobSettled((_dir, j) => void heard.push(j.id));
+    try {
+      notifyJobSettled(A, job("gen-1", { media_refs: ["media_gen_1"] }));
+      notifyJobSettled(A, words("w1"));
+      expect(heard).toEqual(["gen-1"]);
+    } finally {
+      stop();
+    }
   });
 
   it("queues a job that arrives during delivery for the next flush, held jobs included", () => {

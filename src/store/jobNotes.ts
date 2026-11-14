@@ -82,11 +82,14 @@ export function unregisterJobSink(projectDir: string): void {
 /** Record a settled job and schedule the wake. Work another driver started is dropped here rather
  *  than filtered at delivery: it must never occupy the coalescing window either. */
 export function notifyJobSettled(projectDir: string, job: SettledJob): void {
-  for (const listener of settledListeners) {
-    try {
-      void Promise.resolve(listener(projectDir, job)).catch(() => undefined);
-    } catch {}
-  }
+  // The listeners hear of work that produced media. The words of files already in the library are the wake's own
+  // business: nothing is recovered, reconciled or refreshed because they landed.
+  if (job.kind !== "words")
+    for (const listener of settledListeners) {
+      try {
+        void Promise.resolve(listener(projectDir, job)).catch(() => undefined);
+      } catch {}
+    }
   if (job.startedBy !== "chat") return;
   const q = queued.get(projectDir);
   if (q) q.push(job);
