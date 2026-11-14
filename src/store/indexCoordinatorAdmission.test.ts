@@ -16,7 +16,8 @@ import { SpeechCancelledError } from "../tools/speechFailure";
 import { recordSpeechRun } from "../tools/speechPace";
 import { __resetPlanLog, recentPlans } from "../tools/speechPlanLog";
 import { prioritizeTranscript } from "../tools/transcriptQueue";
-import { __resetWorkGate } from "../tools/workGate";
+import { __resetWorkGate, lookWhisper, setExportsBusy } from "../tools/workGate";
+import { __resetSpeechJobs, useSpeechJobs } from "./speechJobs";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -107,6 +108,7 @@ beforeEach(() => {
   __resetExportFlags();
   __resetPlanLog();
   __resetSpeechSession();
+  __resetSpeechJobs();
   __resetWorkGate();
   for (const spy of [ensureTranscript, ensureTranscripts, runWhisper, reportAppError])
     spy.mockClear();
@@ -349,6 +351,74 @@ describe("a file the person stopped", () => {
     expect(reportAppError).not.toHaveBeenCalled();
     expect(wasCancelledByPerson("transcript\u0000library/a.mp3")).toBe(true);
     expect(wasCancelledByPerson("transcript\u0000library/b.mp3")).toBe(true);
+    c.dispose();
+  });
+});
+
+describe("a file waiting for its turn", () => {
+  it("is shown to the chip while an EXPORT is what it waits for, as waiting and not slow, and is gone the moment the export ends", async () => {
+    setExportsBusy(true);
+    const c = coordinator();
+    c.indexSource("library/talk.mp4");
+    await settle(() => useSpeechJobs.getState().jobs.length === 1);
+    const [job] = useSpeechJobs.getState().jobs;
+    expect(job).toMatchObject({
+      purpose: "index",
+      label: "talk.mp4",
+      phase: "waiting",
+      startedAt: null,
+      doneS: 0,
+      rate: null,
+      etaS: null,
+      facts: { exportsBusy: true },
+    });
+    await quiet();
+    expect(started(), "an export holds the turn").toEqual([]);
+    setExportsBusy(false);
+    await settle(() => started().length === 1);
+    expect(useSpeechJobs.getState().jobs).toEqual([]);
+    expect(started()).toEqual(["library/talk.mp4"]);
+    c.dispose();
+  });
+
+  it("is not shown while a look or another transcription is what it waits for", async () => {
+    let finishLook!: () => void;
+    const look = lookWhisper(() => new Promise<void>((r) => (finishLook = r)));
+    const c = coordinator();
+    c.indexSource("library/talk.mp4");
+    await quiet();
+    expect(started()).toEqual([]);
+    expect(useSpeechJobs.getState().jobs).toEqual([]);
+    finishLook();
+    await look;
+    await settle(() => started().length === 1);
+    c.dispose();
+  });
+
+  it("is taken off the chip when the project closes while it waits for the export", async () => {
+    setExportsBusy(true);
+    const c = coordinator();
+    c.indexSource("library/talk.mp4");
+    await settle(() => useSpeechJobs.getState().jobs.length === 1);
+    c.dispose();
+    await settle(() => useSpeechJobs.getState().jobs.length === 0);
+    expect(useSpeechJobs.getState().jobs).toEqual([]);
+    expect(started()).toEqual([]);
+  });
+
+  it("is not made worse by a list that cannot be written: the file is still transcribed when its turn comes", async () => {
+    setExportsBusy(true);
+    const state = useSpeechJobs.getState();
+    const add = vi.spyOn(state, "add").mockImplementation(() => {
+      throw new Error("list down");
+    });
+    const c = coordinator();
+    c.indexSource("library/talk.mp4");
+    await quiet();
+    setExportsBusy(false);
+    await settle(() => started().length === 1);
+    expect(started()).toEqual(["library/talk.mp4"]);
+    add.mockRestore();
     c.dispose();
   });
 });

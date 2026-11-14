@@ -16,7 +16,7 @@ import {
 } from "../store/speechJobs";
 import { cpuOnlyNow } from "./speechBackend";
 import { createSpeechMonitor, passesLiveCap, type MonitorSnapshot } from "./speechMonitor";
-import { backendNow, readPace } from "./speechPace";
+import { backendNow, readPace, recordSpeechRun } from "./speechPace";
 import { CAP_S } from "./speechPlan";
 import { recordPlan } from "./speechPlanLog";
 import { exportsBusyNow, onExportsBusy } from "./workGate";
@@ -181,6 +181,11 @@ function watchRun(input: WatchInput): RunWatch {
     if (!onProcessor || !passesLiveCap(elapsedS, snap.etaS, CAP_S)) return;
     stopped = true;
     liveProjectedS = elapsedS + (snap.etaS ?? 0);
+    // What this run showed of the processor's pace is kept, so the next file is judged by it at admission
+    // and not started only to be stopped again (a stopped run reports no timings of its own).
+    safely(() =>
+      recordSpeechRun(snap.doneS, elapsedS, "cpu", undefined, snap.startupS ?? undefined),
+    );
     safely(() =>
       recordPlan({
         at: now(),

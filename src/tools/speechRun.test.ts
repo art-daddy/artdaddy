@@ -169,6 +169,18 @@ describe("the watcher of one run", () => {
     }
   });
 
+  it("keeps no pace for a run the person stopped, or that failed: only a run the live check stopped has shown a speed worth keeping", () => {
+    for (const [code, by] of [
+      [-1, "person"],
+      [1, null],
+    ] as const) {
+      const w = watch({ liveStop: false });
+      slowRun(w);
+      w.finish(code, by);
+    }
+    expect(readPace()).toEqual([]);
+  });
+
   it("has its Cancel call stop with the person's reason, for this run", () => {
     watch();
     expect(cancelSpeechJob("whisper-w1")).toBe(true);
@@ -270,6 +282,9 @@ describe("the watcher of one run", () => {
       expect(stop).toHaveBeenCalledExactlyOnceWith("too_slow");
       const end = w.finish(-1, "too_slow");
       expect(end.liveProjectedS).toBeCloseTo(55 + 3540, 6);
+      expect(readPace(), "what the run showed of this PC's pace is kept").toEqual([
+        [60, 55, "cpu"],
+      ]);
       expect(recentPlans()).toMatchObject([
         { plan: "ondemand", why: "cap", where: "live", backend: "cpu", file: "talk.mp4" },
       ]);
@@ -509,7 +524,9 @@ describe("a run of the real engine", () => {
     ]);
     expect(reportAppError, "a deferral is nobody's failure").not.toHaveBeenCalled();
     expect(cpuOnlyNow(), "and says nothing about the chip").toBe(true);
-    expect(readPace(), "a stopped run is not a speed").toEqual([]);
+    // A stopped run reports no timings of its own, so what it showed of the pace is kept: 60 s of audio in
+    // the 55 s since launch. The next file is judged by it, and not started only to be stopped again.
+    expect(readPace()).toEqual([[60, 55, "cpu"]]);
   });
 
   it("goes on with the same slow run when a request made it, when it is a stretch, and with the switch off", async () => {

@@ -40,6 +40,7 @@ import {
   wasCancelledByPerson,
 } from "../tools/speechAdmission";
 import { isSpeechCancelled } from "../tools/speechFailure";
+import { cpuOnlyNow } from "../tools/speechBackend";
 import { readPace } from "../tools/speechPace";
 import type { ProjectStoreAccess } from "../tools/store";
 import type { BatchOutcome, TranscribeWindow } from "../tools/transcribe";
@@ -51,10 +52,14 @@ import {
   type BatchFlags,
 } from "../tools/transcribeBatch";
 import { registerBackgroundTranscriber, type BackgroundLoudness } from "../tools/transcriptQueue";
-import { backgroundTurn } from "../tools/workGate";
+import { backgroundTurn, exportsBusyNow, onExportsBusy } from "../tools/workGate";
 import type { Timeline } from "../timeline/model";
 import { kindOf } from "../media/formats";
 import { reportAppError } from "../api/appEvents";
+import { useSpeechJobs } from "./speechJobs";
+
+/** Names the entries this indexer shows the chip while an export holds its turn back. */
+let queuedSeq = 0;
 
 // Media imported BY REFERENCE lives wherever the user keeps it, so neither pass may require
 // a path inside the project. Requiring `library/` here is why an externally-referenced clip
@@ -499,7 +504,13 @@ export class IndexCoordinator {
         if (this.txQ.length === 0) break;
         // One background whisper in the app at a time, and none starts while an export is queued
         // or running or a look's whisper runs. Closed while it waits: dropped with the queue.
-        const release = await backgroundTurn("whisper", this.ac.signal);
+        const waiting = this.showWaiting();
+        let release: (() => void) | null;
+        try {
+          release = await backgroundTurn("whisper", this.ac.signal);
+        } finally {
+          waiting();
+        }
         if (!release) break;
         try {
           // Chosen once the turn is held, so a transcript somebody asked for while this waited goes first.
@@ -516,6 +527,58 @@ export class IndexCoordinator {
       this.txRunning = false;
     }
     if (!this.disposed && !this.engineDown && this.txQ.length > 0) void this.drainTranscripts();
+  }
+
+  /** While an EXPORT holds the turn back, tell the top-bar chip so: a transcription waiting for the export is
+   *  not a slow one (S2-04). Only for that reason: a wait for a look, or for another transcription, is not
+   *  shown. Local, never sent. Returns how to take the entry away, which is also done when the export ends. */
+  private showWaiting(): () => void {
+    const nothing = (): void => undefined;
+    try {
+      const head = this.txQ[0];
+      if (!head || !exportsBusyNow()) return nothing;
+      const id = `queued-${++queuedSeq}`;
+      const cores = Number(globalThis.navigator?.hardwareConcurrency);
+      useSpeechJobs.getState().add({
+        id,
+        purpose: "index",
+        label: head.source.replace(/\\/g, "/").split("/").pop() || head.source,
+        spanS: null,
+        phase: "waiting",
+        stop: null,
+        enqueuedAt: Date.now(),
+        startedAt: null,
+        firstWordsAt: null,
+        endedAt: null,
+        doneS: 0,
+        rate: null,
+        etaS: null,
+        facts: {
+          backend: null,
+          gpuHeld: cpuOnlyNow(),
+          noGpu: false,
+          cores: Number.isFinite(cores) && cores > 0 ? cores : null,
+          threads: null,
+          exportsBusy: true,
+        },
+      });
+      const remove = (): void => {
+        try {
+          useSpeechJobs.getState().dismiss(id);
+        } catch {
+          /* the list is the chip's: nothing here depends on it */
+        }
+      };
+      const off = onExportsBusy((busy) => {
+        if (!busy) remove();
+      });
+      return () => {
+        off();
+        remove();
+      };
+    } catch {
+      return nothing;
+    }
   }
 
   /** The jobs of the next run: the one first in the queue, and the clips behind it that share its run of
