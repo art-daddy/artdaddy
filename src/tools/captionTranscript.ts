@@ -7,6 +7,7 @@
 // and leaves the work running, so the next call finds the words in the cache.
 import type { ClientToolContext } from "./context";
 import { exportFlag } from "../api/exportFlags";
+import { noteWordsFetched, wakeTargetOf } from "../store/speechWakeHost";
 import { ensureTranscript, transcribeSpan, type ParsedTranscript } from "./transcribe";
 import type { TranscriptFailureReason } from "./speechFailure";
 import { waitForRun, type InProgressTranscript } from "./transcriptWait";
@@ -46,9 +47,12 @@ export async function captionWords(
       : ensureTranscript(ctx, ref, undefined, language),
     boundMs: Math.max(CACHE_READ_FLOOR_MS, deadline - Date.now()),
     signal: ctx.signal,
+    wake: wakeTargetOf(ctx, ref, ref),
   });
   switch (outcome.kind) {
     case "done":
+      // add_captions is about to use these words: a wake that was going to say they are ready has nothing to say.
+      noteWordsFetched(ctx, ref);
       return { kind: "ready", transcript: outcome.value.parsed };
     case "pending":
       return { kind: "pending", status: outcome.status };

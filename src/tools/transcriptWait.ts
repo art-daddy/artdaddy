@@ -9,6 +9,7 @@ import { settledWithin } from "../lib/settledWithin";
 import { hostInfo, type HostOs } from "../platform/host";
 import { trackSpeechWait } from "../store/liveWait";
 import { downloadEtaSeconds, percent, useModelDownload } from "../store/modelDownload";
+import { registerPendingWords, type WakeTarget } from "../store/speechWakeHost";
 import {
   classifyTranscriptFailure,
   FAILURE_ADVICE,
@@ -87,6 +88,10 @@ export interface WaitRequest<T> {
   /** At most this long (ms) is waited. */
   boundMs: number;
   signal?: AbortSignal;
+  /** Where the answer "not ready" may bring the assistant back: the chat turn that asked, as `wakeTargetOf`
+   *  makes it. Null where no one can be promised a wake (an outside agent, the indexer, the switch off): a
+   *  caller that passes null says why where it does. Required, so that a new caller must decide. */
+  wake: WakeTarget | null;
   progress?: () => DownloadProgress | null;
   now?: () => number;
   samples?: readonly PaceSample[];
@@ -151,6 +156,8 @@ export async function waitForRun<T>(req: WaitRequest<T>): Promise<WaitOutcome<T>
   if (got?.ok) return { kind: "done", value: got.value };
   if (got) return { kind: "failed", status: failedTranscript(got.error) };
 
+  // Not ready, and the call is answering: the run goes on, and when it ends the chat that asked is told.
+  if (req.wake) registerPendingWords(req.wake, req.key, req.audioSeconds, settled);
   const samples = req.samples ?? readPace();
   const os = req.os ?? hostInfo().os;
   const download = (req.progress ?? modelDownloadNow)();

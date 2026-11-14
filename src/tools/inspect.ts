@@ -19,6 +19,7 @@ import { normLanguage, peekTranscript, runWhisper, transcriptRunning } from "./t
 import { languageProblem } from "./whisperLanguages";
 import type { TranscriptFailureReason } from "./speechFailure";
 import { failedTranscript, waitBoundMs, waitForRun } from "./transcriptWait";
+import { noteWordsFetched, wakeTargetOf } from "../store/speechWakeHost";
 import { clock, tooLongNotReady } from "./transcriptWords";
 import { prioritizeTranscript } from "./transcriptQueue";
 import { exportFlag } from "../api/exportFlags";
@@ -303,6 +304,10 @@ async function lookTranscript(
     waitMs: number;
     clip?: Clip | null;
     fps?: number;
+    /** The file as the library names it, and what the assistant called it (a media_ref or a clip_id): what a
+     *  wake for the words says and what a later read of the file is matched with. Absent: the path. */
+    mediaRef?: string;
+    askedAs?: string;
   },
 ): Promise<Result> {
   try {
@@ -328,6 +333,7 @@ async function lookTranscript(
         run: runWhisper(ctx, path, undefined, opts.language, window),
         boundMs: opts.waitMs,
         signal: ctx.signal,
+        wake: wakeTargetOf(ctx, opts.mediaRef ?? path, opts.askedAs ?? null),
       });
       if (outcome.kind === "cancelled") return { error: STOPPED_ERROR };
       if (outcome.kind === "pending") return { ...outcome.status };
@@ -387,6 +393,8 @@ async function lookTranscript(
       out.words = wordRows.slice(0, TRANSCRIPT_WORD_CAP);
       out.words_truncated = wordRows.length > TRANSCRIPT_WORD_CAP;
     }
+    // The assistant has the words of this file now: a wake that was going to tell it so has nothing to say.
+    noteWordsFetched(ctx, opts.mediaRef ?? path);
     return out;
   } catch (e) {
     const failed = failedTranscript(e);
@@ -600,6 +608,8 @@ async function inspectMedia(
         waitMs: waitLeftMs(),
         clip: timelineClip,
         fps: clipFps,
+        mediaRef: srcRef,
+        askedAs: clipId || srcRef,
       })
     : Promise.resolve(null);
   const finish = async (body: Result): Promise<Result> => {

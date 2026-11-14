@@ -70,6 +70,7 @@ function request<T>(run: Promise<T>, extra: Partial<WaitRequest<T>> = {}): WaitR
     audioSeconds: 30,
     run,
     boundMs: 15_000,
+    wake: null, // these tests are about the wait itself: nobody is promised a wake
     samples: [],
     os: "windows",
     progress: () => null,
