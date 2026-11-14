@@ -22,6 +22,7 @@ import {
   type ExportEncoder,
 } from "./exportEncoder";
 import { rungOf, type PeakSample, type Plan, type Rung } from "./exportPlan";
+import type { LeanOptions } from "./leanOptions";
 import type { RenderWorkload } from "./renderPlan";
 import type { ExportResources } from "../platform/host";
 
@@ -603,6 +604,8 @@ export interface ExportOptions {
   maxDurationSec?: number;
   /** Deliver only project frames [from, to): exactly the whole export's frames and sound there. */
   range?: { from: number; to: number };
+  /** The lean render paths (leanOptions.ts, Phase 3a). Absent: 0.27.0's plan, byte for byte. Only the two production boundaries pass it. */
+  lean?: LeanOptions;
 }
 
 /** The SHORTER side each preset targets. Reading presets off the short side means "1080p" is the

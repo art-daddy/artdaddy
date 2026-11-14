@@ -64,6 +64,10 @@ import {
 } from "../media/stillReader";
 import type { Animatable, Clip, Timeline } from "./model";
 import { validateTimeline } from "./validate";
+import { LeanTally, mergeLeanRecords, type LeanRecord } from "./leanRecord";
+import { leanZoomMask, type LeanMaskBudget } from "./leanZoom";
+import { readLeanFlags, type LeanOptions, type LeanProbeRequest } from "./leanOptions";
+import { probeLean } from "./leanProbe";
 import {
   framesOf,
   onCanvasFrames,
@@ -787,6 +791,9 @@ export interface RenderPlan {
   sources: { clipId: string; path: string }[];
   steps?: CommandStep[];
   audio?: CommandStep;
+  /** What the lean render paths did in this export (leanRecord.ts). Absent for a plan built without the `lean` option (a look, a test). Plain data: it
+   *  travels with the job to the report, which maps it to the two lean facts. */
+  lean?: LeanRecord;
 }
 
 type CompiledRenderPlan = Omit<RenderPlan, "workload">;
@@ -1599,6 +1606,10 @@ function buildSingleRenderCommand(
       : rng
         ? `color=${spec}:s=${cw}x${ch}:r=${fps}:d=${((rng.to - rng.from - 0.5) / fps).toFixed(6)},setpts=PTS+${rng.from}`
         : `color=${spec}:s=${cw}x${ch}:r=${fps}:d=${duration.toFixed(6)}`;
+  // The lean render paths (leanOptions.ts) are off for a look (a frame window) and for the audio pass; everything else sees them only when the caller passed the option.
+  const lean = options.lean && !win && pass !== "audio" ? options.lean : null;
+  const leanTally = new LeanTally();
+  const leanBudget: LeanMaskBudget = { chars: 0, boxes: 0 };
   const chains: string[] =
     pass === "audio" ? [] : [composed ? "[0:v]null[base]" : `${colorSrc("c=black")}[base]`];
   let last = "base";
@@ -1673,6 +1684,8 @@ function buildSingleRenderCommand(
     // aspect-preserved clip in its box. Box-size exprs here are in TIMELINE `t`
     // (offset=tin) to match the post-setpts overlay.
     let sizeAnim: { wBox: string; hBox: string } | null = null;
+    // The text of the pre-scale below (the picture at its box's LARGEST size): the lean zoom mask asks ffmpeg what size that gives (leanProbe.ts).
+    let preScale: string | null = null;
     // The per-frame zoom, appended as the clip's LAST filter (UJ-007): grade, effects, glow and
     // rotate size their state on the first frame they see, so they run at one size before it.
     let zoom: string | null = null;
@@ -1683,9 +1696,8 @@ function buildSingleRenderCommand(
       // (scene.ts fitRects). Everything before it runs at the box's LARGEST size,
       // so the zoom only ever shrinks what was rendered and keeps the detail.
       const foar = fitAspect(fit);
-      parts.push(
-        `scale=w=${evenPx(peak(r.sizeW, w))}:h=${evenPx(peak(r.sizeH, h))}:force_original_aspect_ratio=${foar}:force_divisible_by=2`,
-      );
+      preScale = `scale=w=${evenPx(peak(r.sizeW, w))}:h=${evenPx(peak(r.sizeH, h))}:force_original_aspect_ratio=${foar}:force_divisible_by=2`;
+      parts.push(preScale);
       sizeAnim = {
         wBox: r.sizeW !== undefined ? compileAnim(r.sizeW, "t", r.tin) : String(w),
         hBox: r.sizeH !== undefined ? compileAnim(r.sizeH, "t", r.tin) : String(h),
@@ -1854,6 +1866,7 @@ function buildSingleRenderCommand(
     if (fadeExpr !== null)
       // Visual fade: multiply the alpha plane by the fade envelope over [tin, tout].
       alpha.push(`geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*(${fadeExpr})'`);
+    let leanMask: { text: string } | null = null;
     if (coverAperture) {
       const boxWidth = r.sizeW !== undefined ? compileAnim(r.sizeW, "T", r.tin) : String(w);
       const boxHeight = r.sizeH !== undefined ? compileAnim(r.sizeH, "T", r.tin) : String(h);
@@ -1862,11 +1875,39 @@ function buildSingleRenderCommand(
       const coverScale = `max((${targetWidth})/W,(${targetHeight})/H)`;
       const apertureWidth = `((${targetWidth})/(${coverScale}))`;
       const apertureHeight = `((${targetHeight})/(${coverScale}))`;
-      alpha.push(
-        `geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*` +
-          `gte(X,(W-(${apertureWidth}))/2)*lt(X,(W+(${apertureWidth}))/2)*` +
-          `gte(Y,(H-(${apertureHeight}))/2)*lt(Y,(H+(${apertureHeight}))/2)'`,
-      );
+      // Fix 1 (Phase 3a): the aperture as an exact mask stream merged FIRST into the alpha plane (leanMasks.ts), where the lean path is on and
+      // the shape is proven; every other clip keeps today's per-pixel `geq` below, byte for byte.
+      if (lean && preScale !== null) {
+        const visible = framesOf(r.span, fps);
+        leanMask = leanZoomMask({
+          lean,
+          tally: leanTally,
+          budget: leanBudget,
+          path: inp.path,
+          preScale,
+          widthExpr: apertureWidth,
+          heightExpr: apertureHeight,
+          fps,
+          from: rng ? Math.max(visible.first, rng.from) : visible.first,
+          to: rng ? Math.min(visible.end, rng.to) : visible.end,
+          unproven:
+            hasRotate ||
+            parseGlow(r.glow) !== null ||
+            Math.abs(r.speed - 1) > 1e-6 ||
+            r.cropExpr !== null ||
+            r.flipH ||
+            r.flipV ||
+            !!inp.loop?.graph ||
+            inp.frozenFrame !== undefined ||
+            margin > 0,
+        });
+      }
+      if (!leanMask)
+        alpha.push(
+          `geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*` +
+            `gte(X,(W-(${apertureWidth}))/2)*lt(X,(W+(${apertureWidth}))/2)*` +
+            `gte(Y,(H-(${apertureHeight}))/2)*lt(Y,(H+(${apertureHeight}))/2)'`,
+        );
     }
     if (rotationFilter && !zoom) alpha.push(rotationFilter);
     if (zoom && !rotationFilter) alpha.push(zoom);
@@ -1893,6 +1934,14 @@ function buildSingleRenderCommand(
           : alpha.length
             ? `[g${i}o]${alpha.join(",")}[v${i}]`
             : `[g${i}o]null[v${i}]`,
+      );
+    } else if (leanMask) {
+      // The picture, then its mask stream, merged at the very START of the alpha stage: alphamerge replaces the alpha plane, so anything that touches alpha
+      // (opacity, crossfade, fade) must come after it, where it multiplies the aperture exactly as it multiplied the geq's 0 or 1.
+      chains.push(`${parts.join(",")},${alpha[0]}[leanpic${i}]`);
+      chains.push(`${leanMask.text}[leanmask${i}]`);
+      chains.push(
+        `[leanpic${i}][leanmask${i}]alphamerge${alpha.length > 1 ? `,${alpha.slice(1).join(",")}` : ""}[v${i}]`,
       );
     } else {
       chains.push(
@@ -2312,6 +2361,7 @@ function buildSingleRenderCommand(
     frame: false,
     contractVersion: RENDER_CONTRACT_VERSION,
     sources: inputs.map((i) => ({ clipId: i.clipId, path: i.path })),
+    ...(lean ? { lean: leanTally.record() } : {}),
   };
 }
 
@@ -2337,6 +2387,8 @@ function segmentedRenderPlan(
   const fonts = new Set<string>();
   const parts: { name: string; duration: number }[] = [];
   const steps: CommandStep[] = [];
+  // What each ACCEPTED part's lean paths did (a part that is split again is rebuilt, and its first build counts for nothing).
+  const leanRecords: Array<LeanRecord | undefined> = [];
   const persistentAudio = options.engine === "partition-pipes-v1" && original.audioExpected;
   const append = (start: number, end: number): void => {
     const spanLimit = options.__qaPieceSpanSeconds === 180 ? 180 : 60;
@@ -2351,7 +2403,11 @@ function segmentedRenderPlan(
     const part = buildSingleRenderCommand(
       timeline,
       name,
-      { engine: options.engine, range: { from: start, to: end } },
+      {
+        engine: options.engine,
+        range: { from: start, to: end },
+        ...(options.lean ? { lean: options.lean } : {}),
+      },
       undefined,
       undefined,
       prefix,
@@ -2396,6 +2452,7 @@ function segmentedRenderPlan(
     }
     steps.push({ args: staged.args, duration: (end - start) / fps });
     parts.push({ name, duration: (end - start) / fps });
+    leanRecords.push(part.lean);
     files.push(...staged.files);
     for (const font of part.fonts) fonts.add(font);
   };
@@ -2439,6 +2496,7 @@ function segmentedRenderPlan(
     dependencies: original.dependencies,
     assFiles: [...files, ...final.assFiles],
     fonts: [...fonts, ...final.fonts],
+    ...(options.lean ? { lean: mergeLeanRecords(leanRecords) } : {}),
   };
 }
 
@@ -2911,12 +2969,17 @@ async function prepareRender(
   const r = await loadForRender(ctx, kind, options.mode);
   if (!r.ok) return r;
   const picked = await encoderOptions(ctx, r, options, kind);
-  const plan = buildRenderCommand(r.seconds, outPath, {
+  const built: ExportOptions = {
     ...options,
     engine: r.engine,
     ...picked,
     branding: r.branding,
-  });
+  };
+  // A working render is a frame source nobody watches: it keeps 0.27.0's recipe. A deliverable gets the lean render paths.
+  const plan =
+    kind === "deliverable"
+      ? await buildLeanRenderCommand(ctx, r.seconds, outPath, built)
+      : buildRenderCommand(r.seconds, outPath, built);
   if (r.warnings.length) plan.warnings.push(...r.warnings);
   return {
     ok: true,
@@ -2924,6 +2987,25 @@ async function prepareRender(
     admission: r.admission,
     ...(r.branding ? { branding: r.branding } : {}),
   };
+}
+
+/** Build an export's plan with the lean render paths (leanOptions.ts): the six switches as they stand now and, when the builder needs ffmpeg to tell it
+ *  something before it can take a lean path (the size of a zooming picture), one round of answers and a second build. Every answer that does not come
+ *  leaves its clip on 0.27.0's recipe (counted as unknown). A plan with the zoom switch off is built once and asks nothing. */
+export async function buildLeanRenderCommand(
+  ctx: Pick<ClientToolContext, "runner" | "signal">,
+  raw: Timeline,
+  outPath: string,
+  options: ExportOptions,
+): Promise<RenderPlan> {
+  const flags = readLeanFlags();
+  const asked: LeanOptions = { ...flags, requests: [] };
+  const first = buildRenderCommand(raw, outPath, { ...options, lean: asked });
+  const requests: LeanProbeRequest[] = asked.requests ?? [];
+  if (requests.length === 0) return first;
+  const probed = await probeLean(ctx.runner, requests, ctx.signal);
+  if (probed.size === 0) return first;
+  return buildRenderCommand(raw, outPath, { ...options, lean: { ...flags, probed } });
 }
 
 /** What the person picked in the Export dialog, as a request: nothing picked is the app's own rule. */
