@@ -1882,6 +1882,76 @@ describe("whisper as a job of the app process (4i)", () => {
     ]);
   });
 
+  it("shows a run adopted after a crash as going on the chip's list, with a Cancel that kills it, and takes it off when it ends (F4)", async () => {
+    const fs = disk();
+    const jobs = new FakeJobs();
+    __setJobSupervisor(jobs);
+    void runWhisper(ctxWith(transcribeRunner(fs), fs), SRC).catch(() => undefined);
+    await until(() => jobs.started.length === 1);
+    const [id] = jobs.started;
+    const next = await nextPage(fs, jobs);
+    const chip = await import("../store/speechJobs");
+    expect(await next.transcribe.adoptTranscriptions(next.io)).toBe(1);
+    // Going, titled by the file, and Cancel can reach it: nothing about its speed is claimed
+    const shown = chip.useSpeechJobs.getState().jobs;
+    expect(shown).toHaveLength(1);
+    expect(shown[0]).toMatchObject({
+      id,
+      phase: "running",
+      label: SRC.split("/").pop(),
+      rate: null,
+      etaS: null,
+    });
+    // A request for the same file waits for the adopted run, starting nothing
+    const joined = next.transcribe.runWhisper(next.ctx, SRC).catch((e: unknown) => e);
+    for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 1));
+    expect(jobs.submitted).toHaveLength(1);
+    expect(chip.cancelSpeechJob(id), "Cancel reaches the adopted run").toBe(true);
+    await until(() => jobs.killed.includes(id));
+    // ...and is told the person stopped it, not that the engine failed
+    await until(() => chip.useSpeechJobs.getState().jobs[0]?.phase === "stopped");
+    expect(chip.useSpeechJobs.getState().jobs[0]).toMatchObject({ stop: "cancelled" });
+    expect((await joined) as { code?: string }).toMatchObject({ code: "speech_cancelled" });
+    expect(await next.transcribe.peekTranscript(next.ctx, SRC), "nothing was kept").toBeNull();
+    await until(() => jobs.forgotten.includes(id));
+    expect(under(fs, WORK)).toEqual([]);
+  });
+
+  it("takes an adopted run off the chip's list when it ends by itself, with its words kept (F4)", async () => {
+    const fs = disk();
+    const jobs = new FakeJobs();
+    __setJobSupervisor(jobs);
+    void runWhisper(ctxWith(transcribeRunner(fs), fs), SRC).catch(() => undefined);
+    await until(() => jobs.started.length === 1);
+    const [id] = jobs.started;
+    const next = await nextPage(fs, jobs);
+    const chip = await import("../store/speechJobs");
+    expect(await next.transcribe.adoptTranscriptions(next.io)).toBe(1);
+    expect(chip.useSpeechJobs.getState().jobs).toHaveLength(1);
+    await finish(fs, jobs, id);
+    await until(() => jobs.forgotten.includes(id));
+    expect(chip.useSpeechJobs.getState().jobs, "gone, not stopped").toEqual([]);
+    expect(chip.cancelSpeechJob(id), "and nothing is left to cancel").toBe(false);
+    expect(await next.transcribe.peekTranscript(next.ctx, SRC)).not.toBeNull();
+  });
+
+  it("shows a run that had already ended while no page was there on no list at all (F4)", async () => {
+    const fs = disk();
+    const jobs = new FakeJobs();
+    __setJobSupervisor(jobs);
+    void runWhisper(ctxWith(transcribeRunner(fs), fs), SRC).catch(() => undefined);
+    await until(() => jobs.started.length === 1);
+    const [id] = jobs.started;
+    jobs.pageDied();
+    await finish(fs, jobs, id);
+    const next = await nextPage(fs, jobs);
+    const chip = await import("../store/speechJobs");
+    expect(await next.transcribe.adoptTranscriptions(next.io)).toBe(1);
+    expect(chip.useSpeechJobs.getState().jobs).toEqual([]);
+    await until(() => jobs.forgotten.includes(id));
+    expect(await next.transcribe.peekTranscript(next.ctx, SRC)).not.toBeNull();
+  });
+
   it("refuses a run that was too narrow for its language when the page that adopts it finishes it, and runs it again wider", async () => {
     const fs = disk();
     const jobs = new FakeJobs();

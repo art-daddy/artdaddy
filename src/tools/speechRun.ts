@@ -98,6 +98,75 @@ const QUIET: RunWatch = {
   finish: () => ({ startupS: null, liveProjectedS: null }),
 };
 
+/** What the chip is told of a run that a crashed page left in the app process and this page has taken over
+ *  (F4): it is going, with a Cancel that kills its process, and it leaves the list when it ends. Nothing
+ *  reads its output, so nothing about its speed or time left is claimed, and the live check never stops it:
+ *  only the person can. Local only, and it can never fail the run it shows. */
+export interface AdoptedRun {
+  id: string;
+  purpose: SpeechPurpose;
+  label: string;
+  spanS: number | null;
+  /** When the process was queued and when it started (epoch ms); null when it had not. */
+  enqueuedAt: number;
+  startedAt: number | null;
+  /** Kill the process (the person pressed Cancel). */
+  stop: () => void;
+  now?: () => number;
+}
+
+export function showAdoptedRun(input: AdoptedRun): {
+  /** The person pressed Cancel: the run that ends after this is theirs, not a failure of the engine. */
+  stoppedByPerson: () => boolean;
+  /** The run ended. Idempotent. */
+  end: (how: "done" | "failed" | "cancelled") => void;
+} {
+  const now = input.now ?? Date.now;
+  let cancelled = false;
+  let ended = false;
+  let withdraw: (() => void) | null = null;
+  safely(() => {
+    const cores = Number(globalThis.navigator?.hardwareConcurrency);
+    useSpeechJobs.getState().add({
+      id: input.id,
+      purpose: input.purpose,
+      label: input.label,
+      work: [],
+      spanS: input.spanS,
+      phase: "running",
+      stop: null,
+      enqueuedAt: input.enqueuedAt,
+      startedAt: input.startedAt ?? input.enqueuedAt,
+      firstWordsAt: null,
+      endedAt: null,
+      doneS: 0,
+      rate: null,
+      etaS: null,
+      facts: {
+        backend: null,
+        gpuHeld: cpuOnlyNow(),
+        noGpu: false,
+        cores: Number.isFinite(cores) && cores > 0 ? cores : null,
+        threads: null,
+        exportsBusy: exportsBusyNow(),
+      },
+    });
+    withdraw = registerCanceller(input.id, () => {
+      cancelled = true;
+      input.stop();
+    });
+  });
+  return {
+    stoppedByPerson: () => cancelled,
+    end(how) {
+      if (ended) return;
+      ended = true;
+      safely(() => withdraw?.());
+      safely(() => useSpeechJobs.getState().end(input.id, how, now()));
+    },
+  };
+}
+
 /** Watch one run. If anything at all goes wrong in setting the watch up, the run is simply not watched:
  *  an observer can never fail the transcription it observes. */
 export function watchSpeechRun(input: WatchInput): RunWatch {

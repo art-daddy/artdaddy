@@ -45,7 +45,7 @@ import {
 import { backendOfRun, recordSpeechRun } from "./speechPace";
 import { padded, playedSpan, spanWindows } from "./speechSpans";
 import { CAP_S } from "./speechPlan";
-import { watchSpeechRun, type RunInfo, type StopReason } from "./speechRun";
+import { showAdoptedRun, watchSpeechRun, type RunInfo, type StopReason } from "./speechRun";
 import { exportFlag } from "../api/exportFlags";
 import { joinPath } from "./store";
 import { prioritizeTranscript } from "./transcriptQueue";
@@ -57,6 +57,7 @@ import { beginSessionActivity } from "../observability/crashWatch";
 import { settledWithin } from "../lib/settledWithin";
 import { stoppedAnswer } from "../lib/stopped";
 import { trackSpeechWait } from "../store/liveWait";
+import type { SpeechPurpose } from "../store/speechJobs";
 import {
   clearModelDownload,
   megabytes,
@@ -1214,6 +1215,10 @@ async function runWhisperOnce(
               start,
               end,
             });
+      // The audio is read now, so its length is exact: the engine's chip entry shows it, and the plan is read
+      // again by it before the engine is launched (below).
+      const spanS = await wavSeconds(ctx, wav);
+      const purpose: SpeechPurpose = ctx.background ? "index" : (ctx.speechPurpose ?? "look");
       // The decoding setting. A named language is known now; "auto" is predicted from what this
       // machine last detected and CHECKED once the engine has said (finishWhisper). A model size
       // the gate did not measure is never narrowed, and a re-run is given the width it was sent for.
@@ -1238,6 +1243,9 @@ async function runWhisperOnce(
         variant: MODEL_VARIANT,
         requested: lang,
         ...(widen !== undefined ? { rerun: true } : {}),
+        label: fileLabel(src),
+        purpose,
+        spanS,
       };
       // -mc 0: no text carried from one 30 s window into the next. With it, six minutes of
       // silence left whisper repeating "[BLANK_AUDIO]" straight through the speech after it
@@ -1259,11 +1267,10 @@ async function runWhisperOnce(
         "0",
         ...decodeArgs(plan.beam),
       ];
-      // The audio is read now: its length is exact, and what the first look did not know (a probe that
+      // The audio is read: its length is exact, and what the first look did not know (a probe that
       // failed or lied) or what has changed since (a model that took an hour to install, a pace measured by
       // another run) is read again where the run can still be left undone (S2-02): no engine is launched,
       // and the audio is let go of as for any run that fails. Only the whole files the background starts.
-      const spanS = await wavSeconds(ctx, wav);
       if (ctx.background && win.key === "") {
         const admission = admitWholeFile({
           file: fileLabel(src),
@@ -1274,7 +1281,7 @@ async function runWhisperOnce(
         if (admission?.plan === "ondemand") throw new SpeechDeferredError(admission);
       }
       const { engine, release } = await engineFor(ctx, args, meta, {
-        purpose: ctx.background ? "index" : (ctx.speechPurpose ?? "look"),
+        purpose,
         label: fileLabel(src),
         work: [
           {
@@ -1530,6 +1537,12 @@ interface TranscriptJobMeta {
   requested?: string;
   /** True for the run that replaced one refused for being narrower than its language needs. */
   rerun?: boolean;
+  /** What the chip shows of this run if a page that did not start it takes it over after a crash (F4): the
+   *  file's name, what asked for it, and how much audio it reads. LOCAL: the meta stays in the app process,
+   *  and the app process outlives a page, never a version of the app, so a run adopted always carries them. */
+  label?: string;
+  purpose?: SpeechPurpose;
+  spanS?: number | null;
 }
 
 /** A run of whisper made into its transcript and kept: the one finish, for the page that ran it
@@ -1681,6 +1694,20 @@ async function adoptOrphans(io?: ScratchIO): Promise<number> {
   if (!sup) return 0;
   const scratchIo = io ?? (await desktopScratchIO());
   if (!scratchIo) return 0;
+  /** An adopted run is on the chip's list, going, with a Cancel that kills its process (F4): what its meta
+   *  carries is what the page that started it knew. Nothing is listed for one that has already ended. */
+  const showing = (v: JobView, m: TranscriptJobMeta | undefined) =>
+    v.state === "exited"
+      ? null
+      : showAdoptedRun({
+          id: v.id,
+          purpose: m?.purpose ?? "index",
+          label: m?.label ?? "a file",
+          spanS: typeof m?.spanS === "number" ? m.spanS : null,
+          enqueuedAt: v.queued_at,
+          startedAt: v.started_at,
+          stop: () => void sup.kill(v.id).catch(() => undefined),
+        });
   let adopted = 0;
   for (const v of await sup.list()) {
     const together = transcriptsMeta(v);
@@ -1690,14 +1717,25 @@ async function adoptOrphans(io?: ScratchIO): Promise<number> {
       // output each was given, and let go of once.
       const turn = adoptTurn("whisper");
       const ended = whenJobEnds(sup, v.id);
+      const shown = showing(v, together[0]);
       const finishing = together.map((m) => {
         const finished = holdingWavs(scratchIo, m.wavs, async () => {
           const job = await ended;
           if (!job) throw new Error("the app process no longer has this transcription");
-          return finishWhisper(scratchIo, m, jobResult(job), undefined, true);
+          const result = jobResult(job);
+          return finishWhisper(
+            scratchIo,
+            m,
+            shown?.stoppedByPerson() ? { ...result, stoppedBy: "person" } : result,
+            undefined,
+            true,
+          );
         });
-        // A failure reaches whoever joins it; nobody else is waiting on it.
-        finished.catch(() => undefined);
+        // A failure reaches whoever joins it; nobody else is waiting on it. A file the person stopped is
+        // theirs to ask for again, and nothing starts it behind their back (F7).
+        finished.catch((e: unknown) => {
+          if (isSpeechCancelled(e)) markRunCancelledByPerson(m.key);
+        });
         joinable(m.once, finished);
         return finished;
       });
@@ -1706,6 +1744,8 @@ async function adoptOrphans(io?: ScratchIO): Promise<number> {
           // The run is reported once, by the page that finished it, for the files it kept.
           const kept = outcomes.filter((o) => o.status === "fulfilled").length;
           const job = await ended;
+          if (shown)
+            shown.end(kept > 0 ? "done" : shown.stoppedByPerson() ? "cancelled" : "failed");
           if (kept > 0 && job)
             reportTranscription(
               whisperRunFacts(jobResult(job).stderr, { batch: true }),
@@ -1715,6 +1755,7 @@ async function adoptOrphans(io?: ScratchIO): Promise<number> {
         })
         .catch(() => undefined)
         .finally(async () => {
+          shown?.end("failed");
           turn();
           await sup.forget(v.id).catch(() => undefined);
         });
@@ -1725,10 +1766,25 @@ async function adoptOrphans(io?: ScratchIO): Promise<number> {
     adopted++;
     // Held until its words are kept: while it runs, it is the whisper at work.
     const turn = adoptTurn("whisper");
+    const shown = showing(v, m);
     const finished = holdingWavs(scratchIo, m.wavs, async () => {
-      const ended = await whenJobEnds(sup, v.id);
-      if (!ended) throw new Error("the app process no longer has this transcription");
-      return finishWhisper(scratchIo, m, jobResult(ended));
+      try {
+        const ended = await whenJobEnds(sup, v.id);
+        if (!ended) throw new Error("the app process no longer has this transcription");
+        // A run the person stopped on the chip is answered as that, never as a failure of the engine.
+        const result = jobResult(ended);
+        const parsed = await finishWhisper(
+          scratchIo,
+          m,
+          shown?.stoppedByPerson() ? { ...result, stoppedBy: "person" } : result,
+        );
+        shown?.end("done");
+        return parsed;
+      } catch (e) {
+        if (isSpeechCancelled(e)) markRunCancelledByPerson(m.key);
+        shown?.end(isSpeechCancelled(e) ? "cancelled" : "failed");
+        throw e;
+      }
     }).finally(async () => {
       turn();
       await sup.forget(v.id).catch(() => undefined);
@@ -1999,6 +2055,8 @@ async function runTogether(
         beam: plan.beam,
         variant: MODEL_VARIANT,
         requested: lang,
+        label: fileLabel(ours[n].src),
+        purpose: ctx.background ? "index" : (ctx.speechPurpose ?? "look"),
       }));
       // One process, every file in it, each output under its own name: the nth `-of` is the nth `-f`'s.
       const args = [
