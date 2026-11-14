@@ -26,6 +26,7 @@ import ExportProgressBar from "./ExportProgressBar";
 import ExportQueuePane from "./ExportQueuePane";
 import SpeedCheckLine from "./SpeedCheckLine";
 import { useSpeedCheck } from "./useSpeedCheck";
+import ChipRow from "./ChipRow";
 
 export interface ExportSettings {
   resolution: ExportResolution;
@@ -71,12 +72,14 @@ export default function ExportDialog({
   const [fps, setFps] = useState<number | null>(null);
   // What the person picked in the Mode row; null until they touch it (the app's own choice shows then).
   const [picked, setPicked] = useState<ExportMode | null>(null);
+  // Counts what the person changes about the graphics chip (its switch, Try it again now): the app's answer below is asked again.
+  const [chipEpoch, bumpChip] = useReducer((n: number) => n + 1, 0);
   // What the app decided about the encoder (exportChoice.ts): whether the Mode row is shown and what it starts on. Kept with
   // what it was decided for (the settings, and the history of this PC's exports, which the estimates and so the choice are made
   // from), so the dialog knows whether the answer it has is for what is on screen: an answer to a question the settings or
   // the history have since changed is not to be sent on, and one that has not come yet, or never will (the look failed), is
   // not mistaken for "no row".
-  const askedFor = `${resolution}|${quality}|${fps ?? ""}|${workload ? JSON.stringify(workload) : ""}`;
+  const askedFor = `${resolution}|${quality}|${fps ?? ""}|${workload ? JSON.stringify(workload) : ""}|${chipEpoch}`;
   const calibrations = useExportJob((s) => s.calibrations);
   const [answer, setAnswer] = useState<{
     readonly for: string;
@@ -251,6 +254,7 @@ export default function ExportDialog({
                 ))}
               </select>
             </Field>
+            <ChipRow workload={workload} resolution={resolution} fps={fps} onChange={bumpChip} />
             {decision?.showRow && (
               <div className="text-xs text-neutral-400">
                 <div className="flex items-center gap-3">

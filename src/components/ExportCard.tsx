@@ -54,6 +54,7 @@ import {
   STATUS_REFRESH_MS,
 } from "../timeline/exportWords";
 import ExportProgressBar from "./ExportProgressBar";
+import ChipLine from "./ChipLine";
 import SaveToRow from "./SaveToRow";
 import { cn } from "./ui";
 
@@ -235,9 +236,10 @@ export default function ExportCard(): JSX.Element | null {
               <div className="mt-0.5 text-[11px] text-neutral-500">{describeRung(r.rung)}</div>
             )}
             {describeEncoder(r.encoder, r.reason) && (
-              <div className="mt-0.5 text-[11px] text-neutral-500">
-                {describeEncoder(r.encoder, r.reason)}
-              </div>
+              <ChipLine
+                line={describeEncoder(r.encoder, r.reason)}
+                chip={r.encoder === "amd" || r.encoder === "nvidia" || r.encoder === "intel"}
+              />
             )}
           </div>
         );
