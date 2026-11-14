@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { toolDefinition } from "../contract";
 import { resetLiveWait, useLiveWait } from "../store/liveWait";
 import { TranscriptionFailure } from "./speechFailure";
+import { estimateTranscribeSeconds } from "./speechPace";
 import {
   __resetWaiting,
   waitBoundMs,
@@ -324,14 +325,15 @@ describe("waitForRun", () => {
     });
 
     it("does not collapse to 'about done' for a run that is already past its estimate", async () => {
-      // 30 s of speech is estimated at about 14 s here; at 40 s the run is well past that.
+      // 30 s of speech is estimated at about 30 s here (the default start-up and rate); at 40 s the
+      // run is well past that.
       const eta = await etaAt(30, 40);
       expect(eta!).toBeGreaterThanOrEqual(20);
     });
 
     it("follows the machine's own measured pace", async () => {
-      const slowMachine: WaitRequest<never>["samples"] = [[100, 203]]; // 2 s of work per second
-      const fastMachine: WaitRequest<never>["samples"] = [[100, 13]]; // 0.1 s per second
+      const slowMachine: WaitRequest<never>["samples"] = [[100, 203, "gpu"]]; // about 1.9 s of work per second
+      const fastMachine: WaitRequest<never>["samples"] = [[100, 13, "gpu"]]; // as little as the model believes
       expect(await etaAt(600, 1, slowMachine)).toBeGreaterThan((await etaAt(600, 1, fastMachine))!);
     });
 
@@ -352,10 +354,13 @@ describe("waitForRun", () => {
       expect(big.outcome?.kind).toBe("pending");
       done("ok");
       await vi.advanceTimersByTimeAsync(0);
-      // Were the 50 minutes still queued ahead, this look's wait would be about a thousand seconds.
+      // Were the 50 minutes still queued ahead, this look's wait would be about a thousand seconds:
+      // alone it is the time the pace model gives 30 s of speech, less the second it has waited.
       const small = start(request(NEVER(), { audioSeconds: 30, boundMs: 1_000 }));
       await vi.advanceTimersByTimeAsync(1_000);
-      expect((small.outcome as { status: { eta_s: number } }).status.eta_s).toBeLessThanOrEqual(14);
+      expect((small.outcome as { status: { eta_s: number } }).status.eta_s).toBeLessThanOrEqual(
+        estimateTranscribeSeconds(30, [], "windows"),
+      );
     });
   });
 });

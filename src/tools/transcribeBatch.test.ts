@@ -1,13 +1,13 @@
 // Which queued clips share one run of the engine. The rules are about who must not be held up: a
 // clip somebody asked for, a stretch of a file, another language and a clip of unknown length run
-// alone, and a batch is sized to take about BATCH_TARGET_S on the machine's own pace.
+// alone, and a batch is sized to hold about BATCH_WORK_TARGET_S of work on the machine's own pace.
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
-import { secondsPerAudioSecond, STARTUP_S, type PaceSample } from "./speechPace";
+import { backendNow, paceModel, type PaceSample } from "./speechPace";
 import {
   BATCH_MAX_FILES,
-  BATCH_TARGET_S,
+  BATCH_WORK_TARGET_S,
   batchAudioCapSeconds,
   couldShare,
   pickBatch,
@@ -24,34 +24,58 @@ const clip = (seconds: number | null, over: Partial<BatchCandidate> = {}): Batch
 });
 
 describe("how much audio one batch may hold", () => {
-  it("is what fits in the target after the start-up, at this machine's own pace", () => {
-    // no history: the typical figure for the system
-    expect(batchAudioCapSeconds([], "windows")).toBeCloseTo((BATCH_TARGET_S - STARTUP_S) / 0.35);
-    expect(batchAudioCapSeconds([], "macos")).toBeCloseTo((BATCH_TARGET_S - STARTUP_S) / 0.1);
-    // a fast GPU: 100 s of audio in 10 s of wall time leaves 7 s of work, 0.07 s for each
-    expect(batchAudioCapSeconds([[100, 10]], "windows")).toBeCloseTo(
-      (BATCH_TARGET_S - STARTUP_S) / 0.07,
+  it("is what fits in the target of work, at this machine's own pace", () => {
+    // no history: the figure of the backend the machine would use
+    expect(batchAudioCapSeconds([], "windows")).toBeCloseTo(
+      BATCH_WORK_TARGET_S / paceModel([], "gpu", "windows").rate,
+    );
+    expect(batchAudioCapSeconds([], "macos")).toBeCloseTo(
+      BATCH_WORK_TARGET_S / paceModel([], "gpu", "macos").rate,
+    );
+    expect(batchAudioCapSeconds([], "linux")).toBeCloseTo(
+      BATCH_WORK_TARGET_S / paceModel([], "cpu", "linux").rate,
+    );
+    // a fast GPU: 100 s of audio in 10 s of wall time, 3 s of it start-up, leaves 7 s of work, 0.07 s for each
+    expect(batchAudioCapSeconds([[100, 10, "gpu", 3]], "windows")).toBeCloseTo(
+      BATCH_WORK_TARGET_S / 0.07,
     );
     // a slow CPU takes much smaller batches
-    expect(batchAudioCapSeconds([[60, 40]], "windows")).toBeLessThan(
-      batchAudioCapSeconds([[100, 10]], "windows") / 5,
+    expect(batchAudioCapSeconds([[60, 140, "cpu"]], "windows")).toBeLessThan(
+      batchAudioCapSeconds([[100, 10, "gpu", 3]], "windows") / 5,
     );
   });
 
-  it("property: a batch of several clips is expected to take no longer than the target", () => {
-    const sample = fc.tuple(fc.integer({ min: 10, max: 3600 }), fc.integer({ min: 1, max: 4000 }));
+  it("does not shrink with a longer start-up: every run pays its start-up, so only the work is bounded", () => {
+    const quick: PaceSample[] = [[100, 53, "gpu", 3]]; // 0.5 s of work for each second
+    const slowStart: PaceSample[] = [[100, 115, "gpu", 65]]; // the same 0.5, a minute to begin
+    expect(batchAudioCapSeconds(slowStart, "windows")).toBeCloseTo(
+      batchAudioCapSeconds(quick, "windows"),
+    );
+    expect(batchAudioCapSeconds(slowStart, "windows")).toBeGreaterThan(0);
+  });
+
+  it("property: a batch of several clips holds no more work than the target", () => {
+    const sample = fc.tuple(
+      fc.integer({ min: 10, max: 3600 }),
+      fc.integer({ min: 1, max: 4000 }),
+      fc.constantFrom("gpu", "cpu"),
+    );
     const queue = fc.array(
       fc.integer({ min: 1, max: 120 }).map((s) => clip(s)),
       { minLength: 2, maxLength: 20 },
     );
     fc.assert(
       fc.property(fc.array(sample, { maxLength: 8 }), queue, (history, q) => {
-        const samples: PaceSample[] = history.map(([audio, wall]) => [audio, wall]);
+        const samples: PaceSample[] = history.map(([audio, wall, backend]) => [
+          audio,
+          wall,
+          backend,
+        ]);
         const picked = pickBatch(q, batchAudioCapSeconds(samples, "windows"));
         if (picked.length < 2) return;
         const total = picked.reduce((n, i) => n + (q[i].seconds as number), 0);
-        const expected = STARTUP_S + secondsPerAudioSecond(samples, "windows") * total;
-        expect(expected).toBeLessThanOrEqual(BATCH_TARGET_S + 1e-9);
+        const rate = paceModel(samples, backendNow(samples, "windows", false), "windows").rate;
+        expect(rate * total).toBeLessThanOrEqual(BATCH_WORK_TARGET_S + 1e-9);
       }),
     );
   });

@@ -1177,9 +1177,9 @@ describe("IndexCoordinator", () => {
   // T-34 step 3. Every run of the speech engine costs a start-up that no clip shortens, so short clips that
   // are waiting share one. What is checked is the OUTCOME: which clips each run of the engine was handed.
   describe("clips that share one run of the engine", () => {
-    /** This machine's measured pace: 0.5 s of work per second of audio, so a run may hold 18 s of audio. */
+    /** This machine's measured pace: 0.5 s of work per second of audio (3 s to begin), so a run may hold 18 s of audio. */
     const CAP_S = 18;
-    beforeEach(() => localStorage.setItem(SPEECH_PACE_KEY, JSON.stringify([[100, 53]])));
+    beforeEach(() => localStorage.setItem(SPEECH_PACE_KEY, JSON.stringify([[100, 53, "gpu", 3]])));
     afterEach(() => {
       localStorage.removeItem(SPEECH_PACE_KEY);
       setExportsBusy(false);

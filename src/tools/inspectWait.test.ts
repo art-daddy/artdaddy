@@ -17,6 +17,7 @@ vi.mock("../api/appEvents", async (orig) => ({
 vi.mock("@tauri-apps/api/path", () => ({ resolveResource: async () => "C:/res/fonts" }));
 
 import type { ClientToolContext } from "./context";
+import { __resetExportFlags, __setExportFlag } from "../api/exportFlags";
 import { buildTranscript } from "./inspect";
 import { clearModelDownload } from "../store/modelDownload";
 import { resetLiveWait, useLiveWait } from "../store/liveWait";
@@ -363,10 +364,13 @@ describe("a look that has to wait for a transcript", () => {
     unmeasured.signal.abort(); // a look's engine runs alone: free it for the next
     await settle();
 
-    // A run of 30 s of speech that took 6 s: the machine's own pace, kept for the next estimate.
-    const measured = rig({ engineStderr: timings(30, 6) });
+    // A run of 30 s of speech that took 6 s, on the graphics chip: the machine's own pace and where it
+    // ran, kept for the next estimate.
+    const measured = rig({
+      engineStderr: `whisper_backend_init_gpu: using Vulkan0 backend\n${timings(30, 6)}`,
+    });
     await buildTranscript(measured.ctx, freshSrc(), look(30));
-    expect(readPace()).toEqual([[30, 6]]);
+    expect(readPace()).toEqual([[30, 6, "gpu"]]);
 
     const again = rig({ engineMs: 600_000 });
     const fast = startLook(again.ctx, freshSrc(), look(30, { waitMs: 2_000 }));
@@ -522,18 +526,38 @@ describe("an engine that crashes on the GPU", () => {
     expect(onCpu(calls)).toEqual([false, true, true, true, true]);
   });
 
-  it("is given the GPU again after a week, because drivers are updated", async () => {
+  it("is given the GPU again after six hours, because drivers are updated and a hang can be a passing thing", async () => {
+    const SIX_HOURS = 6 * 60 * 60 * 1000;
     const { ctx, calls } = rig({ gpuCrash: CRASH });
     await buildTranscript(ctx, freshSrc(), look(30));
-    vi.setSystemTime(Date.now() + CPU_ONLY_HOLD_MS - 1);
+    vi.setSystemTime(Date.now() + SIX_HOURS - 1);
     await buildTranscript(ctx, freshSrc(), look(30));
-    expect(onCpu(calls).slice(2), "still off one ms before the week is out").toEqual([true]);
+    expect(onCpu(calls).slice(2), "still off one ms before the six hours are out").toEqual([true]);
     vi.setSystemTime(Date.now() + 2);
     await buildTranscript(ctx, freshSrc(), look(30));
     expect(onCpu(calls).slice(3), "tried again, and crashed again, and retried").toEqual([
       false,
       true,
     ]);
+  });
+
+  it("is given the GPU again after a week, as ever, while the remote switch speech_gpu_retry is off", async () => {
+    __setExportFlag("speech_gpu_retry", false);
+    try {
+      const { ctx, calls } = rig({ gpuCrash: CRASH });
+      await buildTranscript(ctx, freshSrc(), look(30));
+      vi.setSystemTime(Date.now() + CPU_ONLY_HOLD_MS - 1);
+      await buildTranscript(ctx, freshSrc(), look(30));
+      expect(onCpu(calls).slice(2), "still off one ms before the week is out").toEqual([true]);
+      vi.setSystemTime(Date.now() + 2);
+      await buildTranscript(ctx, freshSrc(), look(30));
+      expect(onCpu(calls).slice(3), "tried again, and crashed again, and retried").toEqual([
+        false,
+        true,
+      ]);
+    } finally {
+      __resetExportFlags();
+    }
   });
 
   it("is not blamed on the GPU when the CPU run crashes too: nothing is remembered, and the look says it failed", async () => {

@@ -6,17 +6,20 @@
 // clips are only done together, so what goes into one is bounded:
 //   * a clip somebody is waiting on, a stretch of a file, a different language and a clip whose length is
 //     not known all run alone: they must not wait for, or be mixed with, anything else;
-//   * a batch is sized to take about BATCH_TARGET_S on THIS machine, from its own measured pace, so a
-//     look that asks for the next clip is held up by seconds, not minutes, and a slow CPU takes smaller
+//   * a batch is sized to hold about BATCH_WORK_TARGET_S of work on THIS machine, from its own measured pace,
+//     so a look that asks for the next clip is held up by seconds, not minutes, and a slow CPU takes smaller
 //     batches than a GPU;
 //   * never more than BATCH_MAX_FILES, so the engine's output stays within what the job supervisor keeps.
 // Pure: the queue is in, the places of the clips to take are out.
 import { hostInfo, type HostOs } from "../platform/host";
-import { secondsPerAudioSecond, STARTUP_S, type PaceSample } from "./speechPace";
+import { paceModel, backendNow, type PaceSample } from "./speechPace";
 
 export const BATCH_MAX_FILES = 8;
-/** How long one batch is meant to take, engine start-up included. */
-export const BATCH_TARGET_S = 12;
+/** The work one batch is meant to hold, in seconds on this machine's own pace. Every run pays this
+ *  machine's start-up whatever it holds (a lone clip too), so only the work is bounded: a batch that
+ *  holds more audio saves start-ups, and the longer a PC takes to begin the more that is worth. It is
+ *  the 12 s a batch was first sized to take, less the 3 s of start-up that was measured in the lab. */
+export const BATCH_WORK_TARGET_S = 9;
 /** How far into the queue a batch looks for clips to take along: enough to pass over a few that do not fit. */
 export const BATCH_LOOKAHEAD = 16;
 
@@ -35,12 +38,13 @@ export interface BatchCandidate {
   seconds: number | null;
 }
 
-/** The most audio one batch may hold on this machine: what fits in BATCH_TARGET_S after the start-up. */
+/** The most audio one batch may hold on this machine: what the backend that would run does in
+ *  BATCH_WORK_TARGET_S at the pace this machine measured. */
 export function batchAudioCapSeconds(
   samples: readonly PaceSample[],
   os: HostOs = hostInfo().os,
 ): number {
-  return Math.max(0, (BATCH_TARGET_S - STARTUP_S) / secondsPerAudioSecond(samples, os));
+  return Math.max(0, BATCH_WORK_TARGET_S / paceModel(samples, backendNow(samples, os), os).rate);
 }
 
 /** Whether `c` could share a run with `head`, whatever its length turns out to be: a clip for which this is

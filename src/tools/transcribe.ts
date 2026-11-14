@@ -27,7 +27,7 @@ import {
   type ModelVariant,
 } from "./speechDecoding";
 import { failureText, TranscriptionFailure } from "./speechFailure";
-import { recordSpeechRun } from "./speechPace";
+import { backendOfRun, recordSpeechRun } from "./speechPace";
 import { joinPath } from "./store";
 import { prioritizeTranscript } from "./transcriptQueue";
 import { whisperCode } from "./whisperLanguages";
@@ -1412,7 +1412,7 @@ async function finishWhisper(
     if (!batch) {
       const facts = whisperRunFacts(run.stderr);
       reportTranscription(facts, undefined, { beam: meta.beam, rerun: meta.rerun });
-      recordSpeechRun(facts.audioSeconds, facts.wallSeconds);
+      recordSpeechRun(facts.audioSeconds, facts.wallSeconds, backendOfRun(facts.backend));
     }
     return parsed;
   } finally {
