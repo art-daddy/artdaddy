@@ -13,8 +13,9 @@ import type { TranscriptFailureReason } from "./speechFailure";
 import { approxTime } from "./transcriptWords";
 
 /** Why some files will not be transcribed. A model that could not be downloaded is the download line's
- *  business, so it has no note. */
-export type CardNoteKind = Exclude<TranscriptFailureReason, "model_unavailable"> | "expired";
+ *  business, and a person's own Cancel is shown by the speech chip, so neither has a note. */
+export type CardNoteKind =
+  Exclude<TranscriptFailureReason, "model_unavailable" | "cancelled"> | "expired";
 export interface CardNote {
   id: string;
   kind: CardNoteKind;

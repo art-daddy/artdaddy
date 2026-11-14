@@ -16,6 +16,9 @@ export const BATCH_DEADLINE_MS = 30 * 60_000;
 
 export type EntryState = "pending" | "landed" | "fetched" | "failed" | "cancelled" | "expired";
 
+/** Why a file failed. A person's Cancel is not a failure: it settles as `cancelled`, whichever way it arrives. */
+export type WakeFailureReason = Exclude<TranscriptFailureReason, "cancelled">;
+
 export type SettleOutcome =
   { kind: "landed" } | { kind: "failed"; reason: TranscriptFailureReason } | { kind: "cancelled" };
 
@@ -46,7 +49,7 @@ export interface Entry {
   readonly ref: string | null;
   readonly audioS: number | null;
   readonly state: EntryState;
-  readonly failure: TranscriptFailureReason | null;
+  readonly failure: WakeFailureReason | null;
 }
 
 export interface Release {
@@ -56,7 +59,7 @@ export interface Release {
   readonly exec: number;
   /** Words ready that nobody has read yet, in the order the files were registered. */
   readonly landed: readonly Entry[];
-  readonly failed: ReadonlyArray<{ reason: TranscriptFailureReason; count: number }>;
+  readonly failed: ReadonlyArray<{ reason: WakeFailureReason; count: number }>;
   readonly expired: number;
   readonly cancelled: number;
   /** Every file the batch held: landed, read, failed, cancelled or expired. */
@@ -82,7 +85,7 @@ interface EntryRec {
   ref: string | null;
   audioS: number | null;
   state: EntryState;
-  failure: TranscriptFailureReason | null;
+  failure: WakeFailureReason | null;
 }
 
 interface BatchRec {
@@ -194,7 +197,7 @@ export class WakeRegistry {
     if (outcome.kind === "landed") {
       e.state = "landed";
       if (batch) batch.lastProgressAt = now;
-    } else if (outcome.kind === "failed") {
+    } else if (outcome.kind === "failed" && outcome.reason !== "cancelled") {
       e.state = "failed";
       e.failure = outcome.reason;
     } else {
@@ -343,7 +346,7 @@ export class WakeRegistry {
       for (const e of pending) e.state = "expired";
     }
     batch.phase = "released";
-    const failed = new Map<TranscriptFailureReason, number>();
+    const failed = new Map<WakeFailureReason, number>();
     for (const e of members) {
       if (e.state === "failed" && e.failure)
         failed.set(e.failure, (failed.get(e.failure) ?? 0) + 1);

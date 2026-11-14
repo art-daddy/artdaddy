@@ -239,11 +239,13 @@ describe("the notes", () => {
     });
   });
 
-  it("has words for every reason a transcription can fail with, except the one the download line speaks for", () => {
+  it("has words for every reason a transcription can fail with, except the two that are spoken for elsewhere", () => {
+    // The download line speaks for the model; the speech chip shows the person's own Cancel.
+    const silent: readonly string[] = ["model_unavailable", "cancelled"];
     const texts = new Set<string>();
     for (const reason of TRANSCRIPT_FAILURE_REASONS) {
       const view = noteView([note("n", reason as CardNoteKind, 2)]);
-      if (reason === "model_unavailable") {
+      if (silent.includes(reason)) {
         expect(view).toBeNull();
         continue;
       }
@@ -251,7 +253,7 @@ describe("the notes", () => {
       expect(view?.notes[0].text.length).toBeGreaterThan(10);
       texts.add(view?.notes[0].text ?? "");
     }
-    expect(texts.size).toBe(TRANSCRIPT_FAILURE_REASONS.length - 1);
+    expect(texts.size).toBe(TRANSCRIPT_FAILURE_REASONS.length - silent.length);
     expect(new Set(KINDS.map((k) => NOTE_COPY[k].three)).size).toBe(KINDS.length);
   });
 

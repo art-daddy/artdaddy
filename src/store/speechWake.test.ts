@@ -120,6 +120,19 @@ describe("a batch of files the assistant was told were not ready", () => {
     expect(out[0].size).toBe(4);
   });
 
+  it("settles a person's Cancel as cancelled whichever way it arrives: it is no failure and gets no note", () => {
+    const r = new WakeRegistry();
+    begin(r, A, 1);
+    for (const k of ["a", "b"]) ask(r, A, 1, k);
+    r.endTurn(A, 1, "done", 1);
+    land(r, A, "a", 2);
+    const out = fail(r, A, "b", 3, "cancelled");
+    expect(out).toHaveLength(1);
+    expect(out[0].failed).toEqual([]);
+    expect(out[0].cancelled).toBe(1);
+    expect(refs(out[0])).toEqual(["ref-a"]);
+  });
+
   it("releases a batch in which nothing landed with no words to wake for", () => {
     const r = new WakeRegistry();
     begin(r, A, 1);
