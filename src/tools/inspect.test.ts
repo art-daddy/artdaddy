@@ -2799,6 +2799,24 @@ describe("a look that read the words the assistant was waiting for", () => {
     words: [],
   });
 
+  /** A look is cut at 400 lines and at 10 000 words: the same file with its lines short and its words many. */
+  const manyWords = (n: number): Any => ({
+    language: "en",
+    duration_seconds: 100,
+    segments: [segment(0)],
+    words: Array.from({ length: n }, (_, i) => ({
+      word_id: i,
+      segment_id: 0,
+      index_in_segment: i,
+      word: `w${i}`,
+      start_seconds: i * 0.001,
+      end_seconds: i * 0.001 + 0.001,
+      start_timestamp: "",
+      end_timestamp: "",
+      probability: 0.9,
+    })),
+  });
+
   /** A turn of the chat was told the words of song.mp3 were not ready, and they have landed since. */
   async function wordsLandedUnread(): Promise<void> {
     __resetWakeHost();
@@ -2812,7 +2830,7 @@ describe("a look that read the words the assistant was waiting for", () => {
     wakeEndTurn(CHAT, 1, "done");
     await vi.waitFor(() => expect(wakeViewOf(CHAT).ready?.files).toBe(1));
   }
-  const lookAtSong = async (): Promise<void> => {
+  const lookAtSong = async (args: Record<string, unknown> = {}): Promise<void> => {
     asFastPc();
     const fs = new MockFs();
     fs.touch(joinPath(DIR, "song.mp3"));
@@ -2823,7 +2841,7 @@ describe("a look that read the words the assistant was waiting for", () => {
       ...ctxWith(runner, fs),
       origin: { chatSessionId: CHAT.session, branchId: 0, executionId: 2 },
     } as ClientToolContext;
-    await inspectMediaTool({ media_ref: "song.mp3" }, ctx);
+    await inspectMediaTool({ media_ref: "song.mp3", ...args }, ctx);
   };
   afterEach(() => __resetWakeHost());
 
@@ -2833,10 +2851,24 @@ describe("a look that read the words the assistant was waiting for", () => {
     expect(wakeViewOf(CHAT).ready).toBeNull();
   });
 
-  it("is not the words read when only the first of them came back: the rest is still to be told", async () => {
+  it("is not the words read when only the first of the lines came back: the rest is still to be told", async () => {
     await wordsLandedUnread();
     vi.mocked(runWhisper).mockResolvedValueOnce(lines(401));
     await lookAtSong();
     expect(wakeViewOf(CHAT).ready).toMatchObject({ files: 1 });
+  });
+
+  it("is not the words read when only the first of the words came back: the rest is still to be told", async () => {
+    await wordsLandedUnread();
+    vi.mocked(runWhisper).mockResolvedValueOnce(manyWords(10_001));
+    await lookAtSong({ word_timestamps: true });
+    expect(wakeViewOf(CHAT).ready).toMatchObject({ files: 1 });
+  });
+
+  it("is the words read when the words fit under the cap, with the same transcript's lines", async () => {
+    await wordsLandedUnread();
+    vi.mocked(runWhisper).mockResolvedValueOnce(manyWords(10_000));
+    await lookAtSong({ word_timestamps: true });
+    expect(wakeViewOf(CHAT).ready).toBeNull();
   });
 });
