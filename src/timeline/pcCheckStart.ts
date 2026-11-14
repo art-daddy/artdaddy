@@ -1,7 +1,6 @@
 // Starts the PC check in the app: the one service (`platform/pcCheck.ts`) with its real inputs, the speed probe registered, the service made known to the rest of the app, the chip test's turn in its
 // one slot, and the six signals the service decides from, read from the app's own sources. Everything here fails soft: a piece that cannot start leaves the check out and the app as it was.
-import { exportFlag } from "../api/exportFlags";
-import { pcClass as serverCutoffs } from "../api/exportFlags";
+import { exportFlag, pcClass as serverCutoffs } from "../api/exportFlags";
 import { runCapabilityProbe } from "../platform/host";
 import {
   createPcCheckService,
