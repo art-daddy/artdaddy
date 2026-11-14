@@ -109,44 +109,38 @@ describe("SpeechCard", () => {
     expect(rows()).toEqual(["Transcribing 0 of 1 file"]);
   });
 
-  it("shows every note it is given even when two share an id, and keeps them right as they change", () => {
+  it("shows every note it is given even when two share an id, and leaves nothing of an old one behind", () => {
     const onDismiss = vi.fn();
+    const noteView = (...notes: Array<[id: string, text: string]>): CardView =>
+      view(
+        [],
+        notes.map(([id, text]) => ({ id, text })),
+      );
     const { rerender } = render(
-      <SpeechCard
-        view={view(
-          [],
-          [
-            { id: "x", text: "first" },
-            { id: "x", text: "second" },
-          ],
-        )}
-        onDismiss={onDismiss}
-      />,
+      <SpeechCard view={noteView(["x", "first"], ["x", "second"])} onDismiss={onDismiss} />,
     );
     expect(screen.getByText("first")).toBeTruthy();
     expect(screen.getByText("second")).toBeTruthy();
-    rerender(
-      <SpeechCard
-        view={view(
-          [],
-          [
-            { id: "x", text: "first" },
-            { id: "x", text: "third" },
-          ],
-        )}
-        onDismiss={onDismiss}
-      />,
-    );
+    rerender(<SpeechCard view={noteView(["x", "first"], ["x", "third"])} onDismiss={onDismiss} />);
     expect(screen.queryByText("second")).toBeNull();
+    expect(screen.getByText("third")).toBeTruthy();
+    expect(screen.getAllByRole("button", { name: "dismiss" })).toHaveLength(2);
+    // a note with another id comes in front of the one that is kept
+    rerender(<SpeechCard view={noteView(["y", "other"], ["x", "third"])} onDismiss={onDismiss} />);
+    expect(screen.queryByText("first")).toBeNull();
+    expect(screen.getByText("other")).toBeTruthy();
     expect(screen.getByText("third")).toBeTruthy();
     expect(screen.getAllByRole("button", { name: "dismiss" })).toHaveLength(2);
   });
 
-  it("shows lines that repeat, one row each", () => {
+  it("shows lines that repeat, one row each, and leaves nothing of an old one behind", () => {
     const { rerender } = render(<SpeechCard view={view(["same", "same"])} onDismiss={vi.fn()} />);
-    expect(screen.getAllByText("same")).toHaveLength(2);
+    expect(rows()).toEqual(["same", "same"]);
     rerender(<SpeechCard view={view(["same"])} onDismiss={vi.fn()} />);
-    expect(screen.getAllByText("same")).toHaveLength(1);
+    expect(rows()).toEqual(["same"]);
+    rerender(<SpeechCard view={view(["same", "same", "same"])} onDismiss={vi.fn()} />);
+    rerender(<SpeechCard view={view(["other", "same"])} onDismiss={vi.fn()} />);
+    expect(rows()).toEqual(["other", "same"]);
   });
 
   it("shows a line as the text it is, never as markup", () => {
