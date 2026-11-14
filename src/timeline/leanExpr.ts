@@ -1,6 +1,6 @@
 // A small, safe evaluator for the arithmetic subset of ffmpeg's expression language that the exporter itself writes (anim.ts `compileAnim`,
-// the cover aperture in render.ts): numbers, the variables T (or t), W and H, `+ - * /`, unary minus, parentheses and the functions
-// if, lt, lte, gt, gte, max, min, round, floor, ceil, abs, clip, pow. It evaluates in IEEE doubles in the order ffmpeg's evaluator does, so a
+// the cover aperture in render.ts, the alpha windows in leanWindows.ts): numbers, the variables T (or t), W, H, X and Y, `+ - * /`, unary minus,
+// parentheses and the functions if, lt, lte, gt, gte, between, eq, not, max, min, round, floor, ceil, abs, clip, pow. It evaluates in IEEE doubles in the order ffmpeg's evaluator does, so a
 // value computed here is the value ffmpeg's `geq`/`scale` computes for the same T, W and H (that is what lets the lean paths place a mask
 // exactly where the per-pixel expression would have). There is no `eval` and no `new Function`: the desktop webview may forbid both, and a fix
 // that silently never runs is the failure this lane must not ship.
@@ -12,6 +12,9 @@ export interface LeanEnv {
   T: number;
   W: number;
   H: number;
+  /** The sample's column and row, as in `geq`; 0 when the expression has none. */
+  X?: number;
+  Y?: number;
 }
 
 export type LeanExpr = (env: LeanEnv) => number;
@@ -68,6 +71,9 @@ const FUNCTIONS: Record<string, { arity: number; fn: Fn }> = {
   lte: { arity: 2, fn: (a, b) => (a <= b ? 1 : 0) },
   gt: { arity: 2, fn: (a, b) => (a > b ? 1 : 0) },
   gte: { arity: 2, fn: (a, b) => (a >= b ? 1 : 0) },
+  between: { arity: 3, fn: (x, lo, hi) => (x >= lo && x <= hi ? 1 : 0) },
+  eq: { arity: 2, fn: (a, b) => (a === b ? 1 : 0) },
+  not: { arity: 1, fn: (x) => (x === 0 ? 1 : 0) },
   max: { arity: 2, fn: (a, b) => (a > b ? a : b) },
   min: { arity: 2, fn: (a, b) => (a > b ? b : a) },
   round: { arity: 1, fn: cRound },
@@ -199,6 +205,8 @@ class Parser {
     if (name === "T" || name === "t") return (e) => e.T;
     if (name === "W") return (e) => e.W;
     if (name === "H") return (e) => e.H;
+    if (name === "X") return (e) => e.X ?? 0;
+    if (name === "Y") return (e) => e.Y ?? 0;
     return null;
   }
 }
