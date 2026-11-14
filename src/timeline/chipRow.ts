@@ -1,0 +1,86 @@
+// The pure model of the Export dialog's "Graphics chip" row: which of its states it is in, whether it is drawn, what it says and the
+// one link it offers. The lane draws it. Nothing here tests a chip, reads the PC or reads a flag: a test is never asked for from here,
+// and with the switch on Off no state asks for one.
+import type { ChipPref } from "./chipPref";
+
+export type ChipRowState =
+  "none" | "checking" | "auto_passed" | "auto_not_passed" | "set_aside" | "off";
+
+/** The link the row offers in its state, if any: switching the chip off (the card's quiet "Turn off"), switching it back to
+ *  Auto, or trying a chip that stopped an export again before its day is up. */
+export type ChipRowAction = "turn_off" | "turn_on" | "try_again_now";
+
+export interface ChipRowInput {
+  /** The app found a chip of a known maker on this PC. */
+  found: boolean;
+  pref: ChipPref;
+  /** The per-PC test for the delivered picture's size class is running or waiting its turn. */
+  testing: boolean;
+  /** What that test says (or the one remembered): `unknown` until it has said anything. */
+  verdict: "passed" | "not_passed" | "unknown";
+  /** The chip stopped an export and is set aside for a day. */
+  setAside: boolean;
+  /** The server's switches that let a chip be used at all (the maker's own and `chip_default`) are on. */
+  flagsOn: boolean;
+  /** `quick_export` is on. Off, the old Mode row comes back and this row is not drawn. */
+  quickFlagOn: boolean;
+}
+
+export interface ChipRowModel {
+  state: ChipRowState;
+  /** Whether the row is drawn at all; `none` is exactly the rows that are not. */
+  visible: boolean;
+  note: string | null;
+  action: ChipRowAction | null;
+}
+
+/** The row's words, as the copy pack has them. (The hints about an old NVIDIA driver or a switched-off Intel chip are not the
+ *  row's: they have their own module.) */
+export const CHIP_ROW_NOTES: Readonly<Record<Exclude<ChipRowState, "none">, string>> = {
+  checking: "Checking this PC's graphics chip…",
+  auto_passed:
+    "Auto: used for long exports where it saves time. It passed ArtDaddy's test on this PC.",
+  auto_not_passed:
+    "Auto: not used. The graphics chip did not pass ArtDaddy's test on this PC, so exports use the processor.",
+  set_aside:
+    "The graphics chip stopped an export on this PC, so it is set aside for a day. Try it again now",
+  off: "Off: the graphics chip is not tested, offered or used on this PC. Everything runs on the processor.",
+};
+
+const ACTIONS: Readonly<Record<Exclude<ChipRowState, "none">, ChipRowAction | null>> = {
+  checking: null,
+  auto_passed: "turn_off",
+  auto_not_passed: null,
+  set_aside: "try_again_now",
+  off: "turn_on",
+};
+
+const hidden = (): ChipRowModel => ({ state: "none", visible: false, note: null, action: null });
+
+/** The state the row is in when it is drawn. Off wins over everything (never tested, offered or used); a chip set aside is not
+ *  tested again either; a test that is running beats an older answer (it may be for another picture size); an answer that has
+ *  not come yet is shown as checking. */
+function stateOf(
+  input: Partial<Record<keyof ChipRowInput, unknown>>,
+): Exclude<ChipRowState, "none"> {
+  if (input.pref === "off") return "off";
+  if (input.setAside === true) return "set_aside";
+  if (input.testing === true) return "checking";
+  if (input.verdict === "passed") return "auto_passed";
+  if (input.verdict === "not_passed") return "auto_not_passed";
+  return "checking";
+}
+
+/** The row's model. Anything that is not exactly what the type says is read as the quiet answer (no row), and nothing throws. */
+export function chipRowModel(input: ChipRowInput): ChipRowModel {
+  try {
+    if (input === null || typeof input !== "object") return hidden();
+    const fields: Partial<Record<keyof ChipRowInput, unknown>> = input;
+    if (fields.found !== true || fields.flagsOn !== true || fields.quickFlagOn !== true)
+      return hidden();
+    const state = stateOf(fields);
+    return { state, visible: true, note: CHIP_ROW_NOTES[state], action: ACTIONS[state] };
+  } catch {
+    return hidden();
+  }
+}
