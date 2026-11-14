@@ -58,7 +58,8 @@ describe("the words of the existing states are what 0.27.0 said, byte for byte",
   it("is so for every combination of a label, a time left, a wait and a percent", () => {
     fc.assert(
       fc.property(
-        fc.stringMatching(/^[0-9]{1,2}:[0-5][0-9]$/),
+        // add_captions does not know how long the speech is, and passes no label at all
+        fc.oneof(fc.constant(""), fc.stringMatching(/^[0-9]{1,2}:[0-5][0-9]$/)),
         fc.option(fc.integer({ min: 1, max: 3600 }), { nil: undefined }),
         fc.integer({ min: 0, max: 60 }),
         fc.option(fc.integer({ min: 0, max: 100 }), { nil: undefined }),

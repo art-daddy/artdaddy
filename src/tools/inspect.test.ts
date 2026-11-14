@@ -993,6 +993,40 @@ describe("inspectMediaTool looks at what it returns (UJ-012)", () => {
       expect(vi.mocked(prioritizeTranscript)).not.toHaveBeenCalled();
     });
 
+    it("property: whatever this PC's pace, a span is refused exactly when it is projected past ten minutes, and a refusal starts and queues nothing", async () => {
+      const { fs } = setup();
+      await fc.assert(
+        fc.asyncProperty(
+          fc.constantFrom<SpeechBackend>("gpu", "cpu"),
+          fc.double({ min: 0.05, max: 6, noNaN: true }),
+          fc.integer({ min: 1, max: 60 }),
+          fc.integer({ min: 20, max: 1799 }),
+          async (backend, rate, startup, span) => {
+            // away from the boundary itself, where floating point is the only thing that could differ
+            const limit = (600 - startup) / rate;
+            fc.pre(Math.abs(span - limit) > 1);
+            vi.mocked(runWhisper).mockClear();
+            vi.mocked(prioritizeTranscript).mockClear();
+            pcThatDoes(backend, rate, startup);
+            const r = (await inspectMediaTool(
+              { media_ref: "vid.mp4", max_frames: 1, start_seconds: 0, end_seconds: span },
+              ctxWith(mediaRunner(fs, { probe: LONG_PROBE }), fs),
+            )) as Any;
+            if (span > limit) {
+              expect(r.transcript).toMatchObject({ status: "unavailable", reason: "too_long" });
+              expect(r.transcript.would_take_s).toBe(Math.round(startup + rate * span));
+              expect(vi.mocked(runWhisper)).not.toHaveBeenCalled();
+              expect(vi.mocked(prioritizeTranscript)).not.toHaveBeenCalled();
+            } else {
+              expect(r.transcript.status).not.toBe("unavailable");
+              expect(vi.mocked(runWhisper)).toHaveBeenCalledTimes(1);
+            }
+          },
+        ),
+        { numRuns: 30 },
+      );
+    });
+
     it("says that nothing fits, and runs nothing, on a PC that cannot do even ten seconds in ten minutes", async () => {
       const { fs } = setup();
       pcThatDoes("cpu", 80, 30);

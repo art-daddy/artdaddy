@@ -82,7 +82,7 @@ export function renderNotReady(state: NotReadyState, values: Values): string {
         return typeof n === "number" && Number.isFinite(n) && n > 0 ? fill(piece.text) : "";
       }
       const v = values[name];
-      if (v === undefined || v === "") throw new Error(`renderNotReady(${state}): missing ${name}`);
+      if (v === undefined) throw new Error(`renderNotReady(${state}): missing ${name}`);
       return String(v);
     });
   return fill(entry.text);

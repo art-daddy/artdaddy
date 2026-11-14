@@ -377,6 +377,19 @@ describe("a look that has to wait for a transcript", () => {
     await vi.advanceTimersByTimeAsync(2_000);
     expect(fast.result.eta_s).toBeLessThan(none.result.eta_s);
   });
+
+  it("keeps each run under the backend it ran on, and keeps none whose log does not say", async () => {
+    // The engine reports it found no graphics chip (or the chip was held off with -ng): a processor run.
+    const cpu = rig({
+      engineStderr: `whisper_backend_init_gpu: no GPU found\n${timings(30, 100)}`,
+    });
+    await buildTranscript(cpu.ctx, freshSrc(), look(30));
+    expect(readPace()).toEqual([[30, 100, "cpu"]]);
+    // A run that names no backend belongs to neither model: it is not kept.
+    const silent = rig({ engineStderr: timings(40, 8) });
+    await buildTranscript(silent.ctx, freshSrc(), look(40));
+    expect(readPace()).toEqual([[30, 100, "cpu"]]);
+  });
 });
 
 describe("a look that has to wait for the speech model", () => {
