@@ -510,7 +510,7 @@ describe("what goes in: only what the caller's own object holds", () => {
         event: "download_failed",
         at: 1,
         path: "C:\\Users\\someone\\models\\ggml-small.bin",
-        message: "HTTP 503 from https://example.test/secret",
+        message: "HTTP 503 from https://example.test/path",
         reasonText: "boom",
         nested: { name: "someone" },
       } as never,
@@ -527,7 +527,7 @@ describe("what goes in: only what the caller's own object holds", () => {
       seconds: 7,
       bytes: 7,
       reason: "network",
-      leak: "C:\\secret",
+      leak: "C:\\somewhere",
     };
     const m = memory();
     recordFact(
@@ -749,7 +749,7 @@ describe("what comes out, and storage that holds something else", () => {
       JSON.stringify({
         model_download: [F1, 5, { event: "bogus", at: 1 }, null, F2],
         speech_wake: "broken",
-        someone_else: { secret: "x" },
+        someone_else: { note: "x" },
       }),
     );
     expect(readFacts("model_download", m)).toEqual([F1, F2]);
