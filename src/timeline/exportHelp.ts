@@ -1,6 +1,6 @@
 // The slow-export banner's view-model: what a running export shows when it is going much slower than it was said to, or has stopped
 // moving, and which buttons go with it. Pure: it is handed the facts, so the card, the Export dialog and the assistant's export list can
-// read one state. Nothing imports this yet.
+// read one state.
 //
 // The banner is a courtesy and never a decision: it changes nothing about the export, and every number it cannot read gives no banner.
 import type { EstimateBasis } from "./exportTypes3c";
@@ -34,8 +34,8 @@ export interface HelpInput {
   elapsedSeconds: number;
   /** The share of the project produced so far, 0 to 1. It is 1 once the render is over (checking and saving), which shows no banner. */
   producedFraction: number;
-  /** The render's own time left. Null for a streamed or a sequence export, whose own figure is not a time left: the projection then
-   *  comes from the produced fraction. */
+  /** The render's own time left. Null where it has none to give (a streamed or a sequence export, whose own figure is not a time left, or
+   *  a render that has stopped moving): the projection then comes from the produced fraction. */
   renderEtaSeconds: number | null;
   /** The estimate that was shown before the start, and where it came from. */
   expectedSeconds: number | null;

@@ -1,5 +1,5 @@
 // Quick export: what it changes, whether it is on offer, and whether the chat asks about it. Pure: nothing here reads the PC, a switch
-// or the project, so the Export dialog, the chat card and the tests all get one answer from the same facts. Nothing imports this yet.
+// or the project, so the Export dialog, the chat card and the tests all get one answer from the same facts.
 //
 // Quick is a bundle of ordinary options (a smaller picture, at most 30 frames a second, the chip or the faster setting), never a new way
 // to render. It never overrides a size or a rate that was set, is never selected for an export of a minute or less, and is never offered
@@ -37,8 +37,8 @@ export function isWeakPc(pcClass: PcClass): boolean {
 }
 
 /** The rate Quick delivers for a source rate: rates up to 30 are kept; above that the rate is halved for as long as it stays a whole
- *  number above 30 (60 gives 30, 50 gives 25, 48 gives 24, 120 gives 30), and 30 where it does not (59.94 and 90 give 30). `null` for a
- *  rate that is not a positive number. */
+ *  number above 30 (60 gives 30, 50 gives 25, 48 gives 24, 120 gives 30), and 30 where it does not (59.94 and 90 give 30). The halving
+ *  goes on while it stays whole, so 72 gives 18 and 32 gives 16. `null` for a rate that is not a positive number. */
 export function quickRate(rate: number): number | null {
   if (typeof rate !== "number" || !Number.isFinite(rate) || rate <= 0) return null;
   let capped = rate;
@@ -167,7 +167,8 @@ export function chooseRoute(input: RouteInput): RouteDecision {
 
     let saved: number;
     if (input.explicit?.size === true && input.explicit?.fps === true) {
-      // Both are set, so Quick is only the encoder: it is worth offering only if the encoder alone saves enough.
+      // Both are set, so Quick is only the encoder: it is judged by what the encoder alone saves, and the reason is `explicit` rather than
+      // `small_gain` whatever Quick's own estimate says.
       const encoderOnly = input.encoderOnlySavingFraction;
       const known = typeof encoderOnly === "number" && Number.isFinite(encoderOnly);
       if (!known) return refused("explicit");

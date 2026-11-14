@@ -11,6 +11,7 @@ import {
   type HelpView,
 } from "./exportHelp";
 import { QUIET_SECONDS } from "./exportWords";
+import { HELP_WORDS } from "./exportTypes3c";
 
 const base: HelpInput = {
   elapsedSeconds: 600,
@@ -303,6 +304,16 @@ describe("the stopped-moving banner and the stall rule's verdict", () => {
 });
 
 describe("the view is a plain function of its input, and fails soft", () => {
+  it("shows only kinds the report's list of what help was shown has a word for, and shows both of them", () => {
+    const kinds = new Set<string>();
+    for (const quietSeconds of [0, 75])
+      for (const verdict of ["busy", "idle", "unknown"] as ActivityVerdict[])
+        for (const renderEtaSeconds of [null, 3360])
+          kinds.add(help({ quietSeconds, verdict, renderEtaSeconds }).kind);
+    expect([...kinds].sort()).toEqual(["none", "quiet", "slow"]);
+    for (const kind of kinds) if (kind !== "none") expect(HELP_WORDS).toContain(kind);
+  });
+
   it("answers the same twice, leaves the input alone, and hands out arrays nobody else holds", () => {
     const input = structuredClone(base);
     const once = exportHelp(input);
@@ -364,10 +375,7 @@ describe("the view is a plain function of its input, and fails soft", () => {
   });
 });
 
-// ---------------------------------------------------------------------------------------------------------------------
 // Replays: a run's progress over time, fed to the banner a few seconds apart as the card would see it.
-// ---------------------------------------------------------------------------------------------------------------------
-
 interface Run {
   /** Seconds before the render produces anything (preparing). */
   prep: number;
@@ -710,10 +718,6 @@ describe("replays of progress: a render running at four times its estimate", () 
     );
   });
 });
-
-// ---------------------------------------------------------------------------------------------------------------------
-// Properties over every input.
-// ---------------------------------------------------------------------------------------------------------------------
 
 const number = fc.oneof(
   { weight: 6, arbitrary: fc.double({ min: 0, max: 50_000, noNaN: true }) },

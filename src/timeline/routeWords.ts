@@ -1,6 +1,5 @@
 // The words of the Quick route: the Export dialog's two choices, the slow-export banner and the chat card's two questions. Pure, so the
-// dialog, the card and the assistant's list say one thing, and a number that is not a number never reaches a sentence. Nothing imports
-// this yet.
+// dialog, the card and the assistant's list say one thing, and a number that is not a number never reaches a sentence.
 //
 // Every sentence here is the owner's copy, word for word, with its numbers filled in. A sentence that would claim something the facts do
 // not support (a smaller picture where the picture was not made smaller) has its own wording below; none promises the same pixels or a
@@ -54,8 +53,6 @@ const plainTimesText = (plainTimes: unknown): string | null =>
 export type FullRoute = "processor" | "chip" | "faster";
 /** What Quick runs: the chip, the faster setting, or (where neither is there) the processor's normal setting. */
 export type QuickEncoder = "chip" | "faster" | "processor";
-
-// ---- The Export dialog's two choices ----
 
 export interface FullRowInput {
   route: FullRoute;
@@ -199,8 +196,6 @@ export function describeQuickCardLine(input: QuickCardLineInput): string {
   }
 }
 
-// ---- The slow banner ----
-
 export type BannerButton = "switch_to_quick" | "keep_going" | "cancel";
 
 export const BANNER_BUTTON_LABELS: Readonly<Record<BannerButton, string>> = {
@@ -288,8 +283,6 @@ export function describeSwitchedToQuick(seconds: number | null): string {
   const time = timeOf(seconds);
   return `Started again as a Quick export because this PC is slower than expected.${time ? ` It will take ${time}.` : ""}`;
 }
-
-// ---- The chat card's two questions ----
 
 export interface QuestionButton<Answer extends string> {
   /** The answer the button gives. `continue` and `start_anyway` are the existing answers of the question host. */

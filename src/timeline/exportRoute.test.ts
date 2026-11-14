@@ -13,7 +13,7 @@ import {
   type RouteDecision,
   type RouteInput,
 } from "./exportRoute";
-import { PC_CLASSES, type PcClass } from "./exportTypes3c";
+import { PC_CLASSES, QUICK_OFFERS, ROUTE_KINDS, type PcClass } from "./exportTypes3c";
 
 const base: RouteInput = {
   pcClass: "ok",
@@ -470,5 +470,36 @@ describe("quickSettings: a smaller picture and at most 30 frames a second, where
 describe("isWeakPc", () => {
   it("is weak and unfinished, and nothing else", () => {
     expect(PC_CLASSES.filter(isWeakPc)).toEqual(["weak", "unfinished"]);
+  });
+});
+
+describe("the shared lists of words: the rule can say every one of them, and nothing else", () => {
+  it("gives a decision for every reason in the list the report's `quick_offer` is drawn from, and for no other", () => {
+    const reasons = new Set<string>();
+    const kinds = new Set<string>();
+    for (const quickFlagOn of [true, false])
+      for (const pcClass of PC_CLASSES)
+        for (const picked of [null, "quick", "standard"] as const)
+          for (const explicit of [
+            { size: false, fps: false },
+            { size: true, fps: false },
+            { size: true, fps: true },
+          ])
+            for (const full of [null, 40, 300])
+              for (const quick of [null, 100, 290])
+                for (const encoderOnlySavingFraction of [undefined, 0.1, 0.5]) {
+                  const decision = route({
+                    quickFlagOn,
+                    pcClass,
+                    picked,
+                    explicit,
+                    encoderOnlySavingFraction,
+                    ...times(full, quick),
+                  });
+                  reasons.add(decision.reason);
+                  kinds.add(decision.selected);
+                }
+    expect([...reasons].sort()).toEqual([...QUICK_OFFERS].sort());
+    expect([...kinds].sort()).toEqual([...ROUTE_KINDS].sort());
   });
 });

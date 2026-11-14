@@ -1,6 +1,6 @@
 // The words about an estimate: the line under the Export dialog's three settings, the amber lines for a project that could take much longer
 // or is heavy, and the lines about the PC's speed check. Pure, so a number in a sentence is always the estimate record's own, and a
-// rough guess is never dressed as anything else. Nothing imports this yet.
+// rough guess is never dressed as anything else.
 //
 // Every sentence is the owner's copy, word for word, with its numbers filled in. Times and sizes go through the baseline's
 // describeExportTime and describeExportSize so the style matches the card's.
