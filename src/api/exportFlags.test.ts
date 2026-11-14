@@ -54,6 +54,8 @@ const RELEASED_FLAG_NAMES = [
   "export_help",
   "chip_restart",
 ];
+// Appended after the release decision (disable-only, each with its own entry in the comment block above).
+const LATER_FLAG_NAMES = ["speech_wake"];
 
 beforeEach(() => __resetExportFlags());
 afterEach(() => {
@@ -70,6 +72,7 @@ describe("the exporter's remote switches", () => {
   it("know the 29 released switches, in order, once each, and every one starts on", () => {
     expect(EXPORT_FLAG_NAMES.slice(0, RELEASED_FLAG_NAMES.length)).toEqual(RELEASED_FLAG_NAMES);
     expect(RELEASED_FLAG_NAMES).toHaveLength(29);
+    expect([...EXPORT_FLAG_NAMES]).toEqual([...RELEASED_FLAG_NAMES, ...LATER_FLAG_NAMES]);
     expect(new Set(EXPORT_FLAG_NAMES).size).toBe(EXPORT_FLAG_NAMES.length);
     expect(Object.keys(COMPILED_FLAG_DEFAULTS)).toEqual([...EXPORT_FLAG_NAMES]);
     for (const name of EXPORT_FLAG_NAMES) {

@@ -86,6 +86,9 @@
 //   chip_restart
 //               a graphics-chip failure restarts once on the processor by itself (off: a graphics-chip failure waits
 //               for the person's Try again, as in 0.27.0)
+//   speech_wake
+//               the assistant is brought back, once, when the words of the files it was told were not ready have
+//               landed (off: as in 0.27.0 nothing brings it back and the person has to ask again)
 //
 // The client carries compiled defaults, and the server only ever tells it to switch something off (or back
 // on). So every way this can fail lands on what the client already does: no session, no network, a slow or
@@ -124,6 +127,7 @@ export const EXPORT_FLAG_NAMES = [
   "quick_export",
   "export_help",
   "chip_restart",
+  "speech_wake",
 ] as const;
 export type ExportFlagName = (typeof EXPORT_FLAG_NAMES)[number];
 
@@ -159,6 +163,7 @@ export const COMPILED_FLAG_DEFAULTS: Readonly<Record<ExportFlagName, boolean>> =
   quick_export: true,
   export_help: true,
   chip_restart: true,
+  speech_wake: true,
 };
 
 /** The two cut-offs that turn this PC's speed-test score into fast / OK / weak (`ok_over` and `weak_over` on the
