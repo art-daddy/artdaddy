@@ -30,7 +30,7 @@ import {
   __setDownloadPolicy,
   cancelModelDownload,
   clipWordFrames,
-  ensureTranscript,
+  ensureTranscript as ensureTranscriptAs,
   ensureWhisperModel,
   fmtTimestamp,
   fmtTimestampPrecise,
@@ -45,14 +45,25 @@ import {
   TRANSCRIPT_WAIT_MS,
   transcriptCacheSlot,
   transcriptRunning,
+  transcribeSpan,
   WHISPER_MODELS,
   type WhisperModelSpec,
   whisperModelPath,
 } from "./transcribe";
 import { registerBackgroundTranscriber } from "./transcriptQueue";
+import { __resetExportFlags, __setExportFlag } from "../api/exportFlags";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
+
+/** A whole file's transcript belongs to the background indexer (S2-02): this is how it asks. */
+const ensureTranscript = (
+  ctx: ClientToolContext,
+  ref: string,
+  size?: string,
+  language?: string,
+): ReturnType<typeof ensureTranscriptAs> =>
+  ensureTranscriptAs({ ...ctx, background: true }, ref, size, language);
 
 // These tests were written when a download made one attempt and was done; the patient policy (retries,
 // back-off, stall clock) has its own tests below and must not turn a refused fake origin into minutes.
@@ -2066,6 +2077,30 @@ describe("ensureTranscript", () => {
     expect(again.existed).toBe(true);
     expect(again.parsed).toEqual(first.parsed);
   });
+  it("is the background indexer's: a look or a tool that asks for a whole file is refused before any audio is read (S2-02)", async () => {
+    const fs = new MockFs();
+    fs.touch(joinPath(DIR, "audio.mp4"));
+    fs.putModel();
+    const runner = transcribeRunner(fs);
+    await expect(ensureTranscriptAs(ctxWith(runner, fs), "audio.mp4")).rejects.toThrow(
+      /background indexer/,
+    );
+    expect((runner.run as Any).mock.calls).toHaveLength(0);
+    // The indexer's own way of asking is untouched.
+    expect((await ensureTranscript(ctxWith(runner, fs), "audio.mp4")).existed).toBe(false);
+  });
+  it("is 0.27.0 again with the remote switch speech_cpu_cap off: any caller may ask for a whole file", async () => {
+    const fs = new MockFs();
+    fs.touch(joinPath(DIR, "audio.mp4"));
+    fs.putModel();
+    __setExportFlag("speech_cpu_cap", false);
+    try {
+      const made = await ensureTranscriptAs(ctxWith(transcribeRunner(fs), fs), "audio.mp4");
+      expect(made.existed).toBe(false);
+    } finally {
+      __resetExportFlags();
+    }
+  });
   it("throws on missing media", async () => {
     const fs = new MockFs();
     fs.putModel();
@@ -2210,6 +2245,58 @@ describe("ensureTranscript", () => {
 
 // 4f: a transcript is kept by FILE, outside every project. These assert the rule by what whisper
 // is asked to do: once per file, whichever project asks, and again only for different bytes.
+describe("transcribeSpan: what a foreground caller asks for instead of a whole file (S2-10)", () => {
+  const calls = (runner: CommandRunner, program: string): string[][] =>
+    (runner.run as Any).mock.calls.filter((c: Any[]) => c[0] === program).map((c: Any[]) => c[1]);
+  const setup = () => {
+    const fs = new MockFs();
+    fs.touch(joinPath(DIR, "audio.mp4"));
+    fs.putModel();
+    return { fs, runner: transcribeRunner(fs) };
+  };
+
+  it("runs the stretch alone: ffmpeg reads that stretch's audio, never the whole file's, and the words are on the file's own clock", async () => {
+    const { fs, runner } = setup();
+    const got = await transcribeSpan(ctxWith(runner, fs), "audio.mp4", { start: 60, end: 90 });
+    expect(got.existed).toBe(false);
+    const extracts = calls(runner, "ffmpeg");
+    expect(extracts).toHaveLength(1);
+    expect(extracts[0].slice(0, extracts[0].indexOf("-i"))).toEqual(
+      expect.arrayContaining(["-ss", "60.000", "-to", "90.000"]),
+    );
+    expect(got.parsed.words.map((w) => w.start_seconds)).toEqual([60, 60.6, 61.2]);
+  });
+
+  it("answers from the file's whole transcript when the indexer kept it, and runs nothing", async () => {
+    const { fs, runner } = setup();
+    const ctx = ctxWith(runner, fs);
+    await ensureTranscript(ctx, "audio.mp4");
+    const before = (runner.run as Any).mock.calls.length;
+    const got = await transcribeSpan(ctx, "audio.mp4", { start: 300, end: 330 });
+    expect(got.existed).toBe(true);
+    expect((runner.run as Any).mock.calls.length).toBe(before);
+  });
+
+  it("keeps the stretch's own transcript for the next ask of the same stretch, and never serves it as the whole file's", async () => {
+    const { fs, runner } = setup();
+    const ctx = ctxWith(runner, fs);
+    await transcribeSpan(ctx, "audio.mp4", { start: 60, end: 90 });
+    const runs = calls(runner, "whisper-cli").length;
+    expect((await transcribeSpan(ctx, "audio.mp4", { start: 60, end: 90 })).existed).toBe(true);
+    expect(calls(runner, "whisper-cli")).toHaveLength(runs);
+    expect(
+      (await peekTranscript(ctx, joinPath(DIR, "audio.mp4"), "small", undefined, null)) ?? null,
+    ).toBeNull();
+  });
+
+  it("says so for a file that is not there, as a whole-file ask does", async () => {
+    const { fs, runner } = setup();
+    await expect(
+      transcribeSpan(ctxWith(runner, fs), "missing.mp4", { start: 0, end: 10 }),
+    ).rejects.toThrow(/not found/);
+  });
+});
+
 describe("one transcript per file, in the app-wide cache (4f)", () => {
   const A = "C:/data/projects/a";
   const B = "C:/data/projects/b";

@@ -78,16 +78,23 @@ export interface SpansInput {
   padS: number;
   pace: PaceModel;
   capS?: number;
+  /** Join two windows across the gap when that is cheaper than starting again (default true). A caller
+   *  whose windows are KEYS (the transcript cache keeps a window under its own range) passes false: the
+   *  windows then depend on the used spans alone, so a pace that moves after a run cannot make the same
+   *  clips ask for a different window and transcribe the same audio again. */
+  mergeGaps?: boolean;
 }
 
 /** The windows to transcribe for the used parts of ONE file. Used spans are padded and the ones that
- *  overlap are one window (the rule `get_transcript` already uses). Two windows are then joined across
- *  the gap when reading the gap costs less than starting again (gap times rate below the start-up) and
- *  the joined window still fits the cap. Joining never costs more than not joining, and a window
- *  already past the cap is returned as it is, flagged, never joined to anything. */
+ *  overlap are one window (the rule `get_transcript` already uses). Unless `mergeGaps` is false, two
+ *  windows are then joined across the gap when reading the gap costs less than starting again (gap
+ *  times rate below the start-up) and the joined window still fits the cap. Joining never costs more
+ *  than not joining, and a window already past the cap is returned as it is, flagged, never joined to
+ *  anything. */
 export function planSpans(input: SpansInput): SpanPlan {
   const capS = usable(input.capS) ? input.capS : CAP_S;
   const pad = usable(input.padS) && input.padS > 0 ? input.padS : 0;
+  const mergeGaps = input.mergeGaps !== false;
   const { pace } = input;
   const used: Array<[number, number]> = [];
   for (const span of Array.isArray(input.usedSpans) ? input.usedSpans : []) {
@@ -111,6 +118,7 @@ export function planSpans(input: SpansInput): SpanPlan {
   for (const [start, end] of base) {
     const last = joined[joined.length - 1];
     if (
+      mergeGaps &&
       last &&
       (start - last[1]) * pace.rate < pace.startupS &&
       projectedS(pace, end - last[0]) <= capS

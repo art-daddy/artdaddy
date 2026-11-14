@@ -117,6 +117,8 @@ describe.skipIf(!enabled)("add_captions transcribes real speech", () => {
       const base = mkCtx(dir);
       return {
         ...base,
+        // A whole file's transcript is the background indexer's to make (S2-02).
+        background: true,
         runner: {
           run: (program, ...rest) => {
             if (program === "whisper-cli") whisperRuns += 1;
@@ -179,7 +181,7 @@ describe.skipIf(NON_EN.length === 0)("transcribes speech in the language spoken 
       await openE2EDoc(dir);
 
       const ref = await libRef(ctx, file);
-      const { parsed } = await ensureTranscript(ctx, ref);
+      const { parsed } = await ensureTranscript({ ...ctx, background: true }, ref);
       const words = parsed.words.map((w) => w.word);
       console.log(`[speech ${lang}] detected ${parsed.language}:`, words.join(" ").slice(0, 300));
 

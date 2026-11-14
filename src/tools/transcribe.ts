@@ -28,6 +28,8 @@ import {
 } from "./speechDecoding";
 import { failureText, TranscriptionFailure } from "./speechFailure";
 import { backendOfRun, recordSpeechRun } from "./speechPace";
+import { padded, playedSpan, spanWindows } from "./speechSpans";
+import { exportFlag } from "../api/exportFlags";
 import { joinPath } from "./store";
 import { prioritizeTranscript } from "./transcriptQueue";
 import { whisperCode } from "./whisperLanguages";
@@ -46,7 +48,7 @@ import {
   setModelDownloadCancel,
 } from "../store/modelDownload";
 import { loadTimeline } from "../timeline/engine";
-import { clipSourceSpanSeconds, findClip } from "../timeline/helpers";
+import { findClip } from "../timeline/helpers";
 import type { Clip } from "../timeline/model";
 import { UNSPACED_CHAR } from "../timeline/wordJoin";
 
@@ -1591,18 +1593,40 @@ async function sourcePath(ctx: ClientToolContext, ref: string): Promise<string> 
 }
 
 /** The whole-file transcript of `ref`: the one already made for this file, model and language
- *  (in any project), else a new one. Every caller that needs a file's words comes through here
- *  or {@link runWhisper}, so all of them share one transcript per file. */
+ *  (in any project), else a new one. A WHOLE file is the background indexer's to make, one at a time
+ *  and only where this PC can do it in the cap (S2-02), so a foreground caller never gets here: it
+ *  asks for the stretch it needs ({@link transcribeSpan}), and that cannot be bypassed by forgetting
+ *  to. With the switch `speech_cpu_cap` off it is 0.27.0 again: any caller may ask for a whole file. */
 export async function ensureTranscript(
   ctx: ClientToolContext,
   ref: string,
   size: string = DEFAULT_MODEL,
   language?: string,
 ): Promise<EnsuredTranscript> {
+  if (!ctx.background && exportFlag("speech_cpu_cap"))
+    throw new Error(
+      "ensureTranscript makes a WHOLE file's transcript and belongs to the background indexer: ask for the stretch you need (transcribeSpan)",
+    );
   const src = await sourcePath(ctx, ref);
   const made = await peekTranscript(ctx, src, size, language);
   if (made) return { parsed: made, existed: true };
   return { parsed: await runWhisper(ctx, src, size, language), existed: false };
+}
+
+/** The transcript of one stretch of `ref` (source seconds): this stretch's own, or the file's whole one
+ *  where it is kept, else a run over the stretch alone. What a foreground caller that needs a file's
+ *  words asks for. */
+export async function transcribeSpan(
+  ctx: ClientToolContext,
+  ref: string,
+  window: { start: number; end: number },
+  language?: string,
+  size: string = DEFAULT_MODEL,
+): Promise<EnsuredTranscript> {
+  const src = await sourcePath(ctx, ref);
+  const made = await peekTranscript(ctx, src, size, language, window);
+  if (made) return { parsed: made, existed: true };
+  return { parsed: await runWhisper(ctx, src, size, language, window), existed: false };
 }
 
 /** What one file of {@link ensureTranscripts} came to. */
@@ -1867,29 +1891,6 @@ export function clipWordFrames(
  *  decision 2026-10-04): about a minute. What is not ready goes on in the background. */
 export const TRANSCRIPT_WAIT_MS = 60_000;
 
-/** Audio transcribed either side of what a clip plays, so a word its cut clips is heard whole. */
-const SPAN_PAD_S = 1;
-
-/** The SOURCE seconds `clip` plays inside [fromFrame, toFrame) of the timeline, or null. */
-function playedSpan(
-  clip: Clip,
-  fps: number,
-  fromFrame: number,
-  toFrame: number,
-): [number, number] | null {
-  const tin = Number(clip.timeline_in) || 0;
-  const tout = Number(clip.timeline_out) || 0;
-  const a = Math.max(tin, fromFrame);
-  const b = Math.min(tout, toFrame);
-  if (!(b > a)) return null;
-  const speed = Number(clip.speed) > 0 ? Number(clip.speed) : 1;
-  const sourceIn = (Number(clip.source_in) || 0) + (a - tin) * speed;
-  return clipSourceSpanSeconds(
-    { source_in: sourceIn, timeline_in: a, timeline_out: b, speed },
-    fps,
-  );
-}
-
 /** One clip as get_transcript reads it: its file, and the source seconds it plays. */
 interface ClipUse {
   track: string;
@@ -1906,26 +1907,21 @@ interface SpanJob {
   error?: string;
 }
 
-/** The stretch transcribed for a clip: what it plays, and {@link SPAN_PAD_S} either side. */
-const padded = (span: [number, number]): { start: number; end: number } => ({
-  start: Math.max(0, span[0] - SPAN_PAD_S),
-  end: span[1] + SPAN_PAD_S,
-});
-
 /** The windows to transcribe: each clip's padded span, merged where two of one file overlap, so
- *  a split clip is one window and not two. */
+ *  a split clip is one window and not two (speechSpans.ts, the rule add_captions shares). */
 function spanJobs(uses: ClipUse[]): Map<ClipUse, SpanJob> {
-  const bySrc = new Map<string, ClipUse[]>();
-  for (const u of uses) bySrc.set(u.src, [...(bySrc.get(u.src) ?? []), u]);
+  const windows = spanWindows(uses, (u) => u.src);
+  const jobOfWindow = new Map<object, SpanJob>();
   const jobOf = new Map<ClipUse, SpanJob>();
-  for (const [src, list] of bySrc) {
-    let job: SpanJob | null = null;
-    for (const u of [...list].sort((p, q) => p.span[0] - q.span[0])) {
-      const { start, end } = padded(u.span);
-      if (job && start <= job.window.end) job.window.end = Math.max(job.window.end, end);
-      else job = { src, window: { start, end } };
-      jobOf.set(u, job);
+  for (const u of uses) {
+    const w = windows.get(u);
+    if (!w) continue;
+    let job = jobOfWindow.get(w);
+    if (!job) {
+      job = { src: u.src, window: { start: w.start, end: w.end } };
+      jobOfWindow.set(w, job);
     }
+    jobOf.set(u, job);
   }
   return jobOf;
 }

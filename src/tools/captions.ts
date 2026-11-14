@@ -25,6 +25,7 @@ import type { ClientToolContext } from "./context";
 import type { ClientToolRegistry } from "./registry";
 import { unresolvedRefError } from "./refState";
 import { captionWords, pendingCaptionsResult } from "./captionTranscript";
+import { playedSpan, spanWindows } from "./speechSpans";
 import { TRANSCRIPT_WAIT_MS } from "./transcribe";
 import type { InProgressTranscript } from "./transcriptWait";
 import { stoppedAnswer } from "../lib/stopped";
@@ -187,6 +188,17 @@ export async function addCaptionsTool(args: Args, ctx: ClientToolContext | null)
   const candidates = wantTrack ? [wantTrack] : [...byTrack.keys()];
   const cuesByTrack = new Map<string, Cue[]>();
   const failures: Array<{ clip_id: string; error: string }> = [];
+  // Only what a clip plays is transcribed, plus a second either side (S2-10): the words of a clip come
+  // from the window of its file that holds that stretch, the same rule get_transcript uses, so no
+  // caption request can start a whole file.
+  const uses = candidates.flatMap((trackId) =>
+    (byTrack.get(trackId) ?? []).flatMap((clip) => {
+      const span = playedSpan(clip, fps, -Infinity, Infinity);
+      return span ? [{ clip, file: String(clip.media_ref), span }] : [];
+    }),
+  );
+  const windowOf = spanWindows(uses, (use) => use.file);
+  const useOf = new Map(uses.map((use) => [use.clip, use]));
   // Words not made yet are waited for at most as long as get_transcript waits, in all.
   const until = Date.now() + TRANSCRIPT_WAIT_MS;
   const waiting: Array<{ clip_id: string; track_id: string }> = [];
@@ -194,7 +206,18 @@ export async function addCaptionsTool(args: Args, ctx: ClientToolContext | null)
   for (const trackId of candidates) {
     const cues: Cue[] = [];
     for (const clip of byTrack.get(trackId) ?? []) {
-      const got = await captionWords(ctx, String(clip.media_ref), language, until);
+      const use = useOf.get(clip);
+      if (!use) continue; // it plays nothing: nothing to caption
+      const window = windowOf.get(use)!;
+      // A clip longer than this PC can do in the cap still runs (S2-13): the call answers at once with
+      // the time it is expected to take, and the next call finds the words when they are done.
+      const got = await captionWords(
+        ctx,
+        String(clip.media_ref),
+        language,
+        window.overCap ? Date.now() : until,
+        { start: window.start, end: window.end },
+      );
       if (got.kind === "cancelled") return stoppedAnswer();
       if (got.kind === "pending") {
         waiting.push({ clip_id: String(clip.id), track_id: trackId });

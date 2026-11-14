@@ -289,4 +289,26 @@ describe("planning the parts of a file that are used", () => {
     expect(windows[0]).toMatchObject({ overCap: true });
     expect(windows[0].projectedS).toBeGreaterThan(CAP_S);
   });
+
+  it("with mergeGaps off the windows are the padded used spans that overlap and nothing else: the same range whatever this PC's pace, so a cached window is asked for again by the same key", () => {
+    const ranges = (ws: SpanWindow[]) => ws.map((w) => [w.start, w.end]);
+    fc.assert(
+      fc.property(spans, models, models, caps, (used, paceA, paceB, capS) => {
+        const run = (pace: PaceModel) =>
+          planSpans({ usedSpans: used, padS: 1, pace, capS, mergeGaps: false }).windows;
+        expect(ranges(run(paceA))).toEqual(mergedPadded(used, 1));
+        expect(ranges(run(paceB))).toEqual(ranges(run(paceA)));
+      }),
+    );
+    // ...and the same ten clips that merge on a slow start-up stay ten windows.
+    expect(
+      planSpans({
+        usedSpans: TEN,
+        padS: 1,
+        pace: model("gpu", 65, 0.1),
+        capS: CAP_S,
+        mergeGaps: false,
+      }).windows,
+    ).toHaveLength(10);
+  });
 });
