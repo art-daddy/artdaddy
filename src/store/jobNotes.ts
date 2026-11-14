@@ -1,7 +1,7 @@
 // Waking the agent when background work lands.
 //
 // A generation finishes long after the turn that started it ended, so its result has to re-enter
-// the conversation from outside. Four rules decide when:
+// the conversation from outside. Five rules decide when:
 //
 //   this chat only - the wake says "background work YOU started has finished ... continue what you
 //                  were doing", so it may only fire for work THIS chat started. Two other drivers
@@ -18,6 +18,11 @@
 //                  completion, not the last, so a steady stream still lands.
 //   never lost   - with no sink (project closed) the queue simply waits. Registering one delivers
 //                  whatever accumulated, which is how a completion survives a switch or a reopen.
+//   guarded      - a job of a kind that has its own rules (`kind: "words"`, the transcripts the assistant was
+//                  told were not ready) is asked at the moment of delivery, not when it was queued: a draft
+//                  the person began meanwhile, an empty balance or the hourly cap decide then. The answer is
+//                  deliver, hold (it stays queued until something flushes again) or drop. A job of any other
+//                  kind is never asked and never held: exports and generations behave as they always did.
 export interface SettledJob {
   id: string;
   tool: string;
@@ -27,6 +32,8 @@ export interface SettledJob {
    *  submitter that cannot say defaults to "elsewhere" — the fail-safe direction (a missed wake
    *  costs a message, a wrong one costs a billed round that edits the project). */
   startedBy: "chat" | "elsewhere";
+  /** A kind with its own delivery rules (see "guarded" above). Absent: an export or a generation. */
+  kind?: "words";
   media_refs?: string[];
   /** For work that produces no library media (an export): what to tell the model instead. */
   detail?: string;
@@ -37,6 +44,8 @@ export interface JobSink {
   /** False while a turn is running, a completion is mid-delivery, or approval is pending. */
   isIdle: () => boolean;
   deliver: (jobs: SettledJob[]) => void;
+  /** Asked, once per flush, for each queued job that has a `kind`. Absent: all of them are delivered. */
+  admit?: (job: SettledJob) => "deliver" | "hold" | "drop";
 }
 
 /** How long to gather completions before waking the agent once for all of them. */
@@ -101,10 +110,19 @@ export function flushJobNotes(projectDir: string): void {
   const sink = sinks.get(projectDir);
   const q = queued.get(projectDir);
   if (!sink || !q?.length || !sink.isIdle()) return;
+  // A job with a kind is asked now, one by one; a held one waits for the next flush.
+  const now: SettledJob[] = [];
+  const later: SettledJob[] = [];
+  for (const j of q) {
+    const verdict = j.kind && sink.admit ? sink.admit(j) : "deliver";
+    if (verdict === "deliver") now.push(j);
+    else if (verdict === "hold") later.push(j);
+  }
   // Cleared BEFORE delivering: deliver() starts a turn, and a completion arriving during it must
   // queue for the next wake rather than be dropped or replayed.
-  queued.delete(projectDir);
-  sink.deliver(q);
+  if (later.length) queued.set(projectDir, later);
+  else queued.delete(projectDir);
+  if (now.length) sink.deliver(now);
 }
 
 /** Completions still waiting on this project (for tests and diagnostics). */

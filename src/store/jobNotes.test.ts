@@ -222,3 +222,124 @@ describe("only work THIS chat started may resume it", () => {
     expect(s.deliveries).toHaveLength(0);
   });
 });
+
+// The transcript wake asks the sink when it is about to deliver, because a draft, the balance and the hourly cap
+// can all change between queueing and delivery. Exports and generations are never asked and never held.
+describe("a job with its own delivery rules is asked at the moment of delivery", () => {
+  type Verdict = "deliver" | "hold" | "drop";
+  const words = (id: string): SettledJob =>
+    job(id, { tool: "inspect_media", label: "the words of 2 files", kind: "words" });
+
+  function guardedSink(verdict: () => Verdict) {
+    const deliveries: SettledJob[][] = [];
+    const asked: string[] = [];
+    const s = {
+      idle: true,
+      isIdle: () => s.idle,
+      deliver: (jobs: SettledJob[]) => deliveries.push(jobs),
+      admit: (j: SettledJob): Verdict => {
+        asked.push(j.id);
+        return verdict();
+      },
+      deliveries,
+      asked,
+    };
+    return s;
+  }
+
+  it("delivers a words job the sink admits", () => {
+    const s = guardedSink(() => "deliver");
+    registerJobSink(A, s);
+    notifyJobSettled(A, words("w1"));
+    vi.advanceTimersByTime(SETTLE_WINDOW_MS);
+    expect(s.deliveries).toEqual([[words("w1")]]);
+    expect(s.asked).toEqual(["w1"]);
+  });
+
+  it("keeps a held words job queued and delivers it once a later flush finds it admissible", () => {
+    let verdict: Verdict = "hold";
+    const s = guardedSink(() => verdict);
+    registerJobSink(A, s);
+    notifyJobSettled(A, words("w1"));
+    vi.advanceTimersByTime(SETTLE_WINDOW_MS);
+    expect(s.deliveries).toHaveLength(0);
+    expect(pendingJobNotes(A)).toEqual([words("w1")]);
+
+    flushJobNotes(A); // still held
+    expect(s.deliveries).toHaveLength(0);
+    verdict = "deliver";
+    flushJobNotes(A);
+    expect(s.deliveries).toEqual([[words("w1")]]);
+    expect(pendingJobNotes(A)).toHaveLength(0);
+  });
+
+  it("forgets a words job the sink drops: nothing is delivered now or later", () => {
+    const s = guardedSink(() => "drop");
+    registerJobSink(A, s);
+    notifyJobSettled(A, words("w1"));
+    vi.advanceTimersByTime(SETTLE_WINDOW_MS);
+    expect(s.deliveries).toHaveLength(0);
+    expect(pendingJobNotes(A)).toHaveLength(0);
+    flushJobNotes(A);
+    expect(s.deliveries).toHaveLength(0);
+  });
+
+  it("never asks about, and never holds back, an export or a generation", () => {
+    const s = guardedSink(() => "drop");
+    registerJobSink(A, s);
+    notifyJobSettled(A, job("export-1", { tool: "export" }));
+    vi.advanceTimersByTime(SETTLE_WINDOW_MS);
+    expect(s.deliveries).toEqual([[job("export-1", { tool: "export" })]]);
+    expect(s.asked).toEqual([]);
+  });
+
+  it("delivers what is admissible and keeps what is held, in one flush", () => {
+    const s = guardedSink(() => "hold");
+    registerJobSink(A, s);
+    notifyJobSettled(A, job("export-1", { tool: "export" }));
+    notifyJobSettled(A, words("w1"));
+    vi.advanceTimersByTime(SETTLE_WINDOW_MS);
+    expect(s.deliveries).toEqual([[job("export-1", { tool: "export" })]]);
+    expect(pendingJobNotes(A)).toEqual([words("w1")]);
+  });
+
+  it("does not ask while the chat is busy, and asks when it is idle again", () => {
+    const s = guardedSink(() => "deliver");
+    s.idle = false;
+    registerJobSink(A, s);
+    notifyJobSettled(A, words("w1"));
+    vi.advanceTimersByTime(SETTLE_WINDOW_MS);
+    expect(s.asked).toEqual([]);
+    expect(s.deliveries).toHaveLength(0);
+    s.idle = true;
+    flushJobNotes(A);
+    expect(s.asked).toEqual(["w1"]);
+    expect(s.deliveries).toEqual([[words("w1")]]);
+  });
+
+  it("delivers a words job like any other when the sink has no rule for it", () => {
+    const s = sink();
+    registerJobSink(A, s);
+    notifyJobSettled(A, words("w1"));
+    vi.advanceTimersByTime(SETTLE_WINDOW_MS);
+    expect(s.deliveries).toEqual([[words("w1")]]);
+  });
+
+  it("queues a job that arrives during delivery for the next flush, held jobs included", () => {
+    const verdicts: Verdict[] = ["hold", "deliver"];
+    const s = guardedSink(() => verdicts.shift() ?? "deliver");
+    registerJobSink(A, s);
+    notifyJobSettled(A, words("w1"));
+    vi.advanceTimersByTime(SETTLE_WINDOW_MS); // w1 held
+    notifyJobSettled(A, job("export-2", { tool: "export" }));
+    vi.advanceTimersByTime(SETTLE_WINDOW_MS);
+    // the export goes now; w1 is asked again in the same flush and is admitted
+    expect(
+      s.deliveries
+        .flat()
+        .map((j) => j.id)
+        .sort(),
+    ).toEqual(["export-2", "w1"]);
+    expect(pendingJobNotes(A)).toHaveLength(0);
+  });
+});
