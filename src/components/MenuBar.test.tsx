@@ -63,6 +63,7 @@ import MenuBar from "./MenuBar";
 import { usePanes } from "../store/panes";
 import { BRAND } from "../brand";
 import { useExportJob } from "../store/exportJob";
+import { __resetSpeechJobs, useSpeechJobs } from "../store/speechJobs";
 import { unknownParams } from "../contract/params";
 
 type ToolReply = {
@@ -108,6 +109,7 @@ beforeEach(() => {
   ed.dirty = false;
   authState.status = "locked";
   useExportJob.getState().reset(); // a module-level job would leak a finished render between tests
+  __resetSpeechJobs();
   proj.create.mockResolvedValue({ id: "pNew" });
 });
 
@@ -129,6 +131,49 @@ describe("MenuBar", () => {
     ed.dirty = false;
     renderBar("/p/test");
     expect(screen.queryByText("Unsaved")).not.toBeInTheDocument();
+  });
+
+  // S2-04 = D: one chip in the right cluster, after the Export badge and before Record, like the picture.
+  it("shows a speech job as a chip between the Export badge and Record, in the right cluster", () => {
+    useExportJob.setState({ phase: "rendering", fraction: 0.37 });
+    useSpeechJobs.getState().add({
+      id: "a",
+      purpose: "index",
+      label: "Interview 2.mp4",
+      spanS: 1200,
+      phase: "running",
+      stop: null,
+      enqueuedAt: Date.now() - 60_000,
+      startedAt: Date.now() - 60_000,
+      firstWordsAt: Date.now() - 50_000,
+      endedAt: null,
+      doneS: 576,
+      rate: 1 / 0.3,
+      etaS: 2080,
+      facts: {
+        backend: "cpu",
+        gpuHeld: false,
+        noGpu: true,
+        cores: 4,
+        threads: 2,
+        exportsBusy: true,
+      },
+    });
+    renderBar("/p/test");
+    const exporting = screen.getByLabelText("export progress");
+    const speech = screen.getByTestId("speech-chip");
+    const record = screen.getByRole("button", { name: "Record video" });
+    expect(speech).toHaveTextContent("Transcribing 48% · slow: about 35 min left");
+    expect(
+      exporting.compareDocumentPosition(speech) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(speech.compareDocumentPosition(record) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(speech.closest(".ml-auto")).toBe(record.parentElement);
+  });
+
+  it("draws no speech chip while no speech job is going", () => {
+    renderBar("/p/test");
+    expect(screen.queryByTestId("speech-chip")).not.toBeInTheDocument();
   });
 
   it("creates a project via File → New, with the canvas left to the first clip (Auto)", async () => {

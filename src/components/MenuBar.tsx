@@ -35,6 +35,7 @@ import { NewProjectDialog, OpenProjectDialog } from "./ProjectDialogs";
 import { ShortcutSheet } from "./ShortcutSheet";
 import { shortcutLabel as sc } from "../timeline/shortcuts";
 import ReportProblemDialog from "./ReportProblemDialog";
+import SpeechChip from "./SpeechChip";
 import { Button, cn, Overlay } from "./ui";
 
 type Item = "sep" | { label: string; shortcut?: string; onClick: () => void; disabled?: boolean };
@@ -605,6 +606,7 @@ export default function MenuBar() {
         </button>
         <div className="ml-auto flex items-center gap-1">
           <ExportBadge onClick={() => openExport()} />
+          <SpeechChip />
           {hasProject && (
             <button
               onClick={openRecorder}
