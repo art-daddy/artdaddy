@@ -1083,6 +1083,21 @@ export async function peekTranscript(
   return null;
 }
 
+/** Is a run for exactly this request going right now, started by anything (a look, captions, the
+ *  indexer)? A request for it joins that run instead of starting one, so it is never too long to be
+ *  answered: only a run that has not started is. False for a file with no identity, where the join is
+ *  keyed by a scratch path that cannot be known without making it. */
+export async function transcriptRunning(
+  ctx: ClientToolContext,
+  src: string,
+  size: string = DEFAULT_MODEL,
+  language?: string,
+  window?: TranscribeWindow | null,
+): Promise<boolean> {
+  const { out } = await transcriptKeys(ctx, src, size, language, window);
+  return out !== null && inflight.has(out);
+}
+
 /** A transcription, kept for the file and language it was asked for. Whisper's decoding setting
  *  follows speechDecoding.ts: a language the accuracy gate cleared is decoded with the faster
  *  setting, and a transcript made with a setting narrower than its detected language needs is never

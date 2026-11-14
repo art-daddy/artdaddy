@@ -15,7 +15,7 @@ import { probePath, shortHash } from "./media";
 import { encodeImageForGemini, encodeVideoForGemini } from "./geminiEncode";
 import type { ClientToolRegistry } from "./registry";
 import { unresolvedRefError, unresolvedRefMessage } from "./refState";
-import { normLanguage, peekTranscript, runWhisper } from "./transcribe";
+import { normLanguage, peekTranscript, runWhisper, transcriptRunning } from "./transcribe";
 import { languageProblem } from "./whisperLanguages";
 import type { TranscriptFailureReason } from "./speechFailure";
 import { failedTranscript, waitBoundMs, waitForRun } from "./transcriptWait";
@@ -233,10 +233,20 @@ function coversWholeFile(from: number, to: number | null, duration: number | nul
 
 /** A span that this PC cannot transcribe within the cap (ten minutes on its own measured pace) is
  *  answered at once with how long it would take and what would fit. Nothing is started and nothing is
- *  queued: the caller can ask for a shorter span, and that is the whole of what happens. */
-function tooLongForThisPc(from: number, to: number): Result | null {
+ *  queued: the caller can ask for a shorter span, and that is the whole of what happens. A run for
+ *  exactly this span that something else already started (captions, an earlier look) is joined, never
+ *  refused: the answer is the one a look gives for a run that is going. */
+async function refuseIfTooLong(
+  ctx: ClientToolContext,
+  path: string,
+  language: string,
+  window: { start: number; end: number | null } | null,
+  from: number,
+  to: number,
+): Promise<Result | null> {
   const pace = currentPaceModel();
   if (projectedS(pace, to - from) <= CAP_S) return null;
+  if (await transcriptRunning(ctx, path, undefined, language, window)) return null;
   const { note, would_take_s, fits_seconds } = tooLongNotReady(pace, from, to, CAP_S);
   return { status: "unavailable", reason: "too_long", note, would_take_s, fits_seconds };
 }
@@ -305,7 +315,7 @@ async function lookTranscript(
     let t = await peekTranscript(ctx, path, undefined, opts.language, window);
     if (!t && to !== null && to > from) {
       const refused = exportFlag("speech_cpu_cap")
-        ? tooLongForThisPc(from, to)
+        ? await refuseIfTooLong(ctx, path, opts.language, window, from, to)
         : queueWholeFile(ctx, path, opts.language, from, to);
       if (refused) return refused;
     }

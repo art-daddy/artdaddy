@@ -16,7 +16,8 @@ import {
   mediaKind,
   midpointFrames,
 } from "./inspect";
-import { SPEECH_PACE_KEY, type SpeechBackend } from "./speechPace";
+import { paceModel, spanLimitS, SPEECH_PACE_KEY, type SpeechBackend } from "./speechPace";
+import { CAP_S } from "./speechPlan";
 import { ProjectStoreAccess, joinPath, type FsLike } from "./store";
 import { createLookDecoder } from "./lookDecode";
 import type { LookReport } from "./lookReport";
@@ -25,7 +26,7 @@ import { registerTestDocument, resetTestDocuments } from "../test/timelineKit";
 import { emptyTimeline } from "../timeline/model";
 import { makeStoryboard } from "./storyboard";
 import { TranscriptionFailure } from "./speechFailure";
-import { peekTranscript, runWhisper } from "./transcribe";
+import { peekTranscript, runWhisper, transcriptRunning } from "./transcribe";
 import { backgroundLoudness, prioritizeTranscript } from "./transcriptQueue";
 
 // inspect_media now transcribes audio/video-with-audio via runWhisper; mock it so
@@ -53,6 +54,7 @@ vi.mock("./transcribe", () => ({
     return !s || s === "auto" ? "" : s;
   },
   peekTranscript: vi.fn(async () => null),
+  transcriptRunning: vi.fn(async () => false),
   runWhisper: vi.fn(async () => ({
     language: "en",
     duration_seconds: 12.5,
@@ -955,6 +957,10 @@ describe("inspectMediaTool looks at what it returns (UJ-012)", () => {
     it("runs a span exactly at what fits, and answers the next second at once", async () => {
       const { fs } = setup();
       slowPc();
+      expect(
+        spanLimitS(paceModel([[100, 400, "cpu", 20]], "cpu", "windows"), CAP_S),
+        "the number below is what the pace model says this PC fits in ten minutes",
+      ).toBe(SLOW_FITS_S);
       const ask = (end_seconds: number) =>
         inspectMediaTool(
           { media_ref: "vid.mp4", max_frames: 1, start_seconds: 0, end_seconds },
@@ -1025,6 +1031,26 @@ describe("inspectMediaTool looks at what it returns (UJ-012)", () => {
         ),
         { numRuns: 30 },
       );
+    });
+
+    it("joins a run that something else is already making for this very span, instead of refusing it", async () => {
+      const { fs } = setup();
+      slowPc();
+      vi.mocked(transcriptRunning).mockResolvedValueOnce(true);
+      const r = (await inspectMediaTool(
+        { media_ref: "vid.mp4", max_frames: 1, start_seconds: 0, end_seconds: 900 },
+        ctxWith(mediaRunner(fs, { probe: LONG_PROBE }), fs),
+      )) as Any;
+      expect(r.transcript.status).not.toBe("unavailable");
+      expect(vi.mocked(runWhisper), "asked for it, which is the join").toHaveBeenCalledTimes(1);
+      expect(vi.mocked(runWhisper).mock.calls[0][4]).toEqual({ start: 0, end: 900 });
+      expect(vi.mocked(prioritizeTranscript)).not.toHaveBeenCalled();
+      // ...but only for that span: another long one, with nothing running for it, is still refused
+      const other = (await inspectMediaTool(
+        { media_ref: "vid.mp4", max_frames: 1, start_seconds: 0, end_seconds: 901 },
+        ctxWith(mediaRunner(fs, { probe: LONG_PROBE }), fs),
+      )) as Any;
+      expect(other.transcript).toMatchObject({ status: "unavailable", reason: "too_long" });
     });
 
     it("says that nothing fits, and runs nothing, on a PC that cannot do even ten seconds in ten minutes", async () => {

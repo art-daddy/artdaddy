@@ -44,6 +44,7 @@ import {
   SINGLE_ATTEMPT,
   TRANSCRIPT_WAIT_MS,
   transcriptCacheSlot,
+  transcriptRunning,
   WHISPER_MODELS,
   type WhisperModelSpec,
   whisperModelPath,
@@ -1819,6 +1820,28 @@ describe("whisper as a job of the app process (4i)", () => {
     expect(jobs.killed).toEqual(jobs.started);
     expect(jobs.forgotten).toEqual(jobs.started);
     expect(under(fs, WORK)).toEqual([]);
+  });
+
+  it("says a run is going for exactly one request while it is, and not before, for another span, or after", async () => {
+    const fs = disk();
+    const jobs = new FakeJobs();
+    __setJobSupervisor(jobs);
+    const ctx = ctxWith(transcribeRunner(fs), fs);
+    const span = { start: 30, end: 90 };
+    const going = (window: { start: number; end: number } | null) =>
+      transcriptRunning(ctx, SRC, undefined, undefined, window);
+    expect(await going(span), "nothing started").toBe(false);
+    const run = runWhisper(ctx, SRC, undefined, undefined, span);
+    await until(() => jobs.started.length === 1);
+    expect(await going(span), "this very span").toBe(true);
+    expect(await going({ start: 30, end: 91 }), "another span is another run").toBe(false);
+    expect(await going(null), "the whole file is another run").toBe(false);
+    expect(await transcriptRunning(ctx, SRC, undefined, "es", span), "another language too").toBe(
+      false,
+    );
+    await finish(fs, jobs, jobs.started[0]);
+    await run;
+    expect(await going(span), "finished").toBe(false);
   });
 
   it("keeps the words of a transcription the page crashed during, and asks for nothing twice", async () => {
