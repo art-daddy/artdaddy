@@ -1,8 +1,8 @@
 // What a slow speech job says (S2-09): "Slow: this will take a while because {reason}. {advice}", and each
 // reason only from a fact the app can read. The expected sentences here are not this module's own constants:
 // the golden rows are the output of the mockup's own slowNote() (the code the owner's pictures were
-// rendered from, `_scratch/lanes/L2-p2-contract/mockups/_tools/build-window.mjs`), run over the grid once
-// and frozen. The rules are then checked over EVERY combination of facts, including the ones the
+// rendered from: build-window.mjs in lane L2's mockups folder, outside this repository), run over the grid
+// once and frozen. The rules are then checked over EVERY combination of facts, including the ones the
 // pictures never had (no backend known, a nonsense core count), because a green row says that row works.
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
@@ -347,7 +347,7 @@ describe("the speed rows", () => {
   });
 
   it("claim no speed until a rate is measured", () => {
-    for (const bad of [null, 0, -1, NaN, Infinity]) {
+    for (const bad of [null, 0, -1, NaN, Infinity, Number.MIN_VALUE]) {
       expect(speedLine(bad)).toBeNull();
       if (bad !== null) expect(speedText(bad)).toBeNull();
     }

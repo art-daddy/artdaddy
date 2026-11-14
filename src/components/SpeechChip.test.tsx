@@ -3,6 +3,7 @@
 // stopped one at once, a waiting one only when an export is why), what Cancel reaches, and what the
 // clock is allowed to keep running. Time is faked: the chip's 1-second tick is part of what is tested.
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import fc from "fast-check";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -237,8 +238,17 @@ describe("what the chip says", () => {
   });
 
   it("is grey, with no pulse, once it has stopped or while it waits", () => {
-    seed(job("a", { phase: "stopped", stop: "cancelled", endedAt: T0 }));
+    seed(
+      job("a", { phase: "stopped", stop: "cancelled", endedAt: T0 }),
+      job("w", { phase: "waiting", startedAt: null, facts: { exportsBusy: true } }),
+    );
+    const { unmount } = render(<SpeechChip />);
+    expect(chip()).toHaveClass("text-neutral-400");
+    expect(chip().querySelector("[aria-hidden]")).not.toHaveClass("animate-pulse");
+    unmount();
+    act(() => state().dismiss("a"));
     render(<SpeechChip />);
+    expect(chip().textContent).toBe("Transcription waiting for the export");
     expect(chip()).toHaveClass("text-neutral-400");
     expect(chip().querySelector("[aria-hidden]")).not.toHaveClass("animate-pulse");
   });
@@ -256,6 +266,80 @@ describe("what the chip says", () => {
     );
     const title = openPopover().getByText(`Transcribing ${"A".repeat(200)}`);
     expect(title).toHaveClass("truncate", "min-w-0");
+  });
+});
+
+describe("numbers from the engine", () => {
+  // The float traps of a percent: 0.29 * 100 is 28.999999999999996 and 0.58 * 100 is 57.99999999999999.
+  it.each([
+    [29, 100, 29],
+    [57, 100, 57],
+    [58, 100, 58],
+    [7, 100, 7],
+    [1, 3, 33],
+    [2, 3, 66],
+    [3, 3, 100],
+  ])("%s s of %s s is %s%%", (doneS, spanS, pct) => {
+    seed(job("a", { spanS, doneS }));
+    render(<SpeechChip />);
+    expect(chip().textContent).toBe(`Transcribing ${pct}%`);
+  });
+
+  it("shows the whole percent that is done, never rounded up, for any whole-second span", () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 1, max: 100_000 }),
+        fc.integer({ min: 0, max: 1_000 }),
+        (spanS, thousandths) => {
+          const doneS = Math.floor((spanS * thousandths) / 1_000);
+          const exact = (doneS * 100 - ((doneS * 100) % spanS)) / spanS; // integer arithmetic only
+          __resetSpeechJobs();
+          seed(job("a", { spanS, doneS }));
+          const { unmount } = render(<SpeechChip />);
+          try {
+            expect(chip().textContent).toBe(`Transcribing ${exact}%`);
+          } finally {
+            unmount();
+          }
+        },
+      ),
+      { numRuns: 60 },
+    );
+  });
+
+  it("never puts NaN, Infinity or undefined on the screen, whatever number the engine sends", () => {
+    const number = fc.oneof(
+      fc.constant(NaN),
+      fc.constant(Infinity),
+      fc.constant(-Infinity),
+      fc.constant(Number.MIN_VALUE),
+      fc.constant(-0),
+      fc.double(),
+      fc.integer({ min: -5, max: 5_000 }),
+    );
+    fc.assert(
+      fc.property(
+        number,
+        number,
+        number,
+        number,
+        fc.constantFrom<SpeechJob["phase"]>("starting", "running"),
+        (spanS, doneS, rate, etaS, phase) => {
+          __resetSpeechJobs();
+          seed(job("a", { phase, spanS, doneS, rate, etaS, facts: CPU4 }));
+          const { unmount } = render(<SpeechChip />);
+          try {
+            fireEvent.click(chip());
+            expect(`${chip().textContent} | ${popover().textContent}`).not.toMatch(
+              /NaN|Infinity|undefined|null|\[object|-\d/,
+            );
+          } finally {
+            unmount();
+          }
+        },
+      ),
+      { numRuns: 80 },
+    );
   });
 });
 

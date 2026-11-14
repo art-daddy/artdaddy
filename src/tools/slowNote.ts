@@ -117,6 +117,7 @@ export function about(seconds: number): string {
 export function speedText(rate: number | null): string | null {
   if (rate === null || !Number.isFinite(rate) || rate <= 0) return null;
   const speed = 1 / rate;
+  if (!Number.isFinite(speed)) return null;
   if (speed >= 10) return `${Math.round(speed)}×`;
   if (speed >= 0.1) return `${Number(speed.toFixed(1))}×`;
   return `${Math.max(0.01, Number(speed.toFixed(2)))}×`;

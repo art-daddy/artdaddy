@@ -68,14 +68,15 @@ const isSlow = (job: SpeechJob): boolean =>
 
 function percentOf(job: SpeechJob): number | null {
   const span = job.spanS;
-  if (span === null || !(span > 0)) return null;
+  if (span === null || !Number.isFinite(span) || span <= 0) return null;
   // Multiply first: 29 * 100 / 100 is 29, where 29 / 100 * 100 is 28.999...
-  return Math.min(100, Math.max(0, Math.floor((job.doneS * 100) / span + 1e-9)));
+  const percent = (job.doneS * 100) / span + 1e-9;
+  return Number.isFinite(percent) ? Math.min(100, Math.max(0, Math.floor(percent))) : null;
 }
 
 /** "Transcribing {label}", or by what asked for it and how much of the file it covers. */
 function titleOf(job: SpeechJob): string {
-  const span = job.spanS !== null && job.spanS > 0 ? job.spanS : null;
+  const span = job.spanS !== null && Number.isFinite(job.spanS) && job.spanS > 0 ? job.spanS : null;
   const part = job.purpose !== "index" && span !== null ? `${lengthText(span)} of ` : "";
   return job.purpose === "captions"
     ? `Captions: ${part}${job.label}`
