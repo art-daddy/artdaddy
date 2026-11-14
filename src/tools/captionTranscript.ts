@@ -47,12 +47,12 @@ export async function captionWords(
       : ensureTranscript(ctx, ref, undefined, language),
     boundMs: Math.max(CACHE_READ_FLOOR_MS, deadline - Date.now()),
     signal: ctx.signal,
-    wake: wakeTargetOf(ctx, ref, ref),
+    wake: wakeTargetOf(ctx, ref, ref, bySpan ? window : null),
   });
   switch (outcome.kind) {
     case "done":
       // add_captions is about to use these words: a wake that was going to say they are ready has nothing to say.
-      noteWordsFetched(ctx, ref);
+      noteWordsFetched(ctx, ref, bySpan ? window : null);
       return { kind: "ready", transcript: outcome.value.parsed };
     case "pending":
       return { kind: "pending", status: outcome.status };

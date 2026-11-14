@@ -30,17 +30,36 @@ export interface ChatKey {
   readonly session: string;
 }
 
+/** A stretch of a file in source seconds. `end` may be Infinity: to the end of the file. */
+export interface SpanWindow {
+  readonly start: number;
+  readonly end: number;
+}
+
+/** Seconds of slack when a span read is compared with the span wanted: a look is rounded to what a clip plays. */
+const SPAN_SLACK_S = 0.05;
+
+/** Do the words of `read` hold everything `wanted` is waiting for? Null is the whole file: it holds any part,
+ *  and a part never holds the whole. */
+export function spanCovers(read: SpanWindow | null, wanted: SpanWindow | null): boolean {
+  if (read === null) return true;
+  if (wanted === null) return false;
+  return read.start <= wanted.start + SPAN_SLACK_S && read.end >= wanted.end - SPAN_SLACK_S;
+}
+
 export interface RegisterInput extends ChatKey {
   /** The turn (execution token) whose answer this is. */
   exec: number;
   /** One per transcript wanted: the key `waitForRun` uses. */
   key: string;
   /** The media file the words are of: its media_ref when it has one, else its path. A later read of the
-   *  same source marks the entry read. */
+   *  same source marks the entry read, when what it read holds the stretch this entry is waiting for. */
   source: string;
   /** The media_ref or clip_id the assistant used, as the wake names it to the model. */
   ref: string | null;
   audioS: number | null;
+  /** The stretch of the file the words are of; absent or null is the whole file. */
+  window?: SpanWindow | null;
 }
 
 export interface Entry {
@@ -48,6 +67,7 @@ export interface Entry {
   readonly source: string;
   readonly ref: string | null;
   readonly audioS: number | null;
+  readonly window: SpanWindow | null;
   readonly state: EntryState;
   readonly failure: WakeFailureReason | null;
 }
@@ -84,6 +104,7 @@ interface EntryRec {
   source: string;
   ref: string | null;
   audioS: number | null;
+  window: SpanWindow | null;
   state: EntryState;
   failure: WakeFailureReason | null;
 }
@@ -115,6 +136,7 @@ const snapshot = (e: EntryRec): Entry => ({
   source: e.source,
   ref: e.ref,
   audioS: e.audioS,
+  window: e.window,
   state: e.state,
   failure: e.failure,
 });
@@ -181,6 +203,7 @@ export class WakeRegistry {
       source: input.source,
       ref: input.ref,
       audioS: input.audioS,
+      window: input.window ?? null,
       state: "pending",
       failure: null,
     });
@@ -206,13 +229,14 @@ export class WakeRegistry {
     return batch ? this.evaluate(batch, now) : [];
   }
 
-  /** Some tool gave the assistant the words of `source` (any window of it): whatever this chat was waiting
-   *  to tell it about that file is read. This can only make a wake rarer, never extra. */
-  fetched(chat: ChatKey, source: string, now: number): Release[] {
+  /** Some tool gave the assistant the words of `source`, of the stretch `window` of it (null: the whole file):
+   *  whatever this chat was waiting to tell it about words that stretch holds is read. A file whose words were
+   *  asked for another stretch is still waited for. This can only make a wake rarer, never extra. */
+  fetched(chat: ChatKey, source: string, now: number, window: SpanWindow | null = null): Release[] {
     const c = chatId(chat);
     const touched = new Set<BatchRec>();
     for (const e of this.entries.values()) {
-      if (e.chat !== c || e.source !== source) continue;
+      if (e.chat !== c || e.source !== source || !spanCovers(window, e.window)) continue;
       if (e.state !== "pending" && e.state !== "landed") continue;
       const wasPending = e.state === "pending";
       e.state = "fetched";

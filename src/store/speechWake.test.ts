@@ -215,6 +215,75 @@ describe("a batch of files the assistant was told were not ready", () => {
       expect(land(r, A, "a", 3).map(refs)).toEqual([["ref-a"]]);
       expect(land(r, B, "a", 3)).toEqual([]);
     });
+
+    // Seven clips of one file ask for seven stretches of it. Reading the words of ONE stretch (the clip the
+    // assistant did get words for) says nothing of the others: a wake for them is still wanted.
+    describe("of another stretch of the same file", () => {
+      const askSpan = (r: WakeRegistry, key: string, start: number, end: number) =>
+        r.register(
+          {
+            ...A,
+            exec: 1,
+            key,
+            source: "file",
+            ref: `ref-${key}`,
+            audioS: end - start,
+            window: { start, end },
+          },
+          0,
+        );
+      const sealed = (spans: Array<[string, number, number]>): WakeRegistry => {
+        const r = new WakeRegistry();
+        begin(r, A, 1);
+        for (const [key, start, end] of spans) askSpan(r, key, start, end);
+        r.endTurn(A, 1, "done", 1);
+        return r;
+      };
+
+      it("are not what a read of one stretch gives: the other clips' words are still waited for", () => {
+        const r = sealed([
+          ["c2", 60, 80],
+          ["c3", 120, 140],
+        ]);
+        expect(r.fetched(A, "file", 2, { start: 0, end: 30 })).toEqual([]); // the first clip's words
+        expect(land(r, A, "c2", 3)).toEqual([]);
+        expect(land(r, A, "c3", 4).map(refs)).toEqual([["ref-c2", "ref-c3"]]);
+      });
+
+      it("are read by a read that holds the stretch, by the whole file, and by nothing less", () => {
+        const r = sealed([
+          ["inside", 60, 80],
+          ["edge", 100, 120],
+          ["longer", 150, 200],
+          ["open", 300, Infinity],
+        ]);
+        expect(r.isPending(A, "inside")).toBe(true);
+        r.fetched(A, "file", 2, { start: 50, end: 90 });
+        expect(r.isPending(A, "inside"), "held by 50-90").toBe(false);
+        r.fetched(A, "file", 3, { start: 100.04, end: 119.97 });
+        expect(r.isPending(A, "edge"), "held within the slack of 0.05 s").toBe(false);
+        r.fetched(A, "file", 4, { start: 150, end: 199 });
+        expect(r.isPending(A, "longer"), "a read that stops short holds nothing of it").toBe(true);
+        r.fetched(A, "file", 5, { start: 0, end: 1000 });
+        expect(r.isPending(A, "open"), "a read to a finite end does not hold an open one").toBe(
+          true,
+        );
+        r.fetched(A, "file", 6, null);
+        expect(r.isPending(A, "longer")).toBe(false);
+        expect(r.isPending(A, "open"), "the whole file holds every stretch").toBe(false);
+      });
+
+      it("never read a wait for the WHOLE file: only the whole file does", () => {
+        const r = new WakeRegistry();
+        begin(r, A, 1);
+        r.register({ ...A, exec: 1, key: "all", source: "file", ref: "ref-all", audioS: 90 }, 0);
+        r.endTurn(A, 1, "done", 1);
+        r.fetched(A, "file", 2, { start: 0, end: 1e9 });
+        expect(r.isPending(A, "all")).toBe(true);
+        r.fetched(A, "file", 3, null);
+        expect(r.isPending(A, "all")).toBe(false);
+      });
+    });
   });
 
   describe("a file that never settles", () => {
@@ -340,11 +409,25 @@ describe("a batch of files the assistant was told were not ready", () => {
 // is not moved, a batch that is not deleted, a release that happens twice) cannot also be in the model.
 
 type MState = "pending" | "landed" | "fetched" | "failed" | "cancelled" | "expired";
+/** A stretch of a file as the model holds it: [start, end] in seconds, or null for the whole file. */
+type MWin = [number, number] | null;
+/** Written from the rule, not from the code: the whole file holds any stretch, a stretch never holds the whole
+ *  file, and one stretch holds another when it reaches (within 0.05 s) from before its start to after its end. */
+const modelCovers = (read: MWin, wanted: MWin): boolean =>
+  read === null
+    ? true
+    : wanted === null
+      ? false
+      : read[0] <= wanted[0] + 0.05 && read[1] >= wanted[1] - 0.05;
+const WINDOWS: MWin[] = [null, [0, 10], [5, 20], [10, 20], [0, Infinity], [0.04, 10], [0, 9.9]];
+const span = (w: MWin): { start: number; end: number } | null =>
+  w ? { start: w[0], end: w[1] } : null;
 interface MEntry {
   chat: string;
   exec: number;
   key: string;
   source: string;
+  window: MWin;
   state: MState;
   failure: string | null;
 }
@@ -392,7 +475,14 @@ class Model {
     if (stale) this.dropBatch(stale);
   }
 
-  register(c: ChatKey, exec: number, key: string, source: string, now: number): MRelease[] {
+  register(
+    c: ChatKey,
+    exec: number,
+    key: string,
+    source: string,
+    window: MWin,
+    now: number,
+  ): MRelease[] {
     const chat = modelChat(c);
     if (this.live.get(chat) !== exec) return [];
     const here = this.batch(chat, exec);
@@ -416,7 +506,7 @@ class Model {
         phase: "open",
         progress: now,
       });
-    this.entries.push({ chat, exec, key, source, state: "pending", failure: null });
+    this.entries.push({ chat, exec, key, source, window, state: "pending", failure: null });
     return out;
   }
 
@@ -451,10 +541,10 @@ class Model {
     return b ? this.evaluate(b, now) : [];
   }
 
-  fetched(c: ChatKey, source: string, now: number): MRelease[] {
+  fetched(c: ChatKey, source: string, read: MWin, now: number): MRelease[] {
     const touched: MBatch[] = [];
     for (const e of this.entries) {
-      if (e.chat !== modelChat(c) || e.source !== source) continue;
+      if (e.chat !== modelChat(c) || e.source !== source || !modelCovers(read, e.window)) continue;
       if (e.state !== "pending" && e.state !== "landed") continue;
       const wasPending = e.state === "pending";
       e.state = "fetched";
@@ -651,6 +741,7 @@ describe("the registry against an independent statement of its rules", () => {
                   : [s.a % CHATS.length, 1 + (s.c % 3)];
               const k = s.c % 4;
               const f = Math.floor(s.c / 4) % 4;
+              const window = WINDOWS[(s.a + s.b) % WINDOWS.length];
               got = reg.register(
                 {
                   ...CHATS[ci],
@@ -659,10 +750,11 @@ describe("the registry against an independent statement of its rules", () => {
                   source: `f${f}`,
                   ref: `ref-k${k}`,
                   audioS: 10,
+                  window: span(window),
                 },
                 now,
               );
-              want = model.register(CHATS[ci], exec, `k${k}`, `f${f}`, now);
+              want = model.register(CHATS[ci], exec, `k${k}`, `f${f}`, window, now);
               break;
             }
             case "settle": {
@@ -686,8 +778,9 @@ describe("the registry against an independent statement of its rules", () => {
                   : null;
               const ci = any ? chatOf(any.chat) : s.a % CHATS.length;
               const source = any ? any.source : `f${s.c % 4}`;
-              got = reg.fetched(CHATS[ci], source, now);
-              want = model.fetched(CHATS[ci], source, now);
+              const read = WINDOWS[(s.b + s.c) % WINDOWS.length];
+              got = reg.fetched(CHATS[ci], source, now, span(read));
+              want = model.fetched(CHATS[ci], source, read, now);
               break;
             }
             case "end": {

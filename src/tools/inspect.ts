@@ -20,6 +20,7 @@ import { languageProblem } from "./whisperLanguages";
 import type { TranscriptFailureReason } from "./speechFailure";
 import { failedTranscript, waitBoundMs, waitForRun } from "./transcriptWait";
 import { noteWordsFetched, wakeTargetOf } from "../store/speechWakeHost";
+import type { SpanWindow } from "../store/speechWake";
 import { clock, tooLongNotReady } from "./transcriptWords";
 import { prioritizeTranscript } from "./transcriptQueue";
 import { exportFlag } from "../api/exportFlags";
@@ -232,6 +233,11 @@ function coversWholeFile(from: number, to: number | null, duration: number | nul
   return from <= 0.05 && (to === null || (duration !== null && to >= duration - 0.05));
 }
 
+/** A window of a look as the wake for words keys it: seconds of the file, open-ended where the look is. */
+function spanOf(window: { start: number; end: number | null } | null): SpanWindow | null {
+  return window ? { start: window.start, end: window.end ?? Infinity } : null;
+}
+
 /** A span that this PC cannot transcribe within the cap (ten minutes on its own measured pace) is
  *  answered at once with how long it would take and what would fit. Nothing is started and nothing is
  *  queued: the caller can ask for a shorter span, and that is the whole of what happens. A run for
@@ -333,7 +339,7 @@ async function lookTranscript(
         run: runWhisper(ctx, path, undefined, opts.language, window),
         boundMs: opts.waitMs,
         signal: ctx.signal,
-        wake: wakeTargetOf(ctx, opts.mediaRef ?? path, opts.askedAs ?? null),
+        wake: wakeTargetOf(ctx, opts.mediaRef ?? path, opts.askedAs ?? null, spanOf(window)),
       });
       if (outcome.kind === "cancelled") return { error: STOPPED_ERROR };
       if (outcome.kind === "pending") return { ...outcome.status };
@@ -394,7 +400,7 @@ async function lookTranscript(
       out.words_truncated = wordRows.length > TRANSCRIPT_WORD_CAP;
     }
     // The assistant has the words of this file now: a wake that was going to tell it so has nothing to say.
-    noteWordsFetched(ctx, opts.mediaRef ?? path);
+    noteWordsFetched(ctx, opts.mediaRef ?? path, spanOf(window));
     return out;
   } catch (e) {
     const failed = failedTranscript(e);

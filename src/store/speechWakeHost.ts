@@ -32,6 +32,7 @@ import {
   type Entry,
   type Release,
   type SettleOutcome,
+  type SpanWindow,
   type TurnEnd,
 } from "./speechWake";
 
@@ -58,6 +59,8 @@ export interface WakeTarget extends ChatKey {
   readonly source: string;
   /** What the wake calls it to the assistant: a media_ref or a clip_id. Null when there is no safe name. */
   readonly ref: string | null;
+  /** The stretch of the file whose words are not ready; null is the whole file. */
+  readonly window: SpanWindow | null;
 }
 
 /** What the card needs to know of one chat's waiting for words. */
@@ -122,6 +125,7 @@ export function wakeTargetOf(
   ctx: ClientToolContext,
   source: string,
   ref: string | null,
+  window: SpanWindow | null = null,
 ): WakeTarget | null {
   if (ctx.background === true || ctx.surface === "mcp") return null;
   const origin = ctx.origin;
@@ -133,6 +137,7 @@ export function wakeTargetOf(
     exec: origin.executionId,
     source,
     ref: ref !== null && ref.trim() !== "" && !isUnsafeAgentRef(ref) ? ref.trim() : null,
+    window,
   };
 }
 
@@ -249,6 +254,7 @@ export function registerPendingWords(
         source: target.source,
         ref: target.ref,
         audioS: audioSeconds,
+        window: target.window,
       },
       Date.now(),
     ),
@@ -295,9 +301,14 @@ function landed(chat: ChatKey, key: string, s: Settled): void {
   bump();
 }
 
-/** A tool gave the assistant the words of `source`: whatever this chat was waiting to tell it about that file is
- *  read. Only a chat's own reads count; this can only make a wake rarer. */
-export function noteWordsFetched(ctx: ClientToolContext, source: string): void {
+/** A tool gave the assistant the words of `source`, of the stretch `window` of it (null: the whole file): whatever
+ *  this chat was waiting to tell it about words that stretch holds is read. Only a chat's own reads count; this
+ *  can only make a wake rarer. */
+export function noteWordsFetched(
+  ctx: ClientToolContext,
+  source: string,
+  window: SpanWindow | null = null,
+): void {
   const origin = ctx.origin;
   if (!origin || !origin.chatSessionId) return;
   apply(
@@ -305,6 +316,7 @@ export function noteWordsFetched(ctx: ClientToolContext, source: string): void {
       { dir: ctx.store.projectDir, session: origin.chatSessionId },
       source,
       Date.now(),
+      window,
     ),
   );
   bump();

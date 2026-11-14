@@ -258,6 +258,32 @@ describe("a wake for the words of files the assistant was told were not ready", 
     expect(facts()).toContain("skipped_fetched");
   });
 
+  it("does not count a read of another stretch of the same file: the clip that had its words says nothing of the others", async () => {
+    const sink = chatSink();
+    registerJobSink(DIR, sink);
+    wakeBeginTurn(CHAT, 1, false);
+    const later = run();
+    registerPendingWords(
+      wakeTargetOf(ctxOf(1), "talk.mp4", "c2", { start: 600, end: 612 })!,
+      "c2",
+      12,
+      later.promise,
+    );
+    wakeEndTurn(CHAT, 1, "done");
+    noteWordsFetched(ctxOf(1), "talk.mp4", { start: 59, end: 76 }); // c1's words, in the same call
+    later.land();
+    await settle(SETTLE_WINDOW_MS + 10);
+    expect(sink.words()).toHaveLength(1);
+    expect(sink.words()[0].media_refs).toEqual(["c2"]);
+
+    // Whereas the whole file read covers it.
+    const second = turn(5, ["m_5"]);
+    noteWordsFetched(ctxOf(6), "src-m_5"); // no stretch: the whole file
+    second.get("m_5")!.land();
+    await settle(SETTLE_WINDOW_MS + 10);
+    expect(sink.words()).toHaveLength(1);
+  });
+
   it("does not count an outside agent's read of a file as the assistant's: only the chat's own reads count", async () => {
     const sink = chatSink();
     registerJobSink(DIR, sink);
@@ -276,6 +302,11 @@ describe("who can be promised a wake", () => {
       exec: 3,
       source: "src",
       ref: "m_1",
+      window: null,
+    });
+    expect(wakeTargetOf(ctxOf(3), "src", "m_1", { start: 5, end: 9 })?.window).toEqual({
+      start: 5,
+      end: 9,
     });
     expect(wakeTargetOf(ctxOf(3, { surface: "mcp" }), "src", "m_1"), "an outside agent").toBeNull();
     expect(wakeTargetOf(ctxOf(3, { background: true }), "src", "m_1"), "the indexer").toBeNull();
