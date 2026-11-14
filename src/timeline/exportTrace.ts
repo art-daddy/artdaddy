@@ -13,6 +13,7 @@ import {
   type ExportTraceValue,
   type TraceEvent,
 } from "../api/exportVocabulary";
+import { ActivityRing, parseActivityMarks } from "./exportActivity";
 import { createProgressReader, type RenderProgress } from "./ffmpegProgress";
 
 /** Slots kept back for the end of the story, so a long run cannot crowd out how it ended. Enough for
@@ -130,7 +131,7 @@ export class ExportStory {
   /** Set when the app stopped the export for standing still and that stop was accepted before any cancel.
    *  The export then ends as a failure (a time limit), and a cancel pressed afterwards adds nothing: whichever
    *  stop is accepted first is the one the story tells. */
-  stalledOut: { kind: "frozen" | "slow_start"; seconds: number } | undefined;
+  stalledOut: { kind: StallKind; seconds: number } | undefined;
   /** Told of every stage entered (the chat card follows the run through it). */
   onEnter: ((stage: ExportStage) => void) | undefined;
 
@@ -164,13 +165,25 @@ export class ExportStory {
 
 /** A run that has not moved for this long is logged as a stall. Log only: nothing is stopped. */
 export const STALL_LOG_SECONDS = 60;
-/** A render that has moved before and then makes no progress for this long is stopped (when the switch is
- *  on). The lab saw a frozen export sit at zero CPU for over three minutes and a spinning one go past a
- *  hundred seconds of CPU with no result; no heavy frame in the lab took anywhere near this long. */
+/** A render that has moved before and then makes no progress for this long, while its processors and disk are idle,
+ *  is stopped (when the switch is on). The lab saw a frozen export sit at zero CPU for over three minutes and a
+ *  spinning one go past a hundred seconds of CPU with no result; no heavy frame in the lab took anywhere near this
+ *  long. Without a reading of the activity (`idle_rule` off) this long is the whole rule, as in 0.27.0. */
 export const STALL_STOP_SECONDS = 180;
-/** An export that has not made its first progress by this long after its turn began is stopped: opening
- *  hundreds of inputs is slow, but not this slow. */
+/** An export that has not made its first progress by this long after its turn began, and is idle, is stopped:
+ *  opening hundreds of inputs is slow, but not this slow. */
 export const SLOW_START_SECONDS = 300;
+/** A BUSY export (its processors working or its disk reading) is given this long for its first picture, counted again
+ *  from every step that starts, and this long between pictures, before it is stopped for making none (the owner's 30
+ *  and 15 minutes): the encoder holds its first picture back for dozens of frames and a heavy frame takes seconds, so
+ *  a healthy export can be silent far longer than the idle limits above. */
+export const BUSY_START_CEILING_SECONDS = 1800;
+export const BUSY_RUN_CEILING_SECONDS = 900;
+/** How the no-progress rule ended a run: `frozen` and `slow_start` are the idle stops (the idle limits above; also the
+ *  names the 0.27.0 rule gave its two stops), `spinning` the stop of a busy export at its ceiling between pictures
+ *  (a busy one that never made its first picture is a `slow_start` at the longer ceiling). The seconds tell an idle stop
+ *  (below the busy ceilings) from a ceiling stop. */
+export type StallKind = "frozen" | "slow_start" | "spinning";
 /** What the app process prints on a job's output besides ffmpeg's own progress (src-tauri/src/jobs.rs): a step of a
  *  multi-step render has begun, and the sources are still being checked (`VERIFY_BEAT`). */
 const PROCESS_MARKS = /artdaddy_(verify|step)=(\d+)/g;
@@ -182,12 +195,14 @@ const GAP_WORTH_RECORDING_SECONDS = 10;
 
 /** What to do about a stall, given by the queue. Absent, the watch only logs (an adopted export has none). */
 export interface StallPolicy {
-  /** Whether a stall stops the export. Read at every tick, so a switch changed mid-run applies at once. */
+  /** Whether a stall stops the export (`stall_stop`). Read at every tick, so a switch changed mid-run applies at once. */
   readonly enforce: () => boolean;
-  /** Told once, when the export has stood still long enough to stop. `frozen` is a render that moved and
-   *  then stopped (frozen or spinning: the page cannot see the CPU to tell them apart); `slow_start` one
-   *  that never moved. */
-  readonly onStall: (kind: "frozen" | "slow_start", seconds: number, percent: number) => void;
+  /** Whether the stop reads the PC's activity (`idle_rule`): an export is stopped early only when it is idle, and a busy
+   *  one is given the ceilings. Off, the 0.27.0 rule runs exactly: the idle limits are the whole rule, whatever the
+   *  processor and the disk are doing. Read at every tick. */
+  readonly idleRule: () => boolean;
+  /** Told once, when the export has stood still long enough to stop. See {@link StallKind}. */
+  readonly onStall: (kind: StallKind, seconds: number, percent: number) => void;
 }
 
 /** Watches one running export for movement.
@@ -196,9 +211,14 @@ export interface StallPolicy {
  *  change in the frame count or the output time: ffmpeg prints a progress block every half second even
  *  when it is stuck, and a stuck one repeats the same numbers, so a block arriving is NOT a sign of
  *  life, a block that differs from the last is. Records the longest gap between movements, and a
- *  `stall_detected` event once per gap of STALL_LOG_SECONDS. The kind of stall (frozen, spinning, slow
- *  start) needs the process's CPU and disk activity, which the page does not have, so the kind is left
- *  blank here and the percentage reached is kept. */
+ *  `stall_detected` event once per gap of STALL_LOG_SECONDS.
+ *
+ *  What the processors and the disk are doing arrives as marks in the same stream and is kept in a ring: it never
+ *  counts as progress (a spinning export must reach its ceiling), it only says whether a silent export is idle. A
+ *  silent export is stopped when it has been quiet for the idle limit AND the ring shows it idle for the whole of that
+ *  time, or when it has been quiet for a ceiling whatever the ring says. No reading, or one that cannot be trusted, is
+ *  never idle: only the ceilings can stop it. Each time a step starts (a part of a streamed render, a step of a
+ *  file-sequence render) a new first picture is awaited. */
 export class RunWatch {
   private lastFrame = -1;
   private lastOutMs = -1;
@@ -209,8 +229,12 @@ export class RunWatch {
   private stallsLogged = 0;
   private percent = 0;
   private moving = false;
+  /** A picture (a frame counted) has been made since the last step began: the first picture of this step is no longer
+   *  awaited, so the shorter ceiling applies. */
+  private pictured = false;
   private stopped = false;
   private readonly marks: { verify?: number; step?: number } = {};
+  private readonly ring = new ActivityRing();
   private readonly reader: (chunk: string) => void;
 
   constructor(
@@ -239,8 +263,13 @@ export class RunWatch {
       const value = Number(mark[2]);
       if (this.marks[kind] === value) continue;
       this.marks[kind] = value;
+      if (kind === "step") this.pictured = false;
       this.alive();
     }
+    // What the processors and the disk have done is not life: it is kept for the one question of whether a silent
+    // export is idle.
+    const seconds = this.clock() / 1000;
+    for (const reading of parseActivityMarks(text)) this.ring.push(seconds, reading);
     this.reader(text);
   }
 
@@ -253,6 +282,9 @@ export class RunWatch {
 
   progress(record: Pick<RenderProgress, "frame" | "outMs">): void {
     const now = this.clock();
+    // The output time can move with no picture made (an audio stream, an extra output), so only a counted frame ends
+    // the wait for a first picture.
+    if (record.frame >= 1) this.pictured = true;
     if (record.frame !== this.lastFrame || record.outMs !== this.lastOutMs) {
       this.longestGapMs = Math.max(this.longestGapMs, now - this.lastMove);
       this.lastMove = now;
@@ -274,13 +306,23 @@ export class RunWatch {
     this.observe(true);
   }
 
+  /** Whether the export's processors or disk were busy over the last stretch: true when they were, false when the
+   *  export was idle for all of it, null when that cannot be told (no reading, a reading too old, a window not yet
+   *  covered). The card says "still working" on true. */
+  busy(): boolean | null {
+    const verdict = this.ring.verdict(this.clock() / 1000);
+    return verdict === "busy" ? true : verdict === "idle" ? false : null;
+  }
+
   private observe(mayStop: boolean): void {
     const now = this.clock();
     // With a policy the watch counts only the time it was watching: a gap between two ticks far longer
-    // than the ticks' own rhythm is the PC asleep or the page frozen, not the export standing still.
+    // than the ticks' own rhythm is the PC asleep or the page frozen, not the export standing still. What was
+    // read before it says nothing about what happened after, so an idle stop needs a fresh window.
     if (this.policy && now - this.lastTick > SLEEP_GAP_SECONDS * 1000) {
       this.lastMove += now - this.lastTick;
       this.loggedThisGap = false;
+      this.ring.clear();
     }
     this.lastTick = now;
     const gap = now - this.lastMove;
@@ -295,11 +337,24 @@ export class RunWatch {
     if (mayStop) this.stopIfStalled(gap);
   }
 
+  /** The stop is decided here, in one synchronous block with the call that makes it: the activity is read at the
+   *  moment of the stop, not before. */
   private stopIfStalled(gapMs: number): void {
     if (this.stopped || !this.policy || !this.policy.enforce()) return;
-    const kind = this.moving ? "frozen" : "slow_start";
-    const limit = this.moving ? STALL_STOP_SECONDS : SLOW_START_SECONDS;
-    if (gapMs < limit * 1000) return;
+    const idleKind: StallKind = this.moving ? "frozen" : "slow_start";
+    const idleLimit = this.moving ? STALL_STOP_SECONDS : SLOW_START_SECONDS;
+    let kind: StallKind | null = null;
+    if (!this.policy.idleRule()) {
+      if (gapMs >= idleLimit * 1000) kind = idleKind;
+    } else if (gapMs >= idleLimit * 1000 && this.ring.verdict(this.clock() / 1000) === "idle") {
+      kind = idleKind;
+    } else if (
+      gapMs >=
+      (this.pictured ? BUSY_RUN_CEILING_SECONDS : BUSY_START_CEILING_SECONDS) * 1000
+    ) {
+      kind = this.pictured ? "spinning" : "slow_start";
+    }
+    if (kind === null) return;
     this.stopped = true;
     const seconds = Math.round(gapMs / 1000);
     // An ending: it has slots of its own, so earlier stalls cannot crowd it out.

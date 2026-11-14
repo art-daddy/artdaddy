@@ -86,7 +86,13 @@ import type {
   ExportStarter,
   ExportTraceValue,
 } from "../api/exportVocabulary";
-import { ExportStory, RunWatch, STAGE_CODES } from "./exportTrace";
+import {
+  BUSY_RUN_CEILING_SECONDS,
+  ExportStory,
+  RunWatch,
+  STAGE_CODES,
+  type StallKind,
+} from "./exportTrace";
 import {
   QUIET_SECONDS,
   describeChipFailure,
@@ -719,9 +725,14 @@ function stopStalledExport(
 }
 
 /** What the app says about an export it stopped for standing still (the words the failure is read from, see
- *  exportReason.ts: a time limit). */
-function stalledMessage(kind: "frozen" | "slow_start", seconds: number): string {
+ *  exportReason.ts: a time limit). A stop at a ceiling, where the PC stayed busy, says so; the idle limits are under
+ *  the ceilings, so the length tells the two apart. */
+function stalledMessage(kind: StallKind, seconds: number): string {
   const minutes = Math.max(1, Math.round(seconds / 60));
+  if (kind === "spinning" || seconds >= BUSY_RUN_CEILING_SECONDS)
+    return kind === "slow_start"
+      ? `export stopped: it made no picture in ${minutes} min although the PC stayed busy (stalled)`
+      : `export stopped: it made no new picture for ${minutes} min although the PC stayed busy (stalled)`;
   return kind === "frozen"
     ? `export stopped: it made no progress for ${minutes} min (stalled)`
     : `export stopped: it had not started making progress after ${minutes} min (stalled)`;
@@ -1838,7 +1849,8 @@ async function encode(spec: ExportSpec, ledger: Ledger, jobId: string, key: stri
     const stallPolicy = spec.supervisor
       ? {
           enforce: () => exportFlag("stall_stop"),
-          onStall: (kind: "frozen" | "slow_start", seconds: number) =>
+          idleRule: () => exportFlag("idle_rule"),
+          onStall: (kind: StallKind, seconds: number) =>
             stopStalledExport(jobId, story, { kind, seconds }),
         }
       : undefined;

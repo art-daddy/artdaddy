@@ -1,6 +1,16 @@
+import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { EXPORT_TRACE_EVENTS, EXPORT_TRACE_MAX_EVENTS, cleanTrace } from "../api/exportVocabulary";
 import {
+  ACTIVITY_STALE_SECONDS,
+  IDLE_CPU_MS_PER_SECOND,
+  IDLE_READ_BYTES,
+  IDLE_WINDOW_SECONDS,
+  formatActivityMark,
+} from "./exportActivity";
+import {
+  BUSY_RUN_CEILING_SECONDS,
+  BUSY_START_CEILING_SECONDS,
   ENDING_RESERVE,
   ExportTrace,
   MAX_STALLS_LOGGED,
@@ -89,12 +99,15 @@ describe("ExportTrace", () => {
 });
 
 describe("RunWatch stopping a stalled export", () => {
+  // These pin the 0.27.0 rule, which is what the switch `idle_rule` restores: the idle limits alone, whatever the
+  // processor and the disk are doing. The rule that reads the activity is in the next block.
   function enforced(over: { enforce?: () => boolean; totalMs?: number } = {}) {
     const t = clockAt();
     const trace = new ExportTrace(t.clock);
     const stops: Array<[string, number, number]> = [];
     const w = new RunWatch(trace, over.totalMs ?? 60_000, t.clock, undefined, {
       enforce: over.enforce ?? (() => true),
+      idleRule: () => false,
       onStall: (kind, seconds, percent) => stops.push([kind, seconds, percent]),
     });
     /** Time passes in the 5 s steps the queue's timer takes. */
@@ -263,6 +276,432 @@ describe("RunWatch stopping a stalled export", () => {
       repeated.pass(5);
     }
     expect(repeated.stops).toHaveLength(1);
+  });
+});
+
+/** What the app process says about the export's processors, as the page sees it. The processor time counts every thread, so
+ *  a busy export can use more than a second of it every second. */
+type Activity = { cpuMsPerSecond: number; readBytesPerSecond?: number } | "none";
+const IDLE: Activity = { cpuMsPerSecond: 1 }; // waiting for something that never comes
+const BUSY: Activity = { cpuMsPerSecond: 1500 };
+const DISK: Activity = { cpuMsPerSecond: 3, readBytesPerSecond: 200_000 }; // the processor waits, the drive reads
+
+describe("RunWatch stopping a stalled export only when it is idle (the idle rule)", () => {
+  /** Time passes in the 5 s steps of the queue's timer; at every step the app process's mark arrives, then the tick.
+   *  The sampler's first mark comes with the start, as the native one does. */
+  function watched(
+    over: { idleRule?: () => boolean; enforce?: () => boolean; startMark?: boolean } = {},
+  ) {
+    const t = clockAt(0);
+    const trace = new ExportTrace(t.clock);
+    const stops: Array<[string, number]> = [];
+    const w = new RunWatch(trace, 60_000, t.clock, undefined, {
+      enforce: over.enforce ?? (() => true),
+      idleRule: over.idleRule ?? (() => true),
+      onStall: (kind, seconds) => stops.push([kind, seconds]),
+    });
+    let cpu = 0;
+    let read = 0;
+    const mark = () => w.chunk(formatActivityMark({ cpuMs: cpu, readBytes: read }));
+    if (over.startMark !== false) mark();
+    const pass = (seconds: number, activity: Activity) => {
+      for (let s = 0; s < seconds; s += 5) {
+        t.advance(5000);
+        if (activity !== "none") {
+          cpu += 5 * activity.cpuMsPerSecond;
+          read += 5 * (activity.readBytesPerSecond ?? 0);
+          mark();
+        }
+        w.tick();
+      }
+    };
+    return { t, trace, w, stops, pass };
+  }
+
+  it("does not stop a busy export at the old limits: seven minutes without a picture, the processors full, is a heavy project and not a hang", () => {
+    const { w, stops, pass } = watched();
+    pass(5, BUSY);
+    w.chunk(block(0, 0)); // ffmpeg's first report, with no picture yet
+    pass(420, BUSY); // the encoder holds its first picture back (0.27.0 stopped it 180 s after the first report)
+    expect(stops).toEqual([]);
+    w.chunk(block(1, 33)); // the first picture
+    pass(STALL_STOP_SECONDS + 100, BUSY); // and a long silence after it (0.27.0 stopped it at 180 s again)
+    expect(stops).toEqual([]);
+  });
+
+  it("stops an idle export at the old limits, no sooner and no later: 5 minutes before its first report, 3 after", () => {
+    const never = watched();
+    never.pass(SLOW_START_SECONDS - 5, IDLE);
+    expect(never.stops).toEqual([]);
+    never.pass(5, IDLE);
+    expect(never.stops).toEqual([["slow_start", SLOW_START_SECONDS]]);
+    const frozen = watched();
+    frozen.pass(60, BUSY);
+    frozen.w.chunk(block(100, 3300)); // it moved, and then froze
+    frozen.pass(STALL_STOP_SECONDS - 5, IDLE);
+    expect(frozen.stops).toEqual([]);
+    frozen.pass(5, IDLE);
+    expect(frozen.stops).toEqual([["frozen", STALL_STOP_SECONDS]]); // the busy time before the freeze does not count
+  });
+
+  it("does not take a slow drive for idle: the processor waits and the disk reads", () => {
+    const { w, stops, pass } = watched();
+    w.chunk(block(0, 0));
+    pass(SLOW_START_SECONDS + 300, DISK);
+    expect(stops).toEqual([]);
+  });
+
+  it("stops a spinning export at the ceiling: 30 minutes for its first picture, 15 between pictures", () => {
+    const never = watched();
+    never.pass(BUSY_START_CEILING_SECONDS - 5, BUSY);
+    expect(never.stops).toEqual([]);
+    never.pass(5, BUSY);
+    expect(never.stops).toEqual([["slow_start", BUSY_START_CEILING_SECONDS]]);
+    const spinning = watched();
+    spinning.w.chunk(block(10, 330));
+    spinning.pass(BUSY_RUN_CEILING_SECONDS - 5, BUSY);
+    expect(spinning.stops).toEqual([]);
+    spinning.pass(5, BUSY);
+    expect(spinning.stops).toEqual([["spinning", BUSY_RUN_CEILING_SECONDS]]);
+    expect(BUSY_START_CEILING_SECONDS).toBeGreaterThan(BUSY_RUN_CEILING_SECONDS);
+    expect(BUSY_RUN_CEILING_SECONDS).toBeGreaterThan(SLOW_START_SECONDS);
+  });
+
+  it("never lets the activity count as progress: a busy silence reaches its ceiling and is reported as the long gap it was", () => {
+    const { w, trace, pass } = watched();
+    pass(400, BUSY);
+    w.chunk(block(0, 0));
+    expect(w.finish()).toBe(400);
+    expect(trace.snapshot().find((e) => e.e === "heartbeat_gap")).toMatchObject({ n: 400 });
+  });
+
+  it("never stops early without a reading, or on one that is too old; only the ceilings can", () => {
+    const dark = watched({ startMark: false });
+    dark.w.chunk(block(100, 3300));
+    dark.pass(BUSY_RUN_CEILING_SECONDS - 5, "none");
+    expect(dark.stops).toEqual([]); // no mark ever: not idle, only unknown
+    dark.pass(5, "none");
+    expect(dark.stops).toEqual([["spinning", BUSY_RUN_CEILING_SECONDS]]);
+    const died = watched();
+    died.pass(60, IDLE);
+    died.w.chunk(block(100, 3300));
+    died.pass(40, IDLE); // marks for a while, then the reader dies
+    died.pass(BUSY_RUN_CEILING_SECONDS - 40 - 5, "none");
+    expect(died.stops).toEqual([]);
+    died.pass(5, "none");
+    expect(died.stops).toEqual([["spinning", BUSY_RUN_CEILING_SECONDS]]);
+    const unseen = watched({ startMark: false });
+    unseen.pass(BUSY_START_CEILING_SECONDS, "none");
+    expect(unseen.stops).toEqual([["slow_start", BUSY_START_CEILING_SECONDS]]);
+  });
+
+  it("waits for the whole window: a reading that started late cannot call the export idle sooner than three minutes in", () => {
+    const { w, stops, pass } = watched({ startMark: false });
+    w.chunk(block(100, 3300));
+    pass(SLOW_START_SECONDS - 5, "none"); // the reader started only now
+    pass(STALL_STOP_SECONDS - 5, IDLE);
+    expect(stops).toEqual([]);
+    pass(10, IDLE);
+    expect(stops).toHaveLength(1);
+  });
+
+  it("starts the wait for a first picture again at every step, and only a counted frame ends it", () => {
+    const { w, stops, pass } = watched();
+    w.chunk(block(5, 200)); // a picture
+    w.chunk("artdaddy_step=1\n"); // the next step starts: its first picture is still to come
+    pass(BUSY_RUN_CEILING_SECONDS + 100, BUSY);
+    expect(stops).toEqual([]); // not the 15 minutes after a picture: the 30 of a first one
+    w.chunk(block(0, 400)); // the output time moves, no picture is counted
+    pass(BUSY_RUN_CEILING_SECONDS + 100, BUSY);
+    expect(stops).toEqual([]);
+    w.chunk(block(3, 600)); // a picture
+    pass(BUSY_RUN_CEILING_SECONDS - 5, BUSY);
+    expect(stops).toEqual([]);
+    pass(5, BUSY);
+    expect(stops).toEqual([["spinning", BUSY_RUN_CEILING_SECONDS]]);
+  });
+
+  it("stops an idle export at the idle limit after a step starts too: a step is life, not a reason to wait longer", () => {
+    const { w, stops, pass } = watched();
+    w.chunk(block(5, 200));
+    w.chunk("artdaddy_step=1\n");
+    pass(STALL_STOP_SECONDS, IDLE);
+    expect(stops).toEqual([["frozen", STALL_STOP_SECONDS]]);
+  });
+
+  it("needs a fresh window after the PC slept: what was read before it says nothing about what came after", () => {
+    const { t, w, stops, pass } = watched();
+    w.chunk(block(100, 3300));
+    pass(100, IDLE);
+    t.advance(2 * 3600_000); // the lid was closed for two hours: no tick ran
+    w.chunk(formatActivityMark({ cpuMs: 0, readBytes: 0 }));
+    w.tick();
+    expect(stops).toEqual([]);
+    pass(STALL_STOP_SECONDS - 100, IDLE); // 0.27.0 would stop here: its quiet clock only lost the sleep
+    expect(stops).toEqual([]);
+    pass(100, IDLE); // three minutes of readings since the wake, which the ring does not yet cover
+    expect(stops).toEqual([]);
+    pass(5, IDLE);
+    expect(stops).toEqual([["frozen", 285]]);
+  });
+
+  it("is the 0.27.0 rule exactly when the idle rule is off, whatever the processors do, and only logs when the stop is off", () => {
+    const off = watched({ idleRule: () => false });
+    off.w.chunk(block(100, 3300));
+    off.pass(STALL_STOP_SECONDS, BUSY);
+    expect(off.stops).toEqual([["frozen", STALL_STOP_SECONDS]]);
+    const never = watched({ idleRule: () => false });
+    never.pass(SLOW_START_SECONDS, BUSY);
+    expect(never.stops).toEqual([["slow_start", SLOW_START_SECONDS]]);
+    let on = false;
+    const logged = watched({ enforce: () => on });
+    logged.w.chunk(block(100, 3300));
+    logged.pass(STALL_STOP_SECONDS + 100, IDLE);
+    expect(logged.stops).toEqual([]);
+    expect(logged.trace.snapshot().filter((e) => e.e === "stall_detected")).toHaveLength(1);
+    on = true;
+    logged.pass(5, IDLE);
+    expect(logged.stops).toHaveLength(1);
+  });
+
+  it("reads the switch at every tick: one flipped mid-run applies at once", () => {
+    let rule = false;
+    const { w, stops, pass } = watched({ idleRule: () => rule });
+    w.chunk(block(100, 3300));
+    pass(STALL_STOP_SECONDS - 5, BUSY);
+    rule = true; // the server turned the idle rule on while the export ran: it is busy, so it is left alone
+    pass(60, BUSY);
+    expect(stops).toEqual([]);
+  });
+
+  it("says whether the export is busy, idle or unknown, for the card's line", () => {
+    const dark = watched({ startMark: false });
+    dark.pass(300, "none");
+    expect(dark.w.busy()).toBeNull();
+    const busy = watched();
+    busy.pass(IDLE_WINDOW_SECONDS + 5, BUSY);
+    expect(busy.w.busy()).toBe(true);
+    const idle = watched({ enforce: () => false });
+    idle.pass(IDLE_WINDOW_SECONDS + 5, IDLE);
+    expect(idle.w.busy()).toBe(false);
+    const early = watched();
+    early.pass(60, BUSY);
+    expect(early.w.busy()).toBeNull(); // not yet three minutes of readings
+  });
+
+  // The invariant of the whole change, as a test: the new rule never stops an export EARLIER than 0.27.0 would have, on
+  // any stream of events, and an early stop is always backed by readings that show the export idle for the whole window.
+  // The old rule is restated here, from its arithmetic, so that this test cannot drift with the code.
+  type Step =
+    | { kind: "wait"; seconds: number; activity: Activity }
+    | { kind: "sleep"; seconds: number }
+    | { kind: "block"; frame: number; outMs: number }
+    | { kind: "step"; value: number }
+    | { kind: "verify"; value: number };
+  interface Scenario {
+    startMark: boolean;
+    steps: Step[];
+  }
+  interface Stop {
+    atMs: number;
+    kind: string;
+    seconds: number;
+  }
+  interface Logged {
+    t: number;
+    cpu: number;
+    read: number;
+  }
+
+  function playOld(scenario: Scenario): Stop | null {
+    let now = 0;
+    let lastMove = 0;
+    let lastTick = 0;
+    let moving = false;
+    let frame = -1;
+    let outMs = -1;
+    const seen: Record<string, number | undefined> = {};
+    const tick = (): Stop | null => {
+      if (now - lastTick > 30_000) lastMove += now - lastTick;
+      lastTick = now;
+      const gap = now - lastMove;
+      const limit = moving ? 180_000 : 300_000;
+      return gap >= limit
+        ? { atMs: now, kind: moving ? "frozen" : "slow_start", seconds: Math.round(gap / 1000) }
+        : null;
+    };
+    for (const step of scenario.steps) {
+      if (step.kind === "wait") {
+        for (let s = 0; s < step.seconds; s += 5) {
+          now += 5000;
+          const stop = tick();
+          if (stop) return stop;
+        }
+      } else if (step.kind === "sleep") {
+        now += step.seconds * 1000;
+        const stop = tick();
+        if (stop) return stop;
+      } else if (step.kind === "block") {
+        if (step.frame !== frame || step.outMs !== outMs) {
+          frame = step.frame;
+          outMs = step.outMs;
+          lastMove = now;
+          moving = true;
+        }
+      } else if (seen[step.kind] !== step.value) {
+        seen[step.kind] = step.value;
+        lastMove = now;
+      }
+    }
+    return null;
+  }
+
+  function playNew(scenario: Scenario, idleRule: boolean): { stop: Stop | null; marks: Logged[] } {
+    const t = clockAt(0);
+    const trace = new ExportTrace(t.clock);
+    const result: { stop: Stop | null } = { stop: null };
+    const w = new RunWatch(trace, 0, t.clock, undefined, {
+      enforce: () => true,
+      idleRule: () => idleRule,
+      onStall: (kind, seconds) => {
+        result.stop ??= { atMs: t.clock(), kind, seconds };
+      },
+    });
+    const marks: Logged[] = [];
+    let cpu = 0;
+    let read = 0;
+    const mark = () => {
+      w.chunk(formatActivityMark({ cpuMs: cpu, readBytes: read }));
+      marks.push({ t: t.clock(), cpu, read });
+    };
+    if (scenario.startMark) mark();
+    for (const step of scenario.steps) {
+      if (result.stop) break; // after the stop the story is over
+      if (step.kind === "wait") {
+        for (let s = 0; s < step.seconds && !result.stop; s += 5) {
+          t.advance(5000);
+          if (step.activity !== "none") {
+            cpu += 5 * step.activity.cpuMsPerSecond;
+            read += 5 * (step.activity.readBytesPerSecond ?? 0);
+            mark();
+          }
+          w.tick();
+        }
+      } else if (step.kind === "sleep") {
+        t.advance(step.seconds * 1000);
+        w.tick();
+        marks.length = 0; // what was read before it is gone with the watch's ring
+      } else if (step.kind === "block") w.chunk(block(step.frame, step.outMs));
+      else w.chunk(`artdaddy_${step.kind}=${step.value}\n`);
+    }
+    return { stop: result.stop, marks };
+  }
+
+  /** Whether the readings show the export idle for the whole window that ends at `nowMs`, worked out from the log with
+   *  no help from the ring: a reading at or before the window's start, none of the holes over the stale limit, the
+   *  newest not stale, and next to no processor time and next to no reads between the two ends. */
+  function idleOverWindow(marks: Logged[], nowMs: number): boolean {
+    const startMs = nowMs - IDLE_WINDOW_SECONDS * 1000;
+    const upToNow = marks.filter((m) => m.t <= nowMs);
+    const anchor = [...upToNow].reverse().find((m) => m.t <= startMs);
+    const inside = upToNow.filter((m) => m.t > startMs);
+    if (!anchor || inside.length === 0) return false;
+    let edge = startMs;
+    for (const m of inside) {
+      if (m.t - edge > ACTIVITY_STALE_SECONDS * 1000) return false;
+      edge = m.t;
+    }
+    if (nowMs - edge > ACTIVITY_STALE_SECONDS * 1000) return false;
+    const newest = inside[inside.length - 1];
+    return (
+      newest.cpu - anchor.cpu < IDLE_CPU_MS_PER_SECOND * IDLE_WINDOW_SECONDS &&
+      newest.read - anchor.read < IDLE_READ_BYTES
+    );
+  }
+
+  const activityArb = fc.constantFrom<Activity>(IDLE, BUSY, DISK, "none");
+  const stepArb: fc.Arbitrary<Step> = fc.oneof(
+    {
+      weight: 6,
+      arbitrary: fc.record({
+        kind: fc.constant("wait" as const),
+        seconds: fc.constantFrom(5, 10, 30, 60, 100, 185, 305, 905),
+        activity: activityArb,
+      }),
+    },
+    {
+      weight: 1,
+      arbitrary: fc.record({
+        kind: fc.constant("sleep" as const),
+        seconds: fc.constantFrom(40, 90, 3600),
+      }),
+    },
+    {
+      weight: 3,
+      arbitrary: fc.record({
+        kind: fc.constant("block" as const),
+        frame: fc.constantFrom(0, 1, 5, 100),
+        outMs: fc.constantFrom(0, 100, 3000),
+      }),
+    },
+    {
+      weight: 1,
+      arbitrary: fc.record({
+        kind: fc.constant("step" as const),
+        value: fc.integer({ min: 0, max: 4 }),
+      }),
+    },
+    {
+      weight: 1,
+      arbitrary: fc.record({
+        kind: fc.constant("verify" as const),
+        value: fc.integer({ min: 0, max: 4 }),
+      }),
+    },
+  );
+  const scenarioArb: fc.Arbitrary<Scenario> = fc.record({
+    startMark: fc.boolean(),
+    steps: fc.array(stepArb, { maxLength: 40 }),
+  });
+
+  it("never stops an export sooner than 0.27.0 would have, on any stream of events (the monotone property)", () => {
+    fc.assert(
+      fc.property(scenarioArb, (scenario) => {
+        const stop = playNew(scenario, true).stop;
+        if (stop === null) return true;
+        const old = playOld(scenario);
+        return old !== null && stop.atMs >= old.atMs;
+      }),
+      { numRuns: 400 },
+    );
+  });
+
+  it("stops early only on readings that show the export idle for the whole window, and otherwise only at a ceiling", () => {
+    fc.assert(
+      fc.property(scenarioArb, (scenario) => {
+        const { stop, marks } = playNew(scenario, true);
+        if (stop === null) return true;
+        if (idleOverWindow(marks, stop.atMs)) return true;
+        return (
+          (stop.kind === "spinning" && stop.seconds >= BUSY_RUN_CEILING_SECONDS) ||
+          (stop.kind === "slow_start" && stop.seconds >= BUSY_START_CEILING_SECONDS)
+        );
+      }),
+      { numRuns: 400 },
+    );
+  });
+
+  it("is the 0.27.0 rule exactly, on any stream of events, when the idle rule is off", () => {
+    fc.assert(
+      fc.property(scenarioArb, (scenario) => {
+        const stop = playNew(scenario, false).stop;
+        const old = playOld(scenario);
+        return stop === null
+          ? old === null
+          : old !== null && stop.atMs === old.atMs && stop.kind === old.kind;
+      }),
+      { numRuns: 400 },
+    );
   });
 });
 
