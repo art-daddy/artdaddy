@@ -685,6 +685,20 @@ describe("two runs at once (F3)", () => {
     expect(cancel).toHaveBeenCalledTimes(2);
   });
 
+  it("a double click that arrives before the next draw is still one: the handler itself ignores the second", () => {
+    const cancel = vi.fn();
+    registerCanceller("cap", cancel);
+    seed(idx(), cap());
+    render(<SpeechChip />);
+    const button = openPopover().getByRole("button", { name: "Cancel" });
+    // both clicks inside one batch: React has drawn nothing between them
+    act(() => {
+      button.click();
+      button.click();
+    });
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
+
   it("a second click never reaches the next run: the run that was cancelled ends at once and the other takes its place, with its Cancel disabled", () => {
     const other = vi.fn();
     registerCanceller("cap", () => state().dismiss("cap")); // ended by itself at that very moment: not stopped

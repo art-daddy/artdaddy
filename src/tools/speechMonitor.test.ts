@@ -581,7 +581,9 @@ describe("a run as a whole: the check and the monitor together (F1)", () => {
           const windows = Math.ceil(spanS / 30);
           const pauses = new Map<number, number>();
           long.forEach((extra, i) => pauses.set((where[i] ?? 0) % windows, extra));
-          fc.pre(startupS + rate * spanS + MAX_GAP_S * pauses.size < 2 * 600 - 1);
+          // each pause adds at most 120 s to what the run is projected to take (the number is MAX_GAP_S: it is
+          // written out here so that raising it is a decision this test makes somebody take)
+          fc.pre(startupS + rate * spanS + 120 * pauses.size < 2 * 600 - 1);
           expect(steadyRun({ rate, startupS, spanS, pauses }).stoppedAt).toBeNull();
         },
       ),
