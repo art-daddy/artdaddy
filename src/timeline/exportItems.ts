@@ -24,6 +24,7 @@ import {
 } from "./exportQueue";
 import type { ExportRefusalFacts } from "../api/agentEvents";
 import type { ExportStory } from "./exportTrace";
+import type { RestartLink } from "./exportAttempts";
 import { limitThatFired } from "./nativeDiagnostics";
 import { totalExpectation, type Expectation, type ExportOptions } from "./exportOptions";
 import { describeExpected } from "./exportWords";
