@@ -57,9 +57,9 @@ const run = (over: Partial<PaceInput> = {}): PaceInput => ({
   ...over,
 });
 /** A finished run that was `ratio` times as slow as predicted. */
-const teach = (store: StorageLike, ratio: number, over: Partial<PaceInput> = {}) =>
+const teach = (store: StorageLike | null, ratio: number, over: Partial<PaceInput> = {}) =>
   recordPace(store, run({ runSeconds: 600, predictedTotalSeconds: 600 / ratio, ...over }));
-const learned = (store: StorageLike, key: PaceKey = KEY, now = NOW) =>
+const learned = (store: StorageLike | null, key: PaceKey = KEY, now = NOW) =>
   paceCorrection(store, key, now);
 
 describe("what a run teaches", () => {

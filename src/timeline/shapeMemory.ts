@@ -167,7 +167,11 @@ export function predictShapePeakMiB(input: ShapeMemoryInput): number | null {
       ? input.measured
           .filter(
             (sample) =>
-              isObject(sample) && positive(sample.mib) && sample.rung >= rung && sample.rung <= 2,
+              isObject(sample) &&
+              positive(sample.mib) &&
+              typeof sample.rung === "number" &&
+              sample.rung >= rung &&
+              sample.rung <= 2,
           )
           .map((sample) => sample.mib)
       : [];
