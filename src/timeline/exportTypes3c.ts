@@ -4,6 +4,9 @@
 // Each list below is the ONE definition the 3c modules use. The report's wire lists belong to lane L2 (`src/api/export*.ts`) and are written
 // separately; a conformance test compares the two when the facts are wired. That wiring is HELD until the owner says yes to the privacy text:
 // nothing in this file is sent anywhere.
+import type { ChipMaker } from "./exportEncoder";
+import type { ExportQuality, ExportResolution } from "./exportOptions";
+import type { RenderWorkload } from "./renderPlan";
 
 /** The PC's class from the hidden speed test. `unfinished` = the check could not finish in its time box (counts as weak); `unknown` = no check yet or the check is off. */
 export const PC_CLASSES = ["fast", "ok", "weak", "unfinished", "unknown"] as const;
@@ -56,6 +59,33 @@ export interface HonestEstimate {
 export interface RouteEstimate {
   seconds: number | null;
   basis: EstimateBasis | null;
+}
+
+/** The honest estimate of each way an export could run, for the route decision, the dialog and the chat question. `null` = no estimate for that way:
+ *  it is then not offered and not chosen. */
+export interface RouteEstimates {
+  /** The processor's normal setting at the person's own settings (Full quality). */
+  standard: HonestEstimate | null;
+  /** Quick: its own size and rate and the processor's faster setting. */
+  quick: HonestEstimate | null;
+  /** The graphics chip, where one passed its test for this picture. */
+  chip: HonestEstimate | null;
+  /** The processor's faster setting at the person's own settings. */
+  faster: HonestEstimate | null;
+}
+
+/** What the dialog, the chat question and the admission door ask the estimate side for (see `routeEstimatesPort.ts`). */
+export interface RouteEstimatesRequest {
+  workload: RenderWorkload;
+  settings: {
+    resolution: ExportResolution | undefined;
+    quality: ExportQuality | undefined;
+    fps: number | null | undefined;
+  };
+  /** Which of size and rate the person or the assistant set explicitly: Quick never overrides one that was set. */
+  explicit: ExplicitSettings;
+  /** The chip that passed its test for this picture, or null. */
+  chipMaker: ChipMaker | null;
 }
 
 /** What the person or the assistant set explicitly. Quick never overrides a size or a frame rate that was set. */
