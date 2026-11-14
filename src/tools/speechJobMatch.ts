@@ -19,19 +19,27 @@ export function runReads(job: SpeechJob, path: string, wanted: SpanWindow | null
 
 /** The jobs that stand for what is awaited, in the order of the entries. A file with no path (the tool did not
  *  know it), or one no job reads, has no job: its time is not told. When several jobs read it, the one that has
- *  got furthest is the one that will produce it. */
+ *  got furthest is the one that will produce it; of several running, the one with a measured time, then the
+ *  soonest. */
 export function jobsFor(
   entries: readonly Pick<Entry, "key" | "path" | "window">[],
   jobs: readonly SpeechJob[],
 ): Map<string, SpeechJob> {
   const rank = { running: 3, starting: 2, waiting: 1, stopped: 0 } as const;
+  const sooner = (a: SpeechJob, b: SpeechJob): boolean =>
+    a.etaS !== null && (b.etaS === null || a.etaS < b.etaS);
   const found = new Map<string, SpeechJob>();
   for (const e of entries) {
     if (e.path === null) continue;
     let best: SpeechJob | undefined;
     for (const job of jobs) {
       if (job.phase === "stopped" || !runReads(job, e.path, e.window)) continue;
-      if (!best || rank[job.phase] > rank[best.phase]) best = job;
+      if (
+        !best ||
+        rank[job.phase] > rank[best.phase] ||
+        (job.phase === "running" && best.phase === "running" && sooner(job, best))
+      )
+        best = job;
     }
     if (best) found.set(e.key, best);
   }

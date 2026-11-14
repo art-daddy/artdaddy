@@ -303,7 +303,9 @@ describe("who can be promised a wake", () => {
       source: "src",
       ref: "m_1",
       window: null,
+      path: null,
     });
+    expect(wakeTargetOf(ctxOf(3), "src", "m_1", null, "C:/p/talk.mp4")?.path).toBe("C:/p/talk.mp4");
     expect(wakeTargetOf(ctxOf(3), "src", "m_1", { start: 5, end: 9 })?.window).toEqual({
       start: 5,
       end: 9,

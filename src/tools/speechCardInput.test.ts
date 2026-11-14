@@ -154,9 +154,9 @@ describe("whatever the files and the runs are", () => {
           const got = lines(wake, jobs).join(" ");
           const reads = (j: SpeechJob): boolean =>
             files.some((n) => j.work[0].source === pathOf(n));
-          const running = jobs.filter((j) => reads(j) && j.phase === "running");
-          const mayShowTime = running.length > 0 && running.every((j) => j.etaS !== null);
-          if (!mayShowTime) expect(timeIn(got), got).toBe(false);
+          // The rule: a time needs a run of one of the files that has started AND measured itself.
+          const measured = jobs.some((j) => reads(j) && j.phase === "running" && j.etaS !== null);
+          if (!measured) expect(timeIn(got), got).toBe(false);
         },
       ),
     );

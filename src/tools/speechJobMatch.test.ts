@@ -84,6 +84,15 @@ describe("the job that stands for a file awaited", () => {
     expect(jobsFor([entry("a", PATH)], jobs.slice(0, 2)).get("a")?.id).toBe("s");
   });
 
+  it("is, of several running, the one that has a measured time, and then the soonest", () => {
+    const unmeasured = job({ id: "u", etaS: null });
+    const far = job({ id: "far", etaS: 300 });
+    const near = job({ id: "near", etaS: 40 });
+    expect(jobsFor([entry("a", PATH)], [unmeasured, far]).get("a")?.id).toBe("far");
+    expect(jobsFor([entry("a", PATH)], [far, unmeasured]).get("a")?.id).toBe("far");
+    expect(jobsFor([entry("a", PATH)], [far, near, unmeasured]).get("a")?.id).toBe("near");
+  });
+
   it("is none for a file with no path, a file no run reads, and a run that has been stopped", () => {
     expect(jobsFor([entry("a", null)], [job()]).size).toBe(0);
     expect(jobsFor([entry("a", "C:/proj/other.mp4")], [job()]).size).toBe(0);
