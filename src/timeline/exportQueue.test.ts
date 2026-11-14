@@ -3033,7 +3033,8 @@ describe("what a running export publishes for the chat card", () => {
       expect(row).toMatchObject({
         state: "failed",
         failure_code: "memory_limit",
-        failure: "Your PC ran short of memory. Close other programs and try again.",
+        failure:
+          "Your PC ran short of memory. Close other programs and try again. To use less memory, lower the picture size or frame rate, or export a shorter section.",
       });
       expect(row).not.toHaveProperty("stage");
     });
@@ -3684,7 +3685,8 @@ describe("what happened to an export, as its report tells it", () => {
         expect(row).toMatchObject({
           state: "failed",
           failure_code: "time_limit",
-          failure: "The export took longer than ArtDaddy allows, or stopped making progress.",
+          failure:
+            "The export took longer than ArtDaddy allows, or stopped making progress. On this PC a lower picture size or frame rate, or a shorter section, is faster.",
         });
         const report = lastReport();
         expect(report).toMatchObject({ status: "failed", started_by: "chat" });

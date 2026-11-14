@@ -52,6 +52,13 @@ import {
   type Admission3c,
 } from "./estimateAdmission";
 import { beginExportAsk } from "./exportAsk";
+import {
+  __resetHelp3c,
+  endHelp3c,
+  helpRowOf3c,
+  noteHelpTick3c,
+  withLowerAdvice3c,
+} from "./exportHelpWatch";
 import type { HonestEstimate, PcClass } from "./exportTypes3c";
 import type { ChoiceFacts } from "./exportChoice";
 import type { LeanRecord } from "./leanRecord";
@@ -667,9 +674,12 @@ export function listExportOutcomes(): Array<Record<string, unknown>> {
     const left = running ? timeLeftSeconds(running, now) : null;
     const failure = r.state === "failed" ? failureOf(r.error) : null;
     const restartNote = attempt.attempt > 1 ? restartNoteOf(r.job_id) : null;
+    // A running export that is slower than said: the two facts, and what the assistant is to do about them (not cancel and start again).
+    const slow = r.state === "running" && !r.cancelling ? helpRowOf3c(r.job_id) : null;
     const notes = [
       ...(restartNote ? [restartNote] : []),
       ...(busy === true && quiet >= QUIET_SECONDS ? [busyNoteForAssistant(quiet)] : []),
+      ...(slow ? [slow.note] : []),
     ];
     return {
       job_id: attempt.publicId,
@@ -716,6 +726,7 @@ export function listExportOutcomes(): Array<Record<string, unknown>> {
         ? { progress_percent: Math.round(Math.min(1, Math.max(0, running.fraction)) * 100) }
         : {}),
       ...(left !== null ? { time_left_s: Math.round(left) } : {}),
+      ...(slow ? slow.fields : {}),
       // No new picture for a minute or more: idle (or unreadable) is said as it always was; busy is said as working, so the
       // assistant does not cancel an export that is only heavy.
       ...(quiet >= QUIET_SECONDS
@@ -730,7 +741,12 @@ export function listExportOutcomes(): Array<Record<string, unknown>> {
       ...(failure
         ? {
             failure_code: failure.code,
-            failure: r.chipFailed ? describeChipFailure("assistant") : failure.plain,
+            // 0.27.0's sentence, with what to lower after it where there is something true to say.
+            failure: withLowerAdvice3c(
+              r.chipFailed ? describeChipFailure("assistant") : failure.plain,
+              failure.code,
+              r.chipFailed === true,
+            ),
             ...(r.chipFailed ? { chip_failed: true } : {}),
           }
         : {}),
@@ -1385,6 +1401,7 @@ export function __resetExportQueue(): void {
   restartLog.length = 0;
   attempts.reset();
   __resetAdmission3c();
+  __resetHelp3c();
   records.length = 0;
   snapshot = [];
   setExportsBusy(false);
@@ -2148,6 +2165,11 @@ async function encode(spec: ExportSpec, ledger: Ledger, jobId: string, key: stri
       noteWatchTick3c(jobId);
       // What the processors are doing, for the card's line.
       useExportJob.getState().setLiveBusy(jobId, story.watch?.busy() ?? null);
+      // The slow banner reads the feed as it is now, including what the line above just said about the processors.
+      noteHelpTick3c(jobId, {
+        record: records.find((r) => r.job_id === jobId),
+        feed: liveFeedOf(useExportJob.getState(), jobId),
+      });
     }, WATCH_TICK_MS);
   };
   // The render ended, however it ended: the watch's last word, before the checks that follow it
@@ -2155,6 +2177,7 @@ async function encode(spec: ExportSpec, ledger: Ledger, jobId: string, key: stri
   const endWatch = (): void => {
     if (watchTimer !== undefined) clearInterval(watchTimer);
     watchTimer = undefined;
+    endHelp3c(jobId);
     if (story?.watch && story.longestGapS === undefined) story.longestGapS = story.watch.finish();
   };
   try {
