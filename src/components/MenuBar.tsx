@@ -604,7 +604,7 @@ export default function MenuBar() {
           <DiscordIcon className="h-3 w-3" />
           Discord
         </button>
-        <div className="ml-auto flex items-center gap-1">
+        <div className="ml-auto flex min-w-0 items-center gap-1 [&>*]:shrink-0">
           <ExportBadge onClick={() => openExport()} />
           <SpeechChip />
           {hasProject && (

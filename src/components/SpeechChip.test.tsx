@@ -243,11 +243,14 @@ describe("what the chip says", () => {
     expect(chip().querySelector("[aria-hidden]")).not.toHaveClass("animate-pulse");
   });
 
-  it("keeps the top bar whole in a narrow window: the text can be cut and the chip is capped", () => {
-    // happy-dom has no layout: this pins the classes that do the cutting in the app's CSS.
+  it("keeps the top bar whole in a narrow window: the chip is the one item that gives way, and its text is cut", () => {
+    // happy-dom has no layout, so this pins the classes that do it; the real layout was measured in Edge.
     seed(job("a", { ...SLOW, facts: CPU4, label: "A".repeat(200) }));
     render(<SpeechChip />);
-    expect(chip().className).toMatch(/\bmax-w-\[[\d.]+rem\]/);
+    const box = chip().parentElement;
+    expect(box?.className).toMatch(/\bmax-w-\[[\d.]+rem\]/);
+    expect(box).toHaveClass("!shrink");
+    expect(chip()).toHaveClass("w-full", "min-w-0");
     expect(chip().querySelector(".truncate")?.textContent).toBe(
       "Transcribing 48% · slow: about 35 min left",
     );

@@ -158,7 +158,10 @@ export default function SpeechChip(): JSX.Element | null {
   const more = waitingBesides(jobs, job);
 
   return (
-    <div className="relative">
+    // The one flexible item of the right cluster (which keeps every other item at its own width): in a
+    // narrow window the chip's text is cut, the bar is not broken. The popover must not be clipped, so
+    // the cutting happens on the button inside, never with overflow on this box.
+    <div className="relative min-w-[2rem] max-w-[16rem] !shrink">
       <button
         ref={chipRef}
         type="button"
@@ -168,7 +171,7 @@ export default function SpeechChip(): JSX.Element | null {
         title={words.chip}
         onClick={() => setOpen((o) => !o)}
         className={cn(
-          "flex min-w-0 max-w-[16rem] items-center gap-1 rounded px-2 py-0.5 text-[11px] hover:bg-neutral-800",
+          "flex w-full min-w-0 items-center gap-1 rounded px-2 py-0.5 text-[11px] hover:bg-neutral-800",
           TONE[words.tone].text,
           open && "bg-neutral-800",
         )}
