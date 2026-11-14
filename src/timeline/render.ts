@@ -3786,7 +3786,7 @@ function verbatimStem(path: unknown): string | null {
 export async function exportTimelineTool(
   callArgs: Args,
   ctx: ClientToolContext | null,
-  retrying?: { from: Rung; minRung: Rung; processor?: true },
+  retrying?: { from: Rung; minRung: Rung; processor?: true; plain?: true },
   moved?: MovedTo,
 ): Promise<Result> {
   if (!ctx) return NOT_READY;
@@ -3862,6 +3862,8 @@ export async function exportTimelineTool(
     fps: typeof args.fps === "number" ? args.fps : undefined,
     // A Try again after the graphics chip failed asks for the processor, whatever the app would have chosen.
     ...(retrying?.processor ? { mode: "quality" as const } : {}),
+    // A Try again after an export that ran a lean render path builds 0.27.0's recipe (leanOptions.ts `plain`).
+    ...(retrying?.plain ? { lean: { plain: true } } : {}),
   });
   if (!prepared.ok) return prepared.result;
 
@@ -3961,6 +3963,7 @@ function retryOf(args: Args, ctx: ClientToolContext, placed?: MovedTo): ExportRe
         from,
         minRung,
         ...(options.processor ? { processor: true as const } : {}),
+        ...(options.plain ? { plain: true as const } : {}),
       },
       folder ? { dir: folder } : undefined,
     );

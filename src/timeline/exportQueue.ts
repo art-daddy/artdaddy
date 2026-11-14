@@ -316,6 +316,9 @@ export interface ExportRecord {
   reason?: ModeReason;
   /** The export failed in a way a chip can cause, and it ran on one: Try again runs it on the processor. */
   chipFailed?: true;
+  /** Its plan ran a lean render path (leanRecord.ts, Phase 3a): when it fails, Try again builds 0.27.0's recipe (`plain` of
+   *  {@link ExportRetry}), so a lean path cannot make the same project fail twice. */
+  lean?: true;
   /** A way to start this export again is offered (see {@link offerExportRetry}): the card shows Try again on it
    *  once it has failed. */
   canRetry?: true;
@@ -401,11 +404,12 @@ export function dismissExport(jobId: string): boolean {
 /** How to start an export again, given by whoever started it: told the gentlest rung to start at, it queues a
  *  new export of the same project with the same settings. `processor` says the graphics chip failed it: the new export
  *  runs on the processor's own encoder, whatever the app would have chosen. `saveTo` is a folder the person chose
- *  for it instead (the card's Save somewhere else): the new export starts there, and so does every Try again after it. */
+ *  for it instead (the card's Save somewhere else): the new export starts there, and so does every Try again after it.
+ *  `plain` says the export that failed ran a lean render path (Phase 3a): the new export is built with 0.27.0's recipe. */
 export type ExportRetry = (
   minRung: Rung,
   failedRung: Rung,
-  options: { store?: ProjectStoreAccess; processor?: true; saveTo?: string },
+  options: { store?: ProjectStoreAccess; processor?: true; plain?: true; saveTo?: string },
 ) => Promise<{ ok: boolean; error?: string; declined?: boolean }>;
 const retries = new Map<string, ExportRetry>();
 
@@ -457,6 +461,8 @@ export async function retryExport(
       {
         store,
         ...(processor ? { processor: true as const } : {}),
+        // A lean render path ran: the person's click builds 0.27.0's recipe, so that path cannot fail the same project twice.
+        ...(record.lean === true ? { plain: true as const } : {}),
         ...(options.saveTo ? { saveTo: options.saveTo } : {}),
       },
     );
@@ -1737,6 +1743,7 @@ async function admitExport(spec: ExportSpec, storageReady: boolean): Promise<Exp
       ? { maxRung: rungOf(spec.meta.plan.max_rung) }
       : {}),
     ...(spec.meta?.plan?.ladder ? { ladder: cleanLadder(spec.meta.plan.ladder) } : {}),
+    ...(spec.meta?.plan?.lean?.ran?.length ? { lean: true as const } : {}),
     ...(spec.meta?.choice && spec.meta.choice.encoder !== "x264"
       ? { encoder: spec.meta.choice.encoder, reason: spec.meta.choice.reason }
       : {}),
