@@ -957,37 +957,9 @@ function reasonProblems(row: AutoRestartReason): string[] {
   return problems;
 }
 
-// A second reason, defined here only, of the kind that will join the table later: a failure only a graphics chip
-// explains, restarted on the processor's own encoder, with no first-quarter rule. The mechanism must treat it like
-// any other row.
-const CHIP_CODES: ReadonlySet<ExportReasonCode> = new Set([
-  "verification_failed",
-  "time_limit",
-  "render_failed",
-  "unknown",
-]);
-const CHIP_FAILED: AutoRestartReason = {
-  reason: "chip_failed",
-  owner: "3c",
-  restarted: "processor",
-  flag: "chip_restart",
-  override: ["processor"],
-  trigger: ({ failure, attempt }) =>
-    !CHIP_CODES.has(failure.code)
-      ? { eligible: false, why: "not_memory" }
-      : attempt.chipMaker === null
-        ? { eligible: false, why: "no_route" }
-        : { eligible: true, override: { processor: true } },
-  words: {
-    gap: "Starting again on the processor…",
-    after:
-      "Started again on the processor because the graphics chip could not finish it. Your export settings are kept.",
-    failedAgain: "The export stopped again. Try again, or choose another setting.",
-    assistantNote:
-      "The app restarted this export once by itself on the processor. It is the same export (same job_id): do not start another.",
-  },
-  witnesses: ["M17", "M18"],
-};
+// The graphics chip's reason is a row of the shipped table (chipRestart.ts, lane L3c's): the walks below hold it to the same checks as the
+// memory rows, with facts a failure only a chip explains would have.
+const CHIP_FAILED = restartRow("chip_failed")!;
 
 /** A failed graphics-chip encode that arrived at the very end of the export. */
 function chipFacts(over: Over = {}): RestartFacts {
@@ -1000,9 +972,10 @@ function chipFacts(over: Over = {}): RestartFacts {
   });
 }
 
-const ROWS: readonly AutoRestartReason[] = [...AUTO_RESTART_REASONS, CHIP_FAILED];
+const ROWS: readonly AutoRestartReason[] = AUTO_RESTART_REASONS;
 const WITH_ALL: DecideOptions = { rows: ROWS, table: TABLE };
-// The chip row has no first-quarter rule and its route is a certain one, so it has two conditions fewer.
+// The chip row has no first-quarter rule and its route is a certain one, so it has two conditions fewer; an export that ran on no chip is
+// not its failure at all (the same word as any failure no row is about).
 const BREAKS_CHIP: Partial<Record<RestartRefusal, Over>> = {
   not_memory: { failure: { code: "storage_full" } },
   flag_off: { flags: { chip_restart: false } },
@@ -1010,7 +983,6 @@ const BREAKS_CHIP: Partial<Record<RestartRefusal, Over>> = {
   second: { request: { autoRestartsUsed: 1 } },
   no_closure: { request: { retryClosureExists: false } },
   edited: { request: { snapshotUnchanged: false } },
-  no_route: { attempt: { chipMaker: null, encoder: "x264-crf" } },
 };
 // Facts every row restarts on. A row added to the table needs an entry here, and then the walks below hold it to
 // everything every other row is held to.
@@ -1129,14 +1101,17 @@ describe("a second reason in the table", () => {
       failedRungN: 0,
     });
     // the memory rows do not take it, and it does not take a memory stop
-    expect(decideRestart(chipFacts())).toEqual({ restart: false, why: "not_memory" });
+    expect(decideRestart(chipFacts(), { rows: AUTO_RESTART_REASONS.slice(0, 2), table: TABLE })).toEqual({
+      restart: false,
+      why: "not_memory",
+    });
     expect(decideRestart(facts(), WITH_ALL)).toMatchObject({ reason: "memory_short" });
     expect(decideRestart(ceilingFacts(), WITH_ALL)).toMatchObject({ reason: "memory_ceiling" });
   });
 
   it("is held to the same order of refusals as the memory reasons, with its own switch", () => {
     const walked = walkOrder((over) => chipFacts(over), BREAKS_CHIP, WITH_ALL);
-    expect(walked).toBe(2 ** 7 - 1);
+    expect(walked).toBe(2 ** 6 - 1);
     // the master switch stops it as well
     expect(decideRestart(chipFacts({ flags: { auto_restart: false } }), WITH_ALL)).toEqual({
       restart: false,
