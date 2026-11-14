@@ -116,12 +116,23 @@ describe("what the card is told of the work", () => {
     const ready = { files: 2, held: "typing" as const };
     const notes = [{ id: "n1", kind: "engine_failed" as const, count: 1 }];
     const got = cardInputOf({
-      wake: view([], { ready, notes }),
+      wake: view([entry(1)], { ready, notes }),
       jobs: [],
       download: { pct: 40, etaS: 90 },
       projectedS,
     });
     expect(got).toMatchObject({ ready, notes, download: { pct: 40, etaS: 90 } });
+  });
+
+  it("does not carry a download that no file the assistant waits for needs: the pill says it, the card never appears for it", () => {
+    const wake = view([], { ready: { files: 2, held: null }, notes: [] });
+    const got = cardInputOf({ wake, jobs: [], download: { pct: 40, etaS: 90 }, projectedS });
+    expect(got.download).toBeNull();
+    expect(
+      cardView(
+        cardInputOf({ wake: view([]), jobs: [], download: { pct: 40, etaS: 90 }, projectedS }),
+      ),
+    ).toBeNull();
   });
 });
 

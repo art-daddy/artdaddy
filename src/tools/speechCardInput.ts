@@ -52,7 +52,9 @@ export function cardInputOf(src: CardSources): CardInput {
     runningEtaS,
     queuedS,
     slow: running.some((j) => j.rate !== null && j.rate > 1),
-    download: src.download,
+    // The pill says a download is under way; the card says it only for the files the assistant waits for, so that it
+    // never appears for a launch's download alone.
+    download: wake.total > 0 ? src.download : null,
     ready: wake.ready,
     notes: wake.notes,
   };

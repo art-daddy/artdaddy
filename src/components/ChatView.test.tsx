@@ -80,6 +80,7 @@ import {
 } from "../store/firstPrompt";
 import { useEditor } from "../store/editor";
 import { __resetComposer, useComposer } from "../store/composer";
+import { clearModelDownload, reportModelDownload } from "../store/modelDownload";
 import {
   __resetWakeHost,
   noteWordsFetched,
@@ -1828,11 +1829,28 @@ describe("the speech card in the chat pane", () => {
   afterEach(() => {
     __resetWakeHost();
     __resetComposer();
+    clearModelDownload();
   });
 
   it("is not there when the assistant is not waiting for anything", () => {
     render(<ChatView />);
     expect(screen.queryByTestId("speech-card")).toBeNull();
+  });
+
+  it("is not there for a download alone: the pill says it, and the assistant waits for nothing", () => {
+    act(() => reportModelDownload(200, 500));
+    render(<ChatView />);
+    expect(screen.queryByTestId("speech-card")).toBeNull();
+  });
+
+  it("says the download, and what follows it, when the assistant waits for files the model is needed for", () => {
+    assistantWaitsFor(["m_1", "m_2"]);
+    act(() => reportModelDownload(200, 500));
+    render(<ChatView />);
+    expect(screen.getByTestId("speech-card").textContent).toContain(
+      "Downloading the speech model (one time): 40%",
+    );
+    expect(screen.getByTestId("speech-card").textContent).toContain("Then 2 files to transcribe.");
   });
 
   it("says how many files are being transcribed for the assistant, and goes when the assistant has them", () => {
