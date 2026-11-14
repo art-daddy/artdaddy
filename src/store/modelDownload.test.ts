@@ -11,6 +11,8 @@ import {
   percent,
   reportModelDownload,
   setModelDownloadCancel,
+  setModelDownloadFailure,
+  setModelNextAttemptAt,
   useModelDownload,
 } from "./modelDownload";
 import { WHISPER_MODELS } from "../tools/transcribe";
@@ -122,6 +124,44 @@ describe("useModelDownload", () => {
     vi.setSystemTime(2_000_000);
     reportModelDownload(0, TOTAL);
     expect(useModelDownload.getState()).toMatchObject({ startedAt: 2_000_000, startReceived: 0 });
+  });
+});
+
+describe("the download that failed, and the round that is waiting", () => {
+  afterEach(() => {
+    setModelDownloadFailure(null);
+    setModelNextAttemptAt(null);
+    clearModelDownload();
+  });
+
+  it("stays through the end of the download it belongs to: that is exactly when it matters", () => {
+    reportModelDownload(120, 400);
+    setModelDownloadFailure("network");
+    setModelNextAttemptAt(5_000);
+    clearModelDownload();
+    expect(useModelDownload.getState()).toMatchObject({
+      total: 0,
+      failure: "network",
+      nextAttemptAt: 5_000,
+    });
+  });
+
+  it("is over as soon as a new download begins: it is never held beside one under way", () => {
+    setModelDownloadFailure("stalled");
+    setModelNextAttemptAt(5_000);
+    reportModelDownload(0, 400);
+    expect(useModelDownload.getState()).toMatchObject({
+      total: 400,
+      failure: null,
+      nextAttemptAt: null,
+    });
+  });
+
+  it("goes when the person dismisses it, and says nothing else changed", () => {
+    reportModelDownload(120, 400);
+    setModelDownloadFailure("disk_write");
+    setModelDownloadFailure(null);
+    expect(useModelDownload.getState()).toMatchObject({ received: 120, total: 400, failure: null });
   });
 });
 

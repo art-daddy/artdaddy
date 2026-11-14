@@ -7,6 +7,8 @@
 // there is exactly one place the UI has to read and exactly one message to keep honest.
 import { create } from "zustand";
 
+import type { ModelFailureKind } from "../tools/modelFailure";
+
 interface ModelDownloadState {
   /** Bytes on disk so far, including anything a previous attempt already fetched. */
   received: number;
@@ -21,8 +23,15 @@ interface ModelDownloadState {
 interface ModelDownloadStore extends ModelDownloadState {
   /** Stops the download, whoever is waiting for it; set while one is under way. */
   cancel: (() => void) | null;
+  /** Why the last download failed for good, until the person dismisses it or a new attempt begins.
+   *  Never held together with a download under way: `report` ends it. */
+  failure: ModelFailureKind | null;
+  /** When the app tries again by itself (ms since the epoch); null when no round is scheduled. */
+  nextAttemptAt: number | null;
   report: (received: number, total: number) => void;
   setCancel: (cancel: (() => void) | null) => void;
+  setFailure: (failure: ModelFailureKind | null) => void;
+  setNextAttemptAt: (at: number | null) => void;
   clear: () => void;
 }
 
@@ -32,13 +41,22 @@ export const useModelDownload = create<ModelDownloadStore>((set) => ({
   startedAt: 0,
   startReceived: 0,
   cancel: null,
+  failure: null,
+  nextAttemptAt: null,
+  // A report is a download beginning or moving, so a failure and a scheduled round are over.
   report: (received, total) =>
-    set((s) =>
-      s.total > 0
+    set((s) => ({
+      ...(s.total > 0
         ? { received, total }
-        : { received, total, startedAt: Date.now(), startReceived: received },
-    ),
+        : { received, total, startedAt: Date.now(), startReceived: received }),
+      ...(s.failure !== null || s.nextAttemptAt !== null
+        ? { failure: null, nextAttemptAt: null }
+        : undefined),
+    })),
   setCancel: (cancel) => set({ cancel }),
+  setFailure: (failure) => set({ failure }),
+  setNextAttemptAt: (nextAttemptAt) => set({ nextAttemptAt }),
+  // What stays: the failure and the next round. The download ending is exactly when they matter.
   clear: () => set({ received: 0, total: 0, startedAt: 0, startReceived: 0, cancel: null }),
 }));
 
@@ -53,6 +71,16 @@ export function setModelDownloadCancel(cancel: (() => void) | null): void {
 
 export function clearModelDownload(): void {
   useModelDownload.getState().clear();
+}
+
+/** Say why a download failed for good (null: nothing failed, or the person dismissed it). */
+export function setModelDownloadFailure(failure: ModelFailureKind | null): void {
+  useModelDownload.getState().setFailure(failure);
+}
+
+/** Say when the next round starts by itself (null: none is scheduled). */
+export function setModelNextAttemptAt(at: number | null): void {
+  useModelDownload.getState().setNextAttemptAt(at);
 }
 
 /** Whole MiB, which is the unit the 465 MiB model is actually sized in — dividing by 1e6

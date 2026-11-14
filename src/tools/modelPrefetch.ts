@@ -6,8 +6,15 @@
 // While it runs, the pill on screen says what it is, how far it is, and that it can be cancelled;
 // a look that needs the model in the meantime joins this download and answers within its bound.
 import { platform } from "../platform";
+import { setModelDownloadFailure, setModelNextAttemptAt } from "../store/modelDownload";
 import type { CommandRunner } from "./command";
 import type { ClientToolContext } from "./context";
+import {
+  __resetModelDecline,
+  clearModelDecline,
+  declineModel,
+  modelDeclined,
+} from "./modelDecline";
 import { ensureWhisperModel } from "./transcribe";
 
 export interface PrefetchEnv {
@@ -27,20 +34,40 @@ export const isCancelledDownload = (e: unknown): boolean =>
   e instanceof Error && /speech model download cancelled/.test(e.message);
 
 let session: Promise<void> | null = null;
-let declined = false;
+/** What the last start was given, so that a Retry asks the same way. */
+let lastEnv: PrefetchEnv | null = null;
+/** Ends the wait between two rounds now; set only while a round is waiting. */
+let cutWait: (() => void) | null = null;
 
 /** Start fetching the speech model if it is not on this machine. Never rejects, and costs nothing
  *  when the model is already there (its checksum was verified when it landed). A person who
- *  cancelled is not asked again until the app is next started. */
+ *  cancelled is not asked again, not even after the app is closed and opened (modelDecline.ts). */
 export function startSpeechModelPrefetch(env: PrefetchEnv = productionEnv): Promise<void> {
-  if (declined) return Promise.resolve();
-  session ??= run(env).finally(() => {
+  lastEnv = env;
+  if (modelDeclined()) return Promise.resolve();
+  session ??= run(env, ROUND_WAITS_MS).finally(() => {
     session = null;
   });
   return session;
 }
 
-async function run(env: PrefetchEnv): Promise<void> {
+/** The person pressed Retry on the failure card: a Cancel is forgotten, the card goes, and the model is
+ *  asked for now. A round that is waiting for its turn starts at once; with none running, exactly one round
+ *  is made, and when it fails the card returns. Never rejects. */
+export function retrySpeechModelDownload(): Promise<void> {
+  clearModelDecline();
+  setModelDownloadFailure(null);
+  if (session) {
+    cutWait?.();
+    return session;
+  }
+  session = run(lastEnv ?? productionEnv, []).finally(() => {
+    session = null;
+  });
+  return session;
+}
+
+async function run(env: PrefetchEnv, waits: readonly number[]): Promise<void> {
   try {
     const ctx = await env.context();
     if (!ctx) return;
@@ -50,11 +77,11 @@ async function run(env: PrefetchEnv): Promise<void> {
         return;
       } catch (e) {
         if (isCancelledDownload(e)) {
-          declined = true;
+          declineModel();
           return;
         }
-        if (round >= ROUND_WAITS_MS.length) return;
-        await env.sleep(ROUND_WAITS_MS[round]);
+        if (round >= waits.length) return;
+        await waitForNextRound(env, waits[round]);
       }
     }
   } catch {
@@ -62,10 +89,26 @@ async function run(env: PrefetchEnv): Promise<void> {
   }
 }
 
-/** Tests only. */
+/** The wait between two rounds, which the card says is under way and a Retry can end. */
+async function waitForNextRound(env: PrefetchEnv, ms: number): Promise<void> {
+  let cut!: () => void;
+  const cutShort = new Promise<void>((resolve) => (cut = resolve));
+  cutWait = cut;
+  setModelNextAttemptAt(Date.now() + ms);
+  try {
+    await Promise.race([env.sleep(ms), cutShort]);
+  } finally {
+    if (cutWait === cut) cutWait = null;
+    setModelNextAttemptAt(null);
+  }
+}
+
+/** Tests only: an app that has just started, remembering nothing in memory or in storage. */
 export function __resetPrefetch(): void {
   session = null;
-  declined = false;
+  lastEnv = null;
+  cutWait = null;
+  __resetModelDecline();
 }
 
 /** Downloading needs no command: nothing here may start a process. */
