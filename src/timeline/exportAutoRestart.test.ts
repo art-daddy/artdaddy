@@ -15,7 +15,7 @@ import { __resetProjectJobs } from "../tools/genJobs";
 import { __resetJobSupervisor, __setJobSupervisor } from "../tools/jobSupervisor";
 import { joinPath, ProjectStoreAccess } from "../tools/store";
 import { ensureTimeline } from "./engine";
-import { ID_ENTRY_POINTS } from "./exportAttempts";
+import { attempts, ID_ENTRY_POINTS } from "./exportAttempts";
 import {
   __resetExportQueue,
   cancelExport,
@@ -382,6 +382,37 @@ describe("the app starts an export again by itself when the PC ran short of memo
       expect(isDestinationReserved(DEST)).toBe(false);
       expect(listExports()).toEqual([]);
       expect((await outcomes())[0]).toMatchObject({ job_id: first.job_id, state: "cancelled" });
+    });
+
+    it("in the last moment before the new attempt exists, after every other look at the request, still stops it for good", async () => {
+      const t = await setup();
+      const first = await t.exportNow();
+      await flush();
+      // The Cancel lands where nothing but the registry can still refuse the new attempt: after its last look at the
+      // person's request, in the same turn as the moment it would become the export's next attempt.
+      const link = attempts.link.bind(attempts);
+      const landing = vi.spyOn(attempts, "link").mockImplementation((prev, next, kind, meta) => {
+        cancelExport(first.job_id, "person_card");
+        return link(prev, next, kind, meta);
+      });
+      try {
+        t.jobs.exit(first.job_id, -1, SHORT);
+        await flush(40);
+        expect(landing).toHaveBeenCalledTimes(1);
+        expect(await whenExportEnds(first.job_id)).toMatchObject({ state: "cancelled" });
+        await whenExportsSettle();
+      } finally {
+        landing.mockRestore();
+      }
+      expect(t.jobs.submitted).toHaveLength(1); // the new attempt never ran
+      expect(await t.fs.exists(DEST)).toBe(false);
+      expect(isDestinationReserved(DEST)).toBe(false);
+      expect(listExports()).toEqual([]);
+      expect(
+        [...t.fs.files.keys()].filter((key) => key.startsWith("C:/Users/test/Downloads/")),
+      ).toEqual([]);
+      expect((await outcomes())[0]).toMatchObject({ job_id: first.job_id, state: "cancelled" });
+      expect((await outcomes())[0]).not.toHaveProperty("failure_code");
     });
 
     it.each(["first", "second"] as const)(
