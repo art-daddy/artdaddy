@@ -53,7 +53,7 @@ import {
   wordTimesArgs,
   wordTimesOn,
 } from "./speechWordTimes";
-import { exportFlag } from "../api/exportFlags";
+import { exportFlag, speechModelSources } from "../api/exportFlags";
 import { joinPath } from "./store";
 import { prioritizeTranscript } from "./transcriptQueue";
 import { whisperCode } from "./whisperLanguages";
@@ -61,6 +61,7 @@ import { whisperRunFacts } from "./whisperFacts";
 import { adoptTurn, lookWhisper } from "./workGate";
 import { reportAppError, reportTranscription } from "../api/appEvents";
 import { beginSessionActivity } from "../observability/crashWatch";
+import { recordFact, type ModelFact } from "../lib/localFacts";
 import { settledWithin } from "../lib/settledWithin";
 import { stoppedAnswer } from "../lib/stopped";
 import { trackSpeechWait } from "../store/liveWait";
@@ -71,7 +72,11 @@ import {
   percent,
   reportModelDownload,
   setModelDownloadCancel,
+  setModelDownloadFailure,
 } from "../store/modelDownload";
+import { clearModelDecline, declineModel } from "./modelDecline";
+import { kindOfHttpStatus, type ModelFailureKind } from "./modelFailure";
+import { DEFAULT_MODEL_KEY, MODEL_MANIFEST, modelOrigins } from "./modelManifest";
 import { loadTimeline } from "../timeline/engine";
 import { findClip } from "../timeline/helpers";
 import type { Clip } from "../timeline/model";
@@ -83,25 +88,27 @@ const NOT_READY: Result = { ok: false, error: "client tool runtime not ready" };
 // Fixed transcription model. `get_transcript` does NOT expose model selection —
 // everything (the tool, inspect_media, and captions) uses this one
 // model so the model can never downgrade to base/tiny or pick an inconsistent one.
-const DEFAULT_MODEL = "small";
-const HF_BASE = "https://huggingface.co/ggerganov/whisper.cpp/resolve";
+const DEFAULT_MODEL = DEFAULT_MODEL_KEY;
 
 export interface WhisperModelSpec {
   revision: string;
   bytes: number;
   sha256: string;
+  /** The file's name, on disk and at the place it is fetched from. Absent only in a spec a test builds
+   *  by hand: the manifest's entry for the model says it. */
+  file?: string;
   /** Other places the same bytes can be fetched from, tried when the first fails or refuses. The
    *  checksum above is what makes a copy trustworthy, wherever it comes from. */
   mirrors?: readonly string[];
 }
 
-export const WHISPER_MODELS: Readonly<Record<string, WhisperModelSpec>> = {
-  small: {
-    revision: "5359861c739e955e79d9a303bcbc70fb988958b1",
-    bytes: 487_601_967,
-    sha256: "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
-  },
-};
+/** Every model the app can install, read from the one table that states its size, checksum and revision. */
+export const WHISPER_MODELS: Readonly<Record<string, WhisperModelSpec>> = Object.fromEntries(
+  Object.entries(MODEL_MANIFEST).map(([key, e]) => [
+    key,
+    { file: e.file, revision: e.revision, bytes: e.bytes, sha256: e.sha256 },
+  ]),
+);
 
 function normSep(p: string): string {
   return p.replace(/\\/g, "/");
@@ -137,8 +144,13 @@ export function fmtTimestampPrecise(totalSeconds: number): string {
 function dataRootOf(projectDir: string): string {
   return parentOf(parentOf(projectDir));
 }
-export function whisperModelPath(projectDir: string, size: string): string {
-  return joinPath(dataRootOf(projectDir), "models", `ggml-${size}.bin`);
+/** The model's file name: its entry in the manifest says it. Only a size the manifest does not know (a test
+ *  builds one by hand) falls back to the name `ggml-<size>.bin`. */
+export function modelFileName(size: string, file?: string): string {
+  return file ?? MODEL_MANIFEST[size]?.file ?? `ggml-${size}.bin`;
+}
+export function whisperModelPath(projectDir: string, size: string, file?: string): string {
+  return joinPath(dataRootOf(projectDir), "models", modelFileName(size, file));
 }
 
 interface WhisperToken {
@@ -463,6 +475,8 @@ class ModelInstall {
   waiters = 0;
   settled = false;
   received = 0;
+  /** The bytes the part file already held when the first attempt began; null before it. */
+  startedWith: number | null = null;
 
   constructor(
     readonly total: number,
@@ -570,12 +584,14 @@ export async function ensureWhisperModel(
 ): Promise<{ path: string; downloaded: boolean }> {
   const spec = injectedSpec ?? WHISPER_MODELS[size];
   if (!spec) throw new Error(`unsupported whisper model '${size}'`);
-  const path = whisperModelPath(ctx.store.projectDir, size);
+  const path = whisperModelPath(ctx.store.projectDir, size, spec.file);
   if (await validModel(ctx, path, spec)) return { path, downloaded: false };
   if (!fetchImpl) throw new Error("no network available to download the whisper model");
   if (!ctx.store.canStreamDownload) {
     throw new Error("this platform cannot stream and atomically install the whisper model");
   }
+  // Somebody needs the model and it is not here: a Cancel the person pressed earlier is over.
+  clearModelDecline();
   const key = `${path}\u0000${spec.sha256}`;
   const existing = modelDownloads.get(key);
   if (existing) return joinDownload(existing, ctx.signal);
@@ -594,7 +610,20 @@ export async function ensureWhisperModel(
  *  What has been downloaded stays, and the next request resumes from it. Whoever was waiting is
  *  told the download was cancelled, in the words {@link modelCancelledMessage} uses. */
 export function cancelModelDownload(): void {
+  // Remembered, so that the launch prefetch does not start it again behind his back (modelDecline.ts).
+  declineModel();
   for (const install of modelDownloads.values()) install.ac.abort();
+}
+
+/** What a download left on this PC for later, in closed words: never a path, a name or an address. */
+function recordModelFact(fact: Omit<ModelFact, "at">): void {
+  recordFact("model_download", { ...fact, at: Date.now() });
+}
+
+/** Which of the places asked for this download a fact names: the compiled-in one, or the Nth extra one. */
+function sourceWord(origins: readonly string[], origin: string): NonNullable<ModelFact["source"]> {
+  const i = origins.indexOf(origin);
+  return i <= 0 ? "primary" : i === 1 ? "extra_1" : i === 2 ? "extra_2" : "extra_3";
 }
 
 async function downloadModel(
@@ -612,17 +641,25 @@ async function downloadModel(
   const tmp = `${path}.${spec.sha256.slice(0, 12)}.part`;
   const marker = `${path}.verified.json`;
   const signal = self.ac.signal;
-  const origins = [`${HF_BASE}/${spec.revision}/ggml-${size}.bin`, ...(spec.mirrors ?? [])];
+  const pinned = { file: modelFileName(size, spec.file), revision: spec.revision };
   const finishActivity = beginSessionActivity("whisper-model-download");
   // The pill's Cancel stops this install, whoever is waiting for it.
   setModelDownloadCancel(cancelModelDownload);
+  const began = Date.now();
+  const seconds = (): number => (Date.now() - began) / 1000;
+  const fetched = (): number => Math.max(0, self.received - (self.startedWith ?? 0));
+  recordModelFact({ event: "download_started" });
+  // Why this download failed, if it does. Set where each failure is thrown, never read back from its words.
+  let reason: ModelFailureKind = "unknown";
+  let made = 0;
+  let source: NonNullable<ModelFact["source"]> = "primary";
+  let failure: ModelFailureKind | null = null;
   try {
     // Only bytes we can PROVE are wrong are thrown away (see transferModel). A cancellation or a
     // dropped connection leaves a perfectly good prefix, and discarding it is what made the user
     // restart from zero.
     const attempts = policy.backoffMs.length + 1;
     let last: AttemptFailure | null = null;
-    let made = 0;
     /** Origins that sent something they should not have: asked again, they would only do it again. */
     const refused = new Set<string>();
     for (let attempt = 0; attempt < attempts; attempt++) {
@@ -631,18 +668,23 @@ async function downloadModel(
         await pause(policy.backoffMs[attempt - 1], signal, () =>
           modelCancelledMessage(self.received, spec.bytes),
         );
+      // The places are worked out for EVERY attempt: an answer from the server that comes after the download
+      // began (the launch prefetch starts before the first answer) is used by the next attempt.
+      const origins = modelOrigins(pinned, [...(spec.mirrors ?? []), ...speechModelSources()]);
       const open = origins.filter((o) => !refused.has(o));
+      if (open.length === 0) break; // every origin has refused
       const origin = open[attempt % open.length];
+      source = sourceWord(origins, origin);
       made++;
       try {
         await transferModel(ctx, tmp, spec, origin, fetchImpl, self, policy);
         last = null;
         break;
       } catch (e) {
+        reason = e instanceof AttemptFailure ? e.kind : "unknown";
         if (signal.aborted || !(e instanceof AttemptFailure) || e.fate === "fatal") throw e;
         last = e;
         if (e.fate === "next-origin") refused.add(origin);
-        if (refused.size === origins.length) break; // every origin has refused
       }
     }
     if (last) {
@@ -650,16 +692,42 @@ async function downloadModel(
       throw made === 1 ? last : new Error(`${last.message} (after ${made} attempts)`);
     }
     if (signal.aborted) throw new Error(modelCancelledMessage(self.received, spec.bytes));
+    // From here on only the disk can let it down.
+    reason = "disk_write";
     if (await ctx.store.exists(path)) await ctx.store.remove(path);
     await ctx.store.remove(marker).catch(() => undefined);
     await ctx.store.rename(tmp, path);
     await ctx.store
       .writeText(marker, JSON.stringify({ bytes: spec.bytes, sha256: spec.sha256 }))
       .catch(() => undefined);
+    recordModelFact({
+      event: "download_finished",
+      source,
+      attempts: made,
+      seconds: seconds(),
+      bytes: fetched(),
+    });
     return { path, downloaded: true };
+  } catch (e) {
+    if (signal.aborted) {
+      recordModelFact({ event: "download_cancelled", attempts: made, seconds: seconds() });
+    } else {
+      recordModelFact({
+        event: "download_failed",
+        source,
+        attempts: made,
+        seconds: seconds(),
+        bytes: fetched(),
+        reason,
+      });
+      failure = reason;
+    }
+    throw e;
   } finally {
     clearModelDownload();
     finishActivity();
+    // After the progress is cleared: the card replaces the pill, never sits beside it.
+    if (failure !== null) setModelDownloadFailure(failure);
   }
 }
 
@@ -690,11 +758,13 @@ export function __setDownloadPolicy(policy: DownloadPolicy): void {
 
 /** What to do about an attempt that did not finish. `retry`: the origin or the connection let us
  *  down, so wait and try again. `next-origin`: this origin sent something it should not have, so
- *  try another without waiting. `fatal`: nothing another attempt could do changes it. */
+ *  try another without waiting. `fatal`: nothing another attempt could do changes it. `kind` is
+ *  what went wrong, in the closed words the card and the local record use; each throw site says it. */
 class AttemptFailure extends Error {
   constructor(
     message: string,
     readonly fate: "retry" | "next-origin" | "fatal",
+    readonly kind: ModelFailureKind,
   ) {
     super(message);
     this.name = "AttemptFailure";
@@ -757,6 +827,7 @@ async function transferModel(
               new AttemptFailure(
                 `whisper model download stalled: ${what} for ${policy.stallMs / 1000} s`,
                 "retry",
+                "stalled",
               ),
             );
           }, policy.stallMs)
@@ -786,6 +857,7 @@ async function transferModel(
     // never answers is a download stuck at 0%, and nothing on screen said it had started.
     reportModelDownload(have, spec.bytes);
     self.received = have;
+    self.startedWith ??= have;
     let resp: Response;
     try {
       resp = await unlessStalled(
@@ -798,7 +870,7 @@ async function transferModel(
     } catch (e) {
       if (signal.aborted) throw new Error(modelCancelledMessage(have, spec.bytes));
       if (e instanceof AttemptFailure) throw e;
-      throw new AttemptFailure(`whisper model download failed: ${String(e)}`, "retry");
+      throw new AttemptFailure(`whisper model download failed: ${String(e)}`, "retry", "network");
     }
     if (resp.status === 416) {
       // Our part is at or past the end of the file the server holds, so it is not this model.
@@ -806,16 +878,24 @@ async function transferModel(
       throw new AttemptFailure(
         "whisper model download could not resume from the partial file",
         "retry",
+        "cannot_resume",
       );
     }
     if (!resp.ok) {
-      const transient = resp.status >= 500 || resp.status === 408 || resp.status === 429;
+      const kind = kindOfHttpStatus(resp.status);
       throw new AttemptFailure(
         `whisper model download failed: HTTP ${resp.status}`,
-        transient ? "retry" : "next-origin",
+        kind === "server_busy" ? "retry" : "next-origin",
+        kind,
       );
     }
-    if (!resp.body) throw new AttemptFailure("whisper model download cannot be streamed", "fatal");
+    if (!resp.body) {
+      throw new AttemptFailure(
+        "whisper model download cannot be streamed",
+        "fatal",
+        "cannot_stream",
+      );
+    }
     // A server that ignores Range answers 200 with the WHOLE file. Appending that to what we
     // already had would concatenate two copies and leave the checksum as the only thing between
     // the user and a doubled file — start the part over rather than trust the length check.
@@ -831,6 +911,7 @@ async function transferModel(
       throw new AttemptFailure(
         `whisper model size mismatch: expected ${remaining}, server sent ${declared}`,
         "next-origin",
+        "size_mismatch",
       );
     }
 
@@ -853,7 +934,11 @@ async function transferModel(
         } catch (e) {
           if (signal.aborted) throw new Error(modelCancelledMessage(received, spec.bytes));
           if (e instanceof AttemptFailure) throw e;
-          throw new AttemptFailure(`whisper model download failed: ${String(e)}`, "retry");
+          throw new AttemptFailure(
+            `whisper model download failed: ${String(e)}`,
+            "retry",
+            "network",
+          );
         }
         const { done, value } = chunk;
         if (done) break;
@@ -863,15 +948,26 @@ async function transferModel(
           throw new AttemptFailure(
             `whisper model exceeded expected size ${spec.bytes}`,
             "next-origin",
+            "size_mismatch",
           );
         }
         // `received` tracks what is ON DISK, so a failed append cannot inflate it: the next
         // attempt re-reads the file's real size anyway, which keeps resume self-correcting.
-        if (!(await ctx.store.appendBytes(tmp, value))) {
+        let written: boolean;
+        let writeError = "";
+        try {
+          written = await ctx.store.appendBytes(tmp, value);
+        } catch (e) {
+          // A disk that is full or refuses the write throws; the words say it and the kind types it.
+          written = false;
+          writeError = `: ${String(e)}`;
+        }
+        if (!written) {
           if (signal.aborted) throw new Error(modelCancelledMessage(received, spec.bytes));
           throw new AttemptFailure(
-            "whisper model download stopped before it could be written",
+            `whisper model download stopped before it could be written${writeError}`,
             "fatal",
+            "disk_write",
           );
         }
         received += value.length;
@@ -889,12 +985,17 @@ async function transferModel(
       throw new AttemptFailure(
         `whisper model was incomplete: expected ${spec.bytes}, received ${received}`,
         "retry",
+        "incomplete",
       );
     }
     const probe = await ctx.store.probeMedia(tmp, 0);
     if (!probe || probe.size !== spec.bytes || probe.sha256 !== spec.sha256) {
       await discard(); // proven wrong; resuming these bytes would never converge
-      throw new AttemptFailure("whisper model failed checksum validation", "next-origin");
+      throw new AttemptFailure(
+        "whisper model failed checksum validation",
+        "next-origin",
+        "damaged",
+      );
     }
   } finally {
     signal.removeEventListener("abort", stop);
@@ -1231,9 +1332,9 @@ export async function runWhisper(
   }
 }
 
-/** The model file the gate measured, for the one model there is. A model size that was not
- *  measured is never given a narrower beam. */
-const MODEL_VARIANT: ModelVariant = "f16";
+/** The model file the gate measured, for the one model there is: the manifest's entry says which. A model
+ *  size that was not measured is never given a narrower beam. */
+const MODEL_VARIANT: ModelVariant = MODEL_MANIFEST[DEFAULT_MODEL_KEY].variant;
 
 async function runWhisperOnce(
   ctx: ClientToolContext,

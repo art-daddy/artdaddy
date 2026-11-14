@@ -13,17 +13,26 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { __resetExportFlags, refreshExportFlags } from "../api/exportFlags";
 import ImportProgress from "../components/ImportProgress";
-import { clearModelDownload } from "../store/modelDownload";
+import {
+  clearModelDownload,
+  setModelDownloadFailure,
+  useModelDownload,
+} from "../store/modelDownload";
 import type { CommandRunner } from "./command";
 import type { ClientToolContext } from "./context";
+import { MODEL_FAILURE_KINDS, MODEL_FAILURE_WORDS, type ModelFailureKind } from "./modelFailure";
+import { MODEL_MANIFEST, primaryUrl } from "./modelManifest";
 import { __resetPrefetch, startSpeechModelPrefetch, type PrefetchEnv } from "./modelPrefetch";
 import { joinPath, ProjectStoreAccess, type FsLike } from "./store";
 import {
   __setDownloadPolicy,
+  cancelModelDownload,
   ensureWhisperModel,
   modelCancelledMessage,
   PATIENT_DOWNLOAD,
   SINGLE_ATTEMPT,
+  WHISPER_MODELS,
+  whisperModelPath,
   type WhisperModelSpec,
 } from "./transcribe";
 
@@ -94,7 +103,12 @@ class MockFs implements FsLike {
     const b = this.bytes.get(joinPath(p));
     if (!b) throw new Error("ENOENT");
     const digest = sha256(b);
-    return { id12: digest.slice(0, 12), sha256: digest, size: b.length, head: b.slice(0, headBytes) };
+    return {
+      id12: digest.slice(0, 12),
+      sha256: digest,
+      size: b.length,
+      head: b.slice(0, headBytes),
+    };
   }
   async remove(p: string): Promise<void> {
     const n = joinPath(p);
@@ -164,6 +178,7 @@ beforeEach(() => {
 afterEach(() => {
   __setDownloadPolicy(PATIENT_DOWNLOAD);
   clearModelDownload();
+  setModelDownloadFailure(null);
   __resetExportFlags();
   __resetPrefetch();
   localStorage.clear();
@@ -230,6 +245,93 @@ describe("what the app keeps about each download, on this PC, in closed words", 
     ).rejects.toThrow();
     expect(modelFacts().at(-1)).toMatchObject({ event: "download_failed", reason: "disk_write" });
   });
+
+  it("records a cancel as a cancel, not as a failure, and shows no failure card for it", async () => {
+    const fs = new MockFs();
+    const slow = (): Promise<Response> => new Promise<Response>(() => undefined);
+    const asked = ensureWhisperModel(ctxOf(fs), "small", slow as Any, SPEC);
+    const outcome = asked.then(
+      () => "installed",
+      (e: Error) => e.message,
+    );
+    await vi.waitFor(() => expect(modelFacts().map((f) => f.event)).toEqual(["download_started"]));
+    cancelModelDownload();
+    expect(await outcome).toMatch(/speech model download cancelled/);
+    expect(modelFacts().map((f) => f.event)).toEqual(["download_started", "download_cancelled"]);
+    expect(useModelDownload.getState().failure).toBeNull();
+  });
+});
+
+// A reason is only worth showing if it is the one that happened. Every kind the card has words for must come
+// from the failure it names, and a kind added to the list needs its scenario here (the record below is typed
+// by the list, so a missing one does not compile).
+describe("the reason a download failed is the one that happened", () => {
+  type Scenario = (fs: MockFs) => (url: string, init?: RequestInit) => Promise<Response>;
+  const withoutLength = (r: Response): Response =>
+    Object.assign(r, { headers: new Headers() }) as Response;
+  const SCENARIOS: Record<ModelFailureKind, Scenario> = {
+    network: () => async () => {
+      throw new TypeError("network error");
+    },
+    stalled: () => () => new Promise<Response>(() => undefined),
+    server_busy: () => async () => served(new Uint8Array(), 503),
+    server_refused: () => async () => served(new Uint8Array(), 404),
+    size_mismatch: () => async () =>
+      Object.assign(served(BYTES), {
+        headers: new Headers({ "content-length": String(BYTES.length + 1) }),
+      }) as Response,
+    damaged: () => async () => served(BYTES.map((b) => (b + 1) & 255)),
+    incomplete: () => async () => withoutLength(served(BYTES.slice(0, 4))),
+    cannot_resume: (fs) => {
+      fs.bytes.set(`${MODEL}.${SPEC.sha256.slice(0, 12)}.part`, BYTES.slice(0, 2));
+      return async () => served(new Uint8Array(), 416);
+    },
+    disk_write: (fs) => {
+      fs.failAppend = true;
+      return async () => served(BYTES);
+    },
+    cannot_stream: () => async () =>
+      ({ ok: true, status: 200, headers: new Headers(), body: null }) as unknown as Response,
+    unknown: () => async () =>
+      ({
+        ok: true,
+        status: 200,
+        body: {},
+        get headers(): never {
+          throw new Error("a response that cannot be read");
+        },
+      }) as unknown as Response,
+  };
+
+  it("has a scenario for every kind the card has words for, and for no other", () => {
+    expect(Object.keys(SCENARIOS).sort()).toEqual([...MODEL_FAILURE_KINDS].sort());
+  });
+
+  it.each([...MODEL_FAILURE_KINDS])(
+    "%s: the record, the card and the store all say so",
+    async (kind) => {
+      const fs = new MockFs();
+      const fetchImpl = SCENARIOS[kind](fs);
+      if (kind === "stalled") {
+        vi.useFakeTimers();
+        __setDownloadPolicy({ stallMs: 1_000, backoffMs: [] });
+      }
+      try {
+        const asked = ensureWhisperModel(ctxOf(fs), "small", fetchImpl as Any, SPEC).then(
+          () => "installed",
+          () => "failed",
+        );
+        if (kind === "stalled") await vi.advanceTimersByTimeAsync(1_000);
+        expect(await asked).toBe("failed");
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(modelFacts().at(-1)).toMatchObject({ event: "download_failed", reason: kind });
+      expect(useModelDownload.getState().failure).toBe(kind);
+      render(<ImportProgress />);
+      expect(screen.getByTestId("model-failure").textContent).toContain(MODEL_FAILURE_WORDS[kind]);
+    },
+  );
 });
 
 describe("a second place to fetch the model from, named by the remote answer", () => {
@@ -263,13 +365,30 @@ describe("a second place to fetch the model from, named by the remote answer", (
     expect(fs.bytes.get(MODEL)).toEqual(BYTES);
   });
 
+  it("is used by the next attempt when the answer only comes after the download has begun", async () => {
+    const fs = new MockFs();
+    const urls: string[] = [];
+    const fetchImpl = vi.fn(async (url: string) => {
+      urls.push(url);
+      if (url === EXTRA) return served(BYTES);
+      await answer([EXTRA]); // the launch prefetch starts before the first answer comes
+      return networkDown();
+    });
+    const r = await ensureWhisperModel(ctxOf(fs), "small", fetchImpl as Any, SPEC);
+    expect(urls).toEqual([PRIMARY, EXTRA]);
+    expect(r.downloaded).toBe(true);
+    expect(modelFacts().at(-1)).toMatchObject({
+      event: "download_finished",
+      source: "extra_1",
+      attempts: 2,
+    });
+  });
+
   it("never installs bytes that are not the pinned ones, whoever sends them", async () => {
     await answer([EXTRA]);
     const fs = new MockFs();
     const wrong = BYTES.map((b) => (b + 1) & 255);
-    const fetchImpl = vi.fn(async (url: string) =>
-      url === EXTRA ? served(wrong) : networkDown(),
-    );
+    const fetchImpl = vi.fn(async (url: string) => (url === EXTRA ? served(wrong) : networkDown()));
     await expect(ensureWhisperModel(ctxOf(fs), "small", fetchImpl as Any, SPEC)).rejects.toThrow();
     expect(fs.bytes.get(MODEL)).toBeUndefined();
   });
@@ -309,6 +428,30 @@ describe("a Cancel the person pressed", () => {
 });
 
 describe("the model's file name", () => {
+  it("is what the manifest says for every model the app ships: the table of models and the path read it", () => {
+    for (const [key, entry] of Object.entries(MODEL_MANIFEST)) {
+      expect(WHISPER_MODELS[key], key).toMatchObject({
+        file: entry.file,
+        bytes: entry.bytes,
+        sha256: entry.sha256,
+        revision: entry.revision,
+      });
+      expect(whisperModelPath(DIR, key), key).toBe(`C:/data/models/${entry.file}`);
+    }
+  });
+
+  it("is asked for at the manifest's pinned address when the app downloads the model it ships", async () => {
+    const urls: string[] = [];
+    const fetchImpl = vi.fn(async (url: string) => {
+      urls.push(url);
+      return networkDown();
+    });
+    await expect(
+      ensureWhisperModel(ctxOf(new MockFs()), "small", fetchImpl as Any),
+    ).rejects.toThrow();
+    expect(urls).toEqual([primaryUrl(MODEL_MANIFEST.small)]);
+  });
+
   it("comes from its manifest entry, not from the key it is looked up by", async () => {
     const fs = new MockFs();
     const urls: string[] = [];

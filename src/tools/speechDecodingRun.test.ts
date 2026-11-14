@@ -146,9 +146,10 @@ describe("which arguments the engine is given", () => {
 
   it("never narrows a model size the gate did not measure, even for a cleared language", async () => {
     // Only `small` was measured. A size added later is handed to the engine as it always was until
-    // someone measures it. The test gives `tiny` a spec of its own, as a later release might.
+    // someone measures it. The test gives `tiny` a spec of its own, as a later release might: a spec that
+    // says which file it is, as every manifest entry does.
     const models = WHISPER_MODELS as Record<string, unknown>;
-    models.tiny = WHISPER_MODELS.small;
+    models.tiny = { ...WHISPER_MODELS.small, file: "ggml-tiny.bin" };
     try {
       const r = rig(() => ({ language: "en", text: "x" }));
       await runWhisper(r.ctx, freshSrc(), "tiny", "en");
