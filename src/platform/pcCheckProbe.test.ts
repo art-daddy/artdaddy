@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
@@ -461,10 +461,8 @@ describe("probeRunArgs", () => {
   });
 
   it("does not know how to start a process: the module builds commands and reads text, nothing else", () => {
-    const source = readFileSync(
-      fileURLToPath(new URL("./pcCheckProbe.ts", import.meta.url)),
-      "utf8",
-    );
+    // Read from the repo's root, where the tests run: `import.meta.url` is not a file URL under every test environment.
+    const source = readFileSync(resolve(process.cwd(), "src/platform/pcCheckProbe.ts"), "utf8");
     expect(source).not.toMatch(
       /from "\.\/host"|from "\.\.\/tools|child_process|invoke\(|fetch\(|XMLHttpRequest|localStorage|setTimeout|setInterval/,
     );

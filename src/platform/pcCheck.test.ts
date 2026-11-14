@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
@@ -651,7 +651,8 @@ describe("one probe at a time", () => {
   });
 
   it("does not know the export probe by name, and does not import it", () => {
-    const source = readFileSync(fileURLToPath(new URL("./pcCheck.ts", import.meta.url)), "utf8");
+    // The files are read from the repo's root, where the tests run: `import.meta.url` is not a file URL under every test environment.
+    const source = readFileSync(resolve(process.cwd(), "src/platform/pcCheck.ts"), "utf8");
     expect(source).not.toMatch(/export-speed/);
     expect(source).not.toMatch(/pcCheckProbe/);
   });

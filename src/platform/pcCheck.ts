@@ -107,7 +107,6 @@ export interface PcCheckService {
 
 /** The editor must have been quiet this long before a probe starts by itself. */
 export const IDLE_BEFORE_RUN_MS = 20_000;
-export const DEFAULT_BUDGET_MS = 20_000;
 const MAX_BUDGET_MS = 600_000;
 const MAX_TIMER_MS = 86_400_000;
 /** After a check that did not finish: the wait before the next automatic try, by the number of tries that failed in a row. */
