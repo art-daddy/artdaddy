@@ -62,6 +62,12 @@ const GIB = 1024 ** 3;
 const pc = vi.hoisted(() => ({
   available: null as number | null,
   destinationFree: null as number | null,
+  // Holds ONE call to the PC's resources: the n-th since `calls` was last reset (0: none). The decision to start again
+  // reads them once and the new export's pre-start check reads them again, so holding the second one holds the restart
+  // before it asks for its destination.
+  calls: 0,
+  holdCall: 0,
+  hold: null as Promise<void> | null,
 }));
 // The client send of the restart facts is a constant that is false until the owner approves the privacy text (rule
 // E3b-18); the tests that pin what the report will say once it is true switch it here.
@@ -79,14 +85,18 @@ vi.mock("../platform/host", async (importOriginal) => {
   const real = await importOriginal<typeof import("../platform/host")>();
   return {
     ...real,
-    resolveExportResources: vi.fn(async () => ({
-      total_memory_bytes: null,
-      available_memory_bytes: pc.available,
-      scratch_free_bytes: null,
-      destination_free_bytes: pc.destinationFree,
-      budgets: { memoryBytes: null, temporaryBytes: null, executionSeconds: null },
-      adapters: [],
-    })),
+    resolveExportResources: vi.fn(async () => {
+      pc.calls++;
+      if (pc.holdCall > 0 && pc.calls === pc.holdCall && pc.hold) await pc.hold;
+      return {
+        total_memory_bytes: null,
+        available_memory_bytes: pc.available,
+        scratch_free_bytes: null,
+        destination_free_bytes: pc.destinationFree,
+        budgets: { memoryBytes: null, temporaryBytes: null, executionSeconds: null },
+        adapters: [],
+      };
+    }),
   };
 });
 
@@ -95,6 +105,9 @@ beforeEach(() => {
   useAuth.setState({ profile: null });
   pc.available = 8 * GIB;
   pc.destinationFree = null;
+  pc.calls = 0;
+  pc.holdCall = 0;
+  pc.hold = null;
   held.send = false;
 });
 
@@ -403,6 +416,28 @@ describe("the app starts an export again by itself when the PC ran short of memo
       expect((await outcomes())[0]).toMatchObject({ job_id: first.job_id, state: "cancelled" });
     });
 
+    it("in the gap, by the quit: the window's close cancels every open export, and the one that is starting again is among them", async () => {
+      const t = await setup();
+      const gate = holdTheRestart(t);
+      const first = await t.exportNow();
+      await flush();
+      gate.arm();
+      t.jobs.exit(first.job_id, -1, SHORT);
+      await flush(40);
+      expect(listExports()).toHaveLength(1);
+      // What App.tsx does when the window is closed: no canceller named, so the app's own.
+      for (const open of listExports()) cancelExport(open.job_id);
+      gate.release();
+      expect(await whenExportEnds(first.job_id)).toMatchObject({ state: "cancelled" });
+      await whenExportsSettle();
+      expect(t.jobs.submitted).toHaveLength(1); // nothing was started after the quit
+      expect(listExports()).toEqual([]);
+      expect(isDestinationReserved(DEST)).toBe(false);
+      expect(
+        [...t.fs.files.keys()].filter((key) => key.startsWith("C:/Users/test/Downloads/")),
+      ).toEqual([]);
+    });
+
     it("in the last moment before the new attempt exists, after every other look at the request, still stops it for good", async () => {
       const t = await setup();
       const first = await t.exportNow();
@@ -544,6 +579,43 @@ describe("the app starts an export again by itself when the PC ran short of memo
     await whenExportsSettle();
     await whenExportTelemetrySettles();
     expect(reported.map((r) => r.status)).toEqual(["failed"]);
+  });
+
+  it("does not take a file another request took in the gap: the restart is refused at the door and the failure stands", async () => {
+    const t = await setup();
+    const first = await t.exportNow();
+    await flush();
+    // The destination is released with the failed attempt; the restart asks for it again a moment later, after its own
+    // pre-start check. Another request reserves it in between.
+    let letGo!: () => void;
+    pc.hold = new Promise<void>((resolve) => (letGo = resolve));
+    pc.calls = 0;
+    pc.holdCall = 2; // 1: the decision reads the PC; 2: the new export's pre-start check
+    t.jobs.exit(first.job_id, -1, SHORT);
+    await flush(40);
+    expect(listExportRecords()[0]).toMatchObject({
+      job_id: first.job_id,
+      restarting: expect.any(String),
+    });
+    expect(isDestinationReserved(DEST)).toBe(false);
+    const other = await t.exportNow();
+    await flush();
+    expect(isDestinationReserved(DEST)).toBe(true);
+    letGo();
+    await flush(40);
+    expect(restartDecisions().map((d) => d.record)).toEqual(["eligible", "refused_at_door"]);
+    // The failure shows as it would have, the other request is the one that runs, and nothing was started for the restart.
+    expect(listExportRecords().find((r) => r.job_id === first.job_id)).toMatchObject({
+      state: "failed",
+      canRetry: true,
+    });
+    expect(listExportRecords().find((r) => r.job_id === first.job_id)?.restarting).toBeUndefined();
+    expect(t.jobs.submitted.map((s) => s.id)).toEqual([first.job_id, other.job_id]);
+    t.jobs.exit(other.job_id, 0);
+    expect((await whenExportEnds(other.job_id))?.state).toBe("done");
+    await whenExportsSettle();
+    expect(await t.fs.exists(DEST)).toBe(true);
+    expect(isDestinationReserved(DEST)).toBe(false);
   });
 
   it("does not put a newer project into an export it started again: an edit during the minutes of the first attempt refuses the restart", async () => {
