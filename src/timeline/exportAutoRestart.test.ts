@@ -888,6 +888,75 @@ describe("what the reports say of an export the app started again", () => {
   });
 });
 
+// Lane L3's lean render paths (Phase 3a): a person's Try again after a failure of an export that ran one builds 0.27.0's recipe
+// (ExportRecord.lean, ExportRetry.plain): the click says the person saw it fail. The app's own restart does not. It starts only
+// for a PC that ran short of memory, and its rule (E3b-09) is that lean stays lean and plain stays plain: one change at a time keeps
+// a second failure attributable. So it asks for the gentler setting and for no change of recipe; if that attempt fails too, the
+// person's Try again is the one that goes to 0.27.0's recipe.
+describe("an export the app starts again after one that ran a lean render path", () => {
+  const FLOOR_ERROR =
+    "native render failed: render memory floor crossed: the PC has 410 MiB left and keeps 768 MiB for itself";
+  async function failsShort(
+    lean: { readonly ran: readonly string[]; readonly kept: readonly string[] } | undefined,
+  ) {
+    const t = await setup();
+    const asked: Any[] = [];
+    let go!: () => void;
+    const held = new Promise<void>((resolve) => (go = resolve));
+    const sub = await submitExport({
+      store: t.store,
+      supervisor: t.jobs,
+      via: "chat",
+      dependencies: [],
+      destPath: DEST,
+      stagePath: `${DEST}.partial`,
+      filename: "proj.mp4",
+      meta: {
+        duration_s: 2,
+        width: 1080,
+        height: 1920,
+        fps: 30,
+        quality: "medium",
+        project_id: "",
+        plan: { rung: 0, max_rung: 2, ladder: [0, 1, 2], ...(lean ? { lean } : {}) } as Any,
+      },
+      run: async (_signal, id) => {
+        await t.jobs.submit({ id, lane: "export", program: "ffmpeg", args: ["x"], meta: {} });
+        await held;
+        t.jobs.exit(id, -1, SHORT);
+        throw new Error(FLOOR_ERROR);
+      },
+    });
+    offerExportRetry(sub.job_id, async (minRung, from, options) => {
+      asked.push({ minRung, from, ...options });
+      return { ok: false, error: "not started in this test" };
+    });
+    go();
+    await flush(40);
+    return { t, sub, asked };
+  }
+
+  it.each([
+    ["a lean path ran", { ran: ["fades"], kept: [] }],
+    ["every clip kept 0.27.0's recipe", { ran: [], kept: ["flag_off"] }],
+    ["no lean path was in play", undefined],
+  ] as const)(
+    "goes one rung gentler and asks for no change of recipe when %s",
+    async (_what, lean) => {
+      const { sub, asked } = await failsShort(lean);
+      expect(listExportRecords().find((r) => r.job_id === sub.job_id)).toBeDefined();
+      expect(asked).toHaveLength(1);
+      expect(asked[0]).toMatchObject({
+        minRung: 1,
+        from: 0,
+        restart: { kind: "auto", from: sub.job_id },
+      });
+      expect(asked[0]).not.toHaveProperty("plain");
+      await whenExportsSettle();
+    },
+  );
+});
+
 // What the person reads on the card while all of that happens: it is one export, never a failure and a new export side by side.
 describe("what the person sees on the card of an export the app started again", () => {
   const status = () => screen.getByTestId("export-card-status").textContent;
