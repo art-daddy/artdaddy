@@ -15,6 +15,7 @@ import {
   type TranscriptFailureReason,
 } from "./speechFailure";
 import { estimateTranscribeSeconds, readPace, type PaceSample } from "./speechPace";
+import { renderNotReady } from "./transcriptWords";
 
 /** How long a look waits for what is not ready, when the caller does not say. */
 export const WAIT_DEFAULT_S = 15;
@@ -120,11 +121,6 @@ function queuedWork(
 
 const clampEta = (s: number): number => Math.min(MAX_ETA_S, Math.max(1, Math.round(s)));
 
-const DO_NOT_GUESS =
-  "Do not guess or describe what is said. The frames, metadata and loudness in this result are final. " +
-  "Call inspect_media again with the same arguments: it returns the words at once when they are done, " +
-  "or pass wait_seconds (up to 60) to wait for them.";
-
 function inProgressNote(
   stage: InProgressTranscript["stage"],
   label: string,
@@ -132,18 +128,9 @@ function inProgressNote(
   waited: number,
   pct: number | undefined,
 ): string {
-  const left = eta === undefined ? "" : `, about ${eta} s to go`;
-  if (stage === "downloading_speech_model")
-    return (
-      `The transcript is not ready: the speech model is still downloading (${pct ?? 0}%${left}). ` +
-      `This one-time download happens the first time speech is transcribed on this computer, and ` +
-      `the transcription starts when it ends. ${DO_NOT_GUESS} Tell the user the speech model is downloading.`
-    );
-  const took = waited > 0 ? ` (this call waited ${waited} s)` : "";
-  return (
-    `The transcript is not ready: the speech in this ${label} of audio is still being transcribed${left}${took}. ` +
-    `${DO_NOT_GUESS} Tell the user it is still being transcribed.`
-  );
+  return stage === "downloading_speech_model"
+    ? renderNotReady("download", { pct: pct ?? 0, eta })
+    : renderNotReady("words", { label, eta, waited });
 }
 
 /** Wait for `run` for at most `boundMs`: its value, or what is pending, or why it failed. The run

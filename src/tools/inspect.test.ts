@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import fc from "fast-check";
 
+import { __resetExportFlags, __setExportFlag } from "../api/exportFlags";
 import type { CommandRunner } from "./command";
 import type { ClientToolContext } from "./context";
 import { laplacianVariance, noiseSigma } from "./frameMeasures";
@@ -8,7 +9,6 @@ import {
   colorGapHints,
   colorScopes,
   evenTimes,
-  INLINE_TRANSCRIPT_MAX_S,
   inspectColorTool,
   inspectMediaTool,
   inspectTimelineTool,
@@ -16,6 +16,7 @@ import {
   mediaKind,
   midpointFrames,
 } from "./inspect";
+import { SPEECH_PACE_KEY, type SpeechBackend } from "./speechPace";
 import { ProjectStoreAccess, joinPath, type FsLike } from "./store";
 import { createLookDecoder } from "./lookDecode";
 import type { LookReport } from "./lookReport";
@@ -160,6 +161,13 @@ function ctxWith(runner: CommandRunner, fs: MockFs = new MockFs()): ClientToolCo
 }
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
+
+/** A PC that has measured itself fast (the chip does 100 s of speech in 13 s, 3 s of it to begin), for
+ *  the tests that are not about how long a span may be: what this PC does is kept in storage, and on a
+ *  PC with no history a 3-minute file is longer than the ten minutes it may be asked to transcribe. */
+const asFastPc = (): void =>
+  localStorage.setItem(SPEECH_PACE_KEY, JSON.stringify([[100, 13, "gpu", 3]]));
+afterEach(() => localStorage.removeItem(SPEECH_PACE_KEY));
 
 describe("clip lookup recovery", () => {
   it("points an unplaced library filename to the available media_ref input", async () => {
@@ -405,6 +413,7 @@ describe("inspectMediaTool", () => {
   });
 
   it("returns an on-device transcript for audio (no media attachment on gpt)", async () => {
+    asFastPc();
     const fs = new MockFs();
     fs.touch(joinPath(DIR, "song.mp3"));
     const runner: CommandRunner = {
@@ -420,6 +429,7 @@ describe("inspectMediaTool", () => {
   });
 
   it("returns word-level tuples when word_timestamps is set", async () => {
+    asFastPc();
     const fs = new MockFs();
     fs.touch(joinPath(DIR, "song.mp3"));
     const runner: CommandRunner = {
@@ -902,23 +912,102 @@ describe("inspectMediaTool looks at what it returns (UJ-012)", () => {
       expect(language).toBe("");
     });
 
-    it("never waits on a long file: the whole file goes to the front of the background queue", async () => {
+    /** This PC's own measured pace, as the app keeps it: `rate` seconds of work per second of audio
+     *  after `startup` seconds the engine takes to begin, on `backend`. */
+    const pcThatDoes = (backend: SpeechBackend, rate: number, startup: number): void =>
+      localStorage.setItem(
+        SPEECH_PACE_KEY,
+        JSON.stringify([[100, startup + 100 * rate, backend, startup]]),
+      );
+    /** A typical processor-only PC (3.8 s of work per audio second): what fits in 10 minutes is 152 s. */
+    const SLOW_FITS_S = 152;
+    const slowPc = (): void => pcThatDoes("cpu", 3.8, 20);
+    const fastPc = (): void => pcThatDoes("gpu", 0.1, 3);
+    afterEach(() => {
+      localStorage.removeItem(SPEECH_PACE_KEY);
+      __resetExportFlags();
+    });
+
+    it("answers a span this PC cannot do within ten minutes AT ONCE, with what would fit, and starts and queues nothing", async () => {
       const { fs } = setup();
-      const runner = mediaRunner(fs, { probe: LONG_PROBE });
+      slowPc();
       const r = (await inspectMediaTool(
         { media_ref: "vid.mp4", max_frames: 1, language: "es" },
-        ctxWith(runner, fs),
+        ctxWith(mediaRunner(fs, { probe: LONG_PROBE }), fs),
       )) as Any;
       expect(r.ok).toBe(true);
       expect(r.frames_attached).toBe(1); // the look itself still returns
-      expect(r.transcript.status).toBe("in_progress");
-      expect(r.transcript.note).toMatch(/start_seconds\/end_seconds/);
-      expect(vi.mocked(runWhisper)).not.toHaveBeenCalled();
-      expect(vi.mocked(prioritizeTranscript)).toHaveBeenCalledWith(
-        DIR,
-        joinPath(DIR, "vid.mp4"),
-        "es",
+      expect(r.transcript).toMatchObject({
+        status: "unavailable",
+        reason: "too_long",
+        would_take_s: Math.round(20 + 3.8 * 1800),
+        fits_seconds: SLOW_FITS_S,
+      });
+      expect(r.transcript.note).toMatch(/start_seconds and end_seconds/);
+      expect(r.transcript.note).toMatch(/guess/i);
+      expect(vi.mocked(runWhisper), "nothing is started").not.toHaveBeenCalled();
+      expect(
+        vi.mocked(prioritizeTranscript),
+        "nothing is queued whole in the background",
+      ).not.toHaveBeenCalled();
+    });
+
+    it("runs a span exactly at what fits, and answers the next second at once", async () => {
+      const { fs } = setup();
+      slowPc();
+      const ask = (end_seconds: number) =>
+        inspectMediaTool(
+          { media_ref: "vid.mp4", max_frames: 1, start_seconds: 0, end_seconds },
+          ctxWith(mediaRunner(fs, { probe: LONG_PROBE }), fs),
+        ) as Promise<Any>;
+      const fits = await ask(SLOW_FITS_S);
+      expect(fits.transcript.status).not.toBe("unavailable");
+      expect(vi.mocked(runWhisper)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(runWhisper).mock.calls[0][4]).toEqual({ start: 0, end: SLOW_FITS_S });
+      const over = await ask(SLOW_FITS_S + 1);
+      expect(over.transcript).toMatchObject({ status: "unavailable", reason: "too_long" });
+      expect(vi.mocked(runWhisper), "the second did not start a run").toHaveBeenCalledTimes(1);
+      expect(vi.mocked(prioritizeTranscript)).not.toHaveBeenCalled();
+    });
+
+    it("lets a fast PC ask for more than the old ten minutes, as a window it transcribes now", async () => {
+      const { fs } = setup();
+      fastPc();
+      const r = (await inspectMediaTool(
+        { media_ref: "vid.mp4", max_frames: 1, start_seconds: 0, end_seconds: 1200 },
+        ctxWith(mediaRunner(fs, { probe: LONG_PROBE }), fs),
+      )) as Any;
+      expect(r.transcript.status).not.toBe("unavailable");
+      expect(vi.mocked(runWhisper).mock.calls[0][4]).toEqual({ start: 0, end: 1200 });
+      expect(vi.mocked(prioritizeTranscript)).not.toHaveBeenCalled();
+    });
+
+    it("lets a fast PC transcribe a whole half-hour file now, as the whole-file transcript", async () => {
+      const { fs } = setup();
+      fastPc();
+      await inspectMediaTool(
+        { media_ref: "vid.mp4", max_frames: 1 },
+        ctxWith(mediaRunner(fs, { probe: LONG_PROBE }), fs),
       );
+      expect(vi.mocked(runWhisper).mock.calls[0][4]).toBeNull();
+      expect(vi.mocked(prioritizeTranscript)).not.toHaveBeenCalled();
+    });
+
+    it("says that nothing fits, and runs nothing, on a PC that cannot do even ten seconds in ten minutes", async () => {
+      const { fs } = setup();
+      pcThatDoes("cpu", 80, 30);
+      const r = (await inspectMediaTool(
+        { media_ref: "vid.mp4", max_frames: 1, start_seconds: 0, end_seconds: 120 },
+        ctxWith(mediaRunner(fs, { probe: LONG_PROBE }), fs),
+      )) as Any;
+      expect(r.transcript).toMatchObject({
+        status: "unavailable",
+        reason: "too_long",
+        fits_seconds: 0,
+      });
+      expect(r.transcript.note).toMatch(/even/);
+      expect(vi.mocked(runWhisper)).not.toHaveBeenCalled();
+      expect(vi.mocked(prioritizeTranscript)).not.toHaveBeenCalled();
     });
 
     it("transcribes a window of a long file now, in the language asked for", async () => {
@@ -939,23 +1028,9 @@ describe("inspectMediaTool looks at what it returns (UJ-012)", () => {
       expect(vi.mocked(prioritizeTranscript)).not.toHaveBeenCalled();
     });
 
-    it("sends a long window to the background too: the limit is the span, not the call", async () => {
+    it("answers a long file from its cached transcript at once, whatever this PC's pace", async () => {
       const { fs } = setup();
-      const r = (await inspectMediaTool(
-        {
-          media_ref: "vid.mp4",
-          max_frames: 1,
-          start_seconds: 0,
-          end_seconds: INLINE_TRANSCRIPT_MAX_S + 1,
-        },
-        ctxWith(mediaRunner(fs, { probe: LONG_PROBE }), fs),
-      )) as Any;
-      expect(r.transcript.status).toBe("in_progress");
-      expect(vi.mocked(runWhisper)).not.toHaveBeenCalled();
-    });
-
-    it("answers a long file from its cached transcript at once", async () => {
-      const { fs } = setup();
+      slowPc();
       vi.mocked(peekTranscript).mockResolvedValueOnce({
         language: "en",
         duration_seconds: 1800,
@@ -981,15 +1056,51 @@ describe("inspectMediaTool looks at what it returns (UJ-012)", () => {
       expect(vi.mocked(prioritizeTranscript)).not.toHaveBeenCalled();
     });
 
-    it("says so when nothing will transcribe it in the background", async () => {
-      const { fs } = setup();
-      vi.mocked(prioritizeTranscript).mockReturnValueOnce(false);
-      const r = (await inspectMediaTool(
-        { media_ref: "vid.mp4", max_frames: 1 },
-        ctxWith(mediaRunner(fs, { probe: LONG_PROBE }), fs),
-      )) as Any;
-      expect(r.transcript.status).toBe("unavailable");
-      expect(vi.mocked(runWhisper)).not.toHaveBeenCalled();
+    describe("with the remote switch speech_cpu_cap off (0.27.0 for this)", () => {
+      it("keeps the fixed ten minutes: a longer span goes whole to the front of the background queue", async () => {
+        const { fs } = setup();
+        fastPc(); // a PC that could do it: the old limit does not look at the PC
+        __setExportFlag("speech_cpu_cap", false);
+        const r = (await inspectMediaTool(
+          { media_ref: "vid.mp4", max_frames: 1, language: "es" },
+          ctxWith(mediaRunner(fs, { probe: LONG_PROBE }), fs),
+        )) as Any;
+        expect(r.transcript.status).toBe("in_progress");
+        expect(r.transcript.note).toMatch(/start_seconds\/end_seconds/);
+        expect(vi.mocked(runWhisper)).not.toHaveBeenCalled();
+        expect(vi.mocked(prioritizeTranscript)).toHaveBeenCalledWith(
+          DIR,
+          joinPath(DIR, "vid.mp4"),
+          "es",
+        );
+      });
+
+      it("sends a window of 601 s to the background too, and runs one of 600 s now, on any PC", async () => {
+        const { fs } = setup();
+        slowPc();
+        __setExportFlag("speech_cpu_cap", false);
+        const ask = (end_seconds: number) =>
+          inspectMediaTool(
+            { media_ref: "vid.mp4", max_frames: 1, start_seconds: 0, end_seconds },
+            ctxWith(mediaRunner(fs, { probe: LONG_PROBE }), fs),
+          ) as Promise<Any>;
+        expect((await ask(601)).transcript.status).toBe("in_progress");
+        expect(vi.mocked(runWhisper)).not.toHaveBeenCalled();
+        await ask(600);
+        expect(vi.mocked(runWhisper)).toHaveBeenCalledTimes(1);
+      });
+
+      it("says so when nothing will transcribe it in the background", async () => {
+        const { fs } = setup();
+        __setExportFlag("speech_cpu_cap", false);
+        vi.mocked(prioritizeTranscript).mockReturnValueOnce(false);
+        const r = (await inspectMediaTool(
+          { media_ref: "vid.mp4", max_frames: 1 },
+          ctxWith(mediaRunner(fs, { probe: LONG_PROBE }), fs),
+        )) as Any;
+        expect(r.transcript.status).toBe("unavailable");
+        expect(vi.mocked(runWhisper)).not.toHaveBeenCalled();
+      });
     });
 
     describe("a transcript that does not land", () => {

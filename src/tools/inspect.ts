@@ -19,7 +19,11 @@ import { normLanguage, peekTranscript, runWhisper } from "./transcribe";
 import { languageProblem } from "./whisperLanguages";
 import type { TranscriptFailureReason } from "./speechFailure";
 import { failedTranscript, waitBoundMs, waitForRun } from "./transcriptWait";
+import { clock, tooLongNotReady } from "./transcriptWords";
 import { prioritizeTranscript } from "./transcriptQueue";
+import { exportFlag } from "../api/exportFlags";
+import { currentPaceModel, projectedS } from "./speechPace";
+import { CAP_S } from "./speechPlan";
 import { lookLoudness, type Loudness } from "./loudness";
 import { reportAppError } from "../api/appEvents";
 import { STOPPED_ERROR, stoppedAnswer } from "../lib/stopped";
@@ -215,24 +219,49 @@ const TRANSCRIPT_SEG_CAP = 400;
 const TRANSCRIPT_WORD_CAP = 10_000;
 const round3 = (n: number): number => Math.round(n * 1000) / 1000;
 
-/** The longest span a look transcribes while the model waits (owner decision 2026-10-02, UJ-012).
- *  A longer one is made in the background, one file at a time, and the look returns at once: a
- *  58-minute podcast once took 21 minutes to answer one question about it. */
-export const INLINE_TRANSCRIPT_MAX_S = 600;
-
-/** mm:ss (h:mm:ss past an hour) for a duration in a note to the model. */
-function clock(s: number): string {
-  const t = Math.max(0, Math.round(s));
-  const pad = (n: number): string => String(n).padStart(2, "0");
-  return t >= 3600
-    ? `${Math.floor(t / 3600)}:${pad(Math.floor((t % 3600) / 60))}:${pad(t % 60)}`
-    : `${Math.floor(t / 60)}:${pad(t % 60)}`;
-}
+/** The fixed limit 0.27.0 put on a span the assistant asks for (owner decision 2026-10-02, UJ-012),
+ *  kept for one release behind the remote switch `speech_cpu_cap`: with it off a longer span still goes
+ *  whole to the front of the background queue. On, the limit follows this PC's own speed
+ *  ({@link tooLongForThisPc}) and nothing is queued. */
+const LEGACY_SPAN_LIMIT_S = 600;
 
 /** Does [from, to) cover all of a file `duration` long? Then it IS the whole file, and is asked for
  *  as the whole file: the transcript and loudness the indexer keeps for a file are kept as that. */
 function coversWholeFile(from: number, to: number | null, duration: number | null): boolean {
   return from <= 0.05 && (to === null || (duration !== null && to >= duration - 0.05));
+}
+
+/** A span that this PC cannot transcribe within the cap (ten minutes on its own measured pace) is
+ *  answered at once with how long it would take and what would fit. Nothing is started and nothing is
+ *  queued: the caller can ask for a shorter span, and that is the whole of what happens. */
+function tooLongForThisPc(from: number, to: number): Result | null {
+  const pace = currentPaceModel();
+  if (projectedS(pace, to - from) <= CAP_S) return null;
+  const { note, would_take_s, fits_seconds } = tooLongNotReady(pace, from, to, CAP_S);
+  return { status: "unavailable", reason: "too_long", note, would_take_s, fits_seconds };
+}
+
+/** 0.27.0's answer to a span past {@link LEGACY_SPAN_LIMIT_S}: the whole file goes to the front of the
+ *  background queue and the look returns at once. */
+function queueWholeFile(
+  ctx: ClientToolContext,
+  path: string,
+  language: string,
+  from: number,
+  to: number,
+): Result | null {
+  if (to - from <= LEGACY_SPAN_LIMIT_S) return null;
+  const queued = prioritizeTranscript(ctx.store.projectDir, path, normLanguage(language));
+  const zoom = `Pass start_seconds/end_seconds covering up to ${LEGACY_SPAN_LIMIT_S / 60} minutes to transcribe that part now.`;
+  return queued
+    ? {
+        status: "in_progress",
+        note: `Not transcribed yet: ${clock(to - from)} of audio is too long to wait for, so the whole file is being transcribed in the background (one file at a time, this one next). Call inspect_media again later for it. ${zoom}`,
+      }
+    : {
+        status: "unavailable",
+        note: `Not transcribed: ${clock(to - from)} of audio is too long to wait for, and nothing is transcribing in the background for this project. ${zoom}`,
+      };
 }
 
 /** Transcribe `path` over [start, end] into a compact inspect_media transcript:
@@ -243,8 +272,9 @@ function coversWholeFile(from: number, to: number | null, duration: number | nul
  *  outside its visible span are dropped.
  *
  *  A cached transcript (the whole file's, or this window's) is used whatever its length. With
- *  none, a span longer than {@link INLINE_TRANSCRIPT_MAX_S} goes to the FRONT of the project's
- *  background queue and comes back as `status: "in_progress"`. A shorter one is transcribed now,
+ *  none, a span that this PC cannot transcribe within ten minutes on its own measured pace is
+ *  answered at once as `status: "unavailable"`, `reason: "too_long"`, with `would_take_s` and
+ *  `fits_seconds`, and nothing is started or queued for it. A shorter one is transcribed now,
  *  but a look waits for at most `waitMs` for it, the speech model's download included: past that
  *  it comes back as `status: "in_progress"` with an estimate while the run goes on, and the next
  *  look finds the words. A failure is `status: "failed"` with its reason, so a look still succeeds
@@ -273,18 +303,11 @@ async function lookTranscript(
     const whole = coversWholeFile(from, to, opts.duration);
     const window = whole ? null : { start: from, end: to };
     let t = await peekTranscript(ctx, path, undefined, opts.language, window);
-    if (!t && to !== null && to - from > INLINE_TRANSCRIPT_MAX_S) {
-      const queued = prioritizeTranscript(ctx.store.projectDir, path, normLanguage(opts.language));
-      const zoom = `Pass start_seconds/end_seconds covering up to ${INLINE_TRANSCRIPT_MAX_S / 60} minutes to transcribe that part now.`;
-      return queued
-        ? {
-            status: "in_progress",
-            note: `Not transcribed yet: ${clock(to - from)} of audio is too long to wait for, so the whole file is being transcribed in the background (one file at a time, this one next). Call inspect_media again later for it. ${zoom}`,
-          }
-        : {
-            status: "unavailable",
-            note: `Not transcribed: ${clock(to - from)} of audio is too long to wait for, and nothing is transcribing in the background for this project. ${zoom}`,
-          };
+    if (!t && to !== null && to > from) {
+      const refused = exportFlag("speech_cpu_cap")
+        ? tooLongForThisPc(from, to)
+        : queueWholeFile(ctx, path, opts.language, from, to);
+      if (refused) return refused;
     }
     if (!t) {
       const audio = to === null ? null : Math.max(0, to - from);
