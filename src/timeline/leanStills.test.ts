@@ -2,7 +2,14 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import type { LeanOptions, LeanProbed } from "./leanOptions";
 import { LeanTally } from "./leanRecord";
-import { LEAN_STILL_MAX_HELD_PIXELS, leanPictureLoop, type PictureLoopRequest } from "./leanStills";
+import {
+  LEAN_STILL_BYTES_PER_PIXEL,
+  LEAN_STILL_BYTES_PER_PIXEL_GRADED,
+  LEAN_STILL_MAX_HELD_BYTES,
+  LEAN_STILLS_MAX_TOTAL_BYTES,
+  leanPictureLoop,
+  type PictureLoopRequest,
+} from "./leanStills";
 import type { Timeline } from "./model";
 import { buildRenderCommand } from "./render";
 
@@ -11,6 +18,8 @@ type Any = any;
 
 const OUT = "/out.mp4";
 const PRE_SCALE = "scale=w=216:h=384:force_original_aspect_ratio=increase:force_divisible_by=2";
+/** The most pixels one held frame may have by the bytes estimate (8 bytes a pixel as decoded). */
+const MAX_PIXELS = Math.floor(LEAN_STILL_MAX_HELD_BYTES / LEAN_STILL_BYTES_PER_PIXEL);
 
 function request(over: Partial<PictureLoopRequest> = {}, lean: LeanOptions = { stills: true }) {
   const tally = new LeanTally();
@@ -22,6 +31,9 @@ function request(over: Partial<PictureLoopRequest> = {}, lean: LeanOptions = { s
     path: "/p0.jpg",
     heldPixels: 108 * 192,
     preScale: null,
+    graded: false,
+    cropped: false,
+    budget: { bytes: 0 },
     ...over,
   };
   return { req, tally };
@@ -62,10 +74,10 @@ describe("leanPictureLoop: one still picture, decoded once or left on today's re
       expect(bad.tally.record()).toEqual({ ran: [], kept: ["error"] });
     }
 
-    const big = request({ heldPixels: LEAN_STILL_MAX_HELD_PIXELS + 2 });
+    const big = request({ heldPixels: MAX_PIXELS + 2 });
     expect(leanPictureLoop(big.req)).toBeNull();
     expect(big.tally.record()).toEqual({ ran: [], kept: ["over_budget"] });
-    const edge = request({ heldPixels: LEAN_STILL_MAX_HELD_PIXELS });
+    const edge = request({ heldPixels: MAX_PIXELS });
     expect(leanPictureLoop(edge.req)).not.toBeNull();
 
     for (const heldPixels of [0, -5, NaN, Infinity]) {
@@ -106,6 +118,43 @@ describe("leanPictureLoop: one still picture, decoded once or left on today's re
     expect(huge.tally.record()).toEqual({ ran: [], kept: ["over_budget"] });
   });
 
+  it("the held frame's memory is decided in BYTES by a conservative estimate: a graded picture is a float stack (16 bytes a pixel), and one command's held frames may not add up past 1.5 GiB", () => {
+    const px = Math.floor(LEAN_STILL_MAX_HELD_BYTES / LEAN_STILL_BYTES_PER_PIXEL_GRADED);
+    const graded = request({ heldPixels: px, graded: true });
+    expect(leanPictureLoop(graded.req)).not.toBeNull();
+    const tooBig = request({ heldPixels: px + 1, graded: true });
+    expect(leanPictureLoop(tooBig.req)).toBeNull();
+    expect(tooBig.tally.record()).toEqual({ ran: [], kept: ["over_budget"] });
+    // the same pixels ungraded are within the limit
+    expect(leanPictureLoop(request({ heldPixels: px + 1 }).req)).not.toBeNull();
+
+    const budget = { bytes: 0 };
+    const each = LEAN_STILL_MAX_HELD_BYTES / LEAN_STILL_BYTES_PER_PIXEL;
+    let held = 0;
+    for (let i = 0; i < 10; i += 1) {
+      const next = request({ heldPixels: each, budget });
+      if (leanPictureLoop(next.req) !== null) held += 1;
+    }
+    expect(held).toBe(Math.floor(LEAN_STILLS_MAX_TOTAL_BYTES / LEAN_STILL_MAX_HELD_BYTES));
+    expect(budget.bytes).toBeLessThanOrEqual(LEAN_STILLS_MAX_TOTAL_BYTES);
+  });
+
+  it("a cropped cover zoom is not held: the probe's question does not include the crop, so its answer is not the size that would be held", () => {
+    const cropped = request(
+      { heldPixels: null, preScale: PRE_SCALE, cropped: true },
+      {
+        stills: true,
+        probed: new Map<string, LeanProbed>([
+          [`/p0.jpg\n${PRE_SCALE}`, { fmt: "yuvj420p", source: [4000, 3000], scaled: [512, 384] }],
+        ]),
+      },
+    );
+    expect(leanPictureLoop(cropped.req)).toBeNull();
+    expect(cropped.tally.record()).toEqual({ ran: [], kept: ["not_proven"] });
+    // a fixed box is fitted to exactly its size whatever the crop, so it is held
+    expect(leanPictureLoop(request({ cropped: true }).req)).not.toBeNull();
+  });
+
   it("the loop's text is a rule of the frame rate and nothing else (property), and it never throws whatever it is given", () => {
     fc.assert(
       fc.property(
@@ -120,7 +169,7 @@ describe("leanPictureLoop: one still picture, decoded once or left on today's re
             fps > 0 &&
             reader === "picture" &&
             heldPixels > 0 &&
-            heldPixels <= LEAN_STILL_MAX_HELD_PIXELS;
+            heldPixels * LEAN_STILL_BYTES_PER_PIXEL <= LEAN_STILL_MAX_HELD_BYTES;
           if (!grounded) return loop === null && !tally.record().ran.length;
           return (
             loop !== null &&
@@ -296,6 +345,33 @@ describe("the builder: a picture is read once and its fitted frame is repeated",
     const held = buildRenderCommand(apng, OUT, { lean: keep } as Any);
     expect(held.lean?.ran).not.toContain("stills");
     expect(held.filterComplex).not.toContain("alphamerge");
+  });
+
+  it("a picture outside the exported range asks ffmpeg nothing and is not counted (a clip export of a longer project): the review's BUG-1", () => {
+    const second = {
+      ...zooming("cover", 2),
+      timeline_in: 2,
+      timeline_out: 4,
+      media_ref: "/p1.jpg",
+    };
+    const t = project([zooming("cover"), second]);
+    const asked: LeanOptions = { zoom: true, stills: true, requests: [] };
+    buildRenderCommand(t, OUT, { range: { from: 0, to: 60 }, lean: asked } as Any);
+    expect((asked.requests ?? []).map((r) => r.path)).toEqual(["/p0.jpg"]);
+
+    const probed = new Map<string, LeanProbed>(
+      (asked.requests ?? []).map((r) => [
+        r.key,
+        { fmt: "yuvj420p", source: [4000, 3000], scaled: [288, 384] },
+      ]),
+    );
+    const inRange = buildRenderCommand(t, OUT, {
+      range: { from: 0, to: 60 },
+      lean: { zoom: true, stills: true, probed },
+    } as Any);
+    expect(inRange.args.join(" ")).not.toContain("/p1.jpg");
+    expect(inRange.lean?.ran).toEqual(["zoom", "stills"]);
+    expect(inRange.lean?.kept).not.toContain("unknown_source");
   });
 
   it("the loop's length is the input's length, for every frame rate and every length (property): the same frames as 0.27.0's `-t`", () => {

@@ -77,7 +77,7 @@ import { readLeanFlags, type LeanOptions, type LeanProbeRequest } from "./leanOp
 import { probeLean } from "./leanProbe";
 import { leanDecoderCap } from "./leanDecoders";
 import { leanGradeOnce } from "./leanGrade";
-import { leanPictureLoop } from "./leanStills";
+import { leanPictureLoop, type LeanStillBudget } from "./leanStills";
 import {
   framesOf,
   onCanvasFrames,
@@ -1256,6 +1256,8 @@ function buildSingleRenderCommand(
   const lean = options.lean && !win && pass !== "audio" ? options.lean : null;
   const leanTally = new LeanTally();
   const leanBudget: LeanMaskBudget = lean?.budget ?? { chars: 0, boxes: 0 };
+  // What the pictures held once (fix 3) take in this command: one per command, a streamed export's parts each have their own.
+  const leanStillBudget: LeanStillBudget = { bytes: 0 };
   const inputs: Input[] = [];
   const vrecs: VRec[] = [];
   const arecs: ARec[] = [];
@@ -1461,22 +1463,7 @@ function buildSingleRenderCommand(
             const reader = readerOfStill(clip, String(clip.media_ref));
             const facts = factsOfStill(clip);
             const fitted = fittedPixels(box, ta.sizeW, ta.sizeH, pc.media.crop, facts);
-            // Fix 3 (leanStills.ts): a picture decoded once and repeated in the graph, or null: today's read of the file for every frame.
-            const leanLoop = lean
-              ? leanPictureLoop({
-                  lean,
-                  tally: leanTally,
-                  reader,
-                  fps,
-                  path: String(clip.media_ref),
-                  ...heldFrameOf(box, ta.sizeW, ta.sizeH),
-                })
-              : null;
-            return {
-              reader,
-              loop: leanLoop ?? stillLoop(reader, fps, facts, fitted),
-              ...(leanLoop ? { leanStill: true as const } : {}),
-            };
+            return { reader, loop: stillLoop(reader, fps, facts, fitted) };
           })()
         : {}),
     };
@@ -1529,6 +1516,28 @@ function buildSingleRenderCommand(
     if (rng) {
       const visible = onCanvasFrames(pc, fps);
       if (visible.first >= rng.to || visible.end <= rng.from) continue;
+    }
+    // Fix 3 (leanStills.ts): a picture decoded once and repeated in the graph, or null: today's read of the file for every frame. Decided here, for a picture that is an input of THIS command
+    // (a clip outside the exported range asks ffmpeg nothing and counts nothing; a look's window never takes a lean path).
+    if (lean && isImg && input.reader !== undefined && input.loop !== undefined) {
+      const crop = pc.media.crop;
+      const leanLoop = leanPictureLoop({
+        lean,
+        tally: leanTally,
+        reader: input.reader,
+        fps,
+        path: input.path,
+        ...heldFrameOf(box, ta.sizeW, ta.sizeH),
+        graded:
+          colorFilters(pc.media.color).length > 0 ||
+          (Array.isArray(clip.effects) && clip.effects.length > 0),
+        cropped: !!(crop.left || crop.top || crop.right || crop.bottom),
+        budget: leanStillBudget,
+      });
+      if (leanLoop) {
+        input.loop = leanLoop;
+        input.leanStill = true;
+      }
     }
     inputs.push(input);
     const deferred = DEFERRED_FIELDS.find((f) => clip[f] !== undefined);
@@ -1603,11 +1612,9 @@ function buildSingleRenderCommand(
           RUNG_THREAD_CAPS[rungOf(options.rung)].decoder,
         );
   const videoDecoder = videoThreads === null ? [] : ["-threads:v", String(videoThreads)];
-  // Fix 5 (leanDecoders.ts): on the one-pass engine one decoder thread for a picture that fix 3 reads once and for a sound-only input; null leaves today's options.
-  const decoderCap = (kind: "picture" | "audio", readOnce = false): string[] | null =>
-    lean
-      ? leanDecoderCap({ lean, tally: leanTally, engine: options.engine, kind, readOnce })
-      : null;
+  // Fix 5 (leanDecoders.ts): on the one-pass engine one decoder thread for a picture that fix 3 reads once; null leaves today's options.
+  const decoderCap = (readOnce: boolean): string[] | null =>
+    lean ? leanDecoderCap({ lean, tally: leanTally, engine: options.engine, readOnce }) : null;
   if (composed) {
     cmd.push(...decoder, "-f", "concat", "-safe", "1", "-i", "segments.ffconcat");
     if (composed.audioInput !== undefined) cmd.push("-f", "nut", "-i", "audio.nut");
@@ -1624,7 +1631,7 @@ function buildSingleRenderCommand(
         ...(inp.loop ?? stillLoop(inp.reader ?? "picture", fps)).input,
         "-t",
         inp.lengthArg ?? dur.toFixed(6),
-        ...(decoderCap("picture", inp.leanStill === true) ?? decoder),
+        ...(decoderCap(inp.leanStill === true) ?? decoder),
         "-i",
         inp.path,
       );
@@ -1634,7 +1641,7 @@ function buildSingleRenderCommand(
         inp.seekArg ?? inp.si.toFixed(6),
         "-to",
         inp.so.toFixed(6),
-        ...(videoInputIndices.has(index) ? videoDecoder : (decoderCap("audio") ?? decoder)),
+        ...(videoInputIndices.has(index) ? videoDecoder : decoder),
         ...(win?.decode?.(inp.path) ?? []),
         "-i",
         inp.path,

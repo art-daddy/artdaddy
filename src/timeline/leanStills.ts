@@ -6,9 +6,19 @@ import type { StillLoop, StillReader } from "../media/stillReader";
 import type { LeanOptions } from "./leanOptions";
 import type { LeanTally } from "./leanRecord";
 
-/** The most pixels one held frame may have: 64 MP, so a frame of 4 bytes a pixel is at most 244 MiB. A picture whose fitted frame is bigger keeps today's read for every frame
- *  (DESIGN-3a 2.3: the loop point is a memory decision). */
-export const LEAN_STILL_MAX_HELD_PIXELS = 64e6;
+/** Bytes one held pixel can take: 8 for a picture as decoded (16-bit RGBA at most), 16 once a float colour grade has run on it (fix 4b may move the grade in front of the repeat, and a
+ *  float filter's output is four planes of 4 bytes). Conservative on purpose: the estimate decides whether a picture is held at all. */
+export const LEAN_STILL_BYTES_PER_PIXEL = 8;
+export const LEAN_STILL_BYTES_PER_PIXEL_GRADED = 16;
+/** The most one held frame may take by that estimate (256 MiB), and the most all the held frames of one command may take together (1.5 GiB). A picture over either keeps today's read for every frame
+ *  (DESIGN-3a 2.3: the loop point is a memory decision; the reviewer's note of 15 Nov: a bound in pixels alone hides a 16-byte pixel). */
+export const LEAN_STILL_MAX_HELD_BYTES = 256 * 2 ** 20;
+export const LEAN_STILLS_MAX_TOTAL_BYTES = 1536 * 2 ** 20;
+
+/** What the held frames of one command have taken so far (estimated bytes); the builder makes one per command, a streamed export's parts each have their own. */
+export interface LeanStillBudget {
+  bytes: number;
+}
 
 export interface PictureLoopRequest {
   lean: LeanOptions;
@@ -23,6 +33,11 @@ export interface PictureLoopRequest {
   /** When it does not (a cover zoom: the picture is scaled to COVER its largest box, which it can overflow on one side), the text of that pre-scale: ffmpeg is asked
    *  what size it gives (leanProbe.ts, the same question and key as the zoom mask's, so one probe serves both). */
   preScale: string | null;
+  /** The clip carries a colour grade or effects, so a float stack may have run on the held frame. */
+  graded: boolean;
+  /** The picture is cropped before its fit: the probe's question does not include the crop, so its answer is not the size that is held. */
+  cropped: boolean;
+  budget: LeanStillBudget;
 }
 
 /** The picture's loop in the graph, or null: today's `-loop 1 -framerate` input stays. */
@@ -45,6 +60,10 @@ export function leanPictureLoop(req: PictureLoopRequest): StillLoop | null {
         tally.kept("unknown_source");
         return null;
       }
+      if (req.cropped) {
+        tally.kept("not_proven");
+        return null;
+      }
       const key = `${req.path}\n${req.preScale}`;
       const probed = lean.probed?.get(key);
       if (!probed) {
@@ -64,10 +83,16 @@ export function leanPictureLoop(req: PictureLoopRequest): StillLoop | null {
       tally.kept("unknown_source");
       return null;
     }
-    if (held > LEAN_STILL_MAX_HELD_PIXELS) {
+    const bytes =
+      held * (req.graded ? LEAN_STILL_BYTES_PER_PIXEL_GRADED : LEAN_STILL_BYTES_PER_PIXEL);
+    if (
+      bytes > LEAN_STILL_MAX_HELD_BYTES ||
+      req.budget.bytes + bytes > LEAN_STILLS_MAX_TOTAL_BYTES
+    ) {
       tally.kept("over_budget");
       return null;
     }
+    req.budget.bytes += bytes;
     tally.ran("stills");
     // The same tail the export already uses for one decoded frame (an animated still's frame in a look, render.ts): repeat it, restamp it on the project's clock.
     return {

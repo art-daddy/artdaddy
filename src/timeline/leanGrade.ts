@@ -39,7 +39,7 @@ export function gradeStackIsFrameIndependent(filters: readonly string[]): boolea
 const NUMBER = /^-?\d+(?:\.\d+)?$/;
 const CURVE_POINTS = /^'[0-9 ./-]*'$/;
 function parametersAreConstants(name: string, body: string): boolean {
-  if (name === "lut3d") return /^file=[^,;[\]']+$/.test(body);
+  if (name === "lut3d") return /^file=(?:[A-Za-z0-9_./-]+|'[^']*')$/.test(body);
   return body.split(":").every((pair) => {
     const at = pair.indexOf("=");
     if (at <= 0) return false;

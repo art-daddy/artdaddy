@@ -64,6 +64,22 @@ describe("leanGradeOnce: a picture's grade and spatial effects on its one frame"
     expect(plain.tally.record()).toEqual({ ran: [], kept: [] });
   });
 
+  it("a LUT path in the quoted form the builder writes for a path that needs escaping is accepted; an unquoted path with a separator or an expression is not", () => {
+    expect(
+      gradeStackIsFrameIndependent([
+        "lut3d=file='C\\:/Users/a\\ b/look.cube'",
+        "lut3d=file=/a/b.cube",
+      ]),
+    ).toBe(true);
+    for (const bad of [
+      "lut3d=file=a,b.cube",
+      "lut3d=file='x'y'",
+      "lut3d=file=a;b",
+      "lut3d=interp=sin(t)",
+    ])
+      expect(gradeStackIsFrameIndependent([bad]), bad).toBe(false);
+  });
+
   it("the allow-list is exact: every grade filter passes, and a name that merely starts like one does not (property)", () => {
     for (const filter of GRADE) expect(gradeStackIsFrameIndependent([filter])).toBe(true);
     fc.assert(
