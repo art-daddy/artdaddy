@@ -69,6 +69,9 @@ export function admitWholeFile(input: {
   where: PlanRecord["where"];
   audioS: number | null;
   now?: number;
+  /** A second look at a run the first already let through, where it can still be left undone (the audio read,
+   *  the model installed): only a change, a deferral, is written to the plan log. */
+  recheck?: boolean;
 }): Admission | null {
   try {
     if (!exportFlag("speech_cpu_cap")) return null;
@@ -98,16 +101,17 @@ export function admitWholeFile(input: {
         projectedS: decided.projectedS,
       };
     }
-    recordPlan({
-      at: input.now ?? Date.now(),
-      file: input.file,
-      plan: admission.plan,
-      why: admission.why,
-      projectedS: admission.projectedS,
-      backend,
-      held,
-      where: input.where,
-    });
+    if (!input.recheck || admission.plan === "ondemand")
+      recordPlan({
+        at: input.now ?? Date.now(),
+        file: input.file,
+        plan: admission.plan,
+        why: admission.why,
+        projectedS: admission.projectedS,
+        backend,
+        held,
+        where: input.where,
+      });
     return admission;
   } catch {
     return null;

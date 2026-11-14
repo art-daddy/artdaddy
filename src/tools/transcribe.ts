@@ -1178,7 +1178,8 @@ async function runWhisperOnce(
     // PC would take longer than the cap for is not started by itself; a request (a look, captions,
     // get_transcript) is never planned away here: it asks for the stretch it needs, and what it asks for runs.
     // The length is what the indexer measured (`noteAudioLength`); a run never probes a file to plan it,
-    // and a length nobody measured is a run.
+    // and a length nobody measured is a run here: it is read again, from the audio itself, just before the
+    // engine is launched (below).
     if (ctx.background && win.key === "") {
       const admission = admitWholeFile({
         file: fileLabel(src),
@@ -1253,6 +1254,20 @@ async function runWhisperOnce(
         "0",
         ...decodeArgs(plan.beam),
       ];
+      // The audio is read now: its length is exact, and what the first look did not know (a probe that
+      // failed or lied) or what has changed since (a model that took an hour to install, a pace measured by
+      // another run) is read again where the run can still be left undone (S2-02): no engine is launched,
+      // and the audio is let go of as for any run that fails. Only the whole files the background starts.
+      const spanS = await wavSeconds(ctx, wav);
+      if (ctx.background && win.key === "") {
+        const admission = admitWholeFile({
+          file: fileLabel(src),
+          where: "boundary",
+          audioS: spanS ?? knownAudioLength(src),
+          recheck: true,
+        });
+        if (admission?.plan === "ondemand") throw new SpeechDeferredError(admission);
+      }
       const { engine, release } = await engineFor(ctx, args, meta, {
         purpose: ctx.background ? "index" : (ctx.speechPurpose ?? "look"),
         label: fileLabel(src),
@@ -1263,7 +1278,7 @@ async function runWhisperOnce(
             window: win.key === "" ? null : { start, end },
           },
         ],
-        spanS: await wavSeconds(ctx, wav),
+        spanS,
         threads: Number(whisperThreads()) || null,
         // Only a whole file that the background started by itself can be stopped for being too slow:
         // what a request asked for (a look, captions, get_transcript) runs until it is done or Cancelled.

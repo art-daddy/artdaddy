@@ -124,6 +124,83 @@ describe("a whole file in the background, over the cap on this PC", () => {
   });
 });
 
+describe("the plan is read again where the run can still be left undone (F5)", () => {
+  it("a file whose length nobody could measure but whose audio is 3 hours is left for the cap once the audio is read, and no engine is launched", async () => {
+    heldProcessor();
+    const src = freshSource(); // nobody measured it: the first look cannot tell
+    const rig = speechRig({ audioSeconds: HOURS_3 });
+    const error = await runWhisper(rig.ctx({ background: true }), src).catch((e: unknown) => e);
+    expect(isSpeechDeferred(error)).toBe(true);
+    expect(error).toBeInstanceOf(SpeechDeferredError);
+    // The rule, not the instruction: the audio was read (that is how its length was known) and the engine
+    // was never started.
+    expect(rig.programs, "the audio was extracted, and nothing else was run").toEqual(["ffmpeg"]);
+    expect(rig.launches, "no engine").toEqual([]);
+    expect(rig.leftovers(), "the audio that was read is not left behind").toEqual([]);
+    expect(await peekTranscript(rig.ctx(), src)).toBeNull();
+    // The first look let it through (its length was not known); the second one, which knew, said no.
+    const plans = recentPlans();
+    expect(plans.map((r) => [r.where, r.plan, r.projectedS === null])).toEqual([
+      ["boundary", "whole", true],
+      ["boundary", "ondemand", false],
+    ]);
+    expect(plans[1].projectedS).toBeCloseTo(20 + 3.7 * HOURS_3, 6);
+  });
+
+  it("what the audio measures wins over what was measured before: a probe that said 1 minute for 3 hours of audio", async () => {
+    heldProcessor();
+    const src = freshSource();
+    noteAudioLength(src, 60);
+    const rig = speechRig({ audioSeconds: HOURS_3 });
+    await expect(runWhisper(rig.ctx({ background: true }), src)).rejects.toMatchObject({
+      code: "speech_deferred",
+    });
+    expect(rig.launches).toEqual([]);
+  });
+
+  it("runs a file whose length was unknown and whose audio turns out short, and logs nothing more for it than before", async () => {
+    heldProcessor();
+    const src = freshSource();
+    const rig = speechRig({ audioSeconds: 60 }); // 20 + 3.7 x 60 = 242 s
+    const t = await runWhisper(rig.ctx({ background: true }), src);
+    expect(t.words.length).toBeGreaterThan(0);
+    expect(rig.launches).toHaveLength(1);
+    expect(recentPlans().map((r) => [r.where, r.plan, r.projectedS === null])).toEqual([
+      ["boundary", "whole", true],
+    ]);
+  });
+
+  it("is not a reason to leave a request alone: a look asking for the same file and a window from the queue both run", async () => {
+    heldProcessor();
+    const rig = speechRig({ audioSeconds: HOURS_3 });
+    await runWhisper(rig.ctx(), freshSource());
+    await runWhisper(rig.ctx({ background: true }), freshSource(), "small", undefined, {
+      start: 0,
+      end: 600,
+    });
+    expect(rig.launches).toHaveLength(2);
+    expect(recentPlans()).toEqual([]);
+  });
+
+  it("does nothing with the switch off: the file runs as it did in 0.27.0 and nothing is logged", async () => {
+    heldProcessor();
+    __setExportFlag("speech_cpu_cap", false);
+    const rig = speechRig({ audioSeconds: HOURS_3 });
+    const t = await runWhisper(rig.ctx({ background: true }), freshSource());
+    expect(t.words.length).toBeGreaterThan(0);
+    expect(rig.launches).toHaveLength(1);
+    expect(recentPlans()).toEqual([]);
+  });
+
+  it("is the same on a PC whose chip does the work: the file is run, whatever the length of its audio", async () => {
+    chipPc();
+    const rig = speechRig({ audioSeconds: HOURS_3 });
+    const t = await runWhisper(rig.ctx({ background: true }), freshSource());
+    expect(t.words.length).toBeGreaterThan(0);
+    expect(rig.launches).toHaveLength(1);
+  });
+});
+
 describe("a request is never planned away", () => {
   it("a look, captions or get_transcript asking for a whole file runs it, over the cap or not", async () => {
     heldProcessor();
