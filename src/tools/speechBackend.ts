@@ -6,6 +6,7 @@
 // looks. A crash like that is retried once with the GPU off. When that works the machine is
 // remembered as CPU-only for a while, so nothing after it has to crash first; when it crashes too,
 // the GPU was not the cause and nothing is remembered.
+import { exportFlag } from "../api/exportFlags";
 
 /** Windows kills a process that cannot resolve its imports BEFORE a line of its code runs, so
  *  there is no stderr to read and no exit status from whisper itself — only an NTSTATUS. One
@@ -46,9 +47,13 @@ export function isGpuCrash(run: { code: number | null; stderr: string }): boolea
 }
 
 const KEY = "artdaddy.speech_cpu_only";
-/** How long a crashed GPU stays off. Drivers are updated and a hang can be a passing thing, so the
- *  GPU is tried again after a week. */
+/** What a hold writes as its `until`: a week. The app that is downgraded to reads only this, and
+ *  `speech_gpu_retry` off reads only this, so it is still written even though a hold now ends sooner. */
 export const CPU_ONLY_HOLD_MS = 7 * 24 * 60 * 60 * 1000;
+/** How long a crashed GPU stays off: six hours, or until the app is another version, whichever is
+ *  first (owner decision 14 Nov 2026). A driver update and a passing hang are both over by then, and
+ *  a retry that crashes again costs one fast failed start and the CPU rerun that is built in. */
+export const GPU_RETRY_AFTER_MS = 6 * 60 * 60 * 1000;
 /** Where the hold is kept; exported so a test can put something unreadable there. */
 export const SPEECH_CPU_ONLY_KEY = KEY;
 
@@ -62,28 +67,54 @@ function browserStorage(): Store | null {
   }
 }
 
-/** Is the GPU off for the speech engine on this machine right now? */
+/** The release this app was built as, which a hold records to know an update from a restart. */
+function appVersion(): string {
+  return typeof __ARTDADDY_RELEASE__ === "string" ? __ARTDADDY_RELEASE__ : "";
+}
+
+const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+
+/** Is the GPU off for the speech engine on this machine right now?
+ *
+ *  A hold is `{ since, code, version, until }`. With `speech_gpu_retry` on it lasts for
+ *  {@link GPU_RETRY_AFTER_MS} from `since`, and ends at once when `version` is not this app's, so a
+ *  GPU is tried again after an update or six hours, never sooner. A hold written by 0.27.0 has only
+ *  `until`: its `since` is a week before that, and having no version it ends at the first run after
+ *  the update. With the switch off the only end is the week in `until`, as it always was; flipping
+ *  it needs no rewrite of the hold. */
 export function cpuOnlyNow(
   now: number = Date.now(),
   storage: Store | null = browserStorage(),
+  version: string = appVersion(),
 ): boolean {
   try {
-    const raw: unknown = JSON.parse(storage?.getItem(KEY) ?? "null");
-    const until = (raw as { until?: unknown } | null)?.until;
-    return typeof until === "number" && Number.isFinite(until) && until > now;
+    const raw = JSON.parse(storage?.getItem(KEY) ?? "null") as {
+      until?: unknown;
+      since?: unknown;
+      version?: unknown;
+    } | null;
+    const until = raw?.until;
+    if (!finite(until) || until <= now) return false;
+    if (!exportFlag("speech_gpu_retry")) return true;
+    if (raw?.version !== version) return false;
+    const since = finite(raw.since) ? raw.since : until - CPU_ONLY_HOLD_MS;
+    return now < since + GPU_RETRY_AFTER_MS;
   } catch {
     return false;
   }
 }
 
-/** Keep the GPU off for {@link CPU_ONLY_HOLD_MS}, after a CPU run proved it was the GPU. */
+/** Keep the GPU off, after a CPU run proved it was the GPU. */
 export function holdCpuOnly(
   code: number | null,
   now: number = Date.now(),
   storage: Store | null = browserStorage(),
 ): void {
   try {
-    storage?.setItem(KEY, JSON.stringify({ until: now + CPU_ONLY_HOLD_MS, code }));
+    storage?.setItem(
+      KEY,
+      JSON.stringify({ since: now, until: now + CPU_ONLY_HOLD_MS, code, version: appVersion() }),
+    );
   } catch {
     /* nothing can be kept here: the next run tries the GPU again, and is retried the same way */
   }
