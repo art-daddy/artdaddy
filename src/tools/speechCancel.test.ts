@@ -304,4 +304,54 @@ describe("what a tool answers when the person stopped the run", () => {
     expect(got.ok).toBe(true);
     expect(got.clips[0].words.map((w: Any[]) => w[1])).toEqual(["back"]);
   });
+
+  // The person pressed Cancel on the run of the first window (F6a): the next window is not started at once, in
+  // the face of their click, and the answer is the cancel's for every clip, so the assistant does not start it.
+  it("get_transcript: after the person stopped the first of three windows the other two are not started, and every clip is answered as stopped", async () => {
+    const rig = speechRig();
+    const refs = [freshSource(), freshSource(), freshSource()];
+    const clip = (id: string, ref: string, at: number) => ({
+      id,
+      media_ref: ref,
+      source_in: 0,
+      source_out: 300,
+      timeline_in: at,
+      timeline_out: at + 300,
+    });
+    rig.texts.set(
+      `${DIR}/internals/timeline.json`,
+      JSON.stringify({
+        canvas: { width: 1080, height: 1920, fps: 30 },
+        tracks: [
+          {
+            id: "a1",
+            kind: "audio",
+            clips: refs.map((ref, i) => clip(`c${i + 1}`, ref, i * 300)),
+          },
+        ],
+      }),
+    );
+    rig.files.add(`${DIR}/internals/timeline.json`);
+    let settled = false;
+    const call = (getTranscriptTool({}, rig.ctx()) as Promise<Any>).finally(() => {
+      settled = true;
+    });
+    // Cancel every run the moment it exists, as a person pressing Cancel on whatever the chip shows would
+    const pressed = new Set<string>();
+    for (let i = 0; i < 1000 && !settled; i++) {
+      for (const spec of whisperJobs())
+        if (!pressed.has(spec.id)) {
+          pressed.add(spec.id);
+          cancelSpeechJob(spec.id);
+        }
+      await new Promise((r) => setTimeout(r, 2));
+    }
+    const got = await call;
+    expect(whisperJobs(), "only the first window was ever started").toHaveLength(1);
+    expect(got).toMatchObject({ ok: false, reason: "cancelled" });
+    expect(String(got.error)).toMatch(ADVICE);
+    expect(got.failed.map((f: Any) => f.clip_id)).toEqual(["c1", "c2", "c3"]);
+    expect(got.in_progress).toBeUndefined();
+    expect(reportAppError).not.toHaveBeenCalled();
+  });
 });

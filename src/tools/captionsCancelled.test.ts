@@ -83,4 +83,59 @@ describe("add_captions after the person stopped the transcription", () => {
     expect(r.reason).toBeUndefined();
     expect(String(r.error)).toMatch(/transcription failed for all 1 audio clip/);
   });
+
+  // The person pressed Cancel on the run of the first window. The next window must not start at once, in
+  // the face of their click (F6a); and every clip is told they stopped it, so the assistant does not start it.
+  it("does not start the other windows after the person stopped the first: three windows, one run, the cancel's answer for all three", async () => {
+    const ctx = (await kitCtx(undefined, DIR, new CachingMemFs())).ctx;
+    await withAudio(ctx, "library/one.m4a", "a1");
+    await withAudio(ctx, "library/two.m4a", "a2");
+    await withAudio(ctx, "library/three.m4a", "a3");
+    vi.mocked(transcribeSpan).mockImplementation(async () => {
+      throw new SpeechCancelledError();
+    });
+    const r = (await addCaptionsTool({}, ctx)) as Any;
+    expect(
+      vi.mocked(transcribeSpan),
+      "no run was started after the person stopped one",
+    ).toHaveBeenCalledTimes(1);
+    expect(r).toMatchObject({ ok: false, reason: "cancelled" });
+    expect(String(r.error)).toMatch(
+      /person stopped this transcription in the app\. Do not start it again/,
+    );
+    expect((r.failed as Array<{ clip_id: string }>).map((f) => f.clip_id).sort()).toEqual([
+      "au-a1",
+      "au-a2",
+      "au-a3",
+    ]);
+    expect(
+      (await loadTimeline(ctx.store)).tracks
+        .flatMap((t) => t.clips ?? [])
+        .filter((c) => c.kind === "text"),
+    ).toEqual([]);
+  });
+
+  it("does not start the second window of the same file either when the first was stopped", async () => {
+    const ctx = (await kitCtx(undefined, DIR, new CachingMemFs())).ctx;
+    await withAudio(ctx, "library/talk.m4a", "a1");
+    // A second clip of the same file, far from the first: its own window, and a run of its own
+    await applyOp(ctx.store, "seed", (tl) => {
+      tl.tracks[tl.tracks.length - 1].clips!.push({
+        id: "au-a1-late",
+        kind: "audio",
+        media_ref: "library/talk.m4a",
+        timeline_in: 400,
+        timeline_out: 500,
+        source_in: 1000,
+        source_out: 1100,
+      } as Clip);
+    });
+    vi.mocked(transcribeSpan).mockImplementation(async () => {
+      throw new SpeechCancelledError();
+    });
+    const r = (await addCaptionsTool({}, ctx)) as Any;
+    expect(vi.mocked(transcribeSpan)).toHaveBeenCalledTimes(1);
+    expect(r).toMatchObject({ ok: false, reason: "cancelled" });
+    expect(r.pending).toBeUndefined();
+  });
 });

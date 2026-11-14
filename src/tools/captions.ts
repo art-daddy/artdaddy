@@ -205,11 +205,19 @@ export async function addCaptionsTool(args: Args, ctx: ClientToolContext | null)
   const until = Date.now() + TRANSCRIPT_WAIT_MS;
   const waiting: Array<{ clip_id: string; track_id: string }> = [];
   let waitingStatus: InProgressTranscript | null = null;
+  /** What the person's Cancel left as the answer, once a run was stopped: no other window is started after it
+   *  (F6a), and the clips not reached are answered the same way. */
+  let cancelledText: string | null = null;
   for (const trackId of candidates) {
     const cues: Cue[] = [];
     for (const clip of byTrack.get(trackId) ?? []) {
       const use = useOf.get(clip);
       if (!use) continue; // it plays nothing: nothing to caption
+      if (cancelledText !== null) {
+        failures.push({ clip_id: String(clip.id), error: cancelledText });
+        stoppedByPerson++;
+        continue;
+      }
       const window = windowOf.get(use)!;
       // A clip longer than this PC can do in the cap still runs (S2-13): the call answers at once with
       // the time it is expected to take, and the next call finds the words when they are done.
@@ -229,7 +237,10 @@ export async function addCaptionsTool(args: Args, ctx: ClientToolContext | null)
       if (got.kind === "failed") {
         // One unreadable source must not sink the rest, but it must not read as silence either.
         failures.push({ clip_id: String(clip.id), error: got.error });
-        if (got.reason === "cancelled") stoppedByPerson++;
+        if (got.reason === "cancelled") {
+          stoppedByPerson++;
+          cancelledText = got.error;
+        }
         continue;
       }
       const words = got.transcript.words;

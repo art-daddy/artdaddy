@@ -2219,9 +2219,17 @@ export async function getTranscriptTool(
   // keeps its result; one not started yet goes to the background queue.
   const until = Date.now() + TRANSCRIPT_WAIT_MS;
   let overdue: SpanJob | null = null;
+  /** The answer the person's Cancel left, once a run was stopped: the windows after it are not started (F6a)
+   *  and are answered the same way. */
+  let stopped: { error: string } | null = null;
   const queued: SpanJob[] = [];
   for (const job of jobs) {
     if (job.words) continue;
+    if (stopped) {
+      job.error = stopped.error;
+      job.reason = "cancelled";
+      continue;
+    }
     if (overdue) {
       queued.push(job);
       continue;
@@ -2243,8 +2251,10 @@ export async function getTranscriptTool(
       "get_transcript",
       settledWithin(run, Math.max(0, until - Date.now()), ctx.signal),
     );
-    if (got) Object.assign(job, got);
-    else overdue = job;
+    if (got) {
+      Object.assign(job, got);
+      if (job.reason === "cancelled" && job.error !== undefined) stopped = { error: job.error };
+    } else overdue = job;
   }
   if (ctx.signal?.aborted) return stoppedAnswer();
   const handed = queued
