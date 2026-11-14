@@ -1,0 +1,555 @@
+{
+  "source": "the lab runs of Phase 3 recorded under 0.27.0, one line per (row, variant, profile, frames), the median of its repeats; estimate is what 0.27.0's dialog said with no history",
+  "lines": [
+    {
+      "row": "R2",
+      "variant": "feature",
+      "profile": "WEAK4",
+      "frames": 60,
+      "videoS": 2,
+      "estimate": 13,
+      "measured": 1058.92,
+      "suspect": false
+    },
+    {
+      "row": "R2",
+      "variant": "feature",
+      "profile": "WEAK4",
+      "frames": 12,
+      "videoS": 0.4,
+      "estimate": 11,
+      "measured": 259.28,
+      "suspect": true
+    },
+    {
+      "row": "R3",
+      "variant": "feature",
+      "profile": "WEAK4",
+      "frames": 90,
+      "videoS": 3,
+      "estimate": 14,
+      "measured": 320.96,
+      "suspect": true
+    },
+    {
+      "row": "R6",
+      "variant": "feature",
+      "profile": "STRONG",
+      "frames": 16,
+      "videoS": 0.5333333333333333,
+      "estimate": 13,
+      "measured": 278.36,
+      "suspect": false
+    },
+    {
+      "row": "R2",
+      "variant": "feature",
+      "profile": "STRONG",
+      "frames": 4,
+      "videoS": 0.13333333333333333,
+      "estimate": 11,
+      "measured": 148.94,
+      "suspect": false
+    },
+    {
+      "row": "R10",
+      "variant": "feature",
+      "profile": "WEAK4",
+      "frames": 120,
+      "videoS": 4,
+      "estimate": 15,
+      "measured": 183.35500000000002,
+      "suspect": true
+    },
+    {
+      "row": "R8a",
+      "variant": "feature",
+      "profile": "STRONG",
+      "frames": 360,
+      "videoS": 12,
+      "estimate": 24,
+      "measured": 289.17,
+      "suspect": false
+    },
+    {
+      "row": "R10",
+      "variant": "feature",
+      "profile": "STRONG",
+      "frames": 120,
+      "videoS": 4,
+      "estimate": 15,
+      "measured": 170.31,
+      "suspect": false
+    },
+    {
+      "row": "R4",
+      "variant": "feature",
+      "profile": "STRONG",
+      "frames": 180,
+      "videoS": 6,
+      "estimate": 17,
+      "measured": 185.85500000000002,
+      "suspect": false
+    },
+    {
+      "row": "R3",
+      "variant": "feature",
+      "profile": "STRONG",
+      "frames": 20,
+      "videoS": 0.6666666666666666,
+      "estimate": 11,
+      "measured": 112.55,
+      "suspect": false
+    },
+    {
+      "row": "R11-zoom",
+      "variant": "control",
+      "profile": "STRONG",
+      "frames": 180,
+      "videoS": 6,
+      "estimate": 16,
+      "measured": 160.77,
+      "suspect": false
+    },
+    {
+      "row": "R7",
+      "variant": "feature",
+      "profile": "STRONG",
+      "frames": 60,
+      "videoS": 1,
+      "estimate": 12,
+      "measured": 116.47,
+      "suspect": false
+    },
+    {
+      "row": "R2",
+      "variant": "feature",
+      "profile": "OK8",
+      "frames": 12,
+      "videoS": 0.4,
+      "estimate": 11,
+      "measured": 91.15,
+      "suspect": false
+    },
+    {
+      "row": "R3",
+      "variant": "feature",
+      "profile": "OK8",
+      "frames": 90,
+      "videoS": 3,
+      "estimate": 14,
+      "measured": 113.6,
+      "suspect": false
+    },
+    {
+      "row": "R10",
+      "variant": "feature",
+      "profile": "OK8",
+      "frames": 120,
+      "videoS": 4,
+      "estimate": 15,
+      "measured": 106.9,
+      "suspect": false
+    },
+    {
+      "row": "R4",
+      "variant": "feature",
+      "profile": "WEAK4",
+      "frames": 180,
+      "videoS": 6,
+      "estimate": 17,
+      "measured": 115.3,
+      "suspect": true
+    },
+    {
+      "row": "R5",
+      "variant": "feature",
+      "profile": "STRONG",
+      "frames": 3900,
+      "videoS": 130,
+      "estimate": 153,
+      "measured": 992.25,
+      "suspect": false
+    },
+    {
+      "row": "R7",
+      "variant": "feature",
+      "profile": "OK8",
+      "frames": 240,
+      "videoS": 4,
+      "estimate": 19,
+      "measured": 112.2,
+      "suspect": false
+    },
+    {
+      "row": "R6",
+      "variant": "feature",
+      "profile": "STRONG",
+      "frames": 4,
+      "videoS": 0.13333333333333333,
+      "estimate": 11,
+      "measured": 62.92,
+      "suspect": false
+    },
+    {
+      "row": "R11-zoom",
+      "variant": "feature",
+      "profile": "STRONG",
+      "frames": 180,
+      "videoS": 6,
+      "estimate": 17,
+      "measured": 88.63499999999999,
+      "suspect": false
+    },
+    {
+      "row": "R7",
+      "variant": "feature",
+      "profile": "STRONG",
+      "frames": 240,
+      "videoS": 4,
+      "estimate": 19,
+      "measured": 85.49,
+      "suspect": false
+    },
+    {
+      "row": "ENG-F1-S",
+      "variant": "feature",
+      "profile": "STRONG",
+      "frames": 90,
+      "videoS": 3,
+      "estimate": 13,
+      "measured": 57.98,
+      "suspect": false
+    },
+    {
+      "row": "R3",
+      "variant": "feature",
+      "profile": "STRONG",
+      "frames": 90,
+      "videoS": 3,
+      "estimate": 14,
+      "measured": 53.195,
+      "suspect": false
+    },
+    {
+      "row": "R9",
+      "variant": "feature",
+      "profile": "WEAK4",
+      "frames": 3540,
+      "videoS": 118,
+      "estimate": 140,
+      "measured": 414.595,
+      "suspect": true
+    },
+    {
+      "row": "R2",
+      "variant": "feature",
+      "profile": "STRONG",
+      "frames": 12,
+      "videoS": 0.4,
+      "estimate": 11,
+      "measured": 32.095,
+      "suspect": false
+    },
+    {
+      "row": "R12",
+      "variant": "feature",
+      "profile": "OK8",
+      "frames": 1440,
+      "videoS": 48,
+      "estimate": 63,
+      "measured": 141.61,
+      "suspect": false
+    },
+    {
+      "row": "R4",
+      "variant": "feature",
+      "profile": "OK8",
+      "frames": 180,
+      "videoS": 6,
+      "estimate": 17,
+      "measured": 37.16,
+      "suspect": false
+    },
+    {
+      "row": "R11-fade",
+      "variant": "feature",
+      "profile": "OK8",
+      "frames": 180,
+      "videoS": 6,
+      "estimate": 17,
+      "measured": 35.8,
+      "suspect": false
+    },
+    {
+      "row": "R8b",
+      "variant": "feature",
+      "profile": "STRONG",
+      "frames": 1800,
+      "videoS": 60,
+      "estimate": 70,
+      "measured": 131,
+      "suspect": false
+    },
+    {
+      "row": "R8b",
+      "variant": "feature",
+      "profile": "OK8",
+      "frames": 1800,
+      "videoS": 60,
+      "estimate": 70,
+      "measured": 129.01,
+      "suspect": false
+    },
+    {
+      "row": "R11-fade",
+      "variant": "feature",
+      "profile": "STRONG",
+      "frames": 180,
+      "videoS": 6,
+      "estimate": 17,
+      "measured": 30.72,
+      "suspect": false
+    },
+    {
+      "row": "R12",
+      "variant": "feature",
+      "profile": "STRONG",
+      "frames": 1440,
+      "videoS": 48,
+      "estimate": 63,
+      "measured": 112.35,
+      "suspect": false
+    },
+    {
+      "row": "R10",
+      "variant": "control",
+      "profile": "STRONG",
+      "frames": 120,
+      "videoS": 4,
+      "estimate": 14,
+      "measured": 24.95,
+      "suspect": false
+    },
+    {
+      "row": "R11-base",
+      "variant": "feature",
+      "profile": "STRONG",
+      "frames": 180,
+      "videoS": 6,
+      "estimate": 17,
+      "measured": 27.89,
+      "suspect": false
+    },
+    {
+      "row": "R9",
+      "variant": "feature",
+      "profile": "OK8",
+      "frames": 3540,
+      "videoS": 118,
+      "estimate": 140,
+      "measured": 217.26,
+      "suspect": false
+    },
+    {
+      "row": "R11-fade",
+      "variant": "control",
+      "profile": "OK8",
+      "frames": 180,
+      "videoS": 6,
+      "estimate": 16,
+      "measured": 23.82,
+      "suspect": false
+    },
+    {
+      "row": "R11-fade",
+      "variant": "control",
+      "profile": "STRONG",
+      "frames": 180,
+      "videoS": 6,
+      "estimate": 16,
+      "measured": 19.33,
+      "suspect": false
+    },
+    {
+      "row": "R9",
+      "variant": "feature",
+      "profile": "STRONG",
+      "frames": 3540,
+      "videoS": 118,
+      "estimate": 140,
+      "measured": 118.41,
+      "suspect": false
+    },
+    {
+      "row": "R11-base",
+      "variant": "feature",
+      "profile": "OK8",
+      "frames": 180,
+      "videoS": 6,
+      "estimate": 17,
+      "measured": 14.04,
+      "suspect": false
+    },
+    {
+      "row": "R11-rot",
+      "variant": "feature",
+      "profile": "STRONG",
+      "frames": 180,
+      "videoS": 6,
+      "estimate": 17,
+      "measured": 13.27,
+      "suspect": false
+    },
+    {
+      "row": "R11-odd",
+      "variant": "feature",
+      "profile": "OK8",
+      "frames": 180,
+      "videoS": 6,
+      "estimate": 17,
+      "measured": 11.34,
+      "suspect": false
+    },
+    {
+      "row": "R11-contain",
+      "variant": "feature",
+      "profile": "OK8",
+      "frames": 180,
+      "videoS": 6,
+      "estimate": 17,
+      "measured": 11.02,
+      "suspect": false
+    },
+    {
+      "row": "R11-base",
+      "variant": "control",
+      "profile": "STRONG",
+      "frames": 180,
+      "videoS": 6,
+      "estimate": 16,
+      "measured": 10.015,
+      "suspect": false
+    },
+    {
+      "row": "R11-contain",
+      "variant": "feature",
+      "profile": "STRONG",
+      "frames": 180,
+      "videoS": 6,
+      "estimate": 17,
+      "measured": 10.64,
+      "suspect": false
+    },
+    {
+      "row": "R11-odd",
+      "variant": "feature",
+      "profile": "STRONG",
+      "frames": 180,
+      "videoS": 6,
+      "estimate": 17,
+      "measured": 8.52,
+      "suspect": false
+    },
+    {
+      "row": "R11-contain",
+      "variant": "control",
+      "profile": "STRONG",
+      "frames": 180,
+      "videoS": 6,
+      "estimate": 16,
+      "measured": 5.36,
+      "suspect": false
+    },
+    {
+      "row": "R11-rot",
+      "variant": "control",
+      "profile": "STRONG",
+      "frames": 180,
+      "videoS": 6,
+      "estimate": 16,
+      "measured": 5.3,
+      "suspect": false
+    },
+    {
+      "row": "R11-base",
+      "variant": "control",
+      "profile": "OK8",
+      "frames": 180,
+      "videoS": 6,
+      "estimate": 16,
+      "measured": 5.24,
+      "suspect": false
+    },
+    {
+      "row": "R11-contain",
+      "variant": "control",
+      "profile": "OK8",
+      "frames": 180,
+      "videoS": 6,
+      "estimate": 16,
+      "measured": 5.06,
+      "suspect": false
+    },
+    {
+      "row": "R11-odd",
+      "variant": "control",
+      "profile": "OK8",
+      "frames": 180,
+      "videoS": 6,
+      "estimate": 16,
+      "measured": 5.06,
+      "suspect": false
+    },
+    {
+      "row": "R11-odd",
+      "variant": "control",
+      "profile": "STRONG",
+      "frames": 180,
+      "videoS": 6,
+      "estimate": 16,
+      "measured": 4.31,
+      "suspect": false
+    },
+    {
+      "row": "BASE-V",
+      "variant": "feature",
+      "profile": "WEAK4",
+      "frames": 10,
+      "videoS": 0.3333333333333333,
+      "estimate": 11,
+      "measured": 2.96,
+      "suspect": true
+    },
+    {
+      "row": "BASE-V",
+      "variant": "feature",
+      "profile": "STRONG",
+      "frames": 60,
+      "videoS": 2,
+      "estimate": 12,
+      "measured": 2.8,
+      "suspect": false
+    },
+    {
+      "row": "BASE-V",
+      "variant": "feature",
+      "profile": "STRONG",
+      "frames": 10,
+      "videoS": 0.3333333333333333,
+      "estimate": 11,
+      "measured": 2.01,
+      "suspect": false
+    },
+    {
+      "row": "BASE-V",
+      "variant": "feature",
+      "profile": "OK8",
+      "frames": 10,
+      "videoS": 0.3333333333333333,
+      "estimate": 11,
+      "measured": 1.99,
+      "suspect": true
+    }
+  ]
+}
