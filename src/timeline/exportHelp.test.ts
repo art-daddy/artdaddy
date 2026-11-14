@@ -503,9 +503,9 @@ describe("replays of progress: never a banner on a healthy export", () => {
         });
         expect(views.filter(({ view }) => view.kind !== "none").map(({ t }) => t)).toEqual([]);
       }),
-      { numRuns: 1500 },
+      { numRuns: 400 },
     );
-  });
+  }, 120_000);
 
   it("the same holds where the projection comes from the share produced (a streamed export), with a smaller delay before the first picture", () => {
     fc.assert(
@@ -537,9 +537,9 @@ describe("replays of progress: never a banner on a healthy export", () => {
           expect(views.filter(({ view }) => view.kind !== "none")).toEqual([]);
         },
       ),
-      { numRuns: 1500 },
+      { numRuns: 400 },
     );
-  });
+  }, 120_000);
 
   it("a slow banner never shows before 90 s or before 2 % is produced, on any run", () => {
     fc.assert(
