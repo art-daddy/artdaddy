@@ -1702,7 +1702,7 @@ async function confirmExportRequest(specs: readonly ExportSpec[]): Promise<boole
     // exception is a heads-up whose every reason the person already continued past in the first attempt: it is not a
     // shortage and nothing in it is new.
     if (specs[0].restart?.kind === "auto") {
-      const seen = specs[0].restart.noticesAnswered ?? 0;
+      const seen = specs[0].restart?.noticesAnswered ?? 0;
       const nothingNew = questions.every(
         (question) => question.kind === "notice" && (question.bands.m & ~seen) === 0,
       );
