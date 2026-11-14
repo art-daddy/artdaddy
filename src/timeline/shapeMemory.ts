@@ -8,7 +8,7 @@
 // clip's chain holds in the filter graph, at the size it works at (a zoom's largest, a float-RGB grade's twelve bytes a pixel); a few canvas frames
 // per extra visible layer. The streamed engine runs one partition at a time on one thread per filter and is priced by the canvas and the layers.
 //
-// EVERY NUMBER IN `MEMORY_TABLE` IS A PLACEHOLDER, seeded from lane L3's RED peaks (peak working set, MiB, 16 processors) and the exportPlan.ts
+// EVERY NUMBER IN `MEMORY_TABLE` IS A PLACEHOLDER, seeded from the measured RED peaks (peak working set, MiB, 16 processors) and the exportPlan.ts
 // lab note, then rounded up. They are not fitted: the lane fits them on the rig matrix.
 import type { CostClip, CostShape, FeatureLoads } from "./costShape";
 import { decoderThreads, type ExportEngine } from "./exportOptions";

@@ -58,7 +58,7 @@ describe("paceOfCheck", () => {
     expect(paceOfCheck(done({ rHat: 2.5, cls: "fast" }), COMPILED, 8)?.cls).toBe("ok");
   });
 
-  it("is not told a pair outside lane L2's band: the compiled one stands", () => {
+  it("is not told a pair outside the server's band: the compiled one stands", () => {
     expect(paceOfCheck(done({ rHat: 2.5 }), { okOver: 0.1, weakOver: 99 }, 8)?.cls).toBe("ok");
     expect(paceOfCheck(done({ rHat: 2.5 }), undefined, 8)?.cls).toBe("ok");
     expect(paceOfCheck(done({ rHat: 2.5 }), null as unknown as undefined, 8)?.cls).toBe("ok");

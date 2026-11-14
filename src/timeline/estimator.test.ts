@@ -554,7 +554,7 @@ describe("estimate: recipe honesty", () => {
       }),
     )!;
 
-  it("a project on lane L3's lean recipe is never dearer than one on today's, feature by feature", () => {
+  it("a project on the lean recipe is never dearer than one on today's, feature by feature", () => {
     for (const feature of COST_FEATURES) {
       const today = priced(feature);
       const lean = priced(feature, () => "lean");

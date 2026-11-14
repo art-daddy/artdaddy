@@ -3,14 +3,14 @@
 // holds the prices and estimator.ts multiplies them by these loads.
 //
 // A load is "this feature's filter runs on `frames` frames of the clip, of which `windowFrames` are the frames it does useful work on (a
-// transition's own window, a fade's ramps), at `mp` megapixels per frame". Today's recipe pays for every frame; lane L3's lean recipe pays
+// transition's own window, a fade's ramps), at `mp` megapixels per frame". Today's recipe pays for every frame; the lean recipe pays
 // the window only, so the two prices differ and the estimator needs both counts.
 import { isNum, toSecondsView } from "./frames";
 import { clipKind } from "./helpers";
 import type { Clip, Timeline } from "./model";
 import { onCanvasFrames, resolveRenderPlan } from "./renderPlan";
 
-/** What the estimator needs to know about one source file. Lane L3's `SourceFacts` is assignable to it. */
+/** What the estimator needs to know about one source file. The source-facts reader's result is assignable to it. */
 export interface CostSourceFacts {
   width: number;
   height: number;

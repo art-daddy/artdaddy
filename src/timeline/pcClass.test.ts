@@ -111,7 +111,7 @@ describe("classOf: the class from the ratio", () => {
   });
 });
 
-describe("acceptCutoffs: lane L2's band, both numbers or neither", () => {
+describe("acceptCutoffs: the server's band, both numbers or neither", () => {
   it("accepts a pair inside the band, in the wire's spelling and in the app's own", () => {
     expect(acceptCutoffs({ ok_over: 1.5, weak_over: 5 })).toEqual({ okOver: 1.5, weakOver: 5 });
     expect(acceptCutoffs({ okOver: 1.5, weakOver: 5 })).toEqual({ okOver: 1.5, weakOver: 5 });
@@ -213,7 +213,7 @@ describe("acceptCutoffs: lane L2's band, both numbers or neither", () => {
 });
 
 describe("the cut-offs have no copy of their own here", () => {
-  it("exports no reader or writer of a stored pair and no storage key for one: they are lane L2's, held in memory, and handed in", async () => {
+  it("exports no reader or writer of a stored pair and no storage key for one: they come from the server, are held in memory, and are handed in", async () => {
     const module = await import("./pcClass");
     for (const name of ["readCutoffs", "writeCutoffs", "PC_CLASS_KEY"])
       expect(module, name).not.toHaveProperty(name);

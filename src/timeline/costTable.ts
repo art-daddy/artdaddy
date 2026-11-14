@@ -53,7 +53,7 @@ export const ENGINE = {
 export const RUNG_TIME_FACTOR = [1, 1.7, 2.3] as const;
 
 /** The PC every estimate without a PC check is priced on: the field's median finished 1080p export took 2.44 times the video's length
- *  (ALIGNMENT.md F-14, n 45), which is the reference export's `rHat` for a median PC. It mixes project cost and PC pace (inference). */
+ *  (the field report's median over 45 finished exports), which is the reference export's `rHat` for a median PC. It mixes project cost and PC pace (inference). */
 export const PRIOR_PACE = { rHat: 2.4, cores: 8 } as const;
 
 /** The PC a speed check that could not finish is priced as: a weak one (more than 4 times the video's length for the reference export, the line
@@ -92,7 +92,7 @@ export const RANGE = {
 export type PriceBasis = "measured" | "read" | "assumed";
 
 /** What a feature costs in one recipe: `frame` on every frame its filter runs on, `window` more on the frames it does useful work on. Today's
- *  recipe runs a mask on every frame of its clip and pays `frame` alone; lane L3's lean recipe passes the other frames through, so its `frame`
+ *  recipe runs a mask on every frame of its clip and pays `frame` alone; the lean recipe passes the other frames through, so its `frame`
  *  is small and its `window` carries the work. */
 export interface RecipePrice {
   frame: number;
@@ -109,7 +109,7 @@ export interface FeaturePrice {
   seed: string;
 }
 
-/** The price of every feature the cost shape can contain, in both recipes. Where lane L3's fixes do not touch a feature the lean price IS
+/** The price of every feature the cost shape can contain, in both recipes. Where the lean recipe does not touch a feature the lean price IS
  *  today's. A lean price never exceeds today's, for any load (a conformance test): `lean.frame <= today.frame` and
  *  `lean.frame + lean.window <= today.frame + today.window`. The seeds read the audit's added milliseconds a frame at 1080x1920 (2.0736 MP)
  *  against its 13 ms plain frame. */

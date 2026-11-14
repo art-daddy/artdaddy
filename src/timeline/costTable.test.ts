@@ -15,7 +15,7 @@ import {
 } from "./costTable";
 import { CHIP_MAKERS, FASTER_X264_GAIN } from "./exportEncoder";
 
-/** The features lane L3's fixes touch (the audit's "exact bundle": the exact cover mask, windowed masks, the dip layer, decode-once stills).
+/** The features the lean recipe touches (the audit's "exact bundle": the exact cover mask, windowed masks, the dip layer, decode-once stills).
  *  Every other feature runs the same filters in both recipes, so its lean price must BE today's: a discount no fix delivers is a lie. */
 const FIXED_BY_LANE_L3: readonly CostFeature[] = [
   "cover_zoom",

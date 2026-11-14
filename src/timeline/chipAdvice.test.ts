@@ -17,7 +17,7 @@ import {
 import type { ChipTestResult } from "./chipTest";
 import { CHIP_MAKERS, type ChipMaker } from "./exportEncoder";
 
-// The sentences of the copy pack (BUILD-PLAN-3c.md section 3), with their two blanks, written out here and not read from the module.
+// The sentences of the copy pack's chip section, with their two blanks, written out here and not read from the module.
 const nvidiaLine = (driver: string) =>
   `Your NVIDIA graphics driver is ${driver}. ArtDaddy's graphics-chip path needs 610 or newer. If a newer driver exists for your card, updating it can make exports faster. If not, ArtDaddy keeps using the processor.`;
 const intelLine = (seen: string) =>

@@ -1,7 +1,7 @@
 // Phase 3c (honest estimates, the lighter Quick route, the slow banner, the graphics-chip safeguards): the closed lists and plain types
 // the 3c modules share. Types and frozen constants only: no logic, no storage, no import of app state.
 //
-// Each list below is the ONE definition the 3c modules use. The report's wire lists belong to lane L2 (`src/api/export*.ts`) and are written
+// Each list below is the ONE definition the 3c modules use. The report's wire lists belong to the telemetry vocabulary (`src/api/export*.ts`) and are written
 // separately; a conformance test compares the two when the facts are wired. That wiring is HELD until the owner says yes to the privacy text:
 // nothing in this file is sent anywhere.
 import type { ChipMaker } from "./exportEncoder";
@@ -97,7 +97,7 @@ export interface ExplicitSettings {
 }
 
 /** The remote switches the 3c modules read. A module takes this as a PARAMETER (never reads the flag store itself); one reader of the switches builds it.
- *  The first six are new in Phase 3c (lane L2's flags 24 to 29); the next eight exist since Phase 3; `auto_restart` is lane L3b's master of every automatic restart. */
+ *  The first six are new in Phase 3c (the last of the 29 remote switches); the next eight exist since Phase 3; `auto_restart` is the master of every automatic restart. */
 export const FLAGS_3C = [
   "pc_check",
   "estimate_v2",

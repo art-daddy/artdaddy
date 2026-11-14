@@ -957,7 +957,7 @@ function reasonProblems(row: AutoRestartReason): string[] {
   return problems;
 }
 
-// The graphics chip's reason is a row of the shipped table (chipRestart.ts, lane L3c's): the walks below hold it to the same checks as the
+// The graphics chip's reason is a row of the shipped table (chipRestart.ts): the walks below hold it to the same checks as the
 // memory rows, with facts a failure only a chip explains would have.
 const CHIP_FAILED = restartRow("chip_failed")!;
 
@@ -1101,7 +1101,9 @@ describe("a second reason in the table", () => {
       failedRungN: 0,
     });
     // the memory rows do not take it, and it does not take a memory stop
-    expect(decideRestart(chipFacts(), { rows: AUTO_RESTART_REASONS.slice(0, 2), table: TABLE })).toEqual({
+    expect(
+      decideRestart(chipFacts(), { rows: AUTO_RESTART_REASONS.slice(0, 2), table: TABLE }),
+    ).toEqual({
       restart: false,
       why: "not_memory",
     });

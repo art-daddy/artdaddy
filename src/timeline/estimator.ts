@@ -66,7 +66,7 @@ export interface PcPace {
   cls: PcClass;
 }
 
-/** The recipe a clip will really run on: lane L3's lean one, or today's (the slow one). */
+/** The recipe a clip will really run on: the lean one, or today's (the slow one). */
 export type Recipe = "lean" | "today";
 
 export interface EstimateRequest {
@@ -82,7 +82,7 @@ export interface EstimateRequest {
   correction: number | null;
   /** 0.27.0's finished samples, as today. */
   history: ExportCalibration[];
-  /** Lane L3's per-clip decision; absent = every clip on today's (slow, pessimistic) recipe. */
+  /** The per-clip lean decision; absent = every clip on today's (slow, pessimistic) recipe. */
   recipeOf?: (clipId: string) => Recipe;
   flags: Pick<Flags3c, "estimate_v2" | "pc_check">;
   nowMs?: number;

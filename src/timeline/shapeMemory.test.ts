@@ -72,7 +72,7 @@ describe("predictShapePeakMiB: what it says, against what was measured", () => {
     expect(gentlest).toBeLessThanOrEqual(gentle);
   });
 
-  it("lands within a factor of two and a half of lane L3's RED peaks on approximate shapes (a sanity check, not a fit)", () => {
+  it("lands within a factor of two and a half of the measured RED peaks on approximate shapes (a sanity check, not a fit)", () => {
     // Peak working set, MiB, on 16 logical processors (red\RED-TABLE.md); the shapes are read off RED-NOTES.md and are approximate.
     const rows: Array<[string, CostShape, ExportEngine, number]> = [
       ["BASE-V: one clip", shapeOf(videos(1)), "file-sequence-v1", 489],

@@ -203,7 +203,7 @@ describe("the class cut-offs are the server's, inside their band, and nowhere el
     expect(routeEstimatesHere(request).pcClass).toBe("ok");
   });
 
-  it("is not kept in a storage of this app's own: the pair is lane L2's, held in memory only", async () => {
+  it("is not kept in a storage of this app's own: the pair comes from the server's setting and is held in memory only", async () => {
     setPcCheckService(checkService(record({ rHat: 2.5 })));
     await told({ v: 1, flags: {}, pc_class: { ok_over: 0.5, weak_over: 2 } });
     const keys: string[] = [];

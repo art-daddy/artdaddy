@@ -3,7 +3,7 @@
 // a fact (the estimate side, the route side, the help side) notes it here; the record is bounded so an app left open for weeks does not grow it.
 import type { HelpWord, ReportFacts3c } from "./exportTypes3c";
 
-/** The owner's decision of 14 Nov: not yet. Turning it on is the LAST step of the build, together with lane L2's wire lists and the privacy text. */
+/** The owner's decision of 14 Nov: not yet. Turning it on is the LAST step of the build, together with the report's wire lists and the privacy text. */
 export const SEND_3C_FACTS = false;
 
 const MAX_RECORDS = 200;
