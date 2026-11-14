@@ -325,7 +325,8 @@ describe("one automatic restart, shared with the memory restart", () => {
       attempt: 2,
     });
     expect(attempts.chainOf(firstId)).toHaveLength(2);
-    // Try again goes one rung gentler on the processor, in one click.
+    // Try again goes one rung gentler on the processor, in one click: the chip is set aside for the day, as the real lookup knows.
+    vi.mocked(findChip).mockImplementation(async () => ({ chip: null, events: [] }));
     await retryExport(firstId);
     await flush(60);
     expect(t.jobs.submitted).toHaveLength(jobsBefore + 2);

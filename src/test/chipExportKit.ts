@@ -163,8 +163,12 @@ export type ExportRig = Awaited<ReturnType<typeof setupExport>>;
 
 /** A project this PC has measured to take ten minutes on the processor: long enough for the app to choose the chip by itself. Leaves
  *  the chip lookup answering with `chip` (a proven AMD chip unless told otherwise), and no trace of the measuring export on the card
- *  or in the list. */
-export async function longProject(chip: ChipVerdict | null = amdChip()): Promise<ExportRig> {
+ *  or in the list. The lookup says the chip is still fine after it stopped an export, as the 0.27.0 journeys do (a restart must not
+ *  depend on it); `honourSetAside` makes it answer as the real one does, with a chip that failed an export set aside. */
+export async function longProject(
+  chip: ChipVerdict | null = amdChip(),
+  options: { honourSetAside?: boolean } = {},
+): Promise<ExportRig> {
   const t = await setupExport();
   const first = await t.exportNow("first");
   await flush();
@@ -181,9 +185,8 @@ export async function longProject(chip: ChipVerdict | null = amdChip()): Promise
     temporaryBytes: 0,
   });
   vi.mocked(findChip).mockClear();
-  // As the real lookup answers: a chip that failed an export is set aside, so it is not found again.
   vi.mocked(findChip).mockImplementation(async () => ({
-    chip: vi.mocked(markChipSuspect).mock.calls.length > 0 ? null : chip,
+    chip: options.honourSetAside && vi.mocked(markChipSuspect).mock.calls.length > 0 ? null : chip,
     events: [],
   }));
   return t;
