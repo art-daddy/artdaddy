@@ -650,11 +650,14 @@ describe("one probe at a time", () => {
     expect(twin.runs).toHaveLength(0);
   });
 
-  it("does not know the export probe by name, and does not import it", () => {
+  it("does not know the export probe by name, does not import it, and takes its time only from its deps", () => {
     // The files are read from the repo's root, where the tests run: `import.meta.url` is not a file URL under every test environment.
     const source = readFileSync(resolve(process.cwd(), "src/platform/pcCheck.ts"), "utf8");
     expect(source).not.toMatch(/export-speed/);
     expect(source).not.toMatch(/pcCheckProbe/);
+    expect(source).not.toMatch(
+      /setTimeout|setInterval|clearTimeout|clearInterval|Date\.now|new Date|performance\.now/,
+    );
   });
 });
 
