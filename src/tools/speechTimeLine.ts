@@ -30,11 +30,12 @@ export interface CardInput {
   /** The phase of the speech work for these files: null = not known (no job store data yet: show the
    *  count only). */
   phase: "waiting" | "starting" | "running" | null;
-  /** True when the phase is "waiting" because an export is running. */
+  /** True when the phase is "waiting" because an export is running; in any other phase it is ignored. */
   waitingForExport: boolean;
-  /** Seconds left for the running job, null until audio has moved; plus the seconds the other files not
-   *  yet started are projected to take. */
+  /** Seconds left for the running job: null until audio has moved, which shows "starting…". A number
+   *  that is negative or not finite is not a time, and then only the count shows. */
   runningEtaS: number | null;
+  /** Seconds the other files, not yet started, are projected to take: added to the time left. */
   queuedS: number;
   /** Measured under real time since the first words. */
   slow: boolean;
