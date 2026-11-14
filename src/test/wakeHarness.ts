@@ -24,6 +24,7 @@ import {
 import { useEditor } from "../store/editor";
 import { __resetJobNotes, JOB_WAKE_LEAD, notifyJobSettled } from "../store/jobNotes";
 import { resetLiveWait } from "../store/liveWait";
+import { __resetComposer } from "../store/composer";
 import { clearModelDownload } from "../store/modelDownload";
 import { __resetWakeHost } from "../store/speechWakeHost";
 import { applyOp, ensureTimeline, loadTimeline } from "../timeline/engine";
@@ -199,6 +200,7 @@ class Harness implements WakeHarness, ModelRecorder {
     __resetExportFlags();
     __resetJobNotes();
     __resetWakeHost();
+    __resetComposer();
     resetHistoryModeSupport();
     closeToolHost();
     vi.useFakeTimers();

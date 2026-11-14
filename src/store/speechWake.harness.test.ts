@@ -26,6 +26,9 @@ vi.mock("../api/appEvents", async (original) => ({
 }));
 
 import { JOB_WAKE_LEAD, SETTLE_WINDOW_MS } from "./jobNotes";
+import { __setExportFlag } from "../api/exportFlags";
+import { readFacts } from "../lib/localFacts";
+import { useComposer } from "./composer";
 import {
   createWakeHarness,
   type WakeHarness,
@@ -176,6 +179,51 @@ describe("the person says continue after the words landed", () => {
     const [, second] = m.turns;
     expect(second.endedAtS).toBe(second.startedAtS);
     for (const answers of Object.values(m.looks)) expect(answers).toEqual(["not_ready", "words"]);
+  }, 120_000);
+});
+
+describe("the opposite orders of S1: the wake must still be one, or none", () => {
+  it("S5 waits while the person has a draft in the box, and then comes once, when the draft is sent or cleared", async () => {
+    const h = await start(THIRTEEN_FILES);
+    await h.say(FIRST_MESSAGE);
+    useComposer.getState().setDraft(true); // he starts typing
+    await h.advanceTo(h.lastLandingS() + 120);
+    const typing = h.metrics();
+    expect(typing.wakeTurns, "no turn starts under the person's hands").toEqual([]);
+    expect(typing.systemTurns).toBe(0);
+
+    useComposer.getState().setDraft(false); // he clears the box
+    await h.advance(10_000);
+    await h.writeEvidence("s5-typing");
+    expectS1(h.metrics());
+  }, 120_000);
+
+  it("S6 does nothing when the server has turned the switch off: 0.27.0, the person says continue", async () => {
+    const h = await start(THIRTEEN_FILES);
+    __setExportFlag("speech_wake", false);
+    await h.say(FIRST_MESSAGE);
+    await h.advanceTo(h.lastLandingS() + 120);
+    await h.writeEvidence("s6-switch-off");
+    const m = h.metrics();
+    expect(m.wakeTurns).toEqual([]);
+    expect(m.systemTurns).toBe(0);
+    expect(m.wordsFetched).toBe(0);
+    expect(readFacts("speech_wake"), "nothing was registered, so nothing is recorded").toEqual([]);
+  }, 120_000);
+
+  it("S7 is one wake, not two, when the person said continue part-way and the rest was still not ready", async () => {
+    const h = await start(THIRTEEN_FILES);
+    await h.say(FIRST_MESSAGE);
+    await h.advanceTo(150); // five of the thirteen have landed
+    await h.say("continue"); // the assistant reads those five and is told the other eight are not ready
+    expect(h.metrics().wordsFetched).toBe(5);
+    await h.advanceTo(h.lastLandingS() + 10);
+    await h.writeEvidence("s7-continue-halfway");
+
+    const m = h.metrics();
+    expect(m.wakeTurns, "one wake, for the eight").toHaveLength(1);
+    expect(m.wordsFetched).toBe(13);
+    expect(m.turns.filter((t) => t.kind === "user")).toHaveLength(2);
   }, 120_000);
 });
 
