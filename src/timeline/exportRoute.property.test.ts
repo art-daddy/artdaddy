@@ -141,6 +141,32 @@ describe("chooseRoute: the owner's rules, over every combination", () => {
     );
   });
 
+  it("is exact on the line itself: with Full quality at a multiple of four seconds, three quarters of it is offered and one second more is not", () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 16, max: 50_000 }),
+        fc.integer({ min: -3, max: 3 }),
+        pcClass,
+        (quarter, offset, klass) => {
+          const decision = chooseRoute({
+            pcClass: klass,
+            via: "dialog",
+            full: { seconds: 4 * quarter, basis: "pc_check" },
+            quick: { seconds: 3 * quarter + offset, basis: "pc_check" },
+            explicit: { size: false, fps: false },
+            quickFlagOn: true,
+            picked: null,
+          });
+          expect(decision.offered).toBe(offset <= 0);
+          expect(decision.reason).toBe(
+            offset > 0 ? "small_gain" : isWeakPc(klass) ? "selected" : "offered",
+          );
+        },
+      ),
+      { numRuns: 1000 },
+    );
+  });
+
   it("keeps Full quality always available: not offered means Full quality is selected, and a pick of it is kept", () => {
     fc.assert(
       fc.property(routeInput, (input) => {
