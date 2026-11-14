@@ -2,9 +2,13 @@
 // one rung gentler (exportRestart.ts decides; exportQueue.ts runs it; exportAttempts.ts keeps it one export for the person
 // and the assistant). These drive the real export tool and the real queue against FakeJobs, which plays the app process.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { createHash } from "node:crypto";
+import { createElement } from "react";
 import { __setExportFlag } from "../api/exportFlags";
+import ExportCard from "../components/ExportCard";
 import { useAuth } from "../store/auth";
+import { useEditor } from "../store/editor";
 import { liveFeedOf, useExportJob } from "../store/exportJob";
 import { FakeJobs } from "../test/fakeJobs";
 import { MemFs, registerTestDocument, resetTestDocuments } from "../test/timelineKit";
@@ -180,6 +184,7 @@ async function setup() {
 }
 
 afterEach(async () => {
+  cleanup();
   await resetTestDocuments();
   // A test that failed half way leaves exports running: they are cancelled, and the wait is bounded, so one failure does
   // not stall every test after it.
@@ -190,6 +195,7 @@ afterEach(async () => {
   __resetJobSupervisor();
   // What the PC has learned from the exports of one test must not decide the next one's pre-start check.
   useExportJob.setState({ calibrations: [] });
+  useEditor.setState({ projectId: null, store: null });
   for (const flag of ["auto_restart", "memory_restart", "plan_rung", "restart_streamed"] as const)
     __setExportFlag(flag, true);
 });
@@ -565,6 +571,75 @@ describe("the app starts an export again by itself when the PC ran short of memo
       await whenExportsSettle();
     },
   );
+});
+
+// What the person reads on the card while all of that happens: it is one export, never a failure and a new export side by side.
+describe("what the person sees on the card of an export the app started again", () => {
+  const status = () => screen.getByTestId("export-card-status").textContent;
+  const settle = () =>
+    act(async () => {
+      await flush(40);
+    });
+  const open = async () => {
+    const t = await setup();
+    useEditor.setState({ projectId: "p", store: t.store });
+    return t;
+  };
+
+  it("says it is starting again, then which attempt it is and why, and what to do when that one runs short again", async () => {
+    const t = await open();
+    const gate = holdTheRestart(t);
+    const first = await t.exportNow();
+    await flush();
+    const { container } = render(createElement(ExportCard));
+    expect(screen.getByText("Exporting “proj.mp4”")).toBeVisible();
+
+    gate.arm();
+    t.jobs.exit(first.job_id, -1, SHORT);
+    await settle();
+    // The gap: still the one export, not a failure, and it can still be cancelled.
+    expect(status()).toBe("Starting again on a gentler setting…");
+    expect(screen.queryByText("Export stopped")).toBeNull();
+    expect(screen.getByRole("button", { name: "cancel proj.mp4" })).toBeVisible();
+
+    gate.release();
+    await settle();
+    // The new attempt is the same export, said to be the second, and why.
+    expect(screen.getByText("Exporting “proj.mp4” · attempt 2")).toBeVisible();
+    expect(screen.getByTestId("export-card-restarted").textContent).toMatch(
+      /^Started again on a gentler setting because your PC ran short of memory\./,
+    );
+    expect(screen.queryByText("Export stopped")).toBeNull();
+
+    // It ran short again: said in words for that, with Try again, and nothing starts a third time by itself.
+    t.jobs.exit(t.jobs.submitted[1].id, -1, SHORT);
+    await settle();
+    expect(screen.getByText("Export stopped")).toBeVisible();
+    expect(screen.getByText(/even on a lighter setting/)).toBeVisible();
+    expect(screen.getByRole("button", { name: "try again proj.mp4" })).toBeVisible();
+    expect(t.jobs.submitted).toHaveLength(2);
+    // Nothing on the card promises a speed or a picture.
+    expect(container.textContent).not.toMatch(/faster|identical|same quality|pixel|lossless/i);
+  });
+
+  it("is stopped for good by the card's own Cancel while it is starting again", async () => {
+    const t = await open();
+    const gate = holdTheRestart(t);
+    const first = await t.exportNow();
+    await flush();
+    render(createElement(ExportCard));
+    gate.arm();
+    t.jobs.exit(first.job_id, -1, SHORT);
+    await settle();
+    expect(status()).toBe("Starting again on a gentler setting…");
+
+    fireEvent.click(screen.getByRole("button", { name: "cancel proj.mp4" }));
+    gate.release();
+    await settle();
+    expect(screen.getByText("Export cancelled")).toBeVisible();
+    expect(screen.queryByText(/attempt 2/)).toBeNull();
+    expect(t.jobs.submitted).toHaveLength(1);
+  });
 });
 
 // Every function that takes a job id passes it through the registry (exportAttempts.ts, ID_ENTRY_POINTS): the assistant holds

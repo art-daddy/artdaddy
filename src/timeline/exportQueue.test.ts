@@ -3589,6 +3589,30 @@ describe("what happened to an export, as its report tells it", () => {
       }
     });
 
+    it("tells the assistant a quiet export is working once its processors have been busy for the whole three minutes, so it does not cancel a heavy one", async () => {
+      vi.useFakeTimers({ now: 1_000_000 });
+      try {
+        const { submitted } = await frozenExport({ activity: "busy" });
+        await vi.advanceTimersByTimeAsync(90_000);
+        // The readings do not cover three minutes yet, so nothing is known about the processors: said as it always was.
+        const [early] = ((await manageExportsTool({ action: "list" })) as Any).exports;
+        expect(early).toMatchObject({ state: "running" });
+        expect(early.stalled_for_s).toBeGreaterThanOrEqual(60);
+        expect(early).not.toHaveProperty("working");
+        await vi.advanceTimersByTimeAsync(110_000);
+        const [working] = ((await manageExportsTool({ action: "list" })) as Any).exports;
+        expect(working).toMatchObject({ state: "running", working: true });
+        expect(working.quiet_for_s).toBeGreaterThanOrEqual(180);
+        expect(working).not.toHaveProperty("stalled_for_s");
+        expect(working.note).toMatch(/do not cancel it for that alone/);
+        expect(useExportJob.getState().live?.busy).toBe(true); // and the card reads the same
+        expect(cancelExport(submitted.job_id, "person_card")).toBe(true);
+        await whenExportsSettle();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("gives a busy export that has made no picture at all thirty minutes, not five", async () => {
       vi.useFakeTimers({ now: 1_000_000 });
       try {

@@ -396,6 +396,33 @@ describe("ExportCard", () => {
       expect(status()).toMatch(/^Still working · 1 min in · Rendering and encoding · 39%/);
       g.open();
     });
+    it("says a quiet render is still working, and that the person can cancel, when its processors are busy; and says nothing of the kind when they are not", async () => {
+      vi.useFakeTimers({ now: 5_000_000, toFake: ["Date", "setInterval", "clearInterval"] });
+      const g = gated();
+      await start("one.mp4", g.wait);
+      render(<ExportCard />);
+      report({ fraction: 0.38, etaSec: 100, frame: 100 });
+      const jobId = useExportJob.getState().live!.jobId;
+      act(() => useExportJob.getState().setLiveStage(jobId, "rendering"));
+      act(() => {
+        vi.setSystemTime(5_000_000 + 310_000); // no new picture for five minutes
+        vi.advanceTimersByTime(10_000);
+      });
+      // The queue's own clock writes what its watch reads into the feed; this export has no watch, so it is set by hand.
+      act(() => useExportJob.getState().setLiveBusy(jobId, true));
+      expect(status()).toMatch(/^Still working · no new picture for 5 min/);
+      expect(status()).not.toMatch(/No progress/);
+      expect(screen.getByTestId("export-card-quiet-note").textContent).toBe(
+        "The processor is busy on a heavy part. You can cancel at any time.",
+      );
+      act(() => useExportJob.getState().setLiveBusy(jobId, false));
+      expect(status()).toMatch(/^No progress for 5 min/);
+      expect(screen.queryByTestId("export-card-quiet-note")).toBeNull();
+      act(() => useExportJob.getState().setLiveBusy(jobId, null)); // not readable: as it always was
+      expect(status()).toMatch(/^No progress for 5 min/);
+      expect(screen.queryByTestId("export-card-quiet-note")).toBeNull();
+      g.open();
+    });
   });
 
   describe("exports waiting their turn", () => {

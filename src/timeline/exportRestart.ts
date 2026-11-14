@@ -579,7 +579,7 @@ const REASONS: readonly AutoRestartReason[] = [
     words: {
       gap: "Starting again on the memory-light route…",
       after:
-        "Started again on the memory-light route because your PC ran short of memory. It will take longer; your export settings are kept.",
+        "Started again on the memory-light route because your PC ran short of memory. It may take longer; your export settings are kept.",
       failedAgain: MEMORY_FAILED_AGAIN,
       assistantNote: MEMORY_NOTE,
     },
