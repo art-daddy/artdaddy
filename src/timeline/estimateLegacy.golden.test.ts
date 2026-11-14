@@ -4,9 +4,11 @@
 // pinned below for the same reason `render.corpus.test.ts` pins its snapshot: a regenerated file cannot slip through as a green test.
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { isDeepStrictEqual } from "node:util";
 import { describe, expect, it } from "vitest";
 
 import type { ExportEncoder } from "./exportEncoder";
+import { estimate, type EstimateRequest } from "./estimator";
 import {
   EXPORT_SPEED_REVISION,
   estimateExport,
@@ -171,5 +173,78 @@ describe("the legacy estimate golden (0.27.0's numbers)", () => {
       }
     }
     expect(moved).toEqual([]);
+  });
+});
+
+describe("estimate() with estimate_v2 off says exactly what the golden says", () => {
+  /** The request a caller would make for a golden case: the dialog's route and picture, or (for the admission door) the plan's engine. */
+  const requestFor = (entry: GoldenCase, over: Partial<EstimateRequest> = {}): EstimateRequest => ({
+    workload: golden.workloads[entry.workload],
+    shape: null,
+    output: { ...outputOf(entry), quality: entry.settings.quality },
+    route: {
+      family: entry.route.mode === "fast" && entry.route.chip !== null ? "chip" : "processor",
+      faster: entry.route.faster,
+      chipMaker: entry.route.chip,
+      quick: false,
+    },
+    pace: null,
+    correction: null,
+    history: historyOf(entry),
+    ...(entry.call === "export" ? { engine: entry.engine } : {}),
+    flags: { estimate_v2: false, pc_check: false },
+    ...over,
+  });
+
+  /** What the record must be, written from the golden's own numbers and nothing the estimator computes. */
+  const recordOf = (entry: GoldenCase) =>
+    entry.expected.seconds === null
+      ? null
+      : {
+          seconds: Math.max(1, entry.expected.seconds),
+          low: Math.max(1, entry.expected.seconds),
+          high: Math.max(1, entry.expected.seconds),
+          basis: entry.expected.guessed ? "guess" : "history",
+          bytes: entry.expected.finalBytes,
+          muchLonger: false,
+          family: entry.encoder.startsWith("chip-") ? "chip" : "processor",
+        };
+
+  it("gives 0.27.0's seconds, size and basis for every case, as a point", () => {
+    const wrong: string[] = [];
+    for (const entry of golden.cases)
+      if (!isDeepStrictEqual(estimate(requestFor(entry)), recordOf(entry))) wrong.push(entry.id);
+    expect(wrong).toEqual([]);
+  });
+
+  it("is moved by none of the inputs the new model adds, and by Quick's label no more", () => {
+    const moved: string[] = [];
+    for (const entry of golden.cases) {
+      const plain = estimate(requestFor(entry));
+      const crowded = estimate(
+        requestFor(entry, {
+          shape: null,
+          pace: { rHat: 6, aFps: 20, bFps: 10, cFps: 18, cores: 2, cls: "weak" },
+          correction: 7,
+          recipeOf: () => "lean",
+          rung: 2,
+          nowMs: 1,
+          route: { ...requestFor(entry).route, quick: true },
+          flags: { estimate_v2: false, pc_check: true },
+        }),
+      );
+      if (!isDeepStrictEqual(crowded, plain)) moved.push(entry.id);
+    }
+    expect(moved).toEqual([]);
+  });
+
+  it("turning the flag on is the only thing that changes a number (the model has its own tests)", () => {
+    const entry = golden.cases.find(
+      (candidate) => candidate.expected.seconds !== null && candidate.history.length === 0,
+    )!;
+    const off = estimate(requestFor(entry))!;
+    const on = estimate(requestFor(entry, { flags: { estimate_v2: true, pc_check: true } }))!;
+    expect(on.seconds).not.toBe(off.seconds);
+    expect(on.high).toBeGreaterThan(on.low);
   });
 });
