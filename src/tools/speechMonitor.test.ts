@@ -77,6 +77,21 @@ describe("what the monitor claims, and when", () => {
     expect(s.etaS).toBeCloseTo((300 - 59) * (10 / 30), 9);
   });
 
+  it("never claims a speed from less than 30 s of audio, however long it took, nor from less than 5 s of wall time, however much audio", () => {
+    const slow = createSpeechMonitor({ launchedAt: 0, spanS: 600 });
+    slow.feed(line(0, 10), 10_000);
+    slow.feed(line(10, 39.5), 100_000); // 29.5 s of audio since the first burst, 90 s later
+    expect(slow.snapshot().rate).toBeNull();
+    slow.feed(line(39.5, 40.5), 110_000); // 30.5 s of audio
+    expect(slow.snapshot().rate).toBeCloseTo(100 / 30.5, 9);
+    const quick = createSpeechMonitor({ launchedAt: 0, spanS: 600 });
+    quick.feed(line(0, 10), 10_000);
+    quick.feed(line(10, 100), 14_900); // 90 s of audio, 4.9 s later
+    expect(quick.snapshot().rate).toBeNull();
+    quick.feed(line(100, 101), 15_000);
+    expect(quick.snapshot().rate).toBeCloseTo(5 / 91, 9);
+  });
+
   it("reads the start-up as launch to the first words less the work behind them, not as launch to the first words", () => {
     const m = createSpeechMonitor({ launchedAt: 0, spanS: null });
     m.feed(line(0, 30), 25_000); // 30 s of audio were decoded before anything was printed
@@ -310,12 +325,13 @@ describe("the live check", () => {
   it("passes the cap exactly when the time taken plus the time left is more than twice the cap", () => {
     fc.assert(
       fc.property(
-        fc.double({ min: 0, max: 5_000, noNaN: true }),
-        fc.double({ min: 0, max: 5_000, noNaN: true }),
         fc.integer({ min: 60, max: 1_200 }),
-        (elapsed, eta, cap) => {
-          fc.pre(Math.abs(elapsed + eta - 2 * cap) > 1e-6);
-          expect(passesLiveCap(elapsed, eta, cap)).toBe(elapsed + eta > 2 * cap);
+        fc.double({ min: 0.3, max: 3, noNaN: true }),
+        fc.double({ min: 0, max: 1, noNaN: true }),
+        (cap, ratio, split) => {
+          const total = ratio * 2 * cap;
+          fc.pre(Math.abs(total - 2 * cap) > 1e-6);
+          expect(passesLiveCap(total * split, total * (1 - split), cap)).toBe(ratio > 1);
         },
       ),
     );
