@@ -45,7 +45,11 @@ background — anywhere from seconds to 15 minutes.
   one call replaces a polling loop.
 - When the user writes again, CHECK before claiming anything is done: library_op
   action='list' reports status:'generating' on media still running (the field is absent
-  once an asset is ready), and manage_exports action='list' reports a running export.`.trim();
+  once an asset is ready), and manage_exports action='list' reports a running export.
+- Exports run one at a time. Start ONE, tell the person how long it is expected to take, and
+  do not start a second or cancel a running one unless the person asked. If it is slow, tell
+  them the time and offer a lighter export (\`resolution\`, \`quality\`, \`fps\`) as their
+  choice; it may be quicker, but never promise how much.`.trim();
 
 /** The approval that the in-app UI performs and an external client cannot. */
 export const COST_POLICY = `

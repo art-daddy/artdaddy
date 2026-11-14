@@ -17,6 +17,7 @@ vi.mock("../api/client", () => ({
 }));
 
 import { ASYNC_JOBS, mcpInstructions, __testing } from "./instructions";
+import { paramsByTool } from "../contract/views";
 
 beforeEach(() => {
   __testing.reset();
@@ -63,5 +64,47 @@ describe("MCP instructions", () => {
     // The rule lives here, not in the fetched prompt, precisely so this case still has it.
     h.fail = true;
     expect(await mcpInstructions()).toContain(ASYNC_JOBS);
+  });
+});
+
+// The assistant's export habits are fixed by words alone (no code guard), so what is asserted is
+// the text an agent is actually handed, not the constant's shape.
+describe("the export rules an MCP agent is handed", () => {
+  const RULES = [
+    /Exports run one at a time\. Start ONE/,
+    /do not start a second or cancel a running one unless the person asked/,
+    /offer a lighter export \(`resolution`, `quality`, `fps`\) as their choice/,
+    /it may be quicker, but never promise how much/,
+  ];
+
+  it("reach the agent with the shared prompt and without it", async () => {
+    const online = await mcpInstructions();
+    __testing.reset();
+    h.fail = true;
+    const offline = await mcpInstructions();
+    expect(online).toContain("SHARED PROMPT");
+    expect(offline).not.toContain("SHARED PROMPT");
+    for (const text of [online, offline])
+      for (const rule of RULES) expect(text.replace(/\s+/g, " ")).toMatch(rule);
+  });
+
+  it("offer a lighter export only through parameters `export` really has", () => {
+    const params = paramsByTool().export?.params ?? [];
+    for (const name of ["resolution", "quality", "fps"]) {
+      expect(ASYNC_JOBS).toContain(`\`${name}\``);
+      expect(params).toContain(name);
+    }
+  });
+
+  it("promise no speed-up and no picture, and the check can tell the two apart", () => {
+    // Both directions: a planted promise is caught, and the legitimate words pass.
+    const PROMISE =
+      /\b(?:twice|double|\d+(?:\.\d+)?\s*(?:x|times))\s+(?:as\s+)?(?:fast|quick|the speed)|\bhalf the time\b|\d+\s*(?:%|percent)\s+(?:faster|quicker)|\b(?:same pixels|identical|unchanged picture)\b/i;
+    for (const bad of ["twice as fast", "half the time", "3 times quicker", "the same pixels"])
+      expect(`a lighter export takes ${bad}`).toMatch(PROMISE);
+    expect(
+      "it may be quicker; a smaller picture and a lower frame rate, over twice expected_s",
+    ).not.toMatch(PROMISE);
+    expect(ASYNC_JOBS.replace(/\s+/g, " ")).not.toMatch(PROMISE);
   });
 });
