@@ -8,7 +8,7 @@ import type { ExportOptions } from "./exportOptions";
 import { cRound } from "./leanExpr";
 import * as leanGrade from "./leanGrade";
 import { gradeStackIsFrameIndependent } from "./leanGrade";
-import type { LeanOptions, LeanProbed } from "./leanOptions";
+import type { LeanOptions } from "./leanOptions";
 import * as leanStills from "./leanStills";
 import type { Timeline } from "./model";
 import { buildAudioRenderCommand, buildLeanRenderCommand, buildRenderCommand } from "./render";
@@ -125,9 +125,10 @@ describe("F-B: the grade of a held picture with a LUT", () => {
     }
   });
 
-  it("(evidence) the text that is refused", () => {
+  it("(evidence, was the finding) the quoted form the builder writes for a path that needs escaping is accepted now, and a separator or an expression in the path is not", () => {
     expect(gradeStackIsFrameIndependent(["lut3d=file=/luts/a.cube"])).toBe(true);
-    expect(gradeStackIsFrameIndependent(["lut3d=file='C\\:/Users/me/a.cube'"])).toBe(false);
+    expect(gradeStackIsFrameIndependent(["lut3d=file='C\\:/Users/me/a.cube'"])).toBe(true);
+    expect(gradeStackIsFrameIndependent(["lut3d=file=a,b.cube"])).toBe(false);
   });
 });
 
@@ -246,22 +247,22 @@ describe("F-C: a cover-zoom picture with a crop", () => {
       ]),
     ]);
 
-  it("DEFECT: the question put to ffmpeg includes the crop that runs before the pre-scale (today: the pre-scale of the whole picture is measured)", () => {
+  it("the answer to the finding: a cover zoom of a cropped picture is not held (the probe's question has no crop, so its answer is not the size that would be held): no question, today's read, named not_proven", () => {
     const asked: LeanOptions = { stills: true, requests: [] };
-    buildRenderCommand(cropped(0.45), OUT, { lean: asked });
-    expect(asked.requests).toHaveLength(1);
-    expect(asked.requests?.[0].filters).toContain("crop=");
+    const first = buildRenderCommand(cropped(0.45), OUT, { lean: asked });
+    expect(asked.requests).toHaveLength(0);
+    expect(first.lean?.kept).toContain("not_proven");
+    expect(first.lean?.ran).not.toContain("stills");
+    expect(argsOf(first)).toContain("-loop 1 -framerate");
   });
 
-  it("(evidence) the loop is taken on the answer for the UNcropped picture, the crop sits in front of the pre-scale in the graph", () => {
-    const asked: LeanOptions = { stills: true, requests: [] };
-    buildRenderCommand(cropped(0.45), OUT, { lean: asked });
-    const key = asked.requests?.[0].key ?? "";
-    // what ffmpeg would answer for a 4000x3000 picture pre-scaled to cover 256x144 (2 x 1.3 largest box): the whole picture's size, a few hundred thousand pixels
-    const probed = new Map<string, LeanProbed>([
-      [key, { fmt: "yuvj420p", source: [4000, 3000], scaled: [256, 192] }],
+  it("(control) a cropped picture in a fixed box is fitted to exactly its box whatever the crop, so it is held, with the crop in front of the repeat in the graph", () => {
+    const t = project([
+      videoTrack([
+        picture("/p0.jpg", 0, 2, { crop: { left: 0.2, right: 0.2, top: 0, bottom: 0 } }),
+      ]),
     ]);
-    const plan = buildRenderCommand(cropped(0.45), OUT, { lean: { stills: true, probed } });
+    const plan = buildRenderCommand(t, OUT, { lean: { stills: true } });
     expect(plan.lean?.ran).toContain("stills");
     const chain = plan.filterComplex.split(";").find((c) => c.startsWith("[0:v]")) ?? "";
     expect(chain.indexOf("crop=iw*")).toBeGreaterThan(-1);
@@ -642,7 +643,7 @@ function canon(plan: Plan, strip: { windows?: boolean; caps?: boolean; loops?: b
   const args = (list: readonly string[]): string[] => {
     const out: string[] = [];
     for (let i = 0; i < list.length; i++) {
-      if (strip.caps && list[i] === "-threads:a" && list[i + 1] === "1") {
+      if (strip.caps && list[i] === "-threads:v" && list[i + 1] === "1") {
         i += 1;
         continue;
       }
@@ -843,9 +844,14 @@ describe("composition: each switch alone is the reference plus its own edit (ran
     expect(built).toBeGreaterThan(100);
   }, 120_000);
 
-  it("fix 5 alone adds `-threads:a 1` before sound-only inputs and nothing else; fix 2 alone adds only enable windows and a shorter dip layer", () => {
+  it("fix 5 alone changes nothing (no picture is held without fix 3) and with fix 3 adds `-threads:v 1` before each held picture and nothing else on the one-pass engine; fix 2 alone adds only enable windows and a shorter dip layer", () => {
     let capped = 0;
     let windowed = 0;
+    const threadsV = (plan: Plan): number =>
+      [plan.args, ...(plan.steps ?? []).map((s) => s.args)].reduce(
+        (n, list) => n + list.filter((a, i) => a === "-threads:v" && list[i + 1] === "1").length,
+        0,
+      );
     fc.assert(
       fc.property(mixedArb, (m) => {
         const { t, options } = assemble(m);
@@ -853,15 +859,30 @@ describe("composition: each switch alone is the reference plus its own edit (ran
         const dec = attempt(() =>
           buildRenderCommand(t, OUT, { ...options, lean: { ...ALL_OFF, decoders: true } }),
         );
+        const held = attempt(() =>
+          buildRenderCommand(t, OUT, { ...options, lean: { ...ALL_OFF, stills: true } }),
+        );
+        const both = attempt(() =>
+          buildRenderCommand(t, OUT, {
+            ...options,
+            lean: { ...ALL_OFF, stills: true, decoders: true },
+          }),
+        );
         const fades = attempt(() =>
           buildRenderCommand(t, OUT, { ...options, lean: { ...ALL_OFF, fades: true } }),
         );
         if (!ref.ok) return;
-        expect(dec.ok && fades.ok).toBe(true);
-        if (!dec.ok || !fades.ok) return;
-        expect(canon(dec.value, { caps: true })).toBe(canon(ref.value, {}));
+        expect(dec.ok && held.ok && both.ok && fades.ok).toBe(true);
+        if (!dec.ok || !held.ok || !both.ok || !fades.ok) return;
+        expect(canon(dec.value, {})).toBe(canon(ref.value, {}));
+        expect(dec.value.lean?.ran).toEqual([]);
+        expect(canon(both.value, { caps: true })).toBe(canon(held.value, { caps: true }));
+        const streamed = (options as { engine?: string }).engine === "partition-pipes-v1";
+        expect(threadsV(both.value) - threadsV(held.value)).toBe(
+          streamed ? 0 : tailsOf(held.value),
+        );
         expect(canon(fades.value, { windows: true })).toBe(canon(ref.value, {}));
-        if (dec.value.lean?.ran.includes("decoders")) capped += 1;
+        if (both.value.lean?.ran.includes("decoders")) capped += 1;
         if (fades.value.lean?.ran.includes("fades")) windowed += 1;
       }),
       { numRuns: 250, seed: 20261116 },
@@ -1043,20 +1064,26 @@ describe("Q9: the decoder cap", () => {
     timeline_out: b,
   });
 
-  it("an audio clip and a video clip of the SAME file are two inputs: only the audio clip's carries -threads:a, and only that one", () => {
+  it("a held picture carries one decoder thread on the one-pass engine; a sound-only input never carries a cap; a video clip and an audio clip of the SAME file keep 0.27.0's options", () => {
     const t = project([
       videoTrack([
-        { media_ref: "/m.mp4", source_in: 0, source_out: 2, timeline_in: 0, timeline_out: 2 },
+        picture("/p.jpg", 0, 2),
+        { media_ref: "/m.mp4", source_in: 0, source_out: 2, timeline_in: 2, timeline_out: 4 },
       ]),
-      { id: "a", kind: "audio", z: 0, clips: [sound("a0", "/m.mp4", 0, 2)] },
+      { id: "a", kind: "audio", z: 0, clips: [sound("a0", "/m.mp4", 0, 4)] },
     ]);
-    const plan = buildRenderCommand(t, OUT, { lean: { decoders: true } });
-    expect(argsOf(plan).split("-threads:a 1 -i /m.mp4")).toHaveLength(2);
-    expect(argsOf(plan).split("-i /m.mp4")).toHaveLength(3);
-    expect(plan.sources).toHaveLength(2);
+    const base = buildRenderCommand(t, OUT);
+    const plan = buildRenderCommand(t, OUT, { lean: { stills: true, decoders: true } });
+    expect(argsOf(plan)).toContain("-threads:v 1 -i /p.jpg");
+    expect(argsOf(plan)).not.toContain("-threads:a");
+    const mp4 = (a: string): string[] =>
+      a.match(/-ss [\d.]+ -to [\d.]+(?: -threads:\w \d+)* -i \/m\.mp4/g) ?? [];
+    expect(mp4(argsOf(plan))).toHaveLength(2);
+    expect(mp4(argsOf(plan))).toEqual(mp4(argsOf(base)));
+    expect(plan.sources).toHaveLength(3);
   });
 
-  it("the one-pass engine's own fallback to parts (a command over the length line) caps the sound inputs in its parts; the streamed engine and the audio pass do not", () => {
+  it("the one-pass engine's own fallback to parts (a command over the length line) caps nothing but held pictures; the streamed engine and the audio pass add nothing", () => {
     const audio = Array.from({ length: 220 }, (_, i) =>
       sound(`s${i}`, `/media/${"x".repeat(100)}_${i}.mp3`, i * 2, i * 2 + 2),
     );
@@ -1066,21 +1093,21 @@ describe("Q9: the decoder cap", () => {
       ]),
       { id: "a", kind: "audio", z: 0, clips: audio },
     ]);
+    const everyCommand = (p: { args: string[]; steps?: Array<{ args: string[] }> }) => [
+      p.args,
+      ...(p.steps ?? []).map((s) => s.args),
+    ];
     const fallback = buildRenderCommand(t, OUT, {
       engine: "file-sequence-v1",
       lean: { decoders: true },
     });
     expect(fallback.steps?.length).toBeGreaterThanOrEqual(1);
-    expect((fallback.steps ?? []).some((s) => s.args.includes("-threads:a"))).toBe(true);
+    for (const a of everyCommand(fallback)) expect(a).not.toContain("-threads:a");
     const streamed = buildRenderCommand(t, OUT, {
       engine: "partition-pipes-v1",
       lean: { decoders: true },
     });
-    expect(
-      [streamed.args, ...(streamed.steps ?? []).map((s) => s.args)].some((a) =>
-        a.includes("-threads:a"),
-      ),
-    ).toBe(false);
+    for (const a of everyCommand(streamed)) expect(a).not.toContain("-threads:a");
     const pass = buildAudioRenderCommand(t, "audio.nut", { lean: { decoders: true } });
     expect(pass.args).not.toContain("-threads:a");
   });
@@ -1091,22 +1118,6 @@ describe("Q9: the decoder cap", () => {
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------------
 describe("Q10: the record", () => {
   const ON: LeanOptions = { fades: true, dip: true, stills: true, grade: true, decoders: true };
-  const sound = {
-    id: "a",
-    kind: "audio",
-    z: 0,
-    clips: [
-      {
-        id: "a0",
-        kind: "audio",
-        media_ref: "/a.mp3",
-        source_in: 0,
-        source_out: 2,
-        timeline_in: 0,
-        timeline_out: 2,
-      },
-    ],
-  };
   const video = (extra: Record<string, unknown> = {}, path = "/v.mp4") => ({
     media_ref: path,
     source_in: 0,
@@ -1149,7 +1160,7 @@ describe("Q10: the record", () => {
     },
     {
       switch: "decoders",
-      has: project([videoTrack([video()]), sound]),
+      has: project([videoTrack([picture("/p.jpg", 0, 2)])]),
       hasNot: project([videoTrack([video()])]),
     },
   ];
@@ -1172,6 +1183,22 @@ describe("Q10: the record", () => {
     });
 
   it("a second build with the same options object gives the same record, the same request list and the same text", () => {
+    const sound = {
+      id: "a",
+      kind: "audio",
+      z: 0,
+      clips: [
+        {
+          id: "a0",
+          kind: "audio",
+          media_ref: "/a.mp3",
+          source_in: 0,
+          source_out: 2,
+          timeline_in: 0,
+          timeline_out: 2,
+        },
+      ],
+    };
     const t = project([
       videoTrack([picture("/z.jpg", 0, 2, { transform: zoomOf(2), color: { exposure: 0.1 } })]),
       sound,

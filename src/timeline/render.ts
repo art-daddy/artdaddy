@@ -3126,8 +3126,9 @@ async function prepareRender(
 }
 
 /** Build an export's plan with the lean render paths (leanOptions.ts): the six switches as they stand now and, when the builder needs ffmpeg to tell it
- *  something before it can take a lean path (the size of a zooming picture), one round of answers and a second build. Every answer that does not come
- *  leaves its clip on 0.27.0's recipe (counted as unknown). A plan with the zoom switch off is built once and asks nothing. */
+ *  something before it can take a lean path (the pre-scaled size of a picture that zooms: the zoom mask's box, or the size of the one frame a held
+ *  picture would keep), one round of answers and a second build. Every answer that does not come leaves its clip on 0.27.0's recipe (counted as
+ *  unknown). A plan whose switches that ask (zoom, stills) are off is built once and asks nothing. */
 export async function buildLeanRenderCommand(
   ctx: Pick<ClientToolContext, "runner" | "signal">,
   raw: Timeline,
