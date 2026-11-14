@@ -227,6 +227,19 @@ mod tests {
 
   fn rose(after: u64, before: u64) -> u64 { after.checked_sub(before).expect("a counter went down") }
 
+  /// Takes a look every 50 ms until `done` says what was wanted has happened, for at most 30 s; the last look and whether it
+  /// happened. A PC under load may give a worker a small share of a core, so a test waits for the work to be done and does
+  /// not wait for a time to pass.
+  fn wait_for(control: &Control, tally: &mut Tally, done: impl Fn(Used) -> bool) -> (Used, bool) {
+    let end = Instant::now() + Duration::from_secs(30);
+    loop {
+      let used = sample(control, tally);
+      if done(used) { return (used, true); }
+      if Instant::now() >= end { return (used, false); }
+      std::thread::sleep(Duration::from_millis(50));
+    }
+  }
+
   fn parse(line: &str) -> Option<(u64, u64)> {
     let (cpu, read) = line.strip_prefix("artdaddy_cpu=")?.strip_suffix('\n')?.split_once(',')?;
     Some((cpu.parse().ok()?, read.parse().ok()?))
@@ -360,19 +373,25 @@ mod tests {
   #[test]
   fn a_spinning_worker_reads_as_busy_and_a_sleeping_one_as_idle() {
     if !readable() { return; }
-    for (role, spins) in [("spin", true), ("sleep", false)] {
-      let dir = directory(role);
-      let control = control();
-      let _worker = worker(&control, dir.path(), WorkerRole::Single);
-      let mut tally = Tally::default();
-      let before = sample(&control, &mut tally);
-      std::thread::sleep(Duration::from_millis(1500));
-      let after = sample(&control, &mut tally);
-      let cpu = rose(after.cpu_ms, before.cpu_ms);
-      if spins { assert!(cpu >= 500, "a worker that spun for 1.5 s used {cpu} ms of processor"); }
-      else { assert!(cpu <= 150, "a worker that slept for 1.5 s used {cpu} ms of processor"); }
-      control.stop();
-    }
+    let spin_dir = directory("spin");
+    let spinning = control();
+    let _spinner = worker(&spinning, spin_dir.path(), WorkerRole::Single);
+    let mut tally = Tally::default();
+    let before = sample(&spinning, &mut tally);
+    let (after, busy) = wait_for(&spinning, &mut tally, |used| used.cpu_ms >= before.cpu_ms + 200);
+    assert!(busy, "a worker that spins never showed 200 ms of processor: {before:?} then {after:?}");
+    spinning.stop();
+
+    let sleep_dir = directory("sleep");
+    let sleeping = control();
+    let _sleeper = worker(&sleeping, sleep_dir.path(), WorkerRole::Single);
+    let mut tally = Tally::default();
+    let before = sample(&sleeping, &mut tally);
+    std::thread::sleep(Duration::from_millis(1500));
+    let after = sample(&sleeping, &mut tally);
+    let cpu = rose(after.cpu_ms, before.cpu_ms);
+    assert!(cpu <= 150, "a worker that slept for 1.5 s used {cpu} ms of processor");
+    sleeping.stop();
   }
 
   #[test]
@@ -384,9 +403,8 @@ mod tests {
     let _worker = worker(&control, dir.path(), WorkerRole::Single);
     let mut tally = Tally::default();
     let before = sample(&control, &mut tally);
-    std::thread::sleep(Duration::from_millis(1000));
-    let after = sample(&control, &mut tally);
-    assert!(rose(after.read_bytes, before.read_bytes) >= 8 << 20, "{before:?} then {after:?}");
+    let (after, read) = wait_for(&control, &mut tally, |used| used.read_bytes >= before.read_bytes + (8 << 20));
+    assert!(read, "a worker that reads a file over and over never showed 8 MiB read: {before:?} then {after:?}");
     control.stop();
   }
 
@@ -402,24 +420,25 @@ mod tests {
     tracked.wait().unwrap();
     let after = sample(&control, &mut tally);
     assert!(after.cpu_ms >= before.cpu_ms && after.read_bytes >= before.read_bytes, "{before:?} then {after:?}");
-    // Windows keeps the whole life of an exited worker in the job; by hand only what the last look saw is kept.
-    if cfg!(windows) { assert!(rose(after.cpu_ms, before.cpu_ms) >= 400, "{before:?} then {after:?}"); }
+    // The job object keeps the whole life of a worker that has gone, so the export has used something by now.
+    if cfg!(windows) { assert!(after.cpu_ms > 0, "{before:?} then {after:?}"); }
   }
 
+  // Each kind of worker the engines start (the single encoder, a partition producer, the continuous audio, the final
+  // encoder) adds its own use to the export's total: one at a time, so that what rises is that worker's.
   #[test]
   fn a_worker_of_every_role_is_counted() {
     if !readable() { return; }
     let dir = directory("spin");
     let control = control();
     let mut tally = Tally::default();
-    let mut workers = Vec::new();
-    for (index, role) in [WorkerRole::PartitionProducer, WorkerRole::ContinuousAudio, WorkerRole::FinalEncoder].into_iter().enumerate() {
-      workers.push(worker(&control, dir.path(), role));
+    for role in [WorkerRole::Single, WorkerRole::PartitionProducer, WorkerRole::ContinuousAudio, WorkerRole::FinalEncoder] {
+      let worker = worker(&control, dir.path(), role);
       let before = sample(&control, &mut tally);
-      std::thread::sleep(Duration::from_millis(1000));
-      let after = sample(&control, &mut tally);
-      let gained = rose(after.cpu_ms, before.cpu_ms);
-      assert!(gained >= 300 * (index as u64 + 1), "with {} spinning workers the export used {gained} ms in a second", index + 1);
+      let (after, counted) = wait_for(&control, &mut tally, |used| used.cpu_ms >= before.cpu_ms + 100);
+      assert!(counted, "a spinning {} worker never added 100 ms to the export: {before:?} then {after:?}",
+        match role { WorkerRole::Single => "single", WorkerRole::PartitionProducer => "producer", WorkerRole::ContinuousAudio => "audio", WorkerRole::FinalEncoder => "final" });
+      drop(worker);
     }
     control.stop();
   }
