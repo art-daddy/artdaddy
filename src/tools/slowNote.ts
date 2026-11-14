@@ -112,12 +112,15 @@ export function about(seconds: number): string {
   return `about ${lengthText(seconds)}`;
 }
 
+/** A speed past this is not a measurement a machine can make: no speed is claimed. */
+const MAX_SPEED = 1000;
+
 /** "0.3×": the measured speed against real time, from the rate (seconds of work per second of audio).
  *  Null until a rate is measured. */
 export function speedText(rate: number | null): string | null {
   if (rate === null || !Number.isFinite(rate) || rate <= 0) return null;
   const speed = 1 / rate;
-  if (!Number.isFinite(speed)) return null;
+  if (!Number.isFinite(speed) || speed > MAX_SPEED) return null;
   if (speed >= 10) return `${Math.round(speed)}×`;
   if (speed >= 0.1) return `${Number(speed.toFixed(1))}×`;
   return `${Math.max(0.01, Number(speed.toFixed(2)))}×`;

@@ -346,11 +346,13 @@ describe("the speed rows", () => {
     expect(speedText(3.7)).toBe("0.3×"); // the field's median processor-only PC: 0.27 times real time
   });
 
-  it("claim no speed until a rate is measured", () => {
-    for (const bad of [null, 0, -1, NaN, Infinity, Number.MIN_VALUE]) {
+  it("claim no speed until a rate is measured, or when the rate is no measurement at all", () => {
+    // 1e-300 is a speed of 1e300 times real time: a number like that is a broken measurement.
+    for (const bad of [null, 0, -1, NaN, Infinity, Number.MIN_VALUE, 1e-300, 1e-4]) {
       expect(speedLine(bad)).toBeNull();
       if (bad !== null) expect(speedText(bad)).toBeNull();
     }
+    expect(speedText(1 / 999)).toBe("999×");
   });
 
   it("is a number and a length for any measured rate, and a slower PC never reads as faster", () => {

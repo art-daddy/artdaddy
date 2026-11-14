@@ -331,7 +331,7 @@ describe("numbers from the engine", () => {
           try {
             fireEvent.click(chip());
             expect(`${chip().textContent} | ${popover().textContent}`).not.toMatch(
-              /NaN|Infinity|undefined|null|\[object|-\d/,
+              /NaN|Infinity|undefined|null|\[object|-\d|\de[+-]?\d/,
             );
           } finally {
             unmount();
