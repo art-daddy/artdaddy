@@ -90,7 +90,22 @@ function lastRunWasOnProcessor(): boolean {
   }
 }
 
+const QUIET: RunWatch = {
+  onStdout: () => undefined,
+  finish: () => ({ startupS: null, liveProjectedS: null }),
+};
+
+/** Watch one run. If anything at all goes wrong in setting the watch up, the run is simply not watched:
+ *  an observer can never fail the transcription it observes. */
 export function watchSpeechRun(input: WatchInput): RunWatch {
+  try {
+    return watchRun(input);
+  } catch {
+    return QUIET;
+  }
+}
+
+function watchRun(input: WatchInput): RunWatch {
   const now = input.now ?? Date.now;
   const launchedAt = now();
   const monitor = createSpeechMonitor({ launchedAt, spanS: input.spanS });

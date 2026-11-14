@@ -1295,7 +1295,9 @@ function fileLabel(src: string): string {
  *  run's own length, exactly: no probe of the source is needed. */
 async function wavSeconds(ctx: ClientToolContext, wav: string): Promise<number | null> {
   try {
-    const seconds = ((await ctx.store.byteSize(wav)) - 44) / 32_000;
+    const bytes = await ctx.store.byteSize(wav);
+    if (bytes === null) return null;
+    const seconds = (bytes - 44) / 32_000;
     return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
   } catch {
     return null;
@@ -1336,7 +1338,7 @@ async function modelFor(ctx: ClientToolContext, size: string): Promise<string> {
 /** An engine run as its caller reads it: what the process reported, and how the run ended when the person
  *  (Cancel) or the live check stopped it, so a stopped run is never taken for a crash of the graphics
  *  chip, and what the monitor measured, so the pace this PC keeps learns the start-up too. */
-export type EngineRun = CommandResult & {
+type EngineRun = CommandResult & {
   stoppedBy?: StopReason;
   startupS?: number;
   liveProjectedS?: number;

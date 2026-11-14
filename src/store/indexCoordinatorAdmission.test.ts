@@ -36,8 +36,11 @@ const {
   processImportedMedia: vi.fn(async () => false),
   clearSourceUrlCache: vi.fn(),
   ensureTranscript: vi.fn(async (..._a: unknown[]) => ({ parsed: {}, existed: false })),
-  ensureTranscripts: vi.fn(async (_ctx: unknown, refs: readonly string[], ..._rest: unknown[]) =>
-    refs.map(() => ({ ok: true as const, existed: false })),
+  ensureTranscripts: vi.fn(
+    async (_ctx: unknown, refs: readonly string[], ..._rest: unknown[]) =>
+      refs.map(() => ({ ok: true as const, existed: false })) as Array<
+        { ok: true; existed: boolean } | { ok: false; error: unknown }
+      >,
   ),
   runWhisper: vi.fn(async (..._a: unknown[]) => ({})),
   adoptTranscriptions: vi.fn(async () => 0),
