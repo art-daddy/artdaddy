@@ -75,18 +75,6 @@ const done = (over: Partial<PcCheckRecord> = {}): PcCheckRecord => ({
   cls: "ok",
   ...over,
 });
-const unfinished: PcCheckRecord = {
-  revision: 1,
-  build: "artdaddy@test",
-  atMs: NOW,
-  cores: 8,
-  outcome: "unfinished",
-  aFps: null,
-  bFps: null,
-  cFps: null,
-  rHat: null,
-  cls: "unfinished",
-};
 
 /** The real PC check service, quiet and ready, whose speed test the test answers by hand. */
 function checkWorld() {

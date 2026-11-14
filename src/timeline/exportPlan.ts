@@ -139,8 +139,9 @@ export interface Plan {
   /** The predicted peak at `rung`, or null when nothing was measured. */
   readonly predictedBytes: number | null;
   /** Where the prediction comes from: this PC measured this rung, measured another and converted, never
-   *  measured this shape (the reserve decides), or the PC itself could not be measured. */
-  readonly basis: "measured" | "derived" | "unmeasured" | "unknown_pc";
+   *  measured this shape (the reserve decides), the PC itself could not be measured, or (3c) this PC measured
+   *  nothing and the project's shape predicted it (shapeRung.ts). */
+  readonly basis: "measured" | "derived" | "unmeasured" | "unknown_pc" | "shape";
   /** Whether `rung` fits under the ceiling (or nothing is known that says it does not). */
   readonly fits: boolean;
   /** The free memory the gentlest rung needs: what the memory question calls "Needed". Null when no number

@@ -99,7 +99,7 @@ let memo: {
 
 /** What the project asks of the exporter, when the open timeline is the project that is being priced: the open timeline says what the caller's workload says, field for field.
  *  A clip's own export, a section of the project or a timeline that has changed since do not, and are priced without a shape (on a prior, with the range widened). */
-function shapeOf(workload: RenderWorkload, deps: RouteEstimatesDeps): CostShape | null {
+export function shapeOf(workload: RenderWorkload, deps: RouteEstimatesDeps): CostShape | null {
   try {
     const timeline = deps.openTimeline();
     if (!isObject(timeline)) return null;

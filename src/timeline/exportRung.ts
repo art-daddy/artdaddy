@@ -17,6 +17,8 @@ import {
   type Rung,
 } from "./exportPlan";
 import type { RenderWorkload } from "./renderPlan";
+import type { CostShape } from "./costShape";
+import { hasMeasuredPeak, shapeStart, type ShapeGate } from "./shapeRung";
 
 export interface RungDecision {
   readonly rung: Rung;
@@ -60,6 +62,12 @@ export async function decideRung(input: {
   /** The remote switch (`plan_rung`): off is today's behaviour. */
   enabled: boolean;
   resolve?: Resolve;
+  /** The project's cost shape, for the memory prior (shapeRung.ts). Absent: the open project's, when it is the project being exported; null: none. */
+  shape?: CostShape | null;
+  /** Logical processors of this PC, for the prior. Absent: this PC's. */
+  cores?: number;
+  /** What the prior must pass to start at a gentler rung (absent: the app's picture gate and the code's own arguments). */
+  gate?: ShapeGate;
 }): Promise<RungDecision> {
   const engineLast = lastRungOf(input.engine);
   const bounded = input.ladder
@@ -91,6 +99,21 @@ export async function decideRung(input: {
   }
   const raw = resources?.available_memory_bytes;
   const freeBytes = typeof raw === "number" && Number.isFinite(raw) && raw >= 0 ? raw : null;
-  const plan = planRung({ samples, freeBytes, minRung: input.minRung, ladder });
+  const baseline = planRung({ samples, freeBytes, minRung: input.minRung, ladder });
+  // Where this PC measured nothing for this shape, the project's shape stands in: it can only start the export gentler, and only where the picture gate allows that rung (shapeRung.ts).
+  const shaped = hasMeasuredPeak(samples)
+    ? null
+    : await shapeStart({
+        baseline,
+        workload: input.workload,
+        engine: input.engine,
+        ladder,
+        freeBytes,
+        minRung: input.minRung,
+        shape: input.shape,
+        cores: input.cores,
+        gate: input.gate,
+      });
+  const plan = shaped ?? baseline;
   return { rung: plan.rung, plan, freeBytes, ladder, maxRung };
 }
