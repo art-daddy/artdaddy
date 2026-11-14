@@ -3890,7 +3890,7 @@ export async function exportTimelineTool(
     },
   );
   // If it fails, one click on the chat card starts it again.
-  offerExportRetry(sub.job_id, retryOf(callArgs, ctx, moved));
+  offerExportRetry(sub.job_id, retryOf(callArgs, ctx, moved, retrying?.plain));
 
   // Don't leak the OS Downloads path to the model — return only the filename. When the caller
   // NAMED the destination it already knows the path, so there is nothing to disclose either way.
@@ -3941,8 +3941,15 @@ export async function exportTimelineTool(
  *  session has changed, with the plan told the rung to start at. It runs through the `export` tool, so the
  *  questions an export asks and the way a refusal is reported are the first attempt's own. `args` is the call as it
  *  was made, and `placed` the folder the person had chosen for it, if any: a Try again starts in that folder, and the
- *  card's Save somewhere else replaces it for this and every later try. */
-function retryOf(args: Args, ctx: ClientToolContext, placed?: MovedTo): ExportRetry {
+ *  card's Save somewhere else replaces it for this and every later try. `staysPlain` says this export was itself started
+ *  plain (a Try again of one that ran a lean render path): it has no lean path of its own on its record, so every Try again
+ *  after it stays plain, as the folder does. */
+function retryOf(
+  args: Args,
+  ctx: ClientToolContext,
+  placed?: MovedTo,
+  staysPlain?: true,
+): ExportRetry {
   const request = { ...args };
   const later = ctx.detach?.() ?? ctx;
   return async (minRung, from, options) => {
@@ -3963,7 +3970,7 @@ function retryOf(args: Args, ctx: ClientToolContext, placed?: MovedTo): ExportRe
         from,
         minRung,
         ...(options.processor ? { processor: true as const } : {}),
-        ...(options.plain ? { plain: true as const } : {}),
+        ...(options.plain || staysPlain ? { plain: true as const } : {}),
       },
       folder ? { dir: folder } : undefined,
     );

@@ -1,8 +1,10 @@
 // The person's Try again after an export that ran a lean render path builds 0.27.0's recipe (Phase 3a: DESIGN-3a section 7, rollback layer 2): the one
-// click that makes sure a lean path cannot fail the same project twice. The plumbing has three links, and each test below fails if its link is missing:
+// click that makes sure a lean path cannot fail the same project twice. The plumbing has four links, and each test below fails if its link is missing:
 //   1. the queue remembers, on the export's record, that its plan ran a lean path (`ExportRecord.lean`, from `meta.plan.lean.ran`),
-//   2. `retryExport` hands `plain` to the retry function when the failed record has it, and
-//   3. the export tool (`retryOf` -> `exportTool` -> `exportTimelineTool` -> `prepareRender`) builds the plan with `lean: { plain: true }`.
+//   2. `retryExport` hands `plain` to the retry function when the failed record has it,
+//   3. the export tool (`retryOf` -> `exportTool` -> `exportTimelineTool` -> `prepareRender`) builds the plan with `lean: { plain: true }`, and
+//   4. the export the tool starts as a plain retry offers its own Try again as plain too (`retryOf`'s `staysPlain`): a plain export ran no lean path, so its
+//      record says nothing, and without this the second Try again of a chain would build the lean recipe again.
 // Part 1 drives the real queue with a fake retry function (what the card's button calls). Part 2 drives the real tool, plan and queue against a fake
 // supervisor and reads what was handed to ffmpeg. The oracle for "0.27.0's recipe" is not the code under test: it is the SAME tool run with every lean
 // switch off, which the builder's own tests and the frozen corpus pin to 0.27.0 byte for byte. Nothing here runs ffmpeg or reaches a vendor.
@@ -707,5 +709,64 @@ describe("the export tool: the retry builds 0.27.0's command", () => {
     expect(story).toEqual(expect.arrayContaining(["requested:menu", "retry:try_again"]));
     expect((report.trace as Any[]).find((e) => e.e === "retry")).toMatchObject({ n: 0, m: 1 });
     expect(await t.fs.exists("C:/Users/test/Downloads/a.mp4")).toBe(true);
+  });
+});
+
+// The chain: the card keeps offering Try again on every export it starts, so a project that failed with a lean path may be tried again several times (down the
+// rungs for lack of memory, then for another reason). The lean record lives on the export that RAN a lean path, and a plain export has none; so the rule that
+// a lean path cannot fail the same project twice needs the plain recipe to be carried down the chain, the way the folder the person chose is.
+describe("the Try again chain: once an export has been made plain, every Try again after it is plain", () => {
+  it("down the whole ladder for lack of memory: lean at the normal rung, then plain at the gentle and at the gentlest rung", async () => {
+    const t = await world();
+    leanSwitches(true);
+    let current = await t.exportNow("a");
+    const runs: Look[] = [];
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await flush();
+      runs.push(await t.look(t.jobs.submitted.at(-1)!));
+      if (attempt === 2) break;
+      await t.failWith(current.job_id, FLOOR);
+      await retryExport(current.job_id);
+      current = { job_id: listExportRecords().at(-1)!.job_id };
+    }
+    expect(runs.map((run) => run.rung)).toEqual([0, 1, 2]);
+    expect(runs[0].lean?.ran).toContain("zoom");
+    expect(runs[1].lean).toEqual({ ran: [], kept: [] });
+    expect(runs[2].lean).toEqual({ ran: [], kept: [] });
+    expect(runs[2].graph).toBe(runs[1].graph);
+    expect(runs[2].graph).toBe(await t.todaysGraph());
+    expect(runs[2].graph).not.toBe(runs[0].graph);
+    expect(t.probes).toHaveLength(1); // only the first try ever asked ffmpeg anything
+  });
+
+  it("through every kind of retry: a try without a lean path, then one with, then plain, then plain again after a failure of another kind", async () => {
+    const t = await world();
+    leanSwitches(false); // the first try runs no lean path: 0.27.0's recipe
+    const first = await t.exportNow("a");
+    await flush();
+    expect((await t.look(t.jobs.submitted[0])).lean?.ran).toEqual([]);
+    await t.failWith(first.job_id, GRAPH_REFUSED);
+
+    leanSwitches(true); // switched on before Try again: nothing had run lean, so this one is built with the lean paths
+    await retryExport(first.job_id);
+    await flush();
+    const second = await t.look(t.jobs.submitted[1]);
+    expect(second.lean?.ran).toContain("zoom");
+    await t.failWith(listExportRecords().at(-1)!.job_id, GRAPH_REFUSED);
+
+    await retryExport(listExportRecords().at(-1)!.job_id); // a lean path ran and failed: plain
+    await flush();
+    const third = await t.look(t.jobs.submitted[2]);
+    expect(third.lean).toEqual({ ran: [], kept: [] });
+    expect(listExportRecords().at(-1)).not.toHaveProperty("lean"); // a plain export has no lean path to remember
+    await t.failWith(listExportRecords().at(-1)!.job_id, DISK);
+
+    await retryExport(listExportRecords().at(-1)!.job_id); // the plain export failed for another reason: still plain
+    await flush();
+    const fourth = await t.look(t.jobs.submitted[3]);
+    expect(fourth.lean).toEqual({ ran: [], kept: [] });
+    expect(fourth.graph).toBe(third.graph);
+    expect(fourth.graph).toBe(await t.todaysGraph());
+    expect(t.probes).toHaveLength(1); // only the second try asked: the first had every switch off, and a plain one never asks
   });
 });
