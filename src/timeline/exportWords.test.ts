@@ -287,6 +287,20 @@ describe("what Try again will do, in words", () => {
         expect(describeTryAgain(reason, rung)).toBe("");
     }
   });
+
+  it("says a stop at the ceiling of the no-progress rule starts again as it was, whatever setting it ran at, and promises nothing else", () => {
+    for (const rung of [undefined, 0, 1, 2] as const)
+      for (const last of [0, 1, 2]) {
+        const line = describeTryAgain("time_limit", rung, last, true);
+        expect(line).toBe("Try again starts it again with the same settings.");
+        expect(line).not.toMatch(/gentler|lighter|less memory|faster|quicker/);
+      }
+    // The ceiling is a stop for time: any other reason keeps saying nothing about it.
+    for (const reason of EXPORT_REASON_CODES) {
+      if (reason === "memory_limit" || reason === "time_limit") continue;
+      expect(describeTryAgain(reason, 0, 2, true)).toBe("");
+    }
+  });
 });
 
 describe("the encoder an export runs on, in words", () => {

@@ -14,6 +14,7 @@ import {
   type ExportResolution,
 } from "../timeline/exportOptions";
 import { listExportRecords, subscribeExports } from "../timeline/exportQueue";
+import { attempts } from "../timeline/exportAttempts";
 import {
   describeDialogProgress,
   describeExpected,
@@ -397,12 +398,13 @@ function Progress({
   }, [running]);
 
   const own = running && jobId ? liveFeedOf({ live, finishing }, jobId) : null;
-  // Its place in line, while it waits for its turn (the same line the chat card counts).
+  // Its place in line, while it waits for its turn (the same line the chat card counts). The queue lists the live attempt, and
+  // the dialog holds the export's first attempt's id (exportAttempts.ts): an export the app started again waits as its new attempt.
   const place =
     running && jobId && own === null
       ? rows
           .filter((r) => r.state === "queued" && !r.cancelling)
-          .findIndex((r) => r.job_id === jobId) + 1
+          .findIndex((r) => r.job_id === attempts.current(jobId)) + 1
       : 0;
   const shown =
     phase === "preparing" || phase === "rendering"

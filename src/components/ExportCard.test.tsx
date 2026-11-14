@@ -585,6 +585,42 @@ describe("ExportCard", () => {
       expect(screen.queryByText(/gentler setting|gentlest setting/)).toBeNull();
     });
 
+    // A busy export the app stopped at the ceiling of its no-progress rule is started again as it was (a gentler setting does
+    // not help a run that was busy and made no picture), so the card must say that and Try again must ask for the same rung.
+    it("says Try again starts it as it was after a stop at the ceiling, and asks for the setting it ran at", async () => {
+      const sub = await failing(
+        "export stopped: it made no new picture for 15 min although the PC stayed busy (stalled)",
+        1,
+      );
+      const asked: number[] = [];
+      offerExportRetry(sub.job_id, async (rung) => {
+        asked.push(rung);
+        return { ok: true };
+      });
+      await whenExportsSettle();
+      render(<ExportCard />);
+      expect(screen.getByText("Try again starts it again with the same settings.")).toBeVisible();
+      expect(screen.queryByText(/gentler setting|gentlest setting/)).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "try again one.mp4" }));
+      await waitFor(() => expect(screen.queryByText("Export stopped")).toBeNull());
+      expect(asked).toEqual([1]);
+    });
+
+    it("still says a gentler setting is coming after a stop for standing still at the idle limit", async () => {
+      const sub = await failing("export stopped: it made no progress for 3 min (stalled)", 1);
+      const asked: number[] = [];
+      offerExportRetry(sub.job_id, async (rung) => {
+        asked.push(rung);
+        return { ok: true };
+      });
+      await whenExportsSettle();
+      render(<ExportCard />);
+      expect(screen.getByText(/Try again uses a gentler setting/)).toBeVisible();
+      fireEvent.click(screen.getByRole("button", { name: "try again one.mp4" }));
+      await waitFor(() => expect(screen.queryByText("Export stopped")).toBeNull());
+      expect(asked).toEqual([2]);
+    });
+
     // Save somewhere else (S3b): after a failure that is about the place the file was going (a drive that
     // filled up, a folder that would not take it), the person can choose another folder and the export
     // starts again there.

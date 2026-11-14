@@ -26,6 +26,7 @@ import {
   restartRow,
   routeRowProblems,
   stopFactsOf,
+  wasCancelAsked,
   type AutoRestartReason,
   type DecideOptions,
   type RestartDecision,
@@ -363,6 +364,29 @@ describe("the app's own stop for standing still, as a reason reads it", () => {
       { numRuns: 300 },
     );
   });
+});
+
+describe("who stopped the export a failure ended: a Cancel, or the app for standing still", () => {
+  // Every combination, written out against the rule in words: a Cancel that was asked is a Cancel whatever the controller says;
+  // an aborted controller is a Cancel unless the app's own stop for standing still did it.
+  const CASES: Array<[boolean, boolean, boolean, boolean]> = [
+    // aborted, appStopped, asked -> a Cancel was asked
+    [false, false, false, false],
+    [false, true, false, false],
+    [true, false, false, true],
+    [true, true, false, false], // the app's own stop aborts the controller, and is no Cancel
+    [false, false, true, true],
+    [false, true, true, true],
+    [true, false, true, true],
+    [true, true, true, true], // a Cancel asked on top of the app's own stop still stops the restart
+  ];
+
+  it.each(CASES)(
+    "aborted %s, stopped by the app %s, Cancel asked %s: a Cancel was asked is %s",
+    (aborted, appStopped, asked, expected) => {
+      expect(wasCancelAsked({ aborted, appStopped, asked })).toBe(expected);
+    },
+  );
 });
 
 describe("stage 1: the PC itself ran short", () => {

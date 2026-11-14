@@ -310,15 +310,18 @@ export function describeChipFailure(audience: "card" | "again" | "assistant"): s
 
 /** What Try again will do after a failure, when it does anything beyond starting again: after running short of
  *  memory or time it uses a gentler setting, and when the setting that failed was already the lightest this export
- *  has it says so rather than promise a lighter run. Nothing for a failure a gentler setting does not touch.
- *  `lastRung` is the gentlest this export has (`gentlestRungOf`): the streamed engine has none, and with the switch
- *  for rungs off nothing gentler is offered. */
+ *  has it says so rather than promise a lighter run. Nothing for a failure a gentler setting does not touch. A stop at
+ *  the ceiling of the no-progress rule (`ceilingStop`) is started again as it was, and says that. `lastRung` is the
+ *  gentlest this export has (`gentlestRungOf`): the streamed engine has none, and with the switch for rungs off
+ *  nothing gentler is offered. */
 export function describeTryAgain(
   reason: ExportReasonCode,
   failedRung: unknown,
   lastRung: number = 2,
+  ceilingStop: boolean = false,
 ): string {
   if (reason !== "memory_limit" && reason !== "time_limit") return "";
+  if (ceilingStop) return "Try again starts it again with the same settings.";
   const ran = failedRung === 1 || failedRung === 2 ? failedRung : 0;
   if (ran >= lastRung)
     return "It was already running at its lightest setting, so trying again will not make it lighter.";

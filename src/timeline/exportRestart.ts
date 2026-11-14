@@ -394,6 +394,17 @@ export function stopFactsOf(
   };
 }
 
+/** Whether anyone asked to Cancel the export that a failure ended: the person, the assistant, or the app quitting. The export's
+ *  controller is aborted by a Cancel and also by the app's own stop for standing still, and that stop is not a Cancel; a Cancel
+ *  is told by having been asked (whatever the controller says), or by the controller being aborted when the app did not do it. */
+export function wasCancelAsked(read: {
+  readonly aborted: boolean;
+  readonly appStopped: boolean;
+  readonly asked: boolean;
+}): boolean {
+  return read.asked || (read.aborted && !read.appStopped);
+}
+
 /** What the failed run says the export needed, for a prediction: where the export stopped at its own limit, at least
  *  the larger of its peak and that limit; where the PC ran short, the peak it reached. Null when it says nothing. */
 export function anchorBytes(

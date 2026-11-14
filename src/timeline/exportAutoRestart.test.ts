@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import { createElement } from "react";
 import { __setExportFlag } from "../api/exportFlags";
 import ExportCard from "../components/ExportCard";
+import ExportDialog from "../components/ExportDialog";
 import { useAuth } from "../store/auth";
 import { useEditor } from "../store/editor";
 import { liveFeedOf, useExportJob } from "../store/exportJob";
@@ -29,8 +30,10 @@ import {
   listExports,
   localDeliveryPort,
   manageExportsTool,
+  offerExportRetry,
   restartDecisions,
   retryExport,
+  submitExport,
   waitForExports,
   whenExportEnds,
   whenExportTelemetrySettles,
@@ -72,10 +75,16 @@ const pc = vi.hoisted(() => ({
 // The client send of the restart facts is a constant that is false until the owner approves the privacy text (rule
 // E3b-18); the tests that pin what the report will say once it is true switch it here.
 const held = vi.hoisted(() => ({ send: false }));
+// What the decision to start again was shown, one entry per failure of an export this page started (refused or not).
+const decided = vi.hoisted(() => [] as Array<Record<string, unknown>>);
 vi.mock("./exportRestart", async (importOriginal) => {
   const real = await importOriginal<typeof import("./exportRestart")>();
   return {
     ...real,
+    decideRestart: (...args: Parameters<typeof real.decideRestart>) => {
+      decided.push(args[0] as unknown as Record<string, unknown>);
+      return real.decideRestart(...args);
+    },
     get SEND_RESTART_FACTS() {
       return held.send;
     },
@@ -102,6 +111,7 @@ vi.mock("../platform/host", async (importOriginal) => {
 
 beforeEach(() => {
   reported.length = 0;
+  decided.length = 0;
   useAuth.setState({ profile: null });
   pc.available = 8 * GIB;
   pc.destinationFree = null;
@@ -210,6 +220,7 @@ async function setup() {
 }
 
 afterEach(async () => {
+  vi.useRealTimers();
   cleanup();
   await resetTestDocuments();
   // A test that failed half way leaves exports running: they are cancelled, and the wait is bounded, so one failure does
@@ -222,7 +233,13 @@ afterEach(async () => {
   // What the PC has learned from the exports of one test must not decide the next one's pre-start check.
   useExportJob.setState({ calibrations: [] });
   useEditor.setState({ projectId: null, store: null });
-  for (const flag of ["auto_restart", "memory_restart", "plan_rung", "restart_streamed"] as const)
+  for (const flag of [
+    "auto_restart",
+    "memory_restart",
+    "plan_rung",
+    "restart_streamed",
+    "idle_rule",
+  ] as const)
     __setExportFlag(flag, true);
 });
 
@@ -665,6 +682,77 @@ describe("the app starts an export again by itself when the PC ran short of memo
   );
 });
 
+// The app's own stop for standing still ends an export through the same controller a Cancel does. What the decision to start
+// again is shown must tell the two apart: the app's stop is a failure (a reason such as the chip's reads it), a Cancel is not.
+describe("the decision to start again is shown the app's own stop for standing still as a stop, and a Cancel as a Cancel", () => {
+  const block = (frame: number, outMs: number) =>
+    `frame=${frame}\nfps=30\nout_time_us=${outMs * 1000}\nspeed=1.0x\nprogress=continue\n`;
+
+  /** An export that makes one picture and then stands still, stopped by today's rule after three minutes. `cancelOnTop`: the
+   *  person's Cancel lands while the app's own stop is being cleaned up. */
+  async function stoppedForStandingStill(cancelOnTop: boolean) {
+    vi.useFakeTimers({ now: 1_000_000 });
+    __setExportFlag("idle_rule", false);
+    try {
+      const t = await setup();
+      const sub = await submitExport({
+        store: t.store,
+        supervisor: t.jobs,
+        via: "chat",
+        dependencies: [],
+        destPath: DEST,
+        stagePath: `${DEST}.partial`,
+        filename: "proj.mp4",
+        meta: {
+          duration_s: 2,
+          width: 1080,
+          height: 1920,
+          fps: 30,
+          quality: "medium",
+          project_id: "",
+          plan: { rung: 0, max_rung: 2, ladder: [0, 1, 2] } as Any,
+        },
+        run: async (signal, id) => {
+          await t.jobs.submit({ id, lane: "export", program: "ffmpeg", args: ["x"], meta: {} });
+          t.jobs.stdout(id, block(6, 200)); // one picture, then nothing
+          await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve()));
+          if (cancelOnTop) cancelExport(id, "person_card");
+          t.jobs.exit(id, 255, "");
+          throw new Error("ffmpeg render failed (code=255)");
+        },
+      });
+      offerExportRetry(sub.job_id, async () => ({ ok: false, error: "not started in this test" }));
+      await vi.advanceTimersByTimeAsync(185_000);
+      await whenExportsSettle();
+      return sub;
+    } finally {
+      __setExportFlag("idle_rule", true);
+      vi.useRealTimers();
+    }
+  }
+
+  it("reads it as a stop: the export was not cancelled, it stood still for three minutes", async () => {
+    const sub = await stoppedForStandingStill(false);
+    const record = listExportRecords().find((r) => r.job_id === sub.job_id);
+    expect(record).toMatchObject({ state: "failed" });
+    expect(record?.error).toMatch(/no progress for 3 min \(stalled\)/);
+    expect(decided).toHaveLength(1);
+    expect(decided[0]).toMatchObject({
+      failure: { code: "time_limit", stopKind: "idle" },
+      request: { aborted: false },
+    });
+  });
+
+  it("still reads a Cancel the person asked on top of the app's own stop as a Cancel", async () => {
+    await stoppedForStandingStill(true);
+    expect(decided).toHaveLength(1);
+    expect(decided[0]).toMatchObject({
+      failure: { stopKind: "idle" },
+      request: { aborted: true },
+    });
+  });
+});
+
 // The client send of what the app did (rule E3b-18) is held until the owner approves the one privacy text. What a report
 // says is what leaves the computer, so both states are pinned from the reports themselves.
 describe("what the reports say of an export the app started again", () => {
@@ -782,6 +870,32 @@ describe("what the person sees on the card of an export the app started again", 
     expect(screen.getByText("Export cancelled")).toBeVisible();
     expect(screen.queryByText(/attempt 2/)).toBeNull();
     expect(t.jobs.submitted).toHaveLength(1);
+  });
+
+  // The Export dialog holds the id its export was given, the first attempt's, for the whole export; the queue lists the live
+  // attempt. An export the app started again that waits behind another export must still be found in line, or the dialog
+  // would show the percent of whichever export is rendering.
+  it("tells the Export dialog where the export waits once it was started again behind another one", async () => {
+    const t = await open();
+    const first = await t.exportNow();
+    await flush();
+    const other = await t.exportNow("other"); // waits behind the first
+    await flush();
+    t.jobs.exit(first.job_id, -1, SHORT); // the first runs short: the other takes the turn, the new attempt queues behind it
+    await settle();
+    expect(t.jobs.submitted).toHaveLength(3);
+    expect(t.jobs.view(other.job_id)?.state).toBe("running");
+    expect(t.jobs.view(t.jobs.submitted[2].id)?.state).toBe("queued");
+
+    useExportJob.getState().begin(null);
+    act(() => useExportJob.getState().attach(first.job_id));
+    render(createElement(ExportDialog, { open: true, onCancel: () => {}, onStart: () => {} }));
+    expect(screen.getByTestId("export-status").textContent).toBe("Waiting · 1st in line");
+
+    t.jobs.exit(other.job_id, 0);
+    await settle();
+    t.jobs.exit(t.jobs.submitted[2].id, 0);
+    await whenExportsSettle();
   });
 });
 

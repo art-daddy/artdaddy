@@ -111,6 +111,7 @@ import {
   recordOf,
   restartRow,
   stopFactsOf,
+  wasCancelAsked,
   type RestartDecision,
   type RestartFacts,
   type RestartRecord,
@@ -591,8 +592,9 @@ export async function retryExport(
 }
 
 /** The app stopped this export at the ceiling of its no-progress rule: it had been busy and made no picture for 15 to 30
- *  minutes (stalledMessage). The words are the app's own, so they are read back here. */
-function isCeilingStop(error: string | undefined): boolean {
+ *  minutes (stalledMessage). The words are the app's own, so they are read back here; Try again starts such an export again
+ *  as it was, and the card says so (describeTryAgain). */
+export function isCeilingStop(error: string | undefined): boolean {
   return typeof error === "string" && /although the PC stayed busy/.test(error);
 }
 
@@ -2256,8 +2258,13 @@ async function settle(x: Settle): Promise<void> {
   // From here a page that takes over must not touch the file again.
   if (!publicationPending) await x.supervisor?.commit(x.jobId).catch(() => false);
   // A Cancel that was asked, whether or not the delivery owner has answered yet, is read before the export's controller goes.
-  const cancelRequested =
-    controllers.get(x.jobId)?.signal.aborted === true || cancelAsked.has(x.jobId);
+  // The app's own stop for standing still aborts the controller too and is not a Cancel (its story, `stalledOut`, is set only
+  // when no Cancel was accepted before it); a Cancel asked on top of it is still seen in `cancelAsked`.
+  const cancelRequested = wasCancelAsked({
+    aborted: controllers.get(x.jobId)?.signal.aborted === true,
+    appStopped: x.story?.stalledOut !== undefined,
+    asked: cancelAsked.has(x.jobId),
+  });
   controllers.delete(x.jobId);
   deliveryPorts.delete(x.jobId);
   stories.delete(x.jobId);

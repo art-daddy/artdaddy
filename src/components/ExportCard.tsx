@@ -30,6 +30,7 @@ import {
   cancelExport,
   dismissExport,
   gentlestRungOf,
+  isCeilingStop,
   listExportRecords,
   restartWords,
   retryExport,
@@ -278,7 +279,12 @@ export default function ExportCard(): JSX.Element | null {
           r.state === "failed" && r.canRetry
             ? r.chipFailed
               ? describeChipFailure("card")
-              : describeTryAgain(failureOf(r.error).code, r.rung, gentlestRungOf(r))
+              : describeTryAgain(
+                  failureOf(r.error).code,
+                  r.rung,
+                  gentlestRungOf(r),
+                  isCeilingStop(r.error),
+                )
             : r.state === "failed" && r.chipFailed
               ? describeChipFailure("again")
               : "";
