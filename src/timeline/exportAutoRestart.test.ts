@@ -219,8 +219,15 @@ async function setup() {
       name ? { name } : {},
       agentToolContext(base, new AbortController().signal),
     )) as Any;
+  // The same request from an outside assistant (MCP). The pre-start check warns such a request before a long or slow export;
+  // the menu's own request is not warned, because the dialog has just shown the estimate (exportQuestions.ts).
+  const exportFromAssistant = async (name?: string) =>
+    (await exportTimelineTool(
+      name ? { name } : {},
+      agentToolContext({ ...base, surface: "mcp" }, new AbortController().signal),
+    )) as Any;
   const nextPage = () => ({ store: new ProjectStoreAccess(DIR, fs), runner });
-  return { fs, store, jobs, exportNow, nextPage };
+  return { fs, store, jobs, exportNow, exportFromAssistant, nextPage };
 }
 
 afterEach(async () => {
@@ -612,11 +619,11 @@ describe("the app starts an export again by itself when the PC ran short of memo
   // A heads-up (the export is expected to take a while) is not a shortage: the person was told, continued, and the export ran
   // short of memory a moment later. Asking again, with nobody there, would end the one chance to finish by itself.
   describe("a heads-up from the pre-start check", () => {
-    /** Teaches the PC that an export of this project takes more than twice the video's length, so a request from the chat is
-     *  warned before it starts ("slow"). The descriptor is the one this project's own export is made under. */
+    /** Teaches the PC that an export of this project takes more than twice the video's length, so a request from an assistant
+     *  is warned before it starts ("slow"). The descriptor is the one this project's own export is made under. */
     async function teachSlow(t: Awaited<ReturnType<typeof setup>>) {
       pc.executionSeconds = 28800;
-      const warm = await t.exportNow("warm");
+      const warm = await t.exportFromAssistant("warm");
       await flush();
       const descriptor = (t.jobs.submitted[0].meta.telemetry as Any).calibration;
       cancelExport(warm.job_id, "app");
@@ -638,7 +645,7 @@ describe("the app starts an export again by itself when the PC ran short of memo
         return "continue";
       });
       await teachSlow(t);
-      const first = await t.exportNow();
+      const first = await t.exportFromAssistant();
       await flush();
       expect(told).toHaveLength(1);
       expect(told[0]).toMatch(/more than twice as long as the video/);
@@ -661,7 +668,7 @@ describe("the app starts an export again by itself when the PC ran short of memo
         return "continue";
       });
       pc.executionSeconds = 28800;
-      const first = await t.exportNow(); // nothing is known yet about how long this takes: no heads-up
+      const first = await t.exportFromAssistant(); // nothing is known yet about how long this takes: no heads-up
       await flush();
       expect(told).toEqual([]);
       const descriptor = (t.jobs.submitted[0].meta.telemetry as Any).calibration;
