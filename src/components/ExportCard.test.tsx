@@ -779,6 +779,9 @@ describe("ExportCard", () => {
     });
 
     describe("after the graphics chip stopped the export", () => {
+      // The end a chip failure comes to when the app does not start it again by itself (that switch is off): this card's own.
+      beforeEach(() => __setExportFlag("chip_restart", false));
+      afterEach(() => __setExportFlag("chip_restart", true));
       const onChip = (error: string) =>
         start(
           "one.mp4",

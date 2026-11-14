@@ -566,14 +566,17 @@ describe("Try again, from the card, after an export the PC could not fit", () =>
 });
 
 describe("the graphics chip, from the export tool to the card", () => {
-  // What this PC has measured is global state: each journey starts from none, and leaves none behind.
+  // What this PC has measured is global state: each journey starts from none, and leaves none behind. These journeys are the end a
+  // chip failure comes to when the app does not start the export again by itself (the switch for that is off): the person's click.
   beforeEach(() => {
     __setExportConfirmationForTests(async () => "continue");
     useExportJob.setState({ calibrations: [] });
+    __setExportFlag("chip_restart", false);
   });
   afterEach(() => {
     __setExportConfirmationForTests(null);
     useExportJob.setState({ calibrations: [] });
+    __setExportFlag("chip_restart", true);
   });
   const amdChip = (): ChipVerdict => ({
     maker: "amd",

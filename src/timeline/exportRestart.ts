@@ -9,6 +9,7 @@
 import type { ExportReasonCode } from "../api/exportReason";
 import type { ExportLimit } from "../api/exportVocabulary";
 import type { ChipMaker, ExportEncoder } from "./exportEncoder";
+import { CHIP_RESTART_ROW } from "./chipRestart";
 import { ceilingBytes, cleanLadder, planRung, type Ladder, type Rung } from "./exportPlan";
 
 /** The report carries the restart facts (`retry` with the value `app` on the restarted export, and the percent done in
@@ -72,6 +73,8 @@ export interface RestartFacts {
     /** How the no-progress rule ended the run, when it did. */
     readonly stopKind: "idle" | "ceiling" | null;
     readonly stopSeconds: number | null;
+    /** The failure's own words name the graphics chip's encoder (a render failure only a chip can explain). Absent: they do not. */
+    readonly namesChip?: boolean;
   };
   readonly attempt: {
     /** 1 for the first attempt of an export. */
@@ -328,6 +331,7 @@ function readFacts(raw: unknown): RestartFacts {
       stopKind:
         failure.stopKind === "idle" || failure.stopKind === "ceiling" ? failure.stopKind : null,
       stopSeconds: amount(failure.stopSeconds),
+      namesChip: failure.namesChip === true,
     },
     attempt: {
       number: count(attempt.number, 1, 1),
@@ -612,6 +616,7 @@ const REASONS: readonly AutoRestartReason[] = [
     },
     witnesses: ["M1", "M2b", "M3", "M4", "M9", "M14", "M17", "P1"],
   },
+  CHIP_RESTART_ROW,
 ];
 
 /** Every reason an export may be started again by itself, in the order they are tried. Closed: a reason is added

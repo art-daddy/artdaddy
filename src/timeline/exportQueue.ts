@@ -2552,6 +2552,7 @@ function startRestart(
       guard: limit && limit !== "other" ? limit : null,
       // The app's own stop for standing still, told apart by its length: an idle limit is under the busy ceilings.
       ...stopFactsOf(x.story?.stalledOut, BUSY_RUN_CEILING_SECONDS),
+      namesChip: HARDWARE_ENCODER_WORDS.test(error),
     },
     attempt: {
       number: attempts.attemptNumber(x.jobId),
@@ -2586,6 +2587,7 @@ function startRestart(
         memory_restart: exportFlag("memory_restart"),
         restart_streamed: exportFlag("restart_streamed"),
         plan_rung: exportFlag("plan_rung"),
+        chip_restart: exportFlag("chip_restart"),
       },
       autoRestartsUsed: attempts.autoRestartsUsed(x.jobId),
     },
@@ -2629,6 +2631,8 @@ async function continueRestart(
       result = await retry(rungOf(decision.override.rung), rungOf(decision.failedRungN), {
         store: x.store,
         signal: gap.signal,
+        // A failed chip is started again on the processor's own encoder, from its normal setting: what Try again does.
+        ...(decision.override.processor ? { processor: true as const } : {}),
         restart: {
           kind: "auto",
           from: x.jobId,
