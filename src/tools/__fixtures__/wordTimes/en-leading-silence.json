@@ -1,0 +1,325 @@
+{
+	"systeminfo": "WHISPER : COREML = 0 | OPENVINO = 0 | CPU : SSE3 = 1 | SSSE3 = 1 | AVX = 1 | AVX2 = 1 | F16C = 1 | FMA = 1 | BMI2 = 1 | AVX512 = 1 | AVX512_VNNI = 1 | OPENMP = 1 | REPACK = 1 | ",
+	"model": {
+		"type": "small",
+		"multilingual": true,
+		"vocab": 51865,
+		"audio": {
+			"ctx": 1500,
+			"state": 768,
+			"head": 12,
+			"layer": 12
+		},
+		"text": {
+			"ctx": 448,
+			"state": 768,
+			"head": 12,
+			"layer": 12
+		},
+		"mels": 80,
+		"ftype": 1
+	},
+	"params": {
+		"model": "models/ggml-small.bin",
+		"language": "en",
+		"translate": false
+	},
+	"result": {
+		"language": "en"
+	},
+	"transcription": [
+		{
+			"timestamps": {
+				"from": "00:00:00,000",
+				"to": "00:00:06,000"
+			},
+			"offsets": {
+				"from": 0,
+				"to": 6000
+			},
+			"text": " 20th century research has shown that there are two pools of genetic variation hidden and expressed.",
+			"tokens": [
+				{
+					"text": "[_BEG_]",
+					"timestamps": {
+						"from": "00:00:00,000",
+						"to": "00:00:00,000"
+					},
+					"offsets": {
+						"from": 0,
+						"to": 0
+					},
+					"id": 50364,
+					"p": 0.686898,
+					"t_dtw": -1
+				},
+				{
+					"text": " 20",
+					"timestamps": {
+						"from": "00:00:00,020",
+						"to": "00:00:00,530"
+					},
+					"offsets": {
+						"from": 20,
+						"to": 530
+					},
+					"id": 945,
+					"p": 0.834119,
+					"t_dtw": 136
+				},
+				{
+					"text": "th",
+					"timestamps": {
+						"from": "00:00:00,530",
+						"to": "00:00:00,700"
+					},
+					"offsets": {
+						"from": 530,
+						"to": 700
+					},
+					"id": 392,
+					"p": 0.994721,
+					"t_dtw": 156
+				},
+				{
+					"text": " century",
+					"timestamps": {
+						"from": "00:00:00,790",
+						"to": "00:00:01,310"
+					},
+					"offsets": {
+						"from": 790,
+						"to": 1310
+					},
+					"id": 4901,
+					"p": 0.49249,
+					"t_dtw": 182
+				},
+				{
+					"text": " research",
+					"timestamps": {
+						"from": "00:00:01,310",
+						"to": "00:00:02,010"
+					},
+					"offsets": {
+						"from": 1310,
+						"to": 2010
+					},
+					"id": 2132,
+					"p": 0.98824,
+					"t_dtw": 218
+				},
+				{
+					"text": " has",
+					"timestamps": {
+						"from": "00:00:02,010",
+						"to": "00:00:02,260"
+					},
+					"offsets": {
+						"from": 2010,
+						"to": 2260
+					},
+					"id": 575,
+					"p": 0.970748,
+					"t_dtw": 246
+				},
+				{
+					"text": " shown",
+					"timestamps": {
+						"from": "00:00:02,260",
+						"to": "00:00:02,740"
+					},
+					"offsets": {
+						"from": 2260,
+						"to": 2740
+					},
+					"id": 4898,
+					"p": 0.991768,
+					"t_dtw": 270
+				},
+				{
+					"text": " that",
+					"timestamps": {
+						"from": "00:00:02,740",
+						"to": "00:00:03,000"
+					},
+					"offsets": {
+						"from": 2740,
+						"to": 3000
+					},
+					"id": 300,
+					"p": 0.905956,
+					"t_dtw": 290
+				},
+				{
+					"text": " there",
+					"timestamps": {
+						"from": "00:00:03,000",
+						"to": "00:00:03,160"
+					},
+					"offsets": {
+						"from": 3000,
+						"to": 3160
+					},
+					"id": 456,
+					"p": 0.957488,
+					"t_dtw": 304
+				},
+				{
+					"text": " are",
+					"timestamps": {
+						"from": "00:00:03,280",
+						"to": "00:00:03,280"
+					},
+					"offsets": {
+						"from": 3280,
+						"to": 3280
+					},
+					"id": 366,
+					"p": 0.972292,
+					"t_dtw": 316
+				},
+				{
+					"text": " two",
+					"timestamps": {
+						"from": "00:00:03,290",
+						"to": "00:00:03,400"
+					},
+					"offsets": {
+						"from": 3290,
+						"to": 3400
+					},
+					"id": 732,
+					"p": 0.909148,
+					"t_dtw": 336
+				},
+				{
+					"text": " pools",
+					"timestamps": {
+						"from": "00:00:03,400",
+						"to": "00:00:03,700"
+					},
+					"offsets": {
+						"from": 3400,
+						"to": 3700
+					},
+					"id": 28688,
+					"p": 0.907026,
+					"t_dtw": 364
+				},
+				{
+					"text": " of",
+					"timestamps": {
+						"from": "00:00:03,700",
+						"to": "00:00:03,760"
+					},
+					"offsets": {
+						"from": 3700,
+						"to": 3760
+					},
+					"id": 295,
+					"p": 0.963635,
+					"t_dtw": 380
+				},
+				{
+					"text": " genetic",
+					"timestamps": {
+						"from": "00:00:03,760",
+						"to": "00:00:04,260"
+					},
+					"offsets": {
+						"from": 3760,
+						"to": 4260
+					},
+					"id": 12462,
+					"p": 0.973651,
+					"t_dtw": 414
+				},
+				{
+					"text": " variation",
+					"timestamps": {
+						"from": "00:00:04,260",
+						"to": "00:00:04,830"
+					},
+					"offsets": {
+						"from": 4260,
+						"to": 4830
+					},
+					"id": 12990,
+					"p": 0.953261,
+					"t_dtw": 474
+				},
+				{
+					"text": " hidden",
+					"timestamps": {
+						"from": "00:00:04,840",
+						"to": "00:00:05,160"
+					},
+					"offsets": {
+						"from": 4840,
+						"to": 5160
+					},
+					"id": 7633,
+					"p": 0.688649,
+					"t_dtw": 516
+				},
+				{
+					"text": " and",
+					"timestamps": {
+						"from": "00:00:05,160",
+						"to": "00:00:05,400"
+					},
+					"offsets": {
+						"from": 5160,
+						"to": 5400
+					},
+					"id": 293,
+					"p": 0.810014,
+					"t_dtw": 538
+				},
+				{
+					"text": " expressed",
+					"timestamps": {
+						"from": "00:00:05,400",
+						"to": "00:00:05,930"
+					},
+					"offsets": {
+						"from": 5400,
+						"to": 5930
+					},
+					"id": 12675,
+					"p": 0.893508,
+					"t_dtw": 576
+				},
+				{
+					"text": ".",
+					"timestamps": {
+						"from": "00:00:06,000",
+						"to": "00:00:06,000"
+					},
+					"offsets": {
+						"from": 6000,
+						"to": 6000
+					},
+					"id": 13,
+					"p": 0.862136,
+					"t_dtw": 598
+				},
+				{
+					"text": "[_TT_300]",
+					"timestamps": {
+						"from": "00:00:06,000",
+						"to": "00:00:06,000"
+					},
+					"offsets": {
+						"from": 6000,
+						"to": 6000
+					},
+					"id": 50664,
+					"p": 0.113308,
+					"t_dtw": -1
+				}
+			]
+		}
+	]
+}

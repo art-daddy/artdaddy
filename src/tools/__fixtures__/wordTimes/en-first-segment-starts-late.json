@@ -1,0 +1,367 @@
+{
+	"systeminfo": "WHISPER : COREML = 0 | OPENVINO = 0 | CPU : SSE3 = 1 | SSSE3 = 1 | AVX = 1 | AVX2 = 1 | F16C = 1 | FMA = 1 | BMI2 = 1 | AVX512 = 1 | AVX512_VNNI = 1 | OPENMP = 1 | REPACK = 1 | ",
+	"model": {
+		"type": "small",
+		"multilingual": true,
+		"vocab": 51865,
+		"audio": {
+			"ctx": 1500,
+			"state": 768,
+			"head": 12,
+			"layer": 12
+		},
+		"text": {
+			"ctx": 448,
+			"state": 768,
+			"head": 12,
+			"layer": 12
+		},
+		"mels": 80,
+		"ftype": 1
+	},
+	"params": {
+		"model": "models/ggml-small.bin",
+		"language": "en",
+		"translate": false
+	},
+	"result": {
+		"language": "en"
+	},
+	"transcription": [
+		{
+			"timestamps": {
+				"from": "00:00:00,500",
+				"to": "00:00:09,000"
+			},
+			"offsets": {
+				"from": 500,
+				"to": 9000
+			},
+			"text": " However, due to the slow communication channels, styles in the West could lag behind by 25 to 30 years.",
+			"tokens": [
+				{
+					"text": " However",
+					"timestamps": {
+						"from": "00:00:00,500",
+						"to": "00:00:01,160"
+					},
+					"offsets": {
+						"from": 500,
+						"to": 1160
+					},
+					"id": 2908,
+					"p": 0.904264,
+					"t_dtw": 144
+				},
+				{
+					"text": ",",
+					"timestamps": {
+						"from": "00:00:01,170",
+						"to": "00:00:01,450"
+					},
+					"offsets": {
+						"from": 1170,
+						"to": 1450
+					},
+					"id": 11,
+					"p": 0.920737,
+					"t_dtw": 204
+				},
+				{
+					"text": " due",
+					"timestamps": {
+						"from": "00:00:01,570",
+						"to": "00:00:01,990"
+					},
+					"offsets": {
+						"from": 1570,
+						"to": 1990
+					},
+					"id": 3462,
+					"p": 0.989338,
+					"t_dtw": 214
+				},
+				{
+					"text": " to",
+					"timestamps": {
+						"from": "00:00:01,990",
+						"to": "00:00:02,300"
+					},
+					"offsets": {
+						"from": 1990,
+						"to": 2300
+					},
+					"id": 281,
+					"p": 0.994901,
+					"t_dtw": 224
+				},
+				{
+					"text": " the",
+					"timestamps": {
+						"from": "00:00:02,560",
+						"to": "00:00:02,820"
+					},
+					"offsets": {
+						"from": 2560,
+						"to": 2820
+					},
+					"id": 264,
+					"p": 0.94865,
+					"t_dtw": 240
+				},
+				{
+					"text": " slow",
+					"timestamps": {
+						"from": "00:00:02,820",
+						"to": "00:00:03,470"
+					},
+					"offsets": {
+						"from": 2820,
+						"to": 3470
+					},
+					"id": 2964,
+					"p": 0.996309,
+					"t_dtw": 260
+				},
+				{
+					"text": " communication",
+					"timestamps": {
+						"from": "00:00:03,470",
+						"to": "00:00:05,640"
+					},
+					"offsets": {
+						"from": 3470,
+						"to": 5640
+					},
+					"id": 6101,
+					"p": 0.982131,
+					"t_dtw": 300
+				},
+				{
+					"text": " channels",
+					"timestamps": {
+						"from": "00:00:05,640",
+						"to": "00:00:07,000"
+					},
+					"offsets": {
+						"from": 5640,
+						"to": 7000
+					},
+					"id": 9235,
+					"p": 0.991034,
+					"t_dtw": 382
+				},
+				{
+					"text": ",",
+					"timestamps": {
+						"from": "00:00:07,000",
+						"to": "00:00:07,070"
+					},
+					"offsets": {
+						"from": 7000,
+						"to": 7070
+					},
+					"id": 11,
+					"p": 0.922305,
+					"t_dtw": 420
+				},
+				{
+					"text": " styles",
+					"timestamps": {
+						"from": "00:00:07,070",
+						"to": "00:00:07,280"
+					},
+					"offsets": {
+						"from": 7070,
+						"to": 7280
+					},
+					"id": 13273,
+					"p": 0.804806,
+					"t_dtw": 474
+				},
+				{
+					"text": " in",
+					"timestamps": {
+						"from": "00:00:07,280",
+						"to": "00:00:07,350"
+					},
+					"offsets": {
+						"from": 7280,
+						"to": 7350
+					},
+					"id": 294,
+					"p": 0.967242,
+					"t_dtw": 524
+				},
+				{
+					"text": " the",
+					"timestamps": {
+						"from": "00:00:07,350",
+						"to": "00:00:07,450"
+					},
+					"offsets": {
+						"from": 7350,
+						"to": 7450
+					},
+					"id": 264,
+					"p": 0.978442,
+					"t_dtw": 536
+				},
+				{
+					"text": " West",
+					"timestamps": {
+						"from": "00:00:07,450",
+						"to": "00:00:07,470"
+					},
+					"offsets": {
+						"from": 7450,
+						"to": 7470
+					},
+					"id": 4055,
+					"p": 0.576505,
+					"t_dtw": 564
+				},
+				{
+					"text": " could",
+					"timestamps": {
+						"from": "00:00:07,620",
+						"to": "00:00:07,760"
+					},
+					"offsets": {
+						"from": 7620,
+						"to": 7760
+					},
+					"id": 727,
+					"p": 0.936099,
+					"t_dtw": 594
+				},
+				{
+					"text": " lag",
+					"timestamps": {
+						"from": "00:00:07,770",
+						"to": "00:00:07,820"
+					},
+					"offsets": {
+						"from": 7770,
+						"to": 7820
+					},
+					"id": 8953,
+					"p": 0.977949,
+					"t_dtw": 626
+				},
+				{
+					"text": " behind",
+					"timestamps": {
+						"from": "00:00:07,870",
+						"to": "00:00:08,070"
+					},
+					"offsets": {
+						"from": 7870,
+						"to": 8070
+					},
+					"id": 2261,
+					"p": 0.989483,
+					"t_dtw": 674
+				},
+				{
+					"text": " by",
+					"timestamps": {
+						"from": "00:00:08,130",
+						"to": "00:00:08,130"
+					},
+					"offsets": {
+						"from": 8130,
+						"to": 8130
+					},
+					"id": 538,
+					"p": 0.875511,
+					"t_dtw": 726
+				},
+				{
+					"text": " 25",
+					"timestamps": {
+						"from": "00:00:08,150",
+						"to": "00:00:08,360"
+					},
+					"offsets": {
+						"from": 8150,
+						"to": 8360
+					},
+					"id": 3552,
+					"p": 0.93243,
+					"t_dtw": 770
+				},
+				{
+					"text": " to",
+					"timestamps": {
+						"from": "00:00:08,360",
+						"to": "00:00:08,380"
+					},
+					"offsets": {
+						"from": 8360,
+						"to": 8380
+					},
+					"id": 281,
+					"p": 0.749138,
+					"t_dtw": 808
+				},
+				{
+					"text": " 30",
+					"timestamps": {
+						"from": "00:00:08,490",
+						"to": "00:00:08,620"
+					},
+					"offsets": {
+						"from": 8490,
+						"to": 8620
+					},
+					"id": 2217,
+					"p": 0.881887,
+					"t_dtw": 834
+				},
+				{
+					"text": " years",
+					"timestamps": {
+						"from": "00:00:08,660",
+						"to": "00:00:08,820"
+					},
+					"offsets": {
+						"from": 8660,
+						"to": 8820
+					},
+					"id": 924,
+					"p": 0.994391,
+					"t_dtw": 868
+				},
+				{
+					"text": ".",
+					"timestamps": {
+						"from": "00:00:08,820",
+						"to": "00:00:09,000"
+					},
+					"offsets": {
+						"from": 8820,
+						"to": 9000
+					},
+					"id": 13,
+					"p": 0.953521,
+					"t_dtw": 898
+				},
+				{
+					"text": "[_TT_450]",
+					"timestamps": {
+						"from": "00:00:09,000",
+						"to": "00:00:09,000"
+					},
+					"offsets": {
+						"from": 9000,
+						"to": 9000
+					},
+					"id": 50814,
+					"p": 0.292863,
+					"t_dtw": -1
+				}
+			]
+		}
+	]
+}
