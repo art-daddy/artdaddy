@@ -65,7 +65,7 @@ import {
 import type { Animatable, Clip, Timeline } from "./model";
 import { validateTimeline } from "./validate";
 import { LeanTally, mergeLeanRecords, type LeanRecord } from "./leanRecord";
-import { leanZoomMask, type LeanMaskBudget } from "./leanZoom";
+import { leanZoomMask, preAlphaIsLeanSafe, type LeanMaskBudget } from "./leanZoom";
 import { readLeanFlags, type LeanOptions, type LeanProbeRequest } from "./leanOptions";
 import { probeLean } from "./leanProbe";
 import {
@@ -1609,7 +1609,7 @@ function buildSingleRenderCommand(
   // The lean render paths (leanOptions.ts) are off for a look (a frame window) and for the audio pass; everything else sees them only when the caller passed the option.
   const lean = options.lean && !win && pass !== "audio" ? options.lean : null;
   const leanTally = new LeanTally();
-  const leanBudget: LeanMaskBudget = { chars: 0, boxes: 0 };
+  const leanBudget: LeanMaskBudget = lean?.budget ?? { chars: 0, boxes: 0 };
   const chains: string[] =
     pass === "audio" ? [] : [composed ? "[0:v]null[base]" : `${colorSrc("c=black")}[base]`];
   let last = "base";
@@ -1892,6 +1892,8 @@ function buildSingleRenderCommand(
           to: rng ? Math.min(visible.end, rng.to) : visible.end,
           unproven:
             hasRotate ||
+            dimConst ||
+            !preAlphaIsLeanSafe(r.preAlpha) ||
             parseGlow(r.glow) !== null ||
             Math.abs(r.speed - 1) > 1e-6 ||
             r.cropExpr !== null ||
@@ -2389,6 +2391,10 @@ function segmentedRenderPlan(
   const steps: CommandStep[] = [];
   // What each ACCEPTED part's lean paths did (a part that is split again is rebuilt, and its first build counts for nothing).
   const leanRecords: Array<LeanRecord | undefined> = [];
+  // One mask budget for the whole export (DESIGN-3a 2.1 item 6): the parts spend from the same object, and a part that is rebuilt gives back what its first build spent.
+  const leanForParts: LeanOptions | undefined = options.lean
+    ? { ...options.lean, budget: options.lean.budget ?? { chars: 0, boxes: 0 } }
+    : undefined;
   const persistentAudio = options.engine === "partition-pipes-v1" && original.audioExpected;
   const append = (start: number, end: number): void => {
     const spanLimit = options.__qaPieceSpanSeconds === 180 ? 180 : 60;
@@ -2400,13 +2406,17 @@ function segmentedRenderPlan(
     }
     const prefix = `part${steps.length}_`;
     const name = `${prefix}video.nut`;
+    const spent = leanForParts?.budget ? { ...leanForParts.budget } : null;
+    const giveBack = (): void => {
+      if (spent && leanForParts?.budget) Object.assign(leanForParts.budget, spent);
+    };
     const part = buildSingleRenderCommand(
       timeline,
       name,
       {
         engine: options.engine,
         range: { from: start, to: end },
-        ...(options.lean ? { lean: options.lean } : {}),
+        ...(leanForParts ? { lean: leanForParts } : {}),
       },
       undefined,
       undefined,
@@ -2431,6 +2441,7 @@ function segmentedRenderPlan(
       staged = shortInputPaths(staged, part.stillImages, prefix);
     const videos = part.sources.filter((source) => videoIds.has(source.clipId)).length;
     if (options.__qaPieceSpanSeconds === 180 && videos > 8 && end - start > fps * 60) {
+      giveBack();
       const middle = start + Math.floor((end - start) / 2);
       append(start, middle);
       append(middle, end);
@@ -2445,6 +2456,7 @@ function segmentedRenderPlan(
         throw new Error(
           `too many simultaneous source inputs at project frame ${start} for the safe render command/native reader budget`,
         );
+      giveBack();
       const middle = start + Math.floor((end - start) / 2);
       append(start, middle);
       append(middle, end);
@@ -2998,6 +3010,9 @@ export async function buildLeanRenderCommand(
   outPath: string,
   options: ExportOptions,
 ): Promise<RenderPlan> {
+  // A Try again after a failure of an export that ran a lean fix: 0.27.0's recipe for everything, nothing asked and nothing counted.
+  if (options.lean?.plain)
+    return buildRenderCommand(raw, outPath, { ...options, lean: { plain: true } });
   const flags = readLeanFlags();
   const asked: LeanOptions = { ...flags, requests: [] };
   const first = buildRenderCommand(raw, outPath, { ...options, lean: asked });

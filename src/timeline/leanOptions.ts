@@ -30,6 +30,12 @@ export interface LeanProbed {
   scaled: readonly [number, number];
 }
 
+/** What the lean masks have spent in one export so far (graph text and drawbox filters); one object is shared by every part of a streamed export. */
+export interface LeanMaskBudget {
+  chars: number;
+  boxes: number;
+}
+
 export interface LeanOptions {
   zoom?: boolean;
   fades?: boolean;
@@ -44,6 +50,8 @@ export interface LeanOptions {
   probed?: ReadonlyMap<string, LeanProbed>;
   /** Filled by the builder with the probes it wanted and did not have; the async boundary answers them and builds again. */
   requests?: LeanProbeRequest[];
+  /** The mask budget of the whole export (DESIGN-3a 2.1 item 6): the builder of one command spends from it, and a streamed export passes the same object to every part. */
+  budget?: LeanMaskBudget;
 }
 
 /** The six switches as they stand now. A name this client does not know is never on (exportFlags.ts), so until lane L2 adds the names every fix stays

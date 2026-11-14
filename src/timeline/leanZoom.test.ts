@@ -3,9 +3,9 @@
 // decision and the graph.
 import { describe, expect, it } from "vitest";
 import type { Timeline } from "./model";
-import { buildRenderCommand } from "./render";
+import { buildLeanRenderCommand, buildRenderCommand } from "./render";
 import { LEAN_FIXES, LEAN_KEPT_REASONS, LeanTally, mergeLeanRecords } from "./leanRecord";
-import { LEAN_MAX_MASK_BOXES, leanZoomMask } from "./leanZoom";
+import { LEAN_MAX_MASK_BOXES, leanZoomMask, preAlphaIsLeanSafe } from "./leanZoom";
 import type { LeanOptions, LeanProbed } from "./leanOptions";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -205,13 +205,10 @@ describe("fix 1: the builder", () => {
     const plan = buildRenderCommand(t, OUT, { engine: "partition-pipes-v1", lean: withProbe() });
     const graphs = plan.assFiles.filter((f) => f.name.endsWith(".ffgraph")).map((f) => f.content);
     const text = [plan.filterComplex, ...graphs].join("\n");
-    if (plan.lean?.ran.includes("zoom")) {
-      expect(text.match(/alphamerge/g)!.length).toBeGreaterThanOrEqual(2);
-      expect(text).toContain(",setpts=PTS+0[leanmask0]");
-      expect(text).toContain(",setpts=PTS+1050[leanmask0]");
-    } else {
-      expect(plan.lean?.kept).toContain("over_budget");
-    }
+    expect(plan.lean).toEqual({ ran: ["zoom"], kept: [] });
+    expect(text.match(/alphamerge/g)!.length).toBeGreaterThanOrEqual(2);
+    expect(text).toContain(",setpts=PTS+0[leanmask0]");
+    expect(text).toContain(",setpts=PTS+1050[leanmask0]");
     expect(plan.steps).toHaveLength(2);
   });
 });
@@ -269,5 +266,176 @@ describe("fix 1: the decision, one clip at a time", () => {
     expect(mask).not.toBeNull();
     expect(budget.chars).toBe(mask!.text.length);
     expect(budget.boxes).toBe(mask!.boxes);
+  });
+});
+
+describe("fix 1: shapes where the mask would change the picture keep today's geq (review of 14 Nov)", () => {
+  const todays = (extra: Record<string, unknown>) => buildRenderCommand(oneClip(2, extra), OUT);
+  const lean = (extra: Record<string, unknown>) =>
+    buildRenderCommand(oneClip(2, extra), OUT, { lean: withProbe() });
+
+  it.each<[string, Record<string, unknown>]>([
+    [
+      "a chroma key: chromakey writes the alpha plane that alphamerge would replace",
+      { effects: [{ type: "chroma", params: { color: "#00FF00" } }] },
+    ],
+    [
+      "a custom colorkey effect",
+      { effects: [{ type: "custom", params: { expr: "colorkey=0x00FF00:0.3:0.1" } }] },
+    ],
+    [
+      "a custom crop: the picture's size changes after the probe measured it",
+      { effects: [{ type: "custom", params: { expr: "crop=iw/2:ih/2" } }] },
+    ],
+    [
+      "a custom chain of two filters that starts with an allowed one",
+      { effects: [{ type: "custom", params: { expr: "eq=contrast=1.2,pad=2400:1400" } }] },
+    ],
+    [
+      "a constant opacity below 1: the opacity mixer changes the pixel format in front of the zoom scale",
+      { opacity: 0.5 },
+    ],
+  ])("%s", (_what, extra) => {
+    const plan = lean(extra);
+    expect(plan.filterComplex).toBe(todays(extra).filterComplex);
+    expect(plan.lean).toEqual({ ran: [], kept: ["not_proven"] });
+  });
+
+  it("walks every effect type the builder knows: only the ones that leave size, alpha and format alone take the mask", () => {
+    const effects: Array<[string, Record<string, unknown>, boolean]> = [
+      ["blur", { radius: 3 }, true],
+      ["denoise", { strength: 3 }, true],
+      ["sharpen", { sharpness: 1 }, true],
+      ["grain", { grain: 10 }, true],
+      ["vignette", { vignette: 0.4 }, true],
+      ["motion", { frames: 3 }, true],
+      ["clarity", { clarity: 0.5, dehaze: 0.3 }, true],
+      ["chroma", { color: "#00FF00" }, false],
+      ["glow", { glow: 0.5 }, false],
+      ["custom", { expr: "hue=s=2" }, false],
+    ];
+    for (const [type, params, takes] of effects) {
+      const plan = lean({ effects: [{ type, params }] });
+      expect(plan.lean?.ran.includes("zoom"), type).toBe(takes);
+      if (!takes)
+        expect(plan.filterComplex, type).toBe(
+          todays({ effects: [{ type, params }] }).filterComplex,
+        );
+    }
+  });
+
+  it("a clip with every grade knob set takes the mask: each grade filter is one named, allowed filter", () => {
+    const color = {
+      exposure: 0.2,
+      brightness: 0.05,
+      contrast: 1.1,
+      saturation: 1.2,
+      gamma: 1.05,
+      temperature: 5600,
+      tint: 0.1,
+      vibrance: 0.3,
+      blacks: 0.1,
+      whites: -0.1,
+      shadowsHue: 200,
+      shadowsAmount: 0.2,
+      midsHue: 30,
+      midsAmount: 0.1,
+      highsHue: 50,
+      highsAmount: 0.2,
+      shadowsLum: 0.1,
+      highsGain: 0.9,
+      midsGamma: 1.1,
+      highlights: -0.2,
+      shadows: 0.2,
+      masterCurve: [
+        [0, 0],
+        [0.5, 0.55],
+        [1, 1],
+      ],
+      redCurve: [
+        [0, 0],
+        [1, 0.95],
+      ],
+    };
+    const plan = lean({ color });
+    expect(plan.filterComplex).toContain("colorbalance=");
+    expect(plan.filterComplex).toContain("vibrance=");
+    expect(plan.lean).toEqual({ ran: ["zoom"], kept: [] });
+  });
+});
+
+describe("preAlphaIsLeanSafe", () => {
+  it("accepts one named allowed filter each, with quoted commas inside an option, and an empty stage", () => {
+    expect(preAlphaIsLeanSafe([])).toBe(true);
+    expect(
+      preAlphaIsLeanSafe([
+        "exposure=exposure=0.2000",
+        "eq=brightness=0.0500:contrast=1.1000",
+        "curves=master='0/0 0.2/0.3 0.8/0.7 1/1'",
+        "vignette=angle=0.4712",
+        "vibrance=intensity=0.3000:threads=1",
+        "lut3d=file=C\\:/luts/a.cube",
+      ]),
+    ).toBe(true);
+  });
+
+  it("refuses a filter that writes alpha or can resize, a chain, a label, and anything it does not know", () => {
+    for (const text of [
+      "chromakey=0x00FF00:0.3000:0.1000:threads=1",
+      "colorkey=0x00FF00:0.3:0.1",
+      "crop=iw/2:ih/2",
+      "scale=100:100",
+      "pad=2400:1400",
+      "format=rgba",
+      "eq=contrast=1.2,pad=2400:1400",
+      "eq=contrast=1.2;scale=1:1",
+      "eq=contrast=1.2[x]",
+      "unknownfilter=1",
+      "",
+    ])
+      expect(preAlphaIsLeanSafe(["eq=gamma=1.0000", text]), text).toBe(false);
+  });
+});
+
+describe("fix 1: a retry and the mask budget", () => {
+  it("a plain build keeps today's graph and counts nothing, whatever the switches say (the Try again path of buildLeanRenderCommand)", async () => {
+    const base = buildRenderCommand(oneClip(), OUT);
+    const plan = await buildLeanRenderCommand(
+      { runner: { run: async () => ({ code: 1, stdout: "", stderr: "" }) } },
+      oneClip(),
+      OUT,
+      { lean: { plain: true, zoom: true } },
+    );
+    expect(plan.filterComplex).toBe(base.filterComplex);
+    expect(plan.lean).toEqual({ ran: [], kept: [] });
+  });
+
+  it("the parts of a streamed export spend ONE mask budget: later parts keep geq once it is gone, and a rebuilt part gives back what its first build spent", () => {
+    const clips = [0, 1, 2, 3].map((i) => ({
+      ...zoomClip(70),
+      timeline_in: i * 70,
+      timeline_out: (i + 1) * 70,
+    }));
+    const t = timeline([{ id: "v", kind: "video", z: 0, clips }]);
+    const one = buildRenderCommand(
+      timeline([{ id: "v", kind: "video", z: 0, clips: [zoomClip(70)] }]),
+      OUT,
+      { lean: withProbe() },
+    );
+    const boxesPerClip = (one.filterComplex.match(/drawbox=/g) ?? []).length;
+    expect(boxesPerClip).toBeGreaterThan(50);
+    // room for a little more than one clip's boxes: the first part takes its mask, the later ones cannot
+    const budget = { chars: 0, boxes: LEAN_MAX_MASK_BOXES - Math.ceil(boxesPerClip * 1.5) };
+    const plan = buildRenderCommand(t, OUT, {
+      engine: "partition-pipes-v1",
+      lean: { ...withProbe(), budget },
+    });
+    const drawn = plan.assFiles
+      .filter((f) => f.name.endsWith(".ffgraph"))
+      .reduce((n, f) => n + (f.content.match(/drawbox=/g) ?? []).length, 0);
+    expect(drawn).toBeGreaterThan(0);
+    expect(drawn).toBeLessThanOrEqual(Math.ceil(boxesPerClip * 1.5));
+    expect(plan.lean?.ran).toEqual(["zoom"]);
+    expect(plan.lean?.kept).toContain("over_budget");
   });
 });

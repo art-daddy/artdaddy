@@ -100,24 +100,38 @@ async function probeOne(
   }
 }
 
-/** Answer the builder's requests (distinct by key), a few at a time. A request with no answer is left out of the map. Never throws. */
+/** The whole probing phase gets this long (a probe that hangs or a slow disk must not hold an export back: every clip left without an answer keeps today's recipe). */
+export const PROBE_DEADLINE_MS = 10_000;
+
+/** Answer the builder's requests (distinct by key), a few at a time, within one overall deadline. A request with no answer is left out of the map. Never throws. */
 export async function probeLean(
   runner: CommandRunner,
   requests: readonly LeanProbeRequest[],
   signal?: AbortSignal,
+  deadlineMs: number = PROBE_DEADLINE_MS,
 ): Promise<Map<string, LeanProbed>> {
   const distinct = [...new Map(requests.map((r) => [r.key, r])).values()];
   const answers = new Map<string, LeanProbed>();
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(), deadlineMs);
+  const onAbort = (): void => deadline.abort();
+  signal?.addEventListener("abort", onAbort, { once: true });
+  if (signal?.aborted) deadline.abort();
   let next = 0;
   const worker = async (): Promise<void> => {
     for (;;) {
-      if (signal?.aborted) return;
+      if (deadline.signal.aborted) return;
       const request = distinct[next++];
       if (!request) return;
-      const probed = await probeOne(runner, request, signal);
-      if (probed) answers.set(request.key, probed);
+      const probed = await probeOne(runner, request, deadline.signal);
+      if (probed && !deadline.signal.aborted) answers.set(request.key, probed);
     }
   };
-  await Promise.all(Array.from({ length: Math.min(PROBE_CONCURRENCY, distinct.length) }, worker));
+  try {
+    await Promise.all(Array.from({ length: Math.min(PROBE_CONCURRENCY, distinct.length) }, worker));
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
+  }
   return answers;
 }

@@ -109,4 +109,58 @@ describe("the size probe's log reading (leanProbe)", () => {
     expect([...answers.keys()].sort()).toEqual(["a.mp4\nscale", "b.mp4\nscale"]);
     expect(asked.filter((p) => p === "a.mp4")).toHaveLength(1);
   });
+
+  it("probeLean stops at its overall deadline, keeps the answers it already has, and aborts the probes still running", async () => {
+    let aborted = 0;
+    const runner: CommandRunner = {
+      run: (_program, args, signal) =>
+        new Promise((resolve) => {
+          const path = args[args.indexOf("-i") + 1];
+          if (path === "fast.mp4") resolve({ code: 0, stdout: "", stderr: VIDEO_LOG });
+          else
+            signal?.addEventListener(
+              "abort",
+              () => {
+                aborted += 1;
+                resolve({ code: null, stdout: "", stderr: "cancelled" });
+              },
+              { once: true },
+            );
+        }),
+    };
+    const request = (name: string) => ({
+      key: `${name}\nscale`,
+      path: name,
+      filters: "setsar=1,showinfo,scale=1:1,showinfo",
+    });
+    const started = Date.now();
+    const answers = await probeLean(
+      runner,
+      ["fast.mp4", "hung1.mp4", "hung2.mp4", "hung3.mp4", "hung4.mp4"].map(request),
+      undefined,
+      150,
+    );
+    expect(Date.now() - started).toBeLessThan(3000);
+    expect([...answers.keys()]).toEqual(["fast.mp4\nscale"]);
+    expect(aborted).toBeGreaterThanOrEqual(2);
+  });
+
+  it("probeLean answers nothing and starts nothing when the export was already cancelled", async () => {
+    let started = 0;
+    const runner: CommandRunner = {
+      run: async () => {
+        started += 1;
+        return { code: 0, stdout: "", stderr: VIDEO_LOG };
+      },
+    };
+    const stop = new AbortController();
+    stop.abort();
+    const answers = await probeLean(
+      runner,
+      [{ key: "a\nscale", path: "a.mp4", filters: "x" }],
+      stop.signal,
+    );
+    expect(answers.size).toBe(0);
+    expect(started).toBe(0);
+  });
 });

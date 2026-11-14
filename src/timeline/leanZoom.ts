@@ -2,7 +2,7 @@
 // Pure: the builder (render.ts) passes in what it knows and takes back a mask stream or null (= emit today's text). It never throws; every refusal is one of the
 // closed words of `LeanKeptReason`, counted on the builder's tally so the export's report can say why a clip kept today's recipe.
 import { apertureRects, maskStream, type MaskStream } from "./leanMasks";
-import type { LeanOptions } from "./leanOptions";
+import type { LeanMaskBudget, LeanOptions } from "./leanOptions";
 import type { LeanTally } from "./leanRecord";
 import { pixFmtHasAlpha } from "./pixelFormats";
 
@@ -11,11 +11,40 @@ export const LEAN_MAX_MASK_CHARS = 2 * 1024 * 1024;
 /** Mask rectangles (`drawbox` filters) per command (revised with the per-clip budget: see leanMasks.ts). */
 export const LEAN_MAX_MASK_BOXES = 12000;
 
-/** What the builder has spent so far in one command. */
-export interface LeanMaskBudget {
-  chars: number;
-  boxes: number;
+/**
+ * The filters a zooming clip may carry between its pre-scale and the alpha stage and still take the mask: each one leaves the picture's size, its
+ * alpha plane and its pixel format class alone. `alphamerge` REPLACES the alpha plane, so a filter that writes alpha (`chromakey`) or can resize
+ * (`custom` is the agent's raw filter text) must keep today's `geq`; an allow-list, because a deny-list misses the next effect.
+ */
+const PRE_ALPHA_SAFE = new Set([
+  "exposure",
+  "eq",
+  "colortemperature",
+  "colorbalance",
+  "vibrance",
+  "colorlevels",
+  "curves",
+  "lut3d",
+  "gblur",
+  "hqdn3d",
+  "unsharp",
+  "noise",
+  "vignette",
+  "tmix",
+]);
+
+/** True when every filter of the clip's pre-alpha stage is one single named filter on the allow-list (no chain, no label inside the text). */
+export function preAlphaIsLeanSafe(filters: readonly string[]): boolean {
+  return filters.every((filter) => {
+    const text = filter.trim();
+    const name = /^([A-Za-z0-9_]+)(?:=|$)/.exec(text)?.[1];
+    const unquoted = text.replace(/'[^']*'/g, "");
+    return name !== undefined && PRE_ALPHA_SAFE.has(name) && !/[,;[\]]/.test(unquoted);
+  });
 }
+
+/** What the builder has spent so far in one command. */
+export type { LeanMaskBudget };
 
 export interface ZoomMaskRequest {
   lean: LeanOptions;
