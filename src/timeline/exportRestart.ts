@@ -11,6 +11,11 @@ import type { ExportLimit } from "../api/exportVocabulary";
 import type { ChipMaker, ExportEncoder } from "./exportEncoder";
 import { ceilingBytes, cleanLadder, planRung, type Ladder, type Rung } from "./exportPlan";
 
+/** The report carries the restart facts (`retry` with the value `app` on the restarted export, and the percent done in
+ *  `outcome`) only when this is true. HELD: the owner has not yet approved the one privacy text that covers them (14 Nov);
+ *  the last step of the build flips it, together with the test that pins what the report body then holds. */
+export const SEND_RESTART_FACTS = false;
+
 /** A stop with this share of the project (or more) already produced is too late to start again: the lost work would
  *  be most of what the restart saves. */
 export const FIRST_QUARTER = 0.25;
