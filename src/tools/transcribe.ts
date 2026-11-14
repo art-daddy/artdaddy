@@ -1336,7 +1336,9 @@ function reportGpuCrash(code: number | null, cpuWorked: boolean): void {
   reportedGpuCrashes.add(key);
   reportAppError(
     `speech_gpu_crash: exit ${code}, ` +
-      (cpuWorked ? "the CPU run worked and the GPU is off for a week" : "the CPU run failed too"),
+      (cpuWorked
+        ? "the CPU run worked and the GPU is off until it is tried again"
+        : "the CPU run failed too"),
   );
 }
 
