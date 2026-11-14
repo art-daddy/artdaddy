@@ -26,14 +26,16 @@ vi.mock("../timeline/placement", () => ({
 }));
 
 import { __resetExportFlags } from "../api/exportFlags";
-import { __resetSpeechJobs, useSpeechJobs } from "../store/speechJobs";
+import { __resetSpeechJobs, cancelSpeechJob, useSpeechJobs } from "../store/speechJobs";
 import { FakeJobs } from "../test/fakeJobs";
 import { speechRig } from "../test/speechRig";
 import { __resetJobSupervisor, __setJobSupervisor, type JobSpec } from "../tools/jobSupervisor";
 import { __resetSpeechSession } from "../tools/speechAdmission";
 import { holdCpuOnly } from "../tools/speechBackend";
+import { isSpeechCancelled } from "../tools/speechFailure";
 import { readPace, recordSpeechRun, SPEECH_PACE_KEY } from "../tools/speechPace";
 import { __resetPlanLog, recentPlans } from "../tools/speechPlanLog";
+import { runWhisper } from "../tools/transcribe";
 import { __resetWorkGate } from "../tools/workGate";
 import { IndexCoordinator } from "./indexCoordinator";
 
@@ -185,6 +187,34 @@ describe("a long file on a processor slower than the pace this PC measured befor
     expect(jobs.killed, "the run was only asleep").toEqual([]);
     expect(readPace(), "and a sleep is not a pace").toEqual(before);
     expect(recentPlans().map((r) => r.where)).not.toContain("live");
+    c.dispose();
+  });
+});
+
+describe("a look over a whole file that the person stopped (F7)", () => {
+  it("is not started by the indexer once the look is gone: the real indexer, the real engine path, the same file waiting behind the look", async () => {
+    sourceDurationSeconds.mockImplementation(async () => 60);
+    const rig = speechRig({ audioSeconds: 60 });
+    // a look over the whole of a short file runs in the foreground
+    const look = runWhisper(rig.ctx(), "library/talk.mp4").catch((e: unknown) => e);
+    await until(() => whisperJobs().length === 1);
+    // the indexer has the same file in its queue; it waits behind the look
+    const c = new IndexCoordinator(
+      rig.store as never,
+      async () => rig.runner as never,
+      () => undefined,
+      () => undefined,
+    );
+    c.indexSource("library/talk.mp4");
+    await quiet();
+    expect(whisperJobs(), "the indexer waits for the look").toHaveLength(1);
+    // the person stops the look: the gate opens
+    cancelSpeechJob(whisperJobs()[0].id);
+    expect(isSpeechCancelled(await look)).toBe(true);
+    await quiet();
+    await quiet();
+    expect(whisperJobs(), "the file the person just stopped is not started again").toHaveLength(1);
+    expect(reportAppError, "and it is no failure").not.toHaveBeenCalled();
     c.dispose();
   });
 });

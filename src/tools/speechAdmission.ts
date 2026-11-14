@@ -187,6 +187,18 @@ export function wasCancelledByPerson(key: string): boolean {
   return cancelledByPerson.has(key);
 }
 
+/** The same fact told from the engine's side (F7): a whole-file run ended as the person's Cancel, whoever asked
+ *  for it (the indexer, or a look over a whole short file). Keyed by the engine's own cache key for the file,
+ *  language and model (its identity, never the path a project knows it by), so the background's run of the
+ *  same file is recognised and left alone wherever its queue holds it under another name. Both kinds of key
+ *  are in one set: they cannot be mistaken for one another. */
+export function markRunCancelledByPerson(key: string | null): void {
+  if (key) remember(cancelledByPerson, key);
+}
+export function wasRunCancelledByPerson(key: string | null): boolean {
+  return key !== null && cancelledByPerson.has(key);
+}
+
 /** The live check stopped this file's whole-file run for being too slow: it falls back to the parts a request
  *  uses for the rest of the session, and the indexer does not start it again. */
 export function markOnDemandThisSession(key: string): void {

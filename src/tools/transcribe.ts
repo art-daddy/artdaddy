@@ -38,7 +38,9 @@ import {
   admitWholeFile,
   isSpeechDeferred,
   knownAudioLength,
+  markRunCancelledByPerson,
   SpeechDeferredError,
+  wasRunCancelledByPerson,
 } from "./speechAdmission";
 import { backendOfRun, recordSpeechRun } from "./speechPace";
 import { padded, playedSpan, spanWindows } from "./speechSpans";
@@ -1181,6 +1183,9 @@ async function runWhisperOnce(
     // and a length nobody measured is a run here: it is read again, from the audio itself, just before the
     // engine is launched (below).
     if (ctx.background && win.key === "") {
+      // The person stopped this file's run (a look, captions, the indexer's own): the background never
+      // starts it by itself afterwards, however its queue names the file (F7). A request still runs it.
+      if (wasRunCancelledByPerson(out)) throw new SpeechCancelledError();
       const admission = admitWholeFile({
         file: fileLabel(src),
         where: "boundary",
@@ -1290,6 +1295,11 @@ async function runWhisperOnce(
         const run = ctx.background ? await engine() : await lookWhisper(engine, ctx.signal);
         if (!run) throw new Error("transcription cancelled"); // stopped before its turn came
         return await finishWhisper(ctx.store, meta, run, ctx.signal);
+      } catch (e) {
+        // The person stopped a whole file's run: it is theirs to ask for again, and nothing starts it behind
+        // their back (the check at the top of this run, for the background).
+        if (isSpeechCancelled(e) && win.key === "") markRunCancelledByPerson(out);
+        throw e;
       } finally {
         // Its words are kept, or it failed: nothing is left for another page to finish.
         await release();

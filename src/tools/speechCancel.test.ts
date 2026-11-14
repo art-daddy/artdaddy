@@ -226,6 +226,46 @@ describe("Cancel on one run", () => {
     await finish(rig, spec, "window");
     expect((await again).words.map((w) => w.word)).toEqual(["window"]);
   });
+
+  // F7: the person stopped a look over a whole (short) file. Whoever asked for the run, the file is theirs to
+  // ask for again, and nothing else starts it behind their back.
+  it("a whole file's run that a request had stopped is not started by the background behind the person's back, and a request for it runs", async () => {
+    const rig = speechRig();
+    const src = freshSource();
+    const look = runWhisper(rig.ctx(), src).catch((e: unknown) => e); // a look over the whole file: no window
+    await until(() => whisperJobs().length === 1);
+    cancelSpeechJob(whisperJobs()[0].id);
+    expect(isSpeechCancelled(await look)).toBe(true);
+    // the indexer's turn comes, with the same file in its queue
+    const background = runWhisper(rig.ctx({ background: true }), src).catch((e: unknown) => e);
+    await new Promise((r) => setTimeout(r, 60));
+    expect(whisperJobs(), "the file was not started again").toHaveLength(1);
+    const answer = await background;
+    expect(isSpeechCancelled(answer), "it is answered as the person's cancel").toBe(true);
+    expect((answer as Error).message).toMatch(ADVICE);
+    expect(reportAppError).not.toHaveBeenCalled();
+    // a request for the same file still runs it, because somebody asked
+    const again = runWhisper(rig.ctx(), src);
+    await until(() => whisperJobs().length === 2);
+    await finish(rig, whisperJobs()[1], "back");
+    expect((await again).words.map((w) => w.word)).toEqual(["back"]);
+  });
+
+  it("is only for that file and that language: another file, a stretch of the same file, and another language run in the background", async () => {
+    const rig = speechRig();
+    const src = freshSource();
+    const look = runWhisper(rig.ctx(), src).catch((e: unknown) => e);
+    await until(() => whisperJobs().length === 1);
+    cancelSpeechJob(whisperJobs()[0].id);
+    await look;
+    void runWhisper(rig.ctx({ background: true }), freshSource()).catch(() => undefined);
+    void runWhisper(rig.ctx({ background: true }), src, "small", undefined, {
+      start: 10,
+      end: 40,
+    }).catch(() => undefined);
+    void runWhisper(rig.ctx({ background: true }), src, "small", "es").catch(() => undefined);
+    await until(() => whisperJobs().length === 4);
+  });
 });
 
 describe("what a tool answers when the person stopped the run", () => {
