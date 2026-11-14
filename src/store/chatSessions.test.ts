@@ -60,7 +60,8 @@ import { storeForProject } from "../lib/desktop";
 import { replaceTimeline } from "../timeline/engine";
 import { chatDisk, CHAT_DIR } from "../test/chatDisk";
 import { joinPath } from "../tools/store";
-import { resetHistoryModeSupport, useChat } from "./chat";
+import { disposeChatStore, getChatStore, resetHistoryModeSupport, useChat } from "./chat";
+import { effortsFor, PICKER_MODELS } from "./chatControls";
 import { chatFilePath } from "./chatFiles";
 import { useEditor } from "./editor";
 import { __resetJobNotes, notifyJobSettled, pendingJobNotes } from "./jobNotes";
@@ -837,5 +838,27 @@ describe("the open chat's file after every operation", () => {
       expect(openFile().session).toMatchObject({ context_tokens: 1234 });
       expect(openFile().requests).toHaveLength(2);
     }
+  });
+});
+
+describe("the assistant's controls", () => {
+  it("a new chat store starts on gpt-6-luna at medium effort, which the picker offers for both of its models", () => {
+    const start = getChatStore("controls-start").getState();
+    disposeChatStore("controls-start");
+    expect({ model: start.model, effort: start.effort }).toEqual({
+      model: "gpt-6-luna",
+      effort: "medium",
+    });
+    for (const model of PICKER_MODELS) expect(effortsFor(model)).toContain(start.effort);
+  });
+
+  it("the person's model and effort are not saved with the chat, so a changed default reaches everyone who updates", async () => {
+    useChat.setState({ model: "gpt-6.1-sol", effort: "xhigh" });
+    await say("make a reel", tl("t1"));
+    await chatState().newChat();
+    const saved = [...disk.fs.files.values()].join("\n");
+    expect(saved).toContain("make a reel"); // the chat really was written, so the two lines below mean something
+    expect(saved).not.toContain("gpt-6.1-sol");
+    expect(saved).not.toContain("xhigh");
   });
 });

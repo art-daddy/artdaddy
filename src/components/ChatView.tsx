@@ -29,6 +29,7 @@ import {
   MEDIA_RE,
 } from "../lib/upload";
 import { useChat } from "../store/chat";
+import { effortsFor, PICKER_MODELS } from "../store/chatControls";
 import { chatTitle } from "../store/chatTranscript";
 import { useAuth } from "../store/auth";
 import { useEditor } from "../store/editor";
@@ -64,13 +65,6 @@ import McpChip from "./McpChip";
 import { useProjectNotice } from "../store/projectNotice";
 import { attachmentsFromUploads, mediaKindFromName } from "./chatMedia";
 
-// Gemini ids route to the Gemini provider server-side by prefix (attachments.is_gemini_model),
-// so adding them here is all that is needed to offer them. The gemini-3.x family is withdrawn for
-// now and the server refuses it too, so listing one here would only produce a 400.
-const MODELS = ["gpt-5.6-luna", "gpt-6.1-sol"];
-const EFFORTS = ["none", "low", "medium", "high", "xhigh"];
-// gpt-6.1-sol rejects "none"; the server would send it as "low", so don't offer it.
-const effortsFor = (model: string) => (model === "gpt-6.1-sol" ? EFFORTS.slice(1) : EFFORTS);
 const MODES: ApprovalMode[] = ["default", "autopilot"];
 // "default" alone says nothing about what it decides; the value stays as the stored/wire form.
 const MODE_LABELS: Record<ApprovalMode, string> = {
@@ -901,7 +895,7 @@ export default function ChatView({ onHide }: { onHide?: () => void } = {}) {
                 effortsFor(v).includes(effort) ? { model: v } : { model: v, effort: "low" },
               )
             }
-            options={MODELS}
+            options={PICKER_MODELS}
           />
           <Select
             value={effort}

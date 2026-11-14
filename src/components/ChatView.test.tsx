@@ -96,8 +96,8 @@ function baseState() {
     streaming: false,
     pending: null,
     session: null,
-    model: "gpt-5.6-luna",
-    effort: "high",
+    model: "gpt-6-luna",
+    effort: "medium",
     mode: "default",
     error: null,
     pendingMentions: [],
@@ -838,7 +838,7 @@ describe("ChatView", () => {
     const models = [...(screen.getAllByRole("combobox")[0] as HTMLSelectElement).options].map(
       (o) => o.value,
     );
-    expect(models).toEqual(["gpt-5.6-luna", "gpt-6.1-sol"]);
+    expect(models).toEqual(["gpt-6-luna", "gpt-6.1-sol"]);
   });
 
   // gpt-6.1-sol 400s on effort "none"; Luna accepts it. Both directions, or a filter that hid
@@ -850,7 +850,7 @@ describe("ChatView", () => {
     const { unmount } = render(<ChatView />);
     expect(efforts()).not.toContain("none");
     unmount();
-    state.model = "gpt-5.6-luna";
+    state.model = "gpt-6-luna";
     render(<ChatView />);
     expect(efforts()).toContain("none");
   });

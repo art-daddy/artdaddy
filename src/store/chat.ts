@@ -57,6 +57,7 @@ import {
   unansweredCalls,
 } from "./chatTranscript";
 import { isChatId } from "./chatFiles";
+import { DEFAULT_EFFORT, DEFAULT_MODEL } from "./chatControls";
 import { undoFlags, localSession } from "./chatSession";
 import { projectConfig } from "./projectConfig";
 import { JOB_WAKE_LEAD, registerJobSink, unregisterJobSink, type SettledJob } from "./jobNotes";
@@ -965,9 +966,10 @@ const chatCreator: StateCreator<ChatState> = (set, get) => {
     restored: null,
     error: null,
     canRetry: false,
-    // Luna at high effort costs a fraction of a cent a round; the picker offers gpt-6.1-sol.
-    model: "gpt-5.6-luna",
-    effort: "high",
+    // The picker's starting values (chatControls.ts): Luna at medium effort costs a fraction of a cent
+    // a round; the picker offers gpt-6.1-sol.
+    model: DEFAULT_MODEL,
+    effort: DEFAULT_EFFORT,
     mode: "default",
     pendingMentions: [],
 
