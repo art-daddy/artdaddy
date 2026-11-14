@@ -41,8 +41,8 @@ function oldFormula(history: ReadonlyArray<readonly [number, number]>, audio: nu
 
 /** What the model under test says before run `i`, having been told of the runs before it. */
 const saysBefore = (i: number, startup?: number): number => {
-  const seen: PaceSample[] = W1.slice(0, i).map(
-    ([a, w]) => [a, w, "gpu", ...(startup ? [startup] : [])] as PaceSample,
+  const seen: PaceSample[] = W1.slice(0, i).map(([a, w]) =>
+    startup ? [a, w, "gpu", startup] : [a, w, "gpu"],
   );
   return estimateTranscribeSeconds(W1[i][0], seen, "windows", "gpu");
 };
