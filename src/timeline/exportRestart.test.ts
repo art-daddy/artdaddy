@@ -25,6 +25,7 @@ import {
   recordOf,
   restartRow,
   routeRowProblems,
+  stopFactsOf,
   type AutoRestartReason,
   type DecideOptions,
   type RestartDecision,
@@ -41,6 +42,12 @@ import {
   type RenderProgress,
 } from "./ffmpegProgress";
 import type { RenderWorkload } from "./renderPlan";
+import {
+  BUSY_RUN_CEILING_SECONDS,
+  BUSY_START_CEILING_SECONDS,
+  SLOW_START_SECONDS,
+  STALL_STOP_SECONDS,
+} from "./exportTrace";
 
 const MIB = 1024 ** 2;
 const STREAMED = "partition-pipes-v1" as const;
@@ -294,6 +301,64 @@ describe("the project length produced", () => {
         const value = producedFraction({ fraction, step, steps } as never);
         expect(value).toBeGreaterThanOrEqual(0);
         expect(value).toBeLessThanOrEqual(1);
+      }),
+      { numRuns: 300 },
+    );
+  });
+});
+
+describe("the app's own stop for standing still, as a reason reads it", () => {
+  const ceiling = BUSY_RUN_CEILING_SECONDS;
+
+  it("tells an idle stop from a ceiling stop with the REAL limits of the no-progress rule, so a limit that moves cannot drift away from it", () => {
+    // Every idle limit (before and after the first picture) is an idle stop; every busy ceiling is a ceiling stop.
+    expect(stopFactsOf({ kind: "frozen", seconds: STALL_STOP_SECONDS }, ceiling)).toEqual({
+      stopKind: "idle",
+      stopSeconds: STALL_STOP_SECONDS,
+    });
+    expect(stopFactsOf({ kind: "slow_start", seconds: SLOW_START_SECONDS }, ceiling)).toEqual({
+      stopKind: "idle",
+      stopSeconds: SLOW_START_SECONDS,
+    });
+    expect(stopFactsOf({ kind: "spinning", seconds: BUSY_RUN_CEILING_SECONDS }, ceiling)).toEqual({
+      stopKind: "ceiling",
+      stopSeconds: BUSY_RUN_CEILING_SECONDS,
+    });
+    expect(
+      stopFactsOf({ kind: "slow_start", seconds: BUSY_START_CEILING_SECONDS }, ceiling),
+    ).toEqual({ stopKind: "ceiling", stopSeconds: BUSY_START_CEILING_SECONDS });
+    expect(Math.max(STALL_STOP_SECONDS, SLOW_START_SECONDS)).toBeLessThan(ceiling);
+    expect(BUSY_START_CEILING_SECONDS).toBeGreaterThanOrEqual(ceiling);
+  });
+
+  it("says nothing when the export was not stopped for standing still, or the stop cannot be read", () => {
+    expect(stopFactsOf(undefined, ceiling)).toEqual({ stopKind: null, stopSeconds: null });
+    expect(stopFactsOf(null, ceiling)).toEqual({ stopKind: null, stopSeconds: null });
+    for (const seconds of [Number.NaN, Number.POSITIVE_INFINITY, -1, "180" as never])
+      expect(stopFactsOf({ kind: "frozen", seconds }, ceiling)).toEqual({
+        stopKind: null,
+        stopSeconds: null,
+      });
+  });
+
+  it("is a ceiling stop exactly when the kind is spinning or the stop came at the ceiling or later, and never throws (property)", () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom("frozen", "slow_start", "spinning", "anything else"),
+        fc.integer({ min: 0, max: 7200 }),
+        (kind, seconds) => {
+          const got = stopFactsOf({ kind, seconds }, ceiling);
+          expect(got.stopSeconds).toBe(seconds);
+          expect(got.stopKind).toBe(kind === "spinning" || seconds >= ceiling ? "ceiling" : "idle");
+        },
+      ),
+      { numRuns: 300 },
+    );
+    fc.assert(
+      fc.property(fc.anything(), fc.anything(), (kind, seconds) => {
+        const got = stopFactsOf({ kind, seconds } as never, ceiling);
+        expect([null, "idle", "ceiling"]).toContain(got.stopKind);
+        expect(got.stopKind === null).toBe(got.stopSeconds === null);
       }),
       { numRuns: 300 },
     );

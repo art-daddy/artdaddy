@@ -110,6 +110,7 @@ import {
   producedFraction,
   recordOf,
   restartRow,
+  stopFactsOf,
   type RestartDecision,
   type RestartFacts,
   type RestartRecord,
@@ -178,20 +179,37 @@ const restartGaps = new Map<string, AbortController>();
 const cancelAsked = new Set<string>();
 
 const RESTART_LOG_LIMIT = 50;
-/** What each decision to start an export again came to, newest last: a local record for a bug report. Nothing is sent. */
-const restartLog: Array<{ id: string; at: number; record: RestartRecord }> = [];
+/** What each decision to start an export again came to, newest last: a local record for a bug report. Nothing is sent.
+ *  The decision's own entry carries the failure it was made on (its code, the guard that fired, and the kind and length
+ *  of the app's own stop for standing still), so a reason's row can be checked against what it was shown. */
+const restartLog: Array<{
+  id: string;
+  at: number;
+  record: RestartRecord;
+  failure?: RestartFacts["failure"];
+}> = [];
 
 export function restartDecisions(): ReadonlyArray<{
   id: string;
   at: number;
   record: RestartRecord;
+  failure?: RestartFacts["failure"];
 }> {
   return restartLog.map((entry) => ({ ...entry }));
 }
 
-function noteRestartDecision(id: string, record: RestartRecord | null): void {
+function noteRestartDecision(
+  id: string,
+  record: RestartRecord | null,
+  failure?: RestartFacts["failure"],
+): void {
   if (record === null) return;
-  restartLog.push({ id: attempts.publicId(id), at: Date.now(), record });
+  restartLog.push({
+    id: attempts.publicId(id),
+    at: Date.now(),
+    record,
+    ...(failure ? { failure } : {}),
+  });
   if (restartLog.length > RESTART_LOG_LIMIT)
     restartLog.splice(0, restartLog.length - RESTART_LOG_LIMIT);
 }
@@ -2231,15 +2249,10 @@ async function settle(x: Settle): Promise<void> {
   }
   // The decision to start the export again by itself wants what the app process says about the failed run (the memory it
   // reached, the limit that fired) and how much memory the PC has now. Read here, while a Cancel still reaches the export,
-  // and only for a failure that could be one: a memory stop of an export this page started.
+  // and for any failure of an export this page started: the reasons decide which of them is theirs (a memory stop, a
+  // stop for standing still, a chip), and the others are refused with their own word.
   const failedRun =
-    error &&
-    !cancelled &&
-    x.story &&
-    retries.has(x.jobId) &&
-    failureOf(error).code === "memory_limit"
-      ? await readFailedRun(x)
-      : null;
+    error && !cancelled && x.story && retries.has(x.jobId) ? await readFailedRun(x) : null;
   // From here a page that takes over must not touch the file again.
   if (!publicationPending) await x.supervisor?.commit(x.jobId).catch(() => false);
   // A Cancel that was asked, whether or not the delivery owner has answered yet, is read before the export's controller goes.
@@ -2438,8 +2451,8 @@ function startRestart(
     failure: {
       code: failureOf(error).code,
       guard: limit && limit !== "other" ? limit : null,
-      stopKind: null,
-      stopSeconds: null,
+      // The app's own stop for standing still, told apart by its length: an idle limit is under the busy ceilings.
+      ...stopFactsOf(x.story?.stalledOut, BUSY_RUN_CEILING_SECONDS),
     },
     attempt: {
       number: attempts.attemptNumber(x.jobId),
@@ -2480,7 +2493,7 @@ function startRestart(
     workload: null,
   };
   const decision = decideRestart(facts);
-  noteRestartDecision(x.jobId, recordOf(decision));
+  noteRestartDecision(x.jobId, recordOf(decision), facts.failure);
   if (!decision.restart) return null;
   const row = restartRow(decision.reason);
   if (!row || !attempts.registerPending(x.jobId, "auto")) {

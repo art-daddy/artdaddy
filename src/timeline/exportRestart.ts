@@ -378,6 +378,22 @@ export function producedFraction(live: {
   return Math.min(1, 2 * fraction);
 }
 
+/** What the app's own stop for standing still says to a reason (exportTrace.ts `stalledOut`): an IDLE stop, at the idle
+ *  limits (the processors had done next to nothing), or a CEILING stop (the PC stayed busy: the spinning kind, or a stop at
+ *  `ceilingSeconds` or later, the busy ceilings being above the idle limits). Nothing and nothing when the export was not
+ *  stopped for standing still, or the stop cannot be read. */
+export function stopFactsOf(
+  stall: { readonly kind: string; readonly seconds: number } | null | undefined,
+  ceilingSeconds: number,
+): { stopKind: "idle" | "ceiling" | null; stopSeconds: number | null } {
+  const seconds = stall ? amount(stall.seconds) : null;
+  if (!stall || seconds === null) return { stopKind: null, stopSeconds: null };
+  return {
+    stopKind: stall.kind === "spinning" || seconds >= ceilingSeconds ? "ceiling" : "idle",
+    stopSeconds: seconds,
+  };
+}
+
 /** What the failed run says the export needed, for a prediction: where the export stopped at its own limit, at least
  *  the larger of its peak and that limit; where the PC ran short, the peak it reached. Null when it says nothing. */
 export function anchorBytes(
