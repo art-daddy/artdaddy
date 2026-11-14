@@ -10,8 +10,9 @@ export const CHIP_PREF_KEY = "artdaddy.chipPref.v1";
 /** Choices that could not be written, by the storage they were meant for. */
 const unwritten = new WeakMap<object, ChipPref>();
 
-/** The person's choice: Off only when exactly that was stored (or could not be stored); anything else is Auto. Never throws. */
-export function readChipPref(store: StorageLike | null): ChipPref {
+/** The person's choice: Off only when exactly that was stored (or could not be stored); anything else is Auto. Never throws.
+ *  Reading needs only `getItem`, so a store that is only ever read from (the chip test's own) can be passed. */
+export function readChipPref(store: Pick<StorageLike, "getItem"> | null): ChipPref {
   try {
     if (!store) return "auto";
     const held = unwritten.get(store);
