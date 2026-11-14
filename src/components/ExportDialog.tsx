@@ -6,16 +6,18 @@
 import { useEffect, useMemo, useReducer, useState, useSyncExternalStore } from "react";
 
 import { formatEta } from "../timeline/ffmpegProgress";
+import { attempts } from "../timeline/exportAttempts";
 import { decideExportEncoder, type ExportEncoderDecision } from "../timeline/exportChoice";
 import { dialogEstimate } from "../timeline/dialogEstimate";
 import { CHECKING_LINE } from "../timeline/estimateWords";
 import { holdExportAsk } from "../timeline/exportAsk";
+import { lowerAdvice3c } from "../timeline/exportHelpWatch";
 import type { ExportMode, ExportQuality, ExportResolution } from "../timeline/exportOptions";
-import { listExportRecords, subscribeExports } from "../timeline/exportQueue";
-import { attempts } from "../timeline/exportAttempts";
+import { cancelExport, listExportRecords, subscribeExports } from "../timeline/exportQueue";
 import {
   describeDialogProgress,
   describeModeLines,
+  failureOf,
   STATUS_REFRESH_MS,
   type ModeView,
 } from "../timeline/exportWords";
@@ -24,6 +26,7 @@ import { useEditor } from "../store/editor";
 import { liveFeedOf, useExportJob, type ExportPhase } from "../store/exportJob";
 import ExportProgressBar from "./ExportProgressBar";
 import ExportQueuePane from "./ExportQueuePane";
+import ExportHelpBanner from "./ExportHelpBanner";
 import SpeedCheckLine from "./SpeedCheckLine";
 import { useSpeedCheck } from "./useSpeedCheck";
 import ChipRow from "./ChipRow";
@@ -411,6 +414,7 @@ function Progress({
   const finishing = useExportJob((s) => s.finishing);
   const rows = useSyncExternalStore(subscribeExports, listExportRecords, listExportRecords);
   const running = phase === "preparing" || phase === "rendering";
+  const abort = useExportJob((s) => s.abort);
   // A clock, not the progress feed: a stage that drags on (checking a long file) reports nothing at all, and that is
   // exactly when the line has to keep changing.
   const [, redraw] = useReducer((n: number) => n + 1, 0);
@@ -444,6 +448,15 @@ function Progress({
         .filter(Boolean)
         .join(" · ")
     : "";
+  // What to lower, under the error the dialog has always shown, where there is something true to say.
+  const failedRow =
+    phase === "failed" && jobId
+      ? rows.find((row) => row.job_id === attempts.current(jobId))
+      : undefined;
+  const lower =
+    phase === "failed" && error
+      ? lowerAdvice3c(failureOf(error).code, failedRow?.chipFailed === true)
+      : "";
   return (
     <div className="mt-3">
       <ExportProgressBar
@@ -466,6 +479,12 @@ function Progress({
           {pace}
         </span>
       </div>
+      {running && jobId && (
+        <ExportHelpBanner
+          jobId={jobId}
+          onCancel={() => (abort ? abort() : cancelExport(jobId, "person_dialog"))}
+        />
+      )}
       {savedTo && (
         <p className="mt-2 break-all text-xs text-neutral-300">
           {/* The user picks the folder on desktop, so name it. Only the web build (no save
@@ -474,6 +493,11 @@ function Progress({
         </p>
       )}
       {error && <p className="mt-2 text-xs text-red-300">{error}</p>}
+      {lower && (
+        <p data-testid="export-lower" className="mt-1 text-xs text-neutral-400">
+          {lower}
+        </p>
+      )}
     </div>
   );
 }

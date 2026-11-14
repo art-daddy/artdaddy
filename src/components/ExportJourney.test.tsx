@@ -253,7 +253,8 @@ describe("an assistant's export on a PC that is short of memory", () => {
     expect(after.map((row) => row.state)).toEqual(["failed", "done"]);
     expect(after[0]).toMatchObject({
       failure_code: "memory_limit",
-      failure: "Your PC ran short of memory. Close other programs and try again.",
+      failure:
+        "Your PC ran short of memory. Close other programs and try again. To use less memory, lower the picture size or frame rate, or export a shorter section.",
     });
     expect(ran).toBe(2);
 

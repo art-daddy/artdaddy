@@ -38,6 +38,7 @@ import {
 } from "../timeline/exportQueue";
 import { answerButtons } from "../timeline/exportQuestions";
 import { describeEstimateLine } from "../timeline/estimateWords";
+import { lowerAdvice3c } from "../timeline/exportHelpWatch";
 import {
   canSaveElsewhere,
   describeChipFailure,
@@ -55,6 +56,7 @@ import {
 } from "../timeline/exportWords";
 import ExportProgressBar from "./ExportProgressBar";
 import ChipLine from "./ChipLine";
+import ExportHelpBanner from "./ExportHelpBanner";
 import SaveToRow from "./SaveToRow";
 import { cn } from "./ui";
 
@@ -74,7 +76,12 @@ async function saveSomewhereElse(jobId: string): Promise<void> {
   }
 }
 
-export default function ExportCard(): JSX.Element | null {
+export default function ExportCard({
+  onSwitchToQuick,
+}: {
+  /** Starts a running export again as a Quick export; given only where Quick exists. */
+  onSwitchToQuick?: (jobId: string) => void;
+} = {}): JSX.Element | null {
   const projectDir = useEditor((s) => s.store?.projectDir ?? null);
   const rows = useSyncExternalStore(subscribeExports, listExportRecords, listExportRecords);
   const live = useExportJob((s) => s.live);
@@ -241,6 +248,11 @@ export default function ExportCard(): JSX.Element | null {
                 chip={r.encoder === "amd" || r.encoder === "nvidia" || r.encoder === "intel"}
               />
             )}
+            <ExportHelpBanner
+              jobId={r.job_id}
+              onCancel={() => cancelExport(r.job_id, "person_card")}
+              onSwitchToQuick={onSwitchToQuick}
+            />
           </div>
         );
       })}
@@ -296,6 +308,9 @@ export default function ExportCard(): JSX.Element | null {
               : "";
         const elsewhere =
           r.state === "failed" && r.canRetry === true && canSaveElsewhere(failureOf(r.error).code);
+        // What to lower, after the plain sentence and Try again's line, where there is something true to say.
+        const lower =
+          r.state === "failed" ? lowerAdvice3c(failureOf(r.error).code, r.chipFailed === true) : "";
         return (
           <div key={r.job_id} className="flex items-start justify-between gap-2">
             <div className="min-w-0">
@@ -312,6 +327,11 @@ export default function ExportCard(): JSX.Element | null {
               )}
               {detail && <div className="text-[11px] text-neutral-400">{detail}</div>}
               {tryAgain && <div className="text-[11px] text-neutral-400">{tryAgain}</div>}
+              {lower && (
+                <div data-testid="export-card-lower" className="text-[11px] text-neutral-400">
+                  {lower}
+                </div>
+              )}
               {elsewhere && (
                 <div className="text-[11px] text-neutral-400">{SAVE_ELSEWHERE_LINE}</div>
               )}
