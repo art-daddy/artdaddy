@@ -77,6 +77,13 @@ import {
 import { clearModelDecline, declineModel } from "./modelDecline";
 import { kindOfHttpStatus, type ModelFailureKind } from "./modelFailure";
 import { DEFAULT_MODEL_KEY, MODEL_MANIFEST, modelOrigins } from "./modelManifest";
+import {
+  noteWordsFetched,
+  registerCachedWords,
+  registerPendingWords,
+  wakeTargetOf,
+  type Settled,
+} from "../store/speechWakeHost";
 import { loadTimeline } from "../timeline/engine";
 import { findClip } from "../timeline/helpers";
 import type { Clip } from "../timeline/model";
@@ -2507,6 +2514,8 @@ export async function getTranscriptTool(
   /** The answer the person's Cancel left, once a run was stopped: the windows after it are not started (F6a)
    *  and are answered the same way. */
   let stopped: { error: string } | null = null;
+  /** How the run of the job still going when the time ran out ends: what the wake for its words waits on. */
+  let overdueEnds: Promise<Settled> | null = null;
   const queued: SpanJob[] = [];
   for (const job of jobs) {
     if (job.words) continue;
@@ -2519,13 +2528,14 @@ export async function getTranscriptTool(
       queued.push(job);
       continue;
     }
-    const run = runWhisper(
+    const made = runWhisper(
       { ...ctx, speechPurpose: "transcript" },
       job.src,
       DEFAULT_MODEL,
       undefined,
       job.window,
-    ).then(
+    );
+    const run = made.then(
       (t) => ({ words: t.words }),
       (e: unknown) => ({
         error: transcriptionFailureText(e),
@@ -2539,12 +2549,48 @@ export async function getTranscriptTool(
     if (got) {
       Object.assign(job, got);
       if (job.reason === "cancelled" && job.error !== undefined) stopped = { error: job.error };
-    } else overdue = job;
+    } else {
+      overdue = job;
+      overdueEnds = made.then(
+        (): Settled => ({ ok: true }),
+        (error: unknown): Settled => ({ ok: false, error }),
+      );
+    }
   }
   if (ctx.signal?.aborted) return stoppedAnswer();
-  const handed = queued
-    .map((job) => prioritizeTranscript(ctx.store.projectDir, job.src, "", job.window))
-    .every(Boolean);
+  const handedJobs = new Set(
+    queued.filter((job) => prioritizeTranscript(ctx.store.projectDir, job.src, "", job.window)),
+  );
+  const handed = handedJobs.size === queued.length;
+  // Words still to come are waited for on the chat's behalf: the assistant is brought back when they are there.
+  // The run that was going when the time ran out says so when it ends. A file the project's own transcriber was
+  // handed has no run to wait for here (its words appear in the cache), so the cache is looked at. A file nobody
+  // is transcribing is not waited for: no words will come.
+  for (const job of jobs) {
+    if (job.words || job.error !== undefined) continue;
+    const first = uses.find((u) => jobOf.get(u) === job);
+    if (!first) continue;
+    const target = wakeTargetOf(
+      ctx,
+      String(first.clip.media_ref),
+      String(first.clip.id),
+      job.window,
+    );
+    if (!target) continue;
+    const key = `${job.src}\u0000transcript\u0000${job.window.start}-${job.window.end}`;
+    const seconds = job.window.end - job.window.start;
+    if (job === overdue && overdueEnds) registerPendingWords(target, key, seconds, overdueEnds);
+    else if (handedJobs.has(job))
+      registerCachedWords(
+        target,
+        key,
+        seconds,
+        async () =>
+          (await peekTranscript(ctx, job.src, DEFAULT_MODEL, undefined, job.window).catch(
+            () => null,
+          )) !== null,
+      );
+  }
 
   const clipsOut: Array<Record<string, unknown>> = [];
   const pending: Array<{ clip_id: string; track_id: string }> = [];
@@ -2573,6 +2619,8 @@ export async function getTranscriptTool(
       rows.push([idx++, text, tf, te]);
     }
     if (rows.length) clipsOut.push({ clip_id: clip.id, track_id: track, words: rows });
+    // The assistant has this clip's words now (all of them, unless the cap cut them): a wake has nothing to add.
+    if (!truncated) noteWordsFetched(ctx, String(clip.media_ref), job.window);
   }
   const preview = clipsOut
     .flatMap((c) => (c.words as Array<[number, string, number, number]>).map((r) => r[1]))

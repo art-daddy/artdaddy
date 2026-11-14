@@ -52,6 +52,19 @@ import {
 } from "./transcribe";
 import { registerBackgroundTranscriber } from "./transcriptQueue";
 import { __resetExportFlags, __setExportFlag } from "../api/exportFlags";
+import {
+  __resetJobNotes,
+  pendingJobNotes,
+  registerJobSink,
+  SETTLE_WINDOW_MS,
+  type SettledJob,
+} from "../store/jobNotes";
+import {
+  __resetWakeHost,
+  admitWordsWake,
+  wakeBeginTurn,
+  wakeEndTurn,
+} from "../store/speechWakeHost";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -3095,5 +3108,148 @@ describe("get_transcript transcribes what the clips play (4h)", () => {
     for (let i = 0; i < 2000 && runs.length < 2; i++) await new Promise((r) => setTimeout(r, 1));
     stop.abort();
     expect(await call).toEqual({ ok: false, error: "cancelled" });
+  });
+
+  // The words get_transcript could not wait for: the assistant is told they are not ready, and brought back
+  // when they are, by the run that was still going and by the cache the project's transcriber fills.
+  describe("and is brought back for the clips it was told were not ready", () => {
+    const CHAT = { dir: DIR, session: "chat-1" };
+    const asChat = (
+      ctx: ClientToolContext,
+      exec: number,
+      over: object = {},
+    ): ClientToolContext => ({
+      ...ctx,
+      origin: { chatSessionId: "chat-1", branchId: 0, executionId: exec },
+      ...over,
+    });
+    const woken: SettledJob[] = [];
+    const fakeClock = (): void =>
+      void vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+
+    beforeEach(() => {
+      woken.length = 0;
+      __resetWakeHost();
+      __resetJobNotes();
+      registerJobSink(DIR, {
+        isIdle: () => true,
+        deliver: (jobs) => woken.push(...jobs),
+        admit: (job) => admitWordsWake(DIR, "chat-1", job),
+      });
+    });
+    afterEach(() => {
+      __resetWakeHost();
+      __resetJobNotes();
+      __resetExportFlags();
+    });
+
+    /** Time passing in small steps, so that what a step starts (a run ending, the settling window opening) is
+     *  caught by the next. */
+    const pass = async (ms: number): Promise<void> => {
+      for (let spent = 0; spent < ms; spent += 100) await vi.advanceTimersByTimeAsync(100);
+    };
+    let warmed = false;
+    /** The first whisper run of a process loads what it imports on the way, which a faked clock would wait for. */
+    async function warmUp(): Promise<void> {
+      if (warmed) return;
+      warmed = true;
+      const { fs } = await project([{ id: "w", from: 60, to: 75, at: 0 }]);
+      await getTranscriptTool({}, ctxWith(spoken(fs).runner, fs));
+    }
+
+    /** The first call: c1 has its words, c2's run is still going, c3 was handed to the project's transcriber. */
+    async function firstCall(over: object = {}, handedOn = true) {
+      await warmUp();
+      fakeClock();
+      const rig = await slow();
+      if (handedOn)
+        unregister.push(
+          registerBackgroundTranscriber(DIR, { prioritize: () => true, loudness: () => null }),
+        );
+      const ctx = asChat(ctxWith(rig.runner, rig.fs), 1, over);
+      wakeBeginTurn(CHAT, 1, false);
+      let got: Any;
+      void getTranscriptTool({}, ctx).then((r) => (got = r));
+      await until(() => rig.runs.length === 2);
+      await vi.advanceTimersByTimeAsync(TRANSCRIPT_WAIT_MS);
+      await until(() => got !== undefined);
+      wakeEndTurn(CHAT, 1, "done");
+      return { ...rig, got, ctx };
+    }
+
+    /** What the project's transcriber does for c3: its words come to the cache, with no run of this call's. */
+    async function transcriberMakesC3(rig: { fs: MockFs; src: string; runner: CommandRunner }) {
+      let made = false;
+      void runWhisper(
+        { ...ctxWith(rig.runner, rig.fs), background: true },
+        rig.src,
+        "small",
+        undefined,
+        { start: 1199, end: 1211 },
+      ).then(() => (made = true));
+      await pass(500);
+      await until(() => made);
+    }
+
+    it("lands the clip whose run was still going and the clip the transcriber was handed, and wakes once, after both", async () => {
+      const rig = await firstCall();
+      expect(rig.got.in_progress.map((c: Any) => c.clip_id)).toEqual(["c2", "c3"]);
+      expect(woken).toEqual([]);
+
+      releases.splice(0).forEach((release) => release()); // c2's run ends
+      await pass(SETTLE_WINDOW_MS + 500);
+      expect(woken, "c3 has no words yet").toEqual([]);
+
+      await transcriberMakesC3(rig);
+      await pass(5_000 + SETTLE_WINDOW_MS + 500);
+      expect(woken).toHaveLength(1);
+      expect(woken[0]).toMatchObject({
+        kind: "words",
+        label: "the words of 2 files",
+        media_refs: ["c2", "c3"],
+      });
+      await pass(3 * 60_000);
+      expect(woken, "never a second one").toHaveLength(1);
+    });
+
+    it("does not wake for words the assistant read again before the wake was sent", async () => {
+      const rig = await firstCall();
+      releases.splice(0).forEach((release) => release());
+      await transcriberMakesC3(rig);
+      await pass(5_500); // both have landed; the settling window is open
+      expect(pendingJobNotes(DIR)).toHaveLength(1);
+      const again = (await getTranscriptTool({}, asChat(ctxWith(rig.runner, rig.fs), 2))) as Any;
+      expect(again.in_progress).toBeUndefined();
+      await pass(SETTLE_WINDOW_MS + 500);
+      expect(woken).toEqual([]);
+    });
+
+    it("does not wait for a clip that nobody is transcribing: no words will come for it", async () => {
+      const rig = await firstCall({}, false);
+      expect(rig.got.note).toMatch(/longer than one call waits/);
+      releases.splice(0).forEach((release) => release());
+      await pass(SETTLE_WINDOW_MS + 500);
+      expect(woken).toHaveLength(1);
+      expect(woken[0]).toMatchObject({ label: "the words of 1 file", media_refs: ["c2"] });
+    });
+
+    it("promises nothing to an outside agent", async () => {
+      const rig = await firstCall({ surface: "mcp", origin: undefined });
+      releases.splice(0).forEach((release) => release());
+      await transcriberMakesC3(rig);
+      await pass(5_000 + SETTLE_WINDOW_MS + 500);
+      expect(woken).toEqual([]);
+      expect(pendingJobNotes(DIR)).toEqual([]);
+    });
+
+    it("promises nothing while the switch is off", async () => {
+      __setExportFlag("speech_wake", false);
+      const rig = await firstCall();
+      releases.splice(0).forEach((release) => release());
+      await transcriberMakesC3(rig);
+      await pass(5_000 + SETTLE_WINDOW_MS + 500);
+      expect(woken).toEqual([]);
+      expect(pendingJobNotes(DIR)).toEqual([]);
+    });
   });
 });
