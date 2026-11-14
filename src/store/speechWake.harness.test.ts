@@ -89,7 +89,10 @@ function expectS1(m: WakeMetrics): void {
   expect
     .soft(
       m.wordsFetched,
-      `the words of ${m.wordsFetched} of ${m.filesTotal} files reached the model: with no wake the assistant is never asked to look again`,
+      `the words of ${m.wordsFetched} of ${m.filesTotal} files reached the model: ` +
+        (m.wakeTurns.length === 0
+          ? "with no wake the assistant is never asked to look again"
+          : "the assistant looks at the files the wake names, by id or by file name, and it was not given all 13"),
     )
     .toBe(13);
   expect.soft(m.modelRounds, "model rounds for the whole conversation").toBeLessThanOrEqual(5);
@@ -101,15 +104,17 @@ function expectS1(m: WakeMetrics): void {
 /** S2: after the wake the second add_captions succeeded, so the captions are on the timeline. */
 async function expectS2(m: WakeMetrics, h: WakeHarness): Promise<void> {
   expectOneWakeAfterTheLastWords(m, 7, "clips");
-  expect
-    .soft(m.captionsAnswers, "what add_captions answered: the second call should add the captions")
-    .toEqual(["pending", "added"]);
+  const why =
+    m.wakeTurns.length === 0
+      ? "with no wake the assistant never calls add_captions again"
+      : "after the wake";
   expect
     .soft(
-      await h.captionClips(),
-      "caption clips on the timeline: with no wake the assistant never calls add_captions again",
+      m.captionsAnswers,
+      `what add_captions answered (${why}): the second call should add the captions`,
     )
-    .toBeGreaterThan(0);
+    .toEqual(["pending", "added"]);
+  expect.soft(await h.captionClips(), `caption clips on the timeline (${why})`).toBeGreaterThan(0);
 }
 
 /** The premise of S1: every one of the 13 looks found the words not ready, and the assistant handed back. */
