@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { toolDefinition } from "../contract";
 import { resetLiveWait, useLiveWait } from "../store/liveWait";
 import { TranscriptionFailure } from "./speechFailure";
-import { estimateTranscribeSeconds } from "./speechPace";
+import { estimateTranscribeSeconds, type PaceSample } from "./speechPace";
 import {
   __resetWaiting,
   waitBoundMs,
@@ -335,6 +335,19 @@ describe("waitForRun", () => {
       const slowMachine: WaitRequest<never>["samples"] = [[100, 203, "gpu"]]; // about 1.9 s of work per second
       const fastMachine: WaitRequest<never>["samples"] = [[100, 13, "gpu"]]; // as little as the model believes
       expect(await etaAt(600, 1, slowMachine)).toBeGreaterThan((await etaAt(600, 1, fastMachine))!);
+    });
+
+    it("shows the pace model's own number: the estimate for the span, less what has been waited, and says it in the note", async () => {
+      const samples: PaceSample[] = [[100, 65, "cpu", 5]]; // 5 s to begin, then 0.6 s of work per second
+      __resetWaiting();
+      const seen = start(
+        request(NEVER(), { audioSeconds: 600, boundMs: 5_000, samples, os: "windows" }),
+      );
+      await vi.advanceTimersByTimeAsync(5_000);
+      const status = (seen.outcome as unknown as { status: { eta_s: number; note: string } })
+        .status;
+      expect(status.eta_s).toBe(estimateTranscribeSeconds(600, samples, "windows") - 5);
+      expect(status.note).toContain(`about ${status.eta_s} s to go`);
     });
 
     it("counts the looks queued ahead: the fourth of four at once has the most to wait for", async () => {
