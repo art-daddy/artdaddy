@@ -10,10 +10,16 @@ import { describe, expect, it } from "vitest";
 
 import {
   BUFFER_CAP,
+  createLiveCheck,
   createSpeechMonitor,
+  LIVE_CONFIRM_S,
+  LIVE_MIN_AUDIO_S,
+  LIVE_MIN_LEFT_S,
+  MAX_GAP_S,
   MIN_AUDIO_S,
   MIN_WALL_S,
   passesLiveCap,
+  type LiveReading,
   type MonitorSnapshot,
 } from "./speechMonitor";
 import { backendOfRun } from "./speechPace";
@@ -341,5 +347,277 @@ describe("the live check", () => {
     expect(passesLiveCap(10_000, null, 600)).toBe(false);
     for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, -Infinity])
       expect([passesLiveCap(bad, 5, 600), passesLiveCap(5, bad, 600)]).toEqual([false, false]);
+  });
+});
+
+describe("the run's own time, which the live check reads instead of the clock's (F1)", () => {
+  it("is the time between outputs, a stretch counted whole up to MAX_GAP_S, and no stretch is cut short", () => {
+    const m = createSpeechMonitor({ launchedAt: 0, spanS: 600 });
+    m.feed(line(0, 30), 25_000); // 25 s from the launch to the first output, the engine's start-up included
+    m.feed(line(30, 60), 55_000);
+    m.feed(line(60, 90), 55_000 + MAX_GAP_S * 1000); // exactly the most that is trusted
+    expect(m.live()).toMatchObject({ bursts: 3, activeS: 25 + 30 + MAX_GAP_S, clamped: false });
+  });
+
+  it("counts a stretch longer than MAX_GAP_S for MAX_GAP_S, says so, and reads the speed again from after it", () => {
+    const m = createSpeechMonitor({ launchedAt: 0, spanS: 3600 });
+    m.feed(line(0, 30), 25_000);
+    m.feed(line(30, 60), 55_000);
+    m.feed(line(60, 90), 55_000 + 1_800_000); // half an hour: a sleep
+    const after = m.live();
+    expect(after.activeS).toBeCloseTo(25 + 30 + MAX_GAP_S, 9);
+    expect(after.clamped).toBe(true);
+    expect(after, "the speed of the stretch with the gap in it is not read").toMatchObject({
+      audioS: 0,
+      rate: null,
+      etaS: null,
+    });
+    m.feed(line(90, 120), 55_000 + 1_800_000 + 40_000);
+    m.feed(line(120, 150), 55_000 + 1_800_000 + 80_000);
+    // 60 s of audio at 40 s of work for each 30: from the burst after the gap, not from the first
+    expect(m.live().audioS).toBeCloseTo(60, 9);
+    expect(m.live().rate).toBeCloseTo(80 / 60, 9);
+    expect(m.live().etaS).toBeCloseTo((3600 - 150) * (80 / 60), 9);
+    expect(m.live().clamped, "and it is said for the rest of the run").toBe(true);
+  });
+
+  it("counts the stretch from the launch to the first output like any other: a long start-up is not trusted either", () => {
+    const m = createSpeechMonitor({ launchedAt: 0, spanS: 600 });
+    m.feed(line(0, 30), 400_000);
+    expect(m.live()).toMatchObject({ activeS: MAX_GAP_S, clamped: true });
+  });
+
+  it("adds nothing for a clock that has gone back, and takes nothing away", () => {
+    const m = createSpeechMonitor({ launchedAt: 1_000_000, spanS: 600 });
+    m.feed(line(0, 30), 1_020_000);
+    m.feed(line(30, 60), 1_020_000 - 3_600_000); // an hour back
+    expect(m.live()).toMatchObject({ activeS: 20, clamped: false });
+    m.feed(line(60, 90), 1_020_000 - 3_600_000 + 30_000);
+    expect(m.live().activeS).toBeCloseTo(50, 9);
+  });
+
+  it("is only ever the same as the clock's time or less, never more than MAX_GAP_S for an output, and never goes back", () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.integer({ min: -5_000, max: 400_000 }), { minLength: 1, maxLength: 40 }),
+        (gaps) => {
+          const m = createSpeechMonitor({ launchedAt: 1_000_000, spanS: null });
+          let now = 1_000_000;
+          let before = 0;
+          gaps.forEach((gap, i) => {
+            now += gap;
+            m.feed(line(i, i + 1), now);
+            const live = m.live();
+            expect(live.activeS).toBeGreaterThanOrEqual(before);
+            expect(live.activeS).toBeLessThanOrEqual((i + 1) * MAX_GAP_S + 1e-9);
+            before = live.activeS;
+          });
+        },
+      ),
+      { numRuns: 200 },
+    );
+  });
+
+  it("is exactly the clock's time while no stretch is longer than MAX_GAP_S: the check reads what it read before", () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.integer({ min: 0, max: MAX_GAP_S * 1000 }), { minLength: 1, maxLength: 40 }),
+        (gaps) => {
+          const m = createSpeechMonitor({ launchedAt: 5_000, spanS: null });
+          let now = 5_000;
+          gaps.forEach((gap, i) => {
+            now += gap;
+            m.feed(line(i, i + 1), now);
+            expect(m.live().activeS).toBeCloseTo((now - 5_000) / 1000, 9);
+            expect(m.live().clamped).toBe(false);
+          });
+        },
+      ),
+    );
+  });
+
+  it("says nothing before the first output, and never throws for anything it is handed", () => {
+    const m = createSpeechMonitor({ launchedAt: 0, spanS: 100 });
+    expect(m.live()).toEqual({
+      bursts: 0,
+      activeS: 0,
+      audioS: 0,
+      rate: null,
+      etaS: null,
+      clamped: false,
+    });
+    m.feed(line(0, 30), Number.NaN);
+    m.feed("garbage", 1);
+    expect(m.live().bursts).toBe(0);
+  });
+});
+
+describe("the judge of the live check (F1)", () => {
+  const CAP = 600;
+  /** A reading that is over twice the cap, 90 s of audio measured and a long way to go; override what a case varies. */
+  const over = (over: Partial<LiveReading> = {}): LiveReading => ({
+    bursts: 1,
+    activeS: 300,
+    audioS: LIVE_MIN_AUDIO_S,
+    rate: 5,
+    etaS: 5_000,
+    clamped: false,
+    ...over,
+  });
+
+  it("stops on the second of two readings over the cap in a row, at least 20 s of active time after the first, and not on the first", () => {
+    const check = createLiveCheck(CAP);
+    expect(check.observe(over({ bursts: 4, activeS: 300 }))).toBe(false);
+    expect(check.observe(over({ bursts: 5, activeS: 300 + LIVE_CONFIRM_S - 0.5 }))).toBe(false);
+    expect(check.observe(over({ bursts: 6, activeS: 300 + LIVE_CONFIRM_S }))).toBe(true);
+  });
+
+  it("measures the 20 s from the first reading of the row, however many readings come between", () => {
+    const check = createLiveCheck(CAP);
+    const stops = [0, 5, 10, 15, 19.5, 20].map((later, i) =>
+      check.observe(over({ bursts: 10 + i, activeS: 300 + later })),
+    );
+    expect(stops).toEqual([false, false, false, false, false, true]);
+  });
+
+  it.each<[string, Partial<LiveReading>]>([
+    ["is not over the cap", { activeS: 100, etaS: 500 }],
+    ["has less than 90 s of audio measured", { audioS: LIVE_MIN_AUDIO_S - 0.5 }],
+    // over the cap by the sum, and only the minute that must be left says no
+    ["has less than a minute left", { activeS: 1_200, etaS: LIVE_MIN_LEFT_S - 0.5 }],
+    ["has no speed yet", { rate: null, etaS: null }],
+  ])("starts the two again when a reading between them %s", (_name, between) => {
+    const check = createLiveCheck(CAP);
+    const T = 1_190;
+    expect(check.observe(over({ bursts: 4, activeS: T }))).toBe(false);
+    expect(check.observe(over({ bursts: 5, activeS: T + 10, ...between }))).toBe(false);
+    // 30 s after the first, but the row was broken: this is a first reading again
+    expect(check.observe(over({ bursts: 6, activeS: T + 30 }))).toBe(false);
+    expect(check.observe(over({ bursts: 7, activeS: T + 50 }))).toBe(true);
+  });
+
+  it("is exactly at the limits: 90 s of audio and a minute left count, and the cap is passed only by more than twice it", () => {
+    const row = (second: Partial<LiveReading>): boolean => {
+      const check = createLiveCheck(CAP);
+      check.observe(over({ bursts: 1, activeS: 300, etaS: 5_000 }));
+      return check.observe(over({ bursts: 2, activeS: 330, ...second }));
+    };
+    expect(row({ audioS: LIVE_MIN_AUDIO_S, activeS: 2 * CAP, etaS: LIVE_MIN_LEFT_S })).toBe(true);
+    expect(row({ activeS: 2 * CAP - 330, etaS: 330 }), "twice the cap exactly").toBe(false);
+    expect(row({ activeS: 2 * CAP - 329, etaS: 330 })).toBe(true);
+  });
+
+  it("does not take a reading again for the same burst: the log read after it is not a second reading", () => {
+    const check = createLiveCheck(CAP);
+    expect(check.observe(over({ bursts: 4, activeS: 300 }))).toBe(false);
+    expect(check.observe(over({ bursts: 4, activeS: 400 }))).toBe(false);
+    expect(check.observe(over({ bursts: 4, activeS: 500 }))).toBe(false);
+  });
+
+  it("forgets what it read when it is reset: the readings from before the switch went off do not count", () => {
+    const check = createLiveCheck(CAP);
+    check.observe(over({ bursts: 4, activeS: 300 }));
+    check.reset();
+    expect(check.observe(over({ bursts: 5, activeS: 400 }))).toBe(false);
+  });
+
+  it("never throws and never stops for a reading it cannot read", () => {
+    fc.assert(
+      fc.property(
+        fc.record({
+          bursts: fc.oneof(fc.integer(), fc.constant(Number.NaN)),
+          activeS: fc.oneof(fc.double(), fc.constant(Number.NaN), fc.constant(Infinity)),
+          audioS: fc.oneof(fc.double(), fc.constant(Number.NaN)),
+          rate: fc.oneof(fc.double(), fc.constant(null)),
+          etaS: fc.oneof(fc.double(), fc.constant(null), fc.constant(Number.NaN)),
+          clamped: fc.boolean(),
+        }),
+        (r) => {
+          const check = createLiveCheck(CAP);
+          expect(() => check.observe(r)).not.toThrow();
+          const finite = Number.isFinite(r.etaS ?? Number.NaN) && Number.isFinite(r.activeS);
+          if (!finite) expect(check.observe({ ...r, bursts: r.bursts + 1 })).toBe(false);
+        },
+      ),
+    );
+  });
+});
+
+/** A steady run as the engine prints it: `rate` seconds of work for each second of audio, a start-up of
+ *  `startupS` before the first words, and a pause of the given length before each window in `pauses`
+ *  (a sleep: it adds time to the clock and none to the work). The monitor and the judge, as the watcher
+ *  drives them; the index of the window it was stopped at, or null, and the active time at each window. */
+function steadyRun(
+  run: { rate: number; startupS: number; spanS: number; pauses: ReadonlyMap<number, number> },
+  capS = 600,
+): { stoppedAt: number | null; activeAt: number[] } {
+  const m = createSpeechMonitor({ launchedAt: 0, spanS: run.spanS });
+  const check = createLiveCheck(capS);
+  const windows = Math.ceil(run.spanS / 30);
+  const activeAt: number[] = [];
+  let t = run.startupS * 1000;
+  for (let k = 0; k < windows; k++) {
+    t += 30 * run.rate * 1000 + (run.pauses.get(k) ?? 0) * 1000;
+    m.feed(line(30 * k, Math.min(run.spanS, 30 * (k + 1))), Math.round(t));
+    activeAt.push(m.live().activeS);
+    if (check.observe(m.live())) return { stoppedAt: k, activeAt };
+  }
+  return { stoppedAt: null, activeAt };
+}
+
+describe("a run as a whole: the check and the monitor together (F1)", () => {
+  // Every window is under MAX_GAP_S of work, so no stretch is long unless the PC slept.
+  const rates = fc.double({ min: 0.2, max: 3.5, noNaN: true });
+
+  it("never stops a run that fits in twice the cap, whatever pauses it had: each pause adds at most MAX_GAP_S to what the run is projected to take", () => {
+    fc.assert(
+      fc.property(
+        rates,
+        fc.integer({ min: 0, max: 60 }),
+        fc.integer({ min: 100, max: 40_000 }),
+        fc.array(fc.nat(), { maxLength: 3 }),
+        fc.array(fc.integer({ min: 121, max: 200_000 }), { maxLength: 3 }),
+        (rate, startupS, spanS, where, long) => {
+          const windows = Math.ceil(spanS / 30);
+          const pauses = new Map<number, number>();
+          long.forEach((extra, i) => pauses.set((where[i] ?? 0) % windows, extra));
+          fc.pre(startupS + rate * spanS + MAX_GAP_S * pauses.size < 2 * 600 - 1);
+          expect(steadyRun({ rate, startupS, spanS, pauses }).stoppedAt).toBeNull();
+        },
+      ),
+      { numRuns: 300 },
+    );
+  });
+
+  it("stops a run that is over twice the cap, with no pauses, at the first burst 20 s of the run's time after its first reading, and never before", () => {
+    fc.assert(
+      fc.property(
+        rates,
+        fc.integer({ min: 0, max: 60 }),
+        fc.integer({ min: 900, max: 40_000 }),
+        (rate, startupS, spanS) => {
+          // over by a margin the first stretch's own cut (a long start-up counts for MAX_GAP_S) cannot hide
+          fc.pre(startupS + rate * spanS > 1.1 * 2 * 600 + 60);
+          const { stoppedAt, activeAt } = steadyRun({ rate, startupS, spanS, pauses: new Map() });
+          // the first reading is the burst with 90 s of audio since the first: the fourth
+          const first = 3;
+          const expected = activeAt.findIndex(
+            (a, k) => k > first && a - activeAt[first] >= LIVE_CONFIRM_S - 1e-6,
+          );
+          expect(stoppedAt).toBe(expected);
+          expect(stoppedAt).not.toBeNull();
+        },
+      ),
+      { numRuns: 200 },
+    );
+  });
+
+  it("stops the same run just as soon after a pause as before it, but only on readings that do not have the pause in them", () => {
+    // 2 s of work for each second of audio: 60 s a window, 20 s to begin, 3,600 s of audio is far over the cap
+    const base = steadyRun({ rate: 2, startupS: 20, spanS: 3600, pauses: new Map() });
+    const slept = steadyRun({ rate: 2, startupS: 20, spanS: 3600, pauses: new Map([[2, 5_000]]) });
+    expect(base.stoppedAt).toBe(4);
+    // the pause is in window 2: the speed is read again from window 2, so the first reading is at window 5
+    expect(slept.stoppedAt).toBe(6);
   });
 });

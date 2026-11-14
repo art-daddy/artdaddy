@@ -16,7 +16,7 @@ import {
   type SpeechWorkItem,
 } from "../store/speechJobs";
 import { cpuOnlyNow } from "./speechBackend";
-import { createSpeechMonitor, passesLiveCap, type MonitorSnapshot } from "./speechMonitor";
+import { createLiveCheck, createSpeechMonitor, type MonitorSnapshot } from "./speechMonitor";
 import { backendNow, readPace, recordSpeechRun } from "./speechPace";
 import { CAP_S } from "./speechPlan";
 import { recordPlan } from "./speechPlanLog";
@@ -112,6 +112,7 @@ function watchRun(input: WatchInput): RunWatch {
   const now = input.now ?? Date.now;
   const launchedAt = now();
   const monitor = createSpeechMonitor({ launchedAt, spanS: input.spanS });
+  const check = createLiveCheck(CAP_S);
   const held = cpuOnlyNow() || input.afterCrash;
   const facts: SpeechFacts = {
     // Launched with the chip off, the processor runs it: a fact. Otherwise only the engine's own log says.
@@ -176,20 +177,31 @@ function watchRun(input: WatchInput): RunWatch {
       },
     });
     // The live check (S2-02): only a background whole file, only on the processor (the app launched it so,
-    // or the engine said so, or the chip it does not have is what this PC's last run found), only once the
-    // rate is measured, and only while the switch is on.
-    if (stopped || !input.liveStop || !exportFlag("speech_cpu_cap")) return;
+    // or the engine said so, or the chip it does not have is what this PC's last run found), and only
+    // while the switch is on. It reads the run's own time, not the clock's, and acts on two readings in a
+    // row (speechMonitor.ts, F1).
+    if (stopped || !input.liveStop || !exportFlag("speech_cpu_cap")) {
+      check.reset();
+      return;
+    }
     const onProcessor =
       snap.backend === null ? input.cpuOnly || lastRunWasOnProcessor() : snap.backend === "cpu";
-    const elapsedS = (now() - launchedAt) / 1000;
-    if (!onProcessor || !passesLiveCap(elapsedS, snap.etaS, CAP_S)) return;
+    if (!onProcessor) {
+      check.reset();
+      return;
+    }
+    const live = monitor.live();
+    if (!check.observe(live)) return;
     stopped = true;
-    liveProjectedS = elapsedS + (snap.etaS ?? 0);
+    const elapsedS = live.activeS;
+    liveProjectedS = elapsedS + (live.etaS ?? 0);
     // What this run showed of the processor's pace is kept, so the next file is judged by it at admission
-    // and not started only to be stopped again (a stopped run reports no timings of its own).
-    safely(() =>
-      recordSpeechRun(snap.doneS, elapsedS, "cpu", undefined, snap.startupS ?? undefined),
-    );
+    // and not started only to be stopped again (a stopped run reports no timings of its own). Not when a
+    // stretch of it was cut short as no work: its time is then not a pace.
+    if (!live.clamped)
+      safely(() =>
+        recordSpeechRun(snap.doneS, elapsedS, "cpu", undefined, snap.startupS ?? undefined),
+      );
     safely(() =>
       recordPlan({
         at: now(),

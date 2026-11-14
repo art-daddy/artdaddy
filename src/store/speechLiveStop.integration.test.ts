@@ -32,7 +32,7 @@ import { speechRig } from "../test/speechRig";
 import { __resetJobSupervisor, __setJobSupervisor, type JobSpec } from "../tools/jobSupervisor";
 import { __resetSpeechSession } from "../tools/speechAdmission";
 import { holdCpuOnly } from "../tools/speechBackend";
-import { readPace, SPEECH_PACE_KEY } from "../tools/speechPace";
+import { readPace, recordSpeechRun, SPEECH_PACE_KEY } from "../tools/speechPace";
 import { __resetPlanLog, recentPlans } from "../tools/speechPlanLog";
 import { __resetWorkGate } from "../tools/workGate";
 import { IndexCoordinator } from "./indexCoordinator";
@@ -74,15 +74,17 @@ afterEach(() => {
   __resetJobSupervisor();
 });
 
-describe("a long file on a processor slower than the pace this PC has been assumed to have", () => {
+describe("a long file on a processor slower than the pace this PC measured before", () => {
   it("is admitted, stopped once it is measured to be too slow, never started again by the indexer, and teaches the next admission", async () => {
-    // A PC whose chip crashed, so the processor runs at the default pace of 3.7 s of work per second of audio
-    // and 20 s to begin: 150 s of audio is projected at 575 s, inside the cap of 600.
+    // A PC whose chip crashed, so the processor does the work. It once did 600 s of audio in 50 s of work (a
+    // quiet moment), so a file of an hour is projected at 20 + 0.05 x 3,600 = 200 s, inside the cap of 600.
     holdCpuOnly(-1073740791, Date.now());
+    recordSpeechRun(600, 50, "cpu", undefined, 20);
+    const fast = localStorage.getItem(SPEECH_PACE_KEY)!;
     sourceDurationSeconds.mockImplementation(async (_runner: unknown, abs: unknown) =>
-      String(abs).startsWith("library/slow") ? 150 : 0,
+      String(abs).startsWith("library/slow") ? 3600 : 0,
     );
-    const rig = speechRig({ audioSeconds: 150 });
+    const rig = speechRig({ audioSeconds: 3600 });
     const c = new IndexCoordinator(
       rig.store as never,
       async () => rig.runner as never,
@@ -98,13 +100,16 @@ describe("a long file on a processor slower than the pace this PC has been assum
       ["boundary", "whole", "gpu_held"],
     ]);
 
-    // This PC is really 9 s of work per second of audio, not 3.7: 290 s to the first 30 s of audio (20 s to
-    // begin, then the 30 s window), and 270 s for the next 30.
-    at(290);
-    jobs.stdout(spec.id, stretch(0, 30));
-    expect(jobs.killed, "no speed is measured from one burst").toEqual([]);
-    at(560);
-    jobs.stdout(spec.id, stretch(30, 60));
+    // The PC is busy now: 2 s of work per second of audio, not 0.05. 20 s to begin, then 60 s for each 30 s
+    // of audio. The check reads nothing before 90 s of audio are measured, and wants a second reading.
+    for (let k = 0; k < 4; k++) {
+      at(80 + 60 * k);
+      jobs.stdout(spec.id, stretch(30 * k, 30 * (k + 1)));
+    }
+    await quiet();
+    expect(jobs.killed, "no stop on the first reading").toEqual([]);
+    at(320);
+    jobs.stdout(spec.id, stretch(120, 150));
 
     await until(() => jobs.killed.length === 1);
     expect(jobs.killed).toEqual([spec.id]);
@@ -114,14 +119,18 @@ describe("a long file on a processor slower than the pace this PC has been assum
     expect(whisperJobs(), "stopped, not retried").toHaveLength(1);
     expect(recentPlans().map((r) => r.where)).toContain("live");
 
-    // What the stopped run showed of this PC is kept (60 s of audio, 560 s since launch, 20 s to begin).
-    expect(readPace()).toEqual([[60, 560, "cpu", expect.closeTo(20, 6)]]);
+    // What the stopped run showed of this PC is kept beside what it showed before (150 s of audio, 320 s of
+    // the run, 20 s to begin).
+    expect(readPace()).toEqual([
+      [600, 50, "cpu", 20],
+      [150, 320, "cpu", expect.closeTo(20, 6)],
+    ]);
 
-    // The indexer does not start it again by itself, in the project that is open or in one reopened. The pace
-    // the stopped run showed is put aside for this part, so that only what the session remembers can keep the
-    // file out (at the default pace it would be admitted again).
+    // The indexer does not start it again by itself, in the project that is open or in one reopened. The
+    // pace the stopped run showed is put aside for this part, so that only what the session remembers can
+    // keep the file out (at the pace it had before, it is admitted again).
     const learned = localStorage.getItem(SPEECH_PACE_KEY)!;
-    localStorage.removeItem(SPEECH_PACE_KEY);
+    localStorage.setItem(SPEECH_PACE_KEY, fast);
     const reopened = new IndexCoordinator(
       rig.store as never,
       async () => rig.runner as never,
@@ -143,5 +152,39 @@ describe("a long file on a processor slower than the pace this PC has been assum
     expect(reportAppError).not.toHaveBeenCalled();
     c.dispose();
     reopened.dispose();
+  });
+
+  it("is not stopped by the PC's sleep, in the real indexer and the real engine path, and keeps no pace from it", async () => {
+    holdCpuOnly(-1073740791, Date.now());
+    recordSpeechRun(600, 50, "cpu", undefined, 20);
+    const before = readPace();
+    sourceDurationSeconds.mockImplementation(async () => 900);
+    const rig = speechRig({ audioSeconds: 900 });
+    const c = new IndexCoordinator(
+      rig.store as never,
+      async () => rig.runner as never,
+      () => undefined,
+      () => undefined,
+    );
+    c.indexSource("library/slept.mp4");
+    await until(() => whisperJobs().length === 1);
+    const [spec] = whisperJobs();
+    // a normal run of 1 s of work per second of audio (925 s in all), but the PC slept for 30 minutes after
+    // the first 60 s of audio
+    at(25);
+    jobs.stdout(spec.id, stretch(0, 30));
+    at(55);
+    jobs.stdout(spec.id, stretch(30, 60));
+    at(55 + 1800);
+    jobs.stdout(spec.id, stretch(60, 90));
+    for (let k = 3; k < 20; k++) {
+      at(1855 + 30 * (k - 2));
+      jobs.stdout(spec.id, stretch(30 * k, 30 * (k + 1)));
+    }
+    await quiet();
+    expect(jobs.killed, "the run was only asleep").toEqual([]);
+    expect(readPace(), "and a sleep is not a pace").toEqual(before);
+    expect(recentPlans().map((r) => r.where)).not.toContain("live");
+    c.dispose();
   });
 });

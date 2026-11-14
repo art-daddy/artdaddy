@@ -89,12 +89,14 @@ describe("the watcher of one run", () => {
   const at = (seconds: number): void => {
     clock = T0 + seconds * 1000;
   };
-  /** The processor's pace of 1 s of work per second of audio: 25 s to the first 30 s, then 30 s per 30 s. */
-  const slowRun = (w: ReturnType<typeof watch>): void => {
-    at(25);
-    w.onStdout(stretch(0, 30));
-    at(55);
-    w.onStdout(stretch(30, 60));
+  /** The processor's pace of 1 s of work per second of audio: 25 s to the first 30 s, then 30 s per 30 s,
+   *  for `windows` windows. The live check reads nothing before 90 s of audio are measured and wants a
+   *  second reading after it, so a run that is too slow is stopped at its fifth window. */
+  const slowRun = (w: ReturnType<typeof watch>, windows = 8): void => {
+    for (let k = 0; k < windows; k++) {
+      at(25 + 30 * k);
+      w.onStdout(stretch(30 * k, 30 * (k + 1)));
+    }
   };
 
   it("lists the run as starting, with the facts the app holds, and claims no time", () => {
@@ -274,26 +276,153 @@ describe("the watcher of one run", () => {
   });
 
   describe("stops a run that is too slow (S2-02)", () => {
-    it("once its time so far plus its time left, at the speed measured, passes twice the cap, and not before", () => {
+    it("once its time so far plus its time left, at the speed measured, passes twice the cap on two readings in a row: at its second reading, and not before", () => {
       const w = watch({ spanS: 3600 });
-      at(25);
-      w.onStdout(stretch(0, 30));
-      expect(stop, "no speed yet: nothing is claimed, nothing is stopped").not.toHaveBeenCalled();
-      at(55);
-      w.onStdout(stretch(30, 60));
+      // 25 s to the first 30 s of audio, then 30 s per 30 s: the speed rests on the audio since the first
+      // burst, so the first reading is at 120 s of audio (90 s measured) and the second at 150 s.
+      for (let k = 0; k < 4; k++) {
+        at(25 + 30 * k);
+        w.onStdout(stretch(30 * k, 30 * (k + 1)));
+      }
+      expect(stop, "one reading over the cap is not enough").not.toHaveBeenCalled();
+      at(145);
+      w.onStdout(stretch(120, 150));
       expect(stop).toHaveBeenCalledExactlyOnceWith("too_slow");
       const end = w.finish(-1, "too_slow");
-      expect(end.liveProjectedS).toBeCloseTo(55 + 3540, 6);
+      expect(end.liveProjectedS).toBeCloseTo(145 + 3450, 6);
       expect(readPace(), "what the run showed of this PC's pace is kept").toEqual([
-        [60, 55, "cpu"],
+        [150, 145, "cpu"],
       ]);
       expect(recentPlans()).toMatchObject([
         { plan: "ondemand", why: "cap", where: "live", backend: "cpu", file: "talk.mp4" },
       ]);
     });
 
+    it("never from the speed of one or two windows: nothing is stopped until 90 s of audio are measured, however slow they were", () => {
+      // 100 s of work for each 30 s of audio: 3.3 times real time, over the cap for any long file.
+      const w = watch({ spanS: 36_000 });
+      for (let k = 0; k < 3; k++) {
+        at(100 * (k + 1));
+        w.onStdout(stretch(30 * k, 30 * (k + 1)));
+      }
+      expect(stop).not.toHaveBeenCalled();
+      at(400);
+      w.onStdout(stretch(90, 120)); // 90 s measured: the first reading
+      expect(stop).not.toHaveBeenCalled();
+      at(500);
+      w.onStdout(stretch(120, 150));
+      expect(stop).toHaveBeenCalledExactlyOnceWith("too_slow");
+    });
+
+    it("waits for the second reading to be at least 20 s of the run's own time after the first, however many outputs come in between", () => {
+      // 30 s of audio every 10 s of work: three times real time, but over the cap for a very long file.
+      const w = watch({ spanS: 100_000 });
+      const burst = (k: number): void => {
+        at(10 + 10 * k);
+        w.onStdout(stretch(30 * k, 30 * (k + 1)));
+      };
+      for (let k = 0; k < 4; k++) burst(k); // the fourth is the first reading: 90 s measured
+      burst(4); // 10 s later
+      expect(stop, "10 s after the first reading").not.toHaveBeenCalled();
+      burst(5); // 20 s later
+      expect(stop).toHaveBeenCalledExactlyOnceWith("too_slow");
+    });
+
+    it("is not set off by one reading over the cap: the run that gets faster is not stopped", () => {
+      // 1 s of work per second of audio, then the next window takes only 10 s: the first reading is over
+      // the cap (1,395 s), the second is not (1,166 s), so there are not two in a row.
+      const w = watch({ spanS: 1400 });
+      slowRun(w, 4);
+      at(115 + 10);
+      w.onStdout(stretch(120, 150));
+      for (let k = 5; k < 46; k++) {
+        at(125 + 10 * (k - 4));
+        w.onStdout(stretch(30 * k, 30 * (k + 1)));
+      }
+      expect(stop).not.toHaveBeenCalled();
+      expect(readPace()).toEqual([]);
+    });
+
+    it("never when less than a minute is left, however long the run has taken: it is almost done", () => {
+      // A steady 1 s per second of audio for a 1,200 s file, then the last windows take 100 s each: the run
+      // has taken more than twice the cap when it is nearly read, and killing it loses all its work.
+      const w = watch({ spanS: 1200 });
+      slowRun(w, 37); // audio 1,110 s at 1,105 s: 1,195 s in all, under the cap
+      expect(stop).not.toHaveBeenCalled();
+      at(1205);
+      w.onStdout(stretch(1110, 1140)); // 63.8 s left: the one reading that is over
+      expect(stop, "a single reading").not.toHaveBeenCalled();
+      at(1305);
+      w.onStdout(stretch(1140, 1170)); // 33.7 s left: too little left to stop for
+      at(1405);
+      w.onStdout(stretch(1170, 1200));
+      expect(stop).not.toHaveBeenCalled();
+      expect(readPace()).toEqual([]);
+    });
+
+    describe("is not set off by time the engine did not spend (F1)", () => {
+      it("a sleep: two bursts 30 s of audio apart and 30 minutes apart on the clock give no stop and no sample, however the run goes on", () => {
+        const w = watch({ spanS: 900 });
+        at(25);
+        w.onStdout(stretch(0, 30));
+        at(25 + 1800);
+        w.onStdout(stretch(30, 60)); // the PC slept for half an hour
+        // ...and then the run goes on at the pace it had, 30 s of audio every 30 s: 925 s in all
+        for (let k = 2; k < 20; k++) {
+          at(25 + 1800 + 30 * (k - 1));
+          w.onStdout(stretch(30 * k, 30 * (k + 1)));
+        }
+        expect(stop).not.toHaveBeenCalled();
+        w.finish(0, null);
+        expect(readPace()).toEqual([]);
+        expect(recentPlans()).toEqual([]);
+      });
+
+      it("a sleep before the readings, and again after them: still no stop for a run that fits", () => {
+        const w = watch({ spanS: 900 });
+        slowRun(w, 5); // 150 s of audio at 145 s
+        at(145 + 4000);
+        w.onStdout(stretch(150, 180)); // slept
+        for (let k = 6; k < 12; k++) {
+          at(4145 + 30 * (k - 5));
+          w.onStdout(stretch(30 * k, 30 * (k + 1)));
+        }
+        at(4145 + 3600 * 5);
+        w.onStdout(stretch(360, 390)); // slept again
+        for (let k = 13; k < 20; k++) {
+          at(4145 + 3600 * 5 + 30 * (k - 12));
+          w.onStdout(stretch(30 * k, 30 * (k + 1)));
+        }
+        expect(stop).not.toHaveBeenCalled();
+      });
+
+      it("a sleep delays the stop of a run that really is too slow; it never cancels it, and no pace is kept from a run that had a gap", () => {
+        const w = watch({ spanS: 3600 });
+        slowRun(w, 2);
+        at(55 + 1800);
+        w.onStdout(stretch(60, 90)); // slept
+        // the speed is read again from here: 90 s of audio, then a second reading
+        for (let k = 3; k < 6; k++) {
+          at(1855 + 30 * (k - 2));
+          w.onStdout(stretch(30 * k, 30 * (k + 1)));
+        }
+        expect(stop, "only the readings after the sleep count").not.toHaveBeenCalled();
+        at(1855 + 30 * 4);
+        w.onStdout(stretch(180, 210));
+        expect(stop).toHaveBeenCalledExactlyOnceWith("too_slow");
+        const end = w.finish(-1, "too_slow");
+        // 25 s to start, 30 s, the sleep as the 120 s it is counted for, and 4 windows of 30 s; 3,390 s left
+        expect(end.liveProjectedS, "the sleep is not in the time the run would take").toBeCloseTo(
+          25 + 30 + 120 + 120 + 3390,
+          6,
+        );
+        expect(readPace(), "a run that had a gap in it shows nothing of the PC's pace").toEqual([]);
+        expect(recentPlans()).toMatchObject([{ plan: "ondemand", where: "live" }]);
+      });
+    });
+
     it("exactly at twice the cap: a run that will take 1,199 s goes on, one that will take 1,201 s is stopped", () => {
-      // 55 s so far, then (span - 60) s at 1 s per audio second: the total is span - 5.
+      // 25 s to the first window, then 1 s of work per second of audio: the total is span - 5.
       const goes = watch({ spanS: 1204 });
       slowRun(goes);
       expect(stop).not.toHaveBeenCalled();
@@ -320,8 +449,10 @@ describe("the watcher of one run", () => {
       at(25);
       w.onStdout(stretch(0, 30));
       await vi.waitFor(() => expect(the().facts.backend).toBe("gpu"));
-      at(55);
-      w.onStdout(stretch(30, 60));
+      for (let k = 1; k < 8; k++) {
+        at(25 + 30 * k);
+        w.onStdout(stretch(30 * k, 30 * (k + 1)));
+      }
       expect(stop).not.toHaveBeenCalled();
     });
 
@@ -339,10 +470,11 @@ describe("the watcher of one run", () => {
     it("once, however many more chunks arrive while the process is being stopped", () => {
       const w = watch();
       slowRun(w);
-      at(60);
-      w.onStdout(stretch(60, 90));
-      at(70);
-      w.onStdout(stretch(90, 120));
+      expect(stop).toHaveBeenCalledTimes(1);
+      at(265);
+      w.onStdout(stretch(240, 270));
+      at(295);
+      w.onStdout(stretch(270, 300));
       expect(stop).toHaveBeenCalledTimes(1);
     });
   });
@@ -513,11 +645,13 @@ describe("a run of the real engine", () => {
     const run = runWhisper(rig.ctx({ background: true }), freshSource()).catch((e: unknown) => e);
     await until(() => whisperJobs().length === 1);
     const [spec] = whisperJobs();
-    at(25);
-    jobs.stdout(spec.id, stretch(0, 30));
-    expect(jobs.killed, "not before the speed is measured").toEqual([]);
-    at(55);
-    jobs.stdout(spec.id, stretch(30, 60));
+    for (let k = 0; k < 4; k++) {
+      at(25 + 30 * k);
+      jobs.stdout(spec.id, stretch(30 * k, 30 * (k + 1)));
+    }
+    expect(jobs.killed, "not on one reading").toEqual([]);
+    at(145);
+    jobs.stdout(spec.id, stretch(120, 150));
     const error = (await run) as { code?: string; stopped?: boolean; message?: string };
     expect(jobs.killed).toEqual([spec.id]);
     expect(error).toMatchObject({ code: "speech_deferred", stopped: true });
@@ -530,9 +664,30 @@ describe("a run of the real engine", () => {
     ]);
     expect(reportAppError, "a deferral is nobody's failure").not.toHaveBeenCalled();
     expect(cpuOnlyNow(), "and says nothing about the chip").toBe(true);
-    // A stopped run reports no timings of its own, so what it showed of the pace is kept: 60 s of audio in
-    // the 55 s since launch. The next file is judged by it, and not started only to be stopped again.
-    expect(readPace()).toEqual([[60, 55, "cpu"]]);
+    // A stopped run reports no timings of its own, so what it showed of the pace is kept: 150 s of audio in
+    // the 145 s since launch. The next file is judged by it, and not started only to be stopped again.
+    expect(readPace()).toEqual([[150, 145, "cpu"]]);
+  });
+
+  it("is not killed by a sleep of the PC, and keeps no pace from the run: 30 s of audio, then half an hour", async () => {
+    const rig = speechRig({ audioSeconds: 900 });
+    holdCpuOnly(-1073740791, Date.now());
+    const run = runWhisper(rig.ctx({ background: true }), freshSource());
+    await until(() => whisperJobs().length === 1);
+    const [spec] = whisperJobs();
+    at(25);
+    jobs.stdout(spec.id, stretch(0, 30));
+    at(25 + 1800);
+    jobs.stdout(spec.id, stretch(30, 60));
+    for (let k = 2; k < 20; k++) {
+      at(1825 + 30 * (k - 1));
+      jobs.stdout(spec.id, stretch(30 * k, 30 * (k + 1)));
+    }
+    expect(jobs.killed, "the run is a normal one that slept").toEqual([]);
+    expect(readPace(), "and a sleep is not a pace").toEqual([]);
+    expect(recentPlans().map((r) => r.where)).not.toContain("live");
+    exits(rig, spec, "");
+    await run;
   });
 
   it("goes on with the same slow run when a request made it, when it is a stretch, and with the switch off", async () => {
@@ -551,12 +706,10 @@ describe("a run of the real engine", () => {
           : runWhisper(ctx, freshSource());
       await until(() => jobs.submitted.some((s) => s.program === "whisper-cli"));
       const spec = jobs.submitted.find((s) => s.program === "whisper-cli")!;
-      at(25);
-      jobs.stdout(spec.id, stretch(0, 30));
-      at(55);
-      jobs.stdout(spec.id, stretch(30, 60));
-      at(85);
-      jobs.stdout(spec.id, stretch(60, 90));
+      for (let k = 0; k < 8; k++) {
+        at(25 + 30 * k);
+        jobs.stdout(spec.id, stretch(30 * k, 30 * (k + 1)));
+      }
       expect(jobs.killed, variant).toEqual([]);
       expect(the().rate, `${variant}: the speed is still measured and shown`).toBeCloseTo(1, 6);
       exits(rig, spec, "");
