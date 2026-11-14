@@ -469,6 +469,30 @@ describe("transitionWindow: wipe-right closes where it is allowed to and nowhere
     expect(reference(even)({ T: 69 / 30 })).toBe(0);
   });
 
+  it("closes the frame that sits ON E + half a frame, for every odd frame count, rate and position (and keeps the frame at E open for an even one)", () => {
+    for (const grid of [24, 25, 30, 50, 60])
+      for (const n of [1, 3, 5, 7, 9, 11, 13, 15, 17, 25, 31, 59, 61])
+        for (const tin of [0, 1, 37, 59, 100, 1001]) {
+          const window = transitionWindow("wipe-r", tin / grid - n / grid / 2, n / grid, grid)!;
+          const open = reference(window);
+          // E = tin + n / 2 frames is a half frame: the last frame with p < 1 is the one before it, the first frame with p = 1 is E + half a frame
+          const lastWipeFrame = tin + (n - 1) / 2;
+          const label = `${n} frames at ${tin}, ${grid} fps: ${window}`;
+          expect(open({ T: lastWipeFrame / grid }), label).toBe(1);
+          expect(open({ T: (lastWipeFrame + 1) / grid }), label).toBe(0);
+          // an even count: E is a frame time, that frame stays open (it is 0.27.0's) and the next is closed
+          const evenWindow = transitionWindow(
+            "wipe-r",
+            tin / grid - (n + 1) / grid / 2,
+            (n + 1) / grid,
+            grid,
+          )!;
+          const evenOpen = reference(evenWindow);
+          expect(evenOpen({ T: (tin + (n + 1) / 2) / grid }), `E, ${label}`).toBe(1);
+          expect(evenOpen({ T: (tin + (n + 1) / 2 + 1) / grid }), `E + 1, ${label}`).toBe(0);
+        }
+  });
+
   const WIPE_MUTANTS: Record<string, (run: TransitionRun) => string | null> = {
     "one frame short (the last wipe frame loses its mask)": (run) =>
       `lt(t,${six(threshold(run.real!) - 1 / run.grid)})`,
