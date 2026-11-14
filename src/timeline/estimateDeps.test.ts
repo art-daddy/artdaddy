@@ -180,7 +180,21 @@ describe("the class cut-offs are the server's, inside their band, and nowhere el
     expect(routeEstimatesHere(request).pcClass).toBe("ok");
     await told({ v: 1, flags: {}, pc_class: { ok_over: 0.5, weak_over: 2 } });
     expect(routeEstimatesHere(request).pcClass).toBe("weak");
-    await told({ v: 1, flags: {}, pc_class: { ok_over: 0.1, weak_over: 99 } });
+    // Each pair below is outside its band, and would put this measurement in another class than the compiled pair does, so a band that is not checked shows.
+    for (const outside of [
+      { ok_over: 0.1, weak_over: 1.5 }, // weak_over under its 2
+      { ok_over: 0.4, weak_over: 2.2 }, // ok_over under its 0.5
+      { ok_over: 2.5, weak_over: 3 }, // ok_over over its 2 (and would call 2.5 OK)
+    ]) {
+      await told({ v: 1, flags: {}, pc_class: outside });
+      expect(routeEstimatesHere(request).pcClass, JSON.stringify(outside)).toBe("ok");
+    }
+    setPcCheckService(checkService(record({ rHat: 5 })));
+    await told({ v: 1, flags: {}, pc_class: { ok_over: 0.5, weak_over: 9 } }); // weak_over over its 8: would call 5 OK
+    expect(routeEstimatesHere(request).pcClass).toBe("weak");
+    // an unordered pair is not used either
+    setPcCheckService(checkService(record({ rHat: 2.5 })));
+    await told({ v: 1, flags: {}, pc_class: { ok_over: 2, weak_over: 2 } });
     expect(routeEstimatesHere(request).pcClass).toBe("ok");
     await told({ v: 1, flags: {}, pc_class: { ok_over: 0.5, weak_over: 2 } });
     expect(routeEstimatesHere(request).pcClass).toBe("weak");
