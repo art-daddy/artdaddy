@@ -142,7 +142,8 @@ export const CHIP_CAUTIOUS_GAIN = 1.5;
 /** What the processor's faster setting does to the time (the lab: 2.1 times quicker, about 2.6 VMAF points less). */
 export const FASTER_X264_GAIN = 2.1;
 
-export type ModeRequest = "auto" | "full" | "fast";
+/** `quick` is the person's pick of Quick export (exportRoute.ts decides whether it is on offer): the chip where there is one, else the faster setting. */
+export type ModeRequest = "auto" | "full" | "fast" | "quick";
 export type ModeReason = "over_minute" | "person" | "promise_line" | "none";
 
 export interface ChoiceInput {
@@ -159,6 +160,9 @@ export interface ChoiceInput {
   readonly fullMeasured: boolean;
   /** The chip's estimate (measured, or the processor's divided by the cautious gain). */
   readonly fastSeconds: number | null;
+  /** The honest estimate with the processor's faster setting. Absent, the faster setting needs no saving test (0.27.0's rule). Present,
+   *  `null` included, it is chosen only where it saves at least `FAST_MIN_SAVING` of `fullSeconds`; `null` is no estimate and shows no saving. */
+  readonly fasterSeconds?: number | null;
   readonly durationSeconds: number;
   /** How many times the video's length the product promises to stay within (2 for ordinary HD, 4 for heavy and 4K). */
   readonly promiseMultiple: number;
@@ -173,6 +177,16 @@ export interface EncoderChoice {
   /** What the row starts on. */
   readonly defaultMode: "quality" | "fast";
   readonly reason: ModeReason;
+}
+
+/** The faster setting's own saving test: it changes the picture, so it needs the same real gain as the chip. */
+function fasterSaves(fasterSeconds: number | null, full: number): boolean {
+  return (
+    fasterSeconds !== null &&
+    Number.isFinite(fasterSeconds) &&
+    fasterSeconds >= 0 &&
+    fasterSeconds <= full * (1 - FAST_MIN_SAVING)
+  );
 }
 
 /** The one rule. The Export dialog, the app's chat and MCP all read it, so an export gets the same encoder wherever
@@ -203,6 +217,12 @@ export function chooseEncoder(input: ChoiceInput): EncoderChoice {
       ? { encoder: chip, reason: "person", ...row }
       : { encoder: "x264", reason: "none", ...row };
   }
+  if (input.request === "quick") {
+    if (chip !== null) return { encoder: chip, reason: "person", ...row };
+    return input.fasterX264On
+      ? { encoder: "x264_fast", preset: "veryfast", reason: "person", ...row }
+      : { encoder: "x264", reason: "person", ...row };
+  }
   if (selectedForThem && chip !== null) return { encoder: chip, reason: "over_minute", ...row };
 
   // No usable chip, and the processor would be slower than the product promises: the faster setting, unless that
@@ -217,7 +237,8 @@ export function chooseEncoder(input: ChoiceInput): EncoderChoice {
     full > FAST_DEFAULT_SECONDS &&
     input.durationSeconds > 0 &&
     full > input.durationSeconds * input.promiseMultiple &&
-    (input.fullMeasured || full > 2 * input.durationSeconds * input.promiseMultiple)
+    (input.fullMeasured || full > 2 * input.durationSeconds * input.promiseMultiple) &&
+    (input.fasterSeconds === undefined || fasterSaves(input.fasterSeconds, full))
   )
     return { encoder: "x264_fast", preset: "veryfast", reason: "promise_line", ...row };
   return { encoder: "x264", reason: "none", ...row };
