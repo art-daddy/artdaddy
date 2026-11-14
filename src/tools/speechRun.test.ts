@@ -641,7 +641,10 @@ describe("a run of the real engine", () => {
 
   it("stops a whole file the background started, on the processor, once its measured pace makes it too slow: the answer is the deferral", async () => {
     const rig = speechRig({ audioSeconds: 7200 });
+    // The chip crashed, and the processor once did 600 s of audio in 50 s of work: two hours is projected at
+    // 20 + 0.05 x 7,200 = 380 s, inside the cap, at the first look and at the second one (once the audio is read).
     holdCpuOnly(-1073740791, Date.now());
+    recordSpeechRun(600, 50, "cpu", undefined, 20);
     const run = runWhisper(rig.ctx({ background: true }), freshSource()).catch((e: unknown) => e);
     await until(() => whisperJobs().length === 1);
     const [spec] = whisperJobs();
@@ -664,14 +667,20 @@ describe("a run of the real engine", () => {
     ]);
     expect(reportAppError, "a deferral is nobody's failure").not.toHaveBeenCalled();
     expect(cpuOnlyNow(), "and says nothing about the chip").toBe(true);
-    // A stopped run reports no timings of its own, so what it showed of the pace is kept: 150 s of audio in
-    // the 145 s since launch. The next file is judged by it, and not started only to be stopped again.
-    expect(readPace()).toEqual([[150, 145, "cpu"]]);
+    // A stopped run reports no timings of its own, so what it showed of the pace is kept beside what was
+    // kept before: 150 s of audio in the 145 s since launch. The next file is judged by both, and not
+    // started only to be stopped again.
+    expect(readPace()).toEqual([
+      [600, 50, "cpu", 20],
+      [150, 145, "cpu"],
+    ]);
   });
 
   it("is not killed by a sleep of the PC, and keeps no pace from the run: 30 s of audio, then half an hour", async () => {
     const rig = speechRig({ audioSeconds: 900 });
     holdCpuOnly(-1073740791, Date.now());
+    recordSpeechRun(600, 50, "cpu", undefined, 20); // a quiet moment: 900 s is projected at 65 s
+    const before = readPace();
     const run = runWhisper(rig.ctx({ background: true }), freshSource());
     await until(() => whisperJobs().length === 1);
     const [spec] = whisperJobs();
@@ -684,7 +693,7 @@ describe("a run of the real engine", () => {
       jobs.stdout(spec.id, stretch(30 * k, 30 * (k + 1)));
     }
     expect(jobs.killed, "the run is a normal one that slept").toEqual([]);
-    expect(readPace(), "and a sleep is not a pace").toEqual([]);
+    expect(readPace(), "and a sleep is not a pace").toEqual(before);
     expect(recentPlans().map((r) => r.where)).not.toContain("live");
     exits(rig, spec, "");
     await run;
