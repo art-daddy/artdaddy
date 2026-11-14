@@ -339,7 +339,7 @@ async function lookTranscript(
         run: runWhisper(ctx, path, undefined, opts.language, window),
         boundMs: opts.waitMs,
         signal: ctx.signal,
-        wake: wakeTargetOf(ctx, opts.mediaRef ?? path, opts.askedAs ?? null, spanOf(window)),
+        wake: wakeTargetOf(ctx, opts.mediaRef ?? path, opts.askedAs ?? null, spanOf(window), path),
       });
       if (outcome.kind === "cancelled") return { error: STOPPED_ERROR };
       if (outcome.kind === "pending") return { ...outcome.status };

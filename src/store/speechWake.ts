@@ -60,6 +60,8 @@ export interface RegisterInput extends ChatKey {
   audioS: number | null;
   /** The stretch of the file the words are of; absent or null is the whole file. */
   window?: SpanWindow | null;
+  /** The file's absolute path, when the tool knows it: how a speech job that transcribes it is found. */
+  path?: string | null;
 }
 
 export interface Entry {
@@ -68,6 +70,7 @@ export interface Entry {
   readonly ref: string | null;
   readonly audioS: number | null;
   readonly window: SpanWindow | null;
+  readonly path: string | null;
   readonly state: EntryState;
   readonly failure: WakeFailureReason | null;
 }
@@ -105,6 +108,7 @@ interface EntryRec {
   ref: string | null;
   audioS: number | null;
   window: SpanWindow | null;
+  path: string | null;
   state: EntryState;
   failure: WakeFailureReason | null;
 }
@@ -137,6 +141,7 @@ const snapshot = (e: EntryRec): Entry => ({
   ref: e.ref,
   audioS: e.audioS,
   window: e.window,
+  path: e.path,
   state: e.state,
   failure: e.failure,
 });
@@ -204,6 +209,7 @@ export class WakeRegistry {
       ref: input.ref,
       audioS: input.audioS,
       window: input.window ?? null,
+      path: input.path ?? null,
       state: "pending",
       failure: null,
     });

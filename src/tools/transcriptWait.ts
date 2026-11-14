@@ -10,6 +10,8 @@ import { hostInfo, type HostOs } from "../platform/host";
 import { trackSpeechWait } from "../store/liveWait";
 import { downloadEtaSeconds, percent, useModelDownload } from "../store/modelDownload";
 import { registerPendingWords, type WakeTarget } from "../store/speechWakeHost";
+import { useSpeechJobs } from "../store/speechJobs";
+import { audioMovedFor } from "./speechJobMatch";
 import {
   classifyTranscriptFailure,
   FAILURE_ADVICE,
@@ -173,6 +175,14 @@ export async function waitForRun<T>(req: WaitRequest<T>): Promise<WaitOutcome<T>
     } else if (download.etaS !== null) eta = clampEta(download.etaS + queued.work);
   }
   const stage = download ? "downloading_speech_model" : "transcribing";
+  // No time before audio moves: a run that was launched and has said no word yet has no pace, and the card says so.
+  // The same goes for what the assistant is told. Only a run found for this file is asked; a caller that cannot be
+  // matched to one (an outside agent) keeps the estimate it always had.
+  if (
+    req.wake &&
+    audioMovedFor(useSpeechJobs.getState().jobs, req.wake.path, req.wake.window) === false
+  )
+    eta = undefined;
   return {
     kind: "pending",
     status: {

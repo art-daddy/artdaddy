@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { toolDefinition } from "../contract";
 import { resetLiveWait, useLiveWait } from "../store/liveWait";
+import { useSpeechJobs, type SpeechJob } from "../store/speechJobs";
+import type { WakeTarget } from "../store/speechWakeHost";
 import { TranscriptionFailure } from "./speechFailure";
 import { estimateTranscribeSeconds, type PaceSample } from "./speechPace";
 import {
@@ -415,4 +417,102 @@ describe("what the contract says about wait_seconds", () => {
       expect(description).toMatch(/`transcript\.status: "failed"` carries a `reason`/);
     },
   );
+});
+
+// A run that was launched and has said no word has no pace, so nothing claims a time for it: not the card, and not
+// the answer the assistant reads. Only a run found for THIS file counts; everything else keeps the estimate.
+describe("a time is not claimed for a file whose run has said no word yet", () => {
+  const PATH = "C:/proj/talk.mp4";
+  const speechJob = (over: Partial<SpeechJob> = {}): SpeechJob => ({
+    id: "j1",
+    purpose: "look",
+    label: "talk.mp4",
+    work: [{ source: PATH, language: "", window: null }],
+    spanS: 120,
+    phase: "starting",
+    stop: null,
+    enqueuedAt: 0,
+    startedAt: 0,
+    firstWordsAt: null,
+    endedAt: null,
+    doneS: 0,
+    rate: null,
+    etaS: null,
+    facts: {
+      backend: null,
+      gpuHeld: false,
+      noGpu: false,
+      cores: null,
+      threads: null,
+      exportsBusy: false,
+    },
+    ...over,
+  });
+  const target = (over: Partial<WakeTarget> = {}): WakeTarget => ({
+    dir: "C:/proj",
+    session: "chat-1",
+    exec: 1,
+    source: "m_1",
+    ref: "m_1",
+    window: null,
+    path: PATH,
+    ...over,
+  });
+  const etaOf = async (wake: WakeTarget | null, jobs: SpeechJob[]): Promise<unknown> => {
+    useSpeechJobs.setState({ jobs });
+    const seen = start(request(NEVER(), { audioSeconds: 120, wake }));
+    await vi.advanceTimersByTimeAsync(15_000);
+    return (seen.outcome as unknown as { status: { eta_s?: number } }).status.eta_s;
+  };
+  afterEach(() => useSpeechJobs.setState({ jobs: [] }));
+
+  it("is told without a time while the run has started and said nothing", async () => {
+    expect(await etaOf(target(), [speechJob()])).toBeUndefined();
+  });
+
+  it("is told with the estimate it always had when no run is found for the file, or the run has not started", async () => {
+    expect(await etaOf(target(), [])).toBeGreaterThan(0);
+    expect(
+      await etaOf(target(), [speechJob({ phase: "waiting", startedAt: null })]),
+    ).toBeGreaterThan(0);
+    expect(
+      await etaOf(target(), [
+        speechJob({ work: [{ source: "C:/proj/other.mp4", language: "", window: null }] }),
+      ]),
+      "another file's run says nothing of this one",
+    ).toBeGreaterThan(0);
+    expect(
+      await etaOf(target({ path: null }), [speechJob()]),
+      "a path the tool did not know",
+    ).toBeGreaterThan(0);
+  });
+
+  it("is told with the estimate once the run is measuring", async () => {
+    expect(
+      await etaOf(target(), [
+        speechJob({ phase: "running", firstWordsAt: 1, rate: 0.5, etaS: 40 }),
+      ]),
+    ).toBeGreaterThan(0);
+  });
+
+  it("is kept for a caller that cannot be matched to a run: an outside agent", async () => {
+    expect(await etaOf(null, [speechJob()])).toBeGreaterThan(0);
+  });
+
+  it("finds the run by the stretch it reads: a whole-file run holds any stretch, another stretch holds none of it", async () => {
+    const asked = target({ window: { start: 60, end: 80 } });
+    expect(await etaOf(asked, [speechJob()]), "the whole file is being read").toBeUndefined();
+    expect(
+      await etaOf(asked, [
+        speechJob({ work: [{ source: PATH, language: "", window: { start: 0, end: 30 } }] }),
+      ]),
+      "a different stretch of the same file",
+    ).toBeGreaterThan(0);
+    expect(
+      await etaOf(asked, [
+        speechJob({ work: [{ source: PATH, language: "", window: { start: 50, end: 90 } }] }),
+      ]),
+      "a stretch that holds it",
+    ).toBeUndefined();
+  });
 });

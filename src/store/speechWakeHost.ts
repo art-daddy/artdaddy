@@ -61,6 +61,9 @@ export interface WakeTarget extends ChatKey {
   readonly ref: string | null;
   /** The stretch of the file whose words are not ready; null is the whole file. */
   readonly window: SpanWindow | null;
+  /** The file's absolute path where the tool knows it, so that the card can match the file to the speech job that
+   *  is transcribing it (jobs name files by path). Never shown and never sent. */
+  readonly path: string | null;
 }
 
 /** What the card needs to know of one chat's waiting for words. */
@@ -126,6 +129,7 @@ export function wakeTargetOf(
   source: string,
   ref: string | null,
   window: SpanWindow | null = null,
+  path: string | null = null,
 ): WakeTarget | null {
   if (ctx.background === true || ctx.surface === "mcp") return null;
   const origin = ctx.origin;
@@ -138,6 +142,7 @@ export function wakeTargetOf(
     source,
     ref: ref !== null && ref.trim() !== "" && !isUnsafeAgentRef(ref) ? ref.trim() : null,
     window,
+    path,
   };
 }
 
@@ -255,6 +260,7 @@ export function registerPendingWords(
         ref: target.ref,
         audioS: audioSeconds,
         window: target.window,
+        path: target.path,
       },
       Date.now(),
     ),

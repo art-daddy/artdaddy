@@ -2575,6 +2575,7 @@ export async function getTranscriptTool(
       String(first.clip.media_ref),
       String(first.clip.id),
       job.window,
+      job.src,
     );
     if (!target) continue;
     const key = `${job.src}\u0000transcript\u0000${job.window.start}-${job.window.end}`;

@@ -38,6 +38,10 @@ export async function captionWords(
 ): Promise<CaptionWords> {
   const bySpan = exportFlag("speech_cpu_cap");
   const seconds = Math.max(0, window.end - window.start);
+  // Where the file is, so that the card can find the speech job that transcribes it (it names files by path).
+  const path = await Promise.resolve()
+    .then(() => ctx.store.resolveRef(ref))
+    .catch(() => null);
   const outcome = await waitForRun({
     key: `${ref}\u0000${language ?? ""}\u0000captions${bySpan ? `\u0000${window.start}-${window.end}` : ""}`,
     tool: "add_captions",
@@ -47,7 +51,7 @@ export async function captionWords(
       : ensureTranscript(ctx, ref, undefined, language),
     boundMs: Math.max(CACHE_READ_FLOOR_MS, deadline - Date.now()),
     signal: ctx.signal,
-    wake: wakeTargetOf(ctx, ref, ref, bySpan ? window : null),
+    wake: wakeTargetOf(ctx, ref, ref, bySpan ? window : null, path),
   });
   switch (outcome.kind) {
     case "done":
