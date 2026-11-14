@@ -58,6 +58,8 @@ void Promise.all([import("./timeline/exportQueue"), import("./project/documentRe
 // ...and the transcriptions: their words are kept, and one still running is waited for, not run
 // again (4i).
 void import("./tools/transcribe").then((m) => m.adoptTranscriptions()).catch(() => undefined);
+// The honest estimate: the way to read the open project, the one provider the route side reads, and the PC check (desktop app only).
+void import("./timeline/estimateStart").catch(() => undefined);
 
 // DEV-ONLY seam for the UI sweep (scripts/uisweep): it drives real pointer input for the
 // gesture under test, but needs a stable handle to BUILD each scenario's starting timeline.
