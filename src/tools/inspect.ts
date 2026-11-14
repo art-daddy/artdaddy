@@ -222,7 +222,7 @@ const round3 = (n: number): number => Math.round(n * 1000) / 1000;
 /** The fixed limit 0.27.0 put on a span the assistant asks for (owner decision 2026-10-02, UJ-012),
  *  kept for one release behind the remote switch `speech_cpu_cap`: with it off a longer span still goes
  *  whole to the front of the background queue. On, the limit follows this PC's own speed
- *  ({@link tooLongForThisPc}) and nothing is queued. */
+ *  ({@link refuseIfTooLong}) and nothing is queued. */
 const LEGACY_SPAN_LIMIT_S = 600;
 
 /** Does [from, to) cover all of a file `duration` long? Then it IS the whole file, and is asked for
