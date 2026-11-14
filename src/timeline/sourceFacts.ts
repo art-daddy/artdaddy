@@ -25,6 +25,9 @@ export interface SourceFacts {
 const SINGLE_PICTURE = /(^|,)(\w+_pipe|image2)(,|$)/;
 const asDimension = (v: unknown): number | null =>
   typeof v === "number" && Number.isInteger(v) && v > 0 ? v : null;
+// An empty name and ffprobe's own placeholder ("unknown", "unknown_codec") say nothing, so they are unknown: null.
+const asCodec = (v: unknown): string | null =>
+  typeof v === "string" && v !== "" && !/^unknown/i.test(v) ? v : null;
 
 /** Read one file's facts, or null when the probe fails. */
 export async function readOneSourceFacts(
@@ -46,7 +49,7 @@ export async function readOneSourceFacts(
       kind: "audio",
       width: null,
       height: null,
-      codec: typeof audio.codec === "string" ? audio.codec : null,
+      codec: asCodec(audio.codec),
       hasAlpha: null,
     };
   }
@@ -54,7 +57,7 @@ export async function readOneSourceFacts(
     kind: SINGLE_PICTURE.test(String(probed.format ?? "")) ? "image" : "video",
     width: asDimension(video.width),
     height: asDimension(video.height),
-    codec: typeof video.codec === "string" ? video.codec : null,
+    codec: asCodec(video.codec),
     hasAlpha: pixFmtHasAlpha(video.pix_fmt),
   };
 }
