@@ -325,7 +325,6 @@ async function lookTranscript(
         key: `${path}\u0000${normLanguage(opts.language)}\u0000${whole ? "whole" : `${from}-${to}`}`,
         tool: "inspect_media",
         audioSeconds: audio,
-        audioLabel: clock(audio ?? 0),
         run: runWhisper(ctx, path, undefined, opts.language, window),
         boundMs: opts.waitMs,
         signal: ctx.signal,

@@ -267,7 +267,7 @@ describe("a look that has to wait for a transcript", () => {
     });
     expect(first.result.eta_s).toBeGreaterThanOrEqual(1);
     expect(first.result.note).toMatch(/not ready/);
-    expect(first.result.note).toMatch(/Do not guess/);
+    expect(first.result.note).toMatch(/Don't guess what is said/);
     expect(first.result.segments, "no words yet, so none are invented").toBeUndefined();
     expect(engineRuns()).toBe(1);
 
@@ -405,8 +405,8 @@ describe("a look that has to wait for the speech model", () => {
       stage: "downloading_speech_model",
       progress_pct: 0,
     });
-    expect(seen.result.note).toMatch(/model is still downloading/);
-    expect(seen.result.note).toMatch(/one-time/);
+    expect(seen.result.note).toMatch(/The speech model is downloading/);
+    expect(seen.result.note).toMatch(/The words start after that/);
     expect(origin.requests()).toBe(1);
     expect(engineRuns(), "nothing is transcribed before the model is there").toBe(0);
   });

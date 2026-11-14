@@ -9,7 +9,7 @@ import type { ClientToolContext } from "./context";
 import { exportFlag } from "../api/exportFlags";
 import { ensureTranscript, transcribeSpan, type ParsedTranscript } from "./transcribe";
 import { waitForRun, type InProgressTranscript } from "./transcriptWait";
-import { clock, formatDuration } from "./transcriptWords";
+import { formatDuration } from "./transcriptWords";
 
 /** What a clip not yet transcribed still gets of the wait once the shared time is spent. A read of
  *  the cache takes milliseconds; with no wait at all a transcript that IS cached would be called
@@ -40,7 +40,6 @@ export async function captionWords(
     key: `${ref}\u0000${language ?? ""}\u0000captions${bySpan ? `\u0000${window.start}-${window.end}` : ""}`,
     tool: "add_captions",
     audioSeconds: bySpan ? seconds : null,
-    audioLabel: bySpan ? clock(seconds) : "",
     run: bySpan
       ? transcribeSpan(ctx, ref, window, language)
       : ensureTranscript(ctx, ref, undefined, language),

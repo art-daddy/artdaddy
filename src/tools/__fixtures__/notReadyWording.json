@@ -1,0 +1,422 @@
+{
+  "about": "What LAB-WORDING/data/wording.py (wording C: c_transcribing, b_too_long, b_downloading) makes of these numbers. Made by L2 on 14 Nov 2026 with gen_not_ready_golden.py (lane folder L2-p2-contract/scratch, which imports the study's file and edits nothing); never edit by hand and never regenerate to make a test pass.",
+  "wording_py_sha256": "a1c0babb5b38cf4fb29d7282dfe8a9392aa776c41cdc16cf23e81bea11ceb6c4",
+  "example": {
+    "from_s": 300,
+    "length_s": 180
+  },
+  "approx": [
+    [0, "less than a minute"],
+    [1, "less than a minute"],
+    [29, "less than a minute"],
+    [30, "less than a minute"],
+    [44, "less than a minute"],
+    [44.5, "less than a minute"],
+    [44.999, "less than a minute"],
+    [45, "about 1 minute"],
+    [45.5, "about 1 minute"],
+    [46, "about 1 minute"],
+    [59, "about 1 minute"],
+    [60, "about 1 minute"],
+    [61, "about 1 minute"],
+    [89, "about 1 minute"],
+    [89.5, "about 1 minute"],
+    [90, "about 2 minutes"],
+    [91, "about 2 minutes"],
+    [149, "about 2 minutes"],
+    [149.5, "about 2 minutes"],
+    [150, "about 3 minutes"],
+    [151, "about 3 minutes"],
+    [209, "about 3 minutes"],
+    [209.5, "about 3 minutes"],
+    [210, "about 4 minutes"],
+    [211, "about 4 minutes"],
+    [269, "about 4 minutes"],
+    [269.5, "about 4 minutes"],
+    [270, "about 5 minutes"],
+    [271, "about 5 minutes"],
+    [329, "about 5 minutes"],
+    [329.5, "about 5 minutes"],
+    [330, "about 6 minutes"],
+    [331, "about 6 minutes"],
+    [389, "about 6 minutes"],
+    [389.5, "about 6 minutes"],
+    [390, "about 7 minutes"],
+    [391, "about 7 minutes"],
+    [449, "about 7 minutes"],
+    [449.5, "about 7 minutes"],
+    [450, "about 8 minutes"],
+    [451, "about 8 minutes"],
+    [509, "about 8 minutes"],
+    [509.5, "about 8 minutes"],
+    [510, "about 9 minutes"],
+    [511, "about 9 minutes"],
+    [569, "about 9 minutes"],
+    [569.5, "about 9 minutes"],
+    [570, "about 10 minutes"],
+    [571, "about 10 minutes"],
+    [599, "about 10 minutes"],
+    [600, "about 10 minutes"],
+    [601, "about 10 minutes"],
+    [749, "about 10 minutes"],
+    [750, "about 15 minutes"],
+    [751, "about 15 minutes"],
+    [1049, "about 15 minutes"],
+    [1050, "about 20 minutes"],
+    [1051, "about 20 minutes"],
+    [1234, "about 20 minutes"],
+    [1349, "about 20 minutes"],
+    [1350, "about 25 minutes"],
+    [1351, "about 25 minutes"],
+    [1649, "about 25 minutes"],
+    [1650, "about 30 minutes"],
+    [1651, "about 30 minutes"],
+    [1949, "about 30 minutes"],
+    [1950, "about 35 minutes"],
+    [1951, "about 35 minutes"],
+    [2222, "about 35 minutes"],
+    [2249, "about 35 minutes"],
+    [2250, "about 40 minutes"],
+    [2251, "about 40 minutes"],
+    [2549, "about 40 minutes"],
+    [2550, "about 45 minutes"],
+    [2551, "about 45 minutes"],
+    [2849, "about 45 minutes"],
+    [2850, "about 50 minutes"],
+    [2851, "about 50 minutes"],
+    [3149, "about 50 minutes"],
+    [3150, "about 55 minutes"],
+    [3151, "about 55 minutes"],
+    [3449, "about 55 minutes"],
+    [3450, "about 1 hour"],
+    [3451, "about 1 hour"],
+    [3599, "about 1 hour"],
+    [3600, "about 1 hour"],
+    [3601, "about 1 hour"],
+    [3749, "about 1 hour"],
+    [3750, "about 1 hour 5 minutes"],
+    [3751, "about 1 hour 5 minutes"],
+    [4049, "about 1 hour 5 minutes"],
+    [4050, "about 1 hour 10 minutes"],
+    [4051, "about 1 hour 10 minutes"],
+    [4349, "about 1 hour 10 minutes"],
+    [4350, "about 1 hour 15 minutes"],
+    [4351, "about 1 hour 15 minutes"],
+    [4649, "about 1 hour 15 minutes"],
+    [4650, "about 1 hour 20 minutes"],
+    [4651, "about 1 hour 20 minutes"],
+    [4949, "about 1 hour 20 minutes"],
+    [4950, "about 1 hour 25 minutes"],
+    [4951, "about 1 hour 25 minutes"],
+    [5249, "about 1 hour 25 minutes"],
+    [5250, "about 1 hour 30 minutes"],
+    [5251, "about 1 hour 30 minutes"],
+    [5549, "about 1 hour 30 minutes"],
+    [5550, "about 1 hour 35 minutes"],
+    [5551, "about 1 hour 35 minutes"],
+    [5849, "about 1 hour 35 minutes"],
+    [5850, "about 1 hour 40 minutes"],
+    [5851, "about 1 hour 40 minutes"],
+    [6149, "about 1 hour 40 minutes"],
+    [6150, "about 1 hour 45 minutes"],
+    [6151, "about 1 hour 45 minutes"],
+    [6449, "about 1 hour 45 minutes"],
+    [6450, "about 1 hour 50 minutes"],
+    [6451, "about 1 hour 50 minutes"],
+    [6749, "about 1 hour 50 minutes"],
+    [6750, "about 1 hour 55 minutes"],
+    [6751, "about 1 hour 55 minutes"],
+    [7049, "about 1 hour 55 minutes"],
+    [7050, "about 2 hours"],
+    [7051, "about 2 hours"],
+    [7199, "about 2 hours"],
+    [7200, "about 2 hours"],
+    [7201, "about 2 hours"],
+    [7349, "about 2 hours"],
+    [7350, "about 2 hours 5 minutes"],
+    [7351, "about 2 hours 5 minutes"],
+    [7649, "about 2 hours 5 minutes"],
+    [7650, "about 2 hours 10 minutes"],
+    [7651, "about 2 hours 10 minutes"],
+    [7949, "about 2 hours 10 minutes"],
+    [7950, "about 2 hours 15 minutes"],
+    [7951, "about 2 hours 15 minutes"],
+    [8249, "about 2 hours 15 minutes"],
+    [8250, "about 2 hours 20 minutes"],
+    [8251, "about 2 hours 20 minutes"],
+    [8549, "about 2 hours 20 minutes"],
+    [8550, "about 2 hours 25 minutes"],
+    [8551, "about 2 hours 25 minutes"],
+    [8849, "about 2 hours 25 minutes"],
+    [8850, "about 2 hours 30 minutes"],
+    [8851, "about 2 hours 30 minutes"],
+    [9149, "about 2 hours 30 minutes"],
+    [9150, "about 2 hours 35 minutes"],
+    [9151, "about 2 hours 35 minutes"],
+    [9449, "about 2 hours 35 minutes"],
+    [9450, "about 2 hours 40 minutes"],
+    [9451, "about 2 hours 40 minutes"],
+    [9749, "about 2 hours 40 minutes"],
+    [9750, "about 2 hours 45 minutes"],
+    [9751, "about 2 hours 45 minutes"],
+    [10049, "about 2 hours 45 minutes"],
+    [10050, "about 2 hours 50 minutes"],
+    [10051, "about 2 hours 50 minutes"],
+    [10349, "about 2 hours 50 minutes"],
+    [10350, "about 2 hours 55 minutes"],
+    [10351, "about 2 hours 55 minutes"],
+    [10649, "about 2 hours 55 minutes"],
+    [10650, "about 3 hours"],
+    [10651, "about 3 hours"],
+    [10949, "about 3 hours"],
+    [10950, "about 3 hours 5 minutes"],
+    [10951, "about 3 hours 5 minutes"],
+    [11249, "about 3 hours 5 minutes"],
+    [11250, "about 3 hours 10 minutes"],
+    [11251, "about 3 hours 10 minutes"],
+    [11549, "about 3 hours 10 minutes"],
+    [11550, "about 3 hours 15 minutes"],
+    [11551, "about 3 hours 15 minutes"],
+    [11849, "about 3 hours 15 minutes"],
+    [11850, "about 3 hours 20 minutes"],
+    [11851, "about 3 hours 20 minutes"],
+    [12345, "about 3 hours 25 minutes"],
+    [36000, "about 10 hours"],
+    [86400, "about 24 hours"]
+  ],
+  "words": [
+    [
+      1,
+      "The words are not ready yet (less than a minute). Don't guess what is said. Tell the user, and ask again later, or ask for a shorter span if you need them sooner. If a shorter span is not ready either, stop asking and tell the user."
+    ],
+    [
+      20,
+      "The words are not ready yet (less than a minute). Don't guess what is said. Tell the user, and ask again later, or ask for a shorter span if you need them sooner. If a shorter span is not ready either, stop asking and tell the user."
+    ],
+    [
+      44,
+      "The words are not ready yet (less than a minute). Don't guess what is said. Tell the user, and ask again later, or ask for a shorter span if you need them sooner. If a shorter span is not ready either, stop asking and tell the user."
+    ],
+    [
+      45,
+      "The words are not ready yet (about 1 minute). Don't guess what is said. Tell the user, and ask again later, or ask for a shorter span if you need them sooner. If a shorter span is not ready either, stop asking and tell the user."
+    ],
+    [
+      90,
+      "The words are not ready yet (about 2 minutes). Don't guess what is said. Tell the user, and ask again later, or ask for a shorter span if you need them sooner. If a shorter span is not ready either, stop asking and tell the user."
+    ],
+    [
+      150,
+      "The words are not ready yet (about 3 minutes). Don't guess what is said. Tell the user, and ask again later, or ask for a shorter span if you need them sooner. If a shorter span is not ready either, stop asking and tell the user."
+    ],
+    [
+      270,
+      "The words are not ready yet (about 5 minutes). Don't guess what is said. Tell the user, and ask again later, or ask for a shorter span if you need them sooner. If a shorter span is not ready either, stop asking and tell the user."
+    ],
+    [
+      600,
+      "The words are not ready yet (about 10 minutes). Don't guess what is said. Tell the user, and ask again later, or ask for a shorter span if you need them sooner. If a shorter span is not ready either, stop asking and tell the user."
+    ],
+    [
+      900,
+      "The words are not ready yet (about 15 minutes). Don't guess what is said. Tell the user, and ask again later, or ask for a shorter span if you need them sooner. If a shorter span is not ready either, stop asking and tell the user."
+    ],
+    [
+      1800,
+      "The words are not ready yet (about 30 minutes). Don't guess what is said. Tell the user, and ask again later, or ask for a shorter span if you need them sooner. If a shorter span is not ready either, stop asking and tell the user."
+    ],
+    [
+      3600,
+      "The words are not ready yet (about 1 hour). Don't guess what is said. Tell the user, and ask again later, or ask for a shorter span if you need them sooner. If a shorter span is not ready either, stop asking and tell the user."
+    ]
+  ],
+  "download": [
+    [
+      0,
+      null,
+      "The speech model is downloading (0%). The words start after that. Don't guess what is said. Tell the user, and ask again later."
+    ],
+    [
+      12,
+      null,
+      "The speech model is downloading (12%). The words start after that. Don't guess what is said. Tell the user, and ask again later."
+    ],
+    [
+      37,
+      45,
+      "The speech model is downloading (37%, about 1 minute). The words start after that. Don't guess what is said. Tell the user, and ask again later."
+    ],
+    [
+      37,
+      600,
+      "The speech model is downloading (37%, about 10 minutes). The words start after that. Don't guess what is said. Tell the user, and ask again later."
+    ],
+    [
+      64,
+      1800,
+      "The speech model is downloading (64%, about 30 minutes). The words start after that. Don't guess what is said. Tell the user, and ask again later."
+    ],
+    [
+      99,
+      3,
+      "The speech model is downloading (99%, less than a minute). The words start after that. Don't guess what is said. Tell the user, and ask again later."
+    ],
+    [
+      100,
+      null,
+      "The speech model is downloading (100%). The words start after that. Don't guess what is said. Tell the user, and ask again later."
+    ],
+    [
+      5,
+      1,
+      "The speech model is downloading (5%, less than a minute). The words start after that. Don't guess what is said. Tell the user, and ask again later."
+    ],
+    [
+      50,
+      3600,
+      "The speech model is downloading (50%, about 1 hour). The words start after that. Don't guess what is said. Tell the user, and ask again later."
+    ]
+  ],
+  "too_long": [
+    [
+      481,
+      0.27,
+      "Transcribing these 8 minutes would take about 2 minutes on this PC. A span of 3 minutes (for example 05:00 to 08:00) would take about 1 minute. Ask for a shorter span with start_seconds and end_seconds. Don't guess what is said."
+    ],
+    [
+      481,
+      1.0,
+      "Transcribing these 8 minutes would take about 8 minutes on this PC. A span of 3 minutes (for example 05:00 to 08:00) would take about 3 minutes. Ask for a shorter span with start_seconds and end_seconds. Don't guess what is said."
+    ],
+    [
+      481,
+      2.2,
+      "Transcribing these 8 minutes would take about 20 minutes on this PC. A span of 3 minutes (for example 05:00 to 08:00) would take about 7 minutes. Ask for a shorter span with start_seconds and end_seconds. Don't guess what is said."
+    ],
+    [
+      481,
+      4.2,
+      "Transcribing these 8 minutes would take about 35 minutes on this PC. A span of 3 minutes (for example 05:00 to 08:00) would take about 15 minutes. Ask for a shorter span with start_seconds and end_seconds. Don't guess what is said."
+    ],
+    [
+      630,
+      0.27,
+      "Transcribing these 11 minutes would take about 3 minutes on this PC. A span of 3 minutes (for example 05:00 to 08:00) would take about 1 minute. Ask for a shorter span with start_seconds and end_seconds. Don't guess what is said."
+    ],
+    [
+      630,
+      1.0,
+      "Transcribing these 11 minutes would take about 10 minutes on this PC. A span of 3 minutes (for example 05:00 to 08:00) would take about 3 minutes. Ask for a shorter span with start_seconds and end_seconds. Don't guess what is said."
+    ],
+    [
+      630,
+      2.2,
+      "Transcribing these 11 minutes would take about 25 minutes on this PC. A span of 3 minutes (for example 05:00 to 08:00) would take about 7 minutes. Ask for a shorter span with start_seconds and end_seconds. Don't guess what is said."
+    ],
+    [
+      630,
+      4.2,
+      "Transcribing these 11 minutes would take about 45 minutes on this PC. A span of 3 minutes (for example 05:00 to 08:00) would take about 15 minutes. Ask for a shorter span with start_seconds and end_seconds. Don't guess what is said."
+    ],
+    [
+      900,
+      0.27,
+      "Transcribing these 15 minutes would take about 4 minutes on this PC. A span of 3 minutes (for example 05:00 to 08:00) would take about 1 minute. Ask for a shorter span with start_seconds and end_seconds. Don't guess what is said."
+    ],
+    [
+      900,
+      1.0,
+      "Transcribing these 15 minutes would take about 15 minutes on this PC. A span of 3 minutes (for example 05:00 to 08:00) would take about 3 minutes. Ask for a shorter span with start_seconds and end_seconds. Don't guess what is said."
+    ],
+    [
+      900,
+      2.2,
+      "Transcribing these 15 minutes would take about 35 minutes on this PC. A span of 3 minutes (for example 05:00 to 08:00) would take about 7 minutes. Ask for a shorter span with start_seconds and end_seconds. Don't guess what is said."
+    ],
+    [
+      900,
+      4.2,
+      "Transcribing these 15 minutes would take about 1 hour 5 minutes on this PC. A span of 3 minutes (for example 05:00 to 08:00) would take about 15 minutes. Ask for a shorter span with start_seconds and end_seconds. Don't guess what is said."
+    ],
+    [
+      1320,
+      0.27,
+      "Transcribing these 22 minutes would take about 6 minutes on this PC. A span of 3 minutes (for example 05:00 to 08:00) would take about 1 minute. Ask for a shorter span with start_seconds and end_seconds. Don't guess what is said."
+    ],
+    [
+      1320,
+      1.0,
+      "Transcribing these 22 minutes would take about 20 minutes on this PC. A span of 3 minutes (for example 05:00 to 08:00) would take about 3 minutes. Ask for a shorter span with start_seconds and end_seconds. Don't guess what is said."
+    ],
+    [
+      1320,
+      2.2,
+      "Transcribing these 22 minutes would take about 50 minutes on this PC. A span of 3 minutes (for example 05:00 to 08:00) would take about 7 minutes. Ask for a shorter span with start_seconds and end_seconds. Don't guess what is said."
+    ],
+    [
+      1320,
+      4.2,
+      "Transcribing these 22 minutes would take about 1 hour 30 minutes on this PC. A span of 3 minutes (for example 05:00 to 08:00) would take about 15 minutes. Ask for a shorter span with start_seconds and end_seconds. Don't guess what is said."
+    ],
+    [
+      3600,
+      0.27,
+      "Transcribing these 60 minutes would take about 15 minutes on this PC. A span of 3 minutes (for example 05:00 to 08:00) would take about 1 minute. Ask for a shorter span with start_seconds and end_seconds. Don't guess what is said."
+    ],
+    [
+      3600,
+      1.0,
+      "Transcribing these 60 minutes would take about 1 hour on this PC. A span of 3 minutes (for example 05:00 to 08:00) would take about 3 minutes. Ask for a shorter span with start_seconds and end_seconds. Don't guess what is said."
+    ],
+    [
+      3600,
+      2.2,
+      "Transcribing these 60 minutes would take about 2 hours 10 minutes on this PC. A span of 3 minutes (for example 05:00 to 08:00) would take about 7 minutes. Ask for a shorter span with start_seconds and end_seconds. Don't guess what is said."
+    ],
+    [
+      3600,
+      4.2,
+      "Transcribing these 60 minutes would take about 4 hours 10 minutes on this PC. A span of 3 minutes (for example 05:00 to 08:00) would take about 15 minutes. Ask for a shorter span with start_seconds and end_seconds. Don't guess what is said."
+    ],
+    [
+      7200,
+      0.27,
+      "Transcribing these 120 minutes would take about 30 minutes on this PC. A span of 3 minutes (for example 05:00 to 08:00) would take about 1 minute. Ask for a shorter span with start_seconds and end_seconds. Don't guess what is said."
+    ],
+    [
+      7200,
+      1.0,
+      "Transcribing these 120 minutes would take about 2 hours on this PC. A span of 3 minutes (for example 05:00 to 08:00) would take about 3 minutes. Ask for a shorter span with start_seconds and end_seconds. Don't guess what is said."
+    ],
+    [
+      7200,
+      2.2,
+      "Transcribing these 120 minutes would take about 4 hours 25 minutes on this PC. A span of 3 minutes (for example 05:00 to 08:00) would take about 7 minutes. Ask for a shorter span with start_seconds and end_seconds. Don't guess what is said."
+    ],
+    [
+      7200,
+      4.2,
+      "Transcribing these 120 minutes would take about 8 hours 25 minutes on this PC. A span of 3 minutes (for example 05:00 to 08:00) would take about 15 minutes. Ask for a shorter span with start_seconds and end_seconds. Don't guess what is said."
+    ],
+    [
+      36000,
+      0.27,
+      "Transcribing these 600 minutes would take about 2 hours 40 minutes on this PC. A span of 3 minutes (for example 05:00 to 08:00) would take about 1 minute. Ask for a shorter span with start_seconds and end_seconds. Don't guess what is said."
+    ],
+    [
+      36000,
+      1.0,
+      "Transcribing these 600 minutes would take about 10 hours on this PC. A span of 3 minutes (for example 05:00 to 08:00) would take about 3 minutes. Ask for a shorter span with start_seconds and end_seconds. Don't guess what is said."
+    ],
+    [
+      36000,
+      2.2,
+      "Transcribing these 600 minutes would take about 22 hours on this PC. A span of 3 minutes (for example 05:00 to 08:00) would take about 7 minutes. Ask for a shorter span with start_seconds and end_seconds. Don't guess what is said."
+    ],
+    [
+      36000,
+      4.2,
+      "Transcribing these 600 minutes would take about 42 hours on this PC. A span of 3 minutes (for example 05:00 to 08:00) would take about 15 minutes. Ask for a shorter span with start_seconds and end_seconds. Don't guess what is said."
+    ]
+  ]
+}

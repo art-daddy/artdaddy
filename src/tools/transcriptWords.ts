@@ -1,94 +1,150 @@
 // What the assistant is told when a transcript is not ready, as DATA.
 //
-// The words of every such answer live in ONE table keyed by state, each with the numbers it shows,
-// and one pure function renders a state from its numbers. The final wording of three of these is
-// waiting for a measurement (the A/B of S2-12), so changing it is an edit of this table and nothing
-// else; the default wording of the two states that already existed is what 0.27.0 said, byte for
-// byte. The numbers come from the pace model (`speechPace.ts`), never from this file.
+// The words of every such answer live in ONE table keyed by state, each with the numbers it shows and
+// how each is said, and one pure function renders a state from its numbers. They are wording C of the
+// wording study (LAB-WORDING, owner decision S2-12 of 14 Nov 2026), character for character: `words`
+// is its message 1, `too_long` its message 2 and `download` its message 3. The study ran on gpt-6-luna
+// only and in a mock of the tool. `too_slow` is a fourth state the study did not have, written in the
+// same voice and untested. The numbers come from the pace model (`speechPace.ts`), never from this
+// file, and `__fixtures__/notReadyWording.json` holds what the study's own code makes of numbers,
+// which `transcriptWords.test.ts` holds this table to.
 import { MIN_SPAN_S, projectedS, spanLimitS, type PaceModel } from "./speechPace";
 import { CAP_S } from "./speechPlan";
 
 export const NOT_READY_STATES = ["words", "download", "too_long", "too_slow"] as const;
 export type NotReadyState = (typeof NOT_READY_STATES)[number];
 
+/** How a number is said in the words. Every number a caller gives is seconds, except a percent. */
+export type Say = "approx" | "length" | "clock" | "percent";
+
 export interface NotReadyEntry {
-  /** The words. `{name}` is a number of this state, an optional piece, or a shared clause. */
+  /** The words. `{name}` is a number of the state, or an optional piece. */
   text: string;
-  /** The numbers (and the length of the audio as a person reads it) this state must be given. */
-  numbers: readonly string[];
-  /** A piece that is there only when its number is a positive one: `{piece}` in the words. */
-  optional?: Readonly<Record<string, { number: string; text: string }>>;
+  /** The numbers the state must be given, each with how the words say it. */
+  numbers: Readonly<Record<string, Say>>;
+  /** A piece of the words that is there only when its number is given and above zero: `{piece}` in the
+   *  words, and `{number}` in the piece's own words. */
+  optional?: Readonly<Record<string, { number: string; say: Say; text: string }>>;
 }
 
-/** Sentences that more than one state says, written once. */
-export const NOT_READY_CLAUSES: Readonly<Record<string, string>> = {
-  guard:
-    "Do not guess or describe what is said. The frames, metadata and loudness in this result are final. " +
-    "Call inspect_media again with the same arguments: it returns the words at once when they are done, " +
-    "or pass wait_seconds (up to 60) to wait for them.",
-};
-
 export const NOT_READY_WORDS: Readonly<Record<NotReadyState, NotReadyEntry>> = {
-  // The words are being made, with the time left when it can be told.
+  // The words are being made. Without a time left (a span of unknown length) there is no parenthesis.
   words: {
     text:
-      "The transcript is not ready: the speech in this {label} of audio is still being transcribed{left}{took}. " +
-      "{guard} Tell the user it is still being transcribed.",
-    numbers: ["label"],
-    optional: {
-      left: { number: "eta", text: ", about {eta} s to go" },
-      took: { number: "waited", text: " (this call waited {waited} s)" },
-    },
+      "The words are not ready yet{left}. Don't guess what is said. " +
+      "Tell the user, and ask again later, or ask for a shorter span if you need them sooner. " +
+      "If a shorter span is not ready either, stop asking and tell the user.",
+    numbers: {},
+    optional: { left: { number: "eta", say: "approx", text: " ({eta})" } },
   },
   // The speech model is downloading, with how far it is and the time left when it can be told.
   download: {
     text:
-      "The transcript is not ready: the speech model is still downloading ({pct}%{left}). " +
-      "This one-time download happens the first time speech is transcribed on this computer, and " +
-      "the transcription starts when it ends. {guard} Tell the user the speech model is downloading.",
-    numbers: ["pct"],
-    optional: { left: { number: "eta", text: ", about {eta} s to go" } },
+      "The speech model is downloading ({pct}%{left}). The words start after that. " +
+      "Don't guess what is said. Tell the user, and ask again later.",
+    numbers: { pct: "percent" },
+    optional: { left: { number: "eta", say: "approx", text: ", {eta}" } },
   },
-  // INTERIM wording (the coordinator's draft): the final words wait for the A/B (S2-12).
+  // The span asked for is more than this PC does within the cap. `fit` is the example span, which the
+  // pace model keeps inside what the cap allows (`tooLongNotReady`).
   too_long: {
     text:
-      "Transcribing these {span} would take about {time} on this PC. A span of {fit} (for example {from} to {to}) " +
-      "would take about {fitTime}. Ask for a shorter span with start_seconds and end_seconds. " +
-      "Don't guess what is said.",
-    numbers: ["span", "time", "fit", "from", "to", "fitTime"],
+      "Transcribing these {span} would take {time} on this PC. " +
+      "A span of {fit} (for example {from} to {to}) would take {fitTime}. " +
+      "Ask for a shorter span with start_seconds and end_seconds. Don't guess what is said.",
+    numbers: {
+      span: "length",
+      time: "approx",
+      fit: "length",
+      from: "clock",
+      to: "clock",
+      fitTime: "approx",
+    },
   },
-  // INTERIM wording, same status: a PC so slow that not even the shortest span worth asking for fits.
+  // UNTESTED: a PC so slow that not even the shortest span worth asking for fits, so nothing is offered.
   too_slow: {
     text:
-      "Transcribing these {span} would take about {time} on this PC, and even {minSpan} would take about {minTime}, " +
-      "so no span can be transcribed here in {cap}. Don't guess what is said.",
-    numbers: ["span", "time", "minSpan", "minTime", "cap"],
+      "Transcribing these {span} would take {time} on this PC, and even {minSpan} would take {minTime}. " +
+      "No span can be transcribed here in {cap}. Don't guess what is said. Tell the user, and stop asking.",
+    numbers: {
+      span: "length",
+      time: "approx",
+      minSpan: "length",
+      minTime: "approx",
+      cap: "length",
+    },
   },
 };
 
-type Values = Readonly<Record<string, string | number | undefined>>;
+const finiteOrZero = (n: number): number => (Number.isFinite(n) ? Math.max(0, n) : 0);
+
+/** "less than a minute", "about 4 minutes", "about 1 hour 20 minutes": whole minutes below ten, the
+ *  nearest five minutes from ten on. */
+export function approxTime(seconds: number): string {
+  const m = finiteOrZero(seconds) / 60;
+  if (m < 0.75) return "less than a minute";
+  if (m < 10) {
+    const n = Math.max(1, Math.round(m));
+    return n === 1 ? "about 1 minute" : `about ${n} minutes`;
+  }
+  const n = 5 * Math.round(m / 5);
+  if (n < 60) return `about ${n} minutes`;
+  const hours = Math.floor(n / 60);
+  const minutes = n % 60;
+  return `about ${hours} hour${hours === 1 ? "" : "s"}${minutes ? ` ${minutes} minutes` : ""}`;
+}
+
+/** The length of a span: whole minutes from a minute on, seconds below it. */
+export function lengthWords(seconds: number): string {
+  const s = finiteOrZero(seconds);
+  const unit = (n: number, word: string): string => `${n} ${word}${n === 1 ? "" : "s"}`;
+  return Math.round(s) < 60 ? unit(Math.round(s), "second") : unit(Math.round(s / 60), "minute");
+}
+
+/** mm:ss, zero-padded as the example in the words shows it (h:mm:ss from an hour on). */
+export function paddedClock(seconds: number): string {
+  const t = Math.round(finiteOrZero(seconds));
+  const pad = (n: number): string => String(n).padStart(2, "0");
+  return t >= 3600
+    ? `${Math.floor(t / 3600)}:${pad(Math.floor((t % 3600) / 60))}:${pad(t % 60)}`
+    : `${pad(Math.floor(t / 60))}:${pad(t % 60)}`;
+}
+
+export const SAY: Readonly<Record<Say, (n: number) => string>> = {
+  approx: approxTime,
+  length: lengthWords,
+  clock: paddedClock,
+  percent: (n) => String(Math.round(Math.min(100, finiteOrZero(n)))),
+};
+
+type Values = Readonly<Record<string, number | undefined>>;
 
 /** A state's words with its numbers in. A number the state needs and was not given is a mistake in
  *  the caller, and it fails loudly here rather than put a raw `{placeholder}` in front of the model. */
 export function renderNotReady(state: NotReadyState, values: Values): string {
   const entry = NOT_READY_WORDS[state];
-  const fill = (text: string): string =>
+  const said = (name: string, say: Say): string => {
+    const v = values[name];
+    if (typeof v !== "number" || !Number.isFinite(v))
+      throw new Error(`renderNotReady(${state}): missing ${name}`);
+    return SAY[say](v);
+  };
+  const fill = (text: string, own?: { number: string; say: Say }): string =>
     text.replace(/\{(\w+)\}/g, (_match, name: string) => {
-      const clause = NOT_READY_CLAUSES[name];
-      if (clause !== undefined) return clause;
+      if (own && name === own.number) return said(name, own.say);
       const piece = entry.optional?.[name];
       if (piece) {
         const n = values[piece.number];
-        return typeof n === "number" && Number.isFinite(n) && n > 0 ? fill(piece.text) : "";
+        return typeof n === "number" && Number.isFinite(n) && n > 0 ? fill(piece.text, piece) : "";
       }
-      const v = values[name];
-      if (v === undefined) throw new Error(`renderNotReady(${state}): missing ${name}`);
-      return String(v);
+      const say = entry.numbers[name];
+      if (say === undefined) throw new Error(`renderNotReady(${state}): {${name}} is not declared`);
+      return said(name, say);
     });
   return fill(entry.text);
 }
 
-/** mm:ss (h:mm:ss past an hour) for a time in a note to the model. */
+/** m:ss (h:mm:ss past an hour) for a time in a note to the model. */
 export function clock(s: number): string {
   const t = Number.isFinite(s) ? Math.max(0, Math.round(s)) : 0;
   const pad = (n: number): string => String(n).padStart(2, "0");
@@ -113,10 +169,21 @@ export function formatDuration(seconds: number): string {
   return left ? `${unit(days, "day")} ${unit(left, "hour")}` : unit(days, "day");
 }
 
-/** The span to offer in place of one that is too long: the longest that fits, in whole minutes when
- *  it is a minute or more, so it is said plainly and never rounded up past what fits. */
-function offeredSpan(fits: number): number {
-  return fits >= 60 ? Math.floor(fits / 60) * 60 : fits;
+/** The study's example span: "A span of 3 minutes (for example 05:00 to 08:00)". */
+export const EXAMPLE_FROM_S = 300;
+export const EXAMPLE_LEN_S = 180;
+
+/** The span offered as an example, in seconds: the study's three minutes where this PC does that within
+ *  the cap, else the most whole minutes it does, else the seconds it does. Never more than `fits`. */
+export function exampleSpanS(fits: number): number {
+  if (fits >= EXAMPLE_LEN_S) return EXAMPLE_LEN_S;
+  return fits >= 60 ? Math.floor(fits / 60) * 60 : Math.floor(fits);
+}
+
+/** Where the example starts: at the study's 05:00 when all of it lies inside the span asked for, else
+ *  where that span starts, so that it is always inside the used part of the file. */
+function exampleFromS(fromS: number, toS: number, lenS: number): number {
+  return fromS <= EXAMPLE_FROM_S && toS >= EXAMPLE_FROM_S + lenS ? EXAMPLE_FROM_S : fromS;
 }
 
 export interface TooLongAnswer {
@@ -128,14 +195,13 @@ export interface TooLongAnswer {
   /** The longest span, in seconds, that this PC does within the cap; 0 when not even the shortest span
    *  worth asking for ({@link MIN_SPAN_S}) fits. */
   fits_seconds: number;
-  /** The numbers behind the words, so a test can check them against the pace model. `offerS` is the
-   *  span offered in place of the one asked for, in seconds (0 when none is). */
-  values: Record<string, string | number> & { offerS: number };
+  /** The numbers behind the words, in seconds, so a test can check them against the pace model. */
+  values: Readonly<Record<string, number>>;
 }
 
 /** What to say about a span `[fromS, toS]` that this PC cannot do within `capS`: how long it would
- *  take, and a span that would fit with its own time, or that nothing fits. Every number is the pace
- *  model's. */
+ *  take, and an example span that would fit with its own time, or that nothing fits. Every number is
+ *  the pace model's. */
 export function tooLongNotReady(
   model: Pick<PaceModel, "startupS" | "rate">,
   fromS: number,
@@ -143,38 +209,31 @@ export function tooLongNotReady(
   capS: number = CAP_S,
 ): TooLongAnswer {
   const asked = Math.max(0, toS - fromS);
-  const wouldTake = Math.round(projectedS(model, asked));
+  const time = projectedS(model, asked);
   const fits = spanLimitS(model, capS);
-  const shown = { span: formatDuration(asked), time: formatDuration(wouldTake) };
   if (fits === 0) {
     const values = {
-      ...shown,
-      minSpan: formatDuration(MIN_SPAN_S),
-      minTime: formatDuration(Math.round(projectedS(model, MIN_SPAN_S))),
-      cap: formatDuration(capS),
-      offerS: 0,
+      span: asked,
+      time,
+      minSpan: MIN_SPAN_S,
+      minTime: projectedS(model, MIN_SPAN_S),
+      cap: capS,
     };
     return {
       state: "too_slow",
       note: renderNotReady("too_slow", values),
-      would_take_s: wouldTake,
+      would_take_s: Math.round(time),
       fits_seconds: 0,
       values,
     };
   }
-  const offerS = offeredSpan(fits);
-  const values = {
-    ...shown,
-    fit: formatDuration(offerS),
-    from: clock(fromS),
-    to: clock(fromS + offerS),
-    fitTime: formatDuration(Math.round(projectedS(model, offerS))),
-    offerS,
-  };
+  const fit = exampleSpanS(fits);
+  const from = exampleFromS(fromS, toS, fit);
+  const values = { span: asked, time, fit, from, to: from + fit, fitTime: projectedS(model, fit) };
   return {
     state: "too_long",
     note: renderNotReady("too_long", values),
-    would_take_s: wouldTake,
+    would_take_s: Math.round(time),
     fits_seconds: fits,
     values,
   };

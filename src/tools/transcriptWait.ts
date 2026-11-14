@@ -82,8 +82,6 @@ export interface WaitRequest<T> {
   tool: string;
   /** The speech to be transcribed, in seconds; null when it is not known. */
   audioSeconds: number | null;
-  /** That length as a person reads it ("2:30"), for the note. */
-  audioLabel: string;
   /** The run, started or joined by the caller. It keeps going whatever this call does. */
   run: Promise<T>;
   /** At most this long (ms) is waited. */
@@ -123,14 +121,12 @@ const clampEta = (s: number): number => Math.min(MAX_ETA_S, Math.max(1, Math.rou
 
 function inProgressNote(
   stage: InProgressTranscript["stage"],
-  label: string,
   eta: number | undefined,
-  waited: number,
   pct: number | undefined,
 ): string {
   return stage === "downloading_speech_model"
     ? renderNotReady("download", { pct: pct ?? 0, eta })
-    : renderNotReady("words", { label, eta, waited });
+    : renderNotReady("words", { eta });
 }
 
 /** Wait for `run` for at most `boundMs`: its value, or what is pending, or why it failed. The run
@@ -178,7 +174,7 @@ export async function waitForRun<T>(req: WaitRequest<T>): Promise<WaitOutcome<T>
       waited_s: waited,
       ...(eta === undefined ? {} : { eta_s: eta }),
       ...(download ? { progress_pct: download.pct } : {}),
-      note: inProgressNote(stage, req.audioLabel, eta, waited, download?.pct),
+      note: inProgressNote(stage, eta, download?.pct),
     },
   };
 }

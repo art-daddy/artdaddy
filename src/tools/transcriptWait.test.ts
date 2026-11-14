@@ -13,6 +13,7 @@ import {
   WAIT_MAX_S,
   type WaitRequest,
 } from "./transcriptWait";
+import { approxTime } from "./transcriptWords";
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -67,7 +68,6 @@ function request<T>(run: Promise<T>, extra: Partial<WaitRequest<T>> = {}): WaitR
     key: `k${++seq}`,
     tool: "inspect_media",
     audioSeconds: 30,
-    audioLabel: "0:30",
     run,
     boundMs: 15_000,
     samples: [],
@@ -243,23 +243,26 @@ describe("waitForRun", () => {
       return (seen.outcome as unknown as { status: Record<string, unknown> }).status;
     };
 
-    it("says the transcript is not ready, how long it may take and how to get it, and forbids guessing the speech", async () => {
-      const s = await answers({ audioSeconds: 120, audioLabel: "2:00" });
+    it("says the words are not ready, about how long, and what to do, and forbids guessing the speech", async () => {
+      const s = await answers({ audioSeconds: 120 });
       expect(s).toMatchObject({ status: "in_progress", stage: "transcribing", waited_s: 15 });
-      expect(s.note).toMatch(/not ready/);
-      expect(s.note).toMatch(/2:00 of audio/);
-      expect(s.note).toMatch(/Do not guess/);
-      expect(s.note).toMatch(/wait_seconds/);
-      expect(s.note).toMatch(/frames, metadata and loudness .* are final/);
+      expect(s.note).toMatch(/^The words are not ready yet \(/);
+      expect(s.note).toContain(`(${approxTime(s.eta_s as number)})`);
+      expect(s.note).toMatch(/Don't guess what is said/);
+      expect(s.note).toMatch(/ask again later/);
+      expect(s.note).toMatch(/ask for a shorter span/);
+      expect(s.note).toMatch(/stop asking and tell the user/);
       expect(s.note).not.toMatch(/no speech|silent/i);
     });
 
-    it("says so when it was the speech model's download that was pending, with how far it is", async () => {
+    it("says so when it was the speech model's download that was pending, with how far it is and how long", async () => {
       const s = await answers({ progress: () => ({ pct: 40, etaS: 90 }) });
       expect(s).toMatchObject({ stage: "downloading_speech_model", progress_pct: 40 });
-      expect(s.note).toMatch(/speech model is still downloading \(40%/);
-      expect(s.note).toMatch(/one-time/);
-      expect(s.note).toMatch(/Do not guess/);
+      expect(s.note).toContain(
+        `The speech model is downloading (40%, ${approxTime(s.eta_s as number)}).`,
+      );
+      expect(s.note).toMatch(/The words start after that/);
+      expect(s.note).toMatch(/Don't guess what is said/);
     });
 
     it("adds the transcription that follows the download to the download's own time left", async () => {
@@ -347,7 +350,7 @@ describe("waitForRun", () => {
       const status = (seen.outcome as unknown as { status: { eta_s: number; note: string } })
         .status;
       expect(status.eta_s).toBe(estimateTranscribeSeconds(600, samples, "windows") - 5);
-      expect(status.note).toContain(`about ${status.eta_s} s to go`);
+      expect(status.note).toContain(`(${approxTime(status.eta_s)})`);
     });
 
     it("counts the looks queued ahead: the fourth of four at once has the most to wait for", async () => {
