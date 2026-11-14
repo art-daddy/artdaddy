@@ -4,8 +4,10 @@
 // by an estimate.
 import {
   ESTIMATE_BASES,
+  PC_CLASSES,
   type EncoderFamily,
   type HonestEstimate,
+  type PcClass,
   type RouteEstimates,
   type RouteEstimatesRequest,
 } from "./exportTypes3c";
@@ -16,6 +18,7 @@ export type RouteEstimatesProvider = (
 
 const FAMILIES: readonly EncoderFamily[] = ["processor", "chip"];
 const NONE: RouteEstimates = Object.freeze({
+  pcClass: "unknown",
   standard: null,
   quick: null,
   chip: null,
@@ -64,6 +67,7 @@ export function routeEstimatesNow(request: RouteEstimatesRequest): RouteEstimate
     const got = provider(request);
     if (!got || typeof got !== "object") return NONE;
     return {
+      pcClass: PC_CLASSES.includes(got.pcClass as PcClass) ? (got.pcClass as PcClass) : "unknown",
       standard: sane(got.standard),
       quick: sane(got.quick),
       chip: sane(got.chip),

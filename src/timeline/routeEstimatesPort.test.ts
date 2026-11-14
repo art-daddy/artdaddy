@@ -23,7 +23,7 @@ const good = (seconds: number): HonestEstimate => ({
   muchLonger: false,
   family: "processor",
 });
-const NONE = { standard: null, quick: null, chip: null, faster: null };
+const NONE = { pcClass: "unknown", standard: null, quick: null, chip: null, faster: null };
 
 afterEach(() => __resetRouteEstimatesProvider());
 
@@ -32,14 +32,25 @@ describe("the route estimates port", () => {
     expect(routeEstimatesNow(request)).toEqual(NONE);
   });
 
-  it("passes a sane estimate through unchanged, per way", () => {
-    setRouteEstimatesProvider(() => ({ standard: good(600), quick: good(240), chip: null }));
+  it("passes a sane estimate through unchanged, per way, with the PC's class", () => {
+    setRouteEstimatesProvider(() => ({
+      pcClass: "weak",
+      standard: good(600),
+      quick: good(240),
+      chip: null,
+    }));
     expect(routeEstimatesNow(request)).toEqual({
+      pcClass: "weak",
       standard: good(600),
       quick: good(240),
       chip: null,
       faster: null,
     });
+  });
+
+  it("a class it does not know is `unknown`, never passed on", () => {
+    setRouteEstimatesProvider(() => ({ pcClass: "blazing", standard: good(60) }));
+    expect(routeEstimatesNow(request).pcClass).toBe("unknown");
   });
 
   it("a throwing provider is no estimate, and a later good one works again", () => {
@@ -59,6 +70,7 @@ describe("the route estimates port", () => {
       faster: { ...good(100), seconds: Number.NaN },
     }));
     expect(routeEstimatesNow(request)).toEqual({
+      pcClass: "unknown",
       standard: good(600),
       quick: null,
       chip: null,
@@ -71,7 +83,7 @@ describe("the route estimates port", () => {
       fc.property(fc.anything(), (answer) => {
         setRouteEstimatesProvider(() => answer as never);
         const out = routeEstimatesNow(request);
-        for (const e of Object.values(out)) {
+        for (const e of [out.standard, out.quick, out.chip, out.faster]) {
           if (e === null) continue;
           expect(Number.isFinite(e.seconds) && e.seconds >= 1).toBe(true);
           expect(e.low <= e.seconds && e.seconds <= e.high).toBe(true);

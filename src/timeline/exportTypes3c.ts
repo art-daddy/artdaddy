@@ -64,6 +64,8 @@ export interface RouteEstimate {
 /** The honest estimate of each way an export could run, for the route decision, the dialog and the chat question. `null` = no estimate for that way:
  *  it is then not offered and not chosen. */
 export interface RouteEstimates {
+  /** The speed class of this PC (the estimate side knows it: it priced the estimates from it); `unknown` when there is no check or the check is off. */
+  pcClass: PcClass;
   /** The processor's normal setting at the person's own settings (Full quality). */
   standard: HonestEstimate | null;
   /** Quick: its own size and rate and the processor's faster setting. */
