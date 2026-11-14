@@ -11,6 +11,7 @@ import ExportDialog from "../components/ExportDialog";
 import { useAuth } from "../store/auth";
 import { useEditor } from "../store/editor";
 import { liveFeedOf, useExportJob } from "../store/exportJob";
+import { __setExportConfirmationForTests } from "../lib/confirm";
 import { FakeJobs } from "../test/fakeJobs";
 import { MemFs, registerTestDocument, resetTestDocuments } from "../test/timelineKit";
 import { agentToolContext } from "../tools/agentStore";
@@ -65,6 +66,8 @@ const GIB = 1024 ** 3;
 const pc = vi.hoisted(() => ({
   available: null as number | null,
   destinationFree: null as number | null,
+  // The longest an export may run, which the pre-start check needs before it judges an export "long" or "slow" (a heads-up).
+  executionSeconds: null as number | null,
   // Holds ONE call to the PC's resources: the n-th since `calls` was last reset (0: none). The decision to start again
   // reads them once and the new export's pre-start check reads them again, so holding the second one holds the restart
   // before it asks for its destination.
@@ -102,7 +105,7 @@ vi.mock("../platform/host", async (importOriginal) => {
         available_memory_bytes: pc.available,
         scratch_free_bytes: null,
         destination_free_bytes: pc.destinationFree,
-        budgets: { memoryBytes: null, temporaryBytes: null, executionSeconds: null },
+        budgets: { memoryBytes: null, temporaryBytes: null, executionSeconds: pc.executionSeconds },
         adapters: [],
       };
     }),
@@ -115,6 +118,7 @@ beforeEach(() => {
   useAuth.setState({ profile: null });
   pc.available = 8 * GIB;
   pc.destinationFree = null;
+  pc.executionSeconds = null;
   pc.calls = 0;
   pc.holdCall = 0;
   pc.hold = null;
@@ -603,6 +607,79 @@ describe("the app starts an export again by itself when the PC ran short of memo
     await whenExportsSettle();
     await whenExportTelemetrySettles();
     expect(reported.map((r) => r.status)).toEqual(["failed"]);
+  });
+
+  // A heads-up (the export is expected to take a while) is not a shortage: the person was told, continued, and the export ran
+  // short of memory a moment later. Asking again, with nobody there, would end the one chance to finish by itself.
+  describe("a heads-up from the pre-start check", () => {
+    /** Teaches the PC that an export of this project takes more than twice the video's length, so a request from the chat is
+     *  warned before it starts ("slow"). The descriptor is the one this project's own export is made under. */
+    async function teachSlow(t: Awaited<ReturnType<typeof setup>>) {
+      pc.executionSeconds = 28800;
+      const warm = await t.exportNow("warm");
+      await flush();
+      const descriptor = (t.jobs.submitted[0].meta.telemetry as Any).calibration;
+      cancelExport(warm.job_id, "app");
+      await whenExportsSettle();
+      useExportJob.getState().rememberCalibration({
+        ...descriptor,
+        elapsedSeconds: 60,
+        finalBytes: 100,
+        memoryBytes: 100,
+        temporaryBytes: 10,
+      });
+    }
+
+    it("is not asked again when the person already continued past it: the restart goes ahead", async () => {
+      const t = await setup();
+      const told: string[] = [];
+      __setExportConfirmationForTests(async (message) => {
+        told.push(message);
+        return "continue";
+      });
+      await teachSlow(t);
+      const first = await t.exportNow();
+      await flush();
+      expect(told).toHaveLength(1);
+      expect(told[0]).toMatch(/more than twice as long as the video/);
+      t.jobs.exit(first.job_id, -1, SHORT);
+      await flush(40);
+      expect(told).toHaveLength(1); // nobody was asked a second time
+      expect(restartDecisions().map((d) => d.record)).toEqual(["eligible"]);
+      expect(t.jobs.submitted).toHaveLength(3); // the first export of this test's own project (cancelled), the failed one, the new attempt
+      expect(rungOf(t.jobs.submitted[2])).toBe(1);
+      t.jobs.exit(t.jobs.submitted[2].id, 0);
+      expect(await whenExportEnds(first.job_id)).toMatchObject({ state: "done" });
+      await whenExportsSettle();
+    });
+
+    it("still refuses when the check has a heads-up the person was never shown", async () => {
+      const t = await setup();
+      const told: string[] = [];
+      __setExportConfirmationForTests(async (message) => {
+        told.push(message);
+        return "continue";
+      });
+      pc.executionSeconds = 28800;
+      const first = await t.exportNow(); // nothing is known yet about how long this takes: no heads-up
+      await flush();
+      expect(told).toEqual([]);
+      const descriptor = (t.jobs.submitted[0].meta.telemetry as Any).calibration;
+      useExportJob.getState().rememberCalibration({
+        ...descriptor,
+        elapsedSeconds: 60,
+        finalBytes: 100,
+        memoryBytes: 100,
+        temporaryBytes: 10,
+      });
+      t.jobs.exit(first.job_id, -1, SHORT);
+      await flush(40);
+      expect(told).toEqual([]); // the restart did not ask either
+      expect(t.jobs.submitted).toHaveLength(1);
+      expect(restartDecisions().map((d) => d.record)).toEqual(["eligible", "refused_at_door"]);
+      expect(listExportRecords()[0]).toMatchObject({ job_id: first.job_id, state: "failed" });
+      await whenExportsSettle();
+    });
   });
 
   it("does not take a file another request took in the gap: the restart is refused at the door and the failure stands", async () => {

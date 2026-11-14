@@ -1573,6 +1573,17 @@ async function measurePreflight(
  *  as they like; a program answering for them must not loop for ever. */
 const MAX_QUESTION_ROUNDS = 100;
 
+/** The heads-up (a `notice` question) each request's person saw and continued past, as the bits of its reasons (the question's
+ *  own band), by the request's story. An export the app starts again by itself carries them, so it is not asked about what the
+ *  person was already told; any reason that is not in them is new, and the restart is refused. */
+const noticesContinued = new WeakMap<ExportStory, number>();
+function noteNoticeContinued(specs: readonly ExportSpec[], question: ExportQuestion): void {
+  if (question.kind !== "notice") return;
+  for (const spec of specs)
+    if (spec.story)
+      noticesContinued.set(spec.story, (noticesContinued.get(spec.story) ?? 0) | question.bands.m);
+}
+
 /** Who answered, as the number a trace event carries. */
 const ANSWERER_CODE = { dialog: 1, card: 2, assistant: 3, app: 4 } as const;
 
@@ -1687,14 +1698,23 @@ async function confirmExportRequest(specs: readonly ExportSpec[]): Promise<boole
     const questions = planQuestions(picture, waived);
     if (questions.length === 0) return storageReady;
     // An export the app starts again by itself asks nobody anything: no one may be there (an assistant started it), and a
-    // question means the room it bet on is not there. It is a refusal, and the first attempt's plain failure stands.
-    if (specs[0].restart?.kind === "auto") return refuse("declined");
+    // question means the room it bet on is not there. It is a refusal, and the first attempt's plain failure stands. The one
+    // exception is a heads-up whose every reason the person already continued past in the first attempt: it is not a
+    // shortage and nothing in it is new.
+    if (specs[0].restart?.kind === "auto") {
+      const seen = specs[0].restart.noticesAnswered ?? 0;
+      const nothingNew = questions.every(
+        (question) => question.kind === "notice" && (question.bands.m & ~seen) === 0,
+      );
+      return nothingNew ? storageReady : refuse("declined");
+    }
     if (!hostMounted()) {
       for (const question of questions) {
         const decision = await askNatively(specs, question);
         if (stopped()) return refuse("cancelled");
         if (decision === "cancel") return refuse("declined");
         if (decision === "unavailable") return refuse("blocked");
+        noteNoticeContinued(specs, question);
       }
       return storageReady;
     }
@@ -1713,7 +1733,10 @@ async function confirmExportRequest(specs: readonly ExportSpec[]): Promise<boole
         break;
       case "continue":
         // A notice is a heads-up, not a shortage: nothing to measure again.
-        if (question.kind === "notice") return storageReady;
+        if (question.kind === "notice") {
+          noteNoticeContinued(specs, question);
+          return storageReady;
+        }
         // The person chose another folder for the video: this request ends here and the caller starts it
         // again there. Checked after the request's own stop, above, so a request that was stopped as the
         // answer arrived is cancelled, not moved.
@@ -2527,6 +2550,7 @@ async function continueRestart(
 ): Promise<void> {
   const { decision, gap, publicId } = takeover;
   const retry = retries.get(x.jobId);
+  const noticesAnswered = x.story ? (noticesContinued.get(x.story) ?? 0) : 0;
   let result: Awaited<ReturnType<ExportRetry>> = {
     ok: false,
     error: "there is no way to start this export again",
@@ -2540,6 +2564,7 @@ async function continueRestart(
           kind: "auto",
           from: x.jobId,
           snapshot: x.meta?.snapshot_sha256,
+          ...(noticesAnswered ? { noticesAnswered } : {}),
           meta: {
             reason: decision.reason,
             restarted: decision.restarted,

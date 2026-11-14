@@ -40,6 +40,10 @@ export interface RestartLink {
   /** The project's fingerprint when the first attempt was admitted, for an automatic restart: a project edited since is
    *  not started again by itself (the person's own Try again starts from the project as it is now). */
   snapshot?: string;
+  /** The reasons of the heads-up (a `notice` question) the person saw and continued past in the attempt this one continues,
+   *  as the bits of the question's own band (`CONFIRM_REASON_BITS`): an automatic restart is not asked about what the person
+   *  was already told, and is refused when its pre-start check has anything else to ask. */
+  noticesAnswered?: number;
   meta: LinkMeta;
 }
 
