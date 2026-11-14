@@ -75,6 +75,9 @@ import {
 } from "./leanFades";
 import { readLeanFlags, type LeanOptions, type LeanProbeRequest } from "./leanOptions";
 import { probeLean } from "./leanProbe";
+import { leanDecoderCap } from "./leanDecoders";
+import { leanGradeOnce } from "./leanGrade";
+import { leanPictureLoop } from "./leanStills";
 import {
   framesOf,
   onCanvasFrames,
@@ -261,6 +264,33 @@ function fittedPixels(
   const k =
     fitAspect(box.fit) === "increase" ? Math.max(pw / sw, ph / sh) : Math.min(pw / sw, ph / sh);
   return Math.ceil(sw * k) * Math.ceil(sh * k);
+}
+
+/** The pre-scale of a clip whose box animates: its picture at the box's LARGEST size, which the zoom then only shrinks. One text for the chain and for what the lean paths ask ffmpeg
+ *  about it (leanProbe.ts: the same key serves the zoom mask and the held picture). */
+function preScaleText(
+  sizeW: Animatable | undefined,
+  sizeH: Animatable | undefined,
+  w: number,
+  h: number,
+  fit: FitKind,
+): string {
+  return `scale=w=${evenPx(peak(sizeW, w))}:h=${evenPx(peak(sizeH, h))}:force_original_aspect_ratio=${fitAspect(fit)}:force_divisible_by=2`;
+}
+
+/** What the lean picture loop (leanStills.ts) needs to bound the one frame it holds, once the chain has fitted the picture to its box: a fixed box is cropped or padded to exactly its
+ *  size, and an animated one that contains or stretches its picture is scaled to its largest box at most. Covering overflows the box on one side by an amount that depends on the
+ *  picture's own shape, which nothing here has read: then ffmpeg is asked (the pre-scale's text). */
+function heldFrameOf(
+  box: Box,
+  sizeW: Animatable | undefined,
+  sizeH: Animatable | undefined,
+): { heldPixels: number | null; preScale: string | null } {
+  const animated = (sizeW !== undefined && !isNum(sizeW)) || (sizeH !== undefined && !isNum(sizeH));
+  if (!animated) return { heldPixels: box.w * box.h, preScale: null };
+  if (fitAspect(box.fit) === "increase")
+    return { heldPixels: null, preScale: preScaleText(sizeW, sizeH, box.w, box.h, box.fit) };
+  return { heldPixels: evenPx(peak(sizeW, box.w)) * evenPx(peak(sizeH, box.h)), preScale: null };
 }
 
 /** Per-frame px anims for the ffmpeg overlay/scale, derived from the normalized
@@ -855,6 +885,8 @@ interface Input {
   reader?: StillReader;
   /** How the export reads and loops the still (media/stillReader.ts stillLoop). */
   loop?: StillLoop;
+  /** The picture is decoded once and its frame repeated in the graph (fix 3, leanStills.ts): its `loop.graph` is that repeat, not an animated reader's loop. */
+  leanStill?: true;
   /** Frame window: an animated still shown as this ONE decoded frame of a single pass (the frame the
    *  export shows there), repeated like a picture, instead of replaying every pass before it. */
   frozenFrame?: number;
@@ -1220,6 +1252,10 @@ function buildSingleRenderCommand(
   // pc.clipRef. Built from the SECONDS view, so plan times are seconds — byte-exact for ffmpeg.
   const plan = resolveRenderPlan(timeline);
 
+  // The lean render paths (leanOptions.ts) are off for a look (a frame window) and for the audio pass; everything else sees them only when the caller passed the option.
+  const lean = options.lean && !win && pass !== "audio" ? options.lean : null;
+  const leanTally = new LeanTally();
+  const leanBudget: LeanMaskBudget = lean?.budget ?? { chars: 0, boxes: 0 };
   const inputs: Input[] = [];
   const vrecs: VRec[] = [];
   const arecs: ARec[] = [];
@@ -1425,7 +1461,22 @@ function buildSingleRenderCommand(
             const reader = readerOfStill(clip, String(clip.media_ref));
             const facts = factsOfStill(clip);
             const fitted = fittedPixels(box, ta.sizeW, ta.sizeH, pc.media.crop, facts);
-            return { reader, loop: stillLoop(reader, fps, facts, fitted) };
+            // Fix 3 (leanStills.ts): a picture decoded once and repeated in the graph, or null: today's read of the file for every frame.
+            const leanLoop = lean
+              ? leanPictureLoop({
+                  lean,
+                  tally: leanTally,
+                  reader,
+                  fps,
+                  path: String(clip.media_ref),
+                  ...heldFrameOf(box, ta.sizeW, ta.sizeH),
+                })
+              : null;
+            return {
+              reader,
+              loop: leanLoop ?? stillLoop(reader, fps, facts, fitted),
+              ...(leanLoop ? { leanStill: true as const } : {}),
+            };
           })()
         : {}),
     };
@@ -1552,6 +1603,11 @@ function buildSingleRenderCommand(
           RUNG_THREAD_CAPS[rungOf(options.rung)].decoder,
         );
   const videoDecoder = videoThreads === null ? [] : ["-threads:v", String(videoThreads)];
+  // Fix 5 (leanDecoders.ts): on the one-pass engine one decoder thread for a picture that fix 3 reads once and for a sound-only input; null leaves today's options.
+  const decoderCap = (kind: "picture" | "audio", readOnce = false): string[] | null =>
+    lean
+      ? leanDecoderCap({ lean, tally: leanTally, engine: options.engine, kind, readOnce })
+      : null;
   if (composed) {
     cmd.push(...decoder, "-f", "concat", "-safe", "1", "-i", "segments.ffconcat");
     if (composed.audioInput !== undefined) cmd.push("-f", "nut", "-i", "audio.nut");
@@ -1568,7 +1624,7 @@ function buildSingleRenderCommand(
         ...(inp.loop ?? stillLoop(inp.reader ?? "picture", fps)).input,
         "-t",
         inp.lengthArg ?? dur.toFixed(6),
-        ...decoder,
+        ...(decoderCap("picture", inp.leanStill === true) ?? decoder),
         "-i",
         inp.path,
       );
@@ -1578,7 +1634,7 @@ function buildSingleRenderCommand(
         inp.seekArg ?? inp.si.toFixed(6),
         "-to",
         inp.so.toFixed(6),
-        ...(videoInputIndices.has(index) ? videoDecoder : decoder),
+        ...(videoInputIndices.has(index) ? videoDecoder : (decoderCap("audio") ?? decoder)),
         ...(win?.decode?.(inp.path) ?? []),
         "-i",
         inp.path,
@@ -1613,10 +1669,6 @@ function buildSingleRenderCommand(
       : rng
         ? `color=${spec}:s=${cw}x${ch}:r=${fps}:d=${((rng.to - rng.from - 0.5) / fps).toFixed(6)},setpts=PTS+${rng.from}`
         : `color=${spec}:s=${cw}x${ch}:r=${fps}:d=${duration.toFixed(6)}`;
-  // The lean render paths (leanOptions.ts) are off for a look (a frame window) and for the audio pass; everything else sees them only when the caller passed the option.
-  const lean = options.lean && !win && pass !== "audio" ? options.lean : null;
-  const leanTally = new LeanTally();
-  const leanBudget: LeanMaskBudget = lean?.budget ?? { chars: 0, boxes: 0 };
   const chains: string[] =
     pass === "audio" ? [] : [composed ? "[0:v]null[base]" : `${colorSrc("c=black")}[base]`];
   let last = "base";
@@ -1666,6 +1718,11 @@ function buildSingleRenderCommand(
     const loopParts = inp.loop?.graph
       ? [inp.loop.graph, `trim=duration=${(inp.so - inp.si).toFixed(6)}`]
       : [];
+    // Fix 4b (leanGrade.ts): for a picture that fix 3 holds once, whether its grade and spatial effects run on the one frame, before the repeat.
+    const gradeOnce =
+      lean !== null && inp.leanStill === true
+        ? leanGradeOnce({ lean, tally: leanTally, preAlpha: r.preAlpha, heldOnce: true })
+        : false;
     const parts = [
       margin > 0
         ? `[${r.inputIdx}:v]setpts=PTS-${margin}/TB,setsar=1`
@@ -1703,7 +1760,7 @@ function buildSingleRenderCommand(
       // (scene.ts fitRects). Everything before it runs at the box's LARGEST size,
       // so the zoom only ever shrinks what was rendered and keeps the detail.
       const foar = fitAspect(fit);
-      preScale = `scale=w=${evenPx(peak(r.sizeW, w))}:h=${evenPx(peak(r.sizeH, h))}:force_original_aspect_ratio=${foar}:force_divisible_by=2`;
+      preScale = preScaleText(r.sizeW, r.sizeH, w, h, fit);
       parts.push(preScale);
       sizeAnim = {
         wBox: r.sizeW !== undefined ? compileAnim(r.sizeW, "t", r.tin) : String(w),
@@ -1728,7 +1785,10 @@ function buildSingleRenderCommand(
           assertNever(fit);
       }
     }
-    if (inp.loop?.graphAfterFit) parts.push(...loopParts);
+    if (inp.loop?.graphAfterFit) {
+      if (gradeOnce) parts.push(...r.preAlpha);
+      parts.push(...loopParts);
+    }
     // Screen recorders (especially macOS) may advertise 120 fps while emitting no samples for
     // hundreds of milliseconds when the screen is static. CFR-normalize each occupied clip here,
     // in the renderer, so ffmpeg repeats the previous picture through source PTS gaps instead of
@@ -1790,8 +1850,8 @@ function buildSingleRenderCommand(
           ? `setpts=ceil((${j}+1)/${sp}-0.000001)-1+${anchor}`
           : `setpts=ceil((${j})/${sp}-0.000001)+${anchor}`,
     );
-    // Colour grade + ordered effects act on the opaque, scaled clip.
-    for (const f of r.preAlpha) parts.push(f);
+    // Colour grade + ordered effects act on the opaque, scaled clip (a picture held once already ran them, before its repeat).
+    if (!gradeOnce) for (const f of r.preAlpha) parts.push(f);
     // Alpha-aware transform stage: fit/crop and per-clip opacity precede rotation.
     // The rotated surface retains its corners; only the canvas clips them. format=yuva420p adds the alpha
     // plane only when one of them is present so the no-transform path is unchanged.
@@ -1941,7 +2001,7 @@ function buildSingleRenderCommand(
             r.cropExpr !== null ||
             r.flipH ||
             r.flipV ||
-            !!inp.loop?.graph ||
+            (!!inp.loop?.graph && inp.leanStill !== true) ||
             inp.frozenFrame !== undefined ||
             margin > 0,
         });
