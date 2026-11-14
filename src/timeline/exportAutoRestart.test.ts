@@ -63,6 +63,18 @@ const pc = vi.hoisted(() => ({
   available: null as number | null,
   destinationFree: null as number | null,
 }));
+// The client send of the restart facts is a constant that is false until the owner approves the privacy text (rule
+// E3b-18); the tests that pin what the report will say once it is true switch it here.
+const held = vi.hoisted(() => ({ send: false }));
+vi.mock("./exportRestart", async (importOriginal) => {
+  const real = await importOriginal<typeof import("./exportRestart")>();
+  return {
+    ...real,
+    get SEND_RESTART_FACTS() {
+      return held.send;
+    },
+  };
+});
 vi.mock("../platform/host", async (importOriginal) => {
   const real = await importOriginal<typeof import("../platform/host")>();
   return {
@@ -83,6 +95,7 @@ beforeEach(() => {
   useAuth.setState({ profile: null });
   pc.available = 8 * GIB;
   pc.destinationFree = null;
+  held.send = false;
 });
 
 class Fs extends MemFs {
@@ -571,6 +584,57 @@ describe("the app starts an export again by itself when the PC ran short of memo
       await whenExportsSettle();
     },
   );
+});
+
+// The client send of what the app did (rule E3b-18) is held until the owner approves the one privacy text. What a report
+// says is what leaves the computer, so both states are pinned from the reports themselves.
+describe("what the reports say of an export the app started again", () => {
+  const block = (frame: number, outMs: number) =>
+    `frame=${frame}\nfps=30\nout_time_us=${outMs * 1000}\nspeed=1.0x\nprogress=continue\n`;
+  const eventsOf = (report: Any, name: string): Any[] =>
+    (report.trace as Any[]).filter((e) => e.e === name);
+
+  /** The export runs short of memory a tenth of the way in and is started again; the second attempt ends well. */
+  async function aTenthInThenRestarted() {
+    const t = await setup();
+    const first = await t.exportNow();
+    await flush();
+    t.jobs.stdout(first.job_id, block(6, 200)); // 200 ms of the project's 2 s
+    await flush();
+    const percent = Math.round((useExportJob.getState().live?.fraction ?? 0) * 100);
+    t.jobs.exit(first.job_id, -1, SHORT);
+    await flush(40);
+    expect(t.jobs.submitted).toHaveLength(2);
+    t.jobs.exit(t.jobs.submitted[1].id, 0);
+    await whenExportsSettle();
+    await whenExportTelemetrySettles();
+    expect(reported.map((r) => r.status)).toEqual(["failed", "done"]);
+    return { failed: reported[0], restarted: reported[1], percent };
+  }
+
+  it("says nothing of the restart while the send is held: no retry event, no percent in the outcome", async () => {
+    const { failed, restarted, percent } = await aTenthInThenRestarted();
+    expect(percent).toBeGreaterThan(0); // the run really was part-way, so a percent that is not sent is a held one
+    expect(eventsOf(failed, "retry")).toEqual([]);
+    expect(eventsOf(restarted, "retry")).toEqual([]);
+    expect(eventsOf(failed, "outcome")[0]).toMatchObject({ v: "failed" });
+    expect(eventsOf(failed, "outcome")[0].m ?? 0).toBe(0);
+    expect(eventsOf(restarted, "outcome")[0].m ?? 0).toBe(0);
+  });
+
+  it("says, once the send is approved, that the app started the export again, from which setting to which, and how far along it was", async () => {
+    held.send = true;
+    const { failed, restarted, percent } = await aTenthInThenRestarted();
+    // The restarted export's report carries the restart; the failed attempt's report does not: it ended before the
+    // decision, and it is not the one that was started by the app.
+    expect(eventsOf(failed, "retry")).toEqual([]);
+    expect(eventsOf(restarted, "retry")).toEqual([
+      expect.objectContaining({ v: "app", n: 0, m: 1 }),
+    ]);
+    // How far along the export was, on every report that says how it ended.
+    expect(eventsOf(failed, "outcome")[0]).toMatchObject({ v: "failed", m: percent });
+    expect(eventsOf(restarted, "outcome")[0]).toMatchObject({ v: "done", m: 100 });
+  });
 });
 
 // What the person reads on the card while all of that happens: it is one export, never a failure and a new export side by side.
