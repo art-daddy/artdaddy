@@ -70,7 +70,8 @@ const NOTE_WORDS: Readonly<Record<CardNoteKind, (count: number) => string>> = {
     "Ask the assistant to try again later.",
 };
 
-/** A count as the card says it: whole, never below zero, and zero for anything that is not a finite number. */
+/** A count as the card says it: whole, never below zero, and zero for anything that is not a finite
+ *  number. */
 function whole(n: unknown): number {
   return typeof n === "number" && Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
 }

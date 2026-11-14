@@ -264,6 +264,31 @@ describe("the notes", () => {
     );
   });
 
+  it("puts the notes beside the lines, each with the id it was given, and the lines in their own order", () => {
+    const view = cardView(
+      make({
+        phase: "running",
+        runningEtaS: 180,
+        slow: true,
+        ready: { files: 2, held: "typing" },
+        notes: [note("a", "engine_failed", 1), note("b", "expired", 2)],
+      }),
+    );
+    expect(view).toEqual({
+      lines: [
+        `Transcribing 3 of 8 files · about 3 minutes · ${SLOW}`,
+        "Words are ready for 2 files. The assistant carries on when you send or clear your message.",
+      ],
+      notes: [
+        { id: "a", text: NOTE_COPY.engine_failed.one },
+        {
+          id: "b",
+          text: "The words for 2 files are still not ready after 30 minutes. Ask the assistant to try again later.",
+        },
+      ],
+    });
+  });
+
   it("keeps the notes in the order given and leaves out a note of no files, whatever else is on the card", () => {
     const noteList = fc
       .array(
@@ -461,26 +486,34 @@ const secondsArb = fc.oneof(
 const phaseArb = fc.constantFrom<CardInput["phase"]>(null, "waiting", "starting", "running");
 const heldArb = fc.constantFrom<HeldBy>(null, "typing", "capped", "credits");
 
-/** A state the app can be in: the export wait is only ever said of a job that waits. */
+/** A state the app can be in: the export wait is only ever said of a job that waits. The model downloads
+ *  in a minority of states, and files are left in most, so most have a progress line to check. */
 const coherent: fc.Arbitrary<CardInput> = fc
   .record({
-    done: fc.integer({ min: 0, max: 40 }),
-    total: fc.integer({ min: 0, max: 40 }),
+    done: fc.integer({ min: 0, max: 20 }),
+    left: fc.oneof(
+      { weight: 1, arbitrary: fc.constant(0) },
+      { weight: 5, arbitrary: fc.integer({ min: 1, max: 20 }) },
+    ),
     phase: phaseArb,
     exportWait: fc.boolean(),
-    runningEtaS: fc.option(secondsArb, { nil: null }),
+    runningEtaS: fc.oneof(fc.constant(null), secondsArb),
     queuedS: secondsArb,
     slow: fc.boolean(),
-    download: fc.option(
-      fc.record({
-        pct: fc.integer({ min: 0, max: 100 }),
-        etaS: fc.option(secondsArb, { nil: null }),
-      }),
-      { nil: null },
+    download: fc.oneof(
+      { weight: 3, arbitrary: fc.constant(null) },
+      {
+        weight: 1,
+        arbitrary: fc.record({
+          pct: fc.integer({ min: 0, max: 100 }),
+          etaS: fc.oneof(fc.constant(null), secondsArb),
+        }),
+      },
     ),
-    ready: fc.option(fc.record({ files: fc.integer({ min: 0, max: 20 }), held: heldArb }), {
-      nil: null,
-    }),
+    ready: fc.oneof(
+      fc.constant(null),
+      fc.record({ files: fc.integer({ min: 0, max: 20 }), held: heldArb }),
+    ),
     notes: fc.array(
       fc.record({
         id: fc.string({ maxLength: 6 }),
@@ -490,14 +523,18 @@ const coherent: fc.Arbitrary<CardInput> = fc
       { maxLength: 4 },
     ),
   })
-  .map(({ exportWait, ...rest }) => ({
+  .map(({ exportWait, left, ...rest }) => ({
     ...rest,
+    total: rest.done + left,
     waitingForExport: rest.phase === "waiting" && exportWait,
   }));
 
 const filesLeft = (input: CardInput): number => input.total - Math.min(input.done, input.total);
 const progressShown = (input: CardInput): boolean =>
   input.download === null && filesLeft(input) > 0;
+
+/** The rules about states are the ones worth more samples than the default. */
+const RUNS = { numRuns: 300 };
 
 describe("for any state of the work", () => {
   it("shows a time exactly when audio has moved and the model is not downloading, and it is the time the job and the queue need", () => {
@@ -512,6 +549,7 @@ describe("for any state of the work", () => {
             approxTime((input.runningEtaS ?? 0) + input.queuedS),
           );
       }),
+      RUNS,
     );
   });
 
@@ -524,6 +562,7 @@ describe("for any state of the work", () => {
           (input.phase === "starting" || (input.phase === "running" && input.runningEtaS === null));
         expect(spoken(cardView(input)).some((line) => line.includes("starting…"))).toBe(starting);
       }),
+      RUNS,
     );
   });
 
@@ -537,6 +576,7 @@ describe("for any state of the work", () => {
           expect(line).not.toContain(SLOW);
         }
       }),
+      RUNS,
     );
   });
 
@@ -549,21 +589,37 @@ describe("for any state of the work", () => {
           input.slow && timed,
         );
       }),
+      RUNS,
     );
   });
 
   it("is null exactly when there is nothing to say", () => {
     fc.assert(
-      fc.property(coherent, (input) => {
-        const view = cardView(input);
-        const something =
-          input.download !== null ||
-          filesLeft(input) > 0 ||
-          (input.ready !== null && input.ready.files > 0) ||
-          input.notes.some((n) => n.count > 0);
-        expect(view === null).toBe(!something);
-        if (view) expect(view.lines.length + view.notes.length).toBeGreaterThan(0);
-      }),
+      fc.property(
+        coherent,
+        fc.boolean(),
+        fc.boolean(),
+        fc.boolean(),
+        fc.boolean(),
+        (state, noDownload, nothingLeft, noReady, noNotes) => {
+          const input: CardInput = {
+            ...state,
+            download: noDownload ? null : state.download,
+            done: nothingLeft ? state.total : state.done,
+            ready: noReady ? null : state.ready,
+            notes: noNotes ? [] : state.notes,
+          };
+          const view = cardView(input);
+          const something =
+            input.download !== null ||
+            filesLeft(input) > 0 ||
+            (input.ready !== null && input.ready.files > 0) ||
+            input.notes.some((n) => n.count > 0);
+          expect(view === null).toBe(!something);
+          if (view) expect(view.lines.length + view.notes.length).toBeGreaterThan(0);
+        },
+      ),
+      { numRuns: 400 },
     );
   });
 
@@ -575,6 +631,7 @@ describe("for any state of the work", () => {
           false,
         );
       }),
+      RUNS,
     );
   });
 
@@ -595,20 +652,15 @@ describe("for any state of the work", () => {
     const seconds = fc.double({ min: 0, max: 100_000, noNaN: true });
     fc.assert(
       fc.property(seconds, seconds, seconds, seconds, (e1, q1, e2, q2) => {
-        const [short, long] =
-          e1 + q1 <= e2 + q2
-            ? [
-                [e1, q1],
-                [e2, q2],
-              ]
-            : [
-                [e2, q2],
-                [e1, q1],
-              ];
+        const [short, long] = [
+          [e1, q1],
+          [e2, q2],
+        ].sort((a, b) => a[0] + a[1] - (b[0] + b[1]));
         const [shortRung, longRung] = [rungOf(short[0], short[1]), rungOf(long[0], long[1])];
         expect(shortRung).toBeGreaterThanOrEqual(0);
         expect(shortRung).toBeLessThanOrEqual(longRung);
       }),
+      RUNS,
     );
     expect(rungOf(60, 3600)).toBeGreaterThan(rungOf(60, 0));
   });
