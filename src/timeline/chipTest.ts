@@ -17,6 +17,7 @@ import {
   type GraphicsAdapter,
   type ProbeOutcome,
 } from "../platform/host";
+import { readChipPref, type ChipPref } from "./chipPref";
 import {
   CHIP_PREFERENCE,
   SIZE_CLASS_LIMITS,
@@ -575,7 +576,8 @@ const FLAG_OF: Record<ChipMaker, ExportFlagName> = {
 };
 
 /** A chip that may be used for an export at `sizeClass`: the first, in order of preference, that is switched on, not under
- *  suspicion and proven (remembered, or tested now when `allowRun`). Never throws; "no chip" is the processor's encode. */
+ *  suspicion and proven (remembered, or tested now when `allowRun`). Never throws; "no chip" is the processor's encode.
+ *  The person's own switch is read first and here only: Off is never tested, offered or used, whatever the server says. */
 export async function findChip(
   sizeClass: SizeClass,
   options: { allowRun: boolean; signal?: AbortSignal },
@@ -585,6 +587,7 @@ export async function findChip(
   try {
     if (options.signal?.aborted) return { chip: null, events: [] };
     const deps = given ?? realDeps();
+    if (readChipPref(deps.storage) === "off") return { chip: null, events: [] };
     const adapters = await deps.adapters();
     const memory = load(deps);
     const candidates = [...adapters]
@@ -611,6 +614,98 @@ export async function findChip(
   }
   // A copy: a test that outlives a caller who stopped waiting must not write into what that caller was handed.
   return { chip: null, events: [...events] };
+}
+
+// What the Export dialog's chip row says ----------------------------------------------------------------------------
+
+/** What this PC's chips are and what is remembered of them at one size class, read and never run: the Export dialog's chip
+ *  row draws itself from it, and the hint about an old driver from its adapters' results. */
+export interface ChipStatus {
+  /** The PC has a graphics chip of a maker the exporter knows, whatever any switch says. */
+  readonly found: boolean;
+  /** The server's switches allow a chip to be chosen at all: `chip_default`, and the switch of a maker that was found. */
+  readonly flagsOn: boolean;
+  readonly pref: ChipPref;
+  /** A chip that stopped an export is set aside for a day, and no other chip is proven. */
+  readonly setAside: boolean;
+  readonly verdict: "passed" | "not_passed" | "unknown";
+  /** Each adapter and what the test last said of it at this size class: null when it has said nothing, or too long ago. */
+  readonly adapters: ReadonlyArray<{
+    readonly adapter: GraphicsAdapter;
+    readonly result: ChipTestResult | null;
+  }>;
+}
+
+/** Never throws; a PC that cannot be asked has no chip. Runs no test: whoever wants one asks `findChip`. */
+export async function chipStatusOf(sizeClass: SizeClass, given?: ChipDeps): Promise<ChipStatus> {
+  try {
+    const deps = given ?? realDeps();
+    const adapters = await deps.adapters();
+    const memory = load(deps);
+    const now = deps.now();
+    const remembered = (adapter: GraphicsAdapter, cls: SizeClass): Remembered | null => {
+      const known = memory.results[keyOf(adapter, cls, deps)];
+      return known && now - known.at < (known.ok ? PASS_TTL_MS : FAIL_TTL_MS) ? known : null;
+    };
+    // The 4K class is offered only to a chip that was good enough, against the processor, at 1080p: until that is known
+    // there is nothing to say at 4K, and a failure at 1080p is the answer there too.
+    const resultOf = (adapter: GraphicsAdapter): ChipTestResult | null => {
+      if (sizeClass === "uhd") {
+        const parity = remembered(adapter, "hd");
+        if (!parity) return null;
+        if (!parity.ok) return parity.result;
+      }
+      return remembered(adapter, sizeClass)?.result ?? null;
+    };
+    const aside = (adapter: GraphicsAdapter): boolean =>
+      (memory.suspect[suspectKey(adapter)] ?? 0) > now ||
+      setAsideUntil(suspectKey(adapter), now) > now;
+    const switchedOn = adapters.filter((adapter) => exportFlag(FLAG_OF[adapter.maker]));
+    const usable = switchedOn.filter((adapter) => !aside(adapter));
+    const verdict = usable.some((adapter) => resultOf(adapter) === "passed")
+      ? "passed"
+      : usable.length > 0 &&
+          usable.every((adapter) => {
+            const result = resultOf(adapter);
+            return result !== null && result !== "passed";
+          })
+        ? "not_passed"
+        : "unknown";
+    return {
+      found: adapters.length > 0,
+      flagsOn: switchedOn.length > 0 && exportFlag("chip_default"),
+      pref: readChipPref(deps.storage),
+      setAside: verdict !== "passed" && switchedOn.some(aside),
+      verdict,
+      adapters: adapters.map((adapter) => ({ adapter, result: resultOf(adapter) })),
+    };
+  } catch {
+    return {
+      found: false,
+      flagsOn: false,
+      pref: "auto",
+      setAside: false,
+      verdict: "unknown",
+      adapters: [],
+    };
+  }
+}
+
+/** The person asked for a chip that stopped an export to be tried again before its day is up: the suspicion of every chip on
+ *  this PC is lifted. What the test remembers is kept, so a chip that passed passes again without being tested. */
+export async function liftChipSetAside(given?: ChipDeps): Promise<void> {
+  try {
+    const deps = given ?? realDeps();
+    const adapters = await deps.adapters();
+    const memory = load(deps);
+    for (const adapter of adapters) {
+      setAside.delete(suspectKey(adapter));
+      delete memory.suspect[suspectKey(adapter)];
+    }
+    save(deps, memory);
+  } catch {
+    /* nothing was lifted: the chip stays set aside until its day is up */
+  }
 }
 
 // The real PC ---------------------------------------------------------------------------------------------------
